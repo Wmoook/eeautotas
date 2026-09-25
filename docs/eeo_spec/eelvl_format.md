@@ -1,7 +1,7 @@
 # EEO level files (.eelvl / .eelvls) and how eeo-tas loads them
 
-Ground truth: `C:\Users\super\eeo-tas\src` (AS3). All `file:line` references are to that tree unless another path is
-given. The level-loading code in eeo-tas is byte-identical to the original EE Offline (`C:\Users\super\ee-offline\src`):
+Ground truth: `~\eeo-tas\src` (AS3). All `file:line` references are to that tree unless another path is
+given. The level-loading code in eeo-tas is byte-identical to the original EE Offline (`~\ee-offline\src`):
 `ui/campaigns/CampaignPage.as`, `DownloadLevel.as`, `Lookup.as`, `items/ItemId.as`, `Global.as`, `Portal.as`,
 `WorldPortal.as`, `TextSign.as`, `LabelLookup.as` are unchanged, and the `World.as` diff touches only the key/time-door
 timers and secret drawing (World.as:102-156, 1060-1073, 1099-1119, 1306, 1420), not `deserializeFromMessage`.
@@ -34,7 +34,7 @@ Contents
   stream (`78 xx ...`) or on uncompressed data throws `IOError #2058`, so **EEO only opens raw-deflate files**. Tools
   outside EEO produce other variants: `3d33/levels/forgotten_veil.eelvl` is zlib-wrapped (`78 da`) with an emptied
   header, `3d33/levels/ex_crew_odyssey.eelvl` is uncompressed block data with no header at all (it equals the bytes after
-  the header of `Downloads/EX Crew Odyssey.eelvl`). All 35 files in `C:\Users\super\Downloads` are raw deflate with the
+  the header of `Downloads/EX Crew Odyssey.eelvl`). All 35 files in `~\Downloads` are raw deflate with the
   full header.
 - The inflated stream is read in place: `data.inflate(); data.position = 0;` then header, then records.
 - Byte order is big-endian (the `ByteArray` default). Primitive encodings used below:
@@ -275,7 +275,7 @@ Consequences worth knowing:
 | 1517 EFFECT_GRAVITY | `flipGravity` direction 0 down, 1 left, 2 up, 3 right (other values: no rotation) | Me.as:343-348, Player.as:641-... | |
 | 421 EFFECT_CURSE / 422 EFFECT_ZOMBIE / 1584 EFFECT_POISON | duration in seconds; `> 0` switches it on | Me.as:277-294 | death when `ticks - start > (int + 2*0.2) * 100` evaluated in doubles (Player.as:399-403, 1724-1729, `Global.ping` = 0.2 Global.as:166-169): first fatal tick difference is `floor((int + 0.4) * 100) + 1`, e.g. 5 -> 541 but 20 -> 2040 (2039.9999999999998) |
 | 1582 WORLD_PORTAL_SPAWN | spawn id: which `spawnPoints[]` list the tile joins | World.as:359-366 | section 7 |
-| 77 PIANO / 83 DRUMS / 1520 GUITAR | note index | Me.as:136-147 (sound + blink) | no physics |
+| 77 PIANO / 83 DRUMS / 1520 GUITAR | note index | Me.as:136-147 (sound + blink) | no physics while valid (piano -27..60, drums 0..19, guitar 0..48, SoundManager.as:402-414); another number throws RangeError in touchBlock and aborts the rest of every tick that starts in the cell (ENGINE_NOTES "Block mechanics") |
 | portal 242/381 | rotation (0 down, 1 left, 2 up, 3 right), own id, target id | Player.as:1087-1173 | section 8 |
 | world portal 374 | target world string, spawn id | Player.as:1057-1085 | section 8 |
 | sign 385, label 1000, NPCs | text | UI only | touching NPC_ZOMBIE 1573 gives zombie by id (Me.as:295-299), no args involved |
@@ -326,7 +326,8 @@ Portals (Player.as:1051-1174, `processPortals`, runs every tick for the local pl
 - The pick is `portals[Math.floor(Math.random() * n)]` (`randomRange(0, n - 1)`, 1046-1049, 1099). **With n > 1 the
   destination is random (Math.random, unseeded) and not reproducible**; with n == 1 it is deterministic.
   14 of the 30 distinct sample levels have such portals (FV: 14 portals), see level_survey.md. eesim instead picks
-  with a seeded PCG32 (`_randiRange`) over ee_level.gd's insertion order, which is a stand-in, not EEO behaviour.
+  with an outcome script (rng.js) or a seeded PCG32 (`_randiRange`) over the insertion order of the same entries
+  (toSimLevel `portals`), which is a stand-in for the unreproducible draw; the set of exits is EEO's.
 - Rotations: `old = getPortal(entry).rotation`, `new = getPortal(dest).rotation`, `if (old < new) old += 4`,
   `dir = old - new` in {1, 2, 3} rotates speed/modifier by 90/180/270 degrees with factor 1.42 (1101-1157); any other
   dir (0, or out-of-range rotations) keeps the velocity.
@@ -405,8 +406,9 @@ const level = loadEelvlLevel(file);                // = eesim.prepareLevel(toSim
 `ee_level.gd` builds `EELevel.extra`: layer-0 positions of records with args, keyed by index in **first insertion
 order**, value replaced by a later write; exported as `[index, rotation|null, id|null, target|null]` (int kinds
 `[i, r, null, null]`, portals `[i, r, id, target]`, world portals `[i, null, null, spawnId]`, sign/label/NPC
-`[i, null, null, null]`). Extra fields that `prepareLevel` ignores today: `spawn_points` (AS3 order, per spawn id),
-`world_portals`, `lookup_int`, `portals`, `header`.
+`[i, null, null, null]`). `prepareLevel` also reads `spawn_points` (AS3 order, per spawn id), `lookup_int` (the AS3
+int lookup) and `portals` (the AS3 `portalLookup`: every entry is an exit, see section 8); it ignores `world_portals`
+and `header`.
 
 Verification (script run 2026-09-25):
 - `3d33/levels/forgotten_veil.eelvl` (zlib) and `ex_crew_odyssey.eelvl` (headerless) -> `toSimLevel` equals
@@ -428,10 +430,10 @@ and warnings and can write the eesim JSON (a Godot-free replacement for `export_
 | # | EEO | ee_level.gd / eesim.js | impact |
 |---|---|---|---|
 | 1 | first spawn = `spawnPoints[0][0]` in **load order**, list includes 1582 tiles with number 0 | scan order of 255 only (`prepareLevel` spawnsX/Y) | wrong start/respawn tile when 1582-0 exists (A Music Extravaganza) or when a non-EEO file lists spawns out of row-major order |
-| 2 | portal destination random (`Math.random`) over hash-ordered `portalLookup` incl. stale entries | seeded PCG over insertion order of final-tile portals | inherent: EEO is not reproducible when a target id has n > 1 portals (14/30 levels); an optimizer must avoid or accept every outcome |
+| 2 | portal destination random (`Math.random`) over hash-ordered `portalLookup` incl. stale and background entries | eesim.js: an outcome script (rng.js) or seeded PCG over the insertion order of the same `portalLookup` (toSimLevel `portals`: stale and layer-1 entries are exits; an entry on a coin cell is deleted when the coin is collected, as `setTileComplex` does) | inherent: EEO is not reproducible when a target id has n > 1 portals (14/30 levels); an optimizer must avoid or accept every outcome |
 | 3 | raw deflate only | Godot `COMPRESSION_DEFLATE` is zlib-wrapped: EEO's own files fail and fall into the headerless branch (garbage); server.js re-wraps as a workaround | fixed by eelvl.js |
 | 4 | gravity used as stored | `level.gravity if > 0 else 1.0` | only for gravity <= 0 |
-| 5 | lookups position keyed across layers, never removed at load (stale portal/int entries survive an overwrite) | one Dictionary entry per layer-0 index, replaced wholesale; layer-1 args ignored | only for files with duplicate positions (none written by EEO, none in samples) |
+| 5 | lookups position keyed across layers, never removed at load (stale portal/int entries survive an overwrite) | ee_level.gd: one Dictionary entry per layer-0 index, replaced wholesale; layer-1 args ignored. eesim.js: the AS3 lookups themselves (`lookup_int`, `portals`), the Dictionary only for old JSON without them | none for eesim.js with toSimLevel JSON; ee_level.gd: files with duplicate positions or layer-1 args (none written by EEO, none in samples) |
 | 6 | `u16[]` odd length: ceil(L/2) values, skips 2*ceil(L/2); L >= 2^31: 0 values, no skip | floor(L/2) values, skips L; guard stops parsing | corrupt files only |
 | 7 | layer not 0/1 -> load fails; truncated record -> load fails | layer != 1 -> foreground; trailing < 8 bytes ignored | corrupt files only |
 | 8 | headerless files cannot be opened | headerless heuristic `raw[0] == 0 && raw[1] == 0` (misfires on an uncompressed file with an empty owner), name hard-coded "EX Crew Odyssey" | tooling only |

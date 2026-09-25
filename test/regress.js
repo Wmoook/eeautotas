@@ -12,10 +12,11 @@ const V = require('../src/eelvl.js');
 const args = process.argv.slice(2);
 const opt = (k, d) => { const a = args.filter((x) => x.startsWith(`--${k}=`)).map((x) => x.slice(k.length + 3)); return a.length ? a : d; };
 const QUICK = args.includes('--quick');
-const FV_LEVEL = opt('level', ['C:/Users/super/3d33/levels/forgotten_veil.eelvl'])[0];
-const FV_TAS = opt('tas', ['C:/Users/super/3d33/levels/tas/forgotten_veil.eetas', 'C:/Users/super/3d33/tools/tas/out/best.eetas']);
+const HOMEP = (p) => require('path').join(require('os').homedir(), p);
+const FV_LEVEL = opt('level', [process.env.EEAT_FV_LEVEL || HOMEP('3d33/levels/forgotten_veil.eelvl')])[0];
+const FV_TAS = opt('tas', [process.env.EEAT_FV_TAS || HOMEP('3d33/levels/tas/forgotten_veil.eetas'), HOMEP('3d33/tools/tas/out/best.eetas')]);
 const OLD = opt('old', [null])[0];
-const SAMPLES = 'C:/Users/super/Downloads';
+const SAMPLES = process.env.EEAT_LEVELS || HOMEP('Downloads');
 
 let pass = 0, fail = 0;
 function check(name, ok, detail) {

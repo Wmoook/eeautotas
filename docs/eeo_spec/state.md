@@ -7,9 +7,9 @@ gravity multiplier, god mode, and eeo-tas save states. The last section audits `
 spec.
 
 References:
-- `X.as:N` is a line in `C:\Users\super\eeo-tas\src\X.as` (eeo-tas, the ground truth).
-- `eeo:X.as:N` is a line in the original `C:\Users\super\ee-offline\src\X.as`, cited only where eeo-tas changed it.
-- `eesim.js:N` is a line in `C:\Users\super\3d33\tools\tas\eesim.js`.
+- `X.as:N` is a line in `~\eeo-tas\src\X.as` (eeo-tas, the ground truth).
+- `eeo:X.as:N` is a line in the original `~\ee-offline\src\X.as`, cited only where eeo-tas changed it.
+- `eesim.js:N` is a line in `~\3d33\tools\tas\eesim.js`.
 - `blitter/BlGame.as`, `blitter/BlContainer.as` and `blitter/BlObject.as` are single physical lines (CR line
   endings), so they are cited by function name.
 
@@ -117,7 +117,7 @@ if (ticksEnabled || steps > 0) { ...the tick body (1.3)...; steps--; ... }
    plus the half-block adjustment (`Player.as:406-419`).
 5. **Team retry:** `if (tx != -1) UpdateTeamDoors(tx, ty)` (`Player.as:421`, section 12).
    - The later `var tx:Number` and `var ty:Number` at `Player.as:1012` and `Player.as:1029` do **not** shadow this
-     line. I disassembled `Player.tick` in the compiled `C:\Users\super\Downloads\EE_Offline.swf` (the original
+     line. I disassembled `Player.tick` in the compiled `~\Downloads\EE_Offline.swf` (the original
      EEO, same source line). Offset 743 is `getlocal0; getproperty private::tx`, which is the member. The locals
      live in activation slots 27 and 28. eeo-tas was not available compiled. If its compiler resolved the name to
      the hoisted local instead (NaN → `UpdateTeamDoors(0,0)` every tick), teams would reset every tick. A one-room

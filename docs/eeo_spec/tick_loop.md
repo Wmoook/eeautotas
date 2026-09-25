@@ -10,11 +10,11 @@ files. It appears here only where it sets tick order or timing.
 
 ## 0. Sources and conventions
 
-- Ground truth: `C:\Users\super\eeo-tas\src` at git HEAD `8fc5872` ("Merge pull request #33 from Seb-135/bugfixes").
+- Ground truth: `~\eeo-tas\src` at git HEAD `8fc5872` ("Merge pull request #33 from Seb-135/bugfixes").
   All `file:line` references below are to that tree. Paths are relative to `src\`.
 - `blitter\BlGame.as`, `blitter\BlContainer.as` and `blitter\BlObject.as` use old-Mac CR-only line endings. Most
   tools show them as one line. Their line numbers below count CR-separated lines.
-- The original EE Offline is `C:\Users\super\ee-offline` (HEAD `d148289`). `BlGame`, `BlContainer`, `Bl`,
+- The original EE Offline is `~\ee-offline` (HEAD `d148289`). `BlGame`, `BlContainer`, `Bl`,
   `SynchronizedObject`, `Lookup` and `ItemId` are byte-identical in both trees. `PlayState`, `Me`, `Player`, `World`,
   `Config` and `KeyBinding` differ. The timing-relevant differences come from eeo-tas commit **`d6e2072`**
   (2022-02-03, "fixes #7, fixes #22, fixes #31, fixes #32"):

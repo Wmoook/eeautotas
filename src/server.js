@@ -117,14 +117,23 @@ function readRaw(req, limit) {
 	return new Promise((resolve, reject) => {
 		let size = 0;
 		const chunks = [];
-		req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('upload too large')); req.destroy(); } else chunks.push(c); });
+		// too large: the rest is read and dropped (not req.destroy(), which reset the connection before the error reached the page)
+		let over = false;
+		req.on('data', (c) => {
+			size += c.length;
+			if (size <= limit) { chunks.push(c); return; }
+			if (!over) { over = true; chunks.length = 0; reject(new Error(`upload too large (limit ${limit >= 1 << 20 ? (limit >> 20) + ' MB' : (limit >> 10) + ' KB'})`)); }
+		});
 		req.on('end', () => resolve(Buffer.concat(chunks)));
 		req.on('error', reject);
 	});
 }
 async function readJsonBody(req, limit) {
 	const b = await readRaw(req, limit);
-	try { return JSON.parse(b.toString('utf8') || '{}'); } catch (e) { throw new Error('bad request (expected JSON)'); }
+	let v;
+	try { v = JSON.parse(b.toString('utf8') || '{}'); } catch (e) { throw new Error('bad request (expected JSON)'); }
+	if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('bad request (expected a JSON object)');   // null, 5, [..]
+	return v;
 }
 const validId = (id) => /^[a-z0-9-]+$/.test(id) && fs.existsSync(path.join(J.jobDir(id), 'meta.json'));
 const listJobs = () => J.listJobs(new Map([...children].filter(([, ch]) => ch.exitCode === null).map(([id, ch]) => [id, ch.pid])));
@@ -145,12 +154,24 @@ function startFocus(id, b) {
 	const mine = focusKids.get(id);
 	if (f.running || (mine && mine.exitCode === null)) throw new Error(`a focus search is already running for this job${f.running ? ` (${f.fromTime}-${f.toTime})` : ''}`);
 	for (const k of ['from', 'to']) { if (b[k] === undefined || b[k] === '') throw new Error(`missing "${k}" (m:ss.cc or a tick)`); C.parseTime(b[k]); }
+	// the range must be a non-empty part of the current best run: checked here, because the search runs in the
+	// background and a failure there would only reach focus.log (the page would keep showing the previous search)
+	const tr = C.replay(J.loadJobLevel(id), C.readEetas(path.join(J.jobDir(id), 'best.eetas')), { trace: true });
+	const from = C.tickOf(tr, C.parseTime(b.from)), to = C.tickOf(tr, C.parseTime(b.to));
+	if (!(to > from)) {
+		throw new Error(`empty range: ${b.from} is tick ${from} and ${b.to} is tick ${to} of the best run (${C.fmt(tr.runTicks)}, ${tr.n} ticks); ` +
+			'"To" must be later than "From" and before the finish');
+	}
 	const seconds = Math.max(10, Math.min(3600, +b.seconds || 120));
 	const logFile = path.join(J.jobDir(id), 'focus.log');
 	const fd = fs.openSync(logFile, 'w');
 	const ch = spawn(process.execPath, [path.join(__dirname, 'tas.js'), 'focus', id, String(b.from), String(b.to), String(seconds),
 		...(b.workers ? [`--workers=${+b.workers}`] : [])], { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
+	// replaces the previous search's focus.json at once (tas.js focus rewrites it within a second); if the search dies
+	// before that, the page shows this range as stopped instead of the previous search's result
+	C.writeJSON(path.join(J.jobDir(id), 'focus.json'), { state: 'running', stage: 'starting', pid: ch.pid, started: Date.now(), from, to,
+		fromTime: C.fmt(tr.RUN[from]), toTime: C.fmt(tr.RUN[to]), seconds });
 	focusKids.set(id, ch);
 	ch.on('exit', () => { if (focusKids.get(id) === ch) focusKids.delete(id); });
 	return { ok: true, started: true, pid: ch.pid, seconds, log: logFile };
@@ -233,7 +254,7 @@ const server = http.createServer(async (req, res) => {
 				if (/json/.test(req.headers['content-type'] || '') || raw[0] === 0x7B) {
 					let b;
 					try { b = JSON.parse(raw.toString('utf8')); } catch (e) { throw new Error('bad JSON (send the raw .eetas bytes, or JSON {eetasB64, source})'); }
-					if (!b.eetasB64) throw new Error('missing eetasB64');
+					if (!b || !b.eetasB64) throw new Error('missing eetasB64');
 					buf = Buffer.from(String(b.eetasB64), 'base64');
 					source = b.source || source;
 				}
@@ -267,39 +288,45 @@ const server = http.createServer(async (req, res) => {
 });
 
 function openBrowser(url) { spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', detached: true, windowsHide: true }).unref(); }
-server.on('error', (e) => {
-	if (e.code === 'EADDRINUSE') {   // already running: just open it
-		console.log(`[app] already running on port ${PORT}`);
-		if (args.open) openBrowser(`http://localhost:${PORT}/`);
-		process.exit(0);
-	}
-	throw e;
-});
-server.listen(PORT, '127.0.0.1', () => {
-	const url = `http://localhost:${PORT}/`;
-	console.log(`[app] EE Auto TAS running at ${url} (${os.cpus().length} CPU threads)`);
-	console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
-	if (args.open) openBrowser(url);
-	// resume the job that was optimizing when the app last closed (after the one-time processor benchmark, which
-	// needs an idle CPU: a few seconds, then cached in src/data/_system.json)
-	const resume = () => {
-		const r = C.readJSON(J.RUNNING_FILE, null);
-		if (r && r.id && validId(r.id) && !J.runningPid(r.id)) { console.log(`[app] resuming ${r.id}`); startJob(r.id, r.workers); }
-	};
-	if (bench) { resume(); return; }
-	benchState = 'measuring';
-	console.log('[app] measuring the engine speed on this CPU (once, a few seconds)...');
-	const busy = C.jobIds().some((id) => J.runningPid(id));   // a grind started from the CLI already uses the CPU
-	BENCH.run({ busy }).then((rec) => {
-		bench = rec; benchState = 'done';
-		console.log(`[app] CPU: ${(rec.single / 1e6).toFixed(1)} M ticks/s on 1 thread, ${(rec.all / 1e6).toFixed(1)} M on all ${rec.threads}` +
-			`${rec.allMeasured ? '' : ' (estimated)'}; fastest with ${rec.peakThreads} threads`);
-	}).catch((e) => { benchState = 'error'; console.log(`[app] benchmark failed: ${e.message}`); }).finally(resume);
-});
 function shutdown() {
 	for (const [, ch] of children) if (ch.exitCode === null) J.killTree(ch.pid);
 	for (const [, ch] of focusKids) if (ch.exitCode === null) J.killTree(ch.pid);
 	process.exit(0);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+/** The app: listen on PORT, benchmark the CPU once, resume the last running job. (require()d, e.g. by the tests,
+ *  this file only builds `server`: nothing listens, benchmarks or resumes.) */
+function main() {
+	server.on('error', (e) => {
+		if (e.code === 'EADDRINUSE') {   // already running: just open it
+			console.log(`[app] already running on port ${PORT}`);
+			if (args.open) openBrowser(`http://localhost:${PORT}/`);
+			process.exit(0);
+		}
+		throw e;
+	});
+	process.on('SIGINT', shutdown);
+	process.on('SIGTERM', shutdown);
+	server.listen(PORT, '127.0.0.1', () => {
+		const url = `http://localhost:${PORT}/`;
+		console.log(`[app] EE Auto TAS running at ${url} (${os.cpus().length} CPU threads)`);
+		console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
+		if (args.open) openBrowser(url);
+		// resume the job that was optimizing when the app last closed (after the one-time processor benchmark, which
+		// needs an idle CPU: a few seconds, then cached in src/data/_system.json)
+		const resume = () => {
+			const r = C.readJSON(J.RUNNING_FILE, null);
+			if (r && r.id && validId(r.id) && !J.runningPid(r.id)) { console.log(`[app] resuming ${r.id}`); startJob(r.id, r.workers); }
+		};
+		if (bench) { resume(); return; }
+		benchState = 'measuring';
+		console.log('[app] measuring the engine speed on this CPU (once, a few seconds)...');
+		const busy = C.jobIds().some((id) => J.runningPid(id));   // a grind started from the CLI already uses the CPU
+		BENCH.run({ busy }).then((rec) => {
+			bench = rec; benchState = 'done';
+			console.log(`[app] CPU: ${(rec.single / 1e6).toFixed(1)} M ticks/s on 1 thread, ${(rec.all / 1e6).toFixed(1)} M on all ${rec.threads}` +
+				`${rec.allMeasured ? '' : ' (estimated)'}; fastest with ${rec.peakThreads} threads`);
+		}).catch((e) => { benchState = 'error'; console.log(`[app] benchmark failed: ${e.message}`); }).finally(resume);
+	});
+}
+if (require.main === module) main();
+module.exports = { server, readRaw, readJsonBody, startFocus, focusKids };

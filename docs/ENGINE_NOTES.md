@@ -12,8 +12,8 @@ straightforward port, and snapshot/restore/stateKey are cheap enough to call on 
 | `validate.js` | compares eesim.js against a trace: every tick and field, events, snapshot/restore, stateKey, throughput. *Not in this repo:* `3d33/tools/tas/`; here `node test/regress.js` covers the engine |
 | `fuzz.js` | builds test cases for mechanics the TAS never touches (see Validation). *Not in this repo:* `3d33/tools/tas/` |
 
-The Godot validation commands below run in the EX Odyssey project (`C:\Users\super\3d33`), where these files live.
-`G="C:/Users/super/Downloads/Godot_v4.6.1-stable_win64.exe/Godot_v4.6.1-stable_win64_console.exe"`, headless only:
+The Godot validation commands below run in the EX Odyssey project (`~\3d33`), where these files live.
+`G="~/Downloads/Godot_v4.6.1-stable_win64.exe/Godot_v4.6.1-stable_win64_console.exe"`, headless only:
 
 ```sh
 "$G" --headless --audio-driver Dummy --path . -s res://tools/tas/export_level.gd -- level=forgotten_veil   # also odyssey
@@ -53,7 +53,8 @@ for (const m of parseEetasBytes(fs.readFileSync(file))) { applyMask(inp, m); sim
 - `sim.onEvent = (kind, data) => {}`: the same kinds/payloads as `sim_event` (tiles/dirs as `{x, y}`, `pos` as
   doubles where Godot has a float32 Vector2). With `onEvent = null` no event objects are built. Additional kinds:
   `effect` `{effect: 'curse'|'zombie'|'poison'|'levitation'|'protection', on, tile, duration?}` (when a touch changes
-  it) and `team` `{team, from, tile}` (a team change that went through).
+  it), `team` `{team, from, tile}` (a team change that went through) and `tick_aborted` `{reason: 'piano'|'drum'|
+  'guitar', tile, note}` (eeo-tas threw in touchBlock: see "Block mechanics").
 - `tick()` mutates `input.jump_pressed` / `god_toggle` (cleared) exactly like EESim.
 - `snapshot([reuse])` / `restore(s)`: full state, restorable any number of times in any order, bit-identical
   continuation. Scalars are copied. Collected coins, secrets and switch maps are copy-on-write and shared.
@@ -73,9 +74,11 @@ while the thrust is non-zero, the only time it is read); on levels with 423 the 
 number (only while it differs from the team). The only absolute-clock state is keyed as such: the
 time-door phase `PlayState.ticks % 1000` (only if the level has 156/157) and `ticks % ticksPerFrame` (only if
 ticksPerFrame > 1). `_ox/_oy` are keyed only when a one-way tile is under the box or the player is dead. The key
-also covers coins (collected-coin bitset), secrets, switch on-sets, queues and the RNG step count (only if some
-portal id has more than one target). `-0` and `+0` key the same, as do all `_slippery <= 0` values (provably no
-behavioural difference).
+also covers coins (collected-coin bitset), secrets, switch on-sets, queues, the RNG step count (only if some
+portal id has more than one target) and the portal entries deleted by coin pickups (only if a coin cell has one).
+The variable part (switch on-sets, queues, frame phase) is written as tag, int count, ints, so the key decodes uniquely
+for any int32 switch number; a switch map with nothing on keys like no map. `-0` and `+0` key the same, as do all
+`_slippery <= 0` values (provably no behavioural difference).
 - **Exact across ticks.** eeo-tas timers are integer tick counts (a key lasts exactly 500 ticks from any start;
   the old EE Offline `World.offset` clock gave 500 or 501), so equal keys at different ticks behave identically.
   `stateKey(true)` / `stateHash(true)` are accepted for compatibility and change nothing.
@@ -159,9 +162,27 @@ All effect blocks act when the tick-START cell is entered (touchBlock after move
   reads `getlocal0; getproperty private::tx` at offset 744. eeo-tas itself was not available compiled.
 - **Gold door 200 / gate 201**: `goldBorder` option (see above).
 - **Keyboard-only blocks**: god block 1516 (enables the G key), world portal 374 and reset point 466 (need Y held) are
-  not solid and do nothing in a replay; so are signs, labels, NPCs other than 1573, music, map block, decorations.
+  not solid and do nothing in a replay; so are signs, labels, NPCs other than 1573, map block, decorations, and music
+  blocks with a valid number.
+- **Music 77 / 83 / 1520 with an out-of-range number** (piano outside -27..60, drums outside 0..19, guitar outside
+  0..48; only crafted files, the editor cannot make one): entering the cell (`pastx != cx || pasty != cy`, also flying)
+  plays `pianoSounds[n + 27]` / `drumSounds[n]` / `guitarSounds[n]` (SoundManager.as:402-414, Vectors of 88 / 20 / 49),
+  which throws RangeError #1125. Nothing catches it (Player.tick, BlContainer.tick, PlayState.tick,
+  BlGame.handleEnterFrame have no try), so the tick ends inside touchBlock: pastx / pasty stay, and updateThrust, the
+  auto-align, updateStuff (the run timer) and that frame's PlayState.enterFrame (the queue drains) are skipped;
+  PlayState.ticks, the input byte, movement, portals and jumps of that tick did happen. Since pastx is not updated,
+  every tick that starts in the cell throws again. eesim: `_touchBlock` returns false, `_playerTick` stops there, `tick()`
+  skips the drain, event `tick_aborted {reason, tile, note}`. (Bl.time is not advanced either, so in real time the next
+  frame catches up; a frame may then hold 2 ticks: frame timing, as for `ticksPerFrame`.)
 - **Lookup table**: `prepareLevel` builds the cell numbers from `lookup_int` (AS3 `Lookup.getInt`: position keyed,
   either layer, last write wins); JSON without it falls back to `extras` (identical for every file EEO writes).
+- **Portal lookup**: `prepareLevel` builds the portals from `portals` (AS3 `portalLookup`, World.as:349-352: every
+  242/381 record of either layer, position keyed, last write wins, never removed at load). An entry is entered only from
+  a layer-0 242/381 tile, but EVERY entry with id == target is an exit (`getPortals`, Lookup.as:155-171): background
+  records and stale entries under another block included. Collecting a coin on a cell with an entry deletes it
+  (`setTileComplex` -> `deleteLookup`, World.as:415-418; /reset's `resetCoins` does not bring it back): per-run state
+  `_portalGone` (snapshotted and keyed on such levels only). JSON without `portals` falls back to the extras on final
+  242/381 tiles (identical for every file EEO writes: every sample level gives the same tables both ways).
 
 ## Validation (all PASS)
 FV TAS (11539 ticks). FV TAS prefixes + 4000 random ticks around the portals, the switch and the magenta key
@@ -207,13 +228,20 @@ exploring (minis 6 and 7, the start, the portal chain before coin 4, the portal 
 were always fake here (mini 10), so the exact check is what makes the results trustworthy.
 
 ## Known gaps
-- Checked only against the AS3 source (synthetic tests in `test/regress.js` and `test/mechanics.js`), not against a
-  real eeo-tas trace: world gravity != 1, levels without a spawn point, a respawn with a pending queue retry, and
-  every mechanic of the section above (curse, zombie, poison, levitation, teams, zombie doors). The team retry
-  reading rests on EE Offline's bytecode (same SDK), not on a compiled eeo-tas.
+- Confirmed by real eeo-tas runs (tick for tick, finish on the exact tick): Forgotten Veil (1:55.27: arrows, dots,
+  boosts, portals incl. a random one, keys, switches, coins) and Infinity Pain (6:52.76: levitation for 18k ticks,
+  35 team changes through 59 team doors, multijump, low gravity, speed/jump/gravity effects, checkpoints, 23k spikes).
+- Checked only against the AS3 source (synthetic tests in `test/regress.js`, `test/mechanics.js`, `test/review.js`),
+  not against a real eeo-tas trace: world gravity != 1, levels without a spawn point, a respawn with a pending queue
+  retry, curse, zombie, poison, NPC zombie, zombie doors, time doors, liquids, ice. The team retry reading rests on
+  EE Offline's bytecode (same SDK), not on a compiled eeo-tas.
+- Open: the last bit of 7 of the 8 drag constants (EEO's Flash `Math.pow` vs the square-and-multiply values used
+  here; no test has shown a different finish or death). `node test/review.js` prints the /fps check that settles it.
 - Not modelled: anything needing the keyboard during a replay (Y on world portals 374 / reset points 466, G after a
-  god block 1516, P), multiplayer tagging (`playerOverlaps`, a no-op alone), and the AS3 `portalLookup` quirks of
-  crafted files with several records at one position (stale portal entries stay exits in EEO; eesim takes portals
-  from the final tiles). Water / toxic cells get random lookup values while drawn (World.as:1611-1638), which
-  nothing in physics reads.
+  god block 1516, P), multiplayer tagging (`playerOverlaps`, a no-op alone). Water / toxic cells get random lookup
+  values while drawn (World.as:1611-1638), which nothing in physics reads. (The `portalLookup` quirks of crafted files,
+  background and stale portal entries, are modelled: see "Portal lookup".)
+- Checked only against the AS3 source (test/review.js), not a real eeo-tas run: the tick abort of an out-of-range
+  music block, background / stale portal entries and their deletion by a coin pickup. The abort's frame timing (the
+  frame after it may run 2 ticks before its queue drain) depends on wall-clock time, like `ticksPerFrame`.
 - `Math.random` portal exits and per-frame queue timing: see above.

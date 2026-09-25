@@ -175,17 +175,17 @@ function levelView(levelJson, level, meta) {
 		kinds[id] = [k.kind, k.dir || k.sub || (k.rotatable ? 'rot' : ''), B.isSolidId(id) ? 1 : 0];
 	}
 	const nums = [], portals = [];
-	const byId = new Map();
-	for (const e of levelJson.extras || []) {
-		const t = level.fg[e[0]];
-		if (t === 242 || t === 381) byId.set(e[2] | 0, (byId.get(e[2] | 0) || 0) + 1);
-	}
 	for (const e of levelJson.extras || []) {
 		const i = e[0], t = level.fg[i];
-		if (t === 242 || t === 381) {
-			const id = e[2] | 0, target = e[3] | 0;
-			portals.push([i, e[1] | 0, id, target, target !== id && (byId.get(target) || 0) > 1 ? 1 : 0]);
-		} else if (e[1] !== null && e[1] !== undefined) nums.push([i, e[1] | 0]);
+		if (t !== 242 && t !== 381 && e[1] !== null && e[1] !== undefined) nums.push([i, e[1] | 0]);
+	}
+	// the portal tiles with the engine's portal table (eeo-tas's portalLookup: exits also where a background record or
+	// a stale entry is; random = its target has 2+ exits)
+	for (let i = 0; i < N; i++) {
+		const t = level.fg[i], s = level.portalSlot[i];
+		if ((t !== 242 && t !== 381) || s < 0) continue;
+		const id = level.pId[s], target = level.pTarget[s], ex = level.portalsById.get(target);
+		portals.push([i, level.pRot[s], id, target, target !== id && ex && ex.n > 1 ? 1 : 0]);
 	}
 	const spawns = [];
 	for (let k = 0; k < level.spawnsX.length; k++) spawns.push([level.spawnsX[k], level.spawnsY[k]]);

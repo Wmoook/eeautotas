@@ -41,7 +41,9 @@ Times the user gives are **in-game run times** (the timer eeo-tas shows). Every 
    the log.
 2. **Look at that moment.** `node src/tas.js where <job> 1:10`. It shows the tick, position (tiles), velocity
    (px/tick), whether the ball is on the ground, gravity direction, the tiles at the centre, below and ahead, coins,
-   keys and switches, the inputs of the last 30 and next 100 ticks (`R+J x3, R x20, - x5`), the next events
+   keys and switches, the active effects (levitation and its thrust, multijump, jump / speed / gravity effects, low
+   gravity, protection, curse / zombie / fire / poison with the ticks until they kill, team, god mode), the inputs of
+   the last 30 and next 100 ticks (`R+J x3, R x20, - x5`), the next events
    (portals, coins, jumps, landings) and an ASCII map (`@` ball, `+` path in the next 3 s, `-` path in the last 1 s).
 3. **See it.** `node src/tas.js render <job> 1:08 1:14`. It prints the PNG path. **Read the PNG** (it is an image).
    Tiles are colored by kind: solid grey, arrows and dots blue, portals purple rings (a white dot means a random
@@ -179,6 +181,8 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/run.js` | quick replay: finish tick, run time, coins |
 | `src/examples/idea_template.js` | a script that tries thousands of input variants around a moment exactly; copy it and edit |
 | `test/regress.js` | engine regression tests (maintained together with the physics) |
+| `test/mechanics.js` | block mechanics against the AS3 (effects, levitation, teams, zombie doors, lookup table) |
+| `test/review.js` | the review suite: music blocks without a sound (tick abort), the AS3 portal lookup, stateKey decoding, snapshot / stateKey fuzz on kitchen-sink levels, the two real eeo-tas runs, and the app (import limits, report, where, HTTP errors, inbox verdict) in a temp copy of src/ (`--quick`, `--only=`) |
 
 The tools take `--tas=<file>` and `--level=<level id | job id>`. For a `.eetas` inside `src/jobs/<id>/`, `--level` can
 be left out. Each tool's header comment lists its options.

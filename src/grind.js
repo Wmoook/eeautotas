@@ -115,7 +115,8 @@ function consider(file, what) {
 	}
 	const r = evalRun(file);
 	if (!r) return { accepted: false, r: null, verdict: { accept: false, reason: 'does not finish the level' } };
-	if (r.runTicks <= best.runTicks) r.chance = chanceOf(r); else r.chance = 0;
+	// (a slower run is rejected without its odds: chance null = not computed, not "never finishes")
+	r.chance = r.runTicks <= best.runTicks ? chanceOf(r) : null;
 	const v = C.judge(r, best, baseDeaths);
 	if (!v.accept) {
 		if (r.runTicks < best.runTicks) log(`${what}: ${fmt(r.runTicks)} rejected: ${v.reason}`);

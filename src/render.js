@@ -155,11 +155,17 @@ function decodeLevel(d) {
 	const rot = new Map(), portal = new Map();
 	for (const e of d.extras || []) {
 		const i = e[0], t = fg[i];
-		if (t === 242 || t === 381) portal.set(i, { rot: e[1] | 0, id: e[2] | 0, target: e[3] | 0 });
+		if (t === 242 || t === 381) { if (!Array.isArray(d.portals)) portal.set(i, { rot: e[1] | 0, id: e[2] | 0, target: e[3] | 0 }); }
 		else if (e[1] !== null && e[1] !== undefined) rot.set(i, e[1] | 0);
 	}
+	// exits per id: every entry of eeo-tas's portalLookup (`portals`: background and stale entries too), as eesim does
 	const byId = new Map();
-	for (const p of portal.values()) byId.set(p.id, (byId.get(p.id) || 0) + 1);
+	if (Array.isArray(d.portals)) {
+		for (const [i, r, id, target] of d.portals) {
+			byId.set(id | 0, (byId.get(id | 0) || 0) + 1);
+			if (fg[i] === 242 || fg[i] === 381) portal.set(i, { rot: r | 0, id: id | 0, target: target | 0 });
+		}
+	} else for (const p of portal.values()) byId.set(p.id, (byId.get(p.id) || 0) + 1);
 	for (const p of portal.values()) p.random = p.target !== p.id && (byId.get(p.target) || 0) > 1;
 	return { W, H, fg, bg, rot, portal };
 }
@@ -297,6 +303,12 @@ function renderPath(opts) {
 	const maxW = (opts.maxPx && opts.maxPx[0]) || 1800, maxH = (opts.maxPx && opts.maxPx[1]) || 1300;
 	let T = opts.scale ? Math.max(2, Math.min(48, opts.scale | 0)) : Math.max(2, Math.min(24, Math.floor(Math.min(maxW / wT, maxH / hT))));
 	const LEFT = 30, TOP = 44;
+	// at most maxPixels (default 60 Mpx, ~240 MB of canvas): a larger scale is lowered to fit (a whole big level at
+	// scale 48 would take gigabytes and block the server for seconds)
+	const maxPixels = opts.maxPixels || 60e6;
+	const px = (t) => (LEFT + wT * t + 4) * (TOP + hT * t + 4);
+	while (T > 2 && px(T) > maxPixels) T--;
+	if (px(T) > maxPixels) throw new Error(`the region (${wT} x ${hT} tiles) is too large to draw; use a shorter time range or a smaller margin`);
 	const W = LEFT + wT * T + 4, H = TOP + hT * T + 4;
 	const cv = new Canvas(W, H, [10, 11, 15]);
 	cv.rect(LEFT, TOP, wT * T, hT * T, BG);

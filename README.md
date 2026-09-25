@@ -150,9 +150,17 @@ both.
 - It can only shorten the run you give it: it needs a TAS that already finishes the level, and it searches for
   faster inputs near that route and its variations. It finds new routes locally, but it does not plan a whole new
   route across the level.
-- Mechanics that the physics copy does not model yet are listed under "Known gaps" in `docs/ENGINE_NOTES.md`
-  (currently world portals, the fly effect, curse / zombie / team effects). A level that uses them on the route
-  cannot be optimized reliably.
+- How exact is "exact"? The physics copy follows the eeo-tas source line by line for every block and effect
+  (gravity arrows and dots, liquids, ice, climbables, boosts, keys, switches, every door and gate family, portals,
+  coins, spikes, fire, checkpoints, levitation, teams, curse, zombie, poison, protection, multi-jump, low gravity,
+  speed/jump/gravity effects and more). Two real eeo-tas runs replay tick for tick: a Forgotten Veil TAS (1:55.27)
+  and an Infinity Pain TAS (6:52.76, heavy on levitation, teams, multi-jump and low gravity). Curse, zombie, poison,
+  time doors, liquids and ice are checked against the source and by tests, but no real run of them has been compared
+  yet. One open detail: EEO computes 7 of its 8 friction constants with Flash's `Math.pow`, and it is not yet known
+  whether that rounds like the constants used here in the very last bit. It has not changed a finish or a death in
+  any test; `node test/review.js` prints a one-minute check you can do in eeo-tas to settle it.
+- World portals, reset points and god blocks need the Y / G keys, which a `.eetas` cannot press, so in a TAS they do
+  nothing, exactly like in eeo-tas. Remaining gaps are listed under "Known gaps" in `docs/ENGINE_NOTES.md`.
 - The TAS has to finish within its own inputs. eeo-tas keeps running with no input after the file ends, but the
   optimizer only counts a finish that happens while the file is still playing.
 - All times are the in-game timer, the same number eeo-tas shows. It starts at your first input, so ticks

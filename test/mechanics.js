@@ -14,7 +14,7 @@ const E = require('../src/eesim.js');
 const V = require('../src/eelvl.js');
 
 const QUICK = process.argv.includes('--quick');
-const SAMPLES = 'C:/Users/super/Downloads';
+const SAMPLES = process.env.EEAT_LEVELS || require('path').join(require('os').homedir(), 'Downloads');
 const MULT = 7.752;
 
 let pass = 0, fail = 0;

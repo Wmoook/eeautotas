@@ -223,41 +223,58 @@ function prepareLevel(d, opts) {
       if (i >= 0 && i < N) lookup0[i] = e[1] | 0;
     }
   }
+  // Portals = AS3 Lookup.portalLookup (Lookup.as:135-171): World.deserializeFromMessage (World.as:349-352) calls
+  // setPortal for EVERY 242/381 record, whatever its layer, keyed by position only (a later record at the cell
+  // replaces the entry: last write wins) and never removed at load, also when a later record puts another block on
+  // the cell. processPortals (Player.as:1087-1102) enters only from a layer-0 242/381 tile, with that cell's entry
+  // (none = Portal(0, 0, 0): target == id, no teleport), and getPortals(target) takes EVERY entry with that id as an
+  // exit: background (layer-1) records and stale entries under other blocks included. toSimLevel exports the
+  // lookup as `portals` [index, rotation, id, target, type] in insertion order (= the extras order for every file
+  // EEO writes); JSON without it (older exports) falls back to the extras whose final tile is 242/381.
+  // The only runtime change: collecting a coin calls setTileComplex(0, ...) -> deleteLookup (World.as:415-418), which
+  // removes a portal entry at that cell for good (/reset's resetCoins uses setTile: it does not come back).
   const portalSlot = new Int32Array(N).fill(-1);
   const pId = [], pTarget = [], pRot = [];
-  const byId = new Map();                     // portal id -> {xs, ys} (px positions, <<4), extra order
+  const byId = new Map();                     // portal id -> {xs, ys, cells} (px positions, <<4), lookup order
   const cd = new Set(), bcd = new Set();
+  const addPortal = (i, rotation, id, target) => {
+    const px = id === null || id === undefined ? 0 : id | 0;
+    const tg = target === null || target === undefined ? 0 : target | 0;
+    const rt = rotation === null || rotation === undefined ? 0 : rotation | 0;
+    let slot = portalSlot[i];
+    if (slot < 0) { slot = pId.length; portalSlot[i] = slot; pId.push(0); pTarget.push(0); pRot.push(0); }
+    pId[slot] = px; pTarget[slot] = tg; pRot[slot] = rt;
+  };
+  const usePortalLookup = Array.isArray(d.portals);
+  if (usePortalLookup) {
+    for (const e of d.portals) {
+      const i = e[0] | 0;
+      if (i >= 0 && i < N) addPortal(i, e[1], e[2], e[3]);
+    }
+  }
   for (const e of d.extras) {
     const i = e[0], rotation = e[1], id = e[2], target = e[3];
     const t = fg[i];
     if (t === PORTAL || t === PORTAL_INVISIBLE) {
-      const px = id === null || id === undefined ? 0 : id;
-      const tg = target === null || target === undefined ? 0 : target;
-      const rt = rotation === null || rotation === undefined ? 0 : rotation;
-      let slot = portalSlot[i];
-      if (slot < 0) { slot = pId.length; portalSlot[i] = slot; pId.push(0); pTarget.push(0); pRot.push(0); }
-      pId[slot] = px; pTarget[slot] = tg; pRot[slot] = rt;
-      if (!byId.has(px)) byId.set(px, { xs: [], ys: [] });
-      const l = byId.get(px);
-      l.xs.push((i % W) << 4); l.ys.push(Math.floor(i / W) << 4);
+      if (!usePortalLookup) addPortal(i, rotation, id, target);
     } else if (!useLookupInt && rotation !== null && rotation !== undefined) {
       lookup0[i] = rotation;
     }
+  }
+  // exits per id, in slot (= lookup insertion) order; each position appears once (the lookup is position keyed)
+  const slotCell = new Int32Array(pId.length);
+  for (let i = 0; i < N; i++) if (portalSlot[i] >= 0) slotCell[portalSlot[i]] = i;
+  for (let s = 0; s < pId.length; s++) {
+    const i = slotCell[s];
+    if (!byId.has(pId[s])) byId.set(pId[s], { xs: [], ys: [], cells: [] });
+    const l = byId.get(pId[s]);
+    l.xs.push((i % W) << 4); l.ys.push(Math.floor(i / W) << 4); l.cells.push(i);
   }
   // coin / blue coin door thresholds (door_state events only)
   for (let i = 0; i < N; i++) {
     const t = fg[i];
     if (t === COINDOOR || t === COINGATE) cd.add(lookup0[i]);
     else if (t === BLUECOINDOOR || t === BLUECOINGATE) bcd.add(lookup0[i]);
-  }
-  const portalsById = new Map();
-  let multiTarget = false;
-  for (const [k, v] of byId) {
-    portalsById.set(k, { xs: Int32Array.from(v.xs), ys: Int32Array.from(v.ys), n: v.xs.length });
-  }
-  for (let s = 0; s < pId.length; s++) {
-    const l = portalsById.get(pTarget[s]);
-    if (pTarget[s] !== pId[s] && l && l.n > 1) multiTarget = true;
   }
   // World.spawnPoints[0] (World.as:359-366): every 255 and every 1582 with number 0, both layers, in level-file
   // record order (entry order inside a record); toSimLevel exports it as spawn_points. worldSpawn is 0 for an
@@ -297,6 +314,27 @@ function prepareLevel(d, opts) {
     if ((f & F_SOLID) === 0) ovl[i] = t === 243 ? OV_SECRET : OV_AIR;
     else if ((f & (F_ROTHALF | F_HALF | F_JUMPTHRU | F_DOOR)) !== 0) ovl[i] = OV_COMPLEX;
     else ovl[i] = OV_SOLID;
+  }
+  // portal entries on coin cells (crafted files only: a background portal record under a coin, or a portal record
+  // overwritten by a coin): collecting that coin deletes the entry (see above), tracked per run in _portalGone
+  const portalCoinIdx = new Int32Array(N).fill(-1);
+  let nPortalCoins = 0;
+  for (let s = 0; s < pId.length; s++) if (coinBit[slotCell[s]] >= 0) portalCoinIdx[slotCell[s]] = nPortalCoins++;
+  const portalsById = new Map();
+  for (const [k, v] of byId) {
+    let pc = null;
+    for (let j = 0; j < v.cells.length; j++) {
+      const b = portalCoinIdx[v.cells[j]];
+      if (b >= 0) { if (pc === null) pc = new Int32Array(v.cells.length).fill(-1); pc[j] = b; }
+    }
+    portalsById.set(k, { xs: Int32Array.from(v.xs), ys: Int32Array.from(v.ys), n: v.xs.length, pc });
+  }
+  // random exits (the RNG step count is keyed): an enterable portal (layer-0 242/381) whose target has 2+ exits
+  let multiTarget = false;
+  for (let s = 0; s < pId.length; s++) {
+    const t = fg[slotCell[s]];
+    const l = portalsById.get(pTarget[s]);
+    if ((t === PORTAL || t === PORTAL_INVISIBLE) && pTarget[s] !== pId[s] && l && l.n > 1) multiTarget = true;
   }
   // tileMask[y*W+x] describes the tiles (x+dx, y+dy): bit (dx + 3*dy), dx,dy in 0..2 = plain air (OV_AIR);
   // bit 9 + (dx + 3*dy), dx,dy in 0..1 = plain static solid (OV_SOLID); out of bounds = neither.
@@ -373,6 +411,10 @@ function prepareLevel(d, opts) {
     fg, bg, lookup0, flags, xflags: extra, ovl, airMask, airPS, gMorx, gMory, gMox, gMoy, gFlags,
     portalSlot, pId: Int32Array.from(pId), pTarget: Int32Array.from(pTarget), pRot: Int32Array.from(pRot),
     portalsById, multiTargetPortals: multiTarget, rngScript: Array.isArray(d.rng_script) ? Int32Array.from(d.rng_script) : null,
+    // portal entries on coin cells: index per cell (null when the level has none), count, the per-run deleted set's
+    // start value (all present; shared, replaced on write)
+    portalCoinIdx: nPortalCoins > 0 ? portalCoinIdx : null, nPortalCoins,
+    portalGone0: new Int32Array(Math.max(1, Math.ceil(nPortalCoins / 32))),
     coinDoorThresholds: Int32Array.from([...cd].sort((a, b) => a - b)),
     blueCoinDoorThresholds: Int32Array.from([...bcd].sort((a, b) => a - b)),
     spawnsX: Int32Array.from(spX), spawnsY: Int32Array.from(spY), spawnOrder,
@@ -570,6 +612,9 @@ class EESim {
     this._tileQueue = [];    // flat pairs [sid, enabled]
     this._coinBits = new Int32Array(level.coinWords); this._coinOwned = true;
     this._secretBits = new Int32Array(level.secretWords); this._secretOwned = true;
+    // portal entries deleted by a coin pickup at their cell (bit = level.portalCoinIdx); never mutated in place (a
+    // pickup installs a new array), so snapshots share it like a scalar
+    this._portalGone = level.portalGone0;
     this._rngState = RNG_SEED_STATE; this._rngSteps = 0;
     // player internals
     this._ticks = 0;                          // PlayState.ticks
@@ -670,6 +715,7 @@ class EESim {
     this._lookup.set(L.lookup0);
     this._coinBits = L.coinBits0; this._coinOwned = false; // copy-on-write
     this._secretBits = new Int32Array(L.secretWords); this._secretOwned = true;
+    this._portalGone = L.portalGone0;                      // a new Lookup: every portal entry of the file
     // World
     this._next_spawn = 0;
     this._keysMask = 0;
@@ -816,10 +862,12 @@ class EESim {
     return b >= 0 && ((this._secretBits[b >> 5] >>> (b & 31)) & 1) !== 0;
   }
   get_tile(tx, ty) { return this._getTile(tx, ty); }
+  /** Lookup.getPortal: the portalLookup entry at the cell (any layer; null if none or deleted by a coin pickup). */
   get_portal(tx, ty) {
     if (tx < 0 || ty < 0 || tx >= this.width || ty >= this.height) return null;
-    const s = this.level.portalSlot[ty * this.width + tx];
-    return s < 0 ? null : { id: this.level.pId[s], target: this.level.pTarget[s], rotation: this.level.pRot[s] };
+    const i = ty * this.width + tx, s = this.level.portalSlot[i], pci = this.level.portalCoinIdx;
+    if (s < 0 || (pci !== null && pci[i] >= 0 && ((this._portalGone[pci[i] >> 5] >>> (pci[i] & 31)) & 1) !== 0)) return null;
+    return { id: this.level.pId[s], target: this.level.pTarget[s], rotation: this.level.pRot[s] };
   }
   set_god_mode(on) {
     if (on === this.in_god_mode) return;
@@ -916,12 +964,13 @@ class EESim {
         if ((this._keysMask & (1 << c)) !== 0 && (t - this._kt[c]) >= KEY_TICKS) this._switchKey(c, false, false);
       }
     }
-    // --- Player.tick() (ends with the respawn: Player.as:1176-1179)
-    this._playerTick(input);
-    // --- PlayState.enterFrame() (per rendered frame, see above): queue, then keysquene
+    // --- Player.tick() (ends with the respawn: Player.as:1176-1179); true = eeo-tas threw in it (see _touchBlock)
+    const threw = this._playerTick(input);
+    // --- PlayState.enterFrame() (per rendered frame, see above): queue, then keysquene; not in the frame whose tick
+    // threw (BlGame.handleEnterFrame never gets to it), so pending retries wait for the next tick's frame
     if (this._stateQueue.length !== 0 || this._keysQueue.length !== 0) {
       this.frame_queue_ticks++;
-      if (this.ticksPerFrame === 1 || t % this.ticksPerFrame === 0) this._drainFrameQueues();
+      if (!threw && (this.ticksPerFrame === 1 || t % this.ticksPerFrame === 0)) this._drainFrameQueues();
     }
     this._emitDiffs();
   }
@@ -1326,7 +1375,15 @@ class EESim {
         }
         if (jumped && this.onEvent !== null) this.onEvent('jump', { pos: { x: this.px, y: this.py } });
       }
-      this._touchBlock(cx, cy, isgodmod);
+      if (!this._touchBlock(cx, cy, isgodmod)) {
+        // eeo-tas threw in touchBlock (an out-of-range music block): the rest of Player.tick (sendMovement,
+        // updateThrust, the auto-align, updateStuff = the run timer, the respawn check: the player is alive here) and
+        // of PlayState.tick is skipped, and so is that frame's PlayState.enterFrame (tick() skips the queue drain).
+        // Bl.time is not advanced, so the next frame runs the next tick as usual. (on_ground is this port's
+        // observable of the movement that did happen.)
+        this._setOnGround();
+        return true;
+      }
     }
 
     // --- levitation thrust (Player.as:998-1000, updateThrust 1846-1861), also while dead, after touchBlock (a 418
@@ -1382,6 +1439,7 @@ class EESim {
       this.run_ticks += 1;
     }
 
+    // (= _setOnGround(), inline: the call costs ~5% of the engine's speed here)
     const wasGround = this.on_ground;
     this.on_ground = this._grounded;
     if (this._grounded && !wasGround && this.onEvent !== null) this.onEvent('land', { impact_speed: this._land_speed });
@@ -1394,6 +1452,14 @@ class EESim {
       this.respawn();
       this.deaths++;
     }
+    return false;
+  }
+
+  /** on_ground (+ the 'land' event): whether the movement of this tick hit the floor (inlined at the end of _playerTick). */
+  _setOnGround() {
+    const wasGround = this.on_ground;
+    this.on_ground = this._grounded;
+    if (this._grounded && !wasGround && this.onEvent !== null) this.onEvent('land', { impact_speed: this._land_speed });
   }
 
   _markGrounded(s) {
@@ -1407,8 +1473,11 @@ class EESim {
     this._last_portal_set = true;
     this._last_portal_x = cx << 4;
     this._last_portal_y = cy << 4;
-    const targets = L.portalsById.get(L.pTarget[slot]);
-    if (targets === undefined || targets.n <= 0) return;
+    // getPortals(target): every portalLookup entry with that id (entries deleted by a coin pickup excluded)
+    let targets = L.portalsById.get(L.pTarget[slot]);
+    if (targets === undefined) return;
+    if (targets.pc !== null && this._portalGone !== L.portalGone0) targets = this._liveExits(targets);
+    if (targets.n <= 0) return;
     const pick = this._randiRange(0, targets.n - 1);
     const cpx = targets.xs[pick], cpy = targets.ys[pick];
     let oldRot = L.pRot[slot];
@@ -1455,6 +1524,17 @@ class EESim {
     this._last_portal_y = cpy;
     this.teleported = true;
     if (this.onEvent !== null) this.onEvent('portal', { from: { x: cx, y: cy }, to: { x: cpx >> 4, y: cpy >> 4 } });
+  }
+
+  /** The exits of `t` whose portal entry still exists (see _setTileCoin), in the same order. */
+  _liveExits(t) {
+    const g = this._portalGone, xs = [], ys = [];
+    for (let k = 0; k < t.n; k++) {
+      const b = t.pc[k];
+      if (b >= 0 && ((g[b >> 5] >>> (b & 31)) & 1) !== 0) continue;
+      xs.push(t.xs[k]); ys.push(t.ys[k]);
+    }
+    return { xs, ys, n: xs.length, pc: null };
   }
 
   /** RandomNumberGenerator.randi_range(from, to) (RandomPCG::random + pcg32_boundedrand_r). */
@@ -1714,6 +1794,10 @@ class EESim {
 
   // ================================================================ Me.touchBlock()
 
+  /**
+   * Me.touchBlock. Returns false when eeo-tas throws in it (an out-of-range music block, see below): the caller
+   * then ends the tick there, like the uncaught RangeError does.
+   */
   _touchBlock(cx, cy, isgodmode) {
     const current = this._current;
     if (current === COIN_GOLD || current === COIN_BLUE) {
@@ -1727,9 +1811,20 @@ class EESim {
       }
     }
     if (this._pastx !== cx || this._pasty !== cy) {
-      if ((current === PIANO || current === DRUMS || current === GUITAR) && this.onEvent !== null) {
-        this.onEvent(current === PIANO ? 'piano' : (current === DRUMS ? 'drum' : 'guitar'),
-          { tile: { x: cx, y: cy }, note: this._lookupAt(cx, cy) });
+      if (current === PIANO || current === DRUMS || current === GUITAR) {
+        // Me.as:133-149 (`if (isme)`, whatever god mode): SoundManager.playPianoSound(n) reads pianoSounds[n + 27],
+        // playDrumSound drumSounds[n], playGuitarSound guitarSounds[n] (sounds/SoundManager.as:402-414): Vectors of
+        // 88, 20 and 49 sounds. A number outside them throws RangeError #1125 while the argument is evaluated, and
+        // nothing catches it (Player.tick, BlContainer.tick, PlayState.tick, BlGame.handleEnterFrame have no try):
+        // the rest of this tick is skipped (see _playerTick), pastx / pasty included, so every tick that starts in
+        // this cell throws again.
+        const note = this._lookupAt(cx, cy);
+        const kind = current === PIANO ? 'piano' : (current === DRUMS ? 'drum' : 'guitar');
+        if (!musicNoteValid(current, note)) {
+          if (this.onEvent !== null) this.onEvent('tick_aborted', { reason: kind, tile: { x: cx, y: cy }, note });
+          return false;
+        }
+        if (this.onEvent !== null) this.onEvent(kind, { tile: { x: cx, y: cy }, note });
       }
       if (!isgodmode) {
         if ((this._xflags[current] & X_BLINK) !== 0 && this.onEvent !== null) this.onEvent('blink', { tile: { x: cx, y: cy }, id: current });
@@ -1898,13 +1993,23 @@ class EESim {
       this._pastx = cx;
       this._pasty = cy;
     }
+    return true;
   }
 
-  /** _set_tile for a coin pickup (the only runtime tile write): tile -> 110/111, lookup deleted. */
+  /**
+   * setTileComplex(0, cx, cy, 110/111, null) for a coin pickup (Me.as:87, the only runtime tile write): tile -> 110 /
+   * 111 and Lookup.deleteLookup(cx, cy) (World.as:415-418): the int and a portal entry at the cell are gone.
+   */
   _setTileCoin(cx, cy, id) {
     const i = cy * this.width + cx;
     this.tiles[i] = id;
     this._lookup[i] = 0;
+    const pci = this.level.portalCoinIdx;
+    if (pci !== null && pci[i] >= 0) {
+      const b = pci[i], g = this._portalGone.slice();
+      g[b >> 5] |= 1 << (b & 31);
+      this._portalGone = g;
+    }
     const b = this.level.coinBit[i];
     if (!this._coinOwned) { this._coinBits = this._coinBits.slice(); this._coinOwned = true; }
     this._coinBits[b >> 5] |= 1 << (b & 31);
@@ -2191,15 +2296,27 @@ class EESim {
    */
   stateKey(strict) {   // eslint-disable-line no-unused-vars
     const nd = this._fillKey();
-    let key = this._keyBytes.ucs2Slice(0, this._keyDoubleOff + nd * 8);
-    // variable parts (rare): switch on-sets, queues, the frame phase
-    if (this._switches.size !== 0) key += '\u0001' + switchKey(this._switches);
-    if (this._oswitches.size !== 0) key += '\u0002' + switchKey(this._oswitches);
-    if (this._stateQueue.length !== 0) key += '\u0003' + intsKey(this._stateQueue);
-    if (this._keysQueue.length !== 0) key += '\u0004' + intsKey(this._keysQueue);
-    if (this._tileQueue.length !== 0) key += '\u0005' + intsKey(this._tileQueue);
-    if (this.ticksPerFrame > 1) key += '\u0006' + intsKey([this._ticks % this.ticksPerFrame]);
-    return key;
+    const key = this._keyBytes.ucs2Slice(0, this._keyDoubleOff + nd * 8);
+    const v = this._varKey();
+    return v === '' ? key : key + v;
+  }
+
+  /**
+   * The variable part of the key (rare): purple / orange switch on-sets, the three queues, the frame phase. Each
+   * present section is its tag (1..6), its int count and the ints (2 UTF-16 units each), so the string decodes
+   * uniquely whatever the ints are (switch numbers are any int32 in a crafted file). The fixed part before it is
+   * self-delimiting too (its length follows from the flag bits in its first int). A switch map with no switch on
+   * adds nothing, like no map at all (doors and switches only test `=== true`).
+   */
+  _varKey() {
+    let v = '';
+    if (this._switches.size !== 0) { const s = switchKey(this._switches); if (s !== '') v += '\u0001' + s; }
+    if (this._oswitches.size !== 0) { const s = switchKey(this._oswitches); if (s !== '') v += '\u0002' + s; }
+    if (this._stateQueue.length !== 0) v += '\u0003' + seqKey(this._stateQueue);
+    if (this._keysQueue.length !== 0) v += '\u0004' + seqKey(this._keysQueue);
+    if (this._tileQueue.length !== 0) v += '\u0005' + seqKey(this._tileQueue);
+    if (this.ticksPerFrame > 1) v += '\u0006' + seqKey([this._ticks % this.ticksPerFrame]);
+    return v;
   }
 
   /**
@@ -2226,13 +2343,7 @@ class EESim {
       h1 ^= k; h1 = (h1 << 13) | (h1 >>> 19); h1 = (Math.imul(h1, 5) + 0xe6546b64) | 0;
       h2 = Math.imul(h2 ^ W32[i], 0x5bd1e995); h2 ^= h2 >>> 13;
     }
-    let extra = '';
-    if (this._switches.size !== 0) extra += '\u0001' + switchKey(this._switches);
-    if (this._oswitches.size !== 0) extra += '\u0002' + switchKey(this._oswitches);
-    if (this._stateQueue.length !== 0) extra += '\u0003' + intsKey(this._stateQueue);
-    if (this._keysQueue.length !== 0) extra += '\u0004' + intsKey(this._keysQueue);
-    if (this._tileQueue.length !== 0) extra += '\u0005' + intsKey(this._tileQueue);
-    if (this.ticksPerFrame > 1) extra += '\u0006' + intsKey([this._ticks % this.ticksPerFrame]);
+    const extra = this._varKey();
     for (let i = 0; i < extra.length; i++) {
       const c = extra.charCodeAt(i);
       h1 = Math.imul(h1 ^ c, 0x01000193); h2 = Math.imul(h2 ^ c, 0x5bd1e995); h2 ^= h2 >>> 15;
@@ -2336,6 +2447,8 @@ class EESim {
     this._coinOff = o;
     if (L.coinTiles.length !== 0) { const cb = this._coinBits; for (let w = 0; w < cb.length; w++) I[o++] = cb[w]; }
     if (L.secretTiles.length !== 0) { const sb = this._secretBits; for (let w = 0; w < sb.length; w++) I[o++] = sb[w]; }
+    // portal entries deleted by coin pickups (only levels with portal entries on coin cells; see _setTileCoin)
+    if (L.nPortalCoins > 0) { const pg = this._portalGone; for (let w = 0; w < pg.length; w++) I[o++] = pg[w]; }
     return nd;
   }
 
@@ -2369,6 +2482,7 @@ class EESim {
     if (L.hasTeamEffect) nI += 2;
     if (L.coinTiles.length !== 0) nI += L.coinWords;
     if (L.secretTiles.length !== 0) nI += L.secretWords;
+    if (L.nPortalCoins > 0) nI += L.portalGone0.length;
     if (nI & 1) nI++;   // keep the doubles 8-byte aligned
     // doubles: 5 always, then at most dead_offset, 4 effect timers, thrust, ox + oy, the held-jump timer = 14
     const ab = new ArrayBuffer(nI * 4 + KEY_DOUBLES * 8);
@@ -2398,6 +2512,13 @@ class EESim {
   }
 }
 
+/** Whether eeo-tas's sound tables have the music block's number (SoundManager.as: 88 piano, 20 drum, 49 guitar sounds). */
+function musicNoteValid(id, n) {
+  if (id === PIANO) return n >= -27 && n <= 60;   // pianoSounds[n + 27]
+  if (id === DRUMS) return n >= 0 && n <= 19;
+  return n >= 0 && n <= 48;                        // GUITAR
+}
+
 function rectHit(x, y, rx, ry, rw, rh) {
   return x < rx + rw && rx < x + 16.0 && y < ry + rh && ry < y + 16.0;
 }
@@ -2407,18 +2528,21 @@ function copyInto(dst, src) {
   for (let i = 0; i < src.length; i++) dst.push(src[i]);
 }
 
-function intsKey(arr) {
-  let s = '';
-  for (let i = 0; i < arr.length; i++) { const v = arr[i] | 0; s += String.fromCharCode(v & 0xFFFF, (v >>> 16) & 0xFFFF); }
+/** ints -> their count, then each int, as 2 UTF-16 units apiece (low 16 bits, high 16 bits): self-delimiting. */
+function seqKey(arr) {
+  const n = arr.length;
+  let s = String.fromCharCode(n & 0xFFFF, (n >>> 16) & 0xFFFF);
+  for (let i = 0; i < n; i++) { const v = arr[i] | 0; s += String.fromCharCode(v & 0xFFFF, (v >>> 16) & 0xFFFF); }
   return s;
 }
 
+/** A switch map's on-set as seqKey of the sorted ids, '' when no switch is on (cached on the map until _swSet). */
 function switchKey(m) {
   if (m._key !== undefined) return m._key;
   const on = [];
   for (const [id, v] of m) if (v === true) on.push(id);
   on.sort((a, b) => a - b);
-  const k = intsKey(on);
+  const k = on.length === 0 ? '' : seqKey(on);
   m._key = k;
   return k;
 }
@@ -2426,7 +2550,8 @@ function switchKey(m) {
 // ------------------------------------------------------------------ snapshot object
 // Every scalar field of the sim that snapshot()/restore() copy (the Godot _SNAP_PROPS minus the arrays,
 // plus the RNG state). Straight-line copy code is generated from this list. The key timers (_kt, ints) are
-// copied as kt0..kt5. frame_queue_ticks is a diagnostic counter (no effect on behaviour, not keyed).
+// copied as kt0..kt5. frame_queue_ticks is a diagnostic counter and rngNeed the enumerator's "a draw went past the
+// outcome script" signal (rng.js); neither affects behaviour, neither is keyed.
 const SNAP_SCALARS = ['px', 'py', 'prev_px', 'prev_py', 'speed_x', 'speed_y', 'on_ground', 'is_dead',
   'in_god_mode', 'coins', 'blue_coins', 'has_crown', 'has_silver_crown', 'deaths', 'teleported', 'modifier_x',
   'modifier_y', 'current_tile', 'flip_gravity', 'jump_count', 'max_jumps', 'jump_boost', 'speed_boost',
@@ -2437,10 +2562,10 @@ const SNAP_SCALARS = ['px', 'py', 'prev_px', 'prev_py', 'speed_x', 'speed_y', 'o
   '_last_portal_set', '_last_portal_x', '_last_portal_y', '_dead_offset', '_fire_time_start', '_fire_duration',
   '_horizontal', '_vertical', '_spacedown', '_spacejustdown', '_prev_jump_held', '_mx', '_my', '_current',
   '_evKeysMask', '_ev_coins', '_ev_bcoins', '_ev_timedoor', '_ev_grav_x', '_ev_grav_y', '_rngState', '_rngSteps',
-  'frame_queue_ticks', '_tick0',
+  'rngNeed', 'frame_queue_ticks', '_tick0',
   'is_cursed', '_curse_time_start', '_curse_duration', 'is_zombie', '_zombie_time_start', '_zombie_duration',
   'is_poisoned', '_poison_time_start', '_poison_duration', 'has_levitation', 'is_thrusting', '_current_thrust',
-  'team', '_team_tx', '_team_ty'];
+  'team', '_team_tx', '_team_ty', '_portalGone'];
 
 // eslint-disable-next-line no-new-func
 const EESnapshot = new Function(SNAP_SCALARS.map((f) => `this.${f} = 0;`).join('\n') + `

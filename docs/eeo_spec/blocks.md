@@ -1,12 +1,12 @@
 # eeo-tas block behavior spec (every block id)
 
-Scope: what is solid when, and what touching each block does, in **eeo-tas** (`C:\Users\super\eeo-tas\src`, AS3,
+Scope: what is solid when, and what touching each block does, in **eeo-tas** (`~\eeo-tas\src`, AS3,
 the ground truth), precise enough to implement a bit-exact JS sim. Movement integration (drag constants, sub-steps,
 jumping, auto-align) is only described where a block changes it. Level-file parsing is only described where it decides
 block data (lookup values, spawn order). Section 11 audits `tools/tas/eesim.js` against this spec.
 
 All `File.as:line` references are to `eeo-tas/src` unless marked otherwise. `ItemId.as`, `ItemManager.as` and `Lookup.as`
-are identical to the original EE Offline (`C:\Users\super\ee-offline\src`). eeo-tas changed `Player.as`, `Me.as`,
+are identical to the original EE Offline (`~\ee-offline\src`). eeo-tas changed `Player.as`, `Me.as`,
 `World.as`, `states/PlayState.as`, `Config.as`, `UI2.as`, `KeyBinding.as` (plus UI files). The block-relevant changes are
 called out as **[eeo-tas change]**. The main one: timers (keys, time doors, curse/zombie/poison/fire) count ticks instead of
 wall-clock time.
@@ -475,7 +475,7 @@ step c of every Player.tick (Player.as:421):  if (this.tx != -1) UpdateTeamDoors
   resetPlayer (`team = 0`) the lingering tx/ty would restore that team (with an overlap check).
 - **Source vs. bytecode.** `tick()` also declares the locals `var tx:Number` (1012) and `var ty:Number` (1029) in the
   auto-align code. With ECMAScript hoisting, line 421 would read those NaN locals and call `UpdateTeamDoors(0, 0)` every
-  tick. The compiled EE Offline (`C:\Users\super\Downloads\EE_Offline.swf`, Player.tick bytecode offsets 743-762:
+  tick. The compiled EE Offline (`~\Downloads\EE_Offline.swf`, Player.tick bytecode offsets 743-762:
   `getlocal0; getproperty private::tx; pushbyte -1; ifeq; ...; callpropvoid UpdateTeamDoors`) reads the **members**.
   The locals are activation slots 27/28, used only by auto-align (offset 5689 and later). eeo-tas has the same source
   line and project setup, so assume member semantics, as above. No compiled eeo-tas was available to check. If a level
@@ -642,13 +642,13 @@ everything is id-based.
 | 74 | Green Lime Emerald | minerals | fg | S | Solid. |
 | 75 | Yellow Jasmine | minerals | fg | S | Solid. |
 | 76 | Orange Topaz | minerals | fg | S | Solid. |
-| 77 | PIANO | music | deco | L:int | Piano. NOT solid (explicit exception in isSolid). Entering (also flying): plays note L, blink. Cosmetic. |
+| 77 | PIANO | music | deco | L:int | Piano. NOT solid (explicit exception in isSolid). Entering (also flying): plays note L, blink. Cosmetic for L in -27..60; any other L throws RangeError (pianoSounds[L + 27], 88 sounds) and aborts the rest of every tick that starts in the cell (eesim: tick_aborted). |
 | 78 | Yellow | christmas 2011 | fg | S | Solid. |
 | 79 | White | christmas 2011 | fg | S | Solid. |
 | 80 | Red | christmas 2011 | fg | S | Solid. |
 | 81 | Blue | christmas 2011 | fg | S | Solid. |
 | 82 | Green | christmas 2011 | fg | S | Solid. |
-| 83 | DRUMS | music | deco | L:int | Drums. NOT solid (explicit exception). Entering: plays sound L, blink. Cosmetic. |
+| 83 | DRUMS | music | deco | L:int | Drums. NOT solid (explicit exception). Entering: plays sound L, blink. Cosmetic for L in 0..19; any other L throws RangeError (20 drum sounds) and aborts the rest of every tick that starts in the cell. |
 | 84 | Red Screen Panel | sci-fi | fg | S | Solid. |
 | 85 | Blue Screen Panel | sci-fi | fg | S | Solid. |
 | 86 | Metal Gray Bumpy | sci-fi | fg | S | Solid. |
@@ -1502,7 +1502,7 @@ everything is id-based.
 | 1517 | EFFECT_GRAVITY | effect | deco | L:int | Gravity effect. L = flipGravity: 0 down, 1 left, 2 up, 3 right, 4 none (other = unrotated, below = right). §6, §4.4 |
 | 1518 | Down Arrow | gravity | deco |  | Gravity arrow down. current (0,2), delayed (0,2), not rotated. below uses the flipGravity default (not an explicit case). §4.4 |
 | 1519 | Invisible Down Arrow | gravity | deco |  | Invisible down arrow = id 1518 (forces; below by flipGravity). Entering: blink, cosmetic. |
-| 1520 | GUITAR | music | deco | L:int | Guitar. Not solid (1520 > 1499). Entering: plays note L, blink. Cosmetic. |
+| 1520 | GUITAR | music | deco | L:int | Guitar. Not solid (1520 > 1499). Entering: plays note L, blink. Cosmetic for L in 0..48; any other L throws RangeError (49 guitar sounds) and aborts the rest of every tick that starts in the cell. |
 | 1521 | Pole White | wild west | above |  | No effect (air for physics). |
 | 1522 | Pole Gray Dark | wild west | above |  | No effect (air for physics). |
 | 1523 | Top Side Dark | cloud | deco |  | No effect (air for physics). |

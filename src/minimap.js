@@ -6,7 +6,7 @@
 // (World.getMinimapColor: color(decoration || foreground || background) || color(background)); unknown ids get
 // block 0's color (black).
 // The table is generated once into src/minimapcolors.json (committed; the app does not need eeo-tas):
-//   node src/minimap.js build [path to eeo-tas]      (default C:\Users\super\eeo-tas or $EEO_TAS)
+//   node src/minimap.js build [path to eeo-tas]      (default ~/eeo-tas or $EEO_TAS)
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -178,6 +178,6 @@ module.exports = { colorOf, cellColor, table, decodePng, build };
 if (require.main === module) {
 	const [cmd, dir] = process.argv.slice(2);
 	if (cmd !== 'build') { console.log('usage: node src/minimap.js build [path to eeo-tas]'); process.exit(1); }
-	const r = build(dir || process.env.EEO_TAS || 'C:\\Users\\super\\eeo-tas');
+	const r = build(dir || process.env.EEO_TAS || require('path').join(require('os').homedir(), 'eeo-tas'));
 	console.log(`[minimap] ${r.count} block colors (${r.literal} given, ${r.averaged} averaged from the images, ${r.skipped} skipped) -> ${r.file}`);
 }

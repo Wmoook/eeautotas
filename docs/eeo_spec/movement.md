@@ -1,8 +1,8 @@
 # eeo-tas movement physics: Player.as and everything it calls
 
 This is the ground-truth spec for a bit-exact JavaScript reimplementation of player movement in the eeo-tas client.
-Source: `C:\Users\super\eeo-tas\src` (paths below are relative to it). The original EE Offline
-(`C:\Users\super\ee-offline\src`) differs in the places listed in section 0.4. Section 12 audits
+Source: `~\eeo-tas\src` (paths below are relative to it). The original EE Offline
+(`~\ee-offline\src`) differs in the places listed in section 0.4. Section 12 audits
 `tools/tas/eesim.js` against this spec.
 
 Contents

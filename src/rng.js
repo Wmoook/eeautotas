@@ -55,7 +55,12 @@ function analyze(level, masks, opts) {
 	dfs([], 1);
 	const ok = leaves.filter((l) => l.complete >= 0);
 	const chance = ok.reduce((a, l) => a + l.prob, 0);
-	if (ok.length === 0) return { draws: nodes.size > 0, chance: 0, bestScript: null, bestRunTicks: null, uses: [], truncated, plays };
+	if (ok.length === 0) {
+		// no outcome finishes: how many random exit choices the run meets (fewest and most over the outcome paths)
+		const n = leaves.map((l) => l.draws.length);
+		return { draws: nodes.size > 0, chance: 0, bestScript: null, bestRunTicks: null, uses: [], truncated, plays,
+			drawsMin: n.length ? Math.min(...n) : 0, drawsMax: n.length ? Math.max(...n) : 0 };
+	}
 	const best = ok.reduce((x, y) => (y.runTicks < x.runTicks || (y.runTicks === x.runTicks && y.prob > x.prob) ? y : x));
 	// along the best outcome path: at each draw, how many exits still lead to a finish (and the chance from there)
 	const chanceUnder = (prefix) => ok.filter((l) => prefix.every((c, i) => l.script[i] === c)).reduce((a, l) => a + l.prob, 0);

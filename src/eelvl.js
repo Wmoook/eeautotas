@@ -179,6 +179,7 @@ function tryParse(data, hasHeader, opts) {
     let mx = 0, my = 0;
     for (const rec of records) { for (const v of rec.xs) if (v > mx) mx = v; for (const v of rec.ys) if (v > my) my = v; }
     h.width = opts.width || mx + 1; h.height = opts.height || my + 1;
+    if (!plausibleHeader(h)) throw new Error(`implausible size ${h.width}x${h.height}`);   // (before fg/bg are allocated)
     if (opts.gravity !== undefined) { h.gravity = Math.fround(opts.gravity); const t = Buffer.alloc(4); t.writeFloatBE(h.gravity); h.gravityBits = t.readUInt32BE(0); }
     if (opts.name !== undefined) h.name = opts.name;
     warnings.push('no header (raw block data): not loadable by EEO; width/height from max coordinates, gravity 1');
@@ -319,7 +320,10 @@ const DRAG_HEX = {
  * spawn_points: World.spawnPoints in AS3 load order (prepareLevel takes spawn id 0: every 255 and 1582 #0).
  * lookup_int: the AS3 Lookup int table (position keyed, both layers, last write wins); prepareLevel builds the
  * sim's lookup from it (from `extras` only for older JSON without it).
- * Extra fields ignored by prepareLevel: world_portals, portals (AS3 lookups).
+ * portals: the AS3 portalLookup [index, rotation, id, target, type] (position keyed, both layers, last write wins,
+ * insertion order); prepareLevel builds the portals from it: every entry is an exit, also a background record or a
+ * stale one under another block (from `extras` with a final 242/381 tile only for older JSON without it).
+ * Extra fields ignored by prepareLevel: world_portals.
  */
 function toSimLevel(p, opts = {}) {
   const W = p.width, H = p.height;
@@ -360,7 +364,7 @@ function toSimLevel(p, opts = {}) {
     drag_hex: DRAG_HEX,
     // World.spawnPoints[id] in load order (255 -> id 0, 1582 -> its number); eesim.prepareLevel uses [0]
     spawn_points: spawn,
-    // --- EEO loader facts beyond ee_level.gd's extras (prepareLevel reads lookup_int; the others are ignored)
+    // --- EEO loader facts beyond ee_level.gd's extras (prepareLevel reads lookup_int and portals; world_portals is ignored)
     world_portals: [...p.lookup.worldPortals].map(([i, w]) => [i, w.target, w.spawnId]),
     lookup_int: [...p.lookup.int],                                              // [index, int] incl. layer 1 writes (Lookup.getInt)
     portals: [...p.lookup.portals].map(([i, q]) => [i, q.rotation, q.id, q.target, q.type]),

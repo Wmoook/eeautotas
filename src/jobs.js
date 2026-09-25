@@ -95,6 +95,27 @@ function deleteJob(id) {
  * collected). See eesim.js EESim.reset().
  */
 const START_MODES = { reset: 'after /reset', load: 'right after loading the level' };
+// Sanity limits for files from outside (a crafted or damaged file must not make the import allocate gigabytes or
+// block the web server for minutes): EEO's block ids are below 2000 (docs/eeo_spec/blocks.json), the sample levels
+// are at most 400 x 400, and real runs are well under an hour (1 tick = 10 ms; Infinity Pain is 41 277 ticks).
+const MAX_BLOCK_ID = 65535, MAX_CELLS = 4e6, MAX_TICKS = 5e6;
+/** A level that eeo-tas could not really have made: refused before anything is sized by it (see the limits above). */
+function checkLevelLimits(p) {
+	if (p.width * p.height > MAX_CELLS) {
+		throw new Error(`this level is ${p.width} x ${p.height} tiles (${(p.width * p.height / 1e6).toFixed(1)} million); the limit is ${MAX_CELLS / 1e6} million tiles ` +
+			'(EEO levels are far smaller): it is probably not an EEO level, or it is damaged');
+	}
+	for (const r of p.records) {
+		if (r.id > MAX_BLOCK_ID) {
+			throw new Error(`not an EEO level: block id ${r.id} in the record at byte ${r.offset} of the unpacked file (EEO block ids are below 2000; ` +
+				'the file is probably damaged)');
+		}
+	}
+}
+/** A run far longer than any real one (see MAX_TICKS): refused before it is replayed. */
+function checkTicks(n, what) {
+	if (n > MAX_TICKS) throw new Error(`${what} has ${n} ticks (${fmt(n)} of play); the limit is ${MAX_TICKS} ticks (${fmt(MAX_TICKS)}): is this really an .eetas?`);
+}
 const normStart = (s) => {
 	const v = String(s || 'reset').toLowerCase();
 	if (!START_MODES[v]) throw new Error(`unknown start "${s}" (use reset or load)`);
@@ -113,6 +134,8 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 	const start = normStart(startMode);
 	let p;
 	try { p = EELVL.readEelvl(eelvl); } catch (e) { throw new Error(`this does not look like an .eelvl level file (${e.message})`); }
+	checkLevelLimits(p);
+	checkTicks(eetas.length, 'the .eetas file');
 	const masks = C.parseEetasBuffer(eetas);
 	if (!masks.length) throw new Error('the .eetas file has no inputs');
 	const odd = C.oddBytes(eetas);
@@ -149,16 +172,18 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 		level = E.prepareLevel(ld);
 		C.writeAtomic(dataFile, JSON.stringify(ld));
 		const r = C.replay(level, masks);
+		// what to check when it does not finish: the other start mode, else the file itself
+		const advice = () => startHint() || (` Check that the .eetas belongs to this level` +
+			(odd ? ` (it contains ${odd} bytes that are not inputs eeo-tas writes, e.g. line breaks; EEO plays them as inputs too)` : '') + '.');
 		if (r.complete < 0 && rng.draws && rng.chance === 0) {
-			throw new Error(`the TAS goes through ${rng.uses.length || 'some'} random portal(s) but no combination of exits lets it finish this level` +
-				` when started ${START_MODES[start]}.${startHint()}`);
+			const lo = rng.drawsMin || 1, hi = Math.max(lo, rng.drawsMax || 1);
+			const n = lo === hi ? `${lo} random exit choice${lo === 1 ? '' : 's'}` : `${lo} to ${hi} random exit choices (depending on the exits taken)`;
+			throw new Error(`the TAS goes through random portals (${n}${rng.truncated ? ', outcome tree truncated' : ''}) but no combination of exits lets it ` +
+				`finish this level when started ${START_MODES[start]}.${advice()}`);
 		}
 		if (r.complete < 0) {
-			const hint = startHint();
 			throw new Error(`the TAS does not finish this level${startMatters ? ` when started ${START_MODES[start]}` : ''}: after all ${masks.length} ticks ` +
-				`the ball is at tile (${r.end.x}, ${r.end.y}) with ${r.coins} coins${r.deaths ? `, died ${r.deaths} time(s)` : ''}.` + (hint ||
-				(` Check that the .eetas belongs to this level` +
-				(odd ? ` (it contains ${odd} bytes that are not inputs eeo-tas writes, e.g. line breaks; EEO plays them as inputs too)` : '') + '.')));
+				`the ball is at tile (${r.end.x}, ${r.end.y}) with ${r.coins} coins${r.deaths ? `, died ${r.deaths} time(s)` : ''}.${advice()}`);
 		}
 		const best = masks.slice(0, r.complete);
 		C.writeEetas(path.join(dir, 'best.eetas'), best);
@@ -219,12 +244,17 @@ function summary(id, extraPid) {
 	const bestTicks = st.bestRunTicks || orig;
 	let bestVersion = '';   // changes whenever best.eetas is replaced (the viewer's "newer version found")
 	try { const s = fs.statSync(path.join(dir, 'best.eetas')); bestVersion = `${Math.round(s.mtimeMs)}-${s.size}`; } catch (e) { /* none */ }
+	// the "Finish run" report describes the best run at that moment; once a faster run replaces it (Resume, try, focus)
+	// it is out of date (its time, odds and "Download final" label), so it is not shown until the next Finish
+	// (also a run of the same time that is more likely to work replaces the best: then the report's odds are out of date)
+	const rep = C.readJSON(path.join(dir, 'report.json'), null);
+	const report = rep && rep.runTicks === bestTicks && (st.chance === undefined || rep.chance === undefined || Math.abs(rep.chance - st.chance) < 1e-9) ? rep : null;
 	return { ...meta, startMode: meta.startMode || 'reset', levelId: meta.levelId || C.jobLevelId(id), running: !!pid, pid: pid || null, bestVersion,
 		state: pid ? 'running' : (st.state === 'error' ? 'error' : (st.state === 'finished' ? 'finished' : 'stopped')), error: st.error || null,
 		best: { runTicks: bestTicks, time: fmt(bestTicks) }, original: { runTicks: orig, time: fmt(orig) },
 		savedTicks: orig - bestTicks, history: st.history || [], stage: pid ? (st.stage || '') : '', round: st.rounds || 0,
 		coinsOptional: st.coinsOptional, optimizingSince: pid ? st.sessionStarted : null, lastUpdate: st.updated || null, workers: st.workers,
-		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report: C.readJSON(path.join(dir, 'report.json'), null),
+		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report,
 		inbox: inboxPending(id), focus: focusState(id), logTail: logTail(id, 14),
 		files: { dir, best: path.join(dir, 'best.eetas'), level: levelJsonOf(id) } };
 }
@@ -261,6 +291,7 @@ async function tryCandidate(id, buf, opts) {
 	const o = opts || {};
 	const dir = jobDir(id);
 	const source = String(o.source || 'try').replace(/[^\w .:@()+-]/g, '').slice(0, 60) || 'try';
+	checkTicks(buf.length, 'the candidate .eetas');
 	const level = loadJobLevel(id);
 	const cand = C.evaluate(level, C.parseEetasBuffer(buf));
 	const best = C.evaluate(level, C.readEetas(path.join(dir, 'best.eetas')));
@@ -347,6 +378,24 @@ function where(level, masks, spec, opts) {
 		return { x, y, id, desc: B.describe(id, rot) };
 	};
 	const keys = (E.COLORS || []).filter((c) => sim.is_key_active && sim.is_key_active(c));
+	// active effects (they change what the inputs do: with levitation J thrusts instead of jumping, etc.)
+	const effects = [];
+	if (sim.in_god_mode) effects.push('god mode (no gravity, no collisions)');
+	if (sim.has_levitation) effects.push(`levitation (thrust ${(+sim._current_thrust || 0).toFixed(2)}${sim.is_thrusting ? ', thrusting' : ''}; J thrusts, no jumps)`);
+	if (sim.low_gravity) effects.push('low gravity (gravity x0.15)');
+	if (sim.speed_boost) effects.push(`speed effect ${sim.speed_boost}${sim.speed_boost === 1 ? ' (run x1.5)' : sim.speed_boost === 2 ? ' (run x0.6)' : ''}`);
+	if (sim.jump_boost) effects.push(`jump effect ${sim.jump_boost}${sim.jump_boost === 1 ? ' (jump x1.3)' : sim.jump_boost === 2 ? ' (jump x0.75)' : ''}`);
+	if (sim.max_jumps !== 1) effects.push(`multijump ${sim.max_jumps >= 1000 ? 'infinite' : sim.max_jumps}`);
+	if (sim.flip_gravity) effects.push(`gravity effect ${sim.flip_gravity}${['', ' (gravity left)', ' (gravity up)', ' (gravity right)', ' (no gravity)'][sim.flip_gravity] || ''}`);
+	if (sim.is_invulnerable) effects.push('protection (spikes, fire, toxic and timed effects do not kill)');
+	const timed = (on, start, dur, name) => {   // killed at the first tick with level ticks - start > duration
+		if (on) effects.push(dur ? `${name} (kills in ${start + Math.floor(dur) + 1 - sim.level_ticks()} ticks)` : `${name} (no timer)`);
+	};
+	timed(sim.is_cursed, sim._curse_time_start, sim._curse_duration, 'curse');
+	timed(sim.is_zombie, sim._zombie_time_start, sim._zombie_duration, 'zombie (run x0.6, jump x0.75, zombie doors)');
+	timed(sim.is_on_fire, sim._fire_time_start, sim._fire_duration, 'on fire');
+	timed(sim.is_poisoned, sim._poison_time_start, sim._poison_duration, 'poison');
+	if (sim.team) effects.push(`team ${sim.team}`);
 	const onIds = (m) => { const a = []; if (m) for (const [k, v] of m) if (v === true) a.push(k); return a.sort((x, y) => x - y); };
 	const dirName = (x, y) => (x === 0 && y === 1 ? 'down' : x === 0 && y === -1 ? 'up' : x === 1 && y === 0 ? 'right' : x === -1 && y === 0 ? 'left' : 'none');
 	const rel = (e) => ({ in: e.t - t, at: e.t, time: fmt(tr.RUN[Math.min(e.t, tr.n)]), kind: e.kind, data: e.data });
@@ -386,9 +435,10 @@ function where(level, masks, spec, opts) {
 		centreTile: { x: cx, y: cy },
 		speed: { x: sim.speed_x, y: sim.speed_y },
 		onGround: !!sim.on_ground, dead: !!sim.is_dead, gravity: dirName(gx, gy), jumpCount: sim.jump_count, maxJumps: sim.max_jumps,
-		coins: sim.coins, blueCoins: sim.blue_coins, deaths: sim.deaths, crown: !!sim.has_crown, keys,
+		coins: sim.coins, blueCoins: sim.blue_coins, deaths: sim.deaths, crown: !!sim.has_crown, keys, effects,
 		switches: { purple: onIds(sim._switches), orange: onIds(sim._oswitches) },
-		tiles: { centre: tile(cx, cy), below: tile(cx + gx, cy + gy), ahead: tile(cx + (sim.speed_x > 0 ? 1 : sim.speed_x < 0 ? -1 : 0), cy) },
+		// ahead: the next tile in the horizontal direction of motion (null when not moving sideways)
+		tiles: { centre: tile(cx, cy), below: tile(cx + gx, cy + gy), ahead: sim.speed_x !== 0 ? tile(cx + (sim.speed_x > 0 ? 1 : -1), cy) : null },
 		inputs: { last30: C.inputRuns(masks, t - 30, t), next100: C.inputRuns(masks, t, t + 100), next: C.maskName(masks[t] || 0) },
 		recent, upcoming, map: rows,
 	};
@@ -426,12 +476,14 @@ function renderJob(level, levelJson, masks, fromSpec, toSpec, opts) {
 	if (to < from) throw new Error('the end of the range is before its start');
 	const o = opts || {};
 	const title = `${o.name || ''}  ${fmt(tr.RUN[from])}-${fmt(tr.RUN[to])} (TICKS ${from}-${to})  FINISH ${fmt(tr.runTicks)}`;
-	const out = R.renderPath({ levelJson, trace: tr, from, to, title, fmt: (t) => fmt(tr.RUN[t]), margin: o.margin, scale: o.scale });
+	const num = (v) => (Number.isFinite(v) ? v : undefined);   // ?margin=abc / --margin= (NaN) -> the default
+	const out = R.renderPath({ levelJson, trace: tr, from, to, title, fmt: (t) => fmt(tr.RUN[t]), margin: num(o.margin), scale: num(o.scale) });
 	return Object.assign(out, { from, to, fromTime: fmt(tr.RUN[from]), toTime: fmt(tr.RUN[to]) });
 }
 
 // ---------------------------------------------------------------- probe: test a hand-written idea exactly
 const MASK_BITS = { J: 1, L: 2, R: 4, U: 8, D: 16 };
+const MAX_PROBE_INPUTS = 100000;   // 1000 s of play: far more than any idea (the probe replays them synchronously)
 /** "R+J x3, R x20, - x5" (the format `where` prints) -> masks. Also "R+J*3", "R 20" is not accepted (use x). */
 function parseInputs(spec) {
 	const out = [];
@@ -443,7 +495,9 @@ function parseInputs(spec) {
 		let mask = 0;
 		const name = m[1].trim().toUpperCase();
 		if (name !== '-' && name !== 'NONE') for (const p of name.split('+')) { const b = MASK_BITS[p.trim()]; if (!b) throw new Error(`bad key "${p}" in "${tok}"`); mask |= b; }
-		for (let k = 0; k < (m[2] ? +m[2] : 1); k++) out.push(mask);
+		const n = m[2] ? +m[2] : 1;
+		if (out.length + n > MAX_PROBE_INPUTS) throw new Error(`too many inputs (${out.length + n} ticks or more; at most ${MAX_PROBE_INPUTS} per probe)`);
+		for (let k = 0; k < n; k++) out.push(mask);
 	}
 	return out;
 }
@@ -478,7 +532,8 @@ function probe(level, best, atSpec, inputs, opts) {
 	const o = opts || {};
 	const ctx = o.ctx && o.ctx.best === best && o.ctx.level === level && o.ctx.NC === !!o.nocoins ? o.ctx : probeContext(level, best, o.nocoins);
 	const { NC, tr, n, hashTick } = ctx;
-	const H = o.horizon || 400, SH = o.shift === undefined ? 90 : o.shift;
+	// (clamped: a huge horizon / shift from the API would only block the server)
+	const H = Math.max(1, Math.min(n + 1, o.horizon || 400)), SH = Math.max(0, Math.min(n + 1, o.shift === undefined ? 90 : o.shift | 0));
 	const t0 = Math.min(n, C.tickOf(tr, typeof atSpec === 'object' ? atSpec : C.parseTime(atSpec)));
 	const sim = new E.EESim(level);
 	const inp = new E.EEInput();
@@ -564,13 +619,13 @@ async function focus(id, fromSpec, toSpec, seconds, opts) {
 	const level = loadJobLevel(id);
 	const ts = stamp();
 	const fd = path.join(dir, 'focus', ts);
-	fs.mkdirSync(fd, { recursive: true });
 	const ref = path.join(fd, 'ref.eetas');
 	const refMasks = C.readEetas(path.join(dir, 'best.eetas'));
-	C.writeEetas(ref, refMasks);
 	const tr = C.replay(level, refMasks, { trace: true });
 	const from = C.tickOf(tr, C.parseTime(fromSpec)), to = C.tickOf(tr, C.parseTime(toSpec));
 	if (!(to > from)) throw new Error(`empty window: ${fromSpec} (tick ${from}) .. ${toSpec} (tick ${to})`);
+	fs.mkdirSync(fd, { recursive: true });   // (after the check: a refused window leaves no empty focus/<stamp>/ behind)
+	C.writeEetas(ref, refMasks);
 	const S = Math.max(10, Math.min(3600, +seconds || 120));
 	const running = !!runningPid(id);
 	const Wk = Math.max(1, Math.min(os.cpus().length, +o.workers || (running ? Math.max(1, Math.floor(os.cpus().length / 2)) : os.cpus().length)));
@@ -643,6 +698,9 @@ function evText(e) {
 		case 'checkpoint': case 'crown': case 'complete': case 'secret': return `${e.kind} at ${tile(d.tile)}`;
 		case 'death': case 'respawn': case 'jump': return `${e.kind}${d.pos ? ` at tile (${(d.pos.x / 16).toFixed(2)}, ${(d.pos.y / 16).toFixed(2)})` : ''}`;
 		case 'land': return `land (impact speed ${d.impact_speed !== undefined ? (+d.impact_speed).toFixed(2) : '?'})`;
+		case 'effect': return `${d.effect || 'effect'} ${d.on ? 'on' : 'off'}${d.tile ? ' at ' + tile(d.tile) : ''}`;
+		case 'team': return `team ${d.from} -> ${d.team}${d.tile ? ' at ' + tile(d.tile) : ''}`;
+		case 'tick_aborted': return `tick aborted: ${d.reason} #${d.note} at ${tile(d.tile)} has no sound (eeo-tas throws; the run timer and auto-align skip this tick)`;
 		default: return e.kind;
 	}
 }
@@ -654,9 +712,10 @@ function formatWhere(w) {
 		`jumps used ${w.jumpCount}/${w.maxJumps >= 1000 ? 'inf' : w.maxJumps}`);
 	L.push(`tiles      centre ${w.tiles.centre.desc}`);
 	L.push(`           below  ${w.tiles.below.desc}  at (${w.tiles.below.x}, ${w.tiles.below.y})`);
-	L.push(`           ahead  ${w.tiles.ahead.desc}  at (${w.tiles.ahead.x}, ${w.tiles.ahead.y})`);
+	L.push(`           ahead  ${w.tiles.ahead ? `${w.tiles.ahead.desc}  at (${w.tiles.ahead.x}, ${w.tiles.ahead.y})` : '-  (not moving sideways)'}`);
 	L.push(`state      coins ${w.coins}, blue coins ${w.blueCoins}, deaths ${w.deaths}${w.crown ? ', crown' : ''}, keys [${w.keys.join(', ')}], ` +
 		`purple switches on [${w.switches.purple.join(', ')}], orange [${w.switches.orange.join(', ')}]`);
+	if (w.effects && w.effects.length) L.push(`effects    ${w.effects.join(', ')}`);
 	L.push(`inputs     last 30 ticks: ${w.inputs.last30 || '-'}`);
 	L.push(`           next 100 ticks: ${w.inputs.next100 || '-'}   (L left, R right, U up, D down, J jump, - nothing)`);
 	L.push('recent     ' + (w.recent.length ? w.recent.slice(-8).map((e) => `${e.in} ticks: ${evText(e)}`).join('; ') : '-'));
@@ -686,7 +745,7 @@ function formatReplay(r, name) {
 }
 function formatStatus(s) {
 	const L = [];
-	const since = s.optimizingSince ? new Date(s.optimizingSince).toTimeString().slice(0, 5) : '';
+	const since = s.optimizingSince ? new Date(s.optimizingSince).toTimeString().slice(0, 5) : '-';   // (- until the grind's first status)
 	L.push(`${s.name}  (${s.id})  ${s.running ? `RUNNING pid ${s.pid}, ${s.workers || '?'} workers, since ${since}, round ${s.round}, now: ${s.stage || '-'}` : s.state.toUpperCase()}`);
 	if (s.error) L.push(`error: ${s.error}`);
 	L.push(`level      ${s.level ? `${s.level.name} by ${s.level.owner || '?'} ${s.level.width}x${s.level.height} (${s.level.file})` : '?'}; data ${s.files.level}`);
@@ -716,4 +775,5 @@ module.exports = {
 	pidAlive, runningPid, killTree, updateStatus, startJob, stopJob, deleteJob, importJob,
 	summary, listJobs, focusState, finishReport, tryCandidate, inboxResult, prunePieces, where, replayInfo, renderJob, focus, logTail,
 	parseInputs, probe, probeContext, stamp, START_MODES, normStart,
+	MAX_BLOCK_ID, MAX_CELLS, MAX_TICKS, MAX_PROBE_INPUTS,
 };

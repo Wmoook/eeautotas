@@ -515,7 +515,7 @@ function renderDetail() {
 		<div class="stats">
 			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}` : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
 			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}</div></div>
-			<div class="stat"><div class="k">Running for</div><div class="v">${j.running ? dur(Date.now() - j.optimizingSince) : '—'}</div></div>
+			<div class="stat"><div class="k">Running for</div><div class="v">${j.running && j.optimizingSince ? dur(Date.now() - j.optimizingSince) : (j.running ? 'starting' : '—')}</div></div>
 			<div class="stat"><div class="k">Rounds · coins</div><div class="v">${j.round || 0} · ${j.coinsOptional === undefined ? '—' : (j.coinsOptional ? 'optional' : 'needed')}</div></div>
 		</div>
 		<div class="chart">${chartSvg(j)}</div>

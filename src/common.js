@@ -77,7 +77,10 @@ function parseTime(s) {
 	if (v === 'start' || v === 'begin') return { tick: 0 };
 	if (v === 'end' || v === 'finish') return { tick: Infinity };
 	if ((m = v.match(/^t?(\d+)t?$/))) return { tick: +m[1] };
-	if ((m = v.match(/^(\d+):(\d{1,2}(?:\.\d{1,2})?)$/))) return { run: +m[1] * 6000 + Math.round(parseFloat(m[2]) * 100) };
+	if ((m = v.match(/^(\d+):(\d{1,2}(?:\.\d{1,2})?)$/))) {
+		if (parseFloat(m[2]) >= 60) throw new Error(`bad time "${s}": the seconds must be below 60 (m:ss.cc, e.g. ${+m[1] + 1}:${String(Math.floor(parseFloat(m[2]) - 60)).padStart(2, '0')})`);
+		return { run: +m[1] * 6000 + Math.round(parseFloat(m[2]) * 100) };
+	}
 	if ((m = v.match(/^(\d+(?:\.\d{1,2})?)s$/))) return { run: Math.round(parseFloat(m[1]) * 100) };
 	throw new Error(`bad time "${s}": use m:ss.cc (run time, e.g. 1:10.25), seconds with s (70.25s) or a tick number (7025)`);
 }
