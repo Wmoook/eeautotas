@@ -19,8 +19,10 @@ const V = require('./viewer.js');
 const G = require('./gpu.js');
 const BENCH = require('./bench.js');
 const GFX = require('./eegfx.js');
+const ED = require('./editor.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
+const EDITOR = path.join(__dirname, 'app', 'editor.html');
 const args = C.parseArgs(process.argv.slice(2));
 const PORT = +(args.port || 47823);
 
@@ -121,6 +123,16 @@ const ENDPOINTS = [
 	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
 	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
+	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU finds a route)'],
+	['GET', '/api/editor/blocks?ids=9,121,...', 'block info for the editor: names, kinds ([kind, dir/sub, solid]), EE minimap colors, argument kinds'],
+	['POST', '/api/editor/eelvl', 'the editor\'s level JSON {name, width, height, cells: [[x, y, id, ...args]]} -> .eelvl bytes (what EE Offline opens)'],
+	['POST', '/api/editor/parse', 'an .eelvl -> the editor\'s level JSON: JSON {eelvlB64}'],
+	['POST', '/api/editor/check', 'what stands in the way of a route search: JSON {eelvlB64} or {level}: problems (no start, no trophy, walled in), notes, start, trophies'],
+	['POST', '/api/editor/solve', 'find a route to the trophy on the GPU (one at a time, in the background): JSON {eelvlB64, guide: [[x, y], ...] (px, ball centre; optional), seconds, width}'],
+	['GET', '/api/editor/solve', 'the route search: running, stage, layer, tick, states, ticksPerSec, result {time, runTicks, inputs, path}, message'],
+	['POST', '/api/editor/solve/stop', 'stop the route search'],
+	['GET', '/api/editor/solve/route.eetas', 'download the found route (also level.eelvl: the level it was found on)'],
+	['POST', '/api/editor/job', 'a job from a found route: JSON {eelvlB64, eetasB64, name, start: true|false, processor: "cpu" | "gpu"} (import, optionally start)'],
 ];
 
 // ---------------------------------------------------------------- http helpers
@@ -213,6 +225,61 @@ function startFocus(id, b) {
 	return { ok: true, started: true, pid: ch.pid, seconds, log: logFile };
 }
 
+// ---------------------------------------------------------------- the level editor (src/editor.js, src/app/editor.html)
+/** the level of an editor request: {eelvlB64} (.eelvl bytes) or {level} (the editor's JSON) */
+const editorLevel = (b) => (b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? ED.eelvlOf(b.level) : null);
+async function editorRoute(req, res, parts, q) {
+	const what = parts[2] || '', sub = parts[3] || '';
+	if (req.method === 'GET' && what === 'blocks' && !sub) return send(res, 200, ED.blockInfo(String(q('ids') || '').split(',').filter(Boolean)));
+	if (req.method === 'POST' && what === 'eelvl' && !sub) {
+		const b = await readJsonBody(req, 64 << 20);
+		const lv = b.level || b;
+		const buf = ED.eelvlOf(lv);
+		res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${ED.safeName(lv.name)}.eelvl"`, 'Cache-Control': 'no-store' });
+		return res.end(buf);
+	}
+	if (req.method === 'POST' && what === 'parse' && !sub) {
+		const b = await readJsonBody(req, 64 << 20);
+		return send(res, 200, ED.levelOf(Buffer.from(String(b.eelvlB64 || ''), 'base64')));
+	}
+	if (req.method === 'POST' && what === 'check' && !sub) {
+		const buf = editorLevel(await readJsonBody(req, 64 << 20));
+		if (!buf) throw new Error('missing eelvlB64 or level');
+		return send(res, 200, Object.assign(ED.check(buf), { gpu: systemInfo().processors[1] }));
+	}
+	if (what === 'solve') {
+		if (req.method === 'GET' && !sub) return send(res, 200, ED.state());
+		if (req.method === 'POST' && !sub) {
+			const b = await readJsonBody(req, 64 << 20);
+			try { return send(res, 200, ED.start(b, systemInfo().processors[1])); } catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
+		}
+		if (req.method === 'POST' && sub === 'stop') return send(res, 200, ED.stop());
+		if (req.method === 'GET' && (sub === 'route.eetas' || sub === 'level.eelvl')) {
+			const f = ED.solveFile(sub);
+			if (!f) return send(res, 404, { error: sub === 'route.eetas' ? 'no route found yet' : 'no search yet' });
+			res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${f.name}"`, 'Cache-Control': 'no-store' });
+			return res.end(fs.readFileSync(f.file));
+		}
+	}
+	if (req.method === 'POST' && what === 'job' && !sub) {
+		const b = await readJsonBody(req, 64 << 20);
+		let proc = null;
+		if (b.start) {   // checked before the job is made: a refused start leaves no job behind
+			proc = String(b.processor || (gpuAvailable() ? 'gpu' : 'cpu')).toLowerCase();
+			if (proc !== 'cpu' && proc !== 'gpu') throw new Error(`unknown processor "${b.processor}" (cpu or gpu)`);
+			if (proc === 'gpu' && !gpuAvailable()) {
+				if (b.processor) throw new Error(`GPU mode is not available: ${systemInfo().processors[1].why}`);
+				proc = 'cpu';
+			}
+		}
+		const meta = ED.makeJob(b);
+		if (proc === 'gpu' && G.unsupported(J.loadJobLevel(meta.id))) proc = 'cpu';
+		if (proc) startJob(meta.id, b.workers, { gpu: proc === 'gpu' });
+		return send(res, 200, { ok: true, job: meta, started: !!proc, processor: proc });
+	}
+	return send(res, 404, { error: 'not found (GET /api lists the endpoints)' });
+}
+
 // ---------------------------------------------------------------- routes
 const server = http.createServer(async (req, res) => {
 	try {
@@ -220,6 +287,7 @@ const server = http.createServer(async (req, res) => {
 		const parts = u.pathname.split('/').filter(Boolean);
 		const q = (k) => u.searchParams.get(k);
 		if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) return send(res, 200, fs.readFileSync(APP), 'text/html; charset=utf-8');
+		if (req.method === 'GET' && (u.pathname === '/editor' || u.pathname === '/editor.html')) return send(res, 200, fs.readFileSync(EDITOR), 'text/html; charset=utf-8');
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
@@ -240,6 +308,7 @@ const server = http.createServer(async (req, res) => {
 				return res.end(fs.readFileSync(f));
 			}
 		}
+		if (parts[1] === 'editor') return await editorRoute(req, res, parts, q);
 		if (req.method === 'POST' && parts[1] === 'jobs' && parts.length === 2) {
 			const b = await readJsonBody(req, 96 << 20);
 			const eetas = b.eetasB64 !== undefined ? Buffer.from(String(b.eetasB64), 'base64') : Buffer.from(String(b.eetasText || ''), 'latin1');
@@ -347,6 +416,7 @@ function shutdown() {
 	for (const [, ch] of children) if (ch.exitCode === null) J.killTree(ch.pid);
 	for (const [, ch] of focusKids) if (ch.exitCode === null) J.killTree(ch.pid);
 	for (const [, ch] of guideKids) if (ch.exitCode === null) J.killTree(ch.pid);
+	ED.shutdown();
 	process.exit(0);
 }
 /** The app: listen on PORT, benchmark the CPU once, resume the last running job. (require()d, e.g. by the tests,

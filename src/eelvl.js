@@ -5,6 +5,7 @@
 //   const { readEelvl, toSimLevel, loadEelvlLevel } = require('./eelvl.js');
 //   const lvl = readEelvl(fs.readFileSync('level.eelvl'));   // header, fg/bg, per-block args, AS3 lookups
 //   const simLevel = loadEelvlLevel('level.eelvl');           // = eesim.prepareLevel(toSimLevel(lvl))
+//   const buf = writeEelvl({ width, height, name, records });  // the other way (the level editor, the tests)
 //
 // Format and every quirk: tools/tas/eeo_spec/eelvl_format.md. AS3 references (eeo-tas/src):
 //   header    ui/campaigns/CampaignPage.as:598-625 (onFileLoaded), writer DownloadLevel.as:20-153
@@ -374,6 +375,67 @@ function toSimLevel(p, opts = {}) {
   };
 }
 
+// ------------------------------------------------------------------ writer (DownloadLevel.SaveLevel's format)
+/** the argument shape per argKind: i = int32 (writeInt), s = UTF string (writeUTF), in the reader's order */
+const ARG_SHAPE = { none: '', int: 'i', portal: 'iii', sign: 'si', world_portal: 'si', label: 'ssi', npc: 'ssss' };
+
+/**
+ * Writes an .eelvl: the header of eelvl_format.md section 3 (CampaignPage.as:600-625), then the block records
+ * (World.as:240-284) in the order given, raw DEFLATE like EEO (ByteArray.deflate, DownloadLevel.as:153).
+ * level: { width, height, records: [{ id, layer (0 foreground, 1 background), xs, ys, args }], name, owner, gravity,
+ *   bgColor (ARGB), description, campaign, crewId, crewName, crewStatus, minimap, ownerId }.
+ * Each record's args must be what the reader takes for its id (argKind): [int] for a rotation / number, [rotation,
+ * id, target] for a portal, [text, type] for a sign, ...; a wrong shape would shift every later record, so it throws.
+ * EEO itself writes one record per (id, layer, args) with the positions in row-major order (section 9);
+ * readEelvl(writeEelvl(x)) gives back the same header, blocks and args.
+ */
+function writeEelvl(level) {
+  const W = level.width, H = level.height;
+  const int = (v, what) => {
+    if (!Number.isInteger(v) || v < -0x80000000 || v > 0x7fffffff) throw new Error(`writeEelvl: ${what} must be an int32 (got ${v})`);
+    return v;
+  };
+  const parts = [];
+  const i32 = (v, what) => { const b = Buffer.alloc(4); b.writeInt32BE(int(v, what)); parts.push(b); };
+  const utf = (s, what) => {
+    const b = Buffer.from(String(s === undefined || s === null ? '' : s), 'utf8');
+    if (b.length > 65535) throw new Error(`writeEelvl: ${what} is longer than 65535 bytes (writeUTF)`);
+    const h = Buffer.alloc(2); h.writeUInt16BE(b.length); parts.push(h, b);
+  };
+  const bool = (v) => parts.push(Buffer.from([v ? 1 : 0]));
+  const g = level.gravity === undefined ? 1 : +level.gravity;
+  const f32 = Buffer.alloc(4); f32.writeFloatBE(g);
+  utf(level.owner, 'owner'); utf(level.name, 'name'); i32(W, 'width'); i32(H, 'height'); parts.push(f32);
+  const u32 = Buffer.alloc(4); u32.writeUInt32BE((level.bgColor || 0) >>> 0); parts.push(u32);
+  utf(level.description, 'description'); bool(level.campaign); utf(level.crewId, 'crew id'); utf(level.crewName, 'crew name');
+  i32(level.crewStatus || 0, 'crew status'); bool(level.minimap === undefined ? true : level.minimap);
+  utf(level.ownerId === undefined ? 'made offline' : level.ownerId, 'owner id');
+  for (const r of level.records || []) {
+    const what = `block ${r.id}`;
+    const xs = r.xs || [], ys = r.ys || [];
+    if (xs.length !== ys.length) throw new Error(`writeEelvl: ${what}: ${xs.length} x positions but ${ys.length} y positions`);
+    i32(r.id, 'block id'); i32(r.layer || 0, `${what} layer`);
+    for (const a of [xs, ys]) {
+      const b = Buffer.alloc(4 + 2 * a.length);
+      b.writeUInt32BE(2 * a.length);
+      for (let k = 0; k < a.length; k++) {
+        if (!Number.isInteger(a[k]) || a[k] < 0 || a[k] > 65535) throw new Error(`writeEelvl: ${what}: position ${a[k]} is not 0..65535`);
+        b.writeUInt16BE(a[k], 4 + 2 * k);
+      }
+      parts.push(b);
+    }
+    const shape = ARG_SHAPE[argKind(r.id)];
+    const args = r.args || [];
+    if (args.length !== shape.length) throw new Error(`writeEelvl: ${what} (${argKind(r.id)}) takes ${shape.length} argument(s), got ${args.length}`);
+    for (let k = 0; k < shape.length; k++) {
+      if (shape[k] === 'i') i32(args[k], `${what} argument ${k + 1}`);
+      else if (typeof args[k] !== 'string') throw new Error(`writeEelvl: ${what} argument ${k + 1} must be a string`);
+      else utf(args[k], `${what} argument ${k + 1}`);
+    }
+  }
+  return zlib.deflateRawSync(Buffer.concat(parts), { level: 9 });
+}
+
 /**
  * Reads a level file and returns eesim's prepared level object (what eesim.loadLevel returns for a JSON).
  * opts: readEelvl's (lenient, ...), id, and eesim.prepareLevel's per-run defaults (start, idleTicks, startSpawn,
@@ -388,7 +450,7 @@ function loadEelvlLevel(file, opts = {}) {
 }
 
 module.exports = {
-  readEelvl, readEelvls, toSimLevel, loadEelvlLevel, argKind,
+  readEelvl, readEelvls, toSimLevel, loadEelvlLevel, argKind, writeEelvl,
   ROTATABLE_IDS, NONROT_HALF_IDS, NUMBERED_IDS, MUSIC_IDS, ROT_SPIKE_IDS, NPC_IDS,
   PORTAL, PORTAL_INVISIBLE, TEXT_SIGN, WORLD_PORTAL, LABEL, SPAWNPOINT, WORLD_PORTAL_SPAWN,
   ARG_NONE, ARG_INT, ARG_PORTAL, ARG_SIGN, ARG_WORLD_PORTAL, ARG_LABEL, ARG_NPC,

@@ -97,6 +97,34 @@ job's current best run in the same exact physics the optimizer uses, while the o
   `&play=1`).
 - It works on a phone-sized screen too (pinch to zoom).
 
+## Level editor: build a level, let the GPU find a route
+
+**Level editor** (top right of the page, or `http://localhost:47823/editor`) is a small EE-style editor. Place blocks
+from the palette (in EE's own graphics when eeo-tas is found): solid blocks, one-way platforms and half blocks (**Q**
+turns them), gravity arrows and dots, boosts, spikes, coins and coin doors, water / mud / lava / toxic waste, effects
+(jump, speed, low gravity, multijump, gravity, levitation, protection, curse / zombie / poison with their seconds),
+keys with their doors and gates, portals (rotation, id and target) and the checkpoint. Then place the **Start** (the
+spawn point; there is one) and the **Trophy** (the finish block), and press **Find a route**.
+
+- Tools: **Paint** (click or drag; **Alt+click** picks a block), **Erase**, **Rectangle** (**Shift**: erase),
+  **Pick**, **Guide**; **Ctrl+Z / Ctrl+Y**; drag with the right mouse button (or hold **Space**) to move, wheel zooms,
+  **0** shows the whole level. A new level gets a solid border like a new EE world. Size up to 400 x 400.
+- **Find a route** runs on the GPU (NVIDIA): from the start it tries every input every tick and keeps the tens of
+  thousands of attempts closest to the trophy (walking distance), until one touches it. The route is replayed in the
+  app's exact physics before it is shown, drawn on the map (**Preview here** plays it), and you can **Watch** it in
+  the run viewer, **Optimize this route** (it becomes a run in your list and the optimizer starts on it), or download
+  the `.eetas` and the `.eelvl` it was found on (in eeo-tas: open the level, then `/loadtas`, `/reset`, `/playtas`).
+- **Guide line** (optional): with the Guide tool, drag where you think the ball should go (**Shift+drag** adds a
+  stroke). The search takes it as a hint, not a rail. It helps where "closer to the trophy" is misleading, e.g. the
+  trophy on a ledge whose way up is somewhere else. Draw it along the way the ball can really go (up the steps, around
+  walls). With a line, two searches run side by side: one along your line and one straight for the trophy (in case the
+  line is wrong); the faster route wins.
+- Before a search the editor checks the level: a start, a trophy, and an open way between them (a walled-in trophy is
+  refused at once). If no route is found in time, it says so; try a longer search, more states per tick, or a guide
+  line.
+- The level is saved in your browser as you edit. **Export .eelvl** saves a file EE Offline opens; **Import .eelvl**
+  opens any level (read exactly like EEO reads it).
+
 ## How you started the TAS in eeo-tas
 
 The state a TAS starts from depends on how you started it in eeo-tas:
@@ -163,8 +191,8 @@ each random portal on the route, its time, how many exits it has and how many of
 - `src/jobs/<id>/best.eetas` is the current best run of a job. `best_<ticks>.eetas` keeps every improvement, and
   `grind.log` is the optimizer's log. `src/data/` holds the levels converted for the optimizer, the CPU speed
   measurement (`_system.json`; delete it to measure again), the viewer's eeo-tas folder setting (`settings.json`) and
-  the sprite map read from it (`eegfx.json`, rebuilt when eeo-tas changes). Both folders stay on your computer (git
-  ignores them).
+  the sprite map read from it (`eegfx.json`, rebuilt when eeo-tas changes), and the level editor's last route search
+  (`editor/`: `level.eelvl`, `route.eetas`, `solve.json`). Both folders stay on your computer (git ignores them).
 - Delete a run with the **Delete** button (click twice).
 
 ## Command line (optional)
