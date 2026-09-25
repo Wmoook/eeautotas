@@ -159,6 +159,11 @@ __device__ void beamExpandBody(const BeamParams& p) {
 			if (!crown0 && s.has_silver_crown) c.flags |= 2;
 			const float cx = (float)s.px + 8.f, cy = (float)s.py + 8.f;
 			float sc = 0;
+			if (p.nGuide <= 1 && p.refTile) {   // no line: head along the run from the start (rejoin mode)
+				const i32 tx0 = truncI(s.px + 8.0) >> 4, ty0 = truncI(s.py + 8.0) >> 4;
+				const i32 r = (tx0 >= 0 && ty0 >= 0 && tx0 < p.L.W && ty0 < p.L.H) ? p.refTile[ty0 * p.L.W + tx0] : -1;
+				sc = r >= 0 ? 64.f + runMatchScore(p, r, (float)s.px, (float)s.py, (float)s.speed_x, (float)s.speed_y) : -1e6f;
+			}
 			if (p.nGuide > 1) {
 				const float g = guideScore(p, cx, cy);
 				sc += g;
@@ -222,8 +227,15 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 		if (s.broken || s.is_dead) continue;
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
+		if (p.target == 1) {   // reach a region: report and do not expand further
+			if (cx >= p.reachX0 && cx <= p.reachX1 && cy >= p.reachY0 && cy <= p.reachY1) {
+				const u32 h = atomicAdd(p.nHits, 1u);
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; p.hits[h] = e; }
+				continue;
+			}
+		}
 		// the target: the NEXT tick can land on the floor from above its row; try it with the jump
-		if (s.py < p.aboveMax && s.py + 16.0 > p.floorPy && gt0(s.speed_y)) {
+		else if (s.py < p.aboveMax && s.py + 16.0 > p.floorPy && gt0(s.speed_y)) {
 			for (i32 jo = 0; jo < 3; jo++) {
 				State<TW> t = s;
 				Sim<TW> ts(p.L, t);
@@ -240,7 +252,7 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 		}
 		(void)startPy;
 		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26);
-		const u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow);
+		const u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy);
 		if (!cellInsert(p.cells, p.cellMask, key)) continue;
 		const u32 slot = atomicAdd(p.nOut, 1u);
 		if (slot < p.outCap) p.out[slot] = ((u32)pi << 5) | (u32)o;

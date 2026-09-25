@@ -75,6 +75,18 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			}
 		} else from = 0;
 	}
+	std::string prefix;
+	{
+		const std::string pf = opt(argc, argv, "prefix", "");
+		if (!pf.empty()) {
+			std::vector<uint8_t> raw = readFile(pf.c_str());
+			for (uint8_t c : raw) if (c >= 48 && c < 80) prefix.push_back((char)c);
+			Sim<TW> ps(L, *start);
+			for (char c : prefix) { Input in = maskInput((c - 48) & 31); ps.tick(in); if (start->is_dead) { printf("{\"error\":\"the prefix dies\"}\n"); return 3; } }
+		}
+	}
+	const int from0 = from;
+	from += (int)prefix.size();   // the layer ticks count from the end of the prefix
 	// ---- the guide polyline
 	std::vector<float> gx, gy, gs;
 	{
@@ -103,6 +115,19 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			const int tx = (int)std::floor((X[t] + 8) / 16), ty = (int)std::floor((Y[t] + 8) / 16);
 			if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && refTile[(size_t)ty * L.W + tx] < 0) refTile[(size_t)ty * L.W + tx] = t;
 		}
+	}
+	if (gx.size() < 2 && n > 0) {
+		double bestD = 1e30;
+		for (int t = from; t <= n; t++) {
+			const double dx = X[t] - start->px, dy = Y[t] - start->py, dd = dx * dx + dy * dy;
+			if (dd < bestD) { bestD = dd; refFrom = t; }
+		}
+		refTile.assign((size_t)L.N, -1);
+		for (int t = refFrom; t <= n; t++) {
+			const int tx = (int)std::floor((X[t] + 8) / 16), ty = (int)std::floor((Y[t] + 8) / 16);
+			if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && refTile[(size_t)ty * L.W + tx] < 0) refTile[(size_t)ty * L.W + tx] = t;
+		}
+		printf("{\"ev\":\"rejoinMode\",\"startTick\":%d,\"runTickHere\":%d}\n", from, refFrom);
 	}
 	const int depthLimit = refFrom >= 0 ? std::min(depthMax, refFrom - from + 600) : depthMax;
 	// ---- the goal distance field: walking distance in tiles to a finish block (121) over tiles that are not static
@@ -135,6 +160,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			}
 		}
 	}
+	(void)from0;
 	if (gx.size() < 2 && !goal && refPath.empty()) { printf("{\"error\":\"give a guide line, a goal, or a reference run\"}\n"); return 3; }
 
 	// ---- GPU
@@ -185,7 +211,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	// re-check a result on the CPU from the start state
 	auto verify = [&](const std::string& in, int j, bool finish) {
 		S* st = (S*)malloc(SB);
-		memcpy(st, start, SB);
+		memcpy(st, start, SB);   // (start already includes the prefix)
 		Sim<TW> sim(L, *st);
 		const bool crown0 = st->has_silver_crown;
 		bool ok = true;
@@ -228,7 +254,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 					if (verify(in, c.rejoin, false)) {
 						bestSaving = saving;
 						printf("{\"ev\":\"result\",\"kind\":\"rejoin\",\"from\":%d,\"ticks\":%zu,\"j\":%d,\"saving\":%d,\"inputs\":\"%s\"}\n",
-							from, in.size(), c.rejoin, saving, in.c_str());
+							from0, prefix.size() + in.size(), c.rejoin, saving, (prefix + in).c_str());
 						fflush(stdout);
 					}
 				}

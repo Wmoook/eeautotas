@@ -32,13 +32,17 @@ struct ExploreParams {
 	i32 tx0, tx1;                      // the landing's centre tile x range
 	i32 layer;
 	i32 coarseRow;                     // from this tile row down (box centre), cells are coarse in x
+	i32 target;                        // 0: ground jump on the floor (above); 1: reach the region below
+	i32 reachX0, reachX1, reachY0, reachY1;   // target 1: the box centre's tile in this rectangle
+	double qy, qvy;                    // > 0: py / vy quantized to 1/qy, 1/qvy in the cells (coarse reachability); 0 = exact
 };
 
 /** fine: px / vx resolution where corner clips can still happen; coarse (fineRow and below): px to 2 px, vx to 1/16 */
-EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, bool fine) {
+EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, bool fine, double qy, double qvy) {
 	const double sx = fine ? EE_EXPLORE_QX : 0.5, sv = fine ? EE_EXPLORE_QV : 16.0;
 	const i64 qx = (i64)floor(px * sx), qvx = (i64)floor(vx * sv);
-	u64 h = splitmix(doubleToBits(py + 0) ^ splitmix(doubleToBits(vy + 0) ^ splitmix((u64)qx * 0x9e3779b97f4a7c15ull ^ (u64)qvx ^ ((u64)small << 40))));
+	const u64 ky = qy > 0 ? (u64)(i64)floor(py * qy) : doubleToBits(py + 0), kvy = qvy > 0 ? (u64)(i64)floor(vy * qvy) : doubleToBits(vy + 0);
+	u64 h = splitmix(ky ^ splitmix(kvy ^ splitmix((u64)qx * 0x9e3779b97f4a7c15ull ^ (u64)qvx ^ ((u64)small << 40))));
 	return h | 1ull;   // never 0 (0 = empty slot)
 }
 

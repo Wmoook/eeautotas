@@ -50,6 +50,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.rx0 = rx0; P.ry0 = ry0; P.rx1 = rx1; P.ry1 = ry1;
 	P.floorPy = floorPy; P.aboveMax = aboveMax; P.tx0 = lx0; P.tx1 = lx1;
 	P.coarseRow = atoi(opt(argc, argv, "coarse", "1048576").c_str());
+	P.target = opt(argc, argv, "reach", "").empty() ? 0 : 1;
+	sscanf(opt(argc, argv, "reach", "0,0,0,0").c_str(), "%d,%d,%d,%d", &P.reachX0, &P.reachY0, &P.reachX1, &P.reachY1);
+	P.qy = atof(opt(argc, argv, "qy", "0").c_str()); P.qvy = atof(opt(argc, argv, "qvy", "0").c_str());
 	P.pick = (const u32*)(uintptr_t)dpick.p;
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
@@ -80,7 +83,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			for (uint32_t i = hitsSeen; i < nh; i++) {
 				const ExploreHit& h = hv[i];
 				std::string in = inputsOf(d, h.parent, h.option);
-				in.push_back((char)('0' + h.jumpOption));
+				if (h.jumpOption != 255) in.push_back((char)('0' + h.jumpOption));
 				printf("{\"ev\":\"hit\",\"layer\":%d,\"tick\":%d,\"px\":%.3f,\"vx\":%.3f,\"inputs\":\"%s\"}\n", d, from + (int)in.size(), h.px, h.vx, in.c_str());
 			}
 			fflush(stdout);
