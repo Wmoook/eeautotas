@@ -84,6 +84,7 @@ button.watch { background: var(--gold-soft); color: var(--gold); border-color: c
 @media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
 .hero h3 { margin: 0; font-size: 20px; }
 .hero .meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.verified { color: var(--good); font-weight: 600; cursor: help; }
 .procnote { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
 .procnote b { color: var(--ink); font-weight: 600; }
 .why { text-decoration: underline dotted; cursor: help; }
@@ -337,7 +338,7 @@ $('importBtn').onclick = async () => {
 		const t = j.job.tas;
 		const st = j.job.startMatters ? ` Started ${START_LABEL[j.job.startMode]} (this level has ${j.job.spawns >= 2 ? j.job.spawns + ' spawn points' : 'time doors'}, so it matters).`
 			: ' (How you started it makes no difference on this level.)';
-		$('importMsg').innerHTML = `<div class="msg info">✓ The TAS finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}).${esc(st)} Press <b>Start</b> to optimize it.</div>`;
+		$('importMsg').innerHTML = `<div class="msg info"><span class="verified">✓ TAS verified to completion:</span> it finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}).${esc(st)} Press <b>Start</b> to optimize it.</div>`;
 		files = { eelvl: null, eetas: null }; $('name').value = '';
 		selected = j.job.id; store.set('tasopt.sel', selected);
 		await refresh();
@@ -415,7 +416,7 @@ function renderJobs() {
 	$('jobs').innerHTML = state.jobs.map((j) => `<div class="jobwrap">
 		<button class="job card ${j.id === selected ? 'sel' : ''}" data-id="${j.id}">
 			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : ''}"></span></div>
-			<div class="t2">${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
+			<div class="t2"><span class="verified" title="TAS verified to completion">✓</span> ${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
 		</button><button class="watch jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`).join('');
 	for (const el of document.querySelectorAll('.job')) el.onclick = () => { selected = el.dataset.id; store.set('tasopt.sel', selected); renderJobs(); renderDetail(); renderIdeas(); };
 	for (const el of document.querySelectorAll('[data-watch]')) el.onclick = () => openViewer(el.dataset.watch);
@@ -496,7 +497,7 @@ function renderDetail() {
 		<div class="hero">
 			<div>
 				<h3>${esc(j.name)}</h3>
-				<div class="meta">${esc(j.level.name || j.level.file)} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}${esc(startNote)}</div>
+				<div class="meta"><span class="verified" title="Checked at import: your .eetas was replayed in the exact physics and finishes the level in ${esc(j.original.time)}. A run is only created for a TAS that finishes.">✓ TAS verified to completion</span> · ${esc(j.level.name || j.level.file)} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}${esc(startNote)}</div>
 			</div>
 			<div class="row">
 				<button class="watch" id="watchBtn" title="Play the current best run in the level, with your original .eetas as a ghost (the optimizer keeps running)">Watch</button>

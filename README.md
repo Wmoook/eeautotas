@@ -27,7 +27,9 @@ That is all: no `npm install`, no Godot, no Python.
 1. **Drop your `.eelvl` and `.eetas`** on the page (or click to choose them), give the run a name, answer **How did
    you start the TAS in eeo-tas?** (see below; the default is right for the usual workflow) and press
    **Import & check**. The level is read the way EE Offline reads it, and your TAS is replayed in the exact physics.
-   If it does not finish the level you get a clear message (where the ball ended up, coins, deaths).
+   A run can only be created (and started) for a TAS that finishes the level: it then shows **✓ TAS verified to
+   completion**. If it does not finish, you get a clear message (where the ball ended up, coins, deaths) and no run
+   is created.
 2. Pick how many **threads** to use and press **Start**. It uses the CPU heavily. The first time the app starts it
    measures how fast this PC runs the physics (a few seconds, once), and the thread list shows the speed for each
    count, e.g. "8 · 26 M/s (fastest)". On a laptop more threads is often not faster: pick the fastest count or
