@@ -1,0 +1,610 @@
+// eegpu: the native EE engine (native/eecore.h) and its GPU search, driven by src/gpu.js.
+//   eegpu trace <level.bin> <run.eetas> <out.bin> [--gpu]   per-tick state hashes of a replay (differential tests)
+//   eegpu state <level.bin> <run.eetas> <tick>               the full state after <tick> ticks (JSON, for debugging)
+//   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}
+// Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cstdint>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <chrono>
+#include <algorithm>
+#include "cudadrv.h"
+#include "eecore.h"
+#include "search.h"
+
+using namespace ee;
+
+#ifndef EE_TW_HOST
+#define EE_TW_HOST 2048
+#endif
+typedef State<EE_TW_HOST> HState;
+typedef Sim<EE_TW_HOST> HSim;
+
+static std::vector<uint8_t> readFile(const char* path) {
+	FILE* f = fopen(path, "rb");
+	if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(2); }
+	std::vector<uint8_t> b;
+	uint8_t buf[65536];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof buf, f)) > 0) b.insert(b.end(), buf, buf + n);
+	fclose(f);
+	return b;
+}
+
+// ------------------------------------------------------------------ level blob (src/gpu.js levelBlob)
+static const char* BLOB_INTS[] = { "W", "H", "N", "nFlags", "maxX", "maxY", "nPortals", "nExIds", "multiTargetPortals",
+	"rngScriptLen", "nCoins", "coinWords", "nSecrets", "secretWords", "nPortalCoins", "pgWords", "nSpawns", "nSw", "swWords",
+	"nOsw", "oswWords", "nKeyColors", "hasTimeDoors", "hasCoinGate", "hasBlueCoinGate", "hasDeathDoor", "hasDeathGate",
+	"hasTeamEffect", "startMode", "idleTicks", "startSpawn", "hasStartSpawn", "goldBorder", "ticksPerFrame", "offCoin",
+	"offSecret", "offPg", "offSw", "offOsw", "tailWords", "keyInts", "nExits" };
+enum { A_fg, A_lookup0, A_flags, A_xflags, A_ovl, A_airMask, A_airPS, A_gMorx, A_gMory, A_gMox, A_gMoy, A_gFlags,
+	A_portalSlot, A_pId, A_pTarget, A_pRot, A_exIds, A_exOff, A_exX, A_exY, A_exPc, A_rngScript, A_coinBit, A_coinTiles,
+	A_coinBaseId, A_secretBit, A_portalCoinIdx, A_spawnsX, A_spawnsY, A_swIds, A_oswIds, A_keyColors, A_coinBits0, A_COUNT };
+
+struct LevelBlob {
+	std::vector<uint8_t> bytes;
+	int32_t ints[64];
+	uint32_t aoff[A_COUNT], acount[A_COUNT];
+	double gravityMult;
+	uint64_t rngSeed;
+	int nInts;
+	int32_t get(const char* name) const {
+		for (int i = 0; i < nInts; i++) if (!strcmp(BLOB_INTS[i], name)) return ints[i];
+		fprintf(stderr, "blob: no field %s\n", name); exit(2);
+	}
+	/** Level with pointers relative to `base` (host bytes, or the device copy). */
+	Level level(const uint8_t* base) const {
+		Level L;
+		memset(&L, 0, sizeof L);
+#define I(f) L.f = get(#f);
+		I(W) I(H) I(N) I(nFlags) I(maxX) I(maxY) I(nPortals) I(nExIds) I(multiTargetPortals) I(rngScriptLen)
+		I(nCoins) I(coinWords) I(nSecrets) I(secretWords) I(nPortalCoins) I(pgWords) I(nSpawns) I(nSw) I(swWords)
+		I(nOsw) I(oswWords) I(nKeyColors) I(hasTimeDoors) I(hasCoinGate) I(hasBlueCoinGate) I(hasDeathDoor)
+		I(hasDeathGate) I(hasTeamEffect) I(startMode) I(idleTicks) I(startSpawn) I(hasStartSpawn) I(goldBorder)
+		I(ticksPerFrame) I(offCoin) I(offSecret) I(offPg) I(offSw) I(offOsw) I(tailWords) I(keyInts)
+#undef I
+		L.gravityMult = gravityMult;
+#define P(f, T) L.f = (const T*)(base + aoff[A_##f]);
+		P(fg, i32) P(lookup0, i32) P(flags, u8) P(xflags, u8) P(ovl, u8) P(airMask, u16) P(airPS, i32)
+		P(gMorx, i8) P(gMory, i8) P(gMox, double) P(gMoy, double) P(gFlags, u8) P(portalSlot, i32) P(pId, i32)
+		P(pTarget, i32) P(pRot, i32) P(exIds, i32) P(exOff, i32) P(exX, i32) P(exY, i32) P(exPc, i32)
+		P(rngScript, i32) P(coinBit, i32) P(coinTiles, i32) P(coinBaseId, i32) P(secretBit, i32)
+		P(spawnsX, i32) P(spawnsY, i32) P(swIds, i32) P(oswIds, i32) P(keyColors, i32)
+#undef P
+		L.portalCoinIdx = acount[A_portalCoinIdx] ? (const i32*)(base + aoff[A_portalCoinIdx]) : nullptr;
+		return L;
+	}
+	const u32* coinBits0(const uint8_t* base) const { return (const u32*)(base + aoff[A_coinBits0]); }
+};
+
+static LevelBlob readLevel(const char* path) {
+	LevelBlob b;
+	b.bytes = readFile(path);
+	const uint8_t* p = b.bytes.data();
+	uint32_t magic, version, nInts, nArr;
+	memcpy(&magic, p, 4); memcpy(&version, p + 4, 4); memcpy(&nInts, p + 8, 4); memcpy(&nArr, p + 12, 4);
+	if (magic != 0x324c4545u || version != 1) { fprintf(stderr, "%s: not a level blob (v1)\n", path); exit(2); }
+	if (nInts != sizeof BLOB_INTS / sizeof BLOB_INTS[0] || nArr != A_COUNT) { fprintf(stderr, "level blob layout mismatch\n"); exit(2); }
+	b.nInts = (int)nInts;
+	memcpy(b.ints, p + 16, 4 * nInts);
+	size_t q = 16 + 4 * nInts;
+	memcpy(&b.gravityMult, p + q, 8); q += 8;
+	memcpy(&b.rngSeed, p + q, 8); q += 8;
+	for (uint32_t i = 0; i < nArr; i++) { memcpy(&b.aoff[i], p + q, 4); memcpy(&b.acount[i], p + q + 4, 4); q += 8; }
+	if (b.get("tailWords") > EE_TW_HOST) { fprintf(stderr, "level needs %d state words (max %d)\n", b.get("tailWords"), EE_TW_HOST); exit(3); }
+	return b;
+}
+
+static std::vector<uint8_t> readMasks(const char* path) {
+	std::vector<uint8_t> b = readFile(path);
+	for (auto& x : b) x = (uint8_t)((x - 48) & 31);
+	return b;
+}
+
+// ------------------------------------------------------------------ CPU modes
+static int cmdTrace(int argc, char** argv) {
+	if (argc < 5) { fprintf(stderr, "usage: eegpu trace <level.bin> <run.eetas> <out.bin>\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	Level L = B.level(B.bytes.data());
+	std::vector<uint8_t> m = readMasks(argv[3]);
+	HState* st = (HState*)calloc(1, sizeof(HState));
+	HSim sim(L, *st);
+	sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
+	// startMode 'reset': the file's collected coins are reset anyway, but freshLoad must see them (they matter for
+	// the idle ticks and the pre-reset overlaps); pass them always
+	std::vector<uint64_t> out;
+	int32_t complete = -1, runTicks = -1, deaths = 0, broken = -1;
+	auto t0 = std::chrono::steady_clock::now();
+	out.push_back(sim.hash(false)); out.push_back(sim.hash(true));
+	for (size_t t = 0; t < m.size(); t++) {
+		Input in = maskInput(m[t]);
+		bool had = st->has_silver_crown;
+		sim.tick(in);
+		out.push_back(sim.hash(false)); out.push_back(sim.hash(true));
+		if (!had && st->has_silver_crown && complete < 0) { complete = (int32_t)(t + 1); runTicks = st->run_ticks; }
+		if (st->broken && broken < 0) broken = (int32_t)(t + 1);
+	}
+	double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	deaths = st->deaths;
+	FILE* f = fopen(argv[4], "wb");
+	int32_t head[6] = { (int32_t)m.size(), complete, runTicks, deaths, broken, 0 };
+	fwrite(head, 4, 6, f);
+	fwrite(out.data(), 8, out.size(), f);
+	fclose(f);
+	printf("{\"ticks\":%zu,\"complete\":%d,\"runTicks\":%d,\"deaths\":%d,\"broken\":%d,\"seconds\":%.6f}\n", m.size(), complete, runTicks, deaths, broken, sec);
+	free(st);
+	return 0;
+}
+
+static void jd(const char* k, double v, bool comma = true) {
+	uint64_t b; memcpy(&b, &v, 8);
+	printf("\"%s\":[%.17g,\"%016llx\"]%s", k, v, (unsigned long long)b, comma ? "," : "");
+}
+static int cmdState(int argc, char** argv) {
+	if (argc < 5) { fprintf(stderr, "usage: eegpu state <level.bin> <run.eetas> <tick>\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	Level L = B.level(B.bytes.data());
+	std::vector<uint8_t> m = readMasks(argv[3]);
+	int T = atoi(argv[4]);
+	HState* st = (HState*)calloc(1, sizeof(HState));
+	HSim sim(L, *st);
+	sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
+	for (int t = 0; t < T && t < (int)m.size(); t++) { Input in = maskInput(m[t]); sim.tick(in); }
+	HState& s = *st;
+	printf("{");
+	jd("px", s.px); jd("py", s.py); jd("speed_x", s.speed_x); jd("speed_y", s.speed_y); jd("modifier_x", s.modifier_x);
+	jd("modifier_y", s.modifier_y); jd("mox", s.mox); jd("moy", s.moy); jd("_mx", s.mx); jd("_my", s.my);
+	jd("_slippery", s.slippery); jd("_last_jump", s.last_jump); jd("_ox", s.ox); jd("_oy", s.oy); jd("_dead_offset", s.dead_offset);
+	jd("_current_thrust", s.current_thrust);
+#define II(k, v) printf("\"%s\":%d,", k, (int)(v));
+	II("morx", s.morx) II("mory", s.mory) II("jump_count", s.jump_count) II("max_jumps", s.max_jumps) II("jump_boost", s.jump_boost)
+	II("speed_boost", s.speed_boost) II("flip_gravity", s.flip_gravity) II("coins", s.coins) II("blue_coins", s.blue_coins)
+	II("deaths", s.deaths) II("_next_spawn", s.next_spawn) II("_keysMask", s.keysMask)
+	II("_show_coin_gate", s.show_coin_gate) II("_show_blue_coin_gate", s.show_blue_coin_gate) II("_show_death_gate", s.show_death_gate)
+	II("_ticks", s.ticks) II("_tick0", s.tick0) II("_q0", s.q0) II("_q1", s.q1) II("_pastx", s.pastx) II("_pasty", s.pasty)
+	II("overlapa", s.overlapa) II("overlapb", s.overlapb) II("overlapc", s.overlapc) II("overlapd", s.overlapd)
+	II("_last_portal_x", s.last_portal_x) II("_last_portal_y", s.last_portal_y) II("_horizontal", s.horizontal)
+	II("_vertical", s.vertical) II("_current", s.current) II("run_ticks", s.run_ticks) II("team", s.team)
+	II("_team_tx", s.team_tx) II("_team_ty", s.team_ty) II("cpx", s.checkpoint_x) II("cpy", s.checkpoint_y)
+	II("gdx", s.grav_x) II("gdy", s.grav_y) II("_rngSteps", s.rngSteps)
+	II("on_ground", s.on_ground) II("is_dead", s.is_dead) II("in_god_mode", s.in_god_mode) II("has_crown", s.has_crown)
+	II("has_silver_crown", s.has_silver_crown) II("low_gravity", s.low_gravity) II("is_invulnerable", s.is_invulnerable)
+	II("is_on_fire", s.is_on_fire) II("_timedoor_state", s.timedoor_state) II("_collide_crown", s.collide_crown)
+	II("_collide_silver_crown", s.collide_silver_crown) II("_last_portal_set", s.last_portal_set) II("_spacedown", s.spacedown)
+	II("_spacejustdown", s.spacejustdown) II("_prev_jump_held", s.prev_jump_held) II("is_cursed", s.is_cursed)
+	II("is_zombie", s.is_zombie) II("is_poisoned", s.is_poisoned) II("has_levitation", s.has_levitation)
+	II("is_thrusting", s.is_thrusting) II("broken", s.broken) II("nsq", s.nsq) II("nkq", s.nkq) II("ntq", s.ntq)
+	for (int c = 0; c < 6; c++) printf("\"kt%d\":%d,", c, s.kt[c]);
+#undef II
+	jd("_fire_duration", s.fire_duration); jd("_curse_duration", s.curse_duration); jd("_zombie_duration", s.zombie_duration);
+	jd("_poison_duration", s.poison_duration);
+	printf("\"tail\":[");
+	for (int i = 0; i < L.tailWords; i++) printf("%s%u", i ? "," : "", s.w[i]);
+	printf("],");
+	printf("\"hash\":\"%llu\",\"hashNoCoins\":\"%llu\"}\n", (unsigned long long)sim.hash(false), (unsigned long long)sim.hash(true));
+	free(st);
+	return 0;
+}
+
+// ------------------------------------------------------------------ options
+static std::string opt(int argc, char** argv, const char* name, const char* dflt) {
+	const size_t n = strlen(name);
+	for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "--", 2) && !strncmp(argv[i] + 2, name, n) && argv[i][2 + n] == '=') return argv[i] + 3 + n;
+	for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "--", 2) && !strcmp(argv[i] + 2, name)) return "1";
+	return dflt;
+}
+static std::string exeDir() {
+	char p[MAX_PATH]; GetModuleFileNameA(nullptr, p, MAX_PATH);
+	std::string s = p; size_t k = s.find_last_of("\\/"); return k == std::string::npos ? "." : s.substr(0, k);
+}
+static std::string readText(const std::string& path) {
+	std::vector<uint8_t> b = readFile(path.c_str());
+	return std::string(b.begin(), b.end());
+}
+static std::string jsonStr(const std::string& s) {
+	std::string o = "\"";
+	for (char c : s) { if (c == '"' || c == '\\') { o += '\\'; o += c; } else if ((unsigned char)c < 32) o += ' '; else o += c; }
+	return o + "\"";
+}
+
+// ------------------------------------------------------------------ ptx: compile the kernels with NVRTC (build time)
+static int cmdPtx(int argc, char** argv) {
+	if (argc < 4) { fprintf(stderr, "usage: eegpu ptx <native dir> <out.ptx> --nvrtc=<dir with nvrtc64_120_0.dll> [--arch=compute_60]\n"); return 2; }
+	std::string dir = argv[2];
+	if (!cu::loadNvrtc(opt(argc, argv, "nvrtc", "."))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
+	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h");
+	const char* hdrs[] = { h1.c_str(), h2.c_str() };
+	const char* names[] = { "eecore.h", "search.h" };
+	cu::nvrtcProgram prog;
+	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 2, hdrs, names);
+	std::string arch = "--gpu-architecture=" + opt(argc, argv, "arch", "compute_60");
+	const char* opts[] = { arch.c_str(), "--fmad=false", "--std=c++17", "-lineinfo" };
+	auto t0 = std::chrono::steady_clock::now();
+	int rc = cu::nvrtcCompileProgram(prog, 4, opts);
+	size_t ls = 0; cu::nvrtcGetProgramLogSize(prog, &ls);
+	std::string log(ls + 1, 0); cu::nvrtcGetProgramLog(prog, &log[0]);
+	if (rc) { fprintf(stderr, "NVRTC failed (%d):\n%s\n", rc, log.c_str()); return 4; }
+	size_t ps = 0; cu::nvrtcGetPTXSize(prog, &ps);
+	std::string ptx(ps, 0); cu::nvrtcGetPTX(prog, &ptx[0]);
+	while (!ptx.empty() && ptx.back() == 0) ptx.pop_back();
+	if (ptx.find("fma.rn.f64") != std::string::npos) { fprintf(stderr, "PTX contains fused multiply-adds: not exact\n"); return 5; }
+	FILE* f = fopen(argv[3], "wb"); fwrite(ptx.data(), 1, ptx.size(), f); fclose(f);
+	int maj = 0, min = 0; cu::nvrtcVersion(&maj, &min);
+	printf("{\"ptx\":%s,\"bytes\":%zu,\"nvrtc\":\"%d.%d\",\"ms\":%.0f}\n", jsonStr(argv[3]).c_str(), ptx.size(), maj, min,
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+	if (strlen(log.c_str()) > 1) fprintf(stderr, "%s\n", log.c_str());
+	cu::nvrtcDestroyProgram(&prog);
+	return 0;
+}
+
+// ------------------------------------------------------------------ GPU context with the kernels loaded
+struct Gpu {
+	cu::Device d;
+	cu::CUmodule mod = nullptr;
+	bool ok = false;
+	bool open(const std::string& ptxPath) {
+		if (!d.open()) return false;
+		FILE* f = fopen(ptxPath.c_str(), "rb");
+		if (!f) { cu::lastError = "kernels not found: " + ptxPath; return false; }
+		fclose(f);
+		if (!cu::loadModule(&mod, readText(ptxPath))) return false;
+		ok = true;
+		return true;
+	}
+	cu::CUfunction fn(const std::string& name) {
+		cu::CUfunction f = nullptr;
+		if (cu::cuModuleGetFunction(&f, mod, name.c_str())) return nullptr;
+		return f;
+	}
+	std::string json() const {
+		char b[512];
+		snprintf(b, sizeof b, "{\"name\":%s,\"sms\":%d,\"clockMHz\":%d,\"cc\":\"%d.%d\",\"memMB\":%zu,\"driver\":%d}",
+			jsonStr(d.name).c_str(), d.sms, d.clockMHz, d.ccMajor, d.ccMinor, d.mem >> 20, d.driver);
+		return b;
+	}
+};
+static std::string defaultPtx() { return exeDir() + "\\eegpu.ptx"; }
+
+static int twFor(int tailWords) { return tailWords <= 8 ? 8 : tailWords <= 32 ? 32 : tailWords <= 128 ? 128 : tailWords <= 512 ? 512 : 0; }
+
+static int cmdInfo(int argc, char** argv) {
+	Gpu g;
+	if (!g.open(opt(argc, argv, "ptx", defaultPtx().c_str()))) {
+		printf("{\"gpu\":null,\"why\":%s}\n", jsonStr(cu::lastError).c_str());
+		return 0;
+	}
+	int sz[4] = {0};
+	cu::Buf out; out.alloc(16);
+	cu::CUfunction f = g.fn("stateSize_8");
+	void* args[] = { &out.p };
+	bool layoutOk = false;
+	if (f && !cu::cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr) && !cu::cuCtxSynchronize()) {
+		cu::cuMemcpyDtoH_v2(sz, out.p, 16);
+		layoutOk = sz[0] == (int)sizeof(State<8>) && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level);
+	}
+	printf("{\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]}\n", g.json().c_str(), layoutOk ? "true" : "false",
+		sz[0], sz[1], sz[2], sz[3], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level));
+	return 0;
+}
+
+// ------------------------------------------------------------------ trace on the GPU
+template <int TW>
+static bool gpuTrace(Gpu& g, const LevelBlob& B, const std::vector<uint8_t>& m, std::vector<uint64_t>& out, int32_t info[4], double& sec) {
+	cu::Buf dl, dm, dout, dinfo;
+	if (!dl.upload(B.bytes.data(), B.bytes.size()) || !dm.upload(m.data(), m.size()) || !dout.alloc(16 * (m.size() + 1)) || !dinfo.alloc(16)) return false;
+	Level L = B.level((const uint8_t*)(uintptr_t)dl.p);
+	const u8* masks = (const u8*)(uintptr_t)dm.p;
+	int n = (int)m.size();
+	u64* o = (u64*)(uintptr_t)dout.p;
+	const u32* cb0 = (const u32*)(uintptr_t)(dl.p + B.aoff[A_coinBits0]);
+	u64 seed = B.rngSeed;
+	i32* inf = (i32*)(uintptr_t)dinfo.p;
+	void* args[] = { &L, &masks, &n, &o, &cb0, &seed, &inf };
+	cu::CUfunction f = g.fn("trace_" + std::to_string(TW));
+	if (!f) { cu::lastError = "no trace kernel"; return false; }
+	auto t0 = std::chrono::steady_clock::now();
+	CU_TRY(cu::cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr));
+	CU_TRY(cu::cuCtxSynchronize());
+	sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	out.resize(2 * (m.size() + 1));
+	CU_TRY(cu::cuMemcpyDtoH_v2(out.data(), dout.p, 16 * (m.size() + 1)));
+	CU_TRY(cu::cuMemcpyDtoH_v2(info, dinfo.p, 16));
+	dl.free(); dm.free(); dout.free(); dinfo.free();
+	return true;
+}
+
+static int cmdTraceGpu(int argc, char** argv) {
+	LevelBlob B = readLevel(argv[2]);
+	std::vector<uint8_t> m = readMasks(argv[3]);
+	Gpu g;
+	if (!g.open(opt(argc, argv, "ptx", defaultPtx().c_str()))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
+	std::vector<uint64_t> out;
+	int32_t info[4] = { -1, -1, 0, -1 };
+	double sec = 0;
+	const int tw = twFor(B.get("tailWords"));
+	bool ok = tw == 8 ? gpuTrace<8>(g, B, m, out, info, sec) : tw == 32 ? gpuTrace<32>(g, B, m, out, info, sec)
+		: tw == 128 ? gpuTrace<128>(g, B, m, out, info, sec) : tw == 512 ? gpuTrace<512>(g, B, m, out, info, sec) : false;
+	if (!ok) { fprintf(stderr, "GPU trace failed: %s\n", tw ? cu::lastError.c_str() : "level state too large for the GPU"); return 4; }
+	FILE* f = fopen(argv[4], "wb");
+	int32_t head[6] = { (int32_t)m.size(), info[0], info[1], info[2], info[3], 1 };
+	fwrite(head, 4, 6, f);
+	fwrite(out.data(), 8, out.size(), f);
+	fclose(f);
+	printf("{\"ticks\":%zu,\"complete\":%d,\"runTicks\":%d,\"deaths\":%d,\"broken\":%d,\"seconds\":%.6f,\"gpu\":true}\n", m.size(), info[0], info[1], info[2], info[3], sec);
+	return 0;
+}
+
+// ------------------------------------------------------------------ search
+struct Edge { int32_t t, j, k; uint8_t family, flags; std::vector<uint8_t> seq; };
+
+template <int TW>
+struct Searcher {
+	typedef State<TW> S;
+	const LevelBlob& B;
+	Level L;                       // host pointers
+	std::vector<uint8_t> masks;    // the reference, cut at its finish (n ticks)
+	int n = 0, runTicks = 0;
+	std::vector<uint8_t> snaps;    // S(0..n), sizeof(S) each
+	std::vector<double> X, Y;
+	std::vector<uint64_t> H, H2;   // hash(nc), hash2(nc) of S(t)
+	bool nocoins;
+	std::vector<uint64_t> htKeys; std::vector<int32_t> htVals; uint32_t htMask = 0;
+	std::vector<uint32_t> pix; int pixW = 0, pixH = 0;
+	Searcher(const LevelBlob& b, bool nc) : B(b), L(b.level(b.bytes.data())), nocoins(nc) {}
+
+	/** Replays the reference: per-tick states, positions and hashes, the hash table, the pixel prefilter. */
+	bool prepare(const std::vector<uint8_t>& ref, std::string& err) {
+		S* st = (S*)calloc(1, sizeof(S));
+		Sim<TW> sim(L, *st);
+		sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
+		std::vector<uint8_t> snap;
+		auto push = [&]() {
+			const uint8_t* p = (const uint8_t*)st;
+			snaps.insert(snaps.end(), p, p + sizeof(S));
+			X.push_back(st->px); Y.push_back(st->py);
+			H.push_back(sim.hash(nocoins)); H2.push_back(sim.hash2(nocoins));
+		};
+		push();
+		n = -1;
+		const bool crown0 = st->has_silver_crown;
+		for (size_t t = 0; t < ref.size(); t++) {
+			Input in = maskInput(ref[t]);
+			sim.tick(in);
+			push();
+			if (st->broken) { err = "the reference run overflows the engine's fixed queues at tick " + std::to_string(t + 1); free(st); return false; }
+			if (!crown0 && st->has_silver_crown) { n = (int)t + 1; runTicks = st->run_ticks; break; }
+		}
+		free(st);
+		if (n < 0) { err = "the reference run does not finish the level"; return false; }
+		masks.assign(ref.begin(), ref.begin() + n);
+		// hash table (open addressing; the LATEST tick of a hash wins, like Map.set)
+		uint32_t cap = 1024;
+		while (cap < 4u * (uint32_t)(n + 1)) cap <<= 1;
+		htMask = cap - 1;
+		htKeys.assign(cap, 0); htVals.assign(cap, -1);
+		for (int t = 0; t <= n; t++) {
+			const uint64_t key = H[t] | (1ull << 63);
+			uint32_t slot = (uint32_t)(splitmix(H[t]) & htMask);
+			while (htKeys[slot] != 0 && htKeys[slot] != key) slot = (slot + 1) & htMask;
+			htKeys[slot] = key; htVals[slot] = t;
+		}
+		// pixel prefilter: 1 bit per level pixel, set where the reference's box corner is at some tick
+		pixW = L.W * 16; pixH = L.H * 16;
+		pix.assign(((size_t)pixW * pixH + 31) / 32, 0);
+		for (int t = 0; t <= n; t++) {
+			const double fx = floor(X[t]), fy = floor(Y[t]);
+			if (fx >= 0 && fy >= 0 && fx < pixW && fy < pixH) { const uint32_t bit = (uint32_t)fy * pixW + (uint32_t)fx; pix[bit >> 5] |= 1u << (bit & 31); }
+		}
+		return true;
+	}
+
+	/** Rebuilds a hit's inputs and replays them on the CPU from S(t): true if it really reaches S(j) (both hashes). */
+	bool verify(const Hit& h, Edge& e) {
+		if (h.t < 0 || h.t >= n || h.k <= 0 || h.j <= h.t + h.k || h.j > n) return false;
+		Cand c = makeCand(h.family, h.t, h.v, h.seed, masks.data(), n);
+		if (!c.valid) return false;
+		S* st = (S*)malloc(sizeof(S));
+		memcpy(st, snaps.data() + (size_t)h.t * sizeof(S), sizeof(S));
+		Sim<TW> sim(L, *st);
+		const bool crown0 = st->has_silver_crown;
+		e.seq.clear();
+		int sticky = 0;
+		bool ok = true;
+		for (int q = 0; q < h.k; q++) {
+			const int m = candInput(c, masks.data(), n, q, sticky);
+			if (m < 0) { ok = false; break; }
+			e.seq.push_back((uint8_t)m);
+			Input in = maskInput(m);
+			sim.tick(in);
+			if (st->is_dead || st->broken) { ok = false; break; }
+			if (!crown0 && st->has_silver_crown && q + 1 < h.k) { ok = false; break; }
+		}
+		if (ok) {
+			if (h.flags & 1) ok = !crown0 && st->has_silver_crown;
+			else ok = sim.hash(nocoins) == H[h.j] && sim.hash2(nocoins) == H2[h.j];
+		}
+		free(st);
+		e.t = h.t; e.j = h.j; e.k = h.k; e.family = (uint8_t)h.family; e.flags = (uint8_t)h.flags;
+		return ok;
+	}
+};
+
+static const char* FAMILY_NAMES[] = { "m1", "del", "m2", "pert", "flip", "sticky" };
+
+template <int TW>
+static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vector<uint8_t>& ref) {
+	const bool nc = opt(argc, argv, "nocoins", "0") == "1";
+	const double seconds = atof(opt(argc, argv, "seconds", "20").c_str());
+	const int horizon = atoi(opt(argc, argv, "horizon", "1500").c_str());
+	const double drift = atof(opt(argc, argv, "drift", "96").c_str());
+	const double launchMs = atof(opt(argc, argv, "launch-ms", "120").c_str());
+	uint64_t seed = strtoull(opt(argc, argv, "seed", "1").c_str(), nullptr, 10);
+	std::string fams = opt(argc, argv, "families", "m1,del,m2,pert,flip,sticky");
+	const int from = atoi(opt(argc, argv, "from", "0").c_str());
+	const int toArg = atoi(opt(argc, argv, "to", "-1").c_str());
+	auto tStart = std::chrono::steady_clock::now();
+	auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count(); };
+
+	Searcher<TW> S(B, nc);
+	std::string err;
+	if (!S.prepare(ref, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
+	const int n = S.n;
+	const int t0 = std::max(0, std::min(from, n - 1)), t1 = toArg < 0 ? n : std::max(t0 + 1, std::min(toArg, n));
+	Gpu g;
+	if (!g.open(opt(argc, argv, "ptx", defaultPtx().c_str()))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	cu::CUfunction fsearch = g.fn("search_" + std::to_string(TW));
+	if (!fsearch) { printf("{\"error\":\"search kernel missing\"}\n"); return 4; }
+	// device data
+	cu::Buf dl, dsnap, dmask, dX, dY, dK, dV, dpix, dhits, dcount, dstats;
+	const uint32_t hitCap = 1u << 18;
+	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dsnap.upload(S.snaps.data(), S.snaps.size()) &&
+		dmask.upload(S.masks.data(), S.masks.size()) && dX.upload(S.X.data(), 8 * S.X.size()) && dY.upload(S.Y.data(), 8 * S.Y.size()) &&
+		dK.upload(S.htKeys.data(), 8 * S.htKeys.size()) && dV.upload(S.htVals.data(), 4 * S.htVals.size()) &&
+		dpix.upload(S.pix.data(), 4 * S.pix.size()) && dhits.alloc(sizeof(Hit) * hitCap) && dcount.alloc(4) && dstats.alloc(8 * 8);
+	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	cu::cuMemsetD8_v2(dcount.p, 0, 4); cu::cuMemsetD8_v2(dstats.p, 0, 64);
+	SearchParams P;
+	memset(&P, 0, sizeof P);
+	P.L = B.level((const uint8_t*)(uintptr_t)dl.p);
+	P.snaps = (const u8*)(uintptr_t)dsnap.p; P.stateBytes = (i32)sizeof(State<TW>);
+	P.masks = (const u8*)(uintptr_t)dmask.p; P.n = n;
+	P.X = (const double*)(uintptr_t)dX.p; P.Y = (const double*)(uintptr_t)dY.p;
+	P.htKeys = (const u64*)(uintptr_t)dK.p; P.htVals = (const i32*)(uintptr_t)dV.p; P.htMask = S.htMask;
+	P.pix = (const u32*)(uintptr_t)dpix.p; P.pixW = S.pixW; P.pixH = S.pixH;
+	P.nocoins = nc; P.horizon = horizon; P.drift = drift;
+	P.hits = (Hit*)(uintptr_t)dhits.p; P.hitCount = (u32*)(uintptr_t)dcount.p; P.hitCap = hitCap;
+	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
+
+	// the work: every family over [t0, t1); systematic families once, then the random ones (new seeds) until time is up
+	std::vector<int> famList;
+	for (int f = 0; f < FAM_COUNT; f++) if (fams.find(FAMILY_NAMES[f]) != std::string::npos) famList.push_back(f);
+	std::vector<Edge> edges;
+	std::vector<std::vector<int>> best(n + 1);   // (t -> edge indices), dedupe per (t, j): minimum k
+	uint64_t famTicks[FAM_COUNT] = {0}, famHits[FAM_COUNT] = {0}, famVerified[FAM_COUNT] = {0};
+	double famSec[FAM_COUNT] = {0};
+	uint64_t rejected = 0, launches = 0;
+	unsigned long long statsPrev[8] = {0};
+	double tPerLaunch = 2048.0;   // start ticks per launch (adapted to launchMs)
+	bool firstPass = true;
+	int fi = 0;
+	int tCursor = t0;
+	double lastProgress = 0;
+	while (elapsed() < seconds && !famList.empty()) {
+		const int fam = famList[fi];
+		const bool random = fam >= FAM_PERT;
+		if (!firstPass && !random) { fi = (fi + 1) % famList.size(); if (fi == 0) firstPass = false; continue; }
+		const int V = random ? 256 : familyVariants(fam);
+		int nT = std::max(1, (int)(tPerLaunch * 216.0 / V));
+		nT = std::min(nT, t1 - tCursor);
+		P.family = fam; P.t0 = tCursor; P.nT = nT; P.V = V; P.seed = seed;
+		const unsigned threads = (unsigned)nT * V, block = 128, grid = (threads + block - 1) / block;
+		void* args[] = { &P };
+		auto l0 = std::chrono::steady_clock::now();
+		if (cu::cuLaunchKernel(fsearch, grid, 1, 1, block, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize()) {
+			printf("{\"error\":\"kernel launch failed\"}\n"); return 5;
+		}
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - l0).count();
+		launches++;
+		famSec[fam] += ms / 1000;
+		// adapt the size toward launchMs
+		const double scale = launchMs / std::max(ms, 1.0);
+		tPerLaunch = std::max(8.0, std::min(tPerLaunch * std::min(2.0, std::max(0.5, scale)), 1e6));
+		// hits
+		uint32_t cnt = 0;
+		cu::cuMemcpyDtoH_v2(&cnt, dcount.p, 4);
+		if (cnt) {
+			cnt = std::min(cnt, hitCap);
+			std::vector<Hit> hits(cnt);
+			cu::cuMemcpyDtoH_v2(hits.data(), dhits.p, sizeof(Hit) * cnt);
+			cu::cuMemsetD8_v2(dcount.p, 0, 4);
+			for (const Hit& h : hits) {
+				famHits[h.family]++;
+				// keep the shortest k per (t, j)
+				bool dup = false;
+				for (int ei : best[h.t]) if (edges[ei].j == h.j && edges[ei].k <= h.k) { dup = true; break; }
+				if (dup) continue;
+				Edge e;
+				if (!S.verify(h, e)) { rejected++; continue; }
+				famVerified[h.family]++;
+				best[h.t].push_back((int)edges.size());
+				edges.push_back(std::move(e));
+			}
+		}
+		unsigned long long st[8];
+		cu::cuMemcpyDtoH_v2(st, dstats.p, 64);
+		famTicks[fam] += st[0] - statsPrev[0];
+		memcpy(statsPrev, st, sizeof st);
+		tCursor += nT;
+		if (tCursor >= t1) {
+			tCursor = t0;
+			if (random) seed = splitmix(seed + 0x51ed);
+			fi = (fi + 1) % famList.size();
+			if (fi == 0) firstPass = false;
+		}
+		if (elapsed() - lastProgress > 2.0) {
+			lastProgress = elapsed();
+			printf("{\"ev\":\"progress\",\"t\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"edges\":%zu,\"family\":\"%s\",\"at\":%d,\"launchMs\":%.0f}\n",
+				elapsed(), st[0], st[0] / std::max(1e-9, elapsed()), edges.size(), FAMILY_NAMES[fam], tCursor, ms);
+			fflush(stdout);
+		}
+	}
+	unsigned long long st[8];
+	cu::cuMemcpyDtoH_v2(st, dstats.p, 64);
+	const double sec = elapsed();
+	// edges file: "EEED", version 1, count, n, then per edge: t, j, k (i32), family, flags (u8), 2 pad, k input bytes
+	FILE* f = fopen(argv[4], "wb");
+	uint32_t head[4] = { 0x44454545u, 1u, (uint32_t)edges.size(), (uint32_t)n };
+	fwrite(head, 4, 4, f);
+	for (const Edge& e : edges) {
+		int32_t a[3] = { e.t, e.j, e.k };
+		uint8_t b[4] = { e.family, e.flags, 0, 0 };
+		fwrite(a, 4, 3, f); fwrite(b, 1, 4, f); fwrite(e.seq.data(), 1, e.seq.size(), f);
+	}
+	fclose(f);
+	int64_t bestSave = 0;
+	for (const Edge& e : edges) bestSave = std::max<int64_t>(bestSave, (int64_t)e.j - e.t - e.k);
+	printf("{\"ev\":\"done\",\"gpu\":%s,\"n\":%d,\"runTicks\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"candidates\":%llu,"
+		"\"ends\":{\"death\":%llu,\"drift\":%llu,\"noop\":%llu,\"end\":%llu,\"hit\":%llu,\"broken\":%llu},\"launches\":%llu,"
+		"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"families\":{",
+		g.json().c_str(), n, S.runTicks, sec, st[0], st[0] / std::max(1e-9, sec), st[1], st[2], st[3], st[4], st[5], st[6], st[7],
+		(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW);
+	bool first = true;
+	for (int fm : famList) {
+		printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu}", first ? "" : ",", FAMILY_NAMES[fm],
+			(unsigned long long)famTicks[fm], famSec[fm], (unsigned long long)famHits[fm], (unsigned long long)famVerified[fm]);
+		first = false;
+	}
+	printf("}}\n");
+	return 0;
+}
+
+static int cmdSearch(int argc, char** argv) {
+	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T]\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	std::vector<uint8_t> ref = readMasks(argv[3]);
+	const int tw = twFor(B.get("tailWords"));
+	switch (tw) {
+	case 8: return runSearch<8>(argc, argv, B, ref);
+	case 32: return runSearch<32>(argc, argv, B, ref);
+	case 128: return runSearch<128>(argc, argv, B, ref);
+	case 512: return runSearch<512>(argc, argv, B, ref);
+	}
+	printf("{\"error\":\"this level's state is too large for the GPU engine\"}\n");
+	return 3;
+}
+
+int main(int argc, char** argv) {
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search ...\n"); return 2; }
+	std::string cmd = argv[1];
+	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
+	if (cmd == "state") return cmdState(argc, argv);
+	if (cmd == "info") return cmdInfo(argc, argv);
+	if (cmd == "ptx") return cmdPtx(argc, argv);
+	if (cmd == "search") return cmdSearch(argc, argv);
+	fprintf(stderr, "unknown command %s\n", argv[1]);
+	return 2;
+}
