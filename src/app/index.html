@@ -108,6 +108,7 @@ button.watch { background: var(--gold-soft); color: var(--gold); border-color: c
 .stat { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; min-width: 0; }
 .stat .k { font-size: 11.5px; color: var(--muted); }
 .stat .v { font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat .gnow { font-weight: 500; font-size: 12px; color: var(--good); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
 .chart { margin-top: 16px; height: 170px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); position: relative; }
 .chart svg { width: 100%; height: 100%; display: block; }
 .feed { margin-top: 16px; display: grid; gap: 6px; max-height: 260px; overflow: auto; }
@@ -573,6 +574,11 @@ function friendlyStage(s) {
 	if (m) return `Handed in: ${m[1]}`;
 	return s;
 }
+/** what the GPU searcher is doing (its search family, src/gpusearch.js gpu_status.json) */
+function gpuFamily(f) {
+	return { m1: 'trying input tweaks at every tick', del: 'trying to skip ticks', m2: 'trying pairs of tweaks', pert: 'trying random variations',
+		flip: 'trying random variations', sticky: 'trying random variations' }[f] || 'searching';
+}
 function dur(ms) {
 	if (!ms || ms < 0) return '—';
 	const m = Math.floor(ms / 60000), h = Math.floor(m / 60);
@@ -652,8 +658,8 @@ function renderDetail() {
 			<span class="saved ${j.savedTicks > 0 ? '' : 'zero'}">${j.savedTicks > 0 ? `−${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks} ticks${pct}` : 'no improvement yet'}</span>
 		</div>
 		<div class="stats">
-			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}` : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
-			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}</div></div>
+			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}${j.live && j.live.gpu ? ' + GPU' : ''}` : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
+			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}${j.running && j.live && j.live.gpu ? `<div class="gnow">GPU: ${esc(gpuFamily(j.live.gpu.family))}</div>` : ''}</div></div>
 			<div class="stat"><div class="k">Running for</div><div class="v">${j.running && j.optimizingSince ? dur(Date.now() - j.optimizingSince) : (j.running ? 'starting' : '—')}</div></div>
 			<div class="stat"><div class="k">Rounds · coins</div><div class="v">${j.round || 0} · ${j.coinsOptional === undefined ? '—' : (j.coinsOptional ? 'optional' : 'needed')}</div></div>
 		</div>
