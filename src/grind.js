@@ -165,7 +165,8 @@ function prunePieces(keep = 30) {
 /** Runs a tool; while it runs the inbox is checked every 3 s and the status heartbeat written every 30 s. */
 function runTool(script, args, maxMs, logFile) {
 	return new Promise((resolve) => {
-		const ch = spawn(process.execPath, ['--max-old-space-size=12000', path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+		const ch = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+			env: C.heapEnv(12000) });
 		const chunks = [];
 		let size = 0;
 		const keep = (d) => { if (size < (64 << 20)) { chunks.push(d); size += d.length; } };

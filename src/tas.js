@@ -5,8 +5,10 @@ const fs = require('fs');
 const path = require('path');
 const C = require('./common.js');
 const J = require('./jobs.js');
+// how to call this CLI: EEAutoTAS.exe sets EEAT_EXE to its own path
+const CMD = process.env.EEAT_EXE ? `"${process.env.EEAT_EXE}" tas` : 'node src/tas.js';
 
-const HELP = `EE Auto TAS - command line (node src/tas.js <command> ...)
+const HELP = `EE Auto TAS - command line (${CMD} <command> ...)
 
   jobs                                   list the jobs (id, state, original -> best time)
   status <job>                           one job in detail: times, odds, stage, inbox, focus, recent improvements, log
@@ -59,7 +61,7 @@ async function main() {
 		case 'jobs': {
 			const list = J.listJobs();
 			if (a.json) return json(list.map((s) => ({ id: s.id, name: s.name, state: s.state, original: s.original, best: s.best, savedTicks: s.savedTicks, chance: s.chance, stage: s.stage })));
-			if (!list.length) return out('no jobs yet: import one with the web app or `node src/tas.js import <level.eelvl> <run.eetas>`');
+			if (!list.length) return out(`no jobs yet: import one with the web app or \`${CMD} import <level.eelvl> <run.eetas>\``);
 			for (const s of list) {
 				out(`${s.id.padEnd(40)} ${s.state.padEnd(8)} ${s.original.time} -> ${s.best.time}` +
 					`${s.savedTicks > 0 ? `  (-${(s.savedTicks / 100).toFixed(2)} s)` : ''}${s.chance < 1 ? `  odds ${J.pct(s.chance)}` : ''}${s.running ? `  now: ${s.stage}` : ''}  "${s.name}"`);
@@ -130,7 +132,7 @@ async function main() {
 				if (a.try && p.candidate.saved > 0) {
 					const t = await J.tryCandidate(id, fs.readFileSync(file), { source: a.source || `probe ${p.atTime}`, wait: a.wait !== undefined ? +a.wait : 60 });
 					out(`try        ${t.accepted ? 'ACCEPTED by the job' : t.handed === 'inbox' && !t.result ? 'handed to the running job (inbox)' : `not accepted: ${(t.result && t.result.reason) || t.verdict.reason}`}`);
-				} else if (p.candidate.saved > 0) out(`hand it in: node src/tas.js try ${id} "${file}"`);
+				} else if (p.candidate.saved > 0) out(`hand it in: ${CMD} try ${id} "${file}"`);
 			} else if ((p.rejoin && p.rejoin.saved > 0) || p.finishedDuringInputs) out('candidate  the full replay does not finish (e.g. a coin door needs a skipped coin)');
 			return;
 		}
@@ -146,7 +148,7 @@ async function main() {
 			out(`rule       ${r.verdict.accept ? `better (${r.verdict.saved ? '-' + r.verdict.saved + ' ticks' : 'more likely to work'})` : 'not better: ' + r.verdict.reason}`);
 			if (r.handed === 'inbox') {
 				if (r.result) out(`handed     to the running job: ${r.result.accepted ? `ACCEPTED, best is now ${r.result.bestTime}` : `not accepted (${r.result.reason}); kept for splicing`}`);
-				else out(`handed     to the running job's inbox (${r.inboxFile}); it decides between checks - see: node src/tas.js status ${id}`);
+				else out(`handed     to the running job's inbox (${r.inboxFile}); it decides between checks - see: ${CMD} status ${id}`);
 			} else out(`handed     directly (job not running): ${r.accepted ? 'ACCEPTED, best.eetas updated' : 'not accepted; kept in pieces/ for splicing'}`);
 			return;
 		}
@@ -166,13 +168,13 @@ async function main() {
 			if (a.json) return json(meta);
 			return out(`imported ${meta.id}: "${meta.name}", the TAS finishes in ${meta.tas.time} (${meta.tas.coins} coins, ${meta.tas.deaths} deaths)` +
 				`${meta.rng.chance < 1 ? `, works in ${J.pct(meta.rng.chance)} of EEO plays (random portals)` : ''}\n` +
-				`start: ${J.START_MODES[meta.startMode]}${meta.startMatters ? '' : ' (makes no difference on this level)'}\nstart it: node src/tas.js start ${meta.id}`);
+				`start: ${J.START_MODES[meta.startMode]}${meta.startMatters ? '' : ' (makes no difference on this level)'}\nstart it: ${CMD} start ${meta.id}`);
 		}
 		case 'start': {
 			const id = J.resolve(pos[0]);
 			if (J.runningPid(id)) return out(`${id} is already running`);
 			const ch = J.startJob(id, +a.workers || undefined, { detached: true });
-			return out(`started ${id} (pid ${ch.pid}); log: ${path.join(J.jobDir(id), 'grind.log')}; stop: node src/tas.js stop ${id}`);
+			return out(`started ${id} (pid ${ch.pid}); log: ${path.join(J.jobDir(id), 'grind.log')}; stop: ${CMD} stop ${id}`);
 		}
 		case 'stop': { const id = J.resolve(pos[0]); J.stopJob(id); return out(`stopped ${id}`); }
 		case 'finish': {
@@ -183,7 +185,7 @@ async function main() {
 			return out(`final run ${r.time} (saved ${(r.savedTicks / 100).toFixed(2)} s vs ${r.originalTime}), works in ${J.pct(r.chance)} of EEO plays\n` +
 				`file: ${path.join(J.jobDir(id), 'best.eetas')}`);
 		}
-		default: throw new Error(`unknown command "${cmd}" (node src/tas.js help)`);
+		default: throw new Error(`unknown command "${cmd}" (${CMD} help)`);
 	}
 }
 main().catch((e) => { console.error(`error: ${e && e.message || e}`); process.exit(1); });

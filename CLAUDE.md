@@ -159,6 +159,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | file | what |
 |---|---|
 | `START.bat` | double-click launcher (checks for Node, runs `node src/server.js --open`) |
+| `tools/build-exe.js`, `tools/exe/` | `npm run build:exe` -> `dist/EEAutoTAS.exe` (a Node single executable application: `launcher.js` unpacks the app to `%LOCALAPPDATA%\EEAutoTAS\app\<version>` and sets `EEAT_HOME` = `%LOCALAPPDATA%\EEAutoTAS` for jobs and data; `EEAutoTAS.exe tas ...` = the CLI, `EEAutoTAS.exe script.js` = run a script). Child tools get their heap size through `NODE_OPTIONS` (`C.heapEnv`), because the exe does not read Node flags from its command line. |
 | `src/server.js` | web app + JSON API on 127.0.0.1:47823 (`--port=`, `--open`); resumes the last running job |
 | `src/app/index.html` | the page (single file, no build) |
 | `src/tas.js` | the CLI (`node src/tas.js help`) |

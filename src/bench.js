@@ -14,7 +14,7 @@ const os = require('os');
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 
-const CACHE = path.join(__dirname, 'data', '_system.json');
+const CACHE = path.join(process.env.EEAT_HOME ? path.resolve(process.env.EEAT_HOME) : __dirname, 'data', '_system.json');   // = common.js DATA
 
 /** the synthetic benchmark level (eelvl.js toSimLevel JSON format) */
 function arenaJson() {

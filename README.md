@@ -9,14 +9,29 @@ the faster `.eetas` and play it in eeo-tas.
 - Every improvement is proven by replaying the whole run. Nothing is estimated.
 - It runs on your own computer. No account, no internet, no AI needed.
 
-## Requirements
+## Easiest: the .exe (nothing to install)
+
+Download **EEAutoTAS.exe** from the [Releases page](https://github.com/Wmoook/eeautotas/releases) and double-click
+it. That is the whole app in one file (Node.js is inside it), so you can also just send the file to a friend.
+
+- Windows may say "Windows protected your PC" because the file is not code-signed: click **More info**, then
+  **Run anyway**. Some antivirus programs are wary of new unsigned programs too.
+- Keep the black window open while it optimizes (closing it stops the optimizer; it resumes next time).
+- Your runs are saved in `%LOCALAPPDATA%\EEAutoTAS\jobs`, so a newer exe keeps them.
+- The command line works too: `EEAutoTAS.exe tas help` (see "Command line" below; use `EEAutoTAS.exe tas` wherever
+  it says `node src/tas.js`). `EEAutoTAS.exe --help` lists the options.
+
+To build the exe yourself: `npm run build:exe` (Windows, Node 22.12+). It writes `dist\EEAutoTAS.exe`; the first
+build downloads two build tools from npm (postject, rcedit) into `tools\.cache`.
+
+## Requirements (to run from the source)
 
 - Windows (the launcher is a `.bat`; the tools themselves run anywhere Node runs)
 - [Node.js](https://nodejs.org/) **18 or newer** (the free LTS version is fine)
 
 That is all: no `npm install`, no Godot, no Python.
 
-## Run it
+## Run it (from the source)
 
 - **Double-click `START.bat`.** Your browser opens http://localhost:47823. Keep the black window open while it
   optimizes. Closing it stops the optimizer, and it resumes the next time you start the app.

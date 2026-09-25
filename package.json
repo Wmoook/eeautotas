@@ -4,7 +4,8 @@
   "description": "Automatic TAS optimizer for Everybody Edits Offline (eeo-tas .eetas files)",
   "private": true,
   "scripts": {
-    "start": "node src/server.js --open"
+    "start": "node src/server.js --open",
+    "build:exe": "node tools/build-exe.js"
   },
   "engines": {
     "node": ">=18"

@@ -306,10 +306,12 @@ function main() {
 	});
 	process.on('SIGINT', shutdown);
 	process.on('SIGTERM', shutdown);
+	process.on('SIGHUP', shutdown);   // Windows: the console window was closed
 	server.listen(PORT, '127.0.0.1', () => {
 		const url = `http://localhost:${PORT}/`;
 		console.log(`[app] EE Auto TAS running at ${url} (${os.cpus().length} CPU threads)`);
 		console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
+		if (process.env.EEAT_HOME) console.log(`[app] Your runs are saved in ${C.JOBS}`);
 		if (args.open) openBrowser(url);
 		// resume the job that was optimizing when the app last closed (after the one-time processor benchmark, which
 		// needs an idle CPU: a few seconds, then cached in src/data/_system.json)

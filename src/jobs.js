@@ -600,7 +600,8 @@ function probe(level, best, atSpec, inputs, opts) {
 // ---------------------------------------------------------------- focus: search one window harder
 function runTool(script, args, log) {
 	return new Promise((res) => {
-		const p = spawn(process.execPath, ['--max-old-space-size=8000', path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+		const p = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+			env: C.heapEnv(8000) });
 		const onData = (d) => { for (const line of String(d).split(/\r?\n/)) if (line.trim()) log(line); };
 		p.stdout.on('data', onData); p.stderr.on('data', onData);
 		p.on('close', (code) => res(code));

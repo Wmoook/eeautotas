@@ -4,3 +4,5 @@ src/jobs/
 src/out/
 node_modules/
 *.log
+dist/
+tools/.cache/

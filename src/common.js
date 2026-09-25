@@ -12,8 +12,16 @@ const E = require('./eesim.js');
 const RNG = require('./rng.js');
 
 const SRC = __dirname;
-const DATA = path.join(SRC, 'data');
-const JOBS = path.join(SRC, 'jobs');
+// Where the runs and converted levels live: src/ in the repo. EEAutoTAS.exe sets EEAT_HOME (%LOCALAPPDATA%\EEAutoTAS)
+// so they survive an update of the exe.
+const HOME = process.env.EEAT_HOME ? path.resolve(process.env.EEAT_HOME) : SRC;
+const DATA = path.join(HOME, 'data');
+const JOBS = path.join(HOME, 'jobs');
+/** The environment for a child tool with a bigger heap. The flag goes through NODE_OPTIONS, not the command line:
+ *  EEAutoTAS.exe (a Node single executable application) passes command-line flags to the app, not to Node. */
+function heapEnv(mb) {
+	return { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=${mb}`.trim() };
+}
 
 // ---------------------------------------------------------------- .eetas bytes
 /** Buffer (raw file bytes) -> Uint8Array of input masks, exactly like eeo-tas reads the file. */
@@ -259,7 +267,7 @@ function parseArgs(argv) {
 }
 
 module.exports = {
-	SRC, DATA, JOBS, E, RNG,
+	SRC, HOME, DATA, JOBS, E, RNG, heapEnv,
 	parseEetasBuffer, readEetas, eetasBytes, writeEetas, oddBytes,
 	writeAtomic, writeJSON, readJSON, lock, sleepMs,
 	fmt, parseTime, tickOf,
