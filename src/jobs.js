@@ -249,12 +249,15 @@ function summary(id, extraPid) {
 	// (also a run of the same time that is more likely to work replaces the best: then the report's odds are out of date)
 	const rep = C.readJSON(path.join(dir, 'report.json'), null);
 	const report = rep && rep.runTicks === bestTicks && (st.chance === undefined || rep.chance === undefined || Math.abs(rep.chance - st.chance) < 1e-9) ? rep : null;
+	// the live speed (grind.js writes live.json every second): only while the job runs and the file is fresh
+	const lv = pid ? C.readJSON(path.join(dir, 'live.json'), null) : null;
+	const live = lv && lv.cpu && Date.now() - (+lv.t || 0) < 5000 ? lv : null;
 	return { ...meta, startMode: meta.startMode || 'reset', levelId: meta.levelId || C.jobLevelId(id), running: !!pid, pid: pid || null, bestVersion,
 		state: pid ? 'running' : (st.state === 'error' ? 'error' : (st.state === 'finished' ? 'finished' : 'stopped')), error: st.error || null,
 		best: { runTicks: bestTicks, time: fmt(bestTicks) }, original: { runTicks: orig, time: fmt(orig) },
 		savedTicks: orig - bestTicks, history: st.history || [], stage: pid ? (st.stage || '') : '', round: st.rounds || 0,
 		coinsOptional: st.coinsOptional, optimizingSince: pid ? st.sessionStarted : null, lastUpdate: st.updated || null, workers: st.workers,
-		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report,
+		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report, live,
 		inbox: inboxPending(id), focus: focusState(id), logTail: logTail(id, 14),
 		files: { dir, best: path.join(dir, 'best.eetas'), level: levelJsonOf(id) } };
 }
@@ -602,7 +605,7 @@ function runTool(script, args, log) {
 	return new Promise((res) => {
 		const p = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
 			env: C.heapEnv(8000) });
-		const onData = (d) => { for (const line of String(d).split(/\r?\n/)) if (line.trim()) log(line); };
+		const onData = (d) => { for (const line of String(d).split(/\r?\n/)) if (line.trim() && !line.startsWith('[ticks] ')) log(line); };   // ([ticks]: the live speed, not for the log)
 		p.stdout.on('data', onData); p.stderr.on('data', onData);
 		p.on('close', (code) => res(code));
 	});
@@ -744,10 +747,25 @@ function formatReplay(r, name) {
 	}
 	return L.join('\n') + '\n';
 }
+/** 12400000 -> "12.4 M ticks/s", 153000000 -> "153 M ticks/s" */
+const rateText = (x) => (x > 0 ? `${(x / 1e6).toFixed(x >= 1e8 ? 0 : 1)} M ticks/s` : '-');
+/** 4.2e9 -> "4.2 billion" */
+function countText(n) {
+	for (const [v, w] of [[1e12, 'trillion'], [1e9, 'billion'], [1e6, 'million']]) if (n >= v) return `${(n / v).toFixed(n >= v * 100 ? 0 : 1)} ${w}`;
+	return String(Math.round(n || 0));
+}
+/** summary().live -> "12.4 M ticks/s on the CPU (Intel Core i7-11800H, 8 threads) + ... on the GPU (...) = ...; 4.2 billion ticks simulated this session" */
+function liveText(lv) {
+	const c = lv.cpu || {}, g = lv.gpu;
+	let s = `${rateText(c.ticksPerSec)} on the CPU (${C.cpuName(c.model)}, ${c.threads} thread${c.threads === 1 ? '' : 's'})`;
+	if (g) s += ` + ${rateText(g.ticksPerSec)} on the GPU (${g.name || 'GPU'}) = ${rateText((c.ticksPerSec || 0) + (g.ticksPerSec || 0))}`;
+	return `${s}; ${countText((c.ticks || 0) + ((g && g.ticks) || 0))} ticks simulated this session`;
+}
 function formatStatus(s) {
 	const L = [];
 	const since = s.optimizingSince ? new Date(s.optimizingSince).toTimeString().slice(0, 5) : '-';   // (- until the grind's first status)
 	L.push(`${s.name}  (${s.id})  ${s.running ? `RUNNING pid ${s.pid}, ${s.workers || '?'} workers, since ${since}, round ${s.round}, now: ${s.stage || '-'}` : s.state.toUpperCase()}`);
+	if (s.live) L.push(`speed now  ${liveText(s.live)}`);
 	if (s.error) L.push(`error: ${s.error}`);
 	L.push(`level      ${s.level ? `${s.level.name} by ${s.level.owner || '?'} ${s.level.width}x${s.level.height} (${s.level.file})` : '?'}; data ${s.files.level}`);
 	L.push(`start      TAS started ${START_MODES[s.startMode] || s.startMode} in eeo-tas` + (s.startMatters === false ? ' (makes no difference on this level: one spawn point, no time doors)'
@@ -771,7 +789,7 @@ function formatStatus(s) {
 }
 
 module.exports = {
-	formatWhere, formatReplay, formatStatus, evText,
+	formatWhere, formatReplay, formatStatus, evText, liveText,
 	JOBS, DATA, RUNNING_FILE, jobDir, slug, resolve, levelJsonOf, loadJobLevel, pct,
 	pidAlive, runningPid, killTree, updateStatus, startJob, stopJob, deleteJob, importJob,
 	summary, listJobs, focusState, finishReport, tryCandidate, inboxResult, prunePieces, where, replayInfo, renderJob, focus, logTail,

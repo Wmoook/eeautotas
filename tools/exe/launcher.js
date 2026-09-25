@@ -5,7 +5,7 @@
 // files), and the runs are kept in %LOCALAPPDATA%\EEAutoTAS\jobs (EEAT_HOME), so a newer exe keeps them.
 //   EEAutoTAS.exe                   the web app (opens the browser), like START.bat; --port=N, --no-open
 //   EEAutoTAS.exe tas <command>     the command line (src/tas.js), e.g. `EEAutoTAS.exe tas jobs`
-//   EEAutoTAS.exe bench             measure this PC's engine speed (src/bench.js)
+//   EEAutoTAS.exe bench             measure the CPU's engine speed (src/bench.js)
 //   EEAutoTAS.exe <file.js> [args]  run a script with the exe's Node (the app starts its own tools this way)
 // Only Node built-ins can be require()d here; the app itself is loaded from the unpacked files with Module.runMain.
 const fs = require('fs');
@@ -71,7 +71,7 @@ function aiGuide() {
 	const text = `# EE Auto TAS (the .exe version): guide for AI coding assistants
 
 This folder holds the data of EE Auto TAS, an optimizer for Everybody Edits Offline TAS runs (\`.eetas\`), running as
-**${path.basename(EXE)}** (Node is inside the exe; this PC may not have Node installed).
+**${path.basename(EXE)}** (Node is inside the exe; Node itself may not be installed on the computer).
 
 - The exe: ${q(EXE)} (double-click = the web app at http://localhost:47823).
 - The app's source, the full guide and the physics docs: ${q(APP)} (read \`CLAUDE.md\` there first: section 3 is the
@@ -112,7 +112,7 @@ function main() {
 		else if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
 			console.log(`EE Auto TAS ${manifest.version}\n\n  ${path.basename(EXE)}                  the web app (opens the browser); --port=N, --no-open\n` +
 				`  ${path.basename(EXE)} tas <command>    the command line (${path.basename(EXE)} tas help)\n` +
-				`  ${path.basename(EXE)} bench            measure this PC's engine speed\n\nApp files: ${APP}\nYour runs: ${path.join(HOME, 'jobs')}`);
+				`  ${path.basename(EXE)} bench            measure the CPU's engine speed\n\nApp files: ${APP}\nYour runs: ${path.join(HOME, 'jobs')}`);
 			return;
 		} else {
 			interactive = true;

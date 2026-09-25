@@ -198,10 +198,14 @@ keys at the same tick, whose futures must be identical).
 ## Performance (i7-11800H laptop, one thread, FV TAS, onEvent null)
 About 4.5M ticks/s at ~3.5 GHz (about 3.3M at the 2.3 GHz base clock); a straightforward port does 2.4M / 1.7M.
 `snapshot(reuse)` ~45 ns, `snapshot()` ~150 ns, `restore()` ~50 ns, `stateKey()` ~150-220 ns.
-The web app measures each PC once (`src/bench.js`: a synthetic arena with random inputs, warmed-up workers, 1 / half /
-all threads at once; cached in `src/data/_system.json`, shown by the Processor selector and `GET /api/system`). On
-this laptop: about 6-7M ticks/s on one thread, about 26M with 8 threads, and no more with 16. `node src/bench.js
---threads=N` measures by hand. Why there is no GPU mode: README.md, "CPU or GPU?".
+The web app measures the CPU it runs on once (`src/bench.js`: a synthetic arena with random inputs, warmed-up workers,
+1 / half / all threads at once; cached in `src/data/_system.json`, shown by the Processor selector and
+`GET /api/system`, which name the detected CPU). On the example machine above (i7-11800H laptop, 16 threads): about
+6-7M ticks/s on one thread, about 26M with 8 threads, and no more with 16; on many laptops more threads is not faster,
+and the thread list shows the measured speed for the CPU at hand. `node src/bench.js --threads=N` measures by hand.
+While a job runs, its real speed is live (`EESim.tick()` counts ticks per thread; see CLAUDE.md "Live speed"); the
+counter is one increment and one compare per tick (overhead within the measurement noise, under 2%). Why there is
+no GPU mode: README.md, "CPU or GPU?".
 
 ## Optimizer tools
 All of them read a run that completes the level (`--tas=`, default the level's TAS). Every result is verified

@@ -89,6 +89,7 @@ function reference(level, masks, wantSnap) {
 
 function workerMain() {
 	const { a, starts } = workerData;
+	E.setTickCounter(workerData.ticksBuf);
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
@@ -204,11 +205,13 @@ function workerMain() {
 		}
 		parentPort.postMessage({ type: 'res', i, res });
 	}
+	E.flushTicks();
 	parentPort.postMessage({ type: 'done' });
 }
 
 async function main() {
 	const a = parseArgs();
+	const meter = C.tickMeter();   // `[ticks] N` every second (the page's live speed)
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
@@ -227,7 +230,7 @@ async function main() {
 	}, 1000) : null;
 	await Promise.all(Array.from({ length: a.workers }, (_, w) => new Promise((res) => {
 		const mine = starts.filter((_, k) => k % a.workers === w);
-		const wk = new Worker(__filename, { workerData: { a, starts: mine, stopBuf } });
+		const wk = new Worker(__filename, { workerData: { a, starts: mine, stopBuf, ticksBuf: meter.buf } });
 		wk.on('message', (msg) => {
 			if (msg.type === 'res') {
 				doneStarts++;
@@ -270,6 +273,7 @@ async function main() {
 		C.writeEetas(a.out, seq);
 		console.log(`[sc] written ${a.out}`);
 	}
+	meter.stop();
 }
 
 if (isMainThread) main();

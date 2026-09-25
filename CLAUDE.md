@@ -37,8 +37,8 @@ Times the user gives are **in-game run times** (the timer eeo-tas shows). Every 
 (`1:10` = `1:10.00`), `70.5s`, or a plain number, which is a **tick** (an index into the `.eetas`).
 
 1. **Find the job.** `node src/tas.js jobs`. You can refer to a job by its id, a unique prefix, or part of its name.
-   `node src/tas.js status <job>` shows whether it is running, the best time, the stage, recent improvements and
-   the log.
+   `node src/tas.js status <job>` shows whether it is running, the live speed, the best time, the stage, recent
+   improvements and the log.
 2. **Look at that moment.** `node src/tas.js where <job> 1:10`. It shows the tick, position (tiles), velocity
    (px/tick), whether the ball is on the ground, gravity direction, the tiles at the centre, below and ahead, coins,
    keys and switches, the active effects (levitation and its thrust, multijump, jump / speed / gravity effects, low
@@ -112,8 +112,14 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   matters with 2+ spawn points, time doors or collected coins stored in the file (`meta.startMatters`, from
   `viewer.startMatters(level)`); the page shows it in the job header only then.
 - **CPU only.** The engine is exact IEEE-double physics with heavy branching: there is no GPU mode (README "CPU or
-  GPU?"). `src/bench.js` measures this PC once (`src/data/_system.json`, `GET /api/system`); the thread list and
-  the Processor note show the measured ticks/s per thread count (on the user's laptop 8 threads are as fast as 16).
+  GPU?"). `src/bench.js` measures the CPU the app runs on once (`src/data/_system.json`, `GET /api/system`); the
+  thread list and the Processor note name the detected CPU and show its measured ticks/s per thread count (on many
+  laptops more threads is not faster; the thread list shows the measured speed for the user's CPU). The app is shared:
+  texts name the detected hardware (`common.cpuName`, `bench.describe`), never "this PC".
+- **Live speed.** `EESim.tick()` counts ticks per thread (`E.setTickCounter` / `E.flushTicks`, one shared counter per
+  tool: `common.tickMeter`); mutate, shortcuts, explore and optimize print `[ticks] <total>` every second. The grind
+  sums them over its session and writes `live.json` every second (`summary().live`, the page's "Speed now",
+  `tas.js status`); a fresh `gpu_status.json` is copied in as `live.gpu`.
 
 ## 5. Physics cheat sheet (eeo-tas; details and AS3 references in docs/eeo_spec)
 
@@ -205,6 +211,7 @@ be left out. Each tool's header comment lists its options.
 | `probes/`, `renders/` | candidates written by `probe`, PNGs written by `render` |
 | `report.json` | the final report from "Finish run" (time saved, odds, per-portal odds) |
 | `grind_*.eetas`, `grind_*.log` | stage outputs and logs of the current grind (`grind_ref.eetas` = the stage's copy of best) |
+| `live.json` | written by grind every second: `{t, cpu: {ticks, ticksPerSec, threads, model}, gpu}` (`ticks` = simulated this session, `ticksPerSec` over the last ~3 s, 0 between stages; `gpu` = `gpu_status.json` {t, name, ticks, ticksPerSec, state, edges} while it is under 5 s old, else null) |
 
 `src/jobs/_running.json` records the job to resume when the app starts. The level JSON is eelvl.js `toSimLevel()`
 output plus `rng_script` (section 4) and `start_mode` (section 4, "Start mode"). `src/data/_system.json` is the CPU
@@ -223,10 +230,10 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 
 | method | path | what |
 |---|---|---|
-| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best), CPU threads, `bench` |
-| GET | `/api/system` | processors: CPU with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU `available: false` with `why`; `faster: "cpu"` |
+| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best, and `live`: the running job's `live.json` while under 5 s old, else null), CPU threads, `cpuModel`, `bench` |
+| GET | `/api/system` | processors: CPU (`model`, `text` e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads (measured)") with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU `available: false` with `why`; `faster: "cpu"` |
 | POST | `/api/jobs` | import: JSON `{name, eelvlName, eetasName, eelvlB64, eetasB64, startMode}` (base64 of the raw file bytes; `startMode` `reset` (default) or `load`) |
-| GET | `/api/jobs/:id` | one job summary (best, history, stage, inbox, focus, files) |
+| GET | `/api/jobs/:id` | one job summary (best, history, stage, `live` speed, inbox, focus, files) |
 | POST | `/api/jobs/:id/start` | JSON `{workers, processor}` (`processor` `cpu`; `gpu` is refused with the reason) |
 | POST | `/api/jobs/:id/stop` | pause |
 | POST | `/api/jobs/:id/finish` | stop and write `report.json` (returned) |

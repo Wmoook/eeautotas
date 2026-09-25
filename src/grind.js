@@ -161,6 +161,49 @@ function prunePieces(keep = 30) {
 	for (const f of fl.slice(0, Math.max(0, fl.length - keep))) { try { fs.unlinkSync(path.join(PIECES, f)); } catch (e) { /* gone */ } }
 }
 
+// ---------------------------------------------------------------- live speed (live.json: the web app's and `tas.js status`'s "Speed now")
+// The search tools print `[ticks] <total>` every second (the ticks they simulated so far, common.tickMeter). The grind
+// sums them over this session (finished stages + the running stage's latest count) and writes live.json every second:
+// the speed over the last ~3 s (0 between stages). A GPU search's gpu_status.json is copied in while it is fresh.
+const LIVE = path.join(OUT, 'live.json');
+const GPU_STATUS = path.join(OUT, 'gpu_status.json');   // {t, name, ticks, ticksPerSec, state, edges}, written by the GPU side
+const CPU_MODEL = ((os.cpus()[0] && os.cpus()[0].model) || '').trim();
+let ticksDone = 0, ticksStage = 0, inStage = false;
+let tickSamples = [];   // [time, session total] per `[ticks]` line of the running stage
+function stageTicks(n) {
+	ticksStage = n;
+	const now = Date.now();
+	tickSamples.push([now, ticksDone + n]);
+	while (tickSamples.length > 2 && now - tickSamples[1][0] >= 3000) tickSamples.shift();   // keep ~3 s (+ one older sample)
+}
+function stageEdge(start) {
+	ticksDone += ticksStage; ticksStage = 0; tickSamples = []; inStage = start;
+}
+function ticksPerSec() {
+	if (!inStage || tickSamples.length < 2) return 0;
+	const [t0, n0] = tickSamples[0], [t1, n1] = tickSamples[tickSamples.length - 1];
+	if (Date.now() - t1 > 5000 || t1 <= t0) return 0;   // the tool stopped reporting
+	return Math.round((n1 - n0) * 1000 / (t1 - t0));
+}
+function writeLive() {
+	const now = Date.now();
+	const g = C.readJSON(GPU_STATUS, null);
+	const gpu = g && typeof g === 'object' && now - (+g.t || 0) < 5000 ? g : null;
+	try { C.writeAtomic(LIVE, JSON.stringify({ t: now, cpu: { ticks: ticksDone + ticksStage, ticksPerSec: ticksPerSec(), threads: W, model: CPU_MODEL }, gpu })); } catch (e) { /* ignore */ }
+}
+const liveTimer = setInterval(writeLive, 1000);
+liveTimer.unref();   // (never keeps the grind alive)
+writeLive();
+/** A stage's stdout: `[ticks] N` lines update the live speed and are left out of the stage log; the rest is kept. */
+function tickLines() {
+	let carry = '';
+	const take = (s) => s.replace(/^\[ticks\] (\d+)\r?\n/gm, (m, n) => { stageTicks(+n); return ''; });
+	return {
+		data(s) { s = carry + s; const cut = s.lastIndexOf('\n') + 1; carry = s.slice(cut); return take(s.slice(0, cut)); },
+		end() { const s = take(carry + '\n'); carry = ''; return s === '\n' ? '' : s.slice(0, -1); },
+	};
+}
+
 // ---------------------------------------------------------------- stages (child processes, awaited)
 /** Runs a tool; while it runs the inbox is checked every 3 s and the status heartbeat written every 30 s. */
 function runTool(script, args, maxMs, logFile) {
@@ -170,16 +213,23 @@ function runTool(script, args, maxMs, logFile) {
 		const chunks = [];
 		let size = 0;
 		const keep = (d) => { if (size < (64 << 20)) { chunks.push(d); size += d.length; } };
-		ch.stdout.on('data', keep); ch.stderr.on('data', keep);
+		const out = tickLines();
+		stageEdge(true);
+		ch.stdout.setEncoding('utf8');
+		ch.stdout.on('data', (s) => { const k = out.data(s); if (k) keep(Buffer.from(k)); });
+		ch.stderr.on('data', keep);
 		const inbox = setInterval(checkInbox, 3000);
 		const beat = setInterval(() => saveStatus(), 30000);
 		const kill = setTimeout(() => { try { ch.kill(); } catch (e) { /* gone */ } }, maxMs);
 		ch.on('close', (code) => {
 			clearInterval(inbox); clearInterval(beat); clearTimeout(kill);
+			const rest = out.end();
+			if (rest) keep(Buffer.from(rest));
+			stageEdge(false);
 			if (logFile) { try { fs.writeFileSync(logFile, Buffer.concat(chunks)); } catch (e) { /* ignore */ } }
 			resolve(code);
 		});
-		ch.on('error', () => { clearInterval(inbox); clearInterval(beat); clearTimeout(kill); resolve(-1); });
+		ch.on('error', () => { clearInterval(inbox); clearInterval(beat); clearTimeout(kill); stageEdge(false); resolve(-1); });
 	});
 }
 

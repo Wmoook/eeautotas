@@ -117,6 +117,7 @@ function buildReference(level, masks) {
 // ------------------------------------------------------------------ worker
 function workerMain() {
 	const { levelData, ref, width, idx, nworkers, shared, ctxKeys, distTick } = workerData;
+	E.setTickCounter(workerData.ticksBuf);
 	DIST_TICK = distTick;
 	const level = E.loadLevel(levelData);
 	const sim = new E.EESim(level);
@@ -249,18 +250,21 @@ function workerMain() {
 		Atomics.add(ctl, 3, 1);
 		Atomics.notify(ctl, 3);
 	}
+	E.flushTicks();
 }
 
 // ------------------------------------------------------------------ main
+let meter = null;   // `[ticks] N` every second (the page's live speed); polled in run(), the search loop blocks the event loop
 async function main() {
 	const args = parseArgs();
+	meter = C.tickMeter();
 	const t0 = Date.now();
 	const level = E.loadLevel(args.levelData);
 	let masks = C.readEetas(args.tas);
 	const first = buildReference(level, masks);
 	console.log(`[opt] start: ${masks.length} ticks, completes at tick ${first.complete}, run_ticks ${first.runTicks} ` +
 		`(${fmt(first.runTicks)})`);
-	if (first.complete < 0) { console.log('[opt] the reference does not complete the level'); return; }
+	if (first.complete < 0) { console.log('[opt] the reference does not complete the level'); meter.stop(); return; }
 	let bestRun = first.runTicks;
 	for (let pass = 1; pass <= args.passes; pass++) {
 		const res = await searchPass(level, masks, args, pass, t0);
@@ -272,6 +276,7 @@ async function main() {
 			`saved in total) -> ${args.out}`);
 	}
 	console.log(`[opt] best ${fmt(bestRun)} vs start ${fmt(first.runTicks)}; total ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+	meter.stop();
 }
 
 // One beam search along `masks` (the reference). Returns {masks, runTicks} of the fastest completion found.
@@ -290,7 +295,7 @@ async function searchPass(level, masks, args, pass, t0) {
 	const workers = [];
 	for (let i = 0; i < NW; i++) {
 		workers.push(new Worker(__filename, { workerData: { levelData: args.levelData, ref: refData, width: W, idx: i,
-			nworkers: NW, shared, ctxKeys: ref.ctx, distTick: args.dist } }));
+			nworkers: NW, shared, ctxKeys: ref.ctx, distTick: args.dist, ticksBuf: meter.buf } }));
 	}
 	let step = 0;
 	const run = (count, cmd) => {
@@ -301,6 +306,7 @@ async function searchPass(level, masks, args, pass, t0) {
 		Atomics.store(ctl, 0, step);
 		Atomics.notify(ctl, 0);
 		while (Atomics.load(ctl, 3) < NW) Atomics.wait(ctl, 3, Atomics.load(ctl, 3), 50);
+		meter.poll();
 	};
 	const histPar = [], histIn = [];
 	let count = 1;
