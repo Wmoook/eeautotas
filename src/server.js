@@ -99,6 +99,8 @@ const ENDPOINTS = [
 	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (name and measured speed, or why not available), and which is faster'],
 	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load"} (files as base64 of their raw bytes)'],
 	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, live speed, inbox, focus, files)'],
+	['POST', '/api/jobs/:id/guide', 'GPU guided search: JSON {from, points: [[x, y], ...] (pixels of the ball centre; tiles with tiles: true), seconds, width}; exact faster rejoins go to the job'],
+	['GET', '/api/jobs/:id/guide', 'the guided search: running, layer, tick, states, ticksPerSec, results, log'],
 	['POST', '/api/jobs/:id/start', 'start / resume optimizing: JSON {workers, processor: "cpu" | "gpu"} ("gpu" = the CPU stages plus the GPU searcher)'],
 	['POST', '/api/jobs/:id/stop', 'pause'],
 	['POST', '/api/jobs/:id/finish', 'stop and write the final report (report.json)'],
@@ -157,6 +159,27 @@ function stopJob(id) {
 	if (ch && ch.exitCode === null) J.killTree(ch.pid);
 	children.delete(id);
 	J.stopJob(id);
+}
+/** The guided search (src/guide.js) in the background: JSON {from, points: [[x, y], ...] (px, ball centre), seconds, width, tiles}. */
+const guideKids = new Map();
+function startGuide(id, b) {
+	const GD = require('./guide.js');
+	const mine = guideKids.get(id);
+	if (GD.guideState(id).running || (mine && mine.exitCode === null)) throw new Error('a guided search is already running for this job');
+	if (!gpuAvailable()) throw new Error(`the guided search runs on the GPU, which is not available: ${systemInfo().processors[1].why}`);
+	if (b.from === undefined || b.from === '') throw new Error('missing "from" (m:ss.cc or a tick)');
+	C.parseTime(b.from);
+	const pts = Array.isArray(b.points) ? b.points.filter((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite)) : [];
+	if (pts.length < 2 || pts.length > 2000) throw new Error('the guide line needs 2 to 2000 points [x, y]');
+	const seconds = Math.max(5, Math.min(3600, +b.seconds || 60));
+	const line = pts.map((p) => p.join(',')).join(' ');
+	const fd = fs.openSync(path.join(J.jobDir(id), 'guide.log'), 'w');
+	const ch = spawn(process.execPath, [path.join(__dirname, 'tas.js'), 'guide', id, String(b.from), line, String(seconds),
+		...(b.width ? [`--width=${+b.width}`] : []), ...(b.tiles ? ['--tiles'] : [])], { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', fd, fd], windowsHide: true });
+	fs.closeSync(fd);
+	guideKids.set(id, ch);
+	ch.on('exit', () => { if (guideKids.get(id) === ch) guideKids.delete(id); });
+	return { ok: true, started: true, seconds };
 }
 function startFocus(id, b) {
 	const f = J.focusState(id);
@@ -289,6 +312,8 @@ const server = http.createServer(async (req, res) => {
 				return send(res, 200, p);
 			}
 			if (req.method === 'POST' && what === 'focus') return send(res, 200, startFocus(id, await readJsonBody(req, 1 << 16)));
+			if (req.method === 'POST' && what === 'guide') return send(res, 200, startGuide(id, await readJsonBody(req, 1 << 20)));
+			if (req.method === 'GET' && what === 'guide') return send(res, 200, require('./guide.js').guideState(id));
 			if (req.method === 'GET' && what === 'focus') {
 				let lines = [];
 				try { lines = fs.readFileSync(path.join(dir, 'focus.log'), 'utf8').split(/\r?\n/).filter(Boolean).slice(-40); } catch (e) { /* none */ }
@@ -305,6 +330,7 @@ function openBrowser(url) { spawn('cmd', ['/c', 'start', '', url], { stdio: 'ign
 function shutdown() {
 	for (const [, ch] of children) if (ch.exitCode === null) J.killTree(ch.pid);
 	for (const [, ch] of focusKids) if (ch.exitCode === null) J.killTree(ch.pid);
+	for (const [, ch] of guideKids) if (ch.exitCode === null) J.killTree(ch.pid);
 	process.exit(0);
 }
 /** The app: listen on PORT, benchmark the CPU once, resume the last running job. (require()d, e.g. by the tests,

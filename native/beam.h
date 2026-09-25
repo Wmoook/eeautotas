@@ -37,7 +37,24 @@ struct BeamParams {
 	const u64* htKeys; const i32* htVals; u32 htMask; const u32* qbits;
 	i32 layerTick;                    // reference tick the layer's states "stand for" (start tick + depth)
 	i32 nocoins;
+	// back to the run after the guide: per tile, the first reference tick >= refFrom that visits it (-1 = none); past
+	// the line's end a state scores by how far along the run its tile is (so the beam heads for exact rejoins)
+	const i32* refTile; i32 refFrom; float lineLen;
+	// the run's per-tick position and speed (float; for the closeness score), n + 1 entries
+	const float* rX; const float* rY; const float* rSX; const float* rSY; i32 nRef;
 };
+
+/** Past the guide: the best "closeness" to a state of the run on this tile, favouring later ticks: states that are
+ *  almost equal to a run state become exactly equal at the next wall hit, landing, boost or portal. */
+EE_HD float runMatchScore(const BeamParams& p, i32 r0, float px, float py, float sx, float sy) {
+	float best = -1e30f;
+	for (i32 r = r0; r < r0 + 24 && r < p.nRef; r++) {
+		const float d = fabsf(px - p.rX[r]) + fabsf(py - p.rY[r]) + 3.f * (fabsf(sx - p.rSX[r]) + fabsf(sy - p.rSY[r]));
+		const float sc = 4.f * (float)(r - p.refFrom) - 6.f * d;
+		if (sc > best) best = sc;
+	}
+	return best;
+}
 
 /** Progress along the guide (arc length at the closest point) minus weight * distance to it (float: a heuristic). */
 EE_HD float guideScore(const BeamParams& p, float cx, float cy) {

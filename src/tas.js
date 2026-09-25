@@ -23,6 +23,8 @@ const HELP = `EE Auto TAS - command line (${CMD} <command> ...)
                                          (--try hands it to the job right away)
   try <job> <file.eetas>                 verify a candidate run and hand it to the job (running: via its inbox, the
                                          grind decides within seconds; stopped: decided here, best.eetas updated)
+  guide <job> <from> "<x,y x,y ...>" [seconds]   GPU: search from <from> along a guide line (pixels of the ball's
+                                         centre, or tiles with --tiles); exact faster rejoins go to the job (--width=K)
   focus <job> <from> <to> [seconds]      search that window harder (explore --exact, shortcuts, mutate, splice) and
                                          hand every faster result to the job (default 120 s per search)
   import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load]   create a job (like the web app's Import);
@@ -150,6 +152,15 @@ async function main() {
 				if (r.result) out(`handed     to the running job: ${r.result.accepted ? `ACCEPTED, best is now ${r.result.bestTime}` : `not accepted (${r.result.reason}); kept for splicing`}`);
 				else out(`handed     to the running job's inbox (${r.inboxFile}); it decides between checks - see: ${CMD} status ${id}`);
 			} else out(`handed     directly (job not running): ${r.accepted ? 'ACCEPTED, best.eetas updated' : 'not accepted; kept in pieces/ for splicing'}`);
+			return;
+		}
+		case 'guide': {
+			if (pos.length < 3) throw new Error('usage: guide <job> <from> "<x,y x,y ...>" [seconds] [--tiles] [--width=K]');
+			const id = J.resolve(pos[0]);
+			const pts = pos[2].trim().split(/\s+/).map((p) => p.split(',').map(Number));
+			const r = await require('./guide.js').guide(id, pos[1], pts, +pos[3] || 60, { tiles: !!a.tiles, width: +a.width || undefined });
+			if (a.json) return json(r);
+			for (const l of r.log) out(l);
 			return;
 		}
 		case 'focus': {

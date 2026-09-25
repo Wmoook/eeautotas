@@ -33,6 +33,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	std::vector<uint8_t> refMasks;
 	std::vector<uint64_t> htKeys; std::vector<int32_t> htVals; uint32_t htMask = 0;
 	std::vector<uint32_t> qbits;
+	std::vector<double> X, Y, SX, SY;
 	int n = -1;
 	{
 		Sim<TW> sim(L, *start);
@@ -43,7 +44,6 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			memcpy(st, start, sizeof(S));
 			Sim<TW> rs(L, *st);
 			const bool crown0 = st->has_silver_crown;
-			std::vector<double> X, Y, SX, SY;
 			auto push = [&]() { refH.push_back(rs.hash(nc)); refH2.push_back(rs.hash2(nc)); X.push_back(st->px); Y.push_back(st->py); SX.push_back(st->speed_x); SY.push_back(st->speed_y); };
 			push();
 			if (from <= 0) memcpy(start, st, sizeof(S));
@@ -88,6 +88,23 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			for (size_t i = 1; i < gx.size(); i++) gs.push_back(gs.back() + std::hypot(gx[i] - gx[i - 1], gy[i] - gy[i - 1]));
 		}
 	}
+	// ---- back to the run after the line: the reference tick nearest to the line's end (after the start), and per tile
+	// the first reference tick from there on that visits it; the search stops a while after the run got there
+	std::vector<int32_t> refTile;
+	int refFrom = -1;
+	if (gx.size() >= 2 && n > 0) {
+		double bestD = 1e30;
+		for (int t = from; t <= n; t++) {
+			const double dx = X[t] + 8 - gx.back(), dy = Y[t] + 8 - gy.back(), dd = dx * dx + dy * dy;
+			if (dd < bestD) { bestD = dd; refFrom = t; }
+		}
+		refTile.assign((size_t)L.N, -1);
+		for (int t = refFrom; t <= n; t++) {
+			const int tx = (int)std::floor((X[t] + 8) / 16), ty = (int)std::floor((Y[t] + 8) / 16);
+			if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && refTile[(size_t)ty * L.W + tx] < 0) refTile[(size_t)ty * L.W + tx] = t;
+		}
+	}
+	const int depthLimit = refFrom >= 0 ? std::min(depthMax, refFrom - from + 600) : depthMax;
 	// ---- the goal distance field: walking distance in tiles to a finish block (121) over tiles that are not static
 	// solid blocks (doors, one-ways and half blocks count as open; it only steers the search)
 	std::vector<float> goalDist;
@@ -125,12 +142,14 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fexp = g.fn("beamExpand_" + std::to_string(TW)), fmat = g.fn("beamMaterialize_" + std::to_string(TW));
 	if (!fexp || !fmat) { printf("{\"error\":\"beam kernels missing\"}\n"); return 4; }
-	cu::Buf dl, dA, dB, dout, dpick, dgx, dgy, dgs, dgoal, dK, dV, dq;
+	cu::Buf dl, dA, dB, dout, dpick, dgx, dgy, dgs, dgoal, dK, dV, dq, drt, drx, dry, drsx, drsy;
+	std::vector<float> fX(X.begin(), X.end()), fY(Y.begin(), Y.end()), fSX(SX.begin(), SX.end()), fSY(SY.begin(), SY.end());
 	const size_t SB = sizeof(S);
 	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * K) && dB.alloc(SB * K) && dout.alloc(sizeof(BeamChild) * (size_t)K * 18) &&
 		dpick.alloc(4 * (size_t)K) && dgx.upload(gx.data(), 4 * gx.size()) && dgy.upload(gy.data(), 4 * gy.size()) && dgs.upload(gs.data(), 4 * gs.size()) &&
 		dgoal.upload(goalDist.data(), 4 * goalDist.size()) && dK.upload(htKeys.data(), 8 * htKeys.size()) && dV.upload(htVals.data(), 4 * htVals.size()) &&
-		dq.upload(qbits.data(), 4 * qbits.size());
+		dq.upload(qbits.data(), 4 * qbits.size()) && drt.upload(refTile.data(), 4 * refTile.size()) &&
+		drx.upload(fX.data(), 4 * fX.size()) && dry.upload(fY.data(), 4 * fY.size()) && drsx.upload(fSX.data(), 4 * fSX.size()) && drsy.upload(fSY.data(), 4 * fSY.size());
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
 	BeamParams P;
@@ -142,6 +161,9 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	P.goalDist = (const float*)(uintptr_t)dgoal.p; P.goalWeight = goal ? goalW : 0.f;
 	P.htKeys = (const u64*)(uintptr_t)dK.p; P.htVals = (const i32*)(uintptr_t)dV.p; P.htMask = htMask; P.qbits = (const u32*)(uintptr_t)dq.p;
 	P.nocoins = nc;
+	P.refTile = refTile.empty() ? nullptr : (const i32*)(uintptr_t)drt.p; P.refFrom = refFrom; P.lineLen = gs.empty() ? 0.f : gs.back();
+	P.rX = (const float*)(uintptr_t)drx.p; P.rY = (const float*)(uintptr_t)dry.p; P.rSX = (const float*)(uintptr_t)drsx.p; P.rSY = (const float*)(uintptr_t)drsy.p;
+	P.nRef = (i32)fX.size();
 	P.out = (BeamChild*)(uintptr_t)dout.p;
 	P.pick = (const u32*)(uintptr_t)dpick.p;
 
@@ -177,7 +199,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		return ok;
 	};
 	int d = 0;
-	for (; d < depthMax && elapsed() < seconds && nParents > 0; d++) {
+	for (; d < depthLimit && elapsed() < seconds && nParents > 0; d++) {
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layerTick = from + d;
 		void* a1[] = { &P };
 		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) {

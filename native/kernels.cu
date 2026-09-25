@@ -158,7 +158,15 @@ __device__ void beamExpandBody(const BeamParams& p) {
 			if (!crown0 && s.has_silver_crown) c.flags |= 2;
 			const float cx = (float)s.px + 8.f, cy = (float)s.py + 8.f;
 			float sc = 0;
-			if (p.nGuide > 1) sc += guideScore(p, cx, cy);
+			if (p.nGuide > 1) {
+				const float g = guideScore(p, cx, cy);
+				sc += g;
+				if (p.refTile && g >= p.lineLen - 24.f) {   // at the end of the line: head back along the run
+					const i32 tx0 = truncI(s.px + 8.0) >> 4, ty0 = truncI(s.py + 8.0) >> 4;
+					const i32 r = (tx0 >= 0 && ty0 >= 0 && tx0 < p.L.W && ty0 < p.L.H) ? p.refTile[ty0 * p.L.W + tx0] : -1;
+					if (r >= 0) sc = p.lineLen + 64.f + runMatchScore(p, r, (float)s.px, (float)s.py, (float)s.speed_x, (float)s.speed_y);
+				}
+			}
 			if (p.goalWeight > 0) sc -= p.goalWeight * goalScore(p, p.L, cx, cy);
 			c.score = sc;
 			c.hash = sim.hash(p.nocoins != 0);
