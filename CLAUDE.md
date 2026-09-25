@@ -190,10 +190,11 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/gpusearch.js` | the GPU searcher of a running job (grind `--gpu=1`): rounds of `eegpu search`, edge library, DP, verify, inbox; `gpu_status.json`, `[gpu ...]` lines in grind.log |
 | `tools/build-native.js`, `test/gpu.js` | build the native engine; the exactness proof (per-tick stateHash vs eesim.js; `--gpu` runs it on the GPU) |
 | `src/eegfx.js` | EE graphics for the viewer, read at run time from the user's eeo-tas folder (`settings.json` `eegfxDir`, else `$EEO_TAS`, else `~/eeo-tas`): parses ItemManager.as / ItemId.as into a sprite map (block id -> sheet, 16 px frame, y, ItemLayer, shadow; the BlockSprites; morphable blocks; NPCs, smiley, death animation), cached in `<data>/eegfx.json`. **Never commit EE images or derived sprite data**: the page loads the PNGs from eeo-tas through the server. The page's `gx*` functions follow World.as's draw rules. `node src/eegfx.js [dir]`, `node src/eegfx.js coverage <level.eelvl>...` |
+| `src/editor.js`, `src/app/editor.html`, `test/editor.js` | the level editor (`/editor`): the editor's level JSON <-> `.eelvl` (`eelvl.js writeEelvl` / `readEelvl`), block info, checks (start, trophy, open way incl. portals), the route search: `eegpu beam --goal=1` (with a guide line also a second beam `--guide --guideWeight=4 --goalWeight=4`), every route replayed in the JS engine; state in `<data>/editor/` (`solve.json`, `level.eelvl`, `route.eetas`). The page copies the viewer's `gx*` drawing functions. `node test/editor.js [--gpu]` |
 | `src/bench.js` | CPU benchmark of the engine (1, half and all threads, warmed-up workers), cached in `src/data/_system.json` per CPU / Node / engine size |
 | `src/blocks.js`, `src/blocknames.json` | block names and kinds for display (from docs/eeo_spec/blocks.json) |
 | `src/eesim.js` | the exact physics port (EESim, EEInput, applyMask, parseEetasBytes, loadLevel, prepareLevel) |
-| `src/eelvl.js` | EEO-exact `.eelvl` reader, `toSimLevel()` = the level JSON |
+| `src/eelvl.js` | EEO-exact `.eelvl` reader, `toSimLevel()` = the level JSON; `writeEelvl()` (header + records, raw deflate; args checked against `argKind`) |
 | `src/rng.js` | random-portal outcome tree: chance, best outcome script, per-portal odds |
 | `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`) |
 | `src/mutate.js` | input mutations at every tick, exact rejoins, DP (seconds) |
@@ -268,6 +269,14 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 | GET | `/api/eegfx` | EE graphics (src/eegfx.js): `{available, dir, source, why, version, sheets, sizes, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, npcs, smiley, death, numbers, ids}`; `available: false` with `why` when no eeo-tas folder is found |
 | POST | `/api/eegfx` | JSON `{dir}`: the eeo-tas folder for EE graphics (checked for `media/blocks.png` and `src/items/ItemManager.as`, saved in `<data>/settings.json`; `""` = find it automatically) |
 | GET | `/api/eegfx/sheet/<name>.png` | a sprite sheet, straight from the eeo-tas media folder (only names in the map) |
+| GET | `/editor` | the level editor page (`src/app/editor.html`) |
+| GET | `/api/editor/blocks?ids=9,121` | per id: `names`, `kinds` ([kind, dir/sub, solid]), `palette` (EE minimap color), `args` (eelvl `argKind`) |
+| POST | `/api/editor/eelvl` | the editor's level JSON `{level: {name, width, height, gravity, bgColor, cells: [[x, y, id, ...args]], bg}}` -> `.eelvl` bytes |
+| POST | `/api/editor/parse` | `{eelvlB64}` -> the editor's level JSON (read like EEO: the Lookup's numbers and portals) |
+| POST | `/api/editor/check` | `{eelvlB64}` or `{level}` -> `problems` [{code: spawn / trophy / unreachable, text}], `notes`, `start`, `trophies`, `reach` (open / portals / none), `gpu` |
+| POST | `/api/editor/solve` | `{eelvlB64, guide: [[x, y], ...] (px, ball centre), seconds (60), width (32768)}`: the GPU route search in the background, one at a time; 400 with `problems` when the level is not ready |
+| GET | `/api/editor/solve` | `running`, `stage` (searching / found / not found / stopped / error), `tick`, `ticksPerSec`, `strategies` [{label, state, layer, found}], `result` {time, runTicks, ticks, inputs ('0'+mask chars), path [[x, y] per tick], strategy}, `message`; `POST .../stop`; `GET .../route.eetas`, `.../level.eelvl` |
+| POST | `/api/editor/job` | `{eelvlB64, eetasB64, name, start, processor}`: `jobs.importJob` (start mode reset; one spawn) and optionally start (GPU when available) |
 
 ## 10. Scripting against the engine
 

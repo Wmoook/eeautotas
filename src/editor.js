@@ -1,0 +1,476 @@
+'use strict';
+// The level editor's server side (the page: src/app/editor.html, GET /editor). You build a level from blocks, place a
+// start (the spawn point, block 255) and the trophy (the finish block, 121), maybe draw a guide line, and the GPU
+// brute-forces a route to the trophy:
+// - the editor's level JSON <-> .eelvl bytes (src/eelvl.js writeEelvl / readEelvl), so the file EE Offline opens is
+//   exactly the level the search ran on;
+// - block info for the palette (names, kinds, EE minimap colors, argument kinds);
+// - the checks before a search (a start, a trophy, an open way to it) and the search itself: `eegpu beam <level.bin>
+//   --goal=1` (native/beamhost.h: from the level start, every input every tick, the states closest to the trophy kept
+//   (walking distance over open tiles), and the first state that finishes ends it); with a guide line a second beam
+//   next to it follows the line (see STRATEGIES). Every route it reports is replayed in the exact JS engine (common.js evaluate) before it is
+//   shown. One search at a time; its state is in memory and in <data>/editor/solve.json (with level.eelvl, level.bin,
+//   guide.txt and route.eetas next to it).
+//
+// The editor's level JSON: { name, width, height, gravity (1), bgColor (ARGB, 0 = none), owner, description,
+//   cells: [[x, y, id, ...args], ...] (the foreground, empty cells left out), bg: [[x, y, id, ...args], ...] }
+// with the arguments of eelvl.argKind(id): [n] a rotation or number, [rotation, id, target] a portal, [text, type] a
+// sign, [target, spawn] a world portal, [text, color, wrap] a label, [name, 3 messages] an NPC.
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
+const C = require('./common.js');
+const E = C.E;
+const EL = require('./eelvl.js');
+const G = require('./gpu.js');
+const B = require('./blocks.js');
+const M = require('./minimap.js');
+
+const MAX_SIDE = 1000, MAX_CELLS = 1e6;
+const SPAWN = 255, TROPHY = 121;
+// eesim.js block flags (prepareLevel `flags[id]`), for the reachability check (native/beamhost.h's goal field)
+const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
+const ARG_SHAPE = { none: '', int: 'i', portal: 'iii', sign: 'si', world_portal: 'si', label: 'ssi', npc: 'ssss' };
+const ARG_DEFAULT = { none: [], int: [0], portal: [0, 0, 0], sign: ['', 0], world_portal: ['', 0], label: ['', '#FFFFFF', 200], npc: ['', '', '', ''] };
+const dir = () => path.join(C.DATA, 'editor');
+const safeName = (s) => String(s || 'level').replace(/[^\w .()-]/g, '').trim().slice(0, 60) || 'level';
+
+// ---------------------------------------------------------------- level JSON <-> .eelvl
+function argsFor(id, given, where) {
+	const kind = EL.argKind(id), shape = ARG_SHAPE[kind];
+	const out = ARG_DEFAULT[kind].slice();
+	for (let k = 0; k < shape.length && k < given.length; k++) {
+		const v = given[k];
+		if (v === null || v === undefined) continue;
+		if (shape[k] === 'i') {
+			if (!Number.isInteger(v) || v < -0x80000000 || v > 0x7fffffff) throw new Error(`block ${id} at ${where}: argument ${k + 1} must be a whole number (got ${JSON.stringify(v)})`);
+			out[k] = v;
+		} else out[k] = String(v);
+	}
+	return out;
+}
+/** The editor's level JSON, checked: { name, width, height, gravity, bgColor, owner, description, fg, bg (Int32Array),
+ *  fgArgs, bgArgs (Map index -> args) } */
+function normalize(lv) {
+	if (!lv || typeof lv !== 'object' || Array.isArray(lv)) throw new Error('bad level (expected a JSON object {name, width, height, cells})');
+	const W = lv.width, H = lv.height;
+	if (!Number.isInteger(W) || !Number.isInteger(H) || W < 1 || H < 1 || W > MAX_SIDE || H > MAX_SIDE || W * H > MAX_CELLS) {
+		throw new Error(`bad level size ${W} x ${H} (1 to ${MAX_SIDE} tiles per side, at most ${MAX_CELLS / 1e6} million tiles)`);
+	}
+	const gravity = lv.gravity === undefined || lv.gravity === null ? 1 : +lv.gravity;
+	if (!Number.isFinite(gravity)) throw new Error(`bad gravity ${lv.gravity}`);
+	const n = { name: String(lv.name || '').slice(0, 200), width: W, height: H, gravity, bgColor: (+lv.bgColor || 0) >>> 0,
+		owner: lv.owner === undefined ? 'player' : String(lv.owner).slice(0, 200), description: String(lv.description || '').slice(0, 2000),
+		fg: new Int32Array(W * H), bg: new Int32Array(W * H), fgArgs: new Map(), bgArgs: new Map() };
+	const put = (list, grid, argMap, what) => {
+		if (list === undefined || list === null) return;
+		if (!Array.isArray(list)) throw new Error(`bad level: "${what}" must be a list of [x, y, id, ...args]`);
+		for (const c of list) {
+			if (!Array.isArray(c) || c.length < 3) throw new Error(`bad ${what} entry ${JSON.stringify(c).slice(0, 80)} (expected [x, y, id, ...args])`);
+			const [x, y, id] = c;
+			if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= W || y >= H) throw new Error(`${what}: (${x}, ${y}) is outside the ${W} x ${H} level`);
+			if (!Number.isInteger(id) || id < 0 || id > 65535) throw new Error(`${what}: bad block id ${JSON.stringify(id)} at (${x}, ${y})`);
+			const i = y * W + x;
+			grid[i] = id;
+			argMap.delete(i);
+			if (id && ARG_SHAPE[EL.argKind(id)].length) argMap.set(i, argsFor(id, c.slice(3), `(${x}, ${y})`));
+		}
+	};
+	put(lv.bg, n.bg, n.bgArgs, 'bg');
+	put(lv.cells, n.fg, n.fgArgs, 'cells');
+	return n;
+}
+/**
+ * Block records like EEO's DownloadLevel (eelvl_format.md section 9): one record per (id, layer, args), positions in
+ * row-major order. The background comes first, so that where both layers of a cell carry a number the foreground's
+ * is the one the AS3 Lookup keeps (it is position keyed, last write wins).
+ */
+function records(n) {
+	const out = [];
+	for (const [layer, grid, am] of [[1, n.bg, n.bgArgs], [0, n.fg, n.fgArgs]]) {
+		const byKey = new Map();
+		for (let i = 0; i < grid.length; i++) {
+			const id = grid[i];
+			if (!id) continue;
+			const args = am.get(i) || [];
+			const key = `${id}|${JSON.stringify(args)}`;
+			let r = byKey.get(key);
+			if (!r) { r = { id, layer, xs: [], ys: [], args }; byKey.set(key, r); out.push(r); }
+			r.xs.push(i % n.width); r.ys.push(Math.floor(i / n.width));
+		}
+	}
+	return out;
+}
+/** The editor's level JSON -> .eelvl bytes (what EE Offline opens) */
+function eelvlOf(lv) {
+	const n = normalize(lv);
+	return EL.writeEelvl({ width: n.width, height: n.height, name: n.name, owner: n.owner, gravity: n.gravity, bgColor: n.bgColor,
+		description: n.description, records: records(n) });
+}
+/**
+ * .eelvl bytes -> the editor's level JSON, read the way EEO reads it (eelvl.js): the last block written to a cell
+ * wins; a foreground number or portal comes from the AS3 Lookup (position keyed across layers), like the game uses it.
+ */
+function levelOf(buf) {
+	let p;
+	try { p = EL.readEelvl(buf); } catch (e) { throw new Error(`this does not look like an .eelvl level file (${e.message})`); }
+	if (p.width > MAX_SIDE || p.height > MAX_SIDE || p.width * p.height > MAX_CELLS) {
+		throw new Error(`this level is ${p.width} x ${p.height} tiles; the editor takes up to ${MAX_SIDE} tiles per side (${MAX_CELLS / 1e6} million tiles)`);
+	}
+	const W = p.width, N = W * p.height;
+	const last = new Map();   // "layer|index" -> the last record entry with arguments there
+	for (const b of p.blocks) last.set(`${b.layer}|${b.y * W + b.x}`, b);
+	const cells = [], bg = [], odd = new Set();
+	for (let i = 0; i < N; i++) {
+		const x = i % W, y = Math.floor(i / W);
+		for (const layer of [0, 1]) {
+			const id = layer ? p.bg[i] : p.fg[i];
+			if (!id) continue;
+			if (id < 0 || id > 65535) { odd.add(id); continue; }
+			const kind = EL.argKind(id);
+			let args = [];
+			if (layer === 0 && kind === 'int') args = [p.lookup.int.has(i) ? p.lookup.int.get(i) : 0];
+			else if (layer === 0 && kind === 'portal') { const q = p.lookup.portals.get(i); args = q ? [q.rotation, q.id, q.target] : [0, 0, 0]; }
+			else if (kind !== 'none') { const b = last.get(`${layer}|${i}`); args = b && b.id === id ? b.args.slice() : ARG_DEFAULT[kind].slice(); }
+			(layer ? bg : cells).push([x, y, id, ...args]);
+		}
+	}
+	const warnings = p.warnings.slice(0, 20);
+	if (odd.size) warnings.push(`block ids the editor cannot keep were left out: ${[...odd].slice(0, 10).join(', ')}`);
+	return { name: p.name, width: W, height: p.height, gravity: p.gravity, bgColor: p.bgColor, owner: p.owner, description: p.description,
+		cells, bg, warnings };
+}
+
+// ---------------------------------------------------------------- block info (the palette, and any level's ids)
+/** For the page: per block id its name, kind ([kind, dir/sub, solid] like GET /api/jobs/:id/level), EE minimap color
+ *  ("aarrggbb", null without the table) and argument kind (eelvl.argKind). */
+function blockInfo(ids) {
+	const haveTable = M.table().size > 0;
+	const names = {}, kinds = {}, palette = {}, args = {};
+	for (const v of ids) {
+		const id = +v;
+		if (!Number.isInteger(id) || id < 0 || id > 65535) continue;
+		const k = B.kindOf(id);
+		names[id] = B.blockName(id);
+		kinds[id] = [k.kind, k.dir || k.sub || (k.rotatable ? 'rot' : ''), B.isSolidId(id) ? 1 : 0];
+		palette[id] = haveTable ? (M.colorOf(id) >>> 0).toString(16).padStart(8, '0') : null;
+		args[id] = EL.argKind(id);
+	}
+	return { names, kinds, palette, args, colors: haveTable ? 'ee-minimap' : 'app' };
+}
+
+// ---------------------------------------------------------------- checks
+/** tiles the goal field of the GPU search walks through (native/beamhost.h `open`): not a static solid block */
+function openTile(L, i) {
+	const f = L.flags[L.fg[i]] || 0;
+	return (f & F_SOLID) === 0 || (f & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) !== 0;
+}
+/** tiles reachable from (sx, sy): 8-way over open tiles (no corner cutting, like the goal field), and with
+ *  `portals` also from an entered portal to every exit of its target */
+function reachFrom(L, sx, sy, portals) {
+	const W = L.width, H = L.height, N = W * H;
+	const seen = new Uint8Array(N);
+	const q = [sy * W + sx];
+	seen[q[0]] = 1;
+	const push = (j) => { if (!seen[j]) { seen[j] = 1; q.push(j); } };
+	while (q.length) {
+		const i = q.pop(), x = i % W, y = Math.floor(i / W);
+		for (let dy = -1; dy <= 1; dy++) {
+			for (let dx = -1; dx <= 1; dx++) {
+				if (!dx && !dy) continue;
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				const j = ny * W + nx;
+				if (!openTile(L, j) || (dx && dy && (!openTile(L, y * W + nx) || !openTile(L, ny * W + x)))) continue;
+				push(j);
+			}
+		}
+		const t = L.fg[i], s = L.portalSlot[i];
+		if (portals && (t === 242 || t === 381) && s >= 0) {
+			const ex = L.portalsById.get(L.pTarget[s]);
+			if (ex) for (let k = 0; k < ex.n; k++) push((ex.ys[k] >> 4) * W + (ex.xs[k] >> 4));
+		}
+	}
+	return seen;
+}
+/**
+ * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes.
+ * Returns { problems: [{code, text}], notes: [text], start: [x, y] | null, trophies, level (prepared), json }.
+ */
+function inspect(buf) {
+	let p;
+	try { p = EL.readEelvl(buf); } catch (e) { throw new Error(`not an .eelvl level (${e.message})`); }
+	if (p.width * p.height > MAX_CELLS) throw new Error(`the level is ${p.width} x ${p.height} tiles; the editor's search takes up to ${MAX_CELLS / 1e6} million tiles`);
+	for (const r of p.records) if (r.id < 0 || r.id > 65535) throw new Error(`block id ${r.id} is not an EEO block`);
+	const json = EL.toSimLevel(p, { id: 'editor', file: 'editor.eelvl' });
+	const level = E.prepareLevel(json);
+	const W = level.width, N = W * level.height;
+	const problems = [], notes = [];
+	const trophies = [];
+	for (let i = 0; i < N; i++) if (level.fg[i] === TROPHY) trophies.push(i);
+	let start = null;
+	if (!level.spawnsX.length) problems.push({ code: 'spawn', text: 'Place the start: the spawn point block.' });
+	else {
+		const sim = new E.EESim(level);
+		sim.reset();
+		start = [Math.trunc(sim.px + 8) >> 4, Math.trunc(sim.py + 8) >> 4];
+		if (level.spawnsX.length > 1) notes.push(`${level.spawnsX.length} spawn points: the run starts at (${start[0]}, ${start[1]}) (eeo-tas /reset moves to the second one)`);
+	}
+	if (!trophies.length) problems.push({ code: 'trophy', text: 'Place the trophy (the finish block): the search looks for the fastest way to it.' });
+	let reach = null;
+	if (start && trophies.length) {
+		const walk = reachFrom(level, start[0], start[1], false);
+		if (trophies.some((i) => walk[i])) reach = 'open';
+		else {
+			const viaPortals = reachFrom(level, start[0], start[1], true);
+			if (trophies.some((i) => viaPortals[i])) {
+				reach = 'portals';
+				notes.push('The trophy is only reachable through portals. The search measures the way to the trophy without portals, so draw a guide line through them.');
+			} else {
+				reach = 'none';
+				problems.push({ code: 'unreachable', text: 'The trophy cannot be reached: it is walled in (no open tiles lead from the start to it, not even through portals).' });
+			}
+		}
+	}
+	if (level.multiTargetPortals) notes.push('Some portals have several exits: EE picks one at random, so the route may need a few tries in EEO.');
+	return { problems, notes, start, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json };
+}
+/** inspect() for the page: no engine objects */
+function check(buf) {
+	const r = inspect(buf);
+	return { problems: r.problems, notes: r.notes, start: r.start, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height };
+}
+
+// ---------------------------------------------------------------- the route search (one at a time)
+// Without a guide line: one beam, scored by the walking distance to the trophy. With one: two beams side by side (the
+// tool is mostly single-threaded host work, so the second costs little): "along your line" (the line's progress minus 4
+// per px away from it, plus 4 per tile closer to the trophy: it follows the line, and still leaves it where the ball
+// must) and "straight for the trophy" (the line can be wrong). The beam's own guide score takes the best of (progress
+// minus weight x distance) over the whole line, so with a loose weight a state far from the line can claim the line's
+// later progress (e.g. the floor under a ledge the line reaches by stairs elsewhere): 4 keeps the line in charge.
+// Each beam's first finish is its fastest; a beam that is already deeper than the best route found stops (it cannot
+// find a faster one), and the fastest verified route wins.
+const STRATEGIES = {
+	guide: { label: 'along your line', args: (files) => [`--guide=${files.guide}`, '--guideWeight=4', '--goalWeight=4'] },
+	goal: { label: 'straight for the trophy', args: () => [] },
+};
+let S = null;        // the current / last search (public state, also in solve.json)
+let kids = [];       // the eegpu processes of the running search (one per strategy)
+let cur = null;      // { level, buf } of the running search
+const stateFile = () => path.join(dir(), 'solve.json');
+function save() { try { C.writeJSON(stateFile(), S); } catch (e) { /* read-only data folder: memory only */ } }
+function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); }
+/** the current or last search */
+function state() {
+	if (!S) {
+		S = C.readJSON(stateFile(), null) || { running: false, stage: 'idle', log: [] };
+		if (S.running) { S.running = false; S.stage = 'stopped'; S.message = 'The search stopped when the app closed.'; }
+	}
+	return Object.assign({}, S, { elapsed: S.running ? (Date.now() - S.started) / 1000 : S.elapsed });
+}
+const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
+const running = () => kids.some(alive);
+
+/**
+ * Starts a route search. b: { eelvlB64 (the level as .eelvl bytes; or `level`, the editor's JSON), guide: [[x, y], ...]
+ * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks, 6000), name }.
+ * gpu: the server's GPU processor record ({available, why}). Throws with `problems` when the level is not ready.
+ */
+function start(b, gpu) {
+	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
+	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
+	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
+	const ins = inspect(buf);
+	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
+	const tool = G.nativeTool();
+	if (!tool) throw new Error('the route search needs the GPU engine, which is not part of this build (node tools/build-native.js)');
+	if (gpu && !gpu.available) throw new Error(`the route search runs on an NVIDIA GPU, which is not available: ${gpu.why || 'no NVIDIA GPU found'}`);
+	const why = G.unsupported(ins.level);
+	if (why) throw new Error(`the GPU engine cannot run this level: ${why}`);
+	const pts = Array.isArray(b.guide) ? b.guide.filter((q) => Array.isArray(q) && q.length === 2 && q.every(Number.isFinite)) : [];
+	if (pts.length > 4000) throw new Error('the guide line has too many points (at most 4000)');
+	const guide = pts.length >= 2 ? pts : [];
+	const seconds = Math.max(3, Math.min(600, Math.round(+b.seconds || 60)));
+	const width = Math.max(1024, Math.min(131072, Math.round(+b.width || 32768)));
+	// ticks deep; the tool keeps 4 bytes per state per tick to spell out the route (at most ~0.6 GB per search)
+	const depth = Math.max(100, Math.min(20000, Math.floor(6e8 / (4 * width)), Math.round(+b.depth || 6000)));
+	const d = dir();
+	fs.mkdirSync(d, { recursive: true });
+	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas') };
+	fs.writeFileSync(files.eelvl, buf);
+	fs.writeFileSync(files.bin, G.levelBlob(ins.level));
+	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
+	if (guide.length) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
+	const base = ['beam', files.bin, '--goal=1', `--width=${width}`, `--seconds=${seconds}`, `--depth=${depth}`];
+	const which = guide.length ? ['guide', 'goal'] : ['goal'];
+	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
+	S = { running: true, stage: 'starting', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
+		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
+		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
+		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, message: '', log: [],
+		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, states: 0, ticksPerSec: 0, found: null, error: null })) };
+	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
+		(guide.length ? ` (a ${guide.length}-point line)` : ''));
+	save();
+	cur = { level: ins.level, buf };
+	kids = which.map((k, n) => launch(tool, [...base, ...STRATEGIES[k].args(files)], n));
+	return state();
+}
+/** one strategy's eegpu process: its JSON lines update S.strategies[n] and the totals */
+function launch(tool, args, n) {
+	const V = S.strategies[n];
+	const ch = spawn(tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+	const mine = () => kids[n] === ch;
+	let out = '', err = '';
+	const totals = () => {
+		S.layer = Math.max(...S.strategies.map((q) => q.layer));
+		S.tick = S.layer;
+		S.states = S.strategies.reduce((a, q) => a + (q.state === 'running' ? q.states : 0), 0);
+		S.ticksPerSec = S.strategies.reduce((a, q) => a + (q.state === 'running' ? q.ticksPerSec : 0), 0);
+		S.elapsed = (Date.now() - S.started) / 1000;
+	};
+	const onEvent = (ev) => {
+		if (!mine()) return;
+		if (ev.ev === 'progress') {
+			Object.assign(V, { state: 'running', layer: ev.layer, states: ev.states, ticksPerSec: Math.round(ev.ticksPerSec) });
+			if (!S.result && S.stage !== 'error') S.stage = 'searching';
+			totals();
+			// deeper than the best route: it cannot find a faster one
+			if (S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; try { ch.kill(); } catch (e) { /* gone */ } }
+			save();
+		} else if (ev.ev === 'result' && ev.kind === 'finish') {
+			found(ev.inputs, n);
+		} else if (ev.ev === 'done') {
+			V.layer = ev.layers;
+			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
+		} else if (ev.error) {
+			V.error = ev.error;
+			note(`${V.label}: error: ${ev.error}`);
+			save();
+		}
+	};
+	ch.stdout.on('data', (chunk) => {
+		out += chunk;
+		let k;
+		while ((k = out.indexOf('\n')) >= 0) {
+			const line = out.slice(0, k).trim();
+			out = out.slice(k + 1);
+			if (!line.startsWith('{')) continue;
+			let ev;
+			try { ev = JSON.parse(line); } catch (e) { continue; }
+			onEvent(ev);
+		}
+	});
+	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-2000); });
+	ch.on('error', (e) => { err += e.message; });
+	ch.on('close', (code) => {
+		if (!mine()) return;
+		if (V.state === 'running' || V.state === 'starting') {
+			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
+				V.state = 'error';
+				V.error = V.error || `exit code ${code}${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 300)}` : ''}`;
+			} else V.state = V.found ? 'found' : S.stage === 'stopped' ? 'stopped' : 'ended';
+		}
+		totals();
+		if (!running()) finish();
+		else save();
+	});
+	return ch;
+}
+/** all strategies have ended: the verdict */
+function finish() {
+	S.running = false;
+	S.elapsed = (Date.now() - S.started) / 1000;
+	S.layer = Math.max(...S.strategies.map((q) => q.layer));
+	S.tick = S.layer;
+	if (S.result) S.stage = 'found';
+	else if (S.stage === 'stopped') S.message = S.message || 'The search was stopped before it found a route.';
+	else if (S.strategies.every((q) => q.state === 'error')) {
+		S.stage = 'error';
+		S.message = `The GPU search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
+	} else if (S.stage !== 'error') {
+		S.stage = 'not found';
+		const capped = S.layer >= S.depth;
+		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep, ${S.width.toLocaleString('en-US')} states per tick)` +
+			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
+			` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`;
+	}
+	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
+	cur = null;
+	save();
+}
+/** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept */
+function found(inputs, n) {
+	const V = S.strategies[n];
+	const masks = Uint8Array.from(String(inputs), (c) => (c.charCodeAt(0) - 48) & 31);
+	const ev = C.evaluate(cur.level, masks);
+	// its beam ends at the first finish (the fastest it reached); the tool would still re-check every other state that
+	// finished in the same tick before it exits, which only costs time
+	if (alive(kids[n])) { try { kids[n].kill(); } catch (e) { /* gone */ } }
+	if (!ev) {
+		V.state = 'error';
+		V.error = 'it reported a route that does not finish in the exact JS engine (please report this: the two engines disagree)';
+		note(`${V.label}: ${V.error}`);
+		save();
+		return;
+	}
+	V.state = 'found';
+	V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
+	note(`${V.label}: route ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
+	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
+	if (better) {
+		const tr = C.replay(cur.level, ev.ms, { trace: true });
+		const pathPts = [];
+		for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
+		C.writeEetas(path.join(dir(), 'route.eetas'), ev.ms);
+		S.result = { ticks: ev.ms.length, completeTick: ev.complete, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), deaths: ev.deaths, coins: ev.coins,
+			chance: ev.chance, inputs: C.eetasBytes(ev.ms).toString('latin1'), foundAfter: Math.round((Date.now() - S.started) / 100) / 10, path: pathPts,
+			strategy: V.label, verified: 'replayed in the exact JS engine: it finishes' };
+	}
+	S.stage = 'found';
+	// the other strategies: those already deeper than this route cannot find a faster one
+	S.strategies.forEach((q, k) => {
+		if (k !== n && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; try { kids[k].kill(); } catch (e) { /* gone */ } }
+	});
+	save();
+}
+/** stops the running search (a route found so far stays) */
+function stop() {
+	if (!running()) return state();
+	S.stage = S.result ? 'found' : 'stopped';
+	S.message = S.result ? '' : 'The search was stopped before it found a route.';
+	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; try { kids[k].kill(); } catch (e) { /* gone */ } } });
+	save();
+	return state();
+}
+/** the last search's files: 'route.eetas' (when a route was found) or 'level.eelvl'; null when missing */
+function solveFile(what) {
+	if (what !== 'route.eetas' && what !== 'level.eelvl') return null;
+	const st = state();
+	if (what === 'route.eetas' && !st.result) return null;
+	const f = path.join(dir(), what);
+	if (!fs.existsSync(f)) return null;
+	const nice = `${safeName(st.name)}${what === 'route.eetas' ? ` route ${st.result.time.replace(':', 'm')}.eetas` : '.eelvl'}`;
+	return { file: f, name: nice };
+}
+
+// ---------------------------------------------------------------- a job from a found route (Watch / Optimize)
+/** b: { eelvlB64, eetasB64 } (else the last search's level and route), name. Returns the job's meta (jobs.importJob). */
+function makeJob(b) {
+	const J = require('./jobs.js');
+	const st = state();
+	const eelvl = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : fs.existsSync(path.join(dir(), 'level.eelvl')) ? fs.readFileSync(path.join(dir(), 'level.eelvl')) : null;
+	const eetas = b.eetasB64 ? Buffer.from(String(b.eetasB64), 'base64') : st.result && fs.existsSync(path.join(dir(), 'route.eetas')) ? fs.readFileSync(path.join(dir(), 'route.eetas')) : null;
+	if (!eelvl || !eelvl.length) throw new Error('missing eelvlB64 (the level)');
+	if (!eetas || !eetas.length) throw new Error('missing eetasB64 (the route; find one first)');
+	const name = String(b.name || st.name || 'Editor level').slice(0, 80);
+	// one spawn point: started after /reset or right after loading makes no difference
+	return J.importJob({ eelvl, eetas, name, eelvlName: `${safeName(name)}.eelvl`, eetasName: `${safeName(name)} route.eetas`, startMode: 'reset' });
+}
+
+/** stops a running search (the server is shutting down) */
+function shutdown() { for (const ch of kids) if (alive(ch)) { try { ch.kill(); } catch (e) { /* gone */ } } }
+
+module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
+	safeName, MAX_SIDE, MAX_CELLS };

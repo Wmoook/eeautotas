@@ -29,7 +29,6 @@ const HOMEP = (p) => require('path').join(require('os').homedir(), p);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const zlib = require('zlib');
 const http = require('http');
 const Module = require('module');
 const { spawn } = require('child_process');
@@ -81,20 +80,9 @@ function mkJson({ W = 16, H = 7, tiles = [], spawns = [[2, 4]] } = {}) {
 }
 const mkLevel = (o, opts) => E.prepareLevel(mkJson(o), opts);
 
-/** A minimal .eelvl writer (raw deflate, header + records in World.deserializeFromMessage's format). */
+/** An .eelvl from records (src/eelvl.js writeEelvl: raw deflate, header + records in World.deserializeFromMessage's format). */
 function writeEelvl({ W, H, records, name = 'review', gravity = 1 }) {
-	const utf = (s) => { const b = Buffer.from(s, 'utf8'); const h = Buffer.alloc(2); h.writeUInt16BE(b.length); return Buffer.concat([h, b]); };
-	const i32 = (v) => { const b = Buffer.alloc(4); b.writeInt32BE(v); return b; };
-	const u32 = (v) => { const b = Buffer.alloc(4); b.writeUInt32BE(v); return b; };
-	const f32 = (v) => { const b = Buffer.alloc(4); b.writeFloatBE(v); return b; };
-	const bool = (v) => Buffer.from([v ? 1 : 0]);
-	const us = (arr) => { const b = Buffer.alloc(4 + 2 * arr.length); b.writeUInt32BE(2 * arr.length); arr.forEach((v, k) => b.writeUInt16BE(v, 4 + 2 * k)); return b; };
-	const parts = [utf('review'), utf(name), i32(W), i32(H), f32(gravity), u32(0), utf(''), bool(false), utf(''), utf(''), i32(0), bool(true), utf('')];
-	for (const r of records) {
-		parts.push(i32(r.id), i32(r.layer || 0), us(r.xs), us(r.ys));
-		for (const a of r.args || []) parts.push(typeof a === 'string' ? utf(a) : i32(a));
-	}
-	return zlib.deflateRawSync(Buffer.concat(parts));
+	return V.writeEelvl({ width: W, height: H, records, name, owner: 'review', gravity, ownerId: '' });
 }
 /** block-9 records: the border of a W x H level, and (floorY) a floor row */
 function wallRecords(W, H, floorY) {

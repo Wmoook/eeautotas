@@ -33,6 +33,7 @@ h1 .coin { width: 22px; height: 22px; border-radius: 50%; background: radial-gra
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
 .pill.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, var(--line)); }
 .pill.no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+a.pill { color: var(--ink); text-decoration: none; } a.pill:hover { border-color: var(--gold); }
 .grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; }
@@ -247,7 +248,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 			<h1><span class="coin"></span>EE Auto TAS</h1>
 			<div class="sub">Everybody Edits Offline · the game's exact physics · keeps improving your run until you stop it</div>
 		</div>
-		<div class="pills" id="pills"></div>
+		<div class="pills"><a class="pill" href="/editor" title="Build a level (blocks, a start, the trophy) and let the GPU find a route to the trophy">&#9998; Level editor</a><div class="pills" id="pills"></div></div>
 	</header>
 	<div class="grid">
 		<div>
