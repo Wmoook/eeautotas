@@ -15,6 +15,7 @@
 #include "cudadrv.h"
 #include "eecore.h"
 #include "search.h"
+#include "beam.h"
 
 using namespace ee;
 
@@ -216,13 +217,14 @@ static int cmdPtx(int argc, char** argv) {
 	if (argc < 4) { fprintf(stderr, "usage: eegpu ptx <native dir> <out.ptx> --nvrtc=<dir with nvrtc64_120_0.dll> [--arch=compute_60]\n"); return 2; }
 	std::string dir = argv[2];
 	if (!cu::loadNvrtc(opt(argc, argv, "nvrtc", "."))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
-	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h");
-	const char* hdrs[] = { h1.c_str(), h2.c_str() };
-	const char* names[] = { "eecore.h", "search.h" };
+	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h"), h3 = readText(dir + "/beam.h");
+	const char* hdrs[] = { h1.c_str(), h2.c_str(), h3.c_str() };
+	const char* names[] = { "eecore.h", "search.h", "beam.h" };
 	cu::nvrtcProgram prog;
-	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 2, hdrs, names);
+	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 3, hdrs, names);
 	std::string arch = "--gpu-architecture=" + opt(argc, argv, "arch", "compute_60");
-	const char* opts[] = { arch.c_str(), "--fmad=false", "--std=c++17", "-lineinfo" };
+	std::string tw = "-DEE_ONLY_TW=" + opt(argc, argv, "tw", "8");
+	const char* opts[] = { arch.c_str(), "--fmad=false", "--std=c++17", tw.c_str() };
 	auto t0 = std::chrono::steady_clock::now();
 	int rc = cu::nvrtcCompileProgram(prog, 4, opts);
 	size_t ls = 0; cu::nvrtcGetProgramLogSize(prog, &ls);
@@ -267,13 +269,16 @@ struct Gpu {
 		return b;
 	}
 };
-static std::string defaultPtx() { return exeDir() + "\\eegpu.ptx"; }
+/** The kernels for a state size (eegpu_<tw>.ptx next to the exe, or --ptxdir). */
+static std::string ptxFor(int argc, char** argv, int tw) {
+	return opt(argc, argv, "ptxdir", exeDir().c_str()) + "\\eegpu_" + std::to_string(tw) + ".ptx";
+}
 
 static int twFor(int tailWords) { return tailWords <= 8 ? 8 : tailWords <= 32 ? 32 : tailWords <= 128 ? 128 : tailWords <= 512 ? 512 : 0; }
 
 static int cmdInfo(int argc, char** argv) {
 	Gpu g;
-	if (!g.open(opt(argc, argv, "ptx", defaultPtx().c_str()))) {
+	if (!g.open(ptxFor(argc, argv, 8))) {
 		printf("{\"gpu\":null,\"why\":%s}\n", jsonStr(cu::lastError).c_str());
 		return 0;
 	}
@@ -286,7 +291,16 @@ static int cmdInfo(int argc, char** argv) {
 		cu::cuMemcpyDtoH_v2(sz, out.p, 16);
 		layoutOk = sz[0] == (int)sizeof(State<8>) && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level);
 	}
-	printf("{\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]}\n", g.json().c_str(), layoutOk ? "true" : "false",
+	std::string fa;
+	for (int tw : { 8 }) {
+		cu::CUfunction fs = g.fn("search_" + std::to_string(tw));
+		int regs = -1, local = -1, maxT = -1;
+		if (fs) { cu::cuFuncGetAttribute(&regs, 4, fs); cu::cuFuncGetAttribute(&local, 3, fs); cu::cuFuncGetAttribute(&maxT, 0, fs); }
+		char b[160]; snprintf(b, sizeof b, "%s\"search_%d\":{\"regs\":%d,\"localBytes\":%d,\"maxThreads\":%d}", fa.empty() ? "" : ",", tw, regs, local, maxT);
+		fa += b;
+	}
+	printf("{\"kernels\":{%s},", fa.c_str());
+	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]}\n", g.json().c_str(), layoutOk ? "true" : "false",
 		sz[0], sz[1], sz[2], sz[3], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level));
 	return 0;
 }
@@ -320,12 +334,13 @@ static bool gpuTrace(Gpu& g, const LevelBlob& B, const std::vector<uint8_t>& m, 
 static int cmdTraceGpu(int argc, char** argv) {
 	LevelBlob B = readLevel(argv[2]);
 	std::vector<uint8_t> m = readMasks(argv[3]);
+	const int tw = twFor(B.get("tailWords"));
+	if (!tw) { fprintf(stderr, "this level's state is too large for the GPU engine\n"); return 3; }
 	Gpu g;
-	if (!g.open(opt(argc, argv, "ptx", defaultPtx().c_str()))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
+	if (!g.open(ptxFor(argc, argv, tw))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
 	std::vector<uint64_t> out;
 	int32_t info[4] = { -1, -1, 0, -1 };
 	double sec = 0;
-	const int tw = twFor(B.get("tailWords"));
 	bool ok = tw == 8 ? gpuTrace<8>(g, B, m, out, info, sec) : tw == 32 ? gpuTrace<32>(g, B, m, out, info, sec)
 		: tw == 128 ? gpuTrace<128>(g, B, m, out, info, sec) : tw == 512 ? gpuTrace<512>(g, B, m, out, info, sec) : false;
 	if (!ok) { fprintf(stderr, "GPU trace failed: %s\n", tw ? cu::lastError.c_str() : "level state too large for the GPU"); return 4; }
@@ -349,8 +364,9 @@ struct Searcher {
 	std::vector<uint8_t> masks;    // the reference, cut at its finish (n ticks)
 	int n = 0, runTicks = 0;
 	std::vector<uint8_t> snaps;    // S(0..n), sizeof(S) each
-	std::vector<double> X, Y;
-	std::vector<uint64_t> H, H2;   // hash(nc), hash2(nc) of S(t)
+	std::vector<double> X, Y, SX, SY;
+	std::vector<uint64_t> H, H2;
+	std::vector<uint32_t> qbits;   // hash(nc), hash2(nc) of S(t)
 	bool nocoins;
 	std::vector<uint64_t> htKeys; std::vector<int32_t> htVals; uint32_t htMask = 0;
 	std::vector<uint32_t> pix; int pixW = 0, pixH = 0;
@@ -365,7 +381,7 @@ struct Searcher {
 		auto push = [&]() {
 			const uint8_t* p = (const uint8_t*)st;
 			snaps.insert(snaps.end(), p, p + sizeof(S));
-			X.push_back(st->px); Y.push_back(st->py);
+			X.push_back(st->px); Y.push_back(st->py); SX.push_back(st->speed_x); SY.push_back(st->speed_y);
 			H.push_back(sim.hash(nocoins)); H2.push_back(sim.hash2(nocoins));
 		};
 		push();
@@ -392,7 +408,13 @@ struct Searcher {
 			while (htKeys[slot] != 0 && htKeys[slot] != key) slot = (slot + 1) & htMask;
 			htKeys[slot] = key; htVals[slot] = t;
 		}
-		// pixel prefilter: 1 bit per level pixel, set where the reference's box corner is at some tick
+		// prefilter: the quadKey bit of every reference state
+		qbits.assign((1u << QBITS_LOG2) / 32, 0);
+		for (int t = 0; t <= n; t++) {
+			const uint32_t bit = (uint32_t)(quadKey(X[t], Y[t], SX[t], SY[t]) >> (64 - QBITS_LOG2));
+			qbits[bit >> 5] |= 1u << (bit & 31);
+		}
+		// pixel prefilter (unused by the kernel now): 1 bit per level pixel
 		pixW = L.W * 16; pixH = L.H * 16;
 		pix.assign(((size_t)pixW * pixH + 31) / 32, 0);
 		for (int t = 0; t <= n; t++) {
@@ -455,16 +477,16 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	const int n = S.n;
 	const int t0 = std::max(0, std::min(from, n - 1)), t1 = toArg < 0 ? n : std::max(t0 + 1, std::min(toArg, n));
 	Gpu g;
-	if (!g.open(opt(argc, argv, "ptx", defaultPtx().c_str()))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fsearch = g.fn("search_" + std::to_string(TW));
 	if (!fsearch) { printf("{\"error\":\"search kernel missing\"}\n"); return 4; }
 	// device data
-	cu::Buf dl, dsnap, dmask, dX, dY, dK, dV, dpix, dhits, dcount, dstats;
+	cu::Buf dl, dsnap, dmask, dX, dY, dK, dV, dpix, dq, dhits, dcount, dstats;
 	const uint32_t hitCap = 1u << 18;
 	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dsnap.upload(S.snaps.data(), S.snaps.size()) &&
 		dmask.upload(S.masks.data(), S.masks.size()) && dX.upload(S.X.data(), 8 * S.X.size()) && dY.upload(S.Y.data(), 8 * S.Y.size()) &&
 		dK.upload(S.htKeys.data(), 8 * S.htKeys.size()) && dV.upload(S.htVals.data(), 4 * S.htVals.size()) &&
-		dpix.upload(S.pix.data(), 4 * S.pix.size()) && dhits.alloc(sizeof(Hit) * hitCap) && dcount.alloc(4) && dstats.alloc(8 * 8);
+		dpix.upload(S.pix.data(), 4 * S.pix.size()) && dq.upload(S.qbits.data(), 4 * S.qbits.size()) && dhits.alloc(sizeof(Hit) * hitCap) && dcount.alloc(4) && dstats.alloc(8 * 8);
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcount.p, 0, 4); cu::cuMemsetD8_v2(dstats.p, 0, 64);
 	SearchParams P;
@@ -475,6 +497,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	P.X = (const double*)(uintptr_t)dX.p; P.Y = (const double*)(uintptr_t)dY.p;
 	P.htKeys = (const u64*)(uintptr_t)dK.p; P.htVals = (const i32*)(uintptr_t)dV.p; P.htMask = S.htMask;
 	P.pix = (const u32*)(uintptr_t)dpix.p; P.pixW = S.pixW; P.pixH = S.pixH;
+	P.qbits = (const u32*)(uintptr_t)dq.p;
 	P.nocoins = nc; P.horizon = horizon; P.drift = drift;
 	P.hits = (Hit*)(uintptr_t)dhits.p; P.hitCount = (u32*)(uintptr_t)dcount.p; P.hitCap = hitCap;
 	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
@@ -496,12 +519,19 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	while (elapsed() < seconds && !famList.empty()) {
 		const int fam = famList[fi];
 		const bool random = fam >= FAM_PERT;
-		if (!firstPass && !random) { fi = (fi + 1) % famList.size(); if (fi == 0) firstPass = false; continue; }
+		if (!firstPass && !random) {
+			// the systematic families run once; stop when there is nothing else to do
+			bool anyRandom = false;
+			for (int f2 : famList) if (f2 >= FAM_PERT) anyRandom = true;
+			if (!anyRandom) break;
+			fi = (fi + 1) % famList.size();
+			continue;
+		}
 		const int V = random ? 256 : familyVariants(fam);
 		int nT = std::max(1, (int)(tPerLaunch * 216.0 / V));
 		nT = std::min(nT, t1 - tCursor);
 		P.family = fam; P.t0 = tCursor; P.nT = nT; P.V = V; P.seed = seed;
-		const unsigned threads = (unsigned)nT * V, block = 128, grid = (threads + block - 1) / block;
+		const unsigned threads = (unsigned)nT * V, block = 128, grid = (threads + block - 1) / block;   // one thread per candidate (t fastest)
 		void* args[] = { &P };
 		auto l0 = std::chrono::steady_clock::now();
 		if (cu::cuLaunchKernel(fsearch, grid, 1, 1, block, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize()) {
@@ -582,6 +612,90 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	return 0;
 }
 
+// ------------------------------------------------------------------ bench: raw engine speed, GPU and native CPU
+template <int TW>
+static int runBench(int argc, char** argv, const LevelBlob& B) {
+	const double seconds = atof(opt(argc, argv, "seconds", "3").c_str());
+	const int ticks = atoi(opt(argc, argv, "ticks", "256").c_str());
+	State<TW>* st = (State<TW>*)calloc(1, sizeof(State<TW>));
+	Level L = B.level(B.bytes.data());
+	{ Sim<TW> sim(L, *st); sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed); }
+	// native CPU, one thread (the same random sticky inputs)
+	double cpuRate = 0;
+	{
+		State<TW>* c = (State<TW>*)malloc(sizeof(State<TW>));
+		uint64_t n = 0;
+		auto t0 = std::chrono::steady_clock::now();
+		double el = 0;
+		for (uint64_t lane = 0; el < std::min(1.0, seconds / 3); lane++) {
+			memcpy(c, st, sizeof(State<TW>));
+			Sim<TW> sim(L, *c);
+			u64 r = splitmix(12345 ^ lane);
+			int m = 0;
+			for (int k = 0; k < ticks; k++) {
+				r = splitmix(r);
+				if (k == 0 || (r & 255) < 26) m = option((int)((r >> 8) % 18));
+				Input in = maskInput(m);
+				sim.tick(in);
+				n++;
+			}
+			el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+		}
+		cpuRate = n / el;
+		free(c);
+	}
+	Gpu g;
+	if (!g.open(ptxFor(argc, argv, TW))) {
+		printf("{\"gpu\":null,\"why\":%s,\"nativeCpuSingle\":%.0f}\n", jsonStr(cu::lastError).c_str(), cpuRate);
+		return 0;
+	}
+	cu::CUfunction f = g.fn("bench_" + std::to_string(TW));
+	cu::Buf dl, ds, dout;
+	if (!f || !dl.upload(B.bytes.data(), B.bytes.size()) || !ds.upload(st, sizeof(State<TW>)) || !dout.alloc(8)) {
+		printf("{\"gpu\":null,\"why\":%s,\"nativeCpuSingle\":%.0f}\n", jsonStr(cu::lastError).c_str(), cpuRate);
+		return 0;
+	}
+	Level dL = B.level((const uint8_t*)(uintptr_t)dl.p);
+	const u8* s0 = (const u8*)(uintptr_t)ds.p;
+	unsigned long long* o = (unsigned long long*)(uintptr_t)dout.p;
+	cu::cuMemsetD8_v2(dout.p, 0, 8);
+	int tk = ticks;
+	unsigned threads = (unsigned)g.d.sms * 1024;
+	auto launch = [&](u64 seed) {
+		void* a[] = { &dL, &s0, &tk, &seed, &o };
+		return !cu::cuLaunchKernel(f, threads / 128, 1, 1, 128, 1, 1, 0, nullptr, a, nullptr) && !cu::cuCtxSynchronize();
+	};
+	if (!launch(1)) { printf("{\"gpu\":null,\"why\":\"bench kernel failed\"}\n"); return 0; }   // warm-up (clocks up)
+	cu::cuMemsetD8_v2(dout.p, 0, 8);
+	auto t0 = std::chrono::steady_clock::now();
+	double el = 0;
+	u64 seed = 2;
+	while (el < seconds) {
+		if (!launch(seed++)) break;
+		el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	}
+	unsigned long long n = 0;
+	cu::cuMemcpyDtoH_v2(&n, dout.p, 8);
+	printf("{\"gpu\":%s,\"ticksPerSec\":%.0f,\"ticks\":%llu,\"seconds\":%.2f,\"nativeCpuSingle\":%.0f}\n", g.json().c_str(), n / el, n, el, cpuRate);
+	free(st);
+	return 0;
+}
+
+static int cmdBench(int argc, char** argv) {
+	if (argc < 3) { fprintf(stderr, "usage: eegpu bench <level.bin> [--seconds=3] [--ticks=256]\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	switch (twFor(B.get("tailWords"))) {
+	case 8: return runBench<8>(argc, argv, B);
+	case 32: return runBench<32>(argc, argv, B);
+	case 128: return runBench<128>(argc, argv, B);
+	case 512: return runBench<512>(argc, argv, B);
+	}
+	printf("{\"gpu\":null,\"why\":\"level state too large\"}\n");
+	return 0;
+}
+
+#include "beamhost.h"
+
 static int cmdSearch(int argc, char** argv) {
 	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T]\n"); return 2; }
 	LevelBlob B = readLevel(argv[2]);
@@ -605,6 +719,8 @@ int main(int argc, char** argv) {
 	if (cmd == "info") return cmdInfo(argc, argv);
 	if (cmd == "ptx") return cmdPtx(argc, argv);
 	if (cmd == "search") return cmdSearch(argc, argv);
+	if (cmd == "bench") return cmdBench(argc, argv);
+	if (cmd == "beam") return cmdBeam(argc, argv);
 	fprintf(stderr, "unknown command %s\n", argv[1]);
 	return 2;
 }

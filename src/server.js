@@ -16,6 +16,7 @@ const { spawn } = require('child_process');
 const C = require('./common.js');
 const J = require('./jobs.js');
 const V = require('./viewer.js');
+const G = require('./gpu.js');
 const BENCH = require('./bench.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
@@ -25,12 +26,14 @@ const PORT = +(args.port || 47823);
 const children = new Map();   // job id -> grind ChildProcess started by this server (stopped when the server stops)
 const focusKids = new Map();  // job id -> focus ChildProcess started by this server
 
-// ---------------------------------------------------------------- processor (CPU benchmark; why no GPU)
-const GPU_WHY = 'Exact EE physics needs 64-bit floating point math (every run must replay bit for bit like eeo-tas). WebGPU has no ' +
-	'64-bit floats at all, and gaming GPUs run them at about 1/64 of their normal speed; the engine is also full of branches (1 px ' +
-	'collision steps, portals, doors) that GPUs handle badly. The CPU is faster for this.';
+// ---------------------------------------------------------------- processors (CPU and GPU benchmarks)
+// GPU mode = the CPU stages plus the GPU searcher (src/gpusearch.js on native/eegpu.exe, NVIDIA GPUs): both engines
+// are bit-exact copies of eeo-tas's physics (test/gpu.js), and every GPU find is re-checked by the exact JS engine.
 let bench = BENCH.cached();                    // the benchmark record (src/data/_system.json), measured at startup when missing
 let benchState = bench ? 'done' : 'pending';
+let gpuBench = G.cachedBench();                // data/_gpu.json: { gpu: {name, ...} | null, why, ticksPerSec }
+let gpuState = gpuBench ? 'done' : 'pending';
+const gpuAvailable = () => !!(gpuBench && gpuBench.gpu && gpuBench.ticksPerSec > 0);
 const CPU_MODEL = (os.cpus()[0] && os.cpus()[0].model || '').trim();   // the detected CPU (texts name it: C.cpuName)
 function systemInfo() {
 	const n = os.cpus().length;
@@ -40,10 +43,15 @@ function systemInfo() {
 		processors: [
 			{ id: 'cpu', name: 'CPU', model: C.cpuName(CPU_MODEL), text: BENCH.describe(bench), available: true, threads: n, single: bench ? bench.single : null,
 				all: bench ? bench.all : null, peakThreads: bench ? bench.peakThreads : null, estimate: est },
-			{ id: 'gpu', name: 'GPU', available: false, why: GPU_WHY },
+			gpuAvailable()
+				? { id: 'gpu', name: 'GPU + CPU', model: gpuBench.gpu.name, available: true, ticksPerSec: gpuBench.ticksPerSec, text: G.describeBench(gpuBench), state: gpuState }
+				: { id: 'gpu', name: 'GPU + CPU', available: false, state: gpuState,
+					why: gpuState === 'pending' || gpuState === 'measuring' ? 'measuring the GPU (once, a few seconds)...' : (gpuBench && gpuBench.why) || 'no NVIDIA GPU found' },
 		],
-		faster: 'cpu',
-		note: 'The CPU is faster: exact EE physics is 64-bit floating point math with many branches, which GPUs run far slower (see README "CPU or GPU").',
+		faster: gpuAvailable() && bench && gpuBench.ticksPerSec > bench.all ? 'gpu' : 'cpu',
+		note: gpuAvailable() && bench
+			? `Measured on the same random-input test: ${C.cpuName(CPU_MODEL)} ${(bench.all / 1e6).toFixed(1)} M ticks/s on all threads, ${gpuBench.gpu.name} ${(gpuBench.ticksPerSec / 1e6).toFixed(0)} M ticks/s. GPU mode runs both.`
+			: 'The CPU runs the optimizer; GPU mode (NVIDIA graphics cards) adds a GPU search next to it.',
 	};
 }
 
@@ -88,10 +96,10 @@ function levelJson(id) {
 const ENDPOINTS = [
 	['GET', '/api', 'this list'],
 	['GET', '/api/state', 'all jobs (summaries, with the live speed of a running job), the CPU model and threads, the processor benchmark'],
-	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (not available, why)'],
+	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (name and measured speed, or why not available), and which is faster'],
 	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load"} (files as base64 of their raw bytes)'],
 	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, live speed, inbox, focus, files)'],
-	['POST', '/api/jobs/:id/start', 'start / resume optimizing: JSON {workers, processor: "cpu"}'],
+	['POST', '/api/jobs/:id/start', 'start / resume optimizing: JSON {workers, processor: "cpu" | "gpu"} ("gpu" = the CPU stages plus the GPU searcher)'],
 	['POST', '/api/jobs/:id/stop', 'pause'],
 	['POST', '/api/jobs/:id/finish', 'stop and write the final report (report.json)'],
 	['DELETE', '/api/jobs/:id', 'delete the job and its files'],
@@ -139,9 +147,9 @@ async function readJsonBody(req, limit) {
 const validId = (id) => /^[a-z0-9-]+$/.test(id) && fs.existsSync(path.join(J.jobDir(id), 'meta.json'));
 const listJobs = () => J.listJobs(new Map([...children].filter(([, ch]) => ch.exitCode === null).map(([id, ch]) => [id, ch.pid])));
 
-function startJob(id, workers) {
+function startJob(id, workers, opts) {
 	for (const [other, ch] of children) if (other !== id && ch.exitCode === null) stopJob(other);
-	const ch = J.startJob(id, workers);
+	const ch = J.startJob(id, workers, opts);
 	if (ch) { children.set(id, ch); ch.on('exit', () => { if (children.get(id) === ch) children.delete(id); }); }
 }
 function stopJob(id) {
@@ -189,7 +197,8 @@ const server = http.createServer(async (req, res) => {
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
 			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, cpuModel: CPU_MODEL, now: Date.now(), benchState,
-				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points, model: bench.model } : null });
+				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points, model: bench.model } : null,
+				gpu: systemInfo().processors[1], faster: systemInfo().faster });
 		}
 		if (req.method === 'GET' && parts[1] === 'system' && parts.length === 2) return send(res, 200, systemInfo());
 		if (req.method === 'POST' && parts[1] === 'jobs' && parts.length === 2) {
@@ -208,10 +217,14 @@ const server = http.createServer(async (req, res) => {
 			if (req.method === 'POST' && what === 'start') {
 				const b = await readJsonBody(req, 1 << 16);
 				const proc = String(b.processor || 'cpu').toLowerCase();
-				if (proc === 'gpu') throw new Error(`GPU mode is not available: ${GPU_WHY}`);
-				if (proc !== 'cpu') throw new Error(`unknown processor "${b.processor}" (cpu)`);
-				startJob(id, b.workers);
-				return send(res, 200, { ok: true, processor: 'cpu' });
+				if (proc !== 'cpu' && proc !== 'gpu') throw new Error(`unknown processor "${b.processor}" (cpu or gpu)`);
+				if (proc === 'gpu') {
+					if (!gpuAvailable()) throw new Error(`GPU mode is not available: ${systemInfo().processors[1].why}`);
+					const why = G.unsupported(J.loadJobLevel(id));
+					if (why) throw new Error(`GPU mode cannot run this level: ${why}`);
+				}
+				startJob(id, b.workers, { gpu: proc === 'gpu' });
+				return send(res, 200, { ok: true, processor: proc });
 			}
 			if (req.method === 'GET' && what === 'trajectory') return send(res, 200, trajectoryJson(id, q('which') || 'best'));
 			if (req.method === 'GET' && what === 'level') return send(res, 200, levelJson(id));
@@ -318,16 +331,29 @@ function main() {
 		// needs an idle CPU: a few seconds, then cached in src/data/_system.json)
 		const resume = () => {
 			const r = C.readJSON(J.RUNNING_FILE, null);
-			if (r && r.id && validId(r.id) && !J.runningPid(r.id)) { console.log(`[app] resuming ${r.id}`); startJob(r.id, r.workers); }
+			if (r && r.id && validId(r.id) && !J.runningPid(r.id)) {
+				console.log(`[app] resuming ${r.id}${r.gpu ? ' (GPU on)' : ''}`);
+				startJob(r.id, r.workers, { gpu: !!r.gpu && gpuAvailable() });
+			}
 		};
-		if (bench) { resume(); return; }
+		// the GPU benchmark (once per GPU / build, a few seconds), after the CPU one so they do not disturb each other
+		const gpuMeasure = () => {
+			if (gpuBench) return Promise.resolve();
+			gpuState = 'measuring';
+			console.log('[app] measuring the GPU (once, a few seconds)...');
+			return G.runBench().then((r) => {
+				gpuBench = r; gpuState = 'done';
+				console.log(`[app] ${G.describeBench(r)}`);
+			}).catch((e) => { gpuState = 'error'; console.log(`[app] GPU benchmark failed: ${e.message}`); });
+		};
+		if (bench) { gpuMeasure().finally(resume); return; }
 		benchState = 'measuring';
 		console.log(`[app] measuring the engine speed of the ${BENCH.describe(null)}: once, a few seconds...`);
 		const busy = C.jobIds().some((id) => J.runningPid(id));   // a grind started from the CLI already uses the CPU
 		BENCH.run({ busy }).then((rec) => {
 			bench = rec; benchState = 'done';
 			console.log(`[app] ${BENCH.describe(rec)}; all ${rec.threads} threads together: ${(rec.all / 1e6).toFixed(1)} M ticks/s${rec.allMeasured ? '' : ' (estimated)'}`);
-		}).catch((e) => { benchState = 'error'; console.log(`[app] benchmark failed: ${e.message}`); }).finally(resume);
+		}).catch((e) => { benchState = 'error'; console.log(`[app] benchmark failed: ${e.message}`); }).finally(() => gpuMeasure().finally(resume));
 	});
 }
 if (require.main === module) main();

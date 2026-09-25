@@ -50,8 +50,8 @@ That is all: no `npm install`, no Godot, no Python.
    thread list shows the measured speed for each count, e.g. "8 · 26 M/s (fastest)". On many laptops more threads
    is not faster: pick the fastest count or fewer, and keep it cool. While it optimizes, the run shows its real speed
    right now ("Speed now: 12.4 M ticks/s on the CPU (8 threads)") and how many ticks it has simulated. One run
-   optimizes at a time. The **processor** is the CPU; GPU mode is not available, and the page says why (see "CPU or
-   GPU?" below).
+   optimizes at a time. The **processor**: CPU, or GPU + CPU on computers with an NVIDIA graphics card; the page
+   shows the measured speed of both and marks the faster (see "CPU or GPU?" below).
 3. **Notifications:** every improvement pops up in the page. If you allow browser notifications, you also get one
    while the tab is in the background. The tab title shows the time saved. The chart and the list show every
    improvement and which search found it.
@@ -105,24 +105,36 @@ the run's header shows it when it matters. From a terminal: `node src/tas.js imp
 
 ## CPU or GPU?
 
-The app runs on the **CPU**, and that is the faster choice for this job. GPU mode is shown but not available:
+Pick the **processor** next to Start. The page shows the measured speed of both on your computer and marks the faster.
 
-- **It must be exact.** Every run is replayed bit for bit like eeo-tas: the same 64-bit floating point operations
-  in the same order (EE's physics works in `Number`, an IEEE double). A result that is off in the last bit can take a
-  different path a few thousand ticks later, and the optimizer would hand you a run that fails in the game.
-- **WebGPU (the GPU in a browser) has no 64-bit floats at all**, only 32-bit (and 16-bit). Emulating doubles with
-  pairs of 32-bit floats is slow and does not round exactly like IEEE doubles.
-- **Gaming GPUs run 64-bit math at about 1/64 of their 32-bit speed** (GeForce cards; only data-center cards are
-  faster). With CUDA or Vulkan an exact port would be possible, but slow.
-- **The physics is branchy.** Each tick moves the ball in 1 px steps with a collision test per step, and portals,
-  doors, keys, switches and deaths all branch. The searches try thousands of different inputs, so neighboring GPU
-  threads would take different branches almost at once, and GPUs are slow at that. The searches also keep hash
-  tables of states and snapshots, which suit a CPU.
-- **The numbers** (one example machine, an Intel Core i7-11800H laptop): one CPU thread runs about 5-7 million ticks
-  per second, all threads together about 20-30 million; a desktop CPU does more. An exact GPU port would have to beat
-  that with 64-bit math at 1/64 speed and heavy branch divergence; it would very likely be slower, and it would be a
-  second engine that would have to be proven bit-identical. So there is one exact engine, and it runs on the CPU.
-  `GET /api/system` shows the measurement for the CPU the app runs on.
+- **CPU**: the optimizer's search tools on your CPU threads.
+- **GPU + CPU** (NVIDIA graphics cards): the same CPU optimizer, plus a GPU search running next to it the whole time.
+  The GPU starts from every tick of your current best run, tries millions of small input changes at once
+  (holds, deletions, pairs of changes, random perturbations), and finds exact shortcuts: variants that reach a later
+  state of the run in fewer ticks. They are combined into a faster run and handed to the optimizer, which checks
+  it once more before accepting it. Page and log say "GPU".
+
+**It is exact.** The GPU runs a second copy of EE's physics (`native/eecore.h`, C++), written to do every 64-bit
+floating point operation of the main engine in the same order, so the results are bit for bit the same. `test/gpu.js`
+proves it: both engines replay the real runs, dozens of real levels with random inputs and generated levels with
+every block type, and must give the same state after **every tick** (on the CPU build and on the GPU). On top of
+that, every shortcut the GPU reports is replayed again on the CPU with two independent state hashes, and every run
+goes through the main engine and the acceptance rule before it counts. A GPU mistake can cost time, never give you
+a run that fails in eeo-tas.
+
+Good to know:
+
+- Needs an NVIDIA GPU and a recent driver (2024 or newer). Nothing else to install: the `.exe` contains the GPU
+  engine. The first time, the driver compiles it for your GPU (about 10 seconds, during the one-time GPU benchmark).
+- Browser GPUs (WebGPU) cannot do this: they have no 64-bit floats. Gaming GPUs run 64-bit math at 1/64 of their
+  normal speed, so the GPU engine does comparisons and conversions with exact integer tricks instead
+  (`native/eecore.h`), which roughly doubled its speed.
+- Laptops: GPU and CPU share the cooling. With both working flat out, the GPU gets hot and slows itself down; the
+  live speed on the page shows what you actually get.
+- A level can be too unusual for the GPU engine (a gravity setting that is not a normal number, or a gigantic
+  number of switches); the page then says why, and the CPU does everything.
+- From the source: `node tools/build-native.js` builds the GPU engine (it downloads zig and NVIDIA's NVRTC into
+  `tools/.cache` once), and `node test/gpu.js --gpu` runs the exactness proof.
 
 ## What "random portal odds" mean
 
@@ -185,7 +197,7 @@ both.
   optimizer only counts a finish that happens while the file is still playing.
 - All times are the in-game timer, the same number eeo-tas shows. It starts at your first input, so ticks
   before that do not count.
-- Heavy CPU use for as long as it runs. CPU only (see "CPU or GPU?").
+- Heavy CPU (and in GPU mode GPU) use for as long as it runs. GPU mode needs an NVIDIA graphics card (see "CPU or GPU?").
 
 ## Using it with an AI assistant (optional)
 

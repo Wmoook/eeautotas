@@ -299,9 +299,9 @@ let selected = store.get('tasopt.sel');
 let files = { eelvl: null, eetas: null };
 let busy = false;
 const START_LABEL = { reset: 'after /reset', load: 'right after loading the level' };
-const GPU_WHY = 'Exact EE physics needs 64-bit floating point math: every run must replay bit for bit like eeo-tas. WebGPU has no 64-bit floats at all, ' +
-	'and gaming GPUs run them at about 1/64 of their normal speed. The engine is also full of branches (1 px collision steps, portals, doors) ' +
-	'that GPUs handle badly. The CPU is faster for this.';
+const GPU_HOW = 'GPU mode runs a second, native copy of the exact EE physics on an NVIDIA graphics card (bit for bit the same as eeo-tas, ' +
+	'checked tick by tick against the main engine). It tries millions of input variants from your run\'s own states at once and hands every ' +
+	'proven shortcut to the optimizer, which checks it again before it is accepted. The CPU optimizer keeps running next to it.';
 
 // ------------------------------------------------------------ upload
 function setFiles(list) {
@@ -412,17 +412,36 @@ function cpuName() {
 		.replace(/\s+\d+-Core Processor\b/i, '').replace(/\s+(CPU|Processor)\b/gi, '').replace(/\s+/g, ' ').trim();
 	return s || raw || 'CPU';
 }
+/** the GPU line of the processor note: measured speed and which is faster, or why there is no GPU mode */
+function gpuText() {
+	const g = state.gpu;
+	const how = `<span class="why" title="${esc(GPU_HOW)}">how?</span>`;
+	if (!g) return '';
+	if (!g.available) return g.state === 'measuring' || g.state === 'pending' ? `<span class="spin"></span>Measuring the GPU (once, a few seconds)…` : `GPU mode: not available (${esc(g.why || 'no NVIDIA GPU found')}).`;
+	const b = state.bench;
+	const faster = b ? (g.ticksPerSec > b.all ? `<b>the GPU is faster</b> (${(g.ticksPerSec / b.all).toFixed(1)}x all CPU threads)` : `the CPU is faster (${(b.all / g.ticksPerSec).toFixed(1)}x the GPU)`) : '';
+	return `GPU: <b>${esc(g.model)}</b>: ${mts(g.ticksPerSec)} ticks/s (measured)${faster ? `, ${faster}` : ''}. GPU mode runs the GPU search next to the CPU optimizer (${how}).`;
+}
 function procText(n, running) {
 	const b = state.bench;
-	const why = `<span class="why" title="${esc(GPU_WHY)}">why?</span>`;
 	const cpu = `<b>${esc(cpuName())}</b>`;
-	if (!b) return state.benchState === 'measuring' ? `<span class="spin"></span>Measuring the engine speed of the ${cpu} (${state.cpus} threads; once, a few seconds)… · GPU: not available, the CPU is faster for exact EE physics (${why})`
-		: `CPU: ${cpu} (${state.cpus} threads) · GPU: not available, the CPU is faster for exact EE physics (${why})`;
+	if (!b) return state.benchState === 'measuring' ? `<span class="spin"></span>Measuring the engine speed of the ${cpu} (${state.cpus} threads; once, a few seconds)… ${gpuText()}`
+		: `CPU: ${cpu} (${state.cpus} threads). ${gpuText()}`;
 	const est = estimate(b, n);
 	const peak = b.peakThreads && b.peakThreads < b.threads ? `, fastest with ${b.peakThreads} threads` : '';
 	return `${running ? 'Running on the' : 'Processor:'} <b>CPU, ${n} thread${n === 1 ? '' : 's'} – about ${mts(est)} ticks/s</b> in the benchmark. ` +
-		`${cpu} (${b.threads} threads): ${mts(b.single)} ticks/s per thread${peak} (measured). ` +
-		`The CPU is the faster one here: GPU mode is not available because exact EE physics needs 64-bit math (${why}).`;
+		`${cpu} (${b.threads} threads): ${mts(b.single)} ticks/s per thread${peak} (measured). ${gpuText()}`;
+}
+/** the processor choice: remembered per browser; default = the faster one */
+function procOptions() {
+	const g = state.gpu;
+	const saved = store.get('tasopt.proc');
+	const want = saved === 'cpu' || saved === 'gpu' ? saved : (state.faster === 'gpu' ? 'gpu' : 'cpu');
+	const gpuOk = !!(g && g.available);
+	const pick = want === 'gpu' && gpuOk ? 'gpu' : 'cpu';
+	const tag = (p) => (state.faster === p ? ' (faster)' : '');
+	return `<option value="cpu"${pick === 'cpu' ? ' selected' : ''}>CPU${tag('cpu')}</option>` +
+		`<option value="gpu"${pick === 'gpu' ? ' selected' : ''}${gpuOk ? '' : ' disabled'}>${gpuOk ? `GPU + CPU${tag('gpu')}` : 'GPU (not available)'}</option>`;
 }
 function renderPills() {
 	const running = state.jobs.find((j) => j.running);
@@ -545,7 +564,7 @@ function renderDetail() {
 			<div class="row">
 				<button class="watch" id="watchBtn" title="Play the current best run in the level, with your original .eetas as a ghost (the optimizer keeps running)">Watch</button>
 				${j.running ? `<button class="stop" id="stopBtn">Pause</button><button class="primary" id="finishBtn">Finish run</button>`
-					: `<label class="lab">processor <select id="proc" title="${esc(GPU_WHY)}"><option value="cpu" selected>CPU (faster)</option><option value="gpu" disabled>GPU (not available)</option></select></label>` +
+					: `<label class="lab">processor <select id="proc" title="${esc(GPU_HOW)}">${procOptions()}</select></label>` +
 					`<label class="lab">threads <select id="workers">${opts}</select></label><button class="go" id="startBtn">${j.round || j.savedTicks > 0 ? 'Resume' : 'Start'}</button>` +
 					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
 			</div>
@@ -579,6 +598,7 @@ function renderDetail() {
 	</div>`;
 	const go = $('startBtn'), st = $('stopBtn');
 	if ($('workers')) $('workers').onchange = () => { $('procNote').innerHTML = procText(+$('workers').value, false); };
+	if ($('proc')) $('proc').onchange = () => store.set('tasopt.proc', $('proc').value);
 	if (go) go.onclick = async () => {
 		go.disabled = true;
 		try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { /* none */ }

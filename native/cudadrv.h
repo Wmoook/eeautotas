@@ -38,6 +38,7 @@ CU_FN(CUresult, cuCtxSynchronize, (void))
 CU_FN(CUresult, cuGetErrorString, (CUresult, const char**))
 CU_FN(CUresult, cuCtxSetLimit, (int, size_t))
 CU_FN(CUresult, cuCtxGetLimit, (size_t*, int))
+CU_FN(CUresult, cuFuncGetAttribute, (int*, int, CUfunction))
 
 typedef int nvrtcResult; typedef void* nvrtcProgram;
 CU_FN(nvrtcResult, nvrtcVersion, (int*, int*))
@@ -69,7 +70,7 @@ inline bool loadDriver() {
 	L(cuInit) L(cuDriverGetVersion) L(cuDeviceGetCount) L(cuDeviceGet) L(cuDeviceGetName) L(cuDeviceGetAttribute)
 	L(cuDeviceTotalMem_v2) L(cuCtxCreate_v2) L(cuCtxDestroy_v2) L(cuModuleLoadDataEx) L(cuModuleGetFunction)
 	L(cuMemAlloc_v2) L(cuMemFree_v2) L(cuMemcpyHtoD_v2) L(cuMemcpyDtoH_v2) L(cuMemsetD8_v2) L(cuLaunchKernel)
-	L(cuCtxSynchronize) L(cuGetErrorString) L(cuCtxSetLimit) L(cuCtxGetLimit)
+	L(cuCtxSynchronize) L(cuGetErrorString) L(cuCtxSetLimit) L(cuCtxGetLimit) L(cuFuncGetAttribute)
 #undef L
 	return true;
 }

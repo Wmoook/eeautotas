@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const NATIVE = path.join(ROOT, 'native');
@@ -31,7 +31,7 @@ function fetchTool(name) {
 	return dir;
 }
 
-function main() {
+async function main() {
 	if (process.platform !== 'win32') throw new Error('the native build targets Windows');
 	const zig = path.join(fetchTool('zig'), 'zig.exe');
 	const nvrtc = path.join(fetchTool('nvrtc'), 'bin');
@@ -43,10 +43,16 @@ function main() {
 		'-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-nullability-completeness', path.join(NATIVE, 'eegpu.cpp'), '-o', exe],
 		{ stdio: ['ignore', 'inherit', 'inherit'] });
 	for (const f of fs.readdirSync(OUT)) if (f.endsWith('.pdb') || f.endsWith('.lib')) fs.rmSync(path.join(OUT, f), { force: true });
-	console.log('[native] compiling the GPU kernels (NVRTC)...');
-	const r = execFileSync(exe, ['ptx', NATIVE, path.join(OUT, 'eegpu.ptx'), `--nvrtc=${nvrtc}`], { encoding: 'utf8' });
-	console.log(`[native] ${r.trim()}`);
-	console.log(`[native] done: ${path.relative(ROOT, exe)} + eegpu.ptx`);
+	// one PTX file per state-tail capacity (the exe loads only the one a level needs), compiled in parallel
+	console.log('[native] compiling the GPU kernels (NVRTC, 4 state sizes in parallel)...');
+	const TWS = [8, 32, 128, 512];
+	const outs = await Promise.all(TWS.map((tw) => new Promise((res, rej) => {
+		execFile(exe, ['ptx', NATIVE, path.join(OUT, `eegpu_${tw}.ptx`), `--nvrtc=${nvrtc}`, `--tw=${tw}`], { encoding: 'utf8', maxBuffer: 1 << 26 },
+			(err, stdout, stderr) => (err ? rej(new Error(`ptx ${tw}: ${stderr || err.message}`)) : res(stdout.trim())));
+	})));
+	for (const o of outs) console.log(`[native] ${o}`);
+	for (const f of fs.readdirSync(OUT)) if (/^eegpu\.ptx$|^dev\./.test(f)) fs.rmSync(path.join(OUT, f), { force: true });
+	console.log(`[native] done: ${path.relative(ROOT, exe)} + eegpu_{${TWS.join(',')}}.ptx`);
 }
 
-main();
+main().catch((e) => { console.error(e.message); process.exit(1); });

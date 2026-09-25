@@ -111,8 +111,19 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   level JSON as `start_mode`, so every tool and `J.loadJobLevel` simulate from it without extra options. It only
   matters with 2+ spawn points, time doors or collected coins stored in the file (`meta.startMatters`, from
   `viewer.startMatters(level)`); the page shows it in the job header only then.
-- **CPU only.** The engine is exact IEEE-double physics with heavy branching: there is no GPU mode (README "CPU or
-  GPU?"). `src/bench.js` measures the CPU the app runs on once (`src/data/_system.json`, `GET /api/system`); the
+- **GPU mode** (README "CPU or GPU?"): `native/eecore.h` is a second copy of the physics in C++ (the same double
+  operations in the same order as eesim.js; hot-path comparisons / truncations / int<->double conversions go through
+  exact integer helpers, valid because the engine never meets a NaN: `gpu.unsupported()` refuses levels whose gravity
+  multiplier is not finite). One source compiles natively (zig c++) and for NVIDIA GPUs (NVRTC, `--fmad=false`):
+  `native/build/eegpu.exe` + `eegpu_{8,32,128,512}.ptx` (`node tools/build-native.js`; the number = the state's
+  variable-tail capacity in words). `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
+  del, m2 = mutate's; pert, flip, sticky = random perturbations of the reference) and re-checks every hit on the CPU
+  with two independent hashes; `src/gpusearch.js` (started by grind `--gpu=1`) keeps an edge library keyed by state
+  hashes, runs mutate's DP on the current best, `C.evaluate` + `C.judge`, and hands faster runs in through
+  `J.tryCandidate`; it writes `gpu_status.json`. **Any change to eesim.js physics must be mirrored in eecore.h** and
+  `node test/gpu.js` (CPU build) and `node test/gpu.js --gpu` must pass: they compare stateHash after every tick.
+  `src/bench.js` measures the CPU the app runs on once (`src/data/_system.json`, `GET /api/system`); `gpu.runBench`
+  measures the GPU on the same arena (`data/_gpu.json`); the
   thread list and the Processor note name the detected CPU and show its measured ticks/s per thread count (on many
   laptops more threads is not faster; the thread list shows the measured speed for the user's CPU). The app is shared:
   texts name the detected hardware (`common.cpuName`, `bench.describe`), never "this PC".
@@ -174,6 +185,10 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/render.js` | PNG renderer (canvas, 5x7 font, PNG encoder on zlib) |
 | `src/viewer.js` | data for the page's run viewer: `trajectory()` (per-tick positions, timer, inputs, flags, events, door states in the job's exact engine), `align()` (DTW: the original's tick at the same point, per best tick), `levelView()`, `startMatters()` |
 | `src/minimap.js`, `src/minimapcolors.json` | EE's own minimap color per block id (eeo-tas ItemManager.as `createBrick(..., minimapColor)`, -1 = the average of the block image); regenerate with `node src/minimap.js build [eeo-tas dir]` |
+| `native/eecore.h`, `native/search.h`, `native/kernels.cu`, `native/eegpu.cpp`, `native/cudadrv.h` | the native engine (the physics of eesim.js in C++, bit for bit), the GPU search's candidate families, the CUDA kernels (trace, search, bench), the host tool (`eegpu trace|state|info|ptx|search|bench`), the NVIDIA driver / NVRTC loader |
+| `src/gpu.js` | `levelBlob()` (prepared level -> the native tool's binary), `nativeTool()`, `unsupported(level)`, the GPU benchmark (`data/_gpu.json`) |
+| `src/gpusearch.js` | the GPU searcher of a running job (grind `--gpu=1`): rounds of `eegpu search`, edge library, DP, verify, inbox; `gpu_status.json`, `[gpu ...]` lines in grind.log |
+| `tools/build-native.js`, `test/gpu.js` | build the native engine; the exactness proof (per-tick stateHash vs eesim.js; `--gpu` runs it on the GPU) |
 | `src/bench.js` | CPU benchmark of the engine (1, half and all threads, warmed-up workers), cached in `src/data/_system.json` per CPU / Node / engine size |
 | `src/blocks.js`, `src/blocknames.json` | block names and kinds for display (from docs/eeo_spec/blocks.json) |
 | `src/eesim.js` | the exact physics port (EESim, EEInput, applyMask, parseEetasBytes, loadLevel, prepareLevel) |
@@ -231,10 +246,10 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 | method | path | what |
 |---|---|---|
 | GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best, and `live`: the running job's `live.json` while under 5 s old, else null), CPU threads, `cpuModel`, `bench` |
-| GET | `/api/system` | processors: CPU (`model`, `text` e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads (measured)") with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU `available: false` with `why`; `faster: "cpu"` |
+| GET | `/api/system` | processors: CPU (`model`, `text` e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads (measured)") with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU (`available`, `model`, measured `ticksPerSec`, or `why`); `faster`: `cpu` or `gpu` |
 | POST | `/api/jobs` | import: JSON `{name, eelvlName, eetasName, eelvlB64, eetasB64, startMode}` (base64 of the raw file bytes; `startMode` `reset` (default) or `load`) |
 | GET | `/api/jobs/:id` | one job summary (best, history, stage, `live` speed, inbox, focus, files) |
-| POST | `/api/jobs/:id/start` | JSON `{workers, processor}` (`processor` `cpu`; `gpu` is refused with the reason) |
+| POST | `/api/jobs/:id/start` | JSON `{workers, processor}` (`processor` `cpu`, or `gpu` = the CPU stages plus the GPU searcher; refused with the reason when no GPU or the level is unsupported) |
 | POST | `/api/jobs/:id/stop` | pause |
 | POST | `/api/jobs/:id/finish` | stop and write `report.json` (returned) |
 | DELETE | `/api/jobs/:id` | delete the job and its files |

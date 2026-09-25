@@ -39,6 +39,18 @@ function appFiles() {
 	return files.sort();
 }
 
+/** The GPU engine (node tools/build-native.js): packed as src/bin/ (src/gpu.js nativeTool looks there). */
+const NATIVE_FILES = ['eegpu.exe', 'eegpu_8.ptx', 'eegpu_32.ptx', 'eegpu_128.ptx', 'eegpu_512.ptx'];
+function nativeFiles() {
+	const dir = path.join(ROOT, 'native', 'build');
+	const have = NATIVE_FILES.filter((f) => fs.existsSync(path.join(dir, f)));
+	if (have.length !== NATIVE_FILES.length) {
+		console.log('[build] the GPU engine is not built (node tools/build-native.js): this exe will be CPU only');
+		return [];
+	}
+	return NATIVE_FILES.map((f) => ({ asset: `src/bin/${f}`, file: path.join(dir, f) }));
+}
+
 // ---------------------------------------------------------------- PE signature
 /** Removes the Authenticode signature of a PE file (node.exe is signed; the signature would be invalid after the
  *  changes, which looks worse to Windows and antivirus software than no signature). */
@@ -83,19 +95,22 @@ function tools() {
 function main() {
 	const t = tools();
 	const files = appFiles();
+	const natives = nativeFiles();
 	const hash = crypto.createHash('sha256');
 	for (const f of files) { hash.update(f); hash.update(fs.readFileSync(path.join(ROOT, f))); }
+	for (const n of natives) { hash.update(n.asset); hash.update(fs.readFileSync(n.file)); }
 	hash.update(fs.readFileSync(path.join(__dirname, 'exe', 'launcher.js')));
 	hash.update(process.version);
 	const version = `${pkg.version}-${hash.digest('hex').slice(0, 10)}`;
-	console.log(`[build] EE Auto TAS ${version}: ${files.length} files, Node ${process.version}`);
+	console.log(`[build] EE Auto TAS ${version}: ${files.length} files${natives.length ? ' + the GPU engine' : ''}, Node ${process.version}`);
 
 	fs.rmSync(BUILD, { recursive: true, force: true });
 	fs.mkdirSync(BUILD, { recursive: true });
 	fs.mkdirSync(OUT, { recursive: true });
 	const assets = { 'manifest.json': path.join(BUILD, 'manifest.json') };
-	fs.writeFileSync(assets['manifest.json'], JSON.stringify({ version, node: process.version, files }));
+	fs.writeFileSync(assets['manifest.json'], JSON.stringify({ version, node: process.version, files: [...files, ...natives.map((n) => n.asset)] }));
 	for (const f of files) assets[f] = path.join(ROOT, f);
+	for (const n of natives) assets[n.asset] = n.file;
 	const blob = path.join(BUILD, 'app.blob');
 	fs.writeFileSync(path.join(BUILD, 'sea-config.json'), JSON.stringify({
 		main: path.join(__dirname, 'exe', 'launcher.js'), output: blob,

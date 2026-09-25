@@ -64,12 +64,12 @@ function startJob(id, workers, opts) {
 	const W = Math.max(1, Math.min(os.cpus().length, +workers || Math.max(1, os.cpus().length - 2)));
 	const logFd = fs.openSync(path.join(dir, 'console.log'), 'a');
 	const ch = spawn(process.execPath, [path.join(__dirname, 'grind.js'), `--job=${dir}`, `--level=${C.jobLevelId(id)}`, '--forever=1',
-		`--workers=${W}`, `--rot=${st.rounds || 0}`], { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', logFd, logFd], windowsHide: true,
+		`--workers=${W}`, `--rot=${st.rounds || 0}`, ...(o.gpu ? ['--gpu=1'] : [])], { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', logFd, logFd], windowsHide: true,
 		detached: !!o.detached });
 	fs.closeSync(logFd);
 	if (o.detached) ch.unref();
-	updateStatus(id, { state: 'running', pid: ch.pid, updated: Date.now(), stage: 'starting', workers: W, error: null });
-	C.writeJSON(RUNNING_FILE, { id, workers: W });
+	updateStatus(id, { state: 'running', pid: ch.pid, updated: Date.now(), stage: 'starting', workers: W, gpu: !!o.gpu, error: null });
+	C.writeJSON(RUNNING_FILE, { id, workers: W, gpu: !!o.gpu });
 	return ch;
 }
 function stopJob(id) {

@@ -115,4 +115,67 @@ function nativeTool() {
 	return null;
 }
 
-module.exports = { levelBlob, nativeTool, BLOB_INTS, BLOB_ARRAYS };
+/**
+ * Why the GPU engine cannot run this level (null = it can). The native engine's integer shortcuts for double tests
+ * (native/eecore.h "exact integer forms") assume no NaN can occur: that holds when the gravity multiplier is finite
+ * and not huge (every other number comes from finite tables); the state must also fit the kernels' largest tail.
+ */
+function unsupported(L) {
+	const g = L.gravityMult;
+	if (!Number.isFinite(g) || Math.abs(g) >= 1e300) return `the level's gravity multiplier (${g}) is not a normal number`;
+	const blob = levelBlob(L);
+	const tail = blob.readInt32LE(16 + 4 * BLOB_INTS.indexOf('tailWords'));
+	if (tail > 512) return `the level needs ${tail} words of state per run (the GPU engine takes up to 512)`;
+	return null;
+}
+
+// ---------------------------------------------------------------- the GPU benchmark (cached like src/bench.js)
+const BENCH_FILE = () => path.join(require('./common.js').DATA, '_gpu.json');
+function toolKey(tool) {
+	try {
+		const parts = [tool, ...[8, 32, 128, 512].map((tw) => path.join(path.dirname(tool), `eegpu_${tw}.ptx`))];
+		return parts.map((f) => { const s = fs.statSync(f); return `${s.size}-${Math.round(s.mtimeMs)}`; }).join('|');
+	} catch (e) { return ''; }
+}
+/** The cached benchmark record, or null when missing or made by another build of the native tool. */
+function cachedBench() {
+	const tool = nativeTool();
+	if (!tool) return { gpu: null, why: 'the GPU engine is not part of this build' };
+	try {
+		const r = JSON.parse(fs.readFileSync(BENCH_FILE(), 'utf8'));
+		return r.key === toolKey(tool) ? r : null;
+	} catch (e) { return null; }
+}
+/**
+ * Measures the GPU on src/bench.js's arena (random sticky inputs, the CPU benchmark's workload, so the numbers
+ * compare): { gpu: {name, sms, ...} | null, why, ticksPerSec, nativeCpuSingle }. Cached in data/_gpu.json.
+ */
+function runBench() {
+	return new Promise((resolve) => {
+		const tool = nativeTool();
+		if (!tool) return resolve({ gpu: null, why: 'the GPU engine is not part of this build' });
+		const E2 = require('./eesim.js');
+		const BENCH = require('./bench.js');
+		const C = require('./common.js');
+		const L = E2.prepareLevel(BENCH.arenaJson());
+		const f = path.join(C.DATA, '_gpu_arena.bin');
+		fs.mkdirSync(C.DATA, { recursive: true });
+		fs.writeFileSync(f, levelBlob(L));
+		require('child_process').execFile(tool, ['bench', f, '--seconds=3'], { encoding: 'utf8', timeout: 300000, windowsHide: true }, (err, out) => {
+			let r;
+			try { r = JSON.parse(String(out).trim().split('\n').pop()); } catch (e) { r = { gpu: null, why: err ? err.message : 'the GPU benchmark failed' }; }
+			r.key = toolKey(tool);
+			r.measured = Date.now();
+			try { fs.writeFileSync(BENCH_FILE(), JSON.stringify(r, null, 1)); } catch (e) { /* read-only */ }
+			resolve(r);
+		});
+	});
+}
+/** "NVIDIA GeForce RTX 3080 Laptop GPU: 150 M ticks/s (measured)" or why it is not available. */
+function describeBench(r) {
+	if (!r) return 'GPU: not measured yet';
+	if (!r.gpu) return `GPU: not available (${r.why || 'no NVIDIA GPU found'})`;
+	return `${r.gpu.name}: ${(r.ticksPerSec / 1e6).toFixed(0)} M ticks/s (measured)`;
+}
+
+module.exports = { levelBlob, nativeTool, unsupported, cachedBench, runBench, describeBench, BLOB_INTS, BLOB_ARRAYS };

@@ -20,7 +20,7 @@ const { spawn } = require('child_process');
 const C = require('./common.js');
 const E = C.E;
 
-const a = { until: '', forever: '', level: '', workers: os.cpus().length, job: '', nocoins: 'auto' };
+const a = { until: '', forever: '', level: '', workers: os.cpus().length, job: '', nocoins: 'auto', gpu: '0' };
 for (const s of process.argv.slice(2)) {
 	const m = s.match(/^--([^=]+)=(.*)$/);
 	if (m) a[m[1]] = m[2];
@@ -268,7 +268,14 @@ const TAS = `--tas=${REF}`;
 const LVL = `--level=${LEVEL_ID}`;
 
 // cheap input-mutation passes (seconds each), repeated while they keep finding time
+/** The GPU searcher is running and healthy (its status is fresh): it covers mutate's input changes many times over. */
+function gpuBusy() {
+	if (!gpuChild) return false;
+	const g = C.readJSON(path.join(OUT, 'gpu_status.json'), null);
+	return !!(g && g.state === 'running' && Date.now() - g.t < 60000);
+}
 async function mutateLoop(tag) {
+	if (gpuBusy()) { log(`mutate_${tag}: skipped (the GPU searches these input changes)`); return; }
 	for (let k = 1; k <= 8; k++) {
 		const mo = path.join(OUT, `grind_mut_${tag}_${k}.eetas`);
 		const before = best.runTicks;
@@ -277,7 +284,20 @@ async function mutateLoop(tag) {
 	}
 }
 
+// ---------------------------------------------------------------- the GPU searcher (--gpu=1): src/gpusearch.js
+// It runs next to the CPU stages for the whole session and hands its runs in through the inbox (checked every 3 s by
+// the stages, see runTool). It exits by itself when this process is gone; killTree stops it with the grind.
+let gpuChild = null;
+function startGpu() {
+	const fd = fs.openSync(path.join(OUT, 'gpu.log'), 'a');
+	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`], { stdio: ['ignore', fd, fd], windowsHide: true });
+	fs.closeSync(fd);
+	gpuChild.on('exit', (code) => { if (code && code !== 3) log(`GPU searcher stopped (exit ${code}); see gpu.log`); gpuChild = null; });
+}
+process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
+
 async function main() {
+	if (a.gpu === '1') { log('GPU on: the GPU searcher runs next to the CPU stages'); startGpu(); }
 	checkInbox();
 	for (let round = 1; Date.now() < deadline - 120000; round++) {
 		curRound = round;

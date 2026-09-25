@@ -25,6 +25,13 @@ EE_HD u64 rnd(u64 seed, i32 t, i32 v, i32 q) {
 	return splitmix(seed ^ splitmix(((u64)(u32)t << 32) ^ (u64)(u32)v) ^ ((u64)(u32)q * 0xd1342543de82ef95ull));
 }
 
+/** Prefilter key of a state: equal states have equal (px, py, speed_x, speed_y) (the hash's first four doubles, with
+ *  -0 normalized the same way), so a state whose key bit is not set cannot equal any reference state. */
+EE_HD u64 quadKey(double px, double py, double sx, double sy) {
+	return splitmix(doubleToBits(px + 0) ^ splitmix(doubleToBits(py + 0) ^ splitmix(doubleToBits(sx + 0) ^ splitmix(doubleToBits(sy + 0)))));
+}
+static const int QBITS_LOG2 = 25;   // 32M bits = 4 MB
+
 /** Variants per start tick for the systematic families (random families: any count). */
 EE_HD i32 familyVariants(i32 f) {
 	switch (f) {
@@ -126,7 +133,8 @@ struct SearchParams {
 	const u8* masks; i32 n;
 	const double* X; const double* Y;
 	const u64* htKeys; const i32* htVals; u32 htMask;
-	const u32* pix; i32 pixW, pixH;
+	const u32* pix; i32 pixW, pixH;   // (unused: replaced by qbits)
+	const u32* qbits;                 // 2^QBITS_LOG2 bits: quadKey of every reference state
 	i32 nocoins, horizon; double drift;
 	i32 family, t0, nT, V; u64 seed;
 	Hit* hits; u32* hitCount; u32 hitCap;

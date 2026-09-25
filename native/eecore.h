@@ -12,12 +12,14 @@
 
 #if defined(__CUDACC__) || defined(__CUDACC_RTC__)
 #define EE_HD __host__ __device__ __forceinline__
+#define EE_COLD __host__ __device__ __noinline__
 #define EE_GPU 1
 #else
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #define EE_HD inline
+#define EE_COLD inline
 #define EE_GPU 0
 #endif
 
@@ -59,9 +61,7 @@ EE_HD i32 clz32(u32 x) {
 }
 EE_HD int signi(double x) { return x > 0 ? 1 : (x < 0 ? -1 : 0); }
 
-// ------------------------------------------------------------------ constants (eesim.js top)
-static const double MS_PER_TICK = 10;
-static const double MULT = 7.752;
+// ------------------------------------------------------------------ bit patterns
 EE_HD double bitsToDouble(u64 b) {
 #if EE_GPU
 	return __longlong_as_double((long long)b);
@@ -76,6 +76,63 @@ EE_HD u64 doubleToBits(double d) {
 	u64 b; memcpy(&b, &d, 8); return b;
 #endif
 }
+
+// ------------------------------------------------------------------ exact integer forms of double tests
+// A GeForce GPU runs 64-bit float instructions at 1/64 of its normal rate, and comparisons, truncations and
+// int <-> double conversions are such instructions too. These helpers do them on the bit pattern with integer
+// instructions instead. Each gives exactly the IEEE result for every value that is not NaN (+0 and -0 compare equal).
+// The engine never meets a NaN: the GPU is only used for levels whose gravity multiplier is finite and below 1e300
+// (src/gpu.js), and every other input is a finite table constant; so a hot path may use them. The CPU build runs the
+// same code, and test/gpu.js compares both engines with src/eesim.js tick by tick.
+/** A signed integer with the same order as the double (for non-NaN values; -0 and +0 map to 0). */
+EE_HD i64 ordKey(double x) {
+	const u64 b = doubleToBits(x);
+	if ((b << 1) == 0) return 0;
+	return (i64)b >= 0 ? (i64)b : (i64)(b ^ 0x7FFFFFFFFFFFFFFFull);
+}
+EE_HD bool dlt(double a, double b) { return ordKey(a) < ordKey(b); }
+EE_HD bool dle(double a, double b) { return ordKey(a) <= ordKey(b); }
+EE_HD bool dgt(double a, double b) { return ordKey(a) > ordKey(b); }
+EE_HD bool dge(double a, double b) { return ordKey(a) >= ordKey(b); }
+EE_HD bool gt0(double x) { return (i64)doubleToBits(x) > 0; }                                   // x > 0.0
+EE_HD bool lt0(double x) { const u64 b = doubleToBits(x); return (b >> 63) != 0 && (b << 1) != 0; }   // x < 0.0
+EE_HD bool ne0(double x) { return (doubleToBits(x) << 1) != 0; }                               // x != 0.0
+EE_HD bool eq0(double x) { return (doubleToBits(x) << 1) == 0; }                               // x == 0.0
+/** x > c and x >= c for a constant c > 0: positive doubles are ordered like their bit patterns. */
+EE_HD bool gtP(double x, double c) { return (i64)doubleToBits(x) > (i64)doubleToBits(c); }
+EE_HD bool geP(double x, double c) { return (i64)doubleToBits(x) >= (i64)doubleToBits(c); }
+/** trunc(x) as an int, for |x| < 2^31 (the world's coordinates); larger values go the slow exact way. */
+EE_HD i32 truncI(double x) {
+	const u64 b = doubleToBits(x);
+	const i32 e = (i32)((b >> 52) & 0x7FF) - 1023;
+	if (e < 0) return 0;
+	if (e > 30) return toI32(x);
+	const u32 v = (u32)(((b & 0xFFFFFFFFFFFFFull) | 0x10000000000000ull) >> (52 - e));
+	return (b >> 63) ? -(i32)v : (i32)v;
+}
+/** (double)i, exactly (every int32 is a double). */
+EE_HD double i2d(i32 i) {
+	if (i == 0) return 0.0;
+	const u64 sign = i < 0 ? (1ull << 63) : 0;
+	const u32 a = i < 0 ? (u32)(0u - (u32)i) : (u32)i;
+	const i32 e = 31 - clz32(a);
+	const u64 mant = ((u64)a << (52 - e)) & 0xFFFFFFFFFFFFFull;
+	return bitsToDouble(sign | ((u64)(e + 1023) << 52) | mant);
+}
+/** double(x | 0) for the world's coordinates: truncate toward zero, +0 for (-1, 0]. */
+EE_HD double orZeroF(double x) { return i2d(truncI(x)); }
+/** trunc(x) as a double (sign kept: trunc(-0.5) = -0), for finite x. */
+EE_HD double truncD(double x) {
+	const u64 b = doubleToBits(x);
+	const i32 e = (i32)((b >> 52) & 0x7FF) - 1023;
+	if (e < 0) return bitsToDouble(b & (1ull << 63));
+	if (e >= 52) return x;
+	return bitsToDouble(b & ~((1ull << (52 - e)) - 1));
+}
+
+// ------------------------------------------------------------------ constants (eesim.js top)
+static const double MS_PER_TICK = 10;
+static const double MULT = 7.752;
 // the drag constants, from their raw little-endian bits (eesim.js DRAG_HEX)
 #define EE_BASE_DRAG bitsToDouble(0x3fef66f835f4cc6aull)
 #define EE_ICE_NO_MOD_DRAG bitsToDouble(0x3fefc8253b4bc6faull)
@@ -260,7 +317,7 @@ struct Sim {
 	EE_HD void clearTail() { for (i32 i = 0; i < L.tailWords; i++) s.w[i] = 0; }
 
 	/** _freshLoad(); coinBits0 (the file's collected coins) comes in through `coinBits0` (null = none). */
-	EE_HD void freshLoad(const u32* coinBits0) {
+	EE_COLD void freshLoad(const u32* coinBits0) {
 		clearTail();
 		if (coinBits0) for (i32 i = 0; i < L.coinWords; i++) s.w[L.offCoin + i] = coinBits0[i];
 		s.next_spawn = 0; s.keysMask = 0;
@@ -302,7 +359,7 @@ struct Sim {
 	}
 
 	/** _slashReset(): /reset = Player.resetPlayer(), PlayState.ticks = 0, one pass of the frame queues. */
-	EE_HD void slashReset() {
+	EE_COLD void slashReset() {
 		if (!s.in_god_mode) {
 			s.has_crown = 0; s.has_silver_crown = 0;
 			checkCrown(false);
@@ -328,7 +385,7 @@ struct Sim {
 	}
 
 	/** EESim.reset() (after _freshLoad; the RNG seed comes from the host: RNG_SEED_STATE). */
-	EE_HD void reset(const u32* coinBits0, u64 rngSeedState) {
+	EE_COLD void reset(const u32* coinBits0, u64 rngSeedState) {
 		freshLoad(coinBits0);
 		i32 idle = L.idleTicks > 0 ? L.idleTicks : 0;
 		if (idle > 0 || L.startMode == 0) {
@@ -381,7 +438,7 @@ struct Sim {
 		if (!s.in_god_mode && (gx != s.grav_x || gy != s.grav_y)) { s.grav_x = gx; s.grav_y = gy; }
 	}
 
-	EE_HD void drainFrameQueues() {
+	EE_COLD void drainFrameQueues() {
 		if (s.nsq != 0) {
 			i32 n = s.nsq;
 			while (n > 0) {
@@ -421,8 +478,8 @@ struct Sim {
 			if (s.is_poisoned && !isgodmod && s.poison_duration != 0.0 && (double)(t - s.poison_time_start) > s.poison_duration) killPlayer();
 		}
 
-		i32 cx = toI32(trunc(s.px + 8.0)) >> 4;
-		i32 cy = toI32(trunc(s.py + 8.0)) >> 4;
+		i32 cx = truncI(s.px + 8.0) >> 4;
+		i32 cy = truncI(s.py + 8.0) >> 4;
 
 		i32 delayed = s.q0;
 		s.q0 = s.q1;
@@ -501,8 +558,8 @@ struct Sim {
 
 		double mx, my;
 		if ((flag(delayed) & F_LIQUID) != 0) { mx = s.horizontal; my = s.vertical; }
-		else if (moy != 0.0) { mx = s.horizontal; my = 0.0; }
-		else if (mox != 0.0) { mx = 0.0; my = s.vertical; }
+		else if (ne0(moy)) { mx = s.horizontal; my = 0.0; }
+		else if (ne0(mox)) { mx = 0.0; my = s.vertical; }
 		else { mx = s.horizontal; my = s.vertical; }
 
 		double sm = 1.0;
@@ -525,12 +582,12 @@ struct Sim {
 		const bool climbCur = (flag(current) & F_CLIMB) != 0;
 		if (currentBelow == ICE && !climbCur && current != 4 && current != 414) s.slippery = 2.0;
 		else if ((flag(currentBelow) & F_SOLID) != 0) s.slippery = 0.0;
-		else if (s.slippery > 0.0) s.slippery -= 0.2;
+		else if (gt0(s.slippery)) s.slippery -= 0.2;
 
 		const double slippery = s.slippery;
-		if (s.speed_x != 0.0 || s.modifier_x != 0.0) {
+		if (ne0(s.speed_x) || ne0(s.modifier_x)) {
 			double sx = s.speed_x + s.modifier_x;
-			if (((((mx == 0.0 && moy != 0.0) || (sx < 0.0 && mx > 0.0) || (sx > 0.0 && mx < 0.0)) && (slippery <= 0.0 || isgodmod)) || (climbCur && !isgodmod))) {
+			if (((((eq0(mx) && ne0(moy)) || (lt0(sx) && gt0(mx)) || (gt0(sx) && lt0(mx))) && (!gt0(slippery) || isgodmod)) || (climbCur && !isgodmod))) {
 				sx *= EE_BASE_DRAG;
 				sx *= EE_NO_MOD_DRAG;
 			} else if (current == WATER && !isgodmod) {
@@ -541,21 +598,21 @@ struct Sim {
 				sx *= EE_BASE_DRAG; sx *= EE_LAVA_DRAG;
 			} else if (current == TOXIC_WASTE && !isgodmod) {
 				sx *= EE_BASE_DRAG; sx *= EE_TOXIC_DRAG;
-			} else if (slippery > 0.0 && !isgodmod) {
-				if (mx != 0.0 && !((sx < 0.0 && mx > 0.0) || (sx > 0.0 && mx < 0.0))) sx *= EE_BASE_DRAG;
+			} else if (gt0(slippery) && !isgodmod) {
+				if (ne0(mx) && !((lt0(sx) && gt0(mx)) || (gt0(sx) && lt0(mx)))) sx *= EE_BASE_DRAG;
 				else sx *= EE_ICE_NO_MOD_DRAG;
-				if ((sx < 0.0 && mx > 0.0) || (sx > 0.0 && mx < 0.0)) sx *= EE_ICE_DRAG;
+				if ((lt0(sx) && gt0(mx)) || (gt0(sx) && lt0(mx))) sx *= EE_ICE_DRAG;
 			} else {
 				sx *= EE_BASE_DRAG;
 			}
-			if (sx > 16.0) sx = 16.0;
-			else if (sx < -16.0) sx = -16.0;
-			else if (sx < 0.0001 && sx > -0.0001) sx = 0.0;
+			if (gtP(sx, 16.0)) sx = 16.0;
+			else if (dlt(sx, -16.0)) sx = -16.0;
+			else if (dlt(sx, 0.0001) && dgt(sx, -0.0001)) sx = 0.0;
 			s.speed_x = sx;
 		}
-		if (s.speed_y != 0.0 || s.modifier_y != 0.0) {
+		if (ne0(s.speed_y) || ne0(s.modifier_y)) {
 			double sy = s.speed_y + s.modifier_y;
-			if (((((my == 0.0 && mox != 0.0) || (sy < 0.0 && my > 0.0) || (sy > 0.0 && my < 0.0)) && (slippery <= 0.0 || isgodmod)) || (climbCur && !isgodmod))) {
+			if (((((eq0(my) && ne0(mox)) || (lt0(sy) && gt0(my)) || (gt0(sy) && lt0(my))) && (!gt0(slippery) || isgodmod)) || (climbCur && !isgodmod))) {
 				sy *= EE_BASE_DRAG;
 				sy *= EE_NO_MOD_DRAG;
 			} else if (current == WATER && !isgodmod) {
@@ -566,16 +623,16 @@ struct Sim {
 				sy *= EE_BASE_DRAG; sy *= EE_LAVA_DRAG;
 			} else if (current == TOXIC_WASTE && !isgodmod) {
 				sy *= EE_BASE_DRAG; sy *= EE_TOXIC_DRAG;
-			} else if (slippery > 0.0 && !isgodmod) {
-				if (my != 0.0 && !((sy < 0.0 && my > 0.0) || (sy > 0.0 && my < 0.0))) sy *= EE_BASE_DRAG;
+			} else if (gt0(slippery) && !isgodmod) {
+				if (ne0(my) && !((lt0(sy) && gt0(my)) || (gt0(sy) && lt0(my)))) sy *= EE_BASE_DRAG;
 				else sy *= EE_ICE_NO_MOD_DRAG;
-				if ((sy < 0.0 && my > 0.0) || (sy > 0.0 && my < 0.0)) sy *= EE_ICE_DRAG;
+				if ((lt0(sy) && gt0(my)) || (gt0(sy) && lt0(my))) sy *= EE_ICE_DRAG;
 			} else {
 				sy *= EE_BASE_DRAG;
 			}
-			if (sy > 16.0) sy = 16.0;
-			else if (sy < -16.0) sy = -16.0;
-			else if (sy < 0.0001 && sy > -0.0001) sy = 0.0;
+			if (gtP(sy, 16.0)) sy = 16.0;
+			else if (dlt(sy, -16.0)) sy = -16.0;
+			else if (dlt(sy, 0.0001) && dgt(sy, -0.0001)) sy = 0.0;
 			s.speed_y = sy;
 		}
 
@@ -592,8 +649,7 @@ struct Sim {
 		// sub-stepped movement
 		double rem_x = fmod1(s.px), cur_sx = s.speed_x, rem_y = fmod1(s.py), cur_sy = s.speed_y;
 		bool grounded = false;
-		double landSpeed = 0.0;
-		if (cur_sx != 0.0 || cur_sy != 0.0) {
+		if (ne0(cur_sx) || ne0(cur_sy)) {
 			i32 slot = (current == PORTAL || current == PORTAL_INVISIBLE) ? L.portalSlot[cy * W + cx] : -1;
 			if (isgodmod || slot < 0 || L.pTarget[slot] == L.pId[slot]) s.last_portal_set = 0;
 			else if (!s.last_portal_set) portalTeleport(slot, cx, cy, rem_x, cur_sx, rem_y, cur_sy);
@@ -607,25 +663,25 @@ struct Sim {
 				double minX = x, maxX = x, minY = y, maxY = y, lox = x, loy = y;
 				do {
 					lox = x; loy = y;
-					if (sx > 0.0) {
-						if (sx + rx >= 1.0) { x += (1.0 - rx); x = orZero(x); sx -= (1.0 - rx); rx = 0.0; }
+					if (gt0(sx)) {
+						if (geP(sx + rx, 1.0)) { x += (1.0 - rx); x = orZeroF(x); sx -= (1.0 - rx); rx = 0.0; }
 						else { x += sx; sx = 0.0; }
-					} else if (sx < 0.0) {
-						if (rx + sx < 0.0 && (rx != 0.0 || boostCur)) { sx += rx; x -= rx; x = orZero(x); rx = 1.0; }
+					} else if (lt0(sx)) {
+						if (lt0(rx + sx) && (ne0(rx) || boostCur)) { sx += rx; x -= rx; x = orZeroF(x); rx = 1.0; }
 						else { x += sx; sx = 0.0; }
 					}
-					if (x < minX) minX = x;
-					if (x > maxX) maxX = x;
-					if (sy > 0.0) {
-						if (sy + ry >= 1.0) { y += 1.0 - ry; y = orZero(y); sy -= (1.0 - ry); ry = 0.0; }
+					if (dlt(x, minX)) minX = x;
+					if (dgt(x, maxX)) maxX = x;
+					if (gt0(sy)) {
+						if (geP(sy + ry, 1.0)) { y += 1.0 - ry; y = orZeroF(y); sy -= (1.0 - ry); ry = 0.0; }
 						else { y += sy; sy = 0.0; }
-					} else if (sy < 0.0) {
-						if (ry + sy < 0.0 && (ry != 0.0 || boostCur)) { y -= ry; y = orZero(y); sy += ry; ry = 1.0; }
+					} else if (lt0(sy)) {
+						if (lt0(ry + sy) && (ne0(ry) || boostCur)) { y -= ry; y = orZeroF(y); sy += ry; ry = 1.0; }
 						else { y += sy; sy = 0.0; }
 					}
-					if (y < minY) minY = y;
-					if (y > maxY) maxY = y;
-				} while (sx != 0.0 || sy != 0.0);
+					if (dlt(y, minY)) minY = y;
+					if (dgt(y, maxY)) maxY = y;
+				} while (ne0(sx) || ne0(sy));
 				if (sweptAir(minX, maxX, minY, maxY)) {
 					exact = false;
 					px = x; py = y;
@@ -638,45 +694,44 @@ struct Sim {
 				s.ox = ox;
 				s.oy = oy;
 				const double osx = csx, osy = csy;
-				if (csx > 0.0) {
-					if (csx + remx >= 1.0) { px += (1.0 - remx); px = orZero(px); csx -= (1.0 - remx); remx = 0.0; }
+				if (gt0(csx)) {
+					if (geP(csx + remx, 1.0)) { px += (1.0 - remx); px = orZeroF(px); csx -= (1.0 - remx); remx = 0.0; }
 					else { px += csx; csx = 0.0; }
-				} else if (csx < 0.0) {
-					if (remx + csx < 0.0 && (remx != 0.0 || boostCur)) { csx += remx; px -= remx; px = orZero(px); remx = 1.0; }
+				} else if (lt0(csx)) {
+					if (lt0(remx + csx) && (ne0(remx) || boostCur)) { csx += remx; px -= remx; px = orZeroF(px); remx = 1.0; }
 					else { px += csx; csx = 0.0; }
 				}
 				if (ovAt(px, py) != 0) {
 					px = ox;
 					const double sp = s.speed_x;
-					if (sp > 0.0 && morx > 0) { if (!grounded) landSpeed = fabs(sp); grounded = true; }
-					if (sp < 0.0 && morx < 0) { if (!grounded) landSpeed = fabs(sp); grounded = true; }
+					if (gt0(sp) && morx > 0) grounded = true;
+					if (lt0(sp) && morx < 0) grounded = true;
 					s.speed_x = 0.0;
 					csx = osx;
 					donex = true;
 				}
-				if (csy > 0.0) {
-					if (csy + remy >= 1.0) { py += 1.0 - remy; py = orZero(py); csy -= (1.0 - remy); remy = 0.0; }
+				if (gt0(csy)) {
+					if (geP(csy + remy, 1.0)) { py += 1.0 - remy; py = orZeroF(py); csy -= (1.0 - remy); remy = 0.0; }
 					else { py += csy; csy = 0.0; }
-				} else if (csy < 0.0) {
-					if (remy + csy < 0.0 && (remy != 0.0 || boostCur)) { py -= remy; py = orZero(py); csy += remy; remy = 1.0; }
+				} else if (lt0(csy)) {
+					if (lt0(remy + csy) && (ne0(remy) || boostCur)) { py -= remy; py = orZeroF(py); csy += remy; remy = 1.0; }
 					else { py += csy; csy = 0.0; }
 				}
 				if (ovAt(px, py) != 0) {
 					py = oy;
 					const double sp = s.speed_y;
-					if (sp > 0.0 && mory > 0) { if (!grounded) landSpeed = fabs(sp); grounded = true; }
-					if (sp < 0.0 && mory < 0) { if (!grounded) landSpeed = fabs(sp); grounded = true; }
+					if (gt0(sp) && mory > 0) grounded = true;
+					if (lt0(sp) && mory < 0) grounded = true;
 					s.speed_y = 0.0;
 					csy = osy;
 					doney = true;
 				}
-			} while ((csx != 0.0 && !donex) || (csy != 0.0 && !doney));
+			} while ((ne0(csx) && !donex) || (ne0(csy) && !doney));
 			s.loopCollided = donex || doney;
 			s.px = px;
 			s.py = py;
 		}
 		s.grounded = grounded;
-		(void)landSpeed;
 
 		// jumping, touching blocks
 		if (!s.is_dead) {
@@ -687,25 +742,25 @@ struct Sim {
 				if (s.has_levitation) {
 					s.is_thrusting = 1;
 					s.current_thrust = MAX_THRUST;
-				} else if (s.last_jump < 0.0) {
-					if (now + s.last_jump > 750.0) injump = true;
+				} else if (lt0(s.last_jump)) {
+					if (gtP(now + s.last_jump, 750.0)) injump = true;
 				} else {
-					if (now - s.last_jump > 150.0) injump = true;
+					if (gtP(now - s.last_jump, 150.0)) injump = true;
 				}
 			} else {
 				s.is_thrusting = 0;
 			}
-			if ((((s.speed_x == 0.0 && morx != 0 && mox != 0.0) || (s.speed_y == 0.0 && mory != 0 && moy != 0.0)) && grounded) || s.current == EFFECT_MULTIJUMP) {
+			if ((((eq0(s.speed_x) && morx != 0 && ne0(mox)) || (eq0(s.speed_y) && mory != 0 && ne0(moy))) && grounded) || s.current == EFFECT_MULTIJUMP) {
 				s.jump_count = 0;
 			}
 			if (s.jump_count == 0 && !grounded) s.jump_count = 1;
 			if (injump && !s.has_levitation) {
-				if (s.jump_count < s.max_jumps && morx != 0 && mox != 0.0) {
+				if (s.jump_count < s.max_jumps && morx != 0 && ne0(mox)) {
 					if (s.max_jumps < 1000) s.jump_count += 1;
 					s.speed_x = ((double)(0 - morx) * JUMP_HEIGHT * jumpMultiplier()) / MULT;
 					s.last_jump = now * mod;
 				}
-				if (s.jump_count < s.max_jumps && mory != 0 && moy != 0.0) {
+				if (s.jump_count < s.max_jumps && mory != 0 && ne0(moy)) {
 					if (s.max_jumps < 1000) s.jump_count += 1;
 					s.speed_y = ((double)(0 - mory) * JUMP_HEIGHT * jumpMultiplier()) / MULT;
 					s.last_jump = now * mod;
@@ -723,32 +778,32 @@ struct Sim {
 			if (s.mory != 0) s.speed_y = (s.speed_y * MULT - (thr * THRUST_SCALE) * ((double)s.mory * 0.5)) / MULT;
 			if (s.morx != 0) s.speed_x = (s.speed_x * MULT - (thr * THRUST_SCALE) * ((double)s.morx * 0.5)) / MULT;
 			if (!s.is_thrusting) {
-				if (s.current_thrust > 0.0) s.current_thrust -= THRUST_BURN_OFF;
+				if (gt0(s.current_thrust)) s.current_thrust -= THRUST_BURN_OFF;
 				else s.current_thrust = 0.0;
 			}
 		}
 
 		// auto align to grid (not in liquids)
 		const bool liquidCur = (flag(s.current) & F_LIQUID) != 0 && !isgodmod;
-		if ((s.speed_x >= 1.0 || s.speed_x <= -1.0) || liquidCur) {
-		} else if (s.modifier_x < 0.1 && s.modifier_x > -0.1) {
+		if ((geP(s.speed_x, 1.0) || dle(s.speed_x, -1.0)) || liquidCur) {
+		} else if (dlt(s.modifier_x, 0.1) && dgt(s.modifier_x, -0.1)) {
 			const double tx = fmod16(s.px);
-			if (tx < 2.0) {
-				if (tx < 0.2) s.px = orZero(s.px);
+			if (dlt(tx, 2.0)) {
+				if (dlt(tx, 0.2)) s.px = orZeroF(s.px);
 				else s.px -= tx / 15.0;
-			} else if (tx > 14.0) {
-				if (tx > 15.8) { s.px = orZero(s.px); s.px += 1.0; }
+			} else if (dgt(tx, 14.0)) {
+				if (dgt(tx, 15.8)) { s.px = orZeroF(s.px); s.px += 1.0; }
 				else s.px += (tx - 14.0) / 15.0;
 			}
 		}
-		if ((s.speed_y >= 1.0 || s.speed_y <= -1.0) || liquidCur) {
-		} else if (s.modifier_y < 0.1 && s.modifier_y > -0.1) {
+		if ((geP(s.speed_y, 1.0) || dle(s.speed_y, -1.0)) || liquidCur) {
+		} else if (dlt(s.modifier_y, 0.1) && dgt(s.modifier_y, -0.1)) {
 			const double ty = fmod16(s.py);
-			if (ty < 2.0) {
-				if (ty < 0.2) s.py = orZero(s.py);
+			if (dlt(ty, 2.0)) {
+				if (dlt(ty, 0.2)) s.py = orZeroF(s.py);
 				else s.py -= ty / 15.0;
-			} else if (ty > 14.0) {
-				if (ty > 15.8) { s.py = orZero(s.py); s.py += 1.0; }
+			} else if (dgt(ty, 14.0)) {
+				if (dgt(ty, 15.8)) { s.py = orZeroF(s.py); s.py += 1.0; }
 				else s.py += (ty - 14.0) / 15.0;
 			}
 		}
@@ -756,15 +811,16 @@ struct Sim {
 		// Me.updateStuff()
 		if (!s.has_silver_crown && (s.run_ticks != 0 || s.horizontal != 0 || s.vertical != 0 || s.spacedown)) s.run_ticks += 1;
 		s.on_ground = s.grounded;
-		if (s.dead_offset > 16.0) { respawn(); s.deaths++; }
+		if (gtP(s.dead_offset, 16.0)) { respawn(); s.deaths++; }
 		return false;
 	}
 
-	EE_HD static double fmod1(double x) { return x > 0.0 ? x - trunc(x) : jsMod(x, 1.0); }
-	EE_HD static double fmod16(double x) { return x > 0.0 ? x - 16.0 * floor(x * 0.0625) : jsMod(x, 16.0); }
+	// fmod(x, 1) and fmod(x, 16) (eesim.js fmod1 / fmod16): for x > 0, x - trunc(x) and x - 16 * floor(x / 16)
+	EE_HD static double fmod1(double x) { return gt0(x) ? x - truncD(x) : jsMod(x, 1.0); }
+	EE_HD static double fmod16(double x) { return gt0(x) ? x - 16.0 * truncD(x * 0.0625) : jsMod(x, 16.0); }
 
 	/** _portalTeleport; the loop temporaries are the caller's locals (by reference). */
-	EE_HD void portalTeleport(i32 slot, i32 cx, i32 cy, double& rem_x, double& cur_sx, double& rem_y, double& cur_sy) {
+	EE_COLD void portalTeleport(i32 slot, i32 cx, i32 cy, double& rem_x, double& cur_sx, double& rem_y, double& cur_sy) {
 		s.last_portal_set = 1;
 		s.last_portal_x = cx << 4;
 		s.last_portal_y = cy << 4;
@@ -832,7 +888,7 @@ struct Sim {
 	}
 
 	/** _randiRange(from, to) */
-	EE_HD i32 randiRange(i32 from, i32 to) {
+	EE_COLD i32 randiRange(i32 from, i32 to) {
 		if (from == to) return from;
 		i32 lo = from < to ? from : to;
 		if (L.rngScriptLen >= 0) {
@@ -877,11 +933,11 @@ struct Sim {
 	EE_HD i32 overlaps() { return ovAt(s.px, s.py); }
 
 	EE_HD i32 ovClass(double x, double y) {
-		if (x < 0.0 || y < 0.0 || x > (double)L.maxX || y > (double)L.maxY) return 1;
+		if (lt0(x) || lt0(y) || gtP(x, i2d(L.maxX)) || gtP(y, i2d(L.maxY))) return 1;
 		if (s.in_god_mode) return 0;
-		const i32 ox = toI32(x) >> 4, oy = toI32(y) >> 4;
-		const i32 x2 = (x + 16.0) > (double)(ox * 16 + 16) ? 1 : 0;
-		const i32 y2 = (y + 16.0) > (double)(oy * 16 + 16) ? 1 : 0;
+		const i32 ox = truncI(x) >> 4, oy = truncI(y) >> 4;
+		const i32 x2 = gtP(x + 16.0, i2d(ox * 16 + 16)) ? 1 : 0;
+		const i32 y2 = gtP(y + 16.0, i2d(oy * 16 + 16)) ? 1 : 0;
 		const i32 idx = x2 | (y2 << 1);
 		const i32 req = idx == 0 ? 1 : (idx == 1 ? 3 : (idx == 2 ? 9 : 27));
 		const i32 m = L.airMask[oy * L.W + ox];
@@ -892,11 +948,11 @@ struct Sim {
 	}
 
 	EE_HD bool sweptAir(double minX, double maxX, double minY, double maxY) const {
-		if (minX < 0.0 || minY < 0.0 || maxX > (double)L.maxX || maxY > (double)L.maxY) return false;
-		const i32 tx0 = toI32(minX) >> 4, ty0 = toI32(minY) >> 4;
-		const i32 ox1 = toI32(maxX) >> 4, oy1 = toI32(maxY) >> 4;
-		const i32 tx1 = ox1 + ((maxX + 16.0) > (double)(ox1 * 16 + 16) ? 1 : 0);
-		const i32 ty1 = oy1 + ((maxY + 16.0) > (double)(oy1 * 16 + 16) ? 1 : 0);
+		if (lt0(minX) || lt0(minY) || gtP(maxX, i2d(L.maxX)) || gtP(maxY, i2d(L.maxY))) return false;
+		const i32 tx0 = truncI(minX) >> 4, ty0 = truncI(minY) >> 4;
+		const i32 ox1 = truncI(maxX) >> 4, oy1 = truncI(maxY) >> 4;
+		const i32 tx1 = ox1 + (gtP(maxX + 16.0, i2d(ox1 * 16 + 16)) ? 1 : 0);
+		const i32 ty1 = oy1 + (gtP(maxY + 16.0, i2d(oy1 * 16 + 16)) ? 1 : 0);
 		const i32 w = tx1 - tx0, h = ty1 - ty0;
 		if (w <= 2 && h <= 2) {
 			const i32 k = w + 3 * h;
@@ -909,11 +965,11 @@ struct Sim {
 	}
 
 	EE_HD i32 ovAt(double x, double y) {
-		if (x < 0.0 || y < 0.0 || x > (double)L.maxX || y > (double)L.maxY) return 1;
+		if (lt0(x) || lt0(y) || gtP(x, i2d(L.maxX)) || gtP(y, i2d(L.maxY))) return 1;
 		if (s.in_god_mode) return 0;
-		const i32 ox = toI32(x) >> 4, oy = toI32(y) >> 4;
-		const i32 x2 = (x + 16.0) > (double)(ox * 16 + 16) ? 1 : 0;
-		const i32 y2 = (y + 16.0) > (double)(oy * 16 + 16) ? 1 : 0;
+		const i32 ox = truncI(x) >> 4, oy = truncI(y) >> 4;
+		const i32 x2 = gtP(x + 16.0, i2d(ox * 16 + 16)) ? 1 : 0;
+		const i32 y2 = gtP(y + 16.0, i2d(oy * 16 + 16)) ? 1 : 0;
 		const i32 idx = x2 | (y2 << 1);
 		const i32 req = idx == 0 ? 1 : (idx == 1 ? 3 : (idx == 2 ? 9 : 27));
 		const i32 m = L.airMask[oy * L.W + ox];
@@ -937,31 +993,32 @@ struct Sim {
 				if (k == OV_AIR) continue;
 				if (k == OV_SECRET) { revealSecret(cx, cy); continue; }
 				const i32 val = tileAt(row + cx);
-				const double tlx = (double)(cx * 16);
-				const double tly = (double)(cy * 16);
-				if (!(x < tlx + 16.0 && tlx < x + 16.0 && y < tly + 16.0 && tly < y + 16.0)) continue;
+				const double tlx = i2d(cx * 16);
+				const double tly = i2d(cy * 16);
+				const double tlx16 = i2d(cx * 16 + 16), tly16 = i2d(cy * 16 + 16);   // = tlx + 16.0, tly + 16.0 (exact)
+				if (!(dlt(x, tlx16) && dlt(tlx, x + 16.0) && dlt(y, tly16) && dlt(tly, y + 16.0))) continue;
 				if (k == OV_SOLID) return val;
 				const u8 fl = flag(val);
 				if ((fl & (F_ROTHALF | F_HALF | F_JUMPTHRU)) != 0) {
 					const i32 rot = L.lookup0[row + cx];
 					if ((fl & F_ROTHALF) != 0) {
 						if ((fl & F_JUMPTHRU) != 0) {
-							if ((s.speed_y < 0.0 || cy <= s.overlapa || (s.speed_y == 0.0 && s.speed_x == 0.0 && (s.oy + 15.0) > tly)) && rot == 1) {
+							if ((lt0(s.speed_y) || cy <= s.overlapa || (eq0(s.speed_y) && eq0(s.speed_x) && dgt(s.oy + 15.0, tly))) && rot == 1) {
 								if (cy != oy || s.overlapa == -1) s.overlapa = cy;
 								skipa = true;
 								continue;
 							}
-							if ((s.speed_x > 0.0 || (cx <= s.overlapb && s.speed_x <= 0.0 && s.ox < tlx + 16.0)) && rot == 2) {
+							if ((gt0(s.speed_x) || (cx <= s.overlapb && !gt0(s.speed_x) && dlt(s.ox, tlx16))) && rot == 2) {
 								if (cx != ox || s.overlapb == -1) s.overlapb = cx;
 								skipb = true;
 								continue;
 							}
-							if ((s.speed_y > 0.0 || (cy <= s.overlapc && s.speed_y <= 0.0 && s.oy < tly + 16.0)) && rot == 3) {
+							if ((gt0(s.speed_y) || (cy <= s.overlapc && !gt0(s.speed_y) && dlt(s.oy, tly16))) && rot == 3) {
 								if (cy != oy || s.overlapc == -1) s.overlapc = cy;
 								skipc = true;
 								continue;
 							}
-							if ((s.speed_x < 0.0 || cx <= s.overlapd || (s.speed_y == 0.0 && s.speed_x < 0.0 && (s.ox - 15.0) < tlx)) && rot == 0) {
+							if ((lt0(s.speed_x) || cx <= s.overlapd || (eq0(s.speed_y) && lt0(s.speed_x) && dlt(s.ox - 15.0, tlx))) && rot == 0) {
 								if (cx != ox || s.overlapd == -1) s.overlapd = cx;
 								skipd = true;
 								continue;
@@ -973,7 +1030,7 @@ struct Sim {
 						else if (rot == 3) { if (!rectHit(x, y, tlx, tly, 16.0, 8.0)) continue; }
 						else if (rot == 0) { if (!rectHit(x, y, tlx + 8.0, tly, 8.0, 16.0)) continue; }
 					} else {
-						if (s.speed_y < 0.0 || cy <= s.overlapa || (s.speed_y == 0.0 && s.speed_x == 0.0 && (s.oy + 15.0) > tly)) {
+						if (lt0(s.speed_y) || cy <= s.overlapa || (eq0(s.speed_y) && eq0(s.speed_x) && dgt(s.oy + 15.0, tly))) {
 							if (cy != oy || s.overlapa == -1) s.overlapa = cy;
 							skipa = true;
 							continue;
@@ -1035,7 +1092,7 @@ struct Sim {
 		return false;
 	}
 
-	EE_HD void revealSecret(i32 cx, i32 cy) {
+	EE_COLD void revealSecret(i32 cx, i32 cy) {
 		const i32 b = L.secretBit[cy * L.W + cx];
 		if (b < 0) return;   // (a 243 / 50 tile always has a secret bit)
 		s.w[L.offSecret + (b >> 5)] |= 1u << (b & 31);
@@ -1150,7 +1207,7 @@ struct Sim {
 	}
 
 	/** _setTileCoin: the coin's bit (the tile follows it) and a portal entry at the cell deleted. */
-	EE_HD void setTileCoin(i32 cx, i32 cy) {
+	EE_COLD void setTileCoin(i32 cx, i32 cy) {
 		const i32 i = cy * L.W + cx;
 		if (L.nPortalCoins > 0) {
 			const i32 b = L.portalCoinIdx[i];
@@ -1161,7 +1218,7 @@ struct Sim {
 	}
 
 	// ================================================================ keys, crowns, switches, spawn, teams
-	EE_HD void switchKey(i32 c, bool state, bool fromqueue) {
+	EE_COLD void switchKey(i32 c, bool state, bool fromqueue) {
 		setKey(c, state, fromqueue);
 		if (overlaps() != 0) { setKey(c, !state, false); kqPush(c, state ? 1 : 0); }
 	}
@@ -1171,21 +1228,28 @@ struct Sim {
 		else s.keysMask &= ~(1 << c);
 		if (state && !fromqueue) s.kt[c] = s.ticks;
 	}
-	EE_HD void checkCrown(bool collide) {
+	EE_COLD void checkCrown(bool collide) {
 		s.collide_crown = collide;
 		if (overlaps() != 0) { s.collide_crown = !collide; sqPush(SQ_CROWN, collide ? 1 : 0, 0); }
 	}
-	EE_HD void checkSilverCrown(bool collide) {
+	EE_COLD void checkSilverCrown(bool collide) {
 		s.collide_silver_crown = collide;
 		if (overlaps() != 0) { s.collide_silver_crown = !collide; sqPush(SQ_SILVER, collide ? 1 : 0, 0); }
 	}
-	EE_HD void pressPurpleSwitch(i32 sid, bool enabled) {
-		if (sid == 1000) for (i32 i = 0; i < 1000; i++) pressPurpleSwitch(i, enabled);
+	/** _pressPurpleSwitch: switch 1000 presses 0..999 first (the JS recursion, one level deep, as a loop). */
+	EE_COLD void pressPurpleSwitch(i32 sid, bool enabled) {
+		if (sid == 1000) for (i32 i = 0; i < 1000; i++) pressPurpleOne(i, enabled);
+		pressPurpleOne(sid, enabled);
+	}
+	EE_COLD void pressPurpleOne(i32 sid, bool enabled) {
 		swSet(sid, enabled);
 		if (overlaps() != 0) { swSet(sid, !enabled); tqPush(sid, enabled ? 1 : 0); }
 	}
-	EE_HD void pressOrangeSwitch(i32 sid, bool enabled) {
-		if (sid == 1000) for (i32 i = 0; i < 1000; i++) pressOrangeSwitch(i, enabled);
+	EE_COLD void pressOrangeSwitch(i32 sid, bool enabled) {
+		if (sid == 1000) for (i32 i = 0; i < 1000; i++) pressOrangeOne(i, enabled);
+		pressOrangeOne(sid, enabled);
+	}
+	EE_COLD void pressOrangeOne(i32 sid, bool enabled) {
 		oswSet(sid, enabled);
 		if (overlaps() != 0) { oswSet(sid, !enabled); sqPush(SQ_ORANGE, sid, enabled ? 1 : 0); }
 	}
@@ -1201,7 +1265,7 @@ struct Sim {
 		s.px = (double)(nx * 16);
 		s.py = (double)(ny * 16);
 	}
-	EE_HD void respawn() {
+	EE_COLD void respawn() {
 		s.modifier_x = 0.0; s.modifier_y = 0.0;
 		s.speed_x = 0.0; s.speed_y = 0.0;
 		s.is_dead = 0;
@@ -1219,7 +1283,7 @@ struct Sim {
 		if (s.slippery > 0.0) jm *= 0.88;
 		return jm;
 	}
-	EE_HD void updateTeamDoors(i32 x, i32 y) {
+	EE_COLD void updateTeamDoors(i32 x, i32 y) {
 		const i32 id = lookupAt(x, y);
 		s.team_tx = x; s.team_ty = y;
 		if (s.team == id) return;
@@ -1230,7 +1294,7 @@ struct Sim {
 	}
 
 	// ================================================================ state hash (EESim.stateHash(false, noCoins))
-	EE_HD bool boxTouchesOneWay() const {
+	EE_COLD bool boxTouchesOneWay() const {
 		const double x = s.px, y = s.py;
 		if (x < 0.0 || y < 0.0 || x > (double)L.maxX || y > (double)L.maxY) return false;
 		const i32 ox = toI32(trunc(x)) >> 4, oy = toI32(trunc(y)) >> 4;
@@ -1286,7 +1350,7 @@ struct Sim {
 	EE_HD u64 hash2(bool noCoins) const { return hashWith<Hasher2>(noCoins); }
 
 	template <class HS>
-	EE_HD u64 hashWith(bool noCoins) const {
+	EE_COLD u64 hashWith(bool noCoins) const {
 		// the doubles (in _fillKey order) and the flag word first: the ints are hashed before the doubles
 		double F[16];
 		i32 nd = 0;
