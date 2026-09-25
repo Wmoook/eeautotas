@@ -118,7 +118,8 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	}
 	if (gx.size() < 2 && n > 0) {
 		double bestD = 1e30;
-		for (int t = from; t <= n; t++) {
+		const int rfMin = std::max(from, atoi(opt(argc, argv, "refFrom", "0").c_str()) - 30);   // --refFrom: follow the run from about this tick
+		for (int t = rfMin; t <= n; t++) {
 			const double dx = X[t] - start->px, dy = Y[t] - start->py, dd = dx * dx + dy * dy;
 			if (dd < bestD) { bestD = dd; refFrom = t; }
 		}

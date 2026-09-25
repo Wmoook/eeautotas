@@ -227,10 +227,26 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 		if (s.broken || s.is_dead) continue;
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
-		if (p.target == 1) {   // reach a region: report and do not expand further
+		if (p.target == 2) {   // ahead of the run: a hit when the run reaches this tile only minGain+ ticks later
+			const i32 r = p.refTile[cy * p.L.W + cx], now = p.fromTick + p.layer + 1;
+			if (r >= 0 && r < now - p.slack) continue;   // behind the run's schedule: drop
+			if (r >= 0 && r - now >= p.minGain && r - p.fromTick >= p.minAhead) {
+				// close to the run's state at some tick of its visit (position + 3 x speed)
+				i32 bestR = -1; float bestD = p.maxDist;
+				for (i32 rr = r; rr < r + 24 && rr < p.nRef; rr++) {
+					const float dd = fabsf((float)s.px - p.rX[rr]) + fabsf((float)s.py - p.rY[rr]) + 3.f * (fabsf((float)s.speed_x - p.rVX[rr]) + fabsf((float)s.speed_y - p.rVY[rr]));
+					if (dd <= bestD) { bestD = dd; bestR = rr; }
+				}
+				if (bestR >= 0 && atomicMax(&p.tileBest[cy * p.L.W + cx], bestR - now) < bestR - now) {
+					const u32 h = atomicAdd(p.nHits, 1u);
+					if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = bestR - now; e.refTick = bestR; p.hits[h] = e; }
+				}
+			}
+		}
+		else if (p.target == 1) {   // reach a region: report and do not expand further
 			if (cx >= p.reachX0 && cx <= p.reachX1 && cy >= p.reachY0 && cy <= p.reachY1) {
 				const u32 h = atomicAdd(p.nHits, 1u);
-				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; p.hits[h] = e; }
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 				continue;
 			}
 		}
@@ -245,7 +261,7 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 					const i32 lx = truncI(t.px + 8.0) >> 4;
 					if (lx >= p.tx0 && lx <= p.tx1) {
 						const u32 h = atomicAdd(p.nHits, 1u);
-						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = (u8)(jo == 0 ? 1 : jo == 1 ? 3 : 5); e.pad0 = e.pad1 = 0; e.px = (float)t.px; e.vx = (float)t.speed_x; e.layer = p.layer; p.hits[h] = e; }
+						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = (u8)(jo == 0 ? 1 : jo == 1 ? 3 : 5); e.pad0 = e.pad1 = 0; e.px = (float)t.px; e.vx = (float)t.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 					}
 				}
 			}

@@ -16,7 +16,7 @@
 
 namespace ee {
 
-struct ExploreHit { u32 parent; u8 option, jumpOption, pad0, pad1; float px, vx; i32 layer; };
+struct ExploreHit { u32 parent; u8 option, jumpOption, pad0, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };
 
 struct ExploreParams {
 	Level L;
@@ -35,6 +35,10 @@ struct ExploreParams {
 	i32 target;                        // 0: ground jump on the floor (above); 1: reach the region below
 	i32 reachX0, reachX1, reachY0, reachY1;   // target 1: the box centre's tile in this rectangle
 	double qy, qvy;                    // > 0: py / vy quantized to 1/qy, 1/qvy in the cells (coarse reachability); 0 = exact
+	// target 2: ahead of the run. refTile[tile] = the run's first visit tick >= fromTick (-1 = never)
+	const i32* refTile; i32 fromTick, minGain, slack, minAhead;
+	i32* tileBest;                     // target 2: the best gain recorded per tile (a hit only when it improves)
+	const float* rX; const float* rY; const float* rVX; const float* rVY; i32 nRef; float maxDist;   // the run's states
 };
 
 /** fine: px / vx resolution where corner clips can still happen; coarse (fineRow and below): px to 2 px, vx to 1/16 */

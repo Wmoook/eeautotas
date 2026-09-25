@@ -8,7 +8,7 @@
 template <int TW>
 static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	typedef State<TW> S;
-	const int from = atoi(opt(argc, argv, "from", "0").c_str());
+	int from = atoi(opt(argc, argv, "from", "0").c_str());
 	const int depthMax = atoi(opt(argc, argv, "depth", "200").c_str());
 	const int cap = std::max(1024, atoi(opt(argc, argv, "cap", "2000000").c_str()));
 	const double seconds = atof(opt(argc, argv, "seconds", "120").c_str());
@@ -20,12 +20,50 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count(); };
 	Level L = B.level(B.bytes.data());
 	S* start = (S*)calloc(1, sizeof(S));
+	const bool ahead = opt(argc, argv, "ahead", "0") == "1";
+	std::vector<int32_t> refTile;
+	std::vector<float> rX, rY, rVX, rVY;   // the run's state per tick (index = tick)
 	{
 		Sim<TW> sim(L, *start);
 		sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
 		std::vector<uint8_t> ref = readMasks(argv[3]);
-		for (int t = 0; t < from && t < (int)ref.size(); t++) { Input in = maskInput(ref[t]); sim.tick(in); }
+		S* rs = (S*)malloc(sizeof(S));
+		if (ahead) refTile.assign((size_t)L.N, -1);
+		for (int t = 0; t < (int)ref.size(); t++) {
+			rX.push_back((float)start->px); rY.push_back((float)start->py); rVX.push_back((float)start->speed_x); rVY.push_back((float)start->speed_y);
+			if (t == from) memcpy(rs, start, sizeof(S));
+			if (t >= from && ahead) {
+				const int tx = (int)std::floor((start->px + 8) / 16), ty = (int)std::floor((start->py + 8) / 16);
+				if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && refTile[(size_t)ty * L.W + tx] < 0) refTile[(size_t)ty * L.W + tx] = t;
+			}
+			if (t >= from && !ahead) break;
+			const bool crown0 = start->has_silver_crown;
+			Input in = maskInput(ref[t]); sim.tick(in);
+			if (!crown0 && start->has_silver_crown) break;
+		}
+		if (from < (int)ref.size()) memcpy(start, rs, sizeof(S));
+		free(rs);
 	}
+	// --prefix: inputs played from the start state first (the exploration continues from where they end); the
+	// reported inputs include them
+	std::string prefixStr;
+	{
+		const std::string pf = opt(argc, argv, "prefix", "");
+		if (!pf.empty()) {
+			std::vector<uint8_t> raw = readFile(pf.c_str());
+			Sim<TW> ps(L, *start);
+			for (uint8_t c : raw) {
+				if (c < 48 || c >= 80) continue;
+				prefixStr.push_back((char)c);
+				Input in = maskInput((c - 48) & 31);
+				ps.tick(in);
+			}
+			if (start->is_dead) { printf("{\"error\":\"the prefix dies\"}\n"); return 3; }
+		}
+	}
+	const int from0 = from;
+	from += (int)prefixStr.size();
+	(void)from0;
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fexp = g.fn("exploreExpand_" + std::to_string(TW)), fmat = g.fn("exploreMaterialize_" + std::to_string(TW));
@@ -53,6 +91,19 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.target = opt(argc, argv, "reach", "").empty() ? 0 : 1;
 	sscanf(opt(argc, argv, "reach", "0,0,0,0").c_str(), "%d,%d,%d,%d", &P.reachX0, &P.reachY0, &P.reachX1, &P.reachY1);
 	P.qy = atof(opt(argc, argv, "qy", "0").c_str()); P.qvy = atof(opt(argc, argv, "qvy", "0").c_str());
+	cu::Buf drt, dtb, drx, dry, drvx, drvy;
+	if (ahead) {
+		if (!drt.upload(refTile.data(), 4 * refTile.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		P.target = 2; P.refTile = (const i32*)(uintptr_t)drt.p; P.fromTick = from;
+		std::vector<int32_t> tb(refTile.size(), -1);
+		if (!dtb.upload(tb.data(), 4 * tb.size())) { printf("{\"error\":\"tileBest\"}\n"); return 4; }
+		P.tileBest = (i32*)(uintptr_t)dtb.p;
+		if (!drx.upload(rX.data(), 4 * rX.size()) || !dry.upload(rY.data(), 4 * rY.size()) || !drvx.upload(rVX.data(), 4 * rVX.size()) || !drvy.upload(rVY.data(), 4 * rVY.size())) { printf("{\"error\":\"run arrays\"}\n"); return 4; }
+		P.rX = (const float*)(uintptr_t)drx.p; P.rY = (const float*)(uintptr_t)dry.p; P.rVX = (const float*)(uintptr_t)drvx.p; P.rVY = (const float*)(uintptr_t)drvy.p;
+		P.nRef = (i32)rX.size(); P.maxDist = (float)atof(opt(argc, argv, "maxdist", "24").c_str());
+		P.minGain = atoi(opt(argc, argv, "gain", "10").c_str()); P.slack = atoi(opt(argc, argv, "slack", "30").c_str());
+		P.minAhead = atoi(opt(argc, argv, "minahead", "40").c_str());
+	}
 	P.pick = (const u32*)(uintptr_t)dpick.p;
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
@@ -82,9 +133,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			cu::cuMemcpyDtoH_v2(hv.data(), dhits.p, sizeof(ExploreHit) * nh);
 			for (uint32_t i = hitsSeen; i < nh; i++) {
 				const ExploreHit& h = hv[i];
-				std::string in = inputsOf(d, h.parent, h.option);
+				std::string in = prefixStr + inputsOf(d, h.parent, h.option);
 				if (h.jumpOption != 255) in.push_back((char)('0' + h.jumpOption));
-				printf("{\"ev\":\"hit\",\"layer\":%d,\"tick\":%d,\"px\":%.3f,\"vx\":%.3f,\"inputs\":\"%s\"}\n", d, from + (int)in.size(), h.px, h.vx, in.c_str());
+				printf("{\"ev\":\"hit\",\"layer\":%d,\"tick\":%d,\"px\":%.3f,\"vx\":%.3f,\"gain\":%d,\"refTick\":%d,\"inputs\":\"%s\"}\n", d, from0 + (int)in.size(), h.px, h.vx, h.gain, h.refTick, in.c_str());
 			}
 			fflush(stdout);
 			hitsSeen = nh;
