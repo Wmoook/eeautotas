@@ -1,0 +1,6 @@
+# per-machine data: imported levels, optimizer jobs, scratch
+src/data/
+src/jobs/
+src/out/
+node_modules/
+*.log

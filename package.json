@@ -1,0 +1,12 @@
+{
+  "name": "eeautotas",
+  "version": "1.0.0",
+  "description": "Automatic TAS optimizer for Everybody Edits Offline (eeo-tas .eetas files)",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js --open"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TAS Optimizer</title>
+<style>
+:root {
+	--bg: #f4f2ec; --panel: #ffffff; --panel2: #f8f6f1; --ink: #1d1b16; --muted: #6b665b; --line: #e4dfd3;
+	--gold: #c9900f; --gold-soft: #fbf0d4; --good: #1f8a4c; --good-soft: #e3f4ea; --bad: #b3362b; --bad-soft: #fbe7e4;
+	--accent: #2c5fd6; --shadow: 0 1px 2px rgba(40, 32, 10, .06), 0 6px 20px rgba(40, 32, 10, .06);
+	--mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+	color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #15140f; --panel: #1e1c16; --panel2: #25221b; --ink: #f1ede2; --muted: #a39d8e; --line: #343026;
+		--gold: #f0b93a; --gold-soft: #3a2f14; --good: #4fcf86; --good-soft: #173424; --bad: #ff7a6b; --bad-soft: #3b1d19;
+		--accent: #7aa2ff; --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+		color-scheme: dark;
+	}
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 22px 20px 60px; }
+header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+h1 { margin: 0; font-size: 26px; letter-spacing: -.02em; display: flex; align-items: center; gap: 10px; }
+h1 .coin { width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #ffe28a, var(--gold) 60%, #8a5e05);
+	box-shadow: inset 0 0 0 2px rgba(0, 0, 0, .12); }
+.sub { color: var(--muted); margin-top: 4px; }
+.pills { display: flex; gap: 8px; flex-wrap: wrap; }
+.pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
+.pill.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, var(--line)); }
+.pill.no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; }
+.card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.drop { border: 2px dashed var(--line); border-radius: 12px; padding: 18px 14px; text-align: center; cursor: pointer; transition: .15s;
+	background: var(--panel2); }
+.drop:hover, .drop.over { border-color: var(--gold); background: var(--gold-soft); }
+.drop b { display: block; font-size: 15px; margin-bottom: 4px; }
+.drop span { color: var(--muted); font-size: 12.5px; }
+.files { display: grid; gap: 6px; margin: 12px 0; }
+.file { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px; background: var(--panel2); border: 1px solid var(--line);
+	font-size: 13px; min-width: 0; }
+.file .tag { font: 600 11px var(--mono); padding: 2px 6px; border-radius: 5px; background: var(--gold-soft); color: var(--gold); flex: none; }
+.file .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file.missing { color: var(--muted); border-style: dashed; }
+label.f { display: block; font-size: 12px; color: var(--muted); margin: 6px 0 4px; }
+input[type=text], select { width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); font: inherit; }
+button { font: 600 13.5px "Segoe UI", system-ui, sans-serif; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink);
+	padding: 8px 14px; cursor: pointer; transition: .12s; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.go { background: var(--good); color: #fff; border-color: var(--good); }
+button.stop { background: var(--bad-soft); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
+button.ghost { background: transparent; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.msg { margin-top: 10px; padding: 10px 12px; border-radius: 9px; font-size: 13px; }
+.msg.err { background: var(--bad-soft); color: var(--bad); }
+.msg.info { background: var(--panel2); color: var(--muted); }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes sp { to { transform: rotate(360deg); } }
+.jobs { display: grid; gap: 8px; margin-top: 18px; }
+.job { text-align: left; width: 100%; padding: 11px 12px; display: grid; gap: 3px; background: var(--panel); }
+.job.sel { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold-soft); }
+.job .t1 { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; min-width: 0; }
+.job .t1 span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .t2 { font: 12.5px var(--mono); color: var(--muted); font-weight: 400; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; margin-top: 6px; }
+.dot.run { background: var(--good); box-shadow: 0 0 0 0 var(--good); animation: pulse 1.8s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: end; }
+@media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
+.hero h3 { margin: 0; font-size: 20px; }
+.hero .meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.times { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
+.big { font: 700 48px/1 var(--mono); letter-spacing: -.02em; }
+.was { font: 500 18px var(--mono); color: var(--muted); text-decoration: line-through; }
+.saved { font: 600 14px var(--mono); color: var(--good); background: var(--good-soft); padding: 4px 10px; border-radius: 999px; }
+.saved.zero { color: var(--muted); background: var(--panel2); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
+@media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+.stat { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; min-width: 0; }
+.stat .k { font-size: 11.5px; color: var(--muted); }
+.stat .v { font-weight: 600; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart { margin-top: 16px; height: 170px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); position: relative; }
+.chart svg { width: 100%; height: 100%; display: block; }
+.feed { margin-top: 16px; display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.imp { display: grid; grid-template-columns: 74px 70px 1fr auto; gap: 10px; align-items: center; padding: 7px 10px; border-radius: 9px;
+	background: var(--panel2); font-size: 13px; }
+.imp .d { font: 600 13px var(--mono); color: var(--good); }
+.imp .w { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp .b { font: 13px var(--mono); }
+.imp .c { font: 12px var(--mono); color: var(--muted); }
+details { margin-top: 14px; }
+summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font: 12px/1.5 var(--mono);
+	max-height: 260px; overflow: auto; white-space: pre-wrap; }
+.empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+.empty b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 6px; }
+.how { margin-top: 18px; font-size: 13px; color: var(--muted); }
+.how li { margin: 3px 0; }
+.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 10; max-width: min(360px, calc(100vw - 32px)); }
+.toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--good); border-radius: 10px; padding: 10px 14px;
+	box-shadow: var(--shadow); animation: tin .25s ease-out; }
+.toast b { color: var(--good); font-family: var(--mono); }
+@keyframes tin { from { transform: translateY(10px); opacity: 0; } }
+.report { margin-top: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--panel2); }
+.report h4 { margin: 0 0 8px; font-size: 15px; }
+.odds { font: 700 22px var(--mono); }
+.odds.sure { color: var(--good); } .odds.risky { color: var(--gold); }
+.rng { display: grid; grid-template-columns: 70px 1fr auto; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.rng:first-of-type { border-top: 0; }
+.rng .p { font: 600 13px var(--mono); }
+</style>
+</head>
+<body>
+<div class="toasts" id="toasts"></div>
+<div class="wrap">
+	<header>
+		<div>
+			<h1><span class="coin"></span>TAS Optimizer</h1>
+			<div class="sub">Everybody Edits · the game's exact physics · keeps improving your run until you stop it</div>
+		</div>
+		<div class="pills" id="pills"></div>
+	</header>
+	<div class="grid">
+		<div>
+			<div class="card">
+				<h2>New run</h2>
+				<div class="drop" id="drop">
+					<b>Drop your .eelvl + .eetas here</b>
+					<span>or click to choose files · the level and a TAS that finishes it</span>
+					<input type="file" id="pick" accept=".eelvl,.eetas" multiple hidden>
+				</div>
+				<div class="files" id="files"></div>
+				<label class="f" for="name">Name</label>
+				<input type="text" id="name" placeholder="e.g. Forgotten Veil">
+				<div class="row" style="margin-top:12px">
+					<button class="primary" id="importBtn" disabled>Import &amp; check</button>
+					<span id="importHint" style="color:var(--muted);font-size:12.5px"></span>
+				</div>
+				<div id="importMsg"></div>
+			</div>
+			<div class="jobs" id="jobs"></div>
+		</div>
+		<div id="detail"></div>
+	</div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padStart(5, '0')}`;
+const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* no storage */ } } };
+let state = { jobs: [], cpus: 0, godot: true };
+let selected = store.get('tasopt.sel');
+let files = { eelvl: null, eetas: null };
+let busy = false;
+
+// ------------------------------------------------------------ upload
+function setFiles(list) {
+	for (const f of list) {
+		if (/\.eelvl$/i.test(f.name)) files.eelvl = f;
+		else if (/\.eetas$/i.test(f.name)) files.eetas = f;
+	}
+	if (files.eelvl && !$('name').value) $('name').value = files.eelvl.name.replace(/\.eelvl$/i, '');
+	renderFiles();
+}
+function renderFiles() {
+	const chip = (tag, f, what) => `<div class="file ${f ? '' : 'missing'}"><span class="tag">${tag}</span><span class="nm">${f ? esc(f.name) : 'no ' + what + ' yet'}</span></div>`;
+	$('files').innerHTML = chip('.eelvl', files.eelvl, 'level') + chip('.eetas', files.eetas, 'TAS');
+	$('importBtn').disabled = busy || !(files.eelvl && files.eetas);
+}
+const drop = $('drop');
+drop.onclick = () => $('pick').click();
+$('pick').onchange = (e) => setFiles(e.target.files);
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); setFiles(e.dataTransfer.files); };
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer && e.dataTransfer.files.length) setFiles(e.dataTransfer.files); });
+
+function b64(buf) {
+	const bytes = new Uint8Array(buf);
+	let s = '';
+	for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+	return btoa(s);
+}
+$('importBtn').onclick = async () => {
+	busy = true; renderFiles();
+	$('importMsg').innerHTML = `<div class="msg info"><span class="spin"></span>Reading the level with the game's own parser, then replaying your TAS in the exact physics…</div>`;
+	try {
+		const body = { name: $('name').value.trim(), eelvlName: files.eelvl.name, eetasName: files.eetas.name,
+			eelvlB64: b64(await files.eelvl.arrayBuffer()), eetasText: await files.eetas.text() };
+		const r = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+		const j = await r.json();
+		if (!r.ok) throw new Error(j.error || 'import failed');
+		const t = j.job.tas;
+		$('importMsg').innerHTML = `<div class="msg info">✓ The TAS finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}). Press <b>Start</b> to optimize it.</div>`;
+		files = { eelvl: null, eetas: null }; $('name').value = '';
+		selected = j.job.id; store.set('tasopt.sel', selected);
+		await refresh();
+	} catch (e) {
+		$('importMsg').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+	}
+	busy = false; renderFiles();
+};
+
+// ------------------------------------------------------------ jobs
+async function api(p, opts) {
+	const r = await fetch(p, opts);
+	const j = await r.json().catch(() => ({}));
+	if (!r.ok) throw new Error(j.error || r.statusText);
+	return j;
+}
+let seenImp = null;   // job id -> number of improvements already shown
+function toast(html) {
+	const el = document.createElement('div');
+	el.className = 'toast'; el.innerHTML = html;
+	$('toasts').appendChild(el);
+	setTimeout(() => el.remove(), 9000);
+}
+function notifyImprovements() {
+	const first = seenImp === null;
+	if (first) seenImp = {};
+	for (const j of state.jobs) {
+		const n = (j.history || []).length, was = seenImp[j.id];
+		seenImp[j.id] = n;
+		if (first || was === undefined || n <= was) continue;
+		const fresh = j.history.slice(was), gain = fresh.reduce((a, p) => a + p.saved, 0);
+		const msg = `Saved ${(gain / 100).toFixed(2)} s — ${j.name} is now ${fmt(fresh[fresh.length - 1].runTicks)}`;
+		toast(`<b>−${(gain / 100).toFixed(2)} s</b> &nbsp;${esc(j.name)} is now <b>${fmt(fresh[fresh.length - 1].runTicks)}</b>` +
+			`<div style="color:var(--muted);font-size:12px;margin-top:2px">total saved ${(j.savedTicks / 100).toFixed(2)} s</div>`);
+		try { if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('TAS Optimizer', { body: msg }); } catch (e) { /* no notifications */ }
+	}
+	const run = state.jobs.find((j) => j.running);
+	document.title = run && run.savedTicks > 0 ? `−${(run.savedTicks / 100).toFixed(2)} s · ${run.best.time} · TAS Optimizer` : 'TAS Optimizer';
+}
+async function refresh() {
+	try { state = await api('/api/state'); } catch (e) { return; }
+	notifyImprovements();
+	renderPills(); renderJobs(); renderDetail();
+}
+function renderPills() {
+	const running = state.jobs.find((j) => j.running);
+	$('pills').innerHTML = `<span class="pill">${state.cpus} CPU threads</span>` +
+		`<span class="pill ${state.godot ? 'ok' : 'no'}">${state.godot ? 'level reader ready' : 'Godot 4.6.1 not found'}</span>` +
+		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : `<span class="pill">idle</span>`);
+}
+function renderJobs() {
+	if (!state.jobs.some((j) => j.id === selected)) selected = state.jobs[0] ? state.jobs[0].id : null;
+	$('jobs').innerHTML = state.jobs.map((j) => `
+		<button class="job card ${j.id === selected ? 'sel' : ''}" data-id="${j.id}">
+			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : ''}"></span></div>
+			<div class="t2">${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
+		</button>`).join('');
+	for (const el of document.querySelectorAll('.job')) el.onclick = () => { selected = el.dataset.id; store.set('tasopt.sel', selected); renderJobs(); renderDetail(); };
+}
+function friendlyStage(s) {
+	if (!s) return '—';
+	if (/^mutate/.test(s)) return 'Trying input tweaks';
+	let m = s.match(/^deep\d+_seg(\d+)(?:\.(\d+))?/);
+	if (m) return `Exploring new routes · part ${m[1]}${m[2] ? '.' + m[2] : ''}`;
+	if (/^shortcuts/.test(s)) return 'Searching local shortcuts';
+	if (/^beam/.test(s)) return 'Beam search';
+	if (s === 'splice') return 'Combining the best pieces';
+	if (s === 'starting') return 'Starting…';
+	return s;
+}
+function dur(ms) {
+	if (!ms || ms < 0) return '—';
+	const m = Math.floor(ms / 60000), h = Math.floor(m / 60);
+	return h ? `${h}h ${m % 60}m` : `${m}m`;
+}
+function chartSvg(j) {
+	const h = j.history || [];
+	if (!h.length) return `<div class="empty" style="padding:62px 10px">The chart fills in as improvements are found.</div>`;
+	const W = 800, H = 170, pad = 10;
+	const t0 = Math.min(h[0].t, j.optimizingSince || h[0].t) - 1, t1 = Math.max(Date.now(), h[h.length - 1].t);
+	const y0 = j.original.runTicks, y1 = Math.min(...h.map((p) => p.runTicks));
+	const X = (t) => pad + (W - 2 * pad) * (t - t0) / Math.max(1, t1 - t0);
+	const Y = (v) => pad + (H - 2 * pad) * (y0 - v) / Math.max(1, y0 - y1);
+	let d = `M${X(t0)},${Y(y0)}`, v = y0;
+	for (const p of h) { d += ` H${X(p.t)} V${Y(p.runTicks)}`; v = p.runTicks; }
+	d += ` H${X(t1)}`;
+	return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+		<path d="${d} V${H} H${X(t0)} Z" fill="var(--good-soft)" opacity=".7"/>
+		<path d="${d}" fill="none" stroke="var(--good)" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+		${h.map((p) => `<circle cx="${X(p.t)}" cy="${Y(p.runTicks)}" r="3" fill="var(--good)"/>`).join('')}
+	</svg>`;
+}
+function reportHtml(j) {
+	const r = j.report;
+	const pct = (x) => `${(x * 100).toFixed(x >= 0.9995 || x === 0 ? 0 : 1)}%`;
+	const uses = (r.uses || []).map((u) => `<div class="rng"><span class="p">${esc(u.time || '?')}</span>
+		<span>Random portal at (${u.from ? u.from.x + ', ' + u.from.y : '?'}): ${u.exits} possible exits, ${u.working === u.exits ? 'all of them still finish' : `only ${u.working} ${u.working === 1 ? 'finishes' : 'finish'}`}</span>
+		<span class="p">${pct(u.conditional)}</span></div>`).join('');
+	return `<div class="report">
+		<h4>Final run: ${r.time}${r.savedTicks > 0 ? ` · saved ${(r.savedTicks / 100).toFixed(2)} s (${r.savedTicks} ticks) vs ${r.originalTime}` : ''}</h4>
+		${r.uses && r.uses.length ? `<div><span class="odds ${r.chance >= 0.9995 ? 'sure' : 'risky'}">${pct(r.chance)}</span> chance it works in EEO
+			<span style="color:var(--muted)">(the original: ${pct(r.originalChance)})</span></div>
+			<div style="color:var(--muted);font-size:12.5px;margin:6px 0">EEO picks random portal exits by chance, so replay the .eetas until the portal goes the right way.</div>${uses}`
+			: `<div><span class="odds sure">100%</span> works every time in EEO: no random portals on this route.</div>`}
+		<div class="row" style="margin-top:10px"><button class="primary" id="dlFinal">Download final .eetas (${r.time})</button></div>
+	</div>`;
+}
+function renderDetail() {
+	const j = state.jobs.find((x) => x.id === selected);
+	if (!j) {
+		$('detail').innerHTML = `<div class="card empty"><b>No runs yet</b>Drop a level (.eelvl) and a TAS for it (.eetas) on the left.
+			<ol class="how" style="text-align:left;max-width:460px;margin:18px auto 0">
+			<li>The level is read with the game's own parser, and the TAS is replayed in the exact physics to check it finishes.</li>
+			<li>Press <b>Start</b>: it searches for faster inputs forever, around the clock, until you press Stop.</li>
+			<li>Every improvement is proven by replaying the whole run. Download the best .eetas any time (eeo-tas format).</li></ol></div>`;
+		return;
+	}
+	const sel = $('workers') ? $('workers').value : '';
+	const pct = j.savedTicks > 0 ? ` · ${(100 * j.savedTicks / j.original.runTicks).toFixed(2)}%` : '';
+	const workersDefault = sel || String(j.workers || Math.max(1, state.cpus - 2));
+	const opts = Array.from({ length: state.cpus }, (_, i) => i + 1).map((n) => `<option ${String(n) === workersDefault ? 'selected' : ''}>${n}</option>`).join('');
+	const hist = (j.history || []).slice().reverse();
+	$('detail').innerHTML = `<div class="card">
+		<div class="hero">
+			<div>
+				<h3>${esc(j.name)}</h3>
+				<div class="meta">${esc(j.level.name || j.level.file)} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}</div>
+			</div>
+			<div class="row">
+				${j.running ? `<button class="stop" id="stopBtn">Pause</button><button class="primary" id="finishBtn">Finish run</button>`
+					: `<label style="font-size:12px;color:var(--muted)">threads <select id="workers" style="width:auto;display:inline-block">${opts}</select></label><button class="go" id="startBtn">${j.round || j.savedTicks > 0 ? 'Resume' : 'Start'}</button>` +
+					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
+			</div>
+		</div>
+		<div class="times">
+			<span class="big">${j.best.time}</span>
+			${j.savedTicks > 0 ? `<span class="was">${j.original.time}</span>` : ''}
+			<span class="saved ${j.savedTicks > 0 ? '' : 'zero'}">${j.savedTicks > 0 ? `−${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks} ticks${pct}` : 'no improvement yet'}</span>
+		</div>
+		<div class="stats">
+			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? '● optimizing' : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
+			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}</div></div>
+			<div class="stat"><div class="k">Running for</div><div class="v">${j.running ? dur(Date.now() - j.optimizingSince) : '—'}</div></div>
+			<div class="stat"><div class="k">Rounds · coins</div><div class="v">${j.round || 0} · ${j.coinsOptional === undefined ? '—' : (j.coinsOptional ? 'optional' : 'needed')}</div></div>
+		</div>
+		<div class="chart">${chartSvg(j)}</div>
+		<div class="row" style="margin-top:14px">
+			<button class="primary" id="dlBest">Download optimized .eetas (${j.best.time})</button>
+			<button class="ghost" id="dlOrig">Original</button>
+			<span style="flex:1"></span>
+			<button class="ghost" id="delBtn" title="Delete this run and its files">Delete</button>
+		</div>
+		${j.error ? `<div class="msg err">${esc(j.error)}</div>` : ''}
+		${j.report ? reportHtml(j) : (j.chance < 1 ? `<div class="msg info">⚠ This run goes through random portals: in EEO it finishes in <b>${(j.chance * 100).toFixed(0)}%</b> of plays. The optimizer never lowers that chance. Details appear when you press <b>Finish run</b>.</div>` : '')}
+		<div class="feed">${hist.map((p) => `<div class="imp"><span class="c">${new Date(p.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+			<span class="d">−${p.saved} tick${p.saved === 1 ? '' : 's'}</span><span class="w">${esc(friendlyStage(p.what) === p.what ? p.what : friendlyStage(p.what))}</span><span class="b">${fmt(p.runTicks)}</span></div>`).join('')
+			|| `<div class="msg info">Improvements will appear here, newest first. The first minutes are usually the fastest.</div>`}</div>
+		<details ${store.get('tasopt.log') === '1' ? 'open' : ''} id="logBox"><summary>Optimizer log</summary><pre class="log">${esc((j.logTail || []).join('\n')) || '—'}</pre></details>
+	</div>`;
+	const go = $('startBtn'), st = $('stopBtn');
+	if (go) go.onclick = async () => { go.disabled = true; try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { /* none */ } await api(`/api/jobs/${j.id}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workers: +$('workers').value }) }).catch((e) => alert(e.message)); refresh(); };
+	if (st) st.onclick = async () => { st.disabled = true; await api(`/api/jobs/${j.id}/stop`, { method: 'POST' }).catch(() => {}); refresh(); };
+	$('dlBest').onclick = () => { location.href = `/api/jobs/${j.id}/best.eetas`; };
+	const fin = $('finishBtn');
+	if (fin) fin.onclick = async () => {
+		fin.disabled = true; fin.innerHTML = '<span class="spin"></span>Finishing…';
+		try { await api(`/api/jobs/${j.id}/finish`, { method: 'POST' }); location.href = `/api/jobs/${j.id}/best.eetas`; } catch (e) { toast(esc(e.message)); }
+		refresh();
+	};
+	const df = $('dlFinal');
+	if (df) df.onclick = () => { location.href = `/api/jobs/${j.id}/best.eetas`; };
+	$('dlOrig').onclick = () => { location.href = `/api/jobs/${j.id}/original.eetas`; };
+	$('delBtn').onclick = async () => {
+		const b = $('delBtn');
+		if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; b.classList.add('stop'); return; }
+		await api(`/api/jobs/${j.id}`, { method: 'DELETE' }).catch(() => {}); selected = null; refresh();
+	};
+	$('logBox').ontoggle = (e) => store.set('tasopt.log', e.target.open ? '1' : '0');
+}
+renderFiles();
+refresh();
+setInterval(() => { if (!document.querySelector('#delBtn[data-armed="1"]') && document.activeElement !== $('workers')) refresh(); }, 2500);
+</script>
+</body>
+</html>
