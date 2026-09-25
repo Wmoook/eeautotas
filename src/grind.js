@@ -277,6 +277,7 @@ function gpuBusy() {
 async function mutateLoop(tag) {
 	if (gpuBusy()) { log(`mutate_${tag}: skipped (the GPU searches these input changes)`); return; }
 	for (let k = 1; k <= 8; k++) {
+		if (k > 1 && gpuBusy()) { log(`mutate_${tag}: the GPU searcher is up, leaving the rest to it`); break; }
 		const mo = path.join(OUT, `grind_mut_${tag}_${k}.eetas`);
 		const before = best.runTicks;
 		await stage(`mutate_${tag}_${k}`, 'mutate.js', [TAS, `--out=${mo}`, '--horizon=800', `--workers=${W}`, LVL, `--nocoins=${NC}`, ...dl()], mo, 1800e3);
