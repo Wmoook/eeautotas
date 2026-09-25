@@ -173,7 +173,7 @@ function build(eeoDir) {
 	return { file: TABLE, count: out.count, literal, averaged, skipped };
 }
 
-module.exports = { colorOf, cellColor, table, decodePng, build };
+module.exports = { colorOf, cellColor, table, decodePng, build, stripComments, callArgs };   // (the AS3 helpers are shared with eegfx.js)
 
 if (require.main === module) {
 	const [cmd, dir] = process.argv.slice(2);

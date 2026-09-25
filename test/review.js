@@ -21,7 +21,9 @@ const HOMEP = (p) => require('path').join(require('os').homedir(), p);
 //   drag     the 8 drag constants (Config.as:47-55 pow(x, 10) * 1.00016093): which pow they are (informational)
 //   app      jobs.js / server.js / grind.js / render.js / common.js in a temp copy of src/ (no job ever appears in the
 //            real app): import limits and messages, the Finish report, where, probe / render / try limits, focus
-//            ranges, HTTP errors (upload limit, JSON null, render margin), the inbox verdict of a slower run
+//            ranges, HTTP errors (upload limit, JSON null, render margin), the viewer's data and page script, EE
+//            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, sheet whitelist, folder checks), the inbox
+//            verdict of a slower run
 // usage: node test/review.js [--quick] [--seed=N] [--only=music,portals,keys,fuzz,real,drag,app] [--case=ks1]
 // Exit code 1 if any check fails. Node built-ins only; writes nothing inside the repo.
 const fs = require('fs');
@@ -969,6 +971,61 @@ async function appSection() {
 			`${r.status} in ${Date.now() - t0} ms`);
 		r = await request(port, 'GET', `/api/jobs/${id}/where?t=0&format=text`);
 		check('GET where?t=0&format=text: "ahead -"', r.status === 200 && /ahead {2}- /.test(r.body.toString('utf8')));
+		// ---- the viewer: level lookup numbers and the level clock; EE graphics from an eeo-tas folder (a tiny fake one here)
+		r = await request(port, 'GET', `/api/jobs/${id}/level`);
+		const r3 = await request(port, 'GET', `/api/jobs/${id}/trajectory?which=best`);
+		check('GET level has the lookup numbers ([index, int]: the levitation / multijump / jump effect values), trajectory the level clock at tick 0',
+			r.status === 200 && Array.isArray(r.json.lookup) && r.json.lookup.length === 3 && r.json.lookup.some((e) => e[1] === 2) && r3.json && r3.json.clock0 === 0,
+			`${r.status} ${JSON.stringify(r.json && r.json.lookup)} clock0 ${r3.json && r3.json.clock0}`);
+		const page = fs.readFileSync(path.join(S.src, 'app', 'index.html'), 'utf8');
+		const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+		check('the page\'s script parses', scripts.length > 0 && scripts.every((s) => !errOf(() => new Function(s))), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
+		const fake = path.join(S.dir, 'fake-eeo-tas');
+		fs.mkdirSync(path.join(fake, 'media'), { recursive: true });
+		fs.mkdirSync(path.join(fake, 'src', 'items'), { recursive: true });
+		const sheet = S.R.encodePng(64, 16, new S.R.Canvas(64, 16, [10, 20, 30]).p);
+		fs.writeFileSync(path.join(fake, 'media', 'blocks.png'), sheet);
+		fs.writeFileSync(path.join(fake, 'media', 'blocks_special.png'), sheet);
+		fs.writeFileSync(path.join(fake, 'src', 'items', 'ItemId.as'), 'package items { public class ItemId {\n public static const ONEWAY_CYAN:int = 1001;\n' +
+			' public static const COINDOOR:int = 43;\n public static function isBlockRotateable(itemId:int):Boolean { switch (itemId) { case ONEWAY_CYAN: return true; } return false; }\n} }');
+		fs.writeFileSync(path.join(fake, 'src', 'items', 'ItemManager.as'), [
+			'package items { public class ItemManager {',
+			'  [Embed(source="/../media/blocks.png")] private static var blocksBM:Class;',
+			'  private static var blocksBMD:BitmapData = new blocksBM().bitmapData;',
+			'  [Embed(source="/../media/blocks_special.png") ] protected static var specialBlocksBM:Class;',
+			'  private static var specialBlocksBMD:BitmapData = new specialBlocksBM().bitmapData;',
+			'  public static var sprOnewayCyan:BlockSprite = new BlockSprite(specialBlocksBMD, 1,0,16,16,specialBlocksBMD.width/16 - 2, true);',
+			'  public static function init():void {',
+			'    b.addBrick(createBrick(9, ItemLayer.FORGROUND, blocksBMD, "", "", ItemTab.BLOCK, false, true, 2, 0xFF6E6E6E, ["Grey"]));',
+			'    b.addBrick(createBrick(ItemId.COINDOOR, ItemLayer.DECORATION, blocksBMD, "", "", ItemTab.ACTION, false, true, 3, -1)); // createBrick(1, junk',
+			'    /* createBrick(2, ItemLayer.FORGROUND, blocksBMD, "", "", 0, false, true, 1, 0) */',
+			'    b.addBrick(createBrick(ItemId.ONEWAY_CYAN, ItemLayer.DECORATION, specialBlocksBMD, "", "", ItemTab.BLOCK, false, false, 240-238, -1));',
+			'  }',
+			'  public static function getRotateableSprite(type:int):BlockSprite { switch (type) { case ItemId.ONEWAY_CYAN: return sprOnewayCyan; default: return null; } }',
+			'} }'].join('\n'));
+		const post = (b) => request(port, 'POST', '/api/eegfx', Buffer.from(JSON.stringify(b)), { 'Content-Type': 'application/json' });
+		r = await post({ dir: fake });
+		const g = r.json || {};
+		check('POST /api/eegfx {dir: an eeo-tas folder}: the sprite map from its ItemManager.as (id -> sheet, frame, y, layer, shadow; sprites; morphables)',
+			r.status === 200 && g.available === true && g.source === 'settings' && JSON.stringify(g.sheets) === '["blocks","blocks_special"]' &&
+			JSON.stringify(g.blocks) === '{"9":[0,2,0,0,1],"43":[0,3,0,2,1],"1001":[1,2,0,2,0]}' && JSON.stringify(g.sprites) === '{"sprOnewayCyan":[1,1,2,1]}' &&
+			g.rot[1001] === 'sprOnewayCyan' && g.ids.COINDOOR === 43 && fs.existsSync(path.join(S.C.DATA, 'eegfx.json')) &&
+			C.readJSON(path.join(S.C.DATA, 'settings.json'), {}).eegfxDir === fake, `${r.status} ${JSON.stringify(g).slice(0, 400)}`);
+		r = await request(port, 'GET', '/api/eegfx/sheet/blocks.png');
+		const bad = [];
+		for (const p of ['..%2F..%2Fsrc%2Fitems%2FItemManager.as', '..%5Cmedia%5Cblocks.png', 'ItemManager.png', 'blocks_bg.png', '%2e%2e.png']) {
+			const x = await request(port, 'GET', `/api/eegfx/sheet/${p}`);
+			if (x.status !== 404) bad.push(`${p}: ${x.status}`);
+		}
+		check('GET /api/eegfx/sheet/<name>.png serves the map\'s sheets from the eeo-tas media folder and nothing else', r.status === 200 && /image\/png/.test(r.type) &&
+			Buffer.compare(r.body, sheet) === 0 && !bad.length, `${r.status} ${r.type}; ${bad.join(', ')}`);
+		const e1 = await post({ dir: path.join(S.dir, 'no-such-folder') }), e2 = await post({ dir: S.dir });
+		check('POST /api/eegfx refuses a folder that is not eeo-tas (400 with the reason), the setting stays', e1.status === 400 && /does not exist/.test(e1.json.error) &&
+			e2.status === 400 && /no media\/blocks\.png/.test(e2.json.error) && C.readJSON(path.join(S.C.DATA, 'settings.json'), {}).eegfxDir === fake,
+			`${e1.status} ${e1.json && e1.json.error} | ${e2.status} ${e2.json && e2.json.error}`);
+		r = await post({ dir: '' });
+		check('POST /api/eegfx {dir: ""}: back to finding eeo-tas by itself (available, or not with the reason why)', r.status === 200 && !('eegfxDir' in C.readJSON(path.join(S.C.DATA, 'settings.json'), {})) &&
+			(r.json.available === true ? r.json.source !== 'settings' : typeof r.json.why === 'string' && /eeo-tas/.test(r.json.why)), `${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
 	} finally {
 		await new Promise((res) => SV.server.close(res));
 	}

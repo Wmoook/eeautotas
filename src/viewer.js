@@ -7,7 +7,8 @@
 // - align(): which tick of the original run is "at the same point" as each tick of the best run (dynamic time
 //   warping over the two paths, in a band around the diagonal), for the viewer's "the original is 0.42 s behind".
 // - levelView(): width, height, the fg/bg block ids, EE's own minimap color per id (src/minimap.js) and the block
-//   kind per id (src/blocks.js) so the page can draw arrows, portals, coins, doors, spikes and the finish.
+//   kind per id (src/blocks.js) so the page can draw arrows, portals, coins, doors, spikes and the finish; the lookup
+//   numbers and the background color for drawing it with EE's own graphics (src/eegfx.js).
 // Typed arrays travel as base64 of their little-endian bytes.
 const C = require('./common.js');
 const B = require('./blocks.js');
@@ -24,6 +25,7 @@ const GRAV = (x, y) => (x === 0 && y === 1 ? 0 : x === 0 && y === -1 ? 1 : x ===
 function trajectory(level, masks) {
 	const sim = new E.EESim(level);
 	sim.reset();
+	const clock0 = sim.level_ticks() - sim.ticks();   // PlayState.ticks at tick 0 (time doors; the idle ticks of a start without /reset)
 	const inp = new E.EEInput();
 	const n = masks.length;
 	const X = new Int32Array(n + 1), Y = new Int32Array(n + 1), RUN = new Int32Array(n + 1), FL = new Uint8Array(n + 1);
@@ -83,7 +85,7 @@ function trajectory(level, masks) {
 	const doors = {};
 	for (const [key, g] of groups) doors[key] = [g.solid0 ? 1 : 0, ...g.toggles];
 	return {
-		n: t, complete, runTicks: sim.run_ticks, timerStart, deaths, coins: sim.coins, blueCoins: sim.blue_coins,
+		n: t, complete, runTicks: sim.run_ticks, timerStart, deaths, coins: sim.coins, blueCoins: sim.blue_coins, clock0,
 		X: X.subarray(0, len), Y: Y.subarray(0, len), RUN: RUN.subarray(0, len), FL: FL.subarray(0, len),
 		inputs: Uint8Array.from(masks.subarray ? masks.subarray(0, t) : masks.slice(0, t)), events, doors, taken0,
 	};
@@ -95,7 +97,7 @@ function json(tr, extra) {
 		ticks: tr.n, complete: tr.complete, finished: tr.complete >= 0, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), timerStart: tr.timerStart,
 		deaths: tr.deaths, coins: tr.coins, blueCoins: tr.blueCoins, posScale: 16,
 		x: b64(tr.X), y: b64(tr.Y), run: b64(tr.RUN), flags: b64(tr.FL), inputs: b64(tr.inputs),
-		events: tr.events, doors: tr.doors, coinsTaken0: tr.taken0,
+		events: tr.events, doors: tr.doors, coinsTaken0: tr.taken0, clock0: tr.clock0 | 0,
 	}, extra || {});
 }
 
@@ -190,9 +192,14 @@ function levelView(levelJson, level, meta) {
 	const spawns = [];
 	for (let k = 0; k < level.spawnsX.length; k++) spawns.push([level.spawnsX[k], level.spawnsY[k]]);
 	const m = meta || {};
+	// the AS3 Lookup int table (rotations, door numbers, effect values: what World.as draws with), when the JSON has it
+	const lookup = Array.isArray(levelJson.lookup_int) ? levelJson.lookup_int.filter((e) => e[0] >= 0 && e[0] < N && (fg[e[0]] || bg[e[0]])) : null;
+	// the level's own background color (World.setBackgroundColor: used iff its alpha is 0xFF)
+	const bgc = levelJson.header && levelJson.header.bgColor >>> 0;
+	const bgColor = bgc && (bgc >>> 24) === 0xff ? (bgc & 0xffffff).toString(16).padStart(6, '0') : null;
 	return {
 		width: W, height: H, name: (m.level && m.level.name) || levelJson.world_name || '', fg: b64(fg), bg: b64(bg),
-		palette, kinds, nums, portals, spawns, colors: haveTable ? 'ee-minimap' : 'app',
+		palette, kinds, nums, lookup, bgColor, portals, spawns, colors: haveTable ? 'ee-minimap' : 'app',
 		startMode: m.startMode || level.startMode || 'reset', startMatters: m.startMatters !== undefined ? m.startMatters : startMatters(level),
 	};
 }
