@@ -1,6 +1,6 @@
 'use strict';
 // Processor benchmark for the web app's "Processor" selector (GET /api/system): how many ticks per second the exact
-// engine (eesim.js) simulates on this machine, on one thread and on all threads at once. It runs a synthetic arena
+// engine (eesim.js) simulates on the CPU it runs on, on one thread and on all threads at once. It runs a synthetic arena
 // (solid floors and walls, gaps, arrows, dots, spikes) with random sticky inputs for about 1 s per measurement, in
 // worker threads, and is cached in src/data/_system.json per CPU model, thread count, Node version and engine size.
 // The optimizer's searches also snapshot, restore and hash states, so real search throughput is lower; the numbers
@@ -136,7 +136,18 @@ function estimate(rec, n) {
 	return P[P.length - 1][1];
 }
 
-module.exports = { run, cached, estimate, measure, spin, arenaJson, CACHE };
+/** The measured CPU in words, e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads
+ *  (measured)"; without a record just "Intel Core i7-11800H (16 threads)". */
+function describe(rec) {
+	const threads = (rec && rec.threads) || os.cpus().length;
+	const name = `${require('./common.js').cpuName((rec && rec.model) || (os.cpus()[0] && os.cpus()[0].model))} (${threads} threads)`;
+	if (!rec) return name;
+	const M = (x) => `${(x / 1e6).toFixed(1)} M`;
+	if (!rec.allMeasured) return `${name}: ${M(rec.single)} ticks/s per thread (measured; more threads estimated, the CPU was busy)`;
+	return `${name}: ${M(rec.single)} ticks/s per thread, fastest with ${rec.peakThreads >= threads ? `all ${threads}` : rec.peakThreads} threads (measured)`;
+}
+
+module.exports = { run, cached, estimate, measure, spin, arenaJson, describe, CACHE };
 
 if (isMainThread && require.main === module) {
 	const a = require('./common.js').parseArgs(process.argv.slice(2));

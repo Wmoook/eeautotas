@@ -46,10 +46,12 @@ That is all: no `npm install`, no Godot, no Python.
    completion**. If it does not finish, you get a clear message (where the ball ended up, coins, deaths) and no run
    is created.
 2. Pick how many **threads** to use and press **Start**. It uses the CPU heavily. The first time the app starts it
-   measures how fast this PC runs the physics (a few seconds, once), and the thread list shows the speed for each
-   count, e.g. "8 · 26 M/s (fastest)". On a laptop more threads is often not faster: pick the fastest count or
-   fewer, and keep it cool. One run optimizes at a time. The **processor** is the CPU; GPU mode is not available,
-   and the page says why (see "CPU or GPU?" below).
+   measures how fast your CPU runs the physics (a few seconds, once; the page names the CPU it found), and the
+   thread list shows the measured speed for each count, e.g. "8 · 26 M/s (fastest)". On many laptops more threads
+   is not faster: pick the fastest count or fewer, and keep it cool. While it optimizes, the run shows its real speed
+   right now ("Speed now: 12.4 M ticks/s on the CPU (8 threads)") and how many ticks it has simulated. One run
+   optimizes at a time. The **processor** is the CPU; GPU mode is not available, and the page says why (see "CPU or
+   GPU?" below).
 3. **Notifications:** every improvement pops up in the page. If you allow browser notifications, you also get one
    while the tab is in the background. The tab title shows the time saved. The chart and the list show every
    improvement and which search found it.
@@ -116,10 +118,11 @@ The app runs on the **CPU**, and that is the faster choice for this job. GPU mod
   doors, keys, switches and deaths all branch. The searches try thousands of different inputs, so neighboring GPU
   threads would take different branches almost at once, and GPUs are slow at that. The searches also keep hash
   tables of states and snapshots, which suit a CPU.
-- **The numbers:** one CPU thread runs about 5-7 million ticks per second, a laptop about 20-30 million on all
-  threads, a desktop more. An exact GPU port would have to beat that with 64-bit math at 1/64 speed and heavy branch
-  divergence; it would very likely be slower, and it would be a second engine that would have to be proven
-  bit-identical. So there is one exact engine, and it runs on the CPU. `GET /api/system` shows this PC's measurement.
+- **The numbers** (one example machine, an Intel Core i7-11800H laptop): one CPU thread runs about 5-7 million ticks
+  per second, all threads together about 20-30 million; a desktop CPU does more. An exact GPU port would have to beat
+  that with 64-bit math at 1/64 speed and heavy branch divergence; it would very likely be slower, and it would be a
+  second engine that would have to be proven bit-identical. So there is one exact engine, and it runs on the CPU.
+  `GET /api/system` shows the measurement for the CPU the app runs on.
 
 ## What "random portal odds" mean
 
@@ -155,7 +158,7 @@ node src/tas.js try <job> my_run.eetas         offer your own faster run to a jo
 node src/tas.js focus <job> 1:08 1:14 120      search that part harder
 node src/tas.js import level.eelvl run.eetas   create a run without the page (--start=load: started right after
                                                loading the level); then: start <job>, stop <job>
-node src/bench.js                              measure this PC's physics speed (1 thread and all threads)
+node src/bench.js                              measure the CPU's physics speed (1 thread and all threads)
 ```
 
 The app also has a local JSON API (`GET http://localhost:47823/api` lists it; the viewer uses

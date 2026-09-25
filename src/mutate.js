@@ -96,6 +96,7 @@ function mutationsAt(masks, t, pairs) {
 
 function workerMain() {
 	const { a, ticks } = workerData;
+	E.setTickCounter(workerData.ticksBuf);
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
@@ -137,11 +138,13 @@ function workerMain() {
 		}
 		if (++done % 200 === 0) parentPort.postMessage({ type: 'progress', done });
 	}
+	E.flushTicks();
 	parentPort.postMessage({ type: 'res', found });
 }
 
 async function main() {
 	const a = parseArgs();
+	const meter = C.tickMeter();   // `[ticks] N` every second (the page's live speed)
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
@@ -156,7 +159,7 @@ async function main() {
 	const runAll = (pairs) => Promise.all(Array.from({ length: a.workers }, (_, w) => new Promise((res) => {
 		const ticks = [];
 		for (let t = a.from + w; t < to; t += a.workers) ticks.push(t);
-		const wk = new Worker(__filename, { workerData: { a, ticks, stopBuf, pairs } });
+		const wk = new Worker(__filename, { workerData: { a, ticks, stopBuf, pairs, ticksBuf: meter.buf } });
 		wk.on('message', (m) => { if (m.type === 'res') { for (const f of m.found) all.push(f); res(); } });
 		wk.on('error', (e) => { console.log('[mut] worker error', e); res(); });
 	})));
@@ -190,6 +193,7 @@ async function main() {
 		C.writeEetas(a.out, seq);
 		console.log(`[mut] written ${a.out}`);
 	}
+	meter.stop();
 }
 
 if (isMainThread) main();

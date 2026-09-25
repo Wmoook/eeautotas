@@ -31,14 +31,15 @@ const GPU_WHY = 'Exact EE physics needs 64-bit floating point math (every run mu
 	'collision steps, portals, doors) that GPUs handle badly. The CPU is faster for this.';
 let bench = BENCH.cached();                    // the benchmark record (src/data/_system.json), measured at startup when missing
 let benchState = bench ? 'done' : 'pending';
+const CPU_MODEL = (os.cpus()[0] && os.cpus()[0].model || '').trim();   // the detected CPU (texts name it: C.cpuName)
 function systemInfo() {
 	const n = os.cpus().length;
 	const est = bench ? Array.from({ length: n }, (_, i) => BENCH.estimate(bench, i + 1)) : null;
 	return {
-		cpus: n, model: (os.cpus()[0] && os.cpus()[0].model || '').trim(), benchState, bench,
+		cpus: n, model: CPU_MODEL, benchState, bench,
 		processors: [
-			{ id: 'cpu', name: 'CPU', available: true, threads: n, single: bench ? bench.single : null, all: bench ? bench.all : null,
-				peakThreads: bench ? bench.peakThreads : null, estimate: est },
+			{ id: 'cpu', name: 'CPU', model: C.cpuName(CPU_MODEL), text: BENCH.describe(bench), available: true, threads: n, single: bench ? bench.single : null,
+				all: bench ? bench.all : null, peakThreads: bench ? bench.peakThreads : null, estimate: est },
 			{ id: 'gpu', name: 'GPU', available: false, why: GPU_WHY },
 		],
 		faster: 'cpu',
@@ -86,10 +87,10 @@ function levelJson(id) {
 
 const ENDPOINTS = [
 	['GET', '/api', 'this list'],
-	['GET', '/api/state', 'all jobs (summaries), CPU threads, the processor benchmark'],
+	['GET', '/api/state', 'all jobs (summaries, with the live speed of a running job), the CPU model and threads, the processor benchmark'],
 	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (not available, why)'],
 	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load"} (files as base64 of their raw bytes)'],
-	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, inbox, focus, files)'],
+	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, live speed, inbox, focus, files)'],
 	['POST', '/api/jobs/:id/start', 'start / resume optimizing: JSON {workers, processor: "cpu"}'],
 	['POST', '/api/jobs/:id/stop', 'pause'],
 	['POST', '/api/jobs/:id/finish', 'stop and write the final report (report.json)'],
@@ -187,8 +188,8 @@ const server = http.createServer(async (req, res) => {
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
-			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, now: Date.now(), benchState,
-				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points } : null });
+			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, cpuModel: CPU_MODEL, now: Date.now(), benchState,
+				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points, model: bench.model } : null });
 		}
 		if (req.method === 'GET' && parts[1] === 'system' && parts.length === 2) return send(res, 200, systemInfo());
 		if (req.method === 'POST' && parts[1] === 'jobs' && parts.length === 2) {
@@ -309,7 +310,7 @@ function main() {
 	process.on('SIGHUP', shutdown);   // Windows: the console window was closed
 	server.listen(PORT, '127.0.0.1', () => {
 		const url = `http://localhost:${PORT}/`;
-		console.log(`[app] EE Auto TAS running at ${url} (${os.cpus().length} CPU threads)`);
+		console.log(`[app] EE Auto TAS running at ${url} (CPU: ${C.cpuName(CPU_MODEL)}, ${os.cpus().length} threads)`);
 		console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
 		if (process.env.EEAT_HOME) console.log(`[app] Your runs are saved in ${C.JOBS}`);
 		if (args.open) openBrowser(url);
@@ -321,12 +322,11 @@ function main() {
 		};
 		if (bench) { resume(); return; }
 		benchState = 'measuring';
-		console.log('[app] measuring the engine speed on this CPU (once, a few seconds)...');
+		console.log(`[app] measuring the engine speed of the ${BENCH.describe(null)}: once, a few seconds...`);
 		const busy = C.jobIds().some((id) => J.runningPid(id));   // a grind started from the CLI already uses the CPU
 		BENCH.run({ busy }).then((rec) => {
 			bench = rec; benchState = 'done';
-			console.log(`[app] CPU: ${(rec.single / 1e6).toFixed(1)} M ticks/s on 1 thread, ${(rec.all / 1e6).toFixed(1)} M on all ${rec.threads}` +
-				`${rec.allMeasured ? '' : ' (estimated)'}; fastest with ${rec.peakThreads} threads`);
+			console.log(`[app] ${BENCH.describe(rec)}; all ${rec.threads} threads together: ${(rec.all / 1e6).toFixed(1)} M ticks/s${rec.allMeasured ? '' : ' (estimated)'}`);
 		}).catch((e) => { benchState = 'error'; console.log(`[app] benchmark failed: ${e.message}`); }).finally(resume);
 	});
 }

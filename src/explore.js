@@ -81,6 +81,7 @@ function makeRng(seed) {
 
 function workerMain() {
 	const a = workerData.args;
+	E.setTickCounter(workerData.ticksBuf);
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
@@ -265,11 +266,13 @@ function workerMain() {
 			parentPort.postMessage({ type: 'stat', cells: entries.length, rolls, steps, seed: workerData.seed });
 		}
 	}
+	E.flushTicks();
 	parentPort.postMessage({ type: 'done', cells: entries.length, rolls, steps, seed: workerData.seed });
 }
 
 async function main() {
 	const a = parseArgs();
+	const meter = C.tickMeter();   // `[ticks] N` every second (the page's live speed)
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
@@ -280,7 +283,7 @@ async function main() {
 	const cands = [];
 	const t0 = Date.now();
 	await Promise.all(Array.from({ length: a.workers }, (_, i) => new Promise((res) => {
-		const w = new Worker(__filename, { workerData: { args: a, seed: a.seed * 1000 + i + 1 } });
+		const w = new Worker(__filename, { workerData: { args: a, seed: a.seed * 1000 + i + 1, ticksBuf: meter.buf } });
 		w.on('message', (msg) => {
 			if (msg.type === 'cand') { cands.push(msg); return; }
 			if (msg.type === 'best') {
@@ -299,6 +302,7 @@ async function main() {
 	let cells = 0, steps = 0;
 	for (const s of stats.values()) { cells += s.cells; steps += s.steps; }
 	console.log(`[explore] ${steps.toLocaleString()} simulated ticks, ${cells.toLocaleString()} archive cells (sum over workers)`);
+	meter.stop();
 	if (a.cands) {
 		// top candidates: best per target tick, then by saving (desc) and distance (asc)
 		const per = new Map();

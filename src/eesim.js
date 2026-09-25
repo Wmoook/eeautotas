@@ -58,6 +58,28 @@ const TOXIC_BUOYANCY = -0.4;
 const PING = 0.2;
 const CLOCK_BASE = 1000000000000;
 
+// ------------------------------------------------------------------ tick counter (live speed stats; not physics)
+// EESim.tick() counts the ticks of every EESim of this thread in a plain integer (one increment and one compare on
+// the hot path). Every 65536 ticks, and on flushTicks(), the count is added to the shared counter set with
+// setTickCounter (Atomics.add), which the search tools share between their worker threads (common.tickMeter).
+// (var, not let: no TDZ check on the hot path; the measured overhead is within the noise, under 2%)
+var tickCount = 0;   // eslint-disable-line no-var
+var tickSink = null;   // eslint-disable-line no-var
+/** Counts this thread's ticks into `sab` (a SharedArrayBuffer, read as a BigInt64Array, or an Int32Array /
+ *  BigInt64Array over one); null stops counting. Ticks simulated before the call are not counted. */
+function setTickCounter(sab) {
+  tickSink = sab == null ? null : ArrayBuffer.isView(sab) ? sab : new BigInt64Array(sab);
+  tickCount = 0;
+}
+/** Adds this thread's ticks not yet counted to the shared counter (call it before a worker finishes). */
+function flushTicks() {
+  if (tickSink !== null && tickCount !== 0) {
+    if (tickSink instanceof BigInt64Array) Atomics.add(tickSink, 0, BigInt(tickCount));
+    else Atomics.add(tickSink, 0, tickCount);
+  }
+  tickCount = 0;
+}
+
 // ------------------------------------------------------------------ ItemId.as
 const COIN_GOLD = 100, COIN_BLUE = 101;
 const CROWN = 5, BRICK_COMPLETE = 121, PORTAL = 242, PORTAL_INVISIBLE = 381, SPAWNPOINT = 255;
@@ -924,6 +946,7 @@ class EESim {
    * (Player.tilequeue) run inside Player.tick every tick and are exact.
    */
   tick(input) {
+    if ((++tickCount & 0xFFFF) === 0) flushTicks();   // live speed stats only (see setTickCounter), no physics
     this.prev_px = this.px;
     this.prev_py = this.py;
     this.teleported = false;
@@ -2581,6 +2604,7 @@ EESim.prototype._restoreScalars = new Function('s', SNAP_SCALARS.map((f) => `thi
 
 module.exports = {
   loadLevel, prepareLevel, EESim, EEInput, EESnapshot, applyMask, parseEetas, parseEetasBytes, eetasOddBytes,
+  setTickCounter, flushTicks,
   COLORS, DRAG_HEX, SNAP_SCALARS, RNG_SEED_STATE, pcgSeedState, pcgStep, pcgOut,
   KEY_TICKS, TIMEDOOR_PERIOD, START_MODES,
   constants: { BASE_DRAG, ICE_NO_MOD_DRAG, ICE_DRAG, NO_MOD_DRAG, WATER_DRAG, MUD_DRAG, LAVA_DRAG, TOXIC_DRAG, MULT },

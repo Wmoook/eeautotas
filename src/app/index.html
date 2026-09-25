@@ -85,6 +85,15 @@ button.watch { background: var(--gold-soft); color: var(--gold); border-color: c
 .hero h3 { margin: 0; font-size: 20px; }
 .hero .meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 .verified { color: var(--good); font-weight: 600; cursor: help; }
+.live { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 9px 12px; border-radius: 10px; font-size: 13px;
+	background: var(--good-soft); border: 1px solid color-mix(in srgb, var(--good) 25%, var(--line)); }
+.live .lk { font-weight: 600; }
+.live b { font: 700 17px var(--mono); color: var(--good); }
+.live .lt { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.live.idle { background: var(--panel2); border-color: var(--line); }
+.live.idle b { color: var(--muted); }
+.job .lr { color: var(--good); }
+.job .lr.idle { color: var(--muted); }
 .procnote { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
 .procnote b { color: var(--ink); font-weight: 600; }
 .why { text-decoration: underline dotted; cursor: help; }
@@ -396,20 +405,53 @@ function estimate(b, n) {
 	}
 	return P[P.length - 1][1];
 }
+/** the detected CPU for texts: "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz" -> "Intel Core i7-11800H" (= common.js cpuName) */
+function cpuName() {
+	const raw = String((state.bench && state.bench.model) || state.cpuModel || '').trim();
+	const s = raw.replace(/\((R|TM|C)\)/gi, '').replace(/\b\d+(st|nd|rd|th) Gen\b/i, '').replace(/\s*@.*$/, '').replace(/\s+(with|w\/) Radeon.*$/i, '')
+		.replace(/\s+\d+-Core Processor\b/i, '').replace(/\s+(CPU|Processor)\b/gi, '').replace(/\s+/g, ' ').trim();
+	return s || raw || 'CPU';
+}
 function procText(n, running) {
 	const b = state.bench;
 	const why = `<span class="why" title="${esc(GPU_WHY)}">why?</span>`;
-	if (!b) return state.benchState === 'measuring' ? `<span class="spin"></span>Measuring this CPU's speed (once, a few seconds)… · GPU: not available, the CPU is faster for exact EE physics (${why})`
-		: `CPU · GPU: not available, the CPU is faster for exact EE physics (${why})`;
+	const cpu = `<b>${esc(cpuName())}</b>`;
+	if (!b) return state.benchState === 'measuring' ? `<span class="spin"></span>Measuring the engine speed of the ${cpu} (${state.cpus} threads; once, a few seconds)… · GPU: not available, the CPU is faster for exact EE physics (${why})`
+		: `CPU: ${cpu} (${state.cpus} threads) · GPU: not available, the CPU is faster for exact EE physics (${why})`;
 	const est = estimate(b, n);
-	const peak = b.peakThreads && b.peakThreads < b.threads ? ` More than ${b.peakThreads} threads does not make it faster on this PC.` : '';
-	return `${running ? 'Running on the' : 'Processor:'} <b>CPU, ${n} thread${n === 1 ? '' : 's'} – about ${mts(est)} ticks/s</b> (measured on this PC: ${mts(b.single)} on one thread).${peak} ` +
+	const peak = b.peakThreads && b.peakThreads < b.threads ? `, fastest with ${b.peakThreads} threads` : '';
+	return `${running ? 'Running on the' : 'Processor:'} <b>CPU, ${n} thread${n === 1 ? '' : 's'} – about ${mts(est)} ticks/s</b> in the benchmark. ` +
+		`${cpu} (${b.threads} threads): ${mts(b.single)} ticks/s per thread${peak} (measured). ` +
 		`The CPU is the faster one here: GPU mode is not available because exact EE physics needs 64-bit math (${why}).`;
 }
 function renderPills() {
 	const running = state.jobs.find((j) => j.running);
-	$('pills').innerHTML = `<span class="pill">${state.cpus} CPU threads${state.bench ? ` · ${mts(state.bench.single)} ticks/s each` : ''}</span>` +
+	$('pills').innerHTML = `<span class="pill" title="${esc(state.cpuModel || '')}">${esc(cpuName())} · ${state.cpus} threads${state.bench ? ` · ${mts(state.bench.single)} ticks/s each` : ''}</span>` +
 		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : `<span class="pill">idle</span>`);
+}
+// the live speed of a running job (summary.live: src/jobs/<id>/live.json, written every second by grind.js)
+const rateM = (x) => (x > 0 ? `${(x / 1e6).toFixed(x >= 1e8 ? 0 : 1)} M` : '–');
+function bigCount(n) {
+	for (const [v, w] of [[1e12, 'trillion'], [1e9, 'billion'], [1e6, 'million']]) if (n >= v) return `${(n / v).toFixed(n >= v * 100 ? 0 : 1)} ${w}`;
+	return String(Math.round(n || 0));
+}
+function liveRates(j) {
+	const c = j.live && j.live.cpu, g = j.live && j.live.gpu;
+	return { c, g, cpu: (c && c.ticksPerSec) || 0, gpu: (g && g.ticksPerSec) || 0, ticks: ((c && c.ticks) || 0) + ((g && g.ticks) || 0) };
+}
+function liveHtml(j) {
+	if (!j.running) return '';
+	const { c, g, cpu, gpu, ticks } = liveRates(j);
+	const th = (c && c.threads) || j.workers;
+	let h = `<span class="lk">Speed now:</span><span><b>${rateM(cpu)}</b> ticks/s on the CPU (${th || '?'} thread${th === 1 ? '' : 's'})</span>`;
+	if (g) h += `<span>+ <b>${rateM(gpu)}</b> ticks/s on the GPU (${esc(g.name || 'GPU')})</span><span>= <b>${rateM(cpu + gpu)}</b> ticks/s in total</span>`;
+	h += `<span class="lt">${j.live ? `${bigCount(ticks)} ticks simulated this session` : 'waiting for the first numbers…'}</span>`;
+	return `<div class="live ${cpu + gpu > 0 ? '' : 'idle'}" title="The engine's real speed right now: ticks simulated per second over the last 3 s, all search threads together (– between search stages). ` +
+		`It is lower than the benchmark: the searches also store, restore and compare states.">${h}</div>`;
+}
+function liveShort(j) {
+	const { g, cpu, gpu } = liveRates(j);
+	return `<div class="t2 lr ${cpu + gpu > 0 ? '' : 'idle'}">${rateM(cpu + gpu)} ticks/s now${g ? ' (CPU + GPU)' : ''}</div>`;
 }
 function renderJobs() {
 	if (!state.jobs.some((j) => j.id === selected)) selected = state.jobs[0] ? state.jobs[0].id : null;
@@ -417,6 +459,7 @@ function renderJobs() {
 		<button class="job card ${j.id === selected ? 'sel' : ''}" data-id="${j.id}">
 			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : ''}"></span></div>
 			<div class="t2"><span class="verified" title="TAS verified to completion">✓</span> ${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
+			${j.running ? liveShort(j) : ''}
 		</button><button class="watch jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`).join('');
 	for (const el of document.querySelectorAll('.job')) el.onclick = () => { selected = el.dataset.id; store.set('tasopt.sel', selected); renderJobs(); renderDetail(); renderIdeas(); };
 	for (const el of document.querySelectorAll('[data-watch]')) el.onclick = () => openViewer(el.dataset.watch);
@@ -507,6 +550,7 @@ function renderDetail() {
 					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
 			</div>
 		</div>
+		${liveHtml(j)}
 		<div class="procnote" id="procNote">${procText(j.running ? (j.workers || state.cpus) : +workersDefault, j.running)}</div>
 		<div class="times">
 			<span class="big">${j.best.time}</span>
@@ -1194,10 +1238,14 @@ function openFromHash() {
 window.addEventListener('hashchange', openFromHash);
 renderFiles();
 refresh().then(openFromHash);
+// poll /api/state: every 1.5 s while a job runs (its live speed), else every 2.5 s
+let lastPoll = Date.now(), polling = false;
 setInterval(() => {
+	if (polling || Date.now() - lastPoll < (state.jobs.some((j) => j.running) ? 1500 : 2500) - 100) return;
 	if (document.querySelector('#delBtn[data-armed="1"]') || document.activeElement === $('workers') || document.activeElement === $('proc')) return;
-	refresh();
-}, 2500);
+	lastPoll = Date.now(); polling = true;
+	refresh().finally(() => { polling = false; });
+}, 250);
 </script>
 </body>
 </html>

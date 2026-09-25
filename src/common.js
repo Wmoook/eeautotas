@@ -255,6 +255,30 @@ function inputRuns(masks, a, b) {
 	return out.join(', ');
 }
 
+// ---------------------------------------------------------------- live speed
+/**
+ * The simulated-tick counter of a search tool with worker threads: this thread's ticks and every worker's (pass
+ * `meter.buf` in workerData; the worker calls E.setTickCounter(workerData.ticksBuf)) go into one shared counter,
+ * printed as `[ticks] <total so far>` every second. grind.js turns these lines into the job's live speed (live.json).
+ * poll() prints from a loop that blocks the event loop (optimize.js); stop() prints the final count.
+ */
+function tickMeter() {
+	const buf = new SharedArrayBuffer(8), total = new BigInt64Array(buf);
+	E.setTickCounter(total);
+	let last = Date.now();
+	const print = () => { E.flushTicks(); last = Date.now(); console.log(`[ticks] ${Atomics.load(total, 0)}`); };
+	const timer = setInterval(print, 1000);
+	timer.unref();
+	return { buf, poll() { if (Date.now() - last >= 1000) print(); }, stop() { clearInterval(timer); print(); } };
+}
+/** "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz" -> "Intel Core i7-11800H": the CPU model (os.cpus()[0].model) for texts */
+function cpuName(model) {
+	const raw = String(model || '').trim();
+	const s = raw.replace(/\((R|TM|C)\)/gi, '').replace(/\b\d+(st|nd|rd|th) Gen\b/i, '').replace(/\s*@.*$/, '').replace(/\s+(with|w\/) Radeon.*$/i, '')
+		.replace(/\s+\d+-Core Processor\b/i, '').replace(/\s+(CPU|Processor)\b/gi, '').replace(/\s+/g, ' ').trim();
+	return s || raw || 'CPU';
+}
+
 /** --key=value / --flag and positional arguments */
 function parseArgs(argv) {
 	const a = { _: [] };
@@ -273,5 +297,5 @@ module.exports = {
 	fmt, parseTime, tickOf,
 	jobIds, findJob, jobLevelId, jobOfFile, levelData, loadLevel,
 	replay, isRandom, chanceOf, evaluate, judge, coinsIrrelevant,
-	maskName, inputRuns, parseArgs,
+	maskName, inputRuns, parseArgs, tickMeter, cpuName,
 };
