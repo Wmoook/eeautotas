@@ -5,9 +5,7 @@
 //   chance      - probability that the run finishes in EEO (sum over finishing outcome paths of prod 1/exits)
 //   bestScript  - the outcome path with the fastest finish (the optimizer simulates with this script, see eesim.js)
 //   uses        - along bestScript: each random portal (tick, run time, position, exits, how many exits still finish)
-// usage (CLI): node tools/tas/rng.js <file.eetas> --level=<id>
-const path = require('path');
-const fs = require('fs');
+// usage (CLI): node src/rng.js <file.eetas> [--level=<level id | job id>]   (--level optional inside src/jobs/<id>/)
 const E = require('./eesim.js');
 
 const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padStart(5, '0')}`;
@@ -82,9 +80,11 @@ module.exports = { analyze, play };
 if (require.main === module) {
 	const args = process.argv.slice(2);
 	const file = args.find((x) => !x.startsWith('--'));
-	const lid = (args.find((x) => x.startsWith('--level=')) || '--level=forgotten_veil').slice(8);
-	const level = E.loadLevel(path.join(__dirname, 'data', lid + '.json'));
-	const masks = E.parseEetas(fs.readFileSync(file, 'utf8'));
+	const lid = (args.find((x) => x.startsWith('--level=')) || '--level=').slice(8);
+	const C = require('./common.js');   // (lazily: common.js requires this file)
+	if (!file) { console.log('usage: node src/rng.js <file.eetas> [--level=<level id | job id>]'); process.exit(1); }
+	const level = E.loadLevel(C.levelData(lid, file));
+	const masks = C.readEetas(file);
 	const r = analyze(level, masks);
 	console.log(`[rng] ${r.plays} replays; chance to finish in EEO: ${(r.chance * 100).toFixed(1)}%${r.truncated ? ' (tree truncated)' : ''}; ` +
 		`best outcome path [${(r.bestScript || []).join(',')}] -> ${r.bestRunTicks != null ? fmt(r.bestRunTicks) : 'no finish'}`);

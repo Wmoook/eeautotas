@@ -3,17 +3,19 @@
 // tick j, then A[0..i) + B[j..] behaves exactly like B from j on, finishing (j - i) ticks sooner than B does.
 // Given several runs that all complete the level, finds the fastest combination (dynamic programming over
 // (run, tick) with jumps between equal states) and writes it, verified by a clean replay.
-// usage: node tools/tas/splice.js out.eetas run1.eetas run2.eetas ... [--level=forgotten_veil]
-const fs = require('fs');
+// usage: node src/splice.js out.eetas run1.eetas run2.eetas ... [--level=<level id | job id>] [--nocoins]
+// (--level can be left out when run1.eetas is inside src/jobs/<id>/)
 const path = require('path');
-const E = require('./eesim.js');
+const C = require('./common.js');
+const E = C.E;
 const args = process.argv.slice(2);
-const level = (args.find((a) => a.startsWith('--level=')) || '--level=forgotten_veil').slice(8);
+const levelArg = (args.find((a) => a.startsWith('--level=')) || '--level=').slice(8);
 const files = args.filter((a) => !a.startsWith('--'));
 const NOCOINS = args.includes('--nocoins');   // join at states equal apart from collected coins (coins are optional)
 const keyOf = (sim) => (NOCOINS ? sim.stateHash(false, true) : sim.stateKey());
 const outFile = files.shift();
-const L = E.loadLevel(path.join(__dirname, 'data', level + '.json'));
+if (!outFile || !files.length) { console.log('usage: node src/splice.js out.eetas run1.eetas run2.eetas ... [--level=<id>] [--nocoins]'); process.exit(2); }
+const L = E.loadLevel(C.levelData(levelArg, files[0]));
 
 function trace(masks) {
 	const sim = new E.EESim(L);
@@ -25,8 +27,9 @@ function trace(masks) {
 	for (let t = 0; t < masks.length && complete < 0; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); keys.push(keyOf(sim)); }
 	return { keys, complete, runTicks: sim.run_ticks };
 }
-const runs = files.map((f) => { const m = E.parseEetas(fs.readFileSync(f, 'utf8')); const tr = trace(m); return { f, m, ...tr }; })
+const runs = files.map((f) => { const m = C.readEetas(f); const tr = trace(m); return { f, m, ...tr }; })
 	.filter((r) => { if (r.complete < 0) console.log(`[splice] ${r.f} does not complete, skipped`); return r.complete >= 0; });
+if (!runs.length) { console.log('[splice] no run completes the level'); process.exit(1); }
 for (const r of runs) console.log(`[splice] ${path.basename(r.f)}: completes at ${r.complete}, run_ticks ${r.runTicks}`);
 // Shortest path over states: V(state) = fewest ticks from that state to the finish, using any run's next input from
 // any occurrence of the state (Bellman-Ford style passes until nothing improves). Chains through runs freely:
@@ -57,4 +60,4 @@ for (let guard = 0; V.get(key) > 0 && guard < 1e6; guard++) {
 const v = trace(seq);
 console.log(`[splice] path: ${jumps.join(' -> ')} (${jumps.length - 1} splices)`);
 console.log(`[splice] result: completes at ${v.complete}, run_ticks ${v.runTicks}`);
-if (v.complete >= 0) fs.writeFileSync(outFile, seq.map((m) => String.fromCharCode(48 + m)).join(''));
+if (v.complete >= 0) C.writeEetas(outFile, seq);

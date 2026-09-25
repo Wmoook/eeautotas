@@ -1,5 +1,5 @@
 'use strict';
-// Headless TAS optimizer for EX Odyssey (Everybody Edits physics, bit-exact JS port in ./eesim.js).
+// Beam-search TAS optimizer (Everybody Edits Offline physics, bit-exact JS port in ./eesim.js).
 //
 // Beam search that follows a reference run (an .eetas that already completes the level) and tries every
 // input combination on every tick for every beam state, keeping the W states that are furthest along the
@@ -10,17 +10,18 @@
 // an identical beam (replicated), expands its share of it, and writes child summaries to shared memory; the
 // main thread picks the survivors and broadcasts (parent, input) pairs, which every worker re-applies.
 //
-// usage: node tools/tas/optimize.js [--level=forgotten_veil] [--tas=levels/tas/forgotten_veil.eetas]
-//        [--width=2000] [--workers=16] [--out=tools/tas/out/<level>_opt.eetas]
+// usage: node src/optimize.js --tas=<run.eetas> [--level=<level id | job id>] [--width=2000] [--workers=16]
+//        [--out=src/out/opt.eetas] [--passes=1] [--dist=24] [--prefix=<segment.eetas>]
 //        [--from=<tick>] (reuse the reference inputs verbatim up to this tick, search after it)
+// (--level can be left out for a .eetas inside src/jobs/<id>/)
 
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const E = require('./eesim.js');
+const C = require('./common.js');
+const E = C.E;
 
 // 18 input options: horizontal (none, left, right) x vertical (none, up, down) x jump (no, yes).
 // eeo-tas mask bits: 1 jump, 2 left, 4 right, 8 up, 16 down.
@@ -37,7 +38,7 @@ const SLOTS = 7;           // per child in the shared output: score, key hash, b
 let DIST_TICK = 24;        // score: this many px of position/velocity mismatch with the route cost one tick of progress
 
 function parseArgs() {
-	const a = { level: 'forgotten_veil', tas: null, width: 2000, workers: Math.max(1, os.cpus().length), out: null,
+	const a = { level: '', tas: null, width: 2000, workers: Math.max(1, os.cpus().length), out: null,
 		from: 0, maxSteps: 0, passes: 1, dist: 24, debug: 0, prefix: null };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
@@ -47,9 +48,9 @@ function parseArgs() {
 		else if (k === 'dist') a[k] = parseFloat(v);
 		else a[k] = v;
 	}
-	if (!a.tas) a.tas = path.join(ROOT, 'levels', 'tas', a.level + '.eetas');
-	if (!a.out) a.out = path.join(__dirname, 'out', a.level + '_opt.eetas');
-	a.levelData = path.join(__dirname, 'data', a.level + '.json');
+	if (!a.tas) { console.log('usage: node src/optimize.js --tas=<run.eetas> [--level=<id>] [--width=] [--out=] (see the header)'); process.exit(2); }
+	if (!a.out) a.out = path.join(__dirname, 'out', 'opt.eetas');
+	a.levelData = C.levelData(a.level, a.tas);
 	return a;
 }
 
@@ -255,7 +256,7 @@ async function main() {
 	const args = parseArgs();
 	const t0 = Date.now();
 	const level = E.loadLevel(args.levelData);
-	let masks = E.parseEetas(fs.readFileSync(args.tas, 'utf8'));
+	let masks = C.readEetas(args.tas);
 	const first = buildReference(level, masks);
 	console.log(`[opt] start: ${masks.length} ticks, completes at tick ${first.complete}, run_ticks ${first.runTicks} ` +
 		`(${fmt(first.runTicks)})`);
@@ -266,10 +267,7 @@ async function main() {
 		if (!res || res.runTicks >= bestRun) { console.log(`[opt] pass ${pass}: no improvement, stopping`); break; }
 		bestRun = res.runTicks;
 		masks = res.masks;
-		fs.mkdirSync(path.dirname(args.out), { recursive: true });
-		let str = '';
-		for (let i = 0; i < masks.length; i++) str += String.fromCharCode(48 + masks[i]);
-		fs.writeFileSync(args.out, str);
+		C.writeEetas(args.out, masks);
 		console.log(`[opt] pass ${pass}: ${fmt(res.runTicks)} (run_ticks ${res.runTicks}, ${first.runTicks - res.runTicks} ticks ` +
 			`saved in total) -> ${args.out}`);
 	}
@@ -312,7 +310,7 @@ async function searchPass(level, masks, args, pass, t0) {
 	// --prefix: play these inputs verbatim first (e.g. a new route segment from explore.js), then search; the
 	// reference line (elitism) continues with the reference inputs from the reference tick the prefix rejoins
 	let pre = null, refShift = 0;
-	if (args.prefix && pass === 1) pre = E.parseEetas(fs.readFileSync(args.prefix, 'utf8'));
+	if (args.prefix && pass === 1) pre = C.readEetas(args.prefix);
 	const from = pre ? pre.length : Math.min(args.from, masks.length);
 	let startProg = from;
 	if (pre) {

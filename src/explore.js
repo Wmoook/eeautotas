@@ -10,29 +10,31 @@
 // own explorer (different seed); the best rejoin of all is written as a prefix .eetas (reference inputs up to
 // --from, then the found segment) for optimize.js --prefix to continue.
 //
-// usage: node tools/tas/explore.js --from=5913 --join=6289 [--until=6450] [--seconds=120] [--workers=16]
-//        [--cell=8] [--vcell=2] [--roll=80] [--match=8] [--level=forgotten_veil] [--tas=...] [--out=...]
+// usage: node src/explore.js --tas=<run.eetas> --from=5913 --join=6289 [--until=6450] [--seconds=120] [--workers=16]
+//        [--cell=8] [--vcell=2] [--roll=80] [--match=8] [--exact=1] [--nocoins=0|1] [--level=<level id | job id>] [--out=...]
+// (--level can be left out for a .eetas inside src/jobs/<id>/)
 
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
-const E = require('./eesim.js');
-const ROOT = path.resolve(__dirname, '..', '..');
+const C = require('./common.js');
+const E = C.E;
 
 const OPTIONS = [];
 for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPTIONS.push(h | v | j);
 
 function parseArgs() {
-	const a = { level: 'forgotten_veil', tas: null, from: 0, join: 0, until: 0, seconds: 120, workers: os.cpus().length,
+	const a = { level: '', tas: null, from: 0, join: 0, until: 0, seconds: 120, workers: os.cpus().length,
 		cell: 8, vcell: 2, roll: 80, match: 3, velW: 3, pchange: 0.12, out: null, seed: 1, seed_ref: 1, perCell: 4, exact: 0, ahead: 0.5, cands: 0, minSave: 2, nocoins: 0, maxEntries: 0 };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) continue;
 		a[m[1]] = (m[1] === 'tas' || m[1] === 'level' || m[1] === 'out') ? m[2] : parseFloat(m[2]);
 	}
-	if (!a.tas) a.tas = path.join(ROOT, 'levels', 'tas', a.level + '.eetas');
-	if (!a.out) a.out = path.join(__dirname, 'out', `${a.level}_explore_${a.from}.eetas`);
+	if (!a.tas) { console.log('usage: node src/explore.js --tas=<run.eetas> --from=<tick> --join=<tick> [--until=<tick>] [--level=<id>] (see the header)'); process.exit(2); }
+	a.levelData = C.levelData(a.level, a.tas);
+	if (!a.out) a.out = path.join(__dirname, 'out', `explore_${a.from}.eetas`);
 	if (!a.until) a.until = a.join + 200;
 	return a;
 }
@@ -80,8 +82,8 @@ function makeRng(seed) {
 function workerMain() {
 	const a = workerData.args;
 	NOCOINS = !!a.nocoins;
-	const level = E.loadLevel(path.join(__dirname, 'data', a.level + '.json'));
-	const masks = E.parseEetas(fs.readFileSync(a.tas, 'utf8'));
+	const level = E.loadLevel(a.levelData);
+	const masks = C.readEetas(a.tas);
 	const R = reference(a, level, masks);
 	const sim = new E.EESim(level);
 	const inp = new E.EEInput();
@@ -269,8 +271,8 @@ function workerMain() {
 async function main() {
 	const a = parseArgs();
 	NOCOINS = !!a.nocoins;
-	const level = E.loadLevel(path.join(__dirname, 'data', a.level + '.json'));
-	const masks = E.parseEetas(fs.readFileSync(a.tas, 'utf8'));
+	const level = E.loadLevel(a.levelData);
+	const masks = C.readEetas(a.tas);
 	console.log(`[explore] from ${a.from}, rejoin ref ticks ${a.join}..${a.until}, ${a.workers} workers x ${a.seconds} s, ` +
 		`cells ${a.cell}px/${a.vcell}, roll ${a.roll}, match ${a.match}`);
 	let best = null;
@@ -313,7 +315,7 @@ async function main() {
 	for (const m of best.seq) out.push(m);
 	if (a.exact) for (let t = best.j; t < masks.length; t++) out.push(masks[t]);   // exact: the reference continues from S(j)
 	fs.mkdirSync(path.dirname(a.out), { recursive: true });
-	fs.writeFileSync(a.out, out.map((m) => String.fromCharCode(48 + m)).join(''));
+	C.writeEetas(a.out, out);
 	fs.writeFileSync(a.out + '.json', JSON.stringify({ from: a.from, t: best.t, j: best.j, saved: best.saved, d: best.d }));
 	console.log(`[explore] best: rejoin ref tick ${best.j} at tick ${best.t} (saves ${best.saved}) -> ${a.out}`);
 }

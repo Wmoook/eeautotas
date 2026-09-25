@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TAS Optimizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>EE Auto TAS</title>
 <style>
 :root {
 	--bg: #f4f2ec; --panel: #ffffff; --panel2: #f8f6f1; --ink: #1d1b16; --muted: #6b665b; --line: #e4dfd3;
@@ -21,6 +21,7 @@
 	}
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
 .wrap { max-width: 1240px; margin: 0 auto; padding: 22px 20px 60px; }
 header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
@@ -48,6 +49,7 @@ h1 .coin { width: 22px; height: 22px; border-radius: 50%; background: radial-gra
 .file .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file.missing { color: var(--muted); border-style: dashed; }
 label.f { display: block; font-size: 12px; color: var(--muted); margin: 6px 0 4px; }
+.hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
 input[type=text], select { width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); font: inherit; }
 button { font: 600 13.5px "Segoe UI", system-ui, sans-serif; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink);
 	padding: 8px 14px; cursor: pointer; transition: .12s; }
@@ -57,7 +59,10 @@ button.primary { background: var(--ink); color: var(--bg); border-color: var(--i
 button.go { background: var(--good); color: #fff; border-color: var(--good); }
 button.stop { background: var(--bad-soft); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
 button.ghost { background: transparent; }
+button.watch { background: var(--gold-soft); color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.lab { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.lab select { width: auto; }
 .msg { margin-top: 10px; padding: 10px 12px; border-radius: 9px; font-size: 13px; }
 .msg.err { background: var(--bad-soft); color: var(--bad); }
 .msg.info { background: var(--panel2); color: var(--muted); }
@@ -65,11 +70,13 @@ button.ghost { background: transparent; }
 	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes sp { to { transform: rotate(360deg); } }
 .jobs { display: grid; gap: 8px; margin-top: 18px; }
+.jobwrap { position: relative; }
 .job { text-align: left; width: 100%; padding: 11px 12px; display: grid; gap: 3px; background: var(--panel); }
 .job.sel { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold-soft); }
 .job .t1 { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; min-width: 0; }
 .job .t1 span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.job .t2 { font: 12.5px var(--mono); color: var(--muted); font-weight: 400; }
+.job .t2 { font: 12.5px var(--mono); color: var(--muted); font-weight: 400; padding-right: 70px; }
+.jobwrap .jw { position: absolute; right: 9px; bottom: 8px; padding: 3px 10px; font-size: 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); flex: none; margin-top: 6px; }
 .dot.run { background: var(--good); box-shadow: 0 0 0 0 var(--good); animation: pulse 1.8s infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
@@ -77,6 +84,9 @@ button.ghost { background: transparent; }
 @media (max-width: 640px) { .hero { grid-template-columns: 1fr; } }
 .hero h3 { margin: 0; font-size: 20px; }
 .hero .meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.procnote { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+.procnote b { color: var(--ink); font-weight: 600; }
+.why { text-decoration: underline dotted; cursor: help; }
 .times { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
 .big { font: 700 48px/1 var(--mono); letter-spacing: -.02em; }
 .was { font: 500 18px var(--mono); color: var(--muted); text-decoration: line-through; }
@@ -104,7 +114,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .empty b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 6px; }
 .how { margin-top: 18px; font-size: 13px; color: var(--muted); }
 .how li { margin: 3px 0; }
-.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 10; max-width: min(360px, calc(100vw - 32px)); }
+.toasts { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 40; max-width: min(360px, calc(100vw - 32px)); }
 .toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--good); border-radius: 10px; padding: 10px 14px;
 	box-shadow: var(--shadow); animation: tin .25s ease-out; }
 .toast b { color: var(--good); font-family: var(--mono); }
@@ -116,6 +126,75 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .rng { display: grid; grid-template-columns: 70px 1fr auto; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .rng:first-of-type { border-top: 0; }
 .rng .p { font: 600 13px var(--mono); }
+.ideas { margin-top: 18px; }
+.ideas p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.ideas .fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 8px; align-items: end; }
+@media (max-width: 640px) { .ideas .fields { grid-template-columns: 1fr 1fr; } }
+.ideas input[type=text] { font-family: var(--mono); }
+.ideas .fstate { margin-top: 10px; font-size: 13px; }
+.ideas .map { margin-top: 12px; border-radius: 10px; border: 1px solid var(--line); background: #0a0b0f; overflow: auto; max-height: 70vh; }
+.ideas .map img { display: block; max-width: 100%; }
+
+/* ---------------------------------------------------------------- viewer ("Watch") */
+.viewer { position: fixed; inset: 0; z-index: 30; background: rgba(8, 9, 12, .72); display: flex; align-items: center; justify-content: center;
+	padding: max(12px, env(safe-area-inset-top, 0px)) 12px max(12px, env(safe-area-inset-bottom, 0px)); }
+.vwin { width: min(1500px, 100%); height: 100%; max-height: 980px; display: flex; flex-direction: column; background: #101217; color: #e9ecf2;
+	border: 1px solid #262a33; border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, .5); }
+.vtop { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 16px; border-bottom: 1px solid #22262e; min-width: 0; }
+.vtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: #a7adba; }
+.vtitle b { color: #fff; font-size: 15px; margin-right: 8px; }
+.viewer button { background: #1b1e25; color: #e9ecf2; border-color: #2f3440; padding: 6px 11px; font-size: 13px; }
+.viewer button:hover:not(:disabled) { border-color: #6b7384; }
+.viewer button.on { background: #2b3242; border-color: #56627a; }
+.vnewer { background: #3a2f10 !important; color: #ffd76a !important; border-color: #7a6220 !important; }
+.vstage { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; touch-action: none; }
+.vstage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+.vstage canvas.drag { cursor: grabbing; }
+.vhud { position: absolute; left: 10px; top: 10px; display: grid; gap: 4px; pointer-events: none; }
+.vclock { display: flex; align-items: baseline; gap: 8px; background: rgba(10, 12, 16, .72); border: 1px solid rgba(255, 255, 255, .08);
+	border-radius: 9px; padding: 4px 10px; width: max-content; }
+.vclock .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #9aa3b5; min-width: 58px; }
+.vclock .t { font: 700 22px/1.1 var(--mono); color: #ffd23f; }
+.vclock.gh .t { font-size: 16px; color: #b9d6ff; }
+.vclock .fin { font: 600 11px var(--mono); color: #62e39a; }
+.vdiff { font: 600 13px var(--mono); background: rgba(10, 12, 16, .72); border-radius: 9px; padding: 4px 10px; width: max-content; max-width: calc(100vw - 60px);
+	white-space: normal; }
+.vdiff.ahead { color: #62e39a; } .vdiff.behind { color: #ff9b8a; } .vdiff.even { color: #c9ced8; }
+.vkeys { position: absolute; right: 10px; top: 10px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px; pointer-events: none; }
+.vkeys span { height: 24px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .14); background: rgba(10, 12, 16, .7); color: #7f8898;
+	font: 700 11px/22px var(--mono); text-align: center; }
+.vkeys span.on { background: #ffd23f; color: #16130a; border-color: #ffd23f; }
+.vside { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px; }
+.vside button { padding: 5px 10px; background: rgba(20, 23, 30, .85); }
+.vload { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #c9ced8; font-size: 14px; background: #000;
+	text-align: center; padding: 20px; }
+.vlegend { position: absolute; left: 10px; bottom: 10px; margin: 0; max-width: min(430px, calc(100% - 20px)); background: rgba(10, 12, 16, .85);
+	border: 1px solid rgba(255, 255, 255, .08); border-radius: 9px; padding: 5px 10px; font-size: 12px; color: #b8bfcc; }
+.vlegend summary { color: #9aa3b5; font-size: 12px; }
+.vlegend ul { margin: 6px 0 2px; padding-left: 16px; }
+.vlegend li { margin: 2px 0; }
+.vlegend kbd { font: 11px var(--mono); background: #232733; border-radius: 4px; padding: 0 4px; }
+.vbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; padding: 10px 12px; border-top: 1px solid #22262e; }
+.vbar .scrub { flex: 1 1 260px; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vbar input[type=range] { flex: 1; min-width: 0; accent-color: #ffd23f; }
+.vpos { font: 600 13px var(--mono); color: #d7dbe3; white-space: nowrap; }
+.vbar select, .vbar input[type=text] { width: auto; background: #1b1e25; color: #e9ecf2; border-color: #2f3440; padding: 6px 8px; font-size: 13px; }
+.vbar input[type=text] { width: 118px; font-family: var(--mono); }
+.vplay { min-width: 44px; font-size: 15px !important; }
+.vck { font-size: 12.5px; color: #b8bfcc; display: inline-flex; align-items: center; gap: 5px; }
+@media (max-width: 640px) {
+	.viewer { padding: 0; }
+	.vwin { border-radius: 0; max-height: none; border: 0; }
+	.vclock .t { font-size: 17px; }
+	.vclock.gh .t { font-size: 13px; }
+	.vclock .lbl { min-width: 0; }
+	.vkeys { grid-template-columns: repeat(3, 20px); } .vkeys span { height: 19px; font-size: 10px; line-height: 17px; }
+	.vbar { padding: 8px; gap: 6px 8px; }
+	.vbar .scrub { flex-basis: 100%; gap: 8px; }
+	.vbar input[type=text] { width: 96px; }
+	.vtick { display: none; }
+	.vlegend { display: none; }
+}
 </style>
 </head>
 <body>
@@ -123,8 +202,8 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 <div class="wrap">
 	<header>
 		<div>
-			<h1><span class="coin"></span>TAS Optimizer</h1>
-			<div class="sub">Everybody Edits · the game's exact physics · keeps improving your run until you stop it</div>
+			<h1><span class="coin"></span>EE Auto TAS</h1>
+			<div class="sub">Everybody Edits Offline · the game's exact physics · keeps improving your run until you stop it</div>
 		</div>
 		<div class="pills" id="pills"></div>
 	</header>
@@ -140,6 +219,13 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 				<div class="files" id="files"></div>
 				<label class="f" for="name">Name</label>
 				<input type="text" id="name" placeholder="e.g. Forgotten Veil">
+				<label class="f" for="startMode">How did you start the TAS in eeo-tas?</label>
+				<select id="startMode">
+					<option value="reset">After /reset (default)</option>
+					<option value="load">Right after loading the level</option>
+				</select>
+				<div class="hint">Only matters on levels with 2+ spawn points or time doors (/reset moves you to the next spawn point).
+					On other levels it makes no difference.</div>
 				<div class="row" style="margin-top:12px">
 					<button class="primary" id="importBtn" disabled>Import &amp; check</button>
 					<span id="importHint" style="color:var(--muted);font-size:12.5px"></span>
@@ -148,18 +234,64 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 			</div>
 			<div class="jobs" id="jobs"></div>
 		</div>
-		<div id="detail"></div>
+		<div><div id="detail"></div><div id="ideas"></div></div>
 	</div>
 </div>
+
+<div class="viewer" id="viewer" hidden>
+	<div class="vwin" role="dialog" aria-label="Run viewer">
+		<div class="vtop">
+			<div class="vtitle" id="vTitle"></div>
+			<button class="vnewer" id="vNewer" hidden>Newer version found · reload</button>
+			<button id="vClose" title="Close (Esc)">Close</button>
+		</div>
+		<div class="vstage" id="vStage">
+			<canvas id="vCanvas"></canvas>
+			<div class="vhud">
+				<div class="vclock"><span class="lbl">best</span><span class="t" id="vTimeA">0:00.00</span><span class="fin" id="vFinA"></span></div>
+				<div class="vclock gh" id="vClockG"><span class="lbl">original</span><span class="t" id="vTimeG">0:00.00</span><span class="fin" id="vFinG"></span></div>
+				<div class="vdiff even" id="vDiff"></div>
+			</div>
+			<div class="vkeys" id="vKeys"><span data-b="1">J</span><span data-b="8">U</span><span data-b="0" style="visibility:hidden"></span><span data-b="2">L</span><span data-b="16">D</span><span data-b="4">R</span></div>
+			<div class="vside">
+				<button id="vFollow" class="on" title="Camera follows the ball (F)">Follow</button>
+				<button id="vZoomOut" title="Zoom out (-)">&minus;</button>
+				<button id="vZoomIn" title="Zoom in (+)">+</button>
+			</div>
+			<details class="vlegend" id="vLegend"><summary>Legend &amp; keys</summary><ul>
+				<li><b style="color:#ffd23f">Yellow ball</b>: the current best run · <b style="color:#b9d6ff">pale ball</b>: your original .eetas (ghost), same in-game time</li>
+				<li>Blocks in EE's own minimap colors (background dimmed) · triangles: arrows (gravity) · small dots: dots · orange chevrons: boosts</li>
+				<li>Purple rings: portals (white dot: random exit) · coins disappear when the best run takes them · doors: filled = closed, outline = open
+					(number = coins / deaths needed) · red diamonds: spikes · green checker: the finish</li>
+				<li><kbd>Space</kbd> play/pause · <kbd>&larr;</kbd><kbd>&rarr;</kbd> 1 s (<kbd>Shift</kbd>: 1 tick) · <kbd>+</kbd><kbd>-</kbd> zoom · <kbd>F</kbd> follow ·
+					<kbd>G</kbd> ghost · <kbd>Esc</kbd> close · drag to look around, wheel/pinch to zoom</li></ul></details>
+			<div class="vload" id="vLoad"></div>
+		</div>
+		<div class="vbar">
+			<div class="scrub"><button class="vplay" id="vPlay" title="Play / pause (Space)">&#9654;</button>
+				<input type="range" id="vScrub" min="0" max="1" value="0" step="1" aria-label="run time"><span class="vpos" id="vPos">0:00.00</span></div>
+			<label class="vck">speed <select id="vSpeed"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option>
+				<option value="2">2x</option><option value="4">4x</option><option value="8">8x</option><option value="16">16x</option></select></label>
+			<input type="text" id="vJump" placeholder="jump to 1:10.00" title="Jump to a run time (m:ss.cc, 70.5s) or a tick number; Enter">
+			<label class="vck"><input type="checkbox" id="vGhost" checked> ghost</label>
+			<label class="vck"><input type="checkbox" id="vPath" checked> path</label>
+		</div>
+	</div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padStart(5, '0')}`;
 const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* no storage */ } } };
-let state = { jobs: [], cpus: 0, godot: true };
+let state = { jobs: [], cpus: 0 };
 let selected = store.get('tasopt.sel');
 let files = { eelvl: null, eetas: null };
 let busy = false;
+const START_LABEL = { reset: 'after /reset', load: 'right after loading the level' };
+const GPU_WHY = 'Exact EE physics needs 64-bit floating point math: every run must replay bit for bit like eeo-tas. WebGPU has no 64-bit floats at all, ' +
+	'and gaming GPUs run them at about 1/64 of their normal speed. The engine is also full of branches (1 px collision steps, portals, doors) ' +
+	'that GPUs handle badly. The CPU is faster for this.';
 
 // ------------------------------------------------------------ upload
 function setFiles(list) {
@@ -183,6 +315,8 @@ drop.ondragleave = () => drop.classList.remove('over');
 drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); setFiles(e.dataTransfer.files); };
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer && e.dataTransfer.files.length) setFiles(e.dataTransfer.files); });
+$('startMode').value = store.get('tasopt.start') === 'load' ? 'load' : 'reset';
+$('startMode').onchange = () => store.set('tasopt.start', $('startMode').value);
 
 function b64(buf) {
 	const bytes = new Uint8Array(buf);
@@ -192,15 +326,18 @@ function b64(buf) {
 }
 $('importBtn').onclick = async () => {
 	busy = true; renderFiles();
-	$('importMsg').innerHTML = `<div class="msg info"><span class="spin"></span>Reading the level with the game's own parser, then replaying your TAS in the exact physics…</div>`;
+	$('importMsg').innerHTML = `<div class="msg info"><span class="spin"></span>Reading the level exactly like EE Offline does, then replaying your TAS in the exact physics…</div>`;
 	try {
-		const body = { name: $('name').value.trim(), eelvlName: files.eelvl.name, eetasName: files.eetas.name,
-			eelvlB64: b64(await files.eelvl.arrayBuffer()), eetasText: await files.eetas.text() };
+		// both files go up as their raw bytes: eeo-tas plays every byte of an .eetas as one tick (no text decoding)
+		const body = { name: $('name').value.trim(), eelvlName: files.eelvl.name, eetasName: files.eetas.name, startMode: $('startMode').value,
+			eelvlB64: b64(await files.eelvl.arrayBuffer()), eetasB64: b64(await files.eetas.arrayBuffer()) };
 		const r = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 		const j = await r.json();
 		if (!r.ok) throw new Error(j.error || 'import failed');
 		const t = j.job.tas;
-		$('importMsg').innerHTML = `<div class="msg info">✓ The TAS finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}). Press <b>Start</b> to optimize it.</div>`;
+		const st = j.job.startMatters ? ` Started ${START_LABEL[j.job.startMode]} (this level has ${j.job.spawns >= 2 ? j.job.spawns + ' spawn points' : 'time doors'}, so it matters).`
+			: ' (How you started it makes no difference on this level.)';
+		$('importMsg').innerHTML = `<div class="msg info">✓ The TAS finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}).${esc(st)} Press <b>Start</b> to optimize it.</div>`;
 		files = { eelvl: null, eetas: null }; $('name').value = '';
 		selected = j.job.id; store.set('tasopt.sel', selected);
 		await refresh();
@@ -235,30 +372,53 @@ function notifyImprovements() {
 		const msg = `Saved ${(gain / 100).toFixed(2)} s — ${j.name} is now ${fmt(fresh[fresh.length - 1].runTicks)}`;
 		toast(`<b>−${(gain / 100).toFixed(2)} s</b> &nbsp;${esc(j.name)} is now <b>${fmt(fresh[fresh.length - 1].runTicks)}</b>` +
 			`<div style="color:var(--muted);font-size:12px;margin-top:2px">total saved ${(j.savedTicks / 100).toFixed(2)} s</div>`);
-		try { if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('TAS Optimizer', { body: msg }); } catch (e) { /* no notifications */ }
+		try { if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('EE Auto TAS', { body: msg }); } catch (e) { /* no notifications */ }
 	}
 	const run = state.jobs.find((j) => j.running);
-	document.title = run && run.savedTicks > 0 ? `−${(run.savedTicks / 100).toFixed(2)} s · ${run.best.time} · TAS Optimizer` : 'TAS Optimizer';
+	document.title = run && run.savedTicks > 0 ? `−${(run.savedTicks / 100).toFixed(2)} s · ${run.best.time} · EE Auto TAS` : 'EE Auto TAS';
 }
 async function refresh() {
 	try { state = await api('/api/state'); } catch (e) { return; }
 	notifyImprovements();
-	renderPills(); renderJobs(); renderDetail();
+	renderPills(); renderJobs(); renderDetail(); renderIdeas();
+	vwCheckNewer();
+}
+// processor speed (GET /api/state bench = the engine benchmark, measured once per PC; see src/bench.js)
+const mts = (x) => (x >= 1e6 ? `${(x / 1e6).toFixed(x >= 1e7 ? 0 : 1)} M` : `${Math.round(x / 1e3)} k`);
+function estimate(b, n) {
+	if (!b) return null;
+	const P = b.points && b.points.length ? b.points : [[1, b.single], [b.threads, b.all]];
+	const k = Math.max(1, Math.min(b.threads || 1, n | 0));
+	for (let i = 1; i < P.length; i++) {
+		const [x0, y0] = P[i - 1], [x1, y1] = P[i];
+		if (k <= x1) return Math.round(y0 + (y1 - y0) * (k - x0) / Math.max(1, x1 - x0));
+	}
+	return P[P.length - 1][1];
+}
+function procText(n, running) {
+	const b = state.bench;
+	const why = `<span class="why" title="${esc(GPU_WHY)}">why?</span>`;
+	if (!b) return state.benchState === 'measuring' ? `<span class="spin"></span>Measuring this CPU's speed (once, a few seconds)… · GPU: not available, the CPU is faster for exact EE physics (${why})`
+		: `CPU · GPU: not available, the CPU is faster for exact EE physics (${why})`;
+	const est = estimate(b, n);
+	const peak = b.peakThreads && b.peakThreads < b.threads ? ` More than ${b.peakThreads} threads does not make it faster on this PC.` : '';
+	return `${running ? 'Running on the' : 'Processor:'} <b>CPU, ${n} thread${n === 1 ? '' : 's'} – about ${mts(est)} ticks/s</b> (measured on this PC: ${mts(b.single)} on one thread).${peak} ` +
+		`The CPU is the faster one here: GPU mode is not available because exact EE physics needs 64-bit math (${why}).`;
 }
 function renderPills() {
 	const running = state.jobs.find((j) => j.running);
-	$('pills').innerHTML = `<span class="pill">${state.cpus} CPU threads</span>` +
-		`<span class="pill ${state.godot ? 'ok' : 'no'}">${state.godot ? 'level reader ready' : 'Godot 4.6.1 not found'}</span>` +
+	$('pills').innerHTML = `<span class="pill">${state.cpus} CPU threads${state.bench ? ` · ${mts(state.bench.single)} ticks/s each` : ''}</span>` +
 		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : `<span class="pill">idle</span>`);
 }
 function renderJobs() {
 	if (!state.jobs.some((j) => j.id === selected)) selected = state.jobs[0] ? state.jobs[0].id : null;
-	$('jobs').innerHTML = state.jobs.map((j) => `
+	$('jobs').innerHTML = state.jobs.map((j) => `<div class="jobwrap">
 		<button class="job card ${j.id === selected ? 'sel' : ''}" data-id="${j.id}">
 			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : ''}"></span></div>
 			<div class="t2">${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
-		</button>`).join('');
-	for (const el of document.querySelectorAll('.job')) el.onclick = () => { selected = el.dataset.id; store.set('tasopt.sel', selected); renderJobs(); renderDetail(); };
+		</button><button class="watch jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`).join('');
+	for (const el of document.querySelectorAll('.job')) el.onclick = () => { selected = el.dataset.id; store.set('tasopt.sel', selected); renderJobs(); renderDetail(); renderIdeas(); };
+	for (const el of document.querySelectorAll('[data-watch]')) el.onclick = () => openViewer(el.dataset.watch);
 }
 function friendlyStage(s) {
 	if (!s) return '—';
@@ -269,6 +429,10 @@ function friendlyStage(s) {
 	if (/^beam/.test(s)) return 'Beam search';
 	if (s === 'splice') return 'Combining the best pieces';
 	if (s === 'starting') return 'Starting…';
+	m = s.match(/^inbox \((.*)\)$/);
+	if (m) return `Handed in: ${m[1]}`;
+	m = s.match(/^try: (.*)$/);
+	if (m) return `Handed in: ${m[1]}`;
 	return s;
 }
 function dur(ms) {
@@ -284,8 +448,8 @@ function chartSvg(j) {
 	const y0 = j.original.runTicks, y1 = Math.min(...h.map((p) => p.runTicks));
 	const X = (t) => pad + (W - 2 * pad) * (t - t0) / Math.max(1, t1 - t0);
 	const Y = (v) => pad + (H - 2 * pad) * (y0 - v) / Math.max(1, y0 - y1);
-	let d = `M${X(t0)},${Y(y0)}`, v = y0;
-	for (const p of h) { d += ` H${X(p.t)} V${Y(p.runTicks)}`; v = p.runTicks; }
+	let d = `M${X(t0)},${Y(y0)}`;
+	for (const p of h) d += ` H${X(p.t)} V${Y(p.runTicks)}`;
 	d += ` H${X(t1)}`;
 	return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
 		<path d="${d} V${H} H${X(t0)} Z" fill="var(--good-soft)" opacity=".7"/>
@@ -313,7 +477,7 @@ function renderDetail() {
 	if (!j) {
 		$('detail').innerHTML = `<div class="card empty"><b>No runs yet</b>Drop a level (.eelvl) and a TAS for it (.eetas) on the left.
 			<ol class="how" style="text-align:left;max-width:460px;margin:18px auto 0">
-			<li>The level is read with the game's own parser, and the TAS is replayed in the exact physics to check it finishes.</li>
+			<li>The level is read exactly like EE Offline reads it, and the TAS is replayed in the exact physics to check it finishes.</li>
 			<li>Press <b>Start</b>: it searches for faster inputs forever, around the clock, until you press Stop.</li>
 			<li>Every improvement is proven by replaying the whole run. Download the best .eetas any time (eeo-tas format).</li></ol></div>`;
 		return;
@@ -321,27 +485,35 @@ function renderDetail() {
 	const sel = $('workers') ? $('workers').value : '';
 	const pct = j.savedTicks > 0 ? ` · ${(100 * j.savedTicks / j.original.runTicks).toFixed(2)}%` : '';
 	const workersDefault = sel || String(j.workers || Math.max(1, state.cpus - 2));
-	const opts = Array.from({ length: state.cpus }, (_, i) => i + 1).map((n) => `<option ${String(n) === workersDefault ? 'selected' : ''}>${n}</option>`).join('');
+	const peak = state.bench && state.bench.peakThreads;
+	const opts = Array.from({ length: state.cpus }, (_, i) => i + 1).map((n) => {
+		const e = estimate(state.bench, n);
+		return `<option value="${n}" ${String(n) === workersDefault ? 'selected' : ''}>${n}${e ? ` · ${mts(e)}/s` : ''}${n === peak && peak < state.cpus ? ' (fastest)' : ''}</option>`;
+	}).join('');
 	const hist = (j.history || []).slice().reverse();
+	const startNote = j.startMatters ? ` · TAS started ${START_LABEL[j.startMode] || j.startMode}` : '';
 	$('detail').innerHTML = `<div class="card">
 		<div class="hero">
 			<div>
 				<h3>${esc(j.name)}</h3>
-				<div class="meta">${esc(j.level.name || j.level.file)} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}</div>
+				<div class="meta">${esc(j.level.name || j.level.file)} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}${esc(startNote)}</div>
 			</div>
 			<div class="row">
+				<button class="watch" id="watchBtn" title="Play the current best run in the level, with your original .eetas as a ghost (the optimizer keeps running)">Watch</button>
 				${j.running ? `<button class="stop" id="stopBtn">Pause</button><button class="primary" id="finishBtn">Finish run</button>`
-					: `<label style="font-size:12px;color:var(--muted)">threads <select id="workers" style="width:auto;display:inline-block">${opts}</select></label><button class="go" id="startBtn">${j.round || j.savedTicks > 0 ? 'Resume' : 'Start'}</button>` +
+					: `<label class="lab">processor <select id="proc" title="${esc(GPU_WHY)}"><option value="cpu" selected>CPU (faster)</option><option value="gpu" disabled>GPU (not available)</option></select></label>` +
+					`<label class="lab">threads <select id="workers">${opts}</select></label><button class="go" id="startBtn">${j.round || j.savedTicks > 0 ? 'Resume' : 'Start'}</button>` +
 					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
 			</div>
 		</div>
+		<div class="procnote" id="procNote">${procText(j.running ? (j.workers || state.cpus) : +workersDefault, j.running)}</div>
 		<div class="times">
 			<span class="big">${j.best.time}</span>
 			${j.savedTicks > 0 ? `<span class="was">${j.original.time}</span>` : ''}
 			<span class="saved ${j.savedTicks > 0 ? '' : 'zero'}">${j.savedTicks > 0 ? `−${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks} ticks${pct}` : 'no improvement yet'}</span>
 		</div>
 		<div class="stats">
-			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? '● optimizing' : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
+			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}` : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
 			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}</div></div>
 			<div class="stat"><div class="k">Running for</div><div class="v">${j.running ? dur(Date.now() - j.optimizingSince) : '—'}</div></div>
 			<div class="stat"><div class="k">Rounds · coins</div><div class="v">${j.round || 0} · ${j.coinsOptional === undefined ? '—' : (j.coinsOptional ? 'optional' : 'needed')}</div></div>
@@ -361,8 +533,16 @@ function renderDetail() {
 		<details ${store.get('tasopt.log') === '1' ? 'open' : ''} id="logBox"><summary>Optimizer log</summary><pre class="log">${esc((j.logTail || []).join('\n')) || '—'}</pre></details>
 	</div>`;
 	const go = $('startBtn'), st = $('stopBtn');
-	if (go) go.onclick = async () => { go.disabled = true; try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { /* none */ } await api(`/api/jobs/${j.id}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workers: +$('workers').value }) }).catch((e) => alert(e.message)); refresh(); };
+	if ($('workers')) $('workers').onchange = () => { $('procNote').innerHTML = procText(+$('workers').value, false); };
+	if (go) go.onclick = async () => {
+		go.disabled = true;
+		try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { /* none */ }
+		await api(`/api/jobs/${j.id}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ workers: +$('workers').value, processor: $('proc') ? $('proc').value : 'cpu' }) }).catch((e) => toast(esc(e.message)));
+		refresh();
+	};
 	if (st) st.onclick = async () => { st.disabled = true; await api(`/api/jobs/${j.id}/stop`, { method: 'POST' }).catch(() => {}); refresh(); };
+	$('watchBtn').onclick = () => openViewer(j.id);
 	$('dlBest').onclick = () => { location.href = `/api/jobs/${j.id}/best.eetas`; };
 	const fin = $('finishBtn');
 	if (fin) fin.onclick = async () => {
@@ -376,13 +556,647 @@ function renderDetail() {
 	$('delBtn').onclick = async () => {
 		const b = $('delBtn');
 		if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; b.classList.add('stop'); return; }
+		if (vw.open && vw.id === j.id) closeViewer();
 		await api(`/api/jobs/${j.id}`, { method: 'DELETE' }).catch(() => {}); selected = null; refresh();
 	};
 	$('logBox').ontoggle = (e) => store.set('tasopt.log', e.target.open ? '1' : '0');
 }
+
+// ------------------------------------------------------------ ideas: search one time range harder (POST /focus)
+let ideasFor = null;   // the job the Ideas box is built for (it is rebuilt only when the selection changes)
+function ago(t) { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s` : `${Math.round(s / 60)} min`; }
+function focusText(j) {
+	const f = j.focus || {};
+	if (!f.state) return 'No search yet. Pick a range (in-game time, e.g. 1:10.00 to 1:14.00) where you think time can be saved.';
+	const range = `${esc(f.fromTime)}–${esc(f.toTime)}`;
+	if (f.running) return `<span class="spin"></span>Searching ${range} · ${esc(f.stage || 'starting')} · started ${ago(f.started)} ago (${f.seconds} s per search)`;
+	if (f.state === 'done') {
+		const acc = (f.handed || []).some((h) => h.accepted);
+		return f.found ? `Last search ${range}: found <b>${fmt(f.found)}</b> → ${acc ? 'accepted, it is the new best' : 'handed to the optimizer (it keeps the good parts)'}`
+			: `Last search ${range}: nothing faster found there (${ago(f.finished)} ago). Try a wider range or more seconds.`;
+	}
+	return `Last search ${range}: ${esc(f.state)}`;
+}
+function renderIdeas() {
+	const j = state.jobs.find((x) => x.id === selected);
+	const box = $('ideas');
+	if (!j) { box.innerHTML = ''; ideasFor = null; return; }
+	if (ideasFor === j.id && $('fState')) { $('fState').innerHTML = focusText(j); $('fGo').disabled = !!(j.focus && j.focus.running); return; }
+	ideasFor = j.id;
+	const saved = JSON.parse(store.get('tasopt.ideas.' + j.id) || '{}');
+	box.innerHTML = `<div class="card ideas"><h2>Ideas</h2>
+		<p>Think time can be saved somewhere? Pick that part of the run and press <b>Search harder here</b>: it runs the route explorer and the shortcut
+		searches on just that range (next to the optimizer) and hands anything faster to it. <b>Show map</b> draws the level and your path there.</p>
+		<div class="fields">
+			<div><label class="f" for="fFrom">From (m:ss.cc)</label><input type="text" id="fFrom" placeholder="1:10.00" value="${esc(saved.from || '')}"></div>
+			<div><label class="f" for="fTo">To</label><input type="text" id="fTo" placeholder="1:14.00" value="${esc(saved.to || '')}"></div>
+			<div><label class="f" for="fSec">Search time</label><select id="fSec">${[60, 120, 300, 600].map((s) => `<option value="${s}" ${String(s) === String(saved.sec || 120) ? 'selected' : ''}>${s < 120 ? s + ' s' : s / 60 + ' min'} each</option>`).join('')}</select></div>
+			<div class="row"><button class="ghost" id="fMap">Show map</button><button class="go" id="fGo">Search harder here</button></div>
+		</div>
+		<div class="fstate" id="fState">${focusText(j)}</div>
+		<div id="fMsg"></div>
+		<div class="map" id="fMapBox" hidden><img id="fImg" alt="level map around the path"></div>
+	</div>`;
+	const keep = () => store.set('tasopt.ideas.' + j.id, JSON.stringify({ from: $('fFrom').value.trim(), to: $('fTo').value.trim(), sec: $('fSec').value }));
+	for (const k of ['fFrom', 'fTo', 'fSec']) $(k).onchange = keep;
+	const range = () => { const from = $('fFrom').value.trim(), to = $('fTo').value.trim(); if (!from || !to) throw new Error('Enter a From and a To time, like 1:10.00 and 1:14.00'); return { from, to }; };
+	$('fMap').onclick = () => {
+		try {
+			const r = range(); keep();
+			$('fMsg').innerHTML = '';
+			$('fImg').onerror = () => { $('fMsg').innerHTML = `<div class="msg err">Could not draw that range (check the times).</div>`; $('fMapBox').hidden = true; };
+			$('fImg').src = `/api/jobs/${j.id}/render.png?from=${encodeURIComponent(r.from)}&to=${encodeURIComponent(r.to)}&t=${Date.now()}`;
+			$('fMapBox').hidden = false;
+		} catch (e) { $('fMsg').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+	};
+	$('fGo').disabled = !!(j.focus && j.focus.running);
+	$('fGo').onclick = async () => {
+		try {
+			const r = range(); keep();
+			$('fGo').disabled = true; $('fMsg').innerHTML = '';
+			await api(`/api/jobs/${j.id}/focus`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...r, seconds: +$('fSec').value }) });
+			toast(`Searching ${esc(r.from)}–${esc(r.to)} harder…`);
+			refresh();
+		} catch (e) { $('fMsg').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; $('fGo').disabled = false; }
+	};
+}
+
+// ------------------------------------------------------------ viewer ("Watch"): the job's current best run, the original as a ghost
+// GET /api/jobs/:id/level (ids, EE minimap colors, block kinds) and /trajectory?which=best|original (per-tick positions in
+// 1/16 px, run timer, inputs, flags, events, door states; best also has `align`: the original's tick at the same point).
+// The level is drawn in 16x16-tile chunks cached per zoom; coins, doors, the path and the balls are drawn every frame.
+const ZOOMS = [2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64];   // CSS px per tile
+const vw = { open: false, id: null, L: null, A: null, G: null, pos: 0, T: 0, off: 0, playing: false, speed: 1, zi: 9, follow: true, camX: 0, camY: 0,
+	snap: true, chunks: new Map(), chunkT: 0, dirty: true, last: 0, raf: 0, version: null, ghost: true, path: true, ptr: new Map(), pinch: null, hud: {}, token: 0 };
+function b64u8(s) { const b = atob(s || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+const b64i32 = (s) => { const u = b64u8(s); return new Int32Array(u.buffer, 0, u.length >> 2); };
+const b64u16 = (s) => { const u = b64u8(s); return new Uint16Array(u.buffer, 0, u.length >> 1); };
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function vwPrepLevel(d) {
+	const L = { W: d.width, H: d.height, fg: b64u16(d.fg), bg: b64u16(d.bg), pal: new Map(), kind: new Map(), nums: new Map(d.nums), portals: new Map(),
+		doors: [], coins: [], name: d.name, startMode: d.startMode, startMatters: d.startMatters };
+	for (const [id, hex] of Object.entries(d.palette)) {
+		if (!hex) { L.pal.set(+id, null); continue; }
+		const v = parseInt(hex, 16);
+		L.pal.set(+id, (v >>> 24) === 0 ? null : [(v >>> 16) & 255, (v >>> 8) & 255, v & 255]);
+	}
+	for (const [id, k] of Object.entries(d.kinds)) L.kind.set(+id, { kind: k[0], sub: k[1], solid: !!k[2] });
+	for (const p of d.portals) L.portals.set(p[0], { rot: p[1], id: p[2], target: p[3], random: !!p[4] });
+	for (let i = 0; i < L.W * L.H; i++) {
+		const id = L.fg[i];
+		if (!id) continue;
+		const k = L.kind.get(id);
+		if (!k) continue;
+		const x = i % L.W, y = (i / L.W) | 0;
+		if (k.kind === 'door') { const num = L.nums.get(i) || 0; L.doors.push({ i, x, y, id, sub: k.sub, num, key: `${id}:${num}` }); }
+		else if (k.kind === 'coin' || k.kind === 'bluecoin' || k.kind === 'coin_taken') L.coins.push({ i, x, y, blue: id === 101 || id === 111 });
+	}
+	return L;
+}
+function vwPrepRun(d, L) {
+	const r = { d, n: d.ticks, X: b64i32(d.x), Y: b64i32(d.y), RUN: b64i32(d.run), FL: b64u8(d.flags), IN: b64u8(d.inputs), runTicks: d.runTicks,
+		time: d.time, timerStart: d.timerStart, finished: d.finished, version: d.version, doors: d.doors || {}, events: d.events || [], coinAt: new Map(),
+		taken0: new Set(d.coinsTaken0 || []), align: d.align ? b64i32(d.align) : null };
+	for (const e of r.events) if ((e[1] === 'coin' || e[1] === 'blue_coin') && !r.coinAt.has(e[3] * L.W + e[2])) r.coinAt.set(e[3] * L.W + e[2], e[0]);
+	return r;
+}
+function vwTimeline() {
+	const A = vw.A, G = vw.G;
+	vw.off = G && A.timerStart >= 0 && G.timerStart >= 0 ? G.timerStart - A.timerStart : 0;   // same in-game time: ghost tick = best tick + off
+	vw.T = Math.max(A.n, G ? G.n - vw.off : 0);
+	$('vScrub').max = String(vw.T);
+}
+async function openViewer(id, opts) {
+	const o = opts || {};
+	const j = state.jobs.find((x) => x.id === id);
+	try { history.replaceState(null, '', `#watch=${id}`); } catch (e) { /* file:// or sandbox */ }
+	const token = ++vw.token;
+	Object.assign(vw, { open: true, id, L: null, A: null, G: null, pos: 0, playing: false, follow: true, snap: true, version: null, dirty: true });
+	vw.chunks.clear(); vw.chunkT = 0;
+	$('viewer').hidden = false;
+	document.body.style.overflow = 'hidden';
+	$('vNewer').hidden = true;
+	$('vTitle').innerHTML = `<b>${esc(j ? j.name : id)}</b>loading…`;
+	$('vLoad').hidden = false;
+	$('vLoad').innerHTML = '<div><span class="spin"></span>Replaying the best run and your original in the exact physics…</div>';
+	vwResize();
+	if (!vw.raf) { vw.last = 0; vw.raf = requestAnimationFrame(vwFrame); }
+	try {
+		const [lv, a, g] = await Promise.all([api(`/api/jobs/${id}/level`), api(`/api/jobs/${id}/trajectory?which=best`), api(`/api/jobs/${id}/trajectory?which=original`)]);
+		if (token !== vw.token || !vw.open) return;
+		vw.L = vwPrepLevel(lv);
+		vw.A = vwPrepRun(a, vw.L);
+		vw.G = vwPrepRun(g, vw.L);
+		vw.version = a.version;
+		vwTimeline();
+		vw.zi = clamp(o.zoom !== undefined ? +o.zoom : +(store.get('tasopt.vzoom') || 9), 0, ZOOMS.length - 1);
+		vwTitle();
+		$('vLoad').hidden = true;
+		vw.snap = true; vw.dirty = true;
+		if (o.t) { $('vJump').value = o.t; vwJump(); }
+		if (o.play) vw.playing = true;
+		vwCheckNewer();
+	} catch (e) {
+		if (token === vw.token) $('vLoad').innerHTML = `<div class="msg err">Could not load the run: ${esc(e.message)}</div>`;
+	}
+}
+function vwTitle() {
+	const A = vw.A, G = vw.G, L = vw.L;
+	$('vTitle').innerHTML = `<b>${esc(A.d.name)}</b>best ${esc(A.time)} vs original ${esc(G.time)}` +
+		`${G.runTicks > A.runTicks ? ` · −${((G.runTicks - A.runTicks) / 100).toFixed(2)} s` : ''}${L.startMatters ? ` · started ${esc(START_LABEL[L.startMode] || L.startMode)}` : ''}`;
+}
+function closeViewer() {
+	vw.open = false; vw.playing = false; vw.token++;
+	try { if (/watch=/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* sandbox */ }
+	$('viewer').hidden = true;
+	document.body.style.overflow = '';
+	if (vw.raf) cancelAnimationFrame(vw.raf);
+	vw.raf = 0;
+	vw.chunks.clear();
+}
+function vwCheckNewer() {
+	if (!vw.open || !vw.A) return;
+	const j = state.jobs.find((x) => x.id === vw.id);
+	const newer = j && j.bestVersion && vw.version && j.bestVersion !== vw.version;
+	$('vNewer').hidden = !newer;
+	if (newer) $('vNewer').textContent = `Newer version found (${j.best.time}) · reload`;
+}
+async function vwReloadBest() {
+	const b = $('vNewer');
+	b.disabled = true;
+	try {
+		const a = await api(`/api/jobs/${vw.id}/trajectory?which=best`);
+		if (!vw.open) return;
+		const bt = Math.min(Math.floor(vw.pos), vw.A.n), run = vw.A.RUN[bt];
+		vw.A = vwPrepRun(a, vw.L);
+		vw.version = a.version;
+		vwTimeline();
+		let p = bt;   // keep the in-game time on screen
+		if (run > 0) { p = vw.A.n; for (let t = 0; t <= vw.A.n; t++) if (vw.A.RUN[t] >= run) { p = t; break; } }
+		vw.pos = clamp(p, 0, vw.T);
+		vwTitle(); vw.snap = true; vw.dirty = true;
+		toast(`Viewer: now showing the best run <b>${esc(a.time)}</b>`);
+	} catch (e) { toast(esc(e.message)); }
+	b.disabled = false;
+	vwCheckNewer();
+}
+function vwResize() {
+	const st = $('vStage'), cv = $('vCanvas');
+	const dpr = window.devicePixelRatio || 1;
+	const w = Math.max(1, Math.round(st.clientWidth * dpr)), h = Math.max(1, Math.round(st.clientHeight * dpr));
+	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; vw.dirty = true; }
+}
+// run position (world px, top-left of the 16x16 box) at a fractional tick; no interpolation across teleports / respawns
+function vwPosAt(r, p) {
+	if (p <= 0) return [r.X[0] / 16, r.Y[0] / 16];
+	if (p >= r.n) return [r.X[r.n] / 16, r.Y[r.n] / 16];
+	const i = Math.floor(p), f = p - i;
+	const x0 = r.X[i], y0 = r.Y[i], x1 = r.X[i + 1], y1 = r.Y[i + 1];
+	if (Math.abs(x1 - x0) + Math.abs(y1 - y0) > 40 * 16) return [x0 / 16, y0 / 16];
+	return [(x0 + (x1 - x0) * f) / 16, (y0 + (y1 - y0) * f) / 16];
+}
+function vwDoorSolid(r, key, t) {
+	const a = r.doors[key];
+	if (!a) return true;
+	let s = a[0];
+	for (let k = 1; k < a.length && a[k] <= t; k++) s ^= 1;
+	return !!s;
+}
+// ---- colors
+const VC = { ground: '#000', outside: '#15171d', arrow: '#7fd4ff', arrowInv: '#3f7fa0', boost: '#ff9a3c', spike: '#ff4d4d', fire: '#ff7a1a', portal: '#c77dff',
+	portalInv: '#8a5bb0', finish: '#2fcf72', check: '#48e07a', key: { red: '#ff5252', green: '#4ade80', blue: '#5b8cff', cyan: '#3ee0e6', magenta: '#f05ce0', yellow: '#ffe04a' },
+	liquid: { water: 'rgba(40,110,230,.55)', mud: 'rgba(120,85,40,.6)', lava: 'rgba(240,100,20,.6)', 'toxic waste': 'rgba(100,210,50,.55)' } };
+const KIND_FALLBACK = { solid: [110, 118, 134], deco: [60, 64, 76], oneway: [185, 160, 105], half: [110, 118, 134] };
+function vwColor(L, id) {
+	if (!id) return null;
+	const c = L.pal.get(id);
+	if (c !== undefined) return c;
+	return null;
+}
+const rgb = (c, m, a) => `rgba(${Math.round(c[0] * m)},${Math.round(c[1] * m)},${Math.round(c[2] * m)},${a === undefined ? 1 : a})`;
+function doorColor(sub) {
+	for (const k of Object.keys(VC.key)) if (sub.startsWith(k)) return VC.key[k];
+	if (/blue coin/.test(sub)) return '#4b8dff';
+	if (/coin/.test(sub)) return '#e8b21c';
+	if (/purple/.test(sub)) return '#9d5cf0';
+	if (/orange/.test(sub)) return '#ff9632';
+	if (/time/.test(sub)) return '#3cc0b0';
+	if (/death/.test(sub)) return '#c04848';
+	return '#a0a4b0';
+}
+function tri(g, ax, ay, bx, by, cx, cy) { g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.lineTo(cx, cy); g.closePath(); g.fill(); }
+function arrowGlyph(g, dir, sx, sy, T, m) {
+	const c = T / 2, e = T * m;
+	if (dir === 'left') tri(g, sx + e, sy + c, sx + T - e, sy + e, sx + T - e, sy + T - e);
+	else if (dir === 'right') tri(g, sx + T - e, sy + c, sx + e, sy + e, sx + e, sy + T - e);
+	else if (dir === 'up') tri(g, sx + c, sy + e, sx + e, sy + T - e, sx + T - e, sy + T - e);
+	else tri(g, sx + c, sy + T - e, sx + e, sy + e, sx + T - e, sy + e);
+}
+// static part of one tile (everything but doors and coins, which change during the run)
+function vwTile(g, L, i, sx, sy, T) {
+	const fid = L.fg[i], bid = L.bg[i];
+	const bc = vwColor(L, bid);
+	if (bc) { g.fillStyle = rgb(bc, 0.42); g.fillRect(sx, sy, T, T); }
+	if (!fid) return;
+	const k = L.kind.get(fid) || { kind: 'deco', sub: '' };
+	const own = vwColor(L, fid);
+	const c = T / 2;
+	switch (k.kind) {
+		case 'solid': {
+			const col = own || bc || KIND_FALLBACK.solid;
+			g.fillStyle = rgb(col, 1); g.fillRect(sx, sy, T, T);
+			if (T >= 8) {
+				const w = Math.max(1, Math.round(T / 16));
+				g.fillStyle = 'rgba(255,255,255,.16)'; g.fillRect(sx, sy, T, w); g.fillRect(sx, sy, w, T);
+				g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(sx, sy + T - w, T, w); g.fillRect(sx + T - w, sy, w, T);
+			}
+			return;
+		}
+		case 'deco': if (own) { g.fillStyle = rgb(own, 0.62); g.fillRect(sx, sy, T, T); } return;
+		case 'door': case 'coin': case 'bluecoin': case 'coin_taken': return;
+		case 'oneway': {
+			const th = Math.max(2, Math.round(T / 4));
+			g.fillStyle = rgb(own || KIND_FALLBACK.oneway, own ? 1.15 : 1);
+			const side = k.sub === 'rot' ? (L.nums.get(i) | 0) : 1;   // like eesim overlaps(): 1 top, 2 right, 3 bottom, 0 left
+			if (side === 1) g.fillRect(sx, sy, T, th); else if (side === 3) g.fillRect(sx, sy + T - th, T, th);
+			else if (side === 2) g.fillRect(sx + T - th, sy, th, T); else g.fillRect(sx, sy, th, T);
+			return;
+		}
+		case 'half': {
+			const rot = L.nums.get(i) | 0, h = T / 2;
+			g.fillStyle = rgb(own || KIND_FALLBACK.half, 1);
+			if (rot === 1) g.fillRect(sx, sy + h, T, h); else if (rot === 2) g.fillRect(sx, sy, h, T); else if (rot === 3) g.fillRect(sx, sy, T, h); else g.fillRect(sx + h, sy, h, T);
+			return;
+		}
+		case 'arrow': g.fillStyle = [411, 412, 413, 1519].includes(fid) ? VC.arrowInv : VC.arrow; arrowGlyph(g, k.sub, sx, sy, T, 0.2); return;
+		case 'boost': {
+			g.fillStyle = VC.boost; arrowGlyph(g, k.sub, sx, sy, T, 0.12);
+			g.fillStyle = 'rgba(0,0,0,.45)'; arrowGlyph(g, k.sub, sx + (k.sub === 'left' ? T * 0.22 : k.sub === 'right' ? -T * 0.22 : 0), sy + (k.sub === 'up' ? T * 0.22 : k.sub === 'down' ? -T * 0.22 : 0), T, 0.3);
+			return;
+		}
+		case 'dot': g.fillStyle = fid === 414 ? VC.arrowInv : VC.arrow; g.beginPath(); g.arc(sx + c, sy + c, Math.max(1, T * 0.14), 0, 7); g.fill(); return;
+		case 'liquid': g.fillStyle = VC.liquid[k.sub] || VC.liquid.water; g.fillRect(sx, sy, T, T); return;
+		case 'climbable': {
+			g.fillStyle = '#a8865a'; const w = Math.max(1, T / 9);
+			g.fillRect(sx + T * 0.25, sy, w, T); g.fillRect(sx + T * 0.7, sy, w, T);
+			if (T >= 8) for (let r = 0.2; r < 1; r += 0.33) g.fillRect(sx + T * 0.25, sy + T * r, T * 0.45 + w, w);
+			return;
+		}
+		case 'spike': {
+			g.fillStyle = VC.spike;
+			g.beginPath(); g.moveTo(sx + c, sy + T * 0.1); g.lineTo(sx + T * 0.9, sy + c); g.lineTo(sx + c, sy + T * 0.9); g.lineTo(sx + T * 0.1, sy + c); g.closePath(); g.fill();
+			g.fillStyle = 'rgba(0,0,0,.5)'; g.fillRect(sx + c - T * 0.08, sy + c - T * 0.08, T * 0.16, T * 0.16);
+			return;
+		}
+		case 'fire': g.fillStyle = VC.fire; g.beginPath(); g.arc(sx + c, sy + c, T * 0.36, 0, 7); g.fill(); return;
+		case 'portal': {
+			const p = L.portals.get(i);
+			g.strokeStyle = k.sub === 'invisible' ? VC.portalInv : VC.portal; g.lineWidth = Math.max(1, T / 7);
+			g.beginPath(); g.arc(sx + c, sy + c, Math.max(1.5, T * 0.38), 0, 7); g.stroke();
+			if (p && p.random) { g.fillStyle = '#fff'; g.beginPath(); g.arc(sx + c, sy + c, Math.max(1, T * 0.13), 0, 7); g.fill(); }
+			if (p && T >= 40 * (window.devicePixelRatio || 1)) {   // portal id > target id, only when zoomed in far enough to read
+				g.fillStyle = 'rgba(230,210,255,.9)'; g.font = `${Math.round(T * 0.22)}px ui-monospace, Consolas, monospace`; g.textAlign = 'center'; g.fillText(`${p.id}>${p.target}`, sx + c, sy + T - 2);
+			}
+			return;
+		}
+		case 'worldportal': g.strokeStyle = '#ff9a3c'; g.lineWidth = Math.max(1, T / 7); g.beginPath(); g.arc(sx + c, sy + c, T * 0.38, 0, 7); g.stroke(); return;
+		case 'key': {
+			g.fillStyle = VC.key[k.sub] || '#fff';
+			g.beginPath(); g.arc(sx + T * 0.35, sy + c, T * 0.2, 0, 7); g.fill();
+			g.fillRect(sx + T * 0.45, sy + c - T * 0.06, T * 0.42, T * 0.12); g.fillRect(sx + T * 0.72, sy + c, T * 0.08, T * 0.2);
+			return;
+		}
+		case 'switch': g.fillStyle = k.sub === 'orange' ? '#ff9632' : '#9d5cf0'; g.fillRect(sx + T * 0.2, sy + T * 0.2, T * 0.6, T * 0.6);
+			g.fillStyle = 'rgba(255,255,255,.7)'; g.fillRect(sx + T * 0.4, sy + T * 0.3, T * 0.2, T * 0.4); return;
+		case 'reset': g.strokeStyle = k.sub === 'orange' ? '#ff9632' : '#9d5cf0'; g.lineWidth = Math.max(1, T / 10); g.beginPath(); g.arc(sx + c, sy + c, T * 0.32, 0, 7); g.stroke(); return;
+		case 'crown': g.fillStyle = '#ffc400'; g.beginPath(); g.moveTo(sx + T * 0.15, sy + T * 0.78); g.lineTo(sx + T * 0.2, sy + T * 0.3); g.lineTo(sx + T * 0.38, sy + T * 0.52);
+			g.lineTo(sx + c, sy + T * 0.22); g.lineTo(sx + T * 0.62, sy + T * 0.52); g.lineTo(sx + T * 0.8, sy + T * 0.3); g.lineTo(sx + T * 0.85, sy + T * 0.78); g.closePath(); g.fill(); return;
+		case 'complete': {
+			g.fillStyle = VC.finish; g.fillRect(sx, sy, T, T);
+			const q = T / 4; g.fillStyle = '#eafff1';
+			for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) if ((a + b) % 2 === 0) g.fillRect(sx + a * q, sy + b * q, Math.ceil(q), Math.ceil(q));
+			return;
+		}
+		case 'checkpoint': g.fillStyle = VC.check; tri(g, sx + T * 0.28, sy + T * 0.15, sx + T * 0.28, sy + T * 0.6, sx + T * 0.82, sy + T * 0.37); g.fillRect(sx + T * 0.22, sy + T * 0.15, Math.max(1, T / 12), T * 0.7); return;
+		case 'spawn': g.strokeStyle = '#e8e8e8'; g.lineWidth = Math.max(1, T / 12); g.strokeRect(sx + T * 0.12, sy + T * 0.12, T * 0.76, T * 0.76); return;
+		case 'effect': g.fillStyle = '#50e6c8'; g.beginPath(); g.moveTo(sx + c, sy + T * 0.15); g.lineTo(sx + T * 0.85, sy + c); g.lineTo(sx + c, sy + T * 0.85); g.lineTo(sx + T * 0.15, sy + c); g.closePath(); g.fill(); return;
+		case 'secret': g.fillStyle = 'rgba(80,80,110,.35)'; g.fillRect(sx, sy, T, T); return;
+		default: if (own) { g.fillStyle = rgb(own, 0.62); g.fillRect(sx, sy, T, T); }
+	}
+}
+function vwChunk(cx, cy, T, CH) {
+	const L = vw.L;
+	const tw = Math.min(CH, L.W - cx * CH), th = Math.min(CH, L.H - cy * CH);
+	const c = document.createElement('canvas');
+	c.width = tw * T; c.height = th * T;
+	const g = c.getContext('2d');
+	g.fillStyle = VC.ground; g.fillRect(0, 0, c.width, c.height);
+	for (let ty = 0; ty < th; ty++) for (let tx = 0; tx < tw; tx++) vwTile(g, L, (cy * CH + ty) * L.W + cx * CH + tx, tx * T, ty * T, T);
+	return c;
+}
+function vwBall(g, x, y, s, flags, ghost) {
+	const cx = x + 8 * s, cy = y + 8 * s, r = Math.max(4, 7.6 * s);
+	const dead = flags & 1;
+	if (ghost) {
+		g.fillStyle = 'rgba(170,205,255,.34)'; g.strokeStyle = 'rgba(220,235,255,.8)'; g.lineWidth = Math.max(1, s * 0.9);
+		g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); g.stroke();
+		return;
+	}
+	if (r < 6) { g.strokeStyle = 'rgba(255,210,63,.55)'; g.lineWidth = 2; g.beginPath(); g.arc(cx, cy, r + 5, 0, 7); g.stroke(); }
+	g.fillStyle = dead ? '#8a8f99' : '#ffd23f'; g.strokeStyle = '#3a2c00'; g.lineWidth = Math.max(1, s * 0.9);
+	g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); g.stroke();
+	if (r >= 7) {
+		g.fillStyle = '#2a2000'; g.strokeStyle = '#2a2000'; g.lineWidth = Math.max(1, r * 0.13);
+		if (dead) {
+			for (const ex of [-0.35, 0.35]) { g.beginPath(); g.moveTo(cx + ex * r - r * 0.13, cy - r * 0.38); g.lineTo(cx + ex * r + r * 0.13, cy - r * 0.12); g.moveTo(cx + ex * r + r * 0.13, cy - r * 0.38); g.lineTo(cx + ex * r - r * 0.13, cy - r * 0.12); g.stroke(); }
+		} else {
+			for (const ex of [-0.33, 0.33]) { g.beginPath(); g.ellipse(cx + ex * r, cy - r * 0.22, r * 0.11, r * 0.19, 0, 0, 7); g.fill(); }
+			g.beginPath(); g.arc(cx, cy + r * 0.05, r * 0.52, 0.2 * Math.PI, 0.8 * Math.PI); g.stroke();
+		}
+	}
+	const gd = (flags >> 2) & 7;   // gravity: 0 down, 1 up, 2 left, 3 right, 4 none
+	if (gd >= 1 && gd <= 3) {
+		const [dx, dy] = gd === 1 ? [0, -1] : gd === 2 ? [-1, 0] : [1, 0];
+		const d = r + Math.max(4, r * 0.45), w = Math.max(3, r * 0.4);
+		g.fillStyle = VC.arrow;
+		tri(g, cx + dx * (d + w), cy + dy * (d + w), cx + dx * d - dy * w, cy + dy * d + dx * w, cx + dx * d + dy * w, cy + dy * d - dx * w);
+	}
+}
+function vwDraw() {
+	const cv = $('vCanvas'), g = cv.getContext('2d');
+	const L = vw.L, A = vw.A, G = vw.G;
+	const cw = cv.width, ch = cv.height, dpr = window.devicePixelRatio || 1;
+	g.fillStyle = VC.outside; g.fillRect(0, 0, cw, ch);
+	if (!L || !A) return;
+	const T = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)), s = T / 16;
+	if (T !== vw.chunkT) { vw.chunks.clear(); vw.chunkT = T; }
+	const ox = Math.round(cw / 2 - vw.camX * s), oy = Math.round(ch / 2 - vw.camY * s);
+	const CH = T >= 40 ? 8 : 16, CT = CH * T;
+	// level chunks in view
+	const cx0 = Math.max(0, Math.floor(-ox / CT)), cx1 = Math.min(Math.ceil(L.W / CH) - 1, Math.floor((cw - ox) / CT));
+	const cy0 = Math.max(0, Math.floor(-oy / CT)), cy1 = Math.min(Math.ceil(L.H / CH) - 1, Math.floor((ch - oy) / CT));
+	for (let cy = cy0; cy <= cy1; cy++) {
+		for (let cx = cx0; cx <= cx1; cx++) {
+			const key = cy * 4096 + cx;
+			let c = vw.chunks.get(key);
+			if (!c) { c = vwChunk(cx, cy, T, CH); vw.chunks.set(key, c); }
+			g.drawImage(c, ox + cx * CT, oy + cy * CT);
+		}
+	}
+	if (vw.chunks.size > 900) vw.chunks.clear();   // (zoomed far out and panned around a lot)
+	const tx0 = Math.floor(-ox / T) - 1, tx1 = Math.ceil((cw - ox) / T) + 1, ty0 = Math.floor(-oy / T) - 1, ty1 = Math.ceil((ch - oy) / T) + 1;
+	const inView = (x, y) => x >= tx0 && x <= tx1 && y >= ty0 && y <= ty1;
+	const bt = Math.min(Math.floor(vw.pos), A.n);
+	// doors (state of the best run's world at this tick)
+	for (const d of L.doors) {
+		if (!inView(d.x, d.y)) continue;
+		const sx = ox + d.x * T, sy = oy + d.y * T, col = doorColor(d.sub || '');
+		const solid = vwDoorSolid(A, d.key, bt);
+		if (solid) {
+			g.fillStyle = col; g.globalAlpha = 0.85; g.fillRect(sx, sy, T, T); g.globalAlpha = 1;
+			if (T >= 6) {   // hatching, clipped to the tile
+				g.save(); g.beginPath(); g.rect(sx, sy, T, T); g.clip();
+				g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = Math.max(1, T / 12); g.beginPath();
+				for (let k = -T; k < T; k += Math.max(3, T / 3)) { g.moveTo(sx + k, sy + T); g.lineTo(sx + k + T, sy); }
+				g.stroke(); g.restore();
+			}
+		} else if (T >= 4) {
+			g.strokeStyle = col; g.globalAlpha = 0.55; g.lineWidth = Math.max(1, T / 14); g.setLineDash([Math.max(2, T / 5), Math.max(2, T / 6)]);
+			g.strokeRect(sx + g.lineWidth / 2, sy + g.lineWidth / 2, T - g.lineWidth, T - g.lineWidth); g.setLineDash([]); g.globalAlpha = 1;
+		}
+		if (T >= 14 && d.num && /coin|death/.test(d.sub || '')) {
+			g.fillStyle = solid ? '#111' : col; g.font = `bold ${Math.round(T * 0.45)}px ui-monospace, Consolas, monospace`; g.textAlign = 'center'; g.textBaseline = 'middle';
+			g.fillText(String(d.num), sx + T / 2, sy + T / 2 + 1); g.textBaseline = 'alphabetic';
+		}
+	}
+	// coins (disappear when the best run takes them)
+	for (const c of L.coins) {
+		if (!inView(c.x, c.y)) continue;
+		const at = A.coinAt.get(c.i);
+		const gone = A.taken0.has(c.i) || (at !== undefined && at <= bt);
+		const cx = ox + c.x * T + T / 2, cy = oy + c.y * T + T / 2, r = Math.max(1.5, T * 0.3);
+		if (gone) { g.strokeStyle = c.blue ? 'rgba(90,150,255,.35)' : 'rgba(255,205,0,.3)'; g.lineWidth = Math.max(1, T / 16); g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke(); }
+		else { g.fillStyle = c.blue ? '#4b8dff' : '#ffcc00'; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); if (T >= 8) { g.strokeStyle = c.blue ? '#1d3f8a' : '#8a6400'; g.lineWidth = Math.max(1, T / 16); g.stroke(); } }
+	}
+	// the route of the best run (thin), the recent trail (bright)
+	const P = (r, t) => [ox + (r.X[t] / 16 + 8) * s, oy + (r.Y[t] / 16 + 8) * s];
+	const strokeRun = (r, a, b) => {
+		g.beginPath();
+		let pen = false;
+		for (let t = Math.max(0, a); t <= Math.min(b, r.n); t++) {
+			const [x, y] = P(r, t);
+			const jump = t > a && Math.abs(r.X[t] - r.X[t - 1]) + Math.abs(r.Y[t] - r.Y[t - 1]) > 40 * 16;
+			const off = x < -200 || y < -200 || x > cw + 200 || y > ch + 200;
+			if (!pen || jump || off) { g.moveTo(x, y); pen = !off; } else g.lineTo(x, y);
+		}
+		g.stroke();
+	};
+	g.lineJoin = 'round'; g.lineCap = 'round';
+	if (vw.path) { g.strokeStyle = 'rgba(255,255,255,.16)'; g.lineWidth = Math.max(1, dpr); strokeRun(A, 0, A.n); }
+	g.strokeStyle = 'rgba(255,210,63,.6)'; g.lineWidth = Math.max(2, 2.5 * dpr); strokeRun(A, bt - 80, bt);
+	// event flashes: coins, portals, deaths, keys, switches, the finish (the last 0.3 s)
+	const flash = (wx, wy, age, col) => { const f = age / 30; g.strokeStyle = col; g.globalAlpha = 1 - f; g.lineWidth = Math.max(1.5, 2 * dpr); g.beginPath(); g.arc(ox + wx * s, oy + wy * s, (8 + 18 * f) * s + 4, 0, 7); g.stroke(); g.globalAlpha = 1; };
+	for (const e of A.events) {
+		if (e[0] > bt || e[0] < bt - 30) continue;
+		const age = vw.pos - e[0];
+		if (age < 0) continue;
+		if (e[1] === 'coin' || e[1] === 'blue_coin') flash(e[2] * 16 + 8, e[3] * 16 + 8, age, e[1] === 'coin' ? '#ffe066' : '#7fb0ff');
+		else if (e[1] === 'portal') { flash(e[2] * 16 + 8, e[3] * 16 + 8, age, '#e0a0ff'); flash(e[4] * 16 + 8, e[5] * 16 + 8, age, '#e0a0ff'); }
+		else if (e[1] === 'death') flash(A.X[Math.max(0, e[0] - 1)] / 16 + 8, A.Y[Math.max(0, e[0] - 1)] / 16 + 8, age, '#ff5252');
+		else if (e[1] === 'key' || e[1] === 'checkpoint' || e[1] === 'crown' || e[1] === 'complete') flash(e[e[1] === 'key' ? 3 : 2] * 16 + 8, e[e[1] === 'key' ? 4 : 3] * 16 + 8, age, '#ffffff');
+	}
+	// the ghost (original, same in-game time), then the best run's ball
+	if (vw.ghost && G) {
+		const gt = clamp(vw.pos + vw.off, 0, G.n);
+		const [gx, gy] = vwPosAt(G, gt);
+		vwBall(g, ox + gx * s, oy + gy * s, s, G.FL[Math.floor(gt)], true);
+	}
+	const [ax, ay] = vwPosAt(A, Math.min(vw.pos, A.n));
+	vwBall(g, ox + ax * s, oy + ay * s, s, A.FL[bt], false);
+}
+function vwHud() {
+	const A = vw.A, G = vw.G;
+	if (!A) return;
+	const bt = Math.min(Math.floor(vw.pos), A.n), gt = G ? clamp(Math.floor(vw.pos + vw.off), 0, G.n) : 0;
+	const h = vw.hud;
+	const set = (id, v, prop) => { if (h[id] !== v) { h[id] = v; if (prop === 'html') $(id).innerHTML = v; else if (prop === 'class') $(id).className = v; else $(id).textContent = v; } };
+	set('vTimeA', fmt(A.RUN[bt]));
+	set('vFinA', bt >= A.n && A.finished ? 'FINISHED' : '');
+	$('vClockG').style.visibility = vw.ghost && G ? 'visible' : 'hidden';
+	if (G) { set('vTimeG', fmt(G.RUN[gt])); set('vFinG', gt >= G.n && G.finished ? 'FINISHED' : ''); }
+	// the original's time difference at the best run's current point (align: first original tick at the same point)
+	let txt = '', cls = 'vdiff even';
+	if (G) {
+		if (bt >= A.n && A.finished) {
+			const d = G.runTicks - A.runTicks;
+			txt = G.finished ? (d > 0 ? `At the finish: the original is ${(d / 100).toFixed(2)} s behind (${G.time} vs ${A.time})` : d < 0 ? `At the finish: the original is ${(-d / 100).toFixed(2)} s ahead` : 'At the finish: same time as the original')
+				: 'The original does not finish';
+			cls = d > 0 ? 'vdiff ahead' : d < 0 ? 'vdiff behind' : 'vdiff even';
+		} else if (A.align) {
+			const j = Math.min(A.align[bt], G.n), d = G.RUN[j] - A.RUN[bt];
+			if (A.RUN[bt] === 0 && G.RUN[j] === 0) txt = 'Same start as the original';
+			else {
+				txt = d > 0 ? `original is ${(d / 100).toFixed(2)} s behind here` : d < 0 ? `original is ${(-d / 100).toFixed(2)} s ahead here` : 'even with the original here';
+				cls = d > 0 ? 'vdiff ahead' : d < 0 ? 'vdiff behind' : 'vdiff even';
+			}
+		}
+	}
+	set('vDiff', txt);
+	if ($('vDiff').className !== cls) $('vDiff').className = cls;
+	const m = bt < A.n ? A.IN[bt] : 0;
+	if (h.keys !== m) { h.keys = m; for (const el of $('vKeys').children) el.classList.toggle('on', !!(m & +el.dataset.b)); }
+	set('vPos', `${fmt(A.RUN[bt])} / ${A.time}<span class="vtick"> · tick ${bt}</span>`, 'html');
+	const sv = String(Math.floor(vw.pos));
+	if (document.activeElement !== $('vScrub') && $('vScrub').value !== sv) $('vScrub').value = sv;
+	set('vPlay', vw.playing ? '❚❚' : '▶');
+}
+function vwFrame(ts) {
+	vw.raf = vw.open ? requestAnimationFrame(vwFrame) : 0;
+	if (!vw.open) return;
+	const dt = vw.last ? Math.min(0.1, (ts - vw.last) / 1000) : 0;
+	vw.last = ts;
+	const A = vw.A;
+	if (!A) { if (vw.dirty) { vwDraw(); vw.dirty = false; } return; }
+	if (vw.playing) {
+		vw.pos += dt * 100 * vw.speed;
+		if (vw.pos >= vw.T) { vw.pos = vw.T; vw.playing = false; }
+		vw.dirty = true;
+	}
+	if (vw.follow) {
+		const [x, y] = vwPosAt(A, Math.min(vw.pos, A.n));
+		const tx = x + 8, ty = y + 8;
+		const cv = $('vCanvas'), dpr = window.devicePixelRatio || 1, s = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)) / 16;
+		const far = Math.abs(tx - vw.camX) * s > cv.width * 0.6 || Math.abs(ty - vw.camY) * s > cv.height * 0.6;
+		if (vw.snap || far) { vw.camX = tx; vw.camY = ty; vw.snap = false; vw.dirty = true; }
+		else {
+			const k = 1 - Math.exp(-dt * 7);
+			const nx = vw.camX + (tx - vw.camX) * k, ny = vw.camY + (ty - vw.camY) * k;
+			if (Math.abs(nx - vw.camX) + Math.abs(ny - vw.camY) > 0.01) { vw.camX = nx; vw.camY = ny; vw.dirty = true; }
+		}
+	}
+	if (vw.dirty) { vwDraw(); vwHud(); vw.dirty = false; }
+}
+function vwSetPos(p) { vw.pos = clamp(p, 0, vw.T); vw.snap = true; vw.dirty = true; }
+function vwZoom(step, fx, fy) {
+	const nz = clamp(vw.zi + step, 0, ZOOMS.length - 1);
+	if (nz === vw.zi) return;
+	const cv = $('vCanvas'), dpr = window.devicePixelRatio || 1;
+	if (!vw.follow && fx !== undefined) {   // keep the world point under the cursor in place
+		const s0 = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)) / 16, s1 = Math.max(2, Math.round(ZOOMS[nz] * dpr)) / 16;
+		const wx = vw.camX + (fx - cv.width / 2) / s0, wy = vw.camY + (fy - cv.height / 2) / s0;
+		vw.camX = wx - (fx - cv.width / 2) / s1; vw.camY = wy - (fy - cv.height / 2) / s1;
+	}
+	vw.zi = nz; store.set('tasopt.vzoom', String(nz)); vw.dirty = true;
+}
+function vwFollow(on) { vw.follow = on; $('vFollow').classList.toggle('on', on); if (on) vw.snap = false; vw.dirty = true; }
+function vwTogglePlay() {
+	if (!vw.A) return;
+	if (!vw.playing && vw.pos >= vw.T) vw.pos = 0;
+	vw.playing = !vw.playing; vw.dirty = true;
+}
+function parseTimeSpec(s) {
+	const v = String(s || '').trim().toLowerCase();
+	let m;
+	if (v === 'start') return { tick: 0 };
+	if (v === 'end' || v === 'finish') return { tick: Infinity };
+	if ((m = v.match(/^t?(\d+)t?$/))) return { tick: +m[1] };
+	if ((m = v.match(/^(\d+):(\d{1,2}(?:\.\d{1,2})?)$/))) return { run: +m[1] * 6000 + Math.round(parseFloat(m[2]) * 100) };
+	if ((m = v.match(/^(\d+(?:\.\d{1,2})?)s$/))) return { run: Math.round(parseFloat(m[1]) * 100) };
+	throw new Error('Use m:ss.cc (1:10.25), seconds (70.5s) or a tick number');
+}
+function vwJump() {
+	const A = vw.A;
+	if (!A) return;
+	try {
+		const sp = parseTimeSpec($('vJump').value);
+		let t;
+		if (sp.tick !== undefined) t = sp.tick === Infinity ? A.n : sp.tick;
+		else { t = A.n; for (let k = 0; k <= A.n; k++) if (A.RUN[k] >= sp.run) { t = k; break; } }
+		vwSetPos(t);
+		$('vJump').style.borderColor = '';
+	} catch (e) { $('vJump').style.borderColor = '#ff5252'; $('vJump').title = e.message; }
+}
+$('vClose').onclick = closeViewer;
+$('vNewer').onclick = vwReloadBest;
+$('vPlay').onclick = vwTogglePlay;
+$('vSpeed').onchange = () => { vw.speed = +$('vSpeed').value; };
+$('vScrub').oninput = () => vwSetPos(+$('vScrub').value);
+$('vJump').onkeydown = (e) => { if (e.key === 'Enter') { vwJump(); e.preventDefault(); } };
+$('vJump').onchange = vwJump;
+$('vGhost').onchange = () => { vw.ghost = $('vGhost').checked; vw.dirty = true; };
+$('vPath').onchange = () => { vw.path = $('vPath').checked; vw.dirty = true; };
+$('vFollow').onclick = () => vwFollow(!vw.follow);
+$('vZoomIn').onclick = () => vwZoom(1);
+$('vZoomOut').onclick = () => vwZoom(-1);
+window.addEventListener('resize', () => { if (vw.open) vwResize(); });
+if (window.ResizeObserver) new ResizeObserver(() => { if (vw.open) vwResize(); }).observe($('vStage'));
+document.addEventListener('keydown', (e) => {
+	if (!vw.open) return;
+	if (e.key === 'Escape') { closeViewer(); return; }
+	const tag = (e.target && e.target.tagName) || '';
+	if (tag === 'INPUT' && e.target.type === 'text') return;
+	if (tag === 'SELECT') return;
+	if (e.key === ' ' || e.code === 'Space') {
+		e.preventDefault();
+		if (tag === 'BUTTON' || tag === 'INPUT') e.target.blur();   // or the focused button / checkbox would also react on keyup
+		vwTogglePlay();
+	}
+	else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); vwSetPos(Math.floor(vw.pos) + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 1 : 100)); }
+	else if (e.key === '+' || e.key === '=') vwZoom(1);
+	else if (e.key === '-' || e.key === '_') vwZoom(-1);
+	else if (e.key === 'f' || e.key === 'F') vwFollow(!vw.follow);
+	else if (e.key === 'g' || e.key === 'G') { $('vGhost').checked = !$('vGhost').checked; vw.ghost = $('vGhost').checked; vw.dirty = true; }
+	else if (e.key === 'Home') vwSetPos(0);
+	else if (e.key === 'End') vwSetPos(vw.T);
+});
+// drag to look around (stops following), wheel / pinch to zoom
+const vcv = $('vCanvas');
+vcv.addEventListener('pointerdown', (e) => { vcv.setPointerCapture(e.pointerId); vw.ptr.set(e.pointerId, [e.clientX, e.clientY]); vcv.classList.add('drag'); });
+vcv.addEventListener('pointermove', (e) => {
+	const p = vw.ptr.get(e.pointerId);
+	if (!p) return;
+	const dpr = window.devicePixelRatio || 1, s = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)) / 16;
+	if (vw.ptr.size === 1) {
+		const dx = e.clientX - p[0], dy = e.clientY - p[1];
+		if (Math.abs(dx) + Math.abs(dy) < 1) return;
+		if (vw.follow) vwFollow(false);
+		vw.camX -= dx * dpr / s; vw.camY -= dy * dpr / s; vw.dirty = true;
+	}
+	vw.ptr.set(e.pointerId, [e.clientX, e.clientY]);
+	if (vw.ptr.size === 2) {
+		const [a, b] = [...vw.ptr.values()];
+		const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+		if (!vw.pinch) vw.pinch = d;
+		else if (d / vw.pinch > 1.3) { vwZoom(1); vw.pinch = d; }
+		else if (d / vw.pinch < 0.77) { vwZoom(-1); vw.pinch = d; }
+	}
+});
+const vUp = (e) => { vw.ptr.delete(e.pointerId); if (vw.ptr.size < 2) vw.pinch = null; if (!vw.ptr.size) vcv.classList.remove('drag'); };
+vcv.addEventListener('pointerup', vUp);
+vcv.addEventListener('pointercancel', vUp);
+vcv.addEventListener('wheel', (e) => {
+	e.preventDefault();
+	const r = vcv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+	vwZoom(e.deltaY < 0 ? 1 : -1, (e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr);
+}, { passive: false });
+vcv.addEventListener('dblclick', () => vwFollow(true));
+
+// deep link to the viewer: #watch=<job id>[&t=1:10.00][&zoom=0..13][&play=1] (the page keeps #watch=<id> while it is open)
+function openFromHash() {
+	const h = location.hash.replace(/^#/, '');
+	const m = h.match(/(?:^|&)watch=([a-z0-9-]+)/);
+	if (!m) return;
+	const p = (k) => { const x = h.match(new RegExp(`(?:^|&)${k}=([^&]+)`)); return x ? decodeURIComponent(x[1]) : undefined; };
+	openViewer(m[1], { t: p('t'), zoom: p('zoom'), play: p('play') === '1' });
+}
+window.addEventListener('hashchange', openFromHash);
 renderFiles();
-refresh();
-setInterval(() => { if (!document.querySelector('#delBtn[data-armed="1"]') && document.activeElement !== $('workers')) refresh(); }, 2500);
+refresh().then(openFromHash);
+setInterval(() => {
+	if (document.querySelector('#delBtn[data-armed="1"]') || document.activeElement === $('workers') || document.activeElement === $('proc')) return;
+	refresh();
+}, 2500);
 </script>
 </body>
 </html>

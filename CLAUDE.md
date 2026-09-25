@@ -1,0 +1,258 @@
+# CLAUDE.md: EE Auto TAS, a guide for AI coding assistants
+
+The user started you in this folder, probably while the app is running in their browser. They will say things like
+"at 1:10 I think you can skip the second portal". This page tells you what the app does, where everything is, and
+exactly how to check an idea and hand an improvement to the running optimizer. The app does not need you: it runs
+by itself. You are an optional helper.
+
+## 1. What the app does
+
+EE Auto TAS optimizes a TAS (tool-assisted speedrun, an `.eetas` file of eeo-tas) for an Everybody Edits Offline
+level (`.eelvl`). The user imports both in the web app (`START.bat`, http://localhost:47823). The app checks that the
+TAS finishes the level in an exact physics port of eeo-tas. It then runs `src/grind.js`, which cycles search tools
+over the run until the user stops it. Every improvement is proven by a full replay and saved. The user downloads the
+optimized `.eetas` and plays it in eeo-tas (`/loadtas`, `/reset`, `/playtas`).
+
+- Plain Node.js 18+, no dependencies (built-ins only), CommonJS, `'use strict'`. There is no build step. Windows is
+  the target (START.bat, taskkill), but the tools run anywhere Node runs.
+- Nothing here needs an AI, a GPU, Godot or Python.
+
+## 2. Ground rules
+
+- **Never write `src/jobs/<id>/best.eetas` yourself.** Hand runs in with `node src/tas.js try <job> <file>`. It
+  verifies the run with the same rule as the optimizer and writes files atomically. If the job is running, the file
+  goes through the job's inbox and the grind decides within about 3 seconds.
+- Do not kill processes you did not start. The grind belongs to the user's app. Stop it only if they ask
+  (`tas.js stop <job>` or the Pause button).
+- `src/eesim.js` (physics) and `src/eelvl.js` (level reader) are bit-exact ports of eeo-tas (AS3 source). Do not
+  change them unless the user asks. If you do, follow the AS3 exactly (docs/eeo_spec has file:line references) and
+  run `node test/regress.js --quick`. These two files use 2-space indentation. Every other `src/*.js` file uses tabs.
+- Put scratch scripts and files in `src/out/` (gitignored). Each job has a `probes/` folder for candidate runs.
+- `.eetas` files are **raw bytes**. Read them with `C.readEetas(file)` and write them with `C.writeEetas(file, masks)`
+  (`src/common.js`). Never read one as text: eeo-tas plays every byte as a tick, line breaks included.
+
+## 3. Recipe: "at 1:10 I think X is possible"
+
+Times the user gives are **in-game run times** (the timer eeo-tas shows). Every command accepts `m:ss.cc`
+(`1:10` = `1:10.00`), `70.5s`, or a plain number, which is a **tick** (an index into the `.eetas`).
+
+1. **Find the job.** `node src/tas.js jobs`. You can refer to a job by its id, a unique prefix, or part of its name.
+   `node src/tas.js status <job>` shows whether it is running, the best time, the stage, recent improvements and
+   the log.
+2. **Look at that moment.** `node src/tas.js where <job> 1:10`. It shows the tick, position (tiles), velocity
+   (px/tick), whether the ball is on the ground, gravity direction, the tiles at the centre, below and ahead, coins,
+   keys and switches, the inputs of the last 30 and next 100 ticks (`R+J x3, R x20, - x5`), the next events
+   (portals, coins, jumps, landings) and an ASCII map (`@` ball, `+` path in the next 3 s, `-` path in the last 1 s).
+3. **See it.** `node src/tas.js render <job> 1:08 1:14`. It prints the PNG path. **Read the PNG** (it is an image).
+   Tiles are colored by kind: solid grey, arrows and dots blue, portals purple rings (a white dot means a random
+   exit), coins yellow or blue (hollow if already taken), doors hatched, one-ways drawn as a bar on their solid side.
+   The path runs cyan to yellow to red over time, with run-time labels. The green box is the ball at the start of
+   the range and the red box is the ball at the end. The rest of the run is a thin grey line. Tile coordinates are
+   printed on the top and left edges. For a wide area pass `--scale=4`; for a close-up pass a short range or
+   `--margin=3`.
+4. **Form a hypothesis** in terms of inputs. For example: "jump 6 ticks earlier at 1:10.40 and hold R. The ball clears
+   the wall at tile (330, 150) and lands on the ledge the run reaches at 1:11.20". Section 5 has the physics.
+5. **Test it exactly.**
+   - One idea: `node src/tas.js probe <job> 1:10.40 "R+J x6, R x40"`. It plays those inputs from the best run's
+     *exact* state at 1:10.40. It then looks for an **exact rejoin**: a state identical (`stateHash`) to one the best
+     run reaches later. It tries the inputs themselves and then the best run's own inputs continued from nearby
+     offsets. A rejoin is proof. The saving is the tick difference. It writes a verified candidate `.eetas` and
+     prints how to hand it in (or pass `--try`). If nothing rejoins, it prints the closest reference state
+     (tick and distance). Use it to adjust the timing.
+   - Many variants: copy `src/examples/idea_template.js` to `src/out/` and edit it. It tries thousands of small input changes around a moment with
+     `J.probe` and a shared `J.probeContext` (about 1 ms each) and writes the best one.
+   - Let the machine search: `node src/tas.js focus <job> 1:08 1:14 120`. This runs the route explorer
+     (`explore.js --exact=1`), the dense shortcut search (`shortcuts.js`) and input mutations (`mutate.js`) on just
+     that window, splices the results, and hands every faster run to the job. If the job is running, focus uses half
+     the CPU threads. It takes about 3 x seconds plus a little extra. From the web app, the "Ideas" box does the same.
+6. **Hand it in.** `node src/tas.js try <job> <candidate.eetas>`. It prints the verdict. Running job: the grind's
+   verdict arrives within seconds (`--wait=60` by default). Stopped job: decided at once and `best.eetas` is updated.
+   A run that finishes but is not better is kept in `pieces/`. The grind splices its good parts in at the end of every
+   round, so a partial improvement still helps.
+7. **Tell the user** the new time, the ticks saved (1 tick = 0.01 s) and, if random portals are involved, the odds
+   (section 4). The web app shows a notification for each improvement. To let them see it, give them the viewer
+   link `http://localhost:47823/#watch=<job id>&t=1:10.00`: it plays the current best run from that moment with
+   their original `.eetas` as a ghost (a "Newer version found" button appears in an open viewer when your run lands).
+
+If an idea fails, `render` the probe's candidate (`--file=<candidate.eetas>`), or run `where <job> <t> --file=...` on it
+to see where it goes wrong. Coins that are only collected on the way (no coin door or gate on the route) are optional:
+`status` says "coins optional", and the searches may then skip them.
+
+## 4. Key ideas
+
+- **Exact physics port.** `EESim` (src/eesim.js) reproduces eeo-tas bit for bit: Player.as, World.as, PlayState.as,
+  every float operation in the same order. `sim.stateKey()` / `sim.stateHash()` are equal only for states that behave
+  identically from then on (absolute clocks are left out).
+- **Exact rejoins = proven shortcuts.** If a searched state at tick t equals the best run's state at a later tick j,
+  then the best run's inputs from j replay identically from there. `best[0..i) + found inputs + best[j..]` finishes
+  exactly j - t ticks sooner. No approximation is involved, so no fake improvements. Every tool works this way
+  (mutate, shortcuts, explore `--exact`, splice, probe), and every result is verified by a full replay anyway.
+- **The acceptance rule** (`common.judge`, used by grind, try and the inbox): the run must finish the level, die no
+  more often than the starting run, and be faster with no lower random-portal chance, or equally fast and more
+  likely to work.
+- **The grind cycle** (src/grind.js): mutate loop, then deep exact-rejoin exploring of every coin-to-coin segment
+  (in windows, starting with a different segment each round), mutate, a dense shortcuts pass, mutate, a beam search
+  every other round, then a splice of all results plus `pieces/`. Settings rotate each round, and `--rot` continues
+  the rotation after a restart. While a stage runs, the grind checks `inbox/` every 3 s and writes a status
+  heartbeat every 30 s. Each stage works on its own copy of the best run (`grind_ref.eetas`).
+- **Random portals.** A portal whose target id belongs to several portals picks its exit with `Math.random` in EEO.
+  That draw is unseeded and not reproducible. At import, `rng.js` replays the TAS under every combination of exits.
+  The level JSON gets an `rng_script`, the fastest finishing combination, which every simulation uses. **chance** is
+  the probability that the run finishes in a real EEO replay, for example 50% for one 2-exit portal where only one
+  exit works. The user may need to replay a few times. The optimizer never lowers the chance.
+- **Coin-blind search** (`--nocoins=1`): when coins only matter as pickups, states that differ only in collected
+  coins count as equal. This finds more rejoins and allows skipping coins.
+- **Start mode.** How the user started the TAS in eeo-tas decides the start state (eesim.js `EESim.reset()`):
+  `reset` (default, the eeo-tas README workflow: load, `/reset`, `/playtas`; `/reset` moves to spawn index 1 % n and
+  restores 110/111 coins) or `load` (`/playtas` right after loading: spawn 0). It is chosen at import (page, API
+  `startMode`, `tas.js import --start=load`), kept in `meta.json` (`startMode`, `startMatters`) and written into the
+  level JSON as `start_mode`, so every tool and `J.loadJobLevel` simulate from it without extra options. It only
+  matters with 2+ spawn points, time doors or collected coins stored in the file (`meta.startMatters`, from
+  `viewer.startMatters(level)`); the page shows it in the job header only then.
+- **CPU only.** The engine is exact IEEE-double physics with heavy branching: there is no GPU mode (README "CPU or
+  GPU?"). `src/bench.js` measures this PC once (`src/data/_system.json`, `GET /api/system`); the thread list and
+  the Processor note show the measured ticks/s per thread count (on the user's laptop 8 threads are as fast as 16).
+
+## 5. Physics cheat sheet (eeo-tas; details and AS3 references in docs/eeo_spec)
+
+- 1 tick = 10 ms = 1 byte of `.eetas` = 0.01 s of run time. A tile is 16 px. The position `(px, py)` is the
+  top-left corner of the 16x16 hit box. The centre tile is `((px+8)>>4, (py+8)>>4)`. y points down.
+- Inputs per tick (mask bits): 1 jump, 2 left, 4 right, 8 up, 16 down. The byte is `48 + mask` ('0'..'O').
+  Left+right or up+down cancel. In replay, **every tick with the jump bit is a fresh press**.
+- Speeds in the sim (`speed_x`, `speed_y`) are px/tick. The AS3 "public" speeds are these x 7.752 (Config
+  `physics_variable_multiplyer`). The arithmetic goes through that factor exactly.
+- Gravity: +2/7.752 = 0.258 px/tick per tick. Then drag x0.98132 (base drag) every tick. Falling tops out near
+  13.55 px/tick. Speeds are capped at 16.
+- Running: holding a direction adds 1/7.752 = 0.129 px/tick per tick with base drag only. Speed is 2.13 after
+  20 ticks, 4.59 after 60 and 5.75 after 100, and tends to 6.78 px/tick. With no input (or the opposite one) the
+  extra "no modifier" drag applies: x0.8876 per tick in total, so the ball stops fast. Momentum is precious.
+- Jump: `speed = -26 x 2 / 7.752 = -6.708 px/tick` against gravity (x1.3 with the jump effect). It needs gravity on
+  that axis from both the current and the delayed tile (no jumps in dots, liquids, on climbables or boosts), and
+  `jumpCount < maxJumps`. `jumpCount` resets on a tick where the ball hit the floor with speed 0 on that axis. A
+  1-tick jump rises for 22 ticks and about 63 px (4 tiles).
+- **The gravity queue** (Player.as:406-447): each tick reads two tiles. `current` is the tile under the box centre
+  now. It sets int `morx/mory` (can you jump, what counts as floor) and kills (spikes, fire, toxic). `delayed` is the
+  `current` of **2 ticks ago**. It sets the acceleration `mox/moy`. Dots (4, 414) and climbables shorten the delay to
+  1 tick. So entering an arrow or dot field changes acceleration 2 ticks later, and leaving it keeps the old force for
+  2 ticks.
+- Which inputs act: under vertical gravity up/down do nothing, and under horizontal gravity left/right do nothing.
+  Liquids and zero-gravity tiles (dots, climbables, boosts) allow both axes.
+- Blocks: arrows 1/2/3/1518 (and invisible 411/412/413/1519) set gravity left/up/right/down. Dots 4/414 cancel
+  gravity (4-way control, drag). Boosts 114-117 set speed to 16 px/tick. One-ways block from one side, set by their
+  rotation. Half blocks are half-tile solids. Keys, switches and coins open or close doors and gates.
+  Spikes, fire and toxic kill, and the respawn comes 54 ticks later.
+- Portals: the teleport happens at the start of the movement loop, at most once per tick. The velocity is rotated by
+  the rotation difference and multiplied by 1.42 when rotated. Standing on an exit portal does not teleport again.
+- Run timer: it starts at the end of the first tick with any input. The finishing tick is not counted.
+  `run_ticks = finishTick - timerStart` (the same as eeo-tas `Me.ticks`). `where` prints `timerStart`.
+- Sub-steps: movement advances in 1 px steps with a collision test each step. Wall hits zero the speed. Exact
+  rejoins happen often after wall hits, landings and portals, because those reset the state.
+- Specs: `docs/eeo_spec/movement.md` (Player.tick step by step, collisions, portals, jumps),
+  `tick_loop.md` (tick order, TAS input bytes, run timer, randomness), `state.md` (keys, switches, doors, coins,
+  death, checkpoints), `blocks.md` / `blocks.json` (every block id), `eelvl_format.md` (level files),
+  `level_survey.md` (what the sample levels use). `docs/ENGINE_NOTES.md` covers the engine API and its known gaps.
+
+## 6. Files
+
+| file | what |
+|---|---|
+| `START.bat` | double-click launcher (checks for Node, runs `node src/server.js --open`) |
+| `src/server.js` | web app + JSON API on 127.0.0.1:47823 (`--port=`, `--open`); resumes the last running job |
+| `src/app/index.html` | the page (single file, no build) |
+| `src/tas.js` | the CLI (`node src/tas.js help`) |
+| `src/jobs.js` | job model shared by server and CLI: import, start/stop, summary, try, where, replay, render, probe, focus |
+| `src/common.js` | `.eetas` bytes I/O, atomic writes, time parsing, level lookup, `replay()`, `evaluate()`, `judge()` |
+| `src/render.js` | PNG renderer (canvas, 5x7 font, PNG encoder on zlib) |
+| `src/viewer.js` | data for the page's run viewer: `trajectory()` (per-tick positions, timer, inputs, flags, events, door states in the job's exact engine), `align()` (DTW: the original's tick at the same point, per best tick), `levelView()`, `startMatters()` |
+| `src/minimap.js`, `src/minimapcolors.json` | EE's own minimap color per block id (eeo-tas ItemManager.as `createBrick(..., minimapColor)`, -1 = the average of the block image); regenerate with `node src/minimap.js build [eeo-tas dir]` |
+| `src/bench.js` | CPU benchmark of the engine (1, half and all threads, warmed-up workers), cached in `src/data/_system.json` per CPU / Node / engine size |
+| `src/blocks.js`, `src/blocknames.json` | block names and kinds for display (from docs/eeo_spec/blocks.json) |
+| `src/eesim.js` | the exact physics port (EESim, EEInput, applyMask, parseEetasBytes, loadLevel, prepareLevel) |
+| `src/eelvl.js` | EEO-exact `.eelvl` reader, `toSimLevel()` = the level JSON |
+| `src/rng.js` | random-portal outcome tree: chance, best outcome script, per-portal odds |
+| `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`) |
+| `src/mutate.js` | input mutations at every tick, exact rejoins, DP (seconds) |
+| `src/shortcuts.js` | local beams from every `--step`-th tick, exact rejoins, DP |
+| `src/explore.js` | Go-Explore route explorer for a window (`--from --join --until --exact=1`) |
+| `src/optimize.js` | beam search along the reference with verified leads |
+| `src/splice.js` | best combination of several runs at equal states |
+| `src/run.js` | quick replay: finish tick, run time, coins |
+| `src/examples/idea_template.js` | a script that tries thousands of input variants around a moment exactly; copy it and edit |
+| `test/regress.js` | engine regression tests (maintained together with the physics) |
+
+The tools take `--tas=<file>` and `--level=<level id | job id>`. For a `.eetas` inside `src/jobs/<id>/`, `--level` can
+be left out. Each tool's header comment lists its options.
+
+## 7. Jobs on disk
+
+`src/jobs/<id>/` (the id is `<name-slug>-<6 hex>`), plus the level at `src/data/job_<id with _>.json`:
+
+| file | what |
+|---|---|
+| `meta.json` | name, level info, the original TAS (ticks, finish tick, run ticks, coins, deaths), import-time portal odds, `levelId`, `startMode` (`reset` / `load`), `startMatters`, `spawns`, `timeDoors` |
+| `status.json` | written by grind (and by `try` when stopped): `state`, `pid`, `stage`, `rounds`, `bestRunTicks`, `chance`, `coinsOptional`, `history` [{t, runTicks, saved, what, chance}], `updated` (heartbeat) |
+| `best.eetas` | **the current best run** (bytes '0'..'O', cut at the finish); `best_<runTicks>.eetas` = every improvement |
+| `original.eetas`, `original.eelvl` | the uploaded files, byte for byte |
+| `grind.log` | the optimizer's log (`[grind ...]`, `[try ...]` lines); `console.log` = the grind's raw stdout |
+| `inbox/` | candidates for a running grind: `<stamp>_<source>.eetas` + `.json` {source}; verdicts in `inbox/results.jsonl` |
+| `pieces/` | finishing runs from outside that were not better; spliced in every round (newest 30 kept) |
+| `focus.json`, `focus.log`, `focus/<stamp>/` | the last focus search: state, range, results; its log; its files |
+| `probes/`, `renders/` | candidates written by `probe`, PNGs written by `render` |
+| `report.json` | the final report from "Finish run" (time saved, odds, per-portal odds) |
+| `grind_*.eetas`, `grind_*.log` | stage outputs and logs of the current grind (`grind_ref.eetas` = the stage's copy of best) |
+
+`src/jobs/_running.json` records the job to resume when the app starts. The level JSON is eelvl.js `toSimLevel()`
+output plus `rng_script` (section 4) and `start_mode` (section 4, "Start mode"). `src/data/_system.json` is the CPU
+benchmark.
+
+## 8. CLI (`node src/tas.js help`)
+
+`jobs` | `status <job>` | `where <job> <t>` | `render <job> [from] [to] [out.png]` | `replay <job|file> [--level=<job>]` |
+`probe <job> <t> "<inputs>" [--try]` | `try <job> <file.eetas>` | `focus <job> <from> <to> [seconds]` |
+`import <level.eelvl> <run.eetas> [--name=] [--start=reset|load]` | `start <job> [--workers=N]` | `stop <job>` |
+`finish <job>`. (`node src/bench.js [--threads=N]` measures the engine speed.)
+Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render and replay on another run),
+`--wait=<s>`, `--source=<text>`, `--workers=N`, `--scale=`, `--margin=`.
+
+## 9. HTTP API (the web app's server; `GET /api` lists it)
+
+| method | path | what |
+|---|---|---|
+| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best), CPU threads, `bench` |
+| GET | `/api/system` | processors: CPU with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU `available: false` with `why`; `faster: "cpu"` |
+| POST | `/api/jobs` | import: JSON `{name, eelvlName, eetasName, eelvlB64, eetasB64, startMode}` (base64 of the raw file bytes; `startMode` `reset` (default) or `load`) |
+| GET | `/api/jobs/:id` | one job summary (best, history, stage, inbox, focus, files) |
+| POST | `/api/jobs/:id/start` | JSON `{workers, processor}` (`processor` `cpu`; `gpu` is refused with the reason) |
+| POST | `/api/jobs/:id/stop` | pause |
+| POST | `/api/jobs/:id/finish` | stop and write `report.json` (returned) |
+| DELETE | `/api/jobs/:id` | delete the job and its files |
+| GET | `/api/jobs/:id/best.eetas`, `/original.eetas` | downloads |
+| GET | `/api/jobs/:id/log` | last 300 lines of grind.log |
+| GET | `/api/jobs/:id/where?t=1:10.00` | state at a time or tick (JSON; `&format=text` = the CLI text) |
+| GET | `/api/jobs/:id/render.png?from=1:08&to=1:14` | PNG (`&scale=`, `&margin=`) |
+| GET | `/api/jobs/:id/replay` | summary and timeline of the best run (`&format=text`) |
+| POST | `/api/jobs/:id/try` | raw `.eetas` bytes or JSON `{eetasB64, source}`; `?wait=<s>` for a running job's verdict |
+| POST | `/api/jobs/:id/probe` | JSON `{at, inputs: "R+J x3, R x20", try}` |
+| POST | `/api/jobs/:id/focus` | JSON `{from, to, seconds, workers}`, runs in the background |
+| GET | `/api/jobs/:id/focus` | the last focus search: state, results, log tail |
+| GET | `/api/jobs/:id/trajectory?which=best` | the run for the viewer, simulated with the job's level JSON (rng_script, start_mode): `ticks`, `complete`, `runTicks`, `timerStart`, `version`, base64 little-endian arrays `x`, `y` (Int32, px x 16, top-left of the box, index = tick 0..ticks), `run` (Int32 run timer), `flags` (Uint8: 1 dead, 2 on ground, bits 2-4 gravity 0 down 1 up 2 left 3 right 4 none), `inputs` (masks), `events` ([tick, kind, ...]: coin/blue_coin x y, portal fx fy tx ty, death, respawn, jump, key color x y, key_expired, switch kind id on, checkpoint/crown/complete x y), `doors` ({"id:number": [solid at 0, toggle ticks...]}), `coinsTaken0`; for `best` also `align` (Int32: the original's first tick at the same point, per best tick) and `original` {runTicks, version}. `which=original`: the uploaded TAS |
+| GET | `/api/jobs/:id/level` | the level for the viewer: `width`, `height`, `fg`/`bg` (base64 Uint16 ids), `palette` {id: "aarrggbb" EE minimap color}, `kinds` {id: [kind, dir/sub, solid]} (src/blocks.js), `nums` [[index, rotation/number]], `portals` [[index, rot, id, target, random]], `spawns`, `startMode`, `startMatters` |
+
+## 10. Scripting against the engine
+
+```js
+const C = require('./src/common.js');      // from src/out/: require('../common.js')
+const J = require('./src/jobs.js');
+const E = C.E;                              // eesim.js
+const id = J.resolve('veil');               // id, prefix or part of the name
+const level = J.loadJobLevel(id);           // prepared level (with the job's rng_script)
+const best = C.readEetas(`${J.jobDir(id)}/best.eetas`);
+const tr = C.replay(level, best, { trace: true });   // X, Y, VX, VY, RUN per tick, events [{t, kind, data}]
+const t = C.tickOf(tr, C.parseTime('1:10.40'));
+const sim = new E.EESim(level); sim.reset();
+const inp = new E.EEInput();
+for (let k = 0; k < t; k++) { E.applyMask(inp, best[k]); sim.tick(inp); }
+const s = sim.snapshot();                   // restore(s) as often as you like; stateHash() to compare states
+const ev = C.evaluate(level, candidateMasks);          // null = does not finish; else {runTicks, deaths, chance, ms}
+C.writeEetas('src/out/idea.eetas', ev.ms);             // then: node src/tas.js try <job> src/out/idea.eetas
+```

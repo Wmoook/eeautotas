@@ -1,290 +1,266 @@
 'use strict';
-// TAS Optimizer app: a small local web server (http://localhost:47823) around the optimizer tools.
-// Drop an Everybody Edits level (.eelvl) and a TAS for it (.eetas, eeo-tas format) into the page; the app converts
-// the level with the game's own parser (Godot, tools/tas/export_level.gd), checks that the TAS finishes the level
-// in the exact physics port (tools/tas/eesim.js), then runs tools/tas/grind.js on it until you stop it. Every
-// improvement is verified by a full replay and kept in tools/tas/jobs/<id>/ (best.eetas, best_<ticks>.eetas).
-// One job optimizes at a time (it uses all the CPU threads you give it); the running job resumes when the app
-// starts again. Launch: TAS_OPTIMIZER.bat in the repo root, or: node tools/tas/server.js [--port=47823] [--open]
+// EE Auto TAS web app: a small local web server (http://localhost:47823) around the optimizer tools.
+// Drop an Everybody Edits Offline level (.eelvl) and a TAS for it (.eetas, eeo-tas format) into the page. The app
+// reads the level with its own EEO-exact reader (eelvl.js), checks that the TAS finishes the level in the exact
+// physics port (eesim.js), then runs grind.js on it until you stop it. Every improvement is verified by a full
+// replay and kept in src/jobs/<id>/ (best.eetas, best_<ticks>.eetas). One job optimizes at a time (it uses all the
+// CPU threads you give it); the running job resumes when the app starts again. No AI is needed for any of this.
+// Everything the page does is also a JSON API (GET /api lists it; README.md and CLAUDE.md document it), and
+// src/tas.js does the same from a terminal, with or without this server running.
+// Launch: START.bat, `npm start`, or: node src/server.js [--port=47823] [--open]
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const zlib = require('zlib');
-const crypto = require('crypto');
-const { spawn, spawnSync, execFileSync } = require('child_process');
-const E = require('./eesim.js');
-const RNG = require('./rng.js');
+const { spawn } = require('child_process');
+const C = require('./common.js');
+const J = require('./jobs.js');
+const V = require('./viewer.js');
+const BENCH = require('./bench.js');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const JOBS = path.join(__dirname, 'jobs');
-const DATA = path.join(__dirname, 'data');
 const APP = path.join(__dirname, 'app', 'index.html');
-const RUNNING_FILE = path.join(JOBS, '_running.json');
-const args = {};
-for (const s of process.argv.slice(2)) { const m = s.match(/^--([^=]+)(?:=(.*))?$/); if (m) args[m[1]] = m[2] === undefined ? '1' : m[2]; }
+const args = C.parseArgs(process.argv.slice(2));
 const PORT = +(args.port || 47823);
-fs.mkdirSync(JOBS, { recursive: true });
 
-const fmt = (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padStart(5, '0')}`;
-const readJSON = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return d; } };
+const children = new Map();   // job id -> grind ChildProcess started by this server (stopped when the server stops)
+const focusKids = new Map();  // job id -> focus ChildProcess started by this server
 
-// ---------------------------------------------------------------- Godot (the game's .eelvl parser)
-function findGodot() {
-	const c = [];
-	if (process.env.GODOT_BIN) c.push(process.env.GODOT_BIN);
-	const dl = path.join(os.homedir(), 'Downloads', 'Godot_v4.6.1-stable_win64.exe');
-	c.push(path.join(dl, 'Godot_v4.6.1-stable_win64_console.exe'), path.join(dl, 'Godot_v4.6.1-stable_win64.exe'));
-	for (const f of c) if (f && fs.existsSync(f)) return f;
-	try {
-		const w = execFileSync('where', ['godot'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split(/\r?\n/)[0].trim();
-		if (w && fs.existsSync(w)) return w;
-	} catch (e) { /* not on PATH */ }
-	return null;
-}
-const GODOT = findGodot();
-
-// .eelvl files come zlib-wrapped (78 xx), raw-deflated (EE Offline saves) or uncompressed; the game's parser takes
-// zlib or uncompressed, so raw deflate is re-wrapped as zlib.
-function normalizeEelvl(buf) {
-	if (buf.length < 4) throw new Error('the level file is empty');
-	if (buf[0] === 0x78) { zlib.inflateSync(buf); return { data: buf, kind: 'zlib' }; }
-	try { return { data: zlib.deflateSync(zlib.inflateRawSync(buf)), kind: 'raw deflate' }; } catch (e) { /* not raw deflate */ }
-	try { return { data: zlib.deflateSync(zlib.gunzipSync(buf)), kind: 'gzip' }; } catch (e) { /* not gzip */ }
-	if (buf[0] === 0 && buf[1] === 0) return { data: buf, kind: 'uncompressed' };
-	throw new Error('this does not look like an .eelvl level file (unknown compression)');
+// ---------------------------------------------------------------- processor (CPU benchmark; why no GPU)
+const GPU_WHY = 'Exact EE physics needs 64-bit floating point math (every run must replay bit for bit like eeo-tas). WebGPU has no ' +
+	'64-bit floats at all, and gaming GPUs run them at about 1/64 of their normal speed; the engine is also full of branches (1 px ' +
+	'collision steps, portals, doors) that GPUs handle badly. The CPU is faster for this.';
+let bench = BENCH.cached();                    // the benchmark record (src/data/_system.json), measured at startup when missing
+let benchState = bench ? 'done' : 'pending';
+function systemInfo() {
+	const n = os.cpus().length;
+	const est = bench ? Array.from({ length: n }, (_, i) => BENCH.estimate(bench, i + 1)) : null;
+	return {
+		cpus: n, model: (os.cpus()[0] && os.cpus()[0].model || '').trim(), benchState, bench,
+		processors: [
+			{ id: 'cpu', name: 'CPU', available: true, threads: n, single: bench ? bench.single : null, all: bench ? bench.all : null,
+				peakThreads: bench ? bench.peakThreads : null, estimate: est },
+			{ id: 'gpu', name: 'GPU', available: false, why: GPU_WHY },
+		],
+		faster: 'cpu',
+		note: 'The CPU is faster: exact EE physics is 64-bit floating point math with many branches, which GPUs run far slower (see README "CPU or GPU").',
+	};
 }
 
-function runGodotExport(levelFile, id) {
-	return new Promise((resolve, reject) => {
-		if (!GODOT) return reject(new Error('Godot 4.6.1 was not found (set GODOT_BIN to Godot_v4.6.1-stable_win64_console.exe)'));
-		const p = spawn(GODOT, ['--headless', '--audio-driver', 'Dummy', '--path', ROOT, '-s', 'res://tools/tas/export_level.gd', '--',
-			`file=${levelFile}`, `id=${id}`], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-		let out = '';
-		p.stdout.on('data', (d) => { out += d; });
-		p.stderr.on('data', (d) => { out += d; });
-		const timer = setTimeout(() => { try { p.kill(); } catch (e) { /* gone */ } reject(new Error('the level converter timed out')); }, 180e3);
-		p.on('close', () => {
-			clearTimeout(timer);
-			const f = path.join(DATA, id + '.json');
-			const m = out.match(/\[export\] \S+: (\d+)x(\d+)/);
-			if (!fs.existsSync(f) || !m || +m[1] < 2) return reject(new Error('the game could not read this level file' +
-				(/Decompression failed|incorrect header/.test(out) ? ' (unknown compression)' : '')));
-			resolve(f);
-		});
+// ---------------------------------------------------------------- viewer data (cached per job and file version)
+const viewCache = new Map();   // key -> value (small LRU)
+function cached(key, make) {
+	if (viewCache.has(key)) { const v = viewCache.get(key); viewCache.delete(key); viewCache.set(key, v); return v; }
+	const v = make();
+	viewCache.set(key, v);
+	while (viewCache.size > 12) viewCache.delete(viewCache.keys().next().value);
+	return v;
+}
+const fileVersion = (f) => { try { const s = fs.statSync(f); return `${Math.round(s.mtimeMs)}-${s.size}`; } catch (e) { return ''; } };   // = summary().bestVersion
+/** trajectory of the job's best or original run in the job's exact engine (level JSON: rng_script, start_mode) */
+function runTrajectory(id, which) {
+	const file = path.join(J.jobDir(id), which === 'original' ? 'original.eetas' : 'best.eetas');
+	const lj = J.levelJsonOf(id);
+	const version = fileVersion(file);
+	return cached(`tr|${id}|${which}|${version}|${fileVersion(lj)}`, () => {
+		const level = J.loadJobLevel(id);
+		return { version, level, tr: V.trajectory(level, C.readEetas(file)) };
 	});
 }
-
-// replays a TAS in the exact physics port
-function replay(level, masks) {
-	const sim = new E.EESim(level);
-	sim.reset();
-	const inp = new E.EEInput();
-	let complete = -1, deaths = 0, coins = 0;
-	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); else if (k === 'death') deaths++; };
-	let t = 0;
-	for (; t < masks.length && complete < 0; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); }
-	coins = sim.coins;
-	return { complete, runTicks: sim.run_ticks, deaths, coins, blueCoins: sim.blue_coins, ticks: t,
-		end: { x: Math.round(sim.px / 16), y: Math.round(sim.py / 16) } };
-}
-
-// ---------------------------------------------------------------- jobs
-const slug = (s) => String(s || 'level').toLowerCase().replace(/\.(eelvl|eetas)$/i, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'level';
-const jobDir = (id) => path.join(JOBS, id);
-const levelId = (id) => 'job_' + id.replace(/-/g, '_');
-let children = new Map();   // job id -> ChildProcess (started by this server)
-
-function pidAlive(pid) { if (!pid) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
-function jobRunningPid(id) {
-	const ch = children.get(id);
-	if (ch && ch.exitCode === null) return ch.pid;
-	const st = readJSON(path.join(jobDir(id), 'status.json'), {});
-	// a grind from an earlier app session may still run: accept its pid only if it is alive and recently active
-	if (st.state === 'running' && pidAlive(st.pid) && Date.now() - (st.updated || 0) < 30 * 60e3) return st.pid;
-	return 0;
-}
-function listJobs() {
-	let ids = [];
-	try { ids = fs.readdirSync(JOBS).filter((d) => !d.startsWith('_') && fs.existsSync(path.join(JOBS, d, 'meta.json'))); } catch (e) { /* none */ }
-	return ids.map((id) => {
-		const meta = readJSON(path.join(jobDir(id), 'meta.json'), {});
-		const st = readJSON(path.join(jobDir(id), 'status.json'), {});
-		const pid = jobRunningPid(id);
-		const bestTicks = st.bestRunTicks || meta.tas.runTicks;
-		let logTail = [];
-		try { logTail = fs.readFileSync(path.join(jobDir(id), 'grind.log'), 'utf8').split(/\r?\n/).filter(Boolean).slice(-14); } catch (e) { /* none */ }
-		return { ...meta, running: !!pid, state: pid ? 'running' : (st.state === 'error' ? 'error' : 'stopped'), error: st.error || null,
-			best: { runTicks: bestTicks, time: fmt(bestTicks) }, original: { runTicks: meta.tas.runTicks, time: fmt(meta.tas.runTicks) },
-			savedTicks: meta.tas.runTicks - bestTicks, history: st.history || [], stage: pid ? (st.stage || '') : '', round: st.rounds || 0,
-			coinsOptional: st.coinsOptional, optimizingSince: pid ? st.sessionStarted : null, lastUpdate: st.updated || null, workers: st.workers,
-			chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report: readJSON(path.join(jobDir(id), 'report.json'), null),
-			logTail };
-	}).sort((x, y) => (y.created || 0) - (x.created || 0));
-}
-
-function stopJob(id) {
-	const pid = jobRunningPid(id);
-	if (pid) {
-		// the whole tree: grind.js and the search tool it is running (plus that tool's worker threads)
-		spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+function trajectoryJson(id, which) {
+	const w = which === 'original' ? 'original' : 'best';
+	const r = runTrajectory(id, w);
+	const extra = { which: w, version: r.version, name: C.readJSON(path.join(J.jobDir(id), 'meta.json'), {}).name || id };
+	if (w === 'best') {
+		const o = runTrajectory(id, 'original');
+		// for each tick of the best run, the first tick of the original at the same point (the ghost's time difference)
+		const al = cached(`al|${id}|${r.version}|${o.version}`, () => V.align(r.tr, o.tr));
+		extra.align = Buffer.from(al.buffer, al.byteOffset, al.byteLength).toString('base64');
+		extra.original = { ticks: o.tr.n, runTicks: o.tr.runTicks, time: C.fmt(o.tr.runTicks), finished: o.tr.complete >= 0, version: o.version };
 	}
-	children.delete(id);
-	const sp = path.join(jobDir(id), 'status.json');
-	const st = readJSON(sp, null);
-	if (st) { st.state = 'stopped'; st.stage = ''; try { fs.writeFileSync(sp, JSON.stringify(st)); } catch (e) { /* ignore */ } }
-	const r = readJSON(RUNNING_FILE, {});
-	if (r.id === id) { try { fs.unlinkSync(RUNNING_FILE); } catch (e) { /* ignore */ } }
+	return cached(`trj|${id}|${w}|${r.version}|${extra.original ? extra.original.version : ''}`, () => JSON.stringify(V.json(r.tr, extra)));
+}
+function levelJson(id) {
+	const lj = J.levelJsonOf(id);
+	return cached(`lv|${id}|${fileVersion(lj)}`, () => JSON.stringify(V.levelView(C.readJSON(lj, null), J.loadJobLevel(id), C.readJSON(path.join(J.jobDir(id), 'meta.json'), {}))));
 }
 
-function startJob(id, workers) {
-	for (const j of listJobs()) if (j.running && j.id !== id) stopJob(j.id);   // one job at a time: it uses the whole CPU
-	if (jobRunningPid(id)) return;
-	const dir = jobDir(id);
-	const st = readJSON(path.join(dir, 'status.json'), {});
-	const W = Math.max(1, Math.min(os.cpus().length, +workers || Math.max(1, os.cpus().length - 2)));
-	const logFd = fs.openSync(path.join(dir, 'console.log'), 'a');
-	const ch = spawn(process.execPath, [path.join(__dirname, 'grind.js'), `--job=${dir}`, `--level=${levelId(id)}`, '--forever=1', `--workers=${W}`,
-		`--rot=${st.rounds || 0}`], { cwd: ROOT, stdio: ['ignore', logFd, logFd], windowsHide: true });
-	ch.on('exit', () => { fs.closeSync(logFd); });
-	children.set(id, ch);
-	fs.writeFileSync(RUNNING_FILE, JSON.stringify({ id, workers: W }));
-}
+const ENDPOINTS = [
+	['GET', '/api', 'this list'],
+	['GET', '/api/state', 'all jobs (summaries), CPU threads, the processor benchmark'],
+	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (not available, why)'],
+	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load"} (files as base64 of their raw bytes)'],
+	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, inbox, focus, files)'],
+	['POST', '/api/jobs/:id/start', 'start / resume optimizing: JSON {workers, processor: "cpu"}'],
+	['POST', '/api/jobs/:id/stop', 'pause'],
+	['POST', '/api/jobs/:id/finish', 'stop and write the final report (report.json)'],
+	['DELETE', '/api/jobs/:id', 'delete the job and its files'],
+	['GET', '/api/jobs/:id/best.eetas', 'download the best run (also original.eetas)'],
+	['GET', '/api/jobs/:id/log', 'the last 300 lines of grind.log'],
+	['GET', '/api/jobs/:id/where?t=1:10.00', 'state at a run time (m:ss.cc) or tick: position, velocity, tiles, coins, next inputs/events, ASCII map (&format=text)'],
+	['GET', '/api/jobs/:id/render.png?from=1:10&to=1:14', 'PNG of the level around the path in that range (&scale=px per tile, &margin=tiles)'],
+	['GET', '/api/jobs/:id/replay', 'summary + timeline of the best run (coins, random portals, odds) (&format=text)'],
+	['POST', '/api/jobs/:id/try', 'hand a candidate run to the job: raw .eetas bytes, or JSON {eetasB64, source}; ?wait=seconds for a running job\'s verdict'],
+	['POST', '/api/jobs/:id/probe', 'test an idea exactly: JSON {at, inputs: "R+J x3, R x20", try: true|false}; returns the rejoin/candidate'],
+	['POST', '/api/jobs/:id/focus', 'search a time window harder: JSON {from, to, seconds, workers}; runs in the background'],
+	['GET', '/api/jobs/:id/focus', 'the last focus search: state, results, log tail'],
+	['GET', '/api/jobs/:id/trajectory?which=best', 'per-tick positions (1/16 px, base64 Int32), run timer, inputs, flags, events and door states of the best run ' +
+		'(which=original: the uploaded TAS); best also has align (original tick at the same point, per best tick)'],
+	['GET', '/api/jobs/:id/level', 'the level for the viewer: width, height, fg/bg ids (base64 Uint16), EE minimap color and block kind per id, door numbers, portals, spawns'],
+];
 
-async function importJob(body) {
-	const eelvl = Buffer.from(String(body.eelvlB64 || ''), 'base64');
-	const tasText = String(body.eetasText || '');
-	if (!eelvl.length) throw new Error('no .eelvl level file');
-	if (!tasText.trim()) throw new Error('no .eetas TAS file');
-	const norm = normalizeEelvl(eelvl);
-	const masks = E.parseEetas(tasText);
-	const odd = [...tasText.replace(/^﻿/, '').trim()].filter((ch) => { const c = ch.charCodeAt(0) - 48; return c < 0 || c > 31; }).length;
-	const id = `${slug(body.name || body.eelvlName)}-${crypto.randomBytes(3).toString('hex')}`;
-	const dir = jobDir(id);
-	fs.mkdirSync(dir, { recursive: true });
-	try {
-		fs.writeFileSync(path.join(dir, 'original.eelvl'), eelvl);
-		fs.writeFileSync(path.join(dir, 'level.eelvl'), norm.data);
-		fs.writeFileSync(path.join(dir, 'original.eetas'), tasText);
-		const lid = levelId(id);
-		const dataFile = await runGodotExport(path.join(dir, 'level.eelvl'), lid);
-		const ld = readJSON(dataFile, {});
-		let level = E.loadLevel(dataFile);
-		// random portals (EEO picks their exit with Math.random): find the outcomes this TAS needs, and the odds
-		const rng = RNG.analyze(level, masks);
-		if (rng.draws && rng.bestScript) {
-			ld.rng_script = rng.bestScript;   // every tool simulates with this outcome script
-			fs.writeFileSync(dataFile, JSON.stringify(ld));
-			level = E.loadLevel(dataFile);
-		} else if (level.multiTargetPortals) {
-			ld.rng_script = [];   // random portals exist but this run uses none: any new use shows up as a lower chance
-			fs.writeFileSync(dataFile, JSON.stringify(ld));
-			level = E.loadLevel(dataFile);
-		}
-		const r = replay(level, masks);
-		if (r.complete < 0 && rng.draws && rng.chance === 0) {
-			throw new Error(`the TAS goes through ${rng.uses.length || 'some'} random portal(s) but no combination of exits lets it finish this level.`);
-		}
-		if (r.complete < 0) {
-			const died = r.deaths ? `, died ${r.deaths} time(s)` : '';
-			throw new Error(`the TAS does not finish this level in the game's physics: after all ${masks.length} ticks the ball is at tile ` +
-				`(${r.end.x}, ${r.end.y}) with ${r.coins} coins${died}. Check that the .eetas belongs to this level` +
-				(odd ? ` (it also contains ${odd} characters that are not inputs)` : '') + '.');
-		}
-		const str = Array.from(masks.slice(0, r.complete), (m) => String.fromCharCode(48 + m)).join('');
-		fs.writeFileSync(path.join(dir, 'best.eetas'), str);
-		fs.writeFileSync(path.join(dir, `best_${r.runTicks}.eetas`), str);
-		const meta = {
-			id, name: String(body.name || ld.world_name || slug(body.eelvlName)).slice(0, 80), created: Date.now(),
-			level: { name: ld.world_name || '', file: body.eelvlName || 'level.eelvl', width: level.width, height: level.height, compression: norm.kind },
-			tas: { file: body.eetasName || 'input.eetas', ticks: masks.length, completeTick: r.complete, runTicks: r.runTicks, time: fmt(r.runTicks),
-				coins: r.coins, blueCoins: r.blueCoins, deaths: r.deaths, oddChars: odd },
-			rng: { chance: rng.chance, uses: rng.uses, truncated: rng.truncated },
-		};
-		fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 1));
-		return meta;
-	} catch (e) {
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* ignore */ }
-		try { fs.unlinkSync(path.join(DATA, levelId(id) + '.json')); } catch (e2) { /* ignore */ }
-		throw e;
-	}
-}
-
-// Finish run: the final report (time saved, random-portal odds in EEO), kept in report.json
-function finishReport(id) {
-	const dir = jobDir(id);
-	const meta = readJSON(path.join(dir, 'meta.json'), {});
-	const level = E.loadLevel(path.join(DATA, levelId(id) + '.json'));
-	const masks = E.parseEetas(fs.readFileSync(path.join(dir, 'best.eetas'), 'utf8'));
-	const r = replay(level, masks);
-	const rng = RNG.analyze(level, masks);
-	const rep = { finished: Date.now(), runTicks: r.runTicks, time: fmt(r.runTicks), originalRunTicks: meta.tas.runTicks, originalTime: fmt(meta.tas.runTicks),
-		savedTicks: meta.tas.runTicks - r.runTicks, coins: r.coins, deaths: r.deaths,
-		chance: rng.draws ? rng.chance : 1, originalChance: meta.rng ? meta.rng.chance : 1, uses: rng.uses, truncated: rng.truncated };
-	fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(rep, null, 1));
-	return rep;
-}
-
-function deleteJob(id) {
-	stopJob(id);
-	fs.rmSync(jobDir(id), { recursive: true, force: true });
-	try { fs.unlinkSync(path.join(DATA, levelId(id) + '.json')); } catch (e) { /* ignore */ }
-}
-
-// ---------------------------------------------------------------- http
+// ---------------------------------------------------------------- http helpers
 function send(res, code, body, type) {
 	res.writeHead(code, { 'Content-Type': type || 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
 	res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
-function readBody(req, limit) {
+function readRaw(req, limit) {
 	return new Promise((resolve, reject) => {
 		let size = 0;
 		const chunks = [];
 		req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('upload too large')); req.destroy(); } else chunks.push(c); });
-		req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { reject(new Error('bad request')); } });
+		req.on('end', () => resolve(Buffer.concat(chunks)));
 		req.on('error', reject);
 	});
 }
-const validId = (id) => /^[a-z0-9-]+$/.test(id) && fs.existsSync(path.join(jobDir(id), 'meta.json'));
+async function readJsonBody(req, limit) {
+	const b = await readRaw(req, limit);
+	try { return JSON.parse(b.toString('utf8') || '{}'); } catch (e) { throw new Error('bad request (expected JSON)'); }
+}
+const validId = (id) => /^[a-z0-9-]+$/.test(id) && fs.existsSync(path.join(J.jobDir(id), 'meta.json'));
+const listJobs = () => J.listJobs(new Map([...children].filter(([, ch]) => ch.exitCode === null).map(([id, ch]) => [id, ch.pid])));
 
+function startJob(id, workers) {
+	for (const [other, ch] of children) if (other !== id && ch.exitCode === null) stopJob(other);
+	const ch = J.startJob(id, workers);
+	if (ch) { children.set(id, ch); ch.on('exit', () => { if (children.get(id) === ch) children.delete(id); }); }
+}
+function stopJob(id) {
+	const ch = children.get(id);
+	if (ch && ch.exitCode === null) J.killTree(ch.pid);
+	children.delete(id);
+	J.stopJob(id);
+}
+function startFocus(id, b) {
+	const f = J.focusState(id);
+	const mine = focusKids.get(id);
+	if (f.running || (mine && mine.exitCode === null)) throw new Error(`a focus search is already running for this job${f.running ? ` (${f.fromTime}-${f.toTime})` : ''}`);
+	for (const k of ['from', 'to']) { if (b[k] === undefined || b[k] === '') throw new Error(`missing "${k}" (m:ss.cc or a tick)`); C.parseTime(b[k]); }
+	const seconds = Math.max(10, Math.min(3600, +b.seconds || 120));
+	const logFile = path.join(J.jobDir(id), 'focus.log');
+	const fd = fs.openSync(logFile, 'w');
+	const ch = spawn(process.execPath, [path.join(__dirname, 'tas.js'), 'focus', id, String(b.from), String(b.to), String(seconds),
+		...(b.workers ? [`--workers=${+b.workers}`] : [])], { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', fd, fd], windowsHide: true });
+	fs.closeSync(fd);
+	focusKids.set(id, ch);
+	ch.on('exit', () => { if (focusKids.get(id) === ch) focusKids.delete(id); });
+	return { ok: true, started: true, pid: ch.pid, seconds, log: logFile };
+}
+
+// ---------------------------------------------------------------- routes
 const server = http.createServer(async (req, res) => {
 	try {
 		const u = new URL(req.url, 'http://localhost');
 		const parts = u.pathname.split('/').filter(Boolean);
+		const q = (k) => u.searchParams.get(k);
 		if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) return send(res, 200, fs.readFileSync(APP), 'text/html; charset=utf-8');
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
+		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
-			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, godot: !!GODOT, now: Date.now() });
+			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, now: Date.now(), benchState,
+				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points } : null });
 		}
+		if (req.method === 'GET' && parts[1] === 'system' && parts.length === 2) return send(res, 200, systemInfo());
 		if (req.method === 'POST' && parts[1] === 'jobs' && parts.length === 2) {
-			const body = await readBody(req, 64 << 20);
-			const meta = await importJob(body);
+			const b = await readJsonBody(req, 96 << 20);
+			const eetas = b.eetasB64 !== undefined ? Buffer.from(String(b.eetasB64), 'base64') : Buffer.from(String(b.eetasText || ''), 'latin1');
+			const meta = J.importJob({ eelvl: Buffer.from(String(b.eelvlB64 || ''), 'base64'), eetas, name: b.name, eelvlName: b.eelvlName, eetasName: b.eetasName,
+				startMode: b.startMode });
 			return send(res, 200, { ok: true, job: meta });
 		}
 		if (parts[1] === 'jobs' && parts[2]) {
 			const id = parts[2];
 			if (!validId(id)) return send(res, 404, { error: 'unknown job' });
-			const dir = jobDir(id);
-			if (req.method === 'POST' && parts[3] === 'start') { const b = await readBody(req, 1 << 16); startJob(id, b.workers); return send(res, 200, { ok: true }); }
-			if (req.method === 'POST' && parts[3] === 'stop') { stopJob(id); return send(res, 200, { ok: true }); }
-			if (req.method === 'POST' && parts[3] === 'finish') { stopJob(id); return send(res, 200, { ok: true, report: finishReport(id) }); }
-			if (req.method === 'DELETE' && parts.length === 3) { deleteJob(id); return send(res, 200, { ok: true }); }
-			if (req.method === 'GET' && (parts[3] === 'best.eetas' || parts[3] === 'original.eetas')) {
-				const meta = readJSON(path.join(dir, 'meta.json'), {});
-				const file = path.join(dir, parts[3]);
-				let t = meta.tas && meta.tas.runTicks;
-				if (parts[3] === 'best.eetas') t = (readJSON(path.join(dir, 'status.json'), {}).bestRunTicks) || t;
-				const nice = `${(meta.name || id).replace(/[^\w .()-]/g, '')} ${parts[3] === 'best.eetas' ? 'optimized' : 'original'} ${fmt(t).replace(':', 'm')}.eetas`;
-				res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${nice}"`, 'Cache-Control': 'no-store' });
-				return res.end(fs.readFileSync(file));
+			const dir = J.jobDir(id);
+			const what = parts[3] || '';
+			if (req.method === 'GET' && !what) return send(res, 200, J.summary(id, children.get(id) && children.get(id).pid));
+			if (req.method === 'POST' && what === 'start') {
+				const b = await readJsonBody(req, 1 << 16);
+				const proc = String(b.processor || 'cpu').toLowerCase();
+				if (proc === 'gpu') throw new Error(`GPU mode is not available: ${GPU_WHY}`);
+				if (proc !== 'cpu') throw new Error(`unknown processor "${b.processor}" (cpu)`);
+				startJob(id, b.workers);
+				return send(res, 200, { ok: true, processor: 'cpu' });
 			}
-			if (req.method === 'GET' && parts[3] === 'log') {
+			if (req.method === 'GET' && what === 'trajectory') return send(res, 200, trajectoryJson(id, q('which') || 'best'));
+			if (req.method === 'GET' && what === 'level') return send(res, 200, levelJson(id));
+			if (req.method === 'POST' && what === 'stop') { stopJob(id); return send(res, 200, { ok: true }); }
+			if (req.method === 'POST' && what === 'finish') { stopJob(id); return send(res, 200, { ok: true, report: J.finishReport(id) }); }
+			if (req.method === 'DELETE' && !what) {
+				stopJob(id);
+				const fk = focusKids.get(id);
+				if (fk && fk.exitCode === null) J.killTree(fk.pid);
+				J.deleteJob(id);
+				return send(res, 200, { ok: true });
+			}
+			if (req.method === 'GET' && (what === 'best.eetas' || what === 'original.eetas')) {
+				const meta = C.readJSON(path.join(dir, 'meta.json'), {});
+				let t = meta.tas && meta.tas.runTicks;
+				if (what === 'best.eetas') t = (C.readJSON(path.join(dir, 'status.json'), {}).bestRunTicks) || t;
+				const nice = `${(meta.name || id).replace(/[^\w .()-]/g, '')} ${what === 'best.eetas' ? 'optimized' : 'original'} ${C.fmt(t).replace(':', 'm')}.eetas`;
+				res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${nice}"`, 'Cache-Control': 'no-store' });
+				return res.end(fs.readFileSync(path.join(dir, what)));
+			}
+			if (req.method === 'GET' && what === 'log') return send(res, 200, { lines: J.logTail(id, 300) });
+			if (req.method === 'GET' && what === 'where') {
+				const w = J.where(J.loadJobLevel(id), C.readEetas(path.join(dir, 'best.eetas')), q('t') || q('time') || q('tick') || '0');
+				if (q('format') === 'text') return send(res, 200, J.formatWhere(w), 'text/plain; charset=utf-8');
+				return send(res, 200, w);
+			}
+			if (req.method === 'GET' && what === 'render.png') {
+				const r = J.renderJob(J.loadJobLevel(id), C.readJSON(J.levelJsonOf(id), null), C.readEetas(path.join(dir, 'best.eetas')), q('from') || undefined,
+					q('to') || undefined, { name: C.readJSON(path.join(dir, 'meta.json'), {}).name, scale: +q('scale') || undefined,
+						margin: q('margin') !== null ? +q('margin') : undefined });
+				return send(res, 200, r.png, 'image/png');
+			}
+			if (req.method === 'GET' && what === 'replay') {
+				const r = J.replayInfo(J.loadJobLevel(id), C.readEetas(path.join(dir, 'best.eetas')));
+				if (q('format') === 'text') return send(res, 200, J.formatReplay(r, id), 'text/plain; charset=utf-8');
+				return send(res, 200, r);
+			}
+			if (req.method === 'POST' && what === 'try') {
+				const raw = await readRaw(req, 16 << 20);
+				let buf = raw, source = q('source') || 'api';
+				if (/json/.test(req.headers['content-type'] || '') || raw[0] === 0x7B) {
+					let b;
+					try { b = JSON.parse(raw.toString('utf8')); } catch (e) { throw new Error('bad JSON (send the raw .eetas bytes, or JSON {eetasB64, source})'); }
+					if (!b.eetasB64) throw new Error('missing eetasB64');
+					buf = Buffer.from(String(b.eetasB64), 'base64');
+					source = b.source || source;
+				}
+				const r = await J.tryCandidate(id, buf, { source, wait: Math.min(120, +q('wait') || 0) });
+				return send(res, 200, r);
+			}
+			if (req.method === 'POST' && what === 'probe') {
+				const b = await readJsonBody(req, 1 << 20);
+				const st = C.readJSON(path.join(dir, 'status.json'), {});
+				const p = J.probe(J.loadJobLevel(id), C.readEetas(path.join(dir, 'best.eetas')), String(b.at === undefined ? '' : b.at), J.parseInputs(b.inputs || ''),
+					{ nocoins: !!st.coinsOptional, horizon: +b.horizon || undefined, shift: +b.shift || undefined });
+				if (p.candidate) {
+					p.file = path.join(dir, 'probes', `${J.stamp()}.eetas`);
+					C.writeEetas(p.file, p.candidate.masks);
+					if (b.try && p.candidate.saved > 0) p.try = await J.tryCandidate(id, fs.readFileSync(p.file), { source: b.source || `probe ${p.atTime}`, wait: Math.min(60, +b.wait || 20) });
+					delete p.candidate.masks;
+				}
+				return send(res, 200, p);
+			}
+			if (req.method === 'POST' && what === 'focus') return send(res, 200, startFocus(id, await readJsonBody(req, 1 << 16)));
+			if (req.method === 'GET' && what === 'focus') {
 				let lines = [];
-				try { lines = fs.readFileSync(path.join(dir, 'grind.log'), 'utf8').split(/\r?\n/).filter(Boolean).slice(-300); } catch (e) { /* none */ }
-				return send(res, 200, { lines });
+				try { lines = fs.readFileSync(path.join(dir, 'focus.log'), 'utf8').split(/\r?\n/).filter(Boolean).slice(-40); } catch (e) { /* none */ }
+				return send(res, 200, { ...J.focusState(id), logTail: lines });
 			}
 		}
-		return send(res, 404, { error: 'not found' });
+		return send(res, 404, { error: 'not found (GET /api lists the endpoints)' });
 	} catch (e) {
 		return send(res, 400, { error: e.message || String(e) });
 	}
@@ -301,14 +277,29 @@ server.on('error', (e) => {
 });
 server.listen(PORT, '127.0.0.1', () => {
 	const url = `http://localhost:${PORT}/`;
-	console.log(`[app] TAS Optimizer running at ${url}`);
-	console.log(`[app] Godot: ${GODOT || 'NOT FOUND (set GODOT_BIN)'}; ${os.cpus().length} CPU threads`);
+	console.log(`[app] EE Auto TAS running at ${url} (${os.cpus().length} CPU threads)`);
 	console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
-	// resume the job that was optimizing when the app last closed
-	const r = readJSON(RUNNING_FILE, null);
-	if (r && r.id && validId(r.id) && !jobRunningPid(r.id)) { console.log(`[app] resuming ${r.id}`); startJob(r.id, r.workers); }
 	if (args.open) openBrowser(url);
+	// resume the job that was optimizing when the app last closed (after the one-time processor benchmark, which
+	// needs an idle CPU: a few seconds, then cached in src/data/_system.json)
+	const resume = () => {
+		const r = C.readJSON(J.RUNNING_FILE, null);
+		if (r && r.id && validId(r.id) && !J.runningPid(r.id)) { console.log(`[app] resuming ${r.id}`); startJob(r.id, r.workers); }
+	};
+	if (bench) { resume(); return; }
+	benchState = 'measuring';
+	console.log('[app] measuring the engine speed on this CPU (once, a few seconds)...');
+	const busy = C.jobIds().some((id) => J.runningPid(id));   // a grind started from the CLI already uses the CPU
+	BENCH.run({ busy }).then((rec) => {
+		bench = rec; benchState = 'done';
+		console.log(`[app] CPU: ${(rec.single / 1e6).toFixed(1)} M ticks/s on 1 thread, ${(rec.all / 1e6).toFixed(1)} M on all ${rec.threads}` +
+			`${rec.allMeasured ? '' : ' (estimated)'}; fastest with ${rec.peakThreads} threads`);
+	}).catch((e) => { benchState = 'error'; console.log(`[app] benchmark failed: ${e.message}`); }).finally(resume);
 });
-function shutdown() { for (const [, ch] of children) { try { spawnSync('taskkill', ['/PID', String(ch.pid), '/T', '/F'], { stdio: 'ignore' }); } catch (e) { /* gone */ } } process.exit(0); }
+function shutdown() {
+	for (const [, ch] of children) if (ch.exitCode === null) J.killTree(ch.pid);
+	for (const [, ch] of focusKids) if (ch.exitCode === null) J.killTree(ch.pid);
+	process.exit(0);
+}
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

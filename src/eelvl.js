@@ -316,8 +316,10 @@ const DRAG_HEX = {
  * exactly: a Dictionary index -> args of layer-0 positions whose record has args (ee_level.gd: layer != 1; the same
  * for every file EEO can load), keyed in first-insertion order, value replaced wholesale on a later write;
  * exported as [index, rotation|null, id|null, target|null].
- * Extra fields (ignored by prepareLevel) carry what EEO's loader knows beyond that: spawn_points (AS3 order),
- * world_portals, lookup_int, portals (AS3 lookups).
+ * spawn_points: World.spawnPoints in AS3 load order (prepareLevel takes spawn id 0: every 255 and 1582 #0).
+ * lookup_int: the AS3 Lookup int table (position keyed, both layers, last write wins); prepareLevel builds the
+ * sim's lookup from it (from `extras` only for older JSON without it).
+ * Extra fields ignored by prepareLevel: world_portals, portals (AS3 lookups).
  */
 function toSimLevel(p, opts = {}) {
   const W = p.width, H = p.height;
@@ -338,8 +340,11 @@ function toSimLevel(p, opts = {}) {
   }
   const extras = [];
   for (const [i, ex] of extra) extras.push([i, ex[0], ex[1], ex[2]]);
+  // dense by spawn id up to the highest one, capped: the sim uses id 0 only (worldSpawn is 0 for an opened file), and
+  // a crafted 1582 number such as 1e9 must not build a billion-entry array
   const spawn = [];
-  for (let s = 0; s < p.spawnPoints.length; s++) spawn.push(p.spawnPoints[s] ? p.spawnPoints[s] : []);
+  const nSpawnIds = Math.min(p.spawnPoints.length, 1024);
+  for (let s = 0; s < nSpawnIds; s++) spawn.push(p.spawnPoints[s] ? p.spawnPoints[s] : []);
   return {
     format: 'eesim-level-1',
     level_id: opts.id || '',
@@ -353,10 +358,11 @@ function toSimLevel(p, opts = {}) {
     bg_b64: int32ToB64(p.bg),
     extras,
     drag_hex: DRAG_HEX,
-    // --- not read by eesim.prepareLevel (yet): EEO loader facts it currently ignores
-    spawn_points: spawn,                                                        // World.spawnPoints[id] (load order)
+    // World.spawnPoints[id] in load order (255 -> id 0, 1582 -> its number); eesim.prepareLevel uses [0]
+    spawn_points: spawn,
+    // --- EEO loader facts beyond ee_level.gd's extras (prepareLevel reads lookup_int; the others are ignored)
     world_portals: [...p.lookup.worldPortals].map(([i, w]) => [i, w.target, w.spawnId]),
-    lookup_int: [...p.lookup.int],                                              // [index, int] incl. layer 1 writes
+    lookup_int: [...p.lookup.int],                                              // [index, int] incl. layer 1 writes (Lookup.getInt)
     portals: [...p.lookup.portals].map(([i, q]) => [i, q.rotation, q.id, q.target, q.type]),
     header: { owner: p.owner, description: p.description, bgColor: p.bgColor, campaign: p.campaign, crewId: p.crewId,
       crewName: p.crewName, crewStatus: p.crewStatus, minimap: p.minimap, ownerId: p.ownerId,
@@ -364,13 +370,17 @@ function toSimLevel(p, opts = {}) {
   };
 }
 
-/** Reads a level file and returns eesim's prepared level object (what eesim.loadLevel returns for a JSON). */
+/**
+ * Reads a level file and returns eesim's prepared level object (what eesim.loadLevel returns for a JSON).
+ * opts: readEelvl's (lenient, ...), id, and eesim.prepareLevel's per-run defaults (start, idleTicks, startSpawn,
+ * goldBorder, ticksPerFrame).
+ */
 function loadEelvlLevel(file, opts = {}) {
   const E = require('./eesim.js');
   const p = readEelvl(fs.readFileSync(file), opts);
   const path = require('path');
   const d = toSimLevel(p, { id: opts.id || path.basename(file).replace(/\.eelvl$/i, ''), file });
-  return E.prepareLevel(d);
+  return E.prepareLevel(d, opts);
 }
 
 module.exports = {

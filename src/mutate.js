@@ -9,27 +9,29 @@
 // --drift px from where the reference is at the same shifted time. All shortcuts are combined by DP over the
 // reference ticks, verified by a clean replay and written.
 //
-// usage: node tools/tas/mutate.js [--tas=tools/tas/out/best.eetas] [--out=...] [--horizon=600] [--drift=96]
-//        [--workers=16] [--from=0] [--to=<end>] [--level=forgotten_veil] [--deadline=<epoch ms>]
+// usage: node src/mutate.js --tas=<run.eetas> [--out=...] [--horizon=600] [--drift=96] [--workers=16] [--from=0]
+//        [--to=<end>] [--nocoins=0|1] [--deadline=<epoch ms>] [--level=<level id | job id>]
+// (--level can be left out for a .eetas inside src/jobs/<id>/)
 
 const path = require('path');
-const fs = require('fs');
 const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
-const E = require('./eesim.js');
+const C = require('./common.js');
+const E = C.E;
 
 let NOCOINS = false;   // --nocoins=1: rejoins ignore which coins were collected (coins are optional)
 const OPTIONS = [];
 for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPTIONS.push(h | v | j);
 
 function parseArgs() {
-	const a = { level: 'forgotten_veil', tas: path.join(__dirname, 'out', 'best.eetas'), out: path.join(__dirname, 'out', 'mutate_best.eetas'),
+	const a = { level: '', tas: '', out: path.join(__dirname, 'out', 'mutate_best.eetas'),
 		horizon: 600, drift: 96, workers: os.cpus().length, from: 0, to: 0, deadline: 0, pairs: 1, nocoins: 0 };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (m) a[m[1]] = (m[1] === 'tas' || m[1] === 'out' || m[1] === 'level') ? m[2] : parseFloat(m[2]);
 	}
-	a.levelData = path.join(__dirname, 'data', a.level + '.json');
+	if (!a.tas) { console.log('usage: node src/mutate.js --tas=<run.eetas> [--level=<id>] [--out=] (see the header)'); process.exit(2); }
+	a.levelData = C.levelData(a.level, a.tas);
 	return a;
 }
 
@@ -96,7 +98,7 @@ function workerMain() {
 	const { a, ticks } = workerData;
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
-	const masks = E.parseEetas(fs.readFileSync(a.tas, 'utf8'));
+	const masks = C.readEetas(a.tas);
 	const R = reference(level, masks, true);
 	const sim = new E.EESim(level);
 	const inp = new E.EEInput();
@@ -142,7 +144,7 @@ async function main() {
 	const a = parseArgs();
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
-	const masks = E.parseEetas(fs.readFileSync(a.tas, 'utf8'));
+	const masks = C.readEetas(a.tas);
 	const R = reference(level, masks, false);
 	const to = Math.min(a.to || R.complete, R.complete);
 	console.log(`[mut] ${a.tas}: completes at ${R.complete}, run_ticks ${R.runTicks}; ticks ${a.from}..${to}, horizon ${a.horizon}, ` +
@@ -185,7 +187,7 @@ async function main() {
 	console.log(`[mut] DP: ${n} -> ${cost[n]} ticks; result completes at ${V.complete}, run_ticks ${V.runTicks} (was ${R.runTicks})`);
 	console.log(`[mut] used: ${used.reverse().join(', ')}`);
 	if (V.complete >= 0 && V.runTicks < R.runTicks) {
-		fs.writeFileSync(a.out, seq.map((m) => String.fromCharCode(48 + m)).join(''));
+		C.writeEetas(a.out, seq);
 		console.log(`[mut] written ${a.out}`);
 	}
 }

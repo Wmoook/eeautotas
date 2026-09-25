@@ -8,15 +8,16 @@
 // replay exactly. All shortcuts are then combined by dynamic programming over the reference ticks (shortest path)
 // and the result is verified by a clean replay. Workers search different start ticks independently.
 //
-// usage: node tools/tas/shortcuts.js [--tas=tools/tas/out/best.eetas] [--out=...] [--step=10] [--depth=80]
-//        [--cap=3000] [--workers=16] [--from=0] [--to=<ticks>] [--level=forgotten_veil]
+// usage: node src/shortcuts.js --tas=<run.eetas> [--out=...] [--step=10] [--depth=80] [--cap=3000] [--workers=16]
+//        [--from=0] [--to=<ticks>] [--nocoins=0|1] [--deadline=<epoch ms>] [--level=<level id | job id>]
+// (--level can be left out for a .eetas inside src/jobs/<id>/)
 
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
-const E = require('./eesim.js');
-const ROOT = path.resolve(__dirname, '..', '..');
+const C = require('./common.js');
+const E = C.E;
 
 const OPTIONS = [];
 for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPTIONS.push(h | v | j);
@@ -25,15 +26,16 @@ const OI = (h, v, j) => h * 6 + v * 2 + j;
 const WIN_BACK = 24, WIN_AHEAD = 90, VEL_W = 3.0, MAX_D = 40.0, BUCKET_CAP = 2;
 
 function parseArgs() {
-	const a = { level: 'forgotten_veil', tas: path.join(__dirname, 'out', 'best.eetas'), out: null, step: 10, depth: 80, cap: 3000,
+	const a = { level: '', tas: '', out: null, step: 10, depth: 80, cap: 3000,
 		workers: os.cpus().length, from: 0, to: 0, dist: 24, verbose: 0, bucket: 1, bcap: 8, nocoins: 0 };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) continue;
 		a[m[1]] = (m[1] === 'tas' || m[1] === 'level' || m[1] === 'out') ? m[2] : parseFloat(m[2]);
 	}
+	if (!a.tas) { console.log('usage: node src/shortcuts.js --tas=<run.eetas> [--level=<id>] [--from=] [--to=] (see the header)'); process.exit(2); }
 	if (!a.out) a.out = path.join(__dirname, 'out', 'shortcuts_best.eetas');
-	a.levelData = path.join(__dirname, 'data', a.level + '.json');
+	a.levelData = C.levelData(a.level, a.tas);
 	return a;
 }
 
@@ -89,7 +91,7 @@ function workerMain() {
 	const { a, starts } = workerData;
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
-	const masks = E.parseEetas(fs.readFileSync(a.tas, 'utf8'));
+	const masks = C.readEetas(a.tas);
 	const startSet = new Set(starts);
 	const R = reference(level, masks, (j) => startSet.has(j));
 	const sim = new E.EESim(level);
@@ -209,7 +211,7 @@ async function main() {
 	const a = parseArgs();
 	NOCOINS = !!a.nocoins;
 	const level = E.loadLevel(a.levelData);
-	const masks = E.parseEetas(fs.readFileSync(a.tas, 'utf8'));
+	const masks = C.readEetas(a.tas);
 	const R = reference(level, masks, null);
 	const to = a.to || R.complete;
 	console.log(`[sc] reference ${a.tas}: completes at ${R.complete}, run_ticks ${R.runTicks}; starts ${a.from}..${to} every ${a.step}, ` +
@@ -265,7 +267,7 @@ async function main() {
 	for (let j = n; j > 0;) { const v = via[j]; if (v.seq) used.push(`${v.i}->${j} (-${j - v.i - v.seq.length})`); j = v.i; }
 	console.log(`[sc] shortcuts used: ${used.reverse().join(', ')}`);
 	if (V.complete >= 0 && V.runTicks < R.runTicks) {
-		fs.writeFileSync(a.out, seq.map((m) => String.fromCharCode(48 + m)).join(''));
+		C.writeEetas(a.out, seq);
 		console.log(`[sc] written ${a.out}`);
 	}
 }
