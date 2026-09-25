@@ -16,6 +16,7 @@
 #include "eecore.h"
 #include "search.h"
 #include "beam.h"
+#include "explore.h"
 
 using namespace ee;
 
@@ -217,11 +218,11 @@ static int cmdPtx(int argc, char** argv) {
 	if (argc < 4) { fprintf(stderr, "usage: eegpu ptx <native dir> <out.ptx> --nvrtc=<dir with nvrtc64_120_0.dll> [--arch=compute_60]\n"); return 2; }
 	std::string dir = argv[2];
 	if (!cu::loadNvrtc(opt(argc, argv, "nvrtc", "."))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
-	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h"), h3 = readText(dir + "/beam.h");
-	const char* hdrs[] = { h1.c_str(), h2.c_str(), h3.c_str() };
-	const char* names[] = { "eecore.h", "search.h", "beam.h" };
+	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h"), h3 = readText(dir + "/beam.h"), h4 = readText(dir + "/explore.h");
+	const char* hdrs[] = { h1.c_str(), h2.c_str(), h3.c_str(), h4.c_str() };
+	const char* names[] = { "eecore.h", "search.h", "beam.h", "explore.h" };
 	cu::nvrtcProgram prog;
-	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 3, hdrs, names);
+	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 4, hdrs, names);
 	std::string arch = "--gpu-architecture=" + opt(argc, argv, "arch", "compute_60");
 	std::string tw = "-DEE_ONLY_TW=" + opt(argc, argv, "tw", "8");
 	const char* opts[] = { arch.c_str(), "--fmad=false", "--std=c++17", tw.c_str() };
@@ -695,6 +696,7 @@ static int cmdBench(int argc, char** argv) {
 }
 
 #include "beamhost.h"
+#include "explorehost.h"
 
 static int cmdSearch(int argc, char** argv) {
 	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T]\n"); return 2; }
@@ -721,6 +723,7 @@ int main(int argc, char** argv) {
 	if (cmd == "search") return cmdSearch(argc, argv);
 	if (cmd == "bench") return cmdBench(argc, argv);
 	if (cmd == "beam") return cmdBeam(argc, argv);
+	if (cmd == "explore") return cmdExplore(argc, argv);
 	fprintf(stderr, "unknown command %s\n", argv[1]);
 	return 2;
 }

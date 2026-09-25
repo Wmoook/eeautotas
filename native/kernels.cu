@@ -7,6 +7,7 @@
 #include "eecore.h"
 #include "search.h"
 #include "beam.h"
+#include "explore.h"
 
 using namespace ee;
 
@@ -196,11 +197,74 @@ __device__ void beamMaterializeBody(const BeamParams& p) {
 	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
 }
 
+// ---------------------------------------------------------------- exhaustive exploration (explore.h)
+__device__ __forceinline__ bool cellInsert(u64* cells, u32 mask, u64 key) {
+	u32 slot = (u32)(splitmix(key) & mask);
+	for (u32 probe = 0; probe < 64; probe++) {
+		const u64 prev = atomicCAS((unsigned long long*)&cells[slot], 0ull, (unsigned long long)key);
+		if (prev == 0ull) return true;      // new cell
+		if (prev == key) return false;      // seen
+		slot = (slot + 1) & mask;
+	}
+	return false;   // (the table is full here: treat as seen)
+}
+template <int TW>
+__device__ void exploreExpandBody(const ExploreParams& p) {
+	const i32 pi = blockIdx.x * blockDim.x + threadIdx.x;
+	if (pi >= p.nParents) return;
+	const State<TW>* par = (const State<TW>*)(p.parents + (size_t)pi * p.stateBytes);
+	for (i32 o = 0; o < 18; o++) {
+		State<TW> s = *par;
+		Sim<TW> sim(p.L, s);
+		const double startPy = s.py;
+		Input in = maskInput(option(o));
+		sim.tick(in);
+		if (s.broken || s.is_dead) continue;
+		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
+		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
+		// the target: the NEXT tick can land on the floor from above its row; try it with the jump
+		if (s.py < p.aboveMax && s.py + 16.0 > p.floorPy && gt0(s.speed_y)) {
+			for (i32 jo = 0; jo < 3; jo++) {
+				State<TW> t = s;
+				Sim<TW> ts(p.L, t);
+				Input ji = maskInput(jo == 0 ? 1 : jo == 1 ? 3 : 5);
+				ts.tick(ji);
+				if (!t.is_dead && lt0(t.speed_y) && t.py <= p.floorPy && t.py > p.floorPy - 8.0) {
+					const i32 lx = truncI(t.px + 8.0) >> 4;
+					if (lx >= p.tx0 && lx <= p.tx1) {
+						const u32 h = atomicAdd(p.nHits, 1u);
+						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = (u8)(jo == 0 ? 1 : jo == 1 ? 3 : 5); e.pad0 = e.pad1 = 0; e.px = (float)t.px; e.vx = (float)t.speed_x; e.layer = p.layer; p.hits[h] = e; }
+					}
+				}
+			}
+		}
+		(void)startPy;
+		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26);
+		const u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow);
+		if (!cellInsert(p.cells, p.cellMask, key)) continue;
+		const u32 slot = atomicAdd(p.nOut, 1u);
+		if (slot < p.outCap) p.out[slot] = ((u32)pi << 5) | (u32)o;
+	}
+}
+template <int TW>
+__device__ void exploreMaterializeBody(const ExploreParams& p) {
+	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= p.nPick) return;
+	const u32 pk = p.pick[i];
+	State<TW> s = *(const State<TW>*)(p.parents + (size_t)(pk >> 5) * p.stateBytes);
+	Sim<TW> sim(p.L, s);
+	Input in = maskInput(option((i32)(pk & 31)));
+	sim.tick(in);
+	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
+}
+
 #define INSTANCE(TW) INSTANCE_(TW)
 #define INSTANCE_(TW) \
 	extern "C" __global__ void __launch_bounds__(128) search_##TW(SearchParams p) { searchBody<TW>(p); } \
 	extern "C" __global__ void trace_##TW(Level L, const u8* masks, i32 n, u64* out, const u32* coinBits0, u64 seed, i32* info) { traceBody<TW>(L, masks, n, out, coinBits0, seed, info); } \
-	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 ticks, u64 seed, unsigned long long* out) { benchBody<TW>(L, state0, ticks, seed, out); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); }
+	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 ticks, u64 seed, unsigned long long* out) { benchBody<TW>(L, state0, ticks, seed, out); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
+	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
+	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)
 #ifndef EE_ONLY_TW
 #define EE_ONLY_TW 8
