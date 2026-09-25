@@ -18,6 +18,7 @@ const J = require('./jobs.js');
 const V = require('./viewer.js');
 const G = require('./gpu.js');
 const BENCH = require('./bench.js');
+const GFX = require('./eegfx.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
 const args = C.parseArgs(process.argv.slice(2));
@@ -116,7 +117,10 @@ const ENDPOINTS = [
 	['GET', '/api/jobs/:id/focus', 'the last focus search: state, results, log tail'],
 	['GET', '/api/jobs/:id/trajectory?which=best', 'per-tick positions (1/16 px, base64 Int32), run timer, inputs, flags, events and door states of the best run ' +
 		'(which=original: the uploaded TAS); best also has align (original tick at the same point, per best tick)'],
-	['GET', '/api/jobs/:id/level', 'the level for the viewer: width, height, fg/bg ids (base64 Uint16), EE minimap color and block kind per id, door numbers, portals, spawns'],
+	['GET', '/api/jobs/:id/level', 'the level for the viewer: width, height, fg/bg ids (base64 Uint16), EE minimap color and block kind per id, door numbers, lookup numbers, portals, spawns'],
+	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
+	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
+	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
 ];
 
 // ---------------------------------------------------------------- http helpers
@@ -224,6 +228,18 @@ const server = http.createServer(async (req, res) => {
 				gpu: systemInfo().processors[1], faster: systemInfo().faster });
 		}
 		if (req.method === 'GET' && parts[1] === 'system' && parts.length === 2) return send(res, 200, systemInfo());
+		// EE graphics (the viewer): the sprite map built from the user's eeo-tas folder, and its sheet images
+		if (parts[1] === 'eegfx') {
+			if (req.method === 'GET' && parts.length === 2) return send(res, 200, GFX.info());
+			if (req.method === 'POST' && parts.length === 2) { const b = await readJsonBody(req, 1 << 14); return send(res, 200, GFX.setDir(b.dir)); }
+			if (req.method === 'GET' && parts[2] === 'sheet' && parts.length === 4) {
+				const m = /^([\w.-]+)\.png$/.exec(parts[3]);
+				const f = m && GFX.sheetFile(m[1]);
+				if (!f) return send(res, 404, { error: 'unknown sheet' });
+				res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=86400' });
+				return res.end(fs.readFileSync(f));
+			}
+		}
 		if (req.method === 'POST' && parts[1] === 'jobs' && parts.length === 2) {
 			const b = await readJsonBody(req, 96 << 20);
 			const eetas = b.eetasB64 !== undefined ? Buffer.from(String(b.eetasB64), 'base64') : Buffer.from(String(b.eetasText || ''), 'latin1');

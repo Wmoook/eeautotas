@@ -170,6 +170,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .vdiff { font: 600 13px var(--mono); background: rgba(10, 12, 16, .72); border-radius: 9px; padding: 4px 10px; width: max-content; max-width: calc(100vw - 60px);
 	white-space: normal; }
 .vdiff.ahead { color: #62e39a; } .vdiff.behind { color: #ff9b8a; } .vdiff.even { color: #c9ced8; }
+.vdiff:empty { display: none; }
 .vkeys { position: absolute; right: 10px; top: 10px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px; pointer-events: none; }
 .vkeys span { height: 24px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .14); background: rgba(10, 12, 16, .7); color: #7f8898;
 	font: 700 11px/22px var(--mono); text-align: center; }
@@ -192,6 +193,23 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .vbar input[type=text] { width: 118px; font-family: var(--mono); }
 .vplay { min-width: 44px; font-size: 15px !important; }
 .vck { font-size: 12.5px; color: #b8bfcc; display: inline-flex; align-items: center; gap: 5px; }
+.vstep { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.vstep button { padding: 5px 9px; font: 600 12.5px var(--mono); white-space: nowrap; touch-action: manipulation; user-select: none; }
+.vtk { font: 600 12.5px var(--mono); color: #ffd23f; background: #1b1e25; border: 1px solid #2f3440; border-radius: 9px; padding: 5px 9px; white-space: nowrap; }
+.vgear { padding: 5px 8px !important; }
+.vgfxp { position: absolute; right: 10px; bottom: 52px; width: min(430px, calc(100% - 20px)); background: rgba(14, 16, 21, .96); border: 1px solid #2f3440;
+	border-radius: 11px; padding: 11px 12px; font-size: 12.5px; color: #c9ced8; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+.vgfxp code { font: 12px var(--mono); color: #fff; word-break: break-all; }
+.vgfxp #vGfxNow { padding-right: 18px; }
+.vgfxp .row { margin-top: 8px; flex-wrap: nowrap; }
+.vgfxp input[type=text] { flex: 1; min-width: 0; background: #1b1e25; color: #e9ecf2; border-color: #2f3440; font: 12.5px var(--mono); padding: 6px 8px; }
+.vgfxp .hint { color: #8d95a5; margin-top: 8px; }
+.vgfxp .vx { position: absolute; right: 6px; top: 6px; padding: 1px 8px; background: transparent; border-color: transparent; }
+.vgfxp a { color: #9cc0ff; cursor: pointer; }
+.vgfxp .err { color: #ff9b8a; margin-top: 6px; }
+.vgfxhint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(58, 47, 16, .92) !important; color: #ffd76a !important;
+	border-color: #7a6220 !important; font-size: 12px !important; padding: 4px 10px !important; max-width: calc(100% - 200px); white-space: nowrap; overflow: hidden;
+	text-overflow: ellipsis; }
 @media (max-width: 640px) {
 	.viewer { padding: 0; }
 	.vwin { border-radius: 0; max-height: none; border: 0; }
@@ -204,6 +222,8 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 	.vbar input[type=text] { width: 96px; }
 	.vtick { display: none; }
 	.vlegend { display: none; }
+	.vstep button { padding: 5px 7px; font-size: 11.5px; }
+	.vgfxhint { max-width: calc(100% - 120px); }
 }
 </style>
 </head>
@@ -264,27 +284,56 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 			</div>
 			<div class="vkeys" id="vKeys"><span data-b="1">J</span><span data-b="8">U</span><span data-b="0" style="visibility:hidden"></span><span data-b="2">L</span><span data-b="16">D</span><span data-b="4">R</span></div>
 			<div class="vside">
+				<button id="vFit" title="Zoom out to the whole level (0)">Fit level</button>
 				<button id="vFollow" class="on" title="Camera follows the ball (F)">Follow</button>
 				<button id="vZoomOut" title="Zoom out (-)">&minus;</button>
 				<button id="vZoomIn" title="Zoom in (+)">+</button>
 			</div>
-			<details class="vlegend" id="vLegend"><summary>Legend &amp; keys</summary><ul>
-				<li><b style="color:#ffd23f">Yellow ball</b>: the current best run · <b style="color:#b9d6ff">pale ball</b>: your original .eetas (ghost), same in-game time</li>
-				<li>Blocks in EE's own minimap colors (background dimmed) · triangles: arrows (gravity) · small dots: dots · orange chevrons: boosts</li>
-				<li>Purple rings: portals (white dot: random exit) · coins disappear when the best run takes them · doors: filled = closed, outline = open
-					(number = coins / deaths needed) · red diamonds: spikes · green checker: the finish</li>
-				<li><kbd>Space</kbd> play/pause · <kbd>&larr;</kbd><kbd>&rarr;</kbd> 1 s (<kbd>Shift</kbd>: 1 tick) · <kbd>+</kbd><kbd>-</kbd> zoom · <kbd>F</kbd> follow ·
-					<kbd>G</kbd> ghost · <kbd>Esc</kbd> close · drag to look around, wheel/pinch to zoom</li></ul></details>
+			<button class="vgfxhint" id="vGfxHint" hidden title="EE graphics come from your eeo-tas folder">Simple graphics: EE graphics not found · set the folder</button>
+			<div class="vgfxp" id="vGfxPanel" hidden>
+				<button class="vx" id="vGfxClose" title="Close">&times;</button>
+				<div id="vGfxNow">EE graphics: loading…</div>
+				<div class="row" id="vGfxForm" hidden><input type="text" id="vGfxDir" placeholder="C:\Users\you\eeo-tas" spellcheck="false" aria-label="eeo-tas folder">
+					<button id="vGfxUse">Use</button><button id="vGfxAuto" title="Find it by itself again: EEO_TAS, else the eeo-tas folder in your user folder">Auto</button></div>
+				<div class="err" id="vGfxMsg"></div>
+				<div class="hint">The block images belong to Everybody Edits. The app reads them from your eeo-tas folder (media/*.png and
+					src/items/ItemManager.as) while you watch; they are never copied into the app.</div>
+			</div>
+			<details class="vlegend" id="vLegend"><summary>Legend &amp; keys</summary>
+				<ul id="vLegE">
+					<li>The level in Everybody Edits' own graphics (from your eeo-tas folder, <b>⚙</b> below) · doors, gates, switches and the numbers on coin and
+						death doors follow the run · a coin disappears when the best run takes it (a faint coin marks where it was)</li>
+					<li><b style="color:#ffd23f">Smiley</b>: the current best run · <b style="color:#b9d6ff">pale smiley</b>: your original .eetas (ghost), same in-game
+						time · yellow trail: the last 0.8 s · thin line: the whole route</li>
+				</ul>
+				<ul id="vLegS" hidden>
+					<li><b style="color:#ffd23f">Yellow ball</b>: the current best run · <b style="color:#b9d6ff">pale ball</b>: your original .eetas (ghost), same in-game time</li>
+					<li>Blocks in EE's own minimap colors (background dimmed) · triangles: arrows (gravity) · small dots: dots · orange chevrons: boosts</li>
+					<li>Purple rings: portals (white dot: random exit) · coins disappear when the best run takes them · doors: filled = closed, outline = open
+						(number = coins / deaths needed) · red diamonds: spikes · green checker: the finish</li>
+				</ul>
+				<ul><li><kbd>Space</kbd> play/pause · <kbd>&larr;</kbd><kbd>&rarr;</kbd> 1 s (<kbd>Shift</kbd>: 1 tick; or the step buttons, hold to repeat) ·
+					<kbd>+</kbd><kbd>-</kbd> zoom · <kbd>0</kbd> fit level · <kbd>F</kbd> follow · <kbd>G</kbd> ghost · <kbd>Esc</kbd> close · drag to look around,
+					wheel/pinch to zoom</li></ul></details>
 			<div class="vload" id="vLoad"></div>
 		</div>
 		<div class="vbar">
 			<div class="scrub"><button class="vplay" id="vPlay" title="Play / pause (Space)">&#9654;</button>
 				<input type="range" id="vScrub" min="0" max="1" value="0" step="1" aria-label="run time"><span class="vpos" id="vPos">0:00.00</span></div>
+			<div class="vstep" role="group" aria-label="Step through the run">
+				<button id="vB1s" title="Back 1 second (&larr;); hold to repeat">|&#9664; 1 s</button>
+				<button id="vB1" title="Back 1 tick = 0.01 s (Shift+&larr;); pauses; hold to repeat">&#9664; 1 tick</button>
+				<button id="vF1" title="Forward 1 tick = 0.01 s (Shift+&rarr;); pauses; hold to repeat">1 tick &#9654;</button>
+				<button id="vF1s" title="Forward 1 second (&rarr;); hold to repeat">1 s &#9654;|</button>
+				<span class="vtk" id="vTk" title="The best run's tick (1 tick = 0.01 s; an index into the .eetas) and its run time">tick 0</span>
+			</div>
 			<label class="vck">speed <select id="vSpeed"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option>
 				<option value="2">2x</option><option value="4">4x</option><option value="8">8x</option><option value="16">16x</option></select></label>
 			<input type="text" id="vJump" placeholder="jump to 1:10.00" title="Jump to a run time (m:ss.cc, 70.5s) or a tick number; Enter">
 			<label class="vck"><input type="checkbox" id="vGhost" checked> ghost</label>
 			<label class="vck"><input type="checkbox" id="vPath" checked> path</label>
+			<label class="vck" id="vGfxLbl" title="Draw the level with Everybody Edits' own graphics (off: simple minimap colors)"><input type="checkbox" id="vGfx" checked> EE graphics</label>
+			<button class="vgear" id="vGfxSet" title="EE graphics: which eeo-tas folder they come from">&#9881;</button>
 		</div>
 	</div>
 </div>
@@ -687,20 +736,29 @@ function renderIdeas() {
 }
 
 // ------------------------------------------------------------ viewer ("Watch"): the job's current best run, the original as a ghost
-// GET /api/jobs/:id/level (ids, EE minimap colors, block kinds) and /trajectory?which=best|original (per-tick positions in
-// 1/16 px, run timer, inputs, flags, events, door states; best also has `align`: the original's tick at the same point).
-// The level is drawn in 16x16-tile chunks cached per zoom; coins, doors, the path and the balls are drawn every frame.
-const ZOOMS = [2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64];   // CSS px per tile
-const vw = { open: false, id: null, L: null, A: null, G: null, pos: 0, T: 0, off: 0, playing: false, speed: 1, zi: 9, follow: true, camX: 0, camY: 0,
-	snap: true, chunks: new Map(), chunkT: 0, dirty: true, last: 0, raf: 0, version: null, ghost: true, path: true, ptr: new Map(), pinch: null, hud: {}, token: 0 };
+// GET /api/jobs/:id/level (ids, lookup numbers, EE minimap colors, block kinds) and /trajectory?which=best|original (per-tick
+// positions in 1/16 px, run timer, inputs, flags, events, door states; best also has `align`: the original's tick at the same
+// point). With EE graphics (GET /api/eegfx, see "EE graphics" below) the level is drawn with the game's own block images,
+// else in EE's minimap colors ("simple"). The level is drawn in chunks cached per zoom; doors, gates and switches (EE
+// graphics: patched into the chunks when they change), coins, the path and the balls follow the run every frame.
+const ZOOMS = [0.5, 1, 1.5, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64];   // CSS px per tile
+const ZOFF = 3;   // link and stored zoom numbers count from 2 px per tile (the three smaller steps came later)
+const vw = { open: false, id: null, L: null, A: null, G: null, pos: 0, T: 0, off: 0, playing: false, speed: 1, zi: 9 + ZOFF, follow: true, camX: 0, camY: 0,
+	snap: true, chunks: new Map(), px: 0, frame: 0, dirty: true, last: 0, raf: 0, version: null, ghost: true, path: true, ptr: new Map(), pinch: null, hud: {}, token: 0,
+	S: null };
 function b64u8(s) { const b = atob(s || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
 const b64i32 = (s) => { const u = b64u8(s); return new Int32Array(u.buffer, 0, u.length >> 2); };
 const b64u16 = (s) => { const u = b64u8(s); return new Uint16Array(u.buffer, 0, u.length >> 1); };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+/** device px per tile at zoom step zi */
+const vwT = (zi) => Math.max(1, Math.round(ZOOMS[zi === undefined ? vw.zi : zi] * (window.devicePixelRatio || 1)));
+/** number of entries of the sorted array a that are <= v */
+function ub(a, v) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= v) lo = m + 1; else hi = m; } return lo; }
 
 function vwPrepLevel(d) {
-	const L = { W: d.width, H: d.height, fg: b64u16(d.fg), bg: b64u16(d.bg), pal: new Map(), kind: new Map(), nums: new Map(d.nums), portals: new Map(),
-		doors: [], coins: [], name: d.name, startMode: d.startMode, startMatters: d.startMatters };
+	const L = { W: d.width, H: d.height, fg: b64u16(d.fg), bg: b64u16(d.bg), pal: new Map(), kind: new Map(), nums: new Map(d.lookup || d.nums), portals: new Map(),
+		doors: [], coins: [], cps: [], name: d.name, startMode: d.startMode, startMatters: d.startMatters, bgColor: d.bgColor ? `#${d.bgColor}` : null,
+		ids: Object.keys(d.kinds).map(Number) };
 	for (const [id, hex] of Object.entries(d.palette)) {
 		if (!hex) { L.pal.set(+id, null); continue; }
 		const v = parseInt(hex, 16);
@@ -716,14 +774,23 @@ function vwPrepLevel(d) {
 		const x = i % L.W, y = (i / L.W) | 0;
 		if (k.kind === 'door') { const num = L.nums.get(i) || 0; L.doors.push({ i, x, y, id, sub: k.sub, num, key: `${id}:${num}` }); }
 		else if (k.kind === 'coin' || k.kind === 'bluecoin' || k.kind === 'coin_taken') L.coins.push({ i, x, y, blue: id === 101 || id === 111 });
+		else if (k.kind === 'checkpoint') L.cps.push({ i, x, y });
 	}
 	return L;
 }
 function vwPrepRun(d, L) {
 	const r = { d, n: d.ticks, X: b64i32(d.x), Y: b64i32(d.y), RUN: b64i32(d.run), FL: b64u8(d.flags), IN: b64u8(d.inputs), runTicks: d.runTicks,
 		time: d.time, timerStart: d.timerStart, finished: d.finished, version: d.version, doors: d.doors || {}, events: d.events || [], coinAt: new Map(),
-		taken0: new Set(d.coinsTaken0 || []), align: d.align ? b64i32(d.align) : null };
-	for (const e of r.events) if ((e[1] === 'coin' || e[1] === 'blue_coin') && !r.coinAt.has(e[3] * L.W + e[2])) r.coinAt.set(e[3] * L.W + e[2], e[0]);
+		taken0: new Set(d.coinsTaken0 || []), align: d.align ? b64i32(d.align) : null,
+		coinT: [], bcoinT: [], deathT: [], swEv: [], cpEv: [], clock0: d.clock0 | 0, route: null };
+	for (const e of r.events) {
+		if (e[1] === 'coin' || e[1] === 'blue_coin') {
+			if (!r.coinAt.has(e[3] * L.W + e[2])) r.coinAt.set(e[3] * L.W + e[2], e[0]);
+			(e[1] === 'coin' ? r.coinT : r.bcoinT).push(e[0]);
+		} else if (e[1] === 'death') r.deathT.push(e[0]);
+		else if (e[1] === 'switch') r.swEv.push([e[0], e[2], e[3], e[4]]);
+		else if (e[1] === 'checkpoint') r.cpEv.push([e[0], e[3] * L.W + e[2]]);
+	}
 	return r;
 }
 function vwTimeline() {
@@ -732,36 +799,43 @@ function vwTimeline() {
 	vw.T = Math.max(A.n, G ? G.n - vw.off : 0);
 	$('vScrub').max = String(vw.T);
 }
+function vwRedrawAll() { vw.chunks.clear(); vw.px = 0; vw.S = null; vw.dirty = true; }
 async function openViewer(id, opts) {
 	const o = opts || {};
 	const j = state.jobs.find((x) => x.id === id);
 	try { history.replaceState(null, '', `#watch=${id}`); } catch (e) { /* file:// or sandbox */ }
 	const token = ++vw.token;
 	Object.assign(vw, { open: true, id, L: null, A: null, G: null, pos: 0, playing: false, follow: true, snap: true, version: null, dirty: true });
-	vw.chunks.clear(); vw.chunkT = 0;
+	vwRedrawAll();
 	$('viewer').hidden = false;
 	document.body.style.overflow = 'hidden';
 	$('vNewer').hidden = true;
+	$('vFollow').classList.add('on');
 	$('vTitle').innerHTML = `<b>${esc(j ? j.name : id)}</b>loading…`;
 	$('vLoad').hidden = false;
 	$('vLoad').innerHTML = '<div><span class="spin"></span>Replaying the best run and your original in the exact physics…</div>';
 	vwResize();
 	if (!vw.raf) { vw.last = 0; vw.raf = requestAnimationFrame(vwFrame); }
 	try {
-		const [lv, a, g] = await Promise.all([api(`/api/jobs/${id}/level`), api(`/api/jobs/${id}/trajectory?which=best`), api(`/api/jobs/${id}/trajectory?which=original`)]);
+		const [lv, a, g] = await Promise.all([api(`/api/jobs/${id}/level`), api(`/api/jobs/${id}/trajectory?which=best`), api(`/api/jobs/${id}/trajectory?which=original`),
+			gxLoad(GX.st === 'off')]);   // (not found last time: look again, eeo-tas may be there now)
 		if (token !== vw.token || !vw.open) return;
 		vw.L = vwPrepLevel(lv);
 		vw.A = vwPrepRun(a, vw.L);
 		vw.G = vwPrepRun(g, vw.L);
 		vw.version = a.version;
 		vwTimeline();
-		vw.zi = clamp(o.zoom !== undefined ? +o.zoom : +(store.get('tasopt.vzoom') || 9), 0, ZOOMS.length - 1);
+		const old = store.get('tasopt.vzoom'), stored = store.get('tasopt.vzoom2') !== null ? store.get('tasopt.vzoom2') : old !== null ? String(+old + ZOFF) : null;
+		vw.zi = clamp(o.zoom !== undefined && o.zoom !== 'fit' ? +o.zoom + ZOFF : stored !== null ? +stored : 9 + ZOFF, 0, ZOOMS.length - 1);
+		if (!Number.isFinite(vw.zi)) vw.zi = 9 + ZOFF;
 		vwTitle();
 		$('vLoad').hidden = true;
 		vw.snap = true; vw.dirty = true;
 		if (o.t) { $('vJump').value = o.t; vwJump(); }
+		if (o.zoom === 'fit') vwFit();
 		if (o.play) vw.playing = true;
 		vwCheckNewer();
+		gxUnmapped();
 	} catch (e) {
 		if (token === vw.token) $('vLoad').innerHTML = `<div class="msg err">Could not load the run: ${esc(e.message)}</div>`;
 	}
@@ -775,10 +849,11 @@ function closeViewer() {
 	vw.open = false; vw.playing = false; vw.token++;
 	try { if (/watch=/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* sandbox */ }
 	$('viewer').hidden = true;
+	$('vGfxPanel').hidden = true;
 	document.body.style.overflow = '';
 	if (vw.raf) cancelAnimationFrame(vw.raf);
 	vw.raf = 0;
-	vw.chunks.clear();
+	vwRedrawAll();
 }
 function vwCheckNewer() {
 	if (!vw.open || !vw.A) return;
@@ -828,7 +903,7 @@ function vwDoorSolid(r, key, t) {
 	for (let k = 1; k < a.length && a[k] <= t; k++) s ^= 1;
 	return !!s;
 }
-// ---- colors
+// ---- colors (simple graphics)
 const VC = { ground: '#000', outside: '#15171d', arrow: '#7fd4ff', arrowInv: '#3f7fa0', boost: '#ff9a3c', spike: '#ff4d4d', fire: '#ff7a1a', portal: '#c77dff',
 	portalInv: '#8a5bb0', finish: '#2fcf72', check: '#48e07a', key: { red: '#ff5252', green: '#4ade80', blue: '#5b8cff', cyan: '#3ee0e6', magenta: '#f05ce0', yellow: '#ffe04a' },
 	liquid: { water: 'rgba(40,110,230,.55)', mud: 'rgba(120,85,40,.6)', lava: 'rgba(240,100,20,.6)', 'toxic waste': 'rgba(100,210,50,.55)' } };
@@ -950,6 +1025,7 @@ function vwTile(g, L, i, sx, sy, T) {
 		default: if (own) { g.fillStyle = rgb(own, 0.62); g.fillRect(sx, sy, T, T); }
 	}
 }
+/** a simple-graphics chunk: CH x CH tiles from tile (cx * CH, cy * CH) */
 function vwChunk(cx, cy, T, CH) {
 	const L = vw.L;
 	const tw = Math.min(CH, L.W - cx * CH), th = Math.min(CH, L.H - cy * CH);
@@ -958,7 +1034,15 @@ function vwChunk(cx, cy, T, CH) {
 	const g = c.getContext('2d');
 	g.fillStyle = VC.ground; g.fillRect(0, 0, c.width, c.height);
 	for (let ty = 0; ty < th; ty++) for (let tx = 0; tx < tw; tx++) vwTile(g, L, (cy * CH + ty) * L.W + cx * CH + tx, tx * T, ty * T, T);
-	return c;
+	return { c, a: null, px: c.width * c.height, used: 0 };
+}
+function vwGravArrow(g, cx, cy, r, flags) {
+	const gd = (flags >> 2) & 7;   // gravity: 0 down, 1 up, 2 left, 3 right, 4 none
+	if (gd < 1 || gd > 3) return;
+	const [dx, dy] = gd === 1 ? [0, -1] : gd === 2 ? [-1, 0] : [1, 0];
+	const d = r + Math.max(4, r * 0.45), w = Math.max(3, r * 0.4);
+	g.fillStyle = VC.arrow;
+	tri(g, cx + dx * (d + w), cy + dy * (d + w), cx + dx * d - dy * w, cy + dy * d + dx * w, cx + dx * d + dy * w, cy + dy * d - dx * w);
 }
 function vwBall(g, x, y, s, flags, ghost) {
 	const cx = x + 8 * s, cy = y + 8 * s, r = Math.max(4, 7.6 * s);
@@ -980,105 +1064,590 @@ function vwBall(g, x, y, s, flags, ghost) {
 			g.beginPath(); g.arc(cx, cy + r * 0.05, r * 0.52, 0.2 * Math.PI, 0.8 * Math.PI); g.stroke();
 		}
 	}
-	const gd = (flags >> 2) & 7;   // gravity: 0 down, 1 up, 2 left, 3 right, 4 none
-	if (gd >= 1 && gd <= 3) {
-		const [dx, dy] = gd === 1 ? [0, -1] : gd === 2 ? [-1, 0] : [1, 0];
-		const d = r + Math.max(4, r * 0.45), w = Math.max(3, r * 0.4);
-		g.fillStyle = VC.arrow;
-		tri(g, cx + dx * (d + w), cy + dy * (d + w), cx + dx * d - dy * w, cy + dy * d + dx * w, cx + dx * d + dy * w, cy + dy * d - dx * w);
+	vwGravArrow(g, cx, cy, r, flags);
+}
+
+// ------------------------------------------------------------ EE graphics: the game's own block images, from the user's eeo-tas folder
+// GET /api/eegfx is the sprite map the server reads from eeo-tas (src/eegfx.js: ItemManager.as createBrick -> block id: [sheet,
+// 16 px frame, y, layer, shadow]; the named BlockSprites; the morphable blocks), GET /api/eegfx/sheet/<name>.png the images.
+// Nothing graphical is part of this app. The drawing follows eeo-tas World.as: backgrounds (onDraw, 827-848), then the
+// foreground and decoration blocks in reading order with their drop shadow (2 px right and down, black at 30%; 867-1535),
+// the smileys, then the "above" layer (postDraw: liquids, tall grass, NPCs, coins, checkpoints). The frame of a door, gate,
+// switch or numbered block at a tick follows the World.as rules below; hidden blocks (secret passages, invisible arrows and
+// portals) are drawn like EE's full-level image (drawFull) does.
+const GX = { st: 'idle', on: store.get('tasopt.vgfx') !== 'simple', info: null, m: null, img: [], mip: [], shd: [], num: new Map(), ids: {}, rot: null,
+	dyn: null, loading: null, unmappedFor: null };
+const LAY = { FG: 0, BG: 1, DECO: 2, ABOVE: 3 };
+const KEYDOOR = { 23: 0, 24: 1, 25: 2, 1005: 14, 1006: 15, 1007: 16 };   // World.as:903-960: key door -> sprDoors frame while its key is on
+const KEYGATE = { 26: 3, 27: 4, 28: 5, 1008: 17, 1009: 18, 1010: 19 };   //                key gate -> sprDoors frame while its key is on
+const gxReady = () => GX.on && GX.st === 'ready' && !!vw.L;
+/** loads the sprite map and the sheet images once (again with force, after the folder changed); never throws */
+function gxLoad(force) {
+	if (GX.loading) return GX.loading;
+	if (!force && GX.st !== 'idle') return Promise.resolve();
+	GX.st = 'loading';
+	GX.loading = (async () => {
+		try {
+			const d = await api('/api/eegfx');
+			GX.info = d;
+			if (!d.available) { GX.st = 'off'; GX.m = null; return; }
+			const imgs = await Promise.all(d.sheets.map((n) => new Promise((res, rej) => {
+				const im = new Image();
+				im.onload = () => res(im);
+				im.onerror = () => rej(new Error(`the sheet ${n}.png did not load`));
+				im.src = `/api/eegfx/sheet/${encodeURIComponent(n)}.png?v=${encodeURIComponent(d.version)}`;
+			})));
+			GX.m = d; GX.img = imgs; GX.mip = imgs.map((im) => [im]); GX.shd = imgs.map(() => []); GX.num.clear(); GX.ids = d.ids || {};
+			const I = GX.ids, rotatable = new Set(d.rotatable), nonRot = new Set(d.nonRotHalf || []);
+			// World.as:890 (and 1686): morphable blocks drawn by their sprite at the rotation in the lookup
+			GX.rot = new Map();
+			for (const [id, name] of Object.entries(d.rot)) {
+				const n = +id;
+				if (rotatable.has(n) && !nonRot.has(n) && n !== I.HALLOWEEN_2016_EYES && n !== I.FIREWORKS && n !== I.DUNGEON_TORCH) GX.rot.set(n, name);
+			}
+			// blocks whose image follows the run (doors, gates, switches): redrawn in the cached chunks when they change
+			GX.dyn = new Set([23, 24, 25, 26, 27, 28, 1005, 1006, 1007, 1008, 1009, 1010, I.DEATH_DOOR, I.DEATH_GATE, I.DOOR_PURPLE, I.GATE_PURPLE, I.DOOR_ORANGE,
+				I.GATE_ORANGE, I.SWITCH_PURPLE, I.SWITCH_ORANGE, I.TIMEDOOR, I.TIMEGATE, I.CROWNDOOR, I.CROWNGATE, I.SILVERCROWNDOOR, I.SILVERCROWNGATE,
+				I.COINDOOR, I.BLUECOINDOOR, I.COINGATE, I.BLUECOINGATE, I.ZOMBIE_DOOR, I.ZOMBIE_GATE, I.TEAM_DOOR, I.TEAM_GATE].filter((x) => x !== undefined));
+			GX.st = 'ready';
+		} catch (e) {
+			GX.st = 'off'; GX.m = null;
+			GX.info = Object.assign({}, GX.info || {}, { available: false, why: `EE graphics could not be loaded: ${e.message}` });
+		} finally {
+			GX.loading = null;
+			GX.unmappedFor = null;
+			gxUi();
+			vwRedrawAll();
+		}
+	})();
+	return GX.loading;
+}
+/** logs (once per level) the block ids of the level that have no sprite in this eeo-tas */
+function gxUnmapped() {
+	if (GX.st !== 'ready' || !vw.L || GX.unmappedFor === vw.L) return;
+	GX.unmappedFor = vw.L;
+	const miss = vw.L.ids.filter((id) => id && !GX.m.blocks[id] && !GX.m.npcs[id]);
+	if (miss.length) console.info(`[EE graphics] block ids without a sprite in ${GX.m.dir} (not drawn, like eeo-tas; solid ones as grey tiles): ${miss.join(', ')}`);
+	else console.info(`[EE graphics] every block id of this level has its sprite (${vw.L.ids.length} ids; ${GX.m.dir})`);
+}
+function gxUi() {
+	const d = GX.info, ok = GX.st === 'ready';
+	$('vGfx').checked = GX.on && GX.st !== 'off';
+	const src = d && d.source === 'settings' ? 'set here' : d && d.source === 'env' ? 'from EEO_TAS' : 'found by itself';
+	$('vGfxLbl').title = ok ? `Draw the level with Everybody Edits' own graphics (from ${d.dir}); off: simple minimap colors`
+		: d && d.why ? d.why : 'Draw the level with Everybody Edits\' own graphics';
+	$('vGfxNow').innerHTML = !d ? 'EE graphics: loading…' : d.available && ok
+		? `EE graphics: <code>${esc(d.dir)}</code> <span style="color:#8d95a5">(${src})</span> · <a id="vGfxChange">change</a>`
+		: `EE graphics: <b>not available</b>. ${esc(d.why || '')}`;
+	const ch = $('vGfxChange');
+	if (ch) ch.onclick = () => { $('vGfxForm').hidden = false; $('vGfxDir').focus(); };
+	if (!ok) $('vGfxForm').hidden = false;
+	if (d && !$('vGfxDir').value) $('vGfxDir').value = d.settingsDir || d.dir || '';
+	$('vGfxHint').hidden = !(GX.on && GX.st === 'off');
+	$('vLegE').hidden = !(GX.on && ok);
+	$('vLegS').hidden = GX.on && ok;
+}
+async function gxSetDir(dir) {
+	$('vGfxMsg').textContent = '';
+	$('vGfxUse').disabled = $('vGfxAuto').disabled = true;
+	try {
+		const d = await api('/api/eegfx', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) });
+		GX.info = d; GX.on = true; store.set('tasopt.vgfx', 'ee');
+		await gxLoad(true);
+		if (GX.st === 'ready') { $('vGfxForm').hidden = true; $('vGfxDir').value = d.settingsDir || d.dir || ''; toast(`EE graphics from <b>${esc(d.dir)}</b>`); gxUnmapped(); }
+		else $('vGfxMsg').textContent = (GX.info && GX.info.why) || 'not available';
+	} catch (e) { $('vGfxMsg').textContent = e.message; }
+	$('vGfxUse').disabled = $('vGfxAuto').disabled = false;
+}
+
+// ---- drawing sprites (sheet s, source rect in the sheet's own pixels) at T device px per 16 px tile
+// Below 12 px per tile the sheets are drawn from halved copies (box filtered), so small zooms stay clean and crisp.
+function gxMip(s, m) {
+	const lv = GX.mip[s];
+	if (lv[m]) return lv[m];
+	const prev = gxMip(s, m - 1);
+	const c = document.createElement('canvas');
+	c.width = Math.max(1, Math.ceil(prev.width / 2)); c.height = Math.max(1, Math.ceil(prev.height / 2));
+	const g = c.getContext('2d');
+	g.imageSmoothingEnabled = true;
+	g.drawImage(prev, 0, 0, prev.width / 2, prev.height / 2);
+	return (lv[m] = c);
+}
+/** the sheet as a drop shadow: black with 30% of its alpha (ItemBrick.drawWithShadow, BlockSprite.drawWithShadow) */
+function gxShadow(s, m) {
+	const lv = GX.shd[s];
+	if (lv[m]) return lv[m];
+	const src = gxMip(s, m), c = document.createElement('canvas');
+	c.width = src.width; c.height = src.height;
+	const g = c.getContext('2d');
+	g.drawImage(src, 0, 0);
+	g.globalCompositeOperation = 'source-in';
+	g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(0, 0, c.width, c.height);
+	return (lv[m] = c);
+}
+function gxBlit(g, s, sx, sy, w, h, dx, dy, T, shadow) {
+	const m = T >= 12 ? 0 : T >= 6 ? 1 : T >= 3 ? 2 : T >= 2 ? 3 : 4;
+	const k = 1 / (1 << m), sc = T / 16;
+	g.drawImage(shadow ? gxShadow(s, m) : gxMip(s, m), sx * k, sy * k, w * k, h * k, dx, dy, w * sc, h * sc);
+}
+/** ItemManager.bmdBricks[id]: the block's image (with its drop shadow when it has one; unknown ids: block 0's image) */
+function gxBrick(g, id, dx, dy, T, noShadow) {
+	const b = GX.m.blocks[id] || GX.m.blocks[0];
+	if (!b) return;
+	if (b[4] && !noShadow && T >= 8) gxBlit(g, b[0], b[1] * 16, b[2], 16, 16, dx + T / 8, dy + T / 8, T, true);
+	gxBlit(g, b[0], b[1] * 16, b[2], 16, 16, dx, dy, T, false);
+}
+/** BlockSprite.drawPoint(frame): a frame of a named sprite (a frame outside it draws nothing, like Flash's copyPixels) */
+function gxSpr(g, name, f, dx, dy, T) {
+	const s = GX.m.sprites[name];
+	if (!s || !(f >= 0) || f >= (Array.isArray(s) ? s[2] : s.frames)) return;
+	if (Array.isArray(s)) {
+		if (s[3] && T >= 8) gxBlit(g, s[0], (s[1] + f) * 16, 0, 16, 16, dx + T / 8, dy + T / 8, T, true);
+		gxBlit(g, s[0], (s[1] + f) * 16, 0, 16, 16, dx, dy, T, false);
+		return;
 	}
+	// a sheet ItemManager.init generates: frame f = the brick (or a special frame) with the number f on it
+	let sh, sx, sy = 0;
+	if (s.brick !== undefined) { const b = GX.m.blocks[s.brick]; if (!b) return; sh = b[0]; sx = b[1] * 16; sy = b[2]; } else { sh = s.sheet; sx = s.frame * 16; }
+	if (s.shadow && T >= 8) gxBlit(g, sh, sx, sy, 16, 16, dx + T / 8, dy + T / 8, T, true);
+	gxBlit(g, sh, sx, sy, 16, 16, dx, dy, T, false);
+	if (s.text && T >= 12) { const c = gxNum(f, s.text); if (c) g.drawImage(c, dx, dy, T, T); }
+}
+/** ItemManager.createBlockText(n): block_numbers.png digits right-aligned at y 10 with a 1 px glow ('w': white on dark,
+ *  'b': black on white); 1000 is the infinity sign */
+function gxNum(n, style) {
+	const key = style + n;
+	let c = GX.num.get(key);
+	if (c) return c;
+	if (GX.m.numbers === null || GX.m.numbers === undefined) return null;
+	const src = GX.img[GX.m.numbers];
+	const mk = document.createElement('canvas'); mk.width = mk.height = 16;
+	const mg = mk.getContext('2d');
+	if (n === 1000) mg.drawImage(src, 40, 0, 4, 5, 11, 10, 4, 5);
+	else { let v = n, off = 1; do { const dg = v % 10, w = dg === 1 ? 2 : 4; off += w; mg.drawImage(src, dg * 4, 0, w, 5, 16 - off, 10, w, 5); off += 1; v = Math.floor(v / 10); } while (v > 0); }
+	const tint = (col) => {
+		const t = document.createElement('canvas'); t.width = t.height = 16;
+		const tg = t.getContext('2d'); tg.drawImage(mk, 0, 0); tg.globalCompositeOperation = 'source-in'; tg.fillStyle = col; tg.fillRect(0, 0, 16, 16);
+		return t;
+	};
+	const glow = tint(style === 'b' ? '#fff' : '#000'), face = style === 'b' ? tint('#000') : mk;
+	c = document.createElement('canvas'); c.width = c.height = 16;
+	const g = c.getContext('2d');
+	g.globalAlpha = 0.8;
+	for (const [ox, oy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]]) g.drawImage(glow, ox, oy);
+	g.globalAlpha = 1;
+	g.drawImage(face, 0, 0);
+	GX.num.set(key, c);
+	return c;
+}
+
+// ---- the run's state at a tick (keys, switches, coins, deaths, the level clock) for World.as's door rules
+function gxState(A, t) {
+	if (vw.S && vw.S.A === A && vw.S.t === t) return vw.S;
+	const sw = new Map(), osw = new Map();
+	for (const e of A.swEv) { if (e[0] > t) break; (e[1] === 'orange' ? osw : sw).set(e[2], !!e[3]); }
+	let cp = -1;
+	for (const e of A.cpEv) { if (e[0] > t) break; cp = e[1]; }
+	return (vw.S = { A, t, coins: ub(A.coinT, t), bcoins: ub(A.bcoinT, t), deaths: ub(A.deathT, t), clock: A.clock0 + t, sw, osw, cp, solid: new Map() });
+}
+function gxSolid(S, key) {
+	let v = S.solid.get(key);
+	if (v === undefined) { v = vwDoorSolid(S.A, key, S.t); S.solid.set(key, v); }
+	return v;
+}
+const SP = [0, 0, 0];   // the drawing of one cell: [0] nothing, [1, id] the block's image, [2, sprite, frame]
+const spec = (k, a, b) => { SP[0] = k; SP[1] = a; SP[2] = b; return SP; };
+const specKey = (s) => (s[0] === 0 ? '' : s[0] === 1 ? `b${s[1]}` : `${s[1]}:${s[2]}`);
+/** World.onDraw for a decoration-layer block (World.as:883-1532) at the run's state S */
+function gxSpec(L, i, x, y, id, S) {
+	const I = GX.ids, look = L.nums.get(i) | 0;
+	const rs = GX.rot.get(id);
+	if (rs) return spec(2, rs, look);
+	if (KEYDOOR[id] !== undefined) return !gxSolid(S, `${id}:${look}`) ? spec(2, 'sprDoors', KEYDOOR[id]) : spec(1, id);
+	if (KEYGATE[id] !== undefined) return gxSolid(S, `${id}:${look}`) ? spec(2, 'sprDoors', KEYGATE[id]) : spec(1, id);
+	const wx = (L.W - x) + y;
+	switch (id) {
+		case I.CHECKPOINT: case I.LABEL: case 110: case 111: case I.HALLOWEEN_2016_EYES: case I.FIREWORKS: return spec(0);   // (checkpoints and coins: drawn on top)
+		case I.DEATH_DOOR: return look <= S.deaths ? spec(2, 'sprDoors', 20) : spec(2, 'sprDeathDoor', look - S.deaths);
+		case I.DEATH_GATE: return look <= S.deaths ? spec(2, 'sprDoors', 21) : spec(2, 'sprDeathGate', look - S.deaths);
+		case I.DOOR_PURPLE: return spec(2, S.sw.get(look) ? 'sprPurpleGates' : 'sprPurpleDoors', look);
+		case I.GATE_PURPLE: return spec(2, S.sw.get(look) ? 'sprPurpleDoors' : 'sprPurpleGates', look);
+		case I.DOOR_ORANGE: return spec(2, S.osw.get(look) ? 'sprOrangeGates' : 'sprOrangeDoors', look);
+		case I.GATE_ORANGE: return spec(2, S.osw.get(look) ? 'sprOrangeDoors' : 'sprOrangeGates', look);
+		case I.SWITCH_PURPLE: return spec(2, S.sw.get(look) ? 'sprSwitchDOWN' : 'sprSwitchUP', look);
+		case I.SWITCH_ORANGE: return spec(2, S.osw.get(look) ? 'sprOrangeSwitchDOWN' : 'sprOrangeSwitchUP', look);
+		case I.RESET_PURPLE: return spec(2, 'sprSwitchRESET', look);
+		case I.RESET_ORANGE: return spec(2, 'sprOrangeSwitchRESET', look);
+		// (time door open = the time state on; time gate solid = the time state on)
+		case I.TIMEDOOR: return spec(2, 'sprDoorsTime', (((S.clock / 100) | 0) % 5) + (gxSolid(S, `${id}:${look}`) ? 0 : 5));
+		case I.TIMEGATE: return spec(2, 'sprDoorsTime', (((S.clock / 100) | 0) % 5) + (gxSolid(S, `${id}:${look}`) ? 0 : 5));
+		case I.CROWNDOOR: return !gxSolid(S, `${id}:${look}`) ? spec(2, 'sprDoors', 40) : spec(1, id);
+		case I.CROWNGATE: return gxSolid(S, `${id}:${look}`) ? spec(2, 'sprDoors', 41) : spec(1, id);
+		case I.SILVERCROWNDOOR: return !gxSolid(S, `${id}:${look}`) ? spec(2, 'sprDoors', 42) : spec(1, id);
+		case I.SILVERCROWNGATE: return gxSolid(S, `${id}:${look}`) ? spec(2, 'sprDoors', 43) : spec(1, id);
+		case I.COINDOOR: return look <= S.coins ? spec(2, 'sprDoors', 6) : spec(2, 'sprCoinDoors', look - S.coins);
+		case I.BLUECOINDOOR: return look <= S.bcoins ? spec(2, 'sprDoors', 36) : spec(2, 'sprBlueCoinDoors', look - S.bcoins);
+		case I.COINGATE: return look <= S.coins ? spec(2, 'sprDoors', 7) : spec(2, 'sprCoinGates', look - S.coins);
+		case I.BLUECOINGATE: return look <= S.bcoins ? spec(2, 'sprDoors', 37) : spec(2, 'sprBlueCoinGates', look - S.bcoins);
+		// (zombie door open = zombie; zombie gate solid = zombie; team door open = your team; team gate solid = your team)
+		case I.ZOMBIE_DOOR: return spec(2, 'sprDoors', gxSolid(S, `${id}:${look}`) ? 13 : 12);
+		case I.ZOMBIE_GATE: return spec(2, 'sprDoors', gxSolid(S, `${id}:${look}`) ? 13 : 12);
+		case I.TEAM_DOOR: return spec(2, 'sprDoors', 22 + look + (gxSolid(S, `${id}:${look}`) ? 0 : 7));
+		case I.TEAM_GATE: return spec(2, 'sprDoors', 29 + look - (gxSolid(S, `${id}:${look}`) ? 7 : 0));
+		case I.SPIKE: return spec(2, 'sprSpikes', look);
+		case I.SPIKE_SILVER: return spec(2, 'sprSpikesSilver', look);
+		case I.SPIKE_BLACK: return spec(2, 'sprSpikesBlack', look);
+		case I.SPIKE_RED: return spec(2, 'sprSpikesRed', look);
+		case I.SPIKE_GOLD: return spec(2, 'sprSpikesGold', look);
+		case I.SPIKE_GREEN: return spec(2, 'sprSpikesGreen', look);
+		case I.SPIKE_BLUE: return spec(2, 'sprSpikesBlue', look);
+		case I.PORTAL: { const p = L.portals.get(i); return spec(2, 'sprPortal', (p ? p.rot : look) * 15 + ((x + y) % 15) + 1); }
+		case I.PORTAL_INVISIBLE: { const p = L.portals.get(i); return spec(2, 'sprPortalInvisible', p ? p.rot : look); }
+		case I.WORLD_PORTAL: return spec(2, 'sprPortalWorld', (x + y) % 21);
+		case I.DIAMOND: return spec(2, 'sprDiamond', (x + y) % 13);
+		case I.CAKE: return spec(2, 'sprCake', (x + y) % 5);
+		case I.HOLOGRAM: return spec(2, 'sprHologram', (x + y) % 5);
+		case I.EFFECT_TEAM: return spec(2, 'sprTeamEffect', look);
+		case I.EFFECT_CURSE: return spec(2, 'sprEffect', look ? 4 : 11);
+		case I.EFFECT_FLY: return spec(2, 'sprEffect', look ? 1 : 8);
+		case I.EFFECT_JUMP: return spec(2, 'sprEffect', [7, 0, 22][look] | 0);
+		case I.EFFECT_PROTECTION: return spec(2, 'sprEffect', look ? 3 : 10);
+		case I.EFFECT_RUN: return spec(2, 'sprEffect', [9, 2, 25][look] | 0);
+		case I.EFFECT_ZOMBIE: return spec(2, 'sprEffect', look ? 5 : 12);
+		case I.EFFECT_LOW_GRAVITY: return spec(2, 'sprEffect', look ? 13 : 14);
+		case I.EFFECT_MULTIJUMP: return look === 1 ? spec(2, 'sprEffect', 16) : spec(2, 'sprMultiJumps', look);
+		case I.EFFECT_GRAVITY: return spec(2, 'sprGravityEffect', look);
+		case I.EFFECT_POISON: return spec(2, 'sprEffect', look ? 23 : 24);
+		case 50: return spec(2, 'sprSecret', 0);
+		case 243: return spec(2, 'sprSecret', 1);
+		case 136: return spec(2, 'sprSecret', 2);
+		case I.ICE: return spec(2, 'sprIce', 11);
+		case I.CAVE_TORCH: return spec(2, 'sprCaveTorch', wx % 12);
+		case I.DUNGEON_TORCH: return spec(2, 'sprDungeonTorch', look * 12 + wx % 12);
+		case I.CHRISTMAS_2016_CANDLE: return spec(2, 'sprChristmas2016Candle', wx % 12);
+		default: return spec(1, id);
+	}
+}
+function gxDrawSpec(g, s, dx, dy, T) {
+	if (s[0] === 1) gxBrick(g, s[1], dx, dy, T);
+	else if (s[0] === 2) gxSpr(g, s[1], s[2], dx, dy, T);
+}
+/** World.onDraw for the cells [x0, x1) x [y0, y1), drawn with tile (bx, by) at the canvas origin */
+function gxBelow(g, L, x0, y0, x1, y1, bx, by, T, S) {
+	const W = L.W, B = GX.m.blocks;
+	// backgrounds where no foreground-layer block is (World.as:827-848; the level's own color for an empty background)
+	for (let y = y0; y < y1; y++) {
+		for (let x = x0; x < x1; x++) {
+			const i = y * W + x, f = L.fg[i];
+			if (f && B[f] && B[f][3] === LAY.FG) continue;
+			const b = L.bg[i];
+			if (!b && L.bgColor) { g.fillStyle = L.bgColor; g.fillRect((x - bx) * T, (y - by) * T, T, T); } else gxBrick(g, b, (x - bx) * T, (y - by) * T, T, true);
+		}
+	}
+	// foreground and decoration blocks in reading order (each block's shadow falls 2 px into its right and lower neighbours,
+	// so the column to the left and the row above are drawn as well)
+	for (let y = Math.max(0, y0 - 1); y < y1; y++) {
+		for (let x = Math.max(0, x0 - 1); x < x1; x++) {
+			const i = y * W + x, f = L.fg[i];
+			if (!f) continue;
+			const b = B[f];
+			if (!b) {   // not a block of this eeo-tas (World.setMagicTile leaves it out); still show a solid one
+				const k = L.kind.get(f);
+				if (k && k.solid) { g.fillStyle = rgb(KIND_FALLBACK.solid, 1); g.fillRect((x - bx) * T, (y - by) * T, T, T); }
+				continue;
+			}
+			if (b[3] === LAY.FG) gxBrick(g, f, (x - bx) * T, (y - by) * T, T);
+			else if (b[3] === LAY.DECO) gxDrawSpec(g, gxSpec(L, i, x, y, f, S), (x - bx) * T, (y - by) * T, T);
+		}
+	}
+}
+/** World.postDraw for one "above"-layer block (World.as:1573-1695); coins are drawn every frame instead */
+function gxAboveCell(g, L, i, x, y, id, dx, dy, T) {
+	const I = GX.ids;
+	switch (id) {
+		case 100: case 101: return;
+		case I.WAVE: gxSpr(g, 'sprWave', 0, dx, dy, T); return;
+		case I.MUD_BUBBLE: gxSpr(g, 'sprMudBubble', 0, dx, dy, T); return;
+		case I.FIRE: gxSpr(g, 'sprFireHazard', ((L.W - x) + y) % 12, dx, dy, T); return;
+		case I.WATER: gxSpr(g, 'sprWater', 0, dx, dy, T); return;
+		case I.TOXIC_WASTE: gxSpr(g, 'sprToxic', 0, dx, dy, T); return;
+		case I.TOXIC_WASTE_SURFACE: gxSpr(g, 'sprToxicBubble', 0, dx, dy, T); return;
+		case I.TEXT_SIGN: { const k = y + 1 < L.H ? L.kind.get(L.fg[i + L.W]) : null; gxSpr(g, 'sprSign', k && k.solid ? 0 : 4, dx, dy, T); return; }
+		case I.LAVA: gxSpr(g, 'sprLava', 0, dx, dy, T); return;
+		case I.GOLDEN_EASTER_EGG: if (GX.m.egg !== null && GX.m.egg !== undefined) gxBlit(g, GX.m.egg, 0, 0, 48, 48, dx - T, dy - T, T); return;
+		default: break;
+	}
+	const n = GX.m.npcs[id];
+	if (n) { gxBlit(g, n[0], n[1] * 16, 0, 16, 32, dx, dy - T, T); return; }   // ItemNpc.drawTo: 16x32 from 16 px above
+	const rs = GX.rot.get(id);
+	if (rs) { gxSpr(g, rs, L.nums.get(i) | 0, dx, dy, T); return; }
+	gxBrick(g, id, dx, dy, T);
+}
+function gxAboveRange(L, x0, y0, x1, y1) { return [Math.max(0, x0 - 1), Math.max(0, y0 - 1), x1, Math.min(L.H, y1 + 1)]; }   // (NPCs reach 16 px up)
+function gxHasAbove(L, x0, y0, x1, y1) {
+	const B = GX.m.blocks, [ax0, ay0, ax1, ay1] = gxAboveRange(L, x0, y0, x1, y1);
+	for (let y = ay0; y < ay1; y++) for (let x = ax0; x < ax1; x++) { const f = L.fg[y * L.W + x]; if (f && f !== 100 && f !== 101 && B[f] && B[f][3] === LAY.ABOVE) return true; }
+	return false;
+}
+function gxAbove(g, L, x0, y0, x1, y1, T) {
+	const B = GX.m.blocks, [ax0, ay0, ax1, ay1] = gxAboveRange(L, x0, y0, x1, y1);
+	for (let y = ay0; y < ay1; y++) {
+		for (let x = ax0; x < ax1; x++) {
+			const i = y * L.W + x, f = L.fg[i];
+			if (f && B[f] && B[f][3] === LAY.ABOVE) gxAboveCell(g, L, i, x, y, f, (x - x0) * T, (y - y0) * T, T);
+		}
+	}
+}
+/** tiles per chunk side: ~512 px chunks, at most 32 x 32 tiles (one chunk is built within a frame) */
+function gxChunkSize(T) { return clamp(2 ** Math.round(Math.log2(512 / T)), 8, 32); }
+/** an EE-graphics chunk: the level below the smileys (and the "above" layer on its own canvas), with its door cells' state */
+function gxChunk(L, cx, cy, CH, T, S) {
+	const x0 = cx * CH, y0 = cy * CH, x1 = Math.min(L.W, x0 + CH), y1 = Math.min(L.H, y0 + CH);
+	const c = document.createElement('canvas');
+	c.width = (x1 - x0) * T; c.height = (y1 - y0) * T;
+	const g = c.getContext('2d');
+	g.imageSmoothingEnabled = false;
+	g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+	gxBelow(g, L, x0, y0, x1, y1, x0, y0, T, S);
+	const ch = { c, a: null, x0, y0, x1, y1, dyn: [], keys: [], px: c.width * c.height, used: 0, st: S };
+	for (let y = y0; y < y1; y++) {
+		for (let x = x0; x < x1; x++) {
+			const i = y * L.W + x, f = L.fg[i];
+			if (f && GX.dyn.has(f)) { ch.dyn.push(i); ch.keys.push(specKey(gxSpec(L, i, x, y, f, S))); }
+		}
+	}
+	if (gxHasAbove(L, x0, y0, x1, y1)) {
+		const a = document.createElement('canvas');
+		a.width = c.width; a.height = c.height;
+		const ga = a.getContext('2d');
+		ga.imageSmoothingEnabled = false;
+		gxAbove(ga, L, x0, y0, x1, y1, T);
+		ch.a = a; ch.px *= 2;
+	}
+	return ch;
+}
+/** redraws cell (x, y) in its cached chunk (clipped: its background, then the blocks whose image or shadow reaches it) */
+function gxPatch(L, x, y, T, CH, S) {
+	if (x < 0 || y < 0 || x >= L.W || y >= L.H) return;
+	const ch = vw.chunks.get(`ee|${T}|${Math.floor(x / CH)}|${Math.floor(y / CH)}`);
+	if (!ch) return;
+	const g = ch.c.getContext('2d'), dx = (x - ch.x0) * T, dy = (y - ch.y0) * T;
+	g.save();
+	g.beginPath(); g.rect(dx, dy, T, T); g.clip();
+	g.imageSmoothingEnabled = false;
+	g.fillStyle = '#000'; g.fillRect(dx, dy, T, T);
+	gxBelow(g, L, x, y, x + 1, y + 1, ch.x0, ch.y0, T, S);
+	g.restore();
+}
+/** brings a chunk's doors, gates and switches to the state S (a changed cell and the three cells its shadow reaches) */
+function gxUpdate(ch, L, T, CH, S) {
+	if (ch.st === S) return;   // (the same moment of the same run as last time)
+	ch.st = S;
+	let changed = null;
+	for (let k = 0; k < ch.dyn.length; k++) {
+		const i = ch.dyn[k];
+		const key = specKey(gxSpec(L, i, i % L.W, (i / L.W) | 0, L.fg[i], S));
+		if (key !== ch.keys[k]) { ch.keys[k] = key; (changed || (changed = [])).push(i); }
+	}
+	if (!changed) return;
+	if (changed.length > 24) {   // many at once (a jump in time): redraw the chunk, then the neighbours' edge cells
+		const g = ch.c.getContext('2d');
+		g.imageSmoothingEnabled = false;
+		g.fillStyle = '#000'; g.fillRect(0, 0, ch.c.width, ch.c.height);
+		gxBelow(g, L, ch.x0, ch.y0, ch.x1, ch.y1, ch.x0, ch.y0, T, S);
+		for (const i of changed) {
+			const x = i % L.W, y = (i / L.W) | 0;
+			if (x === ch.x1 - 1) { gxPatch(L, x + 1, y, T, CH, S); gxPatch(L, x + 1, y + 1, T, CH, S); }
+			if (y === ch.y1 - 1) { gxPatch(L, x, y + 1, T, CH, S); if (x !== ch.x1 - 1) gxPatch(L, x + 1, y + 1, T, CH, S); }
+		}
+		return;
+	}
+	for (const i of changed) {
+		const x = i % L.W, y = (i / L.W) | 0;
+		gxPatch(L, x, y, T, CH, S); gxPatch(L, x + 1, y, T, CH, S); gxPatch(L, x, y + 1, T, CH, S); gxPatch(L, x + 1, y + 1, T, CH, S);
+	}
+}
+/** coins (World.postDraw: spinning, above the smileys) or, with `taken`, the faint coins where the run took one (drawn
+ *  for an editor, World.as:1255-1267); checkpoints (on when the run's last checkpoint) */
+function gxCoins(g, L, A, S, ox, oy, T, inView, taken) {
+	const bt = S.t, f0 = (S.t * 0.3) | 0;
+	for (const c of L.coins) {
+		if (!inView(c.x, c.y)) continue;
+		const at = A.coinAt.get(c.i);
+		const gone = A.taken0.has(c.i) || (at !== undefined && at <= bt);
+		if (gone !== taken) continue;
+		const f = (f0 + c.x + c.y) % 12;
+		gxSpr(g, gone ? (c.blue ? 'sprBonusCoinShadow' : 'sprCoinShadow') : (c.blue ? 'sprBonusCoin' : 'sprCoin'), f, ox + c.x * T, oy + c.y * T, T);
+	}
+	if (!taken) for (const c of L.cps) if (inView(c.x, c.y)) gxSpr(g, 'sprCheckpoint', S.cp === c.i ? 1 : 0, ox + c.x * T, oy + c.y * T, T);
+}
+/** Player.draw: the smiley (26x26 at x - 5, y - 5); dead: the death animation (64x64 at x - 24, y - 24, 0.3 frames per tick,
+ *  the face for the first frames). (x, y) = the box's top-left on screen; ghost: at 40%. */
+function gxBall(g, r, t, x, y, s, ghost) {
+	const sm = GX.m.smiley, dm = GX.m.death;
+	if (!sm) return;
+	const bt = clamp(Math.floor(t), 0, r.n), fl = r.FL[bt];
+	g.save();
+	g.globalAlpha = ghost ? 0.4 : 1;
+	g.imageSmoothingEnabled = s < 1;
+	let face = true, off = 0;
+	if (fl & 1) { const k = ub(r.deathT, bt); off = 0.3 * (bt - (k > 0 ? r.deathT[k - 1] : bt)); face = off < 2; }
+	if (face) g.drawImage(GX.img[sm.sheet], sm.frame * sm.size, 0, sm.size, sm.size, x + sm.dx * s, y + sm.dy * s, sm.size * s, sm.size * s);
+	if ((fl & 1) && dm && off <= 16 && (off | 0) < dm.frames) {
+		g.drawImage(GX.img[dm.sheet], (off | 0) * dm.size, 0, dm.size, dm.size, x + dm.dx * s, y + dm.dy * s, dm.size * s, dm.size * s);
+	}
+	g.restore();
+	const cx = x + 8 * s, cy = y + 8 * s;
+	if (s < 0.75) {   // small: a ring shows where it is
+		g.strokeStyle = ghost ? 'rgba(200,225,255,.55)' : 'rgba(255,210,63,.85)'; g.lineWidth = 2;
+		g.beginPath(); g.arc(cx, cy, Math.max(5, 13 * s) + 3, 0, 7); g.stroke();
+	}
+	if (!ghost) vwGravArrow(g, cx, cy, Math.max(4, 11 * s), fl);
+}
+
+// ---- the frame
+/** the level's chunks in view (built as needed, at most ~8 ms per frame; the rest the next frames), EE graphics: brought
+ *  to the run's state; drawn below the smileys. Returns the chunks in view with their screen position. */
+function vwChunks(g, L, T, ox, oy, cw, ch, S) {
+	const ee = !!S, CH = gxChunkSize(T), CT = CH * T, mode = ee ? 'ee' : 's';
+	const nx = Math.ceil(L.W / CH), ny = Math.ceil(L.H / CH);
+	const m = ee ? T : 0;   // (EE graphics: a block one tile left of or above the view casts its shadow into it)
+	const cx0 = Math.max(0, Math.floor((-ox - m) / CT)), cx1 = Math.min(nx - 1, Math.floor((cw - ox) / CT));
+	const cy0 = Math.max(0, Math.floor((-oy - m) / CT)), cy1 = Math.min(ny - 1, Math.floor((ch - oy) / CT));
+	const frame = ++vw.frame, until = performance.now() + 8, vis = [];
+	let built = 0;
+	for (let cy = cy0; cy <= cy1; cy++) {
+		for (let cx = cx0; cx <= cx1; cx++) {
+			const key = `${mode}|${T}|${cx}|${cy}`;
+			let c = vw.chunks.get(key);
+			if (c) { vw.chunks.delete(key); vw.chunks.set(key, c); } else {
+				if (built > 0 && performance.now() > until) { vw.dirty = true; continue; }
+				c = ee ? gxChunk(L, cx, cy, CH, T, S) : vwChunk(cx, cy, T, CH);
+				built++;
+				vw.chunks.set(key, c); vw.px += c.px;
+			}
+			c.used = frame;
+			vis.push([c, ox + cx * CT, oy + cy * CT]);
+		}
+	}
+	if (ee) for (const [c] of vis) gxUpdate(c, L, T, CH, S);
+	for (const [c, x, y] of vis) g.drawImage(c.c, x, y);
+	if (vw.px > 24e6) {   // memory: the least recently used chunks go first
+		for (const [k, c] of vw.chunks) { if (vw.px <= 16e6) break; if (c.used === frame) continue; vw.chunks.delete(k); vw.px -= c.px; }
+	}
+	return vis;
+}
+/** the route of a run as one path in world px (drawn scaled; cached per run) */
+function vwRoute(r) {
+	if (r.route) return r.route;
+	const p = new Path2D();
+	for (let t = 0; t <= r.n; t++) {
+		const x = r.X[t] / 16 + 8, y = r.Y[t] / 16 + 8;
+		if (t === 0 || Math.abs(r.X[t] - r.X[t - 1]) + Math.abs(r.Y[t] - r.Y[t - 1]) > 40 * 16) p.moveTo(x, y); else p.lineTo(x, y);
+	}
+	return (r.route = p);
 }
 function vwDraw() {
 	const cv = $('vCanvas'), g = cv.getContext('2d');
 	const L = vw.L, A = vw.A, G = vw.G;
 	const cw = cv.width, ch = cv.height, dpr = window.devicePixelRatio || 1;
+	g.imageSmoothingEnabled = false;
 	g.fillStyle = VC.outside; g.fillRect(0, 0, cw, ch);
 	if (!L || !A) return;
-	const T = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)), s = T / 16;
-	if (T !== vw.chunkT) { vw.chunks.clear(); vw.chunkT = T; }
+	const T = vwT(), s = T / 16, ee = gxReady();
 	const ox = Math.round(cw / 2 - vw.camX * s), oy = Math.round(ch / 2 - vw.camY * s);
-	const CH = T >= 40 ? 8 : 16, CT = CH * T;
-	// level chunks in view
-	const cx0 = Math.max(0, Math.floor(-ox / CT)), cx1 = Math.min(Math.ceil(L.W / CH) - 1, Math.floor((cw - ox) / CT));
-	const cy0 = Math.max(0, Math.floor(-oy / CT)), cy1 = Math.min(Math.ceil(L.H / CH) - 1, Math.floor((ch - oy) / CT));
-	for (let cy = cy0; cy <= cy1; cy++) {
-		for (let cx = cx0; cx <= cx1; cx++) {
-			const key = cy * 4096 + cx;
-			let c = vw.chunks.get(key);
-			if (!c) { c = vwChunk(cx, cy, T, CH); vw.chunks.set(key, c); }
-			g.drawImage(c, ox + cx * CT, oy + cy * CT);
-		}
-	}
-	if (vw.chunks.size > 900) vw.chunks.clear();   // (zoomed far out and panned around a lot)
+	const bt = Math.min(Math.floor(vw.pos), A.n);
+	const S = ee ? gxState(A, bt) : null;
+	const vis = vwChunks(g, L, T, ox, oy, cw, ch, S);
 	const tx0 = Math.floor(-ox / T) - 1, tx1 = Math.ceil((cw - ox) / T) + 1, ty0 = Math.floor(-oy / T) - 1, ty1 = Math.ceil((ch - oy) / T) + 1;
 	const inView = (x, y) => x >= tx0 && x <= tx1 && y >= ty0 && y <= ty1;
-	const bt = Math.min(Math.floor(vw.pos), A.n);
-	// doors (state of the best run's world at this tick)
-	for (const d of L.doors) {
-		if (!inView(d.x, d.y)) continue;
-		const sx = ox + d.x * T, sy = oy + d.y * T, col = doorColor(d.sub || '');
-		const solid = vwDoorSolid(A, d.key, bt);
-		if (solid) {
-			g.fillStyle = col; g.globalAlpha = 0.85; g.fillRect(sx, sy, T, T); g.globalAlpha = 1;
-			if (T >= 6) {   // hatching, clipped to the tile
-				g.save(); g.beginPath(); g.rect(sx, sy, T, T); g.clip();
-				g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = Math.max(1, T / 12); g.beginPath();
-				for (let k = -T; k < T; k += Math.max(3, T / 3)) { g.moveTo(sx + k, sy + T); g.lineTo(sx + k + T, sy); }
-				g.stroke(); g.restore();
+	if (ee) gxCoins(g, L, A, S, ox, oy, T, inView, true);
+	else {
+		// doors (state of the best run's world at this tick)
+		for (const d of L.doors) {
+			if (!inView(d.x, d.y)) continue;
+			const sx = ox + d.x * T, sy = oy + d.y * T, col = doorColor(d.sub || '');
+			const solid = vwDoorSolid(A, d.key, bt);
+			if (solid) {
+				g.fillStyle = col; g.globalAlpha = 0.85; g.fillRect(sx, sy, T, T); g.globalAlpha = 1;
+				if (T >= 6) {   // hatching, clipped to the tile
+					g.save(); g.beginPath(); g.rect(sx, sy, T, T); g.clip();
+					g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = Math.max(1, T / 12); g.beginPath();
+					for (let k = -T; k < T; k += Math.max(3, T / 3)) { g.moveTo(sx + k, sy + T); g.lineTo(sx + k + T, sy); }
+					g.stroke(); g.restore();
+				}
+			} else if (T >= 4) {
+				g.strokeStyle = col; g.globalAlpha = 0.55; g.lineWidth = Math.max(1, T / 14); g.setLineDash([Math.max(2, T / 5), Math.max(2, T / 6)]);
+				g.strokeRect(sx + g.lineWidth / 2, sy + g.lineWidth / 2, T - g.lineWidth, T - g.lineWidth); g.setLineDash([]); g.globalAlpha = 1;
 			}
-		} else if (T >= 4) {
-			g.strokeStyle = col; g.globalAlpha = 0.55; g.lineWidth = Math.max(1, T / 14); g.setLineDash([Math.max(2, T / 5), Math.max(2, T / 6)]);
-			g.strokeRect(sx + g.lineWidth / 2, sy + g.lineWidth / 2, T - g.lineWidth, T - g.lineWidth); g.setLineDash([]); g.globalAlpha = 1;
+			if (T >= 14 && d.num && /coin|death/.test(d.sub || '')) {
+				g.fillStyle = solid ? '#111' : col; g.font = `bold ${Math.round(T * 0.45)}px ui-monospace, Consolas, monospace`; g.textAlign = 'center'; g.textBaseline = 'middle';
+				g.fillText(String(d.num), sx + T / 2, sy + T / 2 + 1); g.textBaseline = 'alphabetic';
+			}
 		}
-		if (T >= 14 && d.num && /coin|death/.test(d.sub || '')) {
-			g.fillStyle = solid ? '#111' : col; g.font = `bold ${Math.round(T * 0.45)}px ui-monospace, Consolas, monospace`; g.textAlign = 'center'; g.textBaseline = 'middle';
-			g.fillText(String(d.num), sx + T / 2, sy + T / 2 + 1); g.textBaseline = 'alphabetic';
+		// coins (disappear when the best run takes them)
+		for (const c of L.coins) {
+			if (!inView(c.x, c.y)) continue;
+			const at = A.coinAt.get(c.i);
+			const gone = A.taken0.has(c.i) || (at !== undefined && at <= bt);
+			const cx = ox + c.x * T + T / 2, cy = oy + c.y * T + T / 2, r = Math.max(1.5, T * 0.3);
+			if (gone) { g.strokeStyle = c.blue ? 'rgba(90,150,255,.35)' : 'rgba(255,205,0,.3)'; g.lineWidth = Math.max(1, T / 16); g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke(); }
+			else { g.fillStyle = c.blue ? '#4b8dff' : '#ffcc00'; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); if (T >= 8) { g.strokeStyle = c.blue ? '#1d3f8a' : '#8a6400'; g.lineWidth = Math.max(1, T / 16); g.stroke(); } }
 		}
 	}
-	// coins (disappear when the best run takes them)
-	for (const c of L.coins) {
-		if (!inView(c.x, c.y)) continue;
-		const at = A.coinAt.get(c.i);
-		const gone = A.taken0.has(c.i) || (at !== undefined && at <= bt);
-		const cx = ox + c.x * T + T / 2, cy = oy + c.y * T + T / 2, r = Math.max(1.5, T * 0.3);
-		if (gone) { g.strokeStyle = c.blue ? 'rgba(90,150,255,.35)' : 'rgba(255,205,0,.3)'; g.lineWidth = Math.max(1, T / 16); g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke(); }
-		else { g.fillStyle = c.blue ? '#4b8dff' : '#ffcc00'; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); if (T >= 8) { g.strokeStyle = c.blue ? '#1d3f8a' : '#8a6400'; g.lineWidth = Math.max(1, T / 16); g.stroke(); } }
+	// the route of the best run (a thin line), the last 0.8 s (a fading trail)
+	g.lineJoin = 'round'; g.lineCap = 'round';
+	if (vw.path) {
+		g.save();
+		g.setTransform(s, 0, 0, s, ox, oy);
+		const route = vwRoute(A);
+		g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = 3 * dpr / s; g.stroke(route);
+		g.strokeStyle = ee ? 'rgba(255,255,255,.42)' : 'rgba(255,255,255,.2)'; g.lineWidth = Math.max(1, dpr) / s; g.stroke(route);
+		g.restore();
 	}
-	// the route of the best run (thin), the recent trail (bright)
-	const P = (r, t) => [ox + (r.X[t] / 16 + 8) * s, oy + (r.Y[t] / 16 + 8) * s];
-	const strokeRun = (r, a, b) => {
-		g.beginPath();
+	const P = (t) => [ox + (A.X[t] / 16 + 8) * s, oy + (A.Y[t] / 16 + 8) * s];
+	const trail = (a, b, width, col) => {
+		g.strokeStyle = col; g.lineWidth = width; g.beginPath();
 		let pen = false;
-		for (let t = Math.max(0, a); t <= Math.min(b, r.n); t++) {
-			const [x, y] = P(r, t);
-			const jump = t > a && Math.abs(r.X[t] - r.X[t - 1]) + Math.abs(r.Y[t] - r.Y[t - 1]) > 40 * 16;
-			const off = x < -200 || y < -200 || x > cw + 200 || y > ch + 200;
-			if (!pen || jump || off) { g.moveTo(x, y); pen = !off; } else g.lineTo(x, y);
+		for (let t = Math.max(0, a); t <= Math.min(b, A.n); t++) {
+			const [x, y] = P(t);
+			if (!pen || (t > a && Math.abs(A.X[t] - A.X[t - 1]) + Math.abs(A.Y[t] - A.Y[t - 1]) > 40 * 16)) { g.moveTo(x, y); pen = true; } else g.lineTo(x, y);
 		}
 		g.stroke();
 	};
-	g.lineJoin = 'round'; g.lineCap = 'round';
-	if (vw.path) { g.strokeStyle = 'rgba(255,255,255,.16)'; g.lineWidth = Math.max(1, dpr); strokeRun(A, 0, A.n); }
-	g.strokeStyle = 'rgba(255,210,63,.6)'; g.lineWidth = Math.max(2, 2.5 * dpr); strokeRun(A, bt - 80, bt);
+	const tw = Math.max(2, 2.5 * dpr);
+	trail(bt - 80, bt, tw + 2 * dpr, 'rgba(0,0,0,.35)');
+	for (let k = 0; k < 8; k++) trail(bt - 80 + k * 10, bt - 70 + k * 10, tw, `rgba(255,210,63,${(0.12 + 0.11 * k).toFixed(2)})`);
 	// event flashes: coins, portals, deaths, keys, switches, the finish (the last 0.3 s)
-	const flash = (wx, wy, age, col) => { const f = age / 30; g.strokeStyle = col; g.globalAlpha = 1 - f; g.lineWidth = Math.max(1.5, 2 * dpr); g.beginPath(); g.arc(ox + wx * s, oy + wy * s, (8 + 18 * f) * s + 4, 0, 7); g.stroke(); g.globalAlpha = 1; };
-	for (const e of A.events) {
-		if (e[0] > bt || e[0] < bt - 30) continue;
-		const age = vw.pos - e[0];
-		if (age < 0) continue;
-		if (e[1] === 'coin' || e[1] === 'blue_coin') flash(e[2] * 16 + 8, e[3] * 16 + 8, age, e[1] === 'coin' ? '#ffe066' : '#7fb0ff');
-		else if (e[1] === 'portal') { flash(e[2] * 16 + 8, e[3] * 16 + 8, age, '#e0a0ff'); flash(e[4] * 16 + 8, e[5] * 16 + 8, age, '#e0a0ff'); }
-		else if (e[1] === 'death') flash(A.X[Math.max(0, e[0] - 1)] / 16 + 8, A.Y[Math.max(0, e[0] - 1)] / 16 + 8, age, '#ff5252');
-		else if (e[1] === 'key' || e[1] === 'checkpoint' || e[1] === 'crown' || e[1] === 'complete') flash(e[e[1] === 'key' ? 3 : 2] * 16 + 8, e[e[1] === 'key' ? 4 : 3] * 16 + 8, age, '#ffffff');
-	}
-	// the ghost (original, same in-game time), then the best run's ball
-	if (vw.ghost && G) {
-		const gt = clamp(vw.pos + vw.off, 0, G.n);
-		const [gx, gy] = vwPosAt(G, gt);
-		vwBall(g, ox + gx * s, oy + gy * s, s, G.FL[Math.floor(gt)], true);
-	}
+	const flashes = () => {
+		const flash = (wx, wy, age, col) => { const f = age / 30; g.strokeStyle = col; g.globalAlpha = 1 - f; g.lineWidth = Math.max(1.5, 2 * dpr); g.beginPath(); g.arc(ox + wx * s, oy + wy * s, (8 + 18 * f) * s + 4, 0, 7); g.stroke(); g.globalAlpha = 1; };
+		for (const e of A.events) {
+			if (e[0] > bt || e[0] < bt - 30) continue;
+			const age = vw.pos - e[0];
+			if (age < 0) continue;
+			if (e[1] === 'coin' || e[1] === 'blue_coin') flash(e[2] * 16 + 8, e[3] * 16 + 8, age, e[1] === 'coin' ? '#ffe066' : '#7fb0ff');
+			else if (e[1] === 'portal') { flash(e[2] * 16 + 8, e[3] * 16 + 8, age, '#e0a0ff'); flash(e[4] * 16 + 8, e[5] * 16 + 8, age, '#e0a0ff'); }
+			else if (e[1] === 'death') flash(A.X[Math.max(0, e[0] - 1)] / 16 + 8, A.Y[Math.max(0, e[0] - 1)] / 16 + 8, age, '#ff5252');
+			else if (e[1] === 'key' || e[1] === 'checkpoint' || e[1] === 'crown' || e[1] === 'complete') flash(e[e[1] === 'key' ? 3 : 2] * 16 + 8, e[e[1] === 'key' ? 4 : 3] * 16 + 8, age, '#ffffff');
+		}
+	};
+	// the ghost (original, same in-game time), then the best run; EE graphics: then the level's "above" layer and the coins
 	const [ax, ay] = vwPosAt(A, Math.min(vw.pos, A.n));
-	vwBall(g, ox + ax * s, oy + ay * s, s, A.FL[bt], false);
+	if (ee) {
+		if (vw.ghost && G) { const gt = clamp(vw.pos + vw.off, 0, G.n), [gx, gy] = vwPosAt(G, gt); gxBall(g, G, gt, ox + gx * s, oy + gy * s, s, true); }
+		gxBall(g, A, Math.min(vw.pos, A.n), ox + ax * s, oy + ay * s, s, false);
+		for (const [c, x, y] of vis) if (c.a) g.drawImage(c.a, x, y);
+		gxCoins(g, L, A, S, ox, oy, T, inView, false);
+		flashes();
+	} else {
+		flashes();
+		if (vw.ghost && G) {
+			const gt = clamp(vw.pos + vw.off, 0, G.n);
+			const [gx, gy] = vwPosAt(G, gt);
+			vwBall(g, ox + gx * s, oy + gy * s, s, G.FL[Math.floor(gt)], true);
+		}
+		vwBall(g, ox + ax * s, oy + ay * s, s, A.FL[bt], false);
+	}
 }
 function vwHud() {
 	const A = vw.A, G = vw.G;
@@ -1112,6 +1681,7 @@ function vwHud() {
 	const m = bt < A.n ? A.IN[bt] : 0;
 	if (h.keys !== m) { h.keys = m; for (const el of $('vKeys').children) el.classList.toggle('on', !!(m & +el.dataset.b)); }
 	set('vPos', `${fmt(A.RUN[bt])} / ${A.time}<span class="vtick"> · tick ${bt}</span>`, 'html');
+	set('vTk', `tick ${bt} / ${A.n}`);
 	const sv = String(Math.floor(vw.pos));
 	if (document.activeElement !== $('vScrub') && $('vScrub').value !== sv) $('vScrub').value = sv;
 	set('vPlay', vw.playing ? '❚❚' : '▶');
@@ -1122,7 +1692,7 @@ function vwFrame(ts) {
 	const dt = vw.last ? Math.min(0.1, (ts - vw.last) / 1000) : 0;
 	vw.last = ts;
 	const A = vw.A;
-	if (!A) { if (vw.dirty) { vwDraw(); vw.dirty = false; } return; }
+	if (!A) { if (vw.dirty) { vw.dirty = false; vwDraw(); } return; }
 	if (vw.playing) {
 		vw.pos += dt * 100 * vw.speed;
 		if (vw.pos >= vw.T) { vw.pos = vw.T; vw.playing = false; }
@@ -1131,7 +1701,7 @@ function vwFrame(ts) {
 	if (vw.follow) {
 		const [x, y] = vwPosAt(A, Math.min(vw.pos, A.n));
 		const tx = x + 8, ty = y + 8;
-		const cv = $('vCanvas'), dpr = window.devicePixelRatio || 1, s = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)) / 16;
+		const cv = $('vCanvas'), s = vwT() / 16;
 		const far = Math.abs(tx - vw.camX) * s > cv.width * 0.6 || Math.abs(ty - vw.camY) * s > cv.height * 0.6;
 		if (vw.snap || far) { vw.camX = tx; vw.camY = ty; vw.snap = false; vw.dirty = true; }
 		else {
@@ -1140,19 +1710,35 @@ function vwFrame(ts) {
 			if (Math.abs(nx - vw.camX) + Math.abs(ny - vw.camY) > 0.01) { vw.camX = nx; vw.camY = ny; vw.dirty = true; }
 		}
 	}
-	if (vw.dirty) { vwDraw(); vwHud(); vw.dirty = false; }
+	if (vw.dirty) { vw.dirty = false; vwDraw(); vwHud(); }   // (vwDraw sets dirty again while chunks are still being built)
 }
 function vwSetPos(p) { vw.pos = clamp(p, 0, vw.T); vw.snap = true; vw.dirty = true; }
+/** a step through the run: d ticks (the 1-tick steps pause) */
+function vwStep(d, pause) {
+	if (!vw.A) return;
+	if (pause) vw.playing = false;
+	vwSetPos(Math.floor(vw.pos) + d);
+}
 function vwZoom(step, fx, fy) {
 	const nz = clamp(vw.zi + step, 0, ZOOMS.length - 1);
 	if (nz === vw.zi) return;
-	const cv = $('vCanvas'), dpr = window.devicePixelRatio || 1;
+	const cv = $('vCanvas');
 	if (!vw.follow && fx !== undefined) {   // keep the world point under the cursor in place
-		const s0 = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)) / 16, s1 = Math.max(2, Math.round(ZOOMS[nz] * dpr)) / 16;
+		const s0 = vwT() / 16, s1 = vwT(nz) / 16;
 		const wx = vw.camX + (fx - cv.width / 2) / s0, wy = vw.camY + (fy - cv.height / 2) / s0;
 		vw.camX = wx - (fx - cv.width / 2) / s1; vw.camY = wy - (fy - cv.height / 2) / s1;
 	}
-	vw.zi = nz; store.set('tasopt.vzoom', String(nz)); vw.dirty = true;
+	vw.zi = nz; store.set('tasopt.vzoom2', String(nz)); vw.dirty = true;
+}
+/** zoom out to the whole level (the largest zoom at which it fits), centred, not following */
+function vwFit() {
+	const L = vw.L;
+	if (!L) return;
+	const cv = $('vCanvas');
+	let zi = 0;
+	for (let k = ZOOMS.length - 1; k >= 0; k--) { const T = vwT(k); if (L.W * T <= cv.width * 0.97 && L.H * T <= cv.height * 0.97) { zi = k; break; } }
+	vwFollow(false);
+	vw.zi = zi; vw.camX = L.W * 8; vw.camY = L.H * 8; vw.dirty = true;
 }
 function vwFollow(on) { vw.follow = on; $('vFollow').classList.toggle('on', on); if (on) vw.snap = false; vw.dirty = true; }
 function vwTogglePlay() {
@@ -1192,13 +1778,40 @@ $('vJump').onchange = vwJump;
 $('vGhost').onchange = () => { vw.ghost = $('vGhost').checked; vw.dirty = true; };
 $('vPath').onchange = () => { vw.path = $('vPath').checked; vw.dirty = true; };
 $('vFollow').onclick = () => vwFollow(!vw.follow);
+$('vFit').onclick = vwFit;
 $('vZoomIn').onclick = () => vwZoom(1);
 $('vZoomOut').onclick = () => vwZoom(-1);
+// the step buttons (hold one to repeat)
+for (const [id, d, pause] of [['vB1s', -100, false], ['vB1', -1, true], ['vF1', 1, true], ['vF1s', 100, false]]) {
+	const b = $(id);
+	let first = 0, rep = 0;
+	const stop = () => { clearTimeout(first); clearInterval(rep); first = rep = 0; };
+	b.addEventListener('pointerdown', (e) => {
+		if (e.button) return;
+		stop(); vwStep(d, pause);
+		first = setTimeout(() => { rep = setInterval(() => vwStep(d, pause), d === 1 || d === -1 ? 45 : 160); }, 380);
+	});
+	for (const ev of ['pointerup', 'pointerleave', 'pointercancel', 'blur']) b.addEventListener(ev, stop);
+	b.addEventListener('click', (e) => { if (e.detail === 0) vwStep(d, pause); });   // Enter on the focused button
+}
+// EE graphics: the toggle, the folder setting
+$('vGfx').onchange = () => {
+	GX.on = $('vGfx').checked; store.set('tasopt.vgfx', GX.on ? 'ee' : 'simple');
+	if (GX.on && GX.st === 'idle') gxLoad();
+	if (GX.on && GX.st === 'off') $('vGfxPanel').hidden = false;
+	gxUi(); vw.dirty = true;
+};
+$('vGfxSet').onclick = () => { $('vGfxPanel').hidden = !$('vGfxPanel').hidden; gxUi(); };
+$('vGfxHint').onclick = () => { $('vGfxPanel').hidden = false; gxUi(); $('vGfxDir').focus(); };
+$('vGfxClose').onclick = () => { $('vGfxPanel').hidden = true; };
+$('vGfxUse').onclick = () => gxSetDir($('vGfxDir').value);
+$('vGfxAuto').onclick = () => gxSetDir('');
+$('vGfxDir').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); gxSetDir($('vGfxDir').value); } };
 window.addEventListener('resize', () => { if (vw.open) vwResize(); });
 if (window.ResizeObserver) new ResizeObserver(() => { if (vw.open) vwResize(); }).observe($('vStage'));
 document.addEventListener('keydown', (e) => {
 	if (!vw.open) return;
-	if (e.key === 'Escape') { closeViewer(); return; }
+	if (e.key === 'Escape') { if (!$('vGfxPanel').hidden) $('vGfxPanel').hidden = true; else closeViewer(); return; }
 	const tag = (e.target && e.target.tagName) || '';
 	if (tag === 'INPUT' && e.target.type === 'text') return;
 	if (tag === 'SELECT') return;
@@ -1210,6 +1823,7 @@ document.addEventListener('keydown', (e) => {
 	else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); vwSetPos(Math.floor(vw.pos) + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 1 : 100)); }
 	else if (e.key === '+' || e.key === '=') vwZoom(1);
 	else if (e.key === '-' || e.key === '_') vwZoom(-1);
+	else if (e.key === '0') vwFit();
 	else if (e.key === 'f' || e.key === 'F') vwFollow(!vw.follow);
 	else if (e.key === 'g' || e.key === 'G') { $('vGhost').checked = !$('vGhost').checked; vw.ghost = $('vGhost').checked; vw.dirty = true; }
 	else if (e.key === 'Home') vwSetPos(0);
@@ -1221,7 +1835,7 @@ vcv.addEventListener('pointerdown', (e) => { vcv.setPointerCapture(e.pointerId);
 vcv.addEventListener('pointermove', (e) => {
 	const p = vw.ptr.get(e.pointerId);
 	if (!p) return;
-	const dpr = window.devicePixelRatio || 1, s = Math.max(2, Math.round(ZOOMS[vw.zi] * dpr)) / 16;
+	const dpr = window.devicePixelRatio || 1, s = vwT() / 16;
 	if (vw.ptr.size === 1) {
 		const dx = e.clientX - p[0], dy = e.clientY - p[1];
 		if (Math.abs(dx) + Math.abs(dy) < 1) return;
@@ -1247,7 +1861,7 @@ vcv.addEventListener('wheel', (e) => {
 }, { passive: false });
 vcv.addEventListener('dblclick', () => vwFollow(true));
 
-// deep link to the viewer: #watch=<job id>[&t=1:10.00][&zoom=0..13][&play=1] (the page keeps #watch=<id> while it is open)
+// deep link to the viewer: #watch=<job id>[&t=1:10.00][&zoom=0..13 (-3..-1 even smaller) | fit][&play=1] (the page keeps #watch=<id> while it is open)
 function openFromHash() {
 	const h = location.hash.replace(/^#/, '');
 	const m = h.match(/(?:^|&)watch=([a-z0-9-]+)/);

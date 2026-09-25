@@ -73,19 +73,28 @@ That is all: no `npm install`, no Godot, no Python.
 **Watch** (next to each run in the list, and at the top of a run) opens a player over the page. It replays the
 job's current best run in the same exact physics the optimizer uses, while the optimizer keeps running.
 
-- The level is drawn in EE's own minimap colors (background blocks dimmed). Arrows show their gravity direction,
-  dots, boosts, portals (a white dot marks a random exit), coins (they disappear when the run takes them), doors and
-  gates (filled = closed, outline = open, with the coins or deaths they need), spikes and the finish (green checker)
-  are marked. The yellow line is the last moment of the run, the thin line its whole route.
+- **EE graphics:** the level looks like Everybody Edits: the game's own blocks, backgrounds, decorations and shadows,
+  the smiley for your run and a see-through smiley for the ghost. Doors, gates and switches open and close as the run
+  goes, coin and death doors count down, coins disappear when the run takes them (a faint coin marks where one was).
+  The images belong to Everybody Edits, so they are not part of this app: it reads them from your **eeo-tas** folder
+  while you watch (the one you play TASes with: `EEO_TAS`, else `eeo-tas` in your user folder). If it is somewhere
+  else, press **⚙** next to "EE graphics" and enter its folder (it needs `media/blocks.png` and
+  `src/items/ItemManager.as`). Without eeo-tas, or with "EE graphics" unticked, the level is drawn in EE's minimap
+  colors instead: arrows, dots, boosts, portals (a white dot marks a random exit), coins, doors and gates (filled =
+  closed, outline = open, with the coins or deaths they need), spikes and the finish (green checker) are marked.
+- The yellow trail is the last moment of the run, the thin line its whole route.
 - The **ghost** is your original `.eetas`, shown at the same in-game time. The timers of both runs run live, and the
   panel says how far the original is behind at this point of the route (for example "original is 0.42 s behind
   here"), and at the finish.
 - **Space** play / pause, speed 0.25x to 16x, the bar scrubs through the run, **jump to** takes a run time
-  (`1:10.00`, `70.5s`) or a tick number. **+ / -** or the mouse wheel zoom, drag to look around (**Follow** or a double
-  click follows the ball again), **← / →** move 1 s (with Shift 1 tick), **G** hides the ghost, **Esc** closes.
+  (`1:10.00`, `70.5s`) or a tick number. Frame by frame: the **◀ 1 tick / 1 tick ▶** buttons (hold to repeat) or
+  **Shift+← / →**; **|◀ 1 s / 1 s ▶|** or **← / →** move 1 s. The current tick is shown next to them.
+- **+ / -** or the mouse wheel zoom, drag to look around (**Follow** or a double click follows the ball again),
+  **Fit level** (or **0**) shows the whole level. **G** hides the ghost, **Esc** closes.
 - When the optimizer finds a faster run while you watch, a **Newer version found · reload** button appears; the view
   does not change until you press it.
-- Link straight to it: `http://localhost:47823/#watch=<job id>&t=1:10.00` (also `&zoom=0..13`, `&play=1`).
+- Link straight to it: `http://localhost:47823/#watch=<job id>&t=1:10.00` (also `&zoom=0..13` or `&zoom=fit`,
+  `&play=1`).
 - It works on a phone-sized screen too (pinch to zoom).
 
 ## How you started the TAS in eeo-tas
@@ -152,8 +161,10 @@ each random portal on the route, its time, how many exits it has and how many of
 ## Where things are
 
 - `src/jobs/<id>/best.eetas` is the current best run of a job. `best_<ticks>.eetas` keeps every improvement, and
-  `grind.log` is the optimizer's log. `src/data/` holds the levels converted for the optimizer and the CPU speed
-  measurement (`_system.json`; delete it to measure again). Both folders stay on your computer (git ignores them).
+  `grind.log` is the optimizer's log. `src/data/` holds the levels converted for the optimizer, the CPU speed
+  measurement (`_system.json`; delete it to measure again), the viewer's eeo-tas folder setting (`settings.json`) and
+  the sprite map read from it (`eegfx.json`, rebuilt when eeo-tas changes). Both folders stay on your computer (git
+  ignores them).
 - Delete a run with the **Delete** button (click twice).
 
 ## Command line (optional)
@@ -174,8 +185,9 @@ node src/bench.js                              measure the CPU's physics speed (
 ```
 
 The app also has a local JSON API (`GET http://localhost:47823/api` lists it; the viewer uses
-`/api/jobs/<id>/level` and `/api/jobs/<id>/trajectory`, the processor selector `/api/system`). CLAUDE.md documents
-both.
+`/api/jobs/<id>/level`, `/api/jobs/<id>/trajectory` and `/api/eegfx`, the processor selector `/api/system`). CLAUDE.md
+documents both. `node src/eegfx.js` shows which eeo-tas folder the EE graphics come from and what it found there
+(`node src/eegfx.js coverage level.eelvl` lists block ids of a level without a sprite).
 
 ## Limitations
 
