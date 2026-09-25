@@ -246,6 +246,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 							from, in.size(), total, n > 0 ? n - total : 0, in.c_str());
 						fflush(stdout);
 					}
+					if (goal) break;   // the editor: the first verified finish of this tick is the fastest possible
 				}
 			} else if (c.flags & 4) {
 				const int saving = c.rejoin - (from + d + 1);

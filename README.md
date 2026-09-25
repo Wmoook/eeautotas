@@ -96,6 +96,11 @@ job's current best run in the same exact physics the optimizer uses, while the o
 - Link straight to it: `http://localhost:47823/#watch=<job id>&t=1:10.00` (also `&zoom=0..13` or `&zoom=fit`,
   `&play=1`).
 - It works on a phone-sized screen too (pinch to zoom).
+- **✏ Line** (or **L**, GPU mode): think the ball could go another way? Pause at the moment the new route should
+  start, drag a line on the map where you think it can go, and press **Search along the line**. The GPU tries every
+  input every tick from that moment, keeps the attempts that follow your line best (a guide, not a rail), then heads
+  back to the run: an attempt that becomes exactly equal to a later moment of the run is a proven shortcut and goes to
+  the optimizer. The panel shows the search live. (From a terminal: `node src/tas.js guide <job> <from> "<x,y ...>"`.)
 
 ## Level editor: build a level, let the GPU find a route
 

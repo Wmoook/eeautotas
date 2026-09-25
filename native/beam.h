@@ -56,9 +56,11 @@ EE_HD float runMatchScore(const BeamParams& p, i32 r0, float px, float py, float
 	return best;
 }
 
-/** Progress along the guide (arc length at the closest point) minus weight * distance to it (float: a heuristic). */
+/** Progress along the guide at the point of the line NEAREST to the ball (arc length there; the later one on a tie)
+ *  minus weight * the distance to it (float: a heuristic). (Taking the best "progress - weight * distance" over the
+ *  whole line instead would credit a ball far from the line with the line's far end.) */
 EE_HD float guideScore(const BeamParams& p, float cx, float cy) {
-	float best = -1e30f;
+	float bestD = 1e30f, prog = 0.f;
 	for (i32 i = 0; i + 1 < p.nGuide; i++) {
 		const float ax = p.gx[i], ay = p.gy[i], bx = p.gx[i + 1], by = p.gy[i + 1];
 		const float dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
@@ -66,10 +68,10 @@ EE_HD float guideScore(const BeamParams& p, float cx, float cy) {
 		t = t < 0 ? 0 : t > 1 ? 1 : t;
 		const float qx = ax + t * dx - cx, qy = ay + t * dy - cy;
 		const float d = sqrtf(qx * qx + qy * qy);
-		const float sc = p.gs[i] + t * (p.gs[i + 1] - p.gs[i]) - p.guideWeight * d;
-		if (sc > best) best = sc;
+		const float arc = p.gs[i] + t * (p.gs[i + 1] - p.gs[i]);
+		if (d < bestD - 0.01f || (d <= bestD + 0.01f && arc > prog)) { bestD = d; prog = arc; }
 	}
-	return best;
+	return prog - p.guideWeight * bestD;
 }
 /** Walking distance to the goal, bilinear between tile centres (lower = closer; 1e6 where unreachable). */
 EE_HD float goalScore(const BeamParams& p, const Level& L, float cx, float cy) {
