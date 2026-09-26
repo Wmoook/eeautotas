@@ -33,7 +33,8 @@
 const fs = require('fs');
 
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16, F_CLIMB = 32;
-const BMAX = 48;                    // budget levels 0..B (units of 8 px); B = unlimited (never used up); B is per level:
+const BMAX = 16;                    // budget levels 0..B (units of 8 px); B = unlimited (never used up): a budget of B or more
+                                    // (120+ px of rise) counts as unlimited, which keeps the model optimistic; B is per level:
                                     // BMAX with unlimited sources (up boosts, portals, wild effects), else just above the
                                     // biggest budget the level can give (fewer states, the same costs)
 const C_SOLID = 0, C_NORMAL = 1, C_ZEROV = 2, C_UP = 3, C_BOOSTUP = 4, C_DEADLY = 5;
@@ -106,7 +107,7 @@ function reachField(level, opts) {
 			else if (sub[i] === 3) u = unitsOf(apexOf(WATER_APEX, h));
 			else if (sub[i] === 4) u = unitsOf(1);
 			else u = unitsOf(apexOf(DOT_APEX, h));
-			for (let k = y; k <= y2; k++) own[k * W + x] = Math.min(B - 1, u);
+			for (let k = y; k <= y2; k++) own[k * W + x] = u >= B ? B : u;
 			y = y2 + 1;
 		}
 	}
@@ -147,7 +148,7 @@ function reachField(level, opts) {
 
 	// the budget levels this level needs
 	let maxOwn = 0, unlimited = wild || portalExits.size > 0;
-	for (let i = 0; i < N; i++) { if (cls[i] === C_BOOSTUP) unlimited = true; else if (own[i] < BMAX && own[i] > maxOwn) maxOwn = own[i]; }
+	for (let i = 0; i < N; i++) { if (cls[i] === C_BOOSTUP || own[i] >= BMAX) unlimited = true; else if (own[i] > maxOwn) maxOwn = own[i]; }
 	if (!unlimited) {
 		B = Math.min(BMAX, Math.max(JB, LAND_UNITS, 11, maxOwn) + 2);
 		for (let i = 0; i < N; i++) { if (refresh[i] >= B) refresh[i] = B - 1; }
