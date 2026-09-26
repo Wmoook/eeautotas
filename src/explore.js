@@ -19,7 +19,8 @@
 // checking the exact state every tick: wall hits, landings and the grid auto-align absorb small differences, so these
 // rejoin far more often than random inputs. Every exact rejoin (rolls and tails) is kept as an edge b -> j (b = the
 // reference tick the path left the reference), all edges are combined by DP over the reference ticks, and the edges
-// are also written to <out>.edges.json ({from, n, nocoins, edges: [[b, j, inputs as '0'+mask chars]]}).
+// are also written to <out>.edges.json ({from, n, ref: sha1 of the --tas bytes, nocoins, edges: [[b, j, inputs as
+// '0'+mask chars]]}), also when no combination was accepted.
 //
 // usage: node src/explore.js --tas=<run.eetas> --from=5913 --join=6289 [--until=6450] [--seconds=120] [--workers=16]
 //        [--cell=8] [--vcell=2] [--roll=80] [--match=8] [--exact=1] [--nocoins=0|1] [--level=<level id | job id>] [--out=...]
@@ -460,10 +461,13 @@ async function main() {
 			return;
 		}
 	};
+	// (ref: sha1 of the reference's .eetas bytes, the run whose ticks b and j refer to)
+	const refSha1 = TAILS ? require('crypto').createHash('sha1').update(C.eetasBytes(masks)).digest('hex') : '';
 	const writeEdges = () => {
 		const list = [...edges.values()].map((e) => [e.b, e.j, Buffer.from(e.seq.map((m) => 48 + m)).toString('latin1')]);
-		fs.writeFileSync(a.out + '.edges.json', JSON.stringify({ from: a.from, n: masks.length, nocoins: NOCOINS ? 1 : 0, edges: list }));
+		C.writeAtomic(a.out + '.edges.json', JSON.stringify({ from: a.from, n: masks.length, ref: refSha1, nocoins: NOCOINS ? 1 : 0, edges: list }));
 	};
+	if (TAILS) { try { fs.unlinkSync(a.out + '.edges.json'); } catch (e) { /* none */ } }   // never leave another reference's edges behind
 	const dpTimer = TAILS ? setInterval(combineAndWrite, 1000) : null;
 	await Promise.all(Array.from({ length: a.workers }, (_, i) => new Promise((res) => {
 		const w = new Worker(__filename, { workerData: { args: a, seed: a.seed * 1000 + i + 1, ticksBuf: meter.buf } });
@@ -506,8 +510,8 @@ async function main() {
 	if (TAILS) {
 		edgesNew = true;
 		combineAndWrite();
-		if (!dpBest) { console.log('[explore] nothing rejoined the reference'); return; }
-		writeEdges();
+		if (edges.size) writeEdges();   // every exact edge, also when no combination of them was accepted
+		if (!dpBest) { console.log(edges.size ? `[explore] ${edges.size} exact rejoins, no accepted combination: only the edges written` : '[explore] nothing rejoined the reference'); return; }
 		console.log(`[explore] best: DP of the exact rejoins saves ${dpBest.saved} (run_ticks ${dpBest.runTicks}) -> ${a.out}`);
 		return;
 	}
