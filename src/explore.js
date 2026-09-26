@@ -27,16 +27,19 @@
 // seeded with (T0 - j) / --huntKappa at the tile of reference tick j, so gravity budgets, arrows and portals count), at
 // --huntKappa ticks per tile. A state's lead = (T0 - huntKappa x cost) - t: how far it is ahead of the reference. The
 // archive has one cell per (tile, on the ground, sign of vx, vy class, jump count, context) and keeps the earliest state
-// (the reference states of [--from, --until] are pinned; --huntCell=8 = half tiles). Each pick takes a cell from one of two heaps, half the time
+// (the reference states of [--from, --until] are pinned: they stay seeds, and a state that reaches a pinned cell sooner
+// takes the cell; --huntCell=8 = half tiles). Each pick takes a cell from one of two heaps, half the time
 // each (--huntMix): the most lead (-lead + --huntLambda x sqrt(picks)) and novelty (--huntLambda x sqrt(picks)), and
 // plays --huntRolls sticky random rollouts of --roll ticks from it (not past T0). A rollout that meets a later
 // reference state exactly is an edge and ends there. A new (or earlier) cell with lead >= --huntLead gets tails: the
 // reference's own inputs from next to the nearest later reference state (|dpos| + 3|dvel| <= --huntD, offsets -2..2,
 // up to --tailH ticks, --tailDrift cutoff), checked for an exact rejoin every tick; every exact rejoin is an edge.
-// Measured at equal tick budgets (one thread, 3 seeds, every result judged): it finds the local skips the field points
-// at (Forgotten Veil 5760-5830: -15 in every run at 6M and 20M ticks, --tails nothing; Infinity Pain 1000-1100: -9..-10
-// at 6M, -9..-27 at 20M, --tails -5..-7), but fewer of the long, slightly faster detours that a --tails window as wide
-// as its reach finds (Infinity Pain 1000-1900, 6M: -2..-8 against -30..-36): a complement, not a replacement.
+// Measured at equal tick budgets (one thread, every result judged): it finds the local skips the field points at
+// (Forgotten Veil 5760-5830: -15..-16 in every run at 6M and 20M ticks, --tails nothing; Infinity Pain 1000-1100: -9..-12
+// at 6M, -9..-23 at 20M (7 seeds), --tails -5..-7; 5000-5100: 0..-5 at 6M (7 seeds), --tails 0..-4), but fewer of the
+// long, slightly faster detours that a --tails window as wide as its reach finds (Infinity Pain 1000-1900, 6M: -10..-24
+// in 7 seeds against -30..-36 in 3): a complement, not a replacement. The fields cost 2-3 s of CPU per context before
+// the search (Good Egg with coins counted: 22 contexts, 18 s on 3 threads), outside --seconds and --ticks.
 // --ticks=N (every mode): each worker stops after N simulated ticks (rollouts + tails), or at --seconds, whichever
 // comes first (equal tick budgets for comparisons).
 //
@@ -341,9 +344,13 @@ function workerMain() {
 		const MAXE = a.maxEntries || Infinity;
 		const offer = (t, mkNode, pinned, cid) => {
 			const k = cellKey(cid), o = cells.get(k);
-			if (o !== undefined && (o.tick <= t || o.pinned)) return null;
+			if (o !== undefined && o.tick <= t) return null;
 			const lead = leadOf(cid, t);
-			if (o !== undefined) { o.tick = t; o.snap = sim.snapshot(); o.node = mkNode(); o.lead = lead; o.picks = 0; queue(o); return o; }
+			if (o !== undefined && !o.pinned) { o.tick = t; o.snap = sim.snapshot(); o.node = mkNode(); o.lead = lead; o.picks = 0; queue(o); return o; }
+			// a new cell, or one whose pinned reference state is later: the pinned state stays a seed (in the heaps) and
+			// the earlier state takes the cell (a state ahead of the reference in the reference's own cell is what the
+			// hunt is for. Measured at equal ticks, 7 seeds: Infinity Pain 1000-1900 at 6M a mean of -6 -> -18, 5000-5100 at
+			// 6M -0.6 -> -2.1, 1000-1100 at 20M -16 -> -13 (within the noise), Forgotten Veil 5760-5830 the same -15..-16)
 			if (list.length >= MAXE && !pinned) return null;   // --maxEntries: memory cap (existing cells still improve)
 			const e = { tick: t, snap: sim.snapshot(), node: mkNode(), lead, picks: 0, pinned, kLead: 0, kNew: 0 };
 			cells.set(k, e); list.push(e); queue(e);
@@ -765,8 +772,10 @@ async function main() {
 function fieldWorker() {
 	const d = workerData.field;
 	const f = Reach.reachField(E.loadLevel(d.levelData), { goals: d.goals, maxCost: d.maxCost });
-	parentPort.postMessage({ W: f.W, H: f.H, B: f.B, g: f.g, mode: f.mode, cls: f.cls, own: f.own, refresh: f.refresh, cost: f.cost },
-		[f.cls.buffer, f.own.buffer, f.refresh.buffer, f.cost.buffer]);
+	// in shared memory: the explore workers all read the same arrays (workerData would copy every context's field into
+	// every worker: 20+ contexts x 3-5 MB x the workers on coin-counting levels)
+	const shared = (x) => { const s = new x.constructor(new SharedArrayBuffer(x.byteLength)); s.set(x); return s; };
+	parentPort.postMessage({ W: f.W, H: f.H, B: f.B, g: f.g, mode: f.mode, cls: shared(f.cls), own: shared(f.own), refresh: shared(f.refresh), cost: shared(f.cost) });
 }
 
 if (isMainThread) main();

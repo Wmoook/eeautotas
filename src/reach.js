@@ -303,7 +303,8 @@ function reachField(level, opts) {
 			}
 		}
 	}
-	return { W, H, B, JB, g: PX_GRAVITY * (level.gravityMult || 1), mode, goals, cls, own, refresh, cost, mismatches };
+	// (toGoals: a field to opts.goals, not the trophy; writeReachFile refuses it: eegpu reads -1 as a proof of no way)
+	return { W, H, B, JB, g: PX_GRAVITY * (level.gravityMult || 1), mode, goals, toGoals: goalCost !== null, cls, own, refresh, cost, mismatches };
 }
 
 /** the budget (units above tile i's middle) of a ball whose centre is at cy (px), vertical speed vy px/tick, on the
@@ -326,6 +327,7 @@ function costAt(f, px, py, vy, onGround) {
 /** eegpu's reach file: 'RCH2', W, H, B, JB (int32), g (float32), mode (int32: 0 physics, 1 walk), then cls, own,
  *  refresh (the jump budget; uint8 x N each, padded to 4), cost (float32 x N*(B+1)). Budgets are in units of 8 px. */
 function writeReachFile(f, file) {
+	if (f.toGoals) throw new Error('writeReachFile: a field to goals (explore --hunt) is not a cost to the trophy');
 	const N = f.W * f.H, pad = (n) => (n + 3) & ~3;
 	const buf = Buffer.alloc(28 + 3 * pad(N) + 4 * N * (f.B + 1));
 	buf.write('RCH2', 0, 'latin1');

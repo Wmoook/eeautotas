@@ -161,6 +161,10 @@ function goalsSection() {
 	}
 	check(`${levels.length} random levels, 12 goals each: every cost equals the best forward move or its goal's own cost`, bad === 0, `${bad} with mismatches`);
 	check(`maxCost = half the highest cost: the same costs up to it (${kept} states), -1 beyond (${cut})`, badCut === 0 && kept > 0 && cut > 0, `${badCut} levels wrong`);
+	// a goals field is no cost to the trophy (its -1 is no proof): never written for eegpu
+	let refused = false;
+	try { R.writeReachFile(R.reachField(levels[0].level, { goals: [{ tile: 0, cost: 0 }] }), path.join(require('os').tmpdir(), `reach_goals_${process.pid}.bin`)); } catch (e) { refused = true; }
+	check('writeReachFile refuses a goals field', refused);
 }
 
 function jobsSection() {
