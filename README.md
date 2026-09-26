@@ -231,6 +231,8 @@ node src/tas.js where <job> 1:10               the run's state at 1:10 (position
 node src/tas.js render <job> 1:08 1:14         PNG of the level around the path in that part
 node src/tas.js try <job> my_run.eetas         offer your own faster run to a job (it is verified first)
 node src/tas.js focus <job> 1:08 1:14 120      search that part harder
+node src/tas.js endgame <job> [K]              try every input in the last K ticks before the trophy (exact; it
+                                               proves when nothing faster exists there)
 node src/tas.js import level.eelvl run.eetas   create a run without the page (--start=load: started right after
                                                loading the level); then: start <job>, stop <job>
 node src/bench.js                              measure the CPU's physics speed (1 thread and all threads)

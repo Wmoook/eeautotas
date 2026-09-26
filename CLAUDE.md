@@ -67,6 +67,9 @@ Times the user gives are **in-game run times** (the timer eeo-tas shows). Every 
      (`explore.js --exact=1`), the dense shortcut search (`shortcuts.js`) and input mutations (`mutate.js`) on just
      that window, splices the results, and hands every faster run to the job. If the job is running, focus uses half
      the CPU threads. It takes about 3 x seconds plus a little extra. From the web app, the "Ideas" box does the same.
+   - The ending: `node src/tas.js endgame <job> [K] [--seconds=60]` tries EVERY input sequence from K ticks before the
+     finish toward the trophy (exact; no rejoin needed, the trophy cell is the goal) and hands a faster finish in. When
+     it finds nothing it prints "proof": no input sequence from that state finishes sooner (without dying).
 6. **Hand it in.** `node src/tas.js try <job> <candidate.eetas>`. It prints the verdict. Running job: the grind's
    verdict arrives within seconds (`--wait=60` by default). Stopped job: decided at once and `best.eetas` is updated.
    A run that finishes but is not better is kept in `pieces/`. The grind splices its good parts in at the end of every
@@ -203,6 +206,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/explore.js` | Go-Explore route explorer for a window (`--from --join --until --exact=1`) |
 | `src/optimize.js` | beam search along the reference with verified leads |
 | `src/splice.js` | best combination of several runs at equal states |
+| `src/endgame.js`, `test/endgame.js` | the exact endgame solver: from S(F - K) of a run (F = its finish tick) every input sequence, tick by tick (the 18 masks; masks whose left/right or up/down bits provably do nothing are simulated once), states merged globally by stateHash (an earlier copy dominates), deaths dropped, a state at depth d cut when d + h + 1 > the budget; h = `lowerBound()`, ticks until the centre can be in a trophy cell, never an overestimate: the speed limit (16.25 px per axis per tick) with a portal field, a kinematic envelope while the touched tiles have an empty tile's physics (per axis the extreme input, a collision may stop the ball any tick, one jump per landing via `riseTable`, portals as j + Q(p)), else a general per-axis envelope (speed + the largest pull / input / thrust per tick, jumps only where a touched tile has `mor` on the axis; boosts end it). The first finish is the fastest from that start (checked with `C.evaluate` + `C.judge`); running out of states = a proof. `ladder()`: K = 8, 16, 24, .. from many starts (the run, best_*.eetas, original, pieces/), smallest K first, midpoints after a give-up (`--cap` open states, default 300000, ~1.2 KB each); a find becomes the reference and a start. `node src/endgame.js --tas=<run> [--level=] [--K=<max> \| --K=a,b] [--seconds=60] [--out=]` (JSON lines), `tas.js endgame <job> [K]` (hands the faster run in), `endgameJob(id, opts)`. `node test/endgame.js [--only=bound\|exhaust\|masks\|jobs]`: the bound against real walks to synthetic goals in rooms with every block kind, the search with and without cuts, the mask merging, the jobs' endings and 213's 2.35 |
 | `src/run.js` | quick replay: finish tick, run time, coins |
 | `src/examples/idea_template.js` | a script that tries thousands of input variants around a moment exactly; copy it and edit |
 | `test/regress.js` | engine regression tests (maintained together with the physics) |
@@ -239,6 +243,7 @@ benchmark.
 
 `jobs` | `status <job>` | `where <job> <t>` | `render <job> [from] [to] [out.png]` | `replay <job|file> [--level=<job>]` |
 `probe <job> <t> "<inputs>" [--try]` | `try <job> <file.eetas>` | `focus <job> <from> <to> [seconds]` |
+`endgame <job> [K] [--seconds=60] [--cap=]` |
 `import <level.eelvl> <run.eetas> [--name=] [--start=reset|load]` | `start <job> [--workers=N]` | `stop <job>` |
 `finish <job>`. (`node src/bench.js [--threads=N]` measures the engine speed.)
 Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render and replay on another run),

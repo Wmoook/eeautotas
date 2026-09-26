@@ -27,6 +27,10 @@ const HELP = `EE Auto TAS - command line (${CMD} <command> ...)
                                          centre, or tiles with --tiles); exact faster rejoins go to the job (--width=K)
   focus <job> <from> <to> [seconds]      search that window harder (explore --exact, shortcuts, mutate, splice) and
                                          hand every faster result to the job (default 120 s per search)
+  endgame <job> [K] [--seconds=60]       exact endgame search: from K ticks before the finish (K = 8, 16, 24, .. up to
+                                         K), every input sequence toward the trophy, from the best run, its history,
+                                         original and pieces; a faster finish is handed to the job, "proof" = nothing
+                                         faster from there (--cap=<open states>, default 300000)
   import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load]   create a job (like the web app's Import);
                                          --start: how the TAS was started in eeo-tas: reset = after /reset (default,
                                          the eeo-tas README workflow), load = /playtas right after loading the level
@@ -170,6 +174,38 @@ async function main() {
 			if (f.running && f.pid !== process.pid) throw new Error(`a focus search is already running for this job (pid ${f.pid}, ${f.fromTime}-${f.toTime})`);
 			const r = await J.focus(id, pos[1], pos[2], +pos[3] || 120, { workers: +a.workers || undefined });
 			if (a.json) json(r);
+			return;
+		}
+		case 'endgame': {
+			if (!pos[0]) throw new Error('usage: endgame <job> [K] [--seconds=60] [--cap=300000]');
+			const id = J.resolve(pos[0]);
+			const EG = require('./endgame.js');
+			const t = (n) => `${fmt(n)} (${n})`;
+			const log = a.json ? () => {} : (o) => {
+				const at = o.start !== undefined ? `K=${String(o.K).padEnd(3)} ${String(o.start).padEnd(24)} from tick ${o.T}` : '';
+				if (o.event === 'start') out(`endgame  ${id}: best ${t(o.reference)}, ${o.starts} runs as starts, K ${Array.isArray(o.K) ? o.K.join(', ') : '8, 16, 24, ..'}, ${o.seconds} s` +
+					`${o.modelled ? '' : ' (the level\'s gravity is not modelled: speed limit only)'}`);
+				else if (o.event === 'proof') out(`${at}: nothing faster (proof; ${o.ticks} ticks, ${o.seconds} s)`);
+				else if (o.event === 'gave_up') out(`${at}: gave up (${o.reason === 'cap' ? 'too many open states' : 'time is up'}; ${o.ticks} ticks)`);
+				else if (o.event === 'found') out(`${at}: FOUND ${t(o.runTicks)}, -${o.saved} tick${o.saved > 1 ? 's' : ''} (${o.ticks} ticks, ${o.seconds} s)`);
+				else if (o.event === 'rejected') out(`${at}: a finish in ${o.runTicks} ticks, not accepted (${o.why})`);
+				else if (o.event === 'error') out(`${at}: ERROR ${o.why}`);
+			};
+			const r = await EG.endgameJob(id, { K: pos[1], seconds: a.seconds !== undefined ? +a.seconds : 60, cap: +a.cap || undefined, log,
+				source: a.source, wait: a.wait !== undefined ? +a.wait : 60 });
+			const L = r.ladder;
+			if (a.json) {
+				const brief = (x) => ({ start: x.start, K: x.K, T: x.T, ticks: x.ticks, seconds: x.seconds, runTicks: x.runTicks, reason: x.reason });
+				return json({ job: id, reference: L.reference, best: L.best, saved: L.saved, searches: L.searches, ticks: L.ticks, seconds: L.seconds,
+					found: L.found.map(brief), proofs: L.proofs.map(brief), gaveUp: L.gaveUp.map(brief), file: r.file, handed: r.handed && { handed: r.handed.handed, accepted: r.handed.accepted, verdict: r.handed.verdict, result: r.handed.result } });
+			}
+			out(`done     ${t(L.reference)} -> ${t(L.best)}${L.saved ? ` (-${L.saved})` : ' (nothing faster)'}; ${L.searches} searches, ${L.ticks} ticks, ${L.seconds.toFixed(1)} s`);
+			if (r.file) {
+				const h = r.handed;
+				out(`candidate ${r.file}`);
+				if (h.handed === 'inbox') out(`handed   to the running job: ${h.result ? (h.result.accepted ? `ACCEPTED, best is now ${h.result.bestTime}` : `not accepted (${h.result.reason})`) : `waiting in its inbox (${h.inboxFile})`}`);
+				else out(`handed   directly (job not running): ${h.accepted ? 'ACCEPTED, best.eetas updated' : `not accepted (${h.verdict.reason}); kept in pieces/`}`);
+			}
 			return;
 		}
 		case 'import': {
