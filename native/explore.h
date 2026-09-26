@@ -16,7 +16,7 @@
 
 namespace ee {
 
-struct ExploreHit { u32 parent; u8 option, jumpOption, pad0, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };
+struct ExploreHit { u32 parent; u8 option, jumpOption, lane, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };   // (lane: --lanes)
 
 struct ExploreParams {
 	Level L;
@@ -38,6 +38,7 @@ struct ExploreParams {
 	double cqx, cqv;                   // the coarse cells: px x cqx and vx x cqv to whole numbers (0.5 and 16 = 2 px, 1/16 px/tick)
 	i32 discrete;                      // 1: cells also key on Sim::hashDiscrete (coins, keys, switches, door phase, effects)
 	u64 salt;                          // mixed into each child's content hash: which state represents a cell (0 = none)
+	const u8* lanes; u8* lanesNext;    // --lanes: each frontier state's lane (lane k: salt + k; lanes never share a cell), or null
 	i32 keepRest;                      // 1 (time doors): a ball at rest stays in the frontier (it can wait for a door)
 	i32 target;                        // 0: ground jump on the floor (above); 1: reach the region below
 	i32 reachX0, reachX1, reachY0, reachY1;   // target 1: the box centre's tile in this rectangle

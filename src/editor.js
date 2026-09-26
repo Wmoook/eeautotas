@@ -282,7 +282,8 @@ function check(buf) {
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
-		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : [])]; } },
+		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []),
+		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -310,6 +311,13 @@ function cpuWorkers(want) {
 // floor or ceiling hit leaves) never shares a cell with a near miss, and which state stands for a cell is fixed (the
 // nearest to the trophy by the reach field, then the state itself): a pass on the same level gives the same states.
 const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
+// the salt tries (the finest pass, and any pass's salt reruns) run up to LANES salts side by side in one eegpu process
+// (explore --lanes=auto: lane k = salt + k, cells of its own; the tool starts with --lanesStart (the last run's lanes,
+// 1 at first) and doubles them while that raises the tries per second by 10% or more, halves them when a batch fills
+// the cell table). Measured on the RTX 3080 Laptop GPU (throttled to 210-780 MHz, shared with a job's GPU searcher):
+// a try of the finest pass on user30s keeps the GPU ~65% busy with one lane; fixed 4 or more lanes were no faster there
+// and filled the table on the shaft level, so the tool picks the count by what it measures.
+const LANES = 8;
 /** the exploration's cells in pass p: px x cqx, vx x cqv to whole numbers; py x qy, vy x qvy likewise (0 = exact) */
 function passCells(p) {
 	const v = 2 ** Math.max(0, p);   // (the speed cells: pass 0's in the coarser passes)
@@ -430,6 +438,8 @@ function start(b, gpu, test) {
 	const which = [...(noGpu ? [] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
+	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
+	const lanes = Number.isInteger(+b.lanes) && +b.lanes >= 1 ? Math.min(64, +b.lanes) : LANES;
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
 	const cpuOnly = noGpu ? `No GPU search: ${noGpu}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
 		`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.` : '';
@@ -439,13 +449,13 @@ function start(b, gpu, test) {
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], cpuOnly, workers: cpu ? workers : 0,
 		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
-			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0 })) };
+			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0 })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${width} states per tick`}, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu ? ` (${workers} CPU thread${workers > 1 ? 's' : ''})` : ''));
 	if (cpuOnly) note(cpuOnly);
 	save();
 	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move'})`);
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed, salts: !(test && test.salts === false) },
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed, salts: !(test && test.salts === false), lanes },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
 	kids = which.map((k, n) => launch(n));
 	return state();
@@ -465,6 +475,9 @@ function launch(n) {
 	// salts: the tool itself starts over with the next salt after a try without a route (the finest pass, the last rung of
 	// the ladder, from its first run; any pass in a salt rerun)
 	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0) };
+	// the salt tries run several salts side by side (--lanes=auto: from V.lanes, the last run's; the tool doubles them
+	// while that raises the tries per second, up to cur.opts.lanes, and halves them when a batch fills the table)
+	if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
 	if (V.key === 'explore') {
 		q.seconds = V.share = passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
@@ -482,7 +495,8 @@ function launch(n) {
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
-	let hits = 0, end = '', overflow = null, lastSalt = 0;
+	let hits = 0, end = '', overflow = null, lastSalt = 0, lanesNow = q.lanes ? q.lanes.start : 1;
+	const lanesRun = lanesNow;   // (this run's first batch: salts q.salt .. q.salt + lanesRun - 1 at least)
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
 	const totals = () => {
@@ -504,7 +518,7 @@ function launch(n) {
 				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
-					`cells of ${passGrain(V.pass)}`;
+					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu) {
 				V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
 					(Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') + (V.found ? ', looking for a faster route' : '');
@@ -520,12 +534,19 @@ function launch(n) {
 			found(ev.inputs, n, cpu);
 		} else if (ev.ev === 'try') {
 			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
+			// (a batch of --lanes salts side by side: one event for its ev.lanes tries)
 			if (ev.end === 'exhausted' && ev.overflow === 0 && !V.depthCap && !V.found && V.pass >= 0) {
-				V.tries = (V.tries || 0) + 1;
+				V.tries = (V.tries || 0) + (ev.lanes || 1);
 				if (!V.exhausted) V.exhausted = { pass: V.pass, tick: ev.layers, grain: passGrain(V.pass) };
 				yieldBeams(n);
 			}
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
+			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
+		} else if (ev.ev === 'lanes') {
+			// the tool changed how many salts it tries side by side: a batch filled the cell table (it runs them again with
+			// fewer), or (--lanes=auto) the tries per second said so; the next run starts with that many
+			lanesNow = V.lanes = ev.lanes;
+			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
 		} else if (ev.ev === 'closest') {
@@ -541,6 +562,7 @@ function launch(n) {
 			// the situations the exploration left out of its over-full layers (null: the engine does not say)
 			overflow = Number.isFinite(ev.overflow) ? ev.overflow : null;
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
+			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
 		} else if (ev.error) {
 			V.error = ev.error;
@@ -587,7 +609,7 @@ function launch(n) {
 			const why = !verdict ? '' : V.pass < 0 ? ' (coarse cells: that proves little)' : overflow === null ? ' (the engine does not say whether full layers were cut)'
 				: overflow > 0 ? ` (${overflow.toLocaleString('en-US')} situations were cut from full layers)` : '';
 			if (verdict && !why && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
-			if (verdict && !why) V.tries = (V.tries || 0) + 1;
+			if (verdict && !why) V.tries = (V.tries || 0) + lanesNow;   // (its last batch's tries)
 			const left = S.seconds - (Date.now() - S.started) / 1000;
 			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? S.result.ticks : 0, left) : null;
 			if (next !== null && S.running && !S.halted && S.stage !== 'stopped' && left > 2) {
@@ -606,10 +628,13 @@ function launch(n) {
 			// salts of 13, 1.2 s each), so each salt explores another merged graph
 			if (next === null && cur.opts.salts && (how === 'exhausted' || how === 'depth' || how === 'finish' || how === 'beaten') && S.running && !S.halted &&
 				S.stage !== 'stopped' && left > 2 && !V.error) {
-				V.salt = Math.max(V.salt || 0, lastSalt) + 1;
+				// (the next salt after the last one tried: the tool reports it; else this run's first batch covered lanesRun)
+				V.salt = Math.max((V.salt || 0) + lanesRun - 1, lastSalt) + 1;
 				if (how === 'exhausted' && V.pass >= 0 && overflow === 0) yieldBeams(n);
-				if (V.salt === 1 || V.salt % 10 === 0) {
-					note(`${V.label}: ${how === 'exhausted' ? `every situation tried at tick ${V.layer}` : 'no faster route'}; again with other states standing for merged situations (try ${V.salt + 1})`);
+				if (!V.saltNoted || V.salt - V.saltNoted >= 10) {
+					V.saltNoted = V.salt;
+					note(`${V.label}: ${how === 'exhausted' ? `every situation tried at tick ${V.layer}` : 'no faster route'}; again with other states standing for merged situations (try ${V.salt + 1}` +
+						`${V.lanes > 1 ? `, ${V.lanes} side by side` : ''})`);
 				}
 				Object.assign(V, { passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
 				kids[n] = launch(n);
@@ -810,4 +835,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES };

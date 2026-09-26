@@ -332,8 +332,9 @@ if (args[0] !== 'explore') {
 const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p).length;
 const run = (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
 const depth = +opt('depth');
-const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; say(d); };
+const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; if (run.lanes) d.lanes = run.lanes; if (run.lastSalt !== undefined) d.salt = run.lastSalt; say(d); };
 setTimeout(() => {
+	if (run.lanes) say({ ev: 'lanes', lanes: run.lanes, from: +opt('lanes') || 1, why: 'full', layers: run.layers });   // (--lanes: its batch filled the table)
 	say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
 	if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
 	const ticks = run.idle + SC.R;
@@ -429,15 +430,22 @@ async function passesSection() {
 		+L[3].depth === 5 + R - 1, r.text);
 	// the finest pass ran out of situations and no pass is left: the same pass again with other states standing for merged
 	// cells (--salt=1, 2, ...) until one finds the route (merged situations are no proof: which state stands for a cell
-	// decides whether a pixel-exact move survives)
+	// decides whether a pixel-exact move survives); the salt tries run side by side (--lanes=auto, up to ED.LANES, from the
+	// last run's count: a run that ended with 4 lanes (its "lanes" event) makes the next start with 4), and the next salt
+	// comes after the last one the tool tried (its done event's "salt": 9 here)
 	let got = false;
 	r = await drive({ '-1': [{ end: 'exhausted', layers: 20, overflow: 0 }], 0: [{ end: 'exhausted', layers: 30, overflow: 0 }], 1: [{ end: 'exhausted', layers: 40, overflow: 0 }],
-		2: [{ end: 'exhausted', layers: 50, overflow: 0 }, { end: 'exhausted', layers: 52, overflow: 0 }, { end: 'finish', idle: 3, layers: 3 }] }, null,
+		2: [{ end: 'exhausted', layers: 50, overflow: 0 }, { end: 'exhausted', layers: 52, overflow: 0, lanes: 4, lastSalt: 9 }, { end: 'finish', idle: 3, layers: 3 }] }, null,
 		(st) => { if (st.result && !got) { got = true; ED.stop(); } }, true);
 	L = r.launches;
-	check('the finest pass ran out of situations: the same pass again with other states standing for merged cells (--salt=1, 2, ...) until one finds the route',
-		r.st.stage === 'found' && r.st.result.ticks === 3 + R && L.slice(0, 6).map((o) => Math.round(Math.log2(o.cqx / 0.5))).join() === '-1,0,1,2,2,2' &&
-		L[3].salt === undefined && L[4].salt === '1' && L[5].salt === '2', r.text);
+	const NL = String(ED.LANES);
+	check(`the finest pass ran out of situations: the same pass again with other states standing for merged cells, several salts side by side (--lanes=auto --lanesMax=${NL}; ` +
+		'--salt=1, then after the last salt the tool tried, starting with as many lanes as the last run ended with) until one finds the route',
+		r.st.stage === 'found' && r.st.result.ticks === 3 + R && L.slice(0, 6).map((o) => Math.round(Math.log2(o.cqx / 0.5))).join() === '-1,0,1,2,2,2' && ED.LANES > 1 &&
+		L.slice(0, 3).every((o) => o.lanes === undefined) && L.slice(3, 6).every((o) => o.lanes === 'auto' && o.lanesMax === NL) &&
+		L[3].salt === undefined && L[3].lanesStart === '1' && L[4].salt === '1' && L[4].lanesStart === '1' && L[5].salt === '10' && L[5].lanesStart === '4' &&
+		r.st.log.some((s) => /tries side by side filled the table/.test(s)),
+		`${r.text}; salts ${L.map((o) => o.salt || 0).join(', ')}; lanes ${L.map((o) => `${o.lanes || 1}/${o.lanesStart || '-'}`).join(', ')}`);
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {

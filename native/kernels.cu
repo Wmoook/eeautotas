@@ -347,6 +347,10 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 	u64 nearest = ~0ull;   // the closest child to the trophy (goal distance, parent, option)
 	// the parent's content (the tie-break between children that are the same state)
 	const u64 parentHash = splitmix(doubleToBits(par->px) ^ splitmix(doubleToBits(par->py) ^ splitmix(doubleToBits(par->speed_x) ^ splitmix(doubleToBits(par->speed_y) ^ (u64)par->q0 ^ ((u64)par->q1 << 16) ^ ((u64)par->jump_count << 32)))));
+	// --lanes: independent explorations side by side, lane k with salt + k; its cells are its own (the lane is mixed
+	// into the cell key), so lane k explores exactly what a run with --salt=salt+k alone would (until a layer is cut)
+	const u32 lane = p.lanes ? (u32)p.lanes[pi] : 0u;
+	const u64 salt = p.salt + lane;
 	u32 used = 31, jumpUsed = 0;   // option 0's input bits; per (h, v): a jump press matters (Sim::inUsed)
 	for (i32 o = 0; o < 18; o++) {
 		p.candKey[(size_t)pi * 18 + o] = 0;   // (none unless it reaches the end of this loop)
@@ -386,14 +390,14 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 				}
 				if (bestR >= 0 && atomicMax(&p.tileBest[cy * p.L.W + cx], bestR - now) < bestR - now) {
 					const u32 h = atomicAdd(p.nHits, 1u);
-					if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = bestR - now; e.refTick = bestR; p.hits[h] = e; }
+					if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = bestR - now; e.refTick = bestR; p.hits[h] = e; }
 				}
 			}
 		}
 		else if (p.target == 3) {   // the finish: this tick took the trophy (the silver crown); report, do not expand
 			if (s.has_silver_crown && !par->has_silver_crown) {
 				const u32 h = atomicAdd(p.nHits, 1u);
-				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 				continue;
 			}
 		}
@@ -405,7 +409,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 					const i32 now = p.fromTick + p.layer + 1;
 					if (j - now >= p.minGain) {
 						const u32 h = atomicAdd(p.nHits, 1u);
-						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = j - now; e.refTick = j; p.hits[h] = e; }
+						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = j - now; e.refTick = j; p.hits[h] = e; }
 					}
 					continue;   // on the run: from here on it goes as the run does (sooner or later), nothing new
 				}
@@ -418,7 +422,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		else if (p.target == 1) {   // reach a region: report and do not expand further
 			if (cx >= p.reachX0 && cx <= p.reachX1 && cy >= p.reachY0 && cy <= p.reachY1) {
 				const u32 h = atomicAdd(p.nHits, 1u);
-				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 				continue;
 			}
 		}
@@ -434,7 +438,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 					const i32 lx = truncI(t.px + 8.0) >> 4;
 					if (lx >= p.tx0 && lx <= p.tx1) {
 						const u32 h = atomicAdd(p.nHits, 1u);
-						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = (u8)(jo == 0 ? 1 : jo == 1 ? 3 : 5); e.pad0 = e.pad1 = 0; e.px = (float)t.px; e.vx = (float)t.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
+						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = (u8)(jo == 0 ? 1 : jo == 1 ? 3 : 5); e.lane = (u8)lane; e.pad1 = 0; e.px = (float)t.px; e.vx = (float)t.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 					}
 				}
 			}
@@ -447,11 +451,12 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
 		u64 disc = 0;
 		if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
+		if (lane) key = splitmix(key ^ (0xd6e8feb86659fd93ull * (u64)lane));   // (--lanes: a lane's own cells)
 		// the proposal: the cell (12 low bits free for the layer tag) and a fixed priority: the reach-field distance
 		// (12 bits: nearer the trophy first), the state's content (19 bits), then the parent's content and the option
 		// (the rest: which of two identical children stands for the cell)
 		u64 content = splitmix(doubleToBits(s.px) ^ splitmix(doubleToBits(s.py) ^ splitmix(doubleToBits(s.speed_x) ^ splitmix(doubleToBits(s.speed_y) ^ (u64)small ^ disc))));
-		if (p.salt) content = splitmix(content ^ p.salt);   // (--salt: other representatives, another merged graph)
+		if (salt) content = splitmix(content ^ salt);   // (--salt: other representatives, another merged graph; + the lane)
 		// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier even when its cell is known, so it
 		// is there when the time doors switch (then its cells are new again: the door phase is part of them)
 		const bool rest = p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y);
@@ -533,6 +538,7 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	Input in = maskInput(option((i32)(pk & 31)));
 	sim.tick(in);
 	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
+	if (p.lanes) p.lanesNext[i] = p.lanes[pk >> 5];   // (--lanes: the child stays in its parent's lane)
 }
 
 #define INSTANCE(TW) INSTANCE_(TW)

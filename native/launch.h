@@ -34,7 +34,8 @@ struct Guard {
 	double maxMs = 0;       // the longest launch (or big memset) so far, host clock from launch to its end: "maxLaunchMs"
 	double maxKernelMs = 0; // the longest by the GPU's own clock (events around the kernel): "maxKernelMs"; a launch
 	                        // that waits for another process's GPU work counts that wait in maxMs, not here
-	double totalMs = 0;     // time in launches
+	double totalMs = 0;     // time in launches (host clock)
+	double totalKernelMs = 0;   // ... by the GPU's clock (how busy a command keeps the GPU: explore --lanes)
 	uint64_t launches = 0;
 	std::string maxWhat, maxKernelWhat;   // which kernel took maxMs / maxKernelMs
 	cu::CUevent e0 = nullptr, e1 = nullptr;
@@ -104,7 +105,7 @@ inline void checkStop(bool now = false) {
 }
 
 inline void count(double ms, double kms, const char* what) {
-	G.launches++; G.totalMs += ms;
+	G.launches++; G.totalMs += ms; G.totalKernelMs += kms;
 	if (ms > G.maxMs) { G.maxMs = ms; G.maxWhat = what; }
 	if (kms > G.maxKernelMs) { G.maxKernelMs = kms; G.maxKernelWhat = what; }
 }
