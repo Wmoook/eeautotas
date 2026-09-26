@@ -1026,9 +1026,9 @@ static int cmdReachTest(int argc, char** argv) {
 	std::vector<float> hostScore(n), devScore;
 	for (int i = 0; i < n; i++) {
 		const double* q = &in[(size_t)i * 6];
-		const RfState st = rfStateOf(rg.H, q[0], q[1], q[2], (i32)q[3], (i32)q[4], q[5]);
-		host[i] = rfFifths(rg.H, st);
-		hostScore[i] = host[i] >= 0 ? reachScore(rg.H, st, q[0], q[1], host[i]) : -1.f;
+		const RfPre pre = rfPre(rg.H, q[2], (i32)q[3], (i32)q[4], q[5]);
+		host[i] = rfFifthsAt(rg.H, pre, q[0], q[1], q[2]);
+		hostScore[i] = host[i] >= 0 ? reachScore(rg.H, pre, q[0], q[1], q[2], host[i]) : -1.f;
 	}
 	if (opt(argc, argv, "gpu", "0") == "1") {
 		const int tw = twFor(B.get("tailWords"));

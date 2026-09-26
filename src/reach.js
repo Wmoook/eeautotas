@@ -30,7 +30,8 @@
 //   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof).
 // fifthsAt(field, px, py, vy, q0, q1, slippery) -> fifths (-1 = cut off); costAt(field, sim) -> tiles (-1 = cut off)
 //   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest); scoreAt(field, ...
-//   the same) -> the beam's blended score in tiles (native/beam.h reachScore; -1 = cut off);
+//   the same) -> the beam's score in tiles, blended between the 4 tile centres around the ball (native/beam.h
+//   reachScore; -1 = cut off);
 // writeReachFile(field, file): the RCH3 file for eegpu (native/beam.h ReachField, reachFifths / reachScore).
 // Walk mode (levels with jump / fly / speed / low-gravity / multijump / gravity effects, or another world gravity):
 // plain walking distance (through portals and death respawns), never a proof of anything.
@@ -815,56 +816,22 @@ function fifthsAt(f, px, py, vy, q0, q1, slip) {
 	if (s.base) { const b = costOfState(f, s.t, s.base[0], s.base[1]); v = s.rise ? Math.min(v, b) : b; }
 	return v === CUT ? -1 : v;
 }
-/** the cost (fifths) of abstract state s at tile j of a neighbour row dRow rows below its own (the beam's blend): the
- *  ball's own state re-referenced to that tile (R: its apex stays where it is, 2 levels per row down, the tile's own lid;
- *  XR, C, F, L: the same level; a type the tile holds no state of is left out); CUT when none applies */
-function blendCost(f, s, j, dRow) {
-	const W = f.W;
-	let v = CUT;
-	if (s.rise) {
-		let any = false;
-		v = 0;
-		for (const [ty, l] of s.rise) {
-			let l2 = l;
-			if (ty === R_) {
-				l2 = l + 2 * dRow;
-				if (l2 > f.Q) l2 = f.Q;
-				if (l2 < -1) l2 = -1;
-				if ((j < W || f.cls[j - W] === WALL) && l2 > 0) l2 = 0;
-			} else if (ty === X_ && f.rowX[j] < 0) continue;
-			any = true;
-			v = Math.max(v, costOfState(f, j, ty, l2));
-		}
-		if (!any) v = CUT;
-	}
-	if (s.base) { const b = costOfState(f, j, s.base[0], s.base[1]); v = s.rise ? Math.min(v, b) : b; }
-	return v;
-}
 /** the beam's score (native/beam.h reachScore, the same doubles, a float), tiles: the cost blended bilinearly between the
- *  centres of the 4 tiles around the ball's centre, each with the ball's own abstract state re-referenced to it
- *  (blendCost; walls, deadly and cut-off tiles are left out), for a smooth gradient; the own tile's cost when all the
- *  others are left out. The walk mode blends the walking distance. -1: the ball is cut off. */
+ *  centres of the 4 tiles around the ball's centre, the ball (its speed and gravity queue) looked up at each of them
+ *  (cut-off ones left out, and ways through a death while the ball's own way is a real one), for a smooth gradient; the
+ *  own tile's cost when all the others are left out. -1: the ball is cut off. */
 function scoreAt(f, px, py, vy, q0, q1, slip) {
 	const own = fifthsAt(f, px, py, vy, q0, q1, slip);
 	if (own < 0) return -1;
-	const s = f.mode === 'walk' ? null : stateOf(f, px, py, vy, q0, q1, slip);
-	const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
+	const tx = Math.trunc(px + 8.0) >> 4, ty = Math.trunc(py + 8.0) >> 4;
 	const fx = (px + 8.0) / 16.0 - 0.5, fy = (py + 8.0) / 16.0 - 0.5;
 	const x0 = Math.floor(fx), y0 = Math.floor(fy), ax = fx - x0, ay = fy - y0;
 	let v = 0, w = 0;
 	for (let dy = 0; dy < 2; dy++) {
 		for (let dx = 0; dx < 2; dx++) {
 			const x = x0 + dx, y = y0 + dy;
-			let c;
-			if (x === tx && y === ty) c = own;
-			else if (x < 0 || y < 0 || x >= f.W || y >= f.H) continue;
-			else {
-				const j = y * f.W + x;
-				if (!s) c = f.walk[j];
-				else if (f.cls[j] === WALL || f.cls[j] === DEADLY) continue;
-				else c = blendCost(f, s, j, y - ty);
-				if (c === CUT) continue;
-			}
+			const c = x === tx && y === ty ? own : fifthsAt(f, px + 16.0 * (x - tx), py + 16.0 * (y - ty), vy, q0, q1, slip);
+			if (c < 0 || (c >= DEATH_COST && own < DEATH_COST)) continue;
 			const k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
 			v += k * c;
 			w += k;

@@ -887,7 +887,8 @@ function finish() {
 			const ex = S.physics.explain;
 			const high = ex && ex.row >= 0 && ex.trophyRow >= 0 && ex.row > ex.trophyRow ? ` The ball's centre gets no higher than row ${ex.row}; the trophy is in row ${ex.trophyRow}.` : '';
 			S.message = `No route: the trophy cannot be reached from the start.${high} There is no way up to it: a jump rises 63.4 px (the box stands on ledges up to 3 tiles high), ` +
-				'one row of dots lifts the ball about 1 row, arrows and liquids by their height (the check is generous), and walls and spikes block the rest.';
+				'one row of dots lifts the ball about 1 row, arrows and liquids by their height (the check is generous), and walls and spikes block the rest ' +
+				'(a death that takes the ball to a checkpoint or another spawn point counts as a way too).';
 		} else if (XE) {
 			// merged situations are not a proof: one exact pixel can hide between them
 			const tries = XE.tries > 1 ? ` in all ${XE.tries} tries (each with other states standing for merged situations)` : '';
