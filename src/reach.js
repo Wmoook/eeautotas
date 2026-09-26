@@ -32,7 +32,9 @@
 //   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest); scoreAt(field, ...
 //   the same) -> the beam's score in tiles, blended between the 4 tile centres around the ball (native/beam.h
 //   reachScore; -1 = cut off);
-// writeReachFile(field, file): the RCH3 file for eegpu (native/beam.h ReachField, reachFifths / reachScore).
+// writeReachFile(field, file, levelFp): the RCH3 file for eegpu (native/beam.h ReachField, reachFifths / reachScore);
+//   levelFp (src/gpu.js blobFp of the level's blob) names the level it was made for: eegpu prove uses the field only for
+//   that level (a field is a proof about one level: another level's cut-offs could drop a route).
 // Walk mode (levels with jump / fly / speed / low-gravity / multijump / gravity effects, or another world gravity):
 // plain walking distance (through portals and death respawns), never a proof of anything.
 // Deaths: with a checkpoint or 2+ spawn points a death can take the ball to another place (the respawn at the checkpoint
@@ -855,16 +857,17 @@ function stateAt(f, sim) {
 // ---------------------------------------------------------------- the file for eegpu
 /**
  * RCH3: the header (64 bytes): 'RCH3', int32 version 3, W, H, mode (0 physics, 1 walk), Q, prioShift, flags (1 deaths,
- * 2 ice), nC (field tiles), nX (xrOK tiles), nSeg, nFlags, NFV, NTH, 0, 0; f64 constants (16): G, BD, ICE_ND, K_T, TOL,
+ * 2 ice), nC (field tiles), nX (xrOK tiles), nSeg, nFlags, NFV, NTH, the level's fingerprint (u32 lo, hi: gpu.js
+ * blobFp of its blob; 0 0 = not given: eegpu prove then does not use the field); f64 constants (16): G, BD, ICE_ND, K_T, TOL,
  * MOD_STRONG, 0...; then (each 8-aligned): u8 cls[N], u8 seg[N], i32 rowC[N], i32 rowX[N], u16 walk[N], u16 costR[N x
  * (Q + 3)], costF[N x 17], costL[N x 17], costC[nC x 128], costX[nX x 128] (walk mode: none of the cost tables), f64 segPush[nSeg],
  * segCap[nSeg], modMin[nFlags], FV[NFV], FS[NFV], TH[NTH], SW[NTH].
  */
-function writeReachFile(f, file) {
+function writeReachFile(f, file, levelFp) {
 	if (f.toGoals) throw new Error('writeReachFile: a field to goals (explore --hunt) is not a cost to the trophy');
-	fs.writeFileSync(file, reachFileBytes(f));
+	fs.writeFileSync(file, reachFileBytes(f, levelFp));
 }
-function reachFileBytes(f) {
+function reachFileBytes(f, levelFp) {
 	const N = f.W * f.H, walk = f.mode === 'walk';
 	const Q = walk ? 0 : f.Q;
 	const al = (n) => (n + 7) & ~7;
@@ -880,8 +883,9 @@ function reachFileBytes(f) {
 	for (const a of arrays) size = al(size) + a.length;
 	const buf = Buffer.alloc(al(size));
 	buf.write('RCH3', 0, 'latin1');
-	const ints = [3, f.W, f.H, walk ? 1 : 0, Q, f.prioShift || 0, (f.deaths ? 1 : 0) | (f.ice ? 2 : 0), walk ? 0 : f.nC, walk ? 0 : f.nX, nSeg, nFl, NFV, NTH, 0, 0];
+	const ints = [3, f.W, f.H, walk ? 1 : 0, Q, f.prioShift || 0, (f.deaths ? 1 : 0) | (f.ice ? 2 : 0), walk ? 0 : f.nC, walk ? 0 : f.nX, nSeg, nFl, NFV, NTH];
 	ints.forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
+	if (levelFp) { buf.writeUInt32LE(levelFp[0] >>> 0, 56); buf.writeUInt32LE(levelFp[1] >>> 0, 60); }
 	[G, BD, ICE_ND, K_T, TOL, MOD_STRONG].forEach((v, k) => buf.writeDoubleLE(v, 64 + 8 * k));
 	let o = 64 + 128;
 	for (const a of arrays) { o = al(o); a.copy(buf, o); o += a.length; }

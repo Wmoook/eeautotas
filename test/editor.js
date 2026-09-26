@@ -20,10 +20,13 @@
 //              search alone, with a note; a route; the physics verdict), and next to the eegpu stand-in (its first route
 //              bounds the exploration's next pass, it stops when the GPU strategies have ended with a route, not when
 //              they failed)
-//   prove      the proof next to the searches (eegpu prove: the native tool, CPU only; no GPU): user50 with its left run-up
-//              2 tiles shorter (the physics check finds a way, the proof none: "No route (proven)" with its explanation),
-//              user50 itself never "impossible", the cached proof and the search capped at a minute, a route on a level a
-//              stand-in proof rules out (model_miss.json), a failing proof, a search that waits for a slow proof
+//   prove      the proof next to the searches (eegpu prove: the native tool, CPU only; no GPU; skipped without a build that
+//              knows prove): user50 with its left run-up 2 tiles shorter (the physics check finds a way, the proof none, with
+//              the editor's reach file: "No route (proven)" with its explanation), user50 itself never "impossible", the
+//              cached proof and the search capped at NO_WAY_UP_S; with stand-ins: a route on a level the proof rules out
+//              (model_miss.json), a failing proof, a search that waits for a slow proof (no busy file meanwhile), every
+//              strategy failing (the error at once), a silent proof (the watchdog), the cache (time limits not kept, memory
+//              limits kept), the CPU search stopping with the GPU strategies while the proof runs. Elsewhere EEAT_PROOF=0.
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N]      Exit code 1 if any check fails. Writes nothing inside the repo.
 const fs = require('fs');
@@ -38,6 +41,7 @@ const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
 process.env.EEAT_HOME = HOME;   // (before src/ is required: jobs and data go to the temp folder)
+process.env.EEAT_PROOF = '0';   // (the proof, eegpu prove, only where the prove section asks for it: not next to the stand-ins)
 process.on('exit', () => { try { fs.rmSync(HOME, { recursive: true, force: true }); } catch (e) { /* ignore */ } });
 const SRC = path.resolve(__dirname, '..', 'src');
 const EL = require('../src/eelvl.js');
@@ -824,7 +828,6 @@ function user50Shorter(s) {
 async function proveSection() {
 	section('prove: the proof next to the searches (eegpu prove, CPU only; no GPU)');
 	const G = require('../src/gpu.js');
-	if (!G.nativeTool()) { check('the native tool is built (node tools/build-native.js; --exe is enough for the proof)', false); return; }
 	const waitDone = async (limit) => {
 		const t0 = Date.now();
 		let st = ED.state();
@@ -833,30 +836,50 @@ async function proveSection() {
 		return st;
 	};
 	const noGpu = { available: false, why: 'test: no GPU' };
-	// user50 with the left run-up 2 tiles shorter: the physics check finds a way, the proof shows there is none
 	const buf2 = user50Shorter(2);
-	ED.start({ eelvlB64: buf2.toString('base64'), seconds: 6, workers: 1 }, noGpu);
-	let st = await waitDone(120000);
-	check('user50 with the left run-up 2 tiles shorter: the physics check finds a way, the proof none: "No route (proven)", explained (the highest the ball gets, ' +
-		'the nearest tile, the fastest run toward the trophy)', st.stage === 'not found' && st.impossible && st.impossible.by === 'prover' && st.physics && !st.physics.noWayUp &&
-		st.physics.startCost > 0 && /^No route \(proven\): the trophy cannot be reached/.test(st.message) && /y = 624 \(row 39; the trophy is in row 35\)/.test(st.message) &&
-		/the closest it gets is tile \(35, 39\), 4\.1 tiles from the trophy/.test(st.message) && /fastest rightward speed is 4\.26 px\/tick/.test(st.message) &&
-		st.log.some((x) => /the proof: no input sequence reaches the trophy/.test(x)), `${st.stage} ${JSON.stringify(st.impossible || null)}: ${st.message}`);
-	// user50 itself (a 263-tick route): never "impossible"
-	ED.start({ eelvlB64: USER50, seconds: 5, workers: 1 }, noGpu);
-	st = await waitDone(120000);
-	check('user50 itself (a 263-tick route): the proof does not rule it out, and the verdict is not "impossible"', !st.impossible && st.proof && st.proof.verdict === 'reached' &&
-		['not found', 'found'].includes(st.stage) && !/proven/.test(st.message) && st.log.some((x) => /the proof: it cannot rule a route out/.test(x)),
-		`${st.stage}; proof ${st.proof ? st.proof.verdict : '-'}; ${st.message.slice(0, 140)}`);
-	// the shorter level again, a 300 s search: the cached proof at once, the search capped at a minute (stopped here)
-	ED.start({ eelvlB64: buf2.toString('base64'), seconds: 300, workers: 1 }, noGpu);
-	for (const t0 = Date.now(); !(ED.state().proof) && ED.state().running && Date.now() - t0 < 30000;) await new Promise((r) => setTimeout(r, 50));
-	st = ED.state();
-	check('the same level again: the proof from the cache (no process), and the 300 s search capped at 60 s as a check', st.running && st.proof && st.proof.cached &&
-		st.proof.verdict === 'impossible' && st.seconds === 60 && st.log.some((x) => /the proof: .*from the cache.*up to 60 s as a check/.test(x)), `${st.seconds} s; ${JSON.stringify(st.proof)}`);
-	ED.stop();
-	st = await waitDone(20000);
-	check('... stopped: "stopped", not a verdict', st.stage === 'stopped' && !st.impossible, `${st.stage}: ${st.message}`);
+	// ---- the real tool (the app's default: the native tool's `prove`, EEAT_PROOF unset); skipped without a build that
+	// knows `prove` (an older one answers "unknown command prove" before it would load the NVIDIA driver)
+	const tool = G.nativeTool();
+	let skip = '';
+	if (!tool) skip = 'no native build (node tools/build-native.js --exe is enough for the proof)';
+	else {
+		const r = require('child_process').spawnSync(tool, ['prove'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+		if (!/usage: eegpu prove/.test(`${r.stdout}${r.stderr}`)) skip = `the native build (${tool}) is older than eegpu prove: rebuild it (node tools/build-native.js --exe)`;
+	}
+	if (skip) console.log(`  skip the checks with the real proof: ${skip}`);
+	else {
+		delete process.env.EEAT_PROOF;
+		// user50 with the left run-up 2 tiles shorter: the physics check finds a way, the proof shows there is none (with
+		// the editor's reach file: it names this level, so the tool uses its cut-offs)
+		ED.start({ eelvlB64: buf2.toString('base64'), seconds: 30, workers: 1 }, noGpu);
+		let st = await waitDone(120000);
+		check('user50 with the left run-up 2 tiles shorter: the physics check finds a way, the proof none: "No route (proven)", explained (the highest the ball gets, ' +
+			'the nearest tile, the fastest run toward the trophy)', st.stage === 'not found' && st.impossible && st.impossible.by === 'prover' && st.physics && !st.physics.noWayUp &&
+			st.physics.startCost > 0 && /^No route \(proven\): the trophy cannot be reached/.test(st.message) && /y = 624 \(row 39; the trophy is in row 35\)/.test(st.message) &&
+			/the closest it gets is tile \(35, 39\), 4\.1 tiles from the trophy/.test(st.message) && /fastest rightward speed is 4\.26 px\/tick/.test(st.message) &&
+			st.log.some((x) => /the proof: no input sequence reaches the trophy/.test(x)), `${st.stage} ${JSON.stringify(st.impossible || null)}: ${st.message}`);
+		check('... the proof used the editor\'s reach file (its level fingerprint matches the proof\'s level: states cut off), and the search stopped at the check\'s ' +
+			`${ED.NO_WAY_UP_S} s`, st.proof && st.proof.reach === 1 && st.proof.pruned > 0 && st.seconds === ED.NO_WAY_UP_S && st.elapsed < 25,
+			`${JSON.stringify(st.proof && { reach: st.proof.reach, pruned: st.proof.pruned, sec: st.proof.sec })}; ${st.seconds} s; ${st.elapsed.toFixed(1)} s`);
+		// user50 itself (a 263-tick route): never "impossible"
+		ED.start({ eelvlB64: USER50, seconds: 15, workers: 1 }, noGpu);
+		st = await waitDone(120000);
+		check('user50 itself (a 263-tick route): the proof does not rule it out, and the verdict is not "impossible"', !st.impossible && st.proof && st.proof.verdict === 'reached' &&
+			['not found', 'found'].includes(st.stage) && !/proven/.test(st.message) && st.log.some((x) => /the proof: it cannot rule a route out/.test(x)),
+			`${st.stage}; proof ${st.proof ? `${st.proof.verdict} in ${st.proof.sec} s` : '-'}; ${st.message.slice(0, 140)}`);
+		// the shorter level again, a 300 s search: the cached proof at once, the search capped at NO_WAY_UP_S (stopped here)
+		ED.start({ eelvlB64: buf2.toString('base64'), seconds: 300, workers: 1 }, noGpu);
+		for (const t0 = Date.now(); !(ED.state().proof) && ED.state().running && Date.now() - t0 < 30000;) await new Promise((r) => setTimeout(r, 50));
+		st = ED.state();
+		check(`the same level again: the proof from the cache (no process), and the 300 s search capped at ${ED.NO_WAY_UP_S} s as a check`, st.running && st.proof && st.proof.cached &&
+			st.proof.verdict === 'impossible' && st.seconds === ED.NO_WAY_UP_S && st.log.some((x) => new RegExp(`the proof: .*from the cache.*once it has searched ${ED.NO_WAY_UP_S} s`).test(x)),
+			`${st.seconds} s; ${JSON.stringify(st.proof)}`);
+		ED.stop();
+		st = await waitDone(20000);
+		check('... stopped: "stopped", not a verdict', st.stage === 'stopped' && !st.impossible, `${st.stage}: ${st.message}`);
+		process.env.EEAT_PROOF = '0';
+	}
+	// ---- stand-ins for the proof (no native build needed)
 	// a proof on a level with a route (a stand-in's answer): the route found anyway is a mistake in the proof, kept in
 	// model_miss.json (the level, the route) and said in the log; the verdict is the route
 	const plat = room(40, 20);
@@ -867,35 +890,84 @@ async function proveSection() {
 	const platBuf = ED.eelvlOf({ name: 'platforms', width: 40, height: 20, cells: plat });
 	const fake = path.join(HOME, 'fake-prover.js');
 	fs.writeFileSync(fake, FAKE_PROVER);
+	const logOf = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+	const scenario = (name, sc) => { const f = path.join(HOME, `prove-${name}.json`), log = path.join(HOME, `prove-${name}.log`); fs.writeFileSync(f, JSON.stringify(Object.assign({ log }, sc))); return { f, log }; };
 	const miss = path.join(C.DATA, 'editor', 'model_miss.json');
 	try { fs.unlinkSync(miss); } catch (e) { /* none */ }
-	const scI = path.join(HOME, 'prove-imp.json'), logI = path.join(HOME, 'prove-imp.log');
-	fs.writeFileSync(scI, JSON.stringify({ log: logI, wait: 300, done: { verdict: 'impossible', end: 'fixpoint', sec: 0.3, cells: 1000, pruned: 0, explain: null } }));
-	ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 6, workers: 1 }, noGpu, { prover: [process.execPath, fake, scI], proveSeconds: 7 });
+	const scI = scenario('imp', { wait: 300, done: { verdict: 'impossible', end: 'fixpoint', sec: 0.3, cells: 1000, pruned: 0, explain: null } });
+	let st;
+	ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 6, workers: 1 }, noGpu, { prover: [process.execPath, fake, scI.f], proveSeconds: 7 });
 	st = await waitDone(60000);
 	const mj = C.readJSON(miss, null);
-	const LI = fs.existsSync(logI) ? fs.readFileSync(logI, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
-	check('the proof (a stand-in) rules out a level with a route: the route wins, a mistake in the proof kept in model_miss.json and said in the log', st.stage === 'found' &&
-		!st.impossible && mj && mj.by === 'prover' && !!mj.eelvlB64 && typeof mj.inputs === 'string' && mj.inputs.length > 0 && st.log.some((x) => /a mistake in the proof/.test(x)) &&
-		LI.length === 1 && LI[0][0] === 'prove' && LI[0].includes('--seconds=7') && LI[0].some((a) => a.startsWith('--reach=')), `${st.stage}; model_miss ${mj ? mj.by : 'missing'}; ${JSON.stringify(LI[0])}`);
+	const LI = logOf(scI.log);
+	check('the proof (a stand-in) rules out a level with a route: the route wins, a mistake in the proof kept in model_miss.json and said in the log; its budget at most the search\'s',
+		st.stage === 'found' && !st.impossible && mj && mj.by === 'prover' && !!mj.eelvlB64 && typeof mj.inputs === 'string' && mj.inputs.length > 0 && st.log.some((x) => /a mistake in the proof/.test(x)) &&
+		LI.length === 1 && LI[0][0] === 'prove' && LI[0].includes('--seconds=6') && LI[0].some((a) => a.startsWith('--reach=')), `${st.stage}; model_miss ${mj ? mj.by : 'missing'}; ${JSON.stringify(LI[0])}`);
+	check('... the page hides "Proven: no route exists." once a route is known', /st\.proof\.verdict === 'impossible' && !st\.result\)/.test(PAGE));
 	try { fs.unlinkSync(miss); } catch (e) { /* none */ }
 	// a failing proof: said in the log, the search as without it
-	const scF = path.join(HOME, 'prove-fail.json');
-	fs.writeFileSync(scF, JSON.stringify({ log: path.join(HOME, 'prove-fail.log'), fail: true }));
-	ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 4, workers: 1 }, noGpu, { prover: [process.execPath, fake, scF] });
+	const scF = scenario('fail', { fail: true });
+	ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 4, workers: 1 }, noGpu, { prover: [process.execPath, fake, scF.f] });
 	st = await waitDone(60000);
 	check('a failing proof: said in the log, the search goes on as without it', st.stage === 'found' && !st.impossible && st.proof && st.proof.verdict === 'error' &&
 		st.log.some((x) => /the proof failed: exit code 1: test: the proof crashed/.test(x)), `${st.stage}; ${JSON.stringify(st.proof)}`);
-	// the searches end before the proof: the search waits for it (a slow stand-in), then says "No route (proven)"
-	const scW = path.join(HOME, 'prove-wait.json');
-	fs.writeFileSync(scW, JSON.stringify({ log: path.join(HOME, 'prove-wait.log'), wait: 5000, done: { verdict: 'impossible', end: 'fixpoint', sec: 5, cells: 1000, pruned: 0,
-		explain: { topY: 100, maxVxRight: 1, maxVxLeft: 2, nearest: [3, 6], nearestDist: 2, trophy: [3, 4], start: [3, 8], size: [8, 10] } } }));
+	// the searches end before the proof: the search waits for it (a slow stand-in), then says "No route (proven)"; while it
+	// waits, only the proof runs (a CPU process): no busy file keeps a job's GPU searcher paused
+	const scW = scenario('wait', { wait: 5000, done: { verdict: 'impossible', end: 'fixpoint', sec: 5, cells: 1000, pruned: 0,
+		explain: { topY: 100, maxVxRight: 1, maxVxLeft: 2, nearest: [3, 6], nearestDist: 2, trophy: [3, 4], start: [3, 8], size: [8, 10] } } });
 	// (the shorter user50: no route to find; the stand-in's explanation is its own)
-	ED.start({ eelvlB64: buf2.toString('base64'), seconds: 3, workers: 1 }, noGpu, { prover: [process.execPath, fake, scW] });
+	ED.start({ eelvlB64: buf2.toString('base64'), seconds: 3, workers: 1 }, noGpu, { prover: [process.execPath, fake, scW.f] });
+	let busyWhileWaiting = null;
+	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 30000;) {
+		if (busyWhileWaiting === null && ED.state().log.some((x) => /waiting for the proof/.test(x))) busyWhileWaiting = fs.existsSync(path.join(C.DATA, 'editor', 'busy'));
+		await new Promise((r) => setTimeout(r, 50));
+	}
 	st = await waitDone(60000);
 	check('the searches end first: the search waits for the proof ("waiting for the proof"), then "No route (proven)" with its explanation', st.stage === 'not found' &&
 		st.impossible && st.impossible.by === 'prover' && st.log.some((x) => /waiting for the proof/.test(x)) && /no higher than y = 100 \(row 6; the trophy is in row 4\)/.test(st.message) &&
 		/fastest speeds are 1\.00 px\/tick to the right and 2\.00 to the left/.test(st.message) && st.elapsed >= 4.5, `${st.stage} after ${st.elapsed.toFixed(1)} s: ${st.message}`);
+	check('... while it waited for the proof alone, no busy file (a job\'s GPU searcher is not held for a CPU process)', busyWhileWaiting === false, String(busyWhileWaiting));
+	// every strategy fails at once: the error at once, not after the proof
+	const failCpu = path.join(HOME, 'fail-cpu.js');
+	fs.writeFileSync(failCpu, '\'use strict\'; process.stderr.write(\'test: the CPU search crashed\\n\'); process.exit(3);');
+	const scS = scenario('slow', { wait: 60000, done: { verdict: 'reached', end: 'goal', sec: 60, cells: 10, pruned: 0 } });
+	ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 60, workers: 1 }, noGpu, { prover: [process.execPath, fake, scS.f], cpu: [process.execPath, failCpu] });
+	st = await waitDone(90000);
+	check('every strategy fails at once: the error at once (the proof stopped, not waited for)', st.stage === 'error' && /test: the CPU search crashed/.test(st.message) &&
+		st.proof && st.proof.state === 'stopped' && st.elapsed < 10, `${st.stage} after ${st.elapsed.toFixed(1)} s: ${String(st.message).slice(0, 100)}; proof ${st.proof && st.proof.state}`);
+	// a proof that does not answer: killed its watchdog time after its budget, an error; the search goes on without it
+	const scH = scenario('hang', { wait: 600000, done: { verdict: 'impossible', end: 'fixpoint', sec: 600, cells: 10, pruned: 0 } });
+	ED.start({ eelvlB64: buf2.toString('base64'), seconds: 6, workers: 1 }, noGpu, { prover: [process.execPath, fake, scH.f], proveSeconds: 1, proveWatchdogS: 1 });
+	st = await waitDone(60000);
+	check('a proof that does not answer: killed 1 s after its 1 s budget (an error in the log), the search ends as without it', st.stage === 'not found' && !st.impossible &&
+		st.proof && st.proof.verdict === 'error' && st.log.some((x) => /the proof failed: no answer 1 s after its 1 s/.test(x)) && st.elapsed < 15,
+		`${st.stage} after ${st.elapsed.toFixed(1)} s; ${JSON.stringify(st.proof)}`);
+	// the cache: a time limit is not kept (a busy machine's budget says nothing of the next search), a memory limit is
+	const scT = scenario('time', { done: { verdict: 'limit', end: 'time', sec: 3, cells: 5000, pruned: 0 } });
+	const scC = scenario('cells', { done: { verdict: 'limit', end: 'cells', sec: 3, cells: 6000001, pruned: 0 } });
+	const runs = [];
+	for (const sc of [scT, scT, scC, scC]) {
+		ED.start({ eelvlB64: buf2.toString('base64'), seconds: 2, workers: 1 }, noGpu, { prover: [process.execPath, fake, sc.f] });
+		st = await waitDone(30000);
+		runs.push(st.proof ? `${st.proof.verdict}/${st.proof.end}${st.proof.cached ? ' (cache)' : ''}` : '-');
+	}
+	check('the cache: a time limit runs the proof again, a memory limit is read back', logOf(scT.log).length === 2 && logOf(scC.log).length === 1 && runs[3] === 'limit/cells (cache)' &&
+		st.log.some((x) => /the proof: no verdict within its memory \(from the cache\)/.test(x)), `${runs.join(', ')}; runs: time ${logOf(scT.log).length}, cells ${logOf(scC.log).length}`);
+	// every GPU strategy has ended with a route (stand-ins for eegpu), the proof still running: the CPU search stops with
+	// them, the proof with it (the proof, a CPU process, is no GPU strategy)
+	const W = 30, H = 8;
+	const ladder = ED.eelvlOf({ name: 'ladder', width: W, height: H, cells: [...room(W, H), [2, 6, 255], [20, 6, 121]] });
+	const R = C.evaluate(E.prepareLevel(EL.toSimLevel(EL.readEelvl(ladder))), new Uint8Array(300).fill(4)).ms.length;
+	const fakeGpu = path.join(HOME, 'fake-eegpu-prove.js');
+	fs.writeFileSync(fakeGpu, FAKE);
+	const scG = path.join(HOME, 'prove-ladder.json');
+	fs.writeFileSync(scG, JSON.stringify({ log: path.join(HOME, 'prove-ladder.log'), R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 4000, hold: 4000 }], 0: [{ end: 'finish', idle: 0, layers: 3 }] }, beam: null }));
+	const scP = scenario('ladder-proof', { wait: 20000, done: { verdict: 'reached', end: 'goal', sec: 20, cells: 10, pruned: 0 } });
+	ED.start({ eelvlB64: ladder.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fakeGpu, scG], salts: false, prover: [process.execPath, fake, scP.f] });
+	st = await waitDone(60000);
+	const Qc = st.strategies.find((q) => q.cpu);
+	check('the GPU strategies end with a route while the proof runs: the CPU search stops with them (not after the proof), the proof too', st.stage === 'found' && Qc && !Qc.live &&
+		st.proof && st.proof.state === 'stopped' && st.elapsed < 15, `${st.stage} after ${st.elapsed.toFixed(1)} s; ${st.strategies.map((q) => `${q.key}:${q.state}`).join(' ')}; proof ${st.proof && st.proof.state}`);
 }
 
 // ---------------------------------------------------------------- GPU searches (--gpu)

@@ -1537,7 +1537,7 @@ function renderSolve() {
 		if (st.physics && st.physics.noWayUp) h += `<div class="sst">The physics check finds no way up to the trophy; "every move" checks it without the check.</div>`;
 		// (the proof, eegpu prove: whether any route can exist at all)
 		if (st.proof && st.proof.state === 'running') h += `<div class="sst">Proof: checking whether any route can exist…</div>`;
-		else if (st.proof && st.proof.verdict === 'impossible') h += `<div class="sst"><b>Proven: no route exists.</b> The search goes on for up to a minute as a check.</div>`;
+		else if (st.proof && st.proof.verdict === 'impossible' && !st.result) h += `<div class="sst"><b>Proven: no route exists.</b> The search ends once it has searched ${st.proof.checkS || 10} s (a check).</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
 		if (st.strategies && st.strategies.length) {

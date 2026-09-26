@@ -15,7 +15,9 @@
 //            6 inputs, then sticky random walks); "impossible" with a route found, or a route state outside the fixpoint,
 //            is a soundness bug
 //   reach    --reach (the reach field's cut-off): never impossible where the plain run finds the trophy on a room with a
-//            route, the same proofs on the rooms, fewer boxes; user50's variants several times faster
+//            route, the same proofs on the rooms, fewer boxes; user50's variants several times faster; a reach file of
+//            another level is not used (its level fingerprint, src/gpu.js blobFp; none; a start it cuts off): user50 with
+//            the file of its walls and the trophy moved was once "impossible" in 5 ms
 //   scope    unsupported levels are refused with the reason (dots, arrows, ice, world gravity, a start inside a block, no
 //            trophy, an effect block); the done line's fields
 //   mutants  (--mutants: builds 6 broken copies of the tool with tools/.cache's zig, about a minute each, one at a time)
@@ -124,7 +126,7 @@ function blobFile(level) { const f = path.join(TMP, `l${fileN++}.bin`); fs.write
 function reachFile(level) {
 	const f = path.join(TMP, `r${fileN++}.reach`);
 	const field = RF.reachField(level);
-	fs.writeFileSync(f, RF.reachFileBytes(field));
+	fs.writeFileSync(f, RF.reachFileBytes(field, G.blobFp(G.levelBlob(level))));   // (the level it is for: the tool checks it)
 	const sim = new E.EESim(level); sim.reset();
 	return { file: f, startCost: RF.costAt(field, sim), mode: field.mode };
 }
@@ -497,6 +499,20 @@ function reachSection() {
 	const r = prove(user50Variant('shift2'), [`--reach=${other}`]);
 	check('a reach file of another level: a warning, the proof without the cut-off', r.warning && /not used/.test(r.warning.text) && r.done && r.done.verdict === 'impossible' && r.done.reach === 0,
 		`${r.warning ? r.warning.text : 'no warning'}; ${brief(r.done)}`);
+	// the same walls, only the trophy moved (to (1, 1): that level's field cuts user50's start off): a wall-by-wall check
+	// would pass the file, and its cut-offs dropped user50's route ("impossible" in 5 ms). Its fingerprint names the other
+	// level; without one the field is not used either; one that claims user50's (forged) meets the start guard
+	const u50 = levelOfBuf(Buffer.from(USER50, 'base64')), lv = ED.levelOf(Buffer.from(USER50, 'base64'));
+	const moved = levelOfBuf(ED.eelvlOf(Object.assign({}, lv, { cells: [...lv.cells.filter((c) => c[2] !== 121), [1, 1, 121]] })));
+	const fMoved = RF.reachField(moved);
+	for (const [what, fp, re] of [['that level\'s fingerprint', G.blobFp(G.levelBlob(moved)), /made for another level/], ['no fingerprint', null, /names no level/],
+		['user50\'s fingerprint (forged)', G.blobFp(G.levelBlob(u50)), /cuts off the start/]]) {
+		const file = path.join(TMP, `r${fileN++}.reach`);
+		fs.writeFileSync(file, RF.reachFileBytes(fMoved, fp));
+		const q = prove(u50, [`--reach=${file}`, '--seconds=120']);
+		check(`user50 with the reach file of its walls and the trophy moved to (1, 1), ${what}: not used, the route not ruled out`, q.warning && re.test(q.warning.text) &&
+			q.done && q.done.verdict === 'reached' && q.done.reach === 0 && q.done.pruned === 0, `${q.warning ? q.warning.text : 'no warning'}; ${brief(q.done)}`);
+	}
 }
 
 // ---------------------------------------------------------------- the scope

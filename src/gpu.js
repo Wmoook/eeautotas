@@ -107,6 +107,23 @@ function levelBlob(L) {
 	return out;
 }
 
+/**
+ * The FNV-1a 64 of a level blob's bytes as [lo, hi] (uint32): the level a reach file was made for (src/reach.js
+ * reachFileBytes; eegpu prove uses a reach field only for the level whose blob has this fingerprint: native/prove.h
+ * blobFp). 64-bit arithmetic in two 32-bit halves: h * 0x100000001b3 = h * 0x1b3 + (h << 40); the carry of lo * 0x1b3
+ * from its 16-bit halves.
+ */
+function blobFp(buf) {
+	let lo = 0x84222325, hi = 0xcbf29ce4;
+	for (let i = 0; i < buf.length; i++) {
+		lo = (lo ^ buf[i]) >>> 0;
+		const carry = (((lo >>> 16) * 0x1b3) + (((lo & 0xffff) * 0x1b3) >>> 16)) >>> 16;
+		hi = (Math.imul(hi, 0x1b3) + carry + (lo << 8)) >>> 0;
+		lo = Math.imul(lo, 0x1b3) >>> 0;
+	}
+	return [lo, hi];
+}
+
 /** The native tool: next to this file in the exe's app folder (bin/), else the repo build. null when missing. */
 function nativeTool() {
 	for (const p of [path.join(__dirname, 'bin', 'eegpu.exe'), path.join(__dirname, '..', 'native', 'build', 'eegpu.exe')]) {
@@ -205,4 +222,4 @@ function describeBench(r) {
 	return `${r.gpu.name}: ${(r.ticksPerSec / 1e6).toFixed(0)} M ticks/s (measured)`;
 }
 
-module.exports = { levelBlob, nativeTool, cacheDir, cacheArgs, unsupported, cachedBench, runBench, describeBench, BLOB_INTS, BLOB_ARRAYS };
+module.exports = { levelBlob, blobFp, nativeTool, cacheDir, cacheArgs, unsupported, cachedBench, runBench, describeBench, BLOB_INTS, BLOB_ARRAYS };

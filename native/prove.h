@@ -57,7 +57,10 @@
 // in a trophy tile are never dropped). The test is conservative: the lookup's levels (the fall potential k and the
 // apex q, monotone in the centre's height) are taken at the piece's ends and every level in between must be cut, for
 // every gravity queue the level's air-like tiles give. It speeds up levels with large dead ends; the explanation then
-// describes the states the field leaves open ("pruned" > 0 in the done line).
+// describes the states the field leaves open ("pruned" > 0 in the done line). Only this level's field is used: the
+// RCH3 header's level fingerprint (src/gpu.js blobFp, FNV-1a 64 of the level blob) must be this blob's, and a field
+// that cuts off the start is not (the editor proves only levels whose field finds a way); else a "warning" line and
+// the proof without it ("reach" 0). Another level's field (user50's walls, the trophy moved) made user50 "impossible".
 //
 // Explanation (done line "explain"): the highest top of the box (py), the reachable centre tile nearest a trophy
 // (Euclidean in tiles) and its distance, the fastest speeds to the right and to the left, and the start tile.
@@ -1068,12 +1071,18 @@ static int cmdProve(int argc, char** argv) {
 	prv::initEngine();
 	const std::string casesFile = opt(argc, argv, "check", "");
 	if (!casesFile.empty()) return prv::check(casesFile.c_str());
-	// --reach: the reach field's host copy (never uploaded: no GPU), physics mode only
+	// --reach: the reach field's host copy (never uploaded: no GPU), physics mode only, and only the field of this very
+	// level: its cut-offs are a proof about the level it was made for, and another level's (the same walls, the trophy
+	// elsewhere) dropped user50's route (the header's fingerprint = src/gpu.js blobFp of this blob; 0 = none given)
 	ReachGpu rg;
 	const std::string reachFile = opt(argc, argv, "reach", "");
 	if (!reachFile.empty()) {
 		std::string err;
+		uint64_t fpFile = 0, fpLevel = 0xcbf29ce484222325ull;
+		for (uint8_t c : B.bytes) { fpLevel ^= c; fpLevel *= 0x100000001b3ull; }
 		if (!rg.parse(reachFile, L, err)) printf("{\"ev\":\"warning\",\"text\":%s}\n", jsonStr("the reach field is not used: " + err).c_str());
+		else if (memcpy(&fpFile, &rg.raw[56], 8), fpFile != fpLevel)
+			printf("{\"ev\":\"warning\",\"text\":%s}\n", jsonStr(fpFile ? "the reach field is not used: it was made for another level" : "the reach field is not used: it names no level (written without the level's fingerprint)").c_str());
 		else if (rg.H.mode == 0) {
 			prv::RF = &rg.H;
 			// the queue's modifiers: every air-like id the level holds, and block 0 (Sim::reset's queue)
@@ -1083,6 +1092,12 @@ static int cmdProve(int argc, char** argv) {
 				bool seen = false;
 				for (double x : prv::rfMods) if (x == m) seen = true;
 				if (!seen) prv::rfMods.push_back(m);
+			}
+			// (a second guard: the caller runs a proof only when the field finds a way from the start, so a field that
+			// cuts the start off is not this level's; its cut-offs are not used)
+			if (prv::reachCut(prv::vyId(prv::LV.svy0), prv::Iv{ prv::LV.sx0, prv::LV.sx0 }, prv::Iv{ prv::LV.sy0, prv::LV.sy0 })) {
+				printf("{\"ev\":\"warning\",\"text\":%s}\n", jsonStr("the reach field is not used: it cuts off the start").c_str());
+				prv::RF = nullptr;
 			}
 		}
 	}
