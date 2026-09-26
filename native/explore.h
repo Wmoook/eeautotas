@@ -24,6 +24,7 @@ struct ExploreParams {
 	const u64* htKeys; const i32* htVals; u32 htMask; const u32* qbits; i32 nocoins;   // target 4: the run's states (exact rejoins)
 	const u8* parents; i32 stateBytes; i32 nParents;
 	u8* next; const u32* pick; i32 nPick;
+	u32 lo, hi;                        // this launch's parents (expand) or picks (materialize): [lo, hi) (launch.h)
 	u64* cells; u32 cellMask;          // the visited-cell set (open addressing, 0 = empty)
 	u32* out; u32* nOut; u32 outCap;   // new children: parent << 5 | option
 	ExploreHit* hits; u32* nHits; u32 hitCap;
@@ -66,6 +67,7 @@ struct ExploreClaim {
 	u64 selHi; u32 selShift, selBits;  // selShift != ~0: count the selBits bits at selShift of the key among the winners with (key >> (selShift + selBits)) == selHi
 	u32 selIdx;                        // the key: 0 the priority, 1 the candidate index (of the winners with priority thr)
 	u32* nLost;                        // children dropped because their cell found no slot (64 probes), counted
+	u32 lo, hi;                        // this launch's candidates: [lo, hi) (launch.h; every pass in order over all of them)
 };
 #define EE_SLOT_DROP 0xffffffffu
 #define EE_SLOT_REST 0xfffffffeu

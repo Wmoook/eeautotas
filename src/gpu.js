@@ -137,18 +137,24 @@ function toolKey(tool) {
 		return parts.map((f) => { const s = fs.statSync(f); return `${s.size}-${Math.round(s.mtimeMs)}`; }).join('|');
 	} catch (e) { return ''; }
 }
-/** The cached benchmark record, or null when missing or made by another build of the native tool. */
+/** The cached benchmark record, or null when missing, made by another build of the native tool, or a failed run
+ *  whose retry time has come (a GPU launch failure: the GPU is off for that session, measured again later). */
 function cachedBench() {
 	const tool = nativeTool();
 	if (!tool) return { gpu: null, why: 'the GPU engine is not part of this build' };
 	try {
 		const r = JSON.parse(fs.readFileSync(BENCH_FILE(), 'utf8'));
+		if (r.retryAfter && Date.now() > r.retryAfter) return null;
 		return r.key === toolKey(tool) ? r : null;
 	} catch (e) { return null; }
 }
+const BENCH_RETRY_MS = 30 * 60e3;
 /**
  * Measures the GPU on src/bench.js's arena (random sticky inputs, the CPU benchmark's workload, so the numbers
- * compare): { gpu: {name, sms, ...} | null, why, ticksPerSec, nativeCpuSingle }. Cached in data/_gpu.json.
+ * compare): { gpu: {name, sms, ...} | null, why, ticksPerSec, nativeCpuSingle, maxLaunchMs }. Cached in data/_gpu.json.
+ * A run that fails (a kernel launch error: eegpu's {"error":...,"launchError":true}, exit 6 / 7 when the display
+ * driver's watchdog stopped a kernel; or a crash) is not retried at once: the GPU counts as unavailable, and the record
+ * says to measure again after 30 minutes (retryAfter), so a hot or reset GPU is not given work in a loop.
  */
 function runBench() {
 	return new Promise((resolve) => {
@@ -164,6 +170,10 @@ function runBench() {
 		require('child_process').execFile(tool, ['bench', f, '--seconds=3'], { encoding: 'utf8', timeout: 300000, windowsHide: true }, (err, out) => {
 			let r;
 			try { r = JSON.parse(String(out).trim().split('\n').pop()); } catch (e) { r = { gpu: null, why: err ? err.message : 'the GPU benchmark failed' }; }
+			if (r.error) r = { gpu: null, why: `the GPU speed test failed: ${r.error}`, launchError: !!r.launchError };
+			if (err || r.launchError || !r || (!r.gpu && !r.why)) {
+				r = Object.assign({ gpu: null, why: 'the GPU speed test failed' }, r, { gpu: null, failed: true, retryAfter: Date.now() + BENCH_RETRY_MS });
+			}
 			r.key = toolKey(tool);
 			r.measured = Date.now();
 			try { fs.writeFileSync(BENCH_FILE(), JSON.stringify(r, null, 1)); } catch (e) { /* read-only */ }

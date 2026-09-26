@@ -363,10 +363,20 @@ function state() {
 }
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 const running = () => busy.size > 0;
-/** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped') */
+/** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped'). The GPU tool is asked to stop
+ *  (its stop file: it ends between two kernel launches, within about one; killing it while a kernel runs makes the
+ *  NVIDIA driver reset the GPU) and killed only if it is still running 2 s later; the CPU search is killed. */
+const HALT_KILL_MS = 2000;
 function halt(ch, why) {
 	if (!alive(ch)) return;
 	ch.stopWhy = ch.stopWhy || why;
+	if (ch.stopFile) {
+		if (ch.haltTimer) return;
+		try { fs.writeFileSync(ch.stopFile, why); } catch (e) { /* the kill below */ }
+		ch.haltTimer = setTimeout(() => { if (alive(ch)) { try { ch.kill(); } catch (e) { /* gone */ } } }, HALT_KILL_MS);
+		if (ch.haltTimer.unref) ch.haltTimer.unref();
+		return;
+	}
 	try { ch.kill(); } catch (e) { /* gone */ }
 }
 
@@ -462,9 +472,13 @@ function launch(n) {
 	}
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
+	// the GPU tool's stop file (halt: it ends between two kernel launches; a kill during a kernel resets the driver)
+	const stopFile = cpu ? '' : path.join(dir(), `stop_${n}`);
+	if (stopFile) { try { fs.unlinkSync(stopFile); } catch (e) { /* none */ } }
 	// the CPU search: node src/goexplore.js (its stdin takes the depth bound: tellCpu)
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args];
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, `--stopfile=${stopFile}`];
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined });
+	ch.stopFile = stopFile;
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
@@ -483,7 +497,8 @@ function launch(n) {
 	const movesPerSec = (ev) => (ev.ticks > 0 && ev.twins > 0 ? ev.ticksPerSec * (ev.ticks + ev.twins) / ev.ticks : ev.ticksPerSec || 0);
 	const onEvent = (ev) => {
 		if (!mine()) return;
-		if (cpu && ch.stopWhy && ev.ev === 'progress') return;   // (halted: its state stays as the halt left it)
+		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
+		if (ch.stopWhy && (ev.ev === 'progress' || ev.ev === 'layer' || ev.ev === 'try')) return;
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
@@ -530,6 +545,7 @@ function launch(n) {
 		} else if (ev.error) {
 			V.error = ev.error;
 			note(`${V.label}: error: ${ev.error}`);
+			if (!cpu && ev.launchError) gpuFailed(n);
 			save();
 		}
 	};
@@ -549,8 +565,17 @@ function launch(n) {
 	ch.on('error', (e) => { err += e.message; });
 	ch.on('close', (code) => {
 		busy.delete(ch);
+		if (ch.haltTimer) clearTimeout(ch.haltTimer);
 		if (!mine()) return;
 		V.live = false;
+		// eegpu's kernel launch failed (exit 6, 7 = the driver's watchdog) or it crashed: the GPU may have been reset.
+		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
+		if (!cpu && !ch.stopWhy && !V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) {
+			V.error = `the GPU tool ${code === 7 ? 'was stopped by the display driver\'s watchdog' : code === 6 ? 'had a GPU launch failure' : `crashed (exit code ${code})`}` +
+				`${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 200)}` : ''}`;
+			note(`${V.label}: error: ${V.error}`);
+		}
+		if (!cpu && V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) gpuFailed(n);
 		if (V.key === 'explore') {
 			// how this pass ended: why the editor stopped it, else the tool's own verdict
 			const how = ch.stopWhy || (code === 0 && !V.error ? end : '');
@@ -619,11 +644,28 @@ function yieldBeams(n) {
 	if (S.result) return;
 	for (let k = 0; k < kids.length; k++) {
 		const Q = S.strategies[k];
-		if (k === n || !alive(kids[k]) || (Q.key !== 'goal' && Q.key !== 'guide')) continue;
+		// (a beam already told to stop is still alive until its process exits: noted once)
+		if (k === n || !alive(kids[k]) || kids[k].stopWhy || (Q.key !== 'goal' && Q.key !== 'guide')) continue;
 		Q.state = 'stopped'; Q.detail = 'gave the GPU to every move\'s tries';
 		halt(kids[k], 'stopped');
 		note(`${Q.label}: stopped (every move tried every situation; its tries with other states get the GPU)`);
 	}
+}
+/**
+ * A GPU strategy's kernel launch failed (eegpu's {"error":...,"launchError":true}, exit 6 / 7 = the display driver's
+ * watchdog, or a crash): the driver may have reset the GPU. The other GPU strategies stop too, and none is relaunched
+ * (no next pass, no salt rerun); the CPU search goes on. The page shows the error with the strategy.
+ */
+function gpuFailed(n) {
+	if (S.gpuFailed) return;
+	S.gpuFailed = true;
+	for (let k = 0; k < kids.length; k++) {
+		const Q = S.strategies[k];
+		if (k === n || Q.cpu || !alive(kids[k]) || kids[k].stopWhy) continue;
+		Q.state = 'stopped'; Q.detail = 'the GPU failed';
+		halt(kids[k], 'stopped');
+	}
+	note(`the GPU failed: the GPU searches stop${S.strategies.some((q) => q.cpu) ? ' (the CPU search goes on)' : ''}; search again in a minute or two (a hot GPU slows down)`);
 }
 /** all strategies have ended: the verdict */
 function finish() {

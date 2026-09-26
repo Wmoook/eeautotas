@@ -1,6 +1,7 @@
 // kernels.cu - the GPU side of eegpu (compiled to PTX by NVRTC at build time: tools/build-native.js, with
 // --fmad=false so every double operation is rounded exactly like the CPU / JS engine).
-//   trace_<TW>: one thread replays a run from reset() and writes both state hashes after every tick (exactness proof)
+//   trace_<TW>: one thread replays a run from reset() and writes both state hashes after every tick (exactness proof;
+//     in segments that continue from the saved state)
 //   search_<TW>: one thread per candidate (start tick x variant), the exact-rejoin search of search.h
 //   twins_<TW>: the search's twin table (the systematic variants that play like a lower one, search.h twinBits)
 //   stateSize_<TW>: sizeof(State<TW>) on the device (the host checks that the layouts agree)
@@ -46,61 +47,77 @@ __device__ __forceinline__ void warpAdd(unsigned long long* dst, unsigned long l
 // One thread per candidate; consecutive threads are consecutive variants of the same start tick t: a warp loads ONE
 // start state (a broadcast read; 32 different states cost 32x the memory traffic, measured) and shares the level
 // geometry around it. With a list (the systematic families without their twins) the threads take its entries in order.
+// In launches of at most p.segTicks ticks per candidate (launch.h): the batch's records (SearchParams::rec) keep each
+// live candidate's state, tick index and sticky input between launches; phase 0 starts them, phase 1 continues them.
+// A candidate plays exactly the same ticks as in one launch (its inputs depend on its tick index and sticky input only).
 template <int TW>
 __device__ void searchBody(const SearchParams& p) {
-	const i32 gid = blockIdx.x * blockDim.x + threadIdx.x;
-	i32 ti = p.nT, v = 0;
-	if (!p.list) { ti = gid / p.V; v = gid - ti * p.V; }
-	else if ((u32)gid < p.nList) { const u32 e = p.list[gid]; ti = (i32)(e / (u32)p.V); v = (i32)(e - (u32)ti * (u32)p.V); }
+	const u32 r = p.r0 + blockIdx.x * blockDim.x + threadIdx.x;   // (the record: the candidate's index in the batch)
 	unsigned long long nTicks = 0, nCand = 0, nDeath = 0, nDrift = 0, nNoop = 0, nEnd = 0, nHit = 0, nBroken = 0;
-	if (ti < p.nT) {
-		const i32 t = p.t0 + ti;
-		Cand c = makeCand(p.family, t, v, p.seed, p.masks, p.n, p.axis, nullptr);   // (the host left the twins out of the list)
-		if (c.valid) {
-			nCand++;
-			State<TW> s = *(const State<TW>*)(p.snaps + (size_t)t * p.stateBytes);
-			Sim<TW> sim(p.L, s);
-			const bool crown0 = s.has_silver_crown != 0;
-			i32 sticky = 0;
-			for (i32 k = 0;; k++) {
-				const i32 m = candInput(c, p.masks, p.n, p.axis, k, sticky);
-				if (m < 0) { nEnd++; break; }
-				Input in = maskInput(m);
-				sim.tick(in);
-				nTicks++;
-				const i32 done = k + 1;
-				if (s.broken) { nBroken++; break; }
-				if (s.is_dead) { nDeath++; break; }
-				if (!crown0 && s.has_silver_crown) {
-					if (p.n > t + done) {
-						const u32 slot = atomicAdd(p.hitCount, 1u);
-						if (slot < p.hitCap) { Hit h; h.t = t; h.v = v; h.k = done; h.j = p.n; h.family = p.family; h.flags = 1; h.seed = p.seed; p.hits[slot] = h; }
-						nHit++;
-					} else nNoop++;
-					break;
-				}
-				if (done >= c.prefix) {
-					{
-						const u32 bit = (u32)(quadKey(s.px, s.py, s.speed_x, s.speed_y) >> (64 - QBITS_LOG2));
-						if ((p.qbits[bit >> 5] >> (bit & 31)) & 1u) {
-							const i32 j = htLookup(p, sim.hash(p.nocoins != 0));
-							if (j >= 0) {
-								if (j > t + done) {
-									const u32 slot = atomicAdd(p.hitCount, 1u);
-									if (slot < p.hitCap) { Hit h; h.t = t; h.v = v; h.k = done; h.j = j; h.family = p.family; h.flags = 0; h.seed = p.seed; p.hits[slot] = h; }
-									nHit++;
-								} else nNoop++;
-								break;
+	if (r < p.r1) {
+		SearchRec* rec = (SearchRec*)(p.rec + (size_t)r * p.recBytes);
+		State<TW>* saved = (State<TW>*)(p.rec + (size_t)r * p.recBytes + 16);
+		i32 ti = p.nT, v = 0, k = 0, sticky = 0;
+		bool live = false;
+		if (p.phase == 0) {
+			if (!p.list) { ti = (i32)(r / (u32)p.V); v = (i32)(r - (u32)ti * (u32)p.V); }
+			else if (r < p.nList) { const u32 e = p.list[r]; ti = (i32)(e / (u32)p.V); v = (i32)(e - (u32)ti * (u32)p.V); }
+			live = ti < p.nT;
+		} else if (rec->k >= 0) { ti = rec->ti; v = rec->v; k = rec->k; sticky = rec->sticky; live = true; }
+		bool ended = true;
+		if (live) {
+			const i32 t = p.t0 + ti;
+			Cand c = makeCand(p.family, t, v, p.seed, p.masks, p.n, p.axis, nullptr);   // (the host left the twins out of the list)
+			if (c.valid) {
+				const State<TW>* s0 = (const State<TW>*)(p.snaps + (size_t)t * p.stateBytes);
+				if (p.phase == 0) nCand++;
+				State<TW> s = p.phase == 0 ? *s0 : *saved;
+				Sim<TW> sim(p.L, s);
+				const bool crown0 = s0->has_silver_crown != 0;
+				const i32 kEnd = k + p.segTicks;
+				for (;; k++) {
+					if (k >= kEnd) { ended = false; break; }   // (this launch's share: the rest in the next one)
+					const i32 m = candInput(c, p.masks, p.n, p.axis, k, sticky);
+					if (m < 0) { nEnd++; break; }
+					Input in = maskInput(m);
+					sim.tick(in);
+					nTicks++;
+					const i32 done = k + 1;
+					if (s.broken) { nBroken++; break; }
+					if (s.is_dead) { nDeath++; break; }
+					if (!crown0 && s.has_silver_crown) {
+						if (p.n > t + done) {
+							const u32 slot = atomicAdd(p.hitCount, 1u);
+							if (slot < p.hitCap) { Hit h; h.t = t; h.v = v; h.k = done; h.j = p.n; h.family = p.family; h.flags = 1; h.seed = p.seed; p.hits[slot] = h; }
+							nHit++;
+						} else nNoop++;
+						break;
+					}
+					if (done >= c.prefix) {
+						{
+							const u32 bit = (u32)(quadKey(s.px, s.py, s.speed_x, s.speed_y) >> (64 - QBITS_LOG2));
+							if ((p.qbits[bit >> 5] >> (bit & 31)) & 1u) {
+								const i32 j = htLookup(p, sim.hash(p.nocoins != 0));
+								if (j >= 0) {
+									if (j > t + done) {
+										const u32 slot = atomicAdd(p.hitCount, 1u);
+										if (slot < p.hitCap) { Hit h; h.t = t; h.v = v; h.k = done; h.j = j; h.family = p.family; h.flags = 0; h.seed = p.seed; p.hits[slot] = h; }
+										nHit++;
+									} else nNoop++;
+									break;
+								}
 							}
 						}
+						const i32 rr = t + c.skip + (done - c.prefix);
+						if (rr > p.n) { nEnd++; break; }
+						if (fabs(s.px - p.X[rr]) + fabs(s.py - p.Y[rr]) > p.drift) { nDrift++; break; }
 					}
-					const i32 r = t + c.skip + (done - c.prefix);
-					if (r > p.n) { nEnd++; break; }
-					if (fabs(s.px - p.X[r]) + fabs(s.py - p.Y[r]) > p.drift) { nDrift++; break; }
+					if (done >= p.horizon) { nEnd++; break; }
 				}
-				if (done >= p.horizon) { nEnd++; break; }
+				if (!ended) { rec->ti = ti; rec->v = v; rec->k = k; rec->sticky = sticky; *saved = s; atomicAdd(p.nLive, 1u); }
 			}
 		}
+		if (ended) rec->k = -1;
 	}
 	warpAdd(&p.stats[0], nTicks); warpAdd(&p.stats[1], nCand); warpAdd(&p.stats[2], nDeath); warpAdd(&p.stats[3], nDrift);
 	warpAdd(&p.stats[4], nNoop); warpAdd(&p.stats[5], nEnd); warpAdd(&p.stats[6], nHit); warpAdd(&p.stats[7], nBroken);
@@ -120,15 +137,20 @@ __device__ void twinsBody(const SearchParams& p, u32* twin, i32 m1, i32 m2) {
 	twinBits<TW>(p.L, st, p.masks, p.n, t, o, m1 != 0, m2 != 0, a, b, [&](i32 bit) { atomicOr(&row[bit >> 5], 1u << (bit & 31)); });
 }
 
+// The trace in segments (launch.h: a whole run in one launch can outlast the driver's watchdog): ticks [t0, t1) of the
+// run from the state the last segment left in `state` (t0 == 0: from reset()); info (complete, runTicks, deaths,
+// broken) carries over too (the host starts it at -1, -1, 0, -1).
 template <int TW>
-__device__ void traceBody(Level L, const u8* masks, i32 n, u64* out, const u32* coinBits0, u64 seed, i32* info) {
+__device__ void traceBody(Level L, const u8* masks, i32 t0, i32 t1, u64* out, const u32* coinBits0, u64 seed, i32* info, u8* state) {
 	if (blockIdx.x != 0 || threadIdx.x != 0) return;
 	State<TW> s;
 	Sim<TW> sim(L, s);
-	sim.reset(coinBits0, seed);
-	out[0] = sim.hash(false); out[1] = sim.hash(true);
-	i32 complete = -1, runTicks = -1, broken = -1;
-	for (i32 t = 0; t < n; t++) {
+	if (t0 == 0) {
+		sim.reset(coinBits0, seed);
+		out[0] = sim.hash(false); out[1] = sim.hash(true);
+	} else s = *(const State<TW>*)state;
+	i32 complete = info[0], runTicks = info[1], broken = info[3];
+	for (i32 t = t0; t < t1; t++) {
 		Input in = maskInput(masks[t]);
 		const bool had = s.has_silver_crown != 0;
 		sim.tick(in);
@@ -137,25 +159,30 @@ __device__ void traceBody(Level L, const u8* masks, i32 n, u64* out, const u32* 
 		if (s.broken && broken < 0) broken = t + 1;
 	}
 	info[0] = complete; info[1] = runTicks; info[2] = s.deaths; info[3] = broken;
+	*(State<TW>*)state = s;
 }
 
 // Raw engine speed (the processor benchmark): every thread plays random sticky inputs from the same start state, the
 // workload of src/bench.js on the CPU, so the two numbers compare.
+// In segments (launch.h): ticks [k0, k1) of each thread's run; its state and random state wait in `states` / `rng`
+// between launches (k0 == 0: from state0, a new run).
 template <int TW>
-__device__ void benchBody(Level L, const u8* state0, i32 ticks, u64 seed, unsigned long long* out) {
-	State<TW> s = *(const State<TW>*)state0;
-	Sim<TW> sim(L, s);
+__device__ void benchBody(Level L, const u8* state0, i32 k0, i32 k1, u64 seed, unsigned long long* out, u8* states, u64* rng) {
 	const i32 gid = blockIdx.x * blockDim.x + threadIdx.x;
-	u64 r = splitmix(seed ^ (u64)gid);
-	i32 m = 0;
+	State<TW>* saved = (State<TW>*)states + gid;
+	State<TW> s = k0 == 0 ? *(const State<TW>*)state0 : *saved;
+	Sim<TW> sim(L, s);
+	u64 r = k0 == 0 ? splitmix(seed ^ (u64)gid) : rng[2 * gid];
+	i32 m = k0 == 0 ? 0 : (i32)rng[2 * gid + 1];
 	unsigned long long n = 0;
-	for (i32 k = 0; k < ticks; k++) {
+	for (i32 k = k0; k < k1; k++) {
 		r = splitmix(r);
 		if (k == 0 || (r & 255) < 26) m = option((i32)((r >> 8) % 18));
 		Input in = maskInput(m);
 		sim.tick(in);
 		n++;
 	}
+	*saved = s; rng[2 * gid] = r; rng[2 * gid + 1] = (u64)m;
 	warpAdd(out, n);
 }
 
@@ -226,18 +253,19 @@ __device__ __forceinline__ void beamExpandParent(const BeamParams& p, const i32 
 	}
 	if (p.closest && nearest < *(volatile unsigned long long*)p.closest) atomicMin(p.closest, (unsigned long long)nearest);
 }
+// (every kernel below runs over the index range [lo, hi) of its launch: launch.h splits the work into short launches)
 template <int TW>
 __device__ void beamExpandBody(const BeamParams& p) {
-	const i32 pi = blockIdx.x * blockDim.x + threadIdx.x;
+	const i32 pi = (i32)p.lo + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
 	unsigned long long nSim = 0, nTwin = 0;
-	if (pi < p.nParents) beamExpandParent<TW>(p, pi, nSim, nTwin);
+	if (pi < (i32)p.hi && pi < p.nParents) beamExpandParent<TW>(p, pi, nSim, nTwin);
 	warpAdd(&p.stats[0], nSim); warpAdd(&p.stats[1], nTwin);   // (every lane: no early return above)
 }
 // materialize: one thread per kept child: parent + option -> the next layer's state
 template <int TW>
 __device__ void beamMaterializeBody(const BeamParams& p) {
-	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= p.nPick) return;
+	const i32 i = (i32)p.lo + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (i >= (i32)p.hi || i >= p.nPick) return;
 	const u32 pk = p.pick[i];
 	State<TW> s = *(const State<TW>*)(p.parents + (size_t)(pk >> 5) * p.stateBytes);
 	Sim<TW> sim(p.L, s);
@@ -248,8 +276,8 @@ __device__ void beamMaterializeBody(const BeamParams& p) {
 
 // ---------------------------------------------------------------- the beam's selection (beam.h BeamSel)
 extern "C" __global__ void beamSelInsert(BeamSel q) {
-	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nKids) return;
+	const i32 i = (i32)q.r0 + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (i >= (i32)q.r1 || i >= q.nKids) return;
 	const BeamChild c = q.kids[i];
 	if (c.flags & (2 | 4)) { const u32 r = atomicAdd(q.nRes, 1u); if (r < q.resCap) q.res[r] = (u32)i; }
 	if (c.flags & (1 | 2 | 8 | 16)) { q.slot[i] = ~0u; return; }
@@ -264,8 +292,8 @@ extern "C" __global__ void beamSelInsert(BeamSel q) {
 	atomicMax((unsigned long long*)&q.hBest[s], (unsigned long long)(((u64)orderedScore(c.score) << 32) | (u64)(0xffffffffu - (u32)i)));
 }
 extern "C" __global__ void beamSelWinners(BeamSel q) {
-	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nKids) return;
+	const i32 i = (i32)q.r0 + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (i >= (i32)q.r1 || i >= q.nKids) return;
 	const u32 s = q.slot[i];
 	u8 w = 0;
 	if (s != ~0u && (u32)q.hBest[s] == 0xffffffffu - (u32)i) {
@@ -276,14 +304,14 @@ extern "C" __global__ void beamSelWinners(BeamSel q) {
 	q.win[i] = w;
 }
 extern "C" __global__ void beamSelHist(BeamSel q) {
-	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nKids || !q.win[i]) return;
+	const i32 i = (i32)q.r0 + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (i >= (i32)q.r1 || i >= q.nKids || !q.win[i]) return;
 	atomicAdd(&q.hist[scoreBin(q, orderedScore(q.kids[i].score))], 1u);
 }
 /** one round: the winners in score bins [bLo, bHi] */
 extern "C" __global__ void beamSelPick(BeamSel q, i32 bLo, i32 bHi) {
-	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nKids || !q.win[i]) return;
+	const i32 i = (i32)q.r0 + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (i >= (i32)q.r1 || i >= q.nKids || !q.win[i]) return;
 	const BeamChild c = q.kids[i];
 	const i32 b = scoreBin(q, orderedScore(c.score));
 	if (b < bLo || b > bHi) return;
@@ -291,10 +319,10 @@ extern "C" __global__ void beamSelPick(BeamSel q, i32 bLo, i32 bHi) {
 	const u32 s = atomicAdd(q.nPick, 1u);
 	if (s < q.K) q.pick[s] = (c.parent << 5) | c.option;
 }
-/** the fill-up: pick[n0 + j] = the j-th state over the cap (j < need) */
+/** the fill-up: pick[n0 + j] = the j-th state over the cap (j < need; this launch: j in [lo, hi)) */
 extern "C" __global__ void beamSelFill(BeamSel q, u32 n0, u32 need) {
-	const u32 j = blockIdx.x * blockDim.x + threadIdx.x;
-	if (j >= need) return;
+	const u32 j = q.r0 + blockIdx.x * blockDim.x + threadIdx.x;
+	if (j >= q.r1 || j >= need) return;
 	const BeamChild c = q.kids[q.over[j]];
 	q.pick[n0 + j] = (c.parent << 5) | c.option;
 }
@@ -436,15 +464,15 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 }
 template <int TW>
 __device__ void exploreExpandBody(const ExploreParams& p) {
-	const i32 pi = blockIdx.x * blockDim.x + threadIdx.x;
+	const i32 pi = (i32)p.lo + (i32)(blockIdx.x * blockDim.x + threadIdx.x);   // (the launch's parents: [lo, hi))
 	unsigned long long nSim = 0, nTwin = 0;
-	if (pi < p.nParents) exploreExpandParent<TW>(p, pi, nSim, nTwin);
+	if (pi < (i32)p.hi && pi < p.nParents) exploreExpandParent<TW>(p, pi, nSim, nTwin);
 	warpAdd(&p.stats[0], nSim); warpAdd(&p.stats[1], nTwin);   // (every lane: no early return above)
 }
 /** the claim, pass 1: each child finds its cell; new this layer -> it proposes its priority (the minimum wins) */
 extern "C" __global__ void exploreClaimPropose(ExploreClaim q) {
-	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nCand) return;
+	const u32 i = q.lo + blockIdx.x * blockDim.x + threadIdx.x;   // (the launch's candidates: [lo, hi))
+	if (i >= q.hi || i >= q.nCand) return;
 	const u64 ck = q.candKey[i];
 	if (!ck) { q.candSlot[i] = EE_SLOT_DROP; return; }
 	const u64 cell = ck & ~0xfffull, tag = ((u64)(q.layer & 0x7ffu) << 1) | 1ull;
@@ -469,8 +497,8 @@ extern "C" __global__ void exploreClaimPropose(ExploreClaim q) {
  *  select (explorehost.h claimCut), the histogram of the selBits bits at selShift of the key (the priority, or with
  *  selIdx the index of a winner at priority thr) among the winners whose key bits above them are selHi */
 extern "C" __global__ void exploreClaimCount(ExploreClaim q) {
-	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nCand) return;
+	const u32 i = q.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.hi || i >= q.nCand) return;
 	const u32 s = q.candSlot[i];
 	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i])) return;
 	const u64 pr = q.candPrio[i];
@@ -485,8 +513,8 @@ extern "C" __global__ void exploreClaimCount(ExploreClaim q) {
 }
 /** pass 3: the winners below the cut (priority below thr, or thr with an index below thrIdx) are the next layer */
 extern "C" __global__ void exploreClaimTake(ExploreClaim q) {
-	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= q.nCand) return;
+	const u32 i = q.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.hi || i >= q.nCand) return;
 	const u32 s = q.candSlot[i];
 	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i])) return;
 	const u64 pr = q.candPrio[i];
@@ -497,8 +525,8 @@ extern "C" __global__ void exploreClaimTake(ExploreClaim q) {
 
 template <int TW>
 __device__ void exploreMaterializeBody(const ExploreParams& p) {
-	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= p.nPick) return;
+	const i32 i = (i32)p.lo + (i32)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (i >= (i32)p.hi || i >= p.nPick) return;
 	const u32 pk = p.pick[i];
 	State<TW> s = *(const State<TW>*)(p.parents + (size_t)(pk >> 5) * p.stateBytes);
 	Sim<TW> sim(p.L, s);
@@ -511,8 +539,8 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 #define INSTANCE_(TW) \
 	extern "C" __global__ void __launch_bounds__(128) search_##TW(SearchParams p) { searchBody<TW>(p); } \
 	extern "C" __global__ void __launch_bounds__(128) twins_##TW(SearchParams p, u32* twin, i32 m1, i32 m2) { twinsBody<TW>(p, twin, m1, m2); } \
-	extern "C" __global__ void trace_##TW(Level L, const u8* masks, i32 n, u64* out, const u32* coinBits0, u64 seed, i32* info) { traceBody<TW>(L, masks, n, out, coinBits0, seed, info); } \
-	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 ticks, u64 seed, unsigned long long* out) { benchBody<TW>(L, state0, ticks, seed, out); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
+	extern "C" __global__ void trace_##TW(Level L, const u8* masks, i32 t0, i32 t1, u64* out, const u32* coinBits0, u64 seed, i32* info, u8* state) { traceBody<TW>(L, masks, t0, t1, out, coinBits0, seed, info, state); } \
+	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 k0, i32 k1, u64 seed, unsigned long long* out, u8* states, u64* rng) { benchBody<TW>(L, state0, k0, k1, seed, out, states, rng); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
 	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
 	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)

@@ -263,6 +263,13 @@ struct SearchParams {
 	unsigned long long* stats;   // [0] ticks [1] candidates [2] death [3] drift [4] no-op/behind [5] horizon/end [6] hits [7] broken
 	const u8* axis;              // the reference's axis byte per tick (pert / flip; see makeCand)
 	const u32* list; u32 nList;  // non-null: the launch's candidates, (t - t0) * V + v each (systematic families without their twins)
+	// a batch of candidates plays in launches of at most segTicks ticks per candidate (a candidate can run --horizon
+	// ticks; one launch of that on a throttled laptop GPU can outlast the driver's watchdog: launch.h): rec holds one
+	// record per candidate of the batch (SearchRec, then its state; recBytes each), phase 0 starts the batch's candidates,
+	// phase 1 continues the live ones; nLive counts the candidates still running after the launch; [r0, r1) = its records
+	u8* rec; i32 recBytes; i32 segTicks; i32 phase; u32* nLive; u32 r0, r1;
 };
+/** a search candidate between launches: its variant, the next tick index, the sticky input; k < 0 = ended */
+struct SearchRec { i32 ti, v, k, sticky; };
 
 }  // namespace ee

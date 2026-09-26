@@ -4,6 +4,11 @@
 //   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
+// Every GPU command takes --launch-ms=N (default 50): the target time of one kernel launch (launch.h: the work is
+// split into launches sized from the measured speed, so none nears the driver's 2 s watchdog even on a throttled
+// laptop GPU); its done / summary line reports "maxLaunchMs". A failed launch prints {"error":...,"launchError":true}
+// and exits 6 (7: CUDA_ERROR_LAUNCH_TIMEOUT). --stopfile=<path>: when that file appears, the command ends between two
+// launches with its final line (end "stopped") and exit code 0 (killing it while a kernel runs resets the driver).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +19,7 @@
 #include <chrono>
 #include <algorithm>
 #include "cudadrv.h"
+#include "launch.h"
 #include "eecore.h"
 #include "search.h"
 #include "beam.h"
@@ -295,7 +301,8 @@ static int cmdInfo(int argc, char** argv) {
 	cu::CUfunction f = g.fn("stateSize_8");
 	void* args[] = { &out.p };
 	bool layoutOk = false;
-	if (f && !cu::cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr) && !cu::cuCtxSynchronize()) {
+	if (f) {
+		lk::launch(f, 1, 1, args, "stateSize");
 		cu::cuMemcpyDtoH_v2(sz, out.p, 16);
 		layoutOk = sz[0] == (int)sizeof(State<8>) && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level);
 	}
@@ -308,34 +315,43 @@ static int cmdInfo(int argc, char** argv) {
 		fa += b;
 	}
 	printf("{\"kernels\":{%s},", fa.c_str());
-	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]}\n", g.json().c_str(), layoutOk ? "true" : "false",
-		sz[0], sz[1], sz[2], sz[3], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level));
+	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
+		sz[0], sz[1], sz[2], sz[3], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level), lk::doneFields().c_str());
 	return 0;
 }
 
 // ------------------------------------------------------------------ trace on the GPU
 template <int TW>
 static bool gpuTrace(Gpu& g, const LevelBlob& B, const std::vector<uint8_t>& m, std::vector<uint64_t>& out, int32_t info[4], double& sec) {
-	cu::Buf dl, dm, dout, dinfo;
-	if (!dl.upload(B.bytes.data(), B.bytes.size()) || !dm.upload(m.data(), m.size()) || !dout.alloc(16 * (m.size() + 1)) || !dinfo.alloc(16)) return false;
+	cu::Buf dl, dm, dout, dinfo, dstate;
+	if (!dl.upload(B.bytes.data(), B.bytes.size()) || !dm.upload(m.data(), m.size()) || !dout.alloc(16 * (m.size() + 1)) || !dinfo.upload(info, 16) ||
+		!dstate.alloc(sizeof(State<TW>))) return false;
 	Level L = B.level((const uint8_t*)(uintptr_t)dl.p);
 	const u8* masks = (const u8*)(uintptr_t)dm.p;
-	int n = (int)m.size();
+	const int n = (int)m.size();
+	int t0 = 0, t1 = 0;
 	u64* o = (u64*)(uintptr_t)dout.p;
 	const u32* cb0 = (const u32*)(uintptr_t)(dl.p + B.aoff[A_coinBits0]);
 	u64 seed = B.rngSeed;
 	i32* inf = (i32*)(uintptr_t)dinfo.p;
-	void* args[] = { &L, &masks, &n, &o, &cb0, &seed, &inf };
+	u8* stp = (u8*)(uintptr_t)dstate.p;
+	void* args[] = { &L, &masks, &t0, &t1, &o, &cb0, &seed, &inf, &stp };
 	cu::CUfunction f = g.fn("trace_" + std::to_string(TW));
-	if (!f) { cu::lastError = "no trace kernel"; return false; }
-	auto t0 = std::chrono::steady_clock::now();
-	CU_TRY(cu::cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr));
-	CU_TRY(cu::cuCtxSynchronize());
-	sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	if (!f) { cu::lastError = "no trace kernel (rebuild the kernels)"; return false; }
+	auto c0 = std::chrono::steady_clock::now();
+	// one thread over the run, in segments of ticks sized to the launch target (each continues from the saved state)
+	lk::Chunk ck(64, 1, 1e7);
+	do {
+		t1 = t0 + (n > t0 ? (int)ck.next((uint64_t)(n - t0)) : 0);   // (an empty run: one launch for the start state)
+		const double ms = lk::launch(f, 1, 1, args, "trace");
+		ck.took(t1 - t0, ms);
+		t0 = t1;
+	} while (t0 < n);
+	sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
 	out.resize(2 * (m.size() + 1));
 	CU_TRY(cu::cuMemcpyDtoH_v2(out.data(), dout.p, 16 * (m.size() + 1)));
 	CU_TRY(cu::cuMemcpyDtoH_v2(info, dinfo.p, 16));
-	dl.free(); dm.free(); dout.free(); dinfo.free();
+	dl.free(); dm.free(); dout.free(); dinfo.free(); dstate.free();
 	return true;
 }
 
@@ -357,7 +373,7 @@ static int cmdTraceGpu(int argc, char** argv) {
 	fwrite(head, 4, 6, f);
 	fwrite(out.data(), 8, out.size(), f);
 	fclose(f);
-	printf("{\"ticks\":%zu,\"complete\":%d,\"runTicks\":%d,\"deaths\":%d,\"broken\":%d,\"seconds\":%.6f,\"gpu\":true}\n", m.size(), info[0], info[1], info[2], info[3], sec);
+	printf("{\"ticks\":%zu,\"complete\":%d,\"runTicks\":%d,\"deaths\":%d,\"broken\":%d,\"seconds\":%.6f,\"gpu\":true%s}\n", m.size(), info[0], info[1], info[2], info[3], sec, lk::doneFields().c_str());
 	return 0;
 }
 
@@ -488,7 +504,6 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	const double seconds = atof(opt(argc, argv, "seconds", "20").c_str());
 	const int horizon = atoi(opt(argc, argv, "horizon", "1500").c_str());
 	const double drift = atof(opt(argc, argv, "drift", "96").c_str());
-	const double launchMs = atof(opt(argc, argv, "launch-ms", "50").c_str());   // (short launches: a throttled laptop GPU runs 6x slower, and Windows resets the driver after 2 s)
 	uint64_t seed = strtoull(opt(argc, argv, "seed", "1").c_str(), nullptr, 10);
 	std::string fams = opt(argc, argv, "families", "m1,del,m2,pert,flip,sticky");
 	const int from = atoi(opt(argc, argv, "from", "0").c_str());
@@ -514,6 +529,12 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fsearch = g.fn("search_" + std::to_string(TW));
 	if (!fsearch) { printf("{\"error\":\"search kernel missing\"}\n"); return 4; }
+	lk::onStop = [&]() {   // (stopped before the search: an empty edges file; later the finale below)
+		FILE* f = fopen(argv[4], "wb");
+		const uint32_t head[4] = { 0x44454545u, 1u, 0u, (uint32_t)n };
+		if (f) { fwrite(head, 4, 4, f); fclose(f); }
+		printf("{\"ev\":\"done\",\"end\":\"stopped\",\"n\":%d,\"edges\":0%s}\n", n, lk::doneFields().c_str());
+	};
 	// device data
 	cu::Buf dl, dsnap, dmask, dX, dY, dK, dV, dpix, dq, dhits, dcount, dstats, dax, dlist;
 	const uint32_t hitCap = 1u << 18;
@@ -540,19 +561,22 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	if (twGpu) {   // the twin table on the GPU, in chunks of start ticks (18 threads each), copied back for the lists and verify
 		const double s0 = elapsed();
 		cu::CUfunction ftw = g.fn("twins_" + std::to_string(TW));
-		const int chunk = 2048;
+		const int chunkMax = 8192;   // (the buffer; the launches are sized to the launch target: launch.h)
+		lk::Chunk ck(32, 1, chunkMax);
 		cu::Buf dtw;
-		if (!ftw || !dtw.alloc(4ull * TWIN_WORDS * chunk)) { printf("{\"error\":\"twins kernel missing (rebuild: node tools/build-native.js)\"}\n"); return 4; }
+		if (!ftw || !dtw.alloc(4ull * TWIN_WORDS * chunkMax)) { printf("{\"error\":\"twins kernel missing (rebuild: node tools/build-native.js)\"}\n"); return 4; }
 		S.twin.assign((size_t)n * TWIN_WORDS, 0u);
 		i32 m1 = twM1 ? 1 : 0, m2 = twM2 ? 1 : 0;
 		u32* dtwp = (u32*)(uintptr_t)dtw.p;
-		for (int c0 = t0; c0 < t1; c0 += chunk) {
-			P.t0 = c0; P.nT = std::min(chunk, t1 - c0);
+		for (int c0 = t0; c0 < t1;) {
+			P.t0 = c0; P.nT = (int)ck.next((uint64_t)(t1 - c0));
 			cu::cuMemsetD8_v2(dtw.p, 0, 4ull * TWIN_WORDS * P.nT);
 			void* ta[] = { &P, &dtwp, &m1, &m2 };
 			const unsigned threads = (unsigned)P.nT * 18;
-			if (cu::cuLaunchKernel(ftw, (threads + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, ta, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"twins kernel failed\"}\n"); return 5; }
+			const double ms = lk::launch(ftw, (threads + 127) / 128, 128, ta, "twins");
+			ck.took(P.nT, ms);
 			cu::cuMemcpyDtoH_v2(S.twin.data() + (size_t)c0 * TWIN_WORDS, dtw.p, 4ull * TWIN_WORDS * P.nT);
+			c0 += P.nT;
 		}
 		twinSec = elapsed() - s0;
 	}
@@ -564,11 +588,73 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	double famSec[FAM_COUNT] = {0};
 	uint64_t rejected = 0, launches = 0;
 	unsigned long long statsPrev[8] = {0};
-	// start ticks per launch (in m1 units), per family (their costs differ): small at first, grown at most 1.5x per launch
-	// toward launchMs, cut down to a tenth at once after a launch that ran long (a throttled GPU slows down any time)
-	double tPer[FAM_COUNT];
-	for (int f = 0; f < FAM_COUNT; f++) tPer[f] = 16.0;
-	double maxLaunchMs = 0;
+	// batches of candidates (start ticks x variants): each candidate's state waits in a record on the GPU, and the
+	// batch's launches play up to famSeg ticks of every live candidate (launch.h: one candidate can run --horizon ticks,
+	// and one thread's tick took 0.5 ms on a throttled laptop GPU), until none is left. Per family (their candidates
+	// cost differently): the start ticks per batch (toward 10 x the launch target, at most the records' room) and the
+	// ticks per launch (toward the target)
+	const size_t recBytes = (16 + sizeof(State<TW>) + 15) & ~(size_t)15;
+	const size_t recCap = std::max<size_t>(4096, std::min<size_t>((size_t)256 << 20, (g.d.mem ? g.d.mem : (size_t)4 << 30) / 16) / recBytes);
+	cu::Buf drec, dlive;
+	if (!drec.alloc(recBytes * recCap) || !dlive.alloc(4)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	P.rec = (u8*)(uintptr_t)drec.p; P.recBytes = (i32)recBytes; P.nLive = (u32*)(uintptr_t)dlive.p;
+	std::vector<lk::Chunk> famBatch, famSeg;
+	for (int f = 0; f < FAM_COUNT; f++) {
+		const double Vf = f >= FAM_PERT ? 256 : familyVariants(f);
+		famBatch.emplace_back(std::max(1.0, std::floor(1024.0 / Vf)), 1, std::max(1.0, std::floor((double)recCap / Vf)), 1, 10.0);
+		famSeg.emplace_back(32, 1, std::max(1, horizon), 1, 1.0);
+	}
+	std::vector<Hit> batchHits;
+	// a batch's hits: in candidate order (start tick, variant: whatever order the GPU found them in), the shortest k per (t, j)
+	auto takeHits = [&]() {
+		std::sort(batchHits.begin(), batchHits.end(), [](const Hit& a, const Hit& b) { return a.t != b.t ? a.t < b.t : a.v < b.v; });
+		for (const Hit& h : batchHits) {
+			famHits[h.family]++;
+			bool dup = false;
+			for (int ei : best[h.t]) if (edges[ei].j == h.j && edges[ei].k <= h.k) { dup = true; break; }
+			if (dup) continue;
+			Edge e;
+			if (!S.verify(h, e)) { rejected++; continue; }
+			famVerified[h.family]++;
+			best[h.t].push_back((int)edges.size());
+			edges.push_back(std::move(e));
+		}
+		batchHits.clear();
+	};
+	// the edges file and the done event (stopped: a stop request between two launches, launch.h; the batch's hits so far count)
+	auto finale = [&](bool stopped) {
+		if (stopped) takeHits();
+		unsigned long long st[8];
+		cu::cuMemcpyDtoH_v2(st, dstats.p, 64);
+		const double sec = elapsed();
+		// edges file: "EEED", version 1, count, n, then per edge: t, j, k (i32), family, flags (u8), 2 pad, k input bytes
+		FILE* f = fopen(argv[4], "wb");
+		uint32_t head[4] = { 0x44454545u, 1u, (uint32_t)edges.size(), (uint32_t)n };
+		fwrite(head, 4, 4, f);
+		for (const Edge& e : edges) {
+			int32_t a[3] = { e.t, e.j, e.k };
+			uint8_t b[4] = { e.family, e.flags, 0, 0 };
+			fwrite(a, 4, 3, f); fwrite(b, 1, 4, f); fwrite(e.seq.data(), 1, e.seq.size(), f);
+		}
+		fclose(f);
+		int64_t bestSave = 0;
+		for (const Edge& e : edges) bestSave = std::max<int64_t>(bestSave, (int64_t)e.j - e.t - e.k);
+		printf("{\"ev\":\"done\",\"gpu\":%s,\"n\":%d,\"runTicks\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"candidates\":%llu,"
+			"\"ends\":{\"death\":%llu,\"drift\":%llu,\"noop\":%llu,\"end\":%llu,\"hit\":%llu,\"broken\":%llu},\"launches\":%llu,"
+			"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"twinSeconds\":%.2f,\"listSeconds\":%.2f%s%s,\"families\":{",
+			g.json().c_str(), n, S.runTicks, sec, st[0], st[0] / std::max(1e-9, sec), st[1], st[2], st[3], st[4], st[5], st[6], st[7],
+			(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW, twinSec, listSec,
+			stopped ? ",\"end\":\"stopped\"" : "", lk::doneFields().c_str());
+		bool first = true;
+		for (int fm : famList) {
+			printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu,\"twins\":%llu,\"launchTicks\":%.0f,\"batchStarts\":%.0f}", first ? "" : ",", FAMILY_NAMES[fm],
+				(unsigned long long)famTicks[fm], famSec[fm], (unsigned long long)famHits[fm], (unsigned long long)famVerified[fm], (unsigned long long)famTwins[fm], famSeg[fm].size, famBatch[fm].size);
+			first = false;
+		}
+		printf("}}\n");
+	};
+	lk::onStop = [&]() { finale(true); };
+	bool cut = false;   // (the time ran out inside a batch: its start ticks are not done)
 	bool firstPass = true;
 	int fi = 0;
 	int tCursor = t0;
@@ -586,8 +672,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 			continue;
 		}
 		const int V = random ? 256 : familyVariants(fam);
-		int nT = std::max(1, (int)(tPer[fam] * 216.0 / V));
-		nT = std::min(nT, t1 - tCursor);
+		const int nT = (int)famBatch[fam].next((uint64_t)(t1 - tCursor));
 		P.family = fam; P.t0 = tCursor; P.nT = nT; P.V = V; P.seed = seed;
 		unsigned threads = (unsigned)nT * V;   // one thread per candidate (t fastest)
 		P.list = nullptr; P.nList = 0;
@@ -609,44 +694,45 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 			P.list = (const u32*)(uintptr_t)dlist.p; P.nList = (u32)list.size();
 			listSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - b0).count();
 		}
-		const unsigned block = 128, grid = (threads + block - 1) / block;
+		const unsigned block = 128;
 		void* args[] = { &P };
-		auto l0 = std::chrono::steady_clock::now();
-		if (threads && (cu::cuLaunchKernel(fsearch, grid, 1, 1, block, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize())) {
-			printf("{\"error\":\"kernel launch failed\"}\n"); return 5;
-		}
-		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - l0).count();
-		launches++;
-		famSec[fam] += ms / 1000;
-		// adapt the size toward launchMs
-		const double scale = launchMs / std::max(ms, 1.0);
-		tPer[fam] = std::max(1.0, std::min(tPer[fam] * std::min(1.5, std::max(0.1, scale)), 1e6));
-		if (ms > maxLaunchMs) maxLaunchMs = ms;
-		// hits
-		uint32_t cnt = 0;
-		cu::cuMemcpyDtoH_v2(&cnt, dcount.p, 4);
-		if (cnt) {
-			cnt = std::min(cnt, hitCap);
-			std::vector<Hit> hits(cnt);
-			cu::cuMemcpyDtoH_v2(hits.data(), dhits.p, sizeof(Hit) * cnt);
-			cu::cuMemsetD8_v2(dcount.p, 0, 4);
-			for (const Hit& h : hits) {
-				famHits[h.family]++;
-				// keep the shortest k per (t, j)
-				bool dup = false;
-				for (int ei : best[h.t]) if (edges[ei].j == h.j && edges[ei].k <= h.k) { dup = true; break; }
-				if (dup) continue;
-				Edge e;
-				if (!S.verify(h, e)) { rejected++; continue; }
-				famVerified[h.family]++;
-				best[h.t].push_back((int)edges.size());
-				edges.push_back(std::move(e));
+		double ms = 0;
+		batchHits.clear();
+		const double b0 = elapsed();
+		if (threads) {
+			// the batch: phase 0 starts every candidate, phase 1 continues the live ones, each launch up to segTicks ticks
+			P.phase = 0; P.r0 = 0; P.r1 = threads;
+			double liveFrac = 1;
+			for (;;) {
+				cu::cuMemsetD8_v2(dlive.p, 0, 4);
+				P.segTicks = (i32)famSeg[fam].next((uint64_t)std::max(1, horizon));
+				ms = lk::launch(fsearch, (threads + block - 1) / block, block, args, "search");
+				launches++;
+				famSec[fam] += ms / 1000;
+				famSeg[fam].took(P.segTicks * liveFrac, ms);   // (a launch with few live candidates only shrinks it)
+				uint32_t cnt = 0, live = 0;
+				cu::cuMemcpyDtoH_v2(&cnt, dcount.p, 4);
+				if (cnt) {
+					cnt = std::min(cnt, hitCap);
+					const size_t o = batchHits.size();
+					batchHits.resize(o + cnt);
+					cu::cuMemcpyDtoH_v2(batchHits.data() + o, dhits.p, sizeof(Hit) * cnt);
+					cu::cuMemsetD8_v2(dcount.p, 0, 4);
+				}
+				cu::cuMemcpyDtoH_v2(&live, dlive.p, 4);
+				if (!live) break;
+				liveFrac = (double)live / threads;
+				P.phase = 1;
+				if (elapsed() >= seconds) { cut = true; break; }   // (time is up inside the batch)
 			}
 		}
+		takeHits();
 		unsigned long long st[8];
 		cu::cuMemcpyDtoH_v2(st, dstats.p, 64);
 		famTicks[fam] += st[0] - statsPrev[0];
 		memcpy(statsPrev, st, sizeof st);
+		if (cut) break;   // (the batch's start ticks are not done: the cursor stays)
+		if (threads) famBatch[fam].took(nT, (elapsed() - b0) * 1000);
 		tCursor += nT;
 		if (tCursor >= t1) {
 			tCursor = t0;
@@ -661,33 +747,8 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 			fflush(stdout);
 		}
 	}
-	unsigned long long st[8];
-	cu::cuMemcpyDtoH_v2(st, dstats.p, 64);
-	const double sec = elapsed();
-	// edges file: "EEED", version 1, count, n, then per edge: t, j, k (i32), family, flags (u8), 2 pad, k input bytes
-	FILE* f = fopen(argv[4], "wb");
-	uint32_t head[4] = { 0x44454545u, 1u, (uint32_t)edges.size(), (uint32_t)n };
-	fwrite(head, 4, 4, f);
-	for (const Edge& e : edges) {
-		int32_t a[3] = { e.t, e.j, e.k };
-		uint8_t b[4] = { e.family, e.flags, 0, 0 };
-		fwrite(a, 4, 3, f); fwrite(b, 1, 4, f); fwrite(e.seq.data(), 1, e.seq.size(), f);
-	}
-	fclose(f);
-	int64_t bestSave = 0;
-	for (const Edge& e : edges) bestSave = std::max<int64_t>(bestSave, (int64_t)e.j - e.t - e.k);
-	printf("{\"ev\":\"done\",\"gpu\":%s,\"n\":%d,\"runTicks\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"candidates\":%llu,"
-		"\"ends\":{\"death\":%llu,\"drift\":%llu,\"noop\":%llu,\"end\":%llu,\"hit\":%llu,\"broken\":%llu},\"launches\":%llu,"
-		"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"twinSeconds\":%.2f,\"listSeconds\":%.2f,\"maxLaunchMs\":%.0f,\"families\":{",
-		g.json().c_str(), n, S.runTicks, sec, st[0], st[0] / std::max(1e-9, sec), st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-		(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW, twinSec, listSec, maxLaunchMs);
-	bool first = true;
-	for (int fm : famList) {
-		printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu,\"twins\":%llu}", first ? "" : ",", FAMILY_NAMES[fm],
-			(unsigned long long)famTicks[fm], famSec[fm], (unsigned long long)famHits[fm], (unsigned long long)famVerified[fm], (unsigned long long)famTwins[fm]);
-		first = false;
-	}
-	printf("}}\n");
+	lk::onStop = nullptr;
+	finale(false);
 	return 0;
 }
 
@@ -695,7 +756,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 template <int TW>
 static int runBench(int argc, char** argv, const LevelBlob& B) {
 	const double seconds = atof(opt(argc, argv, "seconds", "3").c_str());
-	const int ticks = atoi(opt(argc, argv, "ticks", "256").c_str());
+	const int ticks = std::max(1, std::min(1024, atoi(opt(argc, argv, "ticks", "256").c_str())));   // (per thread: bounds one launch)
 	State<TW>* st = (State<TW>*)calloc(1, sizeof(State<TW>));
 	Level L = B.level(B.bytes.data());
 	{ Sim<TW> sim(L, *st); sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed); }
@@ -729,33 +790,52 @@ static int runBench(int argc, char** argv, const LevelBlob& B) {
 		return 0;
 	}
 	cu::CUfunction f = g.fn("bench_" + std::to_string(TW));
-	cu::Buf dl, ds, dout;
-	if (!f || !dl.upload(B.bytes.data(), B.bytes.size()) || !ds.upload(st, sizeof(State<TW>)) || !dout.alloc(8)) {
+	// one run of `ticks` ticks per thread, 1024 threads per SM (enough to fill the GPU), played in segments of ticks
+	// sized to the launch target (launch.h: one thread's 256 ticks took 300 ms on a throttled laptop GPU); the threads'
+	// states wait on the GPU between segments
+	const unsigned threads = (unsigned)g.d.sms * 1024;
+	cu::Buf dl, ds, dout, dstates, drng;
+	if (!f || !dl.upload(B.bytes.data(), B.bytes.size()) || !ds.upload(st, sizeof(State<TW>)) || !dout.alloc(8) ||
+		!dstates.alloc(sizeof(State<TW>) * (size_t)threads) || !drng.alloc(16ull * threads)) {
 		printf("{\"gpu\":null,\"why\":%s,\"nativeCpuSingle\":%.0f}\n", jsonStr(cu::lastError).c_str(), cpuRate);
 		return 0;
 	}
 	Level dL = B.level((const uint8_t*)(uintptr_t)dl.p);
 	const u8* s0 = (const u8*)(uintptr_t)ds.p;
 	unsigned long long* o = (unsigned long long*)(uintptr_t)dout.p;
+	u8* stp = (u8*)(uintptr_t)dstates.p;
+	u64* rngp = (u64*)(uintptr_t)drng.p;
 	cu::cuMemsetD8_v2(dout.p, 0, 8);
-	int tk = ticks;
-	unsigned threads = (unsigned)g.d.sms * 1024;
-	auto launch = [&](u64 seed) {
-		void* a[] = { &dL, &s0, &tk, &seed, &o };
-		return !cu::cuLaunchKernel(f, threads / 128, 1, 1, 128, 1, 1, 0, nullptr, a, nullptr) && !cu::cuCtxSynchronize();
-	};
-	if (!launch(1)) { printf("{\"gpu\":null,\"why\":\"bench kernel failed\"}\n"); return 0; }   // warm-up (clocks up)
-	cu::cuMemsetD8_v2(dout.p, 0, 8);
+	int k0 = 0, k1 = 0;
+	u64 seed = 1;
+	void* a[] = { &dL, &s0, &k0, &k1, &seed, &o, &stp, &rngp };
+	lk::Chunk ck(4, 1, ticks);
 	auto t0 = std::chrono::steady_clock::now();
 	double el = 0;
-	u64 seed = 2;
-	while (el < seconds) {
-		if (!launch(seed++)) break;
-		el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	bool measuring = false;
+	lk::onStop = [&]() {   // (a stop request: what was measured so far, not a speed to keep)
+		unsigned long long n = 0;
+		cu::cuMemcpyDtoH_v2(&n, dout.p, 8);
+		printf("{\"gpu\":%s,\"ticksPerSec\":%.0f,\"ticks\":%llu,\"seconds\":%.2f,\"nativeCpuSingle\":%.0f,\"end\":\"stopped\"%s}\n", g.json().c_str(),
+			measuring && el > 0 ? n / el : 0.0, n, el, cpuRate, lk::doneFields().c_str());
+	};
+	// runs until `seconds` of measuring (after one whole warm-up run: clocks up, the segment size settles)
+	for (;;) {
+		for (k0 = 0; k0 < ticks; k0 = k1) {
+			k1 = k0 + (int)ck.next((uint64_t)(ticks - k0));
+			ck.took(k1 - k0, lk::launch(f, threads / 128, 128, a, "bench"));
+			el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+			if (measuring && el >= seconds) break;
+		}
+		seed++;
+		if (!measuring) { cu::cuMemsetD8_v2(dout.p, 0, 8); t0 = std::chrono::steady_clock::now(); measuring = true; continue; }
+		if (el >= seconds) break;
 	}
+	lk::onStop = nullptr;
 	unsigned long long n = 0;
 	cu::cuMemcpyDtoH_v2(&n, dout.p, 8);
-	printf("{\"gpu\":%s,\"ticksPerSec\":%.0f,\"ticks\":%llu,\"seconds\":%.2f,\"nativeCpuSingle\":%.0f}\n", g.json().c_str(), n / el, n, el, cpuRate);
+	printf("{\"gpu\":%s,\"ticksPerSec\":%.0f,\"ticks\":%llu,\"seconds\":%.2f,\"nativeCpuSingle\":%.0f,\"ticksPerLaunch\":%.0f%s}\n", g.json().c_str(), n / el, n, el, cpuRate,
+		ck.size, lk::doneFields().c_str());
 	free(st);
 	return 0;
 }
@@ -964,6 +1044,8 @@ static int cmdSearch(int argc, char** argv) {
 int main(int argc, char** argv) {
 	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search ...\n"); return 2; }
 	std::string cmd = argv[1];
+	lk::setTarget(atof(opt(argc, argv, "launch-ms", "50").c_str()));   // (launch.h: every kernel launch aims at this)
+	lk::G.stopFile = opt(argc, argv, "stopfile", "");                   // (launch.h: a graceful stop between launches)
 	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
 	if (cmd == "state") return cmdState(argc, argv);
 	if (cmd == "info") return cmdInfo(argc, argv);

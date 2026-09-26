@@ -304,13 +304,29 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		return ok;
 	};
 	int d = 0;
+	// the done event (stopped: a stop request between two launches, launch.h)
+	auto finale = [&](bool stopped) {
+		if (finishLayer < 0) nearest.print(elapsed(), true, prefix, from0, inputsOf);
+		printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"bestSaving\":%d,\"finish\":%d,\"twins\":%llu%s%s}\n",
+			g.json().c_str(), d, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), bestSaving, finishLayer, (unsigned long long)twins,
+			stopped ? ",\"end\":\"stopped\"" : "", lk::doneFields().c_str());
+	};
+	lk::onStop = [&]() { finale(true); };
+	// the launches (launch.h): each phase over its index range in launches sized to the target, every chunk of a phase
+	// before the next phase (the same result as one launch each)
+	// (a size per kernel: their costs per item differ)
+	lk::Chunk ckExp(2048, 128, 1u << 30, 128), ckMat(8192, 128, 1u << 30, 128);
+	std::vector<lk::Chunk> ckSel(5, lk::Chunk(1 << 16, 256, 1u << 31, 256));
+	void* aq[] = { &Q };
+	auto selPass = [&](cu::CUfunction f, void** args, uint64_t n, const char* what) {
+		lk::Chunk& ck = ckSel[f == fIns ? 0 : f == fWin ? 1 : f == fHist ? 2 : f == fPick ? 3 : 4];
+		lk::over(ck, n, 256, f, args, what, [&](uint32_t lo, uint32_t hi) { Q.r0 = lo; Q.r1 = hi; });
+	};
 	for (; d < depthLimit && elapsed() < seconds && nParents > 0; d++) {
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layerTick = from + d;
 		if (P.closest) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
-		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) {
-			printf("{\"error\":\"beam expand failed\"}\n"); return 5;
-		}
+		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "beam expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; });
 		{
 			unsigned long long st[2] = { 0, 0 };
 			cu::cuMemcpyDtoH_v2(st, dstats.p, 16);
@@ -323,16 +339,13 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			nearest.print(elapsed(), false, prefix, from0, inputsOf);
 		}
 		const uint32_t nKids = (uint32_t)nParents * 18;
-		const unsigned kb = (nKids + 255) / 256;
 		Q.nKids = (i32)nKids;
-		cu::cuMemsetD8_v2(dhK.p, 0, 8ull * hCap); cu::cuMemsetD8_v2(dhB.p, 0, 8ull * hCap);
+		lk::memset8(dhK.p, 0, 8ull * hCap, "memset"); lk::memset8(dhB.p, 0, 8ull * hCap, "memset");
 		cu::cuMemsetD8_v2(dnres.p, 0, 4); cu::cuMemsetD8_v2(dnpick.p, 0, 4); cu::cuMemsetD8_v2(dnover.p, 0, 4);
 		cu::cuMemsetD8_v2(dbc.p, 0, 4ull * 65536); cu::cuMemsetD8_v2(dhist.p, 0, 4ull * NBINS);
 		{ const uint32_t mm0[2] = { 0xffffffffu, 0u }; cu::cuMemcpyHtoD_v2(dmm.p, mm0, 8); }
-		void* aq[] = { &Q };
-		if (cu::cuLaunchKernel(fIns, kb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuLaunchKernel(fWin, kb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) {
-			printf("{\"error\":\"beam select failed\"}\n"); return 5;
-		}
+		selPass(fIns, aq, nKids, "beam insert");   // (every insert before the first winner test)
+		selPass(fWin, aq, nKids, "beam winners");
 		// results: only the flagged children come back to the host
 		uint32_t nRes = 0;
 		cu::cuMemcpyDtoH_v2(&nRes, dnres.p, 4);
@@ -377,7 +390,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		if (mm[0] <= mm[1]) {
 			bestScore = scoreFromOrdered(mm[1]);
 			Q.lo = mm[0]; Q.binW = (uint32_t)(((uint64_t)mm[1] - mm[0]) / NBINS + 1);
-			if (cu::cuLaunchKernel(fHist, kb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"beam histogram failed\"}\n"); return 5; }
+			selPass(fHist, aq, nKids, "beam histogram");
 			std::vector<uint32_t> hist(NBINS);
 			cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4ull * NBINS);
 			const uint64_t roundMax = std::max<uint64_t>(256, (uint64_t)K / 16);
@@ -388,7 +401,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 				while (bLo > 0 && c + hist[bLo - 1] <= roundMax) c += hist[--bLo];
 				if (c) {
 					void* ap[] = { &Q, &bLo, &bHi };
-					if (cu::cuLaunchKernel(fPick, kb, 1, 1, 256, 1, 1, 0, nullptr, ap, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"beam pick failed\"}\n"); return 5; }
+					selPass(fPick, ap, nKids, "beam pick");   // (the whole round, in chunks, before the next round)
 					cu::cuMemcpyDtoH_v2(&np, dnpick.p, 4);
 					np = std::min(np, (uint32_t)K);
 				}
@@ -400,7 +413,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 				uint32_t need = std::min<uint32_t>(std::min(no, maxKids), (uint32_t)K - np);
 				if (need) {
 					void* af[] = { &Q, &np, &need };
-					if (cu::cuLaunchKernel(fFill, (need + 255) / 256, 1, 1, 256, 1, 1, 0, nullptr, af, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"beam fill failed\"}\n"); return 5; }
+					selPass(fFill, af, need, "beam fill");
 					np += need;
 				}
 			}
@@ -412,21 +425,18 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		if (!nParents) { d++; break; }   // (the picks are already on the GPU)
 		P.nPick = nParents; P.next = (u8*)(uintptr_t)nxt;
 		void* a2[] = { &P };
-		if (cu::cuLaunchKernel(fmat, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a2, nullptr) || cu::cuCtxSynchronize()) {
-			printf("{\"error\":\"beam materialize failed\"}\n"); return 5;
-		}
+		lk::over(ckMat, (uint64_t)nParents, 128, fmat, a2, "beam materialize", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; });
 		matTicks += (uint64_t)nParents; ticks += (uint64_t)nParents;
 		std::swap(cur, nxt);
 		if (elapsed() - lastProgress > 1.0) {
 			lastProgress = elapsed();
-			printf("{\"ev\":\"progress\",\"layer\":%d,\"tick\":%d,\"states\":%d,\"bestScore\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"twins\":%llu,\"bestSaving\":%d,\"finish\":%d}\n",
-				d + 1, from + d + 1, nParents, bestScore, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (unsigned long long)twins, bestSaving, finishLayer);
+			printf("{\"ev\":\"progress\",\"layer\":%d,\"tick\":%d,\"states\":%d,\"bestScore\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"twins\":%llu,\"bestSaving\":%d,\"finish\":%d,\"maxLaunchMs\":%.1f}\n",
+				d + 1, from + d + 1, nParents, bestScore, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (unsigned long long)twins, bestSaving, finishLayer, lk::G.maxMs);
 			fflush(stdout);
 		}
 	}
-	if (finishLayer < 0) nearest.print(elapsed(), true, prefix, from0, inputsOf);
-	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"bestSaving\":%d,\"finish\":%d,\"twins\":%llu}\n",
-		g.json().c_str(), d, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), bestSaving, finishLayer, (unsigned long long)twins);
+	lk::onStop = nullptr;
+	finale(false);
 	free(start);
 	return 0;
 }
