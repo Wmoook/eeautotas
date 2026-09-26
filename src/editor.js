@@ -10,17 +10,20 @@
 //   states merged, so the first tick with a finish is the fastest route; in passes of coarser and finer cells, and once
 //   a route is known, finer passes look for faster ones until the time is up: nextPass) next to `eegpu beam --goal=1`
 //   (native/beamhost.h: the states closest to the trophy kept; with a guide line a second beam follows the line; see
-//   STRATEGIES). Every route is replayed in the exact JS engine (common.js evaluate) before it is shown. Both tools
-//   also report their closest attempt (the state nearest the trophy by walking distance around walls and deadly
-//   tiles, beamhost.h goalField); the nearest one is kept (closest.eetas), so a search that finds no route still shows
-//   how far it got. One search at a time; its state is in memory and in <data>/editor/solve.json (with level.eelvl,
-//   level.bin, guide.txt, route.eetas and closest.eetas next to it).
+//   STRATEGIES), and on the CPU src/goexplore.js (Go-Explore: random runs from an archive of the earliest state per
+//   situation, steered by the reach field; a first route fast, whose length then bounds the exploration's passes).
+//   Without an NVIDIA GPU (or the native engine) the CPU search runs alone. Every route is replayed in the exact JS
+//   engine (common.js evaluate) before it is shown. The tools also report their closest attempt (the state nearest the
+//   trophy by the reach field, src/reach.js); the nearest one is kept (closest.eetas), so a search that finds no route
+//   still shows how far it got. One search at a time; its state is in memory and in <data>/editor/solve.json (with
+//   level.eelvl, level.bin, reach.bin, guide.txt, route.eetas and closest.eetas next to it).
 //
 // The editor's level JSON: { name, width, height, gravity (1), bgColor (ARGB, 0 = none), owner, description,
 //   cells: [[x, y, id, ...args], ...] (the foreground, empty cells left out), bg: [[x, y, id, ...args], ...] }
 // with the arguments of eelvl.argKind(id): [n] a rotation or number, [rotation, id, target] a portal, [text, type] a
 // sign, [target, spawn] a world portal, [text, color, wrap] a label, [name, 3 messages] an NPC.
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
@@ -31,6 +34,7 @@ const G = require('./gpu.js');
 const B = require('./blocks.js');
 const M = require('./minimap.js');
 const RF = require('./reach.js');
+const BENCH = require('./bench.js');
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const SPAWN = 255, TROPHY = 121;
@@ -267,14 +271,35 @@ function check(buf) {
 // later progress (e.g. the floor under a ledge the line reaches by stairs elsewhere): 4 keeps the line in charge.
 // Each beam's first finish is its fastest; a beam that is already deeper than the best route found stops (it cannot
 // find a faster one), and the fastest verified route wins.
+// On the CPU (`cpu: true`: node src/goexplore.js, N - 1 worker threads with their own seeds, where N is the number of
+// threads, at most the measured fastest thread count, at most N / 2 while a job's optimizer runs): random runs from an
+// archive that keeps the earliest state per situation, the one nearest the trophy (reach field) picked first with an
+// optimism that fades with its picks. On open levels its first route comes long before the GPU's; the exploration's
+// next pass then runs with --depth = route - 1, and each faster route found anywhere is passed to it on its stdin
+// ("depth D"), so it only looks for faster ones. It keeps improving until the time is up, unless every GPU strategy has
+// ended with a route known (the finest passes found none faster) and none failed. Its depth limit is the request's
+// (6000 ticks), not cut by the beams' width. Without an NVIDIA GPU it is the whole search.
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
 		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
+	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1'] },
 };
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
+/** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
+ *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
+ *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
+function cpuWorkers(want) {
+	const n = os.cpus().length || 1;
+	if (Number.isInteger(+want) && +want >= 1) return Math.min(n, +want);
+	const bench = BENCH.cached();
+	let grind = false;
+	try { const J = require('./jobs.js'); grind = C.jobIds().some((id) => J.runningPid(id)); } catch (e) { /* no jobs folder */ }
+	return Math.max(1, Math.min(grind ? Math.floor(n / 2) : n - 1, bench && bench.peakThreads ? bench.peakThreads : n));
+}
 // the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y. The finer passes (1, 2)
 // halve positions and speeds, and the finest keeps heights and vertical speeds exact. The coarser passes (-1, -2)
 // double the positions only: their speed cells stay at pass 0's 1/16 px/tick (a ball speeding up gains about 0.13
@@ -322,7 +347,7 @@ function nextPass(p, how, ends, routeTicks, left) {
  *  least 20 s), so that the coarser pass gets the rest if this one is slow; else all of it */
 const passSeconds = (p, ends, left) => (p > PASS_MIN && !ends[p - 1] ? Math.min(left, Math.max(20, Math.round(left / 3))) : left);
 let S = null;        // the current / last search (public state, also in solve.json)
-let kids = [];       // the eegpu processes of the running search (one per strategy)
+let kids = [];       // the processes of the running search (one per strategy: eegpu, or node src/goexplore.js)
 const busy = new Set();   // those whose end is not handled yet (a strategy's next pass is launched there)
 let cur = null;      // { level, buf } of the running search
 const stateFile = () => path.join(dir(), 'solve.json');
@@ -347,9 +372,12 @@ function halt(ch, why) {
 
 /**
  * Starts a route search. b: { eelvlB64 (the level as .eelvl bytes; or `level`, the editor's JSON), guide: [[x, y], ...]
- * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks, 6000), name }.
- * gpu: the server's GPU processor record ({available, why}). Throws with `problems` when the level is not ready.
- * test: { tool: [command, ...arguments] } runs that instead of the native engine (test/editor.js; not from HTTP).
+ * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks, 6000), name,
+ * workers (the CPU search's threads; default cpuWorkers()), seed (the CPU search's first seed, 1) }.
+ * gpu: the server's GPU processor record ({available, why}): without one (or without the native engine, or on a level
+ * it cannot run) the CPU search runs alone, with a note. Throws with `problems` when the level is not ready.
+ * test (test/editor.js; not from HTTP): { tool: [command, ...arguments] } runs that instead of the native engine;
+ * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js.
  */
 function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
@@ -358,10 +386,13 @@ function start(b, gpu, test) {
 	const ins = inspect(buf);
 	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
 	const [tool, ...toolArgs] = test && test.tool ? test.tool : [G.nativeTool()];
-	if (!tool) throw new Error('the route search needs the GPU engine, which is not part of this build (node tools/build-native.js)');
-	if (gpu && !gpu.available) throw new Error(`the route search runs on an NVIDIA GPU, which is not available: ${gpu.why || 'no NVIDIA GPU found'}`);
-	const why = G.unsupported(ins.level);
-	if (why) throw new Error(`the GPU engine cannot run this level: ${why}`);
+	// no GPU search: no native engine in this build, no NVIDIA GPU, or a level the native engine cannot run
+	let noGpu = '';
+	if (gpu && !gpu.available) noGpu = `no NVIDIA GPU is available (${gpu.why || 'none found'})`;
+	else if (!tool) noGpu = 'the GPU engine is not part of this build (node tools/build-native.js)';
+	else { const why = G.unsupported(ins.level); if (why) noGpu = `the GPU engine cannot run this level (${why})`; }
+	const cpu = !(test && test.cpu === false);
+	if (noGpu && !cpu) throw new Error(`the route search cannot run: ${noGpu}, and the CPU search is off`);
 	const pts = Array.isArray(b.guide) ? b.guide.filter((q) => Array.isArray(q) && q.length === 2 && q.every(Number.isFinite)) : [];
 	if (pts.length > 4000) throw new Error('the guide line has too many points (at most 4000)');
 	const guide = pts.length >= 2 ? pts : [];
@@ -369,37 +400,52 @@ function start(b, gpu, test) {
 	const width = Math.max(1024, Math.min(131072, Math.round(+b.width || 32768)));
 	// ticks deep; the tool keeps 4 bytes per state per tick to spell out the route (at most ~0.6 GB per search)
 	const depth = Math.max(100, Math.min(20000, Math.floor(6e8 / (4 * width)), Math.round(+b.depth || 6000)));
+	// (the CPU search keeps no such table: its depth is not cut by the beams' width)
+	const cpuDepth = Math.max(100, Math.min(20000, Math.round(+b.depth || 6000)));
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
 	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
 		reach: path.join(d, 'reach.bin') };
 	fs.writeFileSync(files.eelvl, buf);
-	fs.writeFileSync(files.bin, G.levelBlob(ins.level));
+	if (!noGpu) fs.writeFileSync(files.bin, G.levelBlob(ins.level));
 	// the reach field (src/reach.js): the searches' physics-aware distance; the explore prunes what it rules out
 	const rf = RF.reachField(ins.level);
-	RF.writeReachFile(rf, files.reach);
+	if (!noGpu) RF.writeReachFile(rf, files.reach);
 	const sim0 = new E.EESim(ins.level);
 	sim0.reset();
 	const startCost = RF.costAt(rf, sim0.px, sim0.py, sim0.speed_y, !!sim0.on_ground);
 	const noWayUp = rf.mode === 'physics' && startCost < 0;
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
-	if (guide.length) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
-	const which = guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal'];
+	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
+	const which = [...(noGpu ? [] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
+	const workers = cpuWorkers(b.workers);
+	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
+	const cpuOnly = noGpu ? `No GPU search: ${noGpu}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
+		`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.` : '';
 	S = { running: true, stage: 'starting', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
 		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
-		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [],
+		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], cpuOnly, workers: cpu ? workers : 0,
 		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
-		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0, found: null, error: null,
-			pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0 })) };
-	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
-		(guide.length ? ` (a ${guide.length}-point line)` : ''));
+		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
+			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0 })) };
+	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${width} states per tick`}, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
+		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu ? ` (${workers} CPU thread${workers > 1 ? 's' : ''})` : ''));
+	if (cpuOnly) note(cpuOnly);
 	save();
-	if (noWayUp) note('the physics check finds no way from the start to the trophy (checking with every move)');
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, prune: rf.mode === 'physics', salts: !(test && test.salts === false) } };
+	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move'})`);
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed, salts: !(test && test.salts === false) },
+		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
 	kids = which.map((k, n) => launch(n));
 	return state();
+}
+/** the CPU strategies' processes: their depth bound (a route of `ticks` is known: only faster ones count) */
+function tellCpu(ticks) {
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`); } catch (e) { /* gone */ } }
+	});
 }
 /** one strategy's eegpu process (a new pass of the exploration too): its JSON lines update S.strategies[n] and the
  *  totals */
@@ -415,16 +461,21 @@ function launch(n) {
 		q.depth = V.depthCap = S.result ? Math.max(1, S.result.ticks - 1) : 0;
 	}
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
-	const ch = spawn(cur.tool, [...cur.toolArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+	const cpu = V.cpu;
+	// the CPU search: node src/goexplore.js (its stdin takes the depth bound: tellCpu)
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args];
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined });
+	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
+	V.live = true;
 	let hits = 0, end = '', overflow = null, lastSalt = 0;
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
 	const totals = () => {
 		S.layer = Math.max(...S.strategies.map((q) => q.layer));
 		S.tick = S.layer;
-		S.states = S.strategies.reduce((a, q) => a + (q.state === 'running' ? q.states : 0), 0);
-		S.ticksPerSec = S.strategies.reduce((a, q) => a + (q.state === 'running' ? q.ticksPerSec : 0), 0);
+		S.states = S.strategies.reduce((a, q) => a + (q.state === 'running' || (q.cpu && q.live) ? q.states : 0), 0);
+		S.ticksPerSec = S.strategies.reduce((a, q) => a + (q.state === 'running' || (q.cpu && q.live) ? q.ticksPerSec : 0), 0);
 		S.elapsed = (Date.now() - S.started) / 1000;
 	};
 	// moves per second: the ticks simulated plus the twins (moves the tool skipped because a lower option is proven to
@@ -432,20 +483,26 @@ function launch(n) {
 	const movesPerSec = (ev) => (ev.ticks > 0 && ev.twins > 0 ? ev.ticksPerSec * (ev.ticks + ev.twins) / ev.ticks : ev.ticksPerSec || 0);
 	const onEvent = (ev) => {
 		if (!mine()) return;
+		if (cpu && ch.stopWhy && ev.ev === 'progress') return;   // (halted: its state stays as the halt left it)
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
-			Object.assign(V, { state: 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
+			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
 					`cells of ${passGrain(V.pass)}`;
+			} else if (cpu) {
+				V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
+					(Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') + (V.found ? ', looking for a faster route' : '');
 			}
 			if (!S.result && S.stage !== 'error') S.stage = 'searching';
 			totals();
-			// deeper than the best route: it cannot find a faster one
-			if (S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
+			// deeper than the best route: it cannot find a faster one (the CPU search's deepest situation says nothing of
+			// the kind: it is told the bound instead, and looks only for faster routes)
+			if (!cpu && S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
-			found(ev.inputs, n);
+			// (the CPU search goes on looking for faster routes)
+			found(ev.inputs, n, cpu);
 		} else if (ev.ev === 'try') {
 			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
 			if (ev.end === 'exhausted' && ev.overflow === 0 && !V.depthCap && !V.found && V.pass >= 0) {
@@ -454,6 +511,8 @@ function launch(n) {
 				yieldBeams(n);
 			}
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
+		} else if (ev.ev === 'warning') {
+			note(`${V.label}: ${ev.text}`);
 		} else if (ev.ev === 'closest') {
 			closer(ev, n);
 		} else if (ev.ev === 'hit') {
@@ -491,6 +550,7 @@ function launch(n) {
 	ch.on('close', (code) => {
 		busy.delete(ch);
 		if (!mine()) return;
+		V.live = false;
 		if (V.key === 'explore') {
 			// how this pass ended: why the editor stopped it, else the tool's own verdict
 			const how = ch.stopWhy || (code === 0 && !V.error ? end : '');
@@ -539,9 +599,15 @@ function launch(n) {
 			} else V.state = V.found ? 'found' : S.stage === 'stopped' ? 'stopped' : 'ended';
 		}
 		totals();
+		// every GPU strategy has ended with a route known (the exploration's finest passes found none faster): the CPU
+		// search stops too; not when one of them failed (then the CPU search is the search, as without a GPU)
+		if (!cpu && S.result && ![...busy].some((c) => !c.cpuSearch) && !S.strategies.some((q) => !q.cpu && q.state === 'error')) {
+			S.strategies.forEach((q, k) => { if (q.cpu && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
+		}
 		if (!running()) finish();
 		else save();
 	});
+	ch.cpuSearch = cpu;
 	return ch;
 }
 /**
@@ -570,17 +636,22 @@ function finish() {
 	else if (S.stage === 'stopped') S.message = S.message || 'The search was stopped before it found a route.';
 	else if (S.strategies.every((q) => q.state === 'error')) {
 		S.stage = 'error';
-		S.message = `The GPU search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
+		S.message = `The ${S.cpuOnly ? 'CPU' : 'GPU'} search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
 	} else if (S.stage !== 'error') {
 		S.stage = 'not found';
-		const capped = S.strategies.some((q) => q.key !== 'explore' && q.layer >= S.depth);   // (the beams' depth limit)
+		const capped = S.strategies.some((q) => q.key !== 'explore' && !q.cpu && q.layer >= S.depth);   // (the beams' depth limit)
 		const XE = S.strategies.find((q) => q.key === 'explore' && q.exhausted);
 		const X = S.strategies.find((q) => q.key === 'explore');
+		const R = S.strategies.find((q) => q.cpu);
 		const xd = X ? Math.max(X.layer, X.deepest || 0) : 0;
-		const every = xd ? `; every move to tick ${xd.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}` : '';
-		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${every}; the beams kept ${S.width.toLocaleString('en-US')} states per tick)` +
+		const what = [];
+		if (xd) what.push(`every move to tick ${xd.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}`);
+		if (!S.cpuOnly) what.push(`the beams kept ${S.width.toLocaleString('en-US')} states per tick`);
+		if (R && R.states) what.push(`random runs kept ${R.states.toLocaleString('en-US')} situations`);
+		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${what.length ? `; ${what.join('; ')}` : ''})` +
 			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
-			` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`;
+			(S.cpuOnly ? ' Try a longer search (without an NVIDIA GPU only the CPU searches).'
+				: ` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`);
 		if (S.physics && S.physics.noWayUp) {
 			// the reach field is optimistic (generous jumps, dots, arrows; sideways moves free), so this is a proof
 			S.impossible = { by: 'physics' };
@@ -617,8 +688,8 @@ function found(inputs, n, more) {
 	const first = V.state !== 'found';
 	V.state = 'found';
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
-	if (first) note(`${V.label}: route ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
+	if (first || (V.cpu && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	if (better) {
 		const tr = C.replay(cur.level, ev.ms, { trace: true });
 		const pathPts = [];
@@ -629,10 +700,12 @@ function found(inputs, n, more) {
 			strategy: V.label, verified: 'replayed in the exact JS engine: it finishes' };
 	}
 	S.stage = 'found';
-	// the other strategies: those already deeper than this route cannot find a faster one
+	// the other strategies: those already deeper than this route cannot find a faster one; the CPU search is told the
+	// bound (it goes on looking for a faster route)
 	S.strategies.forEach((q, k) => {
-		if (k !== n && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
+		if (k !== n && !q.cpu && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
+	if (better) tellCpu(S.result.ticks);
 	save();
 }
 /** a strategy's closest attempt (ev: {dist (tiles to the trophy), tick, inputs}): kept when it is the nearest so far
@@ -695,4 +768,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START };
