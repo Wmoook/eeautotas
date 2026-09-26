@@ -413,7 +413,7 @@ async function main() {
 	const edges = new Map();   // b * 4194304 + j -> {b, j, seq}
 	let edgesNew = false, bestEdge = null, dpBest = null, nTail = 0;
 	const combine = (avoidRng) => {
-		const n = masks.length, f = a.from;
+		const n = masks.length, f = Math.max(a.from, masks.findIndex((m) => m !== 0));   // (never before the first input: the run timer starts there)
 		const byStart = new Map();
 		for (const e of edges.values()) {
 			if (e.j > n || e.b < f || e.j - e.b - e.seq.length <= 0) continue;

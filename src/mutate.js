@@ -366,10 +366,13 @@ function workerMain() {
 function shortest(R, masks, edgesAt, avoidRng) {
 	const n = R.complete;
 	const cost = new Float64Array(n + 1).fill(Infinity), from = new Int32Array(n + 1).fill(-1), vseq = new Array(n + 1).fill(null);
+	// no shortcut starts before the first input: the run timer only starts there, so those ticks are free, and cutting them
+	// would start the timer sooner (a run with fewer ticks but a longer time)
+	const firstInput = Math.max(0, masks.findIndex((m) => m !== 0));
 	cost[0] = 0;
 	for (let i = 0; i < n; i++) {
 		if (cost[i] + 1 < cost[i + 1]) { cost[i + 1] = cost[i] + 1; from[i + 1] = i; vseq[i + 1] = null; }
-		const list = edgesAt(i);
+		const list = i < firstInput ? undefined : edgesAt(i);
 		if (list === undefined) continue;
 		for (const [j, seq] of list) {
 			if (j > n || j - i - seq.length <= 0) continue;
