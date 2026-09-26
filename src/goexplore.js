@@ -39,7 +39,7 @@
 // stops it too. A last line "[goexplore] ..." sums up.
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
-//        [--seed=1] [--depth=6000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
+//        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4] [--mem=<MB per worker; default 1600 / workers, 200 .. 800>] [--maxCells=] [--maxSnaps=]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
@@ -59,7 +59,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 // class of vy only)
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
-const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 6000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
+const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1 };
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory (V8 heap, measured): a cell without its snapshot about 260 bytes, a snapshot about 1150; each gets 45% of a

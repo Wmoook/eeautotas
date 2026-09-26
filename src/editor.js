@@ -352,8 +352,9 @@ function check(buf) {
 // optimism that fades with its picks. On open levels its first route comes long before the GPU's; the exploration's
 // next pass then runs with --depth = route - 1, and each faster route found anywhere is passed to it on its stdin
 // ("depth D"), so it only looks for faster ones. It keeps improving until the time is up, unless every GPU strategy has
-// ended with a route known (the finest passes found none faster) and none failed. Its depth limit is the request's
-// (6000 ticks), not cut by the beams' width. Without an NVIDIA GPU it is the whole search.
+// ended with a route known (the finest passes found none faster) and none failed. Its depth limit is the request's,
+// else 100000 ticks, not the beams' (their route store is 4 bytes per state per tick): the 200x200 ice level's routes are
+// ~10000 ticks, and with the old 6000 the CPU search could not find one. Without an NVIDIA GPU it is the whole search.
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
@@ -729,7 +730,8 @@ function halt(ch, why) {
 
 /**
  * Starts a route search. b: { eelvlB64 (the level as .eelvl bytes; or `level`, the editor's JSON), guide: [[x, y], ...]
- * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks, 6000), name,
+ * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks; the beams 6000, the
+ * CPU search 100000), name,
  * workers (the CPU search's threads; default cpuWorkers()), seed (the CPU search's first seed, 1) }.
  * gpu: the server's GPU processor record ({available, why}): without one (or without the native engine, or on a level
  * it cannot run) the CPU search runs alone, with a note. Throws with `problems` when the level is not ready.
@@ -761,8 +763,8 @@ function start(b, gpu, test) {
 	const width = Math.max(1024, Math.min(131072, Math.round(+b.width || 32768)));
 	// ticks deep; the tool keeps 4 bytes per state per tick to spell out the route (at most ~0.6 GB per search)
 	const depth = Math.max(100, Math.min(20000, Math.floor(6e8 / (4 * width)), Math.round(+b.depth || 6000)));
-	// (the CPU search keeps no such table: its depth is not cut by the beams' width)
-	const cpuDepth = Math.max(100, Math.min(20000, Math.round(+b.depth || 6000)));
+	// (the CPU search keeps no such table: its depth is neither cut by the beams' width nor their default)
+	const cpuDepth = Math.max(100, Math.min(200000, Math.round(+b.depth || 100000)));
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
 	const levelHash = levelHashOf(buf);
