@@ -531,5 +531,6 @@ async function main() {
 	console.log(`[explore] best: rejoin ref tick ${best.j} at tick ${best.t} (saves ${best.saved}) -> ${a.out}`);
 }
 
+
 if (isMainThread) main();
 else workerMain();
