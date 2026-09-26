@@ -35,6 +35,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const C = require('./common.js');
 const S = require('./splice.js');
+const LP = require('./loops.js');
 const E = C.E;
 
 const a = { until: '', forever: '', level: '', workers: os.cpus().length, job: '', nocoins: 'auto', gpu: '0', roundMin: '10', anchored: '1', tails: '1' };
@@ -513,9 +514,42 @@ function deepWindows(wsz) {
 	}
 	return wins;
 }
-/** 1) deep exact-rejoin exploring, window after window from the deep cursor, for up to ~55% of the round (one at least) */
+/**
+ * Loop windows first: stretches where the run comes back to where it was with nothing collected or toggled in between
+ * (loops.js), the longest first, each (as the state hashes at its ends) once. The explorer on exactly that window finds
+ * a way around the loop directly; tiled windows contain a long loop only in some placements. Not on time-door levels
+ * (an exact rejoin there needs a saving that is a multiple of 1000 ticks). Returns the number of windows run.
+ */
+async function loopWindows(round) {
+	if (level.hasTimeDoors) return 0;
+	const tried = new Set(cur.loops || []);
+	let ran = 0;
+	while (ran < 3 && roundUsed() < 0.4 * ROUND_MS && Date.now() < deadline - 120000) {
+		let loops;
+		try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 1500 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
+		const H = bestTrace().tr.H, n = bestTrace().tr.n;
+		const l = loops.find((x) => !tried.has(`${H[x.a]}:${H[x.b]}`));
+		if (!l) { if (!ran && loops.length) log(`deep: every loop of the run (${loops.length}) was explored already`); return ran; }
+		tried.add(`${H[l.a]}:${H[l.b]}`);
+		cur.loops = [...tried].slice(-200);
+		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
+		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
+		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
+			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${NC}`,
+			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}`);
+		if (!res) return ran;
+		addResult(lp);
+		log(`deep${round}_loop${ran + 1}: ${best.runTicks < before ? `a way around the loop, -${before - best.runTicks}` : 'no way around the loop found'}`);
+		saveCursor();
+		ran++;
+	}
+	return ran;
+}
+/** 1) deep exact-rejoin exploring: the loop windows, then window after window from the deep cursor, for up to ~55% of
+ *  the round (one at least) */
 async function deepStage(round, R) {
 	const WSZ = R([600, 400, 500, 350]);
+	await loopWindows(round);
 	let done = 0;
 	while ((done === 0 || roundUsed() < 0.55 * ROUND_MS) && Date.now() < deadline - 120000) {
 		const wins = deepWindows(WSZ);

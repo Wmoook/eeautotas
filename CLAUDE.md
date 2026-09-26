@@ -94,7 +94,8 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   more often than the starting run, and be faster with no lower random-portal chance, or equally fast and more
   likely to work.
 - **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, deep exact-rejoin
-  exploring windows (every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
+  exploring windows (first up to 3 loop windows: stretches where the run comes back to where it was with nothing
+  collected in between (`src/loops.js`), the longest first, each once; then every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
   round), mutate, a slice of the dense shortcuts pass (from its own cursor), the time-door pass (`phase.js`, on levels with
   time doors, or coin doors when the coins count), mutate, a beam search every other round
   when there is time (every 4th anyway; one stopped by a restart is not repeated), then a splice of all results plus
@@ -213,6 +214,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`; `--roundMin=10`, `--deepS=<s>` per deep window, `--anchored=1`, `--tails=1`, `--siblings` passed to gpusearch); resumes from `status.json` `cursor` |
 | `src/mutate.js` | input mutations at every tick, exact rejoins, DP (seconds) |
 | `src/shortcuts.js` | local beams from every `--step`-th tick, exact rejoins, DP |
+| `src/loops.js` | the run's loops: stretches (a -> b) where the ball comes back within 48 px with nothing collected or toggled in between, longest first (`revisits(level, masks, {coins})`; `node src/loops.js <job> [run.eetas]`); the grind explores these windows first (OC's Octorage: loop #1 = the -356 route skip, found in 2 minutes) |
 | `src/phase.js` | time-door and coin-door shortcuts: every state hash holds the doors' phase (ticks % 1000), so exact rejoins miss them; single input changes, proposals by `stateHashClockBlind` (coin-blind past the last coin door), each replayed plain or with the clock re-synced by idle ticks before the first input (free: the timer starts at the first input), combined by weighted interval scheduling, judged |
 | `src/explore.js` | Go-Explore route explorer for a window (`--from --join --until --exact=1`) |
 | `src/optimize.js` | beam search along the reference with verified leads |
