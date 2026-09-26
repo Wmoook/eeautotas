@@ -329,8 +329,10 @@ async function tryCandidate(id, buf, opts) {
 			logLine(id, `${source}: ${fmt(was)} -> ${fmt(cand.runTicks)} (-${was - cand.runTicks}) accepted`);
 			res.accepted = true;
 		} else {
-			C.writeEetas(path.join(dir, 'pieces', `${stamp()}_${slug(source)}.eetas`), cand.ms);
-			prunePieces(id);
+			// (the GPU searcher's runs in pieces/gpu/ with their own cap: they never crowd out runs from try and focus)
+			const gpu = /^gpu\b/i.test(source);
+			C.writeEetas(path.join(dir, 'pieces', ...(gpu ? ['gpu'] : []), `${stamp()}_${slug(source)}.eetas`), cand.ms);
+			prunePieces(id, gpu ? 10 : 30, gpu ? 'gpu' : '');
 			logLine(id, `${source}: ${fmt(cand.runTicks)} not accepted (${v.reason}); kept for splicing`);
 		}
 	} finally { release(); }
@@ -345,8 +347,9 @@ function inboxResult(id, name) {
 	}
 	return null;
 }
-function prunePieces(id, keep = 30) {
-	const pd = path.join(jobDir(id), 'pieces');
+/** keeps the newest `keep` runs in pieces/ (sub 'gpu': pieces/gpu/, the GPU searcher's) */
+function prunePieces(id, keep = 30, sub = '') {
+	const pd = path.join(jobDir(id), 'pieces', sub);
 	let fl = [];
 	try { fl = fs.readdirSync(pd).filter((f) => f.endsWith('.eetas')).sort(); } catch (e) { return; }
 	for (const f of fl.slice(0, Math.max(0, fl.length - keep))) { try { fs.unlinkSync(path.join(pd, f)); } catch (e) { /* gone */ } }

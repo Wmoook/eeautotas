@@ -69,8 +69,8 @@ Times the user gives are **in-game run times** (the timer eeo-tas shows). Every 
      the CPU threads. It takes about 3 x seconds plus a little extra. From the web app, the "Ideas" box does the same.
 6. **Hand it in.** `node src/tas.js try <job> <candidate.eetas>`. It prints the verdict. Running job: the grind's
    verdict arrives within seconds (`--wait=60` by default). Stopped job: decided at once and `best.eetas` is updated.
-   A run that finishes but is not better is kept in `pieces/`. The grind splices its good parts in at the end of every
-   round, so a partial improvement still helps.
+   A run that finishes but is not better is spliced with the best at once (its faster stretches are kept) and stays in
+   `pieces/`, which the grind splices in again at the end of every round, so a partial improvement still helps.
 7. **Tell the user** the new time, the ticks saved (1 tick = 0.01 s) and, if random portals are involved, the odds
    (section 4). The web app shows a notification for each improvement. To let them see it, give them the viewer
    link `http://localhost:47823/#watch=<job id>&t=1:10.00`: it plays the current best run from that moment with
@@ -92,11 +92,18 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 - **The acceptance rule** (`common.judge`, used by grind, try and the inbox): the run must finish the level, die no
   more often than the starting run, and be faster with no lower random-portal chance, or equally fast and more
   likely to work.
-- **The grind cycle** (src/grind.js): mutate loop, then deep exact-rejoin exploring of every coin-to-coin segment
-  (in windows, starting with a different segment each round), mutate, a dense shortcuts pass, mutate, a beam search
-  every other round, then a splice of all results plus `pieces/`. Settings rotate each round, and `--rot` continues
-  the rotation after a restart. While a stage runs, the grind checks `inbox/` every 3 s and writes a status
-  heartbeat every 30 s. Each stage works on its own copy of the best run (`grind_ref.eetas`).
+- **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, deep exact-rejoin
+  exploring windows (every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
+  round), mutate, a slice of the dense shortcuts pass (from its own cursor), mutate, a beam search every other round
+  when there is time (every 4th anyway), then a splice of all results plus `pieces/`. Settings rotate with the round.
+  After every stage the grind saves where it is in `status.json` `cursor` (round, stage, the deep and shortcuts
+  cursors as tick + state hash, the seed counter), so a restart continues there. Without the GPU, mutate searches only
+  the start ticks whose next ~800 ticks changed since its last full pass (`grind_mutref.eetas`). A finishing run that
+  is not accepted (a stage output that went stale, an inbox run) is logged and spliced with the best at once
+  (splice.js in-process, well under a second); stage outputs stay in the round's splice while they still have states
+  the best lacks. While a stage runs, the grind checks `inbox/` every 3 s and writes a status heartbeat every 30 s.
+  Each stage works on its own copy of the best run (`grind_ref.eetas`). The CPU tools' newer options are passed behind
+  `--anchored=1` (mutate `--anchor --dprune --fixpoint`) and `--tails=1` (explore `--tails`), both on by default.
 - **Random portals.** A portal whose target id belongs to several portals picks its exit with `Math.random` in EEO.
   That draw is unseeded and not reproducible. At import, `rng.js` replays the TAS under every combination of exits.
   The level JSON gets an `rng_script`, the fastest finishing combination, which every simulation uses. **chance** is
@@ -119,8 +126,11 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   variable-tail capacity in words). `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
   del, m2 = mutate's; pert, flip, sticky = random perturbations of the reference) and re-checks every hit on the CPU
   with two independent hashes; `src/gpusearch.js` (started by grind `--gpu=1`) keeps an edge library keyed by state
-  hashes, runs mutate's DP on the current best, `C.evaluate` + `C.judge`, and hands faster runs in through
-  `J.tryCandidate`; it writes `gpu_status.json`. **Any change to eesim.js physics must be mirrored in eecore.h** and
+  hashes (saved in `gpu/library.bin`), splits each round into eegpu invocations with their own cursors (m1 + del up
+  to 30% until a full pass over the current best is done, m2 up to 20%, one random family in turn for the rest),
+  combines the library with the union of every known run (`splice.js unionGraph`: the best, best_*.eetas, pieces/,
+  stage outputs, the best runs of other jobs of the same level), `C.evaluate` + `C.judge`, hands faster runs in
+  through `J.tryCandidate` and searches from them at once; it writes `gpu_status.json`. **Any change to eesim.js physics must be mirrored in eecore.h** and
   `node test/gpu.js` (CPU build) and `node test/gpu.js --gpu` must pass: they compare stateHash after every tick.
   `src/bench.js` measures the CPU the app runs on once (`src/data/_system.json`, `GET /api/system`); `gpu.runBench`
   measures the GPU on the same arena (`data/_gpu.json`); the
@@ -187,7 +197,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/minimap.js`, `src/minimapcolors.json` | EE's own minimap color per block id (eeo-tas ItemManager.as `createBrick(..., minimapColor)`, -1 = the average of the block image); regenerate with `node src/minimap.js build [eeo-tas dir]` |
 | `native/eecore.h`, `native/search.h`, `native/kernels.cu`, `native/eegpu.cpp`, `native/cudadrv.h` | the native engine (the physics of eesim.js in C++, bit for bit), the GPU search's candidate families, the CUDA kernels (trace, search, bench), the host tool (`eegpu trace|state|info|ptx|search|bench`), the NVIDIA driver / NVRTC loader |
 | `src/gpu.js` | `levelBlob()` (prepared level -> the native tool's binary), `nativeTool()`, `unsupported(level)`, the GPU benchmark (`data/_gpu.json`) |
-| `src/gpusearch.js` | the GPU searcher of a running job (grind `--gpu=1`): rounds of `eegpu search`, edge library, DP, verify, inbox; `gpu_status.json`, `[gpu ...]` lines in grind.log. `--every=1` (opt-in) adds "every move" rounds: `eegpu explore --rejoin=1` windows along the run (exact cells; every state equal to a later run state is a proven shortcut, re-checked with both hashes). Off by default: on full-size levels the exact windows explode (20-40 s per 40-60 ticks on a laptop GPU) and the search families find more per second |
+| `src/gpusearch.js` | the GPU searcher of a running job (grind `--gpu=1`): rounds of `eegpu search` split into invocations per family share (`--round=30`, `--sysShare=0.3` m1+del until one full pass over the current best, `--m2Share=0.2` m2, the rest one of pert / flip / sticky in turn; windows from cursors kept in `gpu/state.json` with the seed counter and per-family numbers), the edge library (`gpu/library.bin`, fingerprinted by eesim.js, the level blob and the coin mode), the union combine (`--union=40` most recent runs, `--siblings=1` other jobs of the same level; a library edge that does not replay is dropped), verify, inbox; it searches its own judged run at once; `gpu_status.json` (with `families`), `[gpu ...]` lines in grind.log (one line per round with every invocation's window, time, ticks and new shortcuts). `--tool=<file.js>` runs a stand-in for eegpu (tests without a GPU). `--every=1` (opt-in) adds "every move" rounds: `eegpu explore --rejoin=1` windows along the run (exact cells; every state equal to a later run state is a proven shortcut, re-checked with both hashes). Off by default: on full-size levels the exact windows explode (20-40 s per 40-60 ticks on a laptop GPU) and the search families find more per second |
 | `tools/build-native.js`, `test/gpu.js` | build the native engine; the exactness proof (per-tick stateHash vs eesim.js; `--gpu` runs it on the GPU) |
 | `src/eegfx.js` | EE graphics for the viewer, read at run time from the user's eeo-tas folder (`settings.json` `eegfxDir`, else `$EEO_TAS`, else `~/eeo-tas`): parses ItemManager.as / ItemId.as into a sprite map (block id -> sheet, 16 px frame, y, ItemLayer, shadow; the BlockSprites; morphable blocks; NPCs, smiley, death animation), cached in `<data>/eegfx.json`. **Never commit EE images or derived sprite data**: the page loads the PNGs from eeo-tas through the server. The page's `gx*` functions follow World.as's draw rules. `node src/eegfx.js [dir]`, `node src/eegfx.js coverage <level.eelvl>...` |
 | `src/editor.js`, `src/app/editor.html`, `test/editor.js` | the level editor (`/editor`): the editor's level JSON <-> `.eelvl` (`eelvl.js writeEelvl` / `readEelvl`), block info, checks (start, trophy, open way incl. portals), the route search: `eegpu explore - --finish=1` ("every move": exhaustive, one state per cell, the first finish = the fastest; passes with coarser cells when its table fills, finer when it runs out of states) next to `eegpu beam --goal=1` (with a guide line also a second beam `--guide --guideWeight=4 --goalWeight=4`; the beam's selection runs on the GPU: dedupe, score histogram, picks in score order with a per-bucket cap), every route replayed in the JS engine; state in `<data>/editor/` (`solve.json`, `level.eelvl`, `route.eetas`). The page copies the viewer's `gx*` drawing functions. `node test/editor.js [--gpu]` |
@@ -197,12 +207,12 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/eesim.js` | the exact physics port (EESim, EEInput, applyMask, parseEetasBytes, loadLevel, prepareLevel) |
 | `src/eelvl.js` | EEO-exact `.eelvl` reader, `toSimLevel()` = the level JSON; `writeEelvl()` (header + records, raw deflate; args checked against `argKind`) |
 | `src/rng.js` | random-portal outcome tree: chance, best outcome script, per-portal odds |
-| `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`) |
+| `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`; `--roundMin=10`, `--deepS=<s>` per deep window, `--anchored=1`, `--tails=1`, `--siblings` passed to gpusearch); resumes from `status.json` `cursor` |
 | `src/mutate.js` | input mutations at every tick, exact rejoins, DP (seconds) |
 | `src/shortcuts.js` | local beams from every `--step`-th tick, exact rejoins, DP |
 | `src/explore.js` | Go-Explore route explorer for a window (`--from --join --until --exact=1`) |
 | `src/optimize.js` | beam search along the reference with verified leads |
-| `src/splice.js` | best combination of several runs at equal states |
+| `src/splice.js` | best combination of several runs at equal states: the shortest path over the union of their state graphs (Dijkstra, bucket queue, typed-array hash index; ~0.3 s for 30 Infinity Pain runs); also a module: `trace`, `traceCache`, `unionGraph(runs).path({lib, avoidRng})`, `firstBadCheck` (used by grind.js and gpusearch.js) |
 | `src/run.js` | quick replay: finish tick, run time, coins |
 | `src/examples/idea_template.js` | a script that tries thousands of input variants around a moment exactly; copy it and edit |
 | `test/regress.js` | engine regression tests (maintained together with the physics) |
@@ -219,16 +229,17 @@ be left out. Each tool's header comment lists its options.
 | file | what |
 |---|---|
 | `meta.json` | name, level info, the original TAS (ticks, finish tick, run ticks, coins, deaths), import-time portal odds, `levelId`, `startMode` (`reset` / `load`), `startMatters`, `spawns`, `timeDoors` |
-| `status.json` | written by grind (and by `try` when stopped): `state`, `pid`, `stage`, `rounds`, `bestRunTicks`, `chance`, `coinsOptional`, `history` [{t, runTicks, saved, what, chance}], `updated` (heartbeat) |
+| `status.json` | written by grind (and by `try` when stopped): `state`, `pid`, `stage`, `rounds` (finished rounds), `cursor` {round, stage, used, deep, sc ({t, h}: tick + state hash), scRate, seed} (where a restart continues), `bestRunTicks`, `chance`, `coinsOptional`, `history` [{t, runTicks, saved, what, chance}], `updated` (heartbeat) |
 | `best.eetas` | **the current best run** (bytes '0'..'O', cut at the finish); `best_<runTicks>.eetas` = every improvement |
 | `original.eetas`, `original.eelvl` | the uploaded files, byte for byte |
 | `grind.log` | the optimizer's log (`[grind ...]`, `[try ...]` lines); `console.log` = the grind's raw stdout |
 | `inbox/` | candidates for a running grind: `<stamp>_<source>.eetas` + `.json` {source}; verdicts in `inbox/results.jsonl` |
-| `pieces/` | finishing runs from outside that were not better; spliced in every round (newest 30 kept) |
+| `pieces/` | finishing runs from outside that were not better; spliced in every round (newest 30 kept; the GPU searcher's in `pieces/gpu/`, newest 10) |
 | `focus.json`, `focus.log`, `focus/<stamp>/` | the last focus search: state, range, results; its log; its files |
 | `probes/`, `renders/` | candidates written by `probe`, PNGs written by `render` |
 | `report.json` | the final report from "Finish run" (time saved, odds, per-portal odds) |
-| `grind_*.eetas`, `grind_*.log` | stage outputs and logs of the current grind (`grind_ref.eetas` = the stage's copy of best) |
+| `grind_*.eetas`, `grind_*.log` | stage outputs and logs of the current grind (`grind_ref.eetas` = the stage's copy of best, `grind_mutref.eetas` = the run mutate's last full pass covered, `grind_now.eetas` = the last at-once splice) |
+| `gpu/` | the GPU searcher's files: `library.bin` (the shortcut library), `state.json` (cursors, seed counter, per-family numbers), `level.bin`, `ref.eetas`, `edges.bin` |
 | `live.json` | written by grind every second: `{t, cpu: {ticks, ticksPerSec, threads, model}, gpu}` (`ticks` = simulated this session, `ticksPerSec` over the last ~3 s, 0 between stages; `gpu` = `gpu_status.json` {t, name, ticks, ticksPerSec, state, edges} while it is under 5 s old, else null) |
 
 `src/jobs/_running.json` records the job to resume when the app starts. The level JSON is eelvl.js `toSimLevel()`
