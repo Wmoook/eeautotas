@@ -98,7 +98,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   likely to work.
 - **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, the exact endgame
   solver (`endgame.js`, once per ending: again when the best's last 64 ticks change; `--endgame=0` off), deep exact-rejoin
-  exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 3 loop windows: stretches where the run comes back to where it was with nothing
+  exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 5 loop windows (60% of the round; Infinity Pain: 4 of 7 loop windows found time): stretches where the run comes back to where it was with nothing
   collected in between (`src/loops.js`), the longest first, each once; then every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
   round), mutate, a slice of the dense shortcuts pass (from its own cursor), the time-door pass (`phase.js`, on levels with
   time doors, or coin doors when the coins count), mutate, a beam search every other round
