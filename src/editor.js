@@ -452,7 +452,21 @@ let kids = [];       // the processes of the running search (one per strategy: e
 const busy = new Set();   // those whose end is not handled yet (a strategy's next pass is launched there)
 let cur = null;      // { level, buf } of the running search
 const stateFile = () => path.join(dir(), 'solve.json');
-function save() { try { C.writeJSON(stateFile(), S); } catch (e) { /* read-only data folder: memory only */ } }
+// solve.json keeps the search for the next start of the app (the page reads S from memory): written at most every
+// SAVE_MS while a search runs (every event used to write it, an atomic write each: ~90 "layer" events per second from
+// every move's fast tries plus the beams' kept the server's thread busy for most of a search, so the page and Stop
+// waited 20 s and more for an answer), and at once when a search starts or ends
+const SAVE_MS = 500;
+let saveTimer = null;
+function saveNow() {
+	if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+	try { C.writeJSON(stateFile(), S); } catch (e) { /* read-only data folder: memory only */ }
+}
+function save() {
+	if (saveTimer) return;
+	saveTimer = setTimeout(saveNow, SAVE_MS);
+	if (saveTimer.unref) saveTimer.unref();
+}
 function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); }
 // The clocks. Each eegpu process first loads its kernels (the first load after a build is the NVIDIA driver compiling
 // them for this graphics card: a minute or more on a laptop CPU, then seconds) and says {"ev":"ready"}; its --seconds
@@ -569,7 +583,7 @@ function start(b, gpu, test) {
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
 	if (S.cpuOnly) note(S.cpuOnly);
-	save();
+	saveNow();
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
 	// strategies
 	building = true;
@@ -1044,7 +1058,7 @@ function finish() {
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
 	cur = null;
-	save();
+	saveNow();
 }
 /** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept. more: the
  *  strategy reports more routes of the same length (its process ends by itself) */
@@ -1123,6 +1137,7 @@ function stop() {
 	S.stage = S.result ? 'found' : 'stopped';
 	S.message = S.result ? '' : 'The search was stopped before it found a route.';
 	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; halt(kids[k], 'stopped'); } });
+	saveNow();
 	if (building) {
 		// still checking the physics / the GPU tool (the GPU's first load can take minutes): nothing runs yet, so the
 		// search ends now; the check's late answer is dropped (searchGen) and a new search can start at once
@@ -1164,7 +1179,7 @@ function makeJob(b) {
 
 /** stops a running search (the server is shutting down) */
 function shutdown() {
-	if (S) S.halted = true;
+	if (S) { S.halted = true; saveNow(); }
 	for (const ch of kids) halt(ch, 'stopped');
 }
 
