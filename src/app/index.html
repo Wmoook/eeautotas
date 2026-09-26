@@ -493,7 +493,7 @@ function gpuText() {
 	const g = state.gpu;
 	const how = `<span class="why" title="${esc(GPU_HOW)}">how?</span>`;
 	if (!g) return '';
-	if (!g.available) return g.state === 'measuring' || g.state === 'pending' ? `<span class="spin"></span>Measuring the GPU (once, a few seconds)…` : `GPU mode: not available (${esc(g.why || 'no NVIDIA GPU found')}).`;
+	if (!g.available) return g.state === 'measuring' || g.state === 'pending' ? `<span class="spin"></span>Preparing the GPU (once per update: compiling for this graphics card can take a minute or two)…` : `GPU mode: not available (${esc(g.why || 'no NVIDIA GPU found')}).`;
 	const b = state.bench;
 	const faster = b ? (g.ticksPerSec > b.all ? `<b>the GPU is faster</b> (${(g.ticksPerSec / b.all).toFixed(1)}x all CPU threads)` : `the CPU is faster (${(b.all / g.ticksPerSec).toFixed(1)}x the GPU)`) : '';
 	return `GPU: <b>${esc(g.model)}</b>: ${mts(g.ticksPerSec)} ticks/s (measured)${faster ? `, ${faster}` : ''}. GPU mode runs the GPU search next to the CPU optimizer (${how}).`;

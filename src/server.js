@@ -49,7 +49,7 @@ function systemInfo() {
 			gpuAvailable()
 				? { id: 'gpu', name: 'GPU + CPU', model: gpuBench.gpu.name, available: true, ticksPerSec: gpuBench.ticksPerSec, text: G.describeBench(gpuBench), state: gpuState }
 				: { id: 'gpu', name: 'GPU + CPU', available: false, state: gpuState,
-					why: gpuState === 'pending' || gpuState === 'measuring' ? 'measuring the GPU (once, a few seconds)...' : (gpuBench && gpuBench.why) || 'no NVIDIA GPU found' },
+					why: gpuState === 'pending' || gpuState === 'measuring' ? 'preparing the GPU (once per update: compiling for this graphics card can take a minute or two, then a short speed test)...' : (gpuBench && gpuBench.why) || 'no NVIDIA GPU found' },
 		],
 		faster: gpuAvailable() && bench && gpuBench.ticksPerSec > bench.all ? 'gpu' : 'cpu',
 		note: gpuAvailable() && bench
@@ -448,11 +448,12 @@ function main() {
 				startJob(r.id, r.workers, { gpu: !!r.gpu && gpuAvailable() });
 			}
 		};
-		// the GPU benchmark (once per GPU / build, a few seconds), after the CPU one so they do not disturb each other
+		// the GPU benchmark (once per GPU / build: the driver first compiles the kernels for this card, up to a minute or two
+		// on a laptop CPU, then a few seconds of measuring), after the CPU one so they do not disturb each other
 		const gpuMeasure = () => {
 			if (gpuBench) return Promise.resolve();
 			gpuState = 'measuring';
-			console.log('[app] measuring the GPU (once, a few seconds)...');
+			console.log('[app] preparing the GPU (once per update: compiling for this graphics card, up to a minute or two)...');
 			return G.runBench().then((r) => {
 				gpuBench = r; gpuState = 'done';
 				console.log(`[app] ${G.describeBench(r)}`);
