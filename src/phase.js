@@ -15,10 +15,11 @@
 // Verified proposals are combined (weighted interval scheduling; the compensated ones share one shift = the sum of
 // their savings, tried at +-3), and a run is written only when THE rule accepts it (C.evaluate + C.judge).
 // --workers=N: worker threads, each with every N-th start tick of the grid (they search and replay their own
-// proposals; the main thread combines them).
+// proposals; the main thread combines them). --random=S: then S seconds of random multi-tick changes per worker (pert / sticky, like
+// the GPU's families, which look for exact rejoins and so are blind on time-door levels).
 //
 // node src/phase.js --tas=<run.eetas> --level=<level id | job id> [--out=<file>] [--from=0] [--to=<end>] [--step=3]
-//   [--horizon=300] [--drift=96] [--seconds=60] [--nocoins=0|1] [--workers=1]
+//   [--horizon=300] [--drift=96] [--seconds=60] [--nocoins=0|1] [--workers=1] [--random=0 (seconds)] [--seed=1]
 // Prints [phase] lines and `[ticks] N` every second (the page's live speed).
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -38,6 +39,7 @@ function parseArgs() {
 		from: +(a.from || 0), to: a.to !== undefined ? +a.to : null, step: Math.max(1, +(a.step || 3)),
 		horizon: Math.max(10, +(a.horizon || 300)), drift: +(a.drift || 96), seconds: +(a.seconds || 60),
 		nocoins: a.nocoins === undefined ? null : String(a.nocoins) === '1', workers: Math.max(1, +(a.workers || 1) | 0),
+		random: Math.max(0, +(a.random || 0)), seed: +(a.seed || 1) | 0,
 	};
 }
 
@@ -145,6 +147,51 @@ function searchPart(R, a, wi, nw) {
 			}
 		}
 	}
+	// --random: random multi-tick changes for that many seconds (the GPU's pert and sticky families, which are blind on
+	// time-door levels there: they look for exact rejoins): at a random start tick, a prefix of P = 5..40 ticks
+	// (pert: the reference shifted by the drop D, each input replaced by a random option with 5-20%; sticky: a random
+	// option held and redrawn with 15% per tick), then the reference from t + D + P; clock-blind rejoins as above
+	let rs = (0x9e3779b9 ^ ((a.seed | 0) * 0x85ebca6b) ^ ((wi + 1) * 0xc2b2ae35)) >>> 0 || 1;
+	const rnd = () => { rs ^= rs << 13; rs >>>= 0; rs ^= rs >>> 17; rs ^= rs << 5; rs >>>= 0; return rs / 4294967296; };
+	const t1 = Date.now();
+	let randomTried = 0;
+	while (a.random > 0 && (Date.now() - t1) / 1000 < a.random && to - a.from > 50) {
+		const t = a.from + Math.floor(rnd() * (to - a.from - 45));
+		const P = 5 + Math.floor(rnd() * 36), ds = Math.floor(rnd() * 16), D = ds < 7 ? 1 : ds < 13 ? 2 : 3 + (ds - 13);
+		if (t + D + P >= n) continue;
+		const sticky = rnd() < 0.5, rate = sticky ? 0.15 : [0.05, 0.1, 0.2][Math.floor(rnd() * 3)];
+		const rep = new Array(P);
+		let held = OPT[Math.floor(rnd() * 18)];
+		for (let q = 0; q < P; q++) {
+			if (sticky) { if (q > 0 && rnd() < rate) held = OPT[Math.floor(rnd() * 18)]; rep[q] = held; }
+			else rep[q] = rnd() < rate ? OPT[Math.floor(rnd() * 18)] : best[t + D + q];
+		}
+		randomTried++;
+		sim.restore(snaps[t]); dead = false;
+		let k = 0;
+		for (const o of rep) { E.applyMask(inp, o); sim.tick(inp); k++; if (dead || sim.is_dead) break; }
+		let r = t + D + P;
+		while (k < a.horizon && r < n && !dead && !sim.is_dead) {
+			const jf = full.get(sim.stateHash(false, NOC));
+			let j = jf, exact = true;
+			if (j === undefined) {
+				exact = false;
+				j = blind.get(sim.stateHashClockBlind(NOC));
+				if ((j === undefined || j <= t + k) && blindNC.size) { const j2 = blindNC.get(sim.stateHashClockBlind(true)); if (j2 !== undefined) j = j2; }
+			}
+			if (j !== undefined) {
+				if (j > t + k) {
+					const seq = rep.slice(); for (let q = t + D + P; seq.length < k; q++) seq.push(best[q]);
+					const key = `${t}:${j}:${k}`;
+					if (!proposals.has(key)) proposals.set(key, { i: t, j, k, seq, exact });
+				}
+				break;
+			}
+			if (Math.abs(sim.px - X[r]) + Math.abs(sim.py - Y[r]) > a.drift) break;
+			E.applyMask(inp, best[r]); sim.tick(inp); k++; r++;
+		}
+	}
+	tried += randomTried;
 	// every proposal replayed: plain, else compensated in the idle start
 	const good = [];
 	for (const p of proposals.values()) {
