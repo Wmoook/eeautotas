@@ -1535,6 +1535,9 @@ function renderSolve() {
 		else if (st.preparing) h += `<div class="sst"><span class="spin"></span><b>Preparing the GPU engine for this graphics card…</b> ${(st.elapsed || 0).toFixed(0)} s (the first search after an update; later ones start at once). The ${st.seconds} s of searching start after it.</div>`;
 		else h += `<div class="sst"><span class="spin"></span><b>Searching…</b> ${el2.toFixed(0)} s of ${st.seconds} s${st.guidePoints ? ' · along your guide line' : ''}</div>`;
 		if (st.physics && st.physics.noWayUp) h += `<div class="sst">The physics check finds no way up to the trophy; "every move" checks it without the check.</div>`;
+		// (the proof, eegpu prove: whether any route can exist at all)
+		if (st.proof && st.proof.state === 'running') h += `<div class="sst">Proof: checking whether any route can exist…</div>`;
+		else if (st.proof && st.proof.verdict === 'impossible') h += `<div class="sst"><b>Proven: no route exists.</b> The search goes on for up to a minute as a check.</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
 		if (st.strategies && st.strategies.length) {

@@ -35,6 +35,7 @@ const G = require('./gpu.js');
 const B = require('./blocks.js');
 const M = require('./minimap.js');
 const RF = require('./reach.js');
+const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
@@ -608,7 +609,8 @@ function halt(ch, why) {
  * test (test/editor.js; not from HTTP): { tool: [command, ...arguments] } runs that instead of the native engine;
  * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js; beams:
  * false leaves the GPU beams out (measurements of "every move" alone); reach: fields that override the physics check's
- * answer (e.g. {startCost: -1}: the model rules the start out).
+ * answer (e.g. {startCost: -1}: the model rules the start out); prover: [command, ...arguments] runs that instead of
+ * the native tool's `prove` (false: no proof), proveSeconds its budget.
  */
 function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
@@ -661,7 +663,10 @@ function start(b, gpu, test) {
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
 	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S },
-		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
+		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
+		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there)
+		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : G.nativeTool() ? [G.nativeTool()] : null,
+		proveSeconds: test && test.proveSeconds ? test.proveSeconds : PV.SECONDS };
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
@@ -709,6 +714,8 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	}
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
 	cur.opts.noWayUp = noWayUp;
+	// the physics check finds a way: the proof (next to the searches) may still show there is none
+	if (cur.opts.prune) startProof(ins);
 	S.stage = 'starting';
 	if (noGpu && !S.searchStarted) S.searchStarted = Date.now();   // (the CPU alone: the search's clock from its start)
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${S.width} states per tick`}, up to ${S.seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
@@ -721,6 +728,82 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 		Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for an attempt of ${RELAY_MIN_TICKS}+ ticks to go on from` });
 		return null;
 	});
+}
+// ---------------------------------------------------------------- the proof (src/prove.js: eegpu prove, CPU only)
+// Once the physics check finds a way (a finite start cost), `eegpu prove` (native/prove.h: the engine's tick over boxes
+// of positions and speeds, run-ups included; one thread, up to PV.SECONDS) runs next to the searches: levels of plain
+// solids, air-like blocks and the trophy where the run-up speed decides are beyond the reach field. A proof caps the
+// search at PROOF_CHECK_S of search time (the rest is a check: a route found anyway is a mistake in the proof, kept in
+// model_miss.json) and the verdict is "No route (proven)" with the proof's explanation. Verdicts are cached per level
+// and model (PV.cacheFile). A search whose strategies end first waits for the proof, unless a route is known.
+const PROOF_CHECK_S = 60;
+let proofKid = null;
+function startProof(ins) {
+	S.proof = null;
+	if (!cur || !cur.prover) return;
+	const S0 = S, seconds = cur.proveSeconds;
+	const file = PV.cacheFile(dir(), S.levelHash, cur.prover);
+	const cached = PV.readCache(file, seconds);
+	if (cached) { proofDone(Object.assign({}, cached, { cached: true })); return; }
+	const bin = path.join(dir(), 'prove.bin');
+	try { fs.writeFileSync(bin, G.levelBlob(ins.level)); } catch (e) { return; }
+	S.proof = { state: 'running', started: Date.now() };
+	// (the reach field's cut-off drops states that cannot reach the trophy anyway: several times faster)
+	const ch = PV.run(cur.prover, bin, { reach: fs.existsSync(cur.files.reach) ? cur.files.reach : '', seconds }, (r) => {
+		busy.delete(ch);
+		if (proofKid === ch) proofKid = null;
+		if (S !== S0) return;
+		if (ch.stopWhy) { if (S.proof) S.proof.state = 'stopped'; }
+		else { PV.writeCache(dir(), file, r, seconds); proofDone(r); }
+		if (!running()) finish();
+		else save();
+	});
+	proofKid = ch;
+	busy.add(ch);
+}
+/** the proof's verdict r (the tool's done line, or from the cache) */
+function proofDone(r) {
+	S.proof = { state: 'done', verdict: r.verdict, end: r.end || '', sec: r.sec, cells: r.cells, pruned: r.pruned || 0, explain: r.explain || null, why: r.why || null,
+		error: r.error || null, cached: !!r.cached };
+	const took = `${r.cached ? 'from the cache' : `${(+r.sec || 0).toFixed(1)} s`}`;
+	if (r.verdict === 'impossible') {
+		note(`the proof: no input sequence reaches the trophy (${(r.cells || 0).toLocaleString('en-US')} boxes of states, ${took}); the search goes on for up to ${PROOF_CHECK_S} s as a check`);
+		if (S.result) proofMiss(S.result.strategy, S.result.inputs);
+		else capSearch();
+	} else if (r.verdict === 'reached') note(`the proof: it cannot rule a route out (its model reaches the trophy; ${took})`);
+	else if (r.verdict === 'limit') note(`the proof: no verdict within its ${r.end === 'cells' ? 'memory' : 'time'} (${took})`);
+	else if (r.verdict === 'error') note(`the proof failed: ${r.error}`);
+	save();
+}
+/** a proof: the search ends PROOF_CHECK_S s into its clock (its processes stopped then; no new passes after it) */
+function capSearch() {
+	if (S.seconds <= PROOF_CHECK_S) return;
+	S.seconds = PROOF_CHECK_S;
+	const S0 = S;
+	const tick = () => {
+		if (S !== S0 || !S.running) return;
+		const left = S.seconds - searchClock(Date.now());
+		if (left > 0.2) { const t = setTimeout(tick, left * 1000); if (t.unref) t.unref(); return; }
+		S.strategies.forEach((q, k) => { if (alive(kids[k]) && !kids[k].stopWhy) halt(kids[k], 'time'); });
+	};
+	tick();
+}
+/** a route on a level the proof ruled out: a mistake in the proof (native/prove.h), kept in model_miss.json */
+function proofMiss(label, inputs) {
+	if (S.proofMissed) return;
+	S.proofMissed = true;
+	try { C.writeJSON(path.join(dir(), 'model_miss.json'), { t: new Date().toISOString(), by: 'prover', levelHash: S.levelHash, eelvlB64: cur ? cur.buf.toString('base64') : null, inputs, strategy: label, proof: S.proof }); } catch (e) { /* read-only */ }
+	note(`the proof ruled this level out, but ${label} found a route: a mistake in the proof (saved in model_miss.json; please report it)`);
+}
+/** the strategies have ended and the proof still runs: a route known (or a stop) ends it, else the search waits for it */
+function proofAlone() {
+	if (!alive(proofKid) || proofKid.stopWhy || [...busy].some((c) => c !== proofKid)) return;
+	if (!S.result && !S.halted) {
+		if (S.proof && !S.proof.waited) { S.proof.waited = true; note('the searches are done: waiting for the proof'); }
+		return;
+	}
+	proofKid.stopWhy = 'stopped';
+	try { proofKid.kill(); } catch (e) { /* gone */ }
 }
 /** the note of a search the CPU runs alone (why: the reason the GPU does not) */
 const cpuOnlyText = (why, workers, guide) => `No GPU search: ${why}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
@@ -1088,6 +1171,7 @@ function launch(n) {
 		if (!cpu && S.result && ![...busy].some((c) => !c.cpuSearch) && !S.strategies.some((q) => !q.cpu && q.state === 'error')) {
 			S.strategies.forEach((q, k) => { if (q.cpu && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
 		}
+		proofAlone();
 		if (!running()) finish();
 		else save();
 	});
@@ -1151,7 +1235,7 @@ function finish() {
 	S.tick = S.layer;
 	if (S.result) S.stage = 'found';
 	else if (S.stage === 'stopped') S.message = S.message || 'The search was stopped before it found a route.';
-	else if (S.strategies.every((q) => q.state === 'error')) {
+	else if (S.strategies.every((q) => q.state === 'error') && !(S.proof && S.proof.verdict === 'impossible')) {
 		S.stage = 'error';
 		S.message = `The ${S.cpuOnly ? 'CPU' : 'GPU'} search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
 	} else if (S.stage !== 'error') {
@@ -1177,6 +1261,10 @@ function finish() {
 			S.message = `No route: the trophy cannot be reached from the start.${high} There is no way up to it: a jump rises 63.4 px (the box stands on ledges up to 3 tiles high), ` +
 				'one row of dots lifts the ball about 1 row, arrows and liquids by their height (the check is generous), and walls and spikes block the rest ' +
 				'(a death that takes the ball to a checkpoint or another spawn point counts as a way too).';
+		} else if (S.proof && S.proof.verdict === 'impossible') {
+			// the proof (eegpu prove) holds no state with the ball at the trophy: no input sequence gets there
+			S.impossible = { by: 'prover' };
+			S.message = PV.message(S.proof);
 		} else if (XE) {
 			// merged situations are not a proof: one exact pixel can hide between them
 			const tries = XE.tries > 1 ? ` in all ${XE.tries} tries (each with other states standing for merged situations)` : '';
@@ -1214,6 +1302,7 @@ function found(inputs, n, more) {
 		try { C.writeJSON(path.join(dir(), 'model_miss.json'), { t: new Date().toISOString(), levelHash: S.levelHash, eelvlB64: cur.buf.toString('base64'), inputs: C.eetasBytes(ev.ms).toString('latin1'), strategy: V.label }); } catch (e) { /* read-only */ }
 		note(`the physics check ruled this level out, but ${V.label} found a route: a mistake in the physics model (saved in model_miss.json; please report it)`);
 	}
+	if (S.proof && S.proof.verdict === 'impossible') proofMiss(V.label, C.eetasBytes(ev.ms).toString('latin1'));
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
 	if (first || (V.cpu && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
@@ -1268,6 +1357,7 @@ function stop() {
 	S.stage = S.result ? 'found' : 'stopped';
 	S.message = S.result ? '' : 'The search was stopped before it found a route.';
 	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; halt(kids[k], 'stopped'); } });
+	proofAlone();
 	saveNow();
 	if (building) {
 		// still checking the physics / the GPU tool (the GPU's first load can take minutes): nothing runs yet, so the
@@ -1312,6 +1402,7 @@ function makeJob(b) {
 function shutdown() {
 	if (S) { S.halted = true; saveNow(); }
 	for (const ch of kids) halt(ch, 'stopped');
+	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,

@@ -150,7 +150,11 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   line. When "every move" runs out of new situations without reaching the trophy, it says the trophy **looks impossible**
   (and how finely it told situations apart): strong evidence, not proof, and only from a pass at the normal grain or
   finer that kept every situation of every tick (a coarse pass, or one that had to leave situations out, proves
-  nothing). Only the physics check (no way up at all) says a trophy **cannot be reached**. Searches can run up to 3 hours. Either way it shows the **closest attempt** (orange on the map): the one that got nearest the trophy, measured
+  nothing). Only the physics check (no way up at all) says a trophy **cannot be reached**, and so does the **proof**: on
+  levels of plain blocks (solids, air, spawn, coins, crown, checkpoint, the trophy) a proof that follows every input tick
+  by tick, run-ups included, runs next to the search for up to 30 s on one CPU thread (it needs no GPU); when it shows
+  that nothing reaches the trophy, the search runs a minute at most (a check) and says **No route (proven)**, with how high the ball
+  gets, the nearest tile it reaches and its fastest run toward the trophy. Searches can run up to 3 hours. Either way it shows the **closest attempt** (orange on the map): the one that got nearest the trophy, measured
   along the ways the ball could walk (around walls, never through spikes or other deadly blocks). **Preview here**
   plays it; you can download its `.eetas` too, even when you stop the search early.
 - The level is saved in your browser as you edit. **Export .eelvl** saves a file EE Offline opens; **Import .eelvl**
