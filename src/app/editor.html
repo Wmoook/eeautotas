@@ -1528,7 +1528,10 @@ function renderSolve() {
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed(0)} M ticks/s</div>`;
 		if (st.strategies && st.strategies.length) {
-			const what = (q) => (q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : 'no route')
+			// (every move with a route known: another pass looks for a faster one, up to one tick less than the route)
+			const refining = (q) => q.key === 'explore' && q.depthCap > 0 && (q.state === 'running' || q.state === 'starting');
+			const what = (q) => (refining(q) ? `${q.found ? `route ${esc(q.found.time)} · ` : ''}looking for a faster one: tick ${q.layer.toLocaleString('en-US')} of ${q.depthCap.toLocaleString('en-US')}`
+				: q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : 'no route')
 				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : `tick ${q.layer.toLocaleString('en-US')}`);
 			const more = (q) => (q.key === 'explore' ? (q.state === 'running' && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
 			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;

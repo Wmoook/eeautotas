@@ -8,7 +8,11 @@
 //   checks     no start, no trophy, walled in, only through portals, several spawns; bad input is refused clearly
 //   app        the page's script parses; the HTTP API (in-process server, temp data folder): the page, blocks, eelvl,
 //              parse, check, solve refusals, a job from a route (Watch / Optimize)
-//   gpu        (--gpu) one short route search on the GPU (at most 20 s), verified in the JS engine
+//   passes     the "every move" pass ladder (src/editor.js passCells / passSeconds / nextPass) and the whole search
+//              driven by a stand-in for eegpu (a Node script playing scripted passes; no GPU): coarse first with pass 0's
+//              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
+//              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration
+//   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N]      Exit code 1 if any check fails. Writes nothing inside the repo.
 const fs = require('fs');
 const path = require('path');
@@ -289,6 +293,112 @@ async function appSection() {
 	}
 }
 
+// ---------------------------------------------------------------- the "every move" pass ladder (no GPU)
+// A stand-in for eegpu: logs every launch's arguments, and "explore" plays the scenario's next run for its pass (the
+// pass read back from --cqx): a layer event, then a finish (a route of `idle` idle ticks and then right to the trophy,
+// when it fits in --depth) or a done event with the scripted end and overflow. "beam" reports the scenario's beam route
+// (if any) and ends.
+const FAKE = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
+const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
+const passOf = (a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
+const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+if (args[0] !== 'explore') {
+	if (SC.beam) say({ ev: 'result', kind: 'finish', inputs: SC.beam });
+	say({ ev: 'done', layers: 3, end: SC.beam ? 'finish' : 'time' });
+	return;
+}
+const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p).length;
+const run = (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
+const depth = +opt('depth');
+const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; say(d); };
+setTimeout(() => {
+	say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
+	if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
+	const ticks = run.idle + SC.R;
+	if (ticks > depth) return void say({ ev: 'done', layers: depth, end: 'depth', overflow: 0 });
+	say({ ev: 'hit', layer: ticks - 1, tick: ticks, inputs: '0'.repeat(run.idle) + '4'.repeat(SC.R + 10) });
+	say({ ev: 'done', layers: ticks, end: 'finish', overflow: 0 });
+}, run.wait || 0);
+`;
+async function passesSection() {
+	section('passes: the "every move" pass ladder (a stand-in for eegpu, no GPU)');
+	const cells = (p) => JSON.stringify(ED.passCells(p));
+	check('cells: coarse passes coarsen positions only (speeds stay at 1/16 px/tick); finer passes halve both; the finest keeps heights exact',
+		cells(-2) === '{"cqx":0.125,"cqv":16,"qy":0.25,"qvy":16}' && cells(-1) === '{"cqx":0.25,"cqv":16,"qy":0.5,"qvy":16}' && cells(0) === '{"cqx":0.5,"cqv":16,"qy":1,"qvy":16}' &&
+		cells(1) === '{"cqx":1,"cqv":32,"qy":2,"qvy":32}' && cells(2) === '{"cqx":2,"cqv":64,"qy":0,"qvy":0}' && ED.PASS_START === -1, [-2, -1, 0, 1, 2].map(cells).join(' '));
+	const T = { how: 'time', seconds: 20, layer: 30 };
+	const nx = [
+		[ED.nextPass(-1, 'full', {}, 0, 50), -2], [ED.nextPass(-1, 'time', {}, 0, 50), -2], [ED.nextPass(-2, 'full', {}, 0, 50), null], [ED.nextPass(-1, 'exhausted', {}, 0, 50), 0],
+		[ED.nextPass(2, 'exhausted', {}, 0, 50), null], [ED.nextPass(-2, 'exhausted', { '-1': { how: 'full' } }, 0, 50), null],
+		[ED.nextPass(-2, 'exhausted', { '-1': T }, 0, 50), -1], [ED.nextPass(-2, 'exhausted', { '-1': T }, 0, 15), null], [ED.nextPass(-2, 'finish', { '-1': T }, 25, 50), null],
+		[ED.nextPass(-2, 'finish', { '-1': T }, 90, 50), -1], [ED.nextPass(0, 'depth', {}, 0, 50), null], [ED.nextPass(0, 'depth', {}, 100, 50), 1], [ED.nextPass(-1, 'finish', {}, 100, 50), 0],
+		[ED.nextPass(0, 'beaten', {}, 100, 50), 1], [ED.nextPass(0, 'full', { '-1': { how: 'finish' } }, 100, 50), null], [ED.nextPass(0, 'finish', {}, 1, 50), null],
+		[ED.nextPass(0, 'exhausted', { 1: { how: 'exhausted' } }, 0, 50), null]];
+	check('the next pass: coarser after a full table or a used-up share, finer after every situation or a route; a pass never twice (one that ran out of time again only with more time, and not when it already searched deep enough)',
+		nx.every(([a, b]) => a === b), nx.map(([a, b]) => `${a}${a === b ? '' : ` (want ${b})`}`).join(' '));
+	const sh = [ED.passSeconds(-1, {}, 60), ED.passSeconds(-1, {}, 600), ED.passSeconds(-1, {}, 10), ED.passSeconds(-2, {}, 600), ED.passSeconds(0, { '-1': T }, 600)];
+	check('the time share: a third of what is left (at least 20 s) while a coarser pass is untried, else all of it', JSON.stringify(sh) === '[20,200,10,600,600]', JSON.stringify(sh));
+
+	// the whole search, driven by the stand-in: a flat room, holding right reaches the trophy in R ticks
+	const W = 30, H = 8;
+	const buf = ED.eelvlOf({ name: 'ladder', width: W, height: H, cells: [...room(W, H), [2, 6, 255], [20, 6, 121]] });
+	const level = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf)));
+	const R = C.evaluate(level, new Uint8Array(300).fill(4)).ms.length;
+	const fake = path.join(HOME, 'fake-eegpu.js');
+	fs.writeFileSync(fake, FAKE);
+	let nSc = 0;
+	const drive = async (runs, beam) => {
+		const sc = path.join(HOME, `ladder-${++nSc}.json`), log = path.join(HOME, `ladder-${nSc}.log`);
+		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc] });
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && Date.now() - t0 < 20000) { await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
+		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((r) => setTimeout(r, 40)); }
+		const launches = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore')
+			.map((a) => { const o = {}; for (const x of a) { const m = /^--(\w+)=(.*)$/.exec(x); if (m) o[m[1]] = m[2]; } return o; });
+		const X = st.strategies.find((q) => q.key === 'explore');
+		return { st, X, launches, text: `${st.stage}; passes ${launches.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${launches.map((o) => o.depth).join(', ')}; ` +
+			`seconds ${launches.map((o) => o.seconds).join(', ')}${st.result ? `; route ${st.result.ticks} ticks (${st.result.strategy})` : ''}; ${st.message || ''}` };
+	};
+	const cellsOf = (o) => `${o.cqx}|${o.cqv}|${o.qy}|${o.qvy}`;
+	// the live case: the coarse first pass finds a route, the finer ones (bounded by it) a faster one, and run out
+	let r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'finish', idle: 5, layers: 3 }], 1: [{ end: 'exhausted', layers: 40, overflow: 0 }], 2: [{ end: 'depth', layers: 3 }] });
+	let L = r.launches;
+	check('a route from the coarse first pass (4 px cells, speeds at 1/16 px/tick, a 20 s share of 60 s), then finer passes look only for faster routes (--depth = route - 1) and find one',
+		r.st.stage === 'found' && r.st.result.ticks === 5 + R && r.st.result.strategy === 'every move' && L.length === 4 && cellsOf(L[0]) === '0.25|16|0.5|16' && L[0].depth === '100000' &&
+		L[0].seconds === '20' && cellsOf(L[1]) === '0.5|16|1|16' && +L[1].depth === 20 + R - 1 && +L[1].seconds >= 55 && cellsOf(L[2]) === '1|32|2|32' && +L[2].depth === 5 + R - 1 &&
+		cellsOf(L[3]) === '2|64|0|0' && r.X.passes === 4 && r.X.state === 'found' && !r.st.running, r.text);
+	// the old false verdict: a full pass, then a coarse pass that runs out of situations, is no evidence of anything
+	r = await drive({ '-1': [{ end: 'full', layers: 50 }], '-2': [{ end: 'exhausted', layers: 16, overflow: 0 }] });
+	L = r.launches;
+	check('a coarse pass that runs out of situations gives no verdict ("not found", not "ran out of new situations")', r.st.stage === 'not found' && !r.st.impossible && !r.X.exhausted &&
+		L.length === 2 && cellsOf(L[1]) === '0.125|16|0.25|16' && /^No route to the trophy found/.test(r.st.message) && !/ran out of new situations/.test(r.st.message), r.text);
+	// a pass out of its share of the time -> coarser; that one runs out -> the first again with all the time left; then
+	// finer: the verdict from pass 0 (no layer cut); a finer pass whose layers were cut does not replace it
+	r = await drive({ '-1': [{ end: 'time', layers: 30 }, { end: 'exhausted', layers: 60, overflow: 0 }], '-2': [{ end: 'exhausted', layers: 16, overflow: 0 }],
+		0: [{ end: 'exhausted', layers: 70, overflow: 0 }], 1: [{ end: 'exhausted', layers: 80, overflow: 4 }], 2: [{ end: 'full', layers: 50 }] });
+	L = r.launches;
+	check('out of its share -> coarser, then the slow pass again with all the time left; "ran out of new situations" from pass 0 (no layer cut, 2 px cells)',
+		L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join() === '-1,-2,-1,0,1,2' && L[0].seconds === '20' && +L[1].seconds >= 55 && +L[2].seconds >= 55 && r.st.stage === 'not found' &&
+		r.X.exhausted && r.X.exhausted.pass === 0 && /ran out of new situations by tick 70 \(positions and speeds told apart to 2 px and 1\/16 px\/tick/.test(r.st.message) &&
+		/not proof/.test(r.st.message), r.text);
+	// passes that ran out but cut some layers (or did not say): no verdict
+	r = await drive({ '-1': [{ end: 'exhausted', layers: 20, overflow: 0 }], 0: [{ end: 'exhausted', layers: 30, overflow: 3 }], 1: [{ end: 'exhausted', layers: 40 }], 2: [{ end: 'full', layers: 50 }] });
+	check('passes that cut layers when they ran out (or do not say) give no verdict', r.st.stage === 'not found' && !r.X.exhausted && !/ran out of new situations/.test(r.st.message) &&
+		r.launches.length === 4 && r.st.log.some((s) => /3 situations were cut/.test(s)) && r.st.log.some((s) => /does not say whether full layers were cut/.test(s)), r.text);
+	// a beam's route first: the exploration deeper than it stops, and the finer passes look for a faster one
+	r = await drive({ '-1': [{ end: 'time', layers: 5000, wait: 1500, hold: 4000 }], 0: [{ end: 'finish', idle: 10, layers: 3 }] }, '0'.repeat(30) + '4'.repeat(R + 10));
+	L = r.launches;
+	check('a beam\'s route: the exploration stops once deeper, and the next pass (finer, --depth = route - 1) finds a faster one', r.st.stage === 'found' && r.st.result.ticks === 10 + R &&
+		r.st.result.strategy === 'every move' && r.X.ends['-1'] && r.X.ends['-1'].how === 'beaten' && L.length === 4 && +L[1].depth === 30 + R - 1 && cellsOf(L[1]) === '0.5|16|1|16' &&
+		+L[2].depth === 10 + R - 1, r.text);
+}
+
 // ---------------------------------------------------------------- GPU searches (--gpu)
 /** one route search on a level; the route replayed in the JS engine */
 async function solve(name, W, H, cells, seconds) {
@@ -333,6 +443,15 @@ async function gpuSection() {
 	cells.push([8, 6, 242, 0, 1, 2], [15, 6, 242, 0, 2, 1], [17, 6, 121], [2, 6, 255]);
 	r = await solve('portal', 20, 8, cells, 60);
 	check('a portal: the route goes through it without a guide line, and finishes in the JS engine', r.ok, r.text);
+	// the trophy above a spike, reached by a 37-row fall: the tick that takes the trophy starts on it and ends over the
+	// spike, where the reach field rules the ball out; "every move" must still count that finish (its finish test comes
+	// before the prune), not only a beam
+	cells = room(9, 44);
+	cells.push([4, 1, 255], [4, 38, 121], [4, 39, 361, 1]);
+	r = await solve('trophy over a spike', 9, 44, cells, 30);
+	const XF = r.st.strategies.find((q) => q.key === 'explore');
+	check('a trophy above a spike after a long fall: "every move" finds the route too, and it finishes in the JS engine', r.ok && !!(XF && XF.found),
+		`${r.text}; every move: ${XF ? `${XF.state}${XF.found ? ` ${XF.found.time}` : ''}` : 'none'}`);
 	// no route, proven: the trophy on a ledge two tiles above any jump (the physics check finds no way up)
 	cells = room(20, 10);
 	for (let x = 8; x <= 12; x++) cells.push([x, 3, 9]);
@@ -354,6 +473,7 @@ async function gpuSection() {
 	roundtripSection();
 	checksSection();
 	await appSection();
+	await passesSection();
 	if (GPU) await gpuSection();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

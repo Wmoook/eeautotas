@@ -7,7 +7,8 @@
 // - block info for the palette (names, kinds, EE minimap colors, argument kinds);
 // - the checks before a search (a start, a trophy, an open way to it) and the search itself: `eegpu explore
 //   <level.bin> - --finish=1` (native/explorehost.h: from the level start, every input every tick, near-identical
-//   states merged, so the first tick with a finish is the fastest route) next to `eegpu beam --goal=1`
+//   states merged, so the first tick with a finish is the fastest route; in passes of coarser and finer cells, and once
+//   a route is known, finer passes look for faster ones until the time is up: nextPass) next to `eegpu beam --goal=1`
 //   (native/beamhost.h: the states closest to the trophy kept; with a guide line a second beam follows the line; see
 //   STRATEGIES). Every route is replayed in the exact JS engine (common.js evaluate) before it is shown. Both tools
 //   also report their closest attempt (the state nearest the trophy by walking distance around walls and deadly
@@ -253,9 +254,11 @@ function check(buf) {
 // already seen falls in the same cell (position, speed, gravity queue, jumps; eegpu explore --cqx/--cqv/--qy/--qvy set
 // the cell size). It walks away from the trophy as readily as towards it (a run-up, a block to jump from, an exit
 // the other way), and walls and floors snap the ball to exact positions, so precise moves (a one-tile gap entered at
-// exactly the right pixel) survive the merging. Its first finish is the fastest route up to that merging. When the
-// visited-cell table fills (big levels) the next pass uses coarser cells; when it runs out of states without a finish
-// (every merged state tried), finer ones.
+// exactly the right pixel) survive the merging. Its first finish is the fastest route up to that merging. It runs in
+// passes of different cell sizes (passCells, nextPass): coarse first, then coarser when a pass fills its visited-cell
+// table or uses up its share of the time, finer when it runs out of states without a finish (every merged state tried)
+// or finds a route; with a route of T ticks known, a pass looks only at the first T - 1 ticks (`--depth`), so it can
+// only find faster routes, and it stops by itself when there is none at its grain.
 // Next to it the beams: without a guide line one, scored by the walking distance to the trophy. With one: two beams side by side (the
 // tool is mostly single-threaded host work, so the second costs little): "along your line" (the line's progress minus 4
 // per px away from it, plus 4 per tile closer to the trophy: it follows the line, and still leaves it where the ball
@@ -265,24 +268,50 @@ function check(buf) {
 // Each beam's first finish is its fastest; a beam that is already deeper than the best route found stops (it cannot
 // find a faster one), and the fastest verified route wins.
 const STRATEGIES = {
-	explore: { label: 'every move', args: (f, o, q) => ['explore', f.bin, '-', '--finish=1', '--discrete=1', '--depth=100000', `--seconds=${q.seconds}`, '--coarse=0',
-		`--cqx=${0.5 * 2 ** q.pass}`, `--cqv=${16 * 2 ** q.pass}`, `--qy=${q.pass >= PASS_MAX ? 0 : 2 ** q.pass}`, `--qvy=${q.pass >= PASS_MAX ? 0 : 16 * 2 ** q.pass}`,
-		`--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : [])] },
+	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 };
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
-// the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y; each pass halves
-// (finer, after a pass tried every state) or doubles (coarser, after the table filled) them, up to two steps; the
-// finest pass keeps heights and vertical speeds exact. Whatever the pass, a whole-pixel position or a zero speed (what
-// a wall, floor or ceiling hit leaves) never shares a cell with a near miss, and which state stands for a cell is fixed
-// (the nearest to the trophy by the reach field, then the state itself): the same level gives the same search.
-const PASS_MIN = -2, PASS_MAX = 2;
-/** how finely the exploration's pass p tells situations apart: x position and x speed (y is twice as fine) */
-const passGrain = (p) => ({ '-2': '8 px and 1/4 px/tick', '-1': '4 px and 1/8 px/tick', 0: '2 px and 1/16 px/tick', 1: '1 px and 1/32 px/tick', 2: '1/2 px and 1/64 px/tick, heights exact' })[p];
-const passText = (p) => (p === 0 ? '' : p < 0 ? ` (coarser cells, pass ${1 - p})` : ` (finer cells, pass ${1 + p})`);
+// the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y. The finer passes (1, 2)
+// halve positions and speeds, and the finest keeps heights and vertical speeds exact. The coarser passes (-1, -2)
+// double the positions only: their speed cells stay at pass 0's 1/16 px/tick (a ball speeding up gains about 0.13
+// px/tick per tick, so a coarser speed cell holds it in place: a pass -2 with 1/4 px/tick cells ran out of situations
+// after 16 ticks on a level solved in 143). The search starts coarse (PASS_START): coarse cells fill the table slowly
+// and reach far soon (a level whose pass 0 spent 195 s filling its table by tick 185 was solved at pass -1 in 16 s), and
+// the finer passes then shorten the route. Whatever the pass, a whole-pixel position or a zero speed (what a wall,
+// floor or ceiling hit leaves) never shares a cell with a near miss, and which state stands for a cell is fixed (the
+// nearest to the trophy by the reach field, then the state itself): a pass on the same level gives the same states.
+const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
+/** the exploration's cells in pass p: px x cqx, vx x cqv to whole numbers; py x qy, vy x qvy likewise (0 = exact) */
+function passCells(p) {
+	const v = 2 ** Math.max(0, p);   // (the speed cells: pass 0's in the coarser passes)
+	return { cqx: 0.5 * 2 ** p, cqv: 16 * v, qy: p >= PASS_MAX ? 0 : 2 ** p, qvy: p >= PASS_MAX ? 0 : 16 * v };
+}
+/** how finely the exploration's pass p tells situations apart: x position and speeds (heights are twice as fine) */
+const passGrain = (p) => ({ '-2': '8 px and 1/16 px/tick', '-1': '4 px and 1/16 px/tick', 0: '2 px and 1/16 px/tick', 1: '1 px and 1/32 px/tick', 2: '1/2 px and 1/64 px/tick, heights exact' })[p];
+/**
+ * The exploration's next pass after pass p ended `how` (null = none): 'full' (its visited-cell table filled) or
+ * 'time' (its share of the time ran out) -> the coarser pass; 'exhausted' (every situation tried), 'finish' (a route),
+ * 'depth' or 'beaten' (no route faster than the known one got to) -> the finer pass. ends: how the earlier passes ended
+ * ({pass: {how, seconds, layer}}); a pass does not run twice (it would find the same), except one that ran out of its
+ * share of the time, when more time is left now and it had not already searched as deep as a faster route would be.
+ * routeTicks: the fastest route's ticks (0 = none yet); left: the seconds left.
+ */
+function nextPass(p, how, ends, routeTicks, left) {
+	if (routeTicks && routeTicks <= 1) return null;
+	const q = how === 'full' || how === 'time' ? p - 1 : how === 'exhausted' || how === 'finish' || how === 'beaten' || (how === 'depth' && routeTicks) ? p + 1 : null;
+	if (q === null || q < PASS_MIN || q > PASS_MAX) return null;
+	const e = ends[q];
+	return !e || (e.how === 'time' && left > e.seconds + 1 && !(routeTicks && e.layer >= routeTicks - 1)) ? q : null;
+}
+/** the seconds pass p gets (left: what is left of the search): while a coarser pass is untried, a share (a third, at
+ *  least 20 s), so that the coarser pass gets the rest if this one is slow; else all of it */
+const passSeconds = (p, ends, left) => (p > PASS_MIN && !ends[p - 1] ? Math.min(left, Math.max(20, Math.round(left / 3))) : left);
 let S = null;        // the current / last search (public state, also in solve.json)
 let kids = [];       // the eegpu processes of the running search (one per strategy)
+const busy = new Set();   // those whose end is not handled yet (a strategy's next pass is launched there)
 let cur = null;      // { level, buf } of the running search
 const stateFile = () => path.join(dir(), 'solve.json');
 function save() { try { C.writeJSON(stateFile(), S); } catch (e) { /* read-only data folder: memory only */ } }
@@ -296,20 +325,27 @@ function state() {
 	return Object.assign({}, S, { elapsed: S.running ? (Date.now() - S.started) / 1000 : S.elapsed });
 }
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
-const running = () => kids.some(alive);
+const running = () => busy.size > 0;
+/** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped') */
+function halt(ch, why) {
+	if (!alive(ch)) return;
+	ch.stopWhy = ch.stopWhy || why;
+	try { ch.kill(); } catch (e) { /* gone */ }
+}
 
 /**
  * Starts a route search. b: { eelvlB64 (the level as .eelvl bytes; or `level`, the editor's JSON), guide: [[x, y], ...]
  * (px, the ball's centre; optional), seconds (60), width (beam states per tick, 32768), depth (ticks, 6000), name }.
  * gpu: the server's GPU processor record ({available, why}). Throws with `problems` when the level is not ready.
+ * test: { tool: [command, ...arguments] } runs that instead of the native engine (test/editor.js; not from HTTP).
  */
-function start(b, gpu) {
+function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
 	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
 	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
 	const ins = inspect(buf);
 	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
-	const tool = G.nativeTool();
+	const [tool, ...toolArgs] = test && test.tool ? test.tool : [G.nativeTool()];
 	if (!tool) throw new Error('the route search needs the GPU engine, which is not part of this build (node tools/build-native.js)');
 	if (gpu && !gpu.available) throw new Error(`the route search runs on an NVIDIA GPU, which is not available: ${gpu.why || 'no NVIDIA GPU found'}`);
 	const why = G.unsupported(ins.level);
@@ -343,13 +379,13 @@ function start(b, gpu) {
 		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [],
 		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
-		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, states: 0, ticksPerSec: 0, found: null, error: null,
-			pass: 0, passes: 1, detail: '' })) };
+		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0, found: null, error: null,
+			pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '' })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length ? ` (a ${guide.length}-point line)` : ''));
 	save();
 	if (noWayUp) note('the physics check finds no way from the start to the trophy (checking with every move)');
-	cur = { level: ins.level, buf, tool, files, opts: { width, depth, prune: rf.mode === 'physics' } };
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, prune: rf.mode === 'physics' } };
 	kids = which.map((k, n) => launch(n));
 	return state();
 }
@@ -358,9 +394,16 @@ function start(b, gpu) {
 function launch(n) {
 	const V = S.strategies[n];
 	const left = Math.max(1, Math.round(S.seconds - (Date.now() - S.started) / 1000));
-	const args = STRATEGIES[V.key].args(cur.files, cur.opts, { seconds: left, pass: V.pass });
-	const ch = spawn(cur.tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-	let hits = 0, end = '';
+	const q = { seconds: left, pass: V.pass, depth: 0 };
+	if (V.key === 'explore') {
+		q.seconds = V.share = passSeconds(V.pass, V.ends, left);
+		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
+		q.depth = V.depthCap = S.result ? Math.max(1, S.result.ticks - 1) : 0;
+	}
+	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
+	const ch = spawn(cur.tool, [...cur.toolArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+	busy.add(ch);
+	let hits = 0, end = '', overflow = null;
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
 	const totals = () => {
@@ -373,14 +416,16 @@ function launch(n) {
 	const onEvent = (ev) => {
 		if (!mine()) return;
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
-			Object.assign(V, { state: 'running', layer: ev.layer, states: ev.ev === 'layer' ? ev.kept : ev.states, ticksPerSec: Math.round(ev.ticksPerSec) });
+			Object.assign(V, { state: 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
+				ticksPerSec: Math.round(ev.ticksPerSec) });
 			if (ev.ev === 'layer') {
-				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full${passText(V.pass)}`;
+				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
+					`cells of ${passGrain(V.pass)}`;
 			}
 			if (!S.result && S.stage !== 'error') S.stage = 'searching';
 			totals();
 			// deeper than the best route: it cannot find a faster one
-			if (S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; try { ch.kill(); } catch (e) { /* gone */ } }
+			if (S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			found(ev.inputs, n);
@@ -392,7 +437,10 @@ function launch(n) {
 			if (++hits <= 12) found(ev.inputs, n, hits < 12);
 		} else if (ev.ev === 'done') {
 			V.layer = ev.layers;
+			V.deepest = Math.max(V.deepest || 0, ev.layers || 0);
 			end = ev.end || '';
+			// the situations the exploration left out of its over-full layers (null: the engine does not say)
+			overflow = Number.isFinite(ev.overflow) ? ev.overflow : null;
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
 		} else if (ev.error) {
 			V.error = ev.error;
@@ -415,18 +463,31 @@ function launch(n) {
 	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-2000); });
 	ch.on('error', (e) => { err += e.message; });
 	ch.on('close', (code) => {
+		busy.delete(ch);
 		if (!mine()) return;
-		// the exploration's next pass: coarser cells after a full table, finer after every state was tried
-		// every situation tried (at this pass's grain) without a finish: the evidence that there is no route
-		if (V.key === 'explore' && end === 'exhausted' && !V.found && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
-		const next = end === 'full' && V.pass <= 0 ? V.pass - 1 : end === 'exhausted' && V.pass >= 0 ? V.pass + 1 : null;
-		if (V.key === 'explore' && !V.found && !V.error && code === 0 && next !== null && next >= PASS_MIN && next <= PASS_MAX && S.running &&
-			S.stage !== 'stopped' && !S.result && (Date.now() - S.started) / 1000 < S.seconds - 2) {
-			note(`${V.label}: ${end === 'full' ? 'the table is full' : 'every state tried'} at tick ${V.layer}; again with ${next < V.pass ? 'coarser' : 'finer'} cells`);
-			V.pass = next; V.passes++;
-			kids[n] = launch(n);
-			save();
-			return;
+		if (V.key === 'explore') {
+			// how this pass ended: why the editor stopped it, else the tool's own verdict
+			const how = ch.stopWhy || (code === 0 && !V.error ? end : '');
+			if (how) V.ends[V.pass] = { how, seconds: V.share, layer: V.layer };
+			// every situation tried without a finish: the evidence that there is no route, but only when every layer kept
+			// all its situations (the tool counts those it left out) and the cells were not coarse (they merge too much:
+			// a ball speeding up slowly shares a cell with the ball at rest)
+			const verdict = how === 'exhausted' && !V.depthCap && !V.found;
+			const why = !verdict ? '' : V.pass < 0 ? ' (coarse cells: that proves little)' : overflow === null ? ' (the engine does not say whether full layers were cut)'
+				: overflow > 0 ? ` (${overflow.toLocaleString('en-US')} situations were cut from full layers)` : '';
+			if (verdict && !why && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
+			const left = S.seconds - (Date.now() - S.started) / 1000;
+			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? S.result.ticks : 0, left) : null;
+			if (next !== null && S.running && !S.halted && S.stage !== 'stopped' && left > 2) {
+				const what = { full: 'the table is full', time: `no route in its ${V.share} s`, exhausted: 'every situation tried', finish: 'route found', depth: 'no faster route',
+					beaten: 'a faster route is known' }[how];
+				note(`${V.label}: ${what} at tick ${V.layer}${why}; again with ${next < V.pass ? 'coarser' : 'finer'} cells${S.result ? `, for a route under ${S.result.ticks} ticks` : ''}`);
+				Object.assign(V, { pass: next, passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
+				kids[n] = launch(n);
+				save();
+				return;
+			}
+			if (why) note(`${V.label}: every situation tried at tick ${V.layer}${why}`);
 		}
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
@@ -444,7 +505,8 @@ function launch(n) {
 function finish() {
 	S.running = false;
 	S.elapsed = (Date.now() - S.started) / 1000;
-	S.layer = Math.max(...S.strategies.map((q) => q.layer));
+	// (the exploration's deepest pass: a later, finer one can end sooner)
+	S.layer = Math.max(...S.strategies.map((q) => Math.max(q.layer, q.deepest || 0)));
 	S.tick = S.layer;
 	if (S.result) S.stage = 'found';
 	else if (S.stage === 'stopped') S.message = S.message || 'The search was stopped before it found a route.';
@@ -453,10 +515,11 @@ function finish() {
 		S.message = `The GPU search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
 	} else if (S.stage !== 'error') {
 		S.stage = 'not found';
-		const capped = S.layer >= S.depth;
+		const capped = S.strategies.some((q) => q.key !== 'explore' && q.layer >= S.depth);   // (the beams' depth limit)
 		const XE = S.strategies.find((q) => q.key === 'explore' && q.exhausted);
 		const X = S.strategies.find((q) => q.key === 'explore');
-		const every = X && X.layer ? `; every move to tick ${X.layer.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}` : '';
+		const xd = X ? Math.max(X.layer, X.deepest || 0) : 0;
+		const every = xd ? `; every move to tick ${xd.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}` : '';
 		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${every}; the beams kept ${S.width.toLocaleString('en-US')} states per tick)` +
 			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
 			` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`;
@@ -484,7 +547,7 @@ function found(inputs, n, more) {
 	const ev = C.evaluate(cur.level, masks);
 	// a beam ends at the first finish (the fastest it reached); the tool would still re-check every other state that
 	// finished in the same tick before it exits, which only costs time
-	if (!more && alive(kids[n])) { try { kids[n].kill(); } catch (e) { /* gone */ } }
+	if (!more) halt(kids[n], 'finish');
 	if (!ev) {
 		V.state = 'error';
 		V.error = 'it reported a route that does not finish in the exact JS engine (please report this: the two engines disagree)';
@@ -509,7 +572,7 @@ function found(inputs, n, more) {
 	S.stage = 'found';
 	// the other strategies: those already deeper than this route cannot find a faster one
 	S.strategies.forEach((q, k) => {
-		if (k !== n && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; try { kids[k].kill(); } catch (e) { /* gone */ } }
+		if (k !== n && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
 	save();
 }
@@ -532,9 +595,10 @@ function closer(ev, n) {
 /** stops the running search (a route found so far stays) */
 function stop() {
 	if (!running()) return state();
+	S.halted = true;   // (no next pass either)
 	S.stage = S.result ? 'found' : 'stopped';
 	S.message = S.result ? '' : 'The search was stopped before it found a route.';
-	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; try { kids[k].kill(); } catch (e) { /* gone */ } } });
+	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; halt(kids[k], 'stopped'); } });
 	save();
 	return state();
 }
@@ -566,7 +630,10 @@ function makeJob(b) {
 }
 
 /** stops a running search (the server is shutting down) */
-function shutdown() { for (const ch of kids) if (alive(ch)) { try { ch.kill(); } catch (e) { /* gone */ } } }
+function shutdown() {
+	if (S) S.halted = true;
+	for (const ch of kids) halt(ch, 'stopped');
+}
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, MAX_SIDE, MAX_CELLS };
+	safeName, passCells, passGrain, nextPass, passSeconds, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START };
