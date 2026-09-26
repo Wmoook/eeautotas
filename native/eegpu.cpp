@@ -1,8 +1,10 @@
 // eegpu: the native EE engine (native/eecore.h) and its GPU search, driven by src/gpu.js.
 //   eegpu trace <level.bin> <run.eetas> <out.bin> [--gpu]   per-tick state hashes of a replay (differential tests)
 //   eegpu state <level.bin> <run.eetas> <tick>               the full state after <tick> ticks (JSON, for debugging)
-//   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}
+//   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}; both with "reach":3
+//                                                            (the reach file version it reads: src/reach.js RCH3)
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
+//   eegpu reachtest <level.bin> <reach> <states.bin> [--gpu=1]  the reach lookup of a list of states (test/reach.js F)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +20,7 @@
 #include "search.h"
 #include "beam.h"
 #include "explore.h"
+#define REACH_VERSION 3   // the reach file this tool reads (src/reach.js RCH3; eegpu info "reach")
 
 using namespace ee;
 
@@ -284,21 +287,36 @@ static std::string ptxFor(int argc, char** argv, int tw) {
 
 static int twFor(int tailWords) { return tailWords <= 8 ? 8 : tailWords <= 32 ? 32 : tailWords <= 128 ? 128 : tailWords <= 512 ? 512 : 0; }
 
+/** the kernels' struct sizes on the device (stateSize_<tw>): State<tw>, SearchParams, Hit, Level, BeamParams,
+ *  ExploreParams, ReachField, and the reach file version they read; true when they match this tool's */
+static bool deviceLayout(Gpu& g, int tw, int sz[8]) {
+	for (int k = 0; k < 8; k++) sz[k] = 0;
+	cu::Buf out;
+	if (!out.alloc(32)) return false;
+	cu::CUfunction f = g.fn("stateSize_" + std::to_string(tw));
+	void* args[] = { &out.p };
+	if (!f || cu::cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize()) return false;
+	cu::cuMemcpyDtoH_v2(sz, out.p, 32);
+	const int state = tw == 8 ? (int)sizeof(State<8>) : tw == 32 ? (int)sizeof(State<32>) : tw == 128 ? (int)sizeof(State<128>) : (int)sizeof(State<512>);
+	return sz[0] == state && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level) &&
+		sz[4] == (int)sizeof(BeamParams) && sz[5] == (int)sizeof(ExploreParams) && sz[6] == (int)sizeof(ReachField) && sz[7] == REACH_VERSION;
+}
+/** beam / explore: refuse kernels built from other sources (their parameter structs would be read wrong) */
+static bool layoutOrError(Gpu& g, int tw) {
+	int sz[8];
+	if (deviceLayout(g, tw, sz)) return true;
+	printf("{\"error\":\"the GPU kernels do not match this tool (rebuild it: node tools/build-native.js)\"}\n");
+	return false;
+}
+
 static int cmdInfo(int argc, char** argv) {
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, 8))) {
-		printf("{\"gpu\":null,\"why\":%s}\n", jsonStr(cu::lastError).c_str());
+		printf("{\"gpu\":null,\"reach\":%d,\"why\":%s}\n", REACH_VERSION, jsonStr(cu::lastError).c_str());
 		return 0;
 	}
-	int sz[4] = {0};
-	cu::Buf out; out.alloc(16);
-	cu::CUfunction f = g.fn("stateSize_8");
-	void* args[] = { &out.p };
-	bool layoutOk = false;
-	if (f && !cu::cuLaunchKernel(f, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr) && !cu::cuCtxSynchronize()) {
-		cu::cuMemcpyDtoH_v2(sz, out.p, 16);
-		layoutOk = sz[0] == (int)sizeof(State<8>) && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level);
-	}
+	int sz[8];
+	const bool layoutOk = deviceLayout(g, 8, sz);
 	std::string fa;
 	for (int tw : { 8 }) {
 		cu::CUfunction fs = g.fn("search_" + std::to_string(tw));
@@ -307,9 +325,10 @@ static int cmdInfo(int argc, char** argv) {
 		char b[160]; snprintf(b, sizeof b, "%s\"search_%d\":{\"regs\":%d,\"localBytes\":%d,\"maxThreads\":%d}", fa.empty() ? "" : ",", tw, regs, local, maxT);
 		fa += b;
 	}
-	printf("{\"kernels\":{%s},", fa.c_str());
-	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]}\n", g.json().c_str(), layoutOk ? "true" : "false",
-		sz[0], sz[1], sz[2], sz[3], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level));
+	printf("{\"kernels\":{%s},\"reach\":%d,", fa.c_str(), REACH_VERSION);
+	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d,%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d,%d,%d,%d,%d]}\n", g.json().c_str(), layoutOk ? "true" : "false",
+		sz[0], sz[1], sz[2], sz[3], sz[4], sz[5], sz[6], sz[7], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level),
+		(int)sizeof(BeamParams), (int)sizeof(ExploreParams), (int)sizeof(ReachField), REACH_VERSION);
 	return 0;
 }
 
@@ -961,8 +980,52 @@ static int cmdSearch(int argc, char** argv) {
 	return 3;
 }
 
+/** eegpu reachtest <level.bin> <reach file> <states.bin> [--gpu=1]: reachFifths (beam.h) of each state (6 doubles: px, py,
+ *  speed_y, q0, q1, slippery) on the host and, with --gpu=1, on the GPU: {"n":N,"host":[...],"gpu":[...]|null}
+ *  (test/reach.js F: the JS field and the native lookup agree to the fifth) */
+static int cmdReachTest(int argc, char** argv) {
+	if (argc < 5) { fprintf(stderr, "usage: eegpu reachtest <level.bin> <reach file> <states.bin> [--gpu=1]\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	Level L = B.level(B.bytes.data());
+	ReachGpu rg;
+	std::string err;
+	if (!rg.parse(argv[3], L, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
+	std::vector<uint8_t> raw = readFile(argv[4]);
+	const int n = (int)(raw.size() / 48);
+	std::vector<double> in((size_t)n * 6);
+	memcpy(in.data(), raw.data(), (size_t)n * 48);
+	std::vector<int32_t> host(n), dev;
+	for (int i = 0; i < n; i++) { const double* q = &in[(size_t)i * 6]; host[i] = reachFifths(rg.H, q[0], q[1], q[2], (i32)q[3], (i32)q[4], q[5]); }
+	if (opt(argc, argv, "gpu", "0") == "1") {
+		const int tw = twFor(B.get("tailWords"));
+		Gpu g;
+		if (!g.open(ptxFor(argc, argv, tw))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		if (!layoutOrError(g, tw)) return 4;
+		ReachField R;
+		cu::Buf din, dout;
+		if (!rg.upload(R, err) || !din.upload(in.data(), 8 * in.size()) || !dout.alloc(4ull * std::max(1, n))) { printf("{\"error\":%s}\n", jsonStr(err.empty() ? cu::lastError : err).c_str()); return 4; }
+		cu::CUfunction f = g.fn("reachTest_" + std::to_string(tw));
+		const double* pin = (const double*)(uintptr_t)din.p;
+		i32* pout = (i32*)(uintptr_t)dout.p;
+		i32 nn = n;
+		void* args[] = { &R, &pin, &nn, &pout };
+		if (!f || cu::cuLaunchKernel(f, (n + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"reachTest kernel failed\"}\n"); return 5; }
+		dev.resize(n);
+		cu::cuMemcpyDtoH_v2(dev.data(), dout.p, 4ull * n);
+	}
+	std::string o = "{\"n\":" + std::to_string(n) + ",\"host\":[";
+	for (int i = 0; i < n; i++) { if (i) o += ','; o += std::to_string(host[i]); }
+	o += "],\"gpu\":";
+	if (dev.empty()) o += "null";
+	else { o += '['; for (int i = 0; i < n; i++) { if (i) o += ','; o += std::to_string(dev[i]); } o += ']'; }
+	o += "}\n";
+	fputs(o.c_str(), stdout);
+	return 0;
+}
+
 int main(int argc, char** argv) {
-	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search ...\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|twins|reachtest ...\n"); return 2; }
+	if (std::string(argv[1]) == "reachtest") return cmdReachTest(argc, argv);
 	std::string cmd = argv[1];
 	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
 	if (cmd == "state") return cmdState(argc, argv);

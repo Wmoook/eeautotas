@@ -47,27 +47,67 @@ static bool goalField(const Level& L, std::vector<float>& goalDist) {
 	return true;
 }
 
-/** The reach file (src/reach.js writeReachFile) on the GPU: fills R (device pointers) and keeps the buffers alive. */
+/** The reach file (src/reach.js writeReachFile, 'RCH3') on the GPU: fills R (device pointers), keeps the buffers alive,
+ *  and a host copy (H, host pointers: eegpu reachtest). Anything but RCH3 is refused: the app is newer than this tool. */
 struct ReachGpu {
-	cu::Buf cost, cls, own, refresh;
-	bool load(const std::string& file, const Level& L, ReachField& R, std::string& err) {
-		std::vector<uint8_t> raw = readFile(file.c_str());
-		if (raw.size() < 28 || memcmp(raw.data(), "RCH2", 4) != 0) { err = "bad reach file (expected RCH2): " + file; return false; }
-		int32_t W, H, B, JB, mode; float g;
-		memcpy(&W, &raw[4], 4); memcpy(&H, &raw[8], 4); memcpy(&B, &raw[12], 4); memcpy(&JB, &raw[16], 4); memcpy(&g, &raw[20], 4); memcpy(&mode, &raw[24], 4);
-		const size_t N = (size_t)W * H, pad = (N + 3) & ~(size_t)3;
-		if (W != L.W || H != L.H || B < 1 || B > 255 || raw.size() != 28 + 3 * pad + 4 * N * (size_t)(B + 1)) { err = "the reach file does not match the level"; return false; }
-		const uint8_t* p = raw.data() + 28;
-		if (!cls.upload(p, N) || !own.upload(p + pad, N) || !refresh.upload(p + 2 * pad, N) || !cost.upload(p + 3 * pad, 4 * N * (size_t)(B + 1))) { err = cu::lastError; return false; }
-		R.cost = (const float*)(uintptr_t)cost.p; R.cls = (const u8*)(uintptr_t)cls.p; R.own = (const u8*)(uintptr_t)own.p; R.refresh = (const u8*)(uintptr_t)refresh.p;
-		R.W = W; R.H = H; R.B = B; R.JB = JB; R.g = g; R.on = 1;
-		(void)mode;
+	std::vector<uint8_t> raw;
+	cu::Buf dev;
+	ReachField H;
+	bool parse(const std::string& file, const Level& L, std::string& err) {
+		raw = readFile(file.c_str());
+		if (raw.size() < 4 || memcmp(raw.data(), "RCH3", 4) != 0) {
+			err = std::string("the reach file is not RCH3 (") + (raw.size() >= 4 ? std::string((const char*)raw.data(), 4) : std::string("empty")) +
+				"): the search tool is older (or newer) than the app: rebuild it (node tools/build-native.js)";
+			return false;
+		}
+		if (raw.size() < 192) { err = "bad reach file (too short): " + file; return false; }
+		int32_t in[15];
+		memcpy(in, &raw[4], sizeof in);
+		double d[6];
+		memcpy(d, &raw[64], sizeof d);
+		memset(&H, 0, sizeof H);
+		H.W = in[1]; H.H = in[2]; H.mode = in[3]; H.Q = in[4]; H.prioShift = in[5]; H.deaths = in[6] & 1; H.ice = (in[6] >> 1) & 1;
+		const int32_t nC = in[7], nX = in[8], nSeg = in[9], nFl = in[10];
+		H.NFV = in[11]; H.NTH = in[12]; H.nFlags = nFl; H.nSeg = nSeg; H.nC = nC; H.nX = nX;
+		H.G = d[0]; H.BD = d[1]; H.ICE_ND = d[2]; H.KT = d[3]; H.TOL = d[4]; H.MOD_STRONG = d[5];
+		if (in[0] != 3 || H.W != L.W || H.H != L.H || H.Q < 0 || H.Q > 100 || nC < 0 || nX < 0 || nSeg < 1 || H.NFV < 2 || H.NTH < 2) { err = "the reach file does not match the level"; return false; }
+		if (H.mode == 0 && nFl != L.nFlags) { err = "the reach file does not match the level (block table)"; return false; }
+		const size_t N = (size_t)H.W * H.H, walk = H.mode == 1;
+		size_t o = 192;
+		auto take = [&](size_t bytes) { o = (o + 7) & ~(size_t)7; const size_t at = o; o += bytes; return at; };
+		const size_t oCls = take(N), oSeg = take(N), oRowC = take(4 * N), oRowX = take(4 * N), oWalk = take(2 * N);
+		size_t oR = 0, oF = 0, oL = 0, oC = 0, oX = 0;
+		if (!walk) { oR = take(2 * N * (H.Q + 3)); oF = take(2 * N * 17); oL = take(2 * N * 17); oC = take(2 * (size_t)nC * 128); oX = take(2 * (size_t)nX * 128); }
+		const size_t oPush = take(8 * (size_t)nSeg), oCap = take(8 * (size_t)nSeg), oMod = take(8 * (size_t)nFl), oFV = take(8 * (size_t)H.NFV), oFS = take(8 * (size_t)H.NFV),
+			oTH = take(8 * (size_t)H.NTH), oSW = take(8 * (size_t)H.NTH);
+		if (((o + 7) & ~(size_t)7) != raw.size()) { err = "the reach file does not match the level (size)"; return false; }
+		const uint8_t* b = raw.data();
+		H.cls = b + oCls; H.seg = b + oSeg; H.rowC = (const i32*)(b + oRowC); H.rowX = (const i32*)(b + oRowX); H.walk = (const u16*)(b + oWalk);
+		if (!walk) { H.costR = (const u16*)(b + oR); H.costF = (const u16*)(b + oF); H.costL = (const u16*)(b + oL); H.costC = (const u16*)(b + oC); H.costX = (const u16*)(b + oX); }
+		H.segPush = (const double*)(b + oPush); H.segCap = (const double*)(b + oCap); H.modMin = (const double*)(b + oMod);
+		H.FV = (const double*)(b + oFV); H.FS = (const double*)(b + oFS); H.TH = (const double*)(b + oTH); H.SW = (const double*)(b + oSW);
+		H.on = 1;
 		return true;
 	}
+	/** the same field on the GPU: one buffer, the pointers rebased */
+	bool upload(ReachField& R, std::string& err) {
+		if (!dev.upload(raw.data(), raw.size())) { err = cu::lastError; return false; }
+		R = H;
+		const uint8_t* base = raw.data();
+		auto rebase = [&](const void* p) -> const void* { return p ? (const void*)(uintptr_t)(dev.p + ((const uint8_t*)p - base)) : nullptr; };
+		R.cls = (const u8*)rebase(H.cls); R.seg = (const u8*)rebase(H.seg); R.rowC = (const i32*)rebase(H.rowC); R.rowX = (const i32*)rebase(H.rowX);
+		R.walk = (const u16*)rebase(H.walk); R.costR = (const u16*)rebase(H.costR); R.costF = (const u16*)rebase(H.costF); R.costL = (const u16*)rebase(H.costL);
+		R.costC = (const u16*)rebase(H.costC); R.costX = (const u16*)rebase(H.costX); R.segPush = (const double*)rebase(H.segPush); R.segCap = (const double*)rebase(H.segCap);
+		R.modMin = (const double*)rebase(H.modMin); R.FV = (const double*)rebase(H.FV); R.FS = (const double*)rebase(H.FS); R.TH = (const double*)rebase(H.TH);
+		R.SW = (const double*)rebase(H.SW);
+		return true;
+	}
+	bool load(const std::string& file, const Level& L, ReachField& R, std::string& err) { return parse(file, L, err) && upload(R, err); }
 };
 
-/** The closest attempt of a search: the state nearest the trophy so far (goal field), printed as
- *  {"ev":"closest","dist":tiles,"tick":T,"inputs":...} when it improves, at most every 0.5 s (and at the end). */
+/** The closest attempt of a search: the state nearest the trophy so far (the reach field's cost in tiles; a state it
+ *  cuts off counts 1e4 + its walking distance; without the field the walking distance), printed as
+ *  {"ev":"closest","dist":tiles,["cut":1,]"tick":T,"inputs":...} when it improves, at most every 0.5 s (and at the end). */
 struct Closest {
 	float dist = 1e30f; int layer = -1; uint32_t pk = 0; bool pending = false; double printed = -10;
 	/** after layer d's expand: the GPU's per-layer minimum (~0 = none) */
@@ -79,7 +119,8 @@ struct Closest {
 	template <class F> void print(double now, bool force, const std::string& prefix, int from0, F inputsOf) {
 		if (!pending || (!force && now - printed < 0.5)) return;
 		const std::string in = prefix + inputsOf(layer, pk >> 5, (int)(pk & 31));
-		printf("{\"ev\":\"closest\",\"dist\":%.3f,\"tick\":%d,\"inputs\":\"%s\"}\n", dist, from0 + (int)in.size(), in.c_str());
+		// (dist >= 1e4: the physics model cuts off every state so far, and dist - 1e4 is the walking distance: "cut":1)
+		printf("{\"ev\":\"closest\",\"dist\":%.3f,%s\"tick\":%d,\"inputs\":\"%s\"}\n", dist, dist >= 1e4f ? "\"cut\":1," : "", from0 + (int)in.size(), in.c_str());
 		fflush(stdout);
 		pending = false; printed = now;
 	}
@@ -214,6 +255,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	// ---- GPU
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	if (!layoutOrError(g, TW)) return 4;
 	cu::CUfunction fexp = g.fn("beamExpand_" + std::to_string(TW)), fmat = g.fn("beamMaterialize_" + std::to_string(TW));
 	cu::CUfunction fIns = g.fn("beamSelInsert"), fWin = g.fn("beamSelWinners"), fHist = g.fn("beamSelHist"), fPick = g.fn("beamSelPick"), fFill = g.fn("beamSelFill");
 	if (!fexp || !fmat || !fIns || !fWin || !fHist || !fPick || !fFill) { printf("{\"error\":\"beam kernels missing\"}\n"); return 4; }
@@ -255,7 +297,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	P.stateBytes = (i32)SB;
 	P.gx = (const float*)(uintptr_t)dgx.p; P.gy = (const float*)(uintptr_t)dgy.p; P.gs = (const float*)(uintptr_t)dgs.p;
 	P.nGuide = (i32)gx.size(); P.guideWeight = guideW;
-	P.goalDist = (const float*)(uintptr_t)dgoal.p; P.goalWeight = goal ? goalW : 0.f;
+	P.goalDist = goalDist.empty() ? nullptr : (const float*)(uintptr_t)dgoal.p; P.goalWeight = goal ? goalW : 0.f;
 	P.htKeys = (const u64*)(uintptr_t)dK.p; P.htVals = (const i32*)(uintptr_t)dV.p; P.htMask = htMask; P.qbits = (const u32*)(uintptr_t)dq.p;
 	P.nocoins = nc;
 	P.refTile = refTile.empty() ? nullptr : (const i32*)(uintptr_t)drt.p; P.refFrom = refFrom; P.lineLen = gs.empty() ? 0.f : gs.back();

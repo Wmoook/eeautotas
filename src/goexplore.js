@@ -295,7 +295,7 @@ function explore(L, field, a, seed, ctrl, post) {
 	let end = '';
 	{
 		// the start (the reach field rules it out: no route, a proof; the search ends at once)
-		const rc = RF.costAt(field, sim.px, sim.py, sim.speed_y, !!sim.on_ground);
+		const rc = RF.costAt(field, sim);
 		const k = cellKey();
 		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, tile, ver: 0, gen: 0, used: false };
 		cells.set(k, c);
@@ -391,7 +391,7 @@ function explore(L, field, a, seed, ctrl, post) {
 						break;
 					}
 					if (sim.is_dead) break;
-					const rc = RF.costAt(field, sim.px, sim.py, sim.speed_y, !!sim.on_ground);
+					const rc = RF.costAt(field, sim);
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, node: { up, buf, o, n: s + 1 } };
@@ -421,17 +421,12 @@ async function main() {
 	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
-	const field = RF.reachField(L);
-	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost table is N x (B + 1)
-	// floats: 68 MB on a 1000 x 1000 level) would cost memory and start-up time on every thread
-	for (const k of ['cost', 'cls', 'own', 'refresh']) {
-		const src = field[k], dst = new src.constructor(new SharedArrayBuffer(src.byteLength));
-		dst.set(src);
-		field[k] = dst;
-	}
+	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
+	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
+	const field = RF.shareField(RF.reachField(L));
 	const sim0 = new E.EESim(L);
 	sim0.reset();
-	const startCost = RF.costAt(field, sim0.px, sim0.py, sim0.speed_y, !!sim0.on_ground);
+	const startCost = RF.costAt(field, sim0);
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);

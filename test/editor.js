@@ -27,6 +27,8 @@ const http = require('http');
 
 const argv = process.argv.slice(2);
 const GPU = argv.includes('--gpu');
+// --gpuOnly=a,b: only the GPU cases whose names contain one of these (short GPU runs, one at a time)
+const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)).split(',').filter(Boolean);
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
 process.env.EEAT_HOME = HOME;   // (before src/ is required: jobs and data go to the temp folder)
@@ -319,7 +321,8 @@ const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
 const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
-const passOf = (a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
+if (args[0] === 'info') return void process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach }) + '\\n');
+const passOf =(a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
@@ -577,6 +580,14 @@ async function cpuSection() {
 		+L[1].depth >= R && X.ends['-1'] && X.ends['-1'].how === 'beaten' && Q && Q.found && Q.found.ticks >= R && !Q.live && st.elapsed < 30,
 		`${st.stage}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${L.map((o) => o.depth).join(', ')}; CPU route ${cpuRoute ? cpuRoute[1] : '-'} ticks; ` +
 		`${st.result ? `route ${st.result.ticks} ticks (${st.result.strategy}), R = ${R}` : st.message}; ${st.elapsed.toFixed(1)} s`);
+	// a native tool older than the app (its `info` does not say it reads this reach file version): no GPU strategy, the
+	// CPU search alone, with the reason
+	const scOld = path.join(HOME, 'cpu-old.json');
+	fs.writeFileSync(scOld, JSON.stringify({ log: path.join(HOME, 'cpu-old.log'), R, runs: {}, beam: null, reach: 2 }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 3, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, scOld], salts: false });
+	st = await waitDone(20000);
+	check('a native tool older than the app: the GPU strategies do not start; the CPU searches alone and says why', st.strategies.map((q) => q.key).join() === 'goexplore' &&
+		/the search tool is older than the app: rebuild it/.test(st.cpuOnly) && st.stage === 'found', `${st.strategies.map((q) => q.key).join()}; ${st.cpuOnly.slice(0, 120)}`);
 	// the GPU strategies fail after the CPU's first route: the CPU search is then the whole search and goes on until the
 	// time is up (it is not stopped "with them")
 	const sc2 = path.join(HOME, 'cpu-fail.json');
@@ -593,7 +604,8 @@ async function cpuSection() {
 /** one route search on a level; the route replayed in the JS engine. test: ED.start's test options ({cpu: false}: the
  *  GPU strategies alone) */
 async function solve(name, W, H, cells, seconds, test) {
-	const buf = ED.eelvlOf({ name, width: W, height: H, cells });
+	if (GPU_ONLY.length && !GPU_ONLY.some((k) => name.includes(k))) return null;
+	const buf = W === 'eelvl' ? H : ED.eelvlOf({ name, width: W, height: H, cells });
 	// (the CPU search runs next to the GPU's, as in the app, on one thread here)
 	ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 16384, workers: 1 }, { available: true }, test);
 	const t0 = Date.now();
@@ -609,32 +621,33 @@ async function gpuSection() {
 	section('gpu: route searches (at most 60 s each: a hot laptop GPU throttles hard)');
 	const G = require('../src/gpu.js');
 	if (!G.nativeTool()) { check('the GPU engine is built (node tools/build-native.js)', false); return; }
+	let cells, r;
 	// platforms up to a ledge
-	let cells = room(40, 20);
+	cells = room(40, 20);
 	for (let x = 10; x <= 14; x++) cells.push([x, 16, 9]);
 	for (let x = 18; x <= 22; x++) cells.push([x, 13, 9]);
 	for (let x = 26; x <= 31; x++) cells.push([x, 10, 9]);
 	cells.push([29, 9, 121], [2, 17, 255]);
-	let r = await solve('gpu test', 40, 20, cells, 60);
-	check('platforms: a route to the trophy, and it finishes in the JS engine', r.ok, r.text);
+	r = await solve('gpu test', 40, 20, cells, 60);
+	if (r) check('platforms: a route to the trophy, and it finishes in the JS engine', r.ok, r.text);
 	// a time door (156) between the start and the trophy: shut for the first 5 s, so the route has to wait for it
 	cells = room(20, 8);
 	for (let y = 1; y <= 5; y++) cells.push([12, y, 9]);
 	cells.push([12, 6, 156], [17, 6, 121], [2, 6, 255]);
 	r = await solve('time door', 20, 8, cells, 60);
-	check('a time door: the route waits for it (finishes after tick 500) and finishes in the JS engine', r.ok && r.ev.complete >= 500, r.text);
+	if (r) check('a time door: the route waits for it (finishes after tick 500) and finishes in the JS engine', r.ok && r.ev.complete >= 500, r.text);
 	// a coin door (43, 1 coin) in front of the trophy and the coin behind the start: away from the trophy first
 	cells = room(24, 8);
 	for (let y = 1; y <= 5; y++) cells.push([16, y, 9]);
 	cells.push([16, 6, 43, 1], [21, 6, 121], [8, 6, 255], [2, 6, 100]);
 	r = await solve('coin door', 24, 8, cells, 60);
-	check('a coin door: the route takes the coin behind the start first, and finishes in the JS engine', r.ok && r.ev.coins >= 1, r.text);
+	if (r) check('a coin door: the route takes the coin behind the start first, and finishes in the JS engine', r.ok && r.ev.coins >= 1, r.text);
 	// the trophy sealed off behind a wall, reachable only through a portal pair (no guide line)
 	cells = room(20, 8);
 	for (let y = 1; y <= 6; y++) cells.push([13, y, 9]);
 	cells.push([8, 6, 242, 0, 1, 2], [15, 6, 242, 0, 2, 1], [17, 6, 121], [2, 6, 255]);
 	r = await solve('portal', 20, 8, cells, 60);
-	check('a portal: the route goes through it without a guide line, and finishes in the JS engine', r.ok, r.text);
+	if (r) check('a portal: the route goes through it without a guide line, and finishes in the JS engine', r.ok, r.text);
 	// the trophy above a spike, reached by a 37-row fall: the tick that takes the trophy starts on it and ends over the
 	// spike, where the reach field rules the ball out; "every move" must still count that finish (its finish test comes
 	// before the prune), not only a beam (without the CPU search: its route, a plain fall, would come first and bound
@@ -642,26 +655,46 @@ async function gpuSection() {
 	cells = room(9, 44);
 	cells.push([4, 1, 255], [4, 38, 121], [4, 39, 361, 1]);
 	r = await solve('trophy over a spike', 9, 44, cells, 30, { cpu: false });
-	const XF = r.st.strategies.find((q) => q.key === 'explore');
-	check('a trophy above a spike after a long fall: "every move" finds the route too, and it finishes in the JS engine', r.ok && !!(XF && XF.found),
-		`${r.text}; every move: ${XF ? `${XF.state}${XF.found ? ` ${XF.found.time}` : ''}` : 'none'}`);
-	// no route, proven: the trophy on a ledge two tiles above any jump (the physics check finds no way up)
+	if (r) {
+		const XF = r.st.strategies.find((q) => q.key === 'explore');
+		check('a trophy above a spike after a long fall: "every move" finds the route too, and it finishes in the JS engine', r.ok && !!(XF && XF.found),
+			`${r.text}; every move: ${XF ? `${XF.state}${XF.found ? ` ${XF.found.time}` : ''}` : 'none'}`);
+	}
+	// no route, proven: the trophy on a ledge two tiles above any jump (the physics check finds no way up); "every move"
+	// checks it without the physics check (only it runs), and the verdict says where the ball gets
 	cells = room(20, 10);
 	for (let x = 8; x <= 12; x++) cells.push([x, 3, 9]);
 	cells.push([10, 2, 121], [3, 8, 255]);
 	r = await solve('way too high', 20, 10, cells, 10);
-	check('no route, proven: the physics check finds no way up, and the verdict says so', !r.st.result && r.st.stage === 'not found' && r.st.impossible && r.st.impossible.by === 'physics' &&
-		/cannot be reached/.test(r.st.message), r.st.message);
+	if (r) {
+		check('no route, proven: the physics check finds no way up, and the verdict says so (with the highest row the ball gets to)', !r.st.result && r.st.stage === 'not found' && r.st.impossible && r.st.impossible.by === 'physics' &&
+			/cannot be reached/.test(r.st.message) && /no higher than row 4; the trophy is in row 2/.test(r.st.message), r.st.message);
+		check('... "every move" alone, without the prune (a route there would be a model bug)', r.st.strategies.map((q) => q.key).join() === 'explore' && !r.st.log.some((x) => /mistake in the physics model/.test(x)),
+			r.st.strategies.map((q) => `${q.key} ${q.state}`).join(', '));
+	}
 	// no route, not provable by the model (a spike pit 27 tiles wide: far beyond any jump, but the model lets a ball drift
 	// sideways as far as it likes): the closest attempt is kept
 	cells = room(36, 10);
 	for (let x = 5; x <= 31; x++) cells.push([x, 8, 361]);
 	cells.push([33, 8, 121], [2, 8, 255]);
 	r = await solve('pit too wide', 36, 10, cells, 10);
-	const cl = r.st.closest;
-	check('no route: "not found", with the closest attempt (its distance, path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && !r.st.impossible && cl && cl.tiles > 0 && cl.tiles < 40 &&
-		cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy}); ${r.st.message.slice(0, 120)}` : `${r.st.stage}: no closest attempt`);
+	if (r) {
+		const cl = r.st.closest;
+		check('no route: "not found", with the closest attempt (its distance, path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && !r.st.impossible && cl && cl.tiles > 0 && cl.tiles < 40 &&
+			cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy})${cl.cut ? ', cut' : ''}; ${r.st.message.slice(0, 120)}` : `${r.st.stage}: no closest attempt`);
+	}
+	// the user's 50x50 shaft level (no route: every state runs out by tick 185 at 2 px cells; the physics check cannot
+	// prove it, the pocket needs a 17 px sideways move inside one row): "every move" runs out of situations, the beams
+	// give it the GPU (halted), and the verdict is "No route found" (evidence, not "impossible")
+	r = await solve('user50', 'eelvl', Buffer.from(USER50, 'base64'), null, 40, { cpu: false });
+	if (r) {
+		const X = r.st.strategies.find((q) => q.key === 'explore'), beams = r.st.strategies.filter((q) => q.key === 'goal' || q.key === 'guide');
+		check('user50: no route, "every move" ran out of situations, the beams halted for its tries, not called impossible', !r.st.result && r.st.stage === 'not found' && !r.st.impossible &&
+			X && X.exhausted && /ran out of new situations/.test(r.st.message) && beams.length > 0 && beams.every((q) => q.state === 'stopped'),
+			`${r.st.stage}; ${r.st.strategies.map((q) => `${q.key} ${q.state}`).join(', ')}; ${r.st.message.slice(0, 160)}`);
+	}
 }
+const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI82XaOefMxXxnmpIYjp5JX1zb50/uq31559pX7os7AE41z97hA2PESD3e3rv2qN8fPAxdIPlViN941TgJFlhkiWVWSLLKGinW2WCTLdJss0OGXfbY54BDshxxTI4TLGzyFCjiUKJMhSo16jRo0qJNhy49+Lc5PZsindVfmW/LWPn7c1iTtensZ2d1JrgnG4qsmXEGy4ii9d9n5nDr3tf19yPmuchGPjKSk6zkJTO5yU5+MpSjLOUpU7nKVr4ylrOs5S1zucte/uqAeqAuBLEn5McUxhQnOAFKAcrfUvkBVYNaiHqIhkEzQitCO0InQjdCbw7A2/j+4zjes8j0x+fnGp8=';
 
 (async () => {
 	roundtripSection();

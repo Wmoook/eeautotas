@@ -3,7 +3,10 @@
 //                 --above=<tick-start py limit> --land=x0,x1 [--depth=200] [--cap=2000000] [--seconds=120]
 // From the run's state after T ticks (`-`: the level start), expands every input every tick, one state per cell
 // (explore.h), and reports every input history whose next tick is a ground jump on the floor from above its row (JSON
-// lines). Other targets: --reach=x0,y0,x1,y1 (the box centre enters those tiles), --ahead=1 (ahead of the run),
+// lines). --reach=<file> (src/reach.js, RCH3): the reach field orders each cell's candidates (nearer the trophy
+// first) and measures the closest attempt; with --prune=1 the states it cuts off are dropped (a proof: they cannot
+// reach the trophy; the finish test comes first). Other targets: --enter=x0,y0,x1,y1 (the box centre enters those
+// tiles), --ahead=1 (ahead of the run),
 // --finish=1 (the tick that takes the trophy; the search ends with the first layer that has one: the fastest route
 // up to the cell merging). Cells: --coarse=<row> (from this tile row down, px x --cqx and vx x --cqv to whole
 // numbers; default 0.5 and 16), --qy / --qvy (py / vy likewise; 0 = exact), --discrete=1 (cells also differ in coins,
@@ -127,6 +130,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	(void)from0;
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	if (!layoutOrError(g, TW)) return 4;
 	cu::CUfunction fexp = g.fn("exploreExpand_" + std::to_string(TW)), fmat = g.fn("exploreMaterialize_" + std::to_string(TW));
 	cu::CUfunction fProp = g.fn("exploreClaimPropose"), fCount = g.fn("exploreClaimCount"), fTake = g.fn("exploreClaimTake");
 	if (!fexp || !fmat || !fProp || !fCount || !fTake) { printf("{\"error\":\"explore kernels missing\"}\n"); return 4; }
@@ -168,8 +172,11 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		std::string err;
 		if (!rf.empty() && !reachGpu.load(rf, L, reachF, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
 	}
-	const bool wantNear = finishTarget && (reachF.on || goalField(L, goalDist));
-	if (wantNear && ((!reachF.on && !dgoal.upload(goalDist.data(), 4 * goalDist.size())) || !dclose.alloc(8))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	// the walking distance to the trophy (beamhost.h goalField): the closest attempt without a reach field, and with one the
+	// fallback for the states it cuts off (1e4 + walking distance: there is always an attempt to show)
+	const bool haveGoal = finishTarget && goalField(L, goalDist);
+	const bool wantNear = finishTarget && (reachF.on || haveGoal);
+	if (wantNear && ((haveGoal && !dgoal.upload(goalDist.data(), 4 * goalDist.size())) || !dclose.alloc(8))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
 	cu::cuMemsetD8_v2(dnhits.p, 0, 4);
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
@@ -183,12 +190,12 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.rx0 = rx0; P.ry0 = ry0; P.rx1 = rx1; P.ry1 = ry1;
 	P.floorPy = floorPy; P.aboveMax = aboveMax; P.tx0 = lx0; P.tx1 = lx1;
 	P.coarseRow = atoi(opt(argc, argv, "coarse", "1048576").c_str());
-	P.target = opt(argc, argv, "reach", "").empty() ? 0 : 1;
-	sscanf(opt(argc, argv, "reach", "0,0,0,0").c_str(), "%d,%d,%d,%d", &P.reachX0, &P.reachY0, &P.reachX1, &P.reachY1);
+	P.target = opt(argc, argv, "enter", "").empty() ? 0 : 1;
+	sscanf(opt(argc, argv, "enter", "0,0,0,0").c_str(), "%d,%d,%d,%d", &P.reachX0, &P.reachY0, &P.reachX1, &P.reachY1);
 	P.qy = atof(opt(argc, argv, "qy", "0").c_str()); P.qvy = atof(opt(argc, argv, "qvy", "0").c_str());
 	P.cqx = atof(opt(argc, argv, "cqx", "0.5").c_str()); P.cqv = atof(opt(argc, argv, "cqv", "16").c_str());
 	if (finishTarget) P.target = 3;
-	if (wantNear) { P.goalDist = (const float*)(uintptr_t)dgoal.p; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
+	if (wantNear) { P.goalDist = haveGoal ? (const float*)(uintptr_t)dgoal.p : nullptr; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.reach = reachF;
 	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;

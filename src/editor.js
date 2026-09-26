@@ -27,6 +27,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { Worker } = require('worker_threads');
 const C = require('./common.js');
 const E = C.E;
 const EL = require('./eelvl.js');
@@ -37,6 +38,7 @@ const RF = require('./reach.js');
 const BENCH = require('./bench.js');
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
+const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
 const SPAWN = 255, TROPHY = 121;
 // eesim.js block flags (prepareLevel `flags[id]`), for the reachability check (native/beamhost.h's goal field)
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
@@ -203,11 +205,34 @@ function reachFrom(L, sx, sy, portals) {
 	}
 	return seen;
 }
+/** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
+ *  search's cache (<data>/editor/reach_<hash>_v3.json), else built here for levels up to 40k tiles (null for bigger ones) */
+const physicsMemo = new Map();
+function physicsOf(buf, level) {
+	const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
+	let r = physicsMemo.get(hash) || C.readJSON(path.join(dir(), `reach_${hash}_v${RF_VERSION}.json`), null);
+	if (!r && level.width * level.height <= 40000) {
+		const f = RF.reachField(level, { explain: true });
+		const sim = new E.EESim(level);
+		sim.reset();
+		r = { v: RF_VERSION, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null };
+	}
+	if (r) { physicsMemo.set(hash, r); if (physicsMemo.size > 8) physicsMemo.delete(physicsMemo.keys().next().value); }
+	return r;
+}
+/** the "no way up" note (null: none): the physics check proves the trophy out of reach */
+function noWayNote(ph) {
+	if (!ph || ph.mode !== 'physics' || ph.startCost >= 0) return null;
+	const ex = ph.explain;
+	const high = ex && ex.row >= 0 && ex.trophyRow >= 0 && ex.row > ex.trophyRow ? ` (the ball's centre gets no higher than row ${ex.row}; the trophy is in row ${ex.trophyRow})` : '';
+	return `No way up: the physics check finds no way from the start to the trophy${high}. A search says so at once.`;
+}
 /**
- * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes.
+ * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes (with
+ * opts.physics also the physics check's "no way up").
  * Returns { problems: [{code, text}], notes: [text], start: [x, y] | null, trophies, level (prepared), json }.
  */
-function inspect(buf) {
+function inspect(buf, opts) {
 	let p;
 	try { p = EL.readEelvl(buf); } catch (e) { throw new Error(`not an .eelvl level (${e.message})`); }
 	if (p.width * p.height > MAX_CELLS) throw new Error(`the level is ${p.width} x ${p.height} tiles; the editor's search takes up to ${MAX_CELLS / 1e6} million tiles`);
@@ -245,11 +270,15 @@ function inspect(buf) {
 		}
 	}
 	if (level.multiTargetPortals) notes.push('Some portals have several exits: EE picks one at random, so the route may need a few tries in EEO.');
+	if (opts && opts.physics && start && trophies.length && reach !== 'none') {
+		const n = noWayNote(physicsOf(buf, level));
+		if (n) notes.push(n);
+	}
 	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json };
 }
 /** inspect() for the page: no engine objects */
 function check(buf) {
-	const r = inspect(buf);
+	const r = inspect(buf, { physics: true });
 	return { problems: r.problems, notes: r.notes, start: r.start, noSpawn: r.noSpawn, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height };
 }
 
@@ -362,7 +391,8 @@ function state() {
 	return Object.assign({}, S, { elapsed: S.running ? (Date.now() - S.started) / 1000 : S.elapsed });
 }
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
-const running = () => busy.size > 0;
+let building = false;       // the physics check of a starting search (a worker thread) is under way
+const running = () => busy.size > 0 || building;
 /** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped') */
 function halt(ch, why) {
 	if (!alive(ch)) return;
@@ -404,41 +434,125 @@ function start(b, gpu, test) {
 	const cpuDepth = Math.max(100, Math.min(20000, Math.round(+b.depth || 6000)));
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
+	const levelHash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
 	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
-		reach: path.join(d, 'reach.bin') };
+		reach: path.join(d, `reach_${levelHash}_v${RF_VERSION}.bin`) };
 	fs.writeFileSync(files.eelvl, buf);
 	if (!noGpu) fs.writeFileSync(files.bin, G.levelBlob(ins.level));
-	// the reach field (src/reach.js): the searches' physics-aware distance; the explore prunes what it rules out
-	const rf = RF.reachField(ins.level);
-	if (!noGpu) RF.writeReachFile(rf, files.reach);
-	const sim0 = new E.EESim(ins.level);
-	sim0.reset();
-	const startCost = RF.costAt(rf, sim0.px, sim0.py, sim0.speed_y, !!sim0.on_ground);
-	const noWayUp = rf.mode === 'physics' && startCost < 0;
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
 	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
 	const which = [...(noGpu ? [] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
-	const cpuOnly = noGpu ? `No GPU search: ${noGpu}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
-		`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.` : '';
-	S = { running: true, stage: 'starting', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
-		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
-		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
-		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], cpuOnly, workers: cpu ? workers : 0,
-		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
+	S = { running: true, stage: 'checking the physics', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
+		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
+		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
+		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0 })) };
-	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${width} states per tick`}, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
-		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu ? ` (${workers} CPU thread${workers > 1 ? 's' : ''})` : ''));
-	if (cpuOnly) note(cpuOnly);
-	save();
-	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move'})`);
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed, salts: !(test && test.salts === false) },
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
-	kids = which.map((k, n) => launch(n));
+	if (S.cpuOnly) note(S.cpuOnly);
+	save();
+	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
+	// strategies
+	building = true;
+	const ready = Promise.all([reachInfo(buf, levelHash, noGpu ? null : files.reach), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
+	ready.then(([rf, toolWhy]) => launchAll(rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide), (e) => {
+		building = false;
+		S.stage = 'error'; S.running = false;
+		S.message = `The physics check failed: ${e.message}`;
+		note(S.message);
+		cur = null;
+		save();
+	});
 	return state();
+}
+/** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
+ *  why the GPU strategies do not run ('' = they do); stale: the reason is an old search tool */
+function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
+	building = false;
+	if (!cur) return;
+	if (S.halted) { S.stage = S.result ? 'found' : 'stopped'; finish(); return; }
+	const noWayUp = rf.mode === 'physics' && rf.startCost < 0;
+	S.physics = { mode: rf.mode, startCost: rf.startCost < 0 ? null : Math.round(rf.startCost * 10) / 10, noWayUp, explain: rf.explain || null };
+	if (noGpu) {
+		which = which.filter((k) => STRATEGIES[k].cpu);
+		S.strategies = S.strategies.filter((q) => q.cpu);
+		if (stale) { S.cpuOnly = cpuOnlyText(noGpu, cur.opts.workers, guide); note(S.cpuOnly); }
+		if (!which.length) {
+			S.stage = 'error'; S.running = false; S.message = `The route search cannot run: ${noGpu}, and the CPU search is off.`;
+			note(S.message); cur = null; save(); return;
+		}
+	}
+	// no way up (the physics check proves the trophy out of reach): only "every move", without the prune (with it the start
+	// state itself is cut), for at most a minute: a route found there would be a bug in the model (model_miss.json)
+	if (noWayUp && !noGpu) {
+		which = ['explore'];
+		S.strategies = S.strategies.filter((q) => q.key === 'explore');
+		S.seconds = Math.min(S.seconds, 60 + Math.round((Date.now() - S.started) / 1000));
+	}
+	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
+	S.stage = 'starting';
+	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${S.width} states per tick`}, up to ${S.seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
+		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu && which.includes('goexplore') ? ` (${cur.opts.workers} CPU thread${cur.opts.workers > 1 ? 's' : ''})` : ''));
+	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move, without the physics check'})`);
+	save();
+	kids = which.map((k, n) => launch(n));
+}
+/** the note of a search the CPU runs alone (why: the reason the GPU does not) */
+const cpuOnlyText = (why, workers, guide) => `No GPU search: ${why}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
+	`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.`;
+/** the reach field of a level (.eelvl bytes) for a search: {mode, startCost (tiles; -1 = cut off), explain}, and its
+ *  RCH3 file for eegpu at `file` (null: not needed). Built in a worker thread (a big level takes seconds) and cached
+ *  next to it (<data>/editor/reach_<level hash>_v3.bin / .json; the newest few kept). */
+function reachInfo(buf, hash, file) {
+	const meta = path.join(dir(), `reach_${hash}_v${RF_VERSION}.json`);
+	const cached = C.readJSON(meta, null);
+	if (cached && cached.v === RF_VERSION && (!file || fs.existsSync(file))) return Promise.resolve(cached);
+	return new Promise((resolve, reject) => {
+		const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
+			const E = require(d.mods.eesim), EL = require(d.mods.eelvl), RF = require(d.mods.reach);
+			const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
+			const f = RF.reachField(L, { explain: true });
+			const sim = new E.EESim(L); sim.reset();
+			if (d.file) { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(f)); fs.renameSync(d.file + '.tmp', d.file); }
+			parentPort.postMessage({ v: d.v, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms });`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION,
+			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), reach: require.resolve('./reach.js') } } });
+		w.once('message', (r) => {
+			try { C.writeJSON(meta, r); pruneReachCache(); } catch (e) { /* read-only data folder */ }
+			resolve(r);
+		});
+		w.once('error', reject);
+		w.once('exit', (code) => { if (code) reject(new Error(`the physics check stopped (exit code ${code})`)); });
+	});
+}
+/** the reach cache: the newest 8 levels' files */
+function pruneReachCache() {
+	const d = dir();
+	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+\.json$/.test(f)).map((f) => ({ f, t: fs.statSync(path.join(d, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+	for (const { f } of fl.slice(8)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+}
+/** why the native tool cannot run this app's searches ('' = it can): its `info` must say it reads the reach file of this
+ *  version (an older build refuses every RCH3 file); asked once per build of the tool */
+const toolChecked = new Map();
+function toolVersionProblem(cmd) {
+	let key = cmd.join('\u0000');
+	try { key += `|${fs.statSync(cmd[0] === process.execPath ? cmd[1] : cmd[0]).mtimeMs}`; } catch (e) { /* (no file: the spawn fails anyway) */ }
+	if (toolChecked.has(key)) return toolChecked.get(key);
+	const p = new Promise((resolve) => {
+		require('child_process').execFile(cmd[0], [...cmd.slice(1), 'info'], { encoding: 'utf8', timeout: 60000, windowsHide: true }, (err, out) => {
+			let info = null;
+			for (const line of String(out || '').split('\n')) { try { const j = JSON.parse(line); if (j && typeof j === 'object') info = j; } catch (e) { /* not JSON */ } }
+			if (info && info.reach === RF_VERSION) resolve('');
+			else resolve('the search tool is older than the app: rebuild it (node tools/build-native.js)');
+		});
+	});
+	toolChecked.set(key, p);
+	p.then((why) => { if (why) toolChecked.delete(key); });   // (asked again after a rebuild)
+	return p;
 }
 /** the CPU strategies' processes: their depth bound (a route of `ticks` is known: only faster ones count) */
 function tellCpu(ticks) {
@@ -630,7 +744,7 @@ function finish() {
 	S.running = false;
 	S.elapsed = (Date.now() - S.started) / 1000;
 	// (the exploration's deepest pass: a later, finer one can end sooner)
-	S.layer = Math.max(...S.strategies.map((q) => Math.max(q.layer, q.deepest || 0)));
+	S.layer = Math.max(0, ...S.strategies.map((q) => Math.max(q.layer, q.deepest || 0)));
 	S.tick = S.layer;
 	if (S.result) S.stage = 'found';
 	else if (S.stage === 'stopped') S.message = S.message || 'The search was stopped before it found a route.';
@@ -655,8 +769,10 @@ function finish() {
 		if (S.physics && S.physics.noWayUp) {
 			// the reach field is optimistic (generous jumps, dots, arrows; sideways moves free), so this is a proof
 			S.impossible = { by: 'physics' };
-			S.message = 'No route: the trophy cannot be reached from the start. There is no way up to it: a jump rises about 4 tiles, a dot about 1, ' +
-				'arrows and liquids by their height (the check is generous), and walls and spikes block the rest.';
+			const ex = S.physics.explain;
+			const high = ex && ex.row >= 0 && ex.trophyRow >= 0 && ex.row > ex.trophyRow ? ` The ball's centre gets no higher than row ${ex.row}; the trophy is in row ${ex.trophyRow}.` : '';
+			S.message = `No route: the trophy cannot be reached from the start.${high} There is no way up to it: a jump rises 63.4 px (the box stands on ledges up to 3 tiles high), ` +
+				'one row of dots lifts the ball about 1 row, arrows and liquids by their height (the check is generous), and walls and spikes block the rest.';
 		} else if (XE) {
 			// merged situations are not a proof: one exact pixel can hide between them
 			const tries = XE.tries > 1 ? ` in all ${XE.tries} tries (each with other states standing for merged situations)` : '';
@@ -687,6 +803,11 @@ function found(inputs, n, more) {
 	}
 	const first = V.state !== 'found';
 	V.state = 'found';
+	if (S.physics && S.physics.noWayUp && first) {
+		// the physics check called this level impossible, and a route replays: a bug in the model (src/reach.js), kept
+		try { C.writeJSON(path.join(dir(), 'model_miss.json'), { t: new Date().toISOString(), levelHash: S.levelHash, eelvlB64: cur.buf.toString('base64'), inputs: C.eetasBytes(ev.ms).toString('latin1'), strategy: V.label }); } catch (e) { /* read-only */ }
+		note(`the physics check ruled this level out, but ${V.label} found a route: a mistake in the physics model (saved in model_miss.json; please report it)`);
+	}
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
 	if (first || (V.cpu && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
@@ -708,19 +829,23 @@ function found(inputs, n, more) {
 	if (better) tellCpu(S.result.ticks);
 	save();
 }
-/** a strategy's closest attempt (ev: {dist (tiles to the trophy), tick, inputs}): kept when it is the nearest so far
- *  (or as near and shorter), replayed in the JS engine for its path */
+/** a strategy's closest attempt (ev: {dist (tiles to the trophy by the reach field), tick, inputs, cut}): kept when it is
+ *  the nearest so far (or as near and shorter), replayed in the JS engine for its path. dist >= 1e4 (with "cut":1): the
+ *  physics check rules out every state the tool has seen so far, dist - 1e4 is the walking distance; such an attempt
+ *  never replaces one the check allows */
 function closer(ev, n) {
 	if (!cur) return;
 	const dist = +ev.dist, old = S.closest;
-	if (!Number.isFinite(dist) || dist >= 1e5 || (old && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks)))) return;
+	if (!Number.isFinite(dist) || dist >= 2e4) return;
+	const cut = !!ev.cut || dist >= 1e4;
+	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) return;
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
 	const tr = C.replay(cur.level, masks, { trace: true });
 	const pathPts = [];
 	for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
-	S.closest = { dist, tiles: Math.round(dist * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	S.closest = { dist, cut, tiles: Math.round((cut ? dist - 1e4 : dist) * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10 };
 	save();
 }
