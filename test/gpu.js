@@ -67,7 +67,8 @@ function check(name, level, masks) {
 	const bf = path.join(TMP, 'level.bin'), ef = path.join(TMP, 'run.eetas'), of = path.join(TMP, 'trace.bin');
 	fs.writeFileSync(bf, blob);
 	C.writeEetas(ef, masks);
-	const info = JSON.parse(execFileSync(TOOL, ['trace', bf, ef, of, ...(GPU ? ['--gpu'] : [])], { encoding: 'utf8' }));
+	// (on the GPU with the app's kernel cache, as every GPU tool of the app runs)
+	const info = JSON.parse(execFileSync(TOOL, ['trace', bf, ef, of, ...(GPU ? ['--gpu', ...G.cacheArgs()] : [])], { encoding: 'utf8' }));
 	const buf = fs.readFileSync(of);
 	const js = jsTrace(level, masks);
 	const n = masks.length;

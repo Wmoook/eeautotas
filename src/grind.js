@@ -494,6 +494,7 @@ function startGpu() {
 	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : [])],
 		{ stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
+	saveStatus({ gpuPid: gpuChild.pid });   // (jobs.js stopJob stops it first, alone: its eegpu is never killed mid-kernel)
 	gpuChild.on('exit', (code) => { if (code && code !== 3) log(`GPU searcher stopped (exit ${code}); see gpu.log`); gpuChild = null; });
 }
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
@@ -517,7 +518,7 @@ function deepWindows(wsz) {
 	return wins;
 }
 /**
- * Loop windows first: stretches where the run comes back to where it was with nothing collected or toggled in between
+ * Loop windows first (up to 5 per round, 60% of it): stretches where the run comes back to where it was with nothing collected or toggled in between
  * (loops.js), the longest first, each (as the state hashes at its ends) once. The explorer on exactly that window finds
  * a way around the loop directly; tiled windows contain a long loop only in some placements. Not on time-door levels
  * (an exact rejoin there needs a saving that is a multiple of 1000 ticks). Returns the number of windows run.
@@ -526,7 +527,7 @@ async function loopWindows(round) {
 	if (level.hasTimeDoors) return 0;
 	const tried = new Set(cur.loops || []);
 	let ran = 0;
-	while (ran < 3 && roundUsed() < 0.4 * ROUND_MS && Date.now() < deadline - 120000) {
+	while (ran < 5 && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
 		let loops;
 		try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 1500 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;

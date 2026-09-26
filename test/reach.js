@@ -494,7 +494,10 @@ function sectionF() {
 		}
 		fs.writeFileSync(path.join(tmp, 's.bin'), Buffer.from(st.buffer));
 		let out;
-		try { out = JSON.parse(execFileSync(tool, ['reachtest', path.join(tmp, 'l.bin'), path.join(tmp, 'r.bin'), path.join(tmp, 's.bin'), ...(GPU ? ['--gpu=1'] : [])], { encoding: 'utf8', maxBuffer: 1 << 27, timeout: 120000 }).trim().split('\n').pop()); } catch (e) { out = { error: e.message }; }
+		// (--gpu: the kernel cache, so the driver compiles a build's kernels once; no timeout: an eegpu process is never killed
+		// while a kernel may run, and the first load after a build compiles for minutes)
+		const args = ['reachtest', path.join(tmp, 'l.bin'), path.join(tmp, 'r.bin'), path.join(tmp, 's.bin'), ...(GPU ? ['--gpu=1', ...G.cacheArgs()] : [])];
+		try { out = JSON.parse(execFileSync(tool, args, { encoding: 'utf8', maxBuffer: 1 << 27, timeout: GPU ? 0 : 120000 }).trim().split('\n').pop()); } catch (e) { out = { error: e.message }; }
 		if (out.error) { check(`${name}: eegpu reachtest`, false, out.error); continue; }
 		let bad = 0, firstBad = null;
 		for (let i = 0; i < n; i++) {

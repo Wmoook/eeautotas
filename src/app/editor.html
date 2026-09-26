@@ -1526,8 +1526,11 @@ function renderSolve() {
 	const stale = SOLVE.sig && SOLVE.sig !== currentSig();
 	let h = '';
 	if (st.running) {
-		const el2 = st.elapsed || 0, pct = clamp(el2 / st.seconds * 100, 0, 100);
-		h += `<div class="sst"><span class="spin"></span><b>${st.stage === 'checking the physics' ? 'Checking the physics…' : 'Searching…'}</b> ${el2.toFixed(0)} s of ${st.seconds} s${st.guidePoints ? ' · along your guide line' : ''}</div>`;
+		// (the search's clock: from the GPU engine's start; the first search after an update waits for it to be prepared)
+		const el2 = st.searchElapsed !== undefined ? st.searchElapsed : st.elapsed || 0, pct = clamp(el2 / st.seconds * 100, 0, 100);
+		if (st.stage === 'checking the physics') h += `<div class="sst"><span class="spin"></span><b>Checking the physics…</b> ${(st.elapsed || 0).toFixed(0)} s (which places can still reach the trophy; the ${st.seconds} s of searching start after it)</div>`;
+		else if (st.preparing) h += `<div class="sst"><span class="spin"></span><b>Preparing the GPU engine for this graphics card…</b> ${(st.elapsed || 0).toFixed(0)} s (the first search after an update; later ones start at once). The ${st.seconds} s of searching start after it.</div>`;
+		else h += `<div class="sst"><span class="spin"></span><b>Searching…</b> ${el2.toFixed(0)} s of ${st.seconds} s${st.guidePoints ? ' · along your guide line' : ''}</div>`;
 		if (st.physics && st.physics.noWayUp) h += `<div class="sst">The physics check finds no way up to the trophy; "every move" checks it without the check.</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
@@ -1536,7 +1539,8 @@ function renderSolve() {
 			const refining = (q) => q.key === 'explore' && q.depthCap > 0 && (q.state === 'running' || q.state === 'starting');
 			const what = (q) => (refining(q) ? `${q.found ? `route ${esc(q.found.time)} · ` : ''}looking for a faster one: tick ${q.layer.toLocaleString('en-US')} of ${q.depthCap.toLocaleString('en-US')}`
 				: q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : q.depthCap > 0 ? 'no faster route' : 'no route')
-				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : q.cpu ? `${q.layer.toLocaleString('en-US')} ticks deep` : `tick ${q.layer.toLocaleString('en-US')}`);
+				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? (q.preparing ? 'preparing the GPU engine for this graphics card… (first search after an update)' : 'starting…')
+				: q.cpu ? `${q.layer.toLocaleString('en-US')} ticks deep` : `tick ${q.layer.toLocaleString('en-US')}`);
 			// (the CPU search: its threads, situations, how near; it goes on after a route, looking for a faster one)
 			const more = (q) => (q.key === 'explore' || q.cpu ? ((q.state === 'running' || q.live) && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
 			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;

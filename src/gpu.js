@@ -116,6 +116,21 @@ function nativeTool() {
 }
 
 /**
+ * The folder where the GPU engine keeps its kernels compiled for this graphics card: <data>/gpu-cache (EEAT_GPU_CACHE
+ * overrides it). eegpu --cachedir moves the NVIDIA driver's compile cache there and compiles each build's kernels once,
+ * however many eegpu processes start together (native/cudadrv.h loadModuleCached); the first start after an update
+ * compiles for a minute or two, later ones load in a fraction of a second.
+ */
+function cacheDir() {
+	return process.env.EEAT_GPU_CACHE ? path.resolve(process.env.EEAT_GPU_CACHE) : path.join(require('./common.js').DATA, 'gpu-cache');
+}
+/** eegpu's arguments for the cache folder (every GPU command takes them; none when the folder cannot be made) */
+function cacheArgs() {
+	const d = cacheDir();
+	try { fs.mkdirSync(d, { recursive: true }); return [`--cachedir=${d}`]; } catch (e) { return []; }
+}
+
+/**
  * Why the GPU engine cannot run this level (null = it can). The native engine's integer shortcuts for double tests
  * (native/eecore.h "exact integer forms") assume no NaN can occur: that holds when the gravity multiplier is finite
  * and not huge (every other number comes from finite tables); the state must also fit the kernels' largest tail.
@@ -161,7 +176,9 @@ function runBench() {
 		const f = path.join(C.DATA, '_gpu_arena.bin');
 		fs.mkdirSync(C.DATA, { recursive: true });
 		fs.writeFileSync(f, levelBlob(L));
-		require('child_process').execFile(tool, ['bench', f, '--seconds=3'], { encoding: 'utf8', timeout: 300000, windowsHide: true }, (err, out) => {
+		// (the first run after an update compiles the kernels into the cache folder: the searches after it start at once;
+		// 24 ticks per thread per launch: short launches on a throttled laptop GPU)
+		require('child_process').execFile(tool, ['bench', f, '--seconds=3', '--ticks=24', ...cacheArgs()], { encoding: 'utf8', timeout: 600000, windowsHide: true }, (err, out) => {
 			let r;
 			try { r = JSON.parse(String(out).trim().split('\n').pop()); } catch (e) { r = { gpu: null, why: err ? err.message : 'the GPU benchmark failed' }; }
 			r.key = toolKey(tool);
@@ -178,4 +195,4 @@ function describeBench(r) {
 	return `${r.gpu.name}: ${(r.ticksPerSec / 1e6).toFixed(0)} M ticks/s (measured)`;
 }
 
-module.exports = { levelBlob, nativeTool, unsupported, cachedBench, runBench, describeBench, BLOB_INTS, BLOB_ARRAYS };
+module.exports = { levelBlob, nativeTool, cacheDir, cacheArgs, unsupported, cachedBench, runBench, describeBench, BLOB_INTS, BLOB_ARRAYS };
