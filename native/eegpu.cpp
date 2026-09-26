@@ -5,6 +5,8 @@
 //                                                            both with "reach":3 (the reach file version it reads: src/reach.js RCH3)
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 //   eegpu reachtest <level.bin> <reach> <states.bin> [--gpu=1]  the reach lookup of a list of states (test/reach.js F)
+//   eegpu prove <level.bin> [--reach=<file>] [--seconds=30] [--maxCells=N]   a sound "no route" proof (prove.h; CPU only:
+//                                                            it never loads the NVIDIA driver)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
 // Every GPU command takes --launch-ms=N (default 50): the target time of one kernel launch (launch.h: the work is
 // split into launches sized from the measured speed, so none nears the driver's 2 s watchdog even on a throttled
@@ -923,6 +925,7 @@ static int cmdBench(int argc, char** argv) {
 
 #include "beamhost.h"
 #include "explorehost.h"
+#include "prove.h"
 
 // ------------------------------------------------------------------ twins: the exactness check of the twin rule (CPU)
 /** equal states: every byte, except the fields the next tick overwrites before it reads them (Sim::inUsed) */
@@ -1177,8 +1180,9 @@ static int cmdReachTest(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|twins|reachtest ...\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|twins|reachtest|prove ...\n"); return 2; }
 	std::string cmd = argv[1];
+	if (cmd == "prove") return cmdProve(argc, argv);   // (CPU only: before anything that may touch the driver)
 	gCacheDir = opt(argc, argv, "cachedir", "");
 	if (gCacheDir == "1") gCacheDir.clear();   // (a bare --cachedir names no folder)
 	if (!gCacheDir.empty()) cu::useJitCache(gCacheDir);   // (before the driver loads)

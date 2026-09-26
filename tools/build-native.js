@@ -1,8 +1,11 @@
 'use strict';
 // Builds the native engine and its GPU kernels: native/build/eegpu.exe (zig c++) and native/build/eegpu.ptx (NVRTC).
 //   node tools/build-native.js            (the first run downloads zig and NVIDIA's NVRTC into tools/.cache, ~290 MB)
+//   node tools/build-native.js --exe      (eegpu.exe only, one compile: its CPU commands, e.g. `eegpu prove`, need no
+//                                          kernels; the GPU commands of such a build fail at their kernel load)
 // The exe loads the NVIDIA driver at run time (no CUDA toolkit needed to run it); the PTX is compiled by the driver
-// for the GPU it runs on. Both are needed only by the GPU mode; everything else is plain Node.
+// for the GPU it runs on. Both are needed only by the GPU mode (and Find a route's proof, eegpu prove: the exe alone);
+// everything else is plain Node.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -33,8 +36,9 @@ function fetchTool(name) {
 
 async function main() {
 	if (process.platform !== 'win32') throw new Error('the native build targets Windows');
+	const exeOnly = process.argv.includes('--exe');
 	const zig = path.join(fetchTool('zig'), 'zig.exe');
-	const nvrtc = path.join(fetchTool('nvrtc'), 'bin');
+	const nvrtc = exeOnly ? '' : path.join(fetchTool('nvrtc'), 'bin');
 	fs.mkdirSync(OUT, { recursive: true });
 	const exe = path.join(OUT, 'eegpu.exe');
 	console.log('[native] compiling eegpu.exe...');
@@ -43,6 +47,7 @@ async function main() {
 		'-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-nullability-completeness', path.join(NATIVE, 'eegpu.cpp'), '-o', exe],
 		{ stdio: ['ignore', 'inherit', 'inherit'] });
 	for (const f of fs.readdirSync(OUT)) if (f.endsWith('.pdb') || f.endsWith('.lib')) fs.rmSync(path.join(OUT, f), { force: true });
+	if (exeOnly) { console.log(`[native] done: ${path.relative(ROOT, exe)} (no GPU kernels: --exe)`); return; }
 	// one PTX file per state-tail capacity (the exe loads only the one a level needs), compiled in parallel. Sim::tick
 	// stays inlined in every kernel: the out-of-line build (eegpu ptx --def=EE_TICK_NOINLINE) is 1.66 MB of PTX instead of
 	// 7.77 MB, 25 s of NVRTC instead of 198 s and 148 s of first driver compile instead of 229 s (a busy i7-11800H), but
