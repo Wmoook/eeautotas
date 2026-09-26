@@ -119,13 +119,18 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   jumps), where nearly identical situations count once. It does not need to know any trick: arrow ground jumps, block
   clips and gaps entered at exactly the right pixel come out of the physics, and it goes away from the trophy as
   readily as towards it (a run-up, a block to jump from, the long way round). Its first finish is the fastest route it
-  can see. If its memory fills up (big levels) it starts again with coarser situations, and if it runs out of
-  situations without a finish, with finer ones. Next to it, **straight for the trophy** keeps the tens of thousands of
+  can see. It works in passes. The first one tells positions apart only to a few pixels (speeds as finely as ever), so
+  it gets far soon. A pass that fills its memory (big levels) or uses up its share of the time (a third of what is left,
+  at least 20 s) makes way for a coarser one, and one that runs out of situations without a finish for a finer one.
+  Once there is a route, it keeps going with finer passes that only look for faster ones (each stops a tick short of
+  the best route so far), until the time is up or the finest pass is done: the route shown gets faster while the
+  search runs, and **Stop** keeps the best one. Next to it, **straight for the trophy** keeps the tens of thousands of
   attempts closest to the trophy every tick, which reaches further on big levels. "Closest" is measured with the
   physics: rising needs a jump from a floor (about 4 tiles), dots (about 1), arrows, liquids or a boost, and the way
   through portals counts, so a spot under an unreachable trophy is not close, and whatever cannot reach the trophy at all
-  is not searched. The search is deterministic: the same level gives the same route every time. The route is replayed in the
-  app's exact physics before it is shown, drawn on the map (**Preview here** plays it), and you can **Watch** it in
+  is not searched. Each pass is deterministic (the same level gives the same situations); which passes run depends on
+  how fast the GPU gets through them. The route is replayed in the app's exact physics before it is shown, drawn on
+  the map (**Preview here** plays it), and you can **Watch** it in
   the run viewer, **Optimize this route** (it becomes a run in your list and the optimizer starts on it), or download
   the `.eetas` and the `.eelvl` it was found on (in eeo-tas: open the level, then `/loadtas`, `/reset`, `/playtas`).
 - **Guide line** (optional): with the Guide tool, drag where you think the ball should go (**Shift+drag** adds a
@@ -136,7 +141,9 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
 - Before a search the editor checks the level: a start, a trophy, and an open way between them (a walled-in trophy is
   refused at once). Without a Start block the ball starts at the top-left, as in EE. If no route is found in time, it says so; try a longer search, more states per tick, or a guide
   line. When "every move" runs out of new situations without reaching the trophy, it says the trophy **looks impossible**
-  (and how finely it told situations apart). Searches can run up to 3 hours. Either way it shows the **closest attempt** (orange on the map): the one that got nearest the trophy, measured
+  (and how finely it told situations apart): strong evidence, not proof, and only from a pass at the normal grain or
+  finer that kept every situation of every tick (a coarse pass, or one that had to leave situations out, proves
+  nothing). Only the physics check (no way up at all) says a trophy **cannot be reached**. Searches can run up to 3 hours. Either way it shows the **closest attempt** (orange on the map): the one that got nearest the trophy, measured
   along the ways the ball could walk (around walls, never through spikes or other deadly blocks). **Preview here**
   plays it; you can download its `.eetas` too, even when you stop the search early.
 - The level is saved in your browser as you edit. **Export .eelvl** saves a file EE Offline opens; **Import .eelvl**
