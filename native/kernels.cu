@@ -461,7 +461,11 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		// precise ones a clip or a one-block gap needs, so they never share a cell with a near miss)
 		const u32 snapped = (floor(s.px) == s.px ? 1u : 0u) | (floor(s.py) == s.py ? 2u : 0u) | (eq0(s.speed_x) ? 4u : 0u) | (eq0(s.speed_y) ? 8u : 0u);
 		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26) | (snapped << 27);
-		u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
+		// near-miss refinement: a situation the earlier tries' near misses passed through gets cells rfx / rfv times finer
+		// (bit 31 of small keeps them apart from the plain cells)
+		const bool fine = p.refKeys && refineHit(p.refKeys, p.refMask, exploreSituation(s.py, s.speed_y, s.on_ground != 0, s.jump_count, cx));
+		u64 key = fine ? exploreCell(s.px, s.py, s.speed_x, s.speed_y, small | 0x80000000u, false, p.qy, p.qvy, p.cqx * p.rfx, p.cqv * p.rfv)
+			: exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
 		u64 disc = 0;
 		if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
 		if (lane) key = splitmix(key ^ (0xd6e8feb86659fd93ull * (u64)lane));   // (--lanes: a lane's own cells)
@@ -552,6 +556,22 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	sim.tick(in);
 	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
 	if (p.lanes) p.lanesNext[i] = p.lanes[pk >> 5];   // (--lanes: the child stays in its parent's lane)
+	if (p.nearTile) {
+		// the near-miss record (--refine): how near this state's box centre comes to each neighbour tile's centre, as
+		// (squared distance x 512, 20 bits) << 44 | layer << 21 | index in the layer (the cap is at most 2^21 states)
+		const double cxp = s.px + 8.0, cyp = s.py + 8.0;
+		const i32 tx = truncI(cxp) >> 4, ty = truncI(cyp) >> 4;
+		if (tx >= 0 && ty >= 0 && tx < p.L.W && ty < p.L.H && i < (1 << 21) && p.layer >= 0 && p.layer < (1 << 23)) {
+			const size_t t = (size_t)ty * p.L.W + tx;
+			p.tileSeen[t] = 1;
+			for (i32 k = 0; k < 8; k++) {
+				const double ex = (tx + EE_NB_X(k)) * 16 + 8 - cxp, ey = (ty + EE_NB_Y(k)) * 16 + 8 - cyp;
+				const double q = (ex * ex + ey * ey) * 512.0;
+				const unsigned long long v = ((unsigned long long)(q < 1048575.0 ? (u64)q : 1048575ull) << 44) | ((u64)(u32)p.layer << 21) | (u64)(u32)i;
+				if (v < p.nearTile[t * 8 + k]) atomicMin(&p.nearTile[t * 8 + k], v);
+			}
+		}
+	}
 }
 
 #define INSTANCE(TW) INSTANCE_(TW)

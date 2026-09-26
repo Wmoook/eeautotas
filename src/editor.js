@@ -356,7 +356,7 @@ function check(buf) {
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
-		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []),
+		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []), ...(q.refine ? ['--refine=1'] : []),
 		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
@@ -385,6 +385,18 @@ function cpuWorkers(want) {
 // floor or ceiling hit leaves) never shares a cell with a near miss, and which state stands for a cell is fixed (the
 // nearest to the trophy by the reach field, then the state itself): a pass on the same level gives the same states.
 const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
+// The probe: "every move" first runs the finest pass (its salt loop, with near-miss refinement) and gives it PROBE_S s of
+// search time (from its ready event) for its first try. A try that runs through in that time (a route, or every
+// situation tried) says the finest cells are cheap here: the pass keeps the whole time (the beams yield to its tries as
+// usual). A try still going (or a full table) says they are not: the probe is stopped between two launches and the ladder
+// runs from PASS_START as if it had not been. The user's 50x50 levels: a try takes 0.4-0.5 s alone on the laptop GPU, the
+// ladder's coarse passes took 33 s there next to the beams and the CPU search (route after 59.7 s, the finest pass after
+// 58 s); staircase / dotstairs: the finest pass explodes (60M+ states), the ladder solves them.
+const PROBE_S = 15;   // (the beams run beside it: a beam next to the probe's first try made an 8 s probe miss on the throttled GPU)
+// A beam still getting nearer the trophy (its own closest attempt better within BEAM_PROGRESS_MS) keeps running when every
+// move's tries want the GPU (yieldBeams): on a 50x50 level with a 477-tick route the beam was about to reach the trophy
+// when it gave way, and every move then took far longer.
+const BEAM_PROGRESS_MS = 15000;
 // the salt tries (the finest pass, and any pass's salt reruns) run up to LANES salts side by side in one eegpu process
 // (explore --lanes=auto: lane k = salt + k, cells of its own; the tool starts with --lanesStart (the last run's lanes,
 // 1 at first) and doubles them while that raises the tries per second by 10% or more, halves them when a batch fills
@@ -392,6 +404,13 @@ const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
 // a try of the finest pass on user30s keeps the GPU ~65% busy with one lane; fixed 4 or more lanes were no faster there
 // and filled the table on the shaft level, so the tool picks the count by what it measures.
 const LANES = 8;
+// near-miss refinement (explore --refine=1, on by default; start option refine: false = off): after a salt try runs out of
+// situations, the tool takes the states that came nearest to the tiles no state entered next to reached ones, and the
+// later tries tell situations on those states' paths apart 4x finer in x and in x speed. A pixel-exact route shares its
+// floors and jump arcs with those near misses. user30s (the user's 50x50 shaft level, a 263-tick route through a one-tile
+// pocket): the route 2.9 s after the tool's start, in the first refined try, where 17 salt tries in 90 s found none; the
+// 40x25 shaft level: 2.5 s (before: the 17th salt). Side by side lanes made a refined try slower (5.5 s on user30s:
+// both lanes refined), so with refinement the tries run one at a time.
 /** the exploration's cells in pass p: px x cqx, vx x cqv to whole numbers; py x qy, vy x qvy likewise (0 = exact) */
 function passCells(p) {
 	const v = 2 ** Math.max(0, p);   // (the speed cells: pass 0's in the coarser passes)
@@ -543,9 +562,11 @@ function start(b, gpu, test) {
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
-			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
+			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
+			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes },
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes,
+		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
 	if (S.cpuOnly) note(S.cpuOnly);
 	save();
@@ -689,9 +710,11 @@ function launch(n) {
 	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0) };
 	// the salt tries run several salts side by side (--lanes=auto: from V.lanes, the last run's; the tool doubles them
 	// while that raises the tries per second, up to cur.opts.lanes, and halves them when a batch fills the table)
-	if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
+	// (with near-miss refinement one at a time: see LANES)
+	if (q.salts && cur.opts.refine) q.refine = true;
+	else if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
 	if (V.key === 'explore') {
-		q.seconds = V.share = passSeconds(V.pass, V.ends, left);
+		q.seconds = V.share = V.probe === 'running' || V.probe === 'passed' ? left : passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
 		q.depth = V.depthCap = S.result ? Math.max(1, S.result.ticks - 1) : 0;
 	}
@@ -737,6 +760,11 @@ function launch(n) {
 			S.searchStarted = now;
 			S.prepSec = (now - S.started) / 1000;
 		}
+		// the probe (see PROBE_S): its first try must run through within PROBE_S s of search time
+		if (V.probe === 'running' && !ch.probeTimer) {
+			ch.probeTimer = setTimeout(() => { if (V.probe === 'running' && mine() && alive(ch)) halt(ch, 'probe'); }, cur.opts.probeS * 1000);
+			if (ch.probeTimer.unref) ch.probeTimer.unref();
+		}
 		if (V.prepSec >= 5) {
 			// (module: "compiled" = this process compiled the kernels for the card; "cache" after a wait = another one did)
 			const how = !ev || !Number.isFinite(ev.loadMs) ? '' : ev.module === 'compiled' ? ` (compiling the kernels for this graphics card: ${(ev.loadMs / 1000).toFixed(0)} s)`
@@ -770,6 +798,12 @@ function launch(n) {
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			// (the CPU search goes on looking for faster routes)
 			found(ev.inputs, n, cpu);
+		} else if (ev.ev === 'try' && V.probe === 'running' && (ev.end === 'exhausted' || ev.end === 'depth')) {
+			// the probe passed: the finest cells run through here; the pass goes on with the whole time
+			V.probe = 'passed';
+			if (ch.probeTimer) clearTimeout(ch.probeTimer);
+			note(`${V.label}: the finest cells ran through in ${usedSec(V).toFixed(1)} s (every situation tried at tick ${ev.layers}): trying them first`);
+			onEvent(Object.assign({}, ev, { probeSeen: true }));
 		} else if (ev.ev === 'try') {
 			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
 			// (a batch of --lanes salts side by side: one event for its ev.lanes tries)
@@ -780,6 +814,10 @@ function launch(n) {
 			}
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
 			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
+		} else if (ev.ev === 'refine') {
+			// the try before ran out of situations: the next ones tell the situations along its near misses apart 4x finer
+			V.refine = { tiles: ev.frontierTiles, nearMisses: ev.nearMisses, situations: ev.situations };
+			if (ev.new > 0) note(`${V.label}: ${ev.frontierTiles} tile${ev.frontierTiles === 1 ? '' : 's'} next to reached ones not entered: the next try looks 4x finer along the ${ev.nearMisses} nearest attempts (${ev.situations} situations)`);
 		} else if (ev.ev === 'lanes') {
 			// the tool changed how many salts it tries side by side: a batch filled the cell table (it runs them again with
 			// fewer), or (--lanes=auto) the tries per second said so; the next run starts with that many
@@ -838,6 +876,21 @@ function launch(n) {
 		}
 		if (!cpu && V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) gpuFailed(n);
 		if (V.key === 'explore') {
+			// the probe (PROBE_S) ended before its first try ran through: too many situations at the finest cells here (its
+			// time, or a full table): the ladder from PASS_START, as if the probe had not been. A route: it passed.
+			if (ch.probeTimer) clearTimeout(ch.probeTimer);
+			if (V.probe === 'running') {
+				const h = ch.stopWhy || (code === 0 && !V.error ? end : '');
+				if ((h === 'probe' || h === 'full') && !V.error && S.running && !S.halted && S.stage !== 'stopped' && S.seconds - usedSec(V) > 2) {
+					V.probe = 'slow';
+					note(`${V.label}: the finest cells are too many here (${h === 'full' ? 'the table filled' : `no try through in ${cur.opts.probeS} s`}); from coarse cells up`);
+					Object.assign(V, { pass: PASS_START, passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '', salt: 0, saltNoted: 0 });
+					kids[n] = launch(n);
+					save();
+					return;
+				}
+				V.probe = h === 'finish' ? 'passed' : 'ended';
+			}
 			// how this pass ended: why the editor stopped it, else the tool's own verdict
 			const how = ch.stopWhy || (code === 0 && !V.error ? end : '');
 			if (how) V.ends[V.pass] = { how, seconds: V.share, layer: V.layer };
@@ -902,7 +955,7 @@ function launch(n) {
 /**
  * "every move" (strategy n) tried every situation at a fine grain with nothing cut and found no route: the GPU beams (a
  * subset of those situations, exact) give way, so its tries with other salts get the whole GPU (a beam beside them made
- * them about 3x slower on the shaft level).
+ * them about 3x slower on the shaft level). A beam still getting nearer the trophy keeps running (BEAM_PROGRESS_MS).
  */
 function yieldBeams(n) {
 	if (S.result) return;
@@ -910,6 +963,7 @@ function yieldBeams(n) {
 		const Q = S.strategies[k];
 		// (a beam already told to stop is still alive until its process exits: noted once)
 		if (k === n || !alive(kids[k]) || kids[k].stopWhy || (Q.key !== 'goal' && Q.key !== 'guide')) continue;
+		if (Q.bestAt && Date.now() - Q.bestAt < BEAM_PROGRESS_MS) continue;   // (still getting nearer the trophy: asked again at the next try)
 		Q.state = 'stopped'; Q.detail = 'gave the GPU to every move\'s tries';
 		halt(kids[k], 'stopped');
 		note(`${Q.label}: stopped (every move tried every situation; its tries with other states get the GPU)`);
@@ -1044,6 +1098,9 @@ function found(inputs, n, more) {
 function closer(ev, n) {
 	if (!cur) return;
 	const dist = +ev.dist, old = S.closest;
+	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams)
+	const Vn = S.strategies[n];
+	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) { Vn.best = dist; Vn.bestAt = Date.now(); }
 	if (!Number.isFinite(dist) || dist >= 2e4) return;
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) return;

@@ -390,6 +390,8 @@ const go = () => {
 	const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; if (run.lanes) d.lanes = run.lanes; if (run.lastSalt !== undefined) d.salt = run.lastSalt; say(d); };
 	setTimeout(() => {
 		if (run.lanes) say({ ev: 'lanes', lanes: run.lanes, from: +opt('lanes') || 1, why: 'full', layers: run.layers });   // (--lanes: its batch filled the table)
+		if (run.refine) say(Object.assign({ ev: 'refine' }, run.refine));   // (--refine: this try ran out, the next is refined)
+		if (run.try) say(Object.assign({ ev: 'try' }, run.try));   // (--salts: a try ran through)
 		say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
 		if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
 		const ticks = run.idle + SC.R;
@@ -433,18 +435,21 @@ async function passesSection() {
 	const fake = path.join(HOME, 'fake-eegpu.js');
 	fs.writeFileSync(fake, FAKE);
 	let nSc = 0;
-	const drive = async (runs, beam, during, salts, ready) => {
+	const drive = async (runs, beam, during, salts, ready, body) => {
 		const sc = path.join(HOME, `ladder-${++nSc}.json`), log = path.join(HOME, `ladder-${nSc}.log`);
 		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null, ready: ready || 0 }));
-		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc], cpu: false, salts: !!salts });
+		const { _test, ...b2 } = body || {};   // (_test: more of start()'s test options, e.g. the probe)
+		ED.start(Object.assign({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, b2), { available: true }, Object.assign({ tool: [process.execPath, fake, sc], cpu: false, salts: !!salts }, _test || {}));
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && Date.now() - t0 < 45000) { if (during) during(st); await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
 		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((r) => setTimeout(r, 40)); }
-		const launches = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore')
+		const raw = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+		const kinds = raw.map((a) => (a[0] === 'explore' ? `explore ${Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5))}` : a[0]));
+		const launches = raw.filter((a) => a[0] === 'explore')
 			.map((a) => { const o = {}; for (const x of a) { const m = /^--(\w+)=(.*)$/.exec(x); if (m) o[m[1]] = m[2]; } return o; });
 		const X = st.strategies.find((q) => q.key === 'explore');
-		return { st, X, launches, text: `${st.stage}; passes ${launches.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${launches.map((o) => o.depth).join(', ')}; ` +
+		return { st, X, launches, kinds, text: `${st.stage}; passes ${launches.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${launches.map((o) => o.depth).join(', ')}; ` +
 			`seconds ${launches.map((o) => o.seconds).join(', ')}${st.result ? `; route ${st.result.ticks} ticks (${st.result.strategy})` : ''}; ${st.message || ''}` };
 	};
 	const cellsOf = (o) => `${o.cqx}|${o.cqv}|${o.qy}|${o.qvy}`;
@@ -494,7 +499,7 @@ async function passesSection() {
 	let got = false;
 	r = await drive({ '-1': [{ end: 'exhausted', layers: 20, overflow: 0 }], 0: [{ end: 'exhausted', layers: 30, overflow: 0 }], 1: [{ end: 'exhausted', layers: 40, overflow: 0 }],
 		2: [{ end: 'exhausted', layers: 50, overflow: 0 }, { end: 'exhausted', layers: 52, overflow: 0, lanes: 4, lastSalt: 9 }, { end: 'finish', idle: 3, layers: 3 }] }, null,
-		(st) => { if (st.result && !got) { got = true; ED.stop(); } }, true);
+		(st) => { if (st.result && !got) { got = true; ED.stop(); } }, true, 0, { refine: false });
 	L = r.launches;
 	const NL = String(ED.LANES);
 	check(`the finest pass ran out of situations: the same pass again with other states standing for merged cells, several salts side by side (--lanes=auto --lanesMax=${NL}; ` +
@@ -504,6 +509,35 @@ async function passesSection() {
 		L[3].salt === undefined && L[3].lanesStart === '1' && L[4].salt === '1' && L[4].lanesStart === '1' && L[5].salt === '10' && L[5].lanesStart === '4' &&
 		r.st.log.some((s) => /tries side by side filled the table/.test(s)),
 		`${r.text}; salts ${L.map((o) => o.salt || 0).join(', ')}; lanes ${L.map((o) => `${o.lanes || 1}/${o.lanesStart || '-'}`).join(', ')}`);
+	// near-miss refinement (on by default): the finest pass's salt tries run with --refine=1, one at a time (no lanes), and
+	// the tool's refine event (the try before ran out) is noted in the log
+	got = false;
+	r = await drive({ '-1': [{ end: 'exhausted', layers: 20, overflow: 0 }], 0: [{ end: 'exhausted', layers: 30, overflow: 0 }], 1: [{ end: 'exhausted', layers: 40, overflow: 0 }],
+		2: [{ end: 'exhausted', layers: 50, overflow: 0, refine: { frontierTiles: 19, nearMisses: 46, situations: 422, new: 422 } }, { end: 'finish', idle: 3, layers: 3 }] }, null,
+		(st) => { if (st.result && !got) { got = true; ED.stop(); } }, true);
+	L = r.launches;
+	check('near-miss refinement: the salt tries of the finest pass run with --refine=1 and no lanes; the refine event is noted',
+		r.st.stage === 'found' && L.slice(0, 3).every((o) => o.refine === undefined) && L.slice(3).length >= 1 && L.slice(3).every((o) => o.refine === '1' && o.lanes === undefined) &&
+		r.st.log.some((x) => /19 tiles next to reached ones not entered: the next try looks 4x finer along the 46 nearest attempts \(422 situations\)/.test(x)),
+		`${r.text}; refine ${L.map((o) => o.refine || '-').join(', ')}; lanes ${L.map((o) => o.lanes || '-').join(', ')}`);
+	// the probe: "every move" starts with the finest pass; its first try runs through within the probe time (a try event):
+	// it keeps the finest pass (the salt loop), no coarse pass runs
+	got = false;
+	r = await drive({ 2: [{ end: 'exhausted', layers: 50, overflow: 0, try: { salt: 0, end: 'exhausted', layers: 50, overflow: 0, states: 1000 }, hold: 200, lastSalt: 0 },
+		{ end: 'finish', idle: 3, layers: 3 }] }, null, (st) => { if (st.result && !got) { got = true; ED.stop(); } }, true, 0, { _test: { probe: true, probeS: 5 } });
+	L = r.launches;
+	check('the probe: the finest pass first; its first try ran through in time, so it keeps the finest cells (the salt loop) and no coarse pass runs',
+		r.st.stage === 'found' && L.length >= 2 && L.every((o) => Math.round(Math.log2(o.cqx / 0.5)) === 2) && r.st.log.some((x) => /the finest cells ran through in [\d.]+ s/.test(x)),
+		`${r.text}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}`);
+	// the probe's first try does not run through in time: it is stopped and the ladder runs from the coarse end
+	got = false;
+	r = await drive({ 2: [{ end: 'time', layers: 5000, wait: 6000, hold: 6000 }], '-1': [{ end: 'finish', idle: 20, layers: 3 }] }, null,
+		(st) => { if (st.result && !got) { got = true; ED.stop(); } }, true, 0, { _test: { probe: true, probeS: 1 } });
+	L = r.launches;
+	check('the probe: a first try still going after the probe time is stopped; the ladder then starts at the coarse end (pass -1) and finds the route',
+		r.st.stage === 'found' && L.length >= 2 && Math.round(Math.log2(L[0].cqx / 0.5)) === 2 && Math.round(Math.log2(L[1].cqx / 0.5)) === -1 &&
+		r.st.log.some((x) => /the finest cells are too many here \(no try through in 1 s\); from coarse cells up/.test(x)),
+		`${r.text}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}`);
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {

@@ -52,7 +52,32 @@ struct ExploreParams {
 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
 	i32 prune;
 	unsigned long long* stats;         // [0] ticks simulated, [1] children skipped as twins of a lower option (search.h canonOption)
+	// near-miss refinement (explorehost.h --refine=1): the situations (exploreSituation) in which cells are rfx x finer in
+	// px and rfv x finer in vx (an open-addressing set, 0 = empty; null = off)
+	const u64* refKeys; u32 refMask; double rfx, rfv;
+	// the near-miss record (null = off): per tile and direction k (EE_NB_X / EE_NB_Y), the minimum of (the squared distance
+	// from a state's box centre to the centre of that neighbour tile x 512, 20 bits << 44 | layer << 21 | index in the
+	// layer) over this try's states (kernels.cu exploreMaterialize); tileSeen: the tiles a box centre was in
+	unsigned long long* nearTile; u8* tileSeen;
 };
+
+/** A situation: everything of a state's cell but its x position and speed (exact height and vertical speed, on the
+ *  ground, jumps, the centre's tile column). The near-miss refinement refines every cell of a situation it lists. */
+EE_HD u64 exploreSituation(double py, double vy, bool onGround, i32 jumpCount, i32 tileX) {
+	return splitmix(doubleToBits(py + 0) ^ splitmix(doubleToBits(vy + 0) ^ ((u64)(onGround ? 1 : 0) << 40) ^ ((u64)(u32)(jumpCount & 7) << 44) ^ ((u64)(u32)tileX << 48))) | 1ull;
+}
+EE_HD bool refineHit(const u64* keys, u32 mask, u64 k) {
+	u32 s = (u32)(k >> 20) & mask;
+	for (int i = 0; i < 64; i++) {
+		const u64 v = keys[s];
+		if (v == k) return true;
+		if (v == 0) return false;
+		s = (s + 1) & mask;
+	}
+	return false;
+}
+#define EE_NB_X(k) ((k) == 0 || (k) == 3 || (k) == 5 ? -1 : (k) == 1 || (k) == 6 ? 0 : 1)
+#define EE_NB_Y(k) ((k) < 3 ? -1 : (k) < 5 ? 0 : 1)
 
 /** The per-layer claim of the exploration (after exploreExpand wrote every child's cell and priority): a cell new in
  *  this layer goes to the child with the lowest priority, whatever order the GPU ran them in. The visited-cell table

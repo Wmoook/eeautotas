@@ -26,6 +26,7 @@
 // batch ("lanes": L, "salt": the batch's last), a hit's "salt" = its lane's; a batch that fills the cell table prints
 // {"ev":"lanes","lanes":L/2,...} and runs again with half the lanes; done: "lanes" = the last batch's.
 #pragma once
+#include <unordered_set>
 
 /** A radix select over a key (the claim's priority, or a candidate index): the key of the winner of rank k (0-based,
  *  lowest first). hist = the histogram of the key's `bits` bits at `shift` (the higher ones are 0); count(hi, shift,
@@ -260,6 +261,33 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.pick = (const u32*)(uintptr_t)dpick.p;
 	P.candKey = (u64*)(uintptr_t)dck.p; P.candPrio = (u64*)(uintptr_t)dcp.p;
 	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
+	// --refine=1 (with --finish and --salts): near-miss refinement. Each try records, per tile and direction, the state
+	// that came nearest to the neighbour tile's centre (exploreMaterialize); a try that ends without a finish hands its
+	// near misses to the next one: for every tile no state reached that the reach field does not rule out, next to one
+	// that was reached, the nearest state from each reached neighbour; every situation (exploreSituation: the exact
+	// height and vertical speed, ground, jumps, the centre's column) on those states' input histories gets cells --rfx
+	// times finer in px and --rfv times finer in vx (default 4) in the later tries (the set grows try by try). A
+	// pixel-exact route shares its situations with the merged graph's near misses (the same floors, the same jump arcs),
+	// so it is sampled finely where it needs to be. {"ev":"refine",...} after each such try.
+	const bool refine = finishTarget && opt(argc, argv, "refine", "0") == "1";
+	P.rfx = atof(opt(argc, argv, "rfx", "4").c_str()); P.rfv = atof(opt(argc, argv, "rfv", "4").c_str());
+	P.refKeys = nullptr; P.refMask = 0; P.nearTile = nullptr; P.tileSeen = nullptr;
+	cu::Buf dnear, dseen, drk;
+	std::unordered_set<uint64_t> refSet;
+	if (refine) {
+		if (!dnear.alloc(8ull * 8 * (size_t)L.N) || !dseen.alloc((size_t)L.N)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		lk::memset8(dnear.p, 0xff, 8ull * 8 * (size_t)L.N, "memset");
+		lk::memset8(dseen.p, 0, (size_t)L.N, "memset");
+		P.nearTile = (unsigned long long*)(uintptr_t)dnear.p; P.tileSeen = (u8*)(uintptr_t)dseen.p;
+	}
+	// (the frontier's tiles: one the reach field rules out for a ball at rest, rising or falling there is left out)
+	auto tileReachable = [&](int tx, int ty) {
+		if (!reachGpu.H.on) return true;
+		const int id = L.fg[ty * L.W + tx];
+		for (const double vy : { -6.7, -3.0, 0.0, 3.0, 8.0 })
+			if (reachFifths(reachGpu.H, tx * 16.0, ty * 16.0, vy, id, id, 0.0) >= 0) return true;
+		return false;
+	};
 	g.ready(tStart);   // (the kernels and the tables are on the GPU: --seconds counts from here)
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
@@ -481,6 +509,60 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		fflush(stdout);
 		// the next salts, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
 		nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
+		if (refine && !shrink) {
+			// this try's near misses: their input histories' situations are refined from now on
+			std::vector<unsigned long long> nt(8 * (size_t)L.N);
+			std::vector<uint8_t> seen((size_t)L.N);
+			cu::cuMemcpyDtoH_v2(nt.data(), dnear.p, 8 * nt.size());
+			cu::cuMemcpyDtoH_v2(seen.data(), dseen.p, seen.size());
+			std::unordered_set<std::string> lines;
+			int frontier = 0;
+			for (int ty = 0; ty < L.H; ty++) for (int tx = 0; tx < L.W; tx++) {
+				const int f = ty * L.W + tx;
+				if (seen[f] || !tileReachable(tx, ty)) continue;
+				bool any = false;
+				for (int k = 0; k < 8; k++) {
+					const int nx = tx - EE_NB_X(k), ny = ty - EE_NB_Y(k);   // (the neighbour whose direction k points at f)
+					if (nx < 0 || ny < 0 || nx >= L.W || ny >= L.H || !seen[ny * L.W + nx]) continue;
+					const unsigned long long v = nt[((size_t)ny * L.W + nx) * 8 + k];
+					if (v == ~0ull) continue;
+					const int layer = (int)((v >> 21) & ((1u << 23) - 1)), idx = (int)(v & ((1u << 21) - 1));
+					if (layer >= (int)lineage.size() || idx >= (int)lineage[layer].size()) continue;
+					const uint32_t pk = lineage[layer][idx];
+					lines.insert(inputsOf(layer, pk >> 5, (int)(pk & 31)));
+					any = true;
+				}
+				if (any) frontier++;
+			}
+			const size_t before = refSet.size();
+			S* st = (S*)malloc(SB);
+			for (const std::string& in : lines) {
+				memcpy(st, start, SB);
+				Sim<TW> vs(L, *st);
+				refSet.insert(exploreSituation(st->py, st->speed_y, st->on_ground != 0, st->jump_count, truncI(st->px + 8.0) >> 4));
+				for (char c : in) {
+					Input x = maskInput((c - '0') & 31);
+					vs.tick(x);
+					if (st->is_dead || st->broken) break;
+					refSet.insert(exploreSituation(st->py, st->speed_y, st->on_ground != 0, st->jump_count, truncI(st->px + 8.0) >> 4));
+				}
+			}
+			free(st);
+			if (refSet.size() > before) {
+				uint32_t rcap = 1024;
+				while (rcap < 2 * refSet.size()) rcap <<= 1;
+				std::vector<uint64_t> rk(rcap, 0);
+				for (uint64_t k : refSet) { uint32_t s = (uint32_t)(k >> 20) & (rcap - 1); while (rk[s]) s = (s + 1) & (rcap - 1); rk[s] = k; }
+				if (!drk.upload(rk.data(), 8 * rk.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+				P.refKeys = (const u64*)(uintptr_t)drk.p; P.refMask = rcap - 1;
+			}
+			printf("{\"ev\":\"refine\",\"frontierTiles\":%d,\"nearMisses\":%zu,\"situations\":%zu,\"new\":%zu,\"sec\":%.1f}\n", frontier, lines.size(), refSet.size(), refSet.size() - before, elapsed());
+			fflush(stdout);
+		}
+		if (refine) {
+			lk::memset8(dnear.p, 0xff, 8ull * 8 * (size_t)L.N, "memset");
+			lk::memset8(dseen.p, 0, (size_t)L.N, "memset");
+		}
 		if (shrink) { lanesFull = std::min(lanesFull, lanes); lanes = std::max(1, lanes / 2); if (bestL > lanes) bestL = lanes; }
 		else {
 			P.salt += lanes;
