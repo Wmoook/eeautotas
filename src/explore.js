@@ -321,7 +321,7 @@ function workerMain() {
 		const leadOf = (cid, t) => {
 			const f = fieldOf.get(cid);
 			if (f === undefined) return -1e9;
-			const c = Reach.costAt(f, sim.px, sim.py, sim.speed_y, !!sim.on_ground);
+			const c = Reach.costAt(f, sim);
 			return c < 0 ? -1e9 : (T0 - H.kappa * c) - t;
 		};
 		// the reference ticks in (from, T0] by tile (the tails' nearest reference state)
@@ -779,8 +779,7 @@ function fieldWorker() {
 	const f = Reach.reachField(E.loadLevel(d.levelData), { goals: d.goals, maxCost: d.maxCost });
 	// in shared memory: the explore workers all read the same arrays (workerData would copy every context's field into
 	// every worker: 20+ contexts x 3-5 MB x the workers on coin-counting levels)
-	const shared = (x) => { const s = new x.constructor(new SharedArrayBuffer(x.byteLength)); s.set(x); return s; };
-	parentPort.postMessage({ W: f.W, H: f.H, B: f.B, g: f.g, mode: f.mode, cls: shared(f.cls), own: shared(f.own), refresh: shared(f.refresh), cost: shared(f.cost) });
+	parentPort.postMessage(Reach.shareField(f));
 }
 
 if (isMainThread) main();

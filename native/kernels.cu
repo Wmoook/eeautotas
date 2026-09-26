@@ -4,7 +4,9 @@
 //     in segments that continue from the saved state)
 //   search_<TW>: one thread per candidate (start tick x variant), the exact-rejoin search of search.h
 //   twins_<TW>: the search's twin table (the systematic variants that play like a lower one, search.h twinBits)
-//   stateSize_<TW>: sizeof(State<TW>) on the device (the host checks that the layouts agree)
+//   stateSize_<TW>: the sizes of State<TW> and the kernels' parameter structs on the device (the host checks that the
+//   layouts agree), and the reach file version (3)
+//   reachTest_<TW>: reachFifths and reachScore (beam.h) for a list of states (test/reach.js F: the JS and the GPU agree)
 // <TW> = capacity of the state's variable tail in words (8, 32, 128, 512); the host picks the smallest that fits.
 #include "eecore.h"
 #include "search.h"
@@ -229,13 +231,20 @@ __device__ __forceinline__ void beamExpandParent(const BeamParams& p, const i32 
 				}
 			}
 			if (p.goalWeight > 0 || p.closest) {
-				// the distance to the trophy: the reach field (physics-aware) when loaded, else walking distance
-				const float gd = p.reach.on ? reachAt(p.reach, cx, cy, (float)s.speed_y, s.on_ground != 0) : goalScore(p, p.L, cx, cy);
-				if (p.goalWeight > 0) sc -= p.goalWeight * (gd < 0.f ? 1e4f : gd);   // cut off: behind everything else
-				if (gd >= 0.f) {
-					const u64 k = ((u64)orderedScore(gd) << 32) | ((u32)pi << 5) | (u32)o;
-					if (k < nearest) nearest = k;
+				// the distance to the trophy: the reach field (physics-aware, tiles) when loaded, else walking distance; a
+				// state the field cuts off scores 1e4 + its walking distance (behind everything else, still ordered, and
+				// the closest attempt falls back to it: there is always one to show)
+				const float walk = p.goalDist ? goalScore(p, p.L, cx, cy) : 1e6f;
+				float gd = walk, ck = walk;
+				if (p.reach.on) {
+					const RfPre pre = rfPre(p.reach, s.speed_y, s.q0, s.q1, s.slippery);
+					const i32 own = rfFifthsAt(p.reach, pre, s.px, s.py, s.speed_y);
+					gd = own >= 0 ? reachScore(p.reach, pre, s.px, s.py, s.speed_y, own) : 1e4f + walk;
+					ck = own >= 0 ? (float)own / 5.f : gd;
 				}
+				if (p.goalWeight > 0) sc -= p.goalWeight * gd;
+				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
+				if (k < nearest) nearest = k;
 			}
 			c.score = sc;
 			c.hash = sim.hash(p.nocoins != 0);
@@ -358,7 +367,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		State<TW> s = *par;
 		Sim<TW> sim(p.L, s);
 		const double startPy = s.py;
-		float rcq = 0.f;   // the reach-field distance (the priority's head)
+		u32 rcq = 0;   // the reach-field cost (the priority's head: fifths >> prioShift)
 		Input in = maskInput(option(o));
 		sim.tick(in);
 		nSim++;
@@ -367,13 +376,23 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		if (s.broken || s.is_dead) continue;
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
+		// the finish first: this tick took the trophy (the silver crown); report, do not expand (the crown comes from the
+		// tick-start tile, so the tick-end position may be anywhere, e.g. over a spike the physics model cuts off)
+		if (p.target == 3 && s.has_silver_crown && !par->has_silver_crown) {
+			const u32 h = atomicAdd(p.nHits, 1u);
+			if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
+			continue;
+		}
 		if (p.reach.on) {
-			const float rc = reachAt(p.reach, (float)s.px + 8.f, (float)s.py + 8.f, (float)s.speed_y, s.on_ground != 0);
-			// the physics model rules this state out: it cannot reach the trophy (unless this very tick took it: the
-			// crown comes from the tick-start tile, the field reads the tick-end position, e.g. falling onto a spike)
-			if (p.prune && rc < 0.f && !(s.has_silver_crown && !par->has_silver_crown)) continue;
-			rcq = rc < 0.f ? 4095.f : fminf(rc * 8.f, 4095.f);
-			if (p.closest && rc >= 0.f) { const u64 k = ((u64)orderedScore(rc) << 32) | ((u32)pi << 5) | (u32)o; if (k < nearest) nearest = k; }
+			const i32 own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
+			// the physics model rules this state out: it cannot reach the trophy (a proof)
+			if (p.prune && own < 0) continue;
+			rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
+			if (p.closest) {
+				const float ck = own >= 0 ? (float)own / 5.f : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
+				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
+				if (k < nearest) nearest = k;
+			}
 		} else if (p.closest) {
 			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
 			if (k < nearest) nearest = k;
@@ -394,13 +413,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 				}
 			}
 		}
-		else if (p.target == 3) {   // the finish: this tick took the trophy (the silver crown); report, do not expand
-			if (s.has_silver_crown && !par->has_silver_crown) {
-				const u32 h = atomicAdd(p.nHits, 1u);
-				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
-				continue;
-			}
-		}
+		else if (p.target == 3) { }   // (the finish: tested above, before the prune)
 		else if (p.target == 4) {   // an exact rejoin with the run: a shortcut when the run reaches this state later
 			const u32 bit = (u32)(quadKey(s.px, s.py, s.speed_x, s.speed_y) >> (64 - QBITS_LOG2));
 			if ((p.qbits[bit >> 5] >> (bit & 31)) & 1u) {
@@ -462,7 +475,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		const bool rest = p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y);
 		p.candKey[(size_t)pi * 18 + o] = (key & ~0xfffull) | (rest ? 2ull : 0ull) | 1ull;
 		// (without a reach field the head is part of the content, so a full layer is still cut the same way every run)
-		const u64 head = p.reach.on ? (u64)(u32)rcq : (content >> 52);
+		const u64 head = p.reach.on ? (u64)rcq : (content >> 52);
 		p.candPrio[(size_t)pi * 18 + o] = (head << 51) | ((content & 0x7ffffull) << 32) | ((parentHash & 0x7ffffffull) << 5) | (u64)o;
 	}
 	if (p.closest && nearest < *(volatile unsigned long long*)p.closest) atomicMin(p.closest, (unsigned long long)nearest);
@@ -548,7 +561,9 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	extern "C" __global__ void trace_##TW(Level L, const u8* masks, i32 t0, i32 t1, u64* out, const u32* coinBits0, u64 seed, i32* info, u8* state) { traceBody<TW>(L, masks, t0, t1, out, coinBits0, seed, info, state); } \
 	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 k0, i32 k1, u64 seed, unsigned long long* out, u8* states, u64* rng) { benchBody<TW>(L, state0, k0, k1, seed, out, states, rng); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
 	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
-	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); }
+	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; } \
+	extern "C" __global__ void __launch_bounds__(128) reachTest_##TW(ReachField R, const double* in, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; \
+		if (i < n) { const double* q = in + (size_t)i * 6; const RfPre pre = rfPre(R, q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifthsAt(R, pre, q[0], q[1], q[2]); score[i] = out[i] >= 0 ? reachScore(R, pre, q[0], q[1], q[2], out[i]) : -1.f; } }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)
 #ifndef EE_ONLY_TW
 #define EE_ONLY_TW 8

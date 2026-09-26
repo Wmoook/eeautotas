@@ -1453,8 +1453,11 @@ async function loadGpu() {
 	renderChecks();
 }
 async function runCheck() {
+	const v = editVersion;
 	try { CHECK = await postJson('/api/editor/check', { level: levelJson() }); } catch (e) { CHECK = { error: e.message }; }
 	renderChecks();
+	// (the physics check runs in the app's worker thread: ask again for its note, unless an edit asks anyway)
+	if (CHECK && CHECK.physicsPending && v === editVersion) { clearTimeout(checkT); checkT = setTimeout(runCheck, 1500); }
 }
 function blockers() {
 	const out = [];
@@ -1528,8 +1531,10 @@ function renderSolve() {
 	if (st.running) {
 		// (the search's clock: from the GPU engine's start; the first search after an update waits for it to be prepared)
 		const el2 = st.searchElapsed !== undefined ? st.searchElapsed : st.elapsed || 0, pct = clamp(el2 / st.seconds * 100, 0, 100);
-		if (st.preparing) h += `<div class="sst"><span class="spin"></span><b>Preparing the GPU engine for this graphics card…</b> ${(st.elapsed || 0).toFixed(0)} s (the first search after an update; later ones start at once). The ${st.seconds} s of searching start after it.</div>`;
+		if (st.stage === 'checking the physics') h += `<div class="sst"><span class="spin"></span><b>Checking the physics…</b> ${(st.elapsed || 0).toFixed(0)} s (which places can still reach the trophy; the ${st.seconds} s of searching start after it)</div>`;
+		else if (st.preparing) h += `<div class="sst"><span class="spin"></span><b>Preparing the GPU engine for this graphics card…</b> ${(st.elapsed || 0).toFixed(0)} s (the first search after an update; later ones start at once). The ${st.seconds} s of searching start after it.</div>`;
 		else h += `<div class="sst"><span class="spin"></span><b>Searching…</b> ${el2.toFixed(0)} s of ${st.seconds} s${st.guidePoints ? ' · along your guide line' : ''}</div>`;
+		if (st.physics && st.physics.noWayUp) h += `<div class="sst">The physics check finds no way up to the trophy; "every move" checks it without the check.</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
 		if (st.strategies && st.strategies.length) {
@@ -1562,7 +1567,7 @@ function renderSolve() {
 	if (c) {
 		h += `<div class="result near${stale ? ' stale' : ''}"><div class="rk">Closest attempt${st.running ? ' so far' : ''}</div>
 			<div class="rt">${c.tiles <= 0.05 ? 'at' : `${c.tiles.toFixed(1)} tiles from`} the trophy</div>
-			<div class="rm">along a way the ball can really go (jumps, dots, arrows; around walls and spikes) · tick ${c.ticks.toLocaleString('en-US')} (${fmt(c.ticks)} of play) · ${esc(c.strategy)}${c.deaths ? ` · ${c.deaths} death${c.deaths > 1 ? 's' : ''} on the way` : ''}</div>
+			<div class="rm">${c.cut ? 'nearest by walking distance (the physics check rules out every attempt so far)' : c.viaDeath ? 'along a way that needs a death (a respawn at a checkpoint or another spawn point)' : 'along a way the ball can really go (jumps, dots, arrows; around walls and spikes)'} · tick ${c.ticks.toLocaleString('en-US')} (${fmt(c.ticks)} of play) · ${esc(c.strategy)}${c.deaths ? ` · ${c.deaths} death${c.deaths > 1 ? 's' : ''} on the way` : ''}</div>
 			<div class="row"><button class="small" id="cPlay" title="Play the attempt on this map">${VW.play ? 'Stop preview' : 'Preview here'}</button>
 				<button class="small" id="cEetas" title="The attempt's inputs (it does not finish)">Download .eetas</button></div></div>`;
 	}

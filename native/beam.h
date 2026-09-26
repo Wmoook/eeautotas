@@ -23,48 +23,171 @@ struct BeamChild {
 	i32 rejoin;     // reference tick j of an exact rejoin (flags & 4), else -1
 };
 
-/** The reach field (src/reach.js): the cost to the trophy per (tile, rise budget b), b = how far the box centre can
- *  still rise above the tile's middle, in units of 8 px; refresh = the jump budget per tile (0 = none); -1 = unreachable
- *  (the model is optimistic, so that is a proof). on = 0: not loaded. */
+/** The reach field v3 (src/reach.js, the RCH3 file): the cost to the trophy in fifths of a tile per abstract state of
+ *  the ball, and the lookup from a real state (reachFifths: the same double operations as reach.js fifthsAt, so the
+ *  JS and the GPU agree to the fifth; test/reach.js F). -1 = cut off: the physics model proves the trophy out of reach
+ *  (every rule errs toward reachable). mode 1 (walk): plain walking distance, no proof of anything. on = 0: not loaded. */
 struct ReachField {
-	const float* cost; const u8* cls; const u8* own; const u8* refresh;
-	i32 W, H, B, JB; float g; i32 on;
+	const u8* cls; const u8* seg; const i32* rowC; const i32* rowX; const u16* walk;
+	const u16* costR; const u16* costF; const u16* costL; const u16* costC; const u16* costX;
+	const double* segPush; const double* segCap; const double* modMin; const double* FV; const double* FS; const double* TH; const double* SW;
+	double G, BD, ICE_ND, KT, TOL, MOD_STRONG;
+	i32 W, H, mode, Q, prioShift, deaths, ice, nFlags, NFV, NTH, nSeg, nC, nX, on;
 };
-/** the budget of a ball in tile i (row `row`) whose centre can rise to `top` px (src/reach.js budgetAt) */
-EE_HD i32 reachBudget(const ReachField& R, i32 i, i32 row, float top, bool rising, bool onGround) {
-	(void)rising;
-	i32 b = (i32)ceilf(((float)(row * 16 + 8) - top) / 8.f - 1e-6f);   // (rounded up: optimistic)
-	if (b < 0) b = 0;
-	if (b > R.B - 1) b = R.B - 1;
-	if (onGround && b < (i32)R.refresh[i]) b = R.refresh[i];
-	if (R.cls[i] != 1 && b < (i32)R.own[i]) b = R.own[i];   // (1 = a tile with normal gravity)
-	return b;
+// every table read of the lookup goes through RF_AT (a host build with -DRF_CHECK aborts on an index out of its table:
+// eegpu reachtest with such a build checks the lookup's bounds on the CPU; on the GPU it is a plain read)
+#if defined(RF_CHECK) && !EE_GPU
+#include <cstdlib>
+inline void rfBad(const char* what, long long i, long long n) { fprintf(stderr, "reach lookup: %s index %lld out of [0, %lld)\n", what, i, n); abort(); }
+#define RF_AT(arr, i, n) ((long long)(i) < 0 || (long long)(i) >= (long long)(n) ? (rfBad(#arr, (long long)(i), (long long)(n)), (arr)[0]) : (arr)[i])
+#else
+#define RF_AT(arr, i, n) ((arr)[i])
+#endif
+enum { RF_WALL = 0, RF_DEADLY = 1, RF_NORM = 2, RF_UP = 7, RF_BUP = 8, RF_BDOWN = 9, RF_KF = 16, RF_NL = 128, RF_CUT = 0xffff };
+/** the engine's vertical speed update: (v + modifier) x drag, the cap, the snap to 0 */
+EE_HD double rfStep(double s, double m, double d) {
+	double v = (s + m) * d;
+	if (v > 16.0) v = 16.0;
+	else if (v < -16.0) v = -16.0;
+	else if (v < 0.0001 && v > -0.0001) v = 0.0;
+	return v;
 }
-/** the cost to the trophy of a ball (box centre cx, cy px; vertical speed vy px/tick; on the ground): -1 when its tile
- *  and budget are cut off, else the tile's cost blended bilinearly with the neighbours' (each with its own budget;
- *  cut-off ones left out) for a smooth score */
-EE_HD float reachAt(const ReachField& R, float cx, float cy, float vy, bool onGround) {
-	const i32 tx = (i32)floorf(cx / 16.f), ty = (i32)floorf(cy / 16.f);
-	if (tx < 0 || ty < 0 || tx >= R.W || ty >= R.H) return -1.f;
-	const bool rising = vy < 0.f;
-	const float top = rising ? cy - vy * vy / (2.f * R.g) : cy;
-	const i32 S = R.B + 1, i0 = ty * R.W + tx;
-	const float c0 = R.cost[(size_t)i0 * S + reachBudget(R, i0, ty, top, rising, onGround)];
-	if (c0 < 0.f) return -1.f;
-	const float fx = cx / 16.f - 0.5f, fy = cy / 16.f - 0.5f;
-	const i32 x0 = (i32)floorf(fx), y0 = (i32)floorf(fy);
-	const float ax = fx - x0, ay = fy - y0;
-	float v = 0.f, w = 0.f;
-	for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
-		const i32 x = x0 + dx, y = y0 + dy;
-		if (x < 0 || y < 0 || x >= R.W || y >= R.H) continue;
-		const i32 j = y * R.W + x;
-		const float cj = R.cost[(size_t)j * S + reachBudget(R, j, y, top, rising, onGround && j == i0)];
-		if (cj < 0.f) continue;
-		const float k = (dx ? ax : 1.f - ax) * (dy ? ay : 1.f - ay);
-		v += k * cj; w += k;
+/** the upward distance a ball moving up at u still covers in plain air (closed form of the engine's moves) */
+EE_HD double rfAirRise(const ReachField& R, double u) {
+	if (!(u > 0)) return 0;
+	i32 lo = 0, hi = R.NTH - 1;
+	while (lo < hi) { const i32 m = (lo + hi + 1) >> 1; if (u > RF_AT(R.TH, m, R.NTH)) lo = m; else hi = m - 1; }
+	return (u + R.KT) * RF_AT(R.SW, lo, R.NTH) - (double)lo * R.KT;
+}
+/** the highest the ball rises from speed_y s: the queued modifiers m0, m1, then air; nIce ticks with the ice drag */
+EE_HD double rfRiseQ(const ReachField& R, double s, double m0, double m1, i32 nIce) {
+	double h = 0, best = 0;
+	const i32 n = nIce > 2 ? nIce : 2;
+	for (i32 j = 1; j <= n; j++) {
+		s = rfStep(s, j == 1 ? m0 : j == 2 ? m1 : R.G, j <= nIce ? R.ICE_ND : R.BD);
+		h -= s;
+		if (h > best) best = h;
 	}
-	return w > 1e-6f ? v / w : c0;
+	if (s < 0) { h += rfAirRise(R, -s); if (h > best) best = h; }
+	return best;
+}
+/** the free fall's distance at speed v (the orbit table, linear between ticks); a huge number beyond its end */
+EE_HD double rfFallD(const ReachField& R, double v) {
+	if (!(v > 0)) return 0;
+	if (v >= RF_AT(R.FV, R.NFV - 1, R.NFV)) return 1e300;
+	i32 lo = 0, hi = R.NFV - 2;
+	while (lo < hi) { const i32 m = (lo + hi + 1) >> 1; if (RF_AT(R.FV, m, R.NFV) <= v) lo = m; else hi = m - 1; }
+	return RF_AT(R.FS, lo, R.NFV) + (v - RF_AT(R.FV, lo, R.NFV)) / (RF_AT(R.FV, lo + 1, R.NFV) - R.FV[lo]) * R.FV[lo + 1];
+}
+EE_HD i32 rfKOfX(double x) { if (x <= 16) return 0; if (!(x <= 16.0 * (RF_KF + 1))) return RF_KF; const i32 k = (i32)ceil(x / 16) - 1; return k < RF_KF ? k : RF_KF; }
+EE_HD i32 rfQOf(const ReachField& R, double e) { const double q = ceil((e + R.TOL) / 8); return q < -1 ? -1 : q > R.Q ? R.Q : (i32)q; }
+EE_HD i32 rfCOfV(double v) { if (v >= 16) return RF_NL - 1; const double c = ceil(v * 8 - 1e-9); return c > RF_NL - 1 ? RF_NL - 1 : (i32)c; }
+/** the C (or XR) level of a ball rising at vy with its centre at cy in a row whose top edge is top, segment s */
+EE_HD i32 rfCLevel(const ReachField& R, double top, i32 s, double cy, double vy, double m0, double m1, i32 nIce) {
+	const double push = RF_AT(R.segPush, s, R.nSeg), cap = RF_AT(R.segCap, s, R.nSeg), mField = -push / 32;
+	double v = vy, y = cy, umax = 0;
+	const i32 n = nIce > 2 ? nIce : 2;
+	for (i32 j = 1; j <= n; j++) {
+		v = rfStep(v, j == 1 ? m0 : j == 2 ? m1 : mField, j <= nIce ? R.ICE_ND : R.BD);
+		y += v;
+		if (-v > umax) umax = -v;
+	}
+	const double u = v < 0 ? -v : 0, d = y - top;
+	const double E2 = u * u + (d > 0 ? push * d / 16 : 0);
+	double w = sqrt(E2);
+	if (w > cap) w = cap;
+	if (u > w) w = u;
+	if (umax > w) w = umax;
+	return rfCOfV(w);
+}
+/** the stored cost of (tile t, type, level); types 0 R, 1 F, 2 XR, 3 C, 4 L */
+EE_HD u32 rfCost(const ReachField& R, i32 t, i32 ty, i32 l) {
+	const size_t N = (size_t)R.W * R.H;
+	if (ty == 0) return RF_AT(R.costR, (size_t)t * (R.Q + 3) + l + 1, N * (R.Q + 3));
+	if (ty == 1) return RF_AT(R.costF, (size_t)t * (RF_KF + 1) + l, N * (RF_KF + 1));
+	if (ty == 4) return RF_AT(R.costL, (size_t)t * (RF_KF + 1) + l, N * (RF_KF + 1));
+	if (ty == 3) { const i32 r = RF_AT(R.rowC, t, N); return r < 0 ? RF_CUT : RF_AT(R.costC, (size_t)r * RF_NL + l, (size_t)R.nC * RF_NL); }
+	const i32 r = RF_AT(R.rowX, t, N); return r < 0 ? RF_CUT : RF_AT(R.costX, (size_t)r * RF_NL + l, (size_t)R.nX * RF_NL);
+}
+/** the parts of a ball's lookup that do not depend on where it is (the beam's blend looks the same ball up at the 4 tile
+ *  centres around it): the gravity queue's modifiers, the ice ticks, the speed after them and its free-fall distance,
+ *  the rise. The same doubles as reachFifths computes them. */
+struct RfPre { double m0, m1, fall, rise; i32 nIce; };
+EE_HD RfPre rfPre(const ReachField& R, double vy, i32 q0, i32 q1, double slip) {
+	RfPre p;
+	p.m0 = q0 >= 0 && q0 < R.nFlags ? RF_AT(R.modMin, q0, R.nFlags) : R.MOD_STRONG;
+	p.m1 = q1 >= 0 && q1 < R.nFlags ? RF_AT(R.modMin, q1, R.nFlags) : R.MOD_STRONG;
+	p.nIce = R.ice && slip > 0 ? (i32)floor(slip / 0.2 + 0.5) : 0;
+	double fv = vy;
+	for (i32 j = 1; j <= p.nIce; j++) fv = rfStep(fv, R.G, R.ICE_ND);
+	p.fall = rfFallD(R, fv > 0 ? fv : 0);
+	p.rise = rfRiseQ(R, vy, p.m0, p.m1, p.nIce);
+	return p;
+}
+/** the cost (fifths) of a ball at top-left px, py with speed_y vy and the position-independent parts pre: -1 = cut off.
+ *  (src/reach.js fifthsAt, the same numbers) */
+EE_HD i32 rfFifthsAt(const ReachField& R, const RfPre& pre, double px, double py, double vy) {
+	const i32 tx = truncI(px + 8.0) >> 4, ty = truncI(py + 8.0) >> 4;
+	if (tx < 0 || ty < 0 || tx >= R.W || ty >= R.H) return -1;
+	const i32 t = ty * R.W + tx;
+	const size_t N = (size_t)R.W * R.H;
+	if (R.mode == 1) { const u32 v = RF_AT(R.walk, t, N); return v == RF_CUT ? -1 : (i32)v; }
+	const i32 g = RF_AT(R.cls, t, N);
+	u32 v;
+	if (g == RF_WALL) return -1;
+	if (g == RF_DEADLY) { if (!R.deaths) return -1; v = rfCost(R, t, 1, 0); return v == RF_CUT ? -1 : (i32)v; }
+	if (g == RF_BUP) { v = rfCost(R, t, 0, R.Q + 1); return v == RF_CUT ? -1 : (i32)v; }
+	if (g == RF_BDOWN) { v = rfCost(R, t, 1, RF_KF); return v == RF_CUT ? -1 : (i32)v; }
+	const double m0 = pre.m0, m1 = pre.m1;
+	const i32 nIce = pre.nIce;
+	const double cy = py + 8, top = 16.0 * ty;
+	double fv = vy, fy = cy;
+	for (i32 j = 1; j <= nIce; j++) { fv = rfStep(fv, R.G, R.ICE_ND); fy += fv; }
+	const i32 k = rfKOfX(pre.fall + (top + 16 - fy));
+	if (g != RF_NORM) {
+		v = vy < 0 ? rfCost(R, t, 3, rfCLevel(R, top, RF_AT(R.seg, t, N), cy, vy, m0, m1, nIce)) : rfCost(R, t, 1, k);
+		return v == RF_CUT ? -1 : (i32)v;
+	}
+	const bool hasBase = !(vy < 0);
+	const u32 base = hasBase ? rfCost(R, t, cy > top + 8 ? 4 : 1, k) : RF_CUT;
+	const double rise = pre.rise;
+	if (hasBase && !(rise > 0)) return base == RF_CUT ? -1 : (i32)base;
+	const bool lid = ty == 0 || RF_AT(R.cls, t - R.W, N) == RF_WALL;
+	i32 q = rfQOf(R, top - (cy - rise));
+	if (lid && q > 0) q = 0;
+	v = rfCost(R, t, 0, q);
+	if (RF_AT(R.rowX, t, N) >= 0) {
+		const u32 x = rfCost(R, t, 2, lid ? rfCLevel(R, top, RF_AT(R.seg, t, N), cy < top + 8 ? cy : top + 8, 0, m0, m1, nIce) : rfCLevel(R, top, RF_AT(R.seg, t, N), cy, vy, m0, m1, nIce));
+		if (x > v) v = x;
+	}
+	if (hasBase && base < v) v = base;
+	return v == RF_CUT ? -1 : (i32)v;
+}
+/** the cost (fifths) of a ball: top-left px, py; speed_y vy; the gravity queue q0, q1; slippery. -1 = cut off.
+ *  (src/reach.js fifthsAt, the same numbers) */
+EE_HD i32 reachFifths(const ReachField& R, double px, double py, double vy, i32 q0, i32 q1, double slip) {
+	return rfFifthsAt(R, rfPre(R, vy, q0, q1, slip), px, py, vy);
+}
+/** a death's price in the field (src/reach.js DEATH_COST): a cost at or above it is a way through a death */
+enum { RF_DEATH = 8192 };
+/** the beam's score in tiles (src/reach.js scoreAt, the same doubles): the cost blended bilinearly between the centres of
+ *  the 4 tiles around the ball's centre, the ball (its speed and queue) looked up at each of them (cut-off ones left out,
+ *  and ways through a death while the ball's own way is a real one), for a smooth gradient; the own tile's cost `own`
+ *  when all the others are left out. The position-independent parts of the lookups (pre: the rise, the fall) are shared. */
+EE_HD float reachScore(const ReachField& R, const RfPre& pre, double px, double py, double vy, i32 own) {
+	const double fx = (px + 8.0) / 16.0 - 0.5, fy = (py + 8.0) / 16.0 - 0.5;
+	const i32 x0 = (i32)floor(fx), y0 = (i32)floor(fy);
+	const i32 tx = truncI(px + 8.0) >> 4, ty = truncI(py + 8.0) >> 4;
+	const double ax = fx - x0, ay = fy - y0;
+	double v = 0, w = 0;
+	for (i32 dy = 0; dy < 2; dy++) for (i32 dx = 0; dx < 2; dx++) {
+		const i32 x = x0 + dx, y = y0 + dy;
+		const i32 c = (x == tx && y == ty) ? own : rfFifthsAt(R, pre, px + 16.0 * (x - tx), py + 16.0 * (y - ty), vy);
+		if (c < 0 || (c >= RF_DEATH && own < RF_DEATH)) continue;
+		const double k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
+		v += k * c; w += k;
+	}
+	return (float)(w > 1e-9 ? v / w / 5.0 : own / 5.0);
 }
 
 struct BeamParams {
