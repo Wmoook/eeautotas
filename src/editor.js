@@ -364,7 +364,7 @@ const STRATEGIES = {
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`,
 		// (a small table and layer cap: its layers hold tens of thousands of states, and a full-size second explore next
 		// to every move's (2 GB of cells + ~2.7 GB of states) overcommitted the 8 GB laptop GPU: paged, 5x slower)
-		'--cells=25', '--cap=262144', ...(o.prune ? ['--prune=1'] : [])] },
+		q.big ? '--cells=26' : '--cells=25', q.big ? '--cap=1048576' : '--cap=262144', ...(o.prune ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -505,19 +505,33 @@ function resumeExplore() {
 	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
 	S.strategies.forEach((q, k) => { if (q.key === 'explore' && q.state === 'waiting' && !alive(kids[k])) { Object.assign(q, { state: 'starting', detail: '' }); kids[k] = launch(k); } });
 }
-const RELAY_MIN_TICKS = 100, RELAY_BACK = [60, 150, 400], RELAY_S = 30, RELAY_SWITCH_MS = 3000, RELAY_MIN_KEEP = 50, RELAY_STALL_MS = 8000;
+// A relay that finds nothing nearer goes further back along the nearest attempt (RELAY_BACK), then starts from the
+// other strategies' own nearest attempts (another branch of the level: on a 200x200 key maze the relay stalled 740
+// tiles out, behind a wall of the physics check's optimism, while the CPU search's attempt lay elsewhere), then once more
+// from the nearest attempt with a larger table, coarser cells and twice the time.
+const RELAY_MIN_TICKS = 100, RELAY_BACK = [60, 150, 400, 1000, 2000], RELAY_S = 30, RELAY_SWITCH_MS = 3000, RELAY_MIN_KEEP = 50, RELAY_STALL_MS = 8000;
 const RELAY_CELLS = [{ cqx: 0.25, cqv: 4, qy: 0.25, qvy: 4 }, { cqx: 0.5, cqv: 4, qy: 0.5, qvy: 4 }, { cqx: 0.5, cqv: 16, qy: 1, qvy: 16 }];
 /** starts the relay (strategy n) from the nearest attempt so far; false when there is nothing to start from */
 function relayFrom(n) {
 	const V = S.strategies[n], R = V.relay || (V.relay = { back: 0, cells: 0, runs: 0 });
-	const c = S.closest;
-	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || R.back >= RELAY_BACK.length || S.seconds - searchClock(Date.now()) < 3) return false;
+	// the attempt to go on from: the nearest one (R.back steps back along it), then the others' own (R.alt), then the
+	// nearest with a larger table (R.big)
+	let c = S.closest, back = RELAY_BACK[R.back];
+	R.big = false;
+	if (R.back >= RELAY_BACK.length) {
+		const alts = S.strategies.filter((q) => q !== V && q.bestTry && q.bestTry.ticks >= RELAY_MIN_TICKS && (!c || Math.abs(q.bestTry.dist - c.dist) > 1));
+		const ai = R.back - RELAY_BACK.length;
+		if (ai < alts.length) { const b = alts[ai].bestTry; c = { inputs: b.inputs, ticks: b.ticks, dist: b.dist, tiles: Math.round(b.dist * 10) / 10 }; back = RELAY_BACK[0]; }
+		else if (ai === alts.length) { back = RELAY_BACK[2]; R.big = true; }
+		else return false;
+	}
+	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || S.seconds - searchClock(Date.now()) < 3) return false;
 	const X = S.strategies.find((q) => q.key === 'explore');
 	if (X && !(X.probe === 'slow' || X.refinedOnce || X.state === 'ended' || X.state === 'error' || searchClock(Date.now()) >= RELAY_WAIT_S ||
 		(X.refine && X.refine.at && Date.now() - X.refine.at > RELAY_AFTER_REFINE_MS))) return false;
-	const keep = c.ticks - Math.min(RELAY_BACK[R.back], c.ticks - 1);
+	const keep = c.ticks - Math.min(back, c.ticks - 1);
 	// (a start near the level's start is every move's own work: no relay from there)
-	if (keep < RELAY_MIN_KEEP) return false;
+	if (keep < RELAY_MIN_KEEP) { R.back++; return relayFrom(n); }   // (too near the start: the next step of the plan)
 	// (a route of T ticks known: only a relay that can still end sooner)
 	if (S.result && keep >= S.result.ticks - 1) return false;
 	const file = path.join(dir(), `relay_${n}.eetas`);
@@ -532,7 +546,9 @@ function relayFrom(n) {
 		R.cells = sim.morx === 0 && sim.mory === 0 ? 0 : 1;
 		R.cellsSet = true;
 	}
-	Object.assign(R, { file, keep, src: { dist: c.dist, ticks: c.ticks } });
+	// (src.best: the nearest of all attempts when this run began: "nearer" means nearer than that, also for a run from
+	// another strategy's farther attempt)
+	Object.assign(R, { file, keep, src: { dist: c.dist, ticks: c.ticks, best: S.closest ? Math.min(S.closest.dist, c.dist) : c.dist } });
 	R.runs++;
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `from tick ${keep} of the nearest attempt (${c.tiles} tiles from the trophy)`, passes: R.runs });
 	kids[n] = launch(n);
@@ -546,7 +562,7 @@ function relayKick() {
 		if (q.state === 'waiting' && !alive(kids[k]) && searchClock(Date.now()) >= 3) {
 			// (a relay that went through its starting points waits for a nearer attempt than its last)
 			const c0 = S.closest, R0 = q.relay;
-			if (R0 && R0.src && !(c0 && c0.dist < R0.src.dist - 0.5)) return;
+			if (R0 && R0.src && !(c0 && c0.dist < R0.src.best - 0.5)) return;
 			if (R0) R0.back = 0;
 			relayFrom(k);
 			return;
@@ -558,9 +574,9 @@ function relayKick() {
 		// table, and the cells for where it is now: the dot ring's first run came from outside the dots with 2 px cells and
 		// stalled at the ring's top for 10 s; from there with 4 px cells the route took 10 s)
 		if (R && R.src && c && c.strategy === q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - (q.bestAt || kids[k].startedAt) > RELAY_STALL_MS &&
-			Date.now() - kids[k].startedAt > RELAY_STALL_MS && c.ticks > R.keep + RELAY_BACK[0] + 30) { R.src = { dist: c.dist + 1, ticks: c.ticks }; halt(kids[k], 'nearer'); return; }
+			Date.now() - kids[k].startedAt > RELAY_STALL_MS && c.ticks > R.keep + RELAY_BACK[0] + 30) { R.src = { dist: c.dist + 1, ticks: c.ticks, best: c.dist + 1 }; halt(kids[k], 'nearer'); return; }
 		// (not for its own nearer attempts: it is making them, and a restart would throw its table away)
-		if (R && R.src && c && c.strategy !== q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS && c.dist < R.src.dist - Math.max(3, 0.1 * R.src.dist)) halt(kids[k], 'nearer');
+		if (R && R.src && c && c.strategy !== q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS && c.dist < R.src.best - Math.max(3, 0.1 * R.src.best)) halt(kids[k], 'nearer');
 	});
 }
 // the salt tries (the finest pass, and any pass's salt reruns) run up to LANES salts side by side in one eegpu process
@@ -903,8 +919,8 @@ function launch(n) {
 	else if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
 	if (V.key === 'relay') {
 		// (the search's clock: the relay waits between its runs, so its own run time would let it run past the search's end)
-		q.prefixFile = V.relay.file; q.cells = RELAY_CELLS[V.relay.cells];
-		q.seconds = V.share = Math.max(1, Math.min(RELAY_S, Math.round(S.seconds - searchClock(Date.now()))));
+		q.prefixFile = V.relay.file; q.cells = RELAY_CELLS[V.relay.big ? 0 : V.relay.cells]; q.big = !!V.relay.big;
+		q.seconds = V.share = Math.max(1, Math.min(RELAY_S * (q.big ? 2 : 1), Math.round(S.seconds - searchClock(Date.now()))));
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
 	}
 	if (V.key === 'explore') {
@@ -1179,7 +1195,7 @@ function launch(n) {
 				if (how === 'nearer') V.state = 'starting';
 				// ("the prefix dies" and the like: another point, not an error of the search)
 				V.error = null;
-				const nearer = S.closest && R.src && S.closest.dist < R.src.dist - 0.5;
+				const nearer = S.closest && R.src && S.closest.dist < R.src.best - 0.5;
 				if (nearer) { R.back = 0; R.cellsSet = false; }
 				else if (how === 'exhausted' && V.layer < 30 && R.cells + 1 < RELAY_CELLS.length) R.cells++;
 				else { R.back++; R.cellsSet = false; }
@@ -1361,7 +1377,10 @@ function closer(ev, n) {
 	const dist = +ev.dist, old = S.closest;
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams)
 	const Vn = S.strategies[n];
-	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) { Vn.best = dist; Vn.bestAt = Date.now(); }
+	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
+		Vn.best = dist; Vn.bestAt = Date.now();
+		if (ev.inputs && !ev.cut && dist < RF.DEATH_TILES) Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
+	}
 	if (!Number.isFinite(dist) || dist >= 2e4) return;
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) return;
