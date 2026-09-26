@@ -419,11 +419,14 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
 		u64 disc = 0;
 		if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
+		// --lanes: independent explorations side by side (salt + lane each), never sharing a cell
+		const u32 lane = p.lanes ? (u32)p.lanes[pi] : 0u;
+		if (lane) key = splitmix(key ^ (0xd6e8feb86659fd93ull * (u64)lane));
 		// the proposal: the cell (12 low bits free for the layer tag) and a fixed priority: the reach-field distance
 		// (12 bits: nearer the trophy first), the state's content (19 bits), then the parent's content and the option
 		// (the rest: which of two identical children stands for the cell)
 		u64 content = splitmix(doubleToBits(s.px) ^ splitmix(doubleToBits(s.py) ^ splitmix(doubleToBits(s.speed_x) ^ splitmix(doubleToBits(s.speed_y) ^ (u64)small ^ disc))));
-		if (p.salt) content = splitmix(content ^ p.salt);   // (--salt: other representatives, another merged graph)
+		if (p.salt + lane) content = splitmix(content ^ (p.salt + lane));   // (--salt: other representatives, another merged graph)
 		// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier even when its cell is known, so it
 		// is there when the time doors switch (then its cells are new again: the door phase is part of them)
 		const bool rest = p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y);
@@ -505,6 +508,7 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	Input in = maskInput(option((i32)(pk & 31)));
 	sim.tick(in);
 	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
+	if (p.lanes) p.lanesNext[i] = p.lanes[pk >> 5];
 }
 
 #define INSTANCE(TW) INSTANCE_(TW)

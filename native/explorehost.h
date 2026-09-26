@@ -19,6 +19,7 @@
 // --salt=N mixes N into the tie-break that picks which state stands for a cell (another merged graph); --salts=K
 // (--finish) starts over with the next salt after a try that ran through its depth without a finish ({"ev":"try"});
 // done: "salt" = the last salt tried, "tries", "exhaustedTries" (tries that ran out of situations with no overflow).
+// --lanes=L: L salts side by side in the same launches (lane k: salt + k), the try events per batch ("lanes").
 #pragma once
 
 /** A radix select over a key (the claim's priority, or a candidate index): the key of the winner of rank k (0-based,
@@ -238,6 +239,21 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	int nParents = 1;
 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;
 	uint64_t ticks = 0, twins = 0, totalStates = 1;
+	// --lanes=L: L explorations side by side from the start, lane k with salt + k (lanes never share a cell): L tries for
+	// about the price of one on a level whose layers are small (the per-layer launches and copies dominate there)
+	int lanes = std::max(1, std::min(64, atoi(opt(argc, argv, "lanes", "1").c_str())));
+	cu::Buf dLA, dLB;
+	if (lanes > 1 && !(dLA.alloc((size_t)cap) && dLB.alloc((size_t)cap))) lanes = 1;
+	cu::CUdeviceptr lcur = dLA.p, lnxt = dLB.p;
+	auto startBatch = [&]() {
+		std::vector<uint8_t> multi((size_t)lanes * SB);
+		for (int k = 0; k < lanes; k++) memcpy(&multi[(size_t)k * SB], start, SB);
+		cu::cuMemcpyHtoD_v2(dA.p, multi.data(), multi.size());
+		cur = dA.p; nxt = dB.p;
+		if (lanes > 1) { std::vector<uint8_t> ln(lanes); for (int k = 0; k < lanes; k++) ln[k] = (uint8_t)k; cu::cuMemcpyHtoD_v2(dLA.p, ln.data(), lanes); lcur = dLA.p; lnxt = dLB.p; }
+		nParents = lanes; totalStates = (uint64_t)lanes;
+	};
+	startBatch();
 	uint64_t overflow = 0;   // new cells the layers could not keep (over the cap, or no table slot): an "exhausted" end is a proof only without them
 	uint32_t hitsSeen = 0;
 	std::vector<ExploreHit> hits;
@@ -257,6 +273,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	for (; d < depthMax && nParents > 0 && elapsed() < seconds; d++) {
 		cu::cuMemsetD8_v2(dnout.p, 0, 4);
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layer = d;
+		P.lanes = lanes > 1 ? (const u8*)(uintptr_t)lcur : nullptr;
 		if (wantNear) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
 		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore expand failed\"}\n"); return 5; }
@@ -353,34 +370,39 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		nParents = (int)kept;
 		totalStates += kept;
 		if (!kept) { d++; break; }
-		P.nPick = nParents; P.next = (u8*)(uintptr_t)nxt;
+		P.nPick = nParents; P.next = (u8*)(uintptr_t)nxt; P.lanesNext = lanes > 1 ? (u8*)(uintptr_t)lnxt : nullptr;
 		cu::cuMemcpyHtoD_v2(dpick.p, pick.data(), 4ull * kept);
 		void* a2[] = { &P };
 		if (cu::cuLaunchKernel(fmat, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a2, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore materialize failed\"}\n"); return 5; }
-		std::swap(cur, nxt);
+		std::swap(cur, nxt); std::swap(lcur, lnxt);
 		if (totalStates > cellCount / 2) { printf("{\"warn\":\"the visited-cell table is half full: stopping\"}\n"); d++; break; }
 		printf("{\"ev\":\"layer\",\"layer\":%d,\"tick\":%d,\"new\":%u,\"kept\":%u,\"overflow\":%u,\"states\":%llu,\"hits\":%u,\"sec\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"twins\":%llu,\"full\":%.4f}\n",
 			d + 1, from + d + 1, nOut, kept, over, (unsigned long long)totalStates, hitsSeen, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (unsigned long long)twins,
 			(double)totalStates / (cellCount / 2));
 		fflush(stdout);
 	}
-	tries++;
+	tries += lanes;
 	{
-		const bool ranOut = finishLayer < 0 && totalStates <= cellCount / 2 && (nParents <= 0 || d >= depthMax);
-		if (ranOut && nParents <= 0 && overflow == 0) exhaustedTries++;
-		if (!(finishTarget && ranOut && tries < salts && elapsed() < seconds)) break;
-		printf("{\"ev\":\"try\",\"salt\":%llu,\"end\":\"%s\",\"layers\":%d,\"overflow\":%llu,\"sec\":%.1f}\n", (unsigned long long)P.salt, nParents <= 0 ? "exhausted" : "depth", d,
-			(unsigned long long)overflow, elapsed());
-		fflush(stdout);
-		// the next salt, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
+		const bool full = totalStates > cellCount / 2;
+		const bool ranOut = finishLayer < 0 && !full && (nParents <= 0 || d >= depthMax);
+		if (ranOut && nParents <= 0 && overflow == 0) exhaustedTries += lanes;
+		// a batch of lanes that filled the cell table: fewer lanes, the same salts again
+		const bool shrink = finishTarget && finishLayer < 0 && full && lanes > 1 && elapsed() < seconds;
+		if (shrink) tries -= lanes;
+		if (!shrink && !(finishTarget && ranOut && tries < salts && elapsed() < seconds)) break;
+		if (!shrink) {
+			printf("{\"ev\":\"try\",\"salt\":%llu,\"lanes\":%d,\"end\":\"%s\",\"layers\":%d,\"overflow\":%llu,\"sec\":%.1f}\n", (unsigned long long)(P.salt + lanes - 1), lanes,
+				nParents <= 0 ? "exhausted" : "depth", d, (unsigned long long)overflow, elapsed());
+			fflush(stdout);
+		}
+		// the next salts, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
 		nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
-		P.salt++;
+		if (shrink) lanes = std::max(1, lanes / 2); else P.salt += lanes;
 		cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
 		cu::cuMemsetD8_v2(dbest.p, 0xff, 8ull * cellCount);
 		cu::cuMemsetD8_v2(dnhits.p, 0, 4);
-		cur = dA.p; nxt = dB.p;
-		cu::cuMemcpyHtoD_v2(dA.p, start, SB);
-		lineage.clear(); nParents = 1; totalStates = 1; overflow = 0; hitsSeen = 0; hits.clear(); d = 0;
+		lineage.clear(); overflow = 0; hitsSeen = 0; hits.clear(); d = 0;
+		startBatch();
 	}
 	}
 	if (finishLayer < 0) nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
@@ -389,7 +411,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	// every move was tried (up to the cells' grain), with overflow > 0 it is no proof
 	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d}\n",
 		g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
-		(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)P.salt, tries, exhaustedTries);
+		(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries);
 	free(start);
 	return 0;
 }
