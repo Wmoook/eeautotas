@@ -13,10 +13,11 @@
 //              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
 //              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration
 //   cpu        the CPU route search (src/goexplore.js, no GPU; one or two threads, a few seconds): routes replayed in the
-//              JS engine, the same seed and tick budget give the same routes, --first, --depth, "stop" on stdin; the
-//              editor without an NVIDIA GPU (the CPU search alone, with a note; a route; the physics verdict), and next
-//              to the eegpu stand-in (its first route bounds the exploration's next pass, and it stops when the GPU
-//              strategies have ended with a route)
+//              JS engine, the same seed and tick budget give the same routes (also with 64 snapshots, states rebuilt by
+//              replaying), --first, --depth, "stop" and the end of stdin; the editor without an NVIDIA GPU (the CPU
+//              search alone, with a note; a route; the physics verdict), and next to the eegpu stand-in (its first route
+//              bounds the exploration's next pass, it stops when the GPU strategies have ended with a route, not when
+//              they failed)
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N]      Exit code 1 if any check fails. Writes nothing inside the repo.
 const fs = require('fs');
@@ -313,7 +314,7 @@ async function appSection() {
 // A stand-in for eegpu: logs every launch's arguments, and "explore" plays the scenario's next run for its pass (the
 // pass read back from --cqx): a layer event, then a finish (a route of `idle` idle ticks and then right to the trophy,
 // when it fits in --depth) or a done event with the scripted end and overflow. "beam" reports the scenario's beam route
-// (if any) and ends.
+// (if any) and ends. With `fail` (ms) every launch fails after that long (an error line, exit code 1).
 const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
@@ -322,6 +323,7 @@ const passOf = (a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
 if (args[0] !== 'explore') {
 	if (SC.beam) say({ ev: 'result', kind: 'finish', inputs: SC.beam });
 	say({ ev: 'done', layers: 3, end: SC.beam ? 'finish' : 'time' });
@@ -457,6 +459,17 @@ function goexplore(file, opts, feed) {
 }
 async function cpuSection() {
 	section('cpu: the CPU route search (src/goexplore.js, no GPU)');
+	// its threads: N - 1 (at most the benchmark's fastest count), at most half while a job's optimizer runs (a status
+	// "running" with a live pid: this process), a request as it is
+	const n = os.cpus().length, w0 = ED.cpuWorkers();
+	const fakeJob = path.join(C.JOBS, 'grind-test-000000');
+	fs.mkdirSync(fakeJob, { recursive: true });
+	fs.writeFileSync(path.join(fakeJob, 'meta.json'), '{}');
+	fs.writeFileSync(path.join(fakeJob, 'status.json'), JSON.stringify({ state: 'running', pid: process.pid, updated: Date.now() }));
+	const w1 = ED.cpuWorkers();
+	fs.rmSync(fakeJob, { recursive: true, force: true });
+	check('the CPU search\'s threads: N - 1, at most half while a job is optimizing, a request as it is', w0 >= 1 && w0 <= Math.max(1, n - 1) && w1 >= 1 &&
+		w1 <= Math.max(1, Math.floor(n / 2)) && ED.cpuWorkers(3) === Math.min(n, 3), `${n} threads: ${w0}; with a job optimizing ${w1}`);
 	const plat = room(40, 20);
 	for (let x = 10; x <= 14; x++) plat.push([x, 16, 9]);
 	for (let x = 18; x <= 22; x++) plat.push([x, 13, 9]);
@@ -478,6 +491,14 @@ async function cpuSection() {
 		`${a1.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')} vs ${a2.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}`);
 	const a3 = await goexplore(platFile, ['--workers=1', '--seed=4', '--maxTicks=300000', '--seconds=40']);
 	check('another seed: other runs', sig(a3) !== sig(a1), `${a3.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}`);
+	// a snapshot budget of 64 (most picks rebuild their state by replaying inputs, from the parent's snapshot or the
+	// start): exactly the same search, so the same routes in the same order (found after more simulated ticks)
+	const m = await goexplore(platFile, ['--workers=1', '--seed=3', '--maxTicks=600000', '--seconds=40', '--maxSnaps=64']);
+	const routes = (r) => r.results.map((x) => `${x.ticks}:${x.inputs}`);
+	const mw = m.done && m.done.workers[0];
+	check('64 snapshots at most (states rebuilt by replaying their inputs): the same routes in the same order, no failure',
+		a1.results.length > 0 && routes(a1).every((x, k) => x === routes(m)[k]) && mw && mw.dropped > 0 && mw.replays > 0 && mw.snaps <= 64 && m.done.end === 'ticks' &&
+		!m.events.some((e) => e.ev === 'warning'), `${m.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}; ${mw ? `${mw.dropped} dropped, ${mw.replays} replays` : ''}; ${m.summary}`);
 	// two threads, stop at the first route
 	const b = await goexplore(platFile, ['--workers=2', '--seed=5', '--first=1', '--seconds=30']);
 	check('2 threads, --first=1: stops at the first route, which finishes in the JS engine', b.results.length >= 1 && replays(platLevel, b.results) && b.done && b.done.end === 'finish' &&
@@ -492,6 +513,8 @@ async function cpuSection() {
 	check('stdin (the editor): "depth 30" (a route of 31 ticks known elsewhere) bounds the search; "stop" ends it',
 		s1.done && s1.done.end === 'ticks' && s1.results.length === 0 && s1.done.layers < 30 && s2.done && s2.done.end === 'stopped' && s2.done.seconds < 10,
 		`${s1.summary}; deepest ${s1.done && s1.done.layers} | ${s2.summary}`);
+	const s3 = await goexplore(platFile, ['--workers=1', '--seconds=30', '--stdin=1', '--seed=3'], (ch) => setTimeout(() => ch.stdin.end(), 600));
+	check('the end of stdin (the editor is gone): it stops, not after its 30 s', s3.done && s3.done.end === 'stopped' && s3.done.seconds < 10, s3.summary);
 	// a trophy the reach field rules out: at once
 	const hiCells = room(20, 10);
 	for (let x = 8; x <= 12; x++) hiCells.push([x, 3, 9]);
@@ -543,14 +566,25 @@ async function cpuSection() {
 		+L[1].depth >= R && X.ends['-1'] && X.ends['-1'].how === 'beaten' && Q && Q.found && Q.found.ticks >= R && !Q.live && st.elapsed < 30,
 		`${st.stage}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${L.map((o) => o.depth).join(', ')}; CPU route ${cpuRoute ? cpuRoute[1] : '-'} ticks; ` +
 		`${st.result ? `route ${st.result.ticks} ticks (${st.result.strategy}), R = ${R}` : st.message}; ${st.elapsed.toFixed(1)} s`);
+	// the GPU strategies fail after the CPU's first route: the CPU search is then the whole search and goes on until the
+	// time is up (it is not stopped "with them")
+	const sc2 = path.join(HOME, 'cpu-fail.json');
+	fs.writeFileSync(sc2, JSON.stringify({ log: path.join(HOME, 'cpu-fail.log'), R, runs: {}, beam: null, fail: 3000 }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 7, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc2] });
+	st = await waitDone(30000);
+	const gpuStates = st.strategies.filter((q) => !q.cpu).map((q) => q.state);
+	check('the GPU strategies fail after the CPU\'s first route: the CPU search goes on until the time is up', st.stage === 'found' && st.result.strategy === 'random runs (CPU)' &&
+		st.result.foundAfter < 3 && gpuStates.length === 2 && gpuStates.every((s) => s === 'error') && st.elapsed >= 6.5,
+		`${st.stage}; GPU strategies ${gpuStates.join(', ')}; ${st.result ? `route ${st.result.ticks} ticks after ${st.result.foundAfter} s (${st.result.strategy})` : st.message}; ${st.elapsed.toFixed(1)} s`);
 }
 
 // ---------------------------------------------------------------- GPU searches (--gpu)
-/** one route search on a level; the route replayed in the JS engine */
-async function solve(name, W, H, cells, seconds) {
+/** one route search on a level; the route replayed in the JS engine. test: ED.start's test options ({cpu: false}: the
+ *  GPU strategies alone) */
+async function solve(name, W, H, cells, seconds, test) {
 	const buf = ED.eelvlOf({ name, width: W, height: H, cells });
 	// (the CPU search runs next to the GPU's, as in the app, on one thread here)
-	ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 16384, workers: 1 }, { available: true });
+	ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 16384, workers: 1 }, { available: true }, test);
 	const t0 = Date.now();
 	let st = ED.state();
 	while (st.running && Date.now() - t0 < (seconds + 30) * 1000) { await new Promise((r) => setTimeout(r, 500)); st = ED.state(); }
@@ -592,10 +626,11 @@ async function gpuSection() {
 	check('a portal: the route goes through it without a guide line, and finishes in the JS engine', r.ok, r.text);
 	// the trophy above a spike, reached by a 37-row fall: the tick that takes the trophy starts on it and ends over the
 	// spike, where the reach field rules the ball out; "every move" must still count that finish (its finish test comes
-	// before the prune), not only a beam
+	// before the prune), not only a beam (without the CPU search: its route, a plain fall, would come first and bound
+	// "every move" to faster ones, so it would never report its own)
 	cells = room(9, 44);
 	cells.push([4, 1, 255], [4, 38, 121], [4, 39, 361, 1]);
-	r = await solve('trophy over a spike', 9, 44, cells, 30);
+	r = await solve('trophy over a spike', 9, 44, cells, 30, { cpu: false });
 	const XF = r.st.strategies.find((q) => q.key === 'explore');
 	check('a trophy above a spike after a long fall: "every move" finds the route too, and it finishes in the JS engine', r.ok && !!(XF && XF.found),
 		`${r.text}; every move: ${XF ? `${XF.state}${XF.found ? ` ${XF.found.time}` : ''}` : 'none'}`);

@@ -272,29 +272,32 @@ function check(buf) {
 // Each beam's first finish is its fastest; a beam that is already deeper than the best route found stops (it cannot
 // find a faster one), and the fastest verified route wins.
 // On the CPU (`cpu: true`: node src/goexplore.js, N - 1 worker threads with their own seeds, where N is the number of
-// threads, at most the measured fastest thread count): random runs from an archive that keeps the earliest state per
-// situation, the one nearest the trophy (reach field) picked first with an optimism that fades with its picks. On open
-// levels its first route comes long before the GPU's; the exploration's next pass then runs with --depth = route - 1,
-// and each faster route found anywhere is passed to it on its stdin ("depth D"), so it only looks for faster ones. It
-// keeps improving until the time is up, unless every GPU strategy has ended with a route known (the finest passes found
-// none faster). Without an NVIDIA GPU it is the whole search.
+// threads, at most the measured fastest thread count, at most N / 2 while a job's optimizer runs): random runs from an
+// archive that keeps the earliest state per situation, the one nearest the trophy (reach field) picked first with an
+// optimism that fades with its picks. On open levels its first route comes long before the GPU's; the exploration's
+// next pass then runs with --depth = route - 1, and each faster route found anywhere is passed to it on its stdin
+// ("depth D"), so it only looks for faster ones. It keeps improving until the time is up, unless every GPU strategy has
+// ended with a route known (the finest passes found none faster) and none failed. Its depth limit is the request's
+// (6000 ticks), not cut by the beams' width. Without an NVIDIA GPU it is the whole search.
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.depth}`, '--stdin=1'] },
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1'] },
 };
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
 /** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
  *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
- *  threads are slower) */
+ *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
 function cpuWorkers(want) {
 	const n = os.cpus().length || 1;
 	if (Number.isInteger(+want) && +want >= 1) return Math.min(n, +want);
 	const bench = BENCH.cached();
-	return Math.max(1, Math.min(n - 1, bench && bench.peakThreads ? bench.peakThreads : n));
+	let grind = false;
+	try { const J = require('./jobs.js'); grind = C.jobIds().some((id) => J.runningPid(id)); } catch (e) { /* no jobs folder */ }
+	return Math.max(1, Math.min(grind ? Math.floor(n / 2) : n - 1, bench && bench.peakThreads ? bench.peakThreads : n));
 }
 // the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y. The finer passes (1, 2)
 // halve positions and speeds, and the finest keeps heights and vertical speeds exact. The coarser passes (-1, -2)
@@ -396,6 +399,8 @@ function start(b, gpu, test) {
 	const width = Math.max(1024, Math.min(131072, Math.round(+b.width || 32768)));
 	// ticks deep; the tool keeps 4 bytes per state per tick to spell out the route (at most ~0.6 GB per search)
 	const depth = Math.max(100, Math.min(20000, Math.floor(6e8 / (4 * width)), Math.round(+b.depth || 6000)));
+	// (the CPU search keeps no such table: its depth is not cut by the beams' width)
+	const cpuDepth = Math.max(100, Math.min(20000, Math.round(+b.depth || 6000)));
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
 	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
@@ -429,7 +434,7 @@ function start(b, gpu, test) {
 	if (cpuOnly) note(cpuOnly);
 	save();
 	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move'})`);
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, prune: rf.mode === 'physics', workers, seed },
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
 	kids = which.map((k, n) => launch(n));
 	return state();
@@ -563,8 +568,8 @@ function launch(n) {
 		}
 		totals();
 		// every GPU strategy has ended with a route known (the exploration's finest passes found none faster): the CPU
-		// search stops too
-		if (!cpu && S.result && ![...busy].some((c) => !c.cpuSearch)) {
+		// search stops too; not when one of them failed (then the CPU search is the search, as without a GPU)
+		if (!cpu && S.result && ![...busy].some((c) => !c.cpuSearch) && !S.strategies.some((q) => !q.cpu && q.state === 'error')) {
 			S.strategies.forEach((q, k) => { if (q.cpu && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
 		}
 		if (!running()) finish();

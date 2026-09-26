@@ -133,7 +133,7 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   the map (**Preview here** plays it), and you can **Watch** it in
   the run viewer, **Optimize this route** (it becomes a run in your list and the optimizer starts on it), or download
   the `.eetas` and the `.eelvl` it was found on (in eeo-tas: open the level, then `/loadtas`, `/reset`, `/playtas`).
-- **Random runs (CPU)** (`src/goexplore.js`, on all threads but one): short random runs from the earliest known state
+- **Random runs (CPU)** (`src/goexplore.js`, on all threads but one, half of them while a run is being optimized): short random runs from the earliest known state
   of each situation, the ones nearest the trophy (by the same physics measure) first, with pixel-fine situations only
   where it gets stuck. On open levels it finds a first route in about a second, long before the GPU; that route is
   usually far from the fastest, but "every move" then only looks for faster ones (shorter than it). It keeps looking

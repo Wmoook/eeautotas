@@ -35,7 +35,8 @@
 //     "workers":[{seed,..},..]}      ("unreachable": the reach field rules out the start itself, "exhausted": no cell is
 //                                      early enough for a faster route)
 // Inputs are .eetas characters ('0' + mask). With --stdin=1 it reads lines from stdin: "depth D" (from now on only
-// routes of at most D ticks: a route of D + 1 is known elsewhere) and "stop". A last line "[goexplore] ..." sums up.
+// routes of at most D ticks: a route of D + 1 is known elsewhere) and "stop"; the end of stdin (the editor is gone)
+// stops it too. A last line "[goexplore] ..." sums up.
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=6000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
@@ -259,15 +260,17 @@ function explore(L, field, a, seed, ctrl, post) {
 	const startSnap = sim.snapshot();
 	let nSnaps = 0, replays = 0, dropped = 0, qh = 0;
 	let queue = [];
-	const keepSnap = (c) => {
-		nSnaps++;
-		queue.push(c);
-		while (nSnaps > a.maxSnaps && qh < queue.length) {
+	/** cell c keeps snapshot s (c has none now). Room is made first, so the new one is never the one dropped: c's runs
+	 *  start from it right after (c's older entries in the queue see no snapshot while the budget is enforced). */
+	const keepSnap = (c, s) => {
+		while (nSnaps >= a.maxSnaps && qh < queue.length) {
 			const d = queue[qh++];
 			if (d.snap === null) continue;
 			if (d.used) { d.used = false; queue.push(d); continue; }
 			d.snap = null; nSnaps--; dropped++;
 		}
+		c.snap = s; c.used = true; nSnaps++;
+		queue.push(c);
 		if (qh > 65536 && qh * 2 > queue.length) { queue = queue.slice(qh); qh = 0; }
 	};
 	let deepest = 0, full = false;
@@ -294,10 +297,10 @@ function explore(L, field, a, seed, ctrl, post) {
 		// the start (the reach field rules it out: no route, a proof; the search ends at once)
 		const rc = RF.costAt(field, sim.px, sim.py, sim.speed_y, !!sim.on_ground);
 		const k = cellKey();
-		const c = { t: 0, snap: startSnap, pc: null, pgen: 0, node: null, rc, picks: 0, tile, ver: 0, gen: 0, used: false };
+		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, tile, ver: 0, gen: 0, used: false };
 		cells.set(k, c);
 		hpush(c);
-		keepSnap(c);
+		keepSnap(c, startSnap);
 		if (rc < 0) end = 'unreachable';
 	}
 	let ticks = 0, picks = 0, lastProgress = 0, refined = 0, minRc = Infinity;
@@ -344,9 +347,8 @@ function explore(L, field, a, seed, ctrl, post) {
 					ticks += ms.length;
 					replays++;
 				}
-				e.snap = sim.snapshot();
+				keepSnap(e, sim.snapshot());
 				e.pc = null;
-				keepSnap(e);
 			}
 			e.used = true;
 			if (hv.length > 3 * cells.size + 4096) compact();
@@ -420,6 +422,13 @@ async function main() {
 	const t0 = Date.now();
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
 	const field = RF.reachField(L);
+	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost table is N x (B + 1)
+	// floats: 68 MB on a 1000 x 1000 level) would cost memory and start-up time on every thread
+	for (const k of ['cost', 'cls', 'own', 'refresh']) {
+		const src = field[k], dst = new src.constructor(new SharedArrayBuffer(src.byteLength));
+		dst.set(src);
+		field[k] = dst;
+	}
 	const sim0 = new E.EESim(L);
 	sim0.reset();
 	const startCost = RF.costAt(field, sim0.px, sim0.py, sim0.speed_y, !!sim0.on_ground);
@@ -465,7 +474,10 @@ async function main() {
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
 			}
 		});
-		process.stdin.on('error', () => { /* the editor went away */ });
+		// the end of stdin: the editor went away (a crash, or a kill that missed its children): stop, rather than run on
+		// every thread for the rest of --seconds
+		process.stdin.on('end', () => Atomics.store(ctrl, 1, 1));
+		process.stdin.on('error', () => Atomics.store(ctrl, 1, 1));
 	}
 	const onMessage = (msg) => {
 		if (msg.type === 'stat' || msg.type === 'done') stats.set(msg.seed, msg);
