@@ -102,7 +102,7 @@ job's current best run in the same exact physics the optimizer uses, while the o
   back to the run: an attempt that becomes exactly equal to a later moment of the run is a proven shortcut and goes to
   the optimizer. The panel shows the search live. (From a terminal: `node src/tas.js guide <job> <from> "<x,y ...>"`.)
 
-## Level editor: build a level, let the GPU find a route
+## Level editor: build a level, let the GPU and the CPU find a route
 
 **Level editor** (top right of the page, or `http://localhost:47823/editor`) is a small EE-style editor. Place blocks
 from the palette (in EE's own graphics when eeo-tas is found): solid blocks, one-way platforms and half blocks (**Q**
@@ -114,7 +114,7 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
 - Tools: **Paint** (click or drag; **Alt+click** picks a block), **Erase**, **Rectangle** (**Shift**: erase),
   **Pick**, **Guide**; **Ctrl+Z / Ctrl+Y**; drag with the right mouse button (or hold **Space**) to move, wheel zooms,
   **0** shows the whole level. A new level gets a solid border like a new EE world. Size up to 400 x 400.
-- **Find a route** runs on the GPU (NVIDIA), two searches side by side. **Every move**: from the start, every input
+- **Find a route** runs on the GPU (NVIDIA) and the CPU, several searches side by side. **Every move**: from the start, every input
   every tick from every situation the ball can be in (position, speed, the gravity it will feel next, ground contact,
   jumps), where nearly identical situations count once. It does not need to know any trick: arrow ground jumps, block
   clips and gaps entered at exactly the right pixel come out of the physics, and it goes away from the trophy as
@@ -133,6 +133,13 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   the map (**Preview here** plays it), and you can **Watch** it in
   the run viewer, **Optimize this route** (it becomes a run in your list and the optimizer starts on it), or download
   the `.eetas` and the `.eelvl` it was found on (in eeo-tas: open the level, then `/loadtas`, `/reset`, `/playtas`).
+- **Random runs (CPU)** (`src/goexplore.js`, on all threads but one): short random runs from the earliest known state
+  of each situation, the ones nearest the trophy (by the same physics measure) first, with pixel-fine situations only
+  where it gets stuck. On open levels it finds a first route in about a second, long before the GPU; that route is
+  usually far from the fastest, but "every move" then only looks for faster ones (shorter than it). It keeps looking
+  for faster routes until the time is up or the GPU searches have finished. **Without an NVIDIA GPU** it runs alone, so
+  Find a route works on every PC: it finds routes on open levels, not always the fastest (use **Optimize this route**),
+  and it can miss routes that need a long run-up or one exact pixel.
 - **Guide line** (optional): with the Guide tool, drag where you think the ball should go (**Shift+drag** adds a
   stroke). The search takes it as a hint, not a rail (for the beam search; "every move" needs no line). It helps where "closer to the trophy" is misleading, e.g. the
   trophy on a ledge whose way up is somewhere else. Draw it along the way the ball can really go (up the steps, around

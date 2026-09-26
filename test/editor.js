@@ -12,6 +12,11 @@
 //              driven by a stand-in for eegpu (a Node script playing scripted passes; no GPU): coarse first with pass 0's
 //              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
 //              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration
+//   cpu        the CPU route search (src/goexplore.js, no GPU; one or two threads, a few seconds): routes replayed in the
+//              JS engine, the same seed and tick budget give the same routes, --first, --depth, "stop" on stdin; the
+//              editor without an NVIDIA GPU (the CPU search alone, with a note; a route; the physics verdict), and next
+//              to the eegpu stand-in (its first route bounds the exploration's next pass, and it stops when the GPU
+//              strategies have ended with a route)
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N]      Exit code 1 if any check fails. Writes nothing inside the repo.
 const fs = require('fs');
@@ -271,6 +276,17 @@ async function appSection() {
 		check('GET /api/editor/solve before any search: idle', r.status === 200 && r.json.stage === 'idle' && !r.json.running, JSON.stringify(r.json));
 		r = await request(port, 'GET', '/api/editor/solve/route.eetas');
 		check('GET /api/editor/solve/route.eetas without a route: 404', r.status === 404);
+		// no GPU here (the test server measures none: "preparing the GPU", or no native build): Find a route runs on the
+		// CPU alone
+		r = await request(port, 'POST', '/api/editor/solve', { eelvlB64: b64, seconds: 3, workers: 1 });
+		check('POST /api/editor/solve without a GPU: the CPU search alone, with the reason', r.status === 200 && r.json.running && r.json.strategies.map((q) => q.key).join() === 'goexplore' &&
+			/^No GPU search: no NVIDIA GPU is available \(.+\)\. The CPU searches alone/.test(r.json.cpuOnly), `${r.status} ${JSON.stringify(r.json && (r.json.cpuOnly || r.json.error))}`);
+		const t0 = Date.now();
+		while (r.json && r.json.running && Date.now() - t0 < 20000) { await new Promise((res) => setTimeout(res, 200)); r = await request(port, 'GET', '/api/editor/solve'); }
+		const solved = r.json;
+		r = await request(port, 'GET', '/api/editor/solve/route.eetas');
+		check('... a route (random runs on the CPU), and GET .../route.eetas has its inputs', solved && solved.stage === 'found' && solved.result.strategy === 'random runs (CPU)' && r.status === 200 &&
+			r.buf.toString('latin1') === solved.result.inputs, solved ? `${solved.stage} ${solved.result ? `${solved.result.time} (${solved.result.ticks} ticks)` : solved.message}` : 'no state');
 		r = await request(port, 'GET', '/api/editor/nope');
 		check('an unknown editor path: 404', r.status === 404);
 		// a job from a route (what Watch and Optimize do): here a hand-made route, right until the trophy
@@ -359,7 +375,7 @@ async function passesSection() {
 	const drive = async (runs, beam, during) => {
 		const sc = path.join(HOME, `ladder-${++nSc}.json`), log = path.join(HOME, `ladder-${nSc}.log`);
 		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null }));
-		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc] });
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc], cpu: false });
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && Date.now() - t0 < 45000) { if (during) during(st); await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
@@ -420,11 +436,121 @@ async function passesSection() {
 		r.X.ends['0'] && r.X.ends['0'].how === 'stopped' && !r.st.running, r.text);
 }
 
+// ---------------------------------------------------------------- the CPU route search (src/goexplore.js; no GPU)
+/** runs src/goexplore.js on an .eelvl; feed(child) right after the spawn (its stdin stays open; what it writes waits
+ *  in the pipe until the tool reads it, before its workers start). Resolves to its events, results, done event and
+ *  summary line. */
+function goexplore(file, opts, feed) {
+	return new Promise((resolve) => {
+		const ch = require('child_process').spawn(process.execPath, [path.join(SRC, 'goexplore.js'), file, ...opts], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+		ch.stdin.on('error', () => { /* it ended */ });
+		if (feed) feed(ch); else ch.stdin.end();
+		let out = '', err = '';
+		ch.stdout.on('data', (c) => { out += c; });
+		ch.stderr.on('data', (c) => { err += c; });
+		ch.on('close', (code) => {
+			const events = out.split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return { bad: l }; } });
+			resolve({ code, err, events, results: events.filter((e) => e.ev === 'result'), done: events.find((e) => e.ev === 'done') || null,
+				summary: out.split('\n').find((l) => l.startsWith('[goexplore]')) || err.slice(-300) });
+		});
+	});
+}
+async function cpuSection() {
+	section('cpu: the CPU route search (src/goexplore.js, no GPU)');
+	const plat = room(40, 20);
+	for (let x = 10; x <= 14; x++) plat.push([x, 16, 9]);
+	for (let x = 18; x <= 22; x++) plat.push([x, 13, 9]);
+	for (let x = 26; x <= 31; x++) plat.push([x, 10, 9]);
+	plat.push([29, 9, 121], [2, 17, 255]);
+	const platBuf = ED.eelvlOf({ name: 'platforms', width: 40, height: 20, cells: plat });
+	const platFile = path.join(HOME, 'platforms.eelvl');
+	fs.writeFileSync(platFile, platBuf);
+	const platLevel = E.prepareLevel(EL.toSimLevel(EL.readEelvl(platBuf)));
+	const replays = (level, rs) => rs.every((r) => { const ev = C.evaluate(level, Uint8Array.from(r.inputs, (c) => c.charCodeAt(0) - 48)); return ev && ev.ms.length === r.ticks && ev.runTicks === r.runTicks; });
+	// one worker, a tick budget: every route replays, each faster than the one before; the same seed gives the same routes
+	const a1 = await goexplore(platFile, ['--workers=1', '--seed=3', '--maxTicks=300000', '--seconds=40']);
+	const a2 = await goexplore(platFile, ['--workers=1', '--seed=3', '--maxTicks=300000', '--seconds=40']);
+	const sig = (r) => r.results.map((x) => `${x.ticks}@${x.simTicks}:${x.inputs}`).join('|');
+	check('platforms, 1 thread, 300k ticks: routes, each faster than the last, all finishing in the JS engine (ticks and run time)',
+		a1.results.length > 0 && replays(platLevel, a1.results) && a1.results.every((x, k) => !k || x.ticks < a1.results[k - 1].ticks) && a1.done && a1.done.end === 'ticks' &&
+		a1.done.finish === a1.results[a1.results.length - 1].ticks, a1.summary);
+	check('the same seed and tick budget: the same routes, found after the same number of ticks', sig(a1) !== '' && sig(a1) === sig(a2) && a1.done.ticks === a2.done.ticks,
+		`${a1.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')} vs ${a2.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}`);
+	const a3 = await goexplore(platFile, ['--workers=1', '--seed=4', '--maxTicks=300000', '--seconds=40']);
+	check('another seed: other runs', sig(a3) !== sig(a1), `${a3.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}`);
+	// two threads, stop at the first route
+	const b = await goexplore(platFile, ['--workers=2', '--seed=5', '--first=1', '--seconds=30']);
+	check('2 threads, --first=1: stops at the first route, which finishes in the JS engine', b.results.length >= 1 && replays(platLevel, b.results) && b.done && b.done.end === 'finish' &&
+		b.done.workers.length === 2 && b.done.first && [5, 6].includes(b.done.first.seed), b.summary);
+	// a depth below any route: no cell at or past it, no route
+	const d = await goexplore(platFile, ['--workers=1', '--depth=20', '--maxTicks=200000', '--seconds=30']);
+	check('--depth=20 (no route that short): no route, no situation kept at tick 20 or later', d.results.length === 0 && d.done && d.done.end === 'ticks' && d.done.finish === 0 &&
+		d.done.layers < 20, `${d.summary}; deepest ${d.done && d.done.layers}`);
+	// stdin: "depth" (written before the workers start) and "stop" (the editor's messages)
+	const s1 = await goexplore(platFile, ['--workers=1', '--maxTicks=200000', '--seconds=30', '--stdin=1', '--seed=3'], (ch) => ch.stdin.write('depth 30\n'));
+	const s2 = await goexplore(platFile, ['--workers=1', '--seconds=30', '--stdin=1', '--seed=3'], (ch) => setTimeout(() => ch.stdin.write('stop\n'), 600));
+	check('stdin (the editor): "depth 30" (a route of 31 ticks known elsewhere) bounds the search; "stop" ends it',
+		s1.done && s1.done.end === 'ticks' && s1.results.length === 0 && s1.done.layers < 30 && s2.done && s2.done.end === 'stopped' && s2.done.seconds < 10,
+		`${s1.summary}; deepest ${s1.done && s1.done.layers} | ${s2.summary}`);
+	// a trophy the reach field rules out: at once
+	const hiCells = room(20, 10);
+	for (let x = 8; x <= 12; x++) hiCells.push([x, 3, 9]);
+	hiCells.push([10, 2, 121], [3, 8, 255]);
+	const hiBuf = ED.eelvlOf({ name: 'way too high', width: 20, height: 10, cells: hiCells });
+	const hiFile = path.join(HOME, 'toohigh.eelvl');
+	fs.writeFileSync(hiFile, hiBuf);
+	const u = await goexplore(hiFile, ['--workers=1', '--seconds=30']);
+	check('a trophy the reach field rules out from the start: "unreachable" at once', u.done && u.done.end === 'unreachable' && u.results.length === 0 && u.done.seconds < 5, u.summary);
+
+	// the editor without an NVIDIA GPU: the CPU search alone, with a note
+	const waitDone = async (limit) => {
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && Date.now() - t0 < limit) { await new Promise((r) => setTimeout(r, 100)); st = ED.state(); }
+		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((r) => setTimeout(r, 50)); st = ED.state(); }
+		return st;
+	};
+	let st0 = ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 4, workers: 1 }, { available: false, why: 'test: no GPU' });
+	check('no NVIDIA GPU: the search starts anyway, only the CPU strategy, with a note', st0.running && st0.strategies.length === 1 && st0.strategies[0].key === 'goexplore' &&
+		st0.strategies[0].cpu && /no NVIDIA GPU is available \(test: no GPU\)/.test(st0.cpuOnly) && st0.log.some((x) => /CPU searches alone/.test(x)), JSON.stringify(st0.strategies.map((q) => q.key)));
+	let st = await waitDone(20000);
+	let ev = st.result ? C.evaluate(platLevel, Uint8Array.from(st.result.inputs, (c) => c.charCodeAt(0) - 48)) : null;
+	check('no NVIDIA GPU: a route from the CPU search, verified, route.eetas', st.stage === 'found' && st.result.strategy === 'random runs (CPU)' && ev && ev.runTicks === st.result.runTicks &&
+		!!ED.solveFile('route.eetas') && st.elapsed >= 3.5 && st.elapsed < 15, `${st.stage} ${st.result ? `${st.result.time} (${st.result.ticks} ticks) after ${st.result.foundAfter} s` : st.message}; ${st.elapsed.toFixed(1)} s`);
+	ED.start({ eelvlB64: hiBuf.toString('base64'), seconds: 5, workers: 1 }, { available: false, why: 'test: no GPU' });
+	st = await waitDone(20000);
+	check('no NVIDIA GPU, a trophy out of reach: the physics verdict, at once', st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed < 4, `${st.elapsed.toFixed(1)} s: ${st.message}`);
+
+	// next to the eegpu stand-in: the CPU's first route bounds the exploration's next pass, and the CPU search stops
+	// when the GPU strategies have ended with a route
+	const W = 30, H = 8;
+	const buf = ED.eelvlOf({ name: 'ladder', width: W, height: H, cells: [...room(W, H), [2, 6, 255], [20, 6, 121]] });
+	const level = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf)));
+	const R = C.evaluate(level, new Uint8Array(300).fill(4)).ms.length;
+	const fake = path.join(HOME, 'fake-eegpu-cpu.js');
+	fs.writeFileSync(fake, FAKE);
+	const sc = path.join(HOME, 'cpu-ladder.json'), log = path.join(HOME, 'cpu-ladder.log');
+	// pass -1 reports a deep layer after 4 s (by then the CPU has a route: it is beaten), pass 0 finds the R-tick route
+	fs.writeFileSync(sc, JSON.stringify({ log, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 4000, hold: 4000 }], 0: [{ end: 'finish', idle: 0, layers: 3 }] }, beam: null }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc] });
+	st = await waitDone(45000);
+	const L = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore')
+		.map((a) => { const o = {}; for (const x of a) { const m = /^--(\w+)=(.*)$/.exec(x); if (m) o[m[1]] = m[2]; } return o; });
+	const X = st.strategies.find((q) => q.key === 'explore'), Q = st.strategies.find((q) => q.cpu);
+	const cpuRoute = st.log.map((x) => /random runs \(CPU\): route [\d:.]+ \((\d+) ticks\)/.exec(x)).find(Boolean);
+	check('with the GPU strategies: the CPU\'s first route bounds the next pass (--depth = route - 1), "every move" then finds a faster one, and the CPU search stops with them',
+		st.stage === 'found' && st.result.ticks === R && st.result.strategy === 'every move' && L.length >= 2 && L[0].depth === '100000' && cpuRoute && +L[1].depth <= +cpuRoute[1] - 1 &&
+		+L[1].depth >= R && X.ends['-1'] && X.ends['-1'].how === 'beaten' && Q && Q.found && Q.found.ticks >= R && !Q.live && st.elapsed < 30,
+		`${st.stage}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${L.map((o) => o.depth).join(', ')}; CPU route ${cpuRoute ? cpuRoute[1] : '-'} ticks; ` +
+		`${st.result ? `route ${st.result.ticks} ticks (${st.result.strategy}), R = ${R}` : st.message}; ${st.elapsed.toFixed(1)} s`);
+}
+
 // ---------------------------------------------------------------- GPU searches (--gpu)
 /** one route search on a level; the route replayed in the JS engine */
 async function solve(name, W, H, cells, seconds) {
 	const buf = ED.eelvlOf({ name, width: W, height: H, cells });
-	ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 16384 }, { available: true });
+	// (the CPU search runs next to the GPU's, as in the app, on one thread here)
+	ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 16384, workers: 1 }, { available: true });
 	const t0 = Date.now();
 	let st = ED.state();
 	while (st.running && Date.now() - t0 < (seconds + 30) * 1000) { await new Promise((r) => setTimeout(r, 500)); st = ED.state(); }
@@ -496,6 +622,7 @@ async function gpuSection() {
 	checksSection();
 	await appSection();
 	await passesSection();
+	await cpuSection();
 	if (GPU) await gpuSection();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

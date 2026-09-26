@@ -157,7 +157,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 	<header>
 		<div>
 			<h1><a href="/" title="Back to your runs"><span class="coin"></span>EE Auto TAS</a><span class="sl">/</span>Level editor</h1>
-			<div class="sub">Place blocks, a start and the trophy · the GPU tries every input every tick and finds a route to the trophy · a guide line is only a hint</div>
+			<div class="sub">Place blocks, a start and the trophy · the GPU tries every input every tick and the CPU tries random runs to find a route to the trophy · a guide line is only a hint</div>
 		</div>
 		<div class="pills"><span class="pill" id="pSize"></span><span class="pill" id="pGpu">GPU: …</span><a class="pill" href="/">&larr; Your runs</a></div>
 	</header>
@@ -231,8 +231,9 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 'use strict';
 // The level editor (served at /editor; server side: src/editor.js). The level lives in this page (and in localStorage);
 // the server turns it into .eelvl bytes (src/eelvl.js writeEelvl: POST /api/editor/eelvl), reads imported files the way
-// EEO does (POST /api/editor/parse), checks it (POST /api/editor/check) and runs the GPU route search (POST / GET
-// /api/editor/solve: eegpu beam --goal=1 [--guide], every route replayed in the exact JS engine). Blocks are drawn with
+// EEO does (POST /api/editor/parse), checks it (POST /api/editor/check) and runs the route search (POST / GET
+// /api/editor/solve: eegpu explore / beam on the GPU, src/goexplore.js on the CPU, alone without an NVIDIA GPU; every
+// route replayed in the exact JS engine). Blocks are drawn with
 // Everybody Edits' own images from the user's eeo-tas folder (GET /api/eegfx, the run viewer's gx* functions, copied
 // below), else in EE's minimap colors.
 const $ = (id) => document.getElementById(id);
@@ -1447,7 +1448,7 @@ async function loadGpu() {
 	p.className = `pill ${GPU && GPU.available ? 'ok' : 'no'}`;
 	p.textContent = GPU && GPU.available ? `GPU: ${GPU.model}` : GPU && (GPU.state === 'pending' || GPU.state === 'measuring') ? 'GPU: measuring…' : 'GPU: not available';
 	p.title = GPU && GPU.available ? GPU.text || '' : (GPU && GPU.why) || '';
-	$('rcSub').textContent = GPU && GPU.available ? GPU.model : 'needs an NVIDIA GPU';
+	$('rcSub').textContent = GPU && GPU.available ? `${GPU.model} + CPU` : 'CPU only (no NVIDIA GPU)';
 	if (GPU && !GPU.available && (GPU.state === 'pending' || GPU.state === 'measuring')) setTimeout(loadGpu, 3000);
 	renderChecks();
 }
@@ -1461,7 +1462,7 @@ function blockers() {
 	else if (CHECK.error) out.push(CHECK.error);
 	else for (const p of CHECK.problems) out.push(p.text);
 	if (!GPU) out.push('asking for the GPU…');
-	else if (!GPU.available) out.push(`The route search runs on an NVIDIA GPU, which is not available: ${GPU.why || 'none found'}.`);
+	// (no NVIDIA GPU: the CPU search runs alone)
 	return out;
 }
 function renderChecks() {
@@ -1483,7 +1484,9 @@ function renderChecks() {
 	rows.push(n >= 2 ? li('ok', '✓', `Guide line: ${GUIDE.strokes.length} stroke${GUIDE.strokes.length === 1 ? '' : 's'} (a hint, not a rail) · <a href="#" id="gClear">clear</a>`)
 		: li('opt', '–', 'Guide line: none (optional; the <b>Guide</b> tool, G)'));
 	if (!GPU) rows.push(li('opt', '…', 'GPU…'));
-	else rows.push(GPU.available ? li('ok', '✓', `GPU: ${esc(GPU.model)}`) : li('no', '✕', `GPU not available: ${esc(GPU.why || 'no NVIDIA GPU found')}`));
+	else if (GPU.available) rows.push(li('ok', '✓', `GPU: ${esc(GPU.model)} (and random runs on the CPU)`));
+	else if (GPU.state === 'pending' || GPU.state === 'measuring') rows.push(li('opt', '…', `GPU: ${esc(GPU.why || 'preparing')} Until then the CPU searches alone.`));
+	else rows.push(li('warn', '!', `No NVIDIA GPU (${esc(GPU.why || 'none found')}): the CPU searches alone with random runs. It finds routes, but not always the fastest.`));
 	$('checks').innerHTML = rows.join('');
 	if ($('gClear')) $('gClear').onclick = (e) => { e.preventDefault(); clearGuide(); };
 	$('bGuideClear').hidden = !GUIDE.strokes.length;
@@ -1532,10 +1535,12 @@ function renderSolve() {
 			const refining = (q) => q.key === 'explore' && q.depthCap > 0 && (q.state === 'running' || q.state === 'starting');
 			const what = (q) => (refining(q) ? `${q.found ? `route ${esc(q.found.time)} · ` : ''}looking for a faster one: tick ${q.layer.toLocaleString('en-US')} of ${q.depthCap.toLocaleString('en-US')}`
 				: q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : q.depthCap > 0 ? 'no faster route' : 'no route')
-				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : `tick ${q.layer.toLocaleString('en-US')}`);
-			const more = (q) => (q.key === 'explore' ? (q.state === 'running' && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
+				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : q.cpu ? `${q.layer.toLocaleString('en-US')} ticks deep` : `tick ${q.layer.toLocaleString('en-US')}`);
+			// (the CPU search: its threads, situations, how near; it goes on after a route, looking for a faster one)
+			const more = (q) => (q.key === 'explore' || q.cpu ? ((q.state === 'running' || q.live) && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
 			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
 		}
+		if (st.cpuOnly) h += `<div class="sst">${esc(st.cpuOnly)}</div>`;
 	}
 	const r = st.result;
 	if (r) {
