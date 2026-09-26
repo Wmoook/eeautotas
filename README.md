@@ -121,7 +121,10 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   readily as towards it (a run-up, a block to jump from, the long way round). Its first finish is the fastest route it
   can see. If its memory fills up (big levels) it starts again with coarser situations, and if it runs out of
   situations without a finish, with finer ones. Next to it, **straight for the trophy** keeps the tens of thousands of
-  attempts closest to the trophy (walking distance) every tick, which reaches further on big levels. The route is replayed in the
+  attempts closest to the trophy every tick, which reaches further on big levels. "Closest" is measured with the
+  physics: rising needs a jump from a floor (about 4 tiles), dots (about 1), arrows, liquids or a boost, and the way
+  through portals counts, so a spot under an unreachable trophy is not close, and whatever cannot reach the trophy at all
+  is not searched. The search is deterministic: the same level gives the same route every time. The route is replayed in the
   app's exact physics before it is shown, drawn on the map (**Preview here** plays it), and you can **Watch** it in
   the run viewer, **Optimize this route** (it becomes a run in your list and the optimizer starts on it), or download
   the `.eetas` and the `.eelvl` it was found on (in eeo-tas: open the level, then `/loadtas`, `/reset`, `/playtas`).
@@ -131,7 +134,7 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   walls). With a line, two searches run side by side: one along your line and one straight for the trophy (in case the
   line is wrong), next to "every move"; the fastest route wins.
 - Before a search the editor checks the level: a start, a trophy, and an open way between them (a walled-in trophy is
-  refused at once). If no route is found in time, it says so; try a longer search, more states per tick, or a guide
+  refused at once). Without a Start block the ball starts at the top-left, as in EE. If no route is found in time, it says so; try a longer search, more states per tick, or a guide
   line. When "every move" runs out of new situations without reaching the trophy, it says the trophy **looks impossible**
   (and how finely it told situations apart). Searches can run up to 3 hours. Either way it shows the **closest attempt** (orange on the map): the one that got nearest the trophy, measured
   along the ways the ball could walk (around walls, never through spikes or other deadly blocks). **Preview here**

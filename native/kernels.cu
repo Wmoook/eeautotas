@@ -175,10 +175,13 @@ __device__ void beamExpandBody(const BeamParams& p) {
 				}
 			}
 			if (p.goalWeight > 0 || p.closest) {
-				const float gd = goalScore(p, p.L, cx, cy);
-				if (p.goalWeight > 0) sc -= p.goalWeight * gd;
-				const u64 k = ((u64)orderedScore(gd) << 32) | ((u32)pi << 5) | (u32)o;
-				if (k < nearest) nearest = k;
+				// the distance to the trophy: the reach field (physics-aware) when loaded, else walking distance
+				const float gd = p.reach.on ? reachAt(p.reach, cx, cy, (float)s.speed_y, s.on_ground != 0) : goalScore(p, p.L, cx, cy);
+				if (p.goalWeight > 0) sc -= p.goalWeight * (gd < 0.f ? 1e4f : gd);   // cut off: behind everything else
+				if (gd >= 0.f) {
+					const u64 k = ((u64)orderedScore(gd) << 32) | ((u32)pi << 5) | (u32)o;
+					if (k < nearest) nearest = k;
+				}
 			}
 			c.score = sc;
 			c.hash = sim.hash(p.nocoins != 0);
@@ -279,16 +282,25 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 	if (pi >= p.nParents) return;
 	const State<TW>* par = (const State<TW>*)(p.parents + (size_t)pi * p.stateBytes);
 	u64 nearest = ~0ull;   // the closest child to the trophy (goal distance, parent, option)
+	// the parent's content (the tie-break between children that are the same state)
+	const u64 parentHash = splitmix(doubleToBits(par->px) ^ splitmix(doubleToBits(par->py) ^ splitmix(doubleToBits(par->speed_x) ^ splitmix(doubleToBits(par->speed_y) ^ (u64)par->q0 ^ ((u64)par->q1 << 16) ^ ((u64)par->jump_count << 32)))));
 	for (i32 o = 0; o < 18; o++) {
+		p.candKey[(size_t)pi * 18 + o] = 0;   // (none unless it reaches the end of this loop)
 		State<TW> s = *par;
 		Sim<TW> sim(p.L, s);
 		const double startPy = s.py;
+		float rcq = 0.f;   // the reach-field distance (the priority's head)
 		Input in = maskInput(option(o));
 		sim.tick(in);
 		if (s.broken || s.is_dead) continue;
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
-		if (p.closest) {
+		if (p.reach.on) {
+			const float rc = reachAt(p.reach, (float)s.px + 8.f, (float)s.py + 8.f, (float)s.speed_y, s.on_ground != 0);
+			if (p.prune && rc < 0.f) continue;   // the physics model rules this state out: it cannot reach the trophy
+			rcq = rc < 0.f ? 4095.f : fminf(rc * 8.f, 4095.f);
+			if (p.closest && rc >= 0.f) { const u64 k = ((u64)orderedScore(rc) << 32) | ((u32)pi << 5) | (u32)o; if (k < nearest) nearest = k; }
+		} else if (p.closest) {
 			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
 			if (k < nearest) nearest = k;
 		}
@@ -357,19 +369,69 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 			}
 		}
 		(void)startPy;
-		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26);
+		// (snapped: a whole-pixel position or a zero speed, what a wall, floor or ceiling hit leaves; such states are the
+		// precise ones a clip or a one-block gap needs, so they never share a cell with a near miss)
+		const u32 snapped = (floor(s.px) == s.px ? 1u : 0u) | (floor(s.py) == s.py ? 2u : 0u) | (eq0(s.speed_x) ? 4u : 0u) | (eq0(s.speed_y) ? 8u : 0u);
+		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26) | (snapped << 27);
 		u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
-		if (p.discrete) key = splitmix(key ^ sim.hashDiscrete()) | 1ull;
-		if (!cellInsert(p.cells, p.cellMask, key)) {
-			// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier, so it is there when the
-			// time doors switch (then its cells are new again: the door phase is part of them)
-			if (!(p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y))) continue;
-		}
-		const u32 slot = atomicAdd(p.nOut, 1u);
-		if (slot < p.outCap) p.out[slot] = ((u32)pi << 5) | (u32)o;
+		u64 disc = 0;
+		if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
+		// the proposal: the cell (12 low bits free for the layer tag) and a fixed priority: the reach-field distance
+		// (12 bits: nearer the trophy first), the state's content (19 bits), then the parent's content and the option
+		// (the rest: which of two identical children stands for the cell)
+		const u64 content = splitmix(doubleToBits(s.px) ^ splitmix(doubleToBits(s.py) ^ splitmix(doubleToBits(s.speed_x) ^ splitmix(doubleToBits(s.speed_y) ^ (u64)small ^ disc))));
+		// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier even when its cell is known, so it
+		// is there when the time doors switch (then its cells are new again: the door phase is part of them)
+		const bool rest = p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y);
+		p.candKey[(size_t)pi * 18 + o] = (key & ~0xfffull) | (rest ? 2ull : 0ull) | 1ull;
+		// (without a reach field the head is part of the content, so a full layer is still cut the same way every run)
+		const u64 head = p.reach.on ? (u64)(u32)rcq : (content >> 52);
+		p.candPrio[(size_t)pi * 18 + o] = (head << 51) | ((content & 0x7ffffull) << 32) | ((parentHash & 0x7ffffffull) << 5) | (u64)o;
 	}
 	if (p.closest && nearest < *(volatile unsigned long long*)p.closest) atomicMin(p.closest, (unsigned long long)nearest);
 }
+/** the claim, pass 1: each child finds its cell; new this layer -> it proposes its priority (the minimum wins) */
+extern "C" __global__ void exploreClaimPropose(ExploreClaim q) {
+	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nCand) return;
+	const u64 ck = q.candKey[i];
+	if (!ck) { q.candSlot[i] = EE_SLOT_DROP; return; }
+	const u64 cell = ck & ~0xfffull, tag = ((u64)(q.layer & 0x7ffu) << 1) | 1ull;
+	u32 slot = (u32)(splitmix(cell) & q.mask), res = EE_SLOT_DROP;
+	for (u32 probe = 0; probe < 64; probe++) {
+		u64 prev = q.cells[slot];
+		if (prev == 0ull) {
+			prev = atomicCAS((unsigned long long*)&q.cells[slot], 0ull, (unsigned long long)(cell | tag));
+			if (prev == 0ull) { res = slot; break; }   // new: this layer's
+		}
+		if ((prev & ~0xfffull) == cell) {
+			res = (prev & 0xfffull) == tag ? slot : ((ck & 2ull) ? EE_SLOT_REST : EE_SLOT_DROP);   // earlier layer: seen
+			break;
+		}
+		slot = (slot + 1) & q.mask;
+	}
+	q.candSlot[i] = res;
+	if (res < EE_SLOT_REST) atomicMin((unsigned long long*)&q.cellBest[res], (unsigned long long)q.candPrio[i]);
+}
+/** pass 2: count the winners and their priority bins (for a full layer) */
+extern "C" __global__ void exploreClaimCount(ExploreClaim q) {
+	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nCand) return;
+	const u32 s = q.candSlot[i];
+	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i])) return;
+	atomicAdd(q.nWin, 1u);
+	atomicAdd(&q.hist[prioBin(q.candPrio[i])], 1u);
+}
+/** pass 3: the winners (bins below thrBin) are the next layer */
+extern "C" __global__ void exploreClaimTake(ExploreClaim q) {
+	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nCand) return;
+	const u32 s = q.candSlot[i];
+	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i]) || prioBin(q.candPrio[i]) >= q.thrBin) return;
+	const u32 k = atomicAdd(q.nOut, 1u);
+	if (k < q.outCap) q.out[k] = ((i / 18u) << 5) | (i % 18u);
+}
+
 template <int TW>
 __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;

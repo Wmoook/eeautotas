@@ -84,28 +84,45 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fexp = g.fn("exploreExpand_" + std::to_string(TW)), fmat = g.fn("exploreMaterialize_" + std::to_string(TW));
-	if (!fexp || !fmat) { printf("{\"error\":\"explore kernels missing\"}\n"); return 4; }
+	cu::CUfunction fProp = g.fn("exploreClaimPropose"), fCount = g.fn("exploreClaimCount"), fTake = g.fn("exploreClaimTake");
+	if (!fexp || !fmat || !fProp || !fCount || !fTake) { printf("{\"error\":\"explore kernels missing\"}\n"); return 4; }
 	const size_t SB = sizeof(S);
 	// the visited-cell table: 1 GB (2^27 cells) on GPUs with 6 GB or more, else smaller; stop before it is half full
 	// (probing degrades). The state buffers take at most about a third of the memory.
 	const size_t memB = g.d.mem ? g.d.mem : (size_t)4 << 30;
-	uint32_t cellLog = memB >= ((size_t)6 << 30) ? 27 : memB >= ((size_t)3 << 30) ? 26 : 25;
+	uint32_t cellLog = memB >= ((size_t)11 << 30) ? 27 : memB >= ((size_t)5 << 30) ? 26 : 25;   // (16 bytes per cell)
 	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
 	const uint32_t cellCount = 1u << cellLog;
-	const int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S))));
+	const int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
 	const uint32_t hitCap = 1u << 16;
-	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick;
+	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist;
+	const size_t nCandMax = (size_t)cap * 18;
 	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull * cellCount) &&
-		dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap);
+		dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap) &&
+		dbest.alloc(8ull * cellCount) && dck.alloc(8 * nCandMax) && dcp.alloc(8 * nCandMax) && dcs.alloc(4 * nCandMax) && dnwin.alloc(4) && dhist.alloc(4 * 4096);
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	cu::cuMemsetD8_v2(dbest.p, 0xff, 8ull * cellCount);
+	ExploreClaim Q;
+	memset(&Q, 0, sizeof Q);
+	Q.cells = (u64*)(uintptr_t)dcells.p; Q.cellBest = (u64*)(uintptr_t)dbest.p; Q.mask = cellCount - 1;
+	Q.candKey = (const u64*)(uintptr_t)dck.p; Q.candPrio = (const u64*)(uintptr_t)dcp.p; Q.candSlot = (u32*)(uintptr_t)dcs.p;
+	Q.out = (u32*)(uintptr_t)dout.p; Q.nOut = (u32*)(uintptr_t)dnout.p; Q.outCap = (u32)cap; Q.nWin = (u32*)(uintptr_t)dnwin.p; Q.hist = (u32*)(uintptr_t)dhist.p;
 	const bool finishTarget = opt(argc, argv, "finish", "0") == "1";
 	int finishLayer = -1;
 	// the closest attempt (the route search): the goal field on the GPU, the per-layer minimum
 	std::vector<float> goalDist;
 	cu::Buf dgoal, dclose;
 	Closest nearest;
-	const bool wantNear = finishTarget && goalField(L, goalDist);
-	if (wantNear && (!dgoal.upload(goalDist.data(), 4 * goalDist.size()) || !dclose.alloc(8))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	ReachGpu reachGpu;
+	ReachField reachF;
+	memset(&reachF, 0, sizeof reachF);
+	{
+		const std::string rf = opt(argc, argv, "reach", "");
+		std::string err;
+		if (!rf.empty() && !reachGpu.load(rf, L, reachF, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
+	}
+	const bool wantNear = finishTarget && (reachF.on || goalField(L, goalDist));
+	if (wantNear && ((!reachF.on && !dgoal.upload(goalDist.data(), 4 * goalDist.size())) || !dclose.alloc(8))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
 	cu::cuMemsetD8_v2(dnhits.p, 0, 4);
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
@@ -125,6 +142,8 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.cqx = atof(opt(argc, argv, "cqx", "0.5").c_str()); P.cqv = atof(opt(argc, argv, "cqv", "16").c_str());
 	if (finishTarget) P.target = 3;
 	if (wantNear) { P.goalDist = (const float*)(uintptr_t)dgoal.p; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
+	P.reach = reachF;
+	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
 	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;
 	cu::Buf drt, dtb, drx, dry, drvx, drvy, dhk, dhv, dqb;
@@ -165,6 +184,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		P.minAhead = atoi(opt(argc, argv, "minahead", "40").c_str());
 	}
 	P.pick = (const u32*)(uintptr_t)dpick.p;
+	P.candKey = (u64*)(uintptr_t)dck.p; P.candPrio = (u64*)(uintptr_t)dcp.p;
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;
@@ -191,6 +211,28 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			nearest.take(cl, d);
 			nearest.print(elapsed(), false, prefixStr, from0, inputsOf);
 		}
+		// the claim: the cells new in this layer, one child each (the lowest priority); a layer over the cap keeps the
+		// lowest priority bins
+		Q.candKey = (const u64*)(uintptr_t)dck.p; Q.nCand = (u32)nParents * 18; Q.layer = (u32)d;
+		{
+			const unsigned cb = (Q.nCand + 255) / 256;
+			void* aq[] = { &Q };
+			cu::cuMemsetD8_v2(dnwin.p, 0, 4); cu::cuMemsetD8_v2(dhist.p, 0, 4 * 4096);
+			if (cu::cuLaunchKernel(fProp, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuLaunchKernel(fCount, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) {
+				printf("{\"error\":\"explore claim failed\"}\n"); return 5;
+			}
+			uint32_t nWin = 0;
+			cu::cuMemcpyDtoH_v2(&nWin, dnwin.p, 4);
+			Q.thrBin = 4096;
+			if (nWin > (uint32_t)cap) {
+				std::vector<uint32_t> hist(4096);
+				cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4 * 4096);
+				uint64_t acc = 0; uint32_t b = 0;
+				while (b < 4096 && acc + hist[b] <= (uint64_t)cap) acc += hist[b++];
+				Q.thrBin = std::max(1u, b);
+			}
+			if (cu::cuLaunchKernel(fTake, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore claim failed\"}\n"); return 5; }
+		}
 		uint32_t nOut = 0, nh = 0;
 		cu::cuMemcpyDtoH_v2(&nOut, dnout.p, 4);
 		cu::cuMemcpyDtoH_v2(&nh, dnhits.p, 4);
@@ -198,10 +240,17 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		if (nh > hitsSeen) {
 			std::vector<ExploreHit> hv(nh);
 			cu::cuMemcpyDtoH_v2(hv.data(), dhits.p, sizeof(ExploreHit) * nh);
+			// the layer's hits in a fixed order (by their inputs), whatever order the GPU found them in
+			std::vector<std::pair<std::string, uint32_t>> order;
 			for (uint32_t i = hitsSeen; i < nh; i++) {
-				const ExploreHit& h = hv[i];
-				std::string in = prefixStr + inputsOf(d, h.parent, h.option);
-				if (h.jumpOption != 255) in.push_back((char)('0' + h.jumpOption));
+				std::string in = prefixStr + inputsOf(d, hv[i].parent, hv[i].option);
+				if (hv[i].jumpOption != 255) in.push_back((char)('0' + hv[i].jumpOption));
+				order.push_back({ in, i });
+			}
+			std::sort(order.begin(), order.end());
+			for (const auto& oh : order) {
+				const ExploreHit& h = hv[oh.second];
+				const std::string& in = oh.first;
 				if (rejoin) {
 					const int j = h.refTick;
 					if (j < 0 || j >= (int)refH.size() || (int)in.size() >= rejoinBest[j]) continue;

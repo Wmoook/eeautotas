@@ -46,6 +46,25 @@ static bool goalField(const Level& L, std::vector<float>& goalDist) {
 	return true;
 }
 
+/** The reach file (src/reach.js writeReachFile) on the GPU: fills R (device pointers) and keeps the buffers alive. */
+struct ReachGpu {
+	cu::Buf cost, cls, own, refresh;
+	bool load(const std::string& file, const Level& L, ReachField& R, std::string& err) {
+		std::vector<uint8_t> raw = readFile(file.c_str());
+		if (raw.size() < 28 || memcmp(raw.data(), "RCH1", 4) != 0) { err = "bad reach file " + file; return false; }
+		int32_t W, H, B, JB, mode; float g;
+		memcpy(&W, &raw[4], 4); memcpy(&H, &raw[8], 4); memcpy(&B, &raw[12], 4); memcpy(&JB, &raw[16], 4); memcpy(&g, &raw[20], 4); memcpy(&mode, &raw[24], 4);
+		const size_t N = (size_t)W * H, pad = (N + 3) & ~(size_t)3;
+		if (W != L.W || H != L.H || B < 1 || B > 255 || raw.size() != 28 + 3 * pad + 4 * N * (size_t)(B + 1)) { err = "the reach file does not match the level"; return false; }
+		const uint8_t* p = raw.data() + 28;
+		if (!cls.upload(p, N) || !own.upload(p + pad, N) || !refresh.upload(p + 2 * pad, N) || !cost.upload(p + 3 * pad, 4 * N * (size_t)(B + 1))) { err = cu::lastError; return false; }
+		R.cost = (const float*)(uintptr_t)cost.p; R.cls = (const u8*)(uintptr_t)cls.p; R.own = (const u8*)(uintptr_t)own.p; R.refresh = (const u8*)(uintptr_t)refresh.p;
+		R.W = W; R.H = H; R.B = B; R.JB = JB; R.g = g; R.on = 1;
+		(void)mode;
+		return true;
+	}
+};
+
 /** The closest attempt of a search: the state nearest the trophy so far (goal field), printed as
  *  {"ev":"closest","dist":tiles,"tick":T,"inputs":...} when it improves, at most every 0.5 s (and at the end). */
 struct Closest {
@@ -222,7 +241,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	Q.slot = (u32*)(uintptr_t)dslot.p; Q.win = (u8*)(uintptr_t)dwin.p; Q.mm = (u32*)(uintptr_t)dmm.p; Q.hist = (u32*)(uintptr_t)dhist.p; Q.nBins = NBINS;
 	Q.bucketCnt = (u32*)(uintptr_t)dbc.p; Q.bucketCap = bucketCap; Q.pick = (u32*)(uintptr_t)dpick.p; Q.nPick = (u32*)(uintptr_t)dnpick.p; Q.K = (u32)K;
 	cu::Buf dclose;
-	if (!goalDist.empty()) {
+	if (!goalDist.empty() || !opt(argc, argv, "reach", "").empty()) {
 		if (!dclose.alloc(8)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	}
 	Closest nearest;
@@ -241,7 +260,13 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	P.nRef = (i32)fX.size();
 	P.out = (BeamChild*)(uintptr_t)dout.p;
 	P.pick = (const u32*)(uintptr_t)dpick.p;
-	if (!goalDist.empty()) P.closest = (unsigned long long*)(uintptr_t)dclose.p;
+	ReachGpu reachGpu;
+	{
+		const std::string rf = opt(argc, argv, "reach", "");
+		std::string err;
+		if (!rf.empty() && !reachGpu.load(rf, L, P.reach, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
+	}
+	if (!goalDist.empty() || P.reach.on) P.closest = (unsigned long long*)(uintptr_t)dclose.p;
 
 	std::vector<std::vector<uint32_t>> lineage;   // per layer: kept children as (parent << 5 | option)
 	std::vector<BeamChild> kids;

@@ -198,7 +198,7 @@ function checksSection() {
 	let r = ED.check(lv([[2, 8, 255], [12, 8, 121]]));
 	check('start + trophy + an open way: no problems', r.problems.length === 0 && r.reach === 'open' && JSON.stringify(r.start) === '[2,8]', JSON.stringify(r));
 	r = ED.check(lv([[12, 8, 121]]));
-	check('no start', r.problems.some((q) => q.code === 'spawn'), JSON.stringify(r.problems));
+	check('no start block: the ball starts at the top-left (1, 1) like in EE; a note, not a problem', r.problems.length === 0 && JSON.stringify(r.start) === '[1,1]' && r.noSpawn && r.notes.some((s) => /top-left/.test(s)), JSON.stringify(r));
 	r = ED.check(lv([[2, 8, 255]]));
 	check('no trophy', r.problems.some((q) => q.code === 'trophy'), JSON.stringify(r.problems));
 	const box = [[11, 4, 9], [12, 4, 9], [13, 4, 9], [11, 5, 9], [13, 5, 9], [11, 6, 9], [12, 6, 9], [13, 6, 9]];
@@ -262,7 +262,7 @@ async function appSection() {
 		r = await request(port, 'POST', '/api/editor/check', { eelvlB64: b64 });
 		check('POST /api/editor/check', r.status === 200 && r.json.problems.length === 0 && r.json.reach === 'open' && r.json.gpu && r.json.gpu.id === 'gpu', JSON.stringify(r.json).slice(0, 160));
 		r = await request(port, 'POST', '/api/editor/solve', { level: { name: 'x', width: 10, height: 6, cells: room(10, 6) } });
-		check('POST /api/editor/solve without a start or a trophy: 400 with the problems (before any GPU work)', r.status === 400 && r.json.problems.length === 2, `${r.status} ${r.json && r.json.error}`);
+		check('POST /api/editor/solve without a trophy: 400 with the problem (before any GPU work)', r.status === 400 && r.json.problems.length === 1 && r.json.problems[0].code === 'trophy', `${r.status} ${r.json && r.json.error}`);
 		r = await request(port, 'GET', '/api/editor/solve');
 		check('GET /api/editor/solve before any search: idle', r.status === 200 && r.json.stage === 'idle' && !r.json.running, JSON.stringify(r.json));
 		r = await request(port, 'GET', '/api/editor/solve/route.eetas');
@@ -304,7 +304,7 @@ async function solve(name, W, H, cells, seconds) {
 	return { ok: !!(ok && ev && ev.runTicks === st.result.runTicks), st, ev, text };
 }
 async function gpuSection() {
-	section('gpu: route searches (at most 20 s each)');
+	section('gpu: route searches (at most 60 s each: a hot laptop GPU throttles hard)');
 	const G = require('../src/gpu.js');
 	if (!G.nativeTool()) { check('the GPU engine is built (node tools/build-native.js)', false); return; }
 	// platforms up to a ledge
@@ -313,29 +313,41 @@ async function gpuSection() {
 	for (let x = 18; x <= 22; x++) cells.push([x, 13, 9]);
 	for (let x = 26; x <= 31; x++) cells.push([x, 10, 9]);
 	cells.push([29, 9, 121], [2, 17, 255]);
-	let r = await solve('gpu test', 40, 20, cells, 20);
+	let r = await solve('gpu test', 40, 20, cells, 60);
 	check('platforms: a route to the trophy, and it finishes in the JS engine', r.ok, r.text);
 	// a time door (156) between the start and the trophy: shut for the first 5 s, so the route has to wait for it
 	cells = room(20, 8);
 	for (let y = 1; y <= 5; y++) cells.push([12, y, 9]);
 	cells.push([12, 6, 156], [17, 6, 121], [2, 6, 255]);
-	r = await solve('time door', 20, 8, cells, 20);
+	r = await solve('time door', 20, 8, cells, 60);
 	check('a time door: the route waits for it (finishes after tick 500) and finishes in the JS engine', r.ok && r.ev.complete >= 500, r.text);
 	// a coin door (43, 1 coin) in front of the trophy and the coin behind the start: away from the trophy first
 	cells = room(24, 8);
 	for (let y = 1; y <= 5; y++) cells.push([16, y, 9]);
 	cells.push([16, 6, 43, 1], [21, 6, 121], [8, 6, 255], [2, 6, 100]);
-	r = await solve('coin door', 24, 8, cells, 20);
+	r = await solve('coin door', 24, 8, cells, 60);
 	check('a coin door: the route takes the coin behind the start first, and finishes in the JS engine', r.ok && r.ev.coins >= 1, r.text);
-	// no route (the trophy on a ledge too high to jump to): the closest attempt is kept, with its path and .eetas
+	// the trophy sealed off behind a wall, reachable only through a portal pair (no guide line)
+	cells = room(20, 8);
+	for (let y = 1; y <= 6; y++) cells.push([13, y, 9]);
+	cells.push([8, 6, 242, 0, 1, 2], [15, 6, 242, 0, 2, 1], [17, 6, 121], [2, 6, 255]);
+	r = await solve('portal', 20, 8, cells, 60);
+	check('a portal: the route goes through it without a guide line, and finishes in the JS engine', r.ok, r.text);
+	// no route, proven: the trophy on a ledge two tiles above any jump (the physics check finds no way up)
 	cells = room(20, 10);
 	for (let x = 8; x <= 12; x++) cells.push([x, 3, 9]);
 	cells.push([10, 2, 121], [3, 8, 255]);
-	r = await solve('too high', 20, 10, cells, 6);
+	r = await solve('way too high', 20, 10, cells, 10);
+	check('no route, proven: the physics check finds no way up, and the verdict says so', !r.st.result && r.st.stage === 'not found' && r.st.impossible && r.st.impossible.by === 'physics' &&
+		/cannot be reached/.test(r.st.message), r.st.message);
+	// no route, not provable by the model (the ledge is 1 px too high for a jump): the closest attempt is kept
+	cells = room(20, 10);
+	for (let x = 8; x <= 12; x++) cells.push([x, 4, 9]);
+	cells.push([10, 3, 121], [3, 8, 255]);
+	r = await solve('just too high', 20, 10, cells, 10);
 	const cl = r.st.closest;
-	check('no route: "not found", with the closest attempt (walking distance, its path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && cl && cl.tiles > 0 && cl.tiles < 8 &&
-		cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy})` : `${r.st.stage}: no closest attempt`);
-	check('no route: "every move" tried every situation, and the verdict says so', !!r.st.impossible && /impossible/.test(r.st.message), r.st.message);
+	check('no route: "not found", with the closest attempt (its distance, path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && !r.st.impossible && cl && cl.tiles > 0 && cl.tiles < 8 &&
+		cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy}); ${r.st.message.slice(0, 120)}` : `${r.st.stage}: no closest attempt`);
 }
 
 (async () => {

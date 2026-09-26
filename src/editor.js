@@ -29,6 +29,7 @@ const EL = require('./eelvl.js');
 const G = require('./gpu.js');
 const B = require('./blocks.js');
 const M = require('./minimap.js');
+const RF = require('./reach.js');
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const SPAWN = 255, TROPHY = 121;
@@ -212,12 +213,14 @@ function inspect(buf) {
 	const problems = [], notes = [];
 	const trophies = [];
 	for (let i = 0; i < N; i++) if (level.fg[i] === TROPHY) trophies.push(i);
+	// no spawn block: EE puts the ball at the top-left, tile (1, 1) (Player.placeAtSpawn; eesim.js _placeAtSpawn)
+	const noSpawn = !level.spawnsX.length;
 	let start = null;
-	if (!level.spawnsX.length) problems.push({ code: 'spawn', text: 'Place the start: the spawn point block.' });
-	else {
+	{
 		const sim = new E.EESim(level);
 		sim.reset();
 		start = [Math.trunc(sim.px + 8) >> 4, Math.trunc(sim.py + 8) >> 4];
+		if (noSpawn) notes.push(`No start block: the ball starts at the top-left, tile (${start[0]}, ${start[1]}), like in EE.`);
 		if (level.spawnsX.length > 1) notes.push(`${level.spawnsX.length} spawn points: the run starts at (${start[0]}, ${start[1]}) (eeo-tas /reset moves to the second one)`);
 	}
 	if (!trophies.length) problems.push({ code: 'trophy', text: 'Place the trophy (the finish block): the search looks for the fastest way to it.' });
@@ -229,7 +232,7 @@ function inspect(buf) {
 			const viaPortals = reachFrom(level, start[0], start[1], true);
 			if (trophies.some((i) => viaPortals[i])) {
 				reach = 'portals';
-				notes.push('The trophy is only reachable through portals. The search measures the way to the trophy without portals, so draw a guide line through them.');
+				notes.push('The way to the trophy goes through portals (the search follows them).');
 			} else {
 				reach = 'none';
 				problems.push({ code: 'unreachable', text: 'The trophy cannot be reached: it is walled in (no open tiles lead from the start to it, not even through portals).' });
@@ -237,12 +240,12 @@ function inspect(buf) {
 		}
 	}
 	if (level.multiTargetPortals) notes.push('Some portals have several exits: EE picks one at random, so the route may need a few tries in EEO.');
-	return { problems, notes, start, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json };
+	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json };
 }
 /** inspect() for the page: no engine objects */
 function check(buf) {
 	const r = inspect(buf);
-	return { problems: r.problems, notes: r.notes, start: r.start, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height };
+	return { problems: r.problems, notes: r.notes, start: r.start, noSpawn: r.noSpawn, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height };
 }
 
 // ---------------------------------------------------------------- the route search (one at a time)
@@ -263,16 +266,20 @@ function check(buf) {
 // find a faster one), and the fastest verified route wins.
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => ['explore', f.bin, '-', '--finish=1', '--discrete=1', '--depth=100000', `--seconds=${q.seconds}`, '--coarse=0',
-		`--cqx=${0.5 * 2 ** q.pass}`, `--cqv=${16 * 2 ** q.pass}`, `--qy=${2 ** q.pass}`, `--qvy=${16 * 2 ** q.pass}`] },
+		`--cqx=${0.5 * 2 ** q.pass}`, `--cqv=${16 * 2 ** q.pass}`, `--qy=${q.pass >= PASS_MAX ? 0 : 2 ** q.pass}`, `--qvy=${q.pass >= PASS_MAX ? 0 : 16 * 2 ** q.pass}`,
+		`--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 };
-const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`];
+const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
 // the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y; each pass halves
-// (finer, after a pass tried every state) or doubles (coarser, after the table filled) them, up to two steps
+// (finer, after a pass tried every state) or doubles (coarser, after the table filled) them, up to two steps; the
+// finest pass keeps heights and vertical speeds exact. Whatever the pass, a whole-pixel position or a zero speed (what
+// a wall, floor or ceiling hit leaves) never shares a cell with a near miss, and which state stands for a cell is fixed
+// (the nearest to the trophy by the reach field, then the state itself): the same level gives the same search.
 const PASS_MIN = -2, PASS_MAX = 2;
 /** how finely the exploration's pass p tells situations apart: x position and x speed (y is twice as fine) */
-const passGrain = (p) => ({ '-2': '8 px and 1/4 px/tick', '-1': '4 px and 1/8 px/tick', 0: '2 px and 1/16 px/tick', 1: '1 px and 1/32 px/tick', 2: '1/2 px and 1/64 px/tick' })[p];
+const passGrain = (p) => ({ '-2': '8 px and 1/4 px/tick', '-1': '4 px and 1/8 px/tick', 0: '2 px and 1/16 px/tick', 1: '1 px and 1/32 px/tick', 2: '1/2 px and 1/64 px/tick, heights exact' })[p];
 const passText = (p) => (p === 0 ? '' : p < 0 ? ` (coarser cells, pass ${1 - p})` : ` (finer cells, pass ${1 + p})`);
 let S = null;        // the current / last search (public state, also in solve.json)
 let kids = [];       // the eegpu processes of the running search (one per strategy)
@@ -316,9 +323,17 @@ function start(b, gpu) {
 	const depth = Math.max(100, Math.min(20000, Math.floor(6e8 / (4 * width)), Math.round(+b.depth || 6000)));
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
-	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas') };
+	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
+		reach: path.join(d, 'reach.bin') };
 	fs.writeFileSync(files.eelvl, buf);
 	fs.writeFileSync(files.bin, G.levelBlob(ins.level));
+	// the reach field (src/reach.js): the searches' physics-aware distance; the explore prunes what it rules out
+	const rf = RF.reachField(ins.level);
+	RF.writeReachFile(rf, files.reach);
+	const sim0 = new E.EESim(ins.level);
+	sim0.reset();
+	const startCost = RF.costAt(rf, sim0.px, sim0.py, sim0.speed_y, !!sim0.on_ground);
+	const noWayUp = rf.mode === 'physics' && startCost < 0;
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
 	if (guide.length) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
 	const which = guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal'];
@@ -327,12 +342,14 @@ function start(b, gpu) {
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
 		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [],
+		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, states: 0, ticksPerSec: 0, found: null, error: null,
 			pass: 0, passes: 1, detail: '' })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length ? ` (a ${guide.length}-point line)` : ''));
 	save();
-	cur = { level: ins.level, buf, tool, files, opts: { width, depth } };
+	if (noWayUp) note('the physics check finds no way from the start to the trophy (checking with every move)');
+	cur = { level: ins.level, buf, tool, files, opts: { width, depth, prune: rf.mode === 'physics' } };
 	kids = which.map((k, n) => launch(n));
 	return state();
 }
@@ -443,10 +460,15 @@ function finish() {
 		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${every}; the beams kept ${S.width.toLocaleString('en-US')} states per tick)` +
 			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
 			` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`;
-		if (XE) {
-			S.impossible = XE.exhausted;
-			S.message = `It looks impossible: "every move" tried every situation the ball can get into (positions and speeds told apart to ${XE.exhausted.grain}, and every gravity, jump and pickup state) up to tick ${XE.exhausted.tick.toLocaleString('en-US')}, when there was nothing new left to try, and none of them reaches the trophy.` +
-				(XE.exhausted.pass < PASS_MAX ? ' (A trick that needs a finer position than that is not ruled out.)' : '');
+		if (S.physics && S.physics.noWayUp) {
+			// the reach field is optimistic (generous jumps, dots, arrows; sideways moves free), so this is a proof
+			S.impossible = { by: 'physics' };
+			S.message = 'No route: the trophy cannot be reached from the start. There is no way up to it: a jump rises about 4 tiles, a dot about 1, ' +
+				'arrows and liquids by their height (the check is generous), and walls and spikes block the rest.';
+		} else if (XE) {
+			// merged situations are not a proof: one exact pixel can hide between them
+			S.message = `No route found: "every move" ran out of new situations by tick ${XE.exhausted.tick.toLocaleString('en-US')} (positions and speeds told apart to ${XE.exhausted.grain}, ` +
+				'and every gravity, jump and pickup state; the physics check ruled out the rest). That is strong evidence, not proof: a trick that needs one exact pixel can hide between merged situations.';
 		}
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);

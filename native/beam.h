@@ -23,6 +23,47 @@ struct BeamChild {
 	i32 rejoin;     // reference tick j of an exact rejoin (flags & 4), else -1
 };
 
+/** The reach field (src/reach.js): the cost to the trophy per (tile, rise budget b), b = the tile rows the box centre
+ *  can still rise into; -1 = unreachable (the model is optimistic, so that is a proof). on = 0: not loaded. */
+struct ReachField {
+	const float* cost; const u8* cls; const u8* own; const u8* refresh;
+	i32 W, H, B, JB; float g; i32 on;
+};
+/** the budget of a ball in tile i (row `row`), whose centre can rise to `top` px (rising) */
+EE_HD i32 reachBudget(const ReachField& R, i32 i, i32 row, float top, bool rising, bool onGround) {
+	i32 b = 0;
+	if (rising) { b = row - (i32)floorf(top / 16.f); if (b < 0) b = 0; if (b > R.B - 1) b = R.B - 1; }
+	if (onGround && R.refresh[i] && b < R.JB) b = R.JB;
+	if (R.cls[i] != 1 && b < (i32)R.own[i]) b = R.own[i];   // (1 = a tile with normal gravity)
+	return b;
+}
+/** the cost to the trophy of a ball (box centre cx, cy px; vertical speed vy px/tick; on the ground): -1 when its tile
+ *  and budget are cut off, else the tile's cost blended bilinearly with the neighbours' (each with its own budget;
+ *  cut-off ones left out) for a smooth score */
+EE_HD float reachAt(const ReachField& R, float cx, float cy, float vy, bool onGround) {
+	const i32 tx = (i32)floorf(cx / 16.f), ty = (i32)floorf(cy / 16.f);
+	if (tx < 0 || ty < 0 || tx >= R.W || ty >= R.H) return -1.f;
+	const bool rising = vy < 0.f;
+	const float top = rising ? cy - vy * vy / (2.f * R.g) : cy;
+	const i32 S = R.B + 1, i0 = ty * R.W + tx;
+	const float c0 = R.cost[(size_t)i0 * S + reachBudget(R, i0, ty, top, rising, onGround)];
+	if (c0 < 0.f) return -1.f;
+	const float fx = cx / 16.f - 0.5f, fy = cy / 16.f - 0.5f;
+	const i32 x0 = (i32)floorf(fx), y0 = (i32)floorf(fy);
+	const float ax = fx - x0, ay = fy - y0;
+	float v = 0.f, w = 0.f;
+	for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
+		const i32 x = x0 + dx, y = y0 + dy;
+		if (x < 0 || y < 0 || x >= R.W || y >= R.H) continue;
+		const i32 j = y * R.W + x;
+		const float cj = R.cost[(size_t)j * S + reachBudget(R, j, y, top, rising, onGround && j == i0)];
+		if (cj < 0.f) continue;
+		const float k = (dx ? ax : 1.f - ax) * (dy ? ay : 1.f - ay);
+		v += k * cj; w += k;
+	}
+	return w > 1e-6f ? v / w : c0;
+}
+
 struct BeamParams {
 	Level L;
 	const u8* parents; i32 stateBytes; i32 nParents;
@@ -43,6 +84,7 @@ struct BeamParams {
 	// the run's per-tick position and speed (float; for the closeness score), n + 1 entries
 	const float* rX; const float* rY; const float* rSX; const float* rSY; i32 nRef;
 	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
+	ReachField reach;                  // when on: the score's and the closest attempt's distance (instead of goalDist)
 };
 
 /** Past the guide: the best "closeness" to a state of the run on this tile, favouring later ticks: states that are
