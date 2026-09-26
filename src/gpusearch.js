@@ -177,7 +177,7 @@ function pruneLibrary(graph) {
 // ---------------------------------------------------------------- the reference: the newest judged best
 let level = null, nc = false, RANDOM = false, TC = null;
 let ref = null;          // { key, masks, n, H, R, ev (C.evaluate), tickOf (hash -> last tick) }
-let own = null;          // the last run this searcher judged faster: { key, ms, ev }
+let own = null;          // the last run this searcher judged faster: { key, ms, ev, inbox (its inbox file while the grind decides) }
 const ownRuns = [];      // the runs this searcher judged (for the union), newest last
 let diskKey = '', disk = null;
 const sameOrBetter = (a, b) => a.runTicks < b.runTicks || (a.runTicks === b.runTicks && a.chance >= b.chance - 1e-9);
@@ -191,6 +191,15 @@ async function refresh() {
 		const ev = C.evaluate(level, ms);
 		if (!ev) { if (!ref) { log('GPU: best.eetas does not finish; waiting'); } return !!ref; }
 		diskKey = key; disk = { key, ms: ev.ms, ev };
+	}
+	if (own && own.inbox) {
+		// the grind's verdict on it (e.g. a best with a higher random-portal chance came from the CPU meanwhile): a run
+		// it did not take must not stay the reference, or every later run built on it is refused too
+		const rec = J.inboxResult(ID, own.inbox);
+		if (rec) {
+			own.inbox = '';
+			if (!rec.accepted && !sameOrBetter(disk.ev, own.ev)) { log(`GPU: the grind did not take ${C.fmt(own.ev.runTicks)} (${rec.reason}); searching the job's best again`); own = null; }
+		}
 	}
 	if (own && sameOrBetter(disk.ev, own.ev)) own = null;   // the grind has it (or something better)
 	const pick = own || disk;
@@ -261,9 +270,10 @@ function unionGraph() {
 		keys.add(s.file);
 		const tr = TC.get(s.file);
 		if (!tr || tr.n < 0) continue;
-		runs.push({ tr, tag: s.tag, file: s.file });
+		runs.push({ tr, tag: s.tag, file: s.file, mtime: s.mtime });
 	}
-	const sig = runs.map((r) => (r.file ? `${r.file}:${r.tr.n}` : r.tr.n)).join('|') + '|' + ref.key;
+	// (a file rewritten in place, grind_now.eetas or another job's best, is a new run: its mtime is in the signature)
+	const sig = runs.map((r) => (r.file ? `${r.file}:${r.mtime}:${r.tr.n}` : r.tr.n)).join('|') + '|' + ref.key;
 	if (graph && sig === graphSig) return graph;
 	TC.prune((k) => keys.has(k) || keys.has(k.split('|')[0]));
 	graph = S.unionGraph(runs.map((r) => r.tr));
@@ -273,67 +283,91 @@ function unionGraph() {
 	return graph;
 }
 
+let refOnly = null;
+/** the reference alone as a graph (the library's edges on the current best, like mutate's DP) */
+function refGraph() {
+	if (!refOnly || refOnly.key !== ref.key) {
+		refOnly = S.unionGraph([TC.of('run:' + ref.key, ref.masks)]);
+		refOnly.key = ref.key; refOnly.tags = ['best'];
+	}
+	return refOnly;
+}
+let lastNote = '';
+const note = (s, what) => { if (s !== lastNote) { lastNote = s; log(`GPU: ${what}: ${s}`); } };   // (not the same line every round)
+/**
+ * The fastest run over graph g plus the library that passes THE rule against `base`: {u, cand}, or 'none' (nothing
+ * faster) or 'refused' (the fastest combination is not accepted, or it does not replay here).
+ */
+function combineOn(g, base, what) {
+	for (const avoidRng of RANDOM ? [false, true] : [false]) {
+		let u = null, cand = null;
+		for (let tries = 0; tries < 8; tries++) {
+			u = g.path({ lib, avoidRng });
+			if (!u || u.ticks >= ref.n) return avoidRng ? 'refused' : 'none';
+			cand = C.evaluate(level, u.ms);
+			if (cand && cand.complete <= u.ticks) break;
+			// a library edge that is not exact here (it cannot happen with a matching fingerprint): drop it, try again
+			const k = S.firstBadCheck(level, u.ms, u.checks, nc);
+			const bad = k !== null ? u.libUsed.filter((e) => e.h1 !== 'F')[k] : u.libUsed.find((e) => e.h1 === 'F');
+			if (!bad) { note(`the combined run${g.runs.length > 1 ? ' of the known runs' : ''} does not replay as its parts (${u.ticks} ticks)`, what); return 'refused'; }
+			dropEdge(bad.h0, bad.h1);
+			log(`GPU: dropped a shortcut that does not replay exactly (${bad.fam}, ${bad.seq.length} ticks)`);
+			cand = null;
+		}
+		if (!cand) return 'refused';
+		const v = C.judge(cand, base, base.deaths);
+		if (v.accept) return { u, cand };
+		if (cand.runTicks < base.runTicks && !avoidRng && RANDOM) continue;   // chance dropped: again without new draws
+		if (cand.runTicks < base.runTicks) note(`combined ${u.libUsed.length} shortcuts${g.runs.length > 1 ? ' and the known runs' : ''} but the result is not accepted (${v.reason})`, what);
+		return 'refused';
+	}
+	return 'refused';
+}
+
 let lastOffer = '';
 /** Combines the library with the union of every known run; if the result is faster and passes THE rule, hands it to
  *  the job and makes it the reference. */
 async function offer(what) {
 	if (!ref) return;
 	const base = ref.ev;
-	const g = unionGraph();
-	for (const avoidRng of RANDOM ? [false, true] : [false]) {
-		let u = null, cand = null;
-		for (let tries = 0; tries < 8; tries++) {
-			u = g.path({ lib, avoidRng });
-			if (!u || u.ticks >= ref.n) return;
-			cand = C.evaluate(level, u.ms);
-			if (cand && cand.complete <= u.ticks) break;
-			// a library edge that is not exact here (it cannot happen with a matching fingerprint): drop it, try again
-			const k = S.firstBadCheck(level, u.ms, u.checks, nc);
-			const bad = k !== null ? u.libUsed.filter((e) => e.h1 !== 'F')[k] : u.libUsed.find((e) => e.h1 === 'F');
-			if (!bad) { log(`GPU: ${what}: the combined run does not replay as its parts (${u.ticks} ticks); skipped`); return; }
-			dropEdge(bad.h0, bad.h1);
-			log(`GPU: dropped a shortcut that does not replay exactly (${bad.fam}, ${bad.seq.length} ticks)`);
-			cand = null;
-		}
-		if (!cand) return;
-		const v = C.judge(cand, base, base.deaths);
-		if (!v.accept) {
-			if (cand.runTicks < base.runTicks && !avoidRng && RANDOM) continue;   // chance dropped: again without new draws
-			if (cand.runTicks < base.runTicks) log(`GPU: ${what}: combined ${u.libUsed.length} shortcuts but the result is not accepted (${v.reason})`);
-			return;
-		}
-		const bytes = C.eetasBytes(cand.ms);
-		const key = sha1(bytes);
-		if (key === lastOffer) return;
-		lastOffer = key;
-		// credit: per family, the shortcuts used and the ticks they save on the reference
-		const used = {};
-		let credited = 0;
-		for (const e of u.libUsed) {
-			const i = ref.tickOf.get(e.h0), j = e.h1 === 'F' ? ref.n : ref.tickOf.get(e.h1);
-			const s = i !== undefined && j !== undefined && j > i ? Math.max(0, j - i - e.seq.length) : 0;
-			const f = used[e.fam] || (used[e.fam] = { n: 0, saved: 0 });
-			f.n++; f.saved += s; credited += s;
-			state.fam[e.fam].used++; state.fam[e.fam].saved += s;
-		}
-		const saved = base.runTicks - cand.runTicks;
-		const others = [...u.runsUsed].filter((r) => r > 0).map((r) => g.tags[r]);
-		const sib = [...new Set(others.filter((t) => t.startsWith('job ')))];
-		const res = await J.tryCandidate(ID, bytes, { source: `gpu (${u.libUsed.length} shortcuts)`, wait: 0 });
-		st.submitted++;
-		st.saved = Math.max(st.saved, saved);
-		own = { key, ms: cand.ms, ev: cand };
-		ownRuns.push(own);
-		if (ownRuns.length > 5) ownRuns.shift();
-		const parts = Object.entries(used).map(([f, x]) => `${f} ${x.n}${x.saved ? ` -${x.saved}` : ''}`);
-		if (others.length && saved > credited) parts.push(`other runs -${saved - credited}`);
-		status({ lastSubmit: { t: Date.now(), runTicks: cand.runTicks, saved, handed: res.handed, accepted: res.accepted }, families: famStatus() });
-		log(`GPU: ${what}: ${u.libUsed.length} shortcuts${others.length ? ` + ${new Set(others).size} other run${new Set(others).size > 1 ? 's' : ''}` : ''} -> ` +
-			`${C.fmt(base.runTicks)} to ${C.fmt(cand.runTicks)} (-${saved}) [${parts.join(', ') || 'splices'}]` +
-			`${sib.length ? `; uses the route of ${sib.map((t) => t.slice(4)).join(', ')}` : ''}, handed to the ${res.handed === 'inbox' ? 'grind' : 'job'}${res.accepted ? ' (accepted)' : ''}`);
-		await refresh();   // the next invocation searches this run
-		return;
+	// when the union's fastest combination is refused (another run dies more often, a coin-blind join meets a coin
+	// door, a lower chance), the reference alone with the library: no other run may hold back the GPU's own shortcuts
+	let g = unionGraph();
+	let got = combineOn(g, base, what);
+	if (got === 'refused' && g.runs.length > 1) { g = refGraph(); got = combineOn(g, base, what); }
+	if (typeof got === 'string') return;
+	const { u, cand } = got;
+	const bytes = C.eetasBytes(cand.ms);
+	const key = sha1(bytes);
+	if (key === lastOffer) return;
+	lastOffer = key;
+	// credit: per family, the shortcuts used and the ticks they save on the reference
+	const used = {};
+	let credited = 0;
+	for (const e of u.libUsed) {
+		const i = ref.tickOf.get(e.h0), j = e.h1 === 'F' ? ref.n : ref.tickOf.get(e.h1);
+		const s = i !== undefined && j !== undefined && j > i ? Math.max(0, j - i - e.seq.length) : 0;
+		const f = used[e.fam] || (used[e.fam] = { n: 0, saved: 0 });
+		f.n++; f.saved += s; credited += s;
+		state.fam[e.fam].used++; state.fam[e.fam].saved += s;
 	}
+	const saved = base.runTicks - cand.runTicks;
+	const others = [...u.runsUsed].filter((r) => r > 0).map((r) => g.tags[r]);
+	const sib = [...new Set(others.filter((t) => t.startsWith('job ')))];
+	const res = await J.tryCandidate(ID, bytes, { source: `gpu (${u.libUsed.length} shortcuts)`, wait: 0 });
+	st.submitted++;
+	st.saved = Math.max(st.saved, saved);
+	const mine = { key, ms: cand.ms, ev: cand, inbox: res.handed === 'inbox' ? res.inboxFile : '' };
+	ownRuns.push(mine);
+	if (ownRuns.length > 5) ownRuns.shift();
+	own = res.handed === 'direct' && !res.accepted ? null : mine;   // (refused by a stopped job at once: no reference)
+	const parts = Object.entries(used).map(([f, x]) => `${f} ${x.n}${x.saved ? ` -${x.saved}` : ''}`);
+	if (others.length && saved > credited) parts.push(`other runs -${saved - credited}`);
+	status({ lastSubmit: { t: Date.now(), runTicks: cand.runTicks, saved, handed: res.handed, accepted: res.accepted }, families: famStatus() });
+	log(`GPU: ${what}: ${u.libUsed.length} shortcuts${others.length ? ` + ${new Set(others).size} other run${new Set(others).size > 1 ? 's' : ''}` : ''} -> ` +
+		`${C.fmt(base.runTicks)} to ${C.fmt(cand.runTicks)} (-${saved}) [${parts.join(', ') || 'splices'}]` +
+		`${sib.length ? `; uses the route of ${sib.map((t) => t.slice(4)).join(', ')}` : ''}, handed to the ${res.handed === 'inbox' ? 'grind' : 'job'}${res.accepted ? ' (accepted)' : ''}`);
+	await refresh();   // the next invocation searches this run
 }
 const famStatus = () => Object.fromEntries(LIB_FAMS.map((f) => [f, state.fam[f]]));
 
@@ -400,7 +434,9 @@ async function invoke(slot, seconds) {
 		to = Math.min(n, from + Math.max(64, want), from + state.left[slot]);
 	}
 	const t0 = Date.now();
-	const r = await runSearch(tool, blobFile, path.join(GDIR, 'ref.eetas'), edgesFile, { seconds: secArg, seed: nextSeed(), families, from, to });
+	const seed = nextSeed();
+	saveState();   // (a restart never repeats a seed, also when this invocation is cut off)
+	const r = await runSearch(tool, blobFile, path.join(GDIR, 'ref.eetas'), edgesFile, { seconds: secArg, seed, families, from, to });
 	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}` };
 	const d = r.done;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);

@@ -44,18 +44,24 @@ function trace(level, masks, nc, withR) {
 
 /**
  * Traces by file (path + size + mtime) or by a caller's key, so a run is simulated once per process. get(file) and
- * of(key, masks) return the trace (n -1: does not finish) or null when the file cannot be read.
+ * of(key, masks) return the trace (n -1: does not finish) or null when the file cannot be read. A file rewritten in
+ * place (grind_now.eetas, another job's best.eetas) keeps only its newest trace.
  */
 function traceCache(level, nc, withR) {
 	const m = new Map();
+	const keyOfFile = new Map();   // resolved path -> its key in m
 	return {
 		get(file) {
 			let st;
 			try { st = fs.statSync(file); } catch (e) { return null; }
-			const key = `${path.resolve(file)}|${st.size}|${Math.round(st.mtimeMs)}`;
+			const p = path.resolve(file);
+			const key = `${p}|${st.size}|${Math.round(st.mtimeMs)}`;
 			let tr = m.get(key);
 			if (tr === undefined) {
 				try { tr = trace(level, C.readEetas(file), nc, withR); } catch (e) { tr = null; }
+				const old = keyOfFile.get(p);
+				if (old !== undefined) m.delete(old);
+				keyOfFile.set(p, key);
 				m.set(key, tr);
 			}
 			return tr;
@@ -66,7 +72,14 @@ function traceCache(level, nc, withR) {
 			return tr;
 		},
 		/** forget everything but the traces for which keep(key) is true */
-		prune(keep) { for (const k of [...m.keys()]) if (!keep(k)) m.delete(k); },
+		prune(keep) {
+			for (const k of [...m.keys()]) {
+				if (keep(k)) continue;
+				m.delete(k);
+				const p = k.split('|')[0];
+				if (keyOfFile.get(p) === k) keyOfFile.delete(p);
+			}
+		},
 		get size() { return m.size; },
 	};
 }
@@ -163,7 +176,7 @@ function unionGraph(runs) {
 				if (a < 0) continue;
 				for (const [endKey, e] of m) {
 					const b = endKey === 'F' ? GOAL : index.get(endKey);
-					if (b < 0) continue;
+					if (b < 0 || !e.seq.length) continue;   // (an empty edge would land in the bucket being emptied)
 					if (avoidRng && (b === GOAL ? R[a] !== finalR : R[a] !== R[b])) continue;
 					from.push(a);
 					libList.push({ to: b, h0, h1: endKey, seq: e.seq, fam: e.fam });

@@ -366,7 +366,11 @@ async function spliceAll() {
 	C.writeEetas(REF, best.ms);
 	saveStatus({ stage: 'splice' });
 	await runTool('splice.js', [out, REF, ...ex, `--level=${LEVEL_ID}`, ...(NC ? ['--nocoins'] : [])], 3600e3, path.join(OUT, 'grind_splice.log'));
-	if (fs.existsSync(out)) consider(out, 'splice', { noSplice: true });
+	// (the best itself when nothing is faster: not worth a "not accepted" line every round)
+	let same = false;
+	try { same = sha1(fs.readFileSync(out)) === sha1(C.eetasBytes(best.ms)); } catch (e) { /* no output */ }
+	if (same) log('splice: nothing faster than the best');
+	else if (fs.existsSync(out)) consider(out, 'splice', { noSplice: true });
 }
 const skip1 = new Set(String(a.skip || '').split(',').filter(Boolean));   // --skip=A,deep,beam: skipped in this session's first round
 let curRound = 0, firstRound = 0;
@@ -515,7 +519,9 @@ async function deepStage(round, R) {
 		const wins = deepWindows(WSZ);
 		if (!wins.length) return;
 		const from = cursorTick(cur.deep);
-		let wi = wins.findIndex((w) => w.w0 >= from);
+		// the first window that reaches past the cursor by more than the usual overlap (the window size rotates with the
+		// round: "the first window starting at the cursor" would skip up to a whole window's step at a round change)
+		let wi = wins.findIndex((w) => w.w1 > from + 100);
 		if (wi < 0) { wi = 0; log(`deep: every window of the run explored (${wins.length} windows); starting over at the first`); }
 		const w = wins[wi];
 		// where to continue: the next window's start, as a state (found again when the stage improves the best)
@@ -573,7 +579,8 @@ async function main() {
 		const resume = cur.round === round && STAGES.includes(cur.stage) ? cur.stage : '';
 		roundT0 = Date.now() - (resume ? Math.min(+cur.used || 0, ROUND_MS) : 0);
 		if (resume && resume !== 'mutA') log(`round ${round}: continuing at ${resume} (${Math.round(roundUsed() / 60e3)} of ${ROUND_MS / 60e3} min used)`);
-		for (let si = resume ? STAGES.indexOf(resume) : 0; si < STAGES.length && Date.now() < deadline - 120000; si++) {
+		const resumedAt = resume ? STAGES.indexOf(resume) : -1;
+		for (let si = resume ? resumedAt : 0; si < STAGES.length && Date.now() < deadline - 120000; si++) {
 			const sname = STAGES[si];
 			saveCursor({ round, stage: sname, used: roundUsed() });
 			if (sname === 'mutA') await mutateLoop(`${round}a`);
@@ -583,8 +590,10 @@ async function main() {
 			else if (sname === 'mutC') await mutateLoop(`${round}c`);
 			else if (sname === 'beam') {
 				// 3) beam with verified leads, every other round when there is time left, every 4th round anyway (it has
-				// no window: it runs to the finish)
-				if (round % 4 === 0 || (round % 2 === 0 && roundUsed() < 0.9 * ROUND_MS)) {
+				// no window: it runs to the finish, so one that a restart stopped is not started over: restarts more often
+				// than a beam lasts would repeat it forever)
+				if (si === resumedAt) log(`beam${round}: stopped by the restart; not repeated`);
+				else if (round % 4 === 0 || (round % 2 === 0 && roundUsed() < 0.9 * ROUND_MS)) {
 					const bm = path.join(OUT, `grind_beam_${round}.eetas`);
 					const res = await stage(`beam${round}`, 'optimize.js', [TAS, `--out=${bm}`, `--width=${R([4000, 6000, 3000, 8000])}`, `--dist=${R([24, 16, 32, 24])}`,
 						'--passes=1', `--workers=${W}`, LVL], bm, Math.max(ROUND_MS - roundUsed(), 5 * 60e3) + 5 * 60e3);
