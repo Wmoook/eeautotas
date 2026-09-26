@@ -6,10 +6,10 @@
 //   exactly the level the search ran on;
 // - block info for the palette (names, kinds, EE minimap colors, argument kinds);
 // - the checks before a search (a start, a trophy, an open way to it) and the search itself: `eegpu beam <level.bin>
-//   --goal=1` (native/beamhost.h: from the level start, every input every tick, the states closest to the trophy kept
-//   (walking distance over open tiles), and the first state that finishes ends it); with a guide line a second beam
-//   next to it follows the line (see STRATEGIES). Every route it reports is replayed in the exact JS engine (common.js evaluate) before it is
-//   shown. One search at a time; its state is in memory and in <data>/editor/solve.json (with level.eelvl, level.bin,
+//   --finish=1` (native/explorehost.h: from the level start, every input every tick, near-identical states merged, so
+//   the first tick with a finish is the fastest route) next to `eegpu beam --goal=1` (native/beamhost.h: the states
+//   closest to the trophy kept; with a guide line a second beam follows the line; see STRATEGIES). Every route is
+//   replayed in the exact JS engine (common.js evaluate) before it is shown. One search at a time; its state is in memory and in <data>/editor/solve.json (with level.eelvl, level.bin,
 //   guide.txt and route.eetas next to it).
 //
 // The editor's level JSON: { name, width, height, gravity (1), bgColor (ARGB, 0 = none), owner, description,
@@ -243,7 +243,14 @@ function check(buf) {
 }
 
 // ---------------------------------------------------------------- the route search (one at a time)
-// Without a guide line: one beam, scored by the walking distance to the trophy. With one: two beams side by side (the
+// "every move": the exhaustive exploration. Every input from every state, every tick; a state is dropped when one
+// already seen falls in the same cell (position, speed, gravity queue, jumps; eegpu explore --cqx/--cqv/--qy/--qvy set
+// the cell size). It walks away from the trophy as readily as towards it (a run-up, a block to jump from, an exit
+// the other way), and walls and floors snap the ball to exact positions, so precise moves (a one-tile gap entered at
+// exactly the right pixel) survive the merging. Its first finish is the fastest route up to that merging. When the
+// visited-cell table fills (big levels) the next pass uses coarser cells; when it runs out of states without a finish
+// (every merged state tried), finer ones.
+// Next to it the beams: without a guide line one, scored by the walking distance to the trophy. With one: two beams side by side (the
 // tool is mostly single-threaded host work, so the second costs little): "along your line" (the line's progress minus 4
 // per px away from it, plus 4 per tile closer to the trophy: it follows the line, and still leaves it where the ball
 // must) and "straight for the trophy" (the line can be wrong). The beam's own guide score takes the best of (progress
@@ -252,9 +259,16 @@ function check(buf) {
 // Each beam's first finish is its fastest; a beam that is already deeper than the best route found stops (it cannot
 // find a faster one), and the fastest verified route wins.
 const STRATEGIES = {
-	guide: { label: 'along your line', args: (files) => [`--guide=${files.guide}`, '--guideWeight=4', '--goalWeight=4'] },
-	goal: { label: 'straight for the trophy', args: () => [] },
+	explore: { label: 'every move', args: (f, o, q) => ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${o.depth}`, `--seconds=${q.seconds}`, '--coarse=0',
+		`--cqx=${0.5 * 2 ** q.pass}`, `--cqv=${16 * 2 ** q.pass}`, `--qy=${2 ** q.pass}`, `--qvy=${16 * 2 ** q.pass}`] },
+	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
+	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 };
+const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`];
+// the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y; each pass halves
+// (finer, after a pass tried every state) or doubles (coarser, after the table filled) them, up to two steps
+const PASS_MIN = -2, PASS_MAX = 2;
+const passText = (p) => (p === 0 ? '' : p < 0 ? ` (coarser cells, pass ${1 - p})` : ` (finer cells, pass ${1 + p})`);
 let S = null;        // the current / last search (public state, also in solve.json)
 let kids = [];       // the eegpu processes of the running search (one per strategy)
 let cur = null;      // { level, buf } of the running search
@@ -302,25 +316,29 @@ function start(b, gpu) {
 	fs.writeFileSync(files.bin, G.levelBlob(ins.level));
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
 	if (guide.length) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
-	const base = ['beam', files.bin, '--goal=1', `--width=${width}`, `--seconds=${seconds}`, `--depth=${depth}`];
-	const which = guide.length ? ['guide', 'goal'] : ['goal'];
+	const which = guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal'];
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
 	S = { running: true, stage: 'starting', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
 		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, message: '', log: [],
-		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, states: 0, ticksPerSec: 0, found: null, error: null })) };
+		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, states: 0, ticksPerSec: 0, found: null, error: null,
+			pass: 0, passes: 1, detail: '' })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length ? ` (a ${guide.length}-point line)` : ''));
 	save();
-	cur = { level: ins.level, buf };
-	kids = which.map((k, n) => launch(tool, [...base, ...STRATEGIES[k].args(files)], n));
+	cur = { level: ins.level, buf, tool, files, opts: { width, depth } };
+	kids = which.map((k, n) => launch(n));
 	return state();
 }
-/** one strategy's eegpu process: its JSON lines update S.strategies[n] and the totals */
-function launch(tool, args, n) {
+/** one strategy's eegpu process (a new pass of the exploration too): its JSON lines update S.strategies[n] and the
+ *  totals */
+function launch(n) {
 	const V = S.strategies[n];
-	const ch = spawn(tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+	const left = Math.max(1, Math.round(S.seconds - (Date.now() - S.started) / 1000));
+	const args = STRATEGIES[V.key].args(cur.files, cur.opts, { seconds: left, pass: V.pass });
+	const ch = spawn(cur.tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+	let hits = 0, end = '';
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
 	const totals = () => {
@@ -332,8 +350,11 @@ function launch(tool, args, n) {
 	};
 	const onEvent = (ev) => {
 		if (!mine()) return;
-		if (ev.ev === 'progress') {
-			Object.assign(V, { state: 'running', layer: ev.layer, states: ev.states, ticksPerSec: Math.round(ev.ticksPerSec) });
+		if (ev.ev === 'progress' || ev.ev === 'layer') {
+			Object.assign(V, { state: 'running', layer: ev.layer, states: ev.ev === 'layer' ? ev.kept : ev.states, ticksPerSec: Math.round(ev.ticksPerSec) });
+			if (ev.ev === 'layer') {
+				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full${passText(V.pass)}`;
+			}
 			if (!S.result && S.stage !== 'error') S.stage = 'searching';
 			totals();
 			// deeper than the best route: it cannot find a faster one
@@ -341,8 +362,13 @@ function launch(tool, args, n) {
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			found(ev.inputs, n);
+		} else if (ev.ev === 'hit') {
+			// the exploration's finishes: all in its last layer (equally many ticks); a few are enough (the timer start
+			// can differ)
+			if (++hits <= 12) found(ev.inputs, n, hits < 12);
 		} else if (ev.ev === 'done') {
 			V.layer = ev.layers;
+			end = ev.end || '';
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
 		} else if (ev.error) {
 			V.error = ev.error;
@@ -366,6 +392,16 @@ function launch(tool, args, n) {
 	ch.on('error', (e) => { err += e.message; });
 	ch.on('close', (code) => {
 		if (!mine()) return;
+		// the exploration's next pass: coarser cells after a full table, finer after every state was tried
+		const next = end === 'full' && V.pass <= 0 ? V.pass - 1 : end === 'exhausted' && V.pass >= 0 ? V.pass + 1 : null;
+		if (V.key === 'explore' && !V.found && !V.error && code === 0 && next !== null && next >= PASS_MIN && next <= PASS_MAX && S.running &&
+			S.stage !== 'stopped' && !S.result && (Date.now() - S.started) / 1000 < S.seconds - 2) {
+			note(`${V.label}: ${end === 'full' ? 'the table is full' : 'every state tried'} at tick ${V.layer}; again with ${next < V.pass ? 'coarser' : 'finer'} cells`);
+			V.pass = next; V.passes++;
+			kids[n] = launch(n);
+			save();
+			return;
+		}
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
 				V.state = 'error';
@@ -392,7 +428,9 @@ function finish() {
 	} else if (S.stage !== 'error') {
 		S.stage = 'not found';
 		const capped = S.layer >= S.depth;
-		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep, ${S.width.toLocaleString('en-US')} states per tick)` +
+		const X = S.strategies.find((q) => q.key === 'explore');
+		const every = X && X.layer ? `; every move to tick ${X.layer.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}` : '';
+		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${every}; the beams kept ${S.width.toLocaleString('en-US')} states per tick)` +
 			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
 			` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`;
 	}
@@ -400,14 +438,16 @@ function finish() {
 	cur = null;
 	save();
 }
-/** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept */
-function found(inputs, n) {
+/** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept. more: the
+ *  strategy reports more routes of the same length (its process ends by itself) */
+function found(inputs, n, more) {
 	const V = S.strategies[n];
+	if (!cur) return;
 	const masks = Uint8Array.from(String(inputs), (c) => (c.charCodeAt(0) - 48) & 31);
 	const ev = C.evaluate(cur.level, masks);
-	// its beam ends at the first finish (the fastest it reached); the tool would still re-check every other state that
+	// a beam ends at the first finish (the fastest it reached); the tool would still re-check every other state that
 	// finished in the same tick before it exits, which only costs time
-	if (alive(kids[n])) { try { kids[n].kill(); } catch (e) { /* gone */ } }
+	if (!more && alive(kids[n])) { try { kids[n].kill(); } catch (e) { /* gone */ } }
 	if (!ev) {
 		V.state = 'error';
 		V.error = 'it reported a route that does not finish in the exact JS engine (please report this: the two engines disagree)';
@@ -415,9 +455,10 @@ function found(inputs, n) {
 		save();
 		return;
 	}
+	const first = V.state !== 'found';
 	V.state = 'found';
-	V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
-	note(`${V.label}: route ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
+	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
+	if (first) note(`${V.label}: route ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
 	if (better) {
 		const tr = C.replay(cur.level, ev.ms, { trace: true });

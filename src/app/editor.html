@@ -279,7 +279,7 @@ const PAL = [
 	{ name: 'Coins', ids: [100, 101, 43, 165] },
 	{ name: 'Liquids', ids: [119, 369, 416, 1585] },
 	{ name: 'Effects', ids: [417, 419, 453, 461, 1517, 418, 420, 421, 422, 1584, 1618] },
-	{ name: 'Keys, doors and gates', ids: [6, 7, 8, 23, 24, 25, 26, 27, 28] },
+	{ name: 'Keys, doors and gates', ids: [6, 7, 8, 23, 24, 25, 26, 27, 28, 156, 157] },
 	{ name: 'Portals', ids: [242, 381] },
 ];
 const ONOFF = [[1, 'on'], [0, 'off']];
@@ -1510,11 +1510,12 @@ function renderSolve() {
 		const el2 = st.elapsed || 0, pct = clamp(el2 / st.seconds * 100, 0, 100);
 		h += `<div class="sst"><span class="spin"></span><b>Searching…</b> ${el2.toFixed(0)} s of ${st.seconds} s${st.guidePoints ? ' · along your guide line' : ''}</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
-		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${(st.width || 0).toLocaleString('en-US')} states per tick · ${((st.ticksPerSec || 0) / 1e6).toFixed(0)} M ticks/s</div>`;
-		if (st.strategies && st.strategies.length > 1) {
+		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed(0)} M ticks/s</div>`;
+		if (st.strategies && st.strategies.length) {
 			const what = (q) => (q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? 'no route'
 				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : `tick ${q.layer.toLocaleString('en-US')}`);
-			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>`).join('<br>')}</div>`;
+			const more = (q) => (q.key === 'explore' ? (q.state === 'running' && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
+			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
 		}
 	}
 	const r = st.result;

@@ -289,25 +289,44 @@ async function appSection() {
 	}
 }
 
-// ---------------------------------------------------------------- one GPU search (--gpu)
+// ---------------------------------------------------------------- GPU searches (--gpu)
+/** one route search on a level; the route replayed in the JS engine */
+async function solve(name, W, H, cells, seconds) {
+	const buf = ED.eelvlOf({ name, width: W, height: H, cells });
+	ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 16384 }, { available: true });
+	const t0 = Date.now();
+	let st = ED.state();
+	while (st.running && Date.now() - t0 < (seconds + 30) * 1000) { await new Promise((r) => setTimeout(r, 500)); st = ED.state(); }
+	if (st.running) { ED.stop(); while (ED.state().running) await new Promise((r) => setTimeout(r, 200)); }
+	const ok = st.stage === 'found' && st.result;
+	const ev = ok ? C.evaluate(E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf))), Uint8Array.from(st.result.inputs, (c) => c.charCodeAt(0) - 48)) : null;
+	const text = ok ? `${st.result.time} (${st.result.ticks} ticks, ${st.result.strategy}) in ${st.result.foundAfter} s` : `${st.stage}: ${st.message}`;
+	return { ok: !!(ok && ev && ev.runTicks === st.result.runTicks), st, ev, text };
+}
 async function gpuSection() {
-	section('gpu: a route search (the platforms room, at most 20 s)');
+	section('gpu: route searches (at most 20 s each)');
 	const G = require('../src/gpu.js');
 	if (!G.nativeTool()) { check('the GPU engine is built (node tools/build-native.js)', false); return; }
-	const W = 40, H = 20;
-	const cells = room(W, H);
+	// platforms up to a ledge
+	let cells = room(40, 20);
 	for (let x = 10; x <= 14; x++) cells.push([x, 16, 9]);
 	for (let x = 18; x <= 22; x++) cells.push([x, 13, 9]);
 	for (let x = 26; x <= 31; x++) cells.push([x, 10, 9]);
 	cells.push([29, 9, 121], [2, 17, 255]);
-	const buf = ED.eelvlOf({ name: 'gpu test', width: W, height: H, cells });
-	ED.start({ eelvlB64: buf.toString('base64'), seconds: 20, width: 16384 }, { available: true });
-	const t0 = Date.now();
-	let st = ED.state();
-	while (st.running && Date.now() - t0 < 40000) { await new Promise((r) => setTimeout(r, 500)); st = ED.state(); }
-	const ok = st.stage === 'found' && st.result;
-	const ev = ok ? C.evaluate(E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf))), Uint8Array.from(st.result.inputs, (c) => c.charCodeAt(0) - 48)) : null;
-	check('a route to the trophy, and it finishes in the JS engine', ok && ev && ev.runTicks === st.result.runTicks, ok ? `${st.result.time} (${st.result.ticks} ticks) in ${st.result.foundAfter} s` : `${st.stage}: ${st.message}`);
+	let r = await solve('gpu test', 40, 20, cells, 20);
+	check('platforms: a route to the trophy, and it finishes in the JS engine', r.ok, r.text);
+	// a time door (156) between the start and the trophy: shut for the first 5 s, so the route has to wait for it
+	cells = room(20, 8);
+	for (let y = 1; y <= 5; y++) cells.push([12, y, 9]);
+	cells.push([12, 6, 156], [17, 6, 121], [2, 6, 255]);
+	r = await solve('time door', 20, 8, cells, 20);
+	check('a time door: the route waits for it (finishes after tick 500) and finishes in the JS engine', r.ok && r.ev.complete >= 500, r.text);
+	// a coin door (43, 1 coin) in front of the trophy and the coin behind the start: away from the trophy first
+	cells = room(24, 8);
+	for (let y = 1; y <= 5; y++) cells.push([16, y, 9]);
+	cells.push([16, 6, 43, 1], [21, 6, 121], [8, 6, 255], [2, 6, 100]);
+	r = await solve('coin door', 24, 8, cells, 20);
+	check('a coin door: the route takes the coin behind the start first, and finishes in the JS engine', r.ok && r.ev.coins >= 1, r.text);
 }
 
 (async () => {

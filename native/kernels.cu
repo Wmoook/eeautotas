@@ -202,6 +202,59 @@ __device__ void beamMaterializeBody(const BeamParams& p) {
 	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
 }
 
+// ---------------------------------------------------------------- the beam's selection (beam.h BeamSel)
+extern "C" __global__ void beamSelInsert(BeamSel q) {
+	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nKids) return;
+	const BeamChild c = q.kids[i];
+	if (c.flags & (2 | 4)) { const u32 r = atomicAdd(q.nRes, 1u); if (r < q.resCap) q.res[r] = (u32)i; }
+	if (c.flags & (1 | 2 | 8)) { q.slot[i] = ~0u; return; }
+	const u64 key = c.hash | (1ull << 63);
+	u32 s = (u32)(splitmix(c.hash) & q.hMask);
+	for (u32 probe = 0; probe < 128; probe++) {
+		const u64 prev = atomicCAS((unsigned long long*)&q.hKeys[s], 0ull, (unsigned long long)key);
+		if (prev == 0ull || prev == key) break;
+		s = (s + 1) & q.hMask;
+	}
+	q.slot[i] = s;
+	atomicMax((unsigned long long*)&q.hBest[s], (unsigned long long)(((u64)orderedScore(c.score) << 32) | (u64)(0xffffffffu - (u32)i)));
+}
+extern "C" __global__ void beamSelWinners(BeamSel q) {
+	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nKids) return;
+	const u32 s = q.slot[i];
+	u8 w = 0;
+	if (s != ~0u && (u32)q.hBest[s] == 0xffffffffu - (u32)i) {
+		w = 1;
+		const u32 k = orderedScore(q.kids[i].score);
+		atomicMin(&q.mm[0], k); atomicMax(&q.mm[1], k);
+	}
+	q.win[i] = w;
+}
+extern "C" __global__ void beamSelHist(BeamSel q) {
+	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nKids || !q.win[i]) return;
+	atomicAdd(&q.hist[scoreBin(q, orderedScore(q.kids[i].score))], 1u);
+}
+/** one round: the winners in score bins [bLo, bHi] */
+extern "C" __global__ void beamSelPick(BeamSel q, i32 bLo, i32 bHi) {
+	const i32 i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= q.nKids || !q.win[i]) return;
+	const BeamChild c = q.kids[i];
+	const i32 b = scoreBin(q, orderedScore(c.score));
+	if (b < bLo || b > bHi) return;
+	if (atomicAdd(&q.bucketCnt[c.bucket], 1u) >= (u32)q.bucketCap) { const u32 o = atomicAdd(q.nOver, 1u); if (o < q.overCap) q.over[o] = (u32)i; return; }
+	const u32 s = atomicAdd(q.nPick, 1u);
+	if (s < q.K) q.pick[s] = (c.parent << 5) | c.option;
+}
+/** the fill-up: pick[n0 + j] = the j-th state over the cap (j < need) */
+extern "C" __global__ void beamSelFill(BeamSel q, u32 n0, u32 need) {
+	const u32 j = blockIdx.x * blockDim.x + threadIdx.x;
+	if (j >= need) return;
+	const BeamChild c = q.kids[q.over[j]];
+	q.pick[n0 + j] = (c.parent << 5) | c.option;
+}
+
 // ---------------------------------------------------------------- exhaustive exploration (explore.h)
 __device__ __forceinline__ bool cellInsert(u64* cells, u32 mask, u64 key) {
 	u32 slot = (u32)(splitmix(key) & mask);
@@ -243,6 +296,13 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 				}
 			}
 		}
+		else if (p.target == 3) {   // the finish: this tick took the trophy (the silver crown); report, do not expand
+			if (s.has_silver_crown && !par->has_silver_crown) {
+				const u32 h = atomicAdd(p.nHits, 1u);
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
+				continue;
+			}
+		}
 		else if (p.target == 1) {   // reach a region: report and do not expand further
 			if (cx >= p.reachX0 && cx <= p.reachX1 && cy >= p.reachY0 && cy <= p.reachY1) {
 				const u32 h = atomicAdd(p.nHits, 1u);
@@ -268,8 +328,13 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 		}
 		(void)startPy;
 		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26);
-		const u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy);
-		if (!cellInsert(p.cells, p.cellMask, key)) continue;
+		u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
+		if (p.discrete) key = splitmix(key ^ sim.hashDiscrete()) | 1ull;
+		if (!cellInsert(p.cells, p.cellMask, key)) {
+			// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier, so it is there when the
+			// time doors switch (then its cells are new again: the door phase is part of them)
+			if (!(p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y))) continue;
+		}
 		const u32 slot = atomicAdd(p.nOut, 1u);
 		if (slot < p.outCap) p.out[slot] = ((u32)pi << 5) | (u32)o;
 	}

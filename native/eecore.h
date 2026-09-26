@@ -1348,6 +1348,57 @@ struct Sim {
 	/** EESim.stateHash(false, noCoins): the same 53-bit value (as an integer). */
 	EE_HD u64 hash(bool noCoins) const { return hashWith<Hasher>(noCoins); }
 	EE_HD u64 hash2(bool noCoins) const { return hashWith<Hasher2>(noCoins); }
+	/** What the ball carries, not where it is or how it moves: coins, keys (their time left to 32 ticks), switches, the
+	 *  time doors' phase, effects (time left to 32 ticks), jumps and boosts, checkpoint, gates, deaths for death doors,
+	 *  team, secrets, portal coins, the pending switch / key / timing queues. The exploration's cells add it, so no state
+	 *  that differs in any of these is merged away (and plain levels, which have none of it, are not split at all). */
+	EE_COLD u64 hashDiscrete() const {
+		Hasher2 h; h.init();
+		i32 fl = 0;
+		if (s.in_god_mode) fl |= 1;
+		if (s.has_crown) fl |= 2;
+		if (s.low_gravity) fl |= 4;
+		if (s.is_invulnerable) fl |= 8;
+		if (s.is_cursed) fl |= 16;
+		if (s.is_zombie) fl |= 32;
+		if (s.is_on_fire) fl |= 64;
+		if (s.is_poisoned) fl |= 128;
+		if (s.has_levitation) fl |= 256;
+		if (s.timedoor_state && L.hasTimeDoors) fl |= 512;
+		h.word(fl);
+		h.word(s.coins); h.word(s.blue_coins); h.word(s.max_jumps); h.word(s.jump_boost); h.word(s.speed_boost); h.word(s.flip_gravity);
+		h.word((s.checkpoint_x + 1) | shl(s.checkpoint_y + 1, 16)); h.word(s.next_spawn); h.word(s.keysMask);
+		if (L.nKeyColors != 0) {
+			i32 rel = s.keysMask;
+			for (i32 q = 0; q < s.nkq; q++) rel |= 1 << s.kq[2 * q];
+			for (i32 j = 0; j < L.nKeyColors; j++) {
+				const i32 c = L.keyColors[j];
+				if ((rel & (1 << c)) != 0) { const i32 r = s.kt[c] + KEY_TICKS - s.ticks; h.word(r > 1 ? (r >> 5) + 1 : 1); }
+				else h.word(-1);
+			}
+		}
+		if (s.is_cursed) h.word((i32)effectTimerKey(s.curse_time_start, s.curse_duration) >> 5);
+		if (s.is_zombie) h.word((i32)effectTimerKey(s.zombie_time_start, s.zombie_duration) >> 5);
+		if (s.is_on_fire) h.word((i32)effectTimerKey(s.fire_time_start, s.fire_duration) >> 5);
+		if (s.is_poisoned) h.word((i32)effectTimerKey(s.poison_time_start, s.poison_duration) >> 5);
+		if (s.has_levitation) h.word(truncI(s.current_thrust * 16.0));
+		if (L.hasDeathDoor) h.word(s.deaths);
+		if (L.hasCoinGate) h.word(s.show_coin_gate);
+		if (L.hasBlueCoinGate) h.word(s.show_blue_coin_gate);
+		if (L.hasDeathGate) h.word(s.show_death_gate);
+		if (L.multiTargetPortals) h.word(s.rngSteps);
+		if (L.hasTeamEffect) h.word(s.team);
+		if (L.nCoins != 0) for (i32 w = 0; w < L.coinWords; w++) h.word((i32)s.w[L.offCoin + w]);
+		if (L.nSecrets != 0) for (i32 w = 0; w < L.secretWords; w++) h.word((i32)s.w[L.offSecret + w]);
+		if (L.nPortalCoins > 0) for (i32 w = 0; w < L.pgWords; w++) h.word((i32)s.w[L.offPg + w]);
+		for (i32 w = 0; w < L.swWords; w++) h.word((i32)s.w[L.offSw + w]);
+		for (i32 w = 0; w < L.oswWords; w++) h.word((i32)s.w[L.offOsw + w]);
+		h.word(s.nsq | (s.nkq << 8) | (s.ntq << 16));
+		for (i32 i = 0; i < 3 * s.nsq; i++) h.word(s.sq[i]);
+		for (i32 i = 0; i < 2 * s.nkq; i++) h.word(s.kq[i]);
+		for (i32 i = 0; i < 2 * s.ntq; i++) h.word(s.tq[i]);
+		return h.finish();
+	}
 
 	template <class HS>
 	EE_COLD u64 hashWith(bool noCoins) const {

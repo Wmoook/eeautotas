@@ -114,16 +114,22 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
 - Tools: **Paint** (click or drag; **Alt+click** picks a block), **Erase**, **Rectangle** (**Shift**: erase),
   **Pick**, **Guide**; **Ctrl+Z / Ctrl+Y**; drag with the right mouse button (or hold **Space**) to move, wheel zooms,
   **0** shows the whole level. A new level gets a solid border like a new EE world. Size up to 400 x 400.
-- **Find a route** runs on the GPU (NVIDIA): from the start it tries every input every tick and keeps the tens of
-  thousands of attempts closest to the trophy (walking distance), until one touches it. The route is replayed in the
+- **Find a route** runs on the GPU (NVIDIA), two searches side by side. **Every move**: from the start, every input
+  every tick from every situation the ball can be in (position, speed, the gravity it will feel next, ground contact,
+  jumps), where nearly identical situations count once. It does not need to know any trick: arrow ground jumps, block
+  clips and gaps entered at exactly the right pixel come out of the physics, and it goes away from the trophy as
+  readily as towards it (a run-up, a block to jump from, the long way round). Its first finish is the fastest route it
+  can see. If its memory fills up (big levels) it starts again with coarser situations, and if it runs out of
+  situations without a finish, with finer ones. Next to it, **straight for the trophy** keeps the tens of thousands of
+  attempts closest to the trophy (walking distance) every tick, which reaches further on big levels. The route is replayed in the
   app's exact physics before it is shown, drawn on the map (**Preview here** plays it), and you can **Watch** it in
   the run viewer, **Optimize this route** (it becomes a run in your list and the optimizer starts on it), or download
   the `.eetas` and the `.eelvl` it was found on (in eeo-tas: open the level, then `/loadtas`, `/reset`, `/playtas`).
 - **Guide line** (optional): with the Guide tool, drag where you think the ball should go (**Shift+drag** adds a
-  stroke). The search takes it as a hint, not a rail. It helps where "closer to the trophy" is misleading, e.g. the
+  stroke). The search takes it as a hint, not a rail (for the beam search; "every move" needs no line). It helps where "closer to the trophy" is misleading, e.g. the
   trophy on a ledge whose way up is somewhere else. Draw it along the way the ball can really go (up the steps, around
   walls). With a line, two searches run side by side: one along your line and one straight for the trophy (in case the
-  line is wrong); the faster route wins.
+  line is wrong), next to "every move"; the fastest route wins.
 - Before a search the editor checks the level: a start, a trophy, and an open way between them (a walled-in trophy is
   refused at once). If no route is found in time, it says so; try a longer search, more states per tick, or a guide
   line.

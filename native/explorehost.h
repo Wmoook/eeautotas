@@ -1,8 +1,13 @@
 // explorehost.h - `eegpu explore`: the exhaustive exploration of explore.h, driven from the host. Included by eegpu.cpp.
-//   eegpu explore <level.bin> <run.eetas> --from=T --region=x0,y0,x1,y1 --floor=<py of the ball standing on the floor>
+//   eegpu explore <level.bin> <run.eetas | -> --from=T --region=x0,y0,x1,y1 --floor=<py of the ball standing on the floor>
 //                 --above=<tick-start py limit> --land=x0,x1 [--depth=200] [--cap=2000000] [--seconds=120]
-// From the run's state after T ticks, expands every input every tick, one state per cell (explore.h), and reports
-// every input history whose next tick is a ground jump on the floor from above its row (JSON lines).
+// From the run's state after T ticks (`-`: the level start), expands every input every tick, one state per cell
+// (explore.h), and reports every input history whose next tick is a ground jump on the floor from above its row (JSON
+// lines). Other targets: --reach=x0,y0,x1,y1 (the box centre enters those tiles), --ahead=1 (ahead of the run),
+// --finish=1 (the tick that takes the trophy; the search ends with the first layer that has one: the fastest route
+// up to the cell merging). Cells: --coarse=<row> (from this tile row down, px x --cqx and vx x --cqv to whole
+// numbers; default 0.5 and 16), --qy / --qvy (py / vy likewise; 0 = exact), --discrete=1 (cells also differ in coins,
+// keys, switches, the time doors' phase, effects: Sim::hashDiscrete).
 #pragma once
 
 template <int TW>
@@ -10,7 +15,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	typedef State<TW> S;
 	int from = atoi(opt(argc, argv, "from", "0").c_str());
 	const int depthMax = atoi(opt(argc, argv, "depth", "200").c_str());
-	const int cap = std::max(1024, atoi(opt(argc, argv, "cap", "2000000").c_str()));
+	const int capReq = std::max(1024, atoi(opt(argc, argv, "cap", "2000000").c_str()));
 	const double seconds = atof(opt(argc, argv, "seconds", "120").c_str());
 	int rx0 = 0, ry0 = 0, rx1 = 1 << 20, ry1 = 1 << 20, lx0 = 0, lx1 = 1 << 20;
 	sscanf(opt(argc, argv, "region", "0,0,1048576,1048576").c_str(), "%d,%d,%d,%d", &rx0, &ry0, &rx1, &ry1);
@@ -26,7 +31,8 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	{
 		Sim<TW> sim(L, *start);
 		sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
-		std::vector<uint8_t> ref = readMasks(argv[3]);
+		std::vector<uint8_t> ref;
+		if (strcmp(argv[3], "-") != 0) ref = readMasks(argv[3]);
 		S* rs = (S*)malloc(sizeof(S));
 		if (ahead) refTile.assign((size_t)L.N, -1);
 		for (int t = 0; t < (int)ref.size(); t++) {
@@ -69,12 +75,20 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	cu::CUfunction fexp = g.fn("exploreExpand_" + std::to_string(TW)), fmat = g.fn("exploreMaterialize_" + std::to_string(TW));
 	if (!fexp || !fmat) { printf("{\"error\":\"explore kernels missing\"}\n"); return 4; }
 	const size_t SB = sizeof(S);
-	const uint32_t cellCount = 1u << 27;   // 1 GB: stop before it is half full (probing degrades)
+	// the visited-cell table: 1 GB (2^27 cells) on GPUs with 6 GB or more, else smaller; stop before it is half full
+	// (probing degrades). The state buffers take at most about a third of the memory.
+	const size_t memB = g.d.mem ? g.d.mem : (size_t)4 << 30;
+	uint32_t cellLog = memB >= ((size_t)6 << 30) ? 27 : memB >= ((size_t)3 << 30) ? 26 : 25;
+	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
+	const uint32_t cellCount = 1u << cellLog;
+	const int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S))));
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick;
 	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull * cellCount) &&
 		dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap);
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	const bool finishTarget = opt(argc, argv, "finish", "0") == "1";
+	int finishLayer = -1;
 	cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
 	cu::cuMemsetD8_v2(dnhits.p, 0, 4);
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
@@ -91,6 +105,10 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.target = opt(argc, argv, "reach", "").empty() ? 0 : 1;
 	sscanf(opt(argc, argv, "reach", "0,0,0,0").c_str(), "%d,%d,%d,%d", &P.reachX0, &P.reachY0, &P.reachX1, &P.reachY1);
 	P.qy = atof(opt(argc, argv, "qy", "0").c_str()); P.qvy = atof(opt(argc, argv, "qvy", "0").c_str());
+	P.cqx = atof(opt(argc, argv, "cqx", "0.5").c_str()); P.cqv = atof(opt(argc, argv, "cqv", "16").c_str());
+	if (finishTarget) P.target = 3;
+	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
+	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;
 	cu::Buf drt, dtb, drx, dry, drvx, drvy;
 	if (ahead) {
 		if (!drt.upload(refTile.data(), 4 * refTile.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
@@ -139,6 +157,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			}
 			fflush(stdout);
 			hitsSeen = nh;
+			if (finishTarget) { finishLayer = d; d++; break; }   // the first layer with a finish is the fastest
 		}
 		const uint32_t kept = std::min<uint32_t>(nOut, (uint32_t)cap);
 		std::vector<uint32_t> pick(kept);
@@ -153,10 +172,13 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		if (cu::cuLaunchKernel(fmat, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a2, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore materialize failed\"}\n"); return 5; }
 		std::swap(cur, nxt);
 		if (totalStates > cellCount / 2) { printf("{\"warn\":\"the visited-cell table is half full: stopping\"}\n"); d++; break; }
-		printf("{\"ev\":\"layer\",\"layer\":%d,\"tick\":%d,\"new\":%u,\"kept\":%u,\"states\":%llu,\"hits\":%u,\"sec\":%.1f}\n", d + 1, from + d + 1, nOut, kept, (unsigned long long)totalStates, hitsSeen, elapsed());
+		printf("{\"ev\":\"layer\",\"layer\":%d,\"tick\":%d,\"new\":%u,\"kept\":%u,\"states\":%llu,\"hits\":%u,\"sec\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"full\":%.4f}\n",
+			d + 1, from + d + 1, nOut, kept, (unsigned long long)totalStates, hitsSeen, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (double)totalStates / (cellCount / 2));
 		fflush(stdout);
 	}
-	printf("{\"ev\":\"done\",\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"hits\":%u,\"seconds\":%.1f}\n", d, (unsigned long long)totalStates, (unsigned long long)ticks, hitsSeen, elapsed());
+	const char* why = finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
+	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"cellLog\":%u,\"cap\":%d}\n",
+		g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why, cellLog, cap);
 	free(start);
 	return 0;
 }

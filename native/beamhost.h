@@ -168,7 +168,8 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fexp = g.fn("beamExpand_" + std::to_string(TW)), fmat = g.fn("beamMaterialize_" + std::to_string(TW));
-	if (!fexp || !fmat) { printf("{\"error\":\"beam kernels missing\"}\n"); return 4; }
+	cu::CUfunction fIns = g.fn("beamSelInsert"), fWin = g.fn("beamSelWinners"), fHist = g.fn("beamSelHist"), fPick = g.fn("beamSelPick"), fFill = g.fn("beamSelFill");
+	if (!fexp || !fmat || !fIns || !fWin || !fHist || !fPick || !fFill) { printf("{\"error\":\"beam kernels missing\"}\n"); return 4; }
 	cu::Buf dl, dA, dB, dout, dpick, dgx, dgy, dgs, dgoal, dK, dV, dq, drt, drx, dry, drsx, drsy;
 	std::vector<float> fX(X.begin(), X.end()), fY(Y.begin(), Y.end()), fSX(SX.begin(), SX.end()), fSY(SY.begin(), SY.end());
 	const size_t SB = sizeof(S);
@@ -179,6 +180,21 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		drx.upload(fX.data(), 4 * fX.size()) && dry.upload(fY.data(), 4 * fY.size()) && drsx.upload(fSX.data(), 4 * fSX.size()) && drsy.upload(fSY.data(), 4 * fSY.size());
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
+	// the selection's buffers
+	const uint32_t maxKids = (uint32_t)K * 18;
+	uint32_t hCap = 1024; while (hCap < 2 * maxKids) hCap <<= 1;
+	const int NBINS = 4096;
+	cu::Buf dhK, dhB, dslot, dwin, dmm, dhist, dbc, dnpick, dover, dnover, dres, dnres;
+	const uint32_t resCap = 4096;
+	up = dhK.alloc(8ull * hCap) && dhB.alloc(8ull * hCap) && dslot.alloc(4ull * maxKids) && dwin.alloc(maxKids) && dmm.alloc(8) &&
+		dhist.alloc(4ull * NBINS) && dbc.alloc(4ull * 65536) && dnpick.alloc(4) && dover.alloc(4ull * maxKids) && dnover.alloc(4) && dres.alloc(4ull * resCap) && dnres.alloc(4);
+	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	BeamSel Q;
+	memset(&Q, 0, sizeof Q);
+	Q.kids = (const BeamChild*)(uintptr_t)dout.p; Q.hKeys = (u64*)(uintptr_t)dhK.p; Q.hBest = (u64*)(uintptr_t)dhB.p; Q.hMask = hCap - 1;
+	Q.slot = (u32*)(uintptr_t)dslot.p; Q.win = (u8*)(uintptr_t)dwin.p; Q.mm = (u32*)(uintptr_t)dmm.p; Q.hist = (u32*)(uintptr_t)dhist.p; Q.nBins = NBINS;
+	Q.bucketCnt = (u32*)(uintptr_t)dbc.p; Q.bucketCap = bucketCap; Q.pick = (u32*)(uintptr_t)dpick.p; Q.nPick = (u32*)(uintptr_t)dnpick.p; Q.K = (u32)K;
+	Q.over = (u32*)(uintptr_t)dover.p; Q.nOver = (u32*)(uintptr_t)dnover.p; Q.overCap = maxKids; Q.res = (u32*)(uintptr_t)dres.p; Q.nRes = (u32*)(uintptr_t)dnres.p; Q.resCap = resCap;
 	BeamParams P;
 	memset(&P, 0, sizeof P);
 	P.L = B.level((const uint8_t*)(uintptr_t)dl.p);
@@ -233,9 +249,27 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			printf("{\"error\":\"beam expand failed\"}\n"); return 5;
 		}
 		ticks += (uint64_t)nParents * 18;
-		kids.resize((size_t)nParents * 18);
-		cu::cuMemcpyDtoH_v2(kids.data(), dout.p, sizeof(BeamChild) * kids.size());
-		// results
+		const uint32_t nKids = (uint32_t)nParents * 18;
+		const unsigned kb = (nKids + 255) / 256;
+		Q.nKids = (i32)nKids;
+		cu::cuMemsetD8_v2(dhK.p, 0, 8ull * hCap); cu::cuMemsetD8_v2(dhB.p, 0, 8ull * hCap);
+		cu::cuMemsetD8_v2(dnres.p, 0, 4); cu::cuMemsetD8_v2(dnpick.p, 0, 4); cu::cuMemsetD8_v2(dnover.p, 0, 4);
+		cu::cuMemsetD8_v2(dbc.p, 0, 4ull * 65536); cu::cuMemsetD8_v2(dhist.p, 0, 4ull * NBINS);
+		{ const uint32_t mm0[2] = { 0xffffffffu, 0u }; cu::cuMemcpyHtoD_v2(dmm.p, mm0, 8); }
+		void* aq[] = { &Q };
+		if (cu::cuLaunchKernel(fIns, kb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuLaunchKernel(fWin, kb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) {
+			printf("{\"error\":\"beam select failed\"}\n"); return 5;
+		}
+		// results: only the flagged children come back to the host
+		uint32_t nRes = 0;
+		cu::cuMemcpyDtoH_v2(&nRes, dnres.p, 4);
+		kids.clear();
+		if (nRes) {
+			nRes = std::min(nRes, resCap);
+			std::vector<uint32_t> ri(nRes);
+			cu::cuMemcpyDtoH_v2(ri.data(), dres.p, 4ull * nRes);
+			for (uint32_t r : ri) { BeamChild c; cu::cuMemcpyDtoH_v2(&c, dout.p + sizeof(BeamChild) * r, sizeof c); kids.push_back(c); }
+		}
 		for (const BeamChild& c : kids) {
 			if (c.flags & 2) {
 				const std::string in = inputsOf(d, c.parent, c.option);
@@ -263,43 +297,46 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			}
 		}
 		if (goal && finishLayer >= 0) { d++; break; }   // the editor: the first (= fastest) finish ends the search
-		// selection: best score per state hash, then by score with a cap per spatial bucket
-		std::vector<int> idx;
-		idx.reserve(kids.size());
-		{
-			std::unordered_map<uint64_t, int> seen;
-			seen.reserve(kids.size() * 2);
-			for (int i = 0; i < (int)kids.size(); i++) {
-				const BeamChild& c = kids[i];
-				if (c.flags & (1 | 2 | 8)) continue;
-				auto it = seen.find(c.hash);
-				if (it == seen.end()) { seen.emplace(c.hash, (int)idx.size()); idx.push_back(i); }
-				else if (kids[idx[it->second]].score < c.score) idx[it->second] = i;
-			}
-		}
-		std::sort(idx.begin(), idx.end(), [&](int a, int b) { return kids[a].score > kids[b].score; });
+		// selection on the GPU: the winners' score range, a histogram, the picks in rounds from the best bins down
+		uint32_t mm[2];
+		cu::cuMemcpyDtoH_v2(mm, dmm.p, 8);
 		std::vector<uint32_t> pick;
-		pick.reserve(K);
-		{
-			std::unordered_map<uint32_t, int> perBucket;
-			std::vector<int> over;   // skipped by the cap, in score order
-			for (int i : idx) {
-				if ((int)pick.size() >= K) break;
-				int& cnt = perBucket[kids[i].bucket];
-				if (cnt >= bucketCap) { over.push_back(i); continue; }
-				cnt++;
-				pick.push_back((kids[i].parent << 5) | kids[i].option);
+		if (mm[0] <= mm[1]) {
+			bestScore = scoreFromOrdered(mm[1]);
+			Q.lo = mm[0]; Q.binW = (uint32_t)(((uint64_t)mm[1] - mm[0]) / NBINS + 1);
+			if (cu::cuLaunchKernel(fHist, kb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"beam histogram failed\"}\n"); return 5; }
+			std::vector<uint32_t> hist(NBINS);
+			cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4ull * NBINS);
+			const uint64_t roundMax = std::max<uint64_t>(256, (uint64_t)K / 16);
+			uint32_t np = 0;
+			for (int bHi = NBINS - 1; bHi >= 0 && np < (uint32_t)K;) {
+				int bLo = bHi;
+				uint64_t c = hist[bHi];
+				while (bLo > 0 && c + hist[bLo - 1] <= roundMax) c += hist[--bLo];
+				if (c) {
+					void* ap[] = { &Q, &bLo, &bHi };
+					if (cu::cuLaunchKernel(fPick, kb, 1, 1, 256, 1, 1, 0, nullptr, ap, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"beam pick failed\"}\n"); return 5; }
+					cu::cuMemcpyDtoH_v2(&np, dnpick.p, 4);
+					np = std::min(np, (uint32_t)K);
+				}
+				bHi = bLo - 1;
 			}
-			for (int i : over) {   // fill up past the cap rather than shrinking the beam
-				if ((int)pick.size() >= K) break;
-				pick.push_back((kids[i].parent << 5) | kids[i].option);
+			if (np < (uint32_t)K) {   // fill up past the cap (the best first) rather than shrinking the beam
+				uint32_t no = 0;
+				cu::cuMemcpyDtoH_v2(&no, dnover.p, 4);
+				uint32_t need = std::min<uint32_t>(std::min(no, maxKids), (uint32_t)K - np);
+				if (need) {
+					void* af[] = { &Q, &np, &need };
+					if (cu::cuLaunchKernel(fFill, (need + 255) / 256, 1, 1, 256, 1, 1, 0, nullptr, af, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"beam fill failed\"}\n"); return 5; }
+					np += need;
+				}
 			}
+			pick.resize(np);
+			if (np) cu::cuMemcpyDtoH_v2(pick.data(), dpick.p, 4ull * np);   // for the lineage (rebuilding the inputs)
 		}
-		if (!idx.empty()) bestScore = kids[idx[0]].score;
 		lineage.push_back(pick);
 		nParents = (int)pick.size();
-		if (!nParents) { d++; break; }
-		cu::cuMemcpyHtoD_v2(dpick.p, pick.data(), 4 * pick.size());
+		if (!nParents) { d++; break; }   // (the picks are already on the GPU)
 		P.nPick = nParents; P.next = (u8*)(uintptr_t)nxt;
 		void* a2[] = { &P };
 		if (cu::cuLaunchKernel(fmat, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a2, nullptr) || cu::cuCtxSynchronize()) {

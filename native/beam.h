@@ -90,4 +90,38 @@ EE_HD float goalScore(const BeamParams& p, const Level& L, float cx, float cy) {
 	return w > 1e-6f ? v / w : 1e6f;
 }
 
+/** The per-layer selection on the GPU, the same as walking the children by score: dedupe by state hash (the best score
+ *  wins), a histogram of the winners' scores, then rounds of picks from the best bins down (a few bins per round; the
+ *  order inside a round is arbitrary) with a per-bucket cap; the states over the cap, in round order, fill up the layer
+ *  when the capped pick ends short. */
+struct BeamSel {
+	const BeamChild* kids; i32 nKids;
+	u64* hKeys; u64* hBest; u32 hMask;   // dedupe table (cleared every layer)
+	u32* slot; u8* win;                  // per child: its table slot (~0u = not a candidate), winner flag
+	u32* mm;                             // [0] min, [1] max ordered score of the winners
+	u32* hist; i32 nBins; u32 lo, binW;  // histogram of the winners' ordered scores
+	u32* bucketCnt; i32 bucketCap;       // per bucket (65536)
+	u32* pick; u32* nPick; u32 K;        // the next layer: parent << 5 | option
+	u32* over; u32* nOver; u32 overCap;  // winners over the bucket cap, in round order (for filling up)
+	u32* res; u32* nRes; u32 resCap;     // result children (finish / rejoin)
+};
+/** float -> u32 with the same order */
+EE_HD u32 floatBits(float f) {
+#if EE_GPU
+	return (u32)__float_as_uint(f);
+#else
+	u32 b; memcpy(&b, &f, 4); return b;
+#endif
+}
+EE_HD float bitsFloat(u32 b) {
+#if EE_GPU
+	return __uint_as_float(b);
+#else
+	float f; memcpy(&f, &b, 4); return f;
+#endif
+}
+EE_HD u32 orderedScore(float f) { const u32 b = floatBits(f); return (b & 0x80000000u) ? ~b : (b | 0x80000000u); }
+EE_HD i32 scoreBin(const BeamSel& q, u32 k) { const u32 b = (k - q.lo) / q.binW; return b >= (u32)q.nBins ? q.nBins - 1 : (i32)b; }
+EE_HD float scoreFromOrdered(u32 k) { return bitsFloat((k & 0x80000000u) ? (k & 0x7fffffffu) : ~k); }
+
 }  // namespace ee
