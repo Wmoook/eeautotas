@@ -28,6 +28,11 @@
 // The cost is in tiles along the way (1 per step, 1.4142 per diagonal step).
 // reachField(level, {check}) -> { W, H, B, JB, g, mode, cls, own, refresh (the jump budget per tile, 0 = none),
 //   cost (Float32Array N*(B+1), -1 = unreachable), mismatches (with check: the Bellman self-test) };
+// reachField(level, {goals: [{tile, cost}], maxCost}): the distance to the nearest of these tiles instead of the trophy,
+//   each goal starting at its own cost (every budget); goal tiles are not the end of the way (the trophy still is), so a
+//   goal's cost is min(its own, the way through it to a cheaper goal). explore.js --hunt: the reference run's positions
+//   with their time to go, the time-to-go field of a window. maxCost: the search stops there and every state that would
+//   cost more stays -1 (then -1 is "further than maxCost", not a proof).
 // writeReachFile(field, file) writes it for eegpu (--reach=<file>, native/beam.h ReachField / reachAt);
 // costAt(field, px, py, vy, onGround) samples it like the GPU does.
 const fs = require('fs');
@@ -231,9 +236,24 @@ function reachField(level, opts) {
 		return k;
 	};
 	let goals = 0;
-	for (let i = 0; i < N; i++) if (fg[i] === TROPHY && passable(i)) { goals++; for (let b = 0; b < S; b++) { cost[i * S + b] = 0; push(i * S + b, 0); } }
+	// opts.goals: the goal tiles and their own costs (the lowest per tile), else the trophy tiles at 0
+	const goalCost = opts && opts.goals ? new Float64Array(N).fill(Infinity) : null;
+	if (goalCost) {
+		for (const g of opts.goals) {
+			const i = g.tile;
+			if (!(i >= 0 && i < N) || !passable(i) || !(g.cost >= 0)) continue;
+			if (goalCost[i] === Infinity) goals++;
+			if (g.cost < goalCost[i]) goalCost[i] = g.cost;
+		}
+		for (let i = 0; i < N; i++) if (goalCost[i] !== Infinity) for (let b = 0; b < S; b++) { cost[i * S + b] = goalCost[i]; push(i * S + b, goalCost[i]); }
+	} else for (let i = 0; i < N; i++) if (fg[i] === TROPHY && passable(i)) { goals++; for (let b = 0; b < S; b++) { cost[i * S + b] = 0; push(i * S + b, 0); } }
+	const maxCost = opts && opts.maxCost >= 0 ? opts.maxCost : Infinity;
 	const relax = (k, v) => { if (hpos[k] !== -2 && (cost[k] < 0 || v < cost[k] - 1e-6)) { cost[k] = v; push(k, v); } };
 	while (hn > 0) {
+		if (hv[0] > maxCost) {   // opts.maxCost: everything still open costs more
+			for (let n = 0; n < hn; n++) cost[hk[n]] = -1;
+			break;
+		}
 		const k = pop(), v = popV;
 		const t2 = (k / S) | 0, b2 = k - t2 * S, x2 = t2 % W, y2 = (t2 / W) | 0;
 		// the jump: (t, b < refresh) -> (t, refresh) for free on a floor
@@ -262,7 +282,7 @@ function reachField(level, opts) {
 			if (!passable(t)) continue;
 			const x = t % W, y = (t / W) | 0;
 			for (let b = 0; b < S; b++) {
-				let best = fg[t] === TROPHY ? 0 : Infinity;
+				let best = goalCost ? goalCost[t] : fg[t] === TROPHY ? 0 : Infinity;
 				const via = (k, c) => { if (cost[k] >= 0 && cost[k] + c < best) best = cost[k] + c; };
 				if (fg[t] !== TROPHY) {
 					if (refresh[t] && b < refresh[t]) via(t * S + refresh[t], 0);
@@ -278,11 +298,13 @@ function reachField(level, opts) {
 					}
 				}
 				const have = cost[t * S + b];
+				if (have < 0 && best > maxCost - 1e-3) continue;   // (beyond opts.maxCost: -1)
 				if ((best === Infinity) !== (have < 0) || (have >= 0 && Math.abs(have - best) > 1e-3)) mismatches++;
 			}
 		}
 	}
-	return { W, H, B, JB, g: PX_GRAVITY * (level.gravityMult || 1), mode, goals, cls, own, refresh, cost, mismatches };
+	// (toGoals: a field to opts.goals, not the trophy; writeReachFile refuses it: eegpu reads -1 as a proof of no way)
+	return { W, H, B, JB, g: PX_GRAVITY * (level.gravityMult || 1), mode, goals, toGoals: goalCost !== null, cls, own, refresh, cost, mismatches };
 }
 
 /** the budget (units above tile i's middle) of a ball whose centre is at cy (px), vertical speed vy px/tick, on the
@@ -305,6 +327,7 @@ function costAt(f, px, py, vy, onGround) {
 /** eegpu's reach file: 'RCH2', W, H, B, JB (int32), g (float32), mode (int32: 0 physics, 1 walk), then cls, own,
  *  refresh (the jump budget; uint8 x N each, padded to 4), cost (float32 x N*(B+1)). Budgets are in units of 8 px. */
 function writeReachFile(f, file) {
+	if (f.toGoals) throw new Error('writeReachFile: a field to goals (explore --hunt) is not a cost to the trophy');
 	const N = f.W * f.H, pad = (n) => (n + 3) & ~3;
 	const buf = Buffer.alloc(28 + 3 * pad(N) + 4 * N * (f.B + 1));
 	buf.write('RCH2', 0, 'latin1');

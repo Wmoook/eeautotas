@@ -21,10 +21,32 @@
 // reference tick the path left the reference), all edges are combined by DP over the reference ticks, and the edges
 // are also written to <out>.edges.json ({from, n, ref: sha1 of the --tas bytes, nocoins, edges: [[b, j, inputs as
 // '0'+mask chars]]}), also when no combination was accepted.
+// --hunt=1 (implies --exact=1; off by default): guided skip hunting, a different explorer with the same edges, DP and
+// edges file as --tails. The main thread builds a time-to-go field per context of the reference in [--from, T0]
+// (T0 = --until + --huntH): src/reach.js reachField with the reference's positions as goals (a multi-source Dijkstra
+// seeded with (T0 - j) / --huntKappa at the tile of reference tick j, so gravity budgets, arrows and portals count), at
+// --huntKappa ticks per tile. A state's lead = (T0 - huntKappa x cost) - t: how far it is ahead of the reference. The
+// archive has one cell per (tile, on the ground, sign of vx, vy class, jump count, context) and keeps the earliest state
+// (the reference states of [--from, --until] are pinned: they stay seeds, and a state that reaches a pinned cell sooner
+// takes the cell; --huntCell=8 = half tiles). Each pick takes a cell from one of two heaps, half the time
+// each (--huntMix): the most lead (-lead + --huntLambda x sqrt(picks)) and novelty (--huntLambda x sqrt(picks)), and
+// plays --huntRolls sticky random rollouts of --roll ticks from it (not past T0). A rollout that meets a later
+// reference state exactly is an edge and ends there. A new (or earlier) cell with lead >= --huntLead gets tails: the
+// reference's own inputs from next to the nearest later reference state (|dpos| + 3|dvel| <= --huntD, offsets -2..2,
+// up to --tailH ticks, --tailDrift cutoff), checked for an exact rejoin every tick; every exact rejoin is an edge.
+// Measured at equal tick budgets (one thread, every result judged): it finds the local skips the field points at
+// (Forgotten Veil 5760-5830: -15..-16 in every run at 6M and 20M ticks, --tails nothing; Infinity Pain 1000-1100: -9..-12
+// at 6M, -9..-23 at 20M (7 seeds), --tails -5..-7; 5000-5100: 0..-5 at 6M (7 seeds), --tails 0..-4), but fewer of the
+// long, slightly faster detours that a --tails window as wide as its reach finds (Infinity Pain 1000-1900, 6M: -10..-24
+// in 7 seeds against -30..-36 in 3): a complement, not a replacement. The fields cost 2-3 s of CPU per context before
+// the search (Good Egg with coins counted: 22 contexts, 18 s on 3 threads), outside --seconds and --ticks.
+// --ticks=N (every mode): each worker stops after N simulated ticks (rollouts + tails), or at --seconds, whichever
+// comes first (equal tick budgets for comparisons).
 //
 // usage: node src/explore.js --tas=<run.eetas> --from=5913 --join=6289 [--until=6450] [--seconds=120] [--workers=16]
 //        [--cell=8] [--vcell=2] [--roll=80] [--match=8] [--exact=1] [--nocoins=0|1] [--level=<level id | job id>] [--out=...]
-//        [--tails=0|1 [--tailD=12] [--tailH=300] [--tailDrift=64]]
+//        [--tails=0|1 [--tailD=12] [--tailH=300] [--tailDrift=64]] [--ticks=N]
+//        [--hunt=0|1 [--huntH=800] [--huntKappa=2] [--huntLead=10] [--huntD=24] [--huntMix=0.5] [--huntLambda=3] [--huntRolls=4] [--huntCell=16]]
 // (--level can be left out for a .eetas inside src/jobs/<id>/)
 
 const path = require('path');
@@ -32,6 +54,7 @@ const fs = require('fs');
 const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const C = require('./common.js');
+const Reach = require('./reach.js');
 const E = C.E;
 
 const OPTIONS = [];
@@ -40,13 +63,15 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 function parseArgs() {
 	const a = { level: '', tas: null, from: 0, join: 0, until: 0, seconds: 120, workers: os.cpus().length,
 		cell: 8, vcell: 2, roll: 80, match: 3, velW: 3, pchange: 0.12, out: null, seed: 1, seed_ref: 1, perCell: 4, exact: 0, ahead: 0.5, cands: 0, minSave: 2, nocoins: 0, maxEntries: 0,
-		tails: 0, tailD: 12, tailH: 300, tailDrift: 64 };
+		tails: 0, tailD: 12, tailH: 300, tailDrift: 64, ticks: 0,
+		hunt: 0, huntH: 800, huntKappa: 2, huntLead: 10, huntD: 24, huntMix: 0.5, huntLambda: 3, huntRolls: 4, huntCell: 16 };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) continue;
 		a[m[1]] = (m[1] === 'tas' || m[1] === 'level' || m[1] === 'out') ? m[2] : parseFloat(m[2]);
 	}
 	if (!a.tas) { console.log('usage: node src/explore.js --tas=<run.eetas> --from=<tick> --join=<tick> [--until=<tick>] [--level=<id>] (see the header)'); process.exit(2); }
+	if (a.hunt) a.exact = 1;   // (the hunt only keeps exact rejoins)
 	a.levelData = C.levelData(a.level, a.tas);
 	if (!a.out) a.out = path.join(__dirname, 'out', `explore_${a.from}.eetas`);
 	if (!a.until) a.until = a.join + 200;
@@ -90,6 +115,40 @@ function makeRng(seed) {
 		let x = s0; const y = s1;
 		s0 = y; x ^= x << 23; x ^= x >>> 17; x ^= y ^ (y >>> 26); s1 = x >>> 0;
 		return ((s0 + s1) >>> 0) / 4294967296;
+	};
+}
+
+/** --hunt: a binary min-heap of objects. push(x, key) stamps the key on x[stamp]; an object is pushed again whenever its
+ *  key changes, and pop() skips the copies whose key is no longer the stamped one. */
+function makeHeap(stamp) {
+	const K = [], X = [];
+	return {
+		push(x, key) {
+			x[stamp] = key;
+			let i = K.length;
+			K.push(key); X.push(x);
+			while (i > 0) { const p = (i - 1) >> 1; if (K[p] <= key) break; K[i] = K[p]; X[i] = X[p]; i = p; }
+			K[i] = key; X[i] = x;
+		},
+		pop() {
+			while (K.length) {
+				const k0 = K[0], x0 = X[0], lk = K.pop(), lx = X.pop();
+				if (K.length) {
+					let i = 0;
+					for (;;) {
+						const l = 2 * i + 1, r = l + 1;
+						let m = i, mk = lk;
+						if (l < K.length && K[l] < mk) { m = l; mk = K[l]; }
+						if (r < K.length && K[r] < mk) { m = r; mk = K[r]; }
+						if (m === i) break;
+						K[i] = K[m]; X[i] = X[m]; i = m;
+					}
+					K[i] = lk; X[i] = lx;
+				}
+				if (x0[stamp] === k0) return x0;
+			}
+			return null;
+		},
 	};
 }
 
@@ -186,21 +245,6 @@ function workerMain() {
 		if (w !== null && t < w.tick) { w.tick = t; w.snap = sim.snapshot(); w.node = mkNode(); w.picks = 0; w.fine = fine; w.late = late; return w; }
 		return null;
 	};
-	sim.restore(R.start);
-	{ const c0 = ctxId(contextKey(sim)); offer(cellOf(c0), a.from, () => root, true, c0); }
-	// seed the archive with the reference route itself: exploration branches off it at every tick
-	if (a.seed_ref !== 0) {
-		const rbuf = new Uint8Array(a.until - a.from);
-		sim.restore(R.start);
-		for (let t = a.from; t < a.until && t < masks.length; t++) {
-			rbuf[t - a.from] = masks[t];
-			E.applyMask(inp, masks[t]);
-			sim.tick(inp);
-			const len = t - a.from + 1;
-			const cr = ctxId(contextKey(sim));
-			offer(cellOf(cr), t + 1, () => ({ parent: root, buf: rbuf, len, b: t + 1 }), true, cr);
-		}
-	}
 	// --tails: every exact rejoin is an edge b -> j (inputs from the reference state S(b)); only improvements are posted
 	const TAILS = !!(a.exact && a.tails);
 	const edgeCost = new Map();
@@ -263,11 +307,169 @@ function workerMain() {
 		}
 		sim.restore(s0);
 	};
+	/** --hunt: guided skip hunting (see the header); its own archive and loop, the same edges */
+	const hunt = () => {
+		const H = workerData.hunt, T0 = H.T0, W = level.width, EMPTY = new Uint8Array(0);
+		// the time-to-go field of each context the reference has in [from, T0] (built by the main thread)
+		const fieldOf = new Map();
+		for (const f of H.fields) fieldOf.set(ctxId(f.ctx), f.field);
+		const leadOf = (cid, t) => {
+			const f = fieldOf.get(cid);
+			if (f === undefined) return -1e9;
+			const c = Reach.costAt(f, sim.px, sim.py, sim.speed_y, !!sim.on_ground);
+			return c < 0 ? -1e9 : (T0 - H.kappa * c) - t;
+		};
+		// the reference ticks in (from, T0] by tile (the tails' nearest reference state)
+		const byTile = new Map();
+		for (let j = a.from + 1; j <= T0; j++) {
+			const k = (Math.trunc(R.Y[j] + 8) >> 4) * W + (Math.trunc(R.X[j] + 8) >> 4);
+			let l = byTile.get(k);
+			if (l === undefined) { l = []; byTile.set(k, l); }
+			l.push(j);
+		}
+		// archive: one cell per (tile, on the ground, sign of vx, vy class, jump count, context), the earliest state
+		// {tick, snap, node, lead, picks, pinned}; every entry is in both heaps
+		const cells = new Map(), list = [];
+		const cellKey = (cid) => {
+			const vx = sim.speed_x, vy = sim.speed_y, q = a.huntCell;   // (q = 16: the box centre's tile)
+			return ((((((Math.floor((sim.py + 8) / q)) * 32768 + Math.floor((sim.px + 8) / q)) * 2 + (sim.on_ground ? 1 : 0)) * 3 + (vx > 0 ? 2 : vx < 0 ? 0 : 1)) * 4 +
+				(vy < -3 ? 0 : vy < 0 ? 1 : vy === 0 ? 2 : 3)) * 16 + Math.min(15, sim.jump_count)) * 65536 + cid;
+		};
+		const heapLead = makeHeap('kLead'), heapNew = makeHeap('kNew');
+		const queue = (e) => {
+			const p = a.huntLambda * Math.sqrt(e.picks);
+			heapLead.push(e, -e.lead + p + rnd() * 0.01);   // most lead first; the bonus fades with use
+			heapNew.push(e, p + rnd() * 0.01);              // novelty: the least picked first
+		};
+		const MAXE = a.maxEntries || Infinity;
+		const offer = (t, mkNode, pinned, cid) => {
+			const k = cellKey(cid), o = cells.get(k);
+			if (o !== undefined && o.tick <= t) return null;
+			const lead = leadOf(cid, t);
+			if (o !== undefined && !o.pinned) { o.tick = t; o.snap = sim.snapshot(); o.node = mkNode(); o.lead = lead; o.picks = 0; queue(o); return o; }
+			// a new cell, or one whose pinned reference state is later: the pinned state stays a seed (in the heaps) and
+			// the earlier state takes the cell (a state ahead of the reference in the reference's own cell is what the
+			// hunt is for. Measured at equal ticks, 7 seeds: Infinity Pain 1000-1900 at 6M a mean of -6 -> -18, 5000-5100 at
+			// 6M -0.6 -> -2.1, 1000-1100 at 20M -16 -> -13 (within the noise), Forgotten Veil 5760-5830 the same -15..-16)
+			if (list.length >= MAXE && !pinned) return null;   // --maxEntries: memory cap (existing cells still improve)
+			const e = { tick: t, snap: sim.snapshot(), node: mkNode(), lead, picks: 0, pinned, kLead: 0, kNew: 0 };
+			cells.set(k, e); list.push(e); queue(e);
+			return e;
+		};
+		/** tails from the new entry e (the live state, tick t): the reference's own inputs from next to the nearest later
+		 *  reference state; every exact rejoin with a later reference tick is an edge. Leaves the sim anywhere. */
+		const tails = (t, e) => {
+			const px = sim.px, py = sim.py, vx = sim.speed_x, vy = sim.speed_y;
+			const tk = (Math.trunc(py + 8) >> 4) * W + (Math.trunc(px + 8) >> 4);
+			let bj = -1, bd = Infinity;
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					const js = byTile.get(tk + dy * W + dx);
+					if (js === undefined) continue;
+					for (const j of js) {
+						if (j <= t + 2) continue;
+						const d = Math.abs(px - R.X[j]) + Math.abs(py - R.Y[j]) + 3 * (Math.abs(vx - R.VX[j]) + Math.abs(vy - R.VY[j]));
+						if (d < bd) { bd = d; bj = j; }
+					}
+				}
+			}
+			if (bj < 0 || bd > a.huntD) return;
+			for (let o = -2; o <= 2; o++) {
+				const j0 = bj + o;
+				if (j0 < a.from || j0 >= R.n) continue;
+				sim.restore(e.snap);
+				tailRuns++;
+				for (let k = 0, r = j0; k < a.tailH && r < R.n; k++, r++) {
+					E.applyMask(inp, masks[r]);
+					sim.tick(inp);
+					tailTicks++;
+					if (sim.is_dead) break;
+					if (refPos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
+						const jx = refHash.get(sim.stateHash(false, NOCOINS));
+						if (jx !== undefined) {   // back on the reference: ahead (a shortcut), level or behind
+							if (jx > t + k + 1) edge(e.node, EMPTY, 0, masks.subarray(j0, r + 1), jx, true);
+							break;
+						}
+					}
+					if (Math.abs(sim.px - R.X[r + 1]) + Math.abs(sim.py - R.Y[r + 1]) > a.tailDrift) break;
+				}
+			}
+		};
+		// the reference states of [from, until] (pinned)
+		sim.restore(R.start);
+		offer(a.from, () => root, true, simCtx());
+		const rbuf = new Uint8Array(Math.max(0, Math.min(a.until, masks.length) - a.from));
+		for (let t = a.from; t < a.until && t < masks.length; t++) {
+			rbuf[t - a.from] = masks[t];
+			E.applyMask(inp, masks[t]);
+			sim.tick(inp);
+			const len = t - a.from + 1;
+			offer(t + 1, () => ({ parent: root, buf: rbuf, len, b: t + 1 }), true, simCtx());
+		}
+		const tEnd = Date.now() + a.seconds * 1000;
+		let picks = 0, rolls = 0, steps = 0, maxLead = -1e9, lastReport = Date.now();
+		const stat = (type) => parentPort.postMessage({ type, cells: list.length, rolls, steps, picks, maxLead, rollHits, tailHits, tailRuns, tailTicks, seed: workerData.seed });
+		while (Date.now() < tEnd && !(a.ticks > 0 && steps + tailTicks >= a.ticks)) {
+			const e = (rnd() < a.huntMix ? heapLead : heapNew).pop();
+			if (e === null) break;
+			e.picks++;
+			picks++;
+			queue(e);
+			for (let r = 0; r < a.huntRolls; r++) {
+				rolls++;
+				sim.restore(e.snap);
+				const buf = new Uint8Array(a.roll), node = e.node;
+				let m = OPTIONS[(rnd() * 18) | 0];
+				let t = e.tick;
+				for (let s = 0; s < a.roll; s++) {
+					if (rnd() < a.pchange) m = OPTIONS[(rnd() * 18) | 0];
+					buf[s] = m;
+					E.applyMask(inp, m);
+					sim.tick(inp);
+					t++;
+					steps++;
+					if (sim.is_dead || t > T0) break;
+					if (refPos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
+						const jx = refHash.get(sim.stateHash(false, NOCOINS));
+						if (jx !== undefined) {   // back on the reference: from here on it is the reference
+							if (jx > t) edge(node, buf, s + 1, null, jx, false);
+							break;
+						}
+					}
+					const len = s + 1;
+					const ne = offer(t, () => ({ parent: node, buf, len }), false, simCtx());
+					if (ne !== null) {
+						if (ne.lead > maxLead) maxLead = ne.lead;
+						if (ne.lead >= a.huntLead) { tails(t, ne); sim.restore(ne.snap); }
+					}
+				}
+			}
+			if (Date.now() - lastReport > 10000) { lastReport = Date.now(); stat('stat'); }
+		}
+		E.flushTicks();
+		stat('done');
+	};
+	if (a.hunt) { hunt(); return; }
+	sim.restore(R.start);
+	{ const c0 = ctxId(contextKey(sim)); offer(cellOf(c0), a.from, () => root, true, c0); }
+	// seed the archive with the reference route itself: exploration branches off it at every tick
+	if (a.seed_ref !== 0) {
+		const rbuf = new Uint8Array(a.until - a.from);
+		sim.restore(R.start);
+		for (let t = a.from; t < a.until && t < masks.length; t++) {
+			rbuf[t - a.from] = masks[t];
+			E.applyMask(inp, masks[t]);
+			sim.tick(inp);
+			const len = t - a.from + 1;
+			const cr = ctxId(contextKey(sim));
+			offer(cellOf(cr), t + 1, () => ({ parent: root, buf: rbuf, len, b: t + 1 }), true, cr);
+		}
+	}
 	let best = null;
 	const candBest = new Map();
 	const tEnd = Date.now() + a.seconds * 1000;
 	let rolls = 0, steps = 0, lastReport = Date.now();
-	while (Date.now() < tEnd) {
+	while (Date.now() < tEnd && !(a.ticks > 0 && steps + tailTicks >= a.ticks)) {
 		for (let batch = 0; batch < 200; batch++) {
 			// tournament selection: half the time the fewest picks (coverage), half the time the state furthest
 			// ahead of the reference at its tile (time saves come from there), fewest picks breaking ties
@@ -361,8 +563,42 @@ async function main() {
 	const masks = C.readEetas(a.tas);
 	console.log(`[explore] from ${a.from}, rejoin ref ticks ${a.join}..${a.until}, ${a.workers} workers x ${a.seconds} s, ` +
 		`cells ${a.cell}px/${a.vcell}, roll ${a.roll}, match ${a.match}`);
-	const TAILS = !!(a.exact && a.tails);
-	if (TAILS) console.log(`[explore] tails: from archived states ahead of the reference, its own inputs (within ${a.tailD} px, ${a.tailH} ticks, drift ${a.tailDrift}); every exact rejoin combined by DP`);
+	const TAILS = !!(a.exact && a.tails), HUNT = !!a.hunt, EDGES = TAILS || HUNT;
+	if (TAILS && !HUNT) console.log(`[explore] tails: from archived states ahead of the reference, its own inputs (within ${a.tailD} px, ${a.tailH} ticks, drift ${a.tailDrift}); every exact rejoin combined by DP`);
+	// --hunt: the time-to-go field per context of the reference in [from, T0] (reach.js, the reference's positions as goals)
+	let hunt = null;
+	if (HUNT) {
+		const t1 = Date.now();
+		const R = reference(a, level, masks);
+		const T0 = Math.min(R.n, Math.max(a.from, a.until) + a.huntH);
+		const byCtx = new Map();   // context -> (tile -> the lowest time to go, in tiles)
+		for (let j = a.from; j <= T0; j++) {
+			let g = byCtx.get(R.C[j]);
+			if (g === undefined) { g = new Map(); byCtx.set(R.C[j], g); }
+			const k = (Math.trunc(R.Y[j] + 8) >> 4) * level.width + (Math.trunc(R.X[j] + 8) >> 4), c = (T0 - j) / a.huntKappa;
+			if (!(g.get(k) <= c)) g.set(k, c);
+		}
+		// one field per context, each in a thread of its own (up to --workers at a time; seconds each on big levels)
+		const ctxs = [...byCtx], fields = new Array(ctxs.length);
+		const maxCost = (T0 - a.from + 100) / a.huntKappa;   // (further: 100+ ticks behind the reference anywhere in the window)
+		let mode = '', next = 0;
+		await Promise.all(Array.from({ length: Math.min(ctxs.length, Math.max(1, a.workers)) }, async () => {
+			for (let i = next++; i < ctxs.length; i = next++) {
+				const [ctx, g] = ctxs[i];
+				const f = await new Promise((res, rej) => {
+					const w = new Worker(__filename, { workerData: { field: { levelData: a.levelData, goals: [...g].map(([tile, cost]) => ({ tile, cost })), maxCost } } });
+					w.once('message', res);
+					w.once('error', rej);
+				});
+				fields[i] = { ctx, field: f };
+				mode = f.mode;
+			}
+		}));
+		hunt = { T0, kappa: a.huntKappa, fields };
+		console.log(`[explore] hunt: time-to-go field to ref tick ${T0} (${fields.length} context${fields.length === 1 ? '' : 's'}, ${mode} model, ${a.huntKappa} ticks per tile, ` +
+			`${Date.now() - t1} ms); picks ${Math.round(a.huntMix * 100)}% most lead / ${Math.round(100 - a.huntMix * 100)}% novelty, ${a.huntRolls} x ${a.roll} ticks; ` +
+			`tails from lead >= ${a.huntLead} (within ${a.huntD} px, ${a.tailH} ticks, drift ${a.tailDrift}); every exact rejoin combined by DP`);
+	}
 	let best = null;
 	const stats = new Map();
 	const cands = [];
@@ -462,15 +698,15 @@ async function main() {
 		}
 	};
 	// (ref: sha1 of the reference's .eetas bytes, the run whose ticks b and j refer to)
-	const refSha1 = TAILS ? require('crypto').createHash('sha1').update(C.eetasBytes(masks)).digest('hex') : '';
+	const refSha1 = EDGES ? require('crypto').createHash('sha1').update(C.eetasBytes(masks)).digest('hex') : '';
 	const writeEdges = () => {
 		const list = [...edges.values()].map((e) => [e.b, e.j, Buffer.from(e.seq.map((m) => 48 + m)).toString('latin1')]);
 		C.writeAtomic(a.out + '.edges.json', JSON.stringify({ from: a.from, n: masks.length, ref: refSha1, nocoins: NOCOINS ? 1 : 0, edges: list }));
 	};
-	if (TAILS) { try { fs.unlinkSync(a.out + '.edges.json'); } catch (e) { /* none */ } }   // never leave another reference's edges behind
-	const dpTimer = TAILS ? setInterval(combineAndWrite, 1000) : null;
+	if (EDGES) { try { fs.unlinkSync(a.out + '.edges.json'); } catch (e) { /* none */ } }   // never leave another reference's edges behind
+	const dpTimer = EDGES ? setInterval(combineAndWrite, 1000) : null;
 	await Promise.all(Array.from({ length: a.workers }, (_, i) => new Promise((res) => {
-		const w = new Worker(__filename, { workerData: { args: a, seed: a.seed * 1000 + i + 1, ticksBuf: meter.buf } });
+		const w = new Worker(__filename, { workerData: { args: a, seed: a.seed * 1000 + i + 1, ticksBuf: meter.buf, hunt } });
 		w.on('message', (msg) => {
 			if (msg.type === 'cand') { cands.push(msg); return; }
 			if (msg.type === 'edge') {
@@ -502,12 +738,13 @@ async function main() {
 		w.on('error', (err) => { console.log('[explore] worker error', err); res(); });
 	})));
 	if (dpTimer) clearInterval(dpTimer);
-	let cells = 0, steps = 0, tailTicks = 0, tailRuns = 0;
-	for (const s of stats.values()) { cells += s.cells; steps += s.steps; tailTicks += s.tailTicks || 0; tailRuns += s.tailRuns || 0; }
+	let cells = 0, steps = 0, tailTicks = 0, tailRuns = 0, picks = 0, maxLead = -1e9;
+	for (const s of stats.values()) { cells += s.cells; steps += s.steps; tailTicks += s.tailTicks || 0; tailRuns += s.tailRuns || 0; picks += s.picks || 0; maxLead = Math.max(maxLead, s.maxLead === undefined ? -1e9 : s.maxLead); }
 	console.log(`[explore] ${(steps + tailTicks).toLocaleString()} simulated ticks, ${cells.toLocaleString()} archive cells (sum over workers)` +
-		(TAILS ? `; tails: ${tailRuns.toLocaleString()} runs, ${tailTicks.toLocaleString()} ticks, ${nTail} of ${edges.size} edges` : ''));
+		(EDGES ? `; tails: ${tailRuns.toLocaleString()} runs, ${tailTicks.toLocaleString()} ticks, ${nTail} of ${edges.size} edges` : '') +
+		(HUNT ? `; hunt: ${picks.toLocaleString()} picks, highest lead ${maxLead > -1e9 ? maxLead.toFixed(0) : '-'}` : ''));
 	meter.stop();
-	if (TAILS) {
+	if (EDGES) {
 		edgesNew = true;
 		combineAndWrite();
 		if (edges.size) writeEdges();   // every exact edge, also when no combination of them was accepted
@@ -531,6 +768,16 @@ async function main() {
 	console.log(`[explore] best: rejoin ref tick ${best.j} at tick ${best.t} (saves ${best.saved}) -> ${a.out}`);
 }
 
+/** --hunt: one context's time-to-go field (reach.js with the reference's positions as goals), for the main thread */
+function fieldWorker() {
+	const d = workerData.field;
+	const f = Reach.reachField(E.loadLevel(d.levelData), { goals: d.goals, maxCost: d.maxCost });
+	// in shared memory: the explore workers all read the same arrays (workerData would copy every context's field into
+	// every worker: 20+ contexts x 3-5 MB x the workers on coin-counting levels)
+	const shared = (x) => { const s = new x.constructor(new SharedArrayBuffer(x.byteLength)); s.set(x); return s; };
+	parentPort.postMessage({ W: f.W, H: f.H, B: f.B, g: f.g, mode: f.mode, cls: shared(f.cls), own: shared(f.own), refresh: shared(f.refresh), cost: shared(f.cost) });
+}
 
 if (isMainThread) main();
+else if (workerData.field) fieldWorker();
 else workerMain();
