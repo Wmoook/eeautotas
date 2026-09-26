@@ -601,8 +601,8 @@ async function passesSection() {
 	if (st.running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 40)); }
 	const LM = fs.readFileSync(logM, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 	const mj = C.readJSON(miss, null);
-	check('the physics check rules the start out: "every move" alone, without the prune, at most 60 s', st.strategies.map((q) => q.key).join() === 'explore' && st.seconds === 60 &&
-		LM.length > 0 && LM.every((a) => a[0] === 'explore' && !a.includes('--prune=1')) && +LM[0].find((x) => x.startsWith('--seconds=')).slice(10) <= 60 && !!st.physics && st.physics.noWayUp,
+	check(`the physics check rules the start out: "every move" alone, without the prune, at most ${ED.NO_WAY_UP_S} s`, st.strategies.map((q) => q.key).join() === 'explore' && st.seconds === ED.NO_WAY_UP_S &&
+		LM.length > 0 && LM.every((a) => a[0] === 'explore' && !a.includes('--prune=1')) && +LM[0].find((x) => x.startsWith('--seconds=')).slice(10) <= ED.NO_WAY_UP_S && !!st.physics && st.physics.noWayUp,
 		`${st.strategies.map((q) => q.key).join()}; ${st.seconds} s; ${LM.map((a) => `${a[0]} ${a.filter((x) => /^--(prune|seconds)=/.test(x)).join(' ')}`).join(' | ')}`);
 	check('... and a route found anyway: a mistake in the model, kept in model_miss.json (the level and the route) and said in the log', st.stage === 'found' && !!mj && !!mj.eelvlB64 &&
 		typeof mj.inputs === 'string' && mj.inputs.length > 0 && st.log.some((x) => /mistake in the physics model/.test(x)), `${st.stage}; model_miss.json ${mj ? 'written' : 'missing'}`);
@@ -716,7 +716,7 @@ async function cpuSection() {
 		u0.results.length === 0, u0.summary);
 	ED.start({ eelvlB64: hiBuf.toString('base64'), seconds: 5, workers: 1 }, { available: false, why: 'test: no GPU' });
 	st = await waitDone(20000);
-	check('no NVIDIA GPU, a trophy out of reach: the random runs check it without the physics check (their time, at most a minute), then the physics verdict',
+	check('no NVIDIA GPU, a trophy out of reach: the random runs check it without the physics check (their time, at most NO_WAY_UP_S), then the physics verdict',
 		st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed >= 4 && st.elapsed < 15 && st.log.some((x) => /checking that with random runs \(CPU\), without the physics check/.test(x)),
 		`${st.elapsed.toFixed(1)} s: ${st.message}`);
 	check('... and no proof (eegpu prove) runs: the physics check has proven it already', !st.proof, JSON.stringify(st.proof || null));

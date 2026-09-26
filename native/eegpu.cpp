@@ -303,6 +303,7 @@ struct Gpu {
 		printf("{\"ev\":\"ready\",\"loadMs\":%.0f,\"allocMs\":%.0f,\"ctxMs\":%.0f,\"module\":\"%s\",\"waitMs\":%.0f}\n", loadMs, msSince(opened), ctxMs, how.how.c_str(), how.waitMs);
 		fflush(stdout);
 		tStart = Clock::now();
+		lk::G.searching = true;   // (launch.h: from now on a pause file holds it; the loading and allocations never wait)
 	}
 	cu::CUfunction fn(const std::string& name) {
 		cu::CUfunction f = nullptr;
@@ -1195,6 +1196,7 @@ int main(int argc, char** argv) {
 	const std::string prio = opt(argc, argv, "priority", envPrio && *envPrio ? envPrio : "high");
 	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 	lk::G.stopFile = opt(argc, argv, "stopfile", "");                   // (launch.h: a graceful stop between launches)
+	lk::G.pauseFile = opt(argc, argv, "pausefile", "");                 // (launch.h: waits between launches while it exists)
 	lk::watchParent(opt(argc, argv, "parent", ""));                      // (launch.h: ... also once the caller has exited)
 	lk::G.maxItems = std::max(0.0, atof(opt(argc, argv, "launch-items", "0").c_str()));   // (launch.h: tests split small workloads)
 	// (launch.h: the host thread sleeps through a launch after --spin-ms instead of spinning a core; --wait=spin: off)

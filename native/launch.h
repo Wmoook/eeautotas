@@ -57,6 +57,9 @@ struct Guard {
 	cu::CUevent e0 = nullptr;
 	int events = -1;        // the event timing: -1 not tried yet, 0 unavailable (host clock only), 1 on
 	std::string stopFile;   // --stopfile
+	std::string pauseFile;  // --pausefile: while it exists, wait between launches (the editor gives one search the GPU at a time)
+	double pausedMs = 0, lastPauseCheck = -1e9;
+	bool searching = false;   // set at the command's ready event: a pause holds it only from then on
 	HANDLE parent = nullptr;   // --parent: that process (a stop once it has exited)
 	double maxItems = 0;       // --launch-items=N (tests): at most N items per launch whatever the speed (0: no cap), so
 	                           // a small workload is split too and must give what one launch gives (test/gpulaunch.js)
@@ -139,8 +142,24 @@ inline bool stopRequested(bool now = false) {
 	if (G.parent && WaitForSingleObject(G.parent, 0) == WAIT_OBJECT_0) return true;
 	return !G.stopFile.empty() && GetFileAttributesA(G.stopFile.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
+/** --pausefile=<path>: while that file exists the command waits here, between two launches (no kernel runs, nothing is
+ *  lost): two GPU processes side by side each got far less than half the GPU (the one with the small launches waited
+ *  behind the other's 50 ms ones: a Find a route relay ran 15x slower than alone), so the editor lets one run at a time.
+ *  A stop request still ends it (checked every 5 ms while it waits). */
+inline bool pauseRequested() { return !G.pauseFile.empty() && GetFileAttributesA(G.pauseFile.c_str()) != INVALID_FILE_ATTRIBUTES; }
+inline void checkStop(bool now = false);
+inline void checkPause() {
+	if (G.pauseFile.empty() || !G.searching) return;
+	const double t = nowMs();
+	if (t - G.lastPauseCheck < 5) return;
+	G.lastPauseCheck = t;
+	if (!pauseRequested()) return;
+	while (pauseRequested()) { Sleep(5); checkStop(true); }
+	G.pausedMs += nowMs() - t;
+	G.havePrev = false;   // (the time across a pause is no gap between two commands)
+}
 /** between launches (no kernel running): a stop request ends the command here, cleanly: its final line, exit 0 */
-inline void checkStop(bool now = false) {
+inline void checkStop(bool now) {
 	if (G.stopping || !stopRequested(now)) return;
 	G.stopping = true;
 	if (onStop) onStop();
@@ -174,6 +193,7 @@ inline cu::CUresult waitDone(cu::CUevent end, std::chrono::steady_clock::time_po
 template <class F>
 inline double timed(const char* what, F issue) {
 	checkStop();
+	checkPause();
 	const bool ev = eventsOn();
 	cu::CUevent end = ev ? G.eEnd[G.endIdx] : nullptr;
 	const auto t0 = std::chrono::steady_clock::now();
