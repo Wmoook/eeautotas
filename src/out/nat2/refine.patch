@@ -1,0 +1,173 @@
+--- native/explore.h	2026-09-26 03:19:17.915943200 -0400
++++ src/out/nat2/explore.h	2026-09-26 12:15:49.605860100 -0400
+@@ -50,8 +50,33 @@
+ 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
+ 	i32 prune;
+ 	unsigned long long* stats;         // [0] ticks simulated, [1] children skipped as twins of a lower option (search.h canonOption)
++	// near-miss refinement (explorehost.h --refine=1): the situations (exploreSituation) in which cells are rfx x finer in
++	// px and rfv x finer in vx (an open-addressing set, 0 = empty; null = off)
++	const u64* refKeys; u32 refMask; double rfx, rfv;
++	// the near-miss record (null = off): per tile and direction k (NB_X / NB_Y), the minimum of (float bits of the squared
++	// distance from a state's box centre to the centre of that neighbour tile << 32 | layer << 21 | index in the layer)
++	// over this try's states; tileSeen: the tiles a box centre was in
++	unsigned long long* nearTile; u8* tileSeen;
+ };
+ 
++/** A situation: everything of a state's cell but its x position and speed (exact height and vertical speed, on the
++ *  ground, jumps, the centre's tile column). The near-miss refinement refines every cell of a situation it lists. */
++EE_HD u64 exploreSituation(double py, double vy, bool onGround, i32 jumpCount, i32 tileX) {
++	return splitmix(doubleToBits(py + 0) ^ splitmix(doubleToBits(vy + 0) ^ ((u64)(onGround ? 1 : 0) << 40) ^ ((u64)(u32)(jumpCount & 7) << 44) ^ ((u64)(u32)tileX << 48))) | 1ull;
++}
++EE_HD bool refineHit(const u64* keys, u32 mask, u64 k) {
++	u32 s = (u32)(k >> 20) & mask;
++	for (int i = 0; i < 64; i++) {
++		const u64 v = keys[s];
++		if (v == k) return true;
++		if (v == 0) return false;
++		s = (s + 1) & mask;
++	}
++	return false;
++}
++#define EE_NB_X(k) ((k) == 0 || (k) == 3 || (k) == 5 ? -1 : (k) == 1 || (k) == 6 ? 0 : 1)
++#define EE_NB_Y(k) ((k) < 3 ? -1 : (k) < 5 ? 0 : 1)
++
+ /** The per-layer claim of the exploration (after exploreExpand wrote every child's cell and priority): a cell new in
+  *  this layer goes to the child with the lowest priority, whatever order the GPU ran them in. The visited-cell table
+  *  holds the cell (bits 12.. of the key) and the layer that first saw it (bits 1..11, mod 2048); cellBest the winning
+--- native/explorehost.h	2026-09-26 03:19:17.917498900 -0400
++++ src/out/nat2/explorehost.h	2026-09-26 12:16:48.257256300 -0400
+@@ -20,6 +20,7 @@
+ // (--finish) starts over with the next salt after a try that ran through its depth without a finish ({"ev":"try"});
+ // done: "salt" = the last salt tried, "tries", "exhaustedTries" (tries that ran out of situations with no overflow).
+ #pragma once
++#include <unordered_set>
+ 
+ /** A radix select over a key (the claim's priority, or a candidate index): the key of the winner of rank k (0-based,
+  *  lowest first). hist = the histogram of the key's `bits` bits at `shift` (the higher ones are 0); count(hi, shift,
+@@ -234,6 +235,34 @@
+ 	P.pick = (const u32*)(uintptr_t)dpick.p;
+ 	P.candKey = (u64*)(uintptr_t)dck.p; P.candPrio = (u64*)(uintptr_t)dcp.p;
+ 	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
++	// --refine=1 (with --finish and --salts): near-miss refinement. Each try records, per tile and direction, the state
++	// that came nearest to the neighbour tile's centre (exploreMaterialize); a try that ends without a finish hands its
++	// near misses to the next one: for every tile the reach field calls reachable that no state reached, next to one
++	// that was reached, the nearest state from each reached neighbour; every situation (exploreSituation) on those
++	// states' input histories gets cells --rfx x finer in px and --rfv x finer in vx (default 4) in the later tries
++	// (the set grows try by try). A pixel-exact route shares its situations with the near misses of the merged graph
++	// (the same floors, the same jump arcs), so it is sampled finely where it needs to be.
++	const bool refine = finishTarget && opt(argc, argv, "refine", "0") == "1";
++	P.rfx = atof(opt(argc, argv, "rfx", "4").c_str()); P.rfv = atof(opt(argc, argv, "rfv", "4").c_str());
++	cu::Buf dnear, dseen, drk;
++	std::unordered_set<uint64_t> refSet;
++	std::vector<float> reachHost;   // the reach costs per (tile, budget), for the frontier tiles
++	int reachB = 0;
++	if (refine) {
++		if (!dnear.alloc(8ull * 8 * (size_t)L.N) || !dseen.alloc((size_t)L.N)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
++		cu::cuMemsetD8_v2(dnear.p, 0xff, 8ull * 8 * (size_t)L.N);
++		cu::cuMemsetD8_v2(dseen.p, 0, (size_t)L.N);
++		P.nearTile = (unsigned long long*)(uintptr_t)dnear.p; P.tileSeen = (u8*)(uintptr_t)dseen.p;
++		const std::string rf = opt(argc, argv, "reach", "");
++		if (!rf.empty()) {
++			std::vector<uint8_t> raw = readFile(rf.c_str());
++			int32_t B = 0; memcpy(&B, &raw[12], 4);
++			const size_t N = (size_t)L.N, pad = (N + 3) & ~(size_t)3;
++			reachB = B + 1;
++			reachHost.resize(N * (size_t)reachB);
++			memcpy(reachHost.data(), raw.data() + 28 + 3 * pad, 4 * reachHost.size());
++		}
++	}
+ 	std::vector<std::vector<uint32_t>> lineage;
+ 	int nParents = 1;
+ 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;
+@@ -374,6 +403,55 @@
+ 		fflush(stdout);
+ 		// the next salt, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
+ 		nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
++		if (refine) {
++			// this try's near misses: their input histories' situations are refined from now on
++			std::vector<unsigned long long> nt(8 * (size_t)L.N);
++			std::vector<uint8_t> seen((size_t)L.N);
++			cu::cuMemcpyDtoH_v2(nt.data(), dnear.p, 8 * nt.size());
++			cu::cuMemcpyDtoH_v2(seen.data(), dseen.p, seen.size());
++			auto reachable = [&](int t) { if (!reachB) return true; for (int b = 0; b < reachB; b++) if (reachHost[(size_t)t * reachB + b] >= 0.f) return true; return false; };
++			std::unordered_set<std::string> lines;
++			int frontier = 0;
++			for (int ty = 0; ty < L.H; ty++) for (int tx = 0; tx < L.W; tx++) {
++				const int f = ty * L.W + tx;
++				if (seen[f] || !reachable(f)) continue;
++				bool any = false;
++				for (int k = 0; k < 8; k++) {
++					const int nx = tx - EE_NB_X(k), ny = ty - EE_NB_Y(k);   // (the neighbour whose direction k points at f)
++					if (nx < 0 || ny < 0 || nx >= L.W || ny >= L.H || !seen[ny * L.W + nx]) continue;
++					const unsigned long long v = nt[((size_t)ny * L.W + nx) * 8 + k];
++					if (v == ~0ull) continue;
++					const int layer = (int)((v >> 21) & 2047), idx = (int)(v & ((1u << 21) - 1));
++					if (layer >= (int)lineage.size() || idx >= (int)lineage[layer].size()) continue;
++					const uint32_t pk = lineage[layer][idx];
++					lines.insert(inputsOf(layer, pk >> 5, (int)(pk & 31)));
++					any = true;
++				}
++				if (any) frontier++;
++			}
++			const size_t before = refSet.size();
++			for (const std::string& in : lines) {
++				S* st = (S*)malloc(SB);
++				memcpy(st, start, SB);
++				Sim<TW> vs(L, *st);
++				for (char c : in) {
++					Input x = maskInput((c - '0') & 31); vs.tick(x);
++					if (st->is_dead || st->broken) break;
++					refSet.insert(exploreSituation(st->py, st->speed_y, st->on_ground != 0, st->jump_count, truncI(st->px + 8.0) >> 4));
++				}
++				free(st);
++			}
++			uint32_t rcap = 1024;
++			while (rcap < 2 * refSet.size()) rcap <<= 1;
++			std::vector<uint64_t> rk(rcap, 0);
++			for (uint64_t k : refSet) { uint32_t s = (uint32_t)(k >> 20) & (rcap - 1); while (rk[s]) s = (s + 1) & (rcap - 1); rk[s] = k; }
++			if (!drk.upload(rk.data(), 8 * rk.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
++			P.refKeys = (const u64*)(uintptr_t)drk.p; P.refMask = rcap - 1;
++			printf("{\"ev\":\"refine\",\"frontierTiles\":%d,\"nearMisses\":%zu,\"situations\":%zu,\"new\":%zu}\n", frontier, lines.size(), refSet.size(), refSet.size() - before);
++			fflush(stdout);
++			cu::cuMemsetD8_v2(dnear.p, 0xff, 8ull * 8 * (size_t)L.N);
++			cu::cuMemsetD8_v2(dseen.p, 0, (size_t)L.N);
++		}
+ 		P.salt++;
+ 		cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
+ 		cu::cuMemsetD8_v2(dbest.p, 0xff, 8ull * cellCount);
+--- native/kernels.cu	2026-09-26 03:19:17.917498900 -0400
++++ src/out/nat2/kernels.cu	2026-09-26 12:16:00.586131000 -0400
+@@ -416,7 +416,11 @@
+ 		// precise ones a clip or a one-block gap needs, so they never share a cell with a near miss)
+ 		const u32 snapped = (floor(s.px) == s.px ? 1u : 0u) | (floor(s.py) == s.py ? 2u : 0u) | (eq0(s.speed_x) ? 4u : 0u) | (eq0(s.speed_y) ? 8u : 0u);
+ 		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26) | (snapped << 27);
+-		u64 key = exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
++		// near-miss refinement: a situation the earlier tries' near misses passed through gets cells rfx / rfv times finer
++		// (bit 31 of small keeps them apart from the plain cells)
++		const bool fine = p.refKeys && refineHit(p.refKeys, p.refMask, exploreSituation(s.py, s.speed_y, s.on_ground != 0, s.jump_count, cx));
++		u64 key = fine ? exploreCell(s.px, s.py, s.speed_x, s.speed_y, small | 0x80000000u, false, p.qy, p.qvy, p.cqx * p.rfx, p.cqv * p.rfv)
++			: exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
+ 		u64 disc = 0;
+ 		if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
+ 		// the proposal: the cell (12 low bits free for the layer tag) and a fixed priority: the reach-field distance
+@@ -505,6 +509,20 @@
+ 	Input in = maskInput(option((i32)(pk & 31)));
+ 	sim.tick(in);
+ 	*(State<TW>*)(p.next + (size_t)i * p.stateBytes) = s;
++	if (p.nearTile && p.layer < 2048 && i < (1 << 21)) {
++		// the near-miss record: how near this state's box centre comes to each neighbour tile's centre
++		const double cxp = s.px + 8.0, cyp = s.py + 8.0;
++		const i32 tx = truncI(cxp) >> 4, ty = truncI(cyp) >> 4;
++		if (tx >= 0 && ty >= 0 && tx < p.L.W && ty < p.L.H) {
++			const size_t t = (size_t)ty * p.L.W + tx;
++			p.tileSeen[t] = 1;
++			for (i32 k = 0; k < 8; k++) {
++				const float ex = (float)((tx + EE_NB_X(k)) * 16 + 8 - cxp), ey = (float)((ty + EE_NB_Y(k)) * 16 + 8 - cyp);
++				const unsigned long long v = ((unsigned long long)floatBits(ex * ex + ey * ey) << 32) | ((u64)(u32)p.layer << 21) | (u64)(u32)i;
++				if (v < p.nearTile[t * 8 + k]) atomicMin(&p.nearTile[t * 8 + k], v);
++			}
++		}
++	}
+ }
+ 
+ #define INSTANCE(TW) INSTANCE_(TW)

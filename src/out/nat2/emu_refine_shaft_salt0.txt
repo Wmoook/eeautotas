@@ -1,0 +1,4 @@
+{"ev":"try","salt":0,"end":"exhausted","layers":247,"overflow":0,"sec":128.8}
+{"ev":"refine","frontierTiles":6,"nearMisses":10,"situations":197,"new":197}
+{"ev":"done","gpu":{"name":"CPU emulation","sms":4,"clockMHz":1000,"cc":"8.6","memMB":2048,"driver":12060},"layers":251,"states":21027130,"ticks":112108965,"ticksPerSec":264815,"hits":18,"seconds":423.3,"end":"finish","overflow":0,"twins":502698261,"cellLog":27,"cap":428126,"salt":1,"tries":2,"exhaustedTries":1}
+[emu] 1912985344 emulated GPU threads

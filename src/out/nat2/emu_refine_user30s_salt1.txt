@@ -1,0 +1,6 @@
+{"ev":"try","salt":1,"end":"exhausted","layers":241,"overflow":0,"sec":45.3}
+{"ev":"refine","frontierTiles":19,"nearMisses":46,"situations":390,"new":390}
+{"ev":"try","salt":2,"end":"exhausted","layers":239,"overflow":0,"sec":241.9}
+{"ev":"refine","frontierTiles":18,"nearMisses":44,"situations":426,"new":36}
+{"ev":"done","gpu":{"name":"CPU emulation","sms":4,"clockMHz":1000,"cc":"8.6","memMB":2048,"driver":12060},"layers":264,"states":22515779,"ticks":148823173,"ticksPerSec":376999,"hits":9612,"seconds":394.8,"end":"finish","overflow":0,"twins":673097471,"cellLog":27,"cap":428126,"salt":3,"tries":3,"exhaustedTries":2}
+[emu] 2557473408 emulated GPU threads
