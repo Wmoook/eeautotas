@@ -335,6 +335,7 @@ async function gpuSection() {
 	const cl = r.st.closest;
 	check('no route: "not found", with the closest attempt (walking distance, its path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && cl && cl.tiles > 0 && cl.tiles < 8 &&
 		cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy})` : `${r.st.stage}: no closest attempt`);
+	check('no route: "every move" tried every situation, and the verdict says so', !!r.st.impossible && /impossible/.test(r.st.message), r.st.message);
 }
 
 (async () => {

@@ -262,7 +262,7 @@ function check(buf) {
 // Each beam's first finish is its fastest; a beam that is already deeper than the best route found stops (it cannot
 // find a faster one), and the fastest verified route wins.
 const STRATEGIES = {
-	explore: { label: 'every move', args: (f, o, q) => ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${o.depth}`, `--seconds=${q.seconds}`, '--coarse=0',
+	explore: { label: 'every move', args: (f, o, q) => ['explore', f.bin, '-', '--finish=1', '--discrete=1', '--depth=100000', `--seconds=${q.seconds}`, '--coarse=0',
 		`--cqx=${0.5 * 2 ** q.pass}`, `--cqv=${16 * 2 ** q.pass}`, `--qy=${2 ** q.pass}`, `--qvy=${16 * 2 ** q.pass}`] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
@@ -271,6 +271,8 @@ const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, 
 // the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y; each pass halves
 // (finer, after a pass tried every state) or doubles (coarser, after the table filled) them, up to two steps
 const PASS_MIN = -2, PASS_MAX = 2;
+/** how finely the exploration's pass p tells situations apart: x position and x speed (y is twice as fine) */
+const passGrain = (p) => ({ '-2': '8 px and 1/4 px/tick', '-1': '4 px and 1/8 px/tick', 0: '2 px and 1/16 px/tick', 1: '1 px and 1/32 px/tick', 2: '1/2 px and 1/64 px/tick' })[p];
 const passText = (p) => (p === 0 ? '' : p < 0 ? ` (coarser cells, pass ${1 - p})` : ` (finer cells, pass ${1 + p})`);
 let S = null;        // the current / last search (public state, also in solve.json)
 let kids = [];       // the eegpu processes of the running search (one per strategy)
@@ -308,7 +310,7 @@ function start(b, gpu) {
 	const pts = Array.isArray(b.guide) ? b.guide.filter((q) => Array.isArray(q) && q.length === 2 && q.every(Number.isFinite)) : [];
 	if (pts.length > 4000) throw new Error('the guide line has too many points (at most 4000)');
 	const guide = pts.length >= 2 ? pts : [];
-	const seconds = Math.max(3, Math.min(600, Math.round(+b.seconds || 60)));
+	const seconds = Math.max(3, Math.min(10800, Math.round(+b.seconds || 60)));
 	const width = Math.max(1024, Math.min(131072, Math.round(+b.width || 32768)));
 	// ticks deep; the tool keeps 4 bytes per state per tick to spell out the route (at most ~0.6 GB per search)
 	const depth = Math.max(100, Math.min(20000, Math.floor(6e8 / (4 * width)), Math.round(+b.depth || 6000)));
@@ -398,6 +400,8 @@ function launch(n) {
 	ch.on('close', (code) => {
 		if (!mine()) return;
 		// the exploration's next pass: coarser cells after a full table, finer after every state was tried
+		// every situation tried (at this pass's grain) without a finish: the evidence that there is no route
+		if (V.key === 'explore' && end === 'exhausted' && !V.found && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
 		const next = end === 'full' && V.pass <= 0 ? V.pass - 1 : end === 'exhausted' && V.pass >= 0 ? V.pass + 1 : null;
 		if (V.key === 'explore' && !V.found && !V.error && code === 0 && next !== null && next >= PASS_MIN && next <= PASS_MAX && S.running &&
 			S.stage !== 'stopped' && !S.result && (Date.now() - S.started) / 1000 < S.seconds - 2) {
@@ -433,11 +437,17 @@ function finish() {
 	} else if (S.stage !== 'error') {
 		S.stage = 'not found';
 		const capped = S.layer >= S.depth;
+		const XE = S.strategies.find((q) => q.key === 'explore' && q.exhausted);
 		const X = S.strategies.find((q) => q.key === 'explore');
 		const every = X && X.layer ? `; every move to tick ${X.layer.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}` : '';
 		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${every}; the beams kept ${S.width.toLocaleString('en-US')} states per tick)` +
 			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
 			` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`;
+		if (XE) {
+			S.impossible = XE.exhausted;
+			S.message = `It looks impossible: "every move" tried every situation the ball can get into (positions and speeds told apart to ${XE.exhausted.grain}, and every gravity, jump and pickup state) up to tick ${XE.exhausted.tick.toLocaleString('en-US')}, when there was nothing new left to try, and none of them reaches the trophy.` +
+				(XE.exhausted.pass < PASS_MAX ? ' (A trick that needs a finer position than that is not ruled out.)' : '');
+		}
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
 	cur = null;

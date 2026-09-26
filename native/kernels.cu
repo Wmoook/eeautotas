@@ -315,6 +315,24 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 				continue;
 			}
 		}
+		else if (p.target == 4) {   // an exact rejoin with the run: a shortcut when the run reaches this state later
+			const u32 bit = (u32)(quadKey(s.px, s.py, s.speed_x, s.speed_y) >> (64 - QBITS_LOG2));
+			if ((p.qbits[bit >> 5] >> (bit & 31)) & 1u) {
+				const i32 j = htLookupT(p.htKeys, p.htVals, p.htMask, sim.hash(p.nocoins != 0));
+				if (j >= 0) {
+					const i32 now = p.fromTick + p.layer + 1;
+					if (j - now >= p.minGain) {
+						const u32 h = atomicAdd(p.nHits, 1u);
+						if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.pad0 = e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = j - now; e.refTick = j; p.hits[h] = e; }
+					}
+					continue;   // on the run: from here on it goes as the run does (sooner or later), nothing new
+				}
+			}
+			if (p.refTile) {   // behind the run's schedule here: it cannot become a shortcut through this tile
+				const i32 r = p.refTile[cy * p.L.W + cx];
+				if (r >= 0 && p.fromTick + p.layer + 1 > r + p.slack) continue;
+			}
+		}
 		else if (p.target == 1) {   // reach a region: report and do not expand further
 			if (cx >= p.reachX0 && cx <= p.reachX1 && cy >= p.reachY0 && cy <= p.reachY1) {
 				const u32 h = atomicAdd(p.nHits, 1u);

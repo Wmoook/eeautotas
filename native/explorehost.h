@@ -8,6 +8,10 @@
 // up to the cell merging). Cells: --coarse=<row> (from this tile row down, px x --cqx and vx x --cqv to whole
 // numbers; default 0.5 and 16), --qy / --qvy (py / vy likewise; 0 = exact), --discrete=1 (cells also differ in coins,
 // keys, switches, the time doors' phase, effects: Sim::hashDiscrete).
+// --rejoin=1 [--nocoins=1] [--gain=1]: the optimizer's target. From the run's state at --from, a state equal to one the
+// run reaches at least --gain ticks later (exact state hash, re-checked on the CPU with both hashes) is a proven
+// shortcut: {"ev":"rejoin","from":T,"j":J,"ticks":L,"saving":J-T-L,"inputs":...} (the shortest per J); states on the
+// run are not expanded (from there it goes as the run does).
 #pragma once
 
 template <int TW>
@@ -26,6 +30,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	Level L = B.level(B.bytes.data());
 	S* start = (S*)calloc(1, sizeof(S));
 	const bool ahead = opt(argc, argv, "ahead", "0") == "1";
+	const bool rejoin = opt(argc, argv, "rejoin", "0") == "1", ncR = opt(argc, argv, "nocoins", "0") == "1";
+	std::vector<uint64_t> refH, refH2;       // --rejoin: the run's state hashes per tick, and the quad keys' positions
+	std::vector<double> qX, qY, qSX, qSY;
 	std::vector<int32_t> refTile;
 	std::vector<float> rX, rY, rVX, rVY;   // the run's state per tick (index = tick)
 	{
@@ -34,21 +41,25 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		std::vector<uint8_t> ref;
 		if (strcmp(argv[3], "-") != 0) ref = readMasks(argv[3]);
 		S* rs = (S*)malloc(sizeof(S));
-		if (ahead) refTile.assign((size_t)L.N, -1);
+		if (ahead || rejoin) refTile.assign((size_t)L.N, -1);
 		for (int t = 0; t < (int)ref.size(); t++) {
 			rX.push_back((float)start->px); rY.push_back((float)start->py); rVX.push_back((float)start->speed_x); rVY.push_back((float)start->speed_y);
+			if (rejoin) { refH.push_back(sim.hash(ncR)); refH2.push_back(sim.hash2(ncR)); qX.push_back(start->px); qY.push_back(start->py); qSX.push_back(start->speed_x); qSY.push_back(start->speed_y); }
 			if (t == from) memcpy(rs, start, sizeof(S));
-			if (t >= from && ahead) {
+			if (t >= from && (ahead || rejoin)) {
+				// --ahead: the run's first visit per tile; --rejoin: its last (a state later than that, by more than
+				// the slack, is behind the run's schedule there)
 				const int tx = (int)std::floor((start->px + 8) / 16), ty = (int)std::floor((start->py + 8) / 16);
-				if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && refTile[(size_t)ty * L.W + tx] < 0) refTile[(size_t)ty * L.W + tx] = t;
+				if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && (rejoin || refTile[(size_t)ty * L.W + tx] < 0)) refTile[(size_t)ty * L.W + tx] = t;
 			}
-			if (t >= from && !ahead) break;
+			if (t >= from && !ahead && !rejoin) break;
 			const bool crown0 = start->has_silver_crown;
 			Input in = maskInput(ref[t]); sim.tick(in);
 			if (!crown0 && start->has_silver_crown) break;
 		}
 		if (from < (int)ref.size()) memcpy(start, rs, sizeof(S));
 		free(rs);
+		if (rejoin && from >= (int)refH.size()) { printf("{\"error\":\"--from must be a tick inside the run\"}\n"); return 3; }
 	}
 	// --prefix: inputs played from the start state first (the exploration continues from where they end); the
 	// reported inputs include them
@@ -116,7 +127,31 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (wantNear) { P.goalDist = (const float*)(uintptr_t)dgoal.p; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
 	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;
-	cu::Buf drt, dtb, drx, dry, drvx, drvy;
+	cu::Buf drt, dtb, drx, dry, drvx, drvy, dhk, dhv, dqb;
+	std::vector<int> rejoinBest;   // --rejoin: the shortest printed per target tick
+	if (rejoin) {
+		uint32_t hcap = 1024;
+		while (hcap < 4u * (uint32_t)refH.size()) hcap <<= 1;
+		std::vector<uint64_t> hk(hcap, 0); std::vector<int32_t> hv(hcap, -1);
+		for (int t = 0; t < (int)refH.size(); t++) {
+			const uint64_t key = refH[t] | (1ull << 63);
+			uint32_t slot = (uint32_t)(splitmix(refH[t]) & (hcap - 1));
+			while (hk[slot] != 0 && hk[slot] != key) slot = (slot + 1) & (hcap - 1);
+			hk[slot] = key; hv[slot] = t;   // (the latest tick wins: the biggest saving)
+		}
+		std::vector<uint32_t> qb((1u << QBITS_LOG2) / 32, 0);
+		for (size_t t = 0; t < qX.size(); t++) { const uint32_t bit = (uint32_t)(quadKey(qX[t], qY[t], qSX[t], qSY[t]) >> (64 - QBITS_LOG2)); qb[bit >> 5] |= 1u << (bit & 31); }
+		if (!dhk.upload(hk.data(), 8 * hk.size()) || !dhv.upload(hv.data(), 4 * hv.size()) || !dqb.upload(qb.data(), 4 * qb.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		P.target = 4; P.htKeys = (const u64*)(uintptr_t)dhk.p; P.htVals = (const i32*)(uintptr_t)dhv.p; P.htMask = hcap - 1; P.qbits = (const u32*)(uintptr_t)dqb.p;
+		P.nocoins = ncR ? 1 : 0; P.fromTick = from; P.minGain = std::max(1, atoi(opt(argc, argv, "gain", "1").c_str()));
+		// --slack=N: a state later than the run's last visit of its tile + N is dropped (off by default: -1)
+		P.slack = atoi(opt(argc, argv, "slack", "-1").c_str());
+		if (P.slack >= 0) {
+			if (!drt.upload(refTile.data(), 4 * refTile.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+			P.refTile = (const i32*)(uintptr_t)drt.p;
+		}
+		rejoinBest.assign(refH.size(), 1 << 30);
+	}
 	if (ahead) {
 		if (!drt.upload(refTile.data(), 4 * refTile.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 		P.target = 2; P.refTile = (const i32*)(uintptr_t)drt.p; P.fromTick = from;
@@ -167,6 +202,22 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 				const ExploreHit& h = hv[i];
 				std::string in = prefixStr + inputsOf(d, h.parent, h.option);
 				if (h.jumpOption != 255) in.push_back((char)('0' + h.jumpOption));
+				if (rejoin) {
+					const int j = h.refTick;
+					if (j < 0 || j >= (int)refH.size() || (int)in.size() >= rejoinBest[j]) continue;
+					// the CPU check: the inputs from the start state reach the run's state at j (both hashes)
+					S* st = (S*)malloc(SB);
+					memcpy(st, start, SB);
+					Sim<TW> vs(L, *st);
+					bool ok = true;
+					for (size_t k = prefixStr.size(); k < in.size() && ok; k++) { Input x = maskInput((in[k] - '0') & 31); vs.tick(x); if (st->is_dead || st->broken) ok = false; }
+					ok = ok && vs.hash(ncR) == refH[j] && vs.hash2(ncR) == refH2[j];
+					free(st);
+					if (!ok) continue;
+					rejoinBest[j] = (int)in.size();
+					printf("{\"ev\":\"rejoin\",\"from\":%d,\"j\":%d,\"ticks\":%d,\"saving\":%d,\"inputs\":\"%s\"}\n", from0, j, (int)in.size(), j - from0 - (int)in.size(), in.c_str());
+					continue;
+				}
 				printf("{\"ev\":\"hit\",\"layer\":%d,\"tick\":%d,\"px\":%.3f,\"vx\":%.3f,\"gain\":%d,\"refTick\":%d,\"inputs\":\"%s\"}\n", d, from0 + (int)in.size(), h.px, h.vx, h.gain, h.refTick, in.c_str());
 			}
 			fflush(stdout);

@@ -194,7 +194,8 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 				<ul class="checks" id="checks"></ul>
 				<div class="row" style="margin-top:12px">
 					<label class="lab">search for <select id="sSec"><option value="15">15 s</option><option value="30">30 s</option><option value="60" selected>1 min</option>
-						<option value="120">2 min</option><option value="300">5 min</option></select></label>
+						<option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="1800">30 min</option>
+						<option value="3600">1 hour</option><option value="10800">3 hours</option></select></label>
 					<label class="lab" title="How many states the search keeps per tick (more: more thorough, fewer ticks per second)">states <select id="sWidth">
 						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
 						<option value="65536">64 k</option></select></label>
@@ -1522,7 +1523,7 @@ function renderSolve() {
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed(0)} M ticks/s</div>`;
 		if (st.strategies && st.strategies.length) {
-			const what = (q) => (q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? 'no route'
+			const what = (q) => (q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: every situation tried (to ${esc(q.exhausted.grain)})` : 'no route')
 				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : `tick ${q.layer.toLocaleString('en-US')}`);
 			const more = (q) => (q.key === 'explore' ? (q.state === 'running' && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
 			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
@@ -1539,7 +1540,7 @@ function renderSolve() {
 			<div class="row"><button class="small" id="rEetas">Download .eetas</button><button class="small" id="rEelvl">Download .eelvl</button></div>
 			<div id="rMsg"></div></div>`;
 	} else if (!st.running && st.stage !== 'idle') {
-		h += `<div class="msg ${st.stage === 'error' ? 'err' : 'info'}">${st.stage === 'not found' ? '<b>No route found.</b> ' : ''}${esc(st.message || st.stage)}</div>`;
+		h += `<div class="msg ${st.stage === 'error' ? 'err' : 'info'}">${st.stage === 'not found' ? (st.impossible ? '<b>No route.</b> ' : '<b>No route found.</b> ') : ''}${esc(st.message || st.stage)}</div>`;
 	}
 	const c = !r && st.closest;
 	if (c) {

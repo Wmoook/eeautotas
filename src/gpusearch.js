@@ -8,6 +8,11 @@
 // best.eetas changes; the library is combined with the shortest-path DP of mutate.js on the current best; the result
 // is replayed by the exact JS engine (C.evaluate: finish, deaths, random-portal chance) and judged with THE rule
 // (C.judge); a faster run goes to the grind through the job inbox (J.tryCandidate), which checks it once more.
+// With --every=1, every other round is an "every move" round instead (off by default: on real levels the exact windows
+// explode, 20-40 s per 40-60 ticks on a laptop GPU, and the search families find more per second): eegpu explore --rejoin=1 from the run's state at tick T tries
+// every input sequence over the next --everyDepth ticks (60; states that match to the exact position and speed are
+// merged), and every state equal to a later state of the run is a proven shortcut (re-checked on the CPU). Windows
+// start every --everyStep ticks (25) along the run, continuing where the last round stopped, --everyS seconds each (5).
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, ...).
 const fs = require('fs');
 const path = require('path');
@@ -21,6 +26,9 @@ const args = C.parseArgs(process.argv.slice(2));
 const DIR = path.resolve(args.job || '');
 const ID = path.basename(DIR);
 const ROUND_S = Math.max(5, +(args.round || 30));
+// every-move rounds: opt in with --every=1 (exact every-move windows are slow on big levels; see the header)
+const EVERY_ON = args.every !== undefined && String(args.every) !== '0';
+const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 60)), EVERY_STEP = Math.max(1, +(args.everyStep || 25)), EVERY_S = Math.max(1, +(args.everyS || 5));
 const PARENT = +(args.parent || 0);
 const GDIR = path.join(DIR, 'gpu');
 const STATUS = path.join(DIR, 'gpu_status.json');
@@ -146,6 +154,56 @@ function runRound(tool, blobFile, refFile, edgesFile, seconds, nc, seed, familie
 	});
 }
 
+// ---------------------------------------------------------------- one "every move" round (windows along the run)
+let everyCursor = Math.max(0, +(args.everyFrom || 0));
+/** one window: every move from tick T; its shortcuts go into the library. Resolves {added, done, err}. */
+function runWindow(tool, blobFile, refFile, ref, nc, T) {
+	return new Promise((resolve) => {
+		const a = ['explore', blobFile, refFile, `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000'];
+		child = spawn(tool, a, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+		let buf = '', done = null, err = '', added = 0, last = 0;
+		const base = st.ticks;
+		child.stdout.on('data', (d) => {
+			buf += d;
+			let k;
+			while ((k = buf.indexOf('\n')) >= 0) {
+				const line = buf.slice(0, k).trim();
+				buf = buf.slice(k + 1);
+				if (!line.startsWith('{')) continue;
+				let ev;
+				try { ev = JSON.parse(line); } catch (e) { continue; }
+				if (ev.ev === 'rejoin') {
+					if (ev.from >= 0 && ev.from <= ref.n && ev.j > ev.from && ev.j <= ref.n && ev.saving > 0) {
+						const seq = Uint8Array.from(String(ev.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
+						if (addEdge(ref.H[ev.from], ref.H[ev.j], seq)) added++;
+					}
+				} else if (ev.ev === 'layer') {
+					last = ev.ticks;
+					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: `every move from tick ${T}` });
+				} else if (ev.ev === 'done') done = ev;
+				else if (ev.error) err = ev.error;
+			}
+		});
+		child.stderr.on('data', (d) => { err += d; });
+		child.on('close', (code) => { child = null; if (done) st.ticks = base + (done.ticks || last); resolve({ code, done, err: err.trim(), added }); });
+	});
+}
+/** windows from the cursor on for about ROUND_S seconds */
+async function runEvery(tool, blobFile, refFile, ref, nc) {
+	const t0 = Date.now();
+	let added = 0, windows = 0, from = everyCursor % Math.max(1, ref.n), gpu = null, ticks = 0;
+	while ((Date.now() - t0) / 1000 < ROUND_S) {
+		const T = everyCursor % Math.max(1, ref.n);
+		everyCursor = T + EVERY_STEP;
+		const r = await runWindow(tool, blobFile, refFile, ref, nc, T);
+		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, added, windows };
+		windows++; added += r.added; gpu = r.done.gpu; ticks += r.done.ticks || 0;
+		if (everyCursor >= ref.n) { everyCursor = 0; log(`GPU: every move covered the whole run (windows of ${EVERY_DEPTH} ticks every ${EVERY_STEP})`); break; }
+	}
+	return { added, windows, from, to: everyCursor, gpu, ticks, seconds: (Date.now() - t0) / 1000 };
+}
+
 async function main() {
 	if (!args.job || !fs.existsSync(DIR)) { console.log('usage: node src/gpusearch.js --job=<job dir>'); process.exit(2); }
 	const tool = G.nativeTool();
@@ -180,6 +238,22 @@ async function main() {
 			await offer(level, ref, 'library');
 		}
 		round++;
+		// every other round: every move along the run (not the first: the systematic families go first)
+		if ((EVERY_ON && round % 2 === 0) || args.everyOnly) {
+			const e = await runEvery(tool, blobFile, refFile, ref, nc);
+			if (e.err) {
+				status({ state: 'error', why: e.err, ticksPerSec: 0 });
+				log(`GPU: every-move round failed: ${e.err}`);
+				if (args.once) process.exit(4);
+				await new Promise((res) => setTimeout(res, 15000));
+				continue;
+			}
+			status({ state: 'running', round, edges: libSize, found: st.found + e.added, ticksPerSec: e.seconds ? Math.round(e.ticks / e.seconds) : 0,
+				lastRound: { kind: 'every move', windows: e.windows, from: e.from, to: e.to, ticks: e.ticks, seconds: e.seconds } });
+			if (e.added) { log(`GPU: every move, ticks ${e.from}-${e.to}: ${e.added} new shortcut${e.added > 1 ? 's' : ''}`); await offer(level, ref, `every move ${e.from}-${e.to}`); }
+			if (args.once) break;
+			continue;
+		}
 		// the systematic families once per new best, then the random ones (new seeds every round)
 		const fams = systematicFor === refKey ? 'pert,flip,sticky' : 'm1,del,m2,pert,flip,sticky';
 		systematicFor = refKey;

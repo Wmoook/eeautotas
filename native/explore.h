@@ -20,6 +20,7 @@ struct ExploreHit { u32 parent; u8 option, jumpOption, pad0, pad1; float px, vx;
 
 struct ExploreParams {
 	Level L;
+	const u64* htKeys; const i32* htVals; u32 htMask; const u32* qbits; i32 nocoins;   // target 4: the run's states (exact rejoins)
 	const u8* parents; i32 stateBytes; i32 nParents;
 	u8* next; const u32* pick; i32 nPick;
 	u64* cells; u32 cellMask;          // the visited-cell set (open addressing, 0 = empty)
