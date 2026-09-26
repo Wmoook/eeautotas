@@ -419,6 +419,7 @@ extern "C" __global__ void exploreClaimCount(ExploreClaim q) {
 	if (i >= q.nCand) return;
 	const u32 s = q.candSlot[i];
 	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i])) return;
+	if (q.subBin != 0xffffffffu) { if (prioBin(q.candPrio[i]) == q.subBin) atomicAdd(&q.hist[prioSub(q.candPrio[i])], 1u); return; }
 	atomicAdd(q.nWin, 1u);
 	atomicAdd(&q.hist[prioBin(q.candPrio[i])], 1u);
 }
@@ -427,7 +428,9 @@ extern "C" __global__ void exploreClaimTake(ExploreClaim q) {
 	const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i >= q.nCand) return;
 	const u32 s = q.candSlot[i];
-	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i]) || prioBin(q.candPrio[i]) >= q.thrBin) return;
+	if (s == EE_SLOT_DROP || (s < EE_SLOT_REST && q.cellBest[s] != q.candPrio[i])) return;
+	const u32 b = prioBin(q.candPrio[i]);
+	if (b > q.thrBin || (b == q.thrBin && prioSub(q.candPrio[i]) >= q.thrSub)) return;
 	const u32 k = atomicAdd(q.nOut, 1u);
 	if (k < q.outCap) q.out[k] = ((i / 18u) << 5) | (i % 18u);
 }

@@ -223,13 +223,26 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			}
 			uint32_t nWin = 0;
 			cu::cuMemcpyDtoH_v2(&nWin, dnwin.p, 4);
-			Q.thrBin = 4096;
+			if (opt(argc, argv, "debug", "0") == "1") fprintf(stderr, "layer %d: %u parents, %u candidates, %u winners\n", d, (unsigned)nParents, Q.nCand, nWin);
+			Q.thrBin = 4096; Q.thrSub = 0; Q.subBin = 0xffffffffu;
 			if (nWin > (uint32_t)cap) {
+				// the bins that fit whole, then the boundary bin split by its sub-bins (the state's content)
 				std::vector<uint32_t> hist(4096);
 				cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4 * 4096);
 				uint64_t acc = 0; uint32_t b = 0;
 				while (b < 4096 && acc + hist[b] <= (uint64_t)cap) acc += hist[b++];
-				Q.thrBin = std::max(1u, b);
+				Q.thrBin = b;
+				if (b < 4096) {
+					Q.subBin = b;
+					cu::cuMemsetD8_v2(dhist.p, 0, 4 * 4096);
+					if (cu::cuLaunchKernel(fCount, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore claim failed\"}\n"); return 5; }
+					cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4 * 4096);
+					uint32_t sb = 0;
+					while (sb < 4096 && acc + hist[sb] <= (uint64_t)cap) acc += hist[sb++];
+					Q.thrSub = sb;
+					Q.subBin = 0xffffffffu;
+				}
+				if (opt(argc, argv, "debug", "0") == "1") fprintf(stderr, "claim layer %d: %u candidates, %u winners > cap %d: bins below %u and sub-bins below %u of it (%llu states)\n", d, Q.nCand, nWin, cap, Q.thrBin, Q.thrSub, (unsigned long long)acc);
 			}
 			if (cu::cuLaunchKernel(fTake, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore claim failed\"}\n"); return 5; }
 		}

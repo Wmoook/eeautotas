@@ -58,12 +58,14 @@ struct ExploreClaim {
 	u64* cells; u64* cellBest; u32 mask;
 	const u64* candKey; const u64* candPrio; u32* candSlot; u32 nCand; u32 layer;
 	u32* out; u32* nOut; u32 outCap;
-	u32* nWin; u32* hist; u32 thrBin;   // over-full layers: winners with a priority bin >= thrBin are left out
+	u32* nWin; u32* hist; u32 thrBin;   // over-full layers: winners with a priority bin above thrBin are left out,
+	u32 thrSub, subBin;                // and in bin thrBin those with a sub-bin >= thrSub; subBin != ~0: count sub-bins of that bin
 };
 #define EE_SLOT_DROP 0xffffffffu
 #define EE_SLOT_REST 0xfffffffeu
 /** the priority's histogram bin (the top 12 bits of its 31-bit head) */
 EE_HD u32 prioBin(u64 prio) { return (u32)(prio >> 51) & 4095u; }
+EE_HD u32 prioSub(u64 prio) { return (u32)(prio >> 39) & 4095u; }
 
 /** fine: px / vx resolution where corner clips can still happen; coarse (coarseRow and below): px x cqx, vx x cqv */
 EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, bool fine, double qy, double qvy, double cqx, double cqv) {

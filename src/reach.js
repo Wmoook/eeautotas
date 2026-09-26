@@ -13,7 +13,9 @@
 //   - up arrows: 1 + h rows (the height of the arrow column, energy in = energy out); an up boost: unlimited;
 //   - a portal exit: unlimited (the velocity is rotated and x1.42).
 // Moving sideways keeps b, moving down (falling) sets it to 0, moving up in a gravity tile costs 1 row. Deadly tiles
-// (spikes, fire, toxic; the box centre is never there) and solid blocks are walls; no corner cutting.
+// (spikes, fire, toxic; the box centre is never there at the end of a tick) and solid blocks are walls. A diagonal step
+// is closed only between two walls (the box cannot fit); between spikes it is open (the centre slips past the corner
+// within a tick: a diagonal spike staircase like 213 is run that way).
 //
 // It is OPTIMISTIC by design (a route the game can do is never ruled out: margins on every budget, sideways moves
 // free, doors open, any floor jumpable), so "unreachable" (-1) is a proof the model allows: the explore prunes those
@@ -190,7 +192,7 @@ function reachField(level, opts) {
 				if (x < 0 || y < 0 || x >= W || y >= H) continue;
 				const t = y * W + x;
 				if (!passable(t)) continue;
-				if (dx && dy && (!passable(y * W + x2) || !passable(y2 * W + x))) continue;
+				if (dx && dy && cls[y * W + x2] === C_SOLID && cls[y2 * W + x] === C_SOLID) continue;
 				const c = dx && dy ? 1.4142 : 1;
 				preds(t, dy, t2, b2, (b) => relax(t * S + b, v + c));
 			}
@@ -213,7 +215,7 @@ function reachField(level, opts) {
 					const x2 = x + dx, y2 = y + dy;
 					if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
 					const t2 = y2 * W + x2;
-					if (!passable(t2) || (dx && dy && (!passable(y * W + x2) || !passable(y2 * W + x)))) continue;
+					if (!passable(t2) || (dx && dy && cls[y * W + x2] === C_SOLID && cls[y2 * W + x] === C_SOLID)) continue;
 					const nb = step(t, b, dy, t2);
 					if (nb >= 0) via(t2 * S + nb, dx && dy ? 1.4142 : 1);
 				}
