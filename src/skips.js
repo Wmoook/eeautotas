@@ -21,14 +21,18 @@
 //      end of a ledge and the fastest speed either way), contacts first. From each, every move again on its own (the
 //      cells merge states, and which state stands for a cell decides whether a chain of precise moves survives:
 //      separate searches keep different ones; --salts=N also shifts the cell grid), until --cap2 ticks, inside a tube of
-//      --margin2 tiles around the run's path after the contact. The windows take turns, the best entrances first.
+//      --margin2 tiles around the run's path after the contact and --around tiles around the entrance. The windows
+//      take turns, the best entrances first.
 // Every state equal to a later run state (stateHash) is a proven shortcut; from every new cell within --tailD of a run
 // state at least --minLeadTail ticks later, the run's own inputs are replayed from next to it (tails: offsets -2..2,
 // --tailH ticks, re-anchored up to --anchors times like mutate --anchor: at a landing or a wall stop the tail goes on
 // with the inputs of the nearest run state within --athr) and checked every tick for an exact rejoin. Every exact
 // rejoin is an edge b -> j (b = the window's start); the edges are combined by DP over the run's ticks and the result is
 // replayed (C.evaluate) and accepted by THE rule (C.judge) before it is written, with the edges in <out>.edges.json
-// (explore.js's format).
+// (explore.js's format). --targets=<run.eetas,...> (the grind passes the job's earlier bests): a state equal to one of
+// those runs' states, or a tail along one of them that meets it exactly, makes a whole run (the reference up to the
+// window, the inputs found, that run's inputs from there), judged; a skip's way on after the contact need not be the
+// reference's own.
 //
 // Forgotten Veil from best_11257, the "mini 10" room at 0:57.5 (the 88-tick skip that was found once, by the GPU's
 // exhaustive explore, and that no CPU tool rediscovered): the run falls down a shaft 2 px past a 2-tile ledge and lands
@@ -36,15 +40,17 @@
 // from the ones at the ledge's far end, moving away (a hop on the ledge builds the speed to clear the gap, then a
 // landing-tick jump on an arrow corner): -83 after 48 s on 4 threads (after 165 s and 52.6 M simulated ticks on 1),
 // -84 after 95 s (without re-anchored tails -58 / -59 from the same entrances); the next mutate makes -94 of it (11163,
-// better than the 11169 found once). Fragile: from a run that differs a few ticks there (11245: the same skip is -80 in
-// it) no route in 96 searches (4 grids / cell sizes). Not found here: Octorage's loop skip (explore on the loop window
-// finds it) and Infinity Pain's long route changes (hundreds of ticks of other route before anything is ahead).
+// better than the 11169 found once). From a run that differs a few ticks there (11245: the same skip is -80 in it) no
+// route rejoins that run in 96 searches (4 grids / cell sizes: the chain is lost at the arrow corner, and the run's own
+// way on is too far from the searches' states for tails); with its earlier bests as --targets: -49 after 62 s on 4
+// threads (11192 = -53 after a splice with it). Not found here: Octorage's loop skip (explore on the loop window finds
+// it) and Infinity Pain's long route changes (hundreds of ticks of other route before anything is ahead).
 //
 // usage: node src/skips.js --tas=<run.eetas> [--level=<level id | job id>] [--out=<file>] [--nocoins=0|1]
 //        [--windows=auto | <tick>,<tick>,...] [--scan=24] [--top=6] [--K=24] [--span=80] [--lead0=50] [--R=96]
 //        [--minLead=30] [--cap1=1000000] [--cap2=1200000] [--H=300] [--q=1] [--qv=0.25] [--margin=3] [--margin2=2]
-//        [--cr=24] [--nearD=24] [--tailD=12] [--tailH=300] [--anchors=2] [--athr=8] [--salts=1] [--kpc=1]
-//        [--workers=4] [--seconds=180] [--from=] [--to=]
+//        [--around=5] [--cr=24] [--nearD=24] [--tailD=12] [--tailH=300] [--anchors=2] [--athr=8] [--salts=1] [--kpc=1]
+//        [--targets=<run.eetas,...>] [--workers=4] [--seconds=180] [--from=] [--to=]
 // (--kpc: up to that many different states per cell.)
 // (--windows=<ticks>: the entrance searches start at these ticks, no pass-by ranking; --from/--to: only windows starting
 // in that range.) Prints [skips] lines and [ticks] N every second.
@@ -57,7 +63,7 @@ const LP = require('./loops.js');
 const E = C.E;
 
 const DEFAULTS = { windows: 'auto', scan: 24, top: 6, K: 24, span: 80, lead0: 50, minLead: 30, cap1: 1000000, cap2: 1200000, H: 300,
-	q: 1, qv: 0.25, margin: 3, margin2: 2, salts: 1, kpc: 1, cr: 24, tailD: 12, nearD: 24, tailH: 300, anchors: 2, athr: 8, minLeadTail: 10, workers: 4, seconds: 180, R: 96, from: 0, to: 1e9, maxCells: 6e6 };
+	q: 1, qv: 0.25, margin: 3, margin2: 2, salts: 1, kpc: 1, around: 5, cr: 24, tailD: 12, nearD: 24, tailH: 300, anchors: 2, athr: 8, minLeadTail: 10, workers: 4, seconds: 180, R: 96, from: 0, to: 1e9, maxCells: 6e6 };
 
 // ---------------------------------------------------------------- the reference
 const onSet = (m) => {
@@ -85,11 +91,11 @@ function contexts(nc) {
  * on the ground after the tick; wall: a wall zeroed a speed of 0.3 px/tick or more) by context and exact py / px;
  * the positions (floored) for the exact-rejoin prefilter; the random-portal draws per tick.
  */
-function reference(level, masks, nc) {
+function reference(level, masks, nc, sharedCtx) {
 	const n = masks.length;
 	const R = { n, masks, X: new Float64Array(n + 1), Y: new Float64Array(n + 1), VX: new Float64Array(n + 1), VY: new Float64Array(n + 1),
 		G: new Uint8Array(n + 1), CX: new Int32Array(n + 1), RS: new Int32Array(n + 1), HH: new Float64Array(n + 1), hash: new Map(), snaps: [], finish: -1, first: 0 };
-	const ctxOf = contexts(nc);
+	const ctxOf = sharedCtx || contexts(nc);   // (target runs share the reference's context ids)
 	R.ctxOf = ctxOf;
 	const s = new E.EESim(level);
 	s.reset();
@@ -295,6 +301,76 @@ function everyMove(R, level, nc, seeds, o) {
 		nd = bd;
 		return bj;
 	};
+	// --targets: other runs of the level (the job's older bests, other jobs' bests). A state equal to one of theirs, or a
+	// tail along one of them that meets it exactly, makes a whole run: the reference up to b, the inputs found, the
+	// target's inputs from there. Kept when it would finish at least minLeadTail ticks before the reference does (the
+	// target may be slower elsewhere: the grind's splice takes the best of both). A skip's way on after the contact
+	// then need not be the reference's own (Forgotten Veil: a run a few ticks different there takes the skip only
+	// this way).
+	const TG = o.targets || [];
+	const tgTile = TG.map((T) => {
+		const m = new Map();
+		for (let j = 1; j <= T.finish; j++) {
+			const k = (Math.trunc(T.Y[j] + 8) >> 4) * W + (Math.trunc(T.X[j] + 8) >> 4);
+			let l = m.get(k);
+			if (!l) { l = []; m.set(k, l); }
+			l.push(j);
+		}
+		return m;
+	});
+	const targetHit = (node, extra, k, j, t) => {
+		const T = TG[k];
+		if (t + (T.finish - j) > R.finish - o.minLeadTail) return false;
+		const s0 = seqOf(node);
+		const seq = extra ? new Uint8Array(s0.length + extra.length) : s0;
+		if (extra) { seq.set(s0, 0); seq.set(extra, s0.length); }
+		o.onTarget({ b: o.b, k, j, seq, at: ticks });
+		return true;
+	};
+	let tk0 = -1, tj0 = -1;
+	/** the nearest target state (within --tailD) from which the target would still finish early enough: in tk0 / tj0 */
+	const tgNearest = (cid, t) => {
+		const px = sim.px, py = sim.py, vx = sim.speed_x, vy = sim.speed_y;
+		const tk = (Math.trunc(py + 8) >> 4) * W + (Math.trunc(px + 8) >> 4);
+		let bd = o.tailD + 1e-9;
+		tk0 = -1;
+		for (let k = 0; k < TG.length; k++) {
+			const T = TG[k];
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					const l = tgTile[k].get(tk + dy * W + dx);
+					if (!l) continue;
+					for (const j of l) {
+						if (t + (T.finish - j) > R.finish - o.minLeadTail || T.CX[j] !== cid) continue;
+						const d = Math.abs(px - T.X[j]) + Math.abs(py - T.Y[j]) + 3 * (Math.abs(vx - T.VX[j]) + Math.abs(vy - T.VY[j]));
+						if (d < bd) { bd = d; tk0 = k; tj0 = j; }
+					}
+				}
+			}
+		}
+		return tk0 >= 0;
+	};
+	const tgTails = (snap, node, t, k, j0) => {
+		const T = TG[k];
+		for (let off = -2; off <= 2; off++) {
+			const js = j0 + off;
+			if (js < 0 || js >= T.finish) continue;
+			sim.restore(snap);
+			for (let q = 0, r = js; q < o.tailH && r < T.finish; q++, r++) {
+				played[q] = T.masks[r];
+				E.applyMask(inp, T.masks[r]);
+				sim.tick(inp);
+				ticks++;
+				if (sim.is_dead) break;
+				if (T.pos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
+					const jx = T.hash.get(sim.stateHash(false, nc));
+					if (jx !== undefined) { targetHit(node, played.subarray(0, q + 1), k, jx, t + q + 1); break; }
+				}
+				if (Math.abs(sim.px - T.X[r + 1]) + Math.abs(sim.py - T.Y[r + 1]) > 64) break;
+			}
+		}
+	};
+	const tgTailed = TG.length ? new EG.HashSet(10) : null;
 	const entrances = new Map();   // (t, 2 px x, 1/4 px/tick vx, vy sign, ground) -> entrance
 	let frontier = seeds.map((s) => ({ snap: s.snap, node: { p: null, m: 0, seq: s.seq }, vx: s.vx }));
 	for (const f of frontier) { sim.restore(f.snap); seen.add(cellKey(ctxOf(sim))); }
@@ -316,6 +392,17 @@ function everyMove(R, level, nc, seeds, o) {
 					// (the run's own state at this tick stays: a way off the run may start later; a later run state is a shortcut
 					// and the run continues from there; an earlier one is behind it)
 					if (jx !== undefined && h !== R.HH[t + 1]) { if (jx > t + 1 && jx >= o.jmin) edge({ p: f.node, m: ms[mi] }, null, jx); continue; }
+				}
+				if (TG.length) {
+					const pk = Math.floor(sim.px) * 65536 + Math.floor(sim.py);
+					let h = -1, hit = false;
+					for (let k = 0; k < TG.length && !hit; k++) {
+						if (!TG[k].pos.has(pk)) continue;
+						if (h < 0) h = sim.stateHash(false, nc);
+						const jx = TG[k].hash.get(h);
+						if (jx !== undefined) hit = targetHit({ p: f.node, m: ms[mi] }, null, k, jx, t + 1);
+					}
+					if (hit) continue;
 				}
 				const cid = ctxOf(sim);
 				const ck = cellKey(cid);
@@ -342,6 +429,7 @@ function everyMove(R, level, nc, seeds, o) {
 					}
 				}
 				if (o.tails && jn >= 0 && nd <= o.tailD && tailed.add(ck)) tails(snap, node, t + 1, jn);
+				if (o.tails && TG.length && tgNearest(cid, t + 1) && tgTailed.add(ck)) tgTails(snap, node, t + 1, tk0, tj0);
 			}
 		}
 		frontier = next;
@@ -405,33 +493,52 @@ function runTask(ctx, task) {
 	const sim = new E.EESim(level);
 	const edges = [];
 	const onEdge = (e) => edges.push({ b: e.b, j: e.j, seq: Array.from(e.seq), at: e.at });
+	const hits = [];   // (--targets) whole runs through another run: {b, k, j, seq}
+	const onTarget = (e) => { if (hits.length < 2000) hits.push({ b: e.b, k: e.k, j: e.j, seq: Array.from(e.seq), at: e.at }); };
+	const targets = ctx.targets || [];
 	if (task.type === 'entrances') {
 		// from S(w): every move for --span ticks, entrances only
 		R.stateAt(sim, task.w);
 		const tube = tubeOf(level, R, [[task.w, task.w + o.span + 40], [task.j - 10, task.j + 10]], [], o.margin);
 		const res = everyMove(R, level, nc, [{ snap: sim.snapshot(), seq: new Uint8Array(0), vx: sim.speed_x }],
-			Object.assign({}, o, { salt: task.salt | 0, b: task.w, t0: task.w, until: task.w + o.span, H: Math.max(o.H, task.j + 100 - task.w - o.span), cap: o.cap1, tube, entrances: true, tails: true, jmin: task.w, deadline: task.deadline, onEdge, meter: ctx.meter }));
-		return { edges, entrances: res.entrances, ticks: res.ticks, cells: res.cells, stop: res.stop };
+			Object.assign({}, o, { salt: task.salt | 0, b: task.w, t0: task.w, until: task.w + o.span, H: Math.max(o.H, task.j + 100 - task.w - o.span), cap: o.cap1, tube, entrances: true, tails: true, jmin: task.w, deadline: task.deadline, onEdge, targets, onTarget, meter: ctx.meter }));
+		return { edges, hits, entrances: res.entrances, ticks: res.ticks, cells: res.cells, stop: res.stop };
 	}
 	// routes: every move from one entrance (its inputs from the window start w), with tails
 	const e = task.e;
 	R.stateAt(sim, task.w);
 	const inp = new E.EEInput();
 	for (const m of e.seq) { E.applyMask(inp, m); sim.tick(inp); }
-	const tube = tubeOf(level, R, [[e.j - 10, e.j + o.H]], [[e.px, e.py]], o.margin2 || o.margin);
+	// the tube: around the run's path from the contact on, and around the entrance (a hop to build speed may first go
+	// where the run never is: Forgotten Veil's hop rises 4 tiles above the ledge)
+	const tube = tubeOf(level, R, [[e.j - 10, e.j + o.H]], [], o.margin2 || o.margin);
+	const around = tubeOf(level, R, [], [[e.px, e.py]], o.around);
+	for (let i = 0; i < tube.length; i++) tube[i] |= around[i];
 	const res = everyMove(R, level, nc, [{ snap: sim.snapshot(), seq: Uint8Array.from(e.seq), vx: sim.speed_x }],
-		Object.assign({}, o, { salt: task.salt | 0, b: task.w, t0: e.t, until: e.t + o.H, cap: task.cap || o.cap2, tube, entrances: false, tails: true, jmin: task.w + 1, deadline: task.deadline, onEdge, meter: ctx.meter }));
-	return { edges, ticks: res.ticks, cells: res.cells, stop: res.stop };
+		Object.assign({}, o, { salt: task.salt | 0, b: task.w, t0: e.t, until: e.t + o.H, cap: task.cap || o.cap2, tube, entrances: false, tails: true, jmin: task.w + 1, deadline: task.deadline, onEdge, targets, onTarget, meter: ctx.meter }));
+	return { edges, hits, ticks: res.ticks, cells: res.cells, stop: res.stop };
 }
 
+/** --targets: the runs of these files that finish, traced with the reference's context ids */
+function loadTargets(level, files, nc, R) {
+	const out = [];
+	for (const f of files) {
+		try {
+			const T = reference(level, C.readEetas(f), nc, R.ctxOf);
+			if (T.finish > 0) { T.file = f; out.push(T); }
+		} catch (e) { /* unreadable: left out */ }
+	}
+	return out;
+}
 function workerMain() {
 	const d = workerData;
 	E.setTickCounter(d.ticksBuf);
 	const level = E.loadLevel(d.levelData);
 	const masks = C.readEetas(d.tas);
 	const R = reference(level, masks, d.nc);
+	const targets = loadTargets(level, d.targets || [], d.nc, R);
 	let last = 0;
-	const ctx = { R, level, nc: d.nc, o: d.o, meter: (t) => { if (t - last > 200000) { last = t; E.flushTicks(); } } };
+	const ctx = { R, level, nc: d.nc, o: d.o, targets, meter: (t) => { if (t - last > 200000) { last = t; E.flushTicks(); } } };
 	parentPort.on('message', (task) => {
 		if (task.type === 'quit') { E.flushTicks(); process.exit(0); }
 		let res;
@@ -477,7 +584,7 @@ async function main() {
 	const a = Object.assign({}, DEFAULTS);
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
-		if (m) a[m[1]] = ['tas', 'level', 'out', 'windows'].includes(m[1]) ? m[2] : parseFloat(m[2]);
+		if (m) a[m[1]] = ['tas', 'level', 'out', 'windows', 'targets'].includes(m[1]) ? m[2] : parseFloat(m[2]);
 	}
 	if (!a.tas) { console.log('usage: node src/skips.js --tas=<run.eetas> [--level=<id>] [--out=<file>] (see the header)'); process.exit(2); }
 	const levelData = C.levelData(a.level, a.tas);
@@ -495,11 +602,14 @@ async function main() {
 	const secs = () => ((Date.now() - t0) / 1000).toFixed(1);
 	const meter = C.tickMeter();
 	const R = reference(level, masks, nc);
+	const targetFiles = a.targets ? String(a.targets).split(',').filter((f) => f && fs.existsSync(f)) : [];
+	const targets = loadTargets(level, targetFiles, nc, R);
+	if (targets.length) console.log(`[skips] targets: ${targets.map((T) => `${path.basename(T.file)} (finish ${T.finish})`).join(', ')}`);
 	if (level.hasTimeDoors) console.log('[skips] note: this level has time doors: every state holds their phase, so exact rejoins need savings that are multiples of 1000 ticks (phase.js is the tool there)');
 	const evRef = C.evaluate(level, masks);
 	if (!evRef) { console.log('[skips] the run does not finish the level'); process.exit(1); }
 	const o = { span: a.span, cap1: a.cap1, cap2: a.cap2, H: a.H, q: a.q, qv: a.qv, margin: a.margin, margin2: a.margin2, cr: a.cr, minLead: a.minLead, tailD: a.tailD, nearD: a.nearD,
-		tailH: a.tailH, minLeadTail: a.minLeadTail, maxCells: a.maxCells, kpc: a.kpc, anchors: a.anchors, athr: a.athr };
+		tailH: a.tailH, minLeadTail: a.minLeadTail, maxCells: a.maxCells, kpc: a.kpc, anchors: a.anchors, athr: a.athr, around: a.around };
 	// windows
 	let wins;
 	if (a.windows !== 'auto') wins = String(a.windows).split(',').map(Number).filter((x) => x >= 0).map((w) => ({ w, j: Math.min(R.n, w + a.span), slack: 0, why: 'given' }));
@@ -511,7 +621,7 @@ async function main() {
 	let nextId = 1;
 	const waiting = new Map();
 	await Promise.all(Array.from({ length: W }, () => new Promise((res) => {
-		const w = new Worker(__filename, { workerData: { skipsWorker: true, levelData, tas: a.tas, nc, o, ticksBuf: meter.buf } });
+		const w = new Worker(__filename, { workerData: { skipsWorker: true, levelData, tas: a.tas, targets: targets.map((T) => T.file), nc, o, ticksBuf: meter.buf } });
 		w.on('message', (m) => {
 			if (m.ready) { pool.push(w); res(); return; }
 			const cb = waiting.get(m.id);
@@ -567,6 +677,31 @@ async function main() {
 			return;
 		}
 	}
+	// --targets: whole runs through another run, judged; the fastest few first (a run the same length as the one written
+	// is not tried again)
+	const tried = new Set();
+	const addHits = (list) => {
+		if (!list || !list.length) return;
+		const runs = list.map((h) => ({ h, len: h.b + h.seq.length + targets[h.k].finish - h.j })).sort((p, q) => p.len - q.len);
+		let n = 0;
+		for (const { h, len } of runs) {
+			if (n >= 5 || (written && len > written.runTicks + (R.finish - evRef.runTicks) + 2)) break;
+			const key = `${h.k}|${h.j}|${h.b}|${h.seq.length}`;
+			if (tried.has(key)) continue;
+			tried.add(key);
+			n++;
+			const T = targets[h.k];
+			const ms = new Uint8Array(h.b + h.seq.length + T.finish - h.j);
+			ms.set(masks.subarray(0, h.b), 0); ms.set(h.seq, h.b); ms.set(T.masks.subarray(h.j, T.finish), h.b + h.seq.length);
+			const ev = C.evaluate(level, ms);
+			const v = C.judge(ev, evRef, evRef.deaths);
+			if (!v.accept) continue;
+			if (written && !(ev.runTicks < written.runTicks || (ev.runTicks === written.runTicks && ev.chance > written.chance + 1e-9))) continue;
+			C.writeEetas(a.out, ev.ms);
+			written = { runTicks: ev.runTicks, chance: ev.chance };
+			console.log(`[skips]   ${secs()} s: a way from tick ${h.b} into ${path.basename(T.file)} at its tick ${h.j} -> run_ticks ${ev.runTicks} (-${evRef.runTicks - ev.runTicks})`);
+		}
+	};
 	// 1) entrances in every window (the windows in parallel)
 	const found = await Promise.all(wins.map((win) => run({ type: 'entrances', w: win.w, j: win.j }).then((m) => {
 		if (m.error) { console.log(`[skips] window ${win.w}: ${m.error}`); return null; }
@@ -574,6 +709,7 @@ async function main() {
 		console.log(`[skips] ${secs()} s: window ${win.w} (${win.why}): ${m.entrances.length} entrance${m.entrances.length === 1 ? '' : 's'}` +
 			(best ? `, the best ${best.lead} ticks ahead at tick ${best.t} (${(best.px / 16).toFixed(1)}, ${(best.py / 16).toFixed(1)})` : '') + ` [${(m.ticks / 1e6).toFixed(2)} M ticks${m.stop ? ', ' + m.stop : ''}]`);
 		addEdges(m.edges);
+		addHits(m.hits);
 		return m.entrances.length ? { win, entrances: m.entrances, best: best.lead } : null;
 	})));
 	// 2) routes from the entrances of the best windows
@@ -591,8 +727,9 @@ async function main() {
 		if (m.error) { console.log(`[skips] entrance ${e.t}: ${m.error}`); return; }
 		const best = m.edges.reduce((x, g) => Math.max(x, g.j - g.b - g.seq.length), 0);
 		console.log(`[skips] ${secs()} s: window ${c.win.w}, entrance at ${e.t} (${(e.px / 16).toFixed(2)}, ${(e.py / 16).toFixed(2)}) v(${e.vx.toFixed(2)}, ${e.vy.toFixed(2)}), ` +
-			`${e.lead} ahead${salt ? `, salt ${salt}` : ''}: ${m.edges.length ? `${m.edges.length} rejoin${m.edges.length === 1 ? '' : 's'}, the best -${best}` : 'no rejoin'} [${(m.ticks / 1e6).toFixed(2)} M ticks${m.stop ? ', ' + m.stop : ''}]`);
+			`${e.lead} ahead${salt ? `, salt ${salt}` : ''}: ${m.edges.length ? `${m.edges.length} rejoin${m.edges.length === 1 ? '' : 's'}, the best -${best}` : 'no rejoin'}${m.hits && m.hits.length ? `, ${m.hits.length} into other runs` : ''} [${(m.ticks / 1e6).toFixed(2)} M ticks${m.stop ? ', ' + m.stop : ''}]`);
 		addEdges(m.edges);
+		addHits(m.hits);
 	})));
 	for (const w of pool) w.postMessage({ type: 'quit' });
 	meter.stop();

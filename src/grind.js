@@ -620,7 +620,14 @@ async function skipsStage(round) {
 	if (cur.skips === key || (cur.skipsRound && round - cur.skipsRound < 3 && round > cur.skipsRound)) return;
 	const so = path.join(OUT, `grind_skips_${round}.eetas`);
 	const secs = Math.max(90, Math.min(300, Math.round(0.25 * ROUND_MS / 1000)));   // (its own share of a round)
-	const res = await stage(`skips${round}`, 'skips.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`], so,
+	// targets: the job's earlier bests (the newest 4): a skip's way on after the contact may be theirs, not the best's
+	let targets = [];
+	try {
+		targets = fs.readdirSync(OUT).filter((f) => /^best_\d+\.eetas$/.test(f) && f !== `best_${best.runTicks}.eetas`)
+			.map((f) => ({ f: path.join(OUT, f), m: fs.statSync(path.join(OUT, f)).mtimeMs })).sort((x, y) => y.m - x.m).slice(0, 4).map((x) => x.f);
+	} catch (e) { /* none */ }
+	const res = await stage(`skips${round}`, 'skips.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`,
+		...(targets.length ? [`--targets=${targets.join(',')}`] : [])], so,
 		(secs + 180) * 1000, 'where the run passes a spot it reaches much later: entrances, and every move from them');
 	if (!res) return;
 	addResult(so);
