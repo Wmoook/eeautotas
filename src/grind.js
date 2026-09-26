@@ -608,20 +608,23 @@ async function endgameStage(round) {
  * where it was, every move from the run's state there finds the states that touch that spot early (entrances), and
  * every move from the corners of those (the far end of a ledge, the fastest speed either way) finds the way on to an
  * exact rejoin. Forgotten Veil's 88-tick "mini 10" skip from best_11257: -83 by itself after 48 s on 4 threads, -94
- * after the next mutate. Once per best (again when the best changed), a quarter of a round (90-300 s); not on
- * time-door levels (their exact rejoins need savings that are multiples of 1000 ticks); --skips=0 off.
+ * after the next mutate. Once per best (again when the best changed, at most every third round), a quarter of a round
+ * (90-300 s); not on time-door levels (their exact rejoins need savings that are multiples of 1000 ticks); --skips=0
+ * off.
  */
 async function skipsStage(round) {
 	if (a.skips === '0' || level.hasTimeDoors) return;
 	const key = bestTrace().key;
-	if (cur.skips === key) return;
+	// once per best, and at most every third round (a job whose best changes every round keeps most of its time for the
+	// other stages)
+	if (cur.skips === key || (cur.skipsRound && round - cur.skipsRound < 3 && round > cur.skipsRound)) return;
 	const so = path.join(OUT, `grind_skips_${round}.eetas`);
-	const secs = Math.max(90, Math.min(300, Math.round(0.25 * ROUND_MS / 1000)));   // (its own share: it runs once per best)
+	const secs = Math.max(90, Math.min(300, Math.round(0.25 * ROUND_MS / 1000)));   // (its own share of a round)
 	const res = await stage(`skips${round}`, 'skips.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`], so,
 		(secs + 180) * 1000, 'where the run passes a spot it reaches much later: entrances, and every move from them');
 	if (!res) return;
 	addResult(so);
-	if (!res.killed) saveCursor({ skips: key });
+	if (!res.killed) saveCursor({ skips: key, skipsRound: round });
 }
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
