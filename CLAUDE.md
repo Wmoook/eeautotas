@@ -131,7 +131,11 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   exact integer helpers, valid because the engine never meets a NaN: `gpu.unsupported()` refuses levels whose gravity
   multiplier is not finite). One source compiles natively (zig c++) and for NVIDIA GPUs (NVRTC, `--fmad=false`):
   `native/build/eegpu.exe` + `eegpu_{8,32,128,512}.ptx` (`node tools/build-native.js`; the number = the state's
-  variable-tail capacity in words). `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
+  variable-tail capacity in words). The NVIDIA driver compiles a PTX file for the card at its first load (1-3 min on a
+  laptop CPU, once per build): every GPU command takes `--cachedir` (the app passes `gpu.cacheArgs()`, `<data>/gpu-cache`),
+  which keeps that compile in the app's own folder and does it once however many processes start together
+  (`native/cudadrv.h` `loadModuleCached`); search / beam / explore / bench print `{"ev":"ready","loadMs",...}` after
+  the load, and their `--seconds` (and the editor's clocks) count from there. `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
   del, m2 = mutate's; pert, flip, sticky = random perturbations of the reference) and re-checks every hit on the CPU
   with two independent hashes; `src/gpusearch.js` (started by grind `--gpu=1`) keeps an edge library keyed by state
   hashes (saved in `gpu/library.bin`), splits each round into eegpu invocations with their own cursors (m1 + del up

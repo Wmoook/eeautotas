@@ -271,6 +271,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		if (!rf.empty() && !reachGpu.load(rf, L, P.reach, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
 	}
 	if (!goalDist.empty() || P.reach.on) P.closest = (unsigned long long*)(uintptr_t)dclose.p;
+	g.ready(tStart);   // (the kernels and the buffers are on the GPU: --seconds counts from here)
 
 	std::vector<std::vector<uint32_t>> lineage;   // per layer: kept children as (parent << 5 | option)
 	std::vector<BeamChild> kids;
