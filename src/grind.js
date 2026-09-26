@@ -517,7 +517,7 @@ function deepWindows(wsz) {
 	return wins;
 }
 /**
- * Loop windows first: stretches where the run comes back to where it was with nothing collected or toggled in between
+ * Loop windows first (up to 5 per round, 60% of it): stretches where the run comes back to where it was with nothing collected or toggled in between
  * (loops.js), the longest first, each (as the state hashes at its ends) once. The explorer on exactly that window finds
  * a way around the loop directly; tiled windows contain a long loop only in some placements. Not on time-door levels
  * (an exact rejoin there needs a saving that is a multiple of 1000 ticks). Returns the number of windows run.
@@ -526,7 +526,7 @@ async function loopWindows(round) {
 	if (level.hasTimeDoors) return 0;
 	const tried = new Set(cur.loops || []);
 	let ran = 0;
-	while (ran < 3 && roundUsed() < 0.4 * ROUND_MS && Date.now() < deadline - 120000) {
+	while (ran < 5 && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
 		let loops;
 		try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 1500 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;
@@ -631,8 +631,8 @@ const PHASE = !!level.hasTimeDoors || (!NC && [43, 165, 213, 214].some((id) => l
 async function phaseStage(round, R) {
 	if (!PHASE) return;
 	const po = path.join(OUT, `grind_phase_${round}.eetas`);
-	await stage(`phase${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([3, 2, 3, 4])}`, `--from=${R([0, 1, 2, 3])}`,
-		`--horizon=${R([300, 400, 250, 500])}`, `--drift=${R([96, 128, 64, 160])}`, `--seconds=${R([150, 240, 150, 150])}`], po, 900e3,
+	await stage(`phase${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([2, 1, 3, 2])}`, `--from=${R([0, 0, 1, 1])}`, `--workers=${W}`,
+		`--horizon=${R([300, 400, 250, 500])}`, `--drift=${R([96, 128, 64, 160])}`, `--seconds=${R([120, 180, 120, 120])}`, `--random=${R([60, 90, 60, 120])}`, `--seed=${round}`], po, 900e3,
 		level.hasTimeDoors ? 'time doors' : 'coin doors');
 }
 

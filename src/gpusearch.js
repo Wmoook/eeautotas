@@ -211,7 +211,16 @@ async function refresh() {
 	for (let t = 0; t <= ref.n; t++) ref.tickOf.set(ref.H[t], t);
 	C.writeEetas(path.join(GDIR, 'ref.eetas'), ref.masks);
 	// a new reference: the systematic families need a full pass over it again (their cursors continue by state hash)
-	if (!state.left || state.left.key !== ref.key) state.left = { key: ref.key, sys: ref.n, m2: ref.n };
+	if (!state.left || state.left.key !== ref.key) {
+		state.left = { key: ref.key, sys: ref.n, m2: ref.n };
+		// ... from just before the first state the old reference never reached: a new stretch is unpolished (after a route
+		// change most follow-up finds are inside it), and the pass still covers the whole run
+		if (old) {
+			let first = -1;
+			for (let t = 0; t <= ref.n && first < 0; t++) if (!old.tickOf.has(ref.H[t])) first = t;
+			if (first >= 0) { setCursor('sys', Math.max(0, first - 300)); log(`GPU: the new best differs from tick ${first} on: the single changes start there (tick ${Math.max(0, first - 300)})`); }
+		}
+	}
 	if (old) await offer('new best');
 	saveState();
 	return true;
