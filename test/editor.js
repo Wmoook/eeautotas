@@ -384,14 +384,16 @@ const go = () => {
 		say({ ev: 'done', layers: 3, end: SC.beam ? 'finish' : 'time' });
 		return;
 	}
-	const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p).length;
-	const run = (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
+	const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p && !a.some((x) => x.startsWith('--prefix='))).length;
+	const relayN = prev.filter((a) => a[0] === 'explore' && a.some((x) => x.startsWith('--prefix='))).length;
+	const run = opt('prefix') ? ((SC.relay || [])[relayN] || { end: 'exhausted', layers: 1, overflow: 0 }) : (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
 	const depth = +opt('depth');
 	const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; if (run.lanes) d.lanes = run.lanes; if (run.lastSalt !== undefined) d.salt = run.lastSalt; say(d); };
 	setTimeout(() => {
 		if (run.lanes) say({ ev: 'lanes', lanes: run.lanes, from: +opt('lanes') || 1, why: 'full', layers: run.layers });   // (--lanes: its batch filled the table)
 		if (run.refine) say(Object.assign({ ev: 'refine' }, run.refine));   // (--refine: this try ran out, the next is refined)
 		if (run.try) say(Object.assign({ ev: 'try' }, run.try));   // (--salts: a try ran through)
+		if (run.closest) say({ ev: 'closest', dist: run.closest.dist, tick: run.closest.tick, inputs: '4'.repeat(run.closest.tick) });   // (the nearest attempt so far)
 		say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
 		if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
 		const ticks = run.idle + SC.R;
@@ -538,6 +540,26 @@ async function passesSection() {
 		r.st.stage === 'found' && L.length >= 2 && Math.round(Math.log2(L[0].cqx / 0.5)) === 2 && Math.round(Math.log2(L[1].cqx / 0.5)) === -1 &&
 		r.st.log.some((x) => /the finest cells are too many here \(no try through in 1 s\); from coarse cells up/.test(x)),
 		`${r.text}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}`);
+	// the relay: a nearest attempt of 100+ ticks (the ladder's pass -1 reports one of 150, then keeps searching): "every
+	// move" again from 60 ticks before its end (--prefix = its first 90 inputs, coarse speed cells), and its finish is the route
+	{
+		const scR = path.join(HOME, 'relay.json'), logR = path.join(HOME, 'relay.log');
+		fs.writeFileSync(scR, JSON.stringify({ log: logR, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 200, hold: 8000, closest: { dist: 30, tick: 150 } }] },
+			relay: [{ end: 'finish', idle: 0, layers: 3 }], beam: null }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, scR], cpu: false, salts: true, relay: true });
+		const t0r = Date.now();
+		let str = ED.state();
+		while (str.running && !str.result && Date.now() - t0r < 30000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }
+		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		const LR = fs.readFileSync(logR, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore');
+		const rl = LR.find((a) => a.some((x) => x.startsWith('--prefix=')));
+		const pf = rl ? rl.find((x) => x.startsWith('--prefix=')).slice(9) : '';
+		const pfLen = pf && fs.existsSync(pf) ? fs.readFileSync(pf).length : -1;
+		const opts = rl ? Object.fromEntries(rl.filter((x) => /^--\w+=/.test(x)).map((x) => x.slice(2).split('='))) : {};
+		check('the relay: from a nearest attempt of 150 ticks, "every move" again from 60 ticks before its end (a --prefix of 90 inputs, 1/4 px/tick speed cells), and its finish is the route',
+			!!rl && pfLen === 90 && opts.cqv === '4' && opts.qvy === '4' && str.result && str.result.strategy === 'from the nearest attempt',
+			`relay launch: ${rl ? 'yes' : 'no'}, prefix ${pfLen} inputs, cells ${opts.cqx}/${opts.cqv}/${opts.qy}/${opts.qvy}; ${str.result ? `route ${str.result.ticks} ticks by ${str.result.strategy}` : str.stage}`);
+	}
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {

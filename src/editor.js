@@ -358,6 +358,11 @@ const STRATEGIES = {
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
 		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []), ...(q.refine ? ['--refine=1'] : []),
 		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
+	// the relay: "every move" again from a point of the nearest attempt so far (its inputs as --prefix, a fresh table,
+	// coarse speed cells: see RELAY_CELLS)
+	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`,
+		...(o.prune ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -392,11 +397,85 @@ const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
 // runs from PASS_START as if it had not been. The user's 50x50 levels: a try takes 0.4-0.5 s alone on the laptop GPU, the
 // ladder's coarse passes took 33 s there next to the beams and the CPU search (route after 59.7 s, the finest pass after
 // 58 s); staircase / dotstairs: the finest pass explodes (60M+ states), the ladder solves them.
-const PROBE_S = 15;   // (the beams run beside it: a beam next to the probe's first try made an 8 s probe miss on the throttled GPU)
+const PROBE_S = 15;
+// A refined try (after the tool's refine event) that has not run through in REFINE_S s is stopped and the pass counts as
+// full, so the ladder goes on with coarser cells: on a long level (the dot ring, a 919-tick route) the first refined
+// try kept half the GPU for 36 s before it filled its table; on the pixel-exact levels it is meant for a refined try
+// takes 2-3 s.
+const REFINE_S = 10;
+// A GPU tool that has said nothing for STALL_S s after loading (it prints a line per tick layer) is stopped: its stop
+// file, then the kill 2 s later (halt). Once, next to the relay's process, an explore sat at 100% of a core and of the
+// GPU on one layer for 7 minutes, deaf to its stop file; the search never ended.
+const STALL_S = 20;
+let stallTimer = null;
+function checkStalls() {
+	if (!S || !S.running) return;
+	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
+	const now = Date.now();
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu || !alive(ch) || ch.stopWhy || !q.readyAt || now - (ch.lastOut || ch.startedAt) < STALL_S * 1000) return;
+		note(`${q.label}: no word from the GPU tool for ${STALL_S} s: stopped${q.key === 'explore' ? '; the next pass goes on' : ''}`);
+		halt(ch, q.key === 'explore' ? 'time' : 'stalled');
+	});
+}   // (the beams run beside it: a beam next to the probe's first try made an 8 s probe miss on the throttled GPU)
 // A beam still getting nearer the trophy (its own closest attempt better within BEAM_PROGRESS_MS) keeps running when every
 // move's tries want the GPU (yieldBeams): on a 50x50 level with a 477-tick route the beam was about to reach the trophy
 // when it gave way, and every move then took far longer.
 const BEAM_PROGRESS_MS = 15000;
+// A beam whose own nearest attempt has not improved for BEAM_STALL_MS stops (it is stuck in a trap of the physics check's
+// optimism: the dot ring's beam spent 90 s at the same 102.4 tiles, a third of the GPU), while every move or the relay
+// still searches.
+const BEAM_STALL_MS = 10000;
+// The relay (strategy 'relay'): a long route needs more situations than one table holds (every move from the start of a
+// 50x50 level with a ring of dots filled its 33M at tick 535, 30 tiles from the trophy), and a beam walks into the traps
+// of the physics check's optimism (a run-up detour that first leads away; a corner it thinks it can cut). So once an
+// attempt has gone RELAY_MIN_TICKS, every move starts again from a point of the nearest attempt so far, RELAY_BACK
+// ticks before its end (room to correct its last moves), with a fresh table: exhaustive from there, so no trap holds
+// it. Its speed cells are coarse (1/4 px/tick: in a field of dots both speeds are free and 1/16 filled the table in 76
+// ticks; from there the dot ring's route took 2.7 s); a run that runs out at once (a ball starting from rest merges
+// with the ball at rest in coarse speed cells) tries pass 0's cells. A run without a nearer attempt starts further back;
+// a nearer attempt from any strategy is the next run's start.
+const RELAY_MIN_TICKS = 100, RELAY_BACK = [60, 150, 400], RELAY_S = 30, RELAY_SWITCH_MS = 3000;
+const RELAY_CELLS = [{ cqx: 0.25, cqv: 4, qy: 0.25, qvy: 4 }, { cqx: 0.5, cqv: 4, qy: 0.5, qvy: 4 }, { cqx: 0.5, cqv: 16, qy: 1, qvy: 16 }];
+/** starts the relay (strategy n) from the nearest attempt so far; false when there is nothing to start from */
+function relayFrom(n) {
+	const V = S.strategies[n], R = V.relay || (V.relay = { back: 0, cells: 0, runs: 0 });
+	const c = S.closest;
+	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || R.back >= RELAY_BACK.length) return false;
+	const keep = c.ticks - Math.min(RELAY_BACK[R.back], c.ticks - 1);
+	// (a route of T ticks known: only a relay that can still end sooner)
+	if (S.result && keep >= S.result.ticks - 1) return false;
+	const file = path.join(dir(), `relay_${n}.eetas`);
+	try { fs.writeFileSync(file, Buffer.from(String(c.inputs).slice(0, keep), 'latin1')); } catch (e) { return false; }
+	// the cells by where the relay starts: where no gravity pulls (dots, and the like: both speeds free) 4 px cells, else
+	// 2 px (a run-up in the start's maze of the dot ring needed them); both with 1/4 px/tick speeds
+	if (!R.cellsSet || R.back > 0 || !R.src || c.dist < R.src.dist - 0.5) {
+		const sim = new E.EESim(cur.level), inp = new E.EEInput();
+		sim.reset();
+		const str = String(c.inputs);
+		for (let t = 0; t < keep; t++) { E.applyMask(inp, (str.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		R.cells = sim.morx === 0 && sim.mory === 0 ? 0 : 1;
+		R.cellsSet = true;
+	}
+	Object.assign(R, { file, keep, src: { dist: c.dist, ticks: c.ticks } });
+	R.runs++;
+	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `from tick ${keep} of the nearest attempt (${c.tiles} tiles from the trophy)`, passes: R.runs });
+	kids[n] = launch(n);
+	return true;
+}
+/** a nearer attempt: a waiting relay starts from it */
+function relayKick() {
+	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
+	S.strategies.forEach((q, k) => {
+		if (q.key !== 'relay') return;
+		if (q.state === 'waiting' && !alive(kids[k]) && searchClock(Date.now()) >= 3) { if (q.relay) q.relay.back = 0; relayFrom(k); return; }
+		// running from an attempt that is now far behind the nearest one: stopped between two launches, and it starts
+		// again from the nearer one (its close handler)
+		const R = q.relay, c = S.closest;
+		if (R && R.src && c && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS && c.dist < R.src.dist - Math.max(3, 0.1 * R.src.dist)) halt(kids[k], 'nearer');
+	});
+}
 // the salt tries (the finest pass, and any pass's salt reruns) run up to LANES salts side by side in one eegpu process
 // (explore --lanes=auto: lane k = salt + k, cells of its own; the tool starts with --lanesStart (the last run's lanes,
 // 1 at first) and doubles them while that raises the tries per second by 10% or more, halves them when a batch fills
@@ -564,7 +643,8 @@ function start(b, gpu, test) {
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
 	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
 	const beams = !(test && test.beams === false);
-	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
+	const relay = b.relay !== false && (!test || test.relay === true);
+	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay ? [] : ['relay']), ...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
@@ -588,6 +668,7 @@ function start(b, gpu, test) {
 	// strategies
 	building = true;
 	markBusy();
+	if (!stallTimer) { stallTimer = setInterval(checkStalls, 5000); if (stallTimer.unref) stallTimer.unref(); }
 	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
 	const gen = ++searchGen;
 	ready.then(([rf, toolWhy]) => { if (gen === searchGen) launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); }, (e) => {
@@ -635,7 +716,11 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
 	if (S.physics.viaDeath) note(deathNote(rf));
 	save();
-	kids = which.map((k, n) => launch(n));
+	kids = which.map((k, n) => {
+		if (k !== 'relay') return launch(n);
+		Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for an attempt of ${RELAY_MIN_TICKS}+ ticks to go on from` });
+		return null;
+	});
 }
 /** the note of a search the CPU runs alone (why: the reason the GPU does not) */
 const cpuOnlyText = (why, workers, guide) => `No GPU search: ${why}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
@@ -727,7 +812,12 @@ function launch(n) {
 	// (with near-miss refinement one at a time: see LANES)
 	if (q.salts && cur.opts.refine) q.refine = true;
 	else if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
+	if (V.key === 'relay') {
+		q.prefixFile = V.relay.file; q.cells = RELAY_CELLS[V.relay.cells]; q.seconds = V.share = Math.min(left, RELAY_S);
+		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
+	}
 	if (V.key === 'explore') {
+		V.refine = null;   // (a new process: no refined try running yet)
 		q.seconds = V.share = V.probe === 'running' || V.probe === 'passed' ? left : passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
 		q.depth = V.depthCap = S.result ? Math.max(1, S.result.ticks - 1) : 0;
@@ -744,6 +834,7 @@ function launch(n) {
 	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--parent=${process.pid}`];
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });
 	ch.stopFile = stopFile;
+	ch.startedAt = Date.now();
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
@@ -808,6 +899,18 @@ function launch(n) {
 			// deeper than the best route: it cannot find a faster one (the CPU search's deepest situation says nothing of
 			// the kind: it is told the bound instead, and looks only for faster routes)
 			if (!cpu && S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
+			// a refined try running past REFINE_S: the pass ends as full (the ladder goes coarser)
+			if (V.key === 'explore' && V.refine && V.refine.at && Date.now() - V.refine.at > REFINE_S * 1000 && alive(ch) && !ch.stopWhy && !S.result) {
+				note(`${V.label}: a refined try is still going after ${REFINE_S} s at tick ${ev.layer}: too many situations here; coarser cells`);
+				halt(ch, 'full');
+			}
+			// a stuck beam (BEAM_STALL_MS) gives way while another GPU strategy searches
+			if ((V.key === 'goal' || V.key === 'guide') && !S.result && alive(ch) && !ch.stopWhy && Date.now() - (V.bestAt || ch.startedAt) > BEAM_STALL_MS &&
+				S.strategies.some((q, k) => k !== n && !q.cpu && (q.key === 'explore' || q.key === 'relay') && alive(kids[k]))) {
+				V.state = 'stopped'; V.detail = `no nearer attempt in ${BEAM_STALL_MS / 1000} s: gave the GPU to the others`;
+				halt(ch, 'stopped');
+				note(`${V.label}: stopped (${V.best !== undefined ? `stuck at ${(V.best).toFixed(1)} tiles` : 'no attempt'} for ${BEAM_STALL_MS / 1000} s; the GPU goes to the others)`);
+			}
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			// (the CPU search goes on looking for faster routes)
@@ -819,6 +922,7 @@ function launch(n) {
 			note(`${V.label}: the finest cells ran through in ${usedSec(V).toFixed(1)} s (every situation tried at tick ${ev.layers}): trying them first`);
 			onEvent(Object.assign({}, ev, { probeSeen: true }));
 		} else if (ev.ev === 'try') {
+			if (V.refine) V.refine.at = 0;
 			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
 			// (a batch of --lanes salts side by side: one event for its ev.lanes tries)
 			if (ev.end === 'exhausted' && ev.overflow === 0 && !V.depthCap && !V.found && V.pass >= 0) {
@@ -830,7 +934,7 @@ function launch(n) {
 			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
 		} else if (ev.ev === 'refine') {
 			// the try before ran out of situations: the next ones tell the situations along its near misses apart 4x finer
-			V.refine = { tiles: ev.frontierTiles, nearMisses: ev.nearMisses, situations: ev.situations };
+			V.refine = { tiles: ev.frontierTiles, nearMisses: ev.nearMisses, situations: ev.situations, at: Date.now() };
 			if (ev.new > 0) note(`${V.label}: ${ev.frontierTiles} tile${ev.frontierTiles === 1 ? '' : 's'} next to reached ones not entered: the next try looks 4x finer along the ${ev.nearMisses} nearest attempts (${ev.situations} situations)`);
 		} else if (ev.ev === 'lanes') {
 			// the tool changed how many salts it tries side by side: a batch filled the cell table (it runs them again with
@@ -865,6 +969,7 @@ function launch(n) {
 	// counters only) just the last one is handled; every other event in order. Handling each of a backlog of progress
 	// lines (the totals and texts per line) blocked the server's thread for 2 s at a time during a search.
 	ch.stdout.on('data', (chunk) => {
+		ch.lastOut = Date.now();
 		out += chunk;
 		const k = out.lastIndexOf('\n');
 		if (k < 0) return;
@@ -956,6 +1061,21 @@ function launch(n) {
 				return;
 			}
 		}
+		if (V.key === 'relay' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed) {
+			const how = ch.stopWhy || (code === 0 ? end : '');
+			const R = V.relay;
+			if (how !== 'stopped' && how !== 'beaten' && how !== 'finish' && R) {
+				if (how === 'nearer') V.state = 'starting';
+				// ("the prefix dies" and the like: another point, not an error of the search)
+				V.error = null;
+				const nearer = S.closest && R.src && S.closest.dist < R.src.dist - 0.5;
+				if (nearer) { R.back = 0; R.cellsSet = false; }
+				else if (how === 'exhausted' && V.layer < 30 && R.cells + 1 < RELAY_CELLS.length) R.cells++;
+				else { R.back++; R.cellsSet = false; }
+				if (S.seconds - usedSec(V) > 2 && relayFrom(n)) { save(); return; }
+				Object.assign(V, { state: 'waiting', detail: 'waits for a nearer attempt to go on from' });
+			}
+		}
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
 				V.state = 'error';
@@ -1019,6 +1139,8 @@ function markBusy() {
 }
 function finish() {
 	S.running = false;
+	if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+	S.strategies.forEach((q) => { if (q.state === 'waiting') Object.assign(q, { state: 'ended' }); });
 	setImmediate(markBusy);
 	S.elapsed = (Date.now() - S.started) / 1000;
 	S.searchElapsed = searchClock(Date.now());
@@ -1132,6 +1254,7 @@ function closer(ev, n) {
 	const pathPts = [];
 	for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
+	setImmediate(relayKick);
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
 	const viaDeath = !cut && dist >= RF.DEATH_TILES;
 	S.closest = { dist, cut, viaDeath, tiles: Math.round((cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist) * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
