@@ -633,10 +633,11 @@ async function cpuSection() {
 	st = await waitDone(30000);
 	const L3 = fs.readFileSync(log3, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 	const X3 = st.strategies.find((q) => q.key === 'explore'), B3 = st.strategies.filter((q) => !q.cpu && q.key !== 'explore');
+	// (the two start together: either may log first)
 	const launches3 = L3.filter((a) => a[0] !== 'stopped').map((a) => a[0]), stopped3 = L3.filter((a) => a[0] === 'stopped').map((a) => a[1]);
 	check('a GPU launch failure (the driver\'s watchdog, exit 7): the other GPU strategies stop through their stop files, none starts again, the CPU search goes on',
 		X3.state === 'error' && /stopped the explore/.test(X3.error || '') && B3.length === 1 && B3.every((q) => q.state === 'stopped' && q.detail === 'the GPU failed') &&
-		launches3.join() === 'explore,beam' && stopped3.join() === 'beam' && st.log.some((x) => /the GPU failed: the GPU searches stop \(the CPU search goes on\)/.test(x)) &&
+		launches3.slice().sort().join() === 'beam,explore' && stopped3.join() === 'beam' && st.log.some((x) => /the GPU failed: the GPU searches stop \(the CPU search goes on\)/.test(x)) &&
 		st.stage === 'found' && st.result.strategy === 'random runs (CPU)' && st.elapsed >= 5.5,
 		`explore ${X3.state} (${X3.error}); beams ${B3.map((q) => `${q.state} (${q.detail})`).join(', ')}; launches ${launches3.join(', ')}; stopped by file: ${stopped3.join(', ') || '-'}; ` +
 		`${st.stage} ${st.result ? `(${st.result.strategy})` : ''}; ${st.elapsed.toFixed(1)} s`);

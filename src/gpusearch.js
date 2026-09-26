@@ -30,6 +30,9 @@
 // kernel, or a crash): the driver may have reset the GPU, so the searcher backs off instead of relaunching at once: it
 // waits 60 s (120 s after a second failure in a row), halves the launch target (eegpu --launch-ms, from --launchMs=50),
 // and stops for this session after 3 failures in a row or 5 in all, with a log line; the grind's CPU stages go on.
+// Other failures (out of GPU memory, no context after a driver reset: no kernel ran) are retried after 15 s, doubled
+// with every failure in a row up to 10 min (--failWait=15: the first wait); a log line for the first failures and a
+// new error text, then one every hour; a round that works starts over.
 // Quitting (SIGINT / SIGTERM, the grind gone) asks the running eegpu to stop between two launches (gpu/stop, its
 // --stopfile; jobs.js stopGpuSearcher writes it too) and never kills it: a kill while a kernel runs makes the driver
 // reset the GPU. eegpu runs detached with --parent, so it also ends at its next launch when this process is killed.
@@ -61,6 +64,10 @@ const PARENT = +(args.parent || 0);
 let launchMs = Math.max(5, Math.min(1000, +(args.launchMs || 50)));
 let launchFails = 0, launchFailsAll = 0;
 const FAILS_IN_A_ROW = 3, FAILS_IN_ALL = 5;
+// other failures in a row (no kernel launched: waits from --failWait seconds, doubled per failure, at most 10 min)
+let otherFails = 0, otherErr = '', otherLogged = 0;
+const FAIL_WAIT_S = Math.max(0.05, +(args.failWait || 15)), FAIL_WAIT_MAX_S = Math.max(FAIL_WAIT_S, 600);
+const LAUNCH_WAIT_S = Math.max(0.05, +(args.launchWait || 60));   // (the wait after a first launch failure; tests: shorter)
 /** a failed eegpu run that looks like a GPU launch failure: its launchError line, exit 6 / 7, or a crash (no JSON) */
 const isLaunchFailure = (code, sawLaunchError, done) => !done && (sawLaunchError || code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)));
 const GDIR = path.join(DIR, 'gpu');
@@ -495,7 +502,7 @@ async function invoke(slot, seconds) {
 	saveState();   // (a restart never repeats a seed, also when this invocation is cut off)
 	const r = await runSearch(tool, blobFile, path.join(GDIR, 'ref.eetas'), edgesFile, { seconds: secArg, seed, families, from, to });
 	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError };
-	launchFails = 0;   // (a run that finished: the failures in a row start over)
+	launchFails = 0; otherFails = 0;   // (a run that finished: the failures in a row start over)
 	const d = r.done;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);
 	let got = { added: 0, byFam: {} };
@@ -599,7 +606,7 @@ async function runEvery() {
 		state.every = T + EVERY_STEP;
 		const r = await runWindow(T);
 		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError, added, windows };
-		launchFails = 0;
+		launchFails = 0; otherFails = 0;
 		windows++; added += r.added; gpu = r.done.gpu; ticks += r.done.ticks || 0;
 		if (state.every >= ref.n) { state.every = 0; log(`GPU: every move covered the whole run (windows of ${EVERY_DEPTH} ticks every ${EVERY_STEP})`); break; }
 	}
@@ -619,7 +626,7 @@ async function failed(err, launchError) {
 			status({ state: 'error', why: `stopped: ${why}`, ticksPerSec: 0 });
 			quit(5);
 		}
-		const wait = 60 * 2 ** (launchFails - 1);
+		const wait = LAUNCH_WAIT_S * 2 ** (launchFails - 1);
 		launchMs = Math.max(5, launchMs / 2);
 		status({ state: 'waiting', why: err, ticksPerSec: 0 });
 		log(`GPU: a GPU kernel launch failed (${err}); waiting ${wait} s, then launches of ${launchMs} ms (failure ${launchFails} in a row; the searcher stops after ${FAILS_IN_A_ROW})`);
@@ -627,10 +634,17 @@ async function failed(err, launchError) {
 		await new Promise((res) => setTimeout(res, wait * 1000));
 		return;
 	}
-	status({ state: 'error', why: err, ticksPerSec: 0 });
-	log(`GPU: round failed: ${err}`);
+	// not a launch failure (out of GPU memory, a context the driver refused, a missing file): no kernel ran, so no risk
+	// to the display driver; waits that double up to 10 min, and fewer log lines while the same error repeats
+	otherFails++;
+	const wait = Math.min(FAIL_WAIT_MAX_S, FAIL_WAIT_S * 2 ** (otherFails - 1));
+	status({ state: 'waiting', why: err, ticksPerSec: 0 });
+	if (otherFails <= 3 || err !== otherErr || Date.now() - otherLogged >= 3600e3) {
+		log(`GPU: round failed: ${err}; trying again in ${wait >= 60 ? `${(wait / 60).toFixed(0)} min` : `${+wait.toFixed(1)} s`} (failure ${otherFails} in a row)`);
+		otherErr = err; otherLogged = Date.now();
+	}
 	if (args.once) quit(4);
-	await new Promise((res) => setTimeout(res, 15000));
+	await new Promise((res) => setTimeout(res, wait * 1000));
 }
 async function main() {
 	if (!args.job || !fs.existsSync(DIR)) { console.log('usage: node src/gpusearch.js --job=<job dir>'); process.exit(2); }
