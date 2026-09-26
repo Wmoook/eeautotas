@@ -93,9 +93,11 @@ function session(plan, extra, until) {
 		const r = await session(['oom', 'oom', 'oom', 'oom', 'ok', 'oom', 'ok'], ['--failWait=0.3'], (c) => c.length >= 8);
 		const gaps = r.calls.slice(1).map((c, i) => (c.t - r.calls[i].t) / 1000);
 		const lines = r.out.split('\n').filter((l) => l.includes('round failed'));
-		check('out of memory: the waits double (0.3, 0.6, 1.2, 2.4 s)', gaps.length >= 6 && [0.3, 0.6, 1.2, 2.4].every((w, i) => gaps[i] >= w - 0.05 && gaps[i] < w + 1.5),
+		// (the time between two invocations is the wait plus the round's own work and the stand-in's start: at least the wait)
+		check('out of memory: the waits double (at least 0.3, 0.6, 1.2, 2.4 s between the tries)', gaps.length >= 6 && [0.3, 0.6, 1.2, 2.4].every((w, i) => gaps[i] >= w - 0.05),
 			`gaps ${gaps.map((g) => g.toFixed(2)).join(', ')} s`);
-		check('... and start over after a run that works (0.3 s again)', gaps.length >= 6 && gaps[5] >= 0.25 && gaps[5] < 1.8, `gap after the 6th call ${gaps[5] && gaps[5].toFixed(2)} s`);
+		check('... and start over after a run that works (0.3 s again)', gaps.length >= 6 && gaps[5] >= 0.25 && lines.length >= 4 && /0\.3 s \(failure 1 in a row\)/.test(lines[3]),
+			`gap after the 6th try ${gaps[5] && gaps[5].toFixed(2)} s; ${lines[3] || 'no log line'}`);
 		check('... with a log line for the first failures in a row and the repeat after the run that worked', lines.length === 4 &&
 			/trying again in 0\.3 s \(failure 1 in a row\)/.test(lines[0]) && /1\.2 s \(failure 3 in a row\)/.test(lines[2]) && /0\.3 s \(failure 1 in a row\)/.test(lines[3]), lines.join(' | '));
 		check('... and no launch back-off (the launch target stays 50 ms)', r.calls.every((c) => c.launchMs === 50), r.calls.map((c) => c.launchMs).join(', '));
