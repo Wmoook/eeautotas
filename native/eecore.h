@@ -13,6 +13,13 @@
 #if defined(__CUDACC__) || defined(__CUDACC_RTC__)
 #define EE_HD __host__ __device__ __forceinline__
 #define EE_COLD __host__ __device__ __noinline__
+// EE_TICK_NOINLINE (eegpu ptx --def=EE_TICK_NOINLINE): one out-of-line copy of Sim::tick for every kernel instead of
+// one inlined copy per call site (a much smaller module: faster NVRTC builds and first loads)
+#ifdef EE_TICK_NOINLINE
+#define EE_TICK __host__ __device__ __noinline__
+#else
+#define EE_TICK EE_HD
+#endif
 #define EE_GPU 1
 #else
 #include <cmath>
@@ -20,6 +27,7 @@
 #include <cstring>
 #define EE_HD inline
 #define EE_COLD inline
+#define EE_TICK inline
 #define EE_GPU 0
 #endif
 
@@ -415,7 +423,7 @@ struct Sim {
 	}
 
 	// ================================================================ tick (EESim.tick)
-	EE_HD void tick(Input& input) {
+	EE_TICK void tick(Input& input) {
 		s.ticks++;
 		i32 cls = ovClass(s.px, s.py);
 		if (cls == 0) {

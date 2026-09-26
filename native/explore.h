@@ -36,6 +36,7 @@ struct ExploreParams {
 	i32 coarseRow;                     // from this tile row down (box centre), cells are coarse in x
 	double cqx, cqv;                   // the coarse cells: px x cqx and vx x cqv to whole numbers (0.5 and 16 = 2 px, 1/16 px/tick)
 	i32 discrete;                      // 1: cells also key on Sim::hashDiscrete (coins, keys, switches, door phase, effects)
+	u64 salt;                          // mixed into each child's content hash: which state represents a cell (0 = none)
 	i32 keepRest;                      // 1 (time doors): a ball at rest stays in the frontier (it can wait for a door)
 	i32 target;                        // 0: ground jump on the floor (above); 1: reach the region below
 	i32 reachX0, reachX1, reachY0, reachY1;   // target 1: the box centre's tile in this rectangle

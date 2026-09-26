@@ -189,6 +189,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.reach = reachF;
 	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
+	P.salt = strtoull(opt(argc, argv, "salt", "0").c_str(), nullptr, 10);   // --salt=N: another tie-break among a cell's candidates
 	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;
 	cu::Buf drt, dtb, drx, dry, drvx, drvy, dhk, dhv, dqb;
 	std::vector<int> rejoinBest;   // --rejoin: the shortest printed per target tick

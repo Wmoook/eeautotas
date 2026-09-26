@@ -356,10 +356,10 @@ async function passesSection() {
 	const fake = path.join(HOME, 'fake-eegpu.js');
 	fs.writeFileSync(fake, FAKE);
 	let nSc = 0;
-	const drive = async (runs, beam, during) => {
+	const drive = async (runs, beam, during, salts) => {
 		const sc = path.join(HOME, `ladder-${++nSc}.json`), log = path.join(HOME, `ladder-${nSc}.log`);
 		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null }));
-		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc] });
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc], salts: !!salts });
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && Date.now() - t0 < 45000) { if (during) during(st); await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
@@ -409,6 +409,17 @@ async function passesSection() {
 	check('a route from the coarsest pass after pass -1 filled up beyond it: refining goes on with pass 0 (--depth = route - 1) and finds a faster one',
 		r.st.stage === 'found' && r.st.result.ticks === 5 + R && L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join() === '-1,-2,0,1,2' && +L[2].depth === 20 + R - 1 &&
 		+L[3].depth === 5 + R - 1, r.text);
+	// the finest pass ran out of situations and no pass is left: the same pass again with other states standing for merged
+	// cells (--salt=1, 2, ...) until one finds the route (merged situations are no proof: which state stands for a cell
+	// decides whether a pixel-exact move survives)
+	let got = false;
+	r = await drive({ '-1': [{ end: 'exhausted', layers: 20, overflow: 0 }], 0: [{ end: 'exhausted', layers: 30, overflow: 0 }], 1: [{ end: 'exhausted', layers: 40, overflow: 0 }],
+		2: [{ end: 'exhausted', layers: 50, overflow: 0 }, { end: 'exhausted', layers: 52, overflow: 0 }, { end: 'finish', idle: 3, layers: 3 }] }, null,
+		(st) => { if (st.result && !got) { got = true; ED.stop(); } }, true);
+	L = r.launches;
+	check('the finest pass ran out of situations: the same pass again with other states standing for merged cells (--salt=1, 2, ...) until one finds the route',
+		r.st.stage === 'found' && r.st.result.ticks === 3 + R && L.slice(0, 6).map((o) => Math.round(Math.log2(o.cqx / 0.5))).join() === '-1,0,1,2,2,2' &&
+		L[3].salt === undefined && L[4].salt === '1' && L[5].salt === '2', r.text);
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {

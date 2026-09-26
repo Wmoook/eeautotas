@@ -216,7 +216,7 @@ static std::string jsonStr(const std::string& s) {
 
 // ------------------------------------------------------------------ ptx: compile the kernels with NVRTC (build time)
 static int cmdPtx(int argc, char** argv) {
-	if (argc < 4) { fprintf(stderr, "usage: eegpu ptx <native dir> <out.ptx> --nvrtc=<dir with nvrtc64_120_0.dll> [--arch=compute_60]\n"); return 2; }
+	if (argc < 4) { fprintf(stderr, "usage: eegpu ptx <native dir> <out.ptx> --nvrtc=<dir with nvrtc64_120_0.dll> [--arch=compute_60] [--def=NAME,...]\n"); return 2; }
 	std::string dir = argv[2];
 	if (!cu::loadNvrtc(opt(argc, argv, "nvrtc", "."))) { fprintf(stderr, "%s\n", cu::lastError.c_str()); return 3; }
 	std::string src = readText(dir + "/kernels.cu"), h1 = readText(dir + "/eecore.h"), h2 = readText(dir + "/search.h"), h3 = readText(dir + "/beam.h"), h4 = readText(dir + "/explore.h");
@@ -226,9 +226,15 @@ static int cmdPtx(int argc, char** argv) {
 	cu::nvrtcCreateProgram(&prog, src.c_str(), "kernels.cu", 4, hdrs, names);
 	std::string arch = "--gpu-architecture=" + opt(argc, argv, "arch", "compute_60");
 	std::string tw = "-DEE_ONLY_TW=" + opt(argc, argv, "tw", "8");
-	const char* opts[] = { arch.c_str(), "--fmad=false", "--std=c++17", tw.c_str() };
+	std::vector<std::string> defs;   // --def=A,B: extra -D options (build experiments, e.g. EE_TICK_NOINLINE)
+	{
+		const std::string d = opt(argc, argv, "def", "");
+		for (size_t p = 0; p < d.size();) { size_t q = d.find(',', p); if (q == std::string::npos) q = d.size(); if (q > p) defs.push_back("-D" + d.substr(p, q - p)); p = q + 1; }
+	}
+	std::vector<const char*> opts = { arch.c_str(), "--fmad=false", "--std=c++17", tw.c_str() };
+	for (const std::string& x : defs) opts.push_back(x.c_str());
 	auto t0 = std::chrono::steady_clock::now();
-	int rc = cu::nvrtcCompileProgram(prog, 4, opts);
+	int rc = cu::nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
 	size_t ls = 0; cu::nvrtcGetProgramLogSize(prog, &ls);
 	std::string log(ls + 1, 0); cu::nvrtcGetProgramLog(prog, &log[0]);
 	if (rc) { fprintf(stderr, "NVRTC failed (%d):\n%s\n", rc, log.c_str()); return 4; }

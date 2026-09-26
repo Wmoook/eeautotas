@@ -269,7 +269,8 @@ function check(buf) {
 // find a faster one), and the fastest verified route wins.
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : [])]; } },
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
+		...(q.salt ? [`--salt=${q.salt}`] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 };
@@ -391,12 +392,12 @@ function start(b, gpu, test) {
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [],
 		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0, found: null, error: null,
-			pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '' })) };
+			pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0 })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length ? ` (a ${guide.length}-point line)` : ''));
 	save();
 	if (noWayUp) note('the physics check finds no way from the start to the trophy (checking with every move)');
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, prune: rf.mode === 'physics' } };
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, prune: rf.mode === 'physics', salts: !(test && test.salts === false) } };
 	kids = which.map((k, n) => launch(n));
 	return state();
 }
@@ -405,7 +406,7 @@ function start(b, gpu, test) {
 function launch(n) {
 	const V = S.strategies[n];
 	const left = Math.max(1, Math.round(S.seconds - (Date.now() - S.started) / 1000));
-	const q = { seconds: left, pass: V.pass, depth: 0 };
+	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0 };
 	if (V.key === 'explore') {
 		q.seconds = V.share = passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
@@ -424,11 +425,14 @@ function launch(n) {
 		S.ticksPerSec = S.strategies.reduce((a, q) => a + (q.state === 'running' ? q.ticksPerSec : 0), 0);
 		S.elapsed = (Date.now() - S.started) / 1000;
 	};
+	// moves per second: the ticks simulated plus the twins (moves the tool skipped because a lower option is proven to
+	// give exactly the same state): the moves tried, the number the page shows
+	const movesPerSec = (ev) => (ev.ticks > 0 && ev.twins > 0 ? ev.ticksPerSec * (ev.ticks + ev.twins) / ev.ticks : ev.ticksPerSec || 0);
 	const onEvent = (ev) => {
 		if (!mine()) return;
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			Object.assign(V, { state: 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
-				ticksPerSec: Math.round(ev.ticksPerSec) });
+				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
 					`cells of ${passGrain(V.pass)}`;
@@ -499,6 +503,22 @@ function launch(n) {
 				return;
 			}
 			if (why) note(`${V.label}: every situation tried at tick ${V.layer}${why}`);
+			// no next pass, time left, and this pass went through its whole depth (no route, or none faster): the same pass
+			// again with another salt. Merged situations are not a proof: which state stands for a cell decides whether a
+			// pixel-exact move survives (the 40x25 shaft level: its 251-tick route comes out of the finest pass with 2
+			// salts of 13, 1.2 s each), so each salt explores another merged graph
+			if (next === null && cur.opts.salts && (how === 'exhausted' || how === 'depth' || how === 'finish' || how === 'beaten') && S.running && !S.halted &&
+				S.stage !== 'stopped' && left > 2 && !V.error) {
+				if (how === 'exhausted' && !V.depthCap) V.tries = (V.tries || 0) + 1;
+				V.salt = (V.salt || 0) + 1;
+				if (V.salt === 1 || V.salt % 10 === 0) {
+					note(`${V.label}: ${how === 'exhausted' ? `every situation tried at tick ${V.layer}` : 'no faster route'}; again with other states standing for merged situations (try ${V.salt + 1})`);
+				}
+				Object.assign(V, { passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
+				kids[n] = launch(n);
+				save();
+				return;
+			}
 		}
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
@@ -541,8 +561,9 @@ function finish() {
 				'arrows and liquids by their height (the check is generous), and walls and spikes block the rest.';
 		} else if (XE) {
 			// merged situations are not a proof: one exact pixel can hide between them
-			S.message = `No route found: "every move" ran out of new situations by tick ${XE.exhausted.tick.toLocaleString('en-US')} (positions and speeds told apart to ${XE.exhausted.grain}, ` +
-				'and every gravity, jump and pickup state; the physics check ruled out the rest). That is strong evidence, not proof: a trick that needs one exact pixel can hide between merged situations.';
+			const tries = XE.tries > 1 ? ` in all ${XE.tries} tries (each with other states standing for merged situations)` : '';
+			S.message = `No route found: "every move" ran out of new situations by tick ${XE.exhausted.tick.toLocaleString('en-US')}${tries} (positions and speeds told apart to ${XE.exhausted.grain}, ` +
+				'and every gravity, jump and pickup state; the physics check ruled out the rest). That is evidence, not proof: a route that needs pixel-exact moves can hide between merged situations. A longer search tries more.';
 		}
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
