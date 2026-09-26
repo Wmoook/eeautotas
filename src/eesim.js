@@ -2348,13 +2348,33 @@ class EESim {
    * (`strict` is ignored, see stateKey.)
    */
   stateHash(strict, noCoins) {
+    return this._hashKey(noCoins === true, false);
+  }
+
+  /**
+   * stateHash() without the clocks: the time doors' phase and the key timers are left out. NOT a proof of equal
+   * behaviour: two states with equal clock-blind hashes behave alike only as long as no time door or key door/gate is
+   * touched again, so a match is a proposal that a full replay must confirm (src/phase.js).
+   */
+  stateHashClockBlind(noCoins) {
+    return this._hashKey(noCoins === true, true);
+  }
+
+  _hashKey(noCoins, clockBlind) {
     const nd = this._fillKey();
-    if (noCoins === true) {
+    if (noCoins) {
       // "same state apart from which coins were collected": coins never change physics except through coin doors,
       // gates and coin tiles, so equal no-coin hashes behave identically as long as no coin door/gate is touched
       const I = this._keyI;
       I[1] = 0; I[2] = 0;
       if (this.level.coinTiles.length !== 0) for (let w = 0; w < this.level.coinWords; w++) I[this._coinOff + w] = 0;
+    }
+    if (clockBlind) {
+      // the time-door flag, the key timers and the time-door phase (the int32 slots from 16, in _fillKey's order)
+      const I = this._keyI;
+      I[0] &= ~8192;
+      const n = this._keyColors.length + (this.level.hasTimeDoors ? 1 : 0);
+      for (let o = 16; o < 16 + n; o++) I[o] = 0;
     }
     const words = (this._keyDoubleOff + nd * 8) >> 2;
     const W32 = this._keyW;
