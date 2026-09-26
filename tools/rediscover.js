@@ -11,6 +11,8 @@
 //   endgame  213 (OC's run, 2.36): the exact endgame solver (src/endgame.js) -> 2.35
 //   phase    Stupid Fox (OC's original, time doors): src/phase.js (clock-blind proposals, replayed) -> 7089 or better
 //   hunt     Forgotten Veil best_11257, ticks 5760-5830: explore --hunt=1 (time-to-go field) -> -15
+//   skips    Forgotten Veil best_11257, the whole run: src/skips.js (contact pass-by windows, entrances, routes from
+//            them), then mutate on the rewritten stretch -> the 88-tick "mini 10" skip (11169) or better
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -94,6 +96,30 @@ const CASES = [
 				'--ticks=6000000', '--seconds=120', `--nocoins=${st.coinsOptional ? 1 : 0}`, `--out=${out}`], 200);
 			const ev = fs.existsSync(out) ? C.evaluate(J.loadJobLevel(job), C.readEetas(out)) : null;
 			return { why: 'states ahead of the run by a time-to-go field (the run\'s positions as goals), then its own inputs from there', from: 11257, got: ev ? ev.runTicks : null, r };
+		},
+	},
+	{
+		key: 'skips', name: 'Forgotten Veil: the 88-tick "mini 10" skip', generator: 'skip search through entrances (skips.js) + mutate on the new stretch', want: 11169,
+		async go() {
+			const job = 'forgotten-veil-1-52-57-18f3bd', ref = jobRun(job, 'best_11257.eetas');
+			if (!ref) return null;
+			const st = C.readJSON(path.join(J.jobDir(job), 'status.json'), {});
+			const out = path.join(TMP, 'skips.eetas'), pol = path.join(TMP, 'skips_mut.eetas');
+			const r = await run('skips.js', [`--tas=${ref}`, `--level=${job}`, `--workers=${W}`, '--seconds=240', `--nocoins=${st.coinsOptional ? 1 : 0}`, `--out=${out}`], 300);
+			const level = J.loadJobLevel(job);
+			const ev1 = fs.existsSync(out) ? C.evaluate(level, C.readEetas(out)) : null;
+			let ev = ev1;
+			if (ev1) {
+				// the stretch the skip rewrote, polished like the grind's next mutate stage does
+				const used = (C.readJSON(out + '.edges.json', { edges: [] }).edges || []).map((e) => e[0]);
+				const f = Math.max(0, Math.min(...used) - 60), t = f + 500;
+				const r2 = await run('mutate.js', [`--tas=${out}`, `--level=${job}`, `--from=${f}`, `--to=${t}`, `--workers=${W}`, `--nocoins=${st.coinsOptional ? 1 : 0}`,
+					'--dprune=1', '--anchor=1', '--fixpoint=1', '--pairs=1', `--out=${pol}`, `--deadline=${Date.now() + 120e3}`], 200);
+				r.seconds += r2.seconds; r.ticks += r2.ticks;
+				const ev2 = fs.existsSync(pol) ? C.evaluate(level, C.readEetas(pol)) : null;
+				if (ev2 && ev2.runTicks < ev1.runTicks) ev = ev2;
+			}
+			return { why: `the run passes a ledge it lands on 136 ticks later (contact pass-by); ${ev1 ? `skips.js alone ${ev1.runTicks}` : 'skips.js found nothing'}`, from: 11257, got: ev ? ev.runTicks : null, r };
 		},
 	},
 ];

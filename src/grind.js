@@ -9,10 +9,11 @@
 //
 // A round takes about --roundMin minutes (10): mutate, the exact endgame solver (endgame.js, when the ending changed),
 // deep exploring windows (the run's loops first, then from where the last one stopped; every other one skip hunting),
-// mutate, a slice of the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin
-// doors when the coins count), mutate, a beam every other round, a splice of all
-// results. Where it is (round, stage, the deep and shortcuts cursors as ticks + state hashes, the seed counter) is
-// saved in status.json `cursor` after every stage, so a restart continues there instead of repeating round 1.
+// the skip search (skips.js, once per best: pass-bys and loops, entrances, every move from them), mutate, a slice of
+// the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin doors when the coins
+// count), mutate, a beam every other round, a splice of all results. Where it is (round, stage, the deep and shortcuts
+// cursors as ticks + state hashes, the seed counter, the best the skip search last covered) is saved in status.json
+// `cursor` after every stage, so a restart continues there instead of repeating round 1.
 // Without the GPU, mutate only searches the start ticks whose next ~800 ticks changed since its last full pass
 // (grind_mutref.eetas); mutate is deterministic, so the rest would find the same shortcuts again.
 // Nothing found is lost: a finishing run that is not accepted (a stage output that went stale while the best moved
@@ -27,7 +28,7 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1]
+//        [--hunt=1] [--endgame=1] [--skips=1]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
@@ -500,7 +501,7 @@ function startGpu() {
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
 
 // ---------------------------------------------------------------- one round (about ROUND_MS), resumable stage by stage
-const STAGES = ['mutA', 'endgame', 'deep', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+const STAGES = ['mutA', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -602,6 +603,26 @@ async function endgameStage(round) {
 	const res = await stage(`endgame${round}`, 'endgame.js', [TAS, LVL, `--out=${eo}`, '--seconds=90', ...dl()], eo, 300e3, 'the last ticks, every input');
 	if (res && !res.killed) saveCursor({ endgame: key });
 }
+/**
+ * Skip search (skips.js): where the run passes near a spot it lands on (or a wall it hits) much later, or comes back to
+ * where it was, every move from the run's state there finds the states that touch that spot early (entrances), and
+ * every move from the corners of those (the far end of a ledge, the fastest speed either way) finds the way on to an
+ * exact rejoin. Forgotten Veil's 88-tick "mini 10" skip from best_11257: -83 by itself after 48 s on 4 threads, -94
+ * after the next mutate. Once per best (again when the best changed), a quarter of a round (90-300 s); not on
+ * time-door levels (their exact rejoins need savings that are multiples of 1000 ticks); --skips=0 off.
+ */
+async function skipsStage(round) {
+	if (a.skips === '0' || level.hasTimeDoors) return;
+	const key = bestTrace().key;
+	if (cur.skips === key) return;
+	const so = path.join(OUT, `grind_skips_${round}.eetas`);
+	const secs = Math.max(90, Math.min(300, Math.round(0.25 * ROUND_MS / 1000)));   // (its own share: it runs once per best)
+	const res = await stage(`skips${round}`, 'skips.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`], so,
+		(secs + 180) * 1000, 'where the run passes a spot it reaches much later: entrances, and every move from them');
+	if (!res) return;
+	addResult(so);
+	if (!res.killed) saveCursor({ skips: key });
+}
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
 	const budget = Math.max(90e3, 0.8 * ROUND_MS - roundUsed());
@@ -663,6 +684,7 @@ async function main() {
 			if (sname === 'mutA') await mutateLoop(`${round}a`);
 			else if (sname === 'endgame') await endgameStage(round);
 			else if (sname === 'deep') await deepStage(round, R);
+			else if (sname === 'skips') await skipsStage(round);
 			else if (sname === 'mutB') await mutateLoop(`${round}b`);
 			else if (sname === 'sc') await shortcutsStage(round, R);
 			else if (sname === 'phase') await phaseStage(round, R);
