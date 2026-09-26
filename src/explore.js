@@ -62,7 +62,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 
 function parseArgs() {
 	const a = { level: '', tas: null, from: 0, join: 0, until: 0, seconds: 120, workers: os.cpus().length,
-		cell: 8, vcell: 2, roll: 80, match: 3, velW: 3, pchange: 0.12, out: null, seed: 1, seed_ref: 1, perCell: 4, exact: 0, ahead: 0.5, cands: 0, minSave: 2, nocoins: 0, maxEntries: 0,
+		cell: 8, vcell: 2, roll: 80, match: 3, velW: 3, pchange: 0.12, out: null, seed: 1, seed_ref: 1, perCell: 4, exact: 0, ahead: 0.5, cands: 0, minSave: 2, nocoins: 0, maxEntries: 0, clockblind: 0,
 		tails: 0, tailD: 12, tailH: 300, tailDrift: 64, ticks: 0,
 		hunt: 0, huntH: 800, huntKappa: 2, huntLead: 10, huntD: 24, huntMix: 0.5, huntLambda: 3, huntRolls: 4, huntCell: 16 };
 	for (const s of process.argv.slice(2)) {
@@ -85,6 +85,11 @@ function onSet(m) {
 	return ids.sort((x, y) => x - y).join('.');
 }
 let NOCOINS = false;   // --nocoins=1: coins are ignored (contexts and exact rejoins); finds routes that skip coins
+// --clockblind=1 (time-door levels): rejoins by eesim stateHashClockBlind (no door phase, no key timers): such an edge
+// is not a proven shortcut by itself (the doors after it may be in another phase); phase.js --edges replays each one
+// plain or with the clock re-synced in the idle start. The edges go to <out>.edges.json (with --tails=1 or --hunt=1).
+let CLOCKBLIND = false;
+const hashOf = (sim) => (CLOCKBLIND ? sim.stateHashClockBlind(NOCOINS) : sim.stateHash(false, NOCOINS));
 function contextKey(sim) {
 	return (NOCOINS ? '' : sim.coins + ',' + sim.blue_coins + ',') + (sim.has_crown ? 1 : 0) + ',' + (sim._keysMask | 0) + ',' +
 		onSet(sim._switches) + ',' + onSet(sim._oswitches);
@@ -155,7 +160,7 @@ function makeHeap(stamp) {
 function workerMain() {
 	const a = workerData.args;
 	E.setTickCounter(workerData.ticksBuf);
-	NOCOINS = !!a.nocoins;
+	NOCOINS = !!a.nocoins; CLOCKBLIND = !!a.clockblind;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
 	const R = reference(a, level, masks);
@@ -181,7 +186,7 @@ function workerMain() {
 	{
 		const rs = new E.EESim(level);
 		rs.restore(R.start);
-		for (let t = a.from; t < R.n; t++) { E.applyMask(inp, masks[t]); rs.tick(inp); refHash.set(rs.stateHash(false, NOCOINS), t + 1); }
+		for (let t = a.from; t < R.n; t++) { E.applyMask(inp, masks[t]); rs.tick(inp); refHash.set(hashOf(rs), t + 1); }
 	}
 	// "ahead of the reference" bias: the first reference tick at each (context, tile)
 	const tileFirst = new Map();
@@ -296,7 +301,7 @@ function workerMain() {
 				tailTicks++;
 				if (sim.is_dead) break;
 				if (refPos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
-					const jx = refHash.get(sim.stateHash(false, NOCOINS));
+					const jx = refHash.get(hashOf(sim));
 					if (jx !== undefined) {   // back on the reference: ahead (a shortcut), level or behind
 						if (jx > t + k + 1) edge(node, buf, len, masks.subarray(j0, r + 1), jx, true);
 						break;
@@ -385,7 +390,7 @@ function workerMain() {
 					tailTicks++;
 					if (sim.is_dead) break;
 					if (refPos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
-						const jx = refHash.get(sim.stateHash(false, NOCOINS));
+						const jx = refHash.get(hashOf(sim));
 						if (jx !== undefined) {   // back on the reference: ahead (a shortcut), level or behind
 							if (jx > t + k + 1) edge(e.node, EMPTY, 0, masks.subarray(j0, r + 1), jx, true);
 							break;
@@ -430,7 +435,7 @@ function workerMain() {
 					steps++;
 					if (sim.is_dead || t > T0) break;
 					if (refPos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
-						const jx = refHash.get(sim.stateHash(false, NOCOINS));
+						const jx = refHash.get(hashOf(sim));
 						if (jx !== undefined) {   // back on the reference: from here on it is the reference
 							if (jx > t) edge(node, buf, s + 1, null, jx, false);
 							break;
@@ -501,7 +506,7 @@ function workerMain() {
 				if (a.exact) {
 					let jx;
 					if (refPos.has(Math.floor(sim.px) * 65536 + Math.floor(sim.py))) {
-						jx = refHash.get(sim.stateHash(false, NOCOINS));
+						jx = refHash.get(hashOf(sim));
 						if (TAILS) { if (jx !== undefined && jx > t) edge(parentNode, buf, len, null, jx, false); }
 						else if (jx !== undefined && jx - t > bestExact) {
 							bestExact = jx - t;
@@ -558,7 +563,7 @@ function workerMain() {
 async function main() {
 	const a = parseArgs();
 	const meter = C.tickMeter();   // `[ticks] N` every second (the page's live speed)
-	NOCOINS = !!a.nocoins;
+	NOCOINS = !!a.nocoins; CLOCKBLIND = !!a.clockblind;
 	const level = E.loadLevel(a.levelData);
 	const masks = C.readEetas(a.tas);
 	console.log(`[explore] from ${a.from}, rejoin ref ticks ${a.join}..${a.until}, ${a.workers} workers x ${a.seconds} s, ` +

@@ -20,8 +20,12 @@
 //
 // node src/phase.js --tas=<run.eetas> --level=<level id | job id> [--out=<file>] [--from=0] [--to=<end>] [--step=3]
 //   [--horizon=300] [--drift=96] [--seconds=60] [--nocoins=0|1] [--workers=1] [--random=0 (seconds)] [--seed=1]
+//   [--edges=a.edges.json,b.edges.json] (explore.js --clockblind=1 --tails=1 edges of this same run: long route changes
+//   through time doors, each replayed plain or with the clock re-synced like the proposals, then combined with them)
 // Prints [phase] lines and `[ticks] N` every second (the page's live speed).
+const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const C = require('./common.js');
 const E = C.E;
@@ -39,7 +43,7 @@ function parseArgs() {
 		from: +(a.from || 0), to: a.to !== undefined ? +a.to : null, step: Math.max(1, +(a.step || 3)),
 		horizon: Math.max(10, +(a.horizon || 300)), drift: +(a.drift || 96), seconds: +(a.seconds || 60),
 		nocoins: a.nocoins === undefined ? null : String(a.nocoins) === '1', workers: Math.max(1, +(a.workers || 1) | 0),
-		random: Math.max(0, +(a.random || 0)), seed: +(a.seed || 1) | 0,
+		random: Math.max(0, +(a.random || 0)), seed: +(a.seed || 1) | 0, edges: a.edges || '',
 	};
 }
 
@@ -90,6 +94,21 @@ function spliceRun(R, edges, shift) {
 	if (shift > 0) return Uint8Array.from([...new Array(shift).fill(0), ...body]);
 	if (shift < 0) return -shift <= idle ? Uint8Array.from(body.slice(-shift)) : null;
 	return Uint8Array.from(body);
+}
+
+/** a proposal replayed: plain, else with the clock compensated in the idle start (s or s - 1000 ticks); the verified
+ *  entry {...p, save, shift} or null */
+function verifyProposal(R, p) {
+	const { level, base } = R;
+	const s = p.j - p.i - p.k;
+	if (s <= 0) return null;
+	for (const shift of p.exact ? [0] : level.hasTimeDoors ? [0, s, s - 1000] : [0]) {
+		const cand = spliceRun(R, [p], shift);
+		if (!cand) continue;
+		const ev = C.evaluate(level, cand, false);
+		if (ev && ev.runTicks < base.runTicks && ev.deaths <= base.deaths) return { ...p, save: base.runTicks - ev.runTicks, shift };
+	}
+	return null;
 }
 
 /**
@@ -194,16 +213,7 @@ function searchPart(R, a, wi, nw) {
 	tried += randomTried;
 	// every proposal replayed: plain, else compensated in the idle start
 	const good = [];
-	for (const p of proposals.values()) {
-		const s = p.j - p.i - p.k;
-		if (s <= 0) continue;
-		for (const shift of p.exact ? [0] : level.hasTimeDoors ? [0, s, s - 1000] : [0]) {
-			const cand = spliceRun(R, [p], shift);
-			if (!cand) continue;
-			const ev = C.evaluate(level, cand, false);
-			if (ev && ev.runTicks < base.runTicks && ev.deaths <= base.deaths) { good.push({ ...p, save: base.runTicks - ev.runTicks, shift }); break; }
-		}
-	}
+	for (const p of proposals.values()) { const g = verifyProposal(R, p); if (g) good.push(g); }
 	let exact = 0;
 	for (const p of proposals.values()) if (p.exact) exact++;
 	return { good, tried, tLast, proposals: proposals.size, exact };
@@ -228,6 +238,23 @@ async function main() {
 		})));
 	} else parts = [searchPart(R, a, 0, 1)];
 	const good = [].concat(...parts.map((p) => p.good));
+	// --edges: the explorer's clock-blind edges of this run (b -> j, inputs from S(b)), checked the same way
+	if (a.edges) {
+		const sha = crypto.createHash('sha1').update(fs.readFileSync(a.tas)).digest('hex');
+		let seen = 0, kept = 0;
+		for (const f of a.edges.split(',').filter(Boolean)) {
+			let d = null;
+			try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { console.log(`[phase] ${f}: ${e.message}`); continue; }
+			if (d.ref && d.ref !== sha) { console.log(`[phase] ${path.basename(f)}: edges of another run, skipped`); continue; }
+			for (const [b, j, text] of d.edges || []) {
+				seen++;
+				const seq = [...String(text)].map((ch) => (ch.charCodeAt(0) - 48) & 31);
+				const g = verifyProposal(R, { i: b, j, k: seq.length, seq, exact: false });
+				if (g) { good.push(g); kept++; }
+			}
+		}
+		console.log(`[phase] edges: ${seen} from the explorer, ${kept} verified` + (kept ? ` (best -${Math.max(...good.filter((g) => g.k >= 0).map((g) => g.save))})` : ''));
+	}
 	const tried = parts.reduce((s, p) => s + p.tried, 0), nProp = parts.reduce((s, p) => s + p.proposals, 0), nExact = parts.reduce((s, p) => s + p.exact, 0);
 	const tLast = Math.max(...parts.map((p) => p.tLast));
 	console.log(`[phase] searched ticks ${a.from}..${tLast} in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${tried} changes, ${nProp} proposals (${nExact} exact)`);
