@@ -341,7 +341,8 @@ const famStatus = () => Object.fromEntries(LIB_FAMS.map((f) => [f, state.fam[f]]
 function toolCommand(tool, a) {
 	return /\.js$/i.test(tool) ? [process.execPath, [tool, ...a]] : [tool, a];
 }
-/** Runs `eegpu search`; resolves {code, done, err, at: {family: [first, max, wrapped]}} (progress positions per family). */
+/** Runs `eegpu search`; resolves {code, done, err, at: {family: {max, last, wrapped}}} (the progress positions per
+ *  family: every start tick below `max` is done; wrapped = its pass over [from, to) ended). */
 function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	return new Promise((resolve) => {
 		const a = ['search', blobFile, refFile, edgesFile, `--seconds=${o.seconds.toFixed(1)}`, `--nocoins=${nc ? 1 : 0}`, `--seed=${o.seed}`,
@@ -363,8 +364,12 @@ function runSearch(tool, blobFile, refFile, edgesFile, o) {
 				if (ev.ev === 'progress') {
 					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: ev.family });
 					// eegpu prints the next start tick of the running family (its pass over [from, to) restarts at from)
-					const p = at[ev.family] || (at[ev.family] = { max: o.from, wrapped: false });
-					if (typeof ev.at === 'number') { if (ev.at <= o.from && p.max > o.from) p.wrapped = true; else if (!p.wrapped) p.max = Math.max(p.max, ev.at); }
+					const p = at[ev.family] || (at[ev.family] = { max: o.from, last: o.from, wrapped: false });
+					if (typeof ev.at === 'number') {
+						if (ev.at < p.last || (ev.at <= o.from && p.max > o.from)) p.wrapped = true;   // (its pass ended and started over)
+						else if (!p.wrapped) p.max = Math.max(p.max, ev.at);
+						p.last = ev.at;
+					}
 				} else if (ev.ev === 'done') done = ev;
 				else if (ev.error) err = ev.error;
 			}
