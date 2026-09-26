@@ -7,7 +7,8 @@
 // replay (common.judge): it must finish the level, faster, with no more deaths than the starting run and no lower
 // random-portal chance.
 //
-// A round takes about --roundMin minutes (10): mutate, deep exploring windows (from where the last one stopped),
+// A round takes about --roundMin minutes (10): mutate, the exact endgame solver (endgame.js, when the ending changed),
+// deep exploring windows (the run's loops first, then from where the last one stopped; every other one skip hunting),
 // mutate, a slice of the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin
 // doors when the coins count), mutate, a beam every other round, a splice of all
 // results. Where it is (round, stage, the deep and shortcuts cursors as ticks + state hashes, the seed counter) is
@@ -26,6 +27,7 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
+//        [--hunt=1] [--endgame=1]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
@@ -497,7 +499,7 @@ function startGpu() {
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
 
 // ---------------------------------------------------------------- one round (about ROUND_MS), resumable stage by stage
-const STAGES = ['mutA', 'deep', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+const STAGES = ['mutA', 'endgame', 'deep', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -565,16 +567,34 @@ async function deepStage(round, R) {
 		const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
 		const dp = path.join(OUT, `grind_deep_${round}_${w.seg - 1}_${w.i}.eetas`);
 		const name = `deep${round}_seg${w.seg}${w.of > 1 ? '.' + (w.i + 1) : ''}`;
+		// every other window: guided skip hunting (explore --hunt: states ahead of the reference by a time-to-go field,
+		// then its own inputs from there; FV 5760-5830: -15 where the plain explorer finds 0), else tails
+		const hunt = a.hunt !== '0' && seed % 2 === 0;
 		const res = await stage(name, 'explore.js', [TAS, `--out=${dp}`, `--from=${w.w0}`, `--join=${w.w0}`,
 			`--until=${w.w1}`, `--seconds=${DEEP_S || R([150, 180, 150, 210])}`, `--workers=${W}`, '--exact=1', '--roll=100',
 			`--seed=${seed}`, `--cell=${R([8, 6, 12, 8])}`, `--vcell=${R([2, 1.5, 3, 1])}`, `--ahead=${R([0.5, 0.6, 0.4, 0.7])}`,
-			`--nocoins=${NC}`, '--maxEntries=1500000', ...EXP_EXTRA, LVL], dp, 900e3, `window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}`);
+			`--nocoins=${NC}`, '--maxEntries=1500000', ...(hunt ? ['--hunt=1'] : EXP_EXTRA), LVL], dp, 900e3,
+			`window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}${hunt ? ', skip hunting' : ''}`);
 		if (!res) return;
 		addResult(dp);
 		if (!next && wins.length > 1) log(`deep: the last of the run's ${wins.length} windows is done; the next one starts over at the first`);
 		saveCursor({ deep: next || cursorAt(0) });
 		done++;
 	}
+}
+/**
+ * The exact endgame solver (endgame.js): every input sequence over the run's last K ticks (K = 8, 16, 24, ... with a
+ * sound lower bound), from the best and the job's other runs; finds knife-edge finishes the rejoin tools cannot see
+ * (213: 2.36 -> 2.35 from OC's run in about 5 s). Once per ending: again only when the best's last 64 ticks changed.
+ */
+async function endgameStage(round) {
+	if (a.endgame === '0') return;
+	const b = bestTrace();
+	const key = `${b.tr.H[Math.max(0, b.tr.n - 64)]}:${b.tr.n - Math.max(0, b.tr.n - 64)}`;
+	if (cur.endgame === key) return;
+	const eo = path.join(OUT, `grind_endgame_${round}.eetas`);
+	const res = await stage(`endgame${round}`, 'endgame.js', [TAS, LVL, `--out=${eo}`, '--seconds=90', ...dl()], eo, 300e3, 'the last ticks, every input');
+	if (res && !res.killed) saveCursor({ endgame: key });
 }
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
@@ -635,6 +655,7 @@ async function main() {
 			const sname = STAGES[si];
 			saveCursor({ round, stage: sname, used: roundUsed() });
 			if (sname === 'mutA') await mutateLoop(`${round}a`);
+			else if (sname === 'endgame') await endgameStage(round);
 			else if (sname === 'deep') await deepStage(round, R);
 			else if (sname === 'mutB') await mutateLoop(`${round}b`);
 			else if (sname === 'sc') await shortcutsStage(round, R);

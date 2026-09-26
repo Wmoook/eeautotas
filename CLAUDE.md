@@ -96,8 +96,9 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 - **The acceptance rule** (`common.judge`, used by grind, try and the inbox): the run must finish the level, die no
   more often than the starting run, and be faster with no lower random-portal chance, or equally fast and more
   likely to work.
-- **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, deep exact-rejoin
-  exploring windows (first up to 3 loop windows: stretches where the run comes back to where it was with nothing
+- **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, the exact endgame
+  solver (`endgame.js`, once per ending: again when the best's last 64 ticks change; `--endgame=0` off), deep exact-rejoin
+  exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 3 loop windows: stretches where the run comes back to where it was with nothing
   collected in between (`src/loops.js`), the longest first, each once; then every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
   round), mutate, a slice of the dense shortcuts pass (from its own cursor), the time-door pass (`phase.js`, on levels with
   time doors, or coin doors when the coins count), mutate, a beam search every other round
