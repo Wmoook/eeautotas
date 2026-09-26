@@ -9,6 +9,8 @@
 // laptop GPU); its done / summary line reports "maxLaunchMs". A failed launch prints {"error":...,"launchError":true}
 // and exits 6 (7: CUDA_ERROR_LAUNCH_TIMEOUT). --stopfile=<path>: when that file appears, the command ends between two
 // launches with its final line (end "stopped") and exit code 0 (killing it while a kernel runs resets the driver).
+// explore / beam / search / bench run at above-normal CPU priority: their host thread must start the next short launch
+// at once (--priority=normal, or EEGPU_PRIORITY=normal in the environment: off).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1045,6 +1047,13 @@ int main(int argc, char** argv) {
 	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search ...\n"); return 2; }
 	std::string cmd = argv[1];
 	lk::setTarget(atof(opt(argc, argv, "launch-ms", "50").c_str()));   // (launch.h: every kernel launch aims at this)
+	// the GPU commands' host thread mostly waits for short launches and must start the next one at once: above normal
+	// priority, so busy CPU threads (the editor's CPU search, a job's workers) do not leave the GPU idle between launches
+	// (an explore pass on a 50x50 level took 3-7x as long next to 15 busy threads); --priority=normal (or the environment's
+	// EEGPU_PRIORITY=normal): off
+	const char* envPrio = getenv("EEGPU_PRIORITY");
+	const std::string prio = opt(argc, argv, "priority", envPrio && *envPrio ? envPrio : "high");
+	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 	lk::G.stopFile = opt(argc, argv, "stopfile", "");                   // (launch.h: a graceful stop between launches)
 	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
 	if (cmd == "state") return cmdState(argc, argv);

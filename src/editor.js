@@ -395,7 +395,8 @@ function halt(ch, why) {
  * gpu: the server's GPU processor record ({available, why}): without one (or without the native engine, or on a level
  * it cannot run) the CPU search runs alone, with a note. Throws with `problems` when the level is not ready.
  * test (test/editor.js; not from HTTP): { tool: [command, ...arguments] } runs that instead of the native engine;
- * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js.
+ * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js; beams:
+ * false leaves the GPU beams out (measurements of "every move" alone).
  */
 function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
@@ -435,7 +436,8 @@ function start(b, gpu, test) {
 	const noWayUp = rf.mode === 'physics' && startCost < 0;
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
 	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
-	const which = [...(noGpu ? [] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
+	const beams = !(test && test.beams === false);
+	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
