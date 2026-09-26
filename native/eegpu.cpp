@@ -2,6 +2,7 @@
 //   eegpu trace <level.bin> <run.eetas> <out.bin> [--gpu]   per-tick state hashes of a replay (differential tests)
 //   eegpu state <level.bin> <run.eetas> <tick>               the full state after <tick> ticks (JSON, for debugging)
 //   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}
+//   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
 #include <cstdio>
 #include <cstdlib>
@@ -371,7 +372,10 @@ struct Searcher {
 	bool nocoins;
 	std::vector<uint64_t> htKeys; std::vector<int32_t> htVals; uint32_t htMask = 0;
 	std::vector<uint32_t> pix; int pixW = 0, pixH = 0;
+	std::vector<uint8_t> axis;     // per tick t < n: the input bits that act on the reference's tick t (Sim inAxes | inJump; pert / flip)
+	std::vector<uint32_t> twin;    // TWIN_WORDS per tick: the systematic variants that are exact twins (the GPU's twins kernel or buildTwins; empty = none)
 	Searcher(const LevelBlob& b, bool nc) : B(b), L(b.level(b.bytes.data())), nocoins(nc) {}
+	const uint32_t* twinp() const { return twin.empty() ? nullptr : twin.data(); }
 
 	/** Replays the reference: per-tick states, positions and hashes, the hash table, the pixel prefilter. */
 	bool prepare(const std::vector<uint8_t>& ref, std::string& err) {
@@ -391,6 +395,7 @@ struct Searcher {
 		for (size_t t = 0; t < ref.size(); t++) {
 			Input in = maskInput(ref[t]);
 			sim.tick(in);
+			axis.push_back((uint8_t)(sim.inAxes | sim.inJump));
 			push();
 			if (st->broken) { err = "the reference run overflows the engine's fixed queues at tick " + std::to_string(t + 1); free(st); return false; }
 			if (!crown0 && st->has_silver_crown) { n = (int)t + 1; runTicks = st->run_ticks; break; }
@@ -425,10 +430,23 @@ struct Searcher {
 		return true;
 	}
 
+	/** The systematic twins of start ticks [t0, t1) on the CPU (search.h twinBits; runSearch computes them on the GPU,
+	 *  --twins=cpu here): 130-200 ticks per start tick. */
+	void buildTwins(int t0, int t1, bool wantM1, bool wantM2) {
+		twin.assign((size_t)n * TWIN_WORDS, 0u);
+		S* a = (S*)malloc(sizeof(S)); S* b = (S*)malloc(sizeof(S));
+		for (int t = t0; t < t1 && t < n; t++) {
+			const S& st = *(const S*)(snaps.data() + (size_t)t * sizeof(S));
+			u32* row = twin.data() + (size_t)t * TWIN_WORDS;
+			for (int o = 0; o < 18; o++) twinBits<TW>(L, st, masks.data(), n, t, o, wantM1, wantM2, *a, *b, [&](int bit) { row[bit >> 5] |= 1u << (bit & 31); });
+		}
+		free(a); free(b);
+	}
+
 	/** Rebuilds a hit's inputs and replays them on the CPU from S(t): true if it really reaches S(j) (both hashes). */
 	bool verify(const Hit& h, Edge& e) {
 		if (h.t < 0 || h.t >= n || h.k <= 0 || h.j <= h.t + h.k || h.j > n) return false;
-		Cand c = makeCand(h.family, h.t, h.v, h.seed, masks.data(), n);
+		Cand c = makeCand(h.family, h.t, h.v, h.seed, masks.data(), n, axis.data(), twinp());
 		if (!c.valid) return false;
 		S* st = (S*)malloc(sizeof(S));
 		memcpy(st, snaps.data() + (size_t)h.t * sizeof(S), sizeof(S));
@@ -438,7 +456,7 @@ struct Searcher {
 		int sticky = 0;
 		bool ok = true;
 		for (int q = 0; q < h.k; q++) {
-			const int m = candInput(c, masks.data(), n, q, sticky);
+			const int m = candInput(c, masks.data(), n, axis.data(), q, sticky);
 			if (m < 0) { ok = false; break; }
 			e.seq.push_back((uint8_t)m);
 			Input in = maskInput(m);
@@ -477,17 +495,27 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	if (!S.prepare(ref, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
 	const int n = S.n;
 	const int t0 = std::max(0, std::min(from, n - 1)), t1 = toArg < 0 ? n : std::max(t0 + 1, std::min(toArg, n));
+	std::vector<int> famList;
+	for (int f = 0; f < FAM_COUNT; f++) if (fams.find(FAMILY_NAMES[f]) != std::string::npos) famList.push_back(f);
+	// the systematic families' exact twins (search.h twinBits), left out of their launches: --twins=1 (the table on the
+	// GPU), cpu (on the CPU, the same code), 0 (simulate them all, as before)
+	const std::string twinsOpt = opt(argc, argv, "twins", "1");
+	const bool twM1 = std::find(famList.begin(), famList.end(), (int)FAM_M1) != famList.end(), twM2 = std::find(famList.begin(), famList.end(), (int)FAM_M2) != famList.end();
+	const bool twGpu = twinsOpt != "0" && twinsOpt != "cpu" && (twM1 || twM2);
+	double twinSec = 0, listSec = 0;   // (host time: the twin table, the launches' candidate lists)
+	if (twinsOpt == "cpu" && (twM1 || twM2)) { const double s0 = elapsed(); S.buildTwins(t0, t1, twM1, twM2); twinSec = elapsed() - s0; }
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fsearch = g.fn("search_" + std::to_string(TW));
 	if (!fsearch) { printf("{\"error\":\"search kernel missing\"}\n"); return 4; }
 	// device data
-	cu::Buf dl, dsnap, dmask, dX, dY, dK, dV, dpix, dq, dhits, dcount, dstats;
+	cu::Buf dl, dsnap, dmask, dX, dY, dK, dV, dpix, dq, dhits, dcount, dstats, dax, dlist;
 	const uint32_t hitCap = 1u << 18;
 	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dsnap.upload(S.snaps.data(), S.snaps.size()) &&
 		dmask.upload(S.masks.data(), S.masks.size()) && dX.upload(S.X.data(), 8 * S.X.size()) && dY.upload(S.Y.data(), 8 * S.Y.size()) &&
 		dK.upload(S.htKeys.data(), 8 * S.htKeys.size()) && dV.upload(S.htVals.data(), 4 * S.htVals.size()) &&
-		dpix.upload(S.pix.data(), 4 * S.pix.size()) && dq.upload(S.qbits.data(), 4 * S.qbits.size()) && dhits.alloc(sizeof(Hit) * hitCap) && dcount.alloc(4) && dstats.alloc(8 * 8);
+		dpix.upload(S.pix.data(), 4 * S.pix.size()) && dq.upload(S.qbits.data(), 4 * S.qbits.size()) && dhits.alloc(sizeof(Hit) * hitCap) && dcount.alloc(4) && dstats.alloc(8 * 8) &&
+		dax.upload(S.axis.data(), S.axis.size());
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcount.p, 0, 4); cu::cuMemsetD8_v2(dstats.p, 0, 64);
 	SearchParams P;
@@ -502,13 +530,31 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	P.nocoins = nc; P.horizon = horizon; P.drift = drift;
 	P.hits = (Hit*)(uintptr_t)dhits.p; P.hitCount = (u32*)(uintptr_t)dcount.p; P.hitCap = hitCap;
 	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
+	P.axis = (const u8*)(uintptr_t)dax.p;
+	if (twGpu) {   // the twin table on the GPU, in chunks of start ticks (18 threads each), copied back for the lists and verify
+		const double s0 = elapsed();
+		cu::CUfunction ftw = g.fn("twins_" + std::to_string(TW));
+		const int chunk = 8192;
+		cu::Buf dtw;
+		if (!ftw || !dtw.alloc(4ull * TWIN_WORDS * chunk)) { printf("{\"error\":\"twins kernel missing (rebuild: node tools/build-native.js)\"}\n"); return 4; }
+		S.twin.assign((size_t)n * TWIN_WORDS, 0u);
+		i32 m1 = twM1 ? 1 : 0, m2 = twM2 ? 1 : 0;
+		u32* dtwp = (u32*)(uintptr_t)dtw.p;
+		for (int c0 = t0; c0 < t1; c0 += chunk) {
+			P.t0 = c0; P.nT = std::min(chunk, t1 - c0);
+			cu::cuMemsetD8_v2(dtw.p, 0, 4ull * TWIN_WORDS * P.nT);
+			void* ta[] = { &P, &dtwp, &m1, &m2 };
+			const unsigned threads = (unsigned)P.nT * 18;
+			if (cu::cuLaunchKernel(ftw, (threads + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, ta, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"twins kernel failed\"}\n"); return 5; }
+			cu::cuMemcpyDtoH_v2(S.twin.data() + (size_t)c0 * TWIN_WORDS, dtw.p, 4ull * TWIN_WORDS * P.nT);
+		}
+		twinSec = elapsed() - s0;
+	}
 
 	// the work: every family over [t0, t1); systematic families once, then the random ones (new seeds) until time is up
-	std::vector<int> famList;
-	for (int f = 0; f < FAM_COUNT; f++) if (fams.find(FAMILY_NAMES[f]) != std::string::npos) famList.push_back(f);
 	std::vector<Edge> edges;
 	std::vector<std::vector<int>> best(n + 1);   // (t -> edge indices), dedupe per (t, j): minimum k
-	uint64_t famTicks[FAM_COUNT] = {0}, famHits[FAM_COUNT] = {0}, famVerified[FAM_COUNT] = {0};
+	uint64_t famTicks[FAM_COUNT] = {0}, famHits[FAM_COUNT] = {0}, famVerified[FAM_COUNT] = {0}, famTwins[FAM_COUNT] = {0};
 	double famSec[FAM_COUNT] = {0};
 	uint64_t rejected = 0, launches = 0;
 	unsigned long long statsPrev[8] = {0};
@@ -517,6 +563,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	int fi = 0;
 	int tCursor = t0;
 	double lastProgress = 0;
+	std::vector<uint32_t> list;   // a systematic launch's candidates: (t - t0) * V + v, the twins left out (Searcher::twin)
 	while (elapsed() < seconds && !famList.empty()) {
 		const int fam = famList[fi];
 		const bool random = fam >= FAM_PERT;
@@ -532,10 +579,30 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		int nT = std::max(1, (int)(tPerLaunch * 216.0 / V));
 		nT = std::min(nT, t1 - tCursor);
 		P.family = fam; P.t0 = tCursor; P.nT = nT; P.V = V; P.seed = seed;
-		const unsigned threads = (unsigned)nT * V, block = 128, grid = (threads + block - 1) / block;   // one thread per candidate (t fastest)
+		unsigned threads = (unsigned)nT * V;   // one thread per candidate (t fastest)
+		P.list = nullptr; P.nList = 0;
+		if (!random && S.twinp()) {
+			const auto b0 = std::chrono::steady_clock::now();
+			list.clear();
+			const int base = fam == FAM_M2 ? M1_VARIANTS : 0;
+			for (int ti = 0; ti < nT; ti++) {
+				const uint32_t* row = S.twinp() + (size_t)(tCursor + ti) * TWIN_WORDS;
+				for (int v = 0; v < V; v++) {
+					const int b = base + v;
+					if (fam != FAM_DEL && ((row[b >> 5] >> (b & 31)) & 1u)) { famTwins[fam]++; continue; }   // (the table bit first: most are twins)
+					if (makeCand(fam, tCursor + ti, v, seed, S.masks.data(), n, S.axis.data(), S.twinp()).valid) list.push_back((uint32_t)ti * (uint32_t)V + (uint32_t)v);
+				}
+			}
+			threads = (unsigned)list.size();
+			if (4 * list.size() > dlist.bytes && !dlist.alloc(4 * list.size() + (4 * list.size()) / 2)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+			if (!list.empty()) cu::cuMemcpyHtoD_v2(dlist.p, list.data(), 4 * list.size());
+			P.list = (const u32*)(uintptr_t)dlist.p; P.nList = (u32)list.size();
+			listSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - b0).count();
+		}
+		const unsigned block = 128, grid = (threads + block - 1) / block;
 		void* args[] = { &P };
 		auto l0 = std::chrono::steady_clock::now();
-		if (cu::cuLaunchKernel(fsearch, grid, 1, 1, block, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize()) {
+		if (threads && (cu::cuLaunchKernel(fsearch, grid, 1, 1, block, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize())) {
 			printf("{\"error\":\"kernel launch failed\"}\n"); return 5;
 		}
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - l0).count();
@@ -600,13 +667,13 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	for (const Edge& e : edges) bestSave = std::max<int64_t>(bestSave, (int64_t)e.j - e.t - e.k);
 	printf("{\"ev\":\"done\",\"gpu\":%s,\"n\":%d,\"runTicks\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"candidates\":%llu,"
 		"\"ends\":{\"death\":%llu,\"drift\":%llu,\"noop\":%llu,\"end\":%llu,\"hit\":%llu,\"broken\":%llu},\"launches\":%llu,"
-		"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"families\":{",
+		"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"twinSeconds\":%.2f,\"listSeconds\":%.2f,\"families\":{",
 		g.json().c_str(), n, S.runTicks, sec, st[0], st[0] / std::max(1e-9, sec), st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-		(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW);
+		(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW, twinSec, listSec);
 	bool first = true;
 	for (int fm : famList) {
-		printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu}", first ? "" : ",", FAMILY_NAMES[fm],
-			(unsigned long long)famTicks[fm], famSec[fm], (unsigned long long)famHits[fm], (unsigned long long)famVerified[fm]);
+		printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu,\"twins\":%llu}", first ? "" : ",", FAMILY_NAMES[fm],
+			(unsigned long long)famTicks[fm], famSec[fm], (unsigned long long)famHits[fm], (unsigned long long)famVerified[fm], (unsigned long long)famTwins[fm]);
 		first = false;
 	}
 	printf("}}\n");
@@ -698,8 +765,178 @@ static int cmdBench(int argc, char** argv) {
 #include "beamhost.h"
 #include "explorehost.h"
 
+// ------------------------------------------------------------------ twins: the exactness check of the twin rule (CPU)
+/** equal states: every byte, except the fields the next tick overwrites before it reads them (Sim::inUsed) */
+template <int TW>
+static bool sameState(const State<TW>& a, const State<TW>& b) {
+	static State<TW> x, y;
+	memcpy(&x, &a, sizeof x); memcpy(&y, &b, sizeof y);
+	for (State<TW>* s : { &x, &y }) { s->horizontal = 0; s->vertical = 0; s->spacedown = 0; s->spacejustdown = 0; s->prev_jump_held = 0; s->last_jump = 0; }
+	return !memcmp(&x, &y, sizeof x);
+}
+/** equal now and for `more` ticks of the same (pseudo-random) inputs: both hashes, both coin modes, the run timer */
+template <int TW>
+static bool sameFuture(const Level& L, const State<TW>& a0, const State<TW>& b0, int more, u64 seed) {
+	static State<TW> a, b;
+	memcpy(&a, &a0, sizeof a); memcpy(&b, &b0, sizeof b);
+	Sim<TW> sa(L, a), sb(L, b);
+	for (int k = 0;; k++) {
+		if (sa.hash(false) != sb.hash(false) || sa.hash(true) != sb.hash(true) || sa.hash2(false) != sb.hash2(false) || a.run_ticks != b.run_ticks || a.deaths != b.deaths) return false;
+		if (k == 0 && !sameState(a, b)) return false;
+		if (k >= more) return true;
+		seed = splitmix(seed);
+		Input in = maskInput((int)(seed % 32)); sa.tick(in);
+		Input in2 = maskInput((int)(seed % 32)); sb.tick(in2);
+	}
+}
+
+/** eegpu twins <level.bin> <run.eetas> [<out.bin>] [--every=1] [--walks=0] [--search=0]: at every --every-th state of
+ *  the run (and --walks states reached from it by random inputs), all 18 options: every option the twin rule skips
+ *  (search.h canonOption, as the explore and the beam use it) must give the state of its canonical option, byte for
+ *  byte (but the overwritten input fields), and the same hashes for 8 more random ticks. --search=1 (the run must
+ *  finish): the search's twin tables (Searcher::buildTwins) at the same ticks, each skipped m1 / m2 variant against the
+ *  variant it stands for. out.bin: canon[18] per tick of the run (for the JS engine's check, src/out). Prints a JSON
+ *  summary; exit code 1 on any violation. */
+template <int TW>
+static int runTwins(int argc, char** argv, const LevelBlob& B) {
+	typedef State<TW> S;
+	const int every = std::max(1, atoi(opt(argc, argv, "every", "1").c_str()));
+	const int walks = atoi(opt(argc, argv, "walks", "0").c_str());
+	const bool search = opt(argc, argv, "search", "0") == "1";
+	Level L = B.level(B.bytes.data());
+	std::vector<uint8_t> m = readMasks(argv[3]);
+	S* st = (S*)calloc(1, sizeof(S)); S* tmp = (S*)malloc(sizeof(S)); S* w = (S*)malloc(sizeof(S)); S* kids = (S*)malloc(sizeof(S) * 18);
+	Sim<TW> sim(L, *st);
+	sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
+	std::vector<uint8_t> out;
+	uint64_t states = 0, skipped = 0, bad = 0, sims = 0;
+	uint64_t seed = 0x1234567ull;
+	std::string firstBad;
+	// one state: the 18 children, the canonical map, the check
+	auto check = [&](const S& at, int t, int walk, u8 canon[18]) {
+		canonMap<TW>(L, at, *tmp, canon);
+		for (int o = 0; o < 18; o++) {
+			memcpy(kids + o, &at, sizeof(S));
+			Sim<TW> ks(L, kids[o]);
+			Input in = maskInput(option(o)); ks.tick(in);
+		}
+		states++;
+		for (int o = 0; o < 18; o++) {
+			if (canon[o] == o) { sims++; continue; }
+			skipped++;
+			seed = splitmix(seed + (u64)t);
+			if (!sameFuture<TW>(L, kids[o], kids[canon[o]], 8, seed)) {
+				if (!bad++) { char b[160]; snprintf(b, sizeof b, "tick %d walk %d: option %d (mask %d) differs from its canonical %d (mask %d)", t, walk, o, option(o), canon[o], option(canon[o])); firstBad = b; }
+			}
+		}
+	};
+	const bool crown0 = st->has_silver_crown;
+	const bool writeOut = argc > 4 && argv[4][0] != '-';
+	int n = (int)m.size();
+	for (int t = 0; t <= (int)m.size(); t++) {
+		u8 canon[18];
+		if (t % every == 0 && t < (int)m.size()) {
+			check(*st, t, -1, canon);
+			for (int k = 0; k < walks; k++) {   // off the run: random sticky inputs for 1..40 ticks
+				memcpy(w, st, sizeof(S));
+				Sim<TW> ws(L, *w);
+				seed = splitmix(seed ^ ((u64)t << 20) ^ (u64)k);
+				const int len = 1 + (int)(seed % 40);
+				int mk = option((int)((seed >> 8) % 18));
+				for (int q = 0; q < len && !w->is_dead; q++) { seed = splitmix(seed); if ((seed & 255) < 40) mk = option((int)((seed >> 8) % 18)); Input in = maskInput(mk); ws.tick(in); }
+				if (!w->is_dead && !w->broken) { u8 c2[18]; check(*w, t, k, c2); }
+			}
+		} else if (writeOut && t < (int)m.size()) canonMap<TW>(L, *st, *tmp, canon);
+		if (writeOut && t < (int)m.size()) out.insert(out.end(), canon, canon + 18);
+		if (t == (int)m.size()) break;
+		Input in = maskInput(m[t]); sim.tick(in);
+		if (!crown0 && st->has_silver_crown) { n = t + 1; if (search) break; }
+	}
+	if (writeOut) { FILE* f = fopen(argv[4], "wb"); fwrite(out.data(), 1, out.size(), f); fclose(f); }
+	// the search's tables: a skipped variant must play like some variant with a lower option index (by the prefix's end)
+	uint64_t vChecked = 0, vTwins = 0, vBad = 0, twinBits = 0, twinTotal = 0;
+	double buildSec = 0;
+	if (search) {
+		std::vector<uint8_t> ref(m.begin(), m.begin() + std::min((size_t)n, m.size()));
+		Searcher<TW> SR(B, false);
+		std::string err;
+		if (!SR.prepare(ref, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
+		const int N = SR.n;
+		const auto b0 = std::chrono::steady_clock::now();
+		SR.buildTwins(0, N, true, true);
+		buildSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - b0).count();
+		for (int t = 0; t < N; t++) for (int w2 = 0; w2 < TWIN_WORDS; w2++) twinBits += (uint64_t)__builtin_popcount(SR.twin[(size_t)t * TWIN_WORDS + w2]);
+		twinTotal = (uint64_t)N * (M1_VARIANTS + M2_VARIANTS);
+		// the prefix of a variant into s (m1: option o1 held L1 ticks; m2 (g > 0): o1, the reference g - 1 ticks, o2)
+		auto play = [&](int t, int o1, int L1, int g, int o2, S& s) {
+			memcpy(&s, SR.snaps.data() + (size_t)t * sizeof(S), sizeof(S));
+			Sim<TW> ps(L, s);
+			if (g == 0) { for (int q = 0; q < L1; q++) { Input in = maskInput(option(o1)); ps.tick(in); } return; }
+			{ Input in = maskInput(option(o1)); ps.tick(in); }
+			for (int q = 1; q < g; q++) { Input in = maskInput(SR.masks[t + q]); ps.tick(in); }
+			{ Input in = maskInput(option(o2)); ps.tick(in); }
+		};
+		// the lower variants a skipped one can stand for: its option with some pressed groups (L/R, U/D, jump) dropped
+		auto lower = [&](int o, std::vector<int>& outv) {
+			outv.clear();
+			const int h = o / 6, v = (o / 2) % 3, j = o & 1;
+			for (int dh = 0; dh < 2; dh++) for (int dv = 0; dv < 2; dv++) for (int dj = 0; dj < 2; dj++) {
+				if ((dh && !h) || (dv && !v) || (dj && !j)) continue;
+				const int c = (dh ? 0 : h) * 6 + (dv ? 0 : v) * 2 + (dj ? 0 : j);
+				if (c != o) outv.push_back(c);
+			}
+		};
+		S* a = (S*)malloc(sizeof(S)); S* b = (S*)malloc(sizeof(S));
+		std::vector<int> lo1, lo2;
+		for (int t = 0; t < N; t += every) {
+			for (int v = 0; v < M1_VARIANTS + M2_VARIANTS; v++) {
+				const bool isM1 = v < M1_VARIANTS;
+				const int vv = isM1 ? v : v - M1_VARIANTS;
+				if (isM1 && vv >= 72) continue;   // (the drop D does not change the prefix)
+				if (!isM1 && t + 1 + vv / 324 >= N) continue;
+				vChecked++;
+				if (!((SR.twin[(size_t)t * TWIN_WORDS + (v >> 5)] >> (v & 31)) & 1u)) continue;
+				vTwins++;
+				bool found = false;
+				if (isM1) {
+					const int o = vv % 18, L1 = 1 + vv / 18;
+					play(t, o, L1, 0, 0, *a);
+					lower(o, lo1);
+					for (int c : lo1) { play(t, c, L1, 0, 0, *b); seed = splitmix(seed); if (sameFuture<TW>(L, *a, *b, 8, seed)) { found = true; break; } }
+				} else {
+					const int g = 1 + vv / 324, o1 = (vv / 18) % 18, o2 = vv % 18;
+					play(t, o1, 1, g, o2, *a);
+					lower(o1, lo1); lo1.push_back(o1);
+					lower(o2, lo2); lo2.push_back(o2);
+					for (int c1 : lo1) { for (int c2 : lo2) { if (c1 == o1 && c2 == o2) continue; play(t, c1, 1, g, c2, *b); seed = splitmix(seed); if (sameFuture<TW>(L, *a, *b, 8, seed)) { found = true; break; } } if (found) break; }
+				}
+				if (!found && !vBad++) { char bb[160]; snprintf(bb, sizeof bb, "search tick %d variant %s %d: no lower variant plays the same", t, isM1 ? "m1" : "m2", vv); if (firstBad.empty()) firstBad = bb; }
+			}
+		}
+		free(a); free(b);
+	}
+	printf("{\"states\":%llu,\"options\":%llu,\"simulated\":%llu,\"skipped\":%llu,\"violations\":%llu,\"searchVariants\":%llu,\"searchTwins\":%llu,\"searchViolations\":%llu,"
+		"\"tableTwins\":%llu,\"tableVariants\":%llu,\"tableSeconds\":%.2f,\"first\":%s}\n",
+		(unsigned long long)states, (unsigned long long)states * 18, (unsigned long long)sims, (unsigned long long)skipped, (unsigned long long)bad,
+		(unsigned long long)vChecked, (unsigned long long)vTwins, (unsigned long long)vBad, (unsigned long long)twinBits, (unsigned long long)twinTotal, buildSec, jsonStr(firstBad).c_str());
+	free(st); free(tmp); free(w); free(kids);
+	return bad || vBad ? 1 : 0;
+}
+static int cmdTwins(int argc, char** argv) {
+	if (argc < 4) { fprintf(stderr, "usage: eegpu twins <level.bin> <run.eetas> [out.bin] [--every=1] [--walks=0] [--search=0]\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	switch (twFor(B.get("tailWords"))) {
+	case 8: return runTwins<8>(argc, argv, B);
+	case 32: return runTwins<32>(argc, argv, B);
+	case 128: return runTwins<128>(argc, argv, B);
+	case 512: return runTwins<512>(argc, argv, B);
+	}
+	printf("{\"error\":\"level state too large\"}\n");
+	return 3;
+}
+
 static int cmdSearch(int argc, char** argv) {
-	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T]\n"); return 2; }
+	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T] [--twins=1|cpu|0]\n"); return 2; }
 	LevelBlob B = readLevel(argv[2]);
 	std::vector<uint8_t> ref = readMasks(argv[3]);
 	const int tw = twFor(B.get("tailWords"));
@@ -724,6 +961,7 @@ int main(int argc, char** argv) {
 	if (cmd == "bench") return cmdBench(argc, argv);
 	if (cmd == "beam") return cmdBeam(argc, argv);
 	if (cmd == "explore") return cmdExplore(argc, argv);
+	if (cmd == "twins") return cmdTwins(argc, argv);
 	fprintf(stderr, "unknown command %s\n", argv[1]);
 	return 2;
 }

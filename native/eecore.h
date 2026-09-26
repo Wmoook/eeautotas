@@ -257,7 +257,17 @@ template <int TW>
 struct Sim {
 	const Level& L;
 	State<TW>& s;
-	EE_HD Sim(const Level& l, State<TW>& st) : L(l), s(st) {}
+	// Side information of the last tick() for the searches: which input bits could have changed anything. Never read
+	// by the physics, not part of the state or its hash. An unused bit changed only fields that the next tick
+	// overwrites before it reads them (horizontal / vertical, spacedown / spacejustdown / prev_jump_held, last_jump:
+	// every press is a fresh one in replays), so the same tick without that bit gives the same state (search.h
+	// canonOption, the twins of the explore, the beam and the search families; `eegpu twins` checks it).
+	u8 inAxes;    // 6 (L/R) and / or 24 (U/D): the input axes that fed the acceleration (0 when the tick began dead)
+	u8 inJump;    // 1: a jump press could change something (levitation, thrust held, or a jump that can fire)
+	u8 inTimer;   // 1: the run timer had not started, so any input starts it (run_ticks is not hashed but is the time)
+	EE_HD Sim(const Level& l, State<TW>& st) : L(l), s(st), inAxes(30), inJump(1), inTimer(1) {}
+	/** the input bits (1 jump, 6 L/R, 24 U/D) that could have changed anything in the last tick */
+	EE_HD u32 inUsed() const { return inTimer ? 31u : ((u32)inAxes | (u32)inJump); }
 
 	// ---- tiles (the live layer 0 of EESim.tiles: coin cells follow the collected bits)
 	EE_HD bool coinCollected(i32 k) const { return ((s.w[L.offCoin + (k >> 5)] >> (k & 31)) & 1u) != 0; }
@@ -523,6 +533,9 @@ struct Sim {
 		s.prev_jump_held = ij;
 		input.jump_pressed = 0;
 		if (s.is_dead) { s.spacejustdown = 0; s.spacedown = 0; s.horizontal = 0; s.vertical = 0; }
+		const bool inputRead = !s.is_dead;   // (the side flags, see inUsed)
+		inTimer = inputRead && s.run_ticks == 0;
+		inJump = 0;
 
 		bool rotateMo = true, rotateMor = true;
 		i32 morx = 0, mory = 0;
@@ -557,10 +570,11 @@ struct Sim {
 		}
 
 		double mx, my;
-		if ((flag(delayed) & F_LIQUID) != 0) { mx = s.horizontal; my = s.vertical; }
-		else if (ne0(moy)) { mx = s.horizontal; my = 0.0; }
-		else if (ne0(mox)) { mx = 0.0; my = s.vertical; }
-		else { mx = s.horizontal; my = s.vertical; }
+		if ((flag(delayed) & F_LIQUID) != 0) { mx = s.horizontal; my = s.vertical; inAxes = 30; }
+		else if (ne0(moy)) { mx = s.horizontal; my = 0.0; inAxes = 6; }
+		else if (ne0(mox)) { mx = 0.0; my = s.vertical; inAxes = 24; }
+		else { mx = s.horizontal; my = s.vertical; inAxes = 30; }
+		if (!inputRead) inAxes = 0;
 
 		double sm = 1.0;
 		if (s.speed_boost == 1) sm *= 1.5;
@@ -737,6 +751,7 @@ struct Sim {
 		if (!s.is_dead) {
 			double mod = 1.0;
 			bool injump = false;
+			const bool thrusting0 = s.is_thrusting != 0;   // (a held thrust: a press keeps it, no press clears it)
 			if (s.spacejustdown) { s.last_jump = -now; injump = true; mod = -1.0; }
 			if (s.spacedown) {
 				if (s.has_levitation) {
@@ -754,6 +769,8 @@ struct Sim {
 				s.jump_count = 0;
 			}
 			if (s.jump_count == 0 && !grounded) s.jump_count = 1;
+			// (side flag: here a press matters only through levitation, a held thrust or a jump below that can fire)
+			inJump = inputRead && (s.has_levitation || thrusting0 || (s.jump_count < s.max_jumps && ((morx != 0 && ne0(mox)) || (mory != 0 && ne0(moy)))));
 			if (injump && !s.has_levitation) {
 				if (s.jump_count < s.max_jumps && morx != 0 && ne0(mox)) {
 					if (s.max_jumps < 1000) s.jump_count += 1;
