@@ -219,6 +219,15 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (wantNear) { P.goalDist = haveGoal ? (const float*)(uintptr_t)dgoal.p : nullptr; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.reach = reachF;
 	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
+	// --costslack=<tiles>: states the reach field puts more than that farther from the trophy than the start are dropped (the
+	// relay: a 200x200 level's open arrow fields filled its table with states going back the way it came)
+	{
+		const double slack = atof(opt(argc, argv, "costslack", "0").c_str());
+		if (slack > 0 && reachGpu.H.on) {
+			const i32 own0 = reachFifths(reachGpu.H, start->px, start->py, start->speed_y, start->q0, start->q1, start->slippery);
+			if (own0 >= 0) { P.maxFifths = own0 + (i32)(slack * 5.0); printf("{\"ev\":\"costslack\",\"start\":%.1f,\"max\":%.1f}\n", own0 / 5.0, P.maxFifths / 5.0); }
+		}
+	}
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
 	P.salt = strtoull(opt(argc, argv, "salt", "0").c_str(), nullptr, 10);   // --salt=N: another tie-break among a cell's candidates
 	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;

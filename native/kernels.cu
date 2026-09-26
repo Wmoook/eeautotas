@@ -387,6 +387,8 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			const i32 own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
 			// the physics model rules this state out: it cannot reach the trophy (a proof)
 			if (p.prune && own < 0) continue;
+			// (--costslack: a relay goes on from its start, it does not wander back; a heuristic bound, not a proof)
+			if (p.maxFifths > 0 && own > p.maxFifths) continue;
 			rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
 			if (p.closest) {
 				const float ck = own >= 0 ? (float)own / 5.f : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);

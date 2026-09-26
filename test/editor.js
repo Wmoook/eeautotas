@@ -568,6 +568,28 @@ async function passesSection() {
 			!!rl && pfLen === 90 && opts.cqv === '4' && opts.qvy === '4' && str.result && str.result.strategy === 'from the nearest attempt',
 			`relay launch: ${rl ? 'yes' : 'no'}, prefix ${pfLen} inputs, cells ${opts.cqx}/${opts.cqv}/${opts.qy}/${opts.qvy}; ${str.result ? `route ${str.result.ticks} ticks by ${str.result.strategy}` : str.stage}`);
 	}
+	// the relay's plan: a run that ran out of situations (however deep: 500 ticks) goes on from the same point with the next
+	// finer cells (1/4 px/tick speeds, then 1/16), then further back; with its plan used up (the attempt is too short to go
+	// further back) it starts over with the next salt instead of waiting; every run has its cost ceiling
+	{
+		const scR = path.join(HOME, 'relay2.json'), logR = path.join(HOME, 'relay2.log');
+		const ex = { end: 'exhausted', layers: 500, overflow: 0 };
+		fs.writeFileSync(scR, JSON.stringify({ log: logR, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 200, hold: 20000, closest: { dist: 30, tick: 150 } }] },
+			relay: [ex, ex, ex, ex, ex, { end: 'finish', idle: 0, layers: 3 }], beam: null }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, scR], cpu: false, salts: true, relay: true });
+		const t0r = Date.now();
+		let str = ED.state();
+		while (str.running && !str.result && Date.now() - t0r < 30000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }
+		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		const LR = fs.readFileSync(logR, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.some((x) => x.startsWith('--prefix=')));
+		const runs = LR.map((a) => {
+			const o = Object.fromEntries(a.filter((x) => /^--\w+=/.test(x)).map((x) => x.slice(2).split('=')));
+			return `${o.cqx}/${o.cqv}${o.salt ? ` salt ${o.salt}` : ''}${o.costslack ? '' : ' no ceiling'}`;
+		});
+		const want = ['0.5/4', '0.125/16', '0.25/16', '0.5/16', '0.5/4 salt 1', '0.125/16 salt 1'];
+		check('the relay\'s plan: out of situations 500 ticks deep, finer cells from the same point (1/4 then 1/16 px/tick speeds); the plan used up, the next salt (no waiting); a cost ceiling on every run',
+			JSON.stringify(runs) === JSON.stringify(want) && str.result && str.result.strategy === 'from the nearest attempt', `runs ${runs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}`);
+	}
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {
