@@ -43,7 +43,11 @@ async function main() {
 		'-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-nullability-completeness', path.join(NATIVE, 'eegpu.cpp'), '-o', exe],
 		{ stdio: ['ignore', 'inherit', 'inherit'] });
 	for (const f of fs.readdirSync(OUT)) if (f.endsWith('.pdb') || f.endsWith('.lib')) fs.rmSync(path.join(OUT, f), { force: true });
-	// one PTX file per state-tail capacity (the exe loads only the one a level needs), compiled in parallel
+	// one PTX file per state-tail capacity (the exe loads only the one a level needs), compiled in parallel. Sim::tick
+	// stays inlined in every kernel: the out-of-line build (eegpu ptx --def=EE_TICK_NOINLINE) is 1.66 MB of PTX instead of
+	// 7.77 MB, 25 s of NVRTC instead of 198 s and 148 s of first driver compile instead of 229 s (a busy i7-11800H), but
+	// on the RTX 3080 Laptop it ran bench 0.93x, explore expand 0.96x, beam expand 0.95x and search 0.86x (in one process,
+	// launch by launch; the bench processes alternating A/B 0.935x); the first compile happens once per build anyway.
 	console.log('[native] compiling the GPU kernels (NVRTC, 4 state sizes in parallel)...');
 	const TWS = [8, 32, 128, 512];
 	const outs = await Promise.all(TWS.map((tw) => new Promise((res, rej) => {
