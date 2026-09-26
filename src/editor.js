@@ -861,13 +861,21 @@ function launch(n) {
 			save();
 		}
 	};
+	// a chunk of the tool's output (many lines when the app fell behind): of its progress lines ("layer" / "progress",
+	// counters only) just the last one is handled; every other event in order. Handling each of a backlog of progress
+	// lines (the totals and texts per line) blocked the server's thread for 2 s at a time during a search.
 	ch.stdout.on('data', (chunk) => {
 		out += chunk;
-		let k;
-		while ((k = out.indexOf('\n')) >= 0) {
-			const line = out.slice(0, k).trim();
-			out = out.slice(k + 1);
-			if (!line.startsWith('{')) continue;
+		const k = out.lastIndexOf('\n');
+		if (k < 0) return;
+		const lines = out.slice(0, k).split('\n');
+		out = out.slice(k + 1);
+		const isProgress = (l) => l.startsWith('{"ev":"layer"') || l.startsWith('{"ev":"progress"');
+		let lastProgress = -1;
+		for (let i = lines.length - 1; i >= 0; i--) if (isProgress(lines[i].trim())) { lastProgress = i; break; }
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i].trim();
+			if (!line.startsWith('{') || (i !== lastProgress && isProgress(line))) continue;
 			let ev;
 			try { ev = JSON.parse(line); } catch (e) { continue; }
 			onEvent(ev);
