@@ -132,7 +132,9 @@ spawn point; there is one) and the **Trophy** (the finish block), and press **Fi
   line is wrong), next to "every move"; the fastest route wins.
 - Before a search the editor checks the level: a start, a trophy, and an open way between them (a walled-in trophy is
   refused at once). If no route is found in time, it says so; try a longer search, more states per tick, or a guide
-  line.
+  line. Either way it shows the **closest attempt** (orange on the map): the one that got nearest the trophy, measured
+  along the ways the ball could walk (around walls, never through spikes or other deadly blocks). **Preview here**
+  plays it; you can download its `.eetas` too, even when you stop the search early.
 - The level is saved in your browser as you edit. **Export .eelvl** saves a file EE Offline opens; **Import .eelvl**
   opens any level (read exactly like EEO reads it).
 

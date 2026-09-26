@@ -146,6 +146,7 @@ __device__ void beamExpandBody(const BeamParams& p) {
 	if (pi >= p.nParents) return;
 	const State<TW>* par = (const State<TW>*)(p.parents + (size_t)pi * p.stateBytes);
 	const bool crown0 = par->has_silver_crown != 0;
+	u64 nearest = ~0ull;   // the closest child to the trophy (goal distance, parent, option)
 	for (i32 o = 0; o < 18; o++) {
 		State<TW> s = *par;
 		Sim<TW> sim(p.L, s);
@@ -173,7 +174,12 @@ __device__ void beamExpandBody(const BeamParams& p) {
 					if (r >= 0) sc = p.lineLen + 64.f + runMatchScore(p, r, (float)s.px, (float)s.py, (float)s.speed_x, (float)s.speed_y);
 				}
 			}
-			if (p.goalWeight > 0) sc -= p.goalWeight * goalScore(p, p.L, cx, cy);
+			if (p.goalWeight > 0 || p.closest) {
+				const float gd = goalScore(p, p.L, cx, cy);
+				if (p.goalWeight > 0) sc -= p.goalWeight * gd;
+				const u64 k = ((u64)orderedScore(gd) << 32) | ((u32)pi << 5) | (u32)o;
+				if (k < nearest) nearest = k;
+			}
 			c.score = sc;
 			c.hash = sim.hash(p.nocoins != 0);
 			if (p.htMask) {
@@ -188,6 +194,7 @@ __device__ void beamExpandBody(const BeamParams& p) {
 		}
 		p.out[(size_t)pi * 18 + o] = c;
 	}
+	if (p.closest && nearest < *(volatile unsigned long long*)p.closest) atomicMin(p.closest, (unsigned long long)nearest);
 }
 // materialize: one thread per kept child: parent + option -> the next layer's state
 template <int TW>
@@ -271,6 +278,7 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 	const i32 pi = blockIdx.x * blockDim.x + threadIdx.x;
 	if (pi >= p.nParents) return;
 	const State<TW>* par = (const State<TW>*)(p.parents + (size_t)pi * p.stateBytes);
+	u64 nearest = ~0ull;   // the closest child to the trophy (goal distance, parent, option)
 	for (i32 o = 0; o < 18; o++) {
 		State<TW> s = *par;
 		Sim<TW> sim(p.L, s);
@@ -280,6 +288,10 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 		if (s.broken || s.is_dead) continue;
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
+		if (p.closest) {
+			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
+			if (k < nearest) nearest = k;
+		}
 		if (p.target == 2) {   // ahead of the run: a hit when the run reaches this tile only minGain+ ticks later
 			const i32 r = p.refTile[cy * p.L.W + cx], now = p.fromTick + p.layer + 1;
 			if (r >= 0 && r < now - p.slack) continue;   // behind the run's schedule: drop
@@ -338,6 +350,7 @@ __device__ void exploreExpandBody(const ExploreParams& p) {
 		const u32 slot = atomicAdd(p.nOut, 1u);
 		if (slot < p.outCap) p.out[slot] = ((u32)pi << 5) | (u32)o;
 	}
+	if (p.closest && nearest < *(volatile unsigned long long*)p.closest) atomicMin(p.closest, (unsigned long long)nearest);
 }
 template <int TW>
 __device__ void exploreMaterializeBody(const ExploreParams& p) {

@@ -10,6 +10,61 @@
 #include <queue>
 #include <unordered_map>
 
+
+/** The goal distance field: the walking distance in tiles (8-way, no corner cutting) to a finish block (121) over tiles
+ *  that are not static solid blocks (doors, one-ways and half blocks count as open) and do not kill (spikes, fire,
+ *  toxic: the box centre can never be there, so "next to the trophy, under spikes" is not close). -1 = cut off.
+ *  It only steers the search and names the closest attempt. False when the level has no finish block. */
+static bool goalField(const Level& L, std::vector<float>& goalDist) {
+	goalDist.assign((size_t)L.N, -1.f);
+	typedef std::pair<float, int> QE;
+	std::priority_queue<QE, std::vector<QE>, std::greater<QE>> q;
+	for (int i = 0; i < L.N; i++) if (L.fg[i] == 121) { goalDist[i] = 0; q.push({ 0.f, i }); }
+	if (q.empty()) return false;
+	auto open = [&](int i) {
+		const int id = L.fg[i];
+		const bool known = id >= 0 && id < L.nFlags;
+		const u8 fl = known ? L.flags[id] : 0;
+		if (known && (L.gFlags[id] & 4) != 0) return false;   // kills
+		return (fl & F_SOLID) == 0 || (fl & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) != 0;
+	};
+	while (!q.empty()) {
+		QE e = q.top(); q.pop();
+		if (e.first > goalDist[e.second] + 1e-4f) continue;
+		const int x = e.second % L.W, y = e.second / L.W;
+		for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+			if (!dx && !dy) continue;
+			const int nx = x + dx, ny = y + dy;
+			if (nx < 0 || ny < 0 || nx >= L.W || ny >= L.H) continue;
+			const int j = ny * L.W + nx;
+			if (!open(j)) continue;
+			if (dx && dy && (!open(y * L.W + nx) || !open(ny * L.W + x))) continue;   // no corner cutting
+			const float nd = e.first + (dx && dy ? 1.4142f : 1.f);
+			if (goalDist[j] < 0 || nd < goalDist[j]) { goalDist[j] = nd; q.push({ nd, j }); }
+		}
+	}
+	return true;
+}
+
+/** The closest attempt of a search: the state nearest the trophy so far (goal field), printed as
+ *  {"ev":"closest","dist":tiles,"tick":T,"inputs":...} when it improves, at most every 0.5 s (and at the end). */
+struct Closest {
+	float dist = 1e30f; int layer = -1; uint32_t pk = 0; bool pending = false; double printed = -10;
+	/** after layer d's expand: the GPU's per-layer minimum (~0 = none) */
+	void take(unsigned long long cl, int d) {
+		if (cl == ~0ull) return;
+		const float dd = scoreFromOrdered((u32)(cl >> 32));
+		if (dd < dist - 1e-3f) { dist = dd; layer = d; pk = (u32)cl; pending = true; }
+	}
+	template <class F> void print(double now, bool force, const std::string& prefix, int from0, F inputsOf) {
+		if (!pending || (!force && now - printed < 0.5)) return;
+		const std::string in = prefix + inputsOf(layer, pk >> 5, (int)(pk & 31));
+		printf("{\"ev\":\"closest\",\"dist\":%.3f,\"tick\":%d,\"inputs\":\"%s\"}\n", dist, from0 + (int)in.size(), in.c_str());
+		fflush(stdout);
+		pending = false; printed = now;
+	}
+};
+
 template <int TW>
 static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	typedef State<TW> S;
@@ -131,36 +186,8 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		printf("{\"ev\":\"rejoinMode\",\"startTick\":%d,\"runTickHere\":%d}\n", from, refFrom);
 	}
 	const int depthLimit = refFrom >= 0 ? std::min(depthMax, refFrom - from + 600) : depthMax;
-	// ---- the goal distance field: walking distance in tiles to a finish block (121) over tiles that are not static
-	// solid blocks (doors, one-ways and half blocks count as open; it only steers the search)
 	std::vector<float> goalDist;
-	if (goal) {
-		goalDist.assign((size_t)L.N, -1.f);
-		typedef std::pair<float, int> QE;
-		std::priority_queue<QE, std::vector<QE>, std::greater<QE>> q;
-		for (int i = 0; i < L.N; i++) if (L.fg[i] == 121) { goalDist[i] = 0; q.push({ 0.f, i }); }
-		if (q.empty()) { printf("{\"error\":\"the level has no finish block (the trophy, block 121)\"}\n"); return 3; }
-		auto open = [&](int i) {
-			const int id = L.fg[i];
-			const u8 fl = (id >= 0 && id < L.nFlags) ? L.flags[id] : 0;
-			return (fl & F_SOLID) == 0 || (fl & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) != 0;
-		};
-		while (!q.empty()) {
-			QE e = q.top(); q.pop();
-			if (e.first > goalDist[e.second] + 1e-4f) continue;
-			const int x = e.second % L.W, y = e.second / L.W;
-			for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
-				if (!dx && !dy) continue;
-				const int nx = x + dx, ny = y + dy;
-				if (nx < 0 || ny < 0 || nx >= L.W || ny >= L.H) continue;
-				const int j = ny * L.W + nx;
-				if (!open(j)) continue;
-				if (dx && dy && (!open(y * L.W + nx) || !open(ny * L.W + x))) continue;   // no corner cutting
-				const float nd = e.first + (dx && dy ? 1.4142f : 1.f);
-				if (goalDist[j] < 0 || nd < goalDist[j]) { goalDist[j] = nd; q.push({ nd, j }); }
-			}
-		}
-	}
+	if (goal && !goalField(L, goalDist)) { printf("{\"error\":\"the level has no finish block (the trophy, block 121)\"}\n"); return 3; }
 	(void)from0;
 	if (gx.size() < 2 && !goal && refPath.empty()) { printf("{\"error\":\"give a guide line, a goal, or a reference run\"}\n"); return 3; }
 
@@ -194,6 +221,11 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	Q.kids = (const BeamChild*)(uintptr_t)dout.p; Q.hKeys = (u64*)(uintptr_t)dhK.p; Q.hBest = (u64*)(uintptr_t)dhB.p; Q.hMask = hCap - 1;
 	Q.slot = (u32*)(uintptr_t)dslot.p; Q.win = (u8*)(uintptr_t)dwin.p; Q.mm = (u32*)(uintptr_t)dmm.p; Q.hist = (u32*)(uintptr_t)dhist.p; Q.nBins = NBINS;
 	Q.bucketCnt = (u32*)(uintptr_t)dbc.p; Q.bucketCap = bucketCap; Q.pick = (u32*)(uintptr_t)dpick.p; Q.nPick = (u32*)(uintptr_t)dnpick.p; Q.K = (u32)K;
+	cu::Buf dclose;
+	if (!goalDist.empty()) {
+		if (!dclose.alloc(8)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	}
+	Closest nearest;
 	Q.over = (u32*)(uintptr_t)dover.p; Q.nOver = (u32*)(uintptr_t)dnover.p; Q.overCap = maxKids; Q.res = (u32*)(uintptr_t)dres.p; Q.nRes = (u32*)(uintptr_t)dnres.p; Q.resCap = resCap;
 	BeamParams P;
 	memset(&P, 0, sizeof P);
@@ -209,6 +241,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	P.nRef = (i32)fX.size();
 	P.out = (BeamChild*)(uintptr_t)dout.p;
 	P.pick = (const u32*)(uintptr_t)dpick.p;
+	if (!goalDist.empty()) P.closest = (unsigned long long*)(uintptr_t)dclose.p;
 
 	std::vector<std::vector<uint32_t>> lineage;   // per layer: kept children as (parent << 5 | option)
 	std::vector<BeamChild> kids;
@@ -244,11 +277,18 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	int d = 0;
 	for (; d < depthLimit && elapsed() < seconds && nParents > 0; d++) {
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layerTick = from + d;
+		if (P.closest) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
 		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) {
 			printf("{\"error\":\"beam expand failed\"}\n"); return 5;
 		}
 		ticks += (uint64_t)nParents * 18;
+		if (P.closest) {
+			unsigned long long cl = ~0ull;
+			cu::cuMemcpyDtoH_v2(&cl, dclose.p, 8);
+			nearest.take(cl, d);
+			nearest.print(elapsed(), false, prefix, from0, inputsOf);
+		}
 		const uint32_t nKids = (uint32_t)nParents * 18;
 		const unsigned kb = (nKids + 255) / 256;
 		Q.nKids = (i32)nKids;
@@ -351,6 +391,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 			fflush(stdout);
 		}
 	}
+	if (finishLayer < 0) nearest.print(elapsed(), true, prefix, from0, inputsOf);
 	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"bestSaving\":%d,\"finish\":%d}\n",
 		g.json().c_str(), d, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), bestSaving, finishLayer);
 	free(start);

@@ -327,6 +327,14 @@ async function gpuSection() {
 	cells.push([16, 6, 43, 1], [21, 6, 121], [8, 6, 255], [2, 6, 100]);
 	r = await solve('coin door', 24, 8, cells, 20);
 	check('a coin door: the route takes the coin behind the start first, and finishes in the JS engine', r.ok && r.ev.coins >= 1, r.text);
+	// no route (the trophy on a ledge too high to jump to): the closest attempt is kept, with its path and .eetas
+	cells = room(20, 10);
+	for (let x = 8; x <= 12; x++) cells.push([x, 3, 9]);
+	cells.push([10, 2, 121], [3, 8, 255]);
+	r = await solve('too high', 20, 10, cells, 6);
+	const cl = r.st.closest;
+	check('no route: "not found", with the closest attempt (walking distance, its path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && cl && cl.tiles > 0 && cl.tiles < 8 &&
+		cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy})` : `${r.st.stage}: no closest attempt`);
 }
 
 (async () => {

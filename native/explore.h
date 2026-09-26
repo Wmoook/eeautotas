@@ -42,6 +42,8 @@ struct ExploreParams {
 	const i32* refTile; i32 fromTick, minGain, slack, minAhead;
 	i32* tileBest;                     // target 2: the best gain recorded per tile (a hit only when it improves)
 	const float* rX; const float* rY; const float* rVX; const float* rVY; i32 nRef; float maxDist;   // the run's states
+	const float* goalDist;             // the goal field (tiles to the trophy; beamhost.h goalField), for the closest attempt
+	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 };
 
 /** fine: px / vx resolution where corner clips can still happen; coarse (coarseRow and below): px x cqx, vx x cqv */

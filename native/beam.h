@@ -42,6 +42,7 @@ struct BeamParams {
 	const i32* refTile; i32 refFrom; float lineLen;
 	// the run's per-tick position and speed (float; for the closeness score), n + 1 entries
 	const float* rX; const float* rY; const float* rSX; const float* rSY; i32 nRef;
+	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 };
 
 /** Past the guide: the best "closeness" to a state of the run on this tile, favouring later ticks: states that are
@@ -73,8 +74,9 @@ EE_HD float guideScore(const BeamParams& p, float cx, float cy) {
 	}
 	return prog - p.guideWeight * bestD;
 }
-/** Walking distance to the goal, bilinear between tile centres (lower = closer; 1e6 where unreachable). */
-EE_HD float goalScore(const BeamParams& p, const Level& L, float cx, float cy) {
+/** Walking distance to the goal (gd: the goal field, tiles), bilinear between tile centres (lower = closer; 1e6 where
+ *  unreachable). */
+EE_HD float goalDistAt(const float* gd, const Level& L, float cx, float cy) {
 	const float fx = cx / 16.f - 0.5f, fy = cy / 16.f - 0.5f;
 	i32 x0 = (i32)floorf(fx), y0 = (i32)floorf(fy);
 	const float ax = fx - x0, ay = fy - y0;
@@ -82,13 +84,14 @@ EE_HD float goalScore(const BeamParams& p, const Level& L, float cx, float cy) {
 	for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
 		const i32 x = x0 + dx, y = y0 + dy;
 		if (x < 0 || y < 0 || x >= L.W || y >= L.H) continue;
-		const float d = p.goalDist[y * L.W + x];
+		const float d = gd[y * L.W + x];
 		if (d < 0) continue;
 		const float k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
 		v += k * d; w += k;
 	}
 	return w > 1e-6f ? v / w : 1e6f;
 }
+EE_HD float goalScore(const BeamParams& p, const Level& L, float cx, float cy) { return goalDistAt(p.goalDist, L, cx, cy); }
 
 /** The per-layer selection on the GPU, the same as walking the children by score: dedupe by state hash (the best score
  *  wins), a histogram of the winners' scores, then rounds of picks from the best bins down (a few bins per round; the

@@ -5,12 +5,15 @@
 // - the editor's level JSON <-> .eelvl bytes (src/eelvl.js writeEelvl / readEelvl), so the file EE Offline opens is
 //   exactly the level the search ran on;
 // - block info for the palette (names, kinds, EE minimap colors, argument kinds);
-// - the checks before a search (a start, a trophy, an open way to it) and the search itself: `eegpu beam <level.bin>
-//   --finish=1` (native/explorehost.h: from the level start, every input every tick, near-identical states merged, so
-//   the first tick with a finish is the fastest route) next to `eegpu beam --goal=1` (native/beamhost.h: the states
-//   closest to the trophy kept; with a guide line a second beam follows the line; see STRATEGIES). Every route is
-//   replayed in the exact JS engine (common.js evaluate) before it is shown. One search at a time; its state is in memory and in <data>/editor/solve.json (with level.eelvl, level.bin,
-//   guide.txt and route.eetas next to it).
+// - the checks before a search (a start, a trophy, an open way to it) and the search itself: `eegpu explore
+//   <level.bin> - --finish=1` (native/explorehost.h: from the level start, every input every tick, near-identical
+//   states merged, so the first tick with a finish is the fastest route) next to `eegpu beam --goal=1`
+//   (native/beamhost.h: the states closest to the trophy kept; with a guide line a second beam follows the line; see
+//   STRATEGIES). Every route is replayed in the exact JS engine (common.js evaluate) before it is shown. Both tools
+//   also report their closest attempt (the state nearest the trophy by walking distance around walls and deadly
+//   tiles, beamhost.h goalField); the nearest one is kept (closest.eetas), so a search that finds no route still shows
+//   how far it got. One search at a time; its state is in memory and in <data>/editor/solve.json (with level.eelvl,
+//   level.bin, guide.txt, route.eetas and closest.eetas next to it).
 //
 // The editor's level JSON: { name, width, height, gravity (1), bgColor (ARGB, 0 = none), owner, description,
 //   cells: [[x, y, id, ...args], ...] (the foreground, empty cells left out), bg: [[x, y, id, ...args], ...] }
@@ -321,7 +324,7 @@ function start(b, gpu) {
 	S = { running: true, stage: 'starting', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
 		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
-		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, message: '', log: [],
+		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [],
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, state: 'starting', layer: 0, states: 0, ticksPerSec: 0, found: null, error: null,
 			pass: 0, passes: 1, detail: '' })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}, ${width} states per tick, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
@@ -362,6 +365,8 @@ function launch(n) {
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			found(ev.inputs, n);
+		} else if (ev.ev === 'closest') {
+			closer(ev, n);
 		} else if (ev.ev === 'hit') {
 			// the exploration's finishes: all in its last layer (equally many ticks); a few are enough (the timer start
 			// can differ)
@@ -476,6 +481,22 @@ function found(inputs, n, more) {
 	});
 	save();
 }
+/** a strategy's closest attempt (ev: {dist (tiles to the trophy), tick, inputs}): kept when it is the nearest so far
+ *  (or as near and shorter), replayed in the JS engine for its path */
+function closer(ev, n) {
+	if (!cur) return;
+	const dist = +ev.dist, old = S.closest;
+	if (!Number.isFinite(dist) || dist >= 1e5 || (old && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks)))) return;
+	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
+	if (!masks.length) return;
+	const tr = C.replay(cur.level, masks, { trace: true });
+	const pathPts = [];
+	for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
+	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
+	S.closest = { dist, tiles: Math.round(dist * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10 };
+	save();
+}
 /** stops the running search (a route found so far stays) */
 function stop() {
 	if (!running()) return state();
@@ -485,14 +506,16 @@ function stop() {
 	save();
 	return state();
 }
-/** the last search's files: 'route.eetas' (when a route was found) or 'level.eelvl'; null when missing */
+/** the last search's files: 'route.eetas' (when a route was found), 'closest.eetas' (its closest attempt) or
+ *  'level.eelvl'; null when missing */
 function solveFile(what) {
-	if (what !== 'route.eetas' && what !== 'level.eelvl') return null;
+	if (what !== 'route.eetas' && what !== 'level.eelvl' && what !== 'closest.eetas') return null;
 	const st = state();
 	if (what === 'route.eetas' && !st.result) return null;
+	if (what === 'closest.eetas' && !st.closest) return null;
 	const f = path.join(dir(), what);
 	if (!fs.existsSync(f)) return null;
-	const nice = `${safeName(st.name)}${what === 'route.eetas' ? ` route ${st.result.time.replace(':', 'm')}.eetas` : '.eelvl'}`;
+	const nice = `${safeName(st.name)}${what === 'route.eetas' ? ` route ${st.result.time.replace(':', 'm')}.eetas` : what === 'closest.eetas' ? ' closest attempt.eetas' : '.eelvl'}`;
 	return { file: f, name: nice };
 }
 

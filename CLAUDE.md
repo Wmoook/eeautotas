@@ -275,7 +275,7 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 | POST | `/api/editor/parse` | `{eelvlB64}` -> the editor's level JSON (read like EEO: the Lookup's numbers and portals) |
 | POST | `/api/editor/check` | `{eelvlB64}` or `{level}` -> `problems` [{code: spawn / trophy / unreachable, text}], `notes`, `start`, `trophies`, `reach` (open / portals / none), `gpu` |
 | POST | `/api/editor/solve` | `{eelvlB64, guide: [[x, y], ...] (px, ball centre), seconds (60), width (32768)}`: the GPU route search in the background, one at a time; 400 with `problems` when the level is not ready |
-| GET | `/api/editor/solve` | `running`, `stage` (searching / found / not found / stopped / error), `tick`, `ticksPerSec`, `strategies` [{label, state, layer, found}], `result` {time, runTicks, ticks, inputs ('0'+mask chars), path [[x, y] per tick], strategy}, `message`; `POST .../stop`; `GET .../route.eetas`, `.../level.eelvl` |
+| GET | `/api/editor/solve` | `running`, `stage` (searching / found / not found / stopped / error), `tick`, `ticksPerSec`, `strategies` [{label, state, layer, found}], `result` {time, runTicks, ticks, inputs ('0'+mask chars), path [[x, y] per tick], strategy}, `closest` (no route yet: the attempt nearest the trophy by walking distance around walls and deadly tiles: {dist, tiles, ticks, time, inputs, path, strategy}), `message`; `POST .../stop`; `GET .../route.eetas`, `.../closest.eetas`, `.../level.eelvl` |
 | POST | `/api/editor/job` | `{eelvlB64, eetasB64, name, start, processor}`: `jobs.importJob` (start mode reset; one spawn) and optionally start (GPU when available) |
 
 ## 10. Scripting against the engine

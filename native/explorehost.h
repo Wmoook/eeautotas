@@ -89,6 +89,12 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	const bool finishTarget = opt(argc, argv, "finish", "0") == "1";
 	int finishLayer = -1;
+	// the closest attempt (the route search): the goal field on the GPU, the per-layer minimum
+	std::vector<float> goalDist;
+	cu::Buf dgoal, dclose;
+	Closest nearest;
+	const bool wantNear = finishTarget && goalField(L, goalDist);
+	if (wantNear && (!dgoal.upload(goalDist.data(), 4 * goalDist.size()) || !dclose.alloc(8))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
 	cu::cuMemsetD8_v2(dnhits.p, 0, 4);
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
@@ -107,6 +113,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.qy = atof(opt(argc, argv, "qy", "0").c_str()); P.qvy = atof(opt(argc, argv, "qvy", "0").c_str());
 	P.cqx = atof(opt(argc, argv, "cqx", "0.5").c_str()); P.cqv = atof(opt(argc, argv, "cqv", "16").c_str());
 	if (finishTarget) P.target = 3;
+	if (wantNear) { P.goalDist = (const float*)(uintptr_t)dgoal.p; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
 	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;
 	cu::Buf drt, dtb, drx, dry, drvx, drvy;
@@ -139,9 +146,16 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	for (; d < depthMax && nParents > 0 && elapsed() < seconds; d++) {
 		cu::cuMemsetD8_v2(dnout.p, 0, 4);
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layer = d;
+		if (wantNear) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
 		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore expand failed\"}\n"); return 5; }
 		ticks += (uint64_t)nParents * 18;
+		if (wantNear) {
+			unsigned long long cl = ~0ull;
+			cu::cuMemcpyDtoH_v2(&cl, dclose.p, 8);
+			nearest.take(cl, d);
+			nearest.print(elapsed(), false, prefixStr, from0, inputsOf);
+		}
 		uint32_t nOut = 0, nh = 0;
 		cu::cuMemcpyDtoH_v2(&nOut, dnout.p, 4);
 		cu::cuMemcpyDtoH_v2(&nh, dnhits.p, 4);
@@ -176,6 +190,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			d + 1, from + d + 1, nOut, kept, (unsigned long long)totalStates, hitsSeen, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (double)totalStates / (cellCount / 2));
 		fflush(stdout);
 	}
+	if (finishLayer < 0) nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
 	const char* why = finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
 	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"cellLog\":%u,\"cap\":%d}\n",
 		g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why, cellLog, cap);
