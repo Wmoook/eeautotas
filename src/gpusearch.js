@@ -120,6 +120,19 @@ function quit(code) {
 const EEGPU_OPTS = () => [`--stopfile=${STOPFILE}`, `--parent=${process.pid}`];
 /** a new eegpu run: no stop request left over */
 const clearStop = () => { try { fs.unlinkSync(STOPFILE); } catch (e) { /* none */ } };
+// Find a route has the GPU first: while the editor's search runs (its marker <data>/editor/busy, touched every few
+// seconds, is fresh), the running eegpu is asked to stop between two launches and no new one starts; a stopped run is
+// a normal, shorter run (its done line and edges come as usual)
+const EDITOR_BUSY = path.join(C.DATA, 'editor', 'busy');
+const editorBusy = () => { try { return Date.now() - fs.statSync(EDITOR_BUSY).mtimeMs < 15000; } catch (e) { return false; } };
+setInterval(() => { if (child && child.exitCode === null && editorBusy()) { try { fs.writeFileSync(STOPFILE, 'yield'); } catch (e) { /* it ends within its --seconds */ } } }, 1000).unref();
+async function yieldToEditor() {
+	if (!editorBusy()) return;
+	log('GPU: Find a route is running: the GPU searcher waits for it');
+	status({ state: 'waiting', ticksPerSec: 0 });
+	while (editorBusy() && !quitting) await new Promise((r) => setTimeout(r, 2000));
+	log('GPU: Find a route is done: searching again');
+}
 process.on('SIGINT', () => quit(0));
 process.on('SIGTERM', () => quit(0));
 if (PARENT) setInterval(() => { try { process.kill(PARENT, 0); } catch (e) { quit(0); } }, 2000).unref();
@@ -674,6 +687,7 @@ async function main() {
 	await offer('saved library and known runs');
 	let round = 0;
 	for (;;) {
+		await yieldToEditor();
 		round++;
 		// every other round: every move along the run (not the first: the systematic families go first)
 		if ((EVERY_ON && round % 2 === 0) || args.everyOnly) {
@@ -695,6 +709,7 @@ async function main() {
 			while (!error && state.left[slot] > 0) {
 				const left = (until - Date.now()) / 1000;
 				if (left < MIN_SLICE) break;
+				if (editorBusy()) break;   // (Find a route: this round ends early)
 				await refresh();
 				const r = await invoke(slot, left);
 				if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; break; }

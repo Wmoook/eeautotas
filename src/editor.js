@@ -551,6 +551,7 @@ function start(b, gpu, test) {
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
 	// strategies
 	building = true;
+	markBusy();
 	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
 	ready.then(([rf, toolWhy]) => launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide), (e) => {
 		building = false;
@@ -928,8 +929,18 @@ function gpuFailed(n) {
 	note(`the GPU failed: the GPU searches stop${S.strategies.some((q) => q.cpu) ? ' (the CPU search goes on)' : ''}; search again in a minute or two (a hot GPU slows down)`);
 }
 /** all strategies have ended: the verdict */
+// Find a route has the GPU first: <data>/editor/busy is touched every 5 s while a search runs (a job's GPU searcher,
+// src/gpusearch.js, stops its eegpu between two launches and waits while it is fresh) and removed when none runs
+let busyTimer = null;
+function markBusy() {
+	const f = path.join(dir(), 'busy'), on = running();
+	try { if (on) { fs.mkdirSync(dir(), { recursive: true }); fs.writeFileSync(f, String(Date.now())); } else fs.unlinkSync(f); } catch (e) { /* none */ }
+	if (on && !busyTimer) { busyTimer = setInterval(markBusy, 5000); busyTimer.unref(); }
+	if (!on && busyTimer) { clearInterval(busyTimer); busyTimer = null; }
+}
 function finish() {
 	S.running = false;
+	setImmediate(markBusy);
 	S.elapsed = (Date.now() - S.started) / 1000;
 	S.searchElapsed = searchClock(Date.now());
 	// (the first search after an update: the GPU engine's start took a while; the search time did not count it)
