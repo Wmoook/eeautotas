@@ -293,18 +293,29 @@ function passCells(p) {
 const passGrain = (p) => ({ '-2': '8 px and 1/16 px/tick', '-1': '4 px and 1/16 px/tick', 0: '2 px and 1/16 px/tick', 1: '1 px and 1/32 px/tick', 2: '1/2 px and 1/64 px/tick, heights exact' })[p];
 /**
  * The exploration's next pass after pass p ended `how` (null = none): 'full' (its visited-cell table filled) or
- * 'time' (its share of the time ran out) -> the coarser pass; 'exhausted' (every situation tried), 'finish' (a route),
- * 'depth' or 'beaten' (no route faster than the known one got to) -> the finer pass. ends: how the earlier passes ended
- * ({pass: {how, seconds, layer}}); a pass does not run twice (it would find the same), except one that ran out of its
- * share of the time, when more time is left now and it had not already searched as deep as a faster route would be.
- * routeTicks: the fastest route's ticks (0 = none yet); left: the seconds left.
+ * 'time' (its share of the time ran out) -> the coarser pass (none left: the finer one again, if it ran out of its
+ * share); 'exhausted' (every situation tried), 'finish' (a route), 'depth' or 'beaten' (no route faster than the known
+ * one got to) -> the finer pass. ends: how the earlier passes ended ({pass: {how, seconds, layer}}); a pass does not run
+ * twice (it would find the same), except one that ran out of its share of the time, when more time is left now and it
+ * had not already searched as deep as a faster route would be. With a route known, a finer pass that already ended
+ * without a faster one is passed over for the next finer one, unless it filled its table or used up its time short of
+ * that depth (a finer one would too, sooner). routeTicks: the fastest route's ticks (0 = none yet); left: the seconds left.
  */
 function nextPass(p, how, ends, routeTicks, left) {
 	if (routeTicks && routeTicks <= 1) return null;
-	const q = how === 'full' || how === 'time' ? p - 1 : how === 'exhausted' || how === 'finish' || how === 'beaten' || (how === 'depth' && routeTicks) ? p + 1 : null;
-	if (q === null || q < PASS_MIN || q > PASS_MAX) return null;
-	const e = ends[q];
-	return !e || (e.how === 'time' && left > e.seconds + 1 && !(routeTicks && e.layer >= routeTicks - 1)) ? q : null;
+	const again = (e) => e.how === 'time' && left > e.seconds + 1 && !(routeTicks && e.layer >= routeTicks - 1);
+	if (how === 'full' || how === 'time') {
+		const e = ends[p - 1], f = ends[p + 1];
+		if (p - 1 >= PASS_MIN && (!e || again(e))) return p - 1;
+		return p + 1 <= PASS_MAX && f && again(f) ? p + 1 : null;
+	}
+	if (!(how === 'exhausted' || how === 'finish' || how === 'beaten' || (how === 'depth' && routeTicks))) return null;
+	for (let q = p + 1; q <= PASS_MAX; q++) {
+		const e = ends[q];
+		if (!e || again(e)) return q;
+		if (!routeTicks || ((e.how === 'full' || e.how === 'time') && e.layer < routeTicks - 1)) return null;
+	}
+	return null;
 }
 /** the seconds pass p gets (left: what is left of the search): while a coarser pass is untried, a share (a third, at
  *  least 20 s), so that the coarser pass gets the rest if this one is slow; else all of it */

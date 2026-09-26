@@ -1531,7 +1531,7 @@ function renderSolve() {
 			// (every move with a route known: another pass looks for a faster one, up to one tick less than the route)
 			const refining = (q) => q.key === 'explore' && q.depthCap > 0 && (q.state === 'running' || q.state === 'starting');
 			const what = (q) => (refining(q) ? `${q.found ? `route ${esc(q.found.time)} · ` : ''}looking for a faster one: tick ${q.layer.toLocaleString('en-US')} of ${q.depthCap.toLocaleString('en-US')}`
-				: q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : 'no route')
+				: q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : q.depthCap > 0 ? 'no faster route' : 'no route')
 				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? 'starting…' : `tick ${q.layer.toLocaleString('en-US')}`);
 			const more = (q) => (q.key === 'explore' ? (q.state === 'running' && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
 			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
@@ -1569,14 +1569,16 @@ function renderSolve() {
 		$('rPlay').onclick = () => { VW.play = VW.play ? null : { t0: performance.now() }; if (!VW.play) toolInfo(); renderSolve(); VW.dirty = true; };
 		$('rEetas').onclick = () => { location.href = '/api/editor/solve/route.eetas'; };
 		$('rEelvl').onclick = () => { location.href = '/api/editor/solve/level.eelvl'; };
-		const j = SOLVE.jobs[st.started];
+		const j = SOLVE.jobs[routeKey(st)];
 		if (j && j.started) { $('rOpt').textContent = 'Open the run →'; $('rOpt').className = 'primary'; }
 	}
 	VW.dirty = true;
 }
+/** the key of the run made from a search's route in SOLVE.jobs: per route, as the search keeps finding faster ones */
+function routeKey(st) { return `${st.started}:${st.result.runTicks}:${st.result.ticks}`; }
 /** the found route as a job (the run viewer / the optimizer): POST /api/editor/job with the search's level and route */
 async function routeJob(optimize) {
-	const st = SOLVE.st, key = st.started;
+	const st = SOLVE.st, key = routeKey(st);
 	const known = SOLVE.jobs[key];
 	const win = !optimize ? window.open('', '_blank') : null;
 	const go = (url) => { if (win) win.location.href = url; else location.href = url; };

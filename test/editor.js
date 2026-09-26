@@ -334,10 +334,15 @@ async function passesSection() {
 	const nx = [
 		[ED.nextPass(-1, 'full', {}, 0, 50), -2], [ED.nextPass(-1, 'time', {}, 0, 50), -2], [ED.nextPass(-2, 'full', {}, 0, 50), null], [ED.nextPass(-1, 'exhausted', {}, 0, 50), 0],
 		[ED.nextPass(2, 'exhausted', {}, 0, 50), null], [ED.nextPass(-2, 'exhausted', { '-1': { how: 'full' } }, 0, 50), null],
-		[ED.nextPass(-2, 'exhausted', { '-1': T }, 0, 50), -1], [ED.nextPass(-2, 'exhausted', { '-1': T }, 0, 15), null], [ED.nextPass(-2, 'finish', { '-1': T }, 25, 50), null],
+		[ED.nextPass(-2, 'exhausted', { '-1': T }, 0, 50), -1], [ED.nextPass(-2, 'exhausted', { '-1': T }, 0, 15), null], [ED.nextPass(-2, 'finish', { '-1': T }, 25, 50), 0],
 		[ED.nextPass(-2, 'finish', { '-1': T }, 90, 50), -1], [ED.nextPass(0, 'depth', {}, 0, 50), null], [ED.nextPass(0, 'depth', {}, 100, 50), 1], [ED.nextPass(-1, 'finish', {}, 100, 50), 0],
 		[ED.nextPass(0, 'beaten', {}, 100, 50), 1], [ED.nextPass(0, 'full', { '-1': { how: 'finish' } }, 100, 50), null], [ED.nextPass(0, 'finish', {}, 1, 50), null],
-		[ED.nextPass(0, 'exhausted', { 1: { how: 'exhausted' } }, 0, 50), null]];
+		[ED.nextPass(0, 'exhausted', { 1: { how: 'exhausted' } }, 0, 50), null],
+		// with a route: a finer pass that ended without a faster one is passed over, unless it filled up short of the depth
+		[ED.nextPass(-2, 'finish', { '-1': { how: 'full', layer: 60 } }, 40, 50), 0], [ED.nextPass(-2, 'finish', { '-1': { how: 'full', layer: 20 } }, 40, 50), null],
+		[ED.nextPass(-2, 'finish', { '-1': { how: 'full', layer: 60 }, 0: { how: 'exhausted', layer: 30 } }, 40, 50), 1],
+		// the coarsest pass fills up: the finer one that ran out of its share again, with all the time left
+		[ED.nextPass(-2, 'full', { '-1': T }, 0, 50), -1], [ED.nextPass(-2, 'full', { '-1': T }, 0, 15), null]];
 	check('the next pass: coarser after a full table or a used-up share, finer after every situation or a route; a pass never twice (one that ran out of time again only with more time, and not when it already searched deep enough)',
 		nx.every(([a, b]) => a === b), nx.map(([a, b]) => `${a}${a === b ? '' : ` (want ${b})`}`).join(' '));
 	const sh = [ED.passSeconds(-1, {}, 60), ED.passSeconds(-1, {}, 600), ED.passSeconds(-1, {}, 10), ED.passSeconds(-2, {}, 600), ED.passSeconds(0, { '-1': T }, 600)];
@@ -351,13 +356,13 @@ async function passesSection() {
 	const fake = path.join(HOME, 'fake-eegpu.js');
 	fs.writeFileSync(fake, FAKE);
 	let nSc = 0;
-	const drive = async (runs, beam) => {
+	const drive = async (runs, beam, during) => {
 		const sc = path.join(HOME, `ladder-${++nSc}.json`), log = path.join(HOME, `ladder-${nSc}.log`);
 		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null }));
 		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc] });
 		const t0 = Date.now();
 		let st = ED.state();
-		while (st.running && Date.now() - t0 < 20000) { await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
+		while (st.running && Date.now() - t0 < 20000) { if (during) during(st); await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
 		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((r) => setTimeout(r, 40)); }
 		const launches = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore')
 			.map((a) => { const o = {}; for (const x of a) { const m = /^--(\w+)=(.*)$/.exec(x); if (m) o[m[1]] = m[2]; } return o; });
@@ -397,6 +402,22 @@ async function passesSection() {
 	check('a beam\'s route: the exploration stops once deeper, and the next pass (finer, --depth = route - 1) finds a faster one', r.st.stage === 'found' && r.st.result.ticks === 10 + R &&
 		r.st.result.strategy === 'every move' && r.X.ends['-1'] && r.X.ends['-1'].how === 'beaten' && L.length === 4 && +L[1].depth === 30 + R - 1 && cellsOf(L[1]) === '0.5|16|1|16' &&
 		+L[2].depth === 10 + R - 1, r.text);
+	// a route from the coarsest pass after pass -1 filled up deeper than that route: pass -1 cannot find a faster one (it
+	// saw every layer up to there), so the refining goes on with pass 0
+	r = await drive({ '-1': [{ end: 'full', layers: 200 }], '-2': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'finish', idle: 5, layers: 3 }] });
+	L = r.launches;
+	check('a route from the coarsest pass after pass -1 filled up beyond it: refining goes on with pass 0 (--depth = route - 1) and finds a faster one',
+		r.st.stage === 'found' && r.st.result.ticks === 5 + R && L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join() === '-1,-2,0,1,2' && +L[2].depth === 20 + R - 1 &&
+		+L[3].depth === 5 + R - 1, r.text);
+	// Stop while a finer pass looks for a faster route: no further pass, the route stays
+	let stopped = false, t1 = 0;
+	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {
+		if (st.result && st.strategies[0].pass === 0 && !t1) t1 = Date.now();
+		if (t1 && Date.now() - t1 > 600 && !stopped) { stopped = true; ED.stop(); }   // (pass 0 under way)
+	});
+	L = r.launches;
+	check('Stop while refining: the route stays, no further pass starts', stopped && r.st.stage === 'found' && r.st.result.ticks === 20 + R && L.length === 2 && r.X.passes === 2 &&
+		r.X.ends['0'] && r.X.ends['0'].how === 'stopped' && !r.st.running, r.text);
 }
 
 // ---------------------------------------------------------------- GPU searches (--gpu)
