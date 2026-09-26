@@ -95,7 +95,8 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   likely to work.
 - **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, deep exact-rejoin
   exploring windows (every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
-  round), mutate, a slice of the dense shortcuts pass (from its own cursor), mutate, a beam search every other round
+  round), mutate, a slice of the dense shortcuts pass (from its own cursor), the time-door pass (`phase.js`, on levels with
+  time doors, or coin doors when the coins count), mutate, a beam search every other round
   when there is time (every 4th anyway; one stopped by a restart is not repeated), then a splice of all results plus
   `pieces/`. Settings rotate with the round. After every stage the grind saves where it is in `status.json` `cursor`
   (round, stage, the deep and shortcuts cursors as tick + state hash, the seed counter), so a restart continues there.
@@ -212,6 +213,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`; `--roundMin=10`, `--deepS=<s>` per deep window, `--anchored=1`, `--tails=1`, `--siblings` passed to gpusearch); resumes from `status.json` `cursor` |
 | `src/mutate.js` | input mutations at every tick, exact rejoins, DP (seconds) |
 | `src/shortcuts.js` | local beams from every `--step`-th tick, exact rejoins, DP |
+| `src/phase.js` | time-door and coin-door shortcuts: every state hash holds the doors' phase (ticks % 1000), so exact rejoins miss them; single input changes, proposals by `stateHashClockBlind` (coin-blind past the last coin door), each replayed plain or with the clock re-synced by idle ticks before the first input (free: the timer starts at the first input), combined by weighted interval scheduling, judged |
 | `src/explore.js` | Go-Explore route explorer for a window (`--from --join --until --exact=1`) |
 | `src/optimize.js` | beam search along the reference with verified leads |
 | `src/splice.js` | best combination of several runs at equal states: the shortest path over the union of their state graphs (Dijkstra, bucket queue, typed-array hash index; ~0.3 s for 30 Infinity Pain runs); also a module: `trace`, `traceCache`, `unionGraph(runs).path({lib, avoidRng})`, `firstBadCheck` (used by grind.js and gpusearch.js) |

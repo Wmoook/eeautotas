@@ -1,13 +1,15 @@
 'use strict';
 // Keeps optimizing one job's TAS by cycling the search tools on the current best run, forever or until a deadline:
 //   mutate.js (input mutations), explore.js (route explorer with exact rejoins, every coin-to-coin segment in
-//   windows), shortcuts.js (dense local exact shortcuts), optimize.js (beam with verified leads, every other round),
+//   windows), shortcuts.js (dense local exact shortcuts), phase.js (time-door / coin-door shortcuts, on levels where
+//   exact rejoins cannot see them), optimize.js (beam with verified leads, every other round),
 // and splice.js (joins every result into the best run at equal states). Every accepted run is verified by a clean
 // replay (common.judge): it must finish the level, faster, with no more deaths than the starting run and no lower
 // random-portal chance.
 //
 // A round takes about --roundMin minutes (10): mutate, deep exploring windows (from where the last one stopped),
-// mutate, a slice of the dense shortcuts pass (from its cursor), mutate, a beam every other round, a splice of all
+// mutate, a slice of the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin
+// doors when the coins count), mutate, a beam every other round, a splice of all
 // results. Where it is (round, stage, the deep and shortcuts cursors as ticks + state hashes, the seed counter) is
 // saved in status.json `cursor` after every stage, so a restart continues there instead of repeating round 1.
 // Without the GPU, mutate only searches the start ticks whose next ~800 ticks changed since its last full pass
@@ -494,7 +496,7 @@ function startGpu() {
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
 
 // ---------------------------------------------------------------- one round (about ROUND_MS), resumable stage by stage
-const STAGES = ['mutA', 'deep', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
+const STAGES = ['mutA', 'deep', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -565,6 +567,21 @@ async function shortcutsStage(round, R) {
 	saveCursor({ sc: cut ? markCut : markEnd });
 }
 
+/**
+ * time-door shortcuts (phase.js): on a level with time doors every state holds the doors' phase, so an exact rejoin
+ * needs a saving that is a multiple of 1000 ticks and the other tools find nothing there; the same for the coins
+ * collected after the last coin door when the coins count. phase.js proposes by clock-blind hashes and replays every
+ * proposal (the clock re-synced in the idle start when needed). A whole pass over the run, the tick grid rotating.
+ */
+const PHASE = !!level.hasTimeDoors || (!NC && [43, 165, 213, 214].some((id) => level.fg.includes(id)));
+async function phaseStage(round, R) {
+	if (!PHASE) return;
+	const po = path.join(OUT, `grind_phase_${round}.eetas`);
+	await stage(`phase${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([3, 2, 3, 4])}`, `--from=${R([0, 1, 2, 3])}`,
+		`--horizon=${R([300, 400, 250, 500])}`, `--drift=${R([96, 128, 64, 160])}`, `--seconds=${R([150, 240, 150, 150])}`], po, 900e3,
+		level.hasTimeDoors ? 'time doors' : 'coin doors');
+}
+
 async function main() {
 	if (a.gpu === '1') { log('GPU on: the GPU searcher runs next to the CPU stages'); startGpu(); }
 	checkInbox();
@@ -587,6 +604,7 @@ async function main() {
 			else if (sname === 'deep') await deepStage(round, R);
 			else if (sname === 'mutB') await mutateLoop(`${round}b`);
 			else if (sname === 'sc') await shortcutsStage(round, R);
+			else if (sname === 'phase') await phaseStage(round, R);
 			else if (sname === 'mutC') await mutateLoop(`${round}c`);
 			else if (sname === 'beam') {
 				// 3) beam with verified leads, every other round when there is time left, every 4th round anyway (it has
