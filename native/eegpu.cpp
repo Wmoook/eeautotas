@@ -11,7 +11,9 @@
 // launches with its final line (end "stopped") and exit code 0 (killing it while a kernel runs resets the driver);
 // --parent=<pid>: the same once that process has exited (the callers start eegpu detached: launch.h).
 // explore / beam / search / bench run at above-normal CPU priority: their host thread must start the next short launch
-// at once (--priority=normal, or EEGPU_PRIORITY=normal in the environment: off).
+// at once (--priority=normal, or EEGPU_PRIORITY=normal in the environment: off). During a launch the host thread sleeps
+// on the launch's end event after its first millisecond (--wait=block, --spin-ms=1) instead of spinning a CPU core
+// (--wait=spin); the done lines report "hostCpuMs" and "gapMs" (launch.h).
 // search, beam, explore and bench print {"ev":"ready","loadMs":..,"allocMs":..,"ctxMs":..,"module":..} once the kernels
 // are loaded and the big buffers allocated (Gpu::ready); their --seconds count from there, not from the start of the
 // process. Every GPU command takes --cachedir=<dir>: the driver's compile of the kernels for this GPU is kept there,
@@ -618,10 +620,11 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	uint64_t rejected = 0, launches = 0;
 	unsigned long long statsPrev[8] = {0};
 	// batches of candidates (start ticks x variants): each candidate's state waits in a record on the GPU, and the
-	// batch's launches play up to famSeg ticks of every live candidate (launch.h: one candidate can run --horizon ticks,
-	// and one thread's tick took 0.5 ms on a throttled laptop GPU), until none is left. Per family (their candidates
-	// cost differently): the start ticks per batch (toward 10 x the launch target, at most the records' room) and the
-	// ticks per launch (toward the target)
+	// batch's launches play up to segTicks ticks of every live candidate (launch.h: one candidate can run --horizon
+	// ticks, and one thread's tick took 0.5 ms on a throttled laptop GPU), until none is left. Per family (their
+	// candidates cost differently): the start ticks per batch (toward 10 x the launch target, at most the records' room)
+	// and the candidate-ticks per launch (famSeg, toward the target): segTicks = that budget over the live candidates,
+	// sized for the worst case (every live candidate plays them all; a batch's size and its twins change the count)
 	const size_t recBytes = (16 + sizeof(State<TW>) + 15) & ~(size_t)15;
 	const size_t recCap = std::max<size_t>(4096, std::min<size_t>((size_t)256 << 20, (g.d.mem ? g.d.mem : (size_t)4 << 30) / 16) / recBytes);
 	cu::Buf drec, dlive;
@@ -631,8 +634,9 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	for (int f = 0; f < FAM_COUNT; f++) {
 		const double Vf = f >= FAM_PERT ? 256 : familyVariants(f);
 		famBatch.emplace_back(std::max(1.0, std::floor(1024.0 / Vf)), 1, std::max(1.0, std::floor((double)recCap / Vf)), 1, 10.0);
-		famSeg.emplace_back(32, 1, std::max(1, horizon), 1, 1.0);
+		famSeg.emplace_back(32.0 * 1024, 1, 1e15, 1, 1.0);   // (candidate-ticks)
 	}
+	unsigned long long simSeen = 0;   // (the stats' ticks played so far: each launch's own from the difference)
 	std::vector<Hit> batchHits;
 	// a batch's hits: in candidate order (start tick, variant: whatever order the GPU found them in), the shortest k per (t, j)
 	auto takeHits = [&]() {
@@ -678,7 +682,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 			stopped ? ",\"end\":\"stopped\"" : "", lk::doneFields().c_str());
 		bool first = true;
 		for (int fm : famList) {
-			printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu,\"twins\":%llu,\"launchTicks\":%.0f,\"batchStarts\":%.0f}", first ? "" : ",", FAMILY_NAMES[fm],
+			printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu,\"twins\":%llu,\"launchCandTicks\":%.0f,\"batchStarts\":%.0f}", first ? "" : ",", FAMILY_NAMES[fm],
 				(unsigned long long)famTicks[fm], famSec[fm], (unsigned long long)famHits[fm], (unsigned long long)famVerified[fm], (unsigned long long)famTwins[fm], famSeg[fm].size, famBatch[fm].size);
 			first = false;
 		}
@@ -733,15 +737,25 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		if (threads) {
 			// the batch: phase 0 starts every candidate, phase 1 continues the live ones, each launch up to segTicks ticks
 			P.phase = 0; P.r0 = 0; P.r1 = threads;
-			double liveFrac = 1;
+			uint32_t live = threads;   // (live at the next launch's start)
 			for (;;) {
 				cu::cuMemsetD8_v2(dlive.p, 0, 4);
-				P.segTicks = (i32)famSeg[fam].next((uint64_t)std::max(1, horizon));
+				lk::Chunk& sg = famSeg[fam];
+				double seg = std::floor(std::max(sg.lo, std::min(sg.hi, sg.size)) / std::max<uint32_t>(1, live));
+				if (lk::G.maxItems > 0) seg = std::min(seg, lk::G.maxItems);   // (--launch-items: at most that many ticks)
+				P.segTicks = (i32)std::max(1.0, std::min((double)std::max(1, horizon), seg));
 				ms = lk::launch(fsearch, (threads + block - 1) / block, block, args, "search");
 				launches++;
 				famSec[fam] += ms / 1000;
-				famSeg[fam].took(P.segTicks * liveFrac, ms);   // (a launch with few live candidates only shrinks it)
-				uint32_t cnt = 0, live = 0;
+				{
+					unsigned long long played = simSeen;
+					cu::cuMemcpyDtoH_v2(&played, dstats.p, 8);
+					const double worst = (double)P.segTicks * live;   // (every live candidate playing the whole segment)
+					sg.tookWorst(worst, ms, (double)(played - simSeen), worst);
+					simSeen = played;
+				}
+				uint32_t cnt = 0;
+				live = 0;
 				cu::cuMemcpyDtoH_v2(&cnt, dcount.p, 4);
 				if (cnt) {
 					cnt = std::min(cnt, hitCap);
@@ -752,7 +766,6 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 				}
 				cu::cuMemcpyDtoH_v2(&live, dlive.p, 4);
 				if (!live) break;
-				liveFrac = (double)live / threads;
 				P.phase = 1;
 				if (elapsed() >= seconds) { cut = true; break; }   // (time is up inside the batch)
 			}
@@ -1090,6 +1103,9 @@ int main(int argc, char** argv) {
 	lk::G.stopFile = opt(argc, argv, "stopfile", "");                   // (launch.h: a graceful stop between launches)
 	lk::watchParent(opt(argc, argv, "parent", ""));                      // (launch.h: ... also once the caller has exited)
 	lk::G.maxItems = std::max(0.0, atof(opt(argc, argv, "launch-items", "0").c_str()));   // (launch.h: tests split small workloads)
+	// (launch.h: the host thread sleeps through a launch after --spin-ms instead of spinning a core; --wait=spin: off)
+	lk::G.wait = opt(argc, argv, "wait", "block") == "spin" ? 0 : 1;
+	lk::G.spinMs = std::max(0.0, std::min(1000.0, atof(opt(argc, argv, "spin-ms", "1").c_str())));
 	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
 	if (cmd == "state") return cmdState(argc, argv);
 	if (cmd == "info") return cmdInfo(argc, argv);

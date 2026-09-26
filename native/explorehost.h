@@ -147,15 +147,24 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		if (!cu::cuMemGetInfo_v2(&fr, &tot) && fr >= (16ull << 27) + rest) cellLog = 27;
 	}
 	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
-	const uint32_t cellCount = 1u << cellLog;
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist, dstats, dlost;
 	const size_t nCandMax = (size_t)cap * 18;
-	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull * cellCount) &&
-		dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap) &&
-		dbest.alloc(8ull * cellCount) && dck.alloc(8 * nCandMax) && dcp.alloc(8 * nCandMax) && dcs.alloc(4 * nCandMax) && dnwin.alloc(4) && dhist.alloc(4 * 4096) &&
-		dstats.alloc(16) && dlost.alloc(4);
-	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	// out of GPU memory (another process took it after the free-memory check above, e.g. Find a route's beams starting
+	// next to this exploration): half the cell table, down to 2^24 cells, rather than an error
+	const uint32_t cellLogWanted = cellLog;
+	for (;;) {
+		const bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull << cellLog) &&
+			dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap) &&
+			dbest.alloc(8ull << cellLog) && dck.alloc(8 * nCandMax) && dcp.alloc(8 * nCandMax) && dcs.alloc(4 * nCandMax) && dnwin.alloc(4) && dhist.alloc(4 * 4096) &&
+			dstats.alloc(16) && dlost.alloc(4);
+		if (up) break;
+		if (cu::lastCode != 2 || cellLog <= 24) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		for (cu::Buf* b : { &dl, &dA, &dB, &dcells, &dout, &dnout, &dhits, &dnhits, &dpick, &dbest, &dck, &dcp, &dcs, &dnwin, &dhist, &dstats, &dlost }) b->free();
+		cellLog--;
+	}
+	if (cellLog != cellLogWanted) { printf("{\"warn\":\"out of GPU memory for 2^%u cells: 2^%u\",\"cellLog\":%u}\n", cellLogWanted, cellLog, cellLog); fflush(stdout); }
+	const uint32_t cellCount = 1u << cellLog;
 	lk::memset8(dbest.p, 0xff, 8ull * cellCount, "memset");
 	cu::cuMemsetD8_v2(dstats.p, 0, 16);
 	ExploreClaim Q;
@@ -326,6 +335,16 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	// (a size per kernel: their costs per item differ)
 	lk::Chunk ckExp(2048, 128, 1u << 30, 128), ckProp(1 << 16, 256, 1u << 31, 256), ckCount(1 << 16, 256, 1u << 31, 256), ckTake(1 << 16, 256, 1u << 31, 256),
 		ckMat(8192, 128, 1u << 30, 128);
+	// the expand's launches are sized for their worst case (launch.h tookWorst): a parent simulates 1 to 18 children
+	// (twins skipped; the floor target's landing tries up to 3 more per child), and parents stay grouped by region
+	const double simWorst = P.target == 0 ? 18.0 * 4 : 18.0;
+	unsigned long long simSeen = 0;   // (the stats' children simulated so far: each launch's own from the difference)
+	auto expandTook = [&](lk::Chunk& c, double items, double ms) {
+		unsigned long long sim = simSeen;
+		cu::cuMemcpyDtoH_v2(&sim, dstats.p, 8);
+		c.tookWorst(items, ms, (double)(sim - simSeen), items * simWorst);
+		simSeen = sim;
+	};
 	void* aq[] = { &Q };
 	auto claimPass = [&](cu::CUfunction f, const char* what) {
 		lk::Chunk& ck = f == fProp ? ckProp : f == fCount ? ckCount : ckTake;
@@ -338,7 +357,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		P.lanes = lanes > 1 ? (const u8*)(uintptr_t)lcur : nullptr;
 		if (wantNear) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
-		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "explore expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; });
+		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "explore expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; }, expandTook);
 		{
 			unsigned long long st[2] = { 0, 0 };
 			cu::cuMemcpyDtoH_v2(st, dstats.p, 16);

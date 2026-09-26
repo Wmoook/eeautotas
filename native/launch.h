@@ -10,6 +10,14 @@
 // (default 50): it starts small, grows at most 1.5x per launch toward 70% of the target, and shrinks at once (down to
 // 1/10 in one step) after a launch that took longer than the target. A launch sized for 35 ms takes about 210 ms if
 // the clock drops 6x before it; the next one is sized for the new speed.
+// Items that cost differently: an explore / beam expand parent simulates 1 to 18 children (the twins are skipped), and
+// the parents stay grouped by region, so after a launch of cheap parents one of dear ones took up to 6x the time it was
+// sized for. Those launches are sized for the worst case (tookWorst: the time scaled from the children really simulated
+// to 18 per parent); the search's likewise in candidate-ticks (every live candidate playing the whole segment). In the
+// CPU emulation (src/out/emu) the longest launch at --launch-ms=50 went from 61-121 ms to 23-50 ms.
+// The smallest launch: one block for explore and beam (128 parents or children, 256 claims) and bench (one tick of its
+// threads); the search's is one tick of one batch's candidates (one start tick x the family's variants: 1620 threads
+// for m2), the GPU trace's one tick of its one thread.
 // The chunks split kernels over index ranges only; the phases stay in order (every chunk of a phase before the next
 // phase), so a chunked run computes exactly what the unchunked one did (src/out/emu: --launch-ms=5 vs 500).
 // A graceful stop: killing eegpu while a kernel runs makes the driver reset the GPU too (nvlddmkm 153). With
@@ -19,6 +27,11 @@
 // process has exited. Node kills the children it did not start detached as soon as it exits (its job object: a killed
 // src/gpusearch.js took its eegpu down with it, mid-kernel), so the callers start eegpu detached with --parent: when
 // they die, however, eegpu ends at its next launch instead.
+// The wait (--wait=block, the default): the host thread spins for the first --spin-ms (1) of a launch (the short ones
+// end there, at once), then sleeps on the launch's end event until the GPU signals it (a blocking-sync event) instead
+// of spinning a CPU core for the whole launch (at above-normal priority that core was taken from the CPU workers, and
+// heated the laptop); --wait=spin: cuCtxSynchronize spins throughout. The done events' "hostCpuMs" (the process's CPU
+// time) and "gapMs" (the GPU clock's time from one command's end to the next one's start, summed) show the cost of each.
 #pragma once
 #include <chrono>
 #include <cstdio>
@@ -41,7 +54,7 @@ struct Guard {
 	double totalKernelMs = 0;   // ... by the GPU's clock (how busy a command keeps the GPU: explore --lanes)
 	uint64_t launches = 0;
 	std::string maxWhat, maxKernelWhat;   // which kernel took maxMs / maxKernelMs
-	cu::CUevent e0 = nullptr, e1 = nullptr;
+	cu::CUevent e0 = nullptr;
 	int events = -1;        // the event timing: -1 not tried yet, 0 unavailable (host clock only), 1 on
 	std::string stopFile;   // --stopfile
 	HANDLE parent = nullptr;   // --parent: that process (a stop once it has exited)
@@ -49,6 +62,13 @@ struct Guard {
 	                           // a small workload is split too and must give what one launch gives (test/gpulaunch.js)
 	double lastStopCheck = -1e9;
 	bool stopping = false;
+	int wait = 1;              // --wait: 1 block (spin spinMs, then sleep on the end event), 0 spin
+	double spinMs = 1.0;       // --spin-ms
+	cu::CUevent eEnd[2] = { nullptr, nullptr };   // the end events, in turn (the gap from one command's end to the next's start)
+	int endIdx = 0;
+	bool havePrev = false;
+	double gapMs = 0;          // the GPU clock's time between one timed command's end and the next one's start, summed
+	uint64_t gaps = 0;
 };
 inline Guard G;
 /** the command's final line for a stop request (end "stopped"); none set: a bare done event */
@@ -56,7 +76,9 @@ inline std::function<void()> onStop;
 inline bool eventsOn() {
 	if (G.events < 0) {
 		G.events = 0;
-		if (cu::cuEventCreate && cu::cuEventRecord && cu::cuEventElapsedTime && !cu::cuEventCreate(&G.e0, 0) && !cu::cuEventCreate(&G.e1, 0)) G.events = 1;
+		// (the end events are blocking-sync ones, flag 1: a wait for them can sleep; timing still works)
+		if (cu::cuEventCreate && cu::cuEventRecord && cu::cuEventElapsedTime && !cu::cuEventCreate(&G.e0, 0) && !cu::cuEventCreate(&G.eEnd[0], 1) &&
+			!cu::cuEventCreate(&G.eEnd[1], 1)) G.events = 1;
 	}
 	return G.events == 1;
 }
@@ -84,11 +106,20 @@ inline void setTarget(double ms) { G.targetMs = std::max(1.0, std::min(1000.0, s
 inline double sinceMs(std::chrono::steady_clock::time_point t0) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
 inline double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-/** the done events' fields: ,"maxLaunchMs":..,"maxKernelMs":..,"launchTarget":..,"kernelLaunches":.. */
+/** the process's CPU time so far (all threads, user + kernel), ms */
+inline double hostCpuMs() {
+	FILETIME c, e, k, u;
+	if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
+	const auto ft = [](const FILETIME& f) { return (double)(((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e4; };
+	return ft(k) + ft(u);
+}
+/** the done events' fields: ,"maxLaunchMs":..,"maxKernelMs":..,"launchTarget":..,"kernelLaunches":..,"hostCpuMs":.. */
 inline std::string doneFields() {
-	char b[300];
-	snprintf(b, sizeof b, ",\"maxLaunchMs\":%.1f,\"maxLaunchKernel\":\"%s\",\"maxKernelMs\":%.1f,\"maxKernelKernel\":\"%s\",\"gpuClock\":%s,\"launchTarget\":%.0f,\"kernelLaunches\":%llu",
-		G.maxMs, G.maxWhat.c_str(), G.maxKernelMs, G.maxKernelWhat.c_str(), G.events == 1 ? "true" : "false", G.targetMs, (unsigned long long)G.launches);
+	char b[600];
+	snprintf(b, sizeof b, ",\"maxLaunchMs\":%.1f,\"maxLaunchKernel\":\"%s\",\"maxKernelMs\":%.1f,\"maxKernelKernel\":\"%s\",\"gpuClock\":%s,\"launchTarget\":%.0f,\"kernelLaunches\":%llu,"
+		"\"launchTotalMs\":%.0f,\"kernelTotalMs\":%.0f,\"gapMs\":%.0f,\"wait\":\"%s\",\"hostCpuMs\":%.0f",
+		G.maxMs, G.maxWhat.c_str(), G.maxKernelMs, G.maxKernelWhat.c_str(), G.events == 1 ? "true" : "false", G.targetMs, (unsigned long long)G.launches,
+		G.totalMs, G.totalKernelMs, G.gapMs, G.wait && G.events == 1 && cu::cuEventQuery && cu::cuEventSynchronize ? "block" : "spin", hostCpuMs());
 	return b;
 }
 
@@ -123,20 +154,42 @@ inline void count(double ms, double kms, const char* what) {
 	if (ms > G.maxMs) { G.maxMs = ms; G.maxWhat = what; }
 	if (kms > G.maxKernelMs) { G.maxKernelMs = kms; G.maxKernelWhat = what; }
 }
+/** waits for the GPU command that ends with `end` (issued at t0): --wait=block spins for spinMs, then sleeps on the
+ *  (blocking-sync) event; --wait=spin, or no events: cuCtxSynchronize (a spin). Then the context's status (a kernel's
+ *  error shows there). */
+inline cu::CUresult waitDone(cu::CUevent end, std::chrono::steady_clock::time_point t0) {
+	if (!end || !G.wait || !cu::cuEventQuery || !cu::cuEventSynchronize) return cu::cuCtxSynchronize();
+	for (;;) {
+		const cu::CUresult q = cu::cuEventQuery(end);
+		if (q == 0) return cu::cuCtxSynchronize();
+		if (q != 600) return q;   // (600: CUDA_ERROR_NOT_READY; anything else is the kernel's error)
+		if (sinceMs(t0) >= G.spinMs) break;
+		YieldProcessor();
+	}
+	const cu::CUresult r = cu::cuEventSynchronize(end);
+	return r ? r : cu::cuCtxSynchronize();
+}
 /** one GPU command (a kernel launch, a memset), waited for and timed: returns its time by the GPU's clock (the host's
  *  without events); the host clock's goes into maxMs. Exits on any error. */
 template <class F>
 inline double timed(const char* what, F issue) {
 	checkStop();
 	const bool ev = eventsOn();
+	cu::CUevent end = ev ? G.eEnd[G.endIdx] : nullptr;
 	const auto t0 = std::chrono::steady_clock::now();
 	cu::CUresult r = ev ? cu::cuEventRecord(G.e0, nullptr) : 0;
 	if (!r) r = issue();
-	if (!r && ev) r = cu::cuEventRecord(G.e1, nullptr);
-	if (!r) r = cu::cuCtxSynchronize();
+	if (!r && ev) r = cu::cuEventRecord(end, nullptr);
+	if (!r) r = waitDone(end, t0);
 	const double ms = sinceMs(t0);
 	double kms = ms;
-	if (!r && ev) { float f = 0; if (!cu::cuEventElapsedTime(&f, G.e0, G.e1) && f >= 0) kms = std::min(ms, (double)f); }
+	if (!r && ev) {
+		float f = 0;
+		if (!cu::cuEventElapsedTime(&f, G.e0, end) && f >= 0) kms = std::min(ms, (double)f);
+		// the gap since the last command's end (host work between them, the wake-up, other processes' GPU work)
+		if (G.havePrev && !cu::cuEventElapsedTime(&f, G.eEnd[G.endIdx ^ 1], G.e0) && f >= 0) { G.gapMs += f; G.gaps++; }
+		G.havePrev = true; G.endIdx ^= 1;
+	}
 	count(ms, kms, what);
 	if (r) die(what, r, ms);
 	return kms;
@@ -168,6 +221,10 @@ struct Chunk {
 		if (align > 1) s = std::max(align, std::floor(s / align) * align);
 		return std::max<uint64_t>(1, std::min<uint64_t>(left, (uint64_t)s));
 	}
+	/** a launch of `items` items whose cost per item varies took `ms`: `units` = the work it really did (e.g. children
+	 *  simulated), `worst` = the most it could have done (e.g. 18 per parent). Its time scaled up to the worst case sizes
+	 *  the next launch, so a launch of the dearest items takes no longer than the target at this speed. */
+	void tookWorst(double items, double ms, double units, double worst) { took(items, ms * std::max(1.0, worst / std::max(1.0, units))); }
 	/** a launch of `items` items took `ms` */
 	void took(double items, double ms) {
 		if (items <= 0) return;
@@ -184,16 +241,21 @@ struct Chunk {
 };
 
 /** Runs a kernel over the items [0, n) in launches sized by ck: set(lo, hi) puts the range into the kernel's
- *  arguments (args points at them), then ceil((hi - lo) / block) blocks of `block` threads (one thread per item). */
-template <class F>
-inline void over(Chunk& ck, uint64_t n, unsigned block, cu::CUfunction f, void** args, const char* what, F set) {
+ *  arguments (args points at them), then ceil((hi - lo) / block) blocks of `block` threads (one thread per item);
+ *  after(ck, items, ms) tells ck what a launch took (e.g. tookWorst with the launch's work). */
+template <class F, class A>
+inline void over(Chunk& ck, uint64_t n, unsigned block, cu::CUfunction f, void** args, const char* what, F set, A after) {
 	for (uint64_t a = 0; a < n;) {
 		const uint64_t b = a + ck.next(n - a);
 		set((uint32_t)a, (uint32_t)b);
 		const double ms = launch(f, (unsigned)((b - a + block - 1) / block), block, args, what);
-		ck.took((double)(b - a), ms);
+		after(ck, (double)(b - a), ms);
 		a = b;
 	}
+}
+template <class F>
+inline void over(Chunk& ck, uint64_t n, unsigned block, cu::CUfunction f, void** args, const char* what, F set) {
+	over(ck, n, block, f, args, what, set, [](Chunk& c, double items, double ms) { c.took(items, ms); });
 }
 
 }  // namespace lk

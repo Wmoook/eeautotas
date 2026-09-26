@@ -318,6 +318,15 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	// (a size per kernel: their costs per item differ)
 	lk::Chunk ckExp(2048, 128, 1u << 30, 128), ckMat(8192, 128, 1u << 30, 128);
 	std::vector<lk::Chunk> ckSel(5, lk::Chunk(1 << 16, 256, 1u << 31, 256));
+	// the expand's launches are sized for their worst case (launch.h tookWorst): a parent simulates 1 to 18 children
+	// (twins skipped), and parents stay grouped by region
+	unsigned long long simSeen = 0;   // (the stats' children simulated so far: each launch's own from the difference)
+	auto expandTook = [&](lk::Chunk& c, double items, double ms) {
+		unsigned long long sim = simSeen;
+		cu::cuMemcpyDtoH_v2(&sim, dstats.p, 8);
+		c.tookWorst(items, ms, (double)(sim - simSeen), items * 18.0);
+		simSeen = sim;
+	};
 	void* aq[] = { &Q };
 	auto selPass = [&](cu::CUfunction f, void** args, uint64_t n, const char* what) {
 		lk::Chunk& ck = ckSel[f == fIns ? 0 : f == fWin ? 1 : f == fHist ? 2 : f == fPick ? 3 : 4];
@@ -327,7 +336,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layerTick = from + d;
 		if (P.closest) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
-		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "beam expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; });
+		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "beam expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; }, expandTook);
 		{
 			unsigned long long st[2] = { 0, 0 };
 			cu::cuMemcpyDtoH_v2(st, dstats.p, 16);
