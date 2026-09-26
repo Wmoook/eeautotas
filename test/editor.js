@@ -449,7 +449,9 @@ async function passesSection() {
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {
-		if (st.result && st.strategies[0].pass === 0 && !t1) t1 = Date.now();
+		// (from the stand-in's start for pass 0: a loaded machine can take over half a second to start node)
+		const started = () => { try { return fs.readFileSync(path.join(HOME, `ladder-${nSc}.log`), 'utf8').split('\n').filter((l) => l.startsWith('["explore"')).length >= 2; } catch (e) { return false; } };
+		if (st.result && st.strategies[0].pass === 0 && !t1 && started()) t1 = Date.now();
 		if (t1 && Date.now() - t1 > 600 && !stopped) { stopped = true; ED.stop(); }   // (pass 0 under way)
 	});
 	L = r.launches;
@@ -468,6 +470,25 @@ async function passesSection() {
 	check('a slow first load (3.5 s to the ready event): "preparing the GPU engine" meanwhile, the search\'s clock from the ready, the next pass gets the time the first did not search',
 		prep && clock && clock.wall >= 3.4 && clock.search < 1.5 && L[0].seconds === '20' && +L[1].seconds >= 59 && r.st.stage === 'not found' && r.st.prepSec >= 3.4,
 		`preparing seen ${prep}; clock at the first layer ${clock ? `${clock.search.toFixed(1)} s (wall ${clock.wall.toFixed(1)} s)` : '-'}; ${r.text}`);
+	check('the physics check found a way: every pass of "every move" prunes the states it rules out (--prune=1)', L.length > 0 && L.every((o) => o.prune === '1'), L.map((o) => o.prune || '-').join());
+	// the physics check rules the start out (a stand-in answer): "every move" alone, without the prune, for at most a
+	// minute; a route it finds anyway is a mistake in the model: kept in model_miss.json and said in the log
+	const miss = path.join(C.DATA, 'editor', 'model_miss.json');
+	try { fs.unlinkSync(miss); } catch (e) { /* none */ }
+	const scM = path.join(HOME, 'miss.json'), logM = path.join(HOME, 'miss.log');
+	fs.writeFileSync(scM, JSON.stringify({ log: logM, R, runs: { '-1': [{ end: 'finish', idle: 5, layers: 3 }] }, beam: null }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 300, width: 1024 }, { available: true }, { tool: [process.execPath, fake, scM], cpu: false, salts: false, reach: { startCost: -1 } });
+	let st = ED.state();
+	for (const t0 = Date.now(); st.running && Date.now() - t0 < 45000; st = ED.state()) await new Promise((res) => setTimeout(res, 40));
+	if (st.running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 40)); }
+	const LM = fs.readFileSync(logM, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+	const mj = C.readJSON(miss, null);
+	check('the physics check rules the start out: "every move" alone, without the prune, at most 60 s', st.strategies.map((q) => q.key).join() === 'explore' && st.seconds === 60 &&
+		LM.length > 0 && LM.every((a) => a[0] === 'explore' && !a.includes('--prune=1')) && +LM[0].find((x) => x.startsWith('--seconds=')).slice(10) <= 60 && !!st.physics && st.physics.noWayUp,
+		`${st.strategies.map((q) => q.key).join()}; ${st.seconds} s; ${LM.map((a) => `${a[0]} ${a.filter((x) => /^--(prune|seconds)=/.test(x)).join(' ')}`).join(' | ')}`);
+	check('... and a route found anyway: a mistake in the model, kept in model_miss.json (the level and the route) and said in the log', st.stage === 'found' && !!mj && !!mj.eelvlB64 &&
+		typeof mj.inputs === 'string' && mj.inputs.length > 0 && st.log.some((x) => /mistake in the physics model/.test(x)), `${st.stage}; model_miss.json ${mj ? 'written' : 'missing'}`);
+	try { fs.unlinkSync(miss); } catch (e) { /* none */ }
 }
 
 // ---------------------------------------------------------------- the CPU route search (src/goexplore.js; no GPU)

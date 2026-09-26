@@ -430,7 +430,8 @@ function halt(ch, why) {
  * gpu: the server's GPU processor record ({available, why}): without one (or without the native engine, or on a level
  * it cannot run) the CPU search runs alone, with a note. Throws with `problems` when the level is not ready.
  * test (test/editor.js; not from HTTP): { tool: [command, ...arguments] } runs that instead of the native engine;
- * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js.
+ * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js; reach: fields
+ * that override the physics check's answer (e.g. {startCost: -1}: the model rules the start out).
  */
 function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
@@ -484,7 +485,7 @@ function start(b, gpu, test) {
 	// strategies
 	building = true;
 	const ready = Promise.all([reachInfo(buf, levelHash, noGpu ? null : files.reach), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
-	ready.then(([rf, toolWhy]) => launchAll(rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide), (e) => {
+	ready.then(([rf, toolWhy]) => launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide), (e) => {
 		building = false;
 		S.stage = 'error'; S.running = false;
 		S.message = `The physics check failed: ${e.message}`;
