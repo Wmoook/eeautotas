@@ -14,12 +14,14 @@
 //               the reference's again (or s - 1000 idle ticks taken out, when the run has that many).
 // Verified proposals are combined (weighted interval scheduling; the compensated ones share one shift = the sum of
 // their savings, tried at +-3), and a run is written only when THE rule accepts it (C.evaluate + C.judge).
+// --workers=N: worker threads, each with every N-th start tick of the grid (they search and replay their own
+// proposals; the main thread combines them).
 //
 // node src/phase.js --tas=<run.eetas> --level=<level id | job id> [--out=<file>] [--from=0] [--to=<end>] [--step=3]
-//   [--horizon=300] [--drift=96] [--seconds=60] [--nocoins=0|1]
+//   [--horizon=300] [--drift=96] [--seconds=60] [--nocoins=0|1] [--workers=1]
 // Prints [phase] lines and `[ticks] N` every second (the page's live speed).
-const fs = require('fs');
 const path = require('path');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const C = require('./common.js');
 const E = C.E;
 
@@ -27,12 +29,15 @@ const COIN_DOOR_IDS = new Set([43, 165, 213, 214]);   // coin door, coin gate, b
 
 function parseArgs() {
 	const a = C.parseArgs(process.argv.slice(2));
-	if (!a.tas) { console.log('usage: node src/phase.js --tas=<run.eetas> --level=<level|job> [--out=] [--from=] [--to=] [--step=3] [--horizon=300] [--seconds=60] [--nocoins=0|1]'); process.exit(2); }
+	if (!a.tas) {
+		console.log('usage: node src/phase.js --tas=<run.eetas> --level=<level|job> [--out=] [--from=] [--to=] [--step=3] [--horizon=300] [--seconds=60] [--nocoins=0|1] [--workers=1]');
+		process.exit(2);
+	}
 	return {
 		tas: a.tas, out: a.out || null, level: a.level || null,
 		from: +(a.from || 0), to: a.to !== undefined ? +a.to : null, step: Math.max(1, +(a.step || 3)),
 		horizon: Math.max(10, +(a.horizon || 300)), drift: +(a.drift || 96), seconds: +(a.seconds || 60),
-		nocoins: a.nocoins === undefined ? null : String(a.nocoins) === '1',
+		nocoins: a.nocoins === undefined ? null : String(a.nocoins) === '1', workers: Math.max(1, +(a.workers || 1) | 0),
 	};
 }
 
@@ -48,14 +53,12 @@ function coinFreeTick(level, X, Y, n) {
 	return last + 1;
 }
 
-async function main() {
-	const a = parseArgs();
-	const meter = C.tickMeter();
+/** the reference: per tick the snapshot, position, and the three hash maps (the latest tick wins: the biggest saving) */
+function reference(a) {
 	const level = C.loadLevel(a.level, a.tas);   // (--level may be left out for a run inside a job folder)
 	const best = C.readEetas(a.tas);
 	const base = C.evaluate(level, best);
-	if (!base) { console.log(`[phase] ${a.tas} does not finish the level`); meter.stop(); return; }
-	// the reference: per tick the snapshot, position, and the three hash maps (the latest tick wins: the biggest saving)
+	if (!base) return { level, best, base: null };
 	const n = base.complete;
 	const NOC = a.nocoins !== null ? a.nocoins : false;
 	const sim = new E.EESim(level); sim.reset();
@@ -72,10 +75,27 @@ async function main() {
 	}
 	let idle = 0;
 	while (idle < n && best[idle] === 0) idle++;
-	const to = Math.min(a.to === null ? n : a.to, n);
-	console.log(`[phase] ${path.basename(a.tas)}: completes at ${n}, run ${C.fmt(base.runTicks)} (${base.runTicks}); ticks ${a.from}..${to} step ${a.step}, horizon ${a.horizon}; ` +
-		`time doors ${level.hasTimeDoors ? 'yes' : 'no'}, ${idle} idle ticks before the first input, coins ${NOC ? 'optional' : coinFree <= n ? `blind from tick ${coinFree}` : 'counted'}`);
+	return { level, best, base, n, NOC, sim, inp, X, Y, snaps, full, blind, blindNC, coinFree, idle, to: Math.min(a.to === null ? n : a.to, n) };
+}
 
+/** best[0..i) + the edges' inputs + the rest, with `shift` idle ticks added (> 0) or taken out (< 0) at the start */
+function spliceRun(R, edges, shift) {
+	const { best, idle } = R;
+	const body = [];
+	let at = 0;
+	for (const e of edges) { for (let q = at; q < e.i; q++) body.push(best[q]); for (const x of e.seq) body.push(x); at = e.j; }
+	for (let q = at; q < best.length; q++) body.push(best[q]);
+	if (shift > 0) return Uint8Array.from([...new Array(shift).fill(0), ...body]);
+	if (shift < 0) return -shift <= idle ? Uint8Array.from(body.slice(-shift)) : null;
+	return Uint8Array.from(body);
+}
+
+/**
+ * The start ticks from + step * (wi + nw * m) (worker wi of nw): proposals, each replayed (plain, else with the clock
+ * compensated in the idle start); returns { good: [{i, j, k, seq, exact, save, shift}], tried, tLast, proposals, exact }.
+ */
+function searchPart(R, a, wi, nw) {
+	const { level, best, base, n, NOC, sim, inp, X, Y, snaps, full, blind, blindNC, to } = R;
 	// the changes at a tick: skips, and an option held 1-4 ticks with 0-2 reference ticks dropped
 	const OPT = [];
 	for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPT.push(h | v | j);
@@ -96,7 +116,9 @@ async function main() {
 	const proposals = new Map();   // "i:j:k" -> {i, j, k, seq, exact}
 	let tried = 0, tLast = a.from, dead = false;
 	sim.onEvent = (k) => { if (k === 'death') dead = true; };
-	for (let t = a.from; t < to && (Date.now() - t0) / 1000 < a.seconds; t += a.step) {
+	for (let m = 0; ; m++) {
+		const t = a.from + a.step * (wi + nw * m);
+		if (t >= to || (Date.now() - t0) / 1000 >= a.seconds) break;
 		tLast = t;
 		for (const ch of changes(t)) {
 			tried++;
@@ -123,34 +145,50 @@ async function main() {
 			}
 		}
 	}
-	console.log(`[phase] searched ticks ${a.from}..${tLast} in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${tried} changes, ${proposals.size} proposals (${[...proposals.values()].filter((p) => p.exact).length} exact)`);
-
 	// every proposal replayed: plain, else compensated in the idle start
-	const splice = (edges, shift) => {
-		const body = [];
-		let at = 0;
-		for (const e of edges) { for (let q = at; q < e.i; q++) body.push(best[q]); for (const x of e.seq) body.push(x); at = e.j; }
-		for (let q = at; q < best.length; q++) body.push(best[q]);
-		if (shift > 0) return Uint8Array.from([...new Array(shift).fill(0), ...body]);
-		if (shift < 0) return -shift <= idle ? Uint8Array.from(body.slice(-shift)) : null;
-		return Uint8Array.from(body);
-	};
 	const good = [];
 	for (const p of proposals.values()) {
 		const s = p.j - p.i - p.k;
 		if (s <= 0) continue;
 		for (const shift of p.exact ? [0] : level.hasTimeDoors ? [0, s, s - 1000] : [0]) {
-			const cand = splice([p], shift);
+			const cand = spliceRun(R, [p], shift);
 			if (!cand) continue;
 			const ev = C.evaluate(level, cand, false);
 			if (ev && ev.runTicks < base.runTicks && ev.deaths <= base.deaths) { good.push({ ...p, save: base.runTicks - ev.runTicks, shift }); break; }
 		}
 	}
+	let exact = 0;
+	for (const p of proposals.values()) if (p.exact) exact++;
+	return { good, tried, tLast, proposals: proposals.size, exact };
+}
+
+async function main() {
+	const a = parseArgs();
+	const meter = C.tickMeter();
+	const R = reference(a);
+	const { level, base, n, NOC, coinFree, idle, to } = R;
+	if (!base) { console.log(`[phase] ${a.tas} does not finish the level`); meter.stop(); return; }
+	console.log(`[phase] ${path.basename(a.tas)}: completes at ${n}, run ${C.fmt(base.runTicks)} (${base.runTicks}); ticks ${a.from}..${to} step ${a.step}, horizon ${a.horizon}; ` +
+		`time doors ${level.hasTimeDoors ? 'yes' : 'no'}, ${idle} idle ticks before the first input, coins ${NOC ? 'optional' : coinFree <= n ? `blind from tick ${coinFree}` : 'counted'}` +
+		(a.workers > 1 ? `; ${a.workers} workers` : ''));
+	const t0 = Date.now();
+	let parts;
+	if (a.workers > 1) {
+		parts = await Promise.all(Array.from({ length: a.workers }, (_, wi) => new Promise((resolve) => {
+			const w = new Worker(__filename, { workerData: { a, wi, nw: a.workers, ticksBuf: meter.buf } });
+			w.once('message', resolve);
+			w.once('error', (e) => { console.log(`[phase] worker ${wi}: ${e && e.message || e}`); resolve({ good: [], tried: 0, tLast: a.from, proposals: 0, exact: 0 }); });
+		})));
+	} else parts = [searchPart(R, a, 0, 1)];
+	const good = [].concat(...parts.map((p) => p.good));
+	const tried = parts.reduce((s, p) => s + p.tried, 0), nProp = parts.reduce((s, p) => s + p.proposals, 0), nExact = parts.reduce((s, p) => s + p.exact, 0);
+	const tLast = Math.max(...parts.map((p) => p.tLast));
+	console.log(`[phase] searched ticks ${a.from}..${tLast} in ${((Date.now() - t0) / 1000).toFixed(1)} s: ${tried} changes, ${nProp} proposals (${nExact} exact)`);
 	console.log(`[phase] ${good.length} verified (${good.filter((g) => g.shift !== 0).length} with the clock shifted in the idle start)` +
 		(good.length ? `; best single -${Math.max(...good.map((g) => g.save))}` : ''));
 	// combinations: weighted interval scheduling over the plain ones, over the compensated ones, and over all
 	const schedule = (list) => {
-		const E2 = list.slice().sort((x, y) => x.j - y.j), m = E2.length;
+		const E2 = list.slice().sort((x, y) => x.j - y.j || x.i - y.i), m = E2.length;
 		const dp = new Array(m + 1).fill(0), ch = new Array(m + 1).fill(-1);
 		const prev = E2.map((e, x) => { for (let y = x - 1; y >= 0; y--) if (E2[y].j <= e.i) return y; return -1; });
 		for (let x = 0; x < m; x++) { const take = E2[x].save + (prev[x] >= 0 ? dp[prev[x] + 1] : 0); if (take > dp[x]) { dp[x + 1] = take; ch[x + 1] = x; } else dp[x + 1] = dp[x]; }
@@ -162,7 +200,7 @@ async function main() {
 	const consider = (edges, shifts, tag) => {
 		if (!edges.length) return;
 		for (const shift of shifts) {
-			const cand = splice(edges, shift);
+			const cand = spliceRun(R, edges, shift);
 			if (!cand) continue;
 			const ev = C.evaluate(level, cand);
 			const v = C.judge(ev, base, base.deaths);
@@ -178,7 +216,7 @@ async function main() {
 		const all = schedule(good);
 		consider(all, around(all.filter((e) => e.shift !== 0).reduce((x, e) => x + e.shift, 0)), 'all');
 	}
-	for (const g of good.slice().sort((x, y) => y.save - x.save).slice(0, 5)) consider([g], [g.shift], 'single');
+	for (const g of good.slice().sort((x, y) => y.save - x.save || x.i - y.i).slice(0, 5)) consider([g], [g.shift], 'single');
 	if (!bestRun) { console.log(`[phase] nothing accepted`); meter.stop(); return; }
 	const r = bestRun;
 	console.log(`[phase] ${r.tag}: ${r.edges.length} shortcut${r.edges.length > 1 ? 's' : ''}${r.shift ? `, clock shifted ${r.shift > 0 ? '+' : ''}${r.shift} in the idle start` : ''}: ` +
@@ -188,4 +226,12 @@ async function main() {
 	meter.stop();
 }
 
-main().catch((e) => { console.log('[phase] error', e && e.stack || e); process.exit(1); });
+if (isMainThread) main().catch((e) => { console.log('[phase] error', e && e.stack || e); process.exit(1); });
+else {
+	const { a, wi, nw, ticksBuf } = workerData;
+	E.setTickCounter(new BigInt64Array(ticksBuf));
+	const R = reference(a);
+	const res = R.base ? searchPart(R, a, wi, nw) : { good: [], tried: 0, tLast: a.from, proposals: 0, exact: 0 };
+	E.flushTicks();
+	parentPort.postMessage(res);
+}

@@ -631,8 +631,8 @@ const PHASE = !!level.hasTimeDoors || (!NC && [43, 165, 213, 214].some((id) => l
 async function phaseStage(round, R) {
 	if (!PHASE) return;
 	const po = path.join(OUT, `grind_phase_${round}.eetas`);
-	await stage(`phase${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([3, 2, 3, 4])}`, `--from=${R([0, 1, 2, 3])}`,
-		`--horizon=${R([300, 400, 250, 500])}`, `--drift=${R([96, 128, 64, 160])}`, `--seconds=${R([150, 240, 150, 150])}`], po, 900e3,
+	await stage(`phase${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([2, 1, 3, 2])}`, `--from=${R([0, 0, 1, 1])}`, `--workers=${W}`,
+		`--horizon=${R([300, 400, 250, 500])}`, `--drift=${R([96, 128, 64, 160])}`, `--seconds=${R([120, 180, 120, 120])}`], po, 900e3,
 		level.hasTimeDoors ? 'time doors' : 'coin doors');
 }
 
