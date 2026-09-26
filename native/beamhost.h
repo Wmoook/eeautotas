@@ -51,7 +51,7 @@ struct ReachGpu {
 	cu::Buf cost, cls, own, refresh;
 	bool load(const std::string& file, const Level& L, ReachField& R, std::string& err) {
 		std::vector<uint8_t> raw = readFile(file.c_str());
-		if (raw.size() < 28 || memcmp(raw.data(), "RCH1", 4) != 0) { err = "bad reach file " + file; return false; }
+		if (raw.size() < 28 || memcmp(raw.data(), "RCH2", 4) != 0) { err = "bad reach file (expected RCH2): " + file; return false; }
 		int32_t W, H, B, JB, mode; float g;
 		memcpy(&W, &raw[4], 4); memcpy(&H, &raw[8], 4); memcpy(&B, &raw[12], 4); memcpy(&JB, &raw[16], 4); memcpy(&g, &raw[20], 4); memcpy(&mode, &raw[24], 4);
 		const size_t N = (size_t)W * H, pad = (N + 3) & ~(size_t)3;

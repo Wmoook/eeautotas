@@ -23,17 +23,20 @@ struct BeamChild {
 	i32 rejoin;     // reference tick j of an exact rejoin (flags & 4), else -1
 };
 
-/** The reach field (src/reach.js): the cost to the trophy per (tile, rise budget b), b = the tile rows the box centre
- *  can still rise into; -1 = unreachable (the model is optimistic, so that is a proof). on = 0: not loaded. */
+/** The reach field (src/reach.js): the cost to the trophy per (tile, rise budget b), b = how far the box centre can
+ *  still rise above the tile's middle, in units of 8 px; refresh = the jump budget per tile (0 = none); -1 = unreachable
+ *  (the model is optimistic, so that is a proof). on = 0: not loaded. */
 struct ReachField {
 	const float* cost; const u8* cls; const u8* own; const u8* refresh;
 	i32 W, H, B, JB; float g; i32 on;
 };
-/** the budget of a ball in tile i (row `row`), whose centre can rise to `top` px (rising) */
+/** the budget of a ball in tile i (row `row`) whose centre can rise to `top` px (src/reach.js budgetAt) */
 EE_HD i32 reachBudget(const ReachField& R, i32 i, i32 row, float top, bool rising, bool onGround) {
-	i32 b = 0;
-	if (rising) { b = row - (i32)floorf(top / 16.f); if (b < 0) b = 0; if (b > R.B - 1) b = R.B - 1; }
-	if (onGround && R.refresh[i] && b < R.JB) b = R.JB;
+	(void)rising;
+	i32 b = (i32)floorf(((float)(row * 16 + 8) - top) / 8.f);
+	if (b < 0) b = 0;
+	if (b > R.B - 1) b = R.B - 1;
+	if (onGround && b < (i32)R.refresh[i]) b = R.refresh[i];
 	if (R.cls[i] != 1 && b < (i32)R.own[i]) b = R.own[i];   // (1 = a tile with normal gravity)
 	return b;
 }
