@@ -362,7 +362,9 @@ const STRATEGIES = {
 	// coarse speed cells: see RELAY_CELLS)
 	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`,
-		...(o.prune ? ['--prune=1'] : [])] },
+		// (a small table and layer cap: its layers hold tens of thousands of states, and a full-size second explore next
+		// to every move's (2 GB of cells + ~2.7 GB of states) overcommitted the 8 GB laptop GPU: paged, 5x slower)
+		'--cells=25', '--cap=262144', ...(o.prune ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -414,8 +416,11 @@ let stallTimer = null;
 // move's 50 ms ones, ran 15x slower than alone (the dot ring's route from tick 249: 2.4 s alone, 20-35 s beside every
 // move). Slices of SLICE_MS in turn; a strategy that got nearer the trophy in its slice keeps the GPU (up to SLICE_MAX
 // slices in a row); every move's probe runs alone. The CPU search is not scheduled.
-const SLICE_MS = 2500, SLICE_MAX = 4;
-let sched = null, schedTimer = null;   // { owner: strategy index, since, slices }
+// The leader (the strategy whose own nearest attempt is nearest the trophy) gets every other slice; the others take
+// the slices between in turn; only a strategy within LEAD_TILES of the leader keeps the GPU for getting nearer (every
+// move's refined try, 78 tiles out and inching on, held it for 10 s at a time while the relay, 34 tiles out, waited).
+const SLICE_MS = 2500, SLICE_MAX = 4, LEAD_TILES = 10;
+let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
 function setPaused(k, on) {
 	const ch = kids[k];
@@ -438,10 +443,26 @@ function schedule() {
 		sched = { owner: gpu[0], since: now, slices: 1 };
 	} else if (now - sched.since >= SLICE_MS) {
 		const q = S.strategies[owner];
-		if (q.bestAt && q.bestAt > sched.since && sched.slices < SLICE_MAX) sched = { owner, since: now, slices: sched.slices + 1 };
-		else sched = { owner: gpu[(gpu.indexOf(owner) + 1) % gpu.length], since: now, slices: 1 };
+		let lead = Infinity, leader = -1;
+		for (const k of gpu) { const b = S.strategies[k].best; if (b !== undefined && b < lead) { lead = b; leader = k; } }
+		const nearLead = leader < 0 || (q.best !== undefined && q.best <= lead + LEAD_TILES);
+		// (a process that has not had the GPU yet (a new relay run, a new pass) gets the next slice: the relay's run waited
+		// 5 s behind every move's extensions, and then found the dot ring's route in 3 s)
+		const fresh = gpu.find((k) => k !== owner && !kids[k].hadTurn);
+		if (fresh !== undefined) sched = { owner: fresh, since: now, slices: 1, lastOther: sched.lastOther };
+		else if (q.bestAt && q.bestAt > sched.since && sched.slices < SLICE_MAX && nearLead) sched = Object.assign({}, sched, { since: now, slices: sched.slices + 1 });
+		else if (leader >= 0 && owner !== leader) sched = { owner: leader, since: now, slices: 1, lastOther: owner };
+		else {
+			// (the leader has had its turn: the next of the others)
+			const others = gpu.filter((k) => k !== leader);
+			const last = sched.lastOther !== undefined ? others.indexOf(sched.lastOther) : -1;
+			const next = others.length ? others[(last + 1) % others.length] : owner;
+			sched = { owner: next, since: now, slices: 1, lastOther: next };
+		}
 	}
 	for (const k of gpu) setPaused(k, k !== sched.owner);
+	kids[sched.owner].hadTurn = true;
+	S.gpuTurn = S.strategies[sched.owner].key;   // (the page and the tools: which search has the GPU now)
 }
 function checkStalls() {
 	if (!S || !S.running) return;
@@ -473,7 +494,8 @@ const BEAM_STALL_MS = 10000;
 // a nearer attempt from any strategy is the next run's start.
 // the relay starts once every move's first refined try has ended (the pixel-exact levels' route comes from it, and it
 // needs the GPU), every move runs the ladder (the probe found the finest cells too many), or after RELAY_WAIT_S
-const RELAY_WAIT_S = 20;
+const RELAY_WAIT_S = 20, RELAY_AFTER_REFINE_MS = 3000;   // (a refined try still going after 3 s is not the quick pixel-exact case
+// (user30s, shaft: 2-3 s alone): on the dot ring it filled its table after 8 s, and the relay waited for it)
 // Every move gives the GPU to a relay far ahead of it (its own nearest attempt 10+ tiles behind the relay's, not better
 // for EXPLORE_YIELD_MS): the dot ring's relay reached the ring at 35 s next to every move's coarse passes from the start
 // (10 s with the GPU to itself). It goes on (the same pass) when the relay waits for a nearer attempt, or once a route
@@ -491,7 +513,8 @@ function relayFrom(n) {
 	const c = S.closest;
 	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || R.back >= RELAY_BACK.length || S.seconds - searchClock(Date.now()) < 3) return false;
 	const X = S.strategies.find((q) => q.key === 'explore');
-	if (X && !(X.probe === 'slow' || X.refinedOnce || X.state === 'ended' || X.state === 'error' || searchClock(Date.now()) >= RELAY_WAIT_S)) return false;
+	if (X && !(X.probe === 'slow' || X.refinedOnce || X.state === 'ended' || X.state === 'error' || searchClock(Date.now()) >= RELAY_WAIT_S ||
+		(X.refine && X.refine.at && Date.now() - X.refine.at > RELAY_AFTER_REFINE_MS))) return false;
 	const keep = c.ticks - Math.min(RELAY_BACK[R.back], c.ticks - 1);
 	// (a start near the level's start is every move's own work: no relay from there)
 	if (keep < RELAY_MIN_KEEP) return false;
