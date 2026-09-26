@@ -19,6 +19,9 @@
 // --salt=N mixes N into the tie-break that picks which state stands for a cell (another merged graph); --salts=K
 // (--finish) starts over with the next salt after a try that ran through its depth without a finish ({"ev":"try"});
 // done: "salt" = the last salt tried, "tries", "exhaustedTries" (tries that ran out of situations with no overflow).
+// --lanes=L (--finish): L salts side by side in the same launches (lane k: salt + k, its own cells); a try event per
+// batch ("lanes": L, "salt": the batch's last), a hit's "salt" = its lane's; a batch that fills the cell table prints
+// {"ev":"lanes","lanes":L/2,...} and runs again with half the lanes; done: "lanes" = the last batch's.
 #pragma once
 
 /** A radix select over a key (the claim's priority, or a candidate index): the key of the winner of rank k (0-based,
@@ -135,18 +138,34 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	// (probing degrades). The state buffers take at most about a third of the memory.
 	const size_t memB = g.d.mem ? g.d.mem : (size_t)4 << 30;
 	uint32_t cellLog = memB >= ((size_t)11 << 30) ? 27 : memB >= ((size_t)5 << 30) ? 26 : 25;   // (16 bytes per cell)
-	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
-	const uint32_t cellCount = 1u << cellLog;
 	const int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
+	// --lanes: the tries of a batch share the table, so it is twice as large where the free memory allows (the 8 GB
+	// laptop GPU: 2 GB of cells + ~2.7 GB of states and candidates, 1 GB to spare)
+	if (opt(argc, argv, "finish", "0") == "1" && opt(argc, argv, "lanes", "1") != "1" && cellLog < 27 && cu::cuMemGetInfo_v2) {
+		size_t fr = 0, tot = 0;
+		const size_t rest = 2 * sizeof(S) * (size_t)cap + 20ull * 18 * cap + ((size_t)1 << 30);
+		if (!cu::cuMemGetInfo_v2(&fr, &tot) && fr >= (16ull << 27) + rest) cellLog = 27;
+	}
+	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist, dstats, dlost;
 	const size_t nCandMax = (size_t)cap * 18;
-	bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull * cellCount) &&
-		dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap) &&
-		dbest.alloc(8ull * cellCount) && dck.alloc(8 * nCandMax) && dcp.alloc(8 * nCandMax) && dcs.alloc(4 * nCandMax) && dnwin.alloc(4) && dhist.alloc(4 * 4096) &&
-		dstats.alloc(16) && dlost.alloc(4);
-	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
-	cu::cuMemsetD8_v2(dbest.p, 0xff, 8ull * cellCount);
+	// out of GPU memory (another process took it after the free-memory check above, e.g. Find a route's beams starting
+	// next to this exploration): half the cell table, down to 2^24 cells, rather than an error
+	const uint32_t cellLogWanted = cellLog;
+	for (;;) {
+		const bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull << cellLog) &&
+			dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap) &&
+			dbest.alloc(8ull << cellLog) && dck.alloc(8 * nCandMax) && dcp.alloc(8 * nCandMax) && dcs.alloc(4 * nCandMax) && dnwin.alloc(4) && dhist.alloc(4 * 4096) &&
+			dstats.alloc(16) && dlost.alloc(4);
+		if (up) break;
+		if (cu::lastCode != 2 || cellLog <= 24) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		for (cu::Buf* b : { &dl, &dA, &dB, &dcells, &dout, &dnout, &dhits, &dnhits, &dpick, &dbest, &dck, &dcp, &dcs, &dnwin, &dhist, &dstats, &dlost }) b->free();
+		cellLog--;
+	}
+	if (cellLog != cellLogWanted) { printf("{\"warn\":\"out of GPU memory for 2^%u cells: 2^%u\",\"cellLog\":%u}\n", cellLogWanted, cellLog, cellLog); fflush(stdout); }
+	const uint32_t cellCount = 1u << cellLog;
+	lk::memset8(dbest.p, 0xff, 8ull * cellCount, "memset");
 	cu::cuMemsetD8_v2(dstats.p, 0, 16);
 	ExploreClaim Q;
 	memset(&Q, 0, sizeof Q);
@@ -170,7 +189,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	}
 	const bool wantNear = finishTarget && (reachF.on || goalField(L, goalDist));
 	if (wantNear && ((!reachF.on && !dgoal.upload(goalDist.data(), 4 * goalDist.size())) || !dclose.alloc(8))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
-	cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
+	lk::memset8(dcells.p, 0, 8ull * cellCount, "memset");
 	cu::cuMemsetD8_v2(dnhits.p, 0, 4);
 	cu::cuMemcpyHtoD_v2(dA.p, start, SB);
 	ExploreParams P;
@@ -254,13 +273,91 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	const int salts = std::max(1, atoi(opt(argc, argv, "salts", "1").c_str()));
 	int tries = 0, exhaustedTries = 0;
 	int d = 0;
+	// --lanes=L (with --finish): L salts side by side in the same launches (lane k: salt + k; a lane's cells are its
+	// own), from L copies of the start state: L tries for about the price of one while the layers are small (then the
+	// per-layer launches, copies and host work dominate). A batch whose cells fill the table halves L and runs again
+	// with the same salts. The try events come per batch ("lanes"); a hit's "salt" is its lane's.
+	// --lanes=auto (up to --lanesMax=16, from --lanesStart=1): the tries per second decide. After a batch with the best
+	// lanes so far, twice as many are probed (every 8th batch again: the GPU's load changes); a probe that raises the
+	// tries per second by 10% or more becomes the best, else the best comes back. Never more than 80% of the table's
+	// room for the states the lanes will visit (the last batch's per lane), nor as many as once filled it.
+	const bool lanesAuto = finishTarget && opt(argc, argv, "lanes", "1") == "auto";
+	const int lanesMax = lanesAuto ? std::max(1, std::min(64, atoi(opt(argc, argv, "lanesMax", "16").c_str()))) : 64;
+	int lanes = !finishTarget ? 1 : lanesAuto ? std::max(1, std::min(lanesMax, atoi(opt(argc, argv, "lanesStart", "1").c_str())))
+		: std::max(1, std::min(64, atoi(opt(argc, argv, "lanes", "1").c_str())));
+	cu::Buf dLA, dLB;
+	if ((lanes > 1 || lanesAuto) && !(dLA.alloc((size_t)cap) && dLB.alloc((size_t)cap))) lanes = 1;
+	const int lanesTop = dLA.p && dLB.p ? lanesMax : 1;
+	int lanesFull = 1 << 30;   // (lanes that once filled the table: never again)
+	cu::CUdeviceptr lcur = dLA.p, lnxt = dLB.p;
+	double batchT0 = 0, batchK0 = 0;   // (the batch's start: wall seconds, GPU-clock ms in launches)
+	double bestRate = 0;
+	int bestL = 0, batches = 0;
+	auto nextLanes = [&]() {   // --lanes=auto: the next batch's lanes, after a batch that ran through
+		const double rate = lanes / std::max(1e-3, elapsed() - batchT0);   // (tries per second)
+		const double perLane = std::max(1.0, (double)totalStates / lanes);
+		const int room = std::max(1, std::min({ lanesTop, lanesFull - 1, (int)std::floor(0.8 * (cellCount / 2) / perLane) }));
+		batches++;
+		int L = lanes;
+		if (!bestL || lanes == bestL) { bestL = lanes; bestRate = rate; if (batches == 1 || batches % 8 == 0) L = 2 * lanes; }
+		else if (rate >= 1.1 * bestRate) { bestL = lanes; bestRate = rate; L = 2 * lanes; }
+		else L = bestL;
+		return std::max(1, std::min(L, room));
+	};
+	auto startBatch = [&]() {
+		std::vector<uint8_t> multi((size_t)lanes * SB);
+		for (int k = 0; k < lanes; k++) memcpy(&multi[(size_t)k * SB], start, SB);
+		cu::cuMemcpyHtoD_v2(dA.p, multi.data(), multi.size());
+		cur = dA.p; nxt = dB.p;
+		if (lanes > 1) {
+			std::vector<uint8_t> ln(lanes);
+			for (int k = 0; k < lanes; k++) ln[k] = (uint8_t)k;
+			cu::cuMemcpyHtoD_v2(dLA.p, ln.data(), lanes);
+			lcur = dLA.p; lnxt = dLB.p;
+		}
+		nParents = lanes; totalStates = (uint64_t)lanes;
+		batchT0 = elapsed(); batchK0 = lk::G.totalKernelMs;
+	};
+	startBatch();
+	// the done event (forced: "stopped", a stop request between two launches: launch.h)
+	auto finale = [&](const char* forced) {
+		if (finishLayer < 0) nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
+		const char* why = forced ? forced : finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
+		// overflow: the new cells left out over all layers (over the cap, or no table slot); "exhausted" with overflow 0
+		// means every move was tried (up to the cells' grain), with overflow > 0 it is no proof
+		printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d,\"lanes\":%d%s}\n",
+			g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
+			(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries, lanes, lk::doneFields().c_str());
+	};
+	lk::onStop = [&]() { finale("stopped"); };
+	// the launches (launch.h): each phase of a layer (expand, the claim's passes, materialize) runs over its index range
+	// in launches sized to the target, every chunk of a phase before the next phase: the same result as one launch each
+	// (a size per kernel: their costs per item differ)
+	lk::Chunk ckExp(2048, 128, 1u << 30, 128), ckProp(1 << 16, 256, 1u << 31, 256), ckCount(1 << 16, 256, 1u << 31, 256), ckTake(1 << 16, 256, 1u << 31, 256),
+		ckMat(8192, 128, 1u << 30, 128);
+	// the expand's launches are sized for their worst case (launch.h tookWorst): a parent simulates 1 to 18 children
+	// (twins skipped; the floor target's landing tries up to 3 more per child), and parents stay grouped by region
+	const double simWorst = P.target == 0 ? 18.0 * 4 : 18.0;
+	unsigned long long simSeen = 0;   // (the stats' children simulated so far: each launch's own from the difference)
+	auto expandTook = [&](lk::Chunk& c, double items, double ms) {
+		unsigned long long sim = simSeen;
+		cu::cuMemcpyDtoH_v2(&sim, dstats.p, 8);
+		c.tookWorst(items, ms, (double)(sim - simSeen), items * simWorst);
+		simSeen = sim;
+	};
+	void* aq[] = { &Q };
+	auto claimPass = [&](cu::CUfunction f, const char* what) {
+		lk::Chunk& ck = f == fProp ? ckProp : f == fCount ? ckCount : ckTake;
+		lk::over(ck, Q.nCand, 256, f, aq, what, [&](uint32_t lo, uint32_t hi) { Q.lo = lo; Q.hi = hi; });
+	};
 	for (;;) {
 	for (; d < depthMax && nParents > 0 && elapsed() < seconds; d++) {
 		cu::cuMemsetD8_v2(dnout.p, 0, 4);
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layer = d;
+		P.lanes = lanes > 1 ? (const u8*)(uintptr_t)lcur : nullptr;
 		if (wantNear) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
-		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore expand failed\"}\n"); return 5; }
+		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "explore expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; }, expandTook);
 		{
 			unsigned long long st[2] = { 0, 0 };
 			cu::cuMemcpyDtoH_v2(st, dstats.p, 16);
@@ -277,13 +374,10 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		Q.candKey = (const u64*)(uintptr_t)dck.p; Q.nCand = (u32)nParents * 18; Q.layer = (u32)d;
 		uint32_t nWin = 0, nLost = 0;
 		{
-			const unsigned cb = (Q.nCand + 255) / 256;
-			void* aq[] = { &Q };
 			cu::cuMemsetD8_v2(dnwin.p, 0, 4); cu::cuMemsetD8_v2(dhist.p, 0, 4 * 4096); cu::cuMemsetD8_v2(dlost.p, 0, 4);
 			Q.selShift = 0xffffffffu; Q.selBits = 12; Q.selHi = 0; Q.selIdx = 0; Q.thr = ~0ull; Q.thrIdx = 0;
-			if (cu::cuLaunchKernel(fProp, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuLaunchKernel(fCount, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) {
-				printf("{\"error\":\"explore claim failed\"}\n"); return 5;
-			}
+			claimPass(fProp, "explore claim");   // (every proposal before the first count)
+			claimPass(fCount, "explore count");
 			cu::cuMemcpyDtoH_v2(&nWin, dnwin.p, 4);
 			cu::cuMemcpyDtoH_v2(&nLost, dlost.p, 4);
 			if (opt(argc, argv, "debug", "0") == "1") fprintf(stderr, "layer %d: %u parents, %u candidates, %u winners, %u lost\n", d, (unsigned)nParents, Q.nCand, nWin, nLost);
@@ -291,19 +385,17 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 				std::vector<uint32_t> hist(4096);
 				cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4 * 4096);
 				int passes = 0;
-				bool ok = true;
 				uint64_t thr = ~0ull; uint32_t thrIdx = 0;
 				claimCut(hist, (uint64_t)cap, [&](bool idx, uint64_t hi, int shift, int bits) {
 					Q.selIdx = idx ? 1 : 0; Q.thr = thr; Q.selHi = hi; Q.selShift = (u32)shift; Q.selBits = (u32)bits;
 					cu::cuMemsetD8_v2(dhist.p, 0, 4 * 4096);
-					if (cu::cuLaunchKernel(fCount, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) ok = false;
+					claimPass(fCount, "explore count");
 					cu::cuMemcpyDtoH_v2(hist.data(), dhist.p, 4ull << bits);
 				}, thr, thrIdx, passes);
 				Q.selShift = 0xffffffffu; Q.selIdx = 0; Q.thr = thr; Q.thrIdx = thrIdx;
-				if (!ok) { printf("{\"error\":\"explore claim failed\"}\n"); return 5; }
 				if (opt(argc, argv, "debug", "0") == "1") fprintf(stderr, "claim layer %d: %u winners > cap %d: priorities below %016llx (at it: indices below %u), %d passes\n", d, nWin, cap, (unsigned long long)Q.thr, thrIdx, passes);
 			}
-			if (cu::cuLaunchKernel(fTake, cb, 1, 1, 256, 1, 1, 0, nullptr, aq, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore claim failed\"}\n"); return 5; }
+			claimPass(fTake, "explore take");
 		}
 		uint32_t nOut = 0, nh = 0;
 		cu::cuMemcpyDtoH_v2(&nOut, dnout.p, 4);
@@ -339,7 +431,8 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 					printf("{\"ev\":\"rejoin\",\"from\":%d,\"j\":%d,\"ticks\":%d,\"saving\":%d,\"inputs\":\"%s\"}\n", from0, j, (int)in.size(), j - from0 - (int)in.size(), in.c_str());
 					continue;
 				}
-				printf("{\"ev\":\"hit\",\"layer\":%d,\"tick\":%d,\"px\":%.3f,\"vx\":%.3f,\"gain\":%d,\"refTick\":%d,\"inputs\":\"%s\"}\n", d, from0 + (int)in.size(), h.px, h.vx, h.gain, h.refTick, in.c_str());
+				printf("{\"ev\":\"hit\",\"layer\":%d,\"tick\":%d,\"px\":%.3f,\"vx\":%.3f,\"gain\":%d,\"refTick\":%d,\"salt\":%llu,\"inputs\":\"%s\"}\n", d, from0 + (int)in.size(), h.px, h.vx, h.gain, h.refTick,
+					(unsigned long long)(P.salt + (lanes > 1 ? h.lane : 0)), in.c_str());
 			}
 			fflush(stdout);
 			hitsSeen = nh;
@@ -354,43 +447,51 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		nParents = (int)kept;
 		totalStates += kept;
 		if (!kept) { d++; break; }
-		P.nPick = nParents; P.next = (u8*)(uintptr_t)nxt;
+		P.nPick = nParents; P.next = (u8*)(uintptr_t)nxt; P.lanesNext = lanes > 1 ? (u8*)(uintptr_t)lnxt : nullptr;
 		cu::cuMemcpyHtoD_v2(dpick.p, pick.data(), 4ull * kept);
 		void* a2[] = { &P };
-		if (cu::cuLaunchKernel(fmat, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a2, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"explore materialize failed\"}\n"); return 5; }
-		std::swap(cur, nxt);
+		lk::over(ckMat, (uint64_t)nParents, 128, fmat, a2, "explore materialize", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; });
+		std::swap(cur, nxt); std::swap(lcur, lnxt);
 		if (totalStates > cellCount / 2) { printf("{\"warn\":\"the visited-cell table is half full: stopping\"}\n"); d++; break; }
-		printf("{\"ev\":\"layer\",\"layer\":%d,\"tick\":%d,\"new\":%u,\"kept\":%u,\"overflow\":%u,\"states\":%llu,\"hits\":%u,\"sec\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"twins\":%llu,\"full\":%.4f}\n",
+		printf("{\"ev\":\"layer\",\"layer\":%d,\"tick\":%d,\"new\":%u,\"kept\":%u,\"overflow\":%u,\"states\":%llu,\"hits\":%u,\"sec\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"twins\":%llu,\"full\":%.4f,\"maxLaunchMs\":%.1f}\n",
 			d + 1, from + d + 1, nOut, kept, over, (unsigned long long)totalStates, hitsSeen, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (unsigned long long)twins,
-			(double)totalStates / (cellCount / 2));
+			(double)totalStates / (cellCount / 2), lk::G.maxMs);
 		fflush(stdout);
 	}
-	tries++;
+	tries += lanes;
 	{
-		const bool ranOut = finishLayer < 0 && totalStates <= cellCount / 2 && (nParents <= 0 || d >= depthMax);
-		if (ranOut && nParents <= 0 && overflow == 0) exhaustedTries++;
-		if (!(finishTarget && ranOut && tries < salts && elapsed() < seconds)) break;
-		printf("{\"ev\":\"try\",\"salt\":%llu,\"end\":\"%s\",\"layers\":%d,\"overflow\":%llu,\"sec\":%.1f}\n", (unsigned long long)P.salt, nParents <= 0 ? "exhausted" : "depth", d,
-			(unsigned long long)overflow, elapsed());
+		const bool full = totalStates > cellCount / 2;
+		const bool ranOut = finishLayer < 0 && !full && (nParents <= 0 || d >= depthMax);
+		if (ranOut && nParents <= 0 && overflow == 0) exhaustedTries += lanes;
+		// a batch of lanes that filled the cell table: half the lanes, the same salts again (the tries do not count)
+		const bool shrink = finishTarget && finishLayer < 0 && full && lanes > 1 && elapsed() < seconds;
+		if (shrink) tries -= lanes;
+		if (!shrink && !(finishTarget && ranOut && tries < salts && elapsed() < seconds)) break;
+		const double busy = (lk::G.totalKernelMs - batchK0) / std::max(1.0, (elapsed() - batchT0) * 1000);
+		if (shrink) printf("{\"ev\":\"lanes\",\"lanes\":%d,\"from\":%d,\"why\":\"full\",\"layers\":%d,\"sec\":%.1f}\n", lanes / 2, lanes, d, elapsed());
+		else printf("{\"ev\":\"try\",\"salt\":%llu,\"lanes\":%d,\"end\":\"%s\",\"layers\":%d,\"overflow\":%llu,\"states\":%llu,\"busy\":%.2f,\"sec\":%.1f}\n", (unsigned long long)(P.salt + lanes - 1), lanes,
+			nParents <= 0 ? "exhausted" : "depth", d, (unsigned long long)overflow, (unsigned long long)totalStates, busy, elapsed());
 		fflush(stdout);
-		// the next salt, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
+		// the next salts, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
 		nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
-		P.salt++;
-		cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
-		cu::cuMemsetD8_v2(dbest.p, 0xff, 8ull * cellCount);
+		if (shrink) { lanesFull = std::min(lanesFull, lanes); lanes = std::max(1, lanes / 2); if (bestL > lanes) bestL = lanes; }
+		else {
+			P.salt += lanes;
+			if (lanesAuto) {
+				const int L2 = nextLanes();
+				if (L2 != lanes) { printf("{\"ev\":\"lanes\",\"lanes\":%d,\"from\":%d,\"why\":\"auto\",\"busy\":%.2f,\"states\":%llu,\"sec\":%.1f}\n", L2, lanes, busy, (unsigned long long)totalStates, elapsed()); fflush(stdout); }
+				lanes = L2;
+			}
+		}
+		lk::memset8(dcells.p, 0, 8ull * cellCount, "memset");
+		lk::memset8(dbest.p, 0xff, 8ull * cellCount, "memset");
 		cu::cuMemsetD8_v2(dnhits.p, 0, 4);
-		cur = dA.p; nxt = dB.p;
-		cu::cuMemcpyHtoD_v2(dA.p, start, SB);
-		lineage.clear(); nParents = 1; totalStates = 1; overflow = 0; hitsSeen = 0; hits.clear(); d = 0;
+		lineage.clear(); overflow = 0; hitsSeen = 0; hits.clear(); d = 0;
+		startBatch();
 	}
 	}
-	if (finishLayer < 0) nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
-	const char* why = finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
-	// overflow: the new cells left out over all layers (over the cap, or no table slot); "exhausted" with overflow 0 means
-	// every move was tried (up to the cells' grain), with overflow > 0 it is no proof
-	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d}\n",
-		g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
-		(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)P.salt, tries, exhaustedTries);
+	lk::onStop = nullptr;
+	finale(nullptr);
 	free(start);
 	return 0;
 }

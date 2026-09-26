@@ -72,6 +72,7 @@ struct BeamParams {
 	const u8* parents; i32 stateBytes; i32 nParents;
 	u8* next;                         // materialize: the new layer's states
 	const u32* pick; i32 nPick;       // materialize: (parent << 5 | option) per new state
+	u32 lo, hi;                       // this launch's parents (expand) or picks (materialize): [lo, hi) (launch.h)
 	BeamChild* out;
 	// guide polyline in pixel coordinates of the box centre: (gx[i], gy[i]), cumulative length gs[i]
 	const float* gx; const float* gy; const float* gs; i32 nGuide; float guideWeight;
@@ -153,6 +154,7 @@ struct BeamSel {
 	u32* pick; u32* nPick; u32 K;        // the next layer: parent << 5 | option
 	u32* over; u32* nOver; u32 overCap;  // winners over the bucket cap, in round order (for filling up)
 	u32* res; u32* nRes; u32 resCap;     // result children (finish / rejoin)
+	u32 r0, r1;                          // this launch's children (fill: over-cap entries): [r0, r1) (launch.h)
 };
 /** float -> u32 with the same order */
 EE_HD u32 floatBits(float f) {

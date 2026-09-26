@@ -58,10 +58,12 @@ async function guide(id, fromSpec, points, seconds, opts) {
 	save();
 	note(`from ${state.fromTime} (tick ${from}) along a ${pts.length}-point line, ${S} s`);
 	const args = ['beam', blob, `--ref=${ref}`, `--from=${from}`, `--guide=${gfile}`, `--seconds=${S}`, `--width=${+o.width || 32768}`,
-		`--depth=${best.complete - from}`, `--nocoins=${nc ? 1 : 0}`, `--guideWeight=${o.weight || 0.5}`, ...G.cacheArgs()];
+		`--depth=${best.complete - from}`, `--nocoins=${nc ? 1 : 0}`, `--guideWeight=${o.weight || 0.5}`, ...G.cacheArgs(), `--parent=${process.pid}`];
 	const handed = [];
 	await new Promise((resolve) => {
-		const ch = spawn(tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+		// (detached with --parent: killed with this process, eegpu could be mid-kernel, which makes Windows reset the display
+		// driver; this way it ends at its next kernel launch once this process is gone)
+		const ch = spawn(tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
 		let buf = '';
 		const pending = [];
 		ch.stdout.on('data', (d) => {

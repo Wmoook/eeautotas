@@ -26,6 +26,16 @@
 // merged), and every state equal to a later state of the run is a proven shortcut (re-checked on the CPU). Windows
 // start every --everyStep ticks (25) along the run, continuing where the last round stopped, --everyS seconds each (5).
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, families, ...).
+// GPU launch failures (eegpu's {"error":...,"launchError":true} line, exit 6 / 7 = the driver's watchdog stopped a
+// kernel, or a crash): the driver may have reset the GPU, so the searcher backs off instead of relaunching at once: it
+// waits 60 s (120 s after a second failure in a row), halves the launch target (eegpu --launch-ms, from --launchMs=50),
+// and stops for this session after 3 failures in a row or 5 in all, with a log line; the grind's CPU stages go on.
+// Other failures (out of GPU memory, no context after a driver reset: no kernel ran) are retried after 15 s, doubled
+// with every failure in a row up to 10 min (--failWait=15: the first wait); a log line for the first failures and a
+// new error text, then one every hour; a round that works starts over.
+// Quitting (SIGINT / SIGTERM, the grind gone) asks the running eegpu to stop between two launches (gpu/stop, its
+// --stopfile; jobs.js stopGpuSearcher writes it too) and never kills it: a kill while a kernel runs makes the driver
+// reset the GPU. eegpu runs detached with --parent, so it also ends at its next launch when this process is killed.
 // (--tool=<file.js>: a script that answers like `eegpu search`, for tests without a GPU.)
 const fs = require('fs');
 const path = require('path');
@@ -50,6 +60,16 @@ const LIB_MAX = 300000;   // edges kept; above it, edges that start on no known 
 const EVERY_ON = args.every !== undefined && String(args.every) !== '0';
 const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 60)), EVERY_STEP = Math.max(1, +(args.everyStep || 25)), EVERY_S = Math.max(1, +(args.everyS || 5));
 const PARENT = +(args.parent || 0);
+// eegpu's launch target (ms per kernel launch; halved after each launch failure) and the failures so far
+let launchMs = Math.max(5, Math.min(1000, +(args.launchMs || 50)));
+let launchFails = 0, launchFailsAll = 0;
+const FAILS_IN_A_ROW = 3, FAILS_IN_ALL = 5;
+// other failures in a row (no kernel launched: waits from --failWait seconds, doubled per failure, at most 10 min)
+let otherFails = 0, otherErr = '', otherLogged = 0;
+const FAIL_WAIT_S = Math.max(0.05, +(args.failWait || 15)), FAIL_WAIT_MAX_S = Math.max(FAIL_WAIT_S, 600);
+const LAUNCH_WAIT_S = Math.max(0.05, +(args.launchWait || 60));   // (the wait after a first launch failure; tests: shorter)
+/** a failed eegpu run that looks like a GPU launch failure: its launchError line, exit 6 / 7, or a crash (no JSON) */
+const isLaunchFailure = (code, sawLaunchError, done) => !done && (sawLaunchError || code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)));
 const GDIR = path.join(DIR, 'gpu');
 const STATUS = path.join(DIR, 'gpu_status.json');
 const STATE = path.join(GDIR, 'state.json');
@@ -70,14 +90,36 @@ function status(extra) {
 	Object.assign(st, extra || {}, { t: Date.now() });
 	try { C.writeAtomic(STATUS, JSON.stringify(st)); } catch (e) { /* ignore */ }
 }
-let child = null;
+let child = null, quitting = false;
+// the running eegpu's stop file (its --stopfile): killing it while a kernel runs makes the NVIDIA driver reset the GPU,
+// so quit() asks it to stop between two launches instead
+const STOPFILE = path.join(GDIR, 'stop');
 function quit(code) {
-	// (the running eegpu is not killed: killing it mid-kernel makes Windows reset the display driver; it ends by itself
-	// within its --seconds)
-	try { saveLibrary(true); saveState(); } catch (e) { /* not loaded yet */ }
-	status({ state: code ? 'error' : 'stopped', ticksPerSec: 0 });
-	process.exit(code);
+	const end = () => {
+		try { saveLibrary(true); saveState(); } catch (e) { /* not loaded yet */ }
+		status({ state: code ? 'error' : 'stopped', ticksPerSec: 0 });
+		process.exit(code);
+	};
+	if (quitting) return;
+	quitting = true;
+	const ch = child;
+	if (ch && ch.exitCode === null) {
+		// (the running eegpu is never killed: killing it mid-kernel makes Windows reset the display driver. Its stop file
+		// ends it between two launches; if it has not ended 2 s later (loading its kernels, say), it ends by itself at its
+		// next launch or within its --seconds)
+		try { fs.writeFileSync(STOPFILE, 'quit'); } catch (e) { /* it ends within its --seconds */ }
+		const t = setTimeout(end, 2000);
+		ch.once('close', () => { clearTimeout(t); end(); });
+		return;
+	}
+	end();
 }
+/** eegpu's stop options: its stop file, and this process as its parent. eegpu is started detached: Node kills the
+ *  children it did not start detached the moment it exits (also when it is killed), mid-kernel too; a detached eegpu
+ *  ends at its next kernel launch once this process is gone (--parent) or the stop file is there */
+const EEGPU_OPTS = () => [`--stopfile=${STOPFILE}`, `--parent=${process.pid}`];
+/** a new eegpu run: no stop request left over */
+const clearStop = () => { try { fs.unlinkSync(STOPFILE); } catch (e) { /* none */ } };
 process.on('SIGINT', () => quit(0));
 process.on('SIGTERM', () => quit(0));
 if (PARENT) setInterval(() => { try { process.kill(PARENT, 0); } catch (e) { quit(0); } }, 2000).unref();
@@ -396,10 +438,11 @@ function loaded(ev) {
 function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	return new Promise((resolve) => {
 		const a = ['search', blobFile, refFile, edgesFile, `--seconds=${o.seconds.toFixed(1)}`, `--nocoins=${nc ? 1 : 0}`, `--seed=${o.seed}`,
-			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, ...G.cacheArgs()];
+			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
-		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-		let buf = '', done = null, err = '';
+		clearStop();
+		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
+		let buf = '', done = null, err = '', launchError = false;
 		const at = {};
 		const base = st.ticks;
 		child.stdout.on('data', (d) => {
@@ -422,11 +465,15 @@ function runSearch(tool, blobFile, refFile, edgesFile, o) {
 						p.last = ev.at;
 					}
 				} else if (ev.ev === 'done') done = ev;
-				else if (ev.error) err = ev.error;
+				else if (ev.error) { err = ev.error; if (ev.launchError) launchError = true; }
 			}
 		});
 		child.stderr.on('data', (d) => { err += d; });
-		child.on('close', (code) => { child = null; if (done) st.ticks = base + (done.ticks || 0); resolve({ code, done, err: err.trim(), at }); });
+		child.on('close', (code) => {
+			child = null;
+			if (done) st.ticks = base + (done.ticks || 0);
+			resolve({ code, done, err: err.trim(), at, launchError: isLaunchFailure(code, launchError, done) });
+		});
 	});
 }
 
@@ -454,7 +501,8 @@ async function invoke(slot, seconds) {
 	const seed = nextSeed();
 	saveState();   // (a restart never repeats a seed, also when this invocation is cut off)
 	const r = await runSearch(tool, blobFile, path.join(GDIR, 'ref.eetas'), edgesFile, { seconds: secArg, seed, families, from, to });
-	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}` };
+	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError };
+	launchFails = 0; otherFails = 0;   // (a run that finished: the failures in a row start over)
 	const d = r.done;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);
 	let got = { added: 0, byFam: {} };
@@ -513,10 +561,11 @@ async function invoke(slot, seconds) {
 function runWindow(T) {
 	return new Promise((resolve) => {
 		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', ...G.cacheArgs()];
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
-		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-		let buf = '', done = null, err = '', added = 0, last = 0;
+		clearStop();
+		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
+		let buf = '', done = null, err = '', added = 0, last = 0, launchError = false;
 		const base = st.ticks;
 		child.stdout.on('data', (d) => {
 			buf += d;
@@ -537,11 +586,15 @@ function runWindow(T) {
 					last = ev.ticks;
 					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: `every move from tick ${T}` });
 				} else if (ev.ev === 'done') done = ev;
-				else if (ev.error) err = ev.error;
+				else if (ev.error) { err = ev.error; if (ev.launchError) launchError = true; }
 			}
 		});
 		child.stderr.on('data', (d) => { err += d; });
-		child.on('close', (code) => { child = null; if (done) st.ticks = base + (done.ticks || last); resolve({ code, done, err: err.trim(), added }); });
+		child.on('close', (code) => {
+			child = null;
+			if (done) st.ticks = base + (done.ticks || last);
+			resolve({ code, done, err: err.trim(), added, launchError: isLaunchFailure(code, launchError, done) });
+		});
 	});
 }
 /** windows from the cursor on for about ROUND_S seconds */
@@ -552,7 +605,8 @@ async function runEvery() {
 		const T = (state.every | 0) % Math.max(1, ref.n);
 		state.every = T + EVERY_STEP;
 		const r = await runWindow(T);
-		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, added, windows };
+		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError, added, windows };
+		launchFails = 0; otherFails = 0;
 		windows++; added += r.added; gpu = r.done.gpu; ticks += r.done.ticks || 0;
 		if (state.every >= ref.n) { state.every = 0; log(`GPU: every move covered the whole run (windows of ${EVERY_DEPTH} ticks every ${EVERY_STEP})`); break; }
 	}
@@ -561,11 +615,36 @@ async function runEvery() {
 }
 
 // ---------------------------------------------------------------- the round loop
-async function failed(err) {
-	status({ state: 'error', why: err, ticksPerSec: 0 });
-	log(`GPU: round failed: ${err}`);
+async function failed(err, launchError) {
+	if (launchError) {
+		// a kernel launch failed (the driver's watchdog, or a GPU error): the GPU may have been reset. Back off: a pause,
+		// shorter launches; after repeated failures no more GPU work this session
+		launchFails++; launchFailsAll++;
+		if (launchFails >= FAILS_IN_A_ROW || launchFailsAll >= FAILS_IN_ALL) {
+			const why = `${launchFails >= FAILS_IN_A_ROW ? `${launchFails} GPU kernel launches failed in a row` : `${launchFailsAll} GPU kernel launches failed`} (last: ${err})`;
+			log(`GPU: stopping the GPU searcher for this session: ${why}. The CPU stages go on; start the job again to retry the GPU.`);
+			status({ state: 'error', why: `stopped: ${why}`, ticksPerSec: 0 });
+			quit(5);
+		}
+		const wait = LAUNCH_WAIT_S * 2 ** (launchFails - 1);
+		launchMs = Math.max(5, launchMs / 2);
+		status({ state: 'waiting', why: err, ticksPerSec: 0 });
+		log(`GPU: a GPU kernel launch failed (${err}); waiting ${wait} s, then launches of ${launchMs} ms (failure ${launchFails} in a row; the searcher stops after ${FAILS_IN_A_ROW})`);
+		if (args.once) quit(4);
+		await new Promise((res) => setTimeout(res, wait * 1000));
+		return;
+	}
+	// not a launch failure (out of GPU memory, a context the driver refused, a missing file): no kernel ran, so no risk
+	// to the display driver; waits that double up to 10 min, and fewer log lines while the same error repeats
+	otherFails++;
+	const wait = Math.min(FAIL_WAIT_MAX_S, FAIL_WAIT_S * 2 ** (otherFails - 1));
+	status({ state: 'waiting', why: err, ticksPerSec: 0 });
+	if (otherFails <= 3 || err !== otherErr || Date.now() - otherLogged >= 3600e3) {
+		log(`GPU: round failed: ${err}; trying again in ${wait >= 60 ? `${(wait / 60).toFixed(0)} min` : `${+wait.toFixed(1)} s`} (failure ${otherFails} in a row)`);
+		otherErr = err; otherLogged = Date.now();
+	}
 	if (args.once) quit(4);
-	await new Promise((res) => setTimeout(res, 15000));
+	await new Promise((res) => setTimeout(res, wait * 1000));
 }
 async function main() {
 	if (!args.job || !fs.existsSync(DIR)) { console.log('usage: node src/gpusearch.js --job=<job dir>'); process.exit(2); }
@@ -599,7 +678,7 @@ async function main() {
 		// every other round: every move along the run (not the first: the systematic families go first)
 		if ((EVERY_ON && round % 2 === 0) || args.everyOnly) {
 			const e = await runEvery();
-			if (e.err) { await failed(e.err); continue; }
+			if (e.err) { await failed(e.err, e.launchError); continue; }
 			status({ state: 'running', round, edges: libSize, found: st.found + e.added, ticksPerSec: e.seconds ? Math.round(e.ticks / e.seconds) : 0,
 				lastRound: { kind: 'every move', windows: e.windows, from: e.from, to: e.to, ticks: e.ticks, seconds: e.seconds } });
 			if (e.added) { log(`GPU: every move, ticks ${e.from}-${e.to}: ${e.added} new shortcut${e.added > 1 ? 's' : ''}`); saveLibrary(false); await offer(`every move ${e.from}-${e.to}`); }
@@ -610,7 +689,7 @@ async function main() {
 		// then one random family (in turn) for the rest
 		const t0 = Date.now();
 		const texts = [];
-		let error = null, added = 0;
+		let error = null, errorLaunch = false, added = 0;
 		const slice = async (slot, share) => {
 			const until = Date.now() + share * ROUND_S * 1000;
 			while (!error && state.left[slot] > 0) {
@@ -618,7 +697,7 @@ async function main() {
 				if (left < MIN_SLICE) break;
 				await refresh();
 				const r = await invoke(slot, left);
-				if (!r.ok) { error = r.err; break; }
+				if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; break; }
 				texts.push(r.text); added += r.added;
 				if (r.added) await offer(`round ${round}`);
 			}
@@ -631,10 +710,10 @@ async function main() {
 			const left = Math.max(MIN_SLICE, (1 - SYS_SHARE - M2_SHARE) * ROUND_S, ROUND_S - (Date.now() - t0) / 1000);
 			await refresh();
 			const r = await invoke(fam, left);
-			if (!r.ok) error = r.err;
+			if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; }
 			else { texts.push(r.text); added += r.added; if (r.added) await offer(`round ${round}`); }
 		}
-		if (error) { await failed(error); continue; }
+		if (error) { await failed(error, errorLaunch); continue; }
 		status({ state: 'running', round, edges: libSize, families: famStatus() });
 		// (every round that found something, and every 10th: the rest is in gpu_status.json `families`)
 		if (added || round % 10 === 1) log(`GPU: round ${round} (${((Date.now() - t0) / 1000).toFixed(0)} s, library ${libSize}): ${texts.join('; ')}`);

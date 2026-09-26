@@ -72,13 +72,23 @@ function startJob(id, workers, opts) {
 	C.writeJSON(RUNNING_FILE, { id, workers: W, gpu: !!o.gpu });
 	return ch;
 }
+/**
+ * A running job's GPU searcher, stopped before its grind: the stop file of its eegpu (gpusearch.js STOPFILE) first, then
+ * the searcher alone, not its tree. Killing eegpu while a kernel runs makes Windows reset the display driver (nvlddmkm
+ * 153 / 4101 at every job switch on a laptop), and a tree kill (taskkill /T) reaches it; the searcher starts it detached
+ * with --parent, so it outlives the searcher and ends at its next kernel launch. After this the grind's tree kill no
+ * longer reaches it (its parent is gone). (This session's searcher only: status.json gpuPid.)
+ */
+function stopGpuSearcher(id) {
+	const rp = runningPid(id), gp = rp ? +(C.readJSON(path.join(jobDir(id), 'status.json'), {}).gpuPid || 0) : 0;
+	if (!gp || gp === rp || !pidAlive(gp)) return;
+	try { fs.writeFileSync(path.join(jobDir(id), 'gpu', 'stop'), 'stop'); } catch (e) { /* no gpu folder: it ends at its next launch anyway */ }
+	if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(gp), '/F'], { stdio: 'ignore', windowsHide: true });
+	else { try { process.kill(gp, 'SIGTERM'); } catch (e) { /* gone */ } }
+}
 function stopJob(id) {
-	// the GPU searcher first, alone (not its tree): its running eegpu is left to end by itself within its --seconds,
-	// because killing eegpu while a kernel runs makes Windows reset the display driver (nvlddmkm 153 / 4101 at every
-	// job switch on a laptop); the grind's tree kill then no longer reaches it (its parent is gone)
-	const rp = runningPid(id), gp = rp ? +(C.readJSON(path.join(jobDir(id), 'status.json'), {}).gpuPid || 0) : 0;   // (this session's searcher only)
-	if (gp && gp !== rp && pidAlive(gp) && process.platform === 'win32') spawnSync('taskkill', ['/PID', String(gp), '/F'], { stdio: 'ignore', windowsHide: true });
-	killTree(rp);
+	stopGpuSearcher(id);   // (first: the grind's tree kill must not reach eegpu)
+	killTree(runningPid(id));
 	if (fs.existsSync(path.join(jobDir(id), 'status.json'))) updateStatus(id, (st) => { st.state = 'stopped'; st.stage = ''; });
 	const r = C.readJSON(RUNNING_FILE, {});
 	if (r.id === id) { try { fs.unlinkSync(RUNNING_FILE); } catch (e) { /* gone */ } }
@@ -799,7 +809,7 @@ function formatStatus(s) {
 module.exports = {
 	formatWhere, formatReplay, formatStatus, evText, liveText,
 	JOBS, DATA, RUNNING_FILE, jobDir, slug, resolve, levelJsonOf, loadJobLevel, pct,
-	pidAlive, runningPid, killTree, updateStatus, startJob, stopJob, deleteJob, importJob,
+	pidAlive, runningPid, killTree, stopGpuSearcher, updateStatus, startJob, stopJob, deleteJob, importJob,
 	summary, listJobs, focusState, finishReport, tryCandidate, inboxResult, prunePieces, where, replayInfo, renderJob, focus, logTail,
 	parseInputs, probe, probeContext, stamp, START_MODES, normStart,
 	MAX_BLOCK_ID, MAX_CELLS, MAX_TICKS, MAX_PROBE_INPUTS,

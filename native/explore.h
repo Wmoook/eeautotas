@@ -16,7 +16,7 @@
 
 namespace ee {
 
-struct ExploreHit { u32 parent; u8 option, jumpOption, pad0, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };
+struct ExploreHit { u32 parent; u8 option, jumpOption, lane, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };   // (lane: --lanes)
 
 struct ExploreParams {
 	Level L;
@@ -24,6 +24,7 @@ struct ExploreParams {
 	const u64* htKeys; const i32* htVals; u32 htMask; const u32* qbits; i32 nocoins;   // target 4: the run's states (exact rejoins)
 	const u8* parents; i32 stateBytes; i32 nParents;
 	u8* next; const u32* pick; i32 nPick;
+	u32 lo, hi;                        // this launch's parents (expand) or picks (materialize): [lo, hi) (launch.h)
 	u64* cells; u32 cellMask;          // the visited-cell set (open addressing, 0 = empty)
 	u32* out; u32* nOut; u32 outCap;   // new children: parent << 5 | option
 	ExploreHit* hits; u32* nHits; u32 hitCap;
@@ -37,6 +38,7 @@ struct ExploreParams {
 	double cqx, cqv;                   // the coarse cells: px x cqx and vx x cqv to whole numbers (0.5 and 16 = 2 px, 1/16 px/tick)
 	i32 discrete;                      // 1: cells also key on Sim::hashDiscrete (coins, keys, switches, door phase, effects)
 	u64 salt;                          // mixed into each child's content hash: which state represents a cell (0 = none)
+	const u8* lanes; u8* lanesNext;    // --lanes: each frontier state's lane (lane k: salt + k; lanes never share a cell), or null
 	i32 keepRest;                      // 1 (time doors): a ball at rest stays in the frontier (it can wait for a door)
 	i32 target;                        // 0: ground jump on the floor (above); 1: reach the region below
 	i32 reachX0, reachX1, reachY0, reachY1;   // target 1: the box centre's tile in this rectangle
@@ -66,6 +68,7 @@ struct ExploreClaim {
 	u64 selHi; u32 selShift, selBits;  // selShift != ~0: count the selBits bits at selShift of the key among the winners with (key >> (selShift + selBits)) == selHi
 	u32 selIdx;                        // the key: 0 the priority, 1 the candidate index (of the winners with priority thr)
 	u32* nLost;                        // children dropped because their cell found no slot (64 probes), counted
+	u32 lo, hi;                        // this launch's candidates: [lo, hi) (launch.h; every pass in order over all of them)
 };
 #define EE_SLOT_DROP 0xffffffffu
 #define EE_SLOT_REST 0xfffffffeu

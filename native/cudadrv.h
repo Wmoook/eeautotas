@@ -44,6 +44,14 @@ CU_FN(CUresult, cuGetErrorString, (CUresult, const char**))
 CU_FN(CUresult, cuCtxSetLimit, (int, size_t))
 CU_FN(CUresult, cuCtxGetLimit, (size_t*, int))
 CU_FN(CUresult, cuFuncGetAttribute, (int*, int, CUfunction))
+typedef void* CUevent; typedef void* CUstream;
+// (optional: the launch timing of launch.h; without them the host clock alone)
+CU_FN(CUresult, cuEventCreate, (CUevent*, unsigned))
+CU_FN(CUresult, cuEventRecord, (CUevent, CUstream))
+CU_FN(CUresult, cuEventElapsedTime, (float*, CUevent, CUevent))
+CU_FN(CUresult, cuEventQuery, (CUevent))         // (optional: launch.h's waits; without them a spin in cuCtxSynchronize)
+CU_FN(CUresult, cuEventSynchronize, (CUevent))
+CU_FN(CUresult, cuMemGetInfo_v2, (size_t*, size_t*))   // (optional: explore --lanes sizes its cell table by the free memory)
 
 typedef int nvrtcResult; typedef void* nvrtcProgram;
 CU_FN(nvrtcResult, nvrtcVersion, (int*, int*))
@@ -57,8 +65,10 @@ CU_FN(nvrtcResult, nvrtcDestroyProgram, (nvrtcProgram*))
 #undef CU_FN
 
 inline std::string lastError;
+inline CUresult lastCode = 0;   // (the last failure's code: 2 = CUDA_ERROR_OUT_OF_MEMORY)
 
 inline bool fail(const char* what, CUresult r) {
+	lastCode = r;
 	const char* s = "?";
 	if (cuGetErrorString) cuGetErrorString(r, &s);
 	char b[512]; snprintf(b, sizeof b, "%s failed: CUDA error %d (%s)", what, r, s);
@@ -77,6 +87,12 @@ inline bool loadDriver() {
 	L(cuMemAlloc_v2) L(cuMemFree_v2) L(cuMemcpyHtoD_v2) L(cuMemcpyDtoH_v2) L(cuMemsetD8_v2) L(cuLaunchKernel)
 	L(cuCtxSynchronize) L(cuGetErrorString) L(cuCtxSetLimit) L(cuCtxGetLimit) L(cuFuncGetAttribute)
 #undef L
+	cuEventCreate = (t_cuEventCreate)GetProcAddress(m, "cuEventCreate");   // (optional)
+	cuEventRecord = (t_cuEventRecord)GetProcAddress(m, "cuEventRecord");
+	cuEventElapsedTime = (t_cuEventElapsedTime)GetProcAddress(m, "cuEventElapsedTime");
+	cuEventQuery = (t_cuEventQuery)GetProcAddress(m, "cuEventQuery");
+	cuEventSynchronize = (t_cuEventSynchronize)GetProcAddress(m, "cuEventSynchronize");
+	cuMemGetInfo_v2 = (t_cuMemGetInfo_v2)GetProcAddress(m, "cuMemGetInfo_v2");
 	return true;
 }
 

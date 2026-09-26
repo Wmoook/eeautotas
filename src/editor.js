@@ -282,7 +282,8 @@ function check(buf) {
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
-		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : [])]; } },
+		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []),
+		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -310,6 +311,13 @@ function cpuWorkers(want) {
 // floor or ceiling hit leaves) never shares a cell with a near miss, and which state stands for a cell is fixed (the
 // nearest to the trophy by the reach field, then the state itself): a pass on the same level gives the same states.
 const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
+// the salt tries (the finest pass, and any pass's salt reruns) run up to LANES salts side by side in one eegpu process
+// (explore --lanes=auto: lane k = salt + k, cells of its own; the tool starts with --lanesStart (the last run's lanes,
+// 1 at first) and doubles them while that raises the tries per second by 10% or more, halves them when a batch fills
+// the cell table). Measured on the RTX 3080 Laptop GPU (throttled to 210-780 MHz, shared with a job's GPU searcher):
+// a try of the finest pass on user30s keeps the GPU ~65% busy with one lane; fixed 4 or more lanes were no faster there
+// and filled the table on the shaft level, so the tool picks the count by what it measures.
+const LANES = 8;
 /** the exploration's cells in pass p: px x cqx, vx x cqv to whole numbers; py x qy, vy x qvy likewise (0 = exact) */
 function passCells(p) {
 	const v = 2 ** Math.max(0, p);   // (the speed cells: pass 0's in the coarser passes)
@@ -386,10 +394,20 @@ function state() {
 }
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 const running = () => busy.size > 0;
-/** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped') */
+/** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped'). The GPU tool is asked to stop
+ *  (its stop file: it ends between two kernel launches, within about one; killing it while a kernel runs makes the
+ *  NVIDIA driver reset the GPU) and killed only if it is still running 2 s later; the CPU search is killed. */
+const HALT_KILL_MS = 2000;
 function halt(ch, why) {
 	if (!alive(ch)) return;
 	ch.stopWhy = ch.stopWhy || why;
+	if (ch.stopFile) {
+		if (ch.haltTimer) return;
+		try { fs.writeFileSync(ch.stopFile, why); } catch (e) { /* the kill below */ }
+		ch.haltTimer = setTimeout(() => { if (alive(ch)) { try { ch.kill(); } catch (e) { /* gone */ } } }, HALT_KILL_MS);
+		if (ch.haltTimer.unref) ch.haltTimer.unref();
+		return;
+	}
 	try { ch.kill(); } catch (e) { /* gone */ }
 }
 
@@ -400,7 +418,8 @@ function halt(ch, why) {
  * gpu: the server's GPU processor record ({available, why}): without one (or without the native engine, or on a level
  * it cannot run) the CPU search runs alone, with a note. Throws with `problems` when the level is not ready.
  * test (test/editor.js; not from HTTP): { tool: [command, ...arguments] } runs that instead of the native engine;
- * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js.
+ * cpu: false leaves the CPU search out, [command, ...arguments] runs that instead of node src/goexplore.js; beams:
+ * false leaves the GPU beams out (measurements of "every move" alone).
  */
 function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
@@ -440,9 +459,12 @@ function start(b, gpu, test) {
 	const noWayUp = rf.mode === 'physics' && startCost < 0;
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
 	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
-	const which = [...(noGpu ? [] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
+	const beams = !(test && test.beams === false);
+	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
+	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
+	const lanes = Number.isInteger(+b.lanes) && +b.lanes >= 1 ? Math.min(64, +b.lanes) : LANES;
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
 	const cpuOnly = noGpu ? `No GPU search: ${noGpu}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
 		`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.` : '';
@@ -453,14 +475,14 @@ function start(b, gpu, test) {
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], cpuOnly, workers: cpu ? workers : 0,
 		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
-			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0,
+			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${width} states per tick`}, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu ? ` (${workers} CPU thread${workers > 1 ? 's' : ''})` : ''));
 	if (cpuOnly) note(cpuOnly);
 	save();
 	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move'})`);
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed, salts: !(test && test.salts === false) },
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: rf.mode === 'physics', workers, seed, salts: !(test && test.salts === false), lanes },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')] };
 	kids = which.map((k, n) => launch(n));
 	return state();
@@ -481,6 +503,9 @@ function launch(n) {
 	// salts: the tool itself starts over with the next salt after a try without a route (the finest pass, the last rung of
 	// the ladder, from its first run; any pass in a salt rerun)
 	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0) };
+	// the salt tries run several salts side by side (--lanes=auto: from V.lanes, the last run's; the tool doubles them
+	// while that raises the tries per second, up to cur.opts.lanes, and halves them when a batch fills the table)
+	if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
 	if (V.key === 'explore') {
 		q.seconds = V.share = passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
@@ -488,17 +513,24 @@ function launch(n) {
 	}
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
+	// the GPU tool's stop file (halt: it ends between two kernel launches; a kill during a kernel resets the driver)
+	const stopFile = cpu ? '' : path.join(dir(), `stop_${n}`);
+	if (stopFile) { try { fs.unlinkSync(stopFile); } catch (e) { /* none */ } }
 	// the CPU search: node src/goexplore.js (its stdin takes the depth bound: tellCpu); eegpu with the kernel cache (the
 	// strategies start together: one compiles the kernels after an update, the others wait for it and load them)
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs()];
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined });
+	// (the GPU tool detached, with this process as its --parent: Node kills the children it did not start detached the
+	// moment it exits, mid-kernel too; a detached eegpu ends at its next kernel launch once the app is gone)
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--parent=${process.pid}`];
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });
+	ch.stopFile = stopFile;
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
 	// (the CPU search searches at once; an eegpu process from its ready event)
 	V.launchedAt = Date.now();
 	V.readyAt = cpu ? V.launchedAt : 0;
-	let hits = 0, end = '', overflow = null, lastSalt = 0;
+	let hits = 0, end = '', overflow = null, lastSalt = 0, lanesNow = q.lanes ? q.lanes.start : 1;
+	const lanesRun = lanesNow;   // (this run's first batch: salts q.salt .. q.salt + lanesRun - 1 at least)
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
 	const totals = () => {
@@ -533,13 +565,14 @@ function launch(n) {
 		if (!mine()) return;
 		if (ev.ev === 'ready') { if (!V.readyAt) { ready(ev); save(); } return; }
 		if (!V.readyAt && !ev.error) ready(null);
-		if (cpu && ch.stopWhy && ev.ev === 'progress') return;   // (halted: its state stays as the halt left it)
+		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
+		if (ch.stopWhy && (ev.ev === 'progress' || ev.ev === 'layer' || ev.ev === 'try')) return;
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
-					`cells of ${passGrain(V.pass)}`;
+					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu) {
 				V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
 					(Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') + (V.found ? ', looking for a faster route' : '');
@@ -555,12 +588,19 @@ function launch(n) {
 			found(ev.inputs, n, cpu);
 		} else if (ev.ev === 'try') {
 			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
+			// (a batch of --lanes salts side by side: one event for its ev.lanes tries)
 			if (ev.end === 'exhausted' && ev.overflow === 0 && !V.depthCap && !V.found && V.pass >= 0) {
-				V.tries = (V.tries || 0) + 1;
+				V.tries = (V.tries || 0) + (ev.lanes || 1);
 				if (!V.exhausted) V.exhausted = { pass: V.pass, tick: ev.layers, grain: passGrain(V.pass) };
 				yieldBeams(n);
 			}
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
+			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
+		} else if (ev.ev === 'lanes') {
+			// the tool changed how many salts it tries side by side: a batch filled the cell table (it runs them again with
+			// fewer), or (--lanes=auto) the tries per second said so; the next run starts with that many
+			lanesNow = V.lanes = ev.lanes;
+			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
 		} else if (ev.ev === 'closest') {
@@ -576,10 +616,12 @@ function launch(n) {
 			// the situations the exploration left out of its over-full layers (null: the engine does not say)
 			overflow = Number.isFinite(ev.overflow) ? ev.overflow : null;
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
+			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
 		} else if (ev.error) {
 			V.error = ev.error;
 			note(`${V.label}: error: ${ev.error}`);
+			if (!cpu && ev.launchError) gpuFailed(n);
 			save();
 		}
 	};
@@ -599,9 +641,18 @@ function launch(n) {
 	ch.on('error', (e) => { err += e.message; });
 	ch.on('close', (code) => {
 		busy.delete(ch);
+		if (ch.haltTimer) clearTimeout(ch.haltTimer);
 		if (!mine()) return;
 		V.live = false;
 		if (V.readyAt) { V.usedMs += Date.now() - V.readyAt; V.readyAt = 0; }   // (its search time; the next process loads first)
+		// eegpu's kernel launch failed (exit 6, 7 = the driver's watchdog) or it crashed: the GPU may have been reset.
+		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
+		if (!cpu && !ch.stopWhy && !V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) {
+			V.error = `the GPU tool ${code === 7 ? 'was stopped by the display driver\'s watchdog' : code === 6 ? 'had a GPU launch failure' : `crashed (exit code ${code})`}` +
+				`${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 200)}` : ''}`;
+			note(`${V.label}: error: ${V.error}`);
+		}
+		if (!cpu && V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) gpuFailed(n);
 		if (V.key === 'explore') {
 			// how this pass ended: why the editor stopped it, else the tool's own verdict
 			const how = ch.stopWhy || (code === 0 && !V.error ? end : '');
@@ -613,7 +664,7 @@ function launch(n) {
 			const why = !verdict ? '' : V.pass < 0 ? ' (coarse cells: that proves little)' : overflow === null ? ' (the engine does not say whether full layers were cut)'
 				: overflow > 0 ? ` (${overflow.toLocaleString('en-US')} situations were cut from full layers)` : '';
 			if (verdict && !why && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
-			if (verdict && !why) V.tries = (V.tries || 0) + 1;
+			if (verdict && !why) V.tries = (V.tries || 0) + lanesNow;   // (its last batch's tries)
 			const left = S.seconds - usedSec(V);
 			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? S.result.ticks : 0, left) : null;
 			if (next !== null && S.running && !S.halted && S.stage !== 'stopped' && left > 2) {
@@ -632,10 +683,13 @@ function launch(n) {
 			// salts of 13, 1.2 s each), so each salt explores another merged graph
 			if (next === null && cur.opts.salts && (how === 'exhausted' || how === 'depth' || how === 'finish' || how === 'beaten') && S.running && !S.halted &&
 				S.stage !== 'stopped' && left > 2 && !V.error) {
-				V.salt = Math.max(V.salt || 0, lastSalt) + 1;
+				// (the next salt after the last one tried: the tool reports it; else this run's first batch covered lanesRun)
+				V.salt = Math.max((V.salt || 0) + lanesRun - 1, lastSalt) + 1;
 				if (how === 'exhausted' && V.pass >= 0 && overflow === 0) yieldBeams(n);
-				if (V.salt === 1 || V.salt % 10 === 0) {
-					note(`${V.label}: ${how === 'exhausted' ? `every situation tried at tick ${V.layer}` : 'no faster route'}; again with other states standing for merged situations (try ${V.salt + 1})`);
+				if (!V.saltNoted || V.salt - V.saltNoted >= 10) {
+					V.saltNoted = V.salt;
+					note(`${V.label}: ${how === 'exhausted' ? `every situation tried at tick ${V.layer}` : 'no faster route'}; again with other states standing for merged situations (try ${V.salt + 1}` +
+						`${V.lanes > 1 ? `, ${V.lanes} side by side` : ''})`);
 				}
 				Object.assign(V, { passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
 				kids[n] = launch(n);
@@ -670,11 +724,28 @@ function yieldBeams(n) {
 	if (S.result) return;
 	for (let k = 0; k < kids.length; k++) {
 		const Q = S.strategies[k];
-		if (k === n || !alive(kids[k]) || (Q.key !== 'goal' && Q.key !== 'guide')) continue;
+		// (a beam already told to stop is still alive until its process exits: noted once)
+		if (k === n || !alive(kids[k]) || kids[k].stopWhy || (Q.key !== 'goal' && Q.key !== 'guide')) continue;
 		Q.state = 'stopped'; Q.detail = 'gave the GPU to every move\'s tries';
 		halt(kids[k], 'stopped');
 		note(`${Q.label}: stopped (every move tried every situation; its tries with other states get the GPU)`);
 	}
+}
+/**
+ * A GPU strategy's kernel launch failed (eegpu's {"error":...,"launchError":true}, exit 6 / 7 = the display driver's
+ * watchdog, or a crash): the driver may have reset the GPU. The other GPU strategies stop too, and none is relaunched
+ * (no next pass, no salt rerun); the CPU search goes on. The page shows the error with the strategy.
+ */
+function gpuFailed(n) {
+	if (S.gpuFailed) return;
+	S.gpuFailed = true;
+	for (let k = 0; k < kids.length; k++) {
+		const Q = S.strategies[k];
+		if (k === n || Q.cpu || !alive(kids[k]) || kids[k].stopWhy) continue;
+		Q.state = 'stopped'; Q.detail = 'the GPU failed';
+		halt(kids[k], 'stopped');
+	}
+	note(`the GPU failed: the GPU searches stop${S.strategies.some((q) => q.cpu) ? ' (the CPU search goes on)' : ''}; search again in a minute or two (a hot GPU slows down)`);
 }
 /** all strategies have ended: the verdict */
 function finish() {
@@ -822,4 +893,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES };
