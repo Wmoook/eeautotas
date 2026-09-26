@@ -386,7 +386,7 @@ function loaded(ev) {
 function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	return new Promise((resolve) => {
 		const a = ['search', blobFile, refFile, edgesFile, `--seconds=${o.seconds.toFixed(1)}`, `--nocoins=${nc ? 1 : 0}`, `--seed=${o.seed}`,
-			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`];
+			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 		let buf = '', done = null, err = '';
@@ -503,7 +503,7 @@ async function invoke(slot, seconds) {
 function runWindow(T) {
 	return new Promise((resolve) => {
 		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000'];
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 		let buf = '', done = null, err = '', added = 0, last = 0;

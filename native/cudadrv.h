@@ -7,7 +7,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdio>
+#include <cstdint>
+#include <cstring>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <chrono>
 
 namespace cu {
 
@@ -116,15 +121,83 @@ struct Device {
 	}
 };
 
-/** Loads PTX text; the driver compiles it for this GPU (cached by the driver). */
-inline bool loadModule(CUmodule* mod, const std::string& ptx) {
+/** Loads a module image: PTX text (the driver compiles it for this GPU, cached by the driver) or a cubin. */
+inline bool loadImage(CUmodule* mod, const void* image) {
 	static char errlog[16384];
 	errlog[0] = 0;
 	int opts[] = { JIT_ERROR_LOG_BUFFER, JIT_ERROR_LOG_BUFFER_SIZE_BYTES };
 	void* vals[] = { errlog, (void*)(size_t)sizeof errlog };
-	CUresult r = cuModuleLoadDataEx(mod, ptx.c_str(), 2, opts, vals);
+	CUresult r = cuModuleLoadDataEx(mod, image, 2, opts, vals);
 	if (r) { fail("cuModuleLoadDataEx", r); lastError += std::string(": ") + errlog; return false; }
 	return true;
+}
+inline bool loadModule(CUmodule* mod, const std::string& ptx) { return loadImage(mod, ptx.c_str()); }
+
+// ------------------------------------------------------------------ the kernel cache (--cachedir)
+// The driver compiles the PTX for the GPU on the CPU at the first load (70-190 s for a 7.8 MB module on a busy laptop
+// CPU) and keeps the machine code in its JIT cache (%APPDATA%\NVIDIA\ComputeCache: 1 GiB shared by every CUDA program,
+// the least recently used entries dropped). Processes that load the same module at once (the Find a route strategies)
+// each compile it: 3 at once were ready after 159 s, against 69 s for one. With a cache folder:
+// - the driver's JIT cache moves there (CUDA_CACHE_PATH, set before nvcuda.dll loads; CUDA_CACHE_MAXSIZE 128 MiB unless
+//   set: about 9 modules of 13 MB, the driver drops the least recently used beyond it), so other programs and old builds
+//   do not push the current one out, and old builds do not pile up;
+// - the load holds the named mutex Local\eegpu-jit-<FNV-64 of the PTX>_sm<cc>: the first process compiles, the others
+//   wait for it and then find the machine code in the cache (a fraction of a second).
+// The machine code stays the driver's own compile of the PTX. (Its JIT linker, cuLink, gives a cubin the app could keep,
+// but it compiles relocatable code with another register allocation: search_8 194 registers instead of 168, and Find a
+// route's expand kernels ran 20-25% slower, measured launch by launch in one process.)
+
+/** how loadModuleCached got the kernels (the ready event's "module"): "cache" (the driver's cache had them),
+ *  "compiled" (the driver compiled them here), "ptx" (no cache folder: the driver's default cache) */
+struct ModuleLoad { std::string how = "ptx"; double waitMs = 0; };
+
+inline uint64_t fnv64(const std::string& s) {
+	uint64_t h = 0xcbf29ce484222325ull;
+	for (unsigned char c : s) { h ^= c; h *= 0x100000001b3ull; }
+	return h;
+}
+/** the bytes in a folder and its subfolders (the driver's cache: an index and a few levels of folders) */
+inline uint64_t folderBytes(const std::string& dir, int depth = 0) {
+	uint64_t n = 0;
+	WIN32_FIND_DATAA fd;
+	HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
+	if (h == INVALID_HANDLE_VALUE) return 0;
+	do {
+		if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+		if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (depth < 4) n += folderBytes(dir + "\\" + fd.cFileName, depth + 1); }
+		else n += ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+	} while (FindNextFileA(h, &fd));
+	FindClose(h);
+	return n;
+}
+/** the driver's JIT cache goes to `dir` (before loadDriver: the driver reads these when it loads) */
+inline void useJitCache(const std::string& dir) {
+	CreateDirectoryA(dir.c_str(), nullptr);
+	SetEnvironmentVariableA("CUDA_CACHE_PATH", dir.c_str());
+	char v[64];
+	if (!GetEnvironmentVariableA("CUDA_CACHE_MAXSIZE", v, sizeof v)) SetEnvironmentVariableA("CUDA_CACHE_MAXSIZE", "134217728");
+}
+/** loadModule, one compile at a time per module and GPU (dir: the cache folder, useJitCache'd; empty: the plain load) */
+inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::string& dir, int ccMajor, int ccMinor, ModuleLoad& info) {
+	info = ModuleLoad();
+	if (dir.empty()) return loadModule(mod, ptx);
+	char key[64];
+	snprintf(key, sizeof key, "%016llx_sm%d%d", (unsigned long long)fnv64(ptx), ccMajor, ccMinor);
+	HANDLE mx = CreateMutexA(nullptr, FALSE, (std::string("Local\\eegpu-jit-") + key).c_str());
+	typedef std::chrono::steady_clock Clk;
+	const auto w0 = Clk::now();
+	// (after 20 minutes it loads anyway; the mutex of an owner that died is abandoned: then it is ours)
+	const DWORD w = mx ? WaitForSingleObject(mx, 20 * 60 * 1000) : WAIT_FAILED;
+	info.waitMs = std::chrono::duration<double, std::milli>(Clk::now() - w0).count();
+	const uint64_t before = folderBytes(dir);
+	const auto l0 = Clk::now();
+	const bool ok = loadModule(mod, ptx);
+	// (a hit takes well under a second; a compile adds megabytes, unless the driver dropped as much to make room)
+	const double ms = std::chrono::duration<double, std::milli>(Clk::now() - l0).count();
+	info.how = folderBytes(dir) > before + 65536 || ms > 5000 ? "compiled" : "cache";
+	if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) ReleaseMutex(mx);
+	if (mx) CloseHandle(mx);
+	return ok;
 }
 
 /** A device buffer. */

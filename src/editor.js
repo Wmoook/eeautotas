@@ -488,8 +488,9 @@ function launch(n) {
 	}
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
-	// the CPU search: node src/goexplore.js (its stdin takes the depth bound: tellCpu)
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args];
+	// the CPU search: node src/goexplore.js (its stdin takes the depth bound: tellCpu); eegpu with the kernel cache (the
+	// strategies start together: one compiles the kernels after an update, the others wait for it and load them)
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs()];
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined });
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
@@ -515,14 +516,17 @@ function launch(n) {
 		const now = Date.now();
 		V.readyAt = now;
 		V.prepSec = Math.round((now - V.launchedAt) / 100) / 10;
-		if (ev) V.load = { loadMs: ev.loadMs, allocMs: ev.allocMs, module: ev.module || null };
+		if (ev) V.load = { loadMs: ev.loadMs, allocMs: ev.allocMs, module: ev.module || null, waitMs: ev.waitMs || 0 };
 		if (!S.searchStarted) {
 			S.searchStarted = now;
 			S.prepSec = (now - S.started) / 1000;
 		}
 		if (V.prepSec >= 5) {
-			note(`${V.label}: the GPU engine took ${V.prepSec.toFixed(0)} s to start` + (ev && Number.isFinite(ev.loadMs) ? ` (kernels ${(ev.loadMs / 1000).toFixed(1)} s, ` +
-				`memory ${(ev.allocMs / 1000).toFixed(1)} s)` : '') + '; the search time counts from now');
+			// (module: "compiled" = this process compiled the kernels for the card; "cache" after a wait = another one did)
+			const how = !ev || !Number.isFinite(ev.loadMs) ? '' : ev.module === 'compiled' ? ` (compiling the kernels for this graphics card: ${(ev.loadMs / 1000).toFixed(0)} s)`
+				: ev.waitMs >= 1000 ? ` (waiting for another strategy's compile of the kernels: ${(ev.waitMs / 1000).toFixed(0)} s)`
+				: ` (kernels ${(ev.loadMs / 1000).toFixed(1)} s, memory ${(ev.allocMs / 1000).toFixed(1)} s)`;
+			note(`${V.label}: the GPU engine took ${V.prepSec.toFixed(0)} s to start${how}; the search time counts from now`);
 		}
 	};
 	const onEvent = (ev) => {
