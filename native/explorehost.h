@@ -16,6 +16,9 @@
 // the total in the done event) counts the new cells left out: over the cap, or finding no slot in the cell table; an
 // "end":"exhausted" proves that no move was left untried (up to the cells' grain) only with "overflow":0. "twins" (done):
 // children not simulated because a lower option gives the same state (search.h canonOption); "ticks" counts the rest.
+// --salt=N mixes N into the tie-break that picks which state stands for a cell (another merged graph); --salts=K
+// (--finish) starts over with the next salt after a try that ran through its depth without a finish ({"ev":"try"});
+// done: "salt" = the last salt tried, "tries", "exhaustedTries" (tries that ran out of situations with no overflow).
 #pragma once
 
 /** A radix select over a key (the claim's priority, or a candidate index): the key of the winner of rank k (0-based,
@@ -244,7 +247,13 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		for (int k = d - 1; k >= 0; k--) { const uint32_t pk = lineage[k][p]; s[k] = (char)('0' + option((int)(pk & 31))); p = pk >> 5; }
 		return s;
 	};
+	// --salts=K (with --finish): a try that goes through its whole depth without a finish (it ran out of situations, or
+	// reached --depth) starts over from the start with the next salt (another state stands for each cell: another merged
+	// graph), up to K tries or the time; {"ev":"try",...} after each such try
+	const int salts = std::max(1, atoi(opt(argc, argv, "salts", "1").c_str()));
+	int tries = 0, exhaustedTries = 0;
 	int d = 0;
+	for (;;) {
 	for (; d < depthMax && nParents > 0 && elapsed() < seconds; d++) {
 		cu::cuMemsetD8_v2(dnout.p, 0, 4);
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layer = d;
@@ -355,13 +364,32 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			(double)totalStates / (cellCount / 2));
 		fflush(stdout);
 	}
+	tries++;
+	{
+		const bool ranOut = finishLayer < 0 && totalStates <= cellCount / 2 && (nParents <= 0 || d >= depthMax);
+		if (ranOut && nParents <= 0 && overflow == 0) exhaustedTries++;
+		if (!(finishTarget && ranOut && tries < salts && elapsed() < seconds)) break;
+		printf("{\"ev\":\"try\",\"salt\":%llu,\"end\":\"%s\",\"layers\":%d,\"overflow\":%llu,\"sec\":%.1f}\n", (unsigned long long)P.salt, nParents <= 0 ? "exhausted" : "depth", d,
+			(unsigned long long)overflow, elapsed());
+		fflush(stdout);
+		// the next salt, from the start again (a closest attempt not printed yet goes out first: it walks this try's lineage)
+		nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
+		P.salt++;
+		cu::cuMemsetD8_v2(dcells.p, 0, 8ull * cellCount);
+		cu::cuMemsetD8_v2(dbest.p, 0xff, 8ull * cellCount);
+		cu::cuMemsetD8_v2(dnhits.p, 0, 4);
+		cur = dA.p; nxt = dB.p;
+		cu::cuMemcpyHtoD_v2(dA.p, start, SB);
+		lineage.clear(); nParents = 1; totalStates = 1; overflow = 0; hitsSeen = 0; hits.clear(); d = 0;
+	}
+	}
 	if (finishLayer < 0) nearest.print(elapsed(), true, prefixStr, from0, inputsOf);
 	const char* why = finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
 	// overflow: the new cells left out over all layers (over the cap, or no table slot); "exhausted" with overflow 0 means
 	// every move was tried (up to the cells' grain), with overflow > 0 it is no proof
-	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d}\n",
+	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d}\n",
 		g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
-		(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap);
+		(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)P.salt, tries, exhaustedTries);
 	free(start);
 	return 0;
 }

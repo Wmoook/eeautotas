@@ -270,7 +270,7 @@ function check(buf) {
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
-		...(q.salt ? [`--salt=${q.salt}`] : [])]; } },
+		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : [])]; } },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 };
@@ -406,7 +406,9 @@ function start(b, gpu, test) {
 function launch(n) {
 	const V = S.strategies[n];
 	const left = Math.max(1, Math.round(S.seconds - (Date.now() - S.started) / 1000));
-	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0 };
+	// salts: the tool itself starts over with the next salt after a try without a route (the finest pass, the last rung of
+	// the ladder, from its first run; any pass in a salt rerun)
+	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0) };
 	if (V.key === 'explore') {
 		q.seconds = V.share = passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
@@ -415,7 +417,7 @@ function launch(n) {
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const ch = spawn(cur.tool, [...cur.toolArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 	busy.add(ch);
-	let hits = 0, end = '', overflow = null;
+	let hits = 0, end = '', overflow = null, lastSalt = 0;
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
 	const totals = () => {
@@ -444,6 +446,14 @@ function launch(n) {
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			found(ev.inputs, n);
+		} else if (ev.ev === 'try') {
+			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
+			if (ev.end === 'exhausted' && ev.overflow === 0 && !V.depthCap && !V.found && V.pass >= 0) {
+				V.tries = (V.tries || 0) + 1;
+				if (!V.exhausted) V.exhausted = { pass: V.pass, tick: ev.layers, grain: passGrain(V.pass) };
+				yieldBeams(n);
+			}
+			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
 		} else if (ev.ev === 'closest') {
 			closer(ev, n);
 		} else if (ev.ev === 'hit') {
@@ -456,6 +466,7 @@ function launch(n) {
 			end = ev.end || '';
 			// the situations the exploration left out of its over-full layers (null: the engine does not say)
 			overflow = Number.isFinite(ev.overflow) ? ev.overflow : null;
+			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
 		} else if (ev.error) {
 			V.error = ev.error;
@@ -491,6 +502,7 @@ function launch(n) {
 			const why = !verdict ? '' : V.pass < 0 ? ' (coarse cells: that proves little)' : overflow === null ? ' (the engine does not say whether full layers were cut)'
 				: overflow > 0 ? ` (${overflow.toLocaleString('en-US')} situations were cut from full layers)` : '';
 			if (verdict && !why && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
+			if (verdict && !why) V.tries = (V.tries || 0) + 1;
 			const left = S.seconds - (Date.now() - S.started) / 1000;
 			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? S.result.ticks : 0, left) : null;
 			if (next !== null && S.running && !S.halted && S.stage !== 'stopped' && left > 2) {
@@ -509,8 +521,8 @@ function launch(n) {
 			// salts of 13, 1.2 s each), so each salt explores another merged graph
 			if (next === null && cur.opts.salts && (how === 'exhausted' || how === 'depth' || how === 'finish' || how === 'beaten') && S.running && !S.halted &&
 				S.stage !== 'stopped' && left > 2 && !V.error) {
-				if (how === 'exhausted' && !V.depthCap) V.tries = (V.tries || 0) + 1;
-				V.salt = (V.salt || 0) + 1;
+				V.salt = Math.max(V.salt || 0, lastSalt) + 1;
+				if (how === 'exhausted' && V.pass >= 0 && overflow === 0) yieldBeams(n);
 				if (V.salt === 1 || V.salt % 10 === 0) {
 					note(`${V.label}: ${how === 'exhausted' ? `every situation tried at tick ${V.layer}` : 'no faster route'}; again with other states standing for merged situations (try ${V.salt + 1})`);
 				}
@@ -531,6 +543,21 @@ function launch(n) {
 		else save();
 	});
 	return ch;
+}
+/**
+ * "every move" (strategy n) tried every situation at a fine grain with nothing cut and found no route: the GPU beams (a
+ * subset of those situations, exact) give way, so its tries with other salts get the whole GPU (a beam beside them made
+ * them about 3x slower on the shaft level).
+ */
+function yieldBeams(n) {
+	if (S.result) return;
+	for (let k = 0; k < kids.length; k++) {
+		const Q = S.strategies[k];
+		if (k === n || !alive(kids[k]) || (Q.key !== 'goal' && Q.key !== 'guide')) continue;
+		Q.state = 'stopped'; Q.detail = 'gave the GPU to every move\'s tries';
+		halt(kids[k], 'stopped');
+		note(`${Q.label}: stopped (every move tried every situation; its tries with other states get the GPU)`);
+	}
 }
 /** all strategies have ended: the verdict */
 function finish() {
