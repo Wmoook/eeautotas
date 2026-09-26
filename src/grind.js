@@ -191,7 +191,7 @@ function spliceWithBest(runs, what, name) {
 	const g = S.unionGraph([b.tr, ...runs]);
 	for (const avoidRng of RANDOM ? [false, true] : [false]) {
 		const u = g.path({ avoidRng });
-		if (!u || u.ticks >= b.tr.n) { if (!avoidRng) log(`${what}: spliced with the best, nothing faster (${Date.now() - t0} ms)`); return false; }
+		if (!u || u.run >= best.runTicks) { if (!avoidRng) log(`${what}: spliced with the best, nothing faster (${Date.now() - t0} ms)`); return false; }
 		const out = path.join(OUT, 'grind_now.eetas');
 		C.writeEetas(out, u.ms);
 		const res = consider(out, `${name} (splice, ${u.switches} switch${u.switches === 1 ? '' : 'es'})`, { noSplice: true });

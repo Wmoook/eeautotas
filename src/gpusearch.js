@@ -303,7 +303,7 @@ function combineOn(g, base, what) {
 		let u = null, cand = null;
 		for (let tries = 0; tries < 8; tries++) {
 			u = g.path({ lib, avoidRng });
-			if (!u || u.ticks >= ref.n) return avoidRng ? 'refused' : 'none';
+			if (!u || u.run >= base.runTicks) return avoidRng ? 'refused' : 'none';
 			cand = C.evaluate(level, u.ms);
 			if (cand && cand.complete <= u.ticks) break;
 			// a library edge that is not exact here (it cannot happen with a matching fingerprint): drop it, try again

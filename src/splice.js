@@ -155,10 +155,11 @@ function unionGraph(runs) {
 	};
 	/**
 	 * The fastest run from runs[0]'s start: Dijkstra with a bucket queue over the graph plus every `lib` edge (start
-	 * hash -> Map(end hash, or 'F' = the level finish, -> {seq, fam}); cost = its length); the first finish state
-	 * reached wins, ties keep runs[0]'s own inputs. opts.avoidRng: no step of another run and no library edge may
+	 * hash -> Map(end hash, or 'F' = the level finish, -> {seq, fam})); the cost is the RUN time (the ticks after the
+	 * first input), the first finish state reached wins, ties keep runs[0]'s own inputs. opts.avoidRng: no step of another run and no library edge may
 	 * change the random-portal draw count (the runs need R). Returns null or { ms, ticks, libUsed: [{h0, h1, seq,
-	 * fam, at}], runsUsed (Set of run indices), switches, checks: [[tick, hash]] (the state after each library edge) }.
+	 * fam, at}], runsUsed (Set of run indices), switches, checks: [[tick, hash]] (the state after each library edge),
+	 * ticks (the length), run (the run time: compare it with runTicks) }.
 	 */
 	function path(opts) {
 		const o = opts || {};
@@ -185,40 +186,48 @@ function unionGraph(runs) {
 			libHead = new Int32Array(N).fill(-1); libNext = new Int32Array(libList.length);
 			for (let k = libList.length - 1; k >= 0; k--) { libNext[k] = libHead[from[k]]; libHead[from[k]] = k; }
 		}
-		// Dijkstra (integer costs >= 1): buckets by distance; among equally short paths the one with the fewest library
-		// edges (an edge that only repeats a run's own stretch is not used). Exact: every relaxation into a node of
-		// distance D comes from a node popped before it (distance < D).
-		const INF = 0x7fffffff;
-		const dist = new Int32Array(N + 1).fill(INF), prev = new Int32Array(N + 1).fill(-1), via = new Int32Array(N + 1);
-		const nlib = new Int32Array(N + 1);
-		const done = new Uint8Array(N + 1);
-		const s0 = nodeOf[0];
+		// Dijkstra over (state, timer started): the run timer starts at the end of the first tick with any input, so the
+		// ticks up to and including it cost 0 and every tick after it 1; the distance is then the run time (runTicks), not
+		// the length (a path that cuts idle ticks at the start would start the timer sooner: not faster). Buckets by
+		// distance (a 0-cost step lands in the bucket being emptied); among equally fast paths the one with the fewest
+		// library edges (an edge that only repeats a run's own stretch is not used). Exact: every relaxation into a node of
+		// distance D comes from a node popped before it (distance <= D).
+		const INF = 0x7fffffff, M = 2 * (N + 1);
+		const dist = new Int32Array(M).fill(INF), prev = new Int32Array(M).fill(-1), via = new Int32Array(M);
+		const nlib = new Int32Array(M);
+		const done = new Uint8Array(M);
+		const s0 = 2 * nodeOf[0];
 		const buckets = [[s0]];
 		dist[s0] = 0;
 		let found = -1;
+		const relax = (x, y, nd, v, nl, q, d) => {
+			if (nd < dist[y]) { dist[y] = nd; prev[y] = x; via[y] = v; nlib[y] = nl; (nd === d ? q : (buckets[nd] || (buckets[nd] = []))).push(y); }
+			else if (nd === dist[y] && nl < nlib[y] && !done[y]) { prev[y] = x; via[y] = v; nlib[y] = nl; }
+		};
 		for (let d = 0; d < buckets.length && found < 0; d++) {
 			const q = buckets[d];
 			if (!q) continue;
 			buckets[d] = null;
 			for (let i = 0; i < q.length; i++) {
-				const a = q[i];
-				if (done[a] || dist[a] !== d) continue;
-				done[a] = 1;
-				if (isGoal[a]) { found = a; break; }
-				const la = nlib[a];
+				const x = q[i];
+				if (done[x] || dist[x] !== d) continue;
+				done[x] = 1;
+				const a = x >> 1, on = x & 1;
+				if (isGoal[a]) { found = x; break; }
+				const la = nlib[x];
 				for (let g = occHead[a]; g >= 0; g = occNext[g]) {
 					const r = runOf[g];
 					if (g + 1 >= off[r + 1]) continue;   // the run's finish state: nothing after it
 					if (avoidRng && r !== 0) { const t = g - off[r]; if (runs[r].R[t + 1] !== runs[r].R[t]) continue; }
-					const b = nodeOf[g + 1];
-					if (d + 1 < dist[b]) { dist[b] = d + 1; prev[b] = a; via[b] = g; nlib[b] = la; (buckets[d + 1] || (buckets[d + 1] = [])).push(b); }
-					else if (d + 1 === dist[b] && la < nlib[b] && !done[b]) { prev[b] = a; via[b] = g; nlib[b] = la; }
+					const m = runs[r].masks[g - off[r]];
+					relax(x, 2 * nodeOf[g + 1] + (on || m !== 0 ? 1 : 0), d + on, g, la, q, d);
 				}
 				if (libHead) {
 					for (let k = libHead[a]; k >= 0; k = libNext[k]) {
-						const b = libList[k].to, nd = d + libList[k].seq.length;
-						if (nd < dist[b]) { dist[b] = nd; prev[b] = a; via[b] = -1 - k; nlib[b] = la + 1; (buckets[nd] || (buckets[nd] = [])).push(b); }
-						else if (nd === dist[b] && la + 1 < nlib[b] && !done[b]) { prev[b] = a; via[b] = -1 - k; nlib[b] = la + 1; }
+						const e = libList[k];
+						let cost = e.seq.length, to1 = 1;
+						if (!on) { const f = e.seq.findIndex((mm) => mm !== 0); if (f < 0) { cost = 0; to1 = 0; } else cost = e.seq.length - f - 1; }
+						relax(x, 2 * e.to + to1, d + cost, -1 - k, la + 1, q, d);
 					}
 				}
 			}
@@ -226,9 +235,11 @@ function unionGraph(runs) {
 		if (found < 0) return null;
 		// rebuild: walk back from the finish
 		const parts = [];
-		for (let b = found; b !== s0; b = prev[b]) parts.push(via[b]);
+		for (let y = found; y !== s0; y = prev[y]) parts.push(via[y]);
 		parts.reverse();
-		const ms = new Uint8Array(dist[found]);
+		let len = 0;
+		for (const v of parts) len += v >= 0 ? 1 : libList[-1 - v].seq.length;
+		const ms = new Uint8Array(len);
 		const libUsed = [], runsUsed = new Set(), checks = [];
 		let p = 0, lastRun = -1, switches = 0;
 		for (const v of parts) {
@@ -246,7 +257,7 @@ function unionGraph(runs) {
 				lastRun = -1;
 			}
 		}
-		return { ms, ticks: ms.length, libUsed, runsUsed, switches, checks, nodes: N };
+		return { ms, ticks: ms.length, run: dist[found], libUsed, runsUsed, switches, checks, nodes: N };
 	}
 	return { runs, nodes: N, ticks: T, has: (h) => index.get(h) >= 0, path };
 }
