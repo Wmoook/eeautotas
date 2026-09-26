@@ -98,7 +98,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   likely to work.
 - **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, the exact endgame
   solver (`endgame.js`, once per ending: again when the best's last 64 ticks change; `--endgame=0` off), deep exact-rejoin
-  exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 5 loop windows (60% of the round; Infinity Pain: 4 of 7 loop windows found time): stretches where the run comes back to where it was with nothing
+  exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 5 loop windows (60% of the round; Infinity Pain: 4 of 7 loop windows found time): stretches where the run comes back within 48 px (then, all tried, 96 and 160 px) of where it was with nothing
   collected in between (`src/loops.js`), the longest first, each once; then every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
   round), mutate, a slice of the dense shortcuts pass (from its own cursor), the time-door pass (`phase.js`, on levels with
   time doors, or coin doors when the coins count), mutate, a beam search every other round
@@ -131,7 +131,11 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   exact integer helpers, valid because the engine never meets a NaN: `gpu.unsupported()` refuses levels whose gravity
   multiplier is not finite). One source compiles natively (zig c++) and for NVIDIA GPUs (NVRTC, `--fmad=false`):
   `native/build/eegpu.exe` + `eegpu_{8,32,128,512}.ptx` (`node tools/build-native.js`; the number = the state's
-  variable-tail capacity in words). `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
+  variable-tail capacity in words). The NVIDIA driver compiles a PTX file for the card at its first load (1-3 min on a
+  laptop CPU, once per build): every GPU command takes `--cachedir` (the app passes `gpu.cacheArgs()`, `<data>/gpu-cache`),
+  which keeps that compile in the app's own folder and does it once however many processes start together
+  (`native/cudadrv.h` `loadModuleCached`); search / beam / explore / bench print `{"ev":"ready","loadMs",...}` after
+  the load, and their `--seconds` (and the editor's clocks) count from there. `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
   del, m2 = mutate's; pert, flip, sticky = random perturbations of the reference) and re-checks every hit on the CPU
   with two independent hashes; `src/gpusearch.js` (started by grind `--gpu=1`) keeps an edge library keyed by state
   hashes (saved in `gpu/library.bin`), splits each round into eegpu invocations with their own cursors (m1 + del up

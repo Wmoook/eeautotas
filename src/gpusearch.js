@@ -31,7 +31,7 @@
 // waits 60 s (120 s after a second failure in a row), halves the launch target (eegpu --launch-ms, from --launchMs=50),
 // and stops for this session after 3 failures in a row or 5 in all, with a log line; the grind's CPU stages go on.
 // Quitting (SIGINT / SIGTERM, the grind gone) asks the running eegpu to stop between two launches (gpu/stop, its
-// --stopfile) and kills it only 2 s later: a kill while a kernel runs makes the driver reset the GPU.
+// --stopfile; jobs.js stopJob writes it too) and never kills it: a kill while a kernel runs makes the driver reset the GPU.
 // (--tool=<file.js>: a script that answers like `eegpu search`, for tests without a GPU.)
 const fs = require('fs');
 const path = require('path');
@@ -84,7 +84,7 @@ function status(extra) {
 }
 let child = null, quitting = false;
 // the running eegpu's stop file (its --stopfile): killing it while a kernel runs makes the NVIDIA driver reset the GPU,
-// so quit() asks it to stop between two launches and kills it only if it is still running 2 s later
+// so quit() asks it to stop between two launches instead
 const STOPFILE = path.join(GDIR, 'stop');
 function quit(code) {
 	const end = () => {
@@ -96,8 +96,11 @@ function quit(code) {
 	quitting = true;
 	const ch = child;
 	if (ch && ch.exitCode === null) {
-		try { fs.writeFileSync(STOPFILE, 'quit'); } catch (e) { /* the kill below */ }
-		const t = setTimeout(() => { try { ch.kill(); } catch (e) { /* gone */ } end(); }, 2000);
+		// (the running eegpu is never killed: killing it mid-kernel makes Windows reset the display driver. Its stop file
+		// ends it between two launches; if it has not ended 2 s later (loading its kernels, say), it ends by itself at its
+		// next launch or within its --seconds)
+		try { fs.writeFileSync(STOPFILE, 'quit'); } catch (e) { /* it ends within its --seconds */ }
+		const t = setTimeout(end, 2000);
 		ch.once('close', () => { clearTimeout(t); end(); });
 		return;
 	}
@@ -412,12 +415,18 @@ const famStatus = () => Object.fromEntries(LIB_FAMS.map((f) => [f, state.fam[f]]
 function toolCommand(tool, a) {
 	return /\.js$/i.test(tool) ? [process.execPath, [tool, ...a]] : [tool, a];
 }
+/** eegpu's ready event (its kernels loaded; its --seconds count from there): a slow load is the driver compiling the
+ *  kernels for this graphics card (the first run after an update), worth a line in the log */
+function loaded(ev) {
+	const ms = (+ev.loadMs || 0) + (+ev.allocMs || 0);
+	if (ms >= 5000) log(`GPU: the engine took ${(ms / 1000).toFixed(0)} s to start (kernels ${((+ev.loadMs || 0) / 1000).toFixed(1)} s, memory ${((+ev.allocMs || 0) / 1000).toFixed(1)} s${ev.module ? `, ${ev.module}` : ''})`);
+}
 /** Runs `eegpu search`; resolves {code, done, err, at: {family: {max, last, wrapped}}} (the progress positions per
  *  family: every start tick below `max` is done; wrapped = its pass over [from, to) ended). */
 function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	return new Promise((resolve) => {
 		const a = ['search', blobFile, refFile, edgesFile, `--seconds=${o.seconds.toFixed(1)}`, `--nocoins=${nc ? 1 : 0}`, `--seed=${o.seed}`,
-			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, `--stopfile=${STOPFILE}`];
+			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, `--stopfile=${STOPFILE}`, ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -433,7 +442,8 @@ function runSearch(tool, blobFile, refFile, edgesFile, o) {
 				if (!line.startsWith('{')) continue;
 				let ev;
 				try { ev = JSON.parse(line); } catch (e) { continue; }
-				if (ev.ev === 'progress') {
+				if (ev.ev === 'ready') loaded(ev);
+				else if (ev.ev === 'progress') {
 					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: ev.family });
 					// eegpu prints the next start tick of the running family (its pass over [from, to) restarts at from)
 					const p = at[ev.family] || (at[ev.family] = { max: o.from, last: o.from, wrapped: false });
@@ -539,7 +549,7 @@ async function invoke(slot, seconds) {
 function runWindow(T) {
 	return new Promise((resolve) => {
 		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, `--stopfile=${STOPFILE}`];
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, `--stopfile=${STOPFILE}`, ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -554,7 +564,8 @@ function runWindow(T) {
 				if (!line.startsWith('{')) continue;
 				let ev;
 				try { ev = JSON.parse(line); } catch (e) { continue; }
-				if (ev.ev === 'rejoin') {
+				if (ev.ev === 'ready') loaded(ev);
+				else if (ev.ev === 'rejoin') {
 					if (ev.from >= 0 && ev.from <= ref.n && ev.j > ev.from && ev.j <= ref.n && ev.saving > 0) {
 						const seq = Uint8Array.from(String(ev.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
 						if (addEdge(ref.H[ev.from], ref.H[ev.j], seq, 'every')) added++;

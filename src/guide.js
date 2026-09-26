@@ -58,7 +58,7 @@ async function guide(id, fromSpec, points, seconds, opts) {
 	save();
 	note(`from ${state.fromTime} (tick ${from}) along a ${pts.length}-point line, ${S} s`);
 	const args = ['beam', blob, `--ref=${ref}`, `--from=${from}`, `--guide=${gfile}`, `--seconds=${S}`, `--width=${+o.width || 32768}`,
-		`--depth=${best.complete - from}`, `--nocoins=${nc ? 1 : 0}`, `--guideWeight=${o.weight || 0.5}`];
+		`--depth=${best.complete - from}`, `--nocoins=${nc ? 1 : 0}`, `--guideWeight=${o.weight || 0.5}`, ...G.cacheArgs()];
 	const handed = [];
 	await new Promise((resolve) => {
 		const ch = spawn(tool, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });

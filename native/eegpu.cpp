@@ -1,7 +1,7 @@
 // eegpu: the native EE engine (native/eecore.h) and its GPU search, driven by src/gpu.js.
 //   eegpu trace <level.bin> <run.eetas> <out.bin> [--gpu]   per-tick state hashes of a replay (differential tests)
 //   eegpu state <level.bin> <run.eetas> <tick>               the full state after <tick> ticks (JSON, for debugging)
-//   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}
+//   eegpu info                                               the GPU and every kernel's registers (JSON), or {"gpu":null,"why":...}
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
 // Every GPU command takes --launch-ms=N (default 50): the target time of one kernel launch (launch.h: the work is
@@ -11,6 +11,10 @@
 // launches with its final line (end "stopped") and exit code 0 (killing it while a kernel runs resets the driver).
 // explore / beam / search / bench run at above-normal CPU priority: their host thread must start the next short launch
 // at once (--priority=normal, or EEGPU_PRIORITY=normal in the environment: off).
+// search, beam, explore and bench print {"ev":"ready","loadMs":..,"allocMs":..,"ctxMs":..,"module":..} once the kernels
+// are loaded and the big buffers allocated (Gpu::ready); their --seconds count from there, not from the start of the
+// process. Every GPU command takes --cachedir=<dir>: the driver's compile of the kernels for this GPU is kept there,
+// one compile per build and GPU however many processes load them at once (cudadrv.h loadModuleCached).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -260,18 +264,37 @@ static int cmdPtx(int argc, char** argv) {
 }
 
 // ------------------------------------------------------------------ GPU context with the kernels loaded
+typedef std::chrono::steady_clock Clock;
+static double msSince(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
+static std::string gCacheDir;   // --cachedir=<dir>: the driver's JIT cache folder (cudadrv.h loadModuleCached)
 struct Gpu {
 	cu::Device d;
 	cu::CUmodule mod = nullptr;
 	bool ok = false;
+	double ctxMs = 0, loadMs = 0;   // open(): the driver and context, and the whole open (context + kernels)
+	cu::ModuleLoad how;             // how the kernels were loaded (from the cache, compiled, or without a cache folder)
+	Clock::time_point opened;       // (end of open(): ready() counts the allocations from here)
 	bool open(const std::string& ptxPath) {
+		const auto t0 = Clock::now();
 		if (!d.open()) return false;
+		ctxMs = msSince(t0);
 		FILE* f = fopen(ptxPath.c_str(), "rb");
 		if (!f) { cu::lastError = "kernels not found: " + ptxPath; return false; }
 		fclose(f);
-		if (!cu::loadModule(&mod, readText(ptxPath))) return false;
+		if (!cu::loadModuleCached(&mod, readText(ptxPath), gCacheDir, d.ccMajor, d.ccMinor, how)) return false;
+		loadMs = msSince(t0);
+		opened = Clock::now();
 		ok = true;
 		return true;
+	}
+	/** Right after the kernels are loaded and the big buffers allocated: {"ev":"ready","loadMs":..,"allocMs":..,
+	 *  "module": cache / compiled / ptx, ..} (the first load after a build is a compile of the kernels for this GPU: a
+	 *  minute or more), and the command's clock starts again (tStart), so --seconds counts the search only. */
+	void ready(Clock::time_point& tStart) {
+		cu::cuCtxSynchronize();   // (the memsets of the allocations run asynchronously)
+		printf("{\"ev\":\"ready\",\"loadMs\":%.0f,\"allocMs\":%.0f,\"ctxMs\":%.0f,\"module\":\"%s\",\"waitMs\":%.0f}\n", loadMs, msSince(opened), ctxMs, how.how.c_str(), how.waitMs);
+		fflush(stdout);
+		tStart = Clock::now();
 	}
 	cu::CUfunction fn(const std::string& name) {
 		cu::CUfunction f = nullptr;
@@ -308,15 +331,17 @@ static int cmdInfo(int argc, char** argv) {
 		cu::cuMemcpyDtoH_v2(sz, out.p, 16);
 		layoutOk = sz[0] == (int)sizeof(State<8>) && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level);
 	}
+	// every kernel's registers, local memory (the stack frame: spills and out-of-line calls) and block size limit
 	std::string fa;
-	for (int tw : { 8 }) {
-		cu::CUfunction fs = g.fn("search_" + std::to_string(tw));
+	for (const char* k : { "search_8", "twins_8", "trace_8", "bench_8", "beamExpand_8", "beamMaterialize_8", "exploreExpand_8", "exploreMaterialize_8",
+			"beamSelInsert", "beamSelPick", "exploreClaimPropose", "exploreClaimTake" }) {
+		cu::CUfunction fs = g.fn(k);
 		int regs = -1, local = -1, maxT = -1;
 		if (fs) { cu::cuFuncGetAttribute(&regs, 4, fs); cu::cuFuncGetAttribute(&local, 3, fs); cu::cuFuncGetAttribute(&maxT, 0, fs); }
-		char b[160]; snprintf(b, sizeof b, "%s\"search_%d\":{\"regs\":%d,\"localBytes\":%d,\"maxThreads\":%d}", fa.empty() ? "" : ",", tw, regs, local, maxT);
+		char b[200]; snprintf(b, sizeof b, "%s\"%s\":{\"regs\":%d,\"localBytes\":%d,\"maxThreads\":%d}", fa.empty() ? "" : ",", k, regs, local, maxT);
 		fa += b;
 	}
-	printf("{\"kernels\":{%s},", fa.c_str());
+	printf("{\"module\":\"%s\",\"loadMs\":%.0f,\"kernels\":{%s},", g.how.how.c_str(), g.loadMs, fa.c_str());
 	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d]%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
 		sz[0], sz[1], sz[2], sz[3], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level), lk::doneFields().c_str());
 	return 0;
@@ -547,6 +572,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		dax.upload(S.axis.data(), S.axis.size());
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcount.p, 0, 4); cu::cuMemsetD8_v2(dstats.p, 0, 64);
+	g.ready(tStart);
 	SearchParams P;
 	memset(&P, 0, sizeof P);
 	P.L = B.level((const uint8_t*)(uintptr_t)dl.p);
@@ -808,6 +834,7 @@ static int runBench(int argc, char** argv, const LevelBlob& B) {
 	u8* stp = (u8*)(uintptr_t)dstates.p;
 	u64* rngp = (u64*)(uintptr_t)drng.p;
 	cu::cuMemsetD8_v2(dout.p, 0, 8);
+	{ Clock::time_point t; g.ready(t); }   // (the speed is timed below, after a whole warm-up run)
 	int k0 = 0, k1 = 0;
 	u64 seed = 1;
 	void* a[] = { &dL, &s0, &k0, &k1, &seed, &o, &stp, &rngp };
@@ -1046,6 +1073,9 @@ static int cmdSearch(int argc, char** argv) {
 int main(int argc, char** argv) {
 	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search ...\n"); return 2; }
 	std::string cmd = argv[1];
+	gCacheDir = opt(argc, argv, "cachedir", "");
+	if (gCacheDir == "1") gCacheDir.clear();   // (a bare --cachedir names no folder)
+	if (!gCacheDir.empty()) cu::useJitCache(gCacheDir);   // (before the driver loads)
 	lk::setTarget(atof(opt(argc, argv, "launch-ms", "50").c_str()));   // (launch.h: every kernel launch aims at this)
 	// the GPU commands' host thread mostly waits for short launches and must start the next one at once: above normal
 	// priority, so busy CPU threads (the editor's CPU search, a job's workers) do not leave the GPU idle between launches

@@ -244,6 +244,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	P.pick = (const u32*)(uintptr_t)dpick.p;
 	P.candKey = (u64*)(uintptr_t)dck.p; P.candPrio = (u64*)(uintptr_t)dcp.p;
 	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
+	g.ready(tStart);   // (the kernels and the tables are on the GPU: --seconds counts from here)
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;

@@ -73,7 +73,12 @@ function startJob(id, workers, opts) {
 	return ch;
 }
 function stopJob(id) {
-	killTree(runningPid(id));
+	// the GPU searcher first, alone (not its tree): its running eegpu is left to end by itself within its --seconds,
+	// because killing eegpu while a kernel runs makes Windows reset the display driver (nvlddmkm 153 / 4101 at every
+	// job switch on a laptop); the grind's tree kill then no longer reaches it (its parent is gone)
+	const rp = runningPid(id), gp = rp ? +(C.readJSON(path.join(jobDir(id), 'status.json'), {}).gpuPid || 0) : 0;   // (this session's searcher only)
+	if (gp && gp !== rp && pidAlive(gp) && process.platform === 'win32') spawnSync('taskkill', ['/PID', String(gp), '/F'], { stdio: 'ignore', windowsHide: true });
+	killTree(rp);
 	if (fs.existsSync(path.join(jobDir(id), 'status.json'))) updateStatus(id, (st) => { st.state = 'stopped'; st.stage = ''; });
 	const r = C.readJSON(RUNNING_FILE, {});
 	if (r.id === id) { try { fs.unlinkSync(RUNNING_FILE); } catch (e) { /* gone */ } }
