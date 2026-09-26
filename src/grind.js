@@ -530,9 +530,9 @@ async function loopWindows(round) {
 	while (ran < 5 && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
 		let loops;
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;
-		// the loops that come back within 48 px, then (all tried) the wider ones within 96 px
+		// the loops that come back within 48 px, then (all tried) the wider ones within 96 px, then 160 px
 		let l = null;
-		for (const radius of [48, 96]) {
+		for (const radius of [48, 96, 160]) {
 			try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 2000, radius, keep: 60 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
 			l = loops.find((x) => !tried.has(`${H[x.a]}:${H[x.b]}`));
 			if (l) break;
