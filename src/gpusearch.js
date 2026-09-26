@@ -31,7 +31,8 @@
 // waits 60 s (120 s after a second failure in a row), halves the launch target (eegpu --launch-ms, from --launchMs=50),
 // and stops for this session after 3 failures in a row or 5 in all, with a log line; the grind's CPU stages go on.
 // Quitting (SIGINT / SIGTERM, the grind gone) asks the running eegpu to stop between two launches (gpu/stop, its
-// --stopfile; jobs.js stopJob writes it too) and never kills it: a kill while a kernel runs makes the driver reset the GPU.
+// --stopfile; jobs.js stopGpuSearcher writes it too) and never kills it: a kill while a kernel runs makes the driver
+// reset the GPU. eegpu runs detached with --parent, so it also ends at its next launch when this process is killed.
 // (--tool=<file.js>: a script that answers like `eegpu search`, for tests without a GPU.)
 const fs = require('fs');
 const path = require('path');
@@ -106,6 +107,10 @@ function quit(code) {
 	}
 	end();
 }
+/** eegpu's stop options: its stop file, and this process as its parent. eegpu is started detached: Node kills the
+ *  children it did not start detached the moment it exits (also when it is killed), mid-kernel too; a detached eegpu
+ *  ends at its next kernel launch once this process is gone (--parent) or the stop file is there */
+const EEGPU_OPTS = () => [`--stopfile=${STOPFILE}`, `--parent=${process.pid}`];
 /** a new eegpu run: no stop request left over */
 const clearStop = () => { try { fs.unlinkSync(STOPFILE); } catch (e) { /* none */ } };
 process.on('SIGINT', () => quit(0));
@@ -426,10 +431,10 @@ function loaded(ev) {
 function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	return new Promise((resolve) => {
 		const a = ['search', blobFile, refFile, edgesFile, `--seconds=${o.seconds.toFixed(1)}`, `--nocoins=${nc ? 1 : 0}`, `--seed=${o.seed}`,
-			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, `--stopfile=${STOPFILE}`, ...G.cacheArgs()];
+			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
-		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
 		let buf = '', done = null, err = '', launchError = false;
 		const at = {};
 		const base = st.ticks;
@@ -549,10 +554,10 @@ async function invoke(slot, seconds) {
 function runWindow(T) {
 	return new Promise((resolve) => {
 		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, `--stopfile=${STOPFILE}`, ...G.cacheArgs()];
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
-		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
 		let buf = '', done = null, err = '', added = 0, last = 0, launchError = false;
 		const base = st.ticks;
 		child.stdout.on('data', (d) => {

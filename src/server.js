@@ -172,6 +172,7 @@ function startJob(id, workers, opts) {
 }
 function stopJob(id) {
 	const ch = children.get(id);
+	J.stopGpuSearcher(id);   // (before the tree kill: it would reach the searcher's eegpu, mid-kernel)
 	if (ch && ch.exitCode === null) J.killTree(ch.pid);
 	children.delete(id);
 	J.stopJob(id);
@@ -413,9 +414,11 @@ const server = http.createServer(async (req, res) => {
 
 function openBrowser(url) { spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', detached: true, windowsHide: true }).unref(); }
 function shutdown() {
-	for (const [, ch] of children) if (ch.exitCode === null) J.killTree(ch.pid);
+	// (never a tree kill that reaches eegpu: killing it while a kernel runs makes Windows reset the display driver. The
+	// GPU searcher and the guided search start it detached with --parent: it ends at its next kernel launch)
+	for (const [id, ch] of children) if (ch.exitCode === null) { J.stopGpuSearcher(id); J.killTree(ch.pid); }
 	for (const [, ch] of focusKids) if (ch.exitCode === null) J.killTree(ch.pid);
-	for (const [, ch] of guideKids) if (ch.exitCode === null) J.killTree(ch.pid);
+	for (const [, ch] of guideKids) if (ch.exitCode === null) { try { ch.kill(); } catch (e) { /* gone */ } }
 	ED.shutdown();
 	process.exit(0);
 }

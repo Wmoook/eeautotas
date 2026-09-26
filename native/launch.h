@@ -15,7 +15,10 @@
 // A graceful stop: killing eegpu while a kernel runs makes the driver reset the GPU too (nvlddmkm 153). With
 // --stopfile=<path>, the file's existence (checked before a launch, at most every 20 ms) ends the command cleanly
 // between two launches: its final line (end "stopped", with what it found so far), exit code 0. The callers write the
-// file and kill only when the process has not exited a few seconds later.
+// file and kill only when the process has not exited a few seconds later. --parent=<pid>: the same stop once that
+// process has exited. Node kills the children it did not start detached as soon as it exits (its job object: a killed
+// src/gpusearch.js took its eegpu down with it, mid-kernel), so the callers start eegpu detached with --parent: when
+// they die, however, eegpu ends at its next launch instead.
 #pragma once
 #include <chrono>
 #include <cstdio>
@@ -41,6 +44,9 @@ struct Guard {
 	cu::CUevent e0 = nullptr, e1 = nullptr;
 	int events = -1;        // the event timing: -1 not tried yet, 0 unavailable (host clock only), 1 on
 	std::string stopFile;   // --stopfile
+	HANDLE parent = nullptr;   // --parent: that process (a stop once it has exited)
+	double maxItems = 0;       // --launch-items=N (tests): at most N items per launch whatever the speed (0: no cap), so
+	                           // a small workload is split too and must give what one launch gives (test/gpulaunch.js)
 	double lastStopCheck = -1e9;
 	bool stopping = false;
 };
@@ -86,13 +92,21 @@ inline std::string doneFields() {
 	return b;
 }
 
-/** --stopfile: has a stop been requested? (the file exists; looked at most every 20 ms unless `now`) */
+/** --parent=<pid>: watch that process (a handle from now on, so a reused pid cannot stand in for it; none when it cannot
+ *  be opened) */
+inline void watchParent(const std::string& pid) {
+	const unsigned long p = strtoul(pid.c_str(), nullptr, 10);
+	if (p) G.parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)p);
+}
+/** --stopfile / --parent: has a stop been requested? (the file exists, or the parent has exited; looked at most every
+ *  20 ms unless `now`) */
 inline bool stopRequested(bool now = false) {
-	if (G.stopFile.empty()) return false;
+	if (G.stopFile.empty() && !G.parent) return false;
 	const double t = nowMs();
 	if (!now && t - G.lastStopCheck < 20) return false;
 	G.lastStopCheck = t;
-	return GetFileAttributesA(G.stopFile.c_str()) != INVALID_FILE_ATTRIBUTES;
+	if (G.parent && WaitForSingleObject(G.parent, 0) == WAIT_OBJECT_0) return true;
+	return !G.stopFile.empty() && GetFileAttributesA(G.stopFile.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 /** between launches (no kernel running): a stop request ends the command here, cleanly: its final line, exit 0 */
 inline void checkStop(bool now = false) {
@@ -150,6 +164,7 @@ struct Chunk {
 	/** the next launch's items, with `left` items left to do */
 	uint64_t next(uint64_t left) const {
 		double s = std::max(lo, std::min(hi, size));
+		if (G.maxItems > 0) s = std::min(s, G.maxItems);   // (--launch-items: the aligned kernels still take `align`)
 		if (align > 1) s = std::max(align, std::floor(s / align) * align);
 		return std::max<uint64_t>(1, std::min<uint64_t>(left, (uint64_t)s));
 	}

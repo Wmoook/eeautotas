@@ -8,7 +8,8 @@
 // split into launches sized from the measured speed, so none nears the driver's 2 s watchdog even on a throttled
 // laptop GPU); its done / summary line reports "maxLaunchMs". A failed launch prints {"error":...,"launchError":true}
 // and exits 6 (7: CUDA_ERROR_LAUNCH_TIMEOUT). --stopfile=<path>: when that file appears, the command ends between two
-// launches with its final line (end "stopped") and exit code 0 (killing it while a kernel runs resets the driver).
+// launches with its final line (end "stopped") and exit code 0 (killing it while a kernel runs resets the driver);
+// --parent=<pid>: the same once that process has exited (the callers start eegpu detached: launch.h).
 // explore / beam / search / bench run at above-normal CPU priority: their host thread must start the next short launch
 // at once (--priority=normal, or EEGPU_PRIORITY=normal in the environment: off).
 // search, beam, explore and bench print {"ev":"ready","loadMs":..,"allocMs":..,"ctxMs":..,"module":..} once the kernels
@@ -657,14 +658,16 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		const double sec = elapsed();
 		// edges file: "EEED", version 1, count, n, then per edge: t, j, k (i32), family, flags (u8), 2 pad, k input bytes
 		FILE* f = fopen(argv[4], "wb");
-		uint32_t head[4] = { 0x44454545u, 1u, (uint32_t)edges.size(), (uint32_t)n };
-		fwrite(head, 4, 4, f);
-		for (const Edge& e : edges) {
-			int32_t a[3] = { e.t, e.j, e.k };
-			uint8_t b[4] = { e.family, e.flags, 0, 0 };
-			fwrite(a, 4, 3, f); fwrite(b, 1, 4, f); fwrite(e.seq.data(), 1, e.seq.size(), f);
+		if (f) {   // (none: the folder went away, a deleted job; the done line still comes)
+			uint32_t head[4] = { 0x44454545u, 1u, (uint32_t)edges.size(), (uint32_t)n };
+			fwrite(head, 4, 4, f);
+			for (const Edge& e : edges) {
+				int32_t a[3] = { e.t, e.j, e.k };
+				uint8_t b[4] = { e.family, e.flags, 0, 0 };
+				fwrite(a, 4, 3, f); fwrite(b, 1, 4, f); fwrite(e.seq.data(), 1, e.seq.size(), f);
+			}
+			fclose(f);
 		}
-		fclose(f);
 		int64_t bestSave = 0;
 		for (const Edge& e : edges) bestSave = std::max<int64_t>(bestSave, (int64_t)e.j - e.t - e.k);
 		printf("{\"ev\":\"done\",\"gpu\":%s,\"n\":%d,\"runTicks\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"candidates\":%llu,"
@@ -1085,6 +1088,8 @@ int main(int argc, char** argv) {
 	const std::string prio = opt(argc, argv, "priority", envPrio && *envPrio ? envPrio : "high");
 	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 	lk::G.stopFile = opt(argc, argv, "stopfile", "");                   // (launch.h: a graceful stop between launches)
+	lk::watchParent(opt(argc, argv, "parent", ""));                      // (launch.h: ... also once the caller has exited)
+	lk::G.maxItems = std::max(0.0, atof(opt(argc, argv, "launch-items", "0").c_str()));   // (launch.h: tests split small workloads)
 	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
 	if (cmd == "state") return cmdState(argc, argv);
 	if (cmd == "info") return cmdInfo(argc, argv);

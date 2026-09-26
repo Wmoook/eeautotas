@@ -518,8 +518,10 @@ function launch(n) {
 	if (stopFile) { try { fs.unlinkSync(stopFile); } catch (e) { /* none */ } }
 	// the CPU search: node src/goexplore.js (its stdin takes the depth bound: tellCpu); eegpu with the kernel cache (the
 	// strategies start together: one compiles the kernels after an update, the others wait for it and load them)
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`];
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined });
+	// (the GPU tool detached, with this process as its --parent: Node kills the children it did not start detached the
+	// moment it exits, mid-kernel too; a detached eegpu ends at its next kernel launch once the app is gone)
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--parent=${process.pid}`];
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });
 	ch.stopFile = stopFile;
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
