@@ -362,6 +362,10 @@ static int cmdInfo(int argc, char** argv) {
 		char b[200]; snprintf(b, sizeof b, "%s\"%s\":{\"regs\":%d,\"localBytes\":%d,\"maxThreads\":%d}", fa.empty() ? "" : ",", k, regs, local, maxT);
 		fa += b;
 	}
+	// the loop's cuModuleGetFunction calls load those kernels onto the GPU (the driver loads a module's kernels lazily);
+	// wait for that before the process exits: an exit right after them logged an nvlddmkm 153 in about half the runs
+	// (2 of 4 on the RTX 3080 Laptop, 0 of 9 with this wait, 0 of 4 with CUDA_MODULE_LOADING=EAGER)
+	cu::cuCtxSynchronize();
 	printf("{\"module\":\"%s\",\"loadMs\":%.0f,\"kernels\":{%s},\"reach\":%d,", g.how.how.c_str(), g.loadMs, fa.c_str(), REACH_VERSION);
 	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d,%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d,%d,%d,%d,%d]%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
 		sz[0], sz[1], sz[2], sz[3], sz[4], sz[5], sz[6], sz[7], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level),
