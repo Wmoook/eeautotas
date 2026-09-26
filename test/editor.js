@@ -315,7 +315,9 @@ async function appSection() {
 // pass read back from --cqx): a layer event, then a finish (a route of `idle` idle ticks and then right to the trophy,
 // when it fits in --depth) or a done event with the scripted end and overflow. "beam" reports the scenario's beam route
 // (if any) and ends. With `fail` (ms) every launch fails after that long (an error line, exit code 1). With `ready` (ms)
-// the first launch of each command loads its kernels that long before it says {"ev":"ready"} and starts.
+// the first launch of each command loads its kernels that long before it says {"ev":"ready"} and starts. With
+// `launchFail` (ms) "explore" fails that long after its start like a kernel launch the display driver's watchdog stopped
+// (its launchError line, exit 7), and the beams run until their --stopfile appears, then end "stopped" (logged).
 const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
@@ -325,6 +327,15 @@ const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n'
 fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
+if (SC.launchFail && args[0] === 'explore') return void setTimeout(() => { say({ error: 'test: the GPU driver stopped the explore expand kernel', cuda: 702, launchError: true, timeout: true }); process.exit(7); }, SC.launchFail);
+if (SC.launchFail) {
+	const sf = opt('stopfile');
+	const iv = setInterval(() => {
+		if (sf && fs.existsSync(sf)) { clearInterval(iv); fs.appendFileSync(SC.log, JSON.stringify(['stopped', args[0]]) + '\\n'); say({ ev: 'done', layers: 3, end: 'stopped' }); process.exit(0); }
+		say({ ev: 'progress', layer: 3, tick: 3, states: 100, ticksPerSec: 1000 });
+	}, 100);
+	return;
+}
 const go = () => {
 	if (args[0] !== 'explore') {
 		if (SC.beam) say({ ev: 'result', kind: 'finish', inputs: SC.beam });
@@ -613,6 +624,22 @@ async function cpuSection() {
 	check('the GPU strategies fail after the CPU\'s first route: the CPU search goes on until the time is up', st.stage === 'found' && st.result.strategy === 'random runs (CPU)' &&
 		st.result.foundAfter < 3 && gpuStates.length === 2 && gpuStates.every((s) => s === 'error') && st.elapsed >= 6.5,
 		`${st.stage}; GPU strategies ${gpuStates.join(', ')}; ${st.result ? `route ${st.result.ticks} ticks after ${st.result.foundAfter} s (${st.result.strategy})` : st.message}; ${st.elapsed.toFixed(1)} s`);
+	// a GPU strategy's kernel launch fails (eegpu's launchError line, exit 7: the display driver's watchdog; the driver may
+	// have reset the GPU): the other GPU strategies are asked to stop (their stop files: never a kill mid-kernel), none
+	// starts again (no next pass), and the CPU search goes on until the time is up
+	const sc3 = path.join(HOME, 'cpu-launchfail.json'), log3 = path.join(HOME, 'cpu-launchfail.log');
+	fs.writeFileSync(sc3, JSON.stringify({ log: log3, R, runs: {}, beam: null, launchFail: 1500 }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 6, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc3], salts: false });
+	st = await waitDone(30000);
+	const L3 = fs.readFileSync(log3, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+	const X3 = st.strategies.find((q) => q.key === 'explore'), B3 = st.strategies.filter((q) => !q.cpu && q.key !== 'explore');
+	const launches3 = L3.filter((a) => a[0] !== 'stopped').map((a) => a[0]), stopped3 = L3.filter((a) => a[0] === 'stopped').map((a) => a[1]);
+	check('a GPU launch failure (the driver\'s watchdog, exit 7): the other GPU strategies stop through their stop files, none starts again, the CPU search goes on',
+		X3.state === 'error' && /stopped the explore/.test(X3.error || '') && B3.length === 1 && B3.every((q) => q.state === 'stopped' && q.detail === 'the GPU failed') &&
+		launches3.join() === 'explore,beam' && stopped3.join() === 'beam' && st.log.some((x) => /the GPU failed: the GPU searches stop \(the CPU search goes on\)/.test(x)) &&
+		st.stage === 'found' && st.result.strategy === 'random runs (CPU)' && st.elapsed >= 5.5,
+		`explore ${X3.state} (${X3.error}); beams ${B3.map((q) => `${q.state} (${q.detail})`).join(', ')}; launches ${launches3.join(', ')}; stopped by file: ${stopped3.join(', ') || '-'}; ` +
+		`${st.stage} ${st.result ? `(${st.result.strategy})` : ''}; ${st.elapsed.toFixed(1)} s`);
 }
 
 // ---------------------------------------------------------------- GPU searches (--gpu)
