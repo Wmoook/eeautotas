@@ -529,12 +529,17 @@ async function loopWindows(round) {
 	let ran = 0;
 	while (ran < 5 && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
 		let loops;
-		try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 1500 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;
-		const l = loops.find((x) => !tried.has(`${H[x.a]}:${H[x.b]}`));
+		// the loops that come back within 48 px, then (all tried) the wider ones within 96 px
+		let l = null;
+		for (const radius of [48, 96]) {
+			try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 2000, radius, keep: 60 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
+			l = loops.find((x) => !tried.has(`${H[x.a]}:${H[x.b]}`));
+			if (l) break;
+		}
 		if (!l) { if (!ran && loops.length) log(`deep: every loop of the run (${loops.length}) was explored already`); return ran; }
 		tried.add(`${H[l.a]}:${H[l.b]}`);
-		cur.loops = [...tried].slice(-200);
+		cur.loops = [...tried].slice(-400);
 		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
 		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
 		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
