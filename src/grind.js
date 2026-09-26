@@ -494,6 +494,7 @@ function startGpu() {
 	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : [])],
 		{ stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
+	saveStatus({ gpuPid: gpuChild.pid });   // (jobs.js stopJob stops it first, alone: its eegpu is never killed mid-kernel)
 	gpuChild.on('exit', (code) => { if (code && code !== 3) log(`GPU searcher stopped (exit ${code}); see gpu.log`); gpuChild = null; });
 }
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });

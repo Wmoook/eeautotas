@@ -161,7 +161,7 @@ function runBench() {
 		const f = path.join(C.DATA, '_gpu_arena.bin');
 		fs.mkdirSync(C.DATA, { recursive: true });
 		fs.writeFileSync(f, levelBlob(L));
-		require('child_process').execFile(tool, ['bench', f, '--seconds=3'], { encoding: 'utf8', timeout: 300000, windowsHide: true }, (err, out) => {
+		require('child_process').execFile(tool, ['bench', f, '--seconds=3', '--ticks=24'], { encoding: 'utf8', timeout: 300000, windowsHide: true }, (err, out) => {
 			let r;
 			try { r = JSON.parse(String(out).trim().split('\n').pop()); } catch (e) { r = { gpu: null, why: err ? err.message : 'the GPU benchmark failed' }; }
 			r.key = toolKey(tool);

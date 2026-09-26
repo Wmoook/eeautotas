@@ -72,7 +72,8 @@ function status(extra) {
 }
 let child = null;
 function quit(code) {
-	if (child && child.exitCode === null) { try { child.kill(); } catch (e) { /* gone */ } }
+	// (the running eegpu is not killed: killing it mid-kernel makes Windows reset the display driver; it ends by itself
+	// within its --seconds)
 	try { saveLibrary(true); saveState(); } catch (e) { /* not loaded yet */ }
 	status({ state: code ? 'error' : 'stopped', ticksPerSec: 0 });
 	process.exit(code);
