@@ -10,7 +10,8 @@
 // reads the tick-start tile), so the first finishing depth is the fastest finish from S(T). A finish is an exact faster
 // run (checked with a full C.evaluate and C.judge); a search that runs out of states is a proof that no input sequence
 // from S(T) finishes faster without dying (up to 53-bit hash collisions: below n^2 / 2^54 for n states; a death costs
-// 55+ ticks, so deaths cannot help while K <= 56). The goal is a region (the trophy cell), not an exact state, so this
+// 55+ ticks, so deaths cannot help while K <= 56; a search in which the acceptance rule refused a faster finish is
+// reported with `rejected`, not as a proof). The goal is a region (the trophy cell), not an exact state, so this
 // sees endings the exact-rejoin searches cannot (213: 2.36 -> 2.35, the last tick won by a 0.002 px margin).
 //
 // It runs as a K ladder (8, 16, 24, ... while the time lasts, the smallest K of any start first) from many starts: the
@@ -198,14 +199,16 @@ function chebField(W, H, sources, cap) {
 /**
  * Portals: a lower bound per tile on the ticks from "the centre is in this tile at the end of a tick" to "in a target
  * cell", for paths that use a portal (paths without one are bounded by the pixel distance, freeTicks). Without a teleport
- * the centre moves <= D_TICK px per axis per tick, so tiles m + 1 apart (Chebyshev) take >= m ticks (m <= FIELD_CAP);
- * a teleport (the tick after the centre is in an entry tile) leaves the centre within one tile of an exit. So
- * HT(t) = max(0, min over sources s (cheb(t, s) + c(s)) - 1) with the targets (c = 0) and every entry p
- * (c = Q(p) = max(1, min over its exits e of HT(e))), a fixpoint (Q only decreases). An entry is triggered from its
- * own cell and from a half block whose touch goes to it (the engine teleports by the touched tile). Every entry and
- * every exit of the level counts (EEO's random exit, a coin-deleted exit, the lastPortal rule only make real paths
- * slower). Sets B.portal (the field through portals only), B.trigQ (per cell: Q of the entries it triggers, 0 = none)
- * and B.trigPS (prefix sums of those cells).
+ * the centre moves <= D_TICK px per axis per tick, so tiles m + 1 apart (Chebyshev) take >= m ticks (m <= FIELD_CAP),
+ * and the same or a neighbouring tile 0; a teleport (the tick after the centre is in an entry tile) leaves the centre
+ * within one tile of an exit (the box is put on the exit, then moves <= 16 px). So
+ * HT(t) = min over sources s of (max(0, cheb(t, s) - 1) + c(s)) with the targets (c = 0) and every entry p
+ * (c = Q(p) = 1 + min over its exits e and the tiles t' within one tile of e of HT(t')), a fixpoint (Q only decreases;
+ * every teleport costs its tick, so a cycle of portals never lowers Q). An entry is triggered from its own cell and from
+ * a half block whose touch goes to it (the engine teleports by the touched tile). Every entry and every exit of the
+ * level counts (EEO's random exit, a coin-deleted exit, the lastPortal rule only make real paths slower). Sets B.portal
+ * (the field through portals only), B.trigQ (per cell: Q of the entries it triggers, 0 = none) and B.trigPS (prefix sums
+ * of those cells).
  */
 function portalField(level, B, touchers) {
 	const W = B.W, H = B.H, fg = level.fg;
@@ -226,21 +229,47 @@ function portalField(level, B, touchers) {
 	}
 	if (!entries.length) return;
 	const src = () => { const l = []; for (const e of entries) for (const c of e.trig) l.push([c, e.q]); return l; };
+	/** HT for these sources: with G = min over s of (cheb(t, s) + c(s)), a tile without a source takes G - 1 (every
+	 *  source is >= 1 away); a source tile takes min(its own c, G of its neighbours) (G(n) + 1 - 1: the other sources
+	 *  are reached through a neighbour) */
+	const own = new Int16Array(B.N);
+	const field = (sources) => {
+		const g = chebField(W, H, sources, FIELD_CAP + 1);
+		own.fill(-1);
+		for (const [i, c] of sources) if (own[i] < 0 || c < own[i]) own[i] = c;
+		const f = new Uint8Array(B.N);
+		for (let i = 0; i < B.N; i++) {
+			let v = g[i] - 1;
+			if (own[i] >= 0) {
+				const x = i % W, y = (i - x) / W;
+				v = own[i];
+				for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1); yy++) {
+					for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) if ((xx !== x || yy !== y) && g[yy * W + xx] < v) v = g[yy * W + xx];
+				}
+			}
+			f[i] = Math.min(FIELD_CAP, Math.max(0, v));
+		}
+		return f;
+	};
 	const tsrc = B.cells.map((i) => [i, 0]);
 	for (let it = 0; it < 64; it++) {
-		const g = chebField(W, H, tsrc.concat(src()), FIELD_CAP + 1);
+		const ht = field(tsrc.concat(src()));
 		let changed = false;
 		for (const e of entries) {
+			// the teleport's tick, then from where it leaves the centre: within one tile of an exit
 			let m = FIELD_CAP;
-			for (const x of e.exits) m = Math.min(m, Math.max(0, g[x] - 1));
-			const q = Math.max(1, m);
+			for (const i of e.exits) {
+				const x = i % W, y = (i - x) / W;
+				for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1); yy++) {
+					for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) if (ht[yy * W + xx] < m) m = ht[yy * W + xx];
+				}
+			}
+			const q = Math.min(FIELD_CAP, 1 + m);
 			if (q < e.q) { e.q = q; changed = true; }
 		}
 		if (!changed) break;
 	}
-	const gp = chebField(W, H, src(), FIELD_CAP + 1);
-	const f = new Uint8Array(B.N);
-	for (let i = 0; i < B.N; i++) f[i] = Math.min(FIELD_CAP, Math.max(0, gp[i] - 1));
+	const f = field(src());
 	const trigQ = new Uint8Array(B.N);
 	for (const e of entries) for (const c of e.trig) if (trigQ[c] === 0 || e.q < trigQ[c]) trigQ[c] = e.q;
 	B.portal = f;
@@ -659,10 +688,11 @@ function ladder(level, runs, opts) {
 		if (maxDepth < 1) { s.doneK = K; continue; }       // (nothing from S(T) can beat it)
 		sim.reset();
 		for (let t = 0; t < T; t++) { E.applyMask(inp, s.masks[t]); sim.tick(inp); }
-		if (sim.is_dead) { s.doneK = K; continue; }
+		// (a start that already died more often than the rule allows cannot give an accepted run)
+		if (sim.is_dead || sim.deaths > best.deaths) { s.doneK = K; continue; }
 		const okey = `${K}|${noCoins ? sim.stateHash(false, true) : sim.stateHash()}`;
 		const prev = outcome.get(okey);
-		if (prev !== undefined && prev.runT <= T - s.ts) {
+		if (prev !== undefined && prev.runT <= T - s.ts && !prev.refused) {
 			if (prev.status === 'cap' || prev.status === 'time') s.failedK = K; else s.doneK = K;
 			continue;
 		}
@@ -687,7 +717,8 @@ function ladder(level, runs, opts) {
 		const res = search(sim, snap, maxDepth, { B, cap: o.cap, deadline, noCoins, accept, meter: o.meter,
 			progress: (p) => log(Object.assign({ event: 'progress', start: s.name, K }, p)) });
 		ticks += res.stats.ticks;
-		outcome.set(okey, { runT: T - s.ts, status: res.status });
+		// (a refused finish depends on the start's own path: chance, deaths; then the outcome is not shared)
+		outcome.set(okey, { runT: T - s.ts, status: res.status, refused: res.status !== 'found' && res.stats.finishes > 0 });
 		const info = { start: s.name, K, T, runT: T - s.ts, maxDepth, beat: best.runTicks, ticks: res.stats.ticks, states: res.stats.states,
 			merged: res.stats.merged, cut: res.stats.cut, maxOpen: res.stats.maxOpen, depth: res.stats.depth, seconds: res.stats.seconds };
 		if (res.status === 'found') {
@@ -704,8 +735,14 @@ function ladder(level, runs, opts) {
 			s.doneK = K;
 			continue;
 		}
-		if (res.status === 'proof') { s.doneK = K; proofs.push(info); log(Object.assign({ event: 'proof' }, info)); }
-		else {
+		if (res.status === 'proof') {
+			// finishes the rule refused (lower chance, more deaths): then it is no proof that nothing is faster, only that
+			// nothing faster was accepted (merged states keep one path each, and the rule depends on the path)
+			s.doneK = K;
+			if (res.stats.finishes > 0) info.rejected = res.stats.finishes;
+			proofs.push(info);
+			log(Object.assign({ event: 'proof' }, info));
+		} else {
 			s.failedK = K;
 			gaveUp.push(Object.assign(info, { reason: res.status }));
 			log(Object.assign({ event: 'gave_up', reason: res.status }, info));
@@ -714,9 +751,9 @@ function ladder(level, runs, opts) {
 	}
 	const out = { reference: ref.runTicks, best: best.runTicks, saved: ref.runTicks - best.runTicks, masks: bestMasks, bestEval: best, found, proofs, gaveUp,
 		searches, ticks, seconds: (Date.now() - t0) / 1000 };
-	// per start: the largest K with a proof ("nothing faster from S(F - K)")
+	// per start: the largest K with a proof ("nothing faster from S(F - K)"; not where a faster finish was refused)
 	const provedBy = {};
-	for (const p of proofs) provedBy[p.start] = Math.max(provedBy[p.start] || 0, p.K);
+	for (const p of proofs) if (!p.rejected) provedBy[p.start] = Math.max(provedBy[p.start] || 0, p.K);
 	log({ event: 'done', reference: out.reference, best: out.best, saved: out.saved, file: found.length && o.out ? o.out : null, searches, ticks,
 		seconds: out.seconds, proved: provedBy, gaveUp: gaveUp.map((g) => `${g.start} K=${g.K} (${g.reason})`) });
 	return out;

@@ -183,19 +183,20 @@ async function main() {
 			const t = (n) => `${fmt(n)} (${n})`;
 			const log = a.json ? () => {} : (o) => {
 				const at = o.start !== undefined ? `K=${String(o.K).padEnd(3)} ${String(o.start).padEnd(24)} from tick ${o.T}` : '';
-				if (o.event === 'start') out(`endgame  ${id}: best ${t(o.reference)}, ${o.starts} runs as starts, K ${Array.isArray(o.K) ? o.K.join(', ') : '8, 16, 24, ..'}, ${o.seconds} s` +
+				if (o.event === 'start') out(`endgame  ${id}: best ${t(o.reference)}, ${o.starts} runs as starts, K ${Array.isArray(o.K) ? o.K.join(', ') : `8, 16, 24, ..${/\d/.test(o.K) ? ` up to ${o.K.replace(/\D+/g, '')}` : ''}`}, ${o.seconds} s` +
 					`${o.modelled ? '' : ' (the level\'s gravity is not modelled: speed limit only)'}`);
+				else if (o.event === 'proof' && o.rejected) out(`${at}: no faster finish accepted (${o.rejected} faster refused by the rule; ${o.ticks} ticks, ${o.seconds} s)`);
 				else if (o.event === 'proof') out(`${at}: nothing faster (proof; ${o.ticks} ticks, ${o.seconds} s)`);
 				else if (o.event === 'gave_up') out(`${at}: gave up (${o.reason === 'cap' ? 'too many open states' : 'time is up'}; ${o.ticks} ticks)`);
 				else if (o.event === 'found') out(`${at}: FOUND ${t(o.runTicks)}, -${o.saved} tick${o.saved > 1 ? 's' : ''} (${o.ticks} ticks, ${o.seconds} s)`);
 				else if (o.event === 'rejected') out(`${at}: a finish in ${o.runTicks} ticks, not accepted (${o.why})`);
 				else if (o.event === 'error') out(`${at}: ERROR ${o.why}`);
 			};
-			const r = await EG.endgameJob(id, { K: pos[1], seconds: a.seconds !== undefined ? +a.seconds : 60, cap: +a.cap || undefined, log,
+			const r = await EG.endgameJob(id, { K: pos[1] !== undefined ? pos[1] : a.K, seconds: a.seconds !== undefined ? +a.seconds : 60, cap: +a.cap || undefined, log,
 				source: a.source, wait: a.wait !== undefined ? +a.wait : 60 });
 			const L = r.ladder;
 			if (a.json) {
-				const brief = (x) => ({ start: x.start, K: x.K, T: x.T, ticks: x.ticks, seconds: x.seconds, runTicks: x.runTicks, reason: x.reason });
+				const brief = (x) => ({ start: x.start, K: x.K, T: x.T, ticks: x.ticks, seconds: x.seconds, runTicks: x.runTicks, reason: x.reason, rejected: x.rejected });
 				return json({ job: id, reference: L.reference, best: L.best, saved: L.saved, searches: L.searches, ticks: L.ticks, seconds: L.seconds,
 					found: L.found.map(brief), proofs: L.proofs.map(brief), gaveUp: L.gaveUp.map(brief), file: r.file, handed: r.handed && { handed: r.handed.handed, accepted: r.handed.accepted, verdict: r.handed.verdict, result: r.handed.result } });
 			}
