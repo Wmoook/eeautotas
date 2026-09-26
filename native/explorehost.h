@@ -145,8 +145,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	uint32_t cellLog = memB >= ((size_t)11 << 30) ? 27 : memB >= ((size_t)5 << 30) ? 26 : 25;   // (16 bytes per cell)
 	const int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
 	// --lanes: the tries of a batch share the table, so it is twice as large where the free memory allows (the 8 GB
-	// laptop GPU: 2 GB of cells + ~2.7 GB of states and candidates, 1 GB to spare)
-	if (opt(argc, argv, "finish", "0") == "1" && opt(argc, argv, "lanes", "1") != "1" && cellLog < 27 && cu::cuMemGetInfo_v2) {
+	// laptop GPU: 2 GB of cells + ~2.7 GB of states and candidates, 1 GB to spare); --refine likewise: a refined try keeps
+	// up to ~6x the states (a 50x50 level with a 477-tick route filled 2^26 cells at tick 295 of its first refined try)
+	if (opt(argc, argv, "finish", "0") == "1" && (opt(argc, argv, "lanes", "1") != "1" || opt(argc, argv, "refine", "0") == "1") && cellLog < 27 && cu::cuMemGetInfo_v2) {
 		size_t fr = 0, tot = 0;
 		const size_t rest = 2 * sizeof(S) * (size_t)cap + 20ull * 18 * cap + ((size_t)1 << 30);
 		if (!cu::cuMemGetInfo_v2(&fr, &tot) && fr >= (16ull << 27) + rest) cellLog = 27;

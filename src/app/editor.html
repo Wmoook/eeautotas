@@ -1542,10 +1542,11 @@ function renderSolve() {
 			const refining = (q) => q.key === 'explore' && q.depthCap > 0 && (q.state === 'running' || q.state === 'starting');
 			const what = (q) => (refining(q) ? `${q.found ? `route ${esc(q.found.time)} · ` : ''}looking for a faster one: tick ${q.layer.toLocaleString('en-US')} of ${q.depthCap.toLocaleString('en-US')}`
 				: q.state === 'found' ? `route ${esc(q.found.time)}` : q.state === 'beaten' ? 'stopped: a faster route is known' : q.state === 'ended' ? (q.exhausted ? `no route: ran out of new situations (to ${esc(q.exhausted.grain)})` : q.depthCap > 0 ? 'no faster route' : 'no route')
-				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'starting' ? (q.preparing ? 'preparing the GPU engine for this graphics card… (first search after an update)' : 'starting…')
+				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'waiting' ? esc(q.detail || 'waiting')
+				: q.state === 'stopped' && q.detail ? `stopped: ${esc(q.detail)}` : q.state === 'starting' ? (q.preparing ? 'preparing the GPU engine for this graphics card… (first search after an update)' : 'starting…')
 				: q.cpu ? `${q.layer.toLocaleString('en-US')} ticks deep` : `tick ${q.layer.toLocaleString('en-US')}`);
 			// (the CPU search: its threads, situations, how near; it goes on after a route, looking for a faster one)
-			const more = (q) => (q.key === 'explore' || q.cpu ? ((q.state === 'running' || q.live) && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
+			const more = (q) => (q.key === 'explore' || q.key === 'relay' || q.cpu ? ((q.state === 'running' || q.live) && q.detail ? ` · ${esc(q.detail)}` : '') : q.state === 'running' ? ` · ${(st.width || 0).toLocaleString('en-US')} states per tick` : '');
 			h += `<div class="sst">${st.strategies.map((q) => `${esc(q.label)}: <b>${what(q)}</b>${more(q)}`).join('<br>')}</div>`;
 		}
 		if (st.cpuOnly) h += `<div class="sst">${esc(st.cpuOnly)}</div>`;

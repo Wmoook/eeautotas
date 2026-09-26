@@ -398,23 +398,58 @@ const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
 // ladder's coarse passes took 33 s there next to the beams and the CPU search (route after 59.7 s, the finest pass after
 // 58 s); staircase / dotstairs: the finest pass explodes (60M+ states), the ladder solves them.
 const PROBE_S = 15;
-// A refined try (after the tool's refine event) that has not run through in REFINE_S s is stopped and the pass counts as
-// full, so the ladder goes on with coarser cells: on a long level (the dot ring, a 919-tick route) the first refined
-// try kept half the GPU for 36 s before it filled its table; on the pixel-exact levels it is meant for a refined try
-// takes 2-3 s.
-const REFINE_S = 10;
+// the sanity search after the physics check proves the trophy out of reach (a route there would be a bug in the model):
+// NO_WAY_UP_S s (60 kept the user waiting a minute for a verdict the proof had already given)
+const NO_WAY_UP_S = 10;
+// (no time limit for a refined try: cut at 10 s next to the beams and the relay, shaft's refined try, the one that finds
+// its route in 2.5 s alone, had reached tick 111; a try ends by itself: a finish, every situation tried, a full table.
+// The relay waits for it: RELAY_WAIT_S)
 // A GPU tool that has said nothing for STALL_S s after loading (it prints a line per tick layer) is stopped: its stop
 // file, then the kill 2 s later (halt). Once, next to the relay's process, an explore sat at 100% of a core and of the
 // GPU on one layer for 7 minutes, deaf to its stop file; the search never ended.
 const STALL_S = 20;
 let stallTimer = null;
+// The GPU scheduler: one GPU strategy runs at a time (eegpu --pausefile: the others wait between two launches, keeping
+// everything). Side by side, each got far less than its share: the relay, with its small launches waiting behind every
+// move's 50 ms ones, ran 15x slower than alone (the dot ring's route from tick 249: 2.4 s alone, 20-35 s beside every
+// move). Slices of SLICE_MS in turn; a strategy that got nearer the trophy in its slice keeps the GPU (up to SLICE_MAX
+// slices in a row); every move's probe runs alone. The CPU search is not scheduled.
+const SLICE_MS = 2500, SLICE_MAX = 4;
+let sched = null, schedTimer = null;   // { owner: strategy index, since, slices }
+const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
+function setPaused(k, on) {
+	const ch = kids[k];
+	if (!ch || !!ch.paused === on) return;
+	try { if (on) fs.writeFileSync(pauseFileOf(k), 'pause'); else fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* gone */ }
+	ch.paused = on;
+	if (!on) ch.lastOut = Date.now();   // (the stall watchdog counts from its turn)
+}
+function schedule() {
+	if (!S || !S.running) return;
+	const now = Date.now();
+	const gpu = [];
+	S.strategies.forEach((q, k) => { if (!q.cpu && alive(kids[k]) && !kids[k].stopWhy) gpu.push(k); });
+	if (!gpu.length) { sched = null; return; }
+	let owner = sched && gpu.includes(sched.owner) ? sched.owner : -1;
+	const X = S.strategies.findIndex((q) => q.key === 'explore');
+	if (gpu.includes(X) && S.strategies[X].probe === 'running') {
+		if (owner !== X) sched = { owner: X, since: now, slices: 1 };
+	} else if (owner < 0) {
+		sched = { owner: gpu[0], since: now, slices: 1 };
+	} else if (now - sched.since >= SLICE_MS) {
+		const q = S.strategies[owner];
+		if (q.bestAt && q.bestAt > sched.since && sched.slices < SLICE_MAX) sched = { owner, since: now, slices: sched.slices + 1 };
+		else sched = { owner: gpu[(gpu.indexOf(owner) + 1) % gpu.length], since: now, slices: 1 };
+	}
+	for (const k of gpu) setPaused(k, k !== sched.owner);
+}
 function checkStalls() {
 	if (!S || !S.running) return;
 	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
 	const now = Date.now();
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu || !alive(ch) || ch.stopWhy || !q.readyAt || now - (ch.lastOut || ch.startedAt) < STALL_S * 1000) return;
+		if (q.cpu || !alive(ch) || ch.stopWhy || ch.paused || !q.readyAt || now - (ch.lastOut || ch.startedAt) < STALL_S * 1000) return;
 		note(`${q.label}: no word from the GPU tool for ${STALL_S} s: stopped${q.key === 'explore' ? '; the next pass goes on' : ''}`);
 		halt(ch, q.key === 'explore' ? 'time' : 'stalled');
 	});
@@ -436,14 +471,30 @@ const BEAM_STALL_MS = 10000;
 // ticks; from there the dot ring's route took 2.7 s); a run that runs out at once (a ball starting from rest merges
 // with the ball at rest in coarse speed cells) tries pass 0's cells. A run without a nearer attempt starts further back;
 // a nearer attempt from any strategy is the next run's start.
-const RELAY_MIN_TICKS = 100, RELAY_BACK = [60, 150, 400], RELAY_S = 30, RELAY_SWITCH_MS = 3000;
+// the relay starts once every move's first refined try has ended (the pixel-exact levels' route comes from it, and it
+// needs the GPU), every move runs the ladder (the probe found the finest cells too many), or after RELAY_WAIT_S
+const RELAY_WAIT_S = 20;
+// Every move gives the GPU to a relay far ahead of it (its own nearest attempt 10+ tiles behind the relay's, not better
+// for EXPLORE_YIELD_MS): the dot ring's relay reached the ring at 35 s next to every move's coarse passes from the start
+// (10 s with the GPU to itself). It goes on (the same pass) when the relay waits for a nearer attempt, or once a route
+// is known (faster routes).
+const EXPLORE_YIELD_MS = 15000, EXPLORE_YIELD_TILES = 10;
+function resumeExplore() {
+	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
+	S.strategies.forEach((q, k) => { if (q.key === 'explore' && q.state === 'waiting' && !alive(kids[k])) { Object.assign(q, { state: 'starting', detail: '' }); kids[k] = launch(k); } });
+}
+const RELAY_MIN_TICKS = 100, RELAY_BACK = [60, 150, 400], RELAY_S = 30, RELAY_SWITCH_MS = 3000, RELAY_MIN_KEEP = 50, RELAY_STALL_MS = 8000;
 const RELAY_CELLS = [{ cqx: 0.25, cqv: 4, qy: 0.25, qvy: 4 }, { cqx: 0.5, cqv: 4, qy: 0.5, qvy: 4 }, { cqx: 0.5, cqv: 16, qy: 1, qvy: 16 }];
 /** starts the relay (strategy n) from the nearest attempt so far; false when there is nothing to start from */
 function relayFrom(n) {
 	const V = S.strategies[n], R = V.relay || (V.relay = { back: 0, cells: 0, runs: 0 });
 	const c = S.closest;
-	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || R.back >= RELAY_BACK.length) return false;
+	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || R.back >= RELAY_BACK.length || S.seconds - searchClock(Date.now()) < 3) return false;
+	const X = S.strategies.find((q) => q.key === 'explore');
+	if (X && !(X.probe === 'slow' || X.refinedOnce || X.state === 'ended' || X.state === 'error' || searchClock(Date.now()) >= RELAY_WAIT_S)) return false;
 	const keep = c.ticks - Math.min(RELAY_BACK[R.back], c.ticks - 1);
+	// (a start near the level's start is every move's own work: no relay from there)
+	if (keep < RELAY_MIN_KEEP) return false;
 	// (a route of T ticks known: only a relay that can still end sooner)
 	if (S.result && keep >= S.result.ticks - 1) return false;
 	const file = path.join(dir(), `relay_${n}.eetas`);
@@ -469,11 +520,24 @@ function relayKick() {
 	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
 	S.strategies.forEach((q, k) => {
 		if (q.key !== 'relay') return;
-		if (q.state === 'waiting' && !alive(kids[k]) && searchClock(Date.now()) >= 3) { if (q.relay) q.relay.back = 0; relayFrom(k); return; }
+		if (q.state === 'waiting' && !alive(kids[k]) && searchClock(Date.now()) >= 3) {
+			// (a relay that went through its starting points waits for a nearer attempt than its last)
+			const c0 = S.closest, R0 = q.relay;
+			if (R0 && R0.src && !(c0 && c0.dist < R0.src.dist - 0.5)) return;
+			if (R0) R0.back = 0;
+			relayFrom(k);
+			return;
+		}
 		// running from an attempt that is now far behind the nearest one: stopped between two launches, and it starts
 		// again from the nearer one (its close handler)
 		const R = q.relay, c = S.closest;
-		if (R && R.src && c && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS && c.dist < R.src.dist - Math.max(3, 0.1 * R.src.dist)) halt(kids[k], 'nearer');
+		// a run that has not got nearer for RELAY_STALL_MS, well past its start: again from its own nearest attempt (a fresh
+		// table, and the cells for where it is now: the dot ring's first run came from outside the dots with 2 px cells and
+		// stalled at the ring's top for 10 s; from there with 4 px cells the route took 10 s)
+		if (R && R.src && c && c.strategy === q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - (q.bestAt || kids[k].startedAt) > RELAY_STALL_MS &&
+			Date.now() - kids[k].startedAt > RELAY_STALL_MS && c.ticks > R.keep + RELAY_BACK[0] + 30) { R.src = { dist: c.dist + 1, ticks: c.ticks }; halt(kids[k], 'nearer'); return; }
+		// (not for its own nearer attempts: it is making them, and a restart would throw its table away)
+		if (R && R.src && c && c.strategy !== q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS && c.dist < R.src.dist - Math.max(3, 0.1 * R.src.dist)) halt(kids[k], 'nearer');
 	});
 }
 // the salt tries (the finest pass, and any pass's salt reruns) run up to LANES salts side by side in one eegpu process
@@ -669,6 +733,8 @@ function start(b, gpu, test) {
 	building = true;
 	markBusy();
 	if (!stallTimer) { stallTimer = setInterval(checkStalls, 5000); if (stallTimer.unref) stallTimer.unref(); }
+	sched = null;
+	if (!schedTimer) { schedTimer = setInterval(schedule, 250); if (schedTimer.unref) schedTimer.unref(); }
 	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
 	const gen = ++searchGen;
 	ready.then(([rf, toolWhy]) => { if (gen === searchGen) launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); }, (e) => {
@@ -700,12 +766,12 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 		}
 	}
 	// no way up (the physics check proves the trophy out of reach): only "every move" and the random runs, without the
-	// physics check (with it the start state itself is cut), for at most a minute: a route found there would be a bug in
+	// physics check (with it the start state itself is cut), for NO_WAY_UP_S s: a route found there would be a bug in
 	// the model (model_miss.json)
 	if (noWayUp) {
 		which = which.filter((k) => k === 'explore' || k === 'goexplore');
 		S.strategies = S.strategies.filter((q) => q.key === 'explore' || q.key === 'goexplore');
-		S.seconds = Math.min(S.seconds, 60);
+		S.seconds = Math.min(S.seconds, NO_WAY_UP_S);
 	}
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
 	cur.opts.noWayUp = noWayUp;
@@ -813,7 +879,9 @@ function launch(n) {
 	if (q.salts && cur.opts.refine) q.refine = true;
 	else if (q.salts && cur.opts.lanes > 1) q.lanes = { max: cur.opts.lanes, start: Math.max(1, Math.min(cur.opts.lanes, V.lanes || 1)) };
 	if (V.key === 'relay') {
-		q.prefixFile = V.relay.file; q.cells = RELAY_CELLS[V.relay.cells]; q.seconds = V.share = Math.min(left, RELAY_S);
+		// (the search's clock: the relay waits between its runs, so its own run time would let it run past the search's end)
+		q.prefixFile = V.relay.file; q.cells = RELAY_CELLS[V.relay.cells];
+		q.seconds = V.share = Math.max(1, Math.min(RELAY_S, Math.round(S.seconds - searchClock(Date.now()))));
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
 	}
 	if (V.key === 'explore') {
@@ -831,10 +899,14 @@ function launch(n) {
 	// strategies start together: one compiles the kernels after an update, the others wait for it and load them)
 	// (the GPU tool detached, with this process as its --parent: Node kills the children it did not start detached the
 	// moment it exits, mid-kernel too; a detached eegpu ends at its next kernel launch once the app is gone)
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--parent=${process.pid}`];
+	const pauseFile = cpu ? '' : pauseFileOf(n);
+	const pausedNow = !cpu && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
+	if (pauseFile) { try { if (pausedNow) fs.writeFileSync(pauseFile, 'pause'); else fs.unlinkSync(pauseFile); } catch (e) { /* none */ } }
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`, `--parent=${process.pid}`];
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });
 	ch.stopFile = stopFile;
 	ch.startedAt = Date.now();
+	ch.paused = pausedNow;
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
@@ -887,7 +959,9 @@ function launch(n) {
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
-			if (ev.ev === 'layer') {
+			if (ev.ev === 'layer' && V.key === 'relay' && V.relay) {
+				V.detail = `from tick ${V.relay.keep} of the nearest attempt (run ${V.relay.runs}) · ${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full`;
+			} else if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu) {
@@ -899,10 +973,13 @@ function launch(n) {
 			// deeper than the best route: it cannot find a faster one (the CPU search's deepest situation says nothing of
 			// the kind: it is told the bound instead, and looks only for faster routes)
 			if (!cpu && S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
-			// a refined try running past REFINE_S: the pass ends as full (the ladder goes coarser)
-			if (V.key === 'explore' && V.refine && V.refine.at && Date.now() - V.refine.at > REFINE_S * 1000 && alive(ch) && !ch.stopWhy && !S.result) {
-				note(`${V.label}: a refined try is still going after ${REFINE_S} s at tick ${ev.layer}: too many situations here; coarser cells`);
-				halt(ch, 'full');
+			// every move far behind a running relay (EXPLORE_YIELD_MS) gives it the GPU
+			if (V.key === 'explore' && !S.result && alive(ch) && !ch.stopWhy) {
+				const rk = S.strategies.findIndex((q) => q.key === 'relay'), Rv = S.strategies[rk];
+				if (Rv && alive(kids[rk]) && Rv.best !== undefined && !(V.best <= Rv.best + EXPLORE_YIELD_TILES) && Date.now() - (V.bestAt || ch.startedAt) > EXPLORE_YIELD_MS) {
+					note(`${V.label}: gave the GPU to ${Rv.label} (${Rv.best.toFixed(1)} tiles from the trophy, this one ${V.best !== undefined ? V.best.toFixed(1) : '-'}); it goes on when that one stops`);
+					halt(ch, 'yield');
+				}
 			}
 			// a stuck beam (BEAM_STALL_MS) gives way while another GPU strategy searches
 			if ((V.key === 'goal' || V.key === 'guide') && !S.result && alive(ch) && !ch.stopWhy && Date.now() - (V.bestAt || ch.startedAt) > BEAM_STALL_MS &&
@@ -922,7 +999,10 @@ function launch(n) {
 			note(`${V.label}: the finest cells ran through in ${usedSec(V).toFixed(1)} s (every situation tried at tick ${ev.layers}): trying them first`);
 			onEvent(Object.assign({}, ev, { probeSeen: true }));
 		} else if (ev.ev === 'try') {
+			if (V.refine && V.refine.at) V.refinedOnce = true;
 			if (V.refine) V.refine.at = 0;
+			V.lastTryMs = Date.now() - (ch.tryFrom || V.readyAt || ch.startedAt);
+			ch.tryFrom = Date.now();
 			// a salt rerun's try that ran out of situations (no layer cut, no route bounding it): the evidence counts it
 			// (a batch of --lanes salts side by side: one event for its ev.lanes tries)
 			if (ev.end === 'exhausted' && ev.overflow === 0 && !V.depthCap && !V.found && V.pass >= 0) {
@@ -934,7 +1014,8 @@ function launch(n) {
 			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
 		} else if (ev.ev === 'refine') {
 			// the try before ran out of situations: the next ones tell the situations along its near misses apart 4x finer
-			V.refine = { tiles: ev.frontierTiles, nearMisses: ev.nearMisses, situations: ev.situations, at: Date.now() };
+			V.refine = { tiles: ev.frontierTiles, nearMisses: ev.nearMisses, situations: ev.situations, at: Date.now(),
+			};
 			if (ev.new > 0) note(`${V.label}: ${ev.frontierTiles} tile${ev.frontierTiles === 1 ? '' : 's'} next to reached ones not entered: the next try looks 4x finer along the ${ev.nearMisses} nearest attempts (${ev.situations} situations)`);
 		} else if (ev.ev === 'lanes') {
 			// the tool changed how many salts it tries side by side: a batch filled the cell table (it runs them again with
@@ -1006,6 +1087,13 @@ function launch(n) {
 			// the probe (PROBE_S) ended before its first try ran through: too many situations at the finest cells here (its
 			// time, or a full table): the ladder from PASS_START, as if the probe had not been. A route: it passed.
 			if (ch.probeTimer) clearTimeout(ch.probeTimer);
+			if (V.refine && V.refine.at) V.refinedOnce = true;   // (the refined try ended with its process: full, time)
+			if (ch.stopWhy === 'yield' && S.running && !S.halted && S.stage !== 'stopped') {
+				Object.assign(V, { state: 'waiting', detail: 'gave the GPU to the relay, far ahead; goes on when it stops' });
+				totals();
+				if (!running()) finish(); else save();
+				return;
+			}
 			if (V.probe === 'running') {
 				const h = ch.stopWhy || (code === 0 && !V.error ? end : '');
 				if ((h === 'probe' || h === 'full') && !V.error && S.running && !S.halted && S.stage !== 'stopped' && S.seconds - usedSec(V) > 2) {
@@ -1072,8 +1160,9 @@ function launch(n) {
 				if (nearer) { R.back = 0; R.cellsSet = false; }
 				else if (how === 'exhausted' && V.layer < 30 && R.cells + 1 < RELAY_CELLS.length) R.cells++;
 				else { R.back++; R.cellsSet = false; }
-				if (S.seconds - usedSec(V) > 2 && relayFrom(n)) { save(); return; }
+				if (relayFrom(n)) { save(); return; }
 				Object.assign(V, { state: 'waiting', detail: 'waits for a nearer attempt to go on from' });
+				setImmediate(resumeExplore);
 			}
 		}
 		if (V.state === 'running' || V.state === 'starting') {
@@ -1140,6 +1229,9 @@ function markBusy() {
 function finish() {
 	S.running = false;
 	if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+	if (schedTimer) { clearInterval(schedTimer); schedTimer = null; }
+	sched = null;
+	for (let k = 0; k < S.strategies.length; k++) { try { fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* none */ } }
 	S.strategies.forEach((q) => { if (q.state === 'waiting') Object.assign(q, { state: 'ended' }); });
 	setImmediate(markBusy);
 	S.elapsed = (Date.now() - S.started) / 1000;
@@ -1233,6 +1325,8 @@ function found(inputs, n, more) {
 		if (k !== n && !q.cpu && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
 	if (better) tellCpu(S.result.ticks);
+	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
+	if (better) setImmediate(resumeExplore);
 	save();
 }
 /** a strategy's closest attempt (ev: {dist (tiles to the trophy by the reach field), tick, inputs, cut}): kept when it is
@@ -1268,6 +1362,7 @@ function stop() {
 	S.stage = S.result ? 'found' : 'stopped';
 	S.message = S.result ? '' : 'The search was stopped before it found a route.';
 	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; halt(kids[k], 'stopped'); } });
+	for (let k = 0; k < S.strategies.length; k++) { try { fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* none */ } }
 	saveNow();
 	if (building) {
 		// still checking the physics / the GPU tool (the GPU's first load can take minutes): nothing runs yet, so the
@@ -1315,4 +1410,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
