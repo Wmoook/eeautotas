@@ -21,9 +21,10 @@ const HOMEP = (p) => require('path').join(require('os').homedir(), p);
 //   drag     the 8 drag constants (Config.as:47-55 pow(x, 10) * 1.00016093): which pow they are (informational)
 //   app      jobs.js / server.js / grind.js / render.js / common.js in a temp copy of src/ (no job ever appears in the
 //            real app): import limits and messages, the Finish report, where, probe / render / try limits, focus
-//            ranges, HTTP errors (upload limit, JSON null, render margin), the viewer's data and page script, EE
-//            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, sheet whitelist, folder checks), the inbox
-//            verdict of a slower run
+//            ranges, HTTP errors (upload limit, JSON null, render margin), the viewer's data and page script (the ball's
+//            effects: the trajectory's `effects` decoded by the page's own code = the engine's fields every tick), EE
+//            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, Player.as, sheet whitelist, folder checks), the
+//            inbox verdict of a slower run
 // usage: node test/review.js [--quick] [--seed=N] [--only=music,portals,keys,fuzz,real,drag,app] [--case=ks1]
 // Exit code 1 if any check fails. Node built-ins only; writes nothing inside the repo.
 const fs = require('fs');
@@ -843,6 +844,95 @@ function request(port, method, p, body, headers) {
 }
 const errOf = (fn) => { try { fn(); return null; } catch (e) { return e; } };
 async function errOfAsync(fn) { try { await fn(); return null; } catch (e) { return e; } }
+/**
+ * The run viewer's effects: src/viewer.js trajectory `effects` ({on: [tick, bits, ...], values, thrust}) decoded by the
+ * page's own code (vwPrepFx, vwFxList, cut out of index.html) against the engine's fields tick by tick on tiny levels (a
+ * curse that kills, protection through a spike, fly with thrust), and over HTTP for the app job (fly, multijump, jump).
+ */
+async function viewerEffectsChecks(S, port, id, page, best) {
+	const VW = require(path.join(S.src, 'viewer.js'));
+	const grab = (re) => { const m = page.match(re); return m ? m[0] : ''; };
+	const block = grab(/const FXB = \{[\s\S]*?\n(?=\/\*\* a simple-look badge)/);
+	let P = null;
+	const pe = errOf(() => {
+		P = new Function(`${grab(/^const clamp = .*$/m)}\n${grab(/^function ub\(.*$/m)}\n${grab(/^const esc = .*$/m)}\n${block}\n` +
+			`${grab(/^function fxLabel\([\s\S]*?\n\}\n/m)}\n${grab(/^function fxSpans\([\s\S]*?\n\}\n/m)}\n` +
+			`return { vwPrepFx, vwFxList, FXB, fxSpans: typeof fxSpans === 'function' ? fxSpans : null };`)();
+	});
+	check('the page\'s effect code (FXB .. vwFxList) runs on its own', !pe && P && block.length > 1000, pe ? pe.message : `${block.length} chars`);
+	if (!P) return;
+	const FXB = P.FXB;
+	// every tick: the page's decoded bits and thrust = the engine's fields
+	const walk = (level, masks) => {
+		const tr = VW.trajectory(level, masks), d = JSON.parse(JSON.stringify(VW.json(tr)));
+		const f = P.vwPrepFx(d.effects, d.ticks);
+		const sim = new E.EESim(level); sim.reset();
+		const inp = new E.EEInput();
+		const bad = [];
+		for (let t = 0; t <= tr.n; t++) {
+			if (t > 0) { E.applyMask(inp, masks[t - 1]); sim.tick(inp); }
+			const b = f ? f.bits[t] : 0, th = f ? f.thr[t] : 0;
+			const want = [['protection', sim.is_invulnerable], ['curse', sim.is_cursed], ['zombie', sim.is_zombie], ['poison', sim.is_poisoned], ['fire', sim.is_on_fire],
+				['fly', sim.has_levitation], ['thrust', sim.has_levitation && sim.is_thrusting], ['lowGravity', sim.low_gravity], ['god', sim.in_god_mode],
+				['jump', sim.jump_boost !== 0], ['speed', sim.speed_boost !== 0], ['multijump', sim.max_jumps !== 1], ['gravity', sim.flip_gravity !== 0], ['team', sim.team !== 0]];
+			for (const [k, on] of want) if (!!(b & FXB[k]) !== !!on) bad.push(`t${t} ${k} ${!!on}`);
+			const thr = sim.has_levitation ? Math.round(sim._current_thrust * 100) : 0;
+			if (th !== thr) bad.push(`t${t} thrust ${th} vs ${thr}`);
+			if (bad.length > 5) break;
+		}
+		return { tr, d, f, bad };
+	};
+	const R = (n, m) => new Array(n).fill(m);
+	const lvl = (tiles) => loadRecords(40, 8, [...wallRecords(40, 8, 6), { id: 255, xs: [2], ys: [5] }, ...tiles.map(([x, bid, a]) => (a === undefined ? { id: bid, xs: [x], ys: [5] } : { id: bid, xs: [x], ys: [5], args: [a] }))]);
+	// 1. curse #1 (D = 140): the page's "curse 1.41 s" at the touch, the kill tick = the first dead tick = the death event
+	const c = walk(lvl([[5, 421, 1]]), Uint8Array.from(R(260, 4)));
+	const cv = (c.d.effects ? c.d.effects.values : []).find((v) => v[1] === 'curse');
+	const dt = c.tr.events.find((e) => e[1] === 'death');
+	const chip = cv ? P.vwFxList({ fx: c.f, n: c.tr.n }, cv[0]).map((x) => x.html).join(' | ') : '';
+	check('effects: curse #1 = the engine every tick; its timer ends at the first dead tick (the death event), the page shows "curse 1.41 s" at the touch',
+		!c.bad.length && cv && cv[3] === 141 && dt && cv[2] === dt[0] && (c.tr.FL[cv[2]] & 1) && !(c.tr.FL[cv[2] - 1] & 1) &&
+		/^curse <span class="d">1\.41 s<\/span>$/.test(chip), `${c.bad.join(', ')} ${JSON.stringify(cv)} death ${dt && dt[0]} chip ${chip}`);
+	// 2. protection: cures the curse, a spike does not kill, zombie is not caught (and without it the spike kills)
+	const pl = [[4, 421, 3], [8, 420, 1], [11, 361, 1], [14, 422, 5]];
+	const p = walk(lvl(pl), Uint8Array.from(R(160, 4)));
+	const p0 = VW.trajectory(lvl(pl.filter((x) => x[1] !== 420)), Uint8Array.from(R(160, 4)));
+	const on = p.d.effects ? p.d.effects.on : [];
+	const last = p.f ? P.vwFxList({ fx: p.f, n: p.tr.n }, p.tr.n).map((x) => x.k).join(',') : '';
+	check('effects: protection = the engine every tick (cures the curse, the spike does not kill, no zombie); the page\'s chips at the end: protection',
+		!p.bad.length && p.tr.deaths === 0 && p0.deaths > 0 && last === 'protection' && on.length >= 6 && on[on.length - 1] === FXB.protection,
+		`${p.bad.join(', ')} deaths ${p.tr.deaths} (without protection ${p0.deaths}) on ${JSON.stringify(on)} chips ${last}`);
+	// 3. fly with two thrusts: the thrust per tick from the exceptions only
+	const fm = Uint8Array.from([...R(25, 4), ...R(12, 5), ...R(30, 4), ...R(4, 5), ...R(40, 4)]);
+	const fy = walk(lvl([[4, 418, 1]]), fm);
+	const ex = fy.d.effects ? fy.d.effects.thrust : null;
+	check('effects: fly thrust = the engine every tick, sent as a few exceptions (not per tick)', !fy.bad.length && ex && ex.length > 0 && ex.length <= 8 && fy.f.thr.some((x) => x === 20),
+		`${fy.bad.join(', ')} thrust ${JSON.stringify(ex)}`);
+	// the marks under the time slider (the page's fxSpans): the stretches of each effect = the ticks its bit is on
+	const spanBad = [];
+	for (const [nm, x] of [['curse', c], ['protection', p], ['fly', fy]]) {
+		if (!x.f || !P.fxSpans) { spanBad.push(`${nm}: no effects or no fxSpans`); continue; }
+		const kinds = P.fxSpans({ fx: x.f, n: x.tr.n });
+		if (!kinds.length) spanBad.push(`${nm}: no rows`);
+		for (const { e, s } of kinds) {
+			const on = new Uint8Array(x.tr.n + 1);
+			for (const [a, b] of s) on.fill(1, a, b);
+			for (let t = 0; t <= x.tr.n; t++) if (!!(x.f.bits[t] & e.bit) !== !!on[t]) { spanBad.push(`${nm} ${e.k} t${t}`); break; }
+		}
+	}
+	check('effects: the marks under the time slider (the page\'s fxSpans) = the ticks each effect is on', !spanBad.length, spanBad.join(', '));
+	const none = VW.trajectory(lvl([]), Uint8Array.from(R(60, 4)));
+	check('effects: null for a run without any effect', none.effects === null && JSON.parse(JSON.stringify(VW.json(none))).effects === null);
+	// 4. over HTTP: the app job walks over fly #1, multijump #2, jump #1 (best and original); the old fields are all there
+	const orig = (await request(port, 'GET', `/api/jobs/${id}/trajectory?which=original`)).json;
+	const old = ['ticks', 'complete', 'finished', 'runTicks', 'time', 'timerStart', 'deaths', 'coins', 'blueCoins', 'posScale', 'x', 'y', 'run', 'flags', 'inputs', 'events',
+		'doors', 'coinsTaken0', 'clock0', 'align', 'original'];
+	const e = best && best.effects, f = e && P.vwPrepFx(e, best.ticks);
+	const chips = f ? P.vwFxList({ fx: f, n: best.ticks }, best.ticks).map((x) => `${x.k} ${x.html.replace(/<[^>]*>/g, '')}`).join(' | ') : '';
+	check('GET trajectory has `effects` (best and original: fly, jumps 2, high jump from the blocks on; the multijump / jump values) next to every old field',
+		e && orig && orig.effects && old.every((k) => k in best) && e.values.some((v) => v[1] === 'multijump' && v[2] === 2) && e.values.some((v) => v[1] === 'jump' && v[2] === 1) &&
+		/^fly fly \| jump high jump ×1\.3 \| multijump jumps \d\/2$/.test(chips) && JSON.stringify(e).length < 400,
+		`${chips}; ${JSON.stringify(e)}; missing ${old.filter((k) => !(k in (best || {}))).join(',')}`);
+}
 async function appSection() {
 	section('app: jobs / server / grind / render / common (in a temp copy of src/)');
 	const S = makeSandbox();
@@ -968,6 +1058,7 @@ async function appSection() {
 		const page = fs.readFileSync(path.join(S.src, 'app', 'index.html'), 'utf8');
 		const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 		check('the page\'s script parses', scripts.length > 0 && scripts.every((s) => !errOf(() => new Function(s))), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
+		await viewerEffectsChecks(S, port, id, page, r3.json);
 		const fake = path.join(S.dir, 'fake-eeo-tas');
 		fs.mkdirSync(path.join(fake, 'media'), { recursive: true });
 		fs.mkdirSync(path.join(fake, 'src', 'items'), { recursive: true });
@@ -1011,6 +1102,23 @@ async function appSection() {
 		check('POST /api/eegfx refuses a folder that is not eeo-tas (400 with the reason), the setting stays', e1.status === 400 && /does not exist/.test(e1.json.error) &&
 			e2.status === 400 && /no media\/blocks\.png/.test(e2.json.error) && C.readJSON(path.join(S.C.DATA, 'settings.json'), {}).eegfxDir === fake,
 			`${e1.status} ${e1.json && e1.json.error} | ${e2.status} ${e2.json && e2.json.error}`);
+		// Player.as: how a player with effects is drawn (the fire aura, the effect icons over the head, the zombie face)
+		fs.writeFileSync(path.join(fake, 'media', 'fireaura.png'), S.R.encodePng(156, 26, new S.R.Canvas(156, 26, [200, 100, 0]).p));
+		fs.writeFileSync(path.join(fake, 'media', 'effect_icons.png'), S.R.encodePng(64, 16, new S.R.Canvas(64, 16, [200, 0, 0]).p));
+		fs.writeFileSync(path.join(fake, 'src', 'Player.as'), ['package { public class Player extends SynchronizedObject {',
+			'  [Embed(source="/../media/fireaura.png")] protected static var FireAura:Class;',
+			'  private static var fireAura:BitmapData = new FireAura().bitmapData;',
+			'  [Embed(source = "/../media/effect_icons.png")] protected static var EffectIcons:Class;',
+			'  private static var effectIconsBitmapData:BitmapData = new EffectIcons().bitmapData;',
+			'  private static var fireAnimation:BlSprite = new BlSprite(fireAura, 0, 0, 26, 26, 6);',
+			'  private static var effectIcons:BlSprite = new BlSprite(effectIconsBitmapData, 0, 0, 16, 16, effectIconsBitmapData.width/16);',
+			'} }'].join('\n'));
+		r = await request(port, 'GET', '/api/eegfx');
+		const pg = (r.json && r.json.player) || {};
+		const si = (n) => (r.json && r.json.sheets ? r.json.sheets.indexOf(n) : -1);
+		check('GET /api/eegfx reads Player.as (rebuilt when it changes): the fire aura and the effect icons as [sheet, first frame, w, h, frames] (no levitation here)',
+			r.status === 200 && si('fireaura') >= 0 && JSON.stringify(pg.fire) === JSON.stringify([si('fireaura'), 0, 26, 26, 6]) &&
+			JSON.stringify(pg.icons) === JSON.stringify([si('effect_icons'), 0, 16, 16, 4]) && pg.levitation === null, `${r.status} ${JSON.stringify(pg)} ${JSON.stringify(r.json && r.json.sheets)}`);
 		r = await post({ dir: '' });
 		check('POST /api/eegfx {dir: ""}: back to finding eeo-tas by itself (available, or not with the reason why)', r.status === 200 && !('eegfxDir' in C.readJSON(path.join(S.C.DATA, 'settings.json'), {})) &&
 			(r.json.available === true ? r.json.source !== 'settings' : typeof r.json.why === 'string' && /eeo-tas/.test(r.json.why)), `${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);

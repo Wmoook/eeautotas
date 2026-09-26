@@ -2,8 +2,10 @@
 // Data for the web app's run viewer ("Watch"): GET /api/jobs/:id/trajectory and GET /api/jobs/:id/level.
 // - trajectory(): replays a run in the job's exact engine (the level JSON with its rng_script and start_mode, the
 //   same one every optimizer tool loads) and returns per-tick positions (1/16 px), the run timer, inputs, flags
-//   (dead, on ground, gravity), the events (coins, portals, deaths, keys, switches, finish) and the door states
-//   over time (exact: sim.is_tile_solid_now on one tile per door kind + number).
+//   (dead, on ground, gravity), the events (coins, portals, deaths, keys, switches, finish), the door states
+//   over time (exact: sim.is_tile_solid_now on one tile per door kind + number) and the ball's effects over time
+//   (protection, curse, zombie, poison, fire with their death timers, fly and its thrust, jump, speed, low gravity,
+//   multijump, gravity, team, god mode: the fields jobs.js where() prints, in runs of equal state; see FX below).
 // - align(): which tick of the original run is "at the same point" as each tick of the best run (dynamic time
 //   warping over the two paths, in a band around the diagonal), for the viewer's "the original is 0.42 s behind".
 // - levelView(): width, height, the fg/bg block ids, EE's own minimap color per id (src/minimap.js) and the block
@@ -17,6 +19,23 @@ const E = C.E;
 
 const b64 = (a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
 const GRAV = (x, y) => (x === 0 && y === 1 ? 0 : x === 0 && y === -1 ? 1 : x === -1 && y === 0 ? 2 : x === 1 && y === 0 ? 3 : 4);
+// The effect bits of a tick (the page's `effects.on`; docs/eeo_spec/blocks.md section 6). Bits 14-16: while flying and
+// thrusting, the side eeo-tas draws the levitation flame on (Player.as playLevitationAnimation, from the current tile's
+// gravity ints morx / mory: 1 below, 2 above, 3 left, 4 right; 0 = no gravity there, no flame).
+const FX = { protection: 1, curse: 2, zombie: 4, poison: 8, fire: 16, fly: 32, thrust: 64, lowGravity: 128, god: 256, jump: 512, speed: 1024,
+	multijump: 2048, gravity: 4096, team: 8192 };
+/** the effect bits of the sim's current state */
+function fxBits(sim) {
+	let b = (sim.is_invulnerable ? FX.protection : 0) | (sim.is_cursed ? FX.curse : 0) | (sim.is_zombie ? FX.zombie : 0) |
+		(sim.is_poisoned ? FX.poison : 0) | (sim.is_on_fire ? FX.fire : 0) | (sim.has_levitation ? FX.fly : 0) | (sim.low_gravity ? FX.lowGravity : 0) |
+		(sim.in_god_mode ? FX.god : 0) | (sim.jump_boost ? FX.jump : 0) | (sim.speed_boost ? FX.speed : 0) | (sim.max_jumps !== 1 ? FX.multijump : 0) |
+		(sim.flip_gravity ? FX.gravity : 0) | (sim.team ? FX.team : 0);
+	if (sim.has_levitation && sim.is_thrusting) {
+		b |= FX.thrust;
+		b |= (sim.morx < 0 ? 3 : sim.morx > 0 ? 4 : sim.mory < 0 ? 2 : sim.mory > 0 ? 1 : 0) << 14;   // (morx wins, like the AS3)
+	}
+	return b;
+}
 
 /**
  * Replays `masks` from the level start until the finish (or the end of the inputs). Returns the raw typed arrays
@@ -64,10 +83,47 @@ function trajectory(level, masks) {
 			default: break;
 		}
 	};
+	// effects: the bits in runs ([tick, bits, tick, bits, ...] from tick 0), the values while an effect is on ([tick, name,
+	// ...] when they change) and the fly thrust x 100 (20 = full, 0.2) where it breaks the rule "the last tick's while
+	// thrusting, else the last tick's - 1 (not below 0)" (updateThrust: 0.01 burnt per tick): [tick, thrust, ...]
+	const fxOn = [], fxVal = [], lastVal = new Map(), fxThr = [];
+	let fxLast = -1, fxAny = 0, thrLast = 0;
+	const val = (t, name, a, b) => {
+		const k = b === undefined ? a : `${a},${b}`;
+		if (lastVal.get(name) === k) return;
+		lastVal.set(name, k);
+		fxVal.push(b === undefined ? [t, name, a] : [t, name, a, b]);
+	};
+	// a timed effect (Player.as:399-404): the tick whose state is the first dead one (the kill check fires at level tick
+	// start + floor(D) + 1, like where() and stateKey count it) and the timer's length in ticks; -1, 0 = no timer
+	const timer = (t, name, start, dur) => {
+		if (!(dur !== 0 && dur === dur)) { val(t, name, -1, 0); return; }
+		const len = Math.floor(dur) + 1;
+		val(t, name, t + start + len - sim.level_ticks(), len);
+	};
+	const recFx = (t) => {
+		const b = fxBits(sim);
+		fxAny |= b;
+		if (b !== fxLast) { fxOn.push(t, b); fxLast = b; }
+		const thr = b & FX.fly ? Math.max(0, Math.min(255, Math.round((+sim._current_thrust || 0) * 100))) : 0;
+		if (thr !== (b & FX.thrust ? thrLast : Math.max(0, thrLast - 1))) fxThr.push(t, thr);
+		thrLast = thr;
+		if (!b) return;
+		if (b & FX.jump) val(t, 'jump', sim.jump_boost);
+		if (b & FX.speed) val(t, 'speed', sim.speed_boost);
+		if (b & FX.gravity) val(t, 'gravity', sim.flip_gravity);
+		if (b & FX.team) val(t, 'team', sim.team);
+		if (b & FX.multijump) val(t, 'multijump', sim.max_jumps, sim.max_jumps >= 1000 ? 0 : sim.jump_count);   // (EE shows max - count jumps left)
+		if (b & FX.curse) timer(t, 'curse', sim._curse_time_start, sim._curse_duration);
+		if (b & FX.zombie) timer(t, 'zombie', sim._zombie_time_start, sim._zombie_duration);
+		if (b & FX.poison) timer(t, 'poison', sim._poison_time_start, sim._poison_duration);
+		if (b & FX.fire) timer(t, 'fire', sim._fire_time_start, sim._fire_duration);
+	};
 	const rec = (t) => {
 		X[t] = Math.round(sim.px * 16); Y[t] = Math.round(sim.py * 16); RUN[t] = sim.run_ticks;
 		const g = sim.gravity_dir || { x: 0, y: 1 };
 		FL[t] = (sim.is_dead ? 1 : 0) | (sim.on_ground ? 2 : 0) | (GRAV(g.x, g.y) << 2);
+		recFx(t);
 	};
 	rec(0);
 	let t = 0;
@@ -84,10 +140,12 @@ function trajectory(level, masks) {
 	const len = t + 1;
 	const doors = {};
 	for (const [key, g] of groups) doors[key] = [g.solid0 ? 1 : 0, ...g.toggles];
+	// null when the ball never has an effect (most runs)
+	const effects = fxAny ? { on: fxOn, values: fxVal, thrust: fxThr } : null;
 	return {
 		n: t, complete, runTicks: sim.run_ticks, timerStart, deaths, coins: sim.coins, blueCoins: sim.blue_coins, clock0,
 		X: X.subarray(0, len), Y: Y.subarray(0, len), RUN: RUN.subarray(0, len), FL: FL.subarray(0, len),
-		inputs: Uint8Array.from(masks.subarray ? masks.subarray(0, t) : masks.slice(0, t)), events, doors, taken0,
+		inputs: Uint8Array.from(masks.subarray ? masks.subarray(0, t) : masks.slice(0, t)), events, doors, taken0, effects,
 	};
 }
 
@@ -98,6 +156,7 @@ function json(tr, extra) {
 		deaths: tr.deaths, coins: tr.coins, blueCoins: tr.blueCoins, posScale: 16,
 		x: b64(tr.X), y: b64(tr.Y), run: b64(tr.RUN), flags: b64(tr.FL), inputs: b64(tr.inputs),
 		events: tr.events, doors: tr.doors, coinsTaken0: tr.taken0, clock0: tr.clock0 | 0,
+		effects: tr.effects,
 	}, extra || {});
 }
 
@@ -204,4 +263,4 @@ function levelView(levelJson, level, meta) {
 	};
 }
 
-module.exports = { trajectory, json, align, levelView, startMatters };
+module.exports = { trajectory, json, align, levelView, startMatters, FX };

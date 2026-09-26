@@ -173,6 +173,27 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 	white-space: normal; }
 .vdiff.ahead { color: #62e39a; } .vdiff.behind { color: #ff9b8a; } .vdiff.even { color: #c9ced8; }
 .vdiff:empty { display: none; }
+/* the ball's effects (EE's effect display: the effect block's image in a dark box, a time bar for the timed ones) */
+.vfx { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: min(560px, calc(100vw - 170px)); }
+.vfx:empty { display: none; }
+.vfxc { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 8px 0 3px; border-radius: 7px; background: rgba(10, 12, 16, .8);
+	border: 1px solid rgba(204, 204, 204, .3); font: 600 12px var(--mono); color: #e9ecf2; white-space: nowrap; }
+.vstage .vfxc canvas { position: static; display: block; cursor: default; }   /* (its size: vwFxHud, a whole number of the 16 px icon's pixels) */
+.vfxc .d { color: #ffd23f; font-weight: 700; }
+.vfxc .d.low { color: #ff7a6b; }
+.vfxc .m { color: #9aa3b5; font-weight: 500; }
+.vfxc .bar { width: 4px; height: 16px; background: #cccccc; border: 1px solid #cccccc; position: relative; overflow: hidden; }
+.vfxc .bar i { position: absolute; left: 0; right: 0; bottom: 0; background: #00ff00; }
+.vfx.gh .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #9aa3b5; background: rgba(10, 12, 16, .8); border-radius: 7px;
+	padding: 3px 7px; }
+.vfx.gh .vfxc { min-height: 22px; font-size: 11px; color: #b9d6ff; opacity: .7; padding-right: 6px; }
+.vfx.gh .vfxc .d { color: #b9d6ff; }
+.vfx.gh .vfxc .bar { height: 12px; }
+/* the time slider (at least 100 px: the controls wrap to a second row first) with the effect marks under it (a row per effect, drawn by
+   vwFxLine, which also makes room for them: .vbar's --fxpad) */
+.vsw { flex: 1; min-width: 100px; align-self: stretch; position: relative; display: flex; align-items: center; }
+.vsw input[type=range] { flex: 1; min-width: 0; }
+.vfxline { position: absolute; left: 8px; top: calc(50% + 10px); width: calc(100% - 16px); height: 3px; cursor: help; }
 .vkeys { position: absolute; right: 10px; top: 10px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px; pointer-events: none; }
 .vkeys span { height: 24px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .14); background: rgba(10, 12, 16, .7); color: #7f8898;
 	font: 700 11px/22px var(--mono); text-align: center; }
@@ -187,8 +208,9 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .vlegend ul { margin: 6px 0 2px; padding-left: 16px; }
 .vlegend li { margin: 2px 0; }
 .vlegend kbd { font: 11px var(--mono); background: #232733; border-radius: 4px; padding: 0 4px; }
-.vbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; padding: 10px 12px; border-top: 1px solid #22262e; }
-.vbar .scrub { flex: 1 1 260px; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vbar { display: flex; flex-wrap: wrap; gap: calc(8px + var(--fxpad, 0px)) 10px; align-items: center; padding: 10px 12px calc(10px + var(--fxpad, 0px));
+	border-top: 1px solid #22262e; }   /* (--fxpad: the room the effect marks need below the slider's row, set by vwFxLine) */
+.vbar .scrub { flex: 1 1 260px; display: flex; align-items: center; gap: 10px; }   /* (not narrower than the time and a 100 px slider) */
 .vbar input[type=range] { flex: 1; min-width: 0; accent-color: #ffd23f; }
 .vpos { font: 600 13px var(--mono); color: #d7dbe3; white-space: nowrap; }
 .vbar select, .vbar input[type=text] { width: auto; background: #1b1e25; color: #e9ecf2; border-color: #2f3440; padding: 6px 8px; font-size: 13px; }
@@ -231,10 +253,13 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 	.vclock.gh .t { font-size: 13px; }
 	.vclock .lbl { min-width: 0; }
 	.vkeys { grid-template-columns: repeat(3, 20px); } .vkeys span { height: 19px; font-size: 10px; line-height: 17px; }
-	.vbar { padding: 8px; gap: 6px 8px; }
+	.vbar { padding: 8px 8px calc(8px + var(--fxpad, 0px)); gap: calc(6px + var(--fxpad, 0px)) 8px; }
 	.vbar .scrub { flex-basis: 100%; gap: 8px; }
 	.vbar input[type=text] { width: 96px; }
-	.vtick { display: none; }
+	.vfx { max-width: calc(100vw - 110px); }
+	.vfxc { min-height: 22px; font-size: 11px; gap: 3px; padding-right: 5px; }
+	.vfx.gh .vfxc { padding: 0 3px; gap: 2px; }
+	.vfx.gh .vfxc > span:not(.bar) { display: none; }   /* (the original's effects: icons only) */
 	.vlegend { display: none; }
 	.vstep button { padding: 5px 7px; font-size: 11.5px; }
 	.vgfxhint { max-width: calc(100% - 120px); }
@@ -295,6 +320,8 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 				<div class="vclock"><span class="lbl">best</span><span class="t" id="vTimeA">0:00.00</span><span class="fin" id="vFinA"></span></div>
 				<div class="vclock gh" id="vClockG"><span class="lbl">original</span><span class="t" id="vTimeG">0:00.00</span><span class="fin" id="vFinG"></span></div>
 				<div class="vdiff even" id="vDiff"></div>
+				<div class="vfx" id="vFx" aria-label="the best run's effects"></div>
+				<div class="vfx gh" id="vFxG" aria-label="the original's effects"></div>
 			</div>
 			<div class="vkeys" id="vKeys"><span data-b="1">J</span><span data-b="8">U</span><span data-b="0" style="visibility:hidden"></span><span data-b="2">L</span><span data-b="16">D</span><span data-b="4">R</span></div>
 			<div class="vside">
@@ -339,6 +366,10 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 					<li>Purple rings: portals (white dot: random exit) · coins disappear when the best run takes them · doors: filled = closed, outline = open
 						(number = coins / deaths needed) · red diamonds: spikes · green checker: the finish</li>
 				</ul>
+				<ul><li><b>Effects</b> (protection, curse, zombie, poison, fire, fly, jump, speed, low gravity, multijump, gravity, team, god mode): a chip each
+					under the clocks, with the time left of the timed ones · on the smiley as in EE (EE graphics: the red cross over the head = protection,
+					the fire aura, the fly flame, the zombie face, the smiley turned by a gravity effect; simple: badges, colored rings) · colored marks under
+					the time slider, a row per effect: when it is on in the best run (point at a mark for its times)</li></ul>
 				<ul><li><kbd>Space</kbd> play/pause · <kbd>&larr;</kbd><kbd>&rarr;</kbd> 1 s (<kbd>Shift</kbd>: 1 tick; or the step buttons, hold to repeat) ·
 					<kbd>+</kbd><kbd>-</kbd> zoom · <kbd>0</kbd> fit level · <kbd>F</kbd> follow · <kbd>G</kbd> ghost · <kbd>Esc</kbd> close · drag to look around,
 					wheel/pinch to zoom</li></ul></details>
@@ -346,7 +377,8 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 		</div>
 		<div class="vbar">
 			<div class="scrub"><button class="vplay" id="vPlay" title="Play / pause (Space)">&#9654;</button>
-				<input type="range" id="vScrub" min="0" max="1" value="0" step="1" aria-label="run time"><span class="vpos" id="vPos">0:00.00</span></div>
+				<div class="vsw" id="vScrubW"><input type="range" id="vScrub" min="0" max="1" value="0" step="1" aria-label="run time"><canvas class="vfxline" id="vFxLine" hidden></canvas></div>
+				<span class="vpos" id="vPos">0:00.00</span></div>
 			<div class="vstep" role="group" aria-label="Step through the run">
 				<button id="vB1s" title="Back 1 second (&larr;); hold to repeat">|&#9664; 1 s</button>
 				<button id="vB1" title="Back 1 tick = 0.01 s (Shift+&larr;); pauses; hold to repeat">&#9664; 1 tick</button>
@@ -781,7 +813,7 @@ const ZOOMS = [0.5, 1, 1.5, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64]; 
 const ZOFF = 3;   // link and stored zoom numbers count from 2 px per tile (the three smaller steps came later)
 const vw = { open: false, id: null, L: null, A: null, G: null, pos: 0, T: 0, off: 0, playing: false, speed: 1, zi: 9 + ZOFF, follow: true, camX: 0, camY: 0,
 	snap: true, chunks: new Map(), px: 0, frame: 0, dirty: true, last: 0, raf: 0, version: null, ghost: true, path: true, ptr: new Map(), pinch: null, hud: {}, token: 0,
-	S: null };
+	S: null, fxA: { sig: null, items: [] }, fxG: { sig: null, items: [] } };
 function b64u8(s) { const b = atob(s || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
 const b64i32 = (s) => { const u = b64u8(s); return new Int32Array(u.buffer, 0, u.length >> 2); };
 const b64u16 = (s) => { const u = b64u8(s); return new Uint16Array(u.buffer, 0, u.length >> 1); };
@@ -818,7 +850,7 @@ function vwPrepRun(d, L) {
 	const r = { d, n: d.ticks, X: b64i32(d.x), Y: b64i32(d.y), RUN: b64i32(d.run), FL: b64u8(d.flags), IN: b64u8(d.inputs), runTicks: d.runTicks,
 		time: d.time, timerStart: d.timerStart, finished: d.finished, version: d.version, doors: d.doors || {}, events: d.events || [], coinAt: new Map(),
 		taken0: new Set(d.coinsTaken0 || []), align: d.align ? b64i32(d.align) : null,
-		coinT: [], bcoinT: [], deathT: [], swEv: [], cpEv: [], clock0: d.clock0 | 0, route: null };
+		coinT: [], bcoinT: [], deathT: [], swEv: [], cpEv: [], clock0: d.clock0 | 0, route: null, fx: vwPrepFx(d.effects, d.ticks) };
 	for (const e of r.events) {
 		if (e[1] === 'coin' || e[1] === 'blue_coin') {
 			if (!r.coinAt.has(e[3] * L.W + e[2])) r.coinAt.set(e[3] * L.W + e[2], e[0]);
@@ -834,6 +866,266 @@ function vwTimeline() {
 	vw.off = G && A.timerStart >= 0 && G.timerStart >= 0 ? G.timerStart - A.timerStart : 0;   // same in-game time: ghost tick = best tick + off
 	vw.T = Math.max(A.n, G ? G.n - vw.off : 0);
 	$('vScrub').max = String(vw.T);
+	vwFxLine();
+}
+
+// ---- the ball's effects (trajectory `effects`, src/viewer.js FX), shown as EE shows them: the effect display (UI2.setEffectIcon ->
+// EffectMarker: the effect block's image in a dark box, a time bar for the timed ones; MultiJumpCounter: the jumps left) = the
+// chips under the clocks; Player.draw = the looks on the smiley (gxBall: the zombie face, the smiley turned by a gravity effect,
+// the fire aura, the fly flame while thrusting, drawTagged's icons over the head: protection, curse, poison); simple graphics:
+// badges and rings (vwBall). Colored marks under the time slider show when each effect is on in the best run.
+const FXB = { protection: 1, curse: 2, zombie: 4, poison: 8, fire: 16, fly: 32, thrust: 64, lowGravity: 128, god: 256, jump: 512, speed: 1024,
+	multijump: 2048, gravity: 4096, team: 8192 };
+const TEAMS = [['none', '#8a8f99'], ['red', '#ff4b4b'], ['blue', '#4b7bff'], ['green', '#3fd65a'], ['cyan', '#3fd6e0'], ['magenta', '#d94be0'], ['yellow', '#ffd23f']];
+// the chips, in this order: the simple look's color and glyph (also the marks' colors under the time slider: one each, and none like a
+// spike's red), EE's icon (a frame of sprEffect; fire: the lava block, like getEffectBrickById)
+const FXK = [
+	{ k: 'protection', bit: FXB.protection, col: '#f4f4f4', glyph: '+', ee: 3 },   // (EE's icon: a red cross on white)
+	{ k: 'curse', bit: FXB.curse, col: '#a45cff', glyph: 'C', ee: 4, timed: true },
+	{ k: 'zombie', bit: FXB.zombie, col: '#5fbf4a', glyph: 'Z', ee: 5, timed: true },
+	{ k: 'poison', bit: FXB.poison, col: '#b8e62e', glyph: 'P', ee: 23, timed: true },
+	{ k: 'fire', bit: FXB.fire, col: '#ff8a1f', glyph: 'F', timed: true },
+	{ k: 'fly', bit: FXB.fly, col: '#7fd4ff', glyph: '^', ee: 1 },
+	{ k: 'jump', bit: FXB.jump, col: '#ffb03a', glyph: 'J' },
+	{ k: 'speed', bit: FXB.speed, col: '#3fe0b8', glyph: 'S' },
+	{ k: 'lowGravity', bit: FXB.lowGravity, col: '#cbbcff', glyph: 'L', ee: 13 },
+	{ k: 'multijump', bit: FXB.multijump, col: '#ffe04a', glyph: '' },
+	{ k: 'gravity', bit: FXB.gravity, col: '#4f86ff', glyph: '' },
+	{ k: 'team', bit: FXB.team, col: '#8a8f99', glyph: '' },
+	{ k: 'god', bit: FXB.god, col: '#ff9ee6', glyph: 'G' },
+];
+const FXI = Object.fromEntries(FXK.map((e) => [e.k, e]));
+const GRAV_NAME = ['down', 'left', 'up', 'right', 'none'];
+/** effects {on: [tick, bits, ...], values: [[tick, name, ...]], thrust: [tick, x100, ...]} -> bits and thrust per tick, values by name */
+function vwPrepFx(e, n) {
+	if (!e || !Array.isArray(e.on)) return null;
+	const bits = new Uint32Array(n + 1), on = e.on;
+	let any = 0;
+	for (let k = 0; k + 1 < on.length; k += 2) {
+		bits.fill(on[k + 1], clamp(on[k], 0, n + 1), k + 2 < on.length ? clamp(on[k + 2], 0, n + 1) : n + 1);
+		any |= on[k + 1];
+	}
+	if (!any) return null;
+	// the fly thrust x 100: the last tick's while thrusting, else the last tick's - 1 (not below 0); the listed ticks break the rule
+	const thr = new Uint8Array(n + 1), ex = e.thrust || [];
+	if (any & FXB.fly) {
+		for (let t = 0, i = 0, last = 0; t <= n; t++) {
+			let v = bits[t] & FXB.thrust ? last : Math.max(0, last - 1);
+			while (i + 1 < ex.length && ex[i] < t) i += 2;
+			if (i + 1 < ex.length && ex[i] === t) { v = ex[i + 1]; i += 2; }
+			thr[t] = last = v;
+		}
+	}
+	const vals = new Map();
+	for (const v of e.values || []) {
+		let s = vals.get(v[1]);
+		if (!s) vals.set(v[1], (s = { t: [], v: [] }));
+		s.t.push(v[0]); s.v.push(v.slice(2));
+	}
+	return { bits, thr, vals, any };
+}
+const FX0 = [0, 0];
+/** the values of effect `name` at tick t ([value] or [value, value2]) */
+function fxVal(f, name, t) {
+	const s = f.vals.get(name);
+	if (!s) return FX0;
+	const i = ub(s.t, t) - 1;
+	return i >= 0 ? s.v[i] : FX0;
+}
+/** the chips of run r at tick t: [{k, v, key (what the icon shows), html, frac (the bar: time or thrust left; undefined = no bar)}] */
+function vwFxList(r, t) {
+	const f = r && r.fx, out = [];
+	if (!f) return out;
+	const bt = clamp(Math.floor(t), 0, r.n), b = f.bits[bt];
+	if (!b) return out;
+	for (const e of FXK) {
+		if (!(b & e.bit)) continue;
+		const vv = fxVal(f, e.k, bt), v = vv[0];
+		let name = e.k, d = '', m = '', low = false, frac;
+		if (e.timed) {   // the time left until the kill (EffectMarker's bar: the part of the time still left)
+			name = e.k === 'fire' ? 'on fire' : e.k;
+			const len = vv[1];
+			if (len > 0) { const left = Math.max(0, v - bt); d = `${(left / 100).toFixed(2)} s`; low = left < 100; frac = clamp(left / len, 0, 1); } else m = 'no timer';
+		} else if (e.k === 'fly') {
+			const th = f.thr[bt];
+			if (th || (b & FXB.thrust)) d = `thrust ${(th / 100).toFixed(2)}`;
+			frac = clamp(th / 20, 0, 1);
+		} else if (e.k === 'jump') { name = v === 1 ? 'high jump' : v === 2 ? 'low jump' : `jump ${v}`; m = v === 1 ? '×1.3' : v === 2 ? '×0.75' : ''; }
+		else if (e.k === 'speed') { name = v === 1 ? 'fast' : v === 2 ? 'slow' : `speed ${v}`; m = v === 1 ? '×1.5' : v === 2 ? '×0.6' : ''; }
+		else if (e.k === 'lowGravity') { name = 'low gravity'; m = '×0.15'; }
+		else if (e.k === 'multijump') { name = 'jumps'; d = v >= 1000 ? '∞' : v <= 0 ? 'none' : `${vv[1] > v ? 0 : v - vv[1]}/${v}`; }
+		else if (e.k === 'gravity') { name = 'gravity'; d = GRAV_NAME[v] || String(v); }
+		else if (e.k === 'team') { name = 'team'; d = (TEAMS[v] || [String(v)])[0]; }
+		else if (e.k === 'god') name = 'god mode';
+		const html = `${esc(name)}${d ? ` <span class="d${low ? ' low' : ''}">${esc(d)}</span>` : ''}${m ? ` <span class="m">${esc(m)}</span>` : ''}`;
+		out.push({ k: e.k, v, key: `${e.k}:${e.k === 'multijump' || e.k === 'jump' || e.k === 'speed' || e.k === 'gravity' || e.k === 'team' ? v : ''}`, html, frac });
+	}
+	return out;
+}
+/** a simple-look badge of effect k (value v): a colored disc with a glyph, centred at (cx, cy), d px wide */
+function vwFxBadge(g, k, v, cx, cy, d) {
+	const e = FXI[k], r = d / 2;
+	const col = k === 'team' ? (TEAMS[v] || TEAMS[0])[1] : e.col;
+	g.fillStyle = col; g.strokeStyle = 'rgba(0,0,0,.6)'; g.lineWidth = Math.max(1, d / 14);
+	g.beginPath(); g.arc(cx, cy, r * 0.9, 0, 7); g.fill(); g.stroke();
+	if (k === 'protection') {   // a red cross on white, like EE's icon (not red: spikes are red here)
+		const a = r * 0.58, w = r * 0.2;
+		g.fillStyle = '#e8263b'; g.fillRect(cx - a, cy - w, 2 * a, 2 * w); g.fillRect(cx - w, cy - a, 2 * w, 2 * a);
+		return;
+	}
+	if (k === 'gravity') {   // an arrow toward the gravity (4: a dot)
+		g.fillStyle = '#10131a';
+		if (v >= 1 && v <= 3) { const [dx, dy] = v === 1 ? [-1, 0] : v === 2 ? [0, -1] : [1, 0], a = r * 0.6; tri(g, cx + dx * a, cy + dy * a, cx - dx * a * 0.6 - dy * a * 0.7, cy - dy * a * 0.6 + dx * a * 0.7, cx - dx * a * 0.6 + dy * a * 0.7, cy - dy * a * 0.6 - dx * a * 0.7); }
+		else { g.beginPath(); g.arc(cx, cy, r * 0.25, 0, 7); g.fill(); }
+		return;
+	}
+	const glyph = k === 'multijump' ? (v >= 1000 ? '∞' : String(v)) : k === 'jump' || k === 'speed' ? (v === 2 ? e.glyph.toLowerCase() : e.glyph) : e.glyph;
+	if (!glyph) return;
+	g.fillStyle = k === 'curse' || k === 'team' ? '#fff' : '#10131a';
+	g.font = `700 ${Math.max(6, Math.round(d * (glyph.length > 1 ? 0.46 : 0.62)))}px ui-monospace, Consolas, monospace`;
+	g.textAlign = 'center'; g.textBaseline = 'middle';
+	g.fillText(glyph, cx, cy + d * 0.05);
+	g.textBaseline = 'alphabetic';
+}
+/** a chip's icon, sz px: EE graphics = the effect block's image (EffectMarker; multijump: the block with its number), else the badge */
+function vwFxIcon(g, c, sz) {
+	g.clearRect(0, 0, sz, sz);
+	g.imageSmoothingEnabled = false;
+	if (gxReady()) {
+		const S = GX.m.sprites, I = GX.ids, v = c.v;
+		const sp = (name, f) => {
+			const s = S[name], nf = Array.isArray(s) ? s[2] : s && s.frames;
+			if (!s || !(f >= 0) || f >= nf) return false;
+			gxSpr(g, name, f, 0, 0, sz, true);
+			return true;
+		};
+		const e = FXI[c.k];
+		let ok = false;
+		if (e.ee !== undefined) ok = sp('sprEffect', e.ee);
+		else if (c.k === 'jump') ok = sp('sprEffect', [7, 0, 22][v]);
+		else if (c.k === 'speed') ok = sp('sprEffect', [9, 2, 25][v]);
+		else if (c.k === 'multijump') ok = v === 1 ? sp('sprEffect', 16) : sp('sprMultiJumps', v);
+		else if (c.k === 'gravity') ok = sp('sprGravityEffect', v);
+		else if (c.k === 'team') ok = sp('sprTeamEffect', v);
+		else if (c.k === 'fire' && I.LAVA !== undefined && GX.m.blocks[I.LAVA]) { gxBrick(g, I.LAVA, 0, 0, sz, true); ok = true; }
+		if (ok) return;
+	}
+	vwFxBadge(g, c.k, c.v, sz / 2, sz / 2, sz);
+}
+/** shows the chips `list` in el (st: what el shows now; the chips are rebuilt only when the set of icons changes); css: the icons'
+ *  size in CSS px, rounded to a whole number of device pixels per pixel of EE's 16 px icons (crisp; phones: 4/5 of it) */
+function vwFxHud(el, list, st, css, label) {
+	const dpr = window.devicePixelRatio || 1, small = window.innerWidth <= 640;
+	const sz = 16 * Math.max(1, Math.round(css * (small ? 0.8 : 1) * dpr / 16));
+	const sig = `${gxReady() ? 'ee' : 's'}|${sz}|${dpr}|${list.map((c) => `${c.key}${c.frac === undefined ? '' : '+'}`).join('|')}`;
+	if (st.sig !== sig) {
+		st.sig = sig; st.items = [];
+		el.textContent = '';
+		if (label && list.length) { const l = document.createElement('span'); l.className = 'lbl'; l.textContent = label; el.appendChild(l); }
+		for (const c of list) {
+			const chip = document.createElement('div'), cv = document.createElement('canvas'), tx = document.createElement('span');
+			chip.className = 'vfxc';
+			cv.width = cv.height = sz;
+			cv.style.width = cv.style.height = `${sz / dpr}px`;
+			vwFxIcon(cv.getContext('2d'), c, sz);
+			chip.append(cv, tx);
+			let bar = null;
+			if (c.frac !== undefined) { const b = document.createElement('span'); b.className = 'bar'; bar = document.createElement('i'); b.appendChild(bar); chip.appendChild(b); }
+			el.appendChild(chip);
+			st.items.push({ tx, bar, html: null, frac: null });
+		}
+	}
+	for (let i = 0; i < list.length; i++) {
+		const c = list[i], it = st.items[i];
+		if (it.html !== c.html) { it.html = c.html; it.tx.innerHTML = c.html; }
+		if (it.bar && it.frac !== c.frac) { it.frac = c.frac; it.bar.style.height = `${(c.frac * 100).toFixed(1)}%`; }
+	}
+}
+/** an effect's name with its value (the marks' hover texts: "gravity up", "team red", "jumps 3") */
+function fxLabel(k, v) {
+	switch (k) {
+		case 'fire': return 'on fire';
+		case 'lowGravity': return 'low gravity';
+		case 'god': return 'god mode';
+		case 'jump': return v === 1 ? 'high jump' : v === 2 ? 'low jump' : `jump ${v}`;
+		case 'speed': return v === 1 ? 'fast' : v === 2 ? 'slow' : `speed ${v}`;
+		case 'multijump': return `jumps ${v >= 1000 ? '∞' : v}`;
+		case 'gravity': return `gravity ${GRAV_NAME[v] || v}`;
+		case 'team': return `team ${(TEAMS[v] || [v])[0]}`;
+		default: return k;
+	}
+}
+/** the stretches of each effect run r has, in the chips' order (cached): [{e: its FXK entry, s: [[from, to (exclusive), value], ...]}];
+ *  a new value (jump, speed, gravity, team; multijump: the max jumps) starts a new stretch */
+function fxSpans(r) {
+	const f = r.fx;
+	if (f.spans) return f.spans;
+	f.spans = [];
+	for (const e of FXK) {
+		if (!(f.any & e.bit)) continue;
+		const vs = e.timed ? null : f.vals.get(e.k), s = [];
+		for (let t = 0; t <= r.n;) {
+			if (!(f.bits[t] & e.bit)) { t++; continue; }
+			let u = t;
+			while (u <= r.n && (f.bits[u] & e.bit)) u++;
+			let a = t, v = fxVal(f, e.k, t)[0];
+			if (vs) for (let i = ub(vs.t, t); i < vs.t.length && vs.t[i] < u; i++) if (vs.v[i][0] !== v) { s.push([a, vs.t[i], v]); a = vs.t[i]; v = vs.v[i][0]; }
+			s.push([a, u, v]);
+			t = u;
+		}
+		if (s.length) f.spans.push({ e, s });
+	}
+	return f.spans;
+}
+/** "0:01.66 (tick 941) to the end" / "... to 0:02.10 (tick 985)": a stretch [a, b) of run r */
+const fxWhen = (r, a, b) => `${fmt(r.RUN[a])} (tick ${a}) to ${b > r.n ? 'the end' : `${fmt(r.RUN[b])} (tick ${b})`}`;
+const FXL = { run: null, sig: '' };   // what the marks show now
+/** the marks under the time slider: a row for each effect of the best run (the chips' order, each in its color; team: the team's),
+ *  2-3 CSS px high with 1 px between them; the slider's row gets room for them. The hover texts: every effect with its times (the
+ *  slider), the stretch under the mouse (the marks). Redrawn only when the run, the size or the timeline changes. */
+function vwFxLine() {
+	const cv = $('vFxLine'), W = $('vScrubW'), A = vw.A, f = A && A.fx;
+	cv.hidden = !f;
+	if (!f) { W.title = ''; W.closest('.vbar').style.removeProperty('--fxpad'); FXL.run = null; return; }
+	const spans = fxSpans(A), n = spans.length, lh = n <= 2 ? 3 : 2, H = n * (lh + 1) - 1;
+	const dpr = window.devicePixelRatio || 1, w = Math.round(cv.clientWidth * dpr), h = Math.round(H * dpr);
+	if (w < 2) return;
+	const sig = `${w}|${h}|${vw.T}`;
+	if (FXL.run === A && FXL.sig === sig) return;
+	FXL.run = A; FXL.sig = sig;
+	cv.style.height = `${H}px`;
+	// the room below the slider's row (the marks start 10 px below the slider's middle): more space under the bar and between its rows
+	W.closest('.vbar').style.setProperty('--fxpad', `${Math.max(0, Math.ceil(H + 11 - W.clientHeight / 2))}px`);
+	if (cv.width !== w) cv.width = w;
+	if (cv.height !== h) cv.height = h;
+	const g = cv.getContext('2d'), T = Math.max(1, vw.T), lines = [];
+	g.clearRect(0, 0, w, h);
+	spans.forEach(({ e, s }, li) => {
+		const y0 = Math.round(li * (lh + 1) * dpr), y1 = Math.max(y0 + 1, Math.round((li * (lh + 1) + lh) * dpr));
+		g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(0, y0, w, y1 - y0);   // (the row)
+		for (const [a, b, v] of s) {
+			g.fillStyle = e.k === 'team' ? (TEAMS[v] || TEAMS[0])[1] : e.col;
+			const x0 = Math.floor(a / T * w), x1 = Math.max(x0 + 1, Math.round(b / T * w));
+			g.fillRect(x0, y0, x1 - x0, y1 - y0);
+		}
+		const names = [...new Set(s.map((x) => fxLabel(e.k, x[2])))];
+		lines.push(`${names.slice(0, 4).join(', ')}${names.length > 4 ? ', …' : ''}: ${s.length === 1 ? fxWhen(A, s[0][0], s[0][1]) : `${s.length} times, the first ${fxWhen(A, s[0][0], s[0][1])}`}`);
+	});
+	W.title = `Effects of the best run (the marks under the slider: a row each, top to bottom; point at a mark for its times):\n${lines.join('\n')}`;
+}
+/** the hover text of the marks: the effect of the row under the mouse and its stretch there */
+function vwFxLineTip(ev) {
+	const cv = $('vFxLine'), A = vw.A;
+	if (!A || !A.fx) return;
+	const spans = fxSpans(A), n = spans.length, lh = n <= 2 ? 3 : 2, b = cv.getBoundingClientRect();
+	if (!n || b.width < 1) return;
+	const { e, s } = spans[clamp(Math.floor((ev.clientY - b.top) / (lh + 1)), 0, n - 1)], t = clamp(Math.round((ev.clientX - b.left) / b.width * vw.T), 0, vw.T);
+	let lo = 0, hi = s.length;
+	while (lo < hi) { const m = (lo + hi) >> 1; if (s[m][0] <= t) lo = m + 1; else hi = m; }
+	const x = lo > 0 && t < s[lo - 1][1] ? s[lo - 1] : null;
+	const name = { jump: 'jump effect', speed: 'speed effect', multijump: 'multijump', gravity: 'gravity effect', team: 'team' }[e.k] || fxLabel(e.k, 0);
+	const tip = x ? `${fxLabel(e.k, x[2])}: ${fxWhen(A, x[0], x[1])}` : `${name}: ${t > A.n ? 'after the best run\'s end' : `off at ${fmt(A.RUN[t])}`} (on ${s.length === 1 ? 'once' : `${s.length} times`} in the best run)`;
+	if (cv.title !== tip) cv.title = tip;
 }
 function vwRedrawAll() { vw.chunks.clear(); vw.px = 0; vw.S = null; vw.dirty = true; }
 async function openViewer(id, opts) {
@@ -925,6 +1217,7 @@ function vwResize() {
 	const dpr = window.devicePixelRatio || 1;
 	const w = Math.max(1, Math.round(st.clientWidth * dpr)), h = Math.max(1, Math.round(st.clientHeight * dpr));
 	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; vw.dirty = true; }
+	if (vw.A) vwFxLine();
 }
 // run position (world px, top-left of the 16x16 box) at a fractional tick; no interpolation across teleports / respawns
 function vwPosAt(r, p) {
@@ -1075,24 +1368,65 @@ function vwChunk(cx, cy, T, CH) {
 	for (let ty = 0; ty < th; ty++) for (let tx = 0; tx < tw; tx++) vwTile(g, L, (cy * CH + ty) * L.W + cx * CH + tx, tx * T, ty * T, T);
 	return { c, a: null, px: c.width * c.height, used: 0 };
 }
-function vwGravArrow(g, cx, cy, r, flags) {
+/** an arrow toward the ball's gravity (not down; flame: the side the fly flame is drawn on now, which then shows it: 2 above, 3 left, 4 right) */
+function vwGravArrow(g, cx, cy, r, flags, flame) {
 	const gd = (flags >> 2) & 7;   // gravity: 0 down, 1 up, 2 left, 3 right, 4 none
-	if (gd < 1 || gd > 3) return;
+	if (gd < 1 || gd > 3 || flame === gd + 1) return;
 	const [dx, dy] = gd === 1 ? [0, -1] : gd === 2 ? [-1, 0] : [1, 0];
 	const d = r + Math.max(4, r * 0.45), w = Math.max(3, r * 0.4);
 	g.fillStyle = VC.arrow;
 	tri(g, cx + dx * (d + w), cy + dy * (d + w), cx + dx * d - dy * w, cy + dy * d + dx * w, cx + dx * d + dy * w, cy + dy * d - dx * w);
 }
-function vwBall(g, x, y, s, flags, ghost) {
+/** the effects of run rr at tick t for drawing: {b: bits, f, t, flip: the gravity effect, side: the fly flame's side, clock}, or null */
+function vwFxAt(rr, t) {
+	const f = rr && rr.fx;
+	if (!f) return null;
+	const bt = clamp(Math.floor(t), 0, rr.n), b = f.bits[bt];
+	if (!b) return null;
+	return { b, f, t: bt, flip: b & FXB.gravity ? fxVal(f, 'gravity', bt)[0] : 0, side: (b >> 14) & 7, clock: rr.clock0 + bt };
+}
+/** the simple look of the effects on a ball (centre cx, cy, radius r; flags: its gravity): a flickering orange ring (fire), a
+ *  dashed white ring (god mode), the fly flame while thrusting, badges on the side away from gravity (protection, curse,
+ *  zombie, poison) */
+function vwBallFx(g, fx, cx, cy, r, flags) {
+	const b = fx.b;
+	if (b & FXB.fire) {
+		const a = g.globalAlpha;
+		g.globalAlpha = a * (0.6 + 0.4 * Math.abs(Math.sin(fx.clock * 0.35)));
+		g.strokeStyle = VC.fire; g.lineWidth = Math.max(1.5, r * 0.28);
+		g.beginPath(); g.arc(cx, cy, r * 1.3, 0, 7); g.stroke();
+		g.globalAlpha = a;
+	}
+	if (b & FXB.god) {
+		g.strokeStyle = '#fff'; g.lineWidth = Math.max(1, r * 0.14); g.setLineDash([Math.max(2, r * 0.4), Math.max(2, r * 0.3)]);
+		g.beginPath(); g.arc(cx, cy, r * 1.55, 0, 7); g.stroke(); g.setLineDash([]);
+	}
+	if ((b & FXB.thrust) && fx.side) {   // (white like EE's flame; the gravity arrow, light blue, is left out on its side)
+		const [dx, dy] = [[0, 1], [0, 1], [0, -1], [-1, 0], [1, 0]][fx.side], a = r * (1.05 + 0.12 * (fx.clock % 3)), w = r * 0.5, n = r * 0.85;
+		g.fillStyle = '#eef2f8'; g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = Math.max(1, r * 0.1);
+		tri(g, cx + dx * (r + a), cy + dy * (r + a), cx + dx * n - dy * w, cy + dy * n + dx * w, cx + dx * n + dy * w, cy + dy * n - dx * w);
+		g.stroke();
+	}
+	const gd = (flags >> 2) & 7, [ux, uy] = gd === 1 ? [0, 1] : gd === 2 ? [1, 0] : gd === 3 ? [-1, 0] : [0, -1];
+	const d = Math.max(9, r * 1.15);
+	let o = r + d * 0.5 + Math.max(2, r * 0.18);
+	for (const k of ['protection', 'curse', 'zombie', 'poison']) {
+		if (!(b & FXI[k].bit)) continue;
+		vwFxBadge(g, k, 0, cx + ux * o, cy + uy * o, d);
+		o += d * 0.95;
+	}
+}
+function vwBall(g, x, y, s, flags, ghost, rr, t) {
 	const cx = x + 8 * s, cy = y + 8 * s, r = Math.max(4, 7.6 * s);
-	const dead = flags & 1;
+	const dead = flags & 1, fx = vwFxAt(rr, t), zombie = fx && (fx.b & FXB.zombie);
 	if (ghost) {
-		g.fillStyle = 'rgba(170,205,255,.34)'; g.strokeStyle = 'rgba(220,235,255,.8)'; g.lineWidth = Math.max(1, s * 0.9);
+		g.fillStyle = zombie ? 'rgba(130,215,120,.34)' : 'rgba(170,205,255,.34)'; g.strokeStyle = 'rgba(220,235,255,.8)'; g.lineWidth = Math.max(1, s * 0.9);
 		g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); g.stroke();
+		if (fx && !dead) { g.save(); g.globalAlpha = 0.45; vwBallFx(g, fx, cx, cy, r, flags); g.restore(); }
 		return;
 	}
 	if (r < 6) { g.strokeStyle = 'rgba(255,210,63,.55)'; g.lineWidth = 2; g.beginPath(); g.arc(cx, cy, r + 5, 0, 7); g.stroke(); }
-	g.fillStyle = dead ? '#8a8f99' : '#ffd23f'; g.strokeStyle = '#3a2c00'; g.lineWidth = Math.max(1, s * 0.9);
+	g.fillStyle = dead ? '#8a8f99' : zombie ? '#86cf6a' : '#ffd23f'; g.strokeStyle = '#3a2c00'; g.lineWidth = Math.max(1, s * 0.9);
 	g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); g.stroke();
 	if (r >= 7) {
 		g.fillStyle = '#2a2000'; g.strokeStyle = '#2a2000'; g.lineWidth = Math.max(1, r * 0.13);
@@ -1103,7 +1437,8 @@ function vwBall(g, x, y, s, flags, ghost) {
 			g.beginPath(); g.arc(cx, cy + r * 0.05, r * 0.52, 0.2 * Math.PI, 0.8 * Math.PI); g.stroke();
 		}
 	}
-	vwGravArrow(g, cx, cy, r, flags);
+	vwGravArrow(g, cx, cy, r, flags, fx && !dead && (fx.b & FXB.thrust) ? fx.side : 0);
+	if (fx && !dead) vwBallFx(g, fx, cx, cy, r, flags);
 }
 
 // ------------------------------------------------------------ EE graphics: the game's own block images, from the user's eeo-tas folder
@@ -1237,18 +1572,18 @@ function gxBrick(g, id, dx, dy, T, noShadow) {
 	gxBlit(g, b[0], b[1] * 16, b[2], 16, 16, dx, dy, T, false);
 }
 /** BlockSprite.drawPoint(frame): a frame of a named sprite (a frame outside it draws nothing, like Flash's copyPixels) */
-function gxSpr(g, name, f, dx, dy, T) {
+function gxSpr(g, name, f, dx, dy, T, noShadow) {
 	const s = GX.m.sprites[name];
 	if (!s || !(f >= 0) || f >= (Array.isArray(s) ? s[2] : s.frames)) return;
 	if (Array.isArray(s)) {
-		if (s[3] && T >= 8) gxBlit(g, s[0], (s[1] + f) * 16, 0, 16, 16, dx + T / 8, dy + T / 8, T, true);
+		if (s[3] && T >= 8 && !noShadow) gxBlit(g, s[0], (s[1] + f) * 16, 0, 16, 16, dx + T / 8, dy + T / 8, T, true);
 		gxBlit(g, s[0], (s[1] + f) * 16, 0, 16, 16, dx, dy, T, false);
 		return;
 	}
 	// a sheet ItemManager.init generates: frame f = the brick (or a special frame) with the number f on it
 	let sh, sx, sy = 0;
 	if (s.brick !== undefined) { const b = GX.m.blocks[s.brick]; if (!b) return; sh = b[0]; sx = b[1] * 16; sy = b[2]; } else { sh = s.sheet; sx = s.frame * 16; }
-	if (s.shadow && T >= 8) gxBlit(g, sh, sx, sy, 16, 16, dx + T / 8, dy + T / 8, T, true);
+	if (s.shadow && T >= 8 && !noShadow) gxBlit(g, sh, sx, sy, 16, 16, dx + T / 8, dy + T / 8, T, true);
 	gxBlit(g, sh, sx, sy, 16, 16, dx, dy, T, false);
 	if (s.text && T >= 12) { const c = gxNum(f, s.text); if (c) g.drawImage(c, dx, dy, T, T); }
 }
@@ -1523,25 +1858,69 @@ function gxCoins(g, L, A, S, ox, oy, T, inView, taken) {
 /** Player.draw: the smiley (26x26 at x - 5, y - 5); dead: the death animation (64x64 at x - 24, y - 24, 0.3 frames per tick,
  *  the face for the first frames). (x, y) = the box's top-left on screen; ghost: at 40%. */
 function gxBall(g, r, t, x, y, s, ghost) {
-	const sm = GX.m.smiley, dm = GX.m.death;
+	const sm = GX.m.smiley, dm = GX.m.death, P = GX.m.player || {};
 	if (!sm) return;
-	const bt = clamp(Math.floor(t), 0, r.n), fl = r.FL[bt];
+	const bt = clamp(Math.floor(t), 0, r.n), fl = r.FL[bt], fx = vwFxAt(r, bt), b = fx ? fx.b : 0;
+	// a gravity effect turns the smiley (Player.draw: deg = flipGravity * 90, 360 -> 0)
+	const deg = fx && fx.flip >= 1 && fx.flip <= 3 ? fx.flip * 90 : 0;
 	g.save();
 	g.globalAlpha = ghost ? 0.4 : 1;
 	g.imageSmoothingEnabled = s < 1;
 	let face = true, off = 0;
 	if (fl & 1) { const k = ub(r.deathT, bt); off = 0.3 * (bt - (k > 0 ? r.deathT[k - 1] : bt)); face = off < 2; }
-	if (face) g.drawImage(GX.img[sm.sheet], sm.frame * sm.size, 0, sm.size, sm.size, x + sm.dx * s, y + sm.dy * s, sm.size * s, sm.size * s);
+	const zf = (b & FXB.zombie) && P.zombie !== null && P.zombie !== undefined ? P.zombie : sm.frame;   // drawFace: a zombie has the zombie face
+	if (face) gxRot(g, GX.img[sm.sheet], zf * sm.size, 0, sm.size, sm.size, x + sm.dx * s, y + sm.dy * s, s, (fl & 1) ? 0 : deg);
 	if ((fl & 1) && dm && off <= 16 && (off | 0) < dm.frames) {
 		g.drawImage(GX.img[dm.sheet], (off | 0) * dm.size, 0, dm.size, dm.size, x + dm.dx * s, y + dm.dy * s, dm.size * s, dm.size * s);
 	}
+	if (b && !(fl & 1) && s >= 0.75) gxBallFx(g, P, fx, x, y, s, deg);
 	g.restore();
 	const cx = x + 8 * s, cy = y + 8 * s;
-	if (s < 0.75) {   // small: a ring shows where it is
+	if (s < 0.75) {   // small: a ring shows where it is (and EE's effect marks would be a few pixels: the simple ones)
 		g.strokeStyle = ghost ? 'rgba(200,225,255,.55)' : 'rgba(255,210,63,.85)'; g.lineWidth = 2;
 		g.beginPath(); g.arc(cx, cy, Math.max(5, 13 * s) + 3, 0, 7); g.stroke();
+		if (b && !(fl & 1)) { g.save(); g.globalAlpha = ghost ? 0.45 : 1; vwBallFx(g, fx, cx, cy, Math.max(5, 13 * s) + 3, fl); g.restore(); }
 	}
-	if (!ghost) vwGravArrow(g, cx, cy, Math.max(4, 11 * s), fl);
+	if (!ghost) vwGravArrow(g, cx, cy, Math.max(4, 11 * s), fl, (b & FXB.thrust) && !(fl & 1) && (s < 0.75 || P.levitation) ? fx.side : 0);
+}
+/** Flash's copyPixels of a w x h frame at (dx, dy), s px per game px, turned by deg (Player.rotateBitmapData: about its centre) */
+function gxRot(g, img, sx, sy, w, h, dx, dy, s, deg) {
+	if (!deg) { g.drawImage(img, sx, sy, w, h, dx, dy, w * s, h * s); return; }
+	g.save();
+	g.translate(dx + w * s / 2, dy + h * s / 2);
+	g.rotate(deg * Math.PI / 180);
+	g.drawImage(img, sx, sy, w, h, -w * s / 2, -h * s / 2, w * s, h * s);
+	g.restore();
+}
+/** Player.draw's effect parts for a live player, (x, y) = the box's top-left on screen: the fire aura (fireAnimation, frame
+ *  (ticks / 15) % 6, at the smiley's corner 1 px toward the head, turned with it), the fly flame while thrusting
+ *  (playLevitationAnimation: frame side * 8 + ticks % 8, below / above / left / right of the box by the current tile's
+ *  gravity; none where it has none) and drawTagged's icons (protection, curse, poison: 16 px over the head, 12 px further
+ *  each, turned with the smiley; `ticks` = PlayState.ticks, the level clock) */
+function gxBallFx(g, P, fx, x, y, s, deg) {
+	const b = fx.b, flip = fx.flip;
+	if ((b & FXB.fire) && P.fire) {
+		const [sh, f0, w, h, n] = P.fire, fr = ((fx.clock / 15) | 0) % n;
+		gxRot(g, GX.img[sh], (f0 + fr) * w, 0, w, h, x + (-5 + (flip >= 1 && flip <= 3 ? -1 : 1)) * s, y + (-5 + (flip === 1 ? 1 : flip === 3 ? -1 : 0)) * s, s, deg);
+	}
+	if ((b & FXB.thrust) && fx.side && P.levitation) {
+		const [sh, f0, w, h, n] = P.levitation, [ax, ay] = [[0, 0], [-5, 12], [-5, -21], [-24, -5], [14, -5]][fx.side], fr = (fx.side - 1) * 8 + fx.clock % 8;
+		if (fr < n) g.drawImage(GX.img[sh], (f0 + fr) * w, 0, w, h, x + ax * s, y + ay * s, w * s, h * s);
+	}
+	if (P.icons) {
+		const [sh, f0, w, h, n] = P.icons;
+		let o = -16;
+		for (const [bit, fr] of [[FXB.protection, 0], [FXB.curse, 1], [FXB.poison, 3]]) {
+			if (!(b & bit) || fr >= n) continue;
+			const ix = flip % 2 === 0 ? 0 : flip === 1 ? -o : o, iy = flip % 2 === 1 ? 0 : flip === 2 ? -o : o;
+			gxRot(g, GX.img[sh], (f0 + fr) * w, 0, w, h, x + ix * s, y + iy * s, s, deg);
+			o -= 12;
+		}
+	}
+	if (b & FXB.god) {   // (EE draws a flying player with its aura; here a dashed ring)
+		g.strokeStyle = '#fff'; g.lineWidth = Math.max(1, s); g.setLineDash([4 * s, 3 * s]);
+		g.beginPath(); g.arc(x + 8 * s, y + 8 * s, 16 * s, 0, 7); g.stroke(); g.setLineDash([]);
+	}
 }
 
 // ---- the frame
@@ -1683,9 +2062,9 @@ function vwDraw() {
 		if (vw.ghost && G) {
 			const gt = clamp(vw.pos + vw.off, 0, G.n);
 			const [gx, gy] = vwPosAt(G, gt);
-			vwBall(g, ox + gx * s, oy + gy * s, s, G.FL[Math.floor(gt)], true);
+			vwBall(g, ox + gx * s, oy + gy * s, s, G.FL[Math.floor(gt)], true, G, gt);
 		}
-		vwBall(g, ox + ax * s, oy + ay * s, s, A.FL[bt], false);
+		vwBall(g, ox + ax * s, oy + ay * s, s, A.FL[bt], false, A, bt);
 	}
 	glDraw(g, ox, oy, s, dpr);
 }
@@ -1718,9 +2097,12 @@ function vwHud() {
 	}
 	set('vDiff', txt);
 	if ($('vDiff').className !== cls) $('vDiff').className = cls;
+	// the effects of both balls (the original's lighter, while the ghost is shown)
+	vwFxHud($('vFx'), vwFxList(A, bt), vw.fxA, 20);
+	vwFxHud($('vFxG'), vw.ghost && G ? vwFxList(G, gt) : [], vw.fxG, 15, 'original');
 	const m = bt < A.n ? A.IN[bt] : 0;
 	if (h.keys !== m) { h.keys = m; for (const el of $('vKeys').children) el.classList.toggle('on', !!(m & +el.dataset.b)); }
-	set('vPos', `${fmt(A.RUN[bt])} / ${A.time}<span class="vtick"> · tick ${bt}</span>`, 'html');
+	set('vPos', `${fmt(A.RUN[bt])} / ${A.time}`);   // (the tick: vTk)
 	set('vTk', `tick ${bt} / ${A.n}`);
 	const sv = String(Math.floor(vw.pos));
 	if (document.activeElement !== $('vScrub') && $('vScrub').value !== sv) $('vScrub').value = sv;
@@ -1924,7 +2306,11 @@ $('vGfxUse').onclick = () => gxSetDir($('vGfxDir').value);
 $('vGfxAuto').onclick = () => gxSetDir('');
 $('vGfxDir').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); gxSetDir($('vGfxDir').value); } };
 window.addEventListener('resize', () => { if (vw.open) vwResize(); });
-if (window.ResizeObserver) new ResizeObserver(() => { if (vw.open) vwResize(); }).observe($('vStage'));
+if (window.ResizeObserver) {   // (the stage; the slider: it narrows as the time text grows, and the marks are drawn for its width)
+	const ro = new ResizeObserver(() => { if (vw.open) vwResize(); });
+	ro.observe($('vStage')); ro.observe($('vScrubW'));
+}
+$('vFxLine').onmousemove = vwFxLineTip;
 document.addEventListener('keydown', (e) => {
 	if (!vw.open) return;
 	if (e.key === 'Escape') { if (!$('vGfxPanel').hidden) $('vGfxPanel').hidden = true; else closeViewer(); return; }

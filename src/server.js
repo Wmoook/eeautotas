@@ -117,8 +117,8 @@ const ENDPOINTS = [
 	['POST', '/api/jobs/:id/probe', 'test an idea exactly: JSON {at, inputs: "R+J x3, R x20", try: true|false}; returns the rejoin/candidate'],
 	['POST', '/api/jobs/:id/focus', 'search a time window harder: JSON {from, to, seconds, workers}; runs in the background'],
 	['GET', '/api/jobs/:id/focus', 'the last focus search: state, results, log tail'],
-	['GET', '/api/jobs/:id/trajectory?which=best', 'per-tick positions (1/16 px, base64 Int32), run timer, inputs, flags, events and door states of the best run ' +
-		'(which=original: the uploaded TAS); best also has align (original tick at the same point, per best tick)'],
+	['GET', '/api/jobs/:id/trajectory?which=best', 'per-tick positions (1/16 px, base64 Int32), run timer, inputs, flags, events, door states and effects (protection, curse, ' +
+		'fly, ... with their timers) of the best run (which=original: the uploaded TAS); best also has align (original tick at the same point, per best tick)'],
 	['GET', '/api/jobs/:id/level', 'the level for the viewer: width, height, fg/bg ids (base64 Uint16), EE minimap color and block kind per id, door numbers, lookup numbers, portals, spawns'],
 	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],

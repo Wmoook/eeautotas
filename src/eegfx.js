@@ -10,7 +10,8 @@
 //   frame, frame count, shadow; the numbered sheets ItemManager.init generates (coin, death and switch doors, switches,
 //   multi-jump: a brick with its number in block_numbers.png digits, white on a dark glow or black on a white glow);
 // - getRotateableSprite + ItemId.isBlockRotateable: the sprite that draws a morphable block at its rotation;
-// - addNpc (NPC images), addSmiley / Player.as (the 26x26 smiley drawn at x-5, y-5), AnimationManager (death.png).
+// - addNpc (NPC images), addSmiley / Player.as (the 26x26 smiley drawn at x-5, y-5; the zombie face, the fire aura, the
+//   fly flame and the effect icons above the head), AnimationManager (death.png).
 // World.as onDraw / postDraw decide which frame a door, gate, switch, effect, portal or coin shows at a moment of the
 // run; the page follows those rules (src/app/index.html, the gx* functions). The map is cached in <data>/eegfx.json,
 // keyed by the eeo-tas files it was built from. The PNGs are served unchanged: GET /api/eegfx/sheet/<name>.png, only
@@ -23,7 +24,7 @@ const os = require('os');
 const C = require('./common.js');
 const M = require('./minimap.js');
 
-const GEN = 3;   // generator version: part of the cache key
+const GEN = 4;   // generator version: part of the cache key
 const LAYER = { FORGROUND: 0, BACKGROUND: 1, DECORATION: 2, ABOVE: 3 };
 // ItemId names the page's World.as rules use (sent as `ids`, resolved from this eeo-tas's ItemId.as)
 const ID_NAMES = ['CHECKPOINT', 'DEATH_DOOR', 'DEATH_GATE', 'DOOR_PURPLE', 'GATE_PURPLE', 'DOOR_ORANGE', 'GATE_ORANGE', 'DOOR_GOLD', 'GATE_GOLD',
@@ -230,6 +231,25 @@ function build(dir) {
 		try { const pl = readAs(path.join(srcDir, 'Player.as')); const mm = pl.match(/var\s+playerX\s*:\s*Number\s*=\s*x\s*\+\s*ox\s*-\s*(\d+)/); if (mm) dx = +mm[1]; } catch (e) { /* default */ }
 		smiley = { sheet: smSheet, size: sz, frame: 0, dx: -dx, dy: -dx };
 	}
+	// ---- a player with effects (Player.draw, drawFace, drawTagged, playLevitationAnimation): the BlSprites fireAnimation
+	// (fire aura), levitationAnimation (the fly flame) and effectIcons (protection, curse, zombie, poison icons above the
+	// head) as [sheet, first frame, width, height, frames] (frame f at x = (first + f) * width), and the zombie face's frame
+	// in the smiley sheet (drawFace: `copyPixels(bmd, new Rectangle(26 * 87, ...))`)
+	let player = null;
+	try {
+		const pl = readAs(path.join(srcDir, 'Player.as'));
+		scanEmbeds(pl);
+		const bl = {};
+		for (const m of pl.matchAll(/var\s+(\w+)\s*:\s*BlSprite\s*=\s*new\s+BlSprite\s*\(/g)) {
+			const a = M.callArgs(pl, m.index + m[0].length - 1);
+			if (!a || a.length < 6) continue;
+			const sh = bmdSheet(a[0]), first = evalNum(a[1]), w = evalNum(a[3]), h = evalNum(a[4]), frames = evalNum(a[5]);
+			if (sh >= 0 && first >= 0 && w > 0 && h > 0 && frames > 0) bl[m[1]] = [sh, first, w, h, frames];
+		}
+		const zm = pl.match(/if\s*\(\s*zombie\s*\)\s*\{?\s*\w+\.copyPixels\(\s*bmd\s*,\s*new\s+Rectangle\(\s*(\d+)\s*\*\s*(\d+)/);
+		player = { fire: bl.fireAnimation || null, levitation: bl.levitationAnimation || null, icons: bl.effectIcons || null,
+			zombie: zm && smiley && +zm[1] === smiley.size ? +zm[2] : null };
+	} catch (e) { /* no Player.as: the page marks the effects its own way */ }
 	let death = null;
 	try {
 		const am = readAs(path.join(srcDir, 'animations', 'AnimationManager.as'));
@@ -245,7 +265,7 @@ function build(dir) {
 	if (!Object.keys(blocks).length) throw new Error(`no createBrick(...) calls understood in ${imFile}`);
 	return {
 		format: 'eegfx-1', gen: GEN, dir, itemManager: path.relative(dir, imFile).replace(/\\/g, '/'),
-		sheets, sizes, blocks, sprites, rot, rotatable, nonRotHalf, npcs, smiley, death, numbers: numbers >= 0 ? numbers : null, egg: egg >= 0 ? egg : null,
+		sheets, sizes, blocks, sprites, rot, rotatable, nonRotHalf, npcs, smiley, player, death, numbers: numbers >= 0 ? numbers : null, egg: egg >= 0 ? egg : null,
 		ids, counts: { blocks: Object.keys(blocks).length, sprites: Object.keys(sprites).length, rot: Object.keys(rot).length, npcs: Object.keys(npcs).length, skipped },
 		warnings: warnings.slice(0, 40),
 	};
