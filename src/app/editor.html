@@ -1453,8 +1453,11 @@ async function loadGpu() {
 	renderChecks();
 }
 async function runCheck() {
+	const v = editVersion;
 	try { CHECK = await postJson('/api/editor/check', { level: levelJson() }); } catch (e) { CHECK = { error: e.message }; }
 	renderChecks();
+	// (the physics check runs in the app's worker thread: ask again for its note, unless an edit asks anyway)
+	if (CHECK && CHECK.physicsPending && v === editVersion) { clearTimeout(checkT); checkT = setTimeout(runCheck, 1500); }
 }
 function blockers() {
 	const out = [];
@@ -1564,7 +1567,7 @@ function renderSolve() {
 	if (c) {
 		h += `<div class="result near${stale ? ' stale' : ''}"><div class="rk">Closest attempt${st.running ? ' so far' : ''}</div>
 			<div class="rt">${c.tiles <= 0.05 ? 'at' : `${c.tiles.toFixed(1)} tiles from`} the trophy</div>
-			<div class="rm">${c.cut ? 'nearest by walking distance (the physics check rules out every attempt so far)' : 'along a way the ball can really go (jumps, dots, arrows; around walls and spikes)'} · tick ${c.ticks.toLocaleString('en-US')} (${fmt(c.ticks)} of play) · ${esc(c.strategy)}${c.deaths ? ` · ${c.deaths} death${c.deaths > 1 ? 's' : ''} on the way` : ''}</div>
+			<div class="rm">${c.cut ? 'nearest by walking distance (the physics check rules out every attempt so far)' : c.viaDeath ? 'along a way that needs a death (a respawn at a checkpoint or another spawn point)' : 'along a way the ball can really go (jumps, dots, arrows; around walls and spikes)'} · tick ${c.ticks.toLocaleString('en-US')} (${fmt(c.ticks)} of play) · ${esc(c.strategy)}${c.deaths ? ` · ${c.deaths} death${c.deaths > 1 ? 's' : ''} on the way` : ''}</div>
 			<div class="row"><button class="small" id="cPlay" title="Play the attempt on this map">${VW.play ? 'Stop preview' : 'Preview here'}</button>
 				<button class="small" id="cEetas" title="The attempt's inputs (it does not finish)">Download .eetas</button></div></div>`;
 	}

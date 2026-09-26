@@ -109,20 +109,24 @@ EE_HD u32 rfCost(const ReachField& R, i32 t, i32 ty, i32 l) {
 	if (ty == 3) { const i32 r = RF_AT(R.rowC, t, N); return r < 0 ? RF_CUT : RF_AT(R.costC, (size_t)r * RF_NL + l, (size_t)R.nC * RF_NL); }
 	const i32 r = RF_AT(R.rowX, t, N); return r < 0 ? RF_CUT : RF_AT(R.costX, (size_t)r * RF_NL + l, (size_t)R.nX * RF_NL);
 }
-/** the cost (fifths) of a ball: top-left px, py; speed_y vy; the gravity queue q0, q1; slippery. -1 = cut off.
- *  (src/reach.js fifthsAt, the same numbers) */
-EE_HD i32 reachFifths(const ReachField& R, double px, double py, double vy, i32 q0, i32 q1, double slip) {
+/** a ball's abstract state (src/reach.js stateOf): its tile t (-1: off the level), a base (type bt, level bl; bt -1: none)
+ *  and nr (0..2) rise descriptions (types rt, levels rl: R, then XR in a row next to fields). The walk mode and a wall
+ *  tile: none of them. Types: 0 R, 1 F, 2 XR, 3 C, 4 L. */
+struct RfState { i32 t, bt, bl, nr, rt[2], rl[2]; };
+EE_HD RfState rfStateOf(const ReachField& R, double px, double py, double vy, i32 q0, i32 q1, double slip) {
+	RfState s;
+	s.t = -1; s.bt = -1; s.bl = 0; s.nr = 0; s.rt[0] = s.rt[1] = 0; s.rl[0] = s.rl[1] = 0;
 	const i32 tx = truncI(px + 8.0) >> 4, ty = truncI(py + 8.0) >> 4;
-	if (tx < 0 || ty < 0 || tx >= R.W || ty >= R.H) return -1;
+	if (tx < 0 || ty < 0 || tx >= R.W || ty >= R.H) return s;
 	const i32 t = ty * R.W + tx;
 	const size_t N = (size_t)R.W * R.H;
-	if (R.mode == 1) { const u32 v = RF_AT(R.walk, t, N); return v == RF_CUT ? -1 : (i32)v; }
+	s.t = t;
+	if (R.mode == 1) return s;
 	const i32 g = RF_AT(R.cls, t, N);
-	u32 v;
-	if (g == RF_WALL) return -1;
-	if (g == RF_DEADLY) { if (!R.deaths) return -1; v = rfCost(R, t, 1, 0); return v == RF_CUT ? -1 : (i32)v; }
-	if (g == RF_BUP) { v = rfCost(R, t, 0, R.Q + 1); return v == RF_CUT ? -1 : (i32)v; }
-	if (g == RF_BDOWN) { v = rfCost(R, t, 1, RF_KF); return v == RF_CUT ? -1 : (i32)v; }
+	if (g == RF_WALL) return s;
+	if (g == RF_DEADLY) { if (R.deaths) { s.bt = 1; s.bl = 0; } return s; }
+	if (g == RF_BUP) { s.bt = 0; s.bl = R.Q + 1; return s; }
+	if (g == RF_BDOWN) { s.bt = 1; s.bl = RF_KF; return s; }
 	const double m0 = q0 >= 0 && q0 < R.nFlags ? RF_AT(R.modMin, q0, R.nFlags) : R.MOD_STRONG, m1 = q1 >= 0 && q1 < R.nFlags ? RF_AT(R.modMin, q1, R.nFlags) : R.MOD_STRONG;
 	const i32 nIce = R.ice && slip > 0 ? (i32)floor(slip / 0.2 + 0.5) : 0;
 	const double cy = py + 8, top = 16.0 * ty;
@@ -130,27 +134,67 @@ EE_HD i32 reachFifths(const ReachField& R, double px, double py, double vy, i32 
 	for (i32 j = 1; j <= nIce; j++) { fv = rfStep(fv, R.G, R.ICE_ND); fy += fv; }
 	const i32 k = rfKOfX(rfFallD(R, fv > 0 ? fv : 0) + (top + 16 - fy));
 	if (g != RF_NORM) {
-		v = vy < 0 ? rfCost(R, t, 3, rfCLevel(R, top, RF_AT(R.seg, t, N), cy, vy, m0, m1, nIce)) : rfCost(R, t, 1, k);
-		return v == RF_CUT ? -1 : (i32)v;
+		if (vy < 0) { s.bt = 3; s.bl = rfCLevel(R, top, RF_AT(R.seg, t, N), cy, vy, m0, m1, nIce); }
+		else { s.bt = 1; s.bl = k; }
+		return s;
 	}
-	const bool hasBase = !(vy < 0);
-	const u32 base = hasBase ? rfCost(R, t, cy > top + 8 ? 4 : 1, k) : RF_CUT;
+	if (!(vy < 0)) { s.bt = cy > top + 8 ? 4 : 1; s.bl = k; }
 	const double rise = rfRiseQ(R, vy, m0, m1, nIce);
-	if (hasBase && !(rise > 0)) return base == RF_CUT ? -1 : (i32)base;
+	if (!(vy < 0) && !(rise > 0)) return s;
 	const bool lid = ty == 0 || RF_AT(R.cls, t - R.W, N) == RF_WALL;
 	i32 q = rfQOf(R, top - (cy - rise));
 	if (lid && q > 0) q = 0;
-	v = rfCost(R, t, 0, q);
+	s.rt[0] = 0; s.rl[0] = q; s.nr = 1;
 	if (RF_AT(R.rowX, t, N) >= 0) {
-		const u32 x = rfCost(R, t, 2, lid ? rfCLevel(R, top, RF_AT(R.seg, t, N), cy < top + 8 ? cy : top + 8, 0, m0, m1, nIce) : rfCLevel(R, top, RF_AT(R.seg, t, N), cy, vy, m0, m1, nIce));
-		if (x > v) v = x;
+		s.rt[1] = 2; s.nr = 2;
+		s.rl[1] = lid ? rfCLevel(R, top, RF_AT(R.seg, t, N), cy < top + 8 ? cy : top + 8, 0, m0, m1, nIce) : rfCLevel(R, top, RF_AT(R.seg, t, N), cy, vy, m0, m1, nIce);
 	}
-	if (hasBase && base < v) v = base;
+	return s;
+}
+/** the stored cost of state s at tile j (RF_CUT: cut off). rebase: j is a neighbour tile dRow rows below s's own (the
+ *  beam's blend, reach.js blendCost): the ball's state re-referenced to it (R: its apex stays, 2 levels per row down, j's
+ *  own lid; XR, C, F, L: the same level; a type j holds no state of is left out) */
+EE_HD u32 rfStateCost(const ReachField& R, const RfState& s, i32 j, bool rebase, i32 dRow) {
+	const size_t N = (size_t)R.W * R.H;
+	u32 v = RF_CUT;
+	if (s.nr > 0) {
+		bool any = false;
+		v = 0;
+		for (i32 e = 0; e < s.nr; e++) {
+			i32 l = s.rl[e];
+			if (rebase && s.rt[e] == 0) {
+				l += 2 * dRow;
+				if (l > R.Q) l = R.Q;
+				if (l < -1) l = -1;
+				if ((j < R.W || RF_AT(R.cls, j - R.W, N) == RF_WALL) && l > 0) l = 0;
+			} else if (rebase && s.rt[e] == 2 && RF_AT(R.rowX, j, N) < 0) continue;
+			any = true;
+			const u32 c = rfCost(R, j, s.rt[e], l);
+			if (c > v) v = c;
+		}
+		if (!any) v = RF_CUT;
+	}
+	if (s.bt >= 0) { const u32 b = rfCost(R, j, s.bt, s.bl); v = s.nr > 0 ? (b < v ? b : v) : b; }
+	return v;
+}
+/** the cost (fifths) of the ball in state s: -1 = cut off (the walk mode: the walking distance of its tile) */
+EE_HD i32 rfFifths(const ReachField& R, const RfState& s) {
+	if (s.t < 0) return -1;
+	if (R.mode == 1) { const u32 w = RF_AT(R.walk, s.t, (size_t)R.W * R.H); return w == RF_CUT ? -1 : (i32)w; }
+	const u32 v = rfStateCost(R, s, s.t, false, 0);
 	return v == RF_CUT ? -1 : (i32)v;
 }
-/** the beam's score: the cost in tiles blended bilinearly between the tile centres around the ball (the ball's state
- *  moved to each of them; cut-off ones left out), for a smooth gradient; the own tile's when all the others are cut */
-EE_HD float reachScore(const ReachField& R, double px, double py, double vy, i32 q0, i32 q1, double slip, i32 own) {
+/** the cost (fifths) of a ball: top-left px, py; speed_y vy; the gravity queue q0, q1; slippery. -1 = cut off.
+ *  (src/reach.js fifthsAt, the same numbers) */
+EE_HD i32 reachFifths(const ReachField& R, double px, double py, double vy, i32 q0, i32 q1, double slip) {
+	return rfFifths(R, rfStateOf(R, px, py, vy, q0, q1, slip));
+}
+/** the beam's score in tiles (src/reach.js scoreAt, the same doubles): the cost blended bilinearly between the centres of
+ *  the 4 tiles around the ball's centre, each with the ball's own state s re-referenced to it (rfStateCost; walls,
+ *  deadly and cut-off tiles left out), for a smooth gradient; the own tile's cost `own` (rfFifths(s) >= 0) when all the
+ *  others are left out. One lookup and 4 table reads per state. */
+EE_HD float reachScore(const ReachField& R, const RfState& s, double px, double py, i32 own) {
+	const size_t N = (size_t)R.W * R.H;
 	const double fx = (px + 8.0) / 16.0 - 0.5, fy = (py + 8.0) / 16.0 - 0.5;
 	const i32 x0 = (i32)floor(fx), y0 = (i32)floor(fy);
 	const i32 tx = truncI(px + 8.0) >> 4, ty = truncI(py + 8.0) >> 4;
@@ -158,10 +202,21 @@ EE_HD float reachScore(const ReachField& R, double px, double py, double vy, i32
 	double v = 0, w = 0;
 	for (i32 dy = 0; dy < 2; dy++) for (i32 dx = 0; dx < 2; dx++) {
 		const i32 x = x0 + dx, y = y0 + dy;
-		const i32 c = (x == tx && y == ty) ? own : reachFifths(R, px + 16.0 * (x - tx), py + 16.0 * (y - ty), vy, q0, q1, slip);
-		if (c < 0) continue;
+		u32 c;
+		if (x == tx && y == ty) c = (u32)own;
+		else if (x < 0 || y < 0 || x >= R.W || y >= R.H) continue;
+		else {
+			const i32 j = y * R.W + x;
+			if (R.mode == 1) c = RF_AT(R.walk, j, N);
+			else {
+				const i32 g = RF_AT(R.cls, j, N);
+				if (g == RF_WALL || g == RF_DEADLY) continue;
+				c = rfStateCost(R, s, j, true, y - ty);
+			}
+			if (c == RF_CUT) continue;
+		}
 		const double k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
-		v += k * c; w += k;
+		v += k * (double)c; w += k;
 	}
 	return (float)(w > 1e-9 ? v / w / 5.0 : own / 5.0);
 }

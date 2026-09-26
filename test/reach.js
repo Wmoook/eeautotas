@@ -3,20 +3,27 @@
 //   A tables   the engine's numbers and the model's rules: Ra(JV) = 63.42, Rc(2), Rd(16), convex rise tables, VF[13] <
 //              8.07 <= VF[14] (the landing-tick jump), the jump levels (7 on a floor, 8 on a lower half block), a 1-row
 //              dot strip at rest reaches the upper half of the row above (q 0) but never enters it (q 1), the rise
-//              tables against the engine itself, and each field's top speed against the engine's
+//              tables against the engine itself, each field's top speed against the engine's, and the lookup's R level
+//              of rising balls in open air against the engine's own apex
 //   B rooms    hand-made rooms with the answer known from the engine: the start is cut off (no way) or finite, and every
-//              state of a real route is finite: the design set (ledges, dot steps and columns, arrows, one-ways, slots,
-//              portals, a time door, a diagonal gap, the dot room, landing-tick jumps, a half-block bridge, an up boost),
-//              strip-k (a 1-row dot strip does not lift the ball k >= 2 rows), up-pump (finite), shaft-lip (the user's
-//              50x50 level: the start finite, its states ranked), rising-after-jump (never cheaper than standing)
+//              state from which a small engine search reached the trophy is finite: the design set (ledges, dot steps and
+//              columns, arrows, one-ways, slots, portals, a time door, a diagonal gap, the dot room, landing-tick jumps, a
+//              half-block bridge, an up boost), the limits of single rules (a jump 4 rows not 5, 8 px more from a lower
+//              half block or a present, a water and an up-arrow column), routed rooms (C.evaluate: deaths as a way to
+//              move with 2 spawns / a curse / a 1582 spawn, presents at rotations 0 and 3, a jump with a down boost in the
+//              gravity queue), strip-k (a 1-row dot strip does not lift the ball k >= 2 rows), up-pump (finite), shaft-lip
+//              (the user's 50x50 level: the start finite, its states ranked), rising-after-jump (never cheaper than
+//              standing)
 //   C corpus   every state of every job's original and best run (--jobs=<dir>, default src/jobs) and of the known editor
 //              routes (the dot stairs, the 40x25 shaft's 251-tick route) is reachable: 0 cut off
 //   D fuzz     random rooms and random input runs, fields to the trophy and to random goal tiles: a state cut off at tick
-//              t is cut off at t + 1 too (otherwise the model misses a real move)
+//              t is cut off at t + 1 too (otherwise the model misses a real move); presents and half blocks at every
+//              stored rotation, curses, second spawns (followed through deaths and respawns), down boosts by the start
 //   E bellman  opts.check (every stored cost is its best edge + the target's cost) on 16 random levels with every block
 //              kind; the goals / maxCost options (explore.js --hunt) and writeReachFile's refusal of a goals field
 //   F agree    the JS lookup and the native tool's (eegpu reachtest: the host, and with --gpu the GPU) on 10k random
-//              states per room give the same fifths (skipped without a native tool that reads RCH3)
+//              states per room give the same fifths, and the beam's blended score (reach.js scoreAt = beam.h reachScore)
+//              the same float (skipped without a native tool that reads RCH3)
 //   G timing   200x200 and 400x400 random levels: fails above 3x the target (300 / 1200 ms), scaled by the machine's load
 //              (the engine's single-thread speed now against its benchmark, --bench=<_system.json>)
 // usage: node test/reach.js [--only=A,B,..] [--gpu] [--tool=<eegpu.exe>] [--jobs=<dir>] [--bench=<file>] [--quick]
@@ -45,8 +52,9 @@ const levelOfB64 = (b) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(
 // ASCII rooms: # wall, . air, S spawn, T trophy, o dot, ^ up arrow, < left arrow, > right arrow, ~ water, H ladder, x spike,
 // - one-way rot 1, _ lower half block, B up boost, D down boost, C checkpoint, t time door, v down arrow, I ice, g low gravity,
 // P portal id 1 -> 2 (rot 1), Q portal id 2 -> 1 (rot 3)
+// c curse (1 s), w spawn 1582 #0, p / q / r present 1101 at rotation 1 / 0 / 3, h half block 1116 at rotation 2
 const ID = { '#': [9], S: [255], T: [121], o: [4], '^': [2], '<': [1], '>': [3], '~': [119], H: [120], x: [361, 1], '-': [1052, 1], _: [1041, 1], B: [116], D: [117],
-	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453] };
+	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -68,28 +76,48 @@ function walk(L, f, masks) {
 	}
 	return { n, cut, first, finished: false };
 }
-/** a small breadth-first search over inputs (cells of 1 px and 1/8 px/tick): a route to the trophy, or null */
-function engineRoute(L, maxTicks, maxStates) {
+/** a small breadth-first search over inputs (cells of 1 px and 1/8 px/tick): a route to the trophy, or null. With
+ *  `tree`: {route, ahead}: `extra` more layers after the first finish, and every state from which the search reached the
+ *  trophy (the ancestors of every finish, as snapshots) */
+function engineRoute(L, maxTicks, maxStates, tree, extra) {
 	const OPTS = [0, 2, 4, 1, 3, 5, 8, 10, 12, 9, 11, 13, 16, 18, 20];
 	const sim = new E.EESim(L); sim.reset(); const inp = new E.EEInput();
-	let layer = [{ snap: sim.snapshot(), path: [] }];
-	const seen = new Set();
-	for (let t = 0; t < maxTicks && layer.length; t++) {
+	let layer = [{ snap: sim.snapshot(), up: null, m: -1 }];
+	const seen = new Set(), fins = [];
+	const pathOf = (nd, m) => { const o = [m]; for (let n = nd; n.up; n = n.up) o.push(n.m); return o.reverse(); };
+	let stopAt = maxTicks;
+	for (let t = 0; t < stopAt && layer.length; t++) {
 		const next = [];
 		for (const nd of layer) {
 			for (const m of OPTS) {
 				sim.restore(nd.snap); E.applyMask(inp, m); sim.tick(inp);
 				if (sim.is_dead) continue;
-				if (sim.has_silver_crown) return nd.path.concat([m]);
+				if (sim.has_silver_crown) {
+					if (!tree) return pathOf(nd, m);
+					if (!fins.length) stopAt = Math.min(maxTicks, t + 1 + (extra || 0));
+					fins.push([nd, m]);
+					continue;
+				}
 				const key = `${Math.round(sim.px)},${Math.round(sim.py)},${Math.round(sim.speed_x * 8)},${Math.round(sim.speed_y * 8)},${sim.on_ground ? 1 : 0},${sim.jump_count},${sim._q0},${sim._q1}`;
 				if (seen.has(key)) continue;
 				seen.add(key);
-				next.push({ snap: sim.snapshot(), path: nd.path.concat([m]) });
+				next.push({ snap: sim.snapshot(), up: nd, m });
 			}
 		}
 		layer = next.length > maxStates ? next.slice(0, maxStates) : next;
 	}
-	return null;
+	if (!tree) return null;
+	if (!fins.length) return { route: null, ahead: [] };
+	const ahead = new Set();
+	for (const [nd] of fins) for (let n = nd; n && !ahead.has(n); n = n.up) ahead.add(n);
+	return { route: pathOf(fins[0][0], fins[0][1]), ahead: [...ahead].map((n) => n.snap) };
+}
+/** every state from which the small engine search reached the trophy: the number cut off (and the first) */
+function aheadCut(L, f, ahead) {
+	const sim = new E.EESim(L); sim.reset();
+	let cut = 0, first = null;
+	for (const s of ahead) { sim.restore(s); if (R.costAt(f, sim) < 0) { cut++; if (!first) first = R.stateAt(f, sim); } }
+	return { n: ahead.length, cut, first };
 }
 const seqOf = (...parts) => { const o = []; for (const [m, n] of parts) for (let k = 0; k < n; k++) o.push(m); return o; };
 
@@ -154,6 +182,32 @@ function sectionA() {
 		if (best > R.CAP_CLASS[cls] + 1e-9 || best <= 0) capsOk = false;
 	}
 	check('every field class: the engine\'s top upward speed in a tall column is within the model\'s cap', capsOk, caps.join('; '));
+	// the lookup's rise: a rising ball in open air (the gravity queue: air or up arrows) gets the R level of the engine's own
+	// apex (never below it: that would cut a real state off; at most one above)
+	{
+		const W = 12, H = 60, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		cells.push([6, 1, 121], [6, H - 2, 255], [1, 20, 2]);
+		const La = levelOfCells(W, H, cells), fa = R.reachField(La);
+		const sa = startSim(La, 1), I = new E.EEInput(), s0 = sa.snapshot();
+		let seed = 9;
+		const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+		let low = 0, high = 0, eq = 0, first = null;
+		for (let k = 0; k < 4000; k++) {
+			sa.restore(s0);
+			sa.px = 48 + rnd() * 64; sa.py = 16 * 30 + rnd() * 16 * 25; sa.speed_x = 0; sa.speed_y = -rnd() * 16; sa.on_ground = false;
+			sa._q0 = rnd() < 0.5 ? 0 : 2; sa._q1 = rnd() < 0.5 ? 0 : 2;
+			const st = R.stateOf(fa, sa.px, sa.py, sa.speed_y, sa._q0, sa._q1, sa._slippery), top = 16 * (Math.trunc(sa.py + 8) >> 4);
+			const ql = st.rise.find((r) => r[0] === R.R_)[1];
+			let minY = sa.py;
+			for (let t = 0; t < 200 && sa.speed_y <= 0; t++) { sa.tick(I); if (sa.py < minY) minY = sa.py; }
+			const qe = R.qOf(top - (minY + 8), fa.Q);
+			if (ql < qe) { low++; if (!first) first = { q: ql, engine: qe }; } else if (ql > qe + 1) high++; else if (ql === qe) eq++;
+		}
+		check('the lookup\'s rise: 4000 rising balls in open air (a queue of air or up arrows) get the R level of the engine\'s own apex (never below, at most one above)',
+			low === 0 && high === 0, `${low} below, ${high} more than one above, ${eq} equal${first ? `; first ${JSON.stringify(first)}` : ''}`);
+	}
 }
 
 // ---------------------------------------------------------------- B rooms
@@ -190,6 +244,31 @@ const ROOMS = [
 	['lj10', 'no', [...Array(9).fill('##########'), '.S.#######', ...Array(4).fill('...#######'), '...#######', '...#.....#', '...#..T..#', '...#.#####', '..........', '..........', '<<<<<<<<<<']],
 	['halfbridge', 'yes', ['..................', '..................', '..................', '..................', '..................', '..................', '..................', '..................', '..................', '..................', '..................', '..................', '..........T.......', '.........####.....', '..................', '.....S............', '..______..........', 'xxxxxxxxxxxxxxxxxx']],
 	['upboost', 'yes', ['..T..', ...Array(16).fill('.....'), '.....', '..B..', 'S....']],
+	// the limits of single rules, each at what the engine just reaches (and just beyond): a jump from a floor lifts the
+	// centre 63.42 px (4 rows, not 5); from a lower half block (or a present at rotation 1) 8 px more (a 4-tile ledge);
+	// a water column and an up-arrow column lift the ball out onto the ledge beside them
+	['float3', 'yes', ['......', '......', '......', '......', '..T...', '......', '......', '..S...']],
+	['float4', 'yes', ['......', '......', '......', '..T...', '......', '......', '......', '..S...']],
+	['float5', 'no', ['......', '......', '..T...', '......', '......', '......', '......', '..S...']],
+	['halfledge4', 'yes', ['..............', '..............', '..............', '.........T....', '........######', '........######', '........######', '..S.___.######']],
+	['presentfloat4', 'yes', ['......', '......', '......', '..T...', '......', '......', '..S...', '..p...']],
+	['halffloat5', 'no', ['......', '......', '..T...', '......', '......', '......', '..S...', '..____']],
+	['watercol', 'yes', ['..............', '..............', '..............', '..............', '....T.........', '....#~#.......', '....#~#.......', '.S..#~#.......', '~~~~~~#.......']],
+	['upcol3', 'yes', ['.........', '.........', '.........', '..T......', '.#.#.....', '.#^#.....', '.#^#.....', '.#^#.....', 'S.^......']],
+];
+/** rooms with a known route (checked by C.evaluate): the start finite and every live state of the route finite. The
+ *  review's counterexamples of the first v3: deaths as a way to move (2 spawns, curse, 1582 #0 spawns), presents at
+ *  other rotations, the jump with a down boost in the gravity queue */
+const R4 = (m, n) => Array(n).fill(m);
+const ROUTED = [
+	['death warp: a pit, a spike, 2 spawns (the respawn at the other one)', ['S..T....', '####....', '####....', '####....', '####....', '####S..x'], R4(4, 200)],
+	['death warp: a pit, a curse, 2 spawns and a checkpoint', ['S..T...C', '####....', '####....', '####....', '####....', '####S..c'], R4(4, 400)],
+	['death warp: a walled room, a curse, 2 spawns', ['S...T#......', '######S....c'], R4(4, 600)],
+	['death warp: a walled room, a spike, a 1582 #0 spawn and a checkpoint out of reach', ['w...T#......', '######S....x', '######C#####'], R4(4, 600)],
+	['a present at rotation 0 (its left half open)', ['S...', '#hq#', '..T.'], R4(4, 40)],
+	['a present at rotation 3 (a floor at its top)', ['.....', '...T.', '.....', '.....', '.....', '..S..', 'xxrxx'], [0, 0, 1, ...R4(5, 30)]],
+	['a jump with a down boost in the gravity queue (a 4-tile ledge)', [...Array(6).fill('.'.repeat(32)), '.'.repeat(15) + 'T' + '.'.repeat(16), '.'.repeat(14) + '#'.repeat(18),
+		'.'.repeat(14) + '#'.repeat(18), '.'.repeat(9) + 'D' + '.'.repeat(4) + '#'.repeat(18), 'S' + '.'.repeat(13) + '#'.repeat(18)], [...R4(4, 31), 5, ...R4(0, 11), ...R4(13, 60)]],
 ];
 /** strip-k: a 1-row dot strip on a floor, air beside it over spikes, the trophy k rows above the strip's row */
 function stripK(k) {
@@ -221,12 +300,23 @@ function sectionB() {
 		let ok = want === 'no' ? c < 0 : c >= 0;
 		let detail = `start ${fmt(c)}, ${f.mismatches} mismatches`;
 		if (want === 'yes' && !QUICK && L.width * L.height <= 400) {
-			// the engine's route (a small search): every state on it finite
-			const route = engineRoute(L, 700, 1500);
-			if (route) { const w = walk(L, f, route); ok = ok && w.cut === 0 && w.finished; detail += `; engine route ${route.length} ticks, ${w.cut} states cut off${w.first ? ` (first ${JSON.stringify(w.first)})` : ''}`; }
-			else detail += '; (the small engine search found no route)';
+			// the engine's routes (a small search, 30 layers past its first finish): every state from which it reached the
+			// trophy is finite
+			const tr = engineRoute(L, 700, 1500, true, 30);
+			if (tr.route) {
+				const w = walk(L, f, tr.route), a = aheadCut(L, f, tr.ahead);
+				ok = ok && w.cut === 0 && w.finished && a.cut === 0;
+				detail += `; engine route ${tr.route.length} ticks, ${a.n} states lead to the trophy, ${a.cut} cut off${a.first ? ` (first ${JSON.stringify(a.first)})` : ''}`;
+			} else detail += '; (the small engine search found no route)';
 		}
 		check(`${name}: ${want === 'no' ? 'no way (cut off)' : want === 'yes' ? 'the engine finishes: finite' : 'finite'}`, ok && f.mismatches === 0, detail);
+	}
+	for (const [name, rows, masks] of ROUTED) {
+		const L = ascii(box(rows)), f = R.reachField(L, { check: true });
+		const ev = C.evaluate(L, Uint8Array.from(masks));
+		const w = ev ? walk(L, f, ev.ms) : null, c = R.costAt(f, startSim(L, 0));
+		check(`${name}: the route finishes (C.evaluate), the start and every live state finite`, !!ev && c >= 0 && w.cut === 0 && f.mismatches === 0,
+			`start ${fmt(c)}${ev ? `, ${ev.runTicks} run ticks, ${ev.deaths} deaths, ${w.n} states, ${w.cut} cut off${w.first ? ` (first ${JSON.stringify(w.first)})` : ''}` : ', NO FINISH'}${f.deaths ? ' (deaths)' : ''}, ${f.mismatches} mismatches`);
 	}
 	for (const k of [2, 3, 4, 7]) {
 		const L = stripK(k), f = R.reachField(L), c = R.costAt(f, startSim(L, 30));
@@ -314,8 +404,12 @@ function sectionD() {
 	let seed = 20260926;
 	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
 	const room = (W, H) => { const c = []; for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]); for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]); return c; };
-	const IDS = [9, 9, 9, 9, 9, 4, 4, 1, 2, 3, 2, 119, 369, 416, 116, 117, 114, 120, 361, 1052, 1041, 1518, 23, 43, 360, 2, 4, 1064];
-	const rot = (id) => id === 1052 || id === 1041;
+	// (presents 1101-1105 and the half block 1116 at every stored rotation, 4 = a full solid; a curse; some rooms with a
+	// second spawn point: deaths as a way to move, followed through the death and the respawn)
+	const IDS = [9, 9, 9, 9, 9, 4, 4, 1, 2, 3, 2, 119, 369, 416, 116, 117, 114, 120, 361, 1052, 1041, 1518, 23, 43, 360, 2, 4, 1064, 1101, 1103, 1105, 1116, 421];
+	const rot = (id) => id === 1052 || id === 1041 || (id >= 1101 && id <= 1105) || id === 1116;
+	const rotOf = (id) => Math.floor(rnd() * (id === 1052 || id === 1041 ? 4 : 5));
+	const cellOf = (x, y, id) => (rot(id) ? [x, y, id, rotOf(id)] : id === 43 || id === 23 || id === 421 ? [x, y, id, 1] : [x, y, id]);
 	function randomRoom(k) {
 		const W = 12 + Math.floor(rnd() * 20), H = 10 + Math.floor(rnd() * 12), cells = room(W, H);
 		const dens = 0.12 + rnd() * 0.25, kinds = IDS.filter(() => rnd() < 0.5);
@@ -323,14 +417,15 @@ function sectionD() {
 		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
 			if (rnd() >= dens) continue;
 			const id = rnd() < 0.5 ? 9 : kinds[Math.floor(rnd() * kinds.length)];
-			cells.push(rot(id) ? [x, y, id, Math.floor(rnd() * 4)] : id === 43 || id === 23 ? [x, y, id, 1] : [x, y, id]);
+			cells.push(cellOf(x, y, id));
 		}
 		for (let n = 0; n < 3; n++) {
 			const id = kinds[Math.floor(rnd() * kinds.length)], x0 = 1 + Math.floor(rnd() * (W - 3)), y0 = 1 + Math.floor(rnd() * (H - 3)), len = 2 + Math.floor(rnd() * 5), vert = rnd() < 0.5;
-			for (let i = 0; i < len; i++) { const x = vert ? x0 : x0 + i, y = vert ? y0 + i : y0; if (x > 0 && y > 0 && x < W - 1 && y < H - 1) cells.push(rot(id) ? [x, y, id, Math.floor(rnd() * 4)] : [x, y, id]); }
+			for (let i = 0; i < len; i++) { const x = vert ? x0 : x0 + i, y = vert ? y0 + i : y0; if (x > 0 && y > 0 && x < W - 1 && y < H - 1) cells.push(cellOf(x, y, id)); }
 		}
 		if (k % 3 === 0) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 1, 2], [1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 1, 2, 1]);
 		cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * Math.max(1, (H - 2) / 2)), 121], [1 + Math.floor(rnd() * (W - 2)), H - 2, 255]);
+		if (k % 4 === 1) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 255]);
 		return { W, H, cells };
 	}
 	function puzzleRoom() {   // the trophy at the edge of what one mechanism reaches
@@ -356,12 +451,15 @@ function sectionD() {
 		else if (kind === 'oneway') { for (let y = fl - h + 1; y <= fl; y++) put(fx, y, 1052, Math.floor(rnd() * 4)); tx = fx + 2; ty = fl - Math.floor(rnd() * 4); for (let y = ty + 1; y <= fl; y++) put(fx + 2, y, 9); }
 		else { const id = [4, 1, 2, 119, 120][Math.floor(rnd() * 5)]; for (let x = fx - 2; x <= fx + 2; x++) put(x, fl, id); for (let x = fx + 3; x <= fx + 4; x++) for (let y = fl - 3 - (d + 1); y <= fl; y++) put(x, y, 9); tx = fx + 3; ty = fl - 4 - (d + 1); }
 		for (let n = 0; n < W * H * 0.03; n++) put(1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 3)), [9, 4, 2, 361, 1052][Math.floor(rnd() * 5)]);
+		// (a present or a down boost by the start now and then: jumps from presents, a boost in the gravity queue)
+		if (rnd() < 0.3) put(3, fl, 1101 + Math.floor(rnd() * 5), Math.floor(rnd() * 5));
+		if (rnd() < 0.3) put(3 + Math.floor(rnd() * 3), fl - 1 - Math.floor(rnd() * 2), 117);
 		cells.push([tx, Math.max(1, ty), 121], [2, fl, 255]);
 		return { W, H, cells };
 	}
 	const OPTS = [0, 1, 2, 4, 8, 16, 3, 5, 9, 10, 12, 17, 18, 20, 24, 11, 13];
 	const ROOMSN = QUICK ? 12 : 40, RUNS = QUICK ? 20 : 50, TICKS = 300, GOALS = 3;
-	let pairs = 0, cut = 0, viol = 0, runs = 0, first = null;
+	let pairs = 0, cut = 0, viol = 0, runs = 0, first = null, deathPairs = 0;
 	for (let k = 0; k < ROOMSN; k++) {
 		const rm = k % 2 ? puzzleRoom() : randomRoom(k);
 		let L;
@@ -386,8 +484,10 @@ function sectionD() {
 				if (rnd() < 0.12) m = OPTS[Math.floor(rnd() * OPTS.length)];
 				E.applyMask(inp, m);
 				sim.tick(inp);
-				if (sim.has_silver_crown || sim.is_dead) break;
+				// (a death: followed through the dead ticks and the respawn when the model has deaths as a way to move)
+				if (sim.has_silver_crown || (sim.is_dead && !fields[0].deaths)) break;
 				const now = fields.map((f) => R.fifthsAt(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery));
+				if (sim.is_dead) deathPairs++;
 				for (let fi = 0; fi < fields.length; fi++) {
 					pairs++;
 					if (now[fi] < 0) cut++;
@@ -399,7 +499,7 @@ function sectionD() {
 		}
 	}
 	check(`${runs} random runs of ${TICKS} ticks in ${ROOMSN} rooms (fields to the trophy and ${GOALS} goal tiles each): no state finite right after a cut-off one`, viol === 0 && pairs > 0,
-		`${pairs} pairs, ${cut} cut off, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
+		`${pairs} pairs (${deathPairs} dead ticks followed), ${cut} cut off, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
 }
 
 // ---------------------------------------------------------------- E bellman
@@ -472,7 +572,7 @@ function sectionF() {
 	let seed = 3;
 	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
 	const rooms = [['user50', levelOfB64(USER50)], ['shaft', levelOfB64(SHAFT)], ['dot stairs', levelOfB64(DOTSTAIRS)], ...['upshaft', 'boost', 'portal', 'halfbridge', 'lj16', 'dotroom'].map((n) => [n, ascii(box(ROOMS.find((r) => r[0] === n)[2]))]),
-		['every block (portals, deaths)', randomLevels()[4].level], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))]];
+		['every block (portals, deaths)', randomLevels()[4].level], ['death warp (a curse: every tile a death source)', ascii(box(ROUTED[1][1]))], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))]];
 	for (const [name, L] of rooms) {
 		const f = R.reachField(L);
 		fs.writeFileSync(path.join(tmp, 'l.bin'), G.levelBlob(L));
@@ -499,12 +599,21 @@ function sectionF() {
 		const args = ['reachtest', path.join(tmp, 'l.bin'), path.join(tmp, 'r.bin'), path.join(tmp, 's.bin'), ...(GPU ? ['--gpu=1', ...G.cacheArgs()] : [])];
 		try { out = JSON.parse(execFileSync(tool, args, { encoding: 'utf8', maxBuffer: 1 << 27, timeout: GPU ? 0 : 120000 }).trim().split('\n').pop()); } catch (e) { out = { error: e.message }; }
 		if (out.error) { check(`${name}: eegpu reachtest`, false, out.error); continue; }
-		let bad = 0, firstBad = null;
+		let bad = 0, firstBad = null, badS = 0, firstBadS = null;
+		const fb = new Float32Array(1), ub = new Uint32Array(fb.buffer);
+		const bitsOf = (x) => { fb[0] = x; return ub[0]; };
 		for (let i = 0; i < n; i++) {
-			const js = R.fifthsAt(f, st[i * 6], st[i * 6 + 1], st[i * 6 + 2], st[i * 6 + 3], st[i * 6 + 4], st[i * 6 + 5]);
-			if (js !== out.host[i] || (out.gpu && js !== out.gpu[i])) { bad++; if (!firstBad) firstBad = { s: Array.from(st.slice(i * 6, i * 6 + 6)), js, host: out.host[i], gpu: out.gpu ? out.gpu[i] : null }; }
+			const q = Array.from(st.slice(i * 6, i * 6 + 6));
+			const js = R.fifthsAt(f, ...q);
+			if (js !== out.host[i] || (out.gpu && js !== out.gpu[i])) { bad++; if (!firstBad) firstBad = { s: q, js, host: out.host[i], gpu: out.gpu ? out.gpu[i] : null }; }
+			if (out.hostScore) {
+				const sj = bitsOf(R.scoreAt(f, ...q));
+				if (sj !== out.hostScore[i] || (out.gpuScore && sj !== out.gpuScore[i])) { badS++; if (!firstBadS) firstBadS = { s: q, js: R.scoreAt(f, ...q), host: out.hostScore[i], gpu: out.gpuScore ? out.gpuScore[i] : null }; }
+			}
 		}
 		check(`${name} (${f.mode}${f.ice ? ', ice' : ''}${f.deaths ? ', deaths' : ''}): ${n} states, the same fifths${out.gpu ? ' on the host and the GPU' : ' on the host'}`, bad === 0 && (!GPU || !!out.gpu), `${bad} differ${firstBad ? `; first ${JSON.stringify(firstBad)}` : ''}`);
+		check(`${name}: the beam's blended score, the same float${out.gpuScore ? ' on the host and the GPU' : ' on the host'}`, !!out.hostScore && badS === 0 && (!GPU || !!out.gpuScore),
+			`${out.hostScore ? `${badS} differ${firstBadS ? `; first ${JSON.stringify(firstBadS)}` : ''}` : 'the tool gives no score (older than the app: rebuild it)'}`);
 	}
 	fs.rmSync(tmp, { recursive: true, force: true });
 }

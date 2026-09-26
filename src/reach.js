@@ -24,14 +24,20 @@
 //
 // reachField(level, opts) -> the field (plain data: typed arrays and numbers, so it can go to worker threads);
 //   opts.check: the Bellman self-check (every stored cost equals the best forward edge), in field.mismatches;
-//   opts.explain: the highest row the model lets the start state's centre reach (field.explain {row, trophyRow});
+//   opts.explain: when the start is cut off, the highest row the model lets its centre reach (field.explain {row,
+//   trophyRow, startRow}; null when the start is not cut off: the forward search would walk the whole model);
 //   opts.goals [{tile, cost (tiles)}] and opts.maxCost (tiles): explore.js --hunt's time-to-go field (seeded from these
 //   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof).
 // fifthsAt(field, px, py, vy, q0, q1, slippery) -> fifths (-1 = cut off); costAt(field, sim) -> tiles (-1 = cut off)
-//   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest);
+//   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest); scoreAt(field, ...
+//   the same) -> the beam's blended score in tiles (native/beam.h reachScore; -1 = cut off);
 // writeReachFile(field, file): the RCH3 file for eegpu (native/beam.h ReachField, reachFifths / reachScore).
 // Walk mode (levels with jump / fly / speed / low-gravity / multijump / gravity effects, or another world gravity):
-// plain walking distance (through portals and, with checkpoints, death respawns), never a proof of anything.
+// plain walking distance (through portals and death respawns), never a proof of anything.
+// Deaths: with a checkpoint or 2+ spawn points a death can take the ball to another place (the respawn at the checkpoint
+// touched last, else the next spawn of EE's rotation): an edge from every tile it can die in (a killing current tile;
+// anywhere with a timed killer: curse, zombie, poison, lava) to every respawn tile, at DEATH_COST fifths (finite, so no
+// proof is lost, but behind every real way: the searches drop dead balls).
 const fs = require('fs');
 const E = require('./eesim.js');
 
@@ -46,12 +52,15 @@ const KF = 16, NL = 128;                      // F levels 0..16; C / XR levels 0
 const R_ = 0, F_ = 1, X_ = 2, C_ = 3, L_ = 4, NT = 5;
 const NONE = -32768, NONE8 = -128;
 const CUT = 0xffff, FAR = 0xfffe;             // cost table: cut off; finite but saturated
+// a death (the respawn at a checkpoint or another spawn): finite, so no proof is lost, but priced far beyond any real
+// way (fifths: 1638 tiles), so the searches (which drop dead balls) never head for a spike because a checkpoint is near
+const DEATH_COST = 8192;
 // tile classes
 const WALL = 0, DEADLY = 1, NORM = 2, DOTS = 3, CLIMB = 4, WATER = 5, MUD = 6, UP = 7, BUP = 8, BDOWN = 9;
 const isField = (c) => c >= DOTS && c <= UP;
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16, F_CLIMB = 32, F_LIQUID = 64;
 const X_NONROT_HALF = 4;
-const TROPHY = 121, CHECKPOINT = 360, SPAWN = 255, PROTECTION = 420, ICE = 1064;
+const TROPHY = 121, CHECKPOINT = 360, PROTECTION = 420, ICE = 1064, CURSE = 421, ZOMBIE = 422, POISON = 1584, LAVA = 416;
 // effects that change jumps, speeds or gravity: walk mode (417 jump, 418 fly, 419 speed, 453 low gravity, 461
 // multijump, 1517 gravity)
 const WILD = new Set([417, 418, 419, 453, 461, 1517]);
@@ -152,16 +161,26 @@ function reachField(level, opts) {
 	const W = level.width, H = level.height, N = W * H;
 	const fg = level.fg, flags = level.flags, nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
-	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, deaths = false;
+	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		if (WILD.has(id)) wild = true;
 		if (id === PROTECTION) protect = true;
 		if (id === ICE) ice = true;
-		if (id === CHECKPOINT) deaths = true;
+		if (id === CHECKPOINT) checkpoints = true;
+		// a timed killer: curse / zombie / poison with a time (the tile's number > 0), lava (fire): the ball dies anywhere later
+		if (((id === CURSE || id === ZOMBIE || id === POISON) && lk[i] > 0) || id === LAVA) timed = true;
 	}
-	// ---- classify (the engine's current tile: a half block reads the tile above (rotation 1) or to the left (0))
-	const hrot = (i) => { const id = fg[i]; if ((fl(id) & F_HALF) === 0) return -1; return (xfl[id] & X_NONROT_HALF) ? 1 : lk[i]; };
+	// ---- classify. The collision uses a half block's stored rotation (1 the lower half, 0 the right half: the centre can
+	// be in the tile only on its edge; 2 the left half, 3 the upper half: never; any other value is a full solid, taken as
+	// open here, which errs toward reachable). The engine's current tile (gravity, kills) of a half block is the tile above
+	// (rotation 1, and every present 1101-1105, which the current-tile rule always reads as rotation 1, whatever their
+	// stored rotation) or to the left (0).
+	const hgeo = (i) => ((fl(fg[i]) & F_HALF) === 0 ? -1 : lk[i]);
+	const hcur = (i) => { const id = fg[i]; if ((fl(id) & F_HALF) === 0) return -1; return (xfl[id] & X_NONROT_HALF) ? 1 : lk[i]; };
+	const curOf = new Int32Array(N);   // the engine's current tile when the centre is in tile i (-1: off the level)
+	for (let i = 0; i < N; i++) { const hc = hcur(i); curOf[i] = hc === 1 ? (i >= W ? i - W : -1) : hc === 0 ? (i % W > 0 ? i - 1 : -1) : i; }
+	const kills = (i) => i >= 0 && (gF[fg[i]] & 4) !== 0;
 	const isWallId = (id) => (fl(id) & F_SOLID) !== 0 && (fl(id) & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0;
 	const gclass = (id) => {
 		if (id < 0 || id >= nFlags) return NORM;
@@ -177,17 +196,38 @@ function reachField(level, opts) {
 	const cls = new Uint8Array(N), sp = new Uint8Array(N);
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
-		const hr = hrot(i);
+		const hr = hgeo(i);
 		if (isWallId(id) || hr === 2 || hr === 3) { cls[i] = WALL; continue; }
 		if (!protect && id >= 0 && id < nFlags && (gF[id] & 4) !== 0) { cls[i] = DEADLY; continue; }
 		if (hr === 1) sp[i] = LOWER; else if (hr === 0) sp[i] = RIGHT;
-		let j = i;
-		if (hr === 1) j = i >= W ? i - W : -1; else if (hr === 0) j = i % W > 0 ? i - 1 : -1;
+		const j = curOf[i];
 		const c = j < 0 ? NORM : gclass(fg[j]);
 		cls[i] = c;
 		if (isField(c) || c === BUP || c === BDOWN) anyField = true;
 	}
 	const passable = (i) => cls[i] !== WALL && cls[i] !== DEADLY;
+	// ---- deaths: the ball comes back at the checkpoint it touched last, else at the next spawn point of EE's rotation
+	// (255 and 1582 #0, level.spawnsX / spawnsY; none: tile (1, 1)); every checkpoint and spawn is a respawn tile. It dies
+	// where its current tile kills (spikes, fire, toxic; also with protection somewhere, and a half block's tile under a
+	// spike), or with a timed killer in the level (curse, zombie, poison, lava's fire) anywhere. A death is an edge (of
+	// DEATH_COST, so the ordering keeps real ways first) to every respawn tile, modelled only when a death can take the
+	// ball somewhere its start cannot (a checkpoint, or 2+ spawns): a death back to the start's spawn changes nothing the
+	// start can reach, and the searches drop dead balls.
+	const respawn = [];
+	{
+		const seen = new Uint8Array(N);
+		const add = (i) => { if (i >= 0 && i < N && !seen[i] && passable(i)) { seen[i] = 1; respawn.push(i); } };
+		const sx = level.spawnsX || [], sy = level.spawnsY || [];
+		for (let k = 0; k < sx.length; k++) if (sx[k] >= 0 && sy[k] >= 0 && sx[k] < W && sy[k] < H) add(sy[k] * W + sx[k]);
+		if (!sx.length && W > 1 && H > 1) add(W + 1);
+		for (let i = 0; i < N; i++) if (fg[i] === CHECKPOINT) add(i);
+	}
+	let deaths = (checkpoints || (level.spawnsX ? level.spawnsX.length : 0) >= 2) && respawn.length > 0;
+	const dsrc = [];   // the tiles the ball can die in
+	if (deaths) for (let i = 0; i < N; i++) if (cls[i] === DEADLY || (cls[i] !== WALL && (timed || kills(curOf[i]) || kills(i)))) dsrc.push(i);
+	if (!dsrc.length) deaths = false;
+	const dsrcT = new Uint8Array(N);
+	if (deaths) for (const i of dsrc) dsrcT[i] = 1;
 	// portals: exits (passable, or deadly with deaths) per portal tile
 	const srcOf = new Map(), portalExits = new Map();
 	if (level.portalSlot && level.portalsById) {
@@ -207,12 +247,6 @@ function reachField(level, opts) {
 			for (const j of list) { if (!srcOf.has(j)) srcOf.set(j, []); srcOf.get(j).push(i); }
 		}
 	}
-	// respawn tiles (deaths on: checkpoints; the spawns too, generous)
-	const respawn = [];
-	if (deaths) for (let i = 0; i < N; i++) if ((fg[i] === CHECKPOINT || fg[i] === SPAWN) && passable(i)) respawn.push(i);
-	if (!respawn.length) deaths = false;
-	const deadly = [];
-	if (deaths) for (let i = 0; i < N; i++) if (cls[i] === DEADLY) deadly.push(i);
 	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
@@ -235,7 +269,7 @@ function reachField(level, opts) {
 
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
-	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? respawn : null, maxF);
+	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF);
 	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths, goals, toGoals: goalF !== null, cls, walk, mismatches: 0, KLJ };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walk), labels: 0 });
 
@@ -275,12 +309,15 @@ function reachField(level, opts) {
 	}
 	const xrOK = (i) => cls[i] === NORM && segOf[i] !== 0;
 	const nIce = ice ? 10 : 0;
+	const mm0 = modMinOf(level), mm = (id) => (id >= 0 && id < mm0.length ? mm0[id] : G);
 	const T = TABLES[ice ? 1 : 0];
 	const KSTEP = ice ? 2 : 1;   // rows of fall potential per row fallen (ice: the ball may still fall with less drag)
-	// the jump: from a floor under the centre's tile, a lower half block, or a ledge beside (the box overhangs it); a
-	// neighbour that pulls up (up arrows, liquids, dots) may be in the gravity queue for the tick after the jump
+	// the jump: from a floor under the centre's tile, a lower half block, or a ledge beside (the box overhangs it); the
+	// gravity queue of the tick after the jump holds the current tile of the tick before it, anywhere in the 3 x 3 tiles
+	// around (a neighbour that pulls up: up arrows, liquids, dots, climbables, and boosts, whose zero gravity lets up act):
+	// the lookup's own table (modMin) of that tile's id
 	const J = new Int8Array(N).fill(-128);
-	const modOfClass = (c) => (isField(c) ? -A_CLASS[c] : G);
+	const modCur = (n) => { const j = curOf[n]; return j < 0 ? G : mm(fg[j]); };
 	for (let i = 0; i < N; i++) {
 		if (cls[i] !== NORM) continue;
 		if (i < W || cls[i - W] === WALL) continue;   // a ceiling right above: the jump bonks at once
@@ -288,7 +325,7 @@ function reachField(level, opts) {
 		let m = G;
 		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
 			const nx = x + dx, ny = y + dy;
-			if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) m = Math.min(m, modOfClass(cls[ny * W + nx]));
+			if (nx >= 0 && ny >= 0 && nx < W && ny < H) m = Math.min(m, modCur(ny * W + nx));
 		}
 		const rj = riseQ(JV, m, G, nIce);
 		let e = -1e9;
@@ -402,7 +439,7 @@ function reachField(level, opts) {
 	const stopC = (t) => cOfV(vfieldP(prof[pid[t]], 2 * G, lowWall[t] ? 0.5 : 1));
 	const bounceC = (t, k) => { const P = prof[pid[t]], v = VFC[k]; return cOfV(Math.min(16, Math.sqrt(v * v + Math.max(P.push, 8 * G * v + 10 * G * G)))); };
 
-	// ---- same-tile edges (cost 0) and the edges to other tiles (portals, death respawns; cost 5), forward
+	// ---- same-tile edges (cost 0) and the edges to other tiles (portals: cost 5; death respawns: DEATH_COST), forward
 	/** the same-tile edges of (t, ty, l): emit(ty2, l2) */
 	function sameTile(t, ty, l, emit) {
 		const c = cls[t];
@@ -418,10 +455,13 @@ function reachField(level, opts) {
 		} else if (c === BDOWN) emit(F_, KF);
 		else if (c === BUP) emit(R_, INF);
 	}
-	/** the edges of (t, ty, l) to other tiles: emit(t2, ty2, l2) (cost 5) */
+	/** the edges of (t, ty, l) to other tiles: emit(t2, ty2, l2, cost). A death: the respawned ball stands still in the
+	 *  respawn tile's middle, its gravity queue from where it died (a pull there lifts it a pixel or so: R(0), which the
+	 *  lookup gives it; F(0) without one) */
 	function crossEdges(t, ty, emit) {
-		if (cls[t] === DEADLY) { if (deaths) for (const r of respawn) emit(r, F_, 0); return; }
-		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, INF); emit(e, F_, KF); }
+		if (deaths && dsrcT[t] === 1) for (const r of respawn) { emit(r, F_, 0, DEATH_COST); if (cls[r] === NORM) emit(r, R_, 0, DEATH_COST); }
+		if (cls[t] === DEADLY) return;
+		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, INF, 5); emit(e, F_, KF, 5); }
 	}
 
 	// ---- storage: R, F and L per tile, C per field tile, XR per xrOK tile
@@ -477,21 +517,21 @@ function reachField(level, opts) {
 	const bounceT = new Int16Array(N * (KF + 1));
 	for (let i = 0; i < N; i++) if (cls[i] === UP) for (let k = 0; k <= KF; k++) bounceT[i * (KF + 1) + k] = bounceC(i, k);
 	const respawnT = new Uint8Array(N);
-	if (deaths) for (const r of respawn) respawnT[r] = 1;
+	if (deaths) for (const r of respawn) respawnT[r] = cls[r] === NORM ? 2 : 1;   // (2: R(0) is a respawn state too)
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, deadly: Int32Array.from(deadly), seeds, maxF });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
 	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
-		modMin: modMinOf(level) });
+		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
 	const costOf = (t, ty, l) => { const s = slotOf(t, ty); if (s < 0) return CUT; return COST[ty][s * NLV[ty] + idxOf(ty, Math.max(LO[ty], Math.min(HI[ty], l)))]; };
 	/** every edge out of (t, ty, l): emit(t2, ty2, l2, cost) */
 	const edgesOf = (t, ty, l, emit) => {
 		if (fg[t] === TROPHY) return;
-		crossEdges(t, ty, (t2, ty2, l2) => emit(t2, ty2, l2, 5));
+		crossEdges(t, ty, emit);
 		if (cls[t] === DEADLY) return;
 		sameTile(t, ty, l, (ty2, l2) => emit(t, ty2, l2, 0));
 		const x = t % W, y = (t / W) | 0;
@@ -525,10 +565,13 @@ function reachField(level, opts) {
 		}
 		field.mismatches = bad;
 	}
-	// ---- opts.explain: the highest row the start state's centre can reach in the model (a forward search)
-	if (opts.explain) {
-		const sim = new E.EESim(level);
-		sim.reset();
+	// ---- opts.explain: when the start is cut off, the highest row its centre can reach in the model (a forward search:
+	// small then; from a start that is not cut off it would walk the whole model, so it is skipped: explain null)
+	field.explain = null;
+	const sim0 = opts.explain ? new E.EESim(level) : null;
+	if (sim0) sim0.reset();
+	if (sim0 && fifthsAt(field, sim0.px, sim0.py, sim0.speed_y, sim0._q0, sim0._q1, sim0._slippery) < 0) {
+		const sim = sim0;
 		const st = stateOf(field, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
 		let best = -1, trophyRow = -1;
 		for (let i = 0; i < N; i++) if (trophy(i)) { const r = (i / W) | 0; if (trophyRow < 0 || r < trophyRow) trophyRow = r; }
@@ -560,7 +603,7 @@ function reachField(level, opts) {
  */
 function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
-		stopT, bounceT, srcList, respawnT, deadly, seeds, maxF } = S;
+		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF } = S;
 	const K1 = S.KF + 1;
 	const NB = 8;
 	const bk = [], bn = new Int32Array(NB);
@@ -583,10 +626,14 @@ function labelSearch(S) {
 	const pushAllLow = (t, c) => { for (let ty = 0; ty < 5; ty++) push(t, ty, 0, c); };
 	const DX = [-1, 0, 1, -1, 1, -1, 0, 1], DY = [-1, -1, -1, 0, 0, 1, 1, 1];
 	let si = 0, labels = 0, maxFin = 0;
-	while (si < seeds.length || queued > 0) {
-		if (queued === 0) cur = seeds[si][1];
+	// deaths: every death source costs DEATH_COST more than the cheapest respawn state (a respawn tile's F(0), or R(0)), so
+	// the sources are pushed once, when that label is set, at its cost + DEATH_COST (beyond the bucket ring: kept aside)
+	let dState = dsrc.length ? 0 : 2, dAt = 0;   // 0 waiting for a respawn label, 1 pending at dAt, 2 done
+	while (si < seeds.length || queued > 0 || dState === 1) {
+		if (queued === 0) cur = si < seeds.length && !(dState === 1 && dAt < seeds[si][1]) ? seeds[si][1] : dAt;
 		if (cur > maxF) break;
 		while (si < seeds.length && seeds[si][1] === cur) pushAllLow(seeds[si++][0], cur);
+		if (dState === 1 && dAt === cur) { dState = 2; for (let n = 0; n < dsrc.length; n++) pushAllLow(dsrc[n], cur); }
 		const b = cur & (NB - 1), cv = cur > FAR ? FAR : cur;
 		for (let n = 0; n < bn[b]; n++) {
 			const key = bk[b][n];
@@ -599,7 +646,7 @@ function labelSearch(S) {
 			for (let x = i2; x < old; x++) cst[s2 * L2 + x] = cv;
 			front[fs2] = i2;
 			labels++;
-			if (cur > maxFin) maxFin = cur;
+			if (cur > maxFin && dState !== 2) maxFin = cur;   // (the priorities' range: the costs of real ways, before deaths)
 			const c2 = cls[t2], l2 = i2 + LO[ty2];
 			// same-tile edges into (t2, ty2, >= l2) (the inverse of sameTile)
 			if (c2 === NORM) {
@@ -619,8 +666,8 @@ function labelSearch(S) {
 			else if (c2 === BUP) { if (ty2 === R_) pushAllLow(t2, cur); }
 			// portals: (portal tile, any but C) -> (exit, R(INF) and F(16))
 			if ((ty2 === R_ || ty2 === F_) && srcList[t2] !== null) for (const p of srcList[t2]) { push(p, R_, 0, cur + 5); push(p, F_, 0, cur + 5); push(p, X_, 0, cur + 5); push(p, L_, 0, cur + 5); }
-			// deaths: (deadly tile, any) -> (respawn tile, F(0))
-			if (ty2 === F_ && l2 === 0 && respawnT[t2] === 1) for (const d of deadly) { push(d, R_, 0, cur + 5); push(d, F_, 0, cur + 5); push(d, L_, 0, cur + 5); }
+			// deaths: (a death source, any) -> (respawn tile, F(0) or R(0))
+			if (dState === 0 && respawnT[t2] !== 0 && ((ty2 === F_ && l2 === 0) || (ty2 === R_ && l2 <= 0 && respawnT[t2] === 2))) { dState = 1; dAt = cur + DEATH_COST; }
 			// moves into t2 from its 8 neighbours
 			const x2 = t2 % W, y2 = (t2 - x2) / W, pt2 = pid[t2], o = (ty2 * L + i2) * 5;
 			for (let di = 0; di < 8; di++) {
@@ -644,7 +691,7 @@ function labelSearch(S) {
 
 const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
-function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] < FAR && a[i] > m) m = a[i]; return Math.max(0, bitLen(m) - 12); }
+function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] < DEATH_COST && a[i] > m) m = a[i]; return Math.max(0, bitLen(m) - 12); }
 /** per block id: its most upward modifier_y as the delayed tile (input held where the engine lets it act) */
 function modMinOf(level) {
 	const n = level.flags.length, a = new Float64Array(n);
@@ -654,8 +701,9 @@ function modMinOf(level) {
 	}
 	return a;
 }
-/** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths) */
-function walkField(W, H, cls, passable, trophy, goalF, portalExits, respawn, maxF) {
+/** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
+ *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
+function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF) {
 	const N = W * H, dist = new Uint16Array(N).fill(CUT);
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
@@ -665,15 +713,15 @@ function walkField(W, H, cls, passable, trophy, goalF, portalExits, respawn, max
 	else for (let i = 0; i < N; i++) if (trophy(i)) { d[i] = 0; hpush(i, 0); }
 	const srcOf = new Map();
 	for (const [p, ex] of portalExits) for (const e of ex) { if (!srcOf.has(e)) srcOf.set(e, []); srcOf.get(e).push(p); }
-	const resp = respawn ? new Set(respawn) : null;
+	let resp = deaths ? new Set(deaths.respawn) : null;
 	while (heap.length) {
 		const [v, t2] = hpop();
 		if (v > d[t2] || v > maxF) continue;
 		const x2 = t2 % W, y2 = (t2 / W) | 0;
 		const relax = (t, c) => { if (c < d[t]) { d[t] = c; hpush(t, c); } };
 		if (srcOf.has(t2)) for (const p of srcOf.get(t2)) relax(p, v + 5);
-		if (resp && resp.has(t2)) for (let i = 0; i < N; i++) if (cls[i] === DEADLY) relax(i, v + 5);
-		if (cls[t2] === DEADLY) continue;   // (a deadly tile is only left by dying)
+		if (resp && resp.has(t2)) { resp = null; for (const i of deaths.src) relax(i, v + DEATH_COST); }   // (the nearest respawn tile)
+		// the tiles that move into t2 (a deadly t2 too: the ball moves in and dies; a deadly tile itself is left only by dying)
 		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
 			if (!dx && !dy) continue;
 			const x = x2 - dx, y = y2 - dy;
@@ -767,6 +815,63 @@ function fifthsAt(f, px, py, vy, q0, q1, slip) {
 	if (s.base) { const b = costOfState(f, s.t, s.base[0], s.base[1]); v = s.rise ? Math.min(v, b) : b; }
 	return v === CUT ? -1 : v;
 }
+/** the cost (fifths) of abstract state s at tile j of a neighbour row dRow rows below its own (the beam's blend): the
+ *  ball's own state re-referenced to that tile (R: its apex stays where it is, 2 levels per row down, the tile's own lid;
+ *  XR, C, F, L: the same level; a type the tile holds no state of is left out); CUT when none applies */
+function blendCost(f, s, j, dRow) {
+	const W = f.W;
+	let v = CUT;
+	if (s.rise) {
+		let any = false;
+		v = 0;
+		for (const [ty, l] of s.rise) {
+			let l2 = l;
+			if (ty === R_) {
+				l2 = l + 2 * dRow;
+				if (l2 > f.Q) l2 = f.Q;
+				if (l2 < -1) l2 = -1;
+				if ((j < W || f.cls[j - W] === WALL) && l2 > 0) l2 = 0;
+			} else if (ty === X_ && f.rowX[j] < 0) continue;
+			any = true;
+			v = Math.max(v, costOfState(f, j, ty, l2));
+		}
+		if (!any) v = CUT;
+	}
+	if (s.base) { const b = costOfState(f, j, s.base[0], s.base[1]); v = s.rise ? Math.min(v, b) : b; }
+	return v;
+}
+/** the beam's score (native/beam.h reachScore, the same doubles, a float), tiles: the cost blended bilinearly between the
+ *  centres of the 4 tiles around the ball's centre, each with the ball's own abstract state re-referenced to it
+ *  (blendCost; walls, deadly and cut-off tiles are left out), for a smooth gradient; the own tile's cost when all the
+ *  others are left out. The walk mode blends the walking distance. -1: the ball is cut off. */
+function scoreAt(f, px, py, vy, q0, q1, slip) {
+	const own = fifthsAt(f, px, py, vy, q0, q1, slip);
+	if (own < 0) return -1;
+	const s = f.mode === 'walk' ? null : stateOf(f, px, py, vy, q0, q1, slip);
+	const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
+	const fx = (px + 8.0) / 16.0 - 0.5, fy = (py + 8.0) / 16.0 - 0.5;
+	const x0 = Math.floor(fx), y0 = Math.floor(fy), ax = fx - x0, ay = fy - y0;
+	let v = 0, w = 0;
+	for (let dy = 0; dy < 2; dy++) {
+		for (let dx = 0; dx < 2; dx++) {
+			const x = x0 + dx, y = y0 + dy;
+			let c;
+			if (x === tx && y === ty) c = own;
+			else if (x < 0 || y < 0 || x >= f.W || y >= f.H) continue;
+			else {
+				const j = y * f.W + x;
+				if (!s) c = f.walk[j];
+				else if (f.cls[j] === WALL || f.cls[j] === DEADLY) continue;
+				else c = blendCost(f, s, j, y - ty);
+				if (c === CUT) continue;
+			}
+			const k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
+			v += k * c;
+			w += k;
+		}
+	}
+	return Math.fround(w > 1e-9 ? v / w / 5.0 : own / 5.0);
+}
 /** the cost to the trophy in tiles (-1 = cut off): costAt(field, sim), or costAt(field, px, py, vy, onGround) with the
  *  gravity queue unknown (taken as the strongest pull) */
 function costAt(f, a, py, vy) {
@@ -827,7 +932,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, fifthsAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField,
+	VERSION: 3, reachField, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

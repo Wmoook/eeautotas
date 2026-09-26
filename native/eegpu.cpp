@@ -1007,9 +1007,10 @@ static int cmdSearch(int argc, char** argv) {
 	return 3;
 }
 
-/** eegpu reachtest <level.bin> <reach file> <states.bin> [--gpu=1]: reachFifths (beam.h) of each state (6 doubles: px, py,
- *  speed_y, q0, q1, slippery) on the host and, with --gpu=1, on the GPU: {"n":N,"host":[...],"gpu":[...]|null}
- *  (test/reach.js F: the JS field and the native lookup agree to the fifth) */
+/** eegpu reachtest <level.bin> <reach file> <states.bin> [--gpu=1]: reachFifths and the beam's reachScore (beam.h) of each
+ *  state (6 doubles: px, py, speed_y, q0, q1, slippery) on the host and, with --gpu=1, on the GPU: {"n":N,"host":[...],
+ *  "hostScore":[...],"gpu":[...]|null,"gpuScore":[...]|null} (scores as float bit patterns, -1 for a cut-off state)
+ *  (test/reach.js F: the JS field and the native lookup agree to the fifth, and the scores to the bit) */
 static int cmdReachTest(int argc, char** argv) {
 	if (argc < 5) { fprintf(stderr, "usage: eegpu reachtest <level.bin> <reach file> <states.bin> [--gpu=1]\n"); return 2; }
 	LevelBlob B = readLevel(argv[2]);
@@ -1022,29 +1023,45 @@ static int cmdReachTest(int argc, char** argv) {
 	std::vector<double> in((size_t)n * 6);
 	memcpy(in.data(), raw.data(), (size_t)n * 48);
 	std::vector<int32_t> host(n), dev;
-	for (int i = 0; i < n; i++) { const double* q = &in[(size_t)i * 6]; host[i] = reachFifths(rg.H, q[0], q[1], q[2], (i32)q[3], (i32)q[4], q[5]); }
+	std::vector<float> hostScore(n), devScore;
+	for (int i = 0; i < n; i++) {
+		const double* q = &in[(size_t)i * 6];
+		const RfState st = rfStateOf(rg.H, q[0], q[1], q[2], (i32)q[3], (i32)q[4], q[5]);
+		host[i] = rfFifths(rg.H, st);
+		hostScore[i] = host[i] >= 0 ? reachScore(rg.H, st, q[0], q[1], host[i]) : -1.f;
+	}
 	if (opt(argc, argv, "gpu", "0") == "1") {
 		const int tw = twFor(B.get("tailWords"));
 		Gpu g;
 		if (!g.open(ptxFor(argc, argv, tw))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 		if (!layoutOrError(g, tw)) return 4;
 		ReachField R;
-		cu::Buf din, dout;
-		if (!rg.upload(R, err) || !din.upload(in.data(), 8 * in.size()) || !dout.alloc(4ull * std::max(1, n))) { printf("{\"error\":%s}\n", jsonStr(err.empty() ? cu::lastError : err).c_str()); return 4; }
+		cu::Buf din, dout, dscore;
+		if (!rg.upload(R, err) || !din.upload(in.data(), 8 * in.size()) || !dout.alloc(4ull * std::max(1, n)) || !dscore.alloc(4ull * std::max(1, n))) { printf("{\"error\":%s}\n", jsonStr(err.empty() ? cu::lastError : err).c_str()); return 4; }
 		cu::CUfunction f = g.fn("reachTest_" + std::to_string(tw));
 		const double* pin = (const double*)(uintptr_t)din.p;
 		i32* pout = (i32*)(uintptr_t)dout.p;
+		float* pscore = (float*)(uintptr_t)dscore.p;
 		i32 nn = n;
-		void* args[] = { &R, &pin, &nn, &pout };
+		void* args[] = { &R, &pin, &nn, &pout, &pscore };
 		if (!f || cu::cuLaunchKernel(f, (n + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, args, nullptr) || cu::cuCtxSynchronize()) { printf("{\"error\":\"reachTest kernel failed\"}\n"); return 5; }
 		dev.resize(n);
+		devScore.resize(n);
 		cu::cuMemcpyDtoH_v2(dev.data(), dout.p, 4ull * n);
+		cu::cuMemcpyDtoH_v2(devScore.data(), dscore.p, 4ull * n);
 	}
+	// (a float as the integer of its bits: exact in JSON, compared bit for bit)
+	const auto bits = [](float x) { uint32_t u; memcpy(&u, &x, 4); return std::to_string(u); };
 	std::string o = "{\"n\":" + std::to_string(n) + ",\"host\":[";
 	for (int i = 0; i < n; i++) { if (i) o += ','; o += std::to_string(host[i]); }
+	o += "],\"hostScore\":[";
+	for (int i = 0; i < n; i++) { if (i) o += ','; o += bits(hostScore[i]); }
 	o += "],\"gpu\":";
 	if (dev.empty()) o += "null";
 	else { o += '['; for (int i = 0; i < n; i++) { if (i) o += ','; o += std::to_string(dev[i]); } o += ']'; }
+	o += ",\"gpuScore\":";
+	if (devScore.empty()) o += "null";
+	else { o += '['; for (int i = 0; i < n; i++) { if (i) o += ','; o += bits(devScore[i]); } o += ']'; }
 	o += "}\n";
 	fputs(o.c_str(), stdout);
 	return 0;

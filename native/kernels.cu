@@ -5,7 +5,7 @@
 //   twins_<TW>: the search's twin table (the systematic variants that play like a lower one, search.h twinBits)
 //   stateSize_<TW>: the sizes of State<TW> and the kernels' parameter structs on the device (the host checks that the
 //   layouts agree), and the reach file version (3)
-//   reachTest_<TW>: reachFifths (beam.h) for a list of states (test/reach.js F: the JS and the GPU agree)
+//   reachTest_<TW>: reachFifths and reachScore (beam.h) for a list of states (test/reach.js F: the JS and the GPU agree)
 // <TW> = capacity of the state's variable tail in words (8, 32, 128, 512); the host picks the smallest that fits.
 #include "eecore.h"
 #include "search.h"
@@ -210,8 +210,9 @@ __device__ __forceinline__ void beamExpandParent(const BeamParams& p, const i32 
 				const float walk = p.goalDist ? goalScore(p, p.L, cx, cy) : 1e6f;
 				float gd = walk, ck = walk;
 				if (p.reach.on) {
-					const i32 own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
-					gd = own >= 0 ? reachScore(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery, own) : 1e4f + walk;
+					const RfState st = rfStateOf(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
+					const i32 own = rfFifths(p.reach, st);
+					gd = own >= 0 ? reachScore(p.reach, st, s.px, s.py, own) : 1e4f + walk;
 					ck = own >= 0 ? (float)own / 5.f : gd;
 				}
 				if (p.goalWeight > 0) sc -= p.goalWeight * gd;
@@ -527,7 +528,8 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 ticks, u64 seed, unsigned long long* out) { benchBody<TW>(L, state0, ticks, seed, out); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
 	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
 	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; } \
-	extern "C" __global__ void __launch_bounds__(128) reachTest_##TW(ReachField R, const double* in, i32 n, i32* out) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) { const double* q = in + (size_t)i * 6; out[i] = reachFifths(R, q[0], q[1], q[2], (i32)q[3], (i32)q[4], q[5]); } }
+	extern "C" __global__ void __launch_bounds__(128) reachTest_##TW(ReachField R, const double* in, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; \
+		if (i < n) { const double* q = in + (size_t)i * 6; const RfState st = rfStateOf(R, q[0], q[1], q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifths(R, st); score[i] = out[i] >= 0 ? reachScore(R, st, q[0], q[1], out[i]) : -1.f; } }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)
 #ifndef EE_ONLY_TW
 #define EE_ONLY_TW 8

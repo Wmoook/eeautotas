@@ -5,7 +5,9 @@
 //              identically and writes it again byte for byte; a crafted file (several records per cell, layer-1 numbers)
 //              keeps the numbers EEO uses. Levels: every palette block with every rotation / number, random levels with
 //              backgrounds, signs, labels, world portals and NPCs.
-//   checks     no start, no trophy, walled in, only through portals, several spawns; bad input is refused clearly
+//   checks     no start, no trophy, walled in, only through portals, several spawns, only through a death; bad input is
+//              refused clearly; the physics check of the page's checks (from the cache, else in a worker thread: check()
+//              answers at once, the page asks again; the "No way up" note; the cache named by the model's fingerprint)
 //   app        the page's script parses; the HTTP API (in-process server, temp data folder): the page, blocks, eelvl,
 //              parse, check, solve refusals, a job from a route (Watch / Optimize)
 //   passes     the "every move" pass ladder (src/editor.js passCells / passSeconds / nextPass) and the whole search
@@ -227,6 +229,43 @@ function checksSection() {
 	check('a trophy reachable only through a portal: a note, not a problem', r.problems.length === 0 && r.reach === 'portals' && r.notes.some((s) => /portals/.test(s)), `${r.reach} ${r.notes.join(' ')}`);
 	r = ED.check(lv([[2, 8, 255], [4, 8, 255], [12, 8, 121]]));
 	check('two spawn points: the start after /reset (the second one) and a note', JSON.stringify(r.start) === '[4,8]' && r.notes.some((s) => /2 spawn points/.test(s)), JSON.stringify(r));
+	// a death as a way to move: the start (the second spawn after /reset) walled in with a curse, the trophy by the first
+	// spawn: the curse kills, EE respawns the ball at the next spawn of its rotation
+	const wall = [];
+	for (let y = 1; y <= 8; y++) wall.push([7, y, 9]);
+	r = ED.check(lv([[2, 8, 255], [11, 8, 255], [5, 8, 121], [14, 8, 421, 1], ...wall]));
+	check('a trophy reachable only through a death (2 spawn points, a curse): open, not "walled in"', r.problems.length === 0 && r.reach === 'open', `${r.reach} ${JSON.stringify(r.problems)}`);
+	r = ED.check(lv([[2, 8, 255], [11, 8, 255], [5, 8, 121], ...wall]));
+	check('... and without the curse (no way to die): walled in', r.problems.some((q) => q.code === 'unreachable'), JSON.stringify(r.problems));
+}
+// ---------------------------------------------------------------- the page's physics check (never on the server's thread)
+async function physicsCheckSection() {
+	section('the physics check of the page\'s checks: from the cache, else built in a worker thread (the page asks again)');
+	const rnd = rngOf(5);
+	const W = 200, H = 200, cells = room(W, H);
+	for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (rnd() < 0.08) cells.push([x, y, rnd() < 0.7 ? 9 : [4, 2, 361, 1052][Math.floor(rnd() * 4)]]);
+	cells.push([100, 3, 121], [3, H - 2, 255]);
+	const big = ED.eelvlOf({ name: 'sparse 200', width: W, height: H, cells });
+	let t0 = Date.now();
+	let r = ED.check(big);
+	const ms = Date.now() - t0;
+	// (a timer set now fires on time: the build runs on another thread)
+	t0 = Date.now();
+	await new Promise((res) => setTimeout(res, 10));
+	const late = Date.now() - t0 - 10;
+	check('a 200 x 200 level: check() answers at once, the physics check runs in a worker thread (pending)', r.physicsPending === true && ms < 2000 && late < 500, `${ms} ms, a 10 ms timer ${late} ms late, pending ${r.physicsPending}`);
+	for (t0 = Date.now(); r.physicsPending && Date.now() - t0 < 60000; r = ED.check(big)) await new Promise((res) => setTimeout(res, 200));
+	check('... then (asked again, as the page does) the check has its answer: no note for an open level', !r.physicsPending && !r.notes.some((x) => /No way up/.test(x)), `${((Date.now() - t0) / 1000).toFixed(1)} s; ${r.notes.join(' ')}`);
+	// the trophy on a ledge two tiles above any jump: the note, with the highest row the ball gets to
+	const hi = room(20, 10);
+	for (let x = 8; x <= 12; x++) hi.push([x, 3, 9]);
+	hi.push([10, 2, 121], [3, 8, 255]);
+	const hiBuf = ED.eelvlOf({ name: 'way too high', width: 20, height: 10, cells: hi });
+	for (t0 = Date.now(), r = ED.check(hiBuf); r.physicsPending && Date.now() - t0 < 30000; r = ED.check(hiBuf)) await new Promise((res) => setTimeout(res, 100));
+	check('a trophy out of reach: the "No way up" note (the highest row the ball gets to)', r.notes.some((x) => /No way up/.test(x) && /no higher than row 4; the trophy is in row 2/.test(x)), r.notes.join(' '));
+	// the cache: named by the model's fingerprint (a changed model never reads an old verdict)
+	const files = fs.readdirSync(path.join(C.DATA, 'editor')).filter((f) => /^reach_/.test(f));
+	check('the cache files carry the model\'s fingerprint (reach_<level>_v3_<model>.json / .bin)', files.length >= 4 && files.every((f) => /^reach_[0-9a-f]{16}_v3_[0-9a-f]{10}\.(json|bin)$/.test(f)), files.join(', '));
 }
 
 // ---------------------------------------------------------------- the app (the page, the HTTP API)
@@ -593,9 +632,14 @@ async function cpuSection() {
 	let ev = st.result ? C.evaluate(platLevel, Uint8Array.from(st.result.inputs, (c) => c.charCodeAt(0) - 48)) : null;
 	check('no NVIDIA GPU: a route from the CPU search, verified, route.eetas', st.stage === 'found' && st.result.strategy === 'random runs (CPU)' && ev && ev.runTicks === st.result.runTicks &&
 		!!ED.solveFile('route.eetas') && st.elapsed >= 3.5 && st.elapsed < 15, `${st.stage} ${st.result ? `${st.result.time} (${st.result.ticks} ticks) after ${st.result.foundAfter} s` : st.message}; ${st.elapsed.toFixed(1)} s`);
+	const u0 = await goexplore(hiFile, ['--workers=1', '--seconds=2', '--prune=0']);
+	check('--prune=0 (the editor\'s check of a level the field rules out): it searches, the ruled-out states behind (reach cost 1e4 + walking distance)', u0.done && u0.done.end === 'time' && u0.done.ticks > 0 &&
+		u0.results.length === 0, u0.summary);
 	ED.start({ eelvlB64: hiBuf.toString('base64'), seconds: 5, workers: 1 }, { available: false, why: 'test: no GPU' });
 	st = await waitDone(20000);
-	check('no NVIDIA GPU, a trophy out of reach: the physics verdict, at once', st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed < 4, `${st.elapsed.toFixed(1)} s: ${st.message}`);
+	check('no NVIDIA GPU, a trophy out of reach: the random runs check it without the physics check (their time, at most a minute), then the physics verdict',
+		st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed >= 4 && st.elapsed < 15 && st.log.some((x) => /checking that with random runs \(CPU\), without the physics check/.test(x)),
+		`${st.elapsed.toFixed(1)} s: ${st.message}`);
 
 	// next to the eegpu stand-in: the CPU's first route bounds the exploration's next pass, and the CPU search stops
 	// when the GPU strategies have ended with a route
@@ -702,7 +746,7 @@ async function gpuSection() {
 			`${r.text}; every move: ${XF ? `${XF.state}${XF.found ? ` ${XF.found.time}` : ''}` : 'none'}`);
 	}
 	// no route, proven: the trophy on a ledge two tiles above any jump (the physics check finds no way up); "every move"
-	// checks it without the physics check (only it runs), and the verdict says where the ball gets
+	// and the random runs check it without the physics check (only they run), and the verdict says where the ball gets
 	cells = room(20, 10);
 	for (let x = 8; x <= 12; x++) cells.push([x, 3, 9]);
 	cells.push([10, 2, 121], [3, 8, 255]);
@@ -710,7 +754,8 @@ async function gpuSection() {
 	if (r) {
 		check('no route, proven: the physics check finds no way up, and the verdict says so (with the highest row the ball gets to)', !r.st.result && r.st.stage === 'not found' && r.st.impossible && r.st.impossible.by === 'physics' &&
 			/cannot be reached/.test(r.st.message) && /no higher than row 4; the trophy is in row 2/.test(r.st.message), r.st.message);
-		check('... "every move" alone, without the prune (a route there would be a model bug)', r.st.strategies.map((q) => q.key).join() === 'explore' && !r.st.log.some((x) => /mistake in the physics model/.test(x)),
+		check('... "every move" and the random runs only, without the prune (a route there would be a model bug)', ['explore', 'explore,goexplore'].includes(r.st.strategies.map((q) => q.key).join()) &&
+			!r.st.log.some((x) => /mistake in the physics model/.test(x)),
 			r.st.strategies.map((q) => `${q.key} ${q.state}`).join(', '));
 	}
 	// no route, not provable by the model (a spike pit 27 tiles wide: far beyond any jump, but the model lets a ball drift
@@ -740,6 +785,7 @@ const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI
 (async () => {
 	roundtripSection();
 	checksSection();
+	await physicsCheckSection();
 	await appSection();
 	await passesSection();
 	await cpuSection();

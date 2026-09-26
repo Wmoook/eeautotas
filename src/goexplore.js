@@ -42,6 +42,8 @@
 //        [--seed=1] [--depth=6000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4] [--mem=<MB per worker; default 1600 / workers, 200 .. 800>] [--maxCells=] [--maxSnaps=]
+//        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
+//        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
 const fs = require('fs');
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -58,7 +60,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 6000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
-	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0 };
+	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1 };
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory (V8 heap, measured): a cell without its snapshot about 260 bytes, a snapshot about 1150; each gets 45% of a
 // worker's --mem
@@ -293,9 +295,18 @@ function explore(L, field, a, seed, ctrl, post) {
 		if (t > deepest) deepest = t;
 	};
 	let end = '';
-	{
-		// the start (the reach field rules it out: no route, a proof; the search ends at once)
+	/** the reach cost of the live state (tiles); -1 = ruled out. With --prune=0 (the editor's check of a level the reach
+	 *  field rules out) nothing is ruled out: a ruled-out state costs 1e4 + its walking distance (behind the others) */
+	const costOf = () => {
 		const rc = RF.costAt(field, sim);
+		if (rc >= 0 || a.prune) return rc;
+		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+		const w = tx >= 0 && ty >= 0 && tx < field.W && ty < field.H ? field.walk[ty * field.W + tx] : RF.CUT;
+		return 1e4 + (w === RF.CUT ? 9999 : w / 5);
+	};
+	{
+		// the start (the reach field rules it out: no route, a proof; the search ends at once, unless --prune=0)
+		const rc = costOf();
 		const k = cellKey();
 		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, tile, ver: 0, gen: 0, used: false };
 		cells.set(k, c);
@@ -391,7 +402,7 @@ function explore(L, field, a, seed, ctrl, post) {
 						break;
 					}
 					if (sim.is_dead) break;
-					const rc = RF.costAt(field, sim);
+					const rc = costOf();
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, node: { up, buf, o, n: s + 1 } };
@@ -446,7 +457,7 @@ async function main() {
 		let deepest = 0, minRc = null;
 		for (const v of stats.values()) { deepest = Math.max(deepest, v.deepest || 0); if (v.minRc !== null && (minRc === null || v.minRc < minRc)) minRc = v.minRc; }
 		say({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
-			picks: total('picks'), bestCost: minRc === null ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined'), workers: a.workers });
+			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined'), workers: a.workers });
 	};
 	const flushNear = () => {
 		if (!nearPending) return;

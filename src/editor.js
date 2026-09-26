@@ -178,54 +178,96 @@ function openTile(L, i) {
 	return (f & F_SOLID) === 0 || (f & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) !== 0;
 }
 /** tiles reachable from (sx, sy): 8-way over open tiles (no corner cutting, like the goal field), and with
- *  `portals` also from an entered portal to every exit of its target */
+ *  `portals` also from an entered portal to every exit of its target; a death (where the ball can die: a killing tile,
+ *  anywhere with a timed killer: curse, zombie, poison with a time, lava) takes it to a checkpoint it touched or, with
+ *  2+ spawn points, to the next spawn of EE's rotation: every spawn */
 function reachFrom(L, sx, sy, portals) {
 	const W = L.width, H = L.height, N = W * H;
 	const seen = new Uint8Array(N);
 	const q = [sy * W + sx];
 	seen[q[0]] = 1;
-	const push = (j) => { if (!seen[j]) { seen[j] = 1; q.push(j); } };
-	while (q.length) {
-		const i = q.pop(), x = i % W, y = Math.floor(i / W);
-		for (let dy = -1; dy <= 1; dy++) {
-			for (let dx = -1; dx <= 1; dx++) {
-				if (!dx && !dy) continue;
-				const nx = x + dx, ny = y + dy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-				const j = ny * W + nx;
-				if (!openTile(L, j) || (dx && dy && (!openTile(L, y * W + nx) || !openTile(L, ny * W + x)))) continue;
-				push(j);
+	const push = (j) => { if (j >= 0 && j < N && !seen[j]) { seen[j] = 1; q.push(j); } };
+	let timed = false;
+	for (let i = 0; i < N; i++) { const t = L.fg[i]; if (((t === 421 || t === 422 || t === 1584) && L.lookup0[i] > 0) || t === 416) { timed = true; break; } }
+	let died = false;
+	for (;;) {
+		while (q.length) {
+			const i = q.pop(), x = i % W, y = Math.floor(i / W);
+			if (!died && (timed || (L.gFlags[L.fg[i]] & 4) !== 0)) died = true;
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const nx = x + dx, ny = y + dy;
+					if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+					const j = ny * W + nx;
+					if (!openTile(L, j) || (dx && dy && (!openTile(L, y * W + nx) || !openTile(L, ny * W + x)))) continue;
+					push(j);
+				}
+			}
+			const t = L.fg[i], s = L.portalSlot[i];
+			if (portals && (t === 242 || t === 381) && s >= 0) {
+				const ex = L.portalsById.get(L.pTarget[s]);
+				if (ex) for (let k = 0; k < ex.n; k++) push((ex.ys[k] >> 4) * W + (ex.xs[k] >> 4));
 			}
 		}
-		const t = L.fg[i], s = L.portalSlot[i];
-		if (portals && (t === 242 || t === 381) && s >= 0) {
-			const ex = L.portalsById.get(L.pTarget[s]);
-			if (ex) for (let k = 0; k < ex.n; k++) push((ex.ys[k] >> 4) * W + (ex.xs[k] >> 4));
-		}
+		// (a death: a checkpoint the ball touched is a tile it reached; the spawns, then on from there)
+		if (!died || L.spawnsX.length < 2) break;
+		for (let k = 0; k < L.spawnsX.length; k++) push(L.spawnsY[k] * W + L.spawnsX[k]);
+		if (!q.length) break;
 	}
 	return seen;
 }
-/** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
- *  search's cache (<data>/editor/reach_<hash>_v3.json), else built here for levels up to 40k tiles (null for bigger ones) */
-const physicsMemo = new Map();
-function physicsOf(buf, level) {
-	const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
-	let r = physicsMemo.get(hash) || C.readJSON(path.join(dir(), `reach_${hash}_v${RF_VERSION}.json`), null);
-	if (!r && level.width * level.height <= 40000) {
-		const f = RF.reachField(level, { explain: true });
-		const sim = new E.EESim(level);
-		sim.reset();
-		r = { v: RF_VERSION, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null };
+/** the physics check's cache per level: <data>/editor/reach_<level hash>_v<RCH version>_<model fingerprint>.json / .bin.
+ *  The fingerprint is of the model's sources (reach.js and the engine it measures its tables with), so a changed rule
+ *  (a fix that makes the model more generous) never meets a verdict or a reach file of the old one. */
+let RF_FP = '';
+function reachFp() {
+	if (!RF_FP) {
+		const h = crypto.createHash('sha1');
+		for (const f of ['reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
+		RF_FP = h.digest('hex').slice(0, 10);
 	}
-	if (r) { physicsMemo.set(hash, r); if (physicsMemo.size > 8) physicsMemo.delete(physicsMemo.keys().next().value); }
-	return r;
+	return RF_FP;
+}
+const levelHashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
+const reachBase = (hash) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}`);
+/** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
+ *  cache (memo, or the search's file); none yet: null, and for a level up to 40k tiles the check starts in a worker
+ *  thread (the newest level asked for; the page asks again while `pending`) */
+const physicsMemo = new Map();
+let physicsNext = null, physicsBusy = false;
+function physicsOf(buf, level) {
+	const hash = levelHashOf(buf);
+	let r = physicsMemo.get(hash) || null;
+	if (!r) { const c = C.readJSON(`${reachBase(hash)}.json`, null); if (c && c.v === RF_VERSION && c.fp === reachFp()) r = c; }
+	if (r) { physicsMemo.set(hash, r); if (physicsMemo.size > 8) physicsMemo.delete(physicsMemo.keys().next().value); return r; }
+	if (level.width * level.height <= 40000) {
+		physicsNext = { buf, hash };
+		if (!physicsBusy) physicsRun();
+		return { pending: true };
+	}
+	return null;
+}
+function physicsRun() {
+	const job = physicsNext;
+	physicsNext = null;
+	if (!job) { physicsBusy = false; return; }
+	physicsBusy = true;
+	// (a failed check: no note, and not asked again for this level; a search says why)
+	reachInfo(job.buf, job.hash).then((r) => { physicsMemo.set(job.hash, r); }, () => { physicsMemo.set(job.hash, { failed: true }); }).then(physicsRun);
 }
 /** the "no way up" note (null: none): the physics check proves the trophy out of reach */
 function noWayNote(ph) {
-	if (!ph || ph.mode !== 'physics' || ph.startCost >= 0) return null;
+	if (!ph || ph.pending || ph.failed || ph.mode !== 'physics' || ph.startCost >= 0) return null;
 	const ex = ph.explain;
 	const high = ex && ex.row >= 0 && ex.trophyRow >= 0 && ex.row > ex.trophyRow ? ` (the ball's centre gets no higher than row ${ex.row}; the trophy is in row ${ex.trophyRow})` : '';
-	return `No way up: the physics check finds no way from the start to the trophy${high}. A search says so at once.`;
+	return `No way up: the physics check finds no way from the start to the trophy${high}. A search checks that for up to a minute, then says so.`;
+}
+/** the "only through a death" note (null: none): the physics check's only way to the trophy is a death (a respawn at a
+ *  checkpoint or another spawn), which the searches do not follow (they drop dead balls) */
+function deathNote(ph) {
+	if (!ph || ph.pending || ph.failed || !(ph.startCost >= RF.DEATH_TILES)) return null;
+	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls, so they cannot find it.';
 }
 /**
  * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes (with
@@ -270,16 +312,19 @@ function inspect(buf, opts) {
 		}
 	}
 	if (level.multiTargetPortals) notes.push('Some portals have several exits: EE picks one at random, so the route may need a few tries in EEO.');
+	let physicsPending = false;
 	if (opts && opts.physics && start && trophies.length && reach !== 'none') {
-		const n = noWayNote(physicsOf(buf, level));
-		if (n) notes.push(n);
+		const ph = physicsOf(buf, level);
+		physicsPending = !!(ph && ph.pending);
+		for (const n of [noWayNote(ph), deathNote(ph)]) if (n) notes.push(n);
 	}
-	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json };
+	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json, physicsPending };
 }
-/** inspect() for the page: no engine objects */
+/** inspect() for the page: no engine objects (physicsPending: the physics check runs in a worker thread; ask again) */
 function check(buf) {
 	const r = inspect(buf, { physics: true });
-	return { problems: r.problems, notes: r.notes, start: r.start, noSpawn: r.noSpawn, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height };
+	return { problems: r.problems, notes: r.notes, start: r.start, noSpawn: r.noSpawn, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height,
+		physicsPending: r.physicsPending };
 }
 
 // ---------------------------------------------------------------- the route search (one at a time)
@@ -315,7 +360,7 @@ const STRATEGIES = {
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1'] },
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : [])] },
 };
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
 /** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
@@ -458,9 +503,9 @@ function start(b, gpu, test) {
 	const cpuDepth = Math.max(100, Math.min(20000, Math.round(+b.depth || 6000)));
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
-	const levelHash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
+	const levelHash = levelHashOf(buf);
 	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
-		reach: path.join(d, `reach_${levelHash}_v${RF_VERSION}.bin`) };
+		reach: `${reachBase(levelHash)}.bin` };
 	fs.writeFileSync(files.eelvl, buf);
 	if (!noGpu) fs.writeFileSync(files.bin, G.levelBlob(ins.level));
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
@@ -484,7 +529,7 @@ function start(b, gpu, test) {
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
 	// strategies
 	building = true;
-	const ready = Promise.all([reachInfo(buf, levelHash, noGpu ? null : files.reach), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
+	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
 	ready.then(([rf, toolWhy]) => launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide), (e) => {
 		building = false;
 		S.stage = 'error'; S.running = false;
@@ -502,7 +547,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (!cur) return;
 	if (S.halted) { S.stage = S.result ? 'found' : 'stopped'; finish(); return; }
 	const noWayUp = rf.mode === 'physics' && rf.startCost < 0;
-	S.physics = { mode: rf.mode, startCost: rf.startCost < 0 ? null : Math.round(rf.startCost * 10) / 10, noWayUp, explain: rf.explain || null };
+	S.physics = { mode: rf.mode, startCost: rf.startCost < 0 ? null : Math.round(rf.startCost * 10) / 10, noWayUp, explain: rf.explain || null, viaDeath: !!deathNote(rf) };
 	if (noGpu) {
 		which = which.filter((k) => STRATEGIES[k].cpu);
 		S.strategies = S.strategies.filter((q) => q.cpu);
@@ -512,55 +557,67 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 			note(S.message); cur = null; save(); return;
 		}
 	}
-	// no way up (the physics check proves the trophy out of reach): only "every move", without the prune (with it the start
-	// state itself is cut), for at most a minute: a route found there would be a bug in the model (model_miss.json)
-	if (noWayUp && !noGpu) {
-		which = ['explore'];
-		S.strategies = S.strategies.filter((q) => q.key === 'explore');
+	// no way up (the physics check proves the trophy out of reach): only "every move" and the random runs, without the
+	// physics check (with it the start state itself is cut), for at most a minute: a route found there would be a bug in
+	// the model (model_miss.json)
+	if (noWayUp) {
+		which = which.filter((k) => k === 'explore' || k === 'goexplore');
+		S.strategies = S.strategies.filter((q) => q.key === 'explore' || q.key === 'goexplore');
 		S.seconds = Math.min(S.seconds, 60);
 	}
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
+	cur.opts.noWayUp = noWayUp;
 	S.stage = 'starting';
 	if (noGpu && !S.searchStarted) S.searchStarted = Date.now();   // (the CPU alone: the search's clock from its start)
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${S.width} states per tick`}, up to ${S.seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu && which.includes('goexplore') ? ` (${cur.opts.workers} CPU thread${cur.opts.workers > 1 ? 's' : ''})` : ''));
-	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking with ${noGpu ? 'random runs' : 'every move, without the physics check'})`);
+	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
+	if (S.physics.viaDeath) note(deathNote(rf));
 	save();
 	kids = which.map((k, n) => launch(n));
 }
 /** the note of a search the CPU runs alone (why: the reason the GPU does not) */
 const cpuOnlyText = (why, workers, guide) => `No GPU search: ${why}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
 	`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.`;
-/** the reach field of a level (.eelvl bytes) for a search: {mode, startCost (tiles; -1 = cut off), explain}, and its
- *  RCH3 file for eegpu at `file` (null: not needed). Built in a worker thread (a big level takes seconds) and cached
- *  next to it (<data>/editor/reach_<level hash>_v3.bin / .json; the newest few kept). */
-function reachInfo(buf, hash, file) {
-	const meta = path.join(dir(), `reach_${hash}_v${RF_VERSION}.json`);
+/** the reach field of a level (.eelvl bytes, its hash) for a search and the page's check: {v, fp, mode, startCost (tiles;
+ *  -1 = cut off), explain, ms}, and its RCH3 file for eegpu (reachBase(hash).bin). Built in a worker thread (a big level
+ *  takes seconds; one build per level at a time) and cached next to it (reachBase(hash).json / .bin; the newest few
+ *  kept). */
+const reachBuilds = new Map();
+function reachInfo(buf, hash) {
+	const base = reachBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === RF_VERSION && (!file || fs.existsSync(file))) return Promise.resolve(cached);
-	return new Promise((resolve, reject) => {
+	if (cached && cached.v === RF_VERSION && cached.fp === reachFp() && fs.existsSync(file)) return Promise.resolve(cached);
+	if (reachBuilds.has(hash)) return reachBuilds.get(hash);
+	const p = new Promise((resolve, reject) => {
+		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
 		const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
 			const E = require(d.mods.eesim), EL = require(d.mods.eelvl), RF = require(d.mods.reach);
 			const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
 			const f = RF.reachField(L, { explain: true });
 			const sim = new E.EESim(L); sim.reset();
-			if (d.file) { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(f)); fs.renameSync(d.file + '.tmp', d.file); }
-			parentPort.postMessage({ v: d.v, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms });`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION,
+			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(f)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
+			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms });`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), reach: require.resolve('./reach.js') } } });
 		w.once('message', (r) => {
-			try { C.writeJSON(meta, r); pruneReachCache(); } catch (e) { /* read-only data folder */ }
+			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneReachCache(); } catch (e) { /* read-only data folder */ }
 			resolve(r);
 		});
 		w.once('error', reject);
 		w.once('exit', (code) => { if (code) reject(new Error(`the physics check stopped (exit code ${code})`)); });
 	});
+	reachBuilds.set(hash, p);
+	const done = () => { reachBuilds.delete(hash); };
+	p.then(done, done);
+	return p;
 }
-/** the reach cache: the newest 8 levels' files */
+/** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {
-	const d = dir();
-	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+\.json$/.test(f)).map((f) => ({ f, t: fs.statSync(path.join(d, f)).mtimeMs })).sort((a, b) => b.t - a.t);
-	for (const { f } of fl.slice(8)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+	const d = dir(), fp = reachFp();
+	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+(_[0-9a-f]+)?\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_v${RF_VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
+		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
+	for (const { f } of fl.filter((x, k) => k >= 8 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
 /** why the native tool cannot run this app's searches ('' = it can): its `info` must say it reads the reach file of this
  *  version (an older build refuses every RCH3 file); asked once per build of the tool */
@@ -837,6 +894,8 @@ function finish() {
 			S.message = `No route found: "every move" ran out of new situations by tick ${XE.exhausted.tick.toLocaleString('en-US')}${tries} (positions and speeds told apart to ${XE.exhausted.grain}, ` +
 				'and every gravity, jump and pickup state; the physics check ruled out the rest). That is evidence, not proof: a route that needs pixel-exact moves can hide between merged situations. A longer search tries more.';
 		}
+		// (the model's only way is a death: the searches cannot find it)
+		if (S.physics && S.physics.viaDeath) S.message += ` ${deathNote(S.physics)}`;
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
 	cur = null;
@@ -903,7 +962,9 @@ function closer(ev, n) {
 	const pathPts = [];
 	for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
-	S.closest = { dist, cut, tiles: Math.round((cut ? dist - 1e4 : dist) * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
+	const viaDeath = !cut && dist >= RF.DEATH_TILES;
+	S.closest = { dist, cut, viaDeath, tiles: Math.round((cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist) * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10 };
 	save();
 }
