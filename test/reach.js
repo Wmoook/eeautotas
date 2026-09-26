@@ -3,8 +3,10 @@
 //   physics  hand-made rooms where the answer is known from the engine: a real input sequence reaches the trophy and
 //            every state on the way has a finite cost; or no way exists and the start's cost is -1
 //   bellman  the self-check (every cost equals the best forward move) on random levels
+//   goals    the goals option (explore.js --hunt's time-to-go field): the trophy as the goal gives the default field,
+//            the self-check with goals at their own costs, and maxCost cuts the field without changing what it keeps
 //   jobs     (when src/jobs has jobs) every state of every job's original and best run is reachable
-// usage: node test/reach.js [--only=physics|bellman|jobs]        Exit code 1 if any check fails.
+// usage: node test/reach.js [--only=physics|bellman|goals|jobs]        Exit code 1 if any check fails.
 const fs = require('fs');
 const path = require('path');
 const E = require('../src/eesim.js');
@@ -100,20 +102,65 @@ function physicsSection() {
 	check('a diagonal spike corridor: reachable', startCost(L, f) >= 0 && f.mismatches === 0, startCost(L, f));
 }
 
-function bellmanSection() {
-	section('bellman: the self-check on random levels');
+/** the random levels of the self-checks: {W, H, level} */
+function randomLevels() {
 	let seed = 11; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
 	const ids = [9, 9, 9, 9, 4, 4, 2, 1, 3, 361, 1052, 119, 369, 116, 114, 1518, 23, 43];
-	let bad = 0, levels = 0;
+	const out = [];
 	for (let k = 0; k < 16; k++) {
 		const W = 14 + (k % 4) * 6, H = 10 + (k % 3) * 5, cells = room(W, H);
 		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (rnd() < 0.2) { const id = ids[Math.floor(rnd() * ids.length)]; cells.push(id === 1052 ? [x, y, id, Math.floor(rnd() * 4)] : id === 43 || id === 23 ? [x, y, id, 1] : [x, y, id]); }
 		if (k % 4 === 0) cells.push([2, 2, 242, 0, 1, 2], [W - 3, 2, 242, 0, 2, 1]);
 		cells.push([Math.floor(W / 2), 2, 121], [2, H - 2, 255]);
-		const f = R.reachField(levelOf(W, H, cells), { check: true });
+		out.push({ W, H, level: levelOf(W, H, cells) });
+	}
+	return out;
+}
+
+function bellmanSection() {
+	section('bellman: the self-check on random levels');
+	let bad = 0, levels = 0;
+	for (const { level } of randomLevels()) {
+		const f = R.reachField(level, { check: true });
 		levels++; if (f.mismatches) bad++;
 	}
 	check(`${levels} random levels: every cost equals the best forward move`, bad === 0, `${bad} with mismatches`);
+}
+
+function goalsSection() {
+	section('goals: a field to given tiles at given costs (explore.js --hunt)');
+	const levels = randomLevels();
+	// the trophy tiles as goals at cost 0: the default field, cost for cost
+	let same = 0;
+	for (const { level } of levels) {
+		const trophies = [];
+		for (let i = 0; i < level.fg.length; i++) if (level.fg[i] === 121) trophies.push({ tile: i, cost: 0 });
+		const a = R.reachField(level), b = R.reachField(level, { goals: trophies });
+		if (a.cost.length === b.cost.length && a.cost.every((v, i) => v === b.cost[i]) && a.goals === b.goals) same++;
+	}
+	check(`${levels.length} random levels: the trophy tiles as goals give the default field`, same === levels.length, `${same} the same`);
+	// goals along a random path at decreasing costs (like a reference run's time to go): the self-check, with the goal
+	// tiles not ends of the way; maxCost keeps every cost up to it and cuts the rest to -1
+	let seed = 5; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+	let bad = 0, badCut = 0, cut = 0, kept = 0;
+	for (const { W, H, level } of levels) {
+		const goals = [];
+		for (let k = 0; k < 12; k++) goals.push({ tile: (1 + Math.floor(rnd() * (H - 2))) * W + 1 + Math.floor(rnd() * (W - 2)), cost: Math.floor(rnd() * 40) / 2 });
+		const f = R.reachField(level, { goals, check: true });
+		if (f.mismatches) bad++;
+		let top = 0;
+		for (const v of f.cost) if (v > top) top = v;
+		const maxCost = top / 2;
+		const g = R.reachField(level, { goals, maxCost, check: true });
+		let wrong = g.mismatches;
+		for (let i = 0; i < f.cost.length; i++) {
+			if (f.cost[i] >= 0 && f.cost[i] <= maxCost) { kept++; if (g.cost[i] !== f.cost[i]) wrong++; }
+			else { cut++; if (g.cost[i] !== -1) wrong++; }
+		}
+		if (wrong) badCut++;
+	}
+	check(`${levels.length} random levels, 12 goals each: every cost equals the best forward move or its goal's own cost`, bad === 0, `${bad} with mismatches`);
+	check(`maxCost = half the highest cost: the same costs up to it (${kept} states), -1 beyond (${cut})`, badCut === 0 && kept > 0 && cut > 0, `${badCut} levels wrong`);
 }
 
 function jobsSection() {
@@ -136,6 +183,7 @@ function jobsSection() {
 
 if (!ONLY || ONLY === 'physics') physicsSection();
 if (!ONLY || ONLY === 'bellman') bellmanSection();
+if (!ONLY || ONLY === 'goals') goalsSection();
 if (!ONLY || ONLY === 'jobs') jobsSection();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
