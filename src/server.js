@@ -436,6 +436,10 @@ function main() {
 	process.on('SIGINT', shutdown);
 	process.on('SIGTERM', shutdown);
 	process.on('SIGHUP', shutdown);   // Windows: the console window was closed
+	// the app's own thread above normal priority: with every core busy (Find a route's CPU search, a job's workers, other
+	// programs) the page, its polling and Stop waited tens of seconds for the server. The tools it starts keep the normal
+	// priority (Windows gives a child of an above-normal process the normal class).
+	try { os.setPriority(os.constants.priority.PRIORITY_ABOVE_NORMAL); } catch (e) { /* not allowed: normal */ }
 	server.listen(PORT, '127.0.0.1', () => {
 		const url = `http://localhost:${PORT}/`;
 		console.log(`[app] EE Auto TAS running at ${url} (CPU: ${C.cpuName(CPU_MODEL)}, ${os.cpus().length} threads)`);
