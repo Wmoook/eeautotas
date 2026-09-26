@@ -18,7 +18,7 @@ struct BeamChild {
 	u32 parent;     // index in the parent layer
 	u64 hash;       // state hash (noCoins as configured)
 	u8 option;      // 0..17 (search.h option())
-	u8 flags;       // 1 dead, 2 finished, 4 rejoined (j in `rejoin`), 8 broken
+	u8 flags;       // 1 dead, 2 finished, 4 rejoined (j in `rejoin`), 8 broken, 16 a twin of a lower option (not simulated)
 	u16 bucket;     // spatial bucket id (low bits of the tile position and velocity signs), for the diversity cap
 	i32 rejoin;     // reference tick j of an exact rejoin (flags & 4), else -1
 };
@@ -88,6 +88,7 @@ struct BeamParams {
 	const float* rX; const float* rY; const float* rSX; const float* rSY; i32 nRef;
 	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 	ReachField reach;                  // when on: the score's and the closest attempt's distance (instead of goalDist)
+	unsigned long long* stats;         // expand: [0] ticks simulated, [1] children skipped as twins of a lower option (flag 16)
 };
 
 /** Past the guide: the best "closeness" to a state of the run on this tile, favouring later ticks: states that are

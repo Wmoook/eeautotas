@@ -5,7 +5,8 @@
 // Starts from the reference's state after T ticks (--ref), or from the level start (the editor). Prints JSON lines:
 // progress, results (kind "rejoin": an exact rejoin with the reference at tick j, saving ticks; kind "finish": the
 // level is finished), and done. Every result is re-checked on the CPU before it is printed. Inputs are printed as
-// .eetas characters ('0' + mask).
+// .eetas characters ('0' + mask). "ticks" counts the ticks simulated; "twins" the children not simulated because a
+// lower option gives the same state (search.h canonOption).
 #pragma once
 #include <queue>
 #include <unordered_map>
@@ -230,11 +231,13 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	const uint32_t maxKids = (uint32_t)K * 18;
 	uint32_t hCap = 1024; while (hCap < 2 * maxKids) hCap <<= 1;
 	const int NBINS = 4096;
-	cu::Buf dhK, dhB, dslot, dwin, dmm, dhist, dbc, dnpick, dover, dnover, dres, dnres;
+	cu::Buf dhK, dhB, dslot, dwin, dmm, dhist, dbc, dnpick, dover, dnover, dres, dnres, dstats;
 	const uint32_t resCap = 4096;
 	up = dhK.alloc(8ull * hCap) && dhB.alloc(8ull * hCap) && dslot.alloc(4ull * maxKids) && dwin.alloc(maxKids) && dmm.alloc(8) &&
-		dhist.alloc(4ull * NBINS) && dbc.alloc(4ull * 65536) && dnpick.alloc(4) && dover.alloc(4ull * maxKids) && dnover.alloc(4) && dres.alloc(4ull * resCap) && dnres.alloc(4);
+		dhist.alloc(4ull * NBINS) && dbc.alloc(4ull * 65536) && dnpick.alloc(4) && dover.alloc(4ull * maxKids) && dnover.alloc(4) && dres.alloc(4ull * resCap) && dnres.alloc(4) &&
+		dstats.alloc(16);
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	cu::cuMemsetD8_v2(dstats.p, 0, 16);
 	BeamSel Q;
 	memset(&Q, 0, sizeof Q);
 	Q.kids = (const BeamChild*)(uintptr_t)dout.p; Q.hKeys = (u64*)(uintptr_t)dhK.p; Q.hBest = (u64*)(uintptr_t)dhB.p; Q.hMask = hCap - 1;
@@ -260,6 +263,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	P.nRef = (i32)fX.size();
 	P.out = (BeamChild*)(uintptr_t)dout.p;
 	P.pick = (const u32*)(uintptr_t)dpick.p;
+	P.stats = (unsigned long long*)(uintptr_t)dstats.p;
 	ReachGpu reachGpu;
 	{
 		const std::string rf = opt(argc, argv, "reach", "");
@@ -273,7 +277,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	int nParents = 1;
 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;
 	int bestSaving = 0, finishLayer = -1;
-	uint64_t ticks = 0;
+	uint64_t ticks = 0, matTicks = 0, twins = 0;   // expand ticks (from the kernel: twins of a lower option are skipped), materialize ticks
 	double lastProgress = -10;
 	float bestScore = -1e30f;
 	// the inputs of a child of layer d (parent p, option o): walk the lineage back to the start state
@@ -307,7 +311,11 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		if (cu::cuLaunchKernel(fexp, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a1, nullptr) || cu::cuCtxSynchronize()) {
 			printf("{\"error\":\"beam expand failed\"}\n"); return 5;
 		}
-		ticks += (uint64_t)nParents * 18;
+		{
+			unsigned long long st[2] = { 0, 0 };
+			cu::cuMemcpyDtoH_v2(st, dstats.p, 16);
+			ticks = st[0] + matTicks; twins = st[1];
+		}
 		if (P.closest) {
 			unsigned long long cl = ~0ull;
 			cu::cuMemcpyDtoH_v2(&cl, dclose.p, 8);
@@ -407,18 +415,18 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		if (cu::cuLaunchKernel(fmat, (nParents + 127) / 128, 1, 1, 128, 1, 1, 0, nullptr, a2, nullptr) || cu::cuCtxSynchronize()) {
 			printf("{\"error\":\"beam materialize failed\"}\n"); return 5;
 		}
-		ticks += nParents;
+		matTicks += (uint64_t)nParents; ticks += (uint64_t)nParents;
 		std::swap(cur, nxt);
 		if (elapsed() - lastProgress > 1.0) {
 			lastProgress = elapsed();
-			printf("{\"ev\":\"progress\",\"layer\":%d,\"tick\":%d,\"states\":%d,\"bestScore\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"bestSaving\":%d,\"finish\":%d}\n",
-				d + 1, from + d + 1, nParents, bestScore, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), bestSaving, finishLayer);
+			printf("{\"ev\":\"progress\",\"layer\":%d,\"tick\":%d,\"states\":%d,\"bestScore\":%.1f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"twins\":%llu,\"bestSaving\":%d,\"finish\":%d}\n",
+				d + 1, from + d + 1, nParents, bestScore, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), (unsigned long long)twins, bestSaving, finishLayer);
 			fflush(stdout);
 		}
 	}
 	if (finishLayer < 0) nearest.print(elapsed(), true, prefix, from0, inputsOf);
-	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"bestSaving\":%d,\"finish\":%d}\n",
-		g.json().c_str(), d, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), bestSaving, finishLayer);
+	printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"bestSaving\":%d,\"finish\":%d,\"twins\":%llu}\n",
+		g.json().c_str(), d, elapsed(), (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), bestSaving, finishLayer, (unsigned long long)twins);
 	free(start);
 	return 0;
 }

@@ -48,24 +48,28 @@ struct ExploreParams {
 	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
 	i32 prune;
+	unsigned long long* stats;         // [0] ticks simulated, [1] children skipped as twins of a lower option (search.h canonOption)
 };
 
 /** The per-layer claim of the exploration (after exploreExpand wrote every child's cell and priority): a cell new in
  *  this layer goes to the child with the lowest priority, whatever order the GPU ran them in. The visited-cell table
  *  holds the cell (bits 12.. of the key) and the layer that first saw it (bits 1..11, mod 2048); cellBest the winning
- *  priority of that layer. */
+ *  priority of that layer. An over-full layer keeps exactly `cap` winners, those with the lowest (priority, candidate
+ *  index): the host finds the cut by a radix select (explorehost.h claimCut, the counting kernel's histograms). */
 struct ExploreClaim {
 	u64* cells; u64* cellBest; u32 mask;
 	const u64* candKey; const u64* candPrio; u32* candSlot; u32 nCand; u32 layer;
 	u32* out; u32* nOut; u32 outCap;
-	u32* nWin; u32* hist; u32 thrBin;   // over-full layers: winners with a priority bin above thrBin are left out,
-	u32 thrSub, subBin;                // and in bin thrBin those with a sub-bin >= thrSub; subBin != ~0: count sub-bins of that bin
+	u32* nWin; u32* hist;
+	u64 thr; u32 thrIdx;               // the take: winners with a priority above thr, or at thr with an index >= thrIdx, are left out (~0, 0: none)
+	u64 selHi; u32 selShift, selBits;  // selShift != ~0: count the selBits bits at selShift of the key among the winners with (key >> (selShift + selBits)) == selHi
+	u32 selIdx;                        // the key: 0 the priority, 1 the candidate index (of the winners with priority thr)
+	u32* nLost;                        // children dropped because their cell found no slot (64 probes), counted
 };
 #define EE_SLOT_DROP 0xffffffffu
 #define EE_SLOT_REST 0xfffffffeu
-/** the priority's histogram bin (the top 12 bits of its 31-bit head) */
+/** the priority's histogram bin (the top 12 bits of its 31-bit head; priorities are below 2^63) */
 EE_HD u32 prioBin(u64 prio) { return (u32)(prio >> 51) & 4095u; }
-EE_HD u32 prioSub(u64 prio) { return (u32)(prio >> 39) & 4095u; }
 
 /** fine: px / vx resolution where corner clips can still happen; coarse (coarseRow and below): px x cqx, vx x cqv */
 EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, bool fine, double qy, double qvy, double cqx, double cqv) {
