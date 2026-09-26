@@ -5,8 +5,9 @@
 // from the tile's middle. Rising costs budget and the budget comes from physics (the numbers are eeo-tas measurements
 // with the exact engine; margins keep the model optimistic):
 //   - standing on a floor (a solid block, one-way, half block or door under the centre's tile, or a ledge under a
-//     neighbouring open column) in a tile with gravity: a jump rises 63.42 px = 7 units (floor(63.42 / 8)), so the
-//     box stands on 3-tile ledges but never on 4-tile ones (64 px); 8 units in levels with half blocks (8 px steps);
+//     neighbouring open column) in a tile with gravity: a jump rises 63.42 px = 8 units (rounded up, like every budget
+//     here: the centre does enter the 4th row up; the model lets the box stand on 4-tile ledges, the game does not: an
+//     optimistic model may allow too much, never too little); 9 units in levels with half blocks (8 px steps);
 //   - the landing-tick jump (the "arrow ground jump"): a floor under a no-jump tile (dots, arrows, liquids, ladders)
 //     reached by a fall of 15+ tiles still jumps, up to 83 px: 11 units;
 //   - up arrows: they also bounce a falling ball back (a trampoline), so up to 44 units whatever the column;
@@ -41,7 +42,7 @@ const TROPHY = 121;
 const WILD_EFFECTS = new Set([417, 418, 453, 461, 1517]);
 const PROTECTION = 420;
 const PX_GRAVITY = 2 / 7.752;       // px/tick^2 of normal gravity (GRAVITY / physics_variable_multiplyer)
-const JUMP_UNITS = 7;               // a standing jump: the box rises 63.42 px
+const JUMP_UNITS = 8;               // a standing jump: the box rises 63.42 px (rounded up: the centre enters the 4th row up)
 const LAND_UNITS = 11;              // the landing-tick jump through a no-jump tile: up to 83 px
 const LAND_FALL_TILES = 15;         // ... after a fall of 243+ px
 // the centre's apex above the column's top edge (px) by the column height, from rest holding up (measured)
@@ -287,7 +288,7 @@ function reachField(level, opts) {
  *  ground or not; like the GPU (native/beam.h reachBudget) */
 function budgetAt(f, i, cy, vy, onGround) {
 	const row = Math.floor(i / f.W), top = vy < 0 ? cy - (vy * vy) / (2 * f.g) : cy;
-	let b = Math.min(f.B - 1, Math.max(0, Math.floor((row * 16 + 8 - top) / 8)));
+	let b = Math.min(f.B - 1, Math.max(0, Math.ceil((row * 16 + 8 - top) / 8 - 1e-9)));   // (rounded up: optimistic)
 	if (onGround && f.refresh[i] > b) b = f.refresh[i];
 	if (f.cls[i] !== C_NORMAL && f.own[i] > b) b = f.own[i];
 	return b;

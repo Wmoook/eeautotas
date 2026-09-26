@@ -33,7 +33,7 @@ struct ReachField {
 /** the budget of a ball in tile i (row `row`) whose centre can rise to `top` px (src/reach.js budgetAt) */
 EE_HD i32 reachBudget(const ReachField& R, i32 i, i32 row, float top, bool rising, bool onGround) {
 	(void)rising;
-	i32 b = (i32)floorf(((float)(row * 16 + 8) - top) / 8.f);
+	i32 b = (i32)ceilf(((float)(row * 16 + 8) - top) / 8.f - 1e-6f);   // (rounded up: optimistic)
 	if (b < 0) b = 0;
 	if (b > R.B - 1) b = R.B - 1;
 	if (onGround && b < (i32)R.refresh[i]) b = R.refresh[i];

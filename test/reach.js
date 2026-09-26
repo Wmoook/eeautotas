@@ -54,12 +54,21 @@ function physicsSection() {
 	let route = findJump(L, 200);
 	let w = route ? walk(L, f, route) : null;
 	check('a 3-tile ledge: a real jump finishes and every state on the way is reachable', route && w.finished && w.cut === 0 && f.mismatches === 0, route ? `${route.length} ticks, ${w.cut} cut, ${f.mismatches} mismatches` : 'no route by simple jumps');
-	// the same ledge 4 tiles high: 64 px, out of reach of a jump (63.42 px); the only way to the trophy
+	// the same ledge 5 tiles high: far out of reach of a jump (63.42 px); the only way to the trophy
+	cells = room(20, 12);
+	for (let x = 10; x <= 18; x++) for (let y = 5; y <= 10; y++) cells.push([x, y, 9]);
+	cells.push([14, 4, 121], [3, 10, 255]);
+	L = levelOf(20, 12, cells); f = R.reachField(L, { check: true });
+	check('a 5-tile ledge: the model proves no way (start cost -1), and no simple jump finishes', startCost(L, f) < 0 && !findJump(L, 200) && f.mismatches === 0, startCost(L, f));
+	// a trophy right beside the top of a 3-tile wall, 4 rows up: the centre of a jump just gets into its row (63.42 px of
+	// rise against 55.42 needed), so the model must allow it (an optimistic model never rules out a real route)
 	cells = room(20, 10);
-	for (let x = 10; x <= 18; x++) for (let y = 5; y <= 8; y++) cells.push([x, y, 9]);
-	cells.push([14, 4, 121], [3, 8, 255]);
+	for (let y = 5; y <= 8; y++) cells.push([12, y, 9]);
+	cells.push([11, 4, 121], [3, 8, 255]);
 	L = levelOf(20, 10, cells); f = R.reachField(L, { check: true });
-	check('a 4-tile ledge: the model proves no way (start cost -1), and no simple jump finishes', startCost(L, f) < 0 && !findJump(L, 200) && f.mismatches === 0, startCost(L, f));
+	route = findJump(L, 200);
+	w = route ? walk(L, f, route) : null;
+	check('a trophy 4 rows up beside a wall: a real jump takes it, and the model allows every state on the way', route && w.finished && w.cut === 0 && startCost(L, f) >= 0, route ? `${route.length} ticks, ${w.cut} cut` : 'no route by simple jumps');
 	// a row of dots on the floor with the trophy 3 rows above it: no jumps in dots, and a dot row lifts the centre about
 	// one row (a real search of every input for 400 ticks never finishes either)
 	cells = room(12, 10);

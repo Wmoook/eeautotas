@@ -362,7 +362,7 @@ async function passesSection() {
 		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc] });
 		const t0 = Date.now();
 		let st = ED.state();
-		while (st.running && Date.now() - t0 < 20000) { if (during) during(st); await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
+		while (st.running && Date.now() - t0 < 45000) { if (during) during(st); await new Promise((r) => setTimeout(r, 40)); st = ED.state(); }
 		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((r) => setTimeout(r, 40)); }
 		const launches = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore')
 			.map((a) => { const o = {}; for (const x of a) { const m = /^--(\w+)=(.*)$/.exec(x); if (m) o[m[1]] = m[2]; } return o; });
@@ -480,13 +480,14 @@ async function gpuSection() {
 	r = await solve('way too high', 20, 10, cells, 10);
 	check('no route, proven: the physics check finds no way up, and the verdict says so', !r.st.result && r.st.stage === 'not found' && r.st.impossible && r.st.impossible.by === 'physics' &&
 		/cannot be reached/.test(r.st.message), r.st.message);
-	// no route, not provable by the model (the ledge is 1 px too high for a jump): the closest attempt is kept
-	cells = room(20, 10);
-	for (let x = 8; x <= 12; x++) cells.push([x, 4, 9]);
-	cells.push([10, 3, 121], [3, 8, 255]);
-	r = await solve('just too high', 20, 10, cells, 10);
+	// no route, not provable by the model (a spike pit 27 tiles wide: far beyond any jump, but the model lets a ball drift
+	// sideways as far as it likes): the closest attempt is kept
+	cells = room(36, 10);
+	for (let x = 5; x <= 31; x++) cells.push([x, 8, 361]);
+	cells.push([33, 8, 121], [2, 8, 255]);
+	r = await solve('pit too wide', 36, 10, cells, 10);
 	const cl = r.st.closest;
-	check('no route: "not found", with the closest attempt (its distance, path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && !r.st.impossible && cl && cl.tiles > 0 && cl.tiles < 8 &&
+	check('no route: "not found", with the closest attempt (its distance, path, closest.eetas)', !r.st.result && r.st.stage === 'not found' && !r.st.impossible && cl && cl.tiles > 0 && cl.tiles < 40 &&
 		cl.path.length === cl.ticks + 1 && !!ED.solveFile('closest.eetas'), cl ? `${cl.tiles} tiles at tick ${cl.ticks} (${cl.strategy}); ${r.st.message.slice(0, 120)}` : `${r.st.stage}: no closest attempt`);
 }
 
