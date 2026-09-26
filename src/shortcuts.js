@@ -251,7 +251,9 @@ async function main() {
 	const cost = new Float64Array(n + 1).fill(Infinity), via = new Array(n + 1).fill(null);
 	cost[0] = 0;
 	const byStart = new Map();
-	for (const s of all) { if (s.j <= n) { if (!byStart.has(s.i)) byStart.set(s.i, []); byStart.get(s.i).push(s); } }
+	// (no shortcut before the first input: the run timer starts there, so those ticks are free)
+	const firstInput = Math.max(0, masks.findIndex((m) => m !== 0));
+	for (const s of all) { if (s.j <= n && s.i >= firstInput) { if (!byStart.has(s.i)) byStart.set(s.i, []); byStart.get(s.i).push(s); } }
 	for (let i = 0; i < n; i++) {
 		if (cost[i] + 1 < cost[i + 1]) { cost[i + 1] = cost[i] + 1; via[i + 1] = { i, seq: null }; }
 		const list = byStart.get(i);
