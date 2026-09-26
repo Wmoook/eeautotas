@@ -291,6 +291,7 @@ async function main() {
 					best = msg;
 					console.log(`[explore]   ${((Date.now() - t0) / 1000).toFixed(0)} s: worker ${msg.seed}: rejoins ref tick ${msg.j} at tick ${msg.t} ` +
 						`(d ${msg.d.toFixed(2)}): ${msg.saved >= 0 ? 'saves' : 'loses'} ${Math.abs(msg.saved)}`);
+					if (msg.exact && msg.saved > 0) writeEarly(a, masks, best);   // a find survives a stop of the grind mid-stage
 				}
 			} else {
 				stats.set(msg.seed, msg);
@@ -322,6 +323,14 @@ async function main() {
 	C.writeEetas(a.out, out);
 	fs.writeFileSync(a.out + '.json', JSON.stringify({ from: a.from, t: best.t, j: best.j, saved: best.saved, d: best.d }));
 	console.log(`[explore] best: rejoin ref tick ${best.j} at tick ${best.t} (saves ${best.saved}) -> ${a.out}`);
+}
+
+/** --exact: the best rejoin so far as the full run (reference inputs up to --from, the found segment, the reference from S(j)) */
+function writeEarly(a, masks, best) {
+	try {
+		C.writeEetas(a.out, [...masks.subarray(0, a.from), ...best.seq, ...masks.subarray(best.j)]);
+		C.writeAtomic(a.out + '.json', JSON.stringify({ from: a.from, t: best.t, j: best.j, saved: best.saved, d: best.d }));
+	} catch (e) { /* the final write follows */ }
 }
 
 if (isMainThread) main();
