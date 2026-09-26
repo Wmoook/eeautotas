@@ -353,13 +353,36 @@ let cur = null;      // { level, buf } of the running search
 const stateFile = () => path.join(dir(), 'solve.json');
 function save() { try { C.writeJSON(stateFile(), S); } catch (e) { /* read-only data folder: memory only */ } }
 function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); }
+// The clocks. Each eegpu process first loads its kernels (the first load after a build is the NVIDIA driver compiling
+// them for this graphics card: a minute or more on a laptop CPU, then seconds) and says {"ev":"ready"}; its --seconds
+// count from there. A strategy's time (V.usedMs + the running process's time since its ready) is what its passes and
+// shares are cut from; the search's clock (the page's "N s of M s") runs from the first GPU strategy's ready (from the
+// start when the CPU searches alone). The CPU strategy searches from its start.
+const PREP_NOTE_MS = 3000;   // a GPU strategy still loading after this: the page says the engine is being prepared
+/** a strategy's search seconds so far */
+const usedSec = (V, now) => (V.usedMs + (V.readyAt ? (now || Date.now()) - V.readyAt : 0)) / 1000;
+/** a GPU strategy whose process has not loaded its kernels yet */
+const loading = (q) => !q.cpu && q.live && !q.readyAt;
+/** the search's clock (s): from the first GPU strategy's ready; from the start without one (CPU only, or none got ready) */
+function searchClock(now) {
+	if (S.searchStarted) return Math.max(0, (now - S.searchStarted) / 1000);
+	return S.strategies.some(loading) ? 0 : (now - S.started) / 1000;
+}
 /** the current or last search */
 function state() {
 	if (!S) {
 		S = C.readJSON(stateFile(), null) || { running: false, stage: 'idle', log: [] };
 		if (S.running) { S.running = false; S.stage = 'stopped'; S.message = 'The search stopped when the app closed.'; }
 	}
-	return Object.assign({}, S, { elapsed: S.running ? (Date.now() - S.started) / 1000 : S.elapsed });
+	const now = Date.now();
+	const o = Object.assign({}, S, { elapsed: S.running ? (now - S.started) / 1000 : S.elapsed });
+	if (S.running && Array.isArray(S.strategies)) {
+		// preparing: a GPU strategy has been loading its kernels for a while (the first search after an update)
+		o.strategies = S.strategies.map((q) => (loading(q) && now - q.launchedAt > PREP_NOTE_MS ? Object.assign({}, q, { preparing: true }) : q));
+		o.preparing = !S.searchStarted && o.strategies.some((q) => q.preparing);
+		o.searchElapsed = searchClock(now);
+	}
+	return o;
 }
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 const running = () => busy.size > 0;
@@ -423,13 +446,15 @@ function start(b, gpu, test) {
 	const name = String(b.name || ins.json.world_name || 'level').slice(0, 80);
 	const cpuOnly = noGpu ? `No GPU search: ${noGpu}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
 		`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.` : '';
-	S = { running: true, stage: 'starting', started: Date.now(), elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
+	const t0 = Date.now();
+	S = { running: true, stage: 'starting', started: t0, searchStarted: noGpu ? t0 : 0, prepSec: 0, elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach,
 		levelHash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16),
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], cpuOnly, workers: cpu ? workers : 0,
 		physics: { mode: rf.mode, startCost: startCost < 0 ? null : Math.round(startCost * 10) / 10, noWayUp },
 		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
-			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0 })) };
+			found: null, error: null, live: false, pass: PASS_START, passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0,
+			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${width} states per tick`}, up to ${seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu ? ` (${workers} CPU thread${workers > 1 ? 's' : ''})` : ''));
 	if (cpuOnly) note(cpuOnly);
@@ -451,7 +476,8 @@ function tellCpu(ticks) {
  *  totals */
 function launch(n) {
 	const V = S.strategies[n];
-	const left = Math.max(1, Math.round(S.seconds - (Date.now() - S.started) / 1000));
+	// (the strategy's own search time: the loads of its processes do not count)
+	const left = Math.max(1, Math.round(S.seconds - usedSec(V)));
 	// salts: the tool itself starts over with the next salt after a try without a route (the finest pass, the last rung of
 	// the ladder, from its first run; any pass in a salt rerun)
 	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0) };
@@ -468,6 +494,9 @@ function launch(n) {
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
+	// (the CPU search searches at once; an eegpu process from its ready event)
+	V.launchedAt = Date.now();
+	V.readyAt = cpu ? V.launchedAt : 0;
 	let hits = 0, end = '', overflow = null, lastSalt = 0;
 	const mine = () => kids[n] === ch;
 	let out = '', err = '';
@@ -481,8 +510,25 @@ function launch(n) {
 	// moves per second: the ticks simulated plus the twins (moves the tool skipped because a lower option is proven to
 	// give exactly the same state): the moves tried, the number the page shows
 	const movesPerSec = (ev) => (ev.ticks > 0 && ev.twins > 0 ? ev.ticksPerSec * (ev.ticks + ev.twins) / ev.ticks : ev.ticksPerSec || 0);
+	// the process has its kernels loaded (its ready event; a tool without one: its first event): its time counts from now
+	const ready = (ev) => {
+		const now = Date.now();
+		V.readyAt = now;
+		V.prepSec = Math.round((now - V.launchedAt) / 100) / 10;
+		if (ev) V.load = { loadMs: ev.loadMs, allocMs: ev.allocMs, module: ev.module || null };
+		if (!S.searchStarted) {
+			S.searchStarted = now;
+			S.prepSec = (now - S.started) / 1000;
+		}
+		if (V.prepSec >= 5) {
+			note(`${V.label}: the GPU engine took ${V.prepSec.toFixed(0)} s to start` + (ev && Number.isFinite(ev.loadMs) ? ` (kernels ${(ev.loadMs / 1000).toFixed(1)} s, ` +
+				`memory ${(ev.allocMs / 1000).toFixed(1)} s)` : '') + '; the search time counts from now');
+		}
+	};
 	const onEvent = (ev) => {
 		if (!mine()) return;
+		if (ev.ev === 'ready') { if (!V.readyAt) { ready(ev); save(); } return; }
+		if (!V.readyAt && !ev.error) ready(null);
 		if (cpu && ch.stopWhy && ev.ev === 'progress') return;   // (halted: its state stays as the halt left it)
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
@@ -551,6 +597,7 @@ function launch(n) {
 		busy.delete(ch);
 		if (!mine()) return;
 		V.live = false;
+		if (V.readyAt) { V.usedMs += Date.now() - V.readyAt; V.readyAt = 0; }   // (its search time; the next process loads first)
 		if (V.key === 'explore') {
 			// how this pass ended: why the editor stopped it, else the tool's own verdict
 			const how = ch.stopWhy || (code === 0 && !V.error ? end : '');
@@ -563,7 +610,7 @@ function launch(n) {
 				: overflow > 0 ? ` (${overflow.toLocaleString('en-US')} situations were cut from full layers)` : '';
 			if (verdict && !why && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
 			if (verdict && !why) V.tries = (V.tries || 0) + 1;
-			const left = S.seconds - (Date.now() - S.started) / 1000;
+			const left = S.seconds - usedSec(V);
 			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? S.result.ticks : 0, left) : null;
 			if (next !== null && S.running && !S.halted && S.stage !== 'stopped' && left > 2) {
 				const what = { full: 'the table is full', time: `no route in its ${V.share} s`, exhausted: 'every situation tried', finish: 'route found', depth: 'no faster route',
@@ -629,6 +676,9 @@ function yieldBeams(n) {
 function finish() {
 	S.running = false;
 	S.elapsed = (Date.now() - S.started) / 1000;
+	S.searchElapsed = searchClock(Date.now());
+	// (the first search after an update: the GPU engine's start took a while; the search time did not count it)
+	const prep = S.searchStarted && S.prepSec >= 5 ? `, after ${S.prepSec.toFixed(0)} s preparing the GPU engine` : '';
 	// (the exploration's deepest pass: a later, finer one can end sooner)
 	S.layer = Math.max(...S.strategies.map((q) => Math.max(q.layer, q.deepest || 0)));
 	S.tick = S.layer;
@@ -648,7 +698,7 @@ function finish() {
 		if (xd) what.push(`every move to tick ${xd.toLocaleString('en-US')}${X.passes > 1 ? ` in ${X.passes} passes` : ''}`);
 		if (!S.cpuOnly) what.push(`the beams kept ${S.width.toLocaleString('en-US')} states per tick`);
 		if (R && R.states) what.push(`random runs kept ${R.states.toLocaleString('en-US')} situations`);
-		S.message = `No route to the trophy found in ${S.elapsed.toFixed(0)} s (${S.layer.toLocaleString('en-US')} ticks deep${what.length ? `; ${what.join('; ')}` : ''})` +
+		S.message = `No route to the trophy found in ${S.searchElapsed.toFixed(0)} s${prep} (${S.layer.toLocaleString('en-US')} ticks deep${what.length ? `; ${what.join('; ')}` : ''})` +
 			(capped ? `: the search reached its depth limit of ${S.depth} ticks (${C.fmt(S.depth)} of play).` : '.') +
 			(S.cpuOnly ? ' Try a longer search (without an NVIDIA GPU only the CPU searches).'
 				: ` Try a longer search or more states per tick${S.guidePoints ? ', or another guide line' : ', or draw a guide line that shows the way'}.`);

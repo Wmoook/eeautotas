@@ -314,7 +314,8 @@ async function appSection() {
 // A stand-in for eegpu: logs every launch's arguments, and "explore" plays the scenario's next run for its pass (the
 // pass read back from --cqx): a layer event, then a finish (a route of `idle` idle ticks and then right to the trophy,
 // when it fits in --depth) or a done event with the scripted end and overflow. "beam" reports the scenario's beam route
-// (if any) and ends. With `fail` (ms) every launch fails after that long (an error line, exit code 1).
+// (if any) and ends. With `fail` (ms) every launch fails after that long (an error line, exit code 1). With `ready` (ms)
+// the first launch of each command loads its kernels that long before it says {"ev":"ready"} and starts.
 const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
@@ -324,23 +325,27 @@ const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n'
 fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
-if (args[0] !== 'explore') {
-	if (SC.beam) say({ ev: 'result', kind: 'finish', inputs: SC.beam });
-	say({ ev: 'done', layers: 3, end: SC.beam ? 'finish' : 'time' });
-	return;
-}
-const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p).length;
-const run = (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
-const depth = +opt('depth');
-const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; say(d); };
-setTimeout(() => {
-	say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
-	if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
-	const ticks = run.idle + SC.R;
-	if (ticks > depth) return void say({ ev: 'done', layers: depth, end: 'depth', overflow: 0 });
-	say({ ev: 'hit', layer: ticks - 1, tick: ticks, inputs: '0'.repeat(run.idle) + '4'.repeat(SC.R + 10) });
-	say({ ev: 'done', layers: ticks, end: 'finish', overflow: 0 });
-}, run.wait || 0);
+const go = () => {
+	if (args[0] !== 'explore') {
+		if (SC.beam) say({ ev: 'result', kind: 'finish', inputs: SC.beam });
+		say({ ev: 'done', layers: 3, end: SC.beam ? 'finish' : 'time' });
+		return;
+	}
+	const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p).length;
+	const run = (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
+	const depth = +opt('depth');
+	const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; say(d); };
+	setTimeout(() => {
+		say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
+		if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
+		const ticks = run.idle + SC.R;
+		if (ticks > depth) return void say({ ev: 'done', layers: depth, end: 'depth', overflow: 0 });
+		say({ ev: 'hit', layer: ticks - 1, tick: ticks, inputs: '0'.repeat(run.idle) + '4'.repeat(SC.R + 10) });
+		say({ ev: 'done', layers: ticks, end: 'finish', overflow: 0 });
+	}, run.wait || 0);
+};
+if (SC.ready && !prev.some((a) => a[0] === args[0])) setTimeout(() => { say({ ev: 'ready', loadMs: SC.ready, allocMs: 1 }); go(); }, SC.ready);
+else go();
 `;
 async function passesSection() {
 	section('passes: the "every move" pass ladder (a stand-in for eegpu, no GPU)');
@@ -374,9 +379,9 @@ async function passesSection() {
 	const fake = path.join(HOME, 'fake-eegpu.js');
 	fs.writeFileSync(fake, FAKE);
 	let nSc = 0;
-	const drive = async (runs, beam, during, salts) => {
+	const drive = async (runs, beam, during, salts, ready) => {
 		const sc = path.join(HOME, `ladder-${++nSc}.json`), log = path.join(HOME, `ladder-${nSc}.log`);
-		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null }));
+		fs.writeFileSync(sc, JSON.stringify({ log, R, runs, beam: beam || null, ready: ready || 0 }));
 		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc], cpu: false, salts: !!salts });
 		const t0 = Date.now();
 		let st = ED.state();
@@ -447,6 +452,19 @@ async function passesSection() {
 	L = r.launches;
 	check('Stop while refining: the route stays, no further pass starts', stopped && r.st.stage === 'found' && r.st.result.ticks === 20 + R && L.length === 2 && r.X.passes === 2 &&
 		r.X.ends['0'] && r.X.ends['0'].how === 'stopped' && !r.st.running, r.text);
+	// the first search after an update: the engine loads its kernels for 3.5 s before its ready event. The page says the
+	// GPU engine is being prepared, the search's clock starts at the ready, and the next pass's time is cut from the
+	// strategy's search time only (the wall clock would leave 56 s)
+	let prep = false, clock = null;
+	r = await drive({ '-1': [{ end: 'time', layers: 30, wait: 400 }], '-2': [{ end: 'exhausted', layers: 16, overflow: 0 }] }, null, (st) => {
+		const X0 = st.strategies.find((q) => q.key === 'explore');
+		if (st.preparing && X0.preparing) prep = true;
+		if (!clock && X0.state === 'running') clock = { search: st.searchElapsed, wall: st.elapsed };
+	}, false, 3500);
+	L = r.launches;
+	check('a slow first load (3.5 s to the ready event): "preparing the GPU engine" meanwhile, the search\'s clock from the ready, the next pass gets the time the first did not search',
+		prep && clock && clock.wall >= 3.4 && clock.search < 1.5 && L[0].seconds === '20' && +L[1].seconds >= 59 && r.st.stage === 'not found' && r.st.prepSec >= 3.4,
+		`preparing seen ${prep}; clock at the first layer ${clock ? `${clock.search.toFixed(1)} s (wall ${clock.wall.toFixed(1)} s)` : '-'}; ${r.text}`);
 }
 
 // ---------------------------------------------------------------- the CPU route search (src/goexplore.js; no GPU)

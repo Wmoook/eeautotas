@@ -4,6 +4,8 @@
 //   eegpu info                                               the GPU (JSON), or {"gpu":null,"why":...}
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
+// search, beam, explore and bench print {"ev":"ready","loadMs":..,"allocMs":..,"ctxMs":..} once the kernels are loaded
+// and the big buffers allocated (Gpu::ready); their --seconds count from there, not from the start of the process.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -252,18 +254,35 @@ static int cmdPtx(int argc, char** argv) {
 }
 
 // ------------------------------------------------------------------ GPU context with the kernels loaded
+typedef std::chrono::steady_clock Clock;
+static double msSince(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 struct Gpu {
 	cu::Device d;
 	cu::CUmodule mod = nullptr;
 	bool ok = false;
+	double ctxMs = 0, loadMs = 0;   // open(): the driver and context, and the whole open (context + kernels)
+	Clock::time_point opened;       // (end of open(): ready() counts the allocations from here)
 	bool open(const std::string& ptxPath) {
+		const auto t0 = Clock::now();
 		if (!d.open()) return false;
+		ctxMs = msSince(t0);
 		FILE* f = fopen(ptxPath.c_str(), "rb");
 		if (!f) { cu::lastError = "kernels not found: " + ptxPath; return false; }
 		fclose(f);
 		if (!cu::loadModule(&mod, readText(ptxPath))) return false;
+		loadMs = msSince(t0);
+		opened = Clock::now();
 		ok = true;
 		return true;
+	}
+	/** Right after the kernels are loaded and the big buffers allocated: {"ev":"ready","loadMs":..,"allocMs":..} (the
+	 *  first load after a build is the driver compiling the kernels for this GPU: a minute or more), and the command's
+	 *  clock starts again (tStart), so --seconds counts the search only. */
+	void ready(Clock::time_point& tStart) {
+		cu::cuCtxSynchronize();   // (the memsets of the allocations run asynchronously)
+		printf("{\"ev\":\"ready\",\"loadMs\":%.0f,\"allocMs\":%.0f,\"ctxMs\":%.0f}\n", loadMs, msSince(opened), ctxMs);
+		fflush(stdout);
+		tStart = Clock::now();
 	}
 	cu::CUfunction fn(const std::string& name) {
 		cu::CUfunction f = nullptr;
@@ -524,6 +543,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		dax.upload(S.axis.data(), S.axis.size());
 	if (!up) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::cuMemsetD8_v2(dcount.p, 0, 4); cu::cuMemsetD8_v2(dstats.p, 0, 64);
+	g.ready(tStart);
 	SearchParams P;
 	memset(&P, 0, sizeof P);
 	P.L = B.level((const uint8_t*)(uintptr_t)dl.p);
@@ -733,6 +753,7 @@ static int runBench(int argc, char** argv, const LevelBlob& B) {
 	const u8* s0 = (const u8*)(uintptr_t)ds.p;
 	unsigned long long* o = (unsigned long long*)(uintptr_t)dout.p;
 	cu::cuMemsetD8_v2(dout.p, 0, 8);
+	{ Clock::time_point t; g.ready(t); }   // (the speed is timed below, after a warm-up launch)
 	int tk = ticks;
 	unsigned threads = (unsigned)g.d.sms * 1024;
 	auto launch = [&](u64 seed) {
