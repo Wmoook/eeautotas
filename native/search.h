@@ -69,6 +69,18 @@ struct Cand {
  *  bit unused on every tick it differs), so it is skipped. TWIN_WORDS words per tick. */
 static const int M1_VARIANTS = 18 * 4 * 3, M2_VARIANTS = 5 * 18 * 18, TWIN_WORDS = (M1_VARIANTS + M2_VARIANTS + 31) / 32;
 
+/** One tick of mask m on s; returns Sim::inUsed() of it. Out of line on the GPU (EE_COLD): the twin table's code
+ *  (canonMap, twinBits) reaches the engine only through here, so the twins kernel holds one copy of Sim::tick instead
+ *  of one per call site (with four it was the module's largest kernel: the PTX grew 42% instead of 11%, and with it
+ *  the NVRTC build and the driver's JIT). */
+template <int TW>
+EE_COLD u32 tickUsed(const Level& L, State<TW>& s, i32 m) {
+	Sim<TW> sim(L, s);
+	Input in = maskInput(m);
+	sim.tick(in);
+	return sim.inUsed();
+}
+
 /** canon[o] = canonOption(o) from state st: the option that gives exactly o's next state (o itself when o must be
  *  simulated). Simulates option 0 and the canonical no-jump options (at most 9 ticks; tmp = scratch). */
 template <int TW>
@@ -79,11 +91,9 @@ EE_HD void canonMap(const Level& L, const State<TW>& st, State<TW>& tmp, u8 cano
 		canon[o] = (u8)c;
 		if (c != o || (o & 1)) continue;   // (a jump option's own flags are not needed)
 		tmp = st;
-		Sim<TW> sim(L, tmp);
-		Input in = maskInput(option(o));
-		sim.tick(in);
-		if (o == 0) used = sim.inUsed();
-		jumpUsed |= (sim.inUsed() & 1u) << (o >> 1);
+		const u32 u = tickUsed<TW>(L, tmp, option(o));
+		if (o == 0) used = u;
+		jumpUsed |= (u & 1u) << (o >> 1);
 	}
 }
 
@@ -99,12 +109,9 @@ EE_HD void twinBits(const Level& L, const State<TW>& st, const u8* masks, i32 n,
 	a = st;
 	bool canon1 = true;
 	{
-		Sim<TW> sim(L, a);
 		bool hFree = o / 6 != 0, vFree = (o / 2) % 3 != 0, jFree = (o & 1) != 0;   // pressed, unused on every tick so far
 		for (i32 hold = 1; hold <= (m1 ? 4 : 1); hold++) {
-			Input in = maskInput(option(o));
-			sim.tick(in);
-			const u32 u = sim.inUsed();
+			const u32 u = tickUsed<TW>(L, a, option(o));
 			if (u & 6) hFree = false;
 			if (u & 24) vFree = false;
 			if (u & 1) jFree = false;
@@ -119,10 +126,9 @@ EE_HD void twinBits(const Level& L, const State<TW>& st, const u8* masks, i32 n,
 		return;
 	}
 	a = st;
-	Sim<TW> sim(L, a);
-	{ Input in = maskInput(option(o)); sim.tick(in); }
+	tickUsed<TW>(L, a, option(o));
 	for (i32 g = 1; g <= 5 && t + g < n; g++) {
-		if (g > 1) { Input in = maskInput(masks[t + g - 1]); sim.tick(in); }
+		if (g > 1) tickUsed<TW>(L, a, masks[t + g - 1]);
 		u8 canon[18];
 		canonMap<TW>(L, a, b, canon);
 		for (i32 o2 = 0; o2 < 18; o2++) if (canon[o2] != o2) set(M1_VARIANTS + (g - 1) * 324 + o * 18 + o2);
