@@ -488,7 +488,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	const double seconds = atof(opt(argc, argv, "seconds", "20").c_str());
 	const int horizon = atoi(opt(argc, argv, "horizon", "1500").c_str());
 	const double drift = atof(opt(argc, argv, "drift", "96").c_str());
-	const double launchMs = atof(opt(argc, argv, "launch-ms", "120").c_str());
+	const double launchMs = atof(opt(argc, argv, "launch-ms", "50").c_str());   // (short launches: a throttled laptop GPU runs 6x slower, and Windows resets the driver after 2 s)
 	uint64_t seed = strtoull(opt(argc, argv, "seed", "1").c_str(), nullptr, 10);
 	std::string fams = opt(argc, argv, "families", "m1,del,m2,pert,flip,sticky");
 	const int from = atoi(opt(argc, argv, "from", "0").c_str());
@@ -540,7 +540,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	if (twGpu) {   // the twin table on the GPU, in chunks of start ticks (18 threads each), copied back for the lists and verify
 		const double s0 = elapsed();
 		cu::CUfunction ftw = g.fn("twins_" + std::to_string(TW));
-		const int chunk = 8192;
+		const int chunk = 2048;
 		cu::Buf dtw;
 		if (!ftw || !dtw.alloc(4ull * TWIN_WORDS * chunk)) { printf("{\"error\":\"twins kernel missing (rebuild: node tools/build-native.js)\"}\n"); return 4; }
 		S.twin.assign((size_t)n * TWIN_WORDS, 0u);
@@ -564,7 +564,11 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	double famSec[FAM_COUNT] = {0};
 	uint64_t rejected = 0, launches = 0;
 	unsigned long long statsPrev[8] = {0};
-	double tPerLaunch = 2048.0;   // start ticks per launch (adapted to launchMs)
+	// start ticks per launch (in m1 units), per family (their costs differ): small at first, grown at most 1.5x per launch
+	// toward launchMs, cut down to a tenth at once after a launch that ran long (a throttled GPU slows down any time)
+	double tPer[FAM_COUNT];
+	for (int f = 0; f < FAM_COUNT; f++) tPer[f] = 16.0;
+	double maxLaunchMs = 0;
 	bool firstPass = true;
 	int fi = 0;
 	int tCursor = t0;
@@ -582,7 +586,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 			continue;
 		}
 		const int V = random ? 256 : familyVariants(fam);
-		int nT = std::max(1, (int)(tPerLaunch * 216.0 / V));
+		int nT = std::max(1, (int)(tPer[fam] * 216.0 / V));
 		nT = std::min(nT, t1 - tCursor);
 		P.family = fam; P.t0 = tCursor; P.nT = nT; P.V = V; P.seed = seed;
 		unsigned threads = (unsigned)nT * V;   // one thread per candidate (t fastest)
@@ -616,7 +620,8 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		famSec[fam] += ms / 1000;
 		// adapt the size toward launchMs
 		const double scale = launchMs / std::max(ms, 1.0);
-		tPerLaunch = std::max(8.0, std::min(tPerLaunch * std::min(2.0, std::max(0.5, scale)), 1e6));
+		tPer[fam] = std::max(1.0, std::min(tPer[fam] * std::min(1.5, std::max(0.1, scale)), 1e6));
+		if (ms > maxLaunchMs) maxLaunchMs = ms;
 		// hits
 		uint32_t cnt = 0;
 		cu::cuMemcpyDtoH_v2(&cnt, dcount.p, 4);
@@ -673,9 +678,9 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	for (const Edge& e : edges) bestSave = std::max<int64_t>(bestSave, (int64_t)e.j - e.t - e.k);
 	printf("{\"ev\":\"done\",\"gpu\":%s,\"n\":%d,\"runTicks\":%d,\"seconds\":%.2f,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"candidates\":%llu,"
 		"\"ends\":{\"death\":%llu,\"drift\":%llu,\"noop\":%llu,\"end\":%llu,\"hit\":%llu,\"broken\":%llu},\"launches\":%llu,"
-		"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"twinSeconds\":%.2f,\"listSeconds\":%.2f,\"families\":{",
+		"\"edges\":%zu,\"rejected\":%llu,\"bestSaving\":%lld,\"tw\":%d,\"twinSeconds\":%.2f,\"listSeconds\":%.2f,\"maxLaunchMs\":%.0f,\"families\":{",
 		g.json().c_str(), n, S.runTicks, sec, st[0], st[0] / std::max(1e-9, sec), st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-		(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW, twinSec, listSec);
+		(unsigned long long)launches, edges.size(), (unsigned long long)rejected, (long long)bestSave, TW, twinSec, listSec, maxLaunchMs);
 	bool first = true;
 	for (int fm : famList) {
 		printf("%s\"%s\":{\"ticks\":%llu,\"seconds\":%.2f,\"hits\":%llu,\"edges\":%llu,\"twins\":%llu}", first ? "" : ",", FAMILY_NAMES[fm],
