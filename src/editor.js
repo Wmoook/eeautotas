@@ -1031,6 +1031,12 @@ function launch(n) {
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			// (the CPU search goes on looking for faster routes)
 			found(ev.inputs, n, cpu);
+		} else if (ev.ev === 'try' && V.probe === 'running' && (ev.end === 'exhausted' || ev.end === 'depth') && ev.overflow > 0) {
+			// the first try ran out only because its layers were cut (over the layer cap: the cut keeps the states nearest
+			// the trophy by the physics check, a greedy beam that walks into the check's dead ends; the user's 200x200 ice
+			// level "ran out" at tick 71 that way): the finest cells are too many here, the ladder from the coarse end
+			if (ch.probeTimer) clearTimeout(ch.probeTimer);
+			halt(ch, 'probe');
 		} else if (ev.ev === 'try' && V.probe === 'running' && (ev.end === 'exhausted' || ev.end === 'depth')) {
 			// the probe passed: the finest cells run through here; the pass goes on with the whole time
 			V.probe = 'passed';
