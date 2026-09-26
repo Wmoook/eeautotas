@@ -7,9 +7,9 @@
 // Why: Windows resets the display driver when one GPU command runs past its watchdog (TDR, 2 s), and a laptop GPU
 // that throttles to 1/6 of its clock turns a 300 ms launch into a 2 s one. So a command never launches a whole
 // workload at once: a Chunk sizes the launches of one kernel from the measured time per item toward --launch-ms
-// (default 50): it starts small, grows at most 1.5x per launch, and shrinks at once (down to 1/10 in one step) after
-// a launch that took longer than the target. A launch sized for 50 ms takes about 300 ms if the clock drops 6x
-// before it; the next one is sized for the new speed.
+// (default 50): it starts small, grows at most 1.5x per launch toward 70% of the target, and shrinks at once (down to
+// 1/10 in one step) after a launch that took longer than the target. A launch sized for 35 ms takes about 210 ms if
+// the clock drops 6x before it; the next one is sized for the new speed.
 // The chunks split kernels over index ranges only; the phases stay in order (every chunk of a phase before the next
 // phase), so a chunked run computes exactly what the unchunked one did (src/out/emu: --launch-ms=5 vs 500).
 // A graceful stop: killing eegpu while a kernel runs makes the driver reset the GPU too (nvlddmkm 153). With
@@ -158,8 +158,10 @@ struct Chunk {
 		if (items <= 0) return;
 		const double t = G.targetMs * scale;
 		ms = std::max(ms, 0.02);
-		const double want = items * t / ms;   // the items this launch's speed does in the target time
-		if (ms > t) size = std::max(size * 0.1, std::min(size, 0.8 * want));   // over the target: shrink at once
+		// the items this launch's speed does in 70% of the target: the margin for the next launch's clock (the laptop's
+		// swings between 210 and 780 MHz from one launch to the next: 3.7x)
+		const double want = items * 0.7 * t / ms;
+		if (ms > t) size = std::max(size * 0.1, std::min(size, want));   // over the target: shrink at once
 		else if (items >= 0.5 * size) size = std::min(size * 1.5, want);       // a full launch: toward the target, at most 1.5x
 		else if (want < size) size = std::max(size * 0.1, want);                 // a short launch (a range's tail) that was slow
 		size = std::max(lo, std::min(hi, size));
