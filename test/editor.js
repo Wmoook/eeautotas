@@ -363,7 +363,7 @@ const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
 const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
-if (args[0] === 'info') return void process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach }) + '\\n');
+if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach }) + '\\n'), SC.infoDelay || 0);
 const passOf =(a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
@@ -682,6 +682,25 @@ async function cpuSection() {
 		+L[1].depth >= R && X.ends['-1'] && X.ends['-1'].how === 'beaten' && Q && Q.found && Q.found.ticks >= R && !Q.live && st.elapsed < 30,
 		`${st.stage}; passes ${L.map((o) => Math.round(Math.log2(o.cqx / 0.5))).join(', ')}; depth ${L.map((o) => o.depth).join(', ')}; CPU route ${cpuRoute ? cpuRoute[1] : '-'} ticks; ` +
 		`${st.result ? `route ${st.result.ticks} ticks (${st.result.strategy}), R = ${R}` : st.message}; ${st.elapsed.toFixed(1)} s`);
+	// Stop while the search still checks the physics / the GPU tool (the GPU's first load after an update can take
+	// minutes; it once looked like a Stop button that did nothing): the search ends at once, a new one can start right
+	// away, and the first check's late answer launches nothing
+	const scSlow = path.join(HOME, 'cpu-slowinfo.json'), logSlow = path.join(HOME, 'cpu-slowinfo.log');
+	fs.writeFileSync(scSlow, JSON.stringify({ log: logSlow, R, runs: { '-1': [{ end: 'finish', idle: 0, layers: 3 }] }, beam: null, infoDelay: 2500 }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, scSlow], salts: false });
+	await new Promise((r) => setTimeout(r, 300));
+	const tStop = Date.now(), stStop = ED.stop();
+	const stoppedNow = !stStop.running && !ED.state().running && ED.state().stage === 'stopped';
+	const scNext = path.join(HOME, 'cpu-afterstop.json'), logNext = path.join(HOME, 'cpu-afterstop.log');
+	fs.writeFileSync(scNext, JSON.stringify({ log: logNext, R, runs: { '-1': [{ end: 'finish', idle: 0, layers: 3 }] }, beam: null }));
+	let restartErr = '';
+	try { ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, scNext], salts: false }); } catch (e) { restartErr = e.message; }
+	st = await waitDone(30000);
+	await new Promise((r) => setTimeout(r, Math.max(0, 3000 - (Date.now() - tStop))));   // (the first search's check has answered by now)
+	const slowLaunched = fs.existsSync(logSlow) ? fs.readFileSync(logSlow, 'utf8').split('\n').filter(Boolean).length : 0;
+	check('Stop during the physics / GPU tool check ends the search at once; a new search starts right away and the first check\'s late answer launches nothing',
+		stoppedNow && !restartErr && st.stage === 'found' && !ED.state().running && slowLaunched === 0 && ED.state().stage === 'found',
+		`stopped at once: ${stoppedNow}; restart ${restartErr || 'ok'}; next: ${st.stage}; the stopped search's launches: ${slowLaunched}`);
 	// a native tool older than the app (its `info` does not say it reads this reach file version): no GPU strategy, the
 	// CPU search alone, with the reason
 	const scOld = path.join(HOME, 'cpu-old.json');

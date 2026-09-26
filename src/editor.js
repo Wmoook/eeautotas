@@ -468,6 +468,7 @@ function state() {
 }
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 let building = false;       // the physics check of a starting search (a worker thread) is under way
+let searchGen = 0;          // the search whose physics check / tool check is awaited (a stop or a newer search ends the wait)
 const running = () => busy.size > 0 || building;
 /** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped'). The GPU tool is asked to stop
  *  (its stop file: it ends between two kernel launches, within about one; killing it while a kernel runs makes the
@@ -553,7 +554,9 @@ function start(b, gpu, test) {
 	building = true;
 	markBusy();
 	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
-	ready.then(([rf, toolWhy]) => launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide), (e) => {
+	const gen = ++searchGen;
+	ready.then(([rf, toolWhy]) => { if (gen === searchGen) launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); }, (e) => {
+		if (gen !== searchGen) return;   // (stopped while checking, maybe another search since)
 		building = false;
 		S.stage = 'error'; S.running = false;
 		S.message = `The physics check failed: ${e.message}`;
@@ -1063,6 +1066,15 @@ function stop() {
 	S.stage = S.result ? 'found' : 'stopped';
 	S.message = S.result ? '' : 'The search was stopped before it found a route.';
 	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; halt(kids[k], 'stopped'); } });
+	if (building) {
+		// still checking the physics / the GPU tool (the GPU's first load can take minutes): nothing runs yet, so the
+		// search ends now; the check's late answer is dropped (searchGen) and a new search can start at once
+		building = false;
+		searchGen++;
+		S.strategies.forEach((q) => { if (q.state === 'starting') q.state = 'stopped'; });
+		finish();
+		return state();
+	}
 	save();
 	return state();
 }

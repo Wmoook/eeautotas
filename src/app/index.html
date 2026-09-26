@@ -635,6 +635,9 @@ function renderDetail() {
 		return `<option value="${n}" ${String(n) === workersDefault ? 'selected' : ''}>${n}${e ? ` · ${mts(e)}/s` : ''}${n === peak && peak < state.cpus ? ' (fastest)' : ''}</option>`;
 	}).join('');
 	const hist = (j.history || []).slice().reverse();
+	// the panel is rebuilt on every poll: its scrolling boxes (the improvements, the log) keep their place; one scrolled to
+	// its end stays at the end, so new lines show
+	const scrolled = ['.feed', 'pre.log'].map((sel) => { const el = $('detail').querySelector(sel); return el && { sel, top: el.scrollTop, end: el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 4 }; }).filter(Boolean);
 	const startNote = j.startMatters ? ` · TAS started ${START_LABEL[j.startMode] || j.startMode}` : '';
 	$('detail').innerHTML = `<div class="card">
 		<div class="hero">
@@ -677,6 +680,7 @@ function renderDetail() {
 			|| `<div class="msg info">Improvements will appear here, newest first. The first minutes are usually the fastest.</div>`}</div>
 		<details ${store.get('tasopt.log') === '1' ? 'open' : ''} id="logBox"><summary>Optimizer log</summary><pre class="log">${esc((j.logTail || []).join('\n')) || '—'}</pre></details>
 	</div>`;
+	for (const k of scrolled) { const el = $('detail').querySelector(k.sel); if (el) el.scrollTop = k.end ? el.scrollHeight : k.top; }
 	const go = $('startBtn'), st = $('stopBtn');
 	if ($('workers')) $('workers').onchange = () => { $('procNote').innerHTML = procText(+$('workers').value, false); };
 	if ($('proc')) $('proc').onchange = () => store.set('tasopt.proc', $('proc').value);
