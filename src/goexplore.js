@@ -219,8 +219,10 @@ const MAXRES = QP.length - 1;
 // grain (Y_MAXG levels: 1 = the half tile, the jump count and speed classes; 2 = the quarter tile and the speeds to
 // 1/2 px/tick), so a saturated room, often the one before a precision wall, gets precision; --adapt=3 weights head B by
 // the yield only once no new room came for Y_STALL picks (the quick room changes keep main's picks). --grain=G (0, 1
-// or 2; any --adapt): every room's cells at grain G from its start, without the yield's wait (cycle 3 of "E-archive":
-// Forgotten Veil's single-room coin gates of the gate benchmark are precision, not rooms; see CLAUDE.md)
+// or 2; any --adapt): every room's cells at grain G from its start, without the yield's wait; --grainPos=0: grain 1
+// without the half tile (the jump count and the speed classes only); --grainStall=N: the grain only once no new room
+// came for N picks (cycle 3 of "E-archive": Forgotten Veil's single-room coin gates of the gate benchmark are
+// precision, not rooms; see CLAUDE.md)
 const Y_W = 32, Y_INIT = 4, Y_FLOOR = 0.1, Y_SAT = 0.02, Y_PICKS = 1000, Y_MAXG = 2, B_TILE = 40, Y_STALL = 3000;
 // a seed's states that become cells: every SEED_EVERY ticks back from its end (and the end)
 const SEED_EVERY = 30;
