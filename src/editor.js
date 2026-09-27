@@ -385,7 +385,7 @@ const STRATEGIES = {
 	// the wall breaker ("past the wall", see BREAK_WAIT_S): "every move" from a stalled search's frontier states (--prefix)
 	// with the largest table the GPU holds (--cells, up to 2^31), a 2M layer cap, 4 px / 1/16 px/tick cells first and no
 	// cost ceiling; a box of BREAK_REGION tiles around its start only with a table of 2^28 cells or fewer
-	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, q.enter ? `--enter=${q.enter}` : '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
+	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${q.gateReach || f.reach}`, ...(q.gateReach ? [] : steerArg(f, q.V)),
 		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
@@ -932,8 +932,9 @@ function resumeDeferred() {
 const breakHolds = () => !!S && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && ((!!brk && !!brk.round) || S.strategies.some((q) => q.deferred));
 // The stall target (C-steer, 2026-09-27): on a level whose steer field has the coin DP (a coin door on the plan), a
 // breaker run aims at the coin plan's next gate (steer.js nextGate: the untaken coin with the least leg + rest of the
-// tour from the run's start; explore --enter=<its tile> instead of --finish), a hit ends the run and the chain goes on
-// from it with the next gate (at most BREAK_GATES a chain). The gate order checked against the known routes
+// tour from the run's start), ordered by that coin's leg field (--reach, no --steer; --finish kept: explore reports its
+// closest attempt only then); its closest attempt on the coin (GATE_AT) ends the run and the chain goes on from it with
+// the next gate (at most BREAK_GATES a chain). The gate order checked against the known routes
 // (src/out/csteer): the DP's first choice was the route's next coin on Forgotten Veil in 11 of 15, Good Egg 12 of 17,
 // Stupid Fox 6 of 14, while the steer lookup (the least of the DP and the layer's own field) took the layer field, the
 // way that needs no more coins, before Forgotten Veil's coins 1-4 and Stupid Fox's 1-8: the search went for a way the
@@ -1066,10 +1067,9 @@ function breakLaunch(n) {
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
-	// (explore --enter reports no closest attempt, so no chain: a gate run keeps --finish, ordered by the coin's leg
-	// field, and its closest attempt at the coin (cost 0) is the gate: closer())
-	const enter = '';
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, enter, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
+	// gate: closer(); explore --enter would report no closest attempt, so no chain)
+	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
@@ -1688,7 +1688,7 @@ function launch(n) {
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	if (V.key === 'breaker') {
-		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.enter = V.brk.enter; q.gateReach = V.brk.gateReach;
+		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
 		q.seconds = V.share = V.brk.seconds;
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.brk.keep) : 0;
 	}
@@ -1879,10 +1879,6 @@ function launch(n) {
 				if (rolls && ev.kind === 'room') feedOne(inputs, true);
 				setImmediate(relayKick);
 			}
-		} else if (ev.ev === 'hit' && V.key === 'breaker' && V.brk && V.brk.enter) {
-			// (the wall breaker aimed at the coin plan's next gate: the first attempt that enters it ends the run, and the
-			// chain goes on from it: breakAfter)
-			if (!V.brk.gateHit && ev.inputs) { V.brk.gateHit = String(ev.inputs); halt(ch, 'gate'); }
 		} else if (ev.ev === 'hit') {
 			// the exploration's finishes: all in its last layer (equally many ticks); a few are enough (the timer start
 			// can differ)
