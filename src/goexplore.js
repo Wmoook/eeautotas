@@ -232,7 +232,10 @@ const WAY_PICK = 40;
 // clear gain, so off by default. --wN=1 (cycle 8): the estimate instead of rcS: the nearest tile the route passes, by
 // its schedule (nsched: per tile the least of the route's first tick at a tile it passes + --wK (3) ticks per step
 // there, 4-way through tiles that are not walls): a corridor next to one the route passes at tick 403 is due at ~403 +
-// 3 x its steps, whatever either field says of it
+// 3 x its steps, whatever either field says of it. Cycle 8's A/B (1,200 s, 3 workers, seeds 1 / 21, the A100's GPU 7):
+// head W alone / --wR=0.5 (the steer cost) / --wR=0.5 --wN=1: Octorage 7,071 / 7,630 / 7,619 and 7,083 / 7,257 / 7,117,
+// Stupid Fox 3,934 / 3,818 / 4,206 and 3,679 / 3,678 / 4,139 run ticks: both off by default (along the known Octorage
+// TAS 0 of its 904 off-route ticks lead by nsched: the first route passes near them sooner)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0, wS: 1, wN: 0, wK: 3 };
