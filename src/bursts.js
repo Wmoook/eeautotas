@@ -357,7 +357,7 @@ function create(o) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig })) fresh++;
+				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys })) fresh++;
 				cz = cz2;
 			}
 			key = k2;
