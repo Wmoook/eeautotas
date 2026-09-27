@@ -1836,7 +1836,8 @@ function launch(n) {
 			// (the table it got: smaller than asked where the free memory less the reserve did not hold it)
 			if (V.brk) V.brk.cellLogGot = ev.cellLog;
 			if (S.breaker) S.breaker.cellLog = ev.cellLog;
-			note(`${V.label}: ${ev.warn}${Number.isFinite(ev.freeMB) ? ` (${ev.freeMB} MB free)` : ''}`);
+			// (once per table size: a round of 30 runs noted it 30 times, and the log keeps 30 lines)
+			if (brk && brk.cellLogNoted !== ev.cellLog) { brk.cellLogNoted = ev.cellLog; note(`${V.label}: ${ev.warn}${Number.isFinite(ev.freeMB) ? ` (${ev.freeMB} MB free)` : ''}`); }
 		} else if (ev.error && ev.steer === 0 && !V.noSteer) {
 			// the tool cannot use the steer file (the GPU's memory, a stale file): this strategy again without it, now and
 			// from now on (its distances the reach field's: closer() ranks them behind the steer field's)
