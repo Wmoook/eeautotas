@@ -993,6 +993,7 @@ function breakLaunch(n) {
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
+	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, passes: (V.passes || 0) + 1,
 		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}, cells of ${BREAK_GRAIN_TEXT[ch.grain]} px/tick, 2^${cellLog} of them` });
@@ -1792,6 +1793,11 @@ function launch(n) {
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
 			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
+		} else if (ev.warn && V.key === 'breaker' && Number.isFinite(ev.cellLog)) {
+			// (the table it got: smaller than asked where the free memory less the reserve did not hold it)
+			if (V.brk) V.brk.cellLogGot = ev.cellLog;
+			if (S.breaker) S.breaker.cellLog = ev.cellLog;
+			note(`${V.label}: ${ev.warn}${Number.isFinite(ev.freeMB) ? ` (${ev.freeMB} MB free)` : ''}`);
 		} else if (ev.error && ev.steer === 0 && !V.noSteer) {
 			// the tool cannot use the steer file (the GPU's memory, a stale file): this strategy again without it, now and
 			// from now on (its distances the reach field's: closer() ranks them behind the steer field's)
