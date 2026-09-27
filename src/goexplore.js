@@ -42,7 +42,8 @@
 //               earlier room's did), then the best of --sample random cells of it by 1 / sqrt(1 + seen) + 1 / sqrt(1 +
 //               picks) (seen: how often a run came through the cell); --adapt=1 (the default): the room's weight also
 //               x (0.1 + its yield), the new territory tiles per pick from it, a decaying mean (Y_W; --adapt=2 also
-//               a finer grain for a saturated room; 0: as before);
+//               a finer grain for a saturated room; 3: the yield only after Y_STALL picks without a new room; 0: as
+//               before);
 //             C (discovery, half the picks while one is due): --burst picks of each new room's first cell, only for
 //               rooms that open new territory (gain > 0: on a level of many switches most rooms open nothing).
 //           The room's fields (flood fill, trophy walkable) are cached by the passable set (the doors' states and
@@ -171,7 +172,7 @@
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
-//        [--adapt=1 (0 | 1 | 2; coarse cells: see Y_W)] [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
+//        [--adapt=1 (0 | 1 | 2 | 3; coarse cells: see Y_W)] [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
@@ -216,8 +217,9 @@ const MAXRES = QP.length - 1;
 // new); head B's room weight is multiplied by (Y_FLOOR + yield), so the picks go where the territory still grows.
 // --adapt=2 also gives a room whose yield fell below Y_SAT after at least Y_PICKS picks (since its last change) a finer
 // grain (Y_MAXG levels: 1 = the half tile, the jump count and speed classes; 2 = the quarter tile and the speeds to
-// 1/2 px/tick), so a saturated room, often the one before a precision wall, gets precision
-const Y_W = 32, Y_INIT = 4, Y_FLOOR = 0.1, Y_SAT = 0.02, Y_PICKS = 1000, Y_MAXG = 2, B_TILE = 40;
+// 1/2 px/tick), so a saturated room, often the one before a precision wall, gets precision; --adapt=3 weights head B by
+// the yield only once no new room came for Y_STALL picks (the quick room changes keep main's picks)
+const Y_W = 32, Y_INIT = 4, Y_FLOOR = 0.1, Y_SAT = 0.02, Y_PICKS = 1000, Y_MAXG = 2, B_TILE = 40, Y_STALL = 3000;
 // a seed's states that become cells: every SEED_EVERY ticks back from its end (and the end)
 const SEED_EVERY = 30;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
@@ -745,6 +747,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let roomKey = 0, bursts = 0;
 	// (--adapt: the grain of roomKey's room, looked up when roomKey changes; gKey = NaN forces the next look-up)
 	let gKey = NaN, grain = 0, grained = 0, added = 0, nTiles = 0;   // (added: new territory tiles; nTiles: the rooms' tiles)
+	let yRooms = 0, yAt = 0;   // (--adapt=3: the room count head B saw last and the pick it changed at)
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
@@ -998,10 +1001,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the best of --sample random cells of it by Go-Explore's count weights (cells runs rarely come through first)
 	const popB = () => {
 		let br = null, bw = -1;
+		if (roomList.length !== yRooms) { yRooms = roomList.length; yAt = picks; }
+		const yOn = a.adapt > 0 && (a.adapt !== 3 || picks - yAt > Y_STALL);
 		for (let k = 0; k < 4; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
 			if (!r.arr.length) continue;
-			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) * (a.adapt ? Y_FLOOR + r.y : 1);
+			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) * (yOn ? Y_FLOOR + r.y : 1);
 			if (w > bw) { bw = w; br = r; }
 		}
 		if (br === null) return popA();
