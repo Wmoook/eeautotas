@@ -8,7 +8,8 @@
 // random-portal chance.
 //
 // A round takes about --roundMin minutes (10): mutate, the exact endgame solver (endgame.js, when the ending changed),
-// deep exploring windows (the run's loops first, then from where the last one stopped; every other one skip hunting),
+// the sweep (explore --hunt windows over the whole run, several at once, src/sweep.js; windows that came back empty
+// rest), deep exploring windows (the run's loops first, then from where the last one stopped; every other one skip hunting),
 // the skip search (skips.js, once per best: pass-bys and loops, entrances, every move from them), mutate, a slice of
 // the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin doors when the coins
 // count), mutate, a beam every other round, a splice of all results. Where it is (round, stage, the deep and shortcuts
@@ -28,7 +29,7 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1] [--skips=1]
+//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
