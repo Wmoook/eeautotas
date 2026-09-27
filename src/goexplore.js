@@ -192,6 +192,12 @@
 //        [--rooms=0|1 (an event "room" for every room the one search registers: its cause, the inputs; coarse cells)]
 //        [--pL=0.3 (head L, the one search once a route is known: the picks by the lead on the best route's schedule, its
 //        share by its yield: LEAD_GRACE_S)] [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
+//        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
+//        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
+//        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
+//        shared box: the cycle 7 test's A100, `ps`: goexplore 10, its eegpu explore --prefix 10, the other GPU tools 0)]
+//        The progress and done events carry cpuS: the process's CPU seconds (every thread; process.cpuUsage), so a
+//        route's time can be told per core-second as well as per wall second on a shared machine.
 //        With --stdin=1 and the one search also "route <inputs>": a route found elsewhere (the bound, head L's schedule,
 //        its states into every archive; a "route" event, no result).
 //        With --stdin=1 and the one search also "import <inputs>": another operator's run (the editor's GPU random runs:
@@ -224,7 +230,7 @@ const SEED_EVERY = 30;
 const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -232,6 +238,8 @@ const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir'
 // the text options
 const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
+/** the process's CPU seconds so far (user + system, every thread) */
+const cpuSec = () => { const u = process.cpuUsage(); return Math.round((u.user + u.system) / 1e5) / 10; };
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
 // and 24, x64: the objects as goexplore makes them, 200 K at a time): a cell (its object with the boxed double of its
 // cost 160, its Map entry 45, its slot in its room's list 10), an entry of the pick heap (3 arrays; up to 3 per cell
@@ -1960,6 +1968,9 @@ async function gpuMain(a, L, m) {
 
 function workerMain() {
 	const d = workerData;
+	// (--nice: this worker thread alone. On Linux the nice value is a thread's: setpriority(PRIO_PROCESS, 0) = the calling
+	// thread, which a lower priority needs no privilege for; child processes inherit the main thread's)
+	if (d.a.nice > 0 && process.platform === 'linux') { try { os.setPriority(0, Math.min(19, Math.round(d.a.nice))); } catch (e) { /* as it is */ } }
 	const L = levelOf(d.a);
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
 	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {});
@@ -2053,7 +2064,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -2212,7 +2223,7 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead,
+		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead, cpuS: cpuSec(),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
