@@ -97,7 +97,7 @@ const CUT = 0xffff;
 // a faster route starts again with the settings rotated; a faster route (any operator's) starts a pass along it.
 // RELAY_EVERY - 1 of every RELAY_EVERY bursts of lane 0 are the relay's while a route is known (the rest: the rooms, those
 // the best route never enters first: ROUTE_ROOM_PEN off a room on it).
-const RELAY_EVERY = 4, RELAY_CONFS = [4, 3, 2, 0], RELAY_BIG_CELLS = 28, RELAY_BACK = 60, ROUTE_ROOM_PEN = 0.5;
+const RELAY_EVERY = 4, RELAY_CONFS = [4, 3, 2, 0], RELAY_BIG_CELLS = 28, RELAY_BACK = 60, RELAY_DOOMED = 30, ROUTE_ROOM_PEN = 0.5;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -422,8 +422,9 @@ function create(o) {
 		if (walk[t0] === CUT) return null;
 		return { walk, mx: Math.max(mx, 5), v: walk[t0] };
 	};
-	const relay = { base: null, segs: null, i: 0, prefix: '', lead: 0, pass: 0, tries: 0, turn: 0, keys: null };
-	Object.assign(st, { relayBursts: 0, relaySegs: 0, relayLinks: 0, relayFalls: 0, relayResets: 0, relayPasses: 0, relayLead: 0, relayBestLead: 0 });
+	// (prefix: the chain's inputs; segStart: the chain where its segment began, a waypoint's arrival)
+	const relay = { base: null, segs: null, i: 0, prefix: '', segStart: '', lead: 0, pass: 0, tries: 0, turn: 0, keys: null, hist: [] };
+	Object.assign(st, { relayBursts: 0, relaySegs: 0, relayLinks: 0, relayFalls: 0, relayBacks: 0, relayResets: 0, relayPasses: 0, relayLead: 0, relayBestLead: 0 });
 	/** the room keys along the best route (the rooms it enters: the other rooms' bursts come first after a route) */
 	const routeKeys = () => {
 		const b = o.best && o.best();
@@ -441,12 +442,12 @@ function create(o) {
 	/** the chain gives up its lead: on from the best route's own state after waypoint i */
 	const relayReset = () => {
 		const s = relay.segs[relay.i];
-		relay.prefix = relay.base.slice(0, s.t); relay.lead = 0; relay.i++; relay.tries = 0; st.relayResets++;
+		relay.prefix = relay.segStart = relay.base.slice(0, s.t); relay.lead = 0; relay.i++; relay.tries = 0; relay.hist = []; st.relayResets++;
 	};
 	/** a pass from the level start along the best route (after the last pass ended) */
 	const relayPass = (b) => {
 		if (relay.base !== b.inputs) relay.pass = 0; else relay.pass++;
-		relay.base = b.inputs; relay.segs = segsOf(b.inputs); relay.i = 0; relay.prefix = ''; relay.lead = 0; relay.tries = 0;
+		relay.base = b.inputs; relay.segs = segsOf(b.inputs); relay.i = 0; relay.prefix = relay.segStart = ''; relay.lead = 0; relay.tries = 0; relay.hist = [];
 		st.relayPasses++;
 	};
 	/** the relay's next burst (null: none now) */
@@ -463,13 +464,15 @@ function create(o) {
 			// (the room's other triggers walls, else (the engine's test of a trigger is a centred ball at rest: Infinity Pain's route
 			// passes a low-gravity tile on its way to the trophy with no change) through them: the link's end is checked anyway)
 			const f = segField(sim, s) || segField(sim, s, true);
-			if (!f) { if (!relayFallback(sim)) relayReset(); continue; }
+			if (!f) { relay.prefix = relay.segStart; if (!relayFallback(simAt(relay.prefix))) relayReset(); continue; }
 			// (the last try, before the chain gives up its lead: RELAY_BIG, the wall breaker's way: a table 4x larger, a
 			// layer of 1 M, twice the time)
 			const big = relay.tries >= RELAY_CONFS.length;
 			const ci = big ? 0 : RELAY_CONFS[(relay.tries + relay.pass) % RELAY_CONFS.length];
 			const from = relay.i ? relay.segs[relay.i - 1].t : 0;
-			return { lane, r: null, relay: s, seg: relay.i, inputs: relay.prefix, conf: ci, cells: CONFS[ci], reach: steerFile(f.walk, f.mx, lane), slack: Math.round(SLACK + SLACK_F * f.v / 5),
+			return { lane, r: null, relay: s, seg: relay.i, inputs: relay.prefix, conf: ci, cells: CONFS[ci], reach: steerFile(f.walk, f.mx, lane),
+				// (a retry has no cost ceiling: the walk field knows no physics, and Infinity Pain's low-gravity segment 4 leaves it)
+				slack: relay.tries > 0 ? 0 : Math.round(SLACK + SLACK_F * f.v / 5),
 				depth: Math.max(1, s.t - relay.prefix.length), seconds: Math.max(2, Math.min(a.burstS * (big ? 2 : 1), Math.floor(left - 1))), startDist: f.v / 5, chain: 0,
 				gpuCells: big ? Math.min(RELAY_BIG_CELLS, a.gpuCells + 2) : 0, capAll: big,
 				what: `the route relay: segment ${relay.i + 1}/${relay.segs.length} (the best route's ticks ${from}-${s.t}${s.finish ? ', the trophy' : ''}), lead ${relay.lead}, settings ${ci}${big ? ' (big)' : ''}, pass ${relay.pass + 1}` };
@@ -490,6 +493,7 @@ function create(o) {
 			if (o.RM.key(sim) !== key0) {
 				if (!inSeg(sim, s)) return false;
 				relay.prefix += relay.base.slice(from, k + 1);
+				relay.segStart = relay.prefix;
 				relay.lead = s.t - relay.prefix.length; relay.i++; relay.tries = 0; st.relayFalls++;
 				return true;
 			}
@@ -517,17 +521,30 @@ function create(o) {
 		if (r.reached && r.best) {
 			const sim = simAt(r.best);
 			if (!sim.is_dead && inSeg(sim, s) && r.best.length <= s.t) {
-				relay.prefix = r.best; relay.lead = s.t - r.best.length; relay.i++; relay.tries = 0; st.relaySegs++;
+				relay.hist.push({ i: relay.i, segStart: relay.segStart, lead: relay.lead, tries: relay.tries });
+				if (relay.hist.length > 8) relay.hist.shift();
+				relay.prefix = relay.segStart = r.best; relay.lead = s.t - r.best.length; relay.i++; relay.tries = 0; st.relaySegs++;
 				st.relayLead = relay.lead; if (relay.lead > st.relayBestLead) st.relayBestLead = relay.lead;
 				return;
 			}
 		}
+		// (a doomed arrival: the first try from the segment's start ran out of states within RELAY_DOOMED layers, nothing
+		// nearer; Infinity Pain's segment 9 in 4 layers, five times: the last link again with its next settings, which arrive
+		// otherwise)
+		if (!r.reached && relay.tries === 0 && job.inputs === relay.segStart && r.end === 'exhausted' && r.layers < RELAY_DOOMED && relay.hist.length && relay.lead > 0) {
+			const h = relay.hist.pop();
+			relay.i = h.i; relay.prefix = relay.segStart = h.segStart; relay.lead = h.lead; relay.tries = h.tries + 1; st.relayBacks++;
+			return;
+		}
 		// (nearer without reaching the trigger: a long segment fills the table; the chain goes on from its nearest attempt,
 		// RELAY_BACK ticks back (the nearest is often doomed), the same segment, like the rooms' bursts' chain)
 		if (!r.reached && r.best && Number.isFinite(r.near) && r.near < job.startDist - 1 && r.best.length > relay.prefix.length + RELAY_BACK + 10) {
-			relay.prefix = r.best.slice(0, r.best.length - RELAY_BACK); relay.tries = 0; st.relayLinks++;
+			relay.prefix = r.best.slice(0, r.best.length - RELAY_BACK); st.relayLinks++;
 			return;
 		}
+		// (no nearer: back to the segment's start (a chained link may be in a pocket the walk field lured it into: Infinity
+		// Pain's low-gravity segment 4 from 116 tiles out, five tries), the best route's own inputs from there, the next settings)
+		relay.prefix = relay.segStart;
 		if (relayFallback(simAt(relay.prefix))) return;
 		// (a chain ahead of the best route tries every setting and the big burst before it gives up its lead; one without a
 		// lead loses nothing by going on from the best route's own state: two tries)
