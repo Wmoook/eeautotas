@@ -1001,6 +1001,8 @@ function breakStarts() {
 		seen.add(key);
 		out.push({ inputs: pre, what, dist, key, room });
 	};
+	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
+	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
 	const c = S.closest;
 	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
@@ -1050,7 +1052,7 @@ function breakLaunch(n) {
 		if (src) { src.brk = (src.brk || 0) + 1; publishSources(); }
 		R.chain = { inputs: st.inputs, step: 1, grain: 0, what: st.what };
 	}
-	const roundLeft = cur.opts.breakRound - (Date.now() - R.t0) / 1000, left = S.seconds - searchClock(Date.now());
+	const roundLeft = cur.opts.breakRound - (Date.now() - (R.clock || R.t0)) / 1000, left = S.seconds - searchClock(Date.now());
 	if (!R.chain || S.result || roundLeft < 3 || left < 3) return breakEnd(n);
 	const ch = R.chain, file = path.join(dir(), `break_${n}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(ch.inputs, 'latin1')); } catch (e) { return breakEnd(n); }
@@ -1091,6 +1093,9 @@ function breakAfter(n, how) {
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
 		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
 		seedCpu(hit);
+		// (the gate front: a chain that keeps entering gates is not cut by the round's clock (BREAK_ROUND_S counts from
+		// its last gate), and the next round starts from its last gate first: breakStarts)
+		if (cur.opts.breakFront) { R.clock = Date.now(); brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 }; }
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
 	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
@@ -1333,7 +1338,7 @@ function start(b, gpu, test) {
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
-		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0,
+		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
