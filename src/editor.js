@@ -1228,7 +1228,8 @@ function launch(n) {
 	const pausedNow = !cpu && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
 	if (pauseFile) { try { if (pausedNow) fs.writeFileSync(pauseFile, 'pause'); else fs.unlinkSync(pauseFile); } catch (e) { /* none */ } }
 	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`, `--parent=${process.pid}`];
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });
+	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all)
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : undefined, detached: !cpu });
 	// (Linux, next to GPU strategies: the CPU search at nice 10. The GPU tools' above-normal priority (launch.h) needs root
 	// or CAP_SYS_NICE there, which a container (a rented cloud GPU) lacks, and next to busy CPU threads "every move" was
 	// 3-7x slower without it. Its worker threads start later, from its main thread, and inherit the value.)

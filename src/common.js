@@ -22,6 +22,15 @@ const JOBS = path.join(HOME, 'jobs');
 function heapEnv(mb) {
 	return { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=${mb}`.trim() };
 }
+/** The environment for a child that sizes its worker threads' heaps itself (src/goexplore.js: a V8 heap limit per worker
+ *  from its memory budget): without --max-old-space-size, which V8 applies to every isolate of the process, the workers
+ *  too, over their own limits (the editor's 1024 once capped goexplore's 1500 MB workers at 1 GB: all 8 ran out). */
+function workerHeapEnv() {
+	const env = { ...process.env };
+	const o = (env.NODE_OPTIONS || '').replace(/--max[-_]old[-_]space[-_]size[= ]\d+/g, ' ').replace(/\s+/g, ' ').trim();
+	if (o) env.NODE_OPTIONS = o; else delete env.NODE_OPTIONS;
+	return env;
+}
 
 // ---------------------------------------------------------------- .eetas bytes
 /** Buffer (raw file bytes) -> Uint8Array of input masks, exactly like eeo-tas reads the file. */
@@ -291,7 +300,7 @@ function parseArgs(argv) {
 }
 
 module.exports = {
-	SRC, HOME, DATA, JOBS, E, RNG, heapEnv,
+	SRC, HOME, DATA, JOBS, E, RNG, heapEnv, workerHeapEnv,
 	parseEetasBuffer, readEetas, eetasBytes, writeEetas, oddBytes,
 	writeAtomic, writeJSON, readJSON, lock, sleepMs,
 	fmt, parseTime, tickOf,

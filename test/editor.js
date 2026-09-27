@@ -692,11 +692,12 @@ async function passesSection() {
 
 // ---------------------------------------------------------------- the CPU route search (src/goexplore.js; no GPU)
 /** runs src/goexplore.js on an .eelvl; feed(child) right after the spawn (its stdin stays open; what it writes waits
- *  in the pipe until the tool reads it, before its workers start). Resolves to its events, results, done event and
- *  summary line. */
-function goexplore(file, opts, feed) {
+ *  in the pipe until the tool reads it, before its workers start); how: {node: [Node's own flags], env}. Resolves to its
+ *  events, results, done event and summary line. */
+function goexplore(file, opts, feed, how = {}) {
 	return new Promise((resolve) => {
-		const ch = require('child_process').spawn(process.execPath, [path.join(SRC, 'goexplore.js'), file, ...opts], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+		const ch = require('child_process').spawn(process.execPath, [...(how.node || []), path.join(SRC, 'goexplore.js'), file, ...opts],
+			{ stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: how.env || process.env });
 		ch.stdin.on('error', () => { /* it ended */ });
 		if (feed) feed(ch); else ch.stdin.end();
 		let out = '', err = '';
@@ -791,13 +792,57 @@ async function cpuSection() {
 	check('--cells=auto: fine cells up to 50 x 50 tiles (the platforms, 40 x 20), coarse above (60 x 50); coarse cells never refine',
 		startOf(a1).cells === 'fine' && GX.cellsFor(kdLevel) === 'coarse' && GX.cellsFor({ width: 50, height: 50 }) === 'fine' && GX.cellsFor({ width: 51, height: 50 }) === 'coarse' &&
 		GX.settle(GX.parseArgs(['x.eelvl']), kdLevel).maxres === 0 && GX.settle(GX.parseArgs(['x.eelvl']), platLevel).maxres === 4, `platforms ${startOf(a1).cells}; key door ${GX.cellsFor(kdLevel)}`);
-	// the memory budget: fine cells as before; coarse cells a quarter of the machine's memory over the workers, 200 .. 1500
-	// MB each (15 workers on 32 GB: 542 MB each)
-	const G32 = 32 * 2 ** 30;
-	check('memory per worker: fine cells 1600 / workers (200 .. 800 MB); coarse cells a quarter of the machine\'s memory over the workers (200 .. 1500 MB)',
-		GX.coarseMem(15, G32) === 546 && GX.coarseMem(4, G32) === 1500 && GX.coarseMem(7, 8 * 2 ** 30) === 293 && GX.coarseMem(64, 4 * 2 ** 30) === 200 &&
-		GX.settle(GX.parseArgs(['x.eelvl', '--workers=4']), platLevel).mem === 400 && GX.settle(GX.parseArgs(['x.eelvl', '--workers=4', '--mem=300']), kdLevel).mem === 300,
-		`15 workers on 32 GB: ${GX.coarseMem(15, G32)} MB, 4: ${GX.coarseMem(4, G32)}, 7 on 8 GB: ${GX.coarseMem(7, 8 * 2 ** 30)}`);
+	// the memory budget per worker: fine cells 1600 / workers (200 .. 800 MB), coarse cells 1500 MB, both within the machine:
+	// the search's process memory (workers x (1.5 x budget + 208 MB): each worker's heap limit and its young generation) at
+	// most a quarter of the machine's memory, all searches on it (the registry) at most half, at most half of what is free;
+	// never below 128 MB
+	const GB = 2 ** 30, mach = (total, free, others) => ({ total: total * GB, free: (free === undefined ? total : free) * GB, others: (others || 0) * GB });
+	const dm = (cells, w, m) => GX.defaultMem(cells, w, m).mem;
+	// 5 searches of 36 workers start one after another on a 251 GB machine (the EPYC box: before, each took 1500 MB per
+	// worker, 270 GB of budgets, more than the machine)
+	let others = 0;
+	const claims = [];
+	for (let k = 0; k < 5; k++) { const d = GX.defaultMem('coarse', 36, mach(251, 240, others / 1024)); const mb = GX.processMB(36, d.mem); claims.push([d.mem, mb]); others += mb; }
+	check('memory per worker: 1500 MB on a big machine, a quarter of a laptop (32 GB, 15 workers: 225 MB; 4: 1226), at least 128; fine cells 1600 / workers',
+		dm('coarse', 8, mach(708)) === 1500 && dm('coarse', 15, mach(32)) === 225 && dm('coarse', 4, mach(32)) === 1226 && dm('coarse', 7, mach(8)) === 128 &&
+		dm('fine', 4, mach(32)) === 400 && dm('fine', 1, mach(32)) === 800 && GX.defaultMem('coarse', 15, mach(32)).why === 'a quarter of the machine' &&
+		GX.settle(GX.parseArgs(['x.eelvl', '--workers=4']), platLevel, mach(32)).mem === 400 && GX.settle(GX.parseArgs(['x.eelvl', '--workers=4', '--mem=300']), kdLevel).mem === 300 &&
+		GX.settle(GX.parseArgs(['x.eelvl', '--workers=4', '--memTotal=4000']), kdLevel).mem === 528 && GX.processMB(4, 528) <= 4000,
+		`8 workers on 708 GB: ${dm('coarse', 8, mach(708))} MB; 15 on 32 GB: ${dm('coarse', 15, mach(32))}; 4: ${dm('coarse', 4, mach(32))}; 7 on 8 GB: ${dm('coarse', 7, mach(8))}`);
+	check('... the searches on one machine: its free memory and the others\' claims bound a new one (5 x 36 workers on 251 GB: in all at most three quarters of it)',
+		dm('coarse', 15, mach(32, 6)) === 128 && GX.defaultMem('coarse', 15, mach(32, 6)).why.startsWith('the memory free') && claims[0][0] === 1051 && claims[1][0] === 1051 &&
+		claims[2][0] === 128 && claims.reduce((x, c) => x + c[1], 0) <= 0.75 * 251 * 1024,
+		`5 searches: ${claims.map((c) => `${c[0]} MB/worker (${(c[1] / 1024).toFixed(1)} GB)`).join(', ')}`);
+	// the registry: a file per search in a folder (the temp folder's eeautotas-goexplore); a dead process's file, or one not
+	// refreshed for 10 minutes, is removed; the others' claims count
+	const reg = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-reg-'));
+	const regFile = (pid, bytes, age) => fs.writeFileSync(path.join(reg, `${pid}.json`), JSON.stringify({ pid, bytes, at: Date.now() - (age || 0) }));
+	const deadPid = 4194000 + (process.pid % 1000);
+	regFile(process.ppid, 3 * GB);
+	regFile(deadPid, 5 * GB);
+	regFile(process.pid, 7 * GB);
+	fs.writeFileSync(path.join(reg, `${process.ppid}.tmp`), 'half written');
+	const regSum = GX.registryOthers(reg);
+	regFile(process.ppid, 3 * GB, 11 * 60 * 1000);
+	const regStale = GX.registryOthers(reg);
+	GX.registryClaim(2 * GB, reg);
+	const mine = JSON.parse(fs.readFileSync(path.join(reg, `${process.pid}.json`), 'utf8'));
+	GX.registryClaim(0, reg);
+	check('the registry of searches: a live process\'s claim counts, a dead one\'s file and a stale one go, this process\'s own claim is written and removed',
+		regSum === 3 * GB && regStale === 0 && !fs.existsSync(path.join(reg, `${deadPid}.json`)) && !fs.existsSync(path.join(reg, `${process.ppid}.json`)) && mine.bytes === 2 * GB &&
+		!fs.existsSync(path.join(reg, `${process.pid}.json`)), `others ${regSum / GB} GB, then ${regStale / GB}; ${fs.readdirSync(reg).join(', ')}`);
+	fs.rmSync(reg, { recursive: true, force: true });
+	// a V8 heap flag for the whole process (NODE_OPTIONS --max-old-space-size, as the editor once passed 1024) caps every
+	// worker's heap whatever its own limit asks: the budget fits it (before: 1500 MB budgets in 1 GB heaps, all 8 workers
+	// of the lab's Stupid Fox run ran out); the editor passes none (C.workerHeapEnv)
+	const flagged = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=3', '--mem=500'], null, { env: Object.assign({}, process.env, { NODE_OPTIONS: '--max-old-space-size=300' }) });
+	const envNow = process.env.NODE_OPTIONS;
+	process.env.NODE_OPTIONS = '--max-old-space-size=1024 --trace-warnings';
+	const stripped = C.workerHeapEnv().NODE_OPTIONS;
+	if (envNow === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = envNow;
+	check('a V8 heap flag for the process: the workers\' budget fits it (300 MB: 114 MB each), no worker runs out; the editor starts the CPU search without one',
+		startOf(flagged).mem === 114 && /max-old-space-size=300/.test(startOf(flagged).memWhy) && flagged.done && flagged.done.end === 'time' &&
+		!flagged.events.some((e) => e.ev === 'warning') && stripped === '--trace-warnings', `${JSON.stringify(startOf(flagged))}; ${flagged.summary}; NODE_OPTIONS -> ${stripped}`);
 	const k1 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--maxTicks=1500000', '--seconds=40', '--mem=1500']);
 	const k2 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--maxTicks=1500000', '--seconds=40', '--mem=1500']);
 	check('coarse cells, 1 thread, a tick budget: routes (through the key\'s room), all finishing in the JS engine; the same seed gives the same routes after the same ticks',
@@ -818,10 +863,10 @@ async function cpuSection() {
 		!!kr && kr.desc === 'key:red' && kr.gain > 0 && kr.tick === kr.inputs.length && at.key === kr.room && at.entered && at.desc === 'key:red' &&
 		ks.filter((e) => e.kind === 'room').length === new Set(ks.filter((e) => e.kind === 'room').map((e) => e.room)).size,
 		ks.map((e) => `${e.kind} "${e.desc}" gain ${e.gain} tick ${e.tick}`).join('; '));
-	// a full archive makes no rooms: a 60 x 50 level of 10 purple switches, a purple door wall and a trophy walled in (no
-	// route; --prune=0, as the editor runs a level the reach field calls impossible) with room for 300 cells, full after
-	// 0.5 M ticks. A new switch state after that is no room (it would stay empty, outside the budget, its fields walked for
-	// nothing), so 4x the ticks find no more rooms (before: 38 rooms after 0.5 M ticks, 50 after 2 M)
+	// a full archive sweeps: a 60 x 50 level of 10 purple switches, a purple door wall and a trophy walled in (no route;
+	// --prune=0, as the editor runs a level the reach field calls impossible). With room for 300 cells (--maxCells) the
+	// cells no run touched for longest go and the search goes on; no room is left without cells (a room is made with its
+	// first cell, and goes with its last)
 	const sw = room(60, 50);
 	for (let k = 0; k < 10; k++) sw.push([4 + 2 * k, 48, 113, k + 1]);
 	for (let y = 1; y < 49; y++) sw.push([45, y, 184, 1]);
@@ -832,9 +877,17 @@ async function cpuSection() {
 	const swRun = (ticks) => goexplore(swFile, ['--workers=1', '--seed=1', '--prune=0', '--maxCells=300', `--maxTicks=${ticks}`, '--seconds=30']);
 	const r1 = await swRun(500000), r2 = await swRun(2000000);
 	const sw1 = r1.done && r1.done.workers[0], sw2 = r2.done && r2.done.workers[0];
-	check('coarse cells, the archive full: no new rooms (the same rooms after 0.5 M and 2 M ticks; no walks for rooms that could hold no cell)',
-		!!sw1 && !!sw2 && sw1.full && sw2.full && sw1.cells === 300 && sw1.rooms > 1 && sw2.rooms === sw1.rooms && sw2.walkHits === sw1.walkHits,
-		`rooms ${sw1 ? sw1.rooms : '-'} / ${sw2 ? sw2.rooms : '-'} (full ${sw1 ? sw1.full : '-'} / ${sw2 ? sw2.full : '-'}); ${r2.summary}`);
+	check('coarse cells, the archive full (--maxCells=300): sweeps, at most 300 cells, no room without cells, the search goes on (more cells swept after 2 M ticks than 0.5 M)',
+		!!sw1 && !!sw2 && sw1.full && sw2.full && sw1.cells <= 300 && sw2.cells <= 300 && sw1.sweeps > 0 && sw2.evicted > sw1.evicted && sw1.rooms <= sw1.cells + 1 &&
+		sw2.rooms <= sw2.cells + 1 && r2.done.end === 'ticks' && !r2.events.some((e) => e.ev === 'warning'),
+		`rooms ${sw1 ? sw1.rooms : '-'} / ${sw2 ? sw2.rooms : '-'}, cells ${sw1 ? sw1.cells : '-'} / ${sw2 ? sw2.cells : '-'}, swept ${sw1 ? sw1.evicted : '-'} / ${sw2 ? sw2.evicted : '-'}; ${r2.summary}`);
+	// the byte budget (--mem=24 MB on the switches level: 1024 switch states): the archive's count within it, and the heap
+	// (after a collection: node --expose-gc) within it plus the worker's own few MB (the engine, the level, the code)
+	const b24 = await goexplore(swFile, ['--workers=1', '--seed=1', '--prune=0', '--mem=24', '--maxTicks=10000000', '--seconds=60'], null, { node: ['--expose-gc'] });
+	const bw = b24.done && b24.done.workers[0];
+	check('the memory budget (24 MB; 1024 switch states): counted within it, the heap within it + 10 MB, sweeps, rooms only with cells, no warning',
+		!!bw && b24.done.end === 'ticks' && bw.memMB <= 24 && bw.heapMB <= 34 && bw.sweeps > 0 && bw.rooms > 100 && bw.rooms <= bw.cells + 1 && !b24.events.some((e) => e.ev === 'warning'),
+		bw ? `${bw.cells} cells in ${bw.rooms} rooms, ${bw.snaps} snapshots, counted ${bw.memMB} MB, heap ${bw.heapMB} MB, ${bw.sweeps} sweeps (${bw.evicted} cells)` : b24.summary);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));

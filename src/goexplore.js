@@ -45,8 +45,9 @@
 //           The room's fields (flood fill, trophy walkable) are cached by the passable set (the doors' states and
 //           protection), the least recently used dropped beyond a budget: rooms that share doors cost a hash. A room is
 //           made (its fields walked) only when its first cell enters the archive: a state in a new room while the
-//           archive is full, or too late for a faster route, makes none (it would stay empty, outside the budget). The
-//           room measure only orders: a state is ruled out only by the reach field's -1, as with fine cells.
+//           archive is full (until the next sweep makes room), or too late for a faster route, makes none (it would stay
+//           empty); a room whose cells were all swept goes. The room measure only orders: a state is ruled out only by
+//           the reach field's -1, as with fine cells.
 //           It picks like the prototype except in two ways: the discovery burst goes only to rooms with territory gain
 //           (the prototype bursts every new room, and a burst draws random numbers, so a room without gain changes the
 //           draws after it), and crowns are keyed by _collide_crown, what crown doors read (the prototype: has_crown).
@@ -60,10 +61,15 @@
 //           cooler; 9,661 ticks after 180 s.
 //
 // It prints the JSON lines of the editor's native tools (native/beamhost.h, explorehost.h), one per line:
-//   {"ev":"start","workers":n,"seeds":[..],"mode":"physics"|"walk","cells":"fine"|"coarse","startCost":c|null,"maxCells":..}
+//   {"ev":"start","workers":n,"seeds":[..],"mode":"physics"|"walk","cells":"fine"|"coarse","startCost":c|null,"mem":MB,
+//     "memWhy":"..","processMB":..,"machineMB":..,"freeMB":..,"othersMB":..,"maxCells":..,"maxSnaps":..}
+//                                                (the budget per worker, what bound it, this search's process memory at
+//                                                 most, the machine's, what was free, what the other searches claim)
 //   {"ev":"progress","layer":L,"tick":L,"states":cells,"ticks":simulated,"ticksPerSec":..,"picks":..,"bestCost":..,
-//     "found":T|0,"refined":tiles,"rooms":n,"workers":n}                   (every 0.5 s; L = the deepest cell's tick;
-//                                                                            rooms: the most one worker has found)
+//     "found":T|0,"refined":tiles,"rooms":n,"workers":n,"memMB":..,"heapMB":..,"evicted":..}
+//                                                (every 0.5 s; L = the deepest cell's tick; rooms: the most one worker
+//                                                 has found; memMB: the workers' budgets' counts, heapMB: their V8 heaps
+//                                                 in use (garbage too), evicted: the cells swept)
 //   {"ev":"closest","dist":reach cost,"tick":T,"inputs":".."}                    (the state nearest the trophy, when it
 //                                                                                  improves, at most every 0.5 s)
 //   {"ev":"source","kind":"room"|"best","room":key,"desc":"..","gain":tiles,"tick":T,"dist":reach cost,"inputs":"..",
@@ -75,24 +81,57 @@
 //   {"ev":"done","layers":L,"seconds":..,"ticks":..,"ticksPerSec":..,"states":..,"picks":..,"end":"time"|"ticks"|
 //     "exhausted"|"finish"|"stopped"|"unreachable","finish":T|0,"first":{ticks,sec,simTicks,seed}|null,
 //     "workers":[{seed,..},..]}      ("unreachable": the reach field rules out the start itself, "exhausted": no cell is
-//                                      early enough for a faster route)
+//                                      early enough for a faster route; a worker's memMB / heapMB / evicted / sweeps, its
+//                                      heapMB after a collection when node runs with --expose-gc)
+//   {"ev":"warning","text":".."}     (a route that does not replay, a worker that failed, a worker whose heap is smaller
+//                                      than its budget asks)
 // Inputs are .eetas characters ('0' + mask). With --stdin=1 it reads lines from stdin: "depth D" (from now on only
 // routes of at most D ticks: a route of D + 1 is known elsewhere) and "stop"; the end of stdin (the editor is gone)
 // stops it too. A last line "[goexplore] ..." sums up.
 //
-// Memory (--mem, MB per worker): fine cells 1600 / workers, 200 .. 800 (as before); coarse cells MEM_SHARE (a quarter)
-// of the machine's memory (os.totalmem()) over the workers, 200 .. 1500 (the research's runs used 1.5 GB per worker:
-// 15 workers on a 16-thread laptop with 32 GB get 542 MB each, 8 GB in all; 4 workers 1500 each). A cell without its
-// snapshot costs about 260 bytes (300 with coarse cells: its room and counts), a snapshot about 1150; each gets 45% of
-// the budget (Good Egg with --mem=300: the archive full at 472 K cells, 61 K snapshots, a 279 MB heap). The default
-// depends only on the machine and the workers, so one worker with --maxTicks is reproducible on it (give --mem to
-// reproduce a run on another machine).
+// Memory (--mem MB per worker; the default below). Every piece of a worker's archive is counted as it changes, at its
+// size on the V8 heap (measured: B_CELL .. B_QUEUE): the cells, the pick heap, the path nodes with the picks' inputs
+// they keep (counted by reference: an improved cell's old node lives on while nodes made from it do), the rooms and
+// their walk cache, the snapshot queue; the snapshots on top. The archive may take ARCHIVE_SHARE (55%) of the budget: a
+// new cell past it is refused, and the next sweep (between two chunks of picks) drops the cells no run or pick has
+// touched for longest down to 90% of that share (never the start, a room's lowest-cost cell or a discovery burst's
+// cell), so the archive keeps growing where the search is and the search goes on; the snapshots take what the archive
+// leaves, up to 95% of the budget. The count against the heap after a collection (with the inputs' bytes outside it):
+// within 7% above on Stupid Fox and Good Egg, equal on the ice level (one worker, 60 s). Stupid Fox (200 x 200: time
+// doors, coins, team doors), 8 workers as the editor starts them (1500 MB each), 25 min on 6 threads of the shared H100
+// box: no failure, 10.5 M cells, 0.85-0.96 GB counted and 0.77-0.85 GB of heap a worker at the end (one sweep), the
+// nearest attempt 13.4 tiles from the trophy after 807 s (the lab's A100 box, faster: 305 s).
+// Under the old editor's --max-old-space-size=1024 (597 MB a worker), the same 8 workers, 25 min: no failure, 46-81
+// sweeps a worker (39 M cells swept in all), 350-390 MB counted and 330-350 MB of heap a worker, 42 rooms, 13.4 tiles
+// after 377 s (the box less loaded then).
+// Until 48c4e0b the budget counted 300 bytes a cell and 1150 a snapshot, 45% each: a cell really held about 450 (its
+// path node, its heap entries and its share of the picks' inputs were not counted, nor the old nodes improved cells
+// leave), so a worker's heap outgrew its budget; the editor started this with NODE_OPTIONS=--max-old-space-size=1024,
+// which V8 applies to every isolate of the process, the workers too, over their own limits (resourceLimits): 1 GB
+// heaps under 1500 MB budgets. The lab's Stupid Fox run (8 workers on the 708 GB A100 box): all 8 ran out of heap after
+// 10-16 minutes at about 1.6 M cells each (its workers 1-6 without the flag, on the H100 box: 0.8-1.1 GB heaps after
+// 25 min; under a 350 MB flag with --mem=500 both of 2 workers ran out, at 510 K and 615 K cells).
+// The default budget (defaultMem): fine cells 1600 / workers (200 .. 800), coarse cells 1500, within the machine: the
+// search's process memory, workers x (1.5 x budget + 208 MB) (a worker's V8 heap limit, 1.5 x its budget + 128 MB old
+// and 48 MB young, and its code, level and engine), at most a quarter of the machine's memory (os.totalmem(), or a
+// container's limit: process.constrainedMemory()), all the searches on the machine at most half of it (a registry: a
+// file per search in the temp folder, eeautotas-goexplore/<pid>.json, with its process memory; a dead or silent
+// search's file is removed), at most half of the memory free at its start (os.freemem(), process.availableMemory());
+// never below 128 MB a worker. 15 workers on a 32 GB laptop: 225 MB each (8 GB in all at most), 4 workers 1226, 7 on 8
+// GB 128; 8 on the 708 GB lab box 1500; five searches of 36 workers one after another on the 251 GB EPYC box: 1051,
+// 1051, 128, 128, 128 (168 GB in all at most; before: 1500 each, 270 GB of budgets that each outgrew). --memTotal=<MB>:
+// this search's process memory instead (the budget per worker from it). A V8 heap flag for the process
+// (--max-old-space-size on the command line or in NODE_OPTIONS) caps every worker's heap whatever it asks: the budget
+// fits it (1024: 597 MB a worker; a worker checks its own heap limit too and says so); the editor starts this without
+// one (common.js workerHeapEnv). The default depends on the machine and its load: give --mem to reproduce a run that
+// reaches its budget (a run that never reaches it does not depend on it: the same routes and cells with any budget).
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
-//        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
+//        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
+//        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
 const fs = require('fs');
@@ -103,6 +142,7 @@ const C = require('./common.js');
 const E = C.E;
 const EL = require('./eelvl.js');
 const RF = require('./reach.js');
+const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
 const OPTIONS = [];
@@ -112,16 +152,37 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
-	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50 };
+	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50 };
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
-// memory (V8 heap, measured): a cell without its snapshot about 260 bytes (coarse cells: 300, with their room and
-// counts), a snapshot about 1150; each gets 45% of a worker's --mem
-const CELL_BYTES = 260, CELL_BYTES_COARSE = 300, SNAP_BYTES = 1150;
+// memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
+// and 24, x64: the objects as goexplore makes them, 200 K at a time): a cell (its object with the boxed double of its
+// cost 160, its Map entry 45, its slot in its room's list 10), an entry of the pick heap (3 arrays; up to 3 per cell
+// between two compactions), a path node, a pick's inputs that a live node still uses (the object and its typed array;
+// the rolls x roll bytes themselves lie outside the V8 heap, counted too), a snapshot (1150) with its share of the coin
+// bitsets it holds (a copy per coin taken: 232 bytes each), a room (its object, text and list), a slot of the snapshot
+// queue. The walk cache of the rooms' fields keeps its own count (roomFields).
+const B_CELL = 216, B_HEAPE = 32, B_NODE = 72, B_BLOCK = 250, B_SNAP = 1200, B_ROOM = 600, B_QUEUE = 10;
+// a worker's budget (--mem MB): the archive (cells, their paths, the heap, the rooms, the walk cache) up to
+// ARCHIVE_SHARE of it; past that a sweep drops the cells no run or pick has touched for longest down to EVICT_TO of that
+// share; the snapshots (at least MIN_SNAPS) in what the archive leaves, up to SNAP_TOP of the budget (the rest: the
+// transient arrays of replays and events)
+const ARCHIVE_SHARE = 0.55, EVICT_TO = 0.9, SNAP_TOP = 0.95, MIN_SNAPS = 64, SWEEP_GAP = 256;
 // the biggest level (tiles) that gets fine cells by default (--cells=auto): 50 x 50, the size of the pixel-exact levels
 // the editor's suite checks (sfox50, user30s, user50, the dot ring; shaft, staircase, dotstairs 40 x 25, ...)
 const FINE_MAX_TILES = 2500;
-// coarse cells' default budget: this share of the machine's memory over the workers, MEM_MIN .. MEM_MAX MB each
-const MEM_SHARE = 0.25, MEM_MIN = 200, MEM_MAX = 1500;
+// a worker's V8 heap: its old generation up to HEAP_F x its budget + HEAP_ADD MB (room for the garbage between two
+// collections and the transient arrays), its young generation HEAP_YOUNG MB (Node 20's default; Node 24's 192 would
+// take 4x as much per worker). A --max-old-space-size flag (the command line or NODE_OPTIONS) is V8's for every isolate
+// of the process and wins over a worker's own limit (resourceLimits): the budget then shrinks to fit it (heapFit)
+const HEAP_F = 1.5, HEAP_ADD = 128, HEAP_YOUNG = 48;
+// the default budget (MB per worker): fine cells 1600 / workers within 200 .. 800, coarse cells MEM_MAX, both within the
+// machine: this search's process memory (workers x (RSS_F x budget + RSS_BASE MB): a worker's heap at its limit, its
+// young generation, code, level and engine) at most MEM_SHARE of the machine's memory, all the searches the registry
+// lists (REG_DIR: the goexplore processes on this machine) at most MEM_POOL of it, and at most MEM_FREE of the memory
+// free at the start; never below MEM_MIN
+const MEM_SHARE = 0.25, MEM_POOL = 0.5, MEM_FREE = 0.5, MEM_MIN = 128, MEM_MAX = 1500, RSS_F = HEAP_F, RSS_BASE = HEAP_ADD + HEAP_YOUNG + 32;
+const REG_DIR = path.join(os.tmpdir(), 'eeautotas-goexplore');
+const REG_STALE_MS = 10 * 60 * 1000;   // a registry file not refreshed for this long is a dead search's (every 60 s)
 // coarse cells: every SOURCE_S s the "best" source events; SOURCE_MIN_TICKS: shorter attempts are no source (the
 // editor's relay starts from 100 ticks)
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
@@ -158,17 +219,84 @@ function parseArgs(argv) {
 }
 /** the cells for level L: 'fine' up to FINE_MAX_TILES tiles, else 'coarse' */
 const cellsFor = (L) => (L.width * L.height > FINE_MAX_TILES ? 'coarse' : 'fine');
-/** coarse cells' default memory per worker (MB): MEM_SHARE of the machine's memory over the workers, MEM_MIN .. MEM_MAX */
-const coarseMem = (workers, totalBytes) => Math.max(MEM_MIN, Math.min(MEM_MAX, Math.round((totalBytes || os.totalmem()) / 1048576 * MEM_SHARE / Math.max(1, workers))));
-/** the options that depend on the level: the cells (--cells=auto), and then the memory budget (see the header) */
-function settle(a, L) {
+/** the process memory (MB) of a search of `workers` workers with `mem` MB each (see RSS_F) */
+const processMB = (workers, mem) => Math.round(workers * (mem * RSS_F + RSS_BASE));
+/** the budget per worker (MB) whose search takes `totalMB` of process memory in all */
+const memOfTotal = (workers, totalMB) => Math.floor((totalMB / Math.max(1, workers) - RSS_BASE) / RSS_F);
+/**
+ * the default budget per worker (MB; see the header): `cells` 'fine' | 'coarse', `m` = {total, free, others} (bytes: the
+ * machine's memory, what is free now, what the other searches on it claim). {mem, why}: why names what bound it
+ */
+function defaultMem(cells, workers, m) {
+	const want = cells === 'fine' ? Math.max(200, Math.min(800, Math.round(1600 / workers))) : MEM_MAX;
+	const MB = 1048576;
+	const caps = [['a quarter of the machine', MEM_SHARE * m.total / MB], ['the searches on the machine', MEM_POOL * m.total / MB - (m.others || 0) / MB],
+		['the memory free', MEM_FREE * m.free / MB]];
+	let mem = want, why = cells === 'fine' ? 'fine cells' : 'the most a worker takes';
+	for (const [k, mb] of caps) { const x = memOfTotal(workers, mb); if (x < mem) { mem = x; why = k; } }
+	if (mem < MEM_MIN) { mem = MEM_MIN; why += ` (at least ${MEM_MIN} MB)`; }
+	return { mem, why };
+}
+/** the budget (MB) whose worker fits an old-generation limit of `oldMB` */
+const heapFit = (oldMB) => Math.floor((oldMB - HEAP_ADD) / HEAP_F);
+/** the old-generation limit (MB) a V8 flag sets for every isolate of this process (--max-old-space-size on the command
+ *  line or in NODE_OPTIONS; the editor used to pass 1024 that way), else 0 */
+function heapFlagMB() {
+	const m = /--max[-_]old[-_]space[-_]size[= ](\d+)/.exec(`${process.execArgv.join(' ')} ${process.env.NODE_OPTIONS || ''}`);
+	return m ? +m[1] : 0;
+}
+/** the machine's memory (bytes): os.totalmem() and os.freemem(), or less under a memory limit (a container's cgroup) */
+function machineMemory() {
+	let total = os.totalmem(), free = os.freemem();
+	try { const c = typeof process.constrainedMemory === 'function' ? process.constrainedMemory() : 0; if (c > 0 && c < total) total = c; } catch (e) { /* unknown */ }
+	try { const v = typeof process.availableMemory === 'function' ? process.availableMemory() : 0; if (v > 0 && v < free) free = v; } catch (e) { /* unknown */ }
+	return { total, free: Math.min(free, total), others: 0 };
+}
+/** the registry of the searches on this machine: a file per process (<pid>.json: {pid, bytes (its process memory),
+ *  at}), refreshed every 60 s; the other live ones' bytes. Files of processes gone (or not refreshed for REG_STALE_MS)
+ *  are removed. */
+function registryOthers(dir = REG_DIR) {
+	let names = [], sum = 0;
+	try { names = fs.readdirSync(dir); } catch (e) { return 0; }
+	const now = Date.now();
+	for (const f of names) {
+		const m = /^(\d+)\.json$/.exec(f);
+		if (!m || +m[1] === process.pid) continue;
+		const file = path.join(dir, f);
+		let j = null;
+		try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { continue; }
+		let alive = true;
+		try { process.kill(+m[1], 0); } catch (e) { alive = e.code === 'EPERM'; }
+		if (!alive || !j || !(now - j.at < REG_STALE_MS)) { try { fs.unlinkSync(file); } catch (e) { /* gone */ } continue; }
+		if (Number.isFinite(j.bytes)) sum += j.bytes;
+	}
+	return sum;
+}
+/** this process's entry in the registry (bytes: its process memory; 0 removes it) */
+function registryClaim(bytes, dir = REG_DIR) {
+	const file = path.join(dir, `${process.pid}.json`);
+	try {
+		if (!bytes) { fs.unlinkSync(file); return; }
+		fs.mkdirSync(dir, { recursive: true });
+		const tmp = path.join(dir, `${process.pid}.tmp`);
+		fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, bytes: Math.round(bytes), at: Date.now() }));
+		fs.renameSync(tmp, file);
+	} catch (e) { /* no registry: the other rules still hold */ }
+}
+/** the options that depend on the level: the cells (--cells=auto), and then the memory budget (see the header);
+ *  m: the machine (defaultMem; default machineMemory(), no other searches) */
+function settle(a, L, m) {
 	if (a.cells === 'auto') a.cells = cellsFor(L);
 	const coarse = a.cells === 'coarse';
 	if (coarse) a.maxres = 0;   // (no refinement with coarse cells)
-	if (!a.mem) a.mem = coarse ? coarseMem(a.workers) : Math.max(200, Math.min(800, Math.round(1600 / a.workers)));
-	if (!a.maxCells) a.maxCells = Math.round(a.mem * 1048576 * 0.45 / (coarse ? CELL_BYTES_COARSE : CELL_BYTES));
-	if (!a.maxSnaps) a.maxSnaps = Math.round(a.mem * 1048576 * 0.45 / SNAP_BYTES);
-	a.maxSnaps = Math.max(64, a.maxSnaps);
+	if (a.mem) a.memWhy = '--mem';
+	else if (a.memTotal) { a.mem = Math.max(32, memOfTotal(a.workers, a.memTotal)); a.memWhy = '--memTotal'; }
+	else { const d = defaultMem(a.cells, a.workers, m || machineMemory()); a.mem = d.mem; a.memWhy = d.why; }
+	// (a V8 heap flag for every isolate: the budget its workers can hold, whatever asked for more)
+	const flag = heapFlagMB();
+	if (flag && heapFit(flag) < a.mem) { a.mem = Math.max(16, heapFit(flag)); a.memWhy = `the V8 flag --max-old-space-size=${flag} (NODE_OPTIONS or the command line)`; }
+	a.maxCells = Math.max(0, Math.round(a.maxCells));   // (0: the budget alone)
+	a.maxSnaps = a.maxSnaps ? Math.max(MIN_SNAPS, Math.round(a.maxSnaps)) : 0;
 	return a;
 }
 
@@ -328,13 +456,16 @@ function roomFields(L, budget) {
 	const words = new Int32Array(((doors.length + 31) >> 5) + 1);
 	const cache = new Map();   // passable-set hash -> [{bits, troOk, used}]
 	let gen = 0, clock = 0, bytes = 0, walks = 0, hits = 0, ms = 0;
+	// (a cached walk's bytes: its bitset, outside the V8 heap, and WALK_BYTES of objects, the typed array's and the
+	// cache's)
+	const WALK_BYTES = 300;
 	const evict = () => {
 		// (the least recently used walk; rare: a walk is added only for a new passable set or component)
 		let bk = 0, bi = -1, bu = Infinity;
 		for (const [k, list] of cache) for (let i = 0; i < list.length; i++) if (list[i].used < bu) { bu = list[i].used; bk = k; bi = i; }
 		if (bi < 0) return false;
 		const list = cache.get(bk);
-		bytes -= list[bi].bits.length;
+		bytes -= list[bi].bits.length + WALK_BYTES;
 		list.splice(bi, 1);
 		if (!list.length) cache.delete(bk);
 		return true;
@@ -394,23 +525,23 @@ function roomFields(L, budget) {
 		walks++;
 		const c = { bits, troOk, used: ++clock };
 		if (list) list.push(c); else cache.set(hk, [c]);
-		bytes += bits.length;
+		bytes += bits.length + WALK_BYTES;
 		while (bytes > budget && evict()) { /* the least recently used first */ }
 		ms += Date.now() - t0;
 		return { gain, troOk, cached: false };
 	};
-	return { enter, trophies: trophies.length, stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes }) };
+	return { enter, trophies: trophies.length, bytes: () => bytes, stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes }) };
 }
 
-/** the inputs of a path node {up, buf, o, n} (those of `up`, then buf[o .. o + n); immutable: a cell that improves gets
- *  a new node) as masks */
+/** the inputs of a path node {up, blk, o, n, refs} (those of `up`, then blk.b[o .. o + n); immutable: a cell that
+ *  improves gets a new node) as masks */
 function inputsOf(node) {
 	const parts = [];
 	let len = 0;
 	for (let q = node; q !== null; q = q.up) { parts.push(q); len += q.n; }
 	const out = new Uint8Array(len);
 	let o = 0;
-	for (let k = parts.length - 1; k >= 0; k--) { const q = parts[k]; out.set(q.buf.subarray(q.o, q.o + q.n), o); o += q.n; }
+	for (let k = parts.length - 1; k >= 0; k--) { const q = parts[k]; out.set(q.blk.b.subarray(q.o, q.o + q.n), o); o += q.n; }
 	return out;
 }
 
@@ -430,10 +561,15 @@ function explore(L, field, a, seed, ctrl, post) {
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
 	const t0 = Date.now(), tEnd = t0 + a.seconds * 1000;
 	let maxT = Math.min(a.depth, Atomics.load(ctrl, 0));
+	// the budget this worker's heap can hold: --mem, unless its heap limit is smaller than asked (a V8 flag set one for
+	// the whole process; the main thread fits --mem to the flags it sees, this is the last word; 192: the largest young
+	// generation, Node 24's)
+	const limMB = V8.getHeapStatistics().heap_size_limit / 1048576;
+	const mem = limMB < HEAP_F * a.mem + HEAP_ADD ? Math.max(16, Math.min(a.mem, heapFit(limMB - 192))) : a.mem;
 	// coarse cells: the rooms (roomOf), each with its fields (roomFields: territory gain, trophy walkable), its cells
 	// (head B samples them), its picks, its lowest-cost cell and how often it was a source; roomKey = the live state's
 	const RM = coarse ? roomOf(L) : null;
-	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, a.mem * 1048576 * 0.03))) : null;
+	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
 	const newRoom = (key, t) => {
@@ -535,19 +671,53 @@ function explore(L, field, a, seed, ctrl, post) {
 			hv[j] = v; hc[j] = c; hver[j] = ver;
 		}
 	};
-	// Snapshots (about 1150 bytes each) only for picked cells, at most --maxSnaps of them. A cell that was not picked yet
-	// (most never are) is its parent cell (the one whose runs reached it; `gen` counts the parent's state changes) plus
-	// the inputs of its run so far (node.buf[node.o ..+ node.n)): its first pick replays those from the parent's snapshot,
-	// or, when that is gone (the budget) or the parent's state changed, its whole path from the start. The budget drops
-	// the snapshot picked least recently (a second chance for one picked since it last came up). Exact either way: the
-	// same inputs from the same state give the same state.
+	// Snapshots (about 1150 bytes each) only for picked cells, within the budget. A cell that was not picked yet (most
+	// never are) is its parent cell (the one whose runs reached it; `gen` counts the parent's state changes) plus the
+	// inputs of its run so far (its path node: blk.b[o ..+ n)): its first pick replays those from the parent's snapshot, or,
+	// when that is gone (the budget, or the parent swept) or the parent's state changed, its whole path from the start. The
+	// budget drops the snapshot picked least recently (a second chance for one picked since it last came up). Exact either
+	// way: the same inputs from the same state give the same state.
 	const startSnap = sim.snapshot();
 	let nSnaps = 0, replays = 0, dropped = 0, qh = 0;
 	let queue = [];
+	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
+	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
+	let nNodes = 0, nBlocks = 0;
+	const archiveBytes = () => cells.size * B_CELL + hv.length * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + roomList.length * B_ROOM +
+		(queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
+	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
+	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
+	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
+	// path nodes {up, blk, o, n, refs} (a cell's path: up's, then blk.b[o .. o + n); blk: a pick's inputs {b, refs}). refs
+	// counts what holds a node (its cell, the nodes made from it, the closest state): at 0 it is garbage, and so are the
+	// pick's inputs with their last node, so nNodes and nBlocks are exactly the live ones (an improved cell's old node lives
+	// on while nodes made from it do)
+	const mkNode = (up, blk, o, n) => {
+		if (up !== null) up.refs++;
+		if (blk.refs++ === 0) nBlocks++;
+		nNodes++;
+		return { up, blk, o, n, refs: 1 };
+	};
+	const release = (q) => {
+		while (q !== null && --q.refs === 0) {
+			nNodes--;
+			if (--q.blk.refs === 0) nBlocks--;
+			q = q.up;
+		}
+	};
+	/** the snapshot queue without the entries of cells that hold none (and without repeats) */
+	const compactQueue = () => {
+		const inQ = new Set(), q2 = [];
+		for (let i = qh; i < queue.length; i++) { const d = queue[i]; if (d.snap !== null && !inQ.has(d)) { inQ.add(d); q2.push(d); } }
+		queue = q2; qh = 0;
+	};
 	/** cell c keeps snapshot s (c has none now). Room is made first, so the new one is never the one dropped: c's runs
 	 *  start from it right after (c's older entries in the queue see no snapshot while the budget is enforced). */
 	const keepSnap = (c, s) => {
-		while (nSnaps >= a.maxSnaps && qh < queue.length) {
+		let lim = Math.floor((SNAP_TOP * budget - archiveBytes()) / B_SNAP);
+		if (a.maxSnaps && a.maxSnaps < lim) lim = a.maxSnaps;
+		if (lim < MIN_SNAPS) lim = MIN_SNAPS;
+		while (nSnaps >= lim && qh < queue.length) {
 			const d = queue[qh++];
 			if (d.snap === null) continue;
 			if (d.used) { d.used = false; queue.push(d); continue; }
@@ -556,25 +726,29 @@ function explore(L, field, a, seed, ctrl, post) {
 		c.snap = s; c.used = true; nSnaps++;
 		queue.push(c);
 		if (qh > 65536 && qh * 2 > queue.length) { queue = queue.slice(qh); qh = 0; }
+		else if (queue.length - qh > 2 * nSnaps + 4096) compactQueue();
 	};
-	let deepest = 0, full = false;
-	/** the live state (tick t, reach cost rc; reached from cell pc's state by the inputs of node; coarse cells: in room)
-	 *  into the archive; returns the cell when it is new */
-	const add = (t, rc, pc, up, buf, o, n, room) => {
+	let deepest = 0, full = false, impr = 0, needSweep = false, sweeps = 0, evicted = 0, picks = 0, sweptAt = -1e9;
+	/** the live state (tick t, reach cost rc; reached from cell pc's state by the inputs blk.b[o ..+ n) after path node up;
+	 *  coarse cells: in room) into the archive; returns the cell when it is new */
+	const add = (t, rc, pc, up, blk, o, n, room) => {
 		if (t >= maxT) return null;   // (a route from there would not be faster)
 		const k = cellKey();
 		const c = cells.get(k);
 		if (c !== undefined) {
-			c.seen++;
+			c.seen++; c.touch = picks;
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
-			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = { up, buf, o, n }; c.rc = rc; c.gen++; c.ver++;
+			const old = c.node;
+			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++;
+			release(old);
+			impr++;
 			hpush(c);
 			if (room !== null && (room.best === null || rc < room.best.rc)) room.best = c;
 			return null;
 		}
-		if (cells.size >= a.maxCells) { full = true; return null; }
-		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
+		if (!roomFor()) { full = true; needSweep = true; return null; }
+		const nc = { t, snap: null, pc, pgen: pc.gen, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks };
 		cells.set(k, nc);
 		hpush(nc);
 		if (t > deepest) deepest = t;
@@ -600,18 +774,21 @@ function explore(L, field, a, seed, ctrl, post) {
 		const rc = costOf();
 		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, 0); room0.isNew = false; }
 		const k = cellKey();
-		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false };
+		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 };
 		cells.set(k, c);
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
 		keepSnap(c, startSnap);
 		if (rc < 0) end = 'unreachable';
 	}
-	let ticks = 0, picks = 0, lastProgress = 0, refined = 0, minRc = Infinity;
+	let ticks = 0, lastProgress = 0, refined = 0, minRc = Infinity;
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
+	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
-		snaps: nSnaps, dropped, replays }, coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {});
+		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
+		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
+	coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -663,12 +840,69 @@ function explore(L, field, a, seed, ctrl, post) {
 		return bc || popA();
 	};
 	const discovery = [];   // head C (coarse cells): [cell, picks left], the newest room's last
+	/**
+	 * The sweep (between two chunks, when the archive is past its share of the budget or --maxCells): the cells no run or
+	 * pick has touched for longest go (a cell's `touch`: the pick count when a run last came through it or it was picked),
+	 * down to EVICT_TO of the share, so the archive keeps growing where the search is; never the start, a room's
+	 * lowest-cost cell or a discovery burst's cell. A cell swept takes its snapshot and its hold on its path node along
+	 * (the node lives on while other paths use it); a room left without cells goes too (made again, with no territory
+	 * gain, when a run enters it again); a cell whose parent was swept replays its whole path at its first pick. A cell a
+	 * run reaches again is a new one.
+	 */
+	const sweep = () => {
+		needSweep = false;
+		sweeps++;
+		sweptAt = picks;
+		const HB = 1024, hist = new Int32Array(HB), span = picks + 1;
+		const guard = new Set(discovery.map((d) => d[0]));
+		const keep = (c) => c.t === 0 || guard.has(c) || (c.room !== null && c.room.best === c);
+		for (let pass = 0; pass < 3; pass++) {
+			const A = archiveBytes();
+			const overN = a.maxCells ? cells.size - Math.floor(EVICT_TO * a.maxCells) : 0;
+			const want = Math.max(overN, Math.ceil(cells.size * (A - EVICT_TO * capA) / A));
+			if (want <= 0) break;
+			// the cut: the oldest touches first (a histogram of them), in the archive's order within the last bucket
+			hist.fill(0);
+			for (const c of cells.values()) if (!keep(c)) hist[Math.floor(c.touch * HB / span)]++;
+			let cut = 0, below = 0;
+			while (cut < HB && below + hist[cut] <= want) below += hist[cut++];
+			let extra = want - below, gone = 0;
+			for (const [k, c] of cells) {
+				if (keep(c)) continue;
+				const b = Math.floor(c.touch * HB / span);
+				if (b > cut || (b === cut && extra-- <= 0)) continue;
+				cells.delete(k);
+				if (c.snap !== null) { c.snap = null; nSnaps--; }
+				release(c.node);
+				c.node = null; c.pc = null; c.ver = -1;   // (ver -1: gone; its heap entries are stale)
+				gone++;
+			}
+			if (!gone) break;
+			evicted += gone;
+			// what referred to the swept cells: the rooms' lists (and rooms left empty), parents, the heap, the queue
+			if (coarse) {
+				let n = 0;
+				for (const r of roomList) {
+					r.arr = r.arr.filter((c) => c.ver >= 0);
+					if (r.sentAt !== null && r.sentAt.ver < 0) r.sentAt = null;
+					if (r.arr.length || r === room0) roomList[n++] = r;
+					else rooms.delete(r.key);
+				}
+				roomList.length = n;
+			}
+			for (const c of cells.values()) if (c.pc !== null && c.pc.ver < 0) c.pc = null;
+			compact();
+			compactQueue();
+		}
+	};
 	while (!end) {
 		// between chunks: the clock, the stop flag, the shared bound (a faster route from another worker or the editor)
 		const now = Date.now();
 		if (Atomics.load(ctrl, 1) !== 0) { end = 'stopped'; break; }
 		if (now >= tEnd) { end = 'time'; break; }
 		maxT = Math.min(maxT, Atomics.load(ctrl, 0));
+		// (at most every SWEEP_GAP picks: a sweep that could not get under the share, all protected, is not redone at once)
+		if ((needSweep || archiveBytes() > capA) && picks - sweptAt >= SWEEP_GAP) sweep();
 		if (now - lastStat >= 250) { lastStat = now; post(stat()); }
 		if (now - lastSent >= 250) { lastSent = now; sendNear(); }
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
@@ -684,7 +918,7 @@ function explore(L, field, a, seed, ctrl, post) {
 			} else if (rnd() < a.pA) e = popA();
 			else e = popB();
 			if (e === null) { end = 'exhausted'; break; }
-			e.picks++; e.ver++; picks++;
+			e.picks++; e.ver++; picks++; e.touch = picks;
 			if (coarse) e.room.picks++;
 			hpush(e);
 			if (e.snap === null) {
@@ -692,7 +926,7 @@ function explore(L, field, a, seed, ctrl, post) {
 				const q = e.node, p = e.pc;
 				if (p !== null && p.snap !== null && p.gen === e.pgen) {
 					sim.restore(p.snap);
-					for (let s = 0; s < q.n; s++) { E.applyMask(inp, q.buf[q.o + s]); sim.tick(inp); }
+					for (let s = 0; s < q.n; s++) { E.applyMask(inp, q.blk.b[q.o + s]); sim.tick(inp); }
 					ticks += q.n;
 				} else {
 					const ms = inputsOf(q);
@@ -720,7 +954,7 @@ function explore(L, field, a, seed, ctrl, post) {
 				}
 			}
 			// the pick's runs: one input buffer for all of them (run r at r x roll)
-			const buf = new Uint8Array(a.rolls * a.roll), base = e.snap, up = e.node;
+			const blk = { b: new Uint8Array(a.rolls * a.roll), refs: 0 }, buf = blk.b, base = e.snap, up = e.node;
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
 				const o = r * a.roll;
@@ -741,7 +975,7 @@ function explore(L, field, a, seed, ctrl, post) {
 						const f = { t, sec, simTicks: ticks };
 						if (!first) first = f;
 						best = f;
-						post({ type: 'finish', seed, t, sec, simTicks: ticks, inputs: C.eetasBytes(inputsOf({ up, buf, o, n: s + 1 })).toString('latin1') });
+						post({ type: 'finish', seed, t, sec, simTicks: ticks, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
 						if (a.first) end = 'finish';
 						break;
 					}
@@ -757,13 +991,17 @@ function explore(L, field, a, seed, ctrl, post) {
 						if (roomKey !== room.key) {
 							const r = rooms.get(roomKey);
 							if (r !== undefined) room = r;
-							else if (t < maxT && cells.size < a.maxCells) room = newRoom(roomKey, t);
-							else { into = false; if (t < maxT) full = true; }
+							else if (t < maxT && roomFor()) room = newRoom(roomKey, t);
+							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
 					}
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
-					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, node: { up, buf, o, n: s + 1 } };
-					const nc = into ? add(t, rc, e, up, buf, o, s + 1, room) : null;
+					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) {
+						const node = mkNode(up, blk, o, s + 1);
+						if (near !== null) release(near.node);
+						near = { rc, t, node };
+					}
+					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
 					if (nc !== null && room !== null && room.isNew) {
 						// a new room's first cell: head C's burst and a source, if it opens new territory
 						room.isNew = false;
@@ -781,7 +1019,8 @@ function explore(L, field, a, seed, ctrl, post) {
 	}
 	sendNear();
 	E.flushTicks();
-	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000, heapMB: Math.round(require('v8').getHeapStatistics().used_heap_size / 1048576) }));
+	if (typeof global.gc === 'function') global.gc();   // (node --expose-gc: the done event's heapMB is what the heap holds)
+	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000 }));
 }
 
 function workerMain() {
@@ -795,7 +1034,16 @@ async function main() {
 	try { a = parseArgs(process.argv.slice(2)); } catch (e) { console.log(JSON.stringify({ error: e.message })); process.exitCode = 2; return; }
 	let L;
 	try { L = levelOf(a); } catch (e) { console.log(JSON.stringify({ error: `cannot read the level: ${e.message}` })); process.exitCode = 2; return; }
-	settle(a, L);   // (the cells and the memory budget, for the workers too)
+	// the memory budget (for the workers too): the machine's memory, what is free, what the other searches on it claim (the
+	// registry: a first claim of this search's most goes in before the others' are read, so two searches that start
+	// together each see the other's; then the real one, refreshed every 60 s, removed at the end)
+	const m = machineMemory();
+	if (!a.mem && !a.memTotal) registryClaim(MEM_SHARE * m.total);
+	m.others = registryOthers();
+	settle(a, L, m);
+	const claimed = processMB(a.workers, a.mem) * 1048576;
+	registryClaim(claimed);
+	process.on('exit', () => registryClaim(0));
 	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
@@ -808,10 +1056,11 @@ async function main() {
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);
-	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, mem: a.mem, maxCells: a.maxCells,
-		maxSnaps: a.maxSnaps });
+	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, mem: a.mem, memWhy: a.memWhy,
+		processMB: Math.round(claimed / 1048576), machineMB: Math.round(m.total / 1048576), freeMB: Math.round(m.free / 1048576), othersMB: Math.round(m.others / 1048576),
+		maxCells: a.maxCells, maxSnaps: a.maxSnaps });
 	// the fastest verified route; the closest state
-	let route = null, first = null, near = null, nearPending = false;
+	let route = null, first = null, near = null, nearPending = false, heapWarned = false;
 	const stats = new Map(), dones = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
 	const samples = [[Date.now(), 0]];
@@ -829,7 +1078,7 @@ async function main() {
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms } : {}, { workers: a.workers }));
+		a.cells === 'coarse' ? { rooms: nRooms } : {}, { workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -845,7 +1094,12 @@ async function main() {
 		nearPending = false;
 		say({ ev: 'closest', dist: Math.round(near.rc * 1000) / 1000, tick: near.t, inputs: near.inputs });
 	};
-	const timer = setInterval(() => { progress(); flushNear(); }, 500);
+	let lastClaim = Date.now();
+	const timer = setInterval(() => {
+		progress();
+		flushNear();
+		if (Date.now() - lastClaim >= 60000) { lastClaim = Date.now(); registryClaim(claimed); }
+	}, 500);
 	if (a.stdin) {
 		// the editor: "depth D" (a route of D + 1 ticks is known) and "stop"
 		let buf = '';
@@ -867,7 +1121,13 @@ async function main() {
 		process.stdin.on('error', () => Atomics.store(ctrl, 1, 1));
 	}
 	const onMessage = (msg) => {
-		if (msg.type === 'stat' || msg.type === 'done') stats.set(msg.seed, msg);
+		if (msg.type === 'stat' || msg.type === 'done') {
+			stats.set(msg.seed, msg);
+			if (msg.budgetMB < a.mem && !heapWarned) {
+				heapWarned = true;
+				say({ ev: 'warning', text: `worker ${msg.seed}: its V8 heap limit holds ${msg.budgetMB} MB of archive, not the ${a.mem} MB asked (a V8 flag set a smaller heap for the whole process)` });
+			}
+		}
 		if (msg.type === 'closest') {
 			if (!near || msg.rc < near.rc - 1e-3 || (msg.rc <= near.rc + 1e-3 && msg.t < near.t)) { near = msg; nearPending = true; }
 		} else if (msg.type === 'source') {
@@ -889,8 +1149,9 @@ async function main() {
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
 	};
 	await Promise.all(seeds.map((seed) => new Promise((res) => {
-		// (the heap limit leaves room above the budget: the sizes per cell and snapshot are estimates)
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field }, resourceLimits: { maxOldGenerationSizeMb: Math.round(a.mem * 2 + 256) } });
+		// (the heap limit: room for the garbage between two collections above the budget, which counts what the heap holds)
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field },
+			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
 		w.on('exit', () => res());
@@ -910,7 +1171,8 @@ async function main() {
 		cells: a.cells, workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
-				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, heapMB: d.heapMB || 0 },
+				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
+				memMB: d.memMB || 0, heapMB: d.heapMB || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
@@ -922,4 +1184,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, coarseMem, discreteOf, roomOf, roomFields, inputsOf, rngOf };
+module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+	roomOf, roomFields, inputsOf, rngOf };
