@@ -505,13 +505,14 @@ function schedule() {
 	const gpu = [];
 	S.strategies.forEach((q, k) => { if ((!q.cpu || q.gpuShare) && alive(kids[k]) && !kids[k].stopWhy) gpu.push(k); });
 	if (!gpu.length) { sched = null; return; }
-	// (the wall breaker's round has the GPU to itself: the others wait between two launches, keeping their tables)
+	// (the wall breaker's round has the GPU to itself: the others wait between two launches, keeping their tables; also
+	// between its processes (every move and the relay handing over the memory, one run's end and the next's start), so
+	// the beams and the random runs do not get the GPU back for those seconds)
 	const BK = S.strategies.findIndex((q) => q.key === 'breaker');
-	if (BK >= 0 && gpu.includes(BK)) {
+	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
 		for (const k of gpu) setPaused(k, k !== BK);
-		kids[BK].hadTurn = true;
-		kids[BK].lastTurn = now;
+		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
 		return;
 	}
@@ -1881,7 +1882,8 @@ function launch(n) {
 		if (!mine()) return;
 		V.live = false;
 		if (V.readyAt) { V.usedMs += Date.now() - V.readyAt; V.readyAt = 0; }   // (its search time; the next process loads first)
-		if (ch.steerRetry && !ch.stopWhy && S.running && !S.halted && S.stage !== 'stopped') { if (V.key === 'relay' && breakerBusy()) Object.assign(V, { deferred: true, state: 'waiting', detail: 'waits while the wall breaker has the GPU' }); else if (V.key === 'explore') launchOrWait(n); else kids[n] = launch(n); save(); return; }
+		// (a retry without the steer file: during the wall breaker's round after it, the beams too; the breaker's own now)
+		if (ch.steerRetry && !ch.stopWhy && S.running && !S.halted && S.stage !== 'stopped') { if (V.key === 'relay' && breakerBusy()) Object.assign(V, { deferred: true, state: 'waiting', detail: 'waits while the wall breaker has the GPU' }); else if (V.key !== 'breaker') launchOrWait(n); else kids[n] = launch(n); save(); return; }
 		// eegpu's kernel launch failed (exit 6, 7 = the driver's watchdog) or it crashed: the GPU may have been reset.
 		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
 		// (a crash: an exception code above 255 on Windows; on Linux a signal, exit code null, that no halt sent)
