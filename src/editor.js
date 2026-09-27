@@ -1660,11 +1660,17 @@ function toolVersionProblem(cmd) {
 	p.then((why) => { if (why) toolChecked.delete(key); });   // (asked again after a rebuild)
 	return p;
 }
-/** the CPU strategies' processes: their depth bound (a route of `ticks` is known: only faster ones count) */
-function tellCpu(ticks) {
+/** the CPU strategies' processes: their depth bound (a route of `ticks` is known: only faster ones count); the one search
+ *  (its GPU bursts' route relay follows the best route) gets the route itself when another strategy found it (n) */
+function tellCpu(ticks, inputs, n) {
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if ((q.cpu || q.rolls) && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`); } catch (e) { /* gone */ } }
+		if ((q.cpu || q.rolls) && alive(ch) && ch.stdin && !ch.stdin.destroyed) {
+			try {
+				ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`);
+				if (q.gpuShare && k !== n && inputs) ch.stdin.write(`route ${inputs}\n`);
+			} catch (e) { /* gone */ }
+		}
 	});
 }
 /** one strategy's eegpu process (a new pass of the exploration too): its JSON lines update S.strategies[n] and the
@@ -2241,7 +2247,7 @@ function found(inputs, n, more) {
 	S.strategies.forEach((q, k) => {
 		if (k !== n && !q.cpu && !q.rolls && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
-	if (better) tellCpu(S.result.ticks);
+	if (better) tellCpu(S.result.ticks, S.result.inputs, n);
 	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
 	if (better) setImmediate(resumeExplore);
 	save();

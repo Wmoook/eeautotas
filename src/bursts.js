@@ -95,6 +95,20 @@ const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
+// THE ROUTE RELAY (after the first route; o.best() gives the fastest known route). Infinity Pain's routes (57-58 K ticks,
+// the known one 38,423) go the known route's way room by room (the same room changes at the same tiles, src/out/macro:
+// align.js / seg.js): the time goes inside the rooms, a third on longer paths and two thirds on slower movement (the fly
+// rooms at 1.4-1.7 px/tick where the known route flies 2.3-3.6): the random runs' paths. So once a route is known, lane
+// 0's bursts re-derive it segment by segment: a chain from the level start, each link an exhaustive burst from the
+// chain's state to the trigger of the best route's next room change (a walk field with that component as its goal, the
+// room's other triggers walls), no later than the best route gets there (--depth: its tick less the chain's length), so
+// the chain stays ahead of the best route (its lead); the last link aims at the trophy (--finish: a faster route). A link
+// that finds nothing tries the best route's own inputs from the chain's state, then the next settings (RELAY_CONFS),
+// then gives up the lead: the chain goes on from the best route's own state after that change. A pass that ends without
+// a faster route starts again with the settings rotated; a faster route (any operator's) starts a pass along it.
+// RELAY_EVERY - 1 of every RELAY_EVERY bursts of lane 0 are the relay's while a route is known (the rest: the rooms, those
+// the best route never enters first: ROUTE_ROOM_PEN off a room on it).
+const RELAY_EVERY = 4, RELAY_CONFS = [4, 3, 2, 0], RELAY_BIG_CELLS = 28, RELAY_BACK = 60, RELAY_DOOMED = 30, RELAY_STALE = 200, ROUTE_ROOM_PEN = 0.5;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -260,6 +274,17 @@ function create(o) {
 	const infoOf = (r) => {
 		if (r.info) return r.info;
 		const sim = simAt(r.inputs);
+		const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+		const I = scan(sim, [s0, ...r.entries]);
+		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it)
+		const c0 = r.trig ? compNear(s0) : -1;
+		if (c0 >= 0 && !r.info0) { r.tried.add(c0); r.info0 = true; }
+		r.info = I;
+		return r.info;
+	};
+	/** the room of state `sim` from the tiles `srcs`: its passable set (doors as they are, killers by protection), the walk
+	 *  (8-way) and the trigger components it reaches that change the room (each ends the walk there), the trophy tiles */
+	const scan = (sim, srcs) => {
 		const fg = L.fg, fl = L.flags;
 		const pass = new Uint8Array(N), wall = new Uint8Array(N);
 		for (let k = 0; k < N; k++) {
@@ -270,11 +295,10 @@ function create(o) {
 			wall[k] = solid ? 1 : 0;
 			pass[k] = solid ? 0 : door ? (sim.is_tile_solid_now(k % W, (k / W) | 0) ? 0 : 1) : deadly && !sim.is_invulnerable ? 0 : 1;
 		}
-		const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 		const seen = new Uint8Array(N), q = new Int32Array(N), term = new Uint8Array(N);
 		let qh = 0, qt = 0;
 		// (from every place the room was entered: the first arrival and each later entry elsewhere)
-		for (const e of [s0, ...r.entries]) if (!seen[e]) { seen[e] = 1; q[qt++] = e; pass[e] = 1; }
+		for (const e of srcs) if (!seen[e]) { seen[e] = 1; q[qt++] = e; pass[e] = 1; }
 		const nSrc = qt;
 		// what touching a trigger component does in this room (the engine's own answer: the room's first arrival with its
 		// centre put on the tile, one tick without input): a change by a trigger (goexplore.js roomOf byTrigger) makes it a
@@ -385,6 +409,215 @@ function create(o) {
 		}
 		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
 	};
+	// ---------------------------------------------------------------- the route relay (see RELAY_EVERY)
+	const tileOf = (sim) => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+	let compTiles = null;   // component -> its tiles (made at the relay's first use)
+	let intoMap = null;     // a portal's exit tile -> the portal tiles leading there (made at the relay's first use)
+	const portalsInto = () => {
+		if (intoMap) return intoMap;
+		intoMap = new Map();
+		if (L.portalSlot && L.portalsById) {
+			for (let i = 0; i < N; i++) {
+				const s = L.portalSlot[i];
+				if ((L.fg[i] !== 242 && L.fg[i] !== 381) || s < 0) continue;
+				const ex = L.portalsById.get(L.pTarget[s]);
+				if (!ex) continue;
+				for (let k = 0; k < ex.n; k++) {
+					const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4);
+					if (j >= 0 && j < N) { let l = intoMap.get(j); if (!l) intoMap.set(j, l = []); if (!l.includes(i)) l.push(i); }
+				}
+			}
+		}
+		return intoMap;
+	};
+	/** the route's waypoints: every room change a trigger made ({t: the tick it shows, sub, newKeys, tile, comp}; a
+	 *  change of the clock's is none), then the finish ({t: its length, finish}) */
+	const segsOf = (inputs) => {
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let key = o.RM.key(sim), cz = o.RM.cause(sim);
+		const segs = [];
+		for (let k = 0; k < inputs.length; k++) {
+			E.applyMask(inp, (inputs.charCodeAt(k) - 48) & 31);
+			sim.tick(inp);
+			const k2 = o.RM.key(sim);
+			if (k2 === key) continue;
+			const cz2 = o.RM.cause(sim);
+			if (o.RM.byTrigger(cz, cz2)) { const tile = tileOf(sim); segs.push({ t: k + 1, sub: cz2.sub, newKeys: cz2.keys & ~cz.keys, tile, comp: compNear(tile) }); }
+			key = k2; cz = cz2;
+		}
+		segs.push({ t: inputs.length, finish: true });
+		return segs;
+	};
+	/** does `inputs` end in waypoint s's room (the change's part the ball makes: roomOf cause().sub, and the key it took)? */
+	const inSeg = (sim, s) => { const cz = o.RM.cause(sim); return cz.sub === s.sub && (cz.keys & s.newKeys) === s.newKeys; };
+	/** the walk field from `sim` to waypoint s (the trigger's component; the trophy for the finish): the room's other
+	 *  triggers are walls (past one the ball is in another room); {walk, mx, v (the start's value)} or null (no way) */
+	const segField = (sim, s, loose = false) => {
+		const t0 = tileOf(sim);
+		const I = scan(sim, [t0]);
+		let goals;
+		if (s.finish) goals = I.trophies.length ? I.trophies : Array.from({ length: N }, (_, k) => k).filter((k) => L.fg[k] === 121);
+		else if (s.comp >= 0) {
+			if (!compTiles) { compTiles = new Map(); for (let k = 0; k < N; k++) { const c = TR.comp[k]; if (c >= 0) { let l = compTiles.get(c); if (!l) compTiles.set(c, l = []); l.push(k); } } }
+			goals = compTiles.get(s.comp) || [s.tile];
+		} else goals = [s.tile];
+		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
+		let qh = 0, qt = 0, mx = 0;
+		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
+		const into = portalsInto();
+		while (qh < qt) {
+			const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+			// (portals: a step from the portal's tile to its exit; Infinity Pain's way to the trophy takes one)
+			for (const p of into.get(t) || []) if (walk[p] === CUT && I.pass[p]) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (walk[j] !== CUT || !I.pass[j] || (!loose && I.term[j] && j !== t0)) continue;
+					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
+					walk[j] = d; if (d > mx) mx = d; q[qt++] = j;
+				}
+			}
+		}
+		if (walk[t0] === CUT) return null;
+		return { walk, mx: Math.max(mx, 5), v: walk[t0] };
+	};
+	// (prefix: the chain's inputs; segStart: the chain where its segment began, a waypoint's arrival)
+	const relay = { base: null, segs: null, i: 0, prefix: '', segStart: '', lead: 0, pass: 0, tries: 0, turn: 0, keys: null, hist: [] };
+	Object.assign(st, { relayBursts: 0, relaySegs: 0, relayLinks: 0, relayFalls: 0, relayBacks: 0, relayResets: 0, relayPasses: 0, relayLead: 0, relayBestLead: 0 });
+	/** the room keys along the best route (the rooms it enters: the other rooms' bursts come first after a route) */
+	const routeKeys = () => {
+		const b = o.best && o.best();
+		if (!b) return null;
+		if (relay.keysOf !== b.inputs) {
+			relay.keysOf = b.inputs;
+			relay.keys = new Set();
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			relay.keys.add(o.RM.key(sim));
+			for (let k = 0; k < b.inputs.length; k++) { E.applyMask(inp, (b.inputs.charCodeAt(k) - 48) & 31); sim.tick(inp); relay.keys.add(o.RM.key(sim)); }
+		}
+		return relay.keys;
+	};
+	/** the chain gives up its lead: on from the best route's own state after waypoint i */
+	const relayReset = () => {
+		const s = relay.segs[relay.i];
+		relay.prefix = relay.segStart = relay.base.slice(0, s.t); relay.lead = 0; relay.i++; relay.tries = 0; relay.hist = []; st.relayResets++;
+	};
+	/** a pass from the level start along the best route (after the last pass ended) */
+	const relayPass = (b) => {
+		if (relay.base !== b.inputs) relay.pass = 0; else relay.pass++;
+		relay.base = b.inputs; relay.segs = segsOf(b.inputs); relay.i = 0; relay.prefix = relay.segStart = ''; relay.lead = 0; relay.tries = 0; relay.hist = [];
+		st.relayPasses++;
+	};
+	/** the relay's next burst (null: none now) */
+	const relayJob = (lane, left) => {
+		const b = o.best && o.best();
+		// (not with goexplore.js --prefix: the gate benchmark's searches start past the level start)
+		if (!b || o.minLen) return null;
+		// (a few waypoints at most per call: each costs a replay of the chain; the loop goes on at the next burst)
+		for (let guard = 0; guard < 8; guard++) {
+			// (a pass follows its route to the end: the CPU's random runs make a route a few ticks faster every minute or so, and
+			// starting over at each would never reach the far segments; the links' --depth and the finish count the bound)
+			// (but a best route shorter than the chain could make (its route's length less its lead, RELAY_STALE ticks to
+			// spare) ends the pass: on Infinity Pain head L's routes went 57,690 -> 51,860 in 5 minutes while a pass along the
+			// first route was at segment 30 of 127)
+			if (!relay.segs || relay.i >= relay.segs.length || (b.inputs !== relay.base && b.inputs.length < relay.base.length - Math.max(0, relay.lead) - RELAY_STALE)) relayPass(b);
+			const s = relay.segs[relay.i];
+			const sim = simAt(relay.prefix);
+			// (the room's other triggers walls, else (the engine's test of a trigger is a centred ball at rest: Infinity Pain's route
+			// passes a low-gravity tile on its way to the trophy with no change) through them: the link's end is checked anyway)
+			const f = segField(sim, s) || segField(sim, s, true);
+			if (!f) { relay.prefix = relay.segStart; if (!relayFallback(simAt(relay.prefix))) relayReset(); continue; }
+			// (the last try, before the chain gives up its lead: RELAY_BIG, the wall breaker's way: a table 4x larger, a
+			// layer of 1 M, twice the time)
+			const big = relay.tries >= RELAY_CONFS.length;
+			const ci = big ? 0 : RELAY_CONFS[(relay.tries + relay.pass) % RELAY_CONFS.length];
+			const from = relay.i ? relay.segs[relay.i - 1].t : 0;
+			return { lane, r: null, relay: s, seg: relay.i, inputs: relay.prefix, conf: ci, cells: CONFS[ci], reach: steerFile(f.walk, f.mx, lane),
+				// (a retry has no cost ceiling: the walk field knows no physics, and Infinity Pain's low-gravity segment 4 leaves it)
+				slack: relay.tries > 0 ? 0 : Math.round(SLACK + SLACK_F * f.v / 5),
+				depth: Math.max(1, s.t - relay.prefix.length), seconds: Math.max(2, Math.min(a.burstS * (big ? 2 : 1), Math.floor(left - 1))), startDist: f.v / 5, chain: 0,
+				gpuCells: big ? Math.min(RELAY_BIG_CELLS, a.gpuCells + 2) : 0, capAll: big,
+				what: `the route relay: segment ${relay.i + 1}/${relay.segs.length} (the best route's ticks ${from}-${s.t}${s.finish ? ', the trophy' : ''}), lead ${relay.lead}, settings ${ci}${big ? ' (big)' : ''}, pass ${relay.pass + 1}` };
+		}
+		return null;
+	};
+	/** the best route's own inputs for the chain's segment, from the chain's state: the chain goes on when they make the
+	 *  segment's room change no later than the best route (true) */
+	const relayFallback = (sim) => {
+		const s = relay.segs[relay.i];
+		if (s.finish) return false;
+		const from = relay.i ? relay.segs[relay.i - 1].t : 0, inp = new E.EEInput();
+		const key0 = o.RM.key(sim);
+		for (let k = from; k < s.t + 3 && relay.prefix.length + (k - from) < s.t; k++) {
+			E.applyMask(inp, (relay.base.charCodeAt(k) - 48) & 31);
+			sim.tick(inp);
+			if (sim.is_dead) return false;
+			if (o.RM.key(sim) !== key0) {
+				if (!inSeg(sim, s)) return false;
+				relay.prefix += relay.base.slice(from, k + 1);
+				relay.segStart = relay.prefix;
+				relay.lead = s.t - relay.prefix.length; relay.i++; relay.tries = 0; st.relayFalls++;
+				return true;
+			}
+		}
+		return false;
+	};
+	/** a relay burst's end: the chain goes on (a link, or the best route's own inputs), tries the next settings, or gives
+	 *  up its lead */
+	const relayDone = (job, r) => {
+		st.relayBursts++;
+		if (job.relay !== relay.segs[relay.i] || job.inputs !== relay.prefix) return;   // (a newer pass began)
+		const s = job.relay;
+		if (s.finish) {
+			// (a faster route went to o.finish, and the next pass follows it; else the best route's own last inputs from the
+			// chain's state, a route when they finish sooner)
+			if (!r.hit && relay.lead > 0) {
+				const from = relay.i ? relay.segs[relay.i - 1].t : 0;
+				const ms = Uint8Array.from(relay.prefix + relay.base.slice(from), (c) => (c.charCodeAt(0) - 48) & 31);
+				const ev = C.evaluate(L, ms, false);
+				if (ev && ev.ms.length < relay.base.length) { o.finish(ev.ms, 'relay'); st.relayFalls++; }
+			}
+			relay.i++;
+			return;
+		}
+		if (r.reached && r.best) {
+			const sim = simAt(r.best);
+			if (!sim.is_dead && inSeg(sim, s) && r.best.length <= s.t) {
+				relay.hist.push({ i: relay.i, segStart: relay.segStart, lead: relay.lead, tries: relay.tries });
+				if (relay.hist.length > 8) relay.hist.shift();
+				relay.prefix = relay.segStart = r.best; relay.lead = s.t - r.best.length; relay.i++; relay.tries = 0; st.relaySegs++;
+				st.relayLead = relay.lead; if (relay.lead > st.relayBestLead) st.relayBestLead = relay.lead;
+				return;
+			}
+		}
+		// (a doomed arrival: the first try from the segment's start ran out of states within RELAY_DOOMED layers, nothing
+		// nearer; Infinity Pain's segment 9 in 4 layers, five times: the last link again with its next settings, which arrive
+		// otherwise)
+		if (!r.reached && relay.tries === 0 && job.inputs === relay.segStart && r.end === 'exhausted' && r.layers < RELAY_DOOMED && relay.hist.length && relay.lead > 0) {
+			const h = relay.hist.pop();
+			relay.i = h.i; relay.prefix = relay.segStart = h.segStart; relay.lead = h.lead; relay.tries = h.tries + 1; st.relayBacks++;
+			return;
+		}
+		// (nearer without reaching the trigger: a long segment fills the table; the chain goes on from its nearest attempt,
+		// RELAY_BACK ticks back (the nearest is often doomed), the same segment, like the rooms' bursts' chain)
+		if (!r.reached && r.best && Number.isFinite(r.near) && r.near < job.startDist - 1 && r.best.length > relay.prefix.length + RELAY_BACK + 10) {
+			relay.prefix = r.best.slice(0, r.best.length - RELAY_BACK); st.relayLinks++;
+			return;
+		}
+		// (no nearer: back to the segment's start (a chained link may be in a pocket the walk field lured it into: Infinity
+		// Pain's low-gravity segment 4 from 116 tiles out, five tries), the best route's own inputs from there, the next settings)
+		relay.prefix = relay.segStart;
+		if (relayFallback(simAt(relay.prefix))) return;
+		// (a chain ahead of the best route tries every setting and the big burst before it gives up its lead; one without a
+		// lead loses nothing by going on from the best route's own state: two tries)
+		if (++relay.tries < (relay.lead > 0 ? RELAY_CONFS.length + 1 : 2)) return;
+		relayReset();
+	};
 	/** every worker's cell of room r nearest the field's goals (the nearest of all; null when none has one) */
 	const nearestCell = (r, walk) => new Promise((res) => {
 		const id = ++reqId;
@@ -456,10 +689,12 @@ function create(o) {
 		// (the rooms by score; a room's field (a replay and two walks) only for the best ones until one has a target: a
 		// level of many switches has thousands of rooms)
 		const cand = [];
+		// (a route known: the rooms it never enters first, where a faster way may start)
+		const onRoute = routeKeys();
 		for (const r0 of rooms.values()) {
 			for (const r of [r0, r0.pa]) {
-				if (r.done || r.busy) continue;
-				cand.push([r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n), r]);
+				if (!r || r.done || r.busy) continue;
+				cand.push([(r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n)) - (onRoute && onRoute.has((r.base || r).key) ? ROUTE_ROOM_PEN : 0), r]);
 			}
 		}
 		cand.sort((x, y) => y[0] - x[0]);
@@ -488,10 +723,11 @@ function create(o) {
 		try { fs.unlinkSync(stop); } catch (e) { /* none */ }
 		fs.writeFileSync(pre, Buffer.from(job.inputs, 'latin1'));
 		const T = o.bound();
-		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
+		let depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
+		if (job.depth > 0) depth = Math.min(depth, job.depth);
 		const c = job.cells;
 		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0',
-			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
+			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${job.gpuCells || a.gpuCells}`, `--cap=${a.burstCap > 0 && !job.capAll ? Math.min(c.cap, a.burstCap) : c.cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), ...(job.steer ? [`--steer=${job.steer}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();
 		let ch;
@@ -499,7 +735,9 @@ function create(o) {
 		const cmd = /\.js$/i.test(tool) ? [process.execPath, tool, ...args] : [tool, ...args];
 		try { ch = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true }); } catch (e) { res({ end: `spawn: ${e.message}`, sec: 0, fail: true }); return; }
 		children.add(ch);
-		let buf = '', done = null, reached = false, changed = false, fresh = 0, near = Infinity, readyAt = 0, err = '', ended = false, best = null;
+		let buf = '', done = null, reached = false, changed = false, fresh = 0, near = Infinity, readyAt = 0, err = '', ended = false, best = null, hit = false;
+		// (a room's burst and the route relay's link aim at triggers: an attempt on one goes into the room it makes)
+		const aimed = !!(job.r || job.relay);
 		const halt = () => { if (!ended) { ended = true; try { fs.writeFileSync(stop, '1'); } catch (e) { /* gone */ } } };
 		job.halt = halt;
 		const onLine = (line) => {
@@ -513,6 +751,7 @@ function create(o) {
 				const masks = Uint8Array.from(e.inputs, (ch2) => (ch2.charCodeAt(0) - 48) & 31);
 				o.finish(masks, 'burst');
 				st.finishes++;
+				hit = true;
 				return;
 			}
 			if (e.ev === 'closest' && e.inputs && !e.cut) {
@@ -521,7 +760,10 @@ function create(o) {
 				near = d;
 				let inputs = String(e.inputs);
 				let tile = -1;
-				if (job.r && d <= 1e-3) {
+				// (a relay link's nearer attempt short of its trigger: only kept (the explore's attempts live); a replay and an
+				// import of a whole route's length each, dozens a link, would cost more than the link)
+				if (job.relay && d > 1e-3) { best = inputs; return; }
+				if (aimed && d <= 1e-3) {
 					// a target reached: its trigger is tried from this room (the next burst aims at the rest); the attempt goes on
 					// into the room the trigger makes, when it makes one
 					const rp0 = replay(inputs, null, true);
@@ -536,10 +778,10 @@ function create(o) {
 					o.broadcast(inputs);
 					st.imports++;
 				}
-				if (job.r && d <= 1e-3) {
+				if (aimed && d <= 1e-3) {
 					reached = true;
 					const cc = compNear(tile >= 0 ? tile : rp ? rp.tile : -1);
-					if (cc >= 0) job.r.tried.add(cc);
+					if (cc >= 0 && job.r) job.r.tried.add(cc);
 					halt();
 				}
 			}
@@ -554,7 +796,7 @@ function create(o) {
 		ch.on('close', (code) => {
 			children.delete(ch);
 			const sec = (Date.now() - (readyAt || t0)) / 1000;
-			res({ end: done ? done.end : `exit ${code}${err ? `: ${err.trim().split('\n').pop()}` : ''}`, sec, wall: (Date.now() - t0) / 1000, reached, changed, fresh, near, best, fail: !done && !ended && !stopped,
+			res({ end: done ? done.end : `exit ${code}${err ? `: ${err.trim().split('\n').pop()}` : ''}`, sec, wall: (Date.now() - t0) / 1000, reached, changed, fresh, near, best, hit, fail: !done && !ended && !stopped,
 				states: done ? done.states : 0, layers: done ? done.layers : 0 });
 		});
 	});
@@ -571,9 +813,13 @@ function create(o) {
 			const now = o.sec();
 			const left = a.seconds - now;
 			if (left < 3) break;
-			let job = null;
-			const p = next ? null : pick();
-			if (next) {
+			let job = null, p = null;
+			// (a route known: lane 0's bursts are mostly the route relay's)
+			if (!next && lane === 0 && o.best && o.best() && relay.turn++ % RELAY_EVERY !== RELAY_EVERY - 1) job = relayJob(lane, left);
+			if (!job) p = next ? null : pick();
+			if (job) {
+				// (the route relay's link: see relayJob)
+			} else if (next) {
 				job = Object.assign(next, { seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))) });
 				next = null;
 				if (job.r) job.r.busy = true; else trophyArm.busy = true;
@@ -609,7 +855,25 @@ function create(o) {
 					startDist: nr.rc, chain: 0, what: `the trophy (the nearest attempt, ${back} back)` };
 			} else { await sleep(1000); continue; }
 			const r = await burst(job);
-			if (job.r) job.r.busy = false; else trophyArm.busy = false;
+			if (job.r) job.r.busy = false; else if (!job.relay) trophyArm.busy = false;
+			if (job.relay) {
+				// (the relay: a GPU out of memory waits like any burst; any other failure is the link's: the chain's next try)
+				if (r.fail && /out of memory/i.test(r.end)) {
+					st.failed++; st.oom++;
+					const w = Math.min(OOM_WAIT_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 << oom));
+					o.say({ ev: 'warning', text: `burst: ${r.end}: again in ${w} s` });
+					for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100);
+					oom = Math.min(8, oom + 1);
+					continue;
+				}
+				if (r.fail) { st.failed++; o.say({ ev: 'warning', text: `burst: ${r.end}` }); } else { oom = 0; st.bursts++; st.sec += r.sec; }
+				const lead0 = relay.lead;
+				relayDone(job, r);
+				o.say({ ev: 'burst', n: st.bursts, room: null, relay: true, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end, reached: r.reached,
+					hit: r.hit, dist: Number.isFinite(r.near) ? Math.round(r.near * 10) / 10 : null, startDist: Math.round(job.startDist * 10) / 10, states: r.states, layers: r.layers,
+					seg: job.seg, segs: relay.segs.length, lead: relay.lead, lead0, next: relay.i, at: o.sec() });
+				continue;
+			}
 			if (r.fail) {
 				st.failed++;
 				// (the GPU's memory taken by the other tools (every move's table, the beams, the random runs' pool, other
@@ -670,6 +934,8 @@ function create(o) {
 	};
 	return {
 		room, edge, triggers: TR.n,
+		// (the route relay's pieces, for measurement scripts: src/out/macro)
+		relayParts: { segsOf, segField, simAt, inSeg },
 		start: () => { loopP = Promise.all(Array.from({ length: Math.max(1, a.burstPar) }, (_, k) => loop(k))).catch((e) => o.say({ ev: 'warning', text: `bursts: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` })); return loopP; },
 		/** ends the running burst between two launches and the loop; resolves once its process is gone */
 		stop: async () => {
