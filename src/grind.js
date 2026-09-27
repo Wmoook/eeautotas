@@ -9,10 +9,12 @@
 //
 // A round takes about --roundMin minutes (10): mutate, the exact endgame solver (endgame.js, when the ending changed),
 // the sweep (explore --hunt windows over the whole run, several at once, src/sweep.js; windows that came back empty
-// rest), deep exploring windows (the run's loops first, then from where the last one stopped; every other one skip hunting),
+// rest), deep exploring windows (the windows a sweep lane found empty, once with all the threads, first; the run's loops;
+// then from where the last one stopped; every other one skip hunting),
 // the skip search (skips.js, once per best: pass-bys and loops, entrances, every move from them), mutate, a slice of
 // the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin doors when the coins
-// count), mutate, a beam every other round, a splice of all results. Where it is (round, stage, the deep and shortcuts
+// count), mutate, a beam every other round (not when the last one ran out of time at a speed that cannot reach the
+// finish: then more full-budget windows), a splice of all results. Where it is (round, stage, the deep and shortcuts
 // cursors as ticks + state hashes, the seed counter, the best the skip search last covered) is saved in status.json
 // `cursor` after every stage, so a restart continues there instead of repeating round 1.
 // Without the GPU, mutate only searches the start ticks whose next ~800 ticks changed since its last full pass
@@ -576,6 +578,143 @@ function ownSaving(outFile, refTicks) {
 	const r = evalRun(outFile);
 	return r && r.runTicks < refTicks ? refTicks - r.runTicks : 0;
 }
+/** where the window [w0, w1] of the current best is, for the memory (the full-budget stage finds it again by h0) */
+const atOf = (w0, w1) => ({ h0: bestTrace().tr.H[w0], w0, len: w1 - w0 });
+
+/**
+ * One explore window from a fixed copy of the best (the sweep's lanes and the full-budget windows): explore.js on
+ * [w0, w1] with `per` threads for `secs` s; on time-door levels (an exact rejoin there needs a saving that is a multiple
+ * of 1000 ticks) it rejoins by the clock-blind hash and phase.js replays its edges plain or with the clock re-synced in
+ * the idle start. Every output is offered (consider) and kept for the round's splice.
+ * o: {name, w0, w1, per, secs, mode, seed, ref (file), refMs, refTicks, out, log, pout, plog}.
+ * Resolves {res, saved (the ticks its own output saves against refTicks), got (consider's verdict or null), runOut}.
+ */
+async function exploreWindow(o) {
+	const TD = !!level.hasTimeDoors;
+	C.writeEetas(o.ref, o.refMs);
+	try { fs.unlinkSync(o.out); } catch (e) { /* none */ }
+	try { fs.unlinkSync(`${o.out}.edges.json`); } catch (e) { /* none */ }
+	const mode = [...o.mode];
+	// (time doors: rejoins by the clock-blind hash, as edges for phase.js; --hunt and --tails write them)
+	if (TD) mode.push('--clockblind=1', ...(mode.includes('--hunt=1') || mode.includes('--tails=1') ? [] : ['--tails=1']));
+	const res = await runTool('explore.js', [`--tas=${o.ref}`, `--out=${o.out}`, `--from=${o.w0}`, `--join=${o.w0}`, `--until=${o.w1}`,
+		`--seconds=${o.secs}`, `--workers=${o.per}`, '--exact=1', ...mode, `--seed=${o.seed}`, `--nocoins=${NC}`,
+		'--maxEntries=1500000', LVL],
+		(o.secs + 300) * 1000, o.log);
+	let saved = ownSaving(o.out, o.refTicks), runOut = o.out;
+	let got = fs.existsSync(o.out) ? consider(o.out, o.name) : null;
+	if (got) addResult(o.out);
+	if (TD && fs.existsSync(`${o.out}.edges.json`) && Date.now() < deadline - 60000) {
+		// the window's clock-blind edges, each replayed plain or with the clock re-synced in the idle start, combined
+		try { fs.unlinkSync(o.pout); } catch (e) { /* none */ }
+		await runTool('phase.js', [`--tas=${o.ref}`, `--out=${o.pout}`, LVL, `--nocoins=${NC}`, `--edges=${o.out}.edges.json`, `--from=${o.w0}`, `--to=${o.w0 + 1}`,
+			'--random=0', '--seconds=5'], Math.max(30e3, Math.min(300e3, deadline - Date.now() - 30e3)),   // (not past the deadline)
+			o.plog);
+		const ps = ownSaving(o.pout, o.refTicks);
+		if (fs.existsSync(o.pout)) {
+			const pg = consider(o.pout, `${o.name} (time doors)`);
+			addResult(o.pout);
+			if (ps > saved) { saved = ps; runOut = o.pout; got = pg; }
+		}
+	}
+	return { res, saved, got, runOut };
+}
+
+// ---------------------------------------------------------------- full-budget windows: a window a thin search found empty
+// A sweep lane searches a window with its share of the threads (IP 3 x 120 s, ice 2 x 120 s). Before the window memory
+// counts such a window as searched (and rests it after 2 empty searches), it owes it ONE search with all the threads
+// (sweep.js `due`): explore --hunt with the deep windows' cells (--roll=100 --cell=8 --vcell=2 --ahead=0.5), FULL_S s.
+// Measured on the same windows (src/out/night/autotas_gap2.md; the spots where the known runs are faster): the lane's
+// budget vs all the threads, Infinity Pain's fly shaft 0 -> 248 ticks, the ice level's slope 7 -> 29 and 16 -> 25, 0 -> 5.
+// They run first in the deep stage (before the segment windows) and in a beam slot the beam cannot use (below).
+const FULL_S = 150;
+let fullN = 0;
+const fullTried = { round: 0, set: new Set() };   // (records tried this round: a crash is no evidence, but not again now)
+/** the next window the memory owes a full-budget search, on the current best: the first at or after the full-budget cursor
+ *  (cur.full, tick + state hash) in run order, else the first; null when none */
+function nextFull(round) {
+	if (fullTried.round !== round) { fullTried.round = round; fullTried.set = new Set(); }
+	const due = memo.due().filter((r) => !fullTried.set.has(r));
+	if (!due.length) return null;
+	const b = bestTrace(), H = b.tr.H, n = b.tr.n;
+	const tick = new Map(due.map((r) => [r.at.h0, -1]));
+	for (let t = 0; t <= n; t++) if (tick.get(H[t]) === -1) tick.set(H[t], t);
+	const from = cursorTick(cur.full);
+	let first = null, next = null;
+	for (const r of due) {
+		let w0 = tick.get(r.at.h0);
+		if (!(w0 >= 0)) w0 = r.at.w0 | 0;   // (its first state is gone: where it was, if the memory still sees the same span there)
+		w0 = Math.max(0, Math.min(w0, n - 1));
+		const w1 = Math.min(n, w0 + Math.max(1, r.at.len | 0));
+		const m = memoWin(w0, w1, round);
+		if (!m.st.full || m.st.rec !== r) continue;   // (changed inside: the thin searches take it first; or another span now)
+		const c = { w0, w1, sig: m.sig, rec: r };
+		if (!first || w0 < first.w0) first = c;
+		if (w0 >= from && (!next || w0 < next.w0)) next = c;
+	}
+	return next || first;
+}
+/** one full-budget window (all the threads); the memory records it as 'full'. Resolves exploreWindow's result. */
+async function fullWindow(c, round) {
+	fullTried.set.add(c.rec);
+	const k = ++fullN;
+	const name = `full${round}_${k}`;
+	const secs = Math.max(30, Math.min(DEEP_S || FULL_S, FOREVER ? 1e9 : (deadline - Date.now()) / 1000 - 150));
+	const refMs = best.ms, refTicks = best.runTicks, at = atOf(c.w0, c.w1);
+	const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
+	checkInbox();
+	log(`${name} (full-budget hunt window ticks ${c.w0}-${c.w1} of ${bestTrace().tr.n}: empty at a lane's budget ${c.rec.fails} time${c.rec.fails === 1 ? '' : 's'}; ` +
+		`${W} threads, ${Math.round(secs)} s)...`);
+	saveStatus({ stage: name, round });
+	const r = await exploreWindow({ name, w0: c.w0, w1: c.w1, per: W, secs: Math.round(secs), seed, refMs, refTicks,
+		mode: ['--roll=100', '--cell=8', '--vcell=2', '--ahead=0.5', ...(a.hunt !== '0' ? ['--hunt=1'] : EXP_EXTRA)],
+		ref: path.join(OUT, 'grind_full_ref.eetas'), out: path.join(OUT, `grind_deep_${round}_full${k}.eetas`), log: path.join(OUT, `grind_full${round}_${k}.log`),
+		pout: path.join(OUT, `grind_deep_${round}_full${k}p.eetas`), plog: path.join(OUT, `grind_full${round}_${k}p.log`) });
+	if (searched(r.res, r.saved)) { memo.record(c.sig, r.saved, round, 'full', at); saveMemo(); }
+	saveCursor({ full: cursorAt(c.w0 + 1) });
+	log(`${name}: ${r.saved > 0 ? `its window saves ${r.saved}` : 'nothing in this window'}${r.res && r.res.killed ? ' (stopped)' : ''}`);
+	return r;
+}
+/** full-budget windows while the memory owes any, until `untilMs` of the round is used; returns how many ran */
+async function fullWindows(round, untilMs) {
+	let ran = 0;
+	while (roundUsed() < untilMs - 60e3 && Date.now() < deadline - 180000) {
+		const c = nextFull(round);
+		if (!c) break;
+		await fullWindow(c, round);
+		ran++;
+	}
+	return ran;
+}
+
+// ---------------------------------------------------------------- the whole-run beam: skipped when it cannot reach the finish
+// optimize.js follows the whole run to the finish and writes nothing when its time runs out. On Infinity Pain (39-58k
+// ticks) every beam ran out of time (the A100's 5 h grind: 4 of 4 beams, 40 of ~277 stage minutes, 14%). The speed of
+// the last beam that ran out (steps per second at its width, cursor `beam`) says whether the next one can finish in the
+// time it gets; one that cannot is skipped and its time goes to the full-budget windows.
+/** why the next beam (width `width`, `maxMs` of time) cannot finish, or '' */
+function beamOut(width, maxMs) {
+	const bm = cur.beam;
+	if (!bm || !(bm.sps > 0) || W > 1.5 * (bm.W || W)) return '';
+	const n = bestTrace().tr.n;
+	const sps = bm.sps * (bm.width || width) / width;   // (steps per second fall with the width)
+	const need = n / sps;
+	if (need * 1000 <= maxMs) return '';
+	return `the last beam that ran out of time reached tick ${bm.t} of ${bm.n} at ${bm.sps.toFixed(1)} steps/s, ${bm.width} wide: ` +
+		`this one (${width} wide, ${n} ticks) would need ~${Math.round(need / 60)} min, it gets ${Math.round(maxMs / 60e3)}`;
+}
+/** after a beam: its speed when it ran out of time (cursor `beam`), else none */
+function beamRecord(res, width, ms) {
+	if (!res) return;
+	if (!res.killed) { if (cur.beam) { cur.beam = null; saveCursor(); } return; }
+	const out = res.out || '';
+	let t = 0, sps = 0;
+	for (const m of out.matchAll(/\[opt\]\s+tick (\d+): beam \d+, best progress -?\d+ .*?, ([\d.]+) steps\/s/g)) { t = +m[1]; sps = +m[2]; }
+	const nm = out.match(/reference completes at tick (\d+)/);
+	if (!(sps > 0)) sps = 500 / Math.max(1, ms / 1000);   // (not even 500 steps: at most that fast)
+	cur.beam = { sps, width, W, t, n: nm ? +nm[1] : bestTrace().tr.n };
+	saveCursor();
+}
 
 // ---------------------------------------------------------------- the sweep: hunt windows over the whole run, several at once
 // explore --hunt windows of SWEEP_LEN ticks every SWEEP_STEP ticks over the WHOLE run, run side by side in lanes of the CPU
@@ -705,43 +844,18 @@ async function sweepStage(round) {
 			if (!win) { over = true; return; }
 			inflight.add(win.sig);
 			const id = idx++;
-			const ref = path.join(OUT, `grind_sweep_ref${k}.eetas`);
-			const refMs = best.ms;
-			C.writeEetas(ref, refMs);
-			const refTicks = best.runTicks;
-			const out = path.join(OUT, `grind_deep_${round}_sw${id}.eetas`);
-			try { fs.unlinkSync(out); } catch (e) { /* none */ }
-			try { fs.unlinkSync(`${out}.edges.json`); } catch (e) { /* none */ }
+			const refMs = best.ms, refTicks = best.runTicks, at = atOf(win.w0, win.w1);
 			const name = `sweep${round}_${id + 1}`;
 			const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
 			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads)...`);
-			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : [...EXP_EXTRA];   // (a copy: mode.push below)
-			// (time doors: rejoins by the clock-blind hash, as edges for phase.js; --hunt and --tails write them)
-			if (TD) mode.push('--clockblind=1', ...(mode.includes('--hunt=1') || mode.includes('--tails=1') ? [] : ['--tails=1']));
-			const res = await runTool('explore.js', [`--tas=${ref}`, `--out=${out}`, `--from=${win.w0}`, `--join=${win.w0}`, `--until=${win.w1}`,
-				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${NC}`,
-				'--maxEntries=1500000', LVL],
-				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`));
-			let saved = ownSaving(out, refTicks), runOut = out;
-			let got = fs.existsSync(out) ? consider(out, name) : null;
-			if (got) addResult(out);
-			if (TD && fs.existsSync(`${out}.edges.json`) && Date.now() < deadline - 60000) {
-				// the window's clock-blind edges, each replayed plain or with the clock re-synced in the idle start, combined
-				const po = path.join(OUT, `grind_deep_${round}_sw${id}p.eetas`);
-				try { fs.unlinkSync(po); } catch (e) { /* none */ }
-				await runTool('phase.js', [`--tas=${ref}`, `--out=${po}`, LVL, `--nocoins=${NC}`, `--edges=${out}.edges.json`, `--from=${win.w0}`, `--to=${win.w0 + 1}`,
-					'--random=0', '--seconds=5'], Math.max(30e3, Math.min(300e3, deadline - Date.now() - 30e3)),   // (not past the deadline)
-					path.join(OUT, `grind_sweep${round}_${id}p.log`));
-				const ps = ownSaving(po, refTicks);
-				if (fs.existsSync(po)) {
-					const pg = consider(po, `${name} (time doors)`);
-					addResult(po);
-					if (ps > saved) { saved = ps; runOut = po; got = pg; }
-				}
-			}
+			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : [...EXP_EXTRA];
+			const { res, saved, got, runOut } = await exploreWindow({ name, w0: win.w0, w1: win.w1, per, secs, mode, seed, refMs, refTicks,
+				ref: path.join(OUT, `grind_sweep_ref${k}.eetas`), out: path.join(OUT, `grind_deep_${round}_sw${id}.eetas`), log: path.join(OUT, `grind_sweep${round}_${id}.log`),
+				pout: path.join(OUT, `grind_deep_${round}_sw${id}p.eetas`), plog: path.join(OUT, `grind_sweep${round}_${id}p.log`) });
 			inflight.delete(win.sig);
 			done.push(win.sig);
-			if (searched(res, saved)) { memo.record(win.sig, saved, round); saveMemo(); }
+			// (a lane's share of the threads is a thin search: an empty one owes the window a full-budget search, fullWindow)
+			if (searched(res, saved)) { memo.record(win.sig, saved, round, per >= W ? 'full' : 'thin', at); saveMemo(); }
 			// a stale find: the window again on the current best (once per sweep; a redo's own find is not redone)
 			let again = '';
 			if (saved > 0 && got && !got.accepted && !got.spliced && !win.redo && !redone.has(win.sig)) {
@@ -795,7 +909,7 @@ async function loopWindows(round, max = 5) {
 		const l = nl.l, m = nl.m;
 		tried.add(`${H[l.a]}:${H[l.b]}`);
 		cur.loops = [...tried].slice(-400);
-		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
+		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks, at = atOf(w0, w1);
 		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
 		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
 			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${NC}`,
@@ -803,7 +917,7 @@ async function loopWindows(round, max = 5) {
 		if (!res) return ran;
 		addResult(lp);
 		const saved = ownSaving(lp, before);
-		if (searched(res, saved)) { memo.record(m.sig, saved, round); saveMemo(); }
+		if (searched(res, saved)) { memo.record(m.sig, saved, round, 'full', at); saveMemo(); }
 		log(`deep${round}_loop${ran + 1}: ${saved > 0 ? `a way around the loop, -${saved}` : 'no way around the loop found'}`);
 		saveCursor();
 		ran++;
@@ -818,7 +932,11 @@ async function deepStage(round, R) {
 	await sweepStage(round);
 	await loopWindows(round);
 	let done = 0, rested = 0;
+	const skipDeep = curRound === firstRound && skip1.has('deep');
 	while ((done === 0 || roundUsed() < 0.55 * ROUND_MS) && Date.now() < deadline - 120000) {
+		// the windows a sweep lane found empty get their full-budget search first (the memory owes it: fullWindow)
+		const fw = skipDeep ? null : nextFull(round);
+		if (fw) { await fullWindow(fw, round); done++; continue; }
 		const wins = deepWindows(WSZ);
 		if (!wins.length) return;
 		const from = cursorTick(cur.deep);
@@ -838,7 +956,7 @@ async function deepStage(round, R) {
 			continue;
 		}
 		if (!mw.st.run) return;   // (every window rests)
-		const before = best.runTicks;
+		const before = best.runTicks, at = atOf(w.w0, w.w1);
 		const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
 		const dp = path.join(OUT, `grind_deep_${round}_${w.seg - 1}_${w.i}.eetas`);
 		const name = `deep${round}_seg${w.seg}${w.of > 1 ? '.' + (w.i + 1) : ''}`;
@@ -853,7 +971,7 @@ async function deepStage(round, R) {
 		if (!res) return;
 		addResult(dp);
 		const saved = ownSaving(dp, before);
-		if (searched(res, saved)) { memo.record(mw.sig, saved, round); saveMemo(); }
+		if (searched(res, saved)) { memo.record(mw.sig, saved, round, 'full', at); saveMemo(); }
 		if (!next && wins.length > 1) log(`deep: the last of the run's ${wins.length} windows is done; the next one starts over at the first`);
 		saveCursor({ deep: next || cursorAt(0) });
 		done++;
@@ -982,10 +1100,20 @@ async function main() {
 				if (si === resumedAt) log(`beam${round}: stopped by the restart; not repeated`);
 				else if (round % 4 === 0 || (round % 2 === 0 && roundUsed() < 0.9 * ROUND_MS)) {
 					const bm = path.join(OUT, `grind_beam_${round}.eetas`);
-					const res = await stage(`beam${round}`, 'optimize.js', [TAS, `--out=${bm}`, `--width=${R([4000, 6000, 3000, 8000])}`, `--dist=${R([24, 16, 32, 24])}`,
-						'--passes=1', `--workers=${W}`, LVL], bm, Math.max(ROUND_MS - roundUsed(), 5 * 60e3) + 5 * 60e3);
-					if (res && res.killed) log(`beam${round}: out of time (${Math.round(roundUsed() / 60e3)} min into the round)`);
-					if (res) addResult(bm);
+					const width = R([4000, 6000, 3000, 8000]), maxMs = Math.max(ROUND_MS - roundUsed(), 5 * 60e3) + 5 * 60e3;
+					const out = beamOut(width, maxMs);
+					if (out) {
+						log(`beam${round}: skipped (${out})`);
+						const k = await fullWindows(round, ROUND_MS);
+						if (k) log(`beam${round}: its time went to ${k} full-budget window${k === 1 ? '' : 's'}`);
+					} else {
+						const t0 = Date.now();
+						const res = await stage(`beam${round}`, 'optimize.js', [TAS, `--out=${bm}`, `--width=${width}`, `--dist=${R([24, 16, 32, 24])}`,
+							'--passes=1', `--workers=${W}`, LVL], bm, maxMs);
+						if (res && res.killed) log(`beam${round}: out of time (${Math.round(roundUsed() / 60e3)} min into the round)`);
+						beamRecord(res, width, Date.now() - t0);
+						if (res) addResult(bm);
+					}
 				}
 			} else if (sname === 'splice') await spliceAll();
 			saveCursor({ used: roundUsed() });

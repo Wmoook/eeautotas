@@ -13,13 +13,19 @@
 // rounds (exponential back-off); it opens again at once when the run inside it changed (more than CHANGED of its inner
 // sampled states are new: a shortcut found there by another tool, a new line through it), never for a boundary shift or
 // a few-tick tweak. (The ice level's loop at (56-57, 93), which the known route also has, was explored 8 times in 2 h.)
+// Budgets (record(..., budget)): a window a thin search (a sweep lane's share of the threads) found empty waits for ONE
+// full-budget search (all the threads, grind.js fullWindow) before it counts as searched again: `due` (state() says
+// {run: false, full: true}: the thin searches pass it over, the full-budget stage takes it); an empty full-budget search
+// then counts as usual (FAILS_N empty searches: rest 2, 4, 8, ... rounds). The same spots at the lane's budget and at
+// all the threads (src/out/night/autotas_gap2.md): Infinity Pain's fly shaft 0 -> 248 ticks, the ice level's slope
+// 7 -> 29 and 16 -> 25. A search with no budget given counts as before (no full-budget search owed).
 //
 // windows(n, len, step) -> [[w0, w1], ...] covering [0, n]
 // sigOf(H, w0, w1) -> sorted sampled state hashes of ticks w0..w1 (H = splice.js trace().H)
 // lossEstimate(tr, w0, w1, loops) -> ticks the window may hold (tr = common.replay trace; loops = loops.revisits)
 // mapWindow(fromH, fromN, toH, toN, w0, w1) -> the window on another run; keptShare(outH, outN, refH, refN, has) -> the
 // share of a find's own states the best holds (the sweep's stale finds)
-// Memo(records) -> {state(sig, round), record(sig, saved, round), records}
+// Memo(records) -> {state(sig, inner, round), record(sig, saved, round, budget, at), due(), records}
 const SAMPLE = 8;          // keep the states whose hash is 0 mod SAMPLE (content-defined: shift-invariant)
 const SPAN = 0.6;          // the same span: at least 60% of each sample is in the other (windows of other sizes differ)
 const EDGE = 100;          // ticks at each end left out of the "changed" test (boundary shifts)
@@ -160,25 +166,36 @@ class Memo {
 		if (!r) return { run: true, why: 'new', rec: null };
 		const fresh = inner.length ? (inner.length - common(inner, r.s)) / inner.length : 0;
 		if (fresh > CHANGED) return { run: true, why: 'changed', rec: r };
+		// (a thin search found it empty: its full-budget search is owed, also in the same round)
+		if (r.due) return { run: false, full: true, why: `waits for its full-budget search (${r.fails} empty at a lane's budget)`, rec: r };
 		if (r.last === round && !(r.found > 0)) return { run: false, why: 'searched this round', rec: r };
 		if (r.fails >= FAILS_N && round < r.next) return { run: false, why: `resting until round ${r.next} (${r.fails} empty searches)`, rec: r };
 		return { run: true, why: r.fails ? `again (${r.fails} empty)` : 'again', rec: r };
 	}
-	/** a search of the window ended: saved = the ticks its own output saved (0: nothing) */
-	record(sig, saved, round) {
+	/**
+	 * a search of the window ended: saved = the ticks its own output saved (0: nothing); budget = 'thin' (a lane's share
+	 * of the threads), 'full' (all of them) or undefined (not tracked); at = {h0, w0, len}: where the window was (h0 = the
+	 * searched run's state hash at w0), so the full-budget stage finds it again on a later best
+	 */
+	record(sig, saved, round, budget, at) {
 		let r = this.match(sig);
 		if (!r) { r = { s: sig, fails: 0, next: 0, found: 0, last: round, n: 0 }; this.records.push(r); }
 		r.s = sig; r.last = round; r.n = (r.n || 0) + 1;
-		if (saved > 0) { r.fails = 0; r.next = 0; r.found = saved; }
+		if (at) r.at = at;
+		if (saved > 0) { r.fails = 0; r.next = 0; r.found = saved; r.due = 0; r.full = 0; }
 		else {
 			r.fails = (r.fails || 0) + 1; r.found = 0;
-			r.next = r.fails >= FAILS_N ? round + 2 ** (r.fails - FAILS_N + 1) : 0;
+			if (budget === 'full') { r.full = 1; r.due = 0; }
+			else if (budget === 'thin' && !r.full && r.at) r.due = 1;   // (owed once, until a find)
+			r.next = !r.due && r.fails >= FAILS_N ? round + 2 ** (r.fails - FAILS_N + 1) : 0;
 		}
 		// the most recently used first; at most KEEP
 		this.records.sort((x, y) => (y.last || 0) - (x.last || 0));
 		if (this.records.length > KEEP) this.records.length = KEEP;
 		return r;
 	}
+	/** the records that wait for their full-budget search (with a position) */
+	due() { return this.records.filter((r) => r.due && r.at); }
 }
 
 module.exports = { windows, sigOf, innerOf, lossEstimate, leadEstimate, mapWindow, keptShare, Memo, SAMPLE, FAILS_N, CHANGED, EDGE };

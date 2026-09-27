@@ -105,6 +105,43 @@ console.log('the memory');
 	check('the records survive a save and a load', M2.match(sA) && M2.match(sA).found === 7);
 }
 
+console.log('full-budget searches owed');
+{
+	const M = new SW.Memo([]);
+	const inner = SW.innerOf(tr.H, a0, a1);
+	const at = { h0: tr.H[a0], w0: a0, len: a1 - a0 };
+	M.record(sA, 0, 1, 'thin', at);
+	let st = M.state(sA, inner, 1);
+	check('a thin search found it empty: it waits for a full-budget search, also in the same round', !st.run && st.full && M.due().length === 1 && M.due()[0].at.h0 === tr.H[a0], st.why);
+	st = M.state(sA, inner, 2);
+	check('the thin searches pass it over the next round too', !st.run && st.full, st.why);
+	const mid = SW.sigOf(tr.H, a0 + 300, a0 + 500);
+	const other = mid.map((x) => x + SW.SAMPLE);
+	const chg = sA.filter((x) => !mid.includes(x)).concat(other).sort((x, y) => x - y);
+	const innerChg = inner.filter((x) => !mid.includes(x)).concat(other).sort((x, y) => x - y);
+	st = M.state(chg, innerChg, 2);
+	check('a change of the run inside it opens it for the thin searches first', st.run && st.why === 'changed', st.why);
+	M.record(sA, 0, 1, 'full', at);
+	const r = M.match(sA);
+	check('the full-budget search found it empty too: 2 empty searches, it rests 2 rounds, nothing owed', !r.due && r.full && r.fails === 2 && r.next === 3 &&
+		!M.state(sA, inner, 2).run && !M.state(sA, inner, 2).full && M.state(sA, inner, 3).run && M.due().length === 0, `fails ${r.fails}, next ${r.next}`);
+	M.record(sA, 0, 3, 'thin', at);
+	check('after its full-budget search a thin empty one rests it (4 rounds), nothing owed', !M.match(sA).due && M.match(sA).next === 7, `next ${M.match(sA).next}`);
+	M.record(sA, 5, 7, 'thin', at);
+	M.record(sA, 0, 8, 'thin', at);
+	check('a find resets it: the next thin empty search owes a full-budget one again', M.match(sA).due === 1 && M.state(sA, inner, 8).full);
+	const M2 = new SW.Memo(JSON.parse(JSON.stringify({ records: M.records })).records);
+	check('the debt survives a save and a load', M2.due().length === 1 && M2.state(sA, inner, 9).full);
+	M.record(sA, 3, 8, 'full', at);
+	check('a full-budget search that found time: nothing owed, it runs again', !M.match(sA).due && M.state(sA, inner, 9).run);
+	const M3 = new SW.Memo([]);
+	M3.record(sA, 0, 1, 'full', at);
+	check('a window searched first with all the threads owes nothing (one empty search: again the next round)', !M3.match(sA).due && M3.state(sA, inner, 2).run);
+	const M4 = new SW.Memo([]);
+	M4.record(sA, 0, 1, 'thin');
+	check('a thin search without the window\'s position owes nothing (as before)', !M4.match(sA).due && M4.state(sA, inner, 2).run && M4.due().length === 0);
+}
+
 console.log('stale finds');
 {
 	// the run with 30 idle ticks before it (an improvement earlier in the run moves a window this way): the window maps
