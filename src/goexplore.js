@@ -448,6 +448,8 @@ function discreteOf(L) {
  * the checkpoint, key timers and portal draws are left out (they would split every room into thousands; merged cells
  * cost completeness only: every route is replayed).
  */
+/** a gap of this many coin (blue-coin) counts or more between two doors' thresholds is one room (roomOf) */
+const ROOM_GAP = 16;
 function roomOf(L) {
 	let team = false, coins = false, blue = false, crown = false, silver = false;
 	for (let i = 0; i < L.width * L.height; i++) {
@@ -460,14 +462,21 @@ function roomOf(L) {
 	}
 	const onSum = (m, salt) => { let s = 0; for (const [id, v] of m) if (v === true) s = (s + fmix((id ^ salt) | 0)) | 0; return s; };
 	const onList = (m) => { const a = []; for (const [id, v] of m) if (v === true) a.push(id); return a.sort((x, y) => x - y); };
-	// a count by the doors it opens: how many of the level's coin (blue-coin) door and gate thresholds it reaches, so coins
-	// 10-16 with doors at 9 and 17 are one room, and a blue coin short of every blue door's count is no room change
+	// a count as a room: the count itself, except far short of the next door: in a gap of ROOM_GAP counts or more between
+	// one door's threshold (or 0) and the next one's, every count is the gap's floor (Good Egg: blue doors at 31 and 32,
+	// so a blue coin below 31 is no room change; its coin doors 1..9, 17 and Stupid Fox's one door at 10 keep a room per
+	// coin: merging those took the relay, bursts and breaker's per-coin rooms in cycle 6)
 	const cTh = L.coinDoorThresholds || new Int32Array(0), bTh = L.blueCoinDoorThresholds || new Int32Array(0);
-	const doorsOf = (th, v) => { let n = 0; while (n < th.length && th[n] <= v) n++; return n; };
+	const gapOf = (th, v) => {
+		let n = 0;
+		while (n < th.length && th[n] <= v) n++;
+		const lo = n ? th[n - 1] : 0;
+		return n < th.length && th[n] - lo >= ROOM_GAP ? lo : v;
+	};
 	// (full: the room key; else the part of it only the ball's own touches change: without the keys, which expire, and the
 	// time doors, which flip on the clock. counts: the counts themselves, as the GPU's rollRoom keys a room)
 	const hash = (sim, full, counts) => {
-		const n = (th, v) => counts ? v : doorsOf(th, v);
+		const n = (th, v) => counts ? v : gapOf(th, v);
 		let h = 0x3c6ef372;
 		const w = (v) => { h = Math.imul(h ^ v, 0x5bd1e995); h ^= h >>> 13; };
 		if (full) w(sim._keysMask);
@@ -511,8 +520,8 @@ function roomOf(L) {
 		if (sim.flip_gravity) p.push(`grav=${sim.flip_gravity}`);
 		if (L.hasTimeDoors) p.push(sim._timedoor_state ? 'timedoors:open' : 'timedoors:shut');
 		if (team && sim.team) p.push(`team=${sim.team}`);
-		if (coins) { const n = doorsOf(cTh, sim.coins); p.push(`coins>=${n ? cTh[n - 1] : 0}`); }
-		if (blue) { const n = doorsOf(bTh, sim.blue_coins); if (n) p.push(`bluecoins>=${bTh[n - 1]}`); }
+		if (coins) { const n = gapOf(cTh, sim.coins); p.push(n === sim.coins ? `coins=${n}` : `coins>=${n}`); }
+		if (blue) { const n = gapOf(bTh, sim.blue_coins); p.push(n === sim.blue_coins ? `bluecoins=${n}` : `bluecoins>=${n}`); }
 		if (L.hasDeathDoor) p.push(`deaths=${sim.deaths}`);
 		const s = onList(sim._switches), o = onList(sim._oswitches);
 		if (s.length) p.push(`purple=[${s.join(',')}]`);
