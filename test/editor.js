@@ -835,12 +835,12 @@ async function cpuSection() {
 	check('coarse cells, the archive full: no new rooms (the same rooms after 0.5 M and 2 M ticks; no walks for rooms that could hold no cell)',
 		!!sw1 && !!sw2 && sw1.full && sw2.full && sw1.cells === 300 && sw1.rooms > 1 && sw2.rooms === sw1.rooms && sw2.walkHits === sw1.walkHits,
 		`rooms ${sw1 ? sw1.rooms : '-'} / ${sw2 ? sw2.rooms : '-'} (full ${sw1 ? sw1.full : '-'} / ${sw2 ? sw2.full : '-'}); ${r2.summary}`);
-	// the one search (coarse cells): 2 workers share the rooms they find first (the key's room, found by one, goes into the
-	// other's archive: its 'import'); --share=0: each archive on its own, as before
+	// the one search (coarse cells): --share=1: 2 workers share the rooms they find first (the key's room, found by one,
+	// goes into the other's archive: its 'import'); by default each archive on its own, as before
 	const imports = (r) => (r.done ? r.done.workers.reduce((x, w) => x + (w.imports || 0), 0) : -1);
-	const o1 = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=5', '--mem=300']);
-	const o0 = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=5', '--mem=300', '--share=0']);
-	check('the one search: 2 workers share the rooms they find first (the key\'s room goes into the other archive), routes replay; --share=0: nothing shared',
+	const o1 = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=5', '--mem=300', '--share=1']);
+	const o0 = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=5', '--mem=300']);
+	check('the one search: --share=1: 2 workers share the rooms they find first (the key\'s room goes into the other archive), routes replay; by default nothing is shared',
 		!!o1.done && o1.done.shared >= 1 && imports(o1) >= 1 && o1.done.workers.every((w) => w.rooms === 2) && o1.results.length > 0 && replays(kdLevel, o1.results) &&
 		!!o0.done && imports(o0) === 0 && !o0.done.shared, `shared ${o1.done && o1.done.shared}, imports ${imports(o1)} (share=0: ${imports(o0)}); ${o1.summary}`);
 	// the GPU bursts (src/bursts.js) with a stand-in for eegpu: it prints a nearer attempt at a target (distance 0) one

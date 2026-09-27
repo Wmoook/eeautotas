@@ -60,11 +60,13 @@
 //           cooler; 9,661 ticks after 180 s.
 //
 // THE ONE SEARCH (coarse cells; the friend's "one optimal search" instead of three searches built one after another):
-// one archive of cells for every operator. (a) The random runs: the workers' archives share their frontier: a room a
-// worker enters first ('room' message: its first cell's inputs, the room it came from, the tile) is imported into every
-// other worker's archive (every state along it, as a run's states: --share=1, the default with several workers; on
-// Infinity Pain 14 separate archives held 286 K cells in the same 2 rooms after an hour), and a room change between two
-// known rooms is reported once per (room, tile) ('edge': the trigger tried there, the room entered there). (b) --bursts=1:
+// one archive of cells for every operator. (a) The random runs: every room a worker enters first goes to the main
+// thread ('room' message: its first cell's inputs, the room it came from, the tile), and a room change between two known
+// rooms once per (room, tile) ('edge': the trigger tried there, the room entered there); with --share=1 (off by default)
+// the room also goes into every other worker's archive (every state along it, as a run's states). Measured (A100, 3
+// workers, the GPU bursts on): Infinity Pain 600 s the same with and without (14 rooms each, route coverage 18,779 /
+// 18,769 of 38,498: the bursts' attempts go into every archive anyway); Good Egg 300 s 971 with it, 1,407 without (the
+// relay's search before: 1,390): with many switch and coin rooms every worker spread over all of them. (b) --bursts=1:
 // the GPU operator (src/bursts.js): short exhaustive "every move" bursts (eegpu explore --prefix, --tool) from the
 // archive's cell of a room nearest its untried triggers (the main thread asks every worker for its own: 'nearest'), the
 // bursts' nearer attempts imported into every archive; a bandit over the rooms and the burst settings. The workers read
@@ -111,7 +113,7 @@
 //        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
-//        [--share=1 (the one search: the workers share their new rooms; coarse cells)] [--bursts=0|1 (the GPU operator,
+//        [--share=0|1 (the one search: the workers share their new rooms; coarse cells)] [--bursts=0|1 (the GPU operator,
 //        src/bursts.js; coarse cells)] [--tool=<eegpu> (default: gpu.js nativeTool; a .js file: a stand-in run by Node)]
 //        [--cachedir=<kernel cache>] [--pausefile=<file: the bursts wait between two launches while it exists>]
 //        [--work=<folder for the bursts' files>] [--burstS=15 (seconds per burst at most)] [--burstPar=2 (bursts side by
@@ -134,7 +136,7 @@ const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	share: 1, bursts: 0, burstS: 15, burstPar: 2, gpuCells: 26 };
+	share: 0, bursts: 0, burstS: 15, burstPar: 2, gpuCells: 26 };
 // the text options (the one search's GPU operator: src/bursts.js)
 const TEXT_OPTS = new Set(['level', 'out', 'tool', 'cachedir', 'pausefile', 'work']);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
@@ -981,10 +983,9 @@ async function main() {
 		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
 		if (a.first) Atomics.store(ctrl, 1, 1);
 	};
-	// The one search (coarse cells: several workers or the GPU bursts): one channel per worker. Every room a worker enters
-	// first (its 'room' message) goes into the other workers' archives (--share=1: they all work on the frontier instead
-	// of each on its own; on Infinity Pain 14 separate archives held 286 K cells in the same 2 rooms after 60 minutes), and
-	// every room goes to the GPU operator (src/bursts.js), whose attempts go into every archive.
+	// The one search (coarse cells: the GPU bursts, or several workers with --share=1): one channel per worker. Every room
+	// a worker enters first (its 'room' message) goes to the GPU operator (src/bursts.js), whose attempts go into every
+	// archive, and with --share=1 into the other workers' archives (see the header: off by default)
 	const one = a.cells === 'coarse' && ((a.share && a.workers > 1) || a.bursts) ? { rooms: new Map(), ports: [], shared: 0 } : null;
 	let bursts = null;
 	if (one) {
