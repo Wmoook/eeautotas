@@ -115,7 +115,9 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   -2497, -2324, ... against their start runs) reached the best mostly through the GPU searcher's union combine of the
   stage outputs; on the laptop CPU alone (8 threads, no GPU) 9205 -> 4464 in 12.6 min; on the ice level the stale-window
   redo bought nothing (its finds reach the best through the GPU's union combine anyway; one pair 4758 vs main's 4732);
-  timedoor (one 518-tick window) nothing in 15 min. Before (1aa333b), measured (A100, GPU searcher on,
+  timedoor (one 518-tick window) nothing in 15 min; the merge's sanity run (the shared H100, 6 threads + the GPU
+  searcher, the same 9205 route): the sweep starts only after mutate, phase, endgame and phaseB (at 514 s: 8173 at
+  6 min, no sweep yet), then 7633 -> 4311 (0:43.11, 0 deaths) by 900 s. Before (1aa333b), measured (A100, GPU searcher on,
   8 threads; `src/out/night/opt_hunt.md`): the ice level from Find a route's 9923-tick route 4724 / 4782 after 30 min
   (f619e8c: 4865, 4856 at 25), ahead by 74-141 ticks from 10 min on; Octorage from the human run the same or a little
   better; Forgotten Veil from the human run within the run-to-run spread (the same code differed by 33 ticks between GPUs 1 and 4; its loop window at (326, 90) found -46 with 8
