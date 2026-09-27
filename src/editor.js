@@ -533,17 +533,30 @@ const RELAY_PLAN = [RELAY_BACK[0], RELAY_BACK[1], RELAY_BACK[2], 'new', 'gain', 
 // inputs). From the CPU search's "source" events (coarse cells: each new room's first cell, every 5 s the best cells of
 // the rooms with the most territory gain) and from every strategy's own nearer attempts (closer(): the room its last
 // state is in and the tick it entered that room, from one replay in the JS engine; its territory gain from the
-// editor's own room fields). At most RELAY_SOURCES: when full, the ones relayed from, without gain, oldest go first.
+// editor's own room fields up to SOURCE_WALK_TILES). At most RELAY_SOURCES: when full, the ones relayed from, without
+// gain, oldest go first.
 const RELAY_SOURCES = 64;
 // a strategy's own nearer attempt that is not the nearest of all: its room at most every SOURCE_REPLAY_MS (each is a
 // replay in the JS engine on the server's thread; a beam improves every layer)
 const SOURCE_REPLAY_MS = 1000;
+// the territory gain of a strategy's own attempt's room is a walk of the level on the server's thread (once per room:
+// 5 ms on 200 x 200 tiles, 50-180 ms on 1000 x 1000), so only on levels of at most this many tiles (400 x 400); above,
+// a room's gain comes from the CPU search's source events alone (its walks run in its own threads), 0 until one names it
+const SOURCE_WALK_TILES = 160000;
 let sources = new Map(), sourceSeq = 0;   // room key -> {room, desc, gain, runs, at, from, early, best}
-let roomsCur = null;                      // the running search's rooms: {RM, fields, gain: Map(room key -> gain)}
-/** the running search's room key function and fields (goexplore.js), made at the first use */
+let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain)}
+const srcPending = new Map();             // strategy index -> {at (its last replay), next (the attempt waiting), timer}
+/** the running search's room key function (goexplore.js), made at the first use; its room fields at the first walk */
 function roomsOfSearch() {
-	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: GX.roomFields(cur.level, 16 << 20), gain: new Map() };
+	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map() };
 	return roomsCur;
+}
+/** forgets the sources and the rooms (a new search, or the end of one: the attempts' inputs, up to 100000 characters
+ *  each, would stay in the server; S.sources, the page's summary, stays) */
+function dropSources() {
+	sources = new Map(); sourceSeq = 0; roomsCur = null;
+	for (const p of srcPending.values()) if (p.timer) clearTimeout(p.timer);
+	srcPending.clear();
 }
 /** the page's summary of the sources (no inputs) */
 function publishSources() {
@@ -602,14 +615,24 @@ function replayRooms(masks, withPath) {
 		const k = R.RM.key(sim);
 		if (k !== key) { key = k; since = t + 1; }
 	}
-	// (the room's territory gain: from the state it ends in, once per room)
+	// (the room's territory gain: from the state it ends in, once per room; 0 above SOURCE_WALK_TILES)
 	let gain = R.gain.get(key);
-	if (gain === undefined) { gain = R.fields.enter(sim).gain; R.gain.set(key, gain); }
+	if (gain === undefined) {
+		if (R.walk && !R.fields) {
+			// (the start's room first, as in the CPU search: a room's gain is the territory no earlier room's walk reached,
+			// so the first room walked must not count the start's own territory as its gain)
+			R.fields = GX.roomFields(cur.level, 16 << 20);
+			const s0 = new E.EESim(cur.level);
+			s0.reset();
+			R.gain.set(R.RM.key(s0), R.fields.enter(s0).gain);
+		}
+		gain = R.gain.get(key);
+		if (gain === undefined) { gain = R.walk ? R.fields.enter(sim).gain : 0; R.gain.set(key, gain); }
+	}
 	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain } };
 }
 /** strategy n's own nearer attempt a {inputs, ticks, dist}: a source for its room (at most every SOURCE_REPLAY_MS per
  *  strategy; the latest one waiting is taken then). rm: its room, when the attempt was replayed already. */
-const srcPending = new Map();   // strategy index -> {at (its last replay), next (the attempt waiting), timer}
 function attemptSource(n, a, rm) {
 	const V = S.strategies[n];
 	if (!rm) {
@@ -653,7 +676,8 @@ function relayFrom(n) {
 	// (R.big)
 	let c = S.closest, back = RELAY_BACK[0], src = null;
 	R.big = false;
-	const next = () => { R.back++; R.pick = null; return relayFrom(n); };   // (the next step of the plan)
+	// (the next step of the plan: another starting point, so its own cells, as after a run that went nowhere)
+	const next = () => { R.back++; R.pick = null; R.cellsSet = false; return relayFrom(n); };
 	if (R.back < RELAY_PLAN.length) {
 		const step = RELAY_PLAN[R.back];
 		if (typeof step === 'number') back = step;
@@ -662,6 +686,8 @@ function relayFrom(n) {
 			if (!src) src = pickSource(step, c);
 			const a = src ? (step === 'new' ? src.early : src.best) : null;
 			if (!a) return next();
+			// (only the same source keeps the finer cells its last run went on with: a new one gets its own)
+			if (!R.pick || R.pick.back !== R.back || R.pick.room !== src.room) R.cellsSet = false;
 			R.pick = { back: R.back, room: src.room };
 			c = { inputs: a.inputs, ticks: a.ticks, dist: a.dist, tiles: Math.round(a.dist * 10) / 10 };
 			back = step === 'new' ? 0 : RELAY_BACK[0];
@@ -720,7 +746,8 @@ function relayKick() {
 			const c0 = S.closest, R0 = q.relay;
 			const nearer = !(R0 && R0.src) || !!(c0 && c0.dist < R0.src.best - 0.5);
 			if (!nearer && !pickSource('new', c0)) return;
-			if (R0) { R0.back = nearer ? 0 : RELAY_PLAN.indexOf('new'); R0.pick = null; }
+			// (another starting point: its own cells, not the finer ones a run that ran out of situations left behind)
+			if (R0) { R0.back = nearer ? 0 : RELAY_PLAN.indexOf('new'); R0.pick = null; R0.cellsSet = false; }
 			relayFrom(k);
 			return;
 		}
@@ -931,9 +958,7 @@ function start(b, gpu, test) {
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
 		proveSeconds: test && test.proveSeconds ? test.proveSeconds : PV.SECONDS, proveWatchdogS: test ? test.proveWatchdogS : undefined };
 	// the relay's sources start over (see RELAY_SOURCES)
-	sources = new Map(); sourceSeq = 0; roomsCur = null;
-	for (const p of srcPending.values()) if (p.timer) clearTimeout(p.timer);
-	srcPending.clear();
+	dropSources();
 	S.sources = [];
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
@@ -1613,7 +1638,7 @@ function finish() {
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
 	cur = null;
-	roomsCur = null;
+	dropSources();
 	saveNow();
 }
 /** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept. more: the

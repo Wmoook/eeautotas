@@ -20,10 +20,10 @@
 //              JS engine, the same seed and tick budget give the same routes (also with 64 snapshots, states rebuilt by
 //              replaying), --first, --depth, "stop" and the end of stdin; coarse cells (--cells=auto above 50 x 50, the
 //              memory rule, the same routes for the same seed, the first route pinned to the research prototype's, the
-//              key room's source event, the editor keeping the sources); the editor without an NVIDIA GPU (the CPU
-//              search alone, with a note; a route; the physics verdict), and next to the eegpu stand-in (its first route
-//              bounds the exploration's next pass, it stops when the GPU strategies have ended with a route, not when
-//              they failed)
+//              key room's source event, no rooms once the archive is full, the editor keeping the sources); the editor
+//              without an NVIDIA GPU (the CPU search alone, with a note; a route; the physics verdict), and next to the
+//              eegpu stand-in (its first route bounds the exploration's next pass, it stops when the GPU strategies have
+//              ended with a route, not when they failed)
 //   prove      the proof next to the searches (eegpu prove: the native tool, CPU only; no GPU; skipped without a build that
 //              knows prove): user50 with its left run-up 2 tiles shorter (the physics check finds a way, the proof none, with
 //              the editor's reach file: "No route (proven)" with its explanation), user50 itself never "impossible", the
@@ -803,9 +803,10 @@ async function cpuSection() {
 	check('coarse cells, 1 thread, a tick budget: routes (through the key\'s room), all finishing in the JS engine; the same seed gives the same routes after the same ticks',
 		startOf(k1).cells === 'coarse' && k1.results.length > 0 && replays(kdLevel, k1.results) && sig(k1) === sig(k2) && k1.done.ticks === k2.done.ticks && k1.done.workers[0].rooms === 2,
 		`${k1.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}; ${k1.summary}`);
-	// pinned: the research prototype (src/out/planner_b/ngx.js --mode=novold --seed=3, the same cells, heads and random
-	// draws) found its first route here, 416 ticks, after 8,163 simulated ticks
-	check('coarse cells pick exactly like the research prototype: the first route 416 ticks after 8,163 simulated ticks (seed 3)',
+	// pinned: the research prototype (a local ngx.js --mode=novold --seed=3, not in the repository: the same cells and
+	// heads; here every new room opens territory and no crown door stands, so also the same random draws) found its first
+	// route here, 416 ticks, after 8,163 simulated ticks
+	check('coarse cells pick like the research prototype where every room opens territory: the first route 416 ticks after 8,163 simulated ticks (seed 3)',
 		k1.results.length > 0 && k1.results[0].ticks === 416 && k1.results[0].simTicks === 8163, `${k1.results.length ? `${k1.results[0].ticks}@${k1.results[0].simTicks}` : 'no route'}`);
 	// the source events: the key's room once (its first cell: its inputs end where the ball entered it, with the key)
 	const RM = GX.roomOf(kdLevel);
@@ -817,6 +818,23 @@ async function cpuSection() {
 		!!kr && kr.desc === 'key:red' && kr.gain > 0 && kr.tick === kr.inputs.length && at.key === kr.room && at.entered && at.desc === 'key:red' &&
 		ks.filter((e) => e.kind === 'room').length === new Set(ks.filter((e) => e.kind === 'room').map((e) => e.room)).size,
 		ks.map((e) => `${e.kind} "${e.desc}" gain ${e.gain} tick ${e.tick}`).join('; '));
+	// a full archive makes no rooms: a 60 x 50 level of 10 purple switches, a purple door wall and a trophy walled in (no
+	// route; --prune=0, as the editor runs a level the reach field calls impossible) with room for 300 cells, full after
+	// 0.5 M ticks. A new switch state after that is no room (it would stay empty, outside the budget, its fields walked for
+	// nothing), so 4x the ticks find no more rooms (before: 38 rooms after 0.5 M ticks, 50 after 2 M)
+	const sw = room(60, 50);
+	for (let k = 0; k < 10; k++) sw.push([4 + 2 * k, 48, 113, k + 1]);
+	for (let y = 1; y < 49; y++) sw.push([45, y, 184, 1]);
+	sw.push([2, 48, 255], [55, 47, 121], [54, 47, 9], [56, 47, 9]);
+	for (let x = 54; x <= 56; x++) sw.push([x, 46, 9], [x, 48, 9]);
+	const swFile = path.join(HOME, 'switches.eelvl');
+	fs.writeFileSync(swFile, ED.eelvlOf({ name: 'switches', width: 60, height: 50, cells: sw }));
+	const swRun = (ticks) => goexplore(swFile, ['--workers=1', '--seed=1', '--prune=0', '--maxCells=300', `--maxTicks=${ticks}`, '--seconds=30']);
+	const r1 = await swRun(500000), r2 = await swRun(2000000);
+	const sw1 = r1.done && r1.done.workers[0], sw2 = r2.done && r2.done.workers[0];
+	check('coarse cells, the archive full: no new rooms (the same rooms after 0.5 M and 2 M ticks; no walks for rooms that could hold no cell)',
+		!!sw1 && !!sw2 && sw1.full && sw2.full && sw1.cells === 300 && sw1.rooms > 1 && sw2.rooms === sw1.rooms && sw2.walkHits === sw1.walkHits,
+		`rooms ${sw1 ? sw1.rooms : '-'} / ${sw2 ? sw2.rooms : '-'} (full ${sw1 ? sw1.full : '-'} / ${sw2 ? sw2.full : '-'}); ${r2.summary}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
