@@ -108,8 +108,10 @@ function agree(name, L, st, runs) {
 	let n = 0, dF = 0, dS = 0, gF = 0, gS = 0, err = '';
 	for (const m of runs) {
 		C.writeEetas(path.join(tmp, 'r.eetas'), m);
-		const out = JSON.parse(execFileSync(toolPath, ['steertest', path.join(tmp, 'l.bin'), path.join(tmp, 's.steer'), path.join(tmp, 'r.eetas'), ...(GPU ? ['--gpu=1', ...G.cacheArgs()] : [])],
-			{ encoding: 'utf8', maxBuffer: 1 << 30 }).trim().split('\n').pop());
+		let raw = '';
+		try { raw = execFileSync(toolPath, ['steertest', path.join(tmp, 'l.bin'), path.join(tmp, 's.steer'), path.join(tmp, 'r.eetas'), ...(GPU ? ['--gpu=1', ...G.cacheArgs()] : [])], { encoding: 'utf8', maxBuffer: 1 << 30 }); } catch (e) { raw = String(e.stdout || '') || JSON.stringify({ error: e.message }); }
+		let out;
+		try { out = JSON.parse(raw.trim().split('\n').pop()); } catch (e) { out = { error: raw.slice(0, 200) }; }
 		if (out.error) { err = out.error; break; }
 		const sim = new E.EESim(L); sim.reset();
 		const inp = new E.EEInput();
