@@ -222,10 +222,13 @@ const WAY_PICK = 40;
 // (--wR 0.5 of head W's picks: a cell at a tile the route never passes, in any room, by its reach lead = its tick - the
 // route's first tick with a reach cost at most the cell's (rcS; its own heap HR): the route's own time to go from that
 // cost as the estimate, so a corridor the route never visits that gets as near the trophy sooner is pushed on too;
-// --wR=0: those cells get no lead, as before)
+// --wR=0: those cells get no lead, as before; with the steer field (--steer) the cost is its gate-aware one, --wS=0 the
+// reach field's: on Octorage the reach cost of the known way's off-route states is above the first route's early on
+// (the key-blind field puts the start 87 tiles out, the way through the switches 100-335), so none leads: 39 of its 904
+// off-route ticks lead by the reach cost, 507 by the steer cost, the corridor at (2, 124) at tick 300: +299 vs -9)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0.5 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0.5, wS: 1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -865,6 +868,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out
 	const ST = a.steerData || null;
 	const HS = ST ? heapOf((c) => c.sc + a.lambda * Math.sqrt(c.picks)) : null;
+	// (head W's reach lead by the steer cost: wSt; a state's steer cost in tiles, -1 none)
+	const wSt = !!ST && a.wS !== 0;
+	const stv = (x) => { const v = SF.steerFifths(ST, x); return v < 0 ? -1 : v / 5; };
 	// head L (the one search once a route is known: the main thread's 'route' message): the lead. The best route's
 	// schedule (sched: per (room, tile) the tick it first gets there); a cell at (room, tile) that the route passes gets
 	// lead = its tick - the route's there (below 0: ahead of the best route, which finishes that much sooner from there if
@@ -892,8 +898,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (HW === null) return;
 			const w = tsched[c.tile];
 			if (w !== 0) { c.wlead = c.t - w; HW.push(c); return; }
-			if (HR === null || rcV === null || c.rc < 0) return;
-			c.wlead = c.t - rcS(c.rc);
+			const v = wSt ? (c.sc < STEER_NONE ? c.sc : -1) : c.rc;
+			if (HR === null || rcV === null || v < 0) return;
+			c.wlead = c.t - rcS(v);
 			HR.push(c);
 			return;
 		}
@@ -1254,7 +1261,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const key = RM.key(s2) * 2097152 + tl;
 			if (!m.has(key)) m.set(key, k + 1);
 			if (tm[tl] === 0) tm[tl] = k + 1;
-			if (HR !== null) { const rc = RF.costAt(field, s2); if (rc >= 0 && rc < rmin) { rmin = rc; rv.push(rc); rk.push(k + 1); } }
+			if (HR !== null) { const rc = wSt ? stv(s2) : RF.costAt(field, s2); if (rc >= 0 && rc < rmin) { rmin = rc; rv.push(rc); rk.push(k + 1); } }
 		}
 		sched = m;
 		tsched = tm;
