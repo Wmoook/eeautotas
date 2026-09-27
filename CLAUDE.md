@@ -224,7 +224,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/eesim.js` | the exact physics port (EESim, EEInput, applyMask, parseEetasBytes, loadLevel, prepareLevel) |
 | `src/eelvl.js` | EEO-exact `.eelvl` reader, `toSimLevel()` = the level JSON; `writeEelvl()` (header + records, raw deflate; args checked against `argKind`) |
 | `src/rng.js` | random-portal outcome tree: chance, best outcome script, per-portal odds |
-| `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`; `--roundMin=10`, `--deepS=<s>` per deep window, `--anchored=1`, `--tails=1`, `--siblings` passed to gpusearch); resumes from `status.json` `cursor` |
+| `src/grind.js` | the optimizer loop for one job (`--job=src/jobs/<id>`; `--roundMin=10`, `--deepS=<s>` per deep window, `--anchored=1`, `--tails=1`, `--siblings` and `--every` / `--everyDepth` / `--everyStep` / `--everyS` (its opt-in "every move" rounds) passed to gpusearch); resumes from `status.json` `cursor` |
 | `src/mutate.js` | input mutations at every tick, exact rejoins, DP (seconds) |
 | `src/shortcuts.js` | local beams from every `--step`-th tick, exact rejoins, DP |
 | `src/loops.js` | the run's loops: stretches (a -> b) where the ball comes back within 48 px with nothing collected or toggled in between, longest first (`revisits(level, masks, {coins})`; `node src/loops.js <job> [run.eetas]`); the grind explores these windows first (OC's Octorage: loop #1 = the -356 route skip, found in 2 minutes) |

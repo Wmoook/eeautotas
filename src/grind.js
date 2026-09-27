@@ -28,9 +28,10 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1] [--skips=1]
+//        [--hunt=1] [--endgame=1] [--skips=1] [--every=1 [--everyDepth=60] [--everyStep=25] [--everyS=5]]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
-//        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
+//        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails;
+//        --every and --everyDepth / --everyStep / --everyS: passed to the GPU searcher, its opt-in "every move" rounds)
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -492,7 +493,8 @@ async function mutateLoop(tag) {
 let gpuChild = null;
 function startGpu() {
 	const fd = fs.openSync(path.join(OUT, 'gpu.log'), 'a');
-	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : [])],
+	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : []),
+		...['every', 'everyDepth', 'everyStep', 'everyS'].filter((k) => a[k] !== undefined).map((k) => `--${k}=${a[k]}`)],
 		{ stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
 	saveStatus({ gpuPid: gpuChild.pid });   // (jobs.js stopJob stops it first, alone: its eegpu is never killed mid-kernel)
