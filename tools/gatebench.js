@@ -18,7 +18,8 @@
 // --remote="root@host -p N -i key" [--dir=/dev/shm/gb_<label>] [--clean=1]: the checkout's src/ (without out, jobs, data,
 // bin), this tool and the gates go up to --dir (a gzipped tar over the Windows OpenSSH client), the run happens there
 // (its node: ~/.local/node/bin/node when there), its JSON comes back to --json (default <data>/results/<label>.json);
-// --clean=1 removes --dir after. With --bursts=1 there, --tool / --cachedir are the remote's paths.
+// --clean=1 removes --dir after. With --bursts=1 there, --tool / --cachedir are the remote's paths. The steer fields' temp files
+// go to --dir there (TMPDIR: Forgotten Veil's is 565 MB; the default /tmp filled the A100's 16 GB disk), --baseline goes up too.
 // --data (default src/out/gatebench under the checkout this file is in, git-ignored: the levels and routes are the
 // user's own files, never in git): levels/<alias>.json, prefix/<alias>_<k>.eetas, gates.json.
 const fs = require('fs');
@@ -239,10 +240,13 @@ function remote() {
 	up(tar(code, ['src', 'package.json'], ['src/out', 'src/jobs', 'src/data', 'src/bin']), 'code');
 	up(tar(__dirname, [path.basename(__filename)], []), 'code/tools');
 	up(tar(DATA, ['gates.json', 'levels', 'prefix'], []), 'data');
-	const keep = argv.filter((x) => !/^--(remote|dir|clean|json|code|data)=/.test(x));
+	// (--baseline: a local file, up as data/baseline.json)
+	if (opt.baseline) up(tar(path.dirname(path.resolve(opt.baseline)), [path.basename(opt.baseline)], []), 'data/base');
+	const keep = argv.filter((x) => !/^--(remote|dir|clean|json|code|data|baseline)=/.test(x));
+	if (opt.baseline) keep.push(`--baseline=${dir}/data/base/${path.basename(opt.baseline)}`);
 	if (!opt.label) keep.push(`--label=${label}`);
 	const node = '$( [ -x ~/.local/node/bin/node ] && echo ~/.local/node/bin/node || echo node )';
-	const cmdline = `cd ${dir} && ${node} code/tools/${path.basename(__filename)} run --code=${dir}/code --data=${dir}/data --json=${dir}/out.json ${keep.map((x) => `'${x.replace(/'/g, '')}'`).join(' ')}`;
+	const cmdline = `cd ${dir} && TMPDIR=${dir} ${node} code/tools/${path.basename(__filename)} run --code=${dir}/code --data=${dir}/data --json=${dir}/out.json ${keep.map((x) => `'${x.replace(/'/g, '')}'`).join(' ')}`;
 	const p = spawn(ssh, [...sshArgs, cmdline], { stdio: ['ignore', 'inherit', 'inherit'] });
 	p.on('exit', (c) => {
 		const r = spawnSync(ssh, [...sshArgs, `cat ${dir}/out.json`], { maxBuffer: 1 << 28 });
