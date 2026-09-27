@@ -233,7 +233,7 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0,
-	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 0 };
+	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -242,8 +242,10 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 // but everywhere they blow the cells up 2.6 K -> 269 K a worker). Every further S seconds of stall flags the next
 // frontier room, at most --spdMax; a room made from a flagged room is flagged too (--spdKids=1; the way out of the trap); the flags all
 // go when the nearest distance drops by SPD_PROGRESS (the cells made meanwhile stay: they are valid states).
-// --spdMode=1 instead: a flagged room keeps its coarse cells as they are (the earliest state) and next to each one a
-// second cell with the FASTEST arrival (the most vx^2 + vy^2; the pick runs' states only): at most 2x the cells.
+// --spdMode=1 (the default): a flagged room keeps its coarse cells as they are (the earliest state) and next to each one
+// a second cell with the FASTEST arrival (the most vx^2 + vy^2; the pick runs' states only): at most 2x the cells (the U
+// from its coins=13 state: out in 77 s, as with the buckets; the buckets (--spdMode=0) grew the cells 17-28x and
+// their A/B pair from scratch lost: a slower first route).
 const SPD_PROGRESS = 1;
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
