@@ -9,7 +9,8 @@
 // --reach=<file> (src/reach.js, RCH3): the reach field orders each cell's candidates (nearer the trophy
 // first) and measures the closest attempt; with --prune=1 the states it cuts off are dropped (a proof: they cannot
 // reach the trophy; the finish test comes first). Other targets: --enter=x0,y0,x1,y1 (the box centre enters those
-// tiles), --ahead=1 (ahead of the run),
+// tiles), --ahead=1 (ahead of the run; --visits=1: every visit of a tile counts, not only the first, and
+// --samediscrete=1 only where the discrete state is the same (coin-blind with --nocoins=1): src/leaps.js),
 // --finish=1 (the tick that takes the trophy; the search ends with the first layer that has one: the fastest route
 // up to the cell merging). Cells: --coarse=<row> (from this tile row down, px x --cqx and vx x --cqv to whole
 // numbers; default 0.5 and 16), --qy / --qvy (py / vy likewise; 0 = exact), --discrete=1 (cells also differ in coins,
@@ -90,6 +91,10 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	std::vector<double> qX, qY, qSX, qSY;
 	std::vector<int32_t> refTile;
 	std::vector<float> rX, rY, rVX, rVY;   // the run's state per tick (index = tick)
+	const bool visits = ahead && opt(argc, argv, "visits", "0") == "1";
+	const bool sameDisc = visits && opt(argc, argv, "samediscrete", "0") == "1";   // (--samediscrete=1: kernels.cu target 2)
+	std::vector<uint64_t> rD;              // --samediscrete: the run's discrete state per tick (coin-blind with --nocoins)
+	std::vector<int32_t> tileSeq;          // --visits: the run's centre tile per tick from --from on (-1 outside the level)
 	{
 		Sim<TW> sim(L, *start);
 		sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
@@ -99,6 +104,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		if (ahead || rejoin) refTile.assign((size_t)L.N, -1);
 		for (int t = 0; t < (int)ref.size(); t++) {
 			rX.push_back((float)start->px); rY.push_back((float)start->py); rVX.push_back((float)start->speed_x); rVY.push_back((float)start->speed_y);
+			if (sameDisc) rD.push_back(sim.hashDiscrete(ncR));
 			if (rejoin) { refH.push_back(sim.hash(ncR)); refH2.push_back(sim.hash2(ncR)); qX.push_back(start->px); qY.push_back(start->py); qSX.push_back(start->speed_x); qSY.push_back(start->speed_y); }
 			if (t == from) memcpy(rs, start, sizeof(S));
 			if (t >= from && (ahead || rejoin)) {
@@ -106,6 +112,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 				// the slack, is behind the run's schedule there)
 				const int tx = (int)std::floor((start->px + 8) / 16), ty = (int)std::floor((start->py + 8) / 16);
 				if (tx >= 0 && ty >= 0 && tx < L.W && ty < L.H && (rejoin || refTile[(size_t)ty * L.W + tx] < 0)) refTile[(size_t)ty * L.W + tx] = t;
+				if (visits) tileSeq.push_back(tx >= 0 && ty >= 0 && tx < L.W && ty < L.H ? ty * L.W + tx : -1);
 			}
 			if (t >= from && !ahead && !rejoin) break;
 			const bool crown0 = start->has_silver_crown;
@@ -300,9 +307,27 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		}
 		rejoinBest.assign(refH.size(), 1 << 30);
 	}
+	cu::Buf dvo, dvt, drd;
 	if (ahead) {
 		if (!drt.upload(refTile.data(), 4 * refTile.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 		P.target = 2; P.refTile = (const i32*)(uintptr_t)drt.p; P.fromTick = from;
+		P.visitOff = nullptr; P.visitTick = nullptr;
+		if (visits) {
+			// --visits=1: every entry of the run's centre into a tile (from --from on), by tile (CSR)
+			std::vector<int32_t> off((size_t)L.N + 1, 0), vt;
+			auto entry = [&](size_t k) { return tileSeq[k] >= 0 && (k == 0 || tileSeq[k] != tileSeq[k - 1]); };
+			for (size_t k = 0; k < tileSeq.size(); k++) if (entry(k)) off[(size_t)tileSeq[k] + 1]++;
+			for (size_t t = 0; t < (size_t)L.N; t++) off[t + 1] += off[t];
+			vt.assign((size_t)std::max(1, off[(size_t)L.N]), 0);
+			std::vector<int32_t> fill(off.begin(), off.end() - 1);
+			for (size_t k = 0; k < tileSeq.size(); k++) if (entry(k)) vt[(size_t)fill[(size_t)tileSeq[k]]++] = from + (int32_t)k;
+			if (!dvo.upload(off.data(), 4 * off.size()) || !dvt.upload(vt.data(), 4 * vt.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+			P.visitOff = (const i32*)(uintptr_t)dvo.p; P.visitTick = (const i32*)(uintptr_t)dvt.p;
+			if (sameDisc && !rD.empty()) {
+				if (!drd.upload(rD.data(), 8 * rD.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+				P.rDisc = (const u64*)(uintptr_t)drd.p; P.discNoCoins = ncR ? 1 : 0;
+			}
+		}
 		std::vector<int32_t> tb(refTile.size(), -1);
 		if (!dtb.upload(tb.data(), 4 * tb.size())) { printf("{\"error\":\"tileBest\"}\n"); return 4; }
 		P.tileBest = (i32*)(uintptr_t)dtb.p;

@@ -38,6 +38,15 @@
 // but starts the timer later; the union combine counts run ticks, so it takes such an edge only when the run is faster.
 // Once per session and again when the run's first 400 ticks change (at most every 5 min, doubled after each pass that
 // found nothing, up to 80 min).
+// Long-range shortcut rounds (--leaps=1, the default where every move runs; 0 off; src/leaps.js): path changes the
+// windows above cannot see (a loop, a spur to a switch, a snake: the rejoin 300-3000 ticks after the start). From a
+// cursor every --leapStep ticks (250) along the run, --leapS seconds each (25): every move from the run's state, ordered
+// by a time-to-go field to its later tiles, hits where the run arrives later, tails / an exact rejoin / the run as it
+// is after them, every candidate replayed and judged. An exact one is a library edge (family leap: the combine), a loose
+// one goes to the job as it is. Once the search families and every move save under --leapWhen ticks a minute (20; or
+// from round --leapRound0, 20), every third round until a first pass over the run is done (each pass with
+// the next cell grain; even passes take only hits in the run's own discrete state there, odd ones any: a leap past a
+// switch the rest never needs), then an arm of the bandit (one round in eight at least).
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, families, ...).
 // GPU launch failures (eegpu's {"error":...,"launchError":true} line, exit 6 / 7 = the driver's watchdog stopped a
 // kernel, or a crash): the driver may have reset the GPU, so the searcher backs off instead of relaunching at once: it
@@ -78,11 +87,24 @@ const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 320)), EVERY_STEP = Math.ma
 // a laptop's 8 GB: 2^26 = 1 GB), unless --everyCells gives it
 const everyCells = () => (args.everyCells ? Math.max(20, Math.min(28, +args.everyCells)) : gpuMemMB >= 20000 ? 28 : gpuMemMB >= 11000 ? 27 : 26);
 let gpuMemMB = 0;   // (the GPU's memory, from eegpu's done events)
+// long-range shortcuts (src/leaps.js: path changes past the every-move windows; --leaps=1, the default where every move
+// runs; 0 off): a leap round searches starts from its cursor (every --leapStep ticks, 250) for --leapS seconds each (25),
+// about --leapRound seconds (60) a round; once due (leapDue) every third round is one until a first pass over the run is
+// done, then the bandit weighs it like the other arms (runLeaps, pickArm)
+const LEAP_ON = EVERY_ON && String(args.leaps === undefined ? '1' : args.leaps) !== '0';
+const LEAP_S = Math.max(3, +(args.leapS || 25)), LEAP_STEP = Math.max(20, +(args.leapStep || 250)), LEAP_ROUND_S = Math.max(5, +(args.leapRound || 60));
+// (leaps.js's options: --leapAhead (minAhead 300), --leapGain (minGain 20), --leapSpan (maxSpan 3000))
+// the first pass waits until the search families and every move together save under --leapWhen ticks a minute (20),
+// or round --leapRound0 (20: ~10 min; the rates count per second of each arm's own GPU time, so the families stay above
+// 20 a minute long after the run's own gain has slowed); with --leapWhen=0 from round 4 on
+const LEAP_WHEN = Math.max(0, args.leapWhen !== undefined ? +args.leapWhen : 20), LEAP_ROUND0 = Math.max(4, +(args.leapRound0 || 20));
+const leapDue = (round) => !LEAP_WHEN || round >= LEAP_ROUND0 || (arms.search.n > 0 && arms.every.n > 0 && Math.max(armRate('search'), armRate('every')) * 60 < LEAP_WHEN);
+const LEAP_OPTS = Object.fromEntries([['minAhead', args.leapAhead], ['minGain', args.leapGain], ['maxSpan', args.leapSpan]].filter(([, v]) => v !== undefined).map(([k, v]) => [k, +v]));
 const EVERY_OFFSETS = [0, 50, 25, 75];   // (per pass over the run, scaled to the step)
 const IDLE_ON = String(args.idle === undefined ? (args.tool ? '0' : '1') : args.idle) !== '0';
 // (the idle start is no arm: its own schedule, idleDue; its seconds and credit go to neither arm, so its pass never counts
 // as every move's first try, which pickArm gives round 3)
-const ARM_FAMS = { search: ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'], every: ['every'] };
+const ARM_FAMS = { search: ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'], every: ['every'], leap: ['leap'] };
 const ARM_DECAY = 0.7;
 const PARENT = +(args.parent || 0);
 // eegpu's launch target (ms per kernel launch; halved after each launch failure) and the failures so far
@@ -100,7 +122,7 @@ const STATUS = path.join(DIR, 'gpu_status.json');
 const STATE = path.join(GDIR, 'state.json');
 const LIBRARY = path.join(GDIR, 'library.bin');
 const FAMS = ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'];   // eegpu's family numbers
-const LIB_FAMS = [...FAMS, 'every', 'idle'];                   // (+ the every-move windows, the idle-start windows)
+const LIB_FAMS = [...FAMS, 'every', 'idle', 'leap'];           // (+ the every-move windows, the idle-start windows, the leaps)
 const RANDOM_FAMS = ['pert', 'flip', 'sticky'];
 fs.mkdirSync(GDIR, { recursive: true });
 
@@ -749,8 +771,97 @@ async function runIdle() {
  *  40, 80 min after passes that found nothing: the ice level's later passes found nothing, 24 s each) */
 const idleDue = () => IDLE_ON && !!ref && (!idleLast || (Date.now() - idleLast >= 300e3 * 2 ** Math.min(4, idleMiss) && startKey() !== state.idleKey));
 
-// ---------------------------------------------------------------- the bandit: the search families vs every move
-const arms = { search: { c: 0, s: 0, n: 0, last: 0 }, every: { c: 0, s: 0, n: 0, last: 0 } };
+// ---------------------------------------------------------------- long-range shortcuts (src/leaps.js)
+// A leap round: from the leap cursor (a tick of the reference and its state hash), one start after another, every
+// LEAP_STEP ticks: leaps.js leapFrom (the time-to-go field to the run's later tiles, `eegpu explore --ahead=1 --visits=1`
+// for LEAP_S seconds, the tails and splices, every candidate replayed and judged against the reference). An exact leap
+// becomes a library edge (family `leap`) and goes through the combine (offer); a loose one (no exact rejoin, e.g. it skips
+// a switch the rest of the run never needed) is handed to the job as it is. A pass that reaches the end of the run starts
+// the next one at the start (state.leapPass).
+let leapCtx = null, leapInfo = null;
+async function runLeaps() {
+	const L = require('./leaps.js');
+	const t0 = Date.now();
+	if (!leapCtx) leapCtx = L.context({ level, blob, blobFile, work: path.join(GDIR, 'leaps') });
+	if (!state.leapCur) state.leapCur = { t: 0, h: ref.H[0] };
+	const at = () => { const c = state.leapCur; const t = c.h !== undefined ? ref.tickOf.get(c.h) : undefined; return Math.max(0, Math.min(ref.n - 1, t !== undefined ? t : c.t | 0)); };
+	const from = at();
+	let searches = 0, found = 0, ticks = 0, gpu = null, hits = 0;
+	const fam = state.fam.leap;
+	const lead = (LEAP_OPTS.minAhead || L.DEFAULTS.minAhead) + (LEAP_OPTS.minGain || L.DEFAULTS.minGain);
+	if (ref.n < lead + 1) {   // (a run too short for a leap: nothing to search, the first pass is done)
+		if (!(state.leapPass > 0)) { state.leapPass = 1; saveState(); }
+		return { searches, found, hits, from, to: from, gpu, ticks, seconds: (Date.now() - t0) / 1000 };
+	}
+	while ((Date.now() - t0) / 1000 < LEAP_ROUND_S) {
+		if (!leapInfo || leapInfo.key !== ref.key) {
+			const f0 = leapInfo ? leapInfo.field0 : undefined;
+			leapInfo = L.prepare(level, ref.masks, { nocoins: nc ? 1 : 0, field0: f0 });
+			if (!leapInfo) return { err: 'the reference does not finish', searches, found, from, to: at() };
+			leapInfo.key = ref.key;
+		}
+		const i = at();
+		const base = st.ticks;
+		clearStop();
+		const r = await L.leapFrom(leapCtx, leapInfo, i, Object.assign({}, LEAP_OPTS, {
+			tool, perS: LEAP_S, grain: state.leapPass | 0, sameDiscrete: (state.leapPass | 0) % 2 === 0 ? 1 : 0, cells: everyCells(), cap: gpuMemMB >= 20000 ? 1048576 : 262144, nocoins: nc ? 1 : 0, cacheArgs: G.cacheArgs(),
+			stopFile: STOPFILE, parent: process.pid, launchMs, onChild: (c) => { child = c; },
+			onLayer: (ev) => status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: `long-range shortcuts from tick ${i}` }),
+		}));
+		child = null;
+		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, launchError: isLaunchFailure(r.code, r.launchError, r.done), searches, found, from, to: at() };
+		if (r.done.gpu && r.done.gpu.memMB) gpuMemMB = r.done.gpu.memMB;
+		launchFails = 0; otherFails = 0;
+		searches++; ticks += r.done.ticks || 0; gpu = r.done.gpu; hits += r.hits;
+		st.ticks = base + (r.done.ticks || 0);
+		fam.ticks += r.done.ticks || 0; fam.seconds += +r.done.seconds || 0; fam.hits += r.hits;
+		const before = ref.ev.runTicks;
+		if (r.best) { found++; await handLeap(r.best, i); }
+		log(`GPU: long-range shortcuts from tick ${i}: ${r.hits} hit${r.hits === 1 ? '' : 's'} (best ${r.bestGain} ticks ahead), ${r.done.layers} layers (${r.done.end}, ${(+r.done.seconds).toFixed(0)} s)` +
+			`${r.best ? `: ${r.best.how}, ${C.fmt(before)} to ${C.fmt(ref.ev.runTicks)}` : r.hits ? ': no splice finishes faster' : ''}`);
+		let next = at() + LEAP_STEP, wrapped = false;
+		if (next + lead > ref.n) {
+			wrapped = true;
+			state.leapPass = (state.leapPass | 0) + 1;
+			next = Math.floor(LEAP_STEP * EVERY_OFFSETS[state.leapPass % EVERY_OFFSETS.length] / 100);
+			log(`GPU: long-range shortcuts covered the whole run (pass ${state.leapPass}: a start every ${LEAP_STEP} ticks); the next pass starts at tick ${next}`);
+		}
+		state.leapCur = { t: next, h: ref.H[Math.min(next, ref.n)] };
+		saveState();
+		if (quitting || editorBusy() || wrapped) break;   // (a pass ends a round)
+	}
+	return { searches, found, hits, from, to: at(), gpu, ticks, seconds: (Date.now() - t0) / 1000 };
+}
+/** a leap's run (leaps.js spliceHits: replayed and judged against the reference): an exact one as a library edge through
+ *  the combine, a loose one to the job as it is */
+async function handLeap(b, i) {
+	if (b.edgeLen > 0 && b.j > i && b.j <= ref.n) {
+		const seq = Uint8Array.from(b.masks.subarray(i, i + b.edgeLen));
+		if (addEdge(ref.H[i], ref.H[b.j], seq, 'leap')) { state.fam.leap.edges++; saveLibrary(false); }
+		await offer(`long-range shortcut from tick ${i} (-${b.saved})`);
+		return;
+	}
+	const base = ref.ev;
+	const v = C.judge(b.ev, base, base.deaths);
+	if (!v.accept) return;
+	const bytes = C.eetasBytes(b.ev.ms);
+	const key = sha1(bytes);
+	const saved = base.runTicks - b.ev.runTicks;
+	const res = await J.tryCandidate(ID, bytes, { source: `gpu (long-range shortcut from tick ${i})`, wait: 0 });
+	st.submitted++;
+	st.saved = Math.max(st.saved, saved);
+	state.fam.leap.used++; state.fam.leap.saved += saved;
+	const mine = { key, ms: b.ev.ms, ev: b.ev, inbox: res.handed === 'inbox' ? res.inboxFile : '' };
+	ownRuns.push(mine);
+	if (ownRuns.length > 5) ownRuns.shift();
+	own = res.handed === 'direct' && !res.accepted ? null : mine;
+	status({ lastSubmit: { t: Date.now(), runTicks: b.ev.runTicks, saved, handed: res.handed, accepted: res.accepted }, families: famStatus() });
+	log(`GPU: long-range shortcut from tick ${i} (${b.how}): ${C.fmt(base.runTicks)} to ${C.fmt(b.ev.runTicks)} (-${saved}), handed to the ${res.handed === 'inbox' ? 'grind' : 'job'}${res.accepted ? ' (accepted)' : ''}`);
+	await refresh();
+}
+
+// ---------------------------------------------------------------- the bandit: the search families vs every move (vs the leaps)
+const arms = { search: { c: 0, s: 0, n: 0, last: 0 }, every: { c: 0, s: 0, n: 0, last: 0 }, leap: { c: 0, s: 0, n: 0, last: 0 } };
 const armCredit = (arm) => ARM_FAMS[arm].reduce((x, f) => x + ((state.fam[f] && state.fam[f].saved) || 0), 0);
 const credLast = {};
 /** after a round of `arm` that took `sec` s: every arm's new credit (its families' saved ticks, whenever the combine
@@ -770,11 +881,20 @@ const armRate = (k) => (arms[k].s > 0 ? arms[k].c / arms[k].s : 0);
 function pickArm(round) {
 	if (EVERY_MODE === 'off') return 'search';
 	if (args.everyOnly) return 'every';
+	if (args.leapOnly && LEAP_ON) return 'leap';
+	// the leaps: every third round until a first pass over the run is done, once the other arms slow down (leapDue: a
+	// path change is worth more than any polish of the path it replaces, and no other arm can find one; while they still
+	// find tens of ticks a minute they have the GPU), then weighed like the others
+	if (LEAP_ON && round >= 4 && !(state.leapPass > 0) && round % 3 === 1 && leapDue(round)) return 'leap';
 	if (EVERY_MODE === 'on') return round % 2 === 0 ? 'every' : 'search';
 	if (round <= 2) return 'search';   // (the systematic families go first)
 	if (!arms.every.n) return 'every';
-	const best = armRate('every') > armRate('search') ? 'every' : 'search', other = best === 'every' ? 'search' : 'every';
-	return round - arms[other].last >= 5 ? other : best;   // (the arm behind: one round in five)
+	const keys = LEAP_ON && state.leapPass > 0 ? ['search', 'every', 'leap'] : ['search', 'every'];   // (the leaps join the bandit after their first pass)
+	const best = keys.reduce((b, k) => (armRate(k) > armRate(b) ? k : b), 'search');
+	// the arm behind longest: one round in five (the leaps, whose rounds are longer, one in eight)
+	let due = null;
+	for (const k of keys) if (k !== best && round - arms[k].last >= (k === 'leap' ? 8 : 5) && (!due || arms[k].last < arms[due].last)) due = k;
+	return due || best;
 }
 for (const k of Object.keys(arms)) credLast[k] = armCredit(k);   // (the credit of earlier sessions is not this one's)
 
@@ -849,8 +969,23 @@ async function main() {
 			const got = ref.ev.runTicks < before ? `, ${C.fmt(before)} to ${C.fmt(ref.ev.runTicks)}` : '';
 			log(`GPU: idle start: ${e.ks.length ? `${e.windows} windows after ${e.ks.join(', ')} idle ticks, ${e.added} rejoin${e.added === 1 ? '' : 's'}${got}` : 'the ball rests at the start: nothing to gain'} (${((Date.now() - ti) / 1000).toFixed(0)} s)`);
 		}
-		// this round's arm: every move along the run, or the search families (the bandit: pickArm)
-		if (pickArm(round) === 'every') {
+		// this round's arm: every move along the run, the long-range shortcuts, or the search families (the bandit: pickArm)
+		const arm = pickArm(round);
+		if (arm === 'leap') {
+			await refresh();
+			const before = ref.ev.runTicks;
+			const e = await runLeaps();
+			if (e.err) { await failed(e.err, e.launchError); continue; }
+			account('leap', e.seconds, round);
+			status({ state: 'running', round, edges: libSize, families: famStatus(),
+				arms: { every: Math.round(armRate('every') * 600) / 10, search: Math.round(armRate('search') * 600) / 10, leap: Math.round(armRate('leap') * 600) / 10 },
+				lastRound: { kind: 'long-range shortcuts', searches: e.searches, from: e.from, to: e.to, ticks: e.ticks, seconds: e.seconds, found: e.found } });
+			const got = ref.ev.runTicks < before ? `, ${C.fmt(before)} to ${C.fmt(ref.ev.runTicks)}` : '';
+			log(`GPU: round ${round}, long-range shortcuts (${e.seconds.toFixed(0)} s, ${e.searches} start${e.searches === 1 ? '' : 's'} from tick ${e.from}): ${e.found} found${got}; pass ${state.leapPass | 0}`);
+			if (args.once) break;
+			continue;
+		}
+		if (arm === 'every') {
 			await refresh();
 			const before = ref.ev.runTicks;
 			const e = await runEvery();
