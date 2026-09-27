@@ -232,17 +232,42 @@ function create(o) {
 			pass[k] = solid ? 0 : door ? (sim.is_tile_solid_now(k % W, (k / W) | 0) ? 0 : 1) : deadly && !sim.is_invulnerable ? 0 : 1;
 		}
 		const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
-		const seen = new Uint8Array(N), q = new Int32Array(N);
+		const seen = new Uint8Array(N), q = new Int32Array(N), term = new Uint8Array(N);
 		let qh = 0, qt = 0;
 		// (from every place the room was entered: the first arrival and each later entry elsewhere)
 		for (const e of [s0, ...r.entries]) if (!seen[e]) { seen[e] = 1; q[qt++] = e; pass[e] = 1; }
+		const nSrc = qt;
+		// what touching a trigger component does in this room (the engine's own answer: the room's first arrival with its
+		// centre put on the tile, one tick without input): a change by a trigger (goexplore.js roomOf byTrigger) makes it a
+		// target and the end of the walk there (beyond it the ball is in another room, so a trigger only behind it is no
+		// target of this room); no change (an effect this room has already, e.g. a gravity effect of the room's own
+		// direction) makes it neither (it never changes the room, so no run or burst could ever try it). Infinity Pain's
+		// room "fly grav=2 team=1": 112 targets before, 76 of them only behind another trigger and 35 no-ops, the nearest
+		// of them nearer than the wall's (199, 151) from the archive's cells by the tunnel (7 ticks short of it for 70 min);
+		// with this rule 2: (189, 159) and the wall's
+		const cz0 = o.RM.cause(sim), snap0 = sim.snapshot(), inp0 = new E.EEInput(), acts = new Map();
+		const changes = (c, t) => {
+			let v = acts.get(c);
+			if (v === undefined) {
+				sim.restore(snap0);
+				sim.px = (t % W) * 16; sim.py = ((t / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0;
+				// (a death or an error says nothing: a target, as before the test)
+				try { sim.tick(inp0); v = sim.is_dead || o.RM.byTrigger(cz0, o.RM.cause(sim)); } catch (e) { v = true; }
+				sim.restore(snap0);
+				acts.set(c, v);
+			}
+			return v;
+		};
 		const comps = new Map(), trophies = [];
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
 			const c = TR.comp[t];
 			// (a coin already collected at the room's first arrival is no trigger of it)
-			if (c >= 0 && !(TR.eaten[c] && sim.is_coin_collected(x, y))) { let l = comps.get(c); if (!l) comps.set(c, l = []); l.push(t); }
+			const live = c >= 0 && !(TR.eaten[c] && sim.is_coin_collected(x, y)) && changes(c, t);
+			if (live) { let l = comps.get(c); if (!l) comps.set(c, l = []); l.push(t); }
 			if (fg[t] === 121) trophies.push(t);
+			// (a trigger that changes the room: a goal, no way through; the places the room was entered at are ways out)
+			if (live && qh > nSrc) { term[t] = 1; continue; }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
@@ -258,7 +283,7 @@ function create(o) {
 		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it)
 		const c0 = r.trig ? compNear(s0) : -1;
 		if (c0 >= 0 && !r.info0) { r.tried.add(c0); r.info0 = true; }
-		r.info = { pass, wall, comps, trophies, seen };
+		r.info = { pass, wall, comps, trophies, seen, term };
 		return r.info;
 	};
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
@@ -287,7 +312,8 @@ function create(o) {
 					const xx = x + dx, yy = y + dy;
 					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
 					const j = yy * W + xx;
-					if (walk[j] !== CUT || !I.pass[j]) continue;
+					// (another room-changing trigger is no way through either: past it the ball is in another room)
+					if (walk[j] !== CUT || !I.pass[j] || I.term[j]) continue;
 					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
 					walk[j] = d; if (d > mx) mx = d; q[qt++] = j;
 				}
