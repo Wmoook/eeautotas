@@ -91,12 +91,12 @@ function triggersOf(L) {
 		const k = BK.kindOf(id).kind;
 		return k === 'effect' || k === 'switch' || k === 'key' || k === 'reset' || (k === 'coin' && coinDoor) || (k === 'bluecoin' && blueDoor) || (k === 'crown' && crownDoor);
 	};
-	const comp = new Int32Array(N).fill(-1), q = new Int32Array(N);
+	const comp = new Int32Array(N).fill(-1), q = new Int32Array(N), ids = [];
 	let n = 0;
 	for (let i = 0; i < N; i++) {
 		if (comp[i] >= 0 || !isTrig(fg[i])) continue;
 		let qh = 0, qt = 0;
-		comp[i] = n; q[qt++] = i;
+		comp[i] = n; q[qt++] = i; ids.push(fg[i]);
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
 			for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -108,7 +108,9 @@ function triggersOf(L) {
 		}
 		n++;
 	}
-	return { comp, n };
+	// (consumable: a coin is gone once collected, so a cell standing on its tile proves nothing about it)
+	const eaten = Uint8Array.from(ids, (id) => { const k = BK.kindOf(id).kind; return k === 'coin' || k === 'bluecoin' ? 1 : 0; });
+	return { comp, n, eaten };
 }
 
 /**
@@ -132,6 +134,8 @@ function create(o) {
 	const rooms = new Map();   // room key -> {key, desc, seq, tile, inputs, n, y, sec, tried: Set(component), info (lazy), best}
 	let seq = 0, stopped = false, reqId = 0, loopP = null;
 	const children = new Set();   // the running bursts' processes (--burstPar lanes: one each)
+	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
+	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
 	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, skipped: 0, chained: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
@@ -169,11 +173,12 @@ function create(o) {
 	const room = (m) => {
 		let r = rooms.get(m.room);
 		if (!r) {
-			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set() };
+			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(),
+				trig: m.t > 0 && m.trig !== false };
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
-		} else if (m.t < r.t) { r.t = m.t; r.inputs = m.inputs; r.tile = m.tile; }
+		} else if (m.t < r.t) { r.t = m.t; r.inputs = m.inputs; r.tile = m.tile; r.trig = m.t > 0 && m.trig !== false; }
 		entry(r, m.tile);
 		return r;
 	};
@@ -191,9 +196,10 @@ function create(o) {
 		}
 		return -1;
 	};
-	/** a room change from room `from` to room `to` at tile: that trigger was tried from there, and `to` was entered there */
-	const edge = (from, tile, to) => {
-		const r = rooms.get(from), c = compNear(tile);
+	/** a room change from room `from` to room `to` at tile: `to` was entered there, and when a trigger made the change
+	 *  (trig: not a time door flipping or a key expiring, goexplore.js roomOf byTrigger) that trigger was tried from there */
+	const edge = (from, tile, to, trig) => {
+		const r = rooms.get(from), c = trig === false ? -1 : compNear(tile);
 		if (r && c >= 0) r.tried.add(c);
 		if (to === undefined || to === null) return;
 		const r2 = rooms.get(to);
@@ -230,7 +236,8 @@ function create(o) {
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
 			const c = TR.comp[t];
-			if (c >= 0) { let l = comps.get(c); if (!l) comps.set(c, l = []); l.push(t); }
+			// (a coin already collected at the room's first arrival is no trigger of it)
+			if (c >= 0 && !(TR.eaten[c] && sim.is_coin_collected(x, y))) { let l = comps.get(c); if (!l) comps.set(c, l = []); l.push(t); }
 			if (fg[t] === 121) trophies.push(t);
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
@@ -244,8 +251,8 @@ function create(o) {
 				}
 			}
 		}
-		// (the trigger the room was first entered by is not a target: it made this room)
-		const c0 = compNear(s0);
+		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it)
+		const c0 = r.trig ? compNear(s0) : -1;
 		if (c0 >= 0 && !r.info0) { r.tried.add(c0); r.info0 = true; }
 		r.info = { pass, wall, comps, trophies, seen };
 		return r.info;
@@ -305,7 +312,7 @@ function create(o) {
 	const replay = (inputs, parentKey, quiet) => {
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset();
-		let key = o.RM.key(sim), fresh = 0;
+		let key = o.RM.key(sim), fresh = 0, cz = o.RM.cause(sim);
 		for (let k = 0; k < inputs.length; k++) {
 			E.applyMask(inp, (inputs.charCodeAt(k) - 48) & 31);
 			sim.tick(inp);
@@ -313,8 +320,10 @@ function create(o) {
 			const k2 = o.RM.key(sim);
 			if (k2 !== key && !quiet) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
-				edge(key, tile, k2);
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key })) fresh++;
+				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
+				edge(key, tile, k2, trig);
+				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig })) fresh++;
+				cz = cz2;
 			}
 			key = k2;
 		}
@@ -386,7 +395,7 @@ function create(o) {
 		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
 		const c = job.cells;
 		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0',
-			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${c.cap}`,
+			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();
 		let ch;
@@ -478,7 +487,7 @@ function create(o) {
 				const cell = await nearestCell(r, p.f.walk);
 				if (stopped) break;
 				// (a cell of this room standing on a target: that trigger does not change the room from here: tried, and no burst)
-				if (cell && cell.v === 0 && cell.tile >= 0 && TR.comp[cell.tile] >= 0 && !r.tried.has(TR.comp[cell.tile])) { r.tried.add(TR.comp[cell.tile]); st.skipped++; r.busy = false; continue; }
+				if (cell && cell.v === 0 && cell.tile >= 0 && TR.comp[cell.tile] >= 0 && !TR.eaten[TR.comp[cell.tile]] && !r.tried.has(TR.comp[cell.tile])) { r.tried.add(TR.comp[cell.tile]); st.skipped++; r.busy = false; continue; }
 				r.lastField = p.f;
 				const k = r.k++;
 				let inputs = cell ? cell.inputs : r.inputs, v = cell ? cell.v : p.f.walk[r.tile];
@@ -493,9 +502,9 @@ function create(o) {
 				const nr = p.nr;
 				const back = TROPHY_BACK[trophyArm.back++ % TROPHY_BACK.length];
 				const inputs = nr.inputs.slice(0, Math.max(50, nr.inputs.length - back));
-				const rf = path.join(work, 'trophy.reach');
 				trophyArm.busy = true;
-				if (!fs.existsSync(rf)) RF.writeReachFile(o.field, rf, fp);
+				if (!trophyRf) { trophyRf = path.join(work, 'trophy.reach'); RF.writeReachFile(o.field, trophyRf, fp); }
+				const rf = trophyRf;
 				const ci = pickConf(null);
 				job = { lane, r: null, inputs, conf: ci, cells: CONFS[ci], reach: rf, slack: Math.round(SLACK + SLACK_F * nr.rc), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
 					startDist: nr.rc, chain: 0, what: `the trophy (the nearest attempt, ${back} back)` };
@@ -504,6 +513,8 @@ function create(o) {
 			if (job.r) job.r.busy = false; else trophyArm.busy = false;
 			if (r.fail) {
 				st.failed++;
+				// (a failure counts as a try of its arm with no reward: one broken arm must not win every pick)
+				if (job.r) job.r.n++; else trophyArm.n++;
 				o.say({ ev: 'warning', text: `burst: ${r.end}` });
 				if (++fails >= 3) { o.say({ ev: 'warning', text: 'bursts: 3 failures in a row: no more GPU bursts' }); break; }
 				await sleep(2000);

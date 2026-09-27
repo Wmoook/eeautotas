@@ -116,8 +116,11 @@
 //        [--share=0|1 (the one search: the workers share their new rooms; coarse cells)] [--bursts=0|1 (the GPU operator,
 //        src/bursts.js; coarse cells)] [--tool=<eegpu> (default: gpu.js nativeTool; a .js file: a stand-in run by Node)]
 //        [--cachedir=<kernel cache>] [--pausefile=<file: the bursts wait between two launches while it exists>]
-//        [--work=<folder for the bursts' files>] [--burstS=15 (seconds per burst at most)] [--burstPar=2 (bursts side by
-//        side)] [--gpuCells=26 (log2 of a burst's cell table)]
+//        [--work=<folder for the bursts' files>] [--burstS=15 (seconds per burst at most)] [--burstPar=1 (bursts side by
+//        side)] [--gpuCells=25 (log2 of a burst's cell table)] [--burstCap=262144 (a burst's states per layer at most; 0:
+//        its settings' own, up to 1 M)] (the defaults are the relay's sizing next to every move and the beams: a 2^26
+//        table and 1 M layers on 2 lanes took 3-5.7 GB, more than an 8 GB laptop GPU has beside them; the A100 runs:
+//        --burstPar=2 --gpuCells=26 --burstCap=0)
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -136,7 +139,7 @@ const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	share: 0, bursts: 0, burstS: 15, burstPar: 2, gpuCells: 26 };
+	share: 0, bursts: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144 };
 // the text options (the one search's GPU operator: src/bursts.js)
 const TEXT_OPTS = new Set(['level', 'out', 'tool', 'cachedir', 'pausefile', 'work']);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
@@ -242,6 +245,12 @@ function discreteOf(L) {
 		if (sim._oswitches.size !== 0) w(onSum(sim._oswitches, 0x7654321));
 		return h | 0;
 	};
+	const key = (sim) => hash(sim, true);
+	/** what a room change's cause is judged by: {sub (the key without keys and time doors), keys} */
+	const cause = (sim) => ({ sub: hash(sim, false), keys: sim._keysMask });
+	/** a change from a room of cause a to one of cause b came from a trigger the ball touched (a key picked up, an
+	 *  effect, switch, coin, ...), not from the clock (a time door flipping, a key expiring) */
+	const byTrigger = (a, b) => !a || !b || a.sub !== b.sub || (b.keys & ~a.keys) !== 0;
 }
 
 // ---------------------------------------------------------------- rooms (coarse cells)
@@ -267,13 +276,15 @@ function roomOf(L) {
 	}
 	const onSum = (m, salt) => { let s = 0; for (const [id, v] of m) if (v === true) s = (s + fmix((id ^ salt) | 0)) | 0; return s; };
 	const onList = (m) => { const a = []; for (const [id, v] of m) if (v === true) a.push(id); return a.sort((x, y) => x - y); };
-	const key = (sim) => {
+	// (full: the room key; else the part of it only the ball's own touches change: without the keys, which expire, and the
+	// time doors, which flip on the clock)
+	const hash = (sim, full) => {
 		let h = 0x3c6ef372;
 		const w = (v) => { h = Math.imul(h ^ v, 0x5bd1e995); h ^= h >>> 13; };
-		w(sim._keysMask);
+		if (full) w(sim._keysMask);
 		w((crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
 			(sim.is_cursed ? 16 : 0) | (sim.is_zombie ? 32 : 0) | (sim.is_on_fire ? 64 : 0) | (sim.is_poisoned ? 128 : 0) | (sim.has_levitation ? 256 : 0) |
-			(L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
+			(full && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
 		w(sim.max_jumps); w(sim.jump_boost); w(sim.speed_boost); w(sim.flip_gravity);
 		if (team) w(sim.team);
 		if (coins) w(sim.coins);
@@ -286,6 +297,12 @@ function roomOf(L) {
 		if (sim._oswitches.size !== 0) w(onSum(sim._oswitches, 0x7654321));
 		return h | 0;
 	};
+	const key = (sim) => hash(sim, true);
+	/** what a room change's cause is judged by: {sub (the key without keys and time doors), keys} */
+	const cause = (sim) => ({ sub: hash(sim, false), keys: sim._keysMask });
+	/** a change from a room of cause a to one of cause b came from a trigger the ball touched (a key picked up, an
+	 *  effect, switch, coin, ...), not from the clock (a time door flipping, a key expiring) */
+	const byTrigger = (a, b) => !a || !b || a.sub !== b.sub || (b.keys & ~a.keys) !== 0;
 	const COL = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 	const desc = (sim) => {
 		const p = [];
@@ -313,7 +330,7 @@ function roomOf(L) {
 		if (silver && sim._collide_silver_crown) p.push('silvercrown');
 		return p.join(' ') || '(start)';
 	};
-	return { key, desc };
+	return { key, desc, cause, byTrigger };
 }
 
 /**
@@ -466,12 +483,13 @@ function explore(L, field, a, seed, ctrl, post, port) {
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
 	const report = coarse && !!port;
-	const edges = report ? new Set() : null;
+	const edges = report ? new Set() : null, clockEdges = report ? new Set() : null;
 	const centreTile = () => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
+		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
 		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
-			parent: parent === undefined ? null : parent, tile: centreTile() };
+			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		rooms.set(key, r);
 		roomList.push(r);
 		return r;
@@ -706,16 +724,19 @@ function explore(L, field, a, seed, ctrl, post, port) {
 			source('room', room, nc);
 		}
 		if (report) {
-			post({ type: 'room', seed, room: room.key, desc: room.desc, gain: room.gain, troOk: room.troOk, parent: room.parent, tile: room.tile, t,
+			post({ type: 'room', seed, room: room.key, desc: room.desc, gain: room.gain, troOk: room.troOk, parent: room.parent, tile: room.tile, t, trig: room.trig,
 				inputs: C.eetasBytes(inputsOf(nc.node)).toString('latin1') });
 		}
 	};
 	/** a room change from one known room to another at the live state's tile: once per (room, tile), the trigger tried */
 	const edge = (from, to) => {
+		// (the ones the clock made, a time door or a key's end, apart: they only tell where the room was entered, and must
+		// not hide a trigger's change at the same tile)
+		const trig = RM.byTrigger(from.cause, to.cause), set = trig ? edges : clockEdges;
 		const tl = centreTile(), k = from.key * 4194304 + tl;   // (a number: tiles < 2^22)
-		if (edges.has(k) || edges.size >= 200000) return;
-		edges.add(k);
-		post({ type: 'edge', seed, from: from.key, to: to.key, tile: tl });
+		if (set.has(k) || set.size >= 200000) return;
+		set.add(k);
+		post({ type: 'edge', seed, from: from.key, to: to.key, tile: tl, trig });
 	};
 	/** the one search: another operator's run (another worker's new room, the GPU's attempt) into this archive, every state
 	 *  along it (a cell is kept as always: the earliest state per cell; rooms made as in the runs) */
@@ -1011,7 +1032,7 @@ async function main() {
 		} else if (msg.type === 'room') {
 			if (one && one.register(msg) && a.share && a.workers > 1) { one.broadcast(msg.inputs, msg.seed); one.shared++; }
 		} else if (msg.type === 'edge') {
-			if (bursts) bursts.edge(msg.from, msg.tile, msg.to);
+			if (bursts) bursts.edge(msg.from, msg.tile, msg.to, msg.trig);
 		} else if (msg.type === 'finish') {
 			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`);
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
