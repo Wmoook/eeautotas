@@ -492,7 +492,7 @@ async function mutateLoop(tag) {
 let gpuChild = null;
 function startGpu() {
 	const fd = fs.openSync(path.join(OUT, 'gpu.log'), 'a');
-	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : [])],
+	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : []), ...(a.every !== undefined ? [`--every=${a.every}`] : [])],
 		{ stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
 	saveStatus({ gpuPid: gpuChild.pid });   // (jobs.js stopJob stops it first, alone: its eegpu is never killed mid-kernel)
@@ -501,7 +501,10 @@ function startGpu() {
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
 
 // ---------------------------------------------------------------- one round (about ROUND_MS), resumable stage by stage
-const STAGES = ['mutA', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+// (on time-door / coin-door levels the phase pass comes right after the first mutate: its idle start and re-synced
+// clocks found timedoor's -252 (half the run), which waited 7 minutes behind the endgame, deep windows and shortcuts)
+const STAGES_ALL = ['mutA', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+const STAGES_PHASE = ['mutA', 'phase', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -678,6 +681,7 @@ async function main() {
 	checkInbox();
 	try { recoverOutputs(); } catch (e) { log(`earlier stage outputs: ${e && e.message || e}`); }
 	// the round to continue: the one in progress when the grind stopped, else the next
+	const STAGES = PHASE ? STAGES_PHASE : STAGES_ALL;
 	const rounds = +status.rounds || (+a.rot || 0);
 	let round = cur.stage && cur.round > rounds ? cur.round : rounds + 1;
 	firstRound = round;

@@ -14,7 +14,8 @@
 // --rejoin=1 [--nocoins=1] [--gain=1]: the optimizer's target. From the run's state at --from, a state equal to one the
 // run reaches at least --gain ticks later (exact state hash, re-checked on the CPU with both hashes) is a proven
 // shortcut: {"ev":"rejoin","from":T,"j":J,"ticks":L,"saving":J-T-L,"inputs":...} (the shortest per J); states on the
-// run are not expanded (from there it goes as the run does).
+// run are not expanded (from there it goes as the run does). With --prefix, --gain may be 0 or negative (the idle start:
+// idle ticks before the first input cost no run time, so the caller judges the rejoin by run ticks).
 // A layer over --cap keeps the cap new cells with the lowest priorities (never fewer). "overflow" (per layer event, and
 // the total in the done event) counts the new cells left out: over the cap, or finding no slot in the cell table; an
 // "end":"exhausted" proves that no move was left untried (up to the cells' grain) only with "overflow":0. "twins" (done):
@@ -247,7 +248,10 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		for (size_t t = 0; t < qX.size(); t++) { const uint32_t bit = (uint32_t)(quadKey(qX[t], qY[t], qSX[t], qSY[t]) >> (64 - QBITS_LOG2)); qb[bit >> 5] |= 1u << (bit & 31); }
 		if (!dhk.upload(hk.data(), 8 * hk.size()) || !dhv.upload(hv.data(), 4 * hv.size()) || !dqb.upload(qb.data(), 4 * qb.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 		P.target = 4; P.htKeys = (const u64*)(uintptr_t)dhk.p; P.htVals = (const i32*)(uintptr_t)dhv.p; P.htMask = hcap - 1; P.qbits = (const u32*)(uintptr_t)dqb.p;
-		P.nocoins = ncR ? 1 : 0; P.fromTick = from; P.minGain = std::max(1, atoi(opt(argc, argv, "gain", "1").c_str()));
+		// --gain below 1 (with a --prefix only): rejoins that cost ticks are reported too. The idle start: a prefix of idle
+		// ticks costs no run time (the timer starts at the first input), so a rejoin k ticks later can still be faster
+		P.nocoins = ncR ? 1 : 0; P.fromTick = from; P.minGain = atoi(opt(argc, argv, "gain", "1").c_str());
+		if (P.minGain < 1 && prefixStr.empty()) P.minGain = 1;
 		// --slack=N: a state later than the run's last visit of its tile + N is dropped (off by default: -1)
 		P.slack = atoi(opt(argc, argv, "slack", "-1").c_str());
 		if (P.slack >= 0) {

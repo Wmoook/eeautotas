@@ -132,6 +132,9 @@ const ENDPOINTS = [
 	['GET', '/api/editor/solve', 'the route search: running, stage, layer, tick, states, ticksPerSec, result {time, runTicks, inputs, path}, message'],
 	['POST', '/api/editor/solve/stop', 'stop the route search'],
 	['GET', '/api/editor/solve/route.eetas', 'download the found route (also level.eelvl: the level it was found on)'],
+	['POST', '/api/editor/autotas', 'the AutoTASer: from the level alone to a near-optimal TAS within a time budget (Find a route, a job from its first route optimized at once, fed with its newer routes, the GPU handed to the optimizer when Find a route stops finding faster routes): JSON {eelvlB64, minutes (30), workers, name}'],
+	['GET', '/api/editor/autotas', 'the AutoTASer: running, state (finding / optimizing / done), job, best (run ticks), bestT (s), routes, handoff, events [{t, ev, ...}]'],
+	['POST', '/api/editor/autotas/stop', 'stop the AutoTASer (Find a route stops, the job pauses with its best)'],
 	['POST', '/api/editor/job', 'a job from a found route: JSON {eelvlB64, eetasB64, name, start: true|false, processor: "cpu" | "gpu"} (import, optionally start)'],
 ];
 
@@ -228,6 +231,8 @@ function startFocus(id, b) {
 
 // ---------------------------------------------------------------- the level editor (src/editor.js, src/app/editor.html)
 /** the level of an editor request: {eelvlB64} (.eelvl bytes) or {level} (the editor's JSON) */
+let autotas = null;   // the AutoTASer (src/autotas.js), one at a time
+const autotasState = () => { const s = autotas ? autotas.state() : null; return s ? { running: s.state !== 'done', state: s.state, job: s.job, best: s.best, bestT: s.bestT, routes: s.routes, handoff: s.handoff, events: s.events.slice(-60) } : { running: false, state: 'none' }; };
 const editorLevel = (b) => (b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? ED.eelvlOf(b.level) : null);
 async function editorRoute(req, res, parts, q) {
 	const what = parts[2] || '', sub = parts[3] || '';
@@ -260,6 +265,21 @@ async function editorRoute(req, res, parts, q) {
 			if (!f) return send(res, 404, { error: sub === 'route.eetas' ? 'no route found yet' : 'no search yet' });
 			res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${f.name}"`, 'Cache-Control': 'no-store' });
 			return res.end(fs.readFileSync(f.file));
+		}
+	}
+	if (what === 'autotas') {
+		if (req.method === 'GET' && !sub) return send(res, 200, autotasState());
+		if (req.method === 'POST' && sub === 'stop') { if (autotas) autotas.stop(); return send(res, 200, autotasState()); }
+		if (req.method === 'POST' && !sub) {
+			const b = await readJsonBody(req, 64 << 20);
+			if (autotas && autotas.state().state !== 'done') return send(res, 400, { error: 'the AutoTASer is already running (one at a time): wait for it, or stop it' });
+			const buf = editorLevel(b);
+			if (!buf || !buf.length) return send(res, 400, { error: 'missing eelvlB64 or level' });
+			try {
+				autotas = require('./autotas.js').run({ eelvl: buf, minutes: b.minutes, workers: b.workers, name: b.name ? String(b.name).slice(0, 80) : 'AutoTAS',
+					gpu: systemInfo().processors[1], startJob, stopJob });
+			} catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
+			return send(res, 200, autotasState());
 		}
 	}
 	if (req.method === 'POST' && what === 'job' && !sub) {

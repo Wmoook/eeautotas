@@ -20,11 +20,22 @@
 // the exact JS engine (C.evaluate: finish, deaths, random-portal chance) and judged with THE rule (C.judge); a faster
 // run goes to the grind through the job inbox (J.tryCandidate), which checks it once more, and becomes the reference
 // of the next invocation at once (no waiting for the grind to publish it).
-// With --every=1, every other round is an "every move" round instead (off by default: on real levels the exact windows
-// explode, 20-40 s per 40-60 ticks on a laptop GPU, and the search families find more per second): eegpu explore --rejoin=1 from the run's state at tick T tries
-// every input sequence over the next --everyDepth ticks (60; states that match to the exact position and speed are
-// merged), and every state equal to a later state of the run is a proven shortcut (re-checked on the CPU). Windows
-// start every --everyStep ticks (25) along the run, continuing where the last round stopped, --everyS seconds each (5).
+// "Every move" rounds (--every=auto, the default; 1 = every other round; 0 = off): eegpu explore --rejoin=1 from the
+// run's state at tick T tries every input sequence over the next --everyDepth ticks (320), one state per cell (the
+// relay's cells: 2 px, 1/4 px/tick; a 2^--everyCells (28) table, halved by eegpu when the GPU lacks the memory; the reach
+// field orders the cells and, in physics mode, drops the states it proves cut off: -1 only), and every state equal to
+// a later state of the run is a proven shortcut (exact hash, re-checked on the CPU with both hashes). Windows start
+// every --everyStep ticks (100) along the run from a cursor, --everyS seconds each (12); each pass over the run starts
+// at another offset (0, 50, 25, 75: where a window starts decides whether its table fills before a rejoin). The ice
+// level's optimizer stalled at +10.7% after 30 min (1-2 ticks per minute); such windows took it to +5.5% in 11 min.
+// With auto, a bandit splits the GPU between the search families and every move by their measured yield: the ticks
+// their shortcuts save when the combine uses them (the families' `saved`), per second of GPU time, decayed by 0.7 per
+// round; the arm behind still gets one round in five. The idle start (both modes): the run timer starts at the first
+// input, so waiting at the start is free (the ice level's known run falls 12 tiles for 133 idle ticks; timedoor's
+// best waits 252). Windows from the state after k idle ticks (k along the stretch where the idle ball still moves;
+// every 25 ticks up to 500 on time-door levels) with eegpu's --prefix and a --gain below 1: a rejoin that costs ticks
+// but starts the timer later; the union combine counts run ticks, so it takes such an edge only when the run is faster.
+// Once per session and again when the run's first 400 ticks change (at most every 5 min).
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, families, ...).
 // GPU launch failures (eegpu's {"error":...,"launchError":true} line, exit 6 / 7 = the driver's watchdog stopped a
 // kernel, or a crash): the driver may have reset the GPU, so the searcher backs off instead of relaunching at once: it
@@ -56,9 +67,16 @@ const MIN_SLICE = 4;   // s: shorter invocations are mostly start-up (reference 
 const UNION_K = Math.max(1, +(args.union || 40));   // the most recent runs in the union (30 Infinity Pain runs ~ 1.4 M states)
 const SIBLINGS = String(args.siblings === undefined ? '1' : args.siblings) !== '0';
 const LIB_MAX = 300000;   // edges kept; above it, edges that start on no known run are dropped
-// every-move rounds: opt in with --every=1 (exact every-move windows are slow on big levels; see the header)
-const EVERY_ON = args.every !== undefined && String(args.every) !== '0';
-const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 60)), EVERY_STEP = Math.max(1, +(args.everyStep || 25)), EVERY_S = Math.max(1, +(args.everyS || 5));
+// every-move rounds (see the header): auto (a bandit against the search families), 1 (every other round), 0 (off; the
+// default with a --tool stand-in, which answers only `search`)
+const EVERY_MODE = String(args.every === undefined ? (args.tool ? '0' : 'auto') : args.every) === '0' ? 'off' : String(args.every === undefined ? 'auto' : args.every) === 'auto' ? 'auto' : 'on';
+const EVERY_ON = EVERY_MODE !== 'off';
+const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 320)), EVERY_STEP = Math.max(1, +(args.everyStep || 100)), EVERY_S = Math.max(1, +(args.everyS || 12));
+const EVERY_CELLS = Math.max(20, Math.min(30, +(args.everyCells || 28)));
+const EVERY_OFFSETS = [0, 50, 25, 75];   // (per pass over the run, scaled to the step)
+const IDLE_ON = String(args.idle === undefined ? (args.tool ? '0' : '1') : args.idle) !== '0';
+const ARM_FAMS = { search: ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'], every: ['every', 'idle'] };
+const ARM_DECAY = 0.7;
 const PARENT = +(args.parent || 0);
 // eegpu's launch target (ms per kernel launch; halved after each launch failure) and the failures so far
 let launchMs = Math.max(5, Math.min(1000, +(args.launchMs || 50)));
@@ -75,7 +93,7 @@ const STATUS = path.join(DIR, 'gpu_status.json');
 const STATE = path.join(GDIR, 'state.json');
 const LIBRARY = path.join(GDIR, 'library.bin');
 const FAMS = ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'];   // eegpu's family numbers
-const LIB_FAMS = [...FAMS, 'every'];                           // (+ the every-move windows)
+const LIB_FAMS = [...FAMS, 'every', 'idle'];                   // (+ the every-move windows, the idle-start windows)
 const RANDOM_FAMS = ['pert', 'flip', 'sticky'];
 fs.mkdirSync(GDIR, { recursive: true });
 
@@ -409,9 +427,15 @@ async function offer(what) {
 	// credit: per family, the shortcuts used and the ticks they save on the reference
 	const used = {};
 	let credited = 0;
+	const f0 = ref.masks.findIndex((m) => m !== 0);   // (the reference's first input: the ticks up to it cost no run time)
 	for (const e of u.libUsed) {
 		const i = ref.tickOf.get(e.h0), j = e.h1 === 'F' ? ref.n : ref.tickOf.get(e.h1);
-		const s = i !== undefined && j !== undefined && j > i ? Math.max(0, j - i - e.seq.length) : 0;
+		let s = i !== undefined && j !== undefined && j > i ? Math.max(0, j - i - e.seq.length) : 0;
+		if (e.fam === 'idle' && i === 0 && j !== undefined && f0 >= 0) {
+			// an idle start: run ticks, not ticks (the edge's idle ticks and the reference's are free)
+			const fe = e.seq.findIndex((m) => m !== 0);
+			s = Math.max(0, (j - f0 - 1) - (fe < 0 ? 0 : e.seq.length - fe - 1));
+		}
 		const f = used[e.fam] || (used[e.fam] = { n: 0, saved: 0 });
 		f.n++; f.saved += s; credited += s;
 		state.fam[e.fam].used++; state.fam[e.fam].saved += s;
@@ -490,7 +514,7 @@ function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	});
 }
 
-let tool = null, blobFile = '', edgesFile = '';
+let tool = null, blobFile = '', edgesFile = '', blob = null;
 const G9 = (x) => (x >= 1e9 ? `${(x / 1e9).toFixed(1)} G` : `${(x / 1e6).toFixed(0)} M`);
 /**
  * One invocation of a slot: 'sys' (m1 + del), 'm2' or a random family. Returns {ok, seconds, edges, text} (text: a
@@ -569,16 +593,38 @@ async function invoke(slot, seconds) {
 	return { ok: true, seconds: sec, added: got.added, text };
 }
 
-// ---------------------------------------------------------------- one "every move" round (windows along the run)
-/** one window: every move from tick T; its shortcuts go into the library. Resolves {added, done, err}. */
-function runWindow(T) {
+// ---------------------------------------------------------------- "every move" rounds (windows along the run)
+let reachFile = null;   // the reach field for eegpu (--reach), built at the first window: '' = none
+let reachPrune = false;
+function ensureReach() {
+	if (reachFile !== null) return reachFile;
+	reachFile = '';
+	try {
+		const RF = require('./reach.js');
+		const t0 = Date.now();
+		const f = RF.reachField(level, {});
+		const file = path.join(GDIR, 'reach.bin');
+		fs.writeFileSync(file, RF.reachFileBytes(f, G.blobFp(blob)));
+		reachFile = file;
+		reachPrune = f.mode === 'physics';   // (walk mode is no proof: it only orders)
+		log(`GPU: every move: the reach field (${f.mode}, ${Date.now() - t0} ms)${reachPrune ? '' : ': it orders the cells and prunes nothing'}`);
+	} catch (e) { log(`GPU: every move without the reach field (${e.message})`); }
+	return reachFile;
+}
+/** one window: every move from tick T (o.prefix: a file of inputs played first, o.gain: eegpu's --gain, o.fam: the
+ *  library family, o.seconds); its shortcuts go into the library. Resolves {added, best, done, err}. */
+function runWindow(T, o = {}) {
 	return new Promise((resolve) => {
-		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
+		const rf = ensureReach();
+		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${o.seconds || EVERY_S}`,
+			'--coarse=0', '--cqx=0.5', '--cqv=4', '--qy=0.5', '--qvy=4', '--discrete=1', '--cap=1048576', `--cells=${EVERY_CELLS}`,
+			...(rf ? [`--reach=${rf}`, `--prune=${reachPrune ? 1 : 0}`] : []), ...(o.prefix ? [`--prefix=${o.prefix}`, `--gain=${o.gain}`] : []),
+			`--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
+		const fam = o.fam || 'every';
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
-		let buf = '', done = null, err = '', added = 0, last = 0, launchError = false;
+		let buf = '', done = null, err = '', added = 0, last = 0, launchError = false, best = -Infinity;
 		const base = st.ticks;
 		child.stdout.on('data', (d) => {
 			buf += d;
@@ -591,13 +637,14 @@ function runWindow(T) {
 				try { ev = JSON.parse(line); } catch (e) { continue; }
 				if (ev.ev === 'ready') loaded(ev);
 				else if (ev.ev === 'rejoin') {
-					if (ev.from >= 0 && ev.from <= ref.n && ev.j > ev.from && ev.j <= ref.n && ev.saving > 0) {
+					// (an idle-start window: its rejoins may cost ticks; the combine judges them by run ticks)
+					if (ev.from >= 0 && ev.from <= ref.n && ev.j > ev.from && ev.j <= ref.n && (ev.saving > 0 || o.prefix)) {
 						const seq = Uint8Array.from(String(ev.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
-						if (addEdge(ref.H[ev.from], ref.H[ev.j], seq, 'every')) added++;
+						if (addEdge(ref.H[ev.from], ref.H[ev.j], seq, fam)) { added++; best = Math.max(best, ev.saving); }
 					}
 				} else if (ev.ev === 'layer') {
 					last = ev.ticks;
-					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: `every move from tick ${T}` });
+					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: `${fam === 'idle' ? 'idle start' : 'every move'} from tick ${T}` });
 				} else if (ev.ev === 'done') done = ev;
 				else if (ev.error) { err = ev.error; if (ev.launchError) launchError = true; }
 			}
@@ -605,27 +652,121 @@ function runWindow(T) {
 		child.stderr.on('data', (d) => { err += d; });
 		child.on('close', (code) => {
 			child = null;
-			if (done) st.ticks = base + (done.ticks || last);
-			resolve({ code, done, err: err.trim(), added, launchError: isLaunchFailure(code, launchError, done) });
+			if (done) {
+				st.ticks = base + (done.ticks || last);
+				const x = state.fam[fam];
+				x.ticks += done.ticks || last; x.seconds += +done.seconds || 0; x.edges += added;
+			}
+			resolve({ code, done, err: err.trim(), added, best, launchError: isLaunchFailure(code, launchError, done) });
 		});
 	});
 }
-/** windows from the cursor on for about ROUND_S seconds */
+/** windows from the cursor on for about ROUND_S seconds; a pass over the run ends at its end, the next one starts at
+ *  the next offset */
 async function runEvery() {
 	const t0 = Date.now();
-	let added = 0, windows = 0, from = (state.every | 0) % Math.max(1, ref.n), gpu = null, ticks = 0;
+	let added = 0, windows = 0, gpu = null, ticks = 0;
+	if (!state.everyCur) state.everyCur = { t: 0, h: ref.H[0] };
+	const at = () => { const c = state.everyCur; const t = c.h !== undefined ? ref.tickOf.get(c.h) : undefined; return Math.max(0, Math.min(ref.n - 1, t !== undefined ? t : c.t | 0)); };
+	const from = at();
 	while ((Date.now() - t0) / 1000 < ROUND_S) {
-		const T = (state.every | 0) % Math.max(1, ref.n);
-		state.every = T + EVERY_STEP;
+		const T = at();
 		const r = await runWindow(T);
 		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError, added, windows };
 		launchFails = 0; otherFails = 0;
 		windows++; added += r.added; gpu = r.done.gpu; ticks += r.done.ticks || 0;
-		if (state.every >= ref.n) { state.every = 0; log(`GPU: every move covered the whole run (windows of ${EVERY_DEPTH} ticks every ${EVERY_STEP})`); break; }
+		if (r.added) { saveLibrary(false); await offer(`every move from tick ${T}`); }   // (the next window searches the new best)
+		const step = Math.max(10, Math.min(EVERY_STEP, Math.ceil(ref.n / 4)));
+		let next = at() + step;
+		if (next >= ref.n - 5) {
+			state.everyPass = (state.everyPass | 0) + 1;
+			next = Math.floor(step * EVERY_OFFSETS[state.everyPass % EVERY_OFFSETS.length] / 100);
+			log(`GPU: every move covered the whole run (pass ${state.everyPass}: windows of ${EVERY_DEPTH} ticks every ${step}); the next pass starts at tick ${next}`);
+		}
+		state.everyCur = { t: next, h: ref.H[Math.min(next, ref.n)] };
+		if (quitting || editorBusy()) break;
 	}
 	saveState();
-	return { added, windows, from, to: state.every, gpu, ticks, seconds: (Date.now() - t0) / 1000 };
+	return { added, windows, from, to: at(), gpu, ticks, seconds: (Date.now() - t0) / 1000 };
 }
+
+// ---------------------------------------------------------------- the idle start
+let idleLast = 0;
+/** the idle start's window ticks k (the idle ball still moves there), or [] (it rests at once) */
+function idleTicks() {
+	if (level.hasTimeDoors) { const ks = []; for (let k = 25; k <= Math.min(500, ref.n); k += 25) ks.push(k); return ks; }
+	const E = C.E;
+	const sim = new E.EESim(level);
+	sim.reset();
+	const inp = new E.EEInput();
+	E.applyMask(inp, 0);
+	let prev = sim.stateHash(false, nc), rest = 0;
+	for (let k = 1; k <= 600; k++) {
+		sim.tick(inp);
+		if (sim.is_dead) break;
+		const h = sim.stateHash(false, nc);
+		if (h === prev) { rest = k - 1; break; }
+		prev = h; rest = k;
+	}
+	if (rest < 4) return [];
+	const ks = new Set();
+	for (let i = 1; i <= 8; i++) ks.add(Math.max(1, Math.round(rest * i / 8)));
+	return [...ks];
+}
+const startKey = () => sha1(C.eetasBytes(ref.masks.subarray(0, Math.min(ref.n, 400))));
+/** the idle-start windows (see the header); resolves {err} or {added, windows, ks} */
+async function runIdle() {
+	idleLast = Date.now();
+	state.idleKey = startKey();
+	saveState();
+	const f0 = ref.masks.findIndex((m) => m !== 0);
+	let ks = [];
+	try { ks = idleTicks(); } catch (e) { log(`GPU: idle start: ${e.message}`); }
+	if (!ks.length || f0 < 0) return { added: 0, windows: 0, ks };
+	let added = 0, windows = 0;
+	for (const k of ks) {
+		const pf = path.join(GDIR, 'idle.eetas');
+		fs.writeFileSync(pf, Buffer.alloc(k, 48));
+		const r = await runWindow(0, { prefix: pf, gain: f0 - k + 1, fam: 'idle', seconds: Math.min(EVERY_S, 8) });
+		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError, added, windows, ks };
+		launchFails = 0; otherFails = 0;
+		windows++; added += r.added;
+		if (quitting || editorBusy()) break;
+	}
+	if (added) { saveLibrary(false); await offer('idle start'); }
+	return { added, windows, ks };
+}
+/** once per session (after the first round), again when the run's first 400 ticks changed, at most every 5 min */
+const idleDue = () => IDLE_ON && !!ref && (!idleLast || (Date.now() - idleLast >= 300e3 && startKey() !== state.idleKey));
+
+// ---------------------------------------------------------------- the bandit: the search families vs every move
+const arms = { search: { c: 0, s: 0, n: 0, last: 0 }, every: { c: 0, s: 0, n: 0, last: 0 } };
+const armCredit = (arm) => ARM_FAMS[arm].reduce((x, f) => x + ((state.fam[f] && state.fam[f].saved) || 0), 0);
+const credLast = {};
+/** after a round of `arm` that took `sec` s: every arm's new credit (its families' saved ticks, whenever the combine
+ *  used their shortcuts), decayed; seconds only for the arm that ran */
+function account(arm, sec, round) {
+	for (const k of Object.keys(arms)) {
+		const now = armCredit(k);
+		const d = now - (credLast[k] === undefined ? now : credLast[k]);
+		credLast[k] = now;
+		arms[k].c = arms[k].c * ARM_DECAY + d;
+		arms[k].s = arms[k].s * ARM_DECAY + (k === arm ? sec : 0);
+	}
+	arms[arm].n++; arms[arm].last = round;
+}
+const armRate = (k) => (arms[k].s > 0 ? arms[k].c / arms[k].s : 0);
+/** the next round's arm */
+function pickArm(round) {
+	if (EVERY_MODE === 'off') return 'search';
+	if (args.everyOnly) return 'every';
+	if (EVERY_MODE === 'on') return round % 2 === 0 ? 'every' : 'search';
+	if (round <= 2) return 'search';   // (the systematic families go first)
+	if (!arms.every.n) return 'every';
+	const best = armRate('every') > armRate('search') ? 'every' : 'search', other = best === 'every' ? 'search' : 'every';
+	return round - arms[other].last >= 5 ? other : best;   // (the arm behind: one round in five)
+}
+for (const k of Object.keys(arms)) credLast[k] = armCredit(k);   // (the credit of earlier sessions is not this one's)
 
 // ---------------------------------------------------------------- the round loop
 async function failed(err, launchError) {
@@ -667,7 +808,7 @@ async function main() {
 	const why = G.unsupported(level);
 	if (why) { status({ state: 'unavailable', why }); log(`GPU: not used for this level: ${why}`); process.exit(3); }
 	blobFile = path.join(GDIR, 'level.bin');
-	const blob = G.levelBlob(level);
+	blob = G.levelBlob(level);
 	fs.writeFileSync(blobFile, blob);
 	edgesFile = path.join(GDIR, 'edges.bin');
 	// coin-blind search when the grind decided coins are optional (status.json coinsOptional)
@@ -689,13 +830,28 @@ async function main() {
 	for (;;) {
 		await yieldToEditor();
 		round++;
-		// every other round: every move along the run (not the first: the systematic families go first)
-		if ((EVERY_ON && round % 2 === 0) || args.everyOnly) {
+		// the idle start: once after the first round, again when the run's start changed (see the header)
+		if (round >= 2 && idleDue()) {
+			await refresh();
+			const ti = Date.now(), before = ref.ev.runTicks;
+			const e = await runIdle();
+			if (e.err) { await failed(e.err, e.launchError); continue; }
+			const got = ref.ev.runTicks < before ? `, ${C.fmt(before)} to ${C.fmt(ref.ev.runTicks)}` : '';
+			log(`GPU: idle start: ${e.ks.length ? `${e.windows} windows after ${e.ks.join(', ')} idle ticks, ${e.added} rejoin${e.added === 1 ? '' : 's'}${got}` : 'the ball rests at the start: nothing to gain'} (${((Date.now() - ti) / 1000).toFixed(0)} s)`);
+			account('every', (Date.now() - ti) / 1000, round);
+		}
+		// this round's arm: every move along the run, or the search families (the bandit: pickArm)
+		if (pickArm(round) === 'every') {
+			await refresh();
+			const before = ref.ev.runTicks;
 			const e = await runEvery();
 			if (e.err) { await failed(e.err, e.launchError); continue; }
-			status({ state: 'running', round, edges: libSize, found: st.found + e.added, ticksPerSec: e.seconds ? Math.round(e.ticks / e.seconds) : 0,
+			account('every', e.seconds, round);
+			status({ state: 'running', round, edges: libSize, found: st.found + e.added, ticksPerSec: e.seconds ? Math.round(e.ticks / e.seconds) : 0, families: famStatus(),
+				arms: { every: Math.round(armRate('every') * 600) / 10, search: Math.round(armRate('search') * 600) / 10 },
 				lastRound: { kind: 'every move', windows: e.windows, from: e.from, to: e.to, ticks: e.ticks, seconds: e.seconds } });
-			if (e.added) { log(`GPU: every move, ticks ${e.from}-${e.to}: ${e.added} new shortcut${e.added > 1 ? 's' : ''}`); saveLibrary(false); await offer(`every move ${e.from}-${e.to}`); }
+			const got = ref.ev.runTicks < before ? `, ${C.fmt(before)} to ${C.fmt(ref.ev.runTicks)}` : '';
+			if (e.added || round % 10 === 1) log(`GPU: round ${round}, every move (${e.seconds.toFixed(0)} s, ${e.windows} window${e.windows === 1 ? '' : 's'} from tick ${e.from}): ${e.added} new shortcut${e.added === 1 ? '' : 's'}${got}; ticks saved per minute: every move ${(armRate('every') * 60).toFixed(1)}, search ${(armRate('search') * 60).toFixed(1)}`);
 			if (args.once) break;
 			continue;
 		}
@@ -729,7 +885,8 @@ async function main() {
 			else { texts.push(r.text); added += r.added; if (r.added) await offer(`round ${round}`); }
 		}
 		if (error) { await failed(error, errorLaunch); continue; }
-		status({ state: 'running', round, edges: libSize, families: famStatus() });
+		account('search', (Date.now() - t0) / 1000, round);
+		status({ state: 'running', round, edges: libSize, families: famStatus(), arms: EVERY_ON ? { every: Math.round(armRate('every') * 600) / 10, search: Math.round(armRate('search') * 600) / 10 } : undefined });
 		// (every round that found something, and every 10th: the rest is in gpu_status.json `families`)
 		if (added || round % 10 === 1) log(`GPU: round ${round} (${((Date.now() - t0) / 1000).toFixed(0)} s, library ${libSize}): ${texts.join('; ')}`);
 		saveLibrary(true);
