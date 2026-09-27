@@ -27,7 +27,8 @@
 //   opts.explain: when the start is cut off, the highest row the model lets its centre reach (field.explain {row,
 //   trophyRow, startRow}; null when the start is not cut off: the forward search would walk the whole model);
 //   opts.goals [{tile, cost (tiles)}] and opts.maxCost (tiles): explore.js --hunt's time-to-go field (seeded from these
-//   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof).
+//   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof); opts.oneWayEntry: one-way
+//   platforms block the centre's entry against their pass direction: NOT sound, for src/steer.js's ordering field only).
 // fifthsAt(field, px, py, vy, q0, q1, slippery) -> fifths (-1 = cut off); costAt(field, sim) -> tiles (-1 = cut off)
 //   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest); scoreAt(field, ...
 //   the same) -> the beam's score in tiles, blended between the 4 tile centres around the ball (native/beam.h
@@ -357,14 +358,19 @@ function reachField(level, opts) {
 	const KJD = Math.min(KF, kOfX(fallD(-JV) + 16) + (ice ? 1 : 0));
 
 	// ---- per-tile profiles (what fwd reads), the model
+	// (opts.oneWayEntry, src/steer.js only: a one-way platform's centre entry against its pass direction is blocked (a plain
+	// one-way cannot be entered from above). Not sound (a ball that rose into a platform may fall back through it), so never
+	// in the RCH3 proof field: the steer field only orders)
+	const owOf = new Int8Array(N).fill(-1);
+	if (opts.oneWayEntry) for (let i = 0; i < N; i++) { const f = fl(fg[i]); if ((f & F_JUMPTHRU) && cls[i] !== WALL && cls[i] !== DEADLY) owOf[i] = (f & F_ROTHALF) ? (lk[i] & 3) : 1; }
 	const profKey = new Map(), prof = [], pid = new Int32Array(N);
 	for (let i = 0; i < N; i++) {
-		const key = cls[i] * 1e7 + sp[i] * 1e6 + lowWall[i] * 1e5 + lj[i] * 1e4 + (xrOK(i) ? 1e3 : 0) + segOf[i];
+		const key = (owOf[i] + 1) * 1e8 + cls[i] * 1e7 + sp[i] * 1e6 + lowWall[i] * 1e5 + lj[i] * 1e4 + (xrOK(i) ? 1e3 : 0) + segOf[i];
 		let p = profKey.get(key);
 		if (p === undefined) {
 			p = prof.length; profKey.set(key, p);
 			const s = segOf[i];
-			prof.push({ cls: cls[i], sp: sp[i], lowWall: lowWall[i], lj: lj[i], xrOK: xrOK(i) ? 1 : 0, push: segPush[s], cap: segCap[s], A: segA[s], rd: segRd[s] });
+			prof.push({ ow: owOf[i], cls: cls[i], sp: sp[i], lowWall: lowWall[i], lj: lj[i], xrOK: xrOK(i) ? 1 : 0, push: segPush[s], cap: segCap[s], A: segA[s], rd: segRd[s] });
 		}
 		pid[i] = p;
 	}
@@ -390,6 +396,7 @@ function reachField(level, opts) {
 	/** the forward model: a move from a tile of profile P to a neighbour of profile P2 by (dx, dy) of a state (ty, l) */
 	function fwd(P, P2, dx, dy, ty, l, emit) {
 		if ((P2.sp === LOWER && dy < 0) || (P.sp === LOWER && dy > 0) || (P2.sp === RIGHT && dx < 0) || (P.sp === RIGHT && dx > 0)) return;
+		if (P2.ow >= 0 && (P2.ow === 1 ? dy === 1 : P2.ow === 3 ? dy === -1 : P2.ow === 2 ? dx === -1 : dx === 1)) return;   // (opts.oneWayEntry)
 		const src = P.cls, dst = P2.cls;
 		if (ty === R_ && l === INF) {   // unlimited rise: anywhere up or sideways (and everything R(Q) does)
 			fwd(P, P2, dx, dy, R_, Q, emit);
@@ -820,7 +827,8 @@ function fifthsAt(f, px, py, vy, q0, q1, slip) {
 }
 /** the beam's score (native/beam.h reachScore, the same doubles, a float), tiles: the cost blended bilinearly between the
  *  centres of the 4 tiles around the ball's centre, the ball (its speed and gravity queue) looked up at each of them
- *  (cut-off ones left out, and ways through a death while the ball's own way is a real one), for a smooth gradient; the
+ *  (cut-off ones left out, and on a field with deaths the ways through one while the ball's own way is a real one: without
+ *  death edges, e.g. the steer field's layer bodies, a cost of DEATH_COST or more is a real way), for a smooth gradient; the
  *  own tile's cost when all the others are left out. -1: the ball is cut off. */
 function scoreAt(f, px, py, vy, q0, q1, slip) {
 	const own = fifthsAt(f, px, py, vy, q0, q1, slip);
@@ -833,7 +841,7 @@ function scoreAt(f, px, py, vy, q0, q1, slip) {
 		for (let dx = 0; dx < 2; dx++) {
 			const x = x0 + dx, y = y0 + dy;
 			const c = x === tx && y === ty ? own : fifthsAt(f, px + 16.0 * (x - tx), py + 16.0 * (y - ty), vy, q0, q1, slip);
-			if (c < 0 || (c >= DEATH_COST && own < DEATH_COST)) continue;
+			if (c < 0 || (f.deaths && c >= DEATH_COST && own < DEATH_COST)) continue;
 			const k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
 			v += k * c;
 			w += k;

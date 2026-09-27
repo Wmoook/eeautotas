@@ -52,6 +52,9 @@ struct ExploreParams {
 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
 	i32 prune;
 	i32 maxFifths;                     // > 0 (--costslack): states the reach field puts farther from the trophy are dropped
+	i32 maxSteer;                      // > 0 (--costslack with --steer): ... unless the steer field puts them at most this far or has no value for them
+	SteerField steer;                  // when on (--steer): the priority and the closest attempt read it (never the prune)
+	i32 steerAll;                      // with steer: this layer orders by it (explorehost.h: every 4th, and while near the cap)
 	unsigned long long* stats;         // [0] ticks simulated, [1] children skipped as twins of a lower option (search.h canonOption)
 	// near-miss refinement (explorehost.h --refine=1): the situations (exploreSituation) in which cells are rfx x finer in
 	// px and rfv x finer in vx (an open-addressing set, 0 = empty; null = off)
@@ -100,6 +103,20 @@ struct ExploreClaim {
 #define EE_SLOT_REST 0xfffffffeu
 /** the priority's histogram bin (the top 12 bits of its 31-bit head; priorities are below 2^63) */
 EE_HD u32 prioBin(u64 prio) { return (u32)(prio >> 51) & 4095u; }
+
+/** the claim's verdict ahead of it (in the expand, before this layer's claim: the table holds earlier layers' cells only):
+ *  the cell (bits 12..) is in the table from an earlier layer, so exploreClaimPropose drops a child of it (unless it rests) */
+EE_HD bool exploreSeenBefore(const u64* cells, u32 mask, u64 cell, u32 layer) {
+	const u64 tag = ((u64)(layer & 0x7ffu) << 1) | 1ull;
+	u32 slot = (u32)(splitmix(cell) & mask);
+	for (u32 probe = 0; probe < 64; probe++) {
+		const u64 prev = cells[slot];
+		if (prev == 0ull) return false;
+		if ((prev & ~0xfffull) == cell) return (prev & 0xfffull) != tag;
+		slot = (slot + 1) & mask;
+	}
+	return false;
+}
 
 /** fine: px / vx resolution where corner clips can still happen; coarse (coarseRow and below): px x cqx, vx x cqv */
 EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, bool fine, double qy, double qvy, double cqx, double cqv) {

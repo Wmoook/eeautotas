@@ -15,7 +15,9 @@
 //              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
 //              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration;
 //              the relay's plan (with a stand-in for the CPU search that reports sources: the nearest attempt 60 / 150 /
-//              400 back, the newest source, the source with territory gain, 1000 back, the larger table, the next salt)
+//              400 back, the newest source, the source with territory gain, 1000 back, the larger table, the next salt); the
+//              steer field on a key level: an explore that cannot use the steer file ({"error":...,"steer":0}) runs again
+//              at once without it, the beams keep theirs
 //   cpu        the CPU route search (src/goexplore.js, no GPU; one or two threads, a few seconds): routes replayed in the
 //              JS engine, the same seed and tick budget give the same routes (also with 64 snapshots, states rebuilt by
 //              replaying), --first, --depth, "stop" and the end of stdin; coarse cells (--cells=auto above 50 x 50, the
@@ -377,7 +379,7 @@ const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
 const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
-if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach }) + '\\n'), SC.infoDelay || 0);
+if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach, steer: SC.steer || 0 }) + '\\n'), SC.infoDelay || 0);
 const passOf =(a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 // (a relay's --prefix: its length and first input logged with the launch, as "#pf=<length>:<first>")
@@ -385,6 +387,8 @@ const pfx = opt('prefix'), pfs = pfx && fs.existsSync(pfx) ? fs.readFileSync(pfx
 fs.appendFileSync(SC.log, JSON.stringify(pfs === null ? args : args.concat(['#pf=' + pfs.length + ':' + pfs.slice(0, 1)])) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
+// (steerFail: an explore given --steer cannot use it, as eegpu says when the upload finds no GPU memory)
+if (SC.steerFail && args[0] === 'explore' && opt('steer')) return void setTimeout(() => { say({ error: 'the steer field cannot be used: test: out of memory', steer: 0 }); process.exit(3); }, 50);
 if (SC.launchFail && args[0] === 'explore') return void setTimeout(() => { say({ error: 'test: the GPU driver stopped the explore expand kernel', cuda: 702, launchError: true, timeout: true }); process.exit(7); }, SC.launchFail);
 if (SC.launchFail) {
 	const sf = opt('stopfile');
@@ -688,6 +692,29 @@ async function passesSection() {
 	check('... and a route found anyway: a mistake in the model, kept in model_miss.json (the level and the route) and said in the log', st.stage === 'found' && !!mj && !!mj.eelvlB64 &&
 		typeof mj.inputs === 'string' && mj.inputs.length > 0 && st.log.some((x) => /mistake in the physics model/.test(x)), `${st.stage}; model_miss.json ${mj ? 'written' : 'missing'}`);
 	try { fs.unlinkSync(miss); } catch (e) { /* none */ }
+
+	// the steer field (a key off the way: 2 layers): an explore that cannot use the steer file ("steer":0) runs again at
+	// once without it and goes on; the beams keep theirs (4 copies fit the budget); no strategy error
+	{
+		const KW = 40, KH = 7;
+		const kcells = [...room(KW, KH), [18, 5, 255], [1, 5, 6], [KW - 4, 5, 121]];
+		for (let y = 1; y < KH - 1; y++) kcells.push([KW - 6, y, 23]);
+		const kbuf = ED.eelvlOf({ name: 'steerkey', width: KW, height: KH, cells: kcells });
+		const sc = path.join(HOME, 'steer-sc.json'), log = path.join(HOME, 'steer-sc.log');
+		fs.writeFileSync(sc, JSON.stringify({ log, R: 50, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0 }] }, beam: null, steer: 4, steerFail: true }));
+		ED.start({ eelvlB64: kbuf.toString('base64'), seconds: 8, width: 1024 }, { available: true }, { tool: [process.execPath, fake, sc], cpu: false, salts: false });
+		let st = ED.state();
+		for (const t0 = Date.now(); st.running && Date.now() - t0 < 45000; st = ED.state()) await new Promise((res) => setTimeout(res, 40));
+		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 40)); }
+		const LS = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+		const ex = LS.filter((a) => a[0] === 'explore'), bm = LS.filter((a) => a[0] === 'beam');
+		const hasSteer = (a) => a.some((x) => x.startsWith('--steer='));
+		const X = st.strategies.find((q) => q.key === 'explore');
+		check('the steer field: an explore that cannot use the steer file ("steer":0) runs again at once without it, the beams keep theirs, no error',
+			!!st.steer && st.steer.gpu && st.steer.beams && ex.length >= 2 && hasSteer(ex[0]) && ex.slice(1).every((a) => !hasSteer(a)) && bm.length > 0 && bm.every(hasSteer) &&
+			!X.error && st.log.some((x) => /the steer field cannot be used: test: out of memory; again without it/.test(x)),
+			`steer ${JSON.stringify(st.steer)}; explore ${ex.map((a) => (hasSteer(a) ? 'steer' : 'plain')).join(', ')}; beams ${bm.map((a) => (hasSteer(a) ? 'steer' : 'plain')).join(', ')}; error ${X && X.error}`);
+	}
 }
 
 // ---------------------------------------------------------------- the CPU route search (src/goexplore.js; no GPU)

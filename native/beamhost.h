@@ -8,6 +8,7 @@
 // .eetas characters ('0' + mask). "ticks" counts the ticks simulated; "twins" the children not simulated because a
 // lower option gives the same state (search.h canonOption).
 #pragma once
+#include <algorithm>
 #include <queue>
 #include <unordered_map>
 
@@ -47,6 +48,52 @@ static bool goalField(const Level& L, std::vector<float>& goalDist) {
 	return true;
 }
 
+/** an RCH3 field's bytes (b, n: a whole file, or a body inside an RCH4 file) -> H with pointers into b; false with err */
+inline bool rfParseBytes(const uint8_t* b, size_t n, const Level& L, ReachField& H, std::string& err) {
+	if (n < 4 || memcmp(b, "RCH3", 4) != 0) {
+		err = std::string("the reach file is not RCH3 (") + (n >= 4 ? std::string((const char*)b, 4) : std::string("empty")) +
+			"): the search tool is older (or newer) than the app: rebuild it (node tools/build-native.js)";
+		return false;
+	}
+	if (n < 192) { err = "bad reach file (too short)"; return false; }
+	int32_t in[15];
+	memcpy(in, b + 4, sizeof in);
+	double d[6];
+	memcpy(d, b + 64, sizeof d);
+	memset(&H, 0, sizeof H);
+	H.W = in[1]; H.H = in[2]; H.mode = in[3]; H.Q = in[4]; H.prioShift = in[5]; H.deaths = in[6] & 1; H.ice = (in[6] >> 1) & 1;
+	const int32_t nC = in[7], nX = in[8], nSeg = in[9], nFl = in[10];
+	H.NFV = in[11]; H.NTH = in[12]; H.nFlags = nFl; H.nSeg = nSeg; H.nC = nC; H.nX = nX;
+	H.G = d[0]; H.BD = d[1]; H.ICE_ND = d[2]; H.KT = d[3]; H.TOL = d[4]; H.MOD_STRONG = d[5];
+	if (in[0] != 3 || H.W != L.W || H.H != L.H || H.Q < 0 || H.Q > 100 || nC < 0 || nX < 0 || nSeg < 1 || H.NFV < 2 || H.NTH < 2) { err = "the reach file does not match the level"; return false; }
+	if (H.mode == 0 && nFl != L.nFlags) { err = "the reach file does not match the level (block table)"; return false; }
+	const size_t N = (size_t)H.W * H.H, walk = H.mode == 1;
+	size_t o = 192;
+	auto take = [&](size_t bytes) { o = (o + 7) & ~(size_t)7; const size_t at = o; o += bytes; return at; };
+	const size_t oCls = take(N), oSeg = take(N), oRowC = take(4 * N), oRowX = take(4 * N), oWalk = take(2 * N);
+	size_t oR = 0, oF = 0, oL = 0, oC = 0, oX = 0;
+	if (!walk) { oR = take(2 * N * (H.Q + 3)); oF = take(2 * N * 17); oL = take(2 * N * 17); oC = take(2 * (size_t)nC * 128); oX = take(2 * (size_t)nX * 128); }
+	const size_t oPush = take(8 * (size_t)nSeg), oCap = take(8 * (size_t)nSeg), oMod = take(8 * (size_t)nFl), oFV = take(8 * (size_t)H.NFV), oFS = take(8 * (size_t)H.NFV),
+		oTH = take(8 * (size_t)H.NTH), oSW = take(8 * (size_t)H.NTH);
+	if (((o + 7) & ~(size_t)7) != ((n + 7) & ~(size_t)7)) { err = "the reach file does not match the level (size)"; return false; }
+	H.cls = b + oCls; H.seg = b + oSeg; H.rowC = (const i32*)(b + oRowC); H.rowX = (const i32*)(b + oRowX); H.walk = (const u16*)(b + oWalk);
+	if (!walk) { H.costR = (const u16*)(b + oR); H.costF = (const u16*)(b + oF); H.costL = (const u16*)(b + oL); H.costC = (const u16*)(b + oC); H.costX = (const u16*)(b + oX); }
+	H.segPush = (const double*)(b + oPush); H.segCap = (const double*)(b + oCap); H.modMin = (const double*)(b + oMod);
+	H.FV = (const double*)(b + oFV); H.FS = (const double*)(b + oFS); H.TH = (const double*)(b + oTH); H.SW = (const double*)(b + oSW);
+	H.on = 1;
+	return true;
+}
+/** a host field's pointers moved from the host bytes at base to their device copy at dev */
+inline ReachField rfRebase(const ReachField& H, const uint8_t* base, cu::CUdeviceptr dev) {
+	ReachField R = H;
+	auto rebase = [&](const void* p) -> const void* { return p ? (const void*)(uintptr_t)(dev + ((const uint8_t*)p - base)) : nullptr; };
+	R.cls = (const u8*)rebase(H.cls); R.seg = (const u8*)rebase(H.seg); R.rowC = (const i32*)rebase(H.rowC); R.rowX = (const i32*)rebase(H.rowX);
+	R.walk = (const u16*)rebase(H.walk); R.costR = (const u16*)rebase(H.costR); R.costF = (const u16*)rebase(H.costF); R.costL = (const u16*)rebase(H.costL);
+	R.costC = (const u16*)rebase(H.costC); R.costX = (const u16*)rebase(H.costX); R.segPush = (const double*)rebase(H.segPush); R.segCap = (const double*)rebase(H.segCap);
+	R.modMin = (const double*)rebase(H.modMin); R.FV = (const double*)rebase(H.FV); R.FS = (const double*)rebase(H.FS); R.TH = (const double*)rebase(H.TH);
+	R.SW = (const double*)rebase(H.SW);
+	return R;
+}
 /** The reach file (src/reach.js writeReachFile, 'RCH3') on the GPU: fills R (device pointers), keeps the buffers alive,
  *  and a host copy (H, host pointers: eegpu reachtest). Anything but RCH3 is refused: the app is newer than this tool. */
 struct ReachGpu {
@@ -55,54 +102,122 @@ struct ReachGpu {
 	ReachField H;
 	bool parse(const std::string& file, const Level& L, std::string& err) {
 		raw = readFile(file.c_str());
-		if (raw.size() < 4 || memcmp(raw.data(), "RCH3", 4) != 0) {
-			err = std::string("the reach file is not RCH3 (") + (raw.size() >= 4 ? std::string((const char*)raw.data(), 4) : std::string("empty")) +
-				"): the search tool is older (or newer) than the app: rebuild it (node tools/build-native.js)";
-			return false;
-		}
-		if (raw.size() < 192) { err = "bad reach file (too short): " + file; return false; }
-		int32_t in[15];
-		memcpy(in, &raw[4], sizeof in);
-		double d[6];
-		memcpy(d, &raw[64], sizeof d);
-		memset(&H, 0, sizeof H);
-		H.W = in[1]; H.H = in[2]; H.mode = in[3]; H.Q = in[4]; H.prioShift = in[5]; H.deaths = in[6] & 1; H.ice = (in[6] >> 1) & 1;
-		const int32_t nC = in[7], nX = in[8], nSeg = in[9], nFl = in[10];
-		H.NFV = in[11]; H.NTH = in[12]; H.nFlags = nFl; H.nSeg = nSeg; H.nC = nC; H.nX = nX;
-		H.G = d[0]; H.BD = d[1]; H.ICE_ND = d[2]; H.KT = d[3]; H.TOL = d[4]; H.MOD_STRONG = d[5];
-		if (in[0] != 3 || H.W != L.W || H.H != L.H || H.Q < 0 || H.Q > 100 || nC < 0 || nX < 0 || nSeg < 1 || H.NFV < 2 || H.NTH < 2) { err = "the reach file does not match the level"; return false; }
-		if (H.mode == 0 && nFl != L.nFlags) { err = "the reach file does not match the level (block table)"; return false; }
-		const size_t N = (size_t)H.W * H.H, walk = H.mode == 1;
-		size_t o = 192;
-		auto take = [&](size_t bytes) { o = (o + 7) & ~(size_t)7; const size_t at = o; o += bytes; return at; };
-		const size_t oCls = take(N), oSeg = take(N), oRowC = take(4 * N), oRowX = take(4 * N), oWalk = take(2 * N);
-		size_t oR = 0, oF = 0, oL = 0, oC = 0, oX = 0;
-		if (!walk) { oR = take(2 * N * (H.Q + 3)); oF = take(2 * N * 17); oL = take(2 * N * 17); oC = take(2 * (size_t)nC * 128); oX = take(2 * (size_t)nX * 128); }
-		const size_t oPush = take(8 * (size_t)nSeg), oCap = take(8 * (size_t)nSeg), oMod = take(8 * (size_t)nFl), oFV = take(8 * (size_t)H.NFV), oFS = take(8 * (size_t)H.NFV),
-			oTH = take(8 * (size_t)H.NTH), oSW = take(8 * (size_t)H.NTH);
-		if (((o + 7) & ~(size_t)7) != raw.size()) { err = "the reach file does not match the level (size)"; return false; }
-		const uint8_t* b = raw.data();
-		H.cls = b + oCls; H.seg = b + oSeg; H.rowC = (const i32*)(b + oRowC); H.rowX = (const i32*)(b + oRowX); H.walk = (const u16*)(b + oWalk);
-		if (!walk) { H.costR = (const u16*)(b + oR); H.costF = (const u16*)(b + oF); H.costL = (const u16*)(b + oL); H.costC = (const u16*)(b + oC); H.costX = (const u16*)(b + oX); }
-		H.segPush = (const double*)(b + oPush); H.segCap = (const double*)(b + oCap); H.modMin = (const double*)(b + oMod);
-		H.FV = (const double*)(b + oFV); H.FS = (const double*)(b + oFS); H.TH = (const double*)(b + oTH); H.SW = (const double*)(b + oSW);
-		H.on = 1;
+		if (!rfParseBytes(raw.data(), raw.size(), L, H, err)) { if (err.find("too short") != std::string::npos) err += ": " + file; return false; }
+		if (((raw.size() + 7) & ~(size_t)7) != raw.size()) { err = "the reach file does not match the level (size)"; return false; }
 		return true;
 	}
 	/** the same field on the GPU: one buffer, the pointers rebased */
 	bool upload(ReachField& R, std::string& err) {
 		if (!dev.upload(raw.data(), raw.size())) { err = cu::lastError; return false; }
-		R = H;
-		const uint8_t* base = raw.data();
-		auto rebase = [&](const void* p) -> const void* { return p ? (const void*)(uintptr_t)(dev.p + ((const uint8_t*)p - base)) : nullptr; };
-		R.cls = (const u8*)rebase(H.cls); R.seg = (const u8*)rebase(H.seg); R.rowC = (const i32*)rebase(H.rowC); R.rowX = (const i32*)rebase(H.rowX);
-		R.walk = (const u16*)rebase(H.walk); R.costR = (const u16*)rebase(H.costR); R.costF = (const u16*)rebase(H.costF); R.costL = (const u16*)rebase(H.costL);
-		R.costC = (const u16*)rebase(H.costC); R.costX = (const u16*)rebase(H.costX); R.segPush = (const double*)rebase(H.segPush); R.segCap = (const double*)rebase(H.segCap);
-		R.modMin = (const double*)rebase(H.modMin); R.FV = (const double*)rebase(H.FV); R.FS = (const double*)rebase(H.FS); R.TH = (const double*)rebase(H.TH);
-		R.SW = (const double*)rebase(H.SW);
+		R = rfRebase(H, raw.data(), dev.p);
 		return true;
 	}
 	bool load(const std::string& file, const Level& L, ReachField& R, std::string& err) { return parse(file, L, err) && upload(R, err); }
+};
+/** two reach fields' lookups share their position-independent part (rfPre: the rise, the fall) */
+static bool rfSamePre(const ReachField& a, const ReachField& b) {
+	auto same = [](const double* x, const double* y, int n) { return n <= 0 || (x && y && memcmp(x, y, 8 * (size_t)n) == 0); };
+	return a.G == b.G && a.BD == b.BD && a.ICE_ND == b.ICE_ND && a.KT == b.KT && a.TOL == b.TOL && a.MOD_STRONG == b.MOD_STRONG && a.Q == b.Q && a.ice == b.ice &&
+		a.nFlags == b.nFlags && a.NFV == b.NFV && a.NTH == b.NTH && a.nSeg == b.nSeg && same(a.modMin, b.modMin, a.nFlags) && same(a.FV, b.FV, a.NFV) && same(a.FS, b.FS, a.NFV) &&
+		same(a.TH, b.TH, a.NTH) && same(a.SW, b.SW, a.NTH) && same(a.segPush, b.segPush, a.nSeg) && same(a.segCap, b.segCap, a.nSeg);
+}
+/** The steer file (src/steer.js steerFileBytes, 'RCH4') on the GPU: F (device pointers; the bodies' ReachField structs in
+ *  device memory) and a host copy H (host pointers: eegpu steertest, the cost ceiling's start). A file of another level
+ *  (its size, or the level fingerprint: gpu.js blobFp) is refused with err. */
+struct SteerGpu {
+	std::vector<uint8_t> raw;
+	std::vector<ReachField> hostBodies, devBodies;
+	std::vector<uint8_t> dpOrder;
+	cu::Buf dev, dbodies, dorder;
+	SteerField H;
+	bool parse(const std::string& file, const LevelBlob& B, const Level& L, std::string& err) {
+		memset(&H, 0, sizeof H);
+		raw = readFile(file.c_str());
+		const size_t n = raw.size();
+		if (n < 64 || memcmp(raw.data(), "RCH4", 4) != 0) { err = "the steer file is not RCH4: the search tool is older (or newer) than the app: rebuild it (node tools/build-native.js)"; return false; }
+		int32_t in[11];
+		memcpy(in, &raw[4], sizeof in);
+		if (in[0] != STEER_VERSION) { err = "the steer file's version is not " + std::to_string(STEER_VERSION); return false; }
+		uint64_t fpFile = 0, fpLevel = 0xcbf29ce484222325ull;
+		for (uint8_t c : B.bytes) { fpLevel ^= c; fpLevel *= 0x100000001b3ull; }
+		memcpy(&fpFile, &raw[48], 8);
+		if (in[1] != L.W || in[2] != L.H || fpFile != fpLevel) { err = "the steer file was made for another level"; return false; }
+		H.W = in[1]; H.H = in[2]; H.nFeat = in[3]; H.S = in[4]; H.nBodies = in[5]; H.prioShift = in[7]; H.nTeam = in[8];
+		H.dpN = (in[6] & 1) ? in[9] : 0; H.dpT = in[10];
+		if (H.nFeat < 0 || H.nFeat > 64 || H.S < 1 || H.nBodies < 1 || H.nTeam < 0 || H.dpN < 0 || H.dpN > 20) { err = "bad steer file (header)"; return false; }
+		const size_t N = (size_t)H.W * H.H;
+		size_t o = 64;
+		bool bad = false;
+		auto take = [&](size_t bytes) { o = (o + 7) & ~(size_t)7; const size_t at = o; o += bytes; if (o > n) bad = true; return at; };
+		const size_t oFeat = take(16 * (size_t)H.nFeat), oTeam = take(4 * (size_t)H.nTeam), oLay = take(4 * (size_t)H.S), oOff = take(8 * (size_t)H.nBodies),
+			oSize = take(8 * (size_t)H.nBodies), oGoal = take(N * H.nBodies);
+		if (bad) { err = "bad steer file (size)"; return false; }
+		const uint8_t* b = raw.data();
+		H.feat = (const i32*)(b + oFeat); H.team = (const i32*)(b + oTeam); H.layerBody = (const i32*)(b + oLay); H.goal = b + oGoal;
+		hostBodies.resize(H.nBodies);
+		size_t end = o;
+		for (int k = 0; k < H.nBodies; k++) {
+			uint64_t off, size;
+			memcpy(&off, b + oOff + 8 * k, 8); memcpy(&size, b + oSize + 8 * k, 8);
+			if (off % 8 || off + size > n) { err = "bad steer file (a body)"; return false; }
+			if (!rfParseBytes(b + off, size, L, hostBodies[k], err)) { err = "the steer file's body: " + err; return false; }
+			if (off + size > end) end = off + size;
+		}
+		for (int s = 0; s < H.S; s++) if (H.layerBody[s] < -1 || H.layerBody[s] >= H.nBodies) { err = "bad steer file (layers)"; return false; }
+		if (H.dpN) {
+			o = end;
+			const size_t oBit = take(4 * (size_t)H.dpN), oLeg = take(4 * (size_t)H.dpN), oH = take(4 * ((size_t)1 << H.dpN) * H.dpN);
+			if (bad) { err = "bad steer file (the coin DP)"; return false; }
+			H.dpBit = (const i32*)(b + oBit); H.dpLeg = (const i32*)(b + oLeg); H.dpH = (const float*)(b + oH);
+			for (int q = 0; q < H.dpN; q++) if (H.dpLeg[q] < 0 || H.dpLeg[q] >= H.nBodies) { err = "bad steer file (the coin DP's legs)"; return false; }
+			// (per collected set m the legs not collected, by their rest of the tour h[(m | q) x n + q] ascending, the ones
+			// without a finite rest left out: the lookup stops at the first leg that cannot win; stable, so ties keep the
+			// file's order)
+			const int n = H.dpN;
+			dpOrder.assign(((size_t)1 << n) * n, 0xff);
+			std::vector<int> qs;
+			for (size_t m = 0; m < ((size_t)1 << n); m++) {
+				qs.clear();
+				for (int q = 0; q < n; q++) if (!(m & ((size_t)1 << q)) && H.dpH[(m | ((size_t)1 << q)) * n + q] < 3.0e38f) qs.push_back(q);
+				std::stable_sort(qs.begin(), qs.end(), [&](int a, int b) { return H.dpH[(m | ((size_t)1 << a)) * n + a] < H.dpH[(m | ((size_t)1 << b)) * n + b]; });
+				for (size_t j = 0; j < qs.size(); j++) dpOrder[m * n + j] = (uint8_t)qs[j];
+			}
+			H.dpOrder = dpOrder.data();
+		}
+		// (the bodies' constants: when every physics body has the first one's, the lookups compute their rise and fall once
+		// per state, not once per body: up to 19 per state with the coin DP)
+		H.preBody = -1; H.samePre = 0;
+		for (int k = 0; k < H.nBodies; k++) if (hostBodies[k].mode != 1) { H.preBody = k; break; }
+		if (H.preBody >= 0) {
+			H.samePre = 1;
+			for (int k = 0; k < H.nBodies && H.samePre; k++) if (hostBodies[k].mode != 1 && !rfSamePre(hostBodies[k], hostBodies[H.preBody])) H.samePre = 0;
+		}
+		H.bodies = hostBodies.data();
+		H.on = 1;
+		return true;
+	}
+	/** the same field on the GPU: the file in one buffer, the bodies' structs in another */
+	bool upload(SteerField& F, std::string& err) {
+		if (!dev.upload(raw.data(), raw.size())) { err = cu::lastError; return false; }
+		const uint8_t* base = raw.data();
+		devBodies.resize(H.nBodies);
+		for (int k = 0; k < H.nBodies; k++) devBodies[k] = rfRebase(hostBodies[k], base, dev.p);
+		if (!dbodies.upload(devBodies.data(), sizeof(ReachField) * devBodies.size())) { err = cu::lastError; return false; }
+		auto rebase = [&](const void* p) -> const void* { return p ? (const void*)(uintptr_t)(dev.p + ((const uint8_t*)p - base)) : nullptr; };
+		F = H;
+		F.feat = (const i32*)rebase(H.feat); F.team = (const i32*)rebase(H.team); F.layerBody = (const i32*)rebase(H.layerBody); F.goal = (const u8*)rebase(H.goal);
+		F.dpBit = (const i32*)rebase(H.dpBit); F.dpLeg = (const i32*)rebase(H.dpLeg); F.dpH = (const float*)rebase(H.dpH);
+		F.dpOrder = nullptr;
+		if (!dpOrder.empty()) { if (!dorder.upload(dpOrder.data(), dpOrder.size())) { err = cu::lastError; return false; } F.dpOrder = (const u8*)(uintptr_t)dorder.p; }
+		F.bodies = (const ReachField*)(uintptr_t)dbodies.p;
+		return true;
+	}
+	/** --steer=<file>: loads it into F; false (err) when it cannot be read, does not fit this level or the GPU's memory */
+	bool load(const std::string& file, const LevelBlob& B, const Level& L, SteerField& F, std::string& err) {
+		memset(&F, 0, sizeof F);
+		if (!parse(file, B, L, err) || !upload(F, err)) { memset(&F, 0, sizeof F); H.on = 0; return false; }
+		return true;
+	}
 };
 
 /** The closest attempt of a search: the state nearest the trophy so far (the reach field's cost in tiles; a state it
@@ -312,6 +427,15 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 		std::string err;
 		if (!rf.empty() && !reachGpu.load(rf, L, P.reach, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
 	}
+	// --steer=<file> (src/steer.js RCH4, with --reach): the goal score and the closest attempt by the gate-aware steer field
+	SteerGpu steerGpu;
+	// (a file that cannot be used is an error: src/editor.js runs the tool again without it, rather than reading reach-field
+	// distances as steer ones)
+	if (P.reach.on && !opt(argc, argv, "steer", "").empty()) {
+		std::string err;
+		if (!steerGpu.load(opt(argc, argv, "steer", ""), B, L, P.steer, err)) { printf("{\"error\":%s,\"steer\":0}\n", jsonStr("the steer field cannot be used: " + err).c_str()); return 3; }
+	}
+	if (P.steer.on) printf("{\"ev\":\"steer\",\"layers\":%d,\"bodies\":%d,\"coinDP\":%d,\"mb\":%.1f}\n", P.steer.S, P.steer.nBodies, P.steer.dpN, steerGpu.raw.size() / 1048576.0);
 	if (!goalDist.empty() || P.reach.on) P.closest = (unsigned long long*)(uintptr_t)dclose.p;
 	g.ready(tStart);   // (the kernels and the buffers are on the GPU: --seconds counts from here)
 
