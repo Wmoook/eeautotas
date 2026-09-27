@@ -58,6 +58,8 @@ const CONFS = [{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16, cap: 1048576 }, { cqx: 0
 	{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16, cap: 65536 }, { cqx: 0.0625, cqv: 8, qy: 0.0625, qvy: 8, cap: 262144 },
 	{ cqx: 0.125, cqv: 16, qy: 0.125, qvy: 16, cap: 16384 }, { cqx: 0.5, cqv: 4, qy: 0.5, qvy: 4, cap: 262144 }];
 const CONF_C = 0.3;
+// (a chain link after a full table: the settings with the next smaller layer cap)
+const GREEDIER = [2, 4, 4, 4, 4, 2];
 // how far back along the start cell's run a burst starts, in turn per room (ticks; never 0: the cell nearest the targets
 // is often a doomed state, falling toward them into spikes, and a burst from it ran out of states in 1-5 ticks)
 const BACK = [30, 90, 30, 250];
@@ -585,8 +587,12 @@ function create(o) {
 			if (!r.reached && r.best && Number.isFinite(r.near) && r.near < job.startDist - 1 && job.chain < CHAIN_MAX) {
 				const c = job.chain + 1, back = CHAIN_BACK[c % CHAIN_BACK.length];
 				const inputs = back && r.best.length > back + 50 ? r.best.slice(0, r.best.length - back) : r.best;
-				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c,
-					what: `${job.what.replace(/ · chain .*$/, '')} · chain ${c}${back ? ` (${back} back)` : ''}` });
+				// (a table that filled before a target: the next link greedier, a smaller layer (CONFS' caps 1 M -> 64 K -> 16 K);
+				// Infinity Pain's wall: 4 px / 1/16 px/tick with 1 M states a layer filled its table 33 tiles short three times
+				// in a row, where 64 K and 16 K passed from the route's own states 150 and 400 ticks back)
+				const ci2 = r.end === 'full' ? GREEDIER[job.conf] : job.conf;
+				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2, cells: CONFS[ci2],
+					what: `${job.what.replace(/ · chain .*$/, '').replace(/settings \d+/, `settings ${ci2}`)} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
 			}
 		}
