@@ -453,7 +453,8 @@ function create(o) {
 	/** the relay's next burst (null: none now) */
 	const relayJob = (lane, left) => {
 		const b = o.best && o.best();
-		if (!b) return null;
+		// (not with goexplore.js --prefix: the gate benchmark's searches start past the level start)
+		if (!b || o.minLen) return null;
 		// (a few waypoints at most per call: each costs a replay of the chain; the loop goes on at the next burst)
 		for (let guard = 0; guard < 8; guard++) {
 			// (a pass follows its route to the end: the CPU's random runs make a route a few ticks faster every minute or so, and
