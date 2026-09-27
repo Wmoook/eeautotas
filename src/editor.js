@@ -408,8 +408,10 @@ const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, 
 // beams too when four copies fit), to the CPU search whenever it models anything
 const steerArg = (f, V) => (f.steer && !(V && V.noSteer) ? [`--steer=${f.steer}`] : []);
 const STEER_GPU_SHARE = 1 / 40;
-// the steer build: at most this long before the search starts (it goes on in its worker, cached for the next search; this
-// one orders by the reach field)
+// the steer build: at most this long before the search starts. A later field is taken when it arrives (lateSteer: the
+// CPU search's second heap, the wall breaker's coin plan); before, it was dropped for the whole search, and a run from the
+// level alone has one search: on a loaded box (cycle 8) Forgotten Veil, Octorage and Good Egg ran without it.
+// (EEAT_STEER_WAIT_MS or test.steerWaitMs: another wait, for tests of a late build)
 const STEER_WAIT_MS = 15000;
 // The one search (the friend's "one optimal search" instead of three searches built one after another): on levels above
 // 50 x 50 tiles (goexplore.js coarse cells) with the GPU, the CPU search's archive is the only one: its random runs, and
@@ -1402,10 +1404,18 @@ function start(b, gpu, test) {
 	if (!schedTimer) { schedTimer = setInterval(schedule, 250); if (schedTimer.unref) schedTimer.unref(); }
 	// (the steer field next to it: its own worker; b.steer === false or test.steer === false: none)
 	const wantSteer = b.steer !== false && !(test && test.steer === false);
-	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerInfo(buf, levelHash), new Promise((res) => { const t = setTimeout(() => res({ late: true }), STEER_WAIT_MS); if (t.unref) t.unref(); })]);
+	const steerWait = test && test.steerWaitMs >= 0 ? test.steerWaitMs : +process.env.EEAT_STEER_WAIT_MS >= 0 && process.env.EEAT_STEER_WAIT_MS !== '' ? +process.env.EEAT_STEER_WAIT_MS : STEER_WAIT_MS;
+	const steerBuild = wantSteer ? steerInfo(buf, levelHash) : null;
+	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerBuild, new Promise((res) => { const t = setTimeout(() => res({ late: true }), steerWait); if (t.unref) t.unref(); })]);
 	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), steerP]);
 	const gen = ++searchGen;
-	ready.then(([rf, toolWhy, sf]) => { if (gen === searchGen) { useSteer(sf, noGpu || toolWhy); launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); } }, (e) => {
+	ready.then(([rf, toolWhy, sf]) => {
+		if (gen !== searchGen) return;
+		useSteer(sf, noGpu || toolWhy);
+		launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide);
+		// (a late field: taken when its build ends, after the launches)
+		if (sf && sf.late) steerBuild.then((sf2) => lateSteer(gen, sf2));
+	}, (e) => {
 		if (gen !== searchGen) return;   // (stopped while checking, maybe another search since)
 		building = false;
 		S.stage = 'error'; S.running = false;
@@ -1424,7 +1434,7 @@ function useSteer(sf, noGpu) {
 	if (!cur) return;
 	cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
 	S.steer = null;
-	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field (the next one uses it, once built)'); return; }
+	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field until it is built'); return; }
 	if (sf && sf.over) note(`the steer field ${sf.over}`);
 	if (!sf || !sf.useful || !fs.existsSync(sf.file)) return;
 	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
@@ -1443,6 +1453,32 @@ function useSteer(sf, noGpu) {
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
+}
+/** a steer field built after the search started (start()'s race: sf {late}): gen, the search it was built for; sf2
+ *  steerInfo's answer. From now on the CPU search's head A orders by it too (goexplore.js stdin "steer <file>"; a CPU
+ *  search launched later gets --steer) and the wall breaker's coin plan (breakGate) aims at its gates. The GPU tools and
+ *  the bursts' trophy arm stay on the reach field, and every distance stays the reach field's (--steerDist=0): the
+ *  attempts of all strategies are ranked on one scale, which a switch in the middle of the search would break. */
+function lateSteer(gen, sf2) {
+	if (gen !== searchGen || !cur || !S.running || S.halted || cur.opts.noWayUp || cur.files.steerCpu) return;
+	const sec = S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null;
+	if (!sf2 || !sf2.useful || !fs.existsSync(sf2.file)) {
+		note(`the steer field was built ${sec !== null ? `${sec} s into the search` : 'late'}: ${sf2 ? 'it models nothing the reach field does not' : 'it could not be built'}`);
+		return;
+	}
+	if (sf2.over) note(`the steer field ${sf2.over}`);
+	cur.files.steerCpu = sf2.file;
+	cur.files.steerDist = false;
+	const mb = sf2.bytes / 1048576;
+	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
+	let sent = 0;
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${sf2.file}\n`); sent++; } catch (e) { /* gone */ } }
+	});
+	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
+		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''}; the GPU tools and the distances stay on the reach field`);
+	save();
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
  *  why the GPU strategies do not run ('' = they do); stale: the reason is an old search tool */
@@ -1921,6 +1957,9 @@ function launch(n) {
 			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
+		} else if (ev.ev === 'steer') {
+			// (the CPU search took a late steer field: lateSteer)
+			if (S.steer) S.steer.cpuAt = ev.sec;
 		} else if (ev.ev === 'closest') {
 			closer(ev, n);
 		} else if (ev.ev === 'source') {
