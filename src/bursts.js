@@ -122,6 +122,26 @@ function triggersOf(L) {
 	return { comp, n, eaten };
 }
 
+/** level L's portals as walk edges (goexplore.js roomFields' map): exits (portal tile -> its exits' tiles) and srcOf
+ *  (exit tile -> the portal tiles that lead there: the aim field's walk runs backwards from the goals) */
+function portalsOf(L) {
+	const W = L.width, N = W * L.height, fg = L.fg;
+	const exits = new Map(), srcOf = new Map();
+	if (!L.portalSlot || !L.portalsById) return { exits, srcOf };
+	for (let i = 0; i < N; i++) {
+		const s = L.portalSlot[i];
+		if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+		const ex = L.portalsById.get(L.pTarget[s]);
+		if (!ex) continue;
+		const list = [];
+		for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N && !list.includes(j)) list.push(j); }
+		if (!list.length) continue;
+		exits.set(i, list);
+		for (const j of list) { if (!srcOf.has(j)) srcOf.set(j, []); srcOf.get(j).push(i); }
+	}
+	return { exits, srcOf };
+}
+
 /**
  * create(o) -> {room(info), edge(from, tile), start(), stop() (a promise), stats()}. o: {L, a (goexplore's options),
  * field (the reach field), RM (roomOf(L)), ports (the workers' MessagePorts), say (an event line), bound() (the longest
@@ -131,7 +151,7 @@ function triggersOf(L) {
  */
 function create(o) {
 	const L = o.L, a = o.a, W = L.width, H = L.height, N = W * H;
-	const TR = triggersOf(L);
+	const TR = triggersOf(L), PT = portalsOf(L);
 	const work = a.work || fs.mkdtempSync(path.join(os.tmpdir(), 'gx-bursts-'));
 	fs.mkdirSync(work, { recursive: true });
 	const bin = path.join(work, 'level.bin');
@@ -273,6 +293,10 @@ function create(o) {
 			if (fg[t] === 121) trophies.push(t);
 			// (a trigger that changes the room: a goal, no way through; the places the room was entered at are ways out)
 			if (live && qh > nSrc) { term[t] = 1; continue; }
+			// (through portals: Forgotten Veil's coin 4 and Good Egg's portal pockets are behind one; 8-connected only,
+			// they were no target and a room entered in such a pocket had none)
+			const ex = PT.exits.get(t);
+			if (ex) for (const e of ex) if (!seen[e] && pass[e]) { seen[e] = 1; q[qt++] = e; }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
@@ -311,6 +335,9 @@ function create(o) {
 		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+			// (backwards through portals: the portal tiles that lead here, 5 per portal as src/reach.js)
+			const src = PT.srcOf.get(t);
+			if (src) for (const p of src) if (walk[p] === CUT && I.pass[p] && !I.term[p]) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
@@ -612,4 +639,4 @@ function create(o) {
 	};
 }
 
-module.exports = { create, triggersOf, CONFS };
+module.exports = { create, triggersOf, portalsOf, CONFS };
