@@ -2190,7 +2190,8 @@ async function main() {
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
-		(route ? `first route ${first.ticks} ticks after ${first.sec} s (${first.simTicks.toLocaleString('en-US')} ticks of worker ${first.seed}); best ${route.ticks} ticks (${C.fmt(route.runTicks)}) after ${route.sec} s` +
+		// (a route given on stdin, "route <inputs>", is no find of this search: first stays null)
+		(route ? `${first ? `first route ${first.ticks} ticks after ${first.sec} s (${first.simTicks.toLocaleString('en-US')} ticks of worker ${first.seed})` : 'no route of its own'}; best ${route.ticks} ticks (${C.fmt(route.runTicks)}) after ${route.sec} s${route.adopted ? ' (given)' : ''}` +
 			(a.out ? ` -> ${a.out}` : '') : `no route (closest: reach cost ${near ? near.rc.toFixed(2) : '-'} at tick ${near ? near.t : '-'})`));
 }
 
