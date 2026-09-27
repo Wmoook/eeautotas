@@ -413,6 +413,19 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
 			if (k < nearest) nearest = k;
 		}
+		// the novelty target (--novel): a state in a (room, tile) cell the caller's archive never saw is a hit, once per cell
+		// (the device bitmap gains its bit), at most novMax; it is still expanded. --novelOrder: the head of the priority is
+		// the walking distance to the nearest unseen tile of the start's room
+		u32 novHead = 4095u;
+		if (p.novBits) {
+			const i32 tile = min(max(cy * p.L.W + cx, 0), p.L.N - 1);
+			const u32 room = rollRoom<TW>(p, s), bit = novelBit(room, tile) & p.novMask, m = 1u << (bit & 31);
+			if (!(p.novBits[bit >> 5] & m) && !(atomicOr(&p.novBits[bit >> 5], m) & m) && atomicAdd(p.novCount, 1u) < (u32)p.novMax) {
+				const u32 h = atomicAdd(p.nHits, 1u);
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = EE_NOVEL_HIT; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = (i32)room; e.refTick = tile; p.hits[h] = e; }
+			}
+			if (p.novDist) { const float nd = p.novDist[tile]; novHead = nd < 0.f ? 4095u : (u32)min((i32)(nd * 4.f), 4095); }
+		}
 		if (p.target == 2) {   // ahead of the run: a hit when the run reaches this tile only minGain+ ticks later
 			const i32 r = p.refTile[cy * p.L.W + cx], now = p.fromTick + p.layer + 1;
 			if (r >= 0 && r < now - p.slack) continue;   // behind the run's schedule: drop
@@ -523,7 +536,7 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		}
 		p.candKey[(size_t)pi * 18 + o] = (key & ~0xfffull) | (rest ? 2ull : 0ull) | 1ull;
 		// (without a reach field the head is part of the content, so a full layer is still cut the same way every run)
-		const u64 head = p.reach.on ? (u64)rcq : (content >> 52);
+		const u64 head = p.novDist ? (u64)novHead : p.reach.on ? (u64)rcq : (content >> 52);
 		p.candPrio[(size_t)pi * 18 + o] = (head << 51) | ((content & 0x7ffffull) << 32) | ((parentHash & 0x7ffffffull) << 5) | (u64)o;
 	}
 	if (p.closest && nearest < *(volatile unsigned long long*)p.closest) atomicMin(p.closest, (unsigned long long)nearest);
