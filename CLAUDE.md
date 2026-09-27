@@ -159,11 +159,17 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   watches the grinds there and hands a faster remote best in through `tas.js try` every 5 min). The farm writes
   `src/jobs/<id>/remote.json` every 30 s; while it is under 90 s old (`REMOTE_FRESH_MS`) `summary().remote` carries it
   (machine, GPU index, the CPU and GPU speed there, stage, round, the remote best and `ahead` = ticks it leads the job's
-  own best until the next hand-in, `tonight` = the best at 18:00 local time (or remote.json `since`) -> the better of
-  both now, the last 12 log lines); the page shows it on the job ("Running on <machine> · GPU k", its own log box), in
-  the job list and in a "Rented machines" box (`GET /api/state` `rented`: per machine its jobs, speeds and the gain
-  tonight; also the jobs that exist only there, from `src/out/remote/extra_jobs.json` {t, jobs: {id: record}}, not
-  clickable), `tas.js status` and `tas.js jobs` as a `rented` line. A stale file shows nothing. Running = the farm saw
+  own best until the next hand-in, `tonight` = the job's gain from every source: the best at 18:00 local time (or
+  remote.json `since`) -> the better of both now, `there` = what this copy gained for the job tonight: its hand-ins in
+  the job's history since then (`what` "try: <source>": remote.json `source`, else "<the machine's first word> farm",
+  the farm's `--source`) plus `ahead`; the last 12 log lines); the page shows it on the job ("Running on <machine> ·
+  GPU k", "Tonight there" with the job's gain from all sources under it, its own log box), in the job list and in a
+  "Rented machines" box (`GET /api/state` `rented`: per machine its jobs, speeds and the sum of their `there`; on
+  2026-09-26 the job's whole gain (the H100's "try: h100" hand-ins, the local grind's) was credited to the A100; also
+  the jobs that exist only there, from `src/out/remote/extra_jobs.json` {t, jobs: {id: record}}, not clickable: all of
+  their gain), `tas.js status` and `tas.js jobs` as a `rented` line. Everything in remote.json comes from the rented
+  machine: `remoteView` makes its numbers numbers (rounds, threads, edges, round, the bests) and the page escapes its
+  text (the stage, e.g. "try: <source>", the machine, the GPU names, the log). A stale file shows nothing. Running = the farm saw
   the grind's process AND the status there says running or its live.json is under 2 min old (`REMOTE_LIVE_MS`; the
   A100's clock was 5 s ahead of the laptop's): the farm's process check also matched another checkout's grind of the
   same job (at 00:11 on 2026-09-27 every copy there had stopped 74-89 min before, FV "running"); speeds only from a
@@ -252,7 +258,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `tools/rediscover.js` | the rediscovery benchmark: finds replayed from a run before the find by the tool meant to aim at them (Octorage loop skip, 213 endgame, Stupid Fox time doors, FV skip hunting, FV's 88-tick skip by skips.js + mutate), with the reason the spot is targeted, the time and ticks; `--only=`, `--json` (skips cases whose jobs are not on the machine) |
 | `test/regress.js` | engine regression tests (maintained together with the physics) |
 | `test/mechanics.js` | block mechanics against the AS3 (effects, levitation, teams, zombie doors, lookup table) |
-| `test/review.js` | the review suite: music blocks without a sound (tick abort), the AS3 portal lookup, stateKey decoding, snapshot / stateKey fuzz on kitchen-sink levels, the two real eeo-tas runs, and the app (import limits, report, where, HTTP errors, viewer data (the effects: decoded by the page's own code = the engine every tick), EE graphics on a fake eeo-tas, a job's copy on a rented machine (remote.json: summary, status, `/api/state` `rented`, the page's rendering cut out of index.html; a copy the farm calls running whose status there is stopped and live.json 74 min old = stopped, no speeds; a 3 min old live.json = no speeds; a job only there (extra_jobs.json); stale / broken = nothing), inbox verdict) in a temp copy of src/ (`--quick`, `--only=`) |
+| `test/review.js` | the review suite: music blocks without a sound (tick abort), the AS3 portal lookup, stateKey decoding, snapshot / stateKey fuzz on kitchen-sink levels, the two real eeo-tas runs, and the app (import limits, report, where, HTTP errors, viewer data (the effects: decoded by the page's own code = the engine every tick), EE graphics on a fake eeo-tas, a job's copy on a rented machine (remote.json: summary, status, `/api/state` `rented`, the page's rendering cut out of index.html; a copy the farm calls running whose status there is stopped and live.json 74 min old = stopped, no speeds; a 3 min old live.json = no speeds; the gain per machine = its own hand-ins and lead, not another machine's; HTML in the stage, rounds, threads, machine and GPU names never a tag on the page; a job only there (extra_jobs.json); stale / broken = nothing), inbox verdict) in a temp copy of src/ (`--quick`, `--only=`) |
 
 The tools take `--tas=<file>` and `--level=<level id | job id>`. For a `.eetas` inside `src/jobs/<id>/`, `--level` can
 be left out. Each tool's header comment lists its options.
@@ -276,7 +282,7 @@ be left out. Each tool's header comment lists its options.
 | `grind_*.eetas`, `grind_*.log` | stage outputs and logs of the current grind (`grind_ref.eetas` = the stage's copy of best, `grind_mutref.eetas` = the run mutate's last full pass covered, `grind_now.eetas` = the last at-once splice) |
 | `gpu/` | the GPU searcher's files: `library.bin` (the shortcut library), `state.json` (cursors, seed counter, per-family numbers), `level.bin`, `ref.eetas`, `edges.bin` |
 | `live.json` | written by grind every second: `{t, cpu: {ticks, ticksPerSec, threads, model}, gpu}` (`ticks` = simulated this session, `ticksPerSec` over the last ~3 s, 0 between stages; `gpu` = `gpu_status.json` {t, name, ticks, ticksPerSec, state, edges} while it is under 5 s old, else null) |
-| `remote.json` | the job's copy on a rented machine, written every 30 s by `src/out/remote/farm.js`: `{t (this machine's clock), machine, running, gpuIndex, state, stage, rounds, bestRunTicks, history (the remote's last 8), live (its live.json), gpu (its gpu_status.json), log (its last 12 grind.log lines), since (optional)}`; shown while under 90 s old (section 4, "Rented machines") |
+| `remote.json` | the job's copy on a rented machine, written every 30 s by `src/out/remote/farm.js`: `{t (this machine's clock), machine, running, gpuIndex, state, stage, rounds, bestRunTicks, history (the remote's last 8), live (its live.json), gpu (its gpu_status.json), log (its last 12 grind.log lines), since (optional), source (optional: its hand-ins' `--source`)}`; shown while under 90 s old (section 4, "Rented machines") |
 
 `src/jobs/_running.json` records the job to resume when the app starts. The level JSON is eelvl.js `toSimLevel()`
 output plus `rng_script` (section 4) and `start_mode` (section 4, "Start mode"). `src/data/_system.json` is the CPU
@@ -296,10 +302,10 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 
 | method | path | what |
 |---|---|---|
-| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best, `live`: the running job's `live.json` while under 5 s old, else null, and `remote`: its copy on a rented machine while `remote.json` is under 90 s old, else null), `rented` {since, machines: [{machine, running, cpuTicksPerSec, gpuTicksPerSec, saved (tonight), updated, jobs: [{id, name, extra (only on that machine), running, gpuIndex, gpuName, cpuTicksPerSec, gpuTicksPerSec, stage, lastLive, best, localBest, ahead, tonight}]}]}, `now`, CPU threads, `cpuModel`, `bench` |
+| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best, `live`: the running job's `live.json` while under 5 s old, else null, and `remote`: its copy on a rented machine while `remote.json` is under 90 s old, else null), `rented` {since, machines: [{machine, running, cpuTicksPerSec, gpuTicksPerSec, saved (tonight: the sum of its jobs' `there`), updated, jobs: [{id, name, extra (only on that machine), running, gpuIndex, gpuName, cpuTicksPerSec, gpuTicksPerSec, stage, lastLive, best, localBest, ahead, tonight, there}]}]}, `now`, CPU threads, `cpuModel`, `bench` |
 | GET | `/api/system` | processors: CPU (`model`, `text` e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads (measured)") with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU (`available`, `model`, measured `ticksPerSec`, or `why`); `faster`: `cpu` or `gpu` |
 | POST | `/api/jobs` | import: JSON `{name, eelvlName, eetasName, eelvlB64, eetasB64, startMode}` (base64 of the raw file bytes; `startMode` `reset` (default) or `load`) |
-| GET | `/api/jobs/:id` | one job summary (best, history, stage, `live` speed, `remote` {t, age, machine, running, gpuIndex, state, stage, rounds, lastLive, best, ahead, handInMin, cpu, gpu, history, tonight {since, from, to, saved, found, more}, log}, inbox, focus, files) |
+| GET | `/api/jobs/:id` | one job summary (best, history, stage, `live` speed, `remote` {t, age, machine, running, gpuIndex, state, stage, rounds, lastLive, best, ahead, handInMin, cpu, gpu, history, tonight {since, from, to, saved, found, more} (the job's gain from every source), there (this copy's own gain tonight), log}, inbox, focus, files) |
 | POST | `/api/jobs/:id/start` | JSON `{workers, processor}` (`processor` `cpu`, or `gpu` = the CPU stages plus the GPU searcher; refused with the reason when no GPU or the level is unsupported) |
 | POST | `/api/jobs/:id/stop` | pause |
 | POST | `/api/jobs/:id/finish` | stop and write `report.json` (returned) |

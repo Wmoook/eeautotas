@@ -987,6 +987,37 @@ async function remoteChecks(S, port, id, page) {
 			/on Test box · GPU 7 · 397 M ticks\/s · .* there \(−5\)/.test(sh) && /Rented machines/.test(box.innerHTML) && /GPU 7/.test(box.innerHTML) &&
 			/1 of 1 running · 397 M ticks\/s/.test(box.innerHTML) && box.innerHTML.includes(`data-rid="${id}"`), sh);
 	}
+	// the gain tonight per machine: only its own hand-ins here (the job's history "try: Test farm", or remote.json `source`) and its lead
+	// not handed in yet; the job's gain from other sources (2026-09-26: the H100's "try: h100" credited to the A100) only as the job's
+	const own = [{ t: since - 5e3, runTicks: local + 100, saved: 3, what: 'phase1' }, { t: now - 50 * 60e3, runTicks: local + 58, saved: 42, what: 'try: h100' },
+		{ t: now - 40 * 60e3, runTicks: local + 38, saved: 20, what: 'try: Test farm' }, { t: now - 30 * 60e3, runTicks: local, saved: 38, what: 'deep3_seg1' }];
+	const arec = Object.assign(rec(now - 5e3), { history: [{ t: now - 60e3, runTicks: local - 5, saved: 5, what: 'inbox (gpu (1 shortcuts))' }] });
+	const av = J.remoteView(arec, now, local, local + 200, own), avH = J.remoteView(Object.assign({}, arec, { source: 'h100' }), now, local, local + 200, own);
+	const noX = path.join(S.dir, 'no_extra_jobs.json');
+	const aState = (v) => ({ now, jobs: [{ id, name: 'Test job', best: { time: '0:01.00', runTicks: local }, remote: v }],
+		rented: J.rentedMachines([{ id, name: 'Test job', best: { time: '0:01.00', runTicks: local }, remote: v }], now, noX) });
+	const aq = aState(av);
+	let ah = '';
+	if (P) { const P2 = pageFns(aq); ah = P2.remoteHtml(aq.jobs[0]); P2.renderRented(); }
+	check('the gain tonight per machine counts its own hand-ins (try: Test farm, 20) and its lead (5), not the H100\'s 42 or the grind\'s 38: there 25, the job 105 ' +
+		'(summary, /api/state, tas.js status, the page); remoteView `source` names the hand-ins',
+		av && av.there === 25 && av.tonight.saved === 105 && avH.there === 47 && aq.rented.machines[0].saved === 25 && aq.rented.machines[0].jobs[0].there === 25 &&
+		/tonight \(since \d\d:\d\d\) there -25; the job .* \(-105, all sources\)/.test(J.remoteText(av)) &&
+		(!P || (/Tonight there .*−0\.25 s · 25 ticks/.test(ah.replace(/\s+/g, ' ')) && /\(−105, all sources\)/.test(ah) && /tonight <b>−0\.25 s<\/b>/.test(box.innerHTML) &&
+			/tonight <span class="up">−25<\/span>/.test(box.innerHTML))),
+		`${JSON.stringify(av && { there: av.there, tonight: av.tonight })} ${av && J.remoteText(av)}`);
+	// text from the rented machine is escaped on the page, its numbers are made numbers: HTML in the stage, the rounds, the thread count
+	const bad = '<img src=x onerror=alert(1)>';
+	const brec = Object.assign(rec(now - 5e3), { stage: `try: ${bad}`, rounds: bad, bestRunTicks: String(local - 5), gpuIndex: bad, machine: `Box ${bad} (rented)` });
+	brec.live = Object.assign({}, brec.live, { cpu: Object.assign({}, brec.live.cpu, { threads: bad, model: bad }), gpu: Object.assign({}, brec.live.gpu, { edges: bad, round: bad, name: bad, family: bad }) });
+	brec.history = [{ t: now - 60e3, runTicks: String(local - 5), saved: bad, what: bad }];
+	const bv = J.remoteView(brec, now, local, local, []);
+	let bh = '';
+	if (P && bv) { const bq = aState(bv), P3 = pageFns(bq); bh = P3.remoteHtml(bq.jobs[0]) + P3.remoteShort(bq.jobs[0]); P3.renderRented(); bh += box.innerHTML; }
+	check('HTML from the rented machine (stage "try: <img ...>", rounds, threads, GPU index, machine name, GPU name) is not a tag anywhere on the page; rounds, threads, ' +
+		'edges and round are numbers', bv && bv.rounds === 0 && bv.cpu.threads === 0 && bv.gpu.edges === 0 && bv.gpu.round === 0 && bv.best.runTicks === local - 5 && bv.ahead === 5 &&
+		bv.tonight.from === local && bv.tonight.saved === 5 && (!P || (bh.length > 500 && !/<img/i.test(bh) && /Handed in: &lt;img src=x/.test(bh))),
+		`${JSON.stringify(bv && { rounds: bv.rounds, cpu: bv.cpu, stage: bv.stage })} ${(bh.match(/.{0,60}<img.{0,20}/i) || ['no raw tag'])[0]}`);
 	// what the farm wrote at 00:11 on 2026-09-27: `running` (its process check matched another checkout's grind of the job), the
 	// status there stopped, its live.json and gpu_status.json 74 min old -> a stopped copy, no speeds, stopped since then
 	const old = now - 20e3 - 4431e3;
