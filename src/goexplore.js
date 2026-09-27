@@ -40,7 +40,9 @@
 //             B (novelty, the rest): a room by a tournament of 4 (weight (1 + ln(1 + gain)) x (2 if the trophy is
 //               walkable in the room) / sqrt(1 + picks / 50); gain = the tiles its door-aware flood fill reaches that no
 //               earlier room's did), then the best of --sample random cells of it by 1 / sqrt(1 + seen) + 1 / sqrt(1 +
-//               picks) (seen: how often a run came through the cell);
+//               picks) (seen: how often a run came through the cell); --adapt=1 (the default): the room's weight also
+//               x (0.1 + its yield), the new territory tiles per pick from it, a decaying mean (Y_W; --adapt=2 also
+//               a finer grain for a saturated room; 0: as before);
 //             C (discovery, half the picks while one is due): --burst picks of each new room's first cell, only for
 //               rooms that open new territory (gain > 0: on a level of many switches most rooms open nothing).
 //           The room's fields (flood fill, trophy walkable) are cached by the passable set (the doors' states and
@@ -169,7 +171,7 @@
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
-//        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
+//        [--adapt=1 (0 | 1 | 2; coarse cells: see Y_W)] [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
@@ -209,11 +211,18 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 // class of vy only)
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
+// --adapt (coarse cells): the archive keeps growing toward new territory. Each room keeps the tiles its cells reached
+// and a decaying yield: the new tiles of the room per pick from it (a running mean over ~Y_W picks, Y_INIT when it is
+// new); head B's room weight is multiplied by (Y_FLOOR + yield), so the picks go where the territory still grows.
+// --adapt=2 also gives a room whose yield fell below Y_SAT after at least Y_PICKS picks (since its last change) a finer
+// grain (Y_MAXG levels: 1 = the half tile, the jump count and speed classes; 2 = the quarter tile and the speeds to
+// 1/2 px/tick), so a saturated room, often the one before a precision wall, gets precision
+const Y_W = 32, Y_INIT = 4, Y_FLOOR = 0.1, Y_SAT = 0.02, Y_PICKS = 1000, Y_MAXG = 2, B_TILE = 40;
 // a seed's states that become cells: every SEED_EVERY ticks back from its end (and the end)
 const SEED_EVERY = 30;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
+	steerDist: 1, mix: 0.5, adapt: 1, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -734,6 +743,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
+	// (--adapt: the grain of roomKey's room, looked up when roomKey changes; gKey = NaN forces the next look-up)
+	let gKey = NaN, grain = 0, grained = 0, added = 0, nTiles = 0;   // (added: new territory tiles; nTiles: the rooms' tiles)
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
@@ -743,7 +754,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null, y: Y_INIT, g: 0, gAt: 0, tiles: a.adapt ? new Set() : null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		rooms.set(key, r);
 		roomList.push(r);
@@ -760,8 +771,20 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		tile = Math.min(N - 1, Math.max(0, ty * W + tx));
 		const r = res[tile];
 		if (coarse) {
-			// (tile, room, ground, the time-door phase in buckets of --phase ticks; no jump count or gravity queue)
+			// (tile, room, ground, the time-door phase in buckets of --phase ticks; no jump count or gravity queue; --adapt:
+			// the room's grain)
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (TD ? (((sim.level_ticks() % E.TIMEDOOR_PERIOD) / a.phase) | 0) << 8 : 0); KV[2] = 0; KV[3] = 0; KV[4] = 0; KV[5] = roomKey;
+			if (a.adapt === 2 && r === 0) {
+				if (roomKey !== gKey) { gKey = roomKey; const rr = rooms.get(roomKey); grain = rr !== undefined ? rr.g : 0; }
+				if (grain > 0) {
+					const vx = sim.speed_x, vy = sim.speed_y, sh = grain === 1 ? 3 : 2;
+					KV[2] = sim.jump_count; KV[3] = ((Math.trunc(px + 8) & 15) >> sh) | (((Math.trunc(py + 8) & 15) >> sh) << 4);
+					KV[1] |= 2 | (grain << 2);
+					if (grain === 1) {
+						KV[4] = (vx < -4 ? 0 : vx < 0 ? 1 : vx === 0 ? 2 : vx <= 4 ? 3 : 4) | ((vy < -6 ? 0 : vy < -3 ? 1 : vy < 0 ? 2 : vy === 0 ? 3 : vy <= 3 ? 4 : 5) << 4);
+					} else KV[4] = (Math.floor(vx * 2) & 0xff) | ((Math.floor(vy * 2) & 0xff) << 8);
+				}
+			}
 		} else {
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (r << 1); KV[2] = sim.jump_count; KV[3] = sim._q0; KV[4] = sim._q1; KV[5] = disc(sim);
 		}
@@ -812,7 +835,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
 	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
-		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
+		roomList.length * B_ROOM + nTiles * B_TILE + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
 	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
@@ -877,6 +900,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			return null;
 		}
 		if (!roomFor()) { full = true; needSweep = true; return null; }
+		if (room !== null && room.tiles !== null && !room.tiles.has(tile)) { room.tiles.add(tile); added++; nTiles++; }
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
 		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks }
 			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks };
@@ -936,7 +960,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
-		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
+		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, grained, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
 	const sendNear = () => {
@@ -977,7 +1001,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		for (let k = 0; k < 4; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
 			if (!r.arr.length) continue;
-			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50);
+			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) * (a.adapt ? Y_FLOOR + r.y : 1);
 			if (w > bw) { bw = w; br = r; }
 		}
 		if (br === null) return popA();
@@ -1005,6 +1029,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		needSweep = false;
 		sweeps++;
 		sweptAt = picks;
+		gKey = NaN;   // (a room swept away and made again starts at grain 0)
 		const HB = 1024, hist = new Int32Array(HB), span = picks + 1;
 		const guard = new Set(discovery.map((d) => d[0]));
 		const keep = (c) => c === cell0 || c.t === 0 || guard.has(c) || (c.room !== null && c.room.best === c);
@@ -1038,7 +1063,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					r.arr = r.arr.filter((c) => c.ver >= 0);
 					if (r.sentAt !== null && r.sentAt.ver < 0) r.sentAt = null;
 					if (r.arr.length || r === room0) roomList[n++] = r;
-					else rooms.delete(r.key);
+					else { rooms.delete(r.key); if (r.tiles !== null) nTiles -= r.tiles.size; }
 				}
 				roomList.length = n;
 			}
@@ -1220,6 +1245,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e.pc = null;
 			}
 			e.used = true;
+			const added0 = added;
 			if (HA.size() > 3 * cells.size + 4096) compact();
 			// stuck: finer cells around here
 			if (picks - lastProgress > a.stall && e.picks % a.refine === 0) {
@@ -1286,6 +1312,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					if (nc !== null && room !== null && room.isNew) firstCell(room, nc, t);
 				}
 				if (end) break;
+			}
+			if (coarse && a.adapt) {
+				// the room's yield; a saturated room gets a finer grain (see Y_W)
+				const er = e.room;
+				er.y += (added - added0 - er.y) / Y_W;
+				if (a.adapt === 2 && er.y < Y_SAT && er.g < Y_MAXG && er.picks - er.gAt >= Y_PICKS) { er.g++; er.gAt = er.picks; er.y = Y_INIT / 2; grained++; gKey = NaN; }
 			}
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
