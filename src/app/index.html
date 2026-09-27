@@ -95,6 +95,40 @@ button.watch { background: var(--gold-soft); color: var(--gold); border-color: c
 .live.idle b { color: var(--muted); }
 .job .lr { color: var(--good); }
 .job .lr.idle { color: var(--muted); }
+/* a run's copy on a rented machine (summary.remote: src/jobs/<id>/remote.json while fresh) */
+.dot.rem { background: var(--accent); animation: rpulse 1.8s infinite; }
+@keyframes rpulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
+.job .rm { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .rm.idle { color: var(--muted); }
+.remote { margin-top: 12px; padding: 9px 12px 12px; border-radius: 10px; font-size: 13px; background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+	border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.remote.idle { background: var(--panel2); border-color: var(--line); }
+.remote .rh { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.remote .rh .lk { font-weight: 600; }
+.remote .rh b { font: 700 17px var(--mono); color: var(--accent); }
+.remote .lt { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.remote .stats { margin-top: 10px; }
+.remote .stat { background: var(--panel); }
+.remote .stat .gnow { color: var(--accent); }
+.remote .stat .gnow.up, .remote .stat .v.up { color: var(--good); }
+.remote details { margin-top: 10px; }
+.rented { margin-bottom: 18px; }
+.rmach + .rmach { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.rmh { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
+.rmh b { font-size: 14px; }
+.rmh span, .rms { font: 12px var(--mono); color: var(--muted); }
+.rms { margin-top: 2px; }
+.rms b { color: var(--good); font-weight: 600; }
+.rjob { width: 100%; text-align: left; display: grid; gap: 1px; padding: 7px 10px; margin-top: 6px; font-weight: 400; background: var(--panel2); }
+.rjob.sel { border-color: var(--gold); }
+.rjob .r1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; font-weight: 600; }
+.rjob .r1 .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rjob .g { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--accent); flex: none; }
+.rjob .g.idle { color: var(--muted); background: var(--panel); }
+.rjob .bt { font: 600 13px var(--mono); flex: none; }
+.rjob .r2 { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rjob .up { color: var(--good); }
+.rjob .ah { color: var(--accent); }
 .procnote { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
 .procnote b { color: var(--ink); font-weight: 600; }
 .why { text-decoration: underline dotted; cursor: help; }
@@ -278,6 +312,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 	</header>
 	<div class="grid">
 		<div>
+			<div id="rented"></div>
 			<div class="card">
 				<h2>New run</h2>
 				<div class="drop" id="drop">
@@ -498,7 +533,7 @@ function notifyImprovements() {
 async function refresh() {
 	try { state = await api('/api/state'); } catch (e) { return; }
 	notifyImprovements();
-	renderPills(); renderJobs(); renderDetail(); renderIdeas();
+	renderPills(); renderRented(); renderJobs(); renderDetail(); renderIdeas();
 	vwCheckNewer();
 }
 // processor speed (GET /api/state bench = the engine benchmark, measured once per PC; see src/bench.js)
@@ -553,8 +588,10 @@ function procOptions() {
 }
 function renderPills() {
 	const running = state.jobs.find((j) => j.running);
+	const rented = rentedList().filter((r) => r.running);
 	$('pills').innerHTML = `<span class="pill" title="${esc(state.cpuModel || '')}">${esc(cpuName())} · ${state.cpus} threads${state.bench ? ` · ${mts(state.bench.single)} ticks/s each` : ''}</span>` +
-		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : `<span class="pill">idle</span>`);
+		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : (rented.length ? '' : `<span class="pill">idle</span>`)) +
+		(rented.length ? `<span class="pill ok" title="Jobs whose optimizer runs on a rented machine (the Rented machines box)">${rented.length} on rented GPUs · ${rateMG(rented.reduce((a, r) => a + remoteRate(r), 0))} ticks/s</span>` : '');
 }
 // the live speed of a running job (summary.live: src/jobs/<id>/live.json, written every second by grind.js)
 const rateM = (x) => (x > 0 ? `${(x / 1e6).toFixed(x >= 1e8 ? 0 : 1)} M` : '–');
@@ -584,18 +621,88 @@ function renderJobs() {
 	if (!state.jobs.some((j) => j.id === selected)) selected = state.jobs[0] ? state.jobs[0].id : null;
 	$('jobs').innerHTML = state.jobs.map((j) => `<div class="jobwrap">
 		<button class="job card ${j.id === selected ? 'sel' : ''}" data-id="${j.id}">
-			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : ''}"></span></div>
+			<div class="t1"><span>${esc(j.name)}</span><span class="dot ${j.running ? 'run' : (j.remote && j.remote.running ? 'rem' : '')}"></span></div>
 			<div class="t2"><span class="verified" title="TAS verified to completion">✓</span> ${j.original.time} → ${j.best.time}${j.savedTicks > 0 ? ` · −${(j.savedTicks / 100).toFixed(2)} s` : ''}</div>
-			${j.running ? liveShort(j) : ''}
+			${j.running ? liveShort(j) : ''}${j.remote ? remoteShort(j) : ''}
 		</button><button class="watch jw" data-watch="${j.id}" title="Watch the current best run, with your original .eetas as a ghost">Watch</button></div>`).join('');
-	for (const el of document.querySelectorAll('.job')) el.onclick = () => { selected = el.dataset.id; store.set('tasopt.sel', selected); renderJobs(); renderDetail(); renderIdeas(); };
+	for (const el of document.querySelectorAll('.job')) el.onclick = () => selectJob(el.dataset.id);
 	for (const el of document.querySelectorAll('[data-watch]')) el.onclick = () => openViewer(el.dataset.watch);
+}
+function selectJob(id) { selected = id; store.set('tasopt.sel', selected); renderRented(); renderJobs(); renderDetail(); renderIdeas(); }
+
+// ------------------------------------------------------------ rented machines: summary.remote = src/jobs/<id>/remote.json, written every 30 s by
+// the rented GPUs' monitor (src/out/remote/farm.js) while the job's optimizer runs on a rented machine; the server leaves it out once it is
+// 90 s old, so everything here is live. The farm hands a faster remote best in to the job here every few minutes (remote.handInMin).
+const rateMG = (x) => (x >= 1e9 ? `${(x / 1e9).toFixed(2)} G` : rateM(x));
+const shortMachine = (m) => String(m || '').replace(/\s*\([^)]*\)\s*$/, '') || 'a rented machine';
+function rentedList() { return state.jobs.map((j) => j.remote).filter(Boolean); }
+function remoteRate(r) { return ((r.cpu && r.cpu.ticksPerSec) || 0) + ((r.gpu && r.gpu.ticksPerSec) || 0); }
+function remoteWhere(r, short) { return `${esc(short ? shortMachine(r.machine) : r.machine)}${r.gpuIndex !== null ? ` · GPU ${esc(r.gpuIndex)}` : ''}`; }
+const ticksN = (n) => `${n} tick${n === 1 ? '' : 's'}`;
+function remoteAhead(r, j) {
+	if (!r.best) return 'no best known there yet';
+	if (r.ahead > 0) return `${ticksN(r.ahead)} ahead of ${j.best.time} here · handed in within ${r.handInMin} min`;
+	return r.ahead < 0 ? `the best here is ${ticksN(-r.ahead)} faster` : 'the same as the best here';
+}
+function tonightText(n) {
+	return n.saved > 0 ? `−${(n.saved / 100).toFixed(2)} s · ${ticksN(n.saved)}` : 'nothing yet';
+}
+const sinceText = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function remoteShort(j) {
+	const r = j.remote;
+	return `<div class="t2 rm ${r.running ? '' : 'idle'}">${r.running ? 'on' : 'stopped on'} ${remoteWhere(r, true)}${r.running ? ` · ${rateMG(remoteRate(r))} ticks/s` : ''}` +
+		`${r.ahead > 0 ? ` · ${r.best.time} there (−${r.ahead})` : ''}</div>`;
+}
+function remoteHtml(j) {
+	const r = j.remote;
+	if (!r) return '';
+	const c = r.cpu, g = r.gpu;
+	let h = `<span class="lk">${r.running ? 'Running on' : 'Stopped on'} ${remoteWhere(r)}${r.running ? ':' : ''}</span>`;
+	if (c) h += `<span><b>${rateM(c.ticksPerSec)}</b> ticks/s on the CPU (${esc(c.model || 'CPU')}, ${c.threads || '?'} thread${c.threads === 1 ? '' : 's'})</span>`;
+	if (g) h += `<span>+ <b>${rateMG(g.ticksPerSec)}</b> ticks/s on the GPU (${esc(g.name)})</span>`;
+	if (c && g) h += `<span>= <b>${rateMG(remoteRate(r))}</b> ticks/s</span>`;
+	h += `<span class="lt">updated ${Math.round(r.age / 1000)} s ago${c || g ? ` · ${bigCount(((c && c.ticks) || 0) + ((g && g.ticks) || 0))} ticks there this session` : ''}</span>`;
+	const n = r.tonight;
+	const stats = `<div class="stats">
+		<div class="stat"><div class="k">Now there</div><div class="v" title="${esc(r.stage)}">${r.running ? friendlyStage(r.stage) : '—'}${r.running && g ? `<div class="gnow">GPU: ${esc(gpuFamily(g.family))}</div>` : ''}</div></div>
+		<div class="stat"><div class="k">Best there</div><div class="v ${r.ahead > 0 ? 'up' : ''}">${r.best ? `${r.best.time}` : '—'}</div><div class="gnow ${r.ahead > 0 ? 'up' : ''}" title="${esc(remoteAhead(r, j))}">${esc(remoteAhead(r, j))}</div></div>
+		<div class="stat"><div class="k">Tonight (since ${sinceText(n.since)})</div><div class="v ${n.saved > 0 ? 'up' : ''}">${tonightText(n)}</div><div class="gnow">${fmt(n.from)} → ${fmt(n.to)}${n.found ? ` · ${n.found}${n.more ? '+' : ''} found there` : ''}</div></div>
+		<div class="stat"><div class="k">Round there</div><div class="v">${r.rounds || 0}${r.state && r.state !== 'running' ? ` · ${esc(r.state)}` : ''}</div></div>
+	</div>`;
+	return `<div class="remote ${r.running ? '' : 'idle'}" title="This job's optimizer runs on a rented machine; its numbers arrive every 30 s. A faster run found there is handed in here every ${r.handInMin} minutes (the same check as any run).">
+		<div class="rh">${h}</div>${stats}
+		<details ${store.get('tasopt.rlog') === '0' ? '' : 'open'} id="rlogBox"><summary>Log on ${esc(shortMachine(r.machine))} (last ${r.log.length} lines)</summary><pre class="log">${esc(r.log.join('\n')) || '—'}</pre></details>
+	</div>`;
+}
+function renderRented() {
+	const box = $('rented');
+	const by = new Map();
+	for (const j of state.jobs) if (j.remote) { if (!by.has(j.remote.machine)) by.set(j.remote.machine, []); by.get(j.remote.machine).push(j); }
+	if (!by.size) { box.innerHTML = ''; return; }
+	const gi = (j) => (j.remote.gpuIndex === null ? 1e9 : +j.remote.gpuIndex);
+	const since = rentedList()[0].tonight.since;
+	box.innerHTML = `<div class="card rented"><h2>Rented machines</h2>${[...by].sort((a, b) => a[0].localeCompare(b[0])).map(([m, jobs]) => {
+		jobs.sort((x, y) => gi(x) - gi(y) || x.name.localeCompare(y.name));
+		const rs = jobs.map((j) => j.remote), run = rs.filter((r) => r.running);
+		const cpu = run.reduce((a, r) => a + ((r.cpu && r.cpu.ticksPerSec) || 0), 0), gpu = run.reduce((a, r) => a + ((r.gpu && r.gpu.ticksPerSec) || 0), 0);
+		const saved = rs.reduce((a, r) => a + r.tonight.saved, 0), age = Math.min(...rs.map((r) => r.age));
+		return `<div class="rmach"><div class="rmh"><b>${esc(m)}</b><span>${run.length} running · ${rateMG(cpu + gpu)} ticks/s</span></div>
+			<div class="rms">CPU ${rateMG(cpu)} + GPU ${rateMG(gpu)} ticks/s · tonight ${saved > 0 ? `<b>−${(saved / 100).toFixed(2)} s</b>` : 'nothing yet'} · ${Math.round(age / 1000)} s ago</div>
+			${jobs.map((j) => { const r = j.remote; return `<button class="rjob ${j.id === selected ? 'sel' : ''}" data-rid="${j.id}" title="${esc(`${j.name}: ${r.stage || '—'}`)}">
+				<div class="r1"><span class="g ${r.running ? '' : 'idle'}">${r.gpuIndex !== null ? `GPU ${esc(r.gpuIndex)}` : (r.running ? 'GPU' : 'stopped')}</span><span class="n">${esc(j.name)}</span>` +
+				`<span class="bt">${r.best ? r.best.time : j.best.time}</span></div>
+				<div class="r2">${r.running ? `${rateMG(remoteRate(r))}/s · ${esc(friendlyStage(r.stage))}` : 'stopped'} · tonight ${r.tonight.saved > 0 ? `<span class="up">−${r.tonight.saved}</span>` : '0'}` +
+				`${r.ahead > 0 ? ` · <span class="ah" title="${ticksN(r.ahead)} ahead of the best here until the next hand-in">${r.ahead} ahead</span>` : ''}</div></button>`; }).join('')}</div>`;
+	}).join('')}<div class="hint">Tonight: since ${sinceText(since)}, to the better of this job's best and the rented copy's. A faster run found there is handed in here within a few minutes.</div></div>`;
+	for (const el of box.querySelectorAll('[data-rid]')) el.onclick = () => selectJob(el.dataset.rid);
 }
 function friendlyStage(s) {
 	if (!s) return '—';
 	if (/^mutate/.test(s)) return 'Trying input tweaks';
 	let m = s.match(/^deep\d+_seg(\d+)(?:\.(\d+))?/);
 	if (m) return `Exploring new routes · part ${m[1]}${m[2] ? '.' + m[2] : ''}`;
+	m = s.match(/^deep\d+_loop(\d+)/);
+	if (m) return `Looking for a way around loop ${m[1]}`;
 	if (/^shortcuts/.test(s)) return 'Searching local shortcuts';
 	if (/^beam/.test(s)) return 'Beam search';
 	if (s === 'splice') return 'Combining the best pieces';
@@ -669,7 +776,7 @@ function renderDetail() {
 	const hist = (j.history || []).slice().reverse();
 	// the panel is rebuilt on every poll: its scrolling boxes (the improvements, the log) keep their place; one scrolled to
 	// its end stays at the end, so new lines show
-	const scrolled = ['.feed', 'pre.log'].map((sel) => { const el = $('detail').querySelector(sel); return el && { sel, top: el.scrollTop, end: el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 4 }; }).filter(Boolean);
+	const scrolled = ['.feed', '#logBox pre.log', '#rlogBox pre.log'].map((sel) => { const el = $('detail').querySelector(sel); return el && { sel, top: el.scrollTop, end: el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 4 }; }).filter(Boolean);
 	const startNote = j.startMatters ? ` · TAS started ${START_LABEL[j.startMode] || j.startMode}` : '';
 	$('detail').innerHTML = `<div class="card">
 		<div class="hero">
@@ -685,7 +792,7 @@ function renderDetail() {
 					(j.savedTicks > 0 || j.report ? `<button class="primary" id="finishBtn">Finish run</button>` : '')}
 			</div>
 		</div>
-		${liveHtml(j)}
+		${liveHtml(j)}${remoteHtml(j)}
 		<div class="procnote" id="procNote">${procText(j.running ? (j.workers || state.cpus) : +workersDefault, j.running)}</div>
 		<div class="times">
 			<span class="big">${j.best.time}</span>
@@ -693,7 +800,7 @@ function renderDetail() {
 			<span class="saved ${j.savedTicks > 0 ? '' : 'zero'}">${j.savedTicks > 0 ? `−${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks} ticks${pct}` : 'no improvement yet'}</span>
 		</div>
 		<div class="stats">
-			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}${j.live && j.live.gpu ? ' + GPU' : ''}` : (j.state === 'error' ? 'error' : 'stopped')}</div></div>
+			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}${j.live && j.live.gpu ? ' + GPU' : ''}` : (j.remote && j.remote.running ? `● on ${remoteWhere(j.remote, true)}` : (j.state === 'error' ? 'error' : 'stopped'))}</div></div>
 			<div class="stat"><div class="k">Now</div><div class="v" title="${esc(j.stage)}">${j.running ? friendlyStage(j.stage) : '—'}${j.running && j.live && j.live.gpu ? `<div class="gnow">GPU: ${esc(gpuFamily(j.live.gpu.family))}</div>` : ''}</div></div>
 			<div class="stat"><div class="k">Running for</div><div class="v">${j.running && j.optimizingSince ? dur(Date.now() - j.optimizingSince) : (j.running ? 'starting' : '—')}</div></div>
 			<div class="stat"><div class="k">Rounds · coins</div><div class="v">${j.round || 0} · ${j.coinsOptional === undefined ? '—' : (j.coinsOptional ? 'optional' : 'needed')}</div></div>
@@ -742,6 +849,7 @@ function renderDetail() {
 		await api(`/api/jobs/${j.id}`, { method: 'DELETE' }).catch(() => {}); selected = null; refresh();
 	};
 	$('logBox').ontoggle = (e) => store.set('tasopt.log', e.target.open ? '1' : '0');
+	if ($('rlogBox')) $('rlogBox').ontoggle = (e) => store.set('tasopt.rlog', e.target.open ? '1' : '0');
 }
 
 // ------------------------------------------------------------ ideas: search one time range harder (POST /focus)

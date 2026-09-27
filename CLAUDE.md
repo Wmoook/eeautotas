@@ -155,6 +155,14 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   tool: `common.tickMeter`); mutate, shortcuts, explore and optimize print `[ticks] <total>` every second. The grind
   sums them over its session and writes `live.json` every second (`summary().live`, the page's "Speed now",
   `tas.js status`); a fresh `gpu_status.json` is copied in as `live.gpu`.
+- **Rented machines.** A job's grind can also run on a rented cloud machine (`src/out/remote/`, scratch: `farm.js`
+  watches the grinds there and hands a faster remote best in through `tas.js try` every 5 min). The farm writes
+  `src/jobs/<id>/remote.json` every 30 s; while it is under 90 s old (`REMOTE_FRESH_MS`) `summary().remote` carries it
+  (machine, GPU index, the CPU and GPU speed there, stage, round, the remote best and `ahead` = ticks it leads the job's
+  own best until the next hand-in, `tonight` = the best at 18:00 local time (or remote.json `since`) -> the better of
+  both now, the last 12 log lines); the page shows it on the job ("Running on <machine> · GPU k", its own log box), in
+  the job list and in a "Rented machines" box (`GET /api/state` `rented`: per machine its jobs, speeds and the gain
+  tonight), `tas.js status` and `tas.js jobs` as a `rented` line. A stale file shows nothing.
 
 ## 5. Physics cheat sheet (eeo-tas; details and AS3 references in docs/eeo_spec)
 
@@ -204,7 +212,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/server.js` | web app + JSON API on 127.0.0.1:47823 (`--port=`, `--open`); resumes the last running job |
 | `src/app/index.html` | the page (single file, no build) |
 | `src/tas.js` | the CLI (`node src/tas.js help`) |
-| `src/jobs.js` | job model shared by server and CLI: import, start/stop, summary, try, where, replay, render, probe, focus |
+| `src/jobs.js` | job model shared by server and CLI: import, start/stop, summary (with `remote`: the job's copy on a rented machine, `rentedMachines()`), try, where, replay, render, probe, focus |
 | `src/common.js` | `.eetas` bytes I/O, atomic writes, time parsing, level lookup, `replay()`, `evaluate()`, `judge()` |
 | `src/render.js` | PNG renderer (canvas, 5x7 font, PNG encoder on zlib) |
 | `src/viewer.js` | data for the page's run viewer: `trajectory()` (per-tick positions, timer, inputs, flags, events, door states and the ball's effects (`FX` bits, values, timers, fly thrust) in the job's exact engine; the page shows every effect like EE: chips with EE's effect icons and the time left, the smiley's looks from Player.as, marks under the time slider, a row per effect with its times on hover), `align()` (DTW: the original's tick at the same point, per best tick), `levelView()`, `startMatters()` |
@@ -239,7 +247,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `tools/rediscover.js` | the rediscovery benchmark: finds replayed from a run before the find by the tool meant to aim at them (Octorage loop skip, 213 endgame, Stupid Fox time doors, FV skip hunting, FV's 88-tick skip by skips.js + mutate), with the reason the spot is targeted, the time and ticks; `--only=`, `--json` (skips cases whose jobs are not on the machine) |
 | `test/regress.js` | engine regression tests (maintained together with the physics) |
 | `test/mechanics.js` | block mechanics against the AS3 (effects, levitation, teams, zombie doors, lookup table) |
-| `test/review.js` | the review suite: music blocks without a sound (tick abort), the AS3 portal lookup, stateKey decoding, snapshot / stateKey fuzz on kitchen-sink levels, the two real eeo-tas runs, and the app (import limits, report, where, HTTP errors, viewer data (the effects: decoded by the page's own code = the engine every tick), EE graphics on a fake eeo-tas, inbox verdict) in a temp copy of src/ (`--quick`, `--only=`) |
+| `test/review.js` | the review suite: music blocks without a sound (tick abort), the AS3 portal lookup, stateKey decoding, snapshot / stateKey fuzz on kitchen-sink levels, the two real eeo-tas runs, and the app (import limits, report, where, HTTP errors, viewer data (the effects: decoded by the page's own code = the engine every tick), EE graphics on a fake eeo-tas, a job's copy on a rented machine (remote.json: summary, status, `/api/state` `rented`, the page's rendering cut out of index.html; stale / broken = nothing), inbox verdict) in a temp copy of src/ (`--quick`, `--only=`) |
 
 The tools take `--tas=<file>` and `--level=<level id | job id>`. For a `.eetas` inside `src/jobs/<id>/`, `--level` can
 be left out. Each tool's header comment lists its options.
@@ -263,6 +271,7 @@ be left out. Each tool's header comment lists its options.
 | `grind_*.eetas`, `grind_*.log` | stage outputs and logs of the current grind (`grind_ref.eetas` = the stage's copy of best, `grind_mutref.eetas` = the run mutate's last full pass covered, `grind_now.eetas` = the last at-once splice) |
 | `gpu/` | the GPU searcher's files: `library.bin` (the shortcut library), `state.json` (cursors, seed counter, per-family numbers), `level.bin`, `ref.eetas`, `edges.bin` |
 | `live.json` | written by grind every second: `{t, cpu: {ticks, ticksPerSec, threads, model}, gpu}` (`ticks` = simulated this session, `ticksPerSec` over the last ~3 s, 0 between stages; `gpu` = `gpu_status.json` {t, name, ticks, ticksPerSec, state, edges} while it is under 5 s old, else null) |
+| `remote.json` | the job's copy on a rented machine, written every 30 s by `src/out/remote/farm.js`: `{t (this machine's clock), machine, running, gpuIndex, state, stage, rounds, bestRunTicks, history (the remote's last 8), live (its live.json), gpu (its gpu_status.json), log (its last 12 grind.log lines), since (optional)}`; shown while under 90 s old (section 4, "Rented machines") |
 
 `src/jobs/_running.json` records the job to resume when the app starts. The level JSON is eelvl.js `toSimLevel()`
 output plus `rng_script` (section 4) and `start_mode` (section 4, "Start mode"). `src/data/_system.json` is the CPU
@@ -282,10 +291,10 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 
 | method | path | what |
 |---|---|---|
-| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best, and `live`: the running job's `live.json` while under 5 s old, else null), CPU threads, `cpuModel`, `bench` |
+| GET | `/api/state` | all job summaries (incl. `bestVersion`, changes with every new best, `live`: the running job's `live.json` while under 5 s old, else null, and `remote`: its copy on a rented machine while `remote.json` is under 90 s old, else null), `rented` {since, machines: [{machine, running, cpuTicksPerSec, gpuTicksPerSec, saved (tonight), updated, jobs: [{id, name, running, gpuIndex, gpuName, cpuTicksPerSec, gpuTicksPerSec, stage, best, localBest, ahead, tonight}]}]}, CPU threads, `cpuModel`, `bench` |
 | GET | `/api/system` | processors: CPU (`model`, `text` e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads (measured)") with the measured ticks/s (1 thread, all threads, `estimate[n-1]` per thread count, `peakThreads`); GPU (`available`, `model`, measured `ticksPerSec`, or `why`); `faster`: `cpu` or `gpu` |
 | POST | `/api/jobs` | import: JSON `{name, eelvlName, eetasName, eelvlB64, eetasB64, startMode}` (base64 of the raw file bytes; `startMode` `reset` (default) or `load`) |
-| GET | `/api/jobs/:id` | one job summary (best, history, stage, `live` speed, inbox, focus, files) |
+| GET | `/api/jobs/:id` | one job summary (best, history, stage, `live` speed, `remote` {t, age, machine, running, gpuIndex, state, stage, rounds, best, ahead, handInMin, cpu, gpu, history, tonight {since, from, to, saved, found, more}, log}, inbox, focus, files) |
 | POST | `/api/jobs/:id/start` | JSON `{workers, processor}` (`processor` `cpu`, or `gpu` = the CPU stages plus the GPU searcher; refused with the reason when no GPU or the level is unsupported) |
 | POST | `/api/jobs/:id/stop` | pause |
 | POST | `/api/jobs/:id/finish` | stop and write `report.json` (returned) |

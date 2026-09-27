@@ -23,8 +23,9 @@ const HOMEP = (p) => require('path').join(require('os').homedir(), p);
 //            real app): import limits and messages, the Finish report, where, probe / render / try limits, focus
 //            ranges, HTTP errors (upload limit, JSON null, render margin), the viewer's data and page script (the ball's
 //            effects: the trajectory's `effects` decoded by the page's own code = the engine's fields every tick), EE
-//            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, Player.as, sheet whitelist, folder checks), the
-//            inbox verdict of a slower run
+//            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, Player.as, sheet whitelist, folder checks), a
+//            job's copy on a rented machine (remote.json: summary, status, /api/state `rented`, the page's rendering; stale =
+//            nothing), the inbox verdict of a slower run
 // usage: node test/review.js [--quick] [--seed=N] [--only=music,portals,keys,fuzz,real,drag,app] [--case=ks1]
 // Exit code 1 if any check fails. Node built-ins only; writes nothing inside the repo.
 const fs = require('fs');
@@ -933,6 +934,67 @@ async function viewerEffectsChecks(S, port, id, page, best) {
 		/^fly fly \| jump high jump ×1\.3 \| multijump jumps \d\/2$/.test(chips) && JSON.stringify(e).length < 400,
 		`${chips}; ${JSON.stringify(e)}; missing ${old.filter((k) => !(k in (best || {}))).join(',')}`);
 }
+/**
+ * A job whose optimizer runs on a rented machine: src/jobs/<id>/remote.json (written every 30 s by the rented GPUs' monitor,
+ * src/out/remote/farm.js) -> summary().remote while under 90 s old (the machine, GPU, speeds, stage, best and how far it is
+ * ahead, tonight's gain, the log), `tas.js status`, GET /api/state `rented`, and the page's own rendering of it (cut out of
+ * index.html); a stale or broken file shows nothing.
+ */
+async function remoteChecks(S, port, id, page) {
+	const { J, C } = S;
+	const rf = path.join(J.jobDir(id), 'remote.json');
+	const local = J.summary(id).best.runTicks, now = Date.now(), since = now - 3600e3;
+	const rec = (t) => ({ t, machine: 'Test box (rented)', running: true, gpuIndex: '7', state: 'running', stage: 'deep3_seg2.1', rounds: 3, bestRunTicks: local - 5, since,
+		history: [{ t: since - 1000, runTicks: local, saved: 3, what: 'phase1', chance: 1 }, { t: now - 60e3, runTicks: local - 5, saved: 5, what: 'inbox (gpu (1 shortcuts))', chance: 1 }],
+		live: { t, cpu: { ticks: 4e9, ticksPerSec: 13.1e6, threads: 8, model: 'AMD EPYC 7662 64-Core Processor' },
+			gpu: { t, state: 'running', name: 'NVIDIA A100-PCIE-40GB', ticks: 1.8e11, ticksPerSec: 384e6, edges: 64, round: 16, family: 'flip' } },
+		gpu: { t, name: 'NVIDIA A100-PCIE-40GB', ticksPerSec: 384e6, edges: 64, state: 'running' }, log: ['[grind 02:34:39] <b>deep3_seg2.1</b> (window 2/9)...'] });
+	C.writeJSON(rf, rec(now - 20e3));
+	const s = J.summary(id), r = s.remote;
+	check('a fresh remote.json: summary().remote has the machine, GPU, both speeds, the stage, the remote best 5 ticks ahead and tonight\'s gain (-5)',
+		r && r.machine === 'Test box (rented)' && r.gpuIndex === '7' && r.running && r.cpu.ticksPerSec === 13.1e6 && r.cpu.model === 'AMD EPYC 7662' && r.gpu.ticksPerSec === 384e6 &&
+		r.gpu.family === 'flip' && r.stage === 'deep3_seg2.1' && r.best.runTicks === local - 5 && r.ahead === 5 && r.tonight.from === local && r.tonight.to === local - 5 &&
+		r.tonight.saved === 5 && r.tonight.found === 1 && r.log.length === 1 && r.age >= 20e3, JSON.stringify(r && { ahead: r.ahead, tonight: r.tonight, gpuIndex: r.gpuIndex }));
+	const st = J.formatStatus(s);
+	check('tas.js status shows the rented copy (machine, GPU, speed, 5 ticks ahead) and its log', /rented {5}running on Test box \(rented\) GPU 7 .*397 M ticks\/s.*5 ticks ahead/.test(st) &&
+		/log on Test box \(rented\):\n {2}\[grind 02:34:39\]/.test(st), (st.split('\n').find((l) => l.startsWith('rented')) || 'no rented line'));
+	let q = await request(port, 'GET', '/api/state');
+	const m = q.json && q.json.rented && q.json.rented.machines[0];
+	check('GET /api/state `rented`: the machine with the job, its GPU, the speeds and the gain tonight', m && m.machine === 'Test box (rented)' && m.running === 1 &&
+		m.gpuTicksPerSec === 384e6 && m.saved === 5 && m.jobs.length === 1 && m.jobs[0].id === id && m.jobs[0].gpuIndex === '7' && m.jobs[0].ahead === 5,
+		JSON.stringify(q.json && q.json.rented).slice(0, 300));
+	// the page: remoteHtml / remoteShort / renderRented cut out of index.html, run on this summary
+	const grab = (re) => { const x = page.match(re); return x ? x[0] : ''; };
+	const block = grab(/^const rateMG = [\s\S]*?\n(?=function friendlyStage)/m);
+	const box = { innerHTML: '', querySelectorAll: () => [] };
+	const pageFns = (jobs) => new Function('state', 'box', `${grab(/^const esc = .*$/m)}\n${grab(/^const fmt = .*$/m)}\n${grab(/^const rateM = .*$/m)}\n` +
+		`${grab(/^function bigCount\([\s\S]*?\n\}\n/m)}\n${grab(/^function friendlyStage\([\s\S]*?\n\}\n/m)}\n${grab(/^function gpuFamily\([\s\S]*?\n\}\n/m)}\n` +
+		`const store = { get: () => null }; const $ = () => box; let selected = null; function selectJob() {}\n${block}\n` +
+		'return { remoteHtml, remoteShort, renderRented };')({ jobs }, box);
+	let P = null;
+	const pe = errOf(() => { P = pageFns([s]); });
+	check('the page\'s rented-machine code runs on its own', !pe && P && block.length > 1000, pe ? pe.message : `${block.length} chars`);
+	if (P) {
+		const h = P.remoteHtml(s), sh = P.remoteShort(s);
+		P.renderRented();
+		check('the job page shows "Running on <machine> · GPU k", both speeds, the stage, the remote best ahead, tonight, the log (escaped)',
+			/Running on Test box \(rented\) · GPU 7:/.test(h) && /<b>13\.1 M<\/b> ticks\/s on the CPU \(AMD EPYC 7662, 8 threads\)/.test(h) &&
+			/<b>384 M<\/b> ticks\/s on the GPU \(NVIDIA A100-PCIE-40GB\)/.test(h) && /Exploring new routes · part 2\.1/.test(h) && /5 ticks ahead of /.test(h) &&
+			/−0\.05 s · 5 ticks/.test(h) && /&lt;b&gt;deep3_seg2\.1&lt;\/b&gt;/.test(h) && !/<b>deep3/.test(h), h.replace(/\s+/g, ' ').slice(0, 400));
+		check('the job list says "on <machine> · GPU k" with the speed and the remote best; the Rented machines box lists the job',
+			/on Test box · GPU 7 · 397 M ticks\/s · .* there \(−5\)/.test(sh) && /Rented machines/.test(box.innerHTML) && /GPU 7/.test(box.innerHTML) &&
+			box.innerHTML.includes(`data-rid="${id}"`), sh);
+	}
+	C.writeJSON(rf, rec(now - 91e3));
+	q = await request(port, 'GET', '/api/state');
+	const staleJob = q.json && q.json.jobs.find((j) => j.id === id);
+	if (P && staleJob) { box.innerHTML = 'x'; pageFns([staleJob]).renderRented(); }
+	check('a stale remote.json (91 s old) shows nothing: no summary().remote, no rented machine, an empty Rented machines box', J.summary(id).remote === null && staleJob &&
+		staleJob.remote === null && q.json.rented.machines.length === 0 && (!P || box.innerHTML === ''), JSON.stringify(q.json && q.json.rented));
+	fs.writeFileSync(rf, '{"t": ');
+	check('a broken remote.json shows nothing (no error)', J.summary(id).remote === null);
+	fs.rmSync(rf, { force: true });
+}
 async function appSection() {
 	section('app: jobs / server / grind / render / common (in a temp copy of src/)');
 	const S = makeSandbox();
@@ -1059,6 +1121,7 @@ async function appSection() {
 		const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 		check('the page\'s script parses', scripts.length > 0 && scripts.every((s) => !errOf(() => new Function(s))), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
 		await viewerEffectsChecks(S, port, id, page, r3.json);
+		await remoteChecks(S, port, id, page);
 		const fake = path.join(S.dir, 'fake-eeo-tas');
 		fs.mkdirSync(path.join(fake, 'media'), { recursive: true });
 		fs.mkdirSync(path.join(fake, 'src', 'items'), { recursive: true });

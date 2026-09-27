@@ -98,10 +98,11 @@ function levelJson(id) {
 
 const ENDPOINTS = [
 	['GET', '/api', 'this list'],
-	['GET', '/api/state', 'all jobs (summaries, with the live speed of a running job), the CPU model and threads, the processor benchmark'],
+	['GET', '/api/state', 'all jobs (summaries, with the live speed of a running job and remote: its copy on a rented machine while src/jobs/<id>/remote.json is fresh), ' +
+		'rented (the rented machines: their jobs, GPUs, speeds, the gains tonight), the CPU model and threads, the processor benchmark'],
 	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (name and measured speed, or why not available), and which is faster'],
 	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load"} (files as base64 of their raw bytes)'],
-	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, live speed, inbox, focus, files)'],
+	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, live speed, remote (on a rented machine: machine, GPU, speeds, stage, best, log), inbox, focus, files)'],
 	['POST', '/api/jobs/:id/guide', 'GPU guided search: JSON {from, points: [[x, y], ...] (pixels of the ball centre; tiles with tiles: true), seconds, width}; exact faster rejoins go to the job'],
 	['GET', '/api/jobs/:id/guide', 'the guided search: running, layer, tick, states, ticksPerSec, results, log'],
 	['POST', '/api/jobs/:id/start', 'start / resume optimizing: JSON {workers, processor: "cpu" | "gpu"} ("gpu" = the CPU stages plus the GPU searcher)'],
@@ -292,7 +293,8 @@ const server = http.createServer(async (req, res) => {
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
-			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, cpuModel: CPU_MODEL, now: Date.now(), benchState,
+			const jobs = listJobs(), now = Date.now();
+			return send(res, 200, { jobs, rented: J.rentedMachines(jobs, now), cpus: os.cpus().length, cpuModel: CPU_MODEL, now, benchState,
 				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points, model: bench.model } : null,
 				gpu: systemInfo().processors[1], faster: systemInfo().faster });
 		}

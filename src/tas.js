@@ -66,11 +66,14 @@ async function main() {
 		case undefined: case 'help': case '--help': case '-h': out(HELP); return;
 		case 'jobs': {
 			const list = J.listJobs();
-			if (a.json) return json(list.map((s) => ({ id: s.id, name: s.name, state: s.state, original: s.original, best: s.best, savedTicks: s.savedTicks, chance: s.chance, stage: s.stage })));
+			if (a.json) return json(list.map((s) => ({ id: s.id, name: s.name, state: s.state, original: s.original, best: s.best, savedTicks: s.savedTicks, chance: s.chance, stage: s.stage,
+				remote: s.remote && { machine: s.remote.machine, running: s.remote.running, gpuIndex: s.remote.gpuIndex, stage: s.remote.stage, best: s.remote.best, ahead: s.remote.ahead } })));
 			if (!list.length) return out(`no jobs yet: import one with the web app or \`${CMD} import <level.eelvl> <run.eetas>\``);
 			for (const s of list) {
+				const r = s.remote;
 				out(`${s.id.padEnd(40)} ${s.state.padEnd(8)} ${s.original.time} -> ${s.best.time}` +
-					`${s.savedTicks > 0 ? `  (-${(s.savedTicks / 100).toFixed(2)} s)` : ''}${s.chance < 1 ? `  odds ${J.pct(s.chance)}` : ''}${s.running ? `  now: ${s.stage}` : ''}  "${s.name}"`);
+					`${s.savedTicks > 0 ? `  (-${(s.savedTicks / 100).toFixed(2)} s)` : ''}${s.chance < 1 ? `  odds ${J.pct(s.chance)}` : ''}${s.running ? `  now: ${s.stage}` : ''}` +
+					`${r ? `  rented: ${r.running ? 'on' : 'stopped on'} ${r.machine}${r.gpuIndex !== null ? ` GPU ${r.gpuIndex}` : ''}${r.ahead > 0 ? ` (${r.best.time} there, -${r.ahead})` : ''}` : ''}  "${s.name}"`);
 			}
 			return;
 		}
