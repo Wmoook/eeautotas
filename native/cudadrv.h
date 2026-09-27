@@ -1,11 +1,29 @@
 // cudadrv.h - the CUDA driver API (nvcuda.dll, installed with every NVIDIA driver) and NVRTC (build time only),
 // loaded at run time: the exe needs no CUDA toolkit, and runs (CPU only) on PCs without an NVIDIA GPU.
+// Linux (tools/build-native.js --target=linux: a rented cloud GPU): the driver's libcuda.so.1 through dlopen, NVRTC as
+// libnvrtc.so.12 (only `eegpu ptx` loads it), the kernel cache's lock a flock on a file in the cache folder.
 #pragma once
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define CU_DRIVER_LIB "nvcuda.dll"
+#define CU_SYM(m, n) GetProcAddress(m, n)
+#else
+#include <dlfcn.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstdlib>
+#include <ctime>
+#include <sys/file.h>
+#include <sys/stat.h>
+#define CU_DRIVER_LIB "libcuda.so.1"
+#define CU_SYM(m, n) dlsym(m, n)
+#endif
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -21,7 +39,11 @@ typedef unsigned long long CUdeviceptr;
 enum { ATTR_SM_COUNT = 16, ATTR_CLOCK_KHZ = 13, ATTR_CC_MAJOR = 75, ATTR_CC_MINOR = 76, ATTR_MAX_THREADS_PER_SM = 39,
 	JIT_INFO_LOG_BUFFER = 3, JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4, JIT_ERROR_LOG_BUFFER = 5, JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6 };
 
+#ifdef _WIN32
 #define CU_FN(ret, name, args) typedef ret (__stdcall *t_##name) args; inline t_##name name = nullptr;
+#else
+#define CU_FN(ret, name, args) typedef ret (*t_##name) args; inline t_##name name = nullptr;
+#endif
 CU_FN(CUresult, cuInit, (unsigned))
 CU_FN(CUresult, cuDriverGetVersion, (int*))
 CU_FN(CUresult, cuDeviceGetCount, (int*))
@@ -77,30 +99,42 @@ inline bool fail(const char* what, CUresult r) {
 }
 #define CU_TRY(x) do { cu::CUresult r_ = (x); if (r_) return cu::fail(#x, r_); } while (0)
 
-/** Loads nvcuda.dll. false (lastError says why) when there is no NVIDIA driver. */
+/** Loads nvcuda.dll (Linux: libcuda.so.1). false (lastError says why) when there is no NVIDIA driver. */
 inline bool loadDriver() {
+#ifdef _WIN32
 	HMODULE m = LoadLibraryA("nvcuda.dll");
 	if (!m) { lastError = "no NVIDIA driver (nvcuda.dll not found): GPU mode needs an NVIDIA graphics card"; return false; }
-#define L(n) n = (t_##n)GetProcAddress(m, #n); if (!n) { lastError = "nvcuda.dll lacks " #n " (driver too old?)"; return false; }
+#else
+	void* m = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+	if (!m) { const char* e = dlerror(); lastError = std::string("no NVIDIA driver (libcuda.so.1 not found): GPU mode needs an NVIDIA graphics card") + (e ? std::string(" [") + e + "]" : ""); return false; }
+#endif
+#define L(n) n = (t_##n)CU_SYM(m, #n); if (!n) { lastError = CU_DRIVER_LIB " lacks " #n " (driver too old?)"; return false; }
 	L(cuInit) L(cuDriverGetVersion) L(cuDeviceGetCount) L(cuDeviceGet) L(cuDeviceGetName) L(cuDeviceGetAttribute)
 	L(cuDeviceTotalMem_v2) L(cuCtxCreate_v2) L(cuCtxDestroy_v2) L(cuModuleLoadDataEx) L(cuModuleGetFunction)
 	L(cuMemAlloc_v2) L(cuMemFree_v2) L(cuMemcpyHtoD_v2) L(cuMemcpyDtoH_v2) L(cuMemsetD8_v2) L(cuLaunchKernel)
 	L(cuCtxSynchronize) L(cuGetErrorString) L(cuCtxSetLimit) L(cuCtxGetLimit) L(cuFuncGetAttribute)
 #undef L
-	cuEventCreate = (t_cuEventCreate)GetProcAddress(m, "cuEventCreate");   // (optional)
-	cuEventRecord = (t_cuEventRecord)GetProcAddress(m, "cuEventRecord");
-	cuEventElapsedTime = (t_cuEventElapsedTime)GetProcAddress(m, "cuEventElapsedTime");
-	cuEventQuery = (t_cuEventQuery)GetProcAddress(m, "cuEventQuery");
-	cuEventSynchronize = (t_cuEventSynchronize)GetProcAddress(m, "cuEventSynchronize");
-	cuMemGetInfo_v2 = (t_cuMemGetInfo_v2)GetProcAddress(m, "cuMemGetInfo_v2");
+	cuEventCreate = (t_cuEventCreate)CU_SYM(m, "cuEventCreate");   // (optional)
+	cuEventRecord = (t_cuEventRecord)CU_SYM(m, "cuEventRecord");
+	cuEventElapsedTime = (t_cuEventElapsedTime)CU_SYM(m, "cuEventElapsedTime");
+	cuEventQuery = (t_cuEventQuery)CU_SYM(m, "cuEventQuery");
+	cuEventSynchronize = (t_cuEventSynchronize)CU_SYM(m, "cuEventSynchronize");
+	cuMemGetInfo_v2 = (t_cuMemGetInfo_v2)CU_SYM(m, "cuMemGetInfo_v2");
 	return true;
 }
 
+/** Loads NVRTC from `dir` (`eegpu ptx` only; Linux: libnvrtc.so.12 there, else from the library path). */
 inline bool loadNvrtc(const std::string& dir) {
+#ifdef _WIN32
 	SetDllDirectoryA(dir.c_str());
 	HMODULE m = LoadLibraryA((dir + "\\nvrtc64_120_0.dll").c_str());
 	if (!m) { lastError = "nvrtc64_120_0.dll not found in " + dir; return false; }
-#define L(n) n = (t_##n)GetProcAddress(m, #n); if (!n) { lastError = "nvrtc lacks " #n; return false; }
+#else
+	void* m = dlopen((dir + "/libnvrtc.so.12").c_str(), RTLD_NOW | RTLD_LOCAL);
+	if (!m) m = dlopen("libnvrtc.so.12", RTLD_NOW | RTLD_LOCAL);
+	if (!m) { lastError = "libnvrtc.so.12 not found in " + dir; return false; }
+#endif
+#define L(n) n = (t_##n)CU_SYM(m, #n); if (!n) { lastError = "nvrtc lacks " #n; return false; }
 	L(nvrtcVersion) L(nvrtcCreateProgram) L(nvrtcCompileProgram) L(nvrtcGetProgramLogSize) L(nvrtcGetProgramLog)
 	L(nvrtcGetPTXSize) L(nvrtcGetPTX) L(nvrtcDestroyProgram)
 #undef L
@@ -175,6 +209,7 @@ inline uint64_t fnv64(const std::string& s) {
 /** the bytes in a folder and its subfolders (the driver's cache: an index and a few levels of folders) */
 inline uint64_t folderBytes(const std::string& dir, int depth = 0) {
 	uint64_t n = 0;
+#ifdef _WIN32
 	WIN32_FIND_DATAA fd;
 	HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
 	if (h == INVALID_HANDLE_VALUE) return 0;
@@ -184,14 +219,38 @@ inline uint64_t folderBytes(const std::string& dir, int depth = 0) {
 		else n += ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
 	} while (FindNextFileA(h, &fd));
 	FindClose(h);
+#else
+	DIR* d = opendir(dir.c_str());
+	if (!d) return 0;
+	while (const dirent* e = readdir(d)) {
+		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+		const std::string p = dir + "/" + e->d_name;
+		struct stat st;
+		if (lstat(p.c_str(), &st)) continue;
+		if (S_ISDIR(st.st_mode)) { if (depth < 4) n += folderBytes(p, depth + 1); }
+		else n += (uint64_t)st.st_size;
+	}
+	closedir(d);
+#endif
 	return n;
 }
 /** the driver's JIT cache goes to `dir` (before loadDriver: the driver reads these when it loads) */
 inline void useJitCache(const std::string& dir) {
+#ifdef _WIN32
 	CreateDirectoryA(dir.c_str(), nullptr);
 	SetEnvironmentVariableA("CUDA_CACHE_PATH", dir.c_str());
 	char v[64];
 	if (!GetEnvironmentVariableA("CUDA_CACHE_MAXSIZE", v, sizeof v)) SetEnvironmentVariableA("CUDA_CACHE_MAXSIZE", "134217728");
+#else
+	// (the folder and its parents: a fresh machine's data folder may not exist yet)
+	for (size_t k = dir.find('/', 1); ; k = dir.find('/', k + 1)) {
+		mkdir(dir.substr(0, k).c_str(), 0777);
+		if (k == std::string::npos) break;
+	}
+	setenv("CUDA_CACHE_PATH", dir.c_str(), 1);
+	const char* v = getenv("CUDA_CACHE_MAXSIZE");
+	if (!v || !*v) setenv("CUDA_CACHE_MAXSIZE", "134217728", 1);
+#endif
 }
 /** loadModule, one compile at a time per module and GPU (dir: the cache folder, useJitCache'd; empty: the plain load) */
 inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::string& dir, int ccMajor, int ccMinor, ModuleLoad& info) {
@@ -199,11 +258,25 @@ inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::s
 	if (dir.empty()) return loadModule(mod, ptx);
 	char key[64];
 	snprintf(key, sizeof key, "%016llx_sm%d%d", (unsigned long long)fnv64(ptx), ccMajor, ccMinor);
+#ifdef _WIN32
 	HANDLE mx = CreateMutexA(nullptr, FALSE, (std::string("Local\\eegpu-jit-") + key).c_str());
 	typedef std::chrono::steady_clock Clk;
 	const auto w0 = Clk::now();
 	// (after 20 minutes it loads anyway; the mutex of an owner that died is abandoned: then it is ours)
 	const DWORD w = mx ? WaitForSingleObject(mx, 20 * 60 * 1000) : WAIT_FAILED;
+#else
+	// (Linux: an exclusive flock on <dir>/eegpu-jit-<key>.lock, looked at every 50 ms; after 20 minutes it loads anyway;
+	// the lock of an owner that died goes with it: then it is ours)
+	const int lk = open((dir + "/eegpu-jit-" + key + ".lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+	typedef std::chrono::steady_clock Clk;
+	const auto w0 = Clk::now();
+	bool locked = false;
+	while (lk >= 0 && !locked) {
+		if (!flock(lk, LOCK_EX | LOCK_NB)) locked = true;
+		else if ((errno != EWOULDBLOCK && errno != EINTR) || Clk::now() - w0 > std::chrono::minutes(20)) break;
+		else { const timespec d = { 0, 50 * 1000000L }; nanosleep(&d, nullptr); }
+	}
+#endif
 	info.waitMs = std::chrono::duration<double, std::milli>(Clk::now() - w0).count();
 	const uint64_t before = folderBytes(dir);
 	const auto l0 = Clk::now();
@@ -211,8 +284,13 @@ inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::s
 	// (a hit takes well under a second; a compile adds megabytes, unless the driver dropped as much to make room)
 	const double ms = std::chrono::duration<double, std::milli>(Clk::now() - l0).count();
 	info.how = folderBytes(dir) > before + 65536 || ms > 5000 ? "compiled" : "cache";
+#ifdef _WIN32
 	if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) ReleaseMutex(mx);
 	if (mx) CloseHandle(mx);
+#else
+	if (locked) flock(lk, LOCK_UN);
+	if (lk >= 0) close(lk);
+#endif
 	return ok;
 }
 

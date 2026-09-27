@@ -5,6 +5,15 @@
 //                                          kernels. The kernels of an earlier full build stay only while their sources
 //                                          are unchanged (eegpu_ptx.json); else they are removed, and the GPU commands
 //                                          of such a build fail at their kernel load instead of running old kernels)
+//   node tools/build-native.js --target=linux [--exe]
+//                                         (eegpu for x86-64 Linux, e.g. a rented cloud GPU, cross-compiled with the same
+//                                          flags into native/build/linux: glibc 2.31 or newer (Ubuntu 20.04+), libc++
+//                                          linked in, the NVIDIA driver's libcuda.so.1 loaded at run time. The kernels
+//                                          (PTX) are the same on both systems: they are copied from the Windows build
+//                                          (native/build, or --ptxfrom=<dir>) while current; a full build runs the
+//                                          Windows full build first when they are not; --exe copies only current ones)
+//   --out=<dir>                           (the build folder, relative to native/build (e.g. dev) or absolute; default
+//                                          native/build, with --target=linux native/build/linux)
 // The exe loads the NVIDIA driver at run time (no CUDA toolkit needed to run it); the PTX is compiled by the driver
 // for the GPU it runs on. Both are needed only by the GPU mode (and Find a route's proof, eegpu prove: the exe alone);
 // everything else is plain Node.
@@ -15,22 +24,33 @@ const { execFileSync, execFile } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const NATIVE = path.join(ROOT, 'native');
-const OUT = path.join(NATIVE, 'build');
+const BUILD = path.join(NATIVE, 'build');
 const CACHE = path.join(__dirname, '.cache');
 const DL = {
 	zig: { url: 'https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip', sha256: '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e', dir: 'zig-x86_64-windows-0.16.0' },
 	nvrtc: { url: 'https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.6.85-archive.zip', sha256: 'b1221a95a3758561bc73c56905743730f7459cbaff54a4870aa899fa3489219e', dir: 'cuda_nvrtc-windows-x86_64-12.6.85-archive' },
 };
+const TWS = [8, 32, 128, 512];
+// the Linux target: glibc 2.31 (Ubuntu 20.04) or newer; dlopen is in libdl there (glibc 2.34 moved it into libc)
+const LINUX_TARGET = 'x86_64-linux-gnu.2.31';
 
 // what the kernels are made of (eegpu ptx: kernels.cu and the 4 headers it hands NVRTC, its options in eegpu.cpp, the
 // NVRTC build): a full build stamps its PTX files with it (eegpu_ptx.json), and --exe keeps them only while it matches
 const KERNEL_SRC = ['kernels.cu', 'eecore.h', 'search.h', 'beam.h', 'explore.h', 'eegpu.cpp'];
-const STAMP = path.join(OUT, 'eegpu_ptx.json');
+const stampFile = (dir) => path.join(dir, 'eegpu_ptx.json');
 function kernelStamp() {
 	const h = crypto.createHash('sha1');
 	h.update(DL.nvrtc.dir);
 	for (const f of KERNEL_SRC) h.update(fs.readFileSync(path.join(NATIVE, f)));
 	return h.digest('hex');
+}
+/** the PTX files of the build in `dir` and whether they are current (all there, stamped with `srcStamp`) */
+function kernelsIn(dir, srcStamp) {
+	let ptx = [];
+	try { ptx = fs.readdirSync(dir).filter((f) => /^eegpu_\d+\.ptx$/.test(f)); } catch (e) { /* no folder */ }
+	let stamp = null;
+	try { stamp = JSON.parse(fs.readFileSync(stampFile(dir), 'utf8')); } catch (e) { /* none: a build before the stamp */ }
+	return { ptx, current: ptx.length > 0 && !!stamp && stamp.src === srcStamp, all: TWS.every((tw) => ptx.includes(`eegpu_${tw}.ptx`)) };
 }
 
 function fetchTool(name) {
@@ -47,27 +67,27 @@ function fetchTool(name) {
 	return dir;
 }
 
-async function main() {
-	if (process.platform !== 'win32') throw new Error('the native build targets Windows');
-	const exeOnly = process.argv.includes('--exe');
-	const srcStamp = kernelStamp();   // (the sources this build starts from)
+/** zig c++ for a target (the exact IEEE doubles: no fast-math, no contraction into fused multiply-adds, baseline x86-64:
+ *  no FMA instructions) */
+function compile(zig, target, exe, extra = []) {
+	execFileSync(zig, ['c++', '-O2', '-std=c++17', '-target', target, '-ffp-contract=off', '-fno-fast-math',
+		'-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-nullability-completeness', path.join(NATIVE, 'eegpu.cpp'), '-o', exe, ...extra],
+		{ stdio: ['ignore', 'inherit', 'inherit'] });
+}
+
+/** the Windows build into OUT: eegpu.exe, and (not exeOnly) the kernels */
+async function buildWindows(OUT, exeOnly, srcStamp) {
 	const zig = path.join(fetchTool('zig'), 'zig.exe');
 	const nvrtc = exeOnly ? '' : path.join(fetchTool('nvrtc'), 'bin');
 	fs.mkdirSync(OUT, { recursive: true });
 	const exe = path.join(OUT, 'eegpu.exe');
 	console.log('[native] compiling eegpu.exe...');
-	// exact IEEE doubles: no fast-math, no contraction into fused multiply-adds, baseline x86-64 (no FMA instructions)
-	execFileSync(zig, ['c++', '-O2', '-std=c++17', '-target', 'x86_64-windows-gnu', '-ffp-contract=off', '-fno-fast-math',
-		'-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-nullability-completeness', path.join(NATIVE, 'eegpu.cpp'), '-o', exe],
-		{ stdio: ['ignore', 'inherit', 'inherit'] });
+	compile(zig, 'x86_64-windows-gnu', exe);
 	for (const f of fs.readdirSync(OUT)) if (f.endsWith('.pdb') || f.endsWith('.lib')) fs.rmSync(path.join(OUT, f), { force: true });
 	if (exeOnly) {
-		const ptx = fs.readdirSync(OUT).filter((f) => /^eegpu_\d+\.ptx$/.test(f));
-		let stamp = null;
-		try { stamp = JSON.parse(fs.readFileSync(STAMP, 'utf8')); } catch (e) { /* none: a build before the stamp */ }
-		const current = ptx.length > 0 && !!stamp && stamp.src === srcStamp;
+		const { ptx, current } = kernelsIn(OUT, srcStamp);
 		if (ptx.length && !current) {
-			for (const f of [...ptx, path.basename(STAMP)]) fs.rmSync(path.join(OUT, f), { force: true });
+			for (const f of [...ptx, path.basename(stampFile(OUT))]) fs.rmSync(path.join(OUT, f), { force: true });
 			console.log('[native] removed the GPU kernels of an older build (their sources changed): the GPU commands need a full build (node tools/build-native.js)');
 		}
 		console.log(`[native] done: ${path.relative(ROOT, exe)} (${current ? 'the GPU kernels of the last full build are current' : 'no GPU kernels'}: --exe)`);
@@ -79,15 +99,55 @@ async function main() {
 	// on the RTX 3080 Laptop it ran bench 0.93x, explore expand 0.96x, beam expand 0.95x and search 0.86x (in one process,
 	// launch by launch; the bench processes alternating A/B 0.935x); the first compile happens once per build anyway.
 	console.log('[native] compiling the GPU kernels (NVRTC, 4 state sizes in parallel)...');
-	const TWS = [8, 32, 128, 512];
 	const outs = await Promise.all(TWS.map((tw) => new Promise((res, rej) => {
 		execFile(exe, ['ptx', NATIVE, path.join(OUT, `eegpu_${tw}.ptx`), `--nvrtc=${nvrtc}`, `--tw=${tw}`], { encoding: 'utf8', maxBuffer: 1 << 26 },
 			(err, stdout, stderr) => (err ? rej(new Error(`ptx ${tw}: ${stderr || err.message}`)) : res(stdout.trim())));
 	})));
 	for (const o of outs) console.log(`[native] ${o}`);
 	for (const f of fs.readdirSync(OUT)) if (/^eegpu\.ptx$|^dev\./.test(f)) fs.rmSync(path.join(OUT, f), { force: true });
-	fs.writeFileSync(STAMP, JSON.stringify({ src: srcStamp, t: new Date().toISOString() }));
+	fs.writeFileSync(stampFile(OUT), JSON.stringify({ src: srcStamp, t: new Date().toISOString() }));
 	console.log(`[native] done: ${path.relative(ROOT, exe)} + eegpu_{${TWS.join(',')}}.ptx`);
+}
+
+/** the Linux build into OUT: eegpu (an x86-64 ELF), and the kernels of the Windows build in FROM next to it (the PTX
+ *  is the same for both: NVRTC compiles kernels.cu alone). A full build makes them current first (the Windows full
+ *  build into FROM); --exe copies only current ones and removes stale ones from OUT. */
+async function buildLinux(OUT, FROM, exeOnly, srcStamp) {
+	const zig = path.join(fetchTool('zig'), 'zig.exe');
+	fs.mkdirSync(OUT, { recursive: true });
+	const exe = path.join(OUT, 'eegpu');
+	console.log(`[native] compiling eegpu for Linux (${LINUX_TARGET})...`);
+	compile(zig, LINUX_TARGET, exe, ['-ldl']);
+	let from = kernelsIn(FROM, srcStamp);
+	if (!exeOnly && !(from.current && from.all)) {
+		console.log(`[native] the Windows build's GPU kernels (${path.relative(ROOT, FROM) || '.'}) are ${from.ptx.length ? 'not current' : 'missing'}: building them first (the Windows full build)`);
+		await buildWindows(FROM, false, srcStamp);
+		from = kernelsIn(FROM, srcStamp);
+	}
+	const mine = kernelsIn(OUT, srcStamp);
+	let note;
+	if (from.current && from.all && path.resolve(FROM) !== path.resolve(OUT)) {
+		for (const f of [...TWS.map((tw) => `eegpu_${tw}.ptx`), path.basename(stampFile(FROM))]) fs.copyFileSync(path.join(FROM, f), path.join(OUT, f));
+		note = `+ eegpu_{${TWS.join(',')}}.ptx (from ${path.relative(ROOT, FROM) || '.'})`;
+	} else if (mine.current) {
+		note = '(the GPU kernels already there are current)';
+	} else {
+		for (const f of [...mine.ptx, path.basename(stampFile(OUT))]) fs.rmSync(path.join(OUT, f), { force: true });
+		note = `(no GPU kernels${mine.ptx.length ? ': removed the stale ones' : ''}: the GPU commands need a full build, node tools/build-native.js --target=linux)`;
+	}
+	console.log(`[native] done: ${path.relative(ROOT, exe)} ${note}`);
+}
+
+async function main() {
+	if (process.platform !== 'win32') throw new Error('the native build runs on Windows (it cross-compiles the Linux tool too: --target=linux)');
+	const arg = (k) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : ''; };
+	const exeOnly = process.argv.includes('--exe');
+	const target = arg('target') || 'windows';
+	if (target !== 'windows' && target !== 'linux') throw new Error(`--target=${target}: windows or linux`);
+	const dirOf = (d, dflt) => (d ? path.resolve(BUILD, d) : dflt);
+	const srcStamp = kernelStamp();   // (the sources this build starts from)
+	if (target === 'linux') return buildLinux(dirOf(arg('out'), path.join(BUILD, 'linux')), dirOf(arg('ptxfrom'), BUILD), exeOnly, srcStamp);
+	return buildWindows(dirOf(arg('out'), BUILD), exeOnly, srcStamp);
 }
 
 main().catch((e) => { console.error(e.message); process.exit(1); });

@@ -2,7 +2,7 @@
 // The native engine (native/eecore.h: the physics of eesim.js in C++, bit for bit) and its GPU search, seen from JS:
 // - levelBlob(level): the prepared level (eesim.js prepareLevel) as the flat binary the native side reads
 //   (native/eecore.h struct Level; field order = BLOB_INTS / BLOB_ARRAYS below, shared with native/eegpu.cpp),
-// - the path of the native tool (native/build/eegpu.exe, or next to the app in EEAutoTAS.exe) and a runner.
+// - the path of the native tool (native/build/eegpu.exe, or next to the app in EEAutoTAS.exe; Linux: eegpu) and a runner.
 const fs = require('fs');
 const path = require('path');
 const E = require('./eesim.js');
@@ -124,8 +124,15 @@ function blobFp(buf) {
 	return [lo, hi];
 }
 
-/** The native tool: next to this file in the exe's app folder (bin/), else the repo build. null when missing. */
+/** The native tool: next to this file in the exe's app folder (bin/), else the repo build. null when missing. Linux
+ *  (a rented cloud GPU): eegpu (no .exe) there, or in native/build/linux (node tools/build-native.js --target=linux). */
 function nativeTool() {
+	if (process.platform !== 'win32') {
+		for (const d of [path.join(__dirname, 'bin'), path.join(__dirname, '..', 'native', 'build'), path.join(__dirname, '..', 'native', 'build', 'linux')]) {
+			if (fs.existsSync(path.join(d, 'eegpu'))) return path.join(d, 'eegpu');
+		}
+		return null;
+	}
 	for (const p of [path.join(__dirname, 'bin', 'eegpu.exe'), path.join(__dirname, '..', 'native', 'build', 'eegpu.exe')]) {
 		if (fs.existsSync(p)) return p;
 	}

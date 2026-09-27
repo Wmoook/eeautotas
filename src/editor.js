@@ -1237,7 +1237,7 @@ function launch(n) {
 	});
 	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-2000); });
 	ch.on('error', (e) => { err += e.message; });
-	ch.on('close', (code) => {
+	ch.on('close', (code, sig) => {
 		busy.delete(ch);
 		if (ch.haltTimer) clearTimeout(ch.haltTimer);
 		if (!mine()) return;
@@ -1245,12 +1245,14 @@ function launch(n) {
 		if (V.readyAt) { V.usedMs += Date.now() - V.readyAt; V.readyAt = 0; }   // (its search time; the next process loads first)
 		// eegpu's kernel launch failed (exit 6, 7 = the driver's watchdog) or it crashed: the GPU may have been reset.
 		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
-		if (!cpu && !ch.stopWhy && !V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) {
-			V.error = `the GPU tool ${code === 7 ? 'was stopped by the display driver\'s watchdog' : code === 6 ? 'had a GPU launch failure' : `crashed (exit code ${code})`}` +
+		// (a crash: an exception code above 255 on Windows; on Linux a signal, exit code null, that no halt sent)
+		const crashed = (Number.isFinite(code) && (code < 0 || code > 255)) || (code === null && !!sig && !ch.stopWhy);
+		if (!cpu && !ch.stopWhy && !V.error && (code === 6 || code === 7 || crashed)) {
+			V.error = `the GPU tool ${code === 7 ? 'was stopped by the display driver\'s watchdog' : code === 6 ? 'had a GPU launch failure' : `crashed (${code === null ? `signal ${sig}` : `exit code ${code}`})`}` +
 				`${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 200)}` : ''}`;
 			note(`${V.label}: error: ${V.error}`);
 		}
-		if (!cpu && V.error && (code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)))) gpuFailed(n);
+		if (!cpu && V.error && (code === 6 || code === 7 || crashed)) gpuFailed(n);
 		if (V.key === 'explore') {
 			// the probe (PROBE_S) ended before its first try ran through: too many situations at the finest cells here (its
 			// time, or a full table): the ladder from PASS_START, as if the probe had not been. A route: it passed.

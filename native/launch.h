@@ -32,6 +32,8 @@
 // of spinning a CPU core for the whole launch (at above-normal priority that core was taken from the CPU workers, and
 // heated the laptop); --wait=spin: cuCtxSynchronize spins throughout. The done events' "hostCpuMs" (the process's CPU
 // time) and "gapMs" (the GPU clock's time from one command's end to the next one's start, summed) show the cost of each.
+// Linux: the same, with a pidfd for --parent (else the pid: kill(pid, 0), or getppid() when it is our parent), the
+// process's CPU clock for hostCpuMs, access() for the stop and pause files.
 #pragma once
 #include <chrono>
 #include <cstdio>
@@ -42,8 +44,42 @@
 #include <functional>
 #include <string>
 #include "cudadrv.h"
+#ifndef _WIN32
+#include <csignal>
+#include <poll.h>
+#include <sys/syscall.h>
+#endif
 
 namespace lk {
+
+#ifndef _WIN32
+/** --parent on Linux: a pidfd of that process (it becomes readable once the process has exited: like the Windows
+ *  handle, a reused pid cannot stand in for it); without pidfd_open (a kernel before 5.3, or a sandbox that refuses the
+ *  call) the pid: getppid() when it is our parent (a child whose parent exits is handed to another process), else
+ *  kill(pid, 0). None (false) when that process does not exist, as on Windows. */
+struct ParentWatch {
+	int pid = 0, fd = -1;
+	bool direct = false;
+	explicit operator bool() const { return pid > 0; }
+	void open(int p) {
+		if (p <= 0 || (kill(p, 0) != 0 && errno == ESRCH)) return;
+		pid = p;
+#ifdef SYS_pidfd_open
+		fd = (int)syscall(SYS_pidfd_open, p, 0);
+#else
+		fd = (int)syscall(434 /* pidfd_open */, p, 0);
+#endif
+		direct = fd < 0 && p == (int)getppid();
+	}
+	bool exited() const {
+		if (fd >= 0) { pollfd q = { fd, POLLIN, 0 }; return poll(&q, 1, 0) > 0; }
+		if (direct) return (int)getppid() != pid;
+		return kill(pid, 0) != 0 && errno == ESRCH;
+	}
+};
+/** a file exists (the stop and pause files) */
+inline bool fileExists(const std::string& f) { return access(f.c_str(), F_OK) == 0; }
+#endif
 
 struct Guard {
 	double targetMs = 50;   // --launch-ms
@@ -60,7 +96,11 @@ struct Guard {
 	std::string pauseFile;  // --pausefile: while it exists, wait between launches (the editor gives one search the GPU at a time)
 	double pausedMs = 0, lastPauseCheck = -1e9;
 	bool searching = false;   // set at the command's ready event: a pause holds it only from then on
+#ifdef _WIN32
 	HANDLE parent = nullptr;   // --parent: that process (a stop once it has exited)
+#else
+	ParentWatch parent;        // --parent: that process (a stop once it has exited)
+#endif
 	double maxItems = 0;       // --launch-items=N (tests): at most N items per launch whatever the speed (0: no cap), so
 	                           // a small workload is split too and must give what one launch gives (test/gpulaunch.js)
 	double lastStopCheck = -1e9;
@@ -111,10 +151,16 @@ inline double nowMs() { return std::chrono::duration<double, std::milli>(std::ch
 
 /** the process's CPU time so far (all threads, user + kernel), ms */
 inline double hostCpuMs() {
+#ifdef _WIN32
 	FILETIME c, e, k, u;
 	if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
 	const auto ft = [](const FILETIME& f) { return (double)(((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e4; };
 	return ft(k) + ft(u);
+#else
+	timespec t;
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) return 0;
+	return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
+#endif
 }
 /** the done events' fields: ,"maxLaunchMs":..,"maxKernelMs":..,"launchTarget":..,"kernelLaunches":..,"hostCpuMs":.. */
 inline std::string doneFields() {
@@ -130,7 +176,11 @@ inline std::string doneFields() {
  *  be opened) */
 inline void watchParent(const std::string& pid) {
 	const unsigned long p = strtoul(pid.c_str(), nullptr, 10);
+#ifdef _WIN32
 	if (p) G.parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)p);
+#else
+	if (p && p < 0x7fffffffUL) G.parent.open((int)p);
+#endif
 }
 /** --stopfile / --parent: has a stop been requested? (the file exists, or the parent has exited; looked at most every
  *  20 ms unless `now`) */
@@ -139,14 +189,23 @@ inline bool stopRequested(bool now = false) {
 	const double t = nowMs();
 	if (!now && t - G.lastStopCheck < 20) return false;
 	G.lastStopCheck = t;
+#ifdef _WIN32
 	if (G.parent && WaitForSingleObject(G.parent, 0) == WAIT_OBJECT_0) return true;
 	return !G.stopFile.empty() && GetFileAttributesA(G.stopFile.c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+	if (G.parent && G.parent.exited()) return true;
+	return !G.stopFile.empty() && fileExists(G.stopFile);
+#endif
 }
 /** --pausefile=<path>: while that file exists the command waits here, between two launches (no kernel runs, nothing is
  *  lost): two GPU processes side by side each got far less than half the GPU (the one with the small launches waited
  *  behind the other's 50 ms ones: a Find a route relay ran 15x slower than alone), so the editor lets one run at a time.
  *  A stop request still ends it (checked every 5 ms while it waits). */
+#ifdef _WIN32
 inline bool pauseRequested() { return !G.pauseFile.empty() && GetFileAttributesA(G.pauseFile.c_str()) != INVALID_FILE_ATTRIBUTES; }
+#else
+inline bool pauseRequested() { return !G.pauseFile.empty() && fileExists(G.pauseFile); }
+#endif
 inline void checkStop(bool now = false);
 inline void checkPause() {
 	if (G.pauseFile.empty() || !G.searching) return;
@@ -154,7 +213,11 @@ inline void checkPause() {
 	if (t - G.lastPauseCheck < 5) return;
 	G.lastPauseCheck = t;
 	if (!pauseRequested()) return;
+#ifdef _WIN32
 	while (pauseRequested()) { Sleep(5); checkStop(true); }
+#else
+	while (pauseRequested()) { const timespec d = { 0, 5 * 1000000L }; nanosleep(&d, nullptr); checkStop(true); }
+#endif
 	G.pausedMs += nowMs() - t;
 	G.havePrev = false;   // (the time across a pause is no gap between two commands)
 }
@@ -183,7 +246,11 @@ inline cu::CUresult waitDone(cu::CUevent end, std::chrono::steady_clock::time_po
 		if (q == 0) return cu::cuCtxSynchronize();
 		if (q != 600) return q;   // (600: CUDA_ERROR_NOT_READY; anything else is the kernel's error)
 		if (sinceMs(t0) >= G.spinMs) break;
+#ifdef _WIN32
 		YieldProcessor();
+#else
+		__builtin_ia32_pause();   // (x86-64: the pause instruction, as YieldProcessor)
+#endif
 	}
 	const cu::CUresult r = cu::cuEventSynchronize(end);
 	return r ? r : cu::cuCtxSynchronize();

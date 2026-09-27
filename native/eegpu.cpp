@@ -33,6 +33,9 @@
 #include <algorithm>
 #include "cudadrv.h"
 #include "launch.h"
+#ifndef _WIN32
+#include <sys/resource.h>   // (setpriority)
+#endif
 #include "eecore.h"
 #include "search.h"
 #include "beam.h"
@@ -221,7 +224,11 @@ static std::string opt(int argc, char** argv, const char* name, const char* dflt
 	return dflt;
 }
 static std::string exeDir() {
+#ifdef _WIN32
 	char p[MAX_PATH]; GetModuleFileNameA(nullptr, p, MAX_PATH);
+#else
+	char p[4096]; const ssize_t n = readlink("/proc/self/exe", p, sizeof p - 1); p[n > 0 ? n : 0] = 0;
+#endif
 	std::string s = p; size_t k = s.find_last_of("\\/"); return k == std::string::npos ? "." : s.substr(0, k);
 }
 static std::string readText(const std::string& path) {
@@ -319,7 +326,11 @@ struct Gpu {
 };
 /** The kernels for a state size (eegpu_<tw>.ptx next to the exe, or --ptxdir). */
 static std::string ptxFor(int argc, char** argv, int tw) {
+#ifdef _WIN32
 	return opt(argc, argv, "ptxdir", exeDir().c_str()) + "\\eegpu_" + std::to_string(tw) + ".ptx";
+#else
+	return opt(argc, argv, "ptxdir", exeDir().c_str()) + "/eegpu_" + std::to_string(tw) + ".ptx";
+#endif
 }
 
 static int twFor(int tailWords) { return tailWords <= 8 ? 8 : tailWords <= 32 ? 32 : tailWords <= 128 ? 128 : tailWords <= 512 ? 512 : 0; }
@@ -1194,7 +1205,16 @@ int main(int argc, char** argv) {
 	// EEGPU_PRIORITY=normal): off
 	const char* envPrio = getenv("EEGPU_PRIORITY");
 	const std::string prio = opt(argc, argv, "priority", envPrio && *envPrio ? envPrio : "high");
+#ifdef _WIN32
 	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+#else
+	// (Linux: nice -5, before any thread starts; a nice value below 0 needs root or CAP_SYS_NICE (a container may lack
+	// it): without, the call fails and the priority stays as it was)
+	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") (void)setpriority(PRIO_PROCESS, 0, -5);
+	// (a write to a pipe whose reader has gone fails, as on Windows, instead of killing the process, possibly mid-kernel:
+	// it ends at its next launch through --parent or its stop file)
+	signal(SIGPIPE, SIG_IGN);
+#endif
 	lk::G.stopFile = opt(argc, argv, "stopfile", "");                   // (launch.h: a graceful stop between launches)
 	lk::G.pauseFile = opt(argc, argv, "pausefile", "");                 // (launch.h: waits between launches while it exists)
 	lk::watchParent(opt(argc, argv, "parent", ""));                      // (launch.h: ... also once the caller has exited)
