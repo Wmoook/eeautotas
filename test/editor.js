@@ -835,6 +835,31 @@ async function cpuSection() {
 	check('coarse cells, the archive full: no new rooms (the same rooms after 0.5 M and 2 M ticks; no walks for rooms that could hold no cell)',
 		!!sw1 && !!sw2 && sw1.full && sw2.full && sw1.cells === 300 && sw1.rooms > 1 && sw2.rooms === sw1.rooms && sw2.walkHits === sw1.walkHits,
 		`rooms ${sw1 ? sw1.rooms : '-'} / ${sw2 ? sw2.rooms : '-'} (full ${sw1 ? sw1.full : '-'} / ${sw2 ? sw2.full : '-'}); ${r2.summary}`);
+	// --prefix and --goal (a segment of a known run: from its state at a tick, to a box in a room; the trail's progress):
+	// the first route's inputs up to 60 ticks after it took the key, the goal the trophy's tile and its neighbours in the
+	// key's room, the trail the route's (tile, room) per tick
+	if (k1.results.length) {
+		const rin = Uint8Array.from(k1.results[0].inputs, (c) => c.charCodeAt(0) - 48);
+		const s = new E.EESim(kdLevel), inp = new E.EEInput();
+		s.reset();
+		const trail = [], keyRoom = { t: -1, key: 0 };
+		const pt = () => trail.push([(Math.trunc(s.py + 8) >> 4) * 60 + (Math.trunc(s.px + 8) >> 4), RM.key(s)]);
+		pt();
+		for (let t = 0; t < rin.length; t++) { E.applyMask(inp, rin[t]); s.tick(inp); pt(); if (keyRoom.t < 0 && RM.desc(s) === 'key:red') { keyRoom.t = t + 1; keyRoom.key = RM.key(s); } }
+		const cut = Math.min(rin.length - 20, keyRoom.t + 60);
+		const preFile = path.join(HOME, 'keydoor_prefix.eetas'), goalFile = path.join(HOME, 'keydoor_goal.json');
+		C.writeEetas(preFile, rin.subarray(0, cut));
+		fs.writeFileSync(goalFile, JSON.stringify({ goals: [{ x0: 49, y0: 47, x1: 51, y1: 48, room: keyRoom.key }], trail: trail.slice(cut) }));
+		const g1 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--maxTicks=1500000', '--seconds=40', '--mem=1500', `--prefix=${preFile}`, `--goal=${goalFile}`, '--first=1']);
+		const ge = g1.events.find((e) => e.ev === 'goal');
+		const gm = ge ? Uint8Array.from(ge.inputs, (c) => c.charCodeAt(0) - 48) : null;
+		check('--prefix and --goal: from the route\'s state 60 ticks after the key, the trophy\'s tiles in the key\'s room (a "goal" event: its inputs start with the prefix and replay into the box and room; end "goal"; the trail\'s progress)',
+			keyRoom.t > 0 && !!ge && startOf(g1).prefix === cut && gm.length === ge.ticks && ge.ticks > cut && rin.subarray(0, cut).every((m, k) => gm[k] === m) &&
+			GX.goalCheck(kdLevel, gm, { x0: 49, y0: 47, x1: 51, y1: 48, room: keyRoom.key }) && g1.done.end === 'goal' && g1.done.goal && g1.done.goal.index === 0 &&
+			g1.done.workers[0].trail > 0, `${g1.summary}; goal ${ge ? `${ge.ticks} ticks after ${ge.simTicks} simulated` : 'none'}; trail ${g1.done && g1.done.workers[0].trail}`);
+		const g2 = await goexplore(kdFile, ['--workers=1', '--seconds=5', `--goal=${path.join(HOME, 'nope.json')}`]);
+		check('--goal: a file it cannot read is an error line (exit 2), no search', g2.code === 2 && g2.events.some((e) => /--prefix \/ --goal/.test(e.error || '')), g2.summary);
+	}
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));

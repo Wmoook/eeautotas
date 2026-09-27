@@ -32,7 +32,9 @@
 //           (the ice level: 739 tiles out, where the prototype found routes in 4 of 6 seeds, the first after 87 M ticks
 //           on one thread). A cell is (tile, ROOM, on the ground, sign of vx, class of vy), plus the time-door phase in
 //           --phase-tick buckets on levels with time doors (a ball waiting for a door makes new cells); no jump count, no
-//           gravity queue, no refinement. The ROOM (roomOf) is the part of the discrete state that opens or shuts
+//           gravity queue, no refinement (Infinity Pain's room changes from its route's own states, 3 seeds of 40 M ticks
+//           each: the jumps a finite multijump has left, or the tile's halves, in the cell found no more: 8 and 5 of 33
+//           seed-segments against 8). The ROOM (roomOf) is the part of the discrete state that opens or shuts
 //           doors or changes the physics (keys, switches, effects, team / coin counts / crowns / deaths where a door
 //           reads them, time doors open or shut), not coin identities, checkpoints or timers. Three heads pick:
 //             A (--pA of the picks when no discovery is due): the heap above, on the reach field's cost;
@@ -72,10 +74,22 @@
 //                          SOURCE_S s the lowest-cost cell of the 4 rooms with the most gain and the fewest sources so
 //                          far, when it changed. A room key only once per kind unless its tick / cost improved.)
 //   {"ev":"result","kind":"finish","ticks":T,"runTicks":..,"inputs":"..","seed":s,"simTicks":..,"sec":..}
+//   {"ev":"goal","index":g,"ticks":T,"inputs":"..","seed":s,"simTicks":..,"sec":..}     (--goal: goal g reached after
+//                          T ticks (from the level start), when sooner than before; checked by a replay)
 //   {"ev":"done","layers":L,"seconds":..,"ticks":..,"ticksPerSec":..,"states":..,"picks":..,"end":"time"|"ticks"|
-//     "exhausted"|"finish"|"stopped"|"unreachable","finish":T|0,"first":{ticks,sec,simTicks,seed}|null,
-//     "workers":[{seed,..},..]}      ("unreachable": the reach field rules out the start itself, "exhausted": no cell is
-//                                      early enough for a faster route)
+//     "exhausted"|"finish"|"goal"|"stopped"|"unreachable","finish":T|0,"first":{ticks,sec,simTicks,seed}|null,
+//     "goal":{index,ticks,sec,simTicks,seed}|null,"goals":[{index,ticks}],     (goal, goals: with --goal)
+//     "workers":[{seed,..,trail,trailT,trailTicks},..]}      ("unreachable": the reach field rules out the start itself,
+//                                      "exhausted": no cell is early enough for a faster route; trail: see --goal)
+// --prefix=<run.eetas>: the search starts where these inputs end (the editor's relay from a source, a segment of a known
+// run): ticks still count from the level start (--depth, routes and goals include the prefix; a cell's path replays from
+// the level start). The prefix may die on the way (a respawn) but must not end dead or finish.
+// --goal=<file.json>: targets besides the trophy, {"goals": [{"x0","y0","x1","y1","room"}], "trail": [[tile, room], ...]}:
+// a state whose box centre's tile is in a goal's box (tiles, both ends included) and, when "room" is given (roomOf's key),
+// in that room is a hit ("goal" event; with --first=1 the search ends there). The trail (optional): reference points,
+// e.g. every tick of a known route (tile = y * width + x, room = roomOf's key); each worker reports the furthest index
+// whose (tile, room) a new cell reached (progress: "trail" in progress and done). src/out studies: from a route's own
+// state at each room change to the next one (Infinity Pain: 109 of its 120 in 40 M ticks each).
 // Inputs are .eetas characters ('0' + mask). With --stdin=1 it reads lines from stdin: "depth D" (from now on only
 // routes of at most D ticks: a route of D + 1 is known elsewhere) and "stop"; the end of stdin (the editor is gone)
 // stops it too. A last line "[goexplore] ..." sums up.
@@ -92,7 +106,8 @@
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
-//        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
+//        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=] [--prefix=<run.eetas>]
+//        [--goal=<file.json>]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
 const fs = require('fs');
@@ -127,7 +142,7 @@ const MEM_SHARE = 0.25, MEM_MIN = 200, MEM_MAX = 1500;
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', prefix: '', goal: '' });
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) {
@@ -135,7 +150,7 @@ function parseArgs(argv) {
 			a.file = s;
 			continue;
 		}
-		if (m[1] === 'level' || m[1] === 'out') a[m[1]] = m[2];
+		if (m[1] === 'level' || m[1] === 'out' || m[1] === 'prefix' || m[1] === 'goal') a[m[1]] = m[2];
 		else if (m[1] === 'cells') {
 			if (!['auto', 'fine', 'coarse'].includes(m[2])) throw new Error(`bad --cells=${m[2]} (auto, fine or coarse)`);
 			a.cells = m[2];
@@ -402,6 +417,29 @@ function roomFields(L, budget) {
 	return { enter, trophies: trophies.length, stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes }) };
 }
 
+/** --goal's file: {"goals": [{x0, y0, x1, y1, room}], "trail": [[tile, room], ...]} (tiles, both ends included; room:
+ *  roomOf's key, left out or null = any room; trail: reference points, e.g. every tick of a known route) */
+function goalSpecOf(j) {
+	const goals = (Array.isArray(j) ? j : j.goals || []).map((g) => {
+		for (const k of ['x0', 'y0', 'x1', 'y1']) if (!Number.isFinite(g[k])) throw new Error(`a goal without ${k}`);
+		return { x0: g.x0 | 0, y0: g.y0 | 0, x1: g.x1 | 0, y1: g.y1 | 0, room: g.room === undefined || g.room === null ? null : g.room | 0 };
+	});
+	const trail = !Array.isArray(j) && Array.isArray(j.trail) ? j.trail.map(([tl, rk]) => [tl | 0, rk | 0]) : null;
+	if (!goals.length && !trail) throw new Error('no goals and no trail');
+	return { goals, trail };
+}
+/** whether the last state of masks (the exact engine, from the level start; alive) is in goal g's box and room */
+function goalCheck(L, masks, g) {
+	const sim = new E.EESim(L);
+	sim.reset();
+	const inp = new E.EEInput();
+	for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); }
+	if (sim.is_dead) return false;
+	const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+	if (tx < g.x0 || tx > g.x1 || ty < g.y0 || ty > g.y1) return false;
+	return g.room === null || roomOf(L).key(sim) === g.room;
+}
+
 /** the inputs of a path node {up, buf, o, n} (those of `up`, then buf[o .. o + n); immutable: a cell that improves gets
  *  a new node) as masks */
 function inputsOf(node) {
@@ -425,6 +463,10 @@ function explore(L, field, a, seed, ctrl, post) {
 	const sim = new E.EESim(L);
 	sim.reset();
 	const inp = new E.EEInput();
+	// --prefix: its inputs from the level start first; the archive starts where they end (ticks count from the level
+	// start: the depth and every route include the prefix; a cell's whole path replays from the level start)
+	const zeroSnap = sim.snapshot(), pre = a.prefixMs && a.prefixMs.length ? a.prefixMs : null, tPre = pre ? pre.length : 0;
+	if (pre) for (let s = 0; s < pre.length; s++) { E.applyMask(inp, pre[s]); sim.tick(inp); }
 	const coarse = a.cells === 'coarse';
 	const disc = coarse ? null : discreteOf(L);
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
@@ -598,9 +640,10 @@ function explore(L, field, a, seed, ctrl, post) {
 	{
 		// the start (the reach field rules it out: no route, a proof; the search ends at once, unless --prune=0)
 		const rc = costOf();
-		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, 0); room0.isNew = false; }
+		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, tPre); room0.isNew = false; }
 		const k = cellKey();
-		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false };
+		const c = { t: tPre, snap: null, pc: null, pgen: 0, node: pre ? { up: null, buf: pre, o: 0, n: tPre } : null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0,
+			used: false };
 		cells.set(k, c);
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
@@ -609,9 +652,19 @@ function explore(L, field, a, seed, ctrl, post) {
 	}
 	let ticks = 0, picks = 0, lastProgress = 0, refined = 0, minRc = Infinity;
 	let first = null, best = null;   // routes: {t, sec, simTicks}
+	// --goal: target boxes (the box centre's tile inside, in the room when one is given: roomOf's key), each reported when
+	// reached sooner than before; the trail's progress: the furthest reference point (tile, room) a new cell reached
+	const goals = a.goalSpec && a.goalSpec.goals.length ? a.goalSpec.goals : null;
+	const GRM = a.goalSpec ? RM || roomOf(L) : null;
+	const goalT = goals ? goals.map(() => Infinity) : null;
+	let goalHit = null;
+	const trailMap = a.goalSpec && a.goalSpec.trail ? new Map() : null;
+	if (trailMap) a.goalSpec.trail.forEach(([tl, rk], i) => { trailMap.set(tl * 4294967296 + (rk >>> 0), i); });
+	let trail = -1, trailT = 0, trailTicks = 0;
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
-		snaps: nSnaps, dropped, replays }, coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {});
+		snaps: nSnaps, dropped, replays }, coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {},
+	trailMap ? { trail, trailT, trailTicks } : {}, goals ? { goalHit } : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -696,7 +749,7 @@ function explore(L, field, a, seed, ctrl, post) {
 					ticks += q.n;
 				} else {
 					const ms = inputsOf(q);
-					sim.restore(startSnap);
+					sim.restore(zeroSnap);
 					for (let s = 0; s < ms.length; s++) { E.applyMask(inp, ms[s]); sim.tick(inp); }
 					ticks += ms.length;
 					replays++;
@@ -746,6 +799,24 @@ function explore(L, field, a, seed, ctrl, post) {
 						break;
 					}
 					if (sim.is_dead) break;
+					if (goals !== null) {
+						// (before the reach field's test, like the finish: the field is about the trophy)
+						const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+						let rk = null, gi = -1;
+						for (let g = 0; g < goals.length; g++) {
+							const G = goals[g];
+							if (tx < G.x0 || tx > G.x1 || ty < G.y0 || ty > G.y1 || t >= goalT[g]) continue;
+							if (G.room !== undefined && G.room !== null && (rk === null ? (rk = GRM.key(sim)) : rk) !== G.room) continue;
+							gi = g;
+							break;
+						}
+						if (gi >= 0) {
+							goalT[gi] = t;
+							goalHit = { index: gi, t, sec: (Date.now() - t0) / 1000, simTicks: ticks };
+							post({ type: 'goal', seed, index: gi, t, sec: goalHit.sec, simTicks: ticks, inputs: C.eetasBytes(inputsOf({ up, buf, o, n: s + 1 })).toString('latin1') });
+							if (a.first) { end = 'goal'; break; }
+						}
+					}
 					const rc = costOf();
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
@@ -764,6 +835,10 @@ function explore(L, field, a, seed, ctrl, post) {
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, node: { up, buf, o, n: s + 1 } };
 					const nc = into ? add(t, rc, e, up, buf, o, s + 1, room) : null;
+					if (nc !== null && trailMap !== null) {
+						const i = trailMap.get(nc.tile * 4294967296 + ((coarse ? roomKey : GRM.key(sim)) >>> 0));
+						if (i !== undefined && i > trail) { trail = i; trailT = t; trailTicks = ticks; }
+					}
 					if (nc !== null && room !== null && room.isNew) {
 						// a new room's first cell: head C's burst and a source, if it opens new territory
 						room.isNew = false;
@@ -797,21 +872,36 @@ async function main() {
 	try { L = levelOf(a); } catch (e) { console.log(JSON.stringify({ error: `cannot read the level: ${e.message}` })); process.exitCode = 2; return; }
 	settle(a, L);   // (the cells and the memory budget, for the workers too)
 	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+	// --prefix (a run's inputs: the search starts where they end) and --goal (target boxes, a trail: see the header)
+	const sim0 = new E.EESim(L);
+	sim0.reset();
+	try {
+		if (a.prefix) {
+			a.prefixMs = C.readEetas(a.prefix);
+			const inp0 = new E.EEInput();
+			// (a death on the way is fine: the ball respawns; the prefix must not end dead or finish)
+			for (let t = 0; t < a.prefixMs.length; t++) {
+				E.applyMask(inp0, a.prefixMs[t]); sim0.tick(inp0);
+				if (sim0.has_silver_crown) throw new Error(`the prefix finishes at tick ${t + 1}`);
+			}
+			if (sim0.is_dead) throw new Error('the prefix ends with the ball dead');
+		}
+		if (a.goal) a.goalSpec = goalSpecOf(JSON.parse(fs.readFileSync(a.goal, 'utf8')));
+	} catch (e) { say({ error: `--prefix / --goal: ${e.message}` }); process.exitCode = 2; return; }
 	const t0 = Date.now();
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
 	const field = RF.shareField(RF.reachField(L));
-	const sim0 = new E.EESim(L);
-	sim0.reset();
 	const startCost = RF.costAt(field, sim0);
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);
-	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, mem: a.mem, maxCells: a.maxCells,
-		maxSnaps: a.maxSnaps });
+	say(Object.assign({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, mem: a.mem,
+		maxCells: a.maxCells, maxSnaps: a.maxSnaps }, a.prefixMs ? { prefix: a.prefixMs.length } : {}, a.goalSpec ? { goals: a.goalSpec.goals.length } : {}));
 	// the fastest verified route; the closest state
-	let route = null, first = null, near = null, nearPending = false;
+	let route = null, first = null, near = null, nearPending = false, goalFirst = null;
+	const goalBest = new Map();   // goal index -> the fewest ticks reported
 	const stats = new Map(), dones = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
 	const samples = [[Date.now(), 0]];
@@ -821,15 +911,16 @@ async function main() {
 		samples.push([now, tk]);
 		while (samples.length > 2 && now - samples[1][0] >= 2000) samples.shift();
 		const [ta, ka] = samples[0];
-		let deepest = 0, minRc = null, nRooms = 0;
+		let deepest = 0, minRc = null, nRooms = 0, trail = -1;
 		for (const v of stats.values()) {
 			deepest = Math.max(deepest, v.deepest || 0);
+			if (v.trail !== undefined) trail = Math.max(trail, v.trail);
 			nRooms = Math.max(nRooms, v.rooms || 0);
 			if (v.minRc !== null && (minRc === null || v.minRc < minRc)) minRc = v.minRc;
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms } : {}, { workers: a.workers }));
+		a.cells === 'coarse' ? { rooms: nRooms } : {}, a.goalSpec && a.goalSpec.trail ? { trail } : {}, { workers: a.workers }));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -872,6 +963,15 @@ async function main() {
 			if (!near || msg.rc < near.rc - 1e-3 || (msg.rc <= near.rc + 1e-3 && msg.t < near.t)) { near = msg; nearPending = true; }
 		} else if (msg.type === 'source') {
 			onSource(msg);
+		} else if (msg.type === 'goal') {
+			// replayed in the exact engine: the last state must be in the goal's box (and room)
+			const masks = Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31);
+			if (!goalCheck(L, masks, a.goalSpec.goals[msg.index])) { say({ ev: 'warning', text: `worker ${msg.seed}: a goal hit of ${msg.t} ticks does not replay` }); return; }
+			if (goalBest.has(msg.index) && goalBest.get(msg.index) <= msg.t) return;
+			goalBest.set(msg.index, msg.t);
+			if (!goalFirst) goalFirst = { index: msg.index, ticks: msg.t, sec: sec(), simTicks: msg.simTicks, seed: msg.seed };
+			say({ ev: 'goal', index: msg.index, ticks: msg.t, inputs: msg.inputs, seed: msg.seed, simTicks: msg.simTicks, sec: sec() });
+			if (a.first) Atomics.store(ctrl, 1, 1);
 		} else if (msg.type === 'finish') {
 			if (route && msg.t >= route.ticks) return;
 			// replayed in the exact engine before it counts (the same engine found it, from snapshots and replays: a
@@ -900,17 +1000,18 @@ async function main() {
 	progress();
 	flushNear();
 	const ends = [...dones.values()].map((d) => d.end);
-	const end = ends.includes('unreachable') ? 'unreachable' : ends.includes('stopped') && !(a.first && route) ? 'stopped' : a.first && route ? 'finish'
+	const end = ends.includes('unreachable') ? 'unreachable' : a.first && goalFirst && !route ? 'goal' : ends.includes('stopped') && !(a.first && route) ? 'stopped' : a.first && route ? 'finish'
 		: ends.includes('time') ? 'time' : ends.includes('ticks') ? 'ticks' : ends.length && ends.every((x) => x === 'exhausted') ? 'exhausted' : ends[0] || 'error';
 	const tk = total('ticks'), secs = (Date.now() - t0) / 1000;
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, finish: route ? route.ticks : 0, first,
+		picks: total('picks'), end, finish: route ? route.ticks : 0, first, ...(a.goalSpec ? { goal: goalFirst, goals: [...goalBest].map(([index, ticks]) => ({ index, ticks })) } : {}),
 		cells: a.cells, workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, heapMB: d.heapMB || 0 },
+			d.trail !== undefined ? { trail: d.trail, trailT: d.trailT, trailTicks: d.trailTicks } : {},
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
@@ -922,4 +1023,4 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, coarseMem, discreteOf, roomOf, roomFields, inputsOf, rngOf };
+module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, coarseMem, discreteOf, roomOf, roomFields, inputsOf, rngOf, goalSpecOf, goalCheck };
