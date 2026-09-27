@@ -912,12 +912,14 @@ const BREAK_RESERVE_F = 0.15;
 // (room, tile) cells its archive has seen (goexplore.js stdin "novel <file>", NOV1); the breaker's explore gets it
 // (--novel --novelOrder=1): a state in an unseen cell is a hit (at most BREAK_NOVEL_MAX a run, never a route; they come
 // in layer order, so a small cap keeps only the cells next to the start: Octorage's wall from 400 ticks before it, a
-// 4-step chain reached the known route's tick 791 with 64 a run, 1133 with 1024, the waypoint 1168), its order the
-// walking distance to the nearest unseen tile of its start's room; every BREAK_NOVEL_SEED_EVERY-th hit goes to the CPU
-// search (seedCpu: 16 of 1024, spread over the run's depth) and the chain's next step starts from one (a hit in another
-// room than the step's start first, else the latest) BREAK_NOVEL_BACK ticks short of it. The round waits up to
-// BREAK_NOVEL_WAIT_MS for the file.
-const BREAK_NOVEL_MAX = 1024, BREAK_NOVEL_SEED_EVERY = 64, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'latest';
+// 4-step chain reached the known route's tick 791 with 64 a run, 1133 with 1024 at step 4, and with 4096 the first
+// step's hits reached 1187, past the waypoint 1168), its order the walking distance to the nearest unseen tile of its
+// start's room; every BREAK_NOVEL_SEED_EVERY-th hit goes to the CPU search (seedCpu: 16 of 4096, spread over the
+// run's depth) and the chain's next step starts from one (novelPick, BREAK_NOVEL_PICK 'terr': the latest hit of the
+// other room with the most hits; cycle 3: a capped run's last hits tie at one tick in several rooms, so 'latest' took
+// a pocket room 3 of 7 times at Octorage's wall, 'terr' the route's room 6 of 7) BREAK_NOVEL_BACK ticks short of it.
+// The round waits up to BREAK_NOVEL_WAIT_MS for the file.
+const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr';
 /** asks the CPU search for the novelty file (the answer: its "novel" event sets brk.novelReady) */
 function novelAsk() {
 	if (!S || !brk || !cur || !cur.opts.novel) return false;
