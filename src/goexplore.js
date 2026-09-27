@@ -78,6 +78,13 @@
 // depends only on the machine and the workers, so one worker with --maxTicks is reproducible on it (give --mem to
 // reproduce a run on another machine).
 //
+// Research options (off by default; the editor never passes them): --guide=<model.json> (or the environment's
+// EEAT_GUIDE) orders head A (fine cells: the one heap) by a learned progress measure (src/nnguide.js: predicted ticks to
+// go, in tiles) instead of the reach cost, mixed --guideMix (1) : 1 - --guideMix with the reach cost; it is computed only
+// for a cell that is new or improved, and it never rules a state out (the reach field's -1 still does). --track=
+// <route.eetas>: the furthest tick of that known route whose (tile, room) a cell has reached (fine cells: its tile),
+// `trackMax` / `trackTicks` in the workers' stat and done events (the "Find a route" research's yardstick for a search).
+//
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
@@ -85,6 +92,7 @@
 //        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
+//        [--guide=<model.json>] [--guideMix=1] [--track=<route.eetas>]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -93,6 +101,7 @@ const C = require('./common.js');
 const E = C.E;
 const EL = require('./eelvl.js');
 const RF = require('./reach.js');
+const NG = require('./nnguide.js');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
 const OPTIONS = [];
@@ -102,7 +111,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
-	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50 };
+	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50, guideMix: 1 };
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory (V8 heap, measured): a cell without its snapshot about 260 bytes (coarse cells: 300, with their room and
 // counts), a snapshot about 1150; each gets 45% of a worker's --mem
@@ -117,7 +126,7 @@ const MEM_SHARE = 0.25, MEM_MIN = 200, MEM_MAX = 1500;
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', guide: process.env.EEAT_GUIDE || '', track: '' });
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) {
@@ -125,7 +134,7 @@ function parseArgs(argv) {
 			a.file = s;
 			continue;
 		}
-		if (m[1] === 'level' || m[1] === 'out') a[m[1]] = m[2];
+		if (m[1] === 'level' || m[1] === 'out' || m[1] === 'guide' || m[1] === 'track') a[m[1]] = m[2];
 		else if (m[1] === 'cells') {
 			if (!['auto', 'fine', 'coarse'].includes(m[2])) throw new Error(`bad --cells=${m[2]} (auto, fine or coarse)`);
 			a.cells = m[2];
@@ -434,6 +443,24 @@ function explore(L, field, a, seed, ctrl, post) {
 		return r;
 	};
 	const TD = coarse && !!L.hasTimeDoors;
+	// --guide: the learned measure (src/nnguide.js) orders head A (and the one heap of fine cells) in place of the reach
+	// cost, mixed by --guideMix (1 = the model alone); computed only for a cell that is new or improved. It never prunes.
+	const GM = a.guide ? NG.load(a.guide) : null, gctx = GM ? NG.levelCtx(L, field, NG.DOOR_STATES) : null, mix = a.guideMix;
+	const gcost = GM ? (rc) => (rc < 0 || rc >= 1e4 ? rc : mix * NG.cost(GM, gctx, sim, rc) + (1 - mix) * rc) : (rc) => rc;
+	let guideCalls = 0;
+	// --track=<route.eetas> (research): the furthest tick of a known route whose (tile, room) a cell has reached (fine
+	// cells: its tile), in the stat / done events as trackMax (and the worker's simulated ticks then: trackTicks)
+	let TRACK = null, trackMax = -1, trackTicks = 0;
+	if (a.track) {
+		const ms = C.readEetas(a.track), s2 = new E.EESim(L), i2 = new E.EEInput(), R2 = coarse ? roomOf(L) : null;
+		s2.reset();
+		TRACK = new Map();
+		for (let t = 0; t <= ms.length; t++) {
+			if (t > 0) { E.applyMask(i2, ms[t - 1]); s2.tick(i2); }
+			const tl = Math.min(N - 1, Math.max(0, (Math.trunc(s2.py + 8) >> 4) * W + (Math.trunc(s2.px + 8) >> 4)));
+			TRACK.set(tl * 4294967296 + ((R2 ? R2.key(s2) : 0) >>> 0), t);
+		}
+	}
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
 	const KV = new Int32Array(10);
@@ -471,7 +498,7 @@ function explore(L, field, a, seed, ctrl, post) {
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
 	const cells = new Map();
 	const hv = [], hc = [], hver = [];
-	const prio = (c) => c.rc + a.lambda * Math.sqrt(c.picks);
+	const prio = (c) => c.gc + a.lambda * Math.sqrt(c.picks);
 	const hpush = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -558,15 +585,19 @@ function explore(L, field, a, seed, ctrl, post) {
 			c.seen++;
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
-			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = { up, buf, o, n }; c.rc = rc; c.gen++; c.ver++;
+			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = { up, buf, o, n }; c.rc = rc; c.gc = GM ? (guideCalls++, gcost(rc)) : rc; c.gen++; c.ver++;
 			hpush(c);
 			if (room !== null && (room.best === null || rc < room.best.rc)) room.best = c;
 			return null;
 		}
 		if (cells.size >= a.maxCells) { full = true; return null; }
-		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
+		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, gc: GM ? (guideCalls++, gcost(rc)) : rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
 		cells.set(k, nc);
 		hpush(nc);
+		if (TRACK !== null) {
+			const v = TRACK.get(tile * 4294967296 + ((coarse ? roomKey : 0) >>> 0));
+			if (v !== undefined && v > trackMax) { trackMax = v; trackTicks = ticks; }
+		}
 		if (t > deepest) deepest = t;
 		if (room !== null) {
 			room.arr.push(nc);
@@ -590,7 +621,7 @@ function explore(L, field, a, seed, ctrl, post) {
 		const rc = costOf();
 		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, 0); room0.isNew = false; }
 		const k = cellKey();
-		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false };
+		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, gc: gcost(rc), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false };
 		cells.set(k, c);
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
@@ -601,7 +632,7 @@ function explore(L, field, a, seed, ctrl, post) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
-		snaps: nSnaps, dropped, replays }, coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {});
+		snaps: nSnaps, dropped, replays }, coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {}, GM ? { guideCalls, guideStates: gctx.list.length } : {}, TRACK ? { trackMax, trackTicks } : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -778,6 +809,10 @@ async function main() {
 	let L;
 	try { L = levelOf(a); } catch (e) { console.log(JSON.stringify({ error: `cannot read the level: ${e.message}` })); process.exitCode = 2; return; }
 	settle(a, L);   // (the cells and the memory budget, for the workers too)
+	if (a.guide) {
+		// (the model is read by every worker; a file that is missing or of other features fails here, once)
+		try { NG.load(a.guide); } catch (e) { console.log(JSON.stringify({ error: `cannot read the guide model ${a.guide}: ${e.message}` })); process.exitCode = 2; return; }
+	}
 	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
@@ -893,6 +928,7 @@ async function main() {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, heapMB: d.heapMB || 0 },
+			d.guideCalls !== undefined ? { guideCalls: d.guideCalls, guideStates: d.guideStates } : {}, d.trackMax !== undefined ? { trackMax: d.trackMax, trackTicks: d.trackTicks } : {},
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
