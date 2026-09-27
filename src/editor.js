@@ -670,7 +670,9 @@ function addSource(o) {
 	}
 	if (o.gain > s.gain) s.gain = o.gain;
 	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
-	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
+	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started. Counting a new family only
+	// (bursts.js roomFamily, the time-door phase's twins as one: a21ac55) gave the breaker 813 s of a 1200 s Good Egg
+	// search instead of 220 s side by side on the A100 and nothing nearer along the known route: not kept)
 	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room'); }
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {

@@ -85,6 +85,10 @@ const CHAIN_MAX = 12;
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
 
+/** the room's family key on a level of time doors (timed): its description without the time-door phase (the rooms that
+ *  differ only by it); else (or without a description) the room key itself */
+const roomFamily = (desc, key, timed) => (timed && desc ? String(desc).replace(/(^| )timedoors:(open|shut)/, '').trim() || '(start)' : `#${key}`);
+
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
 	const W = L.width, H = L.height, N = W * H, fg = L.fg;
@@ -140,7 +144,13 @@ function create(o) {
 	const fp = G.blobFp(blob);
 	const tool = a.tool || G.nativeTool();
 	const cacheArgs = a.cachedir ? [`--cachedir=${a.cachedir}`] : [];
-	const rooms = new Map();   // room key -> {key, desc, seq, tile, inputs, n, y, sec, tried: Set(component), info (lazy), best}
+	const rooms = new Map();   // room key -> {key, desc, seq, tile, inputs, n, y, sec, tried: Set(component), info (lazy), best, fam}
+	// a room's FAMILY: the rooms that differ only by the time-door phase (roomFamily). Good Egg (time doors, coin doors, 61
+	// rooms in its known route): every switch or coin state came as two rooms, each an untried arm with its own tried
+	// marks, so the bursts spread over both phases and aimed again at triggers the other phase had tried. The family's
+	// rooms share their tried marks and their bandit arm (its bursts and rewards); a room's own walk (the doors the phase
+	// opens) still picks its targets
+	const fams = new Map();   // family key -> {tried: Set(component), n, y}
 	let seq = 0, stopped = false, reqId = 0, loopP = null;
 	const children = new Set();   // the running bursts' processes (--burstPar lanes: one each)
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
@@ -182,7 +192,10 @@ function create(o) {
 	const room = (m) => {
 		let r = rooms.get(m.room);
 		if (!r) {
-			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(),
+			const fk = roomFamily(m.desc, m.room, L.hasTimeDoors);
+			let F = fams.get(fk);
+			if (!F) fams.set(fk, F = { tried: new Set(), n: 0, y: 0 });
+			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: F.tried, fam: F, info: null, best: Infinity, k: 0, entries: new Set(),
 				trig: m.t > 0 && m.trig !== false };
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
@@ -357,7 +370,9 @@ function create(o) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys })) fresh++;
+				// (a new room of a family known already, a time-door phase's twin, is no find: the clock makes those)
+				const d2 = o.RM.desc(sim), nf = !fams.has(roomFamily(d2, k2, L.hasTimeDoors));
+				if (o.register({ room: k2, desc: d2, tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys }) && nf) fresh++;
 				cz = cz2;
 			}
 			key = k2;
@@ -399,7 +414,9 @@ function create(o) {
 		const cand = [];
 		for (const r of rooms.values()) {
 			if (r.done || r.busy) continue;
-			cand.push([r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n), r]);
+			// (the family's arm: a time-door phase's twin of a room burst from already is no untried frontier)
+			const F = r.fam;
+			cand.push([F.n === 0 ? UNTRIED + r.seq * 1e-6 : F.y / F.n + UCB_C * Math.sqrt(Math.log(1 + total) / F.n), r]);
 		}
 		cand.sort((x, y) => y[0] - x[0]);
 		for (const [sc, r] of cand) {
@@ -564,7 +581,7 @@ function create(o) {
 					continue;
 				}
 				// (a failure counts as a try of its arm with no reward: one broken arm must not win every pick)
-				if (job.r) job.r.n++; else trophyArm.n++;
+				if (job.r) { job.r.n++; job.r.fam.n++; } else trophyArm.n++;
 				o.say({ ev: 'warning', text: `burst: ${r.end}` });
 				// (a start that dies (its inputs, e.g. cut back along a doomed attempt) is the arm's failure, not the tool's)
 				if (/the prefix dies/.test(r.end)) continue;
@@ -577,7 +594,7 @@ function create(o) {
 			st.bursts++; st.sec += r.sec; if (r.reached) st.reached++; st.newRooms += r.fresh;
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
-			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
+			if (job.r) { job.r.n++; job.r.y += reward; job.r.fam.n++; job.r.fam.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
 			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
@@ -608,8 +625,8 @@ function create(o) {
 			for (const ch of children) { try { ch.kill(); } catch (e) { /* gone */ } }
 			if (loopP) await loopP;
 		},
-		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st),
+		stats: () => Object.assign({ rooms: rooms.size, families: fams.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st),
 	};
 }
 
-module.exports = { create, triggersOf, CONFS };
+module.exports = { create, triggersOf, roomFamily, CONFS };
