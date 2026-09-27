@@ -363,8 +363,9 @@ function check(buf) {
 // src/goexplore.js --gpu=1, which drives `eegpu roll`: the archive and the three heads in that process, a batch of
 // ROLL_BATCH picks' runs at a time on the GPU): a GPU strategy for the scheduler (its eegpu gets the stop and pause
 // files), a search like the CPU one for the rest (its events, the depth bound on its stdin, it goes on after a route and
-// stops with the CPU search: cpuDone). The ice level (200 x 200) on the rented H100 shared with other work: its first
-// route in 21 s (6,043 ticks), where the CPU search (4 workers) took 32 s for 9,982.
+// stops with the CPU search: cpuDone). The ice level (200 x 200) on the rented H100 shared with other work, Find a route
+// for 120 s with 16 CPU workers: the first route after 18.2 / 33.9 s (5,271 / 5,319 ticks), without it 61.5 / 66.9 /
+// 67.0 s (10,297 / 9,894 / 10,297 ticks, the CPU search's and the relay's).
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
