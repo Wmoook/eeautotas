@@ -278,9 +278,10 @@ function create(o) {
 		const I = scan(sim, [s0, ...r.entries]);
 		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it)
 		const c0 = r.trig ? compNear(s0) : -1;
-		if (c0 >= 0 && !r.info0) { r.tried.add(c0); r.info0 = true; }
-		r.info = I;
-		return r.info;
+		const R = r.base || r;
+		if (c0 >= 0 && !R.info0) { R.tried.add(c0); R.info0 = true; }
+		R.info = I;
+		return R.info;
 	};
 	/** the room of state `sim` from the tiles `srcs`: its passable set (doors as they are, killers by protection), the walk
 	 *  (8-way) and the trigger components it reaches that change the room (each ends the walk there), the trophy tiles */
@@ -357,15 +358,10 @@ function create(o) {
 				}
 			}
 		}
-		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it)
-		const c0 = r.trig ? compNear(s0) : -1;
-		const R = r.base || r;
-		if (c0 >= 0 && !R.info0) { R.tried.add(c0); R.info0 = true; }
 		// (a component the walk reached only through a portal: the portal arm's target)
 		const pOnly = new Set();
 		for (const [c, tiles] of comps) if (tiles.every((t) => via[t])) pOnly.add(c);
-		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly };
-		return R.info;
+		return { pass, wall, comps, trophies, seen, term, via, pOnly };
 	};
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
 	const fieldOf = (r) => {
