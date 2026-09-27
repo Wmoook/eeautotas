@@ -143,7 +143,11 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   (`native/cudadrv.h` `loadModuleCached`); search / beam / explore / bench print `{"ev":"ready","loadMs",...}` after
   the load, and their `--seconds` (and the editor's clocks) count from there. `eegpu search` runs the exact-rejoin search of `native/search.h` (families m1,
   del, m2 = mutate's; pert, flip, sticky = random perturbations of the reference) and re-checks every hit on the CPU
-  with two independent hashes; `src/gpusearch.js` (started by grind `--gpu=1`) keeps an edge library keyed by state
+  with two independent hashes (its batches: at most the records' room, 256 MB, or 1 GB on a GPU with 32 GB or more,
+  `--recMB`: an H100 filled 256 MB well within a batch's time target, and 1 GB ran Forgotten Veil's pert 1.68x faster,
+  6 of 6 ABBA pairs; a random family over a window narrower than the batch the GPU wants plays more variants per start
+  tick, up to 16 x 256, instead of a short batch: an 812-tick hot window on the H100 went from 41-59 to 146-256 M
+  ticks/s); `src/gpusearch.js` (started by grind `--gpu=1`) keeps an edge library keyed by state
   hashes (saved in `gpu/library.bin`), splits each round into eegpu invocations with their own cursors (m1 + del up
   to 30% until a full pass over the current best is done, m2 up to 20%, one random family in turn for the rest),
   combines the library with the union of every known run (`splice.js unionGraph`: the best, best_*.eetas, pieces/,

@@ -662,8 +662,16 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	// candidates cost differently): the start ticks per batch (toward 10 x the launch target, at most the records' room)
 	// and the candidate-ticks per launch (famSeg, toward the target): segTicks = that budget over the live candidates,
 	// sized for the worst case (every live candidate plays them all; a batch's size and its twins change the count)
+	// The records' room: 256 MB, 1 GB on a GPU with 32 GB or more (at most a 16th of its memory); --recMB=<MB> another.
+	// 256 MB holds 1560 start ticks x 256 variants of a small state: an H100 fills that in well under the batch's time
+	// target, and a batch's launches last as long as its longest-lived candidates, so a bigger batch keeps it busier:
+	// Forgotten Veil's pert, an H100 shared with other work, 6 s each in ABBA order, 6 of 6 pairs faster, 78 -> 131 M
+	// ticks/s on average; Infinity Pain's sticky 41-53 -> 97-118, Octorage's flip 78-82 -> 118-129. (Laptop and desktop
+	// cards, 16 GB or less, keep 256 MB.)
 	const size_t recBytes = (16 + sizeof(State<TW>) + 15) & ~(size_t)15;
-	const size_t recCap = std::max<size_t>(4096, std::min<size_t>((size_t)256 << 20, (g.d.mem ? g.d.mem : (size_t)4 << 30) / 16) / recBytes);
+	const std::string recOpt = opt(argc, argv, "recMB", "auto");
+	const size_t recMax = (size_t)(recOpt == "auto" ? (g.d.mem >= ((size_t)32 << 30) ? 1024.0 : 256.0) : std::max(16.0, atof(recOpt.c_str()))) << 20;
+	const size_t recCap = std::max<size_t>(4096, std::min<size_t>(recMax, (g.d.mem ? g.d.mem : (size_t)4 << 30) / 16) / recBytes);
 	cu::Buf drec, dlive;
 	if (!drec.alloc(recBytes * recCap) || !dlive.alloc(4)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	P.rec = (u8*)(uintptr_t)drec.p; P.recBytes = (i32)recBytes; P.nLive = (u32*)(uintptr_t)dlive.p;
@@ -743,8 +751,18 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 			fi = (fi + 1) % famList.size();
 			continue;
 		}
-		const int V = random ? 256 : familyVariants(fam);
+		int V = random ? 256 : familyVariants(fam);
 		const int nT = (int)famBatch[fam].next((uint64_t)(t1 - tCursor));
+		if (random && tCursor == t0 && nT == t1 - t0) {
+			// a window narrower than the batch the GPU wants (gpusearch's hot windows on a big GPU): more variants per start
+			// tick instead of a short batch. A batch's launches last as long as its longest-lived candidates whatever its
+			// size, so a short one leaves the GPU idle (an H100 at a quarter share: 80 M ticks/s on an 812-tick window
+			// against 110-141 M on the whole run; next to ten other searches 3.6x slower). At most 16 x 256 variants, and
+			// never more candidates than the batch the GPU wants (its size is in start ticks of 256 variants).
+			const double want = std::max(famBatch[fam].lo, std::min(famBatch[fam].hi, famBatch[fam].size));
+			const double k = std::min({ 16.0, std::floor(famBatch[fam].hi / std::max(1, nT)), std::round(want / std::max(1, nT)) });
+			V = 256 * (int)std::max(1.0, k);
+		}
 		P.family = fam; P.t0 = tCursor; P.nT = nT; P.V = V; P.seed = seed;
 		unsigned threads = (unsigned)nT * V;   // one thread per candidate (t fastest)
 		P.list = nullptr; P.nList = 0;
@@ -813,7 +831,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		famTicks[fam] += st[0] - statsPrev[0];
 		memcpy(statsPrev, st, sizeof st);
 		if (cut) break;   // (the batch's start ticks are not done: the cursor stays)
-		if (threads) famBatch[fam].took(nT, (elapsed() - b0) * 1000);
+		if (threads) famBatch[fam].took(random ? nT * (V / 256.0) : nT, (elapsed() - b0) * 1000);   // (in start ticks of 256 variants)
 		tCursor += nT;
 		if (tCursor >= t1) {
 			tCursor = t0;
