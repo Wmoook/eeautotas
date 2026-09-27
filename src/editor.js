@@ -443,8 +443,10 @@ const SLICE_MS = 2500, SLICE_MAX = 4, LEAD_TILES = 10;
 // The GPU random runs (gorolls) get a slice whenever they have waited ROLLS_WAIT_MS since their last one (every other
 // slice), every move's probe included: a single long-lived process whose early attempts are far from the trophy, they won
 // neither the leader's slices nor the turns of fresh processes (every new pass and relay run is one): on the ice level
-// (200 x 200) they had 2 s of the GPU in the search's first 76 s, where alone they find a route in 8 s.
-const ROLLS_WAIT_MS = 2500;
+// (200 x 200) they had 2 s of the GPU in the search's first 76 s, where alone they find a route in 8 s. On levels of at
+// most ROLLS_PROBE_TILES tiles (100 x 100) every move's probe keeps the GPU to itself (its finest pass may run through
+// there in its PROBE_S; on the 200 x 200 levels it never did, and its 15 s were the random runs' lost time).
+const ROLLS_WAIT_MS = 2500, ROLLS_PROBE_TILES = 10000;
 let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
 function setPaused(k, on) {
@@ -464,9 +466,11 @@ function schedule() {
 	const X = S.strategies.findIndex((q) => q.key === 'explore');
 	const RW = S.strategies.findIndex((q) => q.rolls);
 	const rollsSlice = owner >= 0 && owner === RW && now - sched.since < SLICE_MS;   // (the random runs' slice, not over yet)
-	if (RW >= 0 && gpu.includes(RW) && owner !== RW && (owner < 0 || now - sched.since >= SLICE_MS) && now - (kids[RW].lastTurn || kids[RW].startedAt) >= ROLLS_WAIT_MS) {
+	const probing = gpu.includes(X) && S.strategies[X].probe === 'running';
+	const probeAlone = probing && S.size && S.size[0] * S.size[1] <= ROLLS_PROBE_TILES;
+	if (RW >= 0 && gpu.includes(RW) && owner !== RW && !probeAlone && (owner < 0 || now - sched.since >= SLICE_MS) && now - (kids[RW].lastTurn || kids[RW].startedAt) >= ROLLS_WAIT_MS) {
 		sched = { owner: RW, since: now, slices: 1, lastOther: sched ? sched.lastOther : undefined };
-	} else if (gpu.includes(X) && S.strategies[X].probe === 'running') {
+	} else if (probing) {
 		if (owner !== X && !rollsSlice) sched = { owner: X, since: now, slices: 1 };
 	} else if (owner < 0) {
 		sched = { owner: gpu[0], since: now, slices: 1 };
