@@ -242,7 +242,9 @@ function remote() {
 	const keep = argv.filter((x) => !/^--(remote|dir|clean|json|code|data)=/.test(x));
 	if (!opt.label) keep.push(`--label=${label}`);
 	const node = '$( [ -x ~/.local/node/bin/node ] && echo ~/.local/node/bin/node || echo node )';
-	const cmdline = `cd ${dir} && ${node} code/tools/${path.basename(__filename)} run --code=${dir}/code --data=${dir}/data --json=${dir}/out.json ${keep.map((x) => `'${x.replace(/'/g, '')}'`).join(' ')}`;
+	// (its temp files (the steer fields: 0.1-0.6 GB a level, the bursts' work) in --dir too: /tmp is on the rented
+	// machines' small root disk, which two runs filled on the H100)
+	const cmdline = `cd ${dir} && mkdir -p ${dir}/tmp && TMPDIR=${dir}/tmp ${node} code/tools/${path.basename(__filename)} run --code=${dir}/code --data=${dir}/data --json=${dir}/out.json ${keep.map((x) => `'${x.replace(/'/g, '')}'`).join(' ')}`;
 	const p = spawn(ssh, [...sshArgs, cmdline], { stdio: ['ignore', 'inherit', 'inherit'] });
 	p.on('exit', (c) => {
 		const r = spawnSync(ssh, [...sshArgs, `cat ${dir}/out.json`], { maxBuffer: 1 << 28 });

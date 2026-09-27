@@ -10,7 +10,7 @@
 // them ('room' messages), from the bursts' own attempts (every room along a replayed attempt) and from the start. A
 // room's TRIGGERS are the tiles that can change the room (src/blocks.js kinds effect, switch, key, reset; coins where a
 // coin door or gate reads them; crowns where a crown door does), grouped into components of 4-connected tiles of the
-// same block: a strip of team tiles is one trigger. Its targets are the triggers its door- and protection-aware walk
+// same block: a strip of team tiles is one trigger. Its targets are the triggers its door- and protection-aware walk (through portals)
 // reaches from where it was entered (goexplore.js roomFields' passable set), not tried from it yet (a worker's run or a
 // burst changed the room there, or a burst reached it), plus the trophy where it is walkable. The segment study of
 // Infinity Pain's known route: 109 of its 120 room changes were found by the CPU search from the route's state, and the
