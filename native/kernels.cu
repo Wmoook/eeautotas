@@ -576,6 +576,106 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	}
 }
 
+// ---------------------------------------------------------------- random runs (explore.h RollParams, `eegpu roll`)
+/** the cell table's slot of `key`, inserted when new and `insert`; -1 when it is not there (and not inserted: a full
+ *  pool, or 64 probes all taken) */
+__device__ __forceinline__ i32 rollSlot(const RollParams& p, u64 key, bool insert) {
+	u32 slot = (u32)(splitmix(key) & p.mask);
+	for (u32 probe = 0; probe < 64; probe++) {
+		u64 k = p.keys[slot];
+		if (k == key) return (i32)slot;
+		if (k == 0ull) {
+			if (!insert) return -1;
+			k = atomicCAS((unsigned long long*)&p.keys[slot], 0ull, (unsigned long long)key);
+			if (k == 0ull || k == key) return (i32)slot;
+		}
+		slot = (slot + 1) & p.mask;
+	}
+	return -1;
+}
+// one thread per run (pick x R + run): Lr ticks of goexplore.js's random inputs from the pick's state; every state that
+// reaches a cell sooner than the host knows sets the cell's best arrival of the batch. Run 0 of each pick also copies the
+// pick's state (rollCollect replays the winners from these copies while it writes the pool)
+template <int TW>
+__device__ void rollBody(const RollParams& p) {
+	const u32 i = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned long long nTicks = 0, nRuns = 0, nCut = 0, nDead = 0;
+	if (i < p.hi && i < p.nPicks * (u32)p.R) {
+		const u32 pk = i / (u32)p.R, run = i - pk * (u32)p.R;
+		const u32 d = p.picks[pk];
+		const i32 t0 = p.cellT[d];
+		State<TW> s = *(const State<TW>*)(p.pool + (size_t)d * p.stateBytes);
+		if (run == 0) *(State<TW>*)(p.pickStates + (size_t)pk * p.stateBytes) = s;
+		Sim<TW> sim(p.L, s);
+		const bool crown0 = s.has_silver_crown != 0;
+		Mulberry r; r.s = rollSeed(p.batchSeed, pk, run);
+		i32 m = option((i32)(r.next() * 18.0));
+		nRuns++;
+		for (i32 k = 0; k < p.Lr; k++) {
+			const i32 t = t0 + k + 1;
+			if (t > p.maxT) break;
+			m = rollDraw(r, p.keep, m);
+			Input in = maskInput(m);
+			sim.tick(in);
+			nTicks++;
+			if (!crown0 && s.has_silver_crown) {
+				const u32 f = atomicAdd(&p.ctr[1], 1u);
+				if (f < p.finCap) { p.fin[4 * f] = pk; p.fin[4 * f + 1] = run; p.fin[4 * f + 2] = (u32)k; p.fin[4 * f + 3] = (u32)t; }
+				break;
+			}
+			if (s.is_dead || s.broken) { nDead++; break; }
+			if (p.reach.on && p.prune && reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) < 0) { nCut++; break; }
+			if (t >= p.maxT) continue;   // (a route from here would not be faster: the next tick ends the run)
+			const i32 slot = rollSlot(p, rollCellKey<TW>(p, s, rollRoom<TW>(p, s)), !p.full);
+			if (slot < 0) continue;
+			atomicAdd(&p.seen[slot], 1u);
+			if ((u32)t >= p.doneT[slot]) continue;
+			const u64 v = ((u64)(u32)t << 40) | ((u64)pk << 20) | ((u64)run << 8) | (u64)(u32)k;
+			if (v < p.best[slot]) {
+				const u64 old = atomicMin((unsigned long long*)&p.best[slot], (unsigned long long)v);
+				if (old == ~0ull) { const u32 q = atomicAdd(&p.ctr[0], 1u); if (q < p.touchedCap) p.touched[q] = (u32)slot; }
+			}
+		}
+	}
+	warpAdd(&p.stats[0], nTicks); warpAdd(&p.stats[1], nRuns); warpAdd(&p.stats[2], nCut); warpAdd(&p.stats[3], nDead);
+}
+/** the touched slots [lo, hi): a cell reached sooner than the host knows is replayed from its pick's copy to the arrival
+ *  and written into the pool (a new cell gets the next dense id while the pool has room), with a record (dense id or -1,
+ *  tick, reach fifths, room, pick, run | step << 16); the batch's best is cleared for the next batch */
+template <int TW>
+__device__ void rollCollectBody(const RollParams& p) {
+	const u32 i = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= p.hi) return;
+	const u32 slot = p.touched[i];
+	const u64 v = p.best[slot];
+	p.best[slot] = ~0ull;
+	const u32 t = (u32)(v >> 40);
+	if (v == ~0ull || t >= p.doneT[slot]) return;
+	p.doneT[slot] = t;
+	const u32 pk = (u32)(v >> 20) & 0xfffffu, run = (u32)(v >> 8) & 0xfffu, step = (u32)v & 0xffu;
+	State<TW> s = *(const State<TW>*)(p.pickStates + (size_t)pk * p.stateBytes);
+	Sim<TW> sim(p.L, s);
+	Mulberry r; r.s = rollSeed(p.batchSeed, pk, run);
+	i32 m = option((i32)(r.next() * 18.0));
+	for (u32 k = 0; k <= step; k++) { m = rollDraw(r, p.keep, m); Input in = maskInput(m); sim.tick(in); }
+	i32 d = p.dense[slot];
+	if (d < 0) {
+		const u32 n = atomicAdd(&p.ctr[3], 1u);
+		if (n < p.denseCap) { d = (i32)n; p.dense[slot] = d; p.denseSlot[d] = slot; }
+	}
+	if (d >= 0) { *(State<TW>*)(p.pool + (size_t)d * p.stateBytes) = s; p.cellT[d] = (i32)t; }
+	const u32 q = atomicAdd(&p.ctr[2], 1u);
+	i32* o = p.out + 6 * (size_t)q;
+	o[0] = d; o[1] = (i32)t;
+	o[2] = p.reach.on ? reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) : -1;
+	o[3] = (i32)rollRoom<TW>(p, s); o[4] = (i32)pk; o[5] = (i32)(run | (step << 16));
+}
+/** the seen counts by dense id [lo, hi) (head B's novelty) */
+extern "C" __global__ void rollSeen(RollParams p) {
+	const u32 d = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	if (d < p.hi) p.seenOut[d] = p.seen[p.denseSlot[d]];
+}
+
 #define INSTANCE(TW) INSTANCE_(TW)
 #define INSTANCE_(TW) \
 	extern "C" __global__ void __launch_bounds__(128) search_##TW(SearchParams p) { searchBody<TW>(p); } \
@@ -583,7 +683,9 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	extern "C" __global__ void trace_##TW(Level L, const u8* masks, i32 t0, i32 t1, u64* out, const u32* coinBits0, u64 seed, i32* info, u8* state) { traceBody<TW>(L, masks, t0, t1, out, coinBits0, seed, info, state); } \
 	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 k0, i32 k1, u64 seed, unsigned long long* out, u8* states, u64* rng) { benchBody<TW>(L, state0, k0, k1, seed, out, states, rng); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
 	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
-	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; } \
+	extern "C" __global__ void __launch_bounds__(128) roll_##TW(RollParams p) { rollBody<TW>(p); } \
+	extern "C" __global__ void __launch_bounds__(128) rollCollect_##TW(RollParams p) { rollCollectBody<TW>(p); } \
+	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; out[8] = (i32)sizeof(RollParams); } \
 	extern "C" __global__ void __launch_bounds__(128) reachTest_##TW(ReachField R, const double* in, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; \
 		if (i < n) { const double* q = in + (size_t)i * 6; const RfPre pre = rfPre(R, q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifthsAt(R, pre, q[0], q[1], q[2]); score[i] = out[i] >= 0 ? reachScore(R, pre, q[0], q[1], q[2], out[i]) : -1.f; } }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)

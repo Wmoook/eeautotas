@@ -336,23 +336,23 @@ static std::string ptxFor(int argc, char** argv, int tw) {
 static int twFor(int tailWords) { return tailWords <= 8 ? 8 : tailWords <= 32 ? 32 : tailWords <= 128 ? 128 : tailWords <= 512 ? 512 : 0; }
 
 /** the kernels' struct sizes on the device (stateSize_<tw>): State<tw>, SearchParams, Hit, Level, BeamParams,
- *  ExploreParams, ReachField, and the reach file version they read; true when they match this tool's */
-static bool deviceLayout(Gpu& g, int tw, int sz[8]) {
-	for (int k = 0; k < 8; k++) sz[k] = 0;
+ *  ExploreParams, ReachField, the reach file version they read, RollParams; true when they match this tool's */
+static bool deviceLayout(Gpu& g, int tw, int sz[9]) {
+	for (int k = 0; k < 9; k++) sz[k] = 0;
 	cu::Buf out;
-	if (!out.alloc(32)) return false;
+	if (!out.alloc(64)) return false;
 	cu::CUfunction f = g.fn("stateSize_" + std::to_string(tw));
 	void* args[] = { &out.p };
 	if (!f) return false;
 	lk::launch(f, 1, 1, args, "stateSize");   // (launch.h: timed; a launch error ends the command with its launchError line)
-	cu::cuMemcpyDtoH_v2(sz, out.p, 32);
+	cu::cuMemcpyDtoH_v2(sz, out.p, 36);
 	const int state = tw == 8 ? (int)sizeof(State<8>) : tw == 32 ? (int)sizeof(State<32>) : tw == 128 ? (int)sizeof(State<128>) : (int)sizeof(State<512>);
 	return sz[0] == state && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level) &&
-		sz[4] == (int)sizeof(BeamParams) && sz[5] == (int)sizeof(ExploreParams) && sz[6] == (int)sizeof(ReachField) && sz[7] == REACH_VERSION;
+		sz[4] == (int)sizeof(BeamParams) && sz[5] == (int)sizeof(ExploreParams) && sz[6] == (int)sizeof(ReachField) && sz[7] == REACH_VERSION && sz[8] == (int)sizeof(RollParams);
 }
 /** beam / explore: refuse kernels built from other sources (their parameter structs would be read wrong) */
 static bool layoutOrError(Gpu& g, int tw) {
-	int sz[8];
+	int sz[9];
 	if (deviceLayout(g, tw, sz)) return true;
 	printf("{\"error\":\"the GPU kernels do not match this tool (rebuild it: node tools/build-native.js)\"}\n");
 	return false;
@@ -364,11 +364,11 @@ static int cmdInfo(int argc, char** argv) {
 		printf("{\"gpu\":null,\"reach\":%d,\"why\":%s}\n", REACH_VERSION, jsonStr(cu::lastError).c_str());
 		return 0;
 	}
-	int sz[8];
+	int sz[9];
 	const bool layoutOk = deviceLayout(g, 8, sz);
 	// every kernel's registers, local memory (the stack frame: spills and out-of-line calls) and block size limit
 	std::string fa;
-	for (const char* k : { "search_8", "twins_8", "trace_8", "bench_8", "beamExpand_8", "beamMaterialize_8", "exploreExpand_8", "exploreMaterialize_8",
+	for (const char* k : { "search_8", "twins_8", "trace_8", "bench_8", "beamExpand_8", "beamMaterialize_8", "exploreExpand_8", "exploreMaterialize_8", "roll_8", "rollCollect_8",
 			"beamSelInsert", "beamSelPick", "exploreClaimPropose", "exploreClaimTake", "reachTest_8" }) {
 		cu::CUfunction fs = g.fn(k);
 		int regs = -1, local = -1, maxT = -1;
@@ -381,9 +381,9 @@ static int cmdInfo(int argc, char** argv) {
 	// (2 of 4 on the RTX 3080 Laptop, 0 of 9 with this wait, 0 of 4 with CUDA_MODULE_LOADING=EAGER)
 	cu::cuCtxSynchronize();
 	printf("{\"module\":\"%s\",\"loadMs\":%.0f,\"kernels\":{%s},\"reach\":%d,", g.how.how.c_str(), g.loadMs, fa.c_str(), REACH_VERSION);
-	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d,%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d,%d,%d,%d,%d]%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
-		sz[0], sz[1], sz[2], sz[3], sz[4], sz[5], sz[6], sz[7], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level),
-		(int)sizeof(BeamParams), (int)sizeof(ExploreParams), (int)sizeof(ReachField), REACH_VERSION, lk::doneFields().c_str());
+	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"roll\":1%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
+		sz[0], sz[1], sz[2], sz[3], sz[4], sz[5], sz[6], sz[7], sz[8], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level),
+		(int)sizeof(BeamParams), (int)sizeof(ExploreParams), (int)sizeof(ReachField), REACH_VERSION, (int)sizeof(RollParams), lk::doneFields().c_str());
 	return 0;
 }
 
@@ -937,6 +937,7 @@ static int cmdBench(int argc, char** argv) {
 
 #include "beamhost.h"
 #include "explorehost.h"
+#include "rollhost.h"
 #include "prove.h"
 
 // ------------------------------------------------------------------ twins: the exactness check of the twin rule (CPU)
@@ -1192,7 +1193,7 @@ static int cmdReachTest(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|twins|reachtest|prove ...\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|roll|twins|reachtest|prove ...\n"); return 2; }
 	std::string cmd = argv[1];
 	if (cmd == "prove") return cmdProve(argc, argv);   // (CPU only: before anything that may touch the driver)
 	gCacheDir = opt(argc, argv, "cachedir", "");
@@ -1206,11 +1207,11 @@ int main(int argc, char** argv) {
 	const char* envPrio = getenv("EEGPU_PRIORITY");
 	const std::string prio = opt(argc, argv, "priority", envPrio && *envPrio ? envPrio : "high");
 #ifdef _WIN32
-	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench" || cmd == "roll") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 #else
 	// (Linux: nice -5, before any thread starts; a nice value below 0 needs root or CAP_SYS_NICE (a container may lack
 	// it): without, the call fails and the priority stays as it was)
-	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") (void)setpriority(PRIO_PROCESS, 0, -5);
+	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench" || cmd == "roll") && prio != "normal") (void)setpriority(PRIO_PROCESS, 0, -5);
 	// (a write to a pipe whose reader has gone fails, as on Windows, instead of killing the process, possibly mid-kernel:
 	// it ends at its next launch through --parent or its stop file)
 	signal(SIGPIPE, SIG_IGN);
@@ -1231,6 +1232,7 @@ int main(int argc, char** argv) {
 	if (cmd == "bench") return cmdBench(argc, argv);
 	if (cmd == "beam") return cmdBeam(argc, argv);
 	if (cmd == "explore") return cmdExplore(argc, argv);
+	if (cmd == "roll") return cmdRoll(argc, argv);
 	if (cmd == "twins") return cmdTwins(argc, argv);
 	fprintf(stderr, "unknown command %s\n", argv[1]);
 	return 2;

@@ -170,6 +170,57 @@ check('trace --gpu: every tick\'s hashes equal the native CPU trace', same);
 const ts = eegpu(['trace', bin, lf, path.join(TMP, 'trace_split.bin'), '--gpu', '--launch-items=7']);
 const sameSplit = ts.code === 0 && fs.existsSync(path.join(TMP, 'trace_split.bin')) && fs.readFileSync(path.join(TMP, 'trace_split.bin')).subarray(24).equals(fs.readFileSync(path.join(TMP, 'trace_cpu.bin')).subarray(24));
 check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summary(ts).kernelLaunches} launches`);
+// 6. the random runs (eegpu roll, Find a route's "random runs (GPU)"): 3 batches of 512 picks of the start cell, 8 runs of
+// 40 ticks each. Every record (a new cell's earliest arrival) is replayed here from its seed in the JS engine: the tick,
+// the reach field's fifths and the room (goexplore.js roomOf) must be the GPU's; split into launches of 128 runs / cells
+// the batches give the same records (the dense ids apart: they are handed out in the GPU's order)
+{
+	const GX = require('../src/goexplore.js');
+	const field = RF.reachField(level), RM = GX.roomOf(level);
+	const K = 512, seeds = [11, 12, 13];
+	const job = Buffer.concat(seeds.flatMap((sd) => [Buffer.from(`batch ${K} 100000 ${sd}\n`), Buffer.alloc(4 * K)]).concat([Buffer.from('stop\n')]));
+	const roll = (extra) => {
+		const full = ['roll', bin, `--reach=${reach}`, '--rolls=8', '--roll=40', '--cap=65536', `--launch-ms=${TARGET}`, ...extra, ...(args.ptxdir ? [`--ptxdir=${path.resolve(args.ptxdir)}`] : [])];
+		const [cmd, argv] = LOCK ? [process.execPath, [LOCK, TOOL, ...full]] : [TOOL, full];
+		const t0 = Date.now();
+		const r = spawnSync(cmd, argv, { input: job, maxBuffer: 1 << 28, timeout: (LOCK ? 3600 : 120) * 1000, windowsHide: true });
+		const out = r.stdout || Buffer.alloc(0), lines = [], batches = [];
+		for (let o = 0; o < out.length;) {
+			const k = out.indexOf(10, o);
+			if (k < 0) break;
+			let ev = {};
+			try { ev = JSON.parse(out.subarray(o, k).toString('utf8')); } catch (e) { /* not JSON */ }
+			o = k + 1;
+			lines.push(ev);
+			if (ev.ev === 'batch') {
+				const recs = [];
+				for (let j = 0; j < ev.n; j++) { const q = o + 24 * j; recs.push([out.readInt32LE(q), out.readInt32LE(q + 4), out.readInt32LE(q + 8), out.readInt32LE(q + 12), out.readInt32LE(q + 16), out.readInt32LE(q + 20)]); }
+				batches.push(recs);
+				o += ev.bytes;
+			}
+		}
+		return { code: r.status, lines, ms: Date.now() - t0, err: String(r.stderr || '').trim().split('\n').pop(), batches };
+	};
+	const a = roll([]);
+	bound('roll (3 batches of 512 picks x 8 runs x 40 ticks)', a);
+	let bad = 0, n = 0;
+	const sim = new E.EESim(level), inp = new E.EEInput();
+	a.batches.forEach((recs, bi) => {
+		for (const [d, t, fifths, room, pk, rs] of recs) {
+			const ms = new Uint8Array((rs >>> 16) + 1);
+			GX.rollInputs(GX.rollSeed(seeds[bi], pk, rs & 0xffff), ms.length, 0.85, ms, 0);
+			sim.reset();
+			for (const x of ms) { E.applyMask(inp, x); sim.tick(inp); }
+			n++;
+			if (d < 0 || ms.length !== t || RF.fifthsAt(field, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery) !== fifths || (RM.key(sim) | 0) !== room) bad++;
+		}
+	});
+	check('roll: every new cell\'s state, replayed from its seed in the JS engine, has the GPU\'s tick, reach cost and room', n > 100 && bad === 0, `${n} cells, ${bad} different`);
+	const b2 = roll(['--launch-items=128']);
+	const key = (r) => r.batches.map((recs) => recs.map((x) => x.slice(1).join(',')).sort().join(';')).join('|');
+	check('roll split into launches of 128 runs / cells: the same records', b2.code === 0 && key(a) === key(b2) && summary(b2).kernelLaunches > summary(a).kernelLaunches,
+		`${a.batches.map((x) => x.length).join(' + ')} records; ${summary(a).kernelLaunches} launches vs ${summary(b2).kernelLaunches}`);
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);
