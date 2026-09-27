@@ -78,6 +78,18 @@
 // depends only on the machine and the workers, so one worker with --maxTicks is reproducible on it (give --mem to
 // reproduce a run on another machine).
 //
+// GPU (--gpu=1, coarse cells only; the editor's "random runs (GPU)"): the same search with its runs on the GPU (`eegpu
+// roll`, native/rollhost.h). This process keeps the archive (typed arrays by the GPU's dense cell id) and the rooms, and
+// picks --batch cells at a time with the three heads exactly as above, one pick after the other; the GPU keeps one state
+// per cell, plays --rolls runs of --roll ticks per pick with the same inputs (mulberry32 seeded by (batch seed, pick,
+// run): rollSeed / rollInputs rebuild them here, so a cell's path is its parent's plus a run's seed and length), keeps
+// each cell's earliest arrival and reports the new and sooner cells (tick, reach cost, room). A batch is one generation
+// of the frontier (the next one's picks see its cells), so its latency decides: 4096 x 8 x 40 found ice200's route after
+// 8 s on the rented H100 (6 seeds; 1024 / 2048 / 16384 picks: 12.4 / 8.2 / 16.3 s; runs of 20 / 80 ticks slower too).
+// Every route is replayed in the exact JS engine; the reach field's -1 is still the only prune (in the kernel).
+//   [--gpu=1] [--batch=4096] [--gmem=<MB for the GPU's pool>] [--tool=<eegpu>] [--bin=<level blob>] [--reach=<RCH3 file>]
+//   [--stopfile= --pausefile= --cachedir= --launch-ms= (passed to eegpu)]
+//
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
@@ -1049,7 +1061,7 @@ async function gpuMain(a, L) {
 	let end = startCost < 0 && a.prune ? 'unreachable' : '';
 	// ---- the events (explore()'s and main()'s)
 	let ticks = 0, picks = 0, batches = 0, deepest = 0, minRc = cRc[0], full = false, gpuMs = 0, hostMs = 0, rollMs = 0, kernelMs = 0, records = 0, touched = 0, colMs = 0, rollWallMs = 0,
-		pickMs = 0, seenMs = 0, waitMs = 0;
+		pickMs = 0, seenMs = 0, waitMs = 0, reordered = 0;
 	let near = { rc: cRc[0], t: 0, c: 0 }, nearSent = null;
 	let route = null, first = null;
 	const samples = [[Date.now(), 0]];
@@ -1173,13 +1185,17 @@ async function gpuMain(a, L) {
 		const n = m.ev.n, nf = m.ev.fin;
 		const rec = new Int32Array(m.data ? m.data.buffer.slice(m.data.byteOffset, m.data.byteOffset + 24 * n) : new ArrayBuffer(0));
 		bFirst.length = 0;
+		// (new cells: the dense ids from this batch's on; they come in any order, a record's index and its new id are two
+		// separate atomics: judged by the count before the batch, else a new id below one read before was taken for a known
+		// cell and dropped)
+		const n0 = nCells;
 		for (let j = 0; j < n; j++) {
 			const d = rec[6 * j], t = rec[6 * j + 1], fifths = rec[6 * j + 2], roomKey = rec[6 * j + 3], pk = rec[6 * j + 4], rs = rec[6 * j + 5];
 			if (d < 0) continue;   // (the pool is full: not kept)
 			const run = rs & 0xffff, step = rs >>> 16;
 			const node = newNode(pickNode[pk], rollSeed(bs, pk, run), step + 1);
-			const isNew = d >= nCells;
-			if (isNew) { grow(d + 1); if (d + 1 > nCells) nCells = d + 1; cPicks[d] = 0; cVer[d] = 0; cSeen[d] = 0; }
+			const isNew = d >= n0;
+			if (isNew) { grow(d + 1); if (d < nCells) reordered++; else nCells = d + 1; cPicks[d] = 0; cVer[d] = 0; cSeen[d] = 0; }
 			else if (t >= cT[d]) continue;
 			cT[d] = t; cNode[d] = node;
 			const rc = costOf(fifths, node);
@@ -1247,7 +1263,7 @@ async function gpuMain(a, L) {
 	sendNear();
 	const secs = (Date.now() - tReady) / 1000;
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
-		finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs),
+		finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
 		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10,
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
