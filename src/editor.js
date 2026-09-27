@@ -1023,6 +1023,19 @@ function breakGate(inputs) {
 // the breaker's earlier gates) restarts it, and no round runs past BREAK_ROUND_MAX x BREAK_ROUND_S. `b.breakFrontNew ===
 // false`: every gate restarts it, no cap (29ebfd5).
 const BREAK_ROUND_MAX = 2;
+/** the seconds round R has left at now (ms): roundS from its last new gate (R.clock) or its start, and never past
+ *  BREAK_ROUND_MAX x roundS from its start (cap false: no cap, 29ebfd5) */
+function breakRoundLeft(R, now, roundS, cap) {
+	return Math.min(roundS - (now - (R.clock || R.t0)) / 1000, (cap ? BREAK_ROUND_MAX : Infinity) * roundS - (now - R.t0) / 1000);
+}
+/** a gate hit into room (a room key; null: not known) restarts the round's clock: a room no attempt was in (seen) and no
+ *  earlier gate of the breaker entered (gateRooms, which it joins); newOnly false: every gate (29ebfd5) */
+function gateRestarts(room, seen, gateRooms, newOnly) {
+	const known = room === null || room === undefined;
+	const fresh = !known && !seen.has(room) && !gateRooms.has(room);
+	if (!known) gateRooms.add(room);
+	return fresh || !newOnly;
+}
 /** the room key (goexplore.js roomOf) after inputs, or null */
 function gateRoom(inputs) {
 	try {
@@ -1110,9 +1123,7 @@ function breakLaunch(n) {
 		if (src) { src.brk = (src.brk || 0) + 1; publishSources(); }
 		R.chain = { inputs: st.inputs, step: 1, grain: 0, what: st.what };
 	}
-	// (the round's clock from its last new gate, and never past BREAK_ROUND_MAX x BREAK_ROUND_S from its start)
-	const roundLeft = Math.min(cur.opts.breakRound - (Date.now() - (R.clock || R.t0)) / 1000,
-		(cur.opts.breakFrontNew ? BREAK_ROUND_MAX : Infinity) * cur.opts.breakRound - (Date.now() - R.t0) / 1000), left = S.seconds - searchClock(Date.now());
+	const roundLeft = breakRoundLeft(R, Date.now(), cur.opts.breakRound, cur.opts.breakFrontNew), left = S.seconds - searchClock(Date.now());
 	if (!R.chain || S.result || roundLeft < 3 || left < 3) return breakEnd(n);
 	const ch = R.chain, file = path.join(dir(), `break_${n}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(ch.inputs, 'latin1')); } catch (e) { return breakEnd(n); }
@@ -1158,9 +1169,7 @@ function breakAfter(n, how) {
 		// last gate first: breakStarts)
 		if (cur.opts.breakFront) {
 			brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 };
-			const room = gateRoom(hit), fresh = room !== null && !brk.seen.has(room) && !brk.gateRooms.has(room);
-			if (room !== null) brk.gateRooms.add(room);
-			if (fresh || !cur.opts.breakFrontNew) R.clock = Date.now();
+			if (gateRestarts(gateRoom(hit), brk.seen, brk.gateRooms, cur.opts.breakFrontNew)) R.clock = Date.now();
 		}
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
 	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
@@ -2474,4 +2483,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, breakRoundLeft, gateRestarts, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

@@ -739,6 +739,19 @@ async function passesSection() {
 	// the table by the GPU's memory (BREAK_MEM_F at 16 bytes a cell): 8 GB 2^27, 24 GB 2^29, 40 GB 2^30, 80 GB 2^31
 	check("the wall breaker's table: 2^27 cells on 8 GB, 2^29 on 24 GB, 2^30 on 40 GB (40,326 MB), 2^31 on 80 GB (81,559 MB)",
 		[8192, 24564, 40326, 81559].map(ED.breakCells).join() === '27,29,30,31', [8192, 24564, 40326, 81559].map(ED.breakCells).join());
+	// the gate front's clock (cycle 6: Forgotten Veil's round 1 ran 2,027 s, every gate hit restarting it): only a gate into
+	// a room key no attempt had been in and no earlier gate entered restarts it, and a round ends by 2 x its time
+	{
+		const seen = new Set([11, 12]), gates = new Set();
+		const hits = [11, 13, 13, 12, 14, null].map((room) => ED.gateRestarts(room, seen, gates, true));
+		const old = [11, 13, 13].map((room) => ED.gateRestarts(room, seen, new Set(), false));
+		// a round started at 0 whose last new gate was at 250 s: 300 s from there, but 600 s from its start at most
+		const R = { t0: 0, clock: 250000 }, R2 = { t0: 0, clock: 500000 };
+		const left = [ED.breakRoundLeft(R, 400000, 300, true), ED.breakRoundLeft(R2, 550000, 300, true), ED.breakRoundLeft(R2, 550000, 300, false), ED.breakRoundLeft({ t0: 0 }, 100000, 300, true)];
+		check("the wall breaker's gate front: a gate restarts the round's clock only into a new room key (not a source's, not an earlier gate's); a round ends by 2 x BREAK_ROUND_S; the old rule without either",
+			hits.join() === 'false,true,false,false,true,false' && old.join() === 'true,true,true' && left.join() === '150,50,250,200' && [...gates].join() === '11,13,12,14',
+			`restarts ${hits.join()}; old ${old.join()}; left ${left.join()}; gate rooms ${[...gates].join()}`);
+	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
