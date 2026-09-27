@@ -52,6 +52,7 @@ struct ExploreParams {
 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
 	i32 prune;
 	i32 maxFifths;                     // > 0 (--costslack): states the reach field puts farther from the trophy are dropped
+	SteerField steer;                  // when on (--steer): the priority, the closest attempt and --costslack read it (never the prune)
 	unsigned long long* stats;         // [0] ticks simulated, [1] children skipped as twins of a lower option (search.h canonOption)
 	// near-miss refinement (explorehost.h --refine=1): the situations (exploreSituation) in which cells are rfx x finer in
 	// px and rfv x finer in vx (an open-addressing set, 0 = empty; null = off)

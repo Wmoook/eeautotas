@@ -93,6 +93,7 @@ const C = require('./common.js');
 const E = C.E;
 const EL = require('./eelvl.js');
 const RF = require('./reach.js');
+const SF = require('./steer.js');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
 const OPTIONS = [];
@@ -102,7 +103,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
-	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50 };
+	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50, steerDist: 1, mix: 0.5 };
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory (V8 heap, measured): a cell without its snapshot about 260 bytes (coarse cells: 300, with their room and
 // counts), a snapshot about 1150; each gets 45% of a worker's --mem
@@ -117,7 +118,7 @@ const MEM_SHARE = 0.25, MEM_MIN = 200, MEM_MAX = 1500;
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '' });
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) {
@@ -125,7 +126,7 @@ function parseArgs(argv) {
 			a.file = s;
 			continue;
 		}
-		if (m[1] === 'level' || m[1] === 'out') a[m[1]] = m[2];
+		if (m[1] === 'level' || m[1] === 'out' || m[1] === 'steer') a[m[1]] = m[2];
 		else if (m[1] === 'cells') {
 			if (!['auto', 'fine', 'coarse'].includes(m[2])) throw new Error(`bad --cells=${m[2]} (auto, fine or coarse)`);
 			a.cells = m[2];
@@ -404,6 +405,67 @@ function inputsOf(node) {
 	return out;
 }
 
+/** a min-heap of (priority, cell, version) entries; prio(cell) at push. pop() returns the cell and sets popVer (the
+ *  entry's version: stale when the cell's own has moved on); compact() drops the stale entries */
+function heapOf(prio) {
+	const hv = [], hc = [], hver = [];
+	const H = { popVer: 0, size: () => hv.length };
+	H.push = (c) => {
+		let i = hv.length;
+		const v = prio(c);
+		hv.push(v); hc.push(c); hver.push(c.ver);
+		while (i > 0) {
+			const p = (i - 1) >> 1;
+			if (hv[p] <= v) break;
+			hv[i] = hv[p]; hc[i] = hc[p]; hver[i] = hver[p];
+			i = p;
+		}
+		hv[i] = v; hc[i] = c; hver[i] = c.ver;
+	};
+	H.pop = () => {
+		const c = hc[0];
+		H.popVer = hver[0];
+		const v = hv.pop(), lc = hc.pop(), lver = hver.pop();
+		const n = hv.length;
+		if (n > 0) {
+			let i = 0;
+			for (;;) {
+				const l = 2 * i + 1, r = l + 1;
+				let m = i, mv = v;
+				if (l < n && hv[l] < mv) { m = l; mv = hv[l]; }
+				if (r < n && hv[r] < mv) { m = r; mv = hv[r]; }
+				if (m === i) break;
+				hv[i] = hv[m]; hc[i] = hc[m]; hver[i] = hver[m];
+				i = m;
+			}
+			hv[i] = v; hc[i] = lc; hver[i] = lver;
+		}
+		return c;
+	};
+	H.compact = () => {
+		let n = 0;
+		for (let i = 0; i < hv.length; i++) if (hver[i] === hc[i].ver) { hv[n] = hv[i]; hc[n] = hc[i]; hver[n] = hver[i]; n++; }
+		hv.length = n; hc.length = n; hver.length = n;
+		for (let i = (n >> 1) - 1; i >= 0; i--) {
+			const v = hv[i], c = hc[i], ver = hver[i];
+			let j = i;
+			for (;;) {
+				const l = 2 * j + 1, r = l + 1;
+				let m = j, mv = v;
+				if (l < n && hv[l] < mv) { m = l; mv = hv[l]; }
+				if (r < n && hv[r] < mv) { m = r; mv = hv[r]; }
+				if (m === j) break;
+				hv[j] = hv[m]; hc[j] = hc[m]; hver[j] = hver[m];
+				j = m;
+			}
+			hv[j] = v; hc[j] = c; hver[j] = ver;
+		}
+	};
+	return H;
+}
+// a cell's steer cost when the steer field has no value for its state (behind every valued one; the research's 1e5)
+const STEER_NONE = 1e5;
+
 /**
  * One explorer (a worker thread; a = the options, settled for the level, seed its seed). ctrl (Int32Array on a
  * SharedArrayBuffer): [0] the longest route that still counts (ticks), [1] stop. post(msg): to the main thread
@@ -470,61 +532,19 @@ function explore(L, field, a, seed, ctrl, post) {
 	};
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
 	const cells = new Map();
-	const hv = [], hc = [], hver = [];
-	const prio = (c) => c.rc + a.lambda * Math.sqrt(c.picks);
-	const hpush = (c) => {
-		let i = hv.length;
-		const v = prio(c);
-		hv.push(v); hc.push(c); hver.push(c.ver);
-		while (i > 0) {
-			const p = (i - 1) >> 1;
-			if (hv[p] <= v) break;
-			hv[i] = hv[p]; hc[i] = hc[p]; hver[i] = hver[p];
-			i = p;
-		}
-		hv[i] = v; hc[i] = c; hver[i] = c.ver;
-	};
-	let popVer = 0;
-	const hpop = () => {
-		const c = hc[0];
-		popVer = hver[0];
-		const v = hv.pop(), lc = hc.pop(), lver = hver.pop();
-		const n = hv.length;
-		if (n > 0) {
-			let i = 0;
-			for (;;) {
-				const l = 2 * i + 1, r = l + 1;
-				let m = i, mv = v;
-				if (l < n && hv[l] < mv) { m = l; mv = hv[l]; }
-				if (r < n && hv[r] < mv) { m = r; mv = hv[r]; }
-				if (m === i) break;
-				hv[i] = hv[m]; hc[i] = hc[m]; hver[i] = hver[m];
-				i = m;
-			}
-			hv[i] = v; hc[i] = lc; hver[i] = lver;
-		}
-		return c;
-	};
-	/** the heap without its stale entries (when they are most of it) */
-	const compact = () => {
-		let n = 0;
-		for (let i = 0; i < hv.length; i++) if (hver[i] === hc[i].ver) { hv[n] = hv[i]; hc[n] = hc[i]; hver[n] = hver[i]; n++; }
-		hv.length = n; hc.length = n; hver.length = n;
-		for (let i = (n >> 1) - 1; i >= 0; i--) {
-			const v = hv[i], c = hc[i], ver = hver[i];
-			let j = i;
-			for (;;) {
-				const l = 2 * j + 1, r = l + 1;
-				let m = j, mv = v;
-				if (l < n && hv[l] < mv) { m = l; mv = hv[l]; }
-				if (r < n && hv[r] < mv) { m = r; mv = hv[r]; }
-				if (m === j) break;
-				hv[j] = hv[m]; hc[j] = hc[m]; hver[j] = hver[m];
-				j = m;
-			}
-			hv[j] = v; hc[j] = c; hver[j] = ver;
-		}
-	};
+	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks));
+	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
+	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out
+	const ST = a.steerData || null;
+	const HS = ST ? heapOf((c) => c.sc + a.lambda * Math.sqrt(c.picks)) : null;
+	const hpush = HS ? (c) => { HA.push(c); HS.push(c); } : (c) => HA.push(c);
+	const compact = () => { HA.compact(); if (HS) HS.compact(); };
+	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
+	const steerOf = () => { const v = SF.steerFifths(ST, sim); return v < 0 ? STEER_NONE : v / 5; };
+	// (--steerDist: the closest attempt's and the sources' distances by the steer field, 6000 + the reach field's cost where
+	// it has no value: native/beam.h steerMiss)
+	const distBySteer = !!ST && a.steerDist !== 0;
+	const distOf = (c) => (!distBySteer ? c.rc : c.sc < STEER_NONE ? c.sc : Math.min(9990, 6000 + c.rc));
 	// Snapshots (about 1150 bytes each) only for picked cells, at most --maxSnaps of them. A cell that was not picked yet
 	// (most never are) is its parent cell (the one whose runs reached it; `gen` counts the parent's state changes) plus
 	// the inputs of its run so far (node.buf[node.o ..+ node.n)): its first pick replays those from the parent's snapshot,
@@ -559,20 +579,29 @@ function explore(L, field, a, seed, ctrl, post) {
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = { up, buf, o, n }; c.rc = rc; c.gen++; c.ver++;
+			if (ST) { c.sc = steerOf(); nearSteer(c); }
 			hpush(c);
-			if (room !== null && (room.best === null || rc < room.best.rc)) room.best = c;
+			if (room !== null && (room.best === null || distOf(c) < distOf(room.best))) room.best = c;
 			return null;
 		}
 		if (cells.size >= a.maxCells) { full = true; return null; }
-		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
+		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, sc: 0, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
+		if (ST) { nc.sc = steerOf(); nearSteer(nc); }
 		cells.set(k, nc);
 		hpush(nc);
 		if (t > deepest) deepest = t;
 		if (room !== null) {
 			room.arr.push(nc);
-			if (room.best === null || rc < room.best.rc) room.best = nc;
+			if (room.best === null || distOf(nc) < distOf(room.best)) room.best = nc;
 		}
 		return nc;
+	};
+	/** --steerDist: the closest state by the steer field, among new and improved cells (the steer cost is computed only
+	 *  for those) */
+	const nearSteer = (c) => {
+		if (!distBySteer) return;
+		const d = distOf(c);
+		if (!near || d < near.rc - 1e-3 || (d <= near.rc + 1e-3 && c.t < near.t)) near = { rc: d, t: c.t, node: c.node };
 	};
 	let end = '';
 	/** the reach cost of the live state (tiles); -1 = ruled out. With --prune=0 (the editor's check of a level the reach
@@ -590,7 +619,7 @@ function explore(L, field, a, seed, ctrl, post) {
 		const rc = costOf();
 		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, 0); room0.isNew = false; }
 		const k = cellKey();
-		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false };
+		const c = { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, sc: ST ? steerOf() : 0, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false };
 		cells.set(k, c);
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
@@ -612,7 +641,7 @@ function explore(L, field, a, seed, ctrl, post) {
 	let lastBlandSource = -1e9, lastSources = t0;
 	const source = (kind, r, c) => {
 		r.sent++; r.sentAt = c;
-		post({ type: 'source', seed, kind, room: r.key, desc: r.desc, gain: r.gain, t: c.t, rc: c.rc, inputs: C.eetasBytes(inputsOf(c.node)).toString('latin1') });
+		post({ type: 'source', seed, kind, room: r.key, desc: r.desc, gain: r.gain, t: c.t, rc: distOf(c), inputs: C.eetasBytes(inputsOf(c.node)).toString('latin1') });
 	};
 	/** every SOURCE_S s: the lowest-cost cell of the 4 rooms with the most territory gain and the fewest sources so far
 	 *  (by (1 + ln(1 + gain)) / (1 + sources)), when it is not the one already sent */
@@ -622,11 +651,13 @@ function explore(L, field, a, seed, ctrl, post) {
 		cand.sort((x, y) => (1 + Math.log(1 + y.gain)) / (1 + y.sent) - (1 + Math.log(1 + x.gain)) / (1 + x.sent) || x.t - y.t);
 		for (let k = 0; k < 4 && k < cand.length; k++) source('best', cand[k], cand[k].best);
 	};
-	// the picks: head A, the lowest priority whose entry is live and whose state is early enough
+	// the picks: head A, the lowest priority whose entry is live and whose state is early enough (with --steer from the
+	// steer field's heap --mix of the time)
 	const popA = () => {
-		while (hv.length) {
-			const c = hpop();
-			if (popVer !== c.ver || c.t >= maxT) continue;
+		const H = HS !== null && rnd() < a.mix ? HS : HA;
+		while (H.size() > 0) {
+			const c = H.pop();
+			if (H.popVer !== c.ver || c.t >= maxT) continue;
 			return c;
 		}
 		return null;
@@ -695,7 +726,7 @@ function explore(L, field, a, seed, ctrl, post) {
 				e.pc = null;
 			}
 			e.used = true;
-			if (hv.length > 3 * cells.size + 4096) compact();
+			if (HA.size() > 3 * cells.size + 4096) compact();
 			// stuck: finer cells around here
 			if (picks - lastProgress > a.stall && e.picks % a.refine === 0) {
 				lastProgress = picks;
@@ -744,7 +775,7 @@ function explore(L, field, a, seed, ctrl, post) {
 						if (roomKey !== room.key) room = rooms.get(roomKey) || newRoom(roomKey, t);
 					}
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
-					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, node: { up, buf, o, n: s + 1 } };
+					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) near = { rc, t, node: { up, buf, o, n: s + 1 } };
 					const nc = add(t, rc, e, up, buf, o, s + 1, room);
 					if (nc !== null && room !== null && room.isNew) {
 						// a new room's first cell: head C's burst and a source, if it opens new territory
@@ -769,7 +800,9 @@ function explore(L, field, a, seed, ctrl, post) {
 function workerMain() {
 	const d = workerData;
 	const L = levelOf(d.a);
-	explore(L, d.field, d.a, d.seed, d.ctrl, (m) => parentPort.postMessage(m));
+	// (the steer field: views on the main thread's shared bytes, no copy per worker)
+	const a = d.steerBuf ? Object.assign({}, d.a, { steerData: SF.readSteerFile(Buffer.from(d.steerBuf)) }) : d.a;
+	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m));
 }
 
 async function main() {
@@ -790,7 +823,27 @@ async function main() {
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);
-	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, mem: a.mem, maxCells: a.maxCells,
+	// --steer=<RCH4 file> (the editor's, src/steer.js) or --steer=build: the steer field in shared memory for the workers'
+	// second goal heap; a file of another level (or one that cannot be read) is ignored with a warning
+	let steerBuf = null, steerNote = null;
+	if (a.steer) {
+		try {
+			const bytes = a.steer === 'build' ? SF.steerFileBytes(SF.buildSteer(L)) : fs.readFileSync(a.steer);
+			const sab = new SharedArrayBuffer(bytes.length);
+			new Uint8Array(sab).set(bytes);
+			const sd = SF.readSteerFile(Buffer.from(sab));
+			if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
+			if (sd.levelFp[0] || sd.levelFp[1]) {
+				let fp = null;
+				try { const G = require('./gpu.js'); fp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take: the size check only */ }
+				if (fp && (fp[0] >>> 0 !== sd.levelFp[0] || fp[1] >>> 0 !== sd.levelFp[1])) throw new Error('it was made for another level');
+			}
+			steerBuf = sab;
+			const s0 = SF.steerAt(sd, sim0);
+			steerNote = { layers: sd.S, bodies: sd.bodies.length, coinDP: sd.dp ? sd.dp.n : 0, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null, mix: a.mix, dist: a.steerDist !== 0 };
+		} catch (e) { say({ ev: 'warning', text: `the steer field is not used: ${e.message}` }); }
+	}
+	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, steer: steerNote, mem: a.mem, maxCells: a.maxCells,
 		maxSnaps: a.maxSnaps });
 	// the fastest verified route; the closest state
 	let route = null, first = null, near = null, nearPending = false;
@@ -872,7 +925,7 @@ async function main() {
 	};
 	await Promise.all(seeds.map((seed) => new Promise((res) => {
 		// (the heap limit leaves room above the budget: the sizes per cell and snapshot are estimates)
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field }, resourceLimits: { maxOldGenerationSizeMb: Math.round(a.mem * 2 + 256) } });
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf }, resourceLimits: { maxOldGenerationSizeMb: Math.round(a.mem * 2 + 256) } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
 		w.on('exit', () => res());

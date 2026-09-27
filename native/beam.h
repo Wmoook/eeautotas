@@ -190,6 +190,115 @@ EE_HD float reachScore(const ReachField& R, const RfPre& pre, double px, double 
 	return (float)(w > 1e-9 ? v / w / 5.0 : own / 5.0);
 }
 
+/** The steer field v4 (src/steer.js, the RCH4 file): a gate-aware progress measure for ORDERING only (the explore's
+ *  priority and closest attempt, the relay's cost ceiling, the beam's goal score; never a prune: that stays the RCH3
+ *  field's -1). The ball's layer (its keys, switches, team, protection, coin counts, crown, effects: the features) picks
+ *  a reach field (a body) of the level as it is in that layer; on a tile that changes the layer the least of the 8
+ *  neighbours + a step; below the coin threshold the distinct-coin DP (leg bodies + h) too, the least of both. The same
+ *  numbers as steer.js steerFifths / steerScore (eegpu steertest, test/steer.js). on = 0: not loaded. */
+struct SteerField {
+	const i32* feat;            // nFeat x (kind, param, radix, stride)
+	const i32* team;            // the team feature's values
+	const i32* layerBody;       // S: the layer's body (-1: none)
+	const ReachField* bodies;   // nBodies
+	const u8* goal;             // nBodies x N: the tiles that change the body's layer
+	const i32* dpBit; const i32* dpLeg; const float* dpH;   // the coin DP (dpN > 0)
+	i32 nFeat, nTeam, S, nBodies, W, H, prioShift, dpN, dpT, on;
+};
+/** the ordering cost (tiles) of a state the steer field has no value for (a layer it did not build): behind every valued
+ *  one, still ordered by the reach field's cost; below 1e4 (the closest attempt's "cut off" mark) */
+EE_HD float steerMiss(float reachTiles) { const float v = 6000.f + reachTiles; return v < 9990.f ? v : 9990.f; }
+/** the ball's layer: sum of its features' value indices x stride */
+template <int TW>
+EE_HD i32 steerLayer(const SteerField& F, const Level& L, const State<TW>& s) {
+	i32 lay = 0;
+	for (i32 k = 0; k < F.nFeat; k++) {
+		const i32 kind = F.feat[4 * k], p = F.feat[4 * k + 1], radix = F.feat[4 * k + 2], stride = F.feat[4 * k + 3];
+		i32 v = 0;
+		if (kind == 1) v = (s.keysMask >> p) & 1;
+		else if (kind == 2) { const i32 j = findSorted(L.swIds, L.nSw, p); v = j >= 0 && ((s.w[L.offSw + (j >> 5)] >> (j & 31)) & 1u) ? 1 : 0; }
+		else if (kind == 3) { const i32 j = findSorted(L.oswIds, L.nOsw, p); v = j >= 0 && ((s.w[L.offOsw + (j >> 5)] >> (j & 31)) & 1u) ? 1 : 0; }
+		else if (kind == 4) { for (i32 j = 0; j < F.nTeam; j++) if (F.team[j] == s.team) { v = j; break; } }
+		else if (kind == 5) v = s.is_invulnerable ? 1 : 0;
+		else if (kind == 6) v = s.coins < radix - 1 ? s.coins : radix - 1;
+		else if (kind == 7) v = s.blue_coins < radix - 1 ? s.blue_coins : radix - 1;
+		else if (kind == 8) v = s.collide_crown ? 1 : 0;
+		else if (kind == 9) v = (!s.has_levitation && s.flip_gravity == 0 && s.max_jumps == 1 && s.jump_boost == 0 && s.speed_boost == 0 && !s.low_gravity) ? 0 : 1;
+		lay += v * stride;
+	}
+	return lay;
+}
+/** body b's cost of a ball (fifths, -1 none): on a tile that changes the layer, the least of the 8 neighbours + a step */
+EE_HD i32 steerBodyFifths(const SteerField& F, i32 b, const RfPre& pre, double px, double py, double vy) {
+	const ReachField& R = F.bodies[b];
+	const i32 tx = truncI(px + 8.0) >> 4, ty = truncI(py + 8.0) >> 4;
+	if (tx >= 0 && ty >= 0 && tx < F.W && ty < F.H && F.goal[(size_t)b * F.W * F.H + (size_t)ty * F.W + tx]) {
+		i32 v = -1;
+		for (i32 dy = -1; dy <= 1; dy++) for (i32 dx = -1; dx <= 1; dx++) {
+			if (!dx && !dy) continue;
+			const i32 c = rfFifthsAt(R, pre, px + 16.0 * dx, py + 16.0 * dy, vy);
+			if (c < 0 || c >= RF_CUT - 1) continue;
+			const i32 w = c + (dx && dy ? 7 : 5);
+			if (v < 0 || w < v) v = w;
+		}
+		return v;
+	}
+	const i32 c = rfFifthsAt(R, pre, px, py, vy);
+	return c >= RF_CUT - 1 ? -1 : c;
+}
+/** the steer cost of a state (fifths; -1 = no value); layerOut: its layer's body (-1 none) and whether the value is the
+ *  body's plain lookup (for steerScore) */
+template <int TW>
+EE_HD i32 steerFifthsS(const SteerField& F, const Level& L, const State<TW>& s, i32* plainBody) {
+	const i32 lay = steerLayer<TW>(F, L, s);
+	const i32 b = lay >= 0 && lay < F.S ? F.layerBody[lay] : -1;
+	i32 v = -1;
+	if (plainBody) *plainBody = -1;
+	if (b >= 0) {
+		const RfPre pre = rfPre(F.bodies[b], s.speed_y, s.q0, s.q1, s.slippery);
+		v = steerBodyFifths(F, b, pre, s.px, s.py, s.speed_y);
+		if (plainBody) {
+			const i32 tx = truncI(s.px + 8.0) >> 4, ty = truncI(s.py + 8.0) >> 4;
+			const bool onGoal = tx >= 0 && ty >= 0 && tx < F.W && ty < F.H && F.goal[(size_t)b * F.W * F.H + (size_t)ty * F.W + tx];
+			if (!onGoal) *plainBody = b;
+		}
+	}
+	if (F.dpN > 0 && s.coins < F.dpT) {
+		u32 m = 0;
+		for (i32 i = 0; i < F.dpN; i++) { const i32 cb = F.dpBit[i]; if (cb >= 0 && ((s.w[L.offCoin + (cb >> 5)] >> (cb & 31)) & 1u)) m |= 1u << i; }
+		double best = 1e300;
+		for (i32 q = 0; q < F.dpN; q++) {
+			if (m & (1u << q)) continue;
+			const float rest = F.dpH[(size_t)(m | (1u << q)) * F.dpN + q];
+			if (!(rest < 3.0e38f)) continue;
+			const i32 lb = F.dpLeg[q];
+			const RfPre pre = rfPre(F.bodies[lb], s.speed_y, s.q0, s.q1, s.slippery);
+			const i32 c = rfFifthsAt(F.bodies[lb], pre, s.px, s.py, s.speed_y);
+			if (c < 0 || c >= RF_CUT - 1) continue;
+			if ((double)c + (double)rest < best) best = (double)c + (double)rest;
+		}
+		if (best < 1e300) { const i32 d = (i32)floor(best + 0.5); if (v < 0 || d < v) { v = d; if (plainBody) *plainBody = -1; } }
+	}
+	return v;
+}
+template <int TW>
+EE_HD i32 steerFifths(const SteerField& F, const Level& L, const State<TW>& s) { return steerFifthsS<TW>(F, L, s, (i32*)nullptr); }
+/** the beam's score (tiles, a float; -1 no value): the layer body's blend (reachScore) where the value is the body's plain
+ *  lookup, else own / 5 (src/steer.js steerScore) */
+template <int TW>
+EE_HD float steerScore(const SteerField& F, const Level& L, const State<TW>& s, i32* ownOut) {
+	i32 b = -1;
+	const i32 own = steerFifthsS<TW>(F, L, s, &b);
+	if (ownOut) *ownOut = own;
+	if (own < 0) return -1.f;
+	if (b >= 0) {
+		const RfPre pre = rfPre(F.bodies[b], s.speed_y, s.q0, s.q1, s.slippery);
+		const i32 c = rfFifthsAt(F.bodies[b], pre, s.px, s.py, s.speed_y);
+		if (c == own) return reachScore(F.bodies[b], pre, s.px, s.py, s.speed_y, own);
+	}
+	return (float)(own / 5.0);
+}
+
 struct BeamParams {
 	Level L;
 	const u8* parents; i32 stateBytes; i32 nParents;
@@ -212,6 +321,7 @@ struct BeamParams {
 	const float* rX; const float* rY; const float* rSX; const float* rSY; i32 nRef;
 	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 	ReachField reach;                  // when on: the score's and the closest attempt's distance (instead of goalDist)
+	SteerField steer;                  // when on: the score's and the closest attempt's distance instead of the reach field's
 	unsigned long long* stats;         // expand: [0] ticks simulated, [1] children skipped as twins of a lower option (flag 16)
 };
 

@@ -27,7 +27,8 @@
 //   opts.explain: when the start is cut off, the highest row the model lets its centre reach (field.explain {row,
 //   trophyRow, startRow}; null when the start is not cut off: the forward search would walk the whole model);
 //   opts.goals [{tile, cost (tiles)}] and opts.maxCost (tiles): explore.js --hunt's time-to-go field (seeded from these
-//   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof).
+//   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof); opts.oneWayEntry: one-way
+//   platforms block the centre's entry against their pass direction: NOT sound, for src/steer.js's ordering field only).
 // fifthsAt(field, px, py, vy, q0, q1, slippery) -> fifths (-1 = cut off); costAt(field, sim) -> tiles (-1 = cut off)
 //   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest); scoreAt(field, ...
 //   the same) -> the beam's score in tiles, blended between the 4 tile centres around the ball (native/beam.h
@@ -357,14 +358,19 @@ function reachField(level, opts) {
 	const KJD = Math.min(KF, kOfX(fallD(-JV) + 16) + (ice ? 1 : 0));
 
 	// ---- per-tile profiles (what fwd reads), the model
+	// (opts.oneWayEntry, src/steer.js only: a one-way platform's centre entry against its pass direction is blocked (a plain
+	// one-way cannot be entered from above). Not sound (a ball that rose into a platform may fall back through it), so never
+	// in the RCH3 proof field: the steer field only orders)
+	const owOf = new Int8Array(N).fill(-1);
+	if (opts.oneWayEntry) for (let i = 0; i < N; i++) { const f = fl(fg[i]); if ((f & F_JUMPTHRU) && cls[i] !== WALL && cls[i] !== DEADLY) owOf[i] = (f & F_ROTHALF) ? (lk[i] & 3) : 1; }
 	const profKey = new Map(), prof = [], pid = new Int32Array(N);
 	for (let i = 0; i < N; i++) {
-		const key = cls[i] * 1e7 + sp[i] * 1e6 + lowWall[i] * 1e5 + lj[i] * 1e4 + (xrOK(i) ? 1e3 : 0) + segOf[i];
+		const key = (owOf[i] + 1) * 1e8 + cls[i] * 1e7 + sp[i] * 1e6 + lowWall[i] * 1e5 + lj[i] * 1e4 + (xrOK(i) ? 1e3 : 0) + segOf[i];
 		let p = profKey.get(key);
 		if (p === undefined) {
 			p = prof.length; profKey.set(key, p);
 			const s = segOf[i];
-			prof.push({ cls: cls[i], sp: sp[i], lowWall: lowWall[i], lj: lj[i], xrOK: xrOK(i) ? 1 : 0, push: segPush[s], cap: segCap[s], A: segA[s], rd: segRd[s] });
+			prof.push({ ow: owOf[i], cls: cls[i], sp: sp[i], lowWall: lowWall[i], lj: lj[i], xrOK: xrOK(i) ? 1 : 0, push: segPush[s], cap: segCap[s], A: segA[s], rd: segRd[s] });
 		}
 		pid[i] = p;
 	}
@@ -390,6 +396,7 @@ function reachField(level, opts) {
 	/** the forward model: a move from a tile of profile P to a neighbour of profile P2 by (dx, dy) of a state (ty, l) */
 	function fwd(P, P2, dx, dy, ty, l, emit) {
 		if ((P2.sp === LOWER && dy < 0) || (P.sp === LOWER && dy > 0) || (P2.sp === RIGHT && dx < 0) || (P.sp === RIGHT && dx > 0)) return;
+		if (P2.ow >= 0 && (P2.ow === 1 ? dy === 1 : P2.ow === 3 ? dy === -1 : P2.ow === 2 ? dx === -1 : dx === 1)) return;   // (opts.oneWayEntry)
 		const src = P.cls, dst = P2.cls;
 		if (ty === R_ && l === INF) {   // unlimited rise: anywhere up or sideways (and everything R(Q) does)
 			fwd(P, P2, dx, dy, R_, Q, emit);

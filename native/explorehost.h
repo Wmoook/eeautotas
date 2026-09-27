@@ -3,7 +3,9 @@
 //                 --above=<tick-start py limit> --land=x0,x1 [--depth=200] [--cap=2000000] [--seconds=120]
 // From the run's state after T ticks (`-`: the level start), expands every input every tick, one state per cell
 // (explore.h), and reports every input history whose next tick is a ground jump on the floor from above its row (JSON
-// lines). --reach=<file> (src/reach.js, RCH3): the reach field orders each cell's candidates (nearer the trophy
+// lines). --steer=<file> (src/steer.js, RCH4; with --reach): the gate-aware steer field orders instead of the reach field
+// (the priority, the closest attempt, --costslack); only the reach field prunes.
+// --reach=<file> (src/reach.js, RCH3): the reach field orders each cell's candidates (nearer the trophy
 // first) and measures the closest attempt; with --prune=1 the states it cuts off are dropped (a proof: they cannot
 // reach the trophy; the finish test comes first). Other targets: --enter=x0,y0,x1,y1 (the box centre enters those
 // tiles), --ahead=1 (ahead of the run),
@@ -219,12 +221,18 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (wantNear) { P.goalDist = haveGoal ? (const float*)(uintptr_t)dgoal.p : nullptr; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.reach = reachF;
 	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
+	// --steer=<file> (src/steer.js RCH4): the priority, the closest attempt and --costslack read the gate-aware steer field
+	// (the prune stays the reach field's -1); a file of another level is ignored with a warning
+	SteerGpu steerGpu;
+	if (reachF.on) steerGpu.loadOrWarn(opt(argc, argv, "steer", ""), B, L, P.steer);
+	if (P.steer.on) printf("{\"ev\":\"steer\",\"layers\":%d,\"bodies\":%d,\"coinDP\":%d,\"mb\":%.1f}\n", P.steer.S, P.steer.nBodies, P.steer.dpN, steerGpu.raw.size() / 1048576.0);
 	// --costslack=<tiles>: states the reach field puts more than that farther from the trophy than the start are dropped (the
 	// relay: a 200x200 level's open arrow fields filled its table with states going back the way it came)
 	{
 		const double slack = atof(opt(argc, argv, "costslack", "0").c_str());
 		if (slack > 0 && reachGpu.H.on) {
-			const i32 own0 = reachFifths(reachGpu.H, start->px, start->py, start->speed_y, start->q0, start->q1, start->slippery);
+			// (with the steer field: its cost, the one the kernel compares)
+			const i32 own0 = P.steer.on ? steerFifths<TW>(steerGpu.H, L, *start) : reachFifths(reachGpu.H, start->px, start->py, start->speed_y, start->q0, start->q1, start->slippery);
 			if (own0 >= 0) { P.maxFifths = own0 + (i32)(slack * 5.0); printf("{\"ev\":\"costslack\",\"start\":%.1f,\"max\":%.1f}\n", own0 / 5.0, P.maxFifths / 5.0); }
 		}
 	}

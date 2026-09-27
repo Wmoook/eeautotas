@@ -35,6 +35,7 @@ const G = require('./gpu.js');
 const B = require('./blocks.js');
 const M = require('./minimap.js');
 const RF = require('./reach.js');
+const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
@@ -361,13 +362,13 @@ function check(buf) {
 // sources, RELAY_PLAN).
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f), ...(o.prune ? ['--prune=1'] : []),
 		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []), ...(q.refine ? ['--refine=1'] : []),
 		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
 	// the relay: "every move" again from a point of the nearest attempt so far (its inputs as --prefix, a fresh table,
 	// coarse speed cells: see RELAY_CELLS)
 	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`,
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f),
 		// (a small table and layer cap: its layers hold tens of thousands of states, and a full-size second explore next
 		// to every move's (2 GB of cells + ~2.7 GB of states) overcommitted the 8 GB laptop GPU: paged, 5x slower)
 		q.alone ? '--cells=27' : q.big ? '--cells=26' : '--cells=25', q.big || q.alone ? '--cap=1048576' : '--cap=262144', ...(o.prune ? ['--prune=1'] : []), ...(q.salt ? [`--salt=${q.salt}`] : []),
@@ -377,9 +378,14 @@ const STRATEGIES = {
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : [])] },
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : [])] },
 };
-const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
+const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...steerArg(f)];
+// the steer field (src/steer.js, RCH4: the gate-aware order; the prune stays the reach field's): passed to the GPU tools
+// when it models anything the reach field does not (2+ layers or the coin DP) and fits their memory budget (STEER_GPU_SHARE
+// of the GPU's memory per tool), to the CPU search whenever it models anything
+const steerArg = (f) => (f.steer ? [`--steer=${f.steer}`] : []);
+const STEER_GPU_SHARE = 1 / 40;
 /** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
  *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
  *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
@@ -605,7 +611,9 @@ function replayRooms(masks, withPath) {
 	// (the room's territory gain: from the state it ends in, once per room)
 	let gain = R.gain.get(key);
 	if (gain === undefined) { gain = R.fields.enter(sim).gain; R.gain.set(key, gain); }
-	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain } };
+	// (with the steer field the attempts' distances are its own; the page shows the reach field's: reachTiles)
+	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
+	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
 }
 /** strategy n's own nearer attempt a {inputs, ticks, dist}: a source for its room (at most every SOURCE_REPLAY_MS per
  *  strategy; the latest one waiting is taken then). rm: its room, when the attempt was replayed already. */
@@ -633,6 +641,10 @@ function attemptSource(n, a, rm) {
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
 // states going back the way the relay came
 const RELAY_SLACK = 30, RELAY_SLACK_F = 0.1;
+// (at most: the steer field's distances run into the thousands of tiles on a level of gates)
+const RELAY_SLACK_MAX = 200;
+// the steer field's "no value" distances start here (native/beam.h steerMiss, goexplore.js: 6000 + the reach field's cost)
+const STEER_MISS = 6000;
 // (1/4 px/tick speed cells first: fast, and enough for the dot ring; a relay that runs out of situations goes on with 1/16:
 // a key press changes the speed by 0.129 px/tick, so with 1/4 px/tick cells the child that pressed it mostly shares its
 // sibling's cell and speed builds up only across cell edges: the ice level's relay could not run up to a staircase shaft
@@ -944,9 +956,11 @@ function start(b, gpu, test) {
 	if (!stallTimer) { stallTimer = setInterval(checkStalls, 5000); if (stallTimer.unref) stallTimer.unref(); }
 	sched = null;
 	if (!schedTimer) { schedTimer = setInterval(schedule, 250); if (schedTimer.unref) schedTimer.unref(); }
-	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs])]);
+	// (the steer field next to it: its own worker; b.steer === false or test.steer === false: none)
+	const wantSteer = b.steer !== false && !(test && test.steer === false);
+	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), wantSteer ? steerInfo(buf, levelHash) : Promise.resolve(null)]);
 	const gen = ++searchGen;
-	ready.then(([rf, toolWhy]) => { if (gen === searchGen) launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); }, (e) => {
+	ready.then(([rf, toolWhy, sf]) => { if (gen === searchGen) { useSteer(sf, noGpu || toolWhy); launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); } }, (e) => {
 		if (gen !== searchGen) return;   // (stopped while checking, maybe another search since)
 		building = false;
 		S.stage = 'error'; S.running = false;
@@ -956,6 +970,28 @@ function start(b, gpu, test) {
 		save();
 	});
 	return state();
+}
+/** the steer field for this search (sf: steerInfo's answer or null): the CPU search gets it whenever it models anything
+ *  the reach field does not, the GPU tools when their build reads RCH4 and the file fits STEER_GPU_SHARE of the GPU's
+ *  memory (each GPU tool loads its own copy); the attempts' distances are then the steer field's, the page's tiles stay
+ *  the reach field's (cur.reachLookup) */
+function useSteer(sf, noGpu) {
+	if (!cur) return;
+	cur.files.steer = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
+	S.steer = null;
+	if (!sf || !sf.useful || !fs.existsSync(sf.file)) return;
+	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
+	const gpuOk = !noGpu && toolInfo && toolInfo.steer === SF.VERSION && mb <= gpuMB * STEER_GPU_SHARE;
+	cur.files.steerCpu = sf.file;
+	if (gpuOk) cur.files.steer = sf.file;
+	// (the attempts' distances: the steer field's when every strategy orders by it, else the reach field's for all: the CPU
+	// search then reports those, --steerDist=0)
+	cur.distBySteer = cur.files.steerDist = gpuOk || !!noGpu;
+	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
+	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, cpu: true };
+	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
+		(gpuOk ? 'GPU and CPU searches' : `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
+		'; only the reach field rules states out');
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
  *  why the GPU strategies do not run ('' = they do); stale: the reason is an old search tool */
@@ -1120,6 +1156,59 @@ function reachInfo(buf, hash) {
 	p.then(done, done);
 	return p;
 }
+/** the steer field's cache: <data>/editor/reach_<level hash>_s4_<fingerprint of steer.js and the model it builds on>.bin /
+ *  .json */
+let steerFpMemo = null;
+function steerFp() {
+	if (steerFpMemo) return steerFpMemo;
+	const h = crypto.createHash('sha1');
+	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
+	return (steerFpMemo = h.digest('hex').slice(0, 12));
+}
+const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
+/** the steer field of a level (.eelvl bytes, its hash) for a search: {v, fp, layers, bodies, dp, bytes, useful (it models
+ *  something the reach field does not: 2+ layers or the coin DP), features, start (tiles), ms}, and its RCH4 file
+ *  (steerBase(hash).bin). Built in a worker thread next to the reach field's (2-8 s on a 200 x 200 level of gates and
+ *  coins), cached like it (the newest 4). null when it cannot be built (the search then orders by the reach field). */
+const steerBuilds = new Map();
+function steerInfo(buf, hash) {
+	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
+	const cached = C.readJSON(meta, null);
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file))) return Promise.resolve(Object.assign(cached, { file }));
+	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
+	const p = new Promise((resolve) => {
+		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
+		const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
+			const E = require(d.mods.eesim), EL = require(d.mods.eelvl), SF = require(d.mods.steer), G = require(d.mods.gpu);
+			const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
+			const st = SF.buildSteer(L);
+			const useful = st.S > 1 || !!st.dp;
+			let lfp = null, bytes = 0;
+			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
+			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
+			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
+				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms });`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: SF.VERSION, fp: steerFp(),
+			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
+		w.once('message', (r) => {
+			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneSteerCache(); } catch (e) { /* read-only data folder */ }
+			resolve(Object.assign(r, { file }));
+		});
+		w.once('error', () => resolve(null));
+		w.once('exit', (code) => { if (code) resolve(null); });
+	});
+	steerBuilds.set(hash, p);
+	const done = () => { steerBuilds.delete(hash); };
+	p.then(done, done);
+	return p;
+}
+/** the steer cache: the newest 4 levels' files (a 200 x 200 level of coins: up to ~0.5 GB) */
+function pruneSteerCache() {
+	const d = dir(), fp = steerFp();
+	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_s\d+_[0-9a-f]+\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_s${SF.VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
+		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
+	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+}
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {
 	const d = dir(), fp = reachFp();
@@ -1130,6 +1219,7 @@ function pruneReachCache() {
 /** why the native tool cannot run this app's searches ('' = it can): its `info` must say it reads the reach file of this
  *  version (an older build refuses every RCH3 file); asked once per build of the tool */
 const toolChecked = new Map();
+let toolInfo = null;   // the last native tool's `info`: {steer (the steer file version it reads; 0 none), memMB (its GPU's memory)}
 function toolVersionProblem(cmd) {
 	let key = cmd.join('\u0000');
 	try { key += `|${fs.statSync(cmd[0] === process.execPath ? cmd[1] : cmd[0]).mtimeMs}`; } catch (e) { /* (no file: the spawn fails anyway) */ }
@@ -1143,7 +1233,8 @@ function toolVersionProblem(cmd) {
 			{ encoding: 'utf8', windowsHide: true, detached: native }, (err, out) => {
 			let info = null;
 			for (const line of String(out || '').split('\n')) { try { const j = JSON.parse(line); if (j && typeof j === 'object') info = j; } catch (e) { /* not JSON */ } }
-			if (info && info.reach === RF_VERSION) resolve('');
+			// (its steer file version and the GPU's memory: the steer field's budget, launchAll)
+			if (info && info.reach === RF_VERSION) { toolInfo = { steer: info.steer || 0, memMB: info.gpu && info.gpu.memMB > 0 ? info.gpu.memMB : 0 }; resolve(''); }
 			// (its one kernel launch failed: launch.h's {"error":...,"launchError":true} line, exit 6 / 7)
 			else if (info && info.launchError) resolve(`the GPU failed (${String(info.error || 'a kernel launch failed').slice(0, 200)})`);
 			else resolve('the search tool is older than the app: rebuild it (node tools/build-native.js)');
@@ -1180,7 +1271,7 @@ function launch(n) {
 		// (every move not running: the GPU memory is the relay's, a table 4x larger: on the ice level the small one filled
 		// 422 ticks into the climb above (64, 58), the large one went 1072 ticks and 100 tiles nearer)
 		q.alone = !S.strategies.some((x, k) => x.key === 'explore' && alive(kids[k]));
-		q.slack = V.relay.big || !V.relay.src ? 0 : Math.round(RELAY_SLACK + RELAY_SLACK_F * V.relay.src.dist);
+		q.slack = V.relay.big || !V.relay.src ? 0 : Math.round(Math.min(RELAY_SLACK_MAX, RELAY_SLACK + RELAY_SLACK_F * V.relay.src.dist));
 		q.seconds = V.share = Math.max(1, Math.min(RELAY_S * (q.big ? 2 : 1), Math.round(S.seconds - searchClock(Date.now()))));
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
 	}
@@ -1674,10 +1765,12 @@ function closer(ev, n) {
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	const Vn = S.strategies[n];
+	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
+	const deathTiles = cur.distBySteer ? STEER_MISS : RF.DEATH_TILES;
 	let own = null;
 	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
 		Vn.best = dist; Vn.bestAt = Date.now();
-		if (ev.inputs && !ev.cut && dist < RF.DEATH_TILES) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
+		if (ev.inputs && !ev.cut && dist < deathTiles) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
@@ -1691,9 +1784,14 @@ function closer(ev, n) {
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
-	const viaDeath = !cut && dist >= RF.DEATH_TILES;
-	S.closest = { dist, cut, viaDeath, tiles: Math.round((cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist) * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
-		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10 };
+	const viaDeath = !cut && !cur.distBySteer && dist >= RF.DEATH_TILES;
+	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
+	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
+	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
+		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
+	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)
+	if (tr.reachTiles !== null && !(S.nearestReach && S.nearestReach.tiles <= tr.reachTiles)) S.nearestReach = { tiles: Math.round(tr.reachTiles * 10) / 10, ticks: masks.length, after: S.closest.foundAfter };
 	save();
 }
 /** stops the running search (a route found so far stays) */

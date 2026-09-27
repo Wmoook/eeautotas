@@ -7,6 +7,7 @@
 //   stateSize_<TW>: the sizes of State<TW> and the kernels' parameter structs on the device (the host checks that the
 //   layouts agree), and the reach file version (3)
 //   reachTest_<TW>: reachFifths and reachScore (beam.h) for a list of states (test/reach.js F: the JS and the GPU agree)
+//   steerTest_<TW>: steerFifths and steerScore (beam.h) for a list of states (test/steer.js: the JS and the GPU agree)
 // <TW> = capacity of the state's variable tail in words (8, 32, 128, 512); the host picks the smallest that fits.
 #include "eecore.h"
 #include "search.h"
@@ -241,6 +242,14 @@ __device__ __forceinline__ void beamExpandParent(const BeamParams& p, const i32 
 					const i32 own = rfFifthsAt(p.reach, pre, s.px, s.py, s.speed_y);
 					gd = own >= 0 ? reachScore(p.reach, pre, s.px, s.py, s.speed_y, own) : 1e4f + walk;
 					ck = own >= 0 ? (float)own / 5.f : gd;
+					// the steer field (--steer): the gate-aware cost instead; a state it has no value for comes after every
+					// valued one (the reach field's cost + STEER_MISS tiles)
+					if (p.steer.on && own >= 0) {
+						i32 so = -1;
+						const float sg = steerScore<TW>(p.steer, p.L, s, &so);
+						if (so >= 0) { gd = sg; ck = (float)so / 5.f; }
+						else { gd = ck = steerMiss((float)own / 5.f); }
+					}
 				}
 				if (p.goalWeight > 0) sc -= p.goalWeight * gd;
 				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
@@ -387,11 +396,14 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			const i32 own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
 			// the physics model rules this state out: it cannot reach the trophy (a proof)
 			if (p.prune && own < 0) continue;
+			// the ordering cost: the steer field's (--steer; never a prune) or the reach field's
+			const i32 so = p.steer.on && own >= 0 ? steerFifths<TW>(p.steer, p.L, s) : -1;
 			// (--costslack: a relay goes on from its start, it does not wander back; a heuristic bound, not a proof)
-			if (p.maxFifths > 0 && own > p.maxFifths) continue;
-			rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
+			if (p.maxFifths > 0 && (p.steer.on ? so : own) > p.maxFifths) continue;
+			if (p.steer.on) rcq = so < 0 ? 4095u : (u32)min(so >> p.steer.prioShift, 4095);
+			else rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
 			if (p.closest) {
-				const float ck = own >= 0 ? (float)own / 5.f : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
+				const float ck = so >= 0 ? (float)so / 5.f : own >= 0 ? (p.steer.on ? steerMiss((float)own / 5.f) : (float)own / 5.f) : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
 				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
 				if (k < nearest) nearest = k;
 			}
@@ -585,7 +597,7 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
 	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; } \
 	extern "C" __global__ void __launch_bounds__(128) reachTest_##TW(ReachField R, const double* in, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; \
-		if (i < n) { const double* q = in + (size_t)i * 6; const RfPre pre = rfPre(R, q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifthsAt(R, pre, q[0], q[1], q[2]); score[i] = out[i] >= 0 ? reachScore(R, pre, q[0], q[1], q[2], out[i]) : -1.f; } }
+		if (i < n) { const double* q = in + (size_t)i * 6; const RfPre pre = rfPre(R, q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifthsAt(R, pre, q[0], q[1], q[2]); score[i] = out[i] >= 0 ? reachScore(R, pre, q[0], q[1], q[2], out[i]) : -1.f; } } 	extern "C" __global__ void __launch_bounds__(128) steerTest_##TW(SteerField F, Level L, const u8* states, i32 stateBytes, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; 		if (i < n) { const State<TW>& s = *(const State<TW>*)(states + (size_t)i * stateBytes); i32 own = -1; score[i] = steerScore<TW>(F, L, s, &own); out[i] = own; } }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)
 #ifndef EE_ONLY_TW
 #define EE_ONLY_TW 8
