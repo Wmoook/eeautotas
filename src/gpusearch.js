@@ -89,8 +89,8 @@ const everyCells = () => (args.everyCells ? Math.max(20, Math.min(28, +args.ever
 let gpuMemMB = 0;   // (the GPU's memory, from eegpu's done events)
 // long-range shortcuts (src/leaps.js: path changes past the every-move windows; --leaps=1, the default where every move
 // runs; 0 off): a leap round searches starts from its cursor (every --leapStep ticks, 250) for --leapS seconds each (25),
-// about --leapRound seconds (60) a round; every third round is one until a first pass over the run is done, then the
-// bandit weighs it like the other arms (runLeaps)
+// about --leapRound seconds (60) a round; once due (leapDue) every third round is one until a first pass over the run is
+// done, then the bandit weighs it like the other arms (runLeaps, pickArm)
 const LEAP_ON = EVERY_ON && String(args.leaps === undefined ? '1' : args.leaps) !== '0';
 const LEAP_S = Math.max(3, +(args.leapS || 25)), LEAP_STEP = Math.max(20, +(args.leapStep || 250)), LEAP_ROUND_S = Math.max(5, +(args.leapRound || 60));
 // (leaps.js's options: --leapAhead (minAhead 300), --leapGain (minGain 20), --leapSpan (maxSpan 3000))
