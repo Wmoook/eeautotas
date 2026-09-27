@@ -97,7 +97,7 @@ const CUT = 0xffff;
 // a faster route starts again with the settings rotated; a faster route (any operator's) starts a pass along it.
 // RELAY_EVERY - 1 of every RELAY_EVERY bursts of lane 0 are the relay's while a route is known (the rest: the rooms, those
 // the best route never enters first: ROUTE_ROOM_PEN off a room on it).
-const RELAY_EVERY = 4, RELAY_CONFS = [4, 3, 2, 0], RELAY_BIG_CELLS = 28, RELAY_BACK = 60, RELAY_DOOMED = 30, ROUTE_ROOM_PEN = 0.5;
+const RELAY_EVERY = 4, RELAY_CONFS = [4, 3, 2, 0], RELAY_BIG_CELLS = 28, RELAY_BACK = 60, RELAY_DOOMED = 30, RELAY_STALE = 200, ROUTE_ROOM_PEN = 0.5;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -458,7 +458,10 @@ function create(o) {
 		for (let guard = 0; guard < 8; guard++) {
 			// (a pass follows its route to the end: the CPU's random runs make a route a few ticks faster every minute or so, and
 			// starting over at each would never reach the far segments; the links' --depth and the finish count the bound)
-			if (!relay.segs || relay.i >= relay.segs.length) relayPass(b);
+			// (but a best route shorter than the chain could make (its route's length less its lead, RELAY_STALE ticks to
+			// spare) ends the pass: on Infinity Pain head L's routes went 57,690 -> 51,860 in 5 minutes while a pass along the
+			// first route was at segment 30 of 127)
+			if (!relay.segs || relay.i >= relay.segs.length || (b.inputs !== relay.base && b.inputs.length < relay.base.length - Math.max(0, relay.lead) - RELAY_STALE)) relayPass(b);
 			const s = relay.segs[relay.i];
 			const sim = simAt(relay.prefix);
 			// (the room's other triggers walls, else (the engine's test of a trigger is a centred ball at rest: Infinity Pain's route
