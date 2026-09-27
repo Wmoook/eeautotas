@@ -1101,6 +1101,29 @@ async function cpuSection() {
 	check('the one search\'s bursts on a full GPU: 4 "out of memory" failures wait and try again, 3 dying starts count as their arms\' failures only, then bursts run; never "no more GPU bursts"',
 		!!og && og.oom === 4 && og.failed === 7 && og.bursts >= 1 && !oo.events.some((e) => e.ev === 'warning' && /no more GPU bursts/.test(e.text)),
 		`${JSON.stringify(og)}; ${oo.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 400)}`);
+	// room instances (bursts.js entry): a room key entered again by a trigger at a tile outside the walk from all its
+	// earlier entries is a new instance (Infinity Pain's multijump reset into speed=1): its bandit starts over as the newest
+	// room. Inside the walk, or made by the clock (a key running out), it is the same room. Here the start's room (no key)
+	// entered again behind the red doors, which its walk from the start does not pass
+	const is0 = new E.EESim(kdLevel);
+	is0.reset();
+	const iK0 = RM.key(is0), iT = (x, y) => y * 60 + x;
+	const mkInst = () => BU.create({ L: kdLevel, a: { work: fs.mkdtempSync(path.join(HOME, 'inst-')), tool: standin, burstPar: 1 }, field: null, RM, ports: [], say: () => {},
+		bound: () => 1e9, register: () => false, sec: () => 0, broadcast: () => {}, finish: () => {}, nearest: () => null });
+	const ib = mkInst(), ir = ib.room({ room: iK0, desc: '(start)', tile: iT(3, 48), t: 0, inputs: '' });
+	ir.n = 5; ir.y = 2;
+	const iSeq0 = ir.seq, iw0 = ib.infoOf(iK0);
+	const iIn = ib.edge(iK0 ^ 1, iT(20, 48), iK0, true), iOut = ib.edge(iK0 ^ 1, iT(40, 48), iK0, true);
+	const iAfter = { n: ir.n, inst: ir.inst, seq: ir.seq, instances: ib.stats().instances };
+	const iw1 = ib.infoOf(iK0), iOut2 = ib.edge(iK0 ^ 1, iT(45, 48), iK0, true);
+	const ibc = mkInst();
+	ibc.room({ room: iK0, desc: '(start)', tile: iT(3, 48), t: 0, inputs: '' });
+	ibc.infoOf(iK0);
+	const iClock = ibc.edge(iK0 ^ 1, iT(40, 48), iK0, false);
+	check('room instances: the start\'s room entered by a trigger behind the red doors (outside its walk) is instance #2, its bandit new and the newest; inside the walk, again inside the widened walk, or by the clock: the same room',
+		!!iw0 && iw0.seen[iT(20, 48)] === 1 && !iw0.seen[iT(40, 48)] && iIn === null && iOut === ir && iAfter.inst === 2 && iAfter.n === 0 && iAfter.seq > iSeq0 && iAfter.instances === 1 &&
+		!!iw1 && iw1.seen[iT(45, 48)] === 1 && iOut2 === null && ib.stats().instances === 1 && iClock === null && ibc.stats().instances === 0,
+		`walk ${iw0 ? `${iw0.seen[iT(20, 48)]}/${iw0.seen[iT(40, 48)]}` : '-'}; in ${!!iIn}, out ${iOut === ir} ${JSON.stringify(iAfter)}; widened ${iw1 ? iw1.seen[iT(45, 48)] : '-'}, again ${!!iOut2}; clock ${!!iClock} (${ibc.stats().instances})`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));

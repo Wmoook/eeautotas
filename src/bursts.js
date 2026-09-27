@@ -695,6 +695,8 @@ function create(o) {
 	};
 	return {
 		room, edge, triggers: TR.n,
+		/** room `key`'s walk now (its passable set, the tiles `seen` from its entries): tests */
+		infoOf: (key) => { const r = rooms.get(key); return r ? infoOf(r) : null; },
 		start: () => { loopP = Promise.all(Array.from({ length: Math.max(1, a.burstPar) }, (_, k) => loop(k))).catch((e) => o.say({ ev: 'warning', text: `bursts: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` })); return loopP; },
 		/** ends the running burst between two launches and the loop; resolves once its process is gone */
 		stop: async () => {
