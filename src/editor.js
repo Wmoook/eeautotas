@@ -877,8 +877,8 @@ const BREAK_GRAIN_TEXT = ['4 px and 1/16', '2 px and 1/16', '1 px and 1/32'];
 // and states fit the free memory less that, so on a shared GPU the other processes keep room (on the rented H100, shared
 // with 31-42 GB of other work, a 2^31 table left the relay's new processes no memory for a context)
 const BREAK_RESERVE_F = 0.15;
-/** the wall breaker's round is running (its process alive): the others' new processes wait (resumeDeferred) */
-const breakerBusy = () => !!S && Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]));
+/** the wall breaker's round is running (from its start to its end, or its process alive): the others' new processes wait (resumeDeferred) */
+const breakerBusy = () => !!S && ((!!brk && !!brk.round) || (Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]))));
 /** strategy n's next process, or, while the wall breaker's round runs (its table took the memory), a wait for its end */
 function launchOrWait(n) {
 	if (!breakerBusy()) { kids[n] = launch(n); return; }
@@ -944,7 +944,19 @@ function breakKick() {
 	brk.round = { starts, i: 0, t0: Date.now(), progress: [], runs: 0, chain: null, wait };
 	S.breaker = Object.assign(S.breaker || {}, { rounds: brk.rounds, round: { n: brk.rounds, starts: starts.length, runs: 0, after: Math.round((Date.now() - S.started) / 100) / 10 } });
 	note(`${S.strategies[n].label}: no attempt nearer by ${BREAK_TILES} tiles and no new room for ${wait} s: round ${brk.rounds}, ${starts.length} starting point${starts.length > 1 ? 's' : ''} (${starts.map((x) => x.what).join('; ')})`);
-	breakLaunch(n);
+	// every move's and the relay's processes stop (between two launches) and wait for the round's end: their tables and
+	// states (every move's up to a third of the GPU) are the breaker's table; the random runs and the beams stay, paused
+	const freed = [];
+	S.strategies.forEach((q, k) => { if ((q.key === 'explore' || q.key === 'relay') && alive(kids[k]) && !kids[k].stopWhy) { halt(kids[k], 'breaker'); freed.push(k); } });
+	Object.assign(S.strategies[n], { state: 'starting', detail: `round ${brk.rounds}: waits for every move and the relay to hand over the GPU's memory` });
+	const t0 = Date.now(), S0 = S;
+	const go = () => {
+		if (S !== S0 || !brk || !brk.round) return;
+		// (their processes end at their next launch; a halt kills them after HALT_KILL_MS)
+		if (freed.some((k) => alive(kids[k])) && Date.now() - t0 < HALT_KILL_MS + 3000) { const t = setTimeout(go, 100); if (t.unref) t.unref(); return; }
+		breakLaunch(n);
+	};
+	go();
 }
 /** the round's next run (the chain's next step, or the next starting point); false when the round is over */
 function breakLaunch(n) {
@@ -1830,6 +1842,13 @@ function launch(n) {
 			// time, or a full table): the ladder from PASS_START, as if the probe had not been. A route: it passed.
 			if (ch.probeTimer) clearTimeout(ch.probeTimer);
 			if (V.refine && V.refine.at) V.refinedOnce = true;   // (the refined try ended with its process: full, time)
+			if (ch.stopWhy === 'breaker' && S.running && !S.halted && S.stage !== 'stopped') {
+				// (stopped for the wall breaker's round, its memory freed: the same pass again after the round)
+				Object.assign(V, { state: 'waiting', detail: 'waits while the wall breaker has the GPU', deferred: true });
+				totals();
+				if (!running()) finish(); else save();
+				return;
+			}
 			if (ch.stopWhy === 'yield' && S.running && !S.halted && S.stage !== 'stopped') {
 				Object.assign(V, { state: 'waiting', detail: 'gave the GPU to the relay, far ahead; goes on when it stops' });
 				totals();
@@ -1890,6 +1909,13 @@ function launch(n) {
 				save();
 				return;
 			}
+		}
+		if (V.key === 'relay' && ch.stopWhy === 'breaker' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed) {
+			// (stopped for the wall breaker's round: after it, from the same step of its plan)
+			Object.assign(V, { state: 'waiting', detail: 'waits while the wall breaker has the GPU', deferred: true });
+			totals();
+			if (!running()) finish(); else save();
+			return;
 		}
 		if (V.key === 'relay' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed) {
 			const how = ch.stopWhy || (code === 0 ? end : '');
