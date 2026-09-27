@@ -1180,7 +1180,9 @@ function breakAfter(n, how) {
 	const fresh = novelFresh(nh, brk.novCells || (brk.novCells = new Set()));
 	if (fresh && S.breaker) S.breaker.novelFresh = (S.breaker.novelFresh || 0) + fresh;
 	const got = R.progress.length > ((V.brk && V.brk.prog0) || 0) || fresh >= BREAK_NOVEL_FRESH;
-	R.dry = got ? 0 : V.brk && V.brk.novel && nh.length < BREAK_NOVEL_FRESH ? (R.dry || 0) : (R.dry || 0) + 1;
+	// (a gate run has no novelty args: it counts as a plain run)
+	const novRun = !!(V.brk && V.brk.novel && !V.brk.gateReach);
+	R.dry = got ? 0 : novRun && nh.length < BREAK_NOVEL_FRESH ? (R.dry || 0) : (R.dry || 0) + 1;
 	const novOk = R.dry < BREAK_NOVEL_DRY;
 	if (nh.length && !novOk) { R.novelDry = (R.novelDry || 0) + 1; if (S.breaker) S.breaker.novelDry = (S.breaker.novelDry || 0) + 1; }
 	// (a run with novelty hits: the next step from one, a hit in another room than the step's start's first, else the latest)
