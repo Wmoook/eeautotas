@@ -1620,7 +1620,9 @@ function finish() {
 		S.message = `The ${S.cpuOnly ? 'CPU' : 'GPU'} search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
 	} else if (S.stage !== 'error') {
 		S.stage = 'not found';
-		const capped = S.strategies.some((q) => q.key !== 'explore' && !q.cpu && q.layer >= S.depth);   // (the beams' depth limit)
+		// (the beams' depth limit: only when nothing went deeper; Infinity Pain's hour said "reached its depth limit of 2288
+		// ticks" while the CPU search had gone 7,730 ticks deep)
+		const capped = S.layer <= S.depth && S.strategies.some((q) => q.key !== 'explore' && !q.cpu && q.layer >= S.depth);
 		const XE = S.strategies.find((q) => q.key === 'explore' && q.exhausted);
 		const X = S.strategies.find((q) => q.key === 'explore');
 		const R = S.strategies.find((q) => q.cpu);
