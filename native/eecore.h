@@ -1377,7 +1377,7 @@ struct Sim {
 	 *  time doors' phase, effects (time left to 32 ticks), jumps and boosts, checkpoint, gates, deaths for death doors,
 	 *  team, secrets, portal coins, the pending switch / key / timing queues. The exploration's cells add it, so no state
 	 *  that differs in any of these is merged away (and plain levels, which have none of it, are not split at all). */
-	EE_COLD u64 hashDiscrete() const {
+	EE_COLD u64 hashDiscrete(bool noCoins = false) const {   // (noCoins: without the coins taken: explore --ahead --samediscrete with --nocoins)
 		Hasher2 h; h.init();
 		i32 fl = 0;
 		if (s.in_god_mode) fl |= 1;
@@ -1391,7 +1391,7 @@ struct Sim {
 		if (s.has_levitation) fl |= 256;
 		if (s.timedoor_state && L.hasTimeDoors) fl |= 512;
 		h.word(fl);
-		h.word(s.coins); h.word(s.blue_coins); h.word(s.max_jumps); h.word(s.jump_boost); h.word(s.speed_boost); h.word(s.flip_gravity);
+		h.word(noCoins ? 0 : s.coins); h.word(noCoins ? 0 : s.blue_coins); h.word(s.max_jumps); h.word(s.jump_boost); h.word(s.speed_boost); h.word(s.flip_gravity);
 		h.word((s.checkpoint_x + 1) | shl(s.checkpoint_y + 1, 16)); h.word(s.next_spawn); h.word(s.keysMask);
 		if (L.nKeyColors != 0) {
 			i32 rel = s.keysMask;
@@ -1413,7 +1413,7 @@ struct Sim {
 		if (L.hasDeathGate) h.word(s.show_death_gate);
 		if (L.multiTargetPortals) h.word(s.rngSteps);
 		if (L.hasTeamEffect) h.word(s.team);
-		if (L.nCoins != 0) for (i32 w = 0; w < L.coinWords; w++) h.word((i32)s.w[L.offCoin + w]);
+		if (L.nCoins != 0 && !noCoins) for (i32 w = 0; w < L.coinWords; w++) h.word((i32)s.w[L.offCoin + w]);
 		if (L.nSecrets != 0) for (i32 w = 0; w < L.secretWords; w++) h.word((i32)s.w[L.offSecret + w]);
 		if (L.nPortalCoins > 0) for (i32 w = 0; w < L.pgWords; w++) h.word((i32)s.w[L.offPg + w]);
 		for (i32 w = 0; w < L.swWords; w++) h.word((i32)s.w[L.offSw + w]);
