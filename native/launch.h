@@ -47,6 +47,7 @@
 #ifndef _WIN32
 #include <csignal>
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #endif
 
@@ -162,14 +163,22 @@ inline double hostCpuMs() {
 	return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
 #endif
 }
-/** the done events' fields: ,"maxLaunchMs":..,"maxKernelMs":..,"launchTarget":..,"kernelLaunches":..,"hostCpuMs":.. */
+/** the done events' fields: ,"maxLaunchMs":..,"maxKernelMs":..,"launchTarget":..,"kernelLaunches":..,"hostCpuMs":..
+ *  (Linux also "nice": the host thread's nice value, -5 when the above-normal priority took effect, 0 where it is not
+ *  allowed: a container without CAP_SYS_NICE, e.g. a rented cloud GPU) */
 inline std::string doneFields() {
 	char b[600];
 	snprintf(b, sizeof b, ",\"maxLaunchMs\":%.1f,\"maxLaunchKernel\":\"%s\",\"maxKernelMs\":%.1f,\"maxKernelKernel\":\"%s\",\"gpuClock\":%s,\"launchTarget\":%.0f,\"kernelLaunches\":%llu,"
 		"\"launchTotalMs\":%.0f,\"kernelTotalMs\":%.0f,\"gapMs\":%.0f,\"wait\":\"%s\",\"hostCpuMs\":%.0f",
 		G.maxMs, G.maxWhat.c_str(), G.maxKernelMs, G.maxKernelWhat.c_str(), G.events == 1 ? "true" : "false", G.targetMs, (unsigned long long)G.launches,
 		G.totalMs, G.totalKernelMs, G.gapMs, G.wait && G.events == 1 && cu::cuEventQuery && cu::cuEventSynchronize ? "block" : "spin", hostCpuMs());
+#ifdef _WIN32
 	return b;
+#else
+	errno = 0;
+	const int nv = getpriority(PRIO_PROCESS, 0);   // (the calling thread's: eegpu.cpp sets it before any thread starts)
+	return errno ? std::string(b) : std::string(b) + ",\"nice\":" + std::to_string(nv);
+#endif
 }
 
 /** --parent=<pid>: watch that process (a handle from now on, so a reused pid cannot stand in for it; none when it cannot
