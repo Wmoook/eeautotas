@@ -30,8 +30,6 @@ const { Worker, isMainThread, parentPort, workerData } = require('worker_threads
 const C = require('./common.js');
 const E = C.E;
 
-const COIN_DOOR_IDS = new Set([43, 165, 213, 214]);   // coin door, coin gate, blue coin door, blue coin gate
-
 function parseArgs() {
 	const a = C.parseArgs(process.argv.slice(2));
 	if (!a.tas) {
@@ -48,16 +46,7 @@ function parseArgs() {
 }
 
 /** the ticks at which the reference's box (with a 1-tile margin) touches a coin door or gate; the last + 1, or 0 */
-function coinFreeTick(level, X, Y, n) {
-	const W = level.width, H = level.height;
-	let last = -1;
-	for (let t = 0; t <= n; t++) {
-		const x0 = Math.max(0, Math.floor((X[t] - 16) / 16)), x1 = Math.min(W - 1, Math.floor((X[t] + 31) / 16));
-		const y0 = Math.max(0, Math.floor((Y[t] - 16) / 16)), y1 = Math.min(H - 1, Math.floor((Y[t] + 31) / 16));
-		for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (COIN_DOOR_IDS.has(level.fg[y * W + x])) last = t;
-	}
-	return last + 1;
-}
+const coinFreeTick = C.coinFreeTick;
 
 /** the reference: per tick the snapshot, position, and the three hash maps (the latest tick wins: the biggest saving) */
 function reference(a) {

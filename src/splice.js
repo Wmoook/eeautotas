@@ -7,26 +7,42 @@
 // (one that does not finish here simply drops out).
 // Also a module (grind.js splices a rejected run with the best at once; gpusearch.js adds the GPU's edge library):
 //   trace(level, masks, nc, withR), traceCache(level, nc, withR), unionGraph(runs).path({lib, avoidRng}), splice(...)
-// usage: node src/splice.js out.eetas run1.eetas run2.eetas ... [--level=<level id | job id>] [--nocoins]
+// Coin modes (nc): false = exact states; true = coin-blind everywhere (coins only matter as pickups on this level);
+// 'free' = exact states, and from each run's coin-free tick on (C.coinFreeTick: its box touches no coin door or gate
+// any more) also a coin-blind twin of every state: a path may step from a state to its twin (free), and from a twin
+// it goes on along any run whose state there is coin-blind equal and itself past its coin-free tick (nothing reads
+// the coins on that run from there on), never back to exact states. So a line that takes or skips a coin after the
+// last coin door joins the others, and every join is still exact for the physics. (The twins' keys are salted: a
+// coin-blind hash never meets an exact one.)
+// usage: node src/splice.js out.eetas run1.eetas run2.eetas ... [--level=<level id | job id>] [--nocoins | --coinfree]
 // (--level can be left out when run1.eetas is inside src/jobs/<id>/)
 const path = require('path');
 const fs = require('fs');
 const C = require('./common.js');
 const E = C.E;
 
+const P53 = 9007199254740992, SALT = 0x1b873593 * 1048576 + 0x9e3779;   // (a 53-bit hash + SALT mod 2^53, exact)
+/** a coin-blind hash as a twin's key: never equal to an exact state's hash (but by chance, 2^-53) */
+const twinKey = (h) => (h >= P53 - SALT ? h - (P53 - SALT) : h + SALT);
+
 /**
- * Replays a run: H[t] = stateHash after t ticks (nc: coin-blind), up to the finish. n = the finish tick (-1: does not
- * finish), masks = the inputs cut at the finish, R[t] = random-portal draws so far (withR).
+ * Replays a run: H[t] = stateHash after t ticks (nc true: coin-blind), up to the finish. n = the finish tick (-1: does
+ * not finish), masks = the inputs cut at the finish, R[t] = random-portal draws so far (withR). nc 'free': also cf =
+ * the run's coin-free tick and HB[t] = the coin-blind twin's key for t >= cf (HB null when cf > n).
  */
 function trace(level, masks, nc, withR) {
 	const sim = new E.EESim(level);
 	sim.reset();
 	const inp = new E.EEInput();
-	const NC = !!nc;
+	const FREE = nc === 'free';
+	const NC = !FREE && !!nc;
 	const H = new Float64Array(masks.length + 1);
 	const R = withR ? new Int32Array(masks.length + 1) : null;
+	const HB = FREE ? new Float64Array(masks.length + 1) : null;
+	const X = FREE ? new Float64Array(masks.length + 1) : null, Y = FREE ? new Float64Array(masks.length + 1) : null;
 	H[0] = sim.stateHash(false, NC);
 	if (R) R[0] = sim._rngSteps;
+	if (FREE) { HB[0] = twinKey(sim.stateHash(false, true)); X[0] = sim.px; Y[0] = sim.py; }
 	const crown0 = sim.has_silver_crown;
 	let n = -1;
 	for (let t = 0; t < masks.length; t++) {
@@ -34,12 +50,14 @@ function trace(level, masks, nc, withR) {
 		sim.tick(inp);
 		H[t + 1] = sim.stateHash(false, NC);
 		if (R) R[t + 1] = sim._rngSteps;
+		if (FREE) { HB[t + 1] = twinKey(sim.stateHash(false, true)); X[t + 1] = sim.px; Y[t + 1] = sim.py; }
 		if (!crown0 && sim.has_silver_crown) { n = t + 1; break; }
 	}
-	if (n < 0) return { H: null, R: null, n: -1, masks: null };
+	if (n < 0) return { H: null, R: null, n: -1, masks: null, HB: null, cf: -1 };
 	const ms = new Uint8Array(n);
 	for (let t = 0; t < n; t++) ms[t] = masks[t];
-	return { H: H.slice(0, n + 1), R: R ? R.slice(0, n + 1) : null, n, masks: ms };
+	const cf = FREE ? (C.coinFreeOk(level) ? C.coinFreeTick(level, X, Y, n) : n + 1) : NC ? 0 : n + 1;
+	return { H: H.slice(0, n + 1), R: R ? R.slice(0, n + 1) : null, n, masks: ms, HB: FREE && cf <= n ? HB.slice(0, n + 1) : null, cf };
 }
 
 /**
@@ -128,6 +146,7 @@ function unionGraph(runs) {
 	const off = new Int32Array(runs.length + 1);
 	for (let r = 0; r < runs.length; r++) { off[r] = T; T += runs[r].n + 1; }
 	off[runs.length] = T;
+	const TW = T;   // (path's via: a run step g, a library edge -1 - k, a step to a coin-blind twin TW + g)
 	// node ids: the distinct hashes (g = a global tick index: run r's tick t is g = off[r] + t)
 	const index = hashIndex(1 << 16);
 	const nodeOf = new Int32Array(T), runOf = new Int32Array(T);
@@ -135,21 +154,44 @@ function unionGraph(runs) {
 		const H = runs[r].H;
 		for (let t = 0, g = off[r]; t < H.length; t++, g++) { nodeOf[g] = index.id(H[t]); runOf[g] = r; }
 	}
+	// the coin-blind twins (trace nc 'free'): twinOf[g] = the twin node of run r's tick t >= its cf, else -1
+	let twinOf = null;
+	for (let r = 0; r < runs.length; r++) {
+		const HB = runs[r].HB;
+		if (!HB) continue;
+		if (!twinOf) twinOf = new Int32Array(T).fill(-1);
+		for (let t = runs[r].cf, g = off[r] + t; t < HB.length; t++, g++) twinOf[g] = index.id(HB[t]);
+	}
 	const N = index.size;
-	// occurrences per node, runs[0] first (ties keep its inputs)
+	// occurrences per node, runs[0] first (ties keep its inputs); the twins' own lists
 	const occHead = new Int32Array(N).fill(-1), occNext = new Int32Array(T);
 	for (let r = runs.length - 1; r >= 0; r--) {
 		for (let g = off[r + 1] - 1; g >= off[r]; g--) { const a = nodeOf[g]; occNext[g] = occHead[a]; occHead[a] = g; }
 	}
+	const twHead = twinOf ? new Int32Array(N).fill(-1) : null, twNext = twinOf ? new Int32Array(T) : null;
+	if (twinOf) {
+		for (let r = runs.length - 1; r >= 0; r--) {
+			for (let g = off[r + 1] - 1; g >= off[r]; g--) { const a = twinOf[g]; if (a >= 0) { twNext[g] = twHead[a]; twHead[a] = g; } }
+		}
+	}
 	const GOAL = N;   // (a virtual node: the finish reached by a library edge)
 	const isGoal = new Uint8Array(N + 1);
 	isGoal[GOAL] = 1;
-	for (let r = 0; r < runs.length; r++) isGoal[nodeOf[off[r] + runs[r].n]] = 1;
+	for (let r = 0; r < runs.length; r++) {
+		isGoal[nodeOf[off[r] + runs[r].n]] = 1;
+		if (twinOf && twinOf[off[r] + runs[r].n] >= 0) isGoal[twinOf[off[r] + runs[r].n]] = 1;
+	}
 	let nodeR = null;   // random-portal draws per node (the hash contains them on levels with random portals)
 	const drawsOf = () => {
 		if (!nodeR) {
 			nodeR = new Int32Array(N);
-			for (let r = 0; r < runs.length; r++) for (let t = 0; t <= runs[r].n; t++) nodeR[nodeOf[off[r] + t]] = runs[r].R[t];
+			for (let r = 0; r < runs.length; r++) {
+				for (let t = 0; t <= runs[r].n; t++) {
+					const g = off[r] + t;
+					nodeR[nodeOf[g]] = runs[r].R[t];
+					if (twinOf && twinOf[g] >= 0) nodeR[twinOf[g]] = runs[r].R[t];
+				}
+			}
 		}
 		return nodeR;
 	};
@@ -217,10 +259,22 @@ function unionGraph(runs) {
 				const la = nlib[x];
 				for (let g = occHead[a]; g >= 0; g = occNext[g]) {
 					const r = runOf[g];
+					// (past the run's coin-free tick: to the state's coin-blind twin, free; via TW + g, no input)
+					if (twinOf && twinOf[g] >= 0 && twinOf[g] !== a) relax(x, 2 * twinOf[g] + on, d, TW + g, la, q, d);
 					if (g + 1 >= off[r + 1]) continue;   // the run's finish state: nothing after it
 					if (avoidRng && r !== 0) { const t = g - off[r]; if (runs[r].R[t + 1] !== runs[r].R[t]) continue; }
 					const m = runs[r].masks[g - off[r]];
 					relax(x, 2 * nodeOf[g + 1] + (on || m !== 0 ? 1 : 0), d + on, g, la, q, d);
+				}
+				// a twin: on along every run whose state is coin-blind equal here and past its coin-free tick, to its next twin
+				if (twHead) {
+					for (let g = twHead[a]; g >= 0; g = twNext[g]) {
+						const r = runOf[g];
+						if (g + 1 >= off[r + 1]) continue;
+						if (avoidRng && r !== 0) { const t = g - off[r]; if (runs[r].R[t + 1] !== runs[r].R[t]) continue; }
+						const m = runs[r].masks[g - off[r]];
+						relax(x, 2 * twinOf[g + 1] + (on || m !== 0 ? 1 : 0), d + on, g, la, q, d);
+					}
 				}
 				if (libHead) {
 					for (let k = libHead[a]; k >= 0; k = libNext[k]) {
@@ -238,12 +292,13 @@ function unionGraph(runs) {
 		for (let y = found; y !== s0; y = prev[y]) parts.push(via[y]);
 		parts.reverse();
 		let len = 0;
-		for (const v of parts) len += v >= 0 ? 1 : libList[-1 - v].seq.length;
+		for (const v of parts) len += v >= TW ? 0 : v >= 0 ? 1 : libList[-1 - v].seq.length;
 		const ms = new Uint8Array(len);
 		const libUsed = [], runsUsed = new Set(), checks = [];
-		let p = 0, lastRun = -1, switches = 0;
+		let p = 0, lastRun = -1, switches = 0, twins = 0;
 		for (const v of parts) {
-			if (v >= 0) {
+			if (v >= TW) twins++;   // (to a coin-blind twin: no input)
+			else if (v >= 0) {
 				const r = runOf[v];
 				ms[p++] = runs[r].masks[v - off[r]];
 				runsUsed.add(r);
@@ -257,7 +312,7 @@ function unionGraph(runs) {
 				lastRun = -1;
 			}
 		}
-		return { ms, ticks: ms.length, run: dist[found], libUsed, runsUsed, switches, checks, nodes: N };
+		return { ms, ticks: ms.length, run: dist[found], libUsed, runsUsed, switches, checks, nodes: N, twins };
 	}
 	return { runs, nodes: N, ticks: T, has: (h) => index.get(h) >= 0, path };
 }
@@ -275,7 +330,7 @@ function firstBadCheck(level, ms, checks, nc) {
 		E.applyMask(inp, ms[t]);
 		sim.tick(inp);
 		while (k < checks.length && checks[k][0] === t + 1) {
-			if (sim.stateHash(false, !!nc) !== checks[k][1]) return k;
+			if (sim.stateHash(false, nc !== 'free' && !!nc) !== checks[k][1]) return k;   // ('free': the edges are exact)
 			k++;
 		}
 	}
@@ -294,9 +349,11 @@ function main() {
 	const args = process.argv.slice(2);
 	const levelArg = (args.find((a) => a.startsWith('--level=')) || '--level=').slice(8);
 	const files = args.filter((a) => !a.startsWith('--'));
-	const NOCOINS = args.includes('--nocoins');   // join at states equal apart from collected coins (coins are optional)
+	// --nocoins: join at states equal apart from collected coins (coins are optional); --coinfree: exact, and coin-blind
+	// past each run's last coin door (the 'free' mode above)
+	const NOCOINS = args.includes('--nocoins') ? true : args.includes('--coinfree') ? 'free' : false;
 	const outFile = files.shift();
-	if (!outFile || !files.length) { console.log('usage: node src/splice.js out.eetas run1.eetas run2.eetas ... [--level=<id>] [--nocoins]'); process.exit(2); }
+	if (!outFile || !files.length) { console.log('usage: node src/splice.js out.eetas run1.eetas run2.eetas ... [--level=<id>] [--nocoins | --coinfree]'); process.exit(2); }
 	const L = E.loadLevel(C.levelData(levelArg, files[0]));
 	const runs = [];
 	for (const f of files) {
@@ -311,7 +368,7 @@ function main() {
 	const t0 = Date.now();
 	const u = unionPath(runs);
 	console.log(`[splice] ${u.nodes} distinct states; path: ${u.ticks} ticks over ${[...u.runsUsed].map((r) => path.basename(runs[r].f)).join(', ')} ` +
-		`(${u.switches} splices, ${Date.now() - t0} ms)`);
+		`(${u.switches} splices${u.twins ? `, ${u.twins} past the last coin door by the coin-blind state` : ''}, ${Date.now() - t0} ms)`);
 	const v = C.replay(L, u.ms);
 	console.log(`[splice] result: completes at ${v.complete}, run_ticks ${v.runTicks}`);
 	if (v.complete >= 0) C.writeEetas(outFile, u.ms);
