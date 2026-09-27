@@ -246,10 +246,11 @@ EE_HD i32 steerBodyFifths(const SteerField& F, i32 b, const RfPre& pre, double p
 	const i32 c = rfFifthsAt(R, pre, px, py, vy);
 	return c >= RF_CUT - 1 ? -1 : c;
 }
-/** the steer cost of a state (fifths; -1 = no value); layerOut: its layer's body (-1 none) and whether the value is the
- *  body's plain lookup (for steerScore) */
+/** the steer cost of a state (fifths; -1 = no value); plainBody (may be null): the layer's body when the value is its
+ *  plain lookup, else -1 (steerScore blends only then). Out of line on the GPU (EE_COLD): the kernels' own registers stay
+ *  as without the steer field (inlined, the beam's expand went from 128 to 168 registers) */
 template <int TW>
-EE_HD i32 steerFifthsS(const SteerField& F, const Level& L, const State<TW>& s, i32* plainBody) {
+EE_COLD i32 steerFifthsS(const SteerField& F, const Level& L, const State<TW>& s, i32* plainBody) {
 	const i32 lay = steerLayer<TW>(F, L, s);
 	const i32 b = lay >= 0 && lay < F.S ? F.layerBody[lay] : -1;
 	i32 v = -1;
@@ -286,7 +287,7 @@ EE_HD i32 steerFifths(const SteerField& F, const Level& L, const State<TW>& s) {
 /** the beam's score (tiles, a float; -1 no value): the layer body's blend (reachScore) where the value is the body's plain
  *  lookup, else own / 5 (src/steer.js steerScore) */
 template <int TW>
-EE_HD float steerScore(const SteerField& F, const Level& L, const State<TW>& s, i32* ownOut) {
+EE_COLD float steerScore(const SteerField& F, const Level& L, const State<TW>& s, i32* ownOut) {
 	i32 b = -1;
 	const i32 own = steerFifthsS<TW>(F, L, s, &b);
 	if (ownOut) *ownOut = own;

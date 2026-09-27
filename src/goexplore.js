@@ -108,6 +108,9 @@ const CHUNK = 16;   // picks between two looks at the clock, the shared bound an
 // memory (V8 heap, measured): a cell without its snapshot about 260 bytes (coarse cells: 300, with their room and
 // counts), a snapshot about 1150; each gets 45% of a worker's --mem
 const CELL_BYTES = 260, CELL_BYTES_COARSE = 300, SNAP_BYTES = 1150;
+// --steer: the second heap's entries (up to 3 per cell before a compaction, 24 bytes each) and the cell's steer cost; one
+// worker of the editor's Good Egg search ran out of its heap without it
+const STEER_CELL_BYTES = 120;
 // the biggest level (tiles) that gets fine cells by default (--cells=auto): 50 x 50, the size of the pixel-exact levels
 // the editor's suite checks (sfox50, user30s, user50, the dot ring; shaft, staircase, dotstairs 40 x 25, ...)
 const FINE_MAX_TILES = 2500;
@@ -157,7 +160,8 @@ function settle(a, L) {
 	const coarse = a.cells === 'coarse';
 	if (coarse) a.maxres = 0;   // (no refinement with coarse cells)
 	if (!a.mem) a.mem = coarse ? coarseMem(a.workers) : Math.max(200, Math.min(800, Math.round(1600 / a.workers)));
-	if (!a.maxCells) a.maxCells = Math.round(a.mem * 1048576 * 0.45 / (coarse ? CELL_BYTES_COARSE : CELL_BYTES));
+	// (--steer: a second heap and the cell's steer cost, STEER_CELL_BYTES more per cell)
+	if (!a.maxCells) a.maxCells = Math.round(a.mem * 1048576 * 0.45 / ((coarse ? CELL_BYTES_COARSE : CELL_BYTES) + (a.steer ? STEER_CELL_BYTES : 0)));
 	if (!a.maxSnaps) a.maxSnaps = Math.round(a.mem * 1048576 * 0.45 / SNAP_BYTES);
 	a.maxSnaps = Math.max(64, a.maxSnaps);
 	return a;
