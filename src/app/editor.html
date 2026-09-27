@@ -201,7 +201,8 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
 						<option value="65536">64 k</option></select></label>
 				</div>
-				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="stop" id="bStop" hidden>Stop</button></div>
+				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button></div>
+				<div id="autoSt"></div>
 				<div class="hint" id="solveWhy"></div>
 				<div id="solveSt"></div>
 			</div>
@@ -1436,6 +1437,7 @@ $('bExport').onclick = async () => {
 let GPU = null;          // /api/system's GPU record
 let CHECK = null;        // the last POST /api/editor/check
 const SOLVE = { st: null, sig: store.get('eeat.editor.solveSig') || null, poll: 0, jobs: {} };
+const AUTO = { st: null, poll: 0 };   // Find and optimize (the AutoTASer)
 try { SOLVE.jobs = JSON.parse(store.get('eeat.editor.jobs') || '{}') || {}; } catch (e) { SOLVE.jobs = {}; }
 let sigCache = { v: -1, sig: '' };
 function currentSig() { if (sigCache.v !== editVersion) sigCache = { v: editVersion, sig: levelSig() }; return sigCache.sig; }
@@ -1496,6 +1498,7 @@ function renderChecks() {
 	const running = SOLVE.st && SOLVE.st.running;
 	const why = blockers();
 	$('bSolve').disabled = !!running || why.length > 0;
+	$('bAuto').disabled = !!running || why.length > 0 || !!(AUTO.st && AUTO.st.running);
 	$('solveWhy').textContent = !running && why.length ? why[0] : '';
 }
 async function solve() {
@@ -1632,6 +1635,36 @@ async function routeJob(optimize) {
 		msg(esc(e.message), true);
 	}
 }
+/** Find and optimize: the AutoTASer (POST /api/editor/autotas): Find a route, then at once the optimizer on its first
+ *  route, fed with its newer routes, for the time chosen in "search for"; then the run pauses with its best */
+async function autotas() {
+	$('bAuto').disabled = true;
+	$('solveWhy').textContent = '';
+	try {
+		const bytes = await eelvlBytes();
+		SOLVE.sig = currentSig(); store.set('eeat.editor.solveSig', SOLVE.sig);
+		AUTO.st = await postJson('/api/editor/autotas', { eelvlB64: b64(bytes), minutes: Math.max(0.5, (+$('sSec').value || 60) / 60), name: LV.name });
+		VW.play = null;
+		pollSolve();
+		pollAuto();
+	} catch (e) {
+		$('autoSt').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+		renderChecks();
+	}
+}
+async function pollAuto() {
+	clearTimeout(AUTO.poll);
+	try { AUTO.st = await api('/api/editor/autotas'); } catch (e) { /* keep the last */ }
+	const s = AUTO.st;
+	if (s && s.state && s.state !== 'none') {
+		const what = s.state === 'finding' ? 'finding a route' : s.state === 'optimizing' ? (s.handoff ? 'optimizing (the GPU is the optimizer\'s now)' : 'optimizing next to Find a route') : 'done: the run is paused with its best';
+		$('autoSt').innerHTML = `<div class="msg info">Find and optimize: ${what}${s.best != null ? ` · best ${fmt(s.best)}` : ''}${s.job ? ' · <a href="/" id="autoOpen">open the run</a>' : ''}</div>`;
+		if ($('autoOpen')) $('autoOpen').onclick = () => store.set('tasopt.sel', s.job);
+	}
+	renderChecks();
+	if (s && s.running) AUTO.poll = setTimeout(pollAuto, 2000);
+}
+$('bAuto').onclick = autotas;
 $('bSolve').onclick = solve;
 $('bStop').onclick = async () => { try { SOLVE.st = await postJson('/api/editor/solve/stop', {}); } catch (e) { /* ignore */ } pollSolve(); };
 $('sSec').value = store.get('eeat.editor.sec') || '60';
@@ -1678,6 +1711,7 @@ function demoLevel() {
 	if (GX.on) gxLoad(); else gfxUi();
 	loadGpu();
 	pollSolve();
+	pollAuto();
 })();
 </script>
 </body>

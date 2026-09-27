@@ -22,8 +22,9 @@
 // of the next invocation at once (no waiting for the grind to publish it).
 // "Every move" rounds (--every=auto, the default; 1 = every other round; 0 = off): eegpu explore --rejoin=1 from the
 // run's state at tick T tries every input sequence over the next --everyDepth ticks (320), one state per cell (the
-// relay's cells: 2 px, 1/4 px/tick; a 2^--everyCells (28) table, halved by eegpu when the GPU lacks the memory; the reach
-// field orders the cells and, in physics mode, drops the states it proves cut off: -1 only), and every state equal to
+// relay's cells: 2 px, 1/4 px/tick; a 2^--everyCells table, by the GPU's memory: 28 from 20 GB, 27 from 11 GB, else 26,
+// halved by eegpu when an allocation fails; the reach field orders the cells and, in physics mode, drops the states it
+// proves cut off: -1 only), and every state equal to
 // a later state of the run is a proven shortcut (exact hash, re-checked on the CPU with both hashes). Windows start
 // every --everyStep ticks (100) along the run from a cursor, --everyS seconds each (12); each pass over the run starts
 // at another offset (0, 50, 25, 75: where a window starts decides whether its table fills before a rejoin). The ice
@@ -72,7 +73,10 @@ const LIB_MAX = 300000;   // edges kept; above it, edges that start on no known 
 const EVERY_MODE = String(args.every === undefined ? (args.tool ? '0' : 'auto') : args.every) === '0' ? 'off' : String(args.every === undefined ? 'auto' : args.every) === 'auto' ? 'auto' : 'on';
 const EVERY_ON = EVERY_MODE !== 'off';
 const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 320)), EVERY_STEP = Math.max(1, +(args.everyStep || 100)), EVERY_S = Math.max(1, +(args.everyS || 12));
-const EVERY_CELLS = Math.max(20, Math.min(30, +(args.everyCells || 28)));
+// the cell table: 16 bytes a cell, plus ~1.5 GB of states and candidates; by the GPU's memory (a 40 GB A100: 2^28 = 4 GB;
+// a laptop's 8 GB: 2^26 = 1 GB), unless --everyCells gives it
+const everyCells = () => (args.everyCells ? Math.max(20, Math.min(28, +args.everyCells)) : gpuMemMB >= 20000 ? 28 : gpuMemMB >= 11000 ? 27 : 26);
+let gpuMemMB = 0;   // (the GPU's memory, from eegpu's done events)
 const EVERY_OFFSETS = [0, 50, 25, 75];   // (per pass over the run, scaled to the step)
 const IDLE_ON = String(args.idle === undefined ? (args.tool ? '0' : '1') : args.idle) !== '0';
 const ARM_FAMS = { search: ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'], every: ['every', 'idle'] };
@@ -541,6 +545,7 @@ async function invoke(slot, seconds) {
 	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError };
 	launchFails = 0; otherFails = 0;   // (a run that finished: the failures in a row start over)
 	const d = r.done;
+	if (d.gpu && d.gpu.memMB) gpuMemMB = +d.gpu.memMB;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);
 	let got = { added: 0, byFam: {} };
 	try { got = readEdges(edgesFile, ref); } catch (e) { log(`GPU: ${e.message}`); }
@@ -617,7 +622,7 @@ function runWindow(T, o = {}) {
 	return new Promise((resolve) => {
 		const rf = ensureReach();
 		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${o.seconds || EVERY_S}`,
-			'--coarse=0', '--cqx=0.5', '--cqv=4', '--qy=0.5', '--qvy=4', '--discrete=1', '--cap=1048576', `--cells=${EVERY_CELLS}`,
+			'--coarse=0', '--cqx=0.5', '--cqv=4', '--qy=0.5', '--qvy=4', '--discrete=1', '--cap=1048576', `--cells=${everyCells()}`,
 			...(rf ? [`--reach=${rf}`, `--prune=${reachPrune ? 1 : 0}`] : []), ...(o.prefix ? [`--prefix=${o.prefix}`, `--gain=${o.gain}`] : []),
 			`--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
 		const fam = o.fam || 'every';
