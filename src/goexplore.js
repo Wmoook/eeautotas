@@ -190,6 +190,10 @@
 //        [--prefix=<run.eetas | .eetas characters> (the gate benchmark, tools/gatebench.js: the search starts after those
 //        inputs; every path begins with them, only finds after the start state count; CPU cells only)]
 //        [--rooms=0|1 (an event "room" for every room the one search registers: its cause, the inputs; coarse cells)]
+//        [--pL=0.3 (head L, the one search once a route is known: the picks by the lead on the best route's schedule, its
+//        share by its yield: LEAD_GRACE_S)] [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
+//        With --stdin=1 and the one search also "route <inputs>": a route found elsewhere (the bound, head L's schedule,
+//        its states into every archive; a "route" event, no result).
 //        With --stdin=1 and the one search also "import <inputs>": another operator's run (the editor's GPU random runs:
 //        a room they entered first, a nearer attempt) into every worker's archive, like a burst's attempt.
 const fs = require('fs');
@@ -864,7 +868,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// schedule (sched: per (room, tile) the tick it first gets there); a cell at (room, tile) that the route passes gets
 	// lead = its tick - the route's there (below 0: ahead of the best route, which finishes that much sooner from there if
 	// the rest goes as well); head L picks the most ahead, less LEAD_PICK x sqrt(its picks), --pL of the picks: an
-	// earlier arrival (a GPU burst's attempt, a lucky run) spreads down the route like A* with the best route's time to go. Main's search after a route picked by the reach cost (the cells by the trophy) and novelty.
+	// earlier arrival (a GPU burst's attempt, a lucky run) spreads down the route like A* with the best route's time to
+	// go. Main's search after a route picked by the reach cost (the cells by the trophy) and novelty.
 	// On time-door levels the schedule is per (room, tile, the doors' phase bucket: the cell key's, --phase ticks): a lead
 	// then keeps the doors' phase (whole periods sooner, within a bucket), where by (room, tile) alone a cell "ahead" by a
 	// part of a period meets the doors the route passed open shut (Stupid Fox: leads of 625 and 1,351 ticks, doomed).
@@ -963,7 +968,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
-			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++;
+			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL);
 			release(old);
 			impr++;
 			if (ST) { c.sc = steerOf(); nearSteer(c); }
@@ -973,8 +978,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		}
 		if (!roomFor()) { full = true; needSweep = true; return null; }
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
-		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks }
-			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks };
+		// (viaL: the cell descends from a head-L pick's runs, its share's yield: a route head L's earlier arrivals led to is
+		// often finished by head A's pick of a cell by the trophy)
+		const vl = pickL || (pc !== null && pc.viaL);
+		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl }
+			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl };
 		if (ST) nearSteer(nc);
 		cells.set(k, nc);
 		hpush(nc);
@@ -1384,7 +1392,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						const f = { t, sec, simTicks: ticks };
 						if (!first) first = f;
 						best = f;
-						post({ type: 'finish', seed, t, sec, simTicks: ticks, byL: pickL, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
+						post({ type: 'finish', seed, t, sec, simTicks: ticks, byL: pickL || e.viaL, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
 						if (a.first) end = 'finish';
 						break;
 					}
@@ -1417,6 +1425,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			}
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
+		pickL = false;
 	}
 	sendNear();
 	E.flushTicks();
@@ -2203,12 +2212,13 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, finish: route ? route.ticks : 0, first,
+		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead,
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
-				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0 },
+				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
+				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
