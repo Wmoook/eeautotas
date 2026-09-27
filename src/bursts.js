@@ -58,6 +58,14 @@ const CONFS = [{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16, cap: 1048576 }, { cqx: 0
 	{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16, cap: 65536 }, { cqx: 0.0625, cqv: 8, qy: 0.0625, qvy: 8, cap: 262144 },
 	{ cqx: 0.125, cqv: 16, qy: 0.125, qvy: 16, cap: 16384 }, { cqx: 0.5, cqv: 4, qy: 0.5, qvy: 4, cap: 262144 }];
 const CONF_C = 0.3;
+// a room's burst that ran out of situations (explore "exhausted") within FINE_NEAR tiles of a target without reaching it
+// goes again from the same start with the next finer cells (the wall breaker's grains, editor.js BREAK_GRAINS: 2 px and
+// 1/16 px/tick, then 1 px and 1/32); Forgotten Veil's coins=3 room: with the portal walk its portal arm's burst started
+// from the archive's cell 3 tiles from a target (the route's coin 4 behind the precision wall at its tick ~2969) and ran
+// out of situations there at 4 px / 1/16 in every try
+const FINE = [{ cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16, cap: 1048576 }, { cqx: 1, cqv: 32, qy: 1, qvy: 32, cap: 1048576 }];
+const FINE_TEXT = ['2 px and 1/16', '1 px and 1/32'];
+const FINE_NEAR = 8;
 // (a chain link after a full table: the settings with the next smaller layer cap)
 const GREEDIER = [2, 4, 4, 4, 4, 2];
 // how far back along the start cell's run a burst starts, in turn per room (ticks; never 0: the cell nearest the targets
@@ -166,7 +174,7 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -641,9 +649,17 @@ function create(o) {
 				// Infinity Pain's wall: 4 px / 1/16 px/tick with 1 M states a layer filled its table 33 tiles short three times
 				// in a row, where 64 K and 16 K passed from the route's own states 150 and 400 ticks back)
 				const ci2 = r.end === 'full' ? GREEDIER[job.conf] : job.conf;
-				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2, cells: CONFS[ci2],
-					what: `${job.what.replace(/ · chain .*$/, '').replace(/settings \d+/, `settings ${ci2}`)} · chain ${c}${back ? ` (${back} back)` : ''}` });
+				// (a link after finer cells keeps them unless its table filled)
+				const keep = job.fine && r.end !== 'full';
+				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2,
+					cells: keep ? job.cells : CONFS[ci2], fine: keep ? job.fine : 0,
+					what: `${job.what.replace(/ · (chain|finer) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
+			} else if (job.r && !r.reached && r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.fine || 0) < FINE.length && job.chain < CHAIN_MAX) {
+				// every situation tried at this grain a few tiles from a target: the same start with finer cells
+				const k = job.fine || 0;
+				next = Object.assign({}, job, { chain: job.chain + 1, fine: k + 1, cells: FINE[k], what: `${job.what.replace(/ · (chain|finer) .*$/, '')} · finer ${FINE_TEXT[k]}` });
+				st.fine++;
 			}
 		}
 	};
