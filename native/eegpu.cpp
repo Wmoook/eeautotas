@@ -671,9 +671,16 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	const size_t recBytes = (16 + sizeof(State<TW>) + 15) & ~(size_t)15;
 	const std::string recOpt = opt(argc, argv, "recMB", "auto");
 	const size_t recMax = (size_t)(recOpt == "auto" ? (g.d.mem >= ((size_t)32 << 30) ? 1024.0 : 256.0) : std::max(16.0, atof(recOpt.c_str()))) << 20;
-	const size_t recCap = std::max<size_t>(4096, std::min<size_t>(recMax, (g.d.mem ? g.d.mem : (size_t)4 << 30) / 16) / recBytes);
+	size_t recCap = std::max<size_t>(4096, std::min<size_t>(recMax, (g.d.mem ? g.d.mem : (size_t)4 << 30) / 16) / recBytes);
 	cu::Buf drec, dlive;
-	if (!drec.alloc(recBytes * recCap) || !dlive.alloc(4)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+	// out of GPU memory (a GPU shared with other work): half the records' room, down to 64 MB, rather than an error
+	const size_t recWanted = recCap;
+	while (!drec.alloc(recBytes * recCap)) {
+		if (cu::lastCode != 2 || recBytes * recCap / 2 < ((size_t)64 << 20) || recCap / 2 < 4096) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		recCap /= 2;
+	}
+	if (recCap != recWanted) { printf("{\"warn\":\"out of GPU memory for %zu MB of records: %zu MB\"}\n", (recBytes * recWanted) >> 20, (recBytes * recCap) >> 20); fflush(stdout); }
+	if (!dlive.alloc(4)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	P.rec = (u8*)(uintptr_t)drec.p; P.recBytes = (i32)recBytes; P.nLive = (u32*)(uintptr_t)dlive.p;
 	std::vector<lk::Chunk> famBatch, famSeg;
 	for (int f = 0; f < FAM_COUNT; f++) {
@@ -1128,7 +1135,7 @@ static int cmdTwins(int argc, char** argv) {
 }
 
 static int cmdSearch(int argc, char** argv) {
-	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T] [--twins=1|cpu|0]\n"); return 2; }
+	if (argc < 5) { fprintf(stderr, "usage: eegpu search <level.bin> <ref.eetas> <out.edges> [--seconds=20] [--nocoins=0|1] [--horizon=1500] [--drift=96] [--families=m1,del,m2,pert,flip,sticky] [--seed=N] [--from=T] [--to=T] [--twins=1|cpu|0] [--recMB=auto]\n"); return 2; }
 	LevelBlob B = readLevel(argv[2]);
 	std::vector<uint8_t> ref = readMasks(argv[3]);
 	const int tw = twFor(B.get("tailWords"));
