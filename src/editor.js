@@ -386,8 +386,8 @@ const STRATEGIES = {
 	// with the largest table the GPU holds (--cells, up to 2^31), a 2M layer cap, 4 px / 1/16 px/tick cells first and no
 	// cost ceiling; a box of BREAK_REGION tiles around its start only with a table of 2^28 cells or fewer
 	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, q.enter ? `--enter=${q.enter}` : '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V),
-		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune ? ['--prune=1'] : [])] },
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${q.gateReach || f.reach}`, ...(q.gateReach ? [] : steerArg(f, q.V)),
+		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -945,11 +945,12 @@ function breakGate(inputs) {
 	try {
 		if (cur.gateSteer === undefined) {
 			cur.gateSteer = null;
-			const st = SF.readSteerFile(fs.readFileSync(cur.files.steerCpu));
+			const buf = fs.readFileSync(cur.files.steerCpu);
+			const st = SF.readSteerFile(buf);
 			if (st && st.dp) {
 				const tiles = new Map(), cb = cur.level.coinBit;
 				if (cb) for (let t = 0; t < cb.length; t++) if (cb[t] >= 0) tiles.set(cb[t], t);
-				cur.gateSteer = { st, tiles };
+				cur.gateSteer = { st, tiles, buf, files: new Map() };
 			}
 		}
 		const G0 = cur.gateSteer;
@@ -959,7 +960,17 @@ function breakGate(inputs) {
 		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
 		const g = SF.nextGate(G0.st, sim);
 		const t = g ? G0.tiles.get(g.bit) : undefined;
-		return t === undefined ? null : { x: t % cur.level.width, y: Math.floor(t / cur.level.width) };
+		if (t === undefined) return null;
+		// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
+		// steer field, which on Forgotten Veil points the other way (the layer field) and cut the states heading for the coin
+		const b = G0.st.dp.leg[g.i];
+		let reach = G0.files.get(b);
+		if (!reach) {
+			reach = path.join(dir(), `gate_${b}.rch3`);
+			fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
+			G0.files.set(b, reach);
+		}
+		return { x: t % cur.level.width, y: Math.floor(t / cur.level.width), reach };
 	} catch (e) { return null; }
 }
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
@@ -1054,7 +1065,7 @@ function breakLaunch(n) {
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
 	const enter = ch.gate ? `${ch.gate.x},${ch.gate.y},${ch.gate.x},${ch.gate.y}` : '';
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, enter, gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, enter, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
@@ -1073,10 +1084,9 @@ function breakAfter(n, how) {
 	const hit = V.brk && V.brk.gateHit;
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
-		// room where a door reads the coins) and the chain's next step starts from it with the next gate (at most
-		// BREAK_GATES a chain)
+		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
+		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
 		seedCpu(hit);
-		breakProgress('gate');
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
 	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
@@ -1674,7 +1684,7 @@ function launch(n) {
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	if (V.key === 'breaker') {
-		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.enter = V.brk.enter;
+		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.enter = V.brk.enter; q.gateReach = V.brk.gateReach;
 		q.seconds = V.share = V.brk.seconds;
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.brk.keep) : 0;
 	}
@@ -2263,6 +2273,13 @@ function feedOne(inputs, room) {
 function closer(ev, n) {
 	if (!cur) return;
 	const Vn = S.strategies[n];
+	// (a wall breaker run aimed at a gate by the gate's own field: its distances are to the gate, not the trophy: only its
+	// own nearest, for its chain; the chain's attempts reach the others as seeds)
+	if (Vn.key === 'breaker' && Vn.brk && Vn.brk.gateReach) {
+		const d = +ev.dist;
+		if (ev.inputs && !ev.cut && Number.isFinite(d) && (!Vn.bestTry || d < Vn.bestTry.dist - 1e-3)) Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist: d };
+		return;
+	}
 	// (the GPU random runs' nearer attempts: into the one search's archive)
 	if (Vn.rolls && ev.inputs && !ev.cut && (!(Vn.best >= 0) || steerDist(Vn, +ev.dist) < Vn.best - 1e-3)) feedOne(String(ev.inputs), false);
 	const dist = steerDist(Vn, +ev.dist), old = S.closest;
