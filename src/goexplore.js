@@ -233,7 +233,7 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0,
-	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1 };
+	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 0 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -242,6 +242,8 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 // but everywhere they blow the cells up 2.6 K -> 269 K a worker). Every further S seconds of stall flags the next
 // frontier room, at most --spdMax; a room made from a flagged room is flagged too (--spdKids=1; the way out of the trap); the flags all
 // go when the nearest distance drops by SPD_PROGRESS (the cells made meanwhile stay: they are valid states).
+// --spdMode=1 instead: a flagged room keeps its coarse cells as they are (the earliest state) and next to each one a
+// second cell with the FASTEST arrival (the most vx^2 + vy^2; the pick runs' states only): at most 2x the cells.
 const SPD_PROGRESS = 1;
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -863,7 +865,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
 	const KV = new Int32Array(10);
-	let tile = 0, spdCur = false;
+	let tile = 0, spdCur = false, spdFast = false;
 	const cellKey = () => {
 		const px = sim.px, py = sim.py;
 		const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
@@ -876,7 +878,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (r << 1); KV[2] = sim.jump_count; KV[3] = sim._q0; KV[4] = sim._q1; KV[5] = disc(sim);
 		}
 		let n;
-		if (r === 0 && spdCur) {
+		if (r === 0 && spdFast) {
+			// (--spdMode=1: the fastest arrival's cell next to the coarse one: the class keys and a 9th number)
+			const vy = sim.speed_y;
+			KV[6] = Math.sign(sim.speed_x); KV[7] = vy < -3 ? 0 : vy < 0 ? 1 : vy === 0 ? 2 : 3; KV[8] = 0x5f;
+			n = 9;
+		} else if (r === 0 && spdCur) {
 			// (--spd: a stuck room's cells by speed, 1 px/tick buckets; the 9th number keeps them apart from the class keys)
 			KV[6] = Math.round(sim.speed_x); KV[7] = Math.round(sim.speed_y); KV[8] = 0x5d;
 			n = 9;
@@ -998,16 +1005,19 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let deepest = 0, full = false, impr = 0, needSweep = false, sweeps = 0, evicted = 0, picks = 0, sweptAt = -1e9;
 	/** the live state (tick t, reach cost rc; reached from cell pc's state by the inputs blk.b[o ..+ n) after path node up;
 	 *  coarse cells: in room) into the archive; returns the cell when it is new */
-	const add = (t, rc, pc, up, blk, o, n, room) => {
+	const add = (t, rc, pc, up, blk, o, n, room, fast) => {
 		if (t >= maxT) return null;   // (a route from there would not be faster)
 		// (nor from a state whose sound lower bound to the trophy ends past it: lowerBoundTiles)
 		if (LBT !== null && t + Math.max(1, LBT[centreTile()]) > maxT) { lbCut++; return null; }
-		spdCur = room !== null && room !== undefined && room.spd === true;
+		spdFast = fast === true;
+		spdCur = !spdFast && a.spdMode === 0 && room !== null && room !== undefined && room.spd === true;
 		const k = cellKey();
 		const c = cells.get(k);
+		const v2 = spdFast ? sim.speed_x * sim.speed_x + sim.speed_y * sim.speed_y : 0;
 		if (c !== undefined) {
 			c.seen++; c.touch = picks;
-			if (c.t <= t) return null;
+			if (spdFast ? c.v2 >= v2 : c.t <= t) return null;
+			if (spdFast) c.v2 = v2;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
 			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL);
@@ -1026,6 +1036,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl }
 			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl };
 		if (ST) nearSteer(nc);
+		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
 		hpush(nc);
 		if (t > deepest) deepest = t;
@@ -1486,6 +1497,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						near = { rc, t, node };
 					}
 					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
+					// (--spdMode=1: a flagged room's fastest arrivals next to the earliest)
+					if (into && a.spdMode === 1 && room !== null && room.spd === true) {
+						const nf = add(t, rc, e, up, blk, o, s + 1, room, true);
+						if (nf !== null && room.isNew) firstCell(room, nf, t);
+					}
 					if (nc !== null && room !== null && room.isNew) firstCell(room, nc, t);
 				}
 				if (end) break;
