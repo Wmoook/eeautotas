@@ -42,6 +42,8 @@ const HANDOFF_WIN_MAX_S = 120;
 /** routes that gained the job less than this share of its best in the last window count as stalled (a trickle of
  *  1-10-tick splices kept Find a route, and the optimizer on its CPU share, going for the whole budget) */
 const HANDOFF_MIN_GAIN = 0.01;
+/** a route of Find a route waits at most this long for its cleanup (editor.js cleanLater) before it goes to the job */
+const CLEAN_WAIT_MS = 15000;
 /** a job history entry that Find a route's route made (its inbox run, that run's splice with the best, or a direct try
  *  while the job's grind was not running) */
 const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
@@ -94,7 +96,7 @@ function run(o) {
 	const gpuOk = !o.cpu && !!G.nativeTool() && !G.unsupported(level) && !(o.gpu && o.gpu.available === false);
 	emit({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` });
 	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W }, o.gpu || { available: gpuOk });
-	let lastKey = '', frDone = false, hist = 0, ended = false, busy = false;
+	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
 	let jobAt = 0, frAt = 0;
@@ -126,7 +128,8 @@ function run(o) {
 		const faster = !S.job && !ended ? better(ev.runTicks) : false;
 		// (cpuS: the CPU search's CPU seconds when Find a route found it, editor.js cpuAfter: the time to route per
 		// core-second on a shared machine, next to t)
-		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {}));
+		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
+			r.cleaned ? { cleanedFrom: r.cleaned.fromRunTicks, presses: r.cleaned.presses } : {}));
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
 		if (!S.job) {
 			let meta;
@@ -168,8 +171,13 @@ function run(o) {
 			const st = ED.state();
 			const r = st.result;
 			if (r && r.inputs) {
-				const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}`;
-				if (key !== lastKey) { lastKey = key; onRoute(r); }
+				// (a route being cleaned (editor.js cleanLater) waits for its cleanup, at most CLEAN_WAIT_MS: the job's base
+				// is the cleaned route; a route handed on before its cleanup ended goes again once cleaned)
+				const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
+				if (key !== lastKey) {
+					if (r.clean === 'pending' && waitKey !== key) { waitKey = key; waitAt = Date.now(); }
+					if (r.clean !== 'pending' || Date.now() - waitAt >= CLEAN_WAIT_MS) { lastKey = key; onRoute(r); }
+				}
 			}
 			if (!frDone && !st.running) {
 				frDone = true;

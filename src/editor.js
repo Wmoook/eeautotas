@@ -1368,6 +1368,7 @@ function start(b, gpu, test) {
 	S = { running: true, stage: 'checking the physics', started: t0, searchStarted: 0, prepSec: 0, elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
+		noClean: b.clean === false || process.env.EEAT_CLEAN === '0',
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls,
 			...(k === 'goexplore' && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
@@ -2298,14 +2299,9 @@ function found(inputs, n, more) {
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
 	if (first || ((V.cpu || V.rolls) && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	if (better) {
-		const tr = C.replay(cur.level, ev.ms, { trace: true });
-		const pathPts = [];
-		for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
-		C.writeEetas(path.join(dir(), 'route.eetas'), ev.ms);
-		S.result = { ticks: ev.ms.length, completeTick: ev.complete, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), deaths: ev.deaths, coins: ev.coins,
-			chance: ev.chance, inputs: C.eetasBytes(ev.ms).toString('latin1'), foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
-			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, path: pathPts,
-			strategy: V.label, verified: 'replayed in the exact JS engine: it finishes' };
+		setResult(cur.level, ev, { foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
+			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, strategy: V.label });
+		cleanLater();
 	}
 	S.stage = 'found';
 	// the other strategies: those already deeper than this route cannot find a faster one; the CPU search is told the
@@ -2316,6 +2312,73 @@ function found(inputs, n, more) {
 	if (better) tellCpu(S.result.ticks, S.result.inputs, n);
 	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
 	if (better) setImmediate(resumeExplore);
+	save();
+}
+/** S.result from a replayed route (ev: C.evaluate) and route.eetas; o: {foundAfter, cpuAfter, strategy, cleaned} */
+function setResult(level, ev, o) {
+	const tr = C.replay(level, ev.ms, { trace: true });
+	const pathPts = [];
+	for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
+	try { C.writeEetas(path.join(dir(), 'route.eetas'), ev.ms); } catch (e) { /* read-only data folder */ }
+	S.result = { ticks: ev.ms.length, completeTick: ev.complete, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), deaths: ev.deaths, coins: ev.coins,
+		chance: ev.chance, inputs: C.eetasBytes(ev.ms).toString('latin1'), foundAfter: o.foundAfter, cpuAfter: o.cpuAfter, path: pathPts,
+		strategy: o.strategy, verified: 'replayed in the exact JS engine: it finishes', ...(o.cleaned ? { cleaned: o.cleaned } : {}) };
+}
+// ---------------------------------------------------------------- the route cleanup (src/cleanroute.js)
+// Every new best route is cleaned in a worker thread (the random runs' pointless jump presses, up / down presses and
+// direction flips dropped while it still finishes and is not slower; every edit replayed, the result by C.evaluate):
+// S.result.clean is 'pending' meanwhile (the AutoTASer waits for it before it makes the job: the job's base is the
+// cleaned route), then 'done' (S.result is the cleaned route, `cleaned` {fromRunTicks, fromTicks, presses, sec}) or
+// 'kept' (nothing to drop, or it failed: the route as found). One cleanup at a time; a newer best waits (the newest).
+const CLEAN_MS = 20000;   // a route's cleanup budget (the laptop: 1-8 s for the AutoTAS base routes)
+let cleaning = null, cleanNext = null;
+function cleanLater() {
+	if (!S || !S.result || !cur || S.noClean) return;
+	cleanNext = { S, level: cur.level, buf: cur.buf, inputs: S.result.inputs };
+	S.result.clean = 'pending';
+	if (!cleaning) cleanStart();
+}
+function cleanStart() {
+	const job = cleanNext;
+	cleanNext = null;
+	if (!job || !job.S.result || job.S.result.inputs !== job.inputs) return;
+	let w;
+	try {
+		w = new Worker(require.resolve('./cleanroute.js'), { workerData: { cleanRoute: true, eelvl: Uint8Array.from(job.buf), inputs: job.inputs, ms: CLEAN_MS } });
+	} catch (e) { job.S.result.clean = 'kept'; return; }
+	if (w.unref) w.unref();
+	cleaning = w;
+	let over = false;
+	const done = (r) => {
+		if (over) return;
+		over = true;
+		cleaning = null;
+		cleanDone(job, r);
+		if (cleanNext) cleanStart();
+	};
+	w.once('message', done);
+	w.once('error', (e) => done({ error: String(e && e.message || e) }));
+	w.once('exit', () => done({ error: 'the cleanup ended' }));
+}
+function cleanDone(job, r) {
+	const S0 = job.S, R0 = S0.result;
+	if (!R0 || R0.inputs !== job.inputs) return;   // (a faster route came meanwhile: its own cleanup)
+	if (!r || r.error || !r.changed || !(r.runTicks <= R0.runTicks)) {
+		R0.clean = 'kept';
+		if (r && r.error) R0.cleanError = r.error;
+		if (S0 === S) save();
+		return;
+	}
+	const masks = Uint8Array.from(String(r.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
+	const ev = C.evaluate(job.level, masks);
+	if (!ev || ev.runTicks > R0.runTicks || ev.deaths > R0.deaths || ev.chance < R0.chance - 1e-9) { R0.clean = 'kept'; if (S0 === S) save(); return; }
+	if (S0 !== S) return;
+	const cleaned = { fromRunTicks: R0.runTicks, fromTicks: R0.ticks, presses: [r.before.pressesPerS, r.after.pressesPerS], changesPerS: [r.before.changesPerS, r.after.changesPerS],
+		sec: r.sec };
+	setResult(job.level, ev, { foundAfter: R0.foundAfter, cpuAfter: R0.cpuAfter, strategy: R0.strategy, cleaned });
+	S.result.clean = 'done';
+	note(`the route cleaned: ${C.fmt(R0.runTicks)} -> ${C.fmt(ev.runTicks)}, jump presses ${r.before.pressesPerS} -> ${r.after.pressesPerS} a second (${r.sec.toFixed(1)} s)`);
+	if (ev.runTicks < R0.runTicks) tellCpu(S.result.ticks, S.result.inputs, -1);
 	save();
 }
 /** a strategy's closest attempt (ev: {dist (tiles to the trophy by the reach field), tick, inputs, cut}): kept when it is
