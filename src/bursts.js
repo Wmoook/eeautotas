@@ -17,7 +17,8 @@
 // long in-room stretches it missed were found by exhaustive GPU bursts aimed at the room's next trigger; the next trigger
 // ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). So a room's bursts aim at ALL its untried triggers at
 // once (a walk field with them as goals: the burst's order, layer cap and nearest attempt), the nearest first; a trigger
-// reached is tried, and the next burst aims at the rest.
+// reached is tried, and the next burst aims at the rest. With goexplore.js --burstAim=1 a burst aims at ONE of them (the
+// one its start cell's walk leads to) and a target its bursts get no nearer to is retired for a while (AIM_K).
 //
 // A burst (one eegpu explore process) starts from the archive's cell of that room nearest its targets (every worker is
 // asked for its own; the nearest of all, the earliest among equals), sometimes 60 / 200 ticks back along it; its cells
