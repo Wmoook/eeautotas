@@ -241,6 +241,28 @@ function coinsIrrelevant(levelJson, masks, best) {
 	return r.complete === best.complete && r.runTicks === best.runTicks;
 }
 
+/** the blocks that read the coin counts: coin door, coin gate, blue coin door, blue coin gate */
+const COIN_DOOR_IDS = new Set([43, 165, 213, 214]);
+/**
+ * The first tick from which a run's box (with a 1-tile margin: a tick moves it at most 16 px) touches no coin door or
+ * gate any more: the last such tick + 1, 0 when it never does. From there on nothing reads the coin counts along the
+ * run, so a state that differs from the run's state at a tick >= this one only in coins (the coin-blind hash) finishes
+ * exactly like it with the run's inputs. X, Y: the box's top-left per tick 0..n.
+ */
+function coinFreeTick(level, X, Y, n) {
+	const W = level.width, H = level.height, fg = level.fg;
+	let last = -1;
+	for (let t = n; t >= 0 && last < 0; t--) {
+		const x0 = Math.max(0, Math.floor((X[t] - 16) / 16)), x1 = Math.min(W - 1, Math.floor((X[t] + 31) / 16));
+		const y0 = Math.max(0, Math.floor((Y[t] - 16) / 16)), y1 = Math.min(H - 1, Math.floor((Y[t] + 31) / 16));
+		for (let y = y0; y <= y1 && last < 0; y++) for (let x = x0; x <= x1; x++) if (COIN_DOOR_IDS.has(fg[y * W + x])) { last = t; break; }
+	}
+	return last + 1;
+}
+/** Coin-blind joins past a run's coinFreeTick are sound on this level (not with portal entries on coin cells: a
+ *  pickup there deletes a portal entry, endgame.js coinsBlind) */
+const coinFreeOk = (level) => !(level.nPortalCoins > 0);
+
 // ---------------------------------------------------------------- inputs as text
 /** mask -> "R+J", "L", "-" (bits: 1 jump, 2 left, 4 right, 8 up, 16 down) */
 function maskName(m) {
@@ -305,6 +327,6 @@ module.exports = {
 	writeAtomic, writeJSON, readJSON, lock, sleepMs,
 	fmt, parseTime, tickOf,
 	jobIds, findJob, jobLevelId, jobOfFile, levelData, loadLevel,
-	replay, isRandom, chanceOf, evaluate, judge, coinsIrrelevant,
+	replay, isRandom, chanceOf, evaluate, judge, coinsIrrelevant, COIN_DOOR_IDS, coinFreeTick, coinFreeOk,
 	maskName, inputRuns, parseArgs, tickMeter, cpuName,
 };

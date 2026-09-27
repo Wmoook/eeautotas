@@ -1484,8 +1484,9 @@ struct Sim {
 		}
 		if (L.hasTimeDoors) { h.word(s.ticks % TIMEDOOR_PERIOD); nI++; }
 		if (L.hasDeathDoor) { h.word(s.deaths); nI++; }
-		if (L.hasCoinGate) { h.word(s.show_coin_gate); nI++; }
-		if (L.hasBlueCoinGate) { h.word(s.show_blue_coin_gate); nI++; }
+		// (the coin gates' counts copy the coin counts: left out of the coin-blind hash with them, as eesim.js _hashKey)
+		if (L.hasCoinGate) { h.word(noCoins ? 0 : s.show_coin_gate); nI++; }
+		if (L.hasBlueCoinGate) { h.word(noCoins ? 0 : s.show_blue_coin_gate); nI++; }
 		if (L.hasDeathGate) { h.word(s.show_death_gate); nI++; }
 		if (L.multiTargetPortals) { h.word(s.rngSteps); nI++; }
 		if (L.hasTeamEffect) { h.word(s.team); h.word(teamPid); nI += 2; }
