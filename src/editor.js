@@ -927,7 +927,12 @@ const BREAK_RESERVE_F = 0.15;
 // its novelty hits found BREAK_NOVEL_FRESH (room, tile) cells no earlier run of the search hit (brk.novCells: the
 // novelty's own yield; on Octorage the progress count stayed flat while the novelty runs took the route from 21% to
 // 38%, and with the count alone 20 of 24 runs went plain), and a novelty run with fewer hits than that is not counted.
-const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr', BREAK_NOVEL_DRY = 2, BREAK_NOVEL_FRESH = 16;
+// The novelty acts only in a round after one that brought nothing (brk.level >= BREAK_NOVEL_LEVEL): the plain
+// breaker's round comes first (on Octorage it reached 38.1% of the known route by 250-430 s in 2 of 3 pairs, while the
+// novelty rounds from the first stall stayed at 21.1-24.6% in 2 of 3), and on Stupid Fox its one round in 300 s is plain.
+const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr', BREAK_NOVEL_DRY = 2, BREAK_NOVEL_FRESH = 16, BREAK_NOVEL_LEVEL = 1;
+/** the novelty target in this round: opted in, and the last round brought nothing */
+const novelOn = () => !!(cur && cur.opts.novel && brk && (brk.level || 0) >= BREAK_NOVEL_LEVEL);
 /** a run's novelty hits nh -> how many hit a (room, tile) cell no earlier run of the search hit (seen: those cells, grows) */
 function novelFresh(nh, seen) {
 	let fresh = 0;
@@ -936,7 +941,7 @@ function novelFresh(nh, seen) {
 }
 /** asks the CPU search for the novelty file (the answer: its "novel" event sets brk.novelReady) */
 function novelAsk() {
-	if (!S || !brk || !cur || !cur.opts.novel) return false;
+	if (!S || !novelOn()) return false;
 	const file = path.join(dir(), 'novel.bin');
 	let asked = false;
 	S.strategies.forEach((q, k) => {
@@ -1149,8 +1154,8 @@ function breakLaunch(n) {
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
 	// (a dry round, BREAK_NOVEL_DRY runs in a row with no progress: plain runs from then on, ordered as without the target:
 	// a novelty-ordered run's nearest attempt goes on too, so its chains went on to BREAK_CHAIN)
-	const novelF = cur.opts.novel && brk.novelReady && (R.dry || 0) < BREAK_NOVEL_DRY ? path.join(dir(), 'novel.bin') : '';
-	if (cur.opts.novel && (R.dry || 0) >= BREAK_NOVEL_DRY && S.breaker) S.breaker.novelPlain = (S.breaker.novelPlain || 0) + 1;
+	const novelF = novelOn() && brk.novelReady && (R.dry || 0) < BREAK_NOVEL_DRY ? path.join(dir(), 'novel.bin') : '';
+	if (novelOn() && (R.dry || 0) >= BREAK_NOVEL_DRY && S.breaker) S.breaker.novelPlain = (S.breaker.novelPlain || 0) + 1;
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))),
 		novel: novelF && fs.existsSync(novelF) ? novelF : '', prog0: R.progress.length };
 	V.novHits = [];
@@ -1170,7 +1175,7 @@ function breakAfter(n, how) {
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry, nh = V.novHits || [];
 	const hit = V.brk && V.brk.gateHit;
-	if (cur.opts.novel) novelAsk();   // (the next run's novelty file: the archive as it is now)
+	novelAsk();   // (the next run's novelty file, in a novelty round: the archive as it is now)
 	// (the novelty stop rule: runs in a row during which the search got nowhere (no nearer attempt, no new room with
 	// territory: breakProgress); from BREAK_NOVEL_DRY on, no step from a novelty hit, so the chain goes on only from a
 	// nearer attempt as without the target and the round ends as the plain breaker's does)
