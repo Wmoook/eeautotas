@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const BU = require('./bursts.js');   // (roomFamily: the wall breaker's stall clock)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -670,8 +671,11 @@ function addSource(o) {
 	}
 	if (o.gain > s.gain) s.gain = o.gain;
 	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
-	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
-	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room'); }
+	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started; and one of a family seen before
+	// (bursts.js roomFamily: it differs only by the time-door phase) is no progress either: on Good Egg such rooms with
+	// territory came every 25-55 s and kept the clock under 90 s while the search did not advance)
+	const fam = BU.roomFamily(s.desc, o.room);
+	if (brk && s.gain > 0 && !brk.rooms.has(fam)) { brk.rooms.add(fam); breakProgress('room'); }
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
