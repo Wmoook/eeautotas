@@ -14,7 +14,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const C = require('./common.js');
 const E = C.E;
@@ -27,7 +26,7 @@ const WIN_BACK = 24, WIN_AHEAD = 90, VEL_W = 3.0, MAX_D = 40.0, BUCKET_CAP = 2;
 
 function parseArgs() {
 	const a = { level: '', tas: '', out: null, step: 10, depth: 80, cap: 3000,
-		workers: os.cpus().length, from: 0, to: 0, dist: 24, verbose: 0, bucket: 1, bcap: 8, nocoins: 0 };
+		workers: C.cpuThreads(), from: 0, to: 0, dist: 24, verbose: 0, bucket: 1, bcap: 8, nocoins: 0 };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) continue;

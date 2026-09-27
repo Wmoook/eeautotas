@@ -11,7 +11,10 @@
 // deep exploring windows (the run's loops first, then from where the last one stopped; every other one skip hunting),
 // the skip search (skips.js, once per best: pass-bys and loops, entrances, every move from them), mutate, a slice of
 // the dense shortcuts pass (from its cursor), the time-door pass (levels with time doors, or coin doors when the coins
-// count), mutate, a beam every other round, a splice of all results. Where it is (round, stage, the deep and shortcuts
+// count), mutate, a beam every other round, a splice of all results. With the GPU searcher up (--gpu=1), mutate is left
+// to it, the shortcuts slice runs every other round and the beam every 8th: the GPU's random families cover their local
+// input changes (grind logs of 158 job-hours: shortcuts 4.2 and the beam 0.9 ticks per stage-hour, the deep windows 61),
+// so their time goes to the deep windows of the next round. Where it is (round, stage, the deep and shortcuts
 // cursors as ticks + state hashes, the seed counter, the best the skip search last covered) is saved in status.json
 // `cursor` after every stage, so a restart continues there instead of repeating round 1.
 // Without the GPU, mutate only searches the start ticks whose next ~800 ticks changed since its last full pass
@@ -28,7 +31,9 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1] [--skips=1]
+//        [--hunt=1] [--endgame=1] [--skips=1] [--gpuDevices=0,1] [--hot=0.5]
+//        (--workers: default the CPU threads this process may use, C.cpuThreads(): a container's CPU quota counts;
+//        --gpuDevices / --hot: passed to the GPU searcher as --devices / --hot)
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
@@ -41,7 +46,7 @@ const S = require('./splice.js');
 const LP = require('./loops.js');
 const E = C.E;
 
-const a = { until: '', forever: '', level: '', workers: os.cpus().length, job: '', nocoins: 'auto', gpu: '0', roundMin: '10', anchored: '1', tails: '1' };
+const a = { until: '', forever: '', level: '', workers: C.cpuThreads(), job: '', nocoins: 'auto', gpu: '0', roundMin: '10', anchored: '1', tails: '1' };
 for (const s of process.argv.slice(2)) {
 	const m = s.match(/^--([^=]+)=(.*)$/);
 	if (m) a[m[1]] = m[2];
@@ -68,7 +73,7 @@ const LEVEL_JSON = C.levelData(LEVEL_ID);
 fs.mkdirSync(INBOX, { recursive: true });
 fs.mkdirSync(PIECES, { recursive: true });
 const level = E.loadLevel(LEVEL_JSON);
-const W = +a.workers || os.cpus().length;
+const W = +a.workers || C.cpuThreads();
 const ROUND_MS = Math.max(1, +a.roundMin || 10) * 60e3;
 const DEEP_S = Math.max(0, +a.deepS || 0);   // --deepS: seconds per deep window (default: 150-210, rotating)
 const MUT_HORIZON = 800;
@@ -393,7 +398,11 @@ async function stage(name, script, args, outFile, maxMs, note) {
 	log(`${name}${note ? ` (${note})` : ''}...`);
 	saveStatus({ stage: name, round: curRound });
 	const res = await runTool(script, args, Math.min(maxMs, left + 240e3), path.join(OUT, `grind_${name.replace(/[^\w.-]/g, '_')}.log`));   // grace: stages with --deadline wrap up themselves
+	// (res.saved: what the stage's own output saved, also through the at-once splice of a stale one; the best may also
+	// improve while the stage runs, through the inbox: the GPU searcher's finds are not the stage's)
+	const was = best.runTicks;
 	if (fs.existsSync(outFile)) consider(outFile, name);
+	res.saved = Math.max(0, was - best.runTicks);
 	return res;
 }
 const dl = () => (FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`]);
@@ -492,7 +501,8 @@ async function mutateLoop(tag) {
 let gpuChild = null;
 function startGpu() {
 	const fd = fs.openSync(path.join(OUT, 'gpu.log'), 'a');
-	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : [])],
+	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : []),
+		...(a.gpuDevices ? [`--devices=${a.gpuDevices}`] : []), ...(a.hot !== undefined ? [`--hot=${a.hot}`] : [])],
 		{ stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
 	saveStatus({ gpuPid: gpuChild.pid });   // (jobs.js stopJob stops it first, alone: its eegpu is never killed mid-kernel)
@@ -541,14 +551,15 @@ async function loopWindows(round) {
 		if (!l) { if (!ran && loops.length) log(`deep: every loop of the run (${loops.length}) was explored already`); return ran; }
 		tried.add(`${H[l.a]}:${H[l.b]}`);
 		cur.loops = [...tried].slice(-400);
-		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
+		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40);
 		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
 		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
 			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${NC}`,
 			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}`);
 		if (!res) return ran;
 		addResult(lp);
-		log(`deep${round}_loop${ran + 1}: ${best.runTicks < before ? `a way around the loop, -${before - best.runTicks}` : 'no way around the loop found'}`);
+		// (its own find only: the GPU searcher's finds while it ran are the inbox's lines)
+		log(`deep${round}_loop${ran + 1}: ${res.saved > 0 ? `a way around the loop, -${res.saved}` : 'no way around the loop found'}`);
 		saveCursor();
 		ran++;
 	}
@@ -635,6 +646,9 @@ async function skipsStage(round) {
 }
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
+	// with the GPU searcher up, every other round: its random families try local input changes at many times the rate
+	// (the grind logs of 158 job-hours, 2026-09-27: shortcuts saved 4.2 ticks per stage-hour, the deep windows 61)
+	if (gpuBusy() && round % 2 === 1) { log(`shortcuts${round}: skipped this round (the GPU searches local changes; every other round)`); return; }
 	const budget = Math.max(90e3, 0.8 * ROUND_MS - roundUsed());
 	const n = bestTrace().tr.n;
 	const from = cursorTick(cur.sc);
@@ -703,8 +717,10 @@ async function main() {
 				// 3) beam with verified leads, every other round when there is time left, every 4th round anyway (it has
 				// no window: it runs to the finish, so one that a restart stopped is not started over: restarts more often
 				// than a beam lasts would repeat it forever)
+				// With the GPU searcher up, every 8th round only (the grind logs of 158 job-hours: the beam saved 0.9 ticks per
+				// stage-hour, 1 tick in 1.5 h; the deep windows 61): the time goes to the next round's deep windows.
 				if (si === resumedAt) log(`beam${round}: stopped by the restart; not repeated`);
-				else if (round % 4 === 0 || (round % 2 === 0 && roundUsed() < 0.9 * ROUND_MS)) {
+				else if (gpuBusy() ? round % 8 === 0 : round % 4 === 0 || (round % 2 === 0 && roundUsed() < 0.9 * ROUND_MS)) {
 					const bm = path.join(OUT, `grind_beam_${round}.eetas`);
 					const res = await stage(`beam${round}`, 'optimize.js', [TAS, `--out=${bm}`, `--width=${R([4000, 6000, 3000, 8000])}`, `--dist=${R([24, 16, 32, 24])}`,
 						'--passes=1', `--workers=${W}`, LVL], bm, Math.max(ROUND_MS - roundUsed(), 5 * 60e3) + 5 * 60e3);

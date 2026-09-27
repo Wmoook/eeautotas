@@ -33,7 +33,6 @@
 // (--level can be left out for a .eetas inside src/jobs/<id>/)
 
 const path = require('path');
-const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const C = require('./common.js');
 const E = C.E;
@@ -45,7 +44,7 @@ const PAIR_GAP = 5;   // pairs: the second change 1..5 ticks after the first
 
 function parseArgs() {
 	const a = { level: '', tas: '', out: path.join(__dirname, 'out', 'mutate_best.eetas'),
-		horizon: 600, drift: 96, workers: os.cpus().length, from: 0, to: 0, deadline: 0, pairs: 1, nocoins: 0,
+		horizon: 600, drift: 96, workers: C.cpuThreads(), from: 0, to: 0, deadline: 0, pairs: 1, nocoins: 0,
 		dprune: 0, anchor: 0, anchors: 2, ahead: 150, athr: 6, fixpoint: 0 };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);

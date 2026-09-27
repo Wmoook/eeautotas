@@ -1,6 +1,7 @@
 'use strict';
 // The GPU searcher of one job. grind.js starts it next to its CPU stages when the job runs with the GPU on:
 //   node src/gpusearch.js --job=<job dir> [--parent=<grind pid>] [--round=30] [--once=1] [--union=40] [--siblings=1]
+//     [--hot=0.5] [--hotRounds=8] [--devices=0,1]
 // Round after round it runs the native tool (native/eegpu.exe search, see src/gpu.js) on the job's newest best run.
 // The GPU tries millions of input variants from the run's own states and returns every exact shortcut it proved (a
 // variant that reaches a later state of the run in fewer ticks; the tool re-checks each one on the CPU with two
@@ -11,8 +12,10 @@
 //   m1 + del (the systematic single changes): up to --sysShare (0.3) of the round, until one full pass over the
 //     current best is done (windows sized by the measured speed, so a window finishes);
 //   m2 (pairs of changes, 250-300x fewer shortcuts per tick than m1): up to --m2Share (0.2), its own wrapping cursor;
-//   pert / flip / sticky (random perturbations, one family per round in turn): the rest, at least half.
-// Cursors, the seed counter and per-family numbers are kept in gpu/state.json, so a restart continues.
+//   pert / flip / sticky (random perturbations, one family per round in turn): the rest, at least half; while there
+//     is a hot window (the stretch a new best changed, for --hotRounds rounds), --hot (0.5) of it goes there.
+// Cursors, the seed counter, the hot windows and per-family numbers are kept in gpu/state.json, so a restart continues.
+// --devices=0,1,...: one eegpu per GPU at the same time (see DEVICES below).
 // After every invocation that found something, the library is combined with the UNION of every run the job knows
 // (splice.js unionGraph: the current best, the runs this searcher judged, best_*.eetas, pieces/, the grind's stage
 // outputs and, with --siblings=1, the best runs of other jobs of the same level, simulated in this job's level; the
@@ -59,6 +62,21 @@ const LIB_MAX = 300000;   // edges kept; above it, edges that start on no known 
 // every-move rounds: opt in with --every=1 (exact every-move windows are slow on big levels; see the header)
 const EVERY_ON = args.every !== undefined && String(args.every) !== '0';
 const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 60)), EVERY_STEP = Math.max(1, +(args.everyStep || 25)), EVERY_S = Math.max(1, +(args.everyS || 5));
+// hot windows: after the reference changes, --hot (0.5) of the random families' time goes to the changed stretch (its
+// first to last new state, at most HOT_MAX ticks, HOT_MARGIN either side) for HOT_ROUNDS rounds; the newest HOT_KEEP
+// changes in turn. Follow-up finds cluster there: of 140 improvements that changed under 600 ticks after a change that
+// did too, 71 lay within 300 ticks of it (local jobs and the A100 farm, 2026-09-27), where a window of 600 of the run's
+// 5000-38000 ticks is 1.5-12% of the uniform search's candidates. --hot=0: off (the whole run, as before)
+const HOT_SHARE = Math.max(0, Math.min(0.9, args.hot !== undefined ? +args.hot : 0.5));
+const HOT_MARGIN = 300, HOT_MAX = 2000, HOT_ROUNDS = Math.max(1, +(args.hotRounds || 8)), HOT_KEEP = 3;
+// --devices=0,1,... (several GPUs for one job): one eegpu per device at the same time (CUDA_VISIBLE_DEVICES of each
+// lane). Lane 0 runs the rounds as before; every other lane runs the random families (the hot windows first while there
+// are any) in --round long invocations from the newest reference, with its own edges and stop files; the library, the
+// union combine and the hand-in are shared. One eegpu fills a GPU (an H100: 552 M ticks/s alone, 531 M for two at the
+// same time, 509 M for four), so more lanes on one device add nothing; without --devices one lane on the GPU this
+// process sees, as before.
+const DEVICES = String(args.devices || '').split(',').map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
+const LANES = Math.max(1, DEVICES.length);
 const PARENT = +(args.parent || 0);
 // eegpu's launch target (ms per kernel launch; halved after each launch failure) and the failures so far
 let launchMs = Math.max(5, Math.min(1000, +(args.launchMs || 50)));
@@ -90,10 +108,13 @@ function status(extra) {
 	Object.assign(st, extra || {}, { t: Date.now() });
 	try { C.writeAtomic(STATUS, JSON.stringify(st)); } catch (e) { /* ignore */ }
 }
-let child = null, quitting = false;
-// the running eegpu's stop file (its --stopfile): killing it while a kernel runs makes the NVIDIA driver reset the GPU,
-// so quit() asks it to stop between two launches instead
+let quitting = false;
+const children = new Map();   // lane -> its running eegpu
+const running = () => [...children.entries()].filter(([, ch]) => ch && ch.exitCode === null);
+// a running eegpu's stop file (its --stopfile; one per lane): killing it while a kernel runs makes the NVIDIA driver
+// reset the GPU, so quit() asks it to stop between two launches instead. Lane 0's is gpu/stop (jobs.js writes it too).
 const STOPFILE = path.join(GDIR, 'stop');
+const stopFile = (lane) => (lane ? path.join(GDIR, `stop${lane}`) : STOPFILE);
 function quit(code) {
 	const end = () => {
 		try { saveLibrary(true); saveState(); } catch (e) { /* not loaded yet */ }
@@ -102,30 +123,33 @@ function quit(code) {
 	};
 	if (quitting) return;
 	quitting = true;
-	const ch = child;
-	if (ch && ch.exitCode === null) {
-		// (the running eegpu is never killed: killing it mid-kernel makes Windows reset the display driver. Its stop file
-		// ends it between two launches; if it has not ended 2 s later (loading its kernels, say), it ends by itself at its
-		// next launch or within its --seconds)
-		try { fs.writeFileSync(STOPFILE, 'quit'); } catch (e) { /* it ends within its --seconds */ }
+	const live = running();
+	if (live.length) {
+		// (a running eegpu is never killed: killing it mid-kernel makes Windows reset the display driver. Its stop file
+		// ends it between two launches; if they have not ended 2 s later (loading their kernels, say), each ends by itself
+		// at its next launch or within its --seconds)
+		for (const [lane] of live) { try { fs.writeFileSync(stopFile(lane), 'quit'); } catch (e) { /* it ends within its --seconds */ } }
 		const t = setTimeout(end, 2000);
-		ch.once('close', () => { clearTimeout(t); end(); });
+		let left = live.length;
+		for (const [, ch] of live) ch.once('close', () => { if (--left === 0) { clearTimeout(t); end(); } });
 		return;
 	}
 	end();
 }
-/** eegpu's stop options: its stop file, and this process as its parent. eegpu is started detached: Node kills the
+/** eegpu's stop options: its lane's stop file, and this process as its parent. eegpu is started detached: Node kills the
  *  children it did not start detached the moment it exits (also when it is killed), mid-kernel too; a detached eegpu
  *  ends at its next kernel launch once this process is gone (--parent) or the stop file is there */
-const EEGPU_OPTS = () => [`--stopfile=${STOPFILE}`, `--parent=${process.pid}`];
+const EEGPU_OPTS = (lane) => [`--stopfile=${stopFile(lane)}`, `--parent=${process.pid}`];
 /** a new eegpu run: no stop request left over */
-const clearStop = () => { try { fs.unlinkSync(STOPFILE); } catch (e) { /* none */ } };
+const clearStop = (lane) => { try { fs.unlinkSync(stopFile(lane)); } catch (e) { /* none */ } };
+/** the environment of a lane's eegpu: its device (CUDA_VISIBLE_DEVICES) with --devices, else this process's */
+const laneEnv = (lane) => (DEVICES.length ? Object.assign({}, process.env, { CUDA_VISIBLE_DEVICES: DEVICES[lane] }) : process.env);
 // Find a route has the GPU first: while the editor's search runs (its marker <data>/editor/busy, touched every few
 // seconds, is fresh), the running eegpu is asked to stop between two launches and no new one starts; a stopped run is
 // a normal, shorter run (its done line and edges come as usual)
 const EDITOR_BUSY = path.join(C.DATA, 'editor', 'busy');
 const editorBusy = () => { try { return Date.now() - fs.statSync(EDITOR_BUSY).mtimeMs < 15000; } catch (e) { return false; } };
-setInterval(() => { if (child && child.exitCode === null && editorBusy()) { try { fs.writeFileSync(STOPFILE, 'yield'); } catch (e) { /* it ends within its --seconds */ } } }, 1000).unref();
+setInterval(() => { if (editorBusy()) for (const [lane] of running()) { try { fs.writeFileSync(stopFile(lane), 'yield'); } catch (e) { /* it ends within its --seconds */ } } }, 1000).unref();
 async function yieldToEditor() {
 	if (!editorBusy()) return;
 	log('GPU: Find a route is running: the GPU searcher waits for it');
@@ -139,8 +163,12 @@ if (PARENT) setInterval(() => { try { process.kill(PARENT, 0); } catch (e) { qui
 
 // ---------------------------------------------------------------- saved state (cursors, seed counter, per-family numbers)
 // cursors are {t, h}: a tick of the reference and its state hash, found again by hash when the reference changes
-const state = Object.assign({ v: 1, seed: 0, rot: 0, every: 0, cur: {}, left: null, rate: {}, fam: {} }, C.readJSON(STATE, {}));
+const state = Object.assign({ v: 1, seed: 0, rot: 0, every: 0, cur: {}, left: null, rate: {}, fam: {}, hot: [] }, C.readJSON(STATE, {}));
 for (const f of LIB_FAMS) state.fam[f] = Object.assign({ ticks: 0, seconds: 0, hits: 0, edges: 0, used: 0, saved: 0 }, state.fam[f] || {});
+// the hot windows' own numbers (their edges are also in their families' numbers)
+state.hotStats = Object.assign({ ticks: 0, seconds: 0, edges: 0, used: 0, saved: 0 }, state.hotStats || {});
+if (!Array.isArray(state.hot)) state.hot = [];
+const hotKeys = new Set();   // library edges a hot window found (this session): `${start hash}|${end key}`
 function saveState() { try { C.writeAtomic(STATE, JSON.stringify(state)); } catch (e) { /* ignore */ } }
 /** the next search seed: a persisted counter, so a restart never repeats the random families' candidates */
 function nextSeed() { state.seed = (state.seed | 0) + 1; return state.seed * 7919 + 17; }
@@ -160,7 +188,7 @@ function dropEdge(hStart, endKey) {
 	const m = lib.get(hStart);
 	if (m && m.delete(endKey)) { libSize--; libDirty = true; if (!m.size) lib.delete(hStart); }
 }
-function readEdges(file, ref) {
+function readEdges(file, ref, hot) {
 	const b = fs.readFileSync(file);
 	if (b.length < 16 || b.readUInt32LE(0) !== 0x44454545) throw new Error('bad edges file');
 	const count = b.readUInt32LE(8);
@@ -172,7 +200,8 @@ function readEdges(file, ref) {
 		const seq = Uint8Array.from(b.subarray(p, p + k));
 		p += k;
 		if (t < 0 || t > ref.n || j < 0 || j > ref.n) continue;
-		if (addEdge(ref.H[t], (flags & 1) ? 'F' : ref.H[j], seq, fam)) { added++; byFam[fam] = (byFam[fam] || 0) + 1; }
+		const endKey = (flags & 1) ? 'F' : ref.H[j];
+		if (addEdge(ref.H[t], endKey, seq, fam)) { added++; byFam[fam] = (byFam[fam] || 0) + 1; if (hot) hotKeys.add(`${ref.H[t]}|${endKey}`); }
 	}
 	return { count, added, byFam };
 }
@@ -237,8 +266,14 @@ let own = null;          // the last run this searcher judged faster: { key, ms,
 const ownRuns = [];      // the runs this searcher judged (for the union), newest last
 let diskKey = '', disk = null;
 const sameOrBetter = (a, b) => a.runTicks < b.runTicks || (a.runTicks === b.runTicks && a.chance >= b.chance - 1e-9);
+// refresh() and offer() run one at a time (lanes finish their invocations at any moment); inside, refreshNow and
+// offerNow call each other directly
+let lockChain = Promise.resolve();
+function locked(fn) { const p = lockChain.then(fn, fn); lockChain = p.catch(() => {}); return p; }
+const refresh = () => locked(refreshNow);
+const offer = (what) => locked(() => offerNow(what));
 /** best.eetas or this searcher's own judged run, whichever is faster: the reference of the next invocation */
-async function refresh() {
+async function refreshNow() {
 	let bytes;
 	try { bytes = fs.readFileSync(path.join(DIR, 'best.eetas')); } catch (e) { return false; }
 	const key = sha1(bytes);
@@ -272,12 +307,17 @@ async function refresh() {
 		// ... from just before the first state the old reference never reached: a new stretch is unpolished (after a route
 		// change most follow-up finds are inside it), and the pass still covers the whole run
 		if (old) {
-			let first = -1;
-			for (let t = 0; t <= ref.n && first < 0; t++) if (!old.tickOf.has(ref.H[t])) first = t;
-			if (first >= 0) { setCursor('sys', Math.max(0, first - 300)); log(`GPU: the new best differs from tick ${first} on: the single changes start there (tick ${Math.max(0, first - 300)})`); }
+			let first = -1, last = -1;
+			for (let t = 0; t <= ref.n; t++) if (!old.tickOf.has(ref.H[t])) { if (first < 0) first = t; last = t; }
+			if (first >= 0) {
+				setCursor('sys', Math.max(0, first - 300));
+				const hw = addHot(first, last);
+				log(`GPU: the new best differs from tick ${first} on: the single changes start there (tick ${Math.max(0, first - 300)})` +
+					(hw ? `; hot window ${hw[0]}-${hw[1]}` : ''));
+			}
 		}
 	}
-	if (old) await offer('new best');
+	if (old) await offerNow('new best');
 	saveState();
 	return true;
 }
@@ -291,6 +331,30 @@ function cursorAt(name) {
 function setCursor(name, t) {
 	const tt = t >= ref.n ? 0 : Math.max(0, t | 0);   // (wraps at the end)
 	state.cur[name] = { t: tt, h: ref.H[tt] };
+}
+/** a {t, h} mark's tick on the current reference (by its state hash, else its old tick) */
+function markAt(c) {
+	const t = c && c.h !== undefined ? ref.tickOf.get(c.h) : undefined;
+	return Math.max(0, Math.min(ref.n, t !== undefined ? t : (c && c.t) | 0));
+}
+/** A hot window for the changed stretch [first, last] of the new reference (HOT_MARGIN either side, at most HOT_MAX
+ *  long): the newest first, HOT_KEEP kept. Returns [from, to] or null (--hot=0). */
+function addHot(first, last) {
+	if (!(HOT_SHARE > 0)) return null;
+	const a = Math.max(0, first - HOT_MARGIN), b = Math.min(ref.n, Math.min(last, first + HOT_MAX) + HOT_MARGIN);
+	if (b - a < 16) return null;
+	state.hot = [{ a: { t: a, h: ref.H[a] }, b: { t: b, h: ref.H[b] }, left: HOT_ROUNDS }, ...state.hot].slice(0, HOT_KEEP);
+	return [a, b];
+}
+/** This round's hot window ({from, to} on the current reference; the live ones in turn, each for HOT_ROUNDS rounds), or
+ *  null when none is left */
+function nextHot(peek) {
+	state.hot = state.hot.filter((w) => w.left > 0);
+	if (!state.hot.length) return null;
+	const w = state.hot[(state.rot | 0) % state.hot.length];
+	if (!peek) w.left--;   // (peek: the other lanes, which do not use up the windows' rounds)
+	const from = markAt(w.a), to = markAt(w.b);
+	return to - from >= 16 ? { from, to } : null;
 }
 
 // ---------------------------------------------------------------- the union of every known run
@@ -392,7 +456,7 @@ function combineOn(g, base, what) {
 let lastOffer = '';
 /** Combines the library with the union of every known run; if the result is faster and passes THE rule, hands it to
  *  the job and makes it the reference. */
-async function offer(what) {
+async function offerNow(what) {
 	if (!ref) return;
 	const base = ref.ev;
 	// when the union's fastest combination is refused (another run dies more often, a coin-blind join meets a coin
@@ -415,6 +479,7 @@ async function offer(what) {
 		const f = used[e.fam] || (used[e.fam] = { n: 0, saved: 0 });
 		f.n++; f.saved += s; credited += s;
 		state.fam[e.fam].used++; state.fam[e.fam].saved += s;
+		if (hotKeys.has(`${e.h0}|${e.h1}`)) { state.hotStats.used++; state.hotStats.saved += s; f.hot = (f.hot || 0) + 1; }
 	}
 	const saved = base.runTicks - cand.runTicks;
 	const others = [...u.runsUsed].filter((r) => r > 0).map((r) => g.tags[r]);
@@ -426,13 +491,13 @@ async function offer(what) {
 	ownRuns.push(mine);
 	if (ownRuns.length > 5) ownRuns.shift();
 	own = res.handed === 'direct' && !res.accepted ? null : mine;   // (refused by a stopped job at once: no reference)
-	const parts = Object.entries(used).map(([f, x]) => `${f} ${x.n}${x.saved ? ` -${x.saved}` : ''}`);
+	const parts = Object.entries(used).map(([f, x]) => `${f} ${x.n}${x.hot ? ` (${x.hot} hot)` : ''}${x.saved ? ` -${x.saved}` : ''}`);
 	if (others.length && saved > credited) parts.push(`other runs -${saved - credited}`);
 	status({ lastSubmit: { t: Date.now(), runTicks: cand.runTicks, saved, handed: res.handed, accepted: res.accepted }, families: famStatus() });
 	log(`GPU: ${what}: ${u.libUsed.length} shortcuts${others.length ? ` + ${new Set(others).size} other run${new Set(others).size > 1 ? 's' : ''}` : ''} -> ` +
 		`${C.fmt(base.runTicks)} to ${C.fmt(cand.runTicks)} (-${saved}) [${parts.join(', ') || 'splices'}]` +
 		`${sib.length ? `; uses the route of ${sib.map((t) => t.slice(4)).join(', ')}` : ''}, handed to the ${res.handed === 'inbox' ? 'grind' : 'job'}${res.accepted ? ' (accepted)' : ''}`);
-	await refresh();   // the next invocation searches this run
+	await refreshNow();   // the next invocation searches this run
 }
 const famStatus = () => Object.fromEntries(LIB_FAMS.map((f) => [f, state.fam[f]]));
 
@@ -446,18 +511,30 @@ function loaded(ev) {
 	const ms = (+ev.loadMs || 0) + (+ev.allocMs || 0);
 	if (ms >= 5000) log(`GPU: the engine took ${(ms / 1000).toFixed(0)} s to start (kernels ${((+ev.loadMs || 0) / 1000).toFixed(1)} s, memory ${((+ev.allocMs || 0) / 1000).toFixed(1)} s${ev.module ? `, ${ev.module}` : ''})`);
 }
+// the ticks every finished invocation simulated, and the running ones' so far (per lane): gpu_status.json's ticks and speed
+let ticksDone = 0;
+const laneTicks = new Map(), laneRate = new Map();
+function laneProgress(lane, ticks, rate, extra) {
+	laneTicks.set(lane, ticks); laneRate.set(lane, rate);
+	let t = ticksDone, r = 0;
+	for (const x of laneTicks.values()) t += x;
+	for (const x of laneRate.values()) r += x;
+	status(Object.assign({ state: 'running', ticks: t, ticksPerSec: Math.round(r) }, extra || {}));
+}
+function laneDone(lane, ticks) { ticksDone += ticks || 0; laneTicks.delete(lane); laneRate.delete(lane); st.ticks = ticksDone + [...laneTicks.values()].reduce((s, x) => s + x, 0); }
 /** Runs `eegpu search`; resolves {code, done, err, at: {family: {max, last, wrapped}}} (the progress positions per
  *  family: every start tick below `max` is done; wrapped = its pass over [from, to) ended). */
 function runSearch(tool, blobFile, refFile, edgesFile, o) {
 	return new Promise((resolve) => {
+		const lane = o.lane | 0;
 		const a = ['search', blobFile, refFile, edgesFile, `--seconds=${o.seconds.toFixed(1)}`, `--nocoins=${nc ? 1 : 0}`, `--seed=${o.seed}`,
-			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
+			`--families=${o.families}`, `--from=${o.from}`, `--to=${o.to}`, `--launch-ms=${launchMs}`, ...EEGPU_OPTS(lane), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
-		clearStop();
-		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
+		clearStop(lane);
+		const child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true, env: laneEnv(lane) });   // (EEGPU_OPTS)
+		children.set(lane, child);
 		let buf = '', done = null, err = '', launchError = false;
 		const at = {};
-		const base = st.ticks;
 		child.stdout.on('data', (d) => {
 			buf += d;
 			let k;
@@ -469,7 +546,7 @@ function runSearch(tool, blobFile, refFile, edgesFile, o) {
 				try { ev = JSON.parse(line); } catch (e) { continue; }
 				if (ev.ev === 'ready') loaded(ev);
 				else if (ev.ev === 'progress') {
-					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: ev.family });
+					laneProgress(lane, ev.ticks, ev.ticksPerSec, { family: ev.family });
 					// eegpu prints the next start tick of the running family (its pass over [from, to) restarts at from)
 					const p = at[ev.family] || (at[ev.family] = { max: o.from, last: o.from, wrapped: false });
 					if (typeof ev.at === 'number') {
@@ -483,26 +560,38 @@ function runSearch(tool, blobFile, refFile, edgesFile, o) {
 		});
 		child.stderr.on('data', (d) => { err += d; });
 		child.on('close', (code) => {
-			child = null;
-			if (done) st.ticks = base + (done.ticks || 0);
+			if (children.get(lane) === child) children.delete(lane);
+			laneDone(lane, done ? done.ticks || 0 : laneTicks.get(lane) || 0);
 			resolve({ code, done, err: err.trim(), at, launchError: isLaunchFailure(code, launchError, done) });
 		});
 	});
 }
 
 let tool = null, blobFile = '', edgesFile = '';
+/** With several lanes, each has its own edges file (gpu/edges<k>.bin) and gets its own copy of the reference it runs on,
+ *  written at its start (gpu/ref<k>.eetas: another lane's find may make a new reference while its eegpu starts); one
+ *  lane uses gpu/edges.bin and gpu/ref.eetas (written with every new reference), as before */
+const laneEdges = (lane) => (LANES > 1 ? path.join(GDIR, `edges${lane}.bin`) : edgesFile);
+function laneRef(lane, R) {
+	if (LANES <= 1) return path.join(GDIR, 'ref.eetas');
+	const f = path.join(GDIR, `ref${lane}.eetas`);
+	C.writeEetas(f, R.masks);
+	return f;
+}
 const G9 = (x) => (x >= 1e9 ? `${(x / 1e9).toFixed(1)} G` : `${(x / 1e6).toFixed(0)} M`);
 /**
  * One invocation of a slot: 'sys' (m1 + del), 'm2' or a random family. Returns {ok, seconds, edges, text} (text: a
  * piece of the round's log line) or {ok: false, err}.
  */
-async function invoke(slot, seconds) {
+async function invoke(slot, seconds, win, lane) {
+	lane = lane | 0;
 	const random = RANDOM_FAMS.includes(slot);
 	const families = slot === 'sys' ? 'm1,del' : slot;
 	const secArg = Math.round(seconds * 10) / 10;
-	const n = ref.n;
-	const from = cursorAt(slot);
-	let to = n;
+	const R = ref, n = R.n;   // (other lanes may change the reference meanwhile: this invocation's edges are on R)
+	const curName = lane ? `${slot}@${lane}` : slot;   // (the other lanes' random families: cursors of their own)
+	const from = win ? win.from : cursorAt(curName);   // (win: a hot window, a random family over [from, to) only)
+	let to = win ? win.to : n;
 	if (!random) {
 		// size the window so the pass finishes in the time (what is left of the slot goes to the next window or to
 		// the random families); the first window measures the speed (start ticks per second of kernel time)
@@ -513,13 +602,15 @@ async function invoke(slot, seconds) {
 	const t0 = Date.now();
 	const seed = nextSeed();
 	saveState();   // (a restart never repeats a seed, also when this invocation is cut off)
-	const r = await runSearch(tool, blobFile, path.join(GDIR, 'ref.eetas'), edgesFile, { seconds: secArg, seed, families, from, to });
+	const edges = laneEdges(lane);
+	const r = await runSearch(tool, blobFile, laneRef(lane, R), edges, { seconds: secArg, seed, families, from, to, lane });
 	if (!r.done) return { ok: false, err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError };
 	launchFails = 0; otherFails = 0;   // (a run that finished: the failures in a row start over)
 	const d = r.done;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);
 	let got = { added: 0, byFam: {} };
-	try { got = readEdges(edgesFile, ref); } catch (e) { log(`GPU: ${e.message}`); }
+	try { got = readEdges(edges, R, !!win); } catch (e) { log(`GPU: ${e.message}`); }
+	const stale = ref !== R;   // (a new reference meanwhile: its cursors were set for it, and a new pass is due)
 	// per-family numbers of the done event
 	const fams = d.families || {};
 	let kernel = 0;
@@ -534,10 +625,14 @@ async function invoke(slot, seconds) {
 	// cursors: advance only over what is surely done (eegpu reports the next start tick of the running family)
 	const finished = sec < secArg - 0.05;   // a systematic pass that ends early covered its whole window
 	let reach = from;
-	if (random) {
+	if (win) {
+		reach = to;
+		const h = state.hotStats;
+		h.ticks += d.ticks || 0; h.seconds += kernel; h.edges += got.added;
+	} else if (random) {
 		const p = r.at[slot];
 		reach = p && p.wrapped ? n : p ? p.max : from;
-		setCursor(slot, reach);
+		if (!stale) setCursor(curName, reach);
 	} else {
 		const m1 = fams.m1 ? fams.m1.seconds || 0 : 0, dl = fams.del ? fams.del.seconds || 0 : 0;
 		let full = 0;   // kernel seconds the whole window takes (for the speed)
@@ -555,16 +650,16 @@ async function invoke(slot, seconds) {
 			const p = r.at.m1;
 			if (p && p.max > from) full = 1.15 * m1 * (to - from) / (p.max - from);   // (del: ~15% of m1's work)
 		}
-		if (reach > from) state.left[slot] = Math.max(0, state.left[slot] - (reach - from));
+		if (reach > from && !stale) state.left[slot] = Math.max(0, state.left[slot] - (reach - from));
 		if (full > 0) state.rate[slot] = (to - from) / Math.max(full, 0.05);
 		else if (!finished) state.rate[slot] = (state.rate[slot] || 1000) * 0.5;
-		setCursor(slot, reach);
+		if (!stale) setCursor(slot, reach);
 	}
-	status({ state: 'running', name: d.gpu ? d.gpu.name : st.name, edges: libSize, found: st.found + got.added, ticksPerSec: Math.round(d.ticksPerSec || 0), families: famStatus(),
-		lastRound: { ticks: d.ticks, seconds: d.seconds, edges: d.edges, bestSaving: d.bestSaving } });
+	status(Object.assign({ state: 'running', name: d.gpu ? d.gpu.name : st.name, edges: libSize, found: st.found + got.added, families: famStatus(), hot: state.hotStats,
+		lastRound: { ticks: d.ticks, seconds: d.seconds, edges: d.edges, bestSaving: d.bestSaving } }, LANES > 1 ? { lanes: LANES, devices: DEVICES } : { ticksPerSec: Math.round(d.ticksPerSec || 0) }));
 	saveLibrary(false);
 	saveState();
-	const text = `${slot === 'sys' ? 'm1+del' : slot} ${from}-${reach}${random ? '' : finished ? '' : ` (of ${to})`} ${sec.toFixed(1)} s ${G9(d.ticks || 0)} ticks ` +
+	const text = `${lane ? `(GPU ${DEVICES[lane]}) ` : ''}${slot === 'sys' ? 'm1+del' : slot}${win ? ' hot' : ''} ${from}-${reach}${random ? '' : finished ? '' : ` (of ${to})`} ${sec.toFixed(1)} s ${G9(d.ticks || 0)} ticks ` +
 		`${got.added} new${got.added ? ` (${Object.entries(got.byFam).map(([f, x]) => `${f} ${x}`).join(', ')})` : ''}`;
 	return { ok: true, seconds: sec, added: got.added, text };
 }
@@ -573,13 +668,14 @@ async function invoke(slot, seconds) {
 /** one window: every move from tick T; its shortcuts go into the library. Resolves {added, done, err}. */
 function runWindow(T) {
 	return new Promise((resolve) => {
-		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
+		const R = ref;   // (the window's rejoins are on this reference)
+		const a = ['explore', blobFile, laneRef(0, R), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, ...EEGPU_OPTS(0), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
-		clearStop();
-		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
+		clearStop(0);
+		const child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true, env: laneEnv(0) });   // (EEGPU_OPTS)
+		children.set(0, child);
 		let buf = '', done = null, err = '', added = 0, last = 0, launchError = false;
-		const base = st.ticks;
 		child.stdout.on('data', (d) => {
 			buf += d;
 			let k;
@@ -591,21 +687,21 @@ function runWindow(T) {
 				try { ev = JSON.parse(line); } catch (e) { continue; }
 				if (ev.ev === 'ready') loaded(ev);
 				else if (ev.ev === 'rejoin') {
-					if (ev.from >= 0 && ev.from <= ref.n && ev.j > ev.from && ev.j <= ref.n && ev.saving > 0) {
+					if (ev.from >= 0 && ev.from <= R.n && ev.j > ev.from && ev.j <= R.n && ev.saving > 0) {
 						const seq = Uint8Array.from(String(ev.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
-						if (addEdge(ref.H[ev.from], ref.H[ev.j], seq, 'every')) added++;
+						if (addEdge(R.H[ev.from], R.H[ev.j], seq, 'every')) added++;
 					}
 				} else if (ev.ev === 'layer') {
 					last = ev.ticks;
-					status({ state: 'running', ticks: base + ev.ticks, ticksPerSec: Math.round(ev.ticksPerSec), family: `every move from tick ${T}` });
+					laneProgress(0, ev.ticks, ev.ticksPerSec, { family: `every move from tick ${T}` });
 				} else if (ev.ev === 'done') done = ev;
 				else if (ev.error) { err = ev.error; if (ev.launchError) launchError = true; }
 			}
 		});
 		child.stderr.on('data', (d) => { err += d; });
 		child.on('close', (code) => {
-			child = null;
-			if (done) st.ticks = base + (done.ticks || last);
+			if (children.get(0) === child) children.delete(0);
+			laneDone(0, done ? done.ticks || last : last);
 			resolve({ code, done, err: err.trim(), added, launchError: isLaunchFailure(code, launchError, done) });
 		});
 	});
@@ -625,6 +721,26 @@ async function runEvery() {
 	}
 	saveState();
 	return { added, windows, from, to: state.every, gpu, ticks, seconds: (Date.now() - t0) / 1000 };
+}
+
+// ---------------------------------------------------------------- the other devices' lanes (--devices)
+const laneTexts = [];   // their invocations' log pieces, for lane 0's next round line
+let laneAdded = 0;
+/** Lane k >= 1: random families in turn, --round seconds each, from the newest reference; every other invocation in the
+ *  newest hot window while there is one. Failures go through failed() like lane 0's. */
+async function laneLoop(lane) {
+	for (let k = 0; !quitting; k++) {
+		while (editorBusy() && !quitting) await new Promise((r) => setTimeout(r, 2000));   // (Find a route: lane 0 logs it)
+		if (quitting) break;
+		await refresh();
+		const fam = RANDOM_FAMS[(k + lane) % RANDOM_FAMS.length];
+		const hot = HOT_SHARE > 0 && k % 2 === 1 ? nextHot(true) : null;
+		const r = await invoke(fam, ROUND_S, hot, lane);
+		if (!r.ok) { if (!quitting) await failed(r.err, r.launchError); continue; }
+		laneTexts.push(r.text);
+		if (laneTexts.length > 20) laneTexts.shift();
+		if (r.added) { laneAdded += r.added; await offer(`GPU ${DEVICES[lane]}`); }
+	}
 }
 
 // ---------------------------------------------------------------- the round loop
@@ -682,9 +798,11 @@ async function main() {
 	TC = S.traceCache(level, nc, RANDOM);
 	fingerprint = libraryFingerprint(blob, nc);
 	const loaded = loadLibrary();
-	log(`GPU search started (${nc ? 'coin-blind' : 'coin-aware'}), rounds of ${ROUND_S} s` + (loaded ? `, ${loaded} shortcuts from the saved library` : ''));
+	log(`GPU search started (${nc ? 'coin-blind' : 'coin-aware'}), rounds of ${ROUND_S} s` + (loaded ? `, ${loaded} shortcuts from the saved library` : '') +
+		(LANES > 1 ? `, on ${LANES} GPUs at once (devices ${DEVICES.join(', ')})` : ''));
 	while (!(await refresh())) await new Promise((r) => setTimeout(r, 5000));
 	await offer('saved library and known runs');
+	for (let lane = 1; lane < LANES; lane++) laneLoop(lane).catch((e) => log(`GPU: lane ${lane} (GPU ${DEVICES[lane]}): ${e && e.stack || e}`));
 	let round = 0;
 	for (;;) {
 		await yieldToEditor();
@@ -721,17 +839,26 @@ async function main() {
 		if (!error) await slice('m2', M2_SHARE);
 		if (!error) {
 			const fam = RANDOM_FAMS[(state.rot | 0) % RANDOM_FAMS.length];
-			state.rot = (state.rot | 0) + 1;
 			const left = Math.max(MIN_SLICE, (1 - SYS_SHARE - M2_SHARE) * ROUND_S, ROUND_S - (Date.now() - t0) / 1000);
 			await refresh();
-			const r = await invoke(fam, left);
-			if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; }
-			else { texts.push(r.text); added += r.added; if (r.added) await offer(`round ${round}`); }
+			// a hot window first (the stretch the newest bests changed): --hot of the random time, the rest the whole run
+			const hot = HOT_SHARE > 0 && left >= 2 * MIN_SLICE ? nextHot() : null;
+			state.rot = (state.rot | 0) + 1;
+			for (const win of hot ? [hot, null] : [null]) {
+				const sec = win ? Math.max(MIN_SLICE, HOT_SHARE * left) : hot ? Math.max(MIN_SLICE, ROUND_S - (Date.now() - t0) / 1000) : left;
+				if (!win && hot) await refresh();
+				const r = await invoke(fam, sec, win);
+				if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; break; }
+				texts.push(r.text); added += r.added;
+				if (r.added) await offer(`round ${round}`);
+			}
 		}
 		if (error) { await failed(error, errorLaunch); continue; }
 		status({ state: 'running', round, edges: libSize, families: famStatus() });
-		// (every round that found something, and every 10th: the rest is in gpu_status.json `families`)
-		if (added || round % 10 === 1) log(`GPU: round ${round} (${((Date.now() - t0) / 1000).toFixed(0)} s, library ${libSize}): ${texts.join('; ')}`);
+		// (every round that found something, and every 10th: the rest is in gpu_status.json `families`; with --devices the
+		// other GPUs' invocations since the last round line too)
+		if (added || laneAdded || round % 10 === 1) log(`GPU: round ${round} (${((Date.now() - t0) / 1000).toFixed(0)} s, library ${libSize}): ${texts.concat(laneTexts).join('; ')}`);
+		laneTexts.length = 0; laneAdded = 0;
 		saveLibrary(true);
 		if (args.once) break;
 	}

@@ -104,7 +104,7 @@ async function run(opts) {
 	const o = opts || {};
 	const c = !o.force && cached();
 	if (c) return c;
-	const threads = os.cpus().length;
+	const threads = require('./common.js').cpuThreads();
 	const ms = o.ms || 1000;
 	const single = await measure(1, ms);
 	const points = [[1, Math.round(single)]];   // [threads, ticks/s] measured
@@ -139,7 +139,7 @@ function estimate(rec, n) {
 /** The measured CPU in words, e.g. "Intel Core i7-11800H (16 threads): 7.3 M ticks/s per thread, fastest with 8 threads
  *  (measured)"; without a record just "Intel Core i7-11800H (16 threads)". */
 function describe(rec) {
-	const threads = (rec && rec.threads) || os.cpus().length;
+	const threads = (rec && rec.threads) || require('./common.js').cpuThreads();
 	const name = `${require('./common.js').cpuName((rec && rec.model) || (os.cpus()[0] && os.cpus()[0].model))} (${threads} threads)`;
 	if (!rec) return name;
 	const M = (x) => `${(x / 1e6).toFixed(1)} M`;
@@ -154,7 +154,7 @@ if (isMainThread && require.main === module) {
 	(async () => {
 		const ms = +a.ms || 1000;
 		const s = await measure(1, ms);
-		const n = +a.threads || os.cpus().length;
+		const n = +a.threads || require('./common.js').cpuThreads();
 		const all = n > 1 ? await measure(n, ms) : s;
 		const f = (x) => `${(x / 1e6).toFixed(1)} M`;
 		console.log(`[bench] ${os.cpus()[0].model.trim()}: 1 thread ${f(s)} ticks/s, ${n} threads ${f(all)} ticks/s (${(all / s).toFixed(1)}x)`);

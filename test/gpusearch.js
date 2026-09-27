@@ -4,7 +4,8 @@
 //  1. failures that are not launch failures (out of GPU memory: no kernel ran) are retried after waits that double
 //     (--failWait: the first), and a run that works starts them over;
 //  2. launch failures (the driver's watchdog) wait, halve --launch-ms, and stop the searcher after 3 in a row (exit 5);
-//  3. a quit (the grind gone: --parent) asks the running tool to stop through its stop file and never kills it.
+//  3. a quit (the grind gone: --parent) asks the running tool to stop through its stop file and never kills it;
+//  4. two GPUs (--devices): one tool per device at the same time, each with its own stop, edges and reference files.
 //   node test/gpusearch.js
 const fs = require('fs');
 const os = require('os');
@@ -49,7 +50,7 @@ const k = fs.existsSync(cnt) ? +fs.readFileSync(cnt, 'utf8') : 0;
 fs.writeFileSync(cnt, String(k + 1));
 const step = plan[Math.min(k, plan.length - 1)];
 const log = (s) => fs.appendFileSync(path.join(dir, 'tool.log'), JSON.stringify(Object.assign({ t: Date.now(), k, step }, s)) + '\\n');
-log({ launchMs: +opt('launch-ms'), stopfile: opt('stopfile'), parent: +opt('parent') });
+log({ launchMs: +opt('launch-ms'), stopfile: opt('stopfile'), parent: +opt('parent'), dev: process.env.CUDA_VISIBLE_DEVICES || '', ref: a[2], edges: a[3] });
 const empty = () => { const b = Buffer.alloc(16); b.writeUInt32LE(0x44454545, 0); b.writeUInt32LE(1, 4); fs.writeFileSync(a[3], b); };
 const done = (x) => console.log(JSON.stringify(Object.assign({ ev: 'done', gpu: { name: 'stand-in' }, ticks: 0, ticksPerSec: 0, seconds: 0.1, edges: 0, families: {} }, x)));
 if (step === 'oom') { console.log(JSON.stringify({ error: 'cuMemAlloc_v2 failed: CUDA error 2 (out of memory)' })); process.exit(4); }
@@ -117,6 +118,17 @@ function session(plan, extra, until) {
 		const stopped = r.calls.find((c) => c.stopped);
 		check('quit: the running tool is asked to stop (its stop file) and ends by itself', !!stopped && r.code === 0, `${r.calls.length} calls, exit ${r.code}${stopped ? '' : '; the tool never saw its stop file'}`);
 		check('... it was started with --stopfile and --parent', r.calls.length >= 1 && !!r.calls[0].stopfile && r.calls[0].parent > 0, JSON.stringify(r.calls[0] || {}));
+	}
+	// 4. two GPUs (--devices=3,5): one tool per device at the same time (CUDA_VISIBLE_DEVICES), each with its own stop,
+	// edges and reference files; a quit stops both through their stop files
+	{
+		const r = await session(['slow'], ['--devices=3,5'], (c) => c.filter((x) => !x.stopped).length >= 2 && Date.now() - c[c.length - 1].t > 1000);
+		const starts = r.calls.filter((c) => !c.stopped && !c.timeout), stops = r.calls.filter((c) => c.stopped);
+		const devs = starts.map((c) => c.dev).sort().join(',');
+		check('two devices: two tools at once, one per device', starts.length === 2 && devs === '3,5', `${starts.length} started (devices ${devs})`);
+		check('... each with its own stop, edges and reference files', starts.length === 2 && new Set(starts.map((c) => c.stopfile)).size === 2 &&
+			new Set(starts.map((c) => c.edges)).size === 2 && new Set(starts.map((c) => c.ref)).size === 2, starts.map((c) => `${path.basename(c.stopfile)} ${path.basename(c.edges)} ${path.basename(c.ref)}`).join(' | '));
+		check('... and the quit stops both (their stop files), exit 0', stops.length === 2 && r.code === 0, `${stops.length} stopped, exit ${r.code}`);
 	}
 	console.log(`\n${pass} passed, ${fail} failed`);
 	fs.rmSync(TMP, { recursive: true, force: true });

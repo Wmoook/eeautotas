@@ -384,7 +384,7 @@ const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, 
  *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
  *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
 function cpuWorkers(want) {
-	const n = os.cpus().length || 1;
+	const n = C.cpuThreads();
 	if (Number.isInteger(+want) && +want >= 1) return Math.min(n, +want);
 	const bench = BENCH.cached();
 	let grind = false;

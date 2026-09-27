@@ -271,6 +271,33 @@ function tickMeter() {
 	timer.unref();
 	return { buf, poll() { if (Date.now() - last >= 1000) print(); }, stop() { clearInterval(timer); print(); } };
 }
+/**
+ * The CPU threads this process can use: the logical processors it may run on (os.availableParallelism: the affinity
+ * mask), capped on Linux by the container's CPU quota (cgroup v2 cpu.max, v1 cpu.cfs_quota_us / cpu.cfs_period_us).
+ * A rented cloud machine's container shows os.cpus() the host's threads (the H100 box: 192) while its quota is far
+ * lower (23): a worker per host thread would share 23 cores among 192 threads. On Windows / a laptop: os.cpus().length.
+ */
+let cpuThreadsN = 0;
+function cpuThreads() {
+	if (cpuThreadsN) return cpuThreadsN;
+	const os = require('os');
+	let n = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+	if (process.platform === 'linux') {
+		let q = 0;
+		try {
+			const [max, period] = fs.readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/);
+			if (max !== 'max' && +period > 0) q = +max / +period;
+		} catch (e) {
+			try {
+				const quota = +fs.readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'utf8'), period = +fs.readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'utf8');
+				if (quota > 0 && period > 0) q = quota / period;
+			} catch (e2) { /* no cgroup quota */ }
+		}
+		if (q > 0) n = Math.min(n, Math.max(1, Math.floor(q)));
+	}
+	cpuThreadsN = Math.max(1, n || os.cpus().length || 1);
+	return cpuThreadsN;
+}
 /** "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz" -> "Intel Core i7-11800H": the CPU model (os.cpus()[0].model) for texts */
 function cpuName(model) {
 	const raw = String(model || '').trim();
@@ -297,5 +324,5 @@ module.exports = {
 	fmt, parseTime, tickOf,
 	jobIds, findJob, jobLevelId, jobOfFile, levelData, loadLevel,
 	replay, isRandom, chanceOf, evaluate, judge, coinsIrrelevant,
-	maskName, inputRuns, parseArgs, tickMeter, cpuName,
+	maskName, inputRuns, parseArgs, tickMeter, cpuName, cpuThreads,
 };

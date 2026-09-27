@@ -39,7 +39,7 @@ let gpuState = gpuBench ? 'done' : 'pending';
 const gpuAvailable = () => !!(gpuBench && gpuBench.gpu && gpuBench.ticksPerSec > 0);
 const CPU_MODEL = (os.cpus()[0] && os.cpus()[0].model || '').trim();   // the detected CPU (texts name it: C.cpuName)
 function systemInfo() {
-	const n = os.cpus().length;
+	const n = C.cpuThreads();
 	const est = bench ? Array.from({ length: n }, (_, i) => BENCH.estimate(bench, i + 1)) : null;
 	return {
 		cpus: n, model: CPU_MODEL, benchState, bench,
@@ -292,7 +292,7 @@ const server = http.createServer(async (req, res) => {
 		if (parts[0] !== 'api') return send(res, 404, { error: 'not found' });
 		if (req.method === 'GET' && parts.length === 1) return send(res, 200, { app: 'EE Auto TAS', endpoints: ENDPOINTS.map(([m, p, d]) => ({ method: m, path: p, what: d })) });
 		if (req.method === 'GET' && parts[1] === 'state') {
-			return send(res, 200, { jobs: listJobs(), cpus: os.cpus().length, cpuModel: CPU_MODEL, now: Date.now(), benchState,
+			return send(res, 200, { jobs: listJobs(), cpus: C.cpuThreads(), cpuModel: CPU_MODEL, now: Date.now(), benchState,
 				bench: bench ? { single: bench.single, all: bench.all, threads: bench.threads, peakThreads: bench.peakThreads, points: bench.points, model: bench.model } : null,
 				gpu: systemInfo().processors[1], faster: systemInfo().faster });
 		}
@@ -442,7 +442,7 @@ function main() {
 	try { os.setPriority(os.constants.priority.PRIORITY_ABOVE_NORMAL); } catch (e) { /* not allowed: normal */ }
 	server.listen(PORT, '127.0.0.1', () => {
 		const url = `http://localhost:${PORT}/`;
-		console.log(`[app] EE Auto TAS running at ${url} (CPU: ${C.cpuName(CPU_MODEL)}, ${os.cpus().length} threads)`);
+		console.log(`[app] EE Auto TAS running at ${url} (CPU: ${C.cpuName(CPU_MODEL)}, ${C.cpuThreads()} threads)`);
 		console.log('[app] Keep this window open while optimizing. Closing it stops the optimizer (it resumes next time).');
 		if (process.env.EEAT_HOME) console.log(`[app] Your runs are saved in ${C.JOBS}`);
 		if (args.open) openBrowser(url);

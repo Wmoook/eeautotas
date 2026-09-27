@@ -17,7 +17,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 
 const C = require('./common.js');
@@ -38,7 +37,7 @@ const SLOTS = 7;           // per child in the shared output: score, key hash, b
 let DIST_TICK = 24;        // score: this many px of position/velocity mismatch with the route cost one tick of progress
 
 function parseArgs() {
-	const a = { level: '', tas: null, width: 2000, workers: Math.max(1, os.cpus().length), out: null,
+	const a = { level: '', tas: null, width: 2000, workers: C.cpuThreads(), out: null,
 		from: 0, maxSteps: 0, passes: 1, dist: 24, debug: 0, prefix: null };
 	for (const s of process.argv.slice(2)) {
 		const m = s.match(/^--([^=]+)=(.*)$/);

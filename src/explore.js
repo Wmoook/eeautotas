@@ -61,7 +61,7 @@ const OPTIONS = [];
 for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPTIONS.push(h | v | j);
 
 function parseArgs() {
-	const a = { level: '', tas: null, from: 0, join: 0, until: 0, seconds: 120, workers: os.cpus().length,
+	const a = { level: '', tas: null, from: 0, join: 0, until: 0, seconds: 120, workers: C.cpuThreads(),
 		cell: 8, vcell: 2, roll: 80, match: 3, velW: 3, pchange: 0.12, out: null, seed: 1, seed_ref: 1, perCell: 4, exact: 0, ahead: 0.5, cands: 0, minSave: 2, nocoins: 0, maxEntries: 0, clockblind: 0,
 		tails: 0, tailD: 12, tailH: 300, tailDrift: 64, ticks: 0,
 		hunt: 0, huntH: 800, huntKappa: 2, huntLead: 10, huntD: 24, huntMix: 0.5, huntLambda: 3, huntRolls: 4, huntCell: 16 };

@@ -61,7 +61,7 @@ function startJob(id, workers, opts) {
 	for (const other of C.jobIds()) if (other !== id && runningPid(other)) stopJob(other);   // one job at a time: it uses the whole CPU
 	const dir = jobDir(id);
 	const st = C.readJSON(path.join(dir, 'status.json'), {});
-	const W = Math.max(1, Math.min(os.cpus().length, +workers || Math.max(1, os.cpus().length - 2)));
+	const W = Math.max(1, Math.min(C.cpuThreads(), +workers || Math.max(1, C.cpuThreads() - 2)));
 	const logFd = fs.openSync(path.join(dir, 'console.log'), 'a');
 	const ch = spawn(process.execPath, [path.join(__dirname, 'grind.js'), `--job=${dir}`, `--level=${C.jobLevelId(id)}`, '--forever=1',
 		`--workers=${W}`, `--rot=${st.rounds || 0}`, ...(o.gpu ? ['--gpu=1'] : [])], { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', logFd, logFd], windowsHide: true,
@@ -650,7 +650,7 @@ async function focus(id, fromSpec, toSpec, seconds, opts) {
 	C.writeEetas(ref, refMasks);
 	const S = Math.max(10, Math.min(3600, +seconds || 120));
 	const running = !!runningPid(id);
-	const Wk = Math.max(1, Math.min(os.cpus().length, +o.workers || (running ? Math.max(1, Math.floor(os.cpus().length / 2)) : os.cpus().length)));
+	const Wk = Math.max(1, Math.min(C.cpuThreads(), +o.workers || (running ? Math.max(1, Math.floor(C.cpuThreads() / 2)) : C.cpuThreads())));
 	const st = C.readJSON(path.join(dir, 'status.json'), {});
 	const NC = st.coinsOptional !== undefined ? (st.coinsOptional ? 1 : 0)
 		: (C.coinsIrrelevant(levelJsonOf(id), refMasks, { complete: tr.complete, runTicks: tr.runTicks }) ? 1 : 0);
