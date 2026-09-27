@@ -10,6 +10,12 @@
 // first) and measures the closest attempt; with --prune=1 the states it cuts off are dropped (a proof: they cannot
 // reach the trophy; the finish test comes first). Other targets: --enter=x0,y0,x1,y1 (the box centre enters those
 // tiles), --ahead=1 (ahead of the run),
+// --novel=<file> (NOV1: "NOV1", u32 log2 of the bits, the bitmap's u32 words; goexplore.js stdin "novel <file>"): the
+// novelty target, next to any other: a state in a (room, tile) cell whose bit (explore.h novelBit: roomOf's room key, the
+// box centre's tile) is not set is a hit, {"ev":"novel","layer","tick","room","tile","inputs"}, once per cell, at most
+// --novelMax (64); never a finish (the search goes on, the state is expanded). --novelOrder=1: the priority's head is the
+// walking distance (quarter tiles, goalField's walk) to the nearest tile of the start's room whose cell is unseen, not
+// the reach / steer field's cost (only when the start's room has one).
 // --finish=1 (the tick that takes the trophy; the search ends with the first layer that has one: the fastest route
 // up to the cell merging). Cells: --coarse=<row> (from this tile row down, px x --cqx and vx x --cqv to whole
 // numbers; default 0.5 and 16), --qy / --qvy (py / vy likewise; 0 = exact), --discrete=1 (cells also differ in coins,
@@ -269,6 +275,73 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			}
 		}
 	}
+	// --novel=<file>: the novelty target (see the header); --novelOrder=1: its order
+	cu::Buf dnov, dnovc, dnovd;
+	int novelHits = 0;
+	{
+		const std::string nf = opt(argc, argv, "novel", "");
+		if (!nf.empty()) {
+			std::vector<uint8_t> raw = readFile(nf.c_str());
+			uint32_t lg = 0;
+			if (raw.size() >= 8) memcpy(&lg, raw.data() + 4, 4);
+			if (raw.size() < 8 || memcmp(raw.data(), "NOV1", 4) != 0 || lg < 5 || lg > 32 || raw.size() < 8 + ((size_t)1 << lg) / 8) { printf("{\"error\":\"bad novelty file (NOV1)\"}\n"); return 3; }
+			const uint32_t* bits = (const uint32_t*)(raw.data() + 8);
+			const size_t words = ((size_t)1 << lg) / 32;
+			if (!dnov.upload(bits, 4 * words) || !dnovc.alloc(4)) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+			cu::cuMemsetD8_v2(dnovc.p, 0, 4);
+			P.novBits = (u32*)(uintptr_t)dnov.p; P.novMask = (u32)(((uint64_t)1 << lg) - 1); P.novCount = (u32*)(uintptr_t)dnovc.p;
+			P.novMax = std::max(0, atoi(opt(argc, argv, "novelMax", "64").c_str()));
+			for (int i = 0; i < L.N; i++) {
+				const int id = L.fg[i];
+				if (id == 1027 || id == 1028) P.roomTeam = 1;
+				else if (id == 43 || id == 165) P.roomCoins = 1;
+				else if (id == 213 || id == 214) P.roomBlue = 1;
+				else if (id == 1094 || id == 1095) P.roomCrown = 1;
+				else if (id == 1152 || id == 1153) P.roomSilver = 1;
+			}
+			// the start's room and its unseen tiles (open ones: goalField's walk), the walking distance to the nearest
+			struct RoomP { Level L; i32 roomTeam, roomCoins, roomBlue, roomCrown, roomSilver; } rp = { L, P.roomTeam, P.roomCoins, P.roomBlue, P.roomCrown, P.roomSilver };
+			const u32 room0 = rollRoom<TW>(rp, *start);
+			int unseen = 0;
+			std::vector<float> nd((size_t)L.N, -1.f);
+			if (opt(argc, argv, "novelOrder", "0") == "1") {
+				auto open = [&](int i) {
+					const int id = L.fg[i];
+					const bool known = id >= 0 && id < L.nFlags;
+					const u8 fl = known ? L.flags[id] : 0;
+					if (known && (L.gFlags[id] & 4) != 0) return false;
+					return (fl & F_SOLID) == 0 || (fl & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) != 0;
+				};
+				typedef std::pair<float, int> QE;
+				std::priority_queue<QE, std::vector<QE>, std::greater<QE>> q;
+				for (int i = 0; i < L.N; i++) {
+					const u32 b = novelBit(room0, i) & P.novMask;
+					if (open(i) && !((bits[b >> 5] >> (b & 31)) & 1u)) { nd[i] = 0; q.push({ 0.f, i }); unseen++; }
+				}
+				while (!q.empty()) {
+					QE e = q.top(); q.pop();
+					if (e.first > nd[e.second] + 1e-4f) continue;
+					const int x = e.second % L.W, y = e.second / L.W;
+					for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+						if (!dx && !dy) continue;
+						const int nx = x + dx, ny = y + dy;
+						if (nx < 0 || ny < 0 || nx >= L.W || ny >= L.H) continue;
+						const int j = ny * L.W + nx;
+						if (!open(j)) continue;
+						if (dx && dy && (!open(y * L.W + nx) || !open(ny * L.W + x))) continue;
+						const float v = e.first + (dx && dy ? 1.4142f : 1.f);
+						if (nd[j] < 0 || v < nd[j]) { nd[j] = v; q.push({ v, j }); }
+					}
+				}
+				if (unseen) {
+					if (!dnovd.upload(nd.data(), 4 * nd.size())) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+					P.novDist = (const float*)(uintptr_t)dnovd.p;
+				}
+			}
+			const int t0 = std::min(L.N - 1, std::max(0, (truncI(start->py + 8.0) >> 4) * L.W + (truncI(start->px + 8.0) >> 4)));
+			printf("{\"ev\":\"novelty\",\"bits\":%u,\"room\":%d,\"unseenTiles\":%d,\"order\":%d,\"startDist\":%.1f,\"max\":%d}\n", lg, (int)room0, unseen, P.novDist ? 1 : 0, nd[t0], P.novMax);
+		}
+	}
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
 	P.salt = strtoull(opt(argc, argv, "salt", "0").c_str(), nullptr, 10);   // --salt=N: another tie-break among a cell's candidates
 	P.keepRest = P.discrete && L.hasTimeDoors ? 1 : 0;
@@ -414,9 +487,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		const char* why = forced ? forced : finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
 		// overflow: the new cells left out over all layers (over the cap, or no table slot); "exhausted" with overflow 0
 		// means every move was tried (up to the cells' grain), with overflow > 0 it is no proof
-		printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d,\"lanes\":%d%s}\n",
+		printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d,\"lanes\":%d,\"novel\":%d%s}\n",
 			g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
-			(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries, lanes, lk::doneFields().c_str());
+			(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries, lanes, novelHits, lk::doneFields().c_str());
 	};
 	lk::onStop = [&]() { finale("stopped"); };
 	// the launches (launch.h): each phase of a layer (expand, the claim's passes, materialize) runs over its index range
@@ -503,13 +576,20 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			std::vector<std::pair<std::string, uint32_t>> order;
 			for (uint32_t i = hitsSeen; i < nh; i++) {
 				std::string in = prefixStr + inputsOf(d, hv[i].parent, hv[i].option);
-				if (hv[i].jumpOption != 255) in.push_back((char)('0' + hv[i].jumpOption));
+				if (hv[i].jumpOption != 255 && hv[i].jumpOption != EE_NOVEL_HIT) in.push_back((char)('0' + hv[i].jumpOption));
 				order.push_back({ in, i });
 			}
 			std::sort(order.begin(), order.end());
+			bool goalHit = false;   // (a hit of the target itself: novelty hits never end a --finish search)
 			for (const auto& oh : order) {
 				const ExploreHit& h = hv[oh.second];
 				const std::string& in = oh.first;
+				if (h.jumpOption == EE_NOVEL_HIT) {
+					printf("{\"ev\":\"novel\",\"layer\":%d,\"tick\":%d,\"room\":%d,\"tile\":%d,\"inputs\":\"%s\"}\n", d, from0 + (int)in.size(), h.gain, h.refTick, in.c_str());
+					novelHits++;
+					continue;
+				}
+				goalHit = true;
 				if (rejoin) {
 					const int j = h.refTick;
 					if (j < 0 || j >= (int)refH.size() || (int)in.size() >= rejoinBest[j]) continue;
@@ -531,7 +611,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			}
 			fflush(stdout);
 			hitsSeen = nh;
-			if (finishTarget) { finishLayer = d; d++; break; }   // the first layer with a finish is the fastest
+			if (finishTarget && goalHit) { finishLayer = d; d++; break; }   // the first layer with a finish is the fastest
 		}
 		const uint32_t kept = std::min<uint32_t>(nOut, (uint32_t)cap);
 		const uint32_t over = (nWin > kept ? nWin - kept : 0) + nLost;

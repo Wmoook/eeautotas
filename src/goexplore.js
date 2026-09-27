@@ -408,6 +408,11 @@ function rngOf(seed) {
 	};
 }
 const fmix = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); return h ^ (h >>> 16); };
+/** the novelty bitmap's bit of a (room, tile) cell before the mask (native/explore.h novelBit: the same u32 operations;
+ *  the explore's --novel target, stdin "novel <file>") */
+const novelBit = (room, tile) => fmix(room ^ fmix((Math.imul(tile, 0x9e3779b1) + 0x2545f491) | 0)) >>> 0;
+// the novelty file's bits (2^NOVEL_LOG: 16 MB; a few million (room, tile) cells on the big levels)
+const NOVEL_LOG = 27;
 
 /** the discrete state's hash (what a cell tells apart besides the ball's motion): coins (and which ones), keys,
  *  switches, crowns, effects, checkpoint, team, the time-door phase, gates, death count (death doors), portal draws */
@@ -1128,6 +1133,20 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
 			inputs: best !== null ? C.eetasBytes(inputsOf(best.node)).toString('latin1') : '' });
 	};
+	/** the novelty file (stdin "novel <file>"): this archive's (room, tile) cells into the shared bitmap */
+	const novelOf = (m) => {
+		const bits = new Int32Array(m.buf), mask = m.mask >>> 0;
+		let n = 0;
+		for (const r of rooms.values()) {
+			if (!r.arr) continue;
+			for (const c of r.arr) {
+				const b = novelBit(r.key, c.tile) & mask;
+				Atomics.or(bits, b >>> 5, 1 << (b & 31));
+				n++;
+			}
+		}
+		port.postMessage({ type: 'novel', id: m.id, seed, cells: n, rooms: rooms.size });
+	};
 	/** the main thread's messages (between two chunks of picks) */
 	const inbox = () => {
 		let m;
@@ -1135,6 +1154,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const x = m.message;
 			if (x.type === 'import' && coarse) importRun(x.inputs);
 			else if (x.type === 'nearest') nearestOf(x);
+			else if (x.type === 'novel' && coarse) novelOf(x);
 		}
 	};
 	/** a seed (stdin "seed <inputs>": the editor's wall breaker's attempts): its states every SEED_EVERY ticks back from
@@ -1950,6 +1970,7 @@ async function main() {
 				if (m) bound(+m[1]);
 				else if (line.startsWith('seed ') && /^[0-O]+$/.test(line.slice(5))) { for (const p of seedPorts) p.postMessage(line.slice(5)); }
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
+				else if (line.startsWith('novel ') && one) novelFile(line.slice(6).trim());
 				else if (line.startsWith('import ') && one) {
 					// (the one search: another operator's run, the editor's GPU random runs, into every archive)
 					const inputs = line.slice(7);
@@ -2000,6 +2021,36 @@ async function main() {
 		one.broadcast = (inputs, except) => { one.ports.forEach((p, i) => { if (seeds[i] !== except) p.postMessage({ type: 'import', inputs }); }); };
 		one.RM = RM;
 	}
+	/** stdin "novel <file>" (the editor's wall breaker): every worker's (room, tile) cells into one bitmap (NOV1: "NOV1", u32
+	 *  log2 of the bits, the words; eegpu explore --novel), then {"ev":"novel","file",...}; a worker that does not answer
+	 *  within NOVEL_WAIT_MS (it may have ended) is left out */
+	let novelId = 0;
+	const NOVEL_WAIT_MS = 5000;
+	const novelFile = (file) => {
+		const id = ++novelId, sab = new SharedArrayBuffer(4 << (NOVEL_LOG - 5) << 0), want = one.ports.length;
+		let got = 0, cells = 0, done = false;
+		const t1 = Date.now();
+		const finish = () => {
+			if (done) return;
+			done = true;
+			for (const p of one.ports) p.off('message', on);
+			const head = Buffer.alloc(8);
+			head.write('NOV1', 0, 'latin1');
+			head.writeUInt32LE(NOVEL_LOG, 4);
+			const words = new Uint32Array(sab);
+			let set = 0;
+			for (let i = 0; i < words.length; i++) { let v = words[i]; while (v) { v &= v - 1; set++; } }
+			try {
+				fs.writeFileSync(file + '.tmp', Buffer.concat([head, Buffer.from(sab)]));
+				fs.renameSync(file + '.tmp', file);
+				say({ ev: 'novel', file, workers: got, cells, bits: set, ms: Date.now() - t1 });
+			} catch (e) { say({ ev: 'novel', file, error: e.message }); }
+		};
+		const on = (m) => { if (m && m.type === 'novel' && m.id === id) { got++; cells += m.cells; if (got >= want) finish(); } };
+		for (const p of one.ports) { p.on('message', on); p.postMessage({ type: 'novel', id, buf: sab, mask: (2 ** NOVEL_LOG - 1) >>> 0 }); }
+		const t = setTimeout(finish, NOVEL_WAIT_MS);
+		if (t.unref) t.unref();
+	};
 	const onMessage = (msg) => {
 		if (msg.type === 'stat' || msg.type === 'done') {
 			stats.set(msg.seed, msg);
@@ -2075,4 +2126,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB };
+	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, novelBit, NOVEL_LOG };
