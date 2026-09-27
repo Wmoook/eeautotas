@@ -186,6 +186,9 @@
 //        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstSteer=<RCH4 file> (the steer field for the bursts' trophy arm:
 //        its order, as the editor's relay had it; the GPU tool must read RCH4)] [--burstOomS=5 (a burst that found the GPU's
 //        memory full waits this long, doubled while it lasts, up to 120 s: no try of its arm, never the bursts' end)]
+//        [--prefix=<run.eetas | .eetas characters> (the gate benchmark, tools/gatebench.js: the search starts after those
+//        inputs; every path begins with them, only finds after the start state count; CPU cells only)]
+//        [--rooms=0|1 (an event "room" for every room the one search registers: its cause, the inputs; coarse cells)]
 //        With --stdin=1 and the one search also "import <inputs>": another operator's run (the editor's GPU random runs:
 //        a room they entered first, a nearer attempt) into every worker's archive, like a burst's attempt.
 const fs = require('fs');
@@ -210,13 +213,13 @@ const MAXRES = QP.length - 1;
 const SEED_EVERY = 30;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
+	steerDist: 1, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
 // and 24, x64: the objects as goexplore makes them, 200 K at a time): a cell (its object with the boxed double of its
@@ -380,6 +383,13 @@ function settle(a, L, m) {
 	return a;
 }
 
+/** --prefix (the gate benchmark, tools/gatebench.js): the inputs (masks) the search starts after (an .eetas file, or
+ *  .eetas characters), or null. Every cell's path begins with them, so routes, rooms and bursts carry whole runs */
+function prefixOf(a) {
+	if (!a.prefix) return null;
+	const ms = /\.eetas$/i.test(a.prefix) ? C.readEetas(a.prefix) : Uint8Array.from(a.prefix, (ch) => (ch.charCodeAt(0) - 48) & 31);
+	return ms.length ? ms : null;
+}
 /** the prepared level: an .eelvl (read like the editor does), a level JSON, or --level=<level id | job id> */
 function levelOf(a) {
 	if (a.file && /\.eelvl$/i.test(a.file)) return E.prepareLevel(EL.toSimLevel(EL.readEelvl(fs.readFileSync(a.file)), { id: 'goexplore', file: path.basename(a.file) }));
@@ -901,19 +911,24 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const w = tx >= 0 && ty >= 0 && tx < field.W && ty < field.H ? field.walk[ty * field.W + tx] : RF.CUT;
 		return 1e4 + (w === RF.CUT ? 9999 : w / 5);
 	};
-	let room0 = null, cell0 = null;
+	let room0 = null, cell0 = null, preMs = null;
 	{
-		// the start (the reach field rules it out: no route, a proof; the search ends at once, unless --prune=0)
+		// the start (the reach field rules it out: no route, a proof; the search ends at once, unless --prune=0); with
+		// --prefix the state after those inputs, a cell whose path is them (replays go on from the level's start)
+		const pre = prefixOf(a), t0c = pre ? pre.length : 0;
+		preMs = pre;
+		if (pre) for (let s = 0; s < pre.length; s++) { E.applyMask(inp, pre[s]); sim.tick(inp); }
 		const rc = costOf();
-		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, 0); room0.isNew = false; }
+		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, t0c); room0.isNew = false; }
 		const k = cellKey();
-		const c = ST ? { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, sc: steerOf(), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 }
-			: { t: 0, snap: null, pc: null, pgen: 0, node: null, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 };
+		const node0 = pre ? mkNode(null, { b: pre, refs: 0, x: Math.max(0, pre.length - a.rolls * a.roll) }, 0, pre.length) : null;
+		const c = ST ? { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, sc: steerOf(), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 }
+			: { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 };
 		cells.set(k, c);
 		cell0 = c;
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
-		keepSnap(c, startSnap);
+		keepSnap(c, pre ? sim.snapshot() : startSnap);
 		if (rc < 0) end = 'unreachable';
 	}
 	let ticks = 0, lastProgress = 0, refined = 0, minRc = Infinity, imports = 0, importAdded = 0, seeded = 0, seedCells = 0;
@@ -992,7 +1007,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		sweptAt = picks;
 		const HB = 1024, hist = new Int32Array(HB), span = picks + 1;
 		const guard = new Set(discovery.map((d) => d[0]));
-		const keep = (c) => c.t === 0 || guard.has(c) || (c.room !== null && c.room.best === c);
+		const keep = (c) => c === cell0 || c.t === 0 || guard.has(c) || (c.room !== null && c.room.best === c);
 		for (let pass = 0; pass < 3; pass++) {
 			const A = archiveBytes();
 			const overN = a.maxCells ? cells.size - Math.floor(EVICT_TO * a.maxCells) : 0;
@@ -1043,7 +1058,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		}
 		if (report) {
 			post({ type: 'room', seed, room: room.key, desc: room.desc, gain: room.gain, troOk: room.troOk, parent: room.parent, tile: room.tile, t, trig: room.trig,
-				inputs: C.eetasBytes(inputsOf(nc.node)).toString('latin1') });
+				sub: room.cause.sub, keys: room.cause.keys, wt: ticks, inputs: C.eetasBytes(inputsOf(nc.node)).toString('latin1') });
 		}
 	};
 	/** a room change from one known room to another at the live state's tile: once per (room, tile), the trigger tried */
@@ -1061,6 +1076,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const importRun = (str) => {
 		const buf = new Uint8Array(str.length);
 		for (let k = 0; k < str.length; k++) buf[k] = (str.charCodeAt(k) - 48) & 31;
+		// (--prefix: only a run through the start state counts, and only its part after it: the route's own states before
+		// it are no find of this search)
+		const P = preMs !== null ? preMs.length : 0;
+		if (P) { if (buf.length <= P) return; for (let k = 0; k < P; k++) if (buf[k] !== preMs[k]) return; }
 		// (one block of inputs for the whole run: its bytes past a pick's block counted as `x`, see mkNode)
 		const blk = { b: buf, refs: 0, x: Math.max(0, buf.length - a.rolls * a.roll) };
 		sim.restore(startSnap);
@@ -1072,6 +1091,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			sim.tick(inp);
 			ticks++;
 			if (sim.has_silver_crown || sim.is_dead) break;   // (a route is the main thread's: it replays every one)
+			if (t <= P) { if (t === P) room = room0; continue; }
 			const rc = costOf();
 			if (rc < 0) break;
 			roomKey = RM.key(sim);
@@ -1839,6 +1859,9 @@ async function main() {
 	const field = RF.shareField(RF.reachField(L));
 	const sim0 = new E.EESim(L);
 	sim0.reset();
+	const pre0 = prefixOf(a);
+	const preStr = pre0 ? C.eetasBytes(pre0).toString('latin1') : '';
+	if (pre0) { const inp0 = new E.EEInput(); for (let s = 0; s < pre0.length; s++) { E.applyMask(inp0, pre0[s]); sim0.tick(inp0); } }
 	const startCost = RF.costAt(field, sim0);
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
 	ctrl[0] = a.depth;
@@ -1957,19 +1980,23 @@ async function main() {
 	// The one search (coarse cells: the GPU bursts, or several workers with --share=1): one channel per worker. Every room
 	// a worker enters first (its 'room' message) goes to the GPU operator (src/bursts.js), whose attempts go into every
 	// archive, and with --share=1 into the other workers' archives (see the header: off by default)
-	const one = a.cells === 'coarse' && ((a.share && a.workers > 1) || a.bursts) ? { rooms: new Map(), ports: [], shared: 0, fed: 0 } : null;
+	const one = a.cells === 'coarse' && ((a.share && a.workers > 1) || a.bursts || a.rooms) ? { rooms: new Map(), ports: [], shared: 0, fed: 0 } : null;
 	let bursts = null;
 	if (one) {
 		const RM = roomOf(L);
 		/** a room found (a worker's first cell in it, a burst's attempt, the start): true when nobody had found it */
 		one.register = (m) => {
+			// (--prefix: a room change before the start, or on a run that left the route before it, is the route's history)
+			if (pre0 && (m.t < pre0.length || (m.inputs && !m.inputs.startsWith(preStr)))) return false;
 			const r = one.rooms.get(m.room);
 			if (r) { if (m.t < r.t) { r.t = m.t; if (bursts) bursts.room(m); } return false; }
 			one.rooms.set(m.room, { t: m.t, desc: m.desc, tile: m.tile });
 			if (bursts) bursts.room(m);
+			// (--rooms=1: every room found, with the inputs that reach it: the gate benchmark watches for its target room)
+			if (a.rooms && m.inputs && m.t > (pre0 ? pre0.length : 0)) say({ ev: 'room', room: m.room, desc: m.desc, t: m.t, sec: sec(), by: m.seed === undefined ? 'gpu' : 'cpu', sub: m.sub, keys: m.keys, ...(m.wt !== undefined ? { wt: m.wt } : {}), inputs: m.inputs });
 			return true;
 		};
-		one.register({ room: RM.key(sim0), desc: RM.desc(sim0), tile: Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(sim0.py + 8) >> 4) * L.width + (Math.trunc(sim0.px + 8) >> 4))), t: 0, inputs: '' });
+		one.register({ room: RM.key(sim0), desc: RM.desc(sim0), tile: Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(sim0.py + 8) >> 4) * L.width + (Math.trunc(sim0.px + 8) >> 4))), t: pre0 ? pre0.length : 0, inputs: preStr });
 		one.broadcast = (inputs, except) => { one.ports.forEach((p, i) => { if (seeds[i] !== except) p.postMessage({ type: 'import', inputs }); }); };
 		one.RM = RM;
 	}
@@ -2008,10 +2035,10 @@ async function main() {
 	if (one && a.bursts) {
 		const BU = require('./bursts.js');
 		try {
-			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
+			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, minLen: pre0 ? pre0.length : 0, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
 				broadcast: (inputs) => one.broadcast(inputs, -1), finish: (masks) => routeFound(masks, 0, 0, 'a GPU burst'),
 				nearest: () => (near && near.inputs ? { inputs: near.inputs, rc: near.rc } : null) });
-			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: '' });
+			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: preStr });
 			bursts.start();
 		} catch (e) { say({ ev: 'warning', text: `no GPU bursts: ${e.message}` }); bursts = null; }
 	}
