@@ -824,6 +824,9 @@ async function gpuMain(a, L) {
 		...(reachFile ? [`--reach=${reachFile}`] : []), ...(a.gmem ? [`--mem=${a.gmem}`] : []), `--maxPicks=${Math.max(a.batch, 1)}`,
 		...['stopfile', 'pausefile', 'cachedir', 'launch-ms'].filter((k) => a[k]).map((k) => `--${k}=${a[k]}`), `--parent=${process.pid}`];
 	const ch = spawn(tool, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true });
+	// (this process picks every batch while the GPU waits: above normal priority like eegpu's own, next to the CPU search's
+	// busy workers; EEGPU_PRIORITY=normal: off; where it is not allowed (Linux without CAP_SYS_NICE) it stays as it is)
+	if (process.env.EEGPU_PRIORITY !== 'normal') { try { os.setPriority(os.constants.priority.PRIORITY_ABOVE_NORMAL); } catch (e) { /* not allowed */ } }
 	let err = '';
 	ch.stderr.on('data', (c) => { err = (err + c).slice(-2000); });
 	ch.stdin.on('error', () => { /* it ended */ });
