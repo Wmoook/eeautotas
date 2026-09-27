@@ -1256,7 +1256,7 @@ async function cpuSection() {
 	const s6 = (Date.now() - t6) / 1000, G6 = st.strategies.filter((q) => !q.cpu);
 	await new Promise((r) => setTimeout(r, Math.max(0, 15500 - (Date.now() - t6))));
 	const late6 = ED.state().log.some((x) => /the GPU's memory \(asked again: ask 2, late\): 40960 MB/.test(x));
-	check('the tool check asked again hangs: the search starts 5 s later without it, its GPU strategies run, the late answer sets the GPU's memory',
+	check('the tool check asked again hangs: the search starts 5 s later without it, its GPU strategies run, the late answer sets its GPU memory',
 		st.log.some((x) => /the tool check asked again has no answer after 5 s: the search starts without it/.test(x)) &&
 		G6.length === 2 && G6.every((q) => q.state !== 'error') && st.stage === 'found' && s6 >= 10 && s6 < 18 && late6,
 		`${st.log.filter((x) => /GPU memory|tool check/.test(x)).join(' | ')}; GPU ${G6.map((q) => `${q.key} ${q.state}`).join(', ')}; ${st.stage}; ${s6.toFixed(1)} s; late answer ${late6}`);
