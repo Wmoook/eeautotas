@@ -26,15 +26,15 @@
 // Two kinds of cells (--cells; auto: by the level's size):
 //   fine    (levels of at most 50 x 50 = FINE_MAX_TILES tiles: the pixel-exact levels) everything above: the discrete
 //           state's hash, the jump count and gravity queue in every cell, refinement, the one heap.
-//   coarse  (bigger levels) the "Find a route" research's design B (src/out/planner_b, judged in src/out/judge): on a
-//           200 x 200 level the fine cells and their refinement filled the archive (Infinity Pain: 2.36 M cells after
-//           12 M ticks) and the one heap stayed in the reach field's traps (the ice level: 739 tiles out, where the
-//           coarse search found routes in 4 of 6 seeds, the first after 87 M ticks on one thread). A cell is (tile,
-//           ROOM, on the ground, sign of vx, class of vy), plus the time-door phase in --phase-tick buckets on levels
-//           with time doors (a ball waiting for a door makes new cells); no jump count, no gravity queue, no
-//           refinement. The ROOM (roomOf) is the part of the discrete state that opens or shuts doors or changes the
-//           physics (keys, switches, effects, team / coin counts / crowns / deaths where a door reads them, time doors
-//           open or shut), not coin identities, checkpoints or timers. Three heads pick:
+//   coarse  (bigger levels) the "Find a route" research's design B (a local prototype, ngx.js --mode=novold; the
+//           research notes are not in the repository): on a 200 x 200 level the fine cells and their refinement filled
+//           the archive (Infinity Pain: 2.36 M cells after 12 M ticks) and the one heap stayed in the reach field's traps
+//           (the ice level: 739 tiles out, where the prototype found routes in 4 of 6 seeds, the first after 87 M ticks
+//           on one thread). A cell is (tile, ROOM, on the ground, sign of vx, class of vy), plus the time-door phase in
+//           --phase-tick buckets on levels with time doors (a ball waiting for a door makes new cells); no jump count, no
+//           gravity queue, no refinement. The ROOM (roomOf) is the part of the discrete state that opens or shuts
+//           doors or changes the physics (keys, switches, effects, team / coin counts / crowns / deaths where a door
+//           reads them, time doors open or shut), not coin identities, checkpoints or timers. Three heads pick:
 //             A (--pA of the picks when no discovery is due): the heap above, on the reach field's cost;
 //             B (novelty, the rest): a room by a tournament of 4 (weight (1 + ln(1 + gain)) x (2 if the trophy is
 //               walkable in the room) / sqrt(1 + picks / 50); gain = the tiles its door-aware flood fill reaches that no
@@ -43,11 +43,21 @@
 //             C (discovery, half the picks while one is due): --burst picks of each new room's first cell, only for
 //               rooms that open new territory (gain > 0: on a level of many switches most rooms open nothing).
 //           The room's fields (flood fill, trophy walkable) are cached by the passable set (the doors' states and
-//           protection), the least recently used dropped beyond a budget: rooms that share doors cost a hash. The
-//           room measure only orders: a state is ruled out only by the reach field's -1, as with fine cells. It picks
-//           exactly like the prototype (ngx.js --mode=novold: the same routes after the same simulated ticks). The ice
-//           level: one worker, seed 1, a route after 82.8 M simulated ticks (23 s); 4 workers as the editor starts
-//           them, the first route after 32 s (9,982 ticks), 9,661 ticks after 180 s.
+//           protection), the least recently used dropped beyond a budget: rooms that share doors cost a hash. A room is
+//           made (its fields walked) only when its first cell enters the archive: a state in a new room while the
+//           archive is full, or too late for a faster route, makes none (it would stay empty, outside the budget). The
+//           room measure only orders: a state is ruled out only by the reach field's -1, as with fine cells.
+//           It picks like the prototype except in two ways: the discovery burst goes only to rooms with territory gain
+//           (the prototype bursts every new room, and a burst draws random numbers, so a room without gain changes the
+//           draws after it), and crowns are keyed by _collide_crown, what crown doors read (the prototype: has_crown).
+//           Where every new room opens territory and no crown door stands both give the same routes after the same
+//           simulated ticks (test/editor.js pins the prototype's first route on a key-door level); on the ice level
+//           they differ (seed 1's first route after 82.8 M ticks here, 87.2 M in the prototype).
+//           The ice level: one worker, seed 1, its first route (9,982 ticks) after 82.8 M simulated ticks (23-26 s on
+//           the i7-11800H laptop); 4 workers as the editor starts them (seed 1, depth 100000): the same route from the
+//           same worker after the same 82.8 M ticks (a worker's draws do not depend on the others'), so the time is that
+//           worker's speed: 32-36 s on the laptop otherwise idle, 50-56 s while other jobs' GPU work heats its shared
+//           cooler; 9,661 ticks after 180 s.
 //
 // It prints the JSON lines of the editor's native tools (native/beamhost.h, explorehost.h), one per line:
 //   {"ev":"start","workers":n,"seeds":[..],"mode":"physics"|"walk","cells":"fine"|"coarse","startCost":c|null,"maxCells":..}
@@ -738,14 +748,22 @@ function explore(L, field, a, seed, ctrl, post) {
 					if (sim.is_dead) break;
 					const rc = costOf();
 					if (rc < 0) break;   // the reach field rules it out: no route from here
+					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
+					// first cell can enter the archive: a full archive or a state too late for a faster route would leave an
+					// empty room, and walks for nothing, outside the memory budget)
+					let into = true;
 					if (coarse) {
-						// (a new room: its fields, from this state)
 						roomKey = RM.key(sim);
-						if (roomKey !== room.key) room = rooms.get(roomKey) || newRoom(roomKey, t);
+						if (roomKey !== room.key) {
+							const r = rooms.get(roomKey);
+							if (r !== undefined) room = r;
+							else if (t < maxT && cells.size < a.maxCells) room = newRoom(roomKey, t);
+							else { into = false; if (t < maxT) full = true; }
+						}
 					}
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, node: { up, buf, o, n: s + 1 } };
-					const nc = add(t, rc, e, up, buf, o, s + 1, room);
+					const nc = into ? add(t, rc, e, up, buf, o, s + 1, room) : null;
 					if (nc !== null && room !== null && room.isNew) {
 						// a new room's first cell: head C's burst and a source, if it opens new territory
 						room.isNew = false;
