@@ -910,8 +910,9 @@ const BREAK_RESERVE_F = 0.15;
 // holds the memory for a while, e.g. the game or a second search on the same GPU) is started again after GPU_RETRY_S
 // (then every last value) instead of staying in error for the whole search (cycle 5: a cuCtxCreate "out of memory" in
 // the first seconds on the shared H100 cost Infinity Pain every move, straight and the GPU random runs for 30 min). The
-// breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one.
-const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
+// breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one (cycle 7:
+// 1, the 5 s wait; 3 waits cost 85 s for nothing in cycle 6's sample, where a second search held the memory).
+const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 1;
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
 const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
@@ -1676,28 +1677,77 @@ function pruneReachCache() {
  *  version (an older build refuses every RCH3 file); asked once per build of the tool */
 const toolChecked = new Map();
 let toolInfo = null;   // the last native tool's `info`: {steer (the steer file version it reads; 0 none), memMB (its GPU's memory)}
+// An `info` asked while another process holds the GPU's memory makes no context and says {"gpu":null,"why":"... out of
+// memory"}: its memMB 0 kept the steer field off the GPU tools and made the wall breaker plan 2^27 instead of 2^30 on the
+// A100 for the whole search (cycle 6). So the check asks once more after GPU_RETRY_S[0] before the search starts (the GPU
+// strategies would wait that long anyway), then goes on and asks again in the background with the same back-off, at most
+// INFO_ASKS times: a later answer sets memMB (the breaker's next table; the steer field stays as the search began, its
+// distances are the search's units). A tool's GPU memory, once known, is kept for later searches (toolMem).
+const INFO_ASKS = 6;
+const toolMem = new Map();   // (a tool's GPU memory in MB from an earlier `info`)
+let infoTimer = null;
+const infoMem = (info) => info && info.gpu && info.gpu.memMB > 0 ? info.gpu.memMB : 0;
+/** `info` of this app's tool version that found no GPU memory for a context */
+const infoNoMem = (info) => !!info && info.reach === RF_VERSION && !infoMem(info) && gpuTransient(info.why);
+/** one `info` of the tool (cmd) -> cb(its last JSON line or null) */
+function askInfo(cmd, cb) {
+	// (with the kernel cache: the compile after an update happens once, here or in the first strategy; no timeout: an
+	// eegpu process is never killed while it may run a kernel; `info` launches one: detached with --parent, like the
+	// strategies, so the app's exit does not kill it mid-kernel)
+	const native = cmd[0] !== process.execPath;
+	require('child_process').execFile(cmd[0], [...cmd.slice(1), 'info', ...(native ? [...G.cacheArgs(), `--parent=${process.pid}`] : [])],
+		{ encoding: 'utf8', windowsHide: true, detached: native }, (err, out) => {
+		let info = null;
+		for (const line of String(out || '').split('\n')) { try { const j = JSON.parse(line); if (j && typeof j === 'object') info = j; } catch (e) { /* not JSON */ } }
+		cb(info);
+	});
+}
+/** `info` again after the back-off (k: the ask) while the GPU's memory is unknown */
+function reaskInfo(cmd, key, k) {
+	if (infoTimer) clearTimeout(infoTimer);
+	infoTimer = null;
+	if (k > INFO_ASKS) return;
+	const wait = GPU_RETRY_S[Math.min(k - 1, GPU_RETRY_S.length - 1)];
+	infoTimer = setTimeout(() => {
+		infoTimer = null;
+		askInfo(cmd, (info) => {
+			const mem = infoMem(info);
+			if (mem) {
+				toolMem.set(key, mem);
+				if (toolInfo && !toolInfo.memMB) { toolInfo.memMB = mem; note(`the GPU's memory (asked again: ask ${k}): ${mem} MB; the wall breaker plans its table from it`); }
+			} else if (infoNoMem(info)) reaskInfo(cmd, key, k + 1);
+		});
+	}, wait * 1000);
+	if (infoTimer.unref) infoTimer.unref();
+}
 function toolVersionProblem(cmd) {
 	let key = cmd.join('\u0000');
 	try { key += `|${fs.statSync(cmd[0] === process.execPath ? cmd[1] : cmd[0]).mtimeMs}`; } catch (e) { /* (no file: the spawn fails anyway) */ }
 	if (toolChecked.has(key)) return toolChecked.get(key);
+	let noMem = false;
 	const p = new Promise((resolve) => {
-		// (with the kernel cache: the compile after an update happens once, here or in the first strategy; no timeout: an
-		// eegpu process is never killed while it may run a kernel; `info` launches one: detached with --parent, like the
-		// strategies, so the app's exit does not kill it mid-kernel)
-		const native = cmd[0] !== process.execPath;
-		require('child_process').execFile(cmd[0], [...cmd.slice(1), 'info', ...(native ? [...G.cacheArgs(), `--parent=${process.pid}`] : [])],
-			{ encoding: 'utf8', windowsHide: true, detached: native }, (err, out) => {
-			let info = null;
-			for (const line of String(out || '').split('\n')) { try { const j = JSON.parse(line); if (j && typeof j === 'object') info = j; } catch (e) { /* not JSON */ } }
-			// (its steer file version and the GPU's memory: the steer field's budget, launchAll)
-			if (info && info.reach === RF_VERSION) { toolInfo = { steer: info.steer || 0, memMB: info.gpu && info.gpu.memMB > 0 ? info.gpu.memMB : 0 }; resolve(''); }
+		const took = (info) => {
+			// (its steer file version and the GPU's memory: the steer field's budget, launchAll; the breaker's table)
+			if (info && info.reach === RF_VERSION) {
+				const mem = infoMem(info) || toolMem.get(key) || 0;
+				if (infoMem(info)) toolMem.set(key, mem);
+				toolInfo = { steer: info.steer || 0, memMB: mem };
+				// (still no memory: the search starts, and `info` is asked again in the background)
+				if (!mem && infoNoMem(info)) { noMem = true; note(`the tool check still found no GPU memory: the search starts; asked again in ${GPU_RETRY_S[1]} s`); reaskInfo(cmd, key, 2); }
+				resolve('');
+			}
 			// (its one kernel launch failed: launch.h's {"error":...,"launchError":true} line, exit 6 / 7)
 			else if (info && info.launchError) resolve(`the GPU failed (${String(info.error || 'a kernel launch failed').slice(0, 200)})`);
 			else resolve('the search tool is older than the app: rebuild it (node tools/build-native.js)');
+		};
+		askInfo(cmd, (info) => {
+			if (!infoNoMem(info) || toolMem.get(key)) return took(info);
+			note(`the tool check found no GPU memory (${String(info.why).slice(0, 120)}): asked again in ${GPU_RETRY_S[0]} s`);
+			setTimeout(() => askInfo(cmd, took), GPU_RETRY_S[0] * 1000);
 		});
 	});
 	toolChecked.set(key, p);
-	p.then((why) => { if (why) toolChecked.delete(key); });   // (asked again after a rebuild)
+	p.then((why) => { if (why || noMem) toolChecked.delete(key); });   // (asked again after a rebuild, or when it had no GPU memory)
 	return p;
 }
 /** the CPU strategies' processes: their depth bound (a route of `ticks` is known: only faster ones count) */

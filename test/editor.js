@@ -379,7 +379,15 @@ const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
 const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
-if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach, steer: SC.steer || 0 }) + '\\n'), SC.infoDelay || 0);
+// (infoOom: the first infoOom asks of info find no GPU memory for a context, as next to another process holding it;
+// counted in infoLog)
+if (args[0] === 'info') {
+	const n = SC.infoLog && fs.existsSync(SC.infoLog) ? fs.readFileSync(SC.infoLog, 'utf8').length : 0;
+	if (SC.infoLog) fs.appendFileSync(SC.infoLog, 'i');
+	const gpu = n < (SC.infoOom || 0) ? null : { name: 'fake', memMB: SC.infoMem || undefined };
+	const why = gpu ? {} : { why: 'cuCtxSetLimit(0 , stackBytes) failed: CUDA error 2 (out of memory)' };
+	return void setTimeout(() => process.stdout.write(JSON.stringify(Object.assign({ gpu, reach: SC.reach === undefined ? 3 : SC.reach, steer: SC.steer || 0 }, why)) + '\\n'), SC.infoDelay || 0);
+}
 const passOf =(a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 // (a relay's --prefix: its length and first input logged with the launch, as "#pf=<length>:<first>")
@@ -1226,6 +1234,18 @@ async function cpuSection() {
 		st.log.filter((x) => /out of memory\); again in 5 s \(retry 1\)/.test(x)).length === 2 && st.stage === 'found' && st.elapsed >= 5,
 		`GPU strategies ${G4.map((q) => `${q.key} ${q.state}${q.error ? ` (${q.error})` : ''}`).join(', ')}; launches explore ${n4('explore')}, beam ${n4('beam')}; ` +
 		`${st.log.filter((x) => /again in/.test(x)).join(' | ')}; ${st.stage}; ${st.elapsed.toFixed(1)} s`);
+	// the tool check (eegpu info) itself out of GPU memory: asked once more after 5 s before the search starts (cycle 6: its
+	// gpu:null made memMB 0 for the whole search: the steer field off the GPU tools, the breaker's table 2^27 on a 40 GB GPU)
+	const sc5 = path.join(HOME, 'cpu-infooom.json'), log5 = path.join(HOME, 'cpu-infooom.log'), ilog5 = path.join(HOME, 'cpu-infooom.info');
+	fs.writeFileSync(sc5, JSON.stringify({ log: log5, R, runs: {}, beam: null, infoOom: 1, infoMem: 40960, infoLog: ilog5 }));
+	const t5 = Date.now();
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 4, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc5], salts: false });
+	st = await waitDone(40000);
+	const asks5 = fs.existsSync(ilog5) ? fs.readFileSync(ilog5, 'utf8').length : 0, G5 = st.strategies.filter((q) => !q.cpu);
+	check('the tool check out of GPU memory (info gpu:null): asked again after 5 s before the search starts, then its GPU strategies run',
+		asks5 === 2 && st.log.some((x) => /the tool check found no GPU memory \(cuCtxSetLimit.*asked again in 5 s/.test(x)) && !st.log.some((x) => /still found no GPU memory/.test(x)) &&
+		G5.length === 2 && G5.every((q) => q.state !== 'error') && st.stage === 'found' && (Date.now() - t5) / 1000 >= 5,
+		`info asked ${asks5}x; ${st.log.filter((x) => /GPU memory/.test(x)).join(' | ')}; GPU ${G5.map((q) => `${q.key} ${q.state}`).join(', ')}; ${st.stage}; ${((Date.now() - t5) / 1000).toFixed(1)} s`);
 }
 
 // ---------------------------------------------------------------- the proof (eegpu prove: CPU only, no GPU)
