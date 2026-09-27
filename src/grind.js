@@ -632,7 +632,9 @@ async function sweepStage(round) {
 			if (done.some(same(m.sig)) || [...inflight].some(same(m.sig))) continue;
 			const rec = m.st.rec;
 			if (m.st.run && rec && rec.found > 0 && rec.last < round) return { w0, w1, i, sig: m.sig, why: `found ${rec.found} last time` };
-			if (m.st.run && rec && rec.found > 0 && rec.last === round && !chain) chain = { w0, w1, i, sig: m.sig, why: `again after its find of ${rec.found}` };
+			if (m.st.run && !chain && (rec && rec.found > 0 && rec.last === round || m.st.why === 'new' || m.st.why === 'changed')) {
+				chain = { w0, w1, i, sig: m.sig, why: rec && rec.found > 0 ? `again after its find of ${rec.found}` : `${m.st.why} since this sweep searched it` };
+			}
 			if (i < order || front) continue;
 			if (!m.st.run) { skipped.set(`${w0}`, m.st.why); continue; }
 			front = { w0, w1, i, sig: m.sig, why: m.st.why };
