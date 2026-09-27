@@ -1782,7 +1782,9 @@ function finish() {
 		S.message = `The ${S.cpuOnly ? 'CPU' : 'GPU'} search failed: ${S.strategies.map((q) => q.error).filter(Boolean).join('; ')}`;
 	} else if (S.stage !== 'error') {
 		S.stage = 'not found';
-		const capped = S.strategies.some((q) => q.key !== 'explore' && !q.cpu && q.layer >= S.depth);   // (the beams' depth limit)
+		// (the beams' depth limit: the relay's and the GPU random runs' layers are not bound by it; on Infinity Pain the random
+		// runs' 6,282 ticks deep made a search the beams had ended at tick 529 say it had reached the limit of 2,288)
+		const capped = S.strategies.some((q) => (q.key === 'goal' || q.key === 'guide') && q.layer >= S.depth);
 		const XE = S.strategies.find((q) => q.key === 'explore' && q.exhausted);
 		const X = S.strategies.find((q) => q.key === 'explore');
 		const R = S.strategies.find((q) => q.cpu);
