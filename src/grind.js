@@ -161,8 +161,9 @@ function bestTrace() {
 	return bestIdx;
 }
 
-/** Offers a finished run file to the best (THE rule: common.judge). Returns { accepted, r, verdict }.
- *  A finishing run that is not accepted is logged and spliced with the best at once (opts.noSplice: it is a splice). */
+/** Offers a finished run file to the best (THE rule: common.judge). Returns { accepted, r, verdict, spliced }.
+ *  A finishing run that is not accepted is logged and spliced with the best at once (opts.noSplice: it is a splice);
+ *  spliced = that splice was accepted. */
 function consider(file, what, opts) {
 	// best.eetas may have been improved from outside (tas.js try while this grind was not running yet)
 	const disk = evalRun(BEST);
@@ -180,8 +181,8 @@ function consider(file, what, opts) {
 	if (!v.accept) {
 		const splice = !(opts && opts.noSplice);
 		log(`${what}: ${fmt(r.runTicks)} not accepted (${v.reason})${splice ? '; splicing it with the best' : ''}`);
-		if (splice) spliceNow(r, what);
-		return { accepted: false, r, verdict: v };
+		const spliced = splice ? spliceNow(r, what) : false;
+		return { accepted: false, r, verdict: v, spliced };
 	}
 	log(`${what}: ${fmt(best.runTicks)} -> ${fmt(r.runTicks)} (-${best.runTicks - r.runTicks})` + (RANDOM ? `, chance ${(r.chance * 100).toFixed(1)}%` : ''));
 	status.history.push({ t: Date.now(), runTicks: r.runTicks, saved: best.runTicks - r.runTicks, what, chance: r.chance });
@@ -193,13 +194,14 @@ function consider(file, what, opts) {
 /**
  * A finishing run that was not accepted: the fastest combination of it and the best at equal states (it may still
  * hold a faster stretch: a stage output that went stale while the best moved on keeps ~90% of its find). The result
- * is judged like any run; with random portals a second try keeps the draws of the best.
+ * is judged like any run; with random portals a second try keeps the draws of the best. Returns true when accepted.
  */
 function spliceNow(r, what) {
 	try {
 		const rt = S.trace(level, r.ms, NC, RANDOM);
-		if (rt.n >= 0) spliceWithBest([rt], what, `${what} + best`);
+		if (rt.n >= 0) return spliceWithBest([rt], what, `${what} + best`);
 	} catch (e) { log(`${what}: splice failed: ${e && e.message || e}`); }
+	return false;
 }
 /** The fastest run over the best and `runs` (traces) at equal states, judged; with random portals a second try keeps
  *  the draws of the best. Returns true when it was accepted. */
@@ -581,9 +583,22 @@ function ownSaving(outFile, refTicks) {
 // of a session covers every window (whole-run coverage in the first minutes); later ones get ~40% of a round and take the
 // windows that found time last first, then new / changed ones, then the rest in run order from where the last sweep
 // stopped; resting windows (the memory) are left out. On the ice level one such window over the top right took 4899 ->
-// 4792 and 4904 -> 4760 (180 s, 6 threads), where the grind's one-window-per-round cursor needed 2 h to get there. Not
-// on time-door levels (exact rejoins there need savings that are multiples of 1000 ticks); --sweep=0 off.
+// 4792 and 4904 -> 4760 (180 s, 6 threads), where the grind's one-window-per-round cursor needed 2 h to get there.
+// A stale find (its run saved time against the run the window started from, but neither it nor its splice reached the
+// best: the GPU searcher had moved the best on meanwhile, so the best no longer holds the find's states) sends its window
+// back into the lanes at once, on the current best (once per sweep): the first sweep starts while the GPU still cuts
+// whole seconds, and on the A100 12 and 10 of such finds (524 and 546 ticks) never reached the best. On time-door levels
+// (an exact rejoin there needs a saving that is a multiple of 1000 ticks) the windows rejoin by the clock-blind hash
+// (explore --clockblind=1) and phase.js replays their edges plain or with the clock re-synced in the idle start
+// (phase.js --edges). --sweep=0 off.
 const SWEEP_LEN = 800, SWEEP_STEP = 600, SWEEP_LOOPS = 2;
+/** a find's own states (those of the run file `out` its start run lacks: refTr its trace) that the best holds, a share */
+function inBest(out, refTr) {
+	const tr = TC.get(out);
+	if (!tr || tr.n < 0) return 1;
+	const b = bestTrace();
+	return SW.keptShare(tr.H, tr.n, refTr.H, refTr.n, (h) => b.has.get(h) >= 0);
+}
 // --sweepLoops=lane (default): the 2 longest loops in the sweep's lanes; first: the 2 longest loop windows with all the threads
 // before the sweep (an experiment: Forgotten Veil's loop at (326, 90) found -46 with 8 threads and 4 in a 2-thread lane)
 const SWEEP_LOOP_MODE = a.sweepLoops || process.env.EEAT_SWEEP_LOOPS || 'lane';
@@ -605,8 +620,9 @@ function nextLoop(round, tried) {
 	return null;
 }
 async function sweepStage(round) {
-	if (a.sweep === '0' || level.hasTimeDoors) return;
+	if (a.sweep === '0') return;
 	if (curRound === firstRound && skip1.has('deep')) return;
+	const TD = !!level.hasTimeDoors;
 	// lanes of >= 2 threads, up to 4; the share can grow during the sweep (the AutoTASer's Find a route hands the CPU over:
 	// <job>/cpu_share), so the lanes the whole CPU allows are started and each one waits while the share has no room for it
 	const lanesFor = (w) => Math.max(1, Math.min(4, Math.floor(w / 2)));
@@ -650,6 +666,20 @@ async function sweepStage(round) {
 		covered = true;
 		return chain;
 	};
+	// stale finds (above): their windows on the current best, before any other window; each window once per sweep
+	const redo = [], redone = new Set();
+	let stale = 0;
+	const takeRedo = () => {
+		while (redo.length) {
+			const r = redo.shift();
+			const b = bestTrace().tr;
+			const [w0, w1] = SW.mapWindow(r.tr.H, r.tr.n, b.H, b.n, r.w0, r.w1);
+			const m = memoWin(w0, w1, round);
+			if ([...inflight].some((s) => !!new SW.Memo([{ s, fails: 0 }]).match(m.sig))) continue;
+			return { w0, w1, i: -1, sig: m.sig, redo: true, why: `again on the current best: its find of ${r.saved} at ticks ${r.w0}-${r.w1} did not reach it` };
+		}
+		return null;
+	};
 	// the longest loops go into the lanes first (SWEEP_LOOPS per sweep, the loop windows' own explorer: Octorage's -356
 	// route skip is its loop #1), the rest after the sweep in loopWindows
 	const tried = new Set(cur.loops || []);
@@ -670,34 +700,66 @@ async function sweepStage(round) {
 					win = { w0: Math.max(0, l.a - 40), w1: Math.min(n, l.b + 40), sig: nl.m.sig, loop: l, why: `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later` };
 				}
 			}
+			if (!win) win = takeRedo();
 			if (!win) win = pick();
 			if (!win) { over = true; return; }
 			inflight.add(win.sig);
 			const id = idx++;
 			const ref = path.join(OUT, `grind_sweep_ref${k}.eetas`);
-			C.writeEetas(ref, best.ms);
+			const refMs = best.ms;
+			C.writeEetas(ref, refMs);
 			const refTicks = best.runTicks;
 			const out = path.join(OUT, `grind_deep_${round}_sw${id}.eetas`);
 			try { fs.unlinkSync(out); } catch (e) { /* none */ }
+			try { fs.unlinkSync(`${out}.edges.json`); } catch (e) { /* none */ }
 			const name = `sweep${round}_${id + 1}`;
 			const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
 			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads)...`);
 			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : EXP_EXTRA;
+			// (time doors: rejoins by the clock-blind hash, as edges for phase.js; --hunt and --tails write them)
+			if (TD) mode.push('--clockblind=1', ...(mode.includes('--hunt=1') || mode.includes('--tails=1') ? [] : ['--tails=1']));
 			const res = await runTool('explore.js', [`--tas=${ref}`, `--out=${out}`, `--from=${win.w0}`, `--join=${win.w0}`, `--until=${win.w1}`,
 				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${NC}`,
 				'--maxEntries=1500000', LVL],
 				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`));
-			const saved = ownSaving(out, refTicks);
+			let saved = ownSaving(out, refTicks), runOut = out;
+			let got = fs.existsSync(out) ? consider(out, name) : null;
+			if (got) addResult(out);
+			if (TD && fs.existsSync(`${out}.edges.json`) && Date.now() < deadline - 60000) {
+				// the window's clock-blind edges, each replayed plain or with the clock re-synced in the idle start, combined
+				const po = path.join(OUT, `grind_deep_${round}_sw${id}p.eetas`);
+				try { fs.unlinkSync(po); } catch (e) { /* none */ }
+				await runTool('phase.js', [`--tas=${ref}`, `--out=${po}`, LVL, `--nocoins=${NC}`, `--edges=${out}.edges.json`, `--from=${win.w0}`, `--to=${win.w0 + 1}`,
+					'--random=0', '--seconds=5'], 300e3, path.join(OUT, `grind_sweep${round}_${id}p.log`));
+				const ps = ownSaving(po, refTicks);
+				if (fs.existsSync(po)) {
+					const pg = consider(po, `${name} (time doors)`);
+					addResult(po);
+					if (ps > saved) { saved = ps; runOut = po; got = pg; }
+				}
+			}
 			inflight.delete(win.sig);
 			done.push(win.sig);
-			if (fs.existsSync(out)) { consider(out, name); addResult(out); }
 			if (searched(res, saved)) { memo.record(win.sig, saved, round); saveMemo(); }
-			log(`${name}: ${saved > 0 ? `its window saves ${saved}` : 'nothing in this window'}${res && res.killed ? ' (stopped)' : ''}`);
+			// a stale find: the window again on the current best (once per sweep; a redo's own find is not redone)
+			let again = '';
+			if (saved > 0 && got && !got.accepted && !got.spliced && !win.redo && !redone.has(win.sig)) {
+				const refTr = S.trace(level, refMs, NC, RANDOM);
+				const share = inBest(runOut, refTr);
+				if (share < 0.5) {
+					redone.add(win.sig);
+					redo.push({ tr: refTr, w0: win.w0, w1: win.w1, saved });
+					stale++;
+					again = `; stale (${Math.round(share * 100)}% of its states in the best, which is at ${fmt(best.runTicks)} now): again on the current best`;
+				}
+			}
+			log(`${name}: ${saved > 0 ? `its window saves ${saved}` : 'nothing in this window'}${res && res.killed ? ' (stopped)' : ''}${again}`);
 			ran++; if (saved > 0) found++;
 		}
 	};
 	saveStatus({ stage: `sweep${round}`, round });
 	log(`sweep${round}: hunt windows of ${SWEEP_LEN} ticks over the whole run (${bestTrace().tr.n} ticks), up to ${lanes} at once x ${room().per} threads, ${secs} s each` +
+		`${TD ? ' (time doors: clock-blind rejoins, replayed by phase.js)' : ''}` +
 		`${first ? ', every window' : `, up to ${Math.round(budget / 60e3)} min`}`);
 	await Promise.all(Array.from({ length: lanes }, (x, k) => lane(k)));
 	const o0 = order;
@@ -707,7 +769,8 @@ async function sweepStage(round) {
 	cur.swOrder = rest ? 0 : order;
 	if (rest) cur.swept = (cur.swept | 0) + 1;
 	saveCursor();
-	log(`sweep${round}: ${ran} window${ran === 1 ? '' : 's'} searched, ${found} found time${skipped.size ? `, ${skipped.size} resting (${[...new Set(skipped.values())].slice(0, 2).join('; ')})` : ''}` +
+	log(`sweep${round}: ${ran} window${ran === 1 ? '' : 's'} searched, ${found} found time${stale ? ` (${stale} stale: searched again on the best)` : ''}` +
+		`${skipped.size ? `, ${skipped.size} resting (${[...new Set(skipped.values())].slice(0, 2).join('; ')})` : ''}` +
 		`${rest ? '; every window of the run covered' : ''} (${Math.round((Date.now() - t0) / 1000)} s)`);
 }
 

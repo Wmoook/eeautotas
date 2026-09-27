@@ -8,10 +8,14 @@
 //   3. Every newer route of Find a route goes to the job (jobs.tryCandidate: the inbox; the grind splices a slower one
 //      with its best, so its faster stretches are kept).
 //   4. The handoff: Find a route has the GPU first (the job's GPU searcher waits while the editor's busy marker is
-//      fresh). Once Find a route has had no new route for as long as it took to find its last one (at least
-//      --handoffMin 20 s), it is stopped and the optimizer gets the GPU. Measured (the night of 2026-09-26,
-//      src/out/night/fast_curves.md): after 3-37 s Find a route found nothing more in 10-20 min, and on the ice level
-//      it ended by itself at 41.6 s while its GPU sat idle for 29 min.
+//      fresh). A route counts only by what it gains the JOB: the job's history entries of its inbox runs and their
+//      splices with the best (a route slower than the job's best that adds nothing is no progress). Within a window of
+//      the time the first route took (at least --handoffMin 20 s, at most HANDOFF_WIN_MAX_S 120 s), Find a route is
+//      stopped and the optimizer gets the GPU once no route has gained the job anything for that long, or the
+//      optimizer's own stages gained more in the last window than Find a route's routes, on their share of the CPU and
+//      without the GPU. Before (2026-09-27), any faster route restarted the wait: the GPU random runs found a slightly
+//      faster route every 3-35 s on the ice level, so the job's GPU searcher never ran; and the night of 2026-09-26
+//      (src/out/night/fast_curves.md) after 3-37 s Find a route found nothing more in 10-20 min.
 //   5. Until the time budget (--minutes); then the job is paused (its best stays; the app can go on with it). When Find a
 //      route ends without a route (stopped, a failed physics check, a proof that none exists), the AutoTASer ends too.
 // The CPU: until the handoff Find a route keeps its W workers (the CPU search found the ice level's route) and the grind's
@@ -32,6 +36,28 @@ const path = require('path');
 const C = require('./common.js');
 
 const HANDOFF_MIN_S = 20;
+const HANDOFF_WIN_MAX_S = 120;
+/** a job history entry that Find a route's route made (its inbox run, that run's splice with the best, or a direct try
+ *  while the job's grind was not running) */
+const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
+
+/**
+ * The handoff's reason, or '' (Find a route keeps the GPU). o: {now, t0 (the AutoTASer's start), jobAt (the job's start,
+ * at the first route), frAt (the last gain a route made the job, else jobAt), gains [{at, saved, fr}] (the job's
+ * improvements, fr: made by a route), handoffMin (s)}; times in ms. The window: the time the first route took, within
+ * [handoffMin, HANDOFF_WIN_MAX_S]. Due when no route gained the job anything for a window, or when in the last window
+ * the optimizer's own stages gained more than the routes.
+ */
+function handoffWhy(o) {
+	if (!o.jobAt) return '';
+	const win = 1000 * Math.max(o.handoffMin || HANDOFF_MIN_S, Math.min(HANDOFF_WIN_MAX_S, (o.jobAt - o.t0) / 1000));
+	const s = (ms) => Math.round(ms / 1000);
+	if (o.now - Math.max(o.jobAt, o.frAt || 0) > win) return `no route gained the job anything for ${s(o.now - Math.max(o.jobAt, o.frAt || 0))} s`;
+	if (o.now - o.jobAt < win) return '';
+	let fr = 0, opt = 0;
+	for (const g of o.gains) if (g.at > o.now - win) { if (g.fr) fr += g.saved; else opt += g.saved; }
+	return opt > fr ? `in the last ${s(win)} s the optimizer gained ${opt} ticks, the routes ${fr}` : '';
+}
 
 function run(o) {
 	const ED = require('./editor.js');
@@ -61,7 +87,11 @@ function run(o) {
 	const gpuOk = !o.cpu && !!G.nativeTool() && !G.unsupported(level) && !(o.gpu && o.gpu.available === false);
 	emit({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` });
 	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W }, o.gpu || { available: gpuOk });
-	let lastKey = '', lastRouteAt = 0, frDone = false, hist = 0, ended = false, busy = false;
+	let lastKey = '', frDone = false, hist = 0, ended = false, busy = false;
+	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
+	// of the job's best ({at: ms, saved, fr: made by a route})
+	let jobAt = 0, frAt = 0;
+	const gains = [];
 	const pending = [];   // Find a route's routes waiting for the job
 	let jobPid = 0;       // (the grind the AutoTASer started: finish stops the job only while it still runs that one)
 	const share = Math.max(1, Math.min(Math.floor(W / 4), threads - W));
@@ -83,7 +113,6 @@ function run(o) {
 		const masks = Uint8Array.from(String(r.inputs), (ch) => (ch.charCodeAt(0) - 48) & 31);
 		const ev = C.evaluate(level, masks);
 		if (!ev) { emit({ ev: 'route', runTicks: r.runTicks, verified: null, strategy: r.strategy, note: 'does not replay: dropped' }); return; }
-		lastRouteAt = Date.now();
 		S.routes++;
 		// (only the first route counts as a best here: it is the job's base; a newer one counts once the job accepts it by
 		// its own rule, C.judge: deaths, random-portal chance, and appears in its history)
@@ -97,6 +126,7 @@ function run(o) {
 			} catch (e) { finish(`the first route could not be made a job: ${e && e.message || e}`); return; }
 			S.job = meta.id;
 			S.state = 'optimizing';
+			jobAt = frAt = Date.now();
 			if (!frDone) holdShare(true);   // (before the grind starts: its first stage reads it)
 			const ch = startJob(S.job, W, { gpu: gpuOk && !G.unsupported(J.loadJobLevel(S.job)) });
 			jobPid = (ch && ch.pid) || J.runningPid(S.job) || 0;
@@ -109,6 +139,8 @@ function run(o) {
 		const h = Array.isArray(st.history) ? st.history : [];
 		for (; hist < h.length; hist++) {
 			const e = h[hist];
+			const at = Math.min(Date.now(), +e.t || Date.now()), fr = FR_WHAT.test(String(e.what || ''));
+			if (+e.saved > 0) { gains.push({ at, saved: +e.saved, fr }); if (fr) frAt = Math.max(frAt, at); }
 			if (better(e.runTicks)) emit({ ev: 'best', runTicks: e.runTicks, saved: e.saved, what: e.what });
 		}
 	}
@@ -138,11 +170,9 @@ function run(o) {
 				if (!S.job && !ended) finish(`Find a route ended without a route (${st.stage}${st.message ? `: ${st.message}` : ''})`);
 			}
 			if (!frDone) holdShare(true);
-			// the handoff: no new route for as long as it took to find the last one (at least handoffMin s)
-			if (!frDone && S.job && lastRouteAt && Date.now() - lastRouteAt > Math.max(handoffMin * 1000, lastRouteAt - t0)) {
-				handoff(`no new route for ${Math.round((Date.now() - lastRouteAt) / 1000)} s`);
-			}
 			if (!ended) { await feedRoutes(); pollJob(); }
+			// the handoff: the routes gain the job less than the optimizer does (handoffWhy)
+			if (!frDone && !ended && S.job) { const why = handoffWhy({ now: Date.now(), t0, jobAt, frAt, gains, handoffMin }); if (why) handoff(why); }
 		} catch (e) { emit({ ev: 'error', error: String(e && e.message || e) }); }
 		busy = false;
 		if (!ended && Date.now() - t0 >= budgetMs) finish('the time budget');
@@ -172,7 +202,7 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, HANDOFF_MIN_S };
+module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, FR_WHAT };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
