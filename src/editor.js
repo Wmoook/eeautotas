@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const BU = require('./bursts.js');      // (the triggers and a room's walk: the wall breaker's waypoints)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -386,7 +387,8 @@ const STRATEGIES = {
 	// with the largest table the GPU holds (--cells, up to 2^31), a 2M layer cap, 4 px / 1/16 px/tick cells first and no
 	// cost ceiling; a box of BREAK_REGION tiles around its start only with a table of 2^28 cells or fewer
 	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V),
+		// (a waypoint run: the walk-mode file to its trigger orders it, not the trophy's fields: breakWaypoints)
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${q.wpReach || f.reach}`, ...(q.wpReach ? [] : steerArg(f, q.V)),
 		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
@@ -966,6 +968,131 @@ function breakStarts() {
 	}
 	return out;
 }
+// Waypoints (on; start option waypoints: false = off): every stuck level's gate (the trigger the known route needs next)
+// first moves AWAY from the trophy by reach cost (Stupid Fox coin 10 +17 tiles, Good Egg switch 50 +67, Octorage switch
+// 1 +79, Forgotten Veil coin 4 +192, Infinity Pain team 1 +13), and the breaker's runs, ordered by the trophy's fields,
+// ended in the same pockets (Forgotten Veil's coin-door pocket at (350, 109)). So a round first aims runs at waypoints:
+// the room-changing triggers (bursts.js triggersOf: effects, switches, keys, coins where a door reads them) that no known
+// room was entered at, each one alone: a walk-mode steer file to its tiles over its room's walk (bursts.js roomWalk,
+// walkField) in place of the trophy's reach and steer files, no cost ceiling, the breaker's table and cells. The
+// candidates: from the round's starting points and the rooms' entries (the newest WP_POINTS in all), each (room,
+// trigger) pair the walk reaches whose trophy walk cost is at most WP_RISE tiles above the start's, from the start
+// nearest it; ranked by the runs aimed at that pair (none first), then the walking distance; WP_MAX a round. A run that
+// reaches its trigger goes on until the room changes (bursts.js extendToChange): the attempt is its room's source, goes
+// into the CPU search (seed) and, in a room no attempt was in, restarts the stall clock.
+const WP_MAX = 6, WP_RISE = 250, WP_POINTS = 24;
+/** the waypoints' lookups for this search (null: a level without triggers): the triggers, the reach file (its classes
+ *  and trophy walk), the level's fingerprint, the triggers touched (a known room entered there), the runs per pair */
+function wpBase() {
+	if (brk.wpb !== undefined) return brk.wpb;
+	brk.wpb = null;
+	const TR = BU.triggersOf(cur.level);
+	if (!TR.n) return null;
+	const rf = SF.readReachBytes(fs.readFileSync(cur.files.reach));
+	brk.wpb = { TR, rf, P: BU.portalsOf(cur.level), fp: G.blobFp(G.levelBlob(cur.level)), touched: new Set(), entered: new Set(), tried: new Map(), runs: 0, hits: 0, rooms: 0, files: 0 };
+	return brk.wpb;
+}
+/** a sim after inputs (null: it dies) */
+function simAfter(inputs) {
+	const sim = new E.EESim(cur.level), inp = new E.EEInput();
+	sim.reset();
+	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); if (sim.is_dead) return null; }
+	return sim;
+}
+/** the trigger component at the sim's tile, else one next to it (-1: none) */
+function compNear(TR, sim) {
+	const L = cur.level, W = L.width, H = L.height, x0 = Math.trunc(sim.px + 8) >> 4, y0 = Math.trunc(sim.py + 8) >> 4;
+	if (x0 >= 0 && y0 >= 0 && x0 < W && y0 < H && TR.comp[y0 * W + x0] >= 0) return TR.comp[y0 * W + x0];
+	for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const x = x0 + dx, y = y0 + dy; if (x >= 0 && y >= 0 && x < W && y < H && TR.comp[y * W + x] >= 0) return TR.comp[y * W + x]; }
+	return -1;
+}
+/** the round's waypoints: up to WP_MAX {inputs, key, c, room, walk, mx, d, what} (see WP_MAX) */
+function breakWaypoints(starts) {
+	const B0 = wpBase();
+	if (!B0) return [];
+	const L = cur.level, W = L.width, H = L.height, N = W * H, RM = roomsOfSearch().RM, TR = B0.TR, tw = B0.rf.walk;
+	// (the triggers touched: where the known rooms were entered)
+	for (const s of sources.values()) {
+		if (!s.early || B0.entered.has(s.room)) continue;
+		B0.entered.add(s.room);
+		const sim = simAfter(s.early.inputs);
+		const c = sim ? compNear(TR, sim) : -1;
+		if (c >= 0) B0.touched.add(c);
+	}
+	const pts = starts.map((x) => x.inputs);
+	for (const s of [...sources.values()].sort((x, y) => y.at - x.at)) if (s.early && pts.length < WP_POINTS) pts.push(s.early.inputs);
+	const best = new Map();   // "room:component" -> the candidate from the start nearest it
+	const dist = new Int32Array(N), q = new Int32Array(N);
+	for (const inputs of pts) {
+		const sim = simAfter(inputs);
+		if (!sim) continue;
+		const room = RM.key(sim), desc = RM.desc(sim);
+		const I = BU.roomWalk(L, RM, TR, sim, [], B0.P);
+		if (!I.comps.size) continue;
+		// (the walking distance from the start: 8-way steps and portals over the room's passable set, into a trigger but
+		// not through it)
+		dist.fill(-1);
+		let qh = 0, qt = 0;
+		dist[I.s0] = 0; q[qt++] = I.s0;
+		while (qh < qt) {
+			const t = q[qh++], x = t % W, y = (t / W) | 0;
+			if (I.term[t] && t !== I.s0) continue;
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (dist[j] >= 0 || !I.pass[j]) continue;
+					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
+					dist[j] = dist[t] + 1; q[qt++] = j;
+				}
+			}
+			const ex = B0.P ? B0.P.fwd.get(t) : null;
+			if (ex) for (const j of ex) if (dist[j] < 0 && I.pass[j]) { dist[j] = dist[t] + 1; q[qt++] = j; }
+		}
+		const c0 = tw[I.s0];
+		for (const [c, tiles] of I.comps) {
+			if (B0.touched.has(c)) continue;
+			let d = Infinity, rise = -Infinity;
+			for (const t of tiles) { if (dist[t] >= 0 && dist[t] < d) d = dist[t]; if (tw[t] < 0xffff && c0 < 0xffff) rise = Math.max(rise, (tw[t] - c0) / 5); }
+			if (!Number.isFinite(d) || rise > WP_RISE) continue;
+			const key = `${room}:${c}`, o = best.get(key);
+			if (!o || d < o.d) best.set(key, { inputs, key, c, room, desc, tiles, I, d, rise, tile: tiles[0] });
+		}
+	}
+	const cand = [...best.values()].sort((x, y) => (B0.tried.get(x.key) || 0) - (B0.tried.get(y.key) || 0) || x.d - y.d).slice(0, WP_MAX);
+	return cand.map((w) => {
+		const f = BU.walkField(L, w.I, w.tiles, B0.P);
+		const bx = w.tile % W, by = (w.tile / W) | 0;
+		return { inputs: w.inputs, key: w.key, c: w.c, room: w.room, walk: f.walk, mx: f.mx, d: w.d, file: '',
+			what: `waypoint: the trigger at (${bx}, ${by}) (${B.kindOf(L.fg[w.tile]).kind} ${L.fg[w.tile]}), ${w.d} tiles' walk${Number.isFinite(w.rise) ? `, ${w.rise >= 0 ? '+' : ''}${Math.round(w.rise)} from the trophy` : ''}, from room "${w.desc}"` };
+	});
+}
+/** a waypoint run's nearer attempt (its distance: to the waypoint's trigger): its own nearest (the chain's next step);
+ *  at the trigger, on until the room changes: a source, the CPU search's seed, and a new room restarts the stall clock */
+function wpCloser(ev, n) {
+	const V = S.strategies[n], w = V.brk.wp, d = +ev.dist;
+	if (!cur || !brk || !brk.wpb || !ev.inputs || ev.cut || !Number.isFinite(d) || V.brk.wpHit) return;
+	if (V.bestTry && !(d < V.bestTry.dist - 1e-3)) return;
+	V.best = d; V.bestAt = Date.now();
+	V.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist: d };
+	if (d > 1e-3) return;
+	const B0 = brk.wpb, x = BU.extendToChange(cur.level, roomsOfSearch().RM, V.bestTry.inputs), inputs = x || V.bestTry.inputs;
+	V.brk.wpHit = true;
+	B0.hits++;
+	B0.touched.add(w.c);
+	const tr = replayRooms(Uint8Array.from(inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), false);
+	const fresh = !!x && !brk.seen.has(tr.room.key);
+	if (fresh) B0.rooms++;
+	if (S.breaker) S.breaker.wp = { runs: B0.runs, hits: B0.hits, rooms: B0.rooms };
+	addSource({ room: tr.room.key, desc: tr.room.desc, gain: tr.room.gain, from: V.label, inputs, dist: tr.reachTiles !== null ? tr.reachTiles : RF.DEATH_TILES - 1, arrival: x ? inputs.length : tr.room.since });
+	seedCpu(inputs);
+	feedOne(inputs, true);
+	note(`${V.label}: ${w.what}: reached at tick ${inputs.length}${x ? `, into room "${tr.room.desc}"${fresh ? ' (new)' : ''}` : ' (no room change)'}`);
+	if (fresh) breakProgress('waypoint');
+	halt(kids[n], 'waypoint');
+}
 /** every 5 s (checkStalls): a stalled search starts a round of the wall breaker */
 function breakKick() {
 	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.result || S.gpuFailed || !brk || !cur || brk.round) return;
@@ -974,11 +1101,14 @@ function breakKick() {
 	const wait = cur.opts.breakWait[Math.min(brk.level, cur.opts.breakWait.length - 1)];
 	if (Date.now() - brk.at < wait * 1000 || S.seconds - searchClock(Date.now()) < 10) return;
 	const starts = breakStarts();
-	if (!starts.length) { brk.at = Date.now(); return; }   // (nothing new to start from: the clock again)
+	let wps = [];
+	if (cur.opts.waypoints) { try { wps = breakWaypoints(starts); } catch (e) { note(`${S.strategies[n].label}: waypoints: ${e.message}`); } }
+	if (!starts.length && !wps.length) { brk.at = Date.now(); return; }   // (nothing new to start from: the clock again)
 	brk.rounds++;
-	brk.round = { starts, i: 0, t0: Date.now(), progress: [], runs: 0, chain: null, wait };
-	S.breaker = Object.assign(S.breaker || {}, { rounds: brk.rounds, round: { n: brk.rounds, starts: starts.length, runs: 0, after: Math.round((Date.now() - S.started) / 100) / 10 } });
-	note(`${S.strategies[n].label}: no attempt nearer by ${BREAK_TILES} tiles and no new room for ${wait} s: round ${brk.rounds}, ${starts.length} starting point${starts.length > 1 ? 's' : ''} (${starts.map((x) => x.what).join('; ')})`);
+	brk.round = { starts, i: 0, wps, wi: 0, t0: Date.now(), progress: [], runs: 0, chain: null, wait };
+	S.breaker = Object.assign(S.breaker || {}, { rounds: brk.rounds, round: { n: brk.rounds, starts: starts.length, waypoints: wps.length, runs: 0, after: Math.round((Date.now() - S.started) / 100) / 10 } });
+	note(`${S.strategies[n].label}: no attempt nearer by ${BREAK_TILES} tiles and no new room for ${wait} s: round ${brk.rounds}, ` +
+		`${wps.length ? `${wps.length} waypoint${wps.length > 1 ? 's' : ''} (${wps.map((x) => x.what).join('; ')}), then ` : ''}${starts.length} starting point${starts.length === 1 ? '' : 's'} (${starts.map((x) => x.what).join('; ')})`);
 	// every move's and the relay's processes stop (between two launches) and wait for the round's end: their tables and
 	// states (every move's up to a third of the GPU) are the breaker's table; the random runs and the beams stay, paused
 	const freed = [];
@@ -997,7 +1127,14 @@ function breakKick() {
 function breakLaunch(n) {
 	const V = S.strategies[n], R = brk && brk.round;
 	if (!R || !cur || !S.running || S.halted || S.stage === 'stopped' || S.gpuFailed) return breakEnd(n);
-	while (!R.chain && R.i < R.starts.length) {
+	while (!R.chain && (R.i < R.starts.length || R.wi < R.wps.length)) {
+		// (the waypoints first: the trophy-ordered runs ended in the stuck levels' pockets)
+		if (R.wi < R.wps.length) {
+			const w = R.wps[R.wi++], B0 = brk.wpb;
+			B0.tried.set(w.key, (B0.tried.get(w.key) || 0) + 1);
+			R.chain = { inputs: w.inputs, step: 1, grain: 0, what: w.what, wp: w };
+			continue;
+		}
 		const st = R.starts[R.i++];
 		brk.tried.add(st.key);
 		const src = st.room !== undefined ? sources.get(st.room) : null;
@@ -1019,7 +1156,13 @@ function breakLaunch(n) {
 		region = `${tx - BREAK_REGION},${ty - BREAK_REGION},${tx + BREAK_REGION},${ty + BREAK_REGION}`;
 	}
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	// (a waypoint: its walk-mode steer file, written once)
+	if (ch.wp && !ch.wp.file) {
+		const w = ch.wp, B0 = brk.wpb, wf = path.join(dir(), `wp_${n}_${B0.files++ % 16}.reach`);
+		try { RF.writeReachFile(Object.assign({}, B0.rf, { mode: 'walk', walk: w.walk, prioShift: Math.max(0, (32 - Math.clz32(w.mx)) - 12) }), wf, B0.fp); w.file = wf; } catch (e) { note(`waypoints: ${e.message}`); R.chain = null; return breakLaunch(n); }
+	}
+	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))), wp: ch.wp || null, wpHit: false };
+	if (ch.wp) { brk.wpb.runs++; if (S.breaker) S.breaker.wp = { runs: brk.wpb.runs, hits: brk.wpb.hits, rooms: brk.wpb.rooms }; }
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
@@ -1035,10 +1178,11 @@ function breakAfter(n, how) {
 	if (!R) return breakEnd(n);
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
-	if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
+	if (V.brk && V.brk.wpHit) R.chain = null;   // (its waypoint reached: wpCloser took the attempt on)
+	else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
 		// its nearest attempt went on: the next step from 60 ticks short of it (a fresh table)
-		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what };
+		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what, wp: ch.wp };
 		seedCpu(b.inputs);
 	} else {
 		if (b) seedCpu(b.inputs);
@@ -1277,7 +1421,9 @@ function start(b, gpu, test) {
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '' },
+		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '',
+		// (the wall breaker's waypoints, breakWaypoints: on; tests: test.waypoints true)
+		waypoints: test ? test.waypoints === true : b.waypoints !== false },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
@@ -1631,7 +1777,7 @@ function launch(n) {
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	if (V.key === 'breaker') {
-		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve;
+		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.wpReach = V.brk.wp ? V.brk.wp.file : '';
 		q.seconds = V.share = V.brk.seconds;
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.brk.keep) : 0;
 	}
@@ -1810,7 +1956,8 @@ function launch(n) {
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
 		} else if (ev.ev === 'closest') {
-			closer(ev, n);
+			// (a waypoint run's distances are to its trigger, not the trophy)
+			if (V.key === 'breaker' && V.brk && V.brk.wp) wpCloser(ev, n); else closer(ev, n);
 		} else if (ev.ev === 'source') {
 			// the CPU search's starting points for the relay (goexplore.js, coarse cells): a new room's first cell ("room":
 			// its inputs end where it entered the room), a room's lowest-cost cell ("best")
