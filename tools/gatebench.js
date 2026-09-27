@@ -13,7 +13,7 @@
 // node tools/gatebench.js build [--jobs=<the jobs folder>] [--data=<folder>]        the gates from the jobs' best runs
 // node tools/gatebench.js run [--code=<checkout>] [--data=<folder>] [--levels=fv,oct,ge,sf,ip] [--ticks=20000000 | --seconds=S]
 //        [--seeds=1] [--par=8] [--bursts=0] [--tool=<eegpu>] [--steer=1] [--gates=a..b] [--json=<file>] [--baseline=<file>]
-//        [--label=<name>] [--mem=400] [--only=fv#3,ip#44] [--hardOnly=1 (with --baseline: its hard gates alone)]
+//        [--label=<name>] [--mem=400] [--only=fv#3,ip#44] [--hardOnly=1 (with --baseline: its hard gates alone)] [--gx="<more goexplore options>"]
 // --code: the checkout whose src/goexplore.js runs (a variant's worktree); it must have --prefix and --rooms (this commit).
 // --remote="root@host -p N -i key" [--dir=/dev/shm/gb_<label>] [--clean=1]: the checkout's src/ (without out, jobs, data,
 // bin), this tool and the gates go up to --dir (a gzipped tar over the Windows OpenSSH client), the run happens there
@@ -104,6 +104,7 @@ function runGate(code, lv, g, seed, alias) {
 			work = fs.mkdtempSync(path.join(os.tmpdir(), 'gatebench-'));
 			args.push('--bursts=1', `--tool=${opt.tool}`, `--work=${work}`, ...(opt.cachedir ? [`--cachedir=${opt.cachedir}`] : []), ...(opt.burstArgs ? opt.burstArgs.split(' ') : []));
 		}
+		if (opt.gx) args.push(...opt.gx.split(' ').filter(Boolean));
 		const p = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 		const t0 = Date.now();
 		let buf = '', done = false, rooms = 0, simTicks = 0, lastTicks = 0;
