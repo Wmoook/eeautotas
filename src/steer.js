@@ -671,30 +671,32 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 	const A = PH.A, M = PH.M;
 	let s = M.layerOf(sim);
 	let f = PH.fields[s];
-	const tiles = [];
-	if (!f || !f._m) return { tiles };
+	const tiles = [], legs = [];
+	if (!f || !f._m) return { tiles, legs, end: 'no field' };
 	const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
-	let cur = null;
+	let cur = null, why = 'no state';
 	if (st) for (const [ty, l] of [...(st.base ? [st.base] : []), ...(st.rise || [])]) { const c = f._m.costOf(st.t, ty, l); if (c !== CUT && (!cur || c < cur.c)) cur = { t: st.t, ty, l, c }; }
 	for (let leg = 0; leg < maxLegs && cur; leg++) {
 		const path = descend(f, cur);
 		for (const p of path) tiles.push(p.t);
 		const end = path[path.length - 1];
-		if (A.trophies.includes(end.t)) break;
+		if (A.trophies.includes(end.t)) { why = 'trophy'; break; }
 		const k = A.specialAt[end.t];
-		if (k < 0) break;
+		if (k < 0) { why = 'stuck'; break; }
 		let best = null;
 		for (const s2 of M.transAll(s, k)) {
 			const f2 = PH.fields[s2]; if (!f2) continue;
 			const c0 = f2.mode === 'walk' ? f2.walk[end.t] : f2.costF[end.t * (RF.KF + 1)];
 			if (c0 < CUT && (!best || c0 < best.c)) best = { s2, c: c0 };
 		}
-		if (!best) break;
+		if (!best) { why = 'no next layer'; break; }
+		// (a leg: the tile that changes the layer, the layers before and after, the cost left there)
+		legs.push({ t: end.t, s, s2: best.s2, c: best.c });
 		s = best.s2; f = PH.fields[s];
-		if (f.mode === 'walk' || !f._m) break;
+		if (f.mode === 'walk' || !f._m) { why = 'walk layer'; break; }
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
 	}
-	return { tiles };
+	return { tiles, legs, end: why };
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
@@ -935,6 +937,27 @@ function dpFifths(st, sim, bound) {
 	}
 	return best === Infinity ? -1 : Math.floor(best + 0.5);
 }
+/** the coin plan's next gate from a sim's state: the untaken coin of the distinct-coin DP with the least leg + rest of the
+ *  tour ({i: the DP's index, bit: the engine's coin bit, v: fifths}), or null (no DP, the coins done, no leg with a value).
+ *  The wall breaker's stall target (editor.js breakGate): along the known routes the DP's first choice was the route's
+ *  next coin on Forgotten Veil in 11 of 15 coins, Good Egg 12 of 17, where the lookup, the least of the DP and the layer's
+ *  own field, took the layer field (the way that needs no more coins) on Forgotten Veil before its coins 1-4 */
+function nextGate(st, sim) {
+	const D = st.dp;
+	if (!D || !(sim.coins < D.T)) return null;
+	let m = 0;
+	for (let i = 0; i < D.n; i++) { const b = D.bit[i]; if (b >= 0 && ((sim._coinBits[b >> 5] >>> (b & 31)) & 1) === 1) m |= 1 << i; }
+	let best = null;
+	for (let q = 0; q < D.n; q++) {
+		if (m & (1 << q)) continue;
+		const rest = D.h[(m | (1 << q)) * D.n + q];
+		if (!(rest < Infinity)) continue;
+		const c = bodyAt(st.bodies[D.leg[q]], sim, 0, 0);
+		if (c < 0 || c >= CUT - 1) continue;
+		if (!best || c + rest < best.v) best = { i: q, bit: D.bit[q], v: c + rest };
+	}
+	return best;
+}
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
@@ -1045,6 +1068,6 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)] };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample };
+	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, coinLegsPhys, coinDP, arriveCost };
