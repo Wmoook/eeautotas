@@ -95,6 +95,11 @@ const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
+// (infoOf's trigger test: the tiles around a trigger it may put the ball on first, nearest first, above first; up to 3
+// out: Forgotten Veil's purple switch 1 at (182, 84) has portals above and below it and blocks at its sides)
+const OFF = [];
+for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) if (dx || dy) OFF.push([dx, dy]);
+OFF.sort((p, q) => Math.max(Math.abs(p[0]), Math.abs(p[1])) - Math.max(Math.abs(q[0]), Math.abs(q[1])) || (p[0] * p[0] + p[1] * p[1]) - (q[0] * q[0] + q[1] * q[1]) || p[1] - q[1]);
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -284,14 +289,39 @@ function create(o) {
 		// room "fly grav=2 team=1": 112 targets before, 76 of them only behind another trigger and 35 no-ops, the nearest
 		// of them nearer than the wall's (199, 151) from the archive's cells by the tunnel (7 ticks short of it for 70 min);
 		// with this rule 2: (189, 159) and the wall's
+		// The ball goes first for one tick on a free tile next to the trigger (outside every trigger component, no portal),
+		// then on the trigger's tile: a trigger acts when the ball's centre tile changes to it (eesim.js pastx / pasty), and
+		// a room made by a switch is first reached ON that switch, so the press alone was no touch and the switch that made
+		// the room (a toggle: touching it again changes the room back) was never its target. Forgotten Veil's coins=12
+		// purple=[1]: its way out on the known route is the same purple switch 1 at (182, 84) 15 ticks later (a portal
+		// loop); 0 targets in its walk before, and the search stayed there 8.5 of its 23 minutes to a route
 		const cz0 = o.RM.cause(sim), snap0 = sim.snapshot(), inp0 = new E.EEInput(), acts = new Map();
+		const put = (t) => { sim.px = (t % W) * 16; sim.py = ((t / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0; };
+		const offOf = (t) => {
+			const x = t % W, y = (t / W) | 0;
+			for (const [dx, dy] of OFF) {
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const j = yy * W + xx;
+				if (pass[j] && !wall[j] && TR.comp[j] < 0 && !PT.exits.has(j)) return j;
+			}
+			return -1;
+		};
 		const changes = (c, t) => {
 			let v = acts.get(c);
 			if (v === undefined) {
 				sim.restore(snap0);
-				sim.px = (t % W) * 16; sim.py = ((t / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0;
 				// (a death or an error says nothing: a target, as before the test)
-				try { sim.tick(inp0); v = sim.is_dead || o.RM.byTrigger(cz0, o.RM.cause(sim)); } catch (e) { v = true; }
+				try {
+					const f = offOf(t);
+					if (f >= 0) {
+						put(f); sim.tick(inp0);
+						// (the step off changed the room or ended the ball: the trigger alone, from the first arrival)
+						if (sim.is_dead || o.RM.byTrigger(cz0, o.RM.cause(sim))) sim.restore(snap0);
+					}
+					put(t); sim.tick(inp0);
+					v = sim.is_dead || o.RM.byTrigger(cz0, o.RM.cause(sim));
+				} catch (e) { v = true; }
 				sim.restore(snap0);
 				acts.set(c, v);
 			}
@@ -333,10 +363,12 @@ function create(o) {
 				}
 			}
 		}
-		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it)
+		// (the trigger the room was first entered by is not a target: it made this room; not when the clock made it. Unless
+		// touching it again changes the room (a toggle, the test above): then it is, the room's own toggle R.self, whose
+		// bursts start off its tiles (a cell on them has not left it since the press that made the room))
 		const c0 = r.trig ? compNear(s0) : -1;
 		const R = r.base || r;
-		if (c0 >= 0 && !R.info0) { R.tried.add(c0); R.info0 = true; }
+		if (c0 >= 0 && !R.info0) { if (comps.has(c0)) R.self = c0; else R.tried.add(c0); R.info0 = true; }
 		// (a component the walk reached only through a portal: the portal arm's target)
 		const pOnly = new Set();
 		for (const [c, tiles] of comps) if (tiles.every((t) => via[t])) pOnly.add(c);
@@ -580,14 +612,19 @@ function create(o) {
 			} else if (p && !p.trophy) {
 				const r = p.r;
 				r.busy = true;
-				const cell = await nearestCell(r, p.f.walk);
+				// (the room's own toggle among its goals (infoOf's R.self): the nearest cell off its tiles, and the burst from that
+				// cell itself: further back is before the press that made the room, and that press reaches the same tiles)
+				const selfT = r.self !== undefined && !r.portal && !r.tried.has(r.self) ? infoOf(r).comps.get(r.self) : null;
+				let nf = p.f.walk;
+				if (selfT) { nf = p.f.walk.slice(); for (const t of selfT) nf[t] = CUT; }
+				const cell = await nearestCell(r, nf);
 				if (stopped) break;
 				// (a cell of this room standing on a target: that trigger does not change the room from here: tried, and no burst)
 				if (cell && cell.v === 0 && cell.tile >= 0 && TR.comp[cell.tile] >= 0 && !TR.eaten[TR.comp[cell.tile]] && !r.tried.has(TR.comp[cell.tile])) { r.tried.add(TR.comp[cell.tile]); st.skipped++; r.busy = false; continue; }
 				r.lastField = p.f;
 				const k = r.k++;
 				let inputs = cell ? cell.inputs : r.inputs, v = cell ? cell.v : p.f.walk[r.tile];
-				const back = BACK[k % BACK.length];
+				const back = selfT && cell ? 0 : BACK[k % BACK.length];
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
