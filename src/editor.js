@@ -388,8 +388,9 @@ const STRATEGIES = {
 	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${q.gateReach || f.reach}`, ...(q.gateReach ? [] : steerArg(f, q.V)),
 		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : []),
-		// (the novelty target: the one search's seen (room, tile) cells, BREAK_NOVEL)
-		...(q.novel ? [`--novel=${q.novel}`, '--novelOrder=1', `--novelMax=${BREAK_NOVEL_MAX}`] : [])] },
+		// (the novelty target: the one search's seen (room, tile) cells, BREAK_NOVEL; not on a gate run, whose order is
+		// the coin's leg field: --novelOrder would replace it)
+		...(q.novel && !q.gateReach ? [`--novel=${q.novel}`, '--novelOrder=1', `--novelMax=${BREAK_NOVEL_MAX}`] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
