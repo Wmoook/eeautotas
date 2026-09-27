@@ -100,7 +100,8 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 - **The grind cycle** (src/grind.js): rounds of about 10 minutes (`--roundMin`): mutate loop, the exact endgame
   solver (`endgame.js`, once per ending: again when the best's last 64 ticks change; `--endgame=0` off), the sweep
   (`src/sweep.js`; `--sweep=0` off; not on time-door levels): `explore --hunt=1` windows of 800 ticks every 600 over the
-  WHOLE run, up to 4 at once in lanes of at least 2 CPU threads, 120 s each (`--deepS`), each from the best as it is when
+  WHOLE run, up to 4 at once in lanes of at least 2 CPU threads (a lane waits while the AutoTASer's `cpu_share` has no
+  room for it), 120 s each (`--deepS`), each from the best as it is when
   it starts, the run's 2 longest untried loop windows (below) first in the lanes; the session's first sweep runs until the frontier has passed the last window (at most 15 min), later ones
   ~40% of a round from where the last one stopped; windows that found time in an earlier round go first, and once the
   whole run is covered a window whose own find changed it goes again (chained finds); then deep exact-rejoin
