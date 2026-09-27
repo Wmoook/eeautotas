@@ -501,10 +501,12 @@ function startGpu() {
 process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { /* gone */ } } });
 
 // ---------------------------------------------------------------- one round (about ROUND_MS), resumable stage by stage
-// (on time-door / coin-door levels the phase pass comes right after the first mutate: its idle start and re-synced
-// clocks found timedoor's -252 (half the run), which waited 7 minutes behind the endgame, deep windows and shortcuts)
+// (on time-door / coin-door levels the phase pass comes right after the first mutate, and again after the endgame when
+// the best changed meanwhile (a newer route from Find a route, say): its idle start and re-synced clocks found timedoor's
+// -252 (half the run) on a run spliced from Find a route's newer routes, after 7 minutes behind the endgame, deep
+// windows and shortcuts)
 const STAGES_ALL = ['mutA', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
-const STAGES_PHASE = ['mutA', 'phase', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
+const STAGES_PHASE = ['mutA', 'phase', 'endgame', 'phaseB', 'deep', 'skips', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -668,10 +670,14 @@ async function shortcutsStage(round, R) {
  * proposal (the clock re-synced in the idle start when needed). A whole pass over the run, the tick grid rotating.
  */
 const PHASE = !!level.hasTimeDoors || (!NC && [43, 165, 213, 214].some((id) => level.fg.includes(id)));
-async function phaseStage(round, R) {
+let phaseKey = '';   // the best the last phase pass searched
+async function phaseStage(round, R, tag = '') {
 	if (!PHASE) return;
-	const po = path.join(OUT, `grind_phase_${round}.eetas`);
-	await stage(`phase${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([2, 1, 3, 2])}`, `--from=${R([0, 0, 1, 1])}`, `--workers=${W}`,
+	const key = crypto.createHash('sha1').update(C.eetasBytes(best.ms)).digest('hex');
+	if (tag && key === phaseKey) return;   // (the second pass of a round: only on a new best)
+	phaseKey = key;
+	const po = path.join(OUT, `grind_phase${tag}_${round}.eetas`);
+	await stage(`phase${tag}${round}`, 'phase.js', [TAS, `--out=${po}`, LVL, `--nocoins=${NC}`, `--step=${R([2, 1, 3, 2])}`, `--from=${R([0, 0, 1, 1])}`, `--workers=${W}`,
 		`--horizon=${R([300, 400, 250, 500])}`, `--drift=${R([96, 128, 64, 160])}`, `--seconds=${R([120, 180, 120, 120])}`, `--random=${R([60, 90, 60, 120])}`, `--seed=${round}`], po, 900e3,
 		level.hasTimeDoors ? 'time doors' : 'coin doors');
 }
@@ -702,6 +708,7 @@ async function main() {
 			else if (sname === 'mutB') await mutateLoop(`${round}b`);
 			else if (sname === 'sc') await shortcutsStage(round, R);
 			else if (sname === 'phase') await phaseStage(round, R);
+			else if (sname === 'phaseB') await phaseStage(round, R, 'b');
 			else if (sname === 'mutC') await mutateLoop(`${round}c`);
 			else if (sname === 'beam') {
 				// 3) beam with verified leads, every other round when there is time left, every 4th round anyway (it has
