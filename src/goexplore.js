@@ -229,10 +229,13 @@ const WAY_PICK = 40;
 // A/B after the first route (22 min, 5 workers, the A100's GPU 7, one sample each): --wR=0.5 by the reach cost vs head W
 // alone: Octorage 7,146 vs 6,969 run ticks (ahead at 10 min: 7,278 vs 7,620), Stupid Fox 3,751 vs 3,592; by the steer
 // cost Octorage 6,996 at 15 min (head W alone 7,620, the reach cost 7,240), 6,995 at 20 min (6,969 / 7,146): not a
-// clear gain, so off by default
+// clear gain, so off by default. --wN=1 (cycle 8): the estimate instead of rcS: the nearest tile the route passes, by
+// its schedule (nsched: per tile the least of the route's first tick at a tile it passes + --wK (3) ticks per step
+// there, 4-way through tiles that are not walls): a corridor next to one the route passes at tick 403 is due at ~403 +
+// 3 x its steps, whatever either field says of it
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0, wS: 1 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0, wS: 1, wN: 0, wK: 3 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -884,7 +887,31 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// head W (--pW of the other picks): a cell off the route's (room, tile) schedule, by its key-blind lead (tsched: per
 	// tile the route's first tick there in any room): a skipped room, another coin / switch subset or another path in a
 	// room that gets somewhere sooner than the best route did is pushed on, where head L sees nothing
-	let sched = null, tsched = null, rcV = null, rcK = null;
+	let sched = null, tsched = null, rcV = null, rcK = null, nsched = null;
+	/** (--wN) nsched from the route's first ticks per tile (tm): multi-source BFS, the sources in their ticks' order */
+	let nWall = null;
+	const nearSched = (tm) => {
+		const W = L.width, fg = L.fg, fl = L.flags, K = a.wK;
+		if (nWall === null) {
+			nWall = new Uint8Array(N);
+			for (let i = 0; i < N; i++) { const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0; if ((f & 1) !== 0 && (f & 16) === 0 && (f & 14) === 0) nWall[i] = 1; }
+		}
+		const ns = new Int32Array(N).fill(-1), src = [];
+		for (let i = 0; i < N; i++) if (tm[i] > 0) src.push(i);
+		src.sort((x, y) => tm[x] - tm[y]);
+		const qt = new Int32Array(N), qv = new Int32Array(N), inq = new Uint8Array(N);   // (a tile queued once: the queue's ticks never fall)
+		let qh = 0, qn = 0, si = 0;
+		while (si < src.length || qh < qn) {
+			let i, v;
+			if (qh >= qn || (si < src.length && tm[src[si]] <= qv[qh])) { i = src[si]; v = tm[i]; si++; } else { i = qt[qh]; v = qv[qh]; qh++; }
+			if (ns[i] >= 0) continue;
+			ns[i] = v;
+			const x = i % W, y = (i - x) / W;
+			const nb = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, i + W < N ? i + W : -1];
+			for (const j of nb) if (j >= 0 && ns[j] < 0 && inq[j] === 0 && nWall[j] === 0) { inq[j] = 1; qt[qn] = j; qv[qn] = v + K; qn++; }
+		}
+		return ns;
+	};
 	/** the route's first tick with a reach cost at most v (rcV decreasing, rcK its ticks); past the route's end: its length */
 	const rcS = (v) => {
 		let lo = 0, hi = rcV.length;
@@ -902,6 +929,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (HW === null) return;
 			const w = tsched[c.tile];
 			if (w !== 0) { c.wlead = c.t - w; HW.push(c); return; }
+			if (nsched !== null) { const q = nsched[c.tile]; if (q < 0) return; c.wlead = c.t - q; HR.push(c); return; }
 			const v = wSt ? (c.sc < STEER_NONE ? c.sc : -1) : c.rc;
 			if (HR === null || rcV === null || v < 0) return;
 			c.wlead = c.t - rcS(v);
@@ -1270,6 +1298,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		sched = m;
 		tsched = tm;
 		if (rv.length) { rcV = Float64Array.from(rv); rcK = Int32Array.from(rk); }
+		if (HR !== null && a.wN) nsched = nearSched(tm);
 		HL = leadHeap();
 		if (HW !== null) HW = wayHeap();
 		if (HR !== null) HR = wayHeap();
