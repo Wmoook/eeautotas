@@ -647,8 +647,10 @@ function nextFull(round) {
 		w0 = Math.max(0, Math.min(w0, n - 1));
 		const w1 = Math.min(n, w0 + Math.max(1, r.at.len | 0));
 		const m = memoWin(w0, w1, round);
-		if (!m.st.full || m.st.rec !== r) continue;   // (changed inside: the thin searches take it first; or another span now)
-		const c = { w0, w1, sig: m.sig, rec: r };
+		// (changed inside: the thin searches take it first; the span's best-matching record is not owed one (a duplicate
+		// record of a span whose newer search found time): not now)
+		if (!m.st.full) continue;
+		const c = { w0, w1, sig: m.sig, rec: m.st.rec, also: r };
 		if (!first || w0 < first.w0) first = c;
 		if (w0 >= from && (!next || w0 < next.w0)) next = c;
 	}
@@ -656,7 +658,7 @@ function nextFull(round) {
 }
 /** one full-budget window (all the threads); the memory records it as 'full'. Resolves exploreWindow's result. */
 async function fullWindow(c, round) {
-	fullTried.set.add(c.rec);
+	fullTried.set.add(c.rec); fullTried.set.add(c.also);
 	const k = ++fullN;
 	const name = `full${round}_${k}`;
 	const secs = Math.max(30, Math.min(DEEP_S || FULL_S, FOREVER ? 1e9 : (deadline - Date.now()) / 1000 - 150));
@@ -743,7 +745,7 @@ function inBest(out, refTr) {
 const SWEEP_LOOP_MODE = a.sweepLoops || process.env.EEAT_SWEEP_LOOPS || 'lane';
 /** the longest loop of the run (48 px, then 96, then 160) not tried yet (tried: the state hashes at its ends) and not
  *  resting in the window memory (those are added to tried); null when none: {l, m: memoWin of its window} */
-function nextLoop(round, tried) {
+function nextLoop(round, tried, full) {
 	if (level.hasTimeDoors) return null;
 	const H = bestTrace().tr.H, n = bestTrace().tr.n;
 	for (const radius of [48, 96, 160]) {
@@ -752,7 +754,7 @@ function nextLoop(round, tried) {
 		for (const x of loops) {
 			if (tried.has(`${H[x.a]}:${H[x.b]}`)) continue;
 			const mw = memoWin(Math.max(0, x.a - 40), Math.min(n, x.b + 40), round);
-			if (!mw.st.run) { tried.add(`${H[x.a]}:${H[x.b]}`); log(`deep: the loop at (${x.x}, ${x.y}), ticks ${x.a}-${x.b}: ${mw.st.why}`); continue; }
+			if (!mw.st.run && !(full && mw.st.full)) { tried.add(`${H[x.a]}:${H[x.b]}`); log(`deep: the loop at (${x.x}, ${x.y}), ticks ${x.a}-${x.b}: ${mw.st.why}`); continue; }
 			return { l: x, m: mw };
 		}
 	}
@@ -903,7 +905,7 @@ async function loopWindows(round, max = 5) {
 	while (ran < max && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;
 		// the loops that come back within 48 px, then (all tried) the wider ones within 96 px, then 160 px
-		const nl = nextLoop(round, tried);
+		const nl = nextLoop(round, tried, true);   // (all the threads: also a loop the memory owes a full-budget search)
 		cur.loops = [...tried].slice(-400);
 		if (!nl) { if (!ran) log('deep: every loop of the run was explored already (or rests)'); return ran; }
 		const l = nl.l, m = nl.m;
@@ -949,13 +951,14 @@ async function deepStage(round, R) {
 		const next = wi + 1 < wins.length ? cursorAt(wins[wi + 1].w0) : null;
 		// a window the memory rests (searched empty with the same route twice or more) is passed over
 		const mw = memoWin(w.w0, w.w1, round);
-		if (!mw.st.run && rested < wins.length) {
+		// (a window the memory owes a full-budget search: this is one)
+		if (!mw.st.run && !mw.st.full && rested < wins.length) {
 			rested++;
 			log(`deep${round}: window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}: ${mw.st.why}`);
 			saveCursor({ deep: next || cursorAt(0) });
 			continue;
 		}
-		if (!mw.st.run) return;   // (every window rests)
+		if (!mw.st.run && !mw.st.full) return;   // (every window rests)
 		const before = best.runTicks, at = atOf(w.w0, w.w1);
 		const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
 		const dp = path.join(OUT, `grind_deep_${round}_${w.seg - 1}_${w.i}.eetas`);
