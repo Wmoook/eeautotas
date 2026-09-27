@@ -1016,6 +1016,24 @@ function breakGate(inputs) {
 		return { x: t % cur.level.width, y: Math.floor(t / cur.level.width), reach };
 	} catch (e) { return null; }
 }
+// The gate front's clock (cycle 6's test, Forgotten Veil): a gate hit restarted the round's clock whether or not the gate
+// was new, and a round has the GPU (the one search's bursts and the GPU random runs paused), so a chain that kept touching
+// the coins it had touched before never ended its round (round 1: 2,027 s and 160 runs, 34 of the 40 minutes; new rooms at
+// 875 and 2,224 s only). Now only a gate into a room key no attempt had been in (brk.seen: the sources' rooms; brk.gateRooms:
+// the breaker's earlier gates) restarts it, and no round runs past BREAK_ROUND_MAX x BREAK_ROUND_S. `b.breakFrontNew ===
+// false`: every gate restarts it, no cap (29ebfd5).
+const BREAK_ROUND_MAX = 2;
+/** the room key (goexplore.js roomOf) after inputs, or null */
+function gateRoom(inputs) {
+	try {
+		const R = roomsOfSearch();
+		if (!R) return null;
+		const sim = new E.EESim(cur.level), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		return R.RM.key(sim);
+	} catch (e) { return null; }
+}
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1092,7 +1110,9 @@ function breakLaunch(n) {
 		if (src) { src.brk = (src.brk || 0) + 1; publishSources(); }
 		R.chain = { inputs: st.inputs, step: 1, grain: 0, what: st.what };
 	}
-	const roundLeft = cur.opts.breakRound - (Date.now() - (R.clock || R.t0)) / 1000, left = S.seconds - searchClock(Date.now());
+	// (the round's clock from its last new gate, and never past BREAK_ROUND_MAX x BREAK_ROUND_S from its start)
+	const roundLeft = Math.min(cur.opts.breakRound - (Date.now() - (R.clock || R.t0)) / 1000,
+		(cur.opts.breakFrontNew ? BREAK_ROUND_MAX : Infinity) * cur.opts.breakRound - (Date.now() - R.t0) / 1000), left = S.seconds - searchClock(Date.now());
 	if (!R.chain || S.result || roundLeft < 3 || left < 3) return breakEnd(n);
 	const ch = R.chain, file = path.join(dir(), `break_${n}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(ch.inputs, 'latin1')); } catch (e) { return breakEnd(n); }
@@ -1133,9 +1153,15 @@ function breakAfter(n, how) {
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
 		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
 		seedCpu(hit);
-		// (the gate front: a chain that keeps entering gates is not cut by the round's clock (BREAK_ROUND_S counts from
-		// its last gate), and the next round starts from its last gate first: breakStarts)
-		if (cur.opts.breakFront) { R.clock = Date.now(); brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 }; }
+		// (the gate front: a chain that keeps entering gates into new rooms is not cut by the round's clock (BREAK_ROUND_S
+		// counts from its last gate into a room no attempt had been in: BREAK_FRONT_NEW), and the next round starts from its
+		// last gate first: breakStarts)
+		if (cur.opts.breakFront) {
+			brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 };
+			const room = gateRoom(hit), fresh = room !== null && !brk.seen.has(room) && !brk.gateRooms.has(room);
+			if (room !== null) brk.gateRooms.add(room);
+			if (fresh || !cur.opts.breakFrontNew) R.clock = Date.now();
+		}
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
 	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
@@ -1378,7 +1404,7 @@ function start(b, gpu, test) {
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
-		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
+		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false, breakFrontNew: b.breakFrontNew !== false,
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
@@ -1388,7 +1414,7 @@ function start(b, gpu, test) {
 	// the relay's sources start over (see RELAY_SOURCES); the wall breaker's clock too
 	dropSources();
 	S.sources = [];
-	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0 };
+	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), gateRooms: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0 };
 	S.breaker = which.includes('breaker') ? { rounds: 0, round: null, last: null, seeds: 0 } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
