@@ -438,6 +438,27 @@ const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stoppe
 process.stdin.on('data', (d) => { if (/stop/.test(String(d))) end(); });
 process.stdin.on('end', end);
 `;
+// A stand-in for the GPU random runs (src/goexplore.js --gpu=1): logs its arguments, says ready and start, after `wait` ms
+// reports the scenario's route, then progress lines until its --stopfile appears (logged "stopped"); what comes on its
+// stdin is logged.
+const FAKE_ROLLS = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
+const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
+const log = (x) => fs.appendFileSync(SC.log, JSON.stringify(x) + '\\n');
+log(args);
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'ready', loadMs: 1, allocMs: 1 });
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', gpu: 'fake', startCost: 40 });
+setTimeout(() => say({ ev: 'result', kind: 'finish', ticks: SC.route.length, inputs: SC.route }), SC.wait || 0);
+const sf = opt('stopfile');
+const iv = setInterval(() => {
+	if (sf && fs.existsSync(sf)) { clearInterval(iv); log(['stopped']); say({ ev: 'done', layers: 5, end: 'stopped', finish: SC.route.length }); process.exit(0); }
+	say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 40, found: 0, refined: 0, rooms: 1, workers: 1, gpu: true });
+}, 100);
+process.stdin.on('data', (d) => log(['stdin', String(d)]));
+process.stdin.on('end', () => log(['stdin end']));
+`;
 async function passesSection() {
 	section('passes: the "every move" pass ladder (a stand-in for eegpu, no GPU)');
 	const cells = (p) => JSON.stringify(ED.passCells(p));
@@ -648,6 +669,35 @@ async function passesSection() {
 			'the source with territory gain relayed from least, 1000 back, the larger table, the next salt',
 			JSON.stringify(runs) === JSON.stringify(want) && (str.sources || []).length === 4 && /key:blue:1/.test(so) && /key:red:1/.test(so) && /key:green:0/.test(so),
 			`runs ${runs.join(' | ')}; sources ${so}`);
+	}
+	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
+	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
+	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
+	// (its stop file)
+	{
+		const scX = path.join(HOME, 'rolls-x.json'), logX = path.join(HOME, 'rolls-x.log'), scG = path.join(HOME, 'rolls.json'), logG = path.join(HOME, 'rolls.log');
+		const scC = path.join(HOME, 'rolls-cpu.json'), fakeCpu = path.join(HOME, 'fake-cpu.js'), fakeRolls = path.join(HOME, 'fake-rolls.js');
+		fs.writeFileSync(fakeCpu, FAKE_CPU);
+		fs.writeFileSync(fakeRolls, FAKE_ROLLS);
+		fs.writeFileSync(scX, JSON.stringify({ log: logX, R, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, wait: 1500 }] }, beam: null }));
+		fs.writeFileSync(scG, JSON.stringify({ log: logG, route: '4'.repeat(R), wait: 200 }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100 }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scX], cpu: [process.execPath, fakeCpu, scC], rollsCmd: [process.execPath, fakeRolls, scG], rolls: true, salts: false });
+		const t0g = Date.now();
+		while (ED.state().running && Date.now() - t0g < 30000) await new Promise((z) => setTimeout(z, 100));
+		const str = ED.state();
+		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		const LG = fs.existsSync(logG) ? fs.readFileSync(logG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+		const a0 = LG[0] || [];
+		const has = (p) => a0.some((x) => String(x).startsWith(p));
+		const G0 = (str.strategies || []).find((q) => q.key === 'gorolls');
+		check('the GPU random runs: a GPU strategy (the tool, the level blob, the reach file, the stop and pause files), its route counts, it is told the depth bound and stops with the CPU search once every move has ended',
+			!!G0 && G0.label === 'random runs (GPU)' && G0.rolls && !G0.cpu && ['--gpu=1', '--tool=', '--bin=', '--reach=', '--stdin=1', '--stopfile=', '--pausefile=', '--parent='].every(has) &&
+			str.stage === 'found' && str.result && str.result.strategy === 'random runs (GPU)' && str.result.ticks === R &&
+			LG.some((x) => x[0] === 'stdin' && x[1].includes(`depth ${R - 1}`)) && LG.some((x) => x[0] === 'stopped') && !str.running && Date.now() - t0g < 30000,
+			`${str.stage}; ${str.result ? `route ${str.result.ticks} ticks by ${str.result.strategy}` : 'no route'}; rolls log ${LG.map((x) => (x[0] === 'stdin' ? `stdin ${x[1].trim()}` : String(x[0]).slice(0, 20))).join(' | ')}; ` +
+			`strategies ${(str.strategies || []).map((q) => `${q.key}:${q.state}`).join(' ')}`);
 	}
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;

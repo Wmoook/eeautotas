@@ -360,6 +360,13 @@ function check(buf) {
 // On levels above 50 x 50 it runs with coarse cells (goexplore.js --cells=auto: rooms, a novelty and a discovery head
 // next to the reach field's heap, no refinement) and reports "source" events: starting points for the relay (the
 // sources, RELAY_PLAN).
+// There, with a GPU, the same search also runs on the GPU (strategy 'gorolls', "random runs (GPU)", `rolls: true`: node
+// src/goexplore.js --gpu=1, which drives `eegpu roll`: the archive and the three heads in that process, a batch of
+// ROLL_BATCH picks' runs at a time on the GPU): a GPU strategy for the scheduler (its eegpu gets the stop and pause
+// files), a search like the CPU one for the rest (its events, the depth bound on its stdin, it goes on after a route and
+// stops with the CPU search: cpuDone). The ice level (200 x 200) on the rented H100 shared with other work, Find a route
+// for 120 s with 16 CPU workers: the first route after 18.2 / 33.9 s (5,271 / 5,319 ticks), without it 61.5 / 66.9 /
+// 67.0 s (10,297 / 9,894 / 10,297 ticks, the CPU search's and the relay's).
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
@@ -379,7 +386,11 @@ const STRATEGIES = {
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
 		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : [])] },
+	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1'] },
 };
+// the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
+const ROLL_BATCH = 4096;
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(f.steerBeam && !(q.V && q.V.noSteer) ? [`--steer=${f.steerBeam}`] : [])];
 // the steer field (src/steer.js, RCH4: the gate-aware order; the prune stays the reach field's): passed to the GPU tools
 // when it models anything the reach field does not (2+ layers or the coin DP) and their copies fit STEER_GPU_SHARE of the
@@ -418,7 +429,7 @@ const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
 // runs from PASS_START as if it had not been. The user's 50x50 levels: a try takes 0.4-0.5 s alone on the laptop GPU, the
 // ladder's coarse passes took 33 s there next to the beams and the CPU search (route after 59.7 s, the finest pass after
 // 58 s); staircase / dotstairs: the finest pass explodes (60M+ states), the ladder solves them.
-const PROBE_S = 15;
+const PROBE_S = 15, PROBE_WALL = 3;
 // the sanity search after the physics check proves the trophy out of reach (a route there would be a bug in the model):
 // NO_WAY_UP_S s (60 kept the user waiting a minute for a verdict the proof had already given)
 const NO_WAY_UP_S = 10;
@@ -439,6 +450,14 @@ let stallTimer = null;
 // the slices between in turn; only a strategy within LEAD_TILES of the leader keeps the GPU for getting nearer (every
 // move's refined try, 78 tiles out and inching on, held it for 10 s at a time while the relay, 34 tiles out, waited).
 const SLICE_MS = 2500, SLICE_MAX = 4, LEAD_TILES = 10;
+// The GPU random runs (gorolls) get a slice whenever they have waited ROLLS_WAIT_MS since their last one (every other
+// slice), every move's probe included: a single long-lived process whose early attempts are far from the trophy, they won
+// neither the leader's slices nor the turns of fresh processes (every new pass and relay run is one): on the ice level
+// (200 x 200) they had 2 s of the GPU in the search's first 76 s, where alone they find a route in 8 s. On levels of at
+// most ROLLS_PROBE_TILES tiles (100 x 100) every move's probe keeps the GPU to itself (its finest pass may run through
+// there in its PROBE_S; on the 200 x 200 levels it never did, and its 15 s were the random runs' lost time); above, its
+// PROBE_S counts its own GPU time (the ice level's probe, sharing: 4.9 s of kernels in its 15 s of the clock, 11.7 s alone).
+const ROLLS_WAIT_MS = 2500, ROLLS_PROBE_TILES = 10000;
 let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
 function setPaused(k, on) {
@@ -446,8 +465,15 @@ function setPaused(k, on) {
 	if (!ch || !!ch.paused === on) return;
 	try { if (on) fs.writeFileSync(pauseFileOf(k), 'pause'); else fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* gone */ }
 	ch.paused = on;
-	if (!on) ch.lastOut = Date.now();   // (the stall watchdog counts from its turn)
+	if (on) ch.pausedSince = Date.now();
+	else {
+		ch.lastOut = Date.now();   // (the stall watchdog counts from its turn)
+		if (ch.pausedSince) ch.pausedMs = (ch.pausedMs || 0) + Date.now() - ch.pausedSince;
+		ch.pausedSince = 0;
+	}
 }
+/** the ms a strategy's process has spent paused (other strategies' slices) so far */
+const pausedMsOf = (ch) => (ch.pausedMs || 0) + (ch.paused && ch.pausedSince ? Date.now() - ch.pausedSince : 0);
 function schedule() {
 	if (!S || !S.running) return;
 	const now = Date.now();
@@ -456,8 +482,14 @@ function schedule() {
 	if (!gpu.length) { sched = null; return; }
 	let owner = sched && gpu.includes(sched.owner) ? sched.owner : -1;
 	const X = S.strategies.findIndex((q) => q.key === 'explore');
-	if (gpu.includes(X) && S.strategies[X].probe === 'running') {
-		if (owner !== X) sched = { owner: X, since: now, slices: 1 };
+	const RW = S.strategies.findIndex((q) => q.rolls);
+	const rollsSlice = owner >= 0 && owner === RW && now - sched.since < SLICE_MS;   // (the random runs' slice, not over yet)
+	const probing = gpu.includes(X) && S.strategies[X].probe === 'running';
+	const probeAlone = probing && S.size && S.size[0] * S.size[1] <= ROLLS_PROBE_TILES;
+	if (RW >= 0 && gpu.includes(RW) && owner !== RW && !probeAlone && (owner < 0 || now - sched.since >= SLICE_MS) && now - (kids[RW].lastTurn || kids[RW].startedAt) >= ROLLS_WAIT_MS) {
+		sched = { owner: RW, since: now, slices: 1, lastOther: sched ? sched.lastOther : undefined };
+	} else if (probing) {
+		if (owner !== X && !rollsSlice) sched = { owner: X, since: now, slices: 1 };
 	} else if (owner < 0) {
 		sched = { owner: gpu[0], since: now, slices: 1 };
 	} else if (now - sched.since >= SLICE_MS) {
@@ -481,6 +513,7 @@ function schedule() {
 	}
 	for (const k of gpu) setPaused(k, k !== sched.owner);
 	kids[sched.owner].hadTurn = true;
+	kids[sched.owner].lastTurn = now;
 	S.gpuTurn = S.strategies[sched.owner].key;   // (the page and the tools: which search has the GPU now)
 }
 function checkStalls() {
@@ -642,6 +675,13 @@ function replayRooms(masks, withPath) {
 	// (with the steer field the attempts' distances are its own; the page shows the reach field's: reachTiles)
 	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
 	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
+}
+/** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
+ *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
+ *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
+function steerDist(V, d) {
+	const steerless = !!cur && cur.distBySteer && (V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam));
+	return steerless && d < 1e4 ? Math.min(9990, STEER_MISS + d) : d;
 }
 /** strategy n's own nearer attempt a {inputs, ticks, dist}: a source for its room (at most every SOURCE_REPLAY_MS per
  *  strategy; the latest one waiting is taken then). rm: its room, when the attempt was replayed already. */
@@ -954,7 +994,10 @@ function start(b, gpu, test) {
 	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
 	const beams = !(test && test.beams === false);
 	const relay = b.relay !== false && (!test || test.relay === true);
-	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay ? [] : ['relay']), ...(cpu ? ['goexplore'] : [])];
+	// (the GPU random runs: on the levels the CPU search gives coarse cells, above 50 x 50)
+	const rolls = !noGpu && b.rolls !== false && (test ? test.rolls === true : GX.cellsFor(ins.level) === 'coarse');
+	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay ? [] : ['relay']), ...(rolls ? ['gorolls'] : []),
+		...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
@@ -965,13 +1008,14 @@ function start(b, gpu, test) {
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
-		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
+		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes,
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
+		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
 		proveSeconds: test && test.proveSeconds ? test.proveSeconds : PV.SECONDS, proveWatchdogS: test ? test.proveWatchdogS : undefined };
@@ -1288,7 +1332,7 @@ function toolVersionProblem(cmd) {
 function tellCpu(ticks) {
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`); } catch (e) { /* gone */ } }
+		if ((q.cpu || q.rolls) && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`); } catch (e) { /* gone */ } }
 	});
 }
 /** one strategy's eegpu process (a new pass of the exploration too): its JSON lines update S.strategies[n] and the
@@ -1323,6 +1367,9 @@ function launch(n) {
 	}
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
+	// (the GPU random runs: node src/goexplore.js --gpu=1, a GPU strategy (stop and pause files for its eegpu) that is told
+	// the depth bound on its stdin like the CPU search)
+	const rolls = !!V.rolls;
 	// the GPU tool's stop file (halt: it ends between two kernel launches; a kill during a kernel resets the driver)
 	const stopFile = cpu ? '' : path.join(dir(), `stop_${n}`);
 	if (stopFile) { try { fs.unlinkSync(stopFile); } catch (e) { /* none */ } }
@@ -1333,9 +1380,12 @@ function launch(n) {
 	const pauseFile = cpu ? '' : pauseFileOf(n);
 	const pausedNow = !cpu && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
 	if (pauseFile) { try { if (pausedNow) fs.writeFileSync(pauseFile, 'pause'); else fs.unlinkSync(pauseFile); } catch (e) { /* none */ } }
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`, `--parent=${process.pid}`];
-	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all)
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : undefined, detached: !cpu });
+	const cmd = cpu ? [...cur.cpuCmd, ...args] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+		`--parent=${process.pid}`];
+	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
+	// GPU random runs are one thread, their cells' states outside the V8 heap)
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined,
+		detached: !cpu });
 	// (Linux, next to GPU strategies: the CPU search at nice 10. The GPU tools' above-normal priority (launch.h) needs root
 	// or CAP_SYS_NICE there, which a container (a rented cloud GPU) lacks, and next to busy CPU threads "every move" was
 	// 3-7x slower without it. Its worker threads start later, from its main thread, and inherit the value.)
@@ -1373,9 +1423,23 @@ function launch(n) {
 			S.searchStarted = now;
 			S.prepSec = (now - S.started) / 1000;
 		}
-		// the probe (see PROBE_S): its first try must run through within PROBE_S s of search time
+		// the probe (see PROBE_S): its first try must run through within PROBE_S s of search time, its own: the time it waits
+		// while another strategy has the GPU (the random runs' slices, above ROLLS_PROBE_TILES) does not count, up to
+		// PROBE_WALL x PROBE_S of the clock (on the ice level the random runs' slices left the probe 40% of its GPU time)
 		if (V.probe === 'running' && !ch.probeTimer) {
-			ch.probeTimer = setTimeout(() => { if (V.probe === 'running' && mine() && alive(ch)) halt(ch, 'probe'); }, cur.opts.probeS * 1000);
+			const from = now, paused0 = pausedMsOf(ch), budget = cur.opts.probeS * 1000;
+			const check = () => {
+				ch.probeTimer = null;
+				if (V.probe !== 'running' || !mine() || !alive(ch)) return;
+				const wall = Date.now() - from, left = budget - (wall - (pausedMsOf(ch) - paused0));
+				if (left > 20 && wall < PROBE_WALL * budget) {
+					ch.probeTimer = setTimeout(check, Math.min(left, PROBE_WALL * budget - wall));
+					if (ch.probeTimer.unref) ch.probeTimer.unref();
+					return;
+				}
+				halt(ch, 'probe');
+			};
+			ch.probeTimer = setTimeout(check, budget);
 			if (ch.probeTimer.unref) ch.probeTimer.unref();
 		}
 		if (V.prepSec >= 5) {
@@ -1393,15 +1457,15 @@ function launch(n) {
 		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
 		if (ch.stopWhy && (ev.ev === 'progress' || ev.ev === 'layer' || ev.ev === 'try')) return;
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
-			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
+			Object.assign(V, { state: (cpu || rolls) && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer' && V.key === 'relay' && V.relay) {
 				V.detail = `from tick ${V.relay.keep} of ${V.relay.what || 'the nearest attempt'} (run ${V.relay.runs}) · ${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full`;
 			} else if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
-			} else if (cpu) {
-				V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
+			} else if (cpu || rolls) {
+				V.detail = `${rolls ? 'GPU' : `${ev.workers} thread${ev.workers > 1 ? 's' : ''}`}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
 					(ev.rooms > 1 ? ` in ${ev.rooms} rooms` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
 					(V.found ? ', looking for a faster route' : '');
 			}
@@ -1409,7 +1473,7 @@ function launch(n) {
 			totals();
 			// deeper than the best route: it cannot find a faster one (the CPU search's deepest situation says nothing of
 			// the kind: it is told the bound instead, and looks only for faster routes)
-			if (!cpu && S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
+			if (!cpu && !rolls && S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
 			// every move far behind a running relay (EXPLORE_YIELD_MS) gives it the GPU
 			if (V.key === 'explore' && !S.result && alive(ch) && !ch.stopWhy) {
 				const rk = S.strategies.findIndex((q) => q.key === 'relay'), Rv = S.strategies[rk];
@@ -1428,7 +1492,7 @@ function launch(n) {
 			save();
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			// (the CPU search goes on looking for faster routes)
-			found(ev.inputs, n, cpu);
+			found(ev.inputs, n, cpu || rolls);
 		} else if (ev.ev === 'try' && V.probe === 'running' && (ev.end === 'exhausted' || ev.end === 'depth') && ev.overflow > 0) {
 			// the first try ran out only because its layers were cut (over the layer cap: the cut keeps the states nearest
 			// the trophy by the physics check, a greedy beam that walks into the check's dead ends; the user's 200x200 ice
@@ -1472,7 +1536,8 @@ function launch(n) {
 		} else if (ev.ev === 'source') {
 			// the CPU search's starting points for the relay (goexplore.js, coarse cells): a new room's first cell ("room":
 			// its inputs end where it entered the room), a room's lowest-cost cell ("best")
-			const dist = +ev.dist, inputs = String(ev.inputs || '');
+			// (the GPU random runs' too: their distances the reach field's, steerDist)
+			const dist = steerDist(V, +ev.dist), inputs = String(ev.inputs || '');
 			if (cur && inputs && Number.isFinite(dist) && Number.isFinite(+ev.room)) {
 				addSource({ room: +ev.room, desc: ev.desc, gain: +ev.gain || 0, from: V.label, inputs, dist, arrival: ev.kind === 'room' ? inputs.length : 0 });
 				setImmediate(relayKick);
@@ -1640,14 +1705,16 @@ function launch(n) {
 		else save();
 	});
 	ch.cpuSearch = cpu;
+	ch.rollsSearch = rolls;
 	return ch;
 }
 /** every GPU strategy has ended with a route known (the exploration's finest passes found none faster): the CPU search
- *  stops too; not when one of them failed (then the CPU search is the search, as without a GPU). The proof (a CPU
- *  process) does not count: its end asks again. */
+ *  stops too, and the GPU random runs with it (a search like the CPU one); not when one of them failed (then the CPU
+ *  search is the search, as without a GPU). The proof (a CPU process) does not count: its end asks again. */
 function cpuDone() {
-	if (!S.result || !S.strategies.some((q) => !q.cpu) || [...busy].some((c) => !c.cpuSearch && c !== proofKid) || S.strategies.some((q) => !q.cpu && q.state === 'error')) return;
-	S.strategies.forEach((q, k) => { if (q.cpu && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
+	if (!S.result || !S.strategies.some((q) => !q.cpu && !q.rolls) || [...busy].some((c) => !c.cpuSearch && !c.rollsSearch && c !== proofKid) ||
+		S.strategies.some((q) => !q.cpu && !q.rolls && q.state === 'error')) return;
+	S.strategies.forEach((q, k) => { if ((q.cpu || q.rolls) && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
 }
 /**
  * "every move" (strategy n) tried every situation at a fine grain with nothing cut and found no route: the GPU beams (a
@@ -1781,7 +1848,7 @@ function found(inputs, n, more) {
 	if (S.proof && S.proof.verdict === 'impossible') proofMiss(V.label, C.eetasBytes(ev.ms).toString('latin1'));
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
-	if (first || (V.cpu && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
+	if (first || ((V.cpu || V.rolls) && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	if (better) {
 		const tr = C.replay(cur.level, ev.ms, { trace: true });
 		const pathPts = [];
@@ -1795,7 +1862,7 @@ function found(inputs, n, more) {
 	// the other strategies: those already deeper than this route cannot find a faster one; the CPU search is told the
 	// bound (it goes on looking for a faster route)
 	S.strategies.forEach((q, k) => {
-		if (k !== n && !q.cpu && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
+		if (k !== n && !q.cpu && !q.rolls && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
 	if (better) tellCpu(S.result.ticks);
 	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
@@ -1809,10 +1876,7 @@ function found(inputs, n, more) {
 function closer(ev, n) {
 	if (!cur) return;
 	const Vn = S.strategies[n];
-	// (a strategy without the steer field while the others order by it (a beam over the memory budget, a tool that could
-	// not load it): its reach-field distances ranked like the steer field's "no value" ones, STEER_MISS + the distance)
-	const steerless = cur.distBySteer && (Vn.noSteer || ((Vn.key === 'goal' || Vn.key === 'guide') && !cur.files.steerBeam));
-	const dist = steerless && +ev.dist < 1e4 ? Math.min(9990, STEER_MISS + +ev.dist) : +ev.dist, old = S.closest;
+	const dist = steerDist(Vn, +ev.dist), old = S.closest;
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)

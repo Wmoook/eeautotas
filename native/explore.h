@@ -127,4 +127,108 @@ EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, boo
 	return h | 1ull;   // never 0 (0 = empty slot)
 }
 
+// ---------------------------------------------------------------- random runs (`eegpu roll`, native/rollhost.h)
+// The GPU side of Find a route's "random runs (GPU)" (src/goexplore.js --gpu=1): the Go-Explore of goexplore.js with
+// coarse cells, its rolls on the GPU. The host (goexplore.js) keeps the archive and picks K cells per batch (heads A /
+// B / C); here every pick plays R random runs of up to Lr ticks from its cell's state (the state pool is in host memory:
+// one state per cell, by its dense id; the picks' states come up per batch, the records' go down), with goexplore.js's
+// input policy (the first input drawn, then each tick kept with p `keep`, else drawn again from the 18: the same
+// mulberry32 draws, so the host rebuilds a run's inputs from its seed). Every state on the way is looked up in the cell
+// table (open addressing over coarse cell keys: rollCellKey), new cells are added, and per cell the earliest arrival of
+// the batch wins (atomicMin over (tick, pick, run, step)); a cell reached sooner than before is materialized (replayed
+// from its pick's state, for the host's pool) and reported with its reach cost and room. A state the reach field rules
+// out (-1, a proof) ends its run, as a death does; nothing else prunes.
+struct RollParams {
+	Level L;
+	ReachField reach;
+	i32 prune;                         // 1: a state the reach field rules out ends its run (-1 is a proof)
+	u8* stage; i32 stateBytes;         // the records' states, by record index (the host copies them into its pool)
+	i32* cellT;                        // the cells' ticks (the path length), by dense id
+	const u32* picks; u32 nPicks;      // this batch's picked cells (dense ids)
+	i32 R, Lr;                         // runs per pick, ticks per run (Lr <= 255)
+	u32 lo, hi;                        // this launch's items: runs (pick x R + run), touched slots or records
+	u32 batchSeed; double keep;
+	i32 maxT;                          // a state at tick >= maxT is not added (a route from there is not faster); past it a run ends
+	// the cell table (slot = splitmix(key) & mask, linear probing): key (0 = empty), the batch's best arrival
+	// ((tick << 40) | (pick << 20) | (run << 8) | step; ~0 = none), the tick of the arrival the host knows (~0u: none),
+	// how often a run came through (head B), the dense id (-1: not materialized yet)
+	u64* keys; u32 mask; u64* best; u32* doneT; u32* seen; i32* dense;
+	u32* touched; u32 touchedCap;      // the slots whose best was set this batch (first set: appended)
+	i32 full;                          // 1: the pool is full, no new cells (known ones still improve)
+	u32* fin; u32 finCap;              // finishes: (pick, run, step, tick) x 4 u32
+	u32* ctr;                          // counters: [0] touched, [1] finishes, [2] records, [3] dense ids given out
+	// rooms (goexplore.js roomOf): which counts the doors read
+	i32 roomTeam, roomCoins, roomBlue, roomCrown, roomSilver;
+	i32 phase;                         // > 0 (time doors): the cell keys hold the door phase in buckets of `phase` ticks
+	unsigned long long* stats;         // [0] ticks simulated, [1] runs, [2] runs ended by the reach field, [3] deaths
+	// collect
+	u8* pickStates;                    // the picks' states at the batch's start (from the host's pool; collect replays from them)
+	i32* out;                          // per record (dense id or -1: pool full, tick, fifths, room, pick, run | step << 16) x 6
+	u32 denseCap;
+	u32* denseSlot;                    // per dense id: its slot (the seen counts by dense id: rollSeen)
+	u32* seenOut;                      // rollSeen: seen[denseSlot[d]] for d in [lo, hi)
+};
+/** The mulberry32 of goexplore.js (rngOf): the same u32 operations, the same doubles in [0, 1) */
+struct Mulberry {
+	u32 s;
+	EE_HD double next() {
+		s = s + 0x6d2b79f5u;
+		u32 t = (u32)imul((i32)(s ^ (s >> 15)), (i32)(1u | s));
+		t = (t + (u32)imul((i32)(t ^ (t >> 7)), (i32)(61u | t))) ^ t;
+		return (double)(t ^ (t >> 14)) / 4294967296.0;
+	}
+};
+/** goexplore.js fmix (murmur3's finalizer, on int32) */
+EE_HD u32 rollFmix(u32 h) { h ^= h >> 16; h = (u32)imul((i32)h, (i32)0x85ebca6bu); h ^= h >> 13; h = (u32)imul((i32)h, (i32)0xc2b2ae35u); return h ^ (h >> 16); }
+/** a run's seed: (batch seed, pick index, run) -> mulberry32's state (goexplore.js rollSeed) */
+EE_HD u32 rollSeed(u32 batchSeed, u32 pick, u32 run) { return rollFmix(batchSeed ^ rollFmix(pick * 0x9e3779b1u ^ rollFmix(run + 0x7f4a7c15u))); }
+/** the input of step k of a run (goexplore.js: the first input drawn, then each tick kept with p keep, else drawn) */
+EE_HD i32 rollDraw(Mulberry& r, double keep, i32 m) {
+	if (r.next() >= keep) m = option((i32)(r.next() * 18.0));
+	return m;
+}
+EE_HD void rollW(u32& h, i32 v) { h = (u32)imul((i32)(h ^ (u32)v), 0x5bd1e995); h ^= h >> 13; }
+/** goexplore.js roomOf(L).key(sim): the room (keys, effects and their values, switches, and the team / coin / crown /
+ *  death counts where a door reads them), the same int32 hash */
+template <int TW>
+EE_HD u32 rollRoom(const RollParams& p, const State<TW>& s) {
+	u32 h = 0x3c6ef372u;
+#define w(v) rollW(h, (i32)(v))
+	w(s.keysMask);
+	w((p.roomCrown && s.collide_crown ? 1 : 0) | (s.low_gravity ? 2 : 0) | (s.is_invulnerable ? 4 : 0) | (p.roomSilver && s.collide_silver_crown ? 8 : 0) |
+		(s.is_cursed ? 16 : 0) | (s.is_zombie ? 32 : 0) | (s.is_on_fire ? 64 : 0) | (s.is_poisoned ? 128 : 0) | (s.has_levitation ? 256 : 0) |
+		(p.L.hasTimeDoors && s.timedoor_state ? 512 : 0));
+	w(s.max_jumps); w(s.jump_boost); w(s.speed_boost); w(s.flip_gravity);
+	if (p.roomTeam) w(s.team);
+	if (p.roomCoins) w(s.coins);
+	if (p.L.hasCoinGate) w(s.show_coin_gate);
+	if (p.roomBlue) w(s.blue_coins);
+	if (p.L.hasBlueCoinGate) w(s.show_blue_coin_gate);
+	if (p.L.hasDeathDoor) w(s.deaths);
+	if (p.L.hasDeathGate) w(s.show_death_gate);
+	// (the switches that are on: goexplore.js sums fmix(id ^ salt) over them; it writes the sum whenever the switch Map
+	// has an entry, on or off, here whenever one is on: rooms after a switch went on and off again differ only in name)
+	u32 sum = 0; bool any = false;
+	for (i32 k = 0; k < p.L.nSw; k++) if ((s.w[p.L.offSw + (k >> 5)] >> (k & 31)) & 1u) { sum += rollFmix((u32)(p.L.swIds[k] ^ 0x1234567)); any = true; }
+	if (any) w((i32)sum);
+	sum = 0; any = false;
+	for (i32 k = 0; k < p.L.nOsw; k++) if ((s.w[p.L.offOsw + (k >> 5)] >> (k & 31)) & 1u) { sum += rollFmix((u32)(p.L.oswIds[k] ^ 0x7654321)); any = true; }
+	if (any) w((i32)sum);
+#undef w
+	return h;
+}
+/** goexplore.js's coarse cell: (tile, room, on the ground, the time-door phase bucket, sign of vx, class of vy) */
+template <int TW>
+EE_HD u64 rollCellKey(const RollParams& p, const State<TW>& s, u32 room) {
+	const i32 tx = truncI(s.px + 8.0) >> 4, ty = truncI(s.py + 8.0) >> 4;
+	i32 tile = ty * p.L.W + tx;
+	tile = tile < 0 ? 0 : tile > p.L.N - 1 ? p.L.N - 1 : tile;
+	const i32 ph = p.phase > 0 ? (s.ticks % TIMEDOOR_PERIOD) / p.phase : 0;
+	const double vy = s.speed_y;
+	const i32 vyc = dlt(vy, -3.0) ? 0 : lt0(vy) ? 1 : eq0(vy) ? 2 : 3;
+	const i32 vxs = gt0(s.speed_x) ? 2 : lt0(s.speed_x) ? 0 : 1;
+	const u64 small = (u64)(s.on_ground ? 1 : 0) | ((u64)vxs << 1) | ((u64)vyc << 3) | ((u64)(u32)ph << 5);
+	return splitmix(((u64)(u32)tile << 32 | room) ^ splitmix(small + 0x51ed270b27aa6cd1ull)) | 1ull;
+}
+
 }  // namespace ee
