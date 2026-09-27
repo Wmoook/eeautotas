@@ -16,14 +16,14 @@
 // Infinity Pain's known route: 109 of its 120 room changes were found by the CPU search from the route's state, and the
 // long in-room stretches it missed were found by exhaustive GPU bursts aimed at the room's next trigger; the next trigger
 // ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). So a room's bursts start from the archive's cell
-// nearest its live targets (a walk field with all of them as goals), and each aims at ONE of them (goexplore.js
-// --burstAim=1, the default): the target that cell's walk leads to, with a walk field of its tiles alone (the burst's
-// order, layer cap and nearest attempt); a target whose bursts got no nearer to it AIM_K times is retired (below). With
-// every untried target a goal for good (--burstAim=0) an unreachable or wrong nearest target pulled every burst of the
-// room for the whole search, and a needed trigger far down the list never got one of its own (Forgotten Veil's coin 4
-// from its coins=3 entry: 14th of 17 by walking distance; Good Egg's coin (7, 190) 11th of 90). --burstAim=2: each
-// untried target in turn (the walk order from the room's entry), then a bandit over them. A trigger reached is tried,
-// and the next burst aims at the rest.
+// nearest its live targets (a walk field with all of them as goals); with goexplore.js --burstAim=1 each aims at ONE
+// of them: the target that cell's walk leads to, with a walk field of its tiles alone (the burst's order, layer cap and
+// nearest attempt), and a target whose bursts got no nearer to it AIM_K times is retired (below). With every untried
+// target a goal for good (--burstAim=0, the default) an unreachable or wrong nearest target pulls every burst of the room
+// for the whole search, and a needed trigger far down the list never gets one of its own (Forgotten Veil's coin 4 from
+// its coins=3 entry: 14th of 17 by walking distance; Good Egg's coin (7, 190) 11th of 90). --burstAim=2: each
+// untried target in turn (the walk order from the room's entry), then a bandit over them. Neither measured better than
+// the default (2026-09-27, AIM_K). A trigger reached is tried, and the next burst aims at the rest.
 //
 // A burst (one eegpu explore process) starts from the archive's cell of that room nearest its targets (every worker is
 // asked for its own; the nearest of all, the earliest among equals), sometimes 60 / 200 ticks back along it; its cells
