@@ -4,6 +4,8 @@
 # tiles) against the geometric corridor (the walk from the start + the walk to the trophy, lowest on the shortest walk),
 # and the guide field it makes (a walk from the trophy whose step onto a tile costs 1 + beta x (1 - p)) along the route
 # with the judge's yardstick, next to the plain walk, the reach field and the route's own tiles (the line oracle).
+# The walks here (bfs, the corridor, field) have no portal edges: on Octorage the start reaches the trophy only through a
+# portal, so its corridor and field are empty (n/a); the IP and FV routes jump 92 and 145 tiles through portals.
 #   CUDA_VISIBLE_DEVICES=7 python occ.py --data=occ.jsonl --holdout=ip,octo,fv,ice,dotring [--series=<models dir>/v6] [--out=<dir>]
 import argparse, base64, collections, heapq, json, math, os, time
 import numpy as np
