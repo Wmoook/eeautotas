@@ -61,6 +61,20 @@
 //           worker's speed: 32-36 s on the laptop otherwise idle, 50-56 s while other jobs' GPU work heats its shared
 //           cooler; 9,661 ticks after 180 s.
 //
+// THE ONE SEARCH (coarse cells; the friend's "one optimal search" instead of three searches built one after another):
+// one archive of cells for every operator. (a) The random runs: every room a worker enters first goes to the main
+// thread ('room' message: its first cell's inputs, the room it came from, the tile), and a room change between two known
+// rooms once per (room, tile) ('edge': the trigger tried there, the room entered there); with --share=1 (off by default)
+// the room also goes into every other worker's archive (every state along it, as a run's states). Measured (A100, 3
+// workers, the GPU bursts on): Infinity Pain 600 s the same with and without (14 rooms each, route coverage 18,779 /
+// 18,769 of 38,498: the bursts' attempts go into every archive anyway); Good Egg 300 s 971 with it, 1,407 without (the
+// relay's search before: 1,390): with many switch and coin rooms every worker spread over all of them. (b) --bursts=1:
+// the GPU operator (src/bursts.js): short exhaustive "every move" bursts (eegpu explore --prefix, --tool) from the
+// archive's cell of a room nearest its untried triggers (the main thread asks every worker for its own: 'nearest'), the
+// bursts' nearer attempts imported into every archive; a bandit over the rooms and the burst settings. The workers read
+// the main thread's messages between two chunks of picks (a MessageChannel per worker, receiveMessageOnPort). One worker
+// without --bursts is exactly as before (nothing is shared).
+//
 // It prints the JSON lines of the editor's native tools (native/beamhost.h, explorehost.h), one per line:
 //   {"ev":"start","workers":n,"seeds":[..],"mode":"physics"|"walk","cells":"fine"|"coarse","startCost":c|null,"mem":MB,
 //     "memWhy":"..","processMB":..,"machineMB":..,"freeMB":..,"othersMB":..,"maxCells":..,"maxSnaps":..}
@@ -78,7 +92,11 @@
 //                          room with territory gain, the others at most one per SOURCE_S per worker); "best": every
 //                          SOURCE_S s the lowest-cost cell of the 4 rooms with the most gain and the fewest sources so
 //                          far, when it changed. A room key only once per kind unless its tick / cost improved.)
-//   {"ev":"result","kind":"finish","ticks":T,"runTicks":..,"inputs":"..","seed":s,"simTicks":..,"sec":..}
+//   {"ev":"result","kind":"finish","ticks":T,"runTicks":..,"inputs":"..","seed":s,"simTicks":..,"sec":..}   (a GPU
+//     burst's: seed 0, "by":"gpu")
+//   {"ev":"burst","n":..,"room":desc|null,"what":"..","from":T,"sec":..,"end":"..","reached":b,"changed":b,"newRooms":n,
+//     "dist":tiles,"startDist":tiles,"states":..,"layers":..,"reward":..,"chain":k,"at":s}   (--bursts=1: each burst;
+//     the progress and done events carry "gpu": the operator's numbers, "allRooms", "shared")
 //   {"ev":"done","layers":L,"seconds":..,"ticks":..,"ticksPerSec":..,"states":..,"picks":..,"end":"time"|"ticks"|
 //     "exhausted"|"finish"|"stopped"|"unreachable","finish":T|0,"first":{ticks,sec,simTicks,seed}|null,
 //     "workers":[{seed,..},..]}      ("unreachable": the reach field rules out the start itself, "exhausted": no cell is
@@ -158,10 +176,21 @@
 //        [--steer=<RCH4 file> | build (src/steer.js: a second heap for head A on the gate-aware steer field, picked --mix
 //        of its picks; the reach field alone rules states out)] [--mix=0.5] [--steerDist=1 (the closest attempt and the
 //        sources by the steer field)]
+//        [--share=0|1 (the one search: the workers share their new rooms; coarse cells)] [--bursts=0|1 (the GPU operator,
+//        src/bursts.js; coarse cells)] [--tool=<eegpu> (default: gpu.js nativeTool; a .js file: a stand-in run by Node)]
+//        [--cachedir=<kernel cache>] [--pausefile=<file: the bursts wait between two launches while it exists>]
+//        [--work=<folder for the bursts' files>] [--burstS=15 (seconds per burst at most)] [--burstPar=1 (bursts side by
+//        side)] [--gpuCells=25 (log2 of a burst's cell table)] [--burstCap=262144 (a burst's states per layer at most; 0:
+//        its settings' own, up to 1 M)] (the defaults are the relay's sizing next to every move and the beams: a 2^26
+//        table and 1 M layers on 2 lanes took 3-5.7 GB, more than an 8 GB laptop GPU has beside them; the A100 runs:
+//        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstSteer=<RCH4 file> (the steer field for the bursts' trophy arm:
+//        its order, as the editor's relay had it; the GPU tool must read RCH4)]
+//        With --stdin=1 and the one search also "import <inputs>": another operator's run (the editor's GPU random runs:
+//        a room they entered first, a nearer attempt) into every worker's archive, like a burst's attempt.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
+const { Worker, isMainThread, parentPort, workerData, MessageChannel, receiveMessageOnPort } = require('worker_threads');
 const C = require('./common.js');
 const E = C.E;
 const EL = require('./eelvl.js');
@@ -178,10 +207,13 @@ const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0 };
+	steerDist: 1, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
-// its end closes this process's stdin, which stops the search)
+// its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
+// reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
+// the text options
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', ...GPU_STRINGS]);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
 // and 24, x64: the objects as goexplore makes them, 200 K at a time): a cell (its object with the boxed double of its
@@ -224,7 +256,7 @@ const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
 const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '' });
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) {
@@ -232,7 +264,7 @@ function parseArgs(argv) {
 			a.file = s;
 			continue;
 		}
-		if (m[1] === 'level' || m[1] === 'out' || m[1] === 'steer' || GPU_STRINGS.includes(m[1])) a[m[1]] = m[2];
+		if (TEXT_OPTS.has(m[1])) a[m[1]] = m[2];
 		else if (m[1] === 'cells') {
 			if (!['auto', 'fine', 'coarse'].includes(m[2])) throw new Error(`bad --cells=${m[2]} (auto, fine or coarse)`);
 			a.cells = m[2];
@@ -414,13 +446,15 @@ function roomOf(L) {
 	}
 	const onSum = (m, salt) => { let s = 0; for (const [id, v] of m) if (v === true) s = (s + fmix((id ^ salt) | 0)) | 0; return s; };
 	const onList = (m) => { const a = []; for (const [id, v] of m) if (v === true) a.push(id); return a.sort((x, y) => x - y); };
-	const key = (sim) => {
+	// (full: the room key; else the part of it only the ball's own touches change: without the keys, which expire, and the
+	// time doors, which flip on the clock)
+	const hash = (sim, full) => {
 		let h = 0x3c6ef372;
 		const w = (v) => { h = Math.imul(h ^ v, 0x5bd1e995); h ^= h >>> 13; };
-		w(sim._keysMask);
+		if (full) w(sim._keysMask);
 		w((crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
 			(sim.is_cursed ? 16 : 0) | (sim.is_zombie ? 32 : 0) | (sim.is_on_fire ? 64 : 0) | (sim.is_poisoned ? 128 : 0) | (sim.has_levitation ? 256 : 0) |
-			(L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
+			(full && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
 		w(sim.max_jumps); w(sim.jump_boost); w(sim.speed_boost); w(sim.flip_gravity);
 		if (team) w(sim.team);
 		if (coins) w(sim.coins);
@@ -433,6 +467,12 @@ function roomOf(L) {
 		if (sim._oswitches.size !== 0) w(onSum(sim._oswitches, 0x7654321));
 		return h | 0;
 	};
+	const key = (sim) => hash(sim, true);
+	/** what a room change's cause is judged by: {sub (the key without keys and time doors), keys} */
+	const cause = (sim) => ({ sub: hash(sim, false), keys: sim._keysMask });
+	/** a change from a room of cause a to one of cause b came from a trigger the ball touched (a key picked up, an
+	 *  effect, switch, coin, ...), not from the clock (a time door flipping, a key expiring) */
+	const byTrigger = (a, b) => !a || !b || a.sub !== b.sub || (b.keys & ~a.keys) !== 0;
 	const COL = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 	const desc = (sim) => {
 		const p = [];
@@ -460,7 +500,7 @@ function roomOf(L) {
 		if (silver && sim._collide_silver_crown) p.push('silvercrown');
 		return p.join(' ') || '(start)';
 	};
-	return { key, desc };
+	return { key, desc, cause, byTrigger };
 }
 
 /**
@@ -659,7 +699,7 @@ const STEER_REAL_MAX = 5999;
  * SharedArrayBuffer): [0] the longest route that still counts (ticks), [1] stop. post(msg): to the main thread
  * ('finish', 'closest', 'source', 'stat', 'done').
  */
-function explore(L, field, a, seed, ctrl, post) {
+function explore(L, field, a, seed, ctrl, post, port) {
 	const W = L.width, H = L.height, N = W * H;
 	const rnd = rngOf(seed);
 	const sim = new E.EESim(L);
@@ -681,9 +721,17 @@ function explore(L, field, a, seed, ctrl, post) {
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
-	const newRoom = (key, t) => {
+	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
+	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
+	// rooms once per (room, tile): the trigger tried there)
+	const report = coarse && !!port;
+	const edges = report ? new Set() : null, clockEdges = report ? new Set() : null;
+	const centreTile = () => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null };
+		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		rooms.set(key, r);
 		roomList.push(r);
 		return r;
@@ -749,8 +797,8 @@ function explore(L, field, a, seed, ctrl, post) {
 	let queue = [];
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
-	let nNodes = 0, nBlocks = 0;
-	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK +
+	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
+	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
@@ -761,14 +809,14 @@ function explore(L, field, a, seed, ctrl, post) {
 	// on while nodes made from it do)
 	const mkNode = (up, blk, o, n) => {
 		if (up !== null) up.refs++;
-		if (blk.refs++ === 0) nBlocks++;
+		if (blk.refs++ === 0) { nBlocks++; if (blk.x) xBytes += blk.x; }
 		nNodes++;
 		return { up, blk, o, n, refs: 1 };
 	};
 	const release = (q) => {
 		while (q !== null && --q.refs === 0) {
 			nNodes--;
-			if (--q.blk.refs === 0) nBlocks--;
+			if (--q.blk.refs === 0) { nBlocks--; if (q.blk.x) xBytes -= q.blk.x; }
 			q = q.up;
 		}
 	};
@@ -807,7 +855,7 @@ function explore(L, field, a, seed, ctrl, post) {
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
-			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++;
+			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++;
 			release(old);
 			impr++;
 			if (ST) { c.sc = steerOf(); nearSteer(c); }
@@ -817,8 +865,8 @@ function explore(L, field, a, seed, ctrl, post) {
 		}
 		if (!roomFor()) { full = true; needSweep = true; return null; }
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
-		const nc = ST ? { t, snap: null, pc, pgen: pc.gen, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks }
-			: { t, snap: null, pc, pgen: pc.gen, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks };
+		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks }
+			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks };
 		if (ST) nearSteer(nc);
 		cells.set(k, nc);
 		hpush(nc);
@@ -864,14 +912,14 @@ function explore(L, field, a, seed, ctrl, post) {
 		keepSnap(c, startSnap);
 		if (rc < 0) end = 'unreachable';
 	}
-	let ticks = 0, lastProgress = 0, refined = 0, minRc = Infinity;
+	let ticks = 0, lastProgress = 0, refined = 0, minRc = Infinity, imports = 0, importAdded = 0;
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
-	coarse ? Object.assign({ rooms: roomList.length, bursts }, fields.stats()) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -980,6 +1028,91 @@ function explore(L, field, a, seed, ctrl, post) {
 			compactQueue();
 		}
 	};
+	/** a new room's first cell nc (tick t): head C's burst and a source, if it opens new territory; the one search: the
+	 *  room to the main thread */
+	const firstCell = (room, nc, t) => {
+		room.isNew = false;
+		if (room.gain > 0) { if (a.burst > 0) { discovery.push([nc, a.burst]); bursts++; } }
+		if ((room.gain > 0 || Date.now() - lastBlandSource >= SOURCE_S * 1000) && t >= SOURCE_MIN_TICKS) {
+			if (room.gain <= 0) lastBlandSource = Date.now();
+			source('room', room, nc);
+		}
+		if (report) {
+			post({ type: 'room', seed, room: room.key, desc: room.desc, gain: room.gain, troOk: room.troOk, parent: room.parent, tile: room.tile, t, trig: room.trig,
+				inputs: C.eetasBytes(inputsOf(nc.node)).toString('latin1') });
+		}
+	};
+	/** a room change from one known room to another at the live state's tile: once per (room, tile), the trigger tried */
+	const edge = (from, to) => {
+		// (the ones the clock made, a time door or a key's end, apart: they only tell where the room was entered, and must
+		// not hide a trigger's change at the same tile)
+		const trig = RM.byTrigger(from.cause, to.cause), set = trig ? edges : clockEdges;
+		const tl = centreTile(), k = from.key * 4194304 + tl;   // (a number: tiles < 2^22)
+		if (set.has(k) || set.size >= 200000) return;
+		set.add(k);
+		post({ type: 'edge', seed, from: from.key, to: to.key, tile: tl, trig });
+	};
+	/** the one search: another operator's run (another worker's new room, the GPU's attempt) into this archive, every state
+	 *  along it (a cell is kept as always: the earliest state per cell; rooms made as in the runs) */
+	const importRun = (str) => {
+		const buf = new Uint8Array(str.length);
+		for (let k = 0; k < str.length; k++) buf[k] = (str.charCodeAt(k) - 48) & 31;
+		// (one block of inputs for the whole run: its bytes past a pick's block counted as `x`, see mkNode)
+		const blk = { b: buf, refs: 0, x: Math.max(0, buf.length - a.rolls * a.roll) };
+		sim.restore(startSnap);
+		let room = room0, added = 0;
+		for (let s = 0; s < buf.length; s++) {
+			const t = s + 1;
+			if (t >= maxT) break;
+			E.applyMask(inp, buf[s]);
+			sim.tick(inp);
+			ticks++;
+			if (sim.has_silver_crown || sim.is_dead) break;   // (a route is the main thread's: it replays every one)
+			const rc = costOf();
+			if (rc < 0) break;
+			roomKey = RM.key(sim);
+			if (roomKey !== room.key) {
+				const r = rooms.get(roomKey);
+				if (r !== undefined) room = r;
+				else if (roomFor()) room = newRoom(roomKey, t, room.key);
+				else { full = true; needSweep = true; break; }
+			}
+			if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
+			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
+				const node = mkNode(null, blk, 0, t);
+				if (near !== null) release(near.node);
+				near = { rc, t, node };
+			}
+			const nc = add(t, rc, null, null, blk, 0, t, room);
+			if (nc !== null) { added++; if (room.isNew) firstCell(room, nc, t); }
+		}
+		imports++; importAdded += added;
+	};
+	/** the one search: this archive's cell of a room nearest a set of targets (m.field: fifths per tile, 0xffff = none),
+	 *  the earliest among equals, to the main thread (a GPU burst starts there) */
+	const nearestOf = (m) => {
+		const r = rooms.get(m.room), f = m.field;
+		let best = null, bv = 0xffff;
+		if (r !== undefined) {
+			for (const c of r.arr) {
+				if (c.t >= maxT) continue;
+				const v = f[c.tile];
+				if (v === 0xffff) continue;
+				if (best === null || v < bv || (v === bv && c.t < best.t)) { best = c; bv = v; }
+			}
+		}
+		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
+			inputs: best !== null ? C.eetasBytes(inputsOf(best.node)).toString('latin1') : '' });
+	};
+	/** the main thread's messages (between two chunks of picks) */
+	const inbox = () => {
+		let m;
+		while ((m = receiveMessageOnPort(port)) !== undefined) {
+			const x = m.message;
+			if (x.type === 'import' && coarse) importRun(x.inputs);
+			else if (x.type === 'nearest') nearestOf(x);
+		}
+	};
 	while (!end) {
 		// between chunks: the clock, the stop flag, the shared bound (a faster route from another worker or the editor)
 		const now = Date.now();
@@ -991,6 +1124,7 @@ function explore(L, field, a, seed, ctrl, post) {
 		if (now - lastStat >= 250) { lastStat = now; post(stat()); }
 		if (now - lastSent >= 250) { lastSent = now; sendNear(); }
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
+		if (port) inbox();
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
 			if (!coarse) e = popA();
@@ -1075,8 +1209,8 @@ function explore(L, field, a, seed, ctrl, post) {
 						roomKey = RM.key(sim);
 						if (roomKey !== room.key) {
 							const r = rooms.get(roomKey);
-							if (r !== undefined) room = r;
-							else if (t < maxT && roomFor()) room = newRoom(roomKey, t);
+							if (r !== undefined) { if (report) edge(room, r); room = r; }
+							else if (t < maxT && roomFor()) room = newRoom(roomKey, t, room.key);
 							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
 					}
@@ -1087,15 +1221,7 @@ function explore(L, field, a, seed, ctrl, post) {
 						near = { rc, t, node };
 					}
 					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
-					if (nc !== null && room !== null && room.isNew) {
-						// a new room's first cell: head C's burst and a source, if it opens new territory
-						room.isNew = false;
-						if (room.gain > 0) { if (a.burst > 0) { discovery.push([nc, a.burst]); bursts++; } }
-						if ((room.gain > 0 || Date.now() - lastBlandSource >= SOURCE_S * 1000) && t >= SOURCE_MIN_TICKS) {
-							if (room.gain <= 0) lastBlandSource = Date.now();
-							source('room', room, nc);
-						}
-					}
+					if (nc !== null && room !== null && room.isNew) firstCell(room, nc, t);
 				}
 				if (end) break;
 			}
@@ -1638,7 +1764,7 @@ function workerMain() {
 	const L = levelOf(d.a);
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
 	const a = d.steerBuf ? Object.assign({}, d.a, { steerData: SF.readSteerFile(Buffer.from(d.steerBuf)) }) : d.a;
-	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m));
+	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null);
 }
 
 async function main() {
@@ -1717,7 +1843,8 @@ async function main() {
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms } : {}, { workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }));
+		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -1752,12 +1879,51 @@ async function main() {
 				const m = /^depth (\d+)$/.exec(line);
 				if (m) bound(+m[1]);
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
+				else if (line.startsWith('import ') && one) {
+					// (the one search: another operator's run, the editor's GPU random runs, into every archive)
+					const inputs = line.slice(7);
+					if (/^[0-O]+$/.test(inputs)) { one.broadcast(inputs, -1); one.fed++; }
+				}
 			}
 		});
 		// the end of stdin: the editor went away (a crash, or a kill that missed its children): stop, rather than run on
 		// every thread for the rest of --seconds
 		process.stdin.on('end', () => Atomics.store(ctrl, 1, 1));
 		process.stdin.on('error', () => Atomics.store(ctrl, 1, 1));
+	}
+	/** a route (masks) from worker `seed` (0: a GPU burst) after simTicks simulated ticks: replayed in the exact engine
+	 *  before it counts (the same engine found it, from snapshots and replays: a mismatch would be a bug) */
+	const routeFound = (masks, seed, simTicks, who) => {
+		const t = masks.length;
+		if (route && t >= route.ticks) return;
+		const ev = C.evaluate(L, masks);
+		if (!ev || ev.ms.length !== t) { say({ ev: 'warning', text: `${who}: a route of ${t} ticks does not replay (${ev ? `finishes after ${ev.ms.length}` : 'does not finish'})` }); return; }
+		bound(t - 1);
+		const inputs = C.eetasBytes(ev.ms).toString('latin1');
+		route = { ticks: t, runTicks: ev.runTicks, inputs, seed, simTicks, sec: sec() };
+		if (!first) first = { ticks: t, sec: route.sec, simTicks, seed };
+		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }) });
+		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
+		if (a.first) Atomics.store(ctrl, 1, 1);
+	};
+	// The one search (coarse cells: the GPU bursts, or several workers with --share=1): one channel per worker. Every room
+	// a worker enters first (its 'room' message) goes to the GPU operator (src/bursts.js), whose attempts go into every
+	// archive, and with --share=1 into the other workers' archives (see the header: off by default)
+	const one = a.cells === 'coarse' && ((a.share && a.workers > 1) || a.bursts) ? { rooms: new Map(), ports: [], shared: 0, fed: 0 } : null;
+	let bursts = null;
+	if (one) {
+		const RM = roomOf(L);
+		/** a room found (a worker's first cell in it, a burst's attempt, the start): true when nobody had found it */
+		one.register = (m) => {
+			const r = one.rooms.get(m.room);
+			if (r) { if (m.t < r.t) { r.t = m.t; if (bursts) bursts.room(m); } return false; }
+			one.rooms.set(m.room, { t: m.t, desc: m.desc, tile: m.tile });
+			if (bursts) bursts.room(m);
+			return true;
+		};
+		one.register({ room: RM.key(sim0), desc: RM.desc(sim0), tile: Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(sim0.py + 8) >> 4) * L.width + (Math.trunc(sim0.px + 8) >> 4))), t: 0, inputs: '' });
+		one.broadcast = (inputs, except) => { one.ports.forEach((p, i) => { if (seeds[i] !== except) p.postMessage({ type: 'import', inputs }); }); };
+		one.RM = RM;
 	}
 	const onMessage = (msg) => {
 		if (msg.type === 'stat' || msg.type === 'done') {
@@ -1771,30 +1937,38 @@ async function main() {
 			if (!near || msg.rc < near.rc - 1e-3 || (msg.rc <= near.rc + 1e-3 && msg.t < near.t)) { near = msg; nearPending = true; }
 		} else if (msg.type === 'source') {
 			onSource(msg);
+		} else if (msg.type === 'room') {
+			if (one && one.register(msg) && a.share && a.workers > 1) { one.broadcast(msg.inputs, msg.seed); one.shared++; }
+		} else if (msg.type === 'edge') {
+			if (bursts) bursts.edge(msg.from, msg.tile, msg.to, msg.trig);
 		} else if (msg.type === 'finish') {
-			if (route && msg.t >= route.ticks) return;
-			// replayed in the exact engine before it counts (the same engine found it, from snapshots and replays: a
-			// mismatch would be a bug)
-			const masks = Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31);
-			const ev = C.evaluate(L, masks);
-			if (!ev || ev.ms.length !== msg.t) { say({ ev: 'warning', text: `worker ${msg.seed}: a route of ${msg.t} ticks does not replay (${ev ? `finishes after ${ev.ms.length}` : 'does not finish'})` }); return; }
-			bound(msg.t - 1);
-			route = { ticks: msg.t, runTicks: ev.runTicks, inputs: msg.inputs, seed: msg.seed, simTicks: msg.simTicks, sec: sec() };
-			if (!first) first = { ticks: msg.t, sec: route.sec, simTicks: msg.simTicks, seed: msg.seed };
-			say({ ev: 'result', kind: 'finish', ticks: msg.t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs: msg.inputs, seed: msg.seed, simTicks: msg.simTicks,
-				sec: route.sec });
-			if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
-			if (a.first) Atomics.store(ctrl, 1, 1);
+			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`);
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
 	};
-	await Promise.all(seeds.map((seed) => new Promise((res) => {
-		// (the heap limit: room for the garbage between two collections above the budget, which counts what the heap holds)
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf },
+	const workers = seeds.map((seed) => new Promise((res) => {
+		// (the heap limit: room for the garbage between two collections above the budget, which counts what the heap holds;
+		// the one search: a channel per worker, see above)
+		let port = null, list = [];
+		if (one) { const ch = new MessageChannel(); port = ch.port2; list = [port]; one.ports.push(ch.port1); }
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, port }, transferList: list,
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
 		w.on('exit', () => res());
-	})));
+	}));
+	if (one && a.bursts) {
+		const BU = require('./bursts.js');
+		try {
+			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
+				broadcast: (inputs) => one.broadcast(inputs, -1), finish: (masks) => routeFound(masks, 0, 0, 'a GPU burst'),
+				nearest: () => (near && near.inputs ? { inputs: near.inputs, rc: near.rc } : null) });
+			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: '' });
+			bursts.start();
+		} catch (e) { say({ ev: 'warning', text: `no GPU bursts: ${e.message}` }); bursts = null; }
+	}
+	await Promise.all(workers);
+	if (bursts) await bursts.stop();
+	for (const p of one ? one.ports : []) p.close();
 	clearInterval(timer);
 	if (a.stdin) { try { process.stdin.pause(); process.stdin.destroy(); } catch (e) { /* gone */ } }
 	progress();
@@ -1807,12 +1981,12 @@ async function main() {
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
 		picks: total('picks'), end, finish: route ? route.ticks : 0, first,
-		cells: a.cells, workers: seeds.map((s) => {
+		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0 },
-			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0 } : {});
+			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
