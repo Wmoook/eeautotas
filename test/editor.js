@@ -714,16 +714,17 @@ async function passesSection() {
 			`GPU turn seen ${turn}; other launches during the round ${between}; seeds ${seeds.map((l) => l.length - 5).join(',')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; breaker ${JSON.stringify(str.breaker)}`);
 	}
 	// a breaker run that fails ("the prefix dies"): the round goes on from its next starting point (the nearest attempt 400
-	// back: 200 ticks), whose finish is the route
+	// back: 200 ticks), whose finish is the route; no CPU search: while every move and the relay wait for the round and
+	// the breaker has not started yet no process runs, and the search must not end there
 	{
 		const scB = path.join(HOME, 'brk2.json'), logB = path.join(HOME, 'brk2.log'), scC = path.join(HOME, 'brk2cpu.json'), fakeCpu = path.join(HOME, 'fake-cpu.js');
 		fs.writeFileSync(fakeCpu, FAKE_CPU);
-		fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 30, tick: 600, ch: '0' } }] },
+		fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 200, hold: 30000, closest: { dist: 30, tick: 600, ch: '0' } }] },
 			relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
 			breaker: [{ error: 'the prefix dies', wait: 200 }, { end: 'finish', idle: 0, layers: 3, wait: 300 }], beam: null }));
 		fs.writeFileSync(scC, JSON.stringify({ wait: 100 }));
 		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true },
-			{ tool: [process.execPath, fake, scB], cpu: [process.execPath, fakeCpu, scC], salts: false, relay: true, breaker: true, breakWait: [1], breakCells: 26 });
+			{ tool: [process.execPath, fake, scB], cpu: false, salts: false, relay: true, breaker: true, breakWait: [1], breakCells: 26 });
 		const t0b = Date.now();
 		let str = ED.state();
 		while (str.running && !str.result && Date.now() - t0b < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }

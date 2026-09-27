@@ -886,15 +886,21 @@ function launchOrWait(n) {
 }
 /** the round is over: the processes that waited for it start (the relay from its plan's step) */
 function resumeDeferred() {
-	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.gpuFailed || breakerBusy()) return;
+	if (!S || !S.running || breakerBusy()) return;
+	// (a search stopped, out of time or with a failed GPU: they end)
+	const go = !S.halted && S.stage !== 'stopped' && !S.gpuFailed && S.seconds - searchClock(Date.now()) >= 2;
 	S.strategies.forEach((q, k) => {
 		if (!q.deferred || alive(kids[k])) return;
 		q.deferred = false;
+		if (!go) { if (q.state === 'waiting') q.state = 'ended'; return; }
 		if (q.key === 'relay') { if (!relayFrom(k)) Object.assign(q, { state: 'waiting', detail: 'waits for a nearer attempt to go on from' }); }
 		else { Object.assign(q, { state: 'starting', detail: '' }); kids[k] = launch(k); }
 	});
-	save();
+	if (!running()) finish(); else save();
 }
+/** a round of the wall breaker holds the search open: from its start (the others stopped for it, the breaker not yet
+ *  started) until the processes that waited for it have started again */
+const breakHolds = () => !!S && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && ((!!brk && !!brk.round) || S.strategies.some((q) => q.deferred));
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1025,6 +1031,7 @@ function breakEnd(n) {
 		brk.at = Date.now();
 	}
 	setImmediate(resumeDeferred);
+	if (V.state === 'found' || !S.running || S.halted || S.stage === 'stopped') return false;
 	Object.assign(V, { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${cur && brk ? cur.opts.breakWait[brk.level] : BREAK_WAIT_S[0]} s)` });
 	return false;
 }
@@ -1143,7 +1150,7 @@ function state() {
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 let building = false;       // the physics check of a starting search (a worker thread) is under way
 let searchGen = 0;          // the search whose physics check / tool check is awaited (a stop or a newer search ends the wait)
-const running = () => busy.size > 0 || building;
+const running = () => busy.size > 0 || building || breakHolds();
 /** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped'). The GPU tool is asked to stop
  *  (its stop file: it ends between two kernel launches, within about one; killing it while a kernel runs makes the
  *  NVIDIA driver reset the GPU) and killed only if it is still running 2 s later; the CPU search is killed. */
@@ -1936,13 +1943,13 @@ function launch(n) {
 				setImmediate(resumeExplore);
 			}
 		}
-		if (V.key === 'breaker' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed) {
+		if (V.key === 'breaker') {
 			const how = ch.stopWhy || (code === 0 ? end : '');
-			if (how !== 'stopped' && how !== 'beaten' && how !== 'finish') {
+			if (S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && how !== 'stopped' && how !== 'beaten' && how !== 'finish') {
 				// ("the prefix dies", out of GPU memory and the like: the next starting point, not an error of the search)
 				if (V.error) { note(`${V.label}: ${V.error}; the next starting point`); V.error = null; if (brk && brk.round) brk.round.chain = null; }
 				if (breakAfter(n, how)) { save(); return; }
-			}
+			} else if (brk && brk.round) breakEnd(n);   // (a stop, a route, a failed GPU: the round is over)
 		}
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
