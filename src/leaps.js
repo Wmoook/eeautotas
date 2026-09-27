@@ -515,7 +515,7 @@ if (require.main === module) {
 	if (!tool) { console.log(JSON.stringify({ error: 'the native engine is not built (node tools/build-native.js)' })); process.exit(3); }
 	const out = a.out ? path.resolve(a.out) : path.join(C.SRC, 'out', 'leaps_best.eetas');
 	const work = a.work ? path.resolve(a.work) : fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-leaps-'));
-	search(Object.assign(o, { level, masks, tool, seconds: +(a.seconds || 600), work, cacheArgs: G.cacheArgs(),
+	search(Object.assign(o, { level, masks, tool, seconds: +(a.seconds || 600), work, cacheArgs: G.cacheArgs(), parent: process.pid,   // (eegpu detached: it ends between two launches once this process is gone, never mid-kernel)
 		onEvent: (ev) => console.log(JSON.stringify(ev)),
 		onLeap: (b) => { C.writeEetas(out, b.masks); } }))
 		.then((r) => { if (!a.work) { try { fs.rmSync(work, { recursive: true, force: true }); } catch (e) { /* busy */ } } process.exit(r.leaps ? 0 : 1); })
