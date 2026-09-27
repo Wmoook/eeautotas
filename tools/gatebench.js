@@ -202,7 +202,7 @@ async function run() {
 	const f1 = (v, d = 1) => (v === null || v === undefined ? '-' : v.toFixed(d));
 	console.log(`\n| level | gates passed | rate | mean s / pass | mean M ticks / pass | par2 (${opt.seconds ? 's' : 'M ticks'}, lower better) |${base ? ' baseline passed | baseline par2 |' : ''}`);
 	console.log(`|---|---|---|---|---|---|${base ? '---|---|' : ''}`);
-	for (const al of [...want, 'ALL']) {
+	for (const al of [...want.filter((x) => perLevel[x].runs), 'ALL']) {
 		const s = al === 'ALL' ? all : perLevel[al], b = base ? (al === 'ALL' ? base.all : base.perLevel[al]) : null;
 		console.log(`| ${al} | ${s.passed}/${s.runs} | ${f1(s.rate, 3)} | ${f1(s.meanSec)} | ${f1(s.meanMTicks)} | ${f1(s.par2)} |${base ? ` ${b ? `${b.passed}/${b.runs}` : '-'} | ${b ? f1(b.par2) : '-'} |` : ''}`);
 	}

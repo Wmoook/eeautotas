@@ -908,11 +908,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const w = tx >= 0 && ty >= 0 && tx < field.W && ty < field.H ? field.walk[ty * field.W + tx] : RF.CUT;
 		return 1e4 + (w === RF.CUT ? 9999 : w / 5);
 	};
-	let room0 = null, cell0 = null;
+	let room0 = null, cell0 = null, preMs = null;
 	{
 		// the start (the reach field rules it out: no route, a proof; the search ends at once, unless --prune=0); with
 		// --prefix the state after those inputs, a cell whose path is them (replays go on from the level's start)
 		const pre = prefixOf(a), t0c = pre ? pre.length : 0;
+		preMs = pre;
 		if (pre) for (let s = 0; s < pre.length; s++) { E.applyMask(inp, pre[s]); sim.tick(inp); }
 		const rc = costOf();
 		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, t0c); room0.isNew = false; }
@@ -1072,6 +1073,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const importRun = (str) => {
 		const buf = new Uint8Array(str.length);
 		for (let k = 0; k < str.length; k++) buf[k] = (str.charCodeAt(k) - 48) & 31;
+		// (--prefix: only a run through the start state counts, and only its part after it: the route's own states before
+		// it are no find of this search)
+		const P = preMs !== null ? preMs.length : 0;
+		if (P) { if (buf.length <= P) return; for (let k = 0; k < P; k++) if (buf[k] !== preMs[k]) return; }
 		// (one block of inputs for the whole run: its bytes past a pick's block counted as `x`, see mkNode)
 		const blk = { b: buf, refs: 0, x: Math.max(0, buf.length - a.rolls * a.roll) };
 		sim.restore(startSnap);
@@ -1083,6 +1088,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			sim.tick(inp);
 			ticks++;
 			if (sim.has_silver_crown || sim.is_dead) break;   // (a route is the main thread's: it replays every one)
+			if (t <= P) { if (t === P) room = room0; continue; }
 			const rc = costOf();
 			if (rc < 0) break;
 			roomKey = RM.key(sim);
@@ -1851,6 +1857,7 @@ async function main() {
 	const sim0 = new E.EESim(L);
 	sim0.reset();
 	const pre0 = prefixOf(a);
+	const preStr = pre0 ? C.eetasBytes(pre0).toString('latin1') : '';
 	if (pre0) { const inp0 = new E.EEInput(); for (let s = 0; s < pre0.length; s++) { E.applyMask(inp0, pre0[s]); sim0.tick(inp0); } }
 	const startCost = RF.costAt(field, sim0);
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
@@ -1976,15 +1983,17 @@ async function main() {
 		const RM = roomOf(L);
 		/** a room found (a worker's first cell in it, a burst's attempt, the start): true when nobody had found it */
 		one.register = (m) => {
+			// (--prefix: a room change before the start, or on a run that left the route before it, is the route's history)
+			if (pre0 && (m.t < pre0.length || (m.inputs && !m.inputs.startsWith(preStr)))) return false;
 			const r = one.rooms.get(m.room);
 			if (r) { if (m.t < r.t) { r.t = m.t; if (bursts) bursts.room(m); } return false; }
 			one.rooms.set(m.room, { t: m.t, desc: m.desc, tile: m.tile });
 			if (bursts) bursts.room(m);
 			// (--rooms=1: every room found, with the inputs that reach it: the gate benchmark watches for its target room)
-			if (a.rooms && m.inputs) say({ ev: 'room', room: m.room, desc: m.desc, t: m.t, sec: sec(), by: m.seed === undefined ? 'gpu' : 'cpu', sub: m.sub, keys: m.keys, ...(m.wt !== undefined ? { wt: m.wt } : {}), inputs: m.inputs });
+			if (a.rooms && m.inputs && m.t > (pre0 ? pre0.length : 0)) say({ ev: 'room', room: m.room, desc: m.desc, t: m.t, sec: sec(), by: m.seed === undefined ? 'gpu' : 'cpu', sub: m.sub, keys: m.keys, ...(m.wt !== undefined ? { wt: m.wt } : {}), inputs: m.inputs });
 			return true;
 		};
-		one.register({ room: RM.key(sim0), desc: RM.desc(sim0), tile: Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(sim0.py + 8) >> 4) * L.width + (Math.trunc(sim0.px + 8) >> 4))), t: pre0 ? pre0.length : 0, inputs: '' });
+		one.register({ room: RM.key(sim0), desc: RM.desc(sim0), tile: Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(sim0.py + 8) >> 4) * L.width + (Math.trunc(sim0.px + 8) >> 4))), t: pre0 ? pre0.length : 0, inputs: preStr });
 		one.broadcast = (inputs, except) => { one.ports.forEach((p, i) => { if (seeds[i] !== except) p.postMessage({ type: 'import', inputs }); }); };
 		one.RM = RM;
 	}
@@ -2023,10 +2032,10 @@ async function main() {
 	if (one && a.bursts) {
 		const BU = require('./bursts.js');
 		try {
-			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
+			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, minLen: pre0 ? pre0.length : 0, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
 				broadcast: (inputs) => one.broadcast(inputs, -1), finish: (masks) => routeFound(masks, 0, 0, 'a GPU burst'),
 				nearest: () => (near && near.inputs ? { inputs: near.inputs, rc: near.rc } : null) });
-			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: '' });
+			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: preStr });
 			bursts.start();
 		} catch (e) { say({ ev: 'warning', text: `no GPU bursts: ${e.message}` }); bursts = null; }
 	}
