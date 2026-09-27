@@ -926,7 +926,7 @@ const BREAK_RESERVE_F = 0.15;
 // the target (from a nearer attempt), so the round ends as the plain breaker's. Cycle 5: a run is not dry either when
 // its novelty hits found BREAK_NOVEL_FRESH (room, tile) cells no earlier run of the search hit (brk.novCells: the
 // novelty's own yield; on Octorage the progress count stayed flat while the novelty runs took the route from 21% to
-// 38%, and with the count alone 20 of 24 runs went plain).
+// 38%, and with the count alone 20 of 24 runs went plain), and a novelty run with fewer hits than that is not counted.
 const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr', BREAK_NOVEL_DRY = 2, BREAK_NOVEL_FRESH = 16;
 /** a run's novelty hits nh -> how many hit a (room, tile) cell no earlier run of the search hit (seen: those cells, grows) */
 function novelFresh(nh, seen) {
@@ -1174,10 +1174,13 @@ function breakAfter(n, how) {
 	// (the novelty stop rule: runs in a row during which the search got nowhere (no nearer attempt, no new room with
 	// territory: breakProgress); from BREAK_NOVEL_DRY on, no step from a novelty hit, so the chain goes on only from a
 	// nearer attempt as without the target and the round ends as the plain breaker's does)
-	// (cycle 5: or its novelty hits found BREAK_NOVEL_FRESH cells no earlier run hit: the novelty's own yield)
+	// (cycle 5: or its novelty hits found BREAK_NOVEL_FRESH cells no earlier run hit: the novelty's own yield; a novelty
+	// run with fewer hits than that in all counts neither way: the archive has seen the start's area, the target has
+	// nothing to say yet (Octorage's first runs: 7 hits in 17 runs, so the count alone made the round plain at once))
 	const fresh = novelFresh(nh, brk.novCells || (brk.novCells = new Set()));
 	if (fresh && S.breaker) S.breaker.novelFresh = (S.breaker.novelFresh || 0) + fresh;
-	R.dry = R.progress.length > ((V.brk && V.brk.prog0) || 0) || fresh >= BREAK_NOVEL_FRESH ? 0 : (R.dry || 0) + 1;
+	const got = R.progress.length > ((V.brk && V.brk.prog0) || 0) || fresh >= BREAK_NOVEL_FRESH;
+	R.dry = got ? 0 : V.brk && V.brk.novel && nh.length < BREAK_NOVEL_FRESH ? (R.dry || 0) : (R.dry || 0) + 1;
 	const novOk = R.dry < BREAK_NOVEL_DRY;
 	if (nh.length && !novOk) { R.novelDry = (R.novelDry || 0) + 1; if (S.breaker) S.breaker.novelDry = (S.breaker.novelDry || 0) + 1; }
 	// (a run with novelty hits: the next step from one, a hit in another room than the step's start's first, else the latest)
