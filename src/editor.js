@@ -387,7 +387,9 @@ const STRATEGIES = {
 	// cost ceiling; a box of BREAK_REGION tiles around its start only with a table of 2^28 cells or fewer
 	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${q.gateReach || f.reach}`, ...(q.gateReach ? [] : steerArg(f, q.V)),
-		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : [])] },
+		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : []),
+		// (the novelty target: the one search's seen (room, tile) cells, BREAK_NOVEL)
+		...(q.novel ? [`--novel=${q.novel}`, '--novelOrder=1', `--novelMax=${BREAK_NOVEL_MAX}`] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -906,6 +908,69 @@ const BREAK_GRAIN_TEXT = ['4 px and 1/16', '2 px and 1/16', '1 px and 1/32'];
 // and states fit the free memory less that, so on a shared GPU the other processes keep room (on the rented H100, shared
 // with 31-42 GB of other work, a 2^31 table left the relay's new processes no memory for a context)
 const BREAK_RESERVE_F = 0.15;
+// the novelty target (opt-in: body novel true): at each round's start (and after each run) the CPU search writes the
+// (room, tile) cells its archive has seen (goexplore.js stdin "novel <file>", NOV1); the breaker's explore gets it
+// (--novel --novelOrder=1): a state in an unseen cell is a hit (at most BREAK_NOVEL_MAX a run, never a route; they come
+// in layer order, so a small cap keeps only the cells next to the start: Octorage's wall from 400 ticks before it, a
+// 4-step chain reached the known route's tick 791 with 64 a run, 1133 with 1024 at step 4, and with 4096 the first
+// step's hits reached 1187, past the waypoint 1168), its order the walking distance to the nearest unseen tile of its
+// start's room; every BREAK_NOVEL_SEED_EVERY-th hit goes to the CPU search (seedCpu: 16 of 4096, spread over the
+// run's depth) and the chain's next step starts from one (novelPick, BREAK_NOVEL_PICK 'terr': the latest hit of the
+// other room with the most hits; cycle 3: a capped run's last hits tie at one tick in several rooms, so 'latest' took
+// a pocket room 3 of 7 times at Octorage's wall, 'terr' the route's room 6 of 7) BREAK_NOVEL_BACK ticks short of it.
+// The round waits up to BREAK_NOVEL_WAIT_MS for the file.
+// The stop rule (cycle 4): a novelty run always has hits, so without one every chain went on to BREAK_CHAIN and a round
+// held the GPU for all of BREAK_ROUND_S (Stupid Fox: 27-28 runs, the GPU random runs that find its route starved);
+// after BREAK_NOVEL_DRY runs in a row in which the search got nowhere (breakProgress) the chain steps only as without
+// the target (from a nearer attempt), so the round ends as the plain breaker's.
+const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr', BREAK_NOVEL_DRY = 2;
+/** asks the CPU search for the novelty file (the answer: its "novel" event sets brk.novelReady) */
+function novelAsk() {
+	if (!S || !brk || !cur || !cur.opts.novel) return false;
+	const file = path.join(dir(), 'novel.bin');
+	let asked = false;
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`novel ${file}\n`); asked = true; } catch (e) { /* gone */ } }
+	});
+	if (asked) brk.novelAsked = Date.now();
+	return asked;
+}
+/** a novelty hit of the breaker's run n: to the CPU search (every BREAK_NOVEL_SEED_EVERY-th), kept for the chain */
+function novelHit(n, ev) {
+	const V = S.strategies[n], inputs = String(ev.inputs || '');
+	if (!brk || !/^[0-O]+$/.test(inputs)) return;
+	const list = V.novHits || (V.novHits = []);
+	list.push({ inputs, room: ev.room | 0, tile: ev.tile | 0, tick: inputs.length });
+	brk.novelHits = (brk.novelHits || 0) + 1;
+	if (S.breaker) S.breaker.novelHits = brk.novelHits;
+	if (list.length % BREAK_NOVEL_SEED_EVERY === 1) seedCpu(inputs);
+}
+/** the chain's next start among a run's novelty hits nh (those past the step's start `from` by more than
+ *  BREAK_NOVEL_BACK ticks): BREAK_NOVEL_PICK 'terr' = the latest hit in the other room with the most hits (the most new
+ *  cells the run found there: a territory, not a touch), else the latest hit; 'latest' = a hit in another room than
+ *  the start's room0 first, else the latest */
+function novelPick(nh, room0, from, rule = BREAK_NOVEL_PICK) {
+	const ok = nh.filter((h) => h.inputs.length - BREAK_NOVEL_BACK > from);
+	let nv = null;
+	if (rule === 'latest') {
+		for (const h of ok) if (!nv || (h.room !== room0) > (nv.room !== room0) || ((h.room !== room0) === (nv.room !== room0) && h.tick > nv.tick)) nv = h;
+		return nv;
+	}
+	const per = new Map();
+	for (const h of nh) if (h.room !== room0) per.set(h.room, (per.get(h.room) || 0) + 1);
+	let room = null;
+	for (const [r, c] of per) if (room === null || c > per.get(room)) room = r;
+	for (const h of ok) if (h.room === room && (!nv || h.tick > nv.tick)) nv = h;
+	if (!nv) for (const h of ok) if (!nv || h.tick > nv.tick) nv = h;
+	return nv;
+}
+/** a run's novelty hits nh -> the latest hit of each room (the run's frontier in every room it found new cells in) */
+function novelSeeds(nh) {
+	const last = new Map();
+	for (const h of nh) { const o = last.get(h.room); if (!o || h.tick > o.tick) last.set(h.room, h); }
+	return [...last.values()];
+}
 /** the wall breaker's round is running (from its start to its end, or its process alive): the others' new processes wait (resumeDeferred) */
 const breakerBusy = () => !!S && ((!!brk && !!brk.round) || (Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]))));
 /** strategy n's next process, or, while the wall breaker's round runs (its table took the memory), a wait for its end */
@@ -1035,8 +1100,11 @@ function breakKick() {
 		if (S !== S0 || !brk || !brk.round) return;
 		// (their processes end at their next launch; a halt kills them after HALT_KILL_MS)
 		if (freed.some((k) => alive(kids[k])) && Date.now() - t0 < HALT_KILL_MS + 3000) { const t = setTimeout(go, 100); if (t.unref) t.unref(); return; }
+		// (the novelty file asked at the round's start: its answer, at most BREAK_NOVEL_WAIT_MS)
+		if (novel && !(brk.novelReady >= t0) && Date.now() - t0 < BREAK_NOVEL_WAIT_MS) { const t = setTimeout(go, 100); if (t.unref) t.unref(); return; }
 		breakLaunch(n);
 	};
+	const novel = novelAsk();
 	go();
 }
 /** the round's next run (the chain's next step, or the next starting point); false when the round is over */
@@ -1069,7 +1137,10 @@ function breakLaunch(n) {
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	const novelF = cur.opts.novel && brk.novelReady ? path.join(dir(), 'novel.bin') : '';
+	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))),
+		novel: novelF && fs.existsSync(novelF) ? novelF : '', prog0: R.progress.length };
+	V.novHits = [];
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
@@ -1084,16 +1155,31 @@ function breakAfter(n, how) {
 	const V = S.strategies[n], R = brk && brk.round;
 	if (!R) return breakEnd(n);
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
-	const ch = R.chain, b = V.bestTry;
+	const ch = R.chain, b = V.bestTry, nh = V.novHits || [];
 	const hit = V.brk && V.brk.gateHit;
+	if (cur.opts.novel) novelAsk();   // (the next run's novelty file: the archive as it is now)
+	// (the novelty stop rule: runs in a row during which the search got nowhere (no nearer attempt, no new room with
+	// territory: breakProgress); from BREAK_NOVEL_DRY on, no step from a novelty hit, so the chain goes on only from a
+	// nearer attempt as without the target and the round ends as the plain breaker's does)
+	R.dry = R.progress.length > ((V.brk && V.brk.prog0) || 0) ? 0 : (R.dry || 0) + 1;
+	const novOk = R.dry < BREAK_NOVEL_DRY;
+	if (nh.length && !novOk) { R.novelDry = (R.novelDry || 0) + 1; if (S.breaker) S.breaker.novelDry = (S.breaker.novelDry || 0) + 1; }
+	// (a run with novelty hits: the next step from one, a hit in another room than the step's start's first, else the latest)
+	const nv = !hit && novOk && nh.length && ch.step < BREAK_CHAIN ? novelPick(nh, Number.isFinite(V.novRoom0) ? V.novRoom0 : nh[0].room, ch.inputs.length) : null;
+	// (every room's latest hit of the run to the CPU search, its frontier there: from Octorage's walls starts the hits
+	// that went furthest were at times in the start's own room while the pick went to another one)
+	for (const h of novelSeeds(nh)) seedCpu(h.inputs);
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
 		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
 		seedCpu(hit);
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
-	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
-	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
+	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length && !nv) ch.grain++;   // (every situation tried at this grain: finer, the same start)
+	else if (nv) {
+		R.chain = { inputs: nv.inputs.slice(0, nv.inputs.length - BREAK_NOVEL_BACK), step: ch.step + 1, grain: 0, what: `${ch.what}, a novelty hit` };
+		if (b) seedCpu(b.inputs);
+	} else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
 		// its nearest attempt went on: the next step from 60 ticks short of it (a fresh table)
 		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what };
 		seedCpu(b.inputs);
@@ -1333,8 +1419,9 @@ function start(b, gpu, test) {
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
-		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
+		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : Number.isInteger(+b.breakCells) && +b.breakCells >= 24 && +b.breakCells <= 31 ? +b.breakCells : 0,
+		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
+		novel: b.novel === true || !!(test && test.novel === true) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
@@ -1688,7 +1775,7 @@ function launch(n) {
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	if (V.key === 'breaker') {
-		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
+		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach; q.novel = V.brk.novel;
 		q.seconds = V.share = V.brk.seconds;
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.brk.keep) : 0;
 	}
@@ -1878,6 +1965,17 @@ function launch(n) {
 				// (the GPU random runs' first arrival in a room: into the one search's archive)
 				if (rolls && ev.kind === 'room') feedOne(inputs, true);
 				setImmediate(relayKick);
+			}
+		} else if (ev.ev === 'novelty' && V.key === 'breaker') {
+			V.novRoom0 = ev.room | 0;   // (the start's room: a novelty hit in another one is a new room)
+			if (S.breaker) S.breaker.novelty = { unseenTiles: ev.unseenTiles, startDist: ev.startDist };
+		} else if (ev.ev === 'novel' && V.key === 'breaker') {
+			novelHit(n, ev);
+		} else if (ev.ev === 'novel' && V.cpu) {
+			// (the CPU search wrote the novelty file the wall breaker asked for)
+			if (brk && ev.file && !ev.error) {
+				brk.novelReady = Date.now();
+				if (S.breaker) S.breaker.novel = { cells: ev.cells, bits: ev.bits, ms: ev.ms };
 			}
 		} else if (ev.ev === 'hit') {
 			// the exploration's finishes: all in its last layer (equally many ticks); a few are enough (the timer start
@@ -2376,4 +2474,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, novelPick, novelSeeds, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

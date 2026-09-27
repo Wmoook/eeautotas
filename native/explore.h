@@ -63,7 +63,15 @@ struct ExploreParams {
 	// from a state's box centre to the centre of that neighbour tile x 512, 20 bits << 44 | layer << 21 | index in the
 	// layer) over this try's states (kernels.cu exploreMaterialize); tileSeen: the tiles a box centre was in
 	unsigned long long* nearTile; u8* tileSeen;
+	// the novelty target (explorehost.h --novel): a bitmap of the (room, tile) cells the caller's archive has seen (novelBit;
+	// null = off; the device copy gains a bit per hit, so each unseen cell is reported once); a state entering an unseen
+	// cell is a hit (jumpOption EE_NOVEL_HIT, gain = its room, refTick = its tile), at most novMax of them, and is still
+	// expanded; novDist (--novelOrder): the priority's head = the walking distance (quarter tiles) to the nearest unseen
+	// tile of the start's room. The room key: rollRoom's (goexplore.js roomOf), with these flags
+	u32* novBits; u32 novMask; u32* novCount; i32 novMax; const float* novDist;
+	i32 roomTeam, roomCoins, roomBlue, roomCrown, roomSilver;
 };
+#define EE_NOVEL_HIT 254
 
 /** A situation: everything of a state's cell but its x position and speed (exact height and vertical speed, on the
  *  ground, jumps, the centre's tile column). The near-miss refinement refines every cell of a situation it lists. */
@@ -180,6 +188,8 @@ struct Mulberry {
 };
 /** goexplore.js fmix (murmur3's finalizer, on int32) */
 EE_HD u32 rollFmix(u32 h) { h ^= h >> 16; h = (u32)imul((i32)h, (i32)0x85ebca6bu); h ^= h >> 13; h = (u32)imul((i32)h, (i32)0xc2b2ae35u); return h ^ (h >> 16); }
+/** the novelty bitmap's bit of a (room, tile) cell, before the mask (goexplore.js novelBit: the same u32 operations) */
+EE_HD u32 novelBit(u32 room, i32 tile) { return rollFmix(room ^ rollFmix((u32)imul(tile, (i32)0x9e3779b1u) + 0x2545f491u)); }
 /** a run's seed: (batch seed, pick index, run) -> mulberry32's state (goexplore.js rollSeed) */
 EE_HD u32 rollSeed(u32 batchSeed, u32 pick, u32 run) { return rollFmix(batchSeed ^ rollFmix(pick * 0x9e3779b1u ^ rollFmix(run + 0x7f4a7c15u))); }
 /** the input of step k of a run (goexplore.js: the first input drawn, then each tick kept with p keep, else drawn) */
@@ -190,8 +200,8 @@ EE_HD i32 rollDraw(Mulberry& r, double keep, i32 m) {
 EE_HD void rollW(u32& h, i32 v) { h = (u32)imul((i32)(h ^ (u32)v), 0x5bd1e995); h ^= h >> 13; }
 /** goexplore.js roomOf(L).key(sim): the room (keys, effects and their values, switches, and the team / coin / crown /
  *  death counts where a door reads them), the same int32 hash */
-template <int TW>
-EE_HD u32 rollRoom(const RollParams& p, const State<TW>& s) {
+template <int TW, class P>
+EE_HD u32 rollRoom(const P& p, const State<TW>& s) {
 	u32 h = 0x3c6ef372u;
 #define w(v) rollW(h, (i32)(v))
 	w(s.keysMask);

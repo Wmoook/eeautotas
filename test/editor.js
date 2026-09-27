@@ -737,6 +737,19 @@ async function passesSection() {
 	// the table by the GPU's memory (BREAK_MEM_F at 16 bytes a cell): 8 GB 2^27, 24 GB 2^29, 40 GB 2^30, 80 GB 2^31
 	check("the wall breaker's table: 2^27 cells on 8 GB, 2^29 on 24 GB, 2^30 on 40 GB (40,326 MB), 2^31 on 80 GB (81,559 MB)",
 		[8192, 24564, 40326, 81559].map(ED.breakCells).join() === '27,29,30,31', [8192, 24564, 40326, 81559].map(ED.breakCells).join());
+	{
+		// the novelty chain's next start: 'terr' = the latest hit of the other room with the most hits, else the latest hit;
+		// 'latest' = another room's latest first; hits within BREAK_NOVEL_BACK (30) of the step's start never
+		const h = (room, tick) => ({ room, tick, inputs: '0'.repeat(tick) });
+		const nh = [h(1, 140), h(2, 150), h(3, 160), h(3, 170), h(3, 180), h(2, 400), h(1, 500)];
+		const pick = (list, rule) => { const p = ED.novelPick(list, 1, 100, rule); return p ? `${p.room}@${p.tick}` : 'none'; };
+		const got = [pick(nh, 'terr'), pick(nh, 'latest'), pick(nh.filter((x) => x.room === 1), 'terr'), pick([h(3, 120), h(1, 200)], 'terr'), pick([h(1, 120)], 'terr')].join();
+		check("the wall breaker's novelty chain: its next start by the pick rule (terr: the room with the most new cells; latest: another room's latest)",
+			got === '3@180,2@400,1@500,1@200,none', got);
+		// every room's latest hit goes to the CPU search (its frontier there)
+		const seeds = ED.novelSeeds(nh).map((x) => `${x.room}@${x.tick}`).sort().join();
+		check("the wall breaker's novelty hits: every room's latest hit is a seed of the CPU search", seeds === '1@500,2@400,3@180', seeds);
+	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
