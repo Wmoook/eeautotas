@@ -80,6 +80,12 @@ const ROOM_SLACK = 45;
 const TARGET_DRY = 3;
 // (the trophy as a target of a walk-mode room)
 const TROPHY_T = -2;
+// a near miss: a target an earlier burst aimed at it came within NEAR_MISS tiles of (or started that near) without
+// reaching it gets the wall breaker's kind of burst: 4 px / 1/16 px/tick cells, NEAR_CELLS_ADD more cell bits (2^28 at
+// the default 25), NEAR_S_F x the time (Forgotten Veil's precision wall before coin 4, t2969: 2^28-2^30 tables pass it
+// in 8-21 s from the route's own states, src/out/night/walls.md; from the gate into coin 4 the archive held a cell 3
+// tiles from it, and 2^25 bursts from it ran out of states twice)
+const NEAR_MISS = 6, NEAR_CELLS_ADD = 3, NEAR_CELLS_MAX = 28, NEAR_S_F = 2;
 // the trophy arm with the steer field (goexplore.js --burstSteer, the editor's RCH4 file): the relay's ceiling at most
 // (editor.js RELAY_SLACK_MAX), and a distance of 6000+ (the steer field has no value there: 6000 + the reach field's) as
 // the reach field's
@@ -501,7 +507,7 @@ function create(o) {
 		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
 		const c = job.cells;
 		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0',
-			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
+			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${job.gpuCells || a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), ...(job.steer ? [`--steer=${job.steer}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();
 		let ch;
@@ -600,10 +606,12 @@ function create(o) {
 				const back = BACK[k % BACK.length];
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
-				const ci = pickConf(r);
+				const tv = r.tg && r.tg.get(p.f.c), near = tv && tv.n > 0 && tv.best <= NEAR_MISS;
+				const ci = near ? 0 : pickConf(r);
 				const tx = p.f.tile % W, ty = (p.f.tile / W) | 0;
-				job = { lane, r, tgt: p.f.c, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(ROOM_SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
-					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.c === TROPHY_T ? 'the trophy' : `the trigger at (${tx}, ${ty}), ${p.f.triggers} tile${p.f.triggers === 1 ? '' : 's'}`} of ${p.f.live} untried), settings ${ci}, ${back} back` };
+				job = { lane, r, tgt: p.f.c, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(ROOM_SLACK + SLACK_F * v / 5),
+					seconds: Math.max(2, Math.min(a.burstS * (near ? NEAR_S_F : 1), Math.floor(left - 1))), gpuCells: near ? Math.min(NEAR_CELLS_MAX, Math.max(a.gpuCells, a.gpuCells + NEAR_CELLS_ADD)) : 0,
+					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.c === TROPHY_T ? 'the trophy' : `the trigger at (${tx}, ${ty}), ${p.f.triggers} tile${p.f.triggers === 1 ? '' : 's'}`} of ${p.f.live} untried), settings ${ci}${near ? ` (a near miss: 2^${Math.min(NEAR_CELLS_MAX, a.gpuCells + NEAR_CELLS_ADD)} cells)` : ''}, ${back} back` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
