@@ -1061,8 +1061,8 @@ function breakProgress(why) {
 }
 /** the round's starting points: up to BREAK_STARTS {inputs, what, dist, key, room} not used before in this search */
 function breakStarts() {
-	// (breakFrom, the measurements' walls: the one starting point of the first round)
-	if (cur.opts.breakFrom) return brk.rounds ? [] : [{ inputs: cur.opts.breakFrom, what: 'the given start', dist: 0, key: 'from', room: undefined }];
+	// (breakFrom, the measurements' walls: the first round's starting points (one, or several: a list))
+	if (cur.opts.breakFrom.length) return brk.rounds ? [] : cur.opts.breakFrom.map((inputs, i) => ({ inputs, what: i ? `given start ${i + 1}` : 'the given start', dist: 0, key: 'from' + i, room: undefined }));
 	const out = [], seen = new Set();
 	const add = (inputs, keep, what, dist, room) => {
 		keep = Math.min(keep, inputs.length);
@@ -1165,11 +1165,13 @@ function breakAfter(n, how) {
 		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
 		seedCpu(hit);
 		// (the gate front: a chain that keeps entering gates into new rooms is not cut by the round's clock (BREAK_ROUND_S
-		// counts from its last gate into a room no attempt had been in: BREAK_FRONT_NEW), and the next round starts from its
-		// last gate first: breakStarts)
+		// counts from its last gate into a room no attempt had been in: breakFrontNew), and the next round starts from its
+		// last gate first: breakStarts; the round's gates and new-room gates are counted for the state)
 		if (cur.opts.breakFront) {
 			brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 };
-			if (gateRestarts(gateRoom(hit), brk.seen, brk.gateRooms, cur.opts.breakFrontNew)) R.clock = Date.now();
+			const fresh = gateRestarts(gateRoom(hit), brk.seen, brk.gateRooms, true);
+			if (fresh || !cur.opts.breakFrontNew) R.clock = Date.now();
+			if (S.breaker && S.breaker.round) Object.assign(S.breaker.round, { gates: (S.breaker.round.gates || 0) + 1, newGates: (S.breaker.round.newGates || 0) + (fresh ? 1 : 0) });
 		}
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
 	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
@@ -1414,7 +1416,7 @@ function start(b, gpu, test) {
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false, breakFrontNew: b.breakFrontNew !== false,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
+		breakFrom: test && test.breakFrom ? [].concat(test.breakFrom).map(String) : [], breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
