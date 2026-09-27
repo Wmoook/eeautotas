@@ -906,6 +906,46 @@ const BREAK_GRAIN_TEXT = ['4 px and 1/16', '2 px and 1/16', '1 px and 1/32'];
 // and states fit the free memory less that, so on a shared GPU the other processes keep room (on the rented H100, shared
 // with 31-42 GB of other work, a 2^31 table left the relay's new processes no memory for a context)
 const BREAK_RESERVE_F = 0.15;
+// A GPU strategy whose tool fails for want of GPU memory (a context it cannot create, an allocation: another process
+// holds the memory for a while, e.g. the game or a second search on the same GPU) is started again after GPU_RETRY_S
+// (then every last value) instead of staying in error for the whole search (cycle 5: a cuCtxCreate "out of memory" in
+// the first seconds on the shared H100 cost Infinity Pain every move, straight and the GPU random runs for 30 min). The
+// breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one.
+const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
+/** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
+const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
+const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
+const retryHolds = () => retryTimers.some(Boolean);
+function clearRetries() { for (let k = 0; k < retryTimers.length; k++) { if (retryTimers[k]) clearTimeout(retryTimers[k]); retryTimers[k] = null; } }
+/** strategy n's process ended with a transient GPU error (ch: that process): start it again after the back-off (again:
+ *  what starts it, launchOrWait by default); false when the search is over or out of time */
+function gpuRetry(n, ch, again) {
+	const V = S.strategies[n], S0 = S, wait0 = V.retries || 0;
+	if (!S.running || S.halted || S.stage === 'stopped' || S.gpuFailed) return false;
+	// (a process that ran a while before it failed: the back-off starts over)
+	const k = V.retries = ch && ch.startedAt && Date.now() - ch.startedAt > 120000 ? 1 : wait0 + 1;
+	const wait = GPU_RETRY_S[Math.min(k - 1, GPU_RETRY_S.length - 1)];
+	if (S.seconds - searchClock(Date.now()) - wait < 3) return false;
+	S.gpuRetries = (S.gpuRetries || 0) + 1;
+	note(`${V.label}: ${V.error}; again in ${wait} s (retry ${k})`);
+	Object.assign(V, { state: 'waiting', detail: `the GPU's memory was taken; again in ${wait} s (retry ${k})`, error: null });
+	if (retryTimers[n]) clearTimeout(retryTimers[n]);
+	retryTimers[n] = setTimeout(() => {
+		retryTimers[n] = null;
+		if (S !== S0) return;
+		// (the breaker's step: breakLaunch ends its round itself when the search is over or out of time)
+		if (again && S.running && !alive(kids[n])) { again(); save(); return; }
+		if (!S.running || S.halted || S.stage === 'stopped' || S.gpuFailed || alive(kids[n]) || S.seconds - searchClock(Date.now()) < 2) {
+			if (V.state === 'waiting' && !alive(kids[n])) V.state = 'ended';
+			if (S.running && !running()) finish(); else save();
+			return;
+		}
+		Object.assign(V, { state: 'starting', detail: '' });
+		if (again) again(); else launchOrWait(n);
+		save();
+	}, wait * 1000);
+	return true;
+}
 /** the wall breaker's round is running (from its start to its end, or its process alive): the others' new processes wait (resumeDeferred) */
 const breakerBusy = () => !!S && ((!!brk && !!brk.round) || (Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]))));
 /** strategy n's next process, or, while the wall breaker's round runs (its table took the memory), a wait for its end */
@@ -1242,7 +1282,7 @@ function state() {
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 let building = false;       // the physics check of a starting search (a worker thread) is under way
 let searchGen = 0;          // the search whose physics check / tool check is awaited (a stop or a newer search ends the wait)
-const running = () => busy.size > 0 || building || breakHolds();
+const running = () => busy.size > 0 || building || breakHolds() || retryHolds();
 /** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped'). The GPU tool is asked to stop
  *  (its stop file: it ends between two kernel launches, within about one; killing it while a kernel runs makes the
  *  NVIDIA driver reset the GPU) and killed only if it is still running 2 s later; the CPU search is killed. */
@@ -1909,6 +1949,9 @@ function launch(n) {
 			if (S.breaker) S.breaker.cellLog = ev.cellLog;
 			// (once per table size: a round of 30 runs noted it 30 times, and the log keeps 30 lines)
 			if (brk && brk.cellLogNoted !== ev.cellLog) { brk.cellLogNoted = ev.cellLog; note(`${V.label}: ${ev.warn}${Number.isFinite(ev.freeMB) ? ` (${ev.freeMB} MB free)` : ''}`); }
+			// (under a quarter of the table it planned: another process holds the memory; it waits for it, the round's
+			// first BREAK_MEM_WAITS times, rather than run on a table too small for its wall (2^24 on the shared H100))
+			if (V.brk && ev.cellLog <= V.brk.cellLog - 2 && brk && brk.round && brk.round.chain && (brk.round.memWaits || 0) < BREAK_MEM_WAITS) halt(ch, 'memwait');
 		} else if (ev.error && ev.steer === 0 && !V.noSteer) {
 			// the tool cannot use the steer file (the GPU's memory, a stale file): this strategy again without it, now and
 			// from now on (its distances the reach field's: closer() ranks them behind the steer field's)
@@ -1962,6 +2005,14 @@ function launch(n) {
 			note(`${V.label}: error: ${V.error}`);
 		}
 		if (!cpu && V.error && (code === 6 || code === 7 || crashed)) gpuFailed(n);
+		// (out of GPU memory, at its context or an allocation: another process holds it for now; the strategy starts again
+		// after a back-off, gpuRetry. The relay and the breaker go on their own way below.)
+		else if (!cpu && V.error && !ch.stopWhy && gpuTransient(V.error) && V.key !== 'relay' && V.key !== 'breaker' && gpuRetry(n, ch)) {
+			if (ch.probeTimer) clearTimeout(ch.probeTimer);
+			totals();
+			save();
+			return;
+		}
 		if (V.key === 'explore') {
 			// the probe (PROBE_S) ended before its first try ran through: too many situations at the finest cells here (its
 			// time, or a full table): the ladder from PASS_START, as if the probe had not been. A route: it passed.
@@ -2064,6 +2115,15 @@ function launch(n) {
 		if (V.key === 'breaker') {
 			const how = ch.stopWhy || (code === 0 ? end : '');
 			if (S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && how !== 'stopped' && how !== 'beaten' && how !== 'finish') {
+				// (out of GPU memory, or a table smaller than planned (memwait): the same step again after a back-off, at most
+				// BREAK_MEM_WAITS times a round; then as before)
+				const R = brk && brk.round;
+				if (R && R.chain && (how === 'memwait' || (V.error && gpuTransient(V.error))) && (R.memWaits || 0) < BREAK_MEM_WAITS) {
+					V.retries = R.memWaits || 0;
+					R.memWaits = V.retries + 1;
+					if (!V.error) V.error = `2^${V.brk.cellLog} cells do not fit the GPU's free memory now (2^${V.brk.cellLogGot})`;
+					if (gpuRetry(n, null, () => { if (!breakLaunch(n) && !running()) finish(); })) { save(); return; }
+				}
 				// ("the prefix dies", out of GPU memory and the like: the next starting point, not an error of the search)
 				if (V.error) { note(`${V.label}: ${V.error}; the next starting point`); V.error = null; if (brk && brk.round) brk.round.chain = null; }
 				if (breakAfter(n, how)) { save(); return; }
@@ -2090,7 +2150,7 @@ function launch(n) {
  *  search is the search, as without a GPU). The proof (a CPU process) does not count: its end asks again. */
 function cpuDone() {
 	if (!S.result || !S.strategies.some((q) => !q.cpu && !q.rolls) || [...busy].some((c) => !c.cpuSearch && !c.rollsSearch && c !== proofKid) ||
-		S.strategies.some((q) => !q.cpu && !q.rolls && q.state === 'error')) return;
+		S.strategies.some((q) => !q.cpu && !q.rolls && q.state === 'error') || retryHolds()) return;
 	// (the one search is a GPU search too: it goes on looking for faster routes, its bursts bounded by the route, until
 	// the time is up)
 	S.strategies.forEach((q, k) => { if ((q.cpu || q.rolls) && !q.gpuShare && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
@@ -2143,6 +2203,7 @@ function finish() {
 	S.running = false;
 	if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
 	if (schedTimer) { clearInterval(schedTimer); schedTimer = null; }
+	clearRetries();
 	sched = null;
 	for (let k = 0; k < S.strategies.length; k++) { try { fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* none */ } }
 	S.strategies.forEach((q) => { if (q.state === 'waiting') Object.assign(q, { state: 'ended' }); });
@@ -2338,6 +2399,12 @@ function stop() {
 	S.message = S.result ? '' : 'The search was stopped before it found a route.';
 	S.strategies.forEach((q, k) => { if (alive(kids[k])) { q.state = 'stopped'; halt(kids[k], 'stopped'); } });
 	for (let k = 0; k < S.strategies.length; k++) { try { fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* none */ } }
+	// (a strategy waiting to start again after a GPU memory error: it does not; nothing else running, the search ends)
+	if (retryHolds()) {
+		clearRetries();
+		S.strategies.forEach((q, k) => { if (q.state === 'waiting' && !alive(kids[k])) q.state = 'stopped'; });
+		if (!running()) { finish(); return state(); }
+	}
 	proofAlone();
 	saveNow();
 	if (building) {

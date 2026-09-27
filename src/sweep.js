@@ -17,6 +17,8 @@
 // windows(n, len, step) -> [[w0, w1], ...] covering [0, n]
 // sigOf(H, w0, w1) -> sorted sampled state hashes of ticks w0..w1 (H = splice.js trace().H)
 // lossEstimate(tr, w0, w1, loops) -> ticks the window may hold (tr = common.replay trace; loops = loops.revisits)
+// mapWindow(fromH, fromN, toH, toN, w0, w1) -> the window on another run; keptShare(outH, outN, refH, refN, has) -> the
+// share of a find's own states the best holds (the sweep's stale finds)
 // Memo(records) -> {state(sig, round), record(sig, saved, round), records}
 const SAMPLE = 8;          // keep the states whose hash is 0 mod SAMPLE (content-defined: shift-invariant)
 const SPAN = 0.6;          // the same span: at least 60% of each sample is in the other (windows of other sizes differ)
@@ -109,6 +111,32 @@ function leadEstimate(level, ms, tr, w0, w1, opts) {
 	return { lead: Math.round(lead), at, ms: Date.now() - t0 };
 }
 
+/**
+ * A window [w0, w1] of one run on another (H = splice.js trace().H of each, n their finish ticks): from the other run's
+ * tick of the latest state at or before w0 that both share, plus the ticks since it; the same length. With no shared
+ * state before it: w0 itself (clamped). The sweep's stale finds go back on the current best this way.
+ */
+function mapWindow(fromH, fromN, toH, toN, w0, w1) {
+	const at = new Map();
+	for (let t = toN; t >= 0; t--) at.set(toH[t], t);   // (the earliest tick of a repeated state)
+	let s = -1;
+	for (let t = Math.min(w0, fromN); t >= 0 && s < 0; t--) { const k = at.get(fromH[t]); if (k !== undefined) s = k + (w0 - t); }
+	if (s < 0) s = w0;
+	s = Math.max(0, Math.min(s, toN - 1));
+	return [s, Math.min(toN, s + Math.max(1, w1 - w0))];
+}
+/**
+ * How much of a find reached the best: of the states of `out` (a window's output run) that its start run `ref` lacks, the
+ * share the best holds (has(h): the best has state h); 1 when the find has no state of its own.
+ */
+function keptShare(outH, outN, refH, refN, has) {
+	const ref = new Set();
+	for (let t = 0; t <= refN; t++) ref.add(refH[t]);
+	let mine = 0, kept = 0;
+	for (let t = 0; t <= outN; t++) { if (ref.has(outH[t])) continue; mine++; if (has(outH[t])) kept++; }
+	return mine ? kept / mine : 1;
+}
+
 /** The window memory (records as saved in grind_windows.json). */
 class Memo {
 	constructor(records) { this.records = Array.isArray(records) ? records.filter((r) => r && Array.isArray(r.s)) : []; }
@@ -153,4 +181,4 @@ class Memo {
 	}
 }
 
-module.exports = { windows, sigOf, innerOf, lossEstimate, leadEstimate, Memo, SAMPLE, FAILS_N, CHANGED, EDGE };
+module.exports = { windows, sigOf, innerOf, lossEstimate, leadEstimate, mapWindow, keptShare, Memo, SAMPLE, FAILS_N, CHANGED, EDGE };
