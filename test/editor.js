@@ -1020,6 +1020,22 @@ async function cpuSection() {
 		!!kr && kr.desc === 'key:red' && kr.gain > 0 && kr.tick === kr.inputs.length && at.key === kr.room && at.entered && at.desc === 'key:red' &&
 		ks.filter((e) => e.kind === 'room').length === new Set(ks.filter((e) => e.kind === 'room').map((e) => e.room)).size,
 		ks.map((e) => `${e.kind} "${e.desc}" gain ${e.gain} tick ${e.tick}`).join('; '));
+	// room instances on the CPU (goexplore.js roomAt): a 60 x 50 tunnel one tile high (no jumping over anything) with purple
+	// switch 1 at x 15 and x 45 and the trophy at x 57: the second switch turns purple off again 30 tiles from every
+	// (start) cell, a room of its own ("(start) #(40,48)", gain 1: a source and head C's burst); EEAT_INSTANCES=0: none
+	const tn = room(60, 50);
+	for (let x = 6; x <= 58; x++) tn.push([x, 47, 9]);
+	tn.push([15, 48, 113, 1], [45, 48, 113, 1], [3, 48, 255], [57, 48, 121]);
+	const tnFile = path.join(HOME, 'tunnel.eelvl');
+	fs.writeFileSync(tnFile, ED.eelvlOf({ name: 'tunnel', width: 60, height: 50, cells: tn }));
+	const tnArgs = ['--workers=1', '--seed=1', '--seconds=3', '--rooms=1'];
+	const tnOn = await goexplore(tnFile, tnArgs), tnOff = await goexplore(tnFile, tnArgs, null, { env: Object.assign({}, process.env, { EEAT_INSTANCES: '0' }) });
+	const tnI = tnOn.events.filter((e) => e.ev === 'room' && / #\(40,48\)$/.test(e.desc)), tnS = tnOn.events.filter((e) => e.ev === 'source' && e.kind === 'room' && / #/.test(e.desc));
+	const tnW = tnOn.done && tnOn.done.workers[0], tnW0 = tnOff.done && tnOff.done.workers[0];
+	check('room instances on the CPU: the tunnel\'s second purple switch turns purple off 30 tiles from every (start) cell: a room of its own, "(start) #(40,48)", with a source of gain 1; EEAT_INSTANCES=0: no instance',
+		tnI.length === 1 && tnS.length === 1 && tnS[0].gain === 1 && !!tnW && tnW.instances >= 1 && tnOn.results.length > 0 &&
+		!!tnW0 && tnW0.instances === 0 && !tnOff.events.some((e) => (e.ev === 'room' || e.ev === 'source') && / #/.test(e.desc)) && tnOff.results.length > 0,
+		`on: ${tnI.map((e) => `${e.desc} t${e.t}`).join(', ')}; sources ${tnS.map((e) => `${e.desc} gain ${e.gain}`).join(', ')}; instances ${tnW ? tnW.instances : '-'} / off ${tnW0 ? tnW0.instances : '-'}; ${tnOn.summary}`);
 	// a full archive sweeps: a 60 x 50 level of 10 purple switches, a purple door wall and a trophy walled in (no route;
 	// --prune=0, as the editor runs a level the reach field calls impossible). With room for 300 cells (--maxCells) the
 	// cells no run touched for longest go and the search goes on; no room is left without cells (a room is made with its
