@@ -86,13 +86,13 @@
 // `trackMax` / `trackTicks` in the workers' stat and done events (the "Find a route" research's yardstick for a search).
 // --oracle=<route.eetas>: the headroom of any progress measure: head A ordered by one that knows a finishing route (per
 // room the route passes, the ticks to go at its latest visit of a tile / --oracleTpt (9) ticks per tile, spread over the
-// room by the walk; 1e4 + the reach cost in a room the route never enters); --oracleMode=room: only the route's order of
-// rooms (the ticks to go when it last entered the room / --oracleTpt, plus the reach cost inside it); --oracleMode=line:
-// only the route's path, as a guide line drawn on the level would give it (the length of the path left from its latest
-// visit of a tile, scaled so the start's value is the route's ticks / --oracleTpt (--oracleScale=x: x times the reach
-// cost at the start), spread by the walk over the whole level,
-// doors open, whatever the room; --oracleStep=K: a
-// rough line, the route's centre every K ticks joined by straight segments, as a hand-drawn one would be).
+// room by the walk; 1e4 + the reach cost in a room the route never enters; --guideMix mixes it with the reach cost too).
+// --oracleMode=room: only the route's order of rooms (the ticks to go when it last entered the room / --oracleTpt, plus
+// the reach cost inside it). --oracleMode=line: only the route's path, as a guide line drawn on the level would give it
+// (the length of the path left from its latest visit of a tile, scaled so the start's value is the route's ticks /
+// --oracleTpt, or with --oracleScale=x x times the reach cost at the start; spread by the walk over the whole level,
+// doors open, whatever the room; --oracleStep=K: a rough line, the route's centre every K ticks joined by straight
+// segments, their tiles in walls left out).
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
@@ -101,7 +101,8 @@
 //        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
-//        [--guide=<model.json>] [--guideMix=1] [--track=<route.eetas>] [--oracle=<route.eetas>] [--oracleTpt=9] [--oracleMode=tile|room|line] [--oracleStep=1] [--oracleScale=0]
+//        [--guide=<model.json>] [--guideMix=1] [--track=<route.eetas>] [--oracle=<route.eetas>] [--oracleTpt=9]
+//        [--oracleMode=tile|room|line] [--oracleStep=1] [--oracleScale=0]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -463,7 +464,7 @@ function explore(L, field, a, seed, ctrl, post) {
 		// between two walls, the room's doors as the route found them, killing tiles only with protection: Dijkstra, a
 		// tile per step); ordering only, like --guide. --oracleMode=room: what a perfect planner of rooms would know (the
 		// route's ticks to go when it last entered the room / --oracleTpt), inside a room the reach cost; --oracleMode=line:
-		// what a guide line drawn along the route would tell (the path's length left, in tiles, one spread, doors open)
+		// what a guide line drawn along the route would tell (the path's length left, scaled, one spread, doors open)
 		if (!['tile', 'room', 'line'].includes(a.oracleMode)) throw new Error(`bad --oracleMode=${a.oracleMode} (tile, room or line)`);
 		const ms = C.readEetas(a.oracle), s2 = new E.EESim(L), i2 = new E.EEInput(), R2 = coarse ? roomOf(L) : null, T = ms.length;
 		const oc = NG.levelCtx(L, field, 1), seeds = new Map(), enter = new Map(), LINE = a.oracleMode === 'line', path = [];
@@ -521,7 +522,7 @@ function explore(L, field, a, seed, ctrl, post) {
 			let left = 0;
 			for (let k = path.length - 1; k >= 0; k--) {
 				if (k < path.length - 1) left += Math.hypot(path[k] % W - path[k + 1] % W, ((path[k] / W) | 0) - ((path[k + 1] / W) | 0));
-				if (!best.has(path[k])) best.set(path[k], left);
+				if (!best.has(path[k]) && !oc.wall[path[k]]) best.set(path[k], left);   // (a drawn line's tiles in walls mark nothing)
 			}
 			// (the scale decides the greediness against head A's 2 sqrt(picks): the start's value is the route's ticks /
 			// --oracleTpt, as in the full oracle; --oracleScale=x: x times the reach cost at the start, which a drawn line
@@ -556,12 +557,12 @@ function explore(L, field, a, seed, ctrl, post) {
 		gcost = a.oracleMode === 'room' ? (rc) => {
 			if (rc < 0 || rc >= 1e4) return rc;
 			const e = enter.get(coarse ? roomKey >>> 0 : 0);
-			return (e === undefined ? 1e4 : e) + rc;
+			return mix * ((e === undefined ? 1e4 : e) + rc) + (1 - mix) * rc;
 		} : (rc) => {
 			if (rc < 0 || rc >= 1e4) return rc;
 			const d = ORC.get(coarse && !LINE ? roomKey >>> 0 : 0);
 			const v = d === undefined ? Infinity : d[tile];
-			return v < Infinity ? v : 1e4 + rc;
+			return mix * (v < Infinity ? v : 1e4 + rc) + (1 - mix) * rc;
 		};
 	}
 	const GO = GM !== null || !!a.oracle;
