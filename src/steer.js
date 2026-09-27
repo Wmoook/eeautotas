@@ -961,6 +961,9 @@ function nextGate(st, sim) {
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
+	// (st.dpFirst: the coin DP's value wherever it has one, the layer field's only past the coins (goexplore.js --dpFirst):
+	// the layer's own way needs no more coins, and on Forgotten Veil it is a false one (the portal at (77,109)))
+	if (st.dpFirst) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
 	const d = dpFifths(st, sim, v >= 0 ? v : Infinity);
 	return d < 0 ? v : v < 0 ? d : Math.min(v, d);
 }
