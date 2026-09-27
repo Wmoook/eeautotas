@@ -250,6 +250,103 @@ function logTail(id, n) {
 		return lines.slice(-n);
 	} catch (e) { return []; } finally { if (fd >= 0) fs.closeSync(fd); }
 }
+// A job whose grind runs on a rented machine: src/out/remote/farm.js (the rented GPUs' monitor, running on this machine) writes
+// remote.json every 30 s: {t (this machine's clock), machine, running, gpuIndex, state, stage, rounds, bestRunTicks, history (the
+// remote status.json's last 8), live (its live.json), gpu (its gpu_status.json), log (the last 12 grind.log lines), since
+// (optional: when the rented session started), source (optional: the `--source` of its hand-ins, else "<the machine's first
+// word> farm")}, and hands a faster remote best in every 5 min (`tas.js try`). Everything in it comes from the rented machine:
+// numbers are made numbers here, text is escaped by the page. Shown only while
+// fresh: a stale file (the farm or the rental ended) is not shown at all. Jobs that exist only on a rented machine (no job
+// folder here) are in src/out/remote/extra_jobs.json {t, jobs: {id: the same record}} (the Rented machines box only).
+const REMOTE_FRESH_MS = 90e3;
+const REMOTE_LIVE_MS = 120e3;   // the remote live.json is written every second while its grind runs (the clocks: a rented machine's was 5 s ahead)
+const REMOTE_HANDIN_MIN = 5;   // (farm.js: every 5 min)
+const REMOTE_EXTRAS = path.join(__dirname, 'out', 'remote', 'extra_jobs.json');
+/** 18:00 local time at or before t: where "tonight" starts when remote.json has no `since` */
+function tonightStart(t) { const d = new Date(t); d.setHours(18, 0, 0, 0); if (d.getTime() > t) d.setDate(d.getDate() - 1); return d.getTime(); }
+/**
+ * A remote.json record -> summary().remote (null unless fresh). local = the job's own best (ticks), orig = its original, own =
+ * its history (0, 0, null for a job that exists only there: `ahead` 0, tonight from the remote history alone).
+ */
+function remoteView(r, now, local, orig, own) {
+	if (!r || typeof r !== 'object' || !(now - (+r.t || 0) < REMOTE_FRESH_MS)) return null;
+	const best = +r.bestRunTicks > 0 ? +r.bestRunTicks : 0;
+	// running = the farm saw the grind's process there AND its status says running or its live.json is fresh: the process check also
+	// matches another checkout's grind of the same job, whose copy here stopped long ago (its speeds would be old)
+	const fresh = (x) => !!x && typeof x === 'object' && r.t - (+x.t || 0) < REMOTE_LIVE_MS;
+	const lv = r.live && typeof r.live === 'object' ? r.live : {};
+	const liveOk = fresh(lv) && !!lv.cpu;
+	const running = !!r.running && (r.state === 'running' || liveOk);
+	const c = running && liveOk ? lv.cpu : null;
+	const g0 = !running ? null : liveOk ? lv.gpu : fresh(r.gpu) ? r.gpu : null;   // (the remote live.json has gpu_status.json only while that is fresh)
+	const g = g0 && typeof g0 === 'object' ? Object.assign({}, r.gpu || {}, g0) : null;
+	const hist = (Array.isArray(r.history) ? r.history : []).filter((h) => h && +h.runTicks > 0)
+		.map((h) => ({ t: +h.t || 0, runTicks: +h.runTicks, saved: +h.saved || 0, what: String(h.what || '') }));
+	// tonight: the best known at `since` (the job's own history is complete; the remote one holds its last 8) -> the best of both now
+	const since = +r.since || tonightStart(now);
+	let from = orig || (hist.length ? hist[0].runTicks + (+hist[0].saved || 0) : best);
+	for (const h of [...(Array.isArray(own) ? own : []), ...hist]) if (h && h.t < since && h.runTicks > 0) from = Math.min(from, h.runTicks);
+	const to = Math.min(local || best || from, best || local || from);
+	const found = hist.filter((h) => h.t >= since);
+	const ahead = best && local ? local - best : 0;
+	// `there` = what this copy gained for the job tonight: its hand-ins here since `since` (the job's history, `what` "try: <source>")
+	// and its lead not handed in yet; `tonight.saved` is the job's gain from every source (the local grind, other machines). A job
+	// only there: all of it.
+	const handIn = `try: ${r.source ? String(r.source) : `${String(r.machine || 'a').split(' ')[0]} farm`}`;
+	let there = Math.max(0, from - to);
+	if (Array.isArray(own)) {
+		there = Math.max(0, ahead);
+		for (const h of own) if (h && h.t >= since && h.what === handIn && +h.saved > 0) there += +h.saved;
+	}
+	return {
+		t: +r.t, age: Math.max(0, now - r.t), machine: String(r.machine || 'a rented machine'), running,
+		gpuIndex: r.gpuIndex === null || r.gpuIndex === undefined || r.gpuIndex === '' ? null : String(r.gpuIndex),
+		state: r.state ? String(r.state) : null, stage: running ? String(r.stage || '') : '', rounds: +r.rounds || 0,
+		lastLive: +lv.t || null,   // (the remote clock) when its grind last wrote live.json: a stopped copy's "stopped since"
+		best: best ? { runTicks: best, time: fmt(best) } : null,
+		ahead,   // ticks the remote best is ahead of the job's own (handed in within REMOTE_HANDIN_MIN)
+		handInMin: REMOTE_HANDIN_MIN,
+		cpu: c ? { ticksPerSec: +c.ticksPerSec || 0, ticks: +c.ticks || 0, threads: +c.threads || 0, model: c.model ? C.cpuName(String(c.model)) : '' } : null,
+		gpu: g ? { name: String(g.name || 'GPU'), ticksPerSec: +g.ticksPerSec || 0, ticks: +g.ticks || 0, edges: +g.edges || 0, state: g.state ? String(g.state) : null,
+			family: g.family ? String(g.family) : null, round: +g.round || 0 } : null,
+		history: hist.slice(-8),
+		tonight: { since, from, to, saved: Math.max(0, from - to), found: found.length, more: found.length >= 8 && found.length === hist.length },
+		there,
+		log: (Array.isArray(r.log) ? r.log : []).slice(-12).map(String),
+	};
+}
+/** summary().remote: the rented machine's copy of the job (null without a fresh remote.json) */
+function remoteState(id, st, orig, now) {
+	return remoteView(C.readJSON(path.join(jobDir(id), 'remote.json'), null), now, st.bestRunTicks || orig, orig, st.history);
+}
+/**
+ * GET /api/state `rented`: the rented machines with a fresh remote.json, their jobs (with the jobs that exist only there: `extra`,
+ * from extra_jobs.json, or the file `extras` in tests), speeds and tonight's gains
+ */
+function rentedMachines(jobs, now, extras) {
+	now = now || Date.now();
+	const by = new Map();
+	const add = (id, name, j, r) => {
+		if (!by.has(r.machine)) by.set(r.machine, { machine: r.machine, running: 0, cpuTicksPerSec: 0, gpuTicksPerSec: 0, saved: 0, updated: 0, jobs: [] });
+		const m = by.get(r.machine);
+		const cpu = r.cpu ? r.cpu.ticksPerSec : 0, gpu = r.gpu ? r.gpu.ticksPerSec : 0;
+		m.running += r.running ? 1 : 0; m.cpuTicksPerSec += cpu; m.gpuTicksPerSec += gpu; m.saved += r.there; m.updated = Math.max(m.updated, r.t);
+		m.jobs.push({ id, name, extra: !j, running: r.running, gpuIndex: r.gpuIndex, gpuName: r.gpu ? r.gpu.name : null, cpuTicksPerSec: cpu, gpuTicksPerSec: gpu,
+			stage: r.stage, lastLive: r.lastLive, best: r.best, localBest: j ? j.best : null, ahead: r.ahead, tonight: r.tonight, there: r.there });
+	};
+	for (const j of jobs) if (j.remote) add(j.id, j.name, j, j.remote);
+	const x = C.readJSON(extras || REMOTE_EXTRAS, null);
+	if (x && x.jobs && typeof x.jobs === 'object') {
+		const known = new Set(jobs.map((j) => j.id));
+		for (const [id, rec] of Object.entries(x.jobs)) {
+			const r = !known.has(id) && rec && typeof rec === 'object' ? remoteView(Object.assign({ t: x.t }, rec), now, 0, 0, null) : null;
+			if (r) add(id, id, null, r);
+		}
+	}
+	const gi = (x) => (x.gpuIndex === null ? 1e9 : +x.gpuIndex);
+	for (const m of by.values()) m.jobs.sort((x, y) => (y.running - x.running) || gi(x) - gi(y) || String(x.name).localeCompare(String(y.name)));
+	return { since: tonightStart(now), machines: [...by.values()].sort((x, y) => x.machine.localeCompare(y.machine)) };
+}
 /** Everything the web app and `tas.js status` show about a job. extraPid: a grind the caller started itself. */
 function summary(id, extraPid) {
 	const dir = jobDir(id);
@@ -268,12 +365,13 @@ function summary(id, extraPid) {
 	// the live speed (grind.js writes live.json every second): only while the job runs and the file is fresh
 	const lv = pid ? C.readJSON(path.join(dir, 'live.json'), null) : null;
 	const live = lv && lv.cpu && Date.now() - (+lv.t || 0) < 5000 ? lv : null;
+	const remote = remoteState(id, st, orig, Date.now());
 	return { ...meta, startMode: meta.startMode || 'reset', levelId: meta.levelId || C.jobLevelId(id), running: !!pid, pid: pid || null, bestVersion,
 		state: pid ? 'running' : (st.state === 'error' ? 'error' : (st.state === 'finished' ? 'finished' : 'stopped')), error: st.error || null,
 		best: { runTicks: bestTicks, time: fmt(bestTicks) }, original: { runTicks: orig, time: fmt(orig) },
 		savedTicks: orig - bestTicks, history: st.history || [], stage: pid ? (st.stage || '') : '', round: st.rounds || 0,
 		coinsOptional: st.coinsOptional, optimizingSince: pid ? st.sessionStarted : null, lastUpdate: st.updated || null, workers: st.workers,
-		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report, live,
+		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report, live, remote,
 		inbox: inboxPending(id), focus: focusState(id), logTail: logTail(id, 14),
 		files: { dir, best: path.join(dir, 'best.eetas'), level: levelJsonOf(id) } };
 }
@@ -780,11 +878,23 @@ function liveText(lv) {
 	if (g) s += ` + ${rateText(g.ticksPerSec)} on the GPU (${g.name || 'GPU'}) = ${rateText((c.ticksPerSec || 0) + (g.ticksPerSec || 0))}`;
 	return `${s}; ${countText((c.ticks || 0) + ((g && g.ticks) || 0))} ticks simulated this session`;
 }
+/** summary().remote -> "running on A100 x8 (Vast.ai) GPU 7 (12 s ago): <speeds>; now deep16_seg5.2, round 15; best 1:50.87 (11087): 5 ticks ahead ..." */
+function remoteText(r) {
+	const where = `${r.machine}${r.gpuIndex !== null ? ` GPU ${r.gpuIndex}` : ''}${!r.running && r.lastLive ? ` since ${new Date(r.lastLive).toTimeString().slice(0, 5)}` : ''}` +
+		` (${Math.round(r.age / 1000)} s ago)`;
+	let s = `${r.running ? 'running' : 'stopped'} on ${where}`;
+	if (r.cpu) s += `: ${liveText({ cpu: r.cpu, gpu: r.gpu }).replace(/; .*$/, '')}; now ${r.stage || '-'}, round ${r.rounds}`;
+	if (r.best) s += `; best ${r.best.time} (${r.best.runTicks})` + (r.ahead > 0 ? `: ${r.ahead} tick${r.ahead === 1 ? '' : 's'} ahead of this best (handed in within ${r.handInMin} min)`
+		: r.ahead < 0 ? `: this best is ${-r.ahead} tick${r.ahead === -1 ? '' : 's'} faster` : ': the same as this best');
+	const n = r.tonight;
+	return `${s}; tonight (since ${new Date(n.since).toTimeString().slice(0, 5)}) there ${r.there > 0 ? `-${r.there}` : '0'}; the job ${fmt(n.from)} -> ${fmt(n.to)}${n.saved > 0 ? ` (-${n.saved}, all sources)` : ''}`;
+}
 function formatStatus(s) {
 	const L = [];
 	const since = s.optimizingSince ? new Date(s.optimizingSince).toTimeString().slice(0, 5) : '-';   // (- until the grind's first status)
 	L.push(`${s.name}  (${s.id})  ${s.running ? `RUNNING pid ${s.pid}, ${s.workers || '?'} workers, since ${since}, round ${s.round}, now: ${s.stage || '-'}` : s.state.toUpperCase()}`);
 	if (s.live) L.push(`speed now  ${liveText(s.live)}`);
+	if (s.remote) L.push(`rented     ${remoteText(s.remote)}`);
 	if (s.error) L.push(`error: ${s.error}`);
 	L.push(`level      ${s.level ? `${s.level.name} by ${s.level.owner || '?'} ${s.level.width}x${s.level.height} (${s.level.file})` : '?'}; data ${s.files.level}`);
 	L.push(`start      TAS started ${START_MODES[s.startMode] || s.startMode} in eeo-tas` + (s.startMatters === false ? ' (makes no difference on this level: one spawn point, no time doors)'
@@ -804,11 +914,12 @@ function formatStatus(s) {
 		for (const p of h) L.push(`  ${new Date(p.t).toTimeString().slice(0, 8)}  -${p.saved} -> ${fmt(p.runTicks)}  ${p.what}`);
 	}
 	if (s.logTail.length) { L.push('log:'); for (const l of s.logTail.slice(-10)) L.push('  ' + l); }
+	if (s.remote && s.remote.log.length) { L.push(`log on ${s.remote.machine}:`); for (const l of s.remote.log.slice(-10)) L.push('  ' + l); }
 	return L.join('\n') + '\n';
 }
 
 module.exports = {
-	formatWhere, formatReplay, formatStatus, evText, liveText,
+	formatWhere, formatReplay, formatStatus, evText, liveText, remoteText, remoteView, rentedMachines, REMOTE_FRESH_MS,
 	JOBS, DATA, RUNNING_FILE, jobDir, slug, resolve, levelJsonOf, loadJobLevel, pct,
 	pidAlive, runningPid, killTree, stopGpuSearcher, updateStatus, startJob, stopJob, deleteJob, importJob,
 	summary, listJobs, focusState, finishReport, tryCandidate, inboxResult, prunePieces, where, replayInfo, renderJob, focus, logTail,
