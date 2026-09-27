@@ -413,7 +413,31 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
 			if (k < nearest) nearest = k;
 		}
-		if (p.target == 2) {   // ahead of the run: a hit when the run reaches this tile only minGain+ ticks later
+		if (p.target == 2 && p.visitOff) {   // ahead of the run, every visit (--visits=1): per visit its closest tick, the
+			// latest visit with one (the biggest gain); with --samediscrete only ticks where the discrete state is this one's
+			const i32 tile = cy * p.L.W + cx, now = p.fromTick + p.layer + 1;
+			i32 bestR = -1;
+			const i32 v0 = p.visitOff[tile], v1 = p.visitOff[tile + 1];
+			if (v0 < v1) {
+				const u64 cd = p.rDisc ? sim.hashDiscrete(p.discNoCoins != 0) : 0ull;
+				for (i32 k = v0; k < v1; k++) {
+					const i32 r = p.visitTick[k];
+					if (r - now < p.minGain || r - p.fromTick < p.minAhead) continue;
+					i32 vr = -1; float vd = p.maxDist;
+					for (i32 rr = r; rr < r + 24 && rr < p.nRef; rr++) {
+						if (p.rDisc && p.rDisc[rr] != cd) continue;
+						const float dd = fabsf((float)s.px - p.rX[rr]) + fabsf((float)s.py - p.rY[rr]) + 3.f * (fabsf((float)s.speed_x - p.rVX[rr]) + fabsf((float)s.speed_y - p.rVY[rr]));
+						if (dd <= vd) { vd = dd; vr = rr; }
+					}
+					if (vr > bestR) bestR = vr;
+				}
+			}
+			if (bestR >= 0 && atomicMax(&p.tileBest[tile], bestR - now) < bestR - now) {
+				const u32 h = atomicAdd(p.nHits, 1u);
+				if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = bestR - now; e.refTick = bestR; p.hits[h] = e; }
+			}
+		}
+		else if (p.target == 2) {   // ahead of the run: a hit when the run reaches this tile only minGain+ ticks later
 			const i32 r = p.refTile[cy * p.L.W + cx], now = p.fromTick + p.layer + 1;
 			if (r >= 0 && r < now - p.slack) continue;   // behind the run's schedule: drop
 			if (r >= 0 && r - now >= p.minGain && r - p.fromTick >= p.minAhead) {

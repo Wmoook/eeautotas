@@ -539,7 +539,8 @@ async function mutateLoop(tag) {
 let gpuChild = null;
 function startGpu() {
 	const fd = fs.openSync(path.join(OUT, 'gpu.log'), 'a');
-	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : []), ...(a.every !== undefined ? [`--every=${a.every}`] : [])],
+	gpuChild = spawn(process.execPath, [path.join(__dirname, 'gpusearch.js'), `--job=${OUT}`, `--parent=${process.pid}`, ...(a.siblings !== undefined ? [`--siblings=${a.siblings}`] : []), ...(a.every !== undefined ? [`--every=${a.every}`] : []),
+		...Object.keys(a).filter((k) => /^leap|^everyCells$/.test(k)).map((k) => `--${k}=${a[k]}`)],   // (--leaps, --leapWhen, ...: gpusearch.js's long-range shortcuts; --everyCells)
 		{ stdio: ['ignore', fd, fd], windowsHide: true });
 	fs.closeSync(fd);
 	saveStatus({ gpuPid: gpuChild.pid });   // (jobs.js stopJob stops it first, alone: its eegpu is never killed mid-kernel)

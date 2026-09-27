@@ -47,6 +47,13 @@ struct ExploreParams {
 	const i32* refTile; i32 fromTick, minGain, slack, minAhead;
 	i32* tileBest;                     // target 2: the best gain recorded per tile (a hit only when it improves)
 	const float* rX; const float* rY; const float* rVX; const float* rVY; i32 nRef; float maxDist;   // the run's states
+	// target 2 with --visits=1 (src/leaps.js): EVERY visit of a tile, not only the first (a loop, a spur, a snake come back
+	// to the same tiles later): visitOff[tile] .. visitOff[tile + 1] index visitTick = the ticks >= fromTick the run's box
+	// centre enters that tile (null = off: the first visit alone, as refTile)
+	const i32* visitOff; const i32* visitTick;
+	// target 2 with --samediscrete=1: the run's discrete state per tick (Sim::hashDiscrete, coin-blind with --nocoins):
+	// a close tick of the run counts only when the state's discrete part is the same there (null = any)
+	const u64* rDisc; i32 discNoCoins;
 	const float* goalDist;             // the goal field (tiles to the trophy; beamhost.h goalField), for the closest attempt
 	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
