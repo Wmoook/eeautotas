@@ -39,6 +39,7 @@ const { spawn } = require('child_process');
 const C = require('./common.js');
 const S = require('./splice.js');
 const LP = require('./loops.js');
+const SW = require('./sweep.js');
 const E = C.E;
 
 const a = { until: '', forever: '', level: '', workers: os.cpus().length, job: '', nocoins: 'auto', gpu: '0', roundMin: '10', anchored: '1', tails: '1' };
@@ -263,19 +264,33 @@ function prunePieces(dir, keep) {
 const LIVE = path.join(OUT, 'live.json');
 const GPU_STATUS = path.join(OUT, 'gpu_status.json');   // {t, name, ticks, ticksPerSec, state, edges}, written by the GPU side
 const CPU_MODEL = ((os.cpus()[0] && os.cpus()[0].model) || '').trim();
-let ticksDone = 0, ticksStage = 0, inStage = false;
-let tickSamples = [];   // [time, session total] per `[ticks]` line of the running stage
-function stageTicks(n) {
-	ticksStage = n;
+// (the sweep runs several tools at once: each running tool's latest count, summed)
+let ticksDone = 0, ticksStage = 0, laneSeq = 0;
+const laneTicks = new Map();
+let tickSamples = [];   // [time, session total] per `[ticks]` line of the running stage(s)
+function stageTicks(lane, n) {
+	laneTicks.set(lane, n);
+	ticksStage = 0;
+	for (const v of laneTicks.values()) ticksStage += v;
 	const now = Date.now();
-	tickSamples.push([now, ticksDone + n]);
+	tickSamples.push([now, ticksDone + ticksStage]);
 	while (tickSamples.length > 2 && now - tickSamples[1][0] >= 3000) tickSamples.shift();   // keep ~3 s (+ one older sample)
 }
-function stageEdge(start) {
-	ticksDone += ticksStage; ticksStage = 0; tickSamples = []; inStage = start;
+function stageStart() {
+	const lane = ++laneSeq;
+	if (!laneTicks.size) tickSamples = [];
+	laneTicks.set(lane, 0);
+	return lane;
+}
+function stageEnd(lane) {
+	ticksDone += laneTicks.get(lane) || 0;
+	laneTicks.delete(lane);
+	ticksStage = 0;
+	for (const v of laneTicks.values()) ticksStage += v;
+	if (!laneTicks.size) tickSamples = [];
 }
 function ticksPerSec() {
-	if (!inStage || tickSamples.length < 2) return 0;
+	if (!laneTicks.size || tickSamples.length < 2) return 0;
 	const [t0, n0] = tickSamples[0], [t1, n1] = tickSamples[tickSamples.length - 1];
 	if (Date.now() - t1 > 5000 || t1 <= t0) return 0;   // the tool stopped reporting
 	return Math.round((n1 - n0) * 1000 / (t1 - t0));
@@ -290,9 +305,9 @@ const liveTimer = setInterval(writeLive, 1000);
 liveTimer.unref();   // (never keeps the grind alive)
 writeLive();
 /** A stage's stdout: `[ticks] N` lines update the live speed and are left out of the stage log; the rest is kept. */
-function tickLines() {
+function tickLines(lane) {
 	let carry = '';
-	const take = (s) => s.replace(/^\[ticks\] (\d+)\r?\n/gm, (m, n) => { stageTicks(+n); return ''; });
+	const take = (s) => s.replace(/^\[ticks\] (\d+)\r?\n/gm, (m, n) => { stageTicks(lane, +n); return ''; });
 	return {
 		data(s) { s = carry + s; const cut = s.lastIndexOf('\n') + 1; carry = s.slice(cut); return take(s.slice(0, cut)); },
 		end() { const s = take(carry + '\n'); carry = ''; return s === '\n' ? '' : s.slice(0, -1); },
@@ -309,26 +324,27 @@ function runTool(script, args, maxMs, logFile) {
 		const ch = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
 			env: C.heapEnv(12000) });
 		const chunks = [];
-		let size = 0, killed = false;
+		let size = 0, killed = false, ended = false;
 		const keep = (d) => { if (size < (64 << 20)) { chunks.push(d); size += d.length; } };
-		const out = tickLines();
-		stageEdge(true);
+		const lane = stageStart();
+		const out = tickLines(lane);
 		ch.stdout.setEncoding('utf8');
 		ch.stdout.on('data', (s) => { const k = out.data(s); if (k) keep(Buffer.from(k)); });
 		ch.stderr.on('data', keep);
 		const inbox = setInterval(checkInbox, 3000);
 		const beat = setInterval(() => saveCursor(), 30000);
 		const kill = setTimeout(() => { killed = true; try { ch.kill(); } catch (e) { /* gone */ } }, maxMs);
+		const end = () => { if (ended) return false; ended = true; clearInterval(inbox); clearInterval(beat); clearTimeout(kill); return true; };
 		ch.on('close', (code) => {
-			clearInterval(inbox); clearInterval(beat); clearTimeout(kill);
+			if (!end()) return;
 			const rest = out.end();
 			if (rest) keep(Buffer.from(rest));
-			stageEdge(false);
+			stageEnd(lane);
 			const text = Buffer.concat(chunks);
 			if (logFile) { try { fs.writeFileSync(logFile, text); } catch (e) { /* ignore */ } }
 			resolve({ code, out: text.toString('utf8'), killed });
 		});
-		ch.on('error', () => { clearInterval(inbox); clearInterval(beat); clearTimeout(kill); stageEdge(false); resolve({ code: -1, out: '', killed }); });
+		ch.on('error', () => { if (!end()) return; stageEnd(lane); resolve({ code: -1, out: '', killed }); });
 	});
 }
 
@@ -535,9 +551,158 @@ function deepWindows(wsz) {
 	}
 	return wins;
 }
+// ---------------------------------------------------------------- the window memory (src/sweep.js): windows that proved empty rest
+// Every explored window (the sweep's, the loop windows, the segment windows) leaves a record in grind_windows.json: the
+// run's sampled state hashes in it, its empty searches in a row, the round until which it rests. The same span and route
+// searched SW.FAILS_N (2) times without a find rests 2, 4, 8, ... rounds; a change of the run inside it opens it at once.
+const MEMO_FILE = path.join(OUT, 'grind_windows.json');
+const memo = new SW.Memo((C.readJSON(MEMO_FILE, {}) || {}).records);
+const saveMemo = () => { try { C.writeAtomic(MEMO_FILE, JSON.stringify({ records: memo.records })); } catch (e) { /* next time */ } };
+/** the window [w0, w1] of the current best as the memory sees it: {sig, inner, st: {run, why, rec}} */
+function memoWin(w0, w1, round) {
+	const H = bestTrace().tr.H;
+	const sig = SW.sigOf(H, w0, w1), inner = SW.innerOf(H, w0, w1);
+	return { sig, inner, st: memo.state(sig, inner, round) };
+}
+/** a window search that counts for the memory: it found time, or it ran to its end (a crash, a kill at the deadline or a
+ *  stop is no evidence that the window is empty) */
+const searched = (res, saved) => saved > 0 || !!(res && res.code === 0 && !res.killed);
+/** the ticks a stage's own output saves against the run it started from (0: none / no output) */
+function ownSaving(outFile, refTicks) {
+	if (!fs.existsSync(outFile)) return 0;
+	const r = evalRun(outFile);
+	return r && r.runTicks < refTicks ? refTicks - r.runTicks : 0;
+}
+
+// ---------------------------------------------------------------- the sweep: hunt windows over the whole run, several at once
+// explore --hunt windows of SWEEP_LEN ticks every SWEEP_STEP ticks over the WHOLE run, run side by side in lanes of the CPU
+// threads (up to 4 lanes of at least 2 threads), each window from the best as it is when the window starts. The first sweep
+// of a session covers every window (whole-run coverage in the first minutes); later ones get ~40% of a round and take the
+// windows that found time last first, then new / changed ones, then the rest in run order from where the last sweep
+// stopped; resting windows (the memory) are left out. On the ice level one such window over the top right took 4899 ->
+// 4792 and 4904 -> 4760 (180 s, 6 threads), where the grind's one-window-per-round cursor needed 2 h to get there. Not
+// on time-door levels (exact rejoins there need savings that are multiples of 1000 ticks); --sweep=0 off.
+const SWEEP_LEN = 800, SWEEP_STEP = 600, SWEEP_LOOPS = 2;
+/** the longest loop of the run (48 px, then 96, then 160) not tried yet (tried: the state hashes at its ends) and not
+ *  resting in the window memory (those are added to tried); null when none: {l, m: memoWin of its window} */
+function nextLoop(round, tried) {
+	if (level.hasTimeDoors) return null;
+	const H = bestTrace().tr.H, n = bestTrace().tr.n;
+	for (const radius of [48, 96, 160]) {
+		let loops;
+		try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 2000, radius, keep: 60 }); } catch (e) { log(`loops: ${e && e.message || e}`); return null; }
+		for (const x of loops) {
+			if (tried.has(`${H[x.a]}:${H[x.b]}`)) continue;
+			const mw = memoWin(Math.max(0, x.a - 40), Math.min(n, x.b + 40), round);
+			if (!mw.st.run) { tried.add(`${H[x.a]}:${H[x.b]}`); log(`deep: the loop at (${x.x}, ${x.y}), ticks ${x.a}-${x.b}: ${mw.st.why}`); continue; }
+			return { l: x, m: mw };
+		}
+	}
+	return null;
+}
+async function sweepStage(round) {
+	if (a.sweep === '0' || level.hasTimeDoors) return;
+	if (curRound === firstRound && skip1.has('deep')) return;
+	const w = stageWorkers();
+	const lanes = Math.max(1, Math.min(4, Math.floor(w / 2)));
+	const per = Math.max(1, Math.floor(w / lanes));
+	const secs = DEEP_S || 120;
+	const first = !cur.swept;
+	const budget = first ? 1.5 * ROUND_MS : 0.4 * ROUND_MS;   // (the first: until every window is covered, at most 15 min)
+	const t0 = Date.now();
+	const done = [], inflight = new Set();   // sigs searched in this sweep / running now
+	const skipped = new Map();
+	// the frontier: the sweep walks the run's windows in run order from where the last sweep stopped (cur.swOrder), each
+	// once; windows that found time in an earlier round go first. A window a find changed meanwhile waits for the next sweep.
+	let order = cur.swOrder | 0, ran = 0, found = 0, idx = 0;
+	const nWin = () => SW.windows(bestTrace().tr.n, SWEEP_LEN, SWEEP_STEP).length;
+	if (order >= nWin()) order = 0;
+	/** the next window on the current best, or null when there is none: windows that found time in an earlier round, then
+	 *  the frontier; once it has passed the last window (the whole run covered: covered = true), the windows a find of this
+	 *  sweep changed (the find's own window again: chained finds, while each keeps finding time) */
+	let covered = false;
+	const pick = () => {
+		const n = bestTrace().tr.n;
+		const ws = SW.windows(n, SWEEP_LEN, SWEEP_STEP);
+		const same = (sig) => (s) => !!new SW.Memo([{ s, fails: 0 }]).match(sig);
+		let front = null, chain = null;
+		for (let i = 0; i < ws.length; i++) {
+			const [w0, w1] = ws[i];
+			const m = memoWin(w0, w1, round);
+			if (done.some(same(m.sig)) || [...inflight].some(same(m.sig))) continue;
+			const rec = m.st.rec;
+			if (m.st.run && rec && rec.found > 0 && rec.last < round) return { w0, w1, i, sig: m.sig, why: `found ${rec.found} last time` };
+			if (m.st.run && rec && rec.found > 0 && rec.last === round && !chain) chain = { w0, w1, i, sig: m.sig, why: `again after its find of ${rec.found}` };
+			if (i < order || front) continue;
+			if (!m.st.run) { skipped.set(`${w0}`, m.st.why); continue; }
+			front = { w0, w1, i, sig: m.sig, why: m.st.why };
+		}
+		if (front) { order = front.i + 1; return front; }
+		covered = true;
+		return chain;
+	};
+	// the longest loops go into the lanes first (SWEEP_LOOPS per sweep, the loop windows' own explorer: Octorage's -356
+	// route skip is its loop #1), the rest after the sweep in loopWindows
+	const tried = new Set(cur.loops || []);
+	let loopsRun = 0;
+	const lane = async (k) => {
+		while (Date.now() - t0 < budget && Date.now() < deadline - 120000) {
+			let win = null;
+			if (loopsRun < SWEEP_LOOPS) {
+				const nl = nextLoop(round, tried);
+				if (nl) {
+					loopsRun++;
+					const n = bestTrace().tr.n, H = bestTrace().tr.H, l = nl.l;
+					tried.add(`${H[l.a]}:${H[l.b]}`);
+					cur.loops = [...tried].slice(-400);
+					win = { w0: Math.max(0, l.a - 40), w1: Math.min(n, l.b + 40), sig: nl.m.sig, loop: l, why: `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later` };
+				}
+			}
+			if (!win) win = pick();
+			if (!win) return;
+			inflight.add(win.sig);
+			const id = idx++;
+			const ref = path.join(OUT, `grind_sweep_ref${k}.eetas`);
+			C.writeEetas(ref, best.ms);
+			const refTicks = best.runTicks;
+			const out = path.join(OUT, `grind_deep_${round}_sw${id}.eetas`);
+			try { fs.unlinkSync(out); } catch (e) { /* none */ }
+			const name = `sweep${round}_${id + 1}`;
+			const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
+			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads)...`);
+			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : EXP_EXTRA;
+			const res = await runTool('explore.js', [`--tas=${ref}`, `--out=${out}`, `--from=${win.w0}`, `--join=${win.w0}`, `--until=${win.w1}`,
+				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${NC}`,
+				'--maxEntries=1500000', LVL],
+				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`));
+			const saved = ownSaving(out, refTicks);
+			inflight.delete(win.sig);
+			done.push(win.sig);
+			if (fs.existsSync(out)) { consider(out, name); addResult(out); }
+			if (searched(res, saved)) { memo.record(win.sig, saved, round); saveMemo(); }
+			log(`${name}: ${saved > 0 ? `its window saves ${saved}` : 'nothing in this window'}${res && res.killed ? ' (stopped)' : ''}`);
+			ran++; if (saved > 0) found++;
+		}
+	};
+	saveStatus({ stage: `sweep${round}`, round });
+	log(`sweep${round}: hunt windows of ${SWEEP_LEN} ticks over the whole run (${bestTrace().tr.n} ticks), ${lanes} at once x ${per} threads, ${secs} s each` +
+		`${first ? ', every window' : `, up to ${Math.round(budget / 60e3)} min`}`);
+	await Promise.all(Array.from({ length: lanes }, (x, k) => lane(k)));
+	const o0 = order;
+	if (!covered) pick();   // (a look only: the frontier stays where it was)
+	order = o0;
+	const rest = covered;
+	cur.swOrder = rest ? 0 : order;
+	if (rest) cur.swept = (cur.swept | 0) + 1;
+	saveCursor();
+	log(`sweep${round}: ${ran} window${ran === 1 ? '' : 's'} searched, ${found} found time${skipped.size ? `, ${skipped.size} resting (${[...new Set(skipped.values())].slice(0, 2).join('; ')})` : ''}` +
+		`${rest ? '; every window of the run covered' : ''} (${Math.round((Date.now() - t0) / 1000)} s)`);
+}
+
 /**
  * Loop windows first (up to 5 per round, 60% of it): stretches where the run comes back to where it was with nothing collected or toggled in between
- * (loops.js), the longest first, each (as the state hashes at its ends) once. The explorer on exactly that window finds
+ * (loops.js), the longest first, each (as the state hashes at its ends) once, and none the window memory rests (the same
+ * loop, ends shifted by a few ticks, is the same window). The explorer on exactly that window finds
  * a way around the loop directly; tiled windows contain a long loop only in some placements. Not on time-door levels
  * (an exact rejoin there needs a saving that is a multiple of 1000 ticks). Returns the number of windows run.
  */
@@ -546,16 +711,12 @@ async function loopWindows(round) {
 	const tried = new Set(cur.loops || []);
 	let ran = 0;
 	while (ran < 5 && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
-		let loops;
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;
 		// the loops that come back within 48 px, then (all tried) the wider ones within 96 px, then 160 px
-		let l = null;
-		for (const radius of [48, 96, 160]) {
-			try { loops = LP.revisits(level, best.ms, { coins: !NC, max: 2000, radius, keep: 60 }); } catch (e) { log(`loops: ${e && e.message || e}`); return ran; }
-			l = loops.find((x) => !tried.has(`${H[x.a]}:${H[x.b]}`));
-			if (l) break;
-		}
-		if (!l) { if (!ran && loops.length) log(`deep: every loop of the run (${loops.length}) was explored already`); return ran; }
+		const nl = nextLoop(round, tried);
+		cur.loops = [...tried].slice(-400);
+		if (!nl) { if (!ran) log('deep: every loop of the run was explored already (or rests)'); return ran; }
+		const l = nl.l, m = nl.m;
 		tried.add(`${H[l.a]}:${H[l.b]}`);
 		cur.loops = [...tried].slice(-400);
 		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
@@ -565,7 +726,9 @@ async function loopWindows(round) {
 			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}`);
 		if (!res) return ran;
 		addResult(lp);
-		log(`deep${round}_loop${ran + 1}: ${best.runTicks < before ? `a way around the loop, -${before - best.runTicks}` : 'no way around the loop found'}`);
+		const saved = ownSaving(lp, before);
+		if (searched(res, saved)) { memo.record(m.sig, saved, round); saveMemo(); }
+		log(`deep${round}_loop${ran + 1}: ${saved > 0 ? `a way around the loop, -${saved}` : 'no way around the loop found'}`);
 		saveCursor();
 		ran++;
 	}
@@ -575,8 +738,9 @@ async function loopWindows(round) {
  *  the round (one at least) */
 async function deepStage(round, R) {
 	const WSZ = R([600, 400, 500, 350]);
+	await sweepStage(round);
 	await loopWindows(round);
-	let done = 0;
+	let done = 0, rested = 0;
 	while ((done === 0 || roundUsed() < 0.55 * ROUND_MS) && Date.now() < deadline - 120000) {
 		const wins = deepWindows(WSZ);
 		if (!wins.length) return;
@@ -588,6 +752,16 @@ async function deepStage(round, R) {
 		const w = wins[wi];
 		// where to continue: the next window's start, as a state (found again when the stage improves the best)
 		const next = wi + 1 < wins.length ? cursorAt(wins[wi + 1].w0) : null;
+		// a window the memory rests (searched empty with the same route twice or more) is passed over
+		const mw = memoWin(w.w0, w.w1, round);
+		if (!mw.st.run && rested < wins.length) {
+			rested++;
+			log(`deep${round}: window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}: ${mw.st.why}`);
+			saveCursor({ deep: next || cursorAt(0) });
+			continue;
+		}
+		if (!mw.st.run) return;   // (every window rests)
+		const before = best.runTicks;
 		const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
 		const dp = path.join(OUT, `grind_deep_${round}_${w.seg - 1}_${w.i}.eetas`);
 		const name = `deep${round}_seg${w.seg}${w.of > 1 ? '.' + (w.i + 1) : ''}`;
@@ -601,6 +775,8 @@ async function deepStage(round, R) {
 			`window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}${hunt ? ', skip hunting' : ''}`);
 		if (!res) return;
 		addResult(dp);
+		const saved = ownSaving(dp, before);
+		if (searched(res, saved)) { memo.record(mw.sig, saved, round); saveMemo(); }
 		if (!next && wins.length > 1) log(`deep: the last of the run's ${wins.length} windows is done; the next one starts over at the first`);
 		saveCursor({ deep: next || cursorAt(0) });
 		done++;
