@@ -84,6 +84,15 @@
 // for a cell that is new or improved, and it never rules a state out (the reach field's -1 still does). --track=
 // <route.eetas>: the furthest tick of that known route whose (tile, room) a cell has reached (fine cells: its tile),
 // `trackMax` / `trackTicks` in the workers' stat and done events (the "Find a route" research's yardstick for a search).
+// --oracle=<route.eetas>: the headroom of any progress measure: head A ordered by one that knows a finishing route (per
+// room the route passes, the ticks to go at its latest visit of a tile / --oracleTpt (9) ticks per tile, spread over the
+// room by the walk; 1e4 + the reach cost in a room the route never enters); --oracleMode=room: only the route's order of
+// rooms (the ticks to go when it last entered the room / --oracleTpt, plus the reach cost inside it); --oracleMode=line:
+// only the route's path, as a guide line drawn on the level would give it (the length of the path left from its latest
+// visit of a tile, scaled so the start's value is the route's ticks / --oracleTpt (--oracleScale=x: x times the reach
+// cost at the start), spread by the walk over the whole level,
+// doors open, whatever the room; --oracleStep=K: a
+// rough line, the route's centre every K ticks joined by straight segments, as a hand-drawn one would be).
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
@@ -92,7 +101,7 @@
 //        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
-//        [--guide=<model.json>] [--guideMix=1] [--track=<route.eetas>]
+//        [--guide=<model.json>] [--guideMix=1] [--track=<route.eetas>] [--oracle=<route.eetas>] [--oracleTpt=9] [--oracleMode=tile|room|line] [--oracleStep=1] [--oracleScale=0]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -111,7 +120,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
-	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50, guideMix: 1 };
+	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50, guideMix: 1, oracleTpt: 9, oracleStep: 1, oracleScale: 0 };
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // memory (V8 heap, measured): a cell without its snapshot about 260 bytes (coarse cells: 300, with their room and
 // counts), a snapshot about 1150; each gets 45% of a worker's --mem
@@ -126,7 +135,7 @@ const MEM_SHARE = 0.25, MEM_MIN = 200, MEM_MAX = 1500;
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', guide: process.env.EEAT_GUIDE || '', track: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', guide: process.env.EEAT_GUIDE || '', track: '', oracle: '', oracleMode: 'tile' });
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) {
@@ -134,7 +143,7 @@ function parseArgs(argv) {
 			a.file = s;
 			continue;
 		}
-		if (m[1] === 'level' || m[1] === 'out' || m[1] === 'guide' || m[1] === 'track') a[m[1]] = m[2];
+		if (m[1] === 'level' || m[1] === 'out' || m[1] === 'guide' || m[1] === 'track' || m[1] === 'oracle' || m[1] === 'oracleMode') a[m[1]] = m[2];
 		else if (m[1] === 'cells') {
 			if (!['auto', 'fine', 'coarse'].includes(m[2])) throw new Error(`bad --cells=${m[2]} (auto, fine or coarse)`);
 			a.cells = m[2];
@@ -446,8 +455,116 @@ function explore(L, field, a, seed, ctrl, post) {
 	// --guide: the learned measure (src/nnguide.js) orders head A (and the one heap of fine cells) in place of the reach
 	// cost, mixed by --guideMix (1 = the model alone); computed only for a cell that is new or improved. It never prunes.
 	const GM = a.guide ? NG.load(a.guide) : null, gctx = GM ? NG.levelCtx(L, field, NG.DOOR_STATES) : null, mix = a.guideMix;
-	const gcost = GM ? (rc) => (rc < 0 || rc >= 1e4 ? rc : mix * NG.cost(GM, gctx, sim, rc) + (1 - mix) * rc) : (rc) => rc;
+	let gcost = GM ? (rc) => (rc < 0 || rc >= 1e4 ? rc : mix * NG.cost(GM, gctx, sim, rc) + (1 - mix) * rc) : (rc) => rc;
 	let guideCalls = 0;
+	if (a.oracle) {
+		// --oracle (research: how far better ordering alone could take a search): per room of a known route, its ticks
+		// to go at its latest visit of each tile / --oracleTpt, spread from those tiles by the walk (8-way, no corner cut
+		// between two walls, the room's doors as the route found them, killing tiles only with protection: Dijkstra, a
+		// tile per step); ordering only, like --guide. --oracleMode=room: what a perfect planner of rooms would know (the
+		// route's ticks to go when it last entered the room / --oracleTpt), inside a room the reach cost; --oracleMode=line:
+		// what a guide line drawn along the route would tell (the path's length left, in tiles, one spread, doors open)
+		if (!['tile', 'room', 'line'].includes(a.oracleMode)) throw new Error(`bad --oracleMode=${a.oracleMode} (tile, room or line)`);
+		const ms = C.readEetas(a.oracle), s2 = new E.EESim(L), i2 = new E.EEInput(), R2 = coarse ? roomOf(L) : null, T = ms.length;
+		const oc = NG.levelCtx(L, field, 1), seeds = new Map(), enter = new Map(), LINE = a.oracleMode === 'line', path = [];
+		let prk = -1;
+		s2.reset();
+		for (let t = 0; t <= T; t++) {
+			if (t > 0) { E.applyMask(i2, ms[t - 1]); s2.tick(i2); }
+			if (LINE) {
+				// (the line: the route's tiles in order, the length left along it from each; with --oracleStep the centre
+				// every K ticks and the tiles of the straight segments between them, walls or not)
+				if (t % a.oracleStep && t < T) continue;
+				const cx = Math.trunc(s2.px + 8) >> 4, cy = Math.trunc(s2.py + 8) >> 4, p0 = path[path.length - 1];
+				const x0 = p0 === undefined ? cx : p0 % W, y0 = p0 === undefined ? cy : (p0 / W) | 0, n = a.oracleStep > 1 ? Math.max(1, Math.abs(cx - x0), Math.abs(cy - y0)) : 1;
+				for (let k = 1; k <= n; k++) {
+					const tl = Math.min(N - 1, Math.max(0, Math.round(y0 + (cy - y0) * k / n) * W + Math.round(x0 + (cx - x0) * k / n)));
+					if (path[path.length - 1] !== tl) path.push(tl);
+				}
+				continue;
+			}
+			const rk = R2 ? R2.key(s2) >>> 0 : 0;
+			if (rk !== prk) { enter.set(rk, (T - t) / a.oracleTpt); prk = rk; }
+			let r = seeds.get(rk);
+			if (r === undefined) {
+				const shut = new Uint8Array(N);
+				for (const d of oc.doors) shut[d] = s2.is_tile_solid_now(d % W, (d / W) | 0) ? 1 : 0;
+				r = { shut, prot: !!s2.is_invulnerable, best: new Map() };
+				seeds.set(rk, r);
+			}
+			r.best.set(Math.min(N - 1, Math.max(0, (Math.trunc(s2.py + 8) >> 4) * W + (Math.trunc(s2.px + 8) >> 4))), (T - t) / a.oracleTpt);
+		}
+		const ORC = new Map(), hk = [], hd = [];
+		const push = (k, d) => {
+			let i = hk.length;
+			hk.push(k); hd.push(d);
+			while (i > 0) { const p = (i - 1) >> 1; if (hd[p] <= d) break; hk[i] = hk[p]; hd[i] = hd[p]; i = p; }
+			hk[i] = k; hd[i] = d;
+		};
+		const pop = () => {
+			const k = hk[0], lk = hk.pop(), ld = hd.pop(), n = hk.length;
+			if (n > 0) {
+				let i = 0;
+				for (;;) {
+					let c = 2 * i + 1;
+					if (c >= n) break;
+					if (c + 1 < n && hd[c + 1] < hd[c]) c++;
+					if (hd[c] >= ld) break;
+					hk[i] = hk[c]; hd[i] = hd[c]; i = c;
+				}
+				hk[i] = lk; hd[i] = ld;
+			}
+			return k;
+		};
+		if (LINE) {
+			const best = new Map();
+			let left = 0;
+			for (let k = path.length - 1; k >= 0; k--) {
+				if (k < path.length - 1) left += Math.hypot(path[k] % W - path[k + 1] % W, ((path[k] / W) | 0) - ((path[k + 1] / W) | 0));
+				if (!best.has(path[k])) best.set(path[k], left);
+			}
+			// (the scale decides the greediness against head A's 2 sqrt(picks): the start's value is the route's ticks /
+			// --oracleTpt, as in the full oracle; --oracleScale=x: x times the reach cost at the start, which a drawn line
+			// knows too)
+			const s0 = new E.EESim(L);
+			s0.reset();
+			const sc = (a.oracleScale > 0 ? a.oracleScale * Math.max(1, RF.costAt(field, s0)) : T / a.oracleTpt) / Math.max(1, best.get(path[0]) || left);
+			for (const [tl, v] of best) best.set(tl, v * sc);
+			seeds.set(0, { shut: new Uint8Array(N), prot: false, best });
+		}
+		for (const [rk, r] of a.oracleMode === 'room' ? [] : seeds) {
+			const dist = new Float64Array(N).fill(Infinity), wall = oc.wall, dead = oc.deadly, shut = r.shut;
+			for (const [tl, d] of r.best) if (d < dist[tl]) { dist[tl] = d; push(tl, d); }
+			while (hk.length) {
+				const d0 = hd[0], t = pop();
+				if (d0 > dist[t]) continue;
+				const x = t % W, y = (t / W) | 0;
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						if (!dx && !dy) continue;
+						const xx = x + dx, yy = y + dy;
+						if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+						const j = yy * W + xx;
+						if (wall[j] || shut[j] || (dead[j] && !r.prot) || dist[j] <= d0 + 1) continue;
+						if (dx && dy && wall[y * W + xx] && wall[yy * W + x]) continue;
+						dist[j] = d0 + 1; push(j, d0 + 1);
+					}
+				}
+			}
+			ORC.set(rk, dist);
+		}
+		gcost = a.oracleMode === 'room' ? (rc) => {
+			if (rc < 0 || rc >= 1e4) return rc;
+			const e = enter.get(coarse ? roomKey >>> 0 : 0);
+			return (e === undefined ? 1e4 : e) + rc;
+		} : (rc) => {
+			if (rc < 0 || rc >= 1e4) return rc;
+			const d = ORC.get(coarse && !LINE ? roomKey >>> 0 : 0);
+			const v = d === undefined ? Infinity : d[tile];
+			return v < Infinity ? v : 1e4 + rc;
+		};
+	}
+	const GO = GM !== null || !!a.oracle;
 	// --track=<route.eetas> (research): the furthest tick of a known route whose (tile, room) a cell has reached (fine
 	// cells: its tile), in the stat / done events as trackMax (and the worker's simulated ticks then: trackTicks)
 	let TRACK = null, trackMax = -1, trackTicks = 0;
@@ -585,13 +702,13 @@ function explore(L, field, a, seed, ctrl, post) {
 			c.seen++;
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
-			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = { up, buf, o, n }; c.rc = rc; c.gc = GM ? (guideCalls++, gcost(rc)) : rc; c.gen++; c.ver++;
+			c.t = t; c.pc = pc; c.pgen = pc.gen; c.node = { up, buf, o, n }; c.rc = rc; c.gc = GO ? (guideCalls++, gcost(rc)) : rc; c.gen++; c.ver++;
 			hpush(c);
 			if (room !== null && (room.best === null || rc < room.best.rc)) room.best = c;
 			return null;
 		}
 		if (cells.size >= a.maxCells) { full = true; return null; }
-		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, gc: GM ? (guideCalls++, gcost(rc)) : rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
+		const nc = { t, snap: null, pc, pgen: pc.gen, node: { up, buf, o, n }, rc, gc: GO ? (guideCalls++, gcost(rc)) : rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false };
 		cells.set(k, nc);
 		hpush(nc);
 		if (TRACK !== null) {

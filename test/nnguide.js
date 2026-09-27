@@ -8,7 +8,8 @@
 //             forward pass (the embedding, each convolution and the dense layers written out, nothing folded or
 //             cached): the same outputs to float precision, also from the cache; a random structured model (train5.py)
 //             through NG.cost against its formula
-//   search    goexplore --guide with that model: a route replayed in the engine, the same route twice (deterministic)
+//   search    goexplore --guide with that model: a route replayed in the engine, the same route twice (deterministic);
+//             goexplore --oracle / --track with that route: a route, the furthest tick of it reached; --oracleMode=room, line
 // usage: node test/nnguide.js   (no GPU, a few seconds; exit code 1 if a check fails)
 const fs = require('fs');
 const os = require('os');
@@ -187,6 +188,24 @@ section('search');
 	const ev = r1 ? C.evaluate(L, Uint8Array.from(r1.inputs, (ch) => ch.charCodeAt(0) - 48)) : null;
 	check('goexplore --guide: a route (through the key door), replayed in the engine', !!(r1 && ev && ev.ms.length === r1.ticks), r1 ? `${r1.ticks} ticks after ${r1.simTicks} simulated` : 'none');
 	check('the same route again (deterministic)', !!(r1 && r2 && r1.inputs === r2.inputs && r1.simTicks === r2.simTicks));
+	// --oracle (the headroom test): head A ordered by that route's ticks to go; --track reports how far along it a cell got
+	if (r1) {
+		const rf = path.join(tmp, 'route.eetas');
+		C.writeEetas(rf, Uint8Array.from(r1.inputs, (ch) => ch.charCodeAt(0) - 48));
+		const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lf, '--maxTicks=400000', '--seconds=60', '--first=1', `--oracle=${rf}`, `--track=${rf}`], { encoding: 'utf8' });
+		const evs = out.split('\n').filter((s) => s.startsWith('{')).map((s) => JSON.parse(s));
+		const r3 = evs.find((e) => e.ev === 'result'), done = evs.find((e) => e.ev === 'done');
+		const ev3 = r3 ? C.evaluate(L, Uint8Array.from(r3.inputs, (ch) => ch.charCodeAt(0) - 48)) : null;
+		const w = done && done.workers[0] || {};
+		check('goexplore --oracle=<that route>: a route, replayed in the engine', !!(r3 && ev3 && ev3.ms.length === r3.ticks), r3 ? `${r3.ticks} ticks after ${r3.simTicks} simulated` : 'none');
+		check('--track: the furthest tick of the route reached is reported', w.trackMax > 0 && w.trackMax <= r1.ticks, `${w.trackMax} of ${r1.ticks}`);
+		const out2 = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lf, '--maxTicks=400000', '--seconds=60', '--first=1', '--cells=coarse', `--oracle=${rf}`, '--oracleMode=room'], { encoding: 'utf8' });
+		const r4 = out2.split('\n').filter((s) => s.startsWith('{')).map((s) => JSON.parse(s)).find((e) => e.ev === 'result');
+		check('--oracleMode=room (coarse cells: the key opens a room): a route', !!r4, r4 ? `${r4.ticks} ticks after ${r4.simTicks} simulated` : 'none');
+		const out3 = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lf, '--maxTicks=400000', '--seconds=60', '--first=1', `--oracle=${rf}`, '--oracleMode=line'], { encoding: 'utf8' });
+		const r5 = out3.split('\n').filter((s) => s.startsWith('{')).map((s) => JSON.parse(s)).find((e) => e.ev === 'result');
+		check('--oracleMode=line (the route as a guide line): a route', !!r5, r5 ? `${r5.ticks} ticks after ${r5.simTicks} simulated` : 'none');
+	}
 }
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

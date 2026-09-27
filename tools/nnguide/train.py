@@ -33,6 +33,8 @@ ap.add_argument('--tag', default='m')
 ap.add_argument('--out', default='/root/nnguide/models')
 ap.add_argument('--seed', type=int, default=1)
 ap.add_argument('--gexp', type=float, default=0.5)     # group sampling ~ n_g^gexp
+ap.add_argument('--keep', type=float, default=1.0)     # the data question: train on this share of the other groups only (a random draw, --keepSeed)
+ap.add_argument('--keepSeed', type=int, default=1)
 a = ap.parse_args()
 torch.manual_seed(a.seed); np.random.seed(a.seed)
 dev = 'cuda'
@@ -138,6 +140,12 @@ def train_one(hold):
     """hold: a group name (left out) or None (every group)"""
     hid_g = groups.index(hold) if hold else -1
     trn = (GRP != hid_g) & (KIND != 3) & (KIND != 2)
+    if a.keep < 1:
+        others = [g for g in range(len(groups)) if g != hid_g and ((GRP == g) & trn).any()]
+        rs = np.random.RandomState(a.keepSeed + max(hid_g, 0))
+        kept = rs.choice(others, max(1, int(round(a.keep * len(others)))), replace=False)
+        trn &= np.isin(GRP, kept)
+        print(f'  [{hold or "all"}] training groups kept: {sorted(groups[g] for g in kept)}', flush=True)
     rt = np.where(trn & ((KIND == 0) | (KIND == 4)))[0]
     ex = np.where(trn & (KIND == 1))[0]
     ex = ex[(ex + 1 < len(KIND))]; ex = ex[KIND[ex + 1] == 4]
