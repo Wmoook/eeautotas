@@ -968,7 +968,10 @@ function breakStarts() {
 	}
 	return out;
 }
-// Waypoints (on; start option waypoints: false = off): every stuck level's gate (the trigger the known route needs next)
+// Waypoints (start option waypoints: true; off by default: 2026-09-27, the A100, the Forgotten Veil A/B from scratch
+// (1200 s side by side) 1,815 route ticks in both arms, 24 waypoint runs, no hit; from Octorage's known state 400 ticks
+// before its wall 3 hits and 2 new rooms in 150 s but 939 route ticks against 1,512 without: the waypoint runs took the
+// round and hit rooms off the route; src/out/night/imp_1_B_waypoints.md): every stuck level's gate (the trigger the known route needs next)
 // first moves AWAY from the trophy by reach cost (Stupid Fox coin 10 +17 tiles, Good Egg switch 50 +67, Octorage switch
 // 1 +79, Forgotten Veil coin 4 +192, Infinity Pain team 1 +13), and the breaker's runs, ordered by the trophy's fields,
 // ended in the same pockets (Forgotten Veil's coin-door pocket at (350, 109)). So a round first aims runs at waypoints:
@@ -1422,8 +1425,9 @@ function start(b, gpu, test) {
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0,
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '',
-		// (the wall breaker's waypoints, breakWaypoints: on; tests: test.waypoints true)
-		waypoints: test ? test.waypoints === true : b.waypoints !== false },
+		// (the wall breaker's waypoints, breakWaypoints: off unless asked, b.waypoints / test.waypoints true: measured
+		// without a gain, see WP_MAX)
+		waypoints: test ? test.waypoints === true : b.waypoints === true },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
