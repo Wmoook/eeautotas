@@ -1114,6 +1114,12 @@ async function cpuSection() {
 	// its reach lead (--wR): cells at tiles the route never passes, by the route's first tick at their reach cost
 	check('head W\'s reach lead picks cells at tiles the route never passes (--wR of its picks)',
 		!!wp && wp.reachPicks > 0 && wp.reachPicks < wp.wayPicks, wp ? `reachPicks ${wp.reachPicks} of wayPicks ${wp.wayPicks}` : 'no progress event with the picks');
+	// its estimate by the nearest route tile's schedule (--wN=1) instead of the route's running minimum
+	const orn = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=6', '--mem=300', '--bursts=1', `--tool=${nothingTool}`, `--work=${path.join(HOME, 'bursts5')}`, '--stdin=1', '--wR=0.5', '--wN=1'],
+		(ch) => { if (kBest) ch.stdin.write(`route ${kBest.inputs}\n`); });
+	const wn = orn.events.filter((e) => e.ev === 'progress' && e.wayPicks !== undefined).pop();
+	check('head W\'s reach lead by the nearest route tile\'s schedule (--wN=1) picks cells at tiles the route never passes',
+		!!wn && wn.reachPicks > 0 && wn.reachPicks < wn.wayPicks && !orn.events.some((e) => e.ev === 'warning'), wn ? `reachPicks ${wn.reachPicks} of wayPicks ${wn.wayPicks}` : 'no progress event with the picks');
 	// the GPU random runs as an operator of the one search (the editor's feed, goexplore.js stdin "import <inputs>"): a run
 	// into the key's room given on stdin goes into the archive of every worker (2 workers, nothing shared otherwise)
 	const of = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts2')}`, '--stdin=1'],
