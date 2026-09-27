@@ -387,6 +387,8 @@ const pfx = opt('prefix'), pfs = pfx && fs.existsSync(pfx) ? fs.readFileSync(pfx
 fs.appendFileSync(SC.log, JSON.stringify(pfs === null ? args : args.concat(['#pf=' + pfs.length + ':' + pfs.slice(0, 1)])) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
+// (oom: the first oom launches of each command find no GPU memory for a context, as next to another process holding it)
+if (SC.oom && prev.filter((a) => a[0] === args[0]).length < SC.oom) return void setTimeout(() => { say({ error: 'cuCtxSetLimit(0 , stackBytes) failed: CUDA error 2 (out of memory)' }); process.exit(4); }, 50);
 // (steerFail: an explore given --steer cannot use it, as eegpu says when the upload finds no GPU memory)
 if (SC.steerFail && args[0] === 'explore' && opt('steer')) return void setTimeout(() => { say({ error: 'the steer field cannot be used: test: out of memory', steer: 0 }); process.exit(3); }, 50);
 if (SC.launchFail && args[0] === 'explore') return void setTimeout(() => { say({ error: 'test: the GPU driver stopped the explore expand kernel', cuda: 702, launchError: true, timeout: true }); process.exit(7); }, SC.launchFail);
@@ -1210,6 +1212,20 @@ async function cpuSection() {
 		st.stage === 'found' && st.result.strategy === 'random runs (CPU)' && st.elapsed >= 5.5,
 		`explore ${X3.state} (${X3.error}); beams ${B3.map((q) => `${q.state} (${q.detail})`).join(', ')}; launches ${launches3.join(', ')}; stopped by file: ${stopped3.join(', ') || '-'}; ` +
 		`${st.stage} ${st.result ? `(${st.result.strategy})` : ''}; ${st.elapsed.toFixed(1)} s`);
+	// a GPU strategy whose tool finds no GPU memory for its context (another process holds it for a while: the game on the
+	// laptop, a second search on the same GPU) starts again after GPU_RETRY_S (5 s), logged, instead of staying in error
+	// for the whole search (cycle 5 on the shared H100: every move, straight and the GPU random runs lost for 30 min)
+	const sc4 = path.join(HOME, 'cpu-oom.json'), log4 = path.join(HOME, 'cpu-oom.log');
+	fs.writeFileSync(sc4, JSON.stringify({ log: log4, R, runs: {}, beam: null, oom: 1 }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 9, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc4], salts: false });
+	st = await waitDone(40000);
+	const L4 = fs.readFileSync(log4, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+	const G4 = st.strategies.filter((q) => !q.cpu), n4 = (c) => L4.filter((a) => a[0] === c).length;
+	check('a GPU strategy out of GPU memory at its start (cuCtxSetLimit "out of memory"): started again after 5 s, logged, not in error for the search',
+		G4.length === 2 && G4.every((q) => q.state !== 'error') && n4('explore') >= 2 && n4('beam') >= 2 &&
+		st.log.filter((x) => /out of memory\); again in 5 s \(retry 1\)/.test(x)).length === 2 && st.stage === 'found' && st.elapsed >= 5,
+		`GPU strategies ${G4.map((q) => `${q.key} ${q.state}${q.error ? ` (${q.error})` : ''}`).join(', ')}; launches explore ${n4('explore')}, beam ${n4('beam')}; ` +
+		`${st.log.filter((x) => /again in/.test(x)).join(' | ')}; ${st.stage}; ${st.elapsed.toFixed(1)} s`);
 }
 
 // ---------------------------------------------------------------- the proof (eegpu prove: CPU only, no GPU)
