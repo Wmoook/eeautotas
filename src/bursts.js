@@ -67,6 +67,9 @@ const UCB_C = 0.5, NEW_ROOMS_MAX = 3, SLACK = 30, SLACK_F = 0.1, NEAREST_WAIT_MS
 // (editor.js RELAY_SLACK_MAX), and a distance of 6000+ (the steer field has no value there: 6000 + the reach field's) as
 // the reach field's
 const SLACK_MAX = 200, STEER_MISS = 6000;
+// a burst that found the GPU's memory full waits goexplore.js --burstOomS (5) s, doubled while that lasts, at most
+// OOM_WAIT_MAX_S
+const OOM_WAIT_MAX_S = 120;
 // a room never burst from scores this (the newest first among them): above a room whose bursts only got nearer, below
 // one whose bursts keep finding rooms (a level of many switch states has thousands of rooms: each once would take all
 // the GPU)
@@ -141,7 +144,7 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, skipped: 0, chained: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -500,7 +503,7 @@ function create(o) {
 		return file;
 	};
 	const loop = async (lane) => {
-		let fails = 0, next = null;
+		let fails = 0, oom = 0, next = null;
 		while (!stopped) {
 			const now = o.sec();
 			const left = a.seconds - now;
@@ -546,13 +549,28 @@ function create(o) {
 			if (job.r) job.r.busy = false; else trophyArm.busy = false;
 			if (r.fail) {
 				st.failed++;
+				// (the GPU's memory taken by the other tools (every move's table, the beams, the random runs' pool, other
+				// searches on a shared GPU): a wait, doubled while it lasts (--burstOomS, up to OOM_WAIT_MAX_S), never the end
+				// of the bursts, and no try of the arm; the shared H100 lost every burst of two 300 s searches to three such
+				// failures in their first 20 s)
+				if (/out of memory/i.test(r.end)) {
+					st.oom++;
+					const w = Math.min(OOM_WAIT_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 << oom));
+					o.say({ ev: 'warning', text: `burst: ${r.end}: again in ${w} s` });
+					for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100);
+					oom = Math.min(8, oom + 1);
+					continue;
+				}
 				// (a failure counts as a try of its arm with no reward: one broken arm must not win every pick)
 				if (job.r) job.r.n++; else trophyArm.n++;
 				o.say({ ev: 'warning', text: `burst: ${r.end}` });
+				// (a start that dies (its inputs, e.g. cut back along a doomed attempt) is the arm's failure, not the tool's)
+				if (/the prefix dies/.test(r.end)) continue;
 				if (++fails >= 3) { o.say({ ev: 'warning', text: 'bursts: 3 failures in a row: no more GPU bursts' }); break; }
 				await sleep(2000);
 				continue;
 			}
+			oom = 0;
 			fails = 0;
 			st.bursts++; st.sec += r.sec; if (r.reached) st.reached++; st.newRooms += r.fresh;
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;

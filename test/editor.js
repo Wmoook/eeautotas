@@ -1002,6 +1002,25 @@ async function cpuSection() {
 	check('the one search takes in another operator\'s run on its stdin ("import <inputs>": the editor\'s GPU random runs): into both workers\' archives, a bad line ignored',
 		!!kr && !!of.done && of.done.fed === 1 && of.done.workers.every((w) => w.imports >= 1) && !of.events.some((e) => e.ev === 'warning'),
 		`fed ${of.done && of.done.fed}, imports ${of.done ? of.done.workers.map((w) => w.imports).join(' / ') : '-'}; ${of.summary}`);
+	// a full GPU (the other tools' tables, other searches on a shared GPU): a burst that finds no memory waits and tries
+	// again (--burstOomS, doubled while it lasts), never the bursts' end; a dying start is its arm's failure only
+	const oomTool = path.join(HOME, 'burst_oom.js'), oomCount = path.join(HOME, 'burst_oom.count');
+	fs.writeFileSync(oomTool, [
+		"'use strict';",
+		"const fs = require('fs');",
+		`const f = ${JSON.stringify(oomCount)};`,
+		"let n = 0; try { n = +fs.readFileSync(f, 'utf8') || 0; } catch (e) { /* first */ }",
+		"fs.writeFileSync(f, String(n + 1));",
+		"if (n < 4) { console.log(JSON.stringify({ error: 'cuMemAlloc_v2(&p, bytes) failed: CUDA error 2 (out of memory)' })); process.exit(4); }",
+		"if (n < 7) { console.log(JSON.stringify({ error: 'the prefix dies' })); process.exit(3); }",
+		"console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
+		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1 })), 50);",
+	].join('\n'));
+	const oo = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=8', '--mem=300', '--bursts=1', `--tool=${oomTool}`, `--work=${path.join(HOME, 'bursts3')}`, '--burstOomS=0.2']);
+	const og = oo.done && oo.done.gpu;
+	check('the one search\'s bursts on a full GPU: 4 "out of memory" failures wait and try again, 3 dying starts count as their arms\' failures only, then bursts run; never "no more GPU bursts"',
+		!!og && og.oom === 4 && og.failed === 7 && og.bursts >= 1 && !oo.events.some((e) => e.ev === 'warning' && /no more GPU bursts/.test(e.text)),
+		`${JSON.stringify(og)}; ${oo.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 400)}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
