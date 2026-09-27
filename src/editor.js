@@ -1381,6 +1381,7 @@ function start(b, gpu, test) {
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
+		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
@@ -1758,16 +1759,18 @@ function launch(n) {
 	const pauseFile = cpu && !V.gpuShare ? '' : pauseFileOf(n);
 	const pausedNow = (!cpu || !!V.gpuShare) && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
 	if (pauseFile) { try { if (pausedNow) fs.writeFileSync(pauseFile, 'pause'); else fs.unlinkSync(pauseFile); } catch (e) { /* none */ } }
-	const cmd = cpu ? [...cur.cpuCmd, ...args] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+	// (Linux, next to GPU strategies: the CPU search's worker threads at nice 10 (goexplore.js --nice), each lowering its
+	// own thread. The GPU tools' above-normal priority (launch.h) needs root or CAP_SYS_NICE there, which a container (a
+	// rented cloud GPU) lacks, and next to busy CPU threads "every move" was 3-7x slower without it. Before, the whole
+	// process was reniced, so its main thread and the one search's GPU bursts (its eegpu children inherit the main
+	// thread's value) ran at nice 10 too: below every normal process of a shared machine (the cycle 7 test's A100).)
+	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && cur.cpuNice;
+	const cmd = cpu ? [...cur.cpuCmd, ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined,
 		detached: !cpu });
-	// (Linux, next to GPU strategies: the CPU search at nice 10. The GPU tools' above-normal priority (launch.h) needs root
-	// or CAP_SYS_NICE there, which a container (a rented cloud GPU) lacks, and next to busy CPU threads "every move" was
-	// 3-7x slower without it. Its worker threads start later, from its main thread, and inherit the value.)
-	if (cpu && !S.cpuOnly && process.platform !== 'win32' && ch.pid) { try { os.setPriority(ch.pid, 10); } catch (e) { /* as it is */ } }
 	ch.stopFile = stopFile;
 	ch.startedAt = Date.now();
 	ch.paused = pausedNow;
@@ -1836,6 +1839,7 @@ function launch(n) {
 		if (ch.stopWhy && (ev.ev === 'progress' || ev.ev === 'layer' || ev.ev === 'try')) return;
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			if ((cpu || rolls) && Number.isFinite(ev.rooms)) V.rooms = ev.rooms;
+			if (cpu && Number.isFinite(ev.cpuS)) V.cpuS = ev.cpuS;   // (the CPU search's CPU seconds: a route's time per core-second)
 			Object.assign(V, { state: (cpu || rolls) && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer' && V.key === 'relay' && V.relay) {
@@ -2293,7 +2297,8 @@ function found(inputs, n, more) {
 		for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
 		C.writeEetas(path.join(dir(), 'route.eetas'), ev.ms);
 		S.result = { ticks: ev.ms.length, completeTick: ev.complete, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), deaths: ev.deaths, coins: ev.coins,
-			chance: ev.chance, inputs: C.eetasBytes(ev.ms).toString('latin1'), foundAfter: Math.round((Date.now() - S.started) / 100) / 10, path: pathPts,
+			chance: ev.chance, inputs: C.eetasBytes(ev.ms).toString('latin1'), foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
+			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, path: pathPts,
 			strategy: V.label, verified: 'replayed in the exact JS engine: it finishes' };
 	}
 	S.stage = 'found';
