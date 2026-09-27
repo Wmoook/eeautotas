@@ -923,8 +923,17 @@ const BREAK_RESERVE_F = 0.15;
 // The stop rule (cycle 4): a novelty run always has hits, so without one every chain went on to BREAK_CHAIN and a round
 // held the GPU for all of BREAK_ROUND_S (Stupid Fox: 27-28 runs, the GPU random runs that find its route starved);
 // after BREAK_NOVEL_DRY runs in a row in which the search got nowhere (breakProgress) the chain steps only as without
-// the target (from a nearer attempt), so the round ends as the plain breaker's.
-const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr', BREAK_NOVEL_DRY = 2;
+// the target (from a nearer attempt), so the round ends as the plain breaker's. Cycle 5: a run is not dry either when
+// its novelty hits found BREAK_NOVEL_FRESH (room, tile) cells no earlier run of the search hit (brk.novCells: the
+// novelty's own yield; on Octorage the progress count stayed flat while the novelty runs took the route from 21% to
+// 38%, and with the count alone 20 of 24 runs went plain).
+const BREAK_NOVEL_MAX = 4096, BREAK_NOVEL_SEED_EVERY = 256, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'terr', BREAK_NOVEL_DRY = 2, BREAK_NOVEL_FRESH = 16;
+/** a run's novelty hits nh -> how many hit a (room, tile) cell no earlier run of the search hit (seen: those cells, grows) */
+function novelFresh(nh, seen) {
+	let fresh = 0;
+	for (const h of nh) { const k = `${h.room}:${h.tile}`; if (!seen.has(k)) { seen.add(k); fresh++; } }
+	return fresh;
+}
 /** asks the CPU search for the novelty file (the answer: its "novel" event sets brk.novelReady) */
 function novelAsk() {
 	if (!S || !brk || !cur || !cur.opts.novel) return false;
@@ -1165,7 +1174,10 @@ function breakAfter(n, how) {
 	// (the novelty stop rule: runs in a row during which the search got nowhere (no nearer attempt, no new room with
 	// territory: breakProgress); from BREAK_NOVEL_DRY on, no step from a novelty hit, so the chain goes on only from a
 	// nearer attempt as without the target and the round ends as the plain breaker's does)
-	R.dry = R.progress.length > ((V.brk && V.brk.prog0) || 0) ? 0 : (R.dry || 0) + 1;
+	// (cycle 5: or its novelty hits found BREAK_NOVEL_FRESH cells no earlier run hit: the novelty's own yield)
+	const fresh = novelFresh(nh, brk.novCells || (brk.novCells = new Set()));
+	if (fresh && S.breaker) S.breaker.novelFresh = (S.breaker.novelFresh || 0) + fresh;
+	R.dry = R.progress.length > ((V.brk && V.brk.prog0) || 0) || fresh >= BREAK_NOVEL_FRESH ? 0 : (R.dry || 0) + 1;
 	const novOk = R.dry < BREAK_NOVEL_DRY;
 	if (nh.length && !novOk) { R.novelDry = (R.novelDry || 0) + 1; if (S.breaker) S.breaker.novelDry = (S.breaker.novelDry || 0) + 1; }
 	// (a run with novelty hits: the next step from one, a hit in another room than the step's start's first, else the latest)
@@ -2478,4 +2490,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, novelPick, novelSeeds, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, novelPick, novelSeeds, novelFresh, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

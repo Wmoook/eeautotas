@@ -749,6 +749,10 @@ async function passesSection() {
 		// every room's latest hit goes to the CPU search (its frontier there)
 		const seeds = ED.novelSeeds(nh).map((x) => `${x.room}@${x.tick}`).sort().join();
 		check("the wall breaker's novelty hits: every room's latest hit is a seed of the CPU search", seeds === '1@500,2@400,3@180', seeds);
+		// the stop rule's yield (cycle 5): a run's hits in (room, tile) cells no earlier run hit
+		const cell = (room, tile) => ({ room, tile, tick: 1, inputs: '0' }), seen = new Set();
+		const fr = [ED.novelFresh([cell(1, 5), cell(1, 6), cell(2, 5)], seen), ED.novelFresh([cell(1, 5), cell(2, 5), cell(2, 6)], seen), ED.novelFresh([], seen)].join();
+		check("the wall breaker's novelty yield: a run's hits in cells no earlier run hit", fr === '3,1,0' && seen.size === 4, fr);
 	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
