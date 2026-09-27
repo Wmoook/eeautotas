@@ -95,6 +95,9 @@ const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
+// room instances (entry): a key re-entered outside every earlier entry's walk is a new room (EEAT_INSTANCES=0: off, the
+// A/B's control)
+const INSTANCES = process.env.EEAT_INSTANCES !== '0';
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -177,7 +180,7 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, instances: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -203,11 +206,29 @@ function create(o) {
 			if (q.replies.length >= q.want) q.done();
 		});
 	}
-	/** a new place the room r was entered at: its walk (targets) from there too, when that is outside it */
+	/** a new place the room r was entered at: its walk (targets) from there too, when that is outside it. Outside its
+	 *  walk it is a new INSTANCE of the room (true): the same key in territory no earlier entry's walk reached, so a room
+	 *  of its own for the bandit (UNTRIED again, the newest), the burst's reward (a new room) and the editor's sources
+	 *  and breaker (instSource). Infinity Pain's known route resets its multijump at (162, 154) into speed=1, a key first
+	 *  entered ~18,000 ticks before, near the start: before this the change earned nothing and the search sat at 50% of
+	 *  the known route (cycles 1-5: the room-aliasing failure) */
 	const entry = (r, tile) => {
-		if (!(tile >= 0 && tile < N) || r.entries.has(tile)) return;
+		if (!(tile >= 0 && tile < N) || r.entries.has(tile)) return false;
 		r.entries.add(tile);
-		if (r.info && !r.info.seen[tile]) { r.info = null; r.fc = null; r.done = false; r.pa.fc = null; r.pa.done = false; }
+		if (!r.info || r.info.seen[tile]) return false;
+		r.info = null; r.fc = null; r.done = false; r.pa.fc = null; r.pa.done = false;
+		if (!INSTANCES) return false;
+		r.inst = (r.inst || 1) + 1; r.seq = ++seq; r.n = 0; r.y = 0; r.best = Infinity; r.pa.n = 0; r.pa.y = 0; r.pa.best = Infinity;
+		st.instances++;
+		return true;
+	};
+	/** a new instance of room r entered by `inputs` (sim: the state after them): a source event for the editor (its relay
+	 *  plan's 'new' step, the breaker's new-room clock, the progress measure) under the instance's own number */
+	const instSource = (r, sim, inputs) => {
+		const rc = RF.costAt(o.field, sim);
+		if (!(rc >= 0)) return;
+		o.say({ ev: 'source', kind: 'room', room: (r.key ^ Math.imul(r.inst, 0x9e3779b1)) | 0, desc: `${r.desc} #${r.inst}`, gain: 1, tick: inputs.length,
+			dist: Math.round(rc * 1000) / 1000, inputs, inst: r.inst });
 	};
 	/** a room (from a worker, a burst or the start): {room (key), desc, tile, t, inputs} */
 	const room = (m) => {
@@ -246,8 +267,9 @@ function create(o) {
 		if (r && c >= 0) r.tried.add(c);
 		if (to === undefined || to === null) return;
 		const r2 = rooms.get(to);
-		if (r2) entry(r2, tile);
-		else { let l = pendingEntries.get(to); if (!l) pendingEntries.set(to, l = []); if (l.length < 64) l.push(tile); }
+		if (r2) return entry(r2, tile) ? r2 : null;
+		let l = pendingEntries.get(to); if (!l) pendingEntries.set(to, l = []); if (l.length < 64) l.push(tile);
+		return null;
 	};
 	/** a sim in room r (its first arrival) */
 	const simAt = (inputs) => {
@@ -415,8 +437,9 @@ function create(o) {
 			if (k2 !== key && !quiet) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
-				edge(key, tile, k2, trig);
+				const ri = edge(key, tile, k2, trig);
 				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys })) fresh++;
+				else if (ri) { fresh++; instSource(ri, sim, inputs.slice(0, k + 1)); }
 				cz = cz2;
 			}
 			key = k2;
