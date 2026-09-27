@@ -15,9 +15,12 @@
 // burst changed the room there, or a burst reached it), plus the trophy where it is walkable. The segment study of
 // Infinity Pain's known route: 109 of its 120 room changes were found by the CPU search from the route's state, and the
 // long in-room stretches it missed were found by exhaustive GPU bursts aimed at the room's next trigger; the next trigger
-// ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). So a room's bursts aim at ALL its untried triggers at
-// once (a walk field with them as goals: the burst's order, layer cap and nearest attempt), the nearest first; a trigger
-// reached is tried, and the next burst aims at the rest.
+// ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). So a room's bursts aim at its untried triggers, ONE
+// per burst (a walk field with that trigger's tiles as goals, through portals: the burst's order, layer cap, nearest
+// attempt and cost ceiling): each once, the nearest to where the room was entered first, then by a bandit per room over
+// them (`targetOf`), a target retired after TARGET_DRY bursts that got no nearer; a trigger reached is tried. Aimed at
+// all at once (before), the field led the known routes out of the burst's cost ceiling in 45 of their 223 trigger
+// changes (Forgotten Veil's coin 4, the stall of every sample, was no target at all: behind a portal).
 //
 // A burst (one eegpu explore process) starts from the archive's cell of that room nearest its targets (every worker is
 // asked for its own; the nearest of all, the earliest among equals), sometimes 60 / 200 ticks back along it; its cells
@@ -76,6 +79,18 @@ const GREEDIER = [2, 4, 4, 4, 4, 2];
 const BACK = [30, 90, 30, 250];
 const TROPHY_BACK = [60, 150, 400];
 const UCB_C = 0.5, NEW_ROOMS_MAX = 3, SLACK = 30, SLACK_F = 0.1, NEAREST_WAIT_MS = 2000;
+// a room's burst aims at ONE of its targets (the aim field's goals: that trigger's tiles, or the trophy's), its cost
+// ceiling ROOM_SLACK tiles + SLACK_F of the start's distance: along the known routes' 223 trigger changes (the five big
+// levels, src/out/night/cycle2/walkline.js) the route stays within the ceiling of the field aimed at all the room's
+// targets at once in 178, of one aimed at the trigger it takes (with portal edges) in 219 at 30 tiles and in all of
+// Forgotten Veil's 19 at 45 (its coin 4: the route climbs 48 tiles through the portals at t2852; Octorage's team
+// switch: 33 with all targets, 3 with one; Infinity Pain up to 168 vs 15)
+const ROOM_SLACK = 45;
+// a target retires after TARGET_DRY bursts in a row aimed at it that got no nearer than its best (a tile); when every
+// untried target of a room is retired, they all come back (a room never runs dry while it has one)
+const TARGET_DRY = 3;
+// (the trophy as a target of a walk-mode room)
+const TROPHY_T = -2;
 // the trophy arm with the steer field (goexplore.js --burstSteer, the editor's RCH4 file): the relay's ceiling at most
 // (editor.js RELAY_SLACK_MAX), and a distance of 6000+ (the steer field has no value there: 6000 + the reach field's) as
 // the reach field's
@@ -177,7 +192,7 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, retired: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -217,7 +232,7 @@ function create(o) {
 				trig: m.t > 0 && m.trig !== false };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
-			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null });
+			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, tg: null });
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
@@ -271,7 +286,7 @@ function create(o) {
 			pass[k] = solid ? 0 : door ? (sim.is_tile_solid_now(k % W, (k / W) | 0) ? 0 : 1) : deadly && !sim.is_invulnerable ? 0 : 1;
 		}
 		const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
-		const seen = new Uint8Array(N), q = new Int32Array(N), term = new Uint8Array(N);
+		const seen = new Uint8Array(N), q = new Int32Array(N), term = new Uint8Array(N), steps = new Int32Array(N);
 		let qh = 0, qt = 0;
 		// (from every place the room was entered: the first arrival and each later entry elsewhere)
 		for (const e of [s0, ...r.entries]) if (!seen[e]) { seen[e] = 1; q[qt++] = e; pass[e] = 1; }
@@ -307,7 +322,7 @@ function create(o) {
 			if (qh >= qt) {
 				if (phase2 || !portals.length) break;
 				phase2 = true;
-				for (const t of portals) for (const e of PT.exits.get(t)) if (!seen[e] && pass[e]) { seen[e] = 1; q[qt++] = e; }
+				for (const t of portals) for (const e of PT.exits.get(t)) if (!seen[e] && pass[e]) { seen[e] = 1; steps[e] = steps[t] + 1; q[qt++] = e; }
 				continue;
 			}
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
@@ -320,7 +335,7 @@ function create(o) {
 			// (a trigger that changes the room: a goal, no way through; the places the room was entered at are ways out)
 			if (live && qh > nSrc) { term[t] = 1; continue; }
 			const ex = PT.exits.get(t);
-			if (ex) { if (phase2) { for (const e of ex) if (!seen[e] && pass[e]) { seen[e] = 1; q[qt++] = e; } } else portals.push(t); }
+			if (ex) { if (phase2) { for (const e of ex) if (!seen[e] && pass[e]) { seen[e] = 1; steps[e] = steps[t] + 1; q[qt++] = e; } } else portals.push(t); }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
@@ -329,7 +344,7 @@ function create(o) {
 					const j = yy * W + xx;
 					if (seen[j] || !pass[j]) continue;
 					if (dx && dy && wall[y * W + xx] && wall[yy * W + x]) continue;
-					seen[j] = 1; q[qt++] = j;
+					seen[j] = 1; steps[j] = steps[t] + 1; q[qt++] = j;
 				}
 			}
 		}
@@ -340,27 +355,51 @@ function create(o) {
 		// (a component the walk reached only through a portal: the portal arm's target)
 		const pOnly = new Set();
 		for (const [c, tiles] of comps) if (tiles.every((t) => via[t])) pOnly.add(c);
-		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly };
+		// (each target's walking steps from the nearest entry: the order in which an arm's untried targets are first aimed at)
+		const near = new Map();
+		for (const [c, tiles] of comps) near.set(c, tiles.reduce((m, t) => Math.min(m, steps[t]), Infinity));
+		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly, near, steps };
 		return R.info;
 	};
-	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
-	const fieldOf = (r) => {
-		// (cached while no trigger of the room was tried since)
-		if (r.fc && r.fc.n === r.tried.size) return r.fc.f;
-		const f = fieldOf0(r);
-		r.fc = { n: r.tried.size, f };
+	/** room r's next target: an untried trigger component (or TROPHY_T: the trophy, walk mode), never aimed at ones
+	 *  first (the nearest to where the room was entered first), then by UCB over the bursts aimed at it (mean reward +
+	 *  UCB_C x sqrt(ln(1 + the room's bursts) / its bursts)); retired ones (TARGET_DRY dry bursts) skipped while another
+	 *  is left; null: the room has no target left. Per arm: the room's own targets (reached without a portal) or its
+	 *  portal arm's (r.pa: only through one) */
+	const targetOf = (r) => {
+		const I = infoOf(r);
+		const arm = !!r.portal, live = [];
+		for (const c of I.comps.keys()) if (!r.tried.has(c) && I.pOnly.has(c) === arm) live.push(c);
+		let tn = Infinity;
+		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) tn = Math.min(tn, I.steps[t]);
+		if (tn < Infinity) live.push(TROPHY_T);
+		if (!live.length) return null;
+		if (!r.tg) r.tg = new Map();
+		const tg = (c) => { let v = r.tg.get(c); if (!v) r.tg.set(c, v = { n: 0, y: 0, best: Infinity, dry: 0 }); return v; };
+		let open = live.filter((c) => tg(c).dry < TARGET_DRY);
+		if (!open.length) { for (const c of live) tg(c).dry = 0; open = live; }
+		let b = null, bs = -Infinity;
+		for (const c of open) {
+			const v = tg(c);
+			const sc = v.n === 0 ? 1e6 - (c === TROPHY_T ? tn : I.near.get(c) || 0) : v.y / v.n + UCB_C * Math.sqrt(Math.log(1 + r.n) / v.n);
+			if (sc > bs) { bs = sc; b = c; }
+		}
+		return b;
+	};
+	/** the steer field of room r aimed at its target c: walking distance (fifths, 5 per step) to that trigger's tiles
+	 *  (or the trophy's) */
+	const fieldOf = (r, c) => {
+		// (cached per target while the room's walk stays: a new entry resets it)
+		if (r.fc && r.fc.c === c && r.fc.info === r.info) return r.fc.f;
+		const f = fieldOf0(r, c);
+		r.fc = { c, info: r.info, f };
 		return f;
 	};
-	const fieldOf0 = (r) => {
+	const fieldOf0 = (r, c) => {
 		const I = infoOf(r);
-		const goals = [];
-		// (a room's two arms: the targets its walk reaches without a portal (the room itself) and those only through one
-		// (its portal arm r.pa); together, Forgotten Veil's coin 4 ranked 14th of the coins=3 room's 17 targets from the
-		// route's entry: every nearer one first, a burst each)
 		const arm = !!r.portal;
-		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm) for (const t of tiles) goals.push(t);
-		const n = goals.length;
-		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) goals.push(t);
+		const goals = c === TROPHY_T ? I.trophies.filter((t) => !!I.via[t] === arm) : (I.comps.get(c) || []).slice();
+		const n = c === TROPHY_T ? 0 : goals.length;
 		if (!goals.length) return null;
 		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
 		let qh = 0, qt = 0, mx = 0;
@@ -383,7 +422,9 @@ function create(o) {
 				}
 			}
 		}
-		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
+		let live = 0;
+		for (const k of I.comps.keys()) if (!r.tried.has(k) && I.pOnly.has(k) === arm) live++;
+		return { walk, mx, triggers: n, trophies: c === TROPHY_T ? goals.length : 0, c, tile: goals[0], live };
 	};
 	/** every worker's cell of room r nearest the field's goals (the nearest of all; null when none has one) */
 	const nearestCell = (r, walk) => new Promise((res) => {
@@ -465,7 +506,7 @@ function create(o) {
 		cand.sort((x, y) => y[0] - x[0]);
 		for (const [sc, r] of cand) {
 			let f;
-			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
+			try { const c = targetOf(r); f = c === null ? null : fieldOf(r, c); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
 			bs = sc; best = { r, f };
 			break;
@@ -591,8 +632,9 @@ function create(o) {
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
-				job = { lane, r, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
-					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
+				const tx = p.f.tile % W, ty = (p.f.tile / W) | 0;
+				job = { lane, r, tgt: p.f.c, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(ROOM_SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
+					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.c === TROPHY_T ? 'the trophy' : `the trigger at (${tx}, ${ty}), ${p.f.triggers} tile${p.f.triggers === 1 ? '' : 's'}`} of ${p.f.live} untried${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
@@ -639,6 +681,12 @@ function create(o) {
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
 			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
+			// (the target's own arm: nearer than its best by a tile starts its dry count over)
+			if (job.r && job.r.tg && job.r.tg.has(job.tgt)) {
+				const v = job.r.tg.get(job.tgt);
+				v.n++; v.y += reward;
+				if (r.near < Math.min(v.best, job.startDist) - 1) { v.best = r.near; v.dry = 0; } else { v.dry++; if (v.dry === TARGET_DRY) st.retired++; }
+			}
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
 			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
@@ -654,7 +702,7 @@ function create(o) {
 				const ci2 = r.end === 'full' ? GREEDIER[job.conf] : job.conf;
 				// (a link after finer cells keeps them unless its table filled)
 				const keep = job.fine && r.end !== 'full';
-				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2,
+				next = Object.assign({}, job, { inputs, startDist: r.near, slack: job.r ? Math.round(ROOM_SLACK + SLACK_F * r.near) : Math.min(SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2,
 					cells: keep ? job.cells : CONFS[ci2], fine: keep ? job.fine : 0,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
