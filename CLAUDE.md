@@ -140,11 +140,20 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   (`fullWindow`): a window a sweep lane (a lane's share of the threads) found empty is owed ONE search with all the
   threads before the memory counts it again (`sweep.js` `due`; the lanes pass it over): `explore --hunt=1` with the
   deep windows' cells (`--roll=100 --cell=8 --vcell=2 --ahead=0.5`), 150 s (`--deepS`), found again on the current
-  best by its first state's hash; these run first in the deep stage (before the segment windows, which walk a cursor)
-  and in a skipped beam's slot; an empty one then counts as the window's second empty search (it rests 2, 4, ...
-  rounds). Measured before on the same windows (`src/out/night/autotas_gap2.md`, the spots where the known runs are
-  faster): lane budget vs all the threads, Infinity Pain's fly shaft 0 -> 248 ticks, ice 7 -> 29, 16 -> 25, 0 -> 5; the
-  A/B: `src/out/night/autotas_gap_fix.md` (GAPFIX_AB). After every stage the grind saves where it is in `status.json` `cursor`
+  best by its first state's hash (a span whose best-matching record is owed one; the deep segment windows and the loop
+  windows, all the threads too, count as it when they cover such a window); these run first in the deep stage (before
+  the segment windows, which walk a cursor) and in a skipped beam's slot; an empty one then counts as the window's
+  second empty search (it rests 2, 4, ... rounds). Measured before on the same windows (`src/out/night/autotas_gap2.md`,
+  the spots where the known runs are faster): lane budget vs all the threads, Infinity Pain's fly shaft 0 -> 248 ticks,
+  ice 7 -> 29, 16 -> 25, 0 -> 5. **The A/B (2026-09-27, main 2feb533 side by side, GPU searcher on; the worktree's
+  `src/out/night/autotas_gap_fix.md`): no measurable effect in 25-60 min.** The first sweep of a session takes 14-16 min
+  (its cap) on these runs, after it one deep window per round, so only 0-3 full-budget windows ran per run, finding 0,
+  0, 0, 5 (stale) ticks; the ends (branch vs main) Infinity Pain from 39,534, 60 min, 8 threads each on the A100's GPU 3:
+  39,300 vs 39,343; ice from 4,904, 30 min, 4 threads each on the shared H100: 4,742 vs 4,697; ice from 9,923 (H100, 4
+  threads): 4,747 vs 4,935; ice from 9,923 (A100, 8 threads): 4,721 vs 4,685; Stupid Fox from 9,205, 25 min (H100): 3,658
+  vs 3,626; each difference arose before the branch's first full-budget window (the arms run the same code until then:
+  run-to-run spread of the GPU searcher, up to 188 ticks on ice). No beam ran in any of them (rounds of 20-28 min), so the
+  beam skip was not exercised. After every stage the grind saves where it is in `status.json` `cursor`
   (round, stage, the deep and shortcuts cursors as tick + state hash, the seed counter), so a restart continues there.
   Without the GPU, mutate searches only the start ticks whose next ~800 ticks changed since its last full pass
   (`grind_mutref.eetas`). A finishing run that is not accepted (a stage output that went stale, an inbox run) is
