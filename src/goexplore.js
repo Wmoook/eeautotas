@@ -40,9 +40,9 @@
 //             B (novelty, the rest): a room by a tournament of 4 (weight (1 + ln(1 + gain)) x (2 if the trophy is
 //               walkable in the room) / sqrt(1 + picks / 50); gain = the tiles its door-aware flood fill reaches that no
 //               earlier room's did), then the best of --sample random cells of it by 1 / sqrt(1 + seen) + 1 / sqrt(1 +
-//               picks) (seen: how often a run came through the cell); --adapt=1 (the default): the room's weight also
+//               picks) (seen: how often a run came through the cell); --adapt=1: the room's weight also
 //               x (0.1 + its yield), the new territory tiles per pick from it, a decaying mean (Y_W; --adapt=2 also
-//               a finer grain for a saturated room; 3: the yield only after Y_STALL picks without a new room; 0: as
+//               a finer grain for a saturated room; 3: the yield only after Y_STALL picks without a new room; 0, the default: as
 //               before);
 //             C (discovery, half the picks while one is due): --burst picks of each new room's first cell, only for
 //               rooms that open new territory (gain > 0: on a level of many switches most rooms open nothing).
@@ -172,7 +172,7 @@
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
-//        [--adapt=1 (0 | 1 | 2 | 3; coarse cells: see Y_W)] [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
+//        [--adapt=0 (0 | 1 | 2 | 3; coarse cells: see Y_W)] [--grain=0 (0 | 1 | 2: see Y_W)] [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
@@ -218,13 +218,15 @@ const MAXRES = QP.length - 1;
 // --adapt=2 also gives a room whose yield fell below Y_SAT after at least Y_PICKS picks (since its last change) a finer
 // grain (Y_MAXG levels: 1 = the half tile, the jump count and speed classes; 2 = the quarter tile and the speeds to
 // 1/2 px/tick), so a saturated room, often the one before a precision wall, gets precision; --adapt=3 weights head B by
-// the yield only once no new room came for Y_STALL picks (the quick room changes keep main's picks)
+// the yield only once no new room came for Y_STALL picks (the quick room changes keep main's picks). --grain=G (0, 1
+// or 2; any --adapt): every room's cells at grain G from its start, without the yield's wait (cycle 3 of "E-archive":
+// Forgotten Veil's single-room coin gates of the gate benchmark are precision, not rooms; see CLAUDE.md)
 const Y_W = 32, Y_INIT = 4, Y_FLOOR = 0.1, Y_SAT = 0.02, Y_PICKS = 1000, Y_MAXG = 2, B_TILE = 40, Y_STALL = 3000;
 // a seed's states that become cells: every SEED_EVERY ticks back from its end (and the end)
 const SEED_EVERY = 30;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, mix: 0.5, adapt: 1, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
+	steerDist: 1, mix: 0.5, grain: 0, adapt: 0, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -757,7 +759,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null, y: Y_INIT, g: 0, gAt: 0, tiles: a.adapt ? new Set() : null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null, y: Y_INIT, g: a.grain, gAt: 0, tiles: a.adapt ? new Set() : null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		rooms.set(key, r);
 		roomList.push(r);
@@ -777,8 +779,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			// (tile, room, ground, the time-door phase in buckets of --phase ticks; no jump count or gravity queue; --adapt:
 			// the room's grain)
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (TD ? (((sim.level_ticks() % E.TIMEDOOR_PERIOD) / a.phase) | 0) << 8 : 0); KV[2] = 0; KV[3] = 0; KV[4] = 0; KV[5] = roomKey;
-			if (a.adapt === 2 && r === 0) {
-				if (roomKey !== gKey) { gKey = roomKey; const rr = rooms.get(roomKey); grain = rr !== undefined ? rr.g : 0; }
+			if ((a.adapt === 2 || a.grain > 0) && r === 0) {
+				if (roomKey !== gKey) { gKey = roomKey; const rr = rooms.get(roomKey); grain = rr !== undefined ? rr.g : a.grain; }
 				if (grain > 0) {
 					const vx = sim.speed_x, vy = sim.speed_y, sh = grain === 1 ? 3 : 2;
 					KV[2] = sim.jump_count; KV[3] = ((Math.trunc(px + 8) & 15) >> sh) | (((Math.trunc(py + 8) & 15) >> sh) << 4);
