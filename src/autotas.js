@@ -12,9 +12,16 @@
 //      --handoffMin 20 s), it is stopped and the optimizer gets the GPU. Measured (the night of 2026-09-26,
 //      src/out/night/fast_curves.md): after 3-37 s Find a route found nothing more in 10-20 min, and on the ice level
 //      it ended by itself at 41.6 s while its GPU sat idle for 29 min.
-//   5. Until the time budget (--minutes); then the job is paused (its best stays; the app can go on with it).
+//   5. Until the time budget (--minutes); then the job is paused (its best stays; the app can go on with it). When Find a
+//      route ends without a route (stopped, a failed physics check, a proof that none exists), the AutoTASer ends too.
+// The CPU: until the handoff Find a route keeps its W workers (the CPU search found the ice level's route) and the grind's
+// stages get SHARE_OF_W = max(1, min(W / 4, threads - W)) threads (<job>/cpu_share, touched while Find a route runs;
+// grind.js reads it at each stage's start); after it, W. (Both at W: 2 x 14 workers on the laptop's 16 threads.)
+// The first route's job is started like the app's Resume: one job at a time, so a job that runs (the user's too) is
+// paused; at the end the AutoTASer pauses its own job only if it still runs the session it started.
 // Every TAS on the way is replayed (C.evaluate) and judged by the job's own rule (common.judge).
 //   node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1]
+// (Like the app's Resume, its job pauses any other running job, the user's own included: one job at a time.)
 // Prints one JSON line per event ({t, ev: start|route|job|fed|best|handoff|end, ...}; t = seconds since the start) and
 // writes them to <out>/timeline.jsonl with <out>/final.eetas (default out: src/out/autotas/<level name>).
 // As a module: run(opts) -> {stop(), state()} (opts: {eelvl: Buffer, minutes, workers, name, out, handoffMin, cpu,
@@ -56,6 +63,15 @@ function run(o) {
 	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W }, o.gpu || { available: gpuOk });
 	let lastKey = '', lastRouteAt = 0, frDone = false, hist = 0, ended = false, busy = false;
 	const pending = [];   // Find a route's routes waiting for the job
+	let jobPid = 0;       // (the grind the AutoTASer started: finish stops the job only while it still runs that one)
+	const share = Math.max(1, Math.min(Math.floor(W / 4), threads - W));
+	let shareAt = 0;
+	const shareFile = () => (S.job ? path.join(J.jobDir(S.job), 'cpu_share') : null);
+	function holdShare(on) {
+		const f = shareFile();
+		if (!f) return;
+		try { if (on) { if (Date.now() - shareAt >= 3000) { fs.writeFileSync(f, String(share)); shareAt = Date.now(); } } else fs.unlinkSync(f); } catch (e) { /* none */ }
+	}
 	async function feedRoutes() {
 		while (S.job && pending.length) {
 			const r = pending.shift();
@@ -69,15 +85,22 @@ function run(o) {
 		if (!ev) { emit({ ev: 'route', runTicks: r.runTicks, verified: null, strategy: r.strategy, note: 'does not replay: dropped' }); return; }
 		lastRouteAt = Date.now();
 		S.routes++;
-		const faster = better(ev.runTicks);
+		// (only the first route counts as a best here: it is the job's base; a newer one counts once the job accepts it by
+		// its own rule, C.judge: deaths, random-portal chance, and appears in its history)
+		const faster = !S.job && !ended ? better(ev.runTicks) : false;
 		emit({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster });
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
 		if (!S.job) {
-			const meta = J.importJob({ eelvl: o.eelvl, eetas: Buffer.from(C.eetasBytes(ev.ms)), name: o.name || 'AutoTAS', eelvlName: `${o.name || 'level'}.eelvl`, eetasName: 'route.eetas', startMode: 'reset' });
+			let meta;
+			try {
+				meta = J.importJob({ eelvl: o.eelvl, eetas: Buffer.from(C.eetasBytes(ev.ms)), name: o.name || 'AutoTAS', eelvlName: `${o.name || 'level'}.eelvl`, eetasName: 'route.eetas', startMode: 'reset' });
+			} catch (e) { finish(`the first route could not be made a job: ${e && e.message || e}`); return; }
 			S.job = meta.id;
 			S.state = 'optimizing';
-			startJob(S.job, W, { gpu: gpuOk && !G.unsupported(J.loadJobLevel(S.job)) });
-			emit({ ev: 'job', job: S.job, runTicks: ev.runTicks });
+			if (!frDone) holdShare(true);   // (before the grind starts: its first stage reads it)
+			const ch = startJob(S.job, W, { gpu: gpuOk && !G.unsupported(J.loadJobLevel(S.job)) });
+			jobPid = (ch && ch.pid) || J.runningPid(S.job) || 0;
+			emit({ ev: 'job', job: S.job, runTicks: ev.runTicks, pid: jobPid });
 		} else pending.push({ ms: ev.ms, runTicks: ev.runTicks, strategy: r.strategy });
 	}
 	function pollJob() {
@@ -94,6 +117,7 @@ function run(o) {
 		frDone = true;
 		S.handoff = { t: since(), why };
 		emit({ ev: 'handoff', why });
+		holdShare(false);
 		try { ED.stop(); } catch (e) { /* ended */ }
 	}
 	const iv = setInterval(async () => {
@@ -106,25 +130,34 @@ function run(o) {
 				const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}`;
 				if (key !== lastKey) { lastKey = key; onRoute(r); }
 			}
-			if (!frDone && !st.running) { frDone = true; emit({ ev: 'handoff', why: `Find a route ended (${st.stage})` }); }
+			if (!frDone && !st.running) {
+				frDone = true;
+				holdShare(false);
+				emit({ ev: 'handoff', why: `Find a route ended (${st.stage})` });
+				// (no route: nothing to optimize, so the AutoTASer ends here instead of at the budget)
+				if (!S.job && !ended) finish(`Find a route ended without a route (${st.stage}${st.message ? `: ${st.message}` : ''})`);
+			}
+			if (!frDone) holdShare(true);
 			// the handoff: no new route for as long as it took to find the last one (at least handoffMin s)
 			if (!frDone && S.job && lastRouteAt && Date.now() - lastRouteAt > Math.max(handoffMin * 1000, lastRouteAt - t0)) {
 				handoff(`no new route for ${Math.round((Date.now() - lastRouteAt) / 1000)} s`);
 			}
-			await feedRoutes();
-			pollJob();
+			if (!ended) { await feedRoutes(); pollJob(); }
 		} catch (e) { emit({ ev: 'error', error: String(e && e.message || e) }); }
 		busy = false;
-		if (Date.now() - t0 >= budgetMs) finish('the time budget');
+		if (!ended && Date.now() - t0 >= budgetMs) finish('the time budget');
 	}, 250);
 	function finish(why) {
 		if (ended) return;
 		ended = true;
 		clearInterval(iv);
 		if (!frDone) { frDone = true; try { ED.stop(); } catch (e) { /* ended */ } }
+		holdShare(false);
 		let final = null;
 		if (S.job) {
-			try { stopJob(S.job); } catch (e) { /* stopped */ }
+			// (only the session the AutoTASer started: a job the user resumed or took over in the meantime goes on)
+			const rp = J.runningPid(S.job);
+			if (rp && (!jobPid || rp === jobPid)) { try { stopJob(S.job); } catch (e) { /* stopped */ } }
 			pollJob();
 			try {
 				const ms = C.readEetas(path.join(J.jobDir(S.job), 'best.eetas'));
@@ -144,7 +177,7 @@ module.exports = { run, HANDOFF_MIN_S };
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
 	const file = process.argv.slice(2).find((x) => !x.startsWith('--'));
-	if (!file || !fs.existsSync(file)) { console.log('usage: node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1]'); process.exit(2); }
+	if (!file || !fs.existsSync(file)) { console.log('usage: node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1]\n(its job pauses any other running job, yours included: one job at a time)'); process.exit(2); }
 	const name = args.name || path.basename(file, path.extname(file));
 	const out = path.resolve(args.out || path.join(__dirname, 'out', 'autotas', name.replace(/[^\w.-]+/g, '_')));
 	const ctl = run({ eelvl: fs.readFileSync(file), minutes: args.minutes, workers: args.workers, name, out, handoffMin: args.handoffMin, cpu: args.cpu === '1',

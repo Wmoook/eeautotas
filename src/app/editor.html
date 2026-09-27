@@ -201,7 +201,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 						<option value="4096">4 k</option><option value="8192">8 k</option><option value="16384">16 k</option><option value="32768" selected>32 k</option>
 						<option value="65536">64 k</option></select></label>
 				</div>
-				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button></div>
+				<div class="row" style="margin-top:10px"><button class="go" id="bSolve">Find a route</button><button class="go" id="bAuto" title="Find a route, then optimize it at once as a run (the GPU goes to the optimizer when Find a route stops finding faster routes), for the time chosen above. Its run pauses any other running run (one at a time)">Find and optimize</button><button class="stop" id="bStop" hidden>Stop</button></div>
 				<div id="autoSt"></div>
 				<div class="hint" id="solveWhy"></div>
 				<div id="solveSt"></div>
@@ -1526,7 +1526,7 @@ async function pollSolve() {
 }
 function renderSolve() {
 	const st = SOLVE.st, el = $('solveSt');
-	$('bStop').hidden = !(st && st.running);
+	$('bStop').hidden = !(st && st.running) && !(AUTO.st && AUTO.st.running);
 	renderChecks();
 	if (!st || st.stage === 'idle') { el.innerHTML = ''; VW.dirty = true; return; }
 	const stale = SOLVE.sig && SOLVE.sig !== currentSig();
@@ -1661,12 +1661,17 @@ async function pollAuto() {
 		$('autoSt').innerHTML = `<div class="msg info">Find and optimize: ${what}${s.best != null ? ` · best ${fmt(s.best)}` : ''}${s.job ? ' · <a href="/" id="autoOpen">open the run</a>' : ''}</div>`;
 		if ($('autoOpen')) $('autoOpen').onclick = () => store.set('tasopt.sel', s.job);
 	}
+	$('bStop').hidden = !(SOLVE.st && SOLVE.st.running) && !(s && s.running);
 	renderChecks();
 	if (s && s.running) AUTO.poll = setTimeout(pollAuto, 2000);
 }
 $('bAuto').onclick = autotas;
 $('bSolve').onclick = solve;
-$('bStop').onclick = async () => { try { SOLVE.st = await postJson('/api/editor/solve/stop', {}); } catch (e) { /* ignore */ } pollSolve(); };
+// (while Find and optimize runs, Stop ends it: Find a route stops and its run pauses with its best)
+$('bStop').onclick = async () => {
+	if (AUTO.st && AUTO.st.running) { try { AUTO.st = await postJson('/api/editor/autotas/stop', {}); } catch (e) { /* ignore */ } pollAuto(); pollSolve(); return; }
+	try { SOLVE.st = await postJson('/api/editor/solve/stop', {}); } catch (e) { /* ignore */ } pollSolve();
+};
 $('sSec').value = store.get('eeat.editor.sec') || '60';
 $('sWidth').value = store.get('eeat.editor.width') || '32768';
 if (!$('sSec').value) $('sSec').value = '60';

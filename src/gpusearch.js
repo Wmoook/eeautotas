@@ -80,7 +80,9 @@ const everyCells = () => (args.everyCells ? Math.max(20, Math.min(28, +args.ever
 let gpuMemMB = 0;   // (the GPU's memory, from eegpu's done events)
 const EVERY_OFFSETS = [0, 50, 25, 75];   // (per pass over the run, scaled to the step)
 const IDLE_ON = String(args.idle === undefined ? (args.tool ? '0' : '1') : args.idle) !== '0';
-const ARM_FAMS = { search: ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'], every: ['every', 'idle'] };
+// (the idle start is no arm: its own schedule, idleDue; its seconds and credit go to neither arm, so its pass never counts
+// as every move's first try, which pickArm gives round 3)
+const ARM_FAMS = { search: ['m1', 'del', 'm2', 'pert', 'flip', 'sticky'], every: ['every'] };
 const ARM_DECAY = 0.7;
 const PARENT = +(args.parent || 0);
 // eegpu's launch target (ms per kernel launch; halved after each launch failure) and the failures so far
@@ -846,7 +848,6 @@ async function main() {
 			if (e.err) { await failed(e.err, e.launchError); continue; }
 			const got = ref.ev.runTicks < before ? `, ${C.fmt(before)} to ${C.fmt(ref.ev.runTicks)}` : '';
 			log(`GPU: idle start: ${e.ks.length ? `${e.windows} windows after ${e.ks.join(', ')} idle ticks, ${e.added} rejoin${e.added === 1 ? '' : 's'}${got}` : 'the ball rests at the start: nothing to gain'} (${((Date.now() - ti) / 1000).toFixed(0)} s)`);
-			account('every', (Date.now() - ti) / 1000, round);
 		}
 		// this round's arm: every move along the run, or the search families (the bandit: pickArm)
 		if (pickArm(round) === 'every') {

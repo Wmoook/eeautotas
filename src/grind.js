@@ -69,6 +69,16 @@ fs.mkdirSync(INBOX, { recursive: true });
 fs.mkdirSync(PIECES, { recursive: true });
 const level = E.loadLevel(LEVEL_JSON);
 const W = +a.workers || os.cpus().length;
+// Find a route next to this job (the AutoTASer, src/autotas.js, until its handoff): while <job>/cpu_share is fresh (touched
+// every few seconds) a stage starts with the thread count in it instead of W
+const CPU_SHARE = path.join(OUT, 'cpu_share');
+function stageWorkers() {
+	try {
+		if (Date.now() - fs.statSync(CPU_SHARE).mtimeMs > 15000) return W;
+		const n = Math.floor(+fs.readFileSync(CPU_SHARE, 'utf8'));
+		return n >= 1 ? Math.min(W, n) : W;
+	} catch (e) { return W; }
+}
 const ROUND_MS = Math.max(1, +a.roundMin || 10) * 60e3;
 const DEEP_S = Math.max(0, +a.deepS || 0);   // --deepS: seconds per deep window (default: 150-210, rotating)
 const MUT_HORIZON = 800;
@@ -293,6 +303,8 @@ function tickLines() {
 /** Runs a tool; while it runs the inbox is checked every 3 s and the status heartbeat written every 30 s.
  *  Resolves { code, out (the stage's log text), killed (stopped by maxMs) }. */
 function runTool(script, args, maxMs, logFile) {
+	const sw = stageWorkers();
+	if (sw < W) args = args.map((x) => (x === `--workers=${W}` ? `--workers=${sw}` : x));
 	return new Promise((resolve) => {
 		const ch = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
 			env: C.heapEnv(12000) });
