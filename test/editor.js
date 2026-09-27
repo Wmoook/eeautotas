@@ -1104,6 +1104,11 @@ async function cpuSection() {
 	check('after a route the one search\'s bursts relay it: links that find nothing fall back on the route\'s own inputs, a pass ends and the next begins; the route given on stdin is the bound',
 		!!kBest && !!rg && rg.relayBursts >= 2 && rg.relayFalls >= 1 && rg.relayPasses >= 2 && orr.events.some((e) => e.ev === 'route' && e.ticks === kBest.inputs.length) &&
 		!orr.events.some((e) => e.ev === 'warning'), `${JSON.stringify(rg)}; ${orr.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
+	// head W (the path gap): with the route known, cells at a (room, tile) the route never passes are picked by their
+	// key-blind lead next to head L's picks along the route
+	const wp = orr.events.filter((e) => e.ev === 'progress' && e.wayPicks !== undefined).pop();
+	check('after a route head W picks cells off the route\'s (room, tile) schedule (key-blind lead), head L cells on it',
+		!!wp && wp.wayPicks > 0 && wp.leadPicks > 0, wp ? `wayPicks ${wp.wayPicks}, leadPicks ${wp.leadPicks}` : 'no progress event with the picks');
 	// the GPU random runs as an operator of the one search (the editor's feed, goexplore.js stdin "import <inputs>"): a run
 	// into the key's room given on stdin goes into the archive of every worker (2 workers, nothing shared otherwise)
 	const of = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts2')}`, '--stdin=1'],
