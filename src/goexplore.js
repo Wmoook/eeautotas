@@ -40,7 +40,9 @@
 //             B (novelty, the rest): a room by a tournament of 4 (weight (1 + ln(1 + gain)) x (2 if the trophy is
 //               walkable in the room) / sqrt(1 + picks / 50); gain = the tiles its door-aware flood fill reaches that no
 //               earlier room's did), then the best of --sample random cells of it by 1 / sqrt(1 + seen) + 1 / sqrt(1 +
-//               picks) (seen: how often a run came through the cell);
+//               picks) (seen: how often a run came through the cell); --adapt=1 (the default): the room's weight also
+//               x (0.1 + its yield), the new territory tiles per pick from it, a decaying mean (Y_W; --adapt=2 also
+//               a finer grain for a saturated room; 0: as before);
 //             C (discovery, half the picks while one is due): --burst picks of each new room's first cell, only for
 //               rooms that open new territory (gain > 0: on a level of many switches most rooms open nothing).
 //           The room's fields (flood fill, trophy walkable) are cached by the passable set (the doors' states and
@@ -169,7 +171,7 @@
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
-//        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
+//        [--adapt=1 (0 | 1 | 2; coarse cells: see Y_W)] [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
