@@ -711,7 +711,7 @@ function coinPlan(B) {
 }
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
  *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
-function coinLegsPhys(B, PH, base) {
+function coinLegsPhys(B, PH, base, opts) {
 	const { A } = B;
 	const M = PH.M;
 	let sPlan = B.M.s0;
@@ -720,18 +720,58 @@ function coinLegsPhys(B, PH, base) {
 	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
 	const nC = M.names.indexOf('coins');
 	s = M.withVal(s, nC, base.T - 1);
-	const { lv } = layerLevel(A, M, s, {});
-	const fields = new Map();
-	const fg0 = Int32Array.from(lv.fg);
-	for (const q of base.coins) if (fg0[q] === TROPHY) fg0[q] = 0;
-	for (const q of base.coins) {
+	const lvOf = new Map();
+	const legField = (q, k) => {
+		if (!lvOf.has(k)) {
+			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
+			const fg0 = Int32Array.from(lv.fg);
+			for (const c of base.coins) if (fg0[c] === TROPHY) fg0[c] = 0;
+			lvOf.set(k, { lv, fg0 });
+		}
+		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		fields.set(q, RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true }));
-	}
+		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+	};
+	const fields = new Map(), countOf = new Map();
+	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
 	const sT = M.withVal(s, nC, Math.min(base.T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of base.coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
-	return { T: base.T, coins: base.coins, fields, tail, s };
+	const CL = { T: base.T, coins: base.coins, fields, tail, s, countOf, rounds: 0 };
+	// (opts.legTour, default on: a coin's leg in the layer of the count the ball holds on its way to it along the DP's own
+	// tour (the k-th coin of the tour: coins = k - 1), rebuilt until the tour stays (at most 3 rounds). The T - 1 layer
+	// opens every coin door below T: on Forgotten Veil (doors for every count 1..16) coin 4's leg from coin 3 ran through
+	// doors shut at 3 coins, not the known route's 1195-tick loop)
+	if (!opts || opts.legTour !== false) {
+		for (let round = 0; round < 3; round++) {
+			const D = coinDP(CL);
+			if (!D) break;
+			const tour = coinTour(CL, D, A.start.t);
+			let changed = 0;
+			tour.forEach((q, k) => { if (countOf.get(q) !== k) { fields.set(q, legField(q, k)); countOf.set(q, k); changed++; } });
+			CL.rounds = round + 1;
+			if (!changed) break;
+		}
+	}
+	return CL;
+}
+/** the DP's tour from tile t0 (the coins in order; T of them, or fewer where no leg has a value) */
+function coinTour(CL, D, t0) {
+	const n = D.n, tour = [];
+	let m = 0, last = -1;
+	for (let k = 0; k < Math.min(D.T, n); k++) {
+		let best = -1, bv = Infinity;
+		for (let q = 0; q < n; q++) {
+			if (m & (1 << q)) continue;
+			const leg = arriveCost(CL.fields.get(CL.coins[q]), last < 0 ? t0 : CL.coins[last]);
+			if (leg >= CUT) continue;
+			const v = leg + D.h[(m | (1 << q)) * n + q];
+			if (v < bv) { bv = v; best = q; }
+		}
+		if (best < 0) break;
+		tour.push(CL.coins[best]); m |= 1 << best; last = best;
+	}
+	return tour;
 }
 /** the exact tour over the leg-cost model (n <= 18 coins): h[mask * n + last] = the least cost (fifths) to finish from
  *  coin `last` with the coins of mask collected */
@@ -830,13 +870,13 @@ function buildSteer(level, opts) {
 		cp = null;
 	}
 	if (cp) {
-		const CL = coinLegsPhys(B, PH, cp);
+		const CL = coinLegsPhys(B, PH, cp, opts);
 		const D = coinDP(CL);
 		if (D) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
 			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h };
+			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds };
 		}
 	}
 	const feats = M.feats.map((f, n) => {
@@ -850,7 +890,7 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T } : null, start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds } : null, start: steerAt(steer, sim0), ms: Date.now() - t0, over };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
