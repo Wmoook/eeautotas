@@ -168,6 +168,8 @@
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
+//        [--jumpP=0 (the CPU runs: 0 = one of the 18 options, jump in half; p = jump with p, --jumpNear=0.75 on the
+//        ground by a wall or a gap the way it goes)]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
 //        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
@@ -230,7 +232,8 @@ const SEED_EVERY = 30;
 const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0,
+	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -796,6 +799,18 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const sim = new E.EESim(L);
 	sim.reset();
 	const inp = new E.EEInput();
+	// the runs' inputs: one of the 18 options (jump in half of them), or with --jumpP=p (the clean-routes policy) the
+	// direction and up / down drawn as before and the jump bit with p, jumpNear where it can help: under down gravity on
+	// the ground with a wall or no floor in the next column the way the new input goes (the wall's own row), else p
+	const draw = !(a.jumpP > 0) ? () => OPTIONS[(rnd() * 18) | 0] : () => {
+		const h = [0, 2, 4][(rnd() * 3) | 0], v = [0, 8, 16][(rnd() * 3) | 0];
+		let p = a.jumpP;
+		if (h !== 0 && sim.on_ground && sim.gravity_dir.x === 0 && sim.gravity_dir.y === 1) {
+			const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4, d = h === 4 ? 1 : -1;
+			if (sim.is_tile_solid_now(cx + d, cy) || !sim.is_tile_solid_now(cx + d, cy + 1)) p = a.jumpNear;
+		}
+		return h | v | (rnd() < p ? 1 : 0);
+	};
 	const coarse = a.cells === 'coarse';
 	const disc = coarse ? null : discreteOf(L);
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
@@ -1383,12 +1398,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
 				const o = r * a.roll;
-				let m = OPTIONS[(rnd() * 18) | 0];
+				let m = draw();
 				let room = e.room;
 				for (let s = 0; s < a.roll; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
-					if (rnd() >= a.keep) m = OPTIONS[(rnd() * 18) | 0];
+					if (rnd() >= a.keep) m = draw();
 					buf[o + s] = m;
 					E.applyMask(inp, m);
 					sim.tick(inp);
