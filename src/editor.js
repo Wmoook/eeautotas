@@ -1138,7 +1138,9 @@ function breakLaunch(n) {
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
-	const novelF = cur.opts.novel && brk.novelReady ? path.join(dir(), 'novel.bin') : '';
+	// (a dry round, BREAK_NOVEL_DRY runs in a row with no progress: plain runs from then on, ordered as without the target:
+	// a novelty-ordered run's nearest attempt goes on too, so its chains went on to BREAK_CHAIN)
+	const novelF = cur.opts.novel && brk.novelReady && (R.dry || 0) < BREAK_NOVEL_DRY ? path.join(dir(), 'novel.bin') : '';
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))),
 		novel: novelF && fs.existsSync(novelF) ? novelF : '', prog0: R.progress.length };
 	V.novHits = [];
