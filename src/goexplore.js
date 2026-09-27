@@ -219,9 +219,13 @@ const LEAD_PICK = 20;
 // key-blind lead = its tick - the route's first tick at that tile in any room; WAY_PICK x sqrt(its picks): 25 picks cost
 // 200 ticks of lead (a region ahead but walled in by a door the route opened runs out sooner than head L's)
 const WAY_PICK = 40;
+// (--wR 0.5 of head W's picks: a cell at a tile the route never passes, in any room, by its reach lead = its tick - the
+// route's first tick with a reach cost at most the cell's (rcS; its own heap HR): the route's own time to go from that
+// cost as the estimate, so a corridor the route never visits that gets as near the trophy sooner is pushed on too;
+// --wR=0: those cells get no lead, as before)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0.5 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -870,26 +874,34 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// head W (--pW of the other picks): a cell off the route's (room, tile) schedule, by its key-blind lead (tsched: per
 	// tile the route's first tick there in any room): a skipped room, another coin / switch subset or another path in a
 	// room that gets somewhere sooner than the best route did is pushed on, where head L sees nothing
-	let sched = null, tsched = null;
+	let sched = null, tsched = null, rcV = null, rcK = null;
+	/** the route's first tick with a reach cost at most v (rcV decreasing, rcK its ticks); past the route's end: its length */
+	const rcS = (v) => {
+		let lo = 0, hi = rcV.length;
+		while (lo < hi) { const m = (lo + hi) >> 1; if (rcV[m] <= v) hi = m; else lo = m + 1; }
+		return lo < rcK.length ? rcK[lo] : rcK[rcK.length - 1] + 1;
+	};
 	const leadHeap = () => heapOf((c) => c.lead + LEAD_PICK * Math.sqrt(c.picks));
 	const wayHeap = () => heapOf((c) => c.wlead + WAY_PICK * Math.sqrt(c.picks));
 	let HL = coarse && port ? leadHeap() : null;
 	let HW = coarse && port && a.pW > 0 ? wayHeap() : null;
+	let HR = HW !== null && a.wR > 0 ? wayHeap() : null;
 	const lpush = (c) => {
 		const s = sched.get(c.room.key * 2097152 + c.tile);
 		if (s === undefined) {
 			if (HW === null) return;
 			const w = tsched[c.tile];
-			if (w === 0) return;
-			c.wlead = c.t - w;
-			HW.push(c);
+			if (w !== 0) { c.wlead = c.t - w; HW.push(c); return; }
+			if (HR === null || rcV === null || c.rc < 0) return;
+			c.wlead = c.t - rcS(c.rc);
+			HR.push(c);
 			return;
 		}
 		c.lead = c.t - s;
 		HL.push(c);
 	};
 	const hpush = HS ? (c) => { HA.push(c); HS.push(c); if (sched !== null) lpush(c); } : (c) => { HA.push(c); if (sched !== null) lpush(c); };
-	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
+	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); if (HR) HR.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
 	const steerOf = () => { const v = SF.steerFifths(ST, sim); return v < 0 ? STEER_NONE : v / 5; };
 	// (--steerDist: the closest attempt's and the sources' distances by the steer field, at most STEER_REAL_MAX; 6000 + the
@@ -908,7 +920,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
-	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
+	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0) + (HR ? HR.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
@@ -1034,7 +1046,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, wayPicks, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, wayPicks, reachPicks, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1229,11 +1241,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	};
 	/** the best route (the main thread's 'route': any operator's, or the editor's): head L's schedule, and every cell on it
 	 *  into head L (a separate engine: the live state belongs to the picks) */
-	let leadPicks = 0, wayPicks = 0;
+	let leadPicks = 0, wayPicks = 0, reachPicks = 0;
 	const setRoute = (str) => {
 		const ms = Uint8Array.from(str, (ch) => (ch.charCodeAt(0) - 48) & 31);
-		const s2 = new E.EESim(L), in2 = new E.EEInput(), m = new Map(), tm = new Int32Array(N);
+		const s2 = new E.EESim(L), in2 = new E.EEInput(), m = new Map(), tm = new Int32Array(N), rv = [], rk = [];
 		s2.reset();
+		let rmin = Infinity;
 		for (let k = 0; k < ms.length; k++) {
 			E.applyMask(in2, ms[k]);
 			s2.tick(in2);
@@ -1241,11 +1254,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const key = RM.key(s2) * 2097152 + tl;
 			if (!m.has(key)) m.set(key, k + 1);
 			if (tm[tl] === 0) tm[tl] = k + 1;
+			if (HR !== null) { const rc = RF.costAt(field, s2); if (rc >= 0 && rc < rmin) { rmin = rc; rv.push(rc); rk.push(k + 1); } }
 		}
 		sched = m;
 		tsched = tm;
+		if (rv.length) { rcV = Float64Array.from(rv); rcK = Int32Array.from(rk); }
 		HL = leadHeap();
 		if (HW !== null) HW = wayHeap();
+		if (HR !== null) HR = wayHeap();
 		for (const c of cells.values()) lpush(c);
 	};
 	/** the main thread's messages (between two chunks of picks) */
@@ -1323,10 +1339,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				if (e === null) e = popA();
 				else leadPicks++;
 			} else if (sched !== null && HW !== null && rnd() < a.pW) {
-				// head W (a route known): the off-route cell most ahead of the route by tile alone
-				while (HW.size() > 0) { const c = HW.pop(); if (HW.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
+				// head W (a route known): the off-route cell most ahead of the route by tile alone (--wR of them: a tile the
+				// route never passes, by the reach lead)
+				const H = HR !== null && rnd() < a.wR ? HR : HW;
+				while (H.size() > 0) { const c = H.pop(); if (H.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
 				if (e === null) e = popA();
-				else wayPicks++;
+				else { wayPicks++; if (H === HR) reachPicks++; }
 			} else if (rnd() < a.pA) e = popA();
 			else e = popB();
 			if (e === null) { end = 'exhausted'; break; }
@@ -1351,7 +1369,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e.pc = null;
 			}
 			e.used = true;
-			if (HA.size() > 3 * cells.size + 4096 || (HL !== null && HL.size() > 3 * cells.size + 4096) || (HW !== null && HW.size() > 3 * cells.size + 4096)) compact();
+			if (HA.size() > 3 * cells.size + 4096 || (HL !== null && HL.size() > 3 * cells.size + 4096) || (HW !== null && HW.size() > 3 * cells.size + 4096) || (HR !== null && HR.size() > 3 * cells.size + 4096)) compact();
 			// stuck: finer cells around here
 			if (picks - lastProgress > a.stall && e.picks % a.refine === 0) {
 				lastProgress = picks;
@@ -2046,7 +2064,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks') } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), reachPicks: total('reachPicks') } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms

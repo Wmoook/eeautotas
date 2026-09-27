@@ -1111,6 +1111,9 @@ async function cpuSection() {
 	const wp = orr.events.filter((e) => e.ev === 'progress' && e.wayPicks !== undefined).pop();
 	check('after a route head W picks cells off the route\'s (room, tile) schedule (key-blind lead), head L cells on it',
 		!!wp && wp.wayPicks > 0 && wp.leadPicks > 0, wp ? `wayPicks ${wp.wayPicks}, leadPicks ${wp.leadPicks}` : 'no progress event with the picks');
+	// its reach lead (--wR): cells at tiles the route never passes, by the route's first tick at their reach cost
+	check('head W\'s reach lead picks cells at tiles the route never passes (--wR of its picks)',
+		!!wp && wp.reachPicks > 0 && wp.reachPicks < wp.wayPicks, wp ? `reachPicks ${wp.reachPicks} of wayPicks ${wp.wayPicks}` : 'no progress event with the picks');
 	// the GPU random runs as an operator of the one search (the editor's feed, goexplore.js stdin "import <inputs>"): a run
 	// into the key's room given on stdin goes into the archive of every worker (2 workers, nothing shared otherwise)
 	const of = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts2')}`, '--stdin=1'],
