@@ -13,10 +13,14 @@
 //   passes     the "every move" pass ladder (src/editor.js passCells / passSeconds / nextPass) and the whole search
 //              driven by a stand-in for eegpu (a Node script playing scripted passes; no GPU): coarse first with pass 0's
 //              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
-//              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration
+//              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration;
+//              the relay's plan (with a stand-in for the CPU search that reports sources: the nearest attempt 60 / 150 /
+//              400 back, the newest source, the source with territory gain, 1000 back, the larger table, the next salt)
 //   cpu        the CPU route search (src/goexplore.js, no GPU; one or two threads, a few seconds): routes replayed in the
 //              JS engine, the same seed and tick budget give the same routes (also with 64 snapshots, states rebuilt by
-//              replaying), --first, --depth, "stop" and the end of stdin; the editor without an NVIDIA GPU (the CPU
+//              replaying), --first, --depth, "stop" and the end of stdin; coarse cells (--cells=auto above 50 x 50, the
+//              memory rule, the same routes for the same seed, the first route pinned to the research prototype's, the
+//              key room's source event, the editor keeping the sources); the editor without an NVIDIA GPU (the CPU
 //              search alone, with a note; a route; the physics verdict), and next to the eegpu stand-in (its first route
 //              bounds the exploration's next pass, it stops when the GPU strategies have ended with a route, not when
 //              they failed)
@@ -366,7 +370,9 @@ async function appSection() {
 // (if any) and ends. With `fail` (ms) every launch fails after that long (an error line, exit code 1). With `ready` (ms)
 // the first launch of each command loads its kernels that long before it says {"ev":"ready"} and starts. With
 // `launchFail` (ms) "explore" fails that long after its start like a kernel launch the display driver's watchdog stopped
-// (its launchError line, exit 7), and the beams run until their --stopfile appears, then end "stopped" (logged).
+// (its launchError line, exit 7), and the beams run until their --stopfile appears, then end "stopped" (logged). A run's
+// `closest` ({dist, tick, ch}) reports a nearest attempt of `tick` inputs `ch` ('4': right). A relay's --prefix is logged
+// with its launch: "#pf=<length>:<first input>".
 const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
@@ -374,7 +380,9 @@ const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); r
 if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach }) + '\\n'), SC.infoDelay || 0);
 const passOf =(a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
-fs.appendFileSync(SC.log, JSON.stringify(args) + '\\n');
+// (a relay's --prefix: its length and first input logged with the launch, as "#pf=<length>:<first>")
+const pfx = opt('prefix'), pfs = pfx && fs.existsSync(pfx) ? fs.readFileSync(pfx, 'latin1') : null;
+fs.appendFileSync(SC.log, JSON.stringify(pfs === null ? args : args.concat(['#pf=' + pfs.length + ':' + pfs.slice(0, 1)])) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
 if (SC.launchFail && args[0] === 'explore') return void setTimeout(() => { say({ error: 'test: the GPU driver stopped the explore expand kernel', cuda: 702, launchError: true, timeout: true }); process.exit(7); }, SC.launchFail);
@@ -401,7 +409,7 @@ const go = () => {
 		if (run.lanes) say({ ev: 'lanes', lanes: run.lanes, from: +opt('lanes') || 1, why: 'full', layers: run.layers });   // (--lanes: its batch filled the table)
 		if (run.refine) say(Object.assign({ ev: 'refine' }, run.refine));   // (--refine: this try ran out, the next is refined)
 		if (run.try) say(Object.assign({ ev: 'try' }, run.try));   // (--salts: a try ran through)
-		if (run.closest) say({ ev: 'closest', dist: run.closest.dist, tick: run.closest.tick, inputs: '4'.repeat(run.closest.tick) });   // (the nearest attempt so far)
+		if (run.closest) say({ ev: 'closest', dist: run.closest.dist, tick: run.closest.tick, inputs: (run.closest.ch || '4').repeat(run.closest.tick) });   // (the nearest attempt so far)
 		say({ ev: 'layer', layer: run.layers, tick: run.layers, new: 5, kept: 5, states: 1000, hits: 0, sec: 0.1, ticks: 18000, ticksPerSec: 1e6, full: 0.01 });
 		if (run.end !== 'finish') return void setTimeout(done, run.hold || 0);
 		const ticks = run.idle + SC.R;
@@ -412,6 +420,19 @@ const go = () => {
 };
 if (SC.ready && !prev.some((a) => a[0] === args[0])) setTimeout(() => { say({ ev: 'ready', loadMs: SC.ready, allocMs: 1 }); go(); }, SC.ready);
 else go();
+`;
+// A stand-in for the CPU search (src/goexplore.js): after `wait` ms it prints the scenario's source events (the relay's
+// starting points), then progress lines until "stop" or the end of its stdin.
+const FAKE_CPU = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', startCost: 40 });
+setTimeout(() => { for (const s of SC.sources || []) say(Object.assign({ ev: 'source', seed: 1 }, s)); }, SC.wait || 0);
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 40, found: 0, refined: 0, rooms: 3, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/stop/.test(String(d))) end(); });
+process.stdin.on('end', end);
 `;
 async function passesSection() {
 	section('passes: the "every move" pass ladder (a stand-in for eegpu, no GPU)');
@@ -590,6 +611,40 @@ async function passesSection() {
 		check('the relay\'s plan: out of situations 500 ticks deep, finer cells from the same point (1/4 then 1/16 px/tick speeds); the plan used up, the next salt (no waiting); a cost ceiling on every run',
 			JSON.stringify(runs) === JSON.stringify(want) && str.result && str.result.strategy === 'from the nearest attempt', `runs ${runs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}`);
 	}
+	// the relay's sources (RELAY_PLAN): the nearest attempt (1200 idle ticks, every move's) 60, 150 and 400 ticks back; then
+	// the newest source not relayed from yet, from where it entered its room (the CPU search's room 333: 500 inputs '1');
+	// then the source with territory gain relayed from least (room 111, gain 40: its lowest-cost attempt, 300 inputs '2',
+	// 60 back; room 333 has been relayed from, room 222 has no gain, every move's own room is the nearest attempt itself);
+	// then the nearest attempt 1000 back (2000: too near the start), the larger table (400 back, no cost ceiling), and the
+	// next salt from the top. Every relay run fills its table (no finer cells from the same point).
+	{
+		const scR = path.join(HOME, 'relay3.json'), logR = path.join(HOME, 'relay3.log'), scC = path.join(HOME, 'relay3cpu.json'), fakeCpu = path.join(HOME, 'fake-cpu.js');
+		fs.writeFileSync(fakeCpu, FAKE_CPU);
+		fs.writeFileSync(scR, JSON.stringify({ log: logR, R, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 30, tick: 1200, ch: '0' } }] },
+			relay: Array.from({ length: 12 }, () => ({ end: 'full', layers: 50 })), beam: null }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100, sources: [
+			{ kind: 'room', room: 111, desc: 'key:red', gain: 40, tick: 300, dist: 50, inputs: '2'.repeat(300) },
+			{ kind: 'room', room: 222, desc: 'key:green', gain: 0, tick: 400, dist: 45, inputs: '8'.repeat(400) },
+			{ kind: 'room', room: 333, desc: 'key:blue', gain: 25, tick: 500, dist: 60, inputs: '1'.repeat(500) }] }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scR], cpu: [process.execPath, fakeCpu, scC], salts: false, relay: true });
+		const relayRuns = () => (fs.existsSync(logR) ? fs.readFileSync(logR, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.some((x) => x.startsWith('--prefix='))) : []);
+		const t0r = Date.now();
+		while (ED.state().running && relayRuns().length < 8 && Date.now() - t0r < 40000) await new Promise((z) => setTimeout(z, 100));
+		const str = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		const runs = relayRuns().slice(0, 8).map((a) => {
+			const o = Object.fromEntries(a.filter((x) => /^--\w+=/.test(x)).map((x) => x.slice(2).split('=')));
+			return `${(a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4)}${o.costslack ? '' : ' no ceiling'}${o.salt ? ` salt ${o.salt}` : ''}`;
+		});
+		const want = ['1140:0', '1050:0', '800:0', '500:1', '240:2', '200:0', '800:0 no ceiling', '1140:0 salt 1'];
+		const so = (str.sources || []).map((s) => `${s.desc}:${s.runs}`).sort().join(', ');
+		check('the relay goes through its sources in order: the nearest attempt 60 / 150 / 400 back, the newest source not relayed from (from its room\'s entry), ' +
+			'the source with territory gain relayed from least, 1000 back, the larger table, the next salt',
+			JSON.stringify(runs) === JSON.stringify(want) && (str.sources || []).length === 4 && /key:blue:1/.test(so) && /key:red:1/.test(so) && /key:green:0/.test(so),
+			`runs ${runs.join(' | ')}; sources ${so}`);
+	}
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {
@@ -721,6 +776,54 @@ async function cpuSection() {
 	fs.writeFileSync(hiFile, hiBuf);
 	const u = await goexplore(hiFile, ['--workers=1', '--seconds=30']);
 	check('a trophy the reach field rules out from the start: "unreachable" at once', u.done && u.done.end === 'unreachable' && u.results.length === 0 && u.done.seconds < 5, u.summary);
+
+	// coarse cells (the levels above 50 x 50: rooms, the novelty and discovery heads, no refinement). A 60 x 50 level: a
+	// red key on the floor, a wall of red doors, the trophy behind it
+	const GX = require('../src/goexplore.js');
+	const startOf = (r) => r.events.find((e) => e.ev === 'start') || {};
+	const kd = room(60, 50);
+	for (let y = 1; y < 49; y++) kd.push([30, y, 23]);
+	kd.push([12, 48, 6], [50, 48, 121], [3, 48, 255]);
+	const kdBuf = ED.eelvlOf({ name: 'key door', width: 60, height: 50, cells: kd });
+	const kdFile = path.join(HOME, 'keydoor.eelvl');
+	fs.writeFileSync(kdFile, kdBuf);
+	const kdLevel = E.prepareLevel(EL.toSimLevel(EL.readEelvl(kdBuf)));
+	check('--cells=auto: fine cells up to 50 x 50 tiles (the platforms, 40 x 20), coarse above (60 x 50); coarse cells never refine',
+		startOf(a1).cells === 'fine' && GX.cellsFor(kdLevel) === 'coarse' && GX.cellsFor({ width: 50, height: 50 }) === 'fine' && GX.cellsFor({ width: 51, height: 50 }) === 'coarse' &&
+		GX.settle(GX.parseArgs(['x.eelvl']), kdLevel).maxres === 0 && GX.settle(GX.parseArgs(['x.eelvl']), platLevel).maxres === 4, `platforms ${startOf(a1).cells}; key door ${GX.cellsFor(kdLevel)}`);
+	// the memory budget: fine cells as before; coarse cells a quarter of the machine's memory over the workers, 200 .. 1500
+	// MB each (15 workers on 32 GB: 542 MB each)
+	const G32 = 32 * 2 ** 30;
+	check('memory per worker: fine cells 1600 / workers (200 .. 800 MB); coarse cells a quarter of the machine\'s memory over the workers (200 .. 1500 MB)',
+		GX.coarseMem(15, G32) === 546 && GX.coarseMem(4, G32) === 1500 && GX.coarseMem(7, 8 * 2 ** 30) === 293 && GX.coarseMem(64, 4 * 2 ** 30) === 200 &&
+		GX.settle(GX.parseArgs(['x.eelvl', '--workers=4']), platLevel).mem === 400 && GX.settle(GX.parseArgs(['x.eelvl', '--workers=4', '--mem=300']), kdLevel).mem === 300,
+		`15 workers on 32 GB: ${GX.coarseMem(15, G32)} MB, 4: ${GX.coarseMem(4, G32)}, 7 on 8 GB: ${GX.coarseMem(7, 8 * 2 ** 30)}`);
+	const k1 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--maxTicks=1500000', '--seconds=40', '--mem=1500']);
+	const k2 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--maxTicks=1500000', '--seconds=40', '--mem=1500']);
+	check('coarse cells, 1 thread, a tick budget: routes (through the key\'s room), all finishing in the JS engine; the same seed gives the same routes after the same ticks',
+		startOf(k1).cells === 'coarse' && k1.results.length > 0 && replays(kdLevel, k1.results) && sig(k1) === sig(k2) && k1.done.ticks === k2.done.ticks && k1.done.workers[0].rooms === 2,
+		`${k1.results.map((x) => `${x.ticks}@${x.simTicks}`).join(' ')}; ${k1.summary}`);
+	// pinned: the research prototype (src/out/planner_b/ngx.js --mode=novold --seed=3, the same cells, heads and random
+	// draws) found its first route here, 416 ticks, after 8,163 simulated ticks
+	check('coarse cells pick exactly like the research prototype: the first route 416 ticks after 8,163 simulated ticks (seed 3)',
+		k1.results.length > 0 && k1.results[0].ticks === 416 && k1.results[0].simTicks === 8163, `${k1.results.length ? `${k1.results[0].ticks}@${k1.results[0].simTicks}` : 'no route'}`);
+	// the source events: the key's room once (its first cell: its inputs end where the ball entered it, with the key)
+	const RM = GX.roomOf(kdLevel);
+	const roomAt = (inputs) => { const s = new E.EESim(kdLevel), inp = new E.EEInput(); s.reset(); let k = RM.key(s), prev = k; for (const ch of inputs) { E.applyMask(inp, ch.charCodeAt(0) - 48); s.tick(inp); prev = k; k = RM.key(s); } return { key: k, entered: k !== prev, desc: RM.desc(s) }; };
+	const ks = k1.events.filter((e) => e.ev === 'source');
+	const kr = ks.find((e) => e.kind === 'room');
+	const at = kr ? roomAt(kr.inputs) : null;
+	check('coarse cells: a "source" event for the key\'s new room (territory gain; its inputs end as the ball enters it), each room once per kind',
+		!!kr && kr.desc === 'key:red' && kr.gain > 0 && kr.tick === kr.inputs.length && at.key === kr.room && at.entered && at.desc === 'key:red' &&
+		ks.filter((e) => e.kind === 'room').length === new Set(ks.filter((e) => e.kind === 'room').map((e) => e.room)).size,
+		ks.map((e) => `${e.kind} "${e.desc}" gain ${e.gain} tick ${e.tick}`).join('; '));
+	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
+	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
+	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
+	const ss = ED.state();
+	check('the editor keeps the CPU search\'s sources (per room: where it was entered, its nearest attempt, the relay runs from it)', ss.stage === 'found' && Array.isArray(ss.sources) &&
+		ss.sources.some((s) => s.desc === 'key:red' && s.gain > 0 && s.entered >= 100 && s.best && s.runs === 0 && s.from === 'random runs (CPU)'),
+		JSON.stringify(ss.sources));
 
 	// the editor without an NVIDIA GPU: the CPU search alone, with a note
 	const waitDone = async (limit) => {
