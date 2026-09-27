@@ -319,22 +319,29 @@ function tickLines(lane) {
 
 // ---------------------------------------------------------------- stages (child processes, awaited)
 /** Runs a tool; while it runs the inbox is checked every 3 s and the status heartbeat written every 30 s.
- *  Resolves { code, out (the stage's log text), killed (stopped by maxMs) }. */
+ *  Resolves { code, out (the stage's log text), killed (stopped by maxMs, or grown), grown (started on Find a route's
+ *  CPU share, stopped when that share ended: the stage again with every thread, see stage()) }. */
 function runTool(script, args, maxMs, logFile) {
 	const sw = stageWorkers();
-	if (sw < W) args = args.map((x) => (x === `--workers=${W}` ? `--workers=${sw}` : x));
+	const cut = sw < W && args.includes(`--workers=${W}`);
+	if (cut) args = args.map((x) => (x === `--workers=${W}` ? `--workers=${sw}` : x));
 	return new Promise((resolve) => {
 		const ch = spawn(process.execPath, [path.join(__dirname, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
 			env: C.heapEnv(12000) });
 		const chunks = [];
-		let size = 0, killed = false, ended = false;
+		let size = 0, killed = false, ended = false, grown = false;
 		const keep = (d) => { if (size < (64 << 20)) { chunks.push(d); size += d.length; } };
 		const lane = stageStart();
 		const out = tickLines(lane);
 		ch.stdout.setEncoding('utf8');
 		ch.stdout.on('data', (s) => { const k = out.data(s); if (k) keep(Buffer.from(k)); });
 		ch.stderr.on('data', keep);
-		const inbox = setInterval(checkInbox, 3000);
+		// (a stage started on Find a route's share (the AutoTASer, cpu_share) is stopped once the share has ended: at its
+		// handoff the AutoTASer frees W threads, and a 1-thread mutate pass of the ice level had run on alone 6+ minutes)
+		const inbox = setInterval(() => {
+			checkInbox();
+			if (cut && !killed && stageWorkers() >= Math.min(W, 2 * sw)) { grown = killed = true; try { ch.kill(); } catch (e) { /* gone */ } }
+		}, 3000);
 		const beat = setInterval(() => saveCursor(), 30000);
 		const kill = setTimeout(() => { killed = true; try { ch.kill(); } catch (e) { /* gone */ } }, maxMs);
 		const end = () => { if (ended) return false; ended = true; clearInterval(inbox); clearInterval(beat); clearTimeout(kill); return true; };
@@ -345,9 +352,9 @@ function runTool(script, args, maxMs, logFile) {
 			stageEnd(lane);
 			const text = Buffer.concat(chunks);
 			if (logFile) { try { fs.writeFileSync(logFile, text); } catch (e) { /* ignore */ } }
-			resolve({ code, out: text.toString('utf8'), killed });
+			resolve({ code, out: text.toString('utf8'), killed, grown });
 		});
-		ch.on('error', () => { if (!end()) return; stageEnd(lane); resolve({ code: -1, out: '', killed }); });
+		ch.on('error', () => { if (!end()) return; stageEnd(lane); resolve({ code: -1, out: '', killed, grown }); });
 	});
 }
 
@@ -423,7 +430,16 @@ async function stage(name, script, args, outFile, maxMs, note) {
 	C.writeEetas(REF, best.ms);   // the stage searches from this exact copy of the current best
 	log(`${name}${note ? ` (${note})` : ''}...`);
 	saveStatus({ stage: name, round: curRound });
-	const res = await runTool(script, args, Math.min(maxMs, left + 240e3), path.join(OUT, `grind_${name.replace(/[^\w.-]/g, '_')}.log`));   // grace: stages with --deadline wrap up themselves
+	const logFile = path.join(OUT, `grind_${name.replace(/[^\w.-]/g, '_')}.log`);
+	let res = await runTool(script, args, Math.min(maxMs, left + 240e3), logFile);   // grace: stages with --deadline wrap up themselves
+	if (res.grown) {
+		// (Find a route's CPU share ended mid-stage: what it found so far, then the stage again on every thread)
+		if (fs.existsSync(outFile)) consider(outFile, name);
+		log(`${name}: Find a route's CPU share ended: again with ${stageWorkers()} threads`);
+		try { fs.unlinkSync(outFile); } catch (e) { /* none */ }
+		C.writeEetas(REF, best.ms);
+		res = await runTool(script, args, Math.min(maxMs, deadline - Date.now() + 240e3), logFile);
+	}
 	if (fs.existsSync(outFile)) consider(outFile, name);
 	return res;
 }
@@ -593,12 +609,34 @@ function ownSaving(outFile, refTicks) {
 // (explore --clockblind=1) and phase.js replays their edges plain or with the clock re-synced in the idle start
 // (phase.js --edges). --sweep=0 off.
 const SWEEP_LEN = 800, SWEEP_STEP = 600, SWEEP_LOOPS = 2;
-/** a find's own states (those of the run file `out` its start run lacks: refTr its trace) that the best holds, a share */
-function inBest(out, refTr) {
+/** a find's own states (those of the run file `out` its start run lacks: refTr its trace, refMs its inputs) that the best
+ *  holds, a share. On time-door levels by the clock-blind hash (no door phase, no key timers): a find phase.js re-synced
+ *  by idle ticks in the start shares no plain state hash with the best even once the best holds it (the time-door sweep's
+ *  review: 9 of ~23 Stupid Fox windows "stale (0%)") */
+function inBest(out, refTr, refMs) {
+	if (level.hasTimeDoors) {
+		let ms;
+		try { ms = C.readEetas(out); } catch (e) { return 1; }
+		const o = blindTrace(ms), r = blindTrace(refMs), b = new Set(blindTrace(best.ms));
+		return o.length ? SW.keptShare(o, o.length - 1, r, r.length - 1, (h) => b.has(h)) : 1;
+	}
 	const tr = TC.get(out);
 	if (!tr || tr.n < 0) return 1;
 	const b = bestTrace();
 	return SW.keptShare(tr.H, tr.n, refTr.H, refTr.n, (h) => b.has.get(h) >= 0);
+}
+/** the clock-blind state hashes of a run, tick 0 to its finish (none: it does not finish) */
+function blindTrace(ms) {
+	const sim = new E.EESim(level), inp = new E.EEInput();
+	sim.reset();
+	const H = [sim.stateHashClockBlind(NC === 1)], crown0 = sim.has_silver_crown;
+	for (let t = 0; t < ms.length; t++) {
+		E.applyMask(inp, ms[t]);
+		sim.tick(inp);
+		H.push(sim.stateHashClockBlind(NC === 1));
+		if (!crown0 && sim.has_silver_crown) return H;
+	}
+	return [];
 }
 // --sweepLoops=lane (default): the 2 longest loops in the sweep's lanes; first: the 2 longest loop windows with all the threads
 // before the sweep (an experiment: Forgotten Veil's loop at (326, 90) found -46 with 8 threads and 4 in a 2-thread lane)
@@ -747,7 +785,7 @@ async function sweepStage(round) {
 			let again = '';
 			if (saved > 0 && got && !got.accepted && !got.spliced && !win.redo && !redone.has(win.sig)) {
 				const refTr = S.trace(level, refMs, NC, RANDOM);
-				const share = inBest(runOut, refTr);
+				const share = inBest(runOut, refTr, refMs);
 				if (share < 0.5) {
 					redone.add(win.sig);
 					redo.push({ tr: refTr, w0: win.w0, w1: win.w1, saved });

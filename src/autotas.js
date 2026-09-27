@@ -13,14 +13,16 @@
 //      the time the first route took (at least --handoffMin 20 s, at most HANDOFF_WIN_MAX_S 120 s), Find a route is
 //      stopped and the optimizer gets the GPU once no route has gained the job anything for that long, or the
 //      optimizer's own stages gained more in the last window than Find a route's routes, on their share of the CPU and
-//      without the GPU. Before (2026-09-27), any faster route restarted the wait: the GPU random runs found a slightly
+//      without the GPU, or the routes gained the job less than 1% of its best in the last window (HANDOFF_MIN_GAIN: on
+//      the ice level, CPU only, a splice of 1-16 ticks every ~5-25 s kept Find a route going for the whole budget). Before (2026-09-27), any faster route restarted the wait: the GPU random runs found a slightly
 //      faster route every 3-35 s on the ice level, so the job's GPU searcher never ran; and the night of 2026-09-26
 //      (src/out/night/fast_curves.md) after 3-37 s Find a route found nothing more in 10-20 min.
 //   5. Until the time budget (--minutes); then the job is paused (its best stays; the app can go on with it). When Find a
 //      route ends without a route (stopped, a failed physics check, a proof that none exists), the AutoTASer ends too.
 // The CPU: until the handoff Find a route keeps its W workers (the CPU search found the ice level's route) and the grind's
 // stages get SHARE_OF_W = max(1, min(W / 4, threads - W)) threads (<job>/cpu_share, touched while Find a route runs;
-// grind.js reads it at each stage's start); after it, W. (Both at W: 2 x 14 workers on the laptop's 16 threads.)
+// grind.js reads it at each stage's start); after it, W: a stage started on the share is stopped when the share ends and
+// runs again on W threads (grind.js runTool `grown`). (Both at W: 2 x 14 workers on the laptop's 16 threads.)
 // The first route's job is started like the app's Resume: one job at a time, so a job that runs (the user's too) is
 // paused; at the end the AutoTASer pauses its own job only if it still runs the session it started.
 // Every TAS on the way is replayed (C.evaluate) and judged by the job's own rule (common.judge).
@@ -37,6 +39,9 @@ const C = require('./common.js');
 
 const HANDOFF_MIN_S = 20;
 const HANDOFF_WIN_MAX_S = 120;
+/** routes that gained the job less than this share of its best in the last window count as stalled (a trickle of
+ *  1-10-tick splices kept Find a route, and the optimizer on its CPU share, going for the whole budget) */
+const HANDOFF_MIN_GAIN = 0.01;
 /** a job history entry that Find a route's route made (its inbox run, that run's splice with the best, or a direct try
  *  while the job's grind was not running) */
 const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
@@ -44,9 +49,10 @@ const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
 /**
  * The handoff's reason, or '' (Find a route keeps the GPU). o: {now, t0 (the AutoTASer's start), jobAt (the job's start,
  * at the first route), frAt (the last gain a route made the job, else jobAt), gains [{at, saved, fr}] (the job's
- * improvements, fr: made by a route), handoffMin (s)}; times in ms. The window: the time the first route took, within
- * [handoffMin, HANDOFF_WIN_MAX_S]. Due when no route gained the job anything for a window, or when in the last window
- * the optimizer's own stages gained more than the routes.
+ * improvements, fr: made by a route), handoffMin (s), best (the job's best run ticks, optional)}; times in ms. The
+ * window: the time the first route took, within [handoffMin, HANDOFF_WIN_MAX_S]. Due when no route gained the job
+ * anything for a window, when in the last window the optimizer's own stages gained more than the routes, or when the
+ * routes gained it less than HANDOFF_MIN_GAIN of its best.
  */
 function handoffWhy(o) {
 	if (!o.jobAt) return '';
@@ -56,7 +62,8 @@ function handoffWhy(o) {
 	if (o.now - o.jobAt < win) return '';
 	let fr = 0, opt = 0;
 	for (const g of o.gains) if (g.at > o.now - win) { if (g.fr) fr += g.saved; else opt += g.saved; }
-	return opt > fr ? `in the last ${s(win)} s the optimizer gained ${opt} ticks, the routes ${fr}` : '';
+	if (opt > fr) return `in the last ${s(win)} s the optimizer gained ${opt} ticks, the routes ${fr}`;
+	return o.best > 0 && fr < HANDOFF_MIN_GAIN * o.best ? `in the last ${s(win)} s the routes gained the job ${fr} ticks, under ${Math.round(100 * HANDOFF_MIN_GAIN)}% of its ${o.best}` : '';
 }
 
 function run(o) {
@@ -117,7 +124,9 @@ function run(o) {
 		// (only the first route counts as a best here: it is the job's base; a newer one counts once the job accepts it by
 		// its own rule, C.judge: deaths, random-portal chance, and appears in its history)
 		const faster = !S.job && !ended ? better(ev.runTicks) : false;
-		emit({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster });
+		// (cpuS: the CPU search's CPU seconds when Find a route found it, editor.js cpuAfter: the time to route per
+		// core-second on a shared machine, next to t)
+		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {}));
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
 		if (!S.job) {
 			let meta;
@@ -172,7 +181,7 @@ function run(o) {
 			if (!frDone) holdShare(true);
 			if (!ended) { await feedRoutes(); pollJob(); }
 			// the handoff: the routes gain the job less than the optimizer does (handoffWhy)
-			if (!frDone && !ended && S.job) { const why = handoffWhy({ now: Date.now(), t0, jobAt, frAt, gains, handoffMin }); if (why) handoff(why); }
+			if (!frDone && !ended && S.job) { const why = handoffWhy({ now: Date.now(), t0, jobAt, frAt, gains, handoffMin, best: S.best }); if (why) handoff(why); }
 		} catch (e) { emit({ ev: 'error', error: String(e && e.message || e) }); }
 		busy = false;
 		if (!ended && Date.now() - t0 >= budgetMs) finish('the time budget');
@@ -202,7 +211,7 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, FR_WHAT };
+module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
