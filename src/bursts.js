@@ -94,6 +94,12 @@ const UNTRIED = 1.5;
 const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
+// the start cell, in turn per arm: the archive's cell nearest the arm's targets, or (a FAR entry above 0) the nearest at
+// least that many tiles farther out (a cell of another way in: Forgotten Veil's coins=3 room: all 49 bursts of a 240 s gate
+// run started from the archive's nearest cell, 3 tiles under the portal (2, 164) to coin 4, and ran out of situations
+// there (so did the finer cells and the wall ladder: the climb's speed comes from before the portal (3, 196)); the pass
+// that got coin 4 chained from a cell 16 tiles out)
+const FAR = [0, 0, 8, 0, 0, 16];
 const CUT = 0xffff;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
@@ -177,7 +183,7 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, far: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -386,7 +392,7 @@ function create(o) {
 		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
 	};
 	/** every worker's cell of room r nearest the field's goals (the nearest of all; null when none has one) */
-	const nearestCell = (r, walk) => new Promise((res) => {
+	const nearestCell = (r, walk, min) => new Promise((res) => {
 		const id = ++reqId;
 		const q = { replies: [], want: o.ports.length, done: null };
 		let timer = null;
@@ -399,7 +405,7 @@ function create(o) {
 		};
 		pending.set(id, q);
 		timer = setTimeout(q.done, NEAREST_WAIT_MS);
-		for (const p of o.ports) p.postMessage({ type: 'nearest', id, room: r.key, field: walk });
+		for (const p of o.ports) p.postMessage({ type: 'nearest', id, room: r.key, field: walk, min: min || 0 });
 	});
 	/** an attempt (inputs, from the level start) replayed: its rooms registered (the new ones counted), the room and tile
 	 *  it ends in; null when it dies */
@@ -580,10 +586,19 @@ function create(o) {
 			} else if (p && !p.trophy) {
 				const r = p.r;
 				r.busy = true;
-				const cell = await nearestCell(r, p.f.walk);
+				let cell = await nearestCell(r, p.f.walk);
 				if (stopped) break;
 				// (a cell of this room standing on a target: that trigger does not change the room from here: tried, and no burst)
 				if (cell && cell.v === 0 && cell.tile >= 0 && TR.comp[cell.tile] >= 0 && !TR.eaten[TR.comp[cell.tile]] && !r.tried.has(TR.comp[cell.tile])) { r.tried.add(TR.comp[cell.tile]); st.skipped++; r.busy = false; continue; }
+				// (every FAR.length-th burst of an arm: the nearest cell at least FAR tiles farther out than its nearest, when
+				// the archive has one: another way in (see FAR))
+				const far = FAR[r.k % FAR.length];
+				let farText = '';
+				if (far > 0 && cell && cell.v >= 0) {
+					const c2 = await nearestCell(r, p.f.walk, cell.v + 5 * far);
+					if (stopped) break;
+					if (c2 && c2.v >= 0) { farText = `, ${far}+ tiles out (${Math.round(cell.v / 5)} -> ${Math.round(c2.v / 5)})`; cell = c2; st.far++; }
+				}
 				r.lastField = p.f;
 				const k = r.k++;
 				let inputs = cell ? cell.inputs : r.inputs, v = cell ? cell.v : p.f.walk[r.tile];
@@ -592,7 +607,7 @@ function create(o) {
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
 				job = { lane, r, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
-					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
+					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back${farText}` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;

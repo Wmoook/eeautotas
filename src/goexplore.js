@@ -1114,15 +1114,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		imports++; importAdded += added;
 	};
 	/** the one search: this archive's cell of a room nearest a set of targets (m.field: fifths per tile, 0xffff = none),
-	 *  the earliest among equals, to the main thread (a GPU burst starts there) */
+	 *  the earliest among equals, to the main thread (a GPU burst starts there); m.min: only cells at least that far */
 	const nearestOf = (m) => {
-		const r = rooms.get(m.room), f = m.field;
+		const r = rooms.get(m.room), f = m.field, lo = m.min > 0 ? m.min : 0;
 		let best = null, bv = 0xffff;
 		if (r !== undefined) {
 			for (const c of r.arr) {
 				if (c.t >= maxT) continue;
 				const v = f[c.tile];
-				if (v === 0xffff) continue;
+				if (v === 0xffff || v < lo) continue;
 				if (best === null || v < bv || (v === bv && c.t < best.t)) { best = c; bv = v; }
 			}
 		}
