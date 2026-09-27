@@ -221,7 +221,7 @@ function remote() {
 	const { spawnSync } = require('child_process');
 	const code = path.resolve(opt.code || ROOT);
 	const label = opt.label || path.basename(code);
-	const ssh = process.platform === 'win32' ? 'C:\Windows\System32\OpenSSH\ssh.exe' : 'ssh';
+	const ssh = process.platform === 'win32' ? 'C:/Windows/System32/OpenSSH/ssh.exe' : 'ssh';
 	const sshArgs = opt.remote.replace(/^ssh\s+/, '').split(/\s+/).filter(Boolean);
 	const dir = opt.dir || `/dev/shm/gb_${label.replace(/[^\w.-]/g, '_')}`;
 	const jsonOut = path.resolve(opt.json || path.join(DATA, 'results', `${label}.json`));
@@ -233,7 +233,7 @@ function remote() {
 	};
 	const up = (buf, sub) => {
 		const r = spawnSync(ssh, [...sshArgs, `mkdir -p ${dir}/${sub} && tar xzf - -C ${dir}/${sub}`], { input: buf, maxBuffer: 1 << 26 });
-		if (r.status !== 0) throw new Error(`upload failed: ${r.stderr}`);
+		if (r.status !== 0) throw new Error(`upload failed: ${r.error ? r.error.message : r.stderr}`);
 	};
 	up(tar(code, ['src', 'package.json'], ['src/out', 'src/jobs', 'src/data', 'src/bin']), 'code');
 	up(tar(__dirname, [path.basename(__filename)], []), 'code/tools');
