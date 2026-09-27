@@ -518,7 +518,12 @@ function schedule() {
 	const BK = S.strategies.findIndex((q) => q.key === 'breaker');
 	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
-		for (const k of gpu) setPaused(k, k !== BK);
+		// (on a GPU of BURST_BIG_MB or more the one search's bursts go on beside the round (`breakShare`): before, the rounds held
+		// the GPU 38-66% of the time before the first route on Octorage, Infinity Pain, Endeavor and Forgotten Veil, and the
+		// search made 0.6-1.2 new rooms a minute in them against 3.4-4.2 outside (src/out/night/n2_1_time_to_route.md); the
+		// round's explore fits its table to the memory left (--reserve), a burst that finds none waits (goexplore --burstOomS))
+		const share = !!(cur && cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB);
+		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare));
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
 		return;
@@ -1384,6 +1389,7 @@ function start(b, gpu, test) {
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
 	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
 		burstBig: b.burstBig !== false && !(test && test.burstBig === false) && process.env.EEAT_BURST_BIG !== '0',
+		breakShare: b.breakShare !== false && !(test && test.breakShare === false) && process.env.EEAT_BREAK_SHARE !== '0',
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
