@@ -58,13 +58,16 @@ const CONFS = [{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16, cap: 1048576 }, { cqx: 0
 	{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16, cap: 65536 }, { cqx: 0.0625, cqv: 8, qy: 0.0625, qvy: 8, cap: 262144 },
 	{ cqx: 0.125, cqv: 16, qy: 0.125, qvy: 16, cap: 16384 }, { cqx: 0.5, cqv: 4, qy: 0.5, qvy: 4, cap: 262144 }];
 const CONF_C = 0.3;
-// a room's burst that ran out of situations (explore "exhausted") within FINE_NEAR tiles of a target without reaching it
-// goes again from the same start with the next finer cells (the wall breaker's grains, editor.js BREAK_GRAINS: 2 px and
-// 1/16 px/tick, then 1 px and 1/32); Forgotten Veil's coins=3 room: with the portal walk its portal arm's burst started
-// from the archive's cell 3 tiles from a target (the route's coin 4 behind the precision wall at its tick ~2969) and ran
-// out of situations there at 4 px / 1/16 in every try
+// the wall ladder: a room's burst that ran out of situations (explore "exhausted") within FINE_NEAR tiles of a target
+// without reaching it goes again from further back along its start's run (the wall breaker's BREAK_BACK 150 / 400), then
+// also with finer cells (the breaker's grains, editor.js BREAK_GRAINS: 2 px and 1/16 px/tick, 1 px and 1/32); Forgotten
+// Veil's coins=3 room: with the portal walk its portal arm's bursts started from the archive's cell 3 tiles from coin 4
+// (at the portal (2, 164), after the climb from the portal (3, 196): the known route enters that one at 15 px/tick) and
+// ran out of situations there at 4 px / 1/16, 2 px / 1/16 and 1 px / 1/32 alike: the speed the climb needs comes from
+// before the portal
 const FINE = [{ cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16, cap: 1048576 }, { cqx: 1, cqv: 32, qy: 1, qvy: 32, cap: 1048576 }];
 const FINE_TEXT = ['2 px and 1/16', '1 px and 1/32'];
+const WALL = [{ back: 150, fine: 0 }, { back: 400, fine: 0 }, { back: 150, fine: 1 }, { back: 400, fine: 2 }];
 const FINE_NEAR = 8;
 // (a chain link after a full table: the settings with the next smaller layer cap)
 const GREEDIER = [2, 4, 4, 4, 4, 2];
@@ -653,12 +656,14 @@ function create(o) {
 				const keep = job.fine && r.end !== 'full';
 				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2,
 					cells: keep ? job.cells : CONFS[ci2], fine: keep ? job.fine : 0,
-					what: `${job.what.replace(/ · (chain|finer) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
+					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
-			} else if (job.r && !r.reached && r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.fine || 0) < FINE.length && job.chain < CHAIN_MAX) {
-				// every situation tried at this grain a few tiles from a target: the same start with finer cells
-				const k = job.fine || 0;
-				next = Object.assign({}, job, { chain: job.chain + 1, fine: k + 1, cells: FINE[k], what: `${job.what.replace(/ · (chain|finer) .*$/, '')} · finer ${FINE_TEXT[k]}` });
+			} else if (job.r && !r.reached && r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.wall || 0) < WALL.length && job.chain < CHAIN_MAX) {
+				// every situation tried a few tiles from a target: the wall ladder from the same start (further back, then finer)
+				const k = job.wall || 0, w = WALL[k], from = job.from0 || job.inputs;
+				const inputs = from.length > w.back + 50 ? from.slice(0, Math.max(o.minLen || 0, from.length - w.back)) : from;
+				next = Object.assign({}, job, { inputs, from0: from, chain: job.chain + 1, wall: k + 1, fine: w.fine, cells: w.fine ? FINE[w.fine - 1] : job.cells,
+					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '')} · wall ${w.back} back${w.fine ? `, ${FINE_TEXT[w.fine - 1]}` : ''}` });
 				st.fine++;
 			}
 		}
