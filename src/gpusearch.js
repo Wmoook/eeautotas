@@ -36,7 +36,8 @@
 // best waits 252). Windows from the state after k idle ticks (k along the stretch where the idle ball still moves;
 // every 25 ticks up to 500 on time-door levels) with eegpu's --prefix and a --gain below 1: a rejoin that costs ticks
 // but starts the timer later; the union combine counts run ticks, so it takes such an edge only when the run is faster.
-// Once per session and again when the run's first 400 ticks change (at most every 5 min).
+// Once per session and again when the run's first 400 ticks change (at most every 5 min, doubled after each pass that
+// found nothing, up to 80 min).
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, families, ...).
 // GPU launch failures (eegpu's {"error":...,"launchError":true} line, exit 6 / 7 = the driver's watchdog stopped a
 // kernel, or a crash): the driver may have reset the GPU, so the searcher backs off instead of relaunching at once: it
@@ -696,7 +697,7 @@ async function runEvery() {
 }
 
 // ---------------------------------------------------------------- the idle start
-let idleLast = 0;
+let idleLast = 0, idleMiss = 0;   // (idle passes in a row that found no rejoin: the wait doubles)
 /** the idle start's window ticks k (the idle ball still moves there), or [] (it rests at once) */
 function idleTicks() {
 	if (level.hasTimeDoors) { const ks = []; for (let k = 25; k <= Math.min(500, ref.n); k += 25) ks.push(k); return ks; }
@@ -738,11 +739,13 @@ async function runIdle() {
 		windows++; added += r.added;
 		if (quitting || editorBusy()) break;
 	}
+	idleMiss = added ? 0 : idleMiss + 1;
 	if (added) { saveLibrary(false); await offer('idle start'); }
 	return { added, windows, ks };
 }
-/** once per session (after the first round), again when the run's first 400 ticks changed, at most every 5 min */
-const idleDue = () => IDLE_ON && !!ref && (!idleLast || (Date.now() - idleLast >= 300e3 && startKey() !== state.idleKey));
+/** once per session (after the first round), again when the run's first 400 ticks changed, at most every 5 min (10, 20,
+ *  40, 80 min after passes that found nothing: the ice level's later passes found nothing, 24 s each) */
+const idleDue = () => IDLE_ON && !!ref && (!idleLast || (Date.now() - idleLast >= 300e3 * 2 ** Math.min(4, idleMiss) && startKey() !== state.idleKey));
 
 // ---------------------------------------------------------------- the bandit: the search families vs every move
 const arms = { search: { c: 0, s: 0, n: 0, last: 0 }, every: { c: 0, s: 0, n: 0, last: 0 } };
