@@ -184,7 +184,9 @@
 //        side)] [--gpuCells=25 (log2 of a burst's cell table)] [--burstCap=262144 (a burst's states per layer at most; 0:
 //        its settings' own, up to 1 M)] (the defaults are the relay's sizing next to every move and the beams: a 2^26
 //        table and 1 M layers on 2 lanes took 3-5.7 GB, more than an 8 GB laptop GPU has beside them; the A100 runs:
-//        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstSteer=<RCH4 file> (the steer field for the bursts' trophy arm:
+//        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstAim=0 (0: a burst aims at all its arm's untried targets for good;
+//        1: at ONE, the one its start cell's walk leads to, a target retired after 2 bursts no nearer to it: src/bursts.js
+//        AIM_K)] [--burstSteer=<RCH4 file> (the steer field for the bursts' trophy arm:
 //        its order, as the editor's relay had it; the GPU tool must read RCH4)] [--burstOomS=5 (a burst that found the GPU's
 //        memory full waits this long, doubled while it lasts, up to 120 s: no try of its arm, never the bursts' end)]
 //        [--prefix=<run.eetas | .eetas characters> (the gate benchmark, tools/gatebench.js: the search starts after those
@@ -214,7 +216,7 @@ const MAXRES = QP.length - 1;
 const SEED_EVERY = 30;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstAim: 0 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
