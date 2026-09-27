@@ -1100,7 +1100,7 @@ async function cpuSection() {
 	fs.writeFileSync(nothingTool, ["'use strict';", "console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
 		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1 })), 20);"].join('\n'));
 	const kBest = k1.results.length ? k1.results[k1.results.length - 1] : null;
-	const orr = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=8', '--mem=300', '--bursts=1', `--tool=${nothingTool}`, `--work=${path.join(HOME, 'bursts4')}`, '--stdin=1'],
+	const orr = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=8', '--mem=300', '--bursts=1', `--tool=${nothingTool}`, `--work=${path.join(HOME, 'bursts4')}`, '--stdin=1', '--wR=0.5'],
 		(ch) => { if (kBest) ch.stdin.write(`route ${kBest.inputs}\n`); });
 	const rg = orr.done && orr.done.gpu;
 	check('after a route the one search\'s bursts relay it: links that find nothing fall back on the route\'s own inputs, a pass ends and the next begins; the route given on stdin is the bound',

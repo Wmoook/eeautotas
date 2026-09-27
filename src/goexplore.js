@@ -219,16 +219,20 @@ const LEAD_PICK = 20;
 // key-blind lead = its tick - the route's first tick at that tile in any room; WAY_PICK x sqrt(its picks): 25 picks cost
 // 200 ticks of lead (a region ahead but walled in by a door the route opened runs out sooner than head L's)
 const WAY_PICK = 40;
-// (--wR 0.5 of head W's picks: a cell at a tile the route never passes, in any room, by its reach lead = its tick - the
-// route's first tick with a reach cost at most the cell's (rcS; its own heap HR): the route's own time to go from that
-// cost as the estimate, so a corridor the route never visits that gets as near the trophy sooner is pushed on too;
-// --wR=0: those cells get no lead, as before; with the steer field (--steer) the cost is its gate-aware one, --wS=0 the
+// (--wR of head W's picks, off by default (cycle 7's A/B, below): a cell at a tile the route never passes, in any room,
+// by its reach lead = its tick - the route's first tick with a reach cost at most the cell's (rcS; its own heap HR): the
+// route's own time to go from that cost as the estimate, so a corridor the route never visits that gets as near the
+// trophy sooner is pushed on too; --wR=0: those cells get no lead, as before; with the steer field (--steer) the cost is its gate-aware one, --wS=0 the
 // reach field's: on Octorage the reach cost of the known way's off-route states is above the first route's early on
 // (the key-blind field puts the start 87 tiles out, the way through the switches 100-335), so none leads: 39 of its 904
-// off-route ticks lead by the reach cost, 507 by the steer cost, the corridor at (2, 124) at tick 300: +299 vs -9)
+// off-route ticks lead by the reach cost, 507 by the steer cost, the corridor at (2, 124) at tick 300: +299 vs -9).
+// A/B after the first route (22 min, 5 workers, the A100's GPU 7, one sample each): --wR=0.5 by the reach cost vs head W
+// alone: Octorage 7,146 vs 6,969 run ticks (ahead at 10 min: 7,278 vs 7,620), Stupid Fox 3,751 vs 3,592; by the steer
+// cost Octorage 6,996 at 15 min (head W alone 7,620, the reach cost 7,240), 6,995 at 20 min (6,969 / 7,146): not a
+// clear gain, so off by default
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0.5, wS: 1 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, relay: 1, pL: 0.3, pW: 0.3, wR: 0, wS: 1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
