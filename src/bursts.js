@@ -15,9 +15,12 @@
 // burst changed the room there, or a burst reached it), plus the trophy where it is walkable. The segment study of
 // Infinity Pain's known route: 109 of its 120 room changes were found by the CPU search from the route's state, and the
 // long in-room stretches it missed were found by exhaustive GPU bursts aimed at the room's next trigger; the next trigger
-// ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). So a room's bursts aim at ALL its untried triggers at
-// once (a walk field with them as goals: the burst's order, layer cap and nearest attempt), the nearest first; a trigger
-// reached is tried, and the next burst aims at the rest.
+// ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). A burst aims at ONE untried trigger of its room
+// (goexplore.js --burstAim=1, the default; a walk field with its tiles as the goals: the burst's start cell, order, layer
+// cap and nearest attempt), chosen by a bandit over the room's targets (AIM_K below): with all of them as goals at once
+// (--burstAim=0) the nearest won every burst of the room, and a needed trigger far down the list never got one of its
+// own (Forgotten Veil's coin 4 from its coins=3 entry: 14th of 17 by walking distance; Good Egg's coin (7, 190) 11th of
+// 90). A trigger reached is tried, and the next burst aims at the rest.
 //
 // A burst (one eegpu explore process) starts from the archive's cell of that room nearest its targets (every worker is
 // asked for its own; the nearest of all, the earliest among equals), sometimes 60 / 200 ticks back along it; its cells
@@ -83,6 +86,12 @@ const UNTRIED = 1.5;
 const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
+// one target per burst (--burstAim=1): a room's untried targets are the arms of a bandit of its own: each untried by a
+// burst first, in the order of the room's walk from where it was entered (the nearest first), then by mean reward (the
+// burst's) + AIM_C x sqrt(ln(1 + the room's aimed bursts) / its bursts); a target whose last AIM_K bursts got no nearer to
+// it than its best (by a tile) is retired (never aimed at while another is live); once every target of the room is
+// retired they all come back with twice the patience. The fields of the last AIM_CACHE (room, target) pairs are kept.
+const AIM_K = 3, AIM_C = 0.5, AIM_CACHE = 48, AIM_TROPHY = -2;
 const CUT = 0xffff;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
@@ -146,7 +155,8 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, aimed: 0, retired: 0, revived: 0 };
+	const aimCache = new Map();   // `${room seq}:${walk generation}:${target}` -> its field (the last AIM_CACHE)
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -176,7 +186,7 @@ function create(o) {
 	const entry = (r, tile) => {
 		if (!(tile >= 0 && tile < N) || r.entries.has(tile)) return;
 		r.entries.add(tile);
-		if (r.info && !r.info.seen[tile]) { r.info = null; r.fc = null; r.done = false; }
+		if (r.info && !r.info.seen[tile]) { r.info = null; r.fc = null; r.done = false; r.gen = (r.gen || 0) + 1; }
 	};
 	/** a room (from a worker, a burst or the start): {room (key), desc, tile, t, inputs} */
 	const room = (m) => {
@@ -306,6 +316,10 @@ function create(o) {
 		const n = goals.length;
 		if (o.field.mode === 'walk') for (const t of I.trophies) goals.push(t);
 		if (!goals.length) return null;
+		return Object.assign(walkTo(I, goals), { triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 });
+	};
+	/** the room's door- and protection-aware walk (fifths, 5 per step) to goal tiles: {walk, mx} */
+	const walkTo = (I, goals) => {
 		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
 		let qh = 0, qt = 0, mx = 0;
 		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
@@ -324,7 +338,42 @@ function create(o) {
 				}
 			}
 		}
-		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
+		return { walk, mx };
+	};
+	/** --burstAim: the target of room r's next burst and its field ({c (a trigger component; AIM_TROPHY: the trophy in walk
+	 *  mode), f, rank (its place in the room's walk order), of (the untried targets), tile}); null: aim at all of them (one
+	 *  target or none, or --burstAim=0) */
+	const aimOf = (r) => {
+		if (!a.burstAim) return null;
+		const I = infoOf(r);
+		const arms = [];
+		for (const c of I.comps.keys()) if (!r.tried.has(c)) arms.push(c);
+		if (o.field.mode === 'walk' && I.trophies.length) arms.push(AIM_TROPHY);
+		if (arms.length <= 1) return null;
+		const ts = r.ts || (r.ts = new Map());
+		if (!r.aimK) r.aimK = AIM_K;
+		let live = arms.filter((c) => !(ts.has(c) && ts.get(c).retired));
+		if (!live.length) {
+			for (const c of arms) if (ts.has(c)) { ts.get(c).retired = false; ts.get(c).dry = 0; }
+			r.aimK *= 2; live = arms; st.revived++;
+		}
+		let total = 0;
+		for (const c of live) total += ts.has(c) ? ts.get(c).n : 0;
+		let best = live[0], bs = -Infinity;
+		for (const c of live) {
+			const t = ts.get(c);
+			// (untried by a burst: the first in the walk's order (the comps' insertion order: the nearest first)
+			const sc = !t || t.n === 0 ? 100 : t.y / t.n + AIM_C * Math.sqrt(Math.log(1 + total) / t.n);
+			if (sc > bs) { bs = sc; best = c; }
+		}
+		const goals = best === AIM_TROPHY ? I.trophies : I.comps.get(best);
+		const key = `${r.seq}:${r.gen || 0}:${best}`;
+		let f = aimCache.get(key);
+		if (f) aimCache.delete(key);
+		else f = Object.assign(walkTo(I, goals), { triggers: best === AIM_TROPHY ? 0 : goals.length, trophies: best === AIM_TROPHY ? goals.length : 0 });
+		aimCache.set(key, f);
+		while (aimCache.size > AIM_CACHE) aimCache.delete(aimCache.keys().next().value);
+		return { c: best, f, rank: arms.indexOf(best) + 1, of: arms.length, tile: goals[0] };
 	};
 	/** every worker's cell of room r nearest the field's goals (the nearest of all; null when none has one) */
 	const nearestCell = (r, walk) => new Promise((res) => {
@@ -406,7 +455,9 @@ function create(o) {
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
-			bs = sc; best = { r, f };
+			let aim = null;
+			try { aim = aimOf(r); } catch (e) { aim = null; }
+			bs = sc; best = aim ? { r, f: aim.f, aim } : { r, f };
 			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
@@ -530,8 +581,12 @@ function create(o) {
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
-				job = { lane, r, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
-					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left), settings ${ci}, ${back} back` };
+				const aim = p.aim || null;
+				if (aim) st.aimed++;
+				const left0 = aim ? `target ${aim.c === AIM_TROPHY ? 'the trophy' : `(${aim.tile % W}, ${(aim.tile / W) | 0})`} ${aim.rank} of ${aim.of}`
+					: `${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left`;
+				job = { lane, r, aim, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
+					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${left0}), settings ${ci}, ${back} back` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
@@ -578,6 +633,15 @@ function create(o) {
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
 			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
+			// (the aimed target's arm: its reward and best distance; retired after the room's patience of bursts no nearer to it)
+			if (job.r && job.aim && job.r.ts) {
+				let t = job.r.ts.get(job.aim.c);
+				if (!t) job.r.ts.set(job.aim.c, t = { n: 0, y: 0, best: Infinity, dry: 0, retired: false });
+				t.n++; t.y += reward;
+				if (r.reached || r.fresh > 0) t.dry = 0;
+				else if (Number.isFinite(r.near) && r.near < t.best - 1) { t.best = r.near; t.dry = 0; }
+				else if (++t.dry >= (job.r.aimK || AIM_K)) { t.retired = true; st.retired++; }
+			}
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
 			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
