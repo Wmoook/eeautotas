@@ -349,6 +349,24 @@ function create(o) {
 	// ---------------------------------------------------------------- the route relay (see RELAY_EVERY)
 	const tileOf = (sim) => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 	let compTiles = null;   // component -> its tiles (made at the relay's first use)
+	let intoMap = null;     // a portal's exit tile -> the portal tiles leading there (made at the relay's first use)
+	const portalsInto = () => {
+		if (intoMap) return intoMap;
+		intoMap = new Map();
+		if (L.portalSlot && L.portalsById) {
+			for (let i = 0; i < N; i++) {
+				const s = L.portalSlot[i];
+				if ((L.fg[i] !== 242 && L.fg[i] !== 381) || s < 0) continue;
+				const ex = L.portalsById.get(L.pTarget[s]);
+				if (!ex) continue;
+				for (let k = 0; k < ex.n; k++) {
+					const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4);
+					if (j >= 0 && j < N) { let l = intoMap.get(j); if (!l) intoMap.set(j, l = []); if (!l.includes(i)) l.push(i); }
+				}
+			}
+		}
+		return intoMap;
+	};
 	/** the route's waypoints: every room change a trigger made ({t: the tick it shows, sub, newKeys, tile, comp}; a
 	 *  change of the clock's is none), then the finish ({t: its length, finish}) */
 	const segsOf = (inputs) => {
@@ -372,7 +390,7 @@ function create(o) {
 	const inSeg = (sim, s) => { const cz = o.RM.cause(sim); return cz.sub === s.sub && (cz.keys & s.newKeys) === s.newKeys; };
 	/** the walk field from `sim` to waypoint s (the trigger's component; the trophy for the finish): the room's other
 	 *  triggers are walls (past one the ball is in another room); {walk, mx, v (the start's value)} or null (no way) */
-	const segField = (sim, s) => {
+	const segField = (sim, s, loose = false) => {
 		const t0 = tileOf(sim);
 		const I = scan(sim, [t0]);
 		let goals;
@@ -384,15 +402,18 @@ function create(o) {
 		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
 		let qh = 0, qt = 0, mx = 0;
 		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
+		const into = portalsInto();
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+			// (portals: a step from the portal's tile to its exit; Infinity Pain's way to the trophy takes one)
+			for (const p of into.get(t) || []) if (walk[p] === CUT && I.pass[p]) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
 					const xx = x + dx, yy = y + dy;
 					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
 					const j = yy * W + xx;
-					if (walk[j] !== CUT || !I.pass[j] || (I.term[j] && j !== t0)) continue;
+					if (walk[j] !== CUT || !I.pass[j] || (!loose && I.term[j] && j !== t0)) continue;
 					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
 					walk[j] = d; if (d > mx) mx = d; q[qt++] = j;
 				}
@@ -439,7 +460,9 @@ function create(o) {
 			if (!relay.segs || relay.i >= relay.segs.length) relayPass(b);
 			const s = relay.segs[relay.i];
 			const sim = simAt(relay.prefix);
-			const f = segField(sim, s);
+			// (the room's other triggers walls, else (the engine's test of a trigger is a centred ball at rest: Infinity Pain's route
+			// passes a low-gravity tile on its way to the trophy with no change) through them: the link's end is checked anyway)
+			const f = segField(sim, s) || segField(sim, s, true);
 			if (!f) { if (!relayFallback(sim)) relayReset(); continue; }
 			// (the last try, before the chain gives up its lead: RELAY_BIG, the wall breaker's way: a table 4x larger, a
 			// layer of 1 M, twice the time)
@@ -812,6 +835,8 @@ function create(o) {
 	};
 	return {
 		room, edge, triggers: TR.n,
+		// (the route relay's pieces, for measurement scripts: src/out/macro)
+		relayParts: { segsOf, segField, simAt, inSeg },
 		start: () => { loopP = Promise.all(Array.from({ length: Math.max(1, a.burstPar) }, (_, k) => loop(k))).catch((e) => o.say({ ev: 'warning', text: `bursts: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` })); return loopP; },
 		/** ends the running burst between two launches and the loop; resolves once its process is gone */
 		stop: async () => {
