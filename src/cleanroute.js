@@ -16,6 +16,7 @@
 //
 // node src/cleanroute.js <route.eetas> --level=<level id | job id | level.json | level.eelvl> [--out=<file>]
 //      [--ms=5000] [--budget=<sim ticks>] [--horizon=240] [--passes=4] [--kinds=jump,vert,flip]
+//      [--cosmetic=1 (only edits that change no state: the same states and time, no shortcut)]
 // prints the counts before / after (jump presses, input changes per second) and what each kind of edit kept.
 
 const fs = require('fs');
@@ -97,6 +98,8 @@ function cleanRoute(level, masks0, o) {
 	o = o || {};
 	const t0 = Date.now();
 	const msBudget = o.ms > 0 ? o.ms : 5000, tickBudget = o.budget > 0 ? o.budget : 40e6, horizon = o.horizon > 0 ? o.horizon : 240;
+	// (o.cosmetic: only edits whose state equals the route's at the same tick: the same states, the same time, no shortcut)
+	const cosmetic = !!o.cosmetic;
 	const kinds = String(o.kinds || 'jump,vert,flip').split(',');
 	const ev0 = C.evaluate(level, masks0);
 	if (!ev0) return null;
@@ -131,6 +134,7 @@ function cleanRoute(level, masks0, o) {
 			simTicks++;
 			const u = t + 1;
 			if (finished >= 0) {
+				if (cosmetic) return null;
 				// (the edited run finishes: by the route's rule, no more deaths and no more run ticks)
 				if (dead > R.deaths || sim.run_ticks > R.runTicks) return null;
 				const r = new Uint8Array(u);
@@ -146,7 +150,7 @@ function cleanRoute(level, masks0, o) {
 				r.set(cand.subarray(a, u), a);
 				return { ms: r, how: 'same', u };
 			}
-			const v = R.at.get(h);
+			const v = cosmetic ? undefined : R.at.get(h);
 			if (v !== undefined && v > u && R.H[v] === h && R.D[v] >= dead) {
 				// (the route's state of tick v, sooner: the route from there)
 				const r = new Uint8Array(u + n - v);
@@ -209,7 +213,7 @@ function cleanRoute(level, masks0, o) {
 	// edited route played on to the end, then rejoins again while a pass keeps edits
 	passes.push(pass());
 	for (let k = 1; k < maxPasses && !out; k++) {
-		full = k === 1;
+		full = k === 1 && !cosmetic;
 		const c = pass();
 		passes.push(c);
 		if (!c && !full) break;
@@ -230,12 +234,12 @@ function editorLevel(buf) {
 module.exports = { cleanRoute, inputStats, editorLevel, SNAP_EVERY, FLIP_MAX };
 
 if (!isMainThread && workerData && workerData.cleanRoute) {
-	// (editor.js: a route of Find a route cleaned in a worker thread; {eelvl, inputs ('0' + mask chars), ms})
+	// (editor.js: a route of Find a route cleaned in a worker thread; {eelvl, inputs ('0' + mask chars), ms, cosmetic})
 	const d = workerData;
 	let res = null;
 	try {
 		const masks = Uint8Array.from(String(d.inputs), (ch) => (ch.charCodeAt(0) - 48) & 31);
-		const r = cleanRoute(editorLevel(d.eelvl), masks, { ms: d.ms });
+		const r = cleanRoute(editorLevel(d.eelvl), masks, { ms: d.ms, cosmetic: !!d.cosmetic });
 		if (r) res = { inputs: C.eetasBytes(r.ms).toString('latin1'), runTicks: r.ev.runTicks, ticks: r.ms.length, changed: r.changed, before: r.before, after: r.after,
 			kept: r.kept, passes: r.passes, tried: r.tried, simTicks: r.simTicks, out: r.out, sec: r.sec };
 	} catch (e) { res = { error: String(e && e.message || e) }; }
@@ -250,7 +254,7 @@ if (!isMainThread && workerData && workerData.cleanRoute) {
 		level = E.prepareLevel(Object.assign(L.toSimLevel(L.readEelvl(fs.readFileSync(args.level))), { start_mode: 'reset' }));
 	} else level = C.loadLevel(args.level, file);
 	const masks = C.readEetas(file);
-	const r = cleanRoute(level, masks, { ms: +args.ms || 0, budget: +args.budget || 0, horizon: +args.horizon || 0, kinds: args.kinds, passes: +args.passes || 0 });
+	const r = cleanRoute(level, masks, { ms: +args.ms || 0, budget: +args.budget || 0, horizon: +args.horizon || 0, kinds: args.kinds, passes: +args.passes || 0, cosmetic: args.cosmetic === '1' });
 	if (!r) { console.log(JSON.stringify({ error: 'the route does not finish' })); process.exit(1); }
 	if (args.out) C.writeEetas(path.resolve(args.out), r.ms);
 	console.log(JSON.stringify({ runTicks: r.ev.runTicks, from: C.evaluate(level, masks).runTicks, changed: r.changed, before: r.before, after: r.after, kept: r.kept,

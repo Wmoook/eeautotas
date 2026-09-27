@@ -1368,7 +1368,7 @@ function start(b, gpu, test) {
 	S = { running: true, stage: 'checking the physics', started: t0, searchStarted: 0, prepSec: 0, elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
-		noClean: b.clean === false || process.env.EEAT_CLEAN === '0',
+		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls,
 			...(k === 'goexplore' && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
@@ -2336,13 +2336,21 @@ function setResult(level, ev, o) {
 // 'kept' (nothing to drop, or it failed: the route as found). One cleanup at a time; a newer best waits (the newest).
 const CLEAN_MS = 20000;   // a route's cleanup budget (the laptop: 1-8 s for the AutoTAS base routes)
 let cleaning = null, cleanNext = null;
+/** the cleanup's mode: the request's `clean` (false / 'off', 'cosmetic', 'full'), else EEAT_CLEAN (0 = off), else
+ *  CLEAN_DEFAULT; 'cosmetic': only edits that change no state (the same states and time), 'full': shortcuts too */
+const CLEAN_DEFAULT = 'full';
+function cleanModeOf(v) {
+	const e = process.env.EEAT_CLEAN;
+	const m = v === false ? 'off' : typeof v === 'string' ? v : e === '0' ? 'off' : e === 'cosmetic' || e === 'full' ? e : CLEAN_DEFAULT;
+	return m === 'off' || m === 'cosmetic' || m === 'full' ? m : CLEAN_DEFAULT;
+}
 /** the search's bound: the fastest route as found (S.rawBest; the cleanup never tightens it: the searches run as they
  *  would without it), else S.result's */
 const boundTicks = () => (S.rawBest ? S.rawBest.ticks : S.result ? S.result.ticks : 0);
 function cleanLater(ev, label) {
 	if (!S || !cur) return;
 	const inputs = C.eetasBytes(ev.ms).toString('latin1');
-	if (S.noClean) return;
+	if (S.cleanMode === 'off') return;
 	const R0 = S.result;
 	cleanNext = { S, level: cur.level, buf: cur.buf, inputs, runTicks: ev.runTicks, ticks: ev.ms.length, label,
 		foundAfter: Math.round((Date.now() - S.started) / 100) / 10, cpuAfter: R0 ? R0.cpuAfter : 0 };
@@ -2355,7 +2363,8 @@ function cleanStart() {
 	if (!job || job.S !== S) return;
 	let w;
 	try {
-		w = new Worker(require.resolve('./cleanroute.js'), { workerData: { cleanRoute: true, eelvl: Uint8Array.from(job.buf), inputs: job.inputs, ms: CLEAN_MS } });
+		w = new Worker(require.resolve('./cleanroute.js'), { workerData: { cleanRoute: true, eelvl: Uint8Array.from(job.buf), inputs: job.inputs, ms: CLEAN_MS,
+			cosmetic: job.S.cleanMode === 'cosmetic' } });
 	} catch (e) { cleanDone(job, { error: String(e && e.message || e) }); return; }
 	if (w.unref) w.unref();
 	cleaning = w;
