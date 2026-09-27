@@ -1676,7 +1676,7 @@ function pruneReachCache() {
 /** why the native tool cannot run this app's searches ('' = it can): its `info` must say it reads the reach file of this
  *  version (an older build refuses every RCH3 file); asked once per build of the tool */
 const toolChecked = new Map();
-let toolInfo = null;   // the last native tool's `info`: {steer (the steer file version it reads; 0 none), memMB (its GPU's memory)}
+let toolInfo = null;   // the last native tool's `info`: {steer (the steer file version it reads; 0 none), memMB (its GPU's memory), key (its check's: toolMem)}
 // An `info` asked while another process holds the GPU's memory makes no context and says {"gpu":null,"why":"... out of
 // memory"}: its memMB 0 kept the steer field off the GPU tools and made the wall breaker plan 2^27 instead of 2^30 on the
 // A100 for the whole search (cycle 6). So the check asks once more after GPU_RETRY_S[0] before the search starts (the GPU
@@ -1714,7 +1714,7 @@ function reaskInfo(cmd, key, k) {
 			const mem = infoMem(info);
 			if (mem) {
 				toolMem.set(key, mem);
-				if (toolInfo && !toolInfo.memMB) { toolInfo.memMB = mem; note(`the GPU's memory (asked again: ask ${k}): ${mem} MB; the wall breaker plans its table from it`); }
+				if (toolInfo && toolInfo.key === key && !toolInfo.memMB) { toolInfo.memMB = mem; note(`the GPU's memory (asked again: ask ${k}): ${mem} MB; the wall breaker plans its table from it`); }
 			} else if (infoNoMem(info)) reaskInfo(cmd, key, k + 1);
 		});
 	}, wait * 1000);
@@ -1731,7 +1731,7 @@ function toolVersionProblem(cmd) {
 			if (info && info.reach === RF_VERSION) {
 				const mem = infoMem(info) || toolMem.get(key) || 0;
 				if (infoMem(info)) toolMem.set(key, mem);
-				toolInfo = { steer: info.steer || 0, memMB: mem };
+				toolInfo = { steer: info.steer || 0, memMB: mem, key };
 				// (still no memory: the search starts, and `info` is asked again in the background)
 				if (!mem && infoNoMem(info)) { noMem = true; note(`the tool check still found no GPU memory: the search starts; asked again in ${GPU_RETRY_S[1]} s`); reaskInfo(cmd, key, 2); }
 				resolve('');
