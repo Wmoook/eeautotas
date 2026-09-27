@@ -146,6 +146,23 @@ function triggersOf(L) {
 function create(o) {
 	const L = o.L, a = o.a, W = L.width, H = L.height, N = W * H;
 	const TR = triggersOf(L);
+	// portals: tile -> its exits' tiles, and exit -> the portals into it (the rooms' walks go through them, as goexplore.js
+	// roomFields' do; without them Forgotten Veil's coin 4 from its coins=3 entry, 2 portals away, was no target at all:
+	// 12 targets of its room instead of 17)
+	const exits = new Map(), into = new Map();
+	if (L.portalSlot && L.portalsById) {
+		for (let i = 0; i < N; i++) {
+			const s = L.portalSlot[i];
+			if ((L.fg[i] !== 242 && L.fg[i] !== 381) || s < 0) continue;
+			const ex = L.portalsById.get(L.pTarget[s]);
+			if (!ex) continue;
+			const list = [];
+			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N && j !== i && !list.includes(j)) list.push(j); }
+			if (!list.length) continue;
+			exits.set(i, list);
+			for (const j of list) { let l = into.get(j); if (!l) into.set(j, l = []); l.push(i); }
+		}
+	}
 	const work = a.work || fs.mkdtempSync(path.join(os.tmpdir(), 'gx-bursts-'));
 	fs.mkdirSync(work, { recursive: true });
 	const bin = path.join(work, 'level.bin');
@@ -288,6 +305,8 @@ function create(o) {
 			if (fg[t] === 121) trophies.push(t);
 			// (a trigger that changes the room: a goal, no way through; the places the room was entered at are ways out)
 			if (live && qh > nSrc) { term[t] = 1; continue; }
+			const ex = exits.get(t);
+			if (ex) for (const e of ex) if (!seen[e] && pass[e]) { seen[e] = 1; q[qt++] = e; }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
@@ -335,13 +354,16 @@ function create(o) {
 		if (!goals.length) return null;
 		return Object.assign(walkTo(I, goals), { triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 });
 	};
-	/** the room's door- and protection-aware walk (fifths, 5 per step) to goal tiles: {walk, mx} */
+	/** the room's door- and protection-aware walk (fifths, 5 per step or portal) to goal tiles: {walk, mx} */
 	const walkTo = (I, goals) => {
 		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
 		let qh = 0, qt = 0, mx = 0;
 		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+			// (a portal into this tile: one step, as reach.js's walk counts it)
+			const src = into.get(t);
+			if (src) for (const p of src) if (walk[p] === CUT && I.pass[p] && !I.term[p]) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
 			for (let dy = -1; dy <= 1; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					if (!dx && !dy) continue;
@@ -400,6 +422,7 @@ function create(o) {
 		for (let k = 0; k < N && walk[t] > 0; k++) {
 			const x = t % W, y = (t / W) | 0, want = walk[t] - 5;
 			let nx = -1;
+			for (const e of exits.get(t) || []) if (walk[e] === want) { nx = e; break; }
 			for (let dy = -1; dy <= 1 && nx < 0; dy++) {
 				for (let dx = -1; dx <= 1; dx++) {
 					const xx = x + dx, yy = y + dy;
