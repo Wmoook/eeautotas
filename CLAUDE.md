@@ -107,7 +107,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   whole run is covered a window whose own find changed it goes again (chained finds). Measured (A100, GPU searcher on,
   8 threads; `src/out/night/opt_hunt.md`): the ice level from Find a route's 9923-tick route 4724 / 4782 after 30 min
   (f619e8c: 4865, 4856 at 25), ahead by 74-141 ticks from 10 min on; Octorage from the human run the same or a little
-  better; Forgotten Veil from the human run 30 ticks behind at 20 min (its loop window at (326, 90) found -46 with 8
+  better; Forgotten Veil from the human run within the run-to-run spread (the same code differed by 33 ticks between GPUs 1 and 4; its loop window at (326, 90) found -46 with 8
   threads in f619e8c and 4 ticks in a 2-thread lane); on the laptop CPU alone (no GPU) ice 4904 -> 4724..4792 in 7 min
   where f619e8c found nothing, and 9923 -> 5275 in 10 min against 6279; then deep exact-rejoin
   exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 5 loop windows (60% of the round; Infinity Pain: 4 of 7 loop windows found time): stretches where the run comes back within 48 px (then, all tried, 96 and 160 px) of where it was with nothing
