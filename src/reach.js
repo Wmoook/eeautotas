@@ -827,7 +827,8 @@ function fifthsAt(f, px, py, vy, q0, q1, slip) {
 }
 /** the beam's score (native/beam.h reachScore, the same doubles, a float), tiles: the cost blended bilinearly between the
  *  centres of the 4 tiles around the ball's centre, the ball (its speed and gravity queue) looked up at each of them
- *  (cut-off ones left out, and ways through a death while the ball's own way is a real one), for a smooth gradient; the
+ *  (cut-off ones left out, and on a field with deaths the ways through one while the ball's own way is a real one: without
+ *  death edges, e.g. the steer field's layer bodies, a cost of DEATH_COST or more is a real way), for a smooth gradient; the
  *  own tile's cost when all the others are left out. -1: the ball is cut off. */
 function scoreAt(f, px, py, vy, q0, q1, slip) {
 	const own = fifthsAt(f, px, py, vy, q0, q1, slip);
@@ -840,7 +841,7 @@ function scoreAt(f, px, py, vy, q0, q1, slip) {
 		for (let dx = 0; dx < 2; dx++) {
 			const x = x0 + dx, y = y0 + dy;
 			const c = x === tx && y === ty ? own : fifthsAt(f, px + 16.0 * (x - tx), py + 16.0 * (y - ty), vy, q0, q1, slip);
-			if (c < 0 || (c >= DEATH_COST && own < DEATH_COST)) continue;
+			if (c < 0 || (f.deaths && c >= DEATH_COST && own < DEATH_COST)) continue;
 			const k = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
 			v += k * c;
 			w += k;

@@ -8,6 +8,7 @@
 // .eetas characters ('0' + mask). "ticks" counts the ticks simulated; "twins" the children not simulated because a
 // lower option gives the same state (search.h canonOption).
 #pragma once
+#include <algorithm>
 #include <queue>
 #include <unordered_map>
 
@@ -113,13 +114,21 @@ struct ReachGpu {
 	}
 	bool load(const std::string& file, const Level& L, ReachField& R, std::string& err) { return parse(file, L, err) && upload(R, err); }
 };
+/** two reach fields' lookups share their position-independent part (rfPre: the rise, the fall) */
+static bool rfSamePre(const ReachField& a, const ReachField& b) {
+	auto same = [](const double* x, const double* y, int n) { return n <= 0 || (x && y && memcmp(x, y, 8 * (size_t)n) == 0); };
+	return a.G == b.G && a.BD == b.BD && a.ICE_ND == b.ICE_ND && a.KT == b.KT && a.TOL == b.TOL && a.MOD_STRONG == b.MOD_STRONG && a.Q == b.Q && a.ice == b.ice &&
+		a.nFlags == b.nFlags && a.NFV == b.NFV && a.NTH == b.NTH && a.nSeg == b.nSeg && same(a.modMin, b.modMin, a.nFlags) && same(a.FV, b.FV, a.NFV) && same(a.FS, b.FS, a.NFV) &&
+		same(a.TH, b.TH, a.NTH) && same(a.SW, b.SW, a.NTH) && same(a.segPush, b.segPush, a.nSeg) && same(a.segCap, b.segCap, a.nSeg);
+}
 /** The steer file (src/steer.js steerFileBytes, 'RCH4') on the GPU: F (device pointers; the bodies' ReachField structs in
  *  device memory) and a host copy H (host pointers: eegpu steertest, the cost ceiling's start). A file of another level
  *  (its size, or the level fingerprint: gpu.js blobFp) is refused with err. */
 struct SteerGpu {
 	std::vector<uint8_t> raw;
 	std::vector<ReachField> hostBodies, devBodies;
-	cu::Buf dev, dbodies;
+	std::vector<uint8_t> dpOrder;
+	cu::Buf dev, dbodies, dorder;
 	SteerField H;
 	bool parse(const std::string& file, const LevelBlob& B, const Level& L, std::string& err) {
 		memset(&H, 0, sizeof H);
@@ -161,6 +170,27 @@ struct SteerGpu {
 			if (bad) { err = "bad steer file (the coin DP)"; return false; }
 			H.dpBit = (const i32*)(b + oBit); H.dpLeg = (const i32*)(b + oLeg); H.dpH = (const float*)(b + oH);
 			for (int q = 0; q < H.dpN; q++) if (H.dpLeg[q] < 0 || H.dpLeg[q] >= H.nBodies) { err = "bad steer file (the coin DP's legs)"; return false; }
+			// (per collected set m the legs not collected, by their rest of the tour h[(m | q) x n + q] ascending, the ones
+			// without a finite rest left out: the lookup stops at the first leg that cannot win; stable, so ties keep the
+			// file's order)
+			const int n = H.dpN;
+			dpOrder.assign(((size_t)1 << n) * n, 0xff);
+			std::vector<int> qs;
+			for (size_t m = 0; m < ((size_t)1 << n); m++) {
+				qs.clear();
+				for (int q = 0; q < n; q++) if (!(m & ((size_t)1 << q)) && H.dpH[(m | ((size_t)1 << q)) * n + q] < 3.0e38f) qs.push_back(q);
+				std::stable_sort(qs.begin(), qs.end(), [&](int a, int b) { return H.dpH[(m | ((size_t)1 << a)) * n + a] < H.dpH[(m | ((size_t)1 << b)) * n + b]; });
+				for (size_t j = 0; j < qs.size(); j++) dpOrder[m * n + j] = (uint8_t)qs[j];
+			}
+			H.dpOrder = dpOrder.data();
+		}
+		// (the bodies' constants: when every physics body has the first one's, the lookups compute their rise and fall once
+		// per state, not once per body: up to 19 per state with the coin DP)
+		H.preBody = -1; H.samePre = 0;
+		for (int k = 0; k < H.nBodies; k++) if (hostBodies[k].mode != 1) { H.preBody = k; break; }
+		if (H.preBody >= 0) {
+			H.samePre = 1;
+			for (int k = 0; k < H.nBodies && H.samePre; k++) if (hostBodies[k].mode != 1 && !rfSamePre(hostBodies[k], hostBodies[H.preBody])) H.samePre = 0;
 		}
 		H.bodies = hostBodies.data();
 		H.on = 1;
@@ -177,21 +207,16 @@ struct SteerGpu {
 		F = H;
 		F.feat = (const i32*)rebase(H.feat); F.team = (const i32*)rebase(H.team); F.layerBody = (const i32*)rebase(H.layerBody); F.goal = (const u8*)rebase(H.goal);
 		F.dpBit = (const i32*)rebase(H.dpBit); F.dpLeg = (const i32*)rebase(H.dpLeg); F.dpH = (const float*)rebase(H.dpH);
+		F.dpOrder = nullptr;
+		if (!dpOrder.empty()) { if (!dorder.upload(dpOrder.data(), dpOrder.size())) { err = cu::lastError; return false; } F.dpOrder = (const u8*)(uintptr_t)dorder.p; }
 		F.bodies = (const ReachField*)(uintptr_t)dbodies.p;
 		return true;
 	}
-	/** --steer=<file>: loads it into F; a file that does not fit this level (or cannot be read) is ignored with a warning
-	 *  line (the search then runs on the reach field's order) */
-	void loadOrWarn(const std::string& file, const LevelBlob& B, const Level& L, SteerField& F) {
+	/** --steer=<file>: loads it into F; false (err) when it cannot be read, does not fit this level or the GPU's memory */
+	bool load(const std::string& file, const LevelBlob& B, const Level& L, SteerField& F, std::string& err) {
 		memset(&F, 0, sizeof F);
-		if (file.empty()) return;
-		std::string err;
-		if (!parse(file, B, L, err) || !upload(F, err)) {
-			memset(&F, 0, sizeof F);
-			H.on = 0;
-			printf("{\"ev\":\"warning\",\"text\":%s}\n", jsonStr("the steer field is not used: " + err).c_str());
-			fflush(stdout);
-		}
+		if (!parse(file, B, L, err) || !upload(F, err)) { memset(&F, 0, sizeof F); H.on = 0; return false; }
+		return true;
 	}
 };
 
@@ -404,7 +429,12 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	}
 	// --steer=<file> (src/steer.js RCH4, with --reach): the goal score and the closest attempt by the gate-aware steer field
 	SteerGpu steerGpu;
-	if (P.reach.on) steerGpu.loadOrWarn(opt(argc, argv, "steer", ""), B, L, P.steer);
+	// (a file that cannot be used is an error: src/editor.js runs the tool again without it, rather than reading reach-field
+	// distances as steer ones)
+	if (P.reach.on && !opt(argc, argv, "steer", "").empty()) {
+		std::string err;
+		if (!steerGpu.load(opt(argc, argv, "steer", ""), B, L, P.steer, err)) { printf("{\"error\":%s,\"steer\":0}\n", jsonStr("the steer field cannot be used: " + err).c_str()); return 3; }
+	}
 	if (P.steer.on) printf("{\"ev\":\"steer\",\"layers\":%d,\"bodies\":%d,\"coinDP\":%d,\"mb\":%.1f}\n", P.steer.S, P.steer.nBodies, P.steer.dpN, steerGpu.raw.size() / 1048576.0);
 	if (!goalDist.empty() || P.reach.on) P.closest = (unsigned long long*)(uintptr_t)dclose.p;
 	g.ready(tStart);   // (the kernels and the buffers are on the GPU: --seconds counts from here)

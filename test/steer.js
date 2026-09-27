@@ -3,14 +3,15 @@
 //   A model    hand-made rooms of a key door, a coin door (the distinct-coin DP) and a purple switch: the features and
 //              layers, the steer cost at the start counts the detour to the key / coins / switch (the reach field's
 //              does not), with the key (switch, coins) taken it is the reach field's again; the RCH4 file round trip
-//              (readSteerFile gives the same numbers); another level's file is refused by the native tool
+//              (readSteerFile gives the same numbers); another level's file is refused by the native tool; the build's
+//              byte budget: one body's bytes leave the key out (info.over)
 //   B agree    the JS lookup and the native tool's (eegpu steertest: the host, and with --gpu the GPU) along random input
 //              runs in the rooms and, with --jobs=<dir> (default src/jobs), along the big jobs' best runs: the same fifths
 //              and the beam's score to the bit (skipped without a native tool that reads RCH4)
 //   C prune    the native explore with a garbage steer field (random costs) still finds the key room's route: the steer
 //              field only orders (only the reach field's -1 rules states out); the CPU search (goexplore.js --steer)
 //              finds it too, and one worker with a tick budget is reproducible
-// usage: node test/steer.js [--only=A,B,C] [--gpu] [--tool=<eegpu>] [--jobs=<dir>]
+// usage: node test/steer.js [--only=A,B,C] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
 const os = require('os');
@@ -28,6 +29,8 @@ const argv = process.argv.slice(2);
 const arg = (k, d) => { const a = argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : d; };
 const ONLY = arg('only', '').split(',').filter(Boolean);
 const GPU = argv.includes('--gpu');
+// (C: the explore's time limit; more on a GPU other work keeps busy: at 60 s the plain explore too ran out of time there)
+const EXPLORE_S = +arg('exploreSec', '60');
 const want = (s) => !ONLY.length || ONLY.includes(s);
 let pass = 0, fail = 0;
 const check = (name, ok, detail) => { if (ok) pass++; else fail++; console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail !== undefined ? `: ${detail}` : ''}`); };
@@ -89,6 +92,12 @@ function sectionA() {
 		const inp = new E.EEInput();
 		for (let t = 0; t < 400 && same; t++) { E.applyMask(inp, [4, 4, 5, 2, 0, 3][(t / 37 | 0) % 6]); sim2.tick(inp); if (SF.steerFifths(st, sim2) !== SF.steerFifths(rd, sim2) || SF.steerScore(st, sim2) !== SF.steerScore(rd, sim2)) same = false; }
 		check(`${name}: the RCH4 file round trip gives the same numbers`, same);
+	}
+	// the build's budget: a byte budget of one body leaves the key out (one layer), said in info.over
+	{
+		const L = levelOf(ROOMS.key.buf);
+		const b1 = SF.buildSteer(L, { maxBytes: L.width * L.height * 120 });
+		check('the build\'s budget: one body\'s bytes leave the key out (one layer, info.over)', b1.S === 1 && /key0: over 1 layers/.test(b1.info.over || ''), `${b1.S} ${b1.info.over}`);
 	}
 	if (toolOk) {
 		const a = levelOf(ROOMS.key.buf), b = levelOf(ROOMS.switch.buf);
@@ -174,7 +183,7 @@ function sectionC() {
 		R.writeReachFile(R.reachField(L), path.join(tmp, 'k.reach'), G.blobFp(blob));
 		const run = (extra) => {
 			let out = '';
-			try { out = execFileSync(toolPath, ['explore', path.join(tmp, 'k.bin'), '-', '--finish=1', '--discrete=1', '--depth=1500', '--seconds=60', '--coarse=0', '--cqx=0.5', '--cqv=16', '--qy=1', '--qvy=16', `--reach=${path.join(tmp, 'k.reach')}`, '--prune=1', ...extra, ...G.cacheArgs()], { encoding: 'utf8', maxBuffer: 1 << 28 }); } catch (e) { out = String(e.stdout || ''); }
+			try { out = execFileSync(toolPath, ['explore', path.join(tmp, 'k.bin'), '-', '--finish=1', '--discrete=1', '--depth=1500', `--seconds=${EXPLORE_S}`, '--coarse=0', '--cqx=0.5', '--cqv=16', '--qy=1', '--qvy=16', `--reach=${path.join(tmp, 'k.reach')}`, '--prune=1', ...extra, ...G.cacheArgs()], { encoding: 'utf8', maxBuffer: 1 << 28 }); } catch (e) { out = String(e.stdout || ''); }
 			let fin = null, steer = false;
 			for (const line of out.split('\n')) { try { const j = JSON.parse(line); if (j.ev === 'hit') fin = fin || j; if (j.ev === 'done' && j.finish) fin = fin || j; if (j.ev === 'steer') steer = true; } catch (e) { /* not JSON */ } }
 			return { fin, steer, tail: out.trim().split('\n').pop() };

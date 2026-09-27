@@ -469,6 +469,9 @@ function heapOf(prio) {
 }
 // a cell's steer cost when the steer field has no value for its state (behind every valued one; the research's 1e5)
 const STEER_NONE = 1e5;
+// a steer value's distance at most (tiles): below every "no value" distance (6000+) and the editor's "cut off" mark (1e4);
+// real values reach 13,107 tiles (native/beam.h STEER_REAL_MAX)
+const STEER_REAL_MAX = 5999;
 
 /**
  * One explorer (a worker thread; a = the options, settled for the level, seed its seed). ctrl (Int32Array on a
@@ -545,10 +548,10 @@ function explore(L, field, a, seed, ctrl, post) {
 	const compact = () => { HA.compact(); if (HS) HS.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
 	const steerOf = () => { const v = SF.steerFifths(ST, sim); return v < 0 ? STEER_NONE : v / 5; };
-	// (--steerDist: the closest attempt's and the sources' distances by the steer field, 6000 + the reach field's cost where
-	// it has no value: native/beam.h steerMiss)
+	// (--steerDist: the closest attempt's and the sources' distances by the steer field, at most STEER_REAL_MAX; 6000 + the
+	// reach field's cost where it has no value: native/beam.h steerTiles, steerMiss)
 	const distBySteer = !!ST && a.steerDist !== 0;
-	const distOf = (c) => (!distBySteer ? c.rc : c.sc < STEER_NONE ? c.sc : Math.min(9990, 6000 + c.rc));
+	const distOf = (c) => (!distBySteer ? c.rc : c.sc < STEER_NONE ? Math.min(STEER_REAL_MAX, c.sc) : Math.min(9990, 6000 + c.rc));
 	// Snapshots (about 1150 bytes each) only for picked cells, at most --maxSnaps of them. A cell that was not picked yet
 	// (most never are) is its parent cell (the one whose runs reached it; `gen` counts the parent's state changes) plus
 	// the inputs of its run so far (node.buf[node.o ..+ node.n)): its first pick replays those from the parent's snapshot,

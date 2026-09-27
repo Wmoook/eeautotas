@@ -362,13 +362,13 @@ function check(buf) {
 // sources, RELAY_PLAN).
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f), ...(o.prune ? ['--prune=1'] : []),
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
 		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []), ...(q.refine ? ['--refine=1'] : []),
 		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
 	// the relay: "every move" again from a point of the nearest attempt so far (its inputs as --prefix, a fresh table,
 	// coarse speed cells: see RELAY_CELLS)
 	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
-		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f),
+		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V),
 		// (a small table and layer cap: its layers hold tens of thousands of states, and a full-size second explore next
 		// to every move's (2 GB of cells + ~2.7 GB of states) overcommitted the 8 GB laptop GPU: paged, 5x slower)
 		q.alone ? '--cells=27' : q.big ? '--cells=26' : '--cells=25', q.big || q.alone ? '--cap=1048576' : '--cap=262144', ...(o.prune ? ['--prune=1'] : []), ...(q.salt ? [`--salt=${q.salt}`] : []),
@@ -380,12 +380,16 @@ const STRATEGIES = {
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
 		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : [])] },
 };
-const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...steerArg(f)];
+const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(f.steerBeam && !(q.V && q.V.noSteer) ? [`--steer=${f.steerBeam}`] : [])];
 // the steer field (src/steer.js, RCH4: the gate-aware order; the prune stays the reach field's): passed to the GPU tools
-// when it models anything the reach field does not (2+ layers or the coin DP) and fits their memory budget (STEER_GPU_SHARE
-// of the GPU's memory per tool), to the CPU search whenever it models anything
-const steerArg = (f) => (f.steer ? [`--steer=${f.steer}`] : []);
+// when it models anything the reach field does not (2+ layers or the coin DP) and their copies fit STEER_GPU_SHARE of the
+// GPU's memory in all (each tool uploads its own: every move and the relay first, the two beams too when four copies
+// fit), to the CPU search whenever it models anything
+const steerArg = (f, V) => (f.steer && !(V && V.noSteer) ? [`--steer=${f.steer}`] : []);
 const STEER_GPU_SHARE = 1 / 40;
+// the steer build: at most this long before the search starts (it goes on in its worker, cached for the next search; this
+// one orders by the reach field)
+const STEER_WAIT_MS = 15000;
 /** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
  *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
  *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
@@ -639,11 +643,13 @@ function attemptSource(n, a, rm) {
 	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since });
 }
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
-// states going back the way the relay came
+// states going back the way the relay came. With the steer field a state is dropped only above both fields' ceilings
+// (each field's cost at the start + the slack): never one the relay keeps without the steer field
 const RELAY_SLACK = 30, RELAY_SLACK_F = 0.1;
 // (at most: the steer field's distances run into the thousands of tiles on a level of gates)
 const RELAY_SLACK_MAX = 200;
-// the steer field's "no value" distances start here (native/beam.h steerMiss, goexplore.js: 6000 + the reach field's cost)
+// the steer field's "no value" distances start here (native/beam.h steerMiss, goexplore.js: 6000 + the reach field's cost;
+// a real steer distance is at most 5999: native/beam.h STEER_REAL_MAX)
 const STEER_MISS = 6000;
 // (1/4 px/tick speed cells first: fast, and enough for the dot ring; a relay that runs out of situations goes on with 1/16:
 // a key press changes the speed by 0.129 px/tick, so with 1/4 px/tick cells the child that pressed it mostly shares its
@@ -958,7 +964,8 @@ function start(b, gpu, test) {
 	if (!schedTimer) { schedTimer = setInterval(schedule, 250); if (schedTimer.unref) schedTimer.unref(); }
 	// (the steer field next to it: its own worker; b.steer === false or test.steer === false: none)
 	const wantSteer = b.steer !== false && !(test && test.steer === false);
-	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), wantSteer ? steerInfo(buf, levelHash) : Promise.resolve(null)]);
+	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerInfo(buf, levelHash), new Promise((res) => { const t = setTimeout(() => res({ late: true }), STEER_WAIT_MS); if (t.unref) t.unref(); })]);
+	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), steerP]);
 	const gen = ++searchGen;
 	ready.then(([rf, toolWhy, sf]) => { if (gen === searchGen) { useSteer(sf, noGpu || toolWhy); launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); } }, (e) => {
 		if (gen !== searchGen) return;   // (stopped while checking, maybe another search since)
@@ -977,20 +984,26 @@ function start(b, gpu, test) {
  *  the reach field's (cur.reachLookup) */
 function useSteer(sf, noGpu) {
 	if (!cur) return;
-	cur.files.steer = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
+	cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
 	S.steer = null;
+	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field (the next one uses it, once built)'); return; }
+	if (sf && sf.over) note(`the steer field ${sf.over}`);
 	if (!sf || !sf.useful || !fs.existsSync(sf.file)) return;
 	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
-	const gpuOk = !noGpu && toolInfo && toolInfo.steer === SF.VERSION && mb <= gpuMB * STEER_GPU_SHARE;
+	// (STEER_GPU_SHARE in all: two copies (every move, the relay), four with the beams')
+	const copies = mb * 4 <= gpuMB * STEER_GPU_SHARE ? 4 : mb * 2 <= gpuMB * STEER_GPU_SHARE ? 2 : 0;
+	const gpuOk = !noGpu && toolInfo && toolInfo.steer === SF.VERSION && copies > 0;
 	cur.files.steerCpu = sf.file;
 	if (gpuOk) cur.files.steer = sf.file;
+	if (gpuOk && copies === 4) cur.files.steerBeam = sf.file;
 	// (the attempts' distances: the steer field's when every strategy orders by it, else the reach field's for all: the CPU
 	// search then reports those, --steerDist=0)
 	cur.distBySteer = cur.files.steerDist = gpuOk || !!noGpu;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
-	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, cpu: true };
+	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true };
 	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
-		(gpuOk ? 'GPU and CPU searches' : `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
+		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
+			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
@@ -1021,7 +1034,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
 	cur.opts.noWayUp = noWayUp;
 	// (the check of a level the reach field calls impossible runs as before: no steer field)
-	if (noWayUp) { cur.files.steer = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
+	if (noWayUp) { cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
 	// the physics check finds a way: the proof (next to the searches) may still show there is none
 	if (cur.opts.prune) startProof(ins);
 	S.stage = 'starting';
@@ -1189,7 +1202,7 @@ function steerInfo(buf, hash) {
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
-				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms });`;
+				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null });`;
 		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: SF.VERSION, fp: steerFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
 		w.once('message', (r) => {
@@ -1261,7 +1274,7 @@ function launch(n) {
 	const left = Math.max(1, Math.round(S.seconds - usedSec(V)));
 	// salts: the tool itself starts over with the next salt after a try without a route (the finest pass, the last rung of
 	// the ladder, from its first run; any pass in a salt rerun)
-	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0) };
+	const q = { seconds: left, pass: V.pass, depth: 0, salt: V.salt || 0, salts: cur.opts.salts && (V.pass >= PASS_MAX || V.salt > 0), V };
 	// the salt tries run several salts side by side (--lanes=auto: from V.lanes, the last run's; the tool doubles them
 	// while that raises the tries per second, up to cur.opts.lanes, and halves them when a batch fills the table)
 	// (with near-miss refinement one at a time: see LANES)
@@ -1296,7 +1309,7 @@ function launch(n) {
 	const pausedNow = !cpu && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
 	if (pauseFile) { try { if (pausedNow) fs.writeFileSync(pauseFile, 'pause'); else fs.unlinkSync(pauseFile); } catch (e) { /* none */ } }
 	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`, `--parent=${process.pid}`];
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : undefined, detached: !cpu });
 	// (Linux, next to GPU strategies: the CPU search at nice 10. The GPU tools' above-normal priority (launch.h) needs root
 	// or CAP_SYS_NICE there, which a container (a rented cloud GPU) lacks, and next to busy CPU threads "every move" was
 	// 3-7x slower without it. Its worker threads start later, from its main thread, and inherit the value.)
@@ -1451,6 +1464,11 @@ function launch(n) {
 			if (Number.isFinite(ev.salt)) lastSalt = ev.salt;
 			if (Number.isFinite(ev.lanes)) lanesNow = V.lanes = ev.lanes;
 			S.gpu = ev.gpu && ev.gpu.name ? ev.gpu.name : S.gpu;
+		} else if (ev.error && ev.steer === 0 && !V.noSteer) {
+			// the tool cannot use the steer file (the GPU's memory, a stale file): this strategy again without it, now and
+			// from now on (its distances the reach field's: closer() ranks them behind the steer field's)
+			V.noSteer = true; ch.steerRetry = true;
+			note(`${V.label}: ${ev.error}; again without it`);
 		} else if (ev.error) {
 			V.error = ev.error;
 			note(`${V.label}: error: ${ev.error}`);
@@ -1487,6 +1505,7 @@ function launch(n) {
 		if (!mine()) return;
 		V.live = false;
 		if (V.readyAt) { V.usedMs += Date.now() - V.readyAt; V.readyAt = 0; }   // (its search time; the next process loads first)
+		if (ch.steerRetry && !ch.stopWhy && S.running && !S.halted && S.stage !== 'stopped') { kids[n] = launch(n); save(); return; }
 		// eegpu's kernel launch failed (exit 6, 7 = the driver's watchdog) or it crashed: the GPU may have been reset.
 		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
 		// (a crash: an exception code above 255 on Windows; on Linux a signal, exit code null, that no halt sent)
@@ -1763,10 +1782,13 @@ function found(inputs, n, more) {
  *  never replaces one the check allows */
 function closer(ev, n) {
 	if (!cur) return;
-	const dist = +ev.dist, old = S.closest;
+	const Vn = S.strategies[n];
+	// (a strategy without the steer field while the others order by it (a beam over the memory budget, a tool that could
+	// not load it): its reach-field distances ranked like the steer field's "no value" ones, STEER_MISS + the distance)
+	const steerless = cur.distBySteer && (Vn.noSteer || ((Vn.key === 'goal' || Vn.key === 'guide') && !cur.files.steerBeam));
+	const dist = steerless && +ev.dist < 1e4 ? Math.min(9990, STEER_MISS + +ev.dist) : +ev.dist, old = S.closest;
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
-	const Vn = S.strategies[n];
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
 	const deathTiles = cur.distBySteer ? STEER_MISS : RF.DEATH_TILES;
 	let own = null;

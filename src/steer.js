@@ -20,9 +20,11 @@
 // direction (reach.js opts.oneWayEntry: not sound, fine for ordering).
 //
 // Nothing prunes by it: the explore, the relay and the CPU search rule a state out only by the RCH3 field's -1; the steer
-// field orders (the explore's per-cell priority and closest attempt, the relay's cost ceiling, the beam's goal score, the
-// CPU search's second goal heap). -1 = no value (a layer not reached in the walk model, a wall): the searches rank such a
-// state behind every valued one.
+// field orders (the explore's per-cell priority and closest attempt, the beam's goal score, the CPU search's second goal
+// heap) and widens the relay's cost ceiling (a heuristic bound, not a proof: explore --costslack drops a state only above
+// both the reach field's ceiling and the steer field's, so the relay never drops a state it keeps without the steer
+// field). -1 = no value (a layer not reached in the walk model, a wall): the searches rank such a state behind every
+// valued one.
 //
 // buildSteer(level, opts) -> steer (plain data: typed arrays, the layer fields; `info` for the log)
 // steerFifths(steer, sim) -> fifths of a tile (-1 = no value); steerAt(steer, sim) -> tiles (NaN = no value);
@@ -416,7 +418,7 @@ function walkBuild(level, A, opts) {
 	const modeled = new Set(opts.features || []);
 	const maxLayers = opts.maxLayers || 4096;
 	const log = [];
-	let M, F, plan;
+	let M, F, plan, capped = null;
 	for (let it = 0; it < 40; it++) {
 		M = makeModel(A, modeled);
 		F = layeredField(A, M);
@@ -425,10 +427,12 @@ function walkBuild(level, A, opts) {
 		log.push({ features: [...modeled], S: M.S, planOk: plan.ok, cx: cx && cx.feat });
 		if (!cx || modeled.has(cx.feat)) break;
 		const f = A.feats.get(cx.feat);
-		if (!f || M.S * f.values.length > maxLayers) break;
+		if (!f) break;
+		if (M.S * f.values.length > maxLayers) { capped = { feat: cx.feat, why: 'layers' }; break; }
+		if (opts.deadline && Date.now() > opts.deadline) { capped = { feat: cx.feat, why: 'time' }; break; }
 		modeled.add(cx.feat);
 	}
-	return { A, M, F, plan, log };
+	return { A, M, F, plan, log, capped };
 }
 
 // ------------------------------------------------------------------ the layered physics fields
@@ -757,10 +761,16 @@ function coinDP(CL, maxN = 18) {
 }
 
 // ------------------------------------------------------------------ build
+// the build's budget: the bodies' bytes (layers x tiles; a body ~BODY_BYTES_TILE bytes per tile: 107 on the review's
+// 200 x 40 level of 10 switch ids, 1024 layers in an 873 MB file and 2.86 GB of the process) and its time. Past either,
+// no more features (the layers they would add) and no coin DP (its legs are bodies too; more than 18 coins: none anyway).
+// The five big jobs' levels fit (Forgotten Veil: 17 layers + the DP over 16 coins, 539 MB).
+const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
 /**
- * The steer field of a prepared level. opts: {maxLayers (4096), maxIters (12), noDP} -> steer: {version, W, H, feats
- * [{key, kind, param, radix, stride}], team [values], S, layerBody Int32Array(S), bodies [field], goals [Uint8Array(N)],
- * dp {n, T, bit, leg, h} | null, prioShift, info {features, layers, builds, kappa, ms, cegar, dp}}
+ * The steer field of a prepared level. opts: {maxLayers (4096), maxBytes (STEER_MAX_BYTES), maxMs (STEER_MAX_MS),
+ * maxIters (12), noDP} -> steer: {version, W, H, feats [{key, kind, param, radix, stride}], team [values], S, layerBody
+ * Int32Array(S), bodies [field], goals [Uint8Array(N)], dp {n, T, bit, leg, h} | null, prioShift, info {features, layers,
+ * builds, kappa, ms, cegar, dp, over (what the budget left out, or null)}}
  */
 function buildSteer(level, opts) {
 	opts = opts || {};
@@ -768,9 +778,16 @@ function buildSteer(level, opts) {
 	const A = analyze(level, opts);
 	const modeled = new Set();
 	const cegar = [];
+	// (the budget as a layer cap: the effects double the physics layers)
+	const maxBytes = opts.maxBytes || STEER_MAX_BYTES, maxMs = opts.maxMs || STEER_MAX_MS;
+	const bodyBytes = A.N * BODY_BYTES_TILE;
+	const maxLayers = Math.max(1, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / bodyBytes / (A.feats.has('fx') ? 2 : 1))));
+	let over = null;
+	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers: opts.maxLayers });
+		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: t0 + maxMs / 2 });
+		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
 		PH = buildPhysics(B, { staticCoins: true, debug: true });
 		const sim = new E.EESim(level); sim.reset();
@@ -785,7 +802,9 @@ function buildSteer(level, opts) {
 		const cx = path.length > 1 ? counterexample(A, { path }) : null;
 		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, cx: cx && cx.feat });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
-		if (B.M.S * A.feats.get(cx.feat).values.length > (opts.maxLayers || 4096)) break;
+		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
+		// (the next build takes longer than this one)
+		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
 		modeled.add(cx.feat);
 	}
 	const M = PH.M, N = A.N;
@@ -803,7 +822,11 @@ function buildSteer(level, opts) {
 	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
 	// the coin DP
 	let dp = null;
-	const cp = opts.noDP ? null : coinPlan(B);
+	let cp = opts.noDP ? null : coinPlan(B);
+	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
+		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+		cp = null;
+	}
 	if (cp) {
 		const CL = coinLegsPhys(B, PH, cp);
 		const D = coinDP(CL);
@@ -825,7 +848,7 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T } : null, start: steerAt(steer, sim0), ms: Date.now() - t0 };
+		dp: dp ? { n: dp.n, T: dp.T } : null, start: steerAt(steer, sim0), ms: Date.now() - t0, over };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -835,10 +858,12 @@ function stripField(f) {
 	return out;
 }
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
-/** the priority shift: the largest finite cost (below a death's) in 12 bits */
+/** the priority shift: the largest finite cost in 12 bits (every finite value below FAR: the bodies have no death edges,
+ *  so a cost of DEATH_COST or more is a real one; Infinity Pain's bodies reach 17,981 fifths: shift 3, not 1, else 76% of
+ *  its best run's states shared the top priority bucket 4095 with the states of no value) */
 function prioShiftOf(st) {
 	let m = 0;
-	const scan = (a) => { if (!a) return; for (let i = 0; i < a.length; i++) { const v = a[i]; if (v < RF.DEATH_COST && v > m) m = v; } };
+	const scan = (a) => { if (!a) return; for (let i = 0; i < a.length; i++) { const v = a[i]; if (v < RF.FAR && v > m) m = v; } };
 	for (const f of st.bodies) {
 		if (f.mode === 'walk') scan(f.walk);
 		else for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) scan(f[k]);
@@ -892,8 +917,9 @@ function layerFifths(st, sim, s) {
 	const c = bodyAt(f, sim, 0, 0);
 	return c >= CUT - 1 ? -1 : c;
 }
-/** the coin DP's part (-1: none or not below T coins) */
-function dpFifths(st, sim) {
+/** the coin DP's part (-1: none or not below T coins); bound (fifths, or Infinity): the layer's own value, which a leg
+ *  whose rest of the tour alone is not below it cannot beat (no lookup; = native/beam.h, the same minimum where it wins) */
+function dpFifths(st, sim, bound) {
 	const D = st.dp;
 	if (!D || !(sim.coins < D.T)) return -1;
 	let m = 0;
@@ -902,7 +928,7 @@ function dpFifths(st, sim) {
 	for (let q = 0; q < D.n; q++) {
 		if (m & (1 << q)) continue;
 		const rest = D.h[(m | (1 << q)) * D.n + q];
-		if (!(rest < Infinity)) continue;
+		if (!(rest < Infinity) || rest >= best || rest >= bound) continue;
 		const c = bodyAt(st.bodies[D.leg[q]], sim, 0, 0);
 		if (c < 0 || c >= CUT - 1) continue;
 		if (c + rest < best) best = c + rest;
@@ -912,7 +938,7 @@ function dpFifths(st, sim) {
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
-	const d = dpFifths(st, sim);
+	const d = dpFifths(st, sim, v >= 0 ? v : Infinity);
 	return d < 0 ? v : v < 0 ? d : Math.min(v, d);
 }
 /** tiles (NaN = no value) */
@@ -1019,6 +1045,6 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)] };
 }
 
-module.exports = { VERSION, buildSteer, steerFifths, steerAt, steerScore, layerIndex, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample };

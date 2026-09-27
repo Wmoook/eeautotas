@@ -247,7 +247,7 @@ __device__ __forceinline__ void beamExpandParent(const BeamParams& p, const i32 
 					if (p.steer.on && own >= 0) {
 						i32 so = -1;
 						const float sg = steerScore<TW>(p.steer, p.L, s, &so);
-						if (so >= 0) { gd = sg; ck = (float)so / 5.f; }
+						if (so >= 0) { gd = sg < STEER_REAL_MAX ? sg : STEER_REAL_MAX; ck = steerTiles(so); }
 						else { gd = ck = steerMiss((float)own / 5.f); }
 					}
 				}
@@ -392,20 +392,22 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 			continue;
 		}
+		i32 own = -1;   // the reach field's cost (fifths; -1 cut off)
 		if (p.reach.on) {
-			const i32 own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
+			own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
 			// the physics model rules this state out: it cannot reach the trophy (a proof)
 			if (p.prune && own < 0) continue;
-			// the ordering cost: the steer field's (--steer; never a prune) or the reach field's
-			const i32 so = p.steer.on && own >= 0 ? steerFifths<TW>(p.steer, p.L, s) : -1;
-			// (--costslack: a relay goes on from its start, it does not wander back; a heuristic bound, not a proof)
-			if (p.maxFifths > 0 && (p.steer.on ? so : own) > p.maxFifths) continue;
-			if (p.steer.on) rcq = so < 0 ? 4095u : (u32)min(so >> p.steer.prioShift, 4095);
-			else rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
-			if (p.closest) {
-				const float ck = so >= 0 ? (float)so / 5.f : own >= 0 ? (p.steer.on ? steerMiss((float)own / 5.f) : (float)own / 5.f) : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
-				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
-				if (k < nearest) nearest = k;
+			// the reach field's order (with --steer only for the states it cuts off, which get no steer lookup; the others'
+			// ceiling, priority and closest attempt come after the cell, below)
+			if (!p.steer.on || own < 0) {
+				// (--costslack: a relay goes on from its start, it does not wander back; a heuristic bound, not a proof)
+				if (p.maxFifths > 0 && own > p.maxFifths) continue;
+				rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
+				if (p.closest) {
+					const float ck = own >= 0 ? (float)own / 5.f : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
+					const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
+					if (k < nearest) nearest = k;
+				}
 			}
 		} else if (p.closest) {
 			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
@@ -491,6 +493,34 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier even when its cell is known, so it
 		// is there when the time doors switch (then its cells are new again: the door phase is part of them)
 		const bool rest = p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y);
+		// the steer field (--steer; the reach field allows the state): the lookup only for a child the claim can keep, one
+		// whose cell no earlier layer saw (or a ball at rest). A child of a seen cell is dropped whatever its priority, so it
+		// is dropped here, without the lookup (the claim's own verdict; most children of a layer are such). And only in a
+		// layer that orders by it (steerAll: every 4th, and every one while the layers are near the cap, where the priority
+		// cuts; elsewhere it only picks which child stands for a new cell) or for the ceiling: the lookup reads the layer's
+		// body, and a big steer file's bodies do not stay in the GPU's cache (the same work 2-2.9x slower on Good Egg,
+		// Stupid Fox and Octorage with a lookup per new child). The closest attempt: the nearest of the children kept in the
+		// layers that order by it.
+		if (p.steer.on && own >= 0) {
+			if (!rest && exploreSeenBefore(p.cells, p.cellMask, key & ~0xfffull, (u32)p.layer)) continue;
+			const bool ceil = p.maxFifths > 0 && own > p.maxFifths;
+			if (p.steerAll || ceil) {
+				const i32 so = steerFifths<TW>(p.steer, p.L, s);
+				// (--costslack: dropped only above both ceilings, the reach field's and the steer field's, so the relay never
+				// drops a state it keeps without the steer field; a state the steer field has no value for is kept, as without
+				// a ceiling of its own: Good Egg's route passes 56 such ticks, and the reach field's ceiling alone cut 24% of
+				// the relay starts along it; without a steer value at the start: the reach field's ceiling alone)
+				if (ceil && (p.maxSteer <= 0 || so > p.maxSteer)) continue;
+				if (p.steerAll) {
+					rcq = so < 0 ? 4095u : (u32)min(so >> p.steer.prioShift, 4095);
+					if (p.closest) {
+						const float ck = so >= 0 ? steerTiles(so) : steerMiss((float)own / 5.f);
+						const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
+						if (k < nearest) nearest = k;
+					}
+				} else rcq = (u32)min(own >> p.reach.prioShift, 4095);
+			} else rcq = (u32)min(own >> p.reach.prioShift, 4095);
+		}
 		p.candKey[(size_t)pi * 18 + o] = (key & ~0xfffull) | (rest ? 2ull : 0ull) | 1ull;
 		// (without a reach field the head is part of the content, so a full layer is still cut the same way every run)
 		const u64 head = p.reach.on ? (u64)rcq : (content >> 52);
