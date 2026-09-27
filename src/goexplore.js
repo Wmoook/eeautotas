@@ -233,7 +233,7 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0,
-	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1 };
+	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 0 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -245,7 +245,9 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 // --spdMode=1 (the default): a flagged room keeps its coarse cells as they are (the earliest state) and next to each one
 // a second cell with the FASTEST arrival (the most vx^2 + vy^2; the pick runs' states only): at most 2x the cells (the U
 // from its coins=13 state: out in 77 s, as with the buckets; the buckets (--spdMode=0) grew the cells 17-28x and
-// their A/B pair from scratch lost: a slower first route).
+// their A/B pair from scratch lost: a slower first route). --spdSlack=T (mode 1; 0 = off): a fast cell takes only arrivals
+// at most T ticks after its coarse cell's earliest (the fastest arrival of ANY lineage made the first routes 1,000-1,700
+// ticks slower in both A/B pairs: the lineage that escaped had come the slow way).
 const SPD_PROGRESS = 1;
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -867,7 +869,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
 	const KV = new Int32Array(10);
-	let tile = 0, spdCur = false, spdFast = false;
+	let tile = 0, spdCur = false, spdFast = false, spdT0 = 0;
 	const cellKey = () => {
 		const px = sim.px, py = sim.py;
 		const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
@@ -1016,6 +1018,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const k = cellKey();
 		const c = cells.get(k);
 		const v2 = spdFast ? sim.speed_x * sim.speed_x + sim.speed_y * sim.speed_y : 0;
+		if (!spdFast) spdT0 = c !== undefined && c.t < t ? c.t : t;   // (the coarse cell's earliest after this add: --spdSlack)
+		else if (a.spdSlack > 0 && t > spdT0 + a.spdSlack) return null;
 		if (c !== undefined) {
 			c.seen++; c.touch = picks;
 			if (spdFast ? c.v2 >= v2 : c.t <= t) return null;
