@@ -29,7 +29,7 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1]
+//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1] [--sweepLoops=lane|first]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
@@ -584,6 +584,9 @@ function ownSaving(outFile, refTicks) {
 // 4792 and 4904 -> 4760 (180 s, 6 threads), where the grind's one-window-per-round cursor needed 2 h to get there. Not
 // on time-door levels (exact rejoins there need savings that are multiples of 1000 ticks); --sweep=0 off.
 const SWEEP_LEN = 800, SWEEP_STEP = 600, SWEEP_LOOPS = 2;
+// --sweepLoops=lane (default): the 2 longest loops in the sweep's lanes; first: the 2 longest loop windows with all the threads
+// before the sweep (an experiment: Forgotten Veil's loop at (326, 90) found -46 with 8 threads and 4 in a 2-thread lane)
+const SWEEP_LOOP_MODE = a.sweepLoops || process.env.EEAT_SWEEP_LOOPS || 'lane';
 /** the longest loop of the run (48 px, then 96, then 160) not tried yet (tried: the state hashes at its ends) and not
  *  resting in the window memory (those are added to tried); null when none: {l, m: memoWin of its window} */
 function nextLoop(round, tried) {
@@ -657,7 +660,7 @@ async function sweepStage(round) {
 			if (k >= rm.n) { if (over) return; await new Promise((r) => setTimeout(r, 5000)); continue; }   // (no room for this lane yet)
 			const per = rm.per;
 			let win = null;
-			if (loopsRun < SWEEP_LOOPS) {
+			if (loopsRun < SWEEP_LOOPS && SWEEP_LOOP_MODE === 'lane') {
 				const nl = nextLoop(round, tried);
 				if (nl) {
 					loopsRun++;
@@ -715,11 +718,11 @@ async function sweepStage(round) {
  * a way around the loop directly; tiled windows contain a long loop only in some placements. Not on time-door levels
  * (an exact rejoin there needs a saving that is a multiple of 1000 ticks). Returns the number of windows run.
  */
-async function loopWindows(round) {
+async function loopWindows(round, max = 5) {
 	if (level.hasTimeDoors) return 0;
 	const tried = new Set(cur.loops || []);
 	let ran = 0;
-	while (ran < 5 && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
+	while (ran < max && roundUsed() < 0.6 * ROUND_MS && Date.now() < deadline - 120000) {
 		const H = bestTrace().tr.H, n = bestTrace().tr.n;
 		// the loops that come back within 48 px, then (all tried) the wider ones within 96 px, then 160 px
 		const nl = nextLoop(round, tried);
@@ -747,6 +750,7 @@ async function loopWindows(round) {
  *  the round (one at least) */
 async function deepStage(round, R) {
 	const WSZ = R([600, 400, 500, 350]);
+	if (SWEEP_LOOP_MODE === 'first') await loopWindows(round, 2);
 	await sweepStage(round);
 	await loopWindows(round);
 	let done = 0, rested = 0;
