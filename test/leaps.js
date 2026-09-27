@@ -1,10 +1,11 @@
 'use strict';
 // Long-range shortcuts (src/leaps.js) without a GPU, on a hand-made room: the reference walks right, turns back left (a
-// detour), walks right again into a block (pushing against it: the same state tick after tick), jumps over it and walks
-// to the trophy. The explore's hits are made here (a stand-in for eegpu prints them), so every other step is checked:
+// detour), walks right again into a block (the wall hit zeroes its speed: an exact state to meet), jumps over it and
+// walks to the trophy. The explore's hits are made here (a stand-in for eegpu prints them), so every other step is checked:
 //  A. prepare / rank: the run's pace, the time-to-go fields, a candidate at the detour
 //  B. spliceHits: a hit that skips the detour rejoins the run exactly at the block (tails) and is judged faster; a hit
-//     past the block that meets the run nowhere exactly is spliced loose and still verified by the replay
+//     past the block that meets the run nowhere exactly is spliced loose and still verified by the replay; a leap that
+//     skips a coin the reference takes (coins counted) meets it in its physical state only: spliced there, verified
 //  C. leapFrom with the stand-in: the explore's arguments (--ahead=1 --visits=1, the order field as an RCH3 file, the
 //     start tick, no prune), its hit lines, the verified leap
 //  D. gpusearch.js's leap arm (--leapOnly=1) on a job: the leap reaches the job's best (an exact one through the library)
@@ -123,6 +124,42 @@ check('a loose leap (no exact rejoin before the trophy): spliced as it is and ve
 	const h = hitFor(60, new Array(30).fill(0));
 	h.refTick = h.tick - 10; h.gain = -10;   // (a visit before the hit: no leap)
 	check('a hit that is not faster gives nothing', !L.spliceHits(info, { i: 60, j: info.n }, [h], OPTS).best);
+}
+{
+	// a coin at (1, 6) that only the detour takes (the reference turns back to the left wall), coins counted (nocoins 0):
+	// the leap skips it, so no state after it equals the reference's; the physical rejoin at the block does
+	const cells2 = cells.concat([[1, H - 2, 100]]);
+	const lf2 = path.join(TMP, 'level_coin.json');
+	fs.writeFileSync(lf2, JSON.stringify(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'leaps test coin', width: W, height: H, cells: cells2 })))));
+	const level2 = E.loadLevel(lf2);
+	const raw2 = [];
+	const sim = new E.EESim(level2); sim.reset(); const inp = new E.EEInput();
+	const push = (m) => { raw2.push(m); E.applyMask(inp, m); sim.tick(inp); };
+	for (let k = 0; k < 60; k++) push(4);
+	while (sim.px > 16 + 1e-9) push(2);   // (to the left wall: through the coin's tile)
+	while (sim.px < 29 * 16) push(4);
+	push(4);
+	for (let k = 0; k < 3; k++) push(5);
+	for (let k = 0; k < 300; k++) push(4);
+	const ref2 = C.evaluate(level2, Uint8Array.from(raw2));
+	const info2 = ref2 && L.prepare(level2, ref2.ms, { nocoins: 0 });
+	let hit2 = null;
+	if (info2) {
+		const s = new E.EESim(level2); s.reset(); const q = new E.EEInput();
+		for (let t = 0; t < 60; t++) { E.applyMask(q, info2.masks[t]); s.tick(q); }
+		const hin = [];
+		while (s.px < 29 * 16 && hin.length < 400) { E.applyMask(q, 4); s.tick(q); hin.push(4); }
+		E.applyMask(q, 4); s.tick(q); hin.push(4);
+		let best = -1, bd = Infinity;
+		for (let j = 60 + hin.length + 20; j <= info2.n; j++) {
+			const d = Math.abs(s.px - info2.X[j]) + Math.abs(s.py - info2.Y[j]) + 3 * (Math.abs(s.speed_x - info2.VX[j]) + Math.abs(s.speed_y - info2.VY[j]));
+			if (d < bd) { bd = d; best = j; }
+		}
+		hit2 = { tick: 60 + hin.length, gain: best - 60 - hin.length, refTick: best, inputs: String.fromCharCode(...hin.map((m) => 48 + m)) };
+	}
+	const sC = info2 && L.spliceHits(info2, { i: 60, j: info2.n }, [hit2], Object.assign({}, OPTS, { nocoins: 0 }));
+	check('a leap that skips a coin (coins counted): no exact rejoin, the physical one at the block, verified', ref2 && ref2.coins === 1 && sC && sC.best && /physical/.test(sC.best.how) && sC.best.ev.coins === 0 && sC.best.saved >= 50,
+		sC && sC.best ? `${sC.best.how}, -${sC.best.saved}, coins ${sC.best.ev.coins}` : `nothing (${sC ? sC.tried : 0} tried; reference coins ${ref2 && ref2.coins})`);
 }
 
 console.log('\n== C. leapFrom with a stand-in for eegpu');
