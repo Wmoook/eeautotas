@@ -1743,7 +1743,24 @@ function toolVersionProblem(cmd) {
 		askInfo(cmd, (info) => {
 			if (!infoNoMem(info) || toolMem.get(key)) return took(info);
 			note(`the tool check found no GPU memory (${String(info.why).slice(0, 120)}): asked again in ${GPU_RETRY_S[0]} s`);
-			setTimeout(() => askInfo(cmd, took), GPU_RETRY_S[0] * 1000);
+			// (the search waits for that answer at most GPU_RETRY_S[0] s more: on the A100 at load 160 an `info` hung 40-60 s
+			// in the driver's lock (cycle 8); a later answer counts as a background one)
+			setTimeout(() => {
+				let late = false;
+				const cap = setTimeout(() => {
+					late = true;
+					note(`the tool check asked again has no answer after ${GPU_RETRY_S[0]} s: the search starts without it`);
+					took(info);
+				}, GPU_RETRY_S[0] * 1000);
+				askInfo(cmd, (again) => {
+					if (!late) { clearTimeout(cap); return took(again); }
+					const mem = infoMem(again);
+					if (!mem) return;
+					toolMem.set(key, mem);
+					if (infoTimer) { clearTimeout(infoTimer); infoTimer = null; }
+					if (toolInfo && toolInfo.key === key && !toolInfo.memMB) { toolInfo.memMB = mem; note(`the GPU's memory (asked again: ask 2, late): ${mem} MB; the wall breaker plans its table from it`); }
+				});
+			}, GPU_RETRY_S[0] * 1000);
 		});
 	});
 	toolChecked.set(key, p);
