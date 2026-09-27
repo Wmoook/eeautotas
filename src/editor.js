@@ -387,7 +387,7 @@ const STRATEGIES = {
 	// cost ceiling; a box of BREAK_REGION tiles around its start only with a table of 2^28 cells or fewer
 	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V),
-		`--cells=${q.cellLog}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune ? ['--prune=1'] : [])] },
+		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
@@ -571,7 +571,7 @@ const RELAY_WAIT_S = 20, RELAY_AFTER_REFINE_MS = 3000;   // (a refined try still
 // is known (faster routes).
 const EXPLORE_YIELD_MS = 15000, EXPLORE_YIELD_TILES = 10;
 function resumeExplore() {
-	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
+	if (!S || !S.running || S.halted || S.stage === 'stopped' || breakerBusy()) return;
 	S.strategies.forEach((q, k) => { if (q.key === 'explore' && q.state === 'waiting' && !alive(kids[k])) { Object.assign(q, { state: 'starting', detail: '' }); kids[k] = launch(k); } });
 }
 // A relay that finds nothing nearer goes on along its plan (RELAY_PLAN): further back along the nearest attempt, from
@@ -744,6 +744,8 @@ const RELAY_CELLS = [{ cqx: 0.25, cqv: 4, qy: 0.25, qvy: 4 }, { cqx: 0.5, cqv: 4
 /** starts the relay (strategy n) from the nearest attempt so far; false when there is nothing to start from */
 function relayFrom(n) {
 	const V = S.strategies[n], R = V.relay || (V.relay = { back: 0, cells: 0, runs: 0 });
+	// (the wall breaker's round: after it, from this step of the plan)
+	if (breakerBusy()) { V.deferred = true; return false; }
 	// (every move no longer running: the relay's table is 4x larger from now on (launch), so its plan starts over from the
 	// nearest attempt: on the ice level every move ended at 35 s, the relay was 3 steps back by then, and the larger table
 	// from the nearest attempt went 100 tiles on)
@@ -871,6 +873,28 @@ const BREAK_WAIT_S = [90, 180, 360], BREAK_TILES = 0.5, BREAK_STARTS = 8, BREAK_
 const BREAK_STEP_S = 20, BREAK_ROUND_S = 300, BREAK_CAP = 2097152, BREAK_MEM_F = 0.42, BREAK_REGION = 40, BREAK_REGION_LOG = 28;
 const BREAK_GRAINS = [{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16 }, { cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16 }, { cqx: 1, cqv: 32, qy: 1, qvy: 32 }];
 const BREAK_GRAIN_TEXT = ['4 px and 1/16', '2 px and 1/16', '1 px and 1/32'];
+// the GPU memory its table leaves free (explore --reserve, MB: BREAK_RESERVE_F of the GPU's, at least 1 GB): its table
+// and states fit the free memory less that, so on a shared GPU the other processes keep room (on the rented H100, shared
+// with 31-42 GB of other work, a 2^31 table left the relay's new processes no memory for a context)
+const BREAK_RESERVE_F = 0.15;
+/** the wall breaker's round is running (its process alive): the others' new processes wait (resumeDeferred) */
+const breakerBusy = () => !!S && Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]));
+/** strategy n's next process, or, while the wall breaker's round runs (its table took the memory), a wait for its end */
+function launchOrWait(n) {
+	if (!breakerBusy()) { kids[n] = launch(n); return; }
+	Object.assign(S.strategies[n], { state: 'waiting', detail: 'waits while the wall breaker has the GPU', deferred: true });
+}
+/** the round is over: the processes that waited for it start (the relay from its plan's step) */
+function resumeDeferred() {
+	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.gpuFailed || breakerBusy()) return;
+	S.strategies.forEach((q, k) => {
+		if (!q.deferred || alive(kids[k])) return;
+		q.deferred = false;
+		if (q.key === 'relay') { if (!relayFrom(k)) Object.assign(q, { state: 'waiting', detail: 'waits for a nearer attempt to go on from' }); }
+		else { Object.assign(q, { state: 'starting', detail: '' }); kids[k] = launch(k); }
+	});
+	save();
+}
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -947,7 +971,8 @@ function breakLaunch(n) {
 		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
 		region = `${tx - BREAK_REGION},${ty - BREAK_REGION},${tx + BREAK_REGION},${ty + BREAK_REGION}`;
 	}
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
+	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
@@ -959,7 +984,8 @@ function breakLaunch(n) {
 /** a breaker run ended (how: its end): finer cells from the same start, the chain's next step, or the next starting point */
 function breakAfter(n, how) {
 	const V = S.strategies[n], R = brk && brk.round;
-	if (!R || !R.chain) return breakEnd(n);
+	if (!R) return breakEnd(n);
+	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
 	if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
@@ -986,6 +1012,7 @@ function breakEnd(n) {
 		}
 		brk.at = Date.now();
 	}
+	setImmediate(resumeDeferred);
 	Object.assign(V, { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${cur && brk ? cur.opts.breakWait[brk.level] : BREAK_WAIT_S[0]} s)` });
 	return false;
 }
@@ -1546,7 +1573,7 @@ function launch(n) {
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
 	}
 	if (V.key === 'breaker') {
-		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region;
+		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve;
 		q.seconds = V.share = V.brk.seconds;
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.brk.keep) : 0;
 	}
@@ -1787,7 +1814,7 @@ function launch(n) {
 		if (!mine()) return;
 		V.live = false;
 		if (V.readyAt) { V.usedMs += Date.now() - V.readyAt; V.readyAt = 0; }   // (its search time; the next process loads first)
-		if (ch.steerRetry && !ch.stopWhy && S.running && !S.halted && S.stage !== 'stopped') { kids[n] = launch(n); save(); return; }
+		if (ch.steerRetry && !ch.stopWhy && S.running && !S.halted && S.stage !== 'stopped') { if (V.key === 'relay' && breakerBusy()) Object.assign(V, { deferred: true, state: 'waiting', detail: 'waits while the wall breaker has the GPU' }); else if (V.key === 'explore') launchOrWait(n); else kids[n] = launch(n); save(); return; }
 		// eegpu's kernel launch failed (exit 6, 7 = the driver's watchdog) or it crashed: the GPU may have been reset.
 		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
 		// (a crash: an exception code above 255 on Windows; on Linux a signal, exit code null, that no halt sent)
@@ -1815,7 +1842,7 @@ function launch(n) {
 					V.probe = 'slow';
 					note(`${V.label}: the finest cells are too many here (${h === 'full' ? 'the table filled' : `no try through in ${cur.opts.probeS} s`}); from coarse cells up`);
 					Object.assign(V, { pass: PASS_START, passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '', salt: 0, saltNoted: 0 });
-					kids[n] = launch(n);
+					launchOrWait(n);
 					save();
 					return;
 				}
@@ -1839,7 +1866,7 @@ function launch(n) {
 					beaten: 'a faster route is known' }[how];
 				note(`${V.label}: ${what} at tick ${V.layer}${why}; again with ${next < V.pass ? 'coarser' : 'finer'} cells${S.result ? `, for a route under ${S.result.ticks} ticks` : ''}`);
 				Object.assign(V, { pass: next, passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
-				kids[n] = launch(n);
+				launchOrWait(n);
 				save();
 				return;
 			}
@@ -1859,7 +1886,7 @@ function launch(n) {
 						`${V.lanes > 1 ? `, ${V.lanes} side by side` : ''})`);
 				}
 				Object.assign(V, { passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
-				kids[n] = launch(n);
+				launchOrWait(n);
 				save();
 				return;
 			}

@@ -410,6 +410,7 @@ const go = () => {
 	const brkN = prev.filter((a) => a[0] === 'explore' && isBrk(a)).length;
 	const run = isBrk(args) ? ((SC.breaker || [])[brkN] || { end: 'time', layers: 1 }) : opt('prefix') ? ((SC.relay || [])[relayN] || { end: 'exhausted', layers: 1, overflow: 0 }) : (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
 	const depth = +opt('depth');
+	if (run.error) return void setTimeout(() => { say({ error: run.error }); process.exit(3); }, run.wait || 0);   // (a run that fails: "the prefix dies")
 	const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; if (run.lanes) d.lanes = run.lanes; if (run.lastSalt !== undefined) d.salt = run.lastSalt; say(d); };
 	setTimeout(() => {
 		if (run.lanes) say({ ev: 'lanes', lanes: run.lanes, from: +opt('lanes') || 1, why: 'full', layers: run.layers });   // (--lanes: its batch filled the table)
@@ -692,21 +693,45 @@ async function passesSection() {
 		let str = ED.state(), turn = false;
 		while (str.running && !str.result && Date.now() - t0b < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); if (str.gpuTurn === 'breaker') turn = true; }
 		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
-		const LB = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.includes('--cap=2097152'));
+		const LA = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore');
+		const LB = LA.filter((a) => a.includes('--cap=2097152'));
+		// (while its round runs no other GPU process starts: the relay's next run waits for the round's end)
+		const b0 = LA.findIndex((a) => a.includes('--cap=2097152')), b1 = LA.length - 1 - [...LA].reverse().findIndex((a) => a.includes('--cap=2097152'));
+		const between = b0 >= 0 ? LA.slice(b0, b1 + 1).filter((a) => !a.includes('--cap=2097152')).length : -1;
 		const opts = LB.map((a) => Object.fromEntries(a.filter((x) => /^--\w+=/.test(x)).map((x) => x.slice(2).split('='))));
 		const pfs = LB.map((a) => (a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4));
 		const cells = opts.map((o) => `${o.cqx}/${o.cqv}/${o.qy}/${o.qvy}`);
 		const seeds = fs.existsSync(inB) ? fs.readFileSync(inB, 'utf8').split('\n').filter((l) => l.startsWith('seed ')) : [];
 		const logged = (str.log || []).join('\n');
 		check('the wall breaker: a stalled search starts a round from the nearest attempt 150 ticks back with the GPU to itself (4 px / 1/16 px/tick cells, the whole table, ' +
-			'the 2M layer cap, a box around its start, no cost ceiling); its nearer attempt is the next step\'s start 60 ticks short and the CPU search\'s seed; ' +
+			'the 2M layer cap, room left for others, a box around its start, no cost ceiling; no other GPU process starts meanwhile); its nearer attempt is the next step\'s start 60 ticks short and the CPU search\'s seed; ' +
 			'out of situations: finer cells from the same start; its finish is the route',
 			LB.length === 3 && pfs.join() === '450:0,740:4,740:4' && cells.join() === '0.25/16/0.25/16,0.25/16/0.25/16,0.5/16/0.5/16' &&
-			opts.every((o) => o.cells === '26' && o.cap === '2097152' && !o.costslack && /^-?\d+,-?\d+,\d+,\d+$/.test(o.region || '')) && turn &&
+			opts.every((o) => o.cells === '26' && o.cap === '2097152' && +o.reserve >= 1024 && !o.costslack && /^-?\d+,-?\d+,\d+,\d+$/.test(o.region || '')) && turn && between === 0 &&
 			seeds.some((l) => l === 'seed ' + '4'.repeat(800)) && /round 1, 2 starting points/.test(logged) && str.result && str.result.strategy === 'past the wall' &&
 			!!str.breaker && str.breaker.rounds === 1,
 			`breaker runs ${LB.length}: prefixes ${pfs.join(' | ')}, cells ${cells.join(' | ')}, opts ${JSON.stringify(opts.map((o) => [o.cells, o.cap, o.costslack || '-', o.region || '-']))}; ` +
-			`GPU turn seen ${turn}; seeds ${seeds.map((l) => l.length - 5).join(',')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; breaker ${JSON.stringify(str.breaker)}`);
+			`GPU turn seen ${turn}; other launches during the round ${between}; seeds ${seeds.map((l) => l.length - 5).join(',')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; breaker ${JSON.stringify(str.breaker)}`);
+	}
+	// a breaker run that fails ("the prefix dies"): the round goes on from its next starting point (the nearest attempt 400
+	// back: 200 ticks), whose finish is the route
+	{
+		const scB = path.join(HOME, 'brk2.json'), logB = path.join(HOME, 'brk2.log'), scC = path.join(HOME, 'brk2cpu.json'), fakeCpu = path.join(HOME, 'fake-cpu.js');
+		fs.writeFileSync(fakeCpu, FAKE_CPU);
+		fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 30, tick: 600, ch: '0' } }] },
+			relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
+			breaker: [{ error: 'the prefix dies', wait: 200 }, { end: 'finish', idle: 0, layers: 3, wait: 300 }], beam: null }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100 }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scB], cpu: [process.execPath, fakeCpu, scC], salts: false, relay: true, breaker: true, breakWait: [1], breakCells: 26 });
+		const t0b = Date.now();
+		let str = ED.state();
+		while (str.running && !str.result && Date.now() - t0b < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }
+		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		const pfs = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.includes('--cap=2097152'))
+			.map((a) => (a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4));
+		check('the wall breaker: a run that fails ("the prefix dies") is not an error of the search: the round goes on from its next starting point, whose finish is the route',
+			pfs.join() === '450:0,200:0' && str.result && str.result.strategy === 'past the wall', `prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}`);
 	}
 	// the table by the GPU's memory (BREAK_MEM_F at 16 bytes a cell): 8 GB 2^27, 24 GB 2^29, 40 GB 2^30, 80 GB 2^31
 	check("the wall breaker's table: 2^27 cells on 8 GB, 2^29 on 24 GB, 2^30 on 40 GB (40,326 MB), 2^31 on 80 GB (81,559 MB)",

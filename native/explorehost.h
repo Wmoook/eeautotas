@@ -170,6 +170,18 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	// (--cells: up to 2^31, 32 GB with the best-state table: the editor's wall breaker on an 80 GB GPU (editor.js
 	// BREAK_MEM_F); on too little memory the allocation below halves it)
 	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(31, atoi(opt(argc, argv, "cells", "27").c_str())));
+	// --reserve=<MB>: the table and the state buffers fit the GPU's free memory less this much (the editor's wall breaker:
+	// the table it asks for where it fits, never the memory the other processes on a shared GPU still need; down to 2^24)
+	if (opt(argc, argv, "reserve", "").size() && cu::cuMemGetInfo_v2) {
+		size_t fr = 0, tot = 0;
+		if (!cu::cuMemGetInfo_v2(&fr, &tot)) {
+			const size_t keep = (size_t)std::max(0, atoi(opt(argc, argv, "reserve", "0").c_str())) << 20;
+			const size_t rest = 2 * sizeof(S) * (size_t)cap + 20ull * 18 * cap + ((size_t)256 << 20);
+			const uint32_t asked = cellLog;
+			while (cellLog > 24 && (16ull << cellLog) + rest + keep > fr) cellLog--;
+			if (cellLog != asked) { printf("{\"warn\":\"2^%u cells do not fit the free memory less the reserve: 2^%u\",\"cellLog\":%u,\"freeMB\":%zu}\n", asked, cellLog, cellLog, fr >> 20); fflush(stdout); }
+		}
+	}
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist, dstats, dlost;
 	const size_t nCandMax = (size_t)cap * 18;
