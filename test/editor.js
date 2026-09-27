@@ -1254,7 +1254,7 @@ async function cpuSection() {
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 12, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc6], salts: false });
 	st = await waitDone(40000);
 	const s6 = (Date.now() - t6) / 1000, G6 = st.strategies.filter((q) => !q.cpu);
-	await new Promise((r) => setTimeout(r, Math.max(0, 15500 - (Date.now() - t6))));
+	await new Promise((r) => setTimeout(r, Math.max(0, 21000 - (Date.now() - t6))));
 	const late6 = ED.state().log.some((x) => /the GPU's memory \(asked again: ask 2, late\): 40960 MB/.test(x));
 	check('the tool check asked again hangs: the search starts 5 s later without it, its GPU strategies run, the late answer sets its GPU memory',
 		st.log.some((x) => /the tool check asked again has no answer after 5 s: the search starts without it/.test(x)) &&
