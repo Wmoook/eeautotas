@@ -1020,6 +1020,8 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	}
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
 	cur.opts.noWayUp = noWayUp;
+	// (the check of a level the reach field calls impossible runs as before: no steer field)
+	if (noWayUp) { cur.files.steer = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
 	// the physics check finds a way: the proof (next to the searches) may still show there is none
 	if (cur.opts.prune) startProof(ins);
 	S.stage = 'starting';
