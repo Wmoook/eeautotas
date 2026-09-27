@@ -509,7 +509,13 @@ function schedule() {
 	// between its processes (every move and the relay handing over the memory, one run's end and the next's start), so
 	// the beams and the random runs do not get the GPU back for those seconds)
 	const BK = S.strategies.findIndex((q) => q.key === 'breaker');
-	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
+	// (breakSlice: only while its run searches (from its ready event); while a run starts and in the slice between two
+	// runs the others take their turns as below, the breaker's starting process not paused)
+	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round)) && cur && cur.opts.breakSlice && !(gpu.includes(BK) && S.strategies[BK].brk && S.strategies[BK].brk.readyAt > 0)) {
+		if (gpu.includes(BK)) { setPaused(BK, false); gpu.splice(gpu.indexOf(BK), 1); }
+		if (sched && sched.owner === BK) sched = null;
+		if (!gpu.length) { S.gpuTurn = 'breaker'; return; }
+	} else if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
 		for (const k of gpu) setPaused(k, k !== BK);
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
@@ -912,6 +918,15 @@ const BREAK_RESERVE_F = 0.15;
 // the first seconds on the shared H100 cost Infinity Pain every move, straight and the GPU random runs for 30 min). The
 // breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one.
 const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
+// The breaker's GPU slices (cycles 6-8: a round held the GPU for its whole length, the one search's bursts and the GPU
+// random runs paused: Stupid Fox's round 1 1,280 s with 2 bursts by ~1,140 s; FV's 2,027 s; and each run's engine start,
+// a median 26 s on the loaded box, was GPU time nobody used): a breaker run holds the GPU only from its ready event (its
+// kernels loaded and its table allocated: eegpu's pause file holds it from then on) to its end; while it starts, and for
+// BREAK_SLICE_F of each run's search time (at most BREAK_SLICE_S) before the round's next run, the others have their
+// turns (schedule). `b.breakSlice === false`: the round holds the GPU from its start to its end (as before).
+const BREAK_SLICE_F = 0.25, BREAK_SLICE_S = 5;
+/** the others' slice (ms) after a breaker run that searched runMs */
+const breakSliceMs = (runMs) => Math.round(Math.min(BREAK_SLICE_S * 1000, BREAK_SLICE_F * Math.max(0, runMs || 0)));
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
 const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
@@ -1183,7 +1198,27 @@ function breakAfter(n, how) {
 		if (b) seedCpu(b.inputs);
 		R.chain = null;
 	}
-	return breakLaunch(n);
+	return breakNext(n);
+}
+/** the round's next run: after the others' slice of the GPU (breakSlice: breakSliceMs of the run that ended, from its
+ *  ready event), or at once; false when the round is over */
+function breakNext(n) {
+	const V = S.strategies[n], R = brk && brk.round, now = Date.now();
+	const ran = V.brk && V.brk.readyAt > 0 ? now - V.brk.readyAt : 0;
+	if (R) R.heldMs = (R.heldMs || 0) + ran;
+	const gap = R && cur && cur.opts.breakSlice ? breakSliceMs(ran) : 0;
+	if (S.breaker && S.breaker.round && R) S.breaker.round.heldS = Math.round(R.heldMs / 1000);
+	// (nothing left to start from, or the round's time up by the slice's end: breakLaunch ends it now)
+	if (!R || gap < 250 || (!R.chain && R.i >= R.starts.length) || breakRoundLeft(R, now + gap, cur.opts.breakRound, cur.opts.breakFrontNew) < 3) return breakLaunch(n);
+	R.sliceMs = (R.sliceMs || 0) + gap;
+	if (S.breaker && S.breaker.round) S.breaker.round.sliceS = Math.round(R.sliceMs / 1000);
+	Object.assign(V, { state: 'waiting', detail: `round ${brk.rounds}: the other GPU strategies' turn (${(gap / 1000).toFixed(1)} s) before its next run` });
+	const S0 = S;
+	setTimeout(() => {
+		if (S !== S0 || !S.running || !brk || brk.round !== R || alive(kids[n])) return;
+		if (!breakLaunch(n) && !running()) finish(); else save();
+	}, gap);
+	return true;
 }
 /** the round is over: the breaker waits (the next round after BREAK_WAIT_S without progress; longer after one that brought
  *  nothing) */
@@ -1193,9 +1228,15 @@ function breakEnd(n) {
 		brk.round = null;
 		if (R && cur) {
 			brk.level = R.progress.length ? 0 : Math.min(brk.level + 1, cur.opts.breakWait.length - 1);
-			note(`${V.label}: round ${brk.rounds} over (${R.runs} run${R.runs === 1 ? '' : 's'}, ${Math.round((Date.now() - R.t0) / 1000)} s): ` +
+			const sec = Math.round((Date.now() - R.t0) / 1000), held = Math.round((R.heldMs || 0) / 1000);
+			note(`${V.label}: round ${brk.rounds} over (${R.runs} run${R.runs === 1 ? '' : 's'}, ${sec} s, the GPU its own ${held} s of them): ` +
 				`${R.progress.length ? `the search got on (${[...new Set(R.progress)].join(', ')})` : 'nothing nearer, no new room'}; the next after ${cur.opts.breakWait[brk.level]} s without progress`);
-			if (S.breaker) S.breaker.round = null;
+			if (S.breaker) {
+				// (the rounds so far: their length, runs, the seconds its runs searched, gates (into a new room))
+				const r0 = S.breaker.round || {};
+				S.breaker.done = [...(S.breaker.done || []), { n: brk.rounds, after: r0.after, s: sec, runs: R.runs, heldS: held, gates: r0.gates || 0, newGates: r0.newGates || 0 }].slice(-20);
+				S.breaker.round = null;
+			}
 		}
 		brk.at = Date.now();
 	}
@@ -1416,6 +1457,7 @@ function start(b, gpu, test) {
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false, breakFrontNew: b.breakFrontNew !== false,
+		breakSlice: b.breakSlice !== false,
 		breakFrom: test && test.breakFrom ? [].concat(test.breakFrom).map(String) : [], breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
@@ -1876,7 +1918,12 @@ function launch(n) {
 	};
 	const onEvent = (ev) => {
 		if (!mine()) return;
-		if (ev.ev === 'ready') { if (!V.readyAt) { ready(ev); save(); } return; }
+		if (ev.ev === 'ready') {
+			if (!V.readyAt) { ready(ev); save(); }
+			// (a breaker run searches from now: the GPU is its own, breakSlice)
+			if (V.key === 'breaker') { if (V.brk && !V.brk.readyAt) V.brk.readyAt = Date.now(); setImmediate(schedule); }
+			return;
+		}
 		if (!V.readyAt && !ev.error) ready(null);
 		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
 		if (ch.stopWhy && (ev.ev === 'progress' || ev.ev === 'layer' || ev.ev === 'try')) return;
@@ -2496,4 +2543,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, breakRoundLeft, gateRestarts, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, breakRoundLeft, gateRestarts, breakSliceMs, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

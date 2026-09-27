@@ -752,6 +752,9 @@ async function passesSection() {
 			hits.join() === 'false,true,false,false,true,false' && old.join() === 'true,true,true' && left.join() === '150,50,250,200' && [...gates].join() === '11,13,12,14',
 			`restarts ${hits.join()}; old ${old.join()}; left ${left.join()}; gate rooms ${[...gates].join()}`);
 	}
+	// the others' GPU slice between two breaker runs: a quarter of the run's search time, at most 5 s
+	check("the wall breaker's slices: the others get 1/4 of a run's search time before its next run, at most 5 s",
+		[0, 1000, 12000, 20000, 60000].map(ED.breakSliceMs).join() === '0,250,3000,5000,5000', [0, 1000, 12000, 20000, 60000].map(ED.breakSliceMs).join());
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
