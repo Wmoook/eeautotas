@@ -746,6 +746,9 @@ async function passesSection() {
 		const got = [pick(nh, 'terr'), pick(nh, 'latest'), pick(nh.filter((x) => x.room === 1), 'terr'), pick([h(3, 120), h(1, 200)], 'terr'), pick([h(1, 120)], 'terr')].join();
 		check("the wall breaker's novelty chain: its next start by the pick rule (terr: the room with the most new cells; latest: another room's latest)",
 			got === '3@180,2@400,1@500,1@200,none', got);
+		// every room's latest hit goes to the CPU search (its frontier there)
+		const seeds = ED.novelSeeds(nh).map((x) => `${x.room}@${x.tick}`).sort().join();
+		check("the wall breaker's novelty hits: every room's latest hit is a seed of the CPU search", seeds === '1@500,2@400,3@180', seeds);
 	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on

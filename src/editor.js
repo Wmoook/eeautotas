@@ -959,6 +959,12 @@ function novelPick(nh, room0, from, rule = BREAK_NOVEL_PICK) {
 	if (!nv) for (const h of ok) if (!nv || h.tick > nv.tick) nv = h;
 	return nv;
 }
+/** a run's novelty hits nh -> the latest hit of each room (the run's frontier in every room it found new cells in) */
+function novelSeeds(nh) {
+	const last = new Map();
+	for (const h of nh) { const o = last.get(h.room); if (!o || h.tick > o.tick) last.set(h.room, h); }
+	return [...last.values()];
+}
 /** the wall breaker's round is running (from its start to its end, or its process alive): the others' new processes wait (resumeDeferred) */
 const breakerBusy = () => !!S && ((!!brk && !!brk.round) || (Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]))));
 /** strategy n's next process, or, while the wall breaker's round runs (its table took the memory), a wait for its end */
@@ -1097,6 +1103,9 @@ function breakAfter(n, how) {
 	if (cur.opts.novel) novelAsk();   // (the next run's novelty file: the archive as it is now)
 	// (a run with novelty hits: the next step from one, a hit in another room than the step's start's first, else the latest)
 	const nv = nh.length && ch.step < BREAK_CHAIN ? novelPick(nh, Number.isFinite(V.novRoom0) ? V.novRoom0 : nh[0].room, ch.inputs.length) : null;
+	// (every room's latest hit of the run to the CPU search, its frontier there: from Octorage's walls starts the hits
+	// that went furthest were at times in the start's own room while the pick went to another one)
+	for (const h of novelSeeds(nh)) seedCpu(h.inputs);
 	if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length && !nv) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (nv) {
 		R.chain = { inputs: nv.inputs.slice(0, nv.inputs.length - BREAK_NOVEL_BACK), step: ch.step + 1, grain: 0, what: `${ch.what}, a novelty hit` };
@@ -2385,4 +2394,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, novelPick, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, novelPick, novelSeeds, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
