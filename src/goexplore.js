@@ -751,8 +751,9 @@ function explore(L, field, a, seed, ctrl, post, seedPort = null) {
 	let queue = [];
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
-	let nNodes = 0, nBlocks = 0;
-	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK +
+	// (blkExtra: the live seed blocks' bytes beyond BLK: a seed's block holds its whole inputs, up to 38k ticks on IP)
+	let nNodes = 0, nBlocks = 0, blkExtra = 0;
+	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + blkExtra +
 		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
@@ -763,14 +764,14 @@ function explore(L, field, a, seed, ctrl, post, seedPort = null) {
 	// on while nodes made from it do)
 	const mkNode = (up, blk, o, n) => {
 		if (up !== null) up.refs++;
-		if (blk.refs++ === 0) nBlocks++;
+		if (blk.refs++ === 0) { nBlocks++; blkExtra += blk.extra || 0; }
 		nNodes++;
 		return { up, blk, o, n, refs: 1 };
 	};
 	const release = (q) => {
 		while (q !== null && --q.refs === 0) {
 			nNodes--;
-			if (--q.blk.refs === 0) nBlocks--;
+			if (--q.blk.refs === 0) { nBlocks--; blkExtra -= q.blk.extra || 0; }
 			q = q.up;
 		}
 	};
@@ -991,7 +992,8 @@ function explore(L, field, a, seed, ctrl, post, seedPort = null) {
 		const ms = Uint8Array.from(str, (ch) => (ch.charCodeAt(0) - 48) & 31);
 		if (!ms.length || cell0 === null) return;
 		seeded++;
-		const blk = { b: ms, refs: 0 };
+		// (extra: its bytes beyond a pick's block, which archiveBytes counts as BLK)
+		const blk = { b: ms, refs: 0, extra: ms.length - a.rolls * a.roll };
 		sim.restore(startSnap);
 		let room = room0;
 		for (let s = 0; s < ms.length; s++) {
