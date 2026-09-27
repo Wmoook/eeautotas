@@ -212,9 +212,15 @@ const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 // a seed's states that become cells: every SEED_EVERY ticks back from its end (and the end)
 const SEED_EVERY = 30;
+// head L (a route known): a cell's pick priority = its lead (ticks; below 0 ahead of the best route) + LEAD_PICK x
+// sqrt(its picks): 25 picks cost 100 ticks of lead. Its share follows its yield: --pL of the picks for LEAD_GRACE_S after
+// the first route and after each faster route a head-L pick found (any worker's), then halved every LEAD_HALF_S down to
+// LEAD_FLOOR x --pL (Infinity Pain: head L's routes came 19 s after the first route and every few minutes after; Stupid
+// Fox: none in 15 min, while heads A / B found main's 7,680 -> 6,789 at 630-834 s: src/out/night/macro_fix.md)
+const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -632,6 +638,65 @@ function roomFields(L, budget) {
 	return { enter, trophies: trophies.length, bytes: () => bytes, stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes }) };
 }
 
+/**
+ * lowerBoundTiles(L) -> Uint16Array (per tile, over a SharedArrayBuffer): a lower bound on the ticks from a ball whose
+ * centre is in that tile to the trophy, whatever the effects and doors (the minimum over the physics): the box moves at
+ * most 16.25 px along an axis in a tick (|speed| <= 16 after the clamp, the auto-align, rounding: endgame.js D_TICK), so
+ * its centre's tile changes by at most 2 along each axis, and its 1 px steps pass a 4-connected chain of tiles that are
+ * no permanent wall (a solid block that is no door, one-way or half block: the centre is never inside one); a portal
+ * moves it for nothing. So ticks >= ceil(d / 4), d = the 4-connected steps to a tile next to a trophy (a half block's
+ * touch) over every tile but the walls, every door open, portals as free moves (a 0-1 BFS from the trophies). 0xffff:
+ * no trophy that way (a proof too, as the reach field's -1). A search state at tick t with t + max(1, bound) past the
+ * longest route that still counts cannot give a faster route (a death's respawn is no move: the runs end at a death).
+ */
+function lowerBoundTiles(L) {
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	if (!fg.includes(121)) return null;   // (no trophy: no bound)
+	const out = new Uint16Array(new SharedArrayBuffer(2 * N)).fill(0xffff);
+	const wall = new Uint8Array(N);
+	for (let i = 0; i < N; i++) { const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0; wall[i] = (f & 1) !== 0 && (f & 16) === 0 && (f & (2 | 4 | 8)) === 0 ? 1 : 0; }
+	// the portals reversed: exit tile -> the portal tiles that lead there
+	const into = new Map();
+	if (L.portalSlot && L.portalsById) {
+		for (let i = 0; i < N; i++) {
+			const s = L.portalSlot[i];
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			const ex = L.portalsById.get(L.pTarget[s]);
+			if (!ex) continue;
+			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); l.push(i); } }
+		}
+	}
+	// (a deque in one array: 0-cost moves to the front; a tile is put at most once per neighbour or portal that improves it)
+	let nInto = 0;
+	for (const l of into.values()) nInto += l.length;
+	const d = new Int32Array(N).fill(-1), dq = new Int32Array(nInto + 6 * N + 16);
+	let h = nInto + N + 8, t = h;
+	const put = (j, v, front) => { if (d[j] >= 0 && d[j] <= v) return; d[j] = v; if (front) dq[--h] = j; else dq[t++] = j; };
+	for (let i = 0; i < N; i++) {
+		if (fg[i] !== 121) continue;
+		const x = i % W, y = (i / W) | 0;
+		put(i, 0, false);
+		for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) put(yy * W + xx, 0, false); }
+	}
+	const done = new Uint8Array(N);
+	while (h < t) {
+		const i = dq[h++];
+		if (done[i]) continue;
+		done[i] = 1;
+		const v = d[i];
+		for (const p of into.get(i) || []) if (!done[p]) put(p, v, true);
+		const x = i % W, y = (i / W) | 0;
+		for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+			const xx = x + dx, yy = y + dy;
+			if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+			const j = yy * W + xx;
+			if (!wall[j] && !done[j]) put(j, v + 1, false);
+		}
+	}
+	for (let i = 0; i < N; i++) if (d[i] >= 0) out[i] = Math.min(0xfffe, Math.ceil(d[i] / 4));
+	return out;
+}
+
 /** the inputs of a path node {up, blk, o, n, refs} (those of `up`, then blk.b[o .. o + n); immutable: a cell that
  *  improves gets a new node) as masks */
 function inputsOf(node) {
@@ -740,6 +805,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// rooms once per (room, tile): the trigger tried there)
 	const report = coarse && !!port;
 	const edges = report ? new Set() : null, clockEdges = report ? new Set() : null;
+	// (--lb=1: the sound lower bound on the ticks to the trophy per tile, lowerBoundTiles; the states it cuts: lbCut)
+	const LBT = a.lb && a.lbTiles ? a.lbTiles : null;
+	let lbCut = 0;
 	const centreTile = () => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
@@ -792,8 +860,32 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out
 	const ST = a.steerData || null;
 	const HS = ST ? heapOf((c) => c.sc + a.lambda * Math.sqrt(c.picks)) : null;
-	const hpush = HS ? (c) => { HA.push(c); HS.push(c); } : (c) => HA.push(c);
-	const compact = () => { HA.compact(); if (HS) HS.compact(); };
+	// head L (the one search once a route is known: the main thread's 'route' message): the lead. The best route's
+	// schedule (sched: per (room, tile) the tick it first gets there); a cell at (room, tile) that the route passes gets
+	// lead = its tick - the route's there (below 0: ahead of the best route, which finishes that much sooner from there if
+	// the rest goes as well); head L picks the most ahead, less LEAD_PICK x sqrt(its picks), --pL of the picks: an
+	// earlier arrival (a GPU burst's attempt, a lucky run) spreads down the route like A* with the best route's time to go. Main's search after a route picked by the reach cost (the cells by the trophy) and novelty.
+	// On time-door levels the schedule is per (room, tile, the doors' phase bucket: the cell key's, --phase ticks): a lead
+	// then keeps the doors' phase (whole periods sooner, within a bucket), where by (room, tile) alone a cell "ahead" by a
+	// part of a period meets the doors the route passed open shut (Stupid Fox: leads of 625 and 1,351 ticks, doomed).
+	let sched = null;
+	const TDL = coarse && !!L.hasTimeDoors, clock0 = sim.level_ticks(), NPH = Math.ceil(E.TIMEDOOR_PERIOD / a.phase);
+	const phaseOf = (lt) => ((lt % E.TIMEDOOR_PERIOD) / a.phase) | 0;
+	const leadHeap = () => heapOf((c) => c.lead + LEAD_PICK * Math.sqrt(c.picks));
+	let HL = coarse && port ? leadHeap() : null;
+	const lpush = (c) => {
+		const v = sched.get(c.room.key * 2097152 + c.tile);
+		if (v === undefined) return;
+		const s = TDL ? v[phaseOf(clock0 + c.t)] : v;
+		if (s < 0) return;
+		c.lead = c.t - s;
+		HL.push(c);
+	};
+	// (head L's share now: see LEAD_GRACE_S; lastL: the first route's or head L's last faster route's time)
+	let lastL = 0, lShare = 0, pickL = false;
+	const leadShare = (now) => (sched === null || a.pL <= 0 ? 0 : a.pL * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastL) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
+	const hpush = HS ? (c) => { HA.push(c); HS.push(c); if (sched !== null) lpush(c); } : (c) => { HA.push(c); if (sched !== null) lpush(c); };
+	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
 	const steerOf = () => { const v = SF.steerFifths(ST, sim); return v < 0 ? STEER_NONE : v / 5; };
 	// (--steerDist: the closest attempt's and the sources' distances by the steer field, at most STEER_REAL_MAX; 6000 + the
@@ -812,7 +904,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
-	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
+	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
@@ -862,6 +954,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	 *  coarse cells: in room) into the archive; returns the cell when it is new */
 	const add = (t, rc, pc, up, blk, o, n, room) => {
 		if (t >= maxT) return null;   // (a route from there would not be faster)
+		// (nor from a state whose sound lower bound to the trophy ends past it: lowerBoundTiles)
+		if (LBT !== null && t + Math.max(1, LBT[centreTile()]) > maxT) { lbCut++; return null; }
 		const k = cellKey();
 		const c = cells.get(k);
 		if (c !== undefined) {
@@ -936,7 +1030,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1129,6 +1223,31 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
 			inputs: best !== null ? C.eetasBytes(inputsOf(best.node)).toString('latin1') : '' });
 	};
+	/** the best route (the main thread's 'route': any operator's, or the editor's): head L's schedule, and every cell on it
+	 *  into head L (a separate engine: the live state belongs to the picks) */
+	let leadPicks = 0, leadRoutes = 0;
+	const setRoute = (str, byL) => {
+		const ms = Uint8Array.from(str, (ch) => (ch.charCodeAt(0) - 48) & 31);
+		const s2 = new E.EESim(L), in2 = new E.EEInput(), m = new Map();
+		s2.reset();
+		for (let k = 0; k < ms.length; k++) {
+			E.applyMask(in2, ms[k]);
+			s2.tick(in2);
+			const tl = Math.min(N - 1, Math.max(0, (Math.trunc(s2.py + 8) >> 4) * W + (Math.trunc(s2.px + 8) >> 4)));
+			const key = RM.key(s2) * 2097152 + tl;
+			if (TDL) {
+				let v = m.get(key);
+				if (v === undefined) m.set(key, v = new Int32Array(NPH).fill(-1));
+				const ph = phaseOf(s2.level_ticks());
+				if (v[ph] < 0) v[ph] = k + 1;
+			} else if (!m.has(key)) m.set(key, k + 1);
+		}
+		if (sched === null || byL) lastL = Date.now();
+		if (byL) leadRoutes++;
+		sched = m;
+		HL = leadHeap();
+		for (const c of cells.values()) lpush(c);
+	};
 	/** the main thread's messages (between two chunks of picks) */
 	const inbox = () => {
 		let m;
@@ -1136,6 +1255,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const x = m.message;
 			if (x.type === 'import' && coarse) importRun(x.inputs);
 			else if (x.type === 'nearest') nearestOf(x);
+			else if (x.type === 'route' && HL !== null) setRoute(x.inputs, !!x.byL);
 		}
 	};
 	/** a seed (stdin "seed <inputs>": the editor's wall breaker's attempts): its states every SEED_EVERY ticks back from
@@ -1188,8 +1308,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (port) inbox();
 		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) addSeed(String(m.message));
+		lShare = leadShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
+			pickL = false;
 			if (!coarse) e = popA();
 			else if (discovery.length && rnd() < 0.5) {
 				// head C: a new room's first cell, --burst times
@@ -1197,6 +1319,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e = d[0];
 				if (--d[1] <= 0) discovery.pop();
 				if (e.t >= maxT) continue;
+			} else if (lShare > 0 && rnd() < lShare) {
+				// head L (a route known): the cell most ahead of the best route (none: heads A / B as without it)
+				while (HL.size() > 0) { const c = HL.pop(); if (HL.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
+				if (e === null) e = rnd() < a.pA ? popA() : popB();
+				else { leadPicks++; pickL = true; }
 			} else if (rnd() < a.pA) e = popA();
 			else e = popB();
 			if (e === null) { end = 'exhausted'; break; }
@@ -1221,7 +1348,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e.pc = null;
 			}
 			e.used = true;
-			if (HA.size() > 3 * cells.size + 4096) compact();
+			if (HA.size() > 3 * cells.size + 4096 || (HL !== null && HL.size() > 3 * cells.size + 4096)) compact();
 			// stuck: finer cells around here
 			if (picks - lastProgress > a.stall && e.picks % a.refine === 0) {
 				lastProgress = picks;
@@ -1257,7 +1384,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						const f = { t, sec, simTicks: ticks };
 						if (!first) first = f;
 						best = f;
-						post({ type: 'finish', seed, t, sec, simTicks: ticks, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
+						post({ type: 'finish', seed, t, sec, simTicks: ticks, byL: pickL, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
 						if (a.first) end = 'finish';
 						break;
 					}
@@ -1826,7 +1953,7 @@ function workerMain() {
 	const d = workerData;
 	const L = levelOf(d.a);
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
-	const a = d.steerBuf ? Object.assign({}, d.a, { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) }) : d.a;
+	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {});
 	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null);
 }
 
@@ -1864,6 +1991,8 @@ async function main() {
 	const preStr = pre0 ? C.eetasBytes(pre0).toString('latin1') : '';
 	if (pre0) { const inp0 = new E.EEInput(); for (let s = 0; s < pre0.length; s++) { E.applyMask(inp0, pre0[s]); sim0.tick(inp0); } }
 	const startCost = RF.costAt(field, sim0);
+	// (the sound lower bound per tile: every worker's prune once a route is known, in shared memory)
+	const lb = a.lb ? lowerBoundTiles(L) : null;
 	const ctrl = new Int32Array(new SharedArrayBuffer(8));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);
@@ -1898,6 +2027,7 @@ async function main() {
 	let route = null, first = null, near = null, nearPending = false, heapWarned = false;
 	const stats = new Map(), dones = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
+	let nLead = 0;   // (the routes head-L picks found)
 	const samples = [[Date.now(), 0]];
 	const bound = (d) => { if (d < Atomics.load(ctrl, 0)) Atomics.store(ctrl, 0, Math.max(0, d)); };
 	const progress = () => {
@@ -1914,7 +2044,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted') }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -1955,7 +2085,7 @@ async function main() {
 					// (the one search: another operator's run, the editor's GPU random runs, into every archive)
 					const inputs = line.slice(7);
 					if (/^[0-O]+$/.test(inputs)) { one.broadcast(inputs, -1); one.fed++; }
-				}
+				} else if (line.startsWith('route ') && /^[0-O]+$/.test(line.slice(6))) adopt(line.slice(6));
 			}
 		});
 		// the end of stdin: the editor went away (a crash, or a kill that missed its children): stop, rather than run on
@@ -1965,7 +2095,7 @@ async function main() {
 	}
 	/** a route (masks) from worker `seed` (0: a GPU burst) after simTicks simulated ticks: replayed in the exact engine
 	 *  before it counts (the same engine found it, from snapshots and replays: a mismatch would be a bug) */
-	const routeFound = (masks, seed, simTicks, who) => {
+	const routeFound = (masks, seed, simTicks, who, byL = false) => {
 		const t = masks.length;
 		if (route && t >= route.ticks) return;
 		const ev = C.evaluate(L, masks);
@@ -1973,10 +2103,25 @@ async function main() {
 		bound(t - 1);
 		const inputs = C.eetasBytes(ev.ms).toString('latin1');
 		route = { ticks: t, runTicks: ev.runTicks, inputs, seed, simTicks, sec: sec() };
+		if (byL) nLead++;
+		// (head L of every worker: the new best route's schedule; byL: a head-L pick found it, its share's yield)
+		if (one && a.pL > 0) for (const p of one.ports) p.postMessage({ type: 'route', inputs, byL });
 		if (!first) first = { ticks: t, sec: route.sec, simTicks, seed };
 		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }) });
 		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
 		if (a.first) Atomics.store(ctrl, 1, 1);
+	};
+	/** stdin "route <inputs>": a route known elsewhere (the editor's other strategies): the bound, head L's schedule, and
+	 *  its states into every archive (no result event: it is not this search's find) */
+	const adopt = (inputs) => {
+		const masks = Uint8Array.from(inputs, (ch) => (ch.charCodeAt(0) - 48) & 31);
+		if (route && masks.length >= route.ticks) return;
+		const ev = C.evaluate(L, masks, false);
+		if (!ev || ev.ms.length !== masks.length) { say({ ev: 'warning', text: `route: ${masks.length} ticks that do not finish there` }); return; }
+		bound(masks.length - 1);
+		route = { ticks: masks.length, runTicks: ev.runTicks, inputs, seed: -1, simTicks: 0, sec: sec(), adopted: true };
+		if (one) { one.broadcast(inputs, -1); if (a.pL > 0) for (const p of one.ports) p.postMessage({ type: 'route', inputs }); }
+		say({ ev: 'route', ticks: masks.length, runTicks: ev.runTicks });
 	};
 	// The one search (coarse cells: the GPU bursts, or several workers with --share=1): one channel per worker. Every room
 	// a worker enters first (its 'room' message) goes to the GPU operator (src/bursts.js), whose attempts go into every
@@ -2018,7 +2163,7 @@ async function main() {
 		} else if (msg.type === 'edge') {
 			if (bursts) bursts.edge(msg.from, msg.tile, msg.to, msg.trig);
 		} else if (msg.type === 'finish') {
-			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`);
+			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`, !!msg.byL);
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
 	};
 	const workers = seeds.map((seed, i) => new Promise((res) => {
@@ -2027,7 +2172,7 @@ async function main() {
 		let port = null;
 		const list = [seedIn[i]];
 		if (one) { const ch = new MessageChannel(); port = ch.port2; list.push(port); one.ports.push(ch.port1); }
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, port, seedPort: seedIn[i] }, transferList: list,
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i] }, transferList: list,
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
@@ -2068,7 +2213,8 @@ async function main() {
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
-		(route ? `first route ${first.ticks} ticks after ${first.sec} s (${first.simTicks.toLocaleString('en-US')} ticks of worker ${first.seed}); best ${route.ticks} ticks (${C.fmt(route.runTicks)}) after ${route.sec} s` +
+		// (a route given on stdin, "route <inputs>", is no find of this search: first stays null)
+		(route ? `${first ? `first route ${first.ticks} ticks after ${first.sec} s (${first.simTicks.toLocaleString('en-US')} ticks of worker ${first.seed})` : 'no route of its own'}; best ${route.ticks} ticks (${C.fmt(route.runTicks)}) after ${route.sec} s${route.adopted ? ' (given)' : ''}` +
 			(a.out ? ` -> ${a.out}` : '') : `no route (closest: reach cost ${near ? near.rc.toFixed(2) : '-'} at tick ${near ? near.t : '-'})`));
 }
 
@@ -2076,4 +2222,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB };
+	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles };

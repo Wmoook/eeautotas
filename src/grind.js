@@ -592,12 +592,34 @@ function ownSaving(outFile, refTicks) {
 // (explore --clockblind=1) and phase.js replays their edges plain or with the clock re-synced in the idle start
 // (phase.js --edges). --sweep=0 off.
 const SWEEP_LEN = 800, SWEEP_STEP = 600, SWEEP_LOOPS = 2;
-/** a find's own states (those of the run file `out` its start run lacks: refTr its trace) that the best holds, a share */
-function inBest(out, refTr) {
+/** a find's own states (those of the run file `out` its start run lacks: refTr its trace, refMs its inputs) that the best
+ *  holds, a share. On time-door levels by the clock-blind hash (no door phase, no key timers): a find phase.js re-synced
+ *  by idle ticks in the start shares no plain state hash with the best even once the best holds it (the time-door sweep's
+ *  review: 9 of ~23 Stupid Fox windows "stale (0%)") */
+function inBest(out, refTr, refMs) {
+	if (level.hasTimeDoors) {
+		let ms;
+		try { ms = C.readEetas(out); } catch (e) { return 1; }
+		const o = blindTrace(ms), r = blindTrace(refMs), b = new Set(blindTrace(best.ms));
+		return o.length ? SW.keptShare(o, o.length - 1, r, r.length - 1, (h) => b.has(h)) : 1;
+	}
 	const tr = TC.get(out);
 	if (!tr || tr.n < 0) return 1;
 	const b = bestTrace();
 	return SW.keptShare(tr.H, tr.n, refTr.H, refTr.n, (h) => b.has.get(h) >= 0);
+}
+/** the clock-blind state hashes of a run, tick 0 to its finish (none: it does not finish) */
+function blindTrace(ms) {
+	const sim = new E.EESim(level), inp = new E.EEInput();
+	sim.reset();
+	const H = [sim.stateHashClockBlind(NC === 1)], crown0 = sim.has_silver_crown;
+	for (let t = 0; t < ms.length; t++) {
+		E.applyMask(inp, ms[t]);
+		sim.tick(inp);
+		H.push(sim.stateHashClockBlind(NC === 1));
+		if (!crown0 && sim.has_silver_crown) return H;
+	}
+	return [];
 }
 // --sweepLoops=lane (default): the 2 longest loops in the sweep's lanes; first: the 2 longest loop windows with all the threads
 // before the sweep (an experiment: Forgotten Veil's loop at (326, 90) found -46 with 8 threads and 4 in a 2-thread lane)
@@ -746,7 +768,7 @@ async function sweepStage(round) {
 			let again = '';
 			if (saved > 0 && got && !got.accepted && !got.spliced && !win.redo && !redone.has(win.sig)) {
 				const refTr = S.trace(level, refMs, NC, RANDOM);
-				const share = inBest(runOut, refTr);
+				const share = inBest(runOut, refTr, refMs);
 				if (share < 0.5) {
 					redone.add(win.sig);
 					redo.push({ tr: refTr, w0: win.w0, w1: win.w1, saved });
