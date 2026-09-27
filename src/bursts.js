@@ -211,13 +211,15 @@ function create(o) {
 	 *  of its own for the bandit (UNTRIED again, the newest), the burst's reward (a new room) and the editor's sources
 	 *  and breaker (instSource). Infinity Pain's known route resets its multijump at (162, 154) into speed=1, a key first
 	 *  entered ~18,000 ticks before, near the start: before this the change earned nothing and the search sat at 50% of
-	 *  the known route (cycles 1-5: the room-aliasing failure) */
-	const entry = (r, tile) => {
+	 *  the known route (cycles 1-5: the room-aliasing failure). Only an entry a trigger made (trig: not the clock, a time
+	 *  door flipping or a key running out, goexplore.js roomOf byTrigger): along the six known routes every instance is
+	 *  a trigger's (IP 76, Octorage 2), and the clock's entries at new places come by the thousand on time-door levels */
+	const entry = (r, tile, trig) => {
 		if (!(tile >= 0 && tile < N) || r.entries.has(tile)) return false;
 		r.entries.add(tile);
 		if (!r.info || r.info.seen[tile]) return false;
 		r.info = null; r.fc = null; r.done = false; r.pa.fc = null; r.pa.done = false;
-		if (!INSTANCES) return false;
+		if (!INSTANCES || trig === false) return false;
 		r.inst = (r.inst || 1) + 1; r.seq = ++seq; r.n = 0; r.y = 0; r.best = Infinity; r.pa.n = 0; r.pa.y = 0; r.pa.best = Infinity;
 		st.instances++;
 		return true;
@@ -243,7 +245,7 @@ function create(o) {
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
 		} else if (m.t < r.t) { r.t = m.t; r.inputs = m.inputs; r.tile = m.tile; r.trig = m.t > 0 && m.trig !== false; }
-		entry(r, m.tile);
+		entry(r, m.tile, m.trig);
 		return r;
 	};
 	const pendingEntries = new Map();   // (entries of rooms not known yet)
@@ -267,7 +269,7 @@ function create(o) {
 		if (r && c >= 0) r.tried.add(c);
 		if (to === undefined || to === null) return;
 		const r2 = rooms.get(to);
-		if (r2) return entry(r2, tile) ? r2 : null;
+		if (r2) return entry(r2, tile, trig) ? r2 : null;
 		let l = pendingEntries.get(to); if (!l) pendingEntries.set(to, l = []); if (l.length < 64) l.push(tile);
 		return null;
 	};
