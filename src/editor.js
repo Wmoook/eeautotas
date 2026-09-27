@@ -1311,7 +1311,7 @@ function launch(n) {
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu) {
 				V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
-					(ev.rooms > 1 ? ` in ${ev.rooms} rooms` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
+					(ev.rooms > 1 ? ` in ${ev.allRooms > ev.rooms ? ev.allRooms : ev.rooms} rooms` : '') + (ev.gpu && ev.gpu.bursts ? `, ${ev.gpu.bursts} GPU bursts` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
 					(V.found ? ', looking for a faster route' : '');
 			}
 			if (!S.result && S.stage !== 'error') S.stage = 'searching';
@@ -1550,7 +1550,9 @@ function launch(n) {
  *  process) does not count: its end asks again. */
 function cpuDone() {
 	if (!S.result || !S.strategies.some((q) => !q.cpu) || [...busy].some((c) => !c.cpuSearch && c !== proofKid) || S.strategies.some((q) => !q.cpu && q.state === 'error')) return;
-	S.strategies.forEach((q, k) => { if (q.cpu && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
+	// (the one search is a GPU search too: it goes on looking for faster routes, its bursts bounded by the route, until
+	// the time is up)
+	S.strategies.forEach((q, k) => { if (q.cpu && !q.gpuShare && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
 }
 /**
  * "every move" (strategy n) tried every situation at a fine grain with nothing cut and found no route: the GPU beams (a

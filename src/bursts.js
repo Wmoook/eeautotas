@@ -26,11 +26,12 @@
 // runs go on from there. The first attempt on a target (distance 0) ends the burst; a finish (the explore's hit) is
 // replayed with common.js evaluate and reported like the workers' routes.
 //
-// The scheduler is a bandit over rooms: a burst's reward is the rooms nobody had found before it (at most 3) + 0.5 for a
-// target reached + 0.3 x the share of the way to its targets it closed; a room's score is its mean reward + UCB_C x
-// sqrt(ln(1 + bursts) / its bursts); rooms never burst from go first, the newest first (the frontier). When no room has
-// a target left, the trophy arm: from the nearest attempt to the trophy by the reach field (today's relay), 60 / 150 /
-// 400 ticks back.
+// The scheduler is a bandit over rooms: a burst's reward is the rooms nobody had found before it (at most 3) + 0.3 for a
+// room change + 0.3 x the share of the way to its targets it closed; a room's score is its mean reward + UCB_C x
+// sqrt(ln(1 + bursts) / its bursts); a room never burst from scores UNTRIED (the newest first: the frontier). The
+// trophy arm (today's relay: from the nearest attempt to the trophy by the reach field, 60 / 150 / 400 ticks back)
+// competes with them in physics mode, and in walk mode runs only when no room has a target left. A burst that got
+// nearer goes on from its nearest attempt (CHAIN_MAX). The burst settings (CONFS) have a bandit per room.
 //
 // Soundness: a burst's cost ceiling (--costslack, the relay's 30 tiles + 10% of the start's distance on the steer field)
 // only orders an operator's own states, as the relay's did; the archive drops a state only by the reach field's -1, and
@@ -62,6 +63,10 @@ const CONF_C = 0.3;
 const BACK = [30, 90, 30, 250];
 const TROPHY_BACK = [60, 150, 400];
 const UCB_C = 0.5, NEW_ROOMS_MAX = 3, SLACK = 30, SLACK_F = 0.1, NEAREST_WAIT_MS = 2000;
+// a room never burst from scores this (the newest first among them): above a room whose bursts only got nearer, below
+// one whose bursts keep finding rooms (a level of many switch states has thousands of rooms: each once would take all
+// the GPU)
+const UNTRIED = 1.5;
 // a burst that got nearer its targets without reaching one goes on from its nearest attempt with the same targets (the
 // relay's chain: its attempt may end in another room, e.g. after a team toggle, where the room's own next burst would
 // aim elsewhere; Infinity Pain's fly rooms: bursts from the same cell, 54 tiles out, again and again got to 28-33 and
@@ -345,13 +350,20 @@ function create(o) {
 	const pick = () => {
 		let best = null, bs = -Infinity;
 		const total = st.bursts;
+		// (the rooms by score; a room's field (a replay and two walks) only for the best ones until one has a target: a
+		// level of many switches has thousands of rooms)
+		const cand = [];
 		for (const r of rooms.values()) {
 			if (r.done || r.busy) continue;
+			cand.push([r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n), r]);
+		}
+		cand.sort((x, y) => y[0] - x[0]);
+		for (const [sc, r] of cand) {
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
-			const s = r.n === 0 ? 100 + r.seq : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
-			if (s > bs) { bs = s; best = { r, f }; }
+			bs = sc; best = { r, f };
+			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
 		// rooms); with a walk-mode field (effects: its trophy distance ignores doors and physics, and Infinity Pain's nearest
@@ -359,7 +371,7 @@ function create(o) {
 		// own walks aim at the trophy there
 		const nr = trophyArm.busy || (o.field.mode === 'walk' && best) ? null : o.nearest();
 		if (nr && nr.inputs.length >= 100) {
-			const s = trophyArm.n === 0 ? 50 : trophyArm.y / trophyArm.n + UCB_C * Math.sqrt(Math.log(1 + total) / trophyArm.n);
+			const s = trophyArm.n === 0 ? UNTRIED - 0.5 : trophyArm.y / trophyArm.n + UCB_C * Math.sqrt(Math.log(1 + total) / trophyArm.n);
 			if (s > bs) { bs = s; best = { trophy: true, nr }; }
 		}
 		return best;
