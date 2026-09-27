@@ -85,8 +85,9 @@ const CHAIN_MAX = 12;
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
 
-/** the room's family key: its description without the time-door phase (rooms that differ only by it), else the key */
-const roomFamily = (desc, key) => (desc ? String(desc).replace(/(^| )timedoors:(open|shut)/, '').trim() || '(start)' : `#${key}`);
+/** the room's family key on a level of time doors (timed): its description without the time-door phase (the rooms that
+ *  differ only by it); else (or without a description) the room key itself */
+const roomFamily = (desc, key, timed) => (timed && desc ? String(desc).replace(/(^| )timedoors:(open|shut)/, '').trim() || '(start)' : `#${key}`);
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -191,7 +192,7 @@ function create(o) {
 	const room = (m) => {
 		let r = rooms.get(m.room);
 		if (!r) {
-			const fk = roomFamily(m.desc, m.room);
+			const fk = roomFamily(m.desc, m.room, L.hasTimeDoors);
 			let F = fams.get(fk);
 			if (!F) fams.set(fk, F = { tried: new Set(), n: 0, y: 0 });
 			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: F.tried, fam: F, info: null, best: Infinity, k: 0, entries: new Set(),
@@ -370,7 +371,7 @@ function create(o) {
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
 				// (a new room of a family known already, a time-door phase's twin, is no find: the clock makes those)
-				const d2 = o.RM.desc(sim), nf = !fams.has(roomFamily(d2, k2));
+				const d2 = o.RM.desc(sim), nf = !fams.has(roomFamily(d2, k2, L.hasTimeDoors));
 				if (o.register({ room: k2, desc: d2, tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig }) && nf) fresh++;
 				cz = cz2;
 			}

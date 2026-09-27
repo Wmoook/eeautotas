@@ -674,7 +674,7 @@ function addSource(o) {
 	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started; and one of a family seen before
 	// (bursts.js roomFamily: it differs only by the time-door phase) is no progress either: on Good Egg such rooms with
 	// territory came every 25-55 s and kept the clock under 90 s while the search did not advance)
-	const fam = BU.roomFamily(s.desc, o.room);
+	const fam = BU.roomFamily(s.desc, o.room, !!(cur && cur.level && cur.level.hasTimeDoors));
 	if (brk && s.gain > 0 && !brk.rooms.has(fam)) { brk.rooms.add(fam); breakProgress('room'); }
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
