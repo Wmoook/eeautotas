@@ -172,7 +172,7 @@ const sameSplit = ts.code === 0 && fs.existsSync(path.join(TMP, 'trace_split.bin
 check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summary(ts).kernelLaunches} launches`);
 // 6. the random runs (eegpu roll, Find a route's "random runs (GPU)"): 3 batches of 512 picks of the start cell, 8 runs of
 // 40 ticks each. Every record (a new cell's earliest arrival) is replayed here from its seed in the JS engine: the tick,
-// the reach field's fifths and the room (goexplore.js roomOf) must be the GPU's; split into launches of 128 runs / cells
+// the reach field's fifths and the room (goexplore.js roomOf gpuKey: the counts themselves) must be the GPU's; split into launches of 128 runs / cells
 // the batches give the same records in the same order (the canonical order; the dense ids apart: they are handed out in
 // the GPU's order). Then a room with every door the room key reads (a team effect and door, coins and a coin door, time
 // doors: the phase buckets, a key, two purple switches in a row: on, then off again) and batches that pick the cells of
@@ -216,7 +216,7 @@ check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summa
 			sim.reset();
 			for (const x of ms) { E.applyMask(inp, x); sim.tick(inp); }
 			n++;
-			if (d < 0 || ms.length !== t || RF.fifthsAt(field, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery) !== fifths || (RM.key(sim) | 0) !== room) bad++;
+			if (d < 0 || ms.length !== t || RF.fifthsAt(field, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery) !== fifths || (RM.gpuKey(sim) | 0) !== room) bad++;
 		}
 	});
 	check('roll: every new cell\'s state, replayed from its seed in the JS engine, has the GPU\'s tick, reach cost and room', n > 100 && bad === 0, `${n} cells, ${bad} different`);
@@ -247,7 +247,7 @@ check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summa
 		const sw = sim._switches, osw = sim._oswitches;
 		const on = (m) => new Map([...m].filter(([, v]) => v === true));
 		sim._switches = on(sw); sim._oswitches = on(osw);
-		const k = dRM.key(sim) | 0;
+		const k = dRM.gpuKey(sim) | 0;
 		sim._switches = sw; sim._oswitches = osw;
 		return k;
 	};
