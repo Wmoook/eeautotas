@@ -330,7 +330,8 @@ function firstBadCheck(level, ms, checks, nc) {
 		E.applyMask(inp, ms[t]);
 		sim.tick(inp);
 		while (k < checks.length && checks[k][0] === t + 1) {
-			if (sim.stateHash(false, nc !== 'free' && !!nc) !== checks[k][1]) return k;   // ('free': the edges are exact)
+			// ('free': an edge ends at an exact state, or at a coin-blind twin: the GPU's every move past the coin-free tick)
+			if (sim.stateHash(false, nc !== 'free' && !!nc) !== checks[k][1] && !(nc === 'free' && twinKey(sim.stateHash(false, true)) === checks[k][1])) return k;
 			k++;
 		}
 	}
@@ -375,4 +376,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { trace, traceCache, unionGraph, unionPath, firstBadCheck, splice, hashIndex };
+module.exports = { trace, traceCache, unionGraph, unionPath, firstBadCheck, splice, hashIndex, twinKey };

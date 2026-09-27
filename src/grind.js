@@ -29,7 +29,7 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1] [--sweepLoops=lane|first]
+//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1] [--sweepLoops=lane|first] [--coinfree=1] [--coinprop=1]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
@@ -126,9 +126,12 @@ if (status.startRunTicks === undefined) status.startRunTicks = best.runTicks;
 // NC = 0: exact states, except past the best's coin-free tick (COINFREE; common.coinFreeTick: its box touches no coin door or
 // gate any more, nothing reads the coins from there on): windows that start there search coin-blind (ncAt), and the
 // splices join coin-blind past each run's own coin-free tick (splice.js trace 'free'): a line that takes or skips a
-// coin after the last coin door rejoins. --coinfree=0: off (exact up to the finish, as before).
+// coin after the last coin door rejoins; the sweep's windows before it search coin-blind too, but their rejoins are only
+// proposals, each replayed in full by phase.js --edges (COINPROP; the clock-blind edges' way on time-door levels).
+// --coinfree=0: off (exact up to the finish, as before); --coinprop=0: the windows before it exact.
 let NC = a.nocoins === 'auto' ? (C.coinsIrrelevant(LEVEL_JSON, best.ms, best) ? 1 : 0) : (+a.nocoins ? 1 : 0);
 const COINFREE = a.coinfree !== '0' && C.coinFreeOk(level);
+const COINPROP = a.coinprop !== '0';
 /** the traces' coin mode (splice.js trace): blind, or exact with coin-blind twins past each run's coin-free tick */
 const tmode = () => (NC ? true : COINFREE ? 'free' : false);
 log(`start: best ${fmt(best.runTicks)} (run_ticks ${best.runTicks}), ${best.deaths} deaths, coins ${NC ? 'optional (coin-blind search)' : `needed (coin-aware search${COINFREE ? '; coin-blind past the last coin door' : ''})`}, ` +
@@ -786,19 +789,25 @@ async function sweepStage(round) {
 			try { fs.unlinkSync(`${out}.edges.json`); } catch (e) { /* none */ }
 			const name = `sweep${round}_${id + 1}`;
 			const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
-			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads${!NC && ncAt(win.w0) ? CB : ''})...`);
+			// a window before the last coin door where coins count (NC 0): coin-blind rejoins as proposals, each replayed in
+			// full by phase.js --edges (a coin door later that reads the other count fails the replay), as the clock-blind
+			// ones on time-door levels; past it (ncAt) coin-blind rejoins are exact
+			const cblind = ncAt(win.w0), propose = !cblind && COINPROP && HAS_COIN_DOORS;
+			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads` +
+				`${!NC && cblind ? CB : propose ? ', coin-blind proposals, each replayed' : ''})...`);
 			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : [...EXP_EXTRA];   // (a copy: mode.push below)
 			// (time doors: rejoins by the clock-blind hash, as edges for phase.js; --hunt and --tails write them)
-			if (TD) mode.push('--clockblind=1', ...(mode.includes('--hunt=1') || mode.includes('--tails=1') ? [] : ['--tails=1']));
+			if (TD) mode.push('--clockblind=1');
+			if ((TD || propose) && !mode.includes('--hunt=1') && !mode.includes('--tails=1')) mode.push('--tails=1');
 			const res = await runTool('explore.js', [`--tas=${ref}`, `--out=${out}`, `--from=${win.w0}`, `--join=${win.w0}`, `--until=${win.w1}`,
-				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${ncAt(win.w0)}`,
+				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${cblind || propose ? 1 : 0}`,
 				'--maxEntries=1500000', LVL],
 				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`));
 			let saved = ownSaving(out, refTicks), runOut = out;
 			let got = fs.existsSync(out) ? consider(out, name) : null;
 			if (got) addResult(out);
-			if (TD && fs.existsSync(`${out}.edges.json`) && Date.now() < deadline - 60000) {
-				// the window's clock-blind edges, each replayed plain or with the clock re-synced in the idle start, combined
+			if ((TD || propose) && fs.existsSync(`${out}.edges.json`) && Date.now() < deadline - 60000) {
+				// the window's clock-blind (coin-blind) edges, each replayed plain or with the clock re-synced in the idle start, combined
 				const po = path.join(OUT, `grind_deep_${round}_sw${id}p.eetas`);
 				try { fs.unlinkSync(po); } catch (e) { /* none */ }
 				await runTool('phase.js', [`--tas=${ref}`, `--out=${po}`, LVL, `--nocoins=${NC}`, `--edges=${out}.edges.json`, `--from=${win.w0}`, `--to=${win.w0 + 1}`,
@@ -806,7 +815,7 @@ async function sweepStage(round) {
 					path.join(OUT, `grind_sweep${round}_${id}p.log`));
 				const ps = ownSaving(po, refTicks);
 				if (fs.existsSync(po)) {
-					const pg = consider(po, `${name} (time doors)`);
+					const pg = consider(po, `${name} (${TD ? 'time doors' : 'coin-blind, replayed'})`);
 					addResult(po);
 					if (ps > saved) { saved = ps; runOut = po; got = pg; }
 				}
