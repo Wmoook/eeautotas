@@ -59,6 +59,18 @@
 //           worker's speed: 32-36 s on the laptop otherwise idle, 50-56 s while other jobs' GPU work heats its shared
 //           cooler; 9,661 ticks after 180 s.
 //
+// THE ONE SEARCH (coarse cells; the friend's "one optimal search" instead of three searches built one after another):
+// one archive of cells for every operator. (a) The random runs: the workers' archives share their frontier: a room a
+// worker enters first ('room' message: its first cell's inputs, the room it came from, the tile) is imported into every
+// other worker's archive (every state along it, as a run's states: --share=1, the default with several workers; on
+// Infinity Pain 14 separate archives held 286 K cells in the same 2 rooms after an hour), and a room change between two
+// known rooms is reported once per (room, tile) ('edge': the trigger tried there, the room entered there). (b) --bursts=1:
+// the GPU operator (src/bursts.js): short exhaustive "every move" bursts (eegpu explore --prefix, --tool) from the
+// archive's cell of a room nearest its untried triggers (the main thread asks every worker for its own: 'nearest'), the
+// bursts' nearer attempts imported into every archive; a bandit over the rooms and the burst settings. The workers read
+// the main thread's messages between two chunks of picks (a MessageChannel per worker, receiveMessageOnPort). One worker
+// without --bursts is exactly as before (nothing is shared).
+//
 // It prints the JSON lines of the editor's native tools (native/beamhost.h, explorehost.h), one per line:
 //   {"ev":"start","workers":n,"seeds":[..],"mode":"physics"|"walk","cells":"fine"|"coarse","startCost":c|null,"maxCells":..}
 //   {"ev":"progress","layer":L,"tick":L,"states":cells,"ticks":simulated,"ticksPerSec":..,"picks":..,"bestCost":..,
@@ -71,7 +83,11 @@
 //                          room with territory gain, the others at most one per SOURCE_S per worker); "best": every
 //                          SOURCE_S s the lowest-cost cell of the 4 rooms with the most gain and the fewest sources so
 //                          far, when it changed. A room key only once per kind unless its tick / cost improved.)
-//   {"ev":"result","kind":"finish","ticks":T,"runTicks":..,"inputs":"..","seed":s,"simTicks":..,"sec":..}
+//   {"ev":"result","kind":"finish","ticks":T,"runTicks":..,"inputs":"..","seed":s,"simTicks":..,"sec":..}   (a GPU
+//     burst's: seed 0, "by":"gpu")
+//   {"ev":"burst","n":..,"room":desc|null,"what":"..","from":T,"sec":..,"end":"..","reached":b,"changed":b,"newRooms":n,
+//     "dist":tiles,"startDist":tiles,"states":..,"layers":..,"reward":..,"chain":k,"at":s}   (--bursts=1: each burst;
+//     the progress and done events carry "gpu": the operator's numbers, "allRooms", "shared")
 //   {"ev":"done","layers":L,"seconds":..,"ticks":..,"ticksPerSec":..,"states":..,"picks":..,"end":"time"|"ticks"|
 //     "exhausted"|"finish"|"stopped"|"unreachable","finish":T|0,"first":{ticks,sec,simTicks,seed}|null,
 //     "workers":[{seed,..},..]}      ("unreachable": the reach field rules out the start itself, "exhausted": no cell is
@@ -95,6 +111,11 @@
 //        [--phase=50] [--mem=<MB per worker; see above>] [--maxCells=] [--maxSnaps=]
 //        [--prune=1 (0: the reach field rules nothing out: the start is never "unreachable", a ruled-out state costs
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
+//        [--share=1 (the one search: the workers share their new rooms; coarse cells)] [--bursts=0|1 (the GPU operator,
+//        src/bursts.js; coarse cells)] [--tool=<eegpu> (default: gpu.js nativeTool; a .js file: a stand-in run by Node)]
+//        [--cachedir=<kernel cache>] [--pausefile=<file: the bursts wait between two launches while it exists>]
+//        [--work=<folder for the bursts' files>] [--burstS=15 (seconds per burst at most)] [--burstPar=2 (bursts side by
+//        side)] [--gpuCells=26 (log2 of a burst's cell table)]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -989,7 +1010,7 @@ async function main() {
 		} else if (msg.type === 'room') {
 			if (one && one.register(msg) && a.share && a.workers > 1) { one.broadcast(msg.inputs, msg.seed); one.shared++; }
 		} else if (msg.type === 'edge') {
-			if (bursts) bursts.edge(msg.from, msg.tile);
+			if (bursts) bursts.edge(msg.from, msg.tile, msg.to);
 		} else if (msg.type === 'finish') {
 			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`);
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
