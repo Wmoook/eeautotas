@@ -1094,7 +1094,7 @@ async function cpuSection() {
 		"console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
 		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1 })), 50);",
 	].join('\n'));
-	const oo = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=8', '--mem=300', '--bursts=1', `--tool=${oomTool}`, `--work=${path.join(HOME, 'bursts3')}`, '--burstOomS=0.2']);
+	const oo = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=20', '--mem=300', '--bursts=1', `--tool=${oomTool}`, `--work=${path.join(HOME, 'bursts3')}`, '--burstOomS=0.2']);
 	const og = oo.done && oo.done.gpu;
 	check('the one search\'s bursts on a full GPU: 4 "out of memory" failures wait and try again, 3 dying starts count as their arms\' failures only, then bursts run; never "no more GPU bursts"',
 		!!og && og.oom === 4 && og.failed === 7 && og.bursts >= 1 && !oo.events.some((e) => e.ev === 'warning' && /no more GPU bursts/.test(e.text)),

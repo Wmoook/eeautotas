@@ -665,10 +665,12 @@ function addSource(o) {
 		}
 		s = { room: o.room, desc: String(o.desc || ''), gain: 0, runs: 0, at: 0, from: o.from, early: null, best: null };
 		sources.set(o.room, s);
-		// (the wall breaker's stall clock: a room no attempt was in before)
-		if (brk && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); S.roomsSeen = brk.rooms.size; breakProgress('room'); }
+		if (brk && !brk.seen.has(o.room)) { brk.seen.add(o.room); S.roomsSeen = brk.seen.size; }
 	}
 	if (o.gain > s.gain) s.gain = o.gain;
+	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
+	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
+	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room'); }
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
@@ -1283,7 +1285,7 @@ function start(b, gpu, test) {
 	// the relay's sources start over (see RELAY_SOURCES); the wall breaker's clock too
 	dropSources();
 	S.sources = [];
-	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0 };
+	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0 };
 	S.breaker = which.includes('breaker') ? { rounds: 0, round: null, last: null, seeds: 0 } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
