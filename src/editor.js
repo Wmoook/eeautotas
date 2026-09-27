@@ -933,6 +933,8 @@ function gpuRetry(n, ch, again) {
 	retryTimers[n] = setTimeout(() => {
 		retryTimers[n] = null;
 		if (S !== S0) return;
+		// (the breaker's step: breakLaunch ends its round itself when the search is over or out of time)
+		if (again && S.running && !alive(kids[n])) { again(); save(); return; }
 		if (!S.running || S.halted || S.stage === 'stopped' || S.gpuFailed || alive(kids[n]) || S.seconds - searchClock(Date.now()) < 2) {
 			if (V.state === 'waiting' && !alive(kids[n])) V.state = 'ended';
 			if (S.running && !running()) finish(); else save();
