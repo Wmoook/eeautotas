@@ -1141,6 +1141,7 @@ function breakLaunch(n) {
 	// (a dry round, BREAK_NOVEL_DRY runs in a row with no progress: plain runs from then on, ordered as without the target:
 	// a novelty-ordered run's nearest attempt goes on too, so its chains went on to BREAK_CHAIN)
 	const novelF = cur.opts.novel && brk.novelReady && (R.dry || 0) < BREAK_NOVEL_DRY ? path.join(dir(), 'novel.bin') : '';
+	if (cur.opts.novel && (R.dry || 0) >= BREAK_NOVEL_DRY && S.breaker) S.breaker.novelPlain = (S.breaker.novelPlain || 0) + 1;
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))),
 		novel: novelF && fs.existsSync(novelF) ? novelF : '', prog0: R.progress.length };
 	V.novHits = [];
