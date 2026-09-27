@@ -734,18 +734,60 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const RM = coarse ? roomOf(L) : null;
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	const rooms = new Map(), roomList = [];
-	let roomKey = 0, bursts = 0;
+	let roomKey = 0, bursts = 0, instances = 0;
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
 	const report = coarse && !!port;
 	const edges = report ? new Set() : null, clockEdges = report ? new Set() : null;
 	const centreTile = () => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
-	const newRoom = (key, t, parent) => {
+	// room instances (CPU; EEAT_INSTANCES=0: off, the A/B's control): a trigger's entry into a known key in a block of
+	// 8x8 tiles that no cell of any of the key's rooms is in or next to is a room of its own, keyed key ^ the block (the
+	// same in every worker and the main thread's register), with a gain of at least 1: head C's discovery burst, a source,
+	// head B's cells. Infinity Pain's multijump reset at (162, 154) enters speed=1, a key first seen ~18,000 ticks before
+	// near the start, whose walk (roomFields: doors only, triggers do not end it) is cached: gain 0 and the cells in an
+	// old room (cycles 1-7's 50% plateau, the room-aliasing failure; bursts.js's instances alone did not move it)
+	const INST = coarse && process.env.EEAT_INSTANCES !== '0';
+	const BW = (W + 7) >> 3;
+	const blockOf = (tl) => (((tl / W) | 0) >> 3) * BW + ((tl % W) >> 3);
+	const nearBlock = (set, b) => {
+		const bx = b % BW, by = (b / BW) | 0;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			const x = bx + dx, y = by + dy;
+			if (x >= 0 && x < BW && y >= 0 && set.has(y * BW + x)) return true;
+		}
+		return false;
+	};
+	let instKey = 0;
+	/** the room of the live state, of key k, entered from room `from`: a known room (instKey its key) or undefined (a new
+	 *  one of key instKey is to be made) */
+	const roomAt = (from, k) => {
+		instKey = k;
+		const r = rooms.get(k);
+		if (!INST || r === undefined) return r;
+		const b = blockOf(centreTile());
+		for (const ri of r.insts) if (nearBlock(ri.blocks, b)) return ri;
+		if (!RM.byTrigger(from.cause, RM.cause(sim))) return r;   // (the clock's entries: the key's first room)
+		instKey = (k ^ Math.imul(b + 1, 0x9e3779b1)) | 0;
+		if (instKey === k) instKey = (instKey + 1) | 0;
+		return rooms.get(instKey);
+	};
+	const newRoom = (key, t, parent, base) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
 		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
-			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
+			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true,
+			base: base === undefined ? key : base, insts: null, blocks: INST ? new Set() : null };
+		if (INST) {
+			if (r.base === key) r.insts = [r];
+			else {
+				const b0 = rooms.get(r.base);
+				if (b0 !== undefined) b0.insts.push(r);
+				const b = blockOf(r.tile);
+				r.gain = Math.max(1, r.gain); r.desc += ` #(${(b % BW) * 8},${((b / BW) | 0) * 8})`;
+				instances++;
+			}
+		}
 		rooms.set(key, r);
 		roomList.push(r);
 		return r;
@@ -887,6 +929,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (t > deepest) deepest = t;
 		if (room !== null) {
 			room.arr.push(nc);
+			if (INST) room.blocks.add(blockOf(tile));
 			if (room.best === null || distOf(nc) < distOf(room.best)) room.best = nc;
 		}
 		return nc;
@@ -928,7 +971,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		cells.set(k, c);
 		cell0 = c;
 		hpush(c);
-		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
+		if (room0 !== null) { room0.arr.push(c); room0.best = c; if (INST) room0.blocks.add(blockOf(tile)); }
 		keepSnap(c, pre ? sim.snapshot() : startSnap);
 		if (rc < 0) end = 'unreachable';
 	}
@@ -939,7 +982,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
+	coarse ? Object.assign({ rooms: roomList.length, instances, bursts, imports, importAdded }, fields.stats()) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -1039,7 +1082,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					r.arr = r.arr.filter((c) => c.ver >= 0);
 					if (r.sentAt !== null && r.sentAt.ver < 0) r.sentAt = null;
 					if (r.arr.length || r === room0) roomList[n++] = r;
-					else rooms.delete(r.key);
+					else {
+						rooms.delete(r.key);
+						if (INST && r.base !== r.key) { const b0 = rooms.get(r.base); if (b0 !== undefined) b0.insts = b0.insts.filter((x) => x !== r); }
+					}
 				}
 				roomList.length = n;
 			}
@@ -1095,13 +1141,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (t <= P) { if (t === P) room = room0; continue; }
 			const rc = costOf();
 			if (rc < 0) break;
-			roomKey = RM.key(sim);
-			if (roomKey !== room.key) {
-				const r = rooms.get(roomKey);
+			const k = RM.key(sim);
+			if (k !== room.base) {
+				const r = roomAt(room, k);
 				if (r !== undefined) room = r;
-				else if (roomFor()) room = newRoom(roomKey, t, room.key);
+				else if (roomFor()) room = newRoom(instKey, t, room.key, k);
 				else { full = true; needSweep = true; break; }
 			}
+			roomKey = room.key;
 			if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
 				const node = mkNode(null, blk, 0, t);
@@ -1158,13 +1205,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (t >= maxT || sim.is_dead || sim.has_silver_crown) break;
 			let into = true;
 			if (coarse) {
-				roomKey = RM.key(sim);
-				if (roomKey !== room.key) {
-					const r = rooms.get(roomKey);
+				const k = RM.key(sim);
+				if (k !== room.base) {
+					const r = roomAt(room, k);
 					if (r !== undefined) room = r;
-					else if (roomFor()) room = newRoom(roomKey, t, room.key);
+					else if (roomFor()) room = newRoom(instKey, t, room.key, k);
 					else { into = false; full = true; needSweep = true; }
 				}
+				roomKey = room.key;
 			}
 			if ((ms.length - t) % SEED_EVERY !== 0 || !into) continue;
 			const rc = costOf();
@@ -1269,13 +1317,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					// empty room, and walks for nothing, outside the memory budget)
 					let into = true;
 					if (coarse) {
-						roomKey = RM.key(sim);
-						if (roomKey !== room.key) {
-							const r = rooms.get(roomKey);
+						const k = RM.key(sim);
+						if (k !== room.base) {
+							const r = roomAt(room, k);
 							if (r !== undefined) { if (report) edge(room, r); room = r; }
-							else if (t < maxT && roomFor()) room = newRoom(roomKey, t, room.key);
+							else if (t < maxT && roomFor()) room = newRoom(instKey, t, room.key, k);
 							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
+						roomKey = room.key;
 					}
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
