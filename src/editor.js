@@ -821,7 +821,7 @@ function relayFrom(n) {
 	// (a start near the level's start is every move's own work: no relay from there)
 	if (keep < RELAY_MIN_KEEP) return next();   // (too near the start: the next step of the plan)
 	// (a route of T ticks known: only a relay that can still end sooner; a source that cannot: the next step)
-	if (S.result && keep >= S.result.ticks - 1) return src ? next() : false;
+	if (S.result && keep >= boundTicks() - 1) return src ? next() : false;
 	const file = path.join(dir(), `relay_${n}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(String(c.inputs).slice(0, keep), 'latin1')); } catch (e) { return false; }
 	// the cells by where the relay starts: where no gravity pulls (dots, and the like: both speeds free) 4 px cells, else
@@ -1035,7 +1035,7 @@ function breakStarts() {
 	const out = [], seen = new Set();
 	const add = (inputs, keep, what, dist, room) => {
 		keep = Math.min(keep, inputs.length);
-		if (out.length >= BREAK_STARTS || keep < RELAY_MIN_KEEP || (S.result && keep >= S.result.ticks - 1)) return;
+		if (out.length >= BREAK_STARTS || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen.has(key) || brk.tried.has(key)) return;
 		seen.add(key);
@@ -1737,19 +1737,19 @@ function launch(n) {
 		q.alone = !S.strategies.some((x, k) => x.key === 'explore' && alive(kids[k]));
 		q.slack = V.relay.big || !V.relay.src ? 0 : Math.round(Math.min(RELAY_SLACK_MAX, RELAY_SLACK + RELAY_SLACK_F * V.relay.src.dist));
 		q.seconds = V.share = Math.max(1, Math.min(RELAY_S * (q.big ? 2 : 1), Math.round(S.seconds - searchClock(Date.now()))));
-		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
+		q.depth = S.result ? Math.max(1, boundTicks() - 1 - V.relay.keep) : 0;
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	if (V.key === 'breaker') {
 		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
 		q.seconds = V.share = V.brk.seconds;
-		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.brk.keep) : 0;
+		q.depth = S.result ? Math.max(1, boundTicks() - 1 - V.brk.keep) : 0;
 	}
 	if (V.key === 'explore') {
 		V.refine = null;   // (a new process: no refined try running yet)
 		q.seconds = V.share = V.probe === 'running' || V.probe === 'passed' ? left : passSeconds(V.pass, V.ends, left);
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
-		q.depth = V.depthCap = S.result ? Math.max(1, S.result.ticks - 1) : 0;
+		q.depth = V.depthCap = S.result ? Math.max(1, boundTicks() - 1) : 0;
 	}
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
@@ -1864,7 +1864,7 @@ function launch(n) {
 			totals();
 			// deeper than the best route: it cannot find a faster one (the CPU search's deepest situation says nothing of
 			// the kind: it is told the bound instead, and looks only for faster routes)
-			if (!cpu && !rolls && S.result && ev.layer >= S.result.ticks && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
+			if (!cpu && !rolls && S.result && ev.layer >= boundTicks() && alive(ch)) { V.state = 'beaten'; halt(ch, 'beaten'); }
 			// every move far behind a running relay (EXPLORE_YIELD_MS) gives it the GPU
 			if (V.key === 'explore' && !S.result && alive(ch) && !ch.stopWhy) {
 				const rk = S.strategies.findIndex((q) => q.key === 'relay'), Rv = S.strategies[rk];
@@ -2060,11 +2060,11 @@ function launch(n) {
 			if (verdict && !why && (!V.exhausted || V.pass > V.exhausted.pass)) V.exhausted = { pass: V.pass, tick: V.layer, grain: passGrain(V.pass) };
 			if (verdict && !why) V.tries = (V.tries || 0) + lanesNow;   // (its last batch's tries)
 			const left = S.seconds - usedSec(V);
-			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? S.result.ticks : 0, left) : null;
+			const next = how && how !== 'stopped' && !V.error ? nextPass(V.pass, how, V.ends, S.result ? boundTicks() : 0, left) : null;
 			if (next !== null && S.running && !S.halted && S.stage !== 'stopped' && left > 2) {
 				const what = { full: 'the table is full', time: `no route in its ${V.share} s`, exhausted: 'every situation tried', finish: 'route found', depth: 'no faster route',
 					beaten: 'a faster route is known' }[how];
-				note(`${V.label}: ${what} at tick ${V.layer}${why}; again with ${next < V.pass ? 'coarser' : 'finer'} cells${S.result ? `, for a route under ${S.result.ticks} ticks` : ''}`);
+				note(`${V.label}: ${what} at tick ${V.layer}${why}; again with ${next < V.pass ? 'coarser' : 'finer'} cells${S.result ? `, for a route under ${boundTicks()} ticks` : ''}`);
 				Object.assign(V, { pass: next, passes: V.passes + 1, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: '' });
 				launchOrWait(n);
 				save();
@@ -2297,19 +2297,23 @@ function found(inputs, n, more) {
 	if (S.proof && S.proof.verdict === 'impossible') proofMiss(V.label, C.eetasBytes(ev.ms).toString('latin1'));
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
+	// (the fastest route as found: the search's bounds, as without the cleanup; each one is cleaned, and a cleaned route
+	// replaces S.result when it is better)
+	const rb = S.rawBest, rawBetter = !rb || ev.runTicks < rb.runTicks || (ev.runTicks === rb.runTicks && ev.ms.length < rb.ticks);
+	if (rawBetter) S.rawBest = { runTicks: ev.runTicks, ticks: ev.ms.length };
 	if (first || ((V.cpu || V.rolls) && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	if (better) {
 		setResult(cur.level, ev, { foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, strategy: V.label });
-		cleanLater();
 	}
+	if (rawBetter) cleanLater(ev, V.label);
 	S.stage = 'found';
 	// the other strategies: those already deeper than this route cannot find a faster one; the CPU search is told the
 	// bound (it goes on looking for a faster route)
 	S.strategies.forEach((q, k) => {
-		if (k !== n && !q.cpu && !q.rolls && alive(kids[k]) && q.layer >= S.result.ticks) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
+		if (k !== n && !q.cpu && !q.rolls && alive(kids[k]) && q.layer >= boundTicks()) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
-	if (better) tellCpu(S.result.ticks, S.result.inputs, n);
+	if (better || rawBetter) tellCpu(boundTicks(), S.result.inputs, n);
 	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
 	if (better) setImmediate(resumeExplore);
 	save();
@@ -2332,20 +2336,27 @@ function setResult(level, ev, o) {
 // 'kept' (nothing to drop, or it failed: the route as found). One cleanup at a time; a newer best waits (the newest).
 const CLEAN_MS = 20000;   // a route's cleanup budget (the laptop: 1-8 s for the AutoTAS base routes)
 let cleaning = null, cleanNext = null;
-function cleanLater() {
-	if (!S || !S.result || !cur || S.noClean) return;
-	cleanNext = { S, level: cur.level, buf: cur.buf, inputs: S.result.inputs };
-	S.result.clean = 'pending';
+/** the search's bound: the fastest route as found (S.rawBest; the cleanup never tightens it: the searches run as they
+ *  would without it), else S.result's */
+const boundTicks = () => (S.rawBest ? S.rawBest.ticks : S.result ? S.result.ticks : 0);
+function cleanLater(ev, label) {
+	if (!S || !cur) return;
+	const inputs = C.eetasBytes(ev.ms).toString('latin1');
+	if (S.noClean) return;
+	const R0 = S.result;
+	cleanNext = { S, level: cur.level, buf: cur.buf, inputs, runTicks: ev.runTicks, ticks: ev.ms.length, label,
+		foundAfter: Math.round((Date.now() - S.started) / 100) / 10, cpuAfter: R0 ? R0.cpuAfter : 0 };
+	if (R0 && R0.inputs === inputs) R0.clean = 'pending';
 	if (!cleaning) cleanStart();
 }
 function cleanStart() {
 	const job = cleanNext;
 	cleanNext = null;
-	if (!job || !job.S.result || job.S.result.inputs !== job.inputs) return;
+	if (!job || job.S !== S) return;
 	let w;
 	try {
 		w = new Worker(require.resolve('./cleanroute.js'), { workerData: { cleanRoute: true, eelvl: Uint8Array.from(job.buf), inputs: job.inputs, ms: CLEAN_MS } });
-	} catch (e) { job.S.result.clean = 'kept'; return; }
+	} catch (e) { cleanDone(job, { error: String(e && e.message || e) }); return; }
 	if (w.unref) w.unref();
 	cleaning = w;
 	let over = false;
@@ -2360,25 +2371,30 @@ function cleanStart() {
 	w.once('error', (e) => done({ error: String(e && e.message || e) }));
 	w.once('exit', () => done({ error: 'the cleanup ended' }));
 }
+/** a route's cleanup is back: S.result becomes the cleaned route when it is better (or it is the route it was made
+ *  from); `clean` 'done' / 'kept' on the route it was made from */
 function cleanDone(job, r) {
-	const S0 = job.S, R0 = S0.result;
-	if (!R0 || R0.inputs !== job.inputs) return;   // (a faster route came meanwhile: its own cleanup)
-	if (!r || r.error || !r.changed || !(r.runTicks <= R0.runTicks)) {
-		R0.clean = 'kept';
-		if (r && r.error) R0.cleanError = r.error;
-		if (S0 === S) save();
+	const S0 = job.S;
+	if (S0 !== S) return;
+	const R0 = S.result;
+	const mine = !!R0 && R0.inputs === job.inputs;
+	let ev = null;
+	if (r && !r.error && r.changed) {
+		const masks = Uint8Array.from(String(r.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
+		ev = C.evaluate(job.level, masks);
+		if (ev && (ev.runTicks > job.runTicks || (R0 && (ev.deaths > R0.deaths || ev.chance < R0.chance - 1e-9)))) ev = null;
+	}
+	const better = !!ev && (!R0 || mine || ev.runTicks < R0.runTicks || (ev.runTicks === R0.runTicks && ev.ms.length < R0.ticks));
+	if (!better) {
+		if (mine) { R0.clean = 'kept'; if (r && r.error) R0.cleanError = r.error; save(); }
 		return;
 	}
-	const masks = Uint8Array.from(String(r.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
-	const ev = C.evaluate(job.level, masks);
-	if (!ev || ev.runTicks > R0.runTicks || ev.deaths > R0.deaths || ev.chance < R0.chance - 1e-9) { R0.clean = 'kept'; if (S0 === S) save(); return; }
-	if (S0 !== S) return;
-	const cleaned = { fromRunTicks: R0.runTicks, fromTicks: R0.ticks, presses: [r.before.pressesPerS, r.after.pressesPerS], changesPerS: [r.before.changesPerS, r.after.changesPerS],
+	const cleaned = { fromRunTicks: job.runTicks, fromTicks: job.ticks, presses: [r.before.pressesPerS, r.after.pressesPerS], changesPerS: [r.before.changesPerS, r.after.changesPerS],
 		sec: r.sec };
-	setResult(job.level, ev, { foundAfter: R0.foundAfter, cpuAfter: R0.cpuAfter, strategy: R0.strategy, cleaned });
+	setResult(job.level, ev, { foundAfter: mine ? R0.foundAfter : job.foundAfter, cpuAfter: mine ? R0.cpuAfter : job.cpuAfter, strategy: job.label, cleaned });
 	S.result.clean = 'done';
-	note(`the route cleaned: ${C.fmt(R0.runTicks)} -> ${C.fmt(ev.runTicks)}, jump presses ${r.before.pressesPerS} -> ${r.after.pressesPerS} a second (${r.sec.toFixed(1)} s)`);
-	if (ev.runTicks < R0.runTicks) tellCpu(S.result.ticks, S.result.inputs, -1);
+	note(`the route cleaned: ${C.fmt(job.runTicks)} -> ${C.fmt(ev.runTicks)}, jump presses ${r.before.pressesPerS} -> ${r.after.pressesPerS} a second (${r.sec.toFixed(1)} s)`);
+	tellCpu(boundTicks(), S.result.inputs, -1);
 	save();
 }
 /** a strategy's closest attempt (ev: {dist (tiles to the trophy by the reach field), tick, inputs, cut}): kept when it is
