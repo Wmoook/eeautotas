@@ -889,7 +889,7 @@ function pickArm(round) {
 	if (EVERY_MODE === 'on') return round % 2 === 0 ? 'every' : 'search';
 	if (round <= 2) return 'search';   // (the systematic families go first)
 	if (!arms.every.n) return 'every';
-	const keys = LEAP_ON ? ['search', 'every', 'leap'] : ['search', 'every'];
+	const keys = LEAP_ON && state.leapPass > 0 ? ['search', 'every', 'leap'] : ['search', 'every'];   // (the leaps join the bandit after their first pass)
 	const best = keys.reduce((b, k) => (armRate(k) > armRate(b) ? k : b), 'search');
 	// the arm behind longest: one round in five (the leaps, whose rounds are longer, one in eight)
 	let due = null;
