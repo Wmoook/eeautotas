@@ -917,7 +917,7 @@ const BREAK_RESERVE_F = 0.15;
 // search (seedCpu: 16 of 1024, spread over the run's depth) and the chain's next step starts from one (a hit in another
 // room than the step's start first, else the latest) BREAK_NOVEL_BACK ticks short of it. The round waits up to
 // BREAK_NOVEL_WAIT_MS for the file.
-const BREAK_NOVEL_MAX = 1024, BREAK_NOVEL_SEED_EVERY = 64, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000;
+const BREAK_NOVEL_MAX = 1024, BREAK_NOVEL_SEED_EVERY = 64, BREAK_NOVEL_BACK = 30, BREAK_NOVEL_WAIT_MS = 6000, BREAK_NOVEL_PICK = 'latest';
 /** asks the CPU search for the novelty file (the answer: its "novel" event sets brk.novelReady) */
 function novelAsk() {
 	if (!S || !brk || !cur || !cur.opts.novel) return false;
@@ -939,6 +939,25 @@ function novelHit(n, ev) {
 	brk.novelHits = (brk.novelHits || 0) + 1;
 	if (S.breaker) S.breaker.novelHits = brk.novelHits;
 	if (list.length % BREAK_NOVEL_SEED_EVERY === 1) seedCpu(inputs);
+}
+/** the chain's next start among a run's novelty hits nh (those past the step's start `from` by more than
+ *  BREAK_NOVEL_BACK ticks): BREAK_NOVEL_PICK 'terr' = the latest hit in the other room with the most hits (the most new
+ *  cells the run found there: a territory, not a touch), else the latest hit; 'latest' = a hit in another room than
+ *  the start's room0 first, else the latest */
+function novelPick(nh, room0, from, rule = BREAK_NOVEL_PICK) {
+	const ok = nh.filter((h) => h.inputs.length - BREAK_NOVEL_BACK > from);
+	let nv = null;
+	if (rule === 'latest') {
+		for (const h of ok) if (!nv || (h.room !== room0) > (nv.room !== room0) || ((h.room !== room0) === (nv.room !== room0) && h.tick > nv.tick)) nv = h;
+		return nv;
+	}
+	const per = new Map();
+	for (const h of nh) if (h.room !== room0) per.set(h.room, (per.get(h.room) || 0) + 1);
+	let room = null;
+	for (const [r, c] of per) if (room === null || c > per.get(room)) room = r;
+	for (const h of ok) if (h.room === room && (!nv || h.tick > nv.tick)) nv = h;
+	if (!nv) for (const h of ok) if (!nv || h.tick > nv.tick) nv = h;
+	return nv;
 }
 /** the wall breaker's round is running (from its start to its end, or its process alive): the others' new processes wait (resumeDeferred) */
 const breakerBusy = () => !!S && ((!!brk && !!brk.round) || (Array.isArray(S.strategies) && S.strategies.some((q, k) => q.key === 'breaker' && alive(kids[k]))));
@@ -1077,11 +1096,7 @@ function breakAfter(n, how) {
 	const ch = R.chain, b = V.bestTry, nh = V.novHits || [];
 	if (cur.opts.novel) novelAsk();   // (the next run's novelty file: the archive as it is now)
 	// (a run with novelty hits: the next step from one, a hit in another room than the step's start's first, else the latest)
-	let nv = null;
-	if (nh.length && ch.step < BREAK_CHAIN) {
-		const room0 = Number.isFinite(V.novRoom0) ? V.novRoom0 : nh[0].room;
-		for (const h of nh) if (h.inputs.length - BREAK_NOVEL_BACK > ch.inputs.length && (!nv || (h.room !== room0) > (nv.room !== room0) || ((h.room !== room0) === (nv.room !== room0) && h.tick > nv.tick))) nv = h;
-	}
+	const nv = nh.length && ch.step < BREAK_CHAIN ? novelPick(nh, Number.isFinite(V.novRoom0) ? V.novRoom0 : nh[0].room, ch.inputs.length) : null;
 	if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length && !nv) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (nv) {
 		R.chain = { inputs: nv.inputs.slice(0, nv.inputs.length - BREAK_NOVEL_BACK), step: ch.step + 1, grain: 0, what: `${ch.what}, a novelty hit` };
@@ -2370,4 +2385,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, novelPick, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
