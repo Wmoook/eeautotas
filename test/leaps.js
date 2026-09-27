@@ -122,8 +122,8 @@ check('a loose leap (no exact rejoin before the trophy): spliced as it is and ve
 	sB.best ? `${sB.best.how}, -${sB.best.saved}` : `nothing (${sB.tried} tried, ${sB.exact} exact)`);
 {
 	const h = hitFor(60, new Array(30).fill(0));
-	h.refTick = h.tick - 10; h.gain = -10;   // (a visit before the hit: no leap)
-	check('a hit that is not faster gives nothing', !L.spliceHits(info, { i: 60, j: info.n }, [h], OPTS).best);
+	h.refTick = h.tick - 20; h.gain = -20;   // (a visit before the hit: no leap; with rejoinK 0 no every move either)
+	check('a hit before its own tick gives nothing', !L.spliceHits(info, { i: 60, j: info.n }, [h], OPTS).best);
 }
 {
 	// a coin at (1, 6) that only the detour takes (the reference turns back to the left wall), coins counted (nocoins 0):

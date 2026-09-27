@@ -58,7 +58,7 @@ const DEFAULTS = {
 	maxDist: 24,      // closeness to the run's state at the visit (px, speeds x 3)
 	margin: 12,       // tiles around the run's stretch: the explore's region
 	perS: 30,         // GPU seconds per search
-	tailH: 400, tailDrift: 96, maxHits: 160, loose: 12,
+	tailH: 400, tailDrift: 400, maxHits: 160, loose: 12,   // (tailDrift: a tail may stray far and still meet the run: Octorage's arrow room, 250 ticks)
 	rejoinK: 3, rejoinMin: 20, rejoinDepth: 600, rejoinS: 8,   // no splice: every move from the best rejoinK hits (gain >= minGain + rejoinMin) to an exact state of the run
 	nocoins: 1,
 	sameDiscrete: 1,   // hits only where the discrete state (switches, keys, team, effects; coins with nocoins 0) is the run's there
@@ -453,7 +453,14 @@ async function search(o) {
 			const i = starts[k++];
 			if (done.has(info.H[i])) continue;
 			done.add(info.H[i]);
-			const r = await leapFrom(ctx, info, i, Object.assign({}, p, { perS: Math.max(3, Math.min(p.perS, Math.floor(secLeft() - 2))) }));
+			let r = null;
+			// (out of GPU memory: another process holds it for a while; the same start again after 10, 20, 40 s)
+			for (let wait = 10; ; wait *= 2) {
+				r = await leapFrom(ctx, info, i, Object.assign({}, p, { perS: Math.max(3, Math.min(p.perS, Math.floor(secLeft() - 2))) }));
+				if (r.done || r.launchError || !/out of memory|CUDA error 2\b/.test(r.err || '') || wait > 40 || secLeft() < wait + 10) break;
+				emit({ ev: 'wait', i, error: r.err, seconds: wait });
+				await new Promise((res) => setTimeout(res, wait * 1000));
+			}
 			searches++;
 			if (!r.done) {
 				emit({ ev: 'search', i, error: r.err || `exit ${r.code}`, launchError: r.launchError });
