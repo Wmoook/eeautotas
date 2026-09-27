@@ -625,7 +625,7 @@ function create(o) {
 			for (const ch of children) { try { ch.kill(); } catch (e) { /* gone */ } }
 			if (loopP) await loopP;
 		},
-		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st),
+		stats: () => Object.assign({ rooms: rooms.size, families: fams.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st),
 	};
 }
 
