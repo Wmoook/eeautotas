@@ -37,6 +37,7 @@ const M = require('./minimap.js');
 const RF = require('./reach.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
+const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -355,6 +356,9 @@ function check(buf) {
 // ended with a route known (the finest passes found none faster) and none failed. Its depth limit is the request's,
 // else 100000 ticks, not the beams' (their route store is 4 bytes per state per tick): the 200x200 ice level's routes are
 // ~10000 ticks, and with the old 6000 the CPU search could not find one. Without an NVIDIA GPU it is the whole search.
+// On levels above 50 x 50 it runs with coarse cells (goexplore.js --cells=auto: rooms, a novelty and a discovery head
+// next to the reach field's heap, no refinement) and reports "source" events: starting points for the relay (the
+// sources, RELAY_PLAN).
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...(o.prune ? ['--prune=1'] : []),
@@ -510,11 +514,122 @@ function resumeExplore() {
 	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
 	S.strategies.forEach((q, k) => { if (q.key === 'explore' && q.state === 'waiting' && !alive(kids[k])) { Object.assign(q, { state: 'starting', detail: '' }); kids[k] = launch(k); } });
 }
-// A relay that finds nothing nearer goes further back along the nearest attempt (RELAY_BACK), then starts from the
-// other strategies' own nearest attempts (another branch of the level: on a 200x200 key maze the relay stalled 740
-// tiles out, behind a wall of the physics check's optimism, while the CPU search's attempt lay elsewhere), then once more
-// from the nearest attempt with a larger table, coarser cells and twice the time.
+// A relay that finds nothing nearer goes on along its plan (RELAY_PLAN): further back along the nearest attempt, from
+// other starting points (sources: the newest room not relayed from yet, then the room with territory gain relayed from
+// least; on the 200x200 ice level the relay stalled 545-740 tiles out while the route passes that very spot: the place
+// was right, the one attempt it kept restarting from was not), further back again, then from the other strategies' own
+// nearest attempts (another branch of the level: on a 200x200 key maze the relay stalled 740 tiles out, behind a wall of
+// the physics check's optimism, while the CPU search's attempt lay elsewhere), then once more from the nearest attempt
+// with a larger table, coarser cells and twice the time.
 const RELAY_MIN_TICKS = 100, RELAY_BACK = [60, 150, 400, 1000, 2000], RELAY_S = 30, RELAY_SWITCH_MS = 3000, RELAY_MIN_KEEP = 50, RELAY_STALL_MS = 8000;
+// the plan's steps (R.back indexes it): ticks back along the nearest attempt, or a source ('new': the newest source not
+// relayed from yet, from the tick its room was entered; 'gain': the source with territory gain relayed from least, from
+// RELAY_BACK[0] ticks before the end of its lowest-cost attempt); after them the other strategies' attempts and the
+// larger table
+const RELAY_PLAN = [RELAY_BACK[0], RELAY_BACK[1], RELAY_BACK[2], 'new', 'gain', RELAY_BACK[3], RELAY_BACK[4]];
+// The sources: starting points for the relay besides the nearest attempt, per room (goexplore.js roomOf: the keys,
+// switches, effects, ... that open doors or change the physics): the earliest arrival in it (an attempt that ends where
+// it entered the room) and its lowest-cost attempt, with the relay runs made from it (S.sources: the page's summary, no
+// inputs). From the CPU search's "source" events (coarse cells: each new room's first cell, every 5 s the best cells of
+// the rooms with the most territory gain) and from every strategy's own nearer attempts (closer(): the room its last
+// state is in and the tick it entered that room, from one replay in the JS engine; its territory gain from the
+// editor's own room fields). At most RELAY_SOURCES: when full, the ones relayed from, without gain, oldest go first.
+const RELAY_SOURCES = 64;
+// a strategy's own nearer attempt that is not the nearest of all: its room at most every SOURCE_REPLAY_MS (each is a
+// replay in the JS engine on the server's thread; a beam improves every layer)
+const SOURCE_REPLAY_MS = 1000;
+let sources = new Map(), sourceSeq = 0;   // room key -> {room, desc, gain, runs, at, from, early, best}
+let roomsCur = null;                      // the running search's rooms: {RM, fields, gain: Map(room key -> gain)}
+/** the running search's room key function and fields (goexplore.js), made at the first use */
+function roomsOfSearch() {
+	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: GX.roomFields(cur.level, 16 << 20), gain: new Map() };
+	return roomsCur;
+}
+/** the page's summary of the sources (no inputs) */
+function publishSources() {
+	S.sources = [...sources.values()].sort((x, y) => y.at - x.at).map((s) => ({ room: s.room, desc: s.desc, gain: s.gain, runs: s.runs, from: s.from,
+		entered: s.early ? s.early.ticks : null, best: s.best ? { ticks: s.best.ticks, tiles: Math.round(s.best.dist * 10) / 10 } : null }));
+}
+/** a starting point o: {room, desc, gain, from, inputs, dist, arrival (the ticks of its inputs up to where it entered the
+ *  room; 0 = not known)} */
+function addSource(o) {
+	let s = sources.get(o.room);
+	if (!s) {
+		if (sources.size >= RELAY_SOURCES) {
+			// (the least useful goes: relayed from already, no territory gain, the oldest)
+			let v = null;
+			const rank = (x) => (x.runs > 0 ? 4 : 0) + (x.gain > 0 ? 0 : 2);
+			for (const x of sources.values()) if (!v || rank(x) > rank(v) || (rank(x) === rank(v) && x.at < v.at)) v = x;
+			sources.delete(v.room);
+		}
+		s = { room: o.room, desc: String(o.desc || ''), gain: 0, runs: 0, at: 0, from: o.from, early: null, best: null };
+		sources.set(o.room, s);
+	}
+	if (o.gain > s.gain) s.gain = o.gain;
+	const inputs = String(o.inputs);
+	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
+		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
+		s.early = { inputs: inputs.slice(0, o.arrival), ticks: o.arrival, dist: o.dist };
+	}
+	if (!s.best || o.dist < s.best.dist - 1e-3) s.best = { inputs, ticks: inputs.length, dist: o.dist };
+	publishSources();
+}
+/** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
+function pickSource(step, c) {
+	const same = (a) => !!c && a.ticks === c.ticks && Math.abs(a.dist - c.dist) < 1e-3;
+	const usable = (a) => !!a && a.ticks >= RELAY_MIN_TICKS && a.dist < RF.DEATH_TILES && !same(a);
+	let b = null;
+	for (const s of sources.values()) {
+		if (step === 'new') {
+			if (s.runs === 0 && usable(s.early) && (!b || s.at > b.at)) b = s;
+		} else if (s.gain > 0 && usable(s.best) && (!b || s.runs < b.runs || (s.runs === b.runs && (s.gain > b.gain || (s.gain === b.gain && s.at > b.at))))) b = s;
+	}
+	return b;
+}
+/** masks replayed in the JS engine like common.js replay (to the finish, if any): the path, run ticks, deaths, and the
+ *  room of its last state ({key, desc, since: the tick it entered that room}) */
+function replayRooms(masks, withPath) {
+	const R = roomsOfSearch();
+	const sim = new E.EESim(cur.level), inp = new E.EEInput();
+	sim.reset();
+	let deaths = 0, complete = -1, key = R.RM.key(sim), since = 0;
+	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); else if (k === 'death') deaths++; };
+	const path = withPath ? [[Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]] : null;
+	for (let t = 0; t < masks.length && complete < 0; t++) {
+		E.applyMask(inp, masks[t]);
+		sim.tick(inp);
+		if (path) path.push([Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]);
+		const k = R.RM.key(sim);
+		if (k !== key) { key = k; since = t + 1; }
+	}
+	// (the room's territory gain: from the state it ends in, once per room)
+	let gain = R.gain.get(key);
+	if (gain === undefined) { gain = R.fields.enter(sim).gain; R.gain.set(key, gain); }
+	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain } };
+}
+/** strategy n's own nearer attempt a {inputs, ticks, dist}: a source for its room (at most every SOURCE_REPLAY_MS per
+ *  strategy; the latest one waiting is taken then). rm: its room, when the attempt was replayed already. */
+const srcPending = new Map();   // strategy index -> {at (its last replay), next (the attempt waiting), timer}
+function attemptSource(n, a, rm) {
+	const V = S.strategies[n];
+	if (!rm) {
+		const now = Date.now();
+		let p = srcPending.get(n);
+		if (!p) srcPending.set(n, p = { at: 0, next: null, timer: null });
+		if (now - p.at < SOURCE_REPLAY_MS) {
+			p.next = a;
+			if (!p.timer) {
+				const S0 = S;
+				p.timer = setTimeout(() => { p.timer = null; const b = p.next; p.next = null; if (S === S0 && S.running && cur && b) attemptSource(n, b); }, SOURCE_REPLAY_MS - (now - p.at));
+				if (p.timer.unref) p.timer.unref();
+			}
+			return;
+		}
+		p.at = now;
+		rm = replayRooms(Uint8Array.from(a.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), false).room;
+	}
+	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since });
+}
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
 // states going back the way the relay came
 const RELAY_SLACK = 30, RELAY_SLACK_F = 0.1;
@@ -531,21 +646,35 @@ function relayFrom(n) {
 	// nearest attempt: on the ice level every move ended at 35 s, the relay was 3 steps back by then, and the larger table
 	// from the nearest attempt went 100 tiles on)
 	const alone = !S.strategies.some((x, k) => x.key === 'explore' && alive(kids[k]));
-	if (alone && !R.alone && R.runs > 0) Object.assign(R, { back: 0, cells: 0, cellsSet: false });
+	if (alone && !R.alone && R.runs > 0) Object.assign(R, { back: 0, cells: 0, cellsSet: false, pick: null });
 	R.alone = alone;
-	// the attempt to go on from: the nearest one (R.back steps back along it), then the others' own (R.alt), then the
-	// nearest with a larger table (R.big)
-	let c = S.closest, back = RELAY_BACK[R.back];
+	// the attempt to go on from (RELAY_PLAN): the nearest one (R.back steps back along it) or a source (R.pick: the same
+	// one while its point runs again with finer cells), then the others' own (R.alt), then the nearest with a larger table
+	// (R.big)
+	let c = S.closest, back = RELAY_BACK[0], src = null;
 	R.big = false;
-	if (R.back >= RELAY_BACK.length) {
+	const next = () => { R.back++; R.pick = null; return relayFrom(n); };   // (the next step of the plan)
+	if (R.back < RELAY_PLAN.length) {
+		const step = RELAY_PLAN[R.back];
+		if (typeof step === 'number') back = step;
+		else {
+			src = R.pick && R.pick.back === R.back ? sources.get(R.pick.room) || null : null;
+			if (!src) src = pickSource(step, c);
+			const a = src ? (step === 'new' ? src.early : src.best) : null;
+			if (!a) return next();
+			R.pick = { back: R.back, room: src.room };
+			c = { inputs: a.inputs, ticks: a.ticks, dist: a.dist, tiles: Math.round(a.dist * 10) / 10 };
+			back = step === 'new' ? 0 : RELAY_BACK[0];
+		}
+	} else {
 		const alts = S.strategies.filter((q) => q !== V && q.bestTry && q.bestTry.ticks >= RELAY_MIN_TICKS && (!c || Math.abs(q.bestTry.dist - c.dist) > 1));
-		const ai = R.back - RELAY_BACK.length;
+		const ai = R.back - RELAY_PLAN.length;
 		if (ai < alts.length) { const b = alts[ai].bestTry; c = { inputs: b.inputs, ticks: b.ticks, dist: b.dist, tiles: Math.round(b.dist * 10) / 10 }; back = RELAY_BACK[0]; }
 		else if (ai === alts.length) { back = RELAY_BACK[2]; R.big = true; }
 		// (the plan used up: again from the nearest attempt with the next salt, other states standing for the merged cells,
 		// rather than an idle GPU; only after a round that ran)
 		// (a yielded every move goes on too: it waited for the relay to run out of starting points)
-		else if (R.cycleRuns > 0) { R.salt = (R.salt || 0) + 1; R.back = 0; R.cycleRuns = 0; R.cellsSet = false; setImmediate(resumeExplore); return relayFrom(n); }
+		else if (R.cycleRuns > 0) { R.salt = (R.salt || 0) + 1; R.back = 0; R.pick = null; R.cycleRuns = 0; R.cellsSet = false; setImmediate(resumeExplore); return relayFrom(n); }
 		else return false;
 	}
 	if (!cur || !c || c.cut || c.viaDeath || c.ticks < RELAY_MIN_TICKS || S.seconds - searchClock(Date.now()) < 3) return false;
@@ -554,9 +683,9 @@ function relayFrom(n) {
 		(X.refine && X.refine.at && Date.now() - X.refine.at > RELAY_AFTER_REFINE_MS))) return false;
 	const keep = c.ticks - Math.min(back, c.ticks - 1);
 	// (a start near the level's start is every move's own work: no relay from there)
-	if (keep < RELAY_MIN_KEEP) { R.back++; return relayFrom(n); }   // (too near the start: the next step of the plan)
-	// (a route of T ticks known: only a relay that can still end sooner)
-	if (S.result && keep >= S.result.ticks - 1) return false;
+	if (keep < RELAY_MIN_KEEP) return next();   // (too near the start: the next step of the plan)
+	// (a route of T ticks known: only a relay that can still end sooner; a source that cannot: the next step)
+	if (S.result && keep >= S.result.ticks - 1) return src ? next() : false;
 	const file = path.join(dir(), `relay_${n}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(String(c.inputs).slice(0, keep), 'latin1')); } catch (e) { return false; }
 	// the cells by where the relay starts: where no gravity pulls (dots, and the like: both speeds free) 4 px cells, else
@@ -574,7 +703,9 @@ function relayFrom(n) {
 	// another strategy's farther attempt)
 	Object.assign(R, { file, keep, src: { dist: c.dist, ticks: c.ticks, best: S.closest ? Math.min(S.closest.dist, c.dist) : c.dist } });
 	R.runs++; R.cycleRuns = (R.cycleRuns || 0) + 1;
-	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `from tick ${keep} of the nearest attempt (${c.tiles} tiles from the trophy)`, passes: R.runs });
+	R.what = src ? `an attempt in room "${src.desc}"` : 'the nearest attempt';
+	if (src) { src.runs++; publishSources(); }
+	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `from tick ${keep} of ${R.what} (${c.tiles} tiles from the trophy)`, passes: R.runs });
 	kids[n] = launch(n);
 	return true;
 }
@@ -584,10 +715,12 @@ function relayKick() {
 	S.strategies.forEach((q, k) => {
 		if (q.key !== 'relay') return;
 		if (q.state === 'waiting' && !alive(kids[k]) && searchClock(Date.now()) >= 3) {
-			// (a relay that went through its starting points waits for a nearer attempt than its last)
+			// (a relay that went through its starting points waits for a nearer attempt than its last, or a new source: then
+			// its plan from that step)
 			const c0 = S.closest, R0 = q.relay;
-			if (R0 && R0.src && !(c0 && c0.dist < R0.src.best - 0.5)) return;
-			if (R0) R0.back = 0;
+			const nearer = !(R0 && R0.src) || !!(c0 && c0.dist < R0.src.best - 0.5);
+			if (!nearer && !pickSource('new', c0)) return;
+			if (R0) { R0.back = nearer ? 0 : RELAY_PLAN.indexOf('new'); R0.pick = null; }
 			relayFrom(k);
 			return;
 		}
@@ -797,6 +930,11 @@ function start(b, gpu, test) {
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
 		proveSeconds: test && test.proveSeconds ? test.proveSeconds : PV.SECONDS, proveWatchdogS: test ? test.proveWatchdogS : undefined };
+	// the relay's sources start over (see RELAY_SOURCES)
+	sources = new Map(); sourceSeq = 0; roomsCur = null;
+	for (const p of srcPending.values()) if (p.timer) clearTimeout(p.timer);
+	srcPending.clear();
+	S.sources = [];
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
@@ -1122,13 +1260,14 @@ function launch(n) {
 			Object.assign(V, { state: cpu && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
 			if (ev.ev === 'layer' && V.key === 'relay' && V.relay) {
-				V.detail = `from tick ${V.relay.keep} of the nearest attempt (run ${V.relay.runs}) · ${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full`;
+				V.detail = `from tick ${V.relay.keep} of ${V.relay.what || 'the nearest attempt'} (run ${V.relay.runs}) · ${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full`;
 			} else if (ev.ev === 'layer') {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu) {
 				V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
-					(Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') + (V.found ? ', looking for a faster route' : '');
+					(ev.rooms > 1 ? ` in ${ev.rooms} rooms` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
+					(V.found ? ', looking for a faster route' : '');
 			}
 			if (!S.result && S.stage !== 'error') S.stage = 'searching';
 			totals();
@@ -1194,6 +1333,14 @@ function launch(n) {
 			note(`${V.label}: ${ev.text}`);
 		} else if (ev.ev === 'closest') {
 			closer(ev, n);
+		} else if (ev.ev === 'source') {
+			// the CPU search's starting points for the relay (goexplore.js, coarse cells): a new room's first cell ("room":
+			// its inputs end where it entered the room), a room's lowest-cost cell ("best")
+			const dist = +ev.dist, inputs = String(ev.inputs || '');
+			if (cur && inputs && Number.isFinite(dist) && Number.isFinite(+ev.room)) {
+				addSource({ room: +ev.room, desc: ev.desc, gain: +ev.gain || 0, from: V.label, inputs, dist, arrival: ev.kind === 'room' ? inputs.length : 0 });
+				setImmediate(relayKick);
+			}
 		} else if (ev.ev === 'hit') {
 			// the exploration's finishes: all in its last layer (equally many ticks); a few are enough (the timer start
 			// can differ)
@@ -1328,9 +1475,9 @@ function launch(n) {
 				// (ran out of situations: finer cells from the same point first, however deep it got: the ice level's 4 px
 				// relay ran 900 ticks through everything its cells could tell apart and never climbed the one-tile staircase
 				// shaft at (69, 96) that its finest cells climb in 113 ticks; only then further back)
-				if (nearer) { R.back = 0; R.cellsSet = false; }
-				else if (how === 'exhausted' && R.cells + 1 < RELAY_CELLS.length) R.cells++;
-				else { R.back++; R.cellsSet = false; }
+				if (nearer) { R.back = 0; R.pick = null; R.cellsSet = false; }
+				else if (how === 'exhausted' && R.cells + 1 < RELAY_CELLS.length) R.cells++;   // (a source: the same one, R.pick)
+				else { R.back++; R.pick = null; R.cellsSet = false; }
 				if (relayFrom(n)) { save(); return; }
 				Object.assign(V, { state: 'waiting', detail: 'waits for a nearer attempt to go on from' });
 				setImmediate(resumeExplore);
@@ -1460,6 +1607,7 @@ function finish() {
 	}
 	note(S.stage === 'found' ? `route ${S.result.time} (${S.result.ticks} ticks, ${S.result.strategy})` : S.message);
 	cur = null;
+	roomsCur = null;
 	saveNow();
 }
 /** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept. more: the
@@ -1517,20 +1665,23 @@ function found(inputs, n, more) {
 function closer(ev, n) {
 	if (!cur) return;
 	const dist = +ev.dist, old = S.closest;
-	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams)
+	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
+	// room becomes a source for the relay: attemptSource)
 	const Vn = S.strategies[n];
+	let own = null;
 	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
 		Vn.best = dist; Vn.bestAt = Date.now();
-		if (ev.inputs && !ev.cut && dist < RF.DEATH_TILES) Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
+		if (ev.inputs && !ev.cut && dist < RF.DEATH_TILES) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
-	if (!Number.isFinite(dist) || dist >= 2e4) return;
+	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
-	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) return;
+	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
-	const tr = C.replay(cur.level, masks, { trace: true });
-	const pathPts = [];
-	for (let t = 0; t <= tr.n; t++) pathPts.push([Math.round((tr.X[t] + 8) * 10) / 10, Math.round((tr.Y[t] + 8) * 10) / 10]);
+	// (one replay: the path, and the room it ends in for the sources)
+	const tr = replayRooms(masks, true);
+	if (own) attemptSource(n, own, tr.room);
+	const pathPts = tr.path;
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
