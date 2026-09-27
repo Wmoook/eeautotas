@@ -174,9 +174,9 @@ function sectionC() {
 		R.writeReachFile(R.reachField(L), path.join(tmp, 'k.reach'), G.blobFp(blob));
 		const run = (extra) => {
 			let out = '';
-			try { out = execFileSync(toolPath, ['explore', path.join(tmp, 'k.bin'), '-', '--finish=1', '--discrete=1', '--depth=3000', '--seconds=60', `--reach=${path.join(tmp, 'k.reach')}`, '--prune=1', ...extra, ...G.cacheArgs()], { encoding: 'utf8', maxBuffer: 1 << 28 }); } catch (e) { out = String(e.stdout || ''); }
+			try { out = execFileSync(toolPath, ['explore', path.join(tmp, 'k.bin'), '-', '--finish=1', '--discrete=1', '--depth=1500', '--seconds=60', '--coarse=0', '--cqx=0.5', '--cqv=16', '--qy=1', '--qvy=16', `--reach=${path.join(tmp, 'k.reach')}`, '--prune=1', ...extra, ...G.cacheArgs()], { encoding: 'utf8', maxBuffer: 1 << 28 }); } catch (e) { out = String(e.stdout || ''); }
 			let fin = null, steer = false;
-			for (const line of out.split('\n')) { try { const j = JSON.parse(line); if (j.ev === 'result' || j.ev === 'finish' || (j.ev === 'hit' && j.kind === 'finish')) fin = fin || j; if (j.ev === 'done' && j.finish) fin = fin || j; if (j.ev === 'steer') steer = true; } catch (e) { /* not JSON */ } }
+			for (const line of out.split('\n')) { try { const j = JSON.parse(line); if (j.ev === 'hit') fin = fin || j; if (j.ev === 'done' && j.finish) fin = fin || j; if (j.ev === 'steer') steer = true; } catch (e) { /* not JSON */ } }
 			return { fin, steer, tail: out.trim().split('\n').pop() };
 		};
 		if (GPU) {
