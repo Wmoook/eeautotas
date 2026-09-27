@@ -229,6 +229,9 @@ const memOfTotal = (workers, totalMB) => Math.floor((totalMB / Math.max(1, worke
  */
 function defaultMem(cells, workers, m) {
 	const want = cells === 'fine' ? Math.max(200, Math.min(800, Math.round(1600 / workers))) : MEM_MAX;
+	// (fine cells, the small pixel-exact levels, keep their measured 200-800 MB: their archives are small, and the machine
+	// caps below would give 15 workers on a laptop with ~9 GB free only 128 MB, an unmeasured change)
+	if (cells === 'fine') return { mem: want, why: 'fine cells' };
 	const MB = 1048576;
 	const caps = [['a quarter of the machine', MEM_SHARE * m.total / MB], ['the searches on the machine', MEM_POOL * m.total / MB - (m.others || 0) / MB],
 		['the memory free', MEM_FREE * m.free / MB]];
