@@ -135,6 +135,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	P.denseCap = (u32)cap;
 	P.denseSlot = (u32*)(uintptr_t)dslot.p; P.seenOut = (u32*)(uintptr_t)dseenOut.p;
 #ifdef _WIN32
+	fflush(stdout);   // (the lines so far in text mode; from here on the frames' bytes as they are)
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif

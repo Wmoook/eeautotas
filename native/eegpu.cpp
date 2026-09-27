@@ -5,6 +5,8 @@
 //                                                            both with "reach":3 (the reach file version it reads: src/reach.js RCH3)
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 //   eegpu reachtest <level.bin> <reach> <states.bin> [--gpu=1]  the reach lookup of a list of states (test/reach.js F)
+//   eegpu roll <level.bin> [--reach=<file>] [--rolls=8] [--roll=40]   Find a route's GPU random runs: a server for
+//                                                            src/goexplore.js --gpu=1, jobs on stdin (rollhost.h)
 //   eegpu prove <level.bin> [--reach=<file>] [--seconds=30] [--maxCells=N]   a sound "no route" proof (prove.h; CPU only:
 //                                                            it never loads the NVIDIA driver)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).

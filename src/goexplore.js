@@ -828,15 +828,23 @@ async function gpuMain(a, L) {
 	ch.stderr.on('data', (c) => { err = (err + c).slice(-2000); });
 	ch.stdin.on('error', () => { /* it ended */ });
 	// the tool's output: JSON lines, a line with "bytes" followed by that many bytes
-	let buf = Buffer.alloc(0), want = null, waiter = null, toolDone = null, exited = false;
+	// (a payload's chunks are joined once it is all there: joining each 64 KB chunk to what came before took 300 ms for the
+	// 12 MB seen counts of Stupid Fox's 3 M cells, a third of the search's time)
+	let buf = Buffer.alloc(0), want = null, waiter = null, toolDone = null, exited = false, parts = [], have = 0;
 	const queue = [];
 	const deliver = (m) => { if (waiter) { const w = waiter; waiter = null; w(m); } else queue.push(m); };
 	const next = () => (queue.length ? Promise.resolve(queue.shift()) : exited ? Promise.resolve(null) : new Promise((res) => { waiter = res; }));
 	ch.stdout.on('data', (c) => {
-		buf = buf.length ? Buffer.concat([buf, c]) : c;
+		if (want && !buf.length) {
+			parts.push(c);
+			have += c.length;
+			if (have < want.ev.bytes) return;
+			buf = parts.length === 1 ? parts[0] : Buffer.concat(parts);
+			parts = []; have = 0;
+		} else buf = buf.length ? Buffer.concat([buf, c]) : c;
 		for (;;) {
 			if (want) {
-				if (buf.length < want.ev.bytes) return;
+				if (buf.length < want.ev.bytes) { parts = [buf]; have = buf.length; buf = Buffer.alloc(0); return; }
 				want.data = buf.subarray(0, want.ev.bytes);
 				buf = buf.subarray(want.ev.bytes);
 				const m = want;
@@ -1037,7 +1045,8 @@ async function gpuMain(a, L) {
 	hpush(0);
 	let end = startCost < 0 && a.prune ? 'unreachable' : '';
 	// ---- the events (explore()'s and main()'s)
-	let ticks = 0, picks = 0, batches = 0, deepest = 0, minRc = cRc[0], full = false, gpuMs = 0, hostMs = 0, rollMs = 0, kernelMs = 0, records = 0, touched = 0, colMs = 0, rollWallMs = 0;
+	let ticks = 0, picks = 0, batches = 0, deepest = 0, minRc = cRc[0], full = false, gpuMs = 0, hostMs = 0, rollMs = 0, kernelMs = 0, records = 0, touched = 0, colMs = 0, rollWallMs = 0,
+		pickMs = 0, seenMs = 0, waitMs = 0;
 	let near = { rc: cRc[0], t: 0, c: 0 }, nearSent = null;
 	let route = null, first = null;
 	const samples = [[Date.now(), 0]];
@@ -1098,15 +1107,15 @@ async function gpuMain(a, L) {
 	// of the same batch may give the cell a sooner state and path before its runs' records are read)
 	const pickNode = new Int32Array(a.batch);
 	const bFirst = []; // (per batch: each room's first new cell, by room index)
-	let lastSeen = Date.now(), tickBudget = a.maxTicks;
+	// (head B's seen counts: every second, or 20 x as long as the last download took: millions of cells)
+	let lastSeen = Date.now(), seenEvery = 1000, tickBudget = a.maxTicks;
 	while (!end) {
 		const now = Date.now();
 		if (stopReq || stopFile()) { end = 'stopped'; break; }
 		if (now >= tEnd) { end = 'time'; break; }
 		if (tickBudget && ticks >= tickBudget) { end = 'ticks'; break; }
 		if (a.first && route) { end = 'finish'; break; }
-		const h0 = Date.now();
-		if (now - lastSeen >= 1000 && roomList.length > 0) {
+		if (now - lastSeen >= seenEvery && roomList.length > 0) {
 			lastSeen = now;
 			ch.stdin.write('seen\n');
 			const m = await reply();
@@ -1115,7 +1124,10 @@ async function gpuMain(a, L) {
 				const s = new Uint32Array(m.data.buffer.slice(m.data.byteOffset, m.data.byteOffset + m.data.length));
 				cSeen.set(s.subarray(0, Math.min(s.length, capN)));
 			}
+			seenMs += Date.now() - now;
+			seenEvery = Math.max(1000, 20 * (Date.now() - now));
 		}
+		const h0 = Date.now();
 		// the picks (explore()'s heads, one pick after the other)
 		if (hv.length > 3 * nCells + 4096) compact();
 		let K = 0;
@@ -1139,9 +1151,12 @@ async function gpuMain(a, L) {
 		const bs = fmixU((Math.imul(a.seed, 0x9e3779b1) + batches + 1) | 0);
 		ch.stdin.write(`batch ${K} ${maxT} ${bs}\n`);
 		ch.stdin.write(Buffer.from(pickBytes.subarray(0, 4 * K)));
-		hostMs += Date.now() - h0;
+		const hw = Date.now();
+		pickMs += hw - h0;
+		hostMs += hw - h0;
 		const m = await reply();
 		const h1 = Date.now();
+		waitMs += h1 - hw;
 		if (m === null) { end = toolDone && toolDone.end === 'stopped' ? 'stopped' : 'error'; break; }
 		if (m.ev.ev !== 'batch') continue;
 		batches++;
@@ -1229,8 +1244,11 @@ async function gpuMain(a, L) {
 	sendNear();
 	const secs = (Date.now() - tReady) / 1000;
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
-		finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs),
-		roomKeyMismatch: keyMismatch, tool: toolDone || null, loadSec: Math.round((tReady - t0) / 100) / 10 });
+		finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs),
+		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10,
+		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
+		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
+			.map((k) => [k, toolDone[k]])), tool: toolDone || null });
 	console.log(`[goexplore] GPU (${info.gpu ? info.gpu.name : '?'}), batch ${a.batch} x ${a.rolls} x ${a.roll}, ${secs.toFixed(1)} s, ${(ticks / 1e6).toFixed(2)} M ticks, ` +
 		`${nCells.toLocaleString('en-US')} cells in ${roomList.length} rooms, ${batches} batches (GPU ${(gpuMs / 1000).toFixed(1)} s, host ${(hostMs / 1000).toFixed(1)} s), end ${end}: ` +
 		(route ? `first route ${first.ticks} ticks after ${first.sec} s (${first.simTicks.toLocaleString('en-US')} ticks); best ${route.ticks} ticks (${C.fmt(route.runTicks)}) after ${route.sec} s`
