@@ -44,7 +44,7 @@
 // by a time-to-go field to its later tiles, hits where the run arrives later, tails / an exact rejoin / the run as it
 // is after them, every candidate replayed and judged. An exact one is a library edge (family leap: the combine), a loose
 // one goes to the job as it is. Once the search families and every move save under --leapWhen ticks a minute (20; or
-// from round --leapRound0, 40), every third round until a first pass over the run is done (each pass with
+// from round --leapRound0, 20), every third round until a first pass over the run is done (each pass with
 // the next cell grain; even passes take only hits in the run's own discrete state there, odd ones any: a leap past a
 // switch the rest never needs), then an arm of the bandit (one round in eight at least).
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, families, ...).
@@ -95,8 +95,9 @@ const LEAP_ON = EVERY_ON && String(args.leaps === undefined ? '1' : args.leaps) 
 const LEAP_S = Math.max(3, +(args.leapS || 25)), LEAP_STEP = Math.max(20, +(args.leapStep || 250)), LEAP_ROUND_S = Math.max(5, +(args.leapRound || 60));
 // (leaps.js's options: --leapAhead (minAhead 300), --leapGain (minGain 20), --leapSpan (maxSpan 3000))
 // the first pass waits until the search families and every move together save under --leapWhen ticks a minute (20),
-// or round --leapRound0 (40); with --leapWhen=0 from round 4 on
-const LEAP_WHEN = Math.max(0, args.leapWhen !== undefined ? +args.leapWhen : 20), LEAP_ROUND0 = Math.max(4, +(args.leapRound0 || 40));
+// or round --leapRound0 (20: ~10 min; the rates count per second of each arm's own GPU time, so the families stay above
+// 20 a minute long after the run's own gain has slowed); with --leapWhen=0 from round 4 on
+const LEAP_WHEN = Math.max(0, args.leapWhen !== undefined ? +args.leapWhen : 20), LEAP_ROUND0 = Math.max(4, +(args.leapRound0 || 20));
 const leapDue = (round) => !LEAP_WHEN || round >= LEAP_ROUND0 || (arms.search.n > 0 && arms.every.n > 0 && Math.max(armRate('search'), armRate('every')) * 60 < LEAP_WHEN);
 const LEAP_OPTS = Object.fromEntries([['minAhead', args.leapAhead], ['minGain', args.leapGain], ['maxSpan', args.leapSpan]].filter(([, v]) => v !== undefined).map(([k, v]) => [k, +v]));
 const EVERY_OFFSETS = [0, 50, 25, 75];   // (per pass over the run, scaled to the step)
