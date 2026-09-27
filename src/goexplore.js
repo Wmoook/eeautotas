@@ -465,8 +465,9 @@ function roomOf(L) {
 	const cTh = L.coinDoorThresholds || new Int32Array(0), bTh = L.blueCoinDoorThresholds || new Int32Array(0);
 	const doorsOf = (th, v) => { let n = 0; while (n < th.length && th[n] <= v) n++; return n; };
 	// (full: the room key; else the part of it only the ball's own touches change: without the keys, which expire, and the
-	// time doors, which flip on the clock)
-	const hash = (sim, full) => {
+	// time doors, which flip on the clock. counts: the counts themselves, as the GPU's rollRoom keys a room)
+	const hash = (sim, full, counts) => {
+		const n = (th, v) => counts ? v : doorsOf(th, v);
 		let h = 0x3c6ef372;
 		const w = (v) => { h = Math.imul(h ^ v, 0x5bd1e995); h ^= h >>> 13; };
 		if (full) w(sim._keysMask);
@@ -475,10 +476,10 @@ function roomOf(L) {
 			(full && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
 		w(sim.max_jumps); w(sim.jump_boost); w(sim.speed_boost); w(sim.flip_gravity);
 		if (team) w(sim.team);
-		if (coins) w(doorsOf(cTh, sim.coins));
-		if (L.hasCoinGate) w(doorsOf(cTh, sim._show_coin_gate));
-		if (blue) w(doorsOf(bTh, sim.blue_coins));
-		if (L.hasBlueCoinGate) w(doorsOf(bTh, sim._show_blue_coin_gate));
+		if (coins) w(n(cTh, sim.coins));
+		if (L.hasCoinGate) w(n(cTh, sim._show_coin_gate));
+		if (blue) w(n(bTh, sim.blue_coins));
+		if (L.hasBlueCoinGate) w(n(bTh, sim._show_blue_coin_gate));
 		if (L.hasDeathDoor) w(sim.deaths);
 		if (L.hasDeathGate) w(sim._show_death_gate);
 		if (sim._switches.size !== 0) w(onSum(sim._switches, 0x1234567));
@@ -486,6 +487,8 @@ function roomOf(L) {
 		return h | 0;
 	};
 	const key = (sim) => hash(sim, true);
+	/** the room as native/explore.h rollRoom keys it (the GPU random runs): the coin and blue-coin counts themselves */
+	const gpuKey = (sim) => hash(sim, true, true);
 	/** what a room change's cause is judged by: {sub (the key without keys and time doors), keys} */
 	const cause = (sim) => ({ sub: hash(sim, false), keys: sim._keysMask });
 	/** a change from a room of cause a to one of cause b came from a trigger the ball touched (a key picked up, an
@@ -518,7 +521,7 @@ function roomOf(L) {
 		if (silver && sim._collide_silver_crown) p.push('silvercrown');
 		return p.join(' ') || '(start)';
 	};
-	return { key, desc, cause, byTrigger };
+	return { key, gpuKey, desc, cause, byTrigger };
 }
 
 /**
@@ -1512,7 +1515,7 @@ async function gpuMain(a, L, m) {
 		// (room: the JS key the editor's archive and the bursts use; the GPU's key counts the coins where a door reads them,
 		// roomOf the doors the count opens, so several GPU rooms can be one room)
 		const room = RM.key(sim);
-		if (room !== key) keyMismatch++;
+		if (RM.gpuKey(sim) !== key) keyMismatch++;
 		const f = fields.enter(sim);
 		const r = { idx: roomList.length, key, room, desc: RM.desc(sim), t: cT[c], gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: -1, isNew: true, sent: 0, sentAt: -1 };
 		rooms.set(key, r);
