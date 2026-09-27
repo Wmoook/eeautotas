@@ -104,7 +104,12 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   room for it), 120 s each (`--deepS`), each from the best as it is when
   it starts, the run's 2 longest untried loop windows (below) first in the lanes; the session's first sweep runs until the frontier has passed the last window (at most 15 min), later ones
   ~40% of a round from where the last one stopped; windows that found time in an earlier round go first, and once the
-  whole run is covered a window whose own find changed it goes again (chained finds); then deep exact-rejoin
+  whole run is covered a window whose own find changed it goes again (chained finds). Measured (A100, GPU searcher on,
+  8 threads; `src/out/night/opt_hunt.md`): the ice level from Find a route's 9923-tick route 4724 / 4782 after 30 min
+  (f619e8c: 4865, 4856 at 25), ahead by 74-141 ticks from 10 min on; Octorage from the human run the same or a little
+  better; Forgotten Veil from the human run 30 ticks behind at 20 min (its loop window at (326, 90) found -46 with 8
+  threads in f619e8c and 4 ticks in a 2-thread lane); on the laptop CPU alone (no GPU) ice 4904 -> 4724..4792 in 7 min
+  where f619e8c found nothing, and 9923 -> 5275 in 10 min against 6279; then deep exact-rejoin
   exploring windows (every other one with `explore --hunt=1`, guided skip hunting; `--hunt=0` off; first up to 5 loop windows (60% of the round; Infinity Pain: 4 of 7 loop windows found time): stretches where the run comes back within 48 px (then, all tried, 96 and 160 px) of where it was with nothing
   collected in between (`src/loops.js`), the longest first, each once; then every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
   round), the skip search (`skips.js`, once per best: where the run passes a spot it lands on or hits much later, the
