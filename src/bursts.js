@@ -15,12 +15,15 @@
 // burst changed the room there, or a burst reached it), plus the trophy where it is walkable. The segment study of
 // Infinity Pain's known route: 109 of its 120 room changes were found by the CPU search from the route's state, and the
 // long in-room stretches it missed were found by exhaustive GPU bursts aimed at the room's next trigger; the next trigger
-// ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). A burst aims at ONE untried trigger of its room
-// (goexplore.js --burstAim=1, the default; a walk field with its tiles as the goals: the burst's start cell, order, layer
-// cap and nearest attempt), chosen by a bandit over the room's targets (AIM_K below): with all of them as goals at once
-// (--burstAim=0) the nearest won every burst of the room, and a needed trigger far down the list never got one of its
-// own (Forgotten Veil's coin 4 from its coins=3 entry: 14th of 17 by walking distance; Good Egg's coin (7, 190) 11th of
-// 90). A trigger reached is tried, and the next burst aims at the rest.
+// ranked 1st to 7th of 3-136 by walking distance (src/out/ipseg). So a room's bursts start from the archive's cell
+// nearest its live targets (a walk field with all of them as goals), and each aims at ONE of them (goexplore.js
+// --burstAim=1, the default): the target that cell's walk leads to, with a walk field of its tiles alone (the burst's
+// order, layer cap and nearest attempt); a target whose bursts got no nearer to it AIM_K times is retired (below). With
+// every untried target a goal for good (--burstAim=0) an unreachable or wrong nearest target pulled every burst of the
+// room for the whole search, and a needed trigger far down the list never got one of its own (Forgotten Veil's coin 4
+// from its coins=3 entry: 14th of 17 by walking distance; Good Egg's coin (7, 190) 11th of 90). --burstAim=2: each
+// untried target in turn (the walk order from the room's entry), then a bandit over them. A trigger reached is tried,
+// and the next burst aims at the rest.
 //
 // A burst (one eegpu explore process) starts from the archive's cell of that room nearest its targets (every worker is
 // asked for its own; the nearest of all, the earliest among equals), sometimes 60 / 200 ticks back along it; its cells
@@ -86,12 +89,14 @@ const UNTRIED = 1.5;
 const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
-// one target per burst (--burstAim=1): a room's untried targets are the arms of a bandit of its own: each untried by a
-// burst first, in the order of the room's walk from where it was entered (the nearest first), then by mean reward (the
-// burst's) + AIM_C x sqrt(ln(1 + the room's aimed bursts) / its bursts); a target whose last AIM_K bursts got no nearer to
-// it than its best (by a tile) is retired (never aimed at while another is live); once every target of the room is
-// retired they all come back with twice the patience. The fields of the last AIM_CACHE (room, target) pairs are kept.
-const AIM_K = 3, AIM_C = 0.5, AIM_CACHE = 48, AIM_TROPHY = -2;
+// one target per burst (--burstAim=1): a target whose last AIM_K bursts (chain links too) got no nearer to it than its
+// best (by a tile), with no room change and no new room, is retired: no goal of the room's field while another is live;
+// once every untried target of the room is retired they all come back with twice the patience (AIM_K doubled). With
+// --burstAim=2 the room's untried targets are the arms of a bandit of its own: each untried by a burst first, in the
+// order of the room's walk from where it was entered (the nearest first), then by mean reward (the burst's) + AIM_C x
+// sqrt(ln(1 + the room's aimed bursts) / its bursts), retired the same way. The fields of the last AIM_CACHE (room,
+// target) pairs are kept.
+const AIM_K = 2, AIM_C = 0.5, AIM_CACHE = 48, AIM_TROPHY = -2;
 const CUT = 0xffff;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
@@ -304,17 +309,29 @@ function create(o) {
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
 	const fieldOf = (r) => {
 		// (cached while no trigger of the room was tried since)
-		if (r.fc && r.fc.n === r.tried.size) return r.fc.f;
+		if (r.fc && r.fc.n === r.tried.size && r.fc.g === (r.retGen || 0)) return r.fc.f;
 		const f = fieldOf0(r);
-		r.fc = { n: r.tried.size, f };
+		r.fc = { n: r.tried.size, g: r.retGen || 0, f };
 		return f;
 	};
+	/** (--burstAim=1: a target retired from room r) */
+	const retired = (r, c) => a.burstAim === 1 && r.ts !== undefined && r.ts.has(c) && r.ts.get(c).retired;
 	const fieldOf0 = (r) => {
 		const I = infoOf(r);
+		// (--burstAim=1: every untried target retired: all back, with twice the patience)
+		if (a.burstAim === 1 && r.ts !== undefined) {
+			let live = 0, any = 0;
+			for (const c of I.comps.keys()) if (!r.tried.has(c)) { any++; if (!retired(r, c)) live++; }
+			if (o.field.mode === 'walk' && I.trophies.length) { any++; if (!retired(r, AIM_TROPHY)) live++; }
+			if (any && !live) {
+				for (const t of r.ts.values()) { t.retired = false; t.dry = 0; }
+				r.aimK = (r.aimK || AIM_K) * 2; r.retGen = (r.retGen || 0) + 1; st.revived++;
+			}
+		}
 		const goals = [];
-		for (const [c, tiles] of I.comps) if (!r.tried.has(c)) for (const t of tiles) goals.push(t);
+		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && !retired(r, c)) for (const t of tiles) goals.push(t);
 		const n = goals.length;
-		if (o.field.mode === 'walk') for (const t of I.trophies) goals.push(t);
+		if (o.field.mode === 'walk' && !retired(r, AIM_TROPHY)) for (const t of I.trophies) goals.push(t);
 		if (!goals.length) return null;
 		return Object.assign(walkTo(I, goals), { triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 });
 	};
@@ -344,7 +361,7 @@ function create(o) {
 	 *  mode), f, rank (its place in the room's walk order), of (the untried targets), tile}); null: aim at all of them (one
 	 *  target or none, or --burstAim=0) */
 	const aimOf = (r) => {
-		if (!a.burstAim) return null;
+		if (a.burstAim !== 2) return null;
 		const I = infoOf(r);
 		const arms = [];
 		for (const c of I.comps.keys()) if (!r.tried.has(c)) arms.push(c);
@@ -374,6 +391,40 @@ function create(o) {
 		aimCache.set(key, f);
 		while (aimCache.size > AIM_CACHE) aimCache.delete(aimCache.keys().next().value);
 		return { c: best, f, rank: arms.indexOf(best) + 1, of: arms.length, tile: goals[0] };
+	};
+	/** --burstAim=1: the target the room's field f leads to from tile t (down its walk to a goal: the live target nearest
+	 *  the burst's start cell) and that target's own field; null when f has one target or t has no way to one */
+	const aimAt = (r, f, t) => {
+		if (a.burstAim !== 1 || !f || f.triggers + f.trophies <= 1 || !(t >= 0 && t < N) || f.walk[t] === CUT) return null;
+		const I = infoOf(r), walk = f.walk;
+		for (let k = 0; k < N && walk[t] > 0; k++) {
+			const x = t % W, y = (t / W) | 0, want = walk[t] - 5;
+			let nx = -1;
+			for (let dy = -1; dy <= 1 && nx < 0; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					const xx = x + dx, yy = y + dy;
+					if ((!dx && !dy) || xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					if (walk[yy * W + xx] === want) { nx = yy * W + xx; break; }
+				}
+			}
+			if (nx < 0) return null;
+			t = nx;
+		}
+		if (walk[t] !== 0) return null;
+		const c = TR.comp[t] >= 0 && I.comps.has(TR.comp[t]) ? TR.comp[t] : I.trophies.includes(t) ? AIM_TROPHY : -1;
+		if (c === -1) return null;
+		const goals = c === AIM_TROPHY ? I.trophies : I.comps.get(c);
+		const key = `${r.seq}:${r.gen || 0}:${c}`;
+		let g = aimCache.get(key);
+		if (g) aimCache.delete(key);
+		else g = Object.assign(walkTo(I, goals), { triggers: c === AIM_TROPHY ? 0 : goals.length, trophies: c === AIM_TROPHY ? goals.length : 0 });
+		aimCache.set(key, g);
+		while (aimCache.size > AIM_CACHE) aimCache.delete(aimCache.keys().next().value);
+		if (!r.ts) r.ts = new Map();
+		let rank = 0, of = 0;
+		for (const c2 of I.comps.keys()) if (!r.tried.has(c2) && !retired(r, c2)) { of++; if (c2 === c) rank = of; }
+		if (f.trophies) { of++; if (c === AIM_TROPHY) rank = of; }
+		return { c, f: g, rank, of, tile: goals[0] };
 	};
 	/** every worker's cell of room r nearest the field's goals (the nearest of all; null when none has one) */
 	const nearestCell = (r, walk) => new Promise((res) => {
@@ -581,11 +632,14 @@ function create(o) {
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
-				const aim = p.aim || null;
+				// (--burstAim=1: the one target the room's field leads to from the start cell, and its own field)
+				let aim = p.aim || null;
+				if (!aim) { try { aim = aimAt(r, p.f, cell && cell.tile >= 0 ? cell.tile : r.tile); } catch (e) { aim = null; } }
 				if (aim) st.aimed++;
+				const af = aim ? aim.f : p.f;
 				const left0 = aim ? `target ${aim.c === AIM_TROPHY ? 'the trophy' : `(${aim.tile % W}, ${(aim.tile / W) | 0})`} ${aim.rank} of ${aim.of}`
 					: `${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left`;
-				job = { lane, r, aim, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
+				job = { lane, r, aim, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(af.walk, af.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
 					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${left0}), settings ${ci}, ${back} back` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
@@ -640,7 +694,7 @@ function create(o) {
 				t.n++; t.y += reward;
 				if (r.reached || r.fresh > 0) t.dry = 0;
 				else if (Number.isFinite(r.near) && r.near < t.best - 1) { t.best = r.near; t.dry = 0; }
-				else if (++t.dry >= (job.r.aimK || AIM_K)) { t.retired = true; st.retired++; }
+				else if (++t.dry >= (job.r.aimK || AIM_K)) { t.retired = true; job.r.retGen = (job.r.retGen || 0) + 1; st.retired++; }
 			}
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }

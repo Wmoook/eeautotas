@@ -183,8 +183,9 @@
 //        side)] [--gpuCells=25 (log2 of a burst's cell table)] [--burstCap=262144 (a burst's states per layer at most; 0:
 //        its settings' own, up to 1 M)] (the defaults are the relay's sizing next to every move and the beams: a 2^26
 //        table and 1 M layers on 2 lanes took 3-5.7 GB, more than an 8 GB laptop GPU has beside them; the A100 runs:
-//        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstAim=1 (a burst aims at ONE untried target of its room, picked by a
-//        bandit over the room's targets, retired after bursts that got no nearer; 0: all of them at once, the nearest wins)]
+//        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstAim=1 (a burst aims at ONE untried target of its room: the one its
+//        start cell's walk leads to; a target retired after 2 bursts no nearer to it; 0: all of them for good; 2: each
+//        target in turn, then a bandit over them)]
 //        [--burstSteer=<RCH4 file> (the steer field for the bursts' trophy arm:
 //        its order, as the editor's relay had it; the GPU tool must read RCH4)] [--burstOomS=5 (a burst that found the GPU's
 //        memory full waits this long, doubled while it lasts, up to 120 s: no try of its arm, never the bursts' end)]
