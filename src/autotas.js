@@ -21,7 +21,8 @@
 //      route ends without a route (stopped, a failed physics check, a proof that none exists), the AutoTASer ends too.
 // The CPU: until the handoff Find a route keeps its W workers (the CPU search found the ice level's route) and the grind's
 // stages get SHARE_OF_W = max(1, min(W / 4, threads - W)) threads (<job>/cpu_share, touched while Find a route runs;
-// grind.js reads it at each stage's start); after it, W. (Both at W: 2 x 14 workers on the laptop's 16 threads.)
+// grind.js reads it at each stage's start); after it, W: a stage started on the share is stopped when the share ends and
+// runs again on W threads (grind.js runTool `grown`). (Both at W: 2 x 14 workers on the laptop's 16 threads.)
 // The first route's job is started like the app's Resume: one job at a time, so a job that runs (the user's too) is
 // paused; at the end the AutoTASer pauses its own job only if it still runs the session it started.
 // Every TAS on the way is replayed (C.evaluate) and judged by the job's own rule (common.judge).
