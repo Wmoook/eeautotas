@@ -74,6 +74,8 @@ CU_FN(CUresult, cuEventElapsedTime, (float*, CUevent, CUevent))
 CU_FN(CUresult, cuEventQuery, (CUevent))         // (optional: launch.h's waits; without them a spin in cuCtxSynchronize)
 CU_FN(CUresult, cuEventSynchronize, (CUevent))
 CU_FN(CUresult, cuMemGetInfo_v2, (size_t*, size_t*))   // (optional: explore --lanes sizes its cell table by the free memory)
+CU_FN(CUresult, cuMemAllocHost_v2, (void**, size_t))   // (optional: page-locked host buffers, e.g. eegpu roll's copies; else malloc)
+CU_FN(CUresult, cuMemFreeHost, (void*))
 
 typedef int nvrtcResult; typedef void* nvrtcProgram;
 CU_FN(nvrtcResult, nvrtcVersion, (int*, int*))
@@ -120,6 +122,8 @@ inline bool loadDriver() {
 	cuEventQuery = (t_cuEventQuery)CU_SYM(m, "cuEventQuery");
 	cuEventSynchronize = (t_cuEventSynchronize)CU_SYM(m, "cuEventSynchronize");
 	cuMemGetInfo_v2 = (t_cuMemGetInfo_v2)CU_SYM(m, "cuMemGetInfo_v2");
+	cuMemAllocHost_v2 = (t_cuMemAllocHost_v2)CU_SYM(m, "cuMemAllocHost_v2");
+	cuMemFreeHost = (t_cuMemFreeHost)CU_SYM(m, "cuMemFreeHost");
 	return true;
 }
 
@@ -300,6 +304,20 @@ struct Buf {
 	bool alloc(size_t n) { free(); bytes = n ? n : 8; CU_TRY(cuMemAlloc_v2(&p, bytes)); return true; }
 	bool upload(const void* src, size_t n) { if (!alloc(n)) return false; if (n) CU_TRY(cuMemcpyHtoD_v2(p, src, n)); return true; }
 	void free() { if (p) cuMemFree_v2(p); p = 0; }
+};
+/** a host buffer for copies to and from the GPU: page-locked where the driver gives it (faster copies), else malloc */
+struct HostBuf {
+	uint8_t* p = nullptr; size_t bytes = 0; bool locked = false;
+	bool alloc(size_t n) {
+		free();
+		bytes = n ? n : 8;
+		void* q = nullptr;
+		if (cuMemAllocHost_v2 && cuMemFreeHost && cuMemAllocHost_v2(&q, bytes) == 0 && q) { p = (uint8_t*)q; locked = true; return true; }
+		p = (uint8_t*)malloc(bytes);
+		return p != nullptr;
+	}
+	void free() { if (p) { if (locked) cuMemFreeHost(p); else ::free(p); } p = nullptr; locked = false; }
+	~HostBuf() { free(); }
 };
 
 }  // namespace cu

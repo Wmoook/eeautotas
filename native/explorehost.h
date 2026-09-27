@@ -3,7 +3,10 @@
 //                 --above=<tick-start py limit> --land=x0,x1 [--depth=200] [--cap=2000000] [--seconds=120]
 // From the run's state after T ticks (`-`: the level start), expands every input every tick, one state per cell
 // (explore.h), and reports every input history whose next tick is a ground jump on the floor from above its row (JSON
-// lines). --reach=<file> (src/reach.js, RCH3): the reach field orders each cell's candidates (nearer the trophy
+// lines). --steer=<file> (src/steer.js, RCH4; with --reach): the gate-aware steer field orders instead of the reach field
+// (the priority, the closest attempt; --costslack drops a state only above both fields' ceilings); only the reach field
+// prunes. A file that cannot be used is an error ("steer":0).
+// --reach=<file> (src/reach.js, RCH3): the reach field orders each cell's candidates (nearer the trophy
 // first) and measures the closest attempt; with --prune=1 the states it cuts off are dropped (a proof: they cannot
 // reach the trophy; the finish test comes first). Other targets: --enter=x0,y0,x1,y1 (the box centre enters those
 // tiles), --ahead=1 (ahead of the run),
@@ -136,6 +139,17 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	if (!layoutOrError(g, TW)) return 4;
+	// --steer=<file> (src/steer.js RCH4, with --reach): the priority and the closest attempt read the gate-aware steer field
+	// (the prune stays the reach field's -1; --costslack keeps a state below either field's ceiling). Uploaded before the
+	// free-memory check and the tables, which then leave room for it. A file that cannot be used is an error: the caller
+	// (src/editor.js) runs the tool again without it, rather than reading reach-field distances as steer ones.
+	SteerGpu steerGpu;
+	SteerField steerF;
+	memset(&steerF, 0, sizeof steerF);
+	if (!opt(argc, argv, "reach", "").empty() && !opt(argc, argv, "steer", "").empty()) {
+		std::string err;
+		if (!steerGpu.load(opt(argc, argv, "steer", ""), B, L, steerF, err)) { printf("{\"error\":%s,\"steer\":0}\n", jsonStr("the steer field cannot be used: " + err).c_str()); return 3; }
+	}
 	cu::CUfunction fexp = g.fn("exploreExpand_" + std::to_string(TW)), fmat = g.fn("exploreMaterialize_" + std::to_string(TW));
 	cu::CUfunction fProp = g.fn("exploreClaimPropose"), fCount = g.fn("exploreClaimCount"), fTake = g.fn("exploreClaimTake");
 	if (!fexp || !fmat || !fProp || !fCount || !fTake) { printf("{\"error\":\"explore kernels missing\"}\n"); return 4; }
@@ -153,7 +167,21 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		const size_t rest = 2 * sizeof(S) * (size_t)cap + 20ull * 18 * cap + ((size_t)1 << 30);
 		if (!cu::cuMemGetInfo_v2(&fr, &tot) && fr >= (16ull << 27) + rest) cellLog = 27;
 	}
-	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
+	// (--cells: up to 2^31, 32 GB with the best-state table: the editor's wall breaker on an 80 GB GPU (editor.js
+	// BREAK_MEM_F); on too little memory the allocation below halves it)
+	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(31, atoi(opt(argc, argv, "cells", "27").c_str())));
+	// --reserve=<MB>: the table and the state buffers fit the GPU's free memory less this much (the editor's wall breaker:
+	// the table it asks for where it fits, never the memory the other processes on a shared GPU still need; down to 2^24)
+	if (opt(argc, argv, "reserve", "").size() && cu::cuMemGetInfo_v2) {
+		size_t fr = 0, tot = 0;
+		if (!cu::cuMemGetInfo_v2(&fr, &tot)) {
+			const size_t keep = (size_t)std::max(0, atoi(opt(argc, argv, "reserve", "0").c_str())) << 20;
+			const size_t rest = 2 * sizeof(S) * (size_t)cap + 20ull * 18 * cap + ((size_t)256 << 20);
+			const uint32_t asked = cellLog;
+			while (cellLog > 24 && (16ull << cellLog) + rest + keep > fr) cellLog--;
+			if (cellLog != asked) { printf("{\"warn\":\"2^%u cells do not fit the free memory less the reserve: 2^%u\",\"cellLog\":%u,\"freeMB\":%zu}\n", asked, cellLog, cellLog, fr >> 20); fflush(stdout); }
+		}
+	}
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist, dstats, dlost;
 	const size_t nCandMax = (size_t)cap * 18;
@@ -220,13 +248,25 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (wantNear) { P.goalDist = haveGoal ? (const float*)(uintptr_t)dgoal.p : nullptr; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.reach = reachF;
 	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
+	// --steer=<file> (src/steer.js RCH4, loaded above): the priority and the closest attempt read the gate-aware steer field
+	if (reachF.on) P.steer = steerF;
+	if (P.steer.on) printf("{\"ev\":\"steer\",\"layers\":%d,\"bodies\":%d,\"coinDP\":%d,\"mb\":%.1f,\"samePre\":%d}\n", P.steer.S, P.steer.nBodies, P.steer.dpN, steerGpu.raw.size() / 1048576.0, P.steer.samePre);
 	// --costslack=<tiles>: states the reach field puts more than that farther from the trophy than the start are dropped (the
-	// relay: a 200x200 level's open arrow fields filled its table with states going back the way it came)
+	// relay: a 200x200 level's open arrow fields filled its table with states going back the way it came); with --steer
+	// only those the steer field too puts more than that farther than the start (a state it has no value for is kept)
 	{
 		const double slack = atof(opt(argc, argv, "costslack", "0").c_str());
 		if (slack > 0 && reachGpu.H.on) {
+			// (with the steer field a second ceiling, its cost at the start + the slack: a state is dropped only above both)
 			const i32 own0 = reachFifths(reachGpu.H, start->px, start->py, start->speed_y, start->q0, start->q1, start->slippery);
-			if (own0 >= 0) { P.maxFifths = own0 + (i32)(slack * 5.0); printf("{\"ev\":\"costslack\",\"start\":%.1f,\"max\":%.1f}\n", own0 / 5.0, P.maxFifths / 5.0); }
+			const i32 so0 = P.steer.on ? steerFifths<TW>(steerGpu.H, L, *start) : -1;
+			if (own0 >= 0) {
+				P.maxFifths = own0 + (i32)(slack * 5.0);
+				if (so0 >= 0) P.maxSteer = so0 + (i32)(slack * 5.0);
+				printf("{\"ev\":\"costslack\",\"start\":%.1f,\"max\":%.1f", own0 / 5.0, P.maxFifths / 5.0);
+				if (so0 >= 0) printf(",\"steerStart\":%.1f,\"steerMax\":%.1f", so0 / 5.0, P.maxSteer / 5.0);
+				printf("}\n");
+			}
 		}
 	}
 	P.discrete = opt(argc, argv, "discrete", "0") == "1" ? 1 : 0;
@@ -399,10 +439,15 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		lk::Chunk& ck = f == fProp ? ckProp : f == fCount ? ckCount : ckTake;
 		lk::over(ck, Q.nCand, 256, f, aq, what, [&](uint32_t lo, uint32_t hi) { Q.lo = lo; Q.hi = hi; });
 	};
+	// --steer: the layers that order by the steer field (its lookup per new child): every STEER_EVERY-th, and every one
+	// once the last one's new cells came near the cap (over half: the priority cuts there); the others by the reach field
+	const int STEER_EVERY = 4;
+	uint32_t lastWin = 0;
 	for (;;) {
 	for (; d < depthMax && nParents > 0 && elapsed() < seconds; d++) {
 		cu::cuMemsetD8_v2(dnout.p, 0, 4);
 		P.parents = (const u8*)(uintptr_t)cur; P.nParents = nParents; P.layer = d;
+		P.steerAll = P.steer.on && (d % STEER_EVERY == 0 || (uint64_t)lastWin * 2 > (uint64_t)cap) ? 1 : 0;
 		P.lanes = lanes > 1 ? (const u8*)(uintptr_t)lcur : nullptr;
 		if (wantNear) cu::cuMemsetD8_v2(dclose.p, 0xff, 8);
 		void* a1[] = { &P };
@@ -428,6 +473,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 			claimPass(fProp, "explore claim");   // (every proposal before the first count)
 			claimPass(fCount, "explore count");
 			cu::cuMemcpyDtoH_v2(&nWin, dnwin.p, 4);
+			lastWin = nWin;
 			cu::cuMemcpyDtoH_v2(&nLost, dlost.p, 4);
 			if (opt(argc, argv, "debug", "0") == "1") fprintf(stderr, "layer %d: %u parents, %u candidates, %u winners, %u lost\n", d, (unsigned)nParents, Q.nCand, nWin, nLost);
 			if (nWin > (uint32_t)cap) {
@@ -589,7 +635,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		lk::memset8(dcells.p, 0, 8ull * cellCount, "memset");
 		lk::memset8(dbest.p, 0xff, 8ull * cellCount, "memset");
 		cu::cuMemsetD8_v2(dnhits.p, 0, 4);
-		lineage.clear(); overflow = 0; hitsSeen = 0; hits.clear(); d = 0;
+		lineage.clear(); overflow = 0; hitsSeen = 0; hits.clear(); d = 0; lastWin = 0;
 		startBatch();
 	}
 	}

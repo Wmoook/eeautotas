@@ -7,6 +7,7 @@
 //   stateSize_<TW>: the sizes of State<TW> and the kernels' parameter structs on the device (the host checks that the
 //   layouts agree), and the reach file version (3)
 //   reachTest_<TW>: reachFifths and reachScore (beam.h) for a list of states (test/reach.js F: the JS and the GPU agree)
+//   steerTest_<TW>: steerFifths and steerScore (beam.h) for a list of states (test/steer.js: the JS and the GPU agree)
 // <TW> = capacity of the state's variable tail in words (8, 32, 128, 512); the host picks the smallest that fits.
 #include "eecore.h"
 #include "search.h"
@@ -241,6 +242,14 @@ __device__ __forceinline__ void beamExpandParent(const BeamParams& p, const i32 
 					const i32 own = rfFifthsAt(p.reach, pre, s.px, s.py, s.speed_y);
 					gd = own >= 0 ? reachScore(p.reach, pre, s.px, s.py, s.speed_y, own) : 1e4f + walk;
 					ck = own >= 0 ? (float)own / 5.f : gd;
+					// the steer field (--steer): the gate-aware cost instead; a state it has no value for comes after every
+					// valued one (the reach field's cost + STEER_MISS tiles)
+					if (p.steer.on && own >= 0) {
+						i32 so = -1;
+						const float sg = steerScore<TW>(p.steer, p.L, s, &so);
+						if (so >= 0) { gd = sg < STEER_REAL_MAX ? sg : STEER_REAL_MAX; ck = steerTiles(so); }
+						else { gd = ck = steerMiss((float)own / 5.f); }
+					}
 				}
 				if (p.goalWeight > 0) sc -= p.goalWeight * gd;
 				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
@@ -383,17 +392,22 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			if (h < p.hitCap) { ExploreHit e; e.parent = (u32)pi; e.option = (u8)o; e.jumpOption = 255; e.lane = (u8)lane; e.pad1 = 0; e.px = (float)s.px; e.vx = (float)s.speed_x; e.layer = p.layer; e.gain = 0; e.refTick = -1; p.hits[h] = e; }
 			continue;
 		}
+		i32 own = -1;   // the reach field's cost (fifths; -1 cut off)
 		if (p.reach.on) {
-			const i32 own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
+			own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
 			// the physics model rules this state out: it cannot reach the trophy (a proof)
 			if (p.prune && own < 0) continue;
-			// (--costslack: a relay goes on from its start, it does not wander back; a heuristic bound, not a proof)
-			if (p.maxFifths > 0 && own > p.maxFifths) continue;
-			rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
-			if (p.closest) {
-				const float ck = own >= 0 ? (float)own / 5.f : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
-				const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
-				if (k < nearest) nearest = k;
+			// the reach field's order (with --steer only for the states it cuts off, which get no steer lookup; the others'
+			// ceiling, priority and closest attempt come after the cell, below)
+			if (!p.steer.on || own < 0) {
+				// (--costslack: a relay goes on from its start, it does not wander back; a heuristic bound, not a proof)
+				if (p.maxFifths > 0 && own > p.maxFifths) continue;
+				rcq = own < 0 ? 4095u : (u32)min(own >> p.reach.prioShift, 4095);
+				if (p.closest) {
+					const float ck = own >= 0 ? (float)own / 5.f : 1e4f + (p.goalDist ? goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f) : 1e6f);
+					const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
+					if (k < nearest) nearest = k;
+				}
 			}
 		} else if (p.closest) {
 			const u64 k = ((u64)orderedScore(goalDistAt(p.goalDist, p.L, (float)s.px + 8.f, (float)s.py + 8.f)) << 32) | ((u32)pi << 5) | (u32)o;
@@ -479,6 +493,34 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		// waiting: a ball at rest (no input, not moved, no speed) stays in the frontier even when its cell is known, so it
 		// is there when the time doors switch (then its cells are new again: the door phase is part of them)
 		const bool rest = p.keepRest && o == 0 && s.px == par->px && s.py == par->py && eq0(s.speed_x) && eq0(s.speed_y);
+		// the steer field (--steer; the reach field allows the state): the lookup only for a child the claim can keep, one
+		// whose cell no earlier layer saw (or a ball at rest). A child of a seen cell is dropped whatever its priority, so it
+		// is dropped here, without the lookup (the claim's own verdict; most children of a layer are such). And only in a
+		// layer that orders by it (steerAll: every 4th, and every one while the layers are near the cap, where the priority
+		// cuts; elsewhere it only picks which child stands for a new cell) or for the ceiling: the lookup reads the layer's
+		// body, and a big steer file's bodies do not stay in the GPU's cache (the same work 2-2.9x slower on Good Egg,
+		// Stupid Fox and Octorage with a lookup per new child). The closest attempt: the nearest of the children kept in the
+		// layers that order by it.
+		if (p.steer.on && own >= 0) {
+			if (!rest && exploreSeenBefore(p.cells, p.cellMask, key & ~0xfffull, (u32)p.layer)) continue;
+			const bool ceil = p.maxFifths > 0 && own > p.maxFifths;
+			if (p.steerAll || ceil) {
+				const i32 so = steerFifths<TW>(p.steer, p.L, s);
+				// (--costslack: dropped only above both ceilings, the reach field's and the steer field's, so the relay never
+				// drops a state it keeps without the steer field; a state the steer field has no value for is kept, as without
+				// a ceiling of its own: Good Egg's route passes 56 such ticks, and the reach field's ceiling alone cut 24% of
+				// the relay starts along it; without a steer value at the start: the reach field's ceiling alone)
+				if (ceil && (p.maxSteer <= 0 || so > p.maxSteer)) continue;
+				if (p.steerAll) {
+					rcq = so < 0 ? 4095u : (u32)min(so >> p.steer.prioShift, 4095);
+					if (p.closest) {
+						const float ck = so >= 0 ? steerTiles(so) : steerMiss((float)own / 5.f);
+						const u64 k = ((u64)orderedScore(ck) << 32) | ((u32)pi << 5) | (u32)o;
+						if (k < nearest) nearest = k;
+					}
+				} else rcq = (u32)min(own >> p.reach.prioShift, 4095);
+			} else rcq = (u32)min(own >> p.reach.prioShift, 4095);
+		}
 		p.candKey[(size_t)pi * 18 + o] = (key & ~0xfffull) | (rest ? 2ull : 0ull) | 1ull;
 		// (without a reach field the head is part of the content, so a full layer is still cut the same way every run)
 		const u64 head = p.reach.on ? (u64)rcq : (content >> 52);
@@ -576,6 +618,107 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	}
 }
 
+// ---------------------------------------------------------------- random runs (explore.h RollParams, `eegpu roll`)
+/** the cell table's slot of `key`, inserted when new and `insert`; -1 when it is not there (and not inserted: a full
+ *  pool, or 64 probes all taken) */
+__device__ __forceinline__ i32 rollSlot(const RollParams& p, u64 key, bool insert) {
+	u32 slot = (u32)(splitmix(key) & p.mask);
+	for (u32 probe = 0; probe < 64; probe++) {
+		u64 k = p.keys[slot];
+		if (k == key) return (i32)slot;
+		if (k == 0ull) {
+			if (!insert) return -1;
+			k = atomicCAS((unsigned long long*)&p.keys[slot], 0ull, (unsigned long long)key);
+			if (k == 0ull || k == key) return (i32)slot;
+		}
+		slot = (slot + 1) & p.mask;
+	}
+	return -1;
+}
+// one thread per run (pick x R + run): Lr ticks of goexplore.js's random inputs from the pick's state (the host copied
+// the picks' states from its pool); every state that reaches a cell sooner than the host knows sets the cell's best
+// arrival of the batch (rollCollect replays the winners from the same copies)
+template <int TW>
+__device__ void rollBody(const RollParams& p) {
+	const u32 i = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned long long nTicks = 0, nRuns = 0, nCut = 0, nDead = 0;
+	if (i < p.hi && i < p.nPicks * (u32)p.R) {
+		const u32 pk = i / (u32)p.R, run = i - pk * (u32)p.R;
+		const u32 d = p.picks[pk];
+		const i32 t0 = p.cellT[d];
+		State<TW> s = *(const State<TW>*)(p.pickStates + (size_t)pk * p.stateBytes);
+		Sim<TW> sim(p.L, s);
+		const bool crown0 = s.has_silver_crown != 0;
+		Mulberry r; r.s = rollSeed(p.batchSeed, pk, run);
+		i32 m = option((i32)(r.next() * 18.0));
+		nRuns++;
+		for (i32 k = 0; k < p.Lr; k++) {
+			const i32 t = t0 + k + 1;
+			if (t > p.maxT) break;
+			m = rollDraw(r, p.keep, m);
+			Input in = maskInput(m);
+			sim.tick(in);
+			nTicks++;
+			if (!crown0 && s.has_silver_crown) {
+				const u32 f = atomicAdd(&p.ctr[1], 1u);
+				if (f < p.finCap) { p.fin[4 * f] = pk; p.fin[4 * f + 1] = run; p.fin[4 * f + 2] = (u32)k; p.fin[4 * f + 3] = (u32)t; }
+				break;
+			}
+			if (s.is_dead || s.broken) { nDead++; break; }
+			if (p.reach.on && p.prune && reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) < 0) { nCut++; break; }
+			if (t >= p.maxT) continue;   // (a route from here would not be faster: the next tick ends the run)
+			const i32 slot = rollSlot(p, rollCellKey<TW>(p, s, rollRoom<TW>(p, s)), !p.full);
+			if (slot < 0) continue;
+			atomicAdd(&p.seen[slot], 1u);
+			if ((u32)t >= p.doneT[slot]) continue;
+			const u64 v = ((u64)(u32)t << 40) | ((u64)pk << 20) | ((u64)run << 8) | (u64)(u32)k;
+			if (v < p.best[slot]) {
+				const u64 old = atomicMin((unsigned long long*)&p.best[slot], (unsigned long long)v);
+				if (old == ~0ull) { const u32 q = atomicAdd(&p.ctr[0], 1u); if (q < p.touchedCap) p.touched[q] = (u32)slot; }
+			}
+		}
+	}
+	warpAdd(&p.stats[0], nTicks); warpAdd(&p.stats[1], nRuns); warpAdd(&p.stats[2], nCut); warpAdd(&p.stats[3], nDead);
+}
+/** the touched slots [lo, hi): a cell reached sooner than the host knows is replayed from its pick's copy to the arrival
+ *  (a new cell gets the next dense id while the pool has room), with a record (dense id or -1, tick, reach fifths, room,
+ *  pick, run | step << 16) and its state next to it in `stage` (the host copies it into its pool); the batch's best is
+ *  cleared for the next batch */
+template <int TW>
+__device__ void rollCollectBody(const RollParams& p) {
+	const u32 i = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= p.hi) return;
+	const u32 slot = p.touched[i];
+	const u64 v = p.best[slot];
+	p.best[slot] = ~0ull;
+	const u32 t = (u32)(v >> 40);
+	if (v == ~0ull || t >= p.doneT[slot]) return;
+	p.doneT[slot] = t;
+	const u32 pk = (u32)(v >> 20) & 0xfffffu, run = (u32)(v >> 8) & 0xfffu, step = (u32)v & 0xffu;
+	State<TW> s = *(const State<TW>*)(p.pickStates + (size_t)pk * p.stateBytes);
+	Sim<TW> sim(p.L, s);
+	Mulberry r; r.s = rollSeed(p.batchSeed, pk, run);
+	i32 m = option((i32)(r.next() * 18.0));
+	for (u32 k = 0; k <= step; k++) { m = rollDraw(r, p.keep, m); Input in = maskInput(m); sim.tick(in); }
+	i32 d = p.dense[slot];
+	if (d < 0) {
+		const u32 n = atomicAdd(&p.ctr[3], 1u);
+		if (n < p.denseCap) { d = (i32)n; p.dense[slot] = d; p.denseSlot[d] = slot; }
+	}
+	if (d >= 0) p.cellT[d] = (i32)t;
+	const u32 q = atomicAdd(&p.ctr[2], 1u);
+	*(State<TW>*)(p.stage + (size_t)q * p.stateBytes) = s;
+	i32* o = p.out + 6 * (size_t)q;
+	o[0] = d; o[1] = (i32)t;
+	o[2] = p.reach.on ? reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) : -1;
+	o[3] = (i32)rollRoom<TW>(p, s); o[4] = (i32)pk; o[5] = (i32)(run | (step << 16));
+}
+/** the seen counts by dense id [lo, hi) (head B's novelty) */
+extern "C" __global__ void rollSeen(RollParams p) {
+	const u32 d = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
+	if (d < p.hi) p.seenOut[d] = p.seen[p.denseSlot[d]];
+}
+
 #define INSTANCE(TW) INSTANCE_(TW)
 #define INSTANCE_(TW) \
 	extern "C" __global__ void __launch_bounds__(128) search_##TW(SearchParams p) { searchBody<TW>(p); } \
@@ -583,9 +726,11 @@ __device__ void exploreMaterializeBody(const ExploreParams& p) {
 	extern "C" __global__ void trace_##TW(Level L, const u8* masks, i32 t0, i32 t1, u64* out, const u32* coinBits0, u64 seed, i32* info, u8* state) { traceBody<TW>(L, masks, t0, t1, out, coinBits0, seed, info, state); } \
 	extern "C" __global__ void __launch_bounds__(128) bench_##TW(Level L, const u8* state0, i32 k0, i32 k1, u64 seed, unsigned long long* out, u8* states, u64* rng) { benchBody<TW>(L, state0, k0, k1, seed, out, states, rng); } 	extern "C" __global__ void __launch_bounds__(128) beamExpand_##TW(BeamParams p) { beamExpandBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) beamMaterialize_##TW(BeamParams p) { beamMaterializeBody<TW>(p); } 	extern "C" __global__ void __launch_bounds__(128) exploreExpand_##TW(ExploreParams p) { exploreExpandBody<TW>(p); } \
 	extern "C" __global__ void __launch_bounds__(128) exploreMaterialize_##TW(ExploreParams p) { exploreMaterializeBody<TW>(p); } \
-	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; } \
+	extern "C" __global__ void __launch_bounds__(128) roll_##TW(RollParams p) { rollBody<TW>(p); } \
+	extern "C" __global__ void __launch_bounds__(128) rollCollect_##TW(RollParams p) { rollCollectBody<TW>(p); } \
+	extern "C" __global__ void stateSize_##TW(i32* out) { out[0] = (i32)sizeof(State<TW>); out[1] = (i32)sizeof(SearchParams); out[2] = (i32)sizeof(Hit); out[3] = (i32)sizeof(Level); out[4] = (i32)sizeof(BeamParams); out[5] = (i32)sizeof(ExploreParams); out[6] = (i32)sizeof(ReachField); out[7] = 3; out[8] = (i32)sizeof(RollParams); } \
 	extern "C" __global__ void __launch_bounds__(128) reachTest_##TW(ReachField R, const double* in, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; \
-		if (i < n) { const double* q = in + (size_t)i * 6; const RfPre pre = rfPre(R, q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifthsAt(R, pre, q[0], q[1], q[2]); score[i] = out[i] >= 0 ? reachScore(R, pre, q[0], q[1], q[2], out[i]) : -1.f; } }
+		if (i < n) { const double* q = in + (size_t)i * 6; const RfPre pre = rfPre(R, q[2], (i32)q[3], (i32)q[4], q[5]); out[i] = rfFifthsAt(R, pre, q[0], q[1], q[2]); score[i] = out[i] >= 0 ? reachScore(R, pre, q[0], q[1], q[2], out[i]) : -1.f; } } 	extern "C" __global__ void __launch_bounds__(128) steerTest_##TW(SteerField F, Level L, const u8* states, i32 stateBytes, i32 n, i32* out, float* score) { const i32 i = blockIdx.x * blockDim.x + threadIdx.x; 		if (i < n) { const State<TW>& s = *(const State<TW>*)(states + (size_t)i * stateBytes); i32 own = -1; score[i] = steerScore<TW>(F, L, s, &own); out[i] = own; } }
 // one state size per PTX file (the build passes -DEE_ONLY_TW=8 / 32 / 128 / 512)
 #ifndef EE_ONLY_TW
 #define EE_ONLY_TW 8

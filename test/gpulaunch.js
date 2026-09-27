@@ -170,6 +170,123 @@ check('trace --gpu: every tick\'s hashes equal the native CPU trace', same);
 const ts = eegpu(['trace', bin, lf, path.join(TMP, 'trace_split.bin'), '--gpu', '--launch-items=7']);
 const sameSplit = ts.code === 0 && fs.existsSync(path.join(TMP, 'trace_split.bin')) && fs.readFileSync(path.join(TMP, 'trace_split.bin')).subarray(24).equals(fs.readFileSync(path.join(TMP, 'trace_cpu.bin')).subarray(24));
 check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summary(ts).kernelLaunches} launches`);
+// 6. the random runs (eegpu roll, Find a route's "random runs (GPU)"): 3 batches of 512 picks of the start cell, 8 runs of
+// 40 ticks each. Every record (a new cell's earliest arrival) is replayed here from its seed in the JS engine: the tick,
+// the reach field's fifths and the room (goexplore.js roomOf) must be the GPU's; split into launches of 128 runs / cells
+// the batches give the same records in the same order (the canonical order; the dense ids apart: they are handed out in
+// the GPU's order). Then a room with every door the room key reads (a team effect and door, coins and a coin door, time
+// doors: the phase buckets, a key, two purple switches in a row: on, then off again) and batches that pick the cells of
+// the batches before (states that went through the host's pool): every record replayed along its path (the pick's
+// path, then this run's inputs)
+{
+	const GX = require('../src/goexplore.js');
+	const field = RF.reachField(level), RM = GX.roomOf(level);
+	const K = 512, seeds = [11, 12, 13];
+	const job = Buffer.concat(seeds.flatMap((sd) => [Buffer.from(`batch ${K} 100000 ${sd}\n`), Buffer.alloc(4 * K)]).concat([Buffer.from('stop\n')]));
+	const roll = (extra, lvBin, lvReach, input) => {
+		const full = ['roll', lvBin || bin, `--reach=${lvReach || reach}`, '--rolls=8', '--roll=40', '--cap=65536', `--launch-ms=${TARGET}`, ...extra, ...(args.ptxdir ? [`--ptxdir=${path.resolve(args.ptxdir)}`] : [])];
+		const [cmd, argv] = LOCK ? [process.execPath, [LOCK, TOOL, ...full]] : [TOOL, full];
+		const t0 = Date.now();
+		const r = spawnSync(cmd, argv, { input: input || job, maxBuffer: 1 << 28, timeout: (LOCK ? 3600 : 120) * 1000, windowsHide: true });
+		const out = r.stdout || Buffer.alloc(0), lines = [], batches = [];
+		for (let o = 0; o < out.length;) {
+			const k = out.indexOf(10, o);
+			if (k < 0) break;
+			let ev = {};
+			try { ev = JSON.parse(out.subarray(o, k).toString('utf8')); } catch (e) { /* not JSON */ }
+			o = k + 1;
+			lines.push(ev);
+			if (ev.ev === 'batch') {
+				const recs = [];
+				for (let j = 0; j < ev.n; j++) { const q = o + 24 * j; recs.push([out.readInt32LE(q), out.readInt32LE(q + 4), out.readInt32LE(q + 8), out.readInt32LE(q + 12), out.readInt32LE(q + 16), out.readInt32LE(q + 20)]); }
+				batches.push(recs);
+				o += ev.bytes;
+			}
+		}
+		return { code: r.status, lines, ms: Date.now() - t0, err: String(r.stderr || '').trim().split('\n').pop(), batches };
+	};
+	const a = roll([]);
+	bound('roll (3 batches of 512 picks x 8 runs x 40 ticks)', a);
+	let bad = 0, n = 0;
+	const sim = new E.EESim(level), inp = new E.EEInput();
+	a.batches.forEach((recs, bi) => {
+		for (const [d, t, fifths, room, pk, rs] of recs) {
+			const ms = new Uint8Array((rs >>> 16) + 1);
+			GX.rollInputs(GX.rollSeed(seeds[bi], pk, rs & 0xffff), ms.length, 0.85, ms, 0);
+			sim.reset();
+			for (const x of ms) { E.applyMask(inp, x); sim.tick(inp); }
+			n++;
+			if (d < 0 || ms.length !== t || RF.fifthsAt(field, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery) !== fifths || (RM.key(sim) | 0) !== room) bad++;
+		}
+	});
+	check('roll: every new cell\'s state, replayed from its seed in the JS engine, has the GPU\'s tick, reach cost and room', n > 100 && bad === 0, `${n} cells, ${bad} different`);
+	const b2 = roll(['--launch-items=128']);
+	const key = (r) => r.batches.map((recs) => recs.map((x) => x.slice(1).join(',')).join(';')).join('|');
+	check('roll split into launches of 128 runs / cells: the same records in the same order', b2.code === 0 && key(a) === key(b2) && summary(b2).kernelLaunches > summary(a).kernelLaunches,
+		`${a.batches.map((x) => x.length).join(' + ')} records; ${summary(a).kernelLaunches} launches vs ${summary(b2).kernelLaunches}`);
+	// the doors' room
+	const dc = [];
+	for (let x = 0; x < W; x++) dc.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 0; y < H; y++) dc.push([0, y, 9], [W - 1, y, 9]);
+	dc.push([2, 14, 255], [38, 14, 121], [3, 14, 423, 1], [4, 14, 113, 1], [6, 14, 113, 1], [5, 12, 100], [7, 12, 100], [9, 12, 100], [8, 13, 6],
+		[30, 14, 184, 1], [32, 14, 1027, 1], [34, 14, 43, 2], [36, 14, 156], [37, 14, 23]);
+	const dl = E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'roll doors', width: W, height: H, cells: dc }))));
+	const dBin = path.join(TMP, 'doors.bin'), dReach = path.join(TMP, 'doors_reach.bin');
+	fs.writeFileSync(dBin, G.levelBlob(dl));
+	const dField = RF.reachField(dl), dRM = GX.roomOf(dl);
+	RF.writeReachFile(dField, dReach);
+	// (batch 1 picks the start, batch 2 the cells 1..128, batch 3 the cells 150..277, 4 picks each: dense ids the batches
+	// before gave out)
+	const dSeeds = [21, 22, 23], picksOf = [new Uint32Array(K), new Uint32Array(K).map((_, j) => 1 + (j & 127)), new Uint32Array(K).map((_, j) => 150 + (j & 127))];
+	const dJob = Buffer.concat(dSeeds.flatMap((sd, bi) => [Buffer.from(`batch ${K} 100000 ${sd}\n`), Buffer.from(picksOf[bi].buffer)]).concat([Buffer.from('stop\n')]));
+	const d = roll(['--cap=200000'], dBin, dReach, dJob);
+	bound('roll on the doors\' room (3 batches: the start, then cells of the batches before)', d);
+	// (the room as the GPU keys it: a switch that went on and off again leaves an entry in the engine's Map, which roomOf
+	// hashes (its sum 0) and the GPU, which keeps only the switches' bits, does not: the same doors, only the name differs)
+	const gpuRoom = (sim) => {
+		const sw = sim._switches, osw = sim._oswitches;
+		const on = (m) => new Map([...m].filter(([, v]) => v === true));
+		sim._switches = on(sw); sim._oswitches = on(osw);
+		const k = dRM.key(sim) | 0;
+		sim._switches = sw; sim._oswitches = osw;
+		return k;
+	};
+	const paths = new Map([[0, new Uint8Array(0)]]);
+	let dn = 0, dBad = 0, unordered = 0, offAgain = 0, team = 0, coins = 0, keys = 0, noPath = 0, deep = 0;
+	const phases = new Set();
+	const dSim = new E.EESim(dl), dInp = new E.EEInput();
+	d.batches.forEach((recs, bi) => {
+		const upd = [];
+		let prev = -1;
+		for (const [dd, t, fifths, room, pk, rs] of recs) {
+			const run = rs & 0xffff, step = rs >>> 16;
+			const k = ((t * K + pk) * 8 + run) * 256 + step;
+			if (k <= prev) unordered++;
+			prev = k;
+			const base = paths.get(picksOf[bi][pk]);
+			if (!base) { noPath++; continue; }
+			const ms = new Uint8Array(base.length + step + 1);
+			ms.set(base);
+			GX.rollInputs(GX.rollSeed(dSeeds[bi], pk, run), step + 1, 0.85, ms, base.length);
+			dSim.reset();
+			for (const x of ms) { E.applyMask(dInp, x); dSim.tick(dInp); }
+			dn++;
+			if (base.length > 0) deep++;
+			if (dd < 0 || ms.length !== t || RF.fifthsAt(dField, dSim.px, dSim.py, dSim.speed_y, dSim._q0, dSim._q1, dSim._slippery) !== fifths || gpuRoom(dSim) !== room) dBad++;
+			if ([...dSim._switches.values()].some((v) => v !== true)) offAgain++;
+			if (dSim.team) team++;
+			if (dSim.coins > 0) coins++;
+			if (dSim._keysMask) keys++;
+			phases.add(Math.floor((dSim._ticks % 1000) / 50));
+			if (dd >= 0) upd.push([dd, ms]);
+		}
+		for (const [dd, ms] of upd) paths.set(dd, ms);
+	});
+	check('roll on the doors\' room: every record, replayed along its pick\'s path and its run, has the GPU\'s tick, reach cost and room; in (tick, pick, run, step) order',
+		d.code === 0 && d.batches.length === 3 && dn > 1000 && deep > 500 && dBad === 0 && unordered === 0 && noPath === 0 && offAgain > 0 && team > 0 && coins > 0 && keys > 0 && phases.size > 1,
+		`${dn} records (${deep} from picked cells), ${dBad} different, ${unordered} out of order, ${noPath} without a path; switches on and off again ${offAgain}, team ${team}, coins ${coins}, ` +
+		`key ${keys}, ${phases.size} door phases${d.code ? `; exit ${d.code} ${d.err}` : ''}`);
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);

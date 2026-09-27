@@ -3,8 +3,12 @@
 //   eegpu state <level.bin> <run.eetas> <tick>               the full state after <tick> ticks (JSON, for debugging)
 //   eegpu info                                               the GPU and every kernel's registers (JSON), or {"gpu":null,"why":...};
 //                                                            both with "reach":3 (the reach file version it reads: src/reach.js RCH3)
+//                                                            and "steer":4 (the steer file: src/steer.js RCH4)
 //   eegpu twins <level.bin> <run.eetas> [out.bin] [...]      CPU check of the searches' twin rule (runTwins)
 //   eegpu reachtest <level.bin> <reach> <states.bin> [--gpu=1]  the reach lookup of a list of states (test/reach.js F)
+//   eegpu steertest <level.bin> <steer> <run.eetas> [--gpu=1]   the steer lookup after every tick of a run (test/steer.js)
+//   eegpu roll <level.bin> [--reach=<file>] [--rolls=8] [--roll=40]   Find a route's GPU random runs: a server for
+//                                                            src/goexplore.js --gpu=1, jobs on stdin (rollhost.h)
 //   eegpu prove <level.bin> [--reach=<file>] [--seconds=30] [--maxCells=N]   a sound "no route" proof (prove.h; CPU only:
 //                                                            it never loads the NVIDIA driver)
 // Level files come from src/gpu.js levelBlob(); .eetas are raw bytes (mask = (byte - 48) & 31).
@@ -41,6 +45,7 @@
 #include "beam.h"
 #include "explore.h"
 #define REACH_VERSION 3   // the reach file this tool reads (src/reach.js RCH3; eegpu info "reach")
+#define STEER_VERSION 4   // the steer file this tool reads (src/steer.js RCH4; eegpu info "steer")
 
 using namespace ee;
 
@@ -336,23 +341,23 @@ static std::string ptxFor(int argc, char** argv, int tw) {
 static int twFor(int tailWords) { return tailWords <= 8 ? 8 : tailWords <= 32 ? 32 : tailWords <= 128 ? 128 : tailWords <= 512 ? 512 : 0; }
 
 /** the kernels' struct sizes on the device (stateSize_<tw>): State<tw>, SearchParams, Hit, Level, BeamParams,
- *  ExploreParams, ReachField, and the reach file version they read; true when they match this tool's */
-static bool deviceLayout(Gpu& g, int tw, int sz[8]) {
-	for (int k = 0; k < 8; k++) sz[k] = 0;
+ *  ExploreParams, ReachField, the reach file version they read, RollParams; true when they match this tool's */
+static bool deviceLayout(Gpu& g, int tw, int sz[9]) {
+	for (int k = 0; k < 9; k++) sz[k] = 0;
 	cu::Buf out;
-	if (!out.alloc(32)) return false;
+	if (!out.alloc(64)) return false;
 	cu::CUfunction f = g.fn("stateSize_" + std::to_string(tw));
 	void* args[] = { &out.p };
 	if (!f) return false;
 	lk::launch(f, 1, 1, args, "stateSize");   // (launch.h: timed; a launch error ends the command with its launchError line)
-	cu::cuMemcpyDtoH_v2(sz, out.p, 32);
+	cu::cuMemcpyDtoH_v2(sz, out.p, 36);
 	const int state = tw == 8 ? (int)sizeof(State<8>) : tw == 32 ? (int)sizeof(State<32>) : tw == 128 ? (int)sizeof(State<128>) : (int)sizeof(State<512>);
 	return sz[0] == state && sz[1] == (int)sizeof(SearchParams) && sz[2] == (int)sizeof(Hit) && sz[3] == (int)sizeof(Level) &&
-		sz[4] == (int)sizeof(BeamParams) && sz[5] == (int)sizeof(ExploreParams) && sz[6] == (int)sizeof(ReachField) && sz[7] == REACH_VERSION;
+		sz[4] == (int)sizeof(BeamParams) && sz[5] == (int)sizeof(ExploreParams) && sz[6] == (int)sizeof(ReachField) && sz[7] == REACH_VERSION && sz[8] == (int)sizeof(RollParams);
 }
 /** beam / explore: refuse kernels built from other sources (their parameter structs would be read wrong) */
 static bool layoutOrError(Gpu& g, int tw) {
-	int sz[8];
+	int sz[9];
 	if (deviceLayout(g, tw, sz)) return true;
 	printf("{\"error\":\"the GPU kernels do not match this tool (rebuild it: node tools/build-native.js)\"}\n");
 	return false;
@@ -361,15 +366,15 @@ static bool layoutOrError(Gpu& g, int tw) {
 static int cmdInfo(int argc, char** argv) {
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, 8))) {
-		printf("{\"gpu\":null,\"reach\":%d,\"why\":%s}\n", REACH_VERSION, jsonStr(cu::lastError).c_str());
+		printf("{\"gpu\":null,\"reach\":%d,\"steer\":%d,\"why\":%s}\n", REACH_VERSION, STEER_VERSION, jsonStr(cu::lastError).c_str());
 		return 0;
 	}
-	int sz[8];
+	int sz[9];
 	const bool layoutOk = deviceLayout(g, 8, sz);
 	// every kernel's registers, local memory (the stack frame: spills and out-of-line calls) and block size limit
 	std::string fa;
-	for (const char* k : { "search_8", "twins_8", "trace_8", "bench_8", "beamExpand_8", "beamMaterialize_8", "exploreExpand_8", "exploreMaterialize_8",
-			"beamSelInsert", "beamSelPick", "exploreClaimPropose", "exploreClaimTake", "reachTest_8" }) {
+	for (const char* k : { "search_8", "twins_8", "trace_8", "bench_8", "beamExpand_8", "beamMaterialize_8", "exploreExpand_8", "exploreMaterialize_8", "roll_8", "rollCollect_8",
+			"beamSelInsert", "beamSelPick", "exploreClaimPropose", "exploreClaimTake", "reachTest_8", "steerTest_8" }) {
 		cu::CUfunction fs = g.fn(k);
 		int regs = -1, local = -1, maxT = -1;
 		if (fs) { cu::cuFuncGetAttribute(&regs, 4, fs); cu::cuFuncGetAttribute(&local, 3, fs); cu::cuFuncGetAttribute(&maxT, 0, fs); }
@@ -380,10 +385,10 @@ static int cmdInfo(int argc, char** argv) {
 	// wait for that before the process exits: an exit right after them logged an nvlddmkm 153 in about half the runs
 	// (2 of 4 on the RTX 3080 Laptop, 0 of 9 with this wait, 0 of 4 with CUDA_MODULE_LOADING=EAGER)
 	cu::cuCtxSynchronize();
-	printf("{\"module\":\"%s\",\"loadMs\":%.0f,\"kernels\":{%s},\"reach\":%d,", g.how.how.c_str(), g.loadMs, fa.c_str(), REACH_VERSION);
-	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d,%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d,%d,%d,%d,%d]%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
-		sz[0], sz[1], sz[2], sz[3], sz[4], sz[5], sz[6], sz[7], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level),
-		(int)sizeof(BeamParams), (int)sizeof(ExploreParams), (int)sizeof(ReachField), REACH_VERSION, lk::doneFields().c_str());
+	printf("{\"module\":\"%s\",\"loadMs\":%.0f,\"kernels\":{%s},\"reach\":%d,\"steer\":%d,", g.how.how.c_str(), g.loadMs, fa.c_str(), REACH_VERSION, STEER_VERSION);
+	printf("\"gpu\":%s,\"layoutOk\":%s,\"deviceSizes\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"hostSizes\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"roll\":1%s}\n", g.json().c_str(), layoutOk ? "true" : "false",
+		sz[0], sz[1], sz[2], sz[3], sz[4], sz[5], sz[6], sz[7], sz[8], (int)sizeof(State<8>), (int)sizeof(SearchParams), (int)sizeof(Hit), (int)sizeof(Level),
+		(int)sizeof(BeamParams), (int)sizeof(ExploreParams), (int)sizeof(ReachField), REACH_VERSION, (int)sizeof(RollParams), lk::doneFields().c_str());
 	return 0;
 }
 
@@ -937,6 +942,7 @@ static int cmdBench(int argc, char** argv) {
 
 #include "beamhost.h"
 #include "explorehost.h"
+#include "rollhost.h"
 #include "prove.h"
 
 // ------------------------------------------------------------------ twins: the exactness check of the twin rule (CPU)
@@ -1191,8 +1197,93 @@ static int cmdReachTest(int argc, char** argv) {
 	return 0;
 }
 
+/** eegpu steertest <level.bin> <steer file> <run.eetas> [--gpu=1]: the steer field (beam.h steerFifths / steerScore) of
+ *  the state after every tick of the run (played from the level's start), on the host and, with --gpu=1, on the GPU:
+ *  {"n":N,"host":[...],"hostScore":[...],"gpu":[...]|null,"gpuScore":[...]|null} (scores as float bit patterns, -1 for
+ *  no value) (test/steer.js: = src/steer.js steerFifths / steerScore to the fifth, the scores to the bit) */
+template <int TW>
+static int steerTestTW(int argc, char** argv, const LevelBlob& B) {
+	Level L = B.level(B.bytes.data());
+	SteerGpu sg;
+	std::string err;
+	if (!sg.parse(argv[3], B, L, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
+	std::vector<uint8_t> m = readMasks(argv[4]);
+	const int n = (int)m.size();
+	const size_t SB = sizeof(State<TW>);
+	std::vector<uint8_t> states(SB * (size_t)std::max(1, n));
+	State<TW>* st = (State<TW>*)calloc(1, SB);
+	{
+		Sim<TW> sim(L, *st);
+		sim.reset(B.coinBits0(B.bytes.data()), B.rngSeed);
+	}
+	std::vector<int32_t> host(n), dev;
+	std::vector<float> hostScore(n), devScore;
+	for (int t = 0; t < n; t++) {
+		Sim<TW> sim(L, *st);
+		Input in = maskInput(m[t]); sim.tick(in);
+		memcpy(&states[SB * t], st, SB);
+		i32 own = -1;
+		hostScore[t] = steerScore<TW>(sg.H, L, *st, &own);
+		host[t] = own;
+	}
+	free(st);
+	if (opt(argc, argv, "gpu", "0") == "1" && n > 0) {
+		Gpu g;
+		if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		if (!layoutOrError(g, TW)) return 4;
+		SteerField F;
+		cu::Buf dl, din, dout, dscore;
+		if (!sg.upload(F, err) || !dl.upload(B.bytes.data(), B.bytes.size()) || !din.upload(states.data(), states.size()) || !dout.alloc(4ull * n) || !dscore.alloc(4ull * n)) {
+			printf("{\"error\":%s}\n", jsonStr(err.empty() ? cu::lastError : err).c_str()); return 4;
+		}
+		Level LD = B.level((const uint8_t*)(uintptr_t)dl.p);
+		cu::CUfunction f = g.fn("steerTest_" + std::to_string(TW));
+		if (!f) { printf("{\"error\":\"no steerTest kernel (rebuild the kernels)\"}\n"); return 5; }
+		const uint8_t* pin = (const uint8_t*)(uintptr_t)din.p;
+		i32* pout = (i32*)(uintptr_t)dout.p;
+		float* pscore = (float*)(uintptr_t)dscore.p;
+		const uint8_t* qin = pin;
+		i32* qout = pout;
+		float* qscore = pscore;
+		i32 nn = 0, sb = (i32)SB;
+		void* args[] = { &F, &LD, &qin, &sb, &nn, &qout, &qscore };
+		lk::Chunk ck(1024, 128, 1 << 20, 128);
+		lk::over(ck, (uint64_t)n, 128, f, args, "steerTest", [&](uint32_t lo, uint32_t hi) { qin = pin + (size_t)lo * SB; qout = pout + lo; qscore = pscore + lo; nn = (i32)(hi - lo); });
+		dev.resize(n);
+		devScore.resize(n);
+		cu::cuMemcpyDtoH_v2(dev.data(), dout.p, 4ull * n);
+		cu::cuMemcpyDtoH_v2(devScore.data(), dscore.p, 4ull * n);
+	}
+	const auto bits = [](float x) { uint32_t u; memcpy(&u, &x, 4); return std::to_string(u); };
+	std::string o = "{\"n\":" + std::to_string(n) + ",\"host\":[";
+	for (int i = 0; i < n; i++) { if (i) o += ','; o += std::to_string(host[i]); }
+	o += "],\"hostScore\":[";
+	for (int i = 0; i < n; i++) { if (i) o += ','; o += bits(hostScore[i]); }
+	o += "],\"gpu\":";
+	if (dev.empty()) o += "null";
+	else { o += '['; for (int i = 0; i < n; i++) { if (i) o += ','; o += std::to_string(dev[i]); } o += ']'; }
+	o += ",\"gpuScore\":";
+	if (devScore.empty()) o += "null";
+	else { o += '['; for (int i = 0; i < n; i++) { if (i) o += ','; o += bits(devScore[i]); } o += ']'; }
+	o += "}\n";
+	fputs(o.c_str(), stdout);
+	return 0;
+}
+static int cmdSteerTest(int argc, char** argv) {
+	if (argc < 5) { fprintf(stderr, "usage: eegpu steertest <level.bin> <steer file> <run.eetas> [--gpu=1]\n"); return 2; }
+	LevelBlob B = readLevel(argv[2]);
+	switch (twFor(B.get("tailWords"))) {
+	case 8: return steerTestTW<8>(argc, argv, B);
+	case 32: return steerTestTW<32>(argc, argv, B);
+	case 128: return steerTestTW<128>(argc, argv, B);
+	case 512: return steerTestTW<512>(argc, argv, B);
+	}
+	printf("{\"error\":\"this level's state is too large for the GPU engine\"}\n");
+	return 3;
+}
+
 int main(int argc, char** argv) {
-	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|twins|reachtest|prove ...\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|roll|twins|reachtest|steertest|prove ...\n"); return 2; }
 	std::string cmd = argv[1];
 	if (cmd == "prove") return cmdProve(argc, argv);   // (CPU only: before anything that may touch the driver)
 	gCacheDir = opt(argc, argv, "cachedir", "");
@@ -1206,11 +1297,11 @@ int main(int argc, char** argv) {
 	const char* envPrio = getenv("EEGPU_PRIORITY");
 	const std::string prio = opt(argc, argv, "priority", envPrio && *envPrio ? envPrio : "high");
 #ifdef _WIN32
-	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench" || cmd == "roll") && prio != "normal") SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
 #else
 	// (Linux: nice -5, before any thread starts; a nice value below 0 needs root or CAP_SYS_NICE (a container may lack
 	// it): without, the call fails and the priority stays as it was)
-	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench") && prio != "normal") (void)setpriority(PRIO_PROCESS, 0, -5);
+	if ((cmd == "explore" || cmd == "beam" || cmd == "search" || cmd == "bench" || cmd == "roll") && prio != "normal") (void)setpriority(PRIO_PROCESS, 0, -5);
 	// (a write to a pipe whose reader has gone fails, as on Windows, instead of killing the process, possibly mid-kernel:
 	// it ends at its next launch through --parent or its stop file)
 	signal(SIGPIPE, SIG_IGN);
@@ -1223,6 +1314,7 @@ int main(int argc, char** argv) {
 	lk::G.wait = opt(argc, argv, "wait", "block") == "spin" ? 0 : 1;
 	lk::G.spinMs = std::max(0.0, std::min(1000.0, atof(opt(argc, argv, "spin-ms", "1").c_str())));
 	if (cmd == "reachtest") return cmdReachTest(argc, argv);
+	if (cmd == "steertest") return cmdSteerTest(argc, argv);
 	if (cmd == "trace") return opt(argc, argv, "gpu", "0") == "1" ? cmdTraceGpu(argc, argv) : cmdTrace(argc, argv);
 	if (cmd == "state") return cmdState(argc, argv);
 	if (cmd == "info") return cmdInfo(argc, argv);
@@ -1231,6 +1323,7 @@ int main(int argc, char** argv) {
 	if (cmd == "bench") return cmdBench(argc, argv);
 	if (cmd == "beam") return cmdBeam(argc, argv);
 	if (cmd == "explore") return cmdExplore(argc, argv);
+	if (cmd == "roll") return cmdRoll(argc, argv);
 	if (cmd == "twins") return cmdTwins(argc, argv);
 	fprintf(stderr, "unknown command %s\n", argv[1]);
 	return 2;
