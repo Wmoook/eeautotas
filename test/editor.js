@@ -1073,6 +1073,23 @@ async function cpuSection() {
 	check('the one search\'s GPU bursts (a stand-in for eegpu): the key is the level\'s one trigger; a burst from the start\'s room reaches it, goes on into the key\'s room and its attempt goes into the archive',
 		TRk.n === 1 && !!b1 && b1.room === '(start)' && b1.reached && b1.changed && !!ob.done && ob.done.gpu && ob.done.gpu.imports >= 1 && ob.done.workers[0].imports >= 1 &&
 		!ob.events.some((e) => e.ev === 'warning'), `${TRk.n} trigger(s); ${JSON.stringify(b1 || null)}; ${JSON.stringify(ob.done && ob.done.gpu)}; ${ob.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ')}`);
+	// the wall breaker's waypoints walk through portals (bursts.js roomWalk / walkField with portalsOf): a key sealed off
+	// behind a wall, reachable only through a portal pair, is no target of the plain walk and one of the portal-aware walk,
+	// whose field to it has a value at the start
+	{
+		const pw = room(20, 8);
+		for (let y = 1; y <= 6; y++) pw.push([13, y, 9]);
+		pw.push([8, 6, 242, 0, 1, 2], [15, 6, 242, 0, 2, 1], [17, 6, 6], [18, 1, 23], [2, 6, 255], [11, 6, 121]);
+		const PL = E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'wp', width: 20, height: 8, cells: pw }))));
+		const RMp = GX.roomOf(PL), TRp = BU.triggersOf(PL), Pp = BU.portalsOf(PL), sp = new E.EESim(PL);
+		sp.reset();
+		const I0 = BU.roomWalk(PL, RMp, TRp, sp, []), I1 = BU.roomWalk(PL, RMp, TRp, sp, [], Pp);
+		const tiles = I1.comps.size ? [...I1.comps.values()][0] : [];
+		const f0 = BU.walkField(PL, I1, tiles), f1 = BU.walkField(PL, I1, tiles, Pp);
+		check('the waypoints\' walk through portals: a key behind a wall, reachable by a portal pair only, is a target of the portal-aware walk alone, with a distance at the start',
+			TRp.n === 1 && !!Pp && I0.comps.size === 0 && I1.comps.size === 1 && f0.walk[I1.s0] === BU.CUT && f1.walk[I1.s0] < BU.CUT,
+			`triggers ${TRp.n}, portals ${Pp ? Pp.fwd.size : 0}, targets ${I0.comps.size} / ${I1.comps.size}, at the start ${f0.walk[I1.s0]} / ${f1.walk[I1.s0]}`);
+	}
 	// the GPU random runs as an operator of the one search (the editor's feed, goexplore.js stdin "import <inputs>"): a run
 	// into the key's room given on stdin goes into the archive of every worker (2 workers, nothing shared otherwise)
 	const of = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts2')}`, '--stdin=1'],
