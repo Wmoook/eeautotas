@@ -25,6 +25,11 @@
 // every input sequence over the next --everyDepth ticks (60; states that match to the exact position and speed are
 // merged), and every state equal to a later state of the run is a proven shortcut (re-checked on the CPU). Windows
 // start every --everyStep ticks (25) along the run, continuing where the last round stopped, --everyS seconds each (5).
+// On a GPU with 80+ multiprocessors (a datacenter card: its done events' gpu.sms, A100 108, H100 132) the windows go
+// deeper by default: --everyDepth 100, --everyS 15, states behind the run's schedule at their tile by 30+ ticks dropped
+// (explore --slack=30), and a full layer (1 M states) keeps the ones the level's reach field puts nearest the trophy
+// (gpu/reach.bin; else an arbitrary hash order). Forgotten Veil on a rented A100: such windows (depths 100-160) found
+// four -1 shortcuts in ~40 min of a shared GPU, where the random families found none in 55 min.
 // Live numbers for the page go to <job>/gpu_status.json (t, state, name, ticks, ticksPerSec, edges, round, families, ...).
 // GPU launch failures (eegpu's {"error":...,"launchError":true} line, exit 6 / 7 = the driver's watchdog stopped a
 // kernel, or a crash): the driver may have reset the GPU, so the searcher backs off instead of relaunching at once: it
@@ -58,7 +63,11 @@ const SIBLINGS = String(args.siblings === undefined ? '1' : args.siblings) !== '
 const LIB_MAX = 300000;   // edges kept; above it, edges that start on no known run are dropped
 // every-move rounds: opt in with --every=1 (exact every-move windows are slow on big levels; see the header)
 const EVERY_ON = args.every !== undefined && String(args.every) !== '0';
-const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 60)), EVERY_STEP = Math.max(1, +(args.everyStep || 25)), EVERY_S = Math.max(1, +(args.everyS || 5));
+const EVERY_STEP = Math.max(1, +(args.everyStep || 25));
+const BIG_SMS = 80;   // (a GPU with this many multiprocessors gets the deeper every-move windows)
+let bigGpu = false;   // (set from the first eegpu done event's gpu.sms)
+const everyDepth = () => Math.max(5, +(args.everyDepth || (bigGpu ? 100 : 60)));
+const everyS = () => Math.max(1, +(args.everyS || (bigGpu ? 15 : 5)));
 const PARENT = +(args.parent || 0);
 // eegpu's launch target (ms per kernel launch; halved after each launch failure) and the failures so far
 let launchMs = Math.max(5, Math.min(1000, +(args.launchMs || 50)));
@@ -518,6 +527,7 @@ async function invoke(slot, seconds) {
 	launchFails = 0; otherFails = 0;   // (a run that finished: the failures in a row start over)
 	const d = r.done;
 	if (!st.name && d.gpu && d.gpu.name) log(`GPU: ${d.gpu.name}, ${(d.ticksPerSec / 1e6).toFixed(1)} M ticks/s`);
+	if (d.gpu && d.gpu.sms >= BIG_SMS) bigGpu = true;
 	let got = { added: 0, byFam: {} };
 	try { got = readEdges(edgesFile, ref); } catch (e) { log(`GPU: ${e.message}`); }
 	// per-family numbers of the done event
@@ -573,8 +583,10 @@ async function invoke(slot, seconds) {
 /** one window: every move from tick T; its shortcuts go into the library. Resolves {added, done, err}. */
 function runWindow(T) {
 	return new Promise((resolve) => {
-		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${EVERY_DEPTH}`, `--seconds=${EVERY_S}`,
-			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', `--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
+		const rf = bigGpu ? reachFile() : '';
+		const a = ['explore', blobFile, path.join(GDIR, 'ref.eetas'), `--from=${T}`, '--rejoin=1', `--nocoins=${nc ? 1 : 0}`, `--depth=${everyDepth()}`, `--seconds=${everyS()}`,
+			'--qy=0', '--qvy=0', '--discrete=1', '--cap=1000000', ...(bigGpu ? ['--slack=30'] : []), ...(rf ? [`--reach=${rf}`] : []),
+			`--launch-ms=${launchMs}`, ...EEGPU_OPTS(), ...G.cacheArgs()];
 		const [cmd, argv] = toolCommand(tool, a);
 		clearStop();
 		child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });   // (EEGPU_OPTS)
@@ -610,6 +622,21 @@ function runWindow(T) {
 		});
 	});
 }
+/** the level's reach field (src/reach.js: the physics-aware cost to the trophy) as eegpu's RCH3 file, built once: a full
+ *  every-move layer keeps the states nearest the trophy. '' when it cannot be built (the windows then cut in hash order) */
+let reachPath = null;
+function reachFile() {
+	if (reachPath !== null) return reachPath;
+	reachPath = '';
+	try {
+		const f = path.join(GDIR, 'reach.bin');
+		const RF = require('./reach.js');
+		fs.writeFileSync(f + '.tmp', RF.reachFileBytes(RF.reachField(level), G.blobFp(fs.readFileSync(blobFile))));
+		fs.renameSync(f + '.tmp', f);
+		reachPath = f;
+	} catch (e) { log(`GPU: no reach field for the every-move windows (${e.message})`); }
+	return reachPath;
+}
 /** windows from the cursor on for about ROUND_S seconds */
 async function runEvery() {
 	const t0 = Date.now();
@@ -621,7 +648,8 @@ async function runEvery() {
 		if (!r.done) return { err: r.err || `the GPU tool exited with code ${r.code}`, launchError: r.launchError, added, windows };
 		launchFails = 0; otherFails = 0;
 		windows++; added += r.added; gpu = r.done.gpu; ticks += r.done.ticks || 0;
-		if (state.every >= ref.n) { state.every = 0; log(`GPU: every move covered the whole run (windows of ${EVERY_DEPTH} ticks every ${EVERY_STEP})`); break; }
+		if (r.done.gpu && r.done.gpu.sms >= BIG_SMS) bigGpu = true;
+		if (state.every >= ref.n) { state.every = 0; log(`GPU: every move covered the whole run (windows of ${everyDepth()} ticks every ${EVERY_STEP})`); break; }
 	}
 	saveState();
 	return { added, windows, from, to: state.every, gpu, ticks, seconds: (Date.now() - t0) / 1000 };
