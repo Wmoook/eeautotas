@@ -603,9 +603,12 @@ function nextLoop(round, tried) {
 async function sweepStage(round) {
 	if (a.sweep === '0' || level.hasTimeDoors) return;
 	if (curRound === firstRound && skip1.has('deep')) return;
-	const w = stageWorkers();
-	const lanes = Math.max(1, Math.min(4, Math.floor(w / 2)));
-	const per = Math.max(1, Math.floor(w / lanes));
+	// lanes of >= 2 threads, up to 4; the share can grow during the sweep (the AutoTASer's Find a route hands the CPU over:
+	// <job>/cpu_share), so the lanes the whole CPU allows are started and each one waits while the share has no room for it
+	const lanesFor = (w) => Math.max(1, Math.min(4, Math.floor(w / 2)));
+	const lanes = lanesFor(W);
+	const room = () => { const w = stageWorkers(), n = lanesFor(w); return { n, per: Math.max(1, Math.floor(w / n)) }; };
+	let over = false;   // (a lane found nothing left: the waiting lanes end too)
 	const secs = DEEP_S || 120;
 	const first = !cur.swept;
 	const budget = first ? 1.5 * ROUND_MS : 0.4 * ROUND_MS;   // (the first: until every window is covered, at most 15 min)
@@ -649,6 +652,9 @@ async function sweepStage(round) {
 	let loopsRun = 0;
 	const lane = async (k) => {
 		while (Date.now() - t0 < budget && Date.now() < deadline - 120000) {
+			const rm = room();
+			if (k >= rm.n) { if (over) return; await new Promise((r) => setTimeout(r, 5000)); continue; }   // (no room for this lane yet)
+			const per = rm.per;
 			let win = null;
 			if (loopsRun < SWEEP_LOOPS) {
 				const nl = nextLoop(round, tried);
@@ -661,7 +667,7 @@ async function sweepStage(round) {
 				}
 			}
 			if (!win) win = pick();
-			if (!win) return;
+			if (!win) { over = true; return; }
 			inflight.add(win.sig);
 			const id = idx++;
 			const ref = path.join(OUT, `grind_sweep_ref${k}.eetas`);
@@ -687,7 +693,7 @@ async function sweepStage(round) {
 		}
 	};
 	saveStatus({ stage: `sweep${round}`, round });
-	log(`sweep${round}: hunt windows of ${SWEEP_LEN} ticks over the whole run (${bestTrace().tr.n} ticks), ${lanes} at once x ${per} threads, ${secs} s each` +
+	log(`sweep${round}: hunt windows of ${SWEEP_LEN} ticks over the whole run (${bestTrace().tr.n} ticks), up to ${lanes} at once x ${room().per} threads, ${secs} s each` +
 		`${first ? ', every window' : `, up to ${Math.round(budget / 60e3)} min`}`);
 	await Promise.all(Array.from({ length: lanes }, (x, k) => lane(k)));
 	const o0 = order;
