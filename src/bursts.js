@@ -674,6 +674,9 @@ function create(o) {
 				near = d;
 				let inputs = String(e.inputs);
 				let tile = -1;
+				// (a relay link's nearer attempt short of its trigger: only kept (the explore's attempts live); a replay and an
+				// import of a whole route's length each, dozens a link, would cost more than the link)
+				if (job.relay && d > 1e-3) { best = inputs; return; }
 				if (aimed && d <= 1e-3) {
 					// a target reached: its trigger is tried from this room (the next burst aims at the rest); the attempt goes on
 					// into the room the trigger makes, when it makes one
