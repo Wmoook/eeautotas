@@ -405,8 +405,10 @@ const go = () => {
 		return;
 	}
 	const p = passOf(args), k = prev.filter((a) => a[0] === 'explore' && passOf(a) === p && !a.some((x) => x.startsWith('--prefix='))).length;
-	const relayN = prev.filter((a) => a[0] === 'explore' && a.some((x) => x.startsWith('--prefix='))).length;
-	const run = opt('prefix') ? ((SC.relay || [])[relayN] || { end: 'exhausted', layers: 1, overflow: 0 }) : (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
+	const isBrk = (a) => a.includes('--cap=2097152');   // (the wall breaker's runs: SC.breaker)
+	const relayN = prev.filter((a) => a[0] === 'explore' && a.some((x) => x.startsWith('--prefix=')) && !isBrk(a)).length;
+	const brkN = prev.filter((a) => a[0] === 'explore' && isBrk(a)).length;
+	const run = isBrk(args) ? ((SC.breaker || [])[brkN] || { end: 'time', layers: 1 }) : opt('prefix') ? ((SC.relay || [])[relayN] || { end: 'exhausted', layers: 1, overflow: 0 }) : (SC.runs[p] || [])[k] || { end: 'exhausted', layers: 1, overflow: 0 };
 	const depth = +opt('depth');
 	const done = () => { const d = { ev: 'done', gpu: { name: 'fake' }, layers: run.layers, end: run.end }; if (run.overflow !== undefined) d.overflow = run.overflow; if (run.lanes) d.lanes = run.lanes; if (run.lastSalt !== undefined) d.salt = run.lastSalt; say(d); };
 	setTimeout(() => {
@@ -435,7 +437,7 @@ say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', sta
 setTimeout(() => { for (const s of SC.sources || []) say(Object.assign({ ev: 'source', seed: 1 }, s)); }, SC.wait || 0);
 const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 40, found: 0, refined: 0, rooms: 3, workers: 1 }), 300);
 const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
-process.stdin.on('data', (d) => { if (/stop/.test(String(d))) end(); });
+process.stdin.on('data', (d) => { if (SC.stdinLog) fs.appendFileSync(SC.stdinLog, String(d)); if (/stop/.test(String(d))) end(); });
 process.stdin.on('end', end);
 `;
 // A stand-in for the GPU random runs (src/goexplore.js --gpu=1): logs its arguments, says ready and start, after `wait` ms
@@ -670,6 +672,45 @@ async function passesSection() {
 			JSON.stringify(runs) === JSON.stringify(want) && (str.sources || []).length === 4 && /key:blue:1/.test(so) && /key:red:1/.test(so) && /key:green:0/.test(so),
 			`runs ${runs.join(' | ')}; sources ${so}`);
 	}
+	// the wall breaker (strategy 'breaker'; clocks shortened: a round after 1 s without progress, a 2^26 table): every move's
+	// nearest attempt (600 ticks) stalls, the relay's runs fill their tables and get no nearer, the CPU search reports
+	// nothing: a round from the nearest attempt 150 ticks back (450; 400 back is 200); its run has the GPU (the others
+	// paused), 4 px / 1/16 px/tick cells, the whole table, the layer cap, a box around its start (2^26 <= 2^28), no cost
+	// ceiling; its nearer attempt (800 ticks) is the next step's start 60 ticks short (740) and the CPU search's seed; that
+	// step runs out of situations: finer cells (2 px) from the same start, whose finish is the route
+	{
+		const scB = path.join(HOME, 'brk.json'), logB = path.join(HOME, 'brk.log'), scC = path.join(HOME, 'brkcpu.json'), fakeCpu = path.join(HOME, 'fake-cpu.js'), inB = path.join(HOME, 'brk-stdin.log');
+		fs.writeFileSync(fakeCpu, FAKE_CPU);
+		fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 30, tick: 600, ch: '0' } }] },
+			relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
+			breaker: [{ end: 'time', layers: 700, wait: 300, closest: { dist: 20, tick: 800, ch: '4' } }, { end: 'exhausted', layers: 10, overflow: 0, wait: 300 }, { end: 'finish', idle: 0, layers: 3, wait: 300 }],
+			beam: null }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100, stdinLog: inB }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scB], cpu: [process.execPath, fakeCpu, scC], salts: false, relay: true, breaker: true, breakWait: [1, 2, 4], breakCells: 26 });
+		const t0b = Date.now();
+		let str = ED.state(), turn = false;
+		while (str.running && !str.result && Date.now() - t0b < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); if (str.gpuTurn === 'breaker') turn = true; }
+		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		const LB = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.includes('--cap=2097152'));
+		const opts = LB.map((a) => Object.fromEntries(a.filter((x) => /^--\w+=/.test(x)).map((x) => x.slice(2).split('='))));
+		const pfs = LB.map((a) => (a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4));
+		const cells = opts.map((o) => `${o.cqx}/${o.cqv}/${o.qy}/${o.qvy}`);
+		const seeds = fs.existsSync(inB) ? fs.readFileSync(inB, 'utf8').split('\n').filter((l) => l.startsWith('seed ')) : [];
+		const logged = (str.log || []).join('\n');
+		check('the wall breaker: a stalled search starts a round from the nearest attempt 150 ticks back with the GPU to itself (4 px / 1/16 px/tick cells, the whole table, ' +
+			'the 2M layer cap, a box around its start, no cost ceiling); its nearer attempt is the next step\'s start 60 ticks short and the CPU search\'s seed; ' +
+			'out of situations: finer cells from the same start; its finish is the route',
+			LB.length === 3 && pfs.join() === '450:0,740:4,740:4' && cells.join() === '0.25/16/0.25/16,0.25/16/0.25/16,0.5/16/0.5/16' &&
+			opts.every((o) => o.cells === '26' && o.cap === '2097152' && !o.costslack && /^-?\d+,-?\d+,\d+,\d+$/.test(o.region || '')) && turn &&
+			seeds.some((l) => l === 'seed ' + '4'.repeat(800)) && /round 1, 2 starting points/.test(logged) && str.result && str.result.strategy === 'past the wall' &&
+			!!str.breaker && str.breaker.rounds === 1,
+			`breaker runs ${LB.length}: prefixes ${pfs.join(' | ')}, cells ${cells.join(' | ')}, opts ${JSON.stringify(opts.map((o) => [o.cells, o.cap, o.costslack || '-', o.region || '-']))}; ` +
+			`GPU turn seen ${turn}; seeds ${seeds.map((l) => l.length - 5).join(',')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; breaker ${JSON.stringify(str.breaker)}`);
+	}
+	// the table by the GPU's memory (BREAK_MEM_F at 16 bytes a cell): 8 GB 2^27, 24 GB 2^29, 40 GB 2^30, 80 GB 2^31
+	check("the wall breaker's table: 2^27 cells on 8 GB, 2^29 on 24 GB, 2^30 on 40 GB (40,326 MB), 2^31 on 80 GB (81,559 MB)",
+		[8192, 24564, 40326, 81559].map(ED.breakCells).join() === '27,29,30,31', [8192, 24564, 40326, 81559].map(ED.breakCells).join());
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
@@ -845,6 +886,17 @@ async function cpuSection() {
 		`${s1.summary}; deepest ${s1.done && s1.done.layers} | ${s2.summary}`);
 	const s3 = await goexplore(platFile, ['--workers=1', '--seconds=30', '--stdin=1', '--seed=3'], (ch) => setTimeout(() => ch.stdin.end(), 600));
 	check('the end of stdin (the editor is gone): it stops, not after its 30 s', s3.done && s3.done.end === 'stopped' && s3.done.seconds < 10, s3.summary);
+	// stdin "seed <inputs>" (the wall breaker's attempts): cells along them; a route's inputs less its last 5 ticks make the
+	// search finish within a quarter of the ticks its own first route took (without the seed: none in that budget)
+	if (a1.results.length) {
+		const rt = a1.results[0], lim = Math.max(2000, Math.floor(rt.simTicks / 4));
+		const s4 = await goexplore(platFile, ['--workers=1', `--maxTicks=${lim}`, '--seconds=30', '--stdin=1', '--seed=3'], (ch) => ch.stdin.write(`seed ${rt.inputs.slice(0, rt.ticks - 5)}\n`));
+		const s5 = await goexplore(platFile, ['--workers=1', `--maxTicks=${lim}`, '--seconds=30', '--stdin=1', '--seed=3']);
+		const w4 = s4.done && s4.done.workers[0];
+		check('stdin "seed <inputs>" (the wall breaker\'s attempts): cells along them, and a route from there within a quarter of the ticks (none without the seed)',
+			s4.results.length >= 1 && replays(platLevel, s4.results) && w4 && w4.seeded === 1 && w4.seedCells >= 1 && s5.results.length === 0,
+			`budget ${lim} ticks; seeded ${w4 ? `${w4.seeded} (${w4.seedCells} cells)` : '-'}: ${s4.results.length} routes; without: ${s5.results.length}; ${s4.summary}`);
+	}
 	// a trophy the reach field rules out: at once
 	const hiCells = room(20, 10);
 	for (let x = 8; x <= 12; x++) hiCells.push([x, 3, 9]);

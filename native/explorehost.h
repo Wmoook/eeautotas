@@ -167,7 +167,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		const size_t rest = 2 * sizeof(S) * (size_t)cap + 20ull * 18 * cap + ((size_t)1 << 30);
 		if (!cu::cuMemGetInfo_v2(&fr, &tot) && fr >= (16ull << 27) + rest) cellLog = 27;
 	}
-	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(28, atoi(opt(argc, argv, "cells", "27").c_str())));
+	// (--cells: up to 2^31, 32 GB with the best-state table: the editor's wall breaker on an 80 GB GPU (editor.js
+	// BREAK_MEM_F); on too little memory the allocation below halves it)
+	if (opt(argc, argv, "cells", "").size()) cellLog = (uint32_t)std::max(20, std::min(31, atoi(opt(argc, argv, "cells", "27").c_str())));
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist, dstats, dlost;
 	const size_t nCandMax = (size_t)cap * 18;
