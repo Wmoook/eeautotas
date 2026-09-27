@@ -118,9 +118,10 @@ button.watch { background: var(--gold-soft); color: var(--gold); border-color: c
 .rmh b { font-size: 14px; }
 .rmh span, .rms { font: 12px var(--mono); color: var(--muted); }
 .rms { margin-top: 2px; }
-.rms b { color: var(--good); font-weight: 600; }
+.rms b { color: var(--good); font-weight: 600; white-space: nowrap; }
 .rjob { width: 100%; text-align: left; display: grid; gap: 1px; padding: 7px 10px; margin-top: 6px; font-weight: 400; background: var(--panel2); }
 .rjob.sel { border-color: var(--gold); }
+.rjob.x { font-size: 13.5px; border-radius: 9px; border: 1px dashed var(--line); background: transparent; }
 .rjob .r1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; font-weight: 600; }
 .rjob .r1 .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rjob .g { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--accent); flex: none; }
@@ -588,10 +589,11 @@ function procOptions() {
 }
 function renderPills() {
 	const running = state.jobs.find((j) => j.running);
-	const rented = rentedList().filter((r) => r.running);
+	const rented = rentedJobs().filter((x) => x.running);
 	$('pills').innerHTML = `<span class="pill" title="${esc(state.cpuModel || '')}">${esc(cpuName())} · ${state.cpus} threads${state.bench ? ` · ${mts(state.bench.single)} ticks/s each` : ''}</span>` +
 		(running ? `<span class="pill ok">optimizing: ${esc(running.name)}</span>` : (rented.length ? '' : `<span class="pill">idle</span>`)) +
-		(rented.length ? `<span class="pill ok" title="Jobs whose optimizer runs on a rented machine (the Rented machines box)">${rented.length} on rented GPUs · ${rateMG(rented.reduce((a, r) => a + remoteRate(r), 0))} ticks/s</span>` : '');
+		(rented.length ? `<span class="pill ok" title="Jobs whose optimizer runs on a rented machine (the Rented machines box)">${rented.length} on rented machines · ` +
+			`${rateMG(rented.reduce((a, x) => a + x.cpuTicksPerSec + x.gpuTicksPerSec, 0))} ticks/s</span>` : '');
 }
 // the live speed of a running job (summary.live: src/jobs/<id>/live.json, written every second by grind.js)
 const rateM = (x) => (x > 0 ? `${(x / 1e6).toFixed(x >= 1e8 ? 0 : 1)} M` : '–');
@@ -633,9 +635,10 @@ function selectJob(id) { selected = id; store.set('tasopt.sel', selected); rende
 // ------------------------------------------------------------ rented machines: summary.remote = src/jobs/<id>/remote.json, written every 30 s by
 // the rented GPUs' monitor (src/out/remote/farm.js) while the job's optimizer runs on a rented machine; the server leaves it out once it is
 // 90 s old, so everything here is live. The farm hands a faster remote best in to the job here every few minutes (remote.handInMin).
+// state.rented = the Rented machines box: per machine its jobs (also those that exist only there: `extra`), speeds, tonight's gains.
 const rateMG = (x) => (x >= 1e9 ? `${(x / 1e9).toFixed(2)} G` : rateM(x));
 const shortMachine = (m) => String(m || '').replace(/\s*\([^)]*\)\s*$/, '') || 'a rented machine';
-function rentedList() { return state.jobs.map((j) => j.remote).filter(Boolean); }
+function rentedJobs() { return state.rented ? state.rented.machines.flatMap((m) => m.jobs) : []; }
 function remoteRate(r) { return ((r.cpu && r.cpu.ticksPerSec) || 0) + ((r.gpu && r.gpu.ticksPerSec) || 0); }
 function remoteWhere(r, short) { return `${esc(short ? shortMachine(r.machine) : r.machine)}${r.gpuIndex !== null ? ` · GPU ${esc(r.gpuIndex)}` : ''}`; }
 const ticksN = (n) => `${n} tick${n === 1 ? '' : 's'}`;
@@ -648,6 +651,8 @@ function tonightText(n) {
 	return n.saved > 0 ? `−${(n.saved / 100).toFixed(2)} s · ${ticksN(n.saved)}` : 'nothing yet';
 }
 const sinceText = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// a stopped copy: since its grind last wrote live.json there (the rented machine's clock)
+const stoppedSince = (r) => (!r.running && r.lastLive ? ` since ${sinceText(r.lastLive)}` : '');
 function remoteShort(j) {
 	const r = j.remote;
 	return `<div class="t2 rm ${r.running ? '' : 'idle'}">${r.running ? 'on' : 'stopped on'} ${remoteWhere(r, true)}${r.running ? ` · ${rateMG(remoteRate(r))} ticks/s` : ''}` +
@@ -657,43 +662,43 @@ function remoteHtml(j) {
 	const r = j.remote;
 	if (!r) return '';
 	const c = r.cpu, g = r.gpu;
-	let h = `<span class="lk">${r.running ? 'Running on' : 'Stopped on'} ${remoteWhere(r)}${r.running ? ':' : ''}</span>`;
+	let h = `<span class="lk">${r.running ? 'Running on' : 'Stopped on'} ${remoteWhere(r)}${r.running ? ':' : stoppedSince(r)}</span>`;
 	if (c) h += `<span><b>${rateM(c.ticksPerSec)}</b> ticks/s on the CPU (${esc(c.model || 'CPU')}, ${c.threads || '?'} thread${c.threads === 1 ? '' : 's'})</span>`;
 	if (g) h += `<span>+ <b>${rateMG(g.ticksPerSec)}</b> ticks/s on the GPU (${esc(g.name)})</span>`;
 	if (c && g) h += `<span>= <b>${rateMG(remoteRate(r))}</b> ticks/s</span>`;
+	if (r.running && !c && !g) h += '<span>waiting for its speed…</span>';
 	h += `<span class="lt">updated ${Math.round(r.age / 1000)} s ago${c || g ? ` · ${bigCount(((c && c.ticks) || 0) + ((g && g.ticks) || 0))} ticks there this session` : ''}</span>`;
 	const n = r.tonight;
 	const stats = `<div class="stats">
-		<div class="stat"><div class="k">Now there</div><div class="v" title="${esc(r.stage)}">${r.running ? friendlyStage(r.stage) : '—'}${r.running && g ? `<div class="gnow">GPU: ${esc(gpuFamily(g.family))}</div>` : ''}</div></div>
+		<div class="stat"><div class="k">Now there</div><div class="v" title="${esc(r.stage)}">${r.running ? friendlyStage(r.stage) : `stopped${stoppedSince(r)}`}${r.running && g ? `<div class="gnow">GPU: ${esc(gpuFamily(g.family))}</div>` : ''}</div></div>
 		<div class="stat"><div class="k">Best there</div><div class="v ${r.ahead > 0 ? 'up' : ''}">${r.best ? `${r.best.time}` : '—'}</div><div class="gnow ${r.ahead > 0 ? 'up' : ''}" title="${esc(remoteAhead(r, j))}">${esc(remoteAhead(r, j))}</div></div>
 		<div class="stat"><div class="k">Tonight (since ${sinceText(n.since)})</div><div class="v ${n.saved > 0 ? 'up' : ''}">${tonightText(n)}</div><div class="gnow">${fmt(n.from)} → ${fmt(n.to)}${n.found ? ` · ${n.found}${n.more ? '+' : ''} found there` : ''}</div></div>
-		<div class="stat"><div class="k">Round there</div><div class="v">${r.rounds || 0}${r.state && r.state !== 'running' ? ` · ${esc(r.state)}` : ''}</div></div>
+		<div class="stat"><div class="k">Rounds there</div><div class="v">${r.rounds || 0}</div></div>
 	</div>`;
 	return `<div class="remote ${r.running ? '' : 'idle'}" title="This job's optimizer runs on a rented machine; its numbers arrive every 30 s. A faster run found there is handed in here every ${r.handInMin} minutes (the same check as any run).">
 		<div class="rh">${h}</div>${stats}
-		<details ${store.get('tasopt.rlog') === '0' ? '' : 'open'} id="rlogBox"><summary>Log on ${esc(shortMachine(r.machine))} (last ${r.log.length} lines)</summary><pre class="log">${esc(r.log.join('\n')) || '—'}</pre></details>
+		<details ${store.get('tasopt.rlog') === '0' ? '' : 'open'} id="rlogBox"><summary>Log on ${esc(shortMachine(r.machine))} (last ${r.log.length} lines; times on its clock)</summary><pre class="log">${esc(r.log.join('\n')) || '—'}</pre></details>
 	</div>`;
 }
 function renderRented() {
 	const box = $('rented');
-	const by = new Map();
-	for (const j of state.jobs) if (j.remote) { if (!by.has(j.remote.machine)) by.set(j.remote.machine, []); by.get(j.remote.machine).push(j); }
-	if (!by.size) { box.innerHTML = ''; return; }
-	const gi = (j) => (j.remote.gpuIndex === null ? 1e9 : +j.remote.gpuIndex);
-	const since = rentedList()[0].tonight.since;
-	box.innerHTML = `<div class="card rented"><h2>Rented machines</h2>${[...by].sort((a, b) => a[0].localeCompare(b[0])).map(([m, jobs]) => {
-		jobs.sort((x, y) => gi(x) - gi(y) || x.name.localeCompare(y.name));
-		const rs = jobs.map((j) => j.remote), run = rs.filter((r) => r.running);
-		const cpu = run.reduce((a, r) => a + ((r.cpu && r.cpu.ticksPerSec) || 0), 0), gpu = run.reduce((a, r) => a + ((r.gpu && r.gpu.ticksPerSec) || 0), 0);
-		const saved = rs.reduce((a, r) => a + r.tonight.saved, 0), age = Math.min(...rs.map((r) => r.age));
-		return `<div class="rmach"><div class="rmh"><b>${esc(m)}</b><span>${run.length} running · ${rateMG(cpu + gpu)} ticks/s</span></div>
-			<div class="rms">CPU ${rateMG(cpu)} + GPU ${rateMG(gpu)} ticks/s · tonight ${saved > 0 ? `<b>−${(saved / 100).toFixed(2)} s</b>` : 'nothing yet'} · ${Math.round(age / 1000)} s ago</div>
-			${jobs.map((j) => { const r = j.remote; return `<button class="rjob ${j.id === selected ? 'sel' : ''}" data-rid="${j.id}" title="${esc(`${j.name}: ${r.stage || '—'}`)}">
-				<div class="r1"><span class="g ${r.running ? '' : 'idle'}">${r.gpuIndex !== null ? `GPU ${esc(r.gpuIndex)}` : (r.running ? 'GPU' : 'stopped')}</span><span class="n">${esc(j.name)}</span>` +
-				`<span class="bt">${r.best ? r.best.time : j.best.time}</span></div>
-				<div class="r2">${r.running ? `${rateMG(remoteRate(r))}/s · ${esc(friendlyStage(r.stage))}` : 'stopped'} · tonight ${r.tonight.saved > 0 ? `<span class="up">−${r.tonight.saved}</span>` : '0'}` +
-				`${r.ahead > 0 ? ` · <span class="ah" title="${ticksN(r.ahead)} ahead of the best here until the next hand-in">${r.ahead} ahead</span>` : ''}</div></button>`; }).join('')}</div>`;
-	}).join('')}<div class="hint">Tonight: since ${sinceText(since)}, to the better of this job's best and the rented copy's. A faster run found there is handed in here within a few minutes.</div></div>`;
+	const R = state.rented;
+	if (!R || !R.machines.length) { box.innerHTML = ''; return; }
+	const row = (x) => {
+		const inner = `<div class="r1"><span class="g ${x.running ? '' : 'idle'}">${x.gpuIndex !== null ? `GPU ${esc(x.gpuIndex)}` : (x.running ? 'GPU' : 'stopped')}</span>` +
+			`<span class="n">${esc(x.name)}</span><span class="bt">${x.best ? x.best.time : (x.localBest ? x.localBest.time : '—')}</span></div>
+			<div class="r2">${x.running ? `${rateMG(x.cpuTicksPerSec + x.gpuTicksPerSec)}/s · ${esc(friendlyStage(x.stage))}` : `stopped${stoppedSince(x)}`}` +
+			` · tonight ${x.tonight.saved > 0 ? `<span class="up">−${x.tonight.saved}</span>` : '0'}` +
+			`${x.ahead > 0 ? ` · <span class="ah" title="${ticksN(x.ahead)} ahead of the best here until the next hand-in">${x.ahead} ahead</span>` : ''}${x.extra ? ' · only there' : ''}</div>`;
+		return x.extra ? `<div class="rjob x" title="${esc(`${x.name}: a job that exists only on the rented machine`)}">${inner}</div>`
+			: `<button class="rjob ${x.id === selected ? 'sel' : ''}" data-rid="${esc(x.id)}" title="${esc(`${x.name}: ${x.running ? friendlyStage(x.stage) : 'stopped'}`)}">${inner}</button>`;
+	};
+	box.innerHTML = `<div class="card rented"><h2>Rented machines</h2>${R.machines.map((m) => `<div class="rmach"><div class="rmh"><b>${esc(m.machine)}</b>` +
+		`<span>${m.running} of ${m.jobs.length} running${m.running ? ` · ${rateMG(m.cpuTicksPerSec + m.gpuTicksPerSec)} ticks/s` : ''}</span></div>
+		<div class="rms">${m.running ? `CPU ${rateMG(m.cpuTicksPerSec)} + GPU ${rateMG(m.gpuTicksPerSec)} ticks/s · ` : ''}tonight ${m.saved > 0 ? `<b>−${(m.saved / 100).toFixed(2)} s</b>` : 'nothing yet'}` +
+		` · updated ${Math.round(Math.max(0, (state.now || Date.now()) - m.updated) / 1000)} s ago</div>
+		${m.jobs.map(row).join('')}</div>`).join('')}<div class="hint">Tonight: since ${sinceText(R.since)}, to the better of the job's best here and the rented copy's. ` +
+		'A faster run found there is handed in here within a few minutes.</div></div>';
 	for (const el of box.querySelectorAll('[data-rid]')) el.onclick = () => selectJob(el.dataset.rid);
 }
 function friendlyStage(s) {

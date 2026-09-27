@@ -24,8 +24,8 @@ const HOMEP = (p) => require('path').join(require('os').homedir(), p);
 //            ranges, HTTP errors (upload limit, JSON null, render margin), the viewer's data and page script (the ball's
 //            effects: the trajectory's `effects` decoded by the page's own code = the engine's fields every tick), EE
 //            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, Player.as, sheet whitelist, folder checks), a
-//            job's copy on a rented machine (remote.json: summary, status, /api/state `rented`, the page's rendering; stale =
-//            nothing), the inbox verdict of a slower run
+//            job's copy on a rented machine (remote.json: summary, status, /api/state `rented`, the page's rendering; a
+//            stopped copy the farm calls running; old speeds; a job only there; stale = nothing), the inbox verdict of a slower run
 // usage: node test/review.js [--quick] [--seed=N] [--only=music,portals,keys,fuzz,real,drag,app] [--case=ks1]
 // Exit code 1 if any check fails. Node built-ins only; writes nothing inside the repo.
 const fs = require('fs');
@@ -938,7 +938,8 @@ async function viewerEffectsChecks(S, port, id, page, best) {
  * A job whose optimizer runs on a rented machine: src/jobs/<id>/remote.json (written every 30 s by the rented GPUs' monitor,
  * src/out/remote/farm.js) -> summary().remote while under 90 s old (the machine, GPU, speeds, stage, best and how far it is
  * ahead, tonight's gain, the log), `tas.js status`, GET /api/state `rented`, and the page's own rendering of it (cut out of
- * index.html); a stale or broken file shows nothing.
+ * index.html); a copy that stopped there is stopped whatever the farm's process check says, old speeds are not shown, a job
+ * that exists only there (src/out/remote/extra_jobs.json) is listed; a stale or broken file shows nothing.
  */
 async function remoteChecks(S, port, id, page) {
 	const { J, C } = S;
@@ -963,19 +964,20 @@ async function remoteChecks(S, port, id, page) {
 	check('GET /api/state `rented`: the machine with the job, its GPU, the speeds and the gain tonight', m && m.machine === 'Test box (rented)' && m.running === 1 &&
 		m.gpuTicksPerSec === 384e6 && m.saved === 5 && m.jobs.length === 1 && m.jobs[0].id === id && m.jobs[0].gpuIndex === '7' && m.jobs[0].ahead === 5,
 		JSON.stringify(q.json && q.json.rented).slice(0, 300));
-	// the page: remoteHtml / remoteShort / renderRented cut out of index.html, run on this summary
+	// the page: remoteHtml / remoteShort / renderRented cut out of index.html, run on GET /api/state
 	const grab = (re) => { const x = page.match(re); return x ? x[0] : ''; };
 	const block = grab(/^const rateMG = [\s\S]*?\n(?=function friendlyStage)/m);
 	const box = { innerHTML: '', querySelectorAll: () => [] };
-	const pageFns = (jobs) => new Function('state', 'box', `${grab(/^const esc = .*$/m)}\n${grab(/^const fmt = .*$/m)}\n${grab(/^const rateM = .*$/m)}\n` +
+	const pageFns = (state) => new Function('state', 'box', `${grab(/^const esc = .*$/m)}\n${grab(/^const fmt = .*$/m)}\n${grab(/^const rateM = .*$/m)}\n` +
 		`${grab(/^function bigCount\([\s\S]*?\n\}\n/m)}\n${grab(/^function friendlyStage\([\s\S]*?\n\}\n/m)}\n${grab(/^function gpuFamily\([\s\S]*?\n\}\n/m)}\n` +
 		`const store = { get: () => null }; const $ = () => box; let selected = null; function selectJob() {}\n${block}\n` +
-		'return { remoteHtml, remoteShort, renderRented };')({ jobs }, box);
+		'return { remoteHtml, remoteShort, renderRented };')(state, box);
+	const jobOf = (q) => q.json && q.json.jobs.find((j) => j.id === id);
 	let P = null;
-	const pe = errOf(() => { P = pageFns([s]); });
-	check('the page\'s rented-machine code runs on its own', !pe && P && block.length > 1000, pe ? pe.message : `${block.length} chars`);
-	if (P) {
-		const h = P.remoteHtml(s), sh = P.remoteShort(s);
+	const pe = errOf(() => { P = pageFns(q.json); });
+	check('the page\'s rented-machine code runs on its own', !pe && P && block.length > 1000 && jobOf(q), pe ? pe.message : `${block.length} chars`);
+	if (P && jobOf(q)) {
+		const h = P.remoteHtml(jobOf(q)), sh = P.remoteShort(jobOf(q));
 		P.renderRented();
 		check('the job page shows "Running on <machine> · GPU k", both speeds, the stage, the remote best ahead, tonight, the log (escaped)',
 			/Running on Test box \(rented\) · GPU 7:/.test(h) && /<b>13\.1 M<\/b> ticks\/s on the CPU \(AMD EPYC 7662, 8 threads\)/.test(h) &&
@@ -983,12 +985,53 @@ async function remoteChecks(S, port, id, page) {
 			/−0\.05 s · 5 ticks/.test(h) && /&lt;b&gt;deep3_seg2\.1&lt;\/b&gt;/.test(h) && !/<b>deep3/.test(h), h.replace(/\s+/g, ' ').slice(0, 400));
 		check('the job list says "on <machine> · GPU k" with the speed and the remote best; the Rented machines box lists the job',
 			/on Test box · GPU 7 · 397 M ticks\/s · .* there \(−5\)/.test(sh) && /Rented machines/.test(box.innerHTML) && /GPU 7/.test(box.innerHTML) &&
-			box.innerHTML.includes(`data-rid="${id}"`), sh);
+			/1 of 1 running · 397 M ticks\/s/.test(box.innerHTML) && box.innerHTML.includes(`data-rid="${id}"`), sh);
 	}
+	// what the farm wrote at 00:11 on 2026-09-27: `running` (its process check matched another checkout's grind of the job), the
+	// status there stopped, its live.json and gpu_status.json 74 min old -> a stopped copy, no speeds, stopped since then
+	const old = now - 20e3 - 4431e3;
+	C.writeJSON(rf, Object.assign(rec(now - 20e3), { state: 'stopped', stage: '', live: Object.assign(rec(old).live, { t: old }), gpu: Object.assign(rec(old).gpu, { ticksPerSec: 0, state: 'stopped' }) }));
+	const r2 = J.summary(id).remote, st2 = J.formatStatus(J.summary(id));
+	q = await request(port, 'GET', '/api/state');
+	const m2 = q.json && q.json.rented.machines[0];
+	let h2 = '';
+	if (P && jobOf(q)) { P = pageFns(q.json); h2 = P.remoteHtml(jobOf(q)) + P.remoteShort(jobOf(q)); P.renderRented(); }
+	const hhmm = (t) => new Date(t).toTimeString().slice(0, 5);
+	check('a copy the farm calls running whose status there is stopped and live.json 74 min old: stopped since then, no speeds (status, /api/state, the page)',
+		r2 && !r2.running && !r2.cpu && !r2.gpu && r2.stage === '' && r2.lastLive === old && r2.best.runTicks === local - 5 && r2.tonight.saved === 5 &&
+		new RegExp(`rented {5}stopped on Test box \\(rented\\) GPU 7 since ${hhmm(old)} \\(20 s ago\\); best `).test(st2) && !/ticks\/s/.test(st2.split('\n').find((l) => l.startsWith('rented')) || '') &&
+		m2 && m2.running === 0 && m2.cpuTicksPerSec === 0 && m2.gpuTicksPerSec === 0 && m2.jobs[0].running === false &&
+		(!P || (/Stopped on Test box \(rented\) · GPU 7 since /.test(h2) && !/ticks\/s/.test(h2) && /stopped on Test box · GPU 7 · .* there \(−5\)/.test(h2) &&
+			/0 of 1 running<\/span>/.test(box.innerHTML) && /tonight <b>−0\.05 s<\/b>/.test(box.innerHTML))),
+		`${(st2.split('\n').find((l) => l.startsWith('rented')) || 'no rented line')} | ${h2.replace(/\s+/g, ' ').slice(0, 300)}`);
+	// running there with a live.json 3 min old (a grind that hangs): running, but no speeds
+	C.writeJSON(rf, Object.assign(rec(now - 20e3), { live: Object.assign(rec(now).live, { t: now - 200e3 }), gpu: Object.assign(rec(now).gpu, { t: now - 200e3 }) }));
+	const r3 = J.summary(id).remote;
+	check('running there with a live.json 3 min old: running, no speeds (old numbers are not shown as now)', r3 && r3.running && !r3.cpu && !r3.gpu && r3.stage === 'deep3_seg2.1',
+		JSON.stringify(r3 && { running: r3.running, cpu: r3.cpu, gpu: r3.gpu }));
+	// a job that exists only on the rented machine (src/out/remote/extra_jobs.json): in the Rented machines box, not clickable
+	const xf = path.join(S.src, 'out', 'remote', 'extra_jobs.json');
+	fs.mkdirSync(path.dirname(xf), { recursive: true });
+	const xr = Object.assign(rec(now - 5e3), { gpuIndex: '3', bestRunTicks: 900, history: [{ t: since - 5e3, runTicks: 950, saved: 10, what: 'x' }, { t: now - 60e3, runTicks: 900, saved: 50, what: 'y' }] });
+	delete xr.t;
+	C.writeJSON(xf, { t: now - 5e3, jobs: { 'fvclone-a-000001': xr, [id]: xr } });
+	q = await request(port, 'GET', '/api/state');
+	const xm = q.json && q.json.rented.machines[0], xj = xm && xm.jobs.find((x) => x.extra);
+	if (P && q.json) { P = pageFns(q.json); P.renderRented(); }
+	check('a job only on the rented machine (extra_jobs.json): listed under its machine with its GPU, speed and gain tonight (from its own history), not clickable; ' +
+		'an id that is a job here is not listed twice', xm && xm.jobs.length === 2 && xj && xj.id === 'fvclone-a-000001' && xj.running && xj.gpuIndex === '3' && xj.ahead === 0 &&
+		xj.cpuTicksPerSec === 13.1e6 && xj.tonight.from === 950 && xj.tonight.to === 900 && xj.tonight.saved === 50 && xm.running === 2 &&
+		(!P || (/fvclone-a-000001/.test(box.innerHTML) && /only there/.test(box.innerHTML) && !/data-rid="fvclone/.test(box.innerHTML))),
+		JSON.stringify(xm && xm.jobs.map((x) => [x.id, x.extra, x.running, x.tonight.saved])));
+	C.writeJSON(xf, { t: now - 91e3, jobs: { 'fvclone-a-000001': xr } });
+	fs.rmSync(rf, { force: true });
+	q = await request(port, 'GET', '/api/state');
+	check('a stale extra_jobs.json (91 s old) shows nothing', q.json && q.json.rented.machines.length === 0, JSON.stringify(q.json && q.json.rented));
+	fs.rmSync(xf, { force: true });
 	C.writeJSON(rf, rec(now - 91e3));
 	q = await request(port, 'GET', '/api/state');
-	const staleJob = q.json && q.json.jobs.find((j) => j.id === id);
-	if (P && staleJob) { box.innerHTML = 'x'; pageFns([staleJob]).renderRented(); }
+	const staleJob = jobOf(q);
+	if (P && staleJob) { box.innerHTML = 'x'; pageFns(q.json).renderRented(); }
 	check('a stale remote.json (91 s old) shows nothing: no summary().remote, no rented machine, an empty Rented machines box', J.summary(id).remote === null && staleJob &&
 		staleJob.remote === null && q.json.rented.machines.length === 0 && (!P || box.innerHTML === ''), JSON.stringify(q.json && q.json.rented));
 	fs.writeFileSync(rf, '{"t": ');
