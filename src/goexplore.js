@@ -21,7 +21,8 @@
 // From then on only routes of fewer ticks count (a cell at tick T - 1 or later is no longer picked), so the search keeps
 // improving its earliest states and prints each faster route. Each worker thread runs its own archive with its own
 // seed (--seed, --seed + 1, ...); the fastest route bounds them all. One worker is exactly reproducible: the same seed
-// and tick budget (--maxTicks) give the same routes (with several workers, which one finds what first is a race).
+// and tick budget (--maxTicks) give the same routes (with several workers, which one finds what first is a race; --gpu=1:
+// see GPU below).
 //
 // Two kinds of cells (--cells; auto: by the level's size):
 //   fine    (levels of at most 50 x 50 = FINE_MAX_TILES tiles: the pixel-exact levels) everything above: the discrete
@@ -80,14 +81,22 @@
 //
 // GPU (--gpu=1, coarse cells only; the editor's "random runs (GPU)"): the same search with its runs on the GPU (`eegpu
 // roll`, native/rollhost.h). This process keeps the archive (typed arrays by the GPU's dense cell id) and the rooms, and
-// picks --batch cells at a time with the three heads exactly as above, one pick after the other; the GPU keeps one state
-// per cell, plays --rolls runs of --roll ticks per pick with the same inputs (mulberry32 seeded by (batch seed, pick,
-// run): rollSeed / rollInputs rebuild them here, so a cell's path is its parent's plus a run's seed and length), keeps
-// each cell's earliest arrival and reports the new and sooner cells (tick, reach cost, room). A batch is one generation
-// of the frontier (the next one's picks see its cells), so its latency decides: 4096 x 8 x 40 found ice200's route after
-// 8 s on the rented H100 (6 seeds; 1024 / 2048 / 16384 picks: 12.4 / 8.2 / 16.3 s; runs of 20 / 80 ticks slower too).
-// Every route is replayed in the exact JS engine; the reach field's -1 is still the only prune (in the kernel).
-//   [--gpu=1] [--batch=4096] [--gmem=<MB for the GPU's pool>] [--tool=<eegpu>] [--bin=<level blob>] [--reach=<RCH3 file>]
+// picks --batch cells at a time with the three heads exactly as above, one pick after the other; eegpu roll keeps one
+// state per cell (in host memory, --hmem: the GPU holds the cell table, ~70 bytes a cell, --gmem), plays --rolls runs of
+// --roll ticks per pick on the GPU with the same inputs (mulberry32 seeded by (batch seed, pick, run): rollSeed /
+// rollInputs rebuild them here, so a cell's path is its parent's plus a run's seed and length), keeps each cell's
+// earliest arrival and reports the new and sooner cells (tick, reach cost, room). A batch is one generation of the
+// frontier (the next one's picks see its cells), so its latency decides: 4096 x 8 x 40 found ice200's route after 8 s on
+// the rented H100 (6 seeds; 1024 / 2048 / 16384 picks: 12.4 / 8.2 / 16.3 s; runs of 20 / 80 ticks slower too). The
+// same seed makes the same search (the same routes after the same simulated ticks): the tool sends a batch's records in
+// (tick, pick, run, step) order and the seen counts come every SEEN_BATCHES batches, by the count, not the clock; only
+// the dense ids differ (the GPU's atomics hand them out), and so may the cells kept in the batch that fills the pool.
+// Every route is replayed in the exact JS engine; the reach field's -1 is still the only prune (in the kernel). eegpu
+// roll ending by a failed launch or a crash (exit 6 / 7, above 255, a signal, no done line) is an error line with
+// launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7.
+//   [--gpu=1] [--batch=4096] [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
+//   default: an eighth of the machine's memory, at most half of the free memory>] [--tool=<eegpu>] [--bin=<level blob>]
+//   [--reach=<RCH3 file>]
 //   [--stopfile= --pausefile= --cachedir= --launch-ms= (passed to eegpu)]
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
@@ -114,7 +123,7 @@ for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) O
 const QP = [0, 0.25, 1, 4, 16], QV = [0, 2, 8, 32, 128];
 const MAXRES = QP.length - 1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
-	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50, gpu: 0, batch: 4096, gmem: 0 };
+	stall: 200, refine: 6, maxres: MAXRES, mem: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50, gpu: 0, batch: 4096, gmem: 0, hmem: 0 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search)
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
@@ -130,6 +139,10 @@ const MEM_SHARE = 0.25, MEM_MIN = 200, MEM_MAX = 1500;
 // coarse cells: every SOURCE_S s the "best" source events; SOURCE_MIN_TICKS: shorter attempts are no source (the
 // editor's relay starts from 100 ticks)
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
+// --gpu=1: head B's seen counts every SEEN_BATCHES batches, or one batch per SEEN_CELLS cells when that is more (the
+// download of millions of cells); the cells' states in host memory: ROLL_HOST_SHARE of the machine's memory, at most
+// half of the free memory, ROLL_HOST_MIN MB at least
+const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
 	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto' });
@@ -167,6 +180,15 @@ function parseArgs(argv) {
 const cellsFor = (L) => (L.width * L.height > FINE_MAX_TILES ? 'coarse' : 'fine');
 /** coarse cells' default memory per worker (MB): MEM_SHARE of the machine's memory over the workers, MEM_MIN .. MEM_MAX */
 const coarseMem = (workers, totalBytes) => Math.max(MEM_MIN, Math.min(MEM_MAX, Math.round((totalBytes || os.totalmem()) / 1048576 * MEM_SHARE / Math.max(1, workers))));
+/** --gpu=1: the MB of host memory for eegpu roll's pool of cell states (ROLL_HOST_SHARE of the machine's memory, or of a
+ *  container's limit, at most half of the free memory) */
+const rollHostMB = () => {
+	let total = os.totalmem();
+	try { const c = typeof process.constrainedMemory === 'function' ? process.constrainedMemory() : 0; if (c > 0 && c < total) total = c; } catch (e) { /* none */ }
+	let free = os.freemem();
+	try { const f = typeof process.availableMemory === 'function' ? process.availableMemory() : 0; if (f > 0) free = Math.min(free, f); } catch (e) { /* none */ }
+	return Math.max(ROLL_HOST_MIN, Math.round(Math.min(total * ROLL_HOST_SHARE, free / 2) / 1048576));
+};
 /** the options that depend on the level: the cells (--cells=auto), and then the memory budget (see the header) */
 function settle(a, L) {
 	if (a.cells === 'auto') a.cells = cellsFor(L);
@@ -832,8 +854,11 @@ async function gpuMain(a, L) {
 	let reachFile = a.reach;
 	if (!reachFile) { reachFile = tmpFile('reach.bin'); fs.writeFileSync(reachFile, RF.reachFileBytes(field, G.blobFp(fs.readFileSync(bin)))); }
 	const cleanup = () => { if (tmp) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* in use */ } } };
+	// (the cells' states are kept in host memory: an eighth of the machine's (a container's limit where it has one), at
+	// most half of the free memory; the GPU keeps the cell table, ~70 bytes a cell)
+	const hmem = a.hmem > 0 ? a.hmem : rollHostMB();
 	const args = ['roll', bin, `--rolls=${a.rolls}`, `--roll=${Math.min(255, a.roll)}`, `--keep=${a.keep}`, `--phase=${a.phase}`, `--prune=${a.prune ? 1 : 0}`,
-		...(reachFile ? [`--reach=${reachFile}`] : []), ...(a.gmem ? [`--mem=${a.gmem}`] : []), `--maxPicks=${Math.max(a.batch, 1)}`,
+		...(reachFile ? [`--reach=${reachFile}`] : []), ...(a.gmem ? [`--mem=${a.gmem}`] : []), `--hostmem=${hmem}`, `--maxPicks=${Math.max(a.batch, 1)}`,
 		...['stopfile', 'pausefile', 'cachedir', 'launch-ms'].filter((k) => a[k]).map((k) => `--${k}=${a[k]}`), `--parent=${process.pid}`];
 	const ch = spawn(tool, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true });
 	// (this process picks every batch while the GPU waits: above normal priority like eegpu's own, next to the CPU search's
@@ -845,7 +870,7 @@ async function gpuMain(a, L) {
 	// the tool's output: JSON lines, a line with "bytes" followed by that many bytes
 	// (a payload's chunks are joined once it is all there: joining each 64 KB chunk to what came before took 300 ms for the
 	// 12 MB seen counts of Stupid Fox's 3 M cells, a third of the search's time)
-	let buf = Buffer.alloc(0), want = null, waiter = null, toolDone = null, exited = false, parts = [], have = 0;
+	let buf = Buffer.alloc(0), want = null, waiter = null, toolDone = null, toolErr = null, exited = false, parts = [], have = 0;
 	const queue = [];
 	const deliver = (m) => { if (waiter) { const w = waiter; waiter = null; w(m); } else queue.push(m); };
 	const next = () => (queue.length ? Promise.resolve(queue.shift()) : exited ? Promise.resolve(null) : new Promise((res) => { waiter = res; }));
@@ -879,7 +904,26 @@ async function gpuMain(a, L) {
 			else deliver({ ev, data: null });
 		}
 	});
-	ch.on('close', (code) => { exited = true; if (!toolDone && err.trim()) say({ ev: 'warning', text: `eegpu roll: ${err.trim().split('\n').pop().slice(0, 300)}` }); deliver(null); ch.code = code; });
+	ch.on('close', (code, sig) => {
+		exited = true; ch.code = code; ch.sig = sig;
+		if (!toolDone && err.trim()) say({ ev: 'warning', text: `eegpu roll: ${err.trim().split('\n').pop().slice(0, 300)}` });
+		deliver(null);
+	});
+	/** eegpu roll ended by a failed launch (exit 6, 7: the driver's watchdog) or a crash (an exit code above 255, a signal,
+	 *  or an end without its done or error line): the editor's GPU failure rule needs {"error", "launchError": true} (it
+	 *  stops the other GPU strategies too) and this process's exit code 6 / 7 */
+	const crashCheck = () => {
+		if (!exited) return false;
+		const code = ch.code, sig = ch.sig;
+		const crashed = code === 6 || code === 7 || (Number.isFinite(code) && (code < 0 || code > 255)) || (code === null && !!sig) || (!toolDone && !toolErr);
+		if (!crashed) return false;
+		if (!(toolErr && toolErr.launchError)) {
+			say({ error: `eegpu roll ${code === 7 ? 'was stopped by the display driver\'s watchdog' : code === 6 ? 'had a GPU launch failure' : `crashed (${code === null ? `signal ${sig}` : `exit code ${code}`})`}` +
+				`${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 200)}` : ''}`, launchError: true });
+		}
+		process.exitCode = code === 7 ? 7 : 6;
+		return true;
+	};
 	ch.on('error', (e) => { err += e.message; });
 	/** the next message that is not a warning (a warning is passed on) */
 	const reply = async () => {
@@ -887,7 +931,7 @@ async function gpuMain(a, L) {
 			const m = await next();
 			if (m === null) return null;
 			if (m.ev.warn) { say({ ev: 'warning', text: `eegpu roll: ${m.ev.warn}` }); continue; }
-			if (m.ev.error) { say({ error: m.ev.error, launchError: m.ev.launchError || undefined }); return null; }
+			if (m.ev.error) { toolErr = m.ev; say({ error: m.ev.error, launchError: m.ev.launchError || undefined }); return null; }
 			return m;
 		}
 	};
@@ -895,13 +939,18 @@ async function gpuMain(a, L) {
 	let ready = null, info = null;
 	while (!info) {
 		const m = await reply();
-		if (m === null) { say({ error: `eegpu roll ended before it started${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 300)}` : ''}` }); process.exitCode = 4; cleanup(); return; }
+		if (m === null) {
+			if (!crashCheck() && !toolErr) say({ error: `eegpu roll ended before it started${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 300)}` : ''}` });
+			if (!process.exitCode) process.exitCode = 4;
+			cleanup();
+			return;
+		}
 		if (m.ev.ev === 'ready') { ready = m.ev; say(m.ev); }
 		else if (m.ev.ev === 'start') info = m.ev;
 	}
 	const tReady = Date.now(), tEnd = tReady + a.seconds * 1000;
 	say({ ev: 'start', workers: 1, seeds: [a.seed], mode: field.mode, cells: 'coarse', gpu: info.gpu ? info.gpu.name : null, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100,
-		cap: info.cap, memMB: info.memMB, batch: a.batch, rolls: a.rolls, roll: a.roll });
+		cap: info.cap, memMB: info.memMB, hostMB: info.hostMB, batch: a.batch, rolls: a.rolls, roll: a.roll });
 	// ---- the archive (by dense id: the GPU's pool index; cell 0 = the start)
 	let capN = 1 << 16;
 	let cT = new Int32Array(capN), cRc = new Float32Array(capN), cPicks = new Int32Array(capN), cRoom = new Int32Array(capN), cNode = new Int32Array(capN),
@@ -1122,16 +1171,17 @@ async function gpuMain(a, L) {
 	// of the same batch may give the cell a sooner state and path before its runs' records are read)
 	const pickNode = new Int32Array(a.batch);
 	const bFirst = []; // (per batch: each room's first new cell, by room index)
-	// (head B's seen counts: every second, or 20 x as long as the last download took: millions of cells)
-	let lastSeen = Date.now(), seenEvery = 1000, tickBudget = a.maxTicks;
+	// (head B's seen counts: every SEEN_BATCHES batches, more batches apart as the cells grow (a download of millions of
+	// cells takes a while): by the batch count, not the clock, so a seed's search is the same every time)
+	let lastSeen = 0, tickBudget = a.maxTicks;
 	while (!end) {
 		const now = Date.now();
 		if (stopReq || stopFile()) { end = 'stopped'; break; }
 		if (now >= tEnd) { end = 'time'; break; }
 		if (tickBudget && ticks >= tickBudget) { end = 'ticks'; break; }
 		if (a.first && route) { end = 'finish'; break; }
-		if (now - lastSeen >= seenEvery && roomList.length > 0) {
-			lastSeen = now;
+		if (batches - lastSeen >= Math.max(SEEN_BATCHES, Math.ceil(nCells / SEEN_CELLS)) && roomList.length > 0) {
+			lastSeen = batches;
 			ch.stdin.write('seen\n');
 			const m = await reply();
 			if (m === null) { end = 'error'; break; }
@@ -1140,7 +1190,6 @@ async function gpuMain(a, L) {
 				cSeen.set(s.subarray(0, Math.min(s.length, capN)));
 			}
 			seenMs += Date.now() - now;
-			seenEvery = Math.max(1000, 20 * (Date.now() - now));
 		}
 		const h0 = Date.now();
 		// the picks (explore()'s heads, one pick after the other)
@@ -1258,6 +1307,7 @@ async function gpuMain(a, L) {
 	if (!exited) { try { ch.stdin.write('stop\n'); ch.stdin.end(); } catch (e) { /* gone */ } }
 	for (let k = 0; k < 100 && !exited; k++) { const m = await Promise.race([next(), new Promise((res) => setTimeout(() => res(undefined), 100))]); if (m === null) break; }
 	if (!exited) { try { ch.stdout.destroy(); ch.stderr.destroy(); ch.unref(); } catch (e) { /* gone */ } }
+	else if (end === 'error' && crashCheck()) end = 'crashed';
 	cleanup();
 	progress();
 	sendNear();

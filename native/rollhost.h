@@ -2,9 +2,9 @@
 // persistent GPU server for the Go-Explore of goexplore.js with coarse cells (explore.h RollParams). Included by
 // eegpu.cpp.
 //   eegpu roll <level.bin> [--reach=<RCH3>] [--prune=1] [--rolls=8] [--roll=40] [--keep=0.85] [--phase=50]
-//              [--cap=<cells>] [--mem=<MB>] [--maxPicks=65536]
-// It keeps the cell table and one state per cell (the pool, by dense id; the start is cell 0) on the GPU, and reads
-// jobs from stdin (binary mode):
+//              [--cap=<cells>] [--mem=<MB>] [--hostmem=<MB>] [--maxPicks=65536]
+// It keeps the cell table on the GPU and one state per cell (the pool, by dense id; the start is cell 0) in host memory,
+// and reads jobs from stdin (binary mode):
 //   "batch K maxT seed\n" + K x u32 (the picked cells' dense ids): every pick plays --rolls runs of up to --roll ticks
 //       (goexplore.js's inputs: explore.h rollSeed / rollDraw); a state at tick >= maxT is not added and a run ends past
 //       maxT. Reply: {"ev":"batch","n":N,"fin":F,"cells":C,"full":0|1,"touched":..,"ticks":..,"runs":..,"cut":..,
@@ -15,14 +15,23 @@
 //   "seen\n": {"ev":"seen","n":C,"bytes":4C}\n + C x u32: how often runs came through each cell (head B).
 //   "stop\n", or the end of stdin: the done line, exit 0.
 // Before the first job: the ready event, then {"ev":"start","stateBytes":..,"cap":..,"slots":..,"fifths":..,"room":..,
-// "memMB":..}. The pool holds --cap cells (default: from --mem, else a quarter of the GPU's memory (an eighth on a GPU
-// of 12 GB or less: the 8 GB laptop GPU gives it 1 GB, ~1.4 M cells, next to every move's table and the beams), at most
-// the free memory less 1 GB); once full, only known cells improve (goexplore.js's archive likewise). Launches are
-// sized toward --launch-ms like every command (launch.h); --stopfile / --pausefile / --parent act between two launches.
+// "memMB":..,"hostMB":..}. The pool holds --cap cells, else as many as both the GPU's share and the host's hold: on the
+// GPU a cell costs its tick, slot and seen count and its table slots (~70 bytes: --mem MB, else a quarter of the GPU's
+// memory, an eighth on a GPU of 12 GB or less, at most the free memory less 1 GB), in host memory its state (--hostmem
+// MB, default 1024; goexplore.js passes an eighth of the machine's memory, at most half of the free memory): a state is
+// 0.5-2 KB, so a pool on the GPU held ~10x fewer cells (the 8 GB laptop GPU's 1 GB 1.4 M of Stupid Fox's, which the
+// search fills in a minute; now with 32 GB of RAM: 4 GB of states, 6.5 M cells, 574 MB of the GPU instead of ~1.07 GB,
+// next to every move's ~4.9 GB, the beams and the relay; a whole Find a route's peak on an 8 GB GPU is not measured).
+// Per batch the picks' states go up and the records' states come down (page-locked buffers
+// where the driver gives them). Once full, only known cells improve (goexplore.js's archive likewise). memMB = every GPU
+// buffer. Launches are sized toward --launch-ms like every command (launch.h); --stopfile / --pausefile / --parent act
+// between two launches.
 #pragma once
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#else
+#include <sys/mman.h>
 #endif
 
 template <int TW>
@@ -63,43 +72,86 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		if (!rf.empty() && !reachGpu.load(rf, L, P.reach, err)) { printf("{\"error\":%s}\n", jsonStr(err).c_str()); return 3; }
 	}
 	const size_t SB = sizeof(S);
-	// the pool's size: --cap cells, else what --mem MB (else a quarter of the GPU's memory, an eighth up to 12 GB, at most
-	// the free memory less 1 GB) holds: a state, its tick, slot and seen count, and two table slots of 28 bytes per cell
+	// the GPU's share (--mem MB, else a quarter of the GPU's memory, an eighth up to 12 GB, at most the free memory less
+	// 1 GB) and the host's (--hostmem MB)
 	size_t memB = 0;
 	{
 		const size_t total = g.d.mem ? g.d.mem : (size_t)4 << 30;
 		size_t fr = total, tot = 0;
 		if (cu::cuMemGetInfo_v2) cu::cuMemGetInfo_v2(&fr, &tot);
 		const double mb = atof(opt(argc, argv, "mem", "0").c_str());
-		// (a GPU of 12 GB or less, e.g. the 8 GB laptop one: an eighth, 1 GB, next to every move's table and the beams)
 		const size_t share = total <= ((size_t)12 << 30) ? total / 8 : total / 4;
 		memB = mb > 0 ? (size_t)(mb * 1048576.0) : std::min(share, fr > ((size_t)1 << 30) + ((size_t)256 << 20) ? fr - ((size_t)1 << 30) : (size_t)256 << 20);
 	}
+	const size_t hostB = (size_t)(std::max(16.0, atof(opt(argc, argv, "hostmem", "1024").c_str())) * 1048576.0);
+	// (the records of one collect launch range come down with their states: ~64 MB)
+	const uint32_t stageCap = (uint32_t)std::max<size_t>(4096, std::min<size_t>(65536, ((size_t)64 << 20) / SB));
 	// (per pick: its id, its state's copy, and R x Lr touched slots at most)
-	const size_t fixedB = (size_t)maxPicks * (4 + SB + 4 * (size_t)R * Lr) + B.bytes.size();
-	uint64_t cap = (uint64_t)std::max<int64_t>(4096, (int64_t)((memB > fixedB ? memB - fixedB : 0) / (SB + 12 + 24 + 2 * 28)));
-	if (opt(argc, argv, "cap", "").size()) cap = (uint64_t)std::max(1024, atoi(opt(argc, argv, "cap", "0").c_str()));
-	cap = std::min<uint64_t>(cap, (uint64_t)1 << 30);
+	const size_t fixedB = (size_t)maxPicks * (4 + SB + 4 * (size_t)R * Lr) + (size_t)stageCap * (SB + 24) + B.bytes.size() + 4096;
+	const size_t devB = memB > fixedB ? memB - fixedB : 0;
+	// (on the GPU per cell: its tick, slot and seen count, and two table slots of 28 bytes; in host memory its state)
+	const bool capGiven = opt(argc, argv, "cap", "").size() > 0;
+	uint64_t cap = std::min<uint64_t>(devB / (12 + 2 * 28), hostB / SB);
+	if (capGiven) cap = (uint64_t)std::max(1024, atoi(opt(argc, argv, "cap", "0").c_str()));
+	cap = std::max<uint64_t>(4096, std::min<uint64_t>(cap, (uint64_t)1 << 30));
 	uint64_t slots = 1024;
 	while (slots < 2 * cap) slots <<= 1;
+	// (the table's slots are a power of two: fewer cells where the rounding would pass the GPU's share)
+	while (!capGiven && slots > 8192 && 28 * slots + 12 * cap > devB) { slots >>= 1; cap = std::min<uint64_t>(cap, slots / 2); }
 	// (the records of one collect launch range: at most one per touched slot; the touched slots of a batch are collected in
 	// ranges of at most recCap)
 	const uint32_t touchedCap = (uint32_t)std::min<uint64_t>((uint64_t)maxPicks * R * Lr, slots);
-	const uint32_t recCap = (uint32_t)std::min<uint64_t>(touchedCap, cap);
+	const uint32_t recCap = (uint32_t)std::min<uint64_t>(std::min<uint64_t>(touchedCap, cap), stageCap);
 	const uint32_t finCap = 4096;
-	cu::Buf dl, dpool, dcellT, dkeys, dbest, ddone, dseen, ddense, dslot, dseenOut, dtouched, dpicks, dpickS, dfin, dout, dctr;
+	cu::Buf dl, dstage, dcellT, dkeys, dbest, ddone, dseen, ddense, dslot, dseenOut, dtouched, dpicks, dpickS, dfin, dout, dctr;
 	for (;;) {
-		const bool ok = dl.upload(B.bytes.data(), B.bytes.size()) && dpool.alloc(SB * cap) && dcellT.alloc(4 * cap) && dkeys.alloc(8 * slots) && dbest.alloc(8 * slots) &&
+		const bool ok = dl.upload(B.bytes.data(), B.bytes.size()) && dstage.alloc(SB * (size_t)recCap) && dcellT.alloc(4 * cap) && dkeys.alloc(8 * slots) && dbest.alloc(8 * slots) &&
 			ddone.alloc(4 * slots) && dseen.alloc(4 * slots) && ddense.alloc(4 * slots) && dslot.alloc(4 * cap) && dseenOut.alloc(4 * cap) && dtouched.alloc(4ull * touchedCap) &&
 			dpicks.alloc(4ull * maxPicks) && dpickS.alloc(SB * maxPicks) && dfin.alloc(16ull * finCap) && dout.alloc(24ull * recCap) && dctr.alloc(64);
 		if (ok) break;
-		// (out of GPU memory, e.g. another strategy took it after the check: half the pool, down to 64 K cells)
+		// (out of GPU memory, e.g. another strategy took it after the check: half the table, down to 64 K cells)
 		if (cu::lastCode != 2 || cap <= 65536) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
-		for (cu::Buf* b : { &dl, &dpool, &dcellT, &dkeys, &dbest, &ddone, &dseen, &ddense, &dslot, &dseenOut, &dtouched, &dpicks, &dpickS, &dfin, &dout, &dctr }) b->free();
+		for (cu::Buf* b : { &dl, &dstage, &dcellT, &dkeys, &dbest, &ddone, &dseen, &ddense, &dslot, &dseenOut, &dtouched, &dpicks, &dpickS, &dfin, &dout, &dctr }) b->free();
 		cap /= 2;
 		slots /= 2;
 		printf("{\"warn\":\"out of GPU memory: the pool holds %llu cells\"}\n", (unsigned long long)cap);
 	}
+	size_t devUsed = 0;
+	for (cu::Buf* b : { &dl, &dstage, &dcellT, &dkeys, &dbest, &ddone, &dseen, &ddense, &dslot, &dseenOut, &dtouched, &dpicks, &dpickS, &dfin, &dout, &dctr }) devUsed += b->bytes;
+	// the pool in host memory (not page-locked: its pages are touched as cells come; Linux: an anonymous map with huge
+	// pages where the kernel gives them, fewer page faults as it fills), and the copies' buffers
+	struct Pool {
+		uint8_t* p = nullptr; size_t bytes = 0;
+		bool alloc(size_t n) {
+			bytes = n;
+#ifdef _WIN32
+			p = (uint8_t*)malloc(n);
+#else
+			void* q = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+			p = q == MAP_FAILED ? nullptr : (uint8_t*)q;
+#ifdef MADV_HUGEPAGE
+			if (p) (void)madvise(p, n, MADV_HUGEPAGE);
+#endif
+#endif
+			return p != nullptr;
+		}
+		~Pool() {
+#ifdef _WIN32
+			free(p);
+#else
+			if (p) munmap(p, bytes);
+#endif
+		}
+	} poolMem;
+	for (;;) {
+		if (poolMem.alloc(SB * (size_t)cap) || cap <= 65536) break;
+		cap /= 2;
+		printf("{\"warn\":\"out of host memory: the pool holds %llu cells\"}\n", (unsigned long long)cap);
+	}
+	uint8_t* const pool = poolMem.p;
+	if (!pool) { printf("{\"error\":\"out of host memory for the pool\"}\n"); return 4; }
+	cu::HostBuf pickH, stageH;
+	if (!pickH.alloc(SB * maxPicks) || !stageH.alloc(SB * (size_t)recCap)) { printf("{\"error\":\"out of host memory for the copies\"}\n"); return 4; }
 	const uint32_t recCapNow = (uint32_t)std::min<uint64_t>(recCap, cap);
 	lk::memset8(dkeys.p, 0, 8 * slots, "memset");
 	lk::memset8(dbest.p, 0xff, 8 * slots, "memset");
@@ -117,14 +169,14 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		cu::cuMemcpyHtoD_v2(dkeys.p + 8ull * slot0, &key0, 8);
 		cu::cuMemcpyHtoD_v2(ddone.p + 4ull * slot0, &zero, 4);
 		cu::cuMemcpyHtoD_v2(ddense.p + 4ull * slot0, &d0, 4);
-		cu::cuMemcpyHtoD_v2(dpool.p, start, SB);
+		memcpy(pool, start, SB);
 		cu::cuMemcpyHtoD_v2(dcellT.p, &zero, 4);
 		cu::cuMemcpyHtoD_v2(dctr.p + 12, &one, 4);
 		cu::cuMemcpyHtoD_v2(dslot.p, &slot0, 4);
 	}
 	const int32_t fifths0 = reachGpu.H.on ? reachFifths(reachGpu.H, start->px, start->py, start->speed_y, start->q0, start->q1, start->slippery) : -1;
 	P.L = B.level((const uint8_t*)(uintptr_t)dl.p);
-	P.pool = (u8*)(uintptr_t)dpool.p; P.stateBytes = (i32)SB; P.cellT = (i32*)(uintptr_t)dcellT.p;
+	P.stage = (u8*)(uintptr_t)dstage.p; P.stateBytes = (i32)SB; P.cellT = (i32*)(uintptr_t)dcellT.p;
 	P.picks = (const u32*)(uintptr_t)dpicks.p; P.pickStates = (u8*)(uintptr_t)dpickS.p;
 	P.keys = (u64*)(uintptr_t)dkeys.p; P.mask = (u32)(slots - 1); P.best = (u64*)(uintptr_t)dbest.p; P.doneT = (u32*)(uintptr_t)ddone.p;
 	P.seen = (u32*)(uintptr_t)dseen.p; P.dense = (i32*)(uintptr_t)ddense.p;
@@ -140,9 +192,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 	g.ready(tStart);
-	printf("{\"ev\":\"start\",\"stateBytes\":%d,\"cap\":%llu,\"slots\":%llu,\"fifths\":%d,\"room\":%d,\"memMB\":%.0f,\"rolls\":%d,\"roll\":%d,\"phase\":%d,\"gpu\":%s}\n", (int)SB,
-		(unsigned long long)cap, (unsigned long long)slots, fifths0, (int32_t)room0, (double)((SB + 12) * cap + 28 * slots + (SB + 4ull * R * Lr) * maxPicks) / 1048576.0, R, Lr, P.phase,
-		g.json().c_str());
+	printf("{\"ev\":\"start\",\"stateBytes\":%d,\"cap\":%llu,\"slots\":%llu,\"fifths\":%d,\"room\":%d,\"memMB\":%.0f,\"hostMB\":%.0f,\"locked\":%d,\"rolls\":%d,\"roll\":%d,\"phase\":%d,\"gpu\":%s}\n",
+		(int)SB, (unsigned long long)cap, (unsigned long long)slots, fifths0, (int32_t)room0, (double)devUsed / 1048576.0, (double)(SB * cap + pickH.bytes + stageH.bytes) / 1048576.0,
+		pickH.locked && stageH.locked ? 1 : 0, R, Lr, P.phase, g.json().c_str());
 	fflush(stdout);
 	uint64_t batches = 0;
 	unsigned long long st[4] = { 0, 0, 0, 0 };
@@ -161,8 +213,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		simSeen = sim;
 	};
 	std::vector<uint32_t> picks(maxPicks);
-	std::vector<int32_t> outAll;
-	std::vector<uint32_t> fins, seenHost;
+	std::vector<int32_t> outAll, sorted, lastD;
+	std::vector<uint32_t> fins, finSorted, seenHost;
+	std::vector<std::pair<uint64_t, uint32_t>> ord;
 	char line[256];
 	const char* why = "eof";
 	for (;;) {
@@ -193,6 +246,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		uint32_t nd = std::min<uint32_t>(ctr[3], (uint32_t)cap);
 		for (unsigned long long i = 0; i < k; i++) if (picks[i] >= nd) { printf("{\"error\":\"pick %u: no such cell\"}\n", picks[i]); fflush(stdout); return 3; }
 		cu::cuMemcpyHtoD_v2(dpicks.p, picks.data(), 4 * k);
+		// (the picks' states, from the pool)
+		for (unsigned long long i = 0; i < k; i++) memcpy(pickH.p + i * SB, pool + (size_t)picks[i] * SB, SB);
+		cu::cuMemcpyHtoD_v2(dpickS.p, pickH.p, SB * k);
 		cu::cuMemsetD8_v2(dctr.p, 0, 12);   // (touched, finishes, records)
 		P.nPicks = (u32)k; P.maxT = (i32)std::min<unsigned long long>(mt, 0x7fffffff); P.batchSeed = (u32)seed; P.full = nd >= cap ? 1 : 0;
 		void* ap[] = { &P };
@@ -201,6 +257,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		cu::cuMemcpyDtoH_v2(ctr, dctr.p, 32);
 		const uint32_t nt = std::min(ctr[0], touchedCap);
 		outAll.clear();
+		lastD.clear();
 		const double c0 = lk::G.totalKernelMs;
 		for (uint32_t a = 0; a < nt; a += recCapNow) {
 			const uint32_t b = std::min(nt, a + recCapNow);
@@ -212,6 +269,15 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 			const size_t o = outAll.size();
 			outAll.resize(o + 6ull * nr);
 			cu::cuMemcpyDtoH_v2(outAll.data() + o, dout.p, 24ull * nr);
+			// (the records' states, into the pool; those of the last range after the reply, while goexplore.js picks the next
+			// batch: the copies into new pages of the pool took ~10 ms of a 55 ms batch of Stupid Fox's on the H100)
+			cu::cuMemcpyDtoH_v2(stageH.p, dstage.p, SB * nr);
+			if (b < nt) {
+				for (uint32_t j = 0; j < nr; j++) {
+					const int32_t d = outAll[o + 6ull * j];
+					if (d >= 0 && (uint64_t)d < cap) memcpy(pool + (size_t)d * SB, stageH.p + (size_t)j * SB, SB);
+				}
+			} else lastD.assign(outAll.begin() + o, outAll.end());
 		}
 		const double colMs = lk::G.totalKernelMs - c0;
 		const uint32_t nf = std::min(ctr[1], finCap);
@@ -224,6 +290,26 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		memcpy(st, st1, sizeof st);
 		batches++;
 		const size_t n = outAll.size() / 6;
+		// (a canonical order: the records and the finishes by (tick, pick, run, step), unique per record; the GPU's atomics
+		// give them in any order, and goexplore.js's archive follows the order it reads them in: so the same seed makes
+		// the same search, but for the new cells' dense ids, and those of the batch that fills the pool)
+		const auto recKey = [](uint32_t t, uint32_t pk, uint32_t run, uint32_t step) { return ((uint64_t)t << 40) | ((uint64_t)pk << 20) | ((uint64_t)(run & 0xfff) << 8) | (step & 0xff); };
+		if (n > 1) {
+			ord.resize(n);
+			for (size_t j = 0; j < n; j++) { const int32_t* o = &outAll[6 * j]; ord[j] = { recKey((uint32_t)o[1], (uint32_t)o[4], (uint32_t)o[5] & 0xffff, (uint32_t)o[5] >> 16), (uint32_t)j }; }
+			std::sort(ord.begin(), ord.end());
+			sorted.resize(outAll.size());
+			for (size_t j = 0; j < n; j++) memcpy(&sorted[6 * j], &outAll[6ull * ord[j].second], 24);
+			outAll.swap(sorted);
+		}
+		if (nf > 1) {
+			ord.resize(nf);
+			for (uint32_t j = 0; j < nf; j++) ord[j] = { recKey(fins[4 * j + 3], fins[4 * j], fins[4 * j + 1], fins[4 * j + 2]), j };
+			std::sort(ord.begin(), ord.end());
+			finSorted.resize(fins.size());
+			for (uint32_t j = 0; j < nf; j++) memcpy(&finSorted[4 * j], &fins[4ull * ord[j].second], 16);
+			fins.swap(finSorted);
+		}
 		printf("{\"ev\":\"batch\",\"n\":%zu,\"fin\":%u,\"cells\":%u,\"full\":%d,\"touched\":%u,\"ticks\":%llu,\"runs\":%llu,\"cut\":%llu,\"dead\":%llu,\"ms\":%.2f,\"kernelMs\":%.2f,"
 			"\"rollMs\":%.2f,\"rollWallMs\":%.2f,\"colMs\":%.2f,\"bytes\":%llu}\n",
 			n, nf, nd, nd >= cap ? 1 : 0, nt, dt, dr, dc, dd, lk::sinceMs(tb), lk::G.totalKernelMs - k0, rollMs, rollWall, colMs, (unsigned long long)(24 * n + 16ull * nf));
@@ -231,6 +317,11 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		if (n) fwrite(outAll.data(), 24, n, stdout);
 		if (nf) fwrite(fins.data(), 16, nf, stdout);
 		fflush(stdout);
+		// (the last range's states: lastD holds its records as they came, 6 i32 each, next to their states in stageH)
+		for (size_t j = 0; 6 * j < lastD.size(); j++) {
+			const int32_t d = lastD[6 * j];
+			if (d >= 0 && (uint64_t)d < cap) memcpy(pool + (size_t)d * SB, stageH.p + j * SB, SB);
+		}
 	}
 	lk::onStop = nullptr;
 	finale(why);

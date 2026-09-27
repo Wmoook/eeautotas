@@ -113,18 +113,19 @@ EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, boo
 // ---------------------------------------------------------------- random runs (`eegpu roll`, native/rollhost.h)
 // The GPU side of Find a route's "random runs (GPU)" (src/goexplore.js --gpu=1): the Go-Explore of goexplore.js with
 // coarse cells, its rolls on the GPU. The host (goexplore.js) keeps the archive and picks K cells per batch (heads A /
-// B / C); here every pick plays R random runs of up to Lr ticks from its cell's state (the state pool: one state per
-// cell, by its dense id), with goexplore.js's input policy (the first input drawn, then each tick kept with p `keep`,
-// else drawn again from the 18: the same mulberry32 draws, so the host rebuilds a run's inputs from its seed). Every
-// state on the way is looked up in the cell table (open addressing over coarse cell keys: rollCellKey), new cells are
-// added, and per cell the earliest arrival of the batch wins (atomicMin over (tick, pick, run, step)); a cell reached
-// sooner than before is materialized (replayed from its pick's state into the pool) and reported with its reach cost
-// and room. A state the reach field rules out (-1, a proof) ends its run, as a death does; nothing else prunes.
+// B / C); here every pick plays R random runs of up to Lr ticks from its cell's state (the state pool is in host memory:
+// one state per cell, by its dense id; the picks' states come up per batch, the records' go down), with goexplore.js's
+// input policy (the first input drawn, then each tick kept with p `keep`, else drawn again from the 18: the same
+// mulberry32 draws, so the host rebuilds a run's inputs from its seed). Every state on the way is looked up in the cell
+// table (open addressing over coarse cell keys: rollCellKey), new cells are added, and per cell the earliest arrival of
+// the batch wins (atomicMin over (tick, pick, run, step)); a cell reached sooner than before is materialized (replayed
+// from its pick's state, for the host's pool) and reported with its reach cost and room. A state the reach field rules
+// out (-1, a proof) ends its run, as a death does; nothing else prunes.
 struct RollParams {
 	Level L;
 	ReachField reach;
 	i32 prune;                         // 1: a state the reach field rules out ends its run (-1 is a proof)
-	u8* pool; i32 stateBytes;          // the cells' states, by dense id
+	u8* stage; i32 stateBytes;         // the records' states, by record index (the host copies them into its pool)
 	i32* cellT;                        // the cells' ticks (the path length), by dense id
 	const u32* picks; u32 nPicks;      // this batch's picked cells (dense ids)
 	i32 R, Lr;                         // runs per pick, ticks per run (Lr <= 255)
@@ -144,7 +145,7 @@ struct RollParams {
 	i32 phase;                         // > 0 (time doors): the cell keys hold the door phase in buckets of `phase` ticks
 	unsigned long long* stats;         // [0] ticks simulated, [1] runs, [2] runs ended by the reach field, [3] deaths
 	// collect
-	u8* pickStates;                    // the picks' states at the batch's start (run 0 copies them; collect replays from them)
+	u8* pickStates;                    // the picks' states at the batch's start (from the host's pool; collect replays from them)
 	i32* out;                          // per record (dense id or -1: pool full, tick, fifths, room, pick, run | step << 16) x 6
 	u32 denseCap;
 	u32* denseSlot;                    // per dense id: its slot (the seen counts by dense id: rollSeen)

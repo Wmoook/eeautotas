@@ -593,9 +593,9 @@ __device__ __forceinline__ i32 rollSlot(const RollParams& p, u64 key, bool inser
 	}
 	return -1;
 }
-// one thread per run (pick x R + run): Lr ticks of goexplore.js's random inputs from the pick's state; every state that
-// reaches a cell sooner than the host knows sets the cell's best arrival of the batch. Run 0 of each pick also copies the
-// pick's state (rollCollect replays the winners from these copies while it writes the pool)
+// one thread per run (pick x R + run): Lr ticks of goexplore.js's random inputs from the pick's state (the host copied
+// the picks' states from its pool); every state that reaches a cell sooner than the host knows sets the cell's best
+// arrival of the batch (rollCollect replays the winners from the same copies)
 template <int TW>
 __device__ void rollBody(const RollParams& p) {
 	const u32 i = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
@@ -604,8 +604,7 @@ __device__ void rollBody(const RollParams& p) {
 		const u32 pk = i / (u32)p.R, run = i - pk * (u32)p.R;
 		const u32 d = p.picks[pk];
 		const i32 t0 = p.cellT[d];
-		State<TW> s = *(const State<TW>*)(p.pool + (size_t)d * p.stateBytes);
-		if (run == 0) *(State<TW>*)(p.pickStates + (size_t)pk * p.stateBytes) = s;
+		State<TW> s = *(const State<TW>*)(p.pickStates + (size_t)pk * p.stateBytes);
 		Sim<TW> sim(p.L, s);
 		const bool crown0 = s.has_silver_crown != 0;
 		Mulberry r; r.s = rollSeed(p.batchSeed, pk, run);
@@ -640,8 +639,9 @@ __device__ void rollBody(const RollParams& p) {
 	warpAdd(&p.stats[0], nTicks); warpAdd(&p.stats[1], nRuns); warpAdd(&p.stats[2], nCut); warpAdd(&p.stats[3], nDead);
 }
 /** the touched slots [lo, hi): a cell reached sooner than the host knows is replayed from its pick's copy to the arrival
- *  and written into the pool (a new cell gets the next dense id while the pool has room), with a record (dense id or -1,
- *  tick, reach fifths, room, pick, run | step << 16); the batch's best is cleared for the next batch */
+ *  (a new cell gets the next dense id while the pool has room), with a record (dense id or -1, tick, reach fifths, room,
+ *  pick, run | step << 16) and its state next to it in `stage` (the host copies it into its pool); the batch's best is
+ *  cleared for the next batch */
 template <int TW>
 __device__ void rollCollectBody(const RollParams& p) {
 	const u32 i = p.lo + blockIdx.x * blockDim.x + threadIdx.x;
@@ -663,8 +663,9 @@ __device__ void rollCollectBody(const RollParams& p) {
 		const u32 n = atomicAdd(&p.ctr[3], 1u);
 		if (n < p.denseCap) { d = (i32)n; p.dense[slot] = d; p.denseSlot[d] = slot; }
 	}
-	if (d >= 0) { *(State<TW>*)(p.pool + (size_t)d * p.stateBytes) = s; p.cellT[d] = (i32)t; }
+	if (d >= 0) p.cellT[d] = (i32)t;
 	const u32 q = atomicAdd(&p.ctr[2], 1u);
+	*(State<TW>*)(p.stage + (size_t)q * p.stateBytes) = s;
 	i32* o = p.out + 6 * (size_t)q;
 	o[0] = d; o[1] = (i32)t;
 	o[2] = p.reach.on ? reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) : -1;

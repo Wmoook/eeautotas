@@ -419,7 +419,7 @@ const PASS_MIN = -2, PASS_MAX = 2, PASS_START = -1;
 // runs from PASS_START as if it had not been. The user's 50x50 levels: a try takes 0.4-0.5 s alone on the laptop GPU, the
 // ladder's coarse passes took 33 s there next to the beams and the CPU search (route after 59.7 s, the finest pass after
 // 58 s); staircase / dotstairs: the finest pass explodes (60M+ states), the ladder solves them.
-const PROBE_S = 15;
+const PROBE_S = 15, PROBE_WALL = 3;
 // the sanity search after the physics check proves the trophy out of reach (a route there would be a bug in the model):
 // NO_WAY_UP_S s (60 kept the user waiting a minute for a verdict the proof had already given)
 const NO_WAY_UP_S = 10;
@@ -445,7 +445,8 @@ const SLICE_MS = 2500, SLICE_MAX = 4, LEAD_TILES = 10;
 // neither the leader's slices nor the turns of fresh processes (every new pass and relay run is one): on the ice level
 // (200 x 200) they had 2 s of the GPU in the search's first 76 s, where alone they find a route in 8 s. On levels of at
 // most ROLLS_PROBE_TILES tiles (100 x 100) every move's probe keeps the GPU to itself (its finest pass may run through
-// there in its PROBE_S; on the 200 x 200 levels it never did, and its 15 s were the random runs' lost time).
+// there in its PROBE_S; on the 200 x 200 levels it never did, and its 15 s were the random runs' lost time); above, its
+// PROBE_S counts its own GPU time (the ice level's probe, sharing: 4.9 s of kernels in its 15 s of the clock, 11.7 s alone).
 const ROLLS_WAIT_MS = 2500, ROLLS_PROBE_TILES = 10000;
 let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
@@ -454,8 +455,15 @@ function setPaused(k, on) {
 	if (!ch || !!ch.paused === on) return;
 	try { if (on) fs.writeFileSync(pauseFileOf(k), 'pause'); else fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* gone */ }
 	ch.paused = on;
-	if (!on) ch.lastOut = Date.now();   // (the stall watchdog counts from its turn)
+	if (on) ch.pausedSince = Date.now();
+	else {
+		ch.lastOut = Date.now();   // (the stall watchdog counts from its turn)
+		if (ch.pausedSince) ch.pausedMs = (ch.pausedMs || 0) + Date.now() - ch.pausedSince;
+		ch.pausedSince = 0;
+	}
 }
+/** the ms a strategy's process has spent paused (other strategies' slices) so far */
+const pausedMsOf = (ch) => (ch.pausedMs || 0) + (ch.paused && ch.pausedSince ? Date.now() - ch.pausedSince : 0);
 function schedule() {
 	if (!S || !S.running) return;
 	const now = Date.now();
@@ -1275,9 +1283,23 @@ function launch(n) {
 			S.searchStarted = now;
 			S.prepSec = (now - S.started) / 1000;
 		}
-		// the probe (see PROBE_S): its first try must run through within PROBE_S s of search time
+		// the probe (see PROBE_S): its first try must run through within PROBE_S s of search time, its own: the time it waits
+		// while another strategy has the GPU (the random runs' slices, above ROLLS_PROBE_TILES) does not count, up to
+		// PROBE_WALL x PROBE_S of the clock (on the ice level the random runs' slices left the probe 40% of its GPU time)
 		if (V.probe === 'running' && !ch.probeTimer) {
-			ch.probeTimer = setTimeout(() => { if (V.probe === 'running' && mine() && alive(ch)) halt(ch, 'probe'); }, cur.opts.probeS * 1000);
+			const from = now, paused0 = pausedMsOf(ch), budget = cur.opts.probeS * 1000;
+			const check = () => {
+				ch.probeTimer = null;
+				if (V.probe !== 'running' || !mine() || !alive(ch)) return;
+				const wall = Date.now() - from, left = budget - (wall - (pausedMsOf(ch) - paused0));
+				if (left > 20 && wall < PROBE_WALL * budget) {
+					ch.probeTimer = setTimeout(check, Math.min(left, PROBE_WALL * budget - wall));
+					if (ch.probeTimer.unref) ch.probeTimer.unref();
+					return;
+				}
+				halt(ch, 'probe');
+			};
+			ch.probeTimer = setTimeout(check, budget);
 			if (ch.probeTimer.unref) ch.probeTimer.unref();
 		}
 		if (V.prepSec >= 5) {
