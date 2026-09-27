@@ -182,7 +182,7 @@ function create(o) {
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
 	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, retired: 0 };
-	const trophyArm = { n: 0, y: 0, back: 0 };
+	const trophyArm = { n: 0, y: 0, back: 0, best: Infinity };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
 	 *  want different cells): each once, then its mean reward in the room (the level's mean as a prior worth 2 tries) +
@@ -335,9 +335,11 @@ function create(o) {
 		return r.info;
 	};
 	/** room r's next target: an untried trigger component (or TROPHY_T: the trophy, walk mode), never aimed at ones
-	 *  first (the nearest to where the room was entered first), then by UCB over the bursts aimed at it (mean reward +
-	 *  UCB_C x sqrt(ln(1 + the room's bursts) / its bursts)); retired ones (TARGET_DRY dry bursts) skipped while another
-	 *  is left; null: the room has no target left */
+	 *  first (the nearest to where the room was entered first), then the nearest miss (the least distance any burst aimed
+	 *  at it started or ended at; fewer bursts first among equals); retired ones (TARGET_DRY dry bursts) skipped while
+	 *  another is left; null: the room has no target left. Forgotten Veil's gate into coin 4 (the route's own state
+	 *  entering coins=3, the bursts alone): its 14th target by steps, aimed at once after 238 s from a cell 3 tiles away
+	 *  that ran out of states, and by the rooms' mean reward (UCB) never again in 300 s */
 	const targetOf = (r) => {
 		const I = infoOf(r);
 		const live = [];
@@ -351,7 +353,7 @@ function create(o) {
 		let b = null, bs = -Infinity;
 		for (const c of open) {
 			const v = tg(c);
-			const sc = v.n === 0 ? 1e6 - (I.near.get(c) || 0) : v.y / v.n + UCB_C * Math.sqrt(Math.log(1 + r.n) / v.n);
+			const sc = v.n === 0 ? 1e9 - (I.near.get(c) || 0) : -v.best - 0.01 * v.n;
 			if (sc > bs) { bs = sc; b = c; }
 		}
 		return b;
@@ -645,14 +647,21 @@ function create(o) {
 			oom = 0;
 			fails = 0;
 			st.bursts++; st.sec += r.sec; if (r.reached) st.reached++; st.newRooms += r.fresh;
-			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
+			// (the trophy arm's share closed from its own best so far: a relay from 60-400 ticks back that comes back to the same
+			// nearest attempt is no progress; Forgotten Veil's gate into coin 4: 41 of 60 bursts went to the trophy arm, every
+			// chain 382 -> 112 tiles, the same coin-door pocket, rewarded 0.2 each time)
+			const ref = job.r ? job.startDist : Math.min(job.startDist, trophyArm.best);
+			const prog = Number.isFinite(r.near) && ref > 0 ? Math.max(0, Math.min(1, (ref - r.near) / ref)) : 0;
+			if (!job.r && r.near < trophyArm.best) trophyArm.best = r.near;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
 			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
 			// (the target's own arm: nearer than its best by a tile starts its dry count over)
 			if (job.r && job.r.tg && job.r.tg.has(job.tgt)) {
 				const v = job.r.tg.get(job.tgt);
 				v.n++; v.y += reward;
-				if (r.near < Math.min(v.best, job.startDist) - 1) { v.best = r.near; v.dry = 0; } else { v.dry++; if (v.dry === TARGET_DRY) st.retired++; }
+				const prev = Math.min(v.best, job.startDist);
+				v.best = Math.min(prev, Number.isFinite(r.near) ? r.near : Infinity);
+				if (r.near < prev - 1) v.dry = 0; else { v.dry++; if (v.dry === TARGET_DRY) st.retired++; }
 			}
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
