@@ -13,7 +13,7 @@
 //     current best is done (windows sized by the measured speed, so a window finishes);
 //   m2 (pairs of changes, 250-300x fewer shortcuts per tick than m1): up to --m2Share (0.2), its own wrapping cursor;
 //   pert / flip / sticky (random perturbations, one family per round in turn): the rest, at least half; while there
-//     is a hot window (the stretch a new best changed, for --hotRounds rounds), --hot (0.5) of it goes there.
+//     is a hot window (the stretch a new best changed), --hot (0.5) of the rounds run it there (--hotRounds each).
 // Cursors, the seed counter, the hot windows and per-family numbers are kept in gpu/state.json, so a restart continues.
 // --devices=0,1,...: one eegpu per GPU at the same time (see DEVICES below).
 // After every invocation that found something, the library is combined with the UNION of every run the job knows
@@ -62,9 +62,9 @@ const LIB_MAX = 300000;   // edges kept; above it, edges that start on no known 
 // every-move rounds: opt in with --every=1 (exact every-move windows are slow on big levels; see the header)
 const EVERY_ON = args.every !== undefined && String(args.every) !== '0';
 const EVERY_DEPTH = Math.max(5, +(args.everyDepth || 60)), EVERY_STEP = Math.max(1, +(args.everyStep || 25)), EVERY_S = Math.max(1, +(args.everyS || 5));
-// hot windows: after the reference changes, --hot (0.5) of the random families' time goes to the changed stretch (its
-// first to last new state, at most HOT_MAX ticks, HOT_MARGIN either side) for HOT_ROUNDS rounds; the newest HOT_KEEP
-// changes in turn. Follow-up finds cluster there: of 140 improvements that changed under 600 ticks after a change that
+// hot windows: after the reference changes, the random family of --hot (0.5: every other) round runs over the changed
+// stretch (its first to last new state, at most HOT_MAX ticks, HOT_MARGIN either side) instead of the whole run, in
+// HOT_ROUNDS such rounds; the newest HOT_KEEP changes in turn. Follow-up finds cluster there: of 140 improvements that changed under 600 ticks after a change that
 // did too, 71 lay within 300 ticks of it (local jobs and the A100 farm, 2026-09-27), where a window of 600 of the run's
 // 5000-38000 ticks is 1.5-12% of the uniform search's candidates. --hot=0: off (the whole run, as before)
 const HOT_SHARE = Math.max(0, Math.min(0.9, args.hot !== undefined ? +args.hot : 0.5));
@@ -346,7 +346,7 @@ function addHot(first, last) {
 	state.hot = [{ a: { t: a, h: ref.H[a] }, b: { t: b, h: ref.H[b] }, left: HOT_ROUNDS }, ...state.hot].slice(0, HOT_KEEP);
 	return [a, b];
 }
-/** This round's hot window ({from, to} on the current reference; the live ones in turn, each for HOT_ROUNDS rounds), or
+/** This round's hot window ({from, to} on the current reference; the live ones in turn, each in HOT_ROUNDS rounds), or
  *  null when none is left */
 function nextHot(peek) {
 	state.hot = state.hot.filter((w) => w.left > 0);
@@ -841,17 +841,19 @@ async function main() {
 			const fam = RANDOM_FAMS[(state.rot | 0) % RANDOM_FAMS.length];
 			const left = Math.max(MIN_SLICE, (1 - SYS_SHARE - M2_SHARE) * ROUND_S, ROUND_S - (Date.now() - t0) / 1000);
 			await refresh();
-			// a hot window first (the stretch the newest bests changed): --hot of the random time, the rest the whole run
-			const hot = HOT_SHARE > 0 && left >= 2 * MIN_SLICE ? nextHot() : null;
-			state.rot = (state.rot | 0) + 1;
-			for (const win of hot ? [hot, null] : [null]) {
-				const sec = win ? Math.max(MIN_SLICE, HOT_SHARE * left) : hot ? Math.max(MIN_SLICE, ROUND_S - (Date.now() - t0) / 1000) : left;
-				if (!win && hot) await refresh();
-				const r = await invoke(fam, sec, win);
-				if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; break; }
-				texts.push(r.text); added += r.added;
-				if (r.added) await offer(`round ${round}`);
+			// while there is a hot window (the stretch a new best changed), --hot of the rounds (every other one at 0.5)
+			// run their random family there, the others over the whole run: one invocation either way (splitting a round
+			// in two cost a second start of the engine: 0.3 s alone on a GPU, 5-13 s on an H100 shared by a dozen)
+			let hot = null;
+			state.hot = state.hot.filter((w) => w.left > 0);
+			if (HOT_SHARE > 0 && state.hot.length) {
+				state.hotAcc = (+state.hotAcc || 0) + HOT_SHARE;
+				if (state.hotAcc >= 1) { state.hotAcc -= 1; hot = nextHot(); }
 			}
+			state.rot = (state.rot | 0) + 1;
+			const r = await invoke(fam, left, hot);
+			if (!r.ok) { error = r.err; errorLaunch = !!r.launchError; }
+			else { texts.push(r.text); added += r.added; if (r.added) await offer(`round ${round}`); }
 		}
 		if (error) { await failed(error, errorLaunch); continue; }
 		status({ state: 'running', round, edges: libSize, families: famStatus() });
