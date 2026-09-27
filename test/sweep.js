@@ -105,6 +105,34 @@ console.log('the memory');
 	check('the records survive a save and a load', M2.match(sA) && M2.match(sA).found === 7);
 }
 
+console.log('stale finds');
+{
+	// the run with 30 idle ticks before it (an improvement earlier in the run moves a window this way): the window maps
+	// 30 ticks later, the same length
+	const ms2 = new Uint8Array(ms.length + 30);
+	ms2.set(ms, 30);
+	const tr2 = S.trace(level, ms2, 1, false);
+	const [m0, m1] = SW.mapWindow(tr.H, n, tr2.H, tr2.n, 1200, 2000);
+	check('a window maps onto a run shifted by idle ticks', m0 === 1230 && m1 === 2030, `[${m0}, ${m1}]`);
+	// the middle replaced (ticks 1000-1099 idle): a window past it starts from the last shared state before it
+	const ms3 = new Uint8Array(ms.length + 400).fill(4);   // (the slower run needs more ticks to the trophy)
+	ms3.set(ms, 0);
+	ms3.fill(0, 1000, 1100);
+	const tr3 = S.trace(level, ms3, 1, false);
+	let shared = -1;
+	for (let t = 1800; t >= 0 && shared < 0; t--) if (tr3.H.indexOf(tr.H[t]) >= 0) shared = t;
+	const [q0, q1] = SW.mapWindow(tr.H, n, tr3.H, tr3.n, 1800, 2600);
+	check('past a changed stretch a window keeps its distance from the last shared state', shared >= 0 && q0 === tr3.H.indexOf(tr.H[shared]) + 1800 - shared && q1 - q0 === 800,
+		`[${q0}, ${q1}], the last shared state A ${shared}`);
+	const [z0, z1] = SW.mapWindow(tr.H, n, tr3.H, tr3.n, 50000, 50800);
+	check('a window past the other run\'s end is clamped into it', z0 >= 0 && z0 < tr3.n && z1 <= tr3.n, `[${z0}, ${z1}] of ${tr3.n}`);
+	// a find's own states: those the start run lacks; in the best (the find itself) = 1, in the start run = 0
+	const inRun = (T) => { const s = new Set(T.H.slice(0, T.n + 1)); return (h) => s.has(h); };
+	check('a find that reached the best: all its own states are there', SW.keptShare(tr3.H, tr3.n, tr.H, n, inRun(tr3)) === 1);
+	check('a stale find: none of its own states in the best', SW.keptShare(tr3.H, tr3.n, tr.H, n, inRun(tr)) === 0);
+	check('a run with no states of its own counts as kept', SW.keptShare(tr.H, n, tr.H, n, () => false) === 1);
+}
+
 console.log('estimates');
 {
 	const rp = C.replay(level, ms, { trace: true });
