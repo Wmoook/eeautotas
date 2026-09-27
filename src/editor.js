@@ -939,6 +939,8 @@ const breakHolds = () => !!S && S.running && !S.halted && S.stage !== 'stopped' 
 // way that needs no more coins, before Forgotten Veil's coins 1-4 and Stupid Fox's 1-8: the search went for a way the
 // known routes never take. No DP (or no leg with a value): the trophy, as before. `b.breakGate === false`: off.
 const BREAK_GATES = 16;
+// a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
+const GATE_AT = 0.2;
 /** the coin plan's next gate from the state after inputs: {x, y} (tiles) or null; the steer file read once a search */
 function breakGate(inputs) {
 	if (!cur || !cur.opts.breakGate || !S.steer || !S.steer.dp || !cur.files.steerCpu) return null;
@@ -1064,7 +1066,9 @@ function breakLaunch(n) {
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
-	const enter = ch.gate ? `${ch.gate.x},${ch.gate.y},${ch.gate.x},${ch.gate.y}` : '';
+	// (explore --enter reports no closest attempt, so no chain: a gate run keeps --finish, ordered by the coin's leg
+	// field, and its closest attempt at the coin (cost 0) is the gate: closer())
+	const enter = '';
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, enter, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
@@ -2278,6 +2282,9 @@ function closer(ev, n) {
 	if (Vn.key === 'breaker' && Vn.brk && Vn.brk.gateReach) {
 		const d = +ev.dist;
 		if (ev.inputs && !ev.cut && Number.isFinite(d) && (!Vn.bestTry || d < Vn.bestTry.dist - 1e-3)) Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist: d };
+		// (at the gate: the leg field's cost 0 is the coin's tile, the ball's centre in it; explore reports the closest
+		// attempt only with the finish target, so the run keeps --finish and the gate is this: the chain goes on from it)
+		if (ev.inputs && !ev.cut && d <= GATE_AT && !Vn.brk.gateHit) { Vn.brk.gateHit = String(ev.inputs); halt(kids[n], 'gate'); }
 		return;
 	}
 	// (the GPU random runs' nearer attempts: into the one search's archive)
