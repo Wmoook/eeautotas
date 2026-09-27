@@ -257,6 +257,23 @@ function pruneLibrary(graph) {
 
 // ---------------------------------------------------------------- the reference: the newest judged best
 let level = null, nc = false, RANDOM = false, TC = null;
+/** the union's coin mode (splice.js trace): coin-blind, or exact with coin-blind joins past each run's last coin door
+ *  (the library's edges stay exact: they start and end at exact states) */
+const traceMode = () => (nc ? true : C.coinFreeOk(level) ? 'free' : false);
+/** The grind decides at every round's start whether the coins are optional (status.json coinsOptional): a change
+ *  switches this searcher's coin mode (its hashes, the union's traces) and starts a new library (its edges are keyed
+ *  by the other hash). */
+function followCoinMode() {
+	const s = C.readJSON(path.join(DIR, 'status.json'), {});
+	if (typeof s.coinsOptional !== 'boolean' || s.coinsOptional === nc) return;
+	nc = s.coinsOptional;
+	TC = S.traceCache(level, traceMode(), RANDOM);
+	fingerprint = libraryFingerprint(blob, nc);
+	lib.clear(); libSize = 0; libDirty = true;
+	saveLibrary(true);
+	ref = null; diskKey = ''; disk = null; own = null; graph = null; graphSig = ''; refOnly = null;
+	log(`GPU: coins ${nc ? 'optional' : 'needed'} now (the grind's decision): searching ${nc ? 'coin-blind' : 'coin-aware'}, with a new shortcut library`);
+}
 let ref = null;          // { key, masks, n, H, R, ev (C.evaluate), tickOf (hash -> last tick) }
 let own = null;          // the last run this searcher judged faster: { key, ms, ev, inbox (its inbox file while the grind decides) }
 const ownRuns = [];      // the runs this searcher judged (for the union), newest last
@@ -830,7 +847,7 @@ async function main() {
 	}
 	nc = !!ncs;
 	RANDOM = C.isRandom(level);
-	TC = S.traceCache(level, nc, RANDOM);
+	TC = S.traceCache(level, traceMode(), RANDOM);
 	fingerprint = libraryFingerprint(blob, nc);
 	const loaded = loadLibrary();
 	log(`GPU search started (${nc ? 'coin-blind' : 'coin-aware'}), rounds of ${ROUND_S} s` + (loaded ? `, ${loaded} shortcuts from the saved library` : ''));
@@ -840,6 +857,8 @@ async function main() {
 	for (;;) {
 		await yieldToEditor();
 		round++;
+		followCoinMode();
+		if (!ref) while (!(await refresh())) await new Promise((r) => setTimeout(r, 5000));
 		// the idle start: once after the first round, again when the run's start changed (see the header)
 		if (round >= 2 && idleDue()) {
 			await refresh();
