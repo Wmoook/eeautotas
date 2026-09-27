@@ -1073,6 +1073,37 @@ async function cpuSection() {
 	check('the one search\'s GPU bursts (a stand-in for eegpu): the key is the level\'s one trigger; a burst from the start\'s room reaches it, goes on into the key\'s room and its attempt goes into the archive',
 		TRk.n === 1 && !!b1 && b1.room === '(start)' && b1.reached && b1.changed && !!ob.done && ob.done.gpu && ob.done.gpu.imports >= 1 && ob.done.workers[0].imports >= 1 &&
 		!ob.events.some((e) => e.ev === 'warning'), `${TRk.n} trigger(s); ${JSON.stringify(b1 || null)}; ${JSON.stringify(ob.done && ob.done.gpu)}; ${ob.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ')}`);
+	// after the first route (src/out/night/macro.md). The sound lower bound per tile (goexplore.js lowerBoundTiles): along
+	// every route of the key level, at every tick t, t + the bound at the ball's tile is at most the route's length (it never
+	// cuts a real route), and it is not all zeros
+	const lbt = GX.lowerBoundTiles(kdLevel);
+	let lbBad = 0, lbMax = 0;
+	for (const r of k1.results) {
+		const s = new E.EESim(kdLevel), inp = new E.EEInput();
+		s.reset();
+		for (let t = 0; t < r.inputs.length; t++) {
+			E.applyMask(inp, r.inputs.charCodeAt(t) - 48);
+			s.tick(inp);
+			const b = lbt[(Math.trunc(s.py + 8) >> 4) * kdLevel.width + (Math.trunc(s.px + 8) >> 4)];
+			if (t + 1 + b > r.inputs.length) lbBad++;
+			if (b < 0xffff && b > lbMax) lbMax = b;
+		}
+	}
+	check('the sound lower bound on the ticks to the trophy (4 tile steps a tick, every door open): never above what a route of the key level takes; not all zeros',
+		k1.results.length > 0 && lbBad === 0 && lbMax > 0, `${lbBad} states over; the largest bound on the routes ${lbMax} ticks`);
+	// the route relay (bursts.js, a route known: "route <inputs>" on stdin) with a stand-in that finds nothing: every link
+	// falls back on the route's own inputs from the chain's state, the chain follows the route to the finish, the pass ends
+	// and the next one begins; the route given is the bound (a "route" event, no result of this search's)
+	const nothingTool = path.join(HOME, 'burst_nothing.js');
+	fs.writeFileSync(nothingTool, ["'use strict';", "console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
+		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1 })), 20);"].join('\n'));
+	const kBest = k1.results.length ? k1.results[k1.results.length - 1] : null;
+	const orr = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=8', '--mem=300', '--bursts=1', `--tool=${nothingTool}`, `--work=${path.join(HOME, 'bursts4')}`, '--stdin=1'],
+		(ch) => { if (kBest) ch.stdin.write(`route ${kBest.inputs}\n`); });
+	const rg = orr.done && orr.done.gpu;
+	check('after a route the one search\'s bursts relay it: links that find nothing fall back on the route\'s own inputs, a pass ends and the next begins; the route given on stdin is the bound',
+		!!kBest && !!rg && rg.relayBursts >= 2 && rg.relayFalls >= 1 && rg.relayPasses >= 2 && orr.events.some((e) => e.ev === 'route' && e.ticks === kBest.inputs.length) &&
+		!orr.events.some((e) => e.ev === 'warning'), `${JSON.stringify(rg)}; ${orr.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
 	// the GPU random runs as an operator of the one search (the editor's feed, goexplore.js stdin "import <inputs>"): a run
 	// into the key's room given on stdin goes into the archive of every worker (2 workers, nothing shared otherwise)
 	const of = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts2')}`, '--stdin=1'],
