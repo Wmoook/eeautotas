@@ -92,6 +92,16 @@ function sectionA() {
 		const inp = new E.EEInput();
 		for (let t = 0; t < 400 && same; t++) { E.applyMask(inp, [4, 4, 5, 2, 0, 3][(t / 37 | 0) % 6]); sim2.tick(inp); if (SF.steerFifths(st, sim2) !== SF.steerFifths(rd, sim2) || SF.steerScore(st, sim2) !== SF.steerScore(rd, sim2)) same = false; }
 		check(`${name}: the RCH4 file round trip gives the same numbers`, same);
+		if (name === 'coins') {
+			// the coin plan's next gate (the wall breaker's stall target): a coin of the room from the start, none once the
+			// door's coins are taken
+			const s3 = new E.EESim(L); s3.reset();
+			const g = SF.nextGate(rd, s3);
+			const tile = g ? [...L.coinBit].indexOf(g.bit) : -1;
+			check(`coins: the coin plan's next gate from the start is a coin of the room (tile ${tile % L.width},${Math.floor(tile / L.width)})`, tile >= 0 && L.fg[tile] !== 0);
+			s3.coins = 2;
+			check('coins: no next gate with the door\'s coins taken', SF.nextGate(rd, s3) === null);
+		}
 	}
 	// the build's budget: a byte budget of one body leaves the key out (one layer), said in info.over
 	{

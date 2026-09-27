@@ -175,7 +175,8 @@
 //        1e4 + its walking distance; the editor's check of a level the field calls impossible)]
 //        [--steer=<RCH4 file> | build (src/steer.js: a second heap for head A on the gate-aware steer field, picked --mix
 //        of its picks; the reach field alone rules states out)] [--mix=0.5] [--steerDist=1 (the closest attempt and the
-//        sources by the steer field)]
+//        sources by the steer field)] [--dpFirst=0|1 (1: the steer lookup takes the coin DP's value wherever it has one,
+//        not the least of it and the layer's own field)]
 //        [--share=0|1 (the one search: the workers share their new rooms; coarse cells)] [--bursts=0|1 (the GPU operator,
 //        src/bursts.js; coarse cells)] [--tool=<eegpu> (default: gpu.js nativeTool; a .js file: a stand-in run by Node)]
 //        [--cachedir=<kernel cache>] [--pausefile=<file: the bursts wait between two launches while it exists>]
@@ -213,7 +214,7 @@ const MAXRES = QP.length - 1;
 const SEED_EVERY = 30;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -1825,7 +1826,7 @@ function workerMain() {
 	const d = workerData;
 	const L = levelOf(d.a);
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
-	const a = d.steerBuf ? Object.assign({}, d.a, { steerData: SF.readSteerFile(Buffer.from(d.steerBuf)) }) : d.a;
+	const a = d.steerBuf ? Object.assign({}, d.a, { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) }) : d.a;
 	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null);
 }
 
