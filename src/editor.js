@@ -377,9 +377,18 @@ const STRATEGIES = {
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : [])] },
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []),
+		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
+		// scheduler gives the GPU to another strategy: its pause file)
+		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`] : [])] },
 };
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`];
+// The one search (the friend's "one optimal search" instead of three searches built one after another): on levels above
+// 50 x 50 tiles (goexplore.js coarse cells) with the GPU, the CPU search's archive is the only one: its random runs, and
+// GPU bursts (src/bursts.js: "every move" from its cells, aimed at each room's untried triggers, a bandit choosing the
+// room and the settings) whose attempts go back into it. It replaces the relay there. Every move and the beams still
+// run (they end early on such levels: Infinity Pain's at 21 s); the bursts take their GPU slices (schedule).
+const ONE_LABEL = 'one search (CPU runs + GPU bursts)';
 /** the CPU search's worker threads: `want` (the request) or N - 1 of the N threads (one left for the app and the GPU
  *  tools' host work), at most the thread count the CPU benchmark measured fastest (src/bench.js; on many laptops more
  *  threads are slower), and at most half of them while a job's optimizer runs (as for a focus search) */
@@ -442,7 +451,7 @@ function schedule() {
 	if (!S || !S.running) return;
 	const now = Date.now();
 	const gpu = [];
-	S.strategies.forEach((q, k) => { if (!q.cpu && alive(kids[k]) && !kids[k].stopWhy) gpu.push(k); });
+	S.strategies.forEach((q, k) => { if ((!q.cpu || q.gpuShare) && alive(kids[k]) && !kids[k].stopWhy) gpu.push(k); });
 	if (!gpu.length) { sched = null; return; }
 	let owner = sched && gpu.includes(sched.owner) ? sched.owner : -1;
 	const X = S.strategies.findIndex((q) => q.key === 'explore');
@@ -936,7 +945,10 @@ function start(b, gpu, test) {
 	if (guide.length && !noGpu) fs.writeFileSync(files.guide, guide.map(([x, y]) => `${x} ${y}`).join('\n') + '\n');
 	const beams = !(test && test.beams === false);
 	const relay = b.relay !== false && (!test || test.relay === true);
-	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay ? [] : ['relay']), ...(cpu ? ['goexplore'] : [])];
+	// the one search (ONE_LABEL): coarse cells (above GX.FINE_MAX_TILES), the GPU, the CPU search; b.one === false: the
+	// relay as before (tests: test.one === true)
+	const one = !noGpu && cpu && ins.level.width * ins.level.height > GX.FINE_MAX_TILES && b.one !== false && (!test || test.one === true);
+	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay || one ? [] : ['relay']), ...(cpu ? ['goexplore'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
@@ -947,11 +959,12 @@ function start(b, gpu, test) {
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
-		strategies: which.map((k) => ({ key: k, label: STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
+		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, ...(k === 'goexplore' && one ? { gpuShare: true } : {}),
+			state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes,
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, bursts: one,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
@@ -993,6 +1006,8 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (noGpu) {
 		which = which.filter((k) => STRATEGIES[k].cpu);
 		S.strategies = S.strategies.filter((q) => q.cpu);
+		cur.opts.bursts = false;
+		for (const q of S.strategies) if (q.gpuShare) { q.gpuShare = false; q.label = STRATEGIES[q.key].label; }
 		if (stale) { S.cpuOnly = cpuOnlyText(noGpu, cur.opts.workers, guide); note(S.cpuOnly); }
 		if (!which.length) {
 			S.stage = 'error'; S.running = false; S.message = `The route search cannot run: ${noGpu}, and the CPU search is off.`;
@@ -1209,6 +1224,7 @@ function launch(n) {
 		q.seconds = V.share = Math.max(1, Math.min(RELAY_S * (q.big ? 2 : 1), Math.round(S.seconds - searchClock(Date.now()))));
 		q.depth = S.result ? Math.max(1, S.result.ticks - 1 - V.relay.keep) : 0;
 	}
+	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	if (V.key === 'explore') {
 		V.refine = null;   // (a new process: no refined try running yet)
 		q.seconds = V.share = V.probe === 'running' || V.probe === 'passed' ? left : passSeconds(V.pass, V.ends, left);
@@ -1224,8 +1240,8 @@ function launch(n) {
 	// strategies start together: one compiles the kernels after an update, the others wait for it and load them)
 	// (the GPU tool detached, with this process as its --parent: Node kills the children it did not start detached the
 	// moment it exits, mid-kernel too; a detached eegpu ends at its next kernel launch once the app is gone)
-	const pauseFile = cpu ? '' : pauseFileOf(n);
-	const pausedNow = !cpu && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
+	const pauseFile = cpu && !V.gpuShare ? '' : pauseFileOf(n);
+	const pausedNow = (!cpu || !!V.gpuShare) && !!(sched && sched.owner !== n && alive(kids[sched.owner]));
 	if (pauseFile) { try { if (pausedNow) fs.writeFileSync(pauseFile, 'pause'); else fs.unlinkSync(pauseFile); } catch (e) { /* none */ } }
 	const cmd = cpu ? [...cur.cpuCmd, ...args] : [cur.tool, ...cur.toolArgs, ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`, `--parent=${process.pid}`];
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.heapEnv(1024) : undefined, detached: !cpu });

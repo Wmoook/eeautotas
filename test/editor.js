@@ -835,6 +835,36 @@ async function cpuSection() {
 	check('coarse cells, the archive full: no new rooms (the same rooms after 0.5 M and 2 M ticks; no walks for rooms that could hold no cell)',
 		!!sw1 && !!sw2 && sw1.full && sw2.full && sw1.cells === 300 && sw1.rooms > 1 && sw2.rooms === sw1.rooms && sw2.walkHits === sw1.walkHits,
 		`rooms ${sw1 ? sw1.rooms : '-'} / ${sw2 ? sw2.rooms : '-'} (full ${sw1 ? sw1.full : '-'} / ${sw2 ? sw2.full : '-'}); ${r2.summary}`);
+	// the one search (coarse cells): 2 workers share the rooms they find first (the key's room, found by one, goes into the
+	// other's archive: its 'import'); --share=0: each archive on its own, as before
+	const imports = (r) => (r.done ? r.done.workers.reduce((x, w) => x + (w.imports || 0), 0) : -1);
+	const o1 = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=5', '--mem=300']);
+	const o0 = await goexplore(kdFile, ['--workers=2', '--seed=3', '--seconds=5', '--mem=300', '--share=0']);
+	check('the one search: 2 workers share the rooms they find first (the key\'s room goes into the other archive), routes replay; --share=0: nothing shared',
+		!!o1.done && o1.done.shared >= 1 && imports(o1) >= 1 && o1.done.workers.every((w) => w.rooms === 2) && o1.results.length > 0 && replays(kdLevel, o1.results) &&
+		!!o0.done && imports(o0) === 0 && !o0.done.shared, `shared ${o1.done && o1.done.shared}, imports ${imports(o1)} (share=0: ${imports(o0)}); ${o1.summary}`);
+	// the GPU bursts (src/bursts.js) with a stand-in for eegpu: it prints a nearer attempt at a target (distance 0) one
+	// tick short of the key: the operator goes on into the room the trigger makes (its last input again), and the attempt
+	// goes into every worker's archive
+	const BU = require('../src/bursts.js');
+	const TRk = BU.triggersOf(kdLevel);
+	const standin = path.join(HOME, 'burst_standin.js');
+	fs.writeFileSync(standin, [
+		"'use strict';",
+		"const inputs = process.env.EEAT_TEST_BURST || '';",
+		"const a = process.argv.slice(2);",
+		"if (a[0] !== 'explore' || !a.some((x) => x.startsWith('--prefix=')) || !a.some((x) => x.startsWith('--reach='))) { console.log(JSON.stringify({ error: 'bad args ' + a.join(' ') })); process.exit(2); }",
+		"console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
+		"if (inputs) console.log(JSON.stringify({ ev: 'closest', dist: 0, tick: inputs.length, inputs }));",
+		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1 })), 50);",
+	].join('\n'));
+	process.env.EEAT_TEST_BURST = kr ? kr.inputs.slice(0, -1) : '';
+	const ob = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=5', '--mem=300', '--bursts=1', `--tool=${standin}`, `--work=${path.join(HOME, 'bursts')}`]);
+	delete process.env.EEAT_TEST_BURST;
+	const b1 = ob.events.find((e) => e.ev === 'burst');
+	check('the one search\'s GPU bursts (a stand-in for eegpu): the key is the level\'s one trigger; a burst from the start\'s room reaches it, goes on into the key\'s room and its attempt goes into the archive',
+		TRk.n === 1 && !!b1 && b1.room === '(start)' && b1.reached && b1.changed && !!ob.done && ob.done.gpu && ob.done.gpu.imports >= 1 && ob.done.workers[0].imports >= 1 &&
+		!ob.events.some((e) => e.ev === 'warning'), `${TRk.n} trigger(s); ${JSON.stringify(b1 || null)}; ${JSON.stringify(ob.done && ob.done.gpu)}; ${ob.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ')}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
