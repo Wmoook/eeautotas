@@ -139,7 +139,7 @@ function triggersOf(L) {
 /**
  * create(o) -> {room(info), edge(from, tile), start(), stop() (a promise), stats()}. o: {L, a (goexplore's options),
  * field (the reach field), RM (roomOf(L)), ports (the workers' MessagePorts), say (an event line), bound() (the longest
- * route that still counts, ticks), register(info) (a room the bursts found: into the main thread's registry, true when
+ * route that still counts, ticks), minLen (goexplore.js --prefix: no burst starts before that tick), register(info) (a room the bursts found: into the main thread's registry, true when
  * new), broadcast(inputs) (an attempt into every worker's archive), finish(masks, how) (a route: replayed already),
  * nearest() ({inputs, rc} the attempt nearest the trophy by the reach field, or null), sec() (seconds since the start)}
  */
@@ -585,7 +585,7 @@ function create(o) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig })) fresh++;
+				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys })) fresh++;
 				cz = cz2;
 			}
 			key = k2;
@@ -768,7 +768,7 @@ function create(o) {
 				const k = r.k++;
 				let inputs = cell ? cell.inputs : r.inputs, v = cell ? cell.v : p.f.walk[r.tile];
 				const back = BACK[k % BACK.length];
-				if (inputs.length > back + 50) inputs = inputs.slice(0, inputs.length - back);
+				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
 				job = { lane, r, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
@@ -777,7 +777,7 @@ function create(o) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
 				const back = TROPHY_BACK[trophyArm.back++ % TROPHY_BACK.length];
-				const inputs = nr.inputs.slice(0, Math.max(50, nr.inputs.length - back));
+				const inputs = nr.inputs.slice(0, Math.max(50, o.minLen || 0, nr.inputs.length - back));
 				trophyArm.busy = true;
 				if (!trophyRf) { trophyRf = path.join(work, 'trophy.reach'); RF.writeReachFile(o.field, trophyRf, fp); }
 				const rf = trophyRf;
@@ -845,7 +845,7 @@ function create(o) {
 			// the chain: nearer without reaching a target: on from its nearest attempt, the same targets (the same steer file)
 			if (!r.reached && r.best && Number.isFinite(r.near) && r.near < job.startDist - 1 && job.chain < CHAIN_MAX) {
 				const c = job.chain + 1, back = CHAIN_BACK[c % CHAIN_BACK.length];
-				const inputs = back && r.best.length > back + 50 ? r.best.slice(0, r.best.length - back) : r.best;
+				const inputs = back && r.best.length > back + 50 ? r.best.slice(0, Math.max(o.minLen || 0, r.best.length - back)) : r.best;
 				// (a table that filled before a target: the next link greedier, a smaller layer (CONFS' caps 1 M -> 64 K -> 16 K);
 				// Infinity Pain's wall: 4 px / 1/16 px/tick with 1 M states a layer filled its table 33 tiles short three times
 				// in a row, where 64 K and 16 K passed from the route's own states 150 and 400 ticks back)
