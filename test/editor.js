@@ -1165,6 +1165,18 @@ async function cpuSection() {
 		st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed >= 4 && st.elapsed < 15 && st.log.some((x) => /checking that with random runs \(CPU\), without the physics check/.test(x)),
 		`${st.elapsed.toFixed(1)} s: ${st.message}`);
 	check('... and no proof (eegpu prove) runs: the physics check has proven it already', !st.proof, JSON.stringify(st.proof || null));
+	// a steer field built after the search started (the wait forced to 0 ms; a key off the way: 2 layers, on a level no
+	// earlier search built it for): the CPU search takes it when it arrives (goexplore.js stdin "steer <file>", its
+	// "steer" event), the distances stay the reach field's
+	const LW = 44, LH = 7, lcells = [...room(LW, LH), [18, 5, 255], [1, 5, 6], [LW - 4, 5, 121]];
+	for (let y = 1; y < LH - 1; y++) lcells.push([LW - 6, y, 23]);
+	const kdLate = ED.eelvlOf({ name: 'late steer', width: LW, height: LH, cells: lcells });
+	ED.start({ eelvlB64: kdLate.toString('base64'), seconds: 6, workers: 1 }, { available: false, why: 'test: no GPU' }, { steerWaitMs: 0 });
+	st = await waitDone(25000);
+	check('a late steer field: taken when its build ends (the CPU search\'s head A from then on, its "steer" event), the distances still the reach field\'s',
+		st.stage === 'found' && !!st.steer && Number.isFinite(st.steer.late) && Number.isFinite(st.steer.cpuAt) && !st.steer.gpu && st.log.some((x) => /the steer field is still building/.test(x)) &&
+		st.log.some((x) => /arrived [\d.]+ s into the search: from now on it orders the CPU search/.test(x)) && !(st.closest && st.closest.steer !== undefined),
+		`${st.stage}; steer ${JSON.stringify(st.steer)}; ${st.log.filter((x) => /steer/.test(x)).join(' | ')}`);
 
 	// next to the eegpu stand-in: the CPU's first route bounds the exploration's next pass, and the CPU search stops
 	// when the GPU strategies have ended with a route
