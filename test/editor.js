@@ -13,10 +13,14 @@
 //   passes     the "every move" pass ladder (src/editor.js passCells / passSeconds / nextPass) and the whole search
 //              driven by a stand-in for eegpu (a Node script playing scripted passes; no GPU): coarse first with pass 0's
 //              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
-//              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration
+//              situations" verdict only from pass 0 or finer with no layer cut, a beam's route bounding the exploration;
+//              the relay's plan (with a stand-in for the CPU search that reports sources: the nearest attempt 60 / 150 /
+//              400 back, the newest source, the source with territory gain, 1000 back, the larger table, the next salt)
 //   cpu        the CPU route search (src/goexplore.js, no GPU; one or two threads, a few seconds): routes replayed in the
 //              JS engine, the same seed and tick budget give the same routes (also with 64 snapshots, states rebuilt by
-//              replaying), --first, --depth, "stop" and the end of stdin; the editor without an NVIDIA GPU (the CPU
+//              replaying), --first, --depth, "stop" and the end of stdin; coarse cells (--cells=auto above 50 x 50, the
+//              memory rule, the same routes for the same seed, the first route pinned to the research prototype's, the
+//              key room's source event, the editor keeping the sources); the editor without an NVIDIA GPU (the CPU
 //              search alone, with a note; a route; the physics verdict), and next to the eegpu stand-in (its first route
 //              bounds the exploration's next pass, it stops when the GPU strategies have ended with a route, not when
 //              they failed)

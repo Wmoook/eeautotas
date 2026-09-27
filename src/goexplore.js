@@ -44,7 +44,10 @@
 //               rooms that open new territory (gain > 0: on a level of many switches most rooms open nothing).
 //           The room's fields (flood fill, trophy walkable) are cached by the passable set (the doors' states and
 //           protection), the least recently used dropped beyond a budget: rooms that share doors cost a hash. The
-//           room measure only orders: a state is ruled out only by the reach field's -1, as with fine cells.
+//           room measure only orders: a state is ruled out only by the reach field's -1, as with fine cells. It picks
+//           exactly like the prototype (ngx.js --mode=novold: the same routes after the same simulated ticks). The ice
+//           level: one worker, seed 1, a route after 82.8 M simulated ticks (23 s); 4 workers as the editor starts
+//           them, the first route after 32 s (9,982 ticks), 9,661 ticks after 180 s.
 //
 // It prints the JSON lines of the editor's native tools (native/beamhost.h, explorehost.h), one per line:
 //   {"ev":"start","workers":n,"seeds":[..],"mode":"physics"|"walk","cells":"fine"|"coarse","startCost":c|null,"maxCells":..}
@@ -71,8 +74,9 @@
 // of the machine's memory (os.totalmem()) over the workers, 200 .. 1500 (the research's runs used 1.5 GB per worker:
 // 15 workers on a 16-thread laptop with 32 GB get 542 MB each, 8 GB in all; 4 workers 1500 each). A cell without its
 // snapshot costs about 260 bytes (300 with coarse cells: its room and counts), a snapshot about 1150; each gets 45% of
-// the budget. The default depends only on the machine and the workers, so one worker with --maxTicks is reproducible
-// on it (give --mem to reproduce a run on another machine).
+// the budget (Good Egg with --mem=300: the archive full at 472 K cells, 61 K snapshots, a 279 MB heap). The default
+// depends only on the machine and the workers, so one worker with --maxTicks is reproducible on it (give --mem to
+// reproduce a run on another machine).
 //
 // usage: node src/goexplore.js <level.eelvl | level.json> | --level=<level id | job id>  [--seconds=60] [--workers=1]
 //        [--seed=1] [--depth=100000] [--maxTicks=0 (per worker; 0 = no limit)] [--first=0|1 (stop at the first route)]
