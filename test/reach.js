@@ -584,9 +584,12 @@ function sectionF() {
 	let seed = 3;
 	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
 	const rooms = [['user50', levelOfB64(USER50)], ['shaft', levelOfB64(SHAFT)], ['dot stairs', levelOfB64(DOTSTAIRS)], ...['upshaft', 'boost', 'portal', 'halfbridge', 'lj16', 'dotroom'].map((n) => [n, ascii(box(ROOMS.find((r) => r[0] === n)[2]))]),
-		['every block (portals, deaths)', randomLevels()[4].level], ['death warp (a curse: every tile a death source)', ascii(box(ROUTED[1][1]))], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))]];
-	for (const [name, L] of rooms) {
-		const f = R.reachField(L);
+		['every block (portals, deaths)', randomLevels()[4].level], ['death warp (a curse: every tile a death source)', ascii(box(ROUTED[1][1]))], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))],
+		['protection, walk mode (spikes open only where a protected ball can be; the protected walk behind the unprotected one)', ascii(box(['.....T.e..', '..xxxxxx..', '..........', '..S..g..x.']))],
+		['protection, physics mode', ascii(box(['.....T.e..', '..xxxxxx..', '..........', '..S.....x.']))],
+		['death warp without the death edges (the searches\' field)', ascii(box(ROUTED[1][1])), { deaths: false }]];
+	for (const [name, L, fo] of rooms) {
+		const f = R.reachField(L, fo);
 		fs.writeFileSync(path.join(tmp, 'l.bin'), G.levelBlob(L));
 		R.writeReachFile(f, path.join(tmp, 'r.bin'));
 		const n = QUICK ? 2000 : 10000, st = new Float64Array(n * 6), ids = [...new Set(L.fg)];
