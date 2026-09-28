@@ -28,6 +28,8 @@
 //   [--state=<file> (a pass continued across calls: the next start by tick + state hash)] [--cfg=<json list of setting
 //   overrides: each start runs every one>] [--out=<file.eetas> (written only when judged faster)] [--json=<file>]
 //   [--debug=<every N layers>] [--axes=1 (diagnostic: children whose x or y state alone equals a later run state)]
+//   [--axisTails=P (per layer the P children most ahead whose y state alone equals a later run state play the run's y
+//   inputs from there with 4 x-input patterns: the per-axis join; default 0)]
 //   [--order=stretch (with --starts: the starts by their longest low-contact stretch first; --state then keeps the starts done;
 //   a start whose task the call's end cut short is not done)] [--wrap=0 (with --order=stretch: every start done = no search,
 //   "every start done"; default: the pass starts over)]
@@ -104,8 +106,15 @@ function runTask(task) {
 	for (let t = n; t > A; t--) { at.set(H[t], t); xs.add(X[t]); }
 	// (diagnostic, --axes=1) the run's per-axis states: x = (px, vx), y = (py, vy) -> the first tick > A
 	const axX = new Map(), axY = new Map();
-	if (task.axes) for (let t = n; t > A; t--) { axX.set(X[t] * 1e6 + VX[t], t); axY.set(Y[t] * 1e6 + VY[t], t); }
+	const AXT = task.axisTails | 0;
+	if (task.axes || AXT) for (let t = n; t > A; t--) { axX.set(X[t] * 1e6 + VX[t], t); axY.set(Y[t] * 1e6 + VY[t], t); }
 	let hitX = 0, hitY = 0, leadX = -1, leadY = -1;
+	// --axisTails=P: per layer the P children most ahead whose y state (py, vy) alone equals a later run state (tick ty):
+	// each plays the run's own y inputs (jump / up / down bits) from ty with the x inputs of 4 patterns (the run's own
+	// from ty, hold left, hold right, none), up to tailH ticks, an exact rejoin checked every tick (the per-axis join:
+	// on Infinity Pain's shaft 80,859 children had the y state of a later run tick, 6 the x state)
+	const axC = [];
+	let axJ = 0, axTry = 0;
 	// tile index of the run's ticks A..Zend+LOOK (ball centre)
 	const tiles = new Map();
 	const tEnd = Math.min(n, Zend + LOOK);
@@ -203,6 +212,19 @@ function runTask(task) {
 				if (xs.has(x)) {
 					const T = at.get(sim.stateHash(false, NC));
 					if (T !== undefined && T > tick + 1) { direct++; record(T, k + 1, () => { const a = inputsOf(k, i); a.push(m); return a; }); }
+				}
+				if (AXT > 0) {
+					const ty = axY.get(y * 1e6 + sim.speed_y);
+					if (ty !== undefined && ty > tick + 4 && ty < n) {
+						const lead = ty - tick - 1;
+						if (axC.length < AXT || lead > axC[axC.length - 1].lead) {
+							const o = { lead, ty, i, m, s: sim.snapshot() };
+							let q = axC.length; axC.push(o);
+							while (q > 0 && axC[q - 1].lead < lead) { axC[q] = axC[q - 1]; q--; }
+							axC[q] = o;
+							if (axC.length > AXT) axC.pop();
+						}
+					}
 				}
 				if (task.axes) {
 					const tx = axX.get(x * 1e6 + sim.speed_x), ty = axY.get(y * 1e6 + sim.speed_y);
@@ -337,10 +359,33 @@ function runTask(task) {
 				}
 			}
 		}
+		if (AXT > 0 && axC.length) {
+			for (const c of axC) {
+				for (let pi = 0; pi < 4; pi++) {
+					sim.restore(c.s);
+					died = false; done = false; axTry++;
+					const tail = [];
+					for (let j = 0; j < tailH && c.ty + j < n; j++) {
+						const rm = ms[c.ty + j];
+						const mm = (rm & 25) | (pi === 0 ? rm & 6 : pi === 1 ? 2 : pi === 2 ? 4 : 0);
+						tail.push(mm);
+						E.applyMask(inp, mm); sim.tick(inp); sims++;
+						if (died) break;
+						if (done) { axJ++; record(n, k + 1 + j + 1, () => inputsOf(k, c.i).concat([c.m], tail)); break; }
+						if (xs.has(sim.px)) {
+							const T = at.get(sim.stateHash(false, NC));
+							if (T !== undefined && T > now + j + 1) { axJ++; record(T, k + 1 + j + 1, () => inputsOf(k, c.i).concat([c.m], tail)); break; }
+						}
+					}
+				}
+			}
+			axC.length = 0;
+		}
 	}
 	if (task.axes) console.error(`[flybeam ${task.name}] axis hits: x ${hitX} (max lead ${leadX}), y ${hitY} (max lead ${leadY})`);
+	if (AXT > 0) console.error(`[flybeam ${task.name}] axis tails: ${axTry} tried, ${axJ} joined`);
 	return { A, B: task.B, name: task.name, cfg: task.cfg, layers, sims, direct, tails, bestSaving, maxLead, secs: (Date.now() - t0) / 1000,
-		callCut: timeCut && task.shortened === true,
+		callCut: timeCut && task.shortened === true, axJ, axTry,
 		found: [...found.values()] };
 }
 
@@ -371,7 +416,7 @@ async function main() {
 	const a = C.parseArgs(process.argv.slice(2));
 	const num = (k, d) => (a[k] === undefined ? d : +a[k]);
 	const base = { level: a.level, tas: a.tas, W: num('W', 4096), Q: num('Q', 4), V: num('V', 0.25), alpha: num('alpha', 0.3), corridor: num('corridor', 48),
-		rMatch: num('rMatch', 12), debug: num('debug', 0), capT: num('capT', 0), axes: num('axes', 0), convF: num('convF', 0), vw: num('vw', 16), homing: a.homing || 'slots', look: num('look', 800), ext: num('ext', 600), tailP: num('tailP', 24), tailH: num('tailH', 300), timeS: num('timeS', 300) };
+		rMatch: num('rMatch', 12), debug: num('debug', 0), capT: num('capT', 0), axes: num('axes', 0), convF: num('convF', 0), vw: num('vw', 16), homing: a.homing || 'slots', look: num('look', 800), ext: num('ext', 600), tailP: num('tailP', 24), tailH: num('tailH', 300), axisTails: num('axisTails', 0), timeS: num('timeS', 300) };
 	const cfgs = a.cfg ? JSON.parse(a.cfg) : [{}];
 	const level = C.loadLevel(a.level);
 	const ms = C.readEetas(a.tas);
@@ -445,7 +490,7 @@ async function main() {
 			w.on('message', (r) => {
 				results.push(r);
 				console.log(`[flybeam] ${r.name} (A ${r.A}..${r.B}, cfg ${JSON.stringify(cfgs[r.cfg])}): ${r.layers} layers, ${(r.sims / 1e6).toFixed(1)} M ticks, ${r.secs.toFixed(0)} s, ` +
-					`max lead ${r.maxLead}, direct ${r.direct}, tail ${r.tails} rejoins, best saving ${r.bestSaving}`);
+					`max lead ${r.maxLead}, direct ${r.direct}, tail ${r.tails}${r.axTry ? `, axis ${r.axJ} of ${r.axTry}` : ''} rejoins, best saving ${r.bestSaving}`);
 			});
 			w.on('error', (e) => { console.log(`[flybeam] ${task.name} error: ${e.stack || e.message}`); });
 			w.on('exit', () => { live--; spawn(); });
