@@ -210,6 +210,7 @@
 //        [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
 //        [--sat=1 (coarse cells: the dead-end brake, SAT_ZONE: a region whose picks stop making new cells sinks behind the
 //        rest in heads A and B; 0: the picks as before)] [--satN=20000 (the excess past which a region is braked)]
+//        [--satGpu=0 (1: the brake in the GPU random runs too, --gpu=1; off by default: Egg Quest II's first route)]
 //        [--deaths=-1 (deaths as moves: -1 auto = where something kills and a checkpoint or 2+ spawns exist
 //        (deathMovesFor), 1 wherever something kills (a lone spawn too), 0 off: every death ends its run, as before; a
 //        death is kept only where it pays: deathPays in explore(); the progress and done events carry "deaths": {seen,
@@ -291,7 +292,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -2185,7 +2186,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			// (the brake: the pick's region and room, by what its runs made)
 			if (SAT && room1 !== null) {
 				const fresh = roomList.length > rooms0 || minRc < minRc0 - 0.05;
-				const d = 1 - SAT_CELL * (cells.size - cells0);
+				// (the yield: the new cells AND the earlier arrivals at known ones (impr): a region whose picks still make
+				// its cells earlier is being made faster, not saturated. Egg Quest II, n2-int 10-min runs, seeds 2 / 3: counting
+				// new cells alone braked the fast arrivals' regions, head A went on from slower ones: first routes 25,966 /
+				// 25,849 vs 19,164 with --sat=0)
+				const d = 1 - SAT_CELL * ((cells.size - cells0) + (impr - impr0));
 				const v0 = room1.sat.get(zone1);
 				if (v0 === undefined) nSatZ++;
 				room1.sat.set(zone1, fresh ? 0 : Math.max(0, (v0 || 0) + d));
@@ -2418,7 +2423,10 @@ async function gpuMain(a, L, m) {
 	};
 	// ---- the dead-end brake (explore()'s, see SAT_ZONE): a region = (room, band of SAT_BAND tiles of the reach cost: the GPU's
 	// cells carry no tile), its excess in satG, the room's in room.ex
-	const SAT = a.sat !== 0, satG = new Map();
+	// (--satGpu=0, the default: not in the GPU random runs. Egg Quest II, seed 3: their route (main's first route there,
+	// 19,553) came only with it off: n2-int + the yield fix 21,665 first, with this 19,424; seed 2 19,225 -> 19,700 (the
+	// one search's route either way). The gate benchmark that set --satN has no GPU random runs: never measured there)
+	const SAT = a.sat !== 0 && a.satGpu !== 0, satG = new Map();
 	const regionOf = (c) => cRoom[c] * 4096 + Math.min(4095, (cRc[c] / SAT_BAND) | 0);
 	const exG = (c) => { const v = satG.get(regionOf(c)); return v === undefined ? 0 : v; };
 	// ---- head A's heap (explore()'s): (priority, cell, version)
@@ -2662,7 +2670,7 @@ async function gpuMain(a, L, m) {
 			cT[d] = t; cNode[d] = node;
 			const rc = costOf(fifths, node);
 			cRc[d] = rc;
-			if (!isNew) cVer[d]++;
+			if (!isNew) { cVer[d]++; if (SAT && pk < K) pickNew[pk]++; }   // (an earlier arrival is yield too: the brake, above)
 			hpush(d);
 			if (t > deepest) deepest = t;
 			if (rc < minRc - 0.05) minRc = rc;
