@@ -32,8 +32,11 @@
 //        optwin (the optimizer's windows: explore.js --hunt=1 exact rejoins, 800-tick windows every 600 over the case),
 //        gox (Find a route's CPU search from the start state, TOLD the goal: goexplore.js --prefix on the goal level,
 //        whose goal tiles are the trophy), goxb (the same + the GPU bursts), goxr (NOT told: goexplore.js --prefix on
-//        the real level, bounded by our run's finish; its faster routes are checked for the goal), leaps (src/leaps.js
-//        of --leapsCode, a checkout of the leaps branch, with its eegpu --tool).
+//        the real level, bounded by our run's finish; its faster routes are checked for the goal), goxleap (NOT told:
+//        goexplore.js --prefix aimed at our own run's slow places: lag = ticks - --kappa (4) x a tile walk from the
+//        start, the --targets (4) largest; the route + our run's inputs from there), leaps (src/leaps.js of
+//        --leapsCode, a checkout of the leaps branch, with its eegpu --tool).
+// node tools/pathbench.js table <results.json>...: every finder's best per case, side by side.
 // node tools/pathbench.js check: the controls (our run never FOUND on its own case; every known candidate verifies).
 // --remote="root@host -p N -i key" [--dir=/root/pb_<label>]: the same run on a rented machine (the checkout's src/,
 //        this tool and the cases go up; the JSON comes back to --json, default <data>/results/<label>.json).
@@ -229,6 +232,35 @@ function check() {
 	}
 	console.log(`${K.cases.length - bad}/${K.cases.length} cases check`);
 	if (bad) process.exitCode = 1;
+}
+/** table <results.json>...: the cases (par, ours, the known from our state) with every result's best per case (a
+ *  label's several files, e.g. a rerun of some cases, are merged: the later file's rows win) */
+function table() {
+	const K = loadCases();
+	const res = new Map();
+	for (const f of pos) {
+		const r = JSON.parse(fs.readFileSync(f, 'utf8'));
+		const lb = opt.byFinder ? r.finder : r.label.replace(/_(tok|c13|re)$/, '');
+		if (!res.has(lb)) res.set(lb, new Map());
+		for (const x of r.cases) res.get(lb).set(x.case, x);
+	}
+	const labels = [...res.keys()];
+	console.log(`| case | level | start | par | ours | known from our state | ${labels.join(' | ')} |`);
+	console.log(`|---|---|---|---|---|---|${labels.map(() => '---|').join('')}`);
+	const tot = labels.map(() => ({ n: 0, found: 0, closed: 0 }));
+	for (const c of K.cases) {
+		const cells = labels.map((lb, i) => {
+			const x = res.get(lb).get(c.id);
+			if (!x) return '-';
+			tot[i].n++;
+			if (x.found) tot[i].found++;
+			const cl = x.best && x.best.closed !== null ? Math.max(0, Math.min(1.5, x.best.closed)) : 0;
+			tot[i].closed += cl;
+			return x.best ? `${x.found ? '**FOUND** ' : ''}${x.best.ticks} (closed ${x.best.closed})${x.found ? `, ${x.secFound} s` : ''}` : `no${x.rejected ? ` (${x.rejected} refused)` : ''}`;
+		});
+		console.log(`| ${c.id} | ${c.levelName} | ${c.fixed}${c.startMax > c.fixed ? `..${c.startMax}` : ''} | ${c.par} | ${c.ours} | ${c.known ? c.knownTicks : '-'} | ${cells.join(' | ')} |`);
+	}
+	console.log(`| **all** | | | | | ${K.cases.filter((c) => c.known).length} | ${tot.map((t) => `found ${t.found}/${t.n}, mean closed ${t.n ? (t.closed / t.n).toFixed(3) : '-'}`).join(' | ')} |`);
 }
 function verifyCmd() {
 	const K = loadCases();
@@ -504,6 +536,8 @@ function build() {
 	// 2. Forgotten Veil: coin 11 -> coin 12 without purple switch 0 (every route of ours presses it; the known never)
 	tokenCase('fv_sw0', 'fv', 'fv_final', 'fv_known', 'coin@332,143', 'coin@324,119', { not: ['switch:purple:0:1'] });
 	tokenCase('fv_sw0_route', 'fv', 'fv_route', 'fv_known', 'coin@332,143', 'coin@324,119', { not: ['switch:purple:0:1'] });
+	// (coins 11-13: ours keeps purple 0 on through the switch-1 rooms and the magenta key to coin 13)
+	tokenCase('fv_sw0_c13', 'fv', 'fv_final', 'fv_known', 'coin@332,143', 'coin@213,88', { not: ['switch:purple:0:1'] });
 	// 3. Octorage: the arrow room after the first portal (the known climbs round it; ours drops through the team-switch column)
 	tokenCase('oct_arrow', 'oct', 'oct_final', 'oct_known', 'coin@12,174', 'team:0@92,172');
 	// 4. EX Crew: the climb (64, 92) -> (48, 77) (our EPYC final 320 ticks, the H100 final 141)
@@ -656,7 +690,7 @@ function mineCmd() {
 }
 
 // ------------------------------------------------------------------ run: score a finder
-const BUILTIN = ['none', 'ref', 'known', 'optwin', 'gox', 'goxb', 'goxr', 'leaps'];
+const BUILTIN = ['none', 'ref', 'known', 'optwin', 'gox', 'goxb', 'goxr', 'goxleap', 'leaps'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** ends a finder: its stop file first (finders that watch it end their children between two GPU launches), then the tree */
 async function endProcess(p, stopFile, graceMs) {
@@ -683,7 +717,7 @@ async function runCase(cs, finder, o) {
 	let p;
 	const env = Object.assign({}, process.env, { PB_CASE: caseFile, PB_OUT: out, PB_SECONDS: String(o.seconds), PB_THREADS: String(o.threads) });
 	if (BUILTIN.includes(finder)) {
-		const pass = argv.filter((x) => /^--(code|leapsCode|tool|cachedir|mem|gx|leapArgs|seed)=/.test(x));
+		const pass = argv.filter((x) => /^--(code|leapsCode|tool|cachedir|mem|gx|leapArgs|seed|targets|kappa)=/.test(x));
 		p = spawn(process.execPath, [__filename, 'finder', finder, caseFile, ...pass], { stdio: ['ignore', 'pipe', 'pipe'], env, detached: process.platform !== 'win32', windowsHide: true });
 	} else p = spawn(sub(finder), { shell: true, stdio: ['ignore', 'pipe', 'pipe'], env, detached: process.platform !== 'win32', windowsHide: true });
 	const t0 = Date.now();
@@ -880,12 +914,90 @@ async function finderCmd() {
 		if (r.code) say({ error: `goexplore exit ${r.code}`, last: r.last.slice(-5) });
 		return;
 	}
+	if (name === 'goxleap') {
+		// NOT told the goal: targets from our own run. From the start state, the later places of our run that the run
+		// reaches slowly for how near they are (lag = ticks - kappa x walking tiles from the start: loops, detours, a
+		// door's coin tour), the largest lags first (at least 100 ticks apart); per target a goexplore --prefix on a goal
+		// level whose trophy is a 3 x 3 box around our run's place there, bounded by our arrival; a route that gets there
+		// sooner + our run's own inputs from there (offsets -2..2) are the candidates
+		const L = E.loadLevel(cs.level);
+		const ref = C.readEetas(cs.ref);
+		const T = traceRun(L, ref);
+		const W = L.width, H = L.height;
+		const BK = require(path.join(code, 'src', 'blocks.js'));
+		const t0x = tileOf(T.X[cs.fixed]), t0y = tileOf(T.Y[cs.fixed]);
+		const dist = new Int32Array(W * H).fill(-1);
+		{
+			const q = [t0y * W + t0x];
+			dist[q[0]] = 0;
+			for (let h = 0; h < q.length; h++) {
+				const i = q[h], x = i % W, y = (i / W) | 0;
+				for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+					const nx = x + dx, ny = y + dy;
+					if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+					const k = ny * W + nx;
+					if (dist[k] >= 0 || BK.isSolidId(L.fg[k])) continue;
+					dist[k] = dist[i] + 1;
+					q.push(k);
+				}
+			}
+		}
+		const kappa = +(opt.kappa || 4);
+		const span = Math.min(T.n, cs.fixed + Math.max(600, Math.round(cs.ours * 1.5)));
+		const cand = [];
+		for (let j = cs.fixed + 40; j <= span; j += 5) {
+			const d = dist[tileOf(T.Y[j]) * W + tileOf(T.X[j])];
+			if (d < 3) continue;   // (unreachable by the walk, or where the start already is)
+			cand.push({ j, lag: (j - cs.fixed) - kappa * d });
+		}
+		cand.sort((a, b) => b.lag - a.lag);
+		const K = +(opt.targets || 4), picks = [];
+		for (const c of cand) { if (c.lag < 30) break; if (picks.every((p) => Math.abs(p.j - c.j) >= 100)) picks.push(c); if (picks.length >= K) break; }
+		say({ targets: picks });
+		const d0 = JSON.parse(fs.readFileSync(cs.level, 'utf8'));
+		for (let k = 0; k < picks.length; k++) {
+			if (stopped() || left() < 8) break;
+			const j = picks[k].j;
+			// the goal level for this target (the level's trophies air, the box's free tiles the trophy)
+			const d = Object.assign({}, d0);
+			const fg = Buffer.from(d0.fg_b64, 'base64');
+			for (let i = 0; i < W * H; i++) if (fg.readInt32LE(i * 4) === 121) fg.writeInt32LE(0, i * 4);
+			const free = new Set(['empty', 'arrow', 'dot', 'liquid', 'climbable', 'deco', 'coin_taken', 'spawn', 'checkpoint']);
+			const bx = tileOf(T.X[j]), by = tileOf(T.Y[j]);
+			for (let y = by - 1; y <= by + 1; y++) for (let x = bx - 1; x <= bx + 1; x++) {
+				if (x < 0 || y < 0 || x >= W || y >= H) continue;
+				const id = fg.readInt32LE((y * W + x) * 4);
+				if (free.has(BK.kindOf(id).kind) && id !== 416 && id !== 1585) fg.writeInt32LE(121, (y * W + x) * 4);
+			}
+			d.fg_b64 = fg.toString('base64');
+			const gl = path.join(out, `target_${k}.json`);
+			fs.writeFileSync(gl, JSON.stringify(d));
+			const ro = path.join(out, `route_${k}.tmp`);
+			const secs = Math.max(8, Math.floor(left() / (picks.length - k)) - 2);
+			await child([path.join(code, 'src', 'goexplore.js'), gl, `--prefix=${cs.prefix}`, `--workers=${cs.threads}`, '--cells=coarse', '--steer=build', '--stdin=1',
+				`--seconds=${secs}`, `--depth=${j}`, `--out=${ro}`, `--seed=${+(opt.seed || 1)}`, `--mem=${+(opt.mem || 700)}`], { stdin: true });
+			if (!fs.existsSync(ro)) { say({ target: j, route: null }); continue; }
+			const r = C.readEetas(ro);
+			// the route + our run's inputs from our tick at the box (offsets -2..2): whole runs for the verifier
+			let jj = j;
+			for (let t = cs.fixed; t <= j; t++) if (Math.abs(tileOf(T.X[t]) - bx) <= 1 && Math.abs(tileOf(T.Y[t]) - by) <= 1) { jj = t; break; }
+			for (let o = -2; o <= 2; o++) {
+				const s = Math.max(0, jj + o);
+				const m = new Uint8Array(r.length + ref.length - s);
+				m.set(r); m.set(ref.subarray(s), r.length);
+				C.writeEetas(path.join(out, `leap_${k}_${o + 2}.eetas`), m);
+			}
+			say({ target: j, route: r.length, gain: jj - r.length });
+		}
+		return;
+	}
 	if (name === 'leaps') {
 		// the long-range shortcut search (the leaps branch: --leapsCode, its eegpu with --ahead as --tool): starts from
 		// the case's start ticks, our run as the reference; every faster run it writes is a candidate
 		const lc = path.resolve(opt.leapsCode || code);
 		const args = [path.join(lc, 'src', 'leaps.js'), `--tas=${cs.ref}`, `--level=${cs.level}`, `--out=${path.join(out, 'leaps.eetas')}`, `--seconds=${Math.max(10, Math.floor(left()))}`,
-			`--from=${cs.fixed}`, `--to=${Math.max(cs.startMax, cs.fixed + 1)}`, `--leapStep=${cs.startMax > cs.fixed ? 50 : 250}`,
+			// (the starts: from the case's start over the first half of our run's way to the goal)
+			`--from=${cs.fixed}`, `--to=${Math.max(cs.startMax, cs.fixed + Math.floor(cs.ours / 2))}`, `--leapStep=${Math.max(25, Math.min(250, Math.floor(cs.ours / 8)))}`,
 			// (the met visit: at least half of our run's way to the goal ahead, at most past it; leaps' defaults 300 / 3000)
 			`--minAhead=${Math.max(30, Math.min(300, Math.floor(cs.ours / 2)))}`, `--maxSpan=${Math.max(600, cs.ours + 300)}`, `--minGain=${Math.max(5, Math.min(20, Math.floor((cs.ours - cs.par) / 4)))}`,
 			...(opt.tool ? [`--tool=${opt.tool}`] : []), ...(opt.leapArgs ? opt.leapArgs.split(' ').filter(Boolean) : [])];
@@ -935,7 +1047,7 @@ function remote() {
 }
 
 if (require.main === module) {
-	const cmds = { list, verify: verifyCmd, mine: mineCmd, build, check };
+	const cmds = { list, verify: verifyCmd, mine: mineCmd, build, check, table };
 	if (cmd === 'run' && opt.remote) { remote(); return; }
 	if (cmd === 'run') { runBench().catch((e) => { console.error(e.stack || e.message); process.exitCode = 1; }); return; }
 	if (cmd === 'finder') { finderCmd().catch((e) => { console.error(e.stack || e.message); process.exitCode = 1; }); return; }
