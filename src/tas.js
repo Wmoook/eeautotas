@@ -31,7 +31,7 @@ const HELP = `EE Auto TAS - command line (${CMD} <command> ...)
                                          K), every input sequence toward the trophy, from the best run, its history,
                                          original and pieces; a faster finish is handed to the job, "proof" = nothing
                                          faster from there (--cap=<open states>, default 300000)
-  import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load]   create a job (like the web app's Import);
+  import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load] [--deaths=forbid]   create a job (like the web app's Import);
                                          --start: how the TAS was started in eeo-tas: reset = after /reset (default,
                                          the eeo-tas README workflow), load = /playtas right after loading the level
                                          (only matters on levels with 2+ spawn points or time doors)

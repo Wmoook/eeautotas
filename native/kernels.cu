@@ -385,9 +385,25 @@ __device__ __forceinline__ u64 exploreKeyOf(const ExploreParams& p, Sim<TW>& sim
  * reach field rules it out: the earliest arrival there (the claim drops it anyway if a live ball got there first by
  * then). Every other dying child is dropped as before.
  */
+/** deaths as moves: does the death of the ball s (its last live state at px, py with vertical speed vy, gravity queue q0,
+ *  q1, slipperiness sl) throw it back? Its respawn target (standing there: the checkpoint it holds, else the next spawn)
+ *  farther from the trophy by the reach field than that live state, by more than a death's ticks (EE_DEATH_F); a state
+ *  whose only way is a death (RF_DEATH or more) has no such bound (goexplore.js deathPays: the same rule on the CPU) */
+template <int TW>
+__device__ __forceinline__ bool deathThrowsBack(const ReachField& R, const Level& L, const State<TW>& s, double px, double py, double vy, i32 q0, i32 q1, double sl) {
+	if (!R.on) return false;
+	const i32 own = reachFifths(R, px, py, vy, q0, q1, sl);
+	if (own < 0 || own >= RF_DEATH) return false;
+	i32 rx = 1, ry = 1;   // (eecore.h placeAtSpawn)
+	if (s.checkpoint_x != -1) { rx = s.checkpoint_x; ry = s.checkpoint_y; }
+	else if (L.nSpawns > 0) { const i32 k = s.next_spawn >= L.nSpawns || s.next_spawn < 0 ? 0 : s.next_spawn; rx = L.spawnsX[k]; ry = L.spawnsY[k]; }
+	const i32 r = reachFifths(R, 16.0 * rx, 16.0 * ry, 0.0, -1, -1, 0.0);
+	return r < 0 || r > own + EE_DEATH_F;
+}
 template <int TW>
 __device__ __forceinline__ bool exploreKeepDead(const ExploreParams& p, const State<TW>& s, const State<TW>& par, u32 lane, unsigned long long& nSim) {
 	if (par.is_dead) return true;
+	if (deathThrowsBack<TW>(p.reach, p.L, s, par.px, par.py, par.speed_y, par.q0, par.q1, par.slippery)) return false;
 	{
 		State<TW> c = s;
 		Sim<TW> cs(p.L, c);
@@ -464,6 +480,16 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			own = reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery);
 			// the physics model rules this state out: it cannot reach the trophy (a proof)
 			if (p.prune && own < 0) continue;
+			// deaths as moves (--deaths=1): a state whose only way is a death (the field's cost RF_DEATH or more: its death
+			// edges go to the best respawn tile of all) costs its real price, the death's ticks (EE_DEATH_F) + its own
+			// respawn target's cost (the checkpoint it holds, else the next spawn), for the order and the ceiling only
+			if (p.deaths && p.reach.deaths && own >= RF_DEATH) {
+				i32 rx = 1, ry = 1;   // (eecore.h placeAtSpawn)
+				if (s.checkpoint_x != -1) { rx = s.checkpoint_x; ry = s.checkpoint_y; }
+				else if (p.L.nSpawns > 0) { const i32 k = s.next_spawn >= p.L.nSpawns || s.next_spawn < 0 ? 0 : s.next_spawn; rx = p.L.spawnsX[k]; ry = p.L.spawnsY[k]; }
+				const i32 r = reachFifths(p.reach, 16.0 * rx, 16.0 * ry, 0.0, -1, -1, 0.0);
+				if (r >= 0 && EE_DEATH_F + r < own) own = EE_DEATH_F + r;
+			}
 			// the reach field's order (with --steer only for the states it cuts off, which get no steer lookup; the others'
 			// ceiling, priority and closest attempt come after the cell, below)
 			if (!p.steer.on || own < 0) {
@@ -711,11 +737,15 @@ __device__ void rollBody(const RollParams& p) {
 		i32 m = option((i32)(r.next() * 18.0));
 		nRuns++;
 		i32 ext = 0;   // (--deaths=1: a kept death's dead ticks, which the run goes on through: its length grows by them)
+		double lpx = 0, lpy = 0, lvy = 0, lsl = 0;
+		i32 lq0 = -1, lq1 = -1;
 		for (i32 k = 0; k < p.Lr + ext && k < 255; k++) {
 			const i32 t = t0 + k + 1;
 			if (t > p.maxT) break;
 			m = rollDraw(r, p.keep, m);
 			Input in = maskInput(m);
+			// (--deaths=1: the last live state's lookup values, deathThrowsBack's reference)
+			if (p.deaths && !s.is_dead) { lpx = s.px; lpy = s.py; lvy = s.speed_y; lq0 = s.q0; lq1 = s.q1; lsl = s.slippery; }
 			sim.tick(in);
 			nTicks++;
 			if (!crown0 && s.has_silver_crown) {
@@ -731,7 +761,7 @@ __device__ void rollBody(const RollParams& p) {
 				// discrete state (a mark in the cell table, its earliest respawn tick: a later death there comes back later)
 				// and the respawn is not one the reach field rules out. Every other death ends the run, as before.
 				if (ext > 0 && k < p.Lr + ext) continue;   // (the kept death's dead ticks: no cell)
-				if (!p.deaths || ext > 0) { nDead++; break; }
+				if (!p.deaths || ext > 0 || deathThrowsBack<TW>(p.reach, p.L, s, lpx, lpy, lvy, lq0, lq1, lsl)) { nDead++; break; }
 				State<TW> q = s;
 				Sim<TW> qs(p.L, q);
 				i32 n = 0;

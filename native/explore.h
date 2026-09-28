@@ -16,6 +16,9 @@
 
 namespace ee {
 
+// deaths as moves: a death's ticks (goexplore.js DEATH_TILES: 55 ticks at the top running speed, 23.3 tiles) in fifths of a tile
+#define EE_DEATH_F 117
+
 struct ExploreHit { u32 parent; u8 option, jumpOption, lane, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };   // (lane: --lanes)
 
 struct ExploreParams {

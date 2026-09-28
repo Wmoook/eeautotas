@@ -132,13 +132,13 @@ function sectionCpu() {
 	const on2 = gox(pit.file, ['--workers=1', '--cells=coarse', '--maxTicks=4000000', '--seconds=60']);
 	check('the same seed and tick budget: the same routes (deaths change no draw)', JSON.stringify(routesOf(on2).map((e) => [e.ticks, e.inputs])) === JSON.stringify(rs.map((e) => [e.ticks, e.inputs])));
 	// fine cells: a death warp between two spawns (the start is the second spawn after /reset; the death brings the ball to
-	// the first, by the trophy): the only way, so kept by the cost
+	// the first, by the trophy): the only way
 	const warp = levelFile('warp', box(['S...T#......', '######S....x']));
 	const w0 = gox(warp.file, ['--workers=1', '--deaths=0', '--maxTicks=3000000', '--seconds=60']);
 	const w1 = gox(warp.file, ['--workers=1', '--maxTicks=3000000', '--seconds=60']);
 	const wr = routesOf(w1), wd = doneOf(w1).deaths || {};
 	const wev = wr.length ? C.evaluate(warp.level, masksOf(wr[wr.length - 1].inputs)) : null;
-	check('a death warp (fine cells, 2 spawns): no route without, a route through the death with it', routesOf(w0).length === 0 && !!wev && wev.deaths === 1 && wd.byCost >= 1,
+	check('a death warp (fine cells, 2 spawns): no route without, a route through the death with it', routesOf(w0).length === 0 && !!wev && wev.deaths === 1 && wd.byCost + wd.byNew >= 1,
 		`${wr.length} routes, ${wev ? `${wev.ms.length} ticks, ${wev.deaths} death(s)` : '-'}; ${JSON.stringify(wd)}`);
 	// no death pays: a corridor with spikes in the floor and checkpoints behind the start (a respawn only sends the ball
 	// back): every route dies 0 times
