@@ -58,8 +58,9 @@ const DEFAULTS = {
 	picks: 'fast',
 	cap: 60000, log2: 24,   // (the cell table: 2^24 x 8 bytes a worker; full at 70%: the search ends there)
 	perS: 100, bfsShare: 0.85,   // seconds per search (start x pick) and the main bfs's share of them
+	deepEvery: 4, deepDepth: 450, deepLog2: 25, deepPerS: 200,   // the deep starts (isDeep): layers, table, seconds
 	joinTop: 4, hitsPerSeg: 4, hitsClose: 4, quickOffs: [0, -2, 2, -4, 4, -6, 6, -10, 10], quickMax: 400, quickS: 8, tailBack: 90, tailStep: 3, offBack: 150, offAhead: 60, tailH: 400, tailDiverge: 320, tailS: 4, anchors: 3, anchorD: 12, looseD: 4,
-	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackLost: 150, trackLostK: 30, trackS: 8,
+	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackVw: 3, trackLost: 150, trackLostK: 30, trackS: 8,
 	joinBfs: 0, joinDepth: 280, joinCap: 25000, joinMargin: 6,
 	maxCands: 40,
 	unjoinedTop: 2, gpuMin: 60, gpuModes: 'rejoin,finish', gpuS: 30, gpuRejoinDepth: 700, gpuCells: 27, gpuCap: 65536, gpuCqx: 0.25, gpuCqv: 16, gpuQy: 0.25, gpuQvy: 16,
@@ -295,7 +296,7 @@ function bfs(info, start, t0, o) {
 	const segCount = new Map(), closeBy = new Map();
 	const layers = [null];
 	let cur = [start], curN = 1, nxtPool = [];
-	const st = { layers: 0, cells: 1, ticks: 0, skipJ: 0, dead: 0, out: 0, cut: 0, peak: 1, full: false, time: false };
+	const st = { layers: 0, cells: 1, ticks: 0, skipJ: 0, resim: 0, dead: 0, out: 0, cut: 0, peak: 1, full: false, time: false };
 	const lastVis = o.lastVis;   // per tile the run's latest visit in the goal window (-1 none)
 	const nTargets = info.targets ? info.targets.length : 0;
 	// this layer's candidates: one slot per new cell, found through a per-layer open-addressing table (LA/LB keys, LS slot)
@@ -342,14 +343,17 @@ function bfs(info, start, t0, o) {
 					if (LA[p] === ka && LB[p] === kb) break;
 					p = (p + 1) & LMASK;
 				}
+				// (a snapshot only for the layer's first `cap` cells: past that the cut drops most, and a kept one is
+				// simulated again from its parent after the cut: ~1 GB a search down to ~0.4)
 				if (LA[p] !== 0) {
 					const sl = LS[p];
 					if (slotScore[sl] <= score) continue;
-					slotSnap[sl] = sim.snapshot(slotSnap[sl]); slotPar[sl] = i; slotMsk[sl] = m; slotScore[sl] = score;
+					if (slotSnap[sl] !== null) slotSnap[sl] = sim.snapshot(slotSnap[sl]);
+					slotPar[sl] = i; slotMsk[sl] = m; slotScore[sl] = score;
 					continue;
 				}
 				LA[p] = ka; LB[p] = kb; LS[p] = ns; slotPos[ns] = p;
-				slotSnap[ns] = sim.snapshot(nxtPool[ns]); slotPar[ns] = i; slotMsk[ns] = m; slotScore[ns] = score; slotTile[ns] = tile;
+				slotSnap[ns] = ns < o.cap ? sim.snapshot(nxtPool[ns]) : null; slotPar[ns] = i; slotMsk[ns] = m; slotScore[ns] = score; slotTile[ns] = tile;
 				slotKa[ns] = ka; slotKb[ns] = kb; slotCid[ns] = cid;
 				ns++;
 			}
@@ -380,10 +384,22 @@ function bfs(info, start, t0, o) {
 		const nk = order ? order.length : ns;
 		const par = new Int32Array(nk), msk = new Uint8Array(nk);
 		const nxt = new Array(nk);
+		// the dropped cells' snapshots, for the kept ones without one (simulated again from their parent)
+		let spare = null;
+		if (order && ns > o.cap) {
+			const kept = new Uint8Array(ns);
+			for (const q of order) kept[q] = 1;
+			spare = [];
+			for (let q = 0; q < ns; q++) if (!kept[q] && slotSnap[q] !== null) spare.push(slotSnap[q]);
+		}
 		for (let r = 0; r < nk; r++) {
 			const q = order ? order[r] : r;
 			ka = slotKa[q]; kb = slotKb[q]; insert();
 			par[r] = slotPar[q]; msk[r] = slotMsk[q]; nxt[r] = slotSnap[q];
+			if (nxt[r] === null) {
+				sim.restore(cur[slotPar[q]]); E.applyMask(inp, slotMsk[q]); sim.tick(inp); st.ticks++; st.resim++;
+				nxt[r] = sim.snapshot(spare && spare.length ? spare.pop() : undefined);
+			}
 			const tile = slotTile[q];
 			tileSeen[tile]++;
 			// a lead: the run is in this tile at least minGain ticks later. Per run stretch the first arrivals (hitsPerSeg,
@@ -565,7 +581,7 @@ function tail(info, sim, inp, sn, te, r0, o, played) {
 function track(info, sn, te, r0, o) {
 	const { n, hashTick, X, Y, VX, VY, hashOf } = info;
 	const sim = new E.EESim(info.level), inp = new E.EEInput();
-	const W = o.trackW, PH = o.trackPhase;
+	const W = o.trackW, PH = o.trackPhase, VW = o.trackVw;
 	let cur = [sn], lostK = 0;
 	const layers = [];
 	for (let k = 0; k < o.trackH && r0 + k + 1 + PH < n; k++) {
@@ -603,7 +619,7 @@ function track(info, sn, te, r0, o) {
 				const cell = Math.floor(sim.px) * 1e6 + Math.floor(sim.py) * 97 + Math.floor(sim.speed_x * 8) * 7919 + Math.floor(sim.speed_y * 8) * 104729 + (sim.on_ground ? 0.5 : 0) + sim.jump_count * 0.25;
 				let dd = Infinity;
 				for (let rq = Math.max(0, rr - PH); rq <= Math.min(n, rr + PH); rq++) {
-					const d = Math.abs(sim.px - X[rq]) + Math.abs(sim.py - Y[rq]) + 3 * (Math.abs(sim.speed_x - VX[rq]) + Math.abs(sim.speed_y - VY[rq]));
+					const d = Math.abs(sim.px - X[rq]) + Math.abs(sim.py - Y[rq]) + VW * (Math.abs(sim.speed_x - VX[rq]) + Math.abs(sim.speed_y - VY[rq]));
 					if (d < dd) dd = d;
 				}
 				const had = seen.get(cell);
@@ -871,7 +887,9 @@ if (!isMainThread && workerData && workerData.skipfind) {
 		if (msg.task) {
 			const { s, pick } = msg.task;
 			let r;
-			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
+			// (a deep start: the coarse levels' sparse starts search deeper: --deepDepth layers, a 2^--deepLog2 table, --deepPerS seconds)
+			const deep = msg.task.deep ? { depth: wd.o.deepDepth || DEFAULTS.deepDepth, log2: wd.o.deepLog2 || DEFAULTS.deepLog2, perS: wd.o.deepPerS || DEFAULTS.deepPerS } : {};
+			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, deep, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
 			E.flushTicks();
 			const out = Object.assign({ s, pick, version, h: info.H[s] }, r);
 			if (r.best) out.best = { ms: Array.from(r.best.ms), saved: r.best.saved, runTicks: r.best.ev.runTicks, how: r.best.how, edge: r.best.edge, m: r.best.m };
@@ -899,7 +917,7 @@ async function main() {
 	const seconds = +(a.seconds || 600);
 	// the workers: as asked, at most what half of the free memory holds (a worker: its cell table, 2^log2 x 8 bytes, + ~700 MB of
 	// layers and snapshots at the default cap: one Egg Quest II search, 1,041 MB RSS, heap 659 MB, array buffers 212 MB)
-	const perWorkerMB = (2 ** ((o.log2 || DEFAULTS.log2)) * 8) / 1048576 + 700;
+	const perWorkerMB = (2 ** Math.max(o.log2 || DEFAULTS.log2, o.deepLog2 || DEFAULTS.deepLog2) * 8) / 1048576 + 700;
 	const memW = Math.max(1, Math.floor((os.freemem() / 1048576) * 0.5 / perWorkerMB));
 	const nw = Math.max(1, Math.min(memW, +(a.workers || Math.max(1, os.cpus().length - 2))));
 	const out = a.out ? path.resolve(a.out) : path.join(C.SRC, 'out', 'skipfind_best.eetas');
@@ -915,16 +933,30 @@ async function main() {
 	// (the grind's stage continues its pass where the last one stopped: a start is searched again only when its state or
 	// the run over its goal window changed)
 	const P = Object.assign({}, DEFAULTS, o);
-	const keyOf = (s, pk) => `${info.H[s]}:${info.H[Math.min(info.n, s + P.depth + P.horizon)]}:${pk}`;
+	// deep starts: in the coarse order the starts at multiples of --deepEvery x --every (the 8x and 4x levels by default:
+	// sparse, so each searches deeper; Egg Quest II's base route: the chimney from t600 needs ~350 layers)
+	const isDeep = (s) => P.order === 'coarse' && P.deepEvery > 0 && s % (P.deepEvery * Math.max(1, P.every | 0)) === 0;
+	const depthOf = (s) => (isDeep(s) ? P.deepDepth : P.depth);
+	const keyOf = (s, pk) => `${info.H[s]}:${info.H[Math.min(info.n, s + depthOf(s) + P.horizon)]}:${pk}`;
 	const done = new Set();
 	const doneFile = a.done ? path.resolve(a.done) : null;
 	if (doneFile) { try { for (const l of fs.readFileSync(doneFile, 'utf8').split('\n')) if (l) done.add(l); } catch (e) { /* none yet */ } }
-	const markDone = (key) => { done.add(key); if (doneFile) { try { fs.appendFileSync(doneFile, key + '\n'); } catch (e) { /* ignore */ } } };
+	// the queue: the starts whose state was never searched first (in startsOf's order), then the ones searched before whose
+	// goal window changed since (a find elsewhere): with finds spread over a run, re-searching the coarse levels' starts
+	// first kept Egg Quest II's base-route pass from ever reaching t600 (the chimney) in 25 min
+	const stateOfKey = (k) => { const q = k.split(':'); return `${q[0]}:${q[2]}`; };
+	const stateDone = new Set([...done].map(stateOfKey));
+	const markDone = (key) => { done.add(key); stateDone.add(stateOfKey(key)); if (doneFile) { try { fs.appendFileSync(doneFile, key + '\n'); } catch (e) { /* ignore */ } } };
 	let queue = [];
 	const refill = () => {
 		const st = startsOf(info, o);
-		queue = [];
-		for (const s of st) for (const pk of picks) { const key = keyOf(s, pk); if (!done.has(key)) queue.push({ s, pick: pk, key }); }
+		const fresh = [], again = [];
+		for (const s of st) for (const pk of picks) {
+			const key = keyOf(s, pk);
+			if (done.has(key)) continue;
+			(stateDone.has(stateOfKey(key)) ? again : fresh).push({ s, pick: pk, key, deep: isDeep(s) });
+		}
+		queue = fresh.concat(again);
 	};
 	refill();
 	emit({ ev: 'start', n: info.n, runTicks: bestEv.runTicks, nocoins: o.nocoins, clockblind: info.cb, workers: nw, memWorkers: memW, tasks: queue.length, searched: done.size, picks });
