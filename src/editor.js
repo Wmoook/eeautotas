@@ -777,14 +777,16 @@ function pickSource(step, c) {
 	return b;
 }
 /** masks replayed in the JS engine like common.js replay (to the finish, if any): the path, run ticks, deaths, and the
- *  room of its last state ({key, desc, since: the tick it entered that room}) */
-function replayRooms(masks, withPath) {
+ *  room of its last state ({key, desc, since: the tick it entered that room, cul: it ends in a cul-de-sac of that room});
+ *  withCul: the room's cul-de-sacs made when not known yet (closer(): the nearest attempt's candidates, CUL_ROOMS; a
+ *  walk of the level on the server's thread, 20-80 ms on 200 x 200 - 400 x 200), else only those known */
+function replayRooms(masks, withPath, withCul = false) {
 	const R = roomsOfSearch();
 	const sim = new E.EESim(cur.level), inp = new E.EEInput();
 	sim.reset();
 	let deaths = 0, complete = -1, key = R.RM.key(sim), since = 0;
 	// (the state that entered the room the replay ends in: its cul-de-sacs, when not known yet; a dead ball has no tile)
-	const needCul = R.walk && cur.opts.useful !== false && !R.cul.has(key);
+	const needCul = withCul && R.walk && cur.opts.useful !== false && !R.cul.has(key);
 	let entry = needCul ? sim.snapshot() : null;
 	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); else if (k === 'death') deaths++; };
 	const path = withPath ? [[Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]] : null;
@@ -793,7 +795,7 @@ function replayRooms(masks, withPath) {
 		sim.tick(inp);
 		if (path) path.push([Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]);
 		const k = R.RM.key(sim);
-		if (k !== key) { key = k; since = t + 1; entry = R.walk && cur.opts.useful !== false && !R.cul.has(k) && !sim.is_dead ? sim.snapshot() : null; }
+		if (k !== key) { key = k; since = t + 1; entry = withCul && R.walk && cur.opts.useful !== false && !R.cul.has(k) && !sim.is_dead ? sim.snapshot() : null; }
 	}
 	// (the useful territory: whether the attempt ends in a cul-de-sac of its room)
 	let cul = false;
@@ -3142,7 +3144,7 @@ function closer(ev, n) {
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
 	// (one replay: the path, and the room it ends in for the sources)
-	const tr = replayRooms(masks, true);
+	const tr = replayRooms(masks, true, true);
 	if (own) attemptSource(n, own, tr.room);
 	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
 	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
