@@ -518,6 +518,7 @@ function layerLevel(A, M, s, opts) {
 	const goal = new Uint8Array(N);
 	for (let i = 0; i < N; i++) {
 		const c = A.cls[i], id = fg[i];
+		if (A.ordWalls && A.ordWalls[i]) { fg[i] = 9; continue; }   // (buildSteer opts.walls / refute: ordering only)
 		if (c === 3) fg[i] = M.gateOpen(i, s) ? 0 : 9;
 		else if (c === 1 && protOn === true) fg[i] = 0;
 		const k = A.specialAt[i];
@@ -939,6 +940,33 @@ function buildSteer(level, opts) {
 	const A = analyze(level, opts);
 	const modeled = new Set();
 	const cegar = [];
+	// (the stall's refutation, editor.js stallCegarCheck: ORDERING only. opts.refute {tiles: the field's descent from the
+	// nearest attempt's end, from its first tile no attempt entered; modeled: the running steer's features}: its first gate
+	// of a feature the steer does not model is forced (a coin door: the coin plan's count at least its count); no such
+	// gate: its first tile is a wall for the ordering (a one-way met from its solid side, a portal entry never taken, a
+	// physics gap). opts.features: forced features; opts.walls: tiles the model takes as walls (cls 0, a solid block in
+	// the layers' levels; never a trophy or the start). The RCH3 field, its -1 prune and the proofs never read this)
+	let refuted = null;
+	const forced = new Set(opts.features || []), ordWalls = new Set(opts.walls || []);
+	if (opts.refute && opts.refute.tiles && opts.refute.tiles.length) {
+		const known = new Set(opts.refute.modeled || []);
+		for (const t of opts.refute.tiles) {
+			const k = t >= 0 && t < A.N && A.cls[t] === 3 ? A.gateFeat[t] : null;
+			if (!k || k === 'open' || k === 'static' || known.has(k) || forced.has(k) || !A.feats.has(k)) continue;
+			refuted = { kind: 'gate', feat: k, t };
+			forced.add(k);
+			if (k === 'coins' && A.gatePol[t] === 1) opts = Object.assign({}, opts, { coinT: Math.max(opts.coinT || 0, A.gateParam[t]) });
+			break;
+		}
+		if (!refuted) { refuted = { kind: 'wall', t: opts.refute.tiles[0] }; ordWalls.add(opts.refute.tiles[0]); }
+	}
+	for (const k of forced) if (A.feats.has(k)) modeled.add(k);
+	if (ordWalls.size) {
+		const keep = new Set(A.trophies);
+		if (A.start && A.start.t >= 0) keep.add(A.start.t);
+		A.ordWalls = new Uint8Array(A.N);
+		for (const t of ordWalls) if (t >= 0 && t < A.N && !keep.has(t)) { A.ordWalls[t] = 1; A.cls[t] = 0; A.gateFeat[t] = null; }
+	}
 	// (the budget as a layer cap: the effects double the physics layers)
 	const maxBytes = opts.maxBytes || STEER_MAX_BYTES, maxMs = opts.maxMs || STEER_MAX_MS;
 	const bodyBytes = A.N * BODY_BYTES_TILE;
@@ -1010,7 +1038,8 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		refuted: refuted ? Object.assign(refuted, { x: refuted.t % A.W, y: Math.floor(refuted.t / A.W) }) : null, walls: A.ordWalls ? [...ordWalls].filter((t) => A.ordWalls[t]) : [] };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1146,6 +1175,47 @@ function steerFifths(st, sim) {
 }
 /** tiles (NaN = no value) */
 function steerAt(st, sim) { const v = steerFifths(st, sim); return v < 0 ? NaN : v / 5; }
+/** the stall's blocker (editor.js stallCegarCheck; ordering only): from a sim's state (the search's nearest attempt's
+ *  end) the descent of its layer's field toward the trophy, tile by tile (the least of the 8 neighbours, the ball at rest
+ *  there), at most K steps; `entered` (Uint8Array(W x H)): the tiles an attempt passed. -> {tiles: the descent from its
+ *  first tile no attempt entered (the field's claim nothing tested), way, stuck} or null (no layer value, or the descent
+ *  stays on entered tiles and ends at the trophy). A descent that stops above 0 (a local minimum: the field's way leaves
+ *  by a portal or a gap there) with every tile entered names its last tile */
+function stallBlocker(st, sim, entered, K) {
+	K = K || 8;
+	const s = layerIndex(st, sim);
+	const b = s >= 0 && s < st.S ? st.layerBody[s] : -1;
+	if (b < 0) return null;
+	const f = st.bodies[b], W = st.W, H = st.H;
+	const at = (x, y) => {
+		if (x < 0 || y < 0 || x >= W || y >= H) return -1;
+		const c = RF.fifthsAt(f, x * 16, y * 16, 0, 0, 0, sim._slippery);
+		return c < 0 || c >= CUT - 1 ? -1 : c;
+	};
+	let x = Math.trunc(sim.px + 8) >> 4, y = Math.trunc(sim.py + 8) >> 4;
+	let v = at(x, y);
+	const way = [];
+	let stuck = false;
+	for (let k = 0; k < K; k++) {
+		let bx = -1, by = -1, bv = v < 0 ? Infinity : v;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			if (!dx && !dy) continue;
+			const c = at(x + dx, y + dy);
+			if (c >= 0 && c < bv) { bv = c; bx = x + dx; by = y + dy; }
+		}
+		if (bx < 0) { stuck = v > 0; break; }
+		x = bx; y = by; v = bv;
+		way.push(y * W + x);
+		if (v === 0) break;
+	}
+	let i = way.findIndex((t) => !entered || !entered[t]);
+	if (i < 0) {
+		if (!stuck) return null;
+		i = way.length - 1;
+		if (i < 0) { way.push((Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)); i = 0; }
+	}
+	return { tiles: way.slice(i), way, stuck };
+}
 /** the beam's score (tiles, a float; -1 = no value): the layer field's blend (reach.js scoreAt) where the own value is
  *  the plain layer lookup, else own / 5 */
 function steerScore(st, sim) {
@@ -1248,6 +1318,6 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, stallBlocker, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost };

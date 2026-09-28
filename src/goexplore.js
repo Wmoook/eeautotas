@@ -2676,12 +2676,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	 *  that field with the coin DP's value first (dpFirst: its layer fields count a coin at every touch, so they reach the
 	 *  trophy from any coin tile; the DP counts distinct coins); the cells holding a snapshot are scored at once, the
 	 *  others when next picked; the closest state starts over (another measure) */
-	const switchSteer = (sab) => {
+	const switchSteer = (sab, dpf) => {
 		if (ST === null) return;   // (a field in use: from the start, or late (steerOn), which the main thread sent first)
 		let sd = null;
 		try { sd = SF.readSteerFile(Buffer.from(sab)); } catch (e) { return; }
 		if (!sd || sd.W !== W || sd.H !== H) return;
-		ST = Object.assign(sd, { dpFirst: true });
+		// (dpf false: the stall's refutation (editor.js stallCegarCheck, stdin `refute <file>`): the lookup as the search's own)
+		ST = Object.assign(sd, { dpFirst: dpf === false ? a.dpFirst === 1 : true });
 		scFresh = new WeakSet();
 		steerGen++;
 		// (--spd: another measure, so the stall clock starts over: its best and the whole search's nearest were the old
@@ -2744,7 +2745,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
-		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else steerOn(x.steer); } else addSeed(String(x)); }
+		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer, x.dpFirst); else steerOn(x.steer); } else addSeed(String(x)); }
 		lShare = leadShare(now); wShare = wayShare(now);
 		if (coarse && a.spd > 0) spdClock(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
@@ -3669,19 +3670,20 @@ async function main() {
 				// (before any route: another search's nearest attempt (the editor's GPU random runs: their archive takes no
 				// imports, and their routes often come first) as the route arm's target, --rArmPre)
 				else if (line.startsWith('arm ') && /^[0-O]+$/.test(line.slice(4))) { armGate = true; try { if (bursts && !armRouted && bursts.attempt) bursts.attempt(line.slice(4)); } catch (e) { /* not yet */ } }
-				else if (line.startsWith('steer ') && steerBuf) {
+				else if ((line.startsWith('steer ') || line.startsWith('refute ')) && steerBuf) {
 					// (the editor's plan past its count, src/editor.js pastPlan: every worker's head A by it, dpFirst; the
 					// closest attempt starts over: another measure)
 					try {
-						const bytes = fs.readFileSync(line.slice(6));
+						const refute = line.startsWith('refute ');
+						const bytes = fs.readFileSync(line.slice(refute ? 7 : 6));
 						const sab = new SharedArrayBuffer(bytes.length);
 						new Uint8Array(sab).set(bytes);
 						const sd = SF.readSteerFile(Buffer.from(sab));
 						if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
-						for (const p of seedPorts) p.postMessage({ steer: sab, past: true });
+						for (const p of seedPorts) p.postMessage({ steer: sab, past: true, dpFirst: !refute });
 						near = null; nearPending = false; steerGen++;
-						const s0 = SF.steerAt(Object.assign(sd, { dpFirst: true }), sim0);
-						say({ ev: 'steer', dp: sd.dp ? { n: sd.dp.n, T: sd.dp.T } : null, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null });
+						const s0 = SF.steerAt(Object.assign(sd, { dpFirst: !refute || a.dpFirst === 1 }), sim0);
+						say({ ev: 'steer', refute, dp: sd.dp ? { n: sd.dp.n, T: sd.dp.T } : null, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null });
 					} catch (e) { say({ ev: 'warning', text: `the steer field past the plan is not used: ${e.message}` }); }
 				}
 			}
