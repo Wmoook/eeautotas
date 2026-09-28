@@ -2142,7 +2142,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (room !== null && betterBest(c, room.best)) room.best = c;
 			return null;
 		}
-		// (--timed: a cell of the same place in a bucket with more time left that got there no later: this state is dominated)
+		// (--timed: a cell of the same place in a bucket with more time left that got there no later: this state is dominated;
+		// not for --spdMode=1's fast cells, which keep the fastest arrival, not the earliest)
 		if (TBK && tBucket > 0 && !spdFast) {
 			const bmax = TMD.bucketMax(), b0 = tBucket;
 			for (let b = b0 + 1; b <= bmax; b++) {
