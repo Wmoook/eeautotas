@@ -694,6 +694,33 @@ function sectionH() {
 			f.mode === what && ev && ev.deaths === 0 && a.finished && a.cut === 0 && b.cut === 0 && f.prot && f.prot.on === 1,
 			`mode ${f.mode}, ${ev ? `${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; ${a.n} states, cut ${a.cut} / ${b.cut}${a.first ? ` first ${JSON.stringify(a.first)}` : ''}; prot ${JSON.stringify(f.prot)}`);
 	}
+	// physics mode: the unprotected ball's way first (reach.js protOrder, breaker-smarter): a spike column between the start
+	// and the trophy, the protection effect behind the start. The start's cost counts the detour to the protection (the
+	// protected field's goes through the spikes); the -1 set is the protOrder: false field's exactly (the proof unchanged);
+	// the route (left to the effect, right through the spikes) finite at every state; the spike states on the fallback
+	// (the protected cost + PROT_COST). A field to goals priced high (steer.js-style chained goals: 11,500 tiles): the
+	// fallback stays below FAR (at most FAR - 1, the lookups' last value: steer.js / beam.h read FAR as none), no cost
+	// finite in the protOrder: false field becomes FAR (before: min(FAR, c + PROT_COST) turned them into no value)
+	{
+		const L = ascii(box(['........x....', '........x....', 'e...S...x...T', '#############']));
+		const route = seqOf([2, 60], [4, 200]);
+		const ev = C.evaluate(L, route);
+		const on = R.reachField(L), off = R.reachField(L, { protOrder: false });
+		const sim = new E.EESim(L); sim.reset();
+		const c1 = R.costAt(on, sim), c0 = R.costAt(off, sim);
+		let same = true, fb = 0;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < on[k].length; i++) { if ((on[k][i] === R.CUT) !== (off[k][i] === R.CUT)) same = false; if (on[k][i] !== R.CUT && on[k][i] >= R.PROT_COST) fb++; }
+		const a = walk(L, on, route);
+		check('physics mode with protection: the unprotected ball\'s way first (the start counts the detour to the protection), the -1 set unchanged, the route through the spikes finite',
+			on.mode === 'physics' && !!ev && ev.deaths === 0 && on.prot.order && on.prot.order.fallback > 0 && off.prot.order === null && c1 > c0 && same && a.cut === 0 && fb === on.prot.order.fallback,
+			`start ${fmt(c1)} vs ${fmt(c0)} tiles (protOrder: false); ${ev ? `${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; order ${JSON.stringify(on.prot.order)}; ${fb} states on the fallback; route ${a.n} states, cut ${a.cut}`);
+		const T = [...L.fg].indexOf(121), g = [{ tile: T, cost: 11500 }];
+		const on2 = R.reachField(L, { goals: g }), off2 = R.reachField(L, { goals: g, protOrder: false });
+		let turned = 0, fin = 0, mx = 0;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < on2[k].length; i++) if (off2[k][i] < R.FAR) { fin++; if (on2[k][i] >= R.FAR) turned++; if (on2[k][i] > mx) mx = on2[k][i]; }
+		check('... to goals priced high: the fallback stays a value (at most FAR - 1), no finite cost becomes FAR',
+			fin > 0 && turned === 0 && mx <= R.FAR - 1 && on2.prot.order && on2.prot.order.fallback > 0, `${fin} finite states, ${turned} turned FAR, the largest ${mx} (FAR ${R.FAR})`);
+	}
 	// killing tiles no protected ball reaches stay deadly: the protection effect behind the trophy's wall, a spike pit the start
 	// falls into: cut off (before: any protection tile in the level made every spike air, and the pit finite)
 	{

@@ -620,7 +620,11 @@ function buildPhysics(B, opts) {
 	for (const e of fr.edges) succ[Math.floor(e / S)].add(e % S);
 	const comps = sccs(S, fr.layers, succ);
 	const fields = new Array(S).fill(null), goalsOf = new Array(S).fill(null), copies = new Array(S).fill(null);
-	const rfOpts = { oneWayEntry: true, portalForced: true };
+	// (protOrder: false: the layers model protection themselves (the `prot` feature: killers per layer), and a body's
+	// physics-mode protection order (reach.js: the unprotected ball's way first, the protected cost + PROT_COST behind it)
+	// compounded through the layer goals, + PROT_COST a pass, up to FAR = no value: Infinity Pain's steer had no value on
+	// 34,296 of its known route's 38,146 ticks (breaker-v2's review blocker A); the bodies are main's again)
+	const rfOpts = { oneWayEntry: true, portalForced: true, protOrder: false };
 	const kappa = A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	const solve = (s) => {
@@ -737,10 +741,10 @@ function fullCoinT(A) {
  *  coin out of reach from the start and from every other coin (a portal chain the model misreads: the plan would have
  *  no value at all); then without them, as main's legs were */
 function legFieldOf(lv, fg, q, coins, start) {
-	const f = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
+	const f = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, protOrder: false });
 	if (arriveCost(f, start) < CUT) return f;
 	for (const c of coins) if (c !== q && arriveCost(f, c) < CUT) return f;
-	const g = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+	const g = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, protOrder: false });
 	g.unforced = true;
 	return g;
 }

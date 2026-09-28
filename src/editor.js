@@ -1381,14 +1381,19 @@ function gateRoom(inputs) {
 	} catch (e) { return null; }
 }
 // Sealed starts (the user, Octorage: "it shouldn't get stuck on this stupid, obviously impossible wall for 5 min"; "it
-// should instantly know it leads nowhere"): a breaker run that ran out of situations at the ladder's finest grain with
-// nothing of its own (no gate, no attempt nearer, no new room) has tried every situation its cells tell apart from that
-// start: its chain's next step from its own nearest attempt (inside the same pocket) and every later start in the same
-// place and room get the same verdict. So the place (the room key and the 4 x 4 tile block of the start's ball) is
-// sealed for the rest of the search: the chain ends there, and breakStarts skips candidates that end in a sealed place.
-// Evidence at the breaker's own grains, not a proof (like its ladder's verdict). `b.breakSeal === false`: off.
-const SEAL_BLOCK = 4;
-/** a start's place (room key + SEAL_BLOCK tile block of the ball after inputs), or null */
+// should instantly know it leads nowhere"): a breaker start whose runs ran out of situations at the ladder's finest grain
+// with nothing of their own (no gate, no attempt nearer, no new room, at ANY grain from that start) ends its chain there
+// (no step from the last run's own nearest attempt, inside the same pocket), and the round's later starting points in
+// the same place (the room key, the ball's tile and its speed in 1 / SEAL_V px/tick buckets) are skipped. Evidence at
+// the breaker's own grains, NOT a proof (merged cells: another state standing for a cell can pass where these did not;
+// a chain step from the run's own nearest attempt can still find a way the exhausted run missed), so it is conservative
+// (breaker-v2's review blocker B): only a run that searched the WHOLE level (no --region box: tables of 2^28 cells or
+// less keep children inside a box of BREAK_REGION tiles, so "out of situations" there is only "closed in that box") and
+// kept every situation of every layer (`overflow` 0 in explore's done event, the rule of every move's own verdict);
+// the skip lasts for the round only (the next round's starts are fresh); and it is OPT-IN: `b.breakSeal === true` /
+// `EEAT_BREAK_SEAL=1` (its A/B sealed 2 starts in 7 pairs, both on Infinity Pain, none on the levels it was meant for).
+const SEAL_V = 2;
+/** a start's place (room key, the ball's tile and its speed in 1 / SEAL_V px/tick buckets after inputs), or null */
 function sealKeyOf(inputs) {
 	try {
 		const R = roomsOfSearch();
@@ -1397,11 +1402,13 @@ function sealKeyOf(inputs) {
 		sim.reset();
 		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
 		if (sim.is_dead) return null;
-		return `${R.RM.key(sim)}@${Math.trunc(sim.px + 8) >> 6},${Math.trunc(sim.py + 8) >> 6}`;
+		return `${R.RM.key(sim)}@${Math.trunc(sim.px + 8) >> 4},${Math.trunc(sim.py + 8) >> 4}|${Math.round(sim.speed_x * SEAL_V)},${Math.round(sim.speed_y * SEAL_V)}`;
 	} catch (e) { return null; }
 }
-/** a breaker run's end seals its start: out of situations (how) at the finest grain (last), no gate hit, nothing of its own */
-const breakSealed = (how, last, hit, own) => how === 'exhausted' && !!last && !hit && !own;
+/** a breaker run's end seals its start: out of situations (how) at the finest grain (last), no gate hit, nothing of its own
+ *  over every grain from that start (own), the whole level searched (region '': no box) and no situation cut from a full
+ *  layer (overflow exactly 0; null = the tool does not say: no seal) */
+const breakSealed = (how, last, hit, own, region, overflow) => how === 'exhausted' && !!last && !hit && !own && !region && overflow === 0;
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1439,9 +1446,6 @@ function breakStarts() {
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen.has(key) || brk.tried.has(key)) return;
 		seen.add(key);
-		// (a start in a sealed place: skipped, counted for the state)
-		const place = cur.opts.breakSeal && brk.sealed.size ? sealKeyOf(pre) : null;
-		if (place && brk.sealed.has(place)) { brk.sealSkips = (brk.sealSkips || 0) + 1; if (S.breaker) S.breaker.sealSkips = brk.sealSkips; return; }
 		out.push({ inputs: pre, what, dist, key, room, coins: prog ? (coins !== undefined ? coins : coinsOf(pre)) : 0, n: out.length });
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
@@ -1504,11 +1508,12 @@ function breakLaunch(n) {
 	while (!R.chain && R.i < R.starts.length) {
 		const st = R.starts[R.i++];
 		brk.tried.add(st.key);
-		// (a starting point in a place a run of this round sealed: the next one)
-		if (cur.opts.breakSeal && brk.sealed.size) { const place = sealKeyOf(st.inputs); if (place && brk.sealed.has(place)) { brk.sealSkips = (brk.sealSkips || 0) + 1; if (S.breaker) S.breaker.sealSkips = brk.sealSkips; continue; } }
+		// (a starting point in a place a run of THIS round sealed: the next one; the skip lasts for the round only)
+		if (cur.opts.breakSeal && R.sealedAt && R.sealedAt.size) { const place = sealKeyOf(st.inputs); if (place && R.sealedAt.has(place)) { brk.sealSkips = (brk.sealSkips || 0) + 1; if (S.breaker) S.breaker.sealSkips = brk.sealSkips; continue; } }
 		const src = st.room !== undefined ? sources.get(st.room) : null;
 		if (src) { src.brk = (src.brk || 0) + 1; publishSources(); }
-		R.chain = { inputs: st.inputs, step: 1, grain: 0, what: st.what };
+		// (own0: the round's own progress when the chain's start was taken: the seal asks for nothing of its own at any grain)
+		R.chain = { inputs: st.inputs, step: 1, grain: 0, what: st.what, own0: R.own || 0 };
 	}
 	const roundLeft = breakRoundLeft(R, Date.now(), cur.opts.breakRound, cur.opts.breakFrontNew, cur.opts.breakIdle), left = S.seconds - searchClock(Date.now());
 	if (!R.chain || S.result || roundLeft < 3 || left < 3) return breakEnd(n);
@@ -1542,7 +1547,7 @@ function breakLaunch(n) {
 	return true;
 }
 /** a breaker run ended (how: its end): finer cells from the same start, the chain's next step, or the next starting point */
-function breakAfter(n, how) {
+function breakAfter(n, how, overflow) {
 	const V = S.strategies[n], R = brk && brk.round;
 	if (!R) return breakEnd(n);
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
@@ -1573,21 +1578,23 @@ function breakAfter(n, how) {
 			if (fresh || !cur.opts.breakFrontNew) R.clock = Date.now();
 			if (S.breaker && S.breaker.round) Object.assign(S.breaker.round, { gates: (S.breaker.round.gates || 0) + 1, newGates: (S.breaker.round.newGates || 0) + (fresh ? 1 : 0) });
 		}
-		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
+		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1, own0: R.own || 0 } : null;
 	} else if (how === 'exhausted' && ch.grain + 1 < breakGrains().length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
-	else if (cur.opts.breakSeal && breakSealed(how, true, hit, (R.own || 0) > (R.own0 || 0))) {
-		// (every situation from this start tried at the finest grain, nothing of its own: the place is sealed, the chain ends)
+	else if (cur.opts.breakSeal && breakSealed(how, true, hit, (R.own || 0) > (ch.own0 || 0), V.brk ? V.brk.region : 'unknown', overflow)) {
+		// (every situation from this start tried at the finest grain over the whole level with no layer cut, nothing of its
+		// own at any grain: the place is sealed for this round, the chain ends)
 		const place = sealKeyOf(ch.inputs);
-		if (place) brk.sealed.add(place);
+		if (place) (R.sealedAt || (R.sealedAt = new Set())).add(place);
 		R.sealed = (R.sealed || 0) + 1;
-		if (S.breaker) { S.breaker.sealed = brk.sealed.size; if (S.breaker.round) S.breaker.round.sealed = R.sealed; }
-		note(`${V.label}: round ${brk.rounds}: every situation from tick ${ch.inputs.length} of ${ch.what} tried at every grain, nothing nearer, no new room: that place is sealed (${brk.sealed.size} so far); the next starting point`);
+		brk.sealCount = (brk.sealCount || 0) + 1;
+		if (S.breaker) { S.breaker.sealed = brk.sealCount; if (S.breaker.round) S.breaker.round.sealed = R.sealed; }
+		note(`${V.label}: round ${brk.rounds}: every situation from tick ${ch.inputs.length} of ${ch.what} tried at every grain over the whole level (no layer cut), nothing nearer, no new room: that place is sealed for this round (${brk.sealCount} so far); the next starting point`);
 		if (b) seedCpu(b.inputs);
 		R.chain = null;
 	}
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
 		// its nearest attempt went on: the next step from 60 ticks short of it (a fresh table)
-		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what };
+		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what, own0: R.own || 0 };
 		seedCpu(b.inputs);
 	} else {
 		if (b) seedCpu(b.inputs);
@@ -1946,8 +1953,8 @@ function start(b, gpu, test) {
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false, breakFrontNew: b.breakFrontNew !== false,
 		breakSlice: b.breakSlice !== false, breakBursts: b.breakBursts !== false,
-		// (sealed starts: `b.breakSeal === false` off)
-		breakSeal: b.breakSeal !== false && !(test && test.breakSeal === false),
+		// (sealed starts: OPT-IN, `b.breakSeal === true` / EEAT_BREAK_SEAL=1 (evidence, not a proof: see SEAL_V))
+		breakSeal: (b.breakSeal === true || !!(test && test.breakSeal === true) || process.env.EEAT_BREAK_SEAL === '1') && process.env.EEAT_BREAK_SEAL !== '0',
 		// (the round idle end: opt-in, night 2 cycle 3 measured it cutting rounds whose runs still waited for GPU memory)
 		breakIdle: b.breakIdle === true || (test && test.breakIdleS) || process.env.EEAT_BREAK_IDLE === "1" ? (test && test.breakIdleS ? test.breakIdleS : BREAK_IDLE_S) : 0,
 		breakDuty: b.breakDuty !== false && !(test && test.breakDuty === false) && process.env.EEAT_BREAK_DUTY !== "0",
@@ -1972,7 +1979,7 @@ function start(b, gpu, test) {
 	// (the routes of another class than the best's: goexplore.js's class workers, "result" kind "class")
 	S.classes = [];
 	classInputs.clear();
-	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), gateRooms: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0, sealed: new Set() };
+	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), gateRooms: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0, sealCount: 0 };
 	S.breaker = which.includes('breaker') ? { rounds: 0, round: null, last: null, seeds: 0 } : null;
 	// (the precision stage's stall clock; test.precWait: its first wait in s)
 	prec = { mark: Infinity, at: Date.now(), wait: test && test.precWait ? test.precWait : PREC_WAIT_S, wait0: test && test.precWait ? test.precWait : PREC_WAIT_S, runs: 0 };
@@ -2875,7 +2882,7 @@ function launch(n) {
 				}
 				// ("the prefix dies", out of GPU memory and the like: the next starting point, not an error of the search)
 				if (V.error) { note(`${V.label}: ${V.error}; the next starting point`); V.error = null; if (brk && brk.round) brk.round.chain = null; }
-				if (breakAfter(n, how)) { save(); return; }
+				if (breakAfter(n, how, overflow)) { save(); return; }
 			} else if (brk && brk.round) breakEnd(n);   // (a stop, a route, a failed GPU: the round is over)
 		}
 		if (V.state === 'running' || V.state === 'starting') {

@@ -62,6 +62,12 @@ const DEATH_COST = 8192;
 // walk mode with protection: the protected walk where no unprotected way is (the tiles a protected ball can be in only):
 // behind every real way too, like a death (see reachField)
 const PROT_COST = DEATH_COST;
+// the protection fallback's cost (protected cost c + PROT_COST): at most FAR - 1, the largest cost the steer lookups
+// (steer.js layerFifths, native/beam.h steerFifths: c >= CUT - 1 = FAR is "no value") still read as a value; a cost that
+// was FAR already stays FAR. (A field built on goals priced by another field compounds: + PROT_COST a pass, and the goal
+// costs alone saturate it at FAR; steer.js's layer bodies, which model protection as a layer, build with protOrder: false:
+// breaker-v2's review, Infinity Pain's steer without a value on 34,296 of its known route's 38,146 ticks)
+const protFall = (c) => (c >= FAR ? c : Math.min(FAR - 1, c + PROT_COST));
 // tile classes
 const WALL = 0, DEADLY = 1, NORM = 2, DOTS = 3, CLIMB = 4, WATER = 5, MUD = 6, UP = 7, BUP = 8, BDOWN = 9;
 const isField = (c) => c >= DOTS && c <= UP;
@@ -366,7 +372,7 @@ function reachField(level, opts) {
 		walkOut = new Uint16Array(N).fill(CUT);
 		for (let i = 0; i < N; i++) {
 			if (walkU[i] !== CUT) walkOut[i] = walkU[i];
-			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
+			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = protFall(walk[i]); protFallback++; }
 		}
 	}
 	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
@@ -670,7 +676,7 @@ function reachField(level, opts) {
 					const k = sP * nl + li, c = A[k];
 					if (c === CUT) continue;
 					const u = sU >= 0 ? B[sU * nl + li] : CUT;
-					const v = u !== CUT ? u : Math.min(FAR, c + PROT_COST);
+					const v = u !== CUT ? u : protFall(c);
 					A[k] = v;
 					if (u === CUT) fb++; else if (v < FAR && v > mf) mf = v;   // (the order's scale: the real ways, as prioShiftOf)
 				}

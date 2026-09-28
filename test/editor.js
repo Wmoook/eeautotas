@@ -867,36 +867,52 @@ async function passesSection() {
 		check('the wall breaker: a run that fails ("the prefix dies") is not an error of the search: the round goes on from its next starting point, whose finish is the route',
 			pfs.join() === '450:0,200:0' && str.result && str.result.strategy === 'past the wall', `prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}`);
 	}
-	// sealed starts (the user, Octorage: "it shouldn't get stuck on this stupid, obviously impossible wall for 5 min"): a
-	// start whose runs run out of situations at every grain with nothing of their own (their nearest attempt 40 tiles out,
-	// the search's 30) is sealed: its chain does not go on from its own nearest attempt (without the seal: 900 - 60 = 840),
-	// and the round's next starting point (the nearest attempt 400 back: holding right, the ball stands at the same wall,
-	// the same place) is skipped: the round is over after those 3 runs
-	for (const seal of [true, false]) {
-		const scB = path.join(HOME, `brk3${seal}.json`), logB = path.join(HOME, `brk3${seal}.log`);
-		fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 200, hold: 30000, closest: { dist: 30, tick: 600, ch: '4' } }] },
-			relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
-			breaker: [0, 1, 2].map(() => ({ end: 'exhausted', layers: 10, overflow: 0, wait: 150, closest: { dist: 40, tick: 900, ch: '4' } }))
-				.concat([{ end: 'finish', idle: 0, layers: 3, wait: 300 }]), beam: null }));
-		const t0s = Date.now();
-		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1, breakSeal: seal }, { available: true },
-			{ tool: [process.execPath, fake, scB], cpu: false, salts: false, relay: true, breaker: true, breakWait: [1], breakCells: 26 });
-		let str = ED.state();
-		while (str.running && !str.result && !(str.breaker && (str.breaker.done || []).length) && Date.now() - t0s < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }
-		const done = str.breaker && (str.breaker.done || [])[0];
-		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
-		const pfs = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.includes('--cap=2097152'))
-			.map((a) => (a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4));
-		const logged = (str.log || []).join('\n');
-		check(seal ? 'the wall breaker: a start whose runs ran out of situations at every grain with nothing of their own is sealed: no chain step from its own nearest attempt, a starting point in the same place skipped, the round over at once'
-			: "the wall breaker without the seal (breakSeal: false): the chain goes on from that run's own nearest attempt (840 ticks)",
-			seal ? pfs.join() === '450:4,450:4,450:4' && /that place is sealed \(1 so far\)/.test(logged) && !!done && done.runs === 3 && !!str.breaker && str.breaker.sealed === 1 && str.breaker.sealSkips === 1
-				: pfs.slice(0, 4).join() === '450:4,450:4,450:4,840:4' && !/sealed/.test(logged),
-			`prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; ${Date.now() - t0s} ms; breaker ${JSON.stringify(str.breaker && { sealed: str.breaker.sealed, sealSkips: str.breaker.sealSkips, done })}`);
-		if (ED.state().running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+	// sealed starts (the user, Octorage: "it shouldn't get stuck on this stupid, obviously impossible wall for 5 min";
+	// OPT-IN since breaker-v2's review, `breakSeal: true`): a start whose runs run out of situations at every grain with
+	// nothing of their own (their nearest attempt 40 tiles out, the search's 30), over the whole level (a 2^29 table: no
+	// --region box) and with no layer cut (overflow 0), is sealed for the round: its chain does not go on from its own
+	// nearest attempt (without the seal: 900 - 60 = 840), and the round's next starting point (the nearest attempt 400
+	// back: holding right, the ball stands at the same wall: the same tile and speed) is skipped: the round is over after
+	// those 3 runs. Not sealed (the chain goes on, 840): the default (off); a 2^26 table (its runs keep to a box of
+	// BREAK_REGION tiles: "out of situations" there is only "closed in the box"); a layer cut (overflow 5); own progress at
+	// the coarsest grain (the first run nearer, 20 tiles: before, only the last grain's run was asked, and it sealed)
+	{
+		const ex = (dist, overflow) => ({ end: 'exhausted', layers: 10, overflow, wait: 150, closest: { dist, tick: 900, ch: '4' } });
+		const SEAL_CASES = [
+			['on', { breakSeal: true }, 29, [ex(40, 0), ex(40, 0), ex(40, 0)], true],
+			['the default (off)', {}, 29, [ex(40, 0), ex(40, 0), ex(40, 0)], false],
+			['on, a 2^26 table (a --region box)', { breakSeal: true }, 26, [ex(40, 0), ex(40, 0), ex(40, 0)], false],
+			['on, a layer cut (overflow 5)', { breakSeal: true }, 29, [ex(40, 0), ex(40, 0), ex(40, 5)], false],
+			// (no room target here: runs aimed at the trophy, whose nearer attempts are the search's progress)
+			['on, own progress at the coarsest grain', { breakSeal: true, roomGate: false }, 29, [ex(20, 0), ex(40, 0), ex(40, 0)], false]];
+		for (const [name, flags, cellLog, runs, sealed] of SEAL_CASES) {
+			const tag = name.replace(/\W+/g, '_');
+			const scB = path.join(HOME, `brk3_${tag}.json`), logB = path.join(HOME, `brk3_${tag}.log`);
+			fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 200, hold: 30000, closest: { dist: 30, tick: 600, ch: '4' } }] },
+				relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
+				breaker: runs.concat([{ end: 'finish', idle: 0, layers: 3, wait: 300 }]), beam: null }));
+			const t0s = Date.now();
+			ED.start(Object.assign({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, flags), { available: true },
+				{ tool: [process.execPath, fake, scB], cpu: false, salts: false, relay: true, breaker: true, breakWait: [1], breakCells: cellLog });
+			let str = ED.state();
+			while (str.running && !str.result && !(str.breaker && (str.breaker.done || []).length) && Date.now() - t0s < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }
+			const done = str.breaker && (str.breaker.done || [])[0];
+			if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+			const pfs = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.includes('--cap=2097152'))
+				.map((a) => (a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4));
+			const logged = (str.log || []).join('\n');
+			check(sealed ? `the wall breaker's seal (${name}): a start whose runs ran out of situations at every grain over the whole level with no layer cut and nothing of their own is sealed for the round: no chain step from its own nearest attempt, a starting point in the same place skipped, the round over at once`
+				: `the wall breaker's seal, not sealed (${name}): the chain goes on from that run's own nearest attempt (840 ticks)`,
+				sealed ? pfs.join() === '450:4,450:4,450:4' && /that place is sealed for this round \(1 so far\)/.test(logged) && !!done && done.runs === 3 && !!str.breaker && str.breaker.sealed === 1 && str.breaker.sealSkips === 1
+					: pfs.slice(0, 4).join() === '450:4,450:4,450:4,840:4' && !/sealed/.test(logged),
+				`prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; ${Date.now() - t0s} ms; breaker ${JSON.stringify(str.breaker && { sealed: str.breaker.sealed, sealSkips: str.breaker.sealSkips, done })}`);
+			if (ED.state().running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		}
 	}
-	check("the wall breaker's seal rule: out of situations at the finest grain, no gate, nothing of its own; not a table that filled or ran its time, not after a gate or own progress",
-		ED.breakSealed('exhausted', true, null, false) && !ED.breakSealed('exhausted', true, null, true) && !ED.breakSealed('exhausted', true, 'x', false) && !ED.breakSealed('time', true, null, false) && !ED.breakSealed('full', true, null, false),
+	check("the wall breaker's seal rule: out of situations at the finest grain over the whole level (no box) with no layer cut, no gate, nothing of its own; not a table that filled or ran its time, not after a gate or own progress, not in a box, not with a cut layer or an unknown overflow",
+		ED.breakSealed('exhausted', true, null, false, '', 0) && !ED.breakSealed('exhausted', true, null, true, '', 0) && !ED.breakSealed('exhausted', true, 'x', false, '', 0) &&
+		!ED.breakSealed('time', true, null, false, '', 0) && !ED.breakSealed('full', true, null, false, '', 0) && !ED.breakSealed('exhausted', true, null, false, '1,2,81,82', 0) &&
+		!ED.breakSealed('exhausted', true, null, false, '', 3) && !ED.breakSealed('exhausted', true, null, false, '', null) && !ED.breakSealed('exhausted', true, null, false, '', undefined),
 		'breakSealed');
 	// the breaker's GPU slices (breakSlice): with the GPU random runs next to it, a round's runs (each 0.6 s to its ready
 	// event, then 1.5 s) hold the GPU only from their ready events: while a run starts and in the slice after it (1/4 of its

@@ -5,7 +5,9 @@
 //              does not), with the key (switch, coins) taken it is the reach field's again; the RCH4 file round trip
 //              (readSteerFile gives the same numbers); another level's file is refused by the native tool; the build's
 //              byte budget: one body's bytes leave the key out (info.over); the forced portals' lastPortal chains (a
-//              portal next to an exit walked: reach.js unforceChains), with --jobs Good Egg along OC's run
+//              portal next to an exit walked: reach.js unforceChains), with --jobs Good Egg along OC's run; the layer
+//              bodies and the coin legs built with reach.js protOrder: false, with --jobs Infinity Pain along its known
+//              route (the steer has a value at every state: the protection order's fallback had saturated its bodies)
 //   B agree    the JS lookup and the native tool's (eegpu steertest: the host, and with --gpu the GPU) along random input
 //              runs in the rooms and, with --jobs=<dir> (default src/jobs), along the big jobs' best runs: the same fifths
 //              and the beam's score to the bit (skipped without a native tool that reads RCH4)
@@ -120,6 +122,52 @@ function sectionA() {
 		check('another level\'s steer file is refused by the native tool', /another level/.test(out), out.trim().slice(0, 120));
 	}
 	forcedChains();
+	protLayers();
+}
+/** the layer bodies and the coin legs build without reach.js's protection order (protOrder: false): the layers model
+ *  protection themselves, and the order's fallback (the protected cost + PROT_COST) compounded through the layer goals up
+ *  to FAR, which the lookups read as no value (breaker-v2's review blocker A: Infinity Pain's steer had no value on 34,296
+ *  of its known route's 38,146 ticks). A key room with the protection effect and a spike: every reach field of the build
+ *  has protOrder: false. With --jobs (default src/jobs), Infinity Pain along its known route (the job's best run, read at
+ *  run time): the steer has a value at every state (at most 1% without) */
+function protLayers() {
+	const W = 40, H = 5, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9], [34, y, 23]);
+	cells.push([2, 3, 6], [10, 3, 420, 1], [17, 3, 255], [27, 3, 361, 1], [36, 3, 121]);
+	const L = levelOf(ED.eelvlOf({ name: 'p', width: W, height: H, cells }));
+	const calls = [];
+	const orig = R.reachField;
+	R.reachField = (lv, o) => { calls.push(o ? o.protOrder : undefined); return orig(lv, o); };
+	let st;
+	try { st = SF.buildSteer(L); } finally { R.reachField = orig; }
+	const prot = [...L.fg].includes(420);
+	check('the layer bodies and the coin legs build with protOrder: false (a key room with the protection effect)',
+		prot && calls.length > 0 && calls.every((v) => v === false) && Number.isFinite(SF.steerAt(st, (() => { const s = new E.EESim(L); s.reset(); return s; })())),
+		`${calls.length} reach fields, protOrder ${[...new Set(calls.map(String))].join(' / ')}`);
+	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
+	let ids = [];
+	try { ids = fs.readdirSync(jobs).filter((d) => /infinity-pain/.test(d) && fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'best.eetas'))); } catch (e) { /* no jobs */ }
+	// (the known route: the user's own TAS jobs (kiraninja) first, the shortest best run among them; the file's bytes are its ticks)
+	const size = (d) => fs.statSync(path.join(jobs, d, 'best.eetas')).size;
+	ids.sort((a, b) => (/kiraninja/.test(b) ? 1 : 0) - (/kiraninja/.test(a) ? 1 : 0) || size(a) - size(b) || (a < b ? -1 : 1));
+	if (!ids.length) { console.log(`  (skipped: no Infinity Pain job with a best run in ${jobs})`); return; }
+	const IP = levelOf(fs.readFileSync(path.join(jobs, ids[0], 'original.eelvl')));
+	const ms = C.readEetas(path.join(jobs, ids[0], 'best.eetas'));
+	const t0 = Date.now();
+	const si = SF.buildSteer(IP), s2 = new E.EESim(IP), in2 = new E.EEInput();
+	const ms0 = Date.now() - t0;
+	s2.reset();
+	let n = 0, nan = 0, fin = false;
+	for (let t = 0; t <= ms.length; t++) {
+		if (t > 0) { E.applyMask(in2, ms[t - 1]); s2.tick(in2); }
+		if (s2.has_silver_crown) { fin = true; break; }
+		if (s2.is_dead) continue;
+		n++;
+		if (Number.isNaN(SF.steerAt(si, s2))) nan++;
+	}
+	check(`Infinity Pain along its known route (${ids[0]}, best.eetas): the steer has a value almost everywhere (at most 1% without)`,
+		n > 1000 && nan <= n / 100, `${n} states${fin ? '' : ' (no finish)'}, ${nan} without a value; ${si.S} layers, build ${ms0} ms`);
 }
 
 /** the ordering fields' forced portals and a ball that a teleport put on a portal exit (the n2-int gate study's defect,
