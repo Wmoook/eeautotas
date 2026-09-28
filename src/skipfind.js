@@ -137,7 +137,32 @@ function prepare(level, masks, o = {}) {
 		physTick.set(physKey(sim), t);
 		if (t < n) { E.applyMask(inp, ms[t]); sim.tick(inp); }
 	}
-	return { level, masks: ms, n, ev, nc, cb, hashOf, W, Hh, X, Y, VX, VY, T, CX, H, seg, hashTick, physTick, snaps, ctx };
+	// other runs of the level (o.targets: masks; the job's earlier bests, other routes): a state equal to one of theirs is
+	// a join too (their rest from there), counted when that run's finish comes sooner than this one's
+	const targets = [];
+	for (const tm of o.targets || []) {
+		const te = C.evaluate(level, Uint8Array.from(tm));
+		if (!te) continue;
+		const tick = new Map();
+		sim.reset();
+		for (let t = 0; t <= te.ms.length; t++) { tick.set(hashOf(sim), t); if (t < te.ms.length) { E.applyMask(inp, te.ms[t]); sim.tick(inp); } }
+		targets.push({ ms: te.ms, n: te.ms.length, tick });
+	}
+	return { level, masks: ms, n, ev, nc, cb, hashOf, W, Hh, X, Y, VX, VY, T, CX, H, seg, hashTick, physTick, snaps, ctx, targets };
+}
+/** a join candidate's rest: the run's own from c.m, or another run's (c.ti) */
+const restOf = (info, c) => (c.ti !== undefined ? info.targets[c.ti].ms.subarray(c.m) : info.masks.subarray(c.m, info.n));
+/** a state (hash h, at our tick now) equal to another run's (o.targets): the best {ti, m, gain} (gain = this run's finish
+ *  tick - ours through that run's rest), or null */
+function targetHit(info, h, now, minGain) {
+	let best = null;
+	for (let ti = 0; ti < info.targets.length; ti++) {
+		const T = info.targets[ti], m = T.tick.get(h);
+		if (m === undefined) continue;
+		const gain = info.n - (now + T.n - m);
+		if (gain >= minGain && (!best || gain > best.gain)) best = { ti, m, gain };
+	}
+	return best;
 }
 /** the run's exact state after t ticks (into sim) */
 function stateAt(info, sim, t, inp) {
@@ -262,6 +287,7 @@ function bfs(info, start, t0, o) {
 	let cur = [start], curN = 1, nxtPool = [];
 	const st = { layers: 0, cells: 1, ticks: 0, skipJ: 0, dead: 0, out: 0, cut: 0, peak: 1, full: false, time: false };
 	const lastVis = o.lastVis;   // per tile the run's latest visit in the goal window (-1 none)
+	const nTargets = info.targets ? info.targets.length : 0;
 	// this layer's candidates: one slot per new cell, found through a per-layer open-addressing table (LA/LB keys, LS slot)
 	let slotSnap = [], slotPar = [], slotMsk = [], slotScore = [], slotTile = [], slotKa = [], slotKb = [], slotCid = [], slotPos = [];
 	let LCAP = 1 << 12, LMASK = LCAP - 1, LA = new Uint32Array(LCAP), LB = new Uint32Array(LCAP), LS = new Int32Array(LCAP);
@@ -286,10 +312,13 @@ function bfs(info, start, t0, o) {
 				const tx = Math.floor((sim.px + 8) / 16), ty = Math.floor((sim.py + 8) / 16);
 				if (tx < rx0 || tx > rx1 || ty < ry0 || ty > ry1) { st.out++; continue; }
 				const tile = ty * W + tx;
-				// exact rejoin: a state equal to the run's at a later tick (only where the run goes later: a cheap test first)
-				if (lastVis[tile] - t >= minGain) {
-					const mj = hashTick.get(hashOf(sim));
+				// exact rejoin: a state equal to the run's at a later tick (only where the run goes later: a cheap test first), or
+				// to another run's (o.targets) whose rest finishes sooner
+				if (lastVis[tile] - t >= minGain || nTargets) {
+					const hh = hashOf(sim);
+					const mj = hashTick.get(hh);
 					if (mj !== undefined && mj - t >= minGain) { rejoins.push({ d, par: i, mask: m, m: mj, gain: mj - t }); continue; }
+					if (nTargets) { const th = targetHit(info, hh, t, minGain); if (th) { rejoins.push({ d, par: i, mask: m, m: th.m, ti: th.ti, gain: th.gain }); continue; } }
 				}
 				const cid = ctx.of(sim);
 				cellKey(cid);
@@ -453,7 +482,7 @@ function join(info, s, P, hit, o) {
 		}
 	}
 	out.sort((a, b) => a.kind - b.kind || b.claim - a.claim);
-	return out.slice(0, o.maxCands).map((c) => ({ ms: concat([masks.subarray(0, s), P.subarray(0, c.e), c.seq, masks.subarray(c.m, n)]), kind: c.kind, claim: c.claim, how: c.how, edge: c.e + c.seq.length, m: c.m }));
+	return out.slice(0, o.maxCands).map((c) => ({ ms: concat([masks.subarray(0, s), P.subarray(0, c.e), c.seq, restOf(info, c)]), kind: c.kind, claim: c.claim, how: c.how, edge: c.e + c.seq.length, m: c.m }));
 }
 /**
  * One tail: from snapshot sn (our tick te), the run's own inputs from run tick r0, checked every tick for a state of the
@@ -486,7 +515,9 @@ function tail(info, sim, inp, sn, te, r0, o, played) {
 			const dd = Math.abs(sim.px - X[r]) + Math.abs(sim.py - Y[r]) + 3 * (Math.abs(sim.speed_x - VX[r]) + Math.abs(sim.speed_y - VY[r]));
 			if (dd < bestD && r - now >= o.minGain) { bestD = dd; bestK = len; bestR = r; bestNow = now; }
 		}
-		const m = hashTick.get(hashOf(sim));
+		const hh = hashOf(sim);
+		const m = hashTick.get(hh);
+		if (info.targets.length && (m === undefined || m - now < o.minGain)) { const th = targetHit(info, hh, now, o.minGain); if (th) return { seq: played.slice(0, len), m: th.m, ti: th.ti, kind: 0, claim: th.gain, how: `${len} ticks of the run's inputs from ${r0}, meets another run (target ${th.ti}) at ${th.m}` }; }
 		if (m !== undefined) {
 			if (m - now < o.minGain) return null;
 			return { seq: played.slice(0, len), m, kind: 0, claim: m - now, how: `${len} ticks of the run's inputs from ${r0}${anchors ? ` re-anchored ${anchors}x` : ''}, meets the run at ${m}` };
@@ -548,6 +579,15 @@ function track(info, sn, te, r0, o) {
 					seq[k] = m;
 					for (let e = k - 1, idx = i; e >= 0; e--) { seq[e] = layers[e].msk[idx]; idx = layers[e].par[idx]; }
 					return { seq, m: mj, kind: 0, claim: mj - now, how: `a ${k + 1}-tick tracking join along the run from ${r0}, meets the run at ${mj}` };
+				}
+				if (info.targets.length) {
+					const th = targetHit(info, h, now, o.minGain);
+					if (th) {
+						const seq = new Uint8Array(k + 1);
+						seq[k] = m;
+						for (let e = k - 1, idx = i; e >= 0; e--) { seq[e] = layers[e].msk[idx]; idx = layers[e].par[idx]; }
+						return { seq, m: th.m, ti: th.ti, kind: 0, claim: th.gain, how: `a ${k + 1}-tick tracking join along the run from ${r0}, meets another run (target ${th.ti}) at ${th.m}` };
+					}
 				}
 				// one state per fine cell (1 px, 1/8 px/tick, ground, jumps): the nearest; a beam of copies would collapse
 				const cell = Math.floor(sim.px) * 1e6 + Math.floor(sim.py) * 97 + Math.floor(sim.speed_x * 8) * 7919 + Math.floor(sim.speed_y * 8) * 104729 + (sim.on_ground ? 0.5 : 0) + sim.jump_count * 0.25;
@@ -614,7 +654,7 @@ function quickTails(info, s, layers, hits, o) {
 			const key = `${h.d},${h.idx},${c.claim}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
-			out.push({ ms: concat([info.masks.subarray(0, s), P, c.seq, info.masks.subarray(c.m, info.n)]), kind: c.kind, claim: c.claim,
+			out.push({ ms: concat([info.masks.subarray(0, s), P, c.seq, restOf(info, c)]), kind: c.kind, claim: c.claim,
 				how: `${KINDS[c.kind]} (path ${h.d} ticks to the lead at ${te} (the run there at ${h.j}), ${c.how})`, edge: h.d + c.seq.length, m: c.m });
 		}
 	}
@@ -694,7 +734,8 @@ function searchStart(info, s, pick, o) {
 	const direct = [];
 	for (const rj of r.rejoins) {
 		const P = concat([rj.d > 1 ? pathOf(r.layers, rj.d - 1, rj.par) : new Uint8Array(0), Uint8Array.of(rj.mask)]);
-		direct.push({ ms: concat([pre, P, info.masks.subarray(rj.m, info.n)]), kind: 0, claim: rj.gain, how: `exact rejoin in the search (${rj.d} ticks, meets the run at ${rj.m})`, edge: rj.d, m: rj.m });
+		const rest = rj.ti !== undefined ? info.targets[rj.ti].ms.subarray(rj.m) : info.masks.subarray(rj.m, info.n);
+		direct.push({ ms: concat([pre, P, rest]), kind: 0, claim: rj.gain, how: `exact rejoin in the search (${rj.d} ticks, meets ${rj.ti !== undefined ? `another run (target ${rj.ti})` : "the run"} at ${rj.m})`, edge: rj.d, m: rj.m });
 	}
 	for (const f of r.finishes) {
 		const P = concat([f.d > 1 ? pathOf(r.layers, f.d - 1, f.par) : new Uint8Array(0), Uint8Array.of(f.mask)]);
@@ -726,7 +767,7 @@ function searchStart(info, s, pick, o) {
 			for (let e = 0; e < P.length; e++) { E.applyMask(inp, P[e]); sj.tick(inp); }
 			const c = track(info, sj.snapshot(), s + h.d, h.j, Object.assign({}, p, { deadline: Math.min(dl, Date.now() + p.trackS * 1000) }));
 			tracks++;
-			if (c) tryCands([{ ms: concat([pre, P, c.seq, info.masks.subarray(c.m, info.n)]), kind: 0, claim: c.claim,
+			if (c) tryCands([{ ms: concat([pre, P, c.seq, restOf(info, c)]), kind: 0, claim: c.claim,
 				how: `exact rejoin (path ${h.d} ticks to the lead at ${s + h.d} (the run there at ${h.j}), ${c.how})`, edge: h.d + c.seq.length, m: c.m }]);
 		}
 	}
@@ -840,6 +881,8 @@ async function main() {
 	for (const k of Object.keys(DEFAULTS)) if (a[k] !== undefined) o[k] = Array.isArray(DEFAULTS[k]) ? String(a[k]).split(',').map(Number) : typeof DEFAULTS[k] === 'string' ? a[k] : +a[k];
 	for (const k of ['from', 'to']) if (a[k] !== undefined) o[k] = +a[k];
 	if (a.starts) o.starts = String(a.starts).split(',').map(Number);
+	// --targets=<run.eetas,...>: other runs of the level whose states are joins too (the grind: the job's earlier bests)
+	if (a.targets) o.targets = String(a.targets).split(',').filter((f) => f && fs.existsSync(f)).map((f) => Array.from(C.readEetas(f)));
 	const ev0 = C.evaluate(level, masks0);
 	if (!ev0) { console.log(JSON.stringify({ error: 'the run does not finish the level' })); process.exit(1); }
 	o.nocoins = a.nocoins === undefined || a.nocoins === 'auto' ? (C.coinsIrrelevant(levelFile, ev0.ms, ev0) ? 1 : 0) : +a.nocoins;
