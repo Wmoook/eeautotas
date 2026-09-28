@@ -675,12 +675,15 @@ function roomOf(L) {
 // USEFUL GAIN is its territory gain on the band: a room whose useful gain is 0 (the territory it opens is all off the
 // band: a viewing room behind a coin door, a sealed pocket) keeps its raw gain in `graw` and gets gain 0: no novelty
 // weight (head B), no discovery burst (head C), no "room" source at once and no gain for the editor's relay, wall
-// breaker and its stall clock. A death kept only as the earliest arrival (deathPays) must not respawn in a cul-de-sac.
-const CUL_A = 2000, CUL_B = 10, SL_MIN = 6, SL_F = 0.25;
+// breaker and its stall clock. A death kept only as the earliest arrival (deathPays) must not respawn in a cul-de-sac. A room
+// entered again at one of its cul-de-sac tiles (a run, an import, a seed: the clock's rooms, time doors and keys running
+// out, are entered wherever the ball is) gets its cul-de-sacs again with its entries as terminals (reentry, REENTRY_MAX).
+const CUL_A = 2000, CUL_B = 10, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
 /**
- * roomUseful(L) -> {of(sim, band) -> {cul, off, targets, walked}}: the useful territory of the room the live state is in,
- * from its tile (see USEFUL TERRITORY above): cul / off bitsets (a bit per tile; null when no tile is in one), off only
- * with band. The live state is restored exactly after the targets' tests.
+ * roomUseful(L) -> {of(sim, band, extra) -> {cul, off, targets, walked}}: the useful territory of the room the live state
+ * is in, from its tile (see USEFUL TERRITORY above): cul / off bitsets (a bit per tile; null when no tile is in one), off
+ * only with band; extra: more tiles the cul-de-sacs must connect like targets (the room's other entries). The live state is
+ * restored exactly after the targets' tests.
  */
 function roomUseful(L) {
 	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
@@ -736,7 +739,7 @@ function roomUseful(L) {
 		if (k < 8 + ne + ns) { const j = sp[k - 8 - ne]; return stamp[j] === gen ? j : -1; }
 		return -2;
 	};
-	const of = (sim, band) => {
+	const of = (sim, band, extra) => {
 		if (++gen > 2e9) { stamp = new Int32Array(N); gen = 1; }
 		prot = !!sim.is_invulnerable;
 		for (let k = 0; k < doors.length; k++) shut[k] = sim.is_tile_solid_now(doors[k] % W, (doors[k] / W) | 0) ? 1 : 0;
@@ -775,6 +778,9 @@ function roomUseful(L) {
 			if (v) { term[t] = 1; targets++; }
 		}
 		if (!restored) sim.restore(snap);
+		// (the room's other entries: terminals of the cul-de-sac test, not targets of the band)
+		const ext = [];
+		if (extra) for (const x of extra) if (x >= 0 && x < N && stamp[x] === gen && !term[x]) { term[x] = 1; ext.push(x); }
 		// the cul-de-sacs: the block-cut tree of the walk (undirected), rooted at the entry (an iterative Tarjan: a block
 		// closes when low[u] >= disc[p]; its terminals, its vertices' own and those of the blocks hanging at them, go up to p)
 		let cul = null, nCul = 0, time = 0, fs = 0, vs = 0;
@@ -806,6 +812,7 @@ function roomUseful(L) {
 				sub[p] += tb;
 			}
 		}
+		for (const x of ext) term[x] = 0;
 		if (!band) return { cul, off: null, targets, walked, nCul, nOff: 0 };
 		// the band: g(t) = min over the targets T of d(t, T) - dE(T) (+ OFF: every key >= 0), buckets over the reverse walk
 		let maxD = 0;
@@ -992,8 +999,11 @@ function roomFields(L, budget, opts = {}) {
 		culRooms--;
 		if (--e.n <= 0) { culs.delete(e.h); culBytes -= b.length + WALK_BYTES; }
 	};
-	return { enter, release, trophies: trophies.length, bytes: () => bytes + culBytes,
-		stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes, culBytes, culSets: culs.size, culDropped, zeroed }) };
+	// (a room entered again at one of its cul-de-sac tiles: its cul-de-sacs again from there, its entries as terminals)
+	const recul = (sim, extra) => { if (US === null) return null; const t0 = Date.now(), c = share(US.of(sim, false, extra).cul); ms += Date.now() - t0; reculs++; return c; };
+	let reculs = 0;
+	return { enter, recul, release, trophies: trophies.length, bytes: () => bytes + culBytes,
+		stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes, culBytes, culSets: culs.size, culDropped, zeroed, reculs }) };
 }
 
 /**
@@ -1474,6 +1484,21 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// culCells: counted)
 	let culPicks = 0, culCells = 0, dCul = 0;
 	const useOf = (room, t) => (room !== null && bitAt(room.cul, t) ? 2 : 0);
+	// (a run, an import or a seed entering a known room at one of its cul-de-sac tiles: the clock's rooms (time doors, keys
+	// running out) are entered wherever the ball is, and a cul-de-sac is one only as seen from the room's first entry: the
+	// room's cul-de-sacs again with its entries as terminals (at most REENTRY_MAX times a room), its cells' `u` with them)
+	const reentry = (r) => {
+		if (r.cul === null || fields === null) return;
+		const t = centreTile();
+		if (!bitAt(r.cul, t)) return;
+		if (r.ents === undefined) r.ents = [r.tile];
+		if (r.ents.length > REENTRY_MAX) return;
+		r.ents.push(t);
+		const nb = fields.recul(sim, r.ents);
+		fields.release(r.cul);
+		r.cul = nb;
+		for (const c of r.arr) { const u = useOf(r, c.tile); if (u !== c.u) { c.u = u; c.ver++; hpush(c); } }
+	};
 	// (--pickBox=x0,y0,x1,y1, observation only (test/useful.js): the picks and new cells with their tile in that box)
 	const PB = a.pickBox ? String(a.pickBox).split(',').map(Number) : null;
 	const inBox = PB === null ? () => false : (t) => { const x = t % W, y = (t / W) | 0; return x >= PB[0] && x <= PB[2] && y >= PB[1] && y <= PB[3]; };
@@ -2020,7 +2045,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			roomKey = RM.key(sim);
 			if (roomKey !== room.key) {
 				const r = rooms.get(roomKey);
-				if (r !== undefined) room = r;
+				if (r !== undefined) { room = r; reentry(r); }
 				else if (roomFor()) room = newRoom(roomKey, t, room.key);
 				else { full = true; needSweep = true; break; }
 			}
@@ -2132,7 +2157,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				roomKey = RM.key(sim);
 				if (roomKey !== room.key) {
 					const r = rooms.get(roomKey);
-					if (r !== undefined) room = r;
+					if (r !== undefined) { room = r; reentry(r); }
 					else if (roomFor()) room = newRoom(roomKey, t, room.key);
 					else { into = false; full = true; needSweep = true; }
 				}
@@ -2402,7 +2427,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						if (roomKey !== room.key) {
 							if (AV !== null && AV[centreTile()] === 2 && RM.byTrigger(room.cause, RM.cause(sim))) { avoided++; break; }
 							const r = rooms.get(roomKey);
-							if (r !== undefined) { if (report) edge(room, r); room = r; }
+							if (r !== undefined) { if (report) edge(room, r); room = r; reentry(r); }
 							else if (t < maxT && roomFor()) room = newRoom(roomKey, t, room.key);
 							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
@@ -3095,7 +3120,7 @@ async function main() {
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
-	const usefulNow = () => (a.cells === 'coarse' && a.useful !== 0 ? { useful: { culPicks: total('culPicks'), culCells: total('culCells'), zeroed: total('zeroed'), culSets: total('culSets'), culDropped: total('culDropped') } } : {});
+	const usefulNow = () => (a.cells === 'coarse' && a.useful !== 0 ? { useful: { culPicks: total('culPicks'), culCells: total('culCells'), zeroed: total('zeroed'), culSets: total('culSets'), culDropped: total('culDropped'), reculs: total('reculs') } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
 		samples.push([now, tk]);

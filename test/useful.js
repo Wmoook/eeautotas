@@ -83,6 +83,8 @@ function sectionUnits(L) {
 	check('the portal box by the trophy (V2): a cul-de-sac (a detour of a few steps from the hub: within the band\'s slack); the chute box (V1, D1 shut): not walked',
 		all(V2, r0.cul) && !boxTiles(V1).some((t) => GX.bitAt(r0.cul, t) || GX.bitAt(r0.off, t)),
 		`V2 cul ${boxTiles(V2).filter((t) => GX.bitAt(r0.cul, t)).length} / 8, off ${boxTiles(V2).filter((t) => GX.bitAt(r0.off, t)).length}; V1 bits ${boxTiles(V1).filter((t) => GX.bitAt(r0.cul, t) || GX.bitAt(r0.off, t)).length}`);
+	const rx = U.of(sim, false, [5 * LW + 1]);
+	check('a room entered again inside the portal box (an extra terminal): the box is no cul-de-sac then', !boxTiles(V2).some((t) => GX.bitAt(rx.cul, t)) && sim.stateHash() === key0);
 	const way = [[6, 12], [20, 12], [40, 12], [55, 11], [57, 9], [54, 6], [57, 3], [30, 2], [3, 2]];
 	check('the way (the hub, the shaft, the top corridor): no cul-de-sac, on the band', way.every(([x, y]) => !GX.bitAt(r0.cul, y * LW + x) && !GX.bitAt(r0.off, y * LW + x)),
 		way.filter(([x, y]) => GX.bitAt(r0.cul, y * LW + x) || GX.bitAt(r0.off, y * LW + x)).map((p) => p.join(',')).join(' ') || 'all');
