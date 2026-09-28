@@ -2,7 +2,7 @@
 // test/useful.js - the useful territory of goexplore.js (2026-09-28; the user on Forgotten Helix: "it keeps going into
 // the viewing rooms still ... the viewing room leads to nowhere!!!"; see goexplore.js USEFUL TERRITORY):
 //   units    roomUseful / roomFields on a hub level: two viewing boxes, one entered by a portal pair from the hub (a
-//            2-coin door, which the level's one coin never opens, between it and the trophy: the door-blind reach field
+//            purple switch door, whose switch the level lacks, between it and the trophy: the door-blind reach field
 //            puts it next to the trophy), one behind a 1-coin door at the end of a chute whose portal leads back to the
 //            spawn; the targets (the coin, the trophy), the cul-de-sacs and the band at the start and after the coin, the
 //            coin's room: raw territory gain > 0, gain 0 (all off the band); the live state restored exactly
@@ -44,9 +44,10 @@ const masksOf = (s) => Uint8Array.from(s, (ch) => (ch.charCodeAt(0) - 48) & 31);
 
 // The hub level (60 x 22): the spawn S and the coin o in the hub (rows 11-12); the trophy T at the top left, reached the
 // long way: the hub to the right, up the shaft's ledges (x 53-58), the top corridor to the left. V2 (x 1-4, rows 4-5)
-// under the trophy's floor behind a 2-coin door (2, 3): entered only by the portal Q1 in the hub's ceiling (10, 10),
-// left by its portal Q2 (3, 5) back to Q1 (Forgotten Helix's door-16 box: a portal pair from the hub, a coin door the
-// level's coins never open, next to the trophy by the door-blind reach field). V1 (x 27-31, rows 18-20) at the end of a
+// under the trophy's floor behind a purple switch door D2 (2, 3) that never opens (no switch in the level; a coin door
+// above the level's coins would be a wall to the reach field: reach.js neverOpenDoors): entered only by the portal Q1 in
+// the hub's ceiling (10, 10), left by its portal Q2 (3, 5) back to Q1 (Forgotten Helix's door-16 box: a portal pair from
+// the hub, a door the room cannot open, next to the trophy by the door-blind reach field). V1 (x 27-31, rows 18-20) at the end of a
 // chute (29, 13-16) under the hub behind a 1-coin door D1 (29, 17), its portal P (28, 20) sending the ball back to P'
 // by the spawn (3, 10), P' leading nowhere (the viewing room a coin opens, whose portal leads back to the hub).
 const LW = 60, LH = 22;
@@ -58,7 +59,7 @@ function hubLevel(file) {
 	for (const [x0, x1, y] of [[56, 58, 10], [53, 55, 7], [56, 58, 4]]) for (let x = x0; x <= x1; x++) g[y][x] = 9;
 	const extra = new Map();
 	const put = (x, y, ...args) => { g[y][x] = -1; extra.set(`${x},${y}`, [x, y, ...args]); };
-	put(1, 2, 121); put(2, 3, 43, 2); put(3, 5, 242, 0, 2, 1); put(10, 10, 242, 0, 1, 2);
+	put(1, 2, 121); put(2, 3, 184, 0); put(3, 5, 242, 0, 2, 1); put(10, 10, 242, 0, 1, 2);
 	put(29, 17, 43, 1); put(28, 20, 242, 0, 3, 4); put(3, 10, 242, 0, 4, 5); put(20, 12, 100); put(6, 12, 255);
 	const cells = [];
 	for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) if (g[y][x] === 9) cells.push([x, y, 9]);

@@ -12,6 +12,9 @@
 //            as moves off by default, the same search as --deaths=0 (the same routes after the same ticks)
 //   rules    goexplore.js deathMovesFor (levels with a checkpoint or 2+ spawns and something that kills), the editor's
 //            GPU tools get --deaths=1 there
+//   editor   the searches' reach file follows deaths as moves (the pit: the _dm file with the death edges with them, the
+//            death-free field without), the CPU search / GPU random runs' flag (none with them, --deaths=0 without), and
+//            goexplore.js's own auto agrees; in cpu: the room dead ends (roomDead) only with deaths as moves off
 //   gpu      (--gpu, a native build with a GPU) eegpu explore --deaths=1 finds the pit's route through its death (none
 //            without), eegpu roll through goexplore --gpu=1 likewise
 // usage: node test/deaths.js [--gpu]      Exit code 1 if any check fails. Writes only in a temp folder.
@@ -116,6 +119,38 @@ function sectionRules() {
 	void args;
 }
 
+/** the editor's side of the n2-int rule (main's deaths as moves + hx-int-1's dead ends): the searches' reach file and
+ *  the CPU search's flag follow start()'s deathMoves. With deaths as moves the file keeps the death edges (reachBase dm:
+ *  `_dm`) and goexplore.js gets no --deaths flag (its auto: the same deathMovesFor, so its field keeps them and no room dead
+ *  end is cut); without them the death-free field where it reaches the start, and --deaths=0 (goexplore.js builds the same
+ *  field and cuts the room dead ends). Both files of one level built side by side, each its own */
+async function sectionEditor() {
+	section('editor: the searches\' reach file and flags follow deaths as moves');
+	const pit = levelFile('pit_editor', PIT);
+	const buf = fs.readFileSync(pit.file);
+	const hash = 'pittest0deaths01';
+	const [on, off] = await Promise.all([ED.reachInfo(buf, hash, true), ED.reachInfo(buf, hash, false)]);
+	const flagsOf = (dm) => { const b = fs.readFileSync(`${ED.reachBase(hash, dm)}.bin`); return b.toString('latin1', 0, 4) === 'RCH3' ? b.readInt32LE(28) : -1; };
+	const fOn = flagsOf(true), fOff = flagsOf(false);
+	check('the pit: with deaths as moves the searches\' file keeps the death edges (its own _dm file), without them the death-free field (it reaches the start)',
+		ED.reachBase(hash, true).endsWith('_dm') && !ED.reachBase(hash, false).endsWith('_dm') && on.deathFree === false && on.deaths === true && (fOn & 1) === 1 &&
+		off.deathFree === true && (fOff & 1) === 0 && on.startCost === off.startCost && on.onlyDeath === off.onlyDeath,
+		`dm: deathFree ${on.deathFree}, file flags ${fOn}; plain: deathFree ${off.deathFree}, file flags ${fOff}; start ${on.startCost} / ${off.startCost}, onlyDeath ${on.onlyDeath} / ${off.onlyDeath}`);
+	const f = { eelvl: pit.file, bin: 'pit.bin', reach: 'pit.reach', steer: '', steerCpu: '', steerBeam: '' };
+	const q = { seconds: 10, depth: 0, tool: 'eegpu', pauseFile: 'p', work: 'w', pass: 0 };
+	const o = (deaths) => ({ deaths, workers: 1, seed: 1, cpuDepth: 1000, bursts: false, noWayUp: false, tool: 'eegpu', prune: true });
+	const gOn = ED.STRATEGIES.goexplore.args(f, o(true), q), gOff = ED.STRATEGIES.goexplore.args(f, o(false), q);
+	const rOn = ED.STRATEGIES.gorolls.args(f, o(true), q), rOff = ED.STRATEGIES.gorolls.args(f, o(false), q);
+	const has = (a, s) => a.includes(s);
+	check('the CPU search and the GPU random runs: no --deaths flag with deaths as moves (auto: deathMovesFor), --deaths=0 without; never the branch\'s field flag --deaths=1',
+		!gOn.some((s) => s.startsWith('--deaths')) && has(gOff, '--deaths=0') && !rOn.some((s) => s.startsWith('--deaths')) && has(rOff, '--deaths=0') && ![...gOff, ...rOff].includes('--deaths=1'),
+		`on ${gOn.filter((s) => s.startsWith('--deaths')).join(' ') || '-'} / ${rOn.filter((s) => s.startsWith('--deaths')).join(' ') || '-'}; off ${gOff.filter((s) => s.startsWith('--deaths')).join(' ')} / ${rOff.filter((s) => s.startsWith('--deaths')).join(' ')}`);
+	// goexplore.js's own decision for the same level (the editor's deathMoves = its auto): settle
+	const aOn = GX.settle(GX.parseArgs([pit.file]), pit.level), aOff = GX.settle(GX.parseArgs([pit.file, '--deaths=0']), pit.level);
+	check('goexplore.js settle: auto = deaths as moves on the pit (as the editor decides), --deaths=0 off', aOn.deathMoves === true && aOff.deathMoves === false && GX.deathMovesFor(pit.level) === true,
+		`auto ${aOn.deathMoves}, --deaths=0 ${aOff.deathMoves}`);
+}
+
 function sectionCpu() {
 	section('cpu: goexplore.js with deaths as moves');
 	const pit = levelFile('pit', PIT);
@@ -129,6 +164,13 @@ function sectionCpu() {
 		best ? `${rs.length} routes, the best ${best.ticks} ticks, ${ev ? ev.deaths : '?'} death(s); first after ${doneOf(on).first ? doneOf(on).first.simTicks : '-'} ticks` : 'none');
 	check('the dying states counted: most dropped, the paying ones kept (the earliest arrival at the checkpoint with the coin)',
 		d.seen > 0 && d.byNew + d.byCost >= 1 && d.dropped > 10 * (d.byNew + d.byCost) && d.cells >= 1, JSON.stringify(d));
+	// the dead ends (hx-int-1's roomDead and the death-free field) only where deaths are not moves: with them the reach field
+	// keeps its death edges and no room dead end is cut (the pocket at the pit's bottom is a dead end but for its death);
+	// with --deaths=0 both are on (the runs end at a death, so the pocket is a dead end for them)
+	const wOn = (doneOf(on).workers || [])[0] || {}, wOff = (doneOf(off).workers || [])[0] || {};
+	check('the room dead ends only where deaths are not moves: off with them (roomDead off, nothing cut, a finite start), on with --deaths=0 (roomDead on, deaths as moves off)',
+		wOn.roomDead === false && wOn.deadCut === 0 && st.startCost !== null && wOff.roomDead === true && (off.find((e) => e.ev === 'start') || {}).deathMoves === false,
+		`on: roomDead ${wOn.roomDead}, cut ${wOn.deadCut}, start cost ${st.startCost}; off: roomDead ${wOff.roomDead}, cut ${wOff.deadCut}, start cost ${(off.find((e) => e.ev === 'start') || {}).startCost}, end ${doneOf(off).end}`);
 	// a bound given from the start (--depth, a route of that length known): the sound lower bound with the death term
 	// (lbOf: DEATH_TICKS + the bound at the respawn target) keeps the routes through the death
 	const bnd = best ? best.ticks + 15 : 240;
@@ -193,9 +235,12 @@ function sectionGpu() {
 	check('the GPU random runs (eegpu roll): no route without deaths, one through the death with them', routesOf(g0).length === 0 && !!gev && gev.deaths === 1, gev ? `${gev.ms.length} ticks` : '-');
 }
 
-sectionJudge();
-sectionRules();
-sectionCpu();
-if (GPU) sectionGpu();
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exitCode = fail ? 1 : 0;
+(async () => {
+	sectionJudge();
+	sectionRules();
+	await sectionEditor();
+	sectionCpu();
+	if (GPU) sectionGpu();
+	console.log(`\n${pass} passed, ${fail} failed`);
+	process.exitCode = fail ? 1 : 0;
+})().catch((e) => { console.log('TEST ERROR', e); process.exitCode = 1; });
