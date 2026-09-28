@@ -36,6 +36,7 @@ const B = require('./blocks.js');
 const M = require('./minimap.js');
 const RF = require('./reach.js');
 const SF = require('./steer.js');
+const BU = require('./bursts.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
@@ -902,6 +903,12 @@ const BREAK_WAIT_S = [90, 180, 360], BREAK_TILES = 0.5, BREAK_STARTS = 8, BREAK_
 const BREAK_STEP_S = 20, BREAK_ROUND_S = 300, BREAK_CAP = 2097152, BREAK_MEM_F = 0.42, BREAK_REGION = 40, BREAK_REGION_LOG = 28;
 const BREAK_GRAINS = [{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16 }, { cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16 }, { cqx: 1, cqv: 32, qy: 1, qvy: 32 }];
 const BREAK_GRAIN_TEXT = ['4 px and 1/16', '2 px and 1/16', '1 px and 1/32'];
+// on a level with climbables or liquids (bursts.js slowYOf): the fine-y cells (4 px x 1 px, 1/16 px/tick) second: a climb
+// rises 1-2 px a tick and coarse cells drop its every tick (bursts.js FINE_Y: Wine Quest I's chain)
+const BREAK_GRAINS_Y = [BREAK_GRAINS[0], { cqx: 0.25, cqv: 16, qy: 1, qvy: 16 }, BREAK_GRAINS[1], BREAK_GRAINS[2]];
+const BREAK_GRAIN_TEXT_Y = [BREAK_GRAIN_TEXT[0], '4 px x 1 px and 1/16', BREAK_GRAIN_TEXT[1], BREAK_GRAIN_TEXT[2]];
+const breakGrains = () => (cur && cur.slowY ? BREAK_GRAINS_Y : BREAK_GRAINS);
+const breakGrainText = () => (cur && cur.slowY ? BREAK_GRAIN_TEXT_Y : BREAK_GRAIN_TEXT);
 // the GPU memory its table leaves free (explore --reserve, MB: BREAK_RESERVE_F of the GPU's, at least 1 GB): its table
 // and states fit the free memory less that, so on a shared GPU the other processes keep room (on the rented H100, shared
 // with 31-42 GB of other work, a 2^31 table left the relay's new processes no memory for a context)
@@ -1001,7 +1008,16 @@ function breakGate(inputs) {
 		const sim = new E.EESim(cur.level), inp = new E.EEInput();
 		sim.reset();
 		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
-		const g = SF.nextGate(G0.st, sim);
+		// (past the plan: the coin plan's count is reached but a whole round aimed at the trophy found nothing (breakEnd):
+		// the walk plan behind the count is blind to gravity (Wine Quest I: its plan passes the 5-coin door and a 16-row shaft,
+		// the level needs all 10 coins), so the untaken coin with the least leg is the gate)
+		let g = SF.nextGate(G0.st, sim);
+		if (!g && brk && brk.pastPlan && cur.opts.breakPast) {
+			// (the coins a whole round aimed at without entering one rest until every untaken coin has had its round)
+			g = SF.nextCoin(G0.st, sim, brk.coinSkip);
+			if (!g && brk.coinSkip && brk.coinSkip.size) { brk.coinSkip.clear(); g = SF.nextCoin(G0.st, sim); }
+			if (g && brk.round) (brk.round.coins || (brk.round.coins = new Set())).add(g.i);
+		}
 		const t = g ? G0.tiles.get(g.bit) : undefined;
 		if (t === undefined) return null;
 		// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
@@ -1109,15 +1125,16 @@ function breakLaunch(n) {
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
+	if (!ch.gate) R.trophyRuns = (R.trophyRuns || 0) + 1;
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	V.brk = { file, keep: ch.inputs.length, cells: breakGrains()[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, passes: (V.passes || 0) + 1,
-		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to the coin at (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${BREAK_GRAIN_TEXT[ch.grain]} px/tick, 2^${cellLog} of them` });
+		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to the coin at (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${breakGrainText()[ch.grain]} px/tick, 2^${cellLog} of them` });
 	kids[n] = launch(n);
 	return true;
 }
@@ -1129,6 +1146,7 @@ function breakAfter(n, how) {
 	const ch = R.chain, b = V.bestTry;
 	const hit = V.brk && V.brk.gateHit;
 	if (hit) {
+		R.gateHits = (R.gateHits || 0) + 1;
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
 		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
@@ -1137,7 +1155,7 @@ function breakAfter(n, how) {
 		// its last gate), and the next round starts from its last gate first: breakStarts)
 		if (cur.opts.breakFront) { R.clock = Date.now(); brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 }; }
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
-	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
+	} else if (how === 'exhausted' && ch.grain + 1 < breakGrains().length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
 		// its nearest attempt went on: the next step from 60 ticks short of it (a fresh table)
 		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what };
@@ -1156,6 +1174,10 @@ function breakEnd(n) {
 		brk.round = null;
 		if (R && cur) {
 			brk.level = R.progress.length ? 0 : Math.min(brk.level + 1, cur.opts.breakWait.length - 1);
+			// (a round aimed at the trophy (no gate: the coin plan's count held) that brought nothing: the next rounds aim at
+			// the untaken coins: breakGate)
+			if (!R.progress.length && R.trophyRuns > 0 && S.steer && S.steer.dp && !brk.pastPlan) { brk.pastPlan = true; note(`${V.label}: the coin plan's count holds but the trophy was not got nearer: the next rounds aim at the untaken coins`); }
+			if (!R.progress.length && R.coins && !R.gateHits) { if (!brk.coinSkip) brk.coinSkip = new Set(); for (const q of R.coins) brk.coinSkip.add(q); }
 			note(`${V.label}: round ${brk.rounds} over (${R.runs} run${R.runs === 1 ? '' : 's'}, ${Math.round((Date.now() - R.t0) / 1000)} s): ` +
 				`${R.progress.length ? `the search got on (${[...new Set(R.progress)].join(', ')})` : 'nothing nearer, no new room'}; the next after ${cur.opts.breakWait[brk.level]} s without progress`);
 			if (S.breaker) S.breaker.round = null;
@@ -1386,12 +1408,14 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
+	cur = { level: ins.level, buf, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
+		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
+		// (past the plan: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
+		breakPast: b.breakPast !== false && !(test && test.breakPast === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],

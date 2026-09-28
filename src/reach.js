@@ -251,6 +251,14 @@ function reachField(level, opts) {
 			for (const j of list) { if (!srcOf.has(j)) srcOf.set(j, []); srcOf.get(j).push(i); }
 		}
 	}
+	// (opts.portalForced, src/steer.js only, like oneWayEntry: a ball whose tick starts in a portal tile is teleported
+	// (eesim.js _portalTeleport), so a portal tile with exits is left only through them, never walked, jumped or flown
+	// through: a row of portals is a wall that sends the ball elsewhere. Not sound, so never in the RCH3 proof field: a
+	// ball a teleport put on a portal tile keeps lastPortal and moves on over portal tiles (the exits are left out here),
+	// and a move of more than 16 px a tick can cross a one-tile portal row between two tick starts. Without it the ordering
+	// fields send the searches through portal ceilings (Wine Quest I: the hub's portal rows, "190 tiles" from the trophy)
+	const forcedP = new Uint8Array(N);
+	if (opts.portalForced) for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
@@ -273,7 +281,7 @@ function reachField(level, opts) {
 
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
-	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF);
+	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
 	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths, goals, toGoals: goalF !== null, cls, walk, mismatches: 0, KLJ };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walk), labels: 0 });
 
@@ -521,7 +529,7 @@ function reachField(level, opts) {
 	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
 	else for (let i = 0; i < N; i++) if (trophy(i)) seeds.push([i, 0]);
 	const srcP = new Uint8Array(N);
-	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY ? 1 : 0;   // (move sources: the trophy ends the way)
+	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY && !forcedP[i] ? 1 : 0;   // (move sources: the trophy ends the way; a forced portal is left by its exits only)
 	const stopT = new Int16Array(N).fill(-1);
 	for (let i = 0; i < N; i++) if (isField(cls[i]) && cls[i] !== UP) stopT[i] = stopC(i);
 	const bounceT = new Int16Array(N * (KF + 1));
@@ -713,7 +721,7 @@ function modMinOf(level) {
 }
 /** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
  *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
-function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF) {
+function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP) {
 	const N = W * H, dist = new Uint16Array(N).fill(CUT);
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
@@ -737,7 +745,7 @@ function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF
 			const x = x2 - dx, y = y2 - dy;
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
 			const t = y * W + x;
-			if (!passable(t)) continue;
+			if (!passable(t) || (forcedP && forcedP[t])) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
 			relax(t, v + (dx && dy ? 7 : 5));
 		}
