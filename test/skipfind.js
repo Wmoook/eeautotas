@@ -10,11 +10,14 @@
 //   left on the upper floor to a wall it hits (an exact state), then on to the trophy; the skip = the jump up the step
 //   right at the start, joined back to the run exactly at that wall (a lead + a tail, or a rejoin in the search)
 //   - found from the run's early states, at least 100 ticks faster, judged
+//   an attempt (Find a route before any route: the same room's run cut before the finish): its end state reached sooner
+//   from one start (prepare's attempt mode, attemptJudge), and the lane (--lane=1, Find a route's "path skips"): the
+//   attempt on stdin -> a shortened attempt, the whole run as the best route -> a faster route
 // usage: node test/skipfind.js        Exit code 1 if any check fails.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 const E = require('../src/eesim.js');
 const EL = require('../src/eelvl.js');
 const ED = require('../src/editor.js');
@@ -87,6 +90,65 @@ console.log('\n== room 2: the loop again, the trophy far beyond the search (the 
 		v2.accept ? `-${v2.saved} (${lead.best.how})` : `${v2.reason} (hits ${lead.hits}, top ${JSON.stringify(lead.top)})`);
 }
 
+(async () => {
+// ---------------------------------------------------------------- an attempt (Find a route before any route)
+// the same room's run cut before the block: an ATTEMPT (it does not finish). The attempt mode's goal: a later point of
+// the attempt reached sooner (its end state, or the same physical state and room, in fewer ticks); a candidate that dies
+// or ends elsewhere is refused
+console.log('\n== an attempt: its later points reached sooner (prepare attempt mode, attemptJudge)');
+{
+	const W = 160, H = 8, cells = room(W, H);
+	cells.push([2, H - 2, 255], [W - 4, H - 2, 121], [22, H - 2, 9]);
+	const { file, level } = mkLevel('att', W, H, cells);
+	const full = C.evaluate(level, runOf([[4, 40], [2, 60], [4, 120], [5, 3], [4, 600]]));
+	const att = full.ms.slice(0, 300);
+	const info = SF.prepare(level, att, { attempt: true, nocoins: 0 });
+	check('an attempt that does not finish is prepared as one (its end: the state after its last input)', !!info && info.attempt && info.n === 300 && !!info.end, info && `${info.n} ticks, attempt ${info.attempt}`);
+	const r = SF.searchStart(info, 10, 'fast', small);
+	const v = r.best ? SF.attemptJudge(info, r.best.ms) : { accept: false };
+	check('one start (tick 10): the attempt\'s end state reached 50+ ticks sooner (attemptJudge accepts it, no route claimed)', !!r.best && v.accept && !v.route && v.saved >= 50 && !r.best.route,
+		r.best ? `-${r.best.saved} (${r.best.how})` : `no find (hits ${r.hits})`);
+	check('... and its best leads as whole runs (footholds: a place the attempt reaches later, sooner)', Array.isArray(r.leadRuns) && r.leadRuns.every((x) => x.ms.length > 10 && x.gain >= 60),
+		`${(r.leadRuns || []).map((x) => `+${x.gain} at ${x.tile}`).join(', ') || 'none'}`);
+	const dies = runOf([[4, 40], [2, 60], [4, 100]]);
+	check('attemptJudge refuses a run that ends elsewhere', !SF.attemptJudge(info, dies).accept);
+	check('an attempt that finishes is prepared as the route it is', (() => { const i2 = SF.prepare(level, full.ms, { attempt: true }); return !!i2 && !i2.attempt && i2.ev.runTicks === full.runTicks; })());
+
+	// the lane (--lane=1): the attempt on stdin -> a shortcut (a shortened attempt) on stdout; then the whole run as the
+	// best route -> a faster route (the library's shortened attempt spliced into it, or a skip of its own)
+	const out = await new Promise((resolve) => {
+		const ch = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'skipfind.js'), '--lane=1', `--level=${file}`, '--workers=2', '--seconds=60',
+			'--depth=200', '--deepDepth=200', '--horizon=600', '--cap=20000', '--log2=22', '--deepLog2=22', '--perS=20', '--deepPerS=20'], { stdio: ['pipe', 'pipe', 'pipe'] });
+		const evs = [];
+		let buf = '', routed = false, err = '';
+		const str = (ms) => C.eetasBytes(ms).toString('latin1');
+		ch.stdout.on('data', (d) => {
+			buf += d;
+			let k;
+			while ((k = buf.indexOf('\n')) >= 0) {
+				const line = buf.slice(0, k); buf = buf.slice(k + 1);
+				let e; try { e = JSON.parse(line); } catch (x) { continue; }
+				evs.push(e);
+				if (e.ev === 'shortcut' && e.kind !== 'lead' && e.saved >= 50 && !routed) { routed = true; ch.stdin.write(`route ${str(full.ms)}\n`); }
+				if (e.ev === 'result') ch.stdin.write('stop\n');
+			}
+		});
+		ch.stderr.on('data', (d) => { err += d; });
+		ch.stdin.write(`attempt ${str(att)}\n`);
+		const t = setTimeout(() => { try { ch.stdin.write('stop\n'); } catch (e) { /* gone */ } }, 70000);
+		ch.on('close', () => { clearTimeout(t); resolve({ evs, err }); });
+	});
+	const sc = out.evs.find((e) => e.ev === 'shortcut' && e.kind !== 'lead' && e.saved >= 50);
+	const scMs = sc ? Uint8Array.from(sc.inputs, (c) => (c.charCodeAt(0) - 48) & 31) : null;
+	check('the lane: the attempt on stdin -> a shortened attempt (judged: the attempt\'s end state sooner)', !!scMs && SF.attemptJudge(info, scMs).accept && scMs.length <= 250,
+		sc ? `${sc.kind}: ${att.length} -> ${sc.ticks} ticks` : `no shortcut; ${out.evs.map((e) => e.ev).join(',')} ${out.err.slice(-300)}`);
+	const res = out.evs.find((e) => e.ev === 'result');
+	const rv = res ? C.evaluate(level, Uint8Array.from(res.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
+	check('... then the whole run as the best route -> a faster route (replayed), 50+ run ticks', !!rv && C.judge(rv, full, full.deaths).accept && rv.runTicks <= full.runTicks - 50,
+		rv ? `${full.runTicks} -> ${rv.runTicks} (${res.how})` : 'no result');
+	check('... and it ends on "stop" with its counts', out.evs.some((e) => e.ev === 'done' && e.why === 'stopped' && e.shortcuts >= 1 && e.routes >= 1));
+}
+
 // ---------------------------------------------------------------- the jump skip is exact
 // bfs skips a jump input where the same input without it leaves no jumps (jump_count >= max_jumps after the tick, no
 // levitation, the timer on): the two states must be equal. Checked on every state of a jumpy random walk in both rooms'
@@ -128,3 +190,4 @@ console.log('\n== the jump skip is exact');
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { /* busy */ }
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
+})().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });
