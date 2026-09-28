@@ -70,7 +70,7 @@ static void claimCut(std::vector<uint32_t>& hist, uint64_t cap, F count, uint64_
 }
 
 template <int TW>
-static int runExplore(int argc, char** argv, const LevelBlob& B) {
+static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = nullptr) {
 	typedef State<TW> S;
 	int from = atoi(opt(argc, argv, "from", "0").c_str());
 	const int depthMax = atoi(opt(argc, argv, "depth", "200").c_str());
@@ -136,9 +136,13 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	const int from0 = from;
 	from += (int)prefixStr.size();
 	(void)from0;
-	Gpu g;
-	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
-	if (!layoutOrError(g, TW)) return 4;
+	// (--serve: the server's context and kernels, opened and checked once)
+	Gpu gOwn;
+	Gpu& g = shared ? *shared : gOwn;
+	if (!shared) {
+		if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
+		if (!layoutOrError(g, TW)) return 4;
+	}
 	// --steer=<file> (src/steer.js RCH4, with --reach): the priority and the closest attempt read the gate-aware steer field
 	// (the prune stays the reach field's -1; --costslack keeps a state below either field's ceiling). Uploaded before the
 	// free-memory check and the tables, which then leave room for it. A file that cannot be used is an error: the caller
@@ -652,14 +656,81 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	return 0;
 }
 
+/** eegpu explore <level.bin> --serve=1 [options]: a long-lived explore (src/bursts.js: the one search's bursts). The
+ *  context, the kernels and the level are loaded once ({"ev":"serving",...}); then one job per stdin line: tab-separated
+ *  arguments ([run.eetas, default -] --prefix=.. --depth=.. --seconds=.. --stopfile=.. ...: the explore options of one
+ *  run, which override the server's own), run exactly as `eegpu explore <level.bin> <run> <options>` runs them (the same
+ *  lines: ready, closest, layer, hit, done), then {"ev":"idle","job":N,"code":C} (C: the exit code the process would
+ *  have had). The job's buffers are freed after it (only the context and the kernels stay between jobs: no kernel runs
+ *  and no table is held while idle); its stop file ends the job ("stopped"), a --parent that exited or the end of stdin
+ *  (or a line "quit") ends the server. The launches are the per-process mode's (launch.h: --launch-ms, the pause file
+ *  between launches); a launch error still ends the process (launch.h die: the context is gone). An older eegpu reads
+ *  --serve=1 as its run file and exits 2 before it loads the driver (the caller then starts a process per run). */
+template <int TW>
+static int serveExplore(int argc, char** argv, const LevelBlob& B) {
+	const auto t0 = Clock::now();
+	Gpu g;
+	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); fflush(stdout); return 4; }
+	if (!layoutOrError(g, TW)) { fflush(stdout); return 4; }
+	printf("{\"ev\":\"serving\",\"ctxMs\":%.0f,\"loadMs\":%.0f,\"module\":\"%s\",\"waitMs\":%.0f,\"ms\":%.0f,\"gpu\":%s}\n", g.ctxMs, g.loadMs, g.how.how.c_str(), g.how.waitMs, msSince(t0), g.json().c_str());
+	fflush(stdout);
+	g.ctxMs = 0; g.loadMs = 0; g.how.how = "serve"; g.how.waitMs = 0;
+	std::vector<cu::CUdeviceptr> track;
+	cu::gTrack = &track;
+	lk::G.serve = true;
+	std::string line;
+	int jobs = 0;
+	for (;;) {
+		line.clear();
+		int c;
+		while ((c = getchar()) != EOF && c != '\n') line.push_back((char)c);
+		if (c == EOF && line.empty()) break;
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		if (line.empty()) continue;
+		if (line == "quit") break;
+		std::vector<std::string> parts;
+		for (size_t i = 0;;) {
+			const size_t k = line.find('\t', i);
+			parts.push_back(line.substr(i, k == std::string::npos ? std::string::npos : k - i));
+			if (k == std::string::npos) break;
+			i = k + 1;
+		}
+		std::vector<std::string> args = { argv[0], "explore", argv[2], "-" };
+		for (const std::string& p : parts) {
+			if (p.empty()) continue;
+			if (p.compare(0, 2, "--") != 0) args[3] = p; else args.push_back(p);
+		}
+		// (the server's own options after the job's: opt() takes the first)
+		for (int i = 3; i < argc; i++) if (strncmp(argv[i], "--serve", 7) != 0) args.push_back(argv[i]);
+		std::vector<char*> av;
+		for (std::string& s : args) av.push_back(&s[0]);
+		av.push_back(nullptr);
+		const int ac = (int)args.size();
+		lk::jobStart(opt(ac, av.data(), "stopfile", ""));
+		g.opened = Clock::now();
+		int rc = 0;
+		try { rc = runExplore<TW>(ac, av.data(), B, &g); } catch (lk::JobStop&) { rc = 0; }
+		lk::onStop = nullptr;
+		lk::G.searching = false;
+		cu::cuCtxSynchronize();
+		cu::freeTracked();
+		jobs++;
+		printf("{\"ev\":\"idle\",\"job\":%d,\"code\":%d}\n", jobs, rc);
+		fflush(stdout);
+	}
+	cu::gTrack = nullptr;
+	return 0;
+}
+
 static int cmdExplore(int argc, char** argv) {
-	if (argc < 4) { fprintf(stderr, "usage: eegpu explore <level.bin> <run.eetas> --from=T --region=x0,y0,x1,y1 --floor=PY --above=PY --land=x0,x1\n"); return 2; }
+	const bool serve = argc >= 3 && opt(argc, argv, "serve", "0") == "1";
+	if (argc < 4 && !serve) { fprintf(stderr, "usage: eegpu explore <level.bin> <run.eetas> --from=T --region=x0,y0,x1,y1 --floor=PY --above=PY --land=x0,x1\n"); return 2; }
 	LevelBlob B = readLevel(argv[2]);
 	switch (twFor(B.get("tailWords"))) {
-	case 8: return runExplore<8>(argc, argv, B);
-	case 32: return runExplore<32>(argc, argv, B);
-	case 128: return runExplore<128>(argc, argv, B);
-	case 512: return runExplore<512>(argc, argv, B);
+	case 8: return serve ? serveExplore<8>(argc, argv, B) : runExplore<8>(argc, argv, B);
+	case 32: return serve ? serveExplore<32>(argc, argv, B) : runExplore<32>(argc, argv, B);
+	case 128: return serve ? serveExplore<128>(argc, argv, B) : runExplore<128>(argc, argv, B);
+	case 512: return serve ? serveExplore<512>(argc, argv, B) : runExplore<512>(argc, argv, B);
 	}
 	printf("{\"error\":\"level state too large for the GPU engine\"}\n");
 	return 3;
