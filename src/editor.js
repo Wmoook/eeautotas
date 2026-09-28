@@ -273,7 +273,9 @@ function noWayNote(ph) {
 /** the "only through a death" note (null: none): the physics check's only way to the trophy is a death (a respawn at a
  *  checkpoint or another spawn), which the searches do not follow (they drop dead balls) */
 function deathNote(ph) {
-	if (!ph || ph.pending || ph.failed || !(ph.startCost >= RF.DEATH_TILES)) return null;
+	// (onlyDeath: the start is cut off without the death edges and finite with them; a check of an older cache: the start's
+	// cost priced as a death's. Infinity Pain's way around by the walk is 3,178 tiles, above DEATH_TILES)
+	if (!ph || ph.pending || ph.failed || !(ph.onlyDeath !== undefined ? ph.onlyDeath : ph.startCost >= RF.DEATH_TILES)) return null;
 	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls, so they cannot find it.';
 }
 /**
@@ -687,7 +689,7 @@ function addSource(o) {
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
 function pickSource(step, c) {
 	const same = (a) => !!c && a.ticks === c.ticks && Math.abs(a.dist - c.dist) < 1e-3;
-	const usable = (a) => !!a && a.ticks >= RELAY_MIN_TICKS && a.dist < RF.DEATH_TILES && !same(a);
+	const usable = (a) => !!a && a.ticks >= RELAY_MIN_TICKS && a.dist < deathTiles() && !same(a);
 	let b = null;
 	for (const s of sources.values()) {
 		if (step === 'new') {
@@ -730,6 +732,9 @@ function replayRooms(masks, withPath) {
 	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
 	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
 }
+/** the distance (tiles) from which an attempt's way is a death's: RF.DEATH_TILES, but none (1e4: cut off) when the searches'
+ *  reach file has no death edges (cur.opts.deathFree: a long real way, Infinity Pain's 3,178 tiles, is no death) */
+const deathTiles = () => (cur && cur.opts && cur.opts.deathFree ? 1e4 : RF.DEATH_TILES);
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
  *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
@@ -1603,13 +1608,13 @@ function reachInfo(buf, hash) {
 			const sim = new E.EESim(L); sim.reset();
 			// (the searches' file: without the death edges when they drop dead balls, unless that cuts the start off: then the
 			// only way is a death, and the file keeps them as before, the verdict's note says so)
-			let fs2 = f, deathFree = false;
-			if (!d.deathsTaken && f.deaths) { const g = RF.reachField(L, { deaths: false }); if (RF.costAt(g, sim) >= 0) { fs2 = g; deathFree = true; } }
+			let fs2 = f, deathFree = false, onlyDeath = false;
+			if (f.deaths) { const g = RF.reachField(L, { deaths: false }); if (RF.costAt(g, sim) >= 0) { if (!d.deathsTaken) { fs2 = g; deathFree = true; } } else onlyDeath = RF.costAt(f, sim) >= 0; }
 			// (the level's fingerprint in the file: eegpu prove uses a field only for its own level; none: it does not use it)
 			let lfp = null;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(fs2, lfp)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
-			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms, deathFree,
+			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms, deathFree, onlyDeath,
 				...(deathFree ? { searchStartCost: RF.costAt(fs2, sim) } : {}), ...(f.prot ? { prot: f.prot } : {}) });`;
 		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(), deathsTaken: deathsTaken(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), reach: require.resolve('./reach.js'), gpu: require.resolve('./gpu.js') } } });
@@ -2465,11 +2470,11 @@ function closer(ev, n) {
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
-	const deathTiles = cur.distBySteer ? STEER_MISS : RF.DEATH_TILES;
+	const deathTilesNow = cur.distBySteer ? STEER_MISS : deathTiles();
 	let own = null;
 	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
 		Vn.best = dist; Vn.bestAt = Date.now();
-		if (ev.inputs && !ev.cut && dist < deathTiles) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
+		if (ev.inputs && !ev.cut && dist < deathTilesNow) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
@@ -2483,7 +2488,7 @@ function closer(ev, n) {
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
-	const viaDeath = !cut && !cur.distBySteer && dist >= RF.DEATH_TILES;
+	const viaDeath = !cut && !cur.distBySteer && dist >= deathTiles();
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES)
