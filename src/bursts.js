@@ -199,7 +199,7 @@ function create(o) {
 			o.say({ ev: 'shortcut', kind: 'arm', inputs, ticks: masks.length, saved, how });
 		} }) : null;
 	let armAcc = 0, armOom = 0;
-	const ARM_OOM_MAX_S = 30;
+	const ARM_OOM_MAX_S = 30, ARM_PRE_CAP = 0.15;
 	st.arm = 0; st.armSec = 0; st.armRoutes = 0;
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
 	 *  want different cells): each once, then its mean reward in the room (the level's mean as a prior worth 2 tries) +
@@ -594,7 +594,11 @@ function create(o) {
 			if (left < 3) break;
 			let job = null;
 			// the route arm's turn (its share of the bursts, a route known): one start's searches in this lane
-			if (!next && RA && RA.ready() && (armAcc += RA.onAttempt() ? (a.rArmPre >= 0 ? +a.rArmPre : 0) : a.rArm) >= 1) {
+			// (before any route the arm's GPU seconds stay under ARM_PRE_CAP of the search's time: its local explores run up to
+			// 4 x 12 s a start where a burst runs 15 s, and before the first route the bursts find the rooms it needs (Stupid
+			// Fox: no route in 3 of 3 runs with the arm on the attempts, one at 197.6 s without it))
+			const armPreOk = !RA || !RA.onAttempt() || st.armSec <= ARM_PRE_CAP * o.sec();
+			if (!next && RA && RA.ready() && armPreOk && (armAcc += RA.onAttempt() ? (a.rArmPre >= 0 ? +a.rArmPre : 0) : a.rArm) >= 1) {
 				armAcc -= 1;
 				const t0 = Date.now();
 				const r = await RA.run(lane, { child: (ch, on) => { if (on) children.add(ch); else children.delete(ch); }, stopped: () => stopped });
