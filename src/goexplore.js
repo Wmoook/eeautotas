@@ -211,6 +211,11 @@
 //        death is kept only where it pays: deathPays in explore(); the progress and done events carry "deaths": {seen,
 //        byCost, byNew, dropped, cells}; the GPU random runs get eegpu roll --deaths=1. The reach field keeps its death
 //        edges only with deaths as moves: off, the runs end at a death, so a way through one is none of theirs)]
+//        [--dfield=-1 (deaths as moves, coarse cells: the field the runs are pruned by; -1 auto = the DEATH-FREE field
+//        where it reaches the start, with the room dead ends (--roomDead): a state either cuts off (no way on but a death)
+//        is kept only while a trigger of its room is walkable from it or its death could pay now (deathMayPay: the quick
+//        look of deathPays), priced as its death; else the field with death edges; 1 = always the death edges (before
+//        hx2-r2-deaths: no killing dead end pruned, Good Egg's search collapsed); 0 = always death-free)]
 //        [--cpkey=0 (coarse cells, deaths as moves: 1 = the checkpoint in the cell key on levels of at most CPK_MAX 32
 //        checkpoints; 2 = only while the ball is more than --cpfar=2 tiles from its checkpoint, any number of them: the
 //        effect-transport death, a respawn away from the ball with its effects kept; both opt-in, the cost not measured)]
@@ -284,7 +289,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, cpfar: 2, dburst: 1, dsub: 0, roomDead: 1 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, cpfar: 2, dburst: 1, dsub: 0, roomDead: 1, dfield: -1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -391,7 +396,21 @@ function parseArgs(argv) {
 /** the reach field's options for this search: --deaths=0 (the default: the runs end at a death, so a way through one is
  *  no way of theirs) builds it without death edges (src/reach.js opts.deaths: a state only a death leads to the trophy
  *  from is cut off: its runs end there); --deaths=1 keeps them (a search that takes deaths as moves) */
-const fieldOpts = (a) => (a.deathMoves ? {} : { deaths: false });
+const fieldOpts = (a) => (a.deathMoves && !a.dfree ? {} : { deaths: false });
+/** the field the search prunes by (sets a.dfree: deaths as moves pruned by the death-free field, --dfield): deaths off
+ *  the death-free field; deaths as moves the death-free one where it reaches the level's start (--dfield=-1) or always
+ *  (--dfield=0), else the one with death edges (--dfield=1, or a level whose only way is a death) */
+function searchField(L, a) {
+	a.dfree = false;
+	if (!a.deathMoves) return RF.reachField(L, { deaths: false });
+	if (a.dfield === 0 || (a.dfield !== 1 && (a.cells === 'auto' ? cellsFor(L) : a.cells) === 'coarse' && a.roomDead !== 0)) {
+		const g = RF.reachField(L, { deaths: false });
+		const s0 = new E.EESim(L);
+		s0.reset();
+		if (a.dfield === 0 || RF.costAt(g, s0) >= 0) { a.dfree = true; return g; }
+	}
+	return RF.reachField(L, {});
+}
 /** the cells for level L: 'fine' up to FINE_MAX_TILES tiles, else 'coarse' */
 const cellsFor = (L) => (L.width * L.height > FINE_MAX_TILES ? 'coarse' : 'fine');
 /** the process memory (MB) of a search of `workers` workers with `mem` MB each (see RSS_F) */
@@ -1204,7 +1223,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	// (--roomDead=1, coarse cells, not with --deaths=1: each room's live tiles, roomDead; a run ends on a tile that is not live
 	// in its room; deadCut counts those states)
-	const RDEAD = coarse && a.roomDead !== 0 && !a.deathMoves ? roomDead(L, Math.max(1 << 20, Math.min(32 << 20, mem * 1048576 * 0.02))) : null;
+	const RDEAD = coarse && a.roomDead !== 0 && (!a.deathMoves || a.dfree) ? roomDead(L, Math.max(1 << 20, Math.min(32 << 20, mem * 1048576 * 0.02))) : null;
 	let deadCut = 0;
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
@@ -1226,13 +1245,19 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// states, dCost / dNew: kept by the cost or as the earliest arrival, dDrop: ended as before, dCells: the respawns'
 	// new cells)
 	const DI = a.deathMoves ? deathsOf(L) : null;
+	// (FDM: the field has death edges (a cost of RF.DEATH_TILES or more is a way through a death); with the death-free
+	// field (a.dfree, DFREE) a state only a death leads on from is cut off, and a state in a dead end of its room too:
+	// such a state is kept only while a trigger of its room is walkable from it or its death could pay now (deathMayPay);
+	// dDoom counts those kept)
+	const FDM = DI !== null && !a.dfree;
+	const DFREE = DI !== null && !!a.dfree;
 	const rspAt = DI ? new Map() : null;
 	// (rspAt's room: coarse cells the room key, or with --dsub=1 its part the ball's own touches change (RM.cause().sub:
 	// without the keys and the time doors, which flip on the clock); fine cells the discrete state)
 	const rspRoom = () => (!coarse ? disc(sim) : a.dsub ? RM.cause(sim).sub : RM.key(sim));
 	const DEATHBLK_N = DEATH_TICKS + 25;
 	const DEADBLK = { b: new Uint8Array(DEATHBLK_N), refs: 0 };   // (the dead ticks' inputs: the engine reads none)
-	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0, dTicks = 0;   // (dTicks: the dead ticks played)
+	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0, dTicks = 0, dDoom = 0;   // (dTicks: the dead ticks played)
 	// (the sound lower bound of the live state: with deaths also DEATH_TICKS + its respawn target's, see lowerBoundTiles)
 	// (without a checkpoint every death moves the spawn rotation on: any spawn, after enough deaths)
 	const lbSpawn = DI !== null && LBT !== null ? Math.min(...DI.spawnT.map((t) => LBT[t])) : 0xffff;
@@ -1372,7 +1397,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const steerOf = () => {
 		const v = SF.steerFifths(ST, sim);
 		if (v >= 0) return v / 5;
-		if (DI !== null && a.dprice !== 0 && RF.costAt(field, sim) >= RF.DEATH_TILES) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0) return DEATH_TILES + r / 5; }
+		if (FDM && a.dprice !== 0 && RF.costAt(field, sim) >= RF.DEATH_TILES) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0) return DEATH_TILES + r / 5; }
 		return STEER_NONE;
 	};
 	// (--steerDist: the closest attempt's and the sources' distances by the steer field, at most STEER_REAL_MAX; 6000 + the
@@ -1499,7 +1524,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const rc = RF.costAt(field, sim);
 		// (deaths as moves: the field prices a death edge at DEATH_COST, behind every real way, to the best respawn tile of
 		// all; a state whose only way is a death costs its real price: DEATH_TILES + its own respawn target's cost)
-		viaDeath = DI !== null && rc >= RF.DEATH_TILES;
+		viaDeath = FDM && rc >= RF.DEATH_TILES;
 		if (viaDeath && a.dprice !== 0) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + r < rc) return DEATH_TILES + r; }
 		if (rc >= 0 || a.prune) return rc;
 		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
@@ -1530,7 +1555,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, dDoom, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, deadCut }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}) : {});
@@ -1857,6 +1882,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	 * picks when it is new. Respawn states are alike per (checkpoint, room): one cell each (the cell key has the
 	 * checkpoint on levels of checkpoints: CPK).
 	 */
+	/** deathMayPay: would a death of the live state in tick t (a run whose last way cost rcPrev) pass deathPays' quick look
+	 *  (its respawn not thrown back, the earliest arrival there in this room)? A state in a dead end of its room cannot
+	 *  leave it alive nor change it, so where this fails its death never pays: the run ends (--dfield) */
+	const deathMayPay = (t, rcPrev) => {
+		const r0 = respawnCost();
+		if (r0 < 0 || r0 > rcPrev + DEATH_TILES) return false;
+		const v0 = rspAt.get(rspRoom() * 2097152 + respawnTileOf(DI, sim, W));
+		return v0 === undefined || v0 > t + DEATH_TICKS - 1;
+	};
 	const dying = (up, blk, o, n, t, rcPrev, room, e) => {
 		dSeen++;
 		const rt = respawnTileOf(DI, sim, W);
@@ -2013,11 +2047,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					// (a death: the run ends here, unless deaths are moves and this one pays: its respawn then a cell, deathPays)
 					if (sim.is_dead) { if (DI !== null) dying(up, blk, o, s + 1, t, rcPrev, room, e); break; }
 					if (AV !== null && AV[centreTile()] === 1) { avoided++; break; }
-					const rc = costOf();
-					if (rc < 0) break;   // the reach field rules it out: no route from here
+					let rc = costOf();
+					// the reach field rules it out: no route from here (deaths as moves with the death-free field: no way but a
+					// death; kept below only where its room or its death still pays)
+					const cut = rc < 0;
+					if (cut && !DFREE) break;
 					// (deathPays: the reach cost of the last state that had a way of its own; a state whose only way is a death
 					// keeps the one before it, so a fall into a pit does not make a death back to the spawn look free)
-					if (!viaDeath) rcPrev = rc;
+					if (!viaDeath && !cut) rcPrev = rc;
 					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
 					// first cell can enter the archive: a full archive or a state too late for a faster route would leave an
 					// empty room, and walks for nothing, outside the memory budget)
@@ -2032,8 +2069,17 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
 					}
-					// (a dead end of its room: no trophy and no trigger walkable from here: the run ends)
-					if (into && room !== null && room.live !== null && !liveAt(room.live, centreTile())) { deadCut++; break; }
+					// (a dead end of its room: no trophy and no trigger walkable from here: the run ends; deaths as moves with the
+					// death-free field: unless its death could pay now; a state the field cuts off is kept while a trigger of its
+					// room is walkable from it or its death could pay, priced as its death: DEATH_TILES + its respawn's cost)
+					if (DFREE) {
+						const live = into && room !== null && room.live !== null ? liveAt(room.live, centreTile()) : !cut;
+						if (!live || cut) {
+							const pays = deathMayPay(t, rcPrev);
+							if (!live && !pays) { deadCut++; break; }
+							if (cut) { const r = respawnCost(); if (r < 0) break; rc = DEATH_TILES + r; dDoom++; }
+						}
+					} else if (into && room !== null && room.live !== null && !liveAt(room.live, centreTile())) { deadCut++; break; }
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
 						const node = mkNode(up, blk, o, s + 1);
@@ -2095,7 +2141,7 @@ async function gpuMain(a, L, m) {
 	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
 	a.cells = 'coarse';
-	const field = RF.reachField(L, fieldOpts(a));
+	const field = searchField(L, a);
 	const sim = new E.EESim(L);
 	sim.reset();
 	const inp = new E.EEInput();
@@ -2650,7 +2696,7 @@ async function main() {
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
-	const field = RF.shareField(RF.reachField(L, fieldOpts(a)));
+	const field = RF.shareField(searchField(L, a));
 	const sim0 = new E.EESim(L);
 	sim0.reset();
 	const pre0 = prefixOf(a);
@@ -2711,7 +2757,7 @@ async function main() {
 	const bound = (d) => { if (d < Atomics.load(ctrl, 0)) Atomics.store(ctrl, 0, Math.max(0, d)); };
 	// (deaths as moves: the workers' dying states, kept by the cost (i) or as the earliest arrival (ii), dropped, and the
 	// respawns' new cells)
-	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), cells: total('dCells'), deadTicks: total('dTicks') } } : {});
+	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), cells: total('dCells'), deadTicks: total('dTicks'), cutKept: total('dDoom'), field: a.dfree ? 'death-free' : 'death edges' } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
 		samples.push([now, tk]);
