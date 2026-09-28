@@ -46,5 +46,17 @@ check('FR_WHAT: a route\'s inbox run and its splice', AT.FR_WHAT.test('inbox (Fi
 	AT.FR_WHAT.test('inbox (Find a route (route)) + best (splice, 2 switches)') && AT.FR_WHAT.test('try: Find a route (route)') &&
 	!AT.FR_WHAT.test('inbox (gpu m1 3)') && !AT.FR_WHAT.test('sweep1_2') && !AT.FR_WHAT.test('try: focus 0:01.00-0:02.00'));
 
+// the lane after the handoff (laneEndWhy, laneThreadsOf): a fifth of the workers, at least 1; it ends when Find a route
+// ends, or LANE_IDLE_S after its last route that gained the job anything (or the handoff)
+console.log('the lane after the handoff');
+check('the lane\'s threads: a fifth of the workers, at least 1', AT.laneThreadsOf(1) === 1 && AT.laneThreadsOf(5) === 1 && AT.laneThreadsOf(14) === 3 && AT.laneThreadsOf(20) === 4);
+const lw = (o) => AT.laneEndWhy(Object.assign({ running: true, stage: 'found' }, o));
+check('the lane goes on within LANE_IDLE_S of the handoff', lw({ now: 100 * s + (AT.LANE_IDLE_S - 1) * s, laneAt: 100 * s, frAt: 50 * s }) === '');
+const e1 = lw({ now: 100 * s + (AT.LANE_IDLE_S + 1) * s, laneAt: 100 * s, frAt: 50 * s });
+check('the lane ends LANE_IDLE_S after the handoff without a route gain', new RegExp(`no route gained the job anything for ${AT.LANE_IDLE_S + 1} s`).test(e1), e1);
+check('a route gain after the handoff starts the wait over', lw({ now: 100 * s + (AT.LANE_IDLE_S + 1) * s, laneAt: 100 * s, frAt: 400 * s }) === '');
+const e2 = lw({ now: 101 * s, laneAt: 100 * s, frAt: 0, running: false, stage: 'not found' });
+check('the lane ends with Find a route', e2 === 'Find a route ended (not found)', e2);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

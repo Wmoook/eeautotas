@@ -47,6 +47,26 @@ const CLEAN_WAIT_MS = 15000;
 /** a job history entry that Find a route's route made (its inbox run, that run's splice with the best, or a direct try
  *  while the job's grind was not running) */
 const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
+/** the lane after the handoff (editor.js demote; EEAT_FRLANE=0 or run({frLane: false}): off, Find a route stops as
+ *  before): Find a route goes on without the GPU on LANE_F of the workers (laneThreadsOf), its routes to the job as
+ *  before, the job's stages on the rest (<job>/cpu_share = W - the lane's threads); the job's best goes into its archive
+ *  at most every LANE_FEED_S s (when it changed); it ends LANE_IDLE_S s after its last route that gained the job anything
+ *  (or the handoff), or with the budget. Stupid Fox: where Find a route ran on 9.5-10.6 min after the first route its
+ *  own routes reached the door-free class (8,227 -> 3,684 ticks; finals 3,464 / 4,872), stopped 120 s after its last
+ *  gain the finals stayed in the first class (5,310 after 77 min, 6,191 after 43); where it held every thread for 12 min
+ *  (Egg Quest II) the final was 26% worse: hence a small CPU share and no GPU. */
+const LANE_F = 1 / 5;
+const LANE_FEED_S = 60;
+const LANE_IDLE_S = 600;
+/** the lane's threads next to W workers */
+const laneThreadsOf = (W) => Math.max(1, Math.round(W * LANE_F));
+/** the lane's end, or '' (it goes on): o {now, laneAt, frAt (the last gain a route made the job), running (Find a route
+ *  still runs), stage}; times in ms */
+function laneEndWhy(o) {
+	if (!o.running) return `Find a route ended (${o.stage || 'done'})`;
+	const idle = o.now - Math.max(o.laneAt, o.frAt || 0);
+	return idle > LANE_IDLE_S * 1000 ? `no route gained the job anything for ${Math.round(idle / 1000)} s` : '';
+}
 
 /**
  * The handoff's reason, or '' (Find a route keeps the GPU). o: {now, t0 (the AutoTASer's start), jobAt (the job's start,
@@ -108,15 +128,41 @@ function run(o) {
 	let jobAt = 0, frAt = 0;
 	const gains = [];
 	const pending = [];   // Find a route's routes waiting for the job
+	// (the lane after the handoff: {at, threads, fedKey, fedAt, fed}; null before it, without it and after its end)
+	const laneWanted = o.frLane !== undefined ? !!o.frLane : process.env.EEAT_FRLANE !== '0';
+	let lane = null;
 	const classSeen = new Set();   // (the routes of other classes handed on: signature:run ticks)
 	let jobPid = 0;       // (the grind the AutoTASer started: finish stops the job only while it still runs that one)
 	const share = Math.max(1, Math.min(Math.floor(W / 4), threads - W));
-	let shareAt = 0;
+	let shareAt = 0, shareNow = 0;
 	const shareFile = () => (S.job ? path.join(J.jobDir(S.job), 'cpu_share') : null);
-	function holdShare(on) {
+	/** the job's stages' threads: SHARE_OF_W until the handoff, W less the lane's threads (its own count once the CPU
+	 *  search said it: its class workers too) while the lane runs */
+	const shareOf = (st) => (lane ? Math.max(1, W - Math.max(lane.threads, (st && st.lane && st.lane.threads) || 0)) : share);
+	function holdShare(on, st) {
 		const f = shareFile();
 		if (!f) return;
-		try { if (on) { if (Date.now() - shareAt >= 3000) { fs.writeFileSync(f, String(share)); shareAt = Date.now(); } } else fs.unlinkSync(f); } catch (e) { /* none */ }
+		const n = on ? shareOf(st) : 0;
+		try {
+			if (on) { if (Date.now() - shareAt >= 3000 || n !== shareNow) { fs.writeFileSync(f, String(n)); shareAt = Date.now(); shareNow = n; } } else { shareNow = 0; fs.unlinkSync(f); }
+		} catch (e) { /* none */ }
+	}
+	/** the job's best into the lane's archive (when it changed since the last time) */
+	function feedLane() {
+		lane.fedAt = Date.now();
+		try {
+			const ms = C.readEetas(path.join(J.jobDir(S.job), 'best.eetas'));
+			const key = `${ms.length}:${S.best}`;
+			if (key === lane.fedKey) return;
+			if (ED.laneBest(C.eetasBytes(ms).toString('latin1'))) { lane.fedKey = key; lane.fed++; }
+		} catch (e) { /* no best yet */ }
+	}
+	function endLane(why) {
+		if (!lane) return;
+		emit({ ev: 'lane', end: why, fed: lane.fed, after: Math.round((Date.now() - lane.at) / 1000) });
+		lane = null;
+		holdShare(false);
+		try { ED.stop(); } catch (e) { /* ended */ }
 	}
 	async function feedRoutes() {
 		while (S.job && pending.length) {
@@ -167,6 +213,16 @@ function run(o) {
 		if (frDone) return;
 		frDone = true;
 		S.handoff = { t: since(), why };
+		// (the lane: Find a route goes on without the GPU on a few threads; else, or when it cannot, it stops)
+		let lz = null;
+		if (laneWanted && typeof ED.demote === 'function') { try { lz = ED.demote({ workers: laneThreadsOf(W) }); } catch (e) { lz = null; } }
+		if (lz) {
+			lane = { at: Date.now(), threads: lz.threads, fedKey: '', fedAt: Date.now(), fed: 0 };
+			S.handoff.lane = lz.threads;
+			emit({ ev: 'handoff', why, lane: lz.threads });
+			holdShare(true);
+			return;
+		}
 		emit({ ev: 'handoff', why });
 		holdShare(false);
 		try { ED.stop(); } catch (e) { /* ended */ }
@@ -207,8 +263,15 @@ function run(o) {
 				// (no route: nothing to optimize, so the AutoTASer ends here instead of at the budget)
 				if (!S.job && !ended) finish(`Find a route ended without a route (${st.stage}${st.message ? `: ${st.message}` : ''})`);
 			}
-			if (!frDone) holdShare(true);
+			if (!frDone || lane) holdShare(true, st);
 			if (!ended) { await feedRoutes(); pollJob(); }
+			// the lane: its end (LANE_IDLE_S without a route that gained the job anything, or Find a route's own end), else
+			// the job's best into its archive
+			if (lane && !ended) {
+				const why = laneEndWhy({ now: Date.now(), laneAt: lane.at, frAt, running: st.running, stage: st.stage });
+				if (why) endLane(why);
+				else if (Date.now() - lane.fedAt >= LANE_FEED_S * 1000) feedLane();
+			}
 			// the handoff: the routes gain the job less than the optimizer does (handoffWhy)
 			if (!frDone && !ended && S.job) { const why = handoffWhy({ now: Date.now(), t0, jobAt, frAt, gains, handoffMin, best: S.best }); if (why) handoff(why); }
 		} catch (e) { emit({ ev: 'error', error: String(e && e.message || e) }); }
@@ -220,6 +283,7 @@ function run(o) {
 		ended = true;
 		clearInterval(iv);
 		if (!frDone) { frDone = true; try { ED.stop(); } catch (e) { /* ended */ } }
+		if (lane) endLane(why);
 		holdShare(false);
 		let final = null;
 		if (S.job) {
@@ -240,7 +304,7 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
+module.exports = { run, handoffWhy, laneEndWhy, laneThreadsOf, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT, LANE_F, LANE_FEED_S, LANE_IDLE_S };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));

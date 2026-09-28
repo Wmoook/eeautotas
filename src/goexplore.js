@@ -326,6 +326,8 @@ const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir'
 // the text options
 const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
+// a parked worker's sleep between two looks (the lane, stdin "lane K": ctrl[2])
+const PARK_MS = 500;
 /** the process's CPU seconds so far (user + system, every thread) */
 const cpuSec = () => { const u = process.cpuUsage(); return Math.round((u.user + u.system) / 1e5) / 10; };
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
@@ -1259,6 +1261,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
 	const t0 = Date.now(), tEnd = t0 + a.seconds * 1000;
 	let maxT = Math.min(a.depth, Atomics.load(ctrl, 0));
+	// (the lane: this worker's index among the search's workers, parked while it is at or above ctrl[2] (> 0); the class
+	// workers' ctrl has no such slot)
+	const parkIdx = ctrl.length > 2 && Number.isInteger(a.laneIdx) && a.laneIdx >= 0 ? a.laneIdx : -1;
+	let parked = 0;
 	// the budget this worker's heap can hold: --mem, unless its heap limit is smaller than asked (a V8 flag set one for
 	// the whole process; the main thread fits --mem to the flags it sees, this is the last word; 192: the largest young
 	// generation, Node 24's)
@@ -2147,6 +2153,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
 		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else steerOn(x.steer); } else addSeed(String(x)); }
+		// (the lane, stdin "lane K": a worker at index K or above sleeps between two chunks of picks, its archive kept; the
+		// clock, the stop flag and its messages go on as above)
+		if (parkIdx >= 0) { const act = Atomics.load(ctrl, 2); if (act > 0 && parkIdx >= act) { parked++; Atomics.wait(ctrl, 2, act, PARK_MS); continue; } }
 		lShare = leadShare(now); wShare = wayShare(now);
 		if (coarse && a.spd > 0) spdClock(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
@@ -2864,7 +2873,7 @@ function workerMain() {
 	const L = levelOf(d.a);
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
 	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {},
-		d.avoid ? { avoidTiles: d.avoid } : {});
+		d.avoid ? { avoidTiles: d.avoid } : {}, Number.isInteger(d.idx) ? { laneIdx: d.idx } : {});
 	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null);
 }
 
@@ -2906,7 +2915,8 @@ async function main() {
 	const startCost = RF.costAt(field, sim0);
 	// (the sound lower bound per tile: every worker's prune once a route is known, in shared memory)
 	const lb = a.lb ? lowerBoundTiles(L) : null;
-	const ctrl = new Int32Array(new SharedArrayBuffer(8));
+	// ctrl: [0] the depth bound, [1] stop, [2] the lane's worker count (0: all; stdin "lane K")
+	const ctrl = new Int32Array(new SharedArrayBuffer(12));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);
 	// the seeds' channels (stdin "seed <inputs>"): each worker polls its end between chunks of picks (receiveMessageOnPort:
@@ -3020,6 +3030,7 @@ async function main() {
 				if (m) bound(+m[1]);
 				else if (line.startsWith('seed ') && /^[0-O]+$/.test(line.slice(5))) { for (const p of seedPorts) p.postMessage(line.slice(5)); }
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
+				else if (/^lane \d+$/.test(line)) laneOn(+line.slice(5));
 				else if (line.startsWith('steer ') && line.length > 6 && !steerBuf) steerLate(line.slice(6));
 				else if (line.startsWith('import ') && one) {
 					// (the one search: another operator's run, the editor's GPU random runs, into every archive)
@@ -3072,6 +3083,19 @@ async function main() {
 		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
 		if (a.first) Atomics.store(ctrl, 1, 1);
 		onBest(ev.ms, cls);
+	};
+	/** stdin "lane K" (the AutoTASer's handoff, src/editor.js demote): the search goes on as a small CPU-only lane next to
+	 *  the job's optimizer: the GPU bursts end (their eegpu processes gone: the GPU is the job's) and K threads in all
+	 *  search on: the class workers (--classW) first, the rest of the K from the search's own workers (at least one), the
+	 *  others parked (their archives kept). A "lane" event says how many search. */
+	const laneOn = (k) => {
+		const cls = CW && !CW.ended ? a.classW : 0;
+		const main = Math.max(1, Math.min(a.workers, k - cls));
+		Atomics.store(ctrl, 2, main);
+		Atomics.notify(ctrl, 2);
+		const hadBursts = !!bursts;
+		if (bursts) { const b = bursts; bursts = null; b.stop().catch(() => { /* gone */ }); }
+		say({ ev: 'lane', workers: main, of: a.workers, classW: cls, threads: main + cls, bursts: hadBursts, sec: sec() });
 	};
 	/** stdin "route <inputs>": a route known elsewhere (the editor's other strategies): the bound, head L's schedule, and
 	 *  its states into every archive (no result event: it is not this search's find) */
@@ -3235,7 +3259,7 @@ async function main() {
 		let port = null;
 		const list = [seedIn[i]];
 		if (one) { const ch = new MessageChannel(); port = ch.port2; list.push(port); one.ports.push(ch.port1); }
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i] }, transferList: list,
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i], idx: i }, transferList: list,
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });

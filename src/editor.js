@@ -945,7 +945,7 @@ function relayFrom(n) {
 }
 /** a nearer attempt: a waiting relay starts from it */
 function relayKick() {
-	if (!S || !S.running || S.halted || S.stage === 'stopped') return;
+	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.lane) return;
 	S.strategies.forEach((q, k) => {
 		if (q.key !== 'relay') return;
 		if (q.state === 'waiting' && !alive(kids[k]) && searchClock(Date.now()) >= 3) {
@@ -1314,7 +1314,7 @@ function breakStarts() {
 }
 /** every 5 s (checkStalls): a stalled search starts a round of the wall breaker */
 function breakKick() {
-	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.result || S.gpuFailed || !brk || !cur || brk.round) return;
+	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.lane || S.result || S.gpuFailed || !brk || !cur || brk.round) return;
 	const n = S.strategies.findIndex((q) => q.key === 'breaker');
 	if (n < 0 || alive(kids[n]) || S.strategies[n].state !== 'waiting') return;
 	const wait = cur.opts.breakWait[Math.min(brk.level, cur.opts.breakWait.length - 1)];
@@ -2175,6 +2175,8 @@ function tellCpu(ticks, inputs, n) {
  *  totals */
 function launch(n) {
 	const V = S.strategies[n];
+	// (the lane, demote(): no GPU process starts again (a next pass, a relay run, a retry): the GPU is the job's)
+	if (S.lane && !V.cpu) { Object.assign(V, { state: 'stopped', detail: LANE_DETAIL, deferred: false }); return null; }
 	// (the strategy's own search time: the loads of its processes do not count)
 	const left = Math.max(1, Math.round(S.seconds - usedSec(V)));
 	// salts: the tool itself starts over with the next salt after a try without a route (the finest pass, the last rung of
@@ -2409,6 +2411,10 @@ function launch(n) {
 			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
+		} else if (ev.ev === 'lane') {
+			// (the CPU search as the lane, demote(): its threads)
+			if (S.lane) Object.assign(S.lane, { workers: ev.workers, classW: ev.classW, threads: ev.threads });
+			V.detail = `the lane: ${ev.workers} of its ${ev.of} thread${ev.of === 1 ? '' : 's'}${ev.classW ? ` and ${ev.classW} class worker${ev.classW === 1 ? '' : 's'}` : ''}, no GPU`;
 		} else if (ev.ev === 'steer') {
 			// (the CPU search took a late steer field: lateSteer)
 			if (S.steer) S.steer.cpuAt = ev.sec;
@@ -2676,6 +2682,8 @@ function launch(n) {
  *  stops too, and the GPU random runs with it (a search like the CPU one); not when one of them failed (then the CPU
  *  search is the search, as without a GPU). The proof (a CPU process) does not count: its end asks again. */
 function cpuDone() {
+	// (the lane, demote(): the GPU strategies were stopped for the job; its CPU search goes on)
+	if (S.lane) return;
 	if (!S.result || !S.strategies.some((q) => !q.cpu && !q.rolls) || [...busy].some((c) => !c.cpuSearch && !c.rollsSearch && c !== proofKid) ||
 		S.strategies.some((q) => !q.cpu && !q.rolls && q.state === 'error') || retryHolds()) return;
 	// (the one search is a GPU search too: it goes on looking for faster routes, its bursts bounded by the route, until
@@ -2722,7 +2730,8 @@ function gpuFailed(n) {
 // proof alone, a CPU process, leaves the GPU to the job)
 let busyTimer = null;
 function markBusy() {
-	const f = path.join(dir(), 'busy'), on = building || [...busy].some((c) => c !== proofKid);
+	// (the lane after the AutoTASer's handoff, demote(): its CPU search holds no GPU, so the job's GPU searcher goes on)
+	const f = path.join(dir(), 'busy'), on = building || [...busy].some((c) => c !== proofKid && !(S && S.lane && c.cpuSearch));
 	try { if (on) { fs.mkdirSync(dir(), { recursive: true }); fs.writeFileSync(f, String(Date.now())); } else fs.unlinkSync(f); } catch (e) { /* none */ }
 	if (on && !busyTimer) { busyTimer = setInterval(markBusy, 5000); busyTimer.unref(); }
 	if (!on && busyTimer) { clearInterval(busyTimer); busyTimer = null; }
@@ -3154,6 +3163,47 @@ function closer(ev, n) {
 	if (tr.reachTiles !== null && !(S.nearestReach && S.nearestReach.tiles <= tr.reachTiles)) S.nearestReach = { tiles: Math.round(tr.reachTiles * 10) / 10, ticks: masks.length, after: S.closest.foundAfter };
 	save();
 }
+// ---------------------------------------------------------------- the lane (the AutoTASer's handoff)
+// At the AutoTASer's handoff (src/autotas.js) the search is not stopped but demoted (demote): every GPU strategy stops
+// (every move, the relay, the beams, the wall breaker, the GPU random runs; none starts again: launch()), the CPU search's
+// GPU bursts end, and the CPU search goes on as a small lane on `workers` threads (goexplore.js stdin "lane K": its class
+// workers first, then its own workers, the rest parked with their archives), without the path skips (their threads are
+// fixed at their start). The busy marker is off (markBusy): the job's GPU searcher no longer waits. Its routes are results
+// as before (the AutoTASer's route feed); laneBest puts the job's best into its archive. Stop() ends it.
+// (Stupid Fox: where Find a route ran on 9.5-10.6 min after the first route its own routes reached the door-free class,
+// 8,227 -> 3,684 ticks, finals 3,464 / 4,872; stopped at +120 s the finals stayed in the first class, 5,310 / 6,191.)
+const LANE_DETAIL = 'stopped at the handoff: the GPU is the job\'s';
+/** the search as a lane (see above); o: {workers}. -> {threads} or null (no search, or no CPU search to go on with) */
+function demote(o) {
+	if (!S || !S.running || !cur || S.halted || S.lane || S.stage === 'stopped') return null;
+	const kc = S.strategies.findIndex((q) => q.key === 'goexplore');
+	const ch = kc >= 0 ? kids[kc] : null;
+	if (!alive(ch) || ch.stopWhy || !ch.stdin || ch.stdin.destroyed) return null;
+	const threads = Math.max(1, Math.round(+(o && o.workers) || 1));
+	S.lane = { threads, at: Date.now(), after: Math.round((Date.now() - S.started) / 100) / 10, workers: null, classW: null, fed: 0 };
+	clearRetries();
+	S.strategies.forEach((q, k) => {
+		if (k === kc || (q.cpu && !q.lane)) return;   // (the CPU search; the precision stage runs only before a route)
+		q.deferred = false;
+		if (alive(kids[k])) { q.state = 'stopped'; q.detail = LANE_DETAIL; halt(kids[k], 'stopped'); }
+		else if (q.state === 'waiting' || q.state === 'starting') Object.assign(q, { state: 'stopped', detail: LANE_DETAIL });
+	});
+	const V = S.strategies[kc];
+	if (V.gpuShare) { V.gpuShare = false; V.label = STRATEGIES.goexplore.label; }
+	setPaused(kc, false);
+	try { ch.stdin.write(`lane ${threads}\n`); } catch (e) { /* gone */ }
+	note(`the handoff: the GPU is the job's optimizer's; this search goes on as a lane on ${threads} CPU thread${threads === 1 ? '' : 's'} (its routes go to the job)`);
+	markBusy();
+	save();
+	return { threads };
+}
+/** the job's best route (inputs: '0' + mask characters) into the lane's archive (the one search's "import", else "seed") */
+function laneBest(inputs) {
+	if (!S || !S.lane || !S.running || !cur || !inputs || !/^[0-O]+$/.test(inputs)) return false;
+	if (!toArchive(inputs)) return false;
+	S.lane.fed++;
+	return true;
+}
 /** stops the running search (a route found so far stays) */
 function stop() {
 	if (!running()) return state();
@@ -3216,6 +3266,6 @@ function shutdown() {
 	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
 }
 
-module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
+module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, demote, laneBest, found, solveFile, makeJob, shutdown,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
