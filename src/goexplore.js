@@ -212,6 +212,8 @@
 //        [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
 //        [--sat=1 (coarse cells: the dead-end brake, SAT_ZONE: a region whose picks stop making new cells sinks behind the
 //        rest in heads A and B; 0: the picks as before)] [--satN=20000 (the excess past which a region is braked)]
+//        [--antipin=1 (coarse cells, with --sat: the anti-pinning decay, a region's fruitless picks / --apK tiles in head
+//        A, its head-B weight / (1 + that), from the first fruitless pick: the anti-pinning decay by SAT_ZONE; 0: as before)] [--apK=25]
 //        [--satGpu=0 (1: the brake in the GPU random runs too, --gpu=1; off by default: Egg Quest II's first route)]
 //        [--deaths=-1 (deaths as moves: -1 auto = where something kills and a checkpoint or 2+ spawns exist
 //        (deathMovesFor), 1 wherever something kills (a lone spawn too), 0 off: every death ends its run, as before; a
@@ -310,7 +312,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, antipin: 1, apK: 25, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -397,6 +399,18 @@ const SAT_ZONE = 8, SAT_BAND = 8, SAT_CELL = 20, SAT_MU = 1, SAT_B = 10, SAT_SLA
  *  dead-end-traps study's gate benchmark, deterministic CPU: 208 / 230 gates at 20000 vs 205 / 230 at 200 (oct#4 lost) and
  *  205 / 230 on main) */
 const satOver = (ex, n) => (ex > n ? Math.sqrt(ex - n) : 0);
+// The anti-pinning decay (--antipin=1, coarse cells, with the brake's regions; 0: the picks as before). The brake above
+// bites only past --satN picks of excess, and a nearer attempt anywhere in the region resets it: a FALSE NEAR (the door-
+// and portal-optimistic reach field's nearest point that the ball cannot pass: a coin door with too few coins, a portal
+// the field reads as a short way) kept head A in its basin for whole runs (the god program's all-levels triage, main
+// 8c00c75: ~24 of the first 149 campaign levels pinned there, many from the first 3-17 s). So every region also counts
+// its FRUITLESS picks: + 1 per pick whose runs made no new cell and no earlier arrival, halved by a pick that made one,
+// 0 after a pick that found a new room or a nearer attempt. Head A adds fruitless / --apK tiles (25 fruitless picks = 1
+// tile, CONTINUOUS from the first one; head B's cell weight is divided by 1 + fruitless / apK), so a basin whose picks
+// stop yielding sinks by itself behind the next region, that one in turn, and it comes back as soon as the others' own
+// fruitless picks weigh as much: a round-robin by yield (a bandit), never a prune (the reach field's -1 stays the only
+// one). A region that keeps making cells (1 per 20 picks: about 40 fruitless in the steady state, 1.6 tiles) is hardly
+// touched: the levels that route fast keep their order.
 // (the memory of a region's excess: an entry of its room's Map, bytes)
 const B_SATZ = 48;
 // --gpu=1: head B's seen counts every SEEN_BATCHES batches, or one batch per SEEN_CELLS cells when that is more (the
@@ -1783,7 +1797,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	/** the excess of cell c's region (0 without the brake) */
 	const exOf = (c) => { if (!SAT || c.room === null) return 0; const v = c.room.sat.get(zoneOf(c.tile)); return v === undefined ? 0 : v; };
 	/** head A's brake for cell c (tiles) */
-	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c), a.satN) : 0);
+	// (--antipin: the region's fruitless picks, fpOf; head A adds fpOf / apK tiles through satPen, head B divides by apDiv)
+	const AP = SAT && a.antipin !== 0, AP_K = Math.max(1, a.apK);
+	let apPicks = 0, apMax = 0;
+	const fpOf = (c) => { if (!AP || c.room === null) return 0; const v = c.room.fp.get(zoneOf(c.tile)); return v === undefined ? 0 : v; };
+	const apDiv = (c) => (AP ? 1 + fpOf(c) / AP_K : 1);
+	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c), a.satN) + (AP ? fpOf(c) / AP_K : 0) : 0);
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03)), { useful: a.useful !== 0 }) : null;   // (its walk cache: 3%)
 	// (the useful territory: a cell's `u`, 2 in a cul-de-sac of its room, 0 else, demotes it: see USEFUL TERRITORY; culPicks,
 	// culCells: counted)
@@ -1891,7 +1910,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, graw: f.graw, cul: f.cul, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, graw: f.graw, cul: f.cul, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), fp: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true, grp: null, dm: null };
 		if (DOM !== null) {
 			r.dm = RM.dom(sim);
@@ -2078,7 +2097,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
 	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
-		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0);
+		roomList.length * B_ROOM + nSatZ * B_SATZ * (AP ? 2 : 1) + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
 	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
@@ -2270,7 +2289,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	let parked = 0;   // (the chunks this worker sat out: stdin "workers K" parked it)
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, apPicks, apMax: Math.round(apMax), wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
@@ -2357,7 +2376,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
 			// (a cell in a cul-de-sac of its room loses to any cell outside one: see USEFUL TERRITORY)
-			let sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1);
+			let sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1) / apDiv(c);
 			// (--timed: a doomed cell only when the sample has nothing else; the draws are the same either way)
 			if (TKEY && c.tm >= 16 && TMD.doomed(TM, c.tile, c.tm >> 4, c.tm & 15)) sc -= 4;
 			const cu = c.u === 2;
@@ -2929,6 +2948,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (v0 === undefined) nSatZ++;
 				room1.sat.set(zone1, fresh ? 0 : Math.max(0, (v0 || 0) + d));
 				room1.ex = fresh ? 0 : Math.max(0, room1.ex + d);
+				// (--antipin: the region's fruitless picks, see the anti-pinning decay)
+				if (AP) {
+					const y = (cells.size - cells0) + (impr - impr0), f0 = room1.fp.get(zone1) || 0;
+					const f1 = fresh ? 0 : y > 0 ? f0 / 2 : f0 + 1;
+					room1.fp.set(zone1, f1);
+					if (f1 > AP_K) apPicks++;
+					if (f1 > apMax) apMax = f1;
+				}
 			}
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
@@ -3639,6 +3666,8 @@ async function main() {
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
 	const usefulNow = () => (a.cells === 'coarse' && a.useful !== 0 ? { useful: { culPicks: total('culPicks'), culCells: total('culCells'), zeroed: total('zeroed'), culSets: total('culSets'), culDropped: total('culDropped'), reculs: total('reculs') } } : {});
+	// (--antipin, coarse cells: the picks in a region past apK fruitless picks, the most fruitless region's count)
+	const antipinNow = () => (a.cells === 'coarse' && a.sat !== 0 && a.antipin !== 0 ? { antipin: { picks: total('apPicks'), max: Math.max(0, ...[...stats.values()].map((v) => v.apMax || 0)) } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
 		samples.push([now, tk]);
@@ -3653,7 +3682,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), antipinNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -3963,7 +3992,7 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...antipinNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
