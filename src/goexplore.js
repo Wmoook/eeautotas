@@ -295,6 +295,8 @@ const REG_STALE_MS = 10 * 60 * 1000;   // a registry file not refreshed for this
 // coarse cells: every SOURCE_S s the "best" source events; SOURCE_MIN_TICKS: shorter attempts are no source (the
 // editor's relay starts from 100 ticks)
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
+// (EEAT_PICKLOG=1: the picks' log every PICKLOG_S s: an event 'picklog', observation only)
+const PICKLOG_S = 30;
 // --gpu=1: head B's seen counts every SEEN_BATCHES batches, or one batch per SEEN_CELLS cells when that is more (the
 // download of millions of cells); the cells' states in host memory: ROLL_HOST_SHARE of the machine's memory, at most
 // half of the free memory, ROLL_HOST_MIN MB at least
@@ -1155,6 +1157,17 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		return bc || popA();
 	};
 	const discovery = [];   // head C (coarse cells): [cell, picks left], the newest room's last
+	// (EEAT_PICKLOG=1, observation only: per head, room and zone of 10 x 10 tiles the picks and the new and improved cells
+	// their runs made, posted every PICKLOG_S s: where the search's picks go, src/out/night/deadends.md)
+	const plog = process.env.EEAT_PICKLOG === '1' ? new Map() : null;
+	const plogRow = (head, c) => {
+		const z = `${head}|${c.room ? c.room.key : 0}|${((c.tile % W) / 10) | 0},${((c.tile / W) / 10) | 0}`;
+		let r = plog.get(z);
+		if (!r) plog.set(z, r = [0, 0, 0, c.room ? c.room.desc : '']);
+		r[0]++;
+		return r;
+	};
+	let lastPlog = Date.now();
 	/**
 	 * The sweep (between two chunks, when the archive is past its share of the budget or --maxCells): the cells no run or
 	 * pick has touched for longest go (a cell's `touch`: the pick count when a run last came through it or it was picked),
@@ -1382,32 +1395,38 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (now - lastStat >= 250) { lastStat = now; post(stat()); }
 		if (now - lastSent >= 250) { lastSent = now; sendNear(); }
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
+		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
 		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) addSeed(String(m.message));
 		lShare = leadShare(now); wShare = wayShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
 			pickL = false; pickW = false;
+			let head = 'A';
 			if (!coarse) e = popA();
 			else if (discovery.length && rnd() < 0.5) {
 				// head C: a new room's first cell, --burst times
 				const d = discovery[discovery.length - 1];
 				e = d[0];
+				head = 'C';
 				if (--d[1] <= 0) discovery.pop();
 				if (e.t >= maxT) continue;
 			} else if (lShare > 0 && rnd() < lShare) {
 				// head L (a route known): the cell most ahead of the best route (none: heads A / B as without it)
 				while (HL.size() > 0) { const c = HL.pop(); if (HL.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
-				if (e === null) e = rnd() < a.pA ? popA() : popB();
-				else { leadPicks++; pickL = true; }
+				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
+				else { leadPicks++; pickL = true; head = 'L'; }
 			} else if (wShare > 0 && rnd() < wShare) {
 				// head W (a route known): the off-schedule cell most ahead of the route by its tile alone
 				while (HW.size() > 0) { const c = HW.pop(); if (HW.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
-				if (e === null) e = rnd() < a.pA ? popA() : popB();
-				else { wayPicks++; pickW = true; }
+				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
+				else { wayPicks++; pickW = true; head = 'W'; }
 			} else if (rnd() < a.pA) e = popA();
-			else e = popB();
+			else { e = popB(); head = 'B'; }
 			if (e === null) { end = 'exhausted'; break; }
+			// (EEAT_PICKLOG=1: the picks per head, room and 10 x 10-tile zone, with the cells they made; observation only)
+			const plRow = plog !== null ? plogRow(head, e) : null;
+			const cells0 = cells.size, impr0 = impr;
 			e.picks++; e.ver++; picks++; e.touch = picks;
 			if (coarse) e.room.picks++;
 			hpush(e);
@@ -1496,6 +1515,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				}
 				if (end) break;
 			}
+			if (plRow !== null) { plRow[1] += cells.size - cells0; plRow[2] += impr - impr0; }
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
 		pickL = false; pickW = false;
@@ -2110,7 +2130,7 @@ async function main() {
 		maxCells: a.maxCells, maxSnaps: a.maxSnaps });
 	// the fastest verified route; the closest state
 	let route = null, first = null, near = null, nearPending = false, heapWarned = false;
-	const stats = new Map(), dones = new Map();
+	const stats = new Map(), dones = new Map(), plogs = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
 	let nLead = 0, nWay = 0;   // (the routes head-L picks found; the routes that descend from a head-W pick)
 	const samples = [[Date.now(), 0]];
@@ -2250,6 +2270,17 @@ async function main() {
 			if (bursts) bursts.edge(msg.from, msg.tile, msg.to, msg.trig);
 		} else if (msg.type === 'finish') {
 			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`, !!msg.byL, !!msg.byW);
+		} else if (msg.type === 'picklog') {
+			plogs.set(msg.seed, msg.rows);
+			// (every worker's latest log summed: the 60 rows with the most picks)
+			if (plogs.size >= stats.size) {
+				const sum = new Map();
+				for (const rows of plogs.values()) for (const [k, n, nc, im, desc] of rows) { const r = sum.get(k); if (r) { r[1] += n; r[2] += nc; r[3] += im; } else sum.set(k, [k, n, nc, im, desc]); }
+				const rows = [...sum.values()].sort((x, y) => y[1] - x[1]).slice(0, 60).map(([k, n, nc, im, desc]) => { const [h, , z] = k.split('|'); return [h, desc, z, n, nc, im]; });
+				let picks = 0; for (const r of sum.values()) picks += r[1];
+				say({ ev: 'picklog', sec: sec(), picks, rows });
+				plogs.clear();
+			}
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
 	};
 	const workers = seeds.map((seed, i) => new Promise((res) => {
