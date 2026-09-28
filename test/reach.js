@@ -54,7 +54,8 @@ const levelOfB64 = (b) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(
 // P portal id 1 -> 2 (rot 1), Q portal id 2 -> 1 (rot 3)
 // c curse (1 s), w spawn 1582 #0, p / q / r present 1101 at rotation 1 / 0 / 3, h half block 1116 at rotation 2
 const ID = { '#': [9], S: [255], T: [121], o: [4], '^': [2], '<': [1], '>': [3], '~': [119], H: [120], x: [361, 1], '-': [1052, 1], _: [1041, 1], B: [116], D: [117],
-	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2] };
+	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2],
+	k: [100], b: [101], '1': [43, 1], '2': [43, 2], '3': [213, 1], '4': [213, 2] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -559,6 +560,25 @@ function sectionE() {
 	check('writeReachFile refuses a goals field (its cut-off states are no proof)', refused);
 }
 
+// ---------------------------------------------------------------- H coin doors that never open
+function sectionH() {
+	section('H coin doors above the level coins are walls (sound: the count never passes the coin tiles)');
+	const cost = (rows) => { const L = ascii(box(rows)); const f = R.reachField(L); return { L, start: R.costAt(f, startSim(L, 30)) }; };
+	// gold: one coin, a door of 2 in front of the trophy: cut off; a door of 1: a way
+	const a = cost(['S.k.2.T']), b = cost(['S.k.1.T']);
+	check('one gold coin, a 2-coin door before the trophy: the start is cut off', a.start < 0, fmt(a.start));
+	check('one gold coin, a 1-coin door before the trophy: the start has a way', b.start >= 0, fmt(b.start));
+	const na = R.neverOpenDoors(a.L), nb = R.neverOpenDoors(b.L);
+	check('neverOpenDoors: the 2-coin door only', na !== null && na.reduce((x, y) => x + y, 0) === 1 && nb === null);
+	// blue coins count apart from gold: two gold coins do not open a blue door of 2
+	const c = cost(['S.kkb.4.T']), d = cost(['S.kbb.4.T']);
+	check('two gold + one blue coin, a 2-blue-coin door: cut off', c.start < 0, fmt(c.start));
+	check('one gold + two blue coins, a 2-blue-coin door: a way', d.start >= 0, fmt(d.start));
+	// the door is only a wall where it stands: a way around it stays open
+	const e = cost(['.........', '.........', '.........', 'S.k.2..T.']);
+	check('a way over the never-open door stays open', e.start >= 0, fmt(e.start));
+}
+
 // ---------------------------------------------------------------- F agree
 function sectionF() {
 	section(`F agree: the JS lookup = the native tool's (host${GPU ? ' and GPU' : ''})`);
@@ -650,6 +670,7 @@ async function sectionG() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
+	if (want('H')) sectionH();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });

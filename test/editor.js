@@ -1075,6 +1075,20 @@ async function cpuSection() {
 	check('the one search\'s GPU bursts (a stand-in for eegpu): the key is the level\'s one trigger; a burst from the start\'s room reaches it, goes on into the key\'s room and its attempt goes into the archive',
 		TRk.n === 1 && !!b1 && b1.room === '(start)' && b1.reached && b1.changed && !!ob.done && ob.done.gpu && ob.done.gpu.imports >= 1 && ob.done.workers[0].imports >= 1 &&
 		!ob.events.some((e) => e.ev === 'warning'), `${TRk.n} trigger(s); ${JSON.stringify(b1 || null)}; ${JSON.stringify(ob.done && ob.done.gpu)}; ${ob.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ')}`);
+	// the stall ladder (bursts.js STALL_N, --stallLadder): a stand-in whose bursts never get nearer (exhausted where they
+	// started): after 3 such bursts of the arm, its start goes up the wall ladder at any distance (a burst "· stalled", then
+	// "wall ... back"), each start once; with --stallLadder=0 never
+	const stuckTool = path.join(HOME, 'burst_stuck.js');
+	fs.writeFileSync(stuckTool, ["'use strict';", "console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
+		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 3, states: 9 })), 30);"].join('\n'));
+	const sl1 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', `--tool=${stuckTool}`, `--work=${path.join(HOME, 'bursts_sl1')}`]);
+	const sl0 = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=4', '--mem=300', '--bursts=1', '--stallLadder=0', `--tool=${stuckTool}`, `--work=${path.join(HOME, 'bursts_sl0')}`]);
+	const bw = (o) => o.events.filter((e) => e.ev === 'burst' && !e.arm).map((e) => e.what || '');
+	const w1 = bw(sl1), w0 = bw(sl0);
+	const firstStall = w1.findIndex((w) => / · stalled/.test(w));
+	check('the stall ladder: a burst arm that gained nothing 3 times in a row goes up the wall ladder at any distance (a stalled burst, then its ladder), each start once; --stallLadder=0: never',
+		firstStall >= 2 && w1.slice(firstStall + 1).some((w) => /stalled · wall \d+ back/.test(w)) && w0.length >= 4 && !w0.some((w) => /stalled/.test(w)),
+		`on: ${w1.length} bursts, the first stalled #${firstStall}: ${w1.slice(0, 8).join(' | ')}; off: ${w0.length} bursts`);
 	// after the first route (src/out/night/macro.md). The sound lower bound per tile (goexplore.js lowerBoundTiles): along
 	// every route of the key level, at every tick t, t + the bound at the ball's tile is at most the route's length (it never
 	// cuts a real route), and it is not all zeros

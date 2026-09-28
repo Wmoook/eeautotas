@@ -75,6 +75,15 @@ const FINE = [{ cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16, cap: 1048576 }, { cqx: 1, c
 const FINE_TEXT = ['2 px and 1/16', '1 px and 1/32'];
 const WALL = [{ back: 150, fine: 0 }, { back: 400, fine: 0 }, { back: 150, fine: 1 }, { back: 400, fine: 2 }];
 const FINE_NEAR = 8;
+// the stall ladder (--stallLadder, default on): an arm (a room, or its portal arm) whose last STALL_N bursts got no nearer
+// than they started (none reached a target or found a room), whatever the distance and whether their tables filled or
+// ran out of situations, goes up the same ladder from its latest start, then further back (STALL_FAR: the speed a leg
+// needs can come from long before the cell nearest its targets: Forgotten Helix's coin 4 needs a fall of 9.5+ px/tick into
+// the shaft's portal (249, 123), built on the arrows 200+ ticks before; its 703 bursts from the shaft's cells, 41 tiles
+// out, never tried from before them); each start once per arm (by its length), the counter back to 0 after a ladder
+const STALL_N = 3;
+const STALL_FAR = [{ back: 1000, fine: 1 }, { back: 2000, fine: 0 }];
+const STALL_WALL = WALL.concat(STALL_FAR);
 // (a chain link after a full table: the settings with the next smaller layer cap)
 const GREEDIER = [2, 4, 4, 4, 4, 2];
 // how far back along the start cell's run a burst starts, in turn per room (ticks; never 0: the cell nearest the targets
@@ -226,11 +235,11 @@ function create(o) {
 	const room = (m) => {
 		let r = rooms.get(m.room);
 		if (!r) {
-			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(),
+			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), stall: 0, ladders: null,
 				trig: m.t > 0 && m.trig !== false };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
-			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null });
+			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, stall: 0, ladders: null });
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
@@ -667,6 +676,19 @@ function create(o) {
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
 			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
+			// the stall ladder: an arm's bursts that gained nothing (no target, no room, no nearer), STALL_N in a row, send
+			// this one's start up the ladder (each start once per arm); a gain starts the count over
+			let stallNow = false;
+			if (job.r && a.stallLadder !== 0 && !job.stallLadder) {
+				const gain = r.reached || r.fresh > 0 || (Number.isFinite(r.near) && r.near < job.startDist - 1);
+				job.r.stall = gain ? 0 : (job.r.stall || 0) + 1;
+				if (job.r.stall >= STALL_N && job.chain < CHAIN_MAX) {
+					const from = job.from0 || job.inputs;
+					const seen = job.r.ladders || (job.r.ladders = new Set());
+					if (!seen.has(from.length)) { seen.add(from.length); stallNow = true; job.r.stall = 0; st.stalls = (st.stalls || 0) + 1; }
+				}
+			}
+			if (stallNow) { job.stallLadder = true; job.wall = 0; job.from0 = job.from0 || job.inputs; job.what = `${job.what.replace(/ · (chain|finer|wall) .*$/, '')} · stalled`; }
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
 			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
@@ -686,9 +708,12 @@ function create(o) {
 					cells: keep ? job.cells : CONFS[ci2], fine: keep ? job.fine : 0,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
-			} else if (job.r && !r.reached && r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.wall || 0) < WALL.length && job.chain < CHAIN_MAX) {
-				// every situation tried a few tiles from a target: the wall ladder from the same start (further back, then finer)
-				const k = job.wall || 0, w = WALL[k], from = job.from0 || job.inputs;
+			} else if (job.r && !r.reached && ((r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.wall || 0) < WALL.length) ||
+				(job.stallLadder && (job.wall || 0) < STALL_WALL.length)) && job.chain < CHAIN_MAX) {
+				// every situation tried a few tiles from a target (or the arm stalled: the stall ladder, below): the wall ladder
+				// from the same start (further back, then finer)
+				const ladder = job.stallLadder ? STALL_WALL : WALL;
+				const k = job.wall || 0, w = ladder[k], from = job.from0 || job.inputs;
 				const inputs = from.length > w.back + 50 ? from.slice(0, Math.max(o.minLen || 0, from.length - w.back)) : from;
 				next = Object.assign({}, job, { inputs, from0: from, chain: job.chain + 1, wall: k + 1, fine: w.fine, cells: w.fine ? FINE[w.fine - 1] : job.cells,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '')} · wall ${w.back} back${w.fine ? `, ${FINE_TEXT[w.fine - 1]}` : ''}` });
