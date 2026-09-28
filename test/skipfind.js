@@ -149,6 +149,56 @@ console.log('\n== an attempt: its later points reached sooner (prepare attempt m
 	check('... and it ends on "stop" with its counts', out.evs.some((e) => e.ev === 'done' && e.why === 'stopped' && e.shortcuts >= 1 && e.routes >= 1));
 }
 
+// ---------------------------------------------------------------- the route arm on an attempt (routearm.js)
+// before any route the one search's route arm searches from the NEAREST ATTEMPT's states (goexplore.js --rArmPre): its
+// trace of an attempt (no finish), its judge (a shortened attempt that does not die; not one that dies), and one start
+// with a stand-in for `eegpu explore --ahead=1` (it holds right from the start's state until the ball stops against the
+// block, a state the attempt reaches later): spliced by the attempt's own inputs into a shortened attempt ("shortcut")
+console.log('\n== the route arm on an attempt (routearm.js, a stand-in eegpu)');
+await (async () => {
+	const RA = require('../src/routearm.js'), RF = require('../src/reach.js'), G = require('../src/gpu.js');
+	const W = 160, H = 8, cells = room(W, H);
+	cells.push([2, H - 2, 255], [W - 4, H - 2, 121], [22, H - 2, 9]);
+	const { file, level } = mkLevel('arm', W, H, cells);
+	const full = C.evaluate(level, runOf([[4, 40], [2, 60], [4, 120], [5, 3], [4, 600]]));
+	const att = full.ms.slice(0, 300);
+	const R = RA.trace(level, null, att, true);
+	check('trace: an attempt that does not finish is traced as one (its later points are the arm\'s goals)', !!R && R.attempt && R.n === 300 && !RA.trace(level, null, att, false), R && `${R.n} ticks, attempt ${R.attempt}`);
+	const stand = path.join(TMP, 'arm-standin.js');
+	fs.writeFileSync(stand, `'use strict';
+const E = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'eesim.js'))}), C = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'common.js'))});
+const a = process.argv.slice(2), arg = (k) => { const s = a.find((x) => x.startsWith('--' + k + '=')); return s ? s.slice(k.length + 3) : ''; };
+const L = E.loadLevel(process.env.ARM_LEVEL), ms = C.readEetas(a[2]), from = +arg('from');
+const sim = new E.EESim(L), inp = new E.EEInput(); sim.reset();
+const X = [], VX = [];
+for (let t = 0; t <= ms.length; t++) { X.push(sim.px); VX.push(sim.speed_x); if (t < ms.length) { E.applyMask(inp, ms[t]); sim.tick(inp); } }
+sim.reset(); for (let t = 0; t < from; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); }
+let hit = '';
+for (let k = 0; k < 400; k++) { E.applyMask(inp, 4); sim.tick(inp); hit += '4'; if (k > 5 && sim.speed_x === 0 && sim.on_ground) break; }
+const t = from + hit.length;
+let j = -1; for (let q = t + 1; q <= ms.length; q++) if (X[q] === sim.px && VX[q] === 0) { j = q; break; }
+console.log(JSON.stringify({ ev: 'ready' }));
+if (j > 0) console.log(JSON.stringify({ ev: 'hit', tick: t, gain: j - t, refTick: j, inputs: hit }));
+console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: hit.length, states: hit.length }));
+`);
+	process.env.ARM_LEVEL = file;
+	const work = path.join(TMP, 'armwork');
+	fs.mkdirSync(work, { recursive: true });
+	const blob = G.levelBlob(level);
+	const shorts = [];
+	const ra = RA.create({ L: level, field: RF.reachField(level, {}), tool: stand, bin: path.join(work, 'level.bin'), fp: G.blobFp(blob), work, cacheArgs: [], a: { gpuCells: 20, burstCap: 4096 },
+		bound: () => 1e9, say: () => {}, finish: () => {}, broadcast: () => {}, shortcut: (ms, saved, how) => shorts.push({ ms, saved, how }) }, { minPot: -1e9, localTries: 1 });
+	ra.setAttempt(att);
+	check('the arm takes the attempt as its target (no route yet)', ra.ready() && ra.onAttempt());
+	const r = await ra.run(0, {});
+	const sc = shorts[0];
+	const endOf = (ms) => { const s = new E.EESim(level); s.reset(); const i = new E.EEInput(); for (const m of ms) { E.applyMask(i, m); s.tick(i); if (s.is_dead) return null; } return s.stateHash(false, true); };
+	check('one start: a shortened attempt (the attempt\'s end state, coin-blind, 20+ ticks sooner), no route claimed', !!sc && sc.ms.length <= att.length - 20 && endOf(sc.ms) === endOf(att),
+		sc ? `${att.length} -> ${sc.ms.length} (-${sc.saved}, from ${r && r.s}: ${sc.how})` : `none (start ${r && r.s}, hits ${r && r.hits}, ends ${r && r.ends.join(' / ')})`);
+	ra.setRoute(full.ms);
+	check('a route replaces the attempt as the target', ra.ready() && !ra.onAttempt());
+})();
+
 // ---------------------------------------------------------------- the jump skip is exact
 // bfs skips a jump input where the same input without it leaves no jumps (jump_count >= max_jumps after the tick, no
 // levitation, the timer on): the two states must be equal. Checked on every state of a jumpy random walk in both rooms'
