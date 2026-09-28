@@ -41,7 +41,7 @@ process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }
 
 // ASCII rooms: # wall, . air, S spawn, T trophy, k red key, d red door, $ coin, c coin door (2 coins), s purple switch 1,
 // g purple switch door 1
-const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1] };
+const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1], a: [43, 1], b: [43, 16] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -260,7 +260,45 @@ function sectionC() {
 	check('... one worker with a tick budget is reproducible', !!g1.route && !!g2.route && g1.route.inputs === g2.route.inputs && g1.route.simTicks === g2.route.simTicks);
 }
 
+/** D the coin classes (steer.js fitClasses): 17 coins, a 1-coin door and a 16-coin door before the trophy. With a layer
+ *  budget of 4 the per-count coins (17 layers) are refused and the classes {0, 1, 16} (3 layers) fit: the steer values
+ *  equal the per-count build's in the last class (16+ coins: the same doors, no coin step left), have a value wherever
+ *  the per-count build has one (a class's coin tiles step it: the physics layers are not coin-static there), the file
+ *  round trip keeps them (kind 10 and its counts), and with the budget the per-count coins fit the build stays per count
+ *  (kind 6) */
+function sectionD() {
+	section('D coin classes');
+	const w = 48, mid = '.'.repeat(w - 2), floor = [...mid], top = [...mid];
+	for (let x = 1; x <= 17; x++) floor[x] = '$';
+	floor[21] = 'S'; floor[w - 10] = top[w - 10] = 'a'; floor[w - 7] = top[w - 7] = 'b'; floor[w - 4] = 'T';
+	const t = top.join('');
+	const L = levelOf(ascii([wall(w), row(t), row(t), row(t), row(t), row(floor.join('')), wall(w)]).buf);
+	const full = SF.buildSteer(L), cl = SF.buildSteer(L, { maxLayers: 4 });
+	const fk = full.feats.find((f) => f.kind === 6 || f.kind === 10), ck = cl.feats.find((f) => f.kind === 6 || f.kind === 10);
+	check(`per count within the budget (${full.info.features.join(', ')}; ${full.S} layers)`, !!fk && fk.kind === 6 && fk.radix === 17, fk && `${fk.kind} ${fk.radix}`);
+	check(`classes over it (${cl.info.features.join(', ')}; ${cl.S} layers, over ${cl.info.over})`, !!ck && ck.kind === 10 && ck.values.join() === '0,1,16' && !cl.info.over, ck && `${ck.kind} ${ck.values}`);
+	const rd = SF.readSteerFile(SF.steerFileBytes(cl, G.blobFp(G.levelBlob(L))));
+	let same = true, fileSame = true, n = 0;
+	const sim = new E.EESim(L); sim.reset();
+	const inp = new E.EEInput();
+	for (let tk = 0; tk < 600; tk++) {
+		E.applyMask(inp, [4, 4, 5, 2, 0, 3][(tk / 37 | 0) % 6]); sim.tick(inp);
+		for (const c of [0, 1, 7, 15, 16, 17]) {
+			const c0 = sim.coins; sim.coins = c;
+			const a = SF.steerFifths(full, sim), b = SF.steerFifths(cl, sim), f = SF.steerFifths(rd, sim);
+			if (c >= 16 ? a !== b : a >= 0 && b < 0) { if (same) console.log(`    differ at coins ${c}, tick ${tk}: ${a} vs ${b}`); same = false; }
+			if (f !== b || SF.steerScore(rd, sim) !== SF.steerScore(cl, sim)) fileSame = false;
+			sim.coins = c0; n++;
+		}
+	}
+	check(`the class field equals the per-count one at 16 / 17 coins and has a value wherever it has one at 0 / 1 / 7 / 15 (${n} lookups)`, same);
+	check('the class file round trip (kind 10, its counts) gives the same numbers', fileSame);
+	const sim0 = new E.EESim(L); sim0.reset();
+	check(`the start has a value (classes ${SF.steerAt(cl, sim0)}, per count ${SF.steerAt(full, sim0)}) that counts the coins' detour (the door-blind reach field ${R.costAt(R.reachField(L), sim0)})`, Number.isFinite(SF.steerAt(cl, sim0)) && SF.steerAt(cl, sim0) > R.costAt(R.reachField(L), sim0) + 25);
+}
+
 if (want('A')) sectionA();
+if (want('D')) sectionD();
 if (want('B')) sectionB();
 if (want('C')) sectionC();
 console.log(`\n${pass} passed, ${fail} failed`);
