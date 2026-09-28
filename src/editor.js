@@ -733,8 +733,9 @@ function replayRooms(masks, withPath) {
 	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
 }
 /** the distance (tiles) from which an attempt's way is a death's: RF.DEATH_TILES, but none (1e4: cut off) when the searches'
- *  reach file has no death edges (cur.opts.deathFree: a long real way, Infinity Pain's 3,178 tiles, is no death) */
-const deathTiles = () => (cur && cur.opts && cur.opts.deathFree ? 1e4 : RF.DEATH_TILES);
+ *  reach file has no death edges (cur.opts.fileDeaths false: the death-free file, or a level without deaths; a long real way,
+ *  Infinity Pain's 3,178 tiles without the deaths, Egg Quest II's start 3,386, is no death) */
+const deathTiles = () => (cur && cur.opts && cur.opts.fileDeaths === false ? 1e4 : RF.DEATH_TILES);
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
  *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
@@ -1484,6 +1485,9 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
 	// (the reach file the searches read has no death edges: goexplore.js builds its field the same way, --deaths)
 	cur.opts.deathFree = !!rf.deathFree;
+	// (the searches' file has death edges: a distance of RF.DEATH_TILES or more is a way through a death; an older cache
+	// without the flag: as it had)
+	cur.opts.fileDeaths = rf.deaths === undefined ? true : !!rf.deaths && !rf.deathFree;
 	cur.opts.noWayUp = noWayUp;
 	// (the check of a level the reach field calls impossible runs as before: no steer field)
 	if (noWayUp) { cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
@@ -1614,7 +1618,7 @@ function reachInfo(buf, hash) {
 			let lfp = null;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(fs2, lfp)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
-			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms, deathFree, onlyDeath,
+			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms, deathFree, onlyDeath, deaths: !!f.deaths,
 				...(deathFree ? { searchStartCost: RF.costAt(fs2, sim) } : {}), ...(f.prot ? { prot: f.prot } : {}) });`;
 		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(), deathsTaken: deathsTaken(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), reach: require.resolve('./reach.js'), gpu: require.resolve('./gpu.js') } } });
