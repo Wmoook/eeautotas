@@ -306,10 +306,133 @@ function request(port, method, p, body) {
 		rq.end(b || undefined);
 	});
 }
+/** a function of the page's script by its name (`function name(` at column 0 up to its closing `}` at column 0), and a
+ *  one-line `const name = ...` (the review suite's way of running the page's own code) */
+function pageFnSrc(name) {
+	const lines = PAGE.split('\n');
+	const k = lines.findIndex((l) => new RegExp(`^(async )?function ${name}\\(`).test(l));
+	const e = k < 0 ? -1 : lines.indexOf('}', k);
+	return e < 0 ? '' : lines.slice(k, e + 1).join('\n');
+}
+const pageConstSrc = (name) => { const x = PAGE.match(new RegExp(`^const ${name} = .*$`, 'm')); return x ? x[0] : ''; };
+/** a stand-in for a canvas 2D context: the calls (with the styles they drew in), the standard methods the page may use */
+function fakeCtx() {
+	const calls = [], st = [];
+	const g = { calls, strokeStyle: '#000', fillStyle: '#000', lineWidth: 1, globalAlpha: 1, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', lineJoin: 'miter', lineCap: 'butt', dash: [] };
+	const rec = (name) => (...a) => { calls.push({ name, a, stroke: g.strokeStyle, fill: g.fillStyle, width: g.lineWidth, alpha: g.globalAlpha, dash: g.dash.slice(), font: g.font }); };
+	for (const m of ['beginPath', 'moveTo', 'lineTo', 'arc', 'arcTo', 'closePath', 'stroke', 'fill', 'fillText', 'clearRect', 'fillRect', 'strokeRect', 'rect', 'ellipse', 'quadraticCurveTo', 'bezierCurveTo']) g[m] = rec(m);
+	g.save = () => { st.push({ strokeStyle: g.strokeStyle, fillStyle: g.fillStyle, lineWidth: g.lineWidth, globalAlpha: g.globalAlpha, dash: g.dash }); calls.push({ name: 'save', a: [] }); };
+	g.restore = () => { Object.assign(g, st.pop() || {}); calls.push({ name: 'restore', a: [] }); };
+	g.setLineDash = (d) => { g.dash = d.slice(); };
+	g.getLineDash = () => g.dash.slice();
+	g.measureText = (s) => ({ width: String(s).length * 7 });
+	return g;
+}
+/**
+ * The search frontier (editor.html: frontierOf, drawFrontier, gotoFrontier, glideStep cut out of the page and run): the
+ * toggle in the map toolbar (on by default, remembered), F and the closest attempt's "Go to", the layer above the map; the
+ * marker's drawing on a fake canvas context from a sample closest path: the ring at the path's end (its size at every
+ * zoom), the pulse while the search runs (none once it stopped or the level changed), the brighter trail, the label;
+ * off the view an arrow on its edge; hidden once a route is known or turned off.
+ */
+function frontierChecks() {
+	const tools = (PAGE.match(/<div class="tools" id="tools">[\s\S]*?<\/div>/) || [''])[0];
+	check('the search frontier: a "search frontier" toggle in the map toolbar (on by default, remembered), its own layer above the map (clicks pass through), F and the closest attempt\'s "Go to" take the map there',
+		/<label class="ck"[^>]*><input type="checkbox" id="cFrontier" checked> search frontier<\/label>/.test(tools) &&
+		/<canvas id="cv"><\/canvas><canvas id="cvFx" class="fx" aria-hidden="true"><\/canvas>/.test(PAGE) && /\.stage canvas\.fx \{ pointer-events: none; \}/.test(PAGE) &&
+		/^const FX = \{ on: store\.get\('eeat\.editor\.frontier'\) !== '0',/m.test(PAGE) && /store\.set\('eeat\.editor\.frontier', FX\.on \? '1' : '0'\)/.test(PAGE) &&
+		/^\$\('cFrontier'\)\.checked = FX\.on;$/m.test(PAGE) && /if \(k === 'f' \|\| k === 'F'\) \{ gotoFrontier\(\); return; \}/.test(PAGE) &&
+		/<button class="small" id="cGoto"[^>]*>[^<]*Go to<\/button>/.test(PAGE) && /\$\('cGoto'\)\.onclick = \(\) => gotoFrontier\(\);/.test(PAGE) &&
+		// (the layer redraws with the map, and on its own while it pulses; it follows the window's size)
+		/if \(VW\.dirty\) \{ VW\.dirty = false; draw\(\); FX\.dirty = true; \}\n\tif \(FX\.dirty \|\| \(FX\.live && now - FX\.at >= FX_FRAME_MS\)\) drawFx\(now\);/.test(PAGE) &&
+		/fx\.width = w; fx\.height = h; FX\.dirty = true;/.test(PAGE));
+	const env = { $: () => ({ textContent: '' }), SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false }, performance: { now: () => 1000 }, changedView: () => {} };
+	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), ...['frontierOf', 'drawFrontier', 'gotoFrontier', 'glideStep'].map(pageFnSrc)].join('\n');
+	let F = null;
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { frontierOf, drawFrontier, gotoFrontier, glideStep, ZOOMS };`)(...Object.values(env)); });
+	check('the search frontier\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
+	if (!F) return;
+	// a sample closest attempt: 320 ticks right along a floor, up a step, a portal jump (not joined) and on
+	const path = [];
+	for (let t = 0; t <= 320; t++) path.push(t < 200 ? [40 + t * 2, 88] : t < 260 ? [440 + (t - 200), 88 - (t - 200)] : [900 + (t - 260) * 3, 40]);
+	const closest = { dist: 13.4, tiles: 13.4, ticks: 320, runTicks: 312, time: '0:03.12', path, strategy: 'random runs (CPU)', inputs: '4'.repeat(320) };
+	const st = { running: true, stage: 'searching', result: null, closest };
+	const f = F.frontierOf(st, true, false);
+	const end = path[path.length - 1];
+	check('frontierOf: the end of the closest attempt\'s path, "nearest: <tiles> · <time> · <strategy>", pulsing while the search runs',
+		f && f.x === end[0] && f.y === end[1] && f.label === 'nearest: 13.4 tiles · 0:03.12 · random runs (CPU)' && f.pulse && !f.stale && f.P === path, JSON.stringify(f && { x: f.x, y: f.y, label: f.label, pulse: f.pulse }));
+	const lab = (c) => { const x = F.frontierOf({ running: true, closest: Object.assign({}, closest, c) }, true, false); return x && x.label; };
+	const stopped = F.frontierOf(Object.assign({}, st, { running: false, stage: 'stopped' }), true, false), stale = F.frontierOf(st, true, true);
+	check('frontierOf: a stopped search keeps it (still), an edited level dims it (still); hidden once a route is known, with the toggle off, without a closest attempt or its path; labels',
+		stopped && !stopped.pulse && !stopped.stale && stale && !stale.pulse && stale.stale &&
+		F.frontierOf(Object.assign({}, st, { result: { time: '0:05.00', path } }), true, false) === null && F.frontierOf(st, false, false) === null &&
+		F.frontierOf({ running: true, closest: null }, true, false) === null && F.frontierOf({ running: true, closest: Object.assign({}, closest, { path: [] }) }, true, false) === null &&
+		F.frontierOf(null, true, false) === null && lab({ tiles: 280 }) === 'nearest: 280 tiles · 0:03.12 · random runs (CPU)' && lab({ tiles: 1 }) === 'nearest: 1 tile · 0:03.12 · random runs (CPU)' &&
+		lab({ tiles: 0 }) === 'nearest: at the trophy · 0:03.12 · random runs (CPU)' && lab({ strategy: 'x'.repeat(60) }).endsWith(`${'x'.repeat(42)}…`),
+		JSON.stringify([stopped && stopped.pulse, stale && stale.pulse, lab({ tiles: 280 }), lab({ tiles: 1 }), lab({ tiles: 0 })]));
+	// drawn: the level's origin (30, 20) on a 1200 x 700 canvas, 16 px a tile (s = 1), device pixel ratio 1
+	const draw = (fr, s, d, now, ox, oy, cw, ch) => { const g = fakeCtx(); const e = errOf(() => F.drawFrontier(g, fr, ox, oy, s, d, now, cw, ch)); return { g, e, c: g.calls }; };
+	const finite = (c) => c.every((q) => q.a.every((v) => typeof v !== 'number' || Number.isFinite(v)));
+	const inside = (c, cw, ch) => c.filter((q) => q.name === 'fillText').every((q) => q.a[1] >= 0 && q.a[1] <= cw && q.a[2] >= 0 && q.a[2] <= ch);
+	const X = 30 + end[0], Y = 20 + end[1];
+	const A = draw(f, 1, 1, 250, 30, 20, 1200, 700);
+	const arcs = A.c.filter((q) => q.name === 'arc' && Math.abs(q.a[0] - X) < 1e-9 && Math.abs(q.a[1] - Y) < 1e-9);
+	const ring = arcs.filter((q) => q.a[2] === 12), pulse = arcs.filter((q) => q.a[2] > 12 + 1e-9);
+	const text = A.c.filter((q) => q.name === 'fillText').map((q) => q.a[0]).join('');
+	// the trail: the last 300 ticks in 6 pieces (a glow and a bright core each), older fainter; the jump of more than 40 px not joined
+	const trail = A.c.filter((q) => (q.name === 'moveTo' || q.name === 'lineTo') && q.a[1] <= 20 + 88 + 1e-9 && q.a[0] >= 30 + path[20][0]);
+	const alphas = A.c.filter((q) => q.name === 'stroke' && /^rgba\(255,228,184,/.test(q.stroke)).map((q) => +q.stroke.split(',')[3].replace(')', ''));
+	check('drawFrontier (a fake canvas context, the sample path, 16 px a tile): the ring at the path\'s end (12 px of the level), two pulse rings outside it, the attempt\'s last 300 ticks brighter toward the end, ' +
+		'the label "nearest: 13.4 tiles · 0:03.12 · random runs (CPU)" inside the map, nothing but finite numbers, save / restore paired',
+		!A.e && ring.length === 1 && pulse.length === 2 && text === 'nearest: 13.4 tiles · 0:03.12 · random runs (CPU)' && finite(A.c) && inside(A.c, 1200, 700) &&
+		A.c.filter((q) => q.name === 'save').length === A.c.filter((q) => q.name === 'restore').length &&
+		alphas.length === 6 && alphas.every((a, k) => k === 0 || a > alphas[k - 1]) && Math.abs(alphas[5] - 0.95) < 1e-9 &&
+		trail.filter((q) => q.name === 'lineTo').length >= 290 * 2 - 30 && A.c.filter((q) => q.name === 'moveTo' && q.a[0] === 30 + 900 && q.a[1] === 20 + 40).length >= 2,
+		A.e ? A.e.stack : JSON.stringify({ ring: ring.length, pulse: pulse.map((q) => q.a[2]), text, alphas, trail: trail.length }));
+	// the pulse moves; a stopped search and an edited level: no pulse; the edited level dashed and dim
+	const B = draw(f, 1, 1, 700, 30, 20, 1200, 700), S = draw(stopped, 1, 1, 0, 30, 20, 1200, 700), D = draw(stale, 1, 1, 0, 30, 20, 1200, 700);
+	const radii = (r) => r.c.filter((q) => q.name === 'arc' && q.a[2] > 12 + 1e-9 && Math.abs(q.a[0] - X) < 1e-9).map((q) => q.a[2]).sort((a, b) => a - b).join();
+	const dashedRing = D.c.some((q) => q.name === 'arc' && q.a[2] === 12) && D.c.some((q) => q.name === 'stroke' && q.dash.length === 2 && q.stroke === '#ff9f43' && q.alpha === 0.55);
+	check('drawFrontier: the pulse rings grow with the time; a stopped search: the ring alone (no pulse); an edited level: no pulse, the ring dashed at 55%',
+		!B.e && !S.e && !D.e && radii(A) !== radii(B) && radii(B).split(',').length === 2 && radii(S) === '' && radii(D) === '' && dashedRing &&
+		S.c.some((q) => q.name === 'arc' && q.a[2] === 12), `${radii(A)} | ${radii(B)} | ${radii(S)} | ${radii(D)} dashed ${dashedRing}`);
+	// its size at every zoom: 12 px of the level, at least 10 and at most 56 CSS px (d: the device pixel ratio)
+	const ringR = (s, d) => { const r = draw(f, s, d, 0, 0, 0, 1e5, 1e5); const q = r.c.filter((c) => c.name === 'arc' && Math.abs(c.a[0] - end[0] * s) < 1e-9 && Math.abs(c.a[1] - end[1] * s) < 1e-9); return r.e ? NaN : Math.min(...q.map((c) => c.a[2]).filter((v) => v > 4 * d)); };
+	const sizes = [[1 / 16, 1], [1 / 16, 2], [0.5, 1], [1, 1], [2, 1.5], [4, 1], [4, 2], [8, 1]].map(([s, d]) => ringR(s, d));
+	check('drawFrontier: the ring 12 px of the level (3/4 of a tile), at least 10 and at most 56 CSS px (canvas px: x the device pixel ratio): 10 at 1 canvas px a tile (20 at a ratio of 2), ' +
+		'10 at 8, 12 at 16, 24 at 32, 48 at 64, 56 at 128', sizes.join() === [10, 20, 10, 12, 24, 48, 48, 56].join(), sizes.join());
+	// off the view: an arrow on the right edge pointing at it, the label with "F goes there", no ring
+	const O = draw(f, 1, 1, 0, 30 + 2000, 20, 1200, 700);
+	const tri = O.c.findIndex((q) => q.name === 'fill' && q.fill === '#ff9f43');
+	const otext = O.c.filter((q) => q.name === 'fillText').map((q) => q.a[0]).join('');
+	const pts = O.c.slice(0, tri).filter((q) => q.name === 'moveTo' || q.name === 'lineTo').slice(-3);
+	check('drawFrontier off the view: an orange arrow on the map\'s edge (pointing at it), the label "... · F goes there" inside the map, no ring',
+		!O.e && tri > 0 && pts.length === 3 && pts.every((q) => q.a[0] > 1150 && q.a[0] <= 1200 && q.a[1] > 0 && q.a[1] < 700) && pts[0].a[0] > pts[1].a[0] &&
+		otext === 'nearest: 13.4 tiles · 0:03.12 · random runs (CPU) · F goes there' && inside(O.c, 1200, 700) && finite(O.c) &&
+		!O.c.some((q) => q.name === 'arc' && q.a[2] === 12), O.e ? O.e.stack : JSON.stringify({ tri, pts: pts.map((q) => q.a), otext }));
+	// F / "Go to": at least 16 px a tile, the map glides to the end of the path
+	env.SOLVE.st = st;
+	F.gotoFrontier();
+	const g0 = env.VW.glide && Object.assign({}, env.VW.glide), z0 = env.VW.zi;
+	F.glideStep(1150);
+	const mid = [env.VW.camX, env.VW.camY];
+	if (env.VW.glide) F.glideStep(1400);
+	const at = [env.VW.camX, env.VW.camY];
+	env.VW.zi = 12;   // (already nearer: the zoom stays)
+	F.gotoFrontier();
+	const z1 = env.VW.zi;
+	env.SOLVE.st = Object.assign({}, st, { result: { time: '0:05.00', path } });
+	env.VW.glide = null; env.VW.zi = 3;
+	F.gotoFrontier();
+	check('F / "Go to": the map glides to the frontier (300 ms) at 16 px a tile or more, a nearer zoom kept; nothing once a route is known',
+		g0 && g0.x1 === end[0] && g0.y1 === end[1] && F.ZOOMS[z0] === 16 && z1 === 12 && mid[0] > 0 && mid[0] < end[0] && at[0] === end[0] && at[1] === end[1] &&
+		env.VW.glide === null && env.VW.zi === 3, JSON.stringify({ g0, z0, z1, mid, at, zi: env.VW.zi }));
+}
 async function appSection() {
 	section('app: the page and the HTTP API (in-process server, temp data folder)');
 	const scripts = [...PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 	check('the editor page\'s script parses', scripts.length === 1 && !errOf(() => new Function(scripts[0])), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
+	frontierChecks();
 	const SV = require('../src/server.js');
 	await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
 	const port = SV.server.address().port;
