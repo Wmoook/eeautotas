@@ -255,7 +255,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, deaths: 0, roomDead: 1 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: 0, roomDead: 1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -314,10 +314,10 @@ const PICKLOG_S = 30;
 // reach cost, and comes back when something new appears there. The reach field's -1 is still the only prune: this only
 // orders. SAT_SLACK: head A puts a cell whose priority rose by more since it was queued back into the queue (lazily, at
 // its pop).
-const SAT_ZONE = 8, SAT_BAND = 8, SAT_CELL = 20, SAT_N = 200, SAT_MU = 1, SAT_B = 10, SAT_SLACK = 1;
+const SAT_ZONE = 8, SAT_BAND = 8, SAT_CELL = 20, SAT_MU = 1, SAT_B = 10, SAT_SLACK = 1;
 /** the brake of a region (or room) of excess ex: 0 up to SAT_N (a region is saturated after SAT_N picks beyond its yield), then
  *  sqrt(ex - SAT_N): head A adds SAT_MU x that (tiles), head B divides by 1 + that / SAT_B */
-const satOver = (ex) => (ex > SAT_N ? Math.sqrt(ex - SAT_N) : 0);
+const satOver = (ex, n) => (ex > n ? Math.sqrt(ex - n) : 0);
 // (the memory of a region's excess: an entry of its room's Map, bytes)
 const B_SATZ = 48;
 // --gpu=1: head B's seen counts every SEEN_BATCHES batches, or one batch per SEEN_CELLS cells when that is more (the
@@ -989,7 +989,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** the excess of cell c's region (0 without the brake) */
 	const exOf = (c) => { if (!SAT || c.room === null) return 0; const v = c.room.sat.get(zoneOf(c.tile)); return v === undefined ? 0 : v; };
 	/** head A's brake for cell c (tiles) */
-	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c)) : 0);
+	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c), a.satN) : 0);
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	// (--roomDead=1, coarse cells, not with --deaths=1: each room's live tiles, roomDead; a run ends on a tile that is not live
 	// in its room; deadCut counts those states)
@@ -1295,7 +1295,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		for (let k = 0; k < 4; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
 			if (!r.arr.length) continue;
-			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex) / SAT_B : 1);
+			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1);
 			if (w > bw) { bw = w; br = r; }
 		}
 		if (br === null) return popA();
@@ -1304,7 +1304,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
-			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c)) / SAT_B : 1);
+			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1);
 			if (sc > bs) { bs = sc; bc = c; }
 		}
 		return bc || popA();
@@ -1916,7 +1916,7 @@ async function gpuMain(a, L, m) {
 	const exG = (c) => { const v = satG.get(regionOf(c)); return v === undefined ? 0 : v; };
 	// ---- head A's heap (explore()'s): (priority, cell, version)
 	const hv = [], hc = [], hver = [];
-	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c)) : 0);
+	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
 	const hpush = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -1987,7 +1987,7 @@ async function gpuMain(a, L, m) {
 		for (let k = 0; k < 4; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
 			if (!r.arr.length) continue;
-			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex) / SAT_B : 1);
+			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1);
 			if (w > bw) { bw = w; br = r; }
 		}
 		if (br === null) return popA();
@@ -1996,7 +1996,7 @@ async function gpuMain(a, L, m) {
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (cT[c] >= maxT) continue;
-			const sc = (1 / Math.sqrt(1 + cSeen[c]) + 1 / Math.sqrt(1 + cPicks[c])) / (SAT ? 1 + satOver(exG(c)) / SAT_B : 1);
+			const sc = (1 / Math.sqrt(1 + cSeen[c]) + 1 / Math.sqrt(1 + cPicks[c])) / (SAT ? 1 + satOver(exG(c), a.satN) / SAT_B : 1);
 			if (sc > bs) { bs = sc; bc = c; }
 		}
 		return bc >= 0 ? bc : popA();
