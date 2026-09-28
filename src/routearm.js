@@ -198,8 +198,8 @@ function create(o, opts = {}) {
 		for (let k = 0; R && k < Math.ceil(R.n / p.step) + 1; k++) {
 			if (cursor + p.minAhead + p.minGain >= R.n) { cursor = p.minAhead + ((st.pass + 1) * 37) % p.step; st.pass++; }
 			let s = cursor;
-			// (opts.starts: the start ticks in that order, tests; then the passes)
-			if (p.starts && p.starts.length) s = p.starts.shift();
+			// (opts.starts: only these start ticks, in that order: tests, the path benchmark)
+			if (p.starts) { if (!p.starts.length) return null; s = p.starts.shift(); }
 			else cursor += p.step;
 			const jEnd = Math.min(R.n, s + p.maxSpan);
 			const t0 = Date.now();
