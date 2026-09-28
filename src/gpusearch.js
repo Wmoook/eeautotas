@@ -425,7 +425,7 @@ function combineOn(g, base, what) {
 			cand = null;
 		}
 		if (!cand) return 'refused';
-		const v = C.judge(cand, base, base.deaths);
+		const v = C.judge(cand, base, C.deathCap(C.readJSON(path.join(DIR, 'meta.json'), null), base.deaths));
 		if (v.accept) return { u, cand };
 		if (cand.runTicks < base.runTicks && !avoidRng && RANDOM) continue;   // chance dropped: again without new draws
 		if (cand.runTicks < base.runTicks) note(`combined ${u.libUsed.length} shortcuts${g.runs.length > 1 ? ' and the known runs' : ''} but the result is not accepted (${v.reason})`, what);

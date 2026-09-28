@@ -341,7 +341,7 @@ async function appSection() {
 		// no GPU here (the test server measures none: "preparing the GPU", or no native build): Find a route runs on the
 		// CPU alone
 		r = await request(port, 'POST', '/api/editor/solve', { eelvlB64: b64, seconds: 3, workers: 1 });
-		check('POST /api/editor/solve without a GPU: the CPU search alone, with the reason', r.status === 200 && r.json.running && r.json.strategies.map((q) => q.key).join() === 'goexplore' &&
+		check('POST /api/editor/solve without a GPU: the CPU search alone (and the precision stage, a CPU strategy waiting for a stall), with the reason', r.status === 200 && r.json.running && r.json.strategies.map((q) => q.key).join() === 'goexplore,precision' &&
 			/^No GPU search: no NVIDIA GPU is available \(.+\)\. The CPU searches alone/.test(r.json.cpuOnly), `${r.status} ${JSON.stringify(r.json && (r.json.cpuOnly || r.json.error))}`);
 		const t0 = Date.now();
 		while (r.json && r.json.running && Date.now() - t0 < 20000) { await new Promise((res) => setTimeout(res, 200)); r = await request(port, 'GET', '/api/editor/solve'); }
@@ -1160,8 +1160,9 @@ async function cpuSection() {
 		return st;
 	};
 	let st0 = ED.start({ eelvlB64: platBuf.toString('base64'), seconds: 4, workers: 1 }, { available: false, why: 'test: no GPU' });
-	check('no NVIDIA GPU: the search starts anyway, only the CPU strategy, with a note', st0.running && st0.strategies.length === 1 && st0.strategies[0].key === 'goexplore' &&
-		st0.strategies[0].cpu && /no NVIDIA GPU is available \(test: no GPU\)/.test(st0.cpuOnly) && st0.log.some((x) => /CPU searches alone/.test(x)), JSON.stringify(st0.strategies.map((q) => q.key)));
+	check('no NVIDIA GPU: the search starts anyway, only the CPU strategies (the random runs; the precision stage waiting for a stall), with a note', st0.running && st0.strategies.length === 2 &&
+		st0.strategies[0].key === 'goexplore' && st0.strategies[1].key === 'precision' && ['starting', 'waiting'].includes(st0.strategies[1].state) &&
+		st0.strategies.every((q) => q.cpu) && /no NVIDIA GPU is available \(test: no GPU\)/.test(st0.cpuOnly) && st0.log.some((x) => /CPU searches alone/.test(x)), JSON.stringify(st0.strategies.map((q) => `${q.key} ${q.state}`)));
 	let st = await waitDone(20000);
 	let ev = st.result ? C.evaluate(platLevel, Uint8Array.from(st.result.inputs, (c) => c.charCodeAt(0) - 48)) : null;
 	check('no NVIDIA GPU: a route from the CPU search, verified, route.eetas', st.stage === 'found' && st.result.strategy === 'random runs (CPU)' && ev && ev.runTicks === st.result.runTicks &&
@@ -1175,6 +1176,38 @@ async function cpuSection() {
 		st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed >= 4 && st.elapsed < 15 && st.log.some((x) => /checking that with random runs \(CPU\), without the physics check/.test(x)),
 		`${st.elapsed.toFixed(1)} s: ${st.message}`);
 	check('... and no proof (eegpu prove) runs: the physics check has proven it already', !st.proof, JSON.stringify(st.proof || null));
+
+	// the precision stage (src/precision.js, "exact landings"): the user's pocket puzzle (test.eelvl's shape: a trophy pocket
+	// under a spike whose right side is a half block) at x 1976: the ball must drop in with px == 1976.0 exactly. The
+	// random runs stall on the half block, 3.8 tiles out; the stage (its first wait 3 s here) lands the ball there
+	{
+		const OX = 120, PW = OX + 15, PH = 12;
+		const cells = room(PW, PH), inner = [];
+		['..##########.', '..#^.....#S#.', '..#^.....#.#.', '.##^.......#.', '.#..|#######.', '.#..|#.#.....', '.#T.|#.......', '.#####.......'].forEach((row, j) => [...row].forEach((ch, i) => {
+			const x = OX + i, y = 2 + j;
+			if (x >= PW - 1 || y >= PH - 1) return;
+			const id = { '#': [9], '^': [361, 1], '|': [1116, 0], T: [121], S: [255] }[ch];
+			if (id) inner.push([x, y, ...id]);
+		}));
+		const at = new Set(inner.map(([x, y]) => `${x},${y}`));
+		const pBuf = ED.eelvlOf({ name: 'pocket', width: PW, height: PH, cells: [...cells.filter(([x, y]) => !at.has(`${x},${y}`)), ...inner] });
+		const pLevel = E.prepareLevel(EL.toSimLevel(EL.readEelvl(pBuf)));
+		ED.start({ eelvlB64: pBuf.toString('base64'), seconds: 30, workers: 2 }, { available: false, why: 'test: no GPU' }, { precision: true, precWait: 3 });
+		st = await waitDone(60000);
+		const pr = st.result ? Uint8Array.from(st.result.inputs, (c) => (c.charCodeAt(0) - 48) & 31) : null;
+		const pev = pr ? C.evaluate(pLevel, pr) : null;
+		let drop = null;
+		if (pr) {
+			const s = new E.EESim(pLevel), inp = new E.EEInput();
+			s.reset();
+			for (let k = 0; k < pr.length && !drop; k++) { const py0 = s.py; E.applyMask(inp, pr[k]); s.tick(inp); if (py0 === 80 && s.py > py0 && s.px <= 2000) drop = s.px; }
+		}
+		const PS = st.strategies.find((q) => q.key === 'precision');
+		check('the precision stage: the pocket puzzle (a drop at px == 1976.0 exactly) routed by "exact landings" (CPU only), replayed, 0 deaths',
+			st.stage === 'found' && st.result.strategy === 'exact landings' && pev && pev.deaths === 0 && pev.runTicks === st.result.runTicks && drop === 1976 && PS.state === 'found' &&
+			st.log.some((x) => /exactly x = 1976 px/.test(x)), `${st.stage} ${st.result ? `${st.result.time} by ${st.result.strategy} after ${st.result.foundAfter} s, the drop at px ${drop}` : st.message}; ` +
+			`${PS ? `${PS.state}: ${PS.detail}` : 'no precision strategy'}; ${st.log.filter((x) => /exact landings/.test(x)).slice(0, 4).join(' | ')}`);
+	}
 
 	// next to the eegpu stand-in: the CPU's first route bounds the exploration's next pass, and the CPU search stops
 	// when the GPU strategies have ended with a route

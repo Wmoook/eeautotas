@@ -16,6 +16,9 @@
 
 namespace ee {
 
+// deaths as moves: a death's ticks (goexplore.js DEATH_TILES: 55 ticks at the top running speed, 23.3 tiles) in fifths of a tile
+#define EE_DEATH_F 117
+
 struct ExploreHit { u32 parent; u8 option, jumpOption, lane, pad1; float px, vx; i32 layer; i32 gain; i32 refTick; };   // (lane: --lanes)
 
 struct ExploreParams {
@@ -51,6 +54,8 @@ struct ExploreParams {
 	unsigned long long* closest;       // per layer: min of (orderedScore(goal distance) << 32 | parent << 5 | option) (null = off)
 	ReachField reach;                  // when on: the closest attempt's distance; with prune, states it rules out are dropped
 	i32 prune;
+	i32 deaths;                        // 1 (--deaths=1): deaths are moves: a dying child is kept when its respawn pays (kernels.cu
+	                                   // exploreKeepDead), then carried through its dead ticks; 0: every dying child is dropped
 	i32 maxFifths;                     // > 0 (--costslack): states the reach field puts farther from the trophy are dropped
 	i32 maxSteer;                      // > 0 (--costslack with --steer): ... unless the steer field puts them at most this far or has no value for them
 	SteerField steer;                  // when on (--steer): the priority and the closest attempt read it (never the prune)
@@ -118,6 +123,24 @@ EE_HD bool exploreSeenBefore(const u64* cells, u32 mask, u64 cell, u32 layer) {
 	return false;
 }
 
+/** deaths as moves: the cell (bits 12..) marked in the table from this layer on; true when this call put it there (the
+ *  first death to a respawn target in a discrete state: kernels.cu exploreKeepDead), false when it was there already */
+EE_HD bool exploreMarkOnce(u64* cells, u32 mask, u64 cell, u32 layer) {
+	const u64 tag = ((u64)(layer & 0x7ffu) << 1) | 1ull;
+	u32 slot = (u32)(splitmix(cell) & mask);
+	for (u32 probe = 0; probe < 64; probe++) {
+#ifdef __CUDA_ARCH__
+		const u64 prev = atomicCAS((unsigned long long*)&cells[slot], 0ull, (unsigned long long)(cell | tag));
+#else
+		const u64 prev = cells[slot]; if (prev == 0ull) cells[slot] = cell | tag;
+#endif
+		if (prev == 0ull) return true;
+		if ((prev & ~0xfffull) == cell) return false;
+		slot = (slot + 1) & mask;
+	}
+	return false;   // (the table is full here: taken as marked)
+}
+
 /** fine: px / vx resolution where corner clips can still happen; coarse (coarseRow and below): px x cqx, vx x cqv */
 EE_HD u64 exploreCell(double px, double py, double vx, double vy, u32 small, bool fine, double qy, double qvy, double cqx, double cqv) {
 	const double sx = fine ? EE_EXPLORE_QX : cqx, sv = fine ? EE_EXPLORE_QV : cqv;
@@ -160,7 +183,9 @@ struct RollParams {
 	// rooms (goexplore.js roomOf): which counts the doors read
 	i32 roomTeam, roomCoins, roomBlue, roomCrown, roomSilver;
 	i32 phase;                         // > 0 (time doors): the cell keys hold the door phase in buckets of `phase` ticks
-	unsigned long long* stats;         // [0] ticks simulated, [1] runs, [2] runs ended by the reach field, [3] deaths
+	i32 deaths;                        // 1 (--deaths=1): a run goes on through a death that pays (kernels.cu rollBody), at most one
+	unsigned long long* stats;         // [0] ticks simulated, [1] runs, [2] runs ended by the reach field, [3] deaths that ended a
+	                                   // run, [4] deaths kept (--deaths=1)
 	// collect
 	u8* pickStates;                    // the picks' states at the batch's start (from the host's pool; collect replays from them)
 	i32* out;                          // per record (dense id or -1: pool full, tick, fifths, room, pick, run | step << 16) x 6
