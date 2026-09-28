@@ -1249,11 +1249,11 @@ async function lane(a) {
 				}
 			}
 		}
-		// (an attempt's landings twice: first with the attempt's layer cap (fast: the one search's attempt, the chimney line
-		// from its landing in 57 s on the loaded EPYC, where the default cap took 129 s on the GPU random runs' attempt and
-		// came after their first route), then once more with the default cap right after the deep level of the complete
-		// windows (the GPU random runs' landing: the chimney at 60,000, not at 30,000))
-		const fresh = [], again = [], later = [];
+		// (an attempt's landings twice, one right after the other (two workers side by side): with the attempt's layer cap
+		// (fast: the one search's attempt, the chimney line from its landing in 57 s on the loaded EPYC) and with the default
+		// cap (the GPU random runs' landing: the chimney at 60,000, not at 30,000; Egg Quest II pair v6a: from their landing
+		// t545 at 30,000 nothing in 107 s; at 60,000, searched only on their route, the chimney 274 s after their first route))
+		const fresh = [], again = [];
 		for (const x of list) for (const pk of picks) {
 			for (const ck of target.kind === 'attempt' && x.land ? ['a', 'd'] : ['']) {
 				const key = keyOfStart(info, x.s, x.deep, ck ? `${pk}/${ck}` : pk);
@@ -1263,10 +1263,10 @@ async function lane(a) {
 				// after every fresh start: on Forgotten Veil the one search's attempts grew by a few ticks at a time and the lane
 				// searched the same starts 0-400 six times over in its first 300 s)
 				if (!t.complete) t.gkey = `${info.H[x.s]}:g${Math.floor((n - x.s) / GROW_TICKS)}:${ck ? `${pk}/${ck}` : pk}:${x.deep ? 1 : 0}`;
-				(ck === 'd' ? later : stateDone.has(stateOfKey(key)) || (t.gkey && grownDone.has(t.gkey)) ? again : fresh).push(t);
+				(stateDone.has(stateOfKey(key)) || (t.gkey && grownDone.has(t.gkey)) ? again : fresh).push(t);
 			}
 		}
-		queue = [...fresh.filter((t) => t.grp === 0), ...later.filter((t) => t.grp === 0), ...fresh.filter((t) => t.grp !== 0), ...later.filter((t) => t.grp !== 0), ...again];
+		queue = fresh.concat(again);
 	};
 	const give = (w) => {
 		if (ended || w.dead || !target || Date.now() > deadlineAll - 2000) return;
