@@ -443,7 +443,7 @@ function applyTp(sim, tp, t) {
 
 // deep state dump (loop temporaries written in every tick before they are read are not state)
 const SCRATCH = new Set(['_switch_dirty', '_rem_x', '_rem_y', '_cur_sx', '_cur_sy', '_grounded', '_land_speed']);
-const SKIP = new Set(['onEvent', 'level', '_keyBuf', '_keyF', '_keyI', '_keyBytes', '_keyW', '_keyDoubleOff', '_keyColors', '_coinOff',
+const SKIP = new Set(['onEvent', 'level', '_keyBuf', '_keyF', '_keyI', '_keyBytes', '_keyW', '_keyDoubleOff', '_keyColors', '_coinOff', '_gateOff',
 	'_loopCollided', '_coinOwned', '_secretOwned', '_swOwned', '_oswOwned', '_evSwOwned', '_evOSwOwned']);
 function hashArr(a) { let h = 0x811c9dc5 | 0; for (let i = 0; i < a.length; i++) { h ^= a[i] | 0; h = Math.imul(h, 16777619); } return `${a.length}:${h >>> 0}`; }
 function ser(v) {

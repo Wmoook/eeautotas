@@ -29,7 +29,7 @@
 //
 // usage: node src/grind.js --job=src/jobs/<id> [--level=<level id>] [--until=HH:MM | --forever=1] [--workers=N]
 //        [--nocoins=auto|0|1] [--rot=N] [--skip=A,deep,beam] [--gpu=1] [--roundMin=10] [--deepS=<s>] [--anchored=1] [--tails=1]
-//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1] [--sweepLoops=lane|first]
+//        [--hunt=1] [--endgame=1] [--skips=1] [--sweep=1] [--sweepLoops=lane|first] [--coinfree=1] [--coinprop=1]
 //        (--rot: rounds done, for a status.json without a cursor; --skip: stages skipped in this session's first
 //        round; --anchored=0 / --tails=0: without mutate's --anchor --dprune --fixpoint and explore's --tails)
 const path = require('path');
@@ -121,8 +121,20 @@ if (!best) { log('best.eetas does not finish the level'); saveStatus({ state: 'e
 const baseDeaths = best.deaths;   // never accept a run with more deaths than we started with
 if (status.startRunTicks === undefined) status.startRunTicks = best.runTicks;
 
-const NC = a.nocoins === 'auto' ? (C.coinsIrrelevant(LEVEL_JSON, best.ms, best) ? 1 : 0) : (+a.nocoins ? 1 : 0);
-log(`start: best ${fmt(best.runTicks)} (run_ticks ${best.runTicks}), ${best.deaths} deaths, coins ${NC ? 'optional (coin-blind search)' : 'needed (coin-aware search)'}, ` +
+// Coins. NC = 1: the best needs no coin door or gate (coin-blind search everywhere); decided again at every round's start
+// (redecideCoins: a route through a coin door no longer keeps the whole session coin-exact once the best leaves it).
+// NC = 0: exact states, except past the best's coin-free tick (COINFREE; common.coinFreeTick: its box touches no coin door or
+// gate any more, nothing reads the coins from there on): windows that start there search coin-blind (ncAt), and the
+// splices join coin-blind past each run's own coin-free tick (splice.js trace 'free'): a line that takes or skips a
+// coin after the last coin door rejoins; the sweep's windows before it search coin-blind too, but their rejoins are only
+// proposals, each replayed in full by phase.js --edges (COINPROP; the clock-blind edges' way on time-door levels).
+// --coinfree=0: off (exact up to the finish, as before); --coinprop=0: the windows before it exact.
+let NC = a.nocoins === 'auto' ? (C.coinsIrrelevant(LEVEL_JSON, best.ms, best) ? 1 : 0) : (+a.nocoins ? 1 : 0);
+const COINFREE = a.coinfree !== '0' && C.coinFreeOk(level);
+const COINPROP = a.coinprop !== '0';
+/** the traces' coin mode (splice.js trace): blind, or exact with coin-blind twins past each run's coin-free tick */
+const tmode = () => (NC ? true : COINFREE ? 'free' : false);
+log(`start: best ${fmt(best.runTicks)} (run_ticks ${best.runTicks}), ${best.deaths} deaths, coins ${NC ? 'optional (coin-blind search)' : `needed (coin-aware search${COINFREE ? '; coin-blind past the last coin door' : ''})`}, ` +
 	`${W} workers, ${FOREVER ? 'runs until stopped' : 'deadline ' + deadline.toString().slice(0, 21)}`);
 saveStatus({ state: 'running', error: null, level: LEVEL_ID, bestRunTicks: best.runTicks, coinsOptional: !!NC, workers: W, started: status.started || Date.now(),
 	sessionStarted: Date.now(), stage: 'starting' });
@@ -147,18 +159,38 @@ if (RANDOM) log(`random portals: this run finishes in ${(best.chance * 100).toFi
 saveStatus({ chance: best.chance });
 
 // ---------------------------------------------------------------- runs as state-hash traces (splice.js)
-const TC = S.traceCache(level, NC, RANDOM);
+let TC = S.traceCache(level, tmode(), RANDOM);
 let bestIdx = null;   // { key, tr, has: hashIndex of the best's states }
 /** the best run's trace and state set (for splicing at once and for "still has states the best lacks") */
 function bestTrace() {
 	const key = sha1(C.eetasBytes(best.ms));
 	if (!bestIdx || bestIdx.key !== key) {
-		const tr = S.trace(level, best.ms, NC, RANDOM);
+		const tr = S.trace(level, best.ms, tmode(), RANDOM);
 		const has = S.hashIndex(tr.n + 1);
 		for (let t = 0; t <= tr.n; t++) has.id(tr.H[t]);
 		bestIdx = { key, tr, has };
 	}
 	return bestIdx;
+}
+/** --nocoins for a window of the current best that starts at tick w0: 1 when coins are optional, or when w0 is at or
+ *  past the best's coin-free tick (every rejoin target j > w0 is then followed by no coin door or gate); else 0 */
+function ncAt(w0) {
+	if (NC) return 1;
+	return COINFREE && w0 >= bestTrace().tr.cf ? 1 : 0;
+}
+const CB = ', coin-blind: past the last coin door';   // (the log's note on such a window)
+/** At a round's start: are the coins optional for the best now (common.coinsIrrelevant)? A change switches the coin
+ *  mode of the searches and the traces (and of the GPU searcher: status.json coinsOptional) */
+function redecideCoins() {
+	if (a.nocoins !== 'auto') return;
+	const nc = C.coinsIrrelevant(LEVEL_JSON, best.ms, best) ? 1 : 0;
+	if (nc === NC) return;
+	NC = nc;
+	TC = S.traceCache(level, tmode(), RANDOM);
+	bestIdx = null;
+	saveStatus({ coinsOptional: !!NC });
+	log(NC ? 'coins optional now: the best needs no coin door or gate any more (coin-blind search)'
+		: 'coins needed now: the best goes through a coin door or gate (coin-aware search)');
 }
 
 /** Offers a finished run file to the best (THE rule: common.judge). Returns { accepted, r, verdict, spliced }.
@@ -198,7 +230,7 @@ function consider(file, what, opts) {
  */
 function spliceNow(r, what) {
 	try {
-		const rt = S.trace(level, r.ms, NC, RANDOM);
+		const rt = S.trace(level, r.ms, tmode(), RANDOM);
 		if (rt.n >= 0) return spliceWithBest([rt], what, `${what} + best`);
 	} catch (e) { log(`${what}: splice failed: ${e && e.message || e}`); }
 	return false;
@@ -409,7 +441,7 @@ async function spliceAll() {
 	try { fs.unlinkSync(out); } catch (e) { /* none */ }
 	C.writeEetas(REF, best.ms);
 	saveStatus({ stage: 'splice' });
-	await runTool('splice.js', [out, REF, ...ex, `--level=${LEVEL_ID}`, ...(NC ? ['--nocoins'] : [])], 3600e3, path.join(OUT, 'grind_splice.log'));
+	await runTool('splice.js', [out, REF, ...ex, `--level=${LEVEL_ID}`, ...(NC ? ['--nocoins'] : COINFREE ? ['--coinfree'] : [])], 3600e3, path.join(OUT, 'grind_splice.log'));
 	// (the best itself when nothing is faster: not worth a "not accepted" line every round)
 	let same = false;
 	try { same = sha1(fs.readFileSync(out)) === sha1(C.eetasBytes(best.ms)); } catch (e) { /* no output */ }
@@ -515,15 +547,20 @@ async function mutateLoop(tag) {
 			const dirty = ranges.reduce((s, r) => s + r[1] - r[0], 0);
 			if (dirty < n0) log(`mutate_${tag}_${k}: ${dirty} of ${n0} start ticks changed since the last pass (${ranges.map((r) => `${r[0]}-${r[1]}`).join(', ')})`);
 		}
+		// a range over the best's coin-free tick in two: coin-blind from there on (ncAt)
+		const cf = !NC && COINFREE ? bestTrace().tr.cf : Infinity;
+		const spans = [];
+		for (const [f, t] of ranges || [[0, n0]]) { if (cf > f && cf < t) spans.push([f, cf], [cf, t]); else spans.push([f, t]); }
 		// the ranges as state hashes: an earlier range's improvement shifts the later ones
-		const marks = (ranges || [[0, n0]]).map(([f, t]) => [cursorAt(f), cursorAt(t)]);
+		const marks = spans.map(([f, t]) => [cursorAt(f), cursorAt(t)]);
 		let complete = true;
 		for (let i = 0; i < marks.length; i++) {
 			const mo = path.join(OUT, `grind_mut_${tag}_${k}${marks.length > 1 ? String.fromCharCode(97 + i) : ''}.eetas`);
 			const f = cursorTick(marks[i][0]), t = Math.max(f + 1, cursorTick(marks[i][1]));
 			const whole = f === 0 && t >= bestTrace().tr.n;
 			const res = await stage(`mutate_${tag}_${k}${marks.length > 1 ? String.fromCharCode(97 + i) : ''}`, 'mutate.js', [TAS, `--out=${mo}`, `--horizon=${MUT_HORIZON}`,
-				`--workers=${W}`, LVL, `--nocoins=${NC}`, ...(whole ? [] : [`--from=${f}`, `--to=${t}`]), ...MUT_EXTRA, ...dl()], mo, 1800e3);
+				`--workers=${W}`, LVL, `--nocoins=${ncAt(f)}`, ...(whole ? [] : [`--from=${f}`, `--to=${t}`]), ...MUT_EXTRA, ...dl()], mo, 1800e3,
+				!NC && ncAt(f) ? `ticks ${f}-${t}${CB}` : '');
 			// (with --until, mutate stops at its --deadline without saying so)
 			if (!res || res.killed || res.code !== 0 || /worker error/.test(res.out) || (!FOREVER && Date.now() > deadline - 100e3)) complete = false;
 			if (res) addResult(mo);
@@ -752,19 +789,25 @@ async function sweepStage(round) {
 			try { fs.unlinkSync(`${out}.edges.json`); } catch (e) { /* none */ }
 			const name = `sweep${round}_${id + 1}`;
 			const seed = 300 + (cur.seed = (cur.seed | 0) + 1);
-			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads)...`);
+			// a window before the last coin door where coins count (NC 0): coin-blind rejoins as proposals, each replayed in
+			// full by phase.js --edges (a coin door later that reads the other count fails the replay), as the clock-blind
+			// ones on time-door levels; past it (ncAt) coin-blind rejoins are exact
+			const cblind = ncAt(win.w0), propose = !cblind && COINPROP && HAS_COIN_DOORS;
+			log(`${name} (${win.loop ? 'loop' : 'hunt'} window ticks ${win.w0}-${win.w1} of ${bestTrace().tr.n}, ${win.why}, lane ${k + 1}/${lanes}, ${per} threads` +
+				`${!NC && cblind ? CB : propose ? ', coin-blind proposals, each replayed' : ''})...`);
 			const mode = win.loop ? ['--roll=100', ...EXP_EXTRA] : a.hunt !== '0' ? ['--hunt=1'] : [...EXP_EXTRA];   // (a copy: mode.push below)
 			// (time doors: rejoins by the clock-blind hash, as edges for phase.js; --hunt and --tails write them)
-			if (TD) mode.push('--clockblind=1', ...(mode.includes('--hunt=1') || mode.includes('--tails=1') ? [] : ['--tails=1']));
+			if (TD) mode.push('--clockblind=1');
+			if ((TD || propose) && !mode.includes('--hunt=1') && !mode.includes('--tails=1')) mode.push('--tails=1');
 			const res = await runTool('explore.js', [`--tas=${ref}`, `--out=${out}`, `--from=${win.w0}`, `--join=${win.w0}`, `--until=${win.w1}`,
-				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${NC}`,
+				`--seconds=${secs}`, `--workers=${per}`, '--exact=1', ...mode, `--seed=${seed}`, `--nocoins=${cblind || propose ? 1 : 0}`,
 				'--maxEntries=1500000', LVL],
 				(secs + 300) * 1000, path.join(OUT, `grind_sweep${round}_${id}.log`));
 			let saved = ownSaving(out, refTicks), runOut = out;
 			let got = fs.existsSync(out) ? consider(out, name) : null;
 			if (got) addResult(out);
-			if (TD && fs.existsSync(`${out}.edges.json`) && Date.now() < deadline - 60000) {
-				// the window's clock-blind edges, each replayed plain or with the clock re-synced in the idle start, combined
+			if ((TD || propose) && fs.existsSync(`${out}.edges.json`) && Date.now() < deadline - 60000) {
+				// the window's clock-blind (coin-blind) edges, each replayed plain or with the clock re-synced in the idle start, combined
 				const po = path.join(OUT, `grind_deep_${round}_sw${id}p.eetas`);
 				try { fs.unlinkSync(po); } catch (e) { /* none */ }
 				await runTool('phase.js', [`--tas=${ref}`, `--out=${po}`, LVL, `--nocoins=${NC}`, `--edges=${out}.edges.json`, `--from=${win.w0}`, `--to=${win.w0 + 1}`,
@@ -772,7 +815,7 @@ async function sweepStage(round) {
 					path.join(OUT, `grind_sweep${round}_${id}p.log`));
 				const ps = ownSaving(po, refTicks);
 				if (fs.existsSync(po)) {
-					const pg = consider(po, `${name} (time doors)`);
+					const pg = consider(po, `${name} (${TD ? 'time doors' : 'coin-blind, replayed'})`);
 					addResult(po);
 					if (ps > saved) { saved = ps; runOut = po; got = pg; }
 				}
@@ -783,7 +826,7 @@ async function sweepStage(round) {
 			// a stale find: the window again on the current best (once per sweep; a redo's own find is not redone)
 			let again = '';
 			if (saved > 0 && got && !got.accepted && !got.spliced && !win.redo && !redone.has(win.sig)) {
-				const refTr = S.trace(level, refMs, NC, RANDOM);
+				const refTr = S.trace(level, refMs, tmode(), RANDOM);
 				const share = inBest(runOut, refTr, refMs);
 				if (share < 0.5) {
 					redone.add(win.sig);
@@ -836,8 +879,8 @@ async function loopWindows(round, max = 5) {
 		const w0 = Math.max(0, l.a - 40), w1 = Math.min(n, l.b + 40), before = best.runTicks;
 		const lp = path.join(OUT, `grind_deep_${round}_loop${ran}.eetas`);
 		const res = await stage(`deep${round}_loop${ran + 1}`, 'explore.js', [TAS, `--out=${lp}`, `--from=${w0}`, `--join=${w0}`, `--until=${w1}`,
-			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${NC}`,
-			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}`);
+			`--seconds=${DEEP_S || 120}`, `--workers=${W}`, '--exact=1', '--roll=100', `--seed=${300 + (cur.seed = (cur.seed | 0) + 1)}`, `--nocoins=${ncAt(w0)}`,
+			'--maxEntries=1500000', ...EXP_EXTRA, LVL], lp, 600e3, `the run comes back to (${l.x}, ${l.y}) ${l.len} ticks later: ticks ${l.a}-${l.b}${!NC && ncAt(w0) ? CB : ''}`);
 		if (!res) return ran;
 		addResult(lp);
 		const saved = ownSaving(lp, before);
@@ -886,8 +929,8 @@ async function deepStage(round, R) {
 		const res = await stage(name, 'explore.js', [TAS, `--out=${dp}`, `--from=${w.w0}`, `--join=${w.w0}`,
 			`--until=${w.w1}`, `--seconds=${DEEP_S || R([150, 180, 150, 210])}`, `--workers=${W}`, '--exact=1', '--roll=100',
 			`--seed=${seed}`, `--cell=${R([8, 6, 12, 8])}`, `--vcell=${R([2, 1.5, 3, 1])}`, `--ahead=${R([0.5, 0.6, 0.4, 0.7])}`,
-			`--nocoins=${NC}`, '--maxEntries=1500000', ...(hunt ? ['--hunt=1'] : EXP_EXTRA), LVL], dp, 900e3,
-			`window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}${hunt ? ', skip hunting' : ''}`);
+			`--nocoins=${ncAt(w.w0)}`, '--maxEntries=1500000', ...(hunt ? ['--hunt=1'] : EXP_EXTRA), LVL], dp, 900e3,
+			`window ${wi + 1}/${wins.length}, ticks ${w.w0}-${w.w1}${hunt ? ', skip hunting' : ''}${!NC && ncAt(w.w0) ? CB : ''}`);
 		if (!res) return;
 		addResult(dp);
 		const saved = ownSaving(dp, before);
@@ -948,10 +991,13 @@ async function skipsStage(round) {
  * later point of the run reached sooner, joined back exactly (the run's own inputs, or a second search) and judged.
  * A slice per round (--skipfindS, default 30% of a round, 120-300 s) on every thread, continuing its pass over the run
  * (`grind_skipfind.txt`: the starts searched, by their state and their goal window's); in the first round right after
- * mutA (a Find a route base route has the most path to gain), later after the sweep's deep windows. --skipfind=0: off.
+ * mutA (a Find a route base route has the most path to gain), later after the sweep's deep windows. Opt-in for now:
+ * --skipfind=1 (or EEAT_SKIPFIND=1).
  */
 async function skipfindStage(round) {
-	if (a.skipfind === '0') return;
+	// opt-in (--skipfind=1 or EEAT_SKIPFIND=1) until an end-to-end A/B and a review have shown it pays: it was pushed
+	// on by default without either (2026-09-27 20:49), and it takes 30% of every round
+	if (a.skipfind !== '1' && process.env.EEAT_SKIPFIND !== '1') return;
 	const secs = a.skipfindS ? +a.skipfindS : Math.max(120, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
 	if (deadline - Date.now() < (secs + 120) * 1000) return;
 	const so = path.join(OUT, `grind_skipf_${round}.eetas`);
@@ -973,8 +1019,8 @@ async function shortcutsStage(round, R) {
 	const t0 = Date.now();
 	const res = await stage(`shortcuts${round}`, 'shortcuts.js', [TAS, `--out=${sc}`, '--step=10', `--from=${from + R([5, 2, 7, 4])}`, `--to=${to}`,
 		`--depth=${R([180, 150, 200, 160])}`, `--cap=${R([2000, 3000, 1800, 2500])}`, `--dist=${R([24, 16, 32, 40])}`, `--bcap=${R([8, 12, 16, 6])}`,
-		`--workers=${W}`, LVL, `--nocoins=${NC}`, `--deadline=${Math.min(deadline.getTime() - 90e3, Date.now() + budget + 60e3)}`], sc, budget + 600e3,
-		`ticks ${from}-${to} of ${n}`);
+		`--workers=${W}`, LVL, `--nocoins=${ncAt(from)}`, `--deadline=${Math.min(deadline.getTime() - 90e3, Date.now() + budget + 60e3)}`], sc, budget + 600e3,
+		`ticks ${from}-${to} of ${n}${!NC && ncAt(from) ? CB : ''}`);
 	if (!res) return;
 	addResult(sc);
 	const sec = (Date.now() - t0) / 1000;
@@ -990,10 +1036,11 @@ async function shortcutsStage(round, R) {
  * collected after the last coin door when the coins count. phase.js proposes by clock-blind hashes and replays every
  * proposal (the clock re-synced in the idle start when needed). A whole pass over the run, the tick grid rotating.
  */
-const PHASE = !!level.hasTimeDoors || (!NC && [43, 165, 213, 214].some((id) => level.fg.includes(id)));
+const HAS_COIN_DOORS = level.fg.some((id) => C.COIN_DOOR_IDS.has(id));
+const phaseOn = () => !!level.hasTimeDoors || (!NC && HAS_COIN_DOORS);   // (NC can change at a round's start)
 let phaseKey = '';   // the best the last phase pass searched
 async function phaseStage(round, R, tag = '') {
-	if (!PHASE) return;
+	if (!phaseOn()) return;
 	const key = crypto.createHash('sha1').update(C.eetasBytes(best.ms)).digest('hex');
 	if (tag && key === phaseKey) return;   // (the second pass of a round: only on a new best)
 	phaseKey = key;
@@ -1008,12 +1055,13 @@ async function main() {
 	checkInbox();
 	try { recoverOutputs(); } catch (e) { log(`earlier stage outputs: ${e && e.message || e}`); }
 	// the round to continue: the one in progress when the grind stopped, else the next
-	const STAGES = PHASE ? STAGES_PHASE : STAGES_ALL;
 	const rounds = +status.rounds || (+a.rot || 0);
 	let round = cur.stage && cur.round > rounds ? cur.round : rounds + 1;
 	firstRound = round;
 	for (; Date.now() < deadline - 120000; round++) {
 		curRound = round;
+		redecideCoins();
+		const STAGES = phaseOn() ? STAGES_PHASE : STAGES_ALL;
 		const R = (arr) => arr[(round - 1) % arr.length];   // the settings rotate with the round (it continues after a restart)
 		const resume = cur.round === round && STAGES.includes(cur.stage) ? cur.stage : '';
 		roundT0 = Date.now() - (resume ? Math.min(+cur.used || 0, ROUND_MS) : 0);

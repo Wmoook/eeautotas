@@ -663,6 +663,7 @@ class EESim {
     // stateKey scratch
     this._keyBuf = null; this._keyF = null; this._keyI = null; this._keyBytes = null; this._keyDoubleOff = 0;
     this._keyColors = [];
+    this._coinOff = 0; this._gateOff = 0;   // (_fillKey's slots of the collected-coin bits and the coin gates' counts)
     this.reset();
   }
 
@@ -2364,10 +2365,15 @@ class EESim {
     const nd = this._fillKey();
     if (noCoins) {
       // "same state apart from which coins were collected": coins never change physics except through coin doors,
-      // gates and coin tiles, so equal no-coin hashes behave identically as long as no coin door/gate is touched
-      const I = this._keyI;
+      // gates and coin tiles, so equal no-coin hashes behave identically as long as no coin door/gate is touched.
+      // The coin gates' shown counts go too: PlayState.tick copies the counts into them every tick the box is in no
+      // gate, and only a gate's passability reads them (the same promise). With them in, a level with a coin gate
+      // anywhere kept the coin count in this hash (Octorage: one coin gate no run touches, 158 ticks of coin detours).
+      const I = this._keyI, L = this.level;
       I[1] = 0; I[2] = 0;
-      if (this.level.coinTiles.length !== 0) for (let w = 0; w < this.level.coinWords; w++) I[this._coinOff + w] = 0;
+      if (L.hasCoinGate) I[this._gateOff] = 0;
+      if (L.hasBlueCoinGate) I[this._gateOff + (L.hasCoinGate ? 1 : 0)] = 0;
+      if (L.coinTiles.length !== 0) for (let w = 0; w < L.coinWords; w++) I[this._coinOff + w] = 0;
     }
     if (clockBlind) {
       // the time-door flag, the key timers and the time-door phase (the int32 slots from 16, in _fillKey's order)
@@ -2473,6 +2479,7 @@ class EESim {
     // time doors: an absolute phase of PlayState.ticks (the state at every later tick is (T % 1000) >= 500)
     if (L.hasTimeDoors) I[o++] = this._ticks % TIMEDOOR_PERIOD;
     if (L.hasDeathDoor) I[o++] = this.deaths;
+    this._gateOff = o;   // (the coin gates' counts, left out of the coin-blind hash)
     if (L.hasCoinGate) I[o++] = this._show_coin_gate;
     if (L.hasBlueCoinGate) I[o++] = this._show_blue_coin_gate;
     if (L.hasDeathGate) I[o++] = this._show_death_gate;
