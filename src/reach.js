@@ -71,6 +71,28 @@ const TROPHY = 121, CHECKPOINT = 360, PROTECTION = 420, ICE = 1064, CURSE = 421,
 // effects that change jumps, speeds or gravity: walk mode (417 jump, 418 fly, 419 speed, 453 low gravity, 461
 // multijump, 1517 gravity)
 const WILD = new Set([417, 418, 419, 453, 461, 1517]);
+const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
+
+/**
+ * The coin doors that can never open: a door (43 gold, 213 blue) opens at `coins >= its number` (eesim.js), and the
+ * count never passes the number of coin tiles of its colour (each tile gives one coin, once), so a door whose number is
+ * above that is a wall for good (Forgotten Helix: six 16-coin doors, 15 gold coins). Sound: only states behind such a
+ * door are ever cut. Returns a Uint8Array over the tiles (1 = such a door) or null when there is none.
+ */
+function neverOpenDoors(level) {
+	const fg = level.fg, lk = level.lookup0, N = fg.length;
+	if (!lk) return null;
+	let gold = 0, blue = 0;
+	const ct = level.coinTiles, cb = level.coinBaseId;
+	if (ct && cb) for (let k = 0; k < ct.length; k++) { if (cb[k] === COIN_GOLD) gold++; else blue++; }
+	else return null;
+	let out = null;
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		if ((id === COINDOOR && lk[i] > gold) || (id === BLUECOINDOOR && lk[i] > blue)) { (out || (out = new Uint8Array(N)))[i] = 1; }
+	}
+	return out;
+}
 const LOWER = 1, RIGHT = 2;                   // half blocks the centre can be in (on the edge): lower half, right half
 // the field classes' upward pull (the largest -modifier of their ids, input held) and terminal speeds (px/tick)
 const A_CLASS = [0, 0, 0, 1 / MULT, 1 / MULT, 1.5 / MULT, 0.8 / MULT, 2 / MULT, 0, 0];
@@ -235,10 +257,11 @@ function reachField(level, opts) {
 		}
 	}
 	const cls = new Uint8Array(N), sp = new Uint8Array(N);
+	const shut = neverOpenDoors(level);   // coin doors above the level's coins: walls for good
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		const hr = hgeo(i);
-		if (isWallId(id) || hr === 2 || hr === 3) { cls[i] = WALL; continue; }
+		if (isWallId(id) || hr === 2 || hr === 3 || (shut !== null && shut[i])) { cls[i] = WALL; continue; }
 		if (!(protP !== null && protP[i]) && id >= 0 && id < nFlags && (gF[id] & 4) !== 0) { cls[i] = DEADLY; continue; }
 		if (hr === 1) sp[i] = LOWER; else if (hr === 0) sp[i] = RIGHT;
 		const j = curOf[i];
@@ -973,7 +996,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

@@ -1101,6 +1101,25 @@ async function cpuSection() {
 	check('the one search\'s GPU bursts (a stand-in for eegpu): the key is the level\'s one trigger; a burst from the start\'s room reaches it, goes on into the key\'s room and its attempt goes into the archive',
 		TRk.n === 1 && !!b1 && b1.room === '(start)' && b1.reached && b1.changed && !!ob.done && ob.done.gpu && ob.done.gpu.imports >= 1 && ob.done.workers[0].imports >= 1 &&
 		!ob.events.some((e) => e.ev === 'warning'), `${TRk.n} trigger(s); ${JSON.stringify(b1 || null)}; ${JSON.stringify(ob.done && ob.done.gpu)}; ${ob.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ')}`);
+	// the stall ladder (bursts.js stallStep, --stallLadder): an arm's bursts that gained nothing (no target, no room, not a
+	// tile nearer) count; at STALL_N the start goes up the ladder, once per start (by its length); a gain starts over; a
+	// ladder's own bursts do not count
+	{
+		const arm = {}, st1 = [];
+		const job = (len, extra) => Object.assign({ inputs: 'x'.repeat(len), startDist: 40, chain: 0 }, extra || {});
+		const miss = { reached: false, fresh: 0, near: 40 };
+		for (let k = 0; k < 3; k++) st1.push(BU.stallStep(arm, job(500), miss));
+		const again = [BU.stallStep(arm, job(500), miss), BU.stallStep(arm, job(500), miss), BU.stallStep(arm, job(500), miss)];
+		const other = [BU.stallStep(arm, job(300), miss), BU.stallStep(arm, job(300), miss), BU.stallStep(arm, job(300), miss)];
+		const arm2 = {};
+		const gainReset = [BU.stallStep(arm2, job(500), miss), BU.stallStep(arm2, job(500), miss), BU.stallStep(arm2, job(500), { reached: false, fresh: 0, near: 30 }),
+			BU.stallStep(arm2, job(500), miss), BU.stallStep(arm2, job(500), { reached: false, fresh: 1, near: 40 }), BU.stallStep(arm2, job(500), miss)];
+		const ladderOwn = BU.stallStep({ stall: 5 }, job(500, { stallLadder: true }), miss);
+		check('the stall ladder: 3 bursts of an arm that gain nothing send the start up the ladder (the 3rd), the same start never again, another start at once while the arm stays stalled; a nearer tile or a new room starts the count over; a ladder\'s own bursts do not count',
+			BU.STALL_N === 3 && st1.join() === 'false,false,true' && again.join() === 'false,false,false' && other.join() === 'true,false,false' &&
+			gainReset.every((x) => x === false) && ladderOwn === false && BU.STALL_WALL.length > 4,
+			`${st1} / ${again} / ${other} / ${gainReset} / ${ladderOwn}`);
+	}
 	// after the first route (src/out/night/macro.md). The sound lower bound per tile (goexplore.js lowerBoundTiles): along
 	// every route of the key level, at every tick t, t + the bound at the ball's tile is at most the route's length (it never
 	// cuts a real route), and it is not all zeros
