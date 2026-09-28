@@ -59,6 +59,9 @@ const CUT = 0xffff, FAR = 0xfffe;             // cost table: cut off; finite but
 // a death (the respawn at a checkpoint or another spawn): finite, so no proof is lost, but priced far beyond any real
 // way (fifths: 1638 tiles), so the searches (which drop dead balls) never head for a spike because a checkpoint is near
 const DEATH_COST = 8192;
+// walk mode with protection: the protected walk where no unprotected way is (the tiles a protected ball can be in only):
+// behind every real way too, like a death (see reachField)
+const PROT_COST = DEATH_COST;
 // tile classes
 const WALL = 0, DEADLY = 1, NORM = 2, DOTS = 3, CLIMB = 4, WATER = 5, MUD = 6, UP = 7, BUP = 8, BDOWN = 9;
 const isField = (c) => c >= DOTS && c <= UP;
@@ -68,6 +71,28 @@ const TROPHY = 121, CHECKPOINT = 360, PROTECTION = 420, ICE = 1064, CURSE = 421,
 // effects that change jumps, speeds or gravity: walk mode (417 jump, 418 fly, 419 speed, 453 low gravity, 461
 // multijump, 1517 gravity)
 const WILD = new Set([417, 418, 419, 453, 461, 1517]);
+const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
+
+/**
+ * The coin doors that can never open: a door (43 gold, 213 blue) opens at `coins >= its number` (eesim.js), and the
+ * count never passes the number of coin tiles of its colour (each tile gives one coin, once), so a door whose number is
+ * above that is a wall for good (Forgotten Helix: six 16-coin doors, 15 gold coins). Sound: only states behind such a
+ * door are ever cut. Returns a Uint8Array over the tiles (1 = such a door) or null when there is none.
+ */
+function neverOpenDoors(level) {
+	const fg = level.fg, lk = level.lookup0, N = fg.length;
+	if (!lk) return null;
+	let gold = 0, blue = 0;
+	const ct = level.coinTiles, cb = level.coinBaseId;
+	if (ct && cb) for (let k = 0; k < ct.length; k++) { if (cb[k] === COIN_GOLD) gold++; else blue++; }
+	else return null;
+	let out = null;
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		if ((id === COINDOOR && lk[i] > gold) || (id === BLUECOINDOOR && lk[i] > blue)) { (out || (out = new Uint8Array(N)))[i] = 1; }
+	}
+	return out;
+}
 const LOWER = 1, RIGHT = 2;                   // half blocks the centre can be in (on the edge): lower half, right half
 // the field classes' upward pull (the largest -modifier of their ids, input held) and terminal speeds (px/tick)
 const A_CLASS = [0, 0, 0, 1 / MULT, 1 / MULT, 1.5 / MULT, 0.8 / MULT, 2 / MULT, 0, 0];
@@ -166,10 +191,11 @@ function reachField(level, opts) {
 	const fg = level.fg, flags = level.flags, nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
 	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
+	const protOn = [];   // the protection effect's "on" tiles (its number is not 0: Me.as, eesim.js EFFECT_PROTECTION)
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		if (WILD.has(id)) wild = true;
-		if (id === PROTECTION) protect = true;
+		if (id === PROTECTION && lk[i] !== 0) { protect = true; protOn.push(i); }
 		if (id === ICE) ice = true;
 		if (id === CHECKPOINT) checkpoints = true;
 		// a timed killer: curse / zombie / poison with a time (the tile's number > 0), lava (fire): the ball dies anywhere later
@@ -197,12 +223,46 @@ function reachField(level, opts) {
 		if (gMoy[id] < 0) return UP;
 		return NORM;
 	};
+	const wallAt = (i) => { const hr = hgeo(i); return isWallId(fg[i]) || hr === 2 || hr === 3; };
+	// ---- protection: a protected ball passes killing tiles (nothing kills it), but it is protected only on its way from a
+	// protection tile: the tiles a protected ball can be in (protP) are the 8-way walk from the "on" tiles through every tile
+	// but walls (a diagonal step closed between two walls), portals forward (it never dies: no respawn). Outside them a
+	// killing tile is deadly as on a level without protection: sound (a protected ball is never there), and sharper than
+	// "protection somewhere: no tile kills anywhere" (Forgotten Helix: its one protection tile is 2 tiles from the trophy,
+	// its 39,724 spikes were air for the whole level, and a spectator box between two spike clouds, reached by a portal,
+	// looked 106 tiles from the trophy)
+	let protP = null;
+	if (protect) {
+		protP = new Uint8Array(N);
+		const q = [];
+		for (const i of protOn) if (!wallAt(i)) { protP[i] = 1; q.push(i); }
+		const exitsOf = (i) => {
+			const s = level.portalSlot ? level.portalSlot[i] : -1;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || !level.portalsById) return null;
+			return level.portalsById.get(level.pTarget[s]) || null;
+		};
+		while (q.length) {
+			const t = q.pop(), x = t % W, y = (t / W) | 0;
+			const ex = exitsOf(t);
+			if (ex) for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N && !protP[j] && !wallAt(j)) { protP[j] = 1; q.push(j); } }
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				if (!dx && !dy) continue;
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const j = yy * W + xx;
+				if (protP[j] || wallAt(j)) continue;
+				if (dx && dy && wallAt(y * W + xx) && wallAt(yy * W + x)) continue;
+				protP[j] = 1; q.push(j);
+			}
+		}
+	}
 	const cls = new Uint8Array(N), sp = new Uint8Array(N);
+	const shut = neverOpenDoors(level);   // coin doors above the level's coins: walls for good
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		const hr = hgeo(i);
-		if (isWallId(id) || hr === 2 || hr === 3) { cls[i] = WALL; continue; }
-		if (!protect && id >= 0 && id < nFlags && (gF[id] & 4) !== 0) { cls[i] = DEADLY; continue; }
+		if (isWallId(id) || hr === 2 || hr === 3 || (shut !== null && shut[i])) { cls[i] = WALL; continue; }
+		if (!(protP !== null && protP[i]) && id >= 0 && id < nFlags && (gF[id] & 4) !== 0) { cls[i] = DEADLY; continue; }
 		if (hr === 1) sp[i] = LOWER; else if (hr === 0) sp[i] = RIGHT;
 		const j = curOf[i];
 		const c = j < 0 ? NORM : gclass(fg[j]);
@@ -226,7 +286,10 @@ function reachField(level, opts) {
 		if (!sx.length && W > 1 && H > 1) add(W + 1);
 		for (let i = 0; i < N; i++) if (fg[i] === CHECKPOINT) add(i);
 	}
-	let deaths = (checkpoints || (level.spawnsX ? level.spawnsX.length : 0) >= 2) && respawn.length > 0;
+	// (opts.deaths === false: no death edges, as with no checkpoint and one spawn: the searches' prune field when they drop
+	// dead balls, src/editor.js DEATH_FREE; a state only a death leads to the trophy from is then cut off. With the edges
+	// (the default) a death is a finite way: the editor's verdicts, "impossible" and "only through a death")
+	let deaths = opts.deaths !== false && (checkpoints || (level.spawnsX ? level.spawnsX.length : 0) >= 2) && respawn.length > 0;
 	const dsrc = [];   // the tiles the ball can die in
 	if (deaths) for (let i = 0; i < N; i++) if (cls[i] === DEADLY || (cls[i] !== WALL && (timed || kills(curOf[i]) || kills(i)))) dsrc.push(i);
 	if (!dsrc.length) deaths = false;
@@ -251,6 +314,14 @@ function reachField(level, opts) {
 			for (const j of list) { if (!srcOf.has(j)) srcOf.set(j, []); srcOf.get(j).push(i); }
 		}
 	}
+	// (opts.portalForced, src/steer.js only, like oneWayEntry: a ball whose tick starts in a portal tile is teleported
+	// (eesim.js _portalTeleport), so a portal tile with exits is left only through them, never walked, jumped or flown
+	// through: a row of portals is a wall that sends the ball elsewhere. Not sound, so never in the RCH3 proof field: a
+	// ball a teleport put on a portal tile keeps lastPortal and moves on over portal tiles (the exits are left out here),
+	// and a move of more than 16 px a tick can cross a one-tile portal row between two tick starts. Without it the ordering
+	// fields send the searches through portal ceilings (Wine Quest I: the hub's portal rows, "190 tiles" from the trophy)
+	const forcedP = new Uint8Array(N);
+	if (opts.portalForced) for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
@@ -273,9 +344,31 @@ function reachField(level, opts) {
 
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
-	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF);
-	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths, goals, toGoals: goalF !== null, cls, walk, mismatches: 0, KLJ };
-	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walk), labels: 0 });
+	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
+	// walk mode with protection: that walk (killing tiles open where a protected ball can be) is a protected ball's way. An
+	// unprotected ball's (every killing tile deadly; the protection tiles goals at the protected walk's cost from there)
+	// orders every ball, and the protected walk + PROT_COST only where the unprotected one has no way. Sound: a protected
+	// ball is in protP, where the protected walk is its way; an unprotected one reaches the trophy or a protection tile by
+	// its own. (Physics mode: protP's killing tiles open in the one field, as above.) The fallback's costs are ways "through
+	// a death" to the lookups' blend (scoreAt, native reachScore: the deaths flag), behind every real way.
+	let walkOut = walk, protFallback = 0;
+	if (mode === 'walk' && protP !== null) {
+		const killT = (i) => cls[i] !== WALL && fg[i] >= 0 && fg[i] < nFlags && (gF[fg[i]] & 4) !== 0;
+		const passU = (i) => passable(i) && !killT(i);
+		const seedU = new Map();
+		if (goalF) for (const [i, c] of goalF) seedU.set(i, c);
+		else for (let i = 0; i < N; i++) if (trophy(i)) seedU.set(i, 0);
+		for (const p of protOn) { const v = walk[p]; if (v !== CUT && !(seedU.get(p) <= v)) seedU.set(p, v); }
+		const walkU = walkField(W, H, cls, passU, trophy, seedU, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
+		walkOut = new Uint16Array(N).fill(CUT);
+		for (let i = 0; i < N; i++) {
+			if (walkU[i] !== CUT) walkOut[i] = walkU[i];
+			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
+		}
+	}
+	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
+		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
+	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
 
 	// ---- per tile: floors, jumps, landing jumps, ceilings, segments
 	const isFloor = (j) => {
@@ -521,7 +614,7 @@ function reachField(level, opts) {
 	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
 	else for (let i = 0; i < N; i++) if (trophy(i)) seeds.push([i, 0]);
 	const srcP = new Uint8Array(N);
-	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY ? 1 : 0;   // (move sources: the trophy ends the way)
+	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY && !forcedP[i] ? 1 : 0;   // (move sources: the trophy ends the way; a forced portal is left by its exits only)
 	const stopT = new Int16Array(N).fill(-1);
 	for (let i = 0; i < N; i++) if (isField(cls[i]) && cls[i] !== UP) stopT[i] = stopC(i);
 	const bounceT = new Int16Array(N * (KF + 1));
@@ -713,7 +806,7 @@ function modMinOf(level) {
 }
 /** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
  *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
-function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF) {
+function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP) {
 	const N = W * H, dist = new Uint16Array(N).fill(CUT);
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
@@ -737,7 +830,7 @@ function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF
 			const x = x2 - dx, y = y2 - dy;
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
 			const t = y * W + x;
-			if (!passable(t)) continue;
+			if (!passable(t) || (forcedP && forcedP[t])) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
 			relax(t, v + (dx && dy ? 7 : 5));
 		}
@@ -911,7 +1004,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5,
+	VERSION: 3, reachField, neverOpenDoors, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

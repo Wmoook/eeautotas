@@ -26,6 +26,13 @@
 //              the same float (skipped without a native tool that reads RCH3)
 //   G timing   200x200 and 400x400 random levels: fails above 3x the target (300 / 1200 ms), scaled by the machine's load
 //              (the engine's single-thread speed now against its benchmark, --bench=<_system.json>)
+//   H dead ends  protection only where a protected ball can be (a route through a spike with the protection effect: every
+//              state finite, in walk and physics mode, with and without the death edges; killing tiles no protected ball
+//              reaches stay deadly), the death-free field (opts.deaths: false: a pocket only a death leaves is cut off, its
+//              -1 a superset of the default field's), the viewing-room trap (walk mode: a spectator box by the trophy behind
+//              spikes, reached by a portal, ranks behind the start: Forgotten Helix's box looked 106 tiles from the trophy);
+//              the coins stored as collected (110 / 111, coins again after 'reset'): triggers of the room dead ends (a 60 x 50
+//              level with one, a 1-coin door and the trophy: every state of the route live, and the one search routes it)
 // usage: node test/reach.js [--only=A,B,..] [--gpu] [--tool=<eegpu.exe>] [--jobs=<dir>] [--bench=<file>] [--quick]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
@@ -52,9 +59,11 @@ const levelOfB64 = (b) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(
 // ASCII rooms: # wall, . air, S spawn, T trophy, o dot, ^ up arrow, < left arrow, > right arrow, ~ water, H ladder, x spike,
 // - one-way rot 1, _ lower half block, B up boost, D down boost, C checkpoint, t time door, v down arrow, I ice, g low gravity,
 // P portal id 1 -> 2 (rot 1), Q portal id 2 -> 1 (rot 3)
-// c curse (1 s), w spawn 1582 #0, p / q / r present 1101 at rotation 1 / 0 / 3, h half block 1116 at rotation 2
-const ID = { '#': [9], S: [255], T: [121], o: [4], '^': [2], '<': [1], '>': [3], '~': [119], H: [120], x: [361, 1], '-': [1052, 1], _: [1041, 1], B: [116], D: [117],
-	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2] };
+// c curse (1 s), w spawn 1582 #0, p / q / r present 1101 at rotation 1 / 0 / 3, h half block 1116 at rotation 2, e / f the
+// protection effect on / off, k / b a gold / blue coin, 1 / 2 a gold coin door of 1 / 2, 3 / 4 a blue coin door of 1 / 2
+const ID = { e: [420, 1], f: [420, 0], '#': [9], S: [255], T: [121], o: [4], '^': [2], '<': [1], '>': [3], '~': [119], H: [120], x: [361, 1], '-': [1052, 1], _: [1041, 1], B: [116], D: [117],
+	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2],
+	k: [100], b: [101], '1': [43, 1], '2': [43, 2], '3': [213, 1], '4': [213, 2] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -406,10 +415,10 @@ function sectionD() {
 	const room = (W, H) => { const c = []; for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]); for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]); return c; };
 	// (presents 1101-1105 and the half block 1116 at every stored rotation, 4 = a full solid; a curse; some rooms with a
 	// second spawn point: deaths as a way to move, followed through the death and the respawn)
-	const IDS = [9, 9, 9, 9, 9, 4, 4, 1, 2, 3, 2, 119, 369, 416, 116, 117, 114, 120, 361, 1052, 1041, 1518, 23, 43, 360, 2, 4, 1064, 1101, 1103, 1105, 1116, 421];
+	const IDS = [9, 9, 9, 9, 9, 4, 4, 1, 2, 3, 2, 119, 369, 416, 116, 117, 114, 120, 361, 1052, 1041, 1518, 23, 43, 360, 2, 4, 1064, 1101, 1103, 1105, 1116, 421, 420, 361];
 	const rot = (id) => id === 1052 || id === 1041 || (id >= 1101 && id <= 1105) || id === 1116;
 	const rotOf = (id) => Math.floor(rnd() * (id === 1052 || id === 1041 ? 4 : 5));
-	const cellOf = (x, y, id) => (rot(id) ? [x, y, id, rotOf(id)] : id === 43 || id === 23 || id === 421 ? [x, y, id, 1] : [x, y, id]);
+	const cellOf = (x, y, id) => (rot(id) ? [x, y, id, rotOf(id)] : id === 43 || id === 23 || id === 421 ? [x, y, id, 1] : id === 420 ? [x, y, id, rnd() < 0.8 ? 1 : 0] : [x, y, id]);
 	function randomRoom(k) {
 		const W = 12 + Math.floor(rnd() * 20), H = 10 + Math.floor(rnd() * 12), cells = room(W, H);
 		const dens = 0.12 + rnd() * 0.25, kinds = IDS.filter(() => rnd() < 0.5);
@@ -426,6 +435,8 @@ function sectionD() {
 		if (k % 3 === 0) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 1, 2], [1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 1, 2, 1]);
 		cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * Math.max(1, (H - 2) / 2)), 121], [1 + Math.floor(rnd() * (W - 2)), H - 2, 255]);
 		if (k % 4 === 1) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 255]);
+		// (every 5th room in walk mode: a low-gravity tile (off) in a corner; walk mode's -1 prunes the CPU search and the GPU runs)
+		if (k % 5 === 2) cells.push([W - 2, H - 2, 453, 0]);
 		return { W, H, cells };
 	}
 	function puzzleRoom() {   // the trophy at the edge of what one mechanism reaches
@@ -465,12 +476,15 @@ function sectionD() {
 		let L;
 		try { L = levelOfCells(rm.W, rm.H, rm.cells); } catch (e) { continue; }
 		const fields = [R.reachField(L)];
-		if (fields[0].mode !== 'physics') continue;
+		// (the searches' field without death edges: compared until the ball's first death, which ends a search's run)
+		const deathFree = [false];
+		if (fields[0].deaths) { fields.push(R.reachField(L, { deaths: false })); deathFree.push(true); }
 		for (let g = 0; g < GOALS; g++) {
 			for (let tries = 0; tries < 50; tries++) {
 				const x = 1 + Math.floor(rnd() * (rm.W - 2)), y = 1 + Math.floor(rnd() * (rm.H - 2) * (rnd() < 0.7 ? 0.6 : 1)), i = y * rm.W + x;
 				if (fields[0].cls[i] === R.WALL || fields[0].cls[i] === R.DEADLY) continue;
 				fields.push(R.reachField(L, { goals: [{ tile: i, cost: 0 }] }));
+				deathFree.push(false);
 				break;
 			}
 		}
@@ -479,7 +493,7 @@ function sectionD() {
 			runs++;
 			sim.reset();
 			let m = OPTS[Math.floor(rnd() * OPTS.length)];
-			let prev = fields.map((f) => R.fifthsAt(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery)), prevS = null;
+			let prev = fields.map((f) => R.fifthsAt(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery)), prevS = null, died = false;
 			for (let t = 0; t < TICKS; t++) {
 				if (rnd() < 0.12) m = OPTS[Math.floor(rnd() * OPTS.length)];
 				E.applyMask(inp, m);
@@ -487,8 +501,9 @@ function sectionD() {
 				// (a death: followed through the dead ticks and the respawn when the model has deaths as a way to move)
 				if (sim.has_silver_crown || (sim.is_dead && !fields[0].deaths)) break;
 				const now = fields.map((f) => R.fifthsAt(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery));
-				if (sim.is_dead) deathPairs++;
+				if (sim.is_dead) { deathPairs++; died = true; }
 				for (let fi = 0; fi < fields.length; fi++) {
+					if (died && deathFree[fi]) continue;
 					pairs++;
 					if (now[fi] < 0) cut++;
 					if (prev[fi] < 0 && now[fi] >= 0) { viol++; if (!first) first = { room: k, field: fi, run: r, tick: t, before: prevS && prevS[fi], after: R.stateAt(fields[fi], sim) }; }
@@ -498,7 +513,7 @@ function sectionD() {
 			}
 		}
 	}
-	check(`${runs} random runs of ${TICKS} ticks in ${ROOMSN} rooms (fields to the trophy and ${GOALS} goal tiles each): no state finite right after a cut-off one`, viol === 0 && pairs > 0,
+	check(`${runs} random runs of ${TICKS} ticks in ${ROOMSN} rooms (fields to the trophy and ${GOALS} goal tiles each, the death-free field where deaths move the ball; protection tiles; every 5th room in walk mode): no state finite right after a cut-off one`, viol === 0 && pairs > 0,
 		`${pairs} pairs (${deathPairs} dead ticks followed), ${cut} cut off, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
 }
 
@@ -559,6 +574,25 @@ function sectionE() {
 	check('writeReachFile refuses a goals field (its cut-off states are no proof)', refused);
 }
 
+// ---------------------------------------------------------------- I coin doors that never open
+function sectionI() {
+	section('I coin doors above the level coins are walls (sound: the count never passes the coin tiles)');
+	const cost = (rows) => { const L = ascii(box(rows)); const f = R.reachField(L); return { L, start: R.costAt(f, startSim(L, 30)) }; };
+	// gold: one coin, a door of 2 in front of the trophy: cut off; a door of 1: a way
+	const a = cost(['S.k.2.T']), b = cost(['S.k.1.T']);
+	check('one gold coin, a 2-coin door before the trophy: the start is cut off', a.start < 0, fmt(a.start));
+	check('one gold coin, a 1-coin door before the trophy: the start has a way', b.start >= 0, fmt(b.start));
+	const na = R.neverOpenDoors(a.L), nb = R.neverOpenDoors(b.L);
+	check('neverOpenDoors: the 2-coin door only', na !== null && na.reduce((x, y) => x + y, 0) === 1 && nb === null);
+	// blue coins count apart from gold: two gold coins do not open a blue door of 2
+	const c = cost(['S.kkb.4.T']), d = cost(['S.kbb.4.T']);
+	check('two gold + one blue coin, a 2-blue-coin door: cut off', c.start < 0, fmt(c.start));
+	check('one gold + two blue coins, a 2-blue-coin door: a way', d.start >= 0, fmt(d.start));
+	// the door is only a wall where it stands: a way around it stays open
+	const e = cost(['.........', '.........', '.........', 'S.k.2..T.']);
+	check('a way over the never-open door stays open', e.start >= 0, fmt(e.start));
+}
+
 // ---------------------------------------------------------------- F agree
 function sectionF() {
 	section(`F agree: the JS lookup = the native tool's (host${GPU ? ' and GPU' : ''})`);
@@ -572,9 +606,12 @@ function sectionF() {
 	let seed = 3;
 	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
 	const rooms = [['user50', levelOfB64(USER50)], ['shaft', levelOfB64(SHAFT)], ['dot stairs', levelOfB64(DOTSTAIRS)], ...['upshaft', 'boost', 'portal', 'halfbridge', 'lj16', 'dotroom'].map((n) => [n, ascii(box(ROOMS.find((r) => r[0] === n)[2]))]),
-		['every block (portals, deaths)', randomLevels()[4].level], ['death warp (a curse: every tile a death source)', ascii(box(ROUTED[1][1]))], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))]];
-	for (const [name, L] of rooms) {
-		const f = R.reachField(L);
+		['every block (portals, deaths)', randomLevels()[4].level], ['death warp (a curse: every tile a death source)', ascii(box(ROUTED[1][1]))], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))],
+		['protection, walk mode (spikes open only where a protected ball can be; the protected walk behind the unprotected one)', ascii(box(['.....T.e..', '..xxxxxx..', '..........', '..S..g..x.']))],
+		['protection, physics mode', ascii(box(['.....T.e..', '..xxxxxx..', '..........', '..S.....x.']))],
+		['death warp without the death edges (the searches\' field)', ascii(box(ROUTED[1][1])), { deaths: false }]];
+	for (const [name, L, fo] of rooms) {
+		const f = R.reachField(L, fo);
 		fs.writeFileSync(path.join(tmp, 'l.bin'), G.levelBlob(L));
 		R.writeReachFile(f, path.join(tmp, 'r.bin'));
 		const n = QUICK ? 2000 : 10000, st = new Float64Array(n * 6), ids = [...new Set(L.fg)];
@@ -642,6 +679,235 @@ async function sectionG() {
 	}
 }
 
+// ---------------------------------------------------------------- H dead ends
+function sectionH() {
+	section('H dead ends: protection where a protected ball can be, the death-free field, the viewing-room trap');
+	// a route through a spike with the protection effect: hold right from the spawn through e, then over x to T
+	const rows = ['..........', '..........', 'S.e...x.T.', '##########'];
+	for (const [what, extra] of [['physics', '.'], ['walk', 'g']]) {
+		const L = ascii(box(rows.map((r, y) => (y === 0 ? r.slice(0, 9) + extra : r))));
+		const route = seqOf([4, 120]);
+		const ev = C.evaluate(L, route);
+		const f = R.reachField(L), fnd = R.reachField(L, { deaths: false });
+		const a = walk(L, f, route), b = walk(L, fnd, route);
+		check(`${what} mode: a route through a spike with the protection effect finishes (0 deaths) and every state of it is finite, with and without the death edges`,
+			f.mode === what && ev && ev.deaths === 0 && a.finished && a.cut === 0 && b.cut === 0 && f.prot && f.prot.on === 1,
+			`mode ${f.mode}, ${ev ? `${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; ${a.n} states, cut ${a.cut} / ${b.cut}${a.first ? ` first ${JSON.stringify(a.first)}` : ''}; prot ${JSON.stringify(f.prot)}`);
+	}
+	// killing tiles no protected ball reaches stay deadly: the protection effect behind the trophy's wall, a spike pit the start
+	// falls into: cut off (before: any protection tile in the level made every spike air, and the pit finite)
+	{
+		const L = ascii(box(['S......#e.', '.......#..', '....x..#.T', '########..']));
+		const f = R.reachField(L);
+		const sim = new E.EESim(L); sim.reset();
+		sim.px = 5 * 16; sim.py = 3 * 16; sim.speed_y = 0;   // (in the spike's tile, (5, 3))
+		const inSpike = R.costAt(f, sim);
+		check('a spike no protected ball can reach is deadly: its tile cut off, the protection effect\'s own side open', inSpike < 0 && f.cls[3 * 12 + 5] === R.DEADLY && f.prot.tiles > 0,
+			`spike tile ${fmt(inSpike)}, cls ${f.cls[3 * 12 + 5]}; prot ${JSON.stringify(f.prot)}`);
+	}
+	// the death-free field: a pocket only a death leaves (a one-way portal into a sealed room with a spike floor; a checkpoint
+	// by the start): finite with the death edges, cut off without; everywhere the death-free field's -1 covers the default's
+	{
+		const W = 30, H = 12, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let x = 18; x <= 24; x++) cells.push([x, 2, 9], [x, 7, 9]);
+		for (let y = 3; y <= 6; y++) cells.push([18, y, 9], [24, y, 9]);
+		cells.push([21, 6, 361, 1], [21, 3, 242, 0, 7, 99], [8, H - 2, 242, 0, 5, 7], [2, H - 2, 255], [4, H - 2, 360], [27, H - 2, 121]);
+		const L = levelOfCells(W, H, cells);
+		const f = R.reachField(L), fnd = R.reachField(L, { deaths: false });
+		const pocket = 4 * W + 21;
+		let covers = true;
+		for (let i = 0; i < W * H; i++) if (f.cls[i] !== R.WALL && (f.walk[i] === 0xffff) && fnd.walk[i] !== 0xffff) covers = false;
+		const sim = new E.EESim(L); sim.reset();
+		check('the death-free field: a pocket only a death leaves is cut off there (finite with the death edges), the start finite in both, its -1 a superset',
+			f.deaths && !fnd.deaths && f.walk[pocket] !== 0xffff && fnd.walk[pocket] === 0xffff && R.costAt(f, sim) >= 0 && R.costAt(fnd, sim) >= 0 && covers,
+			`pocket ${f.walk[pocket] / 5} / ${fnd.walk[pocket] === 0xffff ? 'CUT' : fnd.walk[pocket] / 5} tiles; start ${fmt(R.costAt(f, sim))} / ${fmt(R.costAt(fnd, sim))}`);
+	}
+	// the viewing-room trap (walk mode, as Forgotten Helix): the trophy's half a dot field behind a spike wall, reached by a
+	// portal; in it by the trophy a spectator box (spike walls, a solid floor) whose only way out is its portal back; the
+	// protection effect by the trophy. The box ranks behind the start (before: the spikes were air, the box 8.6 tiles from
+	// the trophy, the start 19.6)
+	{
+		const t = trapLevel();
+		const L = levelOfCells(t.W, t.H, t.cells);
+		const f = R.reachField(L);
+		const at = (x, y) => f.walk[y * t.W + x] / 5;
+		check('the viewing-room trap: the spectator box by the trophy ranks behind the start and the real way\'s portal (its only way out is its portal back)',
+			f.mode === 'walk' && at(70, 9) > at(2, 38) && at(70, 9) > at(6, 37) && at(45, 37) < at(2, 38),
+			`box ${at(70, 9)} tiles, start ${at(2, 38)}, the real way's portal ${at(6, 37)}, its exit ${at(45, 37)}`);
+	}
+}
+/** the room dead ends and the coins the FILE stores as collected (110 gold / 111 blue): the default 'reset' start turns
+ *  them back into coins that count for coin doors (eesim.js _resetCoinTiles), so they are triggers of roomDead
+ *  (goexplore.js TRIGGER_IDS). The wq-int-1 review's repro: a 60 x 50 level with one such coin, a 1-coin door across the
+ *  level and the trophy behind it; holding right takes the coin, opens the door and finishes. Before the fix the start
+ *  was a dead end (no trigger walkable from it with the door shut): every state before the coin not live, and the one
+ *  search (roomDead on) kept 1 cell and found no route in 10 s where --roomDead=0 found it in 0.2 s */
+function storedCoinDeadEnds() {
+	const GX = require('../src/goexplore.js');
+	for (const [coin, door, what] of [[110, 43, 'gold'], [111, 213, 'blue']]) {
+		const W = 60, H = 50, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([12, y, door, 1]);
+		cells.push([2, H - 2, 255], [6, H - 2, coin], [20, H - 2, 121]);
+		const buf = ED.eelvlOf({ name: `stored${coin}`, width: W, height: H, cells });
+		const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf), { id: 't', file: `stored${coin}.eelvl` }));
+		const route = new Uint8Array(400).fill(4);
+		const ev = C.evaluate(L, route);
+		// every state of the route in its room: live (roomDead), and its reach cost finite (the death-free field too)
+		const RD = GX.roomDead(L, 1 << 24), f = R.reachField(L), fnd = R.reachField(L, { deaths: false });
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let n = 0, dead = 0, cut = 0, firstDead = -1;
+		for (let t = 0; ev && t <= ev.ms.length; t++) {
+			if (t > 0) { E.applyMask(inp, route[t - 1]); sim.tick(inp); }
+			if (sim.has_silver_crown) break;
+			const tile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
+			n++;
+			if (!GX.liveAt(RD.liveFor(sim), tile)) { dead++; if (firstDead < 0) firstDead = t; }
+			if (R.costAt(f, sim) < 0 || R.costAt(fnd, sim) < 0) cut++;
+		}
+		check(`a ${what} coin stored as collected (${coin}, 'reset' makes it a coin), a 1-coin door (${door}) and the trophy: holding right finishes, every state of it live in its room (roomDead) and finite`,
+			!!ev && ev.deaths === 0 && n > 20 && dead === 0 && cut === 0,
+			`${ev ? `${ev.ms.length} ticks, ${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; ${n} states, ${dead} not live${firstDead >= 0 ? ` (first at tick ${firstDead})` : ''}, ${cut} cut off`);
+		// the one search itself (coarse cells: above 50 x 50; roomDead on, deaths as moves off: nothing kills): a route
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reachH-'));
+		const file = path.join(dir, `stored${coin}.eelvl`);
+		fs.writeFileSync(file, buf);
+		let found = null, start = null, err = '';
+		try {
+			const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), file, '--seconds=20', '--workers=1', '--first=1', '--mem=200'], { encoding: 'utf8', timeout: 60000 });
+			for (const line of out.split('\n')) {
+				if (!line.startsWith('{')) continue;
+				const e = JSON.parse(line);
+				if (e.ev === 'start') start = e;
+				if (e.ev === 'result' && e.kind === 'finish' && !found) found = e;
+			}
+		} catch (e) { err = e.message.slice(0, 200); }
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* in use */ }
+		const rep = found ? C.evaluate(L, Uint8Array.from(found.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31)) : null;
+		check(`the one search on it (goexplore.js, 1 worker, roomDead on): a route, replayed`, !!start && start.cells === 'coarse' && start.deathMoves === false && !!rep && rep.deaths === 0,
+			`${found ? `${found.ticks} ticks after ${found.sec} s, replayed ${rep ? `${rep.runTicks} run ticks` : 'NO FINISH'}` : `no route${err ? ` (${err})` : ''}`}; cells ${start && start.cells}, deaths as moves ${start && start.deathMoves}`);
+	}
+}
+/** the room-aware dead ends (goexplore.js roomDead, --roomDead): random rooms of coin / switch / key / team doors and
+ *  gates, their triggers, spikes, protection, time doors, portals; states of random runs on a tile that is not live in
+ *  their room, each checked by a bounded exhaustive search from it (1 px / 1/8 px/tick cells): it never finishes and never
+ *  changes the room alive */
+function roomDeadFuzz() {
+	const GX = require('../src/goexplore.js');
+	let seed = 20260928;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+	const OPTS = [0, 1, 2, 4, 8, 16, 3, 5, 9, 10, 12, 17, 18, 20, 24, 11, 13];
+	const KINDS = [[43, 1], [43, 2], [165, 1], [100], [100], [113, 1], [184, 1], [185, 1], [6], [23], [26], [423, 1], [1027, 1], [1028, 1], [420, 1], [361, 1], [361, 1], [156], [157], [360], [4], [2], [1052, 1], [9], [9], [9]];
+	let rooms = 0, runs = 0, dead = 0, checked = 0, viol = 0, first = null;
+	const ROOMS = QUICK ? 10 : 30;
+	for (let k = 0; k < ROOMS; k++) {
+		const W = 14 + Math.floor(rnd() * 14), H = 10 + Math.floor(rnd() * 8), cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		// walls of doors splitting the room, then random blocks of every kind
+		for (let n = 0; n < 2; n++) { const x = 3 + Math.floor(rnd() * (W - 6)), d = KINDS[Math.floor(rnd() * 14)]; if (d[0] === 100 || d[0] === 6 || d[0] === 113 || d[0] === 423 || d[0] === 420) continue; for (let y = 1; y < H - 1; y++) cells.push([x, y, ...d]); }
+		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (rnd() < 0.12) { const d = KINDS[Math.floor(rnd() * KINDS.length)]; cells.push([x, y, ...d]); }
+		if (k % 3 === 0) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 1, 2], [1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 2, k % 2 ? 1 : 9]);
+		cells.push([W - 2, 1 + Math.floor(rnd() * (H - 2)), 121], [1, H - 2, 255]);
+		let L;
+		try { L = levelOfCells(W, H, cells); } catch (e) { continue; }
+		rooms++;
+		const RM = GX.roomOf(L), RD = GX.roomDead(L, 1 << 24);
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		for (let r = 0; r < (QUICK ? 15 : 30); r++) {
+			runs++;
+			sim.reset();
+			let m = OPTS[Math.floor(rnd() * OPTS.length)];
+			for (let t = 0; t < 250; t++) {
+				if (rnd() < 0.12) m = OPTS[Math.floor(rnd() * OPTS.length)];
+				E.applyMask(inp, m); sim.tick(inp);
+				if (sim.is_dead || sim.has_silver_crown) break;
+				const tile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
+				if (GX.liveAt(RD.liveFor(sim), tile)) continue;
+				dead++;
+				if (checked >= (QUICK ? 40 : 120)) continue;
+				checked++;
+				// a bounded exhaustive search from this state: a finish or a room change alive disproves the dead end
+				const key0 = RM.key(sim), s2 = new E.EESim(L), i2 = new E.EEInput();
+				let layer = [sim.snapshot()];
+				const seen = new Set();
+				let bad = null;
+				for (let d = 0; d < 90 && layer.length && !bad; d++) {
+					const next = [];
+					for (const sn of layer) {
+						for (const mm of OPTS) {
+							s2.restore(sn); E.applyMask(i2, mm); s2.tick(i2);
+							if (s2.is_dead) continue;
+							if (s2.has_silver_crown || RM.key(s2) !== key0) { bad = { d: d + 1, finish: s2.has_silver_crown, room: RM.desc(s2) }; break; }
+							const kk = `${Math.round(s2.px)},${Math.round(s2.py)},${Math.round(s2.speed_x * 8)},${Math.round(s2.speed_y * 8)},${s2.on_ground ? 1 : 0},${s2.jump_count},${s2._q0},${s2._q1}`;
+							if (seen.has(kk)) continue;
+							seen.add(kk);
+							next.push(s2.snapshot());
+						}
+						if (bad) break;
+					}
+					layer = next.length > 20000 ? next.slice(0, 20000) : next;
+				}
+				if (bad) { viol++; if (!first) first = { room: k, run: r, t, tile: [tile % W, (tile / W) | 0], room0: RM.desc(sim), bad }; }
+			}
+		}
+	}
+	// the corpus: every state of every job's original and best run up to its first death (the searches drop dead balls; a run
+	// that dies uses the death as a move) is live in its room, and so is every state of the death-free field's corpus
+	const JOBS = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
+	let jobs = [];
+	try { jobs = fs.readdirSync(JOBS).filter((d) => !d.startsWith('_') && fs.existsSync(path.join(JOBS, d, 'meta.json'))); } catch (e) { /* none */ }
+	let cn = 0, cdead = 0, cfirst = null, cruns = 0, cndf = 0, cdf = 0, cfirstDf = null, cdfDying = 0;
+	const seenLv = new Map();
+	for (const id of jobs) {
+		const lf = path.join(JOBS, '..', 'data', `job_${id.replace(/-/g, '_')}.json`);
+		let L;
+		try { L = fs.existsSync(lf) ? E.loadLevel(lf) : E.prepareLevel(EL.toSimLevel(EL.readEelvl(fs.readFileSync(path.join(JOBS, id, 'original.eelvl'))))); } catch (e) { continue; }
+		if (L.width * L.height <= 2500) continue;   // (coarse cells only: the levels above 50 x 50)
+		const RM = GX.roomOf(L), RD = GX.roomDead(L, 1 << 26), FD = R.reachField(L, { deaths: false });
+		for (const run of ['original.eetas', 'best.eetas']) {
+			const file = path.join(JOBS, id, run);
+			if (!fs.existsSync(file)) continue;
+			const masks = C.readEetas(file);
+			cruns++;
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			for (let t = 0; t <= masks.length; t++) {
+				if (t > 0) { E.applyMask(inp, masks[t - 1]); sim.tick(inp); }
+				if (sim.is_dead || sim.has_silver_crown) break;
+				const tile = (Math.trunc(sim.py + 8) >> 4) * L.width + (Math.trunc(sim.px + 8) >> 4);
+				cn++;
+				if (!GX.liveAt(RD.liveFor(sim), tile)) { cdead++; if (!cfirst) cfirst = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0], room: RM.desc(sim) }; }
+				cndf++;
+				if (R.costAt(FD, sim) < 0) { const nx = t < masks.length ? (() => { const s3 = new E.EESim(L); s3.restore(sim.snapshot()); const i3 = new E.EEInput(); E.applyMask(i3, masks[t]); s3.tick(i3); return s3.is_dead; })() : false; if (!nx) { cdf++; if (!cfirstDf) cfirstDf = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0] }; } else cdfDying++; }
+			}
+		}
+	}
+	check(`every state of every job's runs above 50 x 50 up to its first death (${cruns} runs): live in its room (roomDead) and not cut off by the death-free field`, cdead === 0 && cdf === 0,
+		`${cn} states, ${cdead} not live, ${cdf} cut off by the death-free field (${cdfDying} more on a killing tile the tick before the run's death)${cfirst ? `; first ${JSON.stringify(cfirst)}` : ''}${cfirstDf ? `; first cut ${JSON.stringify(cfirstDf)}` : ''}${jobs.length ? '' : ` (no jobs in ${JOBS})`}`);
+	check(`the room-aware dead ends (goexplore roomDead): ${rooms} random rooms of doors, triggers, spikes, portals; ${runs} random runs: from every state on a tile not live in its room that a bounded exhaustive search checked (90 ticks), no finish and no room change alive`,
+		viol === 0 && checked > 0, `${dead} dead states, ${checked} checked, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
+}
+/** the viewing-room trap level (test/editor.js's one search runs on it too): 80 x 40, walk mode */
+function trapLevel() {
+	const W = 80, H = 40, c = [];
+	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]);
+	for (let y = 1; y < H - 1; y++) for (let x = 42; x < W - 1; x++) c.push([x, y, 4]);
+	for (let y = 1; y < H - 1; y++) c.push([40, y, 361, 1]);
+	for (let x = 68; x <= 72; x++) c.push([x, 6, 361, 1], [x, 10, 9]);
+	for (let y = 7; y <= 9; y++) c.push([68, y, 361, 1], [72, y, 361, 1], [69, y, 0], [70, y, 0], [71, y, 0]);
+	c.push([70, 9, 242, 0, 3, 4], [12, 38, 242, 0, 4, 3], [6, 38, 242, 0, 1, 2], [45, 38, 242, 0, 2, 1], [18, 38, 242, 0, 5, 7]);
+	for (let x = 23; x <= 27; x++) c.push([x, 2, 9], [x, 6, 9]);
+	for (let y = 3; y <= 5; y++) c.push([23, y, 9], [27, y, 9]);
+	c.push([25, 5, 361, 1], [25, 3, 242, 0, 7, 99], [2, 38, 255], [30, 38, 360], [77, 5, 121], [77, 3, 420, 1], [78, 38, 453, 0]);
+	return { W, H, cells: c };
+}
+
 (async () => {
 	if (want('A')) sectionA();
 	if (want('B')) sectionB();
@@ -650,6 +916,8 @@ async function sectionG() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
+	if (want('H')) { sectionH(); storedCoinDeadEnds(); roomDeadFuzz(); }
+	if (want('I')) sectionI();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });
