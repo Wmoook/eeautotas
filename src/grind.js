@@ -73,8 +73,10 @@ const level = E.loadLevel(LEVEL_JSON);
 const W_ALL = +a.workers || os.cpus().length;
 // the corridor beam's own CPU share (--flybeamShare=K or EEAT_FLYBEAM_SHARE=K threads; flybeamLane): K threads run
 // flybeam.js next to the stages for the whole session, the stages get the rest (W); by default 1 thread from 3 workers
-// on (the A/B of 2026-09-28, 3 workers a level: Infinity Pain 39,110 vs main's 39,352, ice 4,579 vs 4,622, Octorage and
-// Forgotten Veil no loss); 0: no lane (then --flybeam=1 / EEAT_FLYBEAM=1 is the slice-per-round stage instead)
+// on (the A/B of 2026-09-28, 3 workers a level, 60 min, one pair each: Infinity Pain 39,110 vs main's 39,352, ice 4,579
+// vs 4,622, Octorage 6,209 vs 6,205, Forgotten Veil 11,723 vs 11,577: main's one -281 GPU shortcut at 36 min, the lane
+// arm's -213 sweep window 1 s after the cutoff); 0: no lane (then --flybeam=1 / EEAT_FLYBEAM=1 is the slice-per-round
+// stage instead)
 const FLY_K = (() => {
 	const set = a.flybeamShare !== undefined ? a.flybeamShare : process.env.EEAT_FLYBEAM_SHARE;
 	const k = set !== undefined && set !== '' ? Math.floor(+set) || 0 : (W_ALL >= 3 ? 1 : 0);
