@@ -370,7 +370,8 @@ async function appSection() {
 // pass read back from --cqx): a layer event, then a finish (a route of `idle` idle ticks and then right to the trophy,
 // when it fits in --depth) or a done event with the scripted end and overflow. "beam" reports the scenario's beam route
 // (if any) and ends. With `fail` (ms) every launch fails after that long (an error line, exit code 1). With `ready` (ms)
-// the first launch of each command loads its kernels that long before it says {"ev":"ready"} and starts. With
+// the first launch of each command loads its kernels that long before it says {"ev":"ready"} and starts; `readyBrk`
+// (ms): every wall breaker run does. With
 // `launchFail` (ms) "explore" fails that long after its start like a kernel launch the display driver's watchdog stopped
 // (its launchError line, exit 7), and the beams run until their --stopfile appears, then end "stopped" (logged). A run's
 // `closest` ({dist, tick, ch}) reports a nearest attempt of `tick` inputs `ch` ('4': right). A relay's --prefix is logged
@@ -428,6 +429,7 @@ const go = () => {
 	}, run.wait || 0);
 };
 if (SC.ready && !prev.some((a) => a[0] === args[0])) setTimeout(() => { say({ ev: 'ready', loadMs: SC.ready, allocMs: 1 }); go(); }, SC.ready);
+else if (SC.readyBrk && args.includes('--cap=2097152')) setTimeout(() => { say({ ev: 'ready', loadMs: SC.readyBrk, allocMs: 1 }); go(); }, SC.readyBrk);   // (every breaker run's start)
 else go();
 `;
 // A stand-in for the CPU search (src/goexplore.js): after `wait` ms it prints the scenario's source events (the relay's
@@ -736,9 +738,61 @@ async function passesSection() {
 		check('the wall breaker: a run that fails ("the prefix dies") is not an error of the search: the round goes on from its next starting point, whose finish is the route',
 			pfs.join() === '450:0,200:0' && str.result && str.result.strategy === 'past the wall', `prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}`);
 	}
+	// the breaker's GPU slices (breakSlice): with the GPU random runs next to it, a round's runs (each 0.6 s to its ready
+	// event, then 1.5 s) hold the GPU only from their ready events: while a run starts and in the slice after it (1/4 of its
+	// 1.5 s) the random runs have the GPU; `breakSlice: false` (as before): the round holds it from its start to its end
+	// (samples every 40 ms from 400 ms into the round: 31 of 102 vs 0 of 94; with all of them 42 of 110 vs 2-5 of ~100,
+	// the scheduler's lag)
+	{
+		const fakeCpu = path.join(HOME, 'fake-cpu.js'), fakeRolls = path.join(HOME, 'fake-rolls.js');
+		fs.writeFileSync(fakeCpu, FAKE_CPU);
+		fs.writeFileSync(fakeRolls, FAKE_ROLLS);
+		const arm = async (tag, body) => {
+			const scB = path.join(HOME, `brks-${tag}.json`), logB = path.join(HOME, `brks-${tag}.log`), scC = path.join(HOME, `brks-${tag}-cpu.json`), scG = path.join(HOME, `brks-${tag}-rolls.json`);
+			fs.writeFileSync(scB, JSON.stringify({ log: logB, R, readyBrk: 600, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 30, tick: 600, ch: '0' } }] },
+				relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
+				breaker: [{ end: 'time', layers: 700, wait: 1500, closest: { dist: 20, tick: 800, ch: '4' } }, { end: 'finish', idle: 0, layers: 3, wait: 1500 }], beam: null }));
+			fs.writeFileSync(scC, JSON.stringify({ wait: 100 }));
+			fs.writeFileSync(scG, JSON.stringify({ log: path.join(HOME, `brks-${tag}-rolls.log`), route: '4'.repeat(R), wait: 600000 }));
+			ED.start(Object.assign({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, body), { available: true },
+				{ tool: [process.execPath, fake, scB], cpu: [process.execPath, fakeCpu, scC], rollsCmd: [process.execPath, fakeRolls, scG], rolls: true, salts: false, relay: true, breaker: true, breakWait: [1], breakCells: 26 });
+			const t0 = Date.now(), turns = {};
+			let r0 = 0;   // (the round seen first: samples in its first 400 ms left out, the scheduler runs every 250 ms)
+			let str = ED.state();
+			while (str.running && !str.result && Date.now() - t0 < 40000) {
+				await new Promise((z) => setTimeout(z, 40));
+				str = ED.state();
+				if (str.breaker && str.breaker.round && !r0) r0 = Date.now();
+				if (str.breaker && str.breaker.round && Date.now() - r0 >= 400) turns[str.gpuTurn] = (turns[str.gpuTurn] || 0) + 1;
+			}
+			const done = str.breaker && (str.breaker.done || []).length ? str.breaker.done : [];
+			if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+			return { turns, route: str.result ? str.result.strategy : str.stage, round: str.breaker ? str.breaker.round || done[0] || null : null };
+		};
+		const on = await arm('on', {}), off = await arm('off', { breakSlice: false });
+		check("the wall breaker's slices: its runs hold the GPU from their ready events only; while a run starts and between two runs the GPU random runs have it (breakSlice: false: the round holds it throughout)",
+			on.route === 'past the wall' && off.route === 'past the wall' && (on.turns.gorolls || 0) >= 15 && (on.turns.breaker || 0) >= 20 && (off.turns.gorolls || 0) <= 2 && (off.turns.breaker || 0) >= 20,
+			`slices: GPU turns in the round ${JSON.stringify(on.turns)}, ${on.route}, round ${JSON.stringify(on.round)}; without: ${JSON.stringify(off.turns)}, ${off.route}`);
+	}
 	// the table by the GPU's memory (BREAK_MEM_F at 16 bytes a cell): 8 GB 2^27, 24 GB 2^29, 40 GB 2^30, 80 GB 2^31
 	check("the wall breaker's table: 2^27 cells on 8 GB, 2^29 on 24 GB, 2^30 on 40 GB (40,326 MB), 2^31 on 80 GB (81,559 MB)",
 		[8192, 24564, 40326, 81559].map(ED.breakCells).join() === '27,29,30,31', [8192, 24564, 40326, 81559].map(ED.breakCells).join());
+	// the gate front's clock (cycle 6: Forgotten Veil's round 1 ran 2,027 s, every gate hit restarting it): only a gate into
+	// a room key no attempt had been in and no earlier gate entered restarts it, and a round ends by 2 x its time
+	{
+		const seen = new Set([11, 12]), gates = new Set();
+		const hits = [11, 13, 13, 12, 14, null].map((room) => ED.gateRestarts(room, seen, gates, true));
+		const old = [11, 13, 13].map((room) => ED.gateRestarts(room, seen, new Set(), false));
+		// a round started at 0 whose last new gate was at 250 s: 300 s from there, but 600 s from its start at most
+		const R = { t0: 0, clock: 250000 }, R2 = { t0: 0, clock: 500000 };
+		const left = [ED.breakRoundLeft(R, 400000, 300, true), ED.breakRoundLeft(R2, 550000, 300, true), ED.breakRoundLeft(R2, 550000, 300, false), ED.breakRoundLeft({ t0: 0 }, 100000, 300, true)];
+		check("the wall breaker's gate front: a gate restarts the round's clock only into a new room key (not a source's, not an earlier gate's); a round ends by 2 x BREAK_ROUND_S; the old rule without either",
+			hits.join() === 'false,true,false,false,true,false' && old.join() === 'true,true,true' && left.join() === '150,50,250,200' && [...gates].join() === '11,13,12,14',
+			`restarts ${hits.join()}; old ${old.join()}; left ${left.join()}; gate rooms ${[...gates].join()}`);
+	}
+	// the others' GPU slice between two breaker runs: a quarter of the run's search time, at most 5 s
+	check("the wall breaker's slices: the others get 1/4 of a run's search time before its next run, at most 5 s",
+		[0, 1000, 12000, 20000, 60000].map(ED.breakSliceMs).join() === '0,250,3000,5000,5000', [0, 1000, 12000, 20000, 60000].map(ED.breakSliceMs).join());
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
