@@ -279,6 +279,9 @@ const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir'
 // the text options
 const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
+// a parked worker (stdin "workers K": only the first K search) looks at its port, its seeds, the clock and the stop flag
+// every PARK_MS
+const PARK_MS = 50;
 /** the process's CPU seconds so far (user + system, every thread) */
 const cpuSec = () => { const u = process.cpuUsage(); return Math.round((u.user + u.system) / 1e5) / 10; };
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
@@ -1011,7 +1014,7 @@ const STEER_REAL_MAX = 5999;
  * SharedArrayBuffer): [0] the longest route that still counts (ticks), [1] stop. post(msg): to the main thread
  * ('finish', 'closest', 'source', 'stat', 'done').
  */
-function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
+function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1) {
 	const W = L.width, H = L.height, N = W * H;
 	const rnd = rngOf(seed);
 	const sim = new E.EESim(L);
@@ -1354,10 +1357,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let ticks = 0, lastProgress = 0, refined = 0, minRc = Infinity, imports = 0, importAdded = 0, seeded = 0, seedCells = 0;
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
+	let parked = 0;   // (the chunks this worker sat out: stdin "workers K" parked it)
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
-		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
+		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
@@ -1712,6 +1716,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (port) inbox();
 		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) addSeed(String(m.message));
+		// (parked: stdin "workers K" keeps only the first K workers searching, e.g. while the editor's stall escape has the
+		// rest of the CPU; a parked worker keeps its archive and still answers its port (the bursts' "nearest" questions, the
+		// imports) and its seeds, and searches again once K allows it)
+		if (idx >= 0 && ctrl.length > 2) { const act = Atomics.load(ctrl, 2); if (act > 0 && idx >= act) { parked++; Atomics.wait(ctrl, 3, 0, PARK_MS); continue; } }
 		lShare = leadShare(now); wShare = wayShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
@@ -2374,7 +2382,7 @@ function workerMain() {
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
 	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {},
 		d.avoid ? { avoidTiles: d.avoid } : {});
-	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null);
+	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null, Number.isInteger(d.idx) ? d.idx : -1);
 }
 
 async function main() {
@@ -2413,7 +2421,9 @@ async function main() {
 	const startCost = RF.costAt(field, sim0);
 	// (the sound lower bound per tile: every worker's prune once a route is known, in shared memory)
 	const lb = a.lb ? lowerBoundTiles(L) : null;
-	const ctrl = new Int32Array(new SharedArrayBuffer(8));
+	// (ctrl: [0] the depth bound, [1] the stop flag, [2] the workers searching (0: all; stdin "workers K": the others park),
+	// [3] unused: the parked workers wait on it)
+	const ctrl = new Int32Array(new SharedArrayBuffer(16));
 	ctrl[0] = a.depth;
 	const seeds = Array.from({ length: a.workers }, (_, i) => (a.seed + i) >>> 0);
 	// the seeds' channels (stdin "seed <inputs>"): each worker polls its end between chunks of picks (receiveMessageOnPort:
@@ -2509,6 +2519,12 @@ async function main() {
 				if (m) bound(+m[1]);
 				else if (line.startsWith('seed ') && /^[0-O]+$/.test(line.slice(5))) { for (const p of seedPorts) p.postMessage(line.slice(5)); }
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
+				// (the editor's stall escape: only the first K workers search, the others park; 0 or K >= the workers: all)
+				else if (/^workers \d+$/.test(line)) {
+					const k = +line.slice(8), act = k > 0 && k < a.workers ? k : 0;
+					Atomics.store(ctrl, 2, act);
+					say({ ev: 'workers', active: act || a.workers, of: a.workers });
+				}
 				else if (line.startsWith('import ') && one) {
 					// (the one search: another operator's run, the editor's GPU random runs, into every archive)
 					const inputs = line.slice(7);
@@ -2690,7 +2706,7 @@ async function main() {
 		let port = null;
 		const list = [seedIn[i]];
 		if (one) { const ch = new MessageChannel(); port = ch.port2; list.push(port); one.ports.push(ch.port1); }
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i] }, transferList: list,
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i], idx: i }, transferList: list,
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
