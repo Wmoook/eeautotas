@@ -935,7 +935,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		HL.push(c);
 	};
 	// (head L's share now: see LEAD_GRACE_S; lastL: the first route's or head L's last faster route's time)
-	let lastL = 0, lShare = 0, pickL = false;
+	let lastL = 0, lShare = 0, pickL = false, pickW = false;   // (pickW / viaW: the same bookkeeping for head W, counted only)
 	const leadShare = (now) => (sched === null || a.pL <= 0 ? 0 : a.pL * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastL) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
 	const hpush = HS ? (c) => { HA.push(c); HS.push(c); if (sched !== null) lpush(c); } : (c) => { HA.push(c); if (sched !== null) lpush(c); };
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
@@ -1016,7 +1016,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (c.t <= t) return null;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
-			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL);
+			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL); c.viaW = pickW || (pc !== null && pc.viaW);
 			release(old);
 			impr++;
 			if (ST) { c.sc = steerOf(); nearSteer(c); }
@@ -1028,9 +1028,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
 		// (viaL: the cell descends from a head-L pick's runs, its share's yield: a route head L's earlier arrivals led to is
 		// often finished by head A's pick of a cell by the trophy)
-		const vl = pickL || (pc !== null && pc.viaL);
-		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl }
-			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl };
+		const vl = pickL || (pc !== null && pc.viaL), vw = pickW || (pc !== null && pc.viaW);
+		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw }
+			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw };
 		if (ST) nearSteer(nc);
 		cells.set(k, nc);
 		hpush(nc);
@@ -1374,7 +1374,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		lShare = leadShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
-			pickL = false;
+			pickL = false; pickW = false;
 			if (!coarse) e = popA();
 			else if (discovery.length && rnd() < 0.5) {
 				// head C: a new room's first cell, --burst times
@@ -1391,7 +1391,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				// head W (a route known): the off-schedule cell most ahead of the route by its tile alone
 				while (HW.size() > 0) { const c = HW.pop(); if (HW.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
 				if (e === null) e = rnd() < a.pA ? popA() : popB();
-				else wayPicks++;
+				else { wayPicks++; pickW = true; }
 			} else if (rnd() < a.pA) e = popA();
 			else e = popB();
 			if (e === null) { end = 'exhausted'; break; }
@@ -1452,7 +1452,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						const f = { t, sec, simTicks: ticks };
 						if (!first) first = f;
 						best = f;
-						post({ type: 'finish', seed, t, sec, simTicks: ticks, byL: pickL || e.viaL, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
+						post({ type: 'finish', seed, t, sec, simTicks: ticks, byL: pickL || e.viaL, byW: pickW || !!e.viaW, inputs: C.eetasBytes(inputsOf({ up, blk, o, n: s + 1 })).toString('latin1') });
 						if (a.first) end = 'finish';
 						break;
 					}
@@ -1485,7 +1485,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			}
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
-		pickL = false;
+		pickL = false; pickW = false;
 	}
 	sendNear();
 	E.flushTicks();
@@ -2099,7 +2099,7 @@ async function main() {
 	let route = null, first = null, near = null, nearPending = false, heapWarned = false;
 	const stats = new Map(), dones = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
-	let nLead = 0;   // (the routes head-L picks found)
+	let nLead = 0, nWay = 0;   // (the routes head-L picks found; the routes that descend from a head-W pick)
 	const samples = [[Date.now(), 0]];
 	const bound = (d) => { if (d < Atomics.load(ctrl, 0)) Atomics.store(ctrl, 0, Math.max(0, d)); };
 	const progress = () => {
@@ -2116,7 +2116,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -2167,7 +2167,7 @@ async function main() {
 	}
 	/** a route (masks) from worker `seed` (0: a GPU burst) after simTicks simulated ticks: replayed in the exact engine
 	 *  before it counts (the same engine found it, from snapshots and replays: a mismatch would be a bug) */
-	const routeFound = (masks, seed, simTicks, who, byL = false) => {
+	const routeFound = (masks, seed, simTicks, who, byL = false, byW = false) => {
 		const t = masks.length;
 		if (route && t >= route.ticks) return;
 		const ev = C.evaluate(L, masks);
@@ -2176,10 +2176,11 @@ async function main() {
 		const inputs = C.eetasBytes(ev.ms).toString('latin1');
 		route = { ticks: t, runTicks: ev.runTicks, inputs, seed, simTicks, sec: sec() };
 		if (byL) nLead++;
+		if (byW) nWay++;
 		// (head L of every worker: the new best route's schedule; byL: a head-L pick found it, its share's yield)
 		if (one && (a.pL > 0 || a.pW > 0)) for (const p of one.ports) p.postMessage({ type: 'route', inputs, byL });
 		if (!first) first = { ticks: t, sec: route.sec, simTicks, seed };
-		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }) });
+		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }), ...(byL ? { byL: true } : {}), ...(byW ? { byW: true } : {}) });
 		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
 		if (a.first) Atomics.store(ctrl, 1, 1);
 	};
@@ -2235,7 +2236,7 @@ async function main() {
 		} else if (msg.type === 'edge') {
 			if (bursts) bursts.edge(msg.from, msg.tile, msg.to, msg.trig);
 		} else if (msg.type === 'finish') {
-			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`, !!msg.byL);
+			routeFound(Uint8Array.from(msg.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), msg.seed, msg.simTicks, `worker ${msg.seed}`, !!msg.byL, !!msg.byW);
 		} else if (msg.type === 'done') dones.set(msg.seed, msg);
 	};
 	const workers = seeds.map((seed, i) => new Promise((res) => {
@@ -2275,7 +2276,7 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead, cpuS: cpuSec(),
+		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
