@@ -238,6 +238,11 @@ const levelHashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex')
  *  edges. Otherwise (today: every search drops a dead ball) the file the searches read is the field without them, where a
  *  state only a death leads to the trophy from is cut off (src/reach.js opts.deaths; the verdicts keep them) */
 const deathsTaken = (dm) => process.env.EEAT_DEATHS === 'moves' || !!dm;
+/** deaths as moves for a search (body deaths: true, or EEAT_DEATHS=moves; OFF by default since hx2-r1-deaths: in the merge
+ *  with hx-int-1 they need the reach field WITH death edges, which prunes no killing dead end, and Good Egg's search
+ *  collapsed: its GPU random runs 98 rooms vs 4,083 in 60 s with one pool, the AutoTASer's nearest 285 tiles (524 ticks,
+ *  never better) vs 249 (7,369 ticks) in 15 min; src/out/night/helix2_r1-deaths.md in that worktree) */
+const deathsAsked = (b) => b.deaths === true || (b.deaths !== false && process.env.EEAT_DEATHS === 'moves');
 const reachBase = (hash, dm) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}${deathsTaken(dm) ? '_dm' : ''}`);
 /** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
  *  cache (memo, or the search's file); none yet: null, and for a level up to 40k tiles the check starts in a worker
@@ -1441,7 +1446,7 @@ function start(b, gpu, test) {
 	fs.mkdirSync(d, { recursive: true });
 	const levelHash = levelHashOf(buf);
 	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
-		reach: `${reachBase(levelHash, b.deaths !== false && GX.deathMovesFor(ins.level))}.bin` };
+		reach: `${reachBase(levelHash, deathsAsked(b) && GX.deathMovesFor(ins.level))}.bin` };
 	fs.writeFileSync(files.eelvl, buf);
 	if (!noGpu) fs.writeFileSync(files.bin, G.levelBlob(ins.level));
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
@@ -1478,7 +1483,7 @@ function start(b, gpu, test) {
 	// (deaths as moves, 2026-09-28: where something kills and a checkpoint or 2+ spawns exist (goexplore.js deathMovesFor),
 	// the searches keep a death that pays (goexplore.js deathPays; the GPU tools' --deaths=1: kernels.cu exploreKeepDead,
 	// rollBody); body deaths: false: every death ends its run, as before)
-	const deathMoves = b.deaths !== false && GX.deathMovesFor(ins.level);
+	const deathMoves = deathsAsked(b) && GX.deathMovesFor(ins.level);
 	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
