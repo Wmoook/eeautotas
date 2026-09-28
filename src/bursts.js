@@ -33,6 +33,12 @@
 // competes with them in physics mode, and in walk mode runs only when no room has a target left. A burst that got
 // nearer goes on from its nearest attempt (CHAIN_MAX). The burst settings (CONFS) have a bandit per room.
 //
+// The route arm (goexplore.js --rArm, src/routearm.js): once a route is known (route(masks): the search's best), that
+// share of the lane's turns goes to searches from the ROUTE's own states for ways that meet its later points sooner
+// (eegpu explore --ahead=1 ordered by the route's own schedule; a fine local search and a 4 px one per start), each hit
+// spliced into a verified route (the route's own inputs from the met visit, or every move to an exact state of the
+// route) and handed on like a burst's finish; its hits go into every archive too. A 'burst' event with arm: true each.
+//
 // Soundness: a burst's cost ceiling (--costslack, the relay's 30 tiles + 10% of the start's distance on the steer field)
 // only orders an operator's own states, as the relay's did; the archive drops a state only by the reach field's -1, and
 // every route is replayed.
@@ -180,6 +186,13 @@ function create(o) {
 	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
+	// the route arm (src/routearm.js; goexplore.js --rArm, a share of the bursts once a route is known): searches from the
+	// route's own states for ways that meet its later points sooner, spliced into verified routes
+	const RA = a.rArm > 0 ? require('./routearm.js').create({ L, field: o.field, tool, bin, fp, work, cacheArgs, a, bound: o.bound, say: o.say,
+		finish: (masks, how) => { st.armRoutes++; o.finish(masks, how); }, broadcast: (inputs) => { st.imports++; o.broadcast(inputs); } }) : null;
+	let armAcc = 0, armOom = 0;
+	const ARM_OOM_MAX_S = 30;
+	st.arm = 0; st.armSec = 0; st.armRoutes = 0;
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
 	 *  want different cells): each once, then its mean reward in the room (the level's mean as a prior worth 2 tries) +
 	 *  CONF_C x sqrt(ln(1 + the room's bursts) / tries) */
@@ -572,6 +585,21 @@ function create(o) {
 			const left = a.seconds - now;
 			if (left < 3) break;
 			let job = null;
+			// the route arm's turn (its share of the bursts, a route known): one start's searches in this lane
+			if (!next && RA && RA.ready() && (armAcc += a.rArm) >= 1) {
+				armAcc -= 1;
+				const t0 = Date.now();
+				const r = await RA.run(lane, { child: (ch, on) => { if (on) children.add(ch); else children.delete(ch); }, stopped: () => stopped });
+				if (stopped) break;
+				if (!r) { await sleep(500); continue; }
+				st.arm++; st.armSec += (Date.now() - t0) / 1000;
+				o.say({ ev: 'burst', n: st.bursts + st.arm, arm: true, room: null, what: `the route arm from tick ${r.s} (potential ${r.pot})`, from: r.s, sec: Math.round(r.sec * 10) / 10, end: r.ends.join(' / '),
+					hits: r.hits, saved: r.saved, how: r.how, at: o.sec() });
+				// (the GPU's memory full: the start goes again after a short wait, longer while it lasts, at most ARM_OOM_MAX_S; the
+				// room bursts' back-off is their own)
+				if (r.oom) { const w = Math.min(ARM_OOM_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 + armOom)); armOom++; for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100); } else armOom = 0;
+				continue;
+			}
 			const p = next ? null : pick();
 			if (next) {
 				job = Object.assign(next, { seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))) });
@@ -670,6 +698,8 @@ function create(o) {
 	};
 	return {
 		room, edge, triggers: TR.n,
+		/** the best route (masks): the route arm's (a newer, faster one replaces it; its cursor keeps its tick) */
+		route: (masks) => { if (RA) { try { RA.setRoute(masks); } catch (e) { o.say({ ev: 'warning', text: `route arm: ${e.message}` }); } } },
 		start: () => { loopP = Promise.all(Array.from({ length: Math.max(1, a.burstPar) }, (_, k) => loop(k))).catch((e) => o.say({ ev: 'warning', text: `bursts: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` })); return loopP; },
 		/** ends the running burst between two launches and the loop; resolves once its process is gone */
 		stop: async () => {
@@ -679,7 +709,7 @@ function create(o) {
 			for (const ch of children) { try { ch.kill(); } catch (e) { /* gone */ } }
 			if (loopP) await loopP;
 		},
-		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st),
+		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st, RA ? { armInfo: RA.stats() } : {}),
 	};
 }
 
