@@ -110,6 +110,7 @@ const ENDPOINTS = [
 	['POST', '/api/jobs/:id/finish', 'stop and write the final report (report.json)'],
 	['DELETE', '/api/jobs/:id', 'delete the job and its files'],
 	['GET', '/api/jobs/:id/best.eetas', 'download the best run (also original.eetas)'],
+	['GET', '/api/jobs/:id/original.eelvl', 'the job\'s level file, byte for byte as imported (404 when it is missing); the level editor opens it: /editor#job=<id>'],
 	['GET', '/api/jobs/:id/log', 'the last 300 lines of grind.log'],
 	['GET', '/api/jobs/:id/where?t=1:10.00', 'state at a run time (m:ss.cc) or tick: position, velocity, tiles, coins, next inputs/events, ASCII map (&format=text)'],
 	['GET', '/api/jobs/:id/render.png?from=1:10&to=1:14', 'PNG of the level around the path in that range (&scale=px per tile, &margin=tiles)'],
@@ -124,7 +125,7 @@ const ENDPOINTS = [
 	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
 	['GET', '/api/eegfx/sheet/<name>.png', 'one sprite sheet from the eeo-tas media folder (only the sheets the map lists)'],
-	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU and the CPU find a route)'],
+	['GET', '/editor', 'the level editor (place blocks, a start and the trophy; the GPU and the CPU find a route); /editor#job=<id> opens a job\'s level (&path=1: with its best run\'s path)'],
 	['GET', '/api/editor/blocks?ids=9,121,...', 'block info for the editor: names, kinds ([kind, dir/sub, solid]), EE minimap colors, argument kinds'],
 	['POST', '/api/editor/eelvl', 'the editor\'s level JSON {name, width, height, cells: [[x, y, id, ...args]]} -> .eelvl bytes (what EE Offline opens)'],
 	['POST', '/api/editor/parse', 'an .eelvl -> the editor\'s level JSON: JSON {eelvlB64}'],
@@ -375,6 +376,15 @@ const server = http.createServer(async (req, res) => {
 				const nice = `${(meta.name || id).replace(/[^\w .()-]/g, '')} ${what === 'best.eetas' ? 'optimized' : 'original'} ${C.fmt(t).replace(':', 'm')}.eetas`;
 				res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${nice}"`, 'Cache-Control': 'no-store' });
 				return res.end(fs.readFileSync(path.join(dir, what)));
+			}
+			// the job's level file as imported, byte for byte (the level editor opens it: /editor#job=<id>)
+			if (req.method === 'GET' && what === 'original.eelvl') {
+				const f = path.join(dir, 'original.eelvl');
+				if (!fs.existsSync(f)) return send(res, 404, { error: 'this job has no level file (original.eelvl is missing from its folder)' });
+				const meta = C.readJSON(path.join(dir, 'meta.json'), {});
+				const base = String((meta.level && meta.level.file) || meta.name || id).replace(/\.eelvl$/i, '').replace(/[^\w .()-]/g, '').trim() || 'level';
+				res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${base}.eelvl"`, 'Cache-Control': 'no-store' });
+				return res.end(fs.readFileSync(f));
 			}
 			if (req.method === 'GET' && what === 'log') return send(res, 200, { lines: J.logTail(id, 300) });
 			if (req.method === 'GET' && what === 'where') {

@@ -25,7 +25,8 @@ const HOMEP = (p) => require('path').join(require('os').homedir(), p);
 //            effects: the trajectory's `effects` decoded by the page's own code = the engine's fields every tick), EE
 //            graphics (src/eegfx.js on a tiny fake eeo-tas: the sprite map, Player.as, sheet whitelist, folder checks), a
 //            job's copy on a rented machine (remote.json: summary, status, /api/state `rented`, the page's rendering; a
-//            stopped copy the farm calls running; old speeds; a job only there; stale = nothing), the inbox verdict of a slower run
+//            stopped copy the farm calls running; old speeds; a job only there; stale = nothing), "Open in level editor" (GET
+//            original.eelvl, the buttons, the editor's #job=<id> handler run against the server), the inbox verdict of a slower run
 // usage: node test/review.js [--quick] [--seed=N] [--only=music,portals,keys,fuzz,real,drag,app] [--case=ks1]
 // Exit code 1 if any check fails. Node built-ins only; writes nothing inside the repo.
 const fs = require('fs');
@@ -822,7 +823,7 @@ function makeSandbox() {
 	const src = path.join(dir, 'src');
 	fs.mkdirSync(path.join(src, 'app'), { recursive: true });
 	for (const f of fs.readdirSync(SRC)) { const p = path.join(SRC, f); if (fs.statSync(p).isFile()) fs.copyFileSync(p, path.join(src, f)); }
-	fs.copyFileSync(path.join(SRC, 'app', 'index.html'), path.join(src, 'app', 'index.html'));
+	for (const f of ['index.html', 'editor.html']) fs.copyFileSync(path.join(SRC, 'app', f), path.join(src, 'app', f));
 	process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } });
 	return { dir, src, J: require(path.join(src, 'jobs.js')), C: require(path.join(src, 'common.js')), R: require(path.join(src, 'render.js')) };
 }
@@ -1069,6 +1070,136 @@ async function remoteChecks(S, port, id, page) {
 	check('a broken remote.json shows nothing (no error)', J.summary(id).remote === null);
 	fs.rmSync(rf, { force: true });
 }
+/** a function of a page's script, cut out by its name: `function name(` / `async function name(` up to its closing `}` at column 0 (or the one line) */
+function pageFn(src, name) {
+	const lines = src.split('\n');
+	const k = lines.findIndex((l) => new RegExp(`^(async )?function ${name}\\(`).test(l));
+	if (k < 0) return '';
+	const count = (l, c) => l.split(c).length - 1;
+	if (count(lines[k], '{') > 0 && count(lines[k], '{') === count(lines[k], '}')) return lines[k];
+	const e = lines.indexOf('}', k);
+	return e < 0 ? '' : lines.slice(k, e + 1).join('\n');
+}
+const pageConst = (src, name) => { const x = src.match(new RegExp(`^const ${name} = .*$`, 'm')); return x ? x[0] : ''; };
+/**
+ * "Open in level editor": GET /api/jobs/:id/original.eelvl (the exact bytes; 404 JSON for an unknown job and a job without
+ * its file), the button in the run viewer's top bar and on the job page (openInEditor cut out of index.html: /editor#job=<id>
+ * in a new tab, the same tab when blocked), and editor.html's #job=<id> handler (jobFromHash / openJob / openEelvl / jobPath
+ * cut out of the page, run against this server through a fetch stand-in): the level through the import path, named after
+ * the job, "Loaded from job <name>", &path=1 = the best run's path; readable errors; no hash = nothing happens.
+ */
+async function editorLinkChecks(S, port, id, page, appLevel) {
+	const { J, C } = S;
+	const dir = J.jobDir(id), lvFile = path.join(dir, 'original.eelvl');
+	let r = await request(port, 'GET', `/api/jobs/${id}/original.eelvl`);
+	check('GET /api/jobs/:id/original.eelvl: the job\'s level file, the exact bytes (a download named after the imported file)', r.status === 200 &&
+		/octet-stream/.test(r.type) && Buffer.compare(r.body, appLevel) === 0 && Buffer.compare(r.body, fs.readFileSync(lvFile)) === 0,
+		`${r.status} ${r.type} ${r.body && r.body.length} bytes vs ${appLevel.length}`);
+	const bad = [];
+	for (const p of ['no-such-job-000000', 'Bad_Id', '..%2F..%2Fsrc', 'a%20b']) {
+		const x = await request(port, 'GET', `/api/jobs/${p}/original.eelvl`);
+		if (!(x.status === 404 && /json/.test(x.type) && x.json && x.json.error === 'unknown job')) bad.push(`${p}: ${x.status} ${x.body && x.body.toString('utf8').slice(0, 60)}`);
+	}
+	check('GET /api/jobs/<unknown or bad id>/original.eelvl: a 404 JSON error "unknown job"', !bad.length, bad.join('; '));
+	const hidden = `${lvFile}.away`;
+	fs.renameSync(lvFile, hidden);
+	try {
+		r = await request(port, 'GET', `/api/jobs/${id}/original.eelvl`);
+		check('GET original.eelvl of a job without its level file: a 404 JSON error that says so', r.status === 404 && r.json && /no level file/.test(r.json.error), `${r.status} ${r.json && r.json.error}`);
+	} finally { fs.renameSync(hidden, lvFile); }
+	r = await request(port, 'GET', '/api');
+	check('GET /api lists GET /api/jobs/:id/original.eelvl', r.status === 200 && r.json.endpoints.some((e) => e.method === 'GET' && e.path === '/api/jobs/:id/original.eelvl'));
+
+	// ---- the run viewer's and the job page's button (index.html)
+	const vtop = (page.match(/<div class="vtop">[\s\S]*?<\/div>\n\t\t<div class="vstage"/) || [''])[0];
+	check('the run viewer\'s top bar has the "Open in level editor" button (next to Close), and the job page\'s file row one (next to Original)',
+		/<button id="vEditor"[^>]*>Open in level editor<\/button>\s*<button id="vClose"/.test(vtop) &&
+		/<button class="ghost" id="dlOrig">Original<\/button>\s*<button class="ghost" id="edBtn"[^>]*>Open in level editor<\/button>/.test(page) &&
+		/^\$\('vEditor'\)\.onclick = \(\) => \{ if \(vw\.id\) openInEditor\(vw\.id\); \};$/m.test(page) && /\$\('edBtn'\)\.onclick = \(\) => openInEditor\(j\.id\);/.test(page));
+	const opened = [];
+	const loc = { href: '/' };
+	const openIn = (blocked) => new Function('window', 'location', `${pageFn(page, 'openInEditor')}\nreturn openInEditor;`)(
+		{ open: (u, t) => { opened.push([u, t]); return blocked ? null : {}; } }, loc);
+	let e = errOf(() => { openIn(false)(id); openIn(true)('lvl-00ff00'); });
+	check('openInEditor: /editor#job=<id> in a new tab (_blank); the same tab when the browser blocks it', !e && opened.length === 2 && opened[0][0] === `/editor#job=${id}` &&
+		opened[0][1] === '_blank' && loc.href === '/editor#job=lvl-00ff00', e ? e.message : JSON.stringify({ opened, href: loc.href }));
+
+	// ---- the editor's #job=<id> handler (editor.html), served by this server
+	r = await request(port, 'GET', '/editor');
+	const ed = r.status === 200 ? r.body.toString('utf8') : '';
+	const edScripts = [...ed.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+	const eds = edScripts.join('\n');
+	check('GET /editor: the page (its script parses) with the "Loaded from job" pill and the "job\'s run" toggle, hidden until a job is opened',
+		edScripts.length > 0 && edScripts.every((s) => !errOf(() => new Function(s))) && /<a class="pill" id="pJob" href="\/" hidden/.test(ed) &&
+		/<label class="ck" id="lJobPath" hidden[^>]*><input type="checkbox" id="cJobPath"> job's run<\/label>/.test(ed), `${r.status}`);
+	check('the editor reads #job=<id> on load and on a hash change, through the import path of Import .eelvl (openEelvl: POST /api/editor/parse, one undo step)',
+		/\n\tjobFromHash\(\);[^\n]*\n\twindow\.addEventListener\('hashchange', jobFromHash\);\n\}\)\(\);/.test(eds) &&
+		/\$\('fImport'\)\.onchange = async \(\) => \{[\s\S]*?await openEelvl\(await f\.arrayBuffer\(\), f\.name\);/.test(eds) &&
+		/await openEelvl\(bytes, [^\n]*\);/.test(pageFn(eds, 'openJob')) && /postJson\('\/api\/editor\/parse'/.test(pageFn(eds, 'openEelvl')) &&
+		/wholeLevel\(/.test(pageFn(eds, 'openEelvl')) && /fetch\(`\/api\/jobs\/\$\{id\}\/original\.eelvl`\)/.test(pageFn(eds, 'openJob')));
+	// run it: the page's own functions with a fetch that asks this server, stand-ins for the canvas and the rest
+	const fetchStub = async (p, o) => {
+		const x = await request(port, (o && o.method) || 'GET', p, o && o.body ? Buffer.from(o.body) : null, o && o.headers);
+		return { ok: x.status >= 200 && x.status < 300, status: x.status, statusText: String(x.status),
+			json: async () => JSON.parse(x.body.toString('utf8')), arrayBuffer: async () => x.body.buffer.slice(x.body.byteOffset, x.body.byteOffset + x.body.length) };
+	};
+	const els = {};
+	const $ = (k) => (els[k] = els[k] || { hidden: true, innerHTML: '', href: '', checked: false, disabled: false });
+	const H = { hash: '', replaced: [], toasts: [], lvMsgs: 0, wholeLevel: 0 };
+	const LV = { name: 'My level', W: 40, H: 25 };
+	const env = { $, fetch: fetchStub, LV, GUIDE: { strokes: [] }, VW: { dirty: false },
+		location: { get hash() { return H.hash; }, pathname: '/editor', search: '' }, history: { replaceState: (a, b, u) => H.replaced.push(u) },
+		toast: (h, err) => H.toasts.push([h, !!err]), ensureInfo: async () => {}, fit: () => {}, currentSig: () => `sig${H.wholeLevel}`,
+		wholeLevel: (fn) => { H.wholeLevel++; fn(); } };
+	const code = [pageConst(eds, 'esc'), pageConst(eds, 'postJson'), pageConst(eds, 'levelFacts'), pageConst(eds, 'JOB'),
+		...['api', 'b64', 'loadJson', 'lvMsg', 'openEelvl', 'b64i32', 'jobClear', 'openJob', 'jobPath', 'jobFromHash'].map((n) => pageFn(eds, n))].join('\n');
+	let P = null;
+	e = errOf(() => { P = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { jobFromHash, jobPath, JOB };`)(...Object.values(env)); });
+	check('the editor\'s job functions cut out of the page run', !!P, e ? e.message : undefined);
+	if (!P) return;
+	const tr = (await request(port, 'GET', `/api/jobs/${id}/trajectory?which=best`)).json;
+	const name = J.summary(id).name;
+	H.hash = `#job=${id}&path=1`;
+	await P.jobFromHash();
+	const X0 = tr && Buffer.from(tr.x, 'base64').readInt32LE(0), Y0 = tr && Buffer.from(tr.y, 'base64').readInt32LE(0);
+	const pt = P.JOB.path && P.JOB.path[0];
+	check('#job=<id>&path=1: the job\'s level through the import path (one undo step), named after the job, "Loaded from job <name>" (a pill that links to Watch), ' +
+		'the hash dropped, the best run\'s path (ball centre per tick) with "job\'s run" ticked', H.wholeLevel === 1 && LV.W === 32 && LV.H === 8 && LV.name === name &&
+		LV.fg[5 * 32 + 2] === 255 && LV.fg[5 * 32 + 28] === 121 && H.replaced.join() === '/editor' && !$('pJob').hidden &&
+		$('pJob').innerHTML === `Loaded from job <b>${name}</b>` && $('pJob').href === `/#watch=${id}` && !$('lJobPath').hidden && $('cJobPath').checked &&
+		/^<div class="msg info">Loaded from job <b>review app<\/b>: 32 × 8 tiles, \d+ blocks\./.test($('lvMsg').innerHTML) && !H.toasts.length &&
+		P.JOB.id === id && tr && P.JOB.path.length === tr.ticks + 1 && pt[0] === X0 / 16 + 8 && pt[1] === Y0 / 16 + 8,
+		JSON.stringify({ wl: H.wholeLevel, name: LV.name, W: LV.W, replaced: H.replaced, pill: $('pJob').innerHTML, msg: $('lvMsg').innerHTML.slice(0, 120), toasts: H.toasts,
+			path: P.JOB.path && P.JOB.path.length, ticks: tr && tr.ticks, pt }));
+	// without &path=1: the toggle unticked, no path until it is ticked
+	H.hash = `#job=${id}`;
+	await P.jobFromHash();
+	const noPath = H.wholeLevel === 2 && !$('cJobPath').checked && P.JOB.path === null && !$('lJobPath').hidden;
+	$('cJobPath').checked = true;
+	await P.jobPath();
+	check('#job=<id> alone: the level, "job\'s run" unticked and no path; ticking it fetches the path', noPath && P.JOB.path && P.JOB.path.length === tr.ticks + 1 && !$('cJobPath').disabled,
+		`${H.wholeLevel} ${$('cJobPath').checked} ${P.JOB.path && P.JOB.path.length}`);
+	// errors: a readable message (the Level card and a toast), the level stays as it was
+	const errCase = async (hash, re) => {
+		H.hash = hash; H.toasts.length = 0;
+		const before = H.wholeLevel;
+		await P.jobFromHash();
+		const m = $('lvMsg').innerHTML;
+		return H.wholeLevel === before && LV.name === name && /^<div class="msg err">Could not open the level of job <b>/.test(m) && re.test(m) && /<a href="\/">Your runs<\/a>/.test(m) &&
+			H.toasts.length === 1 && H.toasts[0][1] ? '' : `${hash}: ${m} ${JSON.stringify(H.toasts)}`;
+	};
+	const errs = [await errCase('#job=no-such-job-000000', /no-such-job-000000<\/b>: there is no such job \(it may have been deleted\)\./),
+		await errCase('#job=..%2Fsrc', /that is not a job id/)];
+	fs.renameSync(lvFile, hidden);
+	try { errs.push(await errCase(`#job=${id}`, new RegExp(`review app</b>: this job has no level file \\(original\\.eelvl is missing from its folder\\)\\.`))); } finally { fs.renameSync(hidden, lvFile); }
+	check('the editor on an unknown job, a bad id and a job without its level file: a readable message in the Level card and a toast, the level unchanged', errs.every((x) => !x), errs.filter(Boolean).join(' | '));
+	H.hash = ''; const n0 = H.replaced.length, w0 = H.wholeLevel, m0 = $('lvMsg').innerHTML;
+	const none = P.jobFromHash();
+	H.hash = '#zoom=3';
+	const none2 = P.jobFromHash();
+	check('no #job= in the hash: the editor does nothing (no fetch, no message, the hash stays)', none === null && none2 === null && H.replaced.length === n0 && H.wholeLevel === w0 &&
+		$('lvMsg').innerHTML === m0);
+}
 async function appSection() {
 	section('app: jobs / server / grind / render / common (in a temp copy of src/)');
 	const S = makeSandbox();
@@ -1209,6 +1340,7 @@ async function appSection() {
 		check('the page\'s script parses', scripts.length > 0 && scripts.every((s) => !errOf(() => new Function(s))), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
 		await viewerEffectsChecks(S, port, id, page, r3.json);
 		await remoteChecks(S, port, id, page);
+		await editorLinkChecks(S, port, id, page, appLevel);
 		const fake = path.join(S.dir, 'fake-eeo-tas');
 		fs.mkdirSync(path.join(fake, 'media'), { recursive: true });
 		fs.mkdirSync(path.join(fake, 'src', 'items'), { recursive: true });

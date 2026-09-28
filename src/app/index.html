@@ -194,6 +194,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 .viewer button:hover:not(:disabled) { border-color: #6b7384; }
 .viewer button.on { background: #2b3242; border-color: #56627a; }
 .vnewer { background: #3a2f10 !important; color: #ffd76a !important; border-color: #7a6220 !important; }
+#vEditor { white-space: nowrap; }
 .vstage { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; touch-action: none; }
 .vstage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
 .vstage canvas.drag { cursor: grabbing; }
@@ -348,6 +349,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 		<div class="vtop">
 			<div class="vtitle" id="vTitle"></div>
 			<button class="vnewer" id="vNewer" hidden>Newer version found · reload</button>
+			<button id="vEditor" title="Open this run's level in the level editor (a new tab: the viewer stays where it is)">Open in level editor</button>
 			<button id="vClose" title="Close (Esc)">Close</button>
 		</div>
 		<div class="vstage" id="vStage">
@@ -824,6 +826,7 @@ function renderDetail() {
 		<div class="row" style="margin-top:14px">
 			<button class="primary" id="dlBest">Download optimized .eetas (${j.best.time})</button>
 			<button class="ghost" id="dlOrig">Original</button>
+			<button class="ghost" id="edBtn" title="Open this run's level in the level editor (a new tab)">Open in level editor</button>
 			<span style="flex:1"></span>
 			<button class="ghost" id="delBtn" title="Delete this run and its files">Delete</button>
 		</div>
@@ -857,6 +860,7 @@ function renderDetail() {
 	const df = $('dlFinal');
 	if (df) df.onclick = () => { location.href = `/api/jobs/${j.id}/best.eetas`; };
 	$('dlOrig').onclick = () => { location.href = `/api/jobs/${j.id}/original.eetas`; };
+	$('edBtn').onclick = () => openInEditor(j.id);
 	$('delBtn').onclick = async () => {
 		const b = $('delBtn');
 		if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; b.classList.add('stop'); return; }
@@ -2389,6 +2393,15 @@ $('vGuideNow').onclick = () => { if (vw.A) $('vGuideFrom').value = fmt(vw.A.RUN[
 $('vGuideGo').onclick = glGo;
 $('vGuideUndo').onclick = () => { GL.strokes.pop(); glSave(); vw.dirty = true; glStatus(GL.last); };
 $('vGuideClear').onclick = () => { GL.strokes = []; glSave(); vw.dirty = true; glStatus(GL.last); };
+/** the level editor on a job's level (/editor#job=<id>: it opens the job's original.eelvl), in a new tab so the viewer
+ *  and the jobs page stay where they are; the same tab when the browser blocks the new one */
+function openInEditor(id) {
+	const url = `/editor#job=${encodeURIComponent(id)}`;
+	let w = null;
+	try { w = window.open(url, '_blank'); } catch (e) { /* blocked */ }
+	if (!w) location.href = url;
+}
+$('vEditor').onclick = () => { if (vw.id) openInEditor(vw.id); };
 $('vClose').onclick = closeViewer;
 $('vNewer').onclick = vwReloadBest;
 $('vPlay').onclick = vwTogglePlay;

@@ -95,6 +95,11 @@ job's current best run in the same exact physics the optimizer uses, while the o
   does not change until you press it.
 - Link straight to it: `http://localhost:47823/#watch=<job id>&t=1:10.00` (also `&zoom=0..13` or `&zoom=fit`,
   `&play=1`).
+- **Open in level editor** (at the top of the player, and on the run's page next to **Original**) opens the run's
+  level in the level editor in a new tab, so the player stays where you were. The editor names the level after the
+  run and says "Loaded from job ..."; **Ctrl+Z** there brings back the level you had open before. Tick **job's run** in
+  the editor's toolbar to draw the run's path over the level (dashed once you change the level). Link:
+  `http://localhost:47823/editor#job=<job id>` (`&path=1` draws the path at once).
 - It works on a phone-sized screen too (pinch to zoom).
 - **✏ Line** (or **L**, GPU mode): think the ball could go another way? Pause at the moment the new route should
   start, drag a line on the map where you think it can go, and press **Search along the line**. The GPU tries every
