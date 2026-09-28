@@ -204,6 +204,15 @@
 //        (deathMovesFor), 1 wherever something kills (a lone spawn too), 0 off: every death ends its run, as before; a
 //        death is kept only where it pays: deathPays in explore(); the progress and done events carry "deaths": {seen,
 //        byCost, byNew, dropped, cells}; the GPU random runs get eegpu roll --deaths=1)]
+//        [--timed=1 (timed killers, src/timed.js: a curse, zombie, fire or poison kills a fixed time after its pickup
+//        unless a remover clears it. 1 (or EEAT_TIMED unset): a coarse cell's key has the bucket of the soonest killer's
+//        ticks left while one runs (TMD.bucketOf: 8 per duration, at least 8 ticks wide), a new state is dropped only when
+//        a cell of the same place in a bucket at least as high got there no later (dominated), a state that can no longer
+//        clear its killer (TMD.doomed: a sound bound) is ordered as the death it is (never ruled out), and the one search's
+//        bursts start from the cells with the most time slack to the removers (nearestOf); 0: as before (the counts still
+//        say how many states with more time left the earliest-arrival rule dropped). On a level without a timed killer
+//        every key and cost is the same either way. The progress and done events carry "timed": {on, cells, dominated,
+//        droppedMore, doomed})]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -235,6 +244,7 @@ const E = C.E;
 const EL = require('./eelvl.js');
 const RF = require('./reach.js');
 const SF = require('./steer.js');
+const TMD = require('./timed.js');
 const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
@@ -271,7 +281,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0 };
+	jumpP: 0, jumpNear: 0.75, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0, timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -292,6 +302,9 @@ const B_CELL = 216, B_HEAPE = 32, B_NODE = 72, B_BLOCK = 250, B_SNAP = 1200, B_R
 // --steer: a cell's steer cost (its property and boxed double: 160 -> 184 bytes, measured the same way); the steer heap's
 // entries count as B_HEAPE each (one worker of the editor's Good Egg search ran out of its heap before they were counted)
 const B_SC = 24;
+// a level with timed killers (src/timed.js): a cell's ticks left and kind (`tm`, a property added to every cell there: its
+// slot in the object's out-of-object properties)
+const B_TM = 32;
 // a worker's budget (--mem MB): the archive (cells, their paths, the heap, the rooms, the walk cache) up to
 // ARCHIVE_SHARE of it; past that a sweep drops the cells no run or pick has touched for longest down to EVICT_TO of that
 // share; the snapshots (at least MIN_SNAPS) in what the archive leaves, up to SNAP_TOP of the budget (the rest: the
@@ -1005,6 +1018,12 @@ const STEER_NONE = 1e5;
 // a steer value's distance at most (tiles): below every "no value" distance (6000+) and the editor's "cut off" mark (1e4);
 // real values reach 13,107 tiles (native/beam.h STEER_REAL_MAX)
 const STEER_REAL_MAX = 5999;
+// --timed without deaths as moves: a doomed state's cost (tiles) above its own (behind every state that can still clear
+// its killer; far below the ruled-out marks, 1e4 and STEER_NONE)
+const DOOM_TILES = 1000;
+// --timed: the ticks a walk tile takes at least in a burst start's slack (nearestOf; ordering only): the top running
+// speed's 2.4 with a detour's share (Forgotten Helix's base route: the curse to its remover, 24 walk tiles in 89 ticks)
+const TIMED_KT = 3;
 
 /**
  * One explorer (a worker thread; a = the options, settled for the level, seed its seed). ctrl (Int32Array on a
@@ -1103,8 +1122,33 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const CPK = DI !== null && DI.cps > 0 && DI.cps <= CPK_MAX && a.cpkey !== 0;
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
-	const KV = new Int32Array(10);
+	const KV = new Int32Array(11);
 	let tile = 0;
+	// timed killers (src/timed.js; TM null: the level has none, and every key and cost is exactly as before): the live
+	// state's ticks left on its soonest killer (tLeft, 0: none), that killer's kind bit (tKind) and bucket (tBucket), set by
+	// cellKey. With --timed=1 (the default) the bucket is one more word of the cell key while a killer runs, so a later
+	// arrival with more time left is its own cell (Forgotten Helix's curse leg: at every cell past the pickup the earliest
+	// state is the first pickup's, whatever it has left), and a new state is dropped only when a cell of the same place
+	// in a bucket at least as high got there no later (tDom: dominated in both); a state that can no longer clear its
+	// killer (TMD.doomed, a sound bound) is ordered as the death it is (costOf). --timed=0: the key as before (the
+	// counts still say how often a state with more time left was dropped: tMore)
+	const TM = TMD.timedOf(L), TKEY = TM !== null && a.timed !== 0;
+	// (the bucket in the key only with coarse cells: fine cells already tell apart the jump count, the gravity queue and,
+	// where refined, the position and speed, and with a bucket more their search on the unit level ran 2.4x slower with no
+	// route either way; there the doomed states' ordering alone)
+	const TBK = TKEY && coarse;
+	let tLeft = 0, tKind = 0, tBucket = 0, kn = 0, tDom = 0, tMore = 0, tDoomed = 0, tCells = 0;
+	/** the cell key of KV[0 .. n): two 32-bit hash lanes (see cellKey) */
+	const hashKV = (n) => {
+		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
+		for (let k = 0; k < n; k++) {
+			let x = Math.imul(KV[k], 0xcc9e2d51);
+			x = (x << 15) | (x >>> 17);
+			h1 ^= Math.imul(x, 0x1b873593); h1 = (h1 << 13) | (h1 >>> 19); h1 = (Math.imul(h1, 5) + 0xe6546b64) | 0;
+			h2 = Math.imul(h2 ^ KV[k], 0x5bd1e995); h2 ^= h2 >>> 13;
+		}
+		return (fmix(h1) >>> 0) * 2097152 + ((fmix(h2) >>> 0) & 0x1fffff);
+	};
 	const cellKey = () => {
 		const px = sim.px, py = sim.py;
 		const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
@@ -1129,14 +1173,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			KV[6] = Math.floor(px * qp); KV[7] = Math.floor(py * qp); KV[8] = Math.floor(sim.speed_x * qv); KV[9] = Math.floor(sim.speed_y * qv);
 			n = 10;
 		}
-		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
-		for (let k = 0; k < n; k++) {
-			let x = Math.imul(KV[k], 0xcc9e2d51);
-			x = (x << 15) | (x >>> 17);
-			h1 ^= Math.imul(x, 0x1b873593); h1 = (h1 << 13) | (h1 >>> 19); h1 = (Math.imul(h1, 5) + 0xe6546b64) | 0;
-			h2 = Math.imul(h2 ^ KV[k], 0x5bd1e995); h2 ^= h2 >>> 13;
+		// (a timed killer running: its bucket as one more word; without one the key is exactly as before)
+		tLeft = 0; tBucket = 0;
+		if (TM !== null) {
+			tLeft = TMD.timedLeft(sim);
+			if (tLeft > 0) { tKind = TMD.TL.kind; tBucket = TMD.bucketOf(tLeft); if (TBK) KV[n++] = tBucket; }
 		}
-		return (fmix(h1) >>> 0) * 2097152 + ((fmix(h2) >>> 0) & 0x1fffff);
+		kn = n;
+		return hashKV(n);
 	};
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
 	const cells = new Map();
@@ -1195,6 +1239,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value; deaths as moves: a state it has no value
 	 *  for, DEATH_TILES + its respawn target's value where that has one: the layer bodies have no death edges) */
 	const steerOf = () => {
+		// (--timed: a doomed state as the death it is, as in costOf)
+		if (TM !== null && doomedNow()) {
+			if (DI !== null) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0) return DEATH_TILES + r / 5; }
+			const v0 = SF.steerFifths(ST, sim);
+			return v0 >= 0 ? v0 / 5 + DOOM_TILES : STEER_NONE;
+		}
 		const v = SF.steerFifths(ST, sim);
 		if (v >= 0) return v / 5;
 		if (DI !== null && a.dprice !== 0 && RF.costAt(field, sim) >= RF.DEATH_TILES) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0) return DEATH_TILES + r / 5; }
@@ -1216,7 +1266,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
-	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
+	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
@@ -1277,16 +1327,31 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const c = cells.get(k);
 		if (c !== undefined) {
 			c.seen++; c.touch = picks;
-			if (c.t <= t) return null;
+			if (c.t <= t) {
+				// (--timed=0: a state dropped here though it has more time left on its killer than the kept one, by a bucket)
+				if (tBucket > 0 && !TBK && tBucket > TMD.bucketOf(c.tm >> 4)) tMore++;
+				return null;
+			}
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
 			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL); c.viaW = pickW || (pc !== null && pc.viaW);
+			if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
 			release(old);
 			impr++;
 			if (ST) { c.sc = steerOf(); nearSteer(c); }
 			hpush(c);
 			if (room !== null && (room.best === null || distOf(c) < distOf(room.best))) room.best = c;
 			return null;
+		}
+		// (--timed: a cell of the same place in a bucket with more time left that got there no later: this state is dominated)
+		if (TBK && tBucket > 0) {
+			const bmax = TMD.bucketMax(), b0 = tBucket;
+			for (let b = b0 + 1; b <= bmax; b++) {
+				KV[kn - 1] = b;
+				const c2 = cells.get(hashKV(kn));
+				if (c2 !== undefined && c2.t <= t) { c2.seen++; c2.touch = picks; tDom++; KV[kn - 1] = b0; return null; }
+			}
+			KV[kn - 1] = b0;
 		}
 		if (!roomFor()) { full = true; needSweep = true; return null; }
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
@@ -1295,6 +1360,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const vl = pickL || (pc !== null && pc.viaL), vw = pickW || (pc !== null && pc.viaW);
 		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw }
 			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw };
+		// (a level with timed killers: the ticks left at arrival and the killer's kind bit, tLeft x 16 + kind; B_TM more)
+		if (TM !== null) { nc.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0); if (tLeft > 0) tCells++; }
 		if (ST) nearSteer(nc);
 		cells.set(k, nc);
 		hpush(nc);
@@ -1320,11 +1387,25 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** the reach cost of the live state (tiles); -1 = ruled out. With --prune=0 (the editor's check of a level the reach
 	 *  field rules out) nothing is ruled out: a ruled-out state costs 1e4 + its walking distance (behind the others) */
 	let viaDeath = false;   // (the last costOf: the field's only way from there is a death)
+	/** --timed: the live state cannot clear its soonest timed killer (nor finish) before it fires (src/timed.js doomed: a
+	 *  sound bound), so its only future is that death */
+	const doomedNow = () => {
+		if (!TKEY) return false;
+		const l = TMD.timedLeft(sim);
+		return l > 0 && TMD.doomed(TM, centreTile(), l);
+	};
 	const costOf = () => {
 		const rc = RF.costAt(field, sim);
 		// (deaths as moves: the field prices a death edge at DEATH_COST, behind every real way, to the best respawn tile of
 		// all; a state whose only way is a death costs its real price: DEATH_TILES + its own respawn target's cost)
 		viaDeath = DI !== null && rc >= RF.DEATH_TILES;
+		// (--timed: a doomed state is ordered as the death it is: DEATH_TILES + its respawn target's cost with deaths as moves,
+		// else behind every state that can still clear its killer; never ruled out: only the reach field's -1 prunes)
+		if (rc >= 0 && TM !== null && doomedNow()) {
+			tDoomed++; viaDeath = true;
+			if (DI !== null) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
+			return rc + DOOM_TILES;
+		}
 		if (viaDeath && a.dprice !== 0) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + r < rc) return DEATH_TILES + r; }
 		if (rc >= 0 || a.prune) return rc;
 		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
@@ -1344,6 +1425,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const node0 = pre ? mkNode(null, { b: pre, refs: 0, x: Math.max(0, pre.length - a.rolls * a.roll) }, 0, pre.length) : null;
 		const c = ST ? { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, sc: steerOf(), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 }
 			: { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 };
+		if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
 		cells.set(k, c);
 		cell0 = c;
 		hpush(c);
@@ -1355,7 +1437,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, tDom, tMore, tDoomed, tCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1402,11 +1484,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		}
 		if (br === null) return popA();
 		const arr = br.arr;
-		let bc = null, bs = -1;
+		let bc = null, bs = -Infinity;
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
-			const sc = 1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks);
+			let sc = 1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks);
+			// (--timed: a doomed cell only when the sample has nothing else; the draws are the same either way)
+			if (TKEY && c.tm >= 16 && TMD.doomed(TM, c.tile, c.tm >> 4, c.tm & 15)) sc -= 4;
 			if (sc > bs) { bs = sc; bc = c; }
 		}
 		return bc || popA();
@@ -1538,16 +1622,23 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	 *  the earliest among equals, to the main thread (a GPU burst starts there) */
 	const nearestOf = (m) => {
 		const r = rooms.get(m.room), f = m.field;
-		let best = null, bv = 0xffff;
+		let best = null, bv = 0xffff, bs = 0;
 		if (r !== undefined) {
+			// (--timed, a cell whose state carries a timed killer: its slack = the ticks left - TIMED_KT x the walk to the
+			// killer's removers (m.way: bursts.js wayField; else to the targets); the cells with slack >= 0 first, the nearest of
+			// them as before (then the most time left); else the most slack: the nearest cell of a curse room is mostly the
+			// first pickup's, a few ticks from its end, and a burst from it runs out of situations when the killer fires
+			// (Forgotten Helix, main: exhausted 4 tiles from the remover)
+			const wf = m.way || null;
 			for (const c of r.arr) {
 				if (c.t >= maxT) continue;
 				const v = f[c.tile];
 				if (v === 0xffff) continue;
-				if (best === null || v < bv || (v === bv && c.t < best.t)) { best = c; bv = v; }
+				const tl = TKEY ? c.tm >> 4 : 0, dw = wf !== null && wf[c.tile] !== 0xffff ? wf[c.tile] : v, sl = tl > 0 ? Math.min(0, tl - TIMED_KT * dw / 5) : 0;
+				if (best === null || sl > bs || (sl === bs && (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && c.t < best.t)))))) { best = c; bv = v; bs = sl; }
 			}
 		}
-		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
+		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, sl: best !== null ? bs : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
 			inputs: best !== null ? C.eetasBytes(inputsOf(best.node)).toString('latin1') : '' });
 	};
 	/** the best route (the main thread's 'route': any operator's, or the editor's): head L's schedule, and every cell on it
@@ -2405,6 +2496,8 @@ async function main() {
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
 	const field = RF.shareField(RF.reachField(L));
+	// (timed killers in the level: src/timed.js; the workers build their own bounds)
+	const TMD_L = TMD.timedOf(L) !== null;
 	const sim0 = new E.EESim(L);
 	sim0.reset();
 	const pre0 = prefixOf(a);
@@ -2452,6 +2545,10 @@ async function main() {
 	const bound = (d) => { if (d < Atomics.load(ctrl, 0)) Atomics.store(ctrl, 0, Math.max(0, d)); };
 	// (deaths as moves: the workers' dying states, kept by the cost (i) or as the earliest arrival (ii), dropped, and the
 	// respawns' new cells)
+	// (--timed, a level with timed killers: the cells made while a killer ran, the states dropped as dominated (a cell of the
+	// same place with more time left got there no later), with --timed=0 the states dropped though they had more time left
+	// than the kept one, the doomed states priced as their death)
+	const timedNow = () => (TMD_L ? { timed: { on: a.timed !== 0, cells: total('tCells'), dominated: total('tDom'), droppedMore: total('tMore'), doomed: total('tDoomed') } } : {});
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), cells: total('dCells'), deadTicks: total('dTicks') } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
@@ -2467,7 +2564,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -2728,7 +2825,7 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(),
+		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
