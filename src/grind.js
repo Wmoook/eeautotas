@@ -394,7 +394,7 @@ function runTool(script, args, maxMs, logFile) {
 let results = [];
 try {
 	// (outputs of an earlier session: a stale find is still a find)
-	results = fs.readdirSync(OUT).filter((f) => /^grind_(deep|sc|mut|beam|skipf)_.*\.eetas$/.test(f)).map((f) => path.join(OUT, f))
+	results = fs.readdirSync(OUT).filter((f) => /^grind_(deep|sc|mut|beam|skipf|flyb)_.*\.eetas$/.test(f)).map((f) => path.join(OUT, f))
 		.sort((x, y) => fs.statSync(x).mtimeMs - fs.statSync(y).mtimeMs);
 } catch (e) { /* none */ }
 function addResult(file) {
