@@ -780,8 +780,8 @@ function coinLegsPhys(B, PH, base, opts) {
  *  coin i to coin j at count k = popcount(set) taken from j's field in layer k (n x T fields, one at a time: only the
  *  arrival costs from the coins and the start are kept), and each coin's lookup body is its field in the layer of its
  *  place on the DP's best tour from the start (a coin off that tour: layer T - 1). -> the coinLegsPhys shape {T, coins,
- *  fields, tail, s, countOf, rounds: 0, layered: {D, tour, start}} or null (over 18 coins) */
-function coinLegsLayered(B, PH, base) {
+ *  fields, tail, s, countOf, rounds: 0, layered: {D, tour, start}} or null (over 18 coins, or past the deadline: ms) */
+function coinLegsLayered(B, PH, base, deadline) {
 	const { A } = B;
 	const M = PH.M;
 	let sPlan = B.M.s0;
@@ -808,6 +808,8 @@ function coinLegsLayered(B, PH, base) {
 	const Lat = (k, i, j) => L[(k * (n + 1) + i) * n + j];
 	for (let k = 0; k < T; k++) {
 		for (let j = 0; j < n; j++) {
+			// (n x T fields: past the build's time, no plan past its count)
+			if (deadline && Date.now() > deadline) return null;
 			const f = legField(coins[j], k);
 			for (let i = 0; i <= n; i++) {
 				if (i === j || (i === n && k > 0)) continue;
@@ -971,7 +973,7 @@ function buildSteer(level, opts) {
 		cp = null;
 	}
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp) : coinLegsPhys(B, PH, cp, opts);
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs) : coinLegsPhys(B, PH, cp, opts);
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (D) {
 			const none = new Uint8Array(N);
