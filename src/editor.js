@@ -561,6 +561,9 @@ const ROLLS_WAIT_MS = 2500, ROLLS_PROBE_TILES = 10000;
 // Infinity Pain the GPU engine does ~0.4 M ticks/s in the play area, where the rolls do not pay, and every other slice
 // was theirs)
 const ROLLS_DRY_MAX = 4;
+// the GPU strategies whose GPU memory is fixed once they run (the random runs' cell table, the beams' buffers): they may
+// take the GPU while the wall breaker's round has no GPU work of its own (schedule: its next process loading, a retry wait)
+const FIXED_MEM = new Set(['gorolls', 'goal', 'guide']);
 let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
 function setPaused(k, on) {
@@ -580,14 +583,31 @@ const pausedMsOf = (ch) => (ch.pausedMs || 0) + (ch.paused && ch.pausedSince ? D
 function schedule() {
 	if (!S || !S.running) return;
 	const now = Date.now();
-	const gpu = [];
-	S.strategies.forEach((q, k) => { if ((!q.cpu || q.gpuShare) && alive(kids[k]) && !kids[k].stopWhy) gpu.push(k); });
+	let gpu = [];
+	// (a GPU tool still loading its context and kernels (eegpu's "ready" not yet: 1.9-4.3 s a process on the A100 box,
+	// fast-engine profile) has no GPU work: it gets no turn and stays paused for when it is ready, and the turn goes to a
+	// strategy that has work; before, a fresh process (a new pass, a new relay run) got the next slice while it loaded and
+	// every other GPU search waited those seconds)
+	S.strategies.forEach((q, k) => { if ((!q.cpu || q.gpuShare) && alive(kids[k]) && !kids[k].stopWhy) { if (loading(q)) setPaused(k, true); else gpu.push(k); } });
 	if (!gpu.length) { sched = null; return; }
 	// (the wall breaker's round has the GPU to itself: the others wait between two launches, keeping their tables; also
 	// between its processes (every move and the relay handing over the memory, one run's end and the next's start), so
 	// the beams and the random runs do not get the GPU back for those seconds)
 	const BK = S.strategies.findIndex((q) => q.key === 'breaker');
-	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
+	// (the round without GPU work of its own: its next process loading, between two processes, or waiting to retry a GPU
+	// memory failure (5 / 20 / 60 s): the strategies whose GPU memory is fixed from their start (the random runs, the
+	// beams) take the turn meanwhile and pause again when its process is ready; every move (its lanes grow with the free
+	// memory) and the one search's bursts (a new process a burst) stay paused, as the round's table needs the memory.
+	// The GE and NC profiles: the round held the GPU ~90 s of 420 s while waiting to retry, SF2's first round 46 of 177 s
+	// while its processes started)
+	const bkIdle = BK >= 0 && !gpu.includes(BK) && !!brk && !!brk.round && !(cur && cur.opts.breakShare && brk.round.shareOn);
+	if (bkIdle) {
+		const fixed = gpu.filter((k) => FIXED_MEM.has(S.strategies[k].key));
+		for (const k of gpu) if (!fixed.includes(k)) setPaused(k, true);
+		S.gpuTurn = 'breaker';
+		if (!fixed.length) return;
+		gpu = fixed;
+	} else if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
 		// (on a GPU of BURST_BIG_MB or more the one search's bursts go on beside the round (`breakShare`): before, the rounds held
 		// the GPU 38-66% of the time before the first route on Octorage, Infinity Pain, Endeavor and Forgotten Veil, and the
