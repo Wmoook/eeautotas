@@ -208,6 +208,15 @@
 //        route's time can be told per core-second as well as per wall second on a shared machine.
 //        With --stdin=1 and the one search also "route <inputs>": a route found elsewhere (the bound, head L's schedule,
 //        its states into every archive; a "route" event, no result).
+//        [--rArm=0.5 (with --bursts=1: the route arm's share of the bursts once a route is known, src/routearm.js: from
+//        the route's own states, searches aimed by the route's schedule (a time-to-go field to its later tiles) for ways
+//        that meet its later points sooner, spliced into verified routes; 0: off)]
+//        [--classW=1 (coarse cells: class workers, extra worker threads once a route is known: each avoids one gate of
+//        the best route (a coin door first, then a switch / key / effect trigger, then another door: routeGates) for
+//        --classS=180 s, bounded by its own routes and --classSlack=2 x the best route; a route whose gates (rank 0-2)
+//        differ from the best's is reported even when slower: {"ev":"result","kind":"class",ticks,runTicks,inputs,avoid,
+//        gates,desc,best}; 0: none)]. The result and route events carry "gates" (the route's class signature); events
+//        "classes" (the best's class and the gates to avoid) and "class" (a class worker's start); done: "classes".
 //        With --stdin=1 and the one search also "import <inputs>": another operator's run (the editor's GPU random runs:
 //        a room they entered first, a nearer attempt) into every worker's archive, like a burst's attempt.
 const fs = require('fs');
@@ -236,6 +245,11 @@ const SEED_EVERY = 30;
 // LEAD_FLOOR x --pL (Infinity Pain: head L's routes came 19 s after the first route and every few minutes after; Stupid
 // Fox: none in 15 min, while heads A / B found main's 7,680 -> 6,789 at 630-834 s: src/out/night/macro_fix.md)
 const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
+// the other route classes (--classW, after the first route): each class worker avoids one gate of the best route for
+// CLASS_S seconds (--classS), bounded by its own routes and at most CLASS_SLACK x the best route (--classSlack): a route
+// of another class (other doors / triggers) is reported even when it is slower (a "result" of kind "class")
+// (a class worker starts from the best route's own way up to CLASS_BACK ticks before the gate it avoids: addSeed)
+const CLASS_BACK = 60;
 // head W (a route known, the path gap: another WAY): a cell off head L's schedule gets the key-blind lead = its tick - the
 // best route's first tick at its tile in any room (at any phase of the time doors: --wPhase=1 keys it by the phase
 // bucket like head L's, which on Stupid Fox left head W almost nothing: 10,727 vs 5,717 per tile, main 10,529,
@@ -247,7 +261,7 @@ const WAY_PICK = 40;
 // --wYield=0: --pW all the time); --wLead=1 (off by default: no clear difference in 6 pairs, n2_2_head_W.md round 4): a
 // faster route from a head-W pick (another way) restarts head L's grace too, so
 // head L refines the new way at its full share (0: only head L's own routes, as before)
-const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
+const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
@@ -729,6 +743,129 @@ function lowerBoundTiles(L) {
 	return out;
 }
 
+// ---------------------------------------------------------------- route classes (--classW)
+/**
+ * gateContext(L) -> the level's gates: its doors' components (4-connected tiles of one door or gate block, src/blocks.js
+ * kind 'door': a coin door, a key gate, a switch door, a team door, a time door, ...), its triggers' components
+ * (bursts.js triggersOf: switches, keys, effects, team, coins where a door reads them), the portals (bursts.js
+ * portalsOf), the rooms (roomOf).
+ */
+function gateContext(L) {
+	const BU = require('./bursts.js'), BK = require('./blocks.js');
+	const W = L.width, H = L.height, N = W * H, fg = L.fg;
+	const door = new Int32Array(N).fill(-1), dIds = [], q = new Int32Array(N);
+	const isDoor = (id) => id > 0 && BK.kindOf(id).kind === 'door';
+	for (let i = 0; i < N; i++) {
+		if (door[i] >= 0 || !isDoor(fg[i])) continue;
+		const c = dIds.length;
+		dIds.push(fg[i]);
+		let qh = 0, qt = 0;
+		door[i] = c; q[qt++] = i;
+		while (qh < qt) {
+			const t = q[qh++], x = t % W, y = (t / W) | 0;
+			for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const j = yy * W + xx;
+				if (door[j] < 0 && fg[j] === fg[i]) { door[j] = c; q[qt++] = j; }
+			}
+		}
+	}
+	return { W, H, N, door, dIds, TR: BU.triggersOf(L), PT: BU.portalsOf(L), RM: roomOf(L), BK };
+}
+/** a gate's rank: what a class is told by (0 a switch, key, effect or team trigger, 1 a key / switch / team / crown / other
+ *  door, 2 a coin door or gate; 3 a coin taken for a door, 4 a time door: not part of a class's signature, never avoided) */
+function gateRank(G, g) {
+	const id = g.kind === 'door' ? G.dIds[g.comp] : g.id;
+	const k = G.BK.kindOf(id);
+	if (g.kind === 'door') return /time/.test(k.sub || '') ? 4 : /coin/.test(k.sub || '') ? 2 : 1;
+	return k.kind === 'coin' || k.kind === 'bluecoin' ? 3 : 0;
+}
+/**
+ * routeGates(L, G, masks) -> the gates of a route in the order of their first pass: the doors its centre passes through
+ * and the trigger components that changed its room by a trigger (roomOf byTrigger; the trigger at the centre's tile or
+ * next to it): [{key ('d<comp>' | 't<comp>'), kind ('door' | 'trigger'), comp, id, rank, t, x, y, desc}]; and the route's
+ * class signature (its gates of rank 0-2, sorted: coins and time doors left out).
+ */
+function routeGates(L, G, masks) {
+	const W = G.W, sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	const out = [], seen = new Set();
+	let cz = G.RM.cause(sim);
+	const compNear = (tile) => {
+		if (G.TR.comp[tile] >= 0) return G.TR.comp[tile];
+		const x = tile % W, y = (tile / W) | 0;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			const xx = x + dx, yy = y + dy;
+			if (xx >= 0 && yy >= 0 && xx < W && yy < G.H && G.TR.comp[yy * W + xx] >= 0) return G.TR.comp[yy * W + xx];
+		}
+		return -1;
+	};
+	const addGate = (kind, comp, t, tile) => {
+		const key = `${kind === 'door' ? 'd' : 't'}${comp}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		const g = { key, kind, comp, id: kind === 'door' ? G.dIds[comp] : L.fg[tile], t, x: tile % W, y: (tile / W) | 0 };
+		g.rank = gateRank(G, g);
+		g.desc = `${G.BK.blockName ? G.BK.blockName(g.id) : g.id} at (${g.x}, ${g.y})`;
+		out.push(g);
+	};
+	for (let t = 0; t < masks.length; t++) {
+		E.applyMask(inp, masks[t]);
+		sim.tick(inp);
+		const tile = Math.min(G.N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+		if (G.door[tile] >= 0) addGate('door', G.door[tile], t + 1, tile);
+		const cz2 = G.RM.cause(sim);
+		if (G.RM.byTrigger(cz, cz2) && (cz2.sub !== cz.sub || cz2.keys !== cz.keys)) {
+			const c = compNear(tile);
+			if (c >= 0) { let tl = tile; if (G.TR.comp[tl] !== c) { const x = tile % W, y = (tile / W) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const j = (y + dy) * W + x + dx; if (j >= 0 && j < G.N && G.TR.comp[j] === c) tl = j; } } addGate('trigger', c, t + 1, tl); }
+		}
+		cz = cz2;
+		if (sim.has_silver_crown) break;
+	}
+	const sig = out.filter((g) => g.rank <= 2).map((g) => g.key).sort().join(',');
+	return { gates: out, sig };
+}
+/** the tiles a class worker avoids for gate g: 1 = the door's tiles, 2 = the trigger's tiles and their 8 neighbours (a room
+ *  change by a trigger there ends the run); a SharedArrayBuffer view */
+function avoidTilesOf(G, g) {
+	const av = new Uint8Array(new SharedArrayBuffer(G.N));
+	for (let i = 0; i < G.N; i++) {
+		if (g.kind === 'door' ? G.door[i] !== g.comp : G.TR.comp[i] !== g.comp) continue;
+		if (g.kind === 'door') { av[i] = 1; continue; }
+		const x = i % G.W, y = (i / G.W) | 0;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < G.W && yy < G.H && av[yy * G.W + xx] !== 1) av[yy * G.W + xx] = 2; }
+	}
+	return av;
+}
+/** whether the trophy stays walkable (8-connected over every tile but the permanent walls, every door open, portals) from
+ *  the start tile with gate g's tiles blocked: a gate every way needs is not avoided */
+function gateAvoidable(L, G, g, startTile) {
+	const av = avoidTilesOf(G, g), fg = L.fg, fl = L.flags, W = G.W, N = G.N;
+	const wall = (i) => { const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0; return (f & 1) !== 0 && (f & 16) === 0 && (f & (2 | 4 | 8)) === 0; };
+	const blocked = (i) => wall(i) || av[i] === 1 || (g.kind !== 'door' && G.TR.comp[i] === g.comp);
+	const seen = new Uint8Array(N), q = new Int32Array(N);
+	let qh = 0, qt = 0;
+	seen[startTile] = 1; q[qt++] = startTile;
+	while (qh < qt) {
+		const t = q[qh++];
+		if (fg[t] === 121) return true;
+		const ex = G.PT.exits.get(t);
+		if (ex) for (const e of ex) if (!seen[e] && !blocked(e)) { seen[e] = 1; q[qt++] = e; }
+		const x = t % W, y = (t / W) | 0;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			if (!dx && !dy) continue;
+			const xx = x + dx, yy = y + dy;
+			if (xx < 0 || yy < 0 || xx >= W || yy >= G.H) continue;
+			const j = yy * W + xx;
+			if (seen[j] || blocked(j)) continue;
+			if (dx && dy && wall(y * W + xx) && wall(yy * W + x)) continue;
+			seen[j] = 1; q[qt++] = j;
+		}
+	}
+	return false;
+}
+
 /** the inputs of a path node {up, blk, o, n, refs} (those of `up`, then blk.b[o .. o + n); immutable: a cell that
  *  improves gets a new node) as masks */
 function inputsOf(node) {
@@ -852,6 +989,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// (--lb=1: the sound lower bound on the ticks to the trophy per tile, lowerBoundTiles; the states it cuts: lbCut)
 	const LBT = a.lb && a.lbTiles ? a.lbTiles : null;
 	let lbCut = 0;
+	// (a class worker, --classW: the gate it avoids, avoidTilesOf: 1 = a door's tiles, the centre in one ends the run; 2 =
+	// around a trigger, a room change by a trigger there ends it)
+	const AV = coarse && a.avoidTiles ? a.avoidTiles : null;
+	let avoided = 0;
 	const centreTile = () => Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
@@ -1098,7 +1239,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1371,6 +1512,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (room !== null && room.isNew) firstCell(room, nc, t);
 		}
 	};
+	// (a class worker: the best route up to its avoided gate, its cells every SEED_EVERY ticks: the class differs only from
+	// the gate on, so the search starts from the route's own way there, not from the level's start)
+	if (a.seedInputs && !end) addSeed(a.seedInputs);
 	while (!end) {
 		// between chunks: the clock, the stop flag, the shared bound (a faster route from another worker or the editor)
 		const now = Date.now();
@@ -1470,6 +1614,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						break;
 					}
 					if (sim.is_dead) break;
+					if (AV !== null && AV[centreTile()] === 1) { avoided++; break; }
 					const rc = costOf();
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
@@ -1479,6 +1624,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					if (coarse) {
 						roomKey = RM.key(sim);
 						if (roomKey !== room.key) {
+							if (AV !== null && AV[centreTile()] === 2 && RM.byTrigger(room.cause, RM.cause(sim))) { avoided++; break; }
 							const r = rooms.get(roomKey);
 							if (r !== undefined) { if (report) edge(room, r); room = r; }
 							else if (t < maxT && roomFor()) room = newRoom(roomKey, t, room.key);
@@ -2038,7 +2184,8 @@ function workerMain() {
 	if (d.a.nice > 0 && process.platform === 'linux') { try { os.setPriority(0, Math.min(19, Math.round(d.a.nice))); } catch (e) { /* as it is */ } }
 	const L = levelOf(d.a);
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
-	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {});
+	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {},
+		d.avoid ? { avoidTiles: d.avoid } : {});
 	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null);
 }
 
@@ -2180,7 +2327,7 @@ async function main() {
 	}
 	/** a route (masks) from worker `seed` (0: a GPU burst) after simTicks simulated ticks: replayed in the exact engine
 	 *  before it counts (the same engine found it, from snapshots and replays: a mismatch would be a bug) */
-	const routeFound = (masks, seed, simTicks, who, byL = false, byW = false) => {
+	const routeFound = (masks, seed, simTicks, who, byL = false, byW = false, how = '') => {
 		const t = masks.length;
 		if (route && t >= route.ticks) return;
 		const ev = C.evaluate(L, masks);
@@ -2193,9 +2340,12 @@ async function main() {
 		// (head L of every worker: the new best route's schedule; byL: a head-L pick found it, its share's yield)
 		if (one && (a.pL > 0 || a.pW > 0)) for (const p of one.ports) p.postMessage({ type: 'route', inputs, byL, byW });
 		if (!first) first = { ticks: t, sec: route.sec, simTicks, seed };
-		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }), ...(byL ? { byL: true } : {}), ...(byW ? { byW: true } : {}) });
+		const cls = classOf(ev.ms);
+		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }), ...(byL ? { byL: true } : {}), ...(byW ? { byW: true } : {}),
+			...(how ? { how } : {}), ...(cls ? { gates: cls.sig } : {}) });
 		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
 		if (a.first) Atomics.store(ctrl, 1, 1);
+		onBest(ev.ms, cls);
 	};
 	/** stdin "route <inputs>": a route known elsewhere (the editor's other strategies): the bound, head L's schedule, and
 	 *  its states into every archive (no result event: it is not this search's find) */
@@ -2207,8 +2357,90 @@ async function main() {
 		bound(masks.length - 1);
 		route = { ticks: masks.length, runTicks: ev.runTicks, inputs, seed: -1, simTicks: 0, sec: sec(), adopted: true };
 		if (one) { one.broadcast(inputs, -1); if (a.pL > 0 || a.pW > 0) for (const p of one.ports) p.postMessage({ type: 'route', inputs }); }
-		say({ ev: 'route', ticks: masks.length, runTicks: ev.runTicks });
+		const cls = classOf(ev.ms);
+		say({ ev: 'route', ticks: masks.length, runTicks: ev.runTicks, ...(cls ? { gates: cls.sig } : {}) });
+		onBest(ev.ms, cls);
 	};
+	// ---- the route classes (--classW, coarse cells): a route's class = its gates of rank 0-2 (routeGates); the class
+	// workers avoid one gate of the best route each, in turn (CLASS_S), and report a route of another class even when it is
+	// slower than the best ("result" kind "class"), so the AutoTASer can optimize both classes (Stupid Fox: the first route
+	// took the 10-coin door in 5 of 5 runs, the door-free class came 743-1,643 s later and optimizes to 0:36.26 vs 0:55.48)
+	const CW = a.classW > 0 && a.cells === 'coarse' && L.fg.includes(121) ? { G: null, queue: [], k: 0, live: new Set(), classes: new Map(), bestSig: null, ended: false, found: 0, runs: 0, ticks: 0 } : null;
+	/** a route's gates and class signature (null without class workers) */
+	function classOf(ms) {
+		if (!CW) return null;
+		try { if (!CW.G) CW.G = gateContext(L); return routeGates(L, CW.G, ms); } catch (e) { say({ ev: 'warning', text: `route classes: ${e.message}` }); return null; }
+	}
+	const startTile = Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(sim0.py + 8) >> 4) * L.width + (Math.trunc(sim0.px + 8) >> 4)));
+	/** a new best route: its class is the best's; a new class of best: the gates to avoid (rank 0-2, in that order, then
+	 *  the route's; only those the trophy stays walkable without) and the class workers */
+	function onBest(ms, cls) {
+		if (bursts) bursts.route(ms);
+		if (!CW || !cls) return;
+		CW.bestTicks = ms.length;
+		CW.bestMs = ms;
+		const prior = CW.classes.get(cls.sig);
+		if (!prior || ms.length < prior.ticks) CW.classes.set(cls.sig, { ticks: ms.length, gates: cls.gates.filter((g) => g.rank <= 2).map((g) => g.desc) });
+		if (cls.sig === CW.bestSig) return;
+		CW.bestSig = cls.sig;
+		// (the order: coin doors first (a coin door commits the route to its coins: Stupid Fox's 10-coin door), then the
+		// switch / key / effect triggers (Forgotten Veil's purple switch 0), then the other doors; each in the route's order)
+		const ord = (g) => (g.rank === 2 ? 0 : g.rank === 0 ? 1 : 2);
+		const q = cls.gates.filter((g) => g.rank <= 2).sort((x, y) => ord(x) - ord(y) || x.t - y.t);
+		CW.queue = q.filter((g) => { try { return gateAvoidable(L, CW.G, g, startTile); } catch (e) { return false; } });
+		CW.k = 0;
+		say({ ev: 'classes', best: cls.sig, gates: cls.gates.length, avoid: CW.queue.map((g) => g.desc) });
+		while (CW.live.size < a.classW && CW.queue.length && !CW.ended) if (!startClass()) break;
+	}
+	/** the next class worker (the next gate of the queue, in turn) */
+	function startClass() {
+		if (!CW.queue.length || CW.ended) return false;
+		const busy = new Set([...CW.live].map((w) => w.gate.key));
+		let g = null;
+		for (let k = 0; k < CW.queue.length && !g; k++) { const c = CW.queue[(CW.k + k) % CW.queue.length]; if (!busy.has(c.key)) { g = c; CW.k = (CW.k + k + 1) % CW.queue.length; } }
+		if (!g) return false;
+		const left = a.seconds - (Date.now() - t0) / 1000;
+		if (left < 10) return false;
+		const cctrl = new Int32Array(new SharedArrayBuffer(8));
+		cctrl[0] = Math.min(a.depth, Math.round(a.classSlack * (CW.bestTicks || a.depth)));
+		const seed = (a.seed + 7001 + CW.runs * 13) >>> 0;
+		CW.runs++;
+		const pre = CW.bestMs ? C.eetasBytes(CW.bestMs.subarray(0, Math.max(0, g.t - CLASS_BACK))).toString('latin1') : '';
+		const w = new Worker(__filename, { workerData: { goexplore: true, a: Object.assign({}, a, { seconds: Math.min(a.classS, left - 2), seedInputs: pre }), seed, ctrl: cctrl, field, steerBuf, lb, port: null, seedPort: null,
+			avoid: avoidTilesOf(CW.G, g) },
+			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
+		const rec = { w, gate: g, ctrl: cctrl, seed, ticks: 0 };
+		CW.live.add(rec);
+		say({ ev: 'class', what: 'start', avoid: g.desc, seconds: Math.round(Math.min(a.classS, left - 2)), bound: cctrl[0], seed });
+		w.on('message', (m) => {
+			if (m.type === 'stat' || m.type === 'done') rec.ticks = m.ticks || rec.ticks;
+			if (m.type === 'finish') classFound(Uint8Array.from(m.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), rec);
+		});
+		w.on('error', (e) => say({ ev: 'warning', text: `class worker (${g.desc}): ${e && e.message ? e.message : e}` }));
+		w.on('exit', () => {
+			CW.live.delete(rec);
+			CW.ticks += rec.ticks;
+			if (!CW.ended) startClass();
+		});
+		return true;
+	}
+	/** a class worker's route: the best when it is faster; else a route of another class when its gates differ from the
+	 *  best's (each class's fastest is reported) */
+	function classFound(masks, rec) {
+		const ev = C.evaluate(L, masks);
+		if (!ev || ev.ms.length !== masks.length) { say({ ev: 'warning', text: `class worker: a route of ${masks.length} ticks does not replay` }); return; }
+		const t = ev.ms.length;
+		if (t - 1 < Atomics.load(rec.ctrl, 0)) Atomics.store(rec.ctrl, 0, t - 1);
+		if (!route || t < route.ticks) { routeFound(ev.ms, rec.seed, 0, `class worker (avoiding ${rec.gate.desc})`, false, false, `class worker avoiding ${rec.gate.desc}`); return; }
+		const cls = classOf(ev.ms);
+		if (!cls || cls.sig === CW.bestSig) return;
+		const prior = CW.classes.get(cls.sig);
+		if (prior && prior.ticks <= t) return;
+		CW.classes.set(cls.sig, { ticks: t, gates: cls.gates.filter((g) => g.rank <= 2).map((g) => g.desc) });
+		CW.found++;
+		say({ ev: 'result', kind: 'class', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs: C.eetasBytes(ev.ms).toString('latin1'), avoid: rec.gate.desc,
+			gates: cls.sig, desc: CW.classes.get(cls.sig).gates.join('; '), best: route.ticks, sec: sec(), new: !prior });
+	}
 	// The one search (coarse cells: the GPU bursts, or several workers with --share=1): one channel per worker. Every room
 	// a worker enters first (its 'room' message) goes to the GPU operator (src/bursts.js), whose attempts go into every
 	// archive, and with --share=1 into the other workers' archives (see the header: off by default)
@@ -2268,13 +2500,20 @@ async function main() {
 		const BU = require('./bursts.js');
 		try {
 			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, minLen: pre0 ? pre0.length : 0, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
-				broadcast: (inputs) => one.broadcast(inputs, -1), finish: (masks) => routeFound(masks, 0, 0, 'a GPU burst'),
+				broadcast: (inputs) => one.broadcast(inputs, -1), finish: (masks, how) => routeFound(masks, 0, 0, how ? 'the route arm' : 'a GPU burst', false, false, how || ''),
 				nearest: () => (near && near.inputs ? { inputs: near.inputs, rc: near.rc } : null) });
 			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: preStr });
 			bursts.start();
 		} catch (e) { say({ ev: 'warning', text: `no GPU bursts: ${e.message}` }); bursts = null; }
 	}
 	await Promise.all(workers);
+	// (the class workers end with the search)
+	if (CW) {
+		CW.ended = true;
+		const live = [...CW.live];
+		for (const r of live) Atomics.store(r.ctrl, 1, 1);
+		await Promise.all(live.map((r) => new Promise((res) => { r.w.once('exit', res); setTimeout(res, 5000); })));
+	}
 	if (bursts) await bursts.stop();
 	for (const p of one ? one.ports : []) p.close();
 	clearInterval(timer);
@@ -2290,6 +2529,7 @@ async function main() {
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
 		picks: total('picks'), end, finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(),
+		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
@@ -2309,4 +2549,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles };
+	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf };

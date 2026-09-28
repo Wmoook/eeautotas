@@ -103,6 +103,7 @@ function run(o) {
 	let jobAt = 0, frAt = 0;
 	const gains = [];
 	const pending = [];   // Find a route's routes waiting for the job
+	const classSeen = new Set();   // (the routes of other classes handed on: signature:run ticks)
 	let jobPid = 0;       // (the grind the AutoTASer started: finish stops the job only while it still runs that one)
 	const share = Math.max(1, Math.min(Math.floor(W / 4), threads - W));
 	let shareAt = 0;
@@ -178,6 +179,20 @@ function run(o) {
 				if (key !== lastKey) {
 					if (r.clean === 'pending' && waitKey !== key) { waitKey = key; waitAt = Date.now(); }
 					if (r.clean !== 'pending' || Date.now() - waitAt >= CLEAN_WAIT_MS) { lastKey = key; onRoute(r); }
+				}
+			}
+			// routes of another class (editor.js classRoutes: other doors / triggers than the best's, even slower ones): saved
+			// next to the timeline and handed to the job (its pieces: a class the optimizer can splice from; a second optimizer
+			// lane per class is not built yet)
+			if (S.job && typeof ED.classRoutes === 'function') {
+				for (const c of ED.classRoutes()) {
+					const key = `${c.gates}:${c.runTicks}`;
+					if (classSeen.has(key)) continue;
+					classSeen.add(key);
+					const ms = Uint8Array.from(String(c.inputs), (ch) => (ch.charCodeAt(0) - 48) & 31);
+					if (out) { try { C.writeEetas(path.join(out, `class_${c.n}_${c.runTicks}.eetas`), ms); } catch (e) { /* read-only */ } }
+					emit({ ev: 'class', runTicks: c.runTicks, gates: c.gates, avoid: c.avoid, foundAfter: c.foundAfter });
+					pending.push({ ms, runTicks: c.runTicks, strategy: `another class, avoiding ${c.avoid}` });
 				}
 			}
 			if (!frDone && !st.running) {
