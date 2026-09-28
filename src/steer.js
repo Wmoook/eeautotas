@@ -83,10 +83,16 @@ function analyze(level, opts) {
 	const addFeat = (k) => { if (!feats.has(k)) feats.set(k, { key: k, gates: 0, sources: 0 }); return feats.get(k); };
 	let killers = 0, prot = 0, fxTiles = 0;
 	const trophies = [];
+	// (the level's gold coins: a coin door of more can never open, a coin gate of more never shuts: statics, not layers.
+	// The walk model counts a coin at every touch, so its plan could pass Forgotten Helix's 16-coin doors with 15 coins
+	// in the level: T 16, and the distinct-coin DP over 15 coins then had no value anywhere)
+	let goldCoins = 0;
+	for (let i = 0; i < N; i++) if (fg[i] === 100 || fg[i] === 110) goldCoins++;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		const hr = (fl(id) & F_HALF) ? lk[i] : -1;
-		const g = GATE.get(id);
+		let g = GATE.get(id);
+		if (g && g[0] === 'coins' && lk[i] > goldCoins) g = ['static', g[1] === 1 ? 0 : 1];
 		if (g) {
 			const [f, pol] = g;
 			const key = f === 'psw' || f === 'osw' ? `${f}:${lk[i]}` : f;
@@ -127,7 +133,7 @@ function analyze(level, opts) {
 	for (const [, kind, v] of special) if (kind === 'team') teamVals.add(v);
 	let coinCap = 0, bcoinCap = 0;
 	for (let i = 0; i < N; i++) {
-		if (fg[i] === 43 || fg[i] === 165) coinCap = Math.max(coinCap, lk[i]);
+		if ((fg[i] === 43 || fg[i] === 165) && lk[i] <= goldCoins) coinCap = Math.max(coinCap, lk[i]);
 		if (fg[i] === 213 || fg[i] === 214) bcoinCap = Math.max(bcoinCap, lk[i]);
 	}
 	for (const [k, f] of feats) {
@@ -156,13 +162,17 @@ function analyze(level, opts) {
 			for (const j of list) { if (!portalSrcOf.has(j)) portalSrcOf.set(j, []); portalSrcOf.get(j).push(i); }
 		}
 	}
+	// forced portals (reach.js opts.portalForced): a portal tile with exits, not itself an exit, whose target is another id:
+	// the ball entering it is teleported, so the walk model leaves it only through its exits
+	const forcedP = new Uint8Array(N);
+	for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!portalSrcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 	// one-way platforms: the pass direction (0 left, 1 up, 2 right, 3 down); the walk model blocks the entry against it
 	const oneWay = new Int8Array(N).fill(-1);
 	for (let i = 0; i < N; i++) { const f = fl(fg[i]); if ((f & F_JUMPTHRU) === 0 || cls[i] !== 2) continue; oneWay[i] = (f & F_ROTHALF) ? (lk[i] & 3) : 1; }
 	const specialAt = new Int32Array(N).fill(-1);
 	special.forEach((s, k) => { specialAt[s[0]] = k; });
 	const start = { t: ((Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)) };
-	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, trophies, start, opts };
+	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts };
 }
 /** a feature's value index in the sim's state */
 function featureOf(k, sim, values) {
@@ -299,7 +309,7 @@ function layeredField(A, M) {
 	const specialAt = A.specialAt, identity = M.identity, pass = M.pass;
 	const isTrophy = new Uint8Array(N); for (const t of A.trophies) isTrophy[t] = 1;
 	let cur = 0, pops = 0;
-	const srcList = A.portalSrcOf;
+	const srcList = A.portalSrcOf, forcedP = A.forcedP;
 	while (queued > 0) {
 		const b = cur & MASK;
 		for (let n = 0; n < bn[b]; n++) {
@@ -320,7 +330,7 @@ function layeredField(A, M) {
 					const x = x2 - DX8[di], y = y2 - DY8[di];
 					if (x < 0 || y < 0 || x >= W || y >= H) continue;
 					const t = y * W + x;
-					if (isTrophy[t] || pass(t, s) !== 1) continue;
+					if (isTrophy[t] || pass(t, s) !== 1 || forcedP[t]) continue;
 					if (ow2 >= 0 && owBlocked(ow2, DX8[di], DY8[di])) continue;
 					if (DX8[di] !== 0 && DY8[di] !== 0 && pass(y * W + x2, s) === 0 && pass(y2 * W + x, s) === 0) continue;
 					push(base + t, cur + (DX8[di] && DY8[di] ? 7 : 5));
@@ -583,7 +593,7 @@ function wildField(A, M, s, goals, kappa) {
 			const x = x2 - DX8[di], y = y2 - DY8[di];
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
 			const t = y * W + x;
-			if (goalT.has(t) || isTrophy.has(t) || M.pass(t, s) !== 1 || M.pass(t2, s) === 0) continue;
+			if (goalT.has(t) || isTrophy.has(t) || M.pass(t, s) !== 1 || M.pass(t2, s) === 0 || A.forcedP[t]) continue;
 			if (DX8[di] && DY8[di] && M.pass(y * W + x2, s) === 0 && M.pass(y2 * W + x, s) === 0) continue;
 			const c = v + (DX8[di] && DY8[di] ? 7 : 5) * kappa;
 			if (c < d[t]) { d[t] = c; hpush(t, c); }
@@ -608,7 +618,7 @@ function buildPhysics(B, opts) {
 	for (const e of fr.edges) succ[Math.floor(e / S)].add(e % S);
 	const comps = sccs(S, fr.layers, succ);
 	const fields = new Array(S).fill(null), goalsOf = new Array(S).fill(null), copies = new Array(S).fill(null);
-	const rfOpts = { oneWayEntry: true };
+	const rfOpts = { oneWayEntry: true, portalForced: true };
 	const kappa = A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	const solve = (s) => {
@@ -700,14 +710,26 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
-/** T (the highest coin door threshold the walk plan passes; null: none) and the coin tiles */
-function coinPlan(B) {
+/** T (the highest coin door threshold the walk plan passes, at least minT; null: none) and the coin tiles */
+function coinPlan(B, minT) {
 	const { A, M } = B;
 	if (M.names.indexOf('coins') < 0) return null;
 	let T = 0;
 	for (const p of B.plan.path) if (A.cls[p.t] === 3 && A.gateFeat[p.t] === 'coins' && A.gatePol[p.t] === 1) T = Math.max(T, A.gateParam[p.t]);
+	if (minT > T) T = minT;
 	if (!T) return null;
 	return { T, coins: A.special.filter((x) => x[1] === 'coins').map((x) => x[0]) };
+}
+/** the full count: the highest count a coin DOOR of the level reads, at most the level's gold coins (0: none; a coin
+ *  gate's count alone is no need: collecting it shuts something, as on Octorage).
+ *  The coin plan's T comes from the walk plan, which is blind to gravity, one-way directions and speed: on Wine Quest I it
+ *  passes the 5-coin door and climbs a 16-row shaft whose only footholds are 10-coin GATES (solid at 10), and the level
+ *  needs all 10 coins. The plan past its count (buildSteer opts.coinT = this) is what the search turns to once the plan's
+ *  own count is held and the search stalls there (editor.js pastPlan) */
+function fullCoinT(A) {
+	let cap = 0;
+	for (let i = 0; i < A.N; i++) if (A.cls[i] === 3 && A.gateFeat[i] === 'coins' && A.gatePol[i] === 1) cap = Math.max(cap, A.gateParam[i]);
+	return Math.min(cap, A.special.filter((x) => x[1] === 'coins').length);
 }
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
  *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
@@ -730,7 +752,7 @@ function coinLegsPhys(B, PH, base, opts) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
 	};
 	const fields = new Map(), countOf = new Map();
 	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
@@ -754,6 +776,90 @@ function coinLegsPhys(B, PH, base, opts) {
 		}
 	}
 	return CL;
+}
+/** the plan past its count (opts.coinT, editor.js pastPlan): every leg in the layer of the count the ball holds when it
+ *  walks it. legTour starts from the T - 1 layer and re-rounds along the DP's own tour; with coin GATES that is no start:
+ *  on Wine Quest I the 9-coin layer shuts the 4-, 5-, 6- and 9-coin gates, which cut the level into parts, every
+ *  10-coin tour had a cut leg and the DP no value at all. Here the DP is over (collected set, last) with the leg from
+ *  coin i to coin j at count k = popcount(set) taken from j's field in layer k (n x T fields, one at a time: only the
+ *  arrival costs from the coins and the start are kept), and each coin's lookup body is its field in the layer of its
+ *  place on the DP's best tour from the start (a coin off that tour: layer T - 1). -> the coinLegsPhys shape {T, coins,
+ *  fields, tail, s, countOf, rounds: 0, layered: {D, tour, start}} or null (over 18 coins, or past the deadline: ms) */
+function coinLegsLayered(B, PH, base, deadline) {
+	const { A } = B;
+	const M = PH.M;
+	let sPlan = B.M.s0;
+	for (const p of B.plan.path) if (p.via === 'touch' && A.special[A.specialAt[p.t]][1] === 'coins') break; else sPlan = p.s;
+	let s = 0;
+	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
+	const nC = M.names.indexOf('coins');
+	const coins = base.coins, n = coins.length, T = Math.min(base.T, n, M.radix[nC] - 1);
+	if (n > 18 || T < 1) return null;
+	const lvOf = new Map();
+	const legField = (q, k) => {
+		if (!lvOf.has(k)) {
+			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
+			const fg0 = Int32Array.from(lv.fg);
+			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
+			lvOf.set(k, { lv, fg0 });
+		}
+		const { lv, fg0 } = lvOf.get(k);
+		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
+		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
+	};
+	// L[(k * (n + 1) + i) * n + j]: from coin i (i = n: the start) to coin j holding k coins
+	const L = new Float64Array(T * (n + 1) * n).fill(Infinity);
+	const Lat = (k, i, j) => L[(k * (n + 1) + i) * n + j];
+	for (let k = 0; k < T; k++) {
+		for (let j = 0; j < n; j++) {
+			// (n x T fields: past the build's time, no plan past its count)
+			if (deadline && Date.now() > deadline) return null;
+			const f = legField(coins[j], k);
+			for (let i = 0; i <= n; i++) {
+				if (i === j || (i === n && k > 0)) continue;
+				const v = arriveCost(f, i === n ? A.start.t : coins[i]);
+				if (v < CUT) L[(k * (n + 1) + i) * n + j] = v;
+			}
+		}
+	}
+	const sT = M.withVal(s, nC, Math.min(T, M.radix[nC] - 1));
+	const tail = new Map();
+	for (const q of coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
+	const NM = 1 << n, h = new Float32Array(NM * n).fill(Infinity);
+	const pc = new Uint8Array(NM);
+	for (let m = 1; m < NM; m++) pc[m] = pc[m >> 1] + (m & 1);
+	const byPc = [];
+	for (let k = 0; k <= T; k++) byPc.push([]);
+	for (let m = 1; m < NM; m++) if (pc[m] <= T) byPc[pc[m]].push(m);
+	const tl = coins.map((q) => { const v = tail.get(q); return v >= CUT ? Infinity : v; });
+	for (let k = T; k >= 1; k--) {
+		for (const m of byPc[k]) {
+			for (let last = 0; last < n; last++) {
+				if (!(m & (1 << last))) continue;
+				let v;
+				if (k >= T) v = tl[last];
+				else { v = Infinity; for (let q = 0; q < n; q++) { if (m & (1 << q)) continue; const c = Lat(k, last, q) + h[(m | (1 << q)) * n + q]; if (c < v) v = c; } }
+				h[m * n + last] = v;
+			}
+		}
+	}
+	// the best tour from the start: each coin's place on it
+	const place = new Int32Array(n).fill(-1), tour = [];
+	let m = 0, last = n, start = Infinity;
+	for (let k = 0; k < T; k++) {
+		let best = -1, bv = Infinity;
+		for (let q = 0; q < n; q++) {
+			if (m & (1 << q)) continue;
+			const v = Lat(k, last, q) + h[(m | (1 << q)) * n + q];
+			if (v < bv) { bv = v; best = q; }
+		}
+		if (best < 0) break;
+		if (k === 0) start = bv;
+		place[best] = k; tour.push(coins[best]); m |= 1 << best; last = best;
+	}
+	const fields = new Map(), countOf = new Map();
+	for (let q = 0; q < n; q++) { const k = place[q] >= 0 ? place[q] : T - 1; fields.set(coins[q], legField(coins[q], k)); countOf.set(coins[q], k); }
+	return { T, coins, fields, tail, s, countOf, rounds: 0, layered: { D: { n, T, h }, tour, start } };
 }
 /** the DP's tour from tile t0 (the coins in order; T of them, or fewer where no leg has a value) */
 function coinTour(CL, D, t0) {
@@ -864,19 +970,20 @@ function buildSteer(level, opts) {
 	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
 	// the coin DP
 	let dp = null;
-	let cp = opts.noDP ? null : coinPlan(B);
+	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
+	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
 		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
 	if (cp) {
-		const CL = coinLegsPhys(B, PH, cp, opts);
-		const D = coinDP(CL);
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs) : coinLegsPhys(B, PH, cp, opts);
+		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (D) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
 			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds };
+			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
 		}
 	}
 	const feats = M.feats.map((f, n) => {
@@ -890,7 +997,7 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds } : null, start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -995,6 +1102,23 @@ function nextGate(st, sim) {
 		const c = bodyAt(st.bodies[D.leg[q]], sim, 0, 0);
 		if (c < 0 || c >= CUT - 1) continue;
 		if (!best || c + rest < best.v) best = { i: q, bit: D.bit[q], v: c + rest };
+	}
+	return best;
+}
+/** past the coin plan's count (nextGate null): the untaken coin with the least leg from the state ({i, bit, v}, null:
+ *  none with a value; `skip`: a Set of coin indices left out). The plan's count comes from the walk plan, which is blind to gravity: Wine Quest I's walk plan
+ *  passes its 5-coin door and a 16-row shaft whose steps are 10-coin gates; the level needs all 10 coins */
+function nextCoin(st, sim, skip) {
+	const D = st.dp;
+	if (!D) return null;
+	let best = null;
+	for (let q = 0; q < D.n; q++) {
+		const b = D.bit[q];
+		if (b >= 0 && ((sim._coinBits[b >> 5] >>> (b & 31)) & 1) === 1) continue;
+		if (skip && skip.has(q)) continue;
+		const c = bodyAt(st.bodies[D.leg[q]], sim, 0, 0);
+		if (c < 0 || c >= CUT - 1) continue;
+		if (!best || c < best.v) best = { i: q, bit: b, v: c };
 	}
 	return best;
 }
@@ -1111,6 +1235,6 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, coinLegsPhys, coinDP, arriveCost };
+	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost };

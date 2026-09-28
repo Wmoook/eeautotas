@@ -1020,6 +1020,32 @@ async function cpuSection() {
 		!!kr && kr.desc === 'key:red' && kr.gain > 0 && kr.tick === kr.inputs.length && at.key === kr.room && at.entered && at.desc === 'key:red' &&
 		ks.filter((e) => e.kind === 'room').length === new Set(ks.filter((e) => e.kind === 'room').map((e) => e.room)).size,
 		ks.map((e) => `${e.kind} "${e.desc}" gain ${e.gain} tick ${e.tick}`).join('; '));
+	// the viewing-room trap (test/reach.js H; Forgotten Helix's spectator box): 80 x 40, walk mode, the trophy's half a dot
+	// field behind a spike wall, reached by a portal; a spectator box by the trophy (spike walls) whose only way out is its
+	// portal back; the protection effect by the trophy; a pocket only a death leaves. When the protection effect made every
+	// spike air the box was 8.6 tiles from the trophy, the start 19.6, and the CPU search's first route came after 47,878 /
+	// 81,202 / 99,482 simulated ticks (seeds 1-3, one worker); the box now ranks behind the start (53.8 vs 50.8 tiles):
+	// 8,358 / 12,105 / 7,188
+	{
+		const W = 80, H = 40, c = room(W, H);
+		for (let y = 1; y < H - 1; y++) for (let x = 42; x < W - 1; x++) c.push([x, y, 4]);
+		for (let y = 1; y < H - 1; y++) c.push([40, y, 361, 1]);
+		for (let x = 68; x <= 72; x++) c.push([x, 6, 361, 1], [x, 10, 9]);
+		for (let y = 7; y <= 9; y++) c.push([68, y, 361, 1], [72, y, 361, 1], [69, y, 0], [70, y, 0], [71, y, 0]);
+		c.push([70, 9, 242, 0, 3, 4], [12, 38, 242, 0, 4, 3], [6, 38, 242, 0, 1, 2], [45, 38, 242, 0, 2, 1], [18, 38, 242, 0, 5, 7]);
+		for (let x = 23; x <= 27; x++) c.push([x, 2, 9], [x, 6, 9]);
+		for (let y = 3; y <= 5; y++) c.push([23, y, 9], [27, y, 9]);
+		c.push([25, 5, 361, 1], [25, 3, 242, 0, 7, 99], [2, 38, 255], [30, 38, 360], [77, 5, 121], [77, 3, 420, 1], [78, 38, 453, 0]);
+		const trapBuf = ED.eelvlOf({ name: 'viewing room trap', width: W, height: H, cells: c });
+		const trapFile = path.join(HOME, 'trap.eelvl');
+		fs.writeFileSync(trapFile, trapBuf);
+		const trapLevel = E.prepareLevel(EL.toSimLevel(EL.readEelvl(trapBuf)));
+		const tr = [];
+		for (const sd of [1, 2, 3]) tr.push(await goexplore(trapFile, ['--workers=1', `--seed=${sd}`, '--maxTicks=30000', '--seconds=30', '--mem=300', '--first=1']));
+		check('the viewing-room trap: the CPU search\'s first route within 30,000 simulated ticks (seeds 1-3, one worker; when every spike was air: 47,878-99,482), each one finishing in the JS engine',
+			tr.every((r) => r.results.length > 0 && r.results[0].simTicks <= 30000) && tr.every((r) => replays(trapLevel, r.results)),
+			tr.map((r) => (r.results.length ? `${r.results[0].ticks}@${r.results[0].simTicks}` : `none (${r.summary})`)).join(', '));
+	}
 	// a full archive sweeps: a 60 x 50 level of 10 purple switches, a purple door wall and a trophy walled in (no route;
 	// --prune=0, as the editor runs a level the reach field calls impossible). With room for 300 cells (--maxCells) the
 	// cells no run touched for longest go and the search goes on; no room is left without cells (a room is made with its
