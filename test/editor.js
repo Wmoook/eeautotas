@@ -747,13 +747,16 @@ async function passesSection() {
 		const on = { breakShare: true }, off = { breakShare: false };
 		const open = [
 			ED.breakShareOpen(on, 40326, { dry: 1 }), ED.breakShareOpen(on, 40326, { dry: 0 }), ED.breakShareOpen(on, 40326, {}),
-			ED.breakShareOpen(on, 8192, { dry: 3 }), ED.breakShareOpen(off, 81559, { dry: 3 }), ED.breakShareOpen(on, 81559, null)];
+			ED.breakShareOpen(on, 8192, { dry: 3 }), ED.breakShareOpen(off, 81559, { dry: 3 }), ED.breakShareOpen(on, 81559, null),
+			// the time gate: a whole breakStep (20 s) of the round without its own progress or a gate (R.quiet, else R.t0)
+			ED.breakShareOpen(on, 40326, { dry: 1, t0: 1e6 }, 1e6 + 5000), ED.breakShareOpen(on, 40326, { dry: 1, t0: 1e6 }, 1e6 + 20000),
+			ED.breakShareOpen(on, 40326, { dry: 2, t0: 1e6, quiet: 1e6 + 50000 }, 1e6 + 60000), ED.breakShareOpen({ breakShare: true, breakStep: 5 }, 40326, { dry: 1, t0: 1e6 }, 1e6 + 6000)];
 		// runs: no gate / no own progress, again, a gate, own progress, nothing
 		let d = 0; const dry = [];
 		for (const [hit, own, own0] of [[false, 0, 0], [false, 2, 2], [true, 2, 2], [false, 3, 3], [false, 5, 3], [false, 5, 5]]) { d = ED.breakDryAfter(d, hit, own, own0); dry.push(d); }
-		check('the bursts by the GPU: the laptop sizing below 20 GB, --burstPar=2 --gpuCells=26 --burstCap=0 from 20 GB; the gated share opens only on such a GPU after a dry run of the round, and a gate or its own progress closes it',
+		check('the bursts by the GPU: the laptop sizing below 20 GB, --burstPar=2 --gpuCells=26 --burstCap=0 from 20 GB; the gated share opens only on such a GPU after a dry run and a whole breakStep of the round without its own progress, and a gate or its own progress closes it',
 			sz.join('|') === '-|-|--burstPar=2 --gpuCells=26 --burstCap=0|--burstPar=2 --gpuCells=26 --burstCap=0|--burstPar=2 --gpuCells=26 --burstCap=0' &&
-			open.join() === 'true,false,false,false,false,false' && dry.join() === '1,2,0,1,0,1',
+			open.join() === 'true,false,false,false,false,false,false,true,false,true' && dry.join() === '1,2,0,1,0,1',
 			`sizes ${sz.join(' | ')}; open ${open.join()}; dry ${dry.join()}`);
 	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the

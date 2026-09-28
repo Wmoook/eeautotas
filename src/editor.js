@@ -525,9 +525,17 @@ function schedule() {
 		// Gated (cycle 2): the round keeps the GPU to itself until one of its runs ends with no gate entered and no progress
 		// of its own (a nearer attempt by BREAK_TILES or a new room with territory gain from the breaker's own attempts:
 		// R.dry); a later run of its own that gets on closes it again. Cycle 1's ungated share (every round from its first
-		// run) slowed the rounds that pass Octorage's wall (1,856 s vs main's 862 s; one pair)
+		// run) slowed the rounds that pass Octorage's wall (1,856 s vs main's 862 s; one pair). Timed (cycle 3): runs often
+		// end in 2-8 s (out of situations at the coarse grain), so the first dry run had opened 85% of Octorage's round
+		// time; now also a whole breakStep (20 s) of the round without its own progress or a gate (R.quiet). Opt-in until
+		// an A/B shows it (src/out/night/n2_3_time_to_route.md): b.breakShare === true / EEAT_BREAK_SHARE=1
 		const R = brk && brk.round;
-		const share = !!cur && breakShareOpen(cur.opts, toolInfo && toolInfo.memMB, R);
+		const share = !!cur && breakShareOpen(cur.opts, toolInfo && toolInfo.memMB, R, now);
+		if (R && share !== !!R.shareOn) {
+			R.shareOn = share;
+			note(share ? `${S.strategies[BK].label}: round ${brk.rounds} got nothing of its own for ${cur.opts.breakStep} s: the one search's bursts go on beside the round`
+				: `${S.strategies[BK].label}: round ${brk.rounds} got on: the round has the GPU to itself again`);
+		}
 		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare));
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
@@ -930,11 +938,12 @@ const BREAK_RESERVE_F = 0.15;
 // breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one.
 const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
 // the gated share (breakShare, schedule()): the round's runs in a row with no gate and no progress of their own before the
-// one search's bursts go on beside it
+// one search's bursts go on beside it (and a whole opts.breakStep of the round's time without them: R.quiet)
 const BREAK_SHARE_DRY = 1;
-/** the gated share (schedule()): does the one search's bursts' GPU turn go on beside the round R? (opts: the search's
- *  opts, memMB: its GPU's memory) */
-const breakShareOpen = (opts, memMB, R) => !!(opts && opts.breakShare && memMB >= BURST_BIG_MB && R && (R.dry || 0) >= BREAK_SHARE_DRY);
+/** the gated share (schedule()): does the one search's bursts' GPU turn go on beside the round R at now (ms)? (opts: the
+ *  search's opts, memMB: its GPU's memory; R.quiet: the round's last own progress or gate, else its start R.t0) */
+const breakShareOpen = (opts, memMB, R, now) => !!(opts && opts.breakShare && memMB >= BURST_BIG_MB && R && (R.dry || 0) >= BREAK_SHARE_DRY &&
+	(now || Date.now()) - (R.quiet || R.t0 || 0) >= (opts.breakStep || BREAK_STEP_S) * 1000);
 /** the round's dry count after a run (breakAfter): 0 when it entered a gate or got on by itself (own > own0: the round's
  *  own progress count after / before the run), else one more */
 const breakDryAfter = (dry, hit, own, own0) => hit || (own || 0) > (own0 || 0) ? 0 : (dry || 0) + 1;
@@ -1053,7 +1062,7 @@ function breakProgress(why, own) {
 	brk.at = Date.now();
 	if (brk.round) brk.round.progress.push(why);
 	// (the breaker's own progress: its runs' nearer attempts and their new rooms; the gated share, schedule())
-	if (brk.round && own) brk.round.own = (brk.round.own || 0) + 1;
+	if (brk.round && own) { brk.round.own = (brk.round.own || 0) + 1; brk.round.quiet = Date.now(); }
 	if (S.breaker) S.breaker.last = { why, after: Math.round((Date.now() - S.started) / 100) / 10 };
 }
 /** the round's starting points: up to BREAK_STARTS {inputs, what, dist, key, room} not used before in this search */
@@ -1159,13 +1168,10 @@ function breakAfter(n, how) {
 	const hit = V.brk && V.brk.gateHit;
 	// (the gated share: a run with no gate and no progress of its own opens the one search's bursts beside the round, one
 	// that got on closes them again; schedule())
+	// (its open / close notes: schedule())
 	R.dry = breakDryAfter(R.dry, hit, R.own, R.own0);
+	if (hit) R.quiet = Date.now();
 	if (S.breaker && S.breaker.round) S.breaker.round.dry = R.dry;
-	if (cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB && S.strategies.some((q) => q.gpuShare)) {
-		if (R.dry === BREAK_SHARE_DRY) note(`${V.label}: round ${brk.rounds} run ${R.runs} got nothing of its own: the one search's bursts go on beside the round`);
-		else if (!R.dry && (R.shared || 0) >= BREAK_SHARE_DRY) note(`${V.label}: round ${brk.rounds} run ${R.runs} got on: the round has the GPU to itself again`);
-		R.shared = R.dry;
-	}
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
@@ -1415,7 +1421,7 @@ function start(b, gpu, test) {
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
 	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
 		burstBig: b.burstBig !== false && !(test && test.burstBig === false) && process.env.EEAT_BURST_BIG !== '0',
-		breakShare: b.breakShare !== false && !(test && test.breakShare === false) && process.env.EEAT_BREAK_SHARE !== '0',
+		breakShare: b.breakShare === true || !!(test && test.breakShare === true) || process.env.EEAT_BREAK_SHARE === '1',
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
