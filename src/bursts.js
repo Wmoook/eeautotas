@@ -112,6 +112,20 @@ function slowYOf(L) {
 	}
 	return false;
 }
+// the stall ladder (--stallLadder=1, OPT-IN: off by default since hx-int-1, no gain in its A/B): an arm (a room, or its portal arm) whose last STALL_N bursts got no nearer
+// than they started (none reached a target or found a room), whatever the distance and whether their tables filled or
+// ran out of situations, goes up the same ladder from its latest start, then further back (STALL_FAR: the speed a leg
+// needs can come from long before the cell nearest its targets: Forgotten Helix's coin 4 needs a fall of 9.5+ px/tick into
+// the shaft's portal (249, 123), built on the arrows 200+ ticks before; its 703 bursts from the shaft's cells, 41 tiles
+// out, never tried from before them); each start once per arm (by its length), the counter back to 0 after a ladder
+const STALL_N = 3;
+const STALL_FAR = [{ back: 1000, fine: 1 }, { back: 2000, fine: 0 }];
+const STALL_WALL = WALL.concat(STALL_FAR);
+// the leg search (src/legsearch.js, --legs=1, OPT-IN: not measured yet): a stalled arm also gets one CPU search in a worker thread that
+// keeps the FASTEST state of each fine cell (the GPU bursts keep the first), from the room's first arrival and from the
+// stalled burst's start LEG_BACK ticks further back (each once per arm), inside the tiles the arm's walk reaches; one
+// at a time, LEG_MS each; its find (a new room by a trigger) is replayed and goes into every archive like a burst's
+const LEG_BACK = 400, LEG_MS = 900000, LEG_DEPTH = 900, LEG_CAP = 80000;
 // (a chain link after a full table: the settings with the next smaller layer cap)
 const GREEDIER = [2, 4, 4, 4, 4, 2];
 // how far back along the start cell's run a burst starts, in turn per room (ticks; never 0: the cell nearest the targets
@@ -151,6 +165,22 @@ const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
+
+/** the stall ladder's count for arm `arm` after a burst of `job` with result `res` ({reached, fresh, near}): a burst that
+ *  gained nothing (no target, no room, not a tile nearer than it started) counts, a gain starts the count over; at
+ *  STALL_N the start (job.from0 or its inputs) goes up the ladder once per arm (by its length): true */
+function stallStep(arm, job, res) {
+	if (job.stallLadder) return false;
+	const gain = !!res.reached || res.fresh > 0 || (Number.isFinite(res.near) && res.near < job.startDist - 1);
+	arm.stall = gain ? 0 : (arm.stall || 0) + 1;
+	if (arm.stall < STALL_N || !(job.chain < CHAIN_MAX)) return false;
+	const from = job.from0 || job.inputs;
+	const seen = arm.ladders || (arm.ladders = new Set());
+	if (seen.has(from.length)) return false;
+	seen.add(from.length);
+	arm.stall = 0;
+	return true;
+}
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
 function triggersOf(L) {
@@ -257,6 +287,53 @@ function create(o) {
 			o.say({ ev: 'shortcut', kind: 'arm', inputs, ticks: masks.length, saved, how });
 		} }) : null;
 	let armAcc = 0, armOom = 0;
+	let legBusy = false;
+	st.legs = 0; st.legFound = 0; st.legSec = 0;
+	/** the leg search for arm r from `from` (inputs), in a worker thread; its find replayed into every archive */
+	const legRun = (r, from, why, walk) => {
+		if (legBusy || stopped || a.legs === 0 || !from || !(a.file || a.level)) return false;
+		const seenStarts = r.legStarts || (r.legStarts = new Set());
+		if (seenStarts.has(from.length)) return false;
+		seenStarts.add(from.length);
+		legBusy = true;
+		let region = null;
+		if (walk) {
+			// (the tiles the arm's walk reaches, and those next to them: the ball's centre stays on the walk's tiles)
+			region = new Uint8Array(N);
+			for (let i = 0; i < N; i++) {
+				if (walk[i] === CUT) continue;
+				const x = i % W, y = (i / W) | 0;
+				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) region[yy * W + xx] = 1; }
+			}
+		}
+		const t0 = Date.now();
+		let w;
+		try {
+			const { Worker } = require('worker_threads');
+			w = new Worker(path.join(__dirname, 'legsearch.js'), { workerData: { legsearch: true, file: a.file || null, level: a.level || null, prefix: from,
+				o: { depth: LEG_DEPTH, cap: LEG_CAP, ms: LEG_MS, region }, known: [...rooms.keys()] } });
+		} catch (e) { legBusy = false; o.say({ ev: 'warning', text: `leg search: ${e.message}` }); return false; }
+		const done = (res) => {
+			if (!legBusy) return;
+			legBusy = false;
+			st.legs++; st.legSec += (Date.now() - t0) / 1000;
+			let fresh = 0;
+			if (res && res.found && !stopped) {
+				const rp = replay(res.found, r.key);
+				if (rp) { fresh = rp.fresh; o.broadcast(res.found); st.imports++; st.legFound++; r.stall = 0; }
+			}
+			o.say({ ev: 'burst', leg: true, n: st.bursts, room: r.desc, what: `the leg search (${why}) from tick ${from.length}${r.portal ? ' through portals' : ''}`, from: from.length,
+				sec: Math.round((Date.now() - t0) / 100) / 10, end: res ? res.why : 'error', reached: !!(res && res.found), newRooms: fresh, legTicks: res && res.legTicks, desc: res && res.desc,
+				layers: res && res.layers, sims: res && res.sims, at: o.sec() });
+		};
+		w.on('message', done);
+		w.on('error', (e) => { o.say({ ev: 'warning', text: `leg search: ${e.message}` }); done(null); });
+		w.on('exit', () => done(null));
+		legWorkers.add(w);
+		w.on('exit', () => legWorkers.delete(w));
+		return true;
+	};
+	const legWorkers = new Set();
 	const ARM_OOM_MAX_S = 30, ARM_PRE_CAP = 0.15;
 	st.arm = 0; st.armSec = 0; st.armRoutes = 0;
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -292,11 +369,11 @@ function create(o) {
 	const room = (m) => {
 		let r = rooms.get(m.room);
 		if (!r) {
-			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), dead: new Set(), zero: 0,
+			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null,
 				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1 };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
-			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0, fl: 0, nt: 1, ntI: null, ntK: -1 });
+			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null, fl: 0, nt: 1, ntI: null, ntK: -1 });
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
@@ -788,6 +865,17 @@ function create(o) {
 					if (!job.r.dead.has(z)) { job.r.dead.add(z); st.deadStarts++; }
 				}
 			}
+			// the stall ladder: an arm's bursts that gained nothing (no target, no room, no nearer), STALL_N in a row, send
+			// this one's start up the ladder (each start once per arm); a gain starts the count over
+			const stallNow = job.r && a.stallLadder !== 0 && stallStep(job.r, job, r);
+			if (stallNow) {
+				st.stalls = (st.stalls || 0) + 1;
+				job.stallLadder = true; job.wall = 0; job.from0 = job.from0 || job.inputs; job.what = `${job.what.replace(/ · (chain|finer|wall) .*$/, '')} · stalled`;
+				// (and the CPU leg search, from the room's first arrival, else from the stalled start LEG_BACK further back)
+				const arm = job.r, f0 = job.from0;
+				const walk = arm.lastField && arm.lastField.walk;
+				if (!legRun(arm, arm.inputs, 'the first arrival in the room', walk) && f0.length > LEG_BACK + 50) legRun(arm, f0.slice(0, Math.max(o.minLen || 0, f0.length - LEG_BACK)), `${LEG_BACK} back`, walk);
+			}
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
 			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
@@ -807,9 +895,12 @@ function create(o) {
 					cells: keep ? job.cells : CF[ci2], fine: keep ? job.fine : 0,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
-			} else if (job.r && !r.reached && r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.wall || 0) < WALL.length && job.chain < CHAIN_MAX) {
-				// every situation tried a few tiles from a target: the wall ladder from the same start (further back, then finer)
-				const k = job.wall || 0, w = WALL[k], from = job.from0 || job.inputs;
+			} else if (job.r && !r.reached && ((r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.wall || 0) < WALL.length) ||
+				(job.stallLadder && (job.wall || 0) < STALL_WALL.length)) && job.chain < CHAIN_MAX) {
+				// every situation tried a few tiles from a target (or the arm stalled: the stall ladder, below): the wall ladder
+				// from the same start (further back, then finer)
+				const ladder = job.stallLadder ? STALL_WALL : WALL;
+				const k = job.wall || 0, w = ladder[k], from = job.from0 || job.inputs;
 				const inputs = from.length > w.back + 50 ? from.slice(0, Math.max(o.minLen || 0, from.length - w.back)) : from;
 				next = Object.assign({}, job, { inputs, from0: from, chain: job.chain + 1, wall: k + 1, fine: w.fine, cells: w.fine ? FINE[w.fine - 1] : job.cells,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '')} · wall ${w.back} back${w.fine ? `, ${FINE_TEXT[w.fine - 1]}` : ''}` });
@@ -881,6 +972,7 @@ function create(o) {
 			for (let k = 0; k < Math.max(1, a.burstPar); k++) { try { fs.writeFileSync(path.join(work, `stop_${k}`), '1'); } catch (e) { /* none */ } }
 			for (let k = 0; k < 150 && children.size; k++) await sleep(100);
 			for (const ch of children) { try { ch.kill(); } catch (e) { /* gone */ } }
+			for (const w of legWorkers) { try { await w.terminate(); } catch (e) { /* gone */ } }
 			if (loopP) await loopP;
 		},
 		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st, RA ? { armInfo: RA.stats() } : {}),
@@ -984,4 +1076,4 @@ function roomAim(L, RM, sim, known, T) {
 	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
 }
 
-module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER };
+module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
