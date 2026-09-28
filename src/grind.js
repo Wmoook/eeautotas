@@ -991,10 +991,13 @@ async function skipsStage(round) {
  * later point of the run reached sooner, joined back exactly (the run's own inputs, or a second search) and judged.
  * A slice per round (--skipfindS, default 30% of a round, 120-300 s) on every thread, continuing its pass over the run
  * (`grind_skipfind.txt`: the starts searched, by their state and their goal window's); in the first round right after
- * mutA (a Find a route base route has the most path to gain), later after the sweep's deep windows. --skipfind=0: off.
+ * mutA (a Find a route base route has the most path to gain), later after the sweep's deep windows. Opt-in for now:
+ * --skipfind=1 (or EEAT_SKIPFIND=1).
  */
 async function skipfindStage(round) {
-	if (a.skipfind === '0') return;
+	// opt-in (--skipfind=1 or EEAT_SKIPFIND=1) until an end-to-end A/B and a review have shown it pays: it was pushed
+	// on by default without either (2026-09-27 20:49), and it takes 30% of every round
+	if (a.skipfind !== '1' && process.env.EEAT_SKIPFIND !== '1') return;
 	const secs = a.skipfindS ? +a.skipfindS : Math.max(120, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
 	if (deadline - Date.now() < (secs + 120) * 1000) return;
 	const so = path.join(OUT, `grind_skipf_${round}.eetas`);
