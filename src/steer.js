@@ -771,7 +771,8 @@ parentPort.on('message', (m) => {
 		try {
 			if (m.deadline && Date.now() > m.deadline) r = { i, late: true };
 			else {
-				const f = SF._legFieldOf(Object.assign({}, d.level, m.deltas[j.k]), j.fg, j.q, m.coins, m.start);
+				const fg = Int32Array.from(m.fg0[j.k]); fg[j.q] = m.trophy;
+				const f = SF._legFieldOf(Object.assign({}, d.level, m.deltas[j.k]), fg, j.q, m.coins, m.start);
 				r = j.at ? { i, costs: Float64Array.from(j.at, (t) => SF.arriveCost(f, t)) } : { i, f };
 			}
 		} catch (e) { r = { i, err: String(e && e.stack || e) }; }
@@ -797,7 +798,7 @@ function legPool(L, n) {
 	} catch (e) { for (const x of ws) x.w.terminate(); return null; }
 	return {
 		n,
-		/** jobs [{k (the layer's delta), fg, q, at?}] with extra {deltas, coins, start, deadline}: the answers ({f} | {costs} |
+		/** jobs [{k (the layer: its delta and its fg0), q (the coin: the goal), at?}] with extra {deltas, fg0, trophy, coins, start, deadline}: the answers ({f} | {costs} |
 		 *  {late}) in the jobs' order; a job a worker could not do (an error, a stalled pool) is done here */
 		run(jobs, extra) {
 			const sab = new SharedArrayBuffer(8), idx = new Int32Array(sab);
@@ -817,7 +818,8 @@ function legPool(L, n) {
 			return out.map((r, i) => {
 				if (r && !r.err) return r;
 				const j = jobs[i];
-				const f = legFieldOf(Object.assign({}, L, extra.deltas[j.k]), j.fg, j.q, extra.coins, extra.start);
+				const fg = Int32Array.from(extra.fg0[j.k]); fg[j.q] = extra.trophy;
+				const f = legFieldOf(Object.assign({}, L, extra.deltas[j.k]), fg, j.q, extra.coins, extra.start);
 				return j.at ? { i, costs: Float64Array.from(j.at, (t) => arriveCost(f, t)) } : { i, f };
 			});
 		},
@@ -867,8 +869,9 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 	const pool = legPool(A.level, legThreadsOf(A, legs || coins.length, opts));
 	const run = (list, withAt, deadline) => {
 		const deltas = {};
-		const jobs = list.map(([q, k, at]) => { deltas[k] = layer(k).delta; return withAt ? { k, fg: fgOf(q, k), q, at } : { k, fg: fgOf(q, k), q }; });
-		return pool.run(jobs, { deltas, coins, start: A.start.t, deadline: deadline || 0 });
+		const fg0 = {};
+		const jobs = list.map(([q, k, at]) => { deltas[k] = layer(k).delta; fg0[k] = layer(k).fg0; return withAt ? { k, q, at } : { k, q }; });
+		return pool.run(jobs, { deltas, fg0, trophy: TROPHY, coins, start: A.start.t, deadline: deadline || 0 });
 	};
 	return {
 		fields(list) {
