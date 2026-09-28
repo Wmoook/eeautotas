@@ -246,6 +246,10 @@ const dmFileFor = (dm) => !!dm && process.env.EEAT_DFIELD === '1';
  *  with hx-int-1 they need the reach field WITH death edges, which prunes no killing dead end, and Good Egg's search
  *  collapsed: its GPU random runs 98 rooms vs 4,083 in 60 s with one pool, the AutoTASer's nearest 285 tiles (524 ticks,
  *  never better) vs 249 (7,369 ticks) in 15 min; src/out/night/helix2_r1-deaths.md in that worktree) */
+/** with deaths as moves on, the GPU random runs drop every dead ball anyway (EEAT_ROLLDEATHS=0; hx2-r3-deaths' A/B arm "mix":
+ *  the CPU search keeps its paying deaths, the random runs spend no 55-tick respawns; r2-deaths saw them make fewer new cells
+ *  per tick on Good Egg with deaths played through) */
+const rollDeathsOff = () => process.env.EEAT_ROLLDEATHS === '0';
 const deathsAsked = (b) => b.deaths === true || (b.deaths !== false && process.env.EEAT_DEATHS === 'moves');
 const reachBase = (hash, dm) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}${deathsTaken(dm) ? '_dm' : ''}`);
 /** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
@@ -414,7 +418,7 @@ const STRATEGIES = {
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : [])] : [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : [o.deathFree ? '--deaths=0' : '--deaths=1'])] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? (rollDeathsOff() ? ['--deaths=0'] : []) : [o.deathFree ? '--deaths=0' : '--deaths=1'])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
