@@ -323,7 +323,7 @@ be left out. Each tool's header comment lists its options.
 
 | file | what |
 |---|---|
-| `meta.json` | name, level info, the original TAS (ticks, finish tick, run ticks, coins, deaths), import-time portal odds, `levelId`, `startMode` (`reset` / `load`), `startMatters`, `spawns`, `timeDoors` |
+| `meta.json` | name, level info, the original TAS (ticks, finish tick, run ticks, coins, deaths, `tailTicks`: empty ticks after the file's last input up to the finish, since EEO plays on with no key held after a TAS ends (`jobs.js` `TAIL_TICKS` 1000: the user's Naos TAS touches the trophy 1 tick after its last input; the job's runs include them, `original.eetas` stays the file as uploaded)), import-time portal odds, `levelId`, `startMode` (`reset` / `load`), `startMatters`, `spawns`, `timeDoors` |
 | `status.json` | written by grind (and by `try` when stopped): `state`, `pid`, `stage`, `rounds` (finished rounds), `cursor` {round, stage, used, deep, sc ({t, h}: tick + state hash), scRate, seed} (where a restart continues), `bestRunTicks`, `chance`, `coinsOptional`, `history` [{t, runTicks, saved, what, chance}], `updated` (heartbeat) |
 | `best.eetas` | **the current best run** (bytes '0'..'O', cut at the finish); `best_<runTicks>.eetas` = every improvement |
 | `original.eetas`, `original.eelvl` | the uploaded files, byte for byte |
