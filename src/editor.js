@@ -564,6 +564,9 @@ const ROLLS_DRY_MAX = 4;
 // the GPU strategies whose GPU memory is fixed once they run (the random runs' cell table, the beams' buffers): they may
 // take the GPU while the wall breaker's round has no GPU work of its own (schedule: its next process loading, a retry wait)
 const FIXED_MEM = new Set(['gorolls', 'goal', 'guide']);
+// the strategies that never read the steer field: with the early start (start()) they run from the reach field's end,
+// the others from the steer field's (the NC and GE profiles: 15 s of the steer wait before any search ran)
+const EARLY_KEYS = new Set(['gorolls', 'skips']);
 let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
 function setPaused(k, on) {
@@ -589,7 +592,6 @@ function schedule() {
 	// strategy that has work; before, a fresh process (a new pass, a new relay run) got the next slice while it loaded and
 	// every other GPU search waited those seconds)
 	S.strategies.forEach((q, k) => { if ((!q.cpu || q.gpuShare) && alive(kids[k]) && !kids[k].stopWhy) { if (loading(q)) setPaused(k, true); else gpu.push(k); } });
-	if (!gpu.length) { sched = null; return; }
 	// (the wall breaker's round has the GPU to itself: the others wait between two launches, keeping their tables; also
 	// between its processes (every move and the relay handing over the memory, one run's end and the next's start), so
 	// the beams and the random runs do not get the GPU back for those seconds)
@@ -607,7 +609,7 @@ function schedule() {
 		S.gpuTurn = 'breaker';
 		if (!fixed.length) return;
 		gpu = fixed;
-	} else if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
+	} else if (!gpu.length) { sched = null; return; } else if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
 		// (on a GPU of BURST_BIG_MB or more the one search's bursts go on beside the round (`breakShare`): before, the rounds held
 		// the GPU 38-66% of the time before the first route on Octorage, Infinity Pain, Endeavor and Forgotten Veil, and the
@@ -1797,7 +1799,7 @@ function state() {
 const alive = (ch) => !!(ch && ch.exitCode === null && ch.signalCode === null);
 let building = false;       // the physics check of a starting search (a worker thread) is under way
 let searchGen = 0;          // the search whose physics check / tool check is awaited (a stop or a newer search ends the wait)
-const running = () => busy.size > 0 || building || breakHolds() || retryHolds();
+const running = () => busy.size > 0 || building || breakHolds() || retryHolds() || (!!cur && !!cur.deferred && !!S && !S.halted);
 /** ends a strategy's process; why: how its pass counts ('beaten', 'finish', 'stopped'). The GPU tool is asked to stop
  *  (its stop file: it ends between two kernel launches, within about one; killing it while a kernel runs makes the
  *  NVIDIA driver reset the GPU) and killed only if it is still running 2 s later; the CPU search is killed. */
@@ -1963,14 +1965,34 @@ function start(b, gpu, test) {
 	const steerWait = test && test.steerWaitMs >= 0 ? test.steerWaitMs : +process.env.EEAT_STEER_WAIT_MS >= 0 && process.env.EEAT_STEER_WAIT_MS !== '' ? +process.env.EEAT_STEER_WAIT_MS : STEER_WAIT_MS;
 	const steerBuild = wantSteer ? steerInfo(buf, levelHash) : null;
 	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerBuild, new Promise((res) => { const t = setTimeout(() => res({ late: true }), steerWait); if (t.unref) t.unref(); })]);
-	const ready = Promise.all([reachInfo(buf, levelHash, deathMoves), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), steerP]);
+	const reachP = reachInfo(buf, levelHash, deathMoves), toolP = noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]);
 	const gen = ++searchGen;
+	// (the early start: the strategies that never read the steer field (EARLY_KEYS: the GPU random runs, the path skips)
+	// start as soon as the reach field and the tool check are done; the others when the steer field is built or its wait
+	// is over (launchDeferred). b.earlyStart === false, test.earlyStart === false or EEAT_EARLY=0: every strategy after the
+	// steer wait, as before)
+	const early = wantSteer && which.some((k) => EARLY_KEYS.has(k)) && b.earlyStart !== false && !(test && test.earlyStart === false) && process.env.EEAT_EARLY !== '0';
+	const ready = early ? Promise.all([reachP, toolP]) : Promise.all([reachP, toolP, steerP]);
 	ready.then(([rf, toolWhy, sf]) => {
 		if (gen !== searchGen) return;
-		useSteer(sf, noGpu || toolWhy);
-		launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide);
-		// (a late field: taken when its build ends, after the launches)
-		if (sf && sf.late) steerBuild.then((sf2) => lateSteer(gen, sf2));
+		const rf2 = test && test.reach ? Object.assign({}, rf, test.reach) : rf;
+		if (!early) {
+			useSteer(sf, noGpu || toolWhy);
+			launchAll(rf2, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide);
+			// (a late field: taken when its build ends, after the launches)
+			if (sf && sf.late) steerBuild.then((sf2) => lateSteer(gen, sf2));
+			return;
+		}
+		if (cur) { cur.early = []; cur.deferred = []; }
+		launchAll(rf2, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide, true);
+		steerP.then((sf1) => {
+			if (gen !== searchGen || !cur) return;
+			useSteer(sf1, noGpu || toolWhy);
+			// (as launchAll does after it: the check of a level the reach field calls impossible runs without the steer field)
+			if (cur.opts.noWayUp) { cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
+			launchDeferred();
+			if (sf1 && sf1.late) steerBuild.then((sf2) => lateSteer(gen, sf2));
+		});
 	}, (e) => {
 		if (gen !== searchGen) return;   // (stopped while checking, maybe another search since)
 		building = false;
@@ -2044,7 +2066,7 @@ function lateSteer(gen, sf2) {
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
  *  why the GPU strategies do not run ('' = they do); stale: the reason is an old search tool */
-function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
+function launchAll(rf, noGpu, stale, which, cpu, ins, guide, defer) {
 	building = false;
 	if (!cur) return;
 	if (S.halted) { S.stage = S.result ? 'found' : 'stopped'; finish(); return; }
@@ -2098,10 +2120,34 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 		if (k === 'escape') { Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc ? esc.wait : ESC_WAIT_S} s)` }); return null; }
 		// (the precision stage waits for a stall; its distances are the reach field's, ranked like a steerless strategy's)
 		if (k === 'precision') { Object.assign(S.strategies[n], { state: 'waiting', noSteer: true, detail: `waits for the search to stall near a spot (no attempt nearer by ${PREC_TILES} tiles for ${prec ? prec.wait : PREC_WAIT_S} s)` }); return null; }
+		// (the early start: a strategy that reads the steer field starts once it is built or its wait is over: launchDeferred)
+		if (k !== 'relay' && defer && !EARLY_KEYS.has(k) && cur.deferred) { cur.deferred.push(n); Object.assign(S.strategies[n], { state: 'starting', detail: 'waits for the steer field (its build, at most its wait)' }); return null; }
 		if (k !== 'relay') return launch(n);
 		Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for an attempt of ${RELAY_MIN_TICKS}+ ticks to go on from` });
 		return null;
 	});
+}
+/** the early start's second half: the steer field is built (or its wait is over; useSteer has run): the strategies that
+ *  read it start, then the attempts the early strategies reported meanwhile are taken (closer(), the sources), now on the
+ *  scale every strategy's distances share (the steer field's; the steerless ones' at STEER_MISS + the reach field's) */
+function launchDeferred() {
+	if (!cur || !cur.deferred) return;
+	const list = cur.deferred, queued = cur.early || [];
+	cur.deferred = null; cur.early = null;
+	if (!S.running || S.halted || S.stage === 'stopped') { if (!running()) finish(); return; }
+	for (const n of list) {
+		if (alive(kids[n])) continue;
+		if (S.strategies[n].detail === 'waits for the steer field (its build, at most its wait)') S.strategies[n].detail = '';
+		kids[n] = launch(n);
+		// (a route an early strategy found meanwhile: the CPU search's bound and head L, as tellCpu gives the running ones;
+		// every move takes its bound at its launch)
+		const q = S.strategies[n], ch = kids[n];
+		if (S.result && q.cpu && !q.lane && alive(ch) && ch.stdin && !ch.stdin.destroyed) {
+			try { ch.stdin.write(`depth ${Math.max(1, boundTicks() - 1)}\n`); if (q.gpuShare && S.result.inputs) ch.stdin.write(`route ${S.result.inputs}\n`); } catch (e) { /* gone */ }
+		}
+	}
+	for (const fn of queued) fn();
+	save();
 }
 // ---------------------------------------------------------------- the proof (src/prove.js: eegpu prove, CPU only)
 // Once the physics check finds a way (a finite start cost), `eegpu prove` (native/prove.h: the engine's tick over boxes
@@ -2492,6 +2538,8 @@ function launch(n) {
 	};
 	const onEvent = (ev) => {
 		if (!mine()) return;
+		// (the early start: an early strategy's attempts wait for the steer field's decision on the distances' scale)
+		if (cur && cur.early && (ev.ev === 'closest' || ev.ev === 'source')) { cur.early.push(() => onEvent(ev)); return; }
 		if (V.lane && laneEvent(V, n, ev)) { totals(); save(); return; }
 		// (the one search's route arm on the nearest attempt, before any route (goexplore.js --rArmPre): a shortened attempt,
 		// already in its archive; into the library found() splices every route with, like the path skips')
@@ -3384,6 +3432,12 @@ function stop() {
 	if (retryHolds()) {
 		clearRetries();
 		S.strategies.forEach((q, k) => { if (q.state === 'waiting' && !alive(kids[k])) q.state = 'stopped'; });
+		if (!running()) { finish(); return state(); }
+	}
+	// (the early start: the strategies still waiting for the steer field do not start)
+	if (cur && cur.deferred) {
+		for (const n of cur.deferred) if (S.strategies[n]) S.strategies[n].state = 'stopped';
+		cur.deferred = null; cur.early = null;
 		if (!running()) { finish(); return state(); }
 	}
 	proofAlone();
