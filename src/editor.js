@@ -2364,8 +2364,10 @@ function found(inputs, n, more) {
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
 	// (the path skips' shortcuts so far, spliced into every route before it counts: a route of another search's lineage,
 	// e.g. the GPU random runs' (their archive takes no imports), that passes a state a shortened attempt reached sooner
-	// takes that shortcut at once: the first route too, when the shortcut came before it)
+	// takes that shortcut at once: the first route too, when the shortcut came before it). The search's bounds stay the
+	// routes as found (S.rawBest, as with the cleanup): that search goes on reporting its own faster routes, each spliced
 	let how = '';
+	const ev0 = ev;
 	if (!V.lane && laneLib && laneLib.S === S && laneLib.L.size) {
 		const sp = laneLib.L.splice(ev.ms, 'route', ev);
 		if (sp) { how = ` + path skips (-${sp.saved}: ${sp.how})`; note(`${V.label}: its route ${C.fmt(ev.runTicks)} spliced with the path skips' shortcuts: ${C.fmt(sp.ev.runTicks)} (-${sp.saved})`); ev = sp.ev; }
@@ -2373,8 +2375,8 @@ function found(inputs, n, more) {
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
 	// (the fastest route as found: the search's bounds, as without the cleanup; each one is cleaned, and a cleaned route
 	// replaces S.result when it is better)
-	const rb = S.rawBest, rawBetter = !rb || ev.runTicks < rb.runTicks || (ev.runTicks === rb.runTicks && ev.ms.length < rb.ticks);
-	if (rawBetter) S.rawBest = { runTicks: ev.runTicks, ticks: ev.ms.length };
+	const rb = S.rawBest, rawBetter = !rb || ev0.runTicks < rb.runTicks || (ev0.runTicks === rb.runTicks && ev0.ms.length < rb.ticks);
+	if (rawBetter) S.rawBest = { runTicks: ev0.runTicks, ticks: ev0.ms.length };
 	if (first || ((V.cpu || V.rolls) && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
 	const label = how ? `${V.label} + path skips` : V.label;
 	if (better) {
@@ -2382,7 +2384,7 @@ function found(inputs, n, more) {
 			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, strategy: label });
 		if (how) S.result.spliced = how.slice(3);
 	}
-	if (rawBetter) cleanLater(ev, label);
+	if (rawBetter || (better && how)) cleanLater(ev, label);
 	S.stage = 'found';
 	// the other strategies: those already deeper than this route cannot find a faster one; the CPU search is told the
 	// bound (it goes on looking for a faster route)
