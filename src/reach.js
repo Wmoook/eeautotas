@@ -321,7 +321,10 @@ function reachField(level, opts) {
 	// and a move of more than 16 px a tick can cross a one-tile portal row between two tick starts. Without it the ordering
 	// fields send the searches through portal ceilings (Wine Quest I: the hub's portal rows, "190 tiles" from the trophy)
 	const forcedP = new Uint8Array(N);
-	if (opts.portalForced) for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
+	if (opts.portalForced) {
+		for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
+		unforceChains(W, H, forcedP, portalExits, srcOf);
+	}
 	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
@@ -804,6 +807,30 @@ function modMinOf(level) {
 	}
 	return a;
 }
+/**
+ * unforceChains(W, H, forcedP, exits, srcOf): the forced portals (opts.portalForced) that a ball a teleport put on a
+ * portal exit can still walk over, cleared: it keeps lastPortal over every portal tile it moves on to (eesim.js
+ * processPortals), so the portal tiles 4-connected to an exit through portal tiles are walked, not forced. Good Egg's
+ * pocket columns x = 1 and x = 3 (exits such as (1, 197) next to portals such as (1, 196)): forced, the pocket coins
+ * (1, 190), (3, 177), (3, 155) were out of reach in the steer field, which had no value and no coin plan for coins 0-8
+ * (the n2-int gate study, 2026-09-28)
+ */
+function unforceChains(W, H, forcedP, exits, srcOf) {
+	const N = W * H, isP = (t) => exits.has(t) || srcOf.has(t);
+	const q = [...srcOf.keys()], seen = new Uint8Array(N);
+	for (const j of q) seen[j] = 1;
+	while (q.length) {
+		const t = q.pop();
+		forcedP[t] = 0;
+		const x = t % W, y = (t / W) | 0;
+		for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+			const x2 = x + dx, y2 = y + dy;
+			if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
+			const u = y2 * W + x2;
+			if (!seen[u] && isP(u)) { seen[u] = 1; q.push(u); }
+		}
+	}
+}
 /** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
  *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
 function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP) {
@@ -1004,7 +1031,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, unforceChains, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

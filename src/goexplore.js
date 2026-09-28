@@ -217,7 +217,8 @@
 //        edges only with deaths as moves (fieldOpts): off, the runs end at a death, so a way through one is none of
 //        theirs and the field is built without them)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
-//        is walkable, roomDead, end a run; never with deaths as moves: a death can take the ball out of a dead end; 0: off)]
+//        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
+//        moves: a death can take the ball out of a dead end; 0: off)]
 //        (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
@@ -874,6 +875,19 @@ function roomDead(L, budget) {
 }
 /** tile t is live in the room's bitset (see roomDead) */
 const liveAt = (live, t) => (live[t >> 3] & (1 << (t & 7))) !== 0;
+/**
+ * a trigger's effect the engine has not applied yet: roomDead's claim (the room changes only at a trigger or by the clock)
+ * holds only once it has landed. A purple switch pressed while the ball's box overlaps a door or gate it would close waits in
+ * _tileQueue and a team change in _team_tx (both retried at the next tick's start, possibly after a portal moved the ball
+ * away from the trigger); orange switches and crowns (_stateQueue) and keys (_keysQueue) are drained at the tick's end
+ * (pending only with ticksPerFrame above 1). While one is pending the room can change one tick after the trigger, off its
+ * tile, so no dead-end cut: the soundness review's repro (a 60 x 50 level: a purple switch touched while overlapping its
+ * gate, a fall through the still-open gate onto a one-way portal into a room sealed by that switch's doors) lost its route
+ * (no route in 42 M ticks, --roomDead=0 one in 0.2 s; test/reach.js H). A team retry onto the team the ball already has
+ * keeps _team_tx set and changes nothing: not pending
+ */
+const pendingTrigger = (sim) => sim._tileQueue.length !== 0 || sim._stateQueue.length !== 0 || sim._keysQueue.length !== 0 ||
+	(sim._team_tx !== -1 && sim.team !== sim._lookupAt(sim._team_tx, sim._team_ty));
 
 /**
  * lowerBoundTiles(L) -> Uint16Array (per tile, over a SharedArrayBuffer): a lower bound on the ticks from a ball whose
@@ -1772,7 +1786,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				else if (roomFor()) room = newRoom(roomKey, t, room.key);
 				else { full = true; needSweep = true; break; }
 			}
-			if (room.live !== null && !liveAt(room.live, centreTile())) { deadCut++; break; }
+			if (room.live !== null && !liveAt(room.live, centreTile()) && !pendingTrigger(sim)) { deadCut++; break; }
 			if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
 				const node = mkNode(null, blk, 0, t);
@@ -2149,7 +2163,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						}
 					}
 					// (a dead end of its room: no trophy and no trigger walkable from here: the run ends)
-					if (into && room !== null && room.live !== null && !liveAt(room.live, centreTile())) { deadCut++; break; }
+					// (not while a trigger's effect is pending: pendingTrigger)
+					if (into && room !== null && room.live !== null && !liveAt(room.live, centreTile()) && !pendingTrigger(sim)) { deadCut++; break; }
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
 						const node = mkNode(up, blk, o, s + 1);
@@ -3165,4 +3180,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, roomFields, roomDead, liveAt, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, roomFields, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
