@@ -713,6 +713,106 @@ function sectionH() {
 			`box ${at(70, 9)} tiles, start ${at(2, 38)}, the real way's portal ${at(6, 37)}, its exit ${at(45, 37)}`);
 	}
 }
+/** the room-aware dead ends (goexplore.js roomDead, --roomDead): random rooms of coin / switch / key / team doors and
+ *  gates, their triggers, spikes, protection, time doors, portals; states of random runs on a tile that is not live in
+ *  their room, each checked by a bounded exhaustive search from it (1 px / 1/8 px/tick cells): it never finishes and never
+ *  changes the room alive */
+function roomDeadFuzz() {
+	const GX = require('../src/goexplore.js');
+	let seed = 20260928;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+	const OPTS = [0, 1, 2, 4, 8, 16, 3, 5, 9, 10, 12, 17, 18, 20, 24, 11, 13];
+	const KINDS = [[43, 1], [43, 2], [165, 1], [100], [100], [113, 1], [184, 1], [185, 1], [6], [23], [26], [423, 1], [1027, 1], [1028, 1], [420, 1], [361, 1], [361, 1], [156], [157], [360], [4], [2], [1052, 1], [9], [9], [9]];
+	let rooms = 0, runs = 0, dead = 0, checked = 0, viol = 0, first = null;
+	const ROOMS = QUICK ? 10 : 30;
+	for (let k = 0; k < ROOMS; k++) {
+		const W = 14 + Math.floor(rnd() * 14), H = 10 + Math.floor(rnd() * 8), cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		// walls of doors splitting the room, then random blocks of every kind
+		for (let n = 0; n < 2; n++) { const x = 3 + Math.floor(rnd() * (W - 6)), d = KINDS[Math.floor(rnd() * 14)]; if (d[0] === 100 || d[0] === 6 || d[0] === 113 || d[0] === 423 || d[0] === 420) continue; for (let y = 1; y < H - 1; y++) cells.push([x, y, ...d]); }
+		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (rnd() < 0.12) { const d = KINDS[Math.floor(rnd() * KINDS.length)]; cells.push([x, y, ...d]); }
+		if (k % 3 === 0) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 1, 2], [1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 2, k % 2 ? 1 : 9]);
+		cells.push([W - 2, 1 + Math.floor(rnd() * (H - 2)), 121], [1, H - 2, 255]);
+		let L;
+		try { L = levelOfCells(W, H, cells); } catch (e) { continue; }
+		rooms++;
+		const RM = GX.roomOf(L), RD = GX.roomDead(L, 1 << 24);
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		for (let r = 0; r < (QUICK ? 15 : 30); r++) {
+			runs++;
+			sim.reset();
+			let m = OPTS[Math.floor(rnd() * OPTS.length)];
+			for (let t = 0; t < 250; t++) {
+				if (rnd() < 0.12) m = OPTS[Math.floor(rnd() * OPTS.length)];
+				E.applyMask(inp, m); sim.tick(inp);
+				if (sim.is_dead || sim.has_silver_crown) break;
+				const tile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
+				if (GX.liveAt(RD.liveFor(sim), tile)) continue;
+				dead++;
+				if (checked >= (QUICK ? 40 : 120)) continue;
+				checked++;
+				// a bounded exhaustive search from this state: a finish or a room change alive disproves the dead end
+				const key0 = RM.key(sim), s2 = new E.EESim(L), i2 = new E.EEInput();
+				let layer = [sim.snapshot()];
+				const seen = new Set();
+				let bad = null;
+				for (let d = 0; d < 90 && layer.length && !bad; d++) {
+					const next = [];
+					for (const sn of layer) {
+						for (const mm of OPTS) {
+							s2.restore(sn); E.applyMask(i2, mm); s2.tick(i2);
+							if (s2.is_dead) continue;
+							if (s2.has_silver_crown || RM.key(s2) !== key0) { bad = { d: d + 1, finish: s2.has_silver_crown, room: RM.desc(s2) }; break; }
+							const kk = `${Math.round(s2.px)},${Math.round(s2.py)},${Math.round(s2.speed_x * 8)},${Math.round(s2.speed_y * 8)},${s2.on_ground ? 1 : 0},${s2.jump_count},${s2._q0},${s2._q1}`;
+							if (seen.has(kk)) continue;
+							seen.add(kk);
+							next.push(s2.snapshot());
+						}
+						if (bad) break;
+					}
+					layer = next.length > 20000 ? next.slice(0, 20000) : next;
+				}
+				if (bad) { viol++; if (!first) first = { room: k, run: r, t, tile: [tile % W, (tile / W) | 0], room0: RM.desc(sim), bad }; }
+			}
+		}
+	}
+	// the corpus: every state of every job's original and best run up to its first death (the searches drop dead balls; a run
+	// that dies uses the death as a move) is live in its room, and so is every state of the death-free field's corpus
+	const JOBS = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
+	let jobs = [];
+	try { jobs = fs.readdirSync(JOBS).filter((d) => !d.startsWith('_') && fs.existsSync(path.join(JOBS, d, 'meta.json'))); } catch (e) { /* none */ }
+	let cn = 0, cdead = 0, cfirst = null, cruns = 0, cndf = 0, cdf = 0, cfirstDf = null, cdfDying = 0;
+	const seenLv = new Map();
+	for (const id of jobs) {
+		const lf = path.join(JOBS, '..', 'data', `job_${id.replace(/-/g, '_')}.json`);
+		let L;
+		try { L = fs.existsSync(lf) ? E.loadLevel(lf) : E.prepareLevel(EL.toSimLevel(EL.readEelvl(fs.readFileSync(path.join(JOBS, id, 'original.eelvl'))))); } catch (e) { continue; }
+		if (L.width * L.height <= 2500) continue;   // (coarse cells only: the levels above 50 x 50)
+		const RM = GX.roomOf(L), RD = GX.roomDead(L, 1 << 26), FD = R.reachField(L, { deaths: false });
+		for (const run of ['original.eetas', 'best.eetas']) {
+			const file = path.join(JOBS, id, run);
+			if (!fs.existsSync(file)) continue;
+			const masks = C.readEetas(file);
+			cruns++;
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			for (let t = 0; t <= masks.length; t++) {
+				if (t > 0) { E.applyMask(inp, masks[t - 1]); sim.tick(inp); }
+				if (sim.is_dead || sim.has_silver_crown) break;
+				const tile = (Math.trunc(sim.py + 8) >> 4) * L.width + (Math.trunc(sim.px + 8) >> 4);
+				cn++;
+				if (!GX.liveAt(RD.liveFor(sim), tile)) { cdead++; if (!cfirst) cfirst = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0], room: RM.desc(sim) }; }
+				cndf++;
+				if (R.costAt(FD, sim) < 0) { const nx = t < masks.length ? (() => { const s3 = new E.EESim(L); s3.restore(sim.snapshot()); const i3 = new E.EEInput(); E.applyMask(i3, masks[t]); s3.tick(i3); return s3.is_dead; })() : false; if (!nx) { cdf++; if (!cfirstDf) cfirstDf = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0] }; } else cdfDying++; }
+			}
+		}
+	}
+	check(`every state of every job's runs above 50 x 50 up to its first death (${cruns} runs): live in its room (roomDead) and not cut off by the death-free field`, cdead === 0 && cdf === 0,
+		`${cn} states, ${cdead} not live, ${cdf} cut off by the death-free field (${cdfDying} more on a killing tile the tick before the run's death)${cfirst ? `; first ${JSON.stringify(cfirst)}` : ''}${cfirstDf ? `; first cut ${JSON.stringify(cfirstDf)}` : ''}${jobs.length ? '' : ` (no jobs in ${JOBS})`}`);
+	check(`the room-aware dead ends (goexplore roomDead): ${rooms} random rooms of doors, triggers, spikes, portals; ${runs} random runs: from every state on a tile not live in its room that a bounded exhaustive search checked (90 ticks), no finish and no room change alive`,
+		viol === 0 && checked > 0, `${dead} dead states, ${checked} checked, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
+}
 /** the viewing-room trap level (test/editor.js's one search runs on it too): 80 x 40, walk mode */
 function trapLevel() {
 	const W = 80, H = 40, c = [];
@@ -737,7 +837,7 @@ function trapLevel() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
-	if (want('H')) sectionH();
+	if (want('H')) { sectionH(); roomDeadFuzz(); }
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });

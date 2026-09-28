@@ -250,7 +250,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, deaths: 0 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, deaths: 0, roomDead: 1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -694,6 +694,117 @@ function roomFields(L, budget) {
 }
 
 /**
+ * roomDead(L, budget) -> {liveFor(sim) -> Uint8Array (a bit per tile: 1 = not a dead end in the ball's room), bytes(),
+ * stats()}: the room-aware dead ends (--roomDead=1, coarse cells). In the ball's room (the discrete state the room key
+ * holds) a tile is LIVE when the trophy or a TRIGGER (a tile whose touch can change the room: effects, keys, switches and
+ * their resets, coins, crowns, liquids and lava (they put a fire out or set one), fire, zombie NPCs; over-inclusive: a
+ * trigger that changes nothing is still one) is walkable from it: 8-way (a diagonal step closed between two walls), through
+ * portals the way they send the ball, killing tiles closed unless the ball is protected (protection comes only from a
+ * trigger), a door or gate closed only when it is closed now and nothing but a trigger can open it (coin, blue coin,
+ * purple / orange switch, team, crown doors and gates, key doors: KEEP_DOORS); every other one open (time doors and key gates
+ * open on the clock; death, zombie, gold doors: open). Then dilated by a tile (the ball's centre is within a tile of where
+ * the walk puts it). The walk over-approximates the ball's moves in the room until its room changes, and the room changes
+ * only at a trigger or by the clock (whose doors are open here), so from a tile that is not live the ball can neither
+ * finish nor leave the room alive: its run ends there (a proof like the reach field's -1, for this room; a search that
+ * takes deaths as moves must not use it: a death respawns the ball elsewhere). Walks are cached by the passable set's hash
+ * (the doors' states and protection), the least recently used dropped beyond `budget` bytes.
+ */
+const KEEP_DOORS = new Set([43, 165, 213, 214, 184, 185, 1079, 1080, 1094, 1095, 1152, 1153, 1027, 1028, 23, 24, 25, 1005, 1006, 1007]);
+const TRIGGER_IDS = new Set([5, 121, 113, 1619, 467, 1620, 6, 7, 8, 408, 409, 410, 100, 101, 119, 369, 416, 1585, 368, 417, 418, 419, 420, 421, 422, 423, 453, 461, 1517,
+	1584, 1618, ...EL.NPC_IDS]);
+function roomDead(L, budget) {
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
+	const wall = new Uint8Array(N), deadly = new Uint8Array(N), keep = [], goals = [];
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		const f = id >= 0 && id < fl.length ? fl[id] : 0;
+		if ((f & F_SOLID) !== 0 && (f & F_DOOR) !== 0) { if (KEEP_DOORS.has(id)) keep.push(i); }
+		else if ((f & F_SOLID) !== 0 && (f & (F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0) wall[i] = 1;
+		if (id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0) deadly[i] = 1;
+		if (TRIGGER_IDS.has(id)) goals.push(i);
+	}
+	// portals reversed: exit tile -> the portal tiles that send the ball there
+	const into = new Map();
+	if (L.portalSlot && L.portalsById) {
+		for (let i = 0; i < N; i++) {
+			const sl = L.portalSlot[i];
+			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0) continue;
+			const ex = L.portalsById.get(L.pTarget[sl]);
+			if (!ex) continue;
+			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); if (!l.includes(i)) l.push(i); } }
+		}
+	}
+	const shut = new Uint8Array(N), seen = new Int32Array(N), q = new Int32Array(N), words = new Int32Array(((keep.length + 31) >> 5) + 1);
+	const cache = new Map();   // passable-set hash -> {live, used}
+	let gen = 0, clock = 0, bytes = 0, walks = 0, hits = 0, ms = 0;
+	const liveFor = (sim) => {
+		const t0 = Date.now();
+		const prot = !!sim.is_invulnerable;
+		words.fill(0);
+		words[words.length - 1] = prot ? 1 : 0;
+		for (let k = 0; k < keep.length; k++) if (sim.is_tile_solid_now(keep[k] % W, (keep[k] / W) | 0)) words[k >> 5] |= 1 << (k & 31);
+		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
+		for (let k = 0; k < words.length; k++) {
+			let x = Math.imul(words[k], 0xcc9e2d51);
+			x = (x << 15) | (x >>> 17);
+			h1 ^= Math.imul(x, 0x1b873593); h1 = (h1 << 13) | (h1 >>> 19); h1 = (Math.imul(h1, 5) + 0xe6546b64) | 0;
+			h2 = Math.imul(h2 ^ words[k], 0x5bd1e995); h2 ^= h2 >>> 13;
+		}
+		const hk = (fmix(h1) >>> 0) * 2097152 + ((fmix(h2) >>> 0) & 0x1fffff);
+		const c = cache.get(hk);
+		if (c) { c.used = ++clock; hits++; ms += Date.now() - t0; return c.live; }
+		for (let k = 0; k < keep.length; k++) if (words[k >> 5] & (1 << (k & 31))) shut[keep[k]] = 1;
+		const pass = (i) => !wall[i] && !shut[i] && (prot || !deadly[i]);
+		const g = ++gen;
+		let qh = 0, qt = 0;
+		for (const i of goals) if (seen[i] !== g) { seen[i] = g; q[qt++] = i; }
+		while (qh < qt) {
+			const t = q[qh++], x = t % W, y = (t / W) | 0;
+			const src = into.get(t);
+			if (src) for (const p of src) if (seen[p] !== g && pass(p)) { seen[p] = g; q[qt++] = p; }
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (seen[j] === g || !pass(j)) continue;
+					if (dx && dy && wall[y * W + xx] && wall[yy * W + x]) continue;
+					seen[j] = g; q[qt++] = j;
+				}
+			}
+		}
+		for (let k = 0; k < keep.length; k++) shut[keep[k]] = 0;
+		// (dilated by a tile)
+		const live = new Uint8Array((N + 7) >> 3);
+		for (let k = 0; k < qt; k++) {
+			const t = q[k], x = t % W, y = (t / W) | 0;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const j = yy * W + xx;
+				live[j >> 3] |= 1 << (j & 7);
+			}
+		}
+		walks++;
+		cache.set(hk, { live, used: ++clock });
+		bytes += live.length + 300;
+		while (bytes > budget && cache.size > 1) {
+			let bk = 0, bu = Infinity;
+			for (const [k, v] of cache) if (v.used < bu && k !== hk) { bu = v.used; bk = k; }
+			bytes -= cache.get(bk).live.length + 300;
+			cache.delete(bk);
+		}
+		ms += Date.now() - t0;
+		return live;
+	};
+	return { liveFor, bytes: () => bytes, stats: () => ({ deadWalks: walks, deadHits: hits, deadMs: ms }) };
+}
+/** tile t is live in the room's bitset (see roomDead) */
+const liveAt = (live, t) => (live[t >> 3] & (1 << (t & 7))) !== 0;
+
+/**
  * lowerBoundTiles(L) -> Uint16Array (per tile, over a SharedArrayBuffer): a lower bound on the ticks from a ball whose
  * centre is in that tile to the trophy, whatever the effects and doors (the minimum over the physics): the box moves at
  * most 16.25 px along an axis in a tick (|speed| <= 16 after the clamp, the auto-align, rounding: endgame.js D_TICK), so
@@ -874,6 +985,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** head A's brake for cell c (tiles) */
 	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c)) : 0);
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
+	// (--roomDead=1, coarse cells, not with --deaths=1: each room's live tiles, roomDead; a run ends on a tile that is not live
+	// in its room; deadCut counts those states)
+	const RDEAD = coarse && a.roomDead !== 0 && !a.deaths ? roomDead(L, Math.max(1 << 20, Math.min(32 << 20, mem * 1048576 * 0.02))) : null;
+	let deadCut = 0;
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
@@ -888,7 +1003,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		rooms.set(key, r);
 		roomList.push(r);
@@ -1002,7 +1117,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
 	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
-		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
+		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
 	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
@@ -1133,7 +1248,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, deadCut }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -1309,6 +1424,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				else if (roomFor()) room = newRoom(roomKey, t, room.key);
 				else { full = true; needSweep = true; break; }
 			}
+			if (room.live !== null && !liveAt(room.live, centreTile())) { deadCut++; break; }
 			if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
 				const node = mkNode(null, blk, 0, t);
@@ -1539,6 +1655,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
 					}
+					// (a dead end of its room: no trophy and no trigger walkable from here: the run ends)
+					if (into && room !== null && room.live !== null && !liveAt(room.live, centreTile())) { deadCut++; break; }
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
 					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
 						const node = mkNode(up, blk, o, s + 1);
@@ -2405,4 +2523,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, roomFields, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles };
+	roomOf, roomFields, roomDead, liveAt, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles };
