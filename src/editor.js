@@ -1277,10 +1277,14 @@ function precEvent(V, ev) {
 // An escape whose own nearest attempt has not got nearer by ESC_TILES and that made no new room with territory gain for
 // ESC_STALL_S (after at least ESC_MIN_S) gives way to the next one at once (escStarts, in rotation: the nearest attempt
 // ESC_BACK[0] ticks back, which after an escape that got nearer is that escape's own (a chain); then the nearest attempt
-// of each other room, rooms of another coin count first; then the nearest attempt further back); each start once a search.
+// of each other room, rooms of another coin count first; then the nearest attempt further back); each start once a search;
+// so does an escape the rest of the search left behind (its nearest attempt clearly nearer: ESC_RETARGET_S).
 // A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
 // none (tests: test.escape === true; test.escWait / escStall / escMin: its clocks in s).
 const ESC_WAIT_S = 180, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
+// (an escape the rest of the search has left behind: the nearest attempt clearly nearer (3 tiles or 10%, the relay's rule)
+// than the escape's start and its own nearest, ESC_RETARGET_S after its start at least: the next one from there)
+const ESC_RETARGET_S = 60;
 // the escape's own work folder for its GPU bursts (the one search's is <data>/editor/bursts)
 const ESC_WORK = 'escape_bursts';
 // the stall clock of the escape: {at (the search's last progress: a nearer attempt by BREAK_TILES or a new room with
@@ -1322,9 +1326,15 @@ function escKick() {
 	if (n < 0) return;
 	const V = S.strategies[n], now = Date.now();
 	if (alive(kids[n])) {
-		const R = esc.run;
+		const R = esc.run, c = S.closest;
 		if (R && !kids[n].stopWhy && now - R.t0 >= esc.min * 1000 && now - R.progAt >= esc.stall * 1000) {
 			note(`${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${esc.stall} s: the next one`);
+			esc.next = true;
+			halt(kids[n], 'escstall');
+		} else if (R && !kids[n].stopWhy && c && !c.cut && c.strategy !== V.label && now - R.t0 >= ESC_RETARGET_S * 1000 &&
+			c.dist < Math.min(R.best, R.start.dist) - Math.max(3, 0.1 * Math.min(R.best, R.start.dist))) {
+			// (the others got clearly nearer than this escape ever did (its start included): the next one from there)
+			note(`${V.label}: the search got clearly nearer elsewhere (${c.tiles} tiles, ${c.strategy}): the next one from there`);
 			esc.next = true;
 			halt(kids[n], 'escstall');
 		}

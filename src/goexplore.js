@@ -105,8 +105,10 @@
 //   {"ev":"warning","text":".."}     (a route that does not replay, a worker that failed, a worker whose heap is smaller
 //                                      than its budget asks)
 // Inputs are .eetas characters ('0' + mask). With --stdin=1 it reads lines from stdin: "depth D" (from now on only
-// routes of at most D ticks: a route of D + 1 is known elsewhere) and "stop"; the end of stdin (the editor is gone)
-// stops it too. A last line "[goexplore] ..." sums up.
+// routes of at most D ticks: a route of D + 1 is known elsewhere), "stop" and "workers K" (only the first K workers search,
+// the others park, keeping their archives and answering their ports: the editor's stall escape has their CPU; 0 = all
+// again; an event {"ev":"workers","active":K,"of":N}); the end of stdin (the editor is gone) stops it too. A last line
+// "[goexplore] ..." sums up.
 //
 // Memory (--mem MB per worker; the default below). Every piece of a worker's archive is counted as it changes, at its
 // size on the V8 heap (measured: B_CELL .. B_QUEUE): the cells, the pick heap, the path nodes with the picks' inputs
