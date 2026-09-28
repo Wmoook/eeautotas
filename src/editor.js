@@ -396,6 +396,8 @@ const STRATEGIES = {
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : [])] : [])] },
+	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
+	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
 		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1'] },
 };
@@ -430,6 +432,24 @@ function cpuWorkers(want) {
 	let grind = false;
 	try { const J = require('./jobs.js'); grind = C.jobIds().some((id) => J.runningPid(id)); } catch (e) { /* no jobs folder */ }
 	return Math.max(1, Math.min(grind ? Math.floor(n / 2) : n - 1, bench && bench.peakThreads ? bench.peakThreads : n));
+}
+// The path skips (strategy 'skips', src/skipfind.js --lane=1): the skip finder inside Find a route, from its start, on
+// levels with coarse cells (above 50 x 50: goexplore.js cellsFor). Before any route, its target is the searches' nearest
+// attempt (closer(): at most every LANE_FEED_MS, the newest), from whose states it searches a later point of the attempt
+// reached sooner; every shortened attempt goes into the CPU search's archive at once (the one search: "import <inputs>",
+// every state along it; else "seed <inputs>"), so the archive's cells past a skip hold the earlier arrivals and the first
+// route is built on them. Once a route is known, the best route ("route <inputs>", tellCpu): every faster route it finds
+// is a result (found()): S.result, the other strategies told, the AutoTASer's route feed. Its threads: LANE_SHARE of the
+// CPU search's, from the threads the CPU search leaves idle, else from the CPU search's own (laneWorkersOf).
+const LANE_FEED_MS = 1000, LANE_SHARE = 0.25;
+/** the path skips' threads next to W CPU search workers: the request's (0: none), else max(1, W x LANE_SHARE) when W >= 2;
+ *  -> {lane, workers: the CPU search's (less the lane's when the machine has no idle threads for it)} */
+function laneWorkersOf(W, want) {
+	const n = os.cpus().length || 1;
+	if (Number.isInteger(+want) && +want >= 0 && want !== null && want !== '') return { lane: +want, workers: W };
+	if (W < 2) return { lane: 0, workers: W };
+	const L = Math.max(1, Math.round(W * LANE_SHARE));
+	return n - 1 - W >= L ? { lane: L, workers: W } : { lane: L, workers: Math.max(1, W - L) };
 }
 // the exploration's cell size: pass 0 = 2 px and 1/16 px/tick in x, 1 px and 1/16 px/tick in y. The finer passes (1, 2)
 // halve positions and speeds, and the finest keeps heights and vertical speeds exact. The coarser passes (-1, -2)
@@ -1172,7 +1192,7 @@ function seedCpu(inputs) {
 	if (!S || !inputs || !brk) return;
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`seed ${inputs}\n`); } catch (e) { /* gone */ } }
+		if (q.cpu && !q.lane && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`seed ${inputs}\n`); } catch (e) { /* gone */ } }
 	});
 	brk.seeds = (brk.seeds || 0) + 1;
 	if (S.breaker) S.breaker.seeds = brk.seeds;
@@ -1359,7 +1379,11 @@ function start(b, gpu, test) {
 	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay || one ? [] : ['relay']), ...(noGpu || !breaker ? [] : ['breaker']),
 		...(rolls ? ['gorolls'] : []),
 		...(cpu ? ['goexplore'] : [])];
-	const workers = cpuWorkers(b.workers);
+	let workers = cpuWorkers(b.workers);
+	// (the path skips: coarse cells (the big levels), the CPU search on; b.skips === false or EEAT_SKIPS=0: none; tests:
+	// test.skips === true)
+	const lw = cpu && b.skips !== false && process.env.EEAT_SKIPS !== '0' && (test ? test.skips === true : GX.cellsFor(ins.level) === 'coarse') ? laneWorkersOf(workers, b.skipWorkers) : { lane: 0, workers };
+	if (lw.lane > 0) { which.push('skips'); workers = lw.workers; }
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
 	const lanes = Number.isInteger(+b.lanes) && +b.lanes >= 1 ? Math.min(64, +b.lanes) : LANES;
@@ -1370,12 +1394,12 @@ function start(b, gpu, test) {
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
-		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls,
+		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, ...(STRATEGIES[k].lane ? { lane: true } : {}),
 			...(k === 'goexplore' && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
@@ -1383,6 +1407,8 @@ function start(b, gpu, test) {
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
+		laneCmd: test && Array.isArray(test.laneCmd) ? test.laneCmd : [process.execPath, path.join(__dirname, 'skipfind.js')],
+		laneNice: !(test && Array.isArray(test.laneCmd)),
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
@@ -1708,6 +1734,8 @@ function tellCpu(ticks, inputs, n) {
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
 		if ((q.cpu || q.rolls) && alive(ch) && ch.stdin && !ch.stdin.destroyed) {
+			// (the path skips: the best route itself, its new target; not its own)
+			if (q.lane) { if (k !== n && inputs) { try { ch.stdin.write(`route ${inputs}\n`); } catch (e) { /* gone */ } } return; }
 			try {
 				ch.stdin.write(`depth ${Math.max(1, ticks - 1)}\n`);
 				if (q.gpuShare && k !== n && inputs) ch.stdin.write(`route ${inputs}\n`);
@@ -1771,8 +1799,8 @@ function launch(n) {
 	// rented cloud GPU) lacks, and next to busy CPU threads "every move" was 3-7x slower without it. Before, the whole
 	// process was reniced, so its main thread and the one search's GPU bursts (its eegpu children inherit the main
 	// thread's value) ran at nice 10 too: below every normal process of a shared machine (the cycle 7 test's A100).)
-	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && cur.cpuNice;
-	const cmd = cpu ? [...cur.cpuCmd, ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && (V.lane ? cur.laneNice : cur.cpuNice);
+	const cmd = cpu ? [...(V.lane ? cur.laneCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
@@ -1840,6 +1868,7 @@ function launch(n) {
 	};
 	const onEvent = (ev) => {
 		if (!mine()) return;
+		if (V.lane && laneEvent(V, n, ev)) { totals(); save(); return; }
 		if (ev.ev === 'ready') { if (!V.readyAt) { ready(ev); save(); } return; }
 		if (!V.readyAt && !ev.error) ready(null);
 		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
@@ -1933,6 +1962,10 @@ function launch(n) {
 				addSource({ room: +ev.room, desc: ev.desc, gain: +ev.gain || 0, from: V.label, inputs, dist, arrival: ev.kind === 'room' ? inputs.length : 0 });
 				// (the GPU random runs' first arrival in a room: into the one search's archive)
 				if (rolls && ev.kind === 'room') feedOne(inputs, true);
+				// (the path skips' targets before any route, by the rooms reached too: a new room's first arrival that opens
+				// territory, one per strategy (on Octorage and Forgotten Veil the nearest attempt by the steer field sat in a
+				// dead end by the start, 271 / 690 ticks, for the whole search))
+				if (ev.kind === 'room' && +ev.gain > 0) laneAttempt(inputs, `${V.key}Room`);
 				setImmediate(relayKick);
 			}
 		} else if (ev.ev === 'hit') {
@@ -2158,7 +2191,8 @@ function cpuDone() {
 		S.strategies.some((q) => !q.cpu && !q.rolls && q.state === 'error') || retryHolds()) return;
 	// (the one search is a GPU search too: it goes on looking for faster routes, its bursts bounded by the route, until
 	// the time is up)
-	S.strategies.forEach((q, k) => { if ((q.cpu || q.rolls) && !q.gpuShare && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
+	// (the path skips too: they look for path changes of the best route)
+	S.strategies.forEach((q, k) => { if ((q.cpu || q.rolls) && !q.gpuShare && !q.lane && alive(kids[k])) { if (!q.found) q.state = 'beaten'; halt(kids[k], 'finish'); } });
 }
 /**
  * "every move" (strategy n) tried every situation at a fine grain with nothing cut and found no route: the GPU beams (a
@@ -2314,6 +2348,8 @@ function found(inputs, n, more) {
 		if (k !== n && !q.cpu && !q.rolls && alive(kids[k]) && q.layer >= boundTicks()) { q.state = 'beaten'; halt(kids[k], 'beaten'); }
 	});
 	if (better || rawBetter) tellCpu(boundTicks(), S.result.inputs, n);
+	// (the path skips' own route, slower than the best: the best is its target)
+	else if (V.lane && S.result) laneRoute(S.result.inputs);
 	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
 	if (better) setImmediate(resumeExplore);
 	save();
@@ -2435,6 +2471,78 @@ function feedOne(inputs, room) {
 	};
 	if (!feedTimer) { const w = Math.max(0, ONE_FEED_MS - (Date.now() - feedAt)); if (w) { feedTimer = setTimeout(flush, w); if (feedTimer.unref) feedTimer.unref(); } else flush(); }
 }
+// ---------------------------------------------------------------- the path skips (the skip finder's lane)
+let laneQ = new Map(), laneAt = 0, laneTimer = null, laneS = null;
+/** a strategy's own nearest attempt to the path skips (before any route: their targets; src: the strategy's key, so each
+ *  search's lineage is followed: the first route comes from any of them, e.g. the GPU random runs' own archive, which
+ *  takes no imports), at most one batch per LANE_FEED_MS, the newest per strategy */
+function laneAttempt(inputs, src) {
+	if (!S || !cur || S.result || !inputs) return;
+	const k = S.strategies.findIndex((q) => q.lane);
+	if (k < 0) return;
+	if (laneS !== S) { laneS = S; laneQ = new Map(); laneAt = 0; if (laneTimer) { clearTimeout(laneTimer); laneTimer = null; } }
+	laneQ.set(src || 'nearest', inputs);
+	const S0 = S;
+	const flush = () => {
+		laneTimer = null;
+		if (S !== S0 || !S.running || S.result || !laneQ.size) return;
+		const ch = kids[k];
+		if (!alive(ch) || !ch.stdin || ch.stdin.destroyed) return;
+		for (const [sk, x] of laneQ) { try { ch.stdin.write(`attempt:${sk} ${x}\n`); S.strategies[k].attempts = (S.strategies[k].attempts || 0) + 1; } catch (e) { /* gone */ } }
+		laneQ.clear();
+		laneAt = Date.now();
+	};
+	if (!laneTimer) { const w = Math.max(0, LANE_FEED_MS - (Date.now() - laneAt)); if (w) { laneTimer = setTimeout(flush, w); if (laneTimer.unref) laneTimer.unref(); } else flush(); }
+}
+/** the best route to the path skips (their target once a route is known) */
+function laneRoute(inputs) {
+	const k = S.strategies.findIndex((q) => q.lane), ch = k >= 0 ? kids[k] : null;
+	if (alive(ch) && ch.stdin && !ch.stdin.destroyed && inputs) { try { ch.stdin.write(`route ${inputs}\n`); } catch (e) { /* gone */ } }
+}
+/** a run into the CPU search's archive: the one search's "import" (every state along it), else "seed" (a cell every
+ *  SEED_EVERY ticks and its end) */
+function toArchive(inputs) {
+	const k = S.strategies.findIndex((q) => q.key === 'goexplore');
+	const ch = k >= 0 ? kids[k] : null;
+	if (!alive(ch) || !ch.stdin || ch.stdin.destroyed) return false;
+	try { ch.stdin.write(`${cur.opts.bursts ? 'import' : 'seed'} ${inputs}\n`); } catch (e) { return false; }
+	return true;
+}
+/** the path skips' events (V, strategy n): true when handled here. "shortcut" (a shortened attempt, one carried over to
+ *  a newer attempt, a lead): into the CPU search's archive; "progress": the page's line; "result": a route (found(), as
+ *  every strategy's); start / search / done: counters */
+function laneEvent(V, n, ev) {
+	if (ev.ev === 'shortcut') {
+		const inputs = String(ev.inputs || '');
+		if (!cur || !/^[0-O]+$/.test(inputs)) return true;
+		if (ev.kind === 'lead') V.leads = (V.leads || 0) + 1;
+		else {
+			V.shortcuts = (V.shortcuts || 0) + 1;
+			if (Number.isFinite(+ev.saved) && +ev.saved > (V.bestSaved || 0)) V.bestSaved = +ev.saved;
+			// (the notes: the skips themselves, not every carry-over)
+			if (ev.kind === 'skip') note(`${V.label}: a later point of the nearest attempt ${ev.saved} ticks sooner (from its tick ${ev.s}; into the CPU search's archive)`);
+		}
+		if (!S.result && toArchive(inputs)) V.fed = (V.fed || 0) + 1;
+		V.state = V.found ? 'found' : 'running';
+		V.laneWhat = laneWhat(V);
+		return true;
+	}
+	if (ev.ev === 'progress') {
+		if (!V.readyAt) { V.readyAt = Date.now(); }
+		Object.assign(V, { state: V.found ? 'found' : 'running', layer: 0, states: 0, ticksPerSec: Math.round(+ev.ticksPerSec || 0), searches: ev.searches, target: ev.target });
+		V.detail = `${ev.workers} thread${ev.workers > 1 ? 's' : ''}, ${ev.searches} search${ev.searches === 1 ? '' : 'es'} from the ${ev.target === 'route' ? 'best route' : ev.target === 'attempt' ? 'nearest attempt' : 'first attempt (waiting)'}` +
+			`${ev.target ? ` (${Number(ev.n).toLocaleString('en-US')} ticks)` : ''}`;
+		V.laneWhat = laneWhat(V);
+		return true;
+	}
+	if (ev.ev === 'start' || ev.ev === 'search' || ev.ev === 'done' || ev.ev === 'warning') {
+		if (ev.ev === 'warning') note(`${V.label}: ${ev.text}`);
+		return true;
+	}
+	return false;
+}
+const laneWhat = (V) => `${V.shortcuts ? `${V.shortcuts} shortcut${V.shortcuts === 1 ? '' : 's'} (up to ${V.bestSaved || 0} ticks) into the archive` : 'no shortcut yet'}` +
+	`${V.found ? `, route ${V.found.time}` : ''}`;
 function closer(ev, n) {
 	if (!cur) return;
 	const Vn = S.strategies[n];
@@ -2460,6 +2568,8 @@ function closer(ev, n) {
 		Vn.best = dist; Vn.bestAt = Date.now();
 		if (ev.inputs && !ev.cut && dist < deathTiles) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
+	// (the path skips' targets before any route: every search's own nearest attempt)
+	if (own && !Vn.lane) laneAttempt(own.inputs, Vn.key);
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }

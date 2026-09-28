@@ -1551,6 +1551,8 @@ function renderSolve() {
 					: q.key === 'explore' ? 'stopped: its table filled up at every cell size (too many situations for this level; that says nothing about a route)' : 'stopped without a route (that says nothing about whether one exists)')
 				: q.state === 'error' ? `failed (${esc(q.error)})` : q.state === 'waiting' ? esc(q.detail || 'waiting')
 				: q.state === 'stopped' && q.detail ? `stopped: ${esc(q.detail)}` : q.state === 'starting' ? (q.preparing ? 'preparing the GPU engine for this graphics card… (first search after an update)' : 'starting…')
+				// (the path skips: the shortcuts it handed to the CPU search's archive, the routes it found)
+				: q.lane ? esc(q.laneWhat || 'searching')
 				: q.cpu || q.rolls ? `${q.layer.toLocaleString('en-US')} ticks deep` : `tick ${q.layer.toLocaleString('en-US')}`);
 			// (the CPU search and the GPU random runs: threads or GPU, situations, how near; they go on after a route, looking
 			// for a faster one)

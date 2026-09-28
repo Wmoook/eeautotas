@@ -37,11 +37,18 @@
 //      chance) against the run; a faster run replaces it at once, and a worker's find made on an older run is spliced
 //      with the current one (splice.js).
 // A start with no find is "not found at that grain, pick and depth", never "impossible".
+// The same finder on an ATTEMPT (prepare's attempt mode: inputs that do not finish, Find a route before any route): its
+// goal is a later point of the attempt reached sooner, a candidate judged by its end (attemptJudge: the attempt's end
+// state, or the same physical state and room, in fewer ticks; a finish is a route). The lane (--lane=1, `lane`) runs it
+// inside Find a route (editor.js strategy "path skips"): the searches' nearest attempt, then the best route, each first
+// spliced with / carried over from its library of shortened attempts and routes (`carryOver`).
 // usage: node src/skipfind.js --tas=<run.eetas> [--level=<level id | job id | .json>] [--out=<best.eetas>]
 //        [--seconds=600] [--workers=N] [--deadline=<ms since 1970>] [--done=<file>] [--order=coarse|run|excess]
 //        [--every=50] [--from=] [--to=] [--starts=a,b,..] [--perS=100] [--depth=300] [--cap=60000] [--picks=fast]
 //        [--minGain=20] [--nocoins=auto|0|1] [--targets=<run.eetas,...>] [--gpu=1 [--tool=<eegpu>] [--cachedir=]]
 //        (every DEFAULTS key is an option)
+//        node src/skipfind.js --lane=1 --level=<level.eelvl | .json> [--workers=N] [--seconds=] [--laneStep=200]
+//        [--laneAir=90] [--laneLib=24] [--nice=0]: the lane (see `lane`), fed on stdin
 // JSON lines on stdout: {ev: start | search | skip | gpu | done}; --out is rewritten at every find; `[ticks] N` lines.
 const fs = require('fs');
 const os = require('os');
@@ -63,6 +70,11 @@ const DEFAULTS = {
 	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackVw: 3, trackLost: 150, trackLostK: 30, trackS: 8,
 	joinBfs: 0, joinDepth: 280, joinCap: 25000, joinMargin: 6,
 	maxCands: 40,
+	leadRuns: 2, leadMin: 60,   // (an attempt: its best leads as whole runs, at least leadMin ticks ahead of it)
+	// (the lane's searches of an attempt, before any route: a layer cap of attemptCap, half the default: time counts there.
+	// Egg Quest II's attempt from its landing after the opening fall, one laptop thread, 400 layers: cap 60,000 the
+	// chimney line -1,018 in 132 s, 30,000 -982 in 79 s, 15,000 not the chimney (-475, the second house) in 38 s)
+	attemptCap: 30000,
 	unjoinedTop: 2, gpuMin: 60, gpuModes: 'rejoin,finish', gpuS: 30, gpuRejoinDepth: 700, gpuCells: 27, gpuCap: 65536, gpuCqx: 0.25, gpuCqv: 16, gpuQy: 0.25, gpuQvy: 16,
 };
 
@@ -121,16 +133,21 @@ const KINDS = ['exact rejoin', 'physical rejoin', 'loose join'];
  */
 function prepare(level, masks, o = {}) {
 	const nc = !!o.nocoins;
+	// an ATTEMPT (o.attempt: Find a route's search before any route exists, the lane): inputs that do not finish; its goal
+	// is its own later points reached sooner (the end state reached in fewer ticks: `attemptJudge`). A run that dies is
+	// cut before its death; one that finishes is a route (prepared as one).
+	const att = o.attempt ? attemptOf(level, masks) : null;
 	// time-door levels: joins by the clock-blind hash (an exact rejoin there needs a saving that is a multiple of the doors' period;
-	// a clock-blind one is a proposal: the replay of the whole candidate decides)
-	const cb = o.clockblind === undefined ? !!level.hasTimeDoors : !!+o.clockblind;
+	// a clock-blind one is a proposal: the replay of the whole candidate decides). An attempt joins by the exact hash: its
+	// candidates are judged by their end state, never by a finish
+	const cb = att && !att.finish ? false : o.clockblind === undefined ? !!level.hasTimeDoors : !!+o.clockblind;
 	const hashOf = cb ? (sm) => sm.stateHashClockBlind(nc) : (sm) => sm.stateHash(false, nc);
-	const ev = C.evaluate(level, masks);
-	if (!ev) return null;
+	const ev = att ? (att.finish ? att.finish : att) : C.evaluate(level, masks);
+	if (!ev || !ev.ms || ev.ms.length < 2) return null;
 	const ms = ev.ms, n = ms.length;
 	const W = level.width, Hh = level.height;
 	const X = new Float64Array(n + 1), Y = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1);
-	const T = new Int32Array(n + 1), CX = new Int32Array(n + 1), H = new Float64Array(n + 1), seg = new Int32Array(n + 1);
+	const T = new Int32Array(n + 1), CX = new Int32Array(n + 1), H = new Float64Array(n + 1), seg = new Int32Array(n + 1), OG = new Uint8Array(n + 1);
 	const hashTick = new Map(), physTick = new Map(), snaps = [];
 	const ctx = makeCtx(nc);
 	const sim = new E.EESim(level);
@@ -138,7 +155,7 @@ function prepare(level, masks, o = {}) {
 	const inp = new E.EEInput();
 	for (let t = 0; t <= n; t++) {
 		if (t % SNAP === 0) snaps.push(sim.snapshot());
-		X[t] = sim.px; Y[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y;
+		X[t] = sim.px; Y[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; OG[t] = sim.on_ground ? 1 : 0;
 		const tx = Math.floor((sim.px + 8) / 16), ty = Math.floor((sim.py + 8) / 16);
 		T[t] = tx >= 0 && ty >= 0 && tx < W && ty < Hh ? ty * W + tx : -1;
 		seg[t] = t > 0 && T[t] === T[t - 1] ? seg[t - 1] : t;
@@ -159,7 +176,64 @@ function prepare(level, masks, o = {}) {
 		for (let t = 0; t <= te.ms.length; t++) { tick.set(hashOf(sim), t); if (t < te.ms.length) { E.applyMask(inp, te.ms[t]); sim.tick(inp); } }
 		targets.push({ ms: te.ms, n: te.ms.length, tick });
 	}
-	return { level, masks: ms, n, ev, nc, cb, hashOf, W, Hh, X, Y, VX, VY, T, CX, H, seg, hashTick, physTick, snaps, ctx, targets };
+	// an attempt's end: its state (exact hash), its physical state and its room (goexplore.js roomOf: Find a route's archive
+	// keys its cells by (tile, room, ...)): a candidate that ends in the same physical state and room, sooner, is its later
+	// point reached sooner
+	let end = null;
+	if (att && !att.finish) {
+		sim.restore(snaps[Math.floor(n / SNAP)]);
+		for (let t = Math.floor(n / SNAP) * SNAP; t < n; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); }
+		end = { h: H[n], phys: physKey(sim), room: roomKeyOf(level)(sim) };
+	}
+	return { level, masks: ms, n, ev, nc, cb, hashOf, W, Hh, X, Y, VX, VY, T, CX, H, seg, OG, hashTick, physTick, snaps, ctx, targets, attempt: !!end, end };
+}
+/** goexplore.js roomOf(level).key, one per level */
+const roomKeys = new WeakMap();
+function roomKeyOf(level) {
+	let f = roomKeys.get(level);
+	if (!f) { const RM = require('./goexplore.js').roomOf(level); f = (sim) => RM.key(sim); roomKeys.set(level, f); }
+	return f;
+}
+/**
+ * An attempt's inputs replayed: {ms, n, runTicks, deaths: 0, chance: 1} cut before its first death (Find a route's
+ * archive keeps no dead state), or {finish: C.evaluate(...)} when it finishes (a route).
+ */
+function attemptOf(level, masks) {
+	const sim = new E.EESim(level);
+	sim.reset();
+	const inp = new E.EEInput();
+	for (let t = 0; t < masks.length; t++) {
+		E.applyMask(inp, masks[t]);
+		sim.tick(inp);
+		if (sim.has_silver_crown) return { finish: C.evaluate(level, masks.subarray(0, t + 1)) };
+		if (sim.is_dead) { const ms = Uint8Array.from(masks.subarray(0, t)); return { ms, n: ms.length, runTicks: ms.length, deaths: 0, chance: 1, attempt: true }; }
+	}
+	const ms = Uint8Array.from(masks);
+	return { ms, n: ms.length, runTicks: ms.length, deaths: 0, chance: 1, attempt: true };
+}
+/**
+ * A candidate against an attempt (info.attempt): replayed from the start; a finish = a route (C.evaluate: {route: ev});
+ * else it must not die and must end, sooner than the attempt, in the attempt's end state (the same stateHash) or in the
+ * same physical state and room (another discrete state Find a route's cells do not tell apart: a coin taken or skipped
+ * where no door reads it). -> {accept, saved, ev: {ms, runTicks, deaths: 0, chance: 1}, route?}
+ */
+function attemptJudge(info, ms) {
+	if (!ms || ms.length >= info.n) return { accept: false };
+	const sim = new E.EESim(info.level);
+	sim.reset();
+	const inp = new E.EEInput();
+	for (let t = 0; t < ms.length; t++) {
+		E.applyMask(inp, ms[t]);
+		sim.tick(inp);
+		if (sim.has_silver_crown) {
+			const ev = C.evaluate(info.level, ms.subarray(0, t + 1));
+			return ev ? { accept: true, route: ev, ev, saved: info.n - ev.ms.length } : { accept: false };
+		}
+		if (sim.is_dead) return { accept: false };
+	}
+	const e = info.end;
+	const ok = info.hashOf(sim) === e.h || (physKey(sim) === e.phys && roomKeyOf(info.level)(sim) === e.room);
+	return ok ? { accept: true, saved: info.n - ms.length, ev: { ms: Uint8Array.from(ms), runTicks: ms.length, deaths: 0, chance: 1, attempt: true } } : { accept: false };
 }
 /** a join candidate's rest: the run's own from c.m, or another run's (c.ti) */
 const restOf = (info, c) => (c.ti !== undefined ? info.targets[c.ti].ms.subarray(c.m) : info.masks.subarray(c.m, info.n));
@@ -734,7 +808,8 @@ function searchStart(info, s, pick, o) {
 	const start = sim.snapshot();
 	const jMax = Math.min(info.n, s + p.depth + p.horizon);
 	const win = windowOf(info, s, jMax, p.margin);
-	const r = bfs(info, start, s, Object.assign({}, p, { pick, finishBefore: info.n, region: win.region, visits: win.visits, lastVis: win.lastVis, colTop: win.colTop,
+	// (an attempt: any finish is a route, whatever its length)
+	const r = bfs(info, start, s, Object.assign({}, p, { pick, finishBefore: info.attempt ? Infinity : info.n, region: win.region, visits: win.visits, lastVis: win.lastVis, colTop: win.colTop,
 		deadline: Math.min(dl, t0 + p.perS * 1000 * p.bfsShare) }));
 	const bfsMs = Date.now() - t0;
 	const base = o.best || info.ev;
@@ -742,15 +817,21 @@ function searchStart(info, s, pick, o) {
 	// every candidate replayed and judged, the most claimed first (only those that claim more than the best so far)
 	// (exact joins first: their claim is a proof up to deaths and the random-portal chance; then at most 8 physical
 	// rejoins and 12 loose joins a list, whose replay decides)
+	// (an attempt: attemptJudge, the end state sooner; a candidate that finishes is a route and beats every shortcut)
 	const LIM = [p.maxCands, 8, 12];
 	const tryCands = (list) => {
 		list.sort((a, b) => a.kind - b.kind || b.claim - a.claim);
 		cands += list.length;
 		const k = [0, 0, 0];
 		for (const c of list) {
-			if (best && c.claim <= best.saved) continue;
+			if (best && (best.route || c.claim <= best.saved)) continue;
 			if (k[c.kind]++ >= LIM[c.kind]) continue;
 			tried++;
+			if (info.attempt) {
+				const v = attemptJudge(info, c.ms);
+				if (v.accept && (v.route || !best || v.saved > best.saved)) best = { ms: v.ev.ms, ev: v.ev, saved: v.route ? info.n : v.saved, route: !!v.route, how: v.route ? `a route: ${c.how}` : c.how, s, pick, edge: c.edge, m: c.m };
+				continue;
+			}
 			const ev = C.evaluate(info.level, c.ms);
 			const v = C.judge(ev, best ? best.ev : base, info.ev.deaths);
 			if (v.accept && ev.runTicks < base.runTicks) best = { ms: ev.ms, ev, saved: base.runTicks - ev.runTicks, how: c.how, s, pick, edge: c.edge, m: c.m };
@@ -841,7 +922,7 @@ function searchStart(info, s, pick, o) {
 		const w2 = windowOf(info, Math.max(s, h.j - 100), Math.min(info.n, h.j + p.joinDepth + p.horizon), p.joinMargin, [h.tile]);
 		// goals: the run's visits after the lead's own tick only
 		const lv = w2.lastVis;
-		const r2 = bfs(info, sj.snapshot(), tl, Object.assign({}, p, { pick, finishBefore: info.n, depth: p.joinDepth, cap: p.joinCap, rejoinOnly: true, region: w2.region, visits: w2.visits, lastVis: lv,
+		const r2 = bfs(info, sj.snapshot(), tl, Object.assign({}, p, { pick, finishBefore: info.attempt ? Infinity : info.n, depth: p.joinDepth, cap: p.joinCap, rejoinOnly: true, region: w2.region, visits: w2.visits, lastVis: lv,
 			colTop: w2.colTop, deadline: dlj }));
 		joinMs += Date.now() - tb;
 		joinStats.push({ t: tl, j: h.j, close: Math.round(h.close * 100) / 100, layers: r2.stats.layers, cells: r2.stats.cells, peak: r2.stats.peak, rejoins: r2.rejoins.length, time: r2.stats.time, out: r2.stats.out, dead: r2.stats.dead });
@@ -870,37 +951,473 @@ function searchStart(info, s, pick, o) {
 			unjoined.push({ d: h.d, j: h.j, gain: h.j - h.t, same: h.same, P: Array.from(pathOf(r.layers, h.d, h.idx)) });
 		}
 	}
-	return { best, stats: Object.assign(r.stats, { bfsMs, quickMs, trackMs, tailsMs, joinMs, ms: Date.now() - t0, region: win.region }), hits: r.hits.length, rejoins: r.rejoins.length, tracks, leadsJoined: joined.length, joinBfs, joinStats, cands, tried, top, unjoined };
+	// (an attempt: its best leads with the same discrete state, the most gain first, one per run stretch: whole runs to the
+	// lead's state, reaching a place the attempt reaches only o.leadMin+ ticks later; the lane hands them to the one
+	// search's archive as footholds, whose cells there then hold the earlier arrival)
+	const leadRuns = [];
+	if (info.attempt && p.leadRuns > 0) {
+		const sg = new Set();
+		for (const h of leads) {
+			if (leadRuns.length >= p.leadRuns || h.j - h.t < p.leadMin) break;
+			if (!h.same) continue;
+			const k = info.seg[h.j];
+			if (sg.has(k)) continue;
+			sg.add(k);
+			leadRuns.push({ ms: Array.from(concat([pre, pathOf(r.layers, h.d, h.idx)])), gain: h.j - h.t, j: h.j, tile: [h.tile % info.W, (h.tile / info.W) | 0] });
+		}
+	}
+	return { best, stats: Object.assign(r.stats, { bfsMs, quickMs, trackMs, tailsMs, joinMs, ms: Date.now() - t0, region: win.region }), hits: r.hits.length, rejoins: r.rejoins.length, tracks, leadsJoined: joined.length, joinBfs, joinStats, cands, tried, top, unjoined, leadRuns };
 }
 
-module.exports = { DEFAULTS, prepare, stateAt, excessOf, startsOf, goalsOf, bfs, pathOf, join, tail, track, quickTails, searchStart, ctxKey, physKey };
+/**
+ * The carry-over of a shortcut to another lineage (the lane: an attempt or a route that shares no state with its
+ * library: another worker's, another strategy's): where the target (info: an attempt, prepare's attempt mode, or a
+ * route) is in a tile a shortened attempt
+ * of src ([{ms, skipAt, what}]: its states from skipAt on are the early ones) reached at least 2 x minGain ticks sooner
+ * (every CROSS_EVERY ticks for CROSS_SPAN ticks past skipAt), and its state there within CROSS_D (|dpos| + 3 |dvel|) of
+ * the library's: from the library's state the target's own inputs from next to its visit (tail: re-anchored at landings
+ * and wall stops, checked every tick for the target's state); every candidate replayed (an attempt: attemptJudge; a
+ * route: C.evaluate + C.judge, run ticks saved). At most CROSS_TAILS tails and o.crossMs ms. -> {ms, saved, how, ev} | null
+ */
+const CROSS_EVERY = 15, CROSS_SPAN = 3000, CROSS_D = 40, CROSS_TAILS = 400;
+function carryOver(level, src, info, o) {
+	if (!src.length || !info) return null;
+	const P = Object.assign({}, DEFAULTS, o);
+	const judge = info.attempt ? (cand) => { const v = attemptJudge(info, cand); return v.accept && !v.route ? { ms: v.ev.ms, saved: v.saved, ev: v.ev } : null; }
+		: (cand) => {
+			const ev = C.evaluate(level, cand);
+			if (!ev || !(ev.runTicks < info.ev.runTicks) || !C.judge(ev, info.ev, info.ev.deaths).accept) return null;
+			return { ms: ev.ms, saved: info.ev.runTicks - ev.runTicks, ev };
+		};
+	const visits = goalsOf(info, 0, info.n);
+	const sim = new E.EESim(level), s2 = new E.EESim(level), inp = new E.EEInput(), inp2 = new E.EEInput();
+	const deadline = Date.now() + (P.crossMs || 2000);
+	const oo = Object.assign({}, P, { deadline });
+	const played = new Uint8Array(oo.tailH);
+	let best = null, tails = 0;
+	for (const R of src) {
+		sim.reset();
+		const end = Math.min(R.ms.length, R.skipAt + CROSS_SPAN);
+		for (let r = 0; r < end && tails < CROSS_TAILS && Date.now() < deadline; r++) {
+			E.applyMask(inp, R.ms[r]);
+			sim.tick(inp);
+			if (sim.is_dead || sim.has_silver_crown) break;
+			const tr = r + 1;
+			if (tr < R.skipAt || (tr - R.skipAt) % CROSS_EVERY !== 0) continue;
+			const tx = Math.floor((sim.px + 8) / 16), ty = Math.floor((sim.py + 8) / 16);
+			const vis = visits.get(ty * info.W + tx);
+			if (!vis) continue;
+			// (the target's visit of this tile nearest the library's state, at least 2 x minGain later)
+			let bt = -1, bd = CROSS_D;
+			for (const t of vis) {
+				if (t - tr < 2 * P.minGain || t >= info.n) continue;
+				const d = Math.abs(sim.px - info.X[t]) + Math.abs(sim.py - info.Y[t]) + 3 * (Math.abs(sim.speed_x - info.VX[t]) + Math.abs(sim.speed_y - info.VY[t]));
+				if (d < bd) { bd = d; bt = t; }
+			}
+			if (bt < 0 || (best && bt - tr <= best.saved)) continue;
+			const sn = sim.snapshot();
+			for (const off of [0, -2, 2, -5, 5]) {
+				const r0 = bt + off;
+				if (r0 <= tr || r0 >= info.n) continue;
+				tails++;
+				const c = tail(info, s2, inp2, sn, tr, r0, oo, played);
+				if (!c || c.kind === 2 || (best && c.claim <= best.saved)) continue;
+				const v = judge(concat([R.ms.subarray(0, tr), c.seq, restOf(info, c)]));
+				if (v && (!best || v.saved > best.saved)) best = Object.assign(v, { how: `carried over: the library's ${R.what || 'run'} to its tick ${tr}, then ${c.how}` });
+			}
+		}
+	}
+	return best;
+}
+
+module.exports = { DEFAULTS, prepare, stateAt, excessOf, startsOf, goalsOf, bfs, pathOf, join, tail, track, quickTails, searchStart, ctxKey, physKey, attemptOf, attemptJudge, carryOver };
 
 // ---------------------------------------------------------------- workers
 if (!isMainThread && workerData && workerData.skipfind) {
 	const wd = workerData;
 	if (wd.ticksBuf) E.setTickCounter(new BigInt64Array(wd.ticksBuf));
-	const level = E.loadLevel(wd.levelFile);
-	let info = prepare(level, Uint8Array.from(wd.masks), wd.o);
+	// (--nice, Linux: this worker thread alone, like goexplore.js's workers next to the editor's GPU tools)
+	if (wd.nice > 0 && process.platform === 'linux') { try { os.setPriority(0, Math.min(19, Math.round(wd.nice))); } catch (e) { /* as it is */ } }
+	const level = wd.levelJson ? E.prepareLevel(JSON.parse(wd.levelJson)) : E.loadLevel(wd.levelFile);
+	// (the lane: a run message says whether it is an attempt (Find a route before a route: its end state sooner) or a
+	// finishing run; its nocoins too)
+	const optsOf = (msg) => (msg && msg.attempt !== undefined ? Object.assign({}, wd.o, { attempt: !!msg.attempt, nocoins: msg.nocoins !== undefined ? msg.nocoins : wd.o.nocoins }) : wd.o);
+	let info = wd.masks ? prepare(level, Uint8Array.from(wd.masks), optsOf(wd)) : null;
 	let version = wd.version;
 	parentPort.on('message', (msg) => {
-		if (msg.run) { info = prepare(level, Uint8Array.from(msg.run), wd.o); version = msg.version; return; }
+		if (msg.run) { info = prepare(level, Uint8Array.from(msg.run), optsOf(msg)); version = msg.version; return; }
 		if (msg.task) {
 			const { s, pick } = msg.task;
 			let r;
 			// (a deep start: the coarse levels' sparse starts search deeper: --deepDepth layers, a 2^--deepLog2 table, --deepPerS seconds)
 			const deep = msg.task.deep ? { depth: wd.o.deepDepth || DEFAULTS.deepDepth, log2: wd.o.deepLog2 || DEFAULTS.deepLog2, perS: wd.o.deepPerS || DEFAULTS.deepPerS } : {};
-			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, deep, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
+			// (the lane: an attempt's searches with the attempt cap, but from a landing after a long fall: the default cap
+			// there (Egg Quest II's GPU random runs' route from its landing: the chimney line at 60,000, not at 30,000))
+			const att = info && info.attempt && !msg.task.land ? { cap: wd.o.attemptCap || DEFAULTS.attemptCap } : {};
+			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, deep, att, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
 			E.flushTicks();
 			const out = Object.assign({ s, pick, version, h: info.H[s] }, r);
-			if (r.best) out.best = { ms: Array.from(r.best.ms), saved: r.best.saved, runTicks: r.best.ev.runTicks, how: r.best.how, edge: r.best.edge, m: r.best.m };
+			if (r.best) out.best = { ms: Array.from(r.best.ms), saved: r.best.saved, runTicks: r.best.ev.runTicks, how: r.best.how, edge: r.best.edge, m: r.best.m, route: !!r.best.route };
 			parentPort.postMessage(out);
 		}
 	});
 }
 
+// ---------------------------------------------------------------- the lane: Find a route's "path skips"
+/**
+ * The lane (--lane=1; editor.js strategy 'skips', "path skips"): the skip finder inside Find a route, a long-lived
+ * process of --workers threads fed on stdin. Its target:
+ *   - before any route: the searches' furthest attempts ("attempt:<search> <inputs>": each strategy's own nearest attempt,
+ *     the newest per search, the searches in turn): the skip finder on the ATTEMPT (prepare's attempt mode: a later point
+ *     of it reached sooner; a candidate must end in its end state, or the same physical state and room, sooner:
+ *     attemptJudge), from its states in run order: every --laneStep ticks and every landing after a long fall (--laneAir
+ *     ticks in the air) deep (--deepDepth layers), then every laneStep / 2 and / 4 at --depth; a start's goal window
+ *     complete first (the attempt reaches s + depth + horizon). Why run order: a shortcut early on the attempts' common
+ *     trunk helps every attempt that passes there, and the trunk's states are stable while the frontier's change every
+ *     few seconds.
+ *     Every shortened attempt is printed ({"ev":"shortcut"}: the editor imports it into the one search's archive, every
+ *     cell along it with its earlier arrival) and kept in the library; the best leads of a search (a place the attempt
+ *     reaches --leadMin+ ticks later, reached sooner) too ({"ev":"shortcut","kind":"lead"}: footholds);
+ *   - once a route is known ("route <inputs>": the best route, any strategy's): the skip finder on the route (the same
+ *     order), every faster route printed ({"ev":"result","kind":"finish"}) and searched on.
+ * The library (every attempt, shortened attempt and route seen, newest --laneLib): a new target is first spliced with
+ * it (the target reaches a state (its physical state and room) the library reached sooner: the library's inputs to there
+ * + the target's from there, replayed and judged): a shortcut found on one attempt carries over at once to the newer
+ * attempts of its lineage and to the routes that pass there.
+ * usage: node src/skipfind.js --lane=1 --level=<level.eelvl | .json | level id> [--workers=2] [--seconds=3600]
+ *        [--laneStep=200] [--laneLib=24] [--nice=0] (every DEFAULTS key); stdin: "attempt[:<search>] <inputs>", "route <inputs>",
+ *        "stop" (its end stops it too); stdout: JSON lines {ev: start | shortcut | result | search | progress | done}
+ */
+const LANE_PER_S = 400;
+async function lane(a) {
+	const t0 = Date.now();
+	// (EEAT_LANE_LOG=<file>: every event appended there too, the inputs left out: measurement scripts)
+	const logFile = process.env.EEAT_LANE_LOG || '';
+	const emit = (ev) => {
+		const line = JSON.stringify(Object.assign({ t: Math.round((Date.now() - t0) / 100) / 10 }, ev));
+		try { process.stdout.write(line + '\n'); } catch (e) { /* gone */ }
+		if (logFile && ev.ev !== 'progress') { try { fs.appendFileSync(logFile, (ev.inputs ? JSON.stringify(Object.assign({ t: Math.round((Date.now() - t0) / 100) / 10 }, ev, { inputs: ev.inputs.length })) : line) + '\n'); } catch (e) { /* no log */ } }
+	};
+	// the level: the editor's .eelvl built as the editor builds it, as JSON for the workers (and coinsIrrelevant)
+	// (no temp file: the editor kills the lane at the search's end)
+	const levelJson = a.level && /\.eelvl$/i.test(a.level)
+		? JSON.stringify(require('./eelvl.js').toSimLevel(require('./eelvl.js').readEelvl(fs.readFileSync(a.level)), { id: 'editor', file: 'editor.eelvl' }))
+		: fs.readFileSync(C.levelData(a.level), 'utf8');
+	const level = E.prepareLevel(JSON.parse(levelJson));
+	/** common.js coinsIrrelevant on the level JSON (a fresh copy: it shuts the coin doors) */
+	const coinsIrrelevant = (ms, ev) => {
+		const L2 = E.prepareLevel(JSON.parse(levelJson));
+		let doors = 0;
+		for (let i = 0; i < L2.fg.length; i++) {
+			const v = L2.fg[i];
+			if (v === 43 || v === 213) { L2.lookup0[i] = 9999; doors++; } else if (v === 165 || v === 214) { L2.lookup0[i] = 0; doors++; }
+		}
+		if (doors === 0) return true;
+		const r = C.replay(L2, ms);
+		return r.complete === ev.complete && r.runTicks === ev.runTicks;
+	};
+	// (the lane's time per search: LANE_PER_S deep, LANE_PER_S / 2 else, unless given: its threads run beside the whole
+	// search, at nice 10 on Linux; on the loaded EPYC a deep search reached 240-300 of its 450 layers in the default 170 s
+	// of bfs, where Egg Quest II's chimney line joins the route after 441)
+	const o = { deepPerS: LANE_PER_S, perS: LANE_PER_S / 2 };
+	for (const k of Object.keys(DEFAULTS)) if (a[k] !== undefined) o[k] = Array.isArray(DEFAULTS[k]) ? String(a[k]).split(',').map(Number) : typeof DEFAULTS[k] === 'string' ? a[k] : +a[k];
+	const P = Object.assign({}, DEFAULTS, o);
+	const step = Math.max(10, +(a.laneStep || 200) | 0), libMax = Math.max(1, +(a.laneLib || 24) | 0), LAND_AIR = Math.max(1, +(a.laneAir || 90) | 0);
+	const nw = Math.max(1, +(a.workers || 1) | 0);
+	const deadlineAll = t0 + (+(a.seconds || 3600)) * 1000;
+	const ticksBuf = new SharedArrayBuffer(8), ticksTotal = new BigInt64Array(ticksBuf);
+	E.setTickCounter(ticksTotal);
+	let target = null, version = 0, route = null, queue = [], ended = false;
+	const done = new Set(), stateDone = new Set();
+	const stats = { searches: 0, shortcuts: 0, splices: 0, leads: 0, routes: 0, attempts: 0 };
+	// ---- the library: {ms, map: physical state + room key -> the earliest tick}
+	const lib = [];
+	const RK = roomKeyOf(level);
+	const keyOf = (sim) => { const k = physKey(sim), r = RK(sim) >>> 0; return (k + r * 2654435761) % 9007199254740881; };
+	/** a run's keys per tick 0..n (index t = after t inputs), up to its first death or finish */
+	const keysOf = (ms) => {
+		const sim = new E.EESim(level), inp = new E.EEInput();
+		sim.reset();
+		const K = new Float64Array(ms.length + 1);
+		K[0] = keyOf(sim);
+		for (let t = 0; t < ms.length; t++) {
+			E.applyMask(inp, ms[t]);
+			sim.tick(inp);
+			if (sim.is_dead || sim.has_silver_crown) return K.subarray(0, t + 1);
+			K[t + 1] = keyOf(sim);
+		}
+		return K;
+	};
+	// (skipAt: a shortened attempt's first tick off the attempt it shortened: its states from there on are the early ones)
+	const libAdd = (ms, what, skipAt = -1) => {
+		const K = keysOf(ms), map = new Map();
+		for (let t = K.length - 1; t >= 0; t--) map.set(K[t], t);   // (the earliest tick of each key wins)
+		lib.push({ ms: Uint8Array.from(ms), map, what, skipAt });
+		if (lib.length > libMax) lib.shift();
+	};
+	const CROSS_LIB = 3;
+	const libCross = (info) => carryOver(level, lib.filter((R) => R.skipAt >= 0).slice(-CROSS_LIB).reverse(), info, P);
+	/**
+	 * The target (masks; kind 'attempt' | 'route', ev the route's C.evaluate) spliced with the library: the best
+	 * candidates by claimed gain (the library reaches the target's state at tick t by tick r < t), each replayed and
+	 * judged; -> {ms, ev, saved, how, route} | null
+	 */
+	const libSplice = (ms, kind, ev) => {
+		if (!lib.length) return null;
+		const K = keysOf(ms), cands = [];
+		for (const R of lib) {
+			let bg = 0, br = -1, bt = -1;
+			for (let t = K.length - 1; t > P.minGain; t--) {
+				const r = R.map.get(K[t]);
+				if (r !== undefined && t - r > bg) { bg = t - r; br = r; bt = t; }
+			}
+			if (bg >= P.minGain) cands.push({ R, r: br, t: bt, g: bg });
+		}
+		cands.sort((x, y) => y.g - x.g);
+		let info = null;
+		for (const c of cands.slice(0, 4)) {
+			const cand = concat([c.R.ms.subarray(0, c.r), ms.subarray(c.t)]);
+			if (kind === 'attempt') {
+				if (!info) info = prepare(level, ms, { attempt: true, nocoins: 0 });
+				if (!info || !info.attempt) return null;
+				const v = attemptJudge(info, cand);
+				if (v.accept) return { ms: v.ev.ms, ev: v.ev, saved: v.saved, route: v.route || null, how: `the library's ${c.R.what} to its tick ${c.r}, then the attempt's own from its tick ${c.t} (-${c.g})` };
+			} else {
+				const e2 = C.evaluate(level, cand);
+				const v = C.judge(e2, ev, ev.deaths);
+				if (v.accept && e2.runTicks < ev.runTicks) return { ms: e2.ms, ev: e2, saved: ev.runTicks - e2.runTicks, how: `the library's ${c.R.what} to its tick ${c.r}, then the route's own from its tick ${c.t}` };
+			}
+		}
+		return null;
+	};
+	const str = (ms) => C.eetasBytes(ms).toString('latin1');
+	// ---- the starts
+	const depthOf = (deep) => (deep ? P.deepDepth : P.depth);
+	// (a start's key: its state, its goal window's end state, the pick, deep, and whether it is an attempt's; searched
+	// before by state (stateDone: another goal window) = searched again after every fresh start. Only a search whose goal
+	// window was complete (the target reached s + depth + horizon) marks its state: Egg Quest II's GPU random runs' landing,
+	// searched on their short early attempt, is fresh again on their route; an attempt's search (a smaller layer cap) does
+	// not mark the state for the route's)
+	const keyOfStart = (info, s, deep, pk) => `${info.H[s]}:${info.H[Math.min(info.n, s + depthOf(deep) + P.horizon)]}:${pk}:${deep ? 1 : 0}:${info.attempt ? 'a' : 'r'}`;
+	const stateOfKey = (k) => { const q = k.split(':'); return `${q[0]}:${q[2]}:${q[3]}:${q[4]}`; };
+	const picks = String(P.picks).split(',').filter(Boolean);
+	let workers = [];
+	const refill = () => {
+		const info = target.info, n = info.n;
+		const list = [];
+		// run order: every step ticks and every landing after a long fall (LAND_AIR+ ticks in the air: where a path is
+		// chosen, e.g. Egg Quest II's opening fall, after which the user's chimney climb starts) deep, then every step / 2
+		// and step / 4 at the normal depth; an attempt's complete goal windows first (a route's too: the earliest first, as
+		// Find a route hands its routes on at once). (The landings first, before the grid, kept the lane on a route's 17
+		// landings, 150-270 s each on the loaded EPYC, where the grid's tick 200 found -54 in 3 s.)
+		const lv = [step, Math.max(10, step >> 1), Math.max(10, step >> 2)], seen = new Set(), land = new Set();
+		for (let t = 1, air = 0; t < n - P.minGain - 1; t++) {
+			if (!info.OG[t]) { air++; continue; }
+			if (air >= LAND_AIR) land.add(t);
+			air = 0;
+		}
+		const ok = (s, deep, complete) => !seen.has(s) && !(target.kind === 'attempt' && s > n - depthOf(deep) / 2) &&
+			!(target.kind === 'attempt' && (s + depthOf(deep) + P.horizon <= n) !== complete);
+		for (const complete of [true, false]) {
+			for (let li = 0; li < lv.length; li++) {
+				const deep = li === 0;
+				const ticks = [];
+				for (let s = 0; s < n - P.minGain - 1; s += lv[li]) ticks.push(s);
+				if (deep) { for (const t of land) ticks.push(t); ticks.sort((x, y) => x - y); }
+				for (const s of ticks) {
+					if (!ok(s, deep, complete)) continue;
+					seen.add(s);
+					list.push({ s, deep, land: land.has(s) });
+				}
+			}
+		}
+		const fresh = [], again = [];
+		for (const x of list) for (const pk of picks) {
+			const key = keyOfStart(info, x.s, x.deep, pk);
+			if (done.has(key)) continue;
+			(stateDone.has(stateOfKey(key)) ? again : fresh).push({ s: x.s, pick: pk, deep: x.deep, land: !!x.land, key, complete: target.kind === 'route' || x.s + depthOf(x.deep) + P.horizon <= n });
+		}
+		queue = fresh.concat(again);
+	};
+	const give = (w) => {
+		if (ended || w.dead || !target || Date.now() > deadlineAll - 2000) return;
+		while (queue.length && done.has(queue[0].key)) queue.shift();
+		if (!queue.length) return;
+		const task = queue.shift();
+		done.add(task.key);
+		if (task.complete) stateDone.add(stateOfKey(task.key));
+		if (w.version !== target.version) { w.postMessage({ run: Array.from(target.ms), version: target.version, attempt: target.kind === 'attempt', nocoins: target.nc }); w.version = target.version; }
+		w.busy = true; w.task = task; w.kind = target.kind; w.since = Date.now();
+		w.postMessage({ task, deadline: deadlineAll });
+	};
+	const setTarget = (kind, ms, nc) => {
+		const info = prepare(level, ms, { attempt: kind === 'attempt', nocoins: nc });
+		if (!info || (kind === 'attempt') !== !!info.attempt) return false;
+		target = { kind, ms: info.masks, info, nc, version: ++version };
+		refill();
+		for (const w of workers) if (!w.busy) give(w);
+		return true;
+	};
+	// ---- a route (the editor's best, or one this lane found): judged, spliced with the library, the new target
+	const offerRoute = (ms, how, own) => {
+		const ev = C.evaluate(level, Uint8Array.from(ms));
+		if (!ev) return false;
+		// (the route itself again: only when the library makes it faster)
+		const again = !!route && ev.ms.length === route.ev.ms.length && ev.runTicks === route.ev.runTicks;
+		if (route && !again && !(C.judge(ev, route.ev, route.ev.deaths).accept && ev.runTicks < route.ev.runTicks)) return false;
+		let best = ev, bhow = how;
+		const sp = libSplice(ev.ms, 'route', ev);
+		if (sp) { best = sp.ev; bhow = `${how}; spliced: ${sp.how}`; stats.splices++; }
+		// (another lineage's route, the GPU random runs' above all: the library's shortened attempts carried over into it)
+		const cx = libCross(prepare(level, best.ms, { nocoins: 0 }));
+		if (cx) { best = cx.ev; bhow = `${bhow}; ${cx.how}`; stats.carries = (stats.carries || 0) + 1; }
+		if (again && best === ev) return false;
+		if ((own && !again) || best !== ev) {
+			stats.routes++;
+			emit({ ev: 'result', kind: 'finish', ticks: best.ms.length, runTicks: best.runTicks, time: C.fmt(best.runTicks), inputs: str(best.ms), how: bhow, saved: route ? route.ev.runTicks - best.runTicks : ev.runTicks - best.runTicks });
+		}
+		route = { ev: best };
+		libAdd(best.ms, 'route');
+		let nc = 0;
+		try { nc = coinsIrrelevant(best.ms, best) ? 1 : 0; } catch (e) { /* exact */ }
+		setTarget('route', best.ms, nc);
+		return true;
+	};
+	// ---- an attempt (the editor's: each search's own nearest, "attempt:<search> <inputs>"; coalesced: the newest one per
+	// search, the searches in turn, at most one every ATTEMPT_MS: each search's lineage is followed, as the first route can
+	// come from any of them)
+	const pending = new Map();
+	let attemptTimer = null, attemptAt = 0, turn = 0;
+	const ATTEMPT_MS = 1000, CROSS_MS = 5000;
+	let crossAt = 0;
+	const takeAttempt = () => {
+		attemptTimer = null;
+		const keys = [...pending.keys()];
+		if (!keys.length || route || ended) return;
+		const src = keys[turn++ % keys.length], ms0 = pending.get(src);
+		pending.delete(src);
+		if (pending.size) attemptTimer = setTimeout(takeAttempt, ATTEMPT_MS);
+		attemptAt = Date.now();
+		stats.attempts++;
+		let ms = ms0;
+		const sp = libSplice(ms0, 'attempt');
+		if (sp && sp.route) { offerRoute(sp.ms, `a route: ${sp.how}`, true); return; }
+		if (sp) { stats.splices++; stats.shortcuts++; ms = sp.ms; emit({ ev: 'shortcut', kind: 'splice', inputs: str(ms), ticks: ms.length, from: ms0.length, saved: sp.saved, how: sp.how }); }
+		else if (Date.now() - crossAt >= CROSS_MS) {
+			// (no state in common with the library: the carry-over to another lineage, at most every CROSS_MS)
+			crossAt = Date.now();
+			const info0 = prepare(level, ms0, { attempt: true, nocoins: 0 });
+			const cx = info0 && info0.attempt ? libCross(info0) : null;
+			if (cx) { stats.carries = (stats.carries || 0) + 1; stats.shortcuts++; ms = cx.ms; emit({ ev: 'shortcut', kind: 'carry', inputs: str(ms), ticks: ms.length, from: ms0.length, saved: cx.saved, how: cx.how }); }
+		}
+		if (setTarget('attempt', ms, 0)) libAdd(target.ms, 'attempt', ms !== ms0 ? 0 : -1);
+	};
+	const onAttempt = (ms, src) => {
+		pending.set(src || '', ms);
+		if (!attemptTimer) attemptTimer = setTimeout(takeAttempt, Math.max(0, ATTEMPT_MS - (Date.now() - attemptAt)));
+	};
+	// ---- the workers' results
+	const onResult = (w, r) => {
+		w.busy = false;
+		stats.searches++;
+		const kind = w.kind, cur = !!target && r.version === target.version;
+		if (r.error) emit({ ev: 'search', s: r.s, error: String(r.error).slice(0, 300) });
+		else emit({ ev: 'search', kind, s: r.s, pick: r.pick, deep: !!(w.task && w.task.deep), layers: r.stats.layers, cells: r.stats.cells, sec: Math.round(r.stats.ms / 100) / 10, hits: r.hits, top: r.top, saved: r.best ? r.best.saved : 0, cur });
+		if (r.best && r.best.route) offerRoute(r.best.ms, `a route from the attempt's tick ${r.s}: ${r.best.how}`, true);
+		else if (r.best && kind === 'route') {
+			// a faster route (made on an older best: spliced with the current one)
+			let ms = Uint8Array.from(r.best.ms), how = `skip from tick ${r.s}: ${r.best.how}`;
+			if (!cur && route) {
+				const sp = require('./splice.js').splice(level, [route.ev.ms, ms], !!(target && target.nc));
+				if (sp) { const e2 = C.evaluate(level, sp.ms); if (e2 && C.judge(e2, route.ev, route.ev.deaths).accept && e2.runTicks < route.ev.runTicks) { ms = e2.ms; how += ' + spliced with the current route'; } }
+			}
+			// (the skip route into the library, its states from the skip on the early ones: made on an older best that
+			// another strategy's route has beaten meanwhile, it is carried over into the current one)
+			libAdd(Uint8Array.from(r.best.ms), `skip route (from its tick ${r.s})`, r.s);
+			if (!offerRoute(ms, how, true) && route) offerRoute(route.ev.ms, 'the best route', true);
+		} else if (r.best && kind === 'attempt' && route) {
+			// (an attempt's search that ended after the first route: its shortened attempt into the library, and from there
+			// spliced or carried over into the route)
+			libAdd(Uint8Array.from(r.best.ms), `shortened attempt (from its tick ${r.s})`, r.s);
+			offerRoute(route.ev.ms, 'the best route', true);
+		} else if (r.best && kind === 'attempt' && !route) {
+			// a shortened attempt: to the one search's archive and the library; the current attempt spliced with it
+			const ms = Uint8Array.from(r.best.ms);
+			stats.shortcuts++;
+			emit({ ev: 'shortcut', kind: 'skip', inputs: str(ms), ticks: ms.length, saved: r.best.saved, s: r.s, how: r.best.how, cur });
+			libAdd(ms, `shortened attempt (from its tick ${r.s})`, r.s);
+			if (target && target.kind === 'attempt') {
+				const base = target.ms, sp = cur ? { ms, saved: r.best.saved } : libSplice(base, 'attempt');
+				if (sp && sp.route) offerRoute(sp.ms, `a route: ${sp.how}`, true);
+				else if (sp) {
+					if (!cur) { stats.splices++; emit({ ev: 'shortcut', kind: 'splice', inputs: str(sp.ms), ticks: sp.ms.length, from: base.length, saved: sp.saved, how: sp.how }); }
+					if (setTarget('attempt', sp.ms, 0)) libAdd(target.ms, 'attempt', cur ? r.s : 0);
+				}
+			}
+		}
+		// (an attempt's best leads: footholds for the one search's archive)
+		if (!r.error && kind === 'attempt' && !route && Array.isArray(r.leadRuns)) {
+			for (const x of r.leadRuns) { stats.leads++; emit({ ev: 'shortcut', kind: 'lead', inputs: str(Uint8Array.from(x.ms)), ticks: x.ms.length, gain: x.gain, j: x.j, tile: x.tile, s: r.s }); }
+		}
+		give(w);
+	};
+	const perWorkerMB = (2 ** Math.max(P.log2, P.deepLog2) * 8) / 1048576 + 700;
+	const memW = Math.max(1, Math.floor((os.freemem() / 1048576) * 0.5 / perWorkerMB));
+	const nWorkers = Math.max(1, Math.min(nw, memW));
+	for (let k = 0; k < nWorkers; k++) {
+		const w = new Worker(__filename, { workerData: { skipfind: true, levelJson, masks: null, o: Object.assign({}, o), version: 0, ticksBuf, nice: +(a.nice || 0) } });
+		w.version = 0; w.busy = false;
+		w.on('message', (r) => onResult(w, r));
+		w.on('error', (e) => { emit({ ev: 'warning', text: `a worker failed: ${String(e && e.message || e).slice(0, 300)}` }); w.busy = false; w.dead = true; });
+		workers.push(w);
+	}
+	emit({ ev: 'start', workers: nWorkers, memWorkers: memW, step, level: `${level.width}x${level.height}` });
+	// ---- the end, the progress, stdin: attempt / route / stop
+	let prog = null;
+	const end = (why) => {
+		if (ended) return;
+		ended = true;
+		if (prog) clearInterval(prog);
+		for (const w of workers) { try { w.terminate(); } catch (e) { /* gone */ } }
+		E.flushTicks();
+		emit({ ev: 'done', why, searches: stats.searches, shortcuts: stats.shortcuts, splices: stats.splices, carries: stats.carries || 0, routes: stats.routes, leads: stats.leads, attempts: stats.attempts, ticks: Number(Atomics.load(ticksTotal, 0)) });
+		setTimeout(() => process.exit(0), 50);
+	};
+	let lastTicks = 0, lastAt = Date.now();
+	prog = setInterval(() => {
+		if (Date.now() > deadlineAll) { end('time'); return; }
+		E.flushTicks();
+		const tk = Number(Atomics.load(ticksTotal, 0)), now = Date.now();
+		const tps = Math.round((tk - lastTicks) / Math.max(0.001, (now - lastAt) / 1000));
+		lastTicks = tk; lastAt = now;
+		emit({ ev: 'progress', target: target ? target.kind : null, n: target ? target.info.n : 0, running: workers.filter((w) => w.busy).length, queue: queue.length, searches: stats.searches,
+			shortcuts: stats.shortcuts, splices: stats.splices, routes: stats.routes, leads: stats.leads, lib: lib.length, ticks: tk, ticksPerSec: tps, workers: nWorkers });
+		for (const w of workers) if (!w.busy) give(w);
+	}, 2000);
+	let buf = '';
+	process.stdin.setEncoding('utf8');
+	process.stdin.on('data', (d) => {
+		buf += d;
+		let k;
+		while ((k = buf.indexOf('\n')) >= 0) {
+			const line = buf.slice(0, k).trim();
+			buf = buf.slice(k + 1);
+			if (line === 'stop') { end('stopped'); return; }
+			const m = /^(attempt|route)(?::(\w+))? ([0-O]+)$/.exec(line);
+			if (!m) continue;
+			const ms = Uint8Array.from(m[3], (c) => (c.charCodeAt(0) - 48) & 31);
+			if (m[1] === 'route') offerRoute(ms, 'the best route', false);
+			else onAttempt(ms, m[2]);
+		}
+	});
+	process.stdin.on('end', () => end('stdin'));
+	process.stdin.on('error', () => end('stdin'));
+}
+
 // ---------------------------------------------------------------- the command line
 async function main() {
 	const a = C.parseArgs(process.argv.slice(2));
+	if (a.lane) return lane(a);
 	if (!a.tas) { console.log('usage: node src/skipfind.js --tas=<run.eetas> [--level=<level id | job id | .json>] [--out=] [--seconds=600] [--workers=N] (see the header)'); process.exit(2); }
 	const levelFile = C.levelData(a.level, a.tas);
 	const level = E.loadLevel(levelFile);

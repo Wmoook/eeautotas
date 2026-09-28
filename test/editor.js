@@ -33,8 +33,11 @@
 //              (model_miss.json), a failing proof, a search that waits for a slow proof (no busy file meanwhile), every
 //              strategy failing (the error at once), a silent proof (the watchdog), the cache (time limits not kept, memory
 //              limits kept), the CPU search stopping with the GPU strategies while the proof runs. Elsewhere EEAT_PROOF=0.
+//   lane       the path skips (src/skipfind.js --lane=1, the real one) next to a stand-in CPU search: a shortened attempt
+//              into the CPU search's archive before any route, a faster route from its slow route after
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
-// usage: node test/editor.js [--gpu] [--seed=N]      Exit code 1 if any check fails. Writes nothing inside the repo.
+// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,gpu]      Exit code 1 if any check
+//        fails. Writes nothing inside the repo.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -45,6 +48,9 @@ const GPU = argv.includes('--gpu');
 // --gpuOnly=a,b: only the GPU cases whose names contain one of these (short GPU runs, one at a time)
 const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)).split(',').filter(Boolean);
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
+// --only=a,b: only the sections whose names are given (app, passes, cpu, prove, lane, gpu); the fast ones always run
+const ONLY = ((argv.find((a) => a.startsWith('--only=')) || '').slice(7)).split(',').filter(Boolean);
+const want = (k) => !ONLY.length || ONLY.includes(k);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
 process.env.EEAT_HOME = HOME;   // (before src/ is required: jobs and data go to the temp folder)
 process.env.EEAT_PROOF = '0';   // (the proof, eegpu prove, only where the prove section asks for it: not next to the stand-ins)
@@ -1520,17 +1526,88 @@ async function gpuSection() {
 			`${r.st.stage}; ${r.st.strategies.map((q) => `${q.key} ${q.state}`).join(', ')}; ${r.st.message.slice(0, 160)}`);
 	}
 }
+// A stand-in for the CPU search next to the path skips (strategy 'skips', the real src/skipfind.js --lane=1): it reports
+// the scenario's attempt as its closest attempt, logs every stdin line, and once a "seed" or "import" line came (a
+// shortcut from the path skips) reports the scenario's slow route
+const FAKE_CPU_LANE = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'fine', startCost: 40 });
+setTimeout(() => say({ ev: 'closest', dist: 5, tick: SC.attempt.length, inputs: SC.attempt }), 200);
+let routed = false;
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 5, found: routed ? SC.route.length : 0, refined: 0, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let buf = '';
+process.stdin.on('data', (d) => {
+	buf += String(d);
+	let k;
+	while ((k = buf.indexOf('\\n')) >= 0) {
+		const line = buf.slice(0, k); buf = buf.slice(k + 1);
+		fs.appendFileSync(SC.stdinLog, line + '\\n');
+		if (line === 'stop') end();
+		if (!routed && /^(seed|import) /.test(line)) { routed = true; setTimeout(() => say({ ev: 'result', kind: 'finish', ticks: SC.route.length, inputs: SC.route }), 300); }
+	}
+});
+process.stdin.on('end', end);
+`;
+async function laneSection() {
+	section('path skips: the skip finder inside Find a route (the real src/skipfind.js --lane=1 next to a stand-in CPU search; no GPU)');
+	// the skip finder's loop room (test/skipfind.js room 2): the run walks right, turns back left for a while (a misguided
+	// loop), then walks right into a block, pushes against it, jumps over it and walks to the trophy. The stand-in's
+	// nearest attempt is that run's first 300 ticks; its route (reported once a shortcut reached it) the whole run
+	const W = 160, H = 8, cells = room(W, H);
+	cells.push([2, H - 2, 255], [W - 4, H - 2, 121], [22, H - 2, 9]);
+	const buf = ED.eelvlOf({ name: 'lane loop', width: W, height: H, cells });
+	const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf), { id: 'editor', file: 'editor.eelvl' }));
+	const raw = [];
+	for (const [m, n] of [[4, 40], [2, 60], [4, 120], [5, 3], [4, 600]]) for (let k = 0; k < n; k++) raw.push(m);
+	const ev = C.evaluate(L, Uint8Array.from(raw));
+	check('the loop room: the slow run finishes', !!ev, ev && `${ev.runTicks} run ticks`);
+	if (!ev) return;
+	const str = (ms) => C.eetasBytes(ms).toString('latin1');
+	const attempt = ev.ms.subarray(0, 300);
+	const endOf = (ms) => { const sim = new E.EESim(L); sim.reset(); const inp = new E.EEInput(); for (const m of ms) { E.applyMask(inp, m); sim.tick(inp); if (sim.is_dead) return null; } return sim.stateHash(); };
+	const hEnd = endOf(attempt);
+	const fake = path.join(HOME, 'fake-cpu-lane.js'), sc = path.join(HOME, 'lane.json'), stdinLog = path.join(HOME, 'lane-stdin.log');
+	fs.writeFileSync(fake, FAKE_CPU_LANE);
+	fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), route: str(ev.ms), stdinLog }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
+		{ cpu: [process.execPath, fake, sc], skips: true, laneArgs: ['--depth=200', '--deepDepth=200', '--horizon=600', '--cap=20000', '--log2=22', '--deepLog2=22', '--perS=20', '--deepPerS=20'] });
+	const t0 = Date.now();
+	let st = ED.state();
+	while (st.running && !(st.result && st.result.strategy === 'path skips') && Date.now() - t0 < 60000) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+	ED.stop();
+	while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+	const lines = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8').split('\n').filter(Boolean) : [];
+	const lane = st.strategies.find((q) => q.key === 'skips');
+	check('the path skips run next to the CPU search: "path skips", its own threads (a quarter of the CPU search\'s 4, from idle threads or its own)',
+		!!lane && lane.label === 'path skips' && lane.cpu && st.strategies.some((q) => q.key === 'goexplore'), st.strategies.map((q) => `${q.key}:${q.label}:${q.state}`).join(', '));
+	// the CPU search got the shortcut as a seed (CPU only: no one search): whole inputs that end in the attempt's end state,
+	// sooner
+	const seeds = lines.filter((l) => l.startsWith('seed ')).map((l) => Uint8Array.from(l.slice(5), (c) => (c.charCodeAt(0) - 48) & 31));
+	const short = seeds.filter((ms) => ms.length <= attempt.length - 20 && endOf(ms) === hEnd);
+	check('before any route: a later point of the nearest attempt reached sooner, into the CPU search\'s archive (a seed line: the attempt\'s end state, 20+ ticks sooner)',
+		short.length > 0, `${seeds.length} seed line(s), ${short.length} ending in the attempt's end state sooner${short.length ? ` (${attempt.length} -> ${Math.min(...short.map((x) => x.length))} ticks)` : ''}; ${(st.log || []).filter((x) => /path skips/.test(x)).slice(-2).join(' | ')}`);
+	// the CPU search's slow route: the path skips splice their shortened attempt into it (or search it): a faster route,
+	// replayed, S.result
+	const r = st.result;
+	const rv = r ? C.evaluate(L, Uint8Array.from(r.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
+	check('after the route: a faster route from the path skips (replayed in the JS engine), the search\'s result, at least 20 run ticks faster than the CPU search\'s',
+		!!r && r.strategy === 'path skips' && !!rv && rv.runTicks === r.runTicks && r.runTicks <= ev.runTicks - 20, r ? `${ev.runTicks} -> ${r.runTicks} (${r.strategy}) after ${r.foundAfter} s` : `no result (${st.stage}); ${(st.log || []).slice(-3).join(' | ')}`);
+}
 const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI82XaOefMxXxnmpIYjp5JX1zb50/uq31559pX7os7AE41z97hA2PESD3e3rv2qN8fPAxdIPlViN941TgJFlhkiWVWSLLKGinW2WCTLdJss0OGXfbY54BDshxxTI4TLGzyFCjiUKJMhSo16jRo0qJNhy49+Lc5PZsindVfmW/LWPn7c1iTtensZ2d1JrgnG4qsmXEGy4ii9d9n5nDr3tf19yPmuchGPjKSk6zkJTO5yU5+MpSjLOUpU7nKVr4ylrOs5S1zucte/uqAeqAuBLEn5McUxhQnOAFKAcrfUvkBVYNaiHqIhkEzQitCO0InQjdCbw7A2/j+4zjes8j0x+fnGp8=';
 
 (async () => {
 	roundtripSection();
 	checksSection();
 	await physicsCheckSection();
-	await appSection();
-	await passesSection();
-	await cpuSection();
-	await proveSection();
-	if (GPU) await gpuSection();
+	if (want('app')) await appSection();
+	if (want('passes')) await passesSection();
+	if (want('cpu')) await cpuSection();
+	if (want('prove')) await proveSection();
+	if (want('lane')) await laneSection();
+	if (GPU && want('gpu')) await gpuSection();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });
