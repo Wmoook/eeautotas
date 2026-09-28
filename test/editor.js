@@ -917,6 +917,49 @@ async function passesSection() {
 			`${str.stage}; ${str.result ? `route ${str.result.ticks} ticks by ${str.result.strategy}` : 'no route'}; rolls log ${LG.map((x) => (x[0] === 'stdin' ? `stdin ${x[1].trim()}` : String(x[0]).slice(0, 20))).join(' | ')}; ` +
 			`strategies ${(str.strategies || []).map((q) => `${q.key}:${q.state}`).join(' ')}`);
 	}
+	// the lane (the AutoTASer's handoff, demote): once a route is known, every GPU strategy stops (every move's long pass,
+	// the GPU random runs: their stop files) and none starts again, the CPU search is told "lane K" and goes on, the busy
+	// marker goes (the job's GPU searcher no longer waits), laneBest puts a run into the CPU search's archive; a second
+	// demote does nothing; Stop ends the search
+	{
+		const scX = path.join(HOME, 'lane-x.json'), logX = path.join(HOME, 'lane-x.log'), scG = path.join(HOME, 'lane-rolls.json'), logG = path.join(HOME, 'lane-rolls.log');
+		const scC = path.join(HOME, 'lane-cpu.json'), inC = path.join(HOME, 'lane-cpu-stdin.log'), fakeCpu = path.join(HOME, 'fake-cpu.js'), fakeRolls = path.join(HOME, 'fake-rolls.js');
+		fs.writeFileSync(fakeCpu, FAKE_CPU);
+		fs.writeFileSync(fakeRolls, FAKE_ROLLS);
+		fs.writeFileSync(scX, JSON.stringify({ log: logX, R, runs: { '-1': [{ end: 'time', layers: 5, wait: 30000 }] }, beam: null }));
+		fs.writeFileSync(scG, JSON.stringify({ log: logG, route: '4'.repeat(R), wait: 200 }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100, stdinLog: inC }));
+		const busyF = path.join(C.DATA, 'editor', 'busy');
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scX], cpu: [process.execPath, fakeCpu, scC], rollsCmd: [process.execPath, fakeRolls, scG], rolls: true, salts: false });
+		const t0l = Date.now();
+		while (!(ED.state().result && ED.state().result.clean !== 'pending') && Date.now() - t0l < 20000) await new Promise((z) => setTimeout(z, 100));
+		const busy0 = fs.existsSync(busyF);
+		const lz = ED.demote({ workers: 2 });
+		const again = ED.demote({ workers: 2 });
+		await new Promise((z) => setTimeout(z, 800));
+		const fed = ED.laneBest('4'.repeat(R));
+		const t1l = Date.now();
+		while (fs.existsSync(busyF) && Date.now() - t1l < 8000) await new Promise((z) => setTimeout(z, 200));
+		const busy1 = fs.existsSync(busyF);
+		const stl = ED.state();
+		const inText = fs.existsSync(inC) ? fs.readFileSync(inC, 'utf8') : '';
+		const LG = fs.existsSync(logG) ? fs.readFileSync(logG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+		// (the strategies' states now: Stop changes the same objects)
+		const stq = new Map((stl.strategies || []).map((q) => [q.key, q.state]));
+		const Q = (k) => ({ state: stq.get(k) });
+		const nX = fs.existsSync(logX) ? fs.readFileSync(logX, 'utf8').split('\n').filter((l) => l.startsWith('["explore"')).length : 0;
+		ED.stop();
+		const t2l = Date.now();
+		while (ED.state().running && Date.now() - t2l < 10000) await new Promise((z) => setTimeout(z, 100));
+		check('the lane: demote stops the GPU strategies (none starts again) and the busy marker, the CPU search goes on with "lane K", laneBest seeds its archive, a second demote does nothing, Stop ends it',
+			busy0 && !!lz && lz.threads === 2 && again === null && stl.running && !!stl.lane && stl.lane.threads === 2 && Q('explore').state === 'stopped' && Q('gorolls').state === 'stopped' &&
+			Q('goexplore').state !== 'stopped' && LG.some((x) => x[0] === 'stopped') && nX === 1 && /(^|\n)lane 2\n/.test(inText) && fed === true && inText.includes(`seed ${'4'.repeat(R)}\n`) &&
+			!busy1 && !ED.state().running,
+			`demote ${JSON.stringify(lz)} / ${JSON.stringify(again)}; busy ${busy0} -> ${busy1}; running ${stl.running}; lane ${JSON.stringify(stl.lane)}; ` +
+			`strategies ${[...stq].map(([k, v]) => `${k}:${v}`).join(' ')}; every move launches ${nX}; rolls ${LG.map((x) => String(x[0]).slice(0, 12)).join(' | ')}; ` +
+			`cpu stdin ${inText.split('\n').filter(Boolean).map((l) => l.slice(0, 24)).join(' | ')}; fed ${fed}; ended ${!ED.state().running}`);
+	}
 	// Stop while a finer pass looks for a faster route: no further pass, the route stays
 	let stopped = false, t1 = 0;
 	r = await drive({ '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 50, wait: 8000 }] }, null, (st) => {
