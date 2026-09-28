@@ -36,7 +36,8 @@
 //   nTeam, dpN, dpT; u32 levelFp lo, hi (gpu.js blobFp; 0 0: none) at 48; then i32 feat[nFeat x 4] (kind, param, radix,
 //   stride; kinds: 1 key colour bit, 2 purple switch id, 3 orange switch id, 4 team, 5 protection, 6 coins, 7 blue coins,
 //   8 crown (collide_crown), 9 effects (0 plain: no levitation, gravity flip, jump / speed boost, low gravity, max_jumps
-//   1)), i32 team[nTeam], i32 layerBody[S] (-1: no field), u64 bodyOff[nBodies], u64 bodySize[nBodies] (from the file's
+//   1), 10 / 11 gold / blue coin classes (the layer: the largest i with count >= values[i]; not in native/beam.h)),
+//   i32 team[nTeam], only with kinds 10 / 11: i32 values[their radixes, in feature order], i32 layerBody[S] (-1: no field), u64 bodyOff[nBodies], u64 bodySize[nBodies] (from the file's
 //   start), u8 goal[nBodies x N] (the tiles that change the layer: the lookup takes the least of the 8 neighbours + a step
 //   there), the bodies (RCH3 bytes, identical ones shared), with the coin DP: i32 dpBit[dpN] (the engine's coin bit),
 //   i32 dpLeg[dpN] (its leg field's body), f32 h[2^dpN x dpN].
@@ -132,16 +133,20 @@ function analyze(level, opts) {
 	const teamVals = new Set([0]);
 	for (const [, kind, v] of special) if (kind === 'team') teamVals.add(v);
 	let coinCap = 0, bcoinCap = 0;
+	// (the counts the coin doors and gates read: a coin feature over the layer budget models these classes instead of one
+	// layer per count, fitClasses)
+	const coinThr = new Set([0]), bcoinThr = new Set([0]);
 	for (let i = 0; i < N; i++) {
-		if ((fg[i] === 43 || fg[i] === 165) && lk[i] <= goldCoins) coinCap = Math.max(coinCap, lk[i]);
-		if (fg[i] === 213 || fg[i] === 214) bcoinCap = Math.max(bcoinCap, lk[i]);
+		if ((fg[i] === 43 || fg[i] === 165) && lk[i] <= goldCoins) { coinCap = Math.max(coinCap, lk[i]); coinThr.add(lk[i]); }
+		if (fg[i] === 213 || fg[i] === 214) { bcoinCap = Math.max(bcoinCap, lk[i]); bcoinThr.add(lk[i]); }
 	}
 	for (const [k, f] of feats) {
 		if (k.startsWith('key') || k.startsWith('psw') || k.startsWith('osw') || k === 'prot' || k === 'crown' || k === 'fx') f.values = [0, 1];
 		else if (k === 'team') f.values = [...teamVals].sort((a, b) => a - b);
-		else if (k === 'coins') f.values = range(coinCap + 1);
-		else if (k === 'bcoins') f.values = range(bcoinCap + 1);
+		else if (k === 'coins') { f.values = range(coinCap + 1); f.classValues = [...coinThr].sort((a, b) => a - b); }
+		else if (k === 'bcoins') { f.values = range(bcoinCap + 1); f.classValues = [...bcoinThr].sort((a, b) => a - b); }
 		f.init = featureOf(k, sim, f.values);
+		if (f.classValues) f.initCount = f.values[f.init];
 		f.static = f.sources === 0;
 	}
 	// portals: tile -> exits that are not walls
@@ -176,6 +181,24 @@ function analyze(level, opts) {
 	const start = { t: ((Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)) };
 	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts };
 }
+/** a coin count's class: the largest i with values[i] <= n (values ascending, values[0] = 0) */
+function classOf(values, n) {
+	let i = 0;
+	while (i + 1 < values.length && values[i + 1] <= n) i++;
+	return i;
+}
+/** a coin feature the layer budget refuses (S layers x its per-count values over maxLayers): its values become the
+ *  classes of the counts the coin doors and gates read (f.classValues: 0 and each threshold), when they fit and are
+ *  fewer. A door reads count >= n, so every count of a class opens the same doors: the physics layers (the coins static
+ *  there) equal the per-count ones at every count; the walk model's touch jumps a class (its plan is optimistic, as its
+ *  re-touches are), and a blue coin's goal seeding adds the re-touches the jump skips. -> true when it switched */
+function fitClasses(f, S, maxLayers) {
+	if (!f || f.classes || !f.classValues || S * f.values.length <= maxLayers) return false;
+	if (f.classValues.length >= f.values.length || S * f.classValues.length > maxLayers) return false;
+	f.values = f.classValues.slice(); f.classes = true;
+	f.init = classOf(f.values, f.initCount || 0);
+	return true;
+}
 /** a feature's value index in the sim's state */
 function featureOf(k, sim, values) {
 	let v;
@@ -184,8 +207,8 @@ function featureOf(k, sim, values) {
 	else if (k.startsWith('osw:')) v = sim._oswitches.get(+k.slice(4)) === true ? 1 : 0;
 	else if (k === 'team') v = sim.team;
 	else if (k === 'prot') v = sim.is_invulnerable ? 1 : 0;
-	else if (k === 'coins') v = Math.min(sim.coins, values.length - 1);
-	else if (k === 'bcoins') v = Math.min(sim.blue_coins, values.length - 1);
+	else if (k === 'coins') v = values[classOf(values, sim.coins)];
+	else if (k === 'bcoins') v = values[classOf(values, sim.blue_coins)];
 	else if (k === 'crown') v = sim._collide_crown ? 1 : 0;
 	else if (k === 'fx') v = plainFx(sim) ? 0 : 1;
 	const i = values.indexOf(v);
@@ -287,7 +310,21 @@ function makeModel(A, modeled) {
 	}
 	const identity = new Uint8Array(A.special.length);
 	for (let k = 0; k < A.special.length; k++) { let id = 1; for (let s = 0; s < S && id; s++) { const ts = transAll(s, k); if (ts.length !== 1 || ts[0] !== s) id = 0; } identity[k] = id; }
-	return { feats, S, s0, radix, stride, valOf, withVal, pass, trans, transAll, inv, layerOf, identity, gateOpen, names: feats.map((f) => f.key) };
+	/** feature n's value index of a coin count (per count: min(count, radix - 1); classes: the count's class) */
+	const countIdx = (n, c) => classOf(feats[n].values, c);
+	/** the highest count feature n's layers tell apart */
+	const maxCount = (n) => feats[n].values[radix[n] - 1];
+	/** the re-touches a coin class step skips (fifths: 2 steps each), entering special tile k from layer s to s2: the
+	 *  per-count field pays them (the walk model counts a coin at every touch) */
+	function skipFifths(s, s2, k) {
+		const kind = A.special[k][1];
+		if (s2 === s || (kind !== 'coins' && kind !== 'bcoins')) return 0;
+		const n = idx.get(kind);
+		if (n === undefined || !feats[n].classes) return 0;
+		const v = feats[n].values, i = valOf(s, n), j = valOf(s2, n);
+		return j === i + 1 ? Math.max(0, v[j] - v[i] - 1) * 10 : 0;
+	}
+	return { feats, S, s0, radix, stride, valOf, withVal, pass, trans, transAll, inv, layerOf, identity, gateOpen, countIdx, maxCount, skipFifths, names: feats.map((f) => f.key) };
 }
 
 // ------------------------------------------------------------------ the walk model: a backward Dijkstra over tile x layer
@@ -440,6 +477,7 @@ function walkBuild(level, A, opts) {
 		if (!cx || modeled.has(cx.feat)) break;
 		const f = A.feats.get(cx.feat);
 		if (!f) break;
+		if (!A.opts || !A.opts.noClasses) fitClasses(f, M.S, maxLayers);
 		if (M.S * f.values.length > maxLayers) { capped = { feat: cx.feat, why: 'layers' }; break; }
 		if (opts.deadline && Date.now() > opts.deadline) { capped = { feat: cx.feat, why: 'time' }; break; }
 		modeled.add(cx.feat);
@@ -635,7 +673,8 @@ function buildPhysics(B, opts) {
 				// (a toggle: the tile changes layer s2 back too, so in s2's field it is a goal of its own (its cost is only
 				// its seed): the ball that pressed it stands there and walks off, the least of its 8 neighbours + a step,
 				// as the lookup prices it)
-				const v = copies[s2] && copies[s2].goal[t] ? arriveNear(f2, t, A) : arriveCost(f2, t);
+				let v = copies[s2] && copies[s2].goal[t] ? arriveNear(f2, t, A) : arriveCost(f2, t);
+				if (v < CUT) v += M.skipFifths(s, s2, k);
 				if (v < g) g = v;
 			}
 			if (g < CUT) goals.push({ tile: t, cost: g / 5 });
@@ -754,11 +793,11 @@ function coinLegsPhys(B, PH, base, opts) {
 	let s = 0;
 	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
 	const nC = M.names.indexOf('coins');
-	s = M.withVal(s, nC, base.T - 1);
+	s = M.withVal(s, nC, M.countIdx(nC, base.T - 1));
 	const lvOf = new Map();
 	const legField = (q, k) => {
 		if (!lvOf.has(k)) {
-			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
+			const { lv } = layerLevel(A, M, M.withVal(s, nC, M.countIdx(nC, k)), {});
 			const fg0 = Int32Array.from(lv.fg);
 			for (const c of base.coins) if (fg0[c] === TROPHY) fg0[c] = 0;
 			lvOf.set(k, { lv, fg0 });
@@ -769,7 +808,7 @@ function coinLegsPhys(B, PH, base, opts) {
 	};
 	const fields = new Map(), countOf = new Map();
 	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
-	const sT = M.withVal(s, nC, Math.min(base.T, M.radix[nC] - 1));
+	const sT = M.withVal(s, nC, M.countIdx(nC, base.T));
 	const tail = new Map();
 	for (const q of base.coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
 	const CL = { T: base.T, coins: base.coins, fields, tail, s, countOf, rounds: 0 };
@@ -806,12 +845,12 @@ function coinLegsLayered(B, PH, base, deadline) {
 	let s = 0;
 	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
 	const nC = M.names.indexOf('coins');
-	const coins = base.coins, n = coins.length, T = Math.min(base.T, n, M.radix[nC] - 1);
+	const coins = base.coins, n = coins.length, T = Math.min(base.T, n, M.maxCount(nC));
 	if (n > 18 || T < 1) return null;
 	const lvOf = new Map();
 	const legField = (q, k) => {
 		if (!lvOf.has(k)) {
-			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
+			const { lv } = layerLevel(A, M, M.withVal(s, nC, M.countIdx(nC, k)), {});
 			const fg0 = Int32Array.from(lv.fg);
 			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
 			lvOf.set(k, { lv, fg0 });
@@ -835,7 +874,7 @@ function coinLegsLayered(B, PH, base, deadline) {
 			}
 		}
 	}
-	const sT = M.withVal(s, nC, Math.min(T, M.radix[nC] - 1));
+	const sT = M.withVal(s, nC, M.countIdx(nC, T));
 	const tail = new Map();
 	for (const q of coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
 	const NM = 1 << n, h = new Float32Array(NM * n).fill(Infinity);
@@ -963,6 +1002,7 @@ function buildSteer(level, opts) {
 		const cx = path.length > 1 ? counterexample(A, { path }) : null;
 		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, cx: cx && cx.feat });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
+		if (!opts.noClasses) fitClasses(A.feats.get(cx.feat), B.M.S, maxLayers);
 		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
 		// (the next build takes longer than this one)
 		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
@@ -1001,16 +1041,24 @@ function buildSteer(level, opts) {
 	}
 	const feats = M.feats.map((f, n) => {
 		const k = f.key;
-		const kind = k.startsWith('key') ? 1 : k.startsWith('psw:') ? 2 : k.startsWith('osw:') ? 3 : k === 'team' ? 4 : k === 'prot' ? 5 : k === 'coins' ? 6 : k === 'bcoins' ? 7 : k === 'crown' ? 8 : 9;
+		const kind = k.startsWith('key') ? 1 : k.startsWith('psw:') ? 2 : k.startsWith('osw:') ? 3 : k === 'team' ? 4 : k === 'prot' ? 5 : k === 'coins' ? (f.classes ? 10 : 6) : k === 'bcoins' ? (f.classes ? 11 : 7) : k === 'crown' ? 8 : 9;
 		const param = kind === 1 ? +k.slice(3) : kind === 2 || kind === 3 ? +k.slice(4) : 0;
-		return { key: k, kind, param, radix: M.radix[n], stride: M.stride[n] };
+		return Object.assign({ key: k, kind, param, radix: M.radix[n], stride: M.stride[n] }, kind >= 10 ? { values: f.values.slice() } : {});
 	});
 	const teamF = M.feats.find((f) => f.key === 'team');
 	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0 };
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
-	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
+	steer.info = { features: M.names.map((k, n) => (M.feats[n].classes ? `${k} classes (${M.feats[n].values.join(' ')})` : k)), classes: M.feats.some((f) => f.classes), layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+	// (coin classes whose field has no value at the start (the coins' DP cut there, the layer's own way behind a coin
+	// door): the build without them, as before the classes (the coins left out: the reach field's optimism)
+	if (steer.info.classes && !Number.isFinite(steer.info.start) && !opts.noClasses) {
+		const st2 = buildSteer(level, Object.assign({}, opts, { noClasses: true }));
+		st2.info.classesDropped = 'no value at the start';
+		st2.info.ms = Date.now() - t0;
+		return st2;
+	}
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1052,6 +1100,8 @@ function layerIndex(st, sim) {
 			case 7: v = Math.min(sim.blue_coins, f.radix - 1); break;
 			case 8: v = sim._collide_crown ? 1 : 0; break;
 			case 9: v = plainFx(sim) ? 0 : 1; break;
+			case 10: v = classOf(f.values, sim.coins); break;
+			case 11: v = classOf(f.values, sim.blue_coins); break;
 		}
 		s += v * f.stride;
 	}
@@ -1172,6 +1222,10 @@ function steerFileBytes(st, levelFp) {
 	const i32 = (a) => Buffer.from(Int32Array.from(a).buffer);
 	parts.push(i32(st.feats.flatMap((f) => [f.kind, f.param, f.radix, f.stride])));
 	parts.push(i32(st.team));
+	// (the coin classes' counts (kinds 10 / 11: radix each, ascending), only when a feature has them: every other file's
+	// bytes stay as they were; native/beam.h does not read these kinds: editor.js gives such a file to the CPU only)
+	const cv = st.feats.filter((f) => f.kind >= 10).flatMap((f) => f.values);
+	if (cv.length) parts.push(i32(cv));
 	parts.push(i32(st.layerBody));
 	const offIdx = parts.length;
 	parts.push(Buffer.alloc(8 * st.bodies.length), Buffer.alloc(8 * st.bodies.length));
@@ -1223,6 +1277,7 @@ function readSteerFile(buf) {
 	const feats = [];
 	for (let k = 0; k < nFeat; k++) feats.push({ kind: fa[4 * k], param: fa[4 * k + 1], radix: fa[4 * k + 2], stride: fa[4 * k + 3] });
 	const team = Array.from(ints(nTeam));
+	for (const f of feats) if (f.kind >= 10) f.values = Array.from(ints(f.radix));
 	const layerBody = ints(S);
 	o = al8(o);
 	const bOff = [], bSize = [];

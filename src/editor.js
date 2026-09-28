@@ -1841,7 +1841,9 @@ function useSteer(sf, noGpu) {
 	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
 	// (STEER_GPU_SHARE in all: two copies (every move, the relay), four with the beams')
 	const copies = mb * 4 <= gpuMB * STEER_GPU_SHARE ? 4 : mb * 2 <= gpuMB * STEER_GPU_SHARE ? 2 : 0;
-	const gpuOk = !noGpu && toolInfo && toolInfo.steer === SF.VERSION && copies > 0;
+	// (a steer field with coin classes (steer.js kinds 10 / 11, a coin feature over the layer budget): the CPU search's only,
+	// native/beam.h does not read them yet; the GPU tools order by the reach field, as they do when the coins are left out)
+	const gpuOk = !noGpu && !sf.classes && toolInfo && toolInfo.steer === SF.VERSION && copies > 0;
 	cur.files.steerCpu = sf.file;
 	if (gpuOk) cur.files.steer = sf.file;
 	if (gpuOk && copies === 4) cur.files.steerBeam = sf.file;
@@ -1855,7 +1857,7 @@ function useSteer(sf, noGpu) {
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
 	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
-			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
+			: `CPU search${noGpu ? '' : ` (not the GPU's: ${sf.classes ? 'its coin classes are not in the GPU tools yet' : toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
 }
 /** a steer field built after the search started (start()'s race: sf {late}): gen, the search it was built for; sf2
@@ -2106,7 +2108,7 @@ function steerInfo(buf, hash) {
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
-				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
+				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null, classes: !!st.info.classes,
 				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
 			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
