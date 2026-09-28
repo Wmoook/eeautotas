@@ -1458,6 +1458,8 @@ function breakLaunch(n) {
 	while (!R.chain && R.i < R.starts.length) {
 		const st = R.starts[R.i++];
 		brk.tried.add(st.key);
+		// (a starting point in a place a run of this round sealed: the next one)
+		if (cur.opts.breakSeal && brk.sealed.size) { const place = sealKeyOf(st.inputs); if (place && brk.sealed.has(place)) { brk.sealSkips = (brk.sealSkips || 0) + 1; if (S.breaker) S.breaker.sealSkips = brk.sealSkips; continue; } }
 		const src = st.room !== undefined ? sources.get(st.room) : null;
 		if (src) { src.brk = (src.brk || 0) + 1; publishSources(); }
 		R.chain = { inputs: st.inputs, step: 1, grain: 0, what: st.what };

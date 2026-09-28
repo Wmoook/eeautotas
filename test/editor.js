@@ -744,6 +744,37 @@ async function passesSection() {
 		check('the wall breaker: a run that fails ("the prefix dies") is not an error of the search: the round goes on from its next starting point, whose finish is the route',
 			pfs.join() === '450:0,200:0' && str.result && str.result.strategy === 'past the wall', `prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}`);
 	}
+	// sealed starts (the user, Octorage: "it shouldn't get stuck on this stupid, obviously impossible wall for 5 min"): a
+	// start whose runs run out of situations at every grain with nothing of their own (their nearest attempt 40 tiles out,
+	// the search's 30) is sealed: its chain does not go on from its own nearest attempt (without the seal: 900 - 60 = 840),
+	// and the round's next starting point (the nearest attempt 400 back: holding right, the ball stands at the same wall,
+	// the same place) is skipped: the round is over after those 3 runs
+	for (const seal of [true, false]) {
+		const scB = path.join(HOME, `brk3${seal}.json`), logB = path.join(HOME, `brk3${seal}.log`);
+		fs.writeFileSync(scB, JSON.stringify({ log: logB, R, runs: { '-1': [{ end: 'time', layers: 5000, wait: 200, hold: 30000, closest: { dist: 30, tick: 600, ch: '4' } }] },
+			relay: Array.from({ length: 40 }, () => ({ end: 'full', layers: 50, wait: 300 })),
+			breaker: [0, 1, 2].map(() => ({ end: 'exhausted', layers: 10, overflow: 0, wait: 150, closest: { dist: 40, tick: 900, ch: '4' } }))
+				.concat([{ end: 'finish', idle: 0, layers: 3, wait: 300 }]), beam: null }));
+		const t0s = Date.now();
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 1, breakSeal: seal }, { available: true },
+			{ tool: [process.execPath, fake, scB], cpu: false, salts: false, relay: true, breaker: true, breakWait: [1], breakCells: 26 });
+		let str = ED.state();
+		while (str.running && !str.result && !(str.breaker && (str.breaker.done || []).length) && Date.now() - t0s < 40000) { await new Promise((z) => setTimeout(z, 100)); str = ED.state(); }
+		const done = str.breaker && (str.breaker.done || [])[0];
+		if (str.running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+		const pfs = fs.readFileSync(logB, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === 'explore' && a.includes('--cap=2097152'))
+			.map((a) => (a.find((x) => x.startsWith('#pf=')) || '#pf=?').slice(4));
+		const logged = (str.log || []).join('\n');
+		check(seal ? 'the wall breaker: a start whose runs ran out of situations at every grain with nothing of their own is sealed: no chain step from its own nearest attempt, a starting point in the same place skipped, the round over at once'
+			: "the wall breaker without the seal (breakSeal: false): the chain goes on from that run's own nearest attempt (840 ticks)",
+			seal ? pfs.join() === '450:4,450:4,450:4' && /that place is sealed \(1 so far\)/.test(logged) && !!done && done.runs === 3 && !!str.breaker && str.breaker.sealed === 1 && str.breaker.sealSkips === 1
+				: pfs.slice(0, 4).join() === '450:4,450:4,450:4,840:4' && !/sealed/.test(logged),
+			`prefixes ${pfs.join(' | ')}; ${str.result ? `route by ${str.result.strategy}` : str.stage}; ${Date.now() - t0s} ms; breaker ${JSON.stringify(str.breaker && { sealed: str.breaker.sealed, sealSkips: str.breaker.sealSkips, done })}`);
+		if (ED.state().running) { ED.stop(); while (ED.state().running) await new Promise((z) => setTimeout(z, 50)); }
+	}
+	check("the wall breaker's seal rule: out of situations at the finest grain, no gate, nothing of its own; not a table that filled or ran its time, not after a gate or own progress",
+		ED.breakSealed('exhausted', true, null, false) && !ED.breakSealed('exhausted', true, null, true) && !ED.breakSealed('exhausted', true, 'x', false) && !ED.breakSealed('time', true, null, false) && !ED.breakSealed('full', true, null, false),
+		'breakSealed');
 	// the breaker's GPU slices (breakSlice): with the GPU random runs next to it, a round's runs (each 0.6 s to its ready
 	// event, then 1.5 s) hold the GPU only from their ready events: while a run starts and in the slice after it (1/4 of its
 	// 1.5 s) the random runs have the GPU; `breakSlice: false` (as before): the round holds it from its start to its end
