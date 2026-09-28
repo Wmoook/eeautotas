@@ -1520,7 +1520,7 @@ function precEvent(V, ev) {
 // so does an escape the rest of the search left behind (its nearest attempt clearly nearer: ESC_RETARGET_S).
 // A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
 // none (tests: test.escape === true; test.escWait / escStall / escMin / escRetarget: its clocks in s).
-const ESC_WAIT_S = 180, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
+const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
 // (an escape the rest of the search has left behind: the nearest attempt clearly nearer (3 tiles or 10%, the relay's rule)
 // than the escape's start, its own nearest and the search's nearest when it started (near0: an escape from a room's attempt
 // starts farther out than the nearest attempt by design, and before near0 every such escape was sent away after 60 s),
