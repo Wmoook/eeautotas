@@ -399,6 +399,9 @@ const STRATEGIES = {
 			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
 		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1'] },
+	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
+	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
+		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
 };
 // the one search's bursts sized by the GPU (goexplore.js --burstPar / --gpuCells / --burstCap): the laptop sizing (1 lane,
 // 2^25 cells, at most 262,144 states a layer) was every GPU's, the A100's 40 GB and the H100's 80 GB too; from BURST_BIG_MB of GPU
@@ -406,6 +409,18 @@ const STRATEGIES = {
 // or EEAT_BURST_BIG=0: the laptop sizing everywhere)
 const BURST_BIG_MB = 20000;
 const burstSizeArgs = (memMB) => memMB >= BURST_BIG_MB ? ['--burstPar=2', '--gpuCells=26', '--burstCap=0'] : [];
+// The precision stage (strategy 'precision', "exact landings", CPU; src/precision.js): a route that needs one exact
+// sub-pixel position (the user's pocket behind a spike corner: the ball must drop in with x == 5720.0 exactly, one double
+// on a grid of 2^-40 px) is lost by every search that keeps one state per cell or samples random runs (the diagnosis:
+// 7 product searches up to 20 min, the nearest 3.8 tiles after 1-5 s and never nearer). Once the search has had no
+// attempt nearer by PREC_TILES for PREC_WAIT_S (doubled after each run that found nothing, up to PREC_WAIT_MAX_S; a
+// nearer attempt starts it over), with no route yet: precision.js from the nearest attempts (S.closest, every strategy's
+// own nearest, the sources' within PREC_SLACK tiles; at most PREC_ATTEMPTS) for at most PREC_S s of the search's time:
+// the nudge test finds where an exact x would pay, a meet in the middle over input pieces (every 1..N-tick input pattern
+// from rest and how far it moves the ball: exact, additive within a binade of doubles) lands the ball there exactly, an
+// exact local search goes on; every route replayed in the JS engine. A landing's nearer state goes to the CPU search
+// (seedCpu) and the page's nearest attempt. Its lookups run on PREC_WORKERS threads at most (half the CPU search's).
+const PREC_TILES = 0.5, PREC_WAIT_S = 10, PREC_WAIT_MAX_S = 240, PREC_S = 90, PREC_AFTER_S = 5, PREC_SLACK = 3, PREC_ATTEMPTS = 8, PREC_WORKERS = 4;
 // the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
 const ROLL_BATCH = 4096;
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(f.steerBeam && !(q.V && q.V.noSteer) ? [`--steer=${f.steerBeam}`] : [])];
@@ -601,6 +616,7 @@ function checkStalls() {
 	if (!S || !S.running) return;
 	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
 	breakKick();   // (a stalled search: a round of the wall breaker)
+	precKick();    // (a stalled search: exact landings from its nearest attempts)
 	const now = Date.now();
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
@@ -1348,6 +1364,58 @@ function breakEnd(n) {
 	Object.assign(V, { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${cur && brk ? cur.opts.breakWait[brk.level] : BREAK_WAIT_S[0]} s)` });
 	return false;
 }
+// ---------------------------------------------------------------- the precision stage (src/precision.js; see PREC_WAIT_S)
+let prec = null;   // {mark (the nearest attempt's distance when it last got nearer by PREC_TILES), at (then), wait (s), runs}
+/** the attempts the precision stage starts from ('0' + mask characters): the nearest (S.closest), every strategy's own
+ *  nearest, the sources' lowest-cost attempts; those within PREC_SLACK tiles of the nearest, nearest first, distinct, at
+ *  most PREC_ATTEMPTS */
+function precAttempts() {
+	const list = [], c = S.closest;
+	const add = (inputs, dist) => { if (inputs && Number.isFinite(dist) && /^[0-O]+$/.test(String(inputs))) list.push({ inputs: String(inputs), dist }); };
+	if (c && !c.cut) add(c.inputs, c.dist);
+	for (const q of S.strategies) if (q.bestTry) add(q.bestTry.inputs, q.bestTry.dist);
+	for (const s of sources.values()) if (s.best) add(s.best.inputs, s.best.dist);
+	const lim = (c && !c.cut ? c.dist : Infinity) + PREC_SLACK, seen = new Set();
+	return list.filter((a) => a.dist <= lim).sort((a, b) => a.dist - b.dist).filter((a) => !seen.has(a.inputs) && seen.add(a.inputs)).slice(0, PREC_ATTEMPTS).map((a) => a.inputs);
+}
+/** every 5 s (checkStalls): a stalled search without a route starts a run of the precision stage */
+function precKick() {
+	if (!S || !S.running || S.halted || S.stage === 'stopped' || S.result || !cur || !prec) return;
+	const n = S.strategies.findIndex((q) => q.key === 'precision');
+	if (n < 0 || alive(kids[n]) || S.strategies[n].state !== 'waiting') return;
+	const V = S.strategies[n], c = S.closest, now = Date.now();
+	if (!c || c.cut || !c.inputs || now - prec.at < prec.wait * 1000) return;
+	// (the search's time left; the CPU search alone: its clock from the start)
+	const left = Math.floor(S.seconds - searchClock(now));
+	if (left < 3) return;
+	const atts = precAttempts();
+	if (!atts.length) return;
+	const file = path.join(dir(), 'precision_attempts.txt');
+	try { fs.writeFileSync(file, atts.join('\n') + '\n'); } catch (e) { return; }
+	prec.runs++;
+	// (its lookups' threads: at most half the CPU search's, PREC_WORKERS at most; the CPU search keeps its own)
+	V.prec = { file, seconds: Math.min(PREC_S, left), workers: Math.max(1, Math.min(PREC_WORKERS, Math.floor((cur.opts.workers || 2) / 2))), mark: prec.mark, attempts: atts.length };
+	if (S.precision) S.precision.runs = prec.runs;
+	note(`${V.label}: no attempt nearer by ${PREC_TILES} tiles for ${prec.wait} s (the nearest ${S.closest.tiles} tiles from the trophy): looking for exact landings from the ${atts.length} nearest attempt${atts.length > 1 ? 's' : ''} (run ${prec.runs})`);
+	Object.assign(V, { state: 'starting', detail: '' });
+	kids[n] = launch(n);
+	save();
+}
+/** the precision stage's events (precision.js): its phase as the strategy's detail, a spot where an exact position pays
+ *  as a log line */
+function precEvent(V, ev) {
+	if (V.state !== 'found') V.state = 'running';
+	const f1 = (x) => (Math.round(x * 10) / 10).toLocaleString('en-US');
+	if (ev.ev === 'start') V.detail = `from ${ev.attempts} attempt${ev.attempts > 1 ? 's' : ''}, ${ev.workers} thread${ev.workers > 1 ? 's' : ''}`;
+	else if (ev.ev === 'target') {
+		V.targets = (V.targets || 0) + 1;
+		note(`${V.label}: the ball at exactly x = ${ev.x} px (${f1(ev.x / 16)} tiles), row ${Math.floor((ev.py + 8) / 16)}, would ${ev.finish ? 'reach the trophy' : `get ${f1(ev.gain)} tiles nearer`}: landing it there`);
+	} else if (ev.ev === 'progress' && ev.phase === 'stall') V.detail = `${ev.stall} states of the nearest attempts ${Number.isFinite(ev.nearest) ? `${f1(ev.nearest)} tiles out` : ''}: where would an exact position pay?`;
+	else if (ev.ev === 'progress' && ev.phase === 'nudge') V.detail = ev.targets ? `${ev.targets} spot${ev.targets > 1 ? 's' : ''} where an exact position pays` : 'no spot where an exact position pays';
+	else if (ev.ev === 'progress' && ev.phase === 'tables' && Number.isFinite(ev.rests)) V.detail = `landing at x = ${ev.target} px: ${ev.rests.toLocaleString('en-US')} rests on the floor (step ${ev.step + 1})`;
+	else if (ev.ev === 'progress' && ev.phase === 'tables' && Number.isFinite(ev.library)) V.detail = `landing: ${ev.library.toLocaleString('en-US')} input pieces, ${ev.arrivals.toLocaleString('en-US')} arrivals (step ${ev.step + 1})`;
+	else if (ev.ev === 'progress' && ev.phase === 'search') V.detail = `landing at x = ${ev.target} px: ${(ev.lookups / 1e6).toFixed(ev.lookups < 1e7 ? 1 : 0)} M combinations tried, ${ev.landed} exact landing${ev.landed === 1 ? '' : 's'} (step ${ev.step + 1})`;
+}
 /** the CPU search's workers make cells along an attempt (goexplore.js "seed <inputs>") */
 function seedCpu(inputs) {
 	if (!S || !inputs || !brk) return;
@@ -1537,9 +1605,11 @@ function start(b, gpu, test) {
 	// relay as before (tests: test.one === true); the wall breaker next to either (its attempts go into the CPU search's
 	// archive: the one search's archive where it runs)
 	const one = !noGpu && cpu && ins.level.width * ins.level.height > GX.FINE_MAX_TILES && b.one !== false && (!test || test.one === true);
+	// (the precision stage: a CPU strategy started when the search stalls; b.precision === false: none; tests: test.precision)
+	const precision = cpu && b.precision !== false && (!test || test.precision === true);
 	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay || one ? [] : ['relay']), ...(noGpu || !breaker ? [] : ['breaker']),
 		...(rolls ? ['gorolls'] : []),
-		...(cpu ? ['goexplore'] : [])];
+		...(cpu ? ['goexplore'] : []), ...(precision ? ['precision'] : [])];
 	const workers = cpuWorkers(b.workers);
 	const seed = Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : 1;
 	// the most salt tries the exploration runs side by side (eegpu explore --lanes=auto --lanesMax): LANES by default
@@ -1551,7 +1621,7 @@ function start(b, gpu, test) {
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
-		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls,
+		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, ...(STRATEGIES[k].precision ? { precision: true } : {}),
 			...(k === 'goexplore' && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
@@ -1570,6 +1640,7 @@ function start(b, gpu, test) {
 		breakFrom: test && test.breakFrom ? [].concat(test.breakFrom).map(String) : [], breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
+		precisionCmd: test && Array.isArray(test.precisionCmd) ? test.precisionCmd : [process.execPath, path.join(__dirname, 'precision.js')],
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		// the proof (eegpu prove: CPU only, so also without an NVIDIA GPU, whenever the native tool is there; EEAT_PROOF=0: none)
 		prover: test && test.prover !== undefined ? (Array.isArray(test.prover) ? test.prover : null) : process.env.EEAT_PROOF === '0' ? null : G.nativeTool() ? [G.nativeTool()] : null,
@@ -1582,6 +1653,9 @@ function start(b, gpu, test) {
 	classInputs.clear();
 	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), gateRooms: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0 };
 	S.breaker = which.includes('breaker') ? { rounds: 0, round: null, last: null, seeds: 0 } : null;
+	// (the precision stage's stall clock; test.precWait: its first wait in s)
+	prec = { mark: Infinity, at: Date.now(), wait: test && test.precWait ? test.precWait : PREC_WAIT_S, wait0: test && test.precWait ? test.precWait : PREC_WAIT_S, runs: 0 };
+	S.precision = which.includes('precision') ? { runs: 0, last: null } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
@@ -1676,8 +1750,11 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (S.physics.viaDeath) note(deathNote(rf));
 	save();
 	if (brk) brk.at = Date.now();   // (the stall clock from the search's start)
+	if (prec) prec.at = Date.now();
 	kids = which.map((k, n) => {
 		if (k === 'breaker') { breakEnd(n); return null; }
+		// (the precision stage waits for a stall; its distances are the reach field's, ranked like a steerless strategy's)
+		if (k === 'precision') { Object.assign(S.strategies[n], { state: 'waiting', noSteer: true, detail: `waits for the search to stall near a spot (no attempt nearer by ${PREC_TILES} tiles for ${prec ? prec.wait : PREC_WAIT_S} s)` }); return null; }
 		if (k !== 'relay') return launch(n);
 		Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for an attempt of ${RELAY_MIN_TICKS}+ ticks to go on from` });
 		return null;
@@ -1930,6 +2007,7 @@ function launch(n) {
 		q.depth = S.result ? Math.max(1, boundTicks() - 1 - V.relay.keep) : 0;
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
+	if (V.key === 'precision') { q.attemptsFile = V.prec.file; q.seconds = V.prec.seconds; q.workers = V.prec.workers; q.depth = S.result ? Math.max(1, boundTicks() - 1) : 0; }
 	if (V.key === 'breaker') {
 		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
 		q.seconds = V.share = V.brk.seconds;
@@ -1961,8 +2039,8 @@ function launch(n) {
 	// rented cloud GPU) lacks, and next to busy CPU threads "every move" was 3-7x slower without it. Before, the whole
 	// process was reniced, so its main thread and the one search's GPU bursts (its eegpu children inherit the main
 	// thread's value) ran at nice 10 too: below every normal process of a shared machine (the cycle 7 test's A100).)
-	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && cur.cpuNice;
-	const cmd = cpu ? [...cur.cpuCmd, ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && cur.cpuNice && !V.precision;
+	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
@@ -2039,6 +2117,13 @@ function launch(n) {
 		if (!V.readyAt && !ev.error) ready(null);
 		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
 		if (ch.stopWhy && (ev.ev === 'progress' || ev.ev === 'layer' || ev.ev === 'try')) return;
+		// (the precision stage: its phases as the strategy's detail; its routes and nearer attempts as every strategy's)
+		if (V.precision && ev.ev !== 'result' && ev.ev !== 'closest' && ev.ev !== 'warning' && !ev.error) {
+			if (ev.ev === 'done') end = ev.end || '';
+			precEvent(V, ev);
+			save();
+			return;
+		}
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			if ((cpu || rolls) && Number.isFinite(ev.rooms)) V.rooms = ev.rooms;
 			if (cpu && ev.gpu && Number.isFinite(ev.gpu.bursts)) V.bursts = ev.gpu.bursts;   // (the one search's bursts: breakBurstsDone)
@@ -2124,6 +2209,8 @@ function launch(n) {
 			note(`${V.label}: ${ev.text}`);
 		} else if (ev.ev === 'closest') {
 			closer(ev, n);
+			// (a landing's nearer state: the CPU search goes on from it)
+			if (V.precision && ev.inputs) seedCpu(String(ev.inputs));
 		} else if (ev.ev === 'source') {
 			// the CPU search's starting points for the relay (goexplore.js, coarse cells): a new room's first cell ("room":
 			// its inputs end where it entered the room), a room's lowest-cost cell ("best")
@@ -2216,6 +2303,31 @@ function launch(n) {
 			if (ch.probeTimer) clearTimeout(ch.probeTimer);
 			totals();
 			save();
+			return;
+		}
+		if (V.precision) {
+			// the precision stage's run ended: without a route, it waits for the next stall (its wait doubled, up to
+			// PREC_WAIT_MAX_S; a nearer attempt starts the wait over)
+			const how = ch.stopWhy || (code === 0 ? end : '');
+			const failed = !ch.stopWhy && code !== 0 && code !== null;
+			if (S.precision) S.precision.last = { end: how || (failed ? 'error' : ''), after: Math.round((Date.now() - S.started) / 100) / 10 };
+			if (V.state !== 'found') {
+				if (failed) {
+					V.state = 'error';
+					V.error = V.error || `exit code ${code}${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 300)}` : ''}`;
+					note(`${V.label}: error: ${V.error}`);
+				} else if (S.running && !S.halted && S.stage !== 'stopped' && !S.result && how !== 'stopped' && prec) {
+					prec.wait = Math.min(PREC_WAIT_MAX_S, prec.wait * 2);
+					prec.at = Date.now();
+					const what = { exhausted: 'no exact landing reached the trophy', time: 'its time ran out', 'no target': 'no spot where an exact position pays', 'no stall states': 'no attempt to start from', none: 'no rests to start from', 'no anchors': 'no rest states on a floor next to the spot' }[how] || how || 'ended';
+					note(`${V.label}: ${what}; again once the search stalls for ${prec.wait} s`);
+					Object.assign(V, { state: 'waiting', detail: `${what}; again after ${prec.wait} s without a nearer attempt (${prec.wait0} s after a nearer one)` });
+				} else if (V.state !== 'beaten') V.state = S.stage === 'stopped' ? 'stopped' : 'ended';
+			}
+			totals();
+			proofAlone();
+			if (!running()) finish();
+			else save();
 			return;
 		}
 		if (V.key === 'explore') {
@@ -2700,8 +2812,9 @@ function closer(ev, n) {
 	const viaDeath = !cut && !cur.distBySteer && dist >= RF.DEATH_TILES;
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
-	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES)
+	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
 	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
+	if (prec && !cut && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
 	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
