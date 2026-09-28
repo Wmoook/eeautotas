@@ -254,7 +254,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, deaths: -1, dprice: 1, cpkey: 0, dburst: 1 };
+	jumpP: 0, jumpNear: 0.75, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -920,6 +920,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// new cells)
 	const DI = a.deathMoves ? deathsOf(L) : null;
 	const rspAt = DI ? new Map() : null;
+	// (rspAt's room: coarse cells the room key, or with --dsub=1 its part the ball's own touches change (RM.cause().sub:
+	// without the keys and the time doors, which flip on the clock); fine cells the discrete state)
+	const rspRoom = () => (!coarse ? disc(sim) : a.dsub ? RM.cause(sim).sub : RM.key(sim));
 	const DEATHBLK_N = DEATH_TICKS + 25;
 	const DEADBLK = { b: new Uint8Array(DEATHBLK_N), refs: 0 };   // (the dead ticks' inputs: the engine reads none)
 	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0, dTicks = 0;   // (dTicks: the dead ticks played)
@@ -1124,7 +1127,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const k = cellKey();
 		// (deaths as moves: the earliest arrival at a respawn tile per room, deathPays' "reached otherwise")
 		if (rspAt !== null && DI.respawnT[tile] === 1) {
-			const rk = (coarse ? roomKey : disc(sim)) * 2097152 + tile, v = rspAt.get(rk);
+			const rk = rspRoom() * 2097152 + tile, v = rspAt.get(rk);
 			if (v === undefined || t < v) rspAt.set(rk, t);
 		}
 		const c = cells.get(k);
@@ -1513,7 +1516,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		// that throws the ball back (its target farther from the trophy by the reach field than the state's own way, by
 		// more than the way a death costs), then the earliest arrival there
 		{ const r0 = respawnCost(); if (r0 < 0 || r0 > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; } }
-		const k0 = coarse ? RM.key(sim) : disc(sim), v0 = rspAt.get(k0 * 2097152 + rt);
+		const v0 = rspAt.get(rspRoom() * 2097152 + rt);
 		if (v0 !== undefined && v0 <= t + DEATH_TICKS - 1) { dDrop++; return; }
 		// (with the steer field, gate-aware, the same bound by it against the run's pick: the reach field is door-blind, and
 		// on Good Egg it puts the spawn as near as the level's upper right, so deaths from there back to the spawn with 7
@@ -1531,7 +1534,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const byCost = raw + DEATH_TILES < rcPrev;
 		// (the earliest arrival first: a room is made only for a death that is kept, never for one dropped after it)
 		if (coarse) roomKey = RM.key(sim);
-		const v = rspAt.get((coarse ? roomKey : disc(sim)) * 2097152 + centreTile());
+		const v = rspAt.get(rspRoom() * 2097152 + centreTile());
 		if (v !== undefined && v <= tR) { dDrop++; return; }
 		let rm = room;
 		if (coarse && roomKey !== room.key) {
