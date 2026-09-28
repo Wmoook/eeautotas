@@ -215,7 +215,7 @@ async function main() {
 		case 'import': {
 			if (pos.length < 2) throw new Error('usage: import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load]');
 			const meta = J.importJob({ eelvl: fs.readFileSync(pos[0]), eetas: fs.readFileSync(pos[1]), name: a.name, eelvlName: path.basename(pos[0]),
-				eetasName: path.basename(pos[1]), startMode: a.start });
+				eetasName: path.basename(pos[1]), startMode: a.start, deaths: a.deaths });
 			if (a.json) return json(meta);
 			return out(`imported ${meta.id}: "${meta.name}", the TAS finishes in ${meta.tas.time} (${meta.tas.coins} coins, ${meta.tas.deaths} deaths)` +
 				`${meta.rng.chance < 1 ? `, works in ${J.pct(meta.rng.chance)} of EEO plays (random portals)` : ''}\n` +

@@ -56,6 +56,8 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	P.L = L;   // (host pointers for now: the start cell's key below; the device copy's before the first launch)
 	P.R = R; P.Lr = Lr; P.keep = keep;
 	P.prune = opt(argc, argv, "prune", "1") == "1" ? 1 : 0;
+	// --deaths=1: deaths are moves: a run goes on through a death that pays (kernels.cu rollBody), at most one a run
+	P.deaths = opt(argc, argv, "deaths", "0") == "1" ? 1 : 0;
 	for (int i = 0; i < L.N; i++) {
 		const int id = L.fg[i];
 		if (id == 1027 || id == 1028) P.roomTeam = 1;
@@ -107,7 +109,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	for (;;) {
 		const bool ok = dl.upload(B.bytes.data(), B.bytes.size()) && dstage.alloc(SB * (size_t)recCap) && dcellT.alloc(4 * cap) && dkeys.alloc(8 * slots) && dbest.alloc(8 * slots) &&
 			ddone.alloc(4 * slots) && dseen.alloc(4 * slots) && ddense.alloc(4 * slots) && dslot.alloc(4 * cap) && dseenOut.alloc(4 * cap) && dtouched.alloc(4ull * touchedCap) &&
-			dpicks.alloc(4ull * maxPicks) && dpickS.alloc(SB * maxPicks) && dfin.alloc(16ull * finCap) && dout.alloc(24ull * recCap) && dctr.alloc(64);
+			dpicks.alloc(4ull * maxPicks) && dpickS.alloc(SB * maxPicks) && dfin.alloc(16ull * finCap) && dout.alloc(24ull * recCap) && dctr.alloc(80);
 		if (ok) break;
 		// (out of GPU memory, e.g. another strategy took it after the check: half the table, down to 64 K cells)
 		if (cu::lastCode != 2 || cap <= 65536) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
@@ -158,7 +160,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	lk::memset8(ddone.p, 0xff, 4 * slots, "memset");
 	lk::memset8(dseen.p, 0, 4 * slots, "memset");
 	lk::memset8(ddense.p, 0xff, 4 * slots, "memset");
-	cu::cuMemsetD8_v2(dctr.p, 0, 64);
+	cu::cuMemsetD8_v2(dctr.p, 0, 80);
 	// the start: cell 0
 	const uint32_t room0 = rollRoom<TW>(P, *start);
 	const uint64_t key0 = rollCellKey<TW>(P, *start, room0);
@@ -197,7 +199,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		pickH.locked && stageH.locked ? 1 : 0, R, Lr, P.phase, g.json().c_str());
 	fflush(stdout);
 	uint64_t batches = 0;
-	unsigned long long st[4] = { 0, 0, 0, 0 };
+	unsigned long long st[5] = { 0, 0, 0, 0, 0 };
 	auto finale = [&](const char* why) {
 		printf("{\"ev\":\"done\",\"end\":\"%s\",\"batches\":%llu,\"ticks\":%llu,\"runs\":%llu,\"seconds\":%.1f%s}\n", why, (unsigned long long)batches, st[0], st[1],
 			std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count(), lk::doneFields().c_str());
@@ -284,9 +286,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		fins.assign(4ull * nf, 0);
 		if (nf) cu::cuMemcpyDtoH_v2(fins.data(), dfin.p, 16ull * nf);
 		nd = std::min<uint32_t>(ctr[3], (uint32_t)cap);
-		unsigned long long st1[4];
-		cu::cuMemcpyDtoH_v2(st1, dctr.p + 32, 32);
-		const unsigned long long dt = st1[0] - st[0], dr = st1[1] - st[1], dc = st1[2] - st[2], dd = st1[3] - st[3];
+		unsigned long long st1[5];
+		cu::cuMemcpyDtoH_v2(st1, dctr.p + 32, 40);
+		const unsigned long long dt = st1[0] - st[0], dr = st1[1] - st[1], dc = st1[2] - st[2], dd = st1[3] - st[3], dk = st1[4] - st[4];
 		memcpy(st, st1, sizeof st);
 		batches++;
 		const size_t n = outAll.size() / 6;
@@ -310,9 +312,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 			for (uint32_t j = 0; j < nf; j++) memcpy(&finSorted[4 * j], &fins[4ull * ord[j].second], 16);
 			fins.swap(finSorted);
 		}
-		printf("{\"ev\":\"batch\",\"n\":%zu,\"fin\":%u,\"cells\":%u,\"full\":%d,\"touched\":%u,\"ticks\":%llu,\"runs\":%llu,\"cut\":%llu,\"dead\":%llu,\"ms\":%.2f,\"kernelMs\":%.2f,"
+		printf("{\"ev\":\"batch\",\"n\":%zu,\"fin\":%u,\"cells\":%u,\"full\":%d,\"touched\":%u,\"ticks\":%llu,\"runs\":%llu,\"cut\":%llu,\"dead\":%llu,\"kept\":%llu,\"ms\":%.2f,\"kernelMs\":%.2f,"
 			"\"rollMs\":%.2f,\"rollWallMs\":%.2f,\"colMs\":%.2f,\"bytes\":%llu}\n",
-			n, nf, nd, nd >= cap ? 1 : 0, nt, dt, dr, dc, dd, lk::sinceMs(tb), lk::G.totalKernelMs - k0, rollMs, rollWall, colMs, (unsigned long long)(24 * n + 16ull * nf));
+			n, nf, nd, nd >= cap ? 1 : 0, nt, dt, dr, dc, dd, dk, lk::sinceMs(tb), lk::G.totalKernelMs - k0, rollMs, rollWall, colMs, (unsigned long long)(24 * n + 16ull * nf));
 		fflush(stdout);
 		if (n) fwrite(outAll.data(), 24, n, stdout);
 		if (nf) fwrite(fins.data(), 16, nf, stdout);

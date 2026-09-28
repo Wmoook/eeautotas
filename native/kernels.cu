@@ -356,6 +356,60 @@ __device__ __forceinline__ bool cellInsert(u64* cells, u32 mask, u64 key) {
 	}
 	return false;   // (the table is full here: treat as seen)
 }
+/** a child's cell key (the claim's cell: bits 12.. of the candidate key), its `small` word and its discrete hash (0 without
+ *  --discrete): the exact vertical state or its quantization, the position and speed at the grain of its row (or the
+ *  near-miss refinement's), the discrete state, the lane */
+template <int TW>
+__device__ __forceinline__ u64 exploreKeyOf(const ExploreParams& p, Sim<TW>& sim, const State<TW>& s, i32 cx, i32 cy, u32 lane, u32& small, u64& disc) {
+	// (snapped: a whole-pixel position or a zero speed, what a wall, floor or ceiling hit leaves; such states are the
+	// precise ones a clip or a one-block gap needs, so they never share a cell with a near miss)
+	const u32 snapped = (floor(s.px) == s.px ? 1u : 0u) | (floor(s.py) == s.py ? 2u : 0u) | (eq0(s.speed_x) ? 4u : 0u) | (eq0(s.speed_y) ? 8u : 0u);
+	small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26) | (snapped << 27);
+	// near-miss refinement: a situation the earlier tries' near misses passed through gets cells rfx / rfv times finer
+	// (bit 31 of small keeps them apart from the plain cells)
+	const bool fine = p.refKeys && refineHit(p.refKeys, p.refMask, exploreSituation(s.py, s.speed_y, s.on_ground != 0, s.jump_count, cx));
+	u64 key = fine ? exploreCell(s.px, s.py, s.speed_x, s.speed_y, small | 0x80000000u, false, p.qy, p.qvy, p.cqx * p.rfx, p.cqv * p.rfv)
+		: exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
+	disc = 0;
+	if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
+	if (lane) key = splitmix(key ^ (0xd6e8feb86659fd93ull * (u64)lane));   // (--lanes: a lane's own cells)
+	return key;
+}
+/**
+ * Deaths as moves (--deaths=1): does the dying child s (its parent par) go on? A dead child of a dead parent: yes (the dead
+ * ticks run their course). A child that died in this tick: only where the death pays: (1) the first death of the whole
+ * exploration to its respawn target in its discrete state (checkpoint and spawn rotation, coins, keys, switches, effects,
+ * the doors' state: Sim::hashDiscrete, which holds the checkpoint; a mark in the cell table, exploreMarkOnce: a later
+ * death there comes back later, or at the same time, to the same place), then (2) the respawn itself (the engine plays the
+ * dead ticks: no input reaches a dead ball) lands in a cell no earlier layer saw, inside the region, and not where the
+ * reach field rules it out: the earliest arrival there (the claim drops it anyway if a live ball got there first by
+ * then). Every other dying child is dropped as before.
+ */
+template <int TW>
+__device__ __forceinline__ bool exploreKeepDead(const ExploreParams& p, const State<TW>& s, const State<TW>& par, u32 lane, unsigned long long& nSim) {
+	if (par.is_dead) return true;
+	{
+		State<TW> c = s;
+		Sim<TW> cs(p.L, c);
+		const i32 rt = c.checkpoint_x != -1 ? c.checkpoint_y * p.L.W + c.checkpoint_x : -1 - c.next_spawn;
+		const u64 mark = splitmix(cs.hashDiscrete() ^ splitmix((u64)(u32)rt ^ 0x72657370776e2121ull ^ ((u64)lane << 40)));
+		if (!exploreMarkOnce(p.cells, p.cellMask, mark & ~0xfffull, (u32)p.layer)) return false;
+	}
+	State<TW> r = s;
+	Sim<TW> rs(p.L, r);
+	i32 n = 0;
+	while (r.is_dead && !r.broken && n < 96) { Input none = maskInput(0); rs.tick(none); n++; }
+	nSim += (unsigned long long)n;
+	if (r.is_dead || r.broken) return false;
+	if (p.reach.on && p.prune && reachFifths(p.reach, r.px, r.py, r.speed_y, r.q0, r.q1, r.slippery) < 0) return false;
+	const i32 cx = truncI(r.px + 8.0) >> 4, cy = truncI(r.py + 8.0) >> 4;
+	if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) return false;
+	u32 small = 0; u64 disc = 0;
+	const u64 key = exploreKeyOf<TW>(p, rs, r, cx, cy, lane, small, disc);
+	if (exploreSeenBefore(p.cells, p.cellMask, key & ~0xfffull, (u32)p.layer)) return false;
+	if (p.stats) atomicAdd(&p.stats[3], 1ull);
+	return true;
+}
 // expand: one thread per parent, all 18 options (like the beam's). A twin of a lower option (search.h canonOption) is
 // not simulated: it would be the same state in the same cell with a higher priority (the option is its last tie-break),
 // so the claim would never pick it; the frontier is the same, with fewer ticks.
@@ -382,7 +436,20 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		nSim++;
 		if (o == 0) used = sim.inUsed();
 		if (!(o & 1)) jumpUsed |= (sim.inUsed() & 1u) << (o >> 1);
-		if (s.broken || s.is_dead) continue;
+		if (s.broken) continue;
+		// deaths as moves (--deaths=1): a dying child only where its respawn pays (exploreKeepDead), then its dead ticks,
+		// each a cell of its own (the dead offset in the key; no input reaches a dead ball: option 0 alone, the others its
+		// twins), first in the layer's order (few: the filter); the respawned ball is a child like any other. Without it
+		// every dying child is dropped, as before.
+		if (s.is_dead) {
+			if (!p.deaths || !exploreKeepDead<TW>(p, s, *par, lane, nSim)) continue;
+			const i32 dx = truncI(s.px + 8.0) >> 4, dy = truncI(s.py + 8.0) >> 4;
+			u32 dsm = 0; u64 ddisc = 0;
+			const u64 dkey = splitmix(exploreKeyOf<TW>(p, sim, s, dx, dy, lane, dsm, ddisc) ^ doubleToBits(s.dead_offset + 0.0) ^ 0x6465616462616c6cull);
+			p.candKey[(size_t)pi * 18 + o] = (dkey & ~0xfffull) | 1ull;
+			p.candPrio[(size_t)pi * 18 + o] = ((splitmix(dkey ^ salt) & 0x7ffffull) << 32) | ((parentHash & 0x7ffffffull) << 5) | (u64)o;
+			continue;
+		}
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
 		// the finish first: this tick took the trophy (the silver crown); report, do not expand (the crown comes from the
@@ -473,18 +540,9 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 			}
 		}
 		(void)startPy;
-		// (snapped: a whole-pixel position or a zero speed, what a wall, floor or ceiling hit leaves; such states are the
-		// precise ones a clip or a one-block gap needs, so they never share a cell with a near miss)
-		const u32 snapped = (floor(s.px) == s.px ? 1u : 0u) | (floor(s.py) == s.py ? 2u : 0u) | (eq0(s.speed_x) ? 4u : 0u) | (eq0(s.speed_y) ? 8u : 0u);
-		const u32 small = (u32)(s.on_ground ? 1 : 0) | ((u32)(s.jump_count & 7) << 1) | ((u32)(s.q0 & 0x7ff) << 4) | ((u32)(s.q1 & 0x7ff) << 15) | ((u32)(s.last_portal_set ? 1 : 0) << 26) | (snapped << 27);
-		// near-miss refinement: a situation the earlier tries' near misses passed through gets cells rfx / rfv times finer
-		// (bit 31 of small keeps them apart from the plain cells)
-		const bool fine = p.refKeys && refineHit(p.refKeys, p.refMask, exploreSituation(s.py, s.speed_y, s.on_ground != 0, s.jump_count, cx));
-		u64 key = fine ? exploreCell(s.px, s.py, s.speed_x, s.speed_y, small | 0x80000000u, false, p.qy, p.qvy, p.cqx * p.rfx, p.cqv * p.rfv)
-			: exploreCell(s.px, s.py, s.speed_x, s.speed_y, small, cy < p.coarseRow, p.qy, p.qvy, p.cqx, p.cqv);
+		u32 small = 0;
 		u64 disc = 0;
-		if (p.discrete) { disc = sim.hashDiscrete(); key = splitmix(key ^ disc); }
-		if (lane) key = splitmix(key ^ (0xd6e8feb86659fd93ull * (u64)lane));   // (--lanes: a lane's own cells)
+		const u64 key = exploreKeyOf<TW>(p, sim, s, cx, cy, lane, small, disc);
 		// the proposal: the cell (12 low bits free for the layer tag) and a fixed priority: the reach-field distance
 		// (12 bits: nearer the trophy first), the state's content (19 bits), then the parent's content and the option
 		// (the rest: which of two identical children stands for the cell)
@@ -652,7 +710,8 @@ __device__ void rollBody(const RollParams& p) {
 		Mulberry r; r.s = rollSeed(p.batchSeed, pk, run);
 		i32 m = option((i32)(r.next() * 18.0));
 		nRuns++;
-		for (i32 k = 0; k < p.Lr; k++) {
+		i32 ext = 0;   // (--deaths=1: a kept death's dead ticks, which the run goes on through: its length grows by them)
+		for (i32 k = 0; k < p.Lr + ext && k < 255; k++) {
 			const i32 t = t0 + k + 1;
 			if (t > p.maxT) break;
 			m = rollDraw(r, p.keep, m);
@@ -664,7 +723,31 @@ __device__ void rollBody(const RollParams& p) {
 				if (f < p.finCap) { p.fin[4 * f] = pk; p.fin[4 * f + 1] = run; p.fin[4 * f + 2] = (u32)k; p.fin[4 * f + 3] = (u32)t; }
 				break;
 			}
-			if (s.is_dead || s.broken) { nDead++; break; }
+			if (s.broken) { nDead++; break; }
+			if (s.is_dead) {
+				// deaths as moves (--deaths=1): a run goes on through one death that pays (the draws go on: the engine reads
+				// none while the ball is dead, and rollInputs rebuilds them the same), then its respawn and what follows are
+				// cells as always; the death pays when it is the first of the whole search to its respawn target in its
+				// discrete state (a mark in the cell table, its earliest respawn tick: a later death there comes back later)
+				// and the respawn is not one the reach field rules out. Every other death ends the run, as before.
+				if (ext > 0 && k < p.Lr + ext) continue;   // (the kept death's dead ticks: no cell)
+				if (!p.deaths || ext > 0) { nDead++; break; }
+				State<TW> q = s;
+				Sim<TW> qs(p.L, q);
+				i32 n = 0;
+				while (q.is_dead && !q.broken && n < 96) { Input none = maskInput(0); qs.tick(none); n++; }
+				nTicks += (unsigned long long)n;
+				const i32 tR = t + n;
+				if (q.is_dead || q.broken || tR >= p.maxT || k + n >= 250) { nDead++; break; }
+				if (p.reach.on && p.prune && reachFifths(p.reach, q.px, q.py, q.speed_y, q.q0, q.q1, q.slippery) < 0) { nDead++; break; }
+				const i32 rt = s.checkpoint_x != -1 ? s.checkpoint_y * p.L.W + s.checkpoint_x : -1 - s.next_spawn;
+				const u64 mk = splitmix(qs.hashDiscrete() ^ splitmix((u64)(u32)rt ^ 0x72657370776e2121ull)) | 1ull;
+				const i32 ms = rollSlot(p, mk, true);
+				if (ms < 0 || atomicMin(&p.doneT[ms], (u32)tR) <= (u32)tR) { nDead++; break; }
+				ext = n;
+				if (p.stats) atomicAdd(&p.stats[4], 1ull);
+				continue;
+			}
 			if (p.reach.on && p.prune && reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) < 0) { nCut++; break; }
 			if (t >= p.maxT) continue;   // (a route from here would not be faster: the next tick ends the run)
 			const i32 slot = rollSlot(p, rollCellKey<TW>(p, s, rollRoom<TW>(p, s)), !p.full);

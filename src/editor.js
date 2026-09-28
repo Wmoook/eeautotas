@@ -270,7 +270,8 @@ function noWayNote(ph) {
  *  checkpoint or another spawn), which the searches do not follow (they drop dead balls) */
 function deathNote(ph) {
 	if (!ph || ph.pending || ph.failed || !(ph.startCost >= RF.DEATH_TILES)) return null;
-	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls, so they cannot find it.';
+	if (ph.deathMoves) return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches take a death as a move where it pays.';
+	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls here (deaths as moves are off), so they cannot find it.';
 }
 /**
  * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes (with
@@ -368,13 +369,13 @@ function check(buf) {
 // for 120 s with 16 CPU workers: the first route after 18.2 / 33.9 s (5,271 / 5,319 ticks), without it 61.5 / 66.9 /
 // 67.0 s (10,297 / 9,894 / 10,297 ticks, the CPU search's and the relay's).
 const STRATEGIES = {
-	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
+	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
 		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []), ...(q.refine ? ['--refine=1'] : []),
 		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
 	// the relay: "every move" again from a point of the nearest attempt so far (its inputs as --prefix, a fresh table,
 	// coarse speed cells: see RELAY_CELLS)
-	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
+	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V),
 		// (a small table and layer cap: its layers hold tens of thousands of states, and a full-size second explore next
 		// to every move's (2 GB of cells + ~2.7 GB of states) overcommitted the 8 GB laptop GPU: paged, 5x slower)
@@ -385,19 +386,19 @@ const STRATEGIES = {
 	// the wall breaker ("past the wall", see BREAK_WAIT_S): "every move" from a stalled search's frontier states (--prefix)
 	// with the largest table the GPU holds (--cells, up to 2^31), a 2M layer cap, 4 px / 1/16 px/tick cells first and no
 	// cost ceiling; a box of BREAK_REGION tiles around its start only with a table of 2^28 cells or fewer
-	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`,
+	breaker: { label: 'past the wall', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${q.cells.cqx}`, `--cqv=${q.cells.cqv}`, `--qy=${q.cells.qy}`, `--qvy=${q.cells.qvy}`, `--reach=${q.gateReach || f.reach}`, ...(q.gateReach ? [] : steerArg(f, q.V)),
 		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : [])] : [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1'] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0'])] },
 };
 // the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
 const ROLL_BATCH = 4096;
@@ -1375,7 +1376,11 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
+	// (deaths as moves, 2026-09-28: where something kills and a checkpoint or 2+ spawns exist (goexplore.js deathMovesFor),
+	// the searches keep a death that pays (goexplore.js deathPays; the GPU tools' --deaths=1: kernels.cu exploreKeepDead,
+	// rollBody); body deaths: false: every death ends its run, as before)
+	const deathMoves = b.deaths !== false && GX.deathMovesFor(ins.level);
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
@@ -1452,7 +1457,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (!cur) return;
 	if (S.halted) { S.stage = S.result ? 'found' : 'stopped'; finish(); return; }
 	const noWayUp = rf.mode === 'physics' && rf.startCost < 0;
-	S.physics = { mode: rf.mode, startCost: rf.startCost < 0 ? null : Math.round(rf.startCost * 10) / 10, noWayUp, explain: rf.explain || null, viaDeath: !!deathNote(rf) };
+	S.physics = { mode: rf.mode, startCost: rf.startCost < 0 ? null : Math.round(rf.startCost * 10) / 10, noWayUp, explain: rf.explain || null, viaDeath: !!deathNote(rf), deathMoves: !!cur.opts.deaths };
 	if (noGpu) {
 		which = which.filter((k) => STRATEGIES[k].cpu);
 		S.strategies = S.strategies.filter((q) => q.cpu);
@@ -1483,7 +1488,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${S.width} states per tick`}, up to ${S.seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu && which.includes('goexplore') ? ` (${cur.opts.workers} CPU thread${cur.opts.workers > 1 ? 's' : ''})` : ''));
 	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
-	if (S.physics.viaDeath) note(deathNote(rf));
+	if (S.physics.viaDeath) note(deathNote(S.physics));
 	save();
 	if (brk) brk.at = Date.now();   // (the stall clock from the search's start)
 	kids = which.map((k, n) => {
