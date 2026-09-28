@@ -655,6 +655,7 @@ function checkStalls() {
 	if (!S || !S.running) return;
 	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
 	pastPlanCheck();   // (a search stalled at the plan's coin count: the plan past it, before the breaker picks its gates)
+	stallCegarCheck();   // (a stalled search: its field's blocker refuted, the CPU search told: ordering only)
 	breakKick();   // (a stalled search: a round of the wall breaker)
 	precKick();    // (a stalled search: exact landings from its nearest attempts)
 	const now = Date.now();
@@ -1159,6 +1160,7 @@ function pastPlanCheck() {
 	if (held < cur.past.planT || !fs.existsSync(cur.past.file)) return;
 	cur.pastOn = true;
 	cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
+	if (cur.cegar) { cur.cegarFile = ''; cur.cegar.file = ''; }   // (a refuted field before: the next refutation rebuilds on the plan past its count, its walls and features kept)
 	S.closest = null;            // (another measure: the CPU search's attempts by it)
 	brk.mark = Infinity;
 	let told = 0;
@@ -1171,6 +1173,95 @@ function pastPlanCheck() {
 	note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
 	save();
 }
+// ---------------------------------------------------------------- the stall's refutation (stall CEGAR, 2026-09-28)
+// The steer field's CEGAR adds a feature only when its own walk / physics plan meets a closed gate; where both models
+// call a one-way, a portal entry or a physics gap passable, the field keeps a false way and every stage that starts from
+// the nearest attempt (breaker, relay, escape, precision) sits at it (DEEPER: 2 tiles from the trophy by the field at
+// 3.2 s, its pocket sealed; Christmas Tree Quest 6 tiles by the field, 289 away). So once the search has had no attempt
+// nearer by BREAK_TILES and no new useful room for the breaker's first wait, and no route: the field's descent from the
+// nearest attempt's end (steer.js stallBlocker, at most CEGAR_K tiles) names its first tile no attempt entered; the
+// steer worker rebuilds the field with that blocker refuted (buildSteer opts.refute: a gate of a feature the field does
+// not model is forced, a coin door with the plan's count at least its own; else the tile is a wall for the ordering),
+// and the CPU search orders head A by it (goexplore.js stdin `refute <file>`: its own lookup rule), the breaker's gates
+// from its coin plan. At most CEGAR_MAX a search, each after a fresh stall. ORDERING only: the RCH3 field, its -1 prune
+// and the proofs never read it. `b.stallCegar === false` / EEAT_STALLCEGAR=0: off.
+const CEGAR_MAX = 4, CEGAR_K = 8, CEGAR_MS = 60000, CEGAR_REPLAY = 2000000;
+function stallCegarCheck() {
+	if (!cur || !cur.opts.stallCegar || !cur.files.steerCpu || !brk || !S || S.result || !S.running || S.halted || !S.steer) return;
+	const R = cur.cegar || (cur.cegar = { n: 0, at: 0, busy: false, walls: [], feats: [], modeled: null, coinT: 0, file: '' });
+	if (R.busy || R.n >= CEGAR_MAX || !S.closest || !S.closest.inputs || S.closest.cut) return;
+	// (a fresh stall: the breaker's first wait since the last progress AND since the last refutation)
+	if (Date.now() - Math.max(brk.at, R.at) < cur.opts.breakWait[0] * 1000) return;
+	R.at = Date.now();
+	let bl = null, why = '';
+	try {
+		const file = R.file || (cur.pastOn ? cur.past.file : cur.files.steerCpu);
+		if (!R.st || R.stFile !== file) { R.st = SF.readSteerFile(fs.readFileSync(file)); R.stFile = file; }
+		const masks = C.parseEetasBuffer(Buffer.from(S.closest.inputs, 'latin1'));
+		const L = cur.level, W = L.width, H = L.height;
+		const entered = new Uint8Array(W * H);
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		const mark = () => { const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4; if (tx >= 0 && ty >= 0 && tx < W && ty < H) entered[ty * W + tx] = 1; };
+		mark();
+		for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t] & 31); sim.tick(inp); mark(); }
+		// (the tiles the sources' lowest-cost attempts entered: every room's, CEGAR_REPLAY ticks at most)
+		const end = sim.snapshot();
+		let budget = CEGAR_REPLAY;
+		for (const q of sources.values()) {
+			const ins = q && q.best && q.best.inputs;
+			if (!ins || ins.length > budget) continue;
+			budget -= ins.length;
+			sim.reset(); mark();
+			for (let t = 0; t < ins.length; t++) { E.applyMask(inp, (ins.charCodeAt(t) - 48) & 31); sim.tick(inp); mark(); }
+		}
+		sim.restore(end);
+		bl = SF.stallBlocker(R.st, sim, entered, CEGAR_K);
+		if (!bl) why = 'the field\'s descent stays on tiles the attempts entered';
+	} catch (e) { why = e.message; }
+	if (!bl || !bl.tiles.length) { if (why) note(`the stall's refutation: nothing to refute (${why})`); return; }
+	R.busy = true;
+	const n = R.n + 1;
+	const out = `${steerBase(cur.levelHash)}_refute${n}.bin`;
+	const o = { refute: { tiles: bl.tiles, modeled: R.modeled || S.steer.features || [] }, features: R.feats.slice(), walls: R.walls.slice(), coinT: Math.max(R.coinT, cur.pastOn && cur.past ? cur.past.T : 0), maxMs: CEGAR_MS };
+	const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
+		const E = require(d.mods.eesim), EL = require(d.mods.eelvl), SF = require(d.mods.steer), G = require(d.mods.gpu);
+		const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
+		const st = SF.buildSteer(L, d.o);
+		let lfp = null;
+		try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
+		const b = SF.steerFileBytes(st, lfp);
+		fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file);
+		parentPort.postMessage({ refuted: st.info.refuted, features: st.info.features, layers: st.info.layers, dp: st.info.dp, walls: st.info.walls, ms: st.info.ms, bytes: b.length, over: st.info.over });`;
+	const gen = searchGen, t0 = Date.now();
+	let w;
+	try {
+		w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(cur.buf), file: out, o,
+			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
+	} catch (e) { R.busy = false; return; }
+	const done = () => { R.busy = false; };
+	w.once('error', (e) => { done(); note(`the stall's refutation: the rebuild failed (${e.message})`); });
+	w.once('exit', done);
+	w.on('message', (r) => {
+		R.busy = false;
+		if (gen !== searchGen || !cur || !S || !S.running || S.result || !r || !r.refuted) return;
+		R.n = n; R.file = out; R.modeled = r.features;
+		if (r.refuted.kind === 'gate') { R.feats.push(r.refuted.feat); if (r.dp && r.dp.T) R.coinT = Math.max(R.coinT, r.dp.T); }
+		R.walls = r.walls || R.walls;
+		let told = 0;
+		S.strategies.forEach((q, k) => {
+			const ch = kids[k];
+			if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`refute ${out}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
+		});
+		if (r.dp) { cur.cegarFile = out; cur.gateSteer = undefined; }
+		const after = Math.round((Date.now() - S.started) / 100) / 10;
+		const what = r.refuted.kind === 'gate' ? `the gate ${r.refuted.feat} at (${r.refuted.x}, ${r.refuted.y}) (the field did not model it)` : `(${r.refuted.x}, ${r.refuted.y}) an ordering wall (the field's way there no attempt took)`;
+		const line = { n, after, kind: r.refuted.kind, feat: r.refuted.feat, x: r.refuted.x, y: r.refuted.y, tiles: bl.tiles.length, near: S.closest ? S.closest.tiles : null, features: r.features, layers: r.layers, dp: r.dp ? r.dp.T : 0, walls: (r.walls || []).length, ms: Date.now() - t0, told };
+		if (S.steer) { S.steer.refuted = S.steer.refuted || []; S.steer.refuted.push(line); }
+		note(`the stall's refutation ${n}: ${what}; the steer field rebuilt in ${((Date.now() - t0) / 1000).toFixed(1)} s (${r.layers} layers${r.dp ? `, coin plan ${r.dp.T}` : ''}), ${told ? 'the CPU search orders by it' : 'no CPU search to tell'}`);
+		save();
+	});
+}
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
 const GATE_AT = 0.2;
 /** the coin plan's next gate from the state after inputs: {x, y} (tiles) or null; the steer file read once a search */
@@ -1179,7 +1270,7 @@ function breakGate(inputs) {
 	try {
 		if (cur.gateSteer === undefined) {
 			cur.gateSteer = null;
-			const buf = fs.readFileSync(cur.pastOn ? cur.past.file : cur.files.steerCpu);
+			const buf = fs.readFileSync(cur.cegarFile || (cur.pastOn ? cur.past.file : cur.files.steerCpu));
 			const st = SF.readSteerFile(buf);
 			if (st && st.dp) {
 				const tiles = new Map(), cb = cur.level.coinBit;
@@ -1209,7 +1300,7 @@ function breakGate(inputs) {
 		const b = G0.st.dp.leg[g.i];
 		let reach = G0.files.get(b);
 		if (!reach) {
-			reach = path.join(dir(), `gate_${cur.pastOn ? 'p' : ''}${b}.rch3`);
+			reach = path.join(dir(), `gate_${cur.cegarFile && cur.cegar ? `r${cur.cegar.n}` : cur.pastOn ? 'p' : ''}${b}.rch3`);
 			fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
 			G0.files.set(b, reach);
 		}
@@ -1772,6 +1863,8 @@ function start(b, gpu, test) {
 		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false),
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
+		// (the stall's refutation: `b.stallCegar === false` / EEAT_STALLCEGAR=0 off)
+		stallCegar: b.stallCegar !== false && !(test && test.stallCegar === false) && process.env.EEAT_STALLCEGAR !== '0',
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
 		breakPast: b.breakPast !== false && !(test && test.breakPast === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
