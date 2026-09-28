@@ -250,7 +250,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300 };
+	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -863,6 +863,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// last reset and when; for the stats: flagged now, flags set in all, the most flagged at once)
 	const spdRooms = [];
 	let spdTrig = 0, spdAt = Date.now(), spdBest = Infinity, spdOn = 0, spdFlags = 0, spdPeak = 0;
+	// (--spdG=1: the one search's nearest distance over all workers, from the main thread ('gnear'): the stall clock runs
+	// only while the WHOLE search makes no progress; the bound at the start: a route since (a lower bound) stops the clock)
+	let gNear = Infinity;
+	const spdMaxT0 = maxT, spdLog = process.env.EEAT_SPDLOG || '';
+	const spdSay = (o) => { if (spdLog) try { fs.appendFileSync(spdLog, JSON.stringify(Object.assign({ s: Math.round((Date.now() - t0) / 100) / 10, seed }, o)) + '\n'); } catch (e) { /* */ } };
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
@@ -1367,6 +1372,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const x = m.message;
 			if (x.type === 'import' && coarse) importRun(x.inputs);
 			else if (x.type === 'nearest') nearestOf(x);
+			else if (x.type === 'gnear') { if (x.rc < gNear) gNear = x.rc; }
 			else if (x.type === 'route' && HL !== null) setRoute(x.inputs, !!x.byL, !!x.byW);
 		}
 	};
@@ -1410,11 +1416,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** --spd: the stall clock (between chunks). Progress (the nearest distance down by SPD_PROGRESS) clears the flags;
 	 *  --spd seconds without it flag the frontier room (the unflagged room whose best cell is nearest), at most --spdMax */
 	const spdClock = (now) => {
-		const d = near !== null ? near.rc : Infinity;
-		if (d < spdBest - SPD_PROGRESS || spdBest === Infinity) {
+		const d0 = near !== null ? near.rc : Infinity;
+		const d = a.spdG ? Math.min(d0, gNear) : d0;
+		// (--spdR=0: a route found (the shared bound dropped) ends the clock: the flags were there to reach the trophy)
+		const routed = !a.spdR && maxT < spdMaxT0;
+		if (d < spdBest - SPD_PROGRESS || spdBest === Infinity || routed) {
 			if (d < Infinity) spdBest = d;
 			spdAt = now;
-			if (spdRooms.length) { for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
+			if (spdRooms.length) { spdSay({ ev: 'clear', d, d0, n: spdRooms.length, routed }); for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
 			spdTrig = 0; spdOn = 0;
 			return;
 		}
@@ -1429,6 +1438,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		spdAt = now;
 		if (br === null) return;
 		br.spd = true; spdRooms.push(br); spdTrig++; spdFlags++;
+		spdSay({ ev: 'flag', d, d0, room: br.key, desc: br.desc, bd, cells: cells.size, n: spdRooms.length });
 		spdOn = spdRooms.length; if (spdOn > spdPeak) spdPeak = spdOn;
 	};
 	while (!end) {
@@ -2307,7 +2317,11 @@ async function main() {
 			}
 		}
 		if (msg.type === 'closest') {
-			if (!near || msg.rc < near.rc - 1e-3 || (msg.rc <= near.rc + 1e-3 && msg.t < near.t)) { near = msg; nearPending = true; }
+			if (!near || msg.rc < near.rc - 1e-3 || (msg.rc <= near.rc + 1e-3 && msg.t < near.t)) {
+				// (--spdG: the whole search's nearest distance to every worker's stall clock)
+				if (one && a.spd > 0 && a.spdG && (!near || msg.rc < near.rc - 1e-3)) for (const p of one.ports) p.postMessage({ type: 'gnear', rc: msg.rc });
+				near = msg; nearPending = true;
+			}
 		} else if (msg.type === 'source') {
 			onSource(msg);
 		} else if (msg.type === 'room') {
