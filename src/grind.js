@@ -1074,7 +1074,12 @@ async function flybeamLane() {
 		const res = await runTool('flybeam.js', [`--tas=${ref}`, LVL, `--out=${fo}`, `--threads=${FLY_K}`, `--nocoins=${NC}`, `--seconds=${s}`,
 			`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 2048}`, `--timeS=${s}`,
 			`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`, '--order=stretch', `--refine=${FLY_REFINE}`, '--wrap=0', `--axisTails=${FLY_AXIS}`,
-			`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], (s + 120) * 1000, logFile);
+			`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], (s + 120) * 1000, null);
+		// (every call's lines kept: the log grows by ~5 KB a call; past 4 MB it starts over)
+		try {
+			if (fs.existsSync(logFile) && fs.statSync(logFile).size > 4e6) fs.unlinkSync(logFile);
+			fs.appendFileSync(logFile, `== lane ${k} (${new Date().toTimeString().slice(0, 8)})\n${res ? res.out : ''}\n`);
+		} catch (e) { /* ignore */ }
 		if (fs.existsSync(fo)) { consider(fo, `flybeam lane ${k}`); addResult(fo); }
 		else log(`flybeam lane ${k}: nothing faster`);
 		if (res && /every start done/.test(res.out)) { waitFor = from; log('flybeam lane: every start of this best searched; waiting for a new best'); }
