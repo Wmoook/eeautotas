@@ -129,7 +129,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
   collected in between (`src/loops.js`), the longest first, each once; then every coin-to-coin segment in windows; window after window from a cursor, for ~55% of the
   round), the skip finder (`skipfind.js`, a slice of `--skipfindS` (default 30% of a round, 120-300 s) on every thread,
   continuing its pass over the run through `grind_skipfind.txt`; in a session's first round 1 right after mutA, later
-  after the skip search; `--skipfind=0` off: path changes from states all along the run, see its row), the skip search (`skips.js`, once per best: where the run passes a spot it lands on or hits much later, the
+  after the skip search; OPT-IN for now (`--skipfind=1` or `EEAT_SKIPFIND=1`): pushed on by default without an end-to-end A/B or a review, so off until both: path changes from states all along the run, see its row), the skip search (`skips.js`, once per best: where the run passes a spot it lands on or hits much later, the
   states that touch it early and every move from them; not on time-door levels; `--skips=0` off), mutate, a slice of the dense shortcuts pass (from its own cursor), the time-door pass (`phase.js`, on levels with
   time doors, or coin doors when the coins count; there it runs right after the first mutate, and again after the endgame when the best changed meanwhile), mutate, a beam search every other round
   when there is time (every 4th anyway; one stopped by a restart is not repeated), then a splice of all results plus
