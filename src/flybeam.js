@@ -374,6 +374,7 @@ async function main() {
 	console.log(`[flybeam] ${tasks.length} tasks (starts ${starts.join(',')}; ${cfgs.length} settings) on ${threads} threads`);
 	const results = [];
 	let next = 0;
+	const meter = C.tickMeter();   // `[ticks] <total>` every second: the grind's live speed
 	await new Promise((resolve) => {
 		let live = 0;
 		const spawn = () => {
@@ -382,7 +383,7 @@ async function main() {
 			const task = tasks[next++];
 			if (isFinite(left)) task.timeS = Math.min(task.timeS, Math.max(5, left / 1000 - 3));
 			live++;
-			const w = new Worker(__filename, { workerData: { flybeam: task } });
+			const w = new Worker(__filename, { workerData: { flybeam: task, ticksBuf: meter.buf } });
 			w.on('message', (r) => {
 				results.push(r);
 				console.log(`[flybeam] ${r.name} (A ${r.A}..${r.B}, cfg ${JSON.stringify(cfgs[r.cfg])}): ${r.layers} layers, ${(r.sims / 1e6).toFixed(1)} M ticks, ${r.secs.toFixed(0)} s, ` +
@@ -401,6 +402,7 @@ async function main() {
 	}
 	// every join replayed alone: its saving in RUN ticks (a join before the first input moves the timer's start: the
 	// ice run's 0 -> 397 saved 69 ticks but started the timer 69 ticks sooner) and only joins the acceptance rule takes
+	meter.stop();
 	const cands = [];
 	for (const c of results.flatMap((r) => r.found)) {
 		const ev = C.evaluate(level, splice(ms, [c]));
@@ -424,7 +426,13 @@ async function main() {
 		tasks: results.map((r) => ({ name: r.name, A: r.A, B: r.B, cfg: cfgs[r.cfg], layers: r.layers, sims: r.sims, secs: r.secs, direct: r.direct, tails: r.tails, maxLead: r.maxLead, best: r.bestSaving })) }, null, 1));
 }
 
-if (!isMainThread && workerData && workerData.flybeam) parentPort.postMessage(runTask(workerData.flybeam));
+if (!isMainThread && workerData && workerData.flybeam) {
+	// the live speed (common.tickMeter): this worker's ticks into the main thread's shared counter
+	if (workerData.ticksBuf) E.setTickCounter(new BigInt64Array(workerData.ticksBuf));
+	const r = runTask(workerData.flybeam);
+	E.flushTicks();
+	parentPort.postMessage(r);
+}
 else if (require.main === module) main().catch((e) => { console.log(`[flybeam] error: ${e.stack || e.message}`); process.exitCode = 1; });
 
 module.exports = { traceRun, runTask, pickSet, splice, MASKS };
