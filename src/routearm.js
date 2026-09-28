@@ -54,9 +54,12 @@ function concat(parts) {
 /** the route's trace: per tick (after t ticks) position, speeds, the reach lookups' inputs, the tile, the coin-blind
  *  state hash (its latest tick) and the physical state (its latest tick); kappa = the route's pace (ticks per tile of
  *  the trophy field along it, its total variation: detours count both ways), 2.4 .. 12 */
-function trace(L, field, masks) {
-	const ev = C.evaluate(L, masks, false);
-	if (!ev) return null;
+function trace(L, field, masks, attempt = false) {
+	let ev = C.evaluate(L, masks, false);
+	// (an attempt, before any route: inputs that do not finish, cut before a death (skipfind.js attemptOf); its "later
+	// points" are the arm's goals as a route's are)
+	if (!ev && attempt) { const at = require('./skipfind.js').attemptOf(L, masks); ev = at.finish || at; }
+	if (!ev || !ev.ms || ev.ms.length < 2) return null;
 	const ms = ev.ms, n = ms.length, W = L.width, H = L.height;
 	const X = new Float64Array(n + 1), Y = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1);
 	const Q0 = new Int32Array(n + 1), Q1 = new Int32Array(n + 1), SL = new Float64Array(n + 1), T = new Int32Array(n + 1);
@@ -78,8 +81,21 @@ function trace(L, field, masks) {
 		}
 	}
 	const kappa = Math.max(2.4, Math.min(12, tv > 1 ? n / tv : 5));
-	return { L, masks: ms, n, ev, X, Y, VX, VY, Q0, Q1, SL, T, hashTick, physTick, kappa, W, H };
+	// (an attempt's landings after a long fall (LAND_AIR+ ticks in the air: where a path is chosen, e.g. Egg Quest II's
+	// opening fall, after which the user's chimney climb starts): the arm's first starts on it)
+	const lands = [];
+	if (ev.attempt) {
+		sim.reset();
+		for (let t = 0, air = 0; t < n; t++) {
+			E.applyMask(inp, ms[t]); sim.tick(inp);
+			if (!sim.on_ground) { air++; continue; }
+			if (air >= LAND_AIR) lands.push(t + 1);
+			air = 0;
+		}
+	}
+	return { L, masks: ms, n, ev, X, Y, VX, VY, Q0, Q1, SL, T, hashTick, physTick, kappa, W, H, attempt: !!ev.attempt, lands };
 }
+const LAND_AIR = 90;
 const stateAt = (R, t) => ({ px: R.X[t], py: R.Y[t], speed_y: R.VY[t], _q0: R.Q0[t], _q1: R.Q1[t], _slippery: R.SL[t] });
 
 /** the time-to-go field to the route's tiles of [g0, jEnd], each seeded (jEnd - j) / kappa (the latest visit of a tile:
@@ -97,8 +113,21 @@ function goalField(R, s, g0, jEnd, box) {
 	return RF.reachField(R.L, { goals: [...goals].map(([tile, cost]) => ({ tile, cost })), maxCost: (jEnd - s + 200) / R.kappa });
 }
 
+/** a candidate against R: a route (C.evaluate finishes, no more deaths than R's) -> {ms, runTicks}; on an attempt
+ *  (R.attempt) also a run that does not finish and does not die: a shortened attempt -> {ms, runTicks, attempt: true};
+ *  else null */
+function judgeOf(R, ms) {
+	const ev = C.evaluate(R.L, ms, false);
+	if (ev) return ev.deaths > R.ev.deaths ? null : { ms: ev.ms, runTicks: ev.runTicks };
+	if (!R.attempt) return null;
+	const sim = new E.EESim(R.L), inp = new E.EEInput();
+	sim.reset();
+	for (let t = 0; t < ms.length; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); if (sim.is_dead) return null; }
+	return { ms: Uint8Array.from(ms), runTicks: ms.length, attempt: true };
+}
 /** the verified route through the hits of a search from s (tails with an exact rejoin, then the physical state, then a
- *  few loose splices), faster than `boundTicks` (fewer ticks) with no more deaths; null when none */
+ *  few loose splices), faster than `boundTicks` (fewer ticks) with no more deaths; null when none. On an attempt: a
+ *  shortened attempt (the attempt's later state reached sooner, no death) or a route */
 function spliceHits(R, s, hits, boundTicks, p) {
 	const { L, masks, n, X, Y, hashTick, physTick } = R;
 	const sim = new E.EESim(L), inp = new E.EEInput();
@@ -119,9 +148,9 @@ function spliceHits(R, s, hits, boundTicks, p) {
 	const consider = (ms, how) => {
 		tried++;
 		if (ms.length >= (best ? best.ticks : boundTicks)) return false;
-		const ev = C.evaluate(L, ms, false);
-		if (!ev || ev.deaths > R.ev.deaths || ev.ms.length >= (best ? best.ticks : boundTicks)) return false;
-		best = { masks: ev.ms, ticks: ev.ms.length, runTicks: ev.runTicks, how };
+		const v = judgeOf(R, ms);
+		if (!v || v.ms.length >= (best ? best.ticks : boundTicks)) return false;
+		best = { masks: v.ms, ticks: v.ms.length, runTicks: v.runTicks, how, attempt: !!v.attempt };
 		return true;
 	};
 	for (const h of list) {
@@ -154,7 +183,9 @@ function spliceHits(R, s, hits, boundTicks, p) {
 			}
 			if (found) break;
 		}
-		if (!found && loose < p.loose) {
+		// (loose splices: routes only; an attempt's candidate must meet the attempt's own state, so that it reaches its later
+		// points sooner)
+		if (!found && loose < p.loose && !R.attempt) {
 			loose++;
 			for (const off of [0, 1, -1, 2, -2]) {
 				const r0 = h.refTick + off;
@@ -179,27 +210,58 @@ function create(o, opts = {}) {
 	const routeFile = (lane) => path.join(o.work, `route_arm_${lane}.eetas`);
 	const st = { starts: 0, skipped: 0, searches: 0, rejoins: 0, sec: 0, hits: 0, spliced: 0, routes: 0, saved: 0, fieldMs: 0, failed: 0, pass: 0, best: 0 };
 	/** a (newer) route: its trace at the next start (a burst of faster routes costs one replay); the cursor keeps its tick */
-	let pending = null;
+	let pending = null, pendingAtt = null, lands = [];
 	const setRoute = (masks) => {
-		if ((R && masks.length >= R.n) || (pending && masks.length >= pending.length)) return;
+		if ((R && !R.attempt && masks.length >= R.n) || (pending && masks.length >= pending.length)) return;
 		pending = masks;
+		pendingAtt = null;
 		gen++;
 	};
+	/** before any route: the search's nearest attempt (a newer one replaces it; its cursor keeps its tick) */
+	const setAttempt = (masks) => {
+		if ((R && !R.attempt) || pending) return;
+		pendingAtt = masks;
+	};
 	const take = () => {
-		if (!pending) return;
-		const R2 = trace(o.L, o.field, pending);
-		pending = null;
+		if (!pending && !pendingAtt) return;
+		const att = !pending;
+		const R2 = trace(o.L, o.field, pending || pendingAtt, att);
+		pending = null; pendingAtt = null;
 		if (!R2) return;
+		const was = R;
 		R = R2;
 		if (cursor < 0) cursor = p.minAhead;
+		// (an attempt: its landings after a long fall first, each landing state once (a newer attempt of the same lineage
+		// lands in the same state: nextStart); a route after attempts: its own pass from the start)
+		// (the landing and 30 ticks after it: on Egg Quest II's base route the arm found the chimney from t575, 31 ticks
+		// after the landing, in 1 of 3-4 salts)
+		if (R.attempt) lands = R.lands.flatMap((t) => [t, t + 30]).filter((t) => t >= p.minAhead && t + p.minAhead + p.minGain < R.n);
+		else { lands = []; if (was && was.attempt) cursor = p.minAhead; }
+	};
+	const landSeen = new Set();
+	/** the next landing start of the attempt not searched yet (by its state), or -1 */
+	const landStart = () => {
+		while (lands.length) {
+			const t = lands.shift();
+			const sim = new E.EESim(o.L), inp = new E.EEInput();
+			sim.reset();
+			for (let k = 0; k < t; k++) { E.applyMask(inp, R.masks[k]); sim.tick(inp); }
+			const key = sim.stateHash(false, true);
+			if (landSeen.has(key)) continue;
+			landSeen.add(key);
+			return t;
+		}
+		return -1;
 	};
 	/** the next start: its tick, field, potential (null: none worth a search in a whole pass) */
 	const nextStart = () => {
-		for (let k = 0; R && k < Math.ceil(R.n / p.step) + 1; k++) {
+		for (let k = 0; R && k < Math.ceil(R.n / p.step) + 1 + lands.length; k++) {
 			if (cursor + p.minAhead + p.minGain >= R.n) { cursor = p.minAhead + ((st.pass + 1) * 37) % p.step; st.pass++; }
 			let s = cursor;
+			const ls = R.attempt && !p.starts ? landStart() : -1;
 			// (opts.starts: only these start ticks, in that order: tests, the path benchmark)
 			if (p.starts) { if (!p.starts.length) return null; s = p.starts.shift(); }
+			else if (ls >= 0) s = ls;
 			else cursor += p.step;
 			const jEnd = Math.min(R.n, s + p.maxSpan);
 			const t0 = Date.now();
@@ -271,9 +333,9 @@ function create(o, opts = {}) {
 			for (const e of rr.rejoins.sort((x, y) => y.saving - x.saving)) {
 				const ms = concat([R0.masks.subarray(0, s), masksOf(e.inputs), R0.masks.subarray(e.j, R0.n)]);
 				if (ms.length >= (best ? best.ticks : boundTicks)) continue;
-				const ev = C.evaluate(R0.L, ms, false);
-				if (!ev || ev.deaths > R0.ev.deaths || ev.ms.length >= (best ? best.ticks : boundTicks)) continue;
-				best = { masks: ev.ms, ticks: ev.ms.length, runTicks: ev.runTicks, how: `hit (gain ${h.gain}) + every move to the route's tick ${e.j} (exact, coin-blind)` };
+				const v = judgeOf(R0, ms);
+				if (!v || v.ms.length >= (best ? best.ticks : boundTicks)) continue;
+				best = { masks: v.ms, ticks: v.ms.length, runTicks: v.runTicks, attempt: !!v.attempt, how: `hit (gain ${h.gain}) + every move to the ${R0.attempt ? 'attempt' : 'route'}'s tick ${e.j} (exact, coin-blind)` };
 			}
 			if (best) break;
 		}
@@ -304,7 +366,9 @@ function create(o, opts = {}) {
 		const local = [Math.max(0, sx - p.box), Math.max(0, sy - p.box), Math.min(R0.W - 1, sx + p.box), Math.min(R0.H - 1, sy + p.box)];
 		const file = path.join(o.work, `arm_${lane}.reach`);
 		const out = { s: c.s, pot: c.pot, hits: 0, saved: 0, sec: 0, ends: [], how: '' };
-		const bound0 = o.bound() + 1;   // (the route in ticks that a find must beat)
+		// (the route in ticks that a find must beat; an attempt: its own length, a shortened attempt reaches its end sooner)
+		const boundOf = () => (R0.attempt ? R0.n : o.bound() + 1);
+		const bound0 = boundOf();
 		// (the local fine search localTries times, each with its own salt: which state stands for a 1 px cell decides whether
 		// the chimney's line lives; one merged graph in 3-5 has it; then the stretch's 4 px search)
 		const plan = [];
@@ -351,15 +415,18 @@ function create(o, opts = {}) {
 			if (r.hits.length) {
 				const bestGain = r.hits.reduce((m, h) => Math.max(m, h.gain), 0);
 				if (bestGain > st.best) st.best = bestGain;
-				let sp = spliceHits(R0, c.s, r.hits, Math.min(bound0, o.bound() + 1), p);
+				let sp = spliceHits(R0, c.s, r.hits, Math.min(bound0, boundOf()), p);
 				// no tail met the route: the rest re-joined exactly by every move from the best hits (explore --rejoin=1 from
 				// the route's state at s + the hit: a state the route reaches later; the leaps' second stage)
-				if (!sp.best) sp = { best: await rejoinStage(R0, c.s, r.hits, file, lane, hooks, Math.min(bound0, o.bound() + 1)) };
+				if (!sp.best) sp = { best: await rejoinStage(R0, c.s, r.hits, file, lane, hooks, Math.min(bound0, boundOf())) };
 				if (sp.best) {
 					st.spliced++;
 					const saved = R0.n - sp.best.ticks;
 					out.saved = Math.max(out.saved, saved);
 					out.how = sp.best.how;
+					// (a shortened attempt, before any route: into every archive and to the editor (its route splice), as the
+					// path skips' shortcuts)
+					if (sp.best.attempt) { st.shortcuts = (st.shortcuts || 0) + 1; if (o.shortcut) o.shortcut(sp.best.masks, saved, `route arm on the nearest attempt from ${c.s} (${g.text}): ${sp.best.how}`); break; }
 					st.routes++; st.saved += saved;
 					o.finish(sp.best.masks, `route arm from ${c.s} (${g.text}): ${sp.best.how}`);
 					break;
@@ -370,7 +437,9 @@ function create(o, opts = {}) {
 		return out;
 	};
 	return {
-		setRoute, run, ready: () => !dead && (R !== null || pending !== null),
+		setRoute, setAttempt, run, ready: () => !dead && (R !== null || pending !== null || pendingAtt !== null),
+		/** the arm's target is an attempt (no route yet) */
+		onAttempt: () => (pending === null && (R ? R.attempt : pendingAtt !== null)),
 		stats: () => Object.assign({ kappa: R ? Math.round(R.kappa * 100) / 100 : null, cursor, route: R ? R.n : 0 }, st),
 	};
 }

@@ -210,7 +210,10 @@
 //        its states into every archive; a "route" event, no result).
 //        [--rArm=0.5 (with --bursts=1: the route arm's share of the bursts once a route is known, src/routearm.js: from
 //        the route's own states, searches aimed by the route's schedule (a time-to-go field to its later tiles) for ways
-//        that meet its later points sooner, spliced into verified routes; 0: off)]
+//        that meet its later points sooner, spliced into verified routes; 0: off)] [--rArmPre=0.2 (before any route: the
+//        arm's share on the search's nearest attempt (its landings after a long fall first, then its pass), a later point
+//        of the attempt reached sooner = a shortened attempt: into every archive and a "shortcut" event (the editor splices
+//        every route with them); 0: off)]
 //        [--classW=1 (coarse cells: class workers, extra worker threads once a route is known: each avoids one gate of
 //        the best route (a coin door first, then a switch / key / effect trigger, then another door: routeGates) for
 //        --classS=180 s, bounded by its own routes and --classSlack=2 x the best route; a route whose gates (rank 0-2)
@@ -261,7 +264,7 @@ const WAY_PICK = 40;
 // --wYield=0: --pW all the time); --wLead=1 (off by default: no clear difference in 6 pairs, n2_2_head_W.md round 4): a
 // faster route from a head-W pick (another way) restarts head L's grace too, so
 // head L refines the new way at its full share (0: only head L's own routes, as before)
-const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, classW: 1, classS: 180, classSlack: 2,
+const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: 0.2, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
@@ -2291,7 +2294,10 @@ async function main() {
 		if (!nearPending) return;
 		nearPending = false;
 		say({ ev: 'closest', dist: Math.round(near.rc * 1000) / 1000, tick: near.t, inputs: near.inputs });
+		// (before any route: the nearest attempt is the route arm's target, --rArmPre)
+		try { if (bursts && !armRouted && bursts.attempt) bursts.attempt(near.inputs); } catch (e) { /* the bursts not made yet */ }
 	};
+	let armRouted = false;
 	let lastClaim = Date.now();
 	const timer = setInterval(() => {
 		progress();
@@ -2318,6 +2324,9 @@ async function main() {
 					const inputs = line.slice(7);
 					if (/^[0-O]+$/.test(inputs)) { one.broadcast(inputs, -1); one.fed++; }
 				} else if (line.startsWith('route ') && /^[0-O]+$/.test(line.slice(6))) adopt(line.slice(6));
+				// (before any route: another search's nearest attempt (the editor's GPU random runs: their archive takes no
+				// imports, and their routes often come first) as the route arm's target, --rArmPre)
+				else if (line.startsWith('arm ') && /^[0-O]+$/.test(line.slice(4))) { try { if (bursts && !armRouted && bursts.attempt) bursts.attempt(line.slice(4)); } catch (e) { /* not yet */ } }
 			}
 		});
 		// the end of stdin: the editor went away (a crash, or a kill that missed its children): stop, rather than run on
@@ -2375,6 +2384,7 @@ async function main() {
 	/** a new best route: its class is the best's; a new class of best: the gates to avoid (rank 0-2, in that order, then
 	 *  the route's; only those the trophy stays walkable without) and the class workers */
 	function onBest(ms, cls) {
+		armRouted = true;
 		if (bursts) bursts.route(ms);
 		if (!CW || !cls) return;
 		CW.bestTicks = ms.length;

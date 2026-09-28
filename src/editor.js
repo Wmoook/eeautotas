@@ -1872,6 +1872,19 @@ function launch(n) {
 	const onEvent = (ev) => {
 		if (!mine()) return;
 		if (V.lane && laneEvent(V, n, ev)) { totals(); save(); return; }
+		// (the one search's route arm on the nearest attempt, before any route (goexplore.js --rArmPre): a shortened attempt,
+		// already in its archive; into the library found() splices every route with, like the path skips')
+		if (ev.ev === 'shortcut') {
+			if (ev.inputs && /^[0-O]+$/.test(String(ev.inputs)) && !S.result) {
+				laneLibAdd(String(ev.inputs), `the route arm's shortened attempt (-${ev.saved})`);
+				// (and to the path skips' library: carried over into another lineage's route when one comes)
+				const kl = S.strategies.findIndex((q) => q.lane), chl = kl >= 0 ? kids[kl] : null;
+				if (alive(chl) && chl.stdin && !chl.stdin.destroyed) { try { chl.stdin.write(`lib:arm ${ev.inputs}\n`); } catch (e) { /* gone */ } }
+				V.armShortcuts = (V.armShortcuts || 0) + 1;
+				note(`${V.label}: its route arm reached a later point of the nearest attempt ${ev.saved} ticks sooner`);
+			}
+			return;
+		}
 		if (ev.ev === 'ready') { if (!V.readyAt) { ready(ev); save(); } return; }
 		if (!V.readyAt && !ev.error) ready(null);
 		// (halted: its state stays as the halt left it; a GPU tool asked to stop still prints until its next launch)
@@ -2516,7 +2529,7 @@ function feedOne(inputs, room) {
 	if (!feedTimer) { const w = Math.max(0, ONE_FEED_MS - (Date.now() - feedAt)); if (w) { feedTimer = setTimeout(flush, w); if (feedTimer.unref) feedTimer.unref(); } else flush(); }
 }
 // ---------------------------------------------------------------- the path skips (the skip finder's lane)
-let laneQ = new Map(), laneAt = 0, laneTimer = null, laneS = null;
+let laneQ = new Map(), laneAt = 0, laneTimer = null, laneS = null, laneTurn = 0;
 // the path skips' shortcuts of this search (skipfind.js makeLibrary: per run its states (physical state + room) and the
 // earliest tick it holds them), which found() splices into every route before it counts: {S, L}
 let laneLib = null;
@@ -2542,6 +2555,13 @@ function laneAttempt(inputs, src) {
 		const ch = kids[k];
 		if (!alive(ch) || !ch.stdin || ch.stdin.destroyed) return;
 		for (const [sk, x] of laneQ) { try { ch.stdin.write(`attempt:${sk} ${x}\n`); S.strategies[k].attempts = (S.strategies[k].attempts || 0) + 1; } catch (e) { /* gone */ } }
+		// (the other searches' attempts, the GPU random runs' above all, also to the one search's route arm (its own it takes
+		// itself): its GPU search from their landings, the newest of each in turn)
+		const ko = S.strategies.findIndex((q) => q.gpuShare), cho = ko >= 0 ? kids[ko] : null;
+		if (alive(cho) && cho.stdin && !cho.stdin.destroyed) {
+			const others = [...laneQ].filter(([sk]) => sk !== S.strategies[ko].key && !/Room$/.test(sk));
+			if (others.length) { const [, x] = others[(laneTurn++) % others.length]; try { cho.stdin.write(`arm ${x}\n`); } catch (e) { /* gone */ } }
+		}
 		laneQ.clear();
 		laneAt = Date.now();
 	};

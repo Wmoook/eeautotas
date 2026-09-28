@@ -1433,10 +1433,13 @@ async function lane(a) {
 			const line = buf.slice(0, k).trim();
 			buf = buf.slice(k + 1);
 			if (line === 'stop') { end('stopped'); return; }
-			const m = /^(attempt|route)(?::(\w+))? ([0-O]+)$/.exec(line);
+			const m = /^(attempt|route|lib)(?::(\w+))? ([0-O]+)$/.exec(line);
 			if (!m) continue;
 			const ms = Uint8Array.from(m[3], (c) => (c.charCodeAt(0) - 48) & 31);
 			if (m[1] === 'route') offerRoute(ms, 'the best route', false);
+			// (a shortened attempt found elsewhere (the one search's route arm): into the library, carried over into the
+			// routes from its start on)
+			else if (m[1] === 'lib') { libAdd(ms, `shortened attempt (${m[2] || 'elsewhere'})`, 0); if (route) offerRoute(route.ev.ms, 'the best route', true); }
 			else onAttempt(ms, m[2]);
 		}
 	});

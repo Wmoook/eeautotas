@@ -188,8 +188,16 @@ function create(o) {
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	// the route arm (src/routearm.js; goexplore.js --rArm, a share of the bursts once a route is known): searches from the
 	// route's own states for ways that meet its later points sooner, spliced into verified routes
+	// (before any route, --rArmPre of the bursts: the arm on the nearest attempt (goexplore.js: attempt(inputs)), its
+	// shortened attempts into every archive and to the editor ("shortcut" events: its route splice))
 	const RA = a.rArm > 0 ? require('./routearm.js').create({ L, field: o.field, tool, bin, fp, work, cacheArgs, a, bound: o.bound, say: o.say,
-		finish: (masks, how) => { st.armRoutes++; o.finish(masks, how); }, broadcast: (inputs) => { st.imports++; o.broadcast(inputs); } }) : null;
+		finish: (masks, how) => { st.armRoutes++; o.finish(masks, how); }, broadcast: (inputs) => { st.imports++; o.broadcast(inputs); },
+		shortcut: (masks, saved, how) => {
+			st.armShortcuts = (st.armShortcuts || 0) + 1;
+			const inputs = C.eetasBytes(masks).toString('latin1');
+			o.broadcast(inputs);
+			o.say({ ev: 'shortcut', kind: 'arm', inputs, ticks: masks.length, saved, how });
+		} }) : null;
 	let armAcc = 0, armOom = 0;
 	const ARM_OOM_MAX_S = 30;
 	st.arm = 0; st.armSec = 0; st.armRoutes = 0;
@@ -586,7 +594,7 @@ function create(o) {
 			if (left < 3) break;
 			let job = null;
 			// the route arm's turn (its share of the bursts, a route known): one start's searches in this lane
-			if (!next && RA && RA.ready() && (armAcc += a.rArm) >= 1) {
+			if (!next && RA && RA.ready() && (armAcc += RA.onAttempt() ? (a.rArmPre >= 0 ? +a.rArmPre : 0) : a.rArm) >= 1) {
 				armAcc -= 1;
 				const t0 = Date.now();
 				const r = await RA.run(lane, { child: (ch, on) => { if (on) children.add(ch); else children.delete(ch); }, stopped: () => stopped });
@@ -700,6 +708,8 @@ function create(o) {
 		room, edge, triggers: TR.n,
 		/** the best route (masks): the route arm's (a newer, faster one replaces it; its cursor keeps its tick) */
 		route: (masks) => { if (RA) { try { RA.setRoute(masks); } catch (e) { o.say({ ev: 'warning', text: `route arm: ${e.message}` }); } } },
+		/** before any route: the search's nearest attempt (inputs), the route arm's target at its --rArmPre share */
+		attempt: (inputs) => { if (RA && a.rArmPre > 0) { try { RA.setAttempt(Uint8Array.from(String(inputs), (c) => (c.charCodeAt(0) - 48) & 31)); } catch (e) { o.say({ ev: 'warning', text: `route arm: ${e.message}` }); } } },
 		start: () => { loopP = Promise.all(Array.from({ length: Math.max(1, a.burstPar) }, (_, k) => loop(k))).catch((e) => o.say({ ev: 'warning', text: `bursts: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` })); return loopP; },
 		/** ends the running burst between two launches and the loop; resolves once its process is gone */
 		stop: async () => {
