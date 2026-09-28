@@ -1099,8 +1099,10 @@ async function cpuSection() {
 	// --prune=0, as the editor runs a level the reach field calls impossible). With room for 300 cells (--maxCells) the
 	// cells no run touched for longest go and the search goes on; no room is left without cells (a room is made with its
 	// first cell, and goes with its last)
+	// (each switch opens a door of its own in the top row: a switch no door reads is no room change, goexplore.js
+	// switchReaders, so without them the level had 2 rooms, not 1024)
 	const sw = room(60, 50);
-	for (let k = 0; k < 10; k++) sw.push([4 + 2 * k, 48, 113, k + 1]);
+	for (let k = 0; k < 10; k++) sw.push([4 + 2 * k, 48, 113, k + 1], [4 + 2 * k, 1, 184, k + 1]);
 	for (let y = 1; y < 49; y++) sw.push([45, y, 184, 1]);
 	sw.push([2, 48, 255], [55, 47, 121], [54, 47, 9], [56, 47, 9]);
 	for (let x = 54; x <= 56; x++) sw.push([x, 46, 9], [x, 48, 9]);

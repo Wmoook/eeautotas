@@ -170,6 +170,8 @@ function analyze(level, opts) {
 	// the ball entering it is teleported, so the walk model leaves it only through its exits
 	const forcedP = new Uint8Array(N);
 	for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!portalSrcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
+	// (the lastPortal chains walked: reach.js unforceChains)
+	RF.unforceChains(W, H, forcedP, portalExits, portalSrcOf);
 	// one-way platforms: the pass direction (0 left, 1 up, 2 right, 3 down); the walk model blocks the entry against it
 	const oneWay = new Int8Array(N).fill(-1);
 	for (let i = 0; i < N; i++) { const f = fl(fg[i]); if ((f & F_JUMPTHRU) === 0 || cls[i] !== 2) continue; oneWay[i] = (f & F_ROTHALF) ? (lk[i] & 3) : 1; }
@@ -737,6 +739,17 @@ function fullCoinT(A) {
 }
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
  *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
+/** a coin leg's field (the level lv with the tiles fg: the coin q the goal): with the forced portals, unless they leave the
+ *  coin out of reach from the start and from every other coin (a portal chain the model misreads: the plan would have
+ *  no value at all); then without them, as main's legs were */
+function legFieldOf(lv, fg, q, coins, start) {
+	const f = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, airPen: AIR_PEN });
+	if (arriveCost(f, start) < CUT) return f;
+	for (const c of coins) if (c !== q && arriveCost(f, c) < CUT) return f;
+	const g = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, airPen: AIR_PEN });
+	g.unforced = true;
+	return g;
+}
 function coinLegsPhys(B, PH, base, opts) {
 	const { A } = B;
 	const M = PH.M;
@@ -756,7 +769,7 @@ function coinLegsPhys(B, PH, base, opts) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, airPen: AIR_PEN });
+		return legFieldOf(lv, fg, q, base.coins, A.start.t);
 	};
 	const fields = new Map(), countOf = new Map();
 	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
@@ -809,7 +822,7 @@ function coinLegsLayered(B, PH, base, deadline) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, airPen: AIR_PEN });
+		return legFieldOf(lv, fg, q, coins, A.start.t);
 	};
 	// L[(k * (n + 1) + i) * n + j]: from coin i (i = n: the start) to coin j holding k coins
 	const L = new Float64Array(T * (n + 1) * n).fill(Infinity);
