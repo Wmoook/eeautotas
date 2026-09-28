@@ -230,6 +230,12 @@
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
 //        (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
+//        [--useful=1 (coarse cells: the useful territory, see USEFUL TERRITORY: cells in a cul-de-sac of their room
+//        demoted (head A: CUL_A tiles more; head B: only when its sample holds no other cell), a room whose territory gain
+//        is all off the band gets gain 0, a death kept as the earliest arrival not into a cul-de-sac; the progress and
+//        done events carry "useful": {culPicks, culCells, zeroed (rooms), culSets, culDropped, reculs}, "deaths"
+//        "useless"; 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
+//        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -302,7 +308,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -324,18 +330,18 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', ...GPU_STRINGS]);
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 /** the process's CPU seconds so far (user + system, every thread) */
 const cpuSec = () => { const u = process.cpuUsage(); return Math.round((u.user + u.system) / 1e5) / 10; };
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
 // and 24, x64: the objects as goexplore makes them, 200 K at a time): a cell (its object with the boxed double of its
-// cost 160, its Map entry 45, its slot in its room's list 10), an entry of the pick heap (3 arrays; up to 3 per cell
+// cost 160 (+ 8: its cul-de-sac flag `u`, 2026-09-28), its Map entry 45, its slot in its room's list 10), an entry of the pick heap (3 arrays; up to 3 per cell
 // between two compactions), a path node, a pick's inputs that a live node still uses (the object and its typed array;
 // the rolls x roll bytes themselves lie outside the V8 heap, counted too), a snapshot (1150) with its share of the coin
 // bitsets it holds (a copy per coin taken: 232 bytes each), a room (its object, text and list), a slot of the snapshot
 // queue. The walk cache of the rooms' fields keeps its own count (roomFields).
-const B_CELL = 216, B_HEAPE = 32, B_NODE = 72, B_BLOCK = 250, B_SNAP = 1200, B_ROOM = 600, B_QUEUE = 10;
+const B_CELL = 224, B_HEAPE = 32, B_NODE = 72, B_BLOCK = 250, B_SNAP = 1200, B_ROOM = 600, B_QUEUE = 10;
 // --steer: a cell's steer cost (its property and boxed double: 160 -> 184 bytes, measured the same way); the steer heap's
 // entries count as B_HEAPE each (one worker of the editor's Good Egg search ran out of its heap before they were counted)
 const B_SC = 24;
@@ -922,16 +928,223 @@ function domIndex() {
 	return { groupOf, list, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
 }
 
+// USEFUL TERRITORY (roomUseful; the playbook's P1 (c) / (d), 2026-09-28; the user on Forgotten Helix: "it keeps going
+// into the viewing rooms still ... the viewing room leads to nowhere!!!"). A room's walk reaches territory the room
+// cannot use: a hub of portals into "viewing rooms" behind coin doors whose own portals lead back (not a physical dead
+// end: the dead-end prune does not cut them), a pocket behind a door the room cannot open, the minis behind the ball
+// whose coins are taken. On Forgotten Helix (main 230e6e3, 8 workers, 100 s) 35% of head A's picks were in the viewing
+// boxes (the door-16 box by the trophy: 5 of 10 tiles, where the door-blind reach field puts the trophy near) and 49% on
+// the hub's bottom around them; the wall breaker's first two starting points were there too.
+//   The room's TARGETS: the trigger components its walk reaches whose touch changes the room by a trigger (bursts.js
+// infoOf's engine test: the room's entry state, the ball on the tile, one tick without input; a coin taken, an effect
+// the ball has already, the room's own switch state: no target), and the trophies.
+//   CUL-DE-SACS (`cul`): the tiles on no SIMPLE way between the room's entry and a target: the walk as an undirected graph
+// (8-way, no corner cut between two walls, portals both ways), its block-cut tree rooted at the entry, the blocks whose
+// subtree holds no target. The ball's centre moves between neighbouring tiles of this walk, so a way that enters a
+// cul-de-sac leaves it by the tile it came in through: the visit reaches nothing (a death inside one aside).
+//   The BAND (`off` = off it): the tiles within max(SL_MIN, SL_F x their walk distance from the entry) steps of a
+// shortest walk from the entry to a target (a multi-source search from the targets, each started at minus its own
+// distance from the entry). Off it: a detour that leads nowhere nearer a target, e.g. a viewing room behind a coin door
+// whose portal leads back to the hub (a loop, no cul-de-sac); the walk is gravity-blind, so a physical way (a ramp for a
+// shaft) may be off it too.
+//   Cells in a cul-de-sac of their room (c.u = 2) are DEMOTED, never pruned (the reach field's -1 stays the only prune):
+// CUL_A more tiles in head A's priority, no head B pick (its sample's cells), no nearest attempt, no source, no room's
+// lowest-cost cell and no burst start while another cell is (head B: its weight divided by 10 left the Helix viewing
+// boxes 10.9-14.0% of its picks: a fresh box cell outweighed the much-picked cells outside). (The known TASes spend
+// 0-0.6% of their ticks in a cul-de-sac of their room, 0.7-22% off its band: FV 17%, NC Naos 22%: the band is no
+// ground to demote a cell on.) A room's
+// USEFUL GAIN is its territory gain on the band: a room whose useful gain is 0 (the territory it opens is all off the
+// band: a viewing room behind a coin door, a sealed pocket) keeps its raw gain in `graw` and gets gain 0: no novelty
+// weight (head B), no discovery burst (head C), no "room" source at once and no gain for the editor's relay, wall
+// breaker and its stall clock. A death kept only as the earliest arrival (deathPays) must not respawn in a cul-de-sac. A room
+// entered again at one of its cul-de-sac tiles (a run, an import, a seed: the clock's rooms, time doors and keys running
+// out, are entered wherever the ball is) gets its cul-de-sacs again with its entries as terminals (reentry, REENTRY_MAX).
+const CUL_A = 2000, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
 /**
- * roomFields(L, budget) -> {enter(sim) -> {gain, troOk, cached}, stats()}: a room's fields, from the state that entered
- * it (its tile): the tiles the ball can walk to (8-way, portals, doors as they are now, spikes and other killing tiles
- * only with protection; one-ways and half blocks open, as src/reach.js), `troOk` whether a trophy is among them, and
- * `gain` how many no earlier room's walk reached (the territory the room opens). A walk depends only on the passable set
- * (the doors' states and protection) and the tile it starts from, so walks are cached by a hash of the passable set: a
- * room whose passable set and start component are known costs that hash and has no gain. Cached walks (a bitset each)
- * beyond `budget` bytes go, the least recently used first. One per worker (its own union).
+ * roomUseful(L) -> {of(sim, band, extra) -> {cul, off, targets, walked}}: the useful territory of the room the live state
+ * is in, from its tile (see USEFUL TERRITORY above): cul / off bitsets (a bit per tile; null when no tile is in one), off
+ * only with band; extra: more tiles the cul-de-sacs must connect like targets (the room's other entries). The live state is
+ * restored exactly after the targets' tests.
  */
-function roomFields(L, budget) {
+function roomUseful(L) {
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const RM = roomOf(L), TR = require('./bursts.js').triggersOf(L);
+	const wall = new Uint8Array(N), deadly = new Uint8Array(N), tro = new Uint8Array(N), dIdx = new Int32Array(N).fill(-1), doors = [];
+	for (let i = 0; i < N; i++) {
+		const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0;
+		if ((f & 1) !== 0 && (f & 16) !== 0) { dIdx[i] = doors.length; doors.push(i); }
+		else if ((f & 1) !== 0 && (f & (2 | 4 | 8)) === 0) wall[i] = 1;
+		if (id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0) deadly[i] = 1;
+		if (id === 121) tro[i] = 1;
+	}
+	// portals: tile -> its exits (forward) and exit -> the portals that send the ball there (reverse)
+	const exits = new Map(), srcs = new Map();
+	if (L.portalSlot && L.portalsById) {
+		for (let i = 0; i < N; i++) {
+			const s = L.portalSlot[i];
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			const ex = L.portalsById.get(L.pTarget[s]);
+			if (!ex) continue;
+			const list = [];
+			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N && j !== i && !list.includes(j)) list.push(j); }
+			if (!list.length) continue;
+			exits.set(i, Int32Array.from(list));
+			for (const j of list) { let l = srcs.get(j); if (!l) srcs.set(j, l = []); l.push(i); }
+		}
+	}
+	for (const [k, v] of srcs) srcs.set(k, Int32Array.from(v));
+	const DX = [-1, 0, 1, -1, 1, -1, 0, 1], DY = [-1, -1, -1, 0, 0, 1, 1, 1];
+	const shut = new Uint8Array(doors.length);
+	const dE = new Int32Array(N), q = new Int32Array(N), g = new Int32Array(N), disc = new Int32Array(N), low = new Int32Array(N), par = new Int32Array(N),
+		sub = new Int32Array(N), term = new Uint8Array(N), fk = new Int32Array(N), vst = new Int32Array(N), frame = new Int32Array(N);
+	let stamp = new Int32Array(N), gen = 0, prot = false, entry = 0;
+	const inp0 = new E.EEInput(), tested = new Map();
+	const pass = (i) => i === entry || (!wall[i] && (dIdx[i] < 0 || !shut[dIdx[i]]) && (prot || !deadly[i]));
+	/** the walk's 8-way step from tile t in direction k: the tile, or -1 (off the level, not passable, a corner cut, and with
+	 *  walked: outside this walk) */
+	const step8 = (t, k, walked) => {
+		const x = t % W, y = (t / W) | 0, xx = x + DX[k], yy = y + DY[k];
+		if (xx < 0 || yy < 0 || xx >= W || yy >= H) return -1;
+		const j = yy * W + xx;
+		if (walked ? stamp[j] !== gen : !pass(j)) return -1;
+		if (DX[k] && DY[k] && wall[y * W + xx] && wall[yy * W + x]) return -1;
+		return j;
+	};
+	/** the undirected walk's neighbour k of u (0-7 the steps, then the portal exits, then the portals into u): a tile of
+	 *  this walk, -1 (none there), -2 (no more) */
+	const nbr = (u, k) => {
+		if (k < 8) return step8(u, k, true);
+		const ex = exits.get(u), ne = ex ? ex.length : 0;
+		if (k < 8 + ne) { const j = ex[k - 8]; return stamp[j] === gen ? j : -1; }
+		const sp = srcs.get(u), ns = sp ? sp.length : 0;
+		if (k < 8 + ne + ns) { const j = sp[k - 8 - ne]; return stamp[j] === gen ? j : -1; }
+		return -2;
+	};
+	const of = (sim, band, extra) => {
+		if (++gen > 2e9) { stamp = new Int32Array(N); gen = 1; }
+		prot = !!sim.is_invulnerable;
+		for (let k = 0; k < doors.length; k++) shut[k] = sim.is_tile_solid_now(doors[k] % W, (doors[k] / W) | 0) ? 1 : 0;
+		const e = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+		entry = e;
+		// the walk from the entry (roomFields' rules), its distances
+		let qh = 0, qt = 0;
+		stamp[e] = gen; dE[e] = 0; q[qt++] = e;
+		while (qh < qt) {
+			const t = q[qh++], d = dE[t] + 1;
+			const ex = exits.get(t);
+			if (ex) for (let k = 0; k < ex.length; k++) { const j = ex[k]; if (stamp[j] !== gen && pass(j)) { stamp[j] = gen; dE[j] = d; q[qt++] = j; } }
+			for (let k = 0; k < 8; k++) { const j = step8(t, k, false); if (j >= 0 && stamp[j] !== gen) { stamp[j] = gen; dE[j] = d; q[qt++] = j; } }
+		}
+		const walked = qt;
+		// the targets: the trigger components the walk reaches whose touch changes the room by a trigger (a coin taken in the
+		// room's state is none; the test's own touch takes it: the room's state first), and the trophies
+		const snap = sim.snapshot(), cz0 = RM.cause(sim);
+		tested.clear();
+		let targets = 0, restored = true;
+		for (let k = 0; k < walked; k++) {
+			const t = q[k];
+			term[t] = 0;
+			if (tro[t]) { term[t] = 1; targets++; continue; }
+			const c = TR.comp[t];
+			if (c < 0) continue;
+			if (TR.eaten[c]) { if (!restored) { sim.restore(snap); restored = true; } if (sim.is_coin_collected(t % W, (t / W) | 0)) continue; }
+			let v = tested.get(c);
+			if (v === undefined) {
+				if (!restored) sim.restore(snap);
+				restored = false;
+				sim.px = (t % W) * 16; sim.py = ((t / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0;
+				try { sim.tick(inp0); v = sim.is_dead || RM.byTrigger(cz0, RM.cause(sim)); } catch (err) { v = true; }
+				tested.set(c, v);
+			}
+			if (v) { term[t] = 1; targets++; }
+		}
+		if (!restored) sim.restore(snap);
+		// (the room's other entries: terminals of the cul-de-sac test, not targets of the band)
+		const ext = [];
+		if (extra) for (const x of extra) if (x >= 0 && x < N && stamp[x] === gen && !term[x]) { term[x] = 1; ext.push(x); }
+		// the cul-de-sacs: the block-cut tree of the walk (undirected), rooted at the entry (an iterative Tarjan: a block
+		// closes when low[u] >= disc[p]; its terminals, its vertices' own and those of the blocks hanging at them, go up to p)
+		let cul = null, nCul = 0, time = 0, fs = 0, vs = 0;
+		for (let k = 0; k < walked; k++) { const t = q[k]; disc[t] = 0; sub[t] = 0; }
+		disc[e] = low[e] = ++time; par[e] = -1; fk[e] = 0; frame[fs++] = e; vst[vs++] = e;
+		while (fs > 0) {
+			const u = frame[fs - 1];
+			let pushed = false;
+			for (;;) {
+				const v = nbr(u, fk[u]++);
+				if (v === -2) break;
+				if (v < 0) continue;
+				if (disc[v] === 0) { disc[v] = low[v] = ++time; par[v] = u; fk[v] = 0; frame[fs++] = v; vst[vs++] = v; pushed = true; break; }
+				if (v !== par[u] && disc[v] < low[u]) low[u] = disc[v];
+			}
+			if (pushed) continue;
+			fs--;
+			const p = par[u];
+			if (p < 0) continue;
+			if (low[u] < low[p]) low[p] = low[u];
+			if (low[u] >= disc[p]) {
+				let tb = 0, from = vs;
+				for (;;) { const w = vst[--from]; tb += term[w] + sub[w]; if (w === u) break; }
+				if (tb === 0) {
+					if (cul === null) cul = new Uint8Array((N + 7) >> 3);
+					for (let i = from; i < vs; i++) { const w = vst[i]; cul[w >> 3] |= 1 << (w & 7); nCul++; }
+				}
+				vs = from;
+				sub[p] += tb;
+			}
+		}
+		for (const x of ext) term[x] = 0;
+		if (!band) return { cul, off: null, targets, walked, nCul, nOff: 0 };
+		// the band: g(t) = min over the targets T of d(t, T) - dE(T) (+ OFF: every key >= 0), buckets over the reverse walk
+		let maxD = 0;
+		for (let k = 0; k < walked; k++) if (dE[q[k]] > maxD) maxD = dE[q[k]];
+		const OFF = maxD, INF = 0x3fffffff, buckets = [];
+		for (let k = 0; k < walked; k++) g[q[k]] = INF;
+		const push = (t, key) => { let b = buckets[key]; if (!b) buckets[key] = b = []; b.push(t); };
+		for (let k = 0; k < walked; k++) { const t = q[k]; if (term[t]) { const key = OFF - dE[t]; if (key < g[t]) { g[t] = key; push(t, key); } } }
+		for (let key = 0; key < buckets.length; key++) {
+			const b = buckets[key];
+			if (!b) continue;
+			const nk = key + 1;
+			for (let i = 0; i < b.length; i++) {
+				const u = b[i];
+				if (g[u] !== key) continue;
+				// (u's predecessors: its 8-way neighbours (the steps are symmetric) and the portals that send the ball to u)
+				for (let k = 0; k < 8; k++) { const v = step8(u, k, true); if (v >= 0 && nk < g[v]) { g[v] = nk; push(v, nk); } }
+				const sp = srcs.get(u);
+				if (sp) for (let k = 0; k < sp.length; k++) { const v = sp[k]; if (stamp[v] === gen && nk < g[v]) { g[v] = nk; push(v, nk); } }
+			}
+			buckets[key] = null;
+		}
+		let off = null, nOff = 0;
+		for (let k = 0; k < walked; k++) {
+			const t = q[k];
+			if (g[t] < INF && dE[t] + g[t] - OFF <= Math.max(SL_MIN, Math.floor(SL_F * dE[t]))) continue;
+			if (off === null) off = new Uint8Array((N + 7) >> 3);
+			off[t >> 3] |= 1 << (t & 7); nOff++;
+		}
+		return { cul, off, targets, walked, nCul, nOff };
+	};
+	return { of };
+}
+/** tile t's bit in bitset b (null: no tile) */
+const bitAt = (b, t) => b !== null && (b[t >> 3] & (1 << (t & 7))) !== 0;
+
+/**
+ * roomFields(L, budget, opts) -> {enter(sim) -> {gain, graw, troOk, cached, cul, targets}, release(bits), stats()}: a room's
+ * fields, from the state that entered it (its tile): the tiles the ball can walk to (8-way, portals, doors as they are
+ * now, spikes and other killing tiles only with protection; one-ways and half blocks open, as src/reach.js), `troOk`
+ * whether a trophy is among them, and `graw` how many no earlier room's walk reached (the territory the room opens). A
+ * walk depends only on the passable set (the doors' states and protection) and the tile it starts from, so walks are
+ * cached by a hash of the passable set: a room whose passable set and start component are known costs that hash and has
+ * no gain. Cached walks (a bitset each) beyond `budget` bytes go, the least recently used first. One per worker (its own
+ * union). With the useful territory (opts.useful, the default; see USEFUL TERRITORY): `gain` = graw when the room's
+ * useful gain (its new tiles on the band) is above 0, else 0; `cul` its cul-de-sacs (a bitset shared by the rooms with the
+ * same one, within `budget` bytes too: past it null, no demotion; release() when the room goes; the band only for a new
+ * walk's gain). Without it (useful false: --useful=0) gain = graw and cul null, as before.
+ */
+function roomFields(L, budget, opts = {}) {
+	const US = opts.useful === false ? null : roomUseful(L);
 	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
 	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), doors = [], trophies = [];
@@ -995,21 +1208,25 @@ function roomFields(L, budget) {
 			for (const c of list) {
 				if ((c.bits[tile >> 3] & (1 << (tile & 7))) === 0) continue;
 				c.used = ++clock; hits++;
+				// (the useful territory is the room's own, from its entry: a known walk has no gain, its cells are still ordered)
+				const U = US !== null ? US.of(sim, false) : null;
 				ms += Date.now() - t0;
-				return { gain: 0, troOk: c.troOk, cached: true };
+				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
 			}
 		}
+		const U = US !== null ? US.of(sim, true) : null;
 		// the walk (8-way, no corner cut between two walls, through portals) from the room's tile
 		for (let k = 0; k < doors.length; k++) if (words[k >> 5] & (1 << (k & 31))) shut[doors[k]] = 1;
 		const pass = (i) => !wall[i] && !shut[i] && (prot || !deadly[i]);
 		const g = ++gen;
 		const bits = new Uint8Array((N + 7) >> 3);
-		let qh = 0, qt = 0, gain = 0, troOk = false;
+		let qh = 0, qt = 0, gain = 0, ugain = 0, troOk = false;
+		const off = U !== null ? U.off : null;
 		seen[tile] = g; q[qt++] = tile;
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
 			bits[t >> 3] |= 1 << (t & 7);
-			if (!union[t]) { union[t] = 1; gain++; }
+			if (!union[t]) { union[t] = 1; gain++; if (!bitAt(off, t)) ugain++; }
 			if (fg[t] === 121) troOk = true;
 			const ex = exits.get(t);
 			if (ex) for (const e of ex) if (seen[e] !== g && pass(e)) { seen[e] = g; q[qt++] = e; }
@@ -1032,9 +1249,42 @@ function roomFields(L, budget) {
 		bytes += bits.length + WALK_BYTES;
 		while (bytes > budget && evict()) { /* the least recently used first */ }
 		ms += Date.now() - t0;
-		return { gain, troOk, cached: false };
+		// (a room whose new territory is all off the band: no gain)
+		if (U !== null && gain > 0 && ugain === 0) zeroed++;
+		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
 	};
-	return { enter, trophies: trophies.length, bytes: () => bytes, stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes }) };
+	// the rooms' cul-de-sac and off-band bitsets, one copy per content (FNV-1a over the bytes): rooms that share doors and
+	// targets often share them; counted in bytes() with the walks, at most `budget` bytes of them (past that a new room gets
+	// none: no demotion); release() when a room goes
+	const culs = new Map();   // hash -> {bits, n}
+	let culBytes = 0, culRooms = 0, culDropped = 0, zeroed = 0;
+	const hashOf = (b) => { let h = 0x811c9dc5 | 0; for (let i = 0; i < b.length; i++) if (b[i] !== 0) { h = Math.imul(h ^ i, 0x01000193); h = Math.imul(h ^ b[i], 0x01000193); } return h >>> 0; };
+	const same = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
+	const share = (b) => {
+		if (b === null) return null;
+		const h = hashOf(b);
+		let e = culs.get(h);
+		if (e && !same(e.bits, b)) return null;   // (a hash collision: this room without demotion)
+		if (!e) {
+			if (culBytes + b.length + WALK_BYTES > budget) { culDropped++; return null; }
+			culs.set(h, e = { bits: b, n: 0, h });
+			culBytes += b.length + WALK_BYTES;
+		}
+		e.n++; culRooms++;
+		return e.bits;
+	};
+	const release = (b) => {
+		if (b === null || b === undefined) return;
+		const e = culs.get(hashOf(b));
+		if (!e || e.bits !== b) return;
+		culRooms--;
+		if (--e.n <= 0) { culs.delete(e.h); culBytes -= b.length + WALK_BYTES; }
+	};
+	// (a room entered again at one of its cul-de-sac tiles: its cul-de-sacs again from there, its entries as terminals)
+	const recul = (sim, extra) => { if (US === null) return null; const t0 = Date.now(), c = share(US.of(sim, false, extra).cul); ms += Date.now() - t0; reculs++; return c; };
+	let reculs = 0;
+	return { enter, recul, release, trophies: trophies.length, bytes: () => bytes + culBytes,
+		stats: () => ({ walks, hits, walkMs: ms, walkBytes: bytes, culBytes, culSets: culs.size, culDropped, zeroed, reculs }) };
 }
 
 /**
@@ -1529,7 +1779,30 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const exOf = (c) => { if (!SAT || c.room === null) return 0; const v = c.room.sat.get(zoneOf(c.tile)); return v === undefined ? 0 : v; };
 	/** head A's brake for cell c (tiles) */
 	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c), a.satN) : 0);
-	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
+	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03)), { useful: a.useful !== 0 }) : null;   // (its walk cache: 3%)
+	// (the useful territory: a cell's `u`, 2 in a cul-de-sac of its room, 0 else, demotes it: see USEFUL TERRITORY; culPicks,
+	// culCells: counted)
+	let culPicks = 0, culCells = 0, dCul = 0;
+	const useOf = (room, t) => (room !== null && bitAt(room.cul, t) ? 2 : 0);
+	// (a run, an import or a seed entering a known room at one of its cul-de-sac tiles: the clock's rooms (time doors, keys
+	// running out) are entered wherever the ball is, and a cul-de-sac is one only as seen from the room's first entry: the
+	// room's cul-de-sacs again with its entries as terminals (at most REENTRY_MAX times a room), its cells' `u` with them)
+	const reentry = (r) => {
+		if (r.cul === null || fields === null) return;
+		const t = centreTile();
+		if (!bitAt(r.cul, t)) return;
+		if (r.ents === undefined) r.ents = [r.tile];
+		if (r.ents.length > REENTRY_MAX) return;
+		r.ents.push(t);
+		const nb = fields.recul(sim, r.ents);
+		fields.release(r.cul);
+		r.cul = nb;
+		for (const c of r.arr) { const u = useOf(r, c.tile); if (u !== c.u) { c.u = u; c.ver++; hpush(c); } }
+	};
+	// (--pickBox=x0,y0,x1,y1, observation only (test/useful.js): the picks and new cells with their tile in that box)
+	const PB = a.pickBox ? String(a.pickBox).split(',').map(Number) : null;
+	const inBox = PB === null ? () => false : (t) => { const x = t % W, y = (t / W) | 0; return x >= PB[0] && x <= PB[2] && y >= PB[1] && y <= PB[3]; };
+	let boxPicks = 0, boxCells = 0;
 	// (--roomDead=1, coarse cells, only where deaths are not moves (a.deathMoves false: every death ends its run, so a tile
 	// from which no trigger and not the trophy is walkable without dying is a dead end; with deaths as moves a death can
 	// take the ball out of it, so no room dead ends there): each room's live tiles, roomDead; a run ends on a tile that is
@@ -1600,7 +1873,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, graw: f.graw, cul: f.cul, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true, grp: null, dm: null };
 		if (DOM !== null) {
 			r.dm = RM.dom(sim);
@@ -1694,14 +1967,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	};
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
 	const cells = new Map();
-	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c));
+	// (a cell in a cul-de-sac of its room: CUL_A tiles behind, see USEFUL TERRITORY)
+	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c) + (c.u === 2 ? CUL_A : 0));
 	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
 	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out.
 	// A late field (stdin "steer <file>": the editor's build finished after the search started): from then on (steerOn);
 	// the cells made before have no steer cost (sc) until a run improves them or they are picked. ST and HS change again
 	// once the editor sends the plan past its count (stdin "steer <file>" when a field is in use: switchSteer)
 	let ST = a.steerData || null;
-	const hsPrio = (c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c);
+	const hsPrio = (c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c) + (c.u === 2 ? CUL_A : 0);
 	const steerHeap = () => heapOf(hsPrio);
 	let HS = ST ? steerHeap() : null;
 	// (after a switch: the cells scored by the new field; the others are scored when next picked. null: no switch yet;
@@ -1865,7 +2139,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			impr++;
 			if (ST) { c.sc = steerOf(); if (scFresh !== null) scFresh.add(c); nearSteer(c); }
 			hpush(c);
-			if (room !== null && (room.best === null || distOf(c) < distOf(room.best))) room.best = c;
+			if (room !== null && betterBest(c, room.best)) room.best = c;
 			return null;
 		}
 		// (--timed: a cell of the same place in a bucket with more time left that got there no later: this state is dominated)
@@ -1882,9 +2156,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
 		// (viaL: the cell descends from a head-L pick's runs, its share's yield: a route head L's earlier arrivals led to is
 		// often finished by head A's pick of a cell by the trophy)
-		const vl = pickL || (pc !== null && pc.viaL), vw = pickW || (pc !== null && pc.viaW);
-		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw }
-			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw };
+		// (u: the cell's tile is in a cul-de-sac of its room (2) or off its band (1): demoted, see USEFUL TERRITORY)
+		const vl = pickL || (pc !== null && pc.viaL), vw = pickW || (pc !== null && pc.viaW), cu = useOf(room, tile);
+		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw, u: cu }
+			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw, u: cu };
+		if (cu === 2) culCells++;
+		if (PB !== null && inBox(tile)) boxCells++;
 		// (a level with timed killers: the ticks left at arrival and the killer's kind bit, tLeft x 16 + kind; B_TM more)
 		if (TM !== null) { nc.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0); if (tLeft > 0) tCells++; }
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
@@ -1894,14 +2171,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (t > deepest) deepest = t;
 		if (room !== null) {
 			room.arr.push(nc);
-			if (room.best === null || distOf(nc) < distOf(room.best)) room.best = nc;
+			if (betterBest(nc, room.best)) room.best = nc;
 		}
 		return nc;
 	};
+	/** a room's lowest-cost cell (its sources, the sweep keeps it): a cell outside its cul-de-sacs before any in one */
+	const betterBest = (c, b) => b === null || ((c.u === 2) !== (b.u === 2) ? c.u !== 2 : distOf(c) < distOf(b));
 	/** --steerDist: the closest state by the steer field, among new and improved cells (the steer cost is computed only
-	 *  for those) */
+	 *  for those; no cell in a cul-de-sac of its room) */
 	const nearSteer = (c) => {
-		if (!distBySteer) return;
+		if (!distBySteer || c.u === 2) return;
 		const d = distOf(c);
 		if (!near || d < near.rc - 1e-3 || (d <= near.rc + 1e-3 && c.t < near.t)) {
 			c.node.refs++;   // (the closest state holds its node too: see mkNode)
@@ -1949,8 +2228,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse) { roomKey = RM.key(sim); room0 = newRoom(roomKey, t0c); room0.isNew = false; }
 		const k = cellKey();
 		const node0 = pre ? mkNode(null, { b: pre, refs: 0, x: Math.max(0, pre.length - a.rolls * a.roll) }, 0, pre.length) : null;
-		const c = ST ? { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, sc: steerOf(), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 }
-			: { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0 };
+		const c = ST ? { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, sc: steerOf(), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0, viaL: false, viaW: false, u: 0 }
+			: { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0, viaL: false, viaW: false, u: 0 };
 		if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
 		cells.set(k, c);
 		cell0 = c;
@@ -1963,7 +2242,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, tDom, tMore, tDoomed, tCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
@@ -1994,7 +2273,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const c = H.pop();
 			if (H.popVer !== c.ver || c.t >= maxT) continue;
 			// (the brake: its region's excess grew since the cell was queued: back into the queue at its priority now)
-			if (SAT && satPen(c) > 0) { const v = (H === HS ? c.sc : c.rc) + a.lambda * Math.sqrt(c.picks) + satPen(c); if (v > H.popVal + SAT_SLACK) { H.push(c); continue; } }
+			if (SAT && satPen(c) > 0) { const v = (H === HS ? c.sc : c.rc) + a.lambda * Math.sqrt(c.picks) + satPen(c) + (c.u === 2 ? CUL_A : 0); if (v > H.popVal + SAT_SLACK) { H.push(c); continue; } }
 			return c;
 		}
 		return null;
@@ -2045,14 +2324,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		}
 		if (br === null) return popA();
 		const arr = br.arr;
-		let bc = null, bs = -Infinity;
+		let bc = null, bs = -Infinity, bu = false;
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
+			// (a cell in a cul-de-sac of its room loses to any cell outside one: see USEFUL TERRITORY)
 			let sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1);
 			// (--timed: a doomed cell only when the sample has nothing else; the draws are the same either way)
 			if (TKEY && c.tm >= 16 && TMD.doomed(TM, c.tile, c.tm >> 4, c.tm & 15)) sc -= 4;
-			if (sc > bs) { bs = sc; bc = c; }
+			const cu = c.u === 2;
+			if (bc === null || (bu && !cu) || (bu === cu && sc > bs)) { bs = sc; bc = c; bu = cu; }
 		}
 		return bc || popA();
 	};
@@ -2115,7 +2396,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					if (r.sentAt !== null && r.sentAt.ver < 0) r.sentAt = null;
 					if (r.arr.length || r === room0) roomList[n++] = r;
 					else {
-						rooms.delete(r.key); nSatZ -= r.sat.size;
+						rooms.delete(r.key); nSatZ -= r.sat.size; fields.release(r.cul);
 						if (r.grp !== null) { const i = r.grp.rooms.indexOf(r); if (i >= 0) r.grp.rooms.splice(i, 1); }
 					}
 				}
@@ -2181,13 +2462,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			roomKey = RM.key(sim);
 			if (roomKey !== room.key) {
 				const r = rooms.get(roomKey);
-				if (r !== undefined) room = r;
+				if (r !== undefined) { room = r; reentry(r); }
 				else if (roomFor()) room = newRoom(roomKey, t, room.key);
 				else { full = true; needSweep = true; break; }
 			}
 			if (room.live !== null && !liveAt(room.live, centreTile()) && !pendingTrigger(sim)) { deadCut++; break; }
 			if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
-			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
+			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) && useOf(room, centreTile()) !== 2) {
 				const node = mkNode(null, blk, 0, t);
 				if (near !== null) release(near.node);
 				near = { rc, t, node };
@@ -2216,8 +2497,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				if (avoid !== null && avoid.has((((c.tile % W) / m.zone) | 0) + (((c.tile / W) / m.zone) | 0) * zw)) continue;
 				const v = f[c.tile];
 				if (v === 0xffff) continue;
+				// (a cell outside the room's cul-de-sacs before any in one: see USEFUL TERRITORY; with a timed killer the time
+				// slack before that)
 				const tl = TKEY ? c.tm >> 4 : 0, dw = wf !== null && wf[c.tile] !== 0xffff ? wf[c.tile] : v, sl = tl > 0 ? Math.min(0, tl - TIMED_KT * dw / 5) : 0;
-				if (best === null || sl > bs || (sl === bs && (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && c.t < best.t)))))) { best = c; bv = v; bs = sl; }
+				if (best === null || sl > bs || (sl === bs && ((c.u === 2) !== (best.u === 2) ? c.u !== 2 : (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && c.t < best.t))))))) { best = c; bv = v; bs = sl; }
 			}
 		}
 		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, sl: best !== null ? bs : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
@@ -2299,7 +2582,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				roomKey = RM.key(sim);
 				if (roomKey !== room.key) {
 					const r = rooms.get(roomKey);
-					if (r !== undefined) room = r;
+					if (r !== undefined) { room = r; reentry(r); }
 					else if (roomFor()) room = newRoom(roomKey, t, room.key);
 					else { into = false; full = true; needSweep = true; }
 				}
@@ -2376,6 +2659,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			else if (roomFor()) rm = newRoom(roomKey, tR, room.key);
 			else { full = true; needSweep = true; dDrop++; return; }
 		}
+		// (a death that pays only as the earliest arrival must bring the ball back into USEFUL territory: a respawn in a
+		// cul-de-sac of its room leads nowhere a target is (Forgotten Helix: back to the mini's start by the viewing room's
+		// portal); dCul)
+		if (!byCost && useOf(rm, centreTile()) === 2) { dCul++; dDrop++; return; }
 		if (byCost) dCost++; else dNew++;
 		const upD = mkNode(up, blk, o, n);
 		const nc = add(tR, rc, null, upD, DEADBLK, 0, nd, rm);
@@ -2489,6 +2776,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const plRow = plog !== null ? plogRow(head, e) : null;
 			const cells0 = cells.size, impr0 = impr, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
 			e.picks++; e.ver++; picks++; e.touch = picks;
+			if (e.u === 2) culPicks++;
+			if (PB !== null && inBox(e.tile)) boxPicks++;
 			if (coarse) { e.room.picks++; if (e.room.grp !== null) { e.room.grp.picks++; if (e.room.grp.dom) picksDom++; } }
 			const stale = scFresh !== null && !scFresh.has(e);
 			if (!stale) hpush(e);
@@ -2570,7 +2859,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						if (roomKey !== room.key) {
 							if (AV !== null && AV[centreTile()] === 2 && RM.byTrigger(room.cause, RM.cause(sim))) { avoided++; break; }
 							const r = rooms.get(roomKey);
-							if (r !== undefined) { if (report) edge(room, r); room = r; }
+							if (r !== undefined) { if (report) edge(room, r); room = r; reentry(r); }
 							else if (t < maxT && roomFor()) room = newRoom(roomKey, t, room.key);
 							else { into = false; if (t < maxT) { full = true; needSweep = true; } }
 						}
@@ -2579,7 +2868,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					// (not while a trigger's effect is pending: pendingTrigger)
 					if (into && room !== null && room.live !== null && !liveAt(room.live, centreTile()) && !pendingTrigger(sim)) { deadCut++; break; }
 					if (rc < minRc - 0.05) { minRc = rc; lastProgress = picks; }
-					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t))) {
+					// (no nearest attempt in a cul-de-sac of its room: see USEFUL TERRITORY)
+					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) && useOf(room, centreTile()) !== 2) {
 						const node = mkNode(up, blk, o, s + 1);
 						if (near !== null) release(near.node);
 						near = { rc, t, node };
@@ -2822,7 +3112,7 @@ async function gpuMain(a, L, m) {
 	// JS key's class and mask (roomOf dom: blue coins no door on the way needs and the time doors' two states in one
 	// group), head B and C as explore()'s)
 	const RM = roomOf(L, { legacy: true }), RMn = a.dom !== 0 ? roomOf(L) : null, DOMg = RMn !== null ? domIndex() : null;
-	const fields = roomFields(L, 64 << 20);
+	const fields = roomFields(L, 64 << 20, { useful: a.useful !== 0 });
 	const rooms = new Map(), roomList = [];
 	let keyMismatch = 0;
 	const newRoom = (key, c) => {
@@ -3309,7 +3599,10 @@ async function main() {
 	// same place with more time left got there no later), with --timed=0 the states dropped though they had more time left
 	// than the kept one, the doomed states priced as their death)
 	const timedNow = () => (TMD_L ? { timed: { on: a.timed !== 0, cells: total('tCells'), dominated: total('tDom'), droppedMore: total('tMore'), doomed: total('tDoomed') } } : {});
-	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
+	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
+	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
+	// was all off the band (gain 0), the cul-de-sac bitsets kept)
+	const usefulNow = () => (a.cells === 'coarse' && a.useful !== 0 ? { useful: { culPicks: total('culPicks'), culCells: total('culCells'), zeroed: total('zeroed'), culSets: total('culSets'), culDropped: total('culDropped'), reculs: total('reculs') } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
 		samples.push([now, tk]);
@@ -3324,7 +3617,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -3625,7 +3918,7 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(),
+		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
@@ -3648,4 +3941,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, counterRelevance, switchReaders, domIndex, maskIn, roomFields, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, counterRelevance, switchReaders, domIndex, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
