@@ -224,6 +224,10 @@
 //        "classes" (the best's class and the gates to avoid) and "class" (a class worker's start); done: "classes".
 //        With --stdin=1 and the one search also "import <inputs>": another operator's run (the editor's GPU random runs:
 //        a room they entered first, a nearer attempt) into every worker's archive, like a burst's attempt.
+//        With --stdin=1 and no steer field yet, "steer <RCH4 file>": the steer field, late (the editor's build finished
+//        after the search started): head A's second heap from each worker's next chunk of picks; the cells made before
+//        get their steer cost when a run improves them or at their next pick; the distances stay the reach field's (as
+//        --steerDist=0); an event {"ev":"steer","sec":..,"layers":..,"bodies":..,"coinDP":..,"start":..} (or a warning).
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -1195,11 +1199,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const cells = new Map();
 	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c));
 	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
-	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out
-	// (ST and HS change once the editor sends the plan past its count: `steer <file>` on stdin, switchSteer)
+	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out.
+	// A late field (stdin "steer <file>": the editor's build finished after the search started): from then on (steerOn);
+	// the cells made before have no steer cost (sc) until a run improves them or they are picked. ST and HS change again
+	// once the editor sends the plan past its count (stdin "steer <file>" when a field is in use: switchSteer)
 	let ST = a.steerData || null;
 	const hsPrio = (c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c);
-	let HS = ST ? heapOf(hsPrio) : null;
+	const steerHeap = () => heapOf(hsPrio);
+	let HS = ST ? steerHeap() : null;
 	// (after a switch: the cells scored by the new field; the others are scored when next picked. null: no switch yet;
 	// steerGen: the switches made, on every closest message: the main thread drops one of an older field)
 	let scFresh = null, steerGen = 0;
@@ -1248,7 +1255,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const leadShare = (now) => (sched === null || a.pL <= 0 ? 0 : a.pL * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastL) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
 	let lastW = 0, wShare = 0;
 	const wayShare = (now) => (sched === null || HW === null ? 0 : !a.wYield ? a.pW : a.pW * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastW) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
-	const hpush = HS ? (c) => { HA.push(c); HS.push(c); if (sched !== null) lpush(c); } : (c) => { HA.push(c); if (sched !== null) lpush(c); };
+	// (a cell made before a late steer field has no sc: not in the steer heap until it gets one)
+	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); };
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
 	const steerOf = () => { const v = SF.steerFifths(ST, sim); return v < 0 ? STEER_NONE : v / 5; };
@@ -1423,8 +1431,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	};
 	// the picks: head A, the lowest priority whose entry is live and whose state is early enough (with --steer from the
 	// steer field's heap --mix of the time)
-	const popA = () => {
-		const H = HS !== null && HS.size() > 0 && rnd() < a.mix ? HS : HA;
+	const popFrom = (H) => {
 		while (H.size() > 0) {
 			const c = H.pop();
 			if (H.popVer !== c.ver || c.t >= maxT) continue;
@@ -1433,6 +1440,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			return c;
 		}
 		return null;
+	};
+	// (the steer heap empty or run dry, as right after a late field: head A's own; with the field from the start both
+	// heaps hold the same live cells)
+	const popA = () => {
+		if (HS !== null && HS.size() > 0 && rnd() < a.mix) { const c = popFrom(HS); if (c !== null) return c; }
+		return popFrom(HA);
 	};
 	// head B (novelty; coarse cells): a room by a tournament of 4 (territory gain, the trophy walkable, few picks), then
 	// the best of --sample random cells of it by Go-Explore's count weights (cells runs rarely come through first)
@@ -1650,6 +1663,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			else if (x.type === 'route' && HL !== null) setRoute(x.inputs, !!x.byL, !!x.byW);
 		}
 	};
+	/** a late steer field (stdin "steer <file>": the main thread's shared bytes): head A's second heap from now on. The
+	 *  distances the search reports stay the reach field's (--steerDist as with 0: the editor ranks every strategy's
+	 *  attempts on one scale, which a switch in the middle of the search would break) */
+	const steerOn = (sab) => {
+		if (ST !== null) return;
+		ST = Object.assign(SF.readSteerFile(Buffer.from(sab)), { dpFirst: a.dpFirst === 1 });
+		HS = steerHeap();
+	};
 	/** a seed (stdin "seed <inputs>": the editor's wall breaker's attempts): its states every SEED_EVERY ticks back from
 	 *  its end, and the end, become cells whose path is the seed's inputs (children of the start: their first pick replays
 	 *  them), in the rooms it passes (made like a run's; a new room's first cell gets head C's burst and is a source);
@@ -1692,7 +1713,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	 *  trophy from any coin tile; the DP counts distinct coins); the cells holding a snapshot are scored at once, the
 	 *  others when next picked; the closest state starts over (another measure) */
 	const switchSteer = (sab) => {
-		if (ST === null) return;
+		if (ST === null) return;   // (a field in use: from the start, or late (steerOn), which the main thread sent first)
 		let sd = null;
 		try { sd = SF.readSteerFile(Buffer.from(sab)); } catch (e) { return; }
 		if (!sd || sd.W !== W || sd.H !== H) return;
@@ -1726,7 +1747,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
-		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) switchSteer(x.steer); else addSeed(String(x)); }
+		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else steerOn(x.steer); } else addSeed(String(x)); }
 		lShare = leadShare(now); wShare = wayShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
@@ -1793,6 +1814,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					}
 				}
 			}
+			// (a cell made before a late steer field: its steer cost at its first pick since, into the steer heap)
+			if (ST !== null && e.sc === undefined) { sim.restore(e.snap); e.sc = steerOf(); HS.push(e); }
 			// the pick's runs: one input buffer for all of them (run r at r x roll)
 			const blk = { b: new Uint8Array(a.rolls * a.roll), refs: 0 }, buf = blk.b, base = e.snap, up = e.node;
 			for (let r = 0; r < a.rolls; r++) {
@@ -2473,24 +2496,37 @@ async function main() {
 	const seedPorts = seedChannels.map((c) => c.port1), seedIn = seedChannels.map((c) => c.port2);
 	// --steer=<RCH4 file> (the editor's, src/steer.js) or --steer=build: the steer field in shared memory for the workers'
 	// second goal heap; a file of another level (or one that cannot be read) is ignored with a warning
+	// (stdin "steer <file>" with --stdin=1: the same, late, for a search that started without it: steerLate below)
+	const loadSteer = (file, dist) => {
+		const bytes = file === 'build' ? SF.steerFileBytes(SF.buildSteer(L)) : fs.readFileSync(file);
+		const sab = new SharedArrayBuffer(bytes.length);
+		new Uint8Array(sab).set(bytes);
+		const sd = SF.readSteerFile(Buffer.from(sab));
+		if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
+		if (sd.levelFp[0] || sd.levelFp[1]) {
+			let fp = null;
+			try { const G = require('./gpu.js'); fp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take: the size check only */ }
+			if (fp && (fp[0] >>> 0 !== sd.levelFp[0] || fp[1] >>> 0 !== sd.levelFp[1])) throw new Error('it was made for another level');
+		}
+		const s0 = SF.steerAt(sd, sim0);
+		return { sab, note: { layers: sd.S, bodies: sd.bodies.length, coinDP: sd.dp ? sd.dp.n : 0, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null, mix: a.mix, dist } };
+	};
 	let steerBuf = null, steerNote = null;
 	if (a.steer) {
-		try {
-			const bytes = a.steer === 'build' ? SF.steerFileBytes(SF.buildSteer(L)) : fs.readFileSync(a.steer);
-			const sab = new SharedArrayBuffer(bytes.length);
-			new Uint8Array(sab).set(bytes);
-			const sd = SF.readSteerFile(Buffer.from(sab));
-			if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
-			if (sd.levelFp[0] || sd.levelFp[1]) {
-				let fp = null;
-				try { const G = require('./gpu.js'); fp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take: the size check only */ }
-				if (fp && (fp[0] >>> 0 !== sd.levelFp[0] || fp[1] >>> 0 !== sd.levelFp[1])) throw new Error('it was made for another level');
-			}
-			steerBuf = sab;
-			const s0 = SF.steerAt(sd, sim0);
-			steerNote = { layers: sd.S, bodies: sd.bodies.length, coinDP: sd.dp ? sd.dp.n : 0, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null, mix: a.mix, dist: a.steerDist !== 0 };
-		} catch (e) { say({ ev: 'warning', text: `the steer field is not used: ${e.message}` }); }
+		try { const r = loadSteer(a.steer, a.steerDist !== 0); steerBuf = r.sab; steerNote = r.note; } catch (e) { say({ ev: 'warning', text: `the steer field is not used: ${e.message}` }); }
 	}
+	/** stdin "steer <file>": a steer field that was not ready when the search started (the editor's build on a loaded
+	 *  machine): to every worker (head A's second heap from its next chunk of picks: steerOn); the distances stay the reach
+	 *  field's; a "steer" event says so (or a warning why not). Once per search. */
+	const steerLate = (file) => {
+		if (steerBuf) return;
+		try {
+			const r = loadSteer(file, false);
+			steerBuf = r.sab; steerNote = r.note; a.steerDist = 0;
+			for (const p of seedPorts) p.postMessage({ steer: r.sab });
+			say(Object.assign({ ev: 'steer', sec: sec() }, r.note));
+		} catch (e) { say({ ev: 'warning', text: `the late steer field is not used: ${e.message}` }); }
+	};
 	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, steer: steerNote, mem: a.mem, memWhy: a.memWhy,
 		processMB: Math.round(claimed / 1048576), machineMB: Math.round(m.total / 1048576), freeMB: Math.round(m.free / 1048576), othersMB: Math.round(m.others / 1048576),
 		maxCells: a.maxCells, maxSnaps: a.maxSnaps });
@@ -2553,6 +2589,7 @@ async function main() {
 				if (m) bound(+m[1]);
 				else if (line.startsWith('seed ') && /^[0-O]+$/.test(line.slice(5))) { for (const p of seedPorts) p.postMessage(line.slice(5)); }
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
+				else if (line.startsWith('steer ') && line.length > 6 && !steerBuf) steerLate(line.slice(6));
 				else if (line.startsWith('import ') && one) {
 					// (the one search: another operator's run, the editor's GPU random runs, into every archive)
 					const inputs = line.slice(7);
@@ -2567,7 +2604,7 @@ async function main() {
 						new Uint8Array(sab).set(bytes);
 						const sd = SF.readSteerFile(Buffer.from(sab));
 						if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
-						for (const p of seedPorts) p.postMessage({ steer: sab });
+						for (const p of seedPorts) p.postMessage({ steer: sab, past: true });
 						near = null; nearPending = false; steerGen++;
 						const s0 = SF.steerAt(Object.assign(sd, { dpFirst: true }), sim0);
 						say({ ev: 'steer', dp: sd.dp ? { n: sd.dp.n, T: sd.dp.T } : null, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null });
