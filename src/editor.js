@@ -832,9 +832,9 @@ const deathTiles = () => (cur && cur.opts && cur.opts.fileDeaths === false ? 1e4
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
  *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
+const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam) || (!V.cpu && !cur.files.steer));
 function steerDist(V, d) {
-	const steerless = !!cur && cur.distBySteer && (V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam));
-	return steerless && d < 1e4 ? Math.min(9990, STEER_MISS + d) : d;
+	return steerless(V) && d < 1e4 ? Math.min(9990, STEER_MISS + d) : d;
 }
 /** strategy n's own nearer attempt a {inputs, ticks, dist}: a source for its room (at most every SOURCE_REPLAY_MS per
  *  strategy; the latest one waiting is taken then). rm: its room, when the attempt was replayed already. */
@@ -1980,9 +1980,12 @@ function useSteer(sf, noGpu) {
 	cur.files.steerCpu = sf.file;
 	if (gpuOk) cur.files.steer = sf.file;
 	if (gpuOk && copies === 4) cur.files.steerBeam = sf.file;
-	// (the attempts' distances: the steer field's when every strategy orders by it, else the reach field's for all: the CPU
-	// search then reports those, --steerDist=0)
-	cur.distBySteer = cur.files.steerDist = gpuOk || !!noGpu;
+	// (the attempts' distances: the steer field's whenever the CPU search orders by it; a GPU tool without it (its copies
+	// over the memory share: Forgotten Helix's 614 MB field on any GPU) reports the reach field's, ranked behind: steerDist.
+	// Before, those distances stayed the reach field's for all, whose walk goes through every coin door: on Helix the
+	// nearest attempt, the stall clocks, the rooms' best attempts (the breaker's starts) and head A sat in the viewing
+	// rooms behind the coin doors the level's coins never open)
+	cur.distBySteer = cur.files.steerDist = true;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
 	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true };
 	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
@@ -1994,10 +1997,12 @@ function useSteer(sf, noGpu) {
 		'; only the reach field rules states out');
 }
 /** a steer field built after the search started (start()'s race: sf {late}): gen, the search it was built for; sf2
- *  steerInfo's answer. From now on the CPU search's head A orders by it too (goexplore.js stdin "steer <file>"; a CPU
+ *  steerInfo's answer. From now on the CPU search's head A orders by it too (goexplore.js stdin "steerd <file>"; a CPU
  *  search launched later gets --steer) and the wall breaker's coin plan (breakGate) aims at its gates. The GPU tools and
- *  the bursts' trophy arm stay on the reach field, and every distance stays the reach field's (--steerDist=0): the
- *  attempts of all strategies are ranked on one scale, which a switch in the middle of the search would break. */
+ *  the bursts' trophy arm stay on the reach field. The distances turn to the steer field's (as useSteer's): another
+ *  measure, so the nearest attempt starts over (the CPU search's first closest by it, sg: its switch), each strategy's own
+ *  best too, and the rooms' attempts kept so far rank behind the new ones (STEER_MISS + their distance). Before, every
+ *  distance stayed the reach field's for the whole search (Forgotten Helix's 614 MB field arrives ~30 s in). */
 function lateSteer(gen, sf2) {
 	if (gen !== searchGen || !cur || !S.running || S.halted || cur.opts.noWayUp || cur.files.steerCpu) return;
 	const sec = S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null;
@@ -2007,7 +2012,15 @@ function lateSteer(gen, sf2) {
 	}
 	if (sf2.over) note(`the steer field ${sf2.over}`);
 	cur.files.steerCpu = sf2.file;
-	cur.files.steerDist = false;
+	// (a CPU search launched from now on reports the steer field's distances from its start)
+	cur.files.steerDist = true;
+	cur.distBySteer = true;
+	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
+	S.closest = null;
+	if (brk) brk.mark = Infinity;
+	if (prec) prec.mark = Infinity;
+	for (const q of S.strategies) { q.best = undefined; q.bestTry = null; }
+	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	const mb = sf2.bytes / 1048576;
 	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
 	// (the plan past its count, when the cache had it; else it comes after the field from the same build: pastArrived)
@@ -2016,10 +2029,13 @@ function lateSteer(gen, sf2) {
 	let sent = 0;
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${sf2.file}\n`); sent++; } catch (e) { /* gone */ } }
+		// (the CPU searches with distances (the one search, the escape): "steerd"; their closest attempts count from its switch
+		// on (sgMin): one sent before it is the reach field's)
+		const dist = q.key === 'goexplore' || q.key === 'escape';
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${sf2.file}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
 	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
-		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''}; the GPU tools and the distances stay on the reach field`);
+		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
 	save();
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
@@ -3312,11 +3328,13 @@ function closer(ev, n) {
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
+	// (a strategy without it (steerless: its distances the reach field's, ranked from STEER_MISS on): by its own field's)
 	const deathTilesNow = cur.distBySteer ? STEER_MISS : deathTiles();
+	const alive0 = steerless(Vn) ? +ev.dist < deathTiles() : dist < deathTilesNow;
 	let own = null;
 	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
 		Vn.best = dist; Vn.bestAt = Date.now();
-		if (ev.inputs && !ev.cut && dist < deathTilesNow) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
+		if (ev.inputs && !ev.cut && alive0) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
 	// (the path skips' targets before any route: every search's own nearest attempt as it reports it (a tool reports its
 	// closest attempt when it got nearer by its own measure), also where the steer field has no value: on Egg Quest II the
@@ -3327,6 +3345,8 @@ function closer(ev, n) {
 	// (past the plan: the CPU search measures by the plan past its count, the GPU tools by the field; one measure for the
 	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
 	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
+	// (a late steer field's switch (lateSteer): a CPU search's closest from before it is the reach field's)
+	if (Vn.sgMin && !(ev.sg >= Vn.sgMin)) return;
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
