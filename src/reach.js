@@ -184,8 +184,39 @@ const cOfV = (v) => (v >= 16 ? NL - 1 : Math.min(NL - 1, Math.ceil(v * 8 - 1e-9)
 const vOfC = (c) => (c >= NL - 1 ? 16 : c / 8);
 
 // ---------------------------------------------------------------- the field
+/**
+ * reachField(level, opts): the field (reachField1), and with live portals (scoreLivePortals) its finite costs ordered as
+ * the portals really work (opts.liveOrder, default on): a second build with opts.portalForced (a live portal tile left only
+ * through its exits, never walked through) and every state whose cost is finite in both raised to the forced one. The
+ * finite set is the first build's (a CUT in either stays as the first build has it), so -1 stays its proof; the forced
+ * build is not sound (lastPortal chains, a > 16 px/tick crossing), so it orders only. A raise into the death range
+ * (DEATH_COST: "a way through a death" to the lookups) is left out. DEEPER: the tile under its live portal row (25, 94)
+ * was 3 tiles (the trophy pocket through the portals), the start 42.6; forced 109.6 and 138.8.
+ */
 function reachField(level, opts) {
 	opts = opts || {};
+	const t0 = Date.now();
+	const f = reachField1(level, opts);
+	if (!f.livePortals || opts.portalForced || opts.liveOrder === false) return f;
+	const g = reachField1(level, Object.assign({}, opts, { portalForced: true, check: false, explain: false, debug: false }));
+	let raised = 0;
+	const merge = (a, b) => {
+		if (!a || !b || a.length !== b.length) return;
+		for (let i = 0; i < a.length; i++) {
+			const x = a[i], y = b[i];
+			if (x === CUT || y === CUT || y <= x || (y >= DEATH_COST && x < DEATH_COST)) continue;
+			a[i] = y; raised++;
+		}
+	};
+	merge(f.walk, g.walk);
+	if (f.mode === 'physics' && g.mode === 'physics' && f.Q === g.Q) for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) merge(f[k], g[k]);
+	if (f.mode === 'walk') f.prioShift = prioShiftOf(f.walk);
+	else f.prioShift = Math.max(f.prioShift, g.prioShift);
+	f.liveOrder = { raised, ms: g.ms };
+	f.ms = Date.now() - t0;
+	return f;
+}
+function reachField1(level, opts) {
 	const t0 = Date.now();
 	const W = level.width, H = level.height, N = W * H;
 	const fg = level.fg, flags = level.flags, nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
@@ -301,6 +332,9 @@ function reachField(level, opts) {
 		for (let i = 0; i < N; i++) {
 			const s = level.portalSlot[i];
 			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || !passable(i)) continue;
+			// (a portal whose target is its own id never teleports: eesim.js clears lastPortal there and moves on, so it has
+			// no exits: Christmas Tree Quest's id-0 border ring was "6 tiles" from the trophy through teleports EE never makes)
+			if (level.pTarget[s] === level.pId[s]) continue;
 			const ex = level.portalsById.get(level.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -324,6 +358,15 @@ function reachField(level, opts) {
 	if (opts.portalForced) {
 		for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 		unforceChains(W, H, forcedP, portalExits, srcOf);
+	}
+	// ---- live portals (scoreLivePortals): the portal tiles a ball is on only for one tick (a tick that starts there
+	// teleports it): the forced set above (with exits, not an exit, not 4-connected to an exit through portal tiles, so no
+	// ball keeps lastPortal there), always computed
+	let liveP = forcedP;
+	if (!opts.portalForced && portalExits.size) {
+		liveP = new Uint8Array(N);
+		for (const i of portalExits.keys()) if (!srcOf.has(i)) liveP[i] = 1;
+		unforceChains(W, H, liveP, portalExits, srcOf);
 	}
 	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	let mode = wild ? 'walk' : 'physics';
@@ -369,7 +412,15 @@ function reachField(level, opts) {
 			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
 		}
 	}
-	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
+	// (the walk table, both modes: its live portals scored by their exits; see scoreLivePortals)
+	let livePortals = 0;
+	if (portalExits.size) for (const [t, ex] of portalExits) {
+		if (!liveP[t] || walkOut[t] === CUT) continue;
+		livePortals++;
+		const v = liveCost(walkOut[t], ex, (e) => walkOut[e]);
+		if (v > walkOut[t]) walkOut[t] = v;
+	}
+	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ, livePortals,
 		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
 
@@ -697,7 +748,45 @@ function reachField(level, opts) {
 		}
 		field.explain = { row: best, trophyRow, startRow: st ? (st.t / W) | 0 : -1 };
 	}
-	if (opts.debug) Object.defineProperty(field, '_m', { value: { fwd, prof, pid, J, lj, ceilJ, KJD, DIRS, stopC, bounceC, portalExits, respawn, passable, lowWall, segOf, edgesOf, costOf } });
+	// ---- the live portals scored by their exits (scoreLivePortals), after the check (a post-pass: the Bellman costs above
+	// stay as they are, and no other state's cost reads these back)
+	let maxLive = 0;
+	if (portalExits.size) {
+		const minAt = new Map();
+		const bestAt = (e) => {
+			let m = minAt.get(e);
+			if (m !== undefined) return m;
+			m = CUT;
+			for (let ty = 0; ty < NT; ty++) {
+				const s = slotOf(e, ty);
+				if (s < 0) continue;
+				const a = COST[ty], o = s * NLV[ty];
+				for (let k = 0; k < NLV[ty]; k++) if (a[o + k] < m) m = a[o + k];
+			}
+			minAt.set(e, m);
+			return m;
+		};
+		const rotOf = (i) => { const s = level.portalSlot[i]; return s >= 0 && level.pRot ? level.pRot[s] : 0; };
+		for (const [t, ex] of portalExits) {
+			if (!liveP[t]) continue;
+			const r0 = rotOf(t);
+			for (let ty = 0; ty < NT; ty++) {
+				const s = slotOf(t, ty);
+				if (s < 0) continue;
+				const a = COST[ty], o = s * NLV[ty];
+				for (let l = LO[ty]; l <= HI[ty]; l++) {
+					const c = a[o + idxOf(ty, l)];
+					if (c === CUT) continue;
+					// (the exit's same state when the teleport keeps the velocity (the same rotation), else its best state)
+					const v = liveCost(c, ex, (e) => { const ce = rotOf(e) === r0 ? costOf(e, ty, l) : CUT; return ce !== CUT ? ce : bestAt(e); });
+					if (v > c) { a[o + idxOf(ty, l)] = v; if (v > maxLive && v < DEATH_COST) maxLive = v; }
+				}
+			}
+		}
+		// (the priorities' range covers the raised costs: native/beam.h buckets by cost >> prioShift)
+		if (maxLive > maxFin) field.prioShift = Math.max(0, bitLen(Math.min(maxLive, FAR)) - 12);
+	}
+	if (opts.debug) Object.defineProperty(field, '_m', { value: { fwd, prof, pid, J, lj, ceilJ, KJD, DIRS, stopC, bounceC, portalExits, respawn, passable, lowWall, segOf, edgesOf, costOf, liveP } });
 	field.ms = Date.now() - t0;
 	return field;
 }
@@ -797,6 +886,28 @@ function labelSearch(S) {
 
 const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
+/**
+ * scoreLivePortals (reachField's post-pass, both tables: the walk table and the physics states): a ball on a live portal
+ * (liveP: a tick that starts there teleports it; not a portal exit or one 4-connected to an exit through portal tiles,
+ * where a teleported ball keeps lastPortal and walks on; the target's own id excluded: those never teleport) is there for
+ * one tick, so it costs what its exits cost, not what the tile's neighbours do: liveCost(own, exits, costOfExit) -> the
+ * cost to store, at least own, else the WORST of its exits' finite costs + 5 (the teleport edge's price), FAR (finite,
+ * last in every order) when no exit has a finite cost. The worst, not the average: EE picks one of several exits at
+ * random, and a ball whose portal lands by the trophy only sometimes must not rank as near (the search would expand the
+ * one-tick state again and again: its children are at whichever exit the replay picked); the exits' costs are all
+ * finite ones, so a portal with one live exit among dead ones ranks by that exit. Only finite costs change (never to or
+ * from CUT), so -1 stays the proof it was; nothing reads these costs back (the tables are final), so every other state
+ * keeps its cost. DEEPER's portals (25..26, 93) below the sealed trophy pocket were 2 tiles (the pocket above), now
+ * 30 (their exit (82, 95)); Spot the Difference's (116, 32) by the trophy 1 tile, now 165 (the worst of (113, 25),
+ * (114, 25)). Every lookup reads the tables (fifthsAt / costAt / scoreAt, the steer fields, eegpu's RCH3 reachFifths /
+ * reachScore), so all of them score the one-tick state by its target.
+ */
+function liveCost(own, exits, costOfExit) {
+	let worst = -1;
+	for (const e of exits) { const c = costOfExit(e); if (c !== CUT && c > worst) worst = c; }
+	const v = worst < 0 ? FAR : Math.min(FAR, worst + 5);
+	return v > own ? v : own;
+}
 function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] < DEATH_COST && a[i] > m) m = a[i]; return Math.max(0, bitLen(m) - 12); }
 /** per block id: its most upward modifier_y as the delayed tile (input held where the engine lets it act) */
 function modMinOf(level) {

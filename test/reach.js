@@ -972,6 +972,45 @@ function roomDeadFuzz() {
 		viol === 0 && checked > 0, `${dead} dead states, ${checked} checked, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
 }
 /** the viewing-room trap level (test/editor.js's one search runs on it too): 80 x 40, walk mode */
+/**
+ * the live portals (reach.js scoreLivePortals, liveOrder): a portal P (id 1 -> 2) under a sealed trophy pocket A, its exit
+ * (4, 10) by the start: a ball on P is teleported the next tick, so P costs its exit's cost + 1 tile, not the 1 tile of
+ * the pocket above it (DEEPER (25, 93), Spot the Difference (116, 32): the searches' "nearest point" was such a one-tick
+ * state). A second pocket B above R (id 3 -> 2), itself the exit of S (id 4 -> 3): a ball a teleport put on R keeps
+ * lastPortal and walks up, so R keeps its 1 tile. A self-target portal V (id 6 -> 6, never teleports) far from the
+ * trophies next to another id-6 portal V2 in pocket B: no exits (before: V cost V2's 0.2 tiles + 1). Both modes (the
+ * physics tables and walk mode's walk table: a low-gravity tile); the cut-off set the same as without liveOrder, the
+ * ball on P in the engine at the exit the next tick.
+ */
+function livePortalPockets() {
+	for (const walkMode of [false, true]) {
+		const W = 30, H = 12, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let x = 9; x <= 11; x++) cells.push([x, 2, 9]);
+		cells.push([9, 3, 9], [11, 3, 9], [9, 4, 9], [11, 4, 9], [10, 3, 121], [10, 4, 242, 0, 1, 2]);   // pocket A, P
+		for (let x = 19; x <= 22; x++) cells.push([x, 2, 9]);
+		cells.push([19, 3, 9], [22, 3, 9], [19, 4, 9], [21, 4, 9], [22, 4, 9], [20, 3, 121], [21, 3, 242, 0, 6, 6], [20, 4, 242, 0, 3, 2]);   // pocket B, V2, R
+		cells.push([4, H - 2, 242, 0, 2, 9], [7, H - 2, 242, 0, 4, 3], [27, H - 2, 242, 0, 6, 6], [2, H - 2, 255]);   // P's exit, S, V, the spawn
+		if (walkMode) cells.push([25, 6, 453]);
+		const L = levelOfCells(W, H, cells);
+		const f = R.reachField(L), f0 = R.reachField(L, { liveOrder: false });
+		const c = (fld, x, y, vy) => R.costAt(fld, x * 16, y * 16, vy || 0);
+		const onP = c(f, 10, 4, -2), exitP = c(f, 4, H - 2), onR = c(f, 20, 4, -2), onV = c(f, 27, H - 2);
+		let sameCut = true;
+		for (let i = 0; i < W * H; i++) if ((f.walk[i] === R.CUT) !== (f0.walk[i] === R.CUT)) sameCut = false;
+		if (!walkMode) for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f[k].length; i++) if ((f[k][i] === R.CUT) !== (f0[k][i] === R.CUT)) sameCut = false;
+		const sim = new E.EESim(L); sim.reset();
+		sim.px = 10 * 16; sim.py = 4 * 16; sim.speed_x = 0; sim.speed_y = -2;
+		sim._last_portal_set = false;   // (reset's lastPortal is a Point until a tick starts off a portal: the ball walked in)
+		const before = R.costAt(f, sim);
+		sim.tick(new E.EEInput());
+		const tx = (sim.px + 8) >> 4, ty = (sim.py + 8) >> 4;
+		check(`${walkMode ? 'walk' : 'physics'} mode: a live portal under a sealed trophy pocket costs its exit's cost + 1 tile (the ball is there one tick), an exit portal under a pocket (lastPortal) keeps its way up, a self-target portal has no exits; the cut-off set unchanged`,
+			f.mode === (walkMode ? 'walk' : 'physics') && f.livePortals >= 1 && onP >= exitP + 1 - 1e-9 && onP > 2 && Math.abs(before - onP) < 1e-9 && tx === 4 && ty === H - 2 && onR >= 0 && onR <= 1.5 && onV > 1.5 && sameCut,
+			`on P ${fmt(onP)} (exit ${fmt(exitP)}; the engine: at (${tx}, ${ty}) the next tick), on R ${fmt(onR)}, on V ${fmt(onV)}, cut set ${sameCut ? 'the same' : 'CHANGED'}, live ${f.livePortals}`);
+	}
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -995,7 +1034,7 @@ function trapLevel() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
-	if (want('H')) { sectionH(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
+	if (want('H')) { sectionH(); livePortalPockets(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
