@@ -392,7 +392,7 @@ const STRATEGIES = {
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
@@ -400,7 +400,7 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0'])] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : [])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
@@ -668,11 +668,17 @@ const SOURCE_REPLAY_MS = 1000;
 // a room's gain comes from the CPU search's source events alone (its walks run in its own threads), 0 until one names it
 const SOURCE_WALK_TILES = 160000;
 let sources = new Map(), sourceSeq = 0;   // room key -> {room, desc, gain, runs, at, from, early, best}
-let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain)}
+let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain), useful, cul}
 const srcPending = new Map();             // strategy index -> {at (its last replay), next (the attempt waiting), timer}
+// the useful territory (goexplore.js USEFUL TERRITORY): an attempt that ends in a cul-de-sac of its room (as the replay
+// entered the room) is no nearest attempt while a useful one is known, and no room's best source (the wall breaker's
+// and the relay's starting points): on Forgotten Helix main's nearest attempt sat 106.2 tiles out in the door-16 viewing
+// box by the trophy (a door the level's 15 coins never open) for the whole 10 minutes, the breaker's round 1 starting
+// there. The rooms' cul-de-sacs from the first replay that entered them, CUL_ROOMS kept (the walks: SOURCE_WALK_TILES)
+const CUL_ROOMS = 256;
 /** the running search's room key function (goexplore.js), made at the first use; its room fields at the first walk */
 function roomsOfSearch() {
-	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map() };
+	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map(), useful: null, cul: new Map() };
 	return roomsCur;
 }
 /** forgets the sources and the rooms (a new search, or the end of one: the attempts' inputs, up to 100000 characters
@@ -690,7 +696,7 @@ function publishSources() {
 		entered: s.early ? s.early.ticks : null, best: s.best ? { ticks: s.best.ticks, tiles: Math.round(s.best.dist * 10) / 10 } : null }));
 }
 /** a starting point o: {room, desc, gain, from, inputs, dist, arrival (the ticks of its inputs up to where it entered the
- *  room; 0 = not known)} */
+ *  room; 0 = not known), cul (it ends in a cul-de-sac of its room: not the room's best)} */
 function addSource(o) {
 	let s = sources.get(o.room);
 	if (!s) {
@@ -714,7 +720,7 @@ function addSource(o) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
 		s.early = { inputs: inputs.slice(0, o.arrival), ticks: o.arrival, dist: o.dist };
 	}
-	if (!s.best || o.dist < s.best.dist - 1e-3) s.best = { inputs, ticks: inputs.length, dist: o.dist };
+	if (!o.cul && (!s.best || o.dist < s.best.dist - 1e-3)) s.best = { inputs, ticks: inputs.length, dist: o.dist };
 	publishSources();
 }
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
@@ -736,6 +742,9 @@ function replayRooms(masks, withPath) {
 	const sim = new E.EESim(cur.level), inp = new E.EEInput();
 	sim.reset();
 	let deaths = 0, complete = -1, key = R.RM.key(sim), since = 0;
+	// (the state that entered the room the replay ends in: its cul-de-sacs, when not known yet; a dead ball has no tile)
+	const needCul = R.walk && cur.opts.useful !== false && !R.cul.has(key);
+	let entry = needCul ? sim.snapshot() : null;
 	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); else if (k === 'death') deaths++; };
 	const path = withPath ? [[Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]] : null;
 	for (let t = 0; t < masks.length && complete < 0; t++) {
@@ -743,7 +752,22 @@ function replayRooms(masks, withPath) {
 		sim.tick(inp);
 		if (path) path.push([Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]);
 		const k = R.RM.key(sim);
-		if (k !== key) { key = k; since = t + 1; }
+		if (k !== key) { key = k; since = t + 1; entry = R.walk && cur.opts.useful !== false && !R.cul.has(k) && !sim.is_dead ? sim.snapshot() : null; }
+	}
+	// (the useful territory: whether the attempt ends in a cul-de-sac of its room)
+	let cul = false;
+	if (R.walk && cur.opts.useful !== false) {
+		if (!R.cul.has(key) && entry !== null) {
+			try {
+				if (!R.useful) R.useful = GX.roomUseful(cur.level);
+				const s2 = new E.EESim(cur.level);
+				s2.reset(); s2.restore(entry);
+				R.cul.set(key, R.useful.of(s2, false).cul);
+				if (R.cul.size > CUL_ROOMS) R.cul.delete(R.cul.keys().next().value);
+			} catch (e) { R.cul.set(key, null); }
+		}
+		const b = R.cul.get(key);
+		if (b) { const W = cur.level.width, tl = Math.min(W * cur.level.height - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4))); cul = (b[tl >> 3] & (1 << (tl & 7))) !== 0; }
 	}
 	// (the room's territory gain: from the state it ends in, once per room; 0 above SOURCE_WALK_TILES)
 	let gain = R.gain.get(key);
@@ -761,7 +785,7 @@ function replayRooms(masks, withPath) {
 	}
 	// (with the steer field the attempts' distances are its own; the page shows the reach field's: reachTiles)
 	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
-	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
+	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain, cul }, reachTiles: rc >= 0 ? rc : null };
 }
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
@@ -790,7 +814,7 @@ function attemptSource(n, a, rm) {
 		p.at = now;
 		rm = replayRooms(Uint8Array.from(a.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), false).room;
 	}
-	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since });
+	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since, cul: !!rm.cul });
 }
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
 // states going back the way the relay came. With the steer field a state is dropped only above both fields' ceilings
@@ -1080,8 +1104,9 @@ function breakStarts() {
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
 	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
+	// (not from an attempt in a cul-de-sac of its room: see CUL_ROOMS)
 	const c = S.closest;
-	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
+	if (c && !c.cut && !c.cul && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
@@ -1475,7 +1500,10 @@ function start(b, gpu, test) {
 	// the searches keep a death that pays (goexplore.js deathPays; the GPU tools' --deaths=1: kernels.cu exploreKeepDead,
 	// rollBody); body deaths: false: every death ends its run, as before)
 	const deathMoves = b.deaths !== false && GX.deathMovesFor(ins.level);
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
+	// (the useful territory, 2026-09-28 (goexplore.js USEFUL TERRITORY): the CPU search's and the GPU random runs' rooms, the
+	// sources' gains, the nearest attempt; body useful: false or EEAT_USEFUL=0: as before)
+	const useful = b.useful !== false && process.env.EEAT_USEFUL !== '0';
+	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves, useful,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
@@ -2773,12 +2801,16 @@ function closer(ev, n) {
 	if (!Vn.lane && ev.inputs && !ev.cut) laneAttempt(String(ev.inputs), Vn.key);
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
-	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
+	// (a nearest attempt in a cul-de-sac of its room (old.cul, see CUL_ROOMS) gives way to any attempt outside one: the
+	// replay below tells)
+	if (old && !(old.cul && !cut) && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
 	// (one replay: the path, and the room it ends in for the sources)
 	const tr = replayRooms(masks, true);
 	if (own) attemptSource(n, own, tr.room);
+	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
+	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
 	const pathPts = tr.path;
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
@@ -2787,9 +2819,9 @@ function closer(ev, n) {
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
-	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer'); }
-	if (prec && !cut && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
-	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	if (brk && !cut && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer'); }
+	if (prec && !cut && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
+	S.closest = { dist, cut, viaDeath, cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
 	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)
