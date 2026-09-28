@@ -66,10 +66,10 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 // 3) --state: a pass continued across calls; 4) --seconds
 {
 	const st = path.join(TMP, 'state.json');
-	run(['--starts=40', '--to=200', '--ext=40', '--timeS=2', '--seconds=9', `--state=${st}`]);
+	run(['--starts=20', '--to=200', '--ext=400', '--timeS=3', '--seconds=8', `--state=${st}`]);
 	const s1 = C.readJSON(st, null);
 	check('--state writes the next start (tick + hash) after a budget-cut pass', !!s1 && s1.t > 0 && s1.t <= 200 && typeof s1.h === 'number', JSON.stringify(s1));
-	run(['--starts=40', '--to=200', '--ext=40', '--timeS=2', '--seconds=9', `--state=${st}`]);
+	run(['--starts=20', '--to=200', '--ext=400', '--timeS=3', '--seconds=8', `--state=${st}`]);
 	const s2 = C.readJSON(st, null);
 	check('the next call continues from it', !!s2 && s1 && (s2.t > s1.t || s2.wrapped === true || s2.t === 0), `${s1 && s1.t} -> ${s2 && s2.t}`);
 }

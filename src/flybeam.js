@@ -399,7 +399,14 @@ async function main() {
 		const nextA = next >= tasks.length ? (to >= n ? 0 : to) : tasks[next].A;
 		C.writeJSON(a.state, { t: nextA, h: stateH[Math.min(nextA, stateH.length - 1)], wrapped: next >= tasks.length && to >= n });
 	}
-	const cands = results.flatMap((r) => r.found);
+	// every join replayed alone: its saving in RUN ticks (a join before the first input moves the timer's start: the
+	// ice run's 0 -> 397 saved 69 ticks but started the timer 69 ticks sooner) and only joins the acceptance rule takes
+	const cands = [];
+	for (const c of results.flatMap((r) => r.found)) {
+		const ev = C.evaluate(level, splice(ms, [c]));
+		const v = C.judge(ev, ref, ref.deaths);
+		if (v.accept && v.saved > 0) cands.push(Object.assign(c, { ticks: c.saving, saving: v.saved }));
+	}
 	const set = pickSet(cands);
 	const total = set.reduce((s, x) => s + x.saving, 0);
 	console.log(`[flybeam] ${cands.length} rejoins; the best non-overlapping set: ${set.map((s) => `${s.A}->${s.T} -${s.saving}`).join(', ') || 'none'} (-${total} planned)`);
