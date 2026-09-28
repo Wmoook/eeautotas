@@ -897,7 +897,11 @@ async function main() {
 	if (!ev0) { console.log(JSON.stringify({ error: 'the run does not finish the level' })); process.exit(1); }
 	o.nocoins = a.nocoins === undefined || a.nocoins === 'auto' ? (C.coinsIrrelevant(levelFile, ev0.ms, ev0) ? 1 : 0) : +a.nocoins;
 	const seconds = +(a.seconds || 600);
-	const nw = Math.max(1, +(a.workers || Math.max(1, os.cpus().length - 2)));
+	// the workers: as asked, at most what half of the free memory holds (a worker: its cell table, 2^log2 x 8 bytes, + ~700 MB of
+	// layers and snapshots at the default cap: one Egg Quest II search, 1,041 MB RSS, heap 659 MB, array buffers 212 MB)
+	const perWorkerMB = (2 ** ((o.log2 || DEFAULTS.log2)) * 8) / 1048576 + 700;
+	const memW = Math.max(1, Math.floor((os.freemem() / 1048576) * 0.5 / perWorkerMB));
+	const nw = Math.max(1, Math.min(memW, +(a.workers || Math.max(1, os.cpus().length - 2))));
 	const out = a.out ? path.resolve(a.out) : path.join(C.SRC, 'out', 'skipfind_best.eetas');
 	const picks = String(o.picks || DEFAULTS.picks).split(',').filter(Boolean);
 	const t0 = Date.now();
@@ -923,7 +927,7 @@ async function main() {
 		for (const s of st) for (const pk of picks) { const key = keyOf(s, pk); if (!done.has(key)) queue.push({ s, pick: pk, key }); }
 	};
 	refill();
-	emit({ ev: 'start', n: info.n, runTicks: bestEv.runTicks, nocoins: o.nocoins, clockblind: info.cb, workers: nw, tasks: queue.length, searched: done.size, picks });
+	emit({ ev: 'start', n: info.n, runTicks: bestEv.runTicks, nocoins: o.nocoins, clockblind: info.cb, workers: nw, memWorkers: memW, tasks: queue.length, searched: done.size, picks });
 	let finds = 0, searches = 0;
 	const workers = [];
 	/** a candidate run (full masks) judged against the current best; accepted: the new best, the workers told */
