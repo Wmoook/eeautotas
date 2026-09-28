@@ -95,7 +95,8 @@ function run(o) {
 	const better = (rt) => { if (S.best === null || rt < S.best) { S.best = rt; S.bestT = since(); return true; } return false; };
 	const gpuOk = !o.cpu && !!G.nativeTool() && !G.unsupported(level) && !(o.gpu && o.gpu.available === false);
 	emit({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` });
-	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W }, o.gpu || { available: gpuOk });
+	ED.start(Object.assign({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W },
+		Number.isInteger(+o.seed) && o.seed != null ? { seed: +o.seed } : {}), o.gpu || { available: gpuOk });
 	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
@@ -227,7 +228,7 @@ if (require.main === module) {
 	if (!file || !fs.existsSync(file)) { console.log('usage: node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1]\n(its job pauses any other running job, yours included: one job at a time)'); process.exit(2); }
 	const name = args.name || path.basename(file, path.extname(file));
 	const out = path.resolve(args.out || path.join(__dirname, 'out', 'autotas', name.replace(/[^\w.-]+/g, '_')));
-	const ctl = run({ eelvl: fs.readFileSync(file), minutes: args.minutes, workers: args.workers, name, out, handoffMin: args.handoffMin, cpu: args.cpu === '1',
+	const ctl = run({ eelvl: fs.readFileSync(file), minutes: args.minutes, workers: args.workers, name, out, handoffMin: args.handoffMin, cpu: args.cpu === '1', seed: args.seed,
 		onEvent: (e) => console.log(JSON.stringify(e)), onEnd: () => setTimeout(() => process.exit(0), 3000) });
 	const stop = () => ctl.stop();
 	process.on('SIGINT', stop);
