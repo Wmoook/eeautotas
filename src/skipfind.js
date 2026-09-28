@@ -934,12 +934,22 @@ async function main() {
 	const done = new Set();
 	const doneFile = a.done ? path.resolve(a.done) : null;
 	if (doneFile) { try { for (const l of fs.readFileSync(doneFile, 'utf8').split('\n')) if (l) done.add(l); } catch (e) { /* none yet */ } }
-	const markDone = (key) => { done.add(key); if (doneFile) { try { fs.appendFileSync(doneFile, key + '\n'); } catch (e) { /* ignore */ } } };
+	// the queue: the starts whose state was never searched first (in startsOf's order), then the ones searched before whose
+	// goal window changed since (a find elsewhere): with finds spread over a run, re-searching the coarse levels' starts
+	// first kept Egg Quest II's base-route pass from ever reaching t600 (the chimney) in 25 min
+	const stateOfKey = (k) => { const q = k.split(':'); return `${q[0]}:${q[2]}`; };
+	const stateDone = new Set([...done].map(stateOfKey));
+	const markDone = (key) => { done.add(key); stateDone.add(stateOfKey(key)); if (doneFile) { try { fs.appendFileSync(doneFile, key + '\n'); } catch (e) { /* ignore */ } } };
 	let queue = [];
 	const refill = () => {
 		const st = startsOf(info, o);
-		queue = [];
-		for (const s of st) for (const pk of picks) { const key = keyOf(s, pk); if (!done.has(key)) queue.push({ s, pick: pk, key }); }
+		const fresh = [], again = [];
+		for (const s of st) for (const pk of picks) {
+			const key = keyOf(s, pk);
+			if (done.has(key)) continue;
+			(stateDone.has(stateOfKey(key)) ? again : fresh).push({ s, pick: pk, key });
+		}
+		queue = fresh.concat(again);
 	};
 	refill();
 	emit({ ev: 'start', n: info.n, runTicks: bestEv.runTicks, nocoins: o.nocoins, clockblind: info.cb, workers: nw, memWorkers: memW, tasks: queue.length, searched: done.size, picks });
