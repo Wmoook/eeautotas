@@ -197,8 +197,8 @@
 //        cell off the route's (room, tile) schedule by its key-blind lead, the route's first tick at its tile in any room:
 //        a skipped room, another coin / switch subset or another path that gets somewhere sooner; 0: off)] [--wPhase=0
 //        (time-door levels: 1 keys head W's schedule per (tile, the doors' phase bucket); 0: per tile at any phase)] [--wYield=1
-//        (head W's share follows its yield like head L's; 0: --pW all the time)] [--wLead=1 (a faster route from a head-W
-//        pick restarts head L's grace too; 0: only head L's own routes)]
+//        (head W's share follows its yield like head L's; 0: --pW all the time)] [--wLead=0 (1: a faster route from a head-W
+//        pick restarts head L's grace too; 0: only head L's own routes, as before)]
 //        [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
@@ -244,11 +244,12 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const WAY_PICK = 40;
 // (--wYield=1: head W's share follows its yield like head L's: --pW for LEAD_GRACE_S after the first route and after
 // every faster route that descends from a head-W pick, then halved every LEAD_HALF_S down to LEAD_FLOOR x --pW;
-// --wYield=0: --pW all the time); --wLead=1: a faster route from a head-W pick (another way) restarts head L's grace too, so
+// --wYield=0: --pW all the time); --wLead=1 (off by default: no clear difference in 6 pairs, n2_2_head_W.md round 4): a
+// faster route from a head-W pick (another way) restarts head L's grace too, so
 // head L refines the new way at its full share (0: only head L's own routes, as before)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 1, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
