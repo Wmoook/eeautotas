@@ -1059,6 +1059,29 @@ function roomGate(inputs) {
 		return null;
 	}
 }
+/** a gate hit's inputs, extended by up to GATE_ENTER ticks of its last input until the room changes (the trigger acts
+ *  on a later tick than the centre's arrival on its tile); the hit itself when the room does not change or the ball dies;
+ *  level: the running search's when not given */
+const GATE_ENTER = 3;
+function gateEnter(inputs, level) {
+	try {
+		const L = level || (cur && cur.level);
+		if (!inputs || !L) return inputs;
+		const RM = !level && cur.roomAimT ? cur.roomAimT.RM : GX.roomOf(L);
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		const k0 = RM.key(sim), last = inputs.charCodeAt(inputs.length - 1);
+		let out = inputs;
+		for (let k = 0; k < GATE_ENTER; k++) {
+			E.applyMask(inp, (last - 48) & 31); sim.tick(inp);
+			if (sim.is_dead) return inputs;
+			out += String.fromCharCode(last);
+			if (RM.key(sim) !== k0) return out;
+		}
+		return inputs;
+	} catch (e) { return inputs; }
+}
 /** the coins the state after inputs holds, as the room keys count them (gold where a coin door or gate reads them, blue
  *  where a blue one does; goexplore.js roomOf): the wall breaker's progress order of its starting points */
 function coinsOf(inputs) {
@@ -1197,7 +1220,11 @@ function breakAfter(n, how) {
 	if (!R) return breakEnd(n);
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
-	const hit = V.brk && V.brk.gateHit;
+	// (a gate hit is the ball's centre on the gate's tile; the trigger acts a tick or two later (a coin: the next tick's touch),
+	// so the chain goes on from the state in the gate's room: without it the next room target was taken from the state
+	// before the coin, where the coin after it leads into the room the search already knows (NC Naos: from coin 7's hit the
+	// next target was a red key 486 tiles away, not coin 8 at 38): gateEnter)
+	const hit = V.brk && V.brk.gateHit ? gateEnter(V.brk.gateHit) : null;
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
@@ -2628,4 +2655,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, coinsOfDesc, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, coinsOfDesc, gateEnter, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

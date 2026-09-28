@@ -1,6 +1,6 @@
 'use strict';
 // bursts.js roomAim (the wall breaker's room target where the coin plan gives none, hx-r1-guidance 2026-09-28) and the
-// breaker's progress order (editor.js coinsOfDesc): on a small coin-sequence level (coin doors 1 and 2, a door of more
+// breaker's progress order (editor.js coinsOfDesc) and its gate hits (gateEnter): on a small coin-sequence level (coin doors 1 and 2, a door of more
 // coins than the level holds in front of a pocket, a spike-boxed coin):
 // - the goals are the triggers the state's own walk reaches with the doors as its room holds them (a shut coin door is
 //   a wall, a coin behind it no goal), killing tiles closed (a coin boxed in by spikes no goal), taken coins none;
@@ -60,6 +60,23 @@ console.log('\n== roomAim');
 	const a2 = BU.roomAim(L, RM, s2, none, T);
 	check('2 coins: the trophy through the open 2-coin door; the pocket (behind 5) and the spike-boxed coin still none', a2 && tiles(a2).join(' ') === '22,9', JSON.stringify(tiles(a2)));
 	check('the ball\'s state is left as it was (roomAim restores its snapshot)', s2.coins === 2 && s2.px === 14 * 16, `coins ${s2.coins}, px ${s2.px}`);
+}
+console.log('\n== a gate hit goes on into the gate\'s room (editor.js gateEnter)');
+{
+	// hold right from the spawn until the ball's centre is first on coin A's tile (the gate hit: the aim's cost 0)
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	let inputs = '';
+	for (let t = 0; t < 200 && (Math.trunc(sim.px + 8) >> 4) !== 6; t++) { inputs += String.fromCharCode(48 + 4); E.applyMask(inp, 4); sim.tick(inp); }
+	const coinsAtHit = sim.coins;
+	const out = ED.gateEnter(inputs, L);
+	const s2 = new E.EESim(L), i2 = new E.EEInput();
+	s2.reset();
+	for (let t = 0; t < out.length; t++) { E.applyMask(i2, (out.charCodeAt(t) - 48) & 31); s2.tick(i2); }
+	check('the hit (the centre on coin A\'s tile) holds the coin a tick later: the chain goes on from the state with it (1 to 3 ticks more of the last input)',
+		coinsAtHit === 0 && s2.coins === 1 && out.length > inputs.length && out.length <= inputs.length + 3, `at the hit ${coinsAtHit} coins (t${inputs.length}), after ${s2.coins} (t${out.length})`);
+	const s0 = ED.gateEnter('', L);
+	check('... no inputs: as given', s0 === '', JSON.stringify(s0));
 }
 console.log('\n== the breaker\'s progress order');
 {
