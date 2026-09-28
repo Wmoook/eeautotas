@@ -76,6 +76,13 @@ const FINE_NEAR = 8;
 // cells climbed it and reached (45, 71) in 9.5 s (then the 6th coin (36, 49) in 11.3 s more). Only on levels with
 // climbables or liquids (`slowY`); the others keep their settings and bandit exactly
 const FINE_Y = { cqx: 0.25, cqv: 16, qy: 1, qvy: 16, cap: 262144 };
+// a target the room's burst chains ended short of REST_AFTER times (a chain = its links; the target it failed at = the
+// untried one nearest the chain's last start by the room's walk) rests: the room's aim field leaves it out until every
+// other untried target rests too (then all come back). The walk is blind to gravity and to up-drafts, so a trigger it
+// reaches may be no target at all from here: Wine Quest I's 5-coin room aimed every burst at the coin (119, 65), 38 walk
+// tiles away through a one-way lid the ball cannot pass from that side (exhaustive at 0.5 px), and never at the 6th
+// coin (36, 49), 100 walk tiles away, that the ball can reach (the explore found it in 21 s with the target given)
+const REST_AFTER = 3;
 const FINE_Y_TEXT = '4 px x 1 px and 1/16';
 /** a level with tiles where the ball rises slowly (climbables, liquids): the fine-y cells are worth a try there */
 function slowYOf(L) {
@@ -370,9 +377,10 @@ function create(o) {
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
 	const fieldOf = (r) => {
 		// (cached while no trigger of the room was tried since)
-		if (r.fc && r.fc.n === r.tried.size) return r.fc.f;
+		const nk = r.tried.size * 4096 + (r.rest ? r.rest.size : 0);
+		if (r.fc && r.fc.n === nk) return r.fc.f;
 		const f = fieldOf0(r);
-		r.fc = { n: r.tried.size, f };
+		r.fc = { n: nk, f };
 		return f;
 	};
 	const fieldOf0 = (r) => {
@@ -382,7 +390,10 @@ function create(o) {
 		// (its portal arm r.pa); together, Forgotten Veil's coin 4 ranked 14th of the coins=3 room's 17 targets from the
 		// route's entry: every nearer one first, a burst each)
 		const arm = !!r.portal;
-		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm) for (const t of tiles) goals.push(t);
+		const rest = r.rest && r.rest.size ? r.rest : null;
+		// (every untried target resting: they all come back)
+		if (rest) { let live = 0; for (const [c] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !rest.has(c)) live++; if (!live) { rest.clear(); r.fails = new Map(); } }
+		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
 		const n = goals.length;
 		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) goals.push(t);
 		if (!goals.length) return null;
@@ -696,7 +707,49 @@ function create(o) {
 					what: `${job.what.replace(/ · (chain|finer|wall|fine-y) .*$/, '').replace(/settings \d+/, `settings ${FY}`)} · fine-y (${FINE_Y_TEXT})` });
 				st.fine++;
 			}
+			// (a chain that ended short of its targets: a failure of the target nearest its last start; REST_AFTER of them rest it)
+			if (!next && job.r && !r.reached) failAt(job);
 		}
+	};
+	/** the untried target (component) nearest the end of job's inputs by the room's walk: one more failure of it */
+	const failAt = (job) => {
+		try {
+			const rr = job.r.base || job.r, arm = !!job.r.portal;
+			const I = rr.info;
+			if (!I) return;
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			for (let k = 0; k < job.inputs.length; k++) { E.applyMask(inp, (job.inputs.charCodeAt(k) - 48) & 31); sim.tick(inp); }
+			const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+			const goal = new Map();
+			for (const [c, tiles] of I.comps) if (!job.r.tried.has(c) && I.pOnly.has(c) === arm && !(job.r.rest && job.r.rest.has(c))) for (const t of tiles) goal.set(t, c);
+			if (!goal.size) return;
+			const seen = new Uint8Array(N), q = new Int32Array(N);
+			let qh = 0, qt = 0, hit = -1;
+			seen[s0] = 1; q[qt++] = s0;
+			while (qh < qt && hit < 0) {
+				const t = q[qh++];
+				if (goal.has(t)) { hit = goal.get(t); break; }
+				const x = t % W, y = (t / W) | 0;
+				const ex = PT.exits.get(t);
+				if (ex) for (const e of ex) if (!seen[e] && I.pass[e]) { seen[e] = 1; q[qt++] = e; }
+				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (seen[j] || !I.pass[j]) continue;
+					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
+					seen[j] = 1; q[qt++] = j;
+				}
+			}
+			if (hit < 0) return;
+			const R = job.r;
+			if (!R.fails) R.fails = new Map();
+			const n = (R.fails.get(hit) || 0) + 1;
+			R.fails.set(hit, n);
+			if (n >= REST_AFTER) { if (!R.rest) R.rest = new Set(); R.rest.add(hit); R.fails.set(hit, 0); st.rested = (st.rested || 0) + 1; }
+		} catch (e) { /* a record only */ }
 	};
 	return {
 		room, edge, triggers: TR.n,
