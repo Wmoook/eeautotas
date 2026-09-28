@@ -1195,7 +1195,7 @@ async function lane(a) {
 	const ticksBuf = new SharedArrayBuffer(8), ticksTotal = new BigInt64Array(ticksBuf);
 	E.setTickCounter(ticksTotal);
 	let target = null, version = 0, route = null, queue = [], ended = false;
-	const done = new Set(), stateDone = new Set();
+	const done = new Set(), stateDone = new Set(), grownDone = new Set(), GROW_TICKS = 500;
 	const stats = { searches: 0, shortcuts: 0, splices: 0, leads: 0, routes: 0, attempts: 0 };
 	// ---- the library: {ms, map: physical state + room key -> the earliest tick} (makeLibrary)
 	const LB = makeLibrary(level, { max: libMax, minGain: P.minGain });
@@ -1259,7 +1259,11 @@ async function lane(a) {
 				const key = keyOfStart(info, x.s, x.deep, ck ? `${pk}/${ck}` : pk);
 				if (done.has(key)) continue;
 				const t = { s: x.s, pick: pk, deep: x.deep, land: !!x.land, capK: ck, grp: x.grp, key, complete: target.kind === 'route' || x.s + depthOf(x.deep) + P.horizon <= n };
-				(ck === 'd' ? later : stateDone.has(stateOfKey(key)) ? again : fresh).push(t);
+				// (an incomplete window: its state searched before on a window at most GROW_TICKS shorter = searched again only
+				// after every fresh start: on Forgotten Veil the one search's attempts grew by a few ticks at a time and the lane
+				// searched the same starts 0-400 six times over in its first 300 s)
+				if (!t.complete) t.gkey = `${info.H[x.s]}:g${Math.floor((n - x.s) / GROW_TICKS)}:${ck ? `${pk}/${ck}` : pk}:${x.deep ? 1 : 0}`;
+				(ck === 'd' ? later : stateDone.has(stateOfKey(key)) || (t.gkey && grownDone.has(t.gkey)) ? again : fresh).push(t);
 			}
 		}
 		queue = [...fresh.filter((t) => t.grp === 0), ...later.filter((t) => t.grp === 0), ...fresh.filter((t) => t.grp !== 0), ...later.filter((t) => t.grp !== 0), ...again];
@@ -1271,6 +1275,7 @@ async function lane(a) {
 		const task = queue.shift();
 		done.add(task.key);
 		if (task.complete) stateDone.add(stateOfKey(task.key));
+		if (task.gkey) grownDone.add(task.gkey);
 		if (w.version !== target.version) { w.postMessage({ run: Array.from(target.ms), version: target.version, attempt: target.kind === 'attempt', nocoins: target.nc }); w.version = target.version; }
 		w.busy = true; w.task = task; w.kind = target.kind; w.since = Date.now();
 		w.postMessage({ task, deadline: deadlineAll });

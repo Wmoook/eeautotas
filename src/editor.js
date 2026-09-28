@@ -2621,8 +2621,11 @@ function closer(ev, n) {
 		Vn.best = dist; Vn.bestAt = Date.now();
 		if (ev.inputs && !ev.cut && dist < deathTiles) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
-	// (the path skips' targets before any route: every search's own nearest attempt)
-	if (own && !Vn.lane) laneAttempt(own.inputs, Vn.key);
+	// (the path skips' targets before any route: every search's own nearest attempt as it reports it (a tool reports its
+	// closest attempt when it got nearer by its own measure), also where the steer field has no value: on Egg Quest II the
+	// one search's attempts reached the path skips only after ~30 s, their steer costs "no value" until then; the newest
+	// per search, at most one batch per LANE_FEED_MS)
+	if (!Vn.lane && ev.inputs && !ev.cut) laneAttempt(String(ev.inputs), Vn.key);
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
