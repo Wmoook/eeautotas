@@ -527,7 +527,7 @@ function schedule() {
 		// R.dry); a later run of its own that gets on closes it again. Cycle 1's ungated share (every round from its first
 		// run) slowed the rounds that pass Octorage's wall (1,856 s vs main's 862 s; one pair)
 		const R = brk && brk.round;
-		const share = !!(cur && cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB && R && (R.dry || 0) >= BREAK_SHARE_DRY);
+		const share = !!cur && breakShareOpen(cur.opts, toolInfo && toolInfo.memMB, R);
 		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare));
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
@@ -932,6 +932,12 @@ const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
 // the gated share (breakShare, schedule()): the round's runs in a row with no gate and no progress of their own before the
 // one search's bursts go on beside it
 const BREAK_SHARE_DRY = 1;
+/** the gated share (schedule()): does the one search's bursts' GPU turn go on beside the round R? (opts: the search's
+ *  opts, memMB: its GPU's memory) */
+const breakShareOpen = (opts, memMB, R) => !!(opts && opts.breakShare && memMB >= BURST_BIG_MB && R && (R.dry || 0) >= BREAK_SHARE_DRY);
+/** the round's dry count after a run (breakAfter): 0 when it entered a gate or got on by itself (own > own0: the round's
+ *  own progress count after / before the run), else one more */
+const breakDryAfter = (dry, hit, own, own0) => hit || (own || 0) > (own0 || 0) ? 0 : (dry || 0) + 1;
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
 const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
@@ -1153,7 +1159,7 @@ function breakAfter(n, how) {
 	const hit = V.brk && V.brk.gateHit;
 	// (the gated share: a run with no gate and no progress of its own opens the one search's bursts beside the round, one
 	// that got on closes them again; schedule())
-	R.dry = hit || (R.own || 0) > (R.own0 || 0) ? 0 : (R.dry || 0) + 1;
+	R.dry = breakDryAfter(R.dry, hit, R.own, R.own0);
 	if (S.breaker && S.breaker.round) S.breaker.round.dry = R.dry;
 	if (cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB && S.strategies.some((q) => q.gpuShare)) {
 		if (R.dry === BREAK_SHARE_DRY) note(`${V.label}: round ${brk.rounds} run ${R.runs} got nothing of its own: the one search's bursts go on beside the round`);
@@ -2581,4 +2587,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
