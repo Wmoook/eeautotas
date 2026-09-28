@@ -159,7 +159,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 			<h1><a href="/" title="Back to your runs"><span class="coin"></span>EE Auto TAS</a><span class="sl">/</span>Level editor</h1>
 			<div class="sub">Place blocks, a start and the trophy · the GPU tries every input every tick and the CPU tries random runs to find a route to the trophy · a guide line is only a hint</div>
 		</div>
-		<div class="pills"><span class="pill" id="pSize"></span><span class="pill" id="pGpu">GPU: …</span><a class="pill" href="/">&larr; Your runs</a></div>
+		<div class="pills"><a class="pill" id="pJob" href="/" hidden title="Watch this job's best run"></a><span class="pill" id="pSize"></span><span class="pill" id="pGpu">GPU: …</span><a class="pill" href="/">&larr; Your runs</a></div>
 	</header>
 	<div class="main">
 		<div class="col left">
@@ -184,6 +184,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 				<span class="sep"></span>
 				<label class="ck" title="Everybody Edits' own block images, from your eeo-tas folder (off: simple colors)"><input type="checkbox" id="cGfx" checked> EE graphics</label>
 				<label class="ck"><input type="checkbox" id="cGrid" checked> grid</label>
+				<label class="ck" id="lJobPath" hidden title="The job's best run over the level, drawn like a found route (dashed once you change the level)"><input type="checkbox" id="cJobPath"> job's run</label>
 			</div>
 			<div class="stage" id="stage" tabindex="0"><canvas id="cv"></canvas><div class="ghint" id="gHint" hidden></div></div>
 			<div class="status"><span id="stPos">&nbsp;</span><span id="stInfo"></span>
@@ -351,6 +352,9 @@ const LV = { name: 'My level', W: 40, H: 25, fg: new Int32Array(1000), bg: new I
 	owner: 'player', description: '', bgColor: null, pal: BI.pal, kind: BI.kind,
 	nums: { get: (i) => { const a = LV.args.get(i); return a ? a[0] : undefined; } },
 	portals: { get: (i) => { const a = LV.args.get(i), t = LV.fg[i]; return a && (t === 242 || t === 381) ? { rot: a[0], id: a[1], target: a[2], random: false } : undefined; } } };
+// the job this level was opened from (#job=<id>: the run viewer's and the job page's "Open in level editor"): its id and
+// name, its best run's path (px, ball centre per tick) once shown, the level's signature then (edited: the path is dashed)
+const JOB = { id: null, name: '', path: null, sig: null, token: 0 };
 const needsArgs = (id) => defaultArgs(id).length > 0;
 const sameArgs = (a, b) => (!a && !b) || (!!a && !!b && a.length === b.length && a.every((v, k) => v === b[k]));
 function blankLevel(W, H, border) {
@@ -1003,6 +1007,7 @@ function draw() {
 		if (T < 14 * d) ring(g, sx + T / 2, sy + T / 2, Math.max(7 * d, T), '#ffd23f');
 	}
 	if (T < 14 * d) for (const i of marks.trophies) ring(g, ox + (i % LV.W) * T + T / 2, oy + ((i / LV.W) | 0) * T + T / 2, Math.max(7 * d, T), '#2fcf72');
+	drawJobPath(g, ox, oy, s, d);
 	drawRoute(g, ox, oy, s, d);
 	drawGuide(g, ox, oy, s, d);
 	// the cursor: the brush's block where it would go, the rectangle, the erase / pick frame
@@ -1108,6 +1113,26 @@ function routeShown() {
 	if (st.result && st.result.path) return st.result;
 	return st.closest && st.closest.path ? st.closest : null;
 }
+/** a path of [x, y] per tick (px, ball centre) as one line; a jump of more than 40 px (a portal, a respawn) is not joined */
+function strokePath(g, P, ox, oy, s, w, col) {
+	g.strokeStyle = col; g.lineWidth = w; g.beginPath();
+	for (let t = 0; t < P.length; t++) {
+		const x = ox + P[t][0] * s, y = oy + P[t][1] * s;
+		if (t === 0 || Math.abs(P[t][0] - P[t - 1][0]) + Math.abs(P[t][1] - P[t - 1][1]) > 40) g.moveTo(x, y); else g.lineTo(x, y);
+	}
+	g.stroke();
+}
+/** the job's best run (#job=<id>&path=1, or the toolbar's "job's run"): drawn like a found route, in blue; dashed once the level changed */
+function drawJobPath(g, ox, oy, s, d) {
+	if (!JOB.id || !JOB.path || !$('cJobPath').checked) return;
+	g.save();
+	g.lineJoin = 'round'; g.lineCap = 'round';
+	const stale = JOB.sig !== currentSig();
+	if (stale) g.setLineDash([6 * d, 5 * d]);
+	strokePath(g, JOB.path, ox, oy, s, Math.max(4, 4.5 * d), 'rgba(0,0,0,.5)');
+	strokePath(g, JOB.path, ox, oy, s, Math.max(2, 2.2 * d), stale ? 'rgba(110,200,255,.55)' : '#6ec8ff');
+	g.restore();
+}
 function drawRoute(g, ox, oy, s, d) {
 	const r = routeShown();
 	if (!r) return;
@@ -1115,14 +1140,7 @@ function drawRoute(g, ox, oy, s, d) {
 	const P = r.path;
 	g.save();
 	g.lineJoin = 'round'; g.lineCap = 'round';
-	const line = (w, col) => {
-		g.strokeStyle = col; g.lineWidth = w; g.beginPath();
-		for (let t = 0; t < P.length; t++) {
-			const x = ox + P[t][0] * s, y = oy + P[t][1] * s;
-			if (t === 0 || Math.abs(P[t][0] - P[t - 1][0]) + Math.abs(P[t][1] - P[t - 1][1]) > 40) g.moveTo(x, y); else g.lineTo(x, y);
-		}
-		g.stroke();
-	};
+	const line = (w, col) => strokePath(g, P, ox, oy, s, w, col);
 	if (stale) g.setLineDash([6 * d, 5 * d]);
 	line(Math.max(4, 4.5 * d), 'rgba(0,0,0,.5)');
 	const near = r === SOLVE.st.closest;
@@ -1404,25 +1422,108 @@ $('bNew').onclick = () => {
 	try { [W, H] = sizeInputs(); } catch (e) { lvMsg(esc(e.message), true); return; }
 	lvMsg('');
 	wholeLevel(() => { blankLevel(W, H, $('cBorder').checked); LV.name = 'My level'; LV.gravity = 1; LV.bgArgb = 0; LV.bgColor = null; LV.owner = 'player'; LV.description = ''; GUIDE.strokes = []; });
+	jobClear();
 	fit();
 	toast('A new level. <b>Ctrl+Z</b> brings the old one back.');
 };
 $('bGuideClear').onclick = () => clearGuide();
 $('bClear').onclick = () => { wholeLevel(() => { blankLevel(LV.W, LV.H, $('cBorder').checked); GUIDE.strokes = []; }); };
 $('bImport').onclick = () => $('fImport').click();
+/** the import path of an .eelvl (Import .eelvl, and a job's level: #job=<id>): read the way EE Offline does (POST
+ *  /api/editor/parse), the block info, then the level in one undo step (`name`: the level's name instead of the file's;
+ *  `still()`: false = a newer load came first, nothing changes) */
+async function openEelvl(bytes, fileName, name, still) {
+	const d = await postJson('/api/editor/parse', { eelvlB64: b64(bytes) });
+	await ensureInfo([...new Set([...d.cells.map((c) => c[2]), ...d.bg.map((c) => c[2])])]);
+	if (still && !still()) return null;
+	wholeLevel(() => { loadJson(d); if (name) LV.name = String(name).slice(0, 80); else if (!d.name) LV.name = fileName.replace(/\.eelvl$/i, ''); GUIDE.strokes = []; });
+	fit();
+	return d;
+}
+const levelFacts = (d) => `${d.width} × ${d.height} tiles, ${d.cells.length.toLocaleString('en-US')} blocks.${d.warnings && d.warnings.length ? ` Notes: ${esc(d.warnings.slice(0, 3).join('; '))}` : ''}`;
 $('fImport').onchange = async () => {
 	const f = $('fImport').files[0];
 	$('fImport').value = '';
 	if (!f) return;
 	lvMsg('<span class="spin"></span>Reading the level the way EE Offline does…');
 	try {
-		const d = await postJson('/api/editor/parse', { eelvlB64: b64(await f.arrayBuffer()) });
-		await ensureInfo([...new Set([...d.cells.map((c) => c[2]), ...d.bg.map((c) => c[2])])]);
-		wholeLevel(() => { loadJson(d); if (!d.name) LV.name = f.name.replace(/\.eelvl$/i, ''); GUIDE.strokes = []; });
-		fit();
-		lvMsg(`Opened <b>${esc(f.name)}</b>: ${d.width} × ${d.height} tiles, ${d.cells.length.toLocaleString('en-US')} blocks.${d.warnings && d.warnings.length ? ` Notes: ${esc(d.warnings.slice(0, 3).join('; '))}` : ''}`);
+		const d = await openEelvl(await f.arrayBuffer(), f.name);
+		jobClear();
+		lvMsg(`Opened <b>${esc(f.name)}</b>: ${levelFacts(d)}`);
 	} catch (e) { lvMsg(esc(e.message), true); }
 };
+
+// ------------------------------------------------------------ a job's level (#job=<id>[&path=1]: "Open in level editor" in the run viewer and on the job page)
+// GET /api/jobs/<id> (the job's name), GET /api/jobs/<id>/original.eelvl (its level file as imported) through the import
+// path above; &path=1, or the toolbar's "job's run", draws the job's best run (GET /api/jobs/<id>/trajectory) over the
+// level. The hash is dropped once read, so a reload keeps the edited level (the autosave); Ctrl+Z brings back the level
+// that was open before.
+function b64i32(s) { const b = atob(s || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Int32Array(u.buffer, 0, u.length >> 2); }
+/** the level is no longer the job's (New, Import .eelvl): no note, no path */
+function jobClear() {
+	JOB.token++;
+	Object.assign(JOB, { id: null, name: '', path: null, sig: null });
+	$('pJob').hidden = true; $('lJobPath').hidden = true; $('cJobPath').checked = false;
+	VW.dirty = true;
+}
+async function openJob(id, withPath) {
+	const token = ++JOB.token, still = () => token === JOB.token;
+	lvMsg(`<span class="spin"></span>Opening the level of job <b>${esc(id)}</b>…`);
+	let what = `job <b>${esc(id)}</b>`;
+	try {
+		if (!/^[a-z0-9-]+$/.test(id)) throw new Error('that is not a job id (the link should look like /editor#job=my-level-1a2b3c)');
+		let j;
+		try { j = await api(`/api/jobs/${id}`); } catch (e) { throw new Error(/unknown job/.test(e.message) ? 'there is no such job (it may have been deleted)' : e.message); }
+		what = `job <b>${esc(j.name || id)}</b>`;
+		const r = await fetch(`/api/jobs/${id}/original.eelvl`);
+		if (!r.ok) { const x = await r.json().catch(() => ({})); throw new Error(x.error || r.statusText); }
+		const bytes = await r.arrayBuffer();
+		if (!still()) return;
+		const d = await openEelvl(bytes, `${j.name || id}.eelvl`, j.name || id, still);
+		if (!d) return;
+		Object.assign(JOB, { id, name: j.name || id, path: null, sig: currentSig() });
+		$('pJob').innerHTML = `Loaded from job <b>${esc(JOB.name)}</b>`;
+		$('pJob').href = `/#watch=${encodeURIComponent(id)}`;
+		$('pJob').hidden = false;
+		$('lJobPath').hidden = false; $('cJobPath').checked = !!withPath;
+		lvMsg(`Loaded from job <b>${esc(JOB.name)}</b>: ${levelFacts(d)} <b>Ctrl+Z</b> brings back the level you had.`);
+		if (withPath) await jobPath();
+	} catch (e) {
+		if (!still()) return;
+		const html = `Could not open the level of ${what}: ${esc(String(e.message || e).replace(/\.$/, ''))}. <a href="/">Your runs</a>`;
+		lvMsg(html, true);
+		toast(html, true);
+	}
+}
+/** the job's best run over the level (fetched once per load) */
+async function jobPath() {
+	if (!JOB.id || JOB.path) { VW.dirty = true; return; }
+	const token = JOB.token, id = JOB.id;
+	$('cJobPath').disabled = true;
+	try {
+		const t = await api(`/api/jobs/${id}/trajectory?which=best`);
+		if (token !== JOB.token) return;
+		const X = b64i32(t.x), Y = b64i32(t.y), sc = t.posScale || 16, n = Math.min(X.length, Y.length);
+		const P = new Array(n);
+		for (let k = 0; k < n; k++) P[k] = [X[k] / sc + 8, Y[k] / sc + 8];
+		JOB.path = P;
+	} catch (e) {
+		if (token !== JOB.token) return;
+		$('cJobPath').checked = false;
+		toast(`Could not draw the run of job <b>${esc(JOB.name)}</b>: ${esc(e.message)}`, true);
+	} finally { $('cJobPath').disabled = false; VW.dirty = true; }
+}
+$('cJobPath').onchange = () => { if ($('cJobPath').checked) jobPath(); else VW.dirty = true; };
+/** #job=<id>[&path=1]: open that job's level (on load and on a hash change; without it nothing happens) */
+function jobFromHash() {
+	const h = location.hash.replace(/^#/, '');
+	const m = h.match(/(?:^|&)job=([^&]*)/);
+	if (!m) return null;
+	let id = m[1];
+	try { id = decodeURIComponent(id); } catch (e) { /* as it is */ }
+	try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* sandbox */ }
+	return openJob(id, /(?:^|&)path=1(?:&|$)/.test(h));
+}
 /** the level as .eelvl bytes (src/eelvl.js on the server: the one writer) */
 async function eelvlBytes() {
 	const r = await fetch('/api/editor/eelvl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ level: levelJson() }) });
@@ -1720,6 +1821,8 @@ function demoLevel() {
 	loadGpu();
 	pollSolve();
 	pollAuto();
+	jobFromHash();   // #job=<id>: "Open in level editor" (the run viewer, the job page)
+	window.addEventListener('hashchange', jobFromHash);
 })();
 </script>
 </body>
