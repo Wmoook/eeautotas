@@ -1813,7 +1813,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1)
 	let lastBlandSource = -1e9, lastSources = t0;
 	const source = (kind, r, c) => {
 		r.sent++; r.sentAt = c;
-		post({ type: 'source', seed, kind, room: r.key, desc: r.desc, gain: r.gain, t: c.t, rc: distOf(c), inputs: C.eetasBytes(inputsOf(c.node)).toString('latin1') });
+		// (gen: the steer switches made: the main thread ranks one of an older measure behind, onSource)
+		post({ type: 'source', seed, kind, room: r.key, desc: r.desc, gain: r.gain, t: c.t, rc: distOf(c), gen: steerGen, inputs: C.eetasBytes(inputsOf(c.node)).toString('latin1') });
 	};
 	/** every SOURCE_S s: the lowest-cost cell of the 4 rooms with the most territory gain and the fewest sources so far
 	 *  (by (1 + ln(1 + gain)) / (1 + sources)), when it is not the one already sent */
@@ -3118,10 +3119,16 @@ async function main() {
 	// worker finds the same rooms
 	const sourcesSent = new Map();   // room key -> {tick: the earliest "room" arrival sent, dist: the lowest "best" cost sent}
 	const onSource = (msg) => {
+		// (a worker's source by an older measure than the last switch's (a late field with its distances, the plan past its
+		// count; sent before the worker took the switch): ranked behind every one of the new measure, as a cell not scored
+		// yet (6000 + its distance: distOf); a room's first arrival is still one. Before, a reach cost sent just before
+		// "steerd" (Forgotten Helix: ~925 tiles against the steer field's 1000-2100) stayed its room's best for the search)
+		const rc = (msg.gen || 0) < steerGen && msg.rc < 6000 ? Math.min(9990, 6000 + msg.rc) : msg.rc;
 		let s = sourcesSent.get(msg.room);
 		if (!s) sourcesSent.set(msg.room, s = { tick: Infinity, dist: Infinity });
-		if (msg.kind === 'room') { if (msg.t >= s.tick) return; s.tick = msg.t; } else { if (msg.rc >= s.dist - 0.5) return; s.dist = msg.rc; }
-		say({ ev: 'source', kind: msg.kind, room: msg.room, desc: msg.desc, gain: msg.gain, tick: msg.t, dist: Math.round(msg.rc * 1000) / 1000, inputs: msg.inputs, seed: msg.seed });
+		if (msg.kind === 'room') { if (msg.t >= s.tick) return; s.tick = msg.t; } else { if (rc >= s.dist - 0.5) return; s.dist = rc; }
+		// (sg: the steer switches made, as on the closest attempts: the editor ranks a source of an older measure behind)
+		say(Object.assign({ ev: 'source', kind: msg.kind, room: msg.room, desc: msg.desc, gain: msg.gain, tick: msg.t, dist: Math.round(rc * 1000) / 1000, inputs: msg.inputs, seed: msg.seed }, steerGen ? { sg: steerGen } : {}));
 	};
 	const flushNear = () => {
 		if (!nearPending) return;

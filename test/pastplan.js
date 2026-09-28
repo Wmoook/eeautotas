@@ -113,6 +113,8 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	{
 		const ch2 = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lv, '--workers=1', '--seconds=6', '--stdin=1', '--cells=coarse', '--seed=3', '--mem=200'], { stdio: ['pipe', 'pipe', 'pipe'] });
 		let out2 = '', sent2 = false, steer2 = null, before = 0, beforeSg = 0, after = 0, afterBad = [], done2 = null;
+		let srcBefore = 0, srcBeforeSg = 0, srcAfter = 0, srcBehind = 0;
+		const srcBad = [];
 		const warn2 = [];
 		ch2.stdout.on('data', (d) => {
 			out2 += d;
@@ -132,6 +134,19 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 					const v = SF.steerAt(st, sim);
 					if (!(ev.sg >= 1) || !(Math.abs(v - ev.dist) < 0.01)) afterBad.push(`${ev.dist} (steer ${v}, sg ${ev.sg})`);
 				}
+				// (the sources: after the switch each carries it and is its end state's steer value, or ranks behind at 6000+:
+				// a cell not scored yet, or one a worker sent before it took the switch (onSource))
+				if (ev.ev === 'source' && !steer2) { srcBefore++; if (ev.sg) srcBeforeSg++; }
+				if (ev.ev === 'source' && steer2) {
+					srcAfter++;
+					const ms = Uint8Array.from(ev.inputs, (q) => (q.charCodeAt(0) - 48) & 31);
+					const sim = new E.EESim(L), inp = new E.EEInput();
+					sim.reset();
+					for (const m of ms) { E.applyMask(inp, m); sim.tick(inp); }
+					const v = SF.steerAt(st, sim);
+					if (ev.dist >= 6000) srcBehind++;
+					if (!(ev.sg >= 1) || !(ev.dist >= 6000 || Math.abs(v - ev.dist) < 0.01)) srcBad.push(`${ev.kind} ${ev.dist} (steer ${v}, sg ${ev.sg})`);
+				}
 				if (ev.ev === 'done') done2 = ev;
 				if (ev.ev === 'warning') warn2.push(ev.text);
 			}
@@ -141,6 +156,8 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 			`${JSON.stringify(steer2)}; end ${done2 && done2.end}${warn2.length ? `; warnings ${warn2.join(' | ').slice(0, 200)}` : ''}`);
 		check('... every closest attempt after it carries the switch (sg 1) and is the steer field\'s value of its end state; none before it carries sg',
 			after > 0 && !afterBad.length && beforeSg === 0, `before ${before} (sg ${beforeSg}), after ${after}${afterBad.length ? `, off: ${afterBad.slice(0, 4).join(', ')}` : ''}`);
+		check('... every source after it carries the switch (sg 1) and is the steer field\'s value of its end state or ranks behind (6000+: not scored yet, or sent before the switch); none before it carries sg',
+			srcAfter > 0 && !srcBad.length && srcBeforeSg === 0, `before ${srcBefore} (sg ${srcBeforeSg}), after ${srcAfter} (${srcBehind} behind)${srcBad.length ? `, off: ${srcBad.slice(0, 4).join(', ')}` : ''}`);
 	}
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* temp */ }
 

@@ -2020,6 +2020,8 @@ function lateSteer(gen, sf2) {
 	if (brk) brk.mark = Infinity;
 	if (prec) prec.mark = Infinity;
 	for (const q of S.strategies) { q.best = undefined; q.bestTry = null; }
+	// (a stall escape running now: its own nearest was the reach field's too)
+	if (esc && esc.run) esc.run.best = Infinity;
 	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	const mb = sf2.bytes / 1048576;
 	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
@@ -2612,7 +2614,11 @@ function launch(n) {
 			// the CPU search's starting points for the relay (goexplore.js, coarse cells): a new room's first cell ("room":
 			// its inputs end where it entered the room), a room's lowest-cost cell ("best")
 			// (the GPU random runs' too: their distances the reach field's, steerDist)
-			const dist = steerDist(V, +ev.dist), inputs = String(ev.inputs || '');
+			let dist = steerDist(V, +ev.dist);
+			const inputs = String(ev.inputs || '');
+			// (a late steer field's switch (lateSteer): a CPU search's source from before it is the reach field's: ranked
+			// behind, as the sources kept until the switch)
+			if (V.sgMin && !(ev.sg >= V.sgMin) && dist < STEER_MISS) dist = Math.min(9990, STEER_MISS + dist);
 			if (cur && inputs && Number.isFinite(dist) && Number.isFinite(+ev.room)) {
 				// (the stall escape: a room new to the search that opens territory is its own progress too)
 				if (V.key === 'escape' && ev.kind === 'room' && +ev.gain > 0 && brk && !brk.rooms.has(+ev.room)) escOwnProgress();
@@ -3325,8 +3331,12 @@ function closer(ev, n) {
 	// (the GPU random runs' and the stall escape's nearer attempts: into the one search's archive)
 	if ((Vn.rolls || Vn.key === 'escape') && ev.inputs && !ev.cut && (!(Vn.best >= 0) || steerDist(Vn, +ev.dist) < Vn.best - 1e-3)) feedOne(String(ev.inputs), false, Vn.key === 'escape');
 	const dist = steerDist(Vn, +ev.dist), old = S.closest;
+	// (a late steer field's switch (lateSteer): a CPU search's closest from before it (on its way when the switch came) is
+	// the reach field's: not its own nearest, not the nearest; before, it set the strategy's own best (Forgotten Helix: a
+	// reach cost ~925 against the steer field's 1000-2100) and the attempts measured by the steer field never beat it)
+	const stale = !!Vn.sgMin && !(ev.sg >= Vn.sgMin);
 	// (the stall escape's own clock: its nearest attempt nearer by ESC_TILES)
-	if (Vn.key === 'escape' && ev.inputs && !ev.cut && Number.isFinite(dist) && dist < 1e4) escOwnProgress(dist);
+	if (Vn.key === 'escape' && !stale && ev.inputs && !ev.cut && Number.isFinite(dist) && dist < 1e4) escOwnProgress(dist);
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
@@ -3334,7 +3344,7 @@ function closer(ev, n) {
 	const deathTilesNow = cur.distBySteer ? STEER_MISS : deathTiles();
 	const alive0 = steerless(Vn) ? +ev.dist < deathTiles() : dist < deathTilesNow;
 	let own = null;
-	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
+	if (!stale && Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
 		Vn.best = dist; Vn.bestAt = Date.now();
 		if (ev.inputs && !ev.cut && alive0) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
@@ -3347,8 +3357,7 @@ function closer(ev, n) {
 	// (past the plan: the CPU search measures by the plan past its count, the GPU tools by the field; one measure for the
 	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
 	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
-	// (a late steer field's switch (lateSteer): a CPU search's closest from before it is the reach field's)
-	if (Vn.sgMin && !(ev.sg >= Vn.sgMin)) return;
+	if (stale) return;
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);

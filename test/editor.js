@@ -1488,6 +1488,55 @@ async function cpuSection() {
 		st.stage === 'found' && !!st.steer && Number.isFinite(st.steer.late) && Number.isFinite(st.steer.cpuAt) && !st.steer.gpu && st.log.some((x) => /the steer field is still building/.test(x)) &&
 		st.log.some((x) => /arrived [\d.]+ s into the search: from now on it orders the CPU search.* and measures the attempts \(the nearest starts over\)/.test(x)) && (!st.closest || st.closest.steer !== undefined),
 		`${st.stage}; steer ${JSON.stringify(st.steer)}; ${st.log.filter((x) => /steer/.test(x)).join(' | ')}`);
+	// ... the attempts on their way at the switch: a CPU search (here a stand-in) that took "steerd" still sends a closest
+	// attempt and a source of the reach field's (without sg: its pipe, a worker's chunk). Neither is its own nearest nor the
+	// nearest, the source ranks behind (STEER_MISS + its distance); the ones after the switch (sg 1) are. Before, the old
+	// closest (10) set the CPU search's own best and its later attempts by the steer field (50) never beat it, and the old
+	// source stayed its room's best (Forgotten Helix: reach costs ~925 against the steer field's 1000-2100)
+	{
+		const SW = 46, SH = 7, scells = [...room(SW, SH), [18, 5, 255], [1, 5, 6], [SW - 4, 5, 121]];
+		for (let y = 1; y < SH - 1; y++) scells.push([SW - 6, y, 23]);
+		const kdSw = ED.eelvlOf({ name: 'late steer race', width: SW, height: SH, cells: scells });
+		const stub = path.join(HOME, 'fake-cpu-steerd.js'), swLog = path.join(HOME, 'steerd-stub.log');
+		fs.writeFileSync(stub, `'use strict';
+const fs = require('fs');
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 50, found: 0, refined: 0, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let sb = '';
+process.stdin.on('data', (d) => {
+	sb += d;
+	for (let k; (k = sb.indexOf('\\n')) >= 0;) {
+		const line = sb.slice(0, k); sb = sb.slice(k + 1);
+		fs.appendFileSync(${JSON.stringify(swLog)}, line + '\\n');
+		if (line.startsWith('steerd ')) {
+			say({ ev: 'closest', dist: 10, tick: 12, inputs: '4'.repeat(12) });
+			say({ ev: 'source', kind: 'best', room: 7, desc: 'test', gain: 0, tick: 12, dist: 10, inputs: '4'.repeat(12), seed: 1 });
+			say({ ev: 'steer', sec: 1, dist: true });
+			setTimeout(() => {
+				say({ ev: 'closest', dist: 50, tick: 14, inputs: '4'.repeat(14), sg: 1 });
+				say({ ev: 'source', kind: 'best', room: 7, desc: 'test', gain: 0, tick: 14, dist: 50, inputs: '4'.repeat(14), seed: 1, sg: 1 });
+			}, 400);
+		}
+		if (line === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`);
+		ED.start({ eelvlB64: kdSw.toString('base64'), seconds: 20, workers: 1 }, { available: false, why: 'test: no GPU' }, { steerWaitMs: 0, cpu: [process.execPath, stub] });
+		let sw = ED.state();
+		const src7 = (x) => (x.sources || []).find((r) => r.room === 7);
+		const cpuOf = (x) => (x.strategies || []).find((q) => q.key === 'goexplore') || {};
+		const settled = (x) => x.closest && x.closest.dist === 50 && src7(x) && src7(x).best && src7(x).best.tiles === 50 && cpuOf(x).best === 50;
+		for (const t0 = Date.now(); sw.running && !settled(sw) && Date.now() - t0 < 25000; sw = ED.state()) await new Promise((res) => setTimeout(res, 50));
+		const G = cpuOf(sw), s7 = src7(sw);
+		if (sw.running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 50)); }
+		const got = fs.existsSync(swLog) ? fs.readFileSync(swLog, 'utf8') : '';
+		check('... an attempt of the reach field\'s on its way at the switch (no sg): not the CPU search\'s own nearest nor the nearest, its source ranked behind; the ones after it (sg 1, 50) are',
+			/^steerd /m.test(got) && sw.closest && sw.closest.dist === 50 && G.best === 50 && G.bestTry && G.bestTry.dist === 50 && s7 && s7.best && s7.best.tiles === 50,
+			`stdin ${JSON.stringify(got.slice(0, 120))}; closest ${sw.closest && sw.closest.dist}; own best ${G.best} (chain ${G.bestTry && G.bestTry.dist}); room 7 ${JSON.stringify(s7 && s7.best)}`);
+	}
 
 	// the precision stage (src/precision.js, "exact landings"): the user's pocket puzzle (test.eelvl's shape: a trophy pocket
 	// under a spike whose right side is a half block) at x 1976: the ball must drop in with px == 1976.0 exactly. The
