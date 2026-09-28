@@ -3,36 +3,46 @@
 // macro PATH and the optimizer's exact rejoins (windows of <= ~800 ticks) can never change it: Egg Quest II's chimney
 // (the user's line stands on the pyramid top at t801, our run at t980), Forgotten Veil's purple switch 0 (+264 ticks),
 // Octorage's arrow room (+131), EX Crew's climb (64,92)->(48,77) (320 ticks vs 141).
-//   1. Starts: every --every ticks of the run, and every --dense ticks around the --spots places where the run later
-//      passes far above / below or doubles back (its path to a later point much longer than the straight line: the
-//      excess, `spotsOf`); the spots first, then the rest by their excess.
-//   2. Per start and pick, a bounded every-move search (`bfs`, --depth layers) from the run's EXACT state there: one
-//      state per FINE cell (--qx px, 1/--qvx px/tick, --qy px (0 = exact), 1/--qvy px/tick (0 = exact); ground, jumps,
-//      the gravity queue, the discrete state), the cell's state chosen by a lineage-stable rule (--picks: fast = the
-//      highest |vx|, first = the first found, high = the highest). Why: Egg Quest II's chimney line is a sub-pixel
-//      chain (src/out/night/eq2_chimney_user.md section 4): every search at 2-4 px cells lost it (0 of 17 CPU, 0 of 7
-//      GPU runs), the GPU explore's per-layer hash choice found it in 5 of 20 runs at 1 px, and a stable rule at 1 px /
-//      1/16 px/tick from 11 of 11 starts (fast or first). The region is the run's tiles over the goal window plus
-//      --margin tiles. A layer with more than --cap new cells keeps them by NOVELTY, never by the reach field's cost
-//      (it rates the chimney top 30 tiles worse than the way east): per tile in turn, the tiles above the run's highest
-//      point in their column first, then the tiles the run never visits, then the tiles the search has seen least.
-//   3. Goals = any LATER point of the run: a state equal (stateHash; coin-blind with --nocoins) to the run's at a tick
-//      at least --minGain later than it (a proven shortcut at once), or a state in a tile the run visits at least
-//      --minGain ticks later (a lead: the latest such visit, the same discrete state first, any other too: a skipped
-//      switch the rest never needs).
-//   4. The join (`join`): from the lead's state and the states before it on its path, the run's own inputs from next
-//      to the visit it met (tails: --tailBack ticks of the path, run offsets --offBack before .. --offAhead after the
-//      visit), checked every tick for an exact state of the run; else the same physical state with another discrete
-//      state (the rest of the run as it is: the replay decides).
+//   1. Starts (`startsOf`, --order coarse): every 8 x and 4 x --every ticks, then every --dense ticks around the
+//      --spots places where the run's path to a later point is much longer than the straight line (`excessOf`: it
+//      passes far above / below or doubles back), then every 2 x and 1 x --every; each level by that excess. --order
+//      run: every --every ticks in run order. Each start once per (its state, its goal window's end state, pick);
+//      --done=<file> keeps them across calls (the grind's stage continues its pass).
+//   2. Per start and pick (`searchStart`, at most --perS seconds), a bounded every-move search (`bfs`, --depth layers,
+//      --bfsShare of the time) from the run's EXACT state there: one state per FINE cell (--qx px, 1/--qvx px/tick,
+//      --qy px (0 = exact), 1/--qvy px/tick (0 = exact); ground, jumps, the gravity queue, the discrete state), the
+//      cell's state chosen by a lineage-stable rule (--picks: fast = the highest |vx| (the default), first = the first
+//      found, high = the highest). Why: Egg Quest II's chimney line is a sub-pixel chain (src/out/night/
+//      eq2_chimney_user.md section 4): every search at 2-4 px cells lost it (0 of 17 CPU, 0 of 7 GPU runs), the GPU
+//      explore's per-layer hash choice found it in 5 of 20 runs at 1 px, a stable rule at 1 px / 1/16 px/tick from 11
+//      of 11 starts. The region is the run's tiles over the goal window plus --margin tiles. A layer with more than --cap
+//      new cells keeps them by NOVELTY, never by the reach field's cost (it rates the chimney top 30 tiles worse than the
+//      way east): per tile in turn, the tiles above the run's highest point in their column first, then the tiles the
+//      run never visits, then the tiles the search has seen least. A jump input that cannot jump (no jumps left after
+//      the tick, no levitation, the timer on) is not simulated: its state is the same input's without the jump.
+//   3. Goals = any LATER point of the run: a state equal (stateHash, coin-blind with --nocoins, clock-blind on time-door
+//      levels) to the run's at a tick at least --minGain later (a proven shortcut at once) or to another run's
+//      (--targets: its rest, when it finishes sooner), or a LEAD: a state in a tile the run visits at least --minGain
+//      ticks later (per run stretch the first arrivals (--hitsPerSeg) and those nearest the run's state (--hitsClose,
+//      |dpos| + 3 |dvel|); another discrete state too: a skipped switch the rest never needs).
+//   4. Joins: quick tails from every lead, the nearest first (`quickTails`, `tail`: the run's own inputs from next to
+//      the visit, re-anchored at landings / wall stops like mutate --anchor, checked every tick for an exact state of
+//      the run; else the same physical state with another discrete state: the rest as it is), loose joins (a lead or a
+//      tail within --looseD of the run's state: the run from there as it is), tracking joins (`track`: a beam that
+//      follows the run's trajectory until it meets it), the per-lead sweep of tails from the path's earlier states
+//      (`join`), and optionally a second search from the nearest leads whose only goal is an equal state (--joinBfs)
+//      and one GPU lane in the main thread for the leads nothing joined (--gpu=1: eegpu explore --prefix, --rejoin=1
+//      against the run and --finish=1 bounded by the run's own finish).
 //   5. Every candidate is replayed from the start (C.evaluate) and judged (C.judge: finish, deaths, random-portal
 //      chance) against the run; a faster run replaces it at once, and a worker's find made on an older run is spliced
 //      with the current one (splice.js).
 // A start with no find is "not found at that grain, pick and depth", never "impossible".
 // usage: node src/skipfind.js --tas=<run.eetas> [--level=<level id | job id | .json>] [--out=<best.eetas>]
-//        [--seconds=600] [--workers=N] [--every=50] [--dense=10] [--spots=8] [--spotSpan=60] [--depth=320]
-//        [--horizon=1500] [--minGain=20] [--margin=10] [--qx=1] [--qvx=16] [--qy=0.5] [--qvy=4] [--picks=fast,first]
-//        [--cap=300000] [--log2=25] [--joinTop=8] [--nocoins=auto|0|1] [--from=] [--to=] [--starts=a,b,..]
-// JSON lines on stdout: {ev: start | search | skip | done}; --out is rewritten at every find; `[ticks] N` lines.
+//        [--seconds=600] [--workers=N] [--deadline=<ms since 1970>] [--done=<file>] [--order=coarse|run|excess]
+//        [--every=50] [--from=] [--to=] [--starts=a,b,..] [--perS=100] [--depth=300] [--cap=60000] [--picks=fast]
+//        [--minGain=20] [--nocoins=auto|0|1] [--targets=<run.eetas,...>] [--gpu=1 [--tool=<eegpu>] [--cachedir=]]
+//        (every DEFAULTS key is an option)
+// JSON lines on stdout: {ev: start | search | skip | gpu | done}; --out is rewritten at every find; `[ticks] N` lines.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -46,7 +56,7 @@ const DEFAULTS = {
 	depth: 300, horizon: 1500, minGain: 20, margin: 10,
 	qx: 1, qvx: 16, qy: 0.5, qvy: 4,
 	picks: 'fast',
-	cap: 60000, log2: 25,
+	cap: 60000, log2: 24,   // (the cell table: 2^24 x 8 bytes a worker; full at 70%: the search ends there)
 	perS: 100, bfsShare: 0.85,   // seconds per search (start x pick) and the main bfs's share of them
 	joinTop: 4, hitsPerSeg: 4, hitsClose: 4, quickOffs: [0, -2, 2, -4, 4, -6, 6, -10, 10], quickMax: 400, quickS: 8, tailBack: 90, tailStep: 3, offBack: 150, offAhead: 60, tailH: 400, tailDiverge: 320, tailS: 4, anchors: 3, anchorD: 12, looseD: 4,
 	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackLost: 150, trackLostK: 30, trackS: 8,

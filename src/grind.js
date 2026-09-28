@@ -942,8 +942,8 @@ async function skipsStage(round) {
 	if (!res.killed) saveCursor({ skips: key, skipsRound: round });
 }
 /**
- * The skip finder (skipfind.js): path changes the windows above cannot make (Egg Quest II's chimney: -171 ticks from
- * the run's state at t544, a climb whose line the run meets again only 580 ticks later): from states all along the
+ * The skip finder (skipfind.js): path changes the windows above cannot make (Egg Quest II's chimney: -183 ticks from
+ * the run's state at t600, a climb whose line the run meets again only 520 ticks later): from states all along the
  * run, bounded every-move searches with fine cells (1 px, 1/16 px/tick) and lineage-stable picks, whose goal is any
  * later point of the run reached sooner, joined back exactly (the run's own inputs, or a second search) and judged.
  * A slice per round (--skipfindS, default 30% of a round, 120-300 s) on every thread, continuing its pass over the run
