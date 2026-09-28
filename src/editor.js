@@ -1416,6 +1416,9 @@ function start(b, gpu, test) {
 	// the relay's sources start over (see RELAY_SOURCES); the wall breaker's clock too
 	dropSources();
 	S.sources = [];
+	// (the routes of another class than the best's: goexplore.js's class workers, "result" kind "class")
+	S.classes = [];
+	classInputs.clear();
 	brk = { at: Date.now(), mark: Infinity, rooms: new Set(), seen: new Set(), level: 0, tried: new Set(), rounds: 0, round: null, seeds: 0 };
 	S.breaker = which.includes('breaker') ? { rounds: 0, round: null, last: null, seeds: 0 } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
@@ -1913,6 +1916,10 @@ function launch(n) {
 		} else if (ev.ev === 'result' && ev.kind === 'finish') {
 			// (the CPU search goes on looking for faster routes)
 			found(ev.inputs, n, cpu || rolls);
+		} else if (ev.ev === 'result' && ev.kind === 'class' && cpu) {
+			// a route of another class (other doors / triggers than the best route's; goexplore.js's class workers), even when
+			// it is slower: kept (replayed) for the AutoTASer, which can optimize that class too
+			classRoute(ev);
 		} else if (ev.ev === 'try' && V.probe === 'running' && (ev.end === 'exhausted' || ev.end === 'depth') && ev.overflow > 0) {
 			// the first try ran out only because its layers were cut (over the layer cap: the cut keeps the states nearest
 			// the trophy by the physics check, a greedy beam that walks into the check's dead ends; the user's 200x200 ice
@@ -2304,6 +2311,31 @@ function finish() {
 	dropSources();
 	saveNow();
 }
+/** a route of another class (goexplore.js "result" kind "class": the class workers avoid one gate of the best route):
+ *  replayed, kept in S.classes (the fastest per class signature, at most CLASS_KEEP) with its inputs for the AutoTASer */
+const CLASS_KEEP = 8;
+const classInputs = new Map();   // class signature -> the inputs of S.classes' route (the page's state carries no inputs)
+function classRoute(ev) {
+	if (!cur || !ev.inputs) return;
+	const masks = Uint8Array.from(String(ev.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
+	const r = C.evaluate(cur.level, masks);
+	if (!r) return;
+	const k = S.classes.findIndex((c) => c.gates === ev.gates);
+	if (k >= 0 && S.classes[k].runTicks <= r.runTicks) return;
+	const c = { gates: String(ev.gates || ''), desc: String(ev.desc || ''), avoid: String(ev.avoid || ''), ticks: r.ms.length, runTicks: r.runTicks, time: C.fmt(r.runTicks), deaths: r.deaths,
+		foundAfter: Math.round((Date.now() - S.started) / 100) / 10, n: (S.classes.reduce((m, x) => Math.max(m, x.n || 0), 0) + 1) };
+	if (k >= 0) S.classes[k] = c; else S.classes.push(c);
+	S.classes = S.classes.sort((x, y) => x.runTicks - y.runTicks).slice(0, CLASS_KEEP);
+	classInputs.set(c.gates, C.eetasBytes(r.ms).toString('latin1'));
+	for (const g of [...classInputs.keys()]) if (!S.classes.some((x) => x.gates === g)) classInputs.delete(g);
+	note(`a route of another class: ${c.time} (avoiding ${c.avoid}; the best ${S.result ? S.result.time : '-'})`);
+	save();
+}
+/** the routes of other classes of the current search, with their inputs ('0' + mask characters): [{gates, desc, avoid,
+ *  ticks, runTicks, time, foundAfter, n, inputs}] (the AutoTASer) */
+function classRoutes() {
+	return S && Array.isArray(S.classes) ? S.classes.filter((c) => classInputs.has(c.gates)).map((c) => Object.assign({}, c, { inputs: classInputs.get(c.gates) })) : [];
+}
 /** a route from strategy n: replayed in the exact JS engine before it counts; the fastest one is kept. more: the
  *  strategy reports more routes of the same length (its process ends by itself) */
 function found(inputs, n, more) {
@@ -2657,4 +2689,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, classRoutes, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

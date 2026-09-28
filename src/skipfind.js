@@ -1453,6 +1453,8 @@ async function main() {
 	// deep starts: in the coarse order the starts at multiples of --deepEvery x --every (the 8x and 4x levels by default:
 	// sparse, so each searches deeper; Egg Quest II's base route: the chimney from t600 needs ~350 layers)
 	const isDeep = (s) => P.order === 'coarse' && P.deepEvery > 0 && s % (P.deepEvery * Math.max(1, P.every | 0)) === 0;
+	/** a task's own time budget (ms): a deep start's --deepPerS, else --perS */
+	const budgetOf = (t) => (t && t.deep ? P.deepPerS : P.perS) * 1000;
 	const depthOf = (s) => (isDeep(s) ? P.deepDepth : P.depth);
 	const keyOf = (s, pk) => `${info.H[s]}:${info.H[Math.min(info.n, s + depthOf(s) + P.horizon)]}:${pk}`;
 	const done = new Set();
@@ -1583,10 +1585,16 @@ async function main() {
 		const give = (w) => {
 			while (queue.length && done.has(queue[0].key)) queue.shift();
 			if (!queue.length || Date.now() > deadlineAll - 2000) { finish(); return; }
-			const task = queue.shift();
+			// (a search the call's end would cut before half of its own budget is not started here: the next call does it
+			// whole; the first one that fits goes instead, e.g. a shallow start while deep ones wait)
+			const left = deadlineAll - Date.now();
+			const k = queue.findIndex((q) => !done.has(q.key) && left >= 0.5 * budgetOf(q));
+			if (k < 0) { finish(); return; }
+			const task = queue.splice(k, 1)[0];
 			done.add(task.key);
 			w.busy = true; busy++;
 			w.task = task;
+			w.taskAt = Date.now();
 			w.postMessage({ task, deadline: deadlineAll });
 		};
 		for (let k = 0; k < nw; k++) {
@@ -1594,8 +1602,12 @@ async function main() {
 			w.on('message', (r) => {
 				w.busy = false; busy--;
 				searches++;
-				// (a search the deadline cut short is not remembered as done: the next call does it again)
-				if (w.task && !r.error && !(r.stats && r.stats.time)) markDone(w.task.key);
+				// (a search the call's end cut short is not remembered as done: the next call does it again; one that its own time
+				// budget ended is: the same start again is the same search. In the grind's 180-s slices every deep start ended
+				// by its own budget (bfs 170 s of 200) was never remembered, so the next slice queued the same starts first
+				// again: Egg Quest II's AutoTASer, 6 deep starts cut in its first slice, 1 find)
+				const cutByCall = r.stats && r.stats.time && w.taskAt + budgetOf(w.task) * P.bfsShare > deadlineAll - 1500;
+				if (w.task && !r.error && !cutByCall) markDone(w.task.key);
 				if (r.error) emit({ ev: 'search', s: r.s, pick: r.pick, error: r.error });
 				else emit({ ev: 'search', s: r.s, pick: r.pick, layers: r.stats.layers, cells: r.stats.cells, peak: r.stats.peak, cut: r.stats.cut, full: r.stats.full, time: r.stats.time, hits: r.hits, rejoins: r.rejoins,
 					joined: r.leadsJoined, joinBfs: r.joinBfs, cands: r.cands, tried: r.tried, top: r.top, sec: Math.round(r.stats.ms / 100) / 10, bfsSec: Math.round(r.stats.bfsMs / 100) / 10,

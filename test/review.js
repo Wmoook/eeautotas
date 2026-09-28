@@ -1104,6 +1104,19 @@ async function appSection() {
 	check('random portals, no finishing exit: the message says how many random exit choices, and to check the .eetas (10 line-break bytes)',
 		e && /random portals \(1 random exit choice\)/.test(e.message) && /Check that the \.eetas belongs to this level \(it contains 10 bytes/.test(e.message) && listing() === before,
 		e ? e.message : 'imported');
+	// a TAS that ends just before the ball reaches the trophy: EEO plays on with no key held, so it finishes (the
+	// user's Naos TAS touches the trophy 1 tick after its last input); the empty ticks become part of the job's run
+	const cut = meta.tas.completeTick - 2;
+	let mt = null;
+	e = errOf(() => { mt = J.importJob({ eelvl: appLevel, eetas: Buffer.from('4'.repeat(cut)), name: 'review tail', eelvlName: 'app.eelvl', eetasName: 'tail.eetas' }); });
+	const tailBest = mt ? C.readEetas(path.join(J.jobDir(mt.id), 'best.eetas')) : null;
+	check(`a TAS cut ${meta.tas.completeTick - cut} ticks before its finish imports: it finishes with no key held after its last input (tail ${mt && mt.tas.tailTicks})`,
+		mt && mt.tas.ticks === cut && mt.tas.tailTicks > 0 && mt.tas.completeTick === cut + mt.tas.tailTicks && tailBest.length === mt.tas.completeTick &&
+		tailBest.slice(cut).every((x) => x === 0), e ? e.message : JSON.stringify(mt && mt.tas));
+	if (mt) J.deleteJob(mt.id);
+	e = errOf(() => J.importJob({ eelvl: appLevel, eetas: Buffer.from('4'.repeat(20)) }));
+	check('a TAS that stops far from the trophy is still refused, and the message says it played on with no key held',
+		e && /does not finish this level/.test(e.message) && /also after 10 more seconds with no key held/.test(e.message) && listing() === before, e ? e.message : 'imported');
 
 	// ---- Finish report: shown only while it describes the current best (time and odds)
 	const rep = J.finishReport(id);

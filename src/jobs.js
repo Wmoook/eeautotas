@@ -115,6 +115,11 @@ const START_MODES = { reset: 'after /reset', load: 'right after loading the leve
 // block the web server for minutes): EEO's block ids are below 2000 (docs/eeo_spec/blocks.json), the sample levels
 // are at most 400 x 400, and real runs are well under an hour (1 tick = 10 ms; Infinity Pain is 41 277 ticks).
 const MAX_BLOCK_ID = 65535, MAX_CELLS = 4e6, MAX_TICKS = 5e6;
+// EEO keeps playing after a TAS's last input, with no key held: a TAS that ends a little before the ball reaches the
+// trophy still finishes (the user's Naos TAS touches it 1 tick after its last input). An import that does not finish
+// within its inputs plays on with no keys for up to TAIL_TICKS (10 s); the empty ticks up to the finish become part
+// of the job's run, so every tool sees a run that finishes within its inputs.
+const TAIL_TICKS = 1000;
 /** A level that eeo-tas could not really have made: refused before anything is sized by it (see the limits above). */
 function checkLevelLimits(p) {
 	if (p.width * p.height > MAX_CELLS) {
@@ -152,8 +157,9 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 	try { p = EELVL.readEelvl(eelvl); } catch (e) { throw new Error(`this does not look like an .eelvl level file (${e.message})`); }
 	checkLevelLimits(p);
 	checkTicks(eetas.length, 'the .eetas file');
-	const masks = C.parseEetasBuffer(eetas);
+	let masks = C.parseEetasBuffer(eetas);
 	if (!masks.length) throw new Error('the .eetas file has no inputs');
+	const fileTicks = masks.length;
 	const odd = C.oddBytes(eetas);
 	const id = `${slug(name || p.name || eelvlName)}-${crypto.randomBytes(3).toString('hex')}`;
 	const dir = jobDir(id);
@@ -172,9 +178,11 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 			if (!startMatters) return false;
 			const other = start === 'reset' ? 'load' : 'reset';
 			const lo = E.prepareLevel(Object.assign({}, ld, { start_mode: other }));
-			const ro = RNG.analyze(lo, masks);
+			const mm = new Uint8Array(masks.length + TAIL_TICKS);   // with EEO's play-on after the last input
+			mm.set(masks);
+			const ro = RNG.analyze(lo, mm);
 			if (ro.draws && ro.bestScript) lo.rngScript = Int32Array.from(ro.bestScript);
-			return C.replay(lo, masks).complete >= 0 ? other : false;
+			return C.replay(lo, mm).complete >= 0 ? other : false;
 		};
 		const startHint = () => {
 			const o = otherFinishes();
@@ -182,23 +190,49 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 				'under "How did you start the TAS in eeo-tas?" and import again.' : '';
 		};
 		// random portals (EEO picks their exit with Math.random): the outcomes this TAS needs, and the odds
-		const rng = RNG.analyze(level, masks);
-		if (rng.draws && rng.bestScript) ld.rng_script = rng.bestScript;   // every tool simulates with this outcome script
-		else if (level.multiTargetPortals) ld.rng_script = [];   // random portals exist but this run uses none
-		level = E.prepareLevel(ld);
+		const level0 = level;   // no outcome script yet
+		const analyzeRun = () => {
+			const a = RNG.analyze(level0, masks);
+			delete ld.rng_script;
+			if (a.draws && a.bestScript) ld.rng_script = a.bestScript;   // every tool simulates with this outcome script
+			else if (level0.multiTargetPortals) ld.rng_script = [];   // random portals exist but this run uses none
+			const lv = E.prepareLevel(ld);
+			return { rng: a, level: lv, r: C.replay(lv, masks) };
+		};
+		let { rng, level: lv, r } = analyzeRun();
+		// it ends before the trophy: EEO plays on with no key held (TAIL_TICKS); keep the empty ticks up to the latest
+		// finish of any outcome, so the odds count every outcome that finishes in EEO
+		let tail = 0;
+		if (r.complete < 0) {
+			const padded = new Uint8Array(fileTicks + TAIL_TICKS);
+			padded.set(masks);
+			const a = RNG.analyze(level0, padded);
+			let end = -1;
+			if (a.draws ? a.chance > 0 : true) {
+				const lp = E.prepareLevel(Object.assign({}, ld, { rng_script: a.draws ? a.bestScript : ld.rng_script }));
+				const rp = C.replay(lp, padded);
+				if (rp.complete >= 0) end = rp.complete + (a.draws ? Math.max(...a.outcomes.map((o) => o.runTicks)) - rp.runTicks : 0);
+			}
+			if (end > fileTicks) {
+				masks = padded.slice(0, end);
+				tail = end - fileTicks;
+				({ rng, level: lv, r } = analyzeRun());
+			}
+		}
+		level = lv;
 		C.writeAtomic(dataFile, JSON.stringify(ld));
-		const r = C.replay(level, masks);
 		// what to check when it does not finish: the other start mode, else the file itself
 		const advice = () => startHint() || (` Check that the .eetas belongs to this level` +
 			(odd ? ` (it contains ${odd} bytes that are not inputs eeo-tas writes, e.g. line breaks; EEO plays them as inputs too)` : '') + '.');
+		const after = ` (also after ${TAIL_TICKS / 100} more seconds with no key held)`;
 		if (r.complete < 0 && rng.draws && rng.chance === 0) {
 			const lo = rng.drawsMin || 1, hi = Math.max(lo, rng.drawsMax || 1);
 			const n = lo === hi ? `${lo} random exit choice${lo === 1 ? '' : 's'}` : `${lo} to ${hi} random exit choices (depending on the exits taken)`;
 			throw new Error(`the TAS goes through random portals (${n}${rng.truncated ? ', outcome tree truncated' : ''}) but no combination of exits lets it ` +
-				`finish this level when started ${START_MODES[start]}.${advice()}`);
+				`finish this level when started ${START_MODES[start]}${after}.${advice()}`);
 		}
 		if (r.complete < 0) {
-			throw new Error(`the TAS does not finish this level${startMatters ? ` when started ${START_MODES[start]}` : ''}: after all ${masks.length} ticks ` +
+			throw new Error(`the TAS does not finish this level${startMatters ? ` when started ${START_MODES[start]}` : ''}: after all ${masks.length} ticks${after} ` +
 				`the ball is at tile (${r.end.x}, ${r.end.y}) with ${r.coins} coins${r.deaths ? `, died ${r.deaths} time(s)` : ''}.${advice()}`);
 		}
 		const best = masks.slice(0, r.complete);
@@ -208,7 +242,7 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 			id, levelId: lid, name: String(name || p.name || slug(eelvlName)).slice(0, 80), created: Date.now(),
 			level: { name: p.name || '', owner: p.owner || '', file: eelvlName || 'level.eelvl', width: p.width, height: p.height,
 				compression: p.compression, warnings: p.warnings.slice(0, 20) },
-			tas: { file: eetasName || 'input.eetas', ticks: masks.length, completeTick: r.complete, runTicks: r.runTicks, time: fmt(r.runTicks),
+			tas: { file: eetasName || 'input.eetas', ticks: fileTicks, tailTicks: tail, completeTick: r.complete, runTicks: r.runTicks, time: fmt(r.runTicks),
 				timerStart: r.timerStart, coins: r.coins, blueCoins: r.blueCoins, deaths: r.deaths, oddBytes: odd },
 			rng: { chance: rng.draws ? rng.chance : 1, uses: rng.uses, truncated: rng.truncated },
 			// how the TAS was started in eeo-tas (level JSON start_mode); it only changes anything when startMatters
