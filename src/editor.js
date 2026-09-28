@@ -1036,10 +1036,12 @@ function breakGate(inputs) {
 // nearer, no new room'), while the frontier (3 coins) needed coin 4. Its closest attempt on a goal is a gate as with the
 // coin plan (GATE_AT). No such target: the trophy, as before. `b.roomGate === false`: off.
 function roomGate(inputs) {
-	if (!cur || !cur.opts.roomGate || !cur.reachLookup) return null;
+	if (!cur || !cur.opts.roomGate) return null;
 	try {
 		const L = cur.level;
-		if (!cur.roomAimT) cur.roomAimT = { RM: GX.roomOf(L), TR: BU.triggersOf(L), PT: BU.portalsOf(L), fp: G.blobFp(G.levelBlob(L)), n: 0 };
+		// (the reach file's header and classes: cur.reachLookup only while the steer field is used, so read here once)
+		if (!cur.roomAimT) cur.roomAimT = { RM: GX.roomOf(L), TR: BU.triggersOf(L), PT: BU.portalsOf(L), fp: G.blobFp(G.levelBlob(L)), n: 0,
+			look: cur.reachLookup || SF.readReachBytes(fs.readFileSync(cur.files.reach)) };
 		const T = cur.roomAimT;
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset();
@@ -1049,10 +1051,13 @@ function roomGate(inputs) {
 		const aim = BU.roomAim(L, T.RM, sim, known, T);
 		if (!aim || !(aim.start < RF.CUT)) return null;
 		const reach = path.join(dir(), `gate_room_${T.n++ % 8}.rch3`);
-		const f = Object.assign({}, cur.reachLookup, { mode: 'walk', walk: aim.walk, prioShift: Math.max(0, (32 - Math.clz32(aim.mx)) - 12) });
+		const f = Object.assign({}, T.look, { mode: 'walk', walk: aim.walk, prioShift: Math.max(0, (32 - Math.clz32(aim.mx)) - 12) });
 		RF.writeReachFile(f, reach, T.fp);
 		return { x: aim.x, y: aim.y, reach, room: true, goals: aim.goals.length };
-	} catch (e) { return null; }
+	} catch (e) {
+		if (cur && !cur.roomAimErr) { cur.roomAimErr = true; note(`past the wall: no room target (${e.message}); the trophy as before`); }
+		return null;
+	}
 }
 /** the coins the state after inputs holds, as the room keys count them (gold where a coin door or gate reads them, blue
  *  where a blue one does; goexplore.js roomOf): the wall breaker's progress order of its starting points */
@@ -2621,4 +2626,4 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, coinsOfDesc, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
