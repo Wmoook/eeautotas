@@ -509,7 +509,8 @@ function create(o) {
 		for (let k = 0; k < inputs.length; k++) {
 			E.applyMask(inp, (inputs.charCodeAt(k) - 48) & 31);
 			sim.tick(inp);
-			if (sim.is_dead) return null;
+			// (deaths as moves: an attempt goes on through a death the GPU kept, --deaths=1; its dead ticks change no room)
+			if (sim.is_dead) { if (a.deathMoves && k + 1 < inputs.length) continue; return null; }
 			const k2 = o.RM.key(sim);
 			if (k2 !== key && !quiet) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
@@ -589,7 +590,7 @@ function create(o) {
 		const T = o.bound();
 		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
 		const c = job.cells;
-		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0',
+		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0', ...(a.deathMoves ? ['--deaths=1'] : []),
 			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), ...(job.steer ? [`--steer=${job.steer}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();

@@ -642,6 +642,15 @@ function rentedJobs() { return state.rented ? state.rented.machines.flatMap((m) 
 function remoteRate(r) { return ((r.cpu && r.cpu.ticksPerSec) || 0) + ((r.gpu && r.gpu.ticksPerSec) || 0); }
 function remoteWhere(r, short) { return `${esc(short ? shortMachine(r.machine) : r.machine)}${r.gpuIndex !== null ? ` · GPU ${esc(r.gpuIndex)}` : ''}`; }
 const ticksN = (n) => `${n} tick${n === 1 ? '' : 's'}`;
+/** the best run's deaths (checkpoint respawns are moves like any other: the optimizer takes a faster run with a death,
+ *  unless the job forbids more deaths than its best has, meta.json "deaths": "forbid") */
+function deathsHtml(j) {
+	const d = j.best && Number.isFinite(j.best.deaths) ? j.best.deaths : null;
+	const forbid = j.deaths === 'forbid';
+	if (!d && !forbid) return '';
+	const tip = forbid ? 'This job forbids runs with more deaths than its best has.' : 'Deaths (checkpoint respawns) are moves: the optimizer takes a faster run with a death.';
+	return `<span class="saved zero" title="${esc(tip)}">${d === null ? '' : `${d} death${d === 1 ? '' : 's'}`}${forbid ? `${d === null ? '' : ' · '}no more deaths` : ''}</span>`;
+}
 function remoteAhead(r, j) {
 	if (!r.best) return 'no best known there yet';
 	if (r.ahead > 0) return `${ticksN(r.ahead)} ahead of ${j.best.time} here · handed in within ${r.handInMin} min`;
@@ -803,6 +812,7 @@ function renderDetail() {
 			<span class="big">${j.best.time}</span>
 			${j.savedTicks > 0 ? `<span class="was">${j.original.time}</span>` : ''}
 			<span class="saved ${j.savedTicks > 0 ? '' : 'zero'}">${j.savedTicks > 0 ? `−${(j.savedTicks / 100).toFixed(2)} s · ${j.savedTicks} ticks${pct}` : 'no improvement yet'}</span>
+			${deathsHtml(j)}
 		</div>
 		<div class="stats">
 			<div class="stat"><div class="k">Status</div><div class="v">${j.running ? `● optimizing · CPU ×${j.workers || '?'}${j.live && j.live.gpu ? ' + GPU' : ''}` : (j.remote && j.remote.running ? `● on ${remoteWhere(j.remote, true)}` : (j.state === 'error' ? 'error' : 'stopped'))}</div></div>

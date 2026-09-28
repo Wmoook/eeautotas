@@ -612,7 +612,7 @@ async function main() {
 	fs.mkdirSync(path.dirname(a.out), { recursive: true });
 	// --exact: the output is a whole run, replayed and judged (THE rule against the reference) before it is written
 	const evRef = a.exact ? C.evaluate(level, masks) : null;
-	const baseDeaths = evRef ? evRef.deaths : 0;
+	const baseDeaths = C.deathCapFor(a.tas, evRef ? evRef.deaths : 0);   // (deaths are moves unless the job forbids them)
 	let RS = null;   // random-portal draws per reference tick (the avoidRng fallback of the DP)
 	if (a.exact && C.isRandom(level)) {
 		const s = new E.EESim(level);

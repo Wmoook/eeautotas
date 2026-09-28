@@ -118,7 +118,9 @@ const log = (s) => {
 
 let best = evalRun(BEST);
 if (!best) { log('best.eetas does not finish the level'); saveStatus({ state: 'error', error: 'best.eetas does not finish the level' }); process.exit(1); }
-const baseDeaths = best.deaths;   // never accept a run with more deaths than we started with
+// deaths: any number (checkpoint respawns are moves; C.deathCap), unless the job opts out (meta.json "deaths": "forbid"):
+// then never more than we started with
+const baseDeaths = C.deathCap(C.readJSON(path.join(OUT, 'meta.json'), null), best.deaths);
 if (status.startRunTicks === undefined) status.startRunTicks = best.runTicks;
 
 // Coins. NC = 1: the best needs no coin door or gate (coin-blind search everywhere); decided again at every round's start
@@ -216,8 +218,9 @@ function consider(file, what, opts) {
 		const spliced = splice ? spliceNow(r, what) : false;
 		return { accepted: false, r, verdict: v, spliced };
 	}
-	log(`${what}: ${fmt(best.runTicks)} -> ${fmt(r.runTicks)} (-${best.runTicks - r.runTicks})` + (RANDOM ? `, chance ${(r.chance * 100).toFixed(1)}%` : ''));
-	status.history.push({ t: Date.now(), runTicks: r.runTicks, saved: best.runTicks - r.runTicks, what, chance: r.chance });
+	log(`${what}: ${fmt(best.runTicks)} -> ${fmt(r.runTicks)} (-${best.runTicks - r.runTicks})` + (RANDOM ? `, chance ${(r.chance * 100).toFixed(1)}%` : '') +
+		(r.deaths !== best.deaths ? `, ${r.deaths} death${r.deaths === 1 ? '' : 's'} (was ${best.deaths})` : ''));
+	status.history.push({ t: Date.now(), runTicks: r.runTicks, saved: best.runTicks - r.runTicks, what, chance: r.chance, deaths: r.deaths });
 	best = r;
 	saveStatus({ chance: r.chance });
 	publish();
