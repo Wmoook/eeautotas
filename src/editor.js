@@ -1247,6 +1247,17 @@ function save() {
 	saveTimer = setTimeout(saveNow, SAVE_MS);
 	if (saveTimer.unref) saveTimer.unref();
 }
+// EEAT_EVLOG=<file> (a lab's record, off by default): every event of every strategy's process (and each launch's
+// arguments) appended as one JSON line {T: s since the search's start, k: the strategy, ...}; a run's inputs kept only
+// for a room's first arrival ('source' kind 'room'), elsewhere their length
+const EVLOG = process.env.EEAT_EVLOG || '';
+function evlog(k, ev) {
+	try {
+		const o = Object.assign({ T: S && S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null, k }, ev);
+		if (typeof o.inputs === 'string' && !(ev.ev === 'source' && ev.kind === 'room')) o.inputs = o.inputs.length;
+		fs.appendFileSync(EVLOG, JSON.stringify(o) + '\n');
+	} catch (e) { /* a record only */ }
+}
 function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); }
 // The clocks. Each eegpu process first loads its kernels (the first load after a build is the NVIDIA driver compiling
 // them for this graphics card: a minute or more on a laptop CPU, then seconds) and says {"ev":"ready"}; its --seconds
@@ -1778,6 +1789,7 @@ function launch(n) {
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined,
 		detached: !cpu });
+	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)) });
 	ch.stopFile = stopFile;
 	ch.startedAt = Date.now();
 	ch.paused = pausedNow;
@@ -1987,6 +1999,7 @@ function launch(n) {
 			if (!line.startsWith('{') || (i !== lastProgress && isProgress(line))) continue;
 			let ev;
 			try { ev = JSON.parse(line); } catch (e) { continue; }
+			if (EVLOG) evlog(V.key, ev);
 			onEvent(ev);
 		}
 	});
