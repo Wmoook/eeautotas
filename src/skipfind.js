@@ -58,6 +58,7 @@ const DEFAULTS = {
 	picks: 'fast',
 	cap: 60000, log2: 24,   // (the cell table: 2^24 x 8 bytes a worker; full at 70%: the search ends there)
 	perS: 100, bfsShare: 0.85,   // seconds per search (start x pick) and the main bfs's share of them
+	deepEvery: 4, deepDepth: 450, deepLog2: 25, deepPerS: 200,   // the deep starts (isDeep): layers, table, seconds
 	joinTop: 4, hitsPerSeg: 4, hitsClose: 4, quickOffs: [0, -2, 2, -4, 4, -6, 6, -10, 10], quickMax: 400, quickS: 8, tailBack: 90, tailStep: 3, offBack: 150, offAhead: 60, tailH: 400, tailDiverge: 320, tailS: 4, anchors: 3, anchorD: 12, looseD: 4,
 	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackVw: 3, trackLost: 150, trackLostK: 30, trackS: 8,
 	joinBfs: 0, joinDepth: 280, joinCap: 25000, joinMargin: 6,
@@ -886,7 +887,9 @@ if (!isMainThread && workerData && workerData.skipfind) {
 		if (msg.task) {
 			const { s, pick } = msg.task;
 			let r;
-			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
+			// (a deep start: the coarse levels' sparse starts search deeper: --deepDepth layers, a 2^--deepLog2 table, --deepPerS seconds)
+			const deep = msg.task.deep ? { depth: wd.o.deepDepth || DEFAULTS.deepDepth, log2: wd.o.deepLog2 || DEFAULTS.deepLog2, perS: wd.o.deepPerS || DEFAULTS.deepPerS } : {};
+			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, deep, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
 			E.flushTicks();
 			const out = Object.assign({ s, pick, version, h: info.H[s] }, r);
 			if (r.best) out.best = { ms: Array.from(r.best.ms), saved: r.best.saved, runTicks: r.best.ev.runTicks, how: r.best.how, edge: r.best.edge, m: r.best.m };
@@ -914,7 +917,7 @@ async function main() {
 	const seconds = +(a.seconds || 600);
 	// the workers: as asked, at most what half of the free memory holds (a worker: its cell table, 2^log2 x 8 bytes, + ~700 MB of
 	// layers and snapshots at the default cap: one Egg Quest II search, 1,041 MB RSS, heap 659 MB, array buffers 212 MB)
-	const perWorkerMB = (2 ** ((o.log2 || DEFAULTS.log2)) * 8) / 1048576 + 700;
+	const perWorkerMB = (2 ** Math.max(o.log2 || DEFAULTS.log2, o.deepLog2 || DEFAULTS.deepLog2) * 8) / 1048576 + 700;
 	const memW = Math.max(1, Math.floor((os.freemem() / 1048576) * 0.5 / perWorkerMB));
 	const nw = Math.max(1, Math.min(memW, +(a.workers || Math.max(1, os.cpus().length - 2))));
 	const out = a.out ? path.resolve(a.out) : path.join(C.SRC, 'out', 'skipfind_best.eetas');
@@ -930,7 +933,11 @@ async function main() {
 	// (the grind's stage continues its pass where the last one stopped: a start is searched again only when its state or
 	// the run over its goal window changed)
 	const P = Object.assign({}, DEFAULTS, o);
-	const keyOf = (s, pk) => `${info.H[s]}:${info.H[Math.min(info.n, s + P.depth + P.horizon)]}:${pk}`;
+	// deep starts: in the coarse order the starts at multiples of --deepEvery x --every (the 8x and 4x levels by default:
+	// sparse, so each searches deeper; Egg Quest II's base route: the chimney from t600 needs ~350 layers)
+	const isDeep = (s) => P.order === 'coarse' && P.deepEvery > 0 && s % (P.deepEvery * Math.max(1, P.every | 0)) === 0;
+	const depthOf = (s) => (isDeep(s) ? P.deepDepth : P.depth);
+	const keyOf = (s, pk) => `${info.H[s]}:${info.H[Math.min(info.n, s + depthOf(s) + P.horizon)]}:${pk}`;
 	const done = new Set();
 	const doneFile = a.done ? path.resolve(a.done) : null;
 	if (doneFile) { try { for (const l of fs.readFileSync(doneFile, 'utf8').split('\n')) if (l) done.add(l); } catch (e) { /* none yet */ } }
@@ -947,7 +954,7 @@ async function main() {
 		for (const s of st) for (const pk of picks) {
 			const key = keyOf(s, pk);
 			if (done.has(key)) continue;
-			(stateDone.has(stateOfKey(key)) ? again : fresh).push({ s, pick: pk, key });
+			(stateDone.has(stateOfKey(key)) ? again : fresh).push({ s, pick: pk, key, deep: isDeep(s) });
 		}
 		queue = fresh.concat(again);
 	};
