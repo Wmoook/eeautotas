@@ -749,7 +749,7 @@ function legFieldOf(lv, fg, q, coins, start) {
 // only for LEG_MIN_WORK tiles x legs or more unless opts.legThreads asks. The build stays synchronous: the workers take
 // jobs from a shared counter, answer on their own ports, and the build waits on the counter (Atomics.wait) and reads the
 // answers (receiveMessageOnPort) into the jobs' own places: the same fields in the same order, the same steer field
-// (test/steer.js D: its file's bytes with and without the workers).
+// (test/steer.js A: its file's bytes with and without the workers).
 const LEG_THREADS = 6, LEG_MIN_WORK = 200000, LEG_STALL_MS = 180000;
 const legThreadsOf = (A, legs, opts) => {
 	const env = process.env.EEAT_STEER_THREADS;
@@ -779,7 +779,7 @@ parentPort.on('message', (m) => {
 		const bufs = new Set();
 		if (r.f) for (const v of Object.values(r.f)) if (ArrayBuffer.isView(v) && !(v.buffer instanceof SharedArrayBuffer)) bufs.add(v.buffer);
 		if (r.costs) bufs.add(r.costs.buffer);
-		d.port.postMessage(r, [...bufs]);
+		try { d.port.postMessage(r, [...bufs]); } catch (e) { d.port.postMessage({ i, err: String(e && e.message || e) }); }   // (an answer that cannot be sent: the caller builds it)
 		Atomics.add(idx, 1, 1); Atomics.notify(idx, 1);
 	}
 });`;
