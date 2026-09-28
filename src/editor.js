@@ -2432,6 +2432,8 @@ function launch(n) {
 	if (ch.stdin) ch.stdin.on('error', () => { /* it ended */ });
 	busy.add(ch);
 	V.live = true;
+	// (a process launched now reads the late steer field's distances from its start: no switch to wait for, lateSteer's sgMin)
+	V.sgMin = 0;
 	// (the CPU search searches at once; an eegpu process from its ready event)
 	V.launchedAt = Date.now();
 	V.readyAt = cpu ? V.launchedAt : 0;

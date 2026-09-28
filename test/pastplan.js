@@ -104,6 +104,44 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	check('the switch: a "steer" event with the plan past its count (the DP over 3 coins)', steerEv && steerEv.dp && steerEv.dp.T === 3, JSON.stringify(steerEv));
 	check('... the worker takes it and the search goes on to its end (no error, no warning; its closest attempts after it carry the switch: sg)', doneEv && doneEv.end !== 'error' && !warn.length && closestAfter > 0,
 		`end ${doneEv && doneEv.end}, closest attempts by the new field: ${closestAfter}${warn.length ? `, warnings: ${warn.join(' | ').slice(0, 200)}` : ''}`);
+
+	console.log('\n== goexplore.js: `steerd <file>` on stdin (a late steer field that measures the attempts from then on)');
+	// (the editor's late field, lateSteer: before, the distances stayed the reach field's for the whole search; on Forgotten
+	// Helix the reach field's walk through every coin door put the nearest attempt in a pocket behind a door the level's
+	// coins never open). Every closest attempt after the switch carries it (sg 1) and its distance is the steer field's
+	// value of the attempt's end state; before it, none carries sg.
+	{
+		const ch2 = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lv, '--workers=1', '--seconds=6', '--stdin=1', '--cells=coarse', '--seed=3', '--mem=200'], { stdio: ['pipe', 'pipe', 'pipe'] });
+		let out2 = '', sent2 = false, steer2 = null, before = 0, beforeSg = 0, after = 0, afterBad = [], done2 = null;
+		const warn2 = [];
+		ch2.stdout.on('data', (d) => {
+			out2 += d;
+			let k;
+			while ((k = out2.indexOf('\n')) >= 0) {
+				const line = out2.slice(0, k); out2 = out2.slice(k + 1);
+				let ev = null; try { ev = JSON.parse(line); } catch (e) { continue; }
+				if (ev.ev === 'start' && !sent2) { sent2 = true; setTimeout(() => { try { ch2.stdin.write(`steerd ${f0}\n`); } catch (e) { /* ended */ } }, 500); }
+				if (ev.ev === 'steer') steer2 = ev;
+				if (ev.ev === 'closest' && !steer2) { before++; if (ev.sg) beforeSg++; }
+				if (ev.ev === 'closest' && steer2) {
+					after++;
+					const ms = Uint8Array.from(ev.inputs, (q) => (q.charCodeAt(0) - 48) & 31);
+					const sim = new E.EESim(L), inp = new E.EEInput();
+					sim.reset();
+					for (const m of ms) { E.applyMask(inp, m); sim.tick(inp); }
+					const v = SF.steerAt(st, sim);
+					if (!(ev.sg >= 1) || !(Math.abs(v - ev.dist) < 0.01)) afterBad.push(`${ev.dist} (steer ${v}, sg ${ev.sg})`);
+				}
+				if (ev.ev === 'done') done2 = ev;
+				if (ev.ev === 'warning') warn2.push(ev.text);
+			}
+		});
+		await new Promise((res) => ch2.on('exit', res));
+		check('the late field with its distances: a "steer" event (dist), the search goes on to its end without a warning', steer2 && steer2.dist === true && done2 && done2.end !== 'error' && !warn2.length,
+			`${JSON.stringify(steer2)}; end ${done2 && done2.end}${warn2.length ? `; warnings ${warn2.join(' | ').slice(0, 200)}` : ''}`);
+		check('... every closest attempt after it carries the switch (sg 1) and is the steer field\'s value of its end state; none before it carries sg',
+			after > 0 && !afterBad.length && beforeSg === 0, `before ${before} (sg ${beforeSg}), after ${after}${afterBad.length ? `, off: ${afterBad.slice(0, 4).join(', ')}` : ''}`);
+	}
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* temp */ }
 
 	console.log('\n== the editor: the steer worker builds the plan past its count, the running search gets it');
