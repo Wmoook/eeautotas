@@ -394,7 +394,7 @@ function runTool(script, args, maxMs, logFile) {
 let results = [];
 try {
 	// (outputs of an earlier session: a stale find is still a find)
-	results = fs.readdirSync(OUT).filter((f) => /^grind_(deep|sc|mut|beam|skipf)_.*\.eetas$/.test(f)).map((f) => path.join(OUT, f))
+	results = fs.readdirSync(OUT).filter((f) => /^grind_(deep|sc|mut|beam|skipf|flyb)_.*\.eetas$/.test(f)).map((f) => path.join(OUT, f))
 		.sort((x, y) => fs.statSync(x).mtimeMs - fs.statSync(y).mtimeMs);
 } catch (e) { /* none */ }
 function addResult(file) {
@@ -589,8 +589,8 @@ process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { 
 // the best changed meanwhile (a newer route from Find a route, say): its idle start and re-synced clocks found timedoor's
 // -252 (half the run) on a run spliced from Find a route's newer routes, after 7 minutes behind the endgame, deep
 // windows and shortcuts)
-const STAGES_ALL = ['mutA', 'skipfA', 'endgame', 'deep', 'skips', 'skipf', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
-const STAGES_PHASE = ['mutA', 'skipfA', 'phase', 'endgame', 'phaseB', 'deep', 'skips', 'skipf', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
+const STAGES_ALL = ['mutA', 'skipfA', 'endgame', 'deep', 'skips', 'skipf', 'flyb', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+const STAGES_PHASE = ['mutA', 'skipfA', 'phase', 'endgame', 'phaseB', 'deep', 'skips', 'skipf', 'flyb', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -1005,6 +1005,31 @@ async function skipfindStage(round) {
 		`--done=${path.join(OUT, 'grind_skipfind.txt')}`, ...dl()], so, (secs + 120) * 1000, 'from states all along the run: every move to later points of the run');
 	if (res) addResult(so);
 }
+/**
+ * The corridor beam (flybeam.js): a non-exact optimizer for long low-contact stretches (fly, low gravity, ice arcs)
+ * where no faster line shares a state with the run for 1,000+ ticks, so every exact-rejoin window is too short: from
+ * the run's exact state every --flybeamStep (400) ticks an every-move beam that follows the run's own path (progress
+ * along the run, one state per position / velocity cell, the run's own state always kept), up to --flybeamExt (1200)
+ * ticks past its window, joined back exactly (a child equal to a later run state, or the run's own inputs from the
+ * nearest states ahead) and judged. A slice per round (--flybeamS, default 30% of a round, 150-300 s) on every thread,
+ * continuing its pass over the run (`grind_flybeam.json`: the next start as tick + state hash). Opt-in:
+ * --flybeam=1 (or EEAT_FLYBEAM=1).
+ */
+async function flybeamStage(round) {
+	if (a.flybeam !== '1' && process.env.EEAT_FLYBEAM !== '1') return;
+	// (a join needs its whole task: Infinity Pain's shaft find took 1,115 layers at W 2048, 326 s on one loaded EPYC thread)
+	const secs = a.flybeamS ? +a.flybeamS : Math.max(150, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
+	if (deadline - Date.now() < (secs + 120) * 1000) return;
+	const fo = path.join(OUT, `grind_flyb_${round}.eetas`);
+	const res = await stage(`flybeam${round}`, 'flybeam.js', [TAS, LVL, `--out=${fo}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`,
+		`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 2048}`, `--timeS=${secs}`,
+		// two settings per start: the plain beam (the ice level's finds) and the homing share with velocity-weighted tails
+		// (Infinity Pain's shaft: -121 where the plain beam found no rejoin)
+		`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`,
+		`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], fo, (secs + 120) * 1000,
+		'every-move beam along the run own path, joined back exactly');
+	if (res) addResult(fo);
+}
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
 	const budget = Math.max(90e3, 0.8 * ROUND_MS - roundUsed());
@@ -1076,6 +1101,7 @@ async function main() {
 			else if (sname === 'skips') await skipsStage(round);
 			else if (sname === 'skipfA') { if (round === firstRound && round === 1) await skipfindStage(round); }
 			else if (sname === 'skipf') { if (!(round === firstRound && round === 1)) await skipfindStage(round); }
+			else if (sname === 'flyb') await flybeamStage(round);
 			else if (sname === 'mutB') await mutateLoop(`${round}b`);
 			else if (sname === 'sc') await shortcutsStage(round, R);
 			else if (sname === 'phase') await phaseStage(round, R);
