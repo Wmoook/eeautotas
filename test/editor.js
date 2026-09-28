@@ -731,6 +731,29 @@ async function passesSection() {
 			fedIn.some((l) => /^seed 2{300}$/.test(l)) && fedIn.some((l) => /^seed 1+$/.test(l)) && (st.notes || st.log || []).concat([]).length >= 0,
 			`seeds ${seeds.join(',')}; restarts ${V.restarts}; crash ${JSON.stringify(cr).slice(0, 300)}; fed ${fedIn.length}; state ${V.state}`);
 	}
+	// ... and with a route already known (every move's first pass finishes; its next pass holds the GPU, so the CPU search
+	// is not stopped by cpuDone): the end is logged, and the search is not started again
+	{
+		const scR = path.join(HOME, 'sup_route.json'), logR = path.join(HOME, 'sup_route.log'), scC = path.join(HOME, 'sup_routecpu.json'), fakeCpu = path.join(HOME, 'fake-cpu-crash.js');
+		const argLog = path.join(HOME, 'sup_route_args.log');
+		fs.writeFileSync(fakeCpu, FAKE_CPU_CRASH);
+		fs.writeFileSync(scR, JSON.stringify({ log: logR, R, runs: { '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 5000, wait: 8000, hold: 8000 }] }, beam: null }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100, crashMs: 3000, how: 'exit', argLog }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 200, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scR], cpu: [process.execPath, fakeCpu, scC], salts: false });
+		const t0s = Date.now();
+		const V0 = () => (ED.state().strategies || []).find((q) => q.key === 'goexplore') || {};
+		while (ED.state().running && !(V0().crashes || []).length && Date.now() - t0s < 15000) await new Promise((z) => setTimeout(z, 100));
+		await new Promise((z) => setTimeout(z, 1000));
+		const st = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		const n = fs.existsSync(argLog) ? fs.readFileSync(argLog, 'utf8').split('\n').filter(Boolean).length : 0;
+		const V = (st.strategies || []).find((q) => q.key === 'goexplore') || {};
+		const cr = (V.crashes || [])[0] || {};
+		check('the one search ends on its own with a route known: logged, not started again',
+			!!st.result && n === 1 && !V.restarts && cr.code === 137 && cr.restarted === false, `route ${!!st.result}; launches ${n}; restarts ${V.restarts}; crash ${JSON.stringify(cr).slice(0, 200)}; state ${V.state}`);
+	}
 	// the wall breaker (strategy 'breaker'; clocks shortened: a round after 1 s without progress, a 2^26 table): every move's
 	// nearest attempt (600 ticks) stalls, the relay's runs fill their tables and get no nearer, the CPU search reports
 	// nothing: a round from the nearest attempt 150 ticks back (450; 400 back is 200); its run has the GPU (the others
