@@ -1011,17 +1011,18 @@ async function skipfindStage(round) {
  * the run's exact state every --flybeamStep (400) ticks an every-move beam that follows the run's own path (progress
  * along the run, one state per position / velocity cell, the run's own state always kept), up to --flybeamExt (1200)
  * ticks past its window, joined back exactly (a child equal to a later run state, or the run's own inputs from the
- * nearest states ahead) and judged. A slice per round (--flybeamS, default 20% of a round, 90-240 s) on every thread,
+ * nearest states ahead) and judged. A slice per round (--flybeamS, default 30% of a round, 150-300 s) on every thread,
  * continuing its pass over the run (`grind_flybeam.json`: the next start as tick + state hash). Opt-in:
  * --flybeam=1 (or EEAT_FLYBEAM=1).
  */
 async function flybeamStage(round) {
 	if (a.flybeam !== '1' && process.env.EEAT_FLYBEAM !== '1') return;
-	const secs = a.flybeamS ? +a.flybeamS : Math.max(90, Math.min(240, Math.round(0.2 * ROUND_MS / 1000)));
+	// (a join needs its whole task: Infinity Pain's shaft find took 1,115 layers at W 2048, 326 s on one loaded EPYC thread)
+	const secs = a.flybeamS ? +a.flybeamS : Math.max(150, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
 	if (deadline - Date.now() < (secs + 120) * 1000) return;
 	const fo = path.join(OUT, `grind_flyb_${round}.eetas`);
 	const res = await stage(`flybeam${round}`, 'flybeam.js', [TAS, LVL, `--out=${fo}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`,
-		`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 4096}`, `--timeS=${Math.min(secs, 180)}`,
+		`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 2048}`, `--timeS=${secs}`,
 		// two settings per start: the plain beam (the ice level's finds) and the homing share with velocity-weighted tails
 		// (Infinity Pain's shaft: -121 where the plain beam found no rejoin)
 		`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`,
