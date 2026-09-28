@@ -690,7 +690,7 @@ function mineCmd() {
 }
 
 // ------------------------------------------------------------------ run: score a finder
-const BUILTIN = ['none', 'ref', 'known', 'optwin', 'gox', 'goxb', 'goxr', 'goxleap', 'leaps'];
+const BUILTIN = ['none', 'ref', 'known', 'optwin', 'gox', 'goxb', 'goxr', 'goxleap', 'leaps', 'skipfind'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** ends a finder: its stop file first (finders that watch it end their children between two GPU launches), then the tree */
 async function endProcess(p, stopFile, graceMs) {
@@ -717,7 +717,7 @@ async function runCase(cs, finder, o) {
 	let p;
 	const env = Object.assign({}, process.env, { PB_CASE: caseFile, PB_OUT: out, PB_SECONDS: String(o.seconds), PB_THREADS: String(o.threads) });
 	if (BUILTIN.includes(finder)) {
-		const pass = argv.filter((x) => /^--(code|leapsCode|tool|cachedir|mem|gx|leapArgs|seed|targets|kappa)=/.test(x));
+		const pass = argv.filter((x) => /^--(code|leapsCode|tool|cachedir|mem|gx|leapArgs|seed|targets|kappa|sfEvery|sfArgs)=/.test(x));
 		p = spawn(process.execPath, [__filename, 'finder', finder, caseFile, ...pass], { stdio: ['ignore', 'pipe', 'pipe'], env, detached: process.platform !== 'win32', windowsHide: true });
 	} else p = spawn(sub(finder), { shell: true, stdio: ['ignore', 'pipe', 'pipe'], env, detached: process.platform !== 'win32', windowsHide: true });
 	const t0 = Date.now();
@@ -1003,6 +1003,25 @@ async function finderCmd() {
 			...(opt.tool ? [`--tool=${opt.tool}`] : []), ...(opt.leapArgs ? opt.leapArgs.split(' ').filter(Boolean) : [])];
 		const r = await child(args, { onLine: (l) => { if (/"ev":"leap"/.test(l)) say({ candidate: 'leaps.eetas' }); } });
 		if (r.code) say({ error: `leaps exit ${r.code}`, last: r.last.slice(-5) });
+		return;
+	}
+	if (name === 'skipfind') {
+		// the skip finder (src/skipfind.js, NOT told the goal): its searches from our run's states from the case's start
+		// over the first 3/4 of our way to the goal (every --sfEvery ticks, default ours / 12 within 10..50, in run order),
+		// our run as the reference; every faster run it writes is a candidate (copied: it rewrites its --out at each find)
+		const every = +(opt.sfEvery || Math.max(10, Math.min(50, Math.round(cs.ours / 12))));
+		const to = Math.max(cs.startMax || cs.fixed, cs.fixed + Math.floor(cs.ours * 0.75));
+		const sfOut = path.join(out, 'skipfind_live.eetas.keep');
+		const args = [path.join(code, 'src', 'skipfind.js'), `--tas=${cs.ref}`, `--level=${cs.level}`, `--out=${sfOut}`, `--seconds=${Math.max(10, Math.floor(left()))}`,
+			`--from=${cs.fixed}`, `--to=${to}`, '--order=run', `--every=${every}`, `--workers=${Math.max(1, cs.threads | 0)}`,
+			...(opt.sfArgs ? opt.sfArgs.split(' ').filter(Boolean) : [])];
+		let k = 0;
+		const r = await child(args, { onLine: (l) => {
+			if (!/"ev":"skip"/.test(l)) return;
+			const f = `skipfind_${k++}.eetas`;
+			try { fs.copyFileSync(sfOut, path.join(out, f)); say({ candidate: f }); } catch (e) { /* the next find */ }
+		} });
+		if (r.code > 1) say({ error: `skipfind exit ${r.code}`, last: r.last.slice(-5) });
 		return;
 	}
 	throw new Error(`unknown finder ${name} (${BUILTIN.join(', ')})`);

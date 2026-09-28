@@ -394,7 +394,7 @@ function runTool(script, args, maxMs, logFile) {
 let results = [];
 try {
 	// (outputs of an earlier session: a stale find is still a find)
-	results = fs.readdirSync(OUT).filter((f) => /^grind_(deep|sc|mut|beam)_.*\.eetas$/.test(f)).map((f) => path.join(OUT, f))
+	results = fs.readdirSync(OUT).filter((f) => /^grind_(deep|sc|mut|beam|skipf)_.*\.eetas$/.test(f)).map((f) => path.join(OUT, f))
 		.sort((x, y) => fs.statSync(x).mtimeMs - fs.statSync(y).mtimeMs);
 } catch (e) { /* none */ }
 function addResult(file) {
@@ -589,8 +589,8 @@ process.on('exit', () => { if (gpuChild) { try { gpuChild.kill(); } catch (e) { 
 // the best changed meanwhile (a newer route from Find a route, say): its idle start and re-synced clocks found timedoor's
 // -252 (half the run) on a run spliced from Find a route's newer routes, after 7 minutes behind the endgame, deep
 // windows and shortcuts)
-const STAGES_ALL = ['mutA', 'endgame', 'deep', 'skips', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
-const STAGES_PHASE = ['mutA', 'phase', 'endgame', 'phaseB', 'deep', 'skips', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
+const STAGES_ALL = ['mutA', 'skipfA', 'endgame', 'deep', 'skips', 'skipf', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+const STAGES_PHASE = ['mutA', 'skipfA', 'phase', 'endgame', 'phaseB', 'deep', 'skips', 'skipf', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
 let roundT0 = 0;
 const roundUsed = () => Date.now() - roundT0;
 /** the deep exploring windows of the whole run: every coin-to-coin segment (a level without coins is one), in tick order */
@@ -984,6 +984,24 @@ async function skipsStage(round) {
 	addResult(so);
 	if (!res.killed) saveCursor({ skips: key, skipsRound: round });
 }
+/**
+ * The skip finder (skipfind.js): path changes the windows above cannot make (Egg Quest II's chimney: -183 ticks from
+ * the run's state at t600, a climb whose line the run meets again only 520 ticks later): from states all along the
+ * run, bounded every-move searches with fine cells (1 px, 1/16 px/tick) and lineage-stable picks, whose goal is any
+ * later point of the run reached sooner, joined back exactly (the run's own inputs, or a second search) and judged.
+ * A slice per round (--skipfindS, default 30% of a round, 120-300 s) on every thread, continuing its pass over the run
+ * (`grind_skipfind.txt`: the starts searched, by their state and their goal window's); in the first round right after
+ * mutA (a Find a route base route has the most path to gain), later after the sweep's deep windows. --skipfind=0: off.
+ */
+async function skipfindStage(round) {
+	if (a.skipfind === '0') return;
+	const secs = a.skipfindS ? +a.skipfindS : Math.max(120, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
+	if (deadline - Date.now() < (secs + 120) * 1000) return;
+	const so = path.join(OUT, `grind_skipf_${round}.eetas`);
+	const res = await stage(`skipfind${round}`, 'skipfind.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`,
+		`--done=${path.join(OUT, 'grind_skipfind.txt')}`, ...dl()], so, (secs + 120) * 1000, 'from states all along the run: every move to later points of the run');
+	if (res) addResult(so);
+}
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
 	const budget = Math.max(90e3, 0.8 * ROUND_MS - roundUsed());
@@ -1053,6 +1071,8 @@ async function main() {
 			else if (sname === 'endgame') await endgameStage(round);
 			else if (sname === 'deep') await deepStage(round, R);
 			else if (sname === 'skips') await skipsStage(round);
+			else if (sname === 'skipfA') { if (round === firstRound && round === 1) await skipfindStage(round); }
+			else if (sname === 'skipf') { if (!(round === firstRound && round === 1)) await skipfindStage(round); }
 			else if (sname === 'mutB') await mutateLoop(`${round}b`);
 			else if (sname === 'sc') await shortcutsStage(round, R);
 			else if (sname === 'phase') await phaseStage(round, R);
