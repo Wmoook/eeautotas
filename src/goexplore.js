@@ -1200,8 +1200,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let ST = a.steerData || null;
 	const hsPrio = (c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c);
 	let HS = ST ? heapOf(hsPrio) : null;
-	// (after a switch: the cells scored by the new field; the others are scored when next picked. null: no switch yet)
-	let scFresh = null;
+	// (after a switch: the cells scored by the new field; the others are scored when next picked. null: no switch yet;
+	// steerGen: the switches made, on every closest message: the main thread drops one of an older field)
+	let scFresh = null, steerGen = 0;
 	// head L (the one search once a route is known: the main thread's 'route' message): the lead. The best route's
 	// schedule (sched: per (room, tile) the tick it first gets there); a cell at (room, tile) that the route passes gets
 	// lead = its tick - the route's there (below 0: ahead of the best route, which finishes that much sooner from there if
@@ -1403,7 +1404,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
-		post({ type: 'closest', seed, rc: near.rc, t: near.t, inputs: C.eetasBytes(inputsOf(near.node)).toString('latin1') });
+		post({ type: 'closest', seed, rc: near.rc, t: near.t, gen: steerGen, inputs: C.eetasBytes(inputsOf(near.node)).toString('latin1') });
 	};
 	// sources (coarse cells): starting points for the editor's relay (see the header). A room without territory gain is a
 	// "room" source at most once per SOURCE_S (on a level of many switches most rooms open nothing)
@@ -1697,6 +1698,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (!sd || sd.W !== W || sd.H !== H) return;
 		ST = Object.assign(sd, { dpFirst: true });
 		scFresh = new WeakSet();
+		steerGen++;
 		HS = heapOf(hsPrio);
 		if (near !== null) { release(near.node); near = null; }
 		nearSent = null;
@@ -1705,7 +1707,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			sim.restore(c.snap);
 			c.sc = steerOf(); scFresh.add(c); c.ver++;
 			hpush(c);
-			nearSteer(c);
+			if (c.node !== null) nearSteer(c);   // (the start cell has no path node: never the closest)
 		}
 	};
 	// (a class worker: the best route up to its avoided gate, its cells every SEED_EVERY ticks: the class differs only from
@@ -1776,7 +1778,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e.pc = null;
 			}
 			e.used = true;
-			if (stale) { sim.restore(e.snap); e.sc = steerOf(); scFresh.add(e); nearSteer(e); hpush(e); }
+			if (stale) { sim.restore(e.snap); e.sc = steerOf(); scFresh.add(e); if (e.node !== null) nearSteer(e); hpush(e); }
 			if (HA.size() > 3 * cells.size + 4096 || (HL !== null && HL.size() > 3 * cells.size + 4096) || (HW !== null && HW.size() > 3 * cells.size + 4096)) compact();
 			// stuck: finer cells around here
 			if (picks - lastProgress > a.stall && e.picks % a.refine === 0) {
@@ -2493,7 +2495,7 @@ async function main() {
 		processMB: Math.round(claimed / 1048576), machineMB: Math.round(m.total / 1048576), freeMB: Math.round(m.free / 1048576), othersMB: Math.round(m.others / 1048576),
 		maxCells: a.maxCells, maxSnaps: a.maxSnaps });
 	// the fastest verified route; the closest state
-	let route = null, first = null, near = null, nearPending = false, heapWarned = false;
+	let route = null, first = null, near = null, nearPending = false, heapWarned = false, steerGen = 0;
 	const stats = new Map(), dones = new Map(), plogs = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
 	let nLead = 0, nWay = 0;   // (the routes head-L picks found; the routes that descend from a head-W pick)
@@ -2527,7 +2529,8 @@ async function main() {
 	const flushNear = () => {
 		if (!nearPending) return;
 		nearPending = false;
-		say({ ev: 'closest', dist: Math.round(near.rc * 1000) / 1000, tick: near.t, inputs: near.inputs });
+		// (sg: the steer switches made: the editor takes a closest attempt of the plan past its count only with sg)
+		say(Object.assign({ ev: 'closest', dist: Math.round(near.rc * 1000) / 1000, tick: near.t, inputs: near.inputs }, steerGen ? { sg: steerGen } : {}));
 	};
 	let lastClaim = Date.now();
 	const timer = setInterval(() => {
@@ -2565,7 +2568,7 @@ async function main() {
 						const sd = SF.readSteerFile(Buffer.from(sab));
 						if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
 						for (const p of seedPorts) p.postMessage({ steer: sab });
-						near = null; nearPending = false;
+						near = null; nearPending = false; steerGen++;
 						const s0 = SF.steerAt(Object.assign(sd, { dpFirst: true }), sim0);
 						say({ ev: 'steer', dp: sd.dp ? { n: sd.dp.n, T: sd.dp.T } : null, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null });
 					} catch (e) { say({ ev: 'warning', text: `the steer field past the plan is not used: ${e.message}` }); }
@@ -2725,6 +2728,8 @@ async function main() {
 			}
 		}
 		if (msg.type === 'closest') {
+			// (a worker's closest by an older steer field than the last switch's: another measure, dropped)
+			if ((msg.gen || 0) < steerGen) return;
 			if (!near || msg.rc < near.rc - 1e-3 || (msg.rc <= near.rc + 1e-3 && msg.t < near.t)) { near = msg; nearPending = true; }
 		} else if (msg.type === 'source') {
 			onSource(msg);

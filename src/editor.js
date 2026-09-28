@@ -2659,7 +2659,7 @@ function closer(ev, n) {
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	// (past the plan: the CPU search measures by the plan past its count, the GPU tools by the field; one measure for the
 	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
-	if (cur.pastOn && !Vn.cpu) { if (own) attemptSource(n, own); return; }
+	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);

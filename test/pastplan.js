@@ -79,22 +79,27 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	const lv = path.join(tmp, 'level.eelvl'), f0 = path.join(tmp, 'main.rch4'), f1 = path.join(tmp, 'past.rch4');
 	fs.writeFileSync(lv, buf); SF.writeSteerFile(st, f0); SF.writeSteerFile(sp, f1);
 	const ch = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lv, '--workers=1', '--seconds=12', '--stdin=1', `--steer=${f0}`, '--cells=coarse', '--seed=3', '--mem=200'], { stdio: ['pipe', 'pipe', 'pipe'] });
-	let out = '', sent = false, steerEv = null, closestAfter = 0, done = false;
+	let out = '', sent = false, steerEv = null, closestAfter = 0, doneEv = null;
+	const warn = [];
 	ch.stdout.on('data', (d) => {
 		out += d;
 		let k;
 		while ((k = out.indexOf('\n')) >= 0) {
 			const line = out.slice(0, k); out = out.slice(k + 1);
 			let ev = null; try { ev = JSON.parse(line); } catch (e) { continue; }
-			if (ev.ev === 'start' && !sent) { sent = true; setTimeout(() => { try { ch.stdin.write(`steer ${f1}\n`); } catch (e) { /* ended */ } }, 1500); }
+			// (the switch early, before the first route: the start cell (no path node) is among the cells rescored)
+			if (ev.ev === 'start' && !sent) { sent = true; setTimeout(() => { try { ch.stdin.write(`steer ${f1}\n`); } catch (e) { /* ended */ } }, 300); }
 			if (ev.ev === 'steer') steerEv = ev;
-			if (ev.ev === 'closest' && steerEv) closestAfter++;
-			if (ev.ev === 'done' || ev.ev === 'result') done = true;
+			if (ev.ev === 'closest' && steerEv && ev.sg >= 1) closestAfter++;
+			if (ev.ev === 'done') doneEv = ev;
+			if (ev.ev === 'warning') warn.push(ev.text);
+			if (process.env.PP_DEBUG) console.log('   ev', line.slice(0, 160));
 		}
 	});
 	await new Promise((res) => ch.on('exit', res));
 	check('the switch: a "steer" event with the plan past its count (the DP over 3 coins)', steerEv && steerEv.dp && steerEv.dp.T === 3, JSON.stringify(steerEv));
-	check('... the search goes on to its end (a closest attempt by the new measure, or a route)', done && (closestAfter > 0 || done), `closest after the switch: ${closestAfter}, done ${done}`);
+	check('... the worker takes it and the search goes on to its end (no error, no warning; its closest attempts after it carry the switch: sg)', doneEv && doneEv.end !== 'error' && !warn.length && closestAfter > 0,
+		`end ${doneEv && doneEv.end}, closest attempts by the new field: ${closestAfter}${warn.length ? `, warnings: ${warn.join(' | ').slice(0, 200)}` : ''}`);
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* temp */ }
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
