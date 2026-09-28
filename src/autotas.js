@@ -50,8 +50,11 @@ const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
 /** the lane after the handoff (editor.js demote; EEAT_FRLANE=0 or run({frLane: false}): off, Find a route stops as
  *  before): Find a route goes on without the GPU on LANE_F of the workers (laneThreadsOf), its routes to the job as
  *  before, the job's stages on the rest (<job>/cpu_share = W - the lane's threads); the job's best goes into its archive
- *  at most every LANE_FEED_S s (when it changed); it ends LANE_IDLE_S s after its last route that gained the job anything
- *  (or the handoff), or with the budget. Stupid Fox: where Find a route ran on 9.5-10.6 min after the first route its
+ *  at most every LANE_FEED_S s (when it changed); it ends once its routes gained the job less than HANDOFF_MIN_GAIN of
+ *  its best in the last LANE_IDLE_S s (not before LANE_IDLE_S s after the handoff), or with the budget: the first version
+ *  ran on while its routes gained anything, and on Stupid Fox (rq-1 A/B, 2026-09-28) the job's best fed into its archive
+ *  came back as its "route" every 60 s with 1-40-tick splices, so it held 2 of the 5 threads for the whole 21 min (3,531
+ *  vs 3,478 without it). Stupid Fox: where Find a route ran on 9.5-10.6 min after the first route its
  *  own routes reached the door-free class (8,227 -> 3,684 ticks; finals 3,464 / 4,872), stopped 120 s after its last
  *  gain the finals stayed in the first class (5,310 after 77 min, 6,191 after 43); where it held every thread for 12 min
  *  (Egg Quest II) the final was 26% worse: hence a small CPU share and no GPU. */
@@ -60,12 +63,18 @@ const LANE_FEED_S = 60;
 const LANE_IDLE_S = 600;
 /** the lane's threads next to W workers */
 const laneThreadsOf = (W) => Math.max(1, Math.round(W * LANE_F));
-/** the lane's end, or '' (it goes on): o {now, laneAt, frAt (the last gain a route made the job), running (Find a route
- *  still runs), stage}; times in ms */
+/** the lane's end, or '' (it goes on): o {now, laneAt (the handoff), gains [{at, saved, fr}] (the job's improvements, fr:
+ *  made by a route), best (the job's best run ticks), running (Find a route still runs), stage}; times in ms. It ends with
+ *  Find a route, or once LANE_IDLE_S s have passed since the handoff and in the last LANE_IDLE_S s the routes gained the
+ *  job less than HANDOFF_MIN_GAIN of its best (a trickle of small splices does not keep it) */
 function laneEndWhy(o) {
 	if (!o.running) return `Find a route ended (${o.stage || 'done'})`;
-	const idle = o.now - Math.max(o.laneAt, o.frAt || 0);
-	return idle > LANE_IDLE_S * 1000 ? `no route gained the job anything for ${Math.round(idle / 1000)} s` : '';
+	const win = LANE_IDLE_S * 1000;
+	if (o.now - o.laneAt < win) return '';
+	let fr = 0;
+	for (const g of o.gains || []) if (g.fr && g.at > o.now - win) fr += g.saved;
+	if (!fr) return `no route gained the job anything in the last ${LANE_IDLE_S} s`;
+	return o.best > 0 && fr < HANDOFF_MIN_GAIN * o.best ? `in the last ${LANE_IDLE_S} s the routes gained the job ${fr} ticks, under ${Math.round(100 * HANDOFF_MIN_GAIN)}% of its ${o.best}` : '';
 }
 
 /**
@@ -268,7 +277,7 @@ function run(o) {
 			// the lane: its end (LANE_IDLE_S without a route that gained the job anything, or Find a route's own end), else
 			// the job's best into its archive
 			if (lane && !ended) {
-				const why = laneEndWhy({ now: Date.now(), laneAt: lane.at, frAt, running: st.running, stage: st.stage });
+				const why = laneEndWhy({ now: Date.now(), laneAt: lane.at, gains, best: S.best, running: st.running, stage: st.stage });
 				if (why) endLane(why);
 				else if (Date.now() - lane.fedAt >= LANE_FEED_S * 1000) feedLane();
 			}

@@ -50,12 +50,18 @@ check('FR_WHAT: a route\'s inbox run and its splice', AT.FR_WHAT.test('inbox (Fi
 // ends, or LANE_IDLE_S after its last route that gained the job anything (or the handoff)
 console.log('the lane after the handoff');
 check('the lane\'s threads: a fifth of the workers, at least 1', AT.laneThreadsOf(1) === 1 && AT.laneThreadsOf(5) === 1 && AT.laneThreadsOf(14) === 3 && AT.laneThreadsOf(20) === 4);
-const lw = (o) => AT.laneEndWhy(Object.assign({ running: true, stage: 'found' }, o));
-check('the lane goes on within LANE_IDLE_S of the handoff', lw({ now: 100 * s + (AT.LANE_IDLE_S - 1) * s, laneAt: 100 * s, frAt: 50 * s }) === '');
-const e1 = lw({ now: 100 * s + (AT.LANE_IDLE_S + 1) * s, laneAt: 100 * s, frAt: 50 * s });
-check('the lane ends LANE_IDLE_S after the handoff without a route gain', new RegExp(`no route gained the job anything for ${AT.LANE_IDLE_S + 1} s`).test(e1), e1);
-check('a route gain after the handoff starts the wait over', lw({ now: 100 * s + (AT.LANE_IDLE_S + 1) * s, laneAt: 100 * s, frAt: 400 * s }) === '');
-const e2 = lw({ now: 101 * s, laneAt: 100 * s, frAt: 0, running: false, stage: 'not found' });
+const lw = (o) => AT.laneEndWhy(Object.assign({ running: true, stage: 'found', gains: [], best: 5000 }, o));
+const endAt = 100 * s + (AT.LANE_IDLE_S + 1) * s;
+check('the lane goes on within LANE_IDLE_S of the handoff, gains or not', lw({ now: 100 * s + (AT.LANE_IDLE_S - 1) * s, laneAt: 100 * s }) === '');
+const e1 = lw({ now: endAt, laneAt: 100 * s, gains: [{ at: 80 * s, saved: 900, fr: true }, { at: 300 * s, saved: 400, fr: false }] });
+check('the lane ends LANE_IDLE_S after the handoff when no route gained the job anything in that window', new RegExp(`no route gained the job anything in the last ${AT.LANE_IDLE_S} s`).test(e1), e1);
+check('a route gain of 1% or more of the best in the window keeps it', lw({ now: endAt, laneAt: 100 * s, gains: [{ at: 400 * s, saved: 50, fr: true }] }) === '');
+// (Stupid Fox, the A/B's first version: the job's best fed into the lane came back as its route every 60 s, 1-40-tick
+// splices kept it going for the whole run)
+const trickle = [1, 2, 1, 3, 1, 2, 1, 1, 2, 1].map((v, k) => ({ at: (150 + 60 * k) * s, saved: v, fr: true }));
+const e3 = lw({ now: endAt, laneAt: 100 * s, gains: trickle, best: 3600 });
+check('a trickle of small route gains (under 1% of the best in the window) does not keep it', /the routes gained the job 15 ticks, under 1% of its 3600/.test(e3), e3);
+const e2 = lw({ now: 101 * s, laneAt: 100 * s, running: false, stage: 'not found' });
 check('the lane ends with Find a route', e2 === 'Find a route ended (not found)', e2);
 
 console.log(`\n${pass} passed, ${fail} failed`);
