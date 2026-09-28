@@ -1132,5 +1132,14 @@ async function main() {
 	}
 	log(`finished: best ${fmt(best.runTicks)} (run_ticks ${best.runTicks})`);
 	saveStatus({ state: 'finished', stage: 'finished' });
+	// the deadline's end is the process's: the live timer kept it alive and its GPU searcher kept searching and handing
+	// runs in past --until (2026-09-28, the flybeam A/B: both arms' grinds and searchers still ran 2+ min after
+	// "finished", one arm's best 4,834 -> 4,816 then); the searcher gets SIGTERM (its own quit: eegpu's stop file first)
+	clearInterval(liveTimer);
+	const ch = gpuChild;
+	if (!ch) process.exit(0);
+	ch.once('exit', () => process.exit(0));
+	setTimeout(() => process.exit(0), 10000).unref();
+	try { ch.kill(); } catch (e) { process.exit(0); }
 }
 main().catch((e) => { log(`error: ${e && e.stack || e}`); saveStatus({ state: 'error', error: String(e && e.message || e) }); process.exit(1); });
