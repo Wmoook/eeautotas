@@ -2295,9 +2295,11 @@ async function main() {
 		nearPending = false;
 		say({ ev: 'closest', dist: Math.round(near.rc * 1000) / 1000, tick: near.t, inputs: near.inputs });
 		// (before any route: the nearest attempt is the route arm's target, --rArmPre)
-		try { if (bursts && !armRouted && bursts.attempt) bursts.attempt(near.inputs); } catch (e) { /* the bursts not made yet */ }
+		try { if (bursts && !armRouted && armGate && bursts.attempt) bursts.attempt(near.inputs); } catch (e) { /* the bursts not made yet */ }
 	};
-	let armRouted = false;
+	// (armGate: with --stdin=1 the arm starts before any route only after the editor's first "arm" line (it sends them once
+	// the GPU random runs run and no GPU strategy waits on memory); without stdin at once)
+	let armRouted = false, armGate = !a.stdin;
 	let lastClaim = Date.now();
 	const timer = setInterval(() => {
 		progress();
@@ -2326,7 +2328,7 @@ async function main() {
 				} else if (line.startsWith('route ') && /^[0-O]+$/.test(line.slice(6))) adopt(line.slice(6));
 				// (before any route: another search's nearest attempt (the editor's GPU random runs: their archive takes no
 				// imports, and their routes often come first) as the route arm's target, --rArmPre)
-				else if (line.startsWith('arm ') && /^[0-O]+$/.test(line.slice(4))) { try { if (bursts && !armRouted && bursts.attempt) bursts.attempt(line.slice(4)); } catch (e) { /* not yet */ } }
+				else if (line.startsWith('arm ') && /^[0-O]+$/.test(line.slice(4))) { armGate = true; try { if (bursts && !armRouted && bursts.attempt) bursts.attempt(line.slice(4)); } catch (e) { /* not yet */ } }
 			}
 		});
 		// the end of stdin: the editor went away (a crash, or a kill that missed its children): stop, rather than run on

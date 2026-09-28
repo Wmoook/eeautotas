@@ -2557,8 +2557,13 @@ function laneAttempt(inputs, src) {
 		for (const [sk, x] of laneQ) { try { ch.stdin.write(`attempt:${sk} ${x}\n`); S.strategies[k].attempts = (S.strategies[k].attempts || 0) + 1; } catch (e) { /* gone */ } }
 		// (the other searches' attempts, the GPU random runs' above all, also to the one search's route arm (its own it takes
 		// itself): its GPU search from their landings, the newest of each in turn)
+		// Only while no GPU strategy waits to start again after an out-of-memory failure and the GPU random runs run: the
+		// arm's tables take GPU memory, and before any route the random runs' own start matters most (Egg Quest II pair v9c:
+		// with the arm from the first seconds their first start waited 5 + 20 + 60 s on a full shared GPU, their first route
+		// came at 132 s where main's came at 74 s). goexplore.js starts the arm before any route only after this line came.
 		const ko = S.strategies.findIndex((q) => q.gpuShare), cho = ko >= 0 ? kids[ko] : null;
-		if (alive(cho) && cho.stdin && !cho.stdin.destroyed) {
+		const rollsOn = S.strategies.every((q, kq) => !q.rolls || (alive(kids[kq]) && q.state === 'running'));
+		if (alive(cho) && cho.stdin && !cho.stdin.destroyed && !retryHolds() && rollsOn) {
 			const others = [...laneQ].filter(([sk]) => sk !== S.strategies[ko].key && !/Room$/.test(sk));
 			if (others.length) { const [, x] = others[(laneTurn++) % others.length]; try { cho.stdin.write(`arm ${x}\n`); } catch (e) { /* gone */ } }
 		}
