@@ -221,7 +221,7 @@
 //        (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
 //        [--useful=1 (coarse cells: the useful territory, see USEFUL TERRITORY: cells in a cul-de-sac of their room or off
 //        its band demoted, a room whose territory gain is all off the band gets gain 0, a death kept as the earliest arrival
-//        not into a cul-de-sac; the progress and done events carry "useful": {culPicks, culCells, offPicks, offCells, zeroed
+//        not into a cul-de-sac; the progress and done events carry "useful": {culPicks, culCells, zeroed
 //        (rooms), culSets, culDropped}, "deaths" "useless"; 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
@@ -668,9 +668,10 @@ function roomOf(L) {
 // distance from the entry). Off it: a detour that leads nowhere nearer a target, e.g. a viewing room behind a coin door
 // whose portal leads back to the hub (a loop, no cul-de-sac); the walk is gravity-blind, so a physical way (a ramp for a
 // shaft) may be off it too.
-//   Cells are DEMOTED by these, never pruned (the reach field's -1 stays the only prune): a cell in a cul-de-sac of its
-// room (c.u = 2) gets CUL_A more tiles in head A's priority and is no nearest attempt, no source and no room's
-// lowest-cost cell while another cell is; head B divides the weight of a cell off the band (c.u >= 1) by CUL_B. A room's
+//   Cells in a cul-de-sac of their room (c.u = 2) are DEMOTED, never pruned (the reach field's -1 stays the only prune):
+// CUL_A more tiles in head A's priority, head B's weight divided by CUL_B, no nearest attempt, no source, no room's
+// lowest-cost cell and no burst start while another cell is. (The known TASes spend 0-0.6% of their ticks in a cul-de-sac of
+// their room, 0.7-22% off its band: FV 17%, NC Naos 22%: the band is no ground to demote a cell on.) A room's
 // USEFUL GAIN is its territory gain on the band: a room whose useful gain is 0 (the territory it opens is all off the
 // band: a viewing room behind a coin door, a sealed pocket) keeps its raw gain in `graw` and gets gain 0: no novelty
 // weight (head B), no discovery burst (head C), no "room" source at once and no gain for the editor's relay, wall
@@ -842,7 +843,7 @@ function roomUseful(L) {
 const bitAt = (b, t) => b !== null && (b[t >> 3] & (1 << (t & 7))) !== 0;
 
 /**
- * roomFields(L, budget, opts) -> {enter(sim) -> {gain, graw, troOk, cached, cul, off}, release(bits), stats()}: a room's
+ * roomFields(L, budget, opts) -> {enter(sim) -> {gain, graw, troOk, cached, cul, targets}, release(bits), stats()}: a room's
  * fields, from the state that entered it (its tile): the tiles the ball can walk to (8-way, portals, doors as they are
  * now, spikes and other killing tiles only with protection; one-ways and half blocks open, as src/reach.js), `troOk`
  * whether a trophy is among them, and `graw` how many no earlier room's walk reached (the territory the room opens). A
@@ -850,9 +851,9 @@ const bitAt = (b, t) => b !== null && (b[t >> 3] & (1 << (t & 7))) !== 0;
  * cached by a hash of the passable set: a room whose passable set and start component are known costs that hash and has
  * no gain. Cached walks (a bitset each) beyond `budget` bytes go, the least recently used first. One per worker (its own
  * union). With the useful territory (opts.useful, the default; see USEFUL TERRITORY): `gain` = graw when the room's
- * useful gain (its new tiles on the band) is above 0, else 0; `cul` / `off` its cul-de-sacs and the tiles off its band
- * (bitsets shared by the rooms with the same ones, within `budget` bytes too: past it null, no demotion; release() each
- * when the room goes). Without it (useful false: --useful=0) gain = graw and cul / off null, as before.
+ * useful gain (its new tiles on the band) is above 0, else 0; `cul` its cul-de-sacs (a bitset shared by the rooms with the
+ * same one, within `budget` bytes too: past it null, no demotion; release() when the room goes; the band only for a new
+ * walk's gain). Without it (useful false: --useful=0) gain = graw and cul null, as before.
  */
 function roomFields(L, budget, opts = {}) {
 	const US = opts.useful === false ? null : roomUseful(L);
@@ -920,9 +921,9 @@ function roomFields(L, budget, opts = {}) {
 				if ((c.bits[tile >> 3] & (1 << (tile & 7))) === 0) continue;
 				c.used = ++clock; hits++;
 				// (the useful territory is the room's own, from its entry: a known walk has no gain, its cells are still ordered)
-				const U = US !== null ? US.of(sim, true) : null;
+				const U = US !== null ? US.of(sim, false) : null;
 				ms += Date.now() - t0;
-				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, off: U !== null ? share(U.off) : null, targets: U !== null ? U.targets : -1 };
+				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
 			}
 		}
 		const U = US !== null ? US.of(sim, true) : null;
@@ -962,7 +963,7 @@ function roomFields(L, budget, opts = {}) {
 		ms += Date.now() - t0;
 		// (a room whose new territory is all off the band: no gain)
 		if (U !== null && gain > 0 && ugain === 0) zeroed++;
-		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, off: U !== null ? share(U.off) : null, targets: U !== null ? U.targets : -1 };
+		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
 	};
 	// the rooms' cul-de-sac and off-band bitsets, one copy per content (FNV-1a over the bytes): rooms that share doors and
 	// targets often share them; counted in bytes() with the walks, at most `budget` bytes of them (past that a new room gets
@@ -1469,10 +1470,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** head A's brake for cell c (tiles) */
 	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c), a.satN) : 0);
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03)), { useful: a.useful !== 0 }) : null;   // (its walk cache: 3%)
-	// (the useful territory: a cell's `u`, 2 in a cul-de-sac of its room, 1 off its band, 0 else, demotes it: see USEFUL
-	// TERRITORY; culPicks / offPicks, culCells / offCells: counted)
-	let culPicks = 0, culCells = 0, offPicks = 0, offCells = 0, dCul = 0;
-	const useOf = (room, t) => (room === null ? 0 : bitAt(room.cul, t) ? 2 : bitAt(room.off, t) ? 1 : 0);
+	// (the useful territory: a cell's `u`, 2 in a cul-de-sac of its room, 0 else, demotes it: see USEFUL TERRITORY; culPicks,
+	// culCells: counted)
+	let culPicks = 0, culCells = 0, dCul = 0;
+	const useOf = (room, t) => (room !== null && bitAt(room.cul, t) ? 2 : 0);
 	// (--pickBox=x0,y0,x1,y1, observation only (test/useful.js): the picks and new cells with their tile in that box)
 	const PB = a.pickBox ? String(a.pickBox).split(',').map(Number) : null;
 	const inBox = PB === null ? () => false : (t) => { const x = t % W, y = (t / W) | 0; return x >= PB[0] && x <= PB[2] && y >= PB[1] && y <= PB[3]; };
@@ -1539,7 +1540,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, graw: f.graw, cul: f.cul, off: f.off, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, graw: f.graw, cul: f.cul, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		if (a.spdKids && pr !== undefined && pr.spd) { r.spd = true; spdRooms.push(r); }
 		rooms.set(key, r);
@@ -1771,7 +1772,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const vl = pickL || (pc !== null && pc.viaL), vw = pickW || (pc !== null && pc.viaW), cu = useOf(room, tile);
 		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw, u: cu }
 			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw, u: cu };
-		if (cu === 2) culCells++; else if (cu === 1) offCells++;
+		if (cu === 2) culCells++;
 		if (PB !== null && inBox(tile)) boxCells++;
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
@@ -1836,7 +1837,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, dCul, culPicks, culCells, offPicks, offCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}) : {});
@@ -1895,7 +1896,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
 			// (a cell in a cul-de-sac of its room or off its band: CUL_B times less, see USEFUL TERRITORY)
-			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1) / (c.u !== 0 ? CUL_B : 1);
+			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1) / (c.u === 2 ? CUL_B : 1);
 			if (sc > bs) { bs = sc; bc = c; }
 		}
 		return bc || popA();
@@ -1958,7 +1959,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					r.arr = r.arr.filter((c) => c.ver >= 0);
 					if (r.sentAt !== null && r.sentAt.ver < 0) r.sentAt = null;
 					if (r.arr.length || r === room0) roomList[n++] = r;
-					else { rooms.delete(r.key); nSatZ -= r.sat.size; fields.release(r.cul); fields.release(r.off); }
+					else { rooms.delete(r.key); nSatZ -= r.sat.size; fields.release(r.cul); }
 				}
 				roomList.length = n;
 			}
@@ -2318,7 +2319,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const plRow = plog !== null ? plogRow(head, e) : null;
 			const cells0 = cells.size, impr0 = impr, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
 			e.picks++; e.ver++; picks++; e.touch = picks;
-			if (e.u === 2) culPicks++; else if (e.u === 1) offPicks++;
+			if (e.u === 2) culPicks++;
 			if (PB !== null && inBox(e.tile)) boxPicks++;
 			if (coarse) e.room.picks++;
 			const stale = scFresh !== null && !scFresh.has(e);
@@ -3094,7 +3095,7 @@ async function main() {
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
-	const usefulNow = () => (a.cells === 'coarse' && a.useful !== 0 ? { useful: { culPicks: total('culPicks'), culCells: total('culCells'), offPicks: total('offPicks'), offCells: total('offCells'), zeroed: total('zeroed'), culSets: total('culSets'), culDropped: total('culDropped') } } : {});
+	const usefulNow = () => (a.cells === 'coarse' && a.useful !== 0 ? { useful: { culPicks: total('culPicks'), culCells: total('culCells'), zeroed: total('zeroed'), culSets: total('culSets'), culDropped: total('culDropped') } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
 		samples.push([now, tk]);

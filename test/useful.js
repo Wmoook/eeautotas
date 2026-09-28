@@ -96,7 +96,8 @@ function sectionUnits(L) {
 	const f1 = F.enter(sim), g1 = F0.enter(sim);
 	check('the coin\'s room: raw gain (V1 and its door) > 0, gain 0 (all off the band); without the useful territory the raw gain', f1.graw >= 16 && f1.gain === 0 && g1.gain === f1.graw,
 		`graw ${f1.graw}, gain ${f1.gain}, off ${g1.gain}`);
-	check('a room keeps its bitsets (shared per content) and gives them back', f1.off !== null && (() => { const before = F.stats().culSets; F.release(f1.cul); F.release(f1.off); return F.stats().culSets <= before; })());
+	const f2 = F.enter(sim), n2 = F.stats().culSets;
+	check('a room keeps its cul-de-sacs (one bitset per content: the same room again shares it) and gives them back', !!f1.cul && f2.cul === f1.cul && (() => { F.release(f1.cul); const one = F.stats().culSets === n2; F.release(f2.cul); return one && F.stats().culSets === n2 - 1; })(), `sets ${n2} -> ${F.stats().culSets}`);
 }
 
 function sectionCpu(file, L) {
