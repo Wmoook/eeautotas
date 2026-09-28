@@ -507,7 +507,12 @@ async function main() {
 		let live = 0;
 		const spawn = () => {
 			const left = endAt - Date.now();
-			if (next >= tasks.length || left < 5000) { if (live === 0) resolve(); return; }
+			// (no task starts that the budget would cut before 3/4 of the tasks' mean time so far: a cut task is not done and
+			// runs again from its start next call; in the grind's 180-s slices on 3 A100 threads each thread ran 2 tasks
+			// of 60-80 s and then a third one for ~40 s, cut: ~20% of the slice)
+			const meanS = results.length ? results.reduce((s, r) => s + r.secs, 0) / results.length : 0;
+			const tooShort = isFinite(left) && meanS > 0 && left / 1000 < 0.75 * meanS;
+			if (next >= tasks.length || left < 5000 || tooShort) { if (live === 0) resolve(); return; }
 			const task = tasks[next++];
 			if (isFinite(left) && left / 1000 - 3 < task.timeS) { task.timeS = Math.max(5, left / 1000 - 3); task.shortened = true; }
 			live++;

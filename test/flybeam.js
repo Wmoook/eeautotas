@@ -71,7 +71,9 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 	check('--state writes the next start (tick + hash) after a budget-cut pass', !!s1 && s1.t > 0 && s1.t <= 200 && typeof s1.h === 'number', JSON.stringify(s1));
 	run(['--starts=20', '--to=200', '--ext=400', '--timeS=3', '--seconds=8', `--state=${st}`]);
 	const s2 = C.readJSON(st, null);
-	check('the next call continues from it', !!s2 && s1 && (s2.t > s1.t || s2.wrapped === true || s2.t === 0), `${s1 && s1.t} -> ${s2 && s2.t}`);
+	// (a next start within 50 ticks of the finish starts the pass over: flybeam.js --state; how far a call gets depends on
+	// the machine's speed)
+	check('the next call continues from it', !!s2 && s1 && (s2.t > s1.t || s2.wrapped === true || s2.t === 0 || s1.t >= evRef.complete - 50), `${s1 && s1.t} -> ${s2 && s2.t}`);
 }
 // 5) --order=stretch: the starts by their longest contact-free stretch; --state keeps the starts done
 {
@@ -92,7 +94,7 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 {
 	const st = path.join(TMP, 'state_cut.json');
 	// (W 16384: a beam that cannot reach the run's end in the 3 s the call leaves its first task)
-	const r = run(['--starts=20', '--to=200', '--ext=400', '--timeS=30', '--seconds=6', '--threads=1', '--W=16384', '--order=stretch', `--state=${st}`]);
+	const r = run(['--starts=20', '--to=60', '--ext=400', '--timeS=30', '--seconds=6', '--threads=1', '--W=16384', '--order=stretch', `--state=${st}`]);
 	const s1 = C.readJSON(st, null);
 	check('a start cut short by the call\'s end (--seconds) is not marked done', !!s1 && s1.done.length === 0, `${s1 && s1.done.length} done; ${(r.stdout || '').split('\n').filter((l) => /layers/.test(l)).length} task(s) ran`);
 	const st2 = path.join(TMP, 'state_wrap.json');
