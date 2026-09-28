@@ -129,6 +129,13 @@ function sectionCpu() {
 		best ? `${rs.length} routes, the best ${best.ticks} ticks, ${ev ? ev.deaths : '?'} death(s); first after ${doneOf(on).first ? doneOf(on).first.simTicks : '-'} ticks` : 'none');
 	check('the dying states counted: most dropped, the paying ones kept (the earliest arrival at the checkpoint with the coin)',
 		d.seen > 0 && d.byNew + d.byCost >= 1 && d.dropped > 10 * (d.byNew + d.byCost) && d.cells >= 1, JSON.stringify(d));
+	// a bound given from the start (--depth, a route of that length known): the sound lower bound with the death term
+	// (lbOf: DEATH_TICKS + the bound at the respawn target) keeps the routes through the death
+	const bnd = best ? best.ticks + 15 : 240;
+	const onb = gox(pit.file, ['--workers=1', '--cells=coarse', `--depth=${bnd}`, '--maxTicks=4000000', '--seconds=60']);
+	const rb = routesOf(onb);
+	check('a depth bound from the start just above the route: routes through the death still found (the lower bound with a death)', rb.length > 0 && rb.every((e) => e.ticks <= bnd && e.deaths === 1),
+		`bound ${bnd}: ${rb.map((e) => `${e.ticks}/${e.deaths}`).join(' ')}`);
 	const on2 = gox(pit.file, ['--workers=1', '--cells=coarse', '--maxTicks=4000000', '--seconds=60']);
 	check('the same seed and tick budget: the same routes (deaths change no draw)', JSON.stringify(routesOf(on2).map((e) => [e.ticks, e.inputs])) === JSON.stringify(rs.map((e) => [e.ticks, e.inputs])));
 	// fine cells: a death warp between two spawns (the start is the second spawn after /reset; the death brings the ball to
