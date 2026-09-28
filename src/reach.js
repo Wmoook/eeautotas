@@ -930,8 +930,43 @@ function costOfState(f, t, ty, l) {
 	const r = f.rowX[t]; return r < 0 ? CUT : f.costX[r * NL + l];
 }
 /** the cost (fifths) of a ball: top-left px, py; speed_y vy; the gravity queue q0, q1 (block ids; -1 = unknown: the
- *  strongest pull); slippery. -1 = cut off. The same numbers as native/beam.h reachFifths. */
+ *  strongest pull); slippery. -1 = cut off. The same numbers as native/beam.h reachFifths. stateOf's cases without
+ *  its objects (the one search looks this up at every simulated tick, and the arrays stateOf makes per call were a
+ *  third of the lookup's time): the same float operations in the same order and the same Math.max / Math.min, so the
+ *  same results as fifthsAtRef (test/reach.js J checks both along random runs) */
 function fifthsAt(f, px, py, vy, q0, q1, slip) {
+	const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
+	if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
+	if (f.mode === 'walk') { const w = f.walk[ty * f.W + tx]; return w === CUT ? -1 : w; }
+	const t = ty * f.W + tx, g = f.cls[t];
+	let v;
+	if (g === WALL) return -1;
+	if (g === DEADLY) { if (!f.deaths) return -1; v = costOfState(f, t, F_, 0); return v === CUT ? -1 : v; }
+	if (g === BUP) { v = costOfState(f, t, R_, f.Q + 1); return v === CUT ? -1 : v; }
+	if (g === BDOWN) { v = costOfState(f, t, F_, KF); return v === CUT ? -1 : v; }
+	const mm = f.modMin, nF = mm.length;
+	const m0 = q0 >= 0 && q0 < nF ? mm[q0] : MOD_STRONG, m1 = q1 >= 0 && q1 < nF ? mm[q1] : MOD_STRONG;
+	const nIce = f.ice ? nIceOf(slip) : 0;
+	const cy = py + 8, top = 16 * ty;
+	// (the fall potential: the ice ticks, then D(v) + the px to the tile's bottom edge)
+	let vv = vy, y = cy;
+	for (let j = 1; j <= nIce; j++) { vv = vstep(vv, G, ICE_ND); y += vv; }
+	const k = kOfX(fallD(vv > 0 ? vv : 0) + (top + 16 - y));
+	if (g !== NORM) { v = vy < 0 ? costOfState(f, t, C_, cLevel(f, top, f.seg[t], cy, vy, m0, m1, nIce)) : costOfState(f, t, F_, k); return v === CUT ? -1 : v; }
+	const baseTy = cy > top + 8 ? L_ : F_;
+	const rise = riseQ(vy, m0, m1, nIce);
+	if (vy >= 0 && !(rise > 0)) { v = costOfState(f, t, baseTy, k); return v === CUT ? -1 : v; }
+	const ceil = ty === 0 || f.cls[t - f.W] === WALL;
+	let q = qOf(top - (cy - rise), f.Q);
+	if (ceil && q > 0) q = 0;
+	// (the rise states' max from 0, then the min with the base when the ball is not rising: stateOf's order)
+	v = Math.max(0, costOfState(f, t, R_, q));
+	if (f.rowX[t] >= 0) v = Math.max(v, costOfState(f, t, X_, ceil ? cLevel(f, top, f.seg[t], Math.min(cy, top + 8), 0, m0, m1, nIce) : cLevel(f, top, f.seg[t], cy, vy, m0, m1, nIce)));
+	if (!(vy < 0)) v = Math.min(v, costOfState(f, t, baseTy, k));
+	return v === CUT ? -1 : v;
+}
+/** fifthsAt through stateOf's objects (the reference the allocation-free fifthsAt is checked against) */
+function fifthsAtRef(f, px, py, vy, q0, q1, slip) {
 	if (f.mode === 'walk') {
 		const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
 		if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
@@ -1031,7 +1066,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, unforceChains, fifthsAt, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
