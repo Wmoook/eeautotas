@@ -1108,7 +1108,9 @@ function breakStarts() {
 		out.push({ inputs: pre, what, dist, key, room, coins: prog ? (coins !== undefined ? coins : coinsOf(pre)) : 0, n: out.length });
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
-	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined, Infinity);
+	// (with the progress order by its own coins, first among equals: a room target's gate can be a lateral room, e.g.
+	// Forgotten Helix's low gravity at 2 coins, and the frontier of 3 coins goes first then)
+	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
 	const c = S.closest;
 	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
