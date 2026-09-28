@@ -623,7 +623,16 @@ function reachField(level, opts) {
 	if (deaths) for (const r of respawn) respawnT[r] = cls[r] === NORM ? 2 : 1;   // (2: R(0) is a respawn state too)
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
-	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
+	// (opts.airPen, src/steer.js only, like oneWayEntry: a sideways move of a rising or falling ball (R, F, L) from a tile with
+	// no floor under it costs that many fifths more. The model has no horizontal speed: R(q) keeps its apex and F(k) its fall
+	// potential on every sideways step, so a jump hovers across any width of air (Good Egg: from the ledge (98, 58) the
+	// plan walks 34 tiles of air at row 58 in R(0) to the chute (50, 63), 428 tiles, under the launcher alcove's 440; the
+	// ball can only cross there at a boost's 16 px/tick, which the model keeps in its field states C / X, not charged). Not
+	// sound (a cost only, but an ordering field's), never in the RCH3 proof field)
+	const airPen = opts.airPen > 0 ? Math.min(8, Math.round(opts.airPen)) : 0;
+	const air = airPen ? new Uint8Array(N) : null;
+	if (air) for (let i = 0; i < N; i++) if (cls[i] === NORM && !isFloor(i + W)) air[i] = 1;
+	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, air, airPen,
 		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
 	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD,
@@ -644,7 +653,8 @@ function reachField(level, opts) {
 			const t2 = y2 * W + x2;
 			if (!passable(t2) && !(deaths && cls[t2] === DEADLY)) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
-			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, dx && dy ? 7 : 5));
+			const pen = air !== null && dy === 0 && air[t] === 1 && (ty === R_ || ty === F_ || ty === L_) ? airPen : 0;
+			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, (dx && dy ? 7 : 5) + pen));
 		}
 	};
 
@@ -706,9 +716,9 @@ function reachField(level, opts) {
  */
 function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
-		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF } = S;
+		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, air, airPen } = S;
 	const K1 = S.KF + 1;
-	const NB = 8;
+	const NB = air ? 16 : 8;   // (the bucket ring: every edge at most NB - 1 fifths; airPen up to 8 makes a straight step 13)
 	const bk = [], bn = new Int32Array(NB);
 	for (let b = 0; b < NB; b++) bk.push(new Int32Array(4096));
 	let queued = 0, cur = 0;
@@ -783,7 +793,8 @@ function labelSearch(S) {
 				let tab = invArr[(pt * nP + pt2) * 8 + di];
 				if (tab === null) tab = invTable(pt, pt2, di);
 				const step = cur + (dx !== 0 && dy !== 0 ? 7 : 5);
-				for (let ty = 0; ty < 5; ty++) { const lm = tab[o + ty]; if (lm !== NONE8) push(t, ty, lm - LO[ty], step); }
+				const aStep = air !== null && dy === 0 && air[t] === 1 ? step + airPen : step;
+				for (let ty = 0; ty < 5; ty++) { const lm = tab[o + ty]; if (lm !== NONE8) push(t, ty, lm - LO[ty], ty === R_ || ty === F_ || ty === L_ ? aStep : step); }
 			}
 		}
 		bn[b] = 0;

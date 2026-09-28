@@ -50,6 +50,9 @@ const KEY_IDS = [6, 7, 8, 408, 409, 410];
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 const CUT = RF.CUT;
 const INF = 0xffffffff;
+// the ordering fields' air penalty (reach.js opts.airPen: fifths more per sideways step of a rising or falling ball over a
+// tile with no floor; 0: none). EEAT_AIRPEN for experiments
+const AIR_PEN = process.env.EEAT_AIRPEN !== undefined ? +process.env.EEAT_AIRPEN : 0;
 // door / gate ids -> [feature, polarity (1: open when on / satisfied)]; exact statics (gold border: off; silver crown:
 // only the trophy gives it); time doors shut (a door that opens every 10 s is a wait of up to 5 s); the rest open
 const GATE = new Map([
@@ -93,6 +96,7 @@ function analyze(level, opts) {
 		const hr = (fl(id) & F_HALF) ? lk[i] : -1;
 		let g = GATE.get(id);
 		if (g && g[0] === 'coins' && lk[i] > goldCoins) g = ['static', g[1] === 1 ? 0 : 1];
+		if (g && (id === 156 || id === 157) && opts && opts.timeDoors === 'open') g = ['open', 1];
 		if (g) {
 			const [f, pol] = g;
 			const key = f === 'psw' || f === 'osw' ? `${f}:${lk[i]}` : f;
@@ -618,7 +622,7 @@ function buildPhysics(B, opts) {
 	for (const e of fr.edges) succ[Math.floor(e / S)].add(e % S);
 	const comps = sccs(S, fr.layers, succ);
 	const fields = new Array(S).fill(null), goalsOf = new Array(S).fill(null), copies = new Array(S).fill(null);
-	const rfOpts = { oneWayEntry: true, portalForced: true };
+	const rfOpts = { oneWayEntry: true, portalForced: true, airPen: AIR_PEN };
 	const kappa = A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	const solve = (s) => {
@@ -752,7 +756,7 @@ function coinLegsPhys(B, PH, base, opts) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
+		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, airPen: AIR_PEN });
 	};
 	const fields = new Map(), countOf = new Map();
 	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
@@ -805,7 +809,7 @@ function coinLegsLayered(B, PH, base, deadline) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
+		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, airPen: AIR_PEN });
 	};
 	// L[(k * (n + 1) + i) * n + j]: from coin i (i = n: the start) to coin j holding k coins
 	const L = new Float64Array(T * (n + 1) * n).fill(Infinity);
