@@ -28,6 +28,7 @@
 //   [--state=<file> (a pass continued across calls: the next start by tick + state hash)] [--cfg=<json list of setting
 //   overrides: each start runs every one>] [--out=<file.eetas> (written only when judged faster)] [--json=<file>]
 //   [--debug=<every N layers>] [--axes=1 (diagnostic: children whose x or y state alone equals a later run state)]
+//   [--refine=L (with --order=stretch: the starts between the grid's too, level 1: every / 2, 2: every / 4; by stretch / (1 + L))]
 //   [--carry=M (a task's end inside a contact-free stretch moves to the stretch's end, at most M ticks later)]
 //   [--axisTails=P (per layer the P children most ahead whose y state alone equals a later run state play the run's y
 //   inputs from there with 4 x-input patterns: the per-axis join; default 0)]
@@ -69,8 +70,12 @@ function traceRun(level, ms, noCoins) {
  * state with the run for 1,000+ ticks); in tick order a few threads reach the late stretches after hours: Infinity Pain's
  * 39,410 run has 99 starts and the shaft (the -142 at 33250 -> 34365) ranks 1-6 by this order, 83-88 by tick; the ice
  * level's arc (2400 -> 3278 -49) ranks 1-2 of 12.
+ * refine = L > 0: also the starts between the grid's (level 1: every / 2 past each; level 2: every / 4 and 3 every / 4),
+ * ranked by the stretch / (1 + level): the joins depend on the start tick (Infinity Pain's shaft, the 39,410 run, the
+ * homing setting: 33250 -142, 32900 -66, 33300 -59, 32800 -19, 0 from 33200, 33000, 33100, 33350, ...), so a long
+ * stretch's in-between starts go before a short stretch's grid starts.
  */
-function stretchOrder(K, n, from, to, every) {
+function stretchOrder(K, n, from, to, every, refine = 0) {
 	const runLen = new Int32Array(n + 1);
 	for (let t = 0; t <= n;) {
 		if (K[t]) { t++; continue; }
@@ -79,13 +84,18 @@ function stretchOrder(K, n, from, to, every) {
 		t = u;
 	}
 	const rows = [];
-	for (let s = from; s < to; s += every) {
+	const add = (s, level) => {
 		let best = 0, free = 0;
 		const e = Math.min(n, s + every);
 		for (let t = s; t < e; t++) { if (runLen[t] > best) best = runLen[t]; if (!K[t]) free++; }
-		rows.push({ s, best, free: free / Math.max(1, e - s) });
+		rows.push({ s, best, free: free / Math.max(1, e - s), level, score: best / (1 + level) });
+	};
+	for (let s = from; s < to; s += every) {
+		add(s, 0);
+		if (refine >= 1 && s + Math.round(every / 2) < to) add(s + Math.round(every / 2), 1);
+		if (refine >= 2) for (const f of [1, 3]) if (s + Math.round(f * every / 4) < to) add(s + Math.round(f * every / 4), 2);
 	}
-	rows.sort((x, y) => y.best - x.best || y.free - x.free || x.s - y.s);
+	rows.sort((x, y) => y.score - x.score || x.level - y.level || y.free - x.free || x.s - y.s);
 	return rows;
 }
 
@@ -468,7 +478,7 @@ async function main() {
 	const F0 = ms.findIndex((m) => m !== 0);
 	if (a.startList) for (const x of a.startList.split(',')) starts.push(+x);
 	else if (STRETCH) {
-		let rows = stretchOrder(trace.K, n, from, to, every);
+		let rows = stretchOrder(trace.K, n, from, to, every, Math.max(0, Math.min(2, num('refine', 0) | 0)));
 		if (F0 >= 0) rows = rows.map((r) => (r.s <= F0 && F0 + 1 < n ? Object.assign({}, r, { s: F0 + 1 }) : r));
 		if (doneH) {
 			// (done = per task: the start's state hash and the setting; a start with one setting done runs only the other)

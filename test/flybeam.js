@@ -82,6 +82,8 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 	for (let t = 5; t < 15; t++) K[t] = 0;   // a 10-tick one in the window at 0
 	const rows = FB.stretchOrder(K, 100, 0, 100, 20);
 	check('stretchOrder ranks the windows on the longest stretch first (then the free share)', rows.map((r) => r.s).join(',') === '60,40,80,0,20', rows.map((r) => `${r.s}:${r.best}`).join(' '));
+	const rows1 = FB.stretchOrder(K, 100, 0, 100, 20, 1);
+	check('refine 1: the starts between the grid\'s too, ranked by stretch / (1 + level)', rows1.map((r) => r.s).join(',') === '60,40,80,50,70,30,0,10,20,90', rows1.map((r) => `${r.s}:${r.score}`).join(' '));
 	const st = path.join(TMP, 'state_stretch.json');
 	run(['--starts=20', '--to=200', '--ext=400', '--timeS=3', '--seconds=8', '--order=stretch', `--state=${st}`]);
 	const s1 = C.readJSON(st, null);
