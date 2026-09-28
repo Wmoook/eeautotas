@@ -102,11 +102,11 @@ function sectionWait() {
 	check('waitShut: a door 156 is shut in the doors\' phase [0, 500), a gate 157 in [500, 1000)', GX.waitShut(1, 0) && GX.waitShut(1, 499) && !GX.waitShut(1, 500) && !GX.waitShut(2, 100) && GX.waitShut(2, 700) && GX.waitShut(3, 700));
 	check('waitLen: to between --waitLead and 8 ticks after the next flip (phase 0 / 500)', GX.waitLen(100, 40, 0) === 408 && GX.waitLen(100, 40, 0.9999) === 360 && GX.waitLen(990, 40, 0) === 18 && GX.waitLen(499, 40, 0.9999) === 1);
 	check('the door level: the clock starts at 0 and the level has time doors', !!lv.level.hasTimeDoors && (() => { const s = new E.EESim(lv.level); s.reset(); return s.level_ticks() === 0; })());
-	const B = 60000;
+	const B = 60000, B0 = 1000000;
 	const on = [], off = [];
 	for (const seed of [1, 2, 3]) {
 		on.push(gox(lv.file, ['--workers=1', '--cells=coarse', `--seed=${seed}`, `--maxTicks=${B}`, '--seconds=60', '--first=1']));
-		off.push(gox(lv.file, ['--workers=1', '--cells=coarse', `--seed=${seed}`, `--maxTicks=${B}`, '--seconds=60', '--first=1', '--wait=0']));
+		off.push(gox(lv.file, ['--workers=1', '--cells=coarse', `--seed=${seed}`, `--maxTicks=${B0}`, '--seconds=120', '--first=1', '--wait=0']));
 	}
 	const firsts = on.map((ev) => doneOf(ev).first);
 	const reps = on.map((ev) => { const r = routesOf(ev)[0]; return r ? C.evaluate(lv.level, masksOf(r.inputs)) : null; });
@@ -114,8 +114,12 @@ function sectionWait() {
 		firsts.every((f) => f && f.ticks <= 520) && reps.every((v) => v && v.ms.length <= 520 && v.deaths === 0),
 		firsts.map((f) => (f ? `${f.ticks} ticks after ${f.simTicks}` : 'none')).join(', '));
 	check('its wait runs are counted (the workers\' waitRuns)', on.every((ev) => ((doneOf(ev).workers || [])[0] || {}).waitRuns > 0));
-	check(`without it (--wait=0): no route within the same budget in any of the 3 seeds (the runs keep an input with p 0.85: 500 ticks still on the ledge almost never)`,
-		off.every((ev) => routesOf(ev).length === 0), off.map((ev) => `${doneOf(ev).end}`).join(', '));
+	// (without it the runs keep an input with p 0.85: 500 ticks still on the ledge almost never; the first route's simulated
+	// ticks, a budget of B0 counted as B0 when there is none)
+	const offT = off.map((ev) => (doneOf(ev).first ? doneOf(ev).first.simTicks : B0)).sort((x, y) => x - y);
+	const onT = firsts.map((f) => (f ? f.simTicks : B)).sort((x, y) => x - y);
+	check('without it (--wait=0): the first route takes at least 5 times the simulated ticks (the medians of the 3 seeds)', offT[1] >= 5 * onT[1],
+		`${offT.join(', ')} vs ${onT.join(', ')}`);
 	// a level without time doors: the search is exactly the one without the move (the same routes after the same ticks)
 	const pit = levelFile('pit_wait', PIT);
 	const p0 = gox(pit.file, ['--workers=1', '--cells=coarse', '--maxTicks=3000000', '--seconds=60', '--wait=0']);

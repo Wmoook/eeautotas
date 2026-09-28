@@ -96,7 +96,6 @@ function analyze(level, opts) {
 		const hr = (fl(id) & F_HALF) ? lk[i] : -1;
 		let g = GATE.get(id);
 		if (g && g[0] === 'coins' && lk[i] > goldCoins) g = ['static', g[1] === 1 ? 0 : 1];
-		if (g && (id === 156 || id === 157) && opts && opts.timeDoors === 'open') g = ['open', 1];
 		if (g) {
 			const [f, pol] = g;
 			const key = f === 'psw' || f === 'osw' ? `${f}:${lk[i]}` : f;
