@@ -89,6 +89,15 @@ const FINE_Y = { cqx: 0.25, cqv: 16, qy: 1, qvy: 16, cap: 262144 };
 // tiles away through a one-way lid the ball cannot pass from that side (exhaustive at 0.5 px), and never at the 6th
 // coin (36, 49), 100 walk tiles away, that the ball can reach (the explore found it in 21 s with the target given)
 const REST_AFTER = 3;
+// target-fair rooms (--burstFair=1, the default; 0: the rooms' bandit as before): a room's score (its mean reward + the
+// UCB term) is divided by 1 + its failed chains / (REST_AFTER x its untried targets), so the bursts go to the rooms with
+// the most targets not yet failed, not evenly over the rooms: the bandit's arms were the rooms, and every stalled room
+// got ~1/k of the bursts whatever its targets. Wine Quest I's run from the level alone (wq-watch 858e0fd, 37 min):
+// 5 rooms whose 1-3 leftover targets were phantoms (behind a door or a lid by the walk, 86-312 walk tiles) took most of
+// the bursts after the stall; the frontier room (13 untried targets + the trophy, the 6th coin among them) got 41. The
+// order of the rooms only (an untried room first as before; nothing is ruled out); the trophy arm competes with the
+// chosen room's own score as before
+const fairScore = (raw, fails, targets) => (fails > 0 ? raw / (1 + fails / (REST_AFTER * Math.max(1, targets))) : raw);
 const FINE_Y_TEXT = '4 px x 1 px and 1/16';
 /** a level with tiles where the ball rises slowly (climbables, liquids): the fine-y cells are worth a try there */
 function slowYOf(L) {
@@ -124,6 +133,12 @@ const SLACK_MAX = 200, STEER_MISS = 6000;
 // a burst that found the GPU's memory full waits goexplore.js --burstOomS (5) s, doubled while that lasts, at most
 // OOM_WAIT_MAX_S
 const OOM_WAIT_MAX_S = 120;
+// the big sizing's fallback (the editor's burstBig from 20 GB: goexplore.js --burstPar=2 --gpuCells=26 --burstCap=0, 3-5.7 GB
+// of tables): a burst that found the GPU's memory full takes the small sizing (goexplore's defaults: lane 0 alone, 2^25
+// cells, at most 262,144 states a layer) at once, for --burstSmallS (300) s, then the big sizing again; it waits
+// (--burstOomS) only when the small one finds no memory either. The EPYC's 24 GB RTX 4090 is often nearly full, and two
+// searches on one 40 GB A100 had 11 such waits against 0 (src/out/night/n2_2_time_to_route.md)
+const SMALL = { cells: 25, cap: 262144 };
 // a room never burst from scores this (the newest first among them): above a room whose bursts only got nearer, below
 // one whose bursts keep finding rooms (a level of many switch states has thousands of rooms: each once would take all
 // the GPU)
@@ -221,7 +236,12 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0 };
+	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0 };
+	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
+	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
+	let smallUntil = 0;
+	const small = () => big && Date.now() < smallUntil;
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CF.map(() => ({ n: 0, y: 0 }));
 	// the route arm (src/routearm.js; goexplore.js --rArm, a share of the bursts once a route is known): searches from the
@@ -265,10 +285,10 @@ function create(o) {
 		let r = rooms.get(m.room);
 		if (!r) {
 			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), dead: new Set(), zero: 0,
-				trig: m.t > 0 && m.trig !== false };
+				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1 };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
-			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0 });
+			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0, fl: 0, nt: 1, ntI: null, ntK: -1 });
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
@@ -506,6 +526,23 @@ function create(o) {
 		for (let i = 0; !r && i < OPTS.length; i++) r = tryMasks([OPTS[i]]);
 		return r;
 	};
+	// (--burstFair, off with --burstFair=0)
+	const fair = a.burstFair === undefined || a.burstFair === null ? true : !!+a.burstFair;
+	/** room r's untried targets (its arm's trigger components + the trophy where the walk aims at it), rested ones too:
+	 *  from its info while it has one, else the last count */
+	const targetsOf = (r) => {
+		const R = r.base || r, I = R.info;
+		if (!I) return r.nt;
+		// (cached while the room's info and its tried set stay: a pick scores every room burst from)
+		if (r.ntI === I && r.ntK === R.tried.size) return r.nt;
+		r.ntI = I; r.ntK = R.tried.size;
+		const arm = !!r.portal;
+		let n = 0;
+		for (const [c] of I.comps) if (!R.tried.has(c) && I.pOnly.has(c) === arm) n++;
+		if (o.field.mode === 'walk' && I.trophies.some((t) => !!I.via[t] === arm)) n++;
+		r.nt = Math.max(1, n);
+		return r.nt;
+	};
 	/** the next burst: {r (room, or null: the trophy arm), f (its field)} */
 	const pick = () => {
 		let best = null, bs = -Infinity;
@@ -516,15 +553,17 @@ function create(o) {
 		for (const r0 of rooms.values()) {
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
-				cand.push([r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n), r]);
+				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
+				// (--burstFair: the order by the score per untried target not yet failed)
+				cand.push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
 		}
 		cand.sort((x, y) => y[0] - x[0]);
-		for (const [sc, r] of cand) {
+		for (const [, r, raw] of cand) {
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
-			bs = sc; best = { r, f };
+			bs = raw; best = { r, f };
 			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
@@ -546,9 +585,10 @@ function create(o) {
 		fs.writeFileSync(pre, Buffer.from(job.inputs, 'latin1'));
 		const T = o.bound();
 		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
-		const c = job.cells;
+		const c = job.cells, sm = small();
+		const cells = sm ? Math.min(a.gpuCells, SMALL.cells) : a.gpuCells, cap = Math.min(c.cap, a.burstCap > 0 ? a.burstCap : Infinity, sm ? SMALL.cap : Infinity);
 		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0',
-			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
+			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${cells}`, `--cap=${cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), ...(job.steer ? [`--steer=${job.steer}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();
 		let ch;
@@ -564,7 +604,12 @@ function create(o) {
 			let e;
 			try { e = JSON.parse(line); } catch (x) { return; }
 			if (e.ev === 'ready') { readyAt = Date.now(); return; }
-			if (e.ev === 'done') { done = e; return; }
+			if (e.ev === 'done') {
+				done = e;
+				if (e.maxLaunchMs > st.maxLaunchMs) st.maxLaunchMs = e.maxLaunchMs;
+				if (e.maxKernelMs > st.maxKernelMs) st.maxKernelMs = e.maxKernelMs;
+				return;
+			}
 			if (e.error) { err = String(e.error); return; }
 			if (e.ev === 'hit' && e.inputs) {
 				const masks = Uint8Array.from(e.inputs, (ch2) => (ch2.charCodeAt(0) - 48) & 31);
@@ -628,6 +673,8 @@ function create(o) {
 			const now = o.sec();
 			const left = a.seconds - now;
 			if (left < 3) break;
+			// (the small sizing after an out-of-memory failure: lane 0 alone; a chain's next link waits for the big sizing)
+			if (lane > 0 && small()) { await sleep(1000); continue; }
 			let job = null;
 			// the route arm's turn (its share of the bursts, a route known): one start's searches in this lane
 			if (!next && RA && RA.ready() && (armAcc += a.rArm) >= 1) {
@@ -690,6 +737,13 @@ function create(o) {
 				// failures in their first 20 s)
 				if (/out of memory/i.test(r.end)) {
 					st.oom++;
+					// (the big sizing: the small one at once, SMALL for --burstSmallS s)
+					if (big && !small() && !stopped) {
+						smallUntil = Date.now() + (a.burstSmallS > 0 ? a.burstSmallS : 300) * 1000;
+						st.small++;
+						o.say({ ev: 'warning', text: `burst: ${r.end}: the small sizing (one lane, 2^${SMALL.cells} cells, ${SMALL.cap.toLocaleString('en-US')} states a layer) for ${a.burstSmallS > 0 ? a.burstSmallS : 300} s` });
+						continue;
+					}
 					const w = Math.min(OOM_WAIT_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 << oom));
 					o.say({ ev: 'warning', text: `burst: ${r.end}: again in ${w} s` });
 					for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100);
@@ -758,6 +812,9 @@ function create(o) {
 	};
 	/** the untried target (component) nearest the end of job's inputs by the room's walk: one more failure of it */
 	const failAt = (job) => {
+		// (every chain that ended short of its targets: the room's failures, --burstFair)
+		job.r.fl = (job.r.fl || 0) + 1;
+		st.failedChains = (st.failedChains || 0) + 1;
 		try {
 			const rr = job.r.base || job.r, arm = !!job.r.portal;
 			const I = rr.info;
@@ -910,4 +967,4 @@ function roomAim(L, RM, sim, known, T) {
 	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
 }
 
-module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf };
+module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER };
