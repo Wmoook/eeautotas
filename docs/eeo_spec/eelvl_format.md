@@ -272,7 +272,7 @@ Consequences worth knowing:
 | 453 EFFECT_LOW_GRAVITY | on iff int != 0; gravity x0.15 | Me.as:271-276, Player.as:349 | |
 | 420 EFFECT_PROTECTION | on iff int != 0 | Me.as:300-315 | |
 | 461 EFFECT_MULTIJUMP | `maxJumps` (>= 1000 = infinite) | Me.as:337-342, Player.as:974-988 | |
-| 1517 EFFECT_GRAVITY | `flipGravity` direction 0 down, 1 left, 2 up, 3 right (other values: no rotation) | Me.as:343-348, Player.as:641-... | |
+| 1517 EFFECT_GRAVITY | `flipGravity` direction 0 down, 1 left, 2 up, 3 right, 4 none (zero gravity on the tiles that allow rotation; other values: no rotation); set by the next 1517 only, reset to 0 by /reset or 1618 (a level whose 1517 are all 0 never turns gravity: src/levelcheck.js warns) | Me.as:343-348, Player.as:641-683 | |
 | 421 EFFECT_CURSE / 422 EFFECT_ZOMBIE / 1584 EFFECT_POISON | duration in seconds; `> 0` switches it on | Me.as:277-294 | death when `ticks - start > (int + 2*0.2) * 100` evaluated in doubles (Player.as:399-403, 1724-1729, `Global.ping` = 0.2 Global.as:166-169): first fatal tick difference is `floor((int + 0.4) * 100) + 1`, e.g. 5 -> 541 but 20 -> 2040 (2039.9999999999998) |
 | 1582 WORLD_PORTAL_SPAWN | spawn id: which `spawnPoints[]` list the tile joins | World.as:359-366 | section 7 |
 | 77 PIANO / 83 DRUMS / 1520 GUITAR | note index | Me.as:136-147 (sound + blink) | no physics while valid (piano -27..60, drums 0..19, guitar 0..48, SoundManager.as:402-414); another number throws RangeError in touchBlock and aborts the rest of every tick that starts in the cell (ENGINE_NOTES "Block mechanics") |

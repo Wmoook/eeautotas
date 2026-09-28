@@ -34,7 +34,10 @@ const HELP = `EE Auto TAS - command line (${CMD} <command> ...)
   import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load] [--deaths=forbid]   create a job (like the web app's Import);
                                          --start: how the TAS was started in eeo-tas: reset = after /reset (default,
                                          the eeo-tas README workflow), load = /playtas right after loading the level
-                                         (only matters on levels with 2+ spawn points or time doors)
+                                         (only matters on levels with 2+ spawn points or time doors);
+                                         prints the level check (a file that differs from EEO's own copy of a campaign
+                                         level, effect blocks that do nothing); --eeo-copy: import EEO's own copy of that
+                                         campaign level (eeo-tas media/campaigns/campaigns.zip) instead of the file
   start <job> [--workers=N]              start optimizing in the background (keeps running without the web app)
   stop <job>                             stop optimizing
   finish <job>                           stop and write the final report (report.json)
@@ -213,12 +216,15 @@ async function main() {
 			return;
 		}
 		case 'import': {
-			if (pos.length < 2) throw new Error('usage: import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load]');
+			if (pos.length < 2) throw new Error('usage: import <level.eelvl> <run.eetas> [--name=..] [--start=reset|load] [--eeo-copy]');
 			const meta = J.importJob({ eelvl: fs.readFileSync(pos[0]), eetas: fs.readFileSync(pos[1]), name: a.name, eelvlName: path.basename(pos[0]),
-				eetasName: path.basename(pos[1]), startMode: a.start, deaths: a.deaths });
+				eetasName: path.basename(pos[1]), startMode: a.start, deaths: a.deaths, eeoCopy: a['eeo-copy'] === '1' });
 			if (a.json) return json(meta);
+			const lc = meta.level.check, ec = meta.level.eeoCopy;
 			return out(`imported ${meta.id}: "${meta.name}", the TAS finishes in ${meta.tas.time} (${meta.tas.coins} coins, ${meta.tas.deaths} deaths)` +
 				`${meta.rng.chance < 1 ? `, works in ${J.pct(meta.rng.chance)} of EEO plays (random portals)` : ''}\n` +
+				`level: ${meta.level.file}, md5 ${meta.level.md5}${ec ? ` (EEO's own copy, ${ec.entry} of campaigns.zip, instead of ${ec.replaced.file}, md5 ${ec.replaced.md5})` : ''}\n` +
+				(lc ? [...lc.warnings.map((s) => `WARNING: ${s}\n`), ...lc.notes.map((s) => `${s}\n`)].join('') : '') +
 				`start: ${J.START_MODES[meta.startMode]}${meta.startMatters ? '' : ' (makes no difference on this level)'}\nstart it: ${CMD} start ${meta.id}`);
 		}
 		case 'start': {

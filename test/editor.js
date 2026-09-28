@@ -940,6 +940,10 @@ async function cpuSection() {
 	fs.writeFileSync(hiFile, hiBuf);
 	const u = await goexplore(hiFile, ['--workers=1', '--seconds=30']);
 	check('a trophy the reach field rules out from the start: "unreachable" at once', u.done && u.done.end === 'unreachable' && u.results.length === 0 && u.done.seconds < 5, u.summary);
+	// (a proof about a level is a proof about a FILE: the verdict names it and its md5, src/levelcheck.js)
+	const hiMd5 = require('crypto').createHash('md5').update(hiBuf).digest('hex');
+	check('... and the verdict names the level file and its md5 (the summary line and the done event\'s levelFile)', u.done && u.done.levelFile === `toohigh.eelvl, md5 ${hiMd5}` &&
+		u.summary.endsWith(`(the reach field rules the start out: toohigh.eelvl, md5 ${hiMd5})`), `${u.done && u.done.levelFile} | ${u.summary}`);
 
 	// coarse cells (the levels above 50 x 50: rooms, the novelty and discovery heads, no refinement). A 60 x 50 level: a
 	// red key on the floor, a wall of red doors, the trophy behind it
@@ -1175,6 +1179,8 @@ async function cpuSection() {
 	check('no NVIDIA GPU, a trophy out of reach: the random runs check it without the physics check (their time, at most NO_WAY_UP_S), then the physics verdict',
 		st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed >= 4 && st.elapsed < 15 && st.log.some((x) => /checking that with random runs \(CPU\), without the physics check/.test(x)),
 		`${st.elapsed.toFixed(1)} s: ${st.message}`);
+	check('... the verdict and the log name the level file\'s md5 (a proof about a level is about a file)', st.file === `level file md5 ${hiMd5}` &&
+		st.message.includes(`The level: level file md5 ${hiMd5}.`) && st.log.some((x) => x.includes(`the physics check finds no way from the start to the trophy on this level (level file md5 ${hiMd5};`)), st.message);
 	check('... and no proof (eegpu prove) runs: the physics check has proven it already', !st.proof, JSON.stringify(st.proof || null));
 
 	// the precision stage (src/precision.js, "exact landings"): the user's pocket puzzle (test.eelvl's shape: a trophy pocket
@@ -1424,6 +1430,9 @@ async function proveSection() {
 	check('the searches end first: the search waits for the proof ("waiting for the proof"), then "No route (proven)" with its explanation', st.stage === 'not found' &&
 		st.impossible && st.impossible.by === 'prover' && st.log.some((x) => /waiting for the proof/.test(x)) && /no higher than y = 100 \(row 6; the trophy is in row 4\)/.test(st.message) &&
 		/fastest speeds are 1\.00 px\/tick to the right and 2\.00 to the left/.test(st.message) && st.elapsed >= 4.5, `${st.stage} after ${st.elapsed.toFixed(1)} s: ${st.message}`);
+	const md5b2 = require('crypto').createHash('md5').update(buf2).digest('hex');
+	check('... "No route (proven)" names the level file (its md5), in the verdict and the proof\'s log line', /^No route \(proven\): /.test(st.message) &&
+		st.message.includes(`The level: level file md5 ${md5b2}.`) && st.log.some((x) => x.includes(`the proof: no input sequence reaches the trophy on this level (level file md5 ${md5b2};`)), st.message);
 	check('... while it waited for the proof alone, no busy file (a job\'s GPU searcher is not held for a CPU process)', busyWhileWaiting === false, String(busyWhileWaiting));
 	// every strategy fails at once: the error at once, not after the proof
 	const failCpu = path.join(HOME, 'fail-cpu.js');
@@ -1641,11 +1650,151 @@ async function laneSection() {
 }
 const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI82XaOefMxXxnmpIYjp5JX1zb50/uq31559pX7os7AE41z97hA2PESD3e3rv2qN8fPAxdIPlViN941TgJFlhkiWVWSLLKGinW2WCTLdJss0OGXfbY54BDshxxTI4TLGzyFCjiUKJMhSo16jRo0qJNhy49+Lc5PZsindVfmW/LWPn7c1iTtensZ2d1JrgnG4qsmXEGy4ii9d9n5nDr3tf19yPmuchGPjKSk6zkJTO5yU5+MpSjLOUpU7nKVr4ylrOs5S1zucte/uqAeqAuBLEn5McUxhQnOAFKAcrfUvkBVYNaiHqIhkEzQitCO0InQjdCbw7A2/j+4zjes8j0x+fnGp8=';
 
+// ---------------------------------------------------------------- broken level files (src/levelcheck.js)
+/**
+ * The level check in the editor (2026-09-28: a damaged Forgotten Helix copy, every gravity effect stored as down, cost a
+ * night): effect blocks that can never do anything (noopEffects: gravity all down, the static effects off, removers with
+ * nothing to remove, an effect reset with nothing to reset; and where they DO something: none); a copy against EEO's own
+ * (a fake eeo-tas, test/review.js campaignFixture "Mini Helix": 3 cells, e.g. 3 gravity effects; a block and the world
+ * gravity too); the editor's parse (md5, check), its checks (levelCheck; its own round trip of EEO's copy = the same
+ * blocks), the verdicts that name the file (the walled-in problem, "No way up", a Find a route "not found": the file the
+ * page sends as source, else the md5 of the bytes); the page's "Use EEO's copy" (useEeoCopy cut out of editor.html, run
+ * against the server: EEO's copy through the import path), checkHtml, fileSource after an edit.
+ */
+async function levelCheckSection() {
+	section('levelcheck: broken level files (EEO\'s own copy of a campaign level, effect blocks that do nothing, the md5 in "no route" verdicts)');
+	const LC = require('../src/levelcheck.js');
+	const R = require('./review.js');
+	const md5 = (b) => require('crypto').createHash('md5').update(b).digest('hex');
+	const lvl = (tiles, o = {}) => EL.readEelvl(ED.eelvlOf({ name: o.name || 'fx', width: 30, height: 8, gravity: o.gravity, cells: [...room(30, 8), [2, 6, 255], [28, 6, 121], ...tiles] }));
+	const ids = (list) => list.map((x) => `${x.id}:${x.n}`).join(',');
+	// ---- effect blocks that can never do anything
+	let n = LC.noopEffects(lvl([[5, 6, 1517, 0]]));
+	check('one gravity effect set to 0 = down: a no-op (its cell), without the damaged-copy hint', ids(n) === '1517:1' && /^The gravity effect \(1517\) is set to 0 = down \(at \(5, 6\)\): gravity starts down and nothing else in this level turns it, so it can never do anything\.$/.test(n[0].text), JSON.stringify(n));
+	n = LC.noopEffects(lvl([[5, 6, 1517, 0], [6, 6, 1517, 0], [7, 6, 1517, 0]]));
+	check('three gravity effects, all 0: no-ops, with the damaged-copy hint', ids(n) === '1517:3' && /A damaged copy of a level can lose their directions: check the file\.$/.test(n[0].text), JSON.stringify(n));
+	n = LC.noopEffects(lvl([[5, 6, 1517, 0], [7, 6, 1517, 3]]));
+	check('a gravity effect 0 next to one set to right: both do something (0 turns it back down): nothing said', n.length === 0, JSON.stringify(n));
+	n = LC.noopEffects(lvl([[4, 6, 417, 0], [5, 6, 417, 0], [6, 6, 419, 0], [7, 6, 418, 0], [8, 6, 420, 0], [9, 6, 453, 0]]));
+	check('jump, speed, fly, protection and low gravity effects set to 0 (what the ball starts with): no-ops, each with its cells', ids(n) === '417:2,419:1,418:1,420:1,453:1' &&
+		/^All 2 jump effects \(417\) are set to 0 = normal jumps \(at \(4, 6\), \(5, 6\)\)/.test(n[0].text) && /^The low gravity effect \(453\) is set to 0 = off \(at \(9, 6\)\)/.test(n[4].text), JSON.stringify(n.map((x) => x.text)));
+	n = LC.noopEffects(lvl([[4, 6, 417, 0], [5, 6, 417, 1], [6, 6, 420, 1], [7, 6, 420, 0]]));
+	check('a jump effect 0 next to a high jump, protection off next to on: nothing said', n.length === 0, JSON.stringify(n));
+	n = LC.noopEffects(lvl([[4, 6, 421, 0], [5, 6, 422, 0], [6, 6, 1584, 0]]));
+	check('curse, zombie and poison effects set to 0 (they lift it) with nothing that gives it: no-ops', ids(n) === '421:1,422:1,1584:1' &&
+		/^The curse effect \(421\) is set to 0, which lifts the curse effect \(at \(4, 6\)\), but nothing in this level gives it: it can never do anything\.$/.test(n[0].text), JSON.stringify(n.map((x) => x.text)));
+	n = LC.noopEffects(lvl([[4, 6, 421, 0], [5, 6, 421, 3], [6, 6, 422, 0], [7, 6, 1573]]));
+	check('a curse remover with a curse (3 s) in the level, a zombie remover with a zombie NPC: nothing said', n.length === 0, JSON.stringify(n));
+	n = LC.noopEffects(lvl([[4, 6, 1618], [5, 6, 461, 1]]));
+	const n2 = LC.noopEffects(lvl([[4, 6, 1618], [5, 6, 461, 2]])), n3 = LC.noopEffects(lvl([[4, 6, 1618], [5, 6, 1517, 1]]));
+	check('an effect reset with nothing to reset (a multijump of 1 = the default): a no-op; with a double jump or a gravity effect to reset: nothing said', ids(n) === '1618:1' &&
+		/^The effect reset \(1618\) \(at \(4, 6\)\) resets jump, speed, fly, protection, low gravity, multijump and gravity effects, but nothing in this level gives the ball one: it can never do anything\.$/.test(n[0].text) &&
+		n2.length === 0 && n3.length === 0, JSON.stringify([n, n2, n3]));
+	// ---- EEO's own copy (a fake eeo-tas with campaigns.zip, found through $EEO_TAS)
+	const F = R.campaignFixture();
+	const envBefore = process.env.EEO_TAS;
+	process.env.EEO_TAS = R.fakeEeoTas(path.join(HOME, 'fake-eeo'), F.zip);
+	const SV = require('../src/server.js');
+	let listening = false;
+	try {
+		const pd = EL.readEelvl(F.damaged);
+		let m = LC.campaignMatch(pd);
+		check('the damaged copy against EEO\'s: 3 cells differ, all gravity effects (down here, up / right / left there)', m && !m.same && m.cells === 3 && ids(m.kinds) === '1517:3' &&
+			m.examples.map((e) => `${e.x},${e.y} ${e.here} / ${e.eeo}`).join('; ') === '6,9 gravity effect down / gravity effect up; 10,9 gravity effect down / gravity effect right; 12,9 gravity effect down / gravity effect left',
+			JSON.stringify(m && m.examples));
+		// a block gone and another world gravity: counted by EEO's block; the world gravity said
+		const pw = EL.readEelvl(EL.writeEelvl({ width: F.W, height: F.H, name: 'Mini Helix', gravity: 0.5, records: EL.readEelvl(F.damaged).records.map((r) => ({ id: r.id, layer: r.layer,
+			xs: [...r.xs].filter((x, k) => !(r.id === 9 && x === 7 && r.ys[k] === 5)), ys: [...r.ys].filter((y, k) => !(r.id === 9 && r.xs[k] === 7 && y === 5)), args: r.args })) }));
+		m = LC.campaignMatch(pw);
+		check('... a wall block gone and the world gravity 0.5: 4 cells (e.g. 3 gravity effects, 1 block 9) and the world gravity, said', m && m.cells === 4 && ids(m.kinds) === '1517:3,9:1' &&
+			/in 4 cells \(e\.g\. 3 gravity effects, 1 .* block\) and the world gravity \(0\.5 here, 1 in EEO's copy\): the game plays its own copy\.$/.test(m.text), m && m.text);
+		// the editor: parse, check, its own round trip
+		const d = ED.levelOf(F.damaged);
+		check('the editor\'s parse of the damaged copy: its md5 and level check (the campaign difference first, then the no-op gravity effects)', d.md5 === md5(F.damaged) && d.check &&
+			d.check.warnings.length === 2 && /^This file differs from EEO's own copy of Mini Helix \(campaign Worst, level 2 of 3\) in 3 cells \(e\.g\. 3 gravity effects\)/.test(d.check.warnings[0]) &&
+			d.check.campaign.entry === '41/1.eelvl' && /^All 3 gravity effects/.test(d.check.warnings[1]), JSON.stringify(d.check).slice(0, 300));
+		const rt = ED.eelvlOf({ name: d.name, width: d.width, height: d.height, cells: d.cells, bg: d.bg });
+		const rtCopy = (() => { const e = ED.levelOf(F.copy); return ED.eelvlOf({ name: e.name, width: e.width, height: e.height, cells: e.cells, bg: e.bg }); })();
+		let c = ED.check(rt), c2 = ED.check(rtCopy), c3 = ED.check(rt, { name: 'Mini Helix.eelvl', md5: md5(F.damaged) }), c4 = ED.check(rt, { name: 'x', md5: 'not an md5' });
+		check('the editor\'s checks on its own copy of the level (what the page sends): the damaged one differs (3 cells), EEO\'s is the same blocks; the file: the source the page sends ' +
+			'(else the md5 of these bytes)', c.levelCheck.campaign.same === false && c.levelCheck.campaign.cells === 3 && c.levelCheck.noops.length === 1 && c2.levelCheck.campaign.same === true &&
+			c2.levelCheck.warnings.length === 0 && c.file === `level file md5 ${md5(rt)}` && c3.file === `file Mini Helix.eelvl, md5 ${md5(F.damaged)}` && c4.file === `level file md5 ${md5(rt)}`,
+			JSON.stringify([c.file, c3.file, c4.file, c2.levelCheck.notes]));
+		// the verdicts name the file: the walled-in problem, "No way up"
+		const box = [[11, 4, 9], [12, 4, 9], [13, 4, 9], [11, 5, 9], [13, 5, 9], [11, 6, 9], [12, 6, 9], [13, 6, 9]];
+		const walled = ED.eelvlOf({ name: 'walled', width: 16, height: 10, cells: [...room(16, 10), [2, 8, 255], [12, 5, 121], ...box] });
+		c = ED.check(walled, { name: 'walled.eelvl', md5: 'ab'.repeat(16) });
+		check('a walled-in trophy: the problem names the file (the source the page sends, its md5)', c.problems.some((q) => q.code === 'unreachable' &&
+			q.text.includes(`not even through portals; file walled.eelvl, md5 ${'ab'.repeat(16)}).`)), JSON.stringify(c.problems));
+		const hi = room(20, 10);
+		for (let x = 8; x <= 12; x++) hi.push([x, 3, 9]);
+		hi.push([10, 2, 121], [3, 8, 255]);
+		const hiBuf = ED.eelvlOf({ name: 'way too high', width: 20, height: 10, cells: hi });
+		let t0 = Date.now();
+		for (c = ED.check(hiBuf, { name: 'high.eelvl', md5: 'cd'.repeat(16) }); c.physicsPending && Date.now() - t0 < 30000; c = ED.check(hiBuf, { name: 'high.eelvl', md5: 'cd'.repeat(16) })) await new Promise((r) => setTimeout(r, 100));
+		check('"No way up" (the physics check proves the trophy out of reach) names the file', c.notes.some((x) => /^No way up: /.test(x) && x.includes(`(file high.eelvl, md5 ${'cd'.repeat(16)})`)), c.notes.join(' | '));
+		// a Find a route verdict on the damaged copy (CPU only, 3 s): "not found", the file and its md5, the campaign difference
+		ED.start({ eelvlB64: F.damaged.toString('base64'), seconds: 3, workers: 1, source: { name: 'Mini Helix.eelvl', md5: md5(F.damaged) } }, { available: false, why: 'test: no GPU' });
+		for (t0 = Date.now(); ED.state().running && Date.now() - t0 < 30000;) await new Promise((r) => setTimeout(r, 100));
+		const st = ED.state();
+		check('Find a route on the damaged copy: no route, and the verdict names the file and its md5, then says it differs from EEO\'s own copy (e.g. 3 gravity effects) and why its gravity effects do nothing',
+			st.stage === 'not found' && !st.result && st.file === `file Mini Helix.eelvl, md5 ${md5(F.damaged)}` && st.message.includes(`The level: file Mini Helix.eelvl, md5 ${md5(F.damaged)}. This file differs from EEO's own copy of Mini Helix`) &&
+			/All 3 gravity effects \(1517\) are set to 0 = down/.test(st.message) && st.levelCheck && st.levelCheck.campaign.entry === '41/1.eelvl', `${st.stage}: ${st.message}`);
+		// the page: "Use EEO's copy" (useEeoCopy and the import path cut out of editor.html, run against this server)
+		await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
+		listening = true;
+		const port = SV.server.address().port;
+		const pageFn = (name) => {
+			const lines = PAGE.split('\n');
+			const k = lines.findIndex((l) => new RegExp(`^(async )?function ${name}\\(`).test(l));
+			const e = k < 0 ? -1 : lines.indexOf('}', k);
+			return e < 0 ? '' : lines.slice(k, e + 1).join('\n');
+		};
+		const pageConst = (name) => { const x = PAGE.match(new RegExp(`^const ${name} = .*$`, 'm')); return x ? x[0] : ''; };
+		const fetchStub = async (p, o) => {
+			const x = await request(port, (o && o.method) || 'GET', p, o && o.body !== undefined ? o.body : undefined);
+			return { ok: x.status >= 200 && x.status < 300, status: x.status, statusText: String(x.status), json: async () => JSON.parse(x.buf.toString('utf8')),
+				arrayBuffer: async () => x.buf.buffer.slice(x.buf.byteOffset, x.buf.byteOffset + x.buf.length) };
+		};
+		const els = {};
+		const $ = (k) => (els[k] = els[k] || { innerHTML: '' });
+		let sig = 's0', jobCleared = 0;
+		const LV = { name: 'x', W: 1, H: 1 };
+		const env = { $, fetch: fetchStub, LV, GUIDE: { strokes: [] }, ensureInfo: async () => {}, fit: () => {}, wholeLevel: (fn) => { fn(); sig = `s${Math.random()}`; }, jobClear: () => { jobCleared++; },
+			currentSig: () => sig };
+		const code = [pageConst('esc'), pageConst('postJson'), pageConst('levelFacts'), pageConst('FILE'), pageConst('fileSource'),
+			...['api', 'b64', 'loadJson', 'lvMsg', 'openEelvl', 'checkHtml', 'useEeoCopy'].map(pageFn)].join('\n');
+		let P = null;
+		const pe = errOf(() => { P = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { useEeoCopy, checkHtml, FILE, fileSource };`)(...Object.values(env)); });
+		if (P) await P.useEeoCopy('41/1.eelvl', 'Mini Helix');
+		const g = LV.fg ? LV.fg[9 * F.W + 6] : 0, ga = LV.args ? LV.args.get(9 * F.W + 6) : null;
+		const src0 = P ? P.fileSource() : null;
+		sig = 'edited';
+		const src1 = P ? P.fileSource() : null;
+		check('the page\'s "Use EEO\'s copy": EEO\'s copy through the import path (the gravity effect at (6, 9) up), "Opened EEO\'s own copy of Mini Helix (41/1.eelvl in campaigns.zip)", ' +
+			'the file its md5 (the source the searches get) until the level is edited', !pe && P && g === 1517 && ga && ga[0] === 2 && LV.name === 'Mini Helix' && jobCleared === 1 &&
+			/^<div class="msg info">Opened <b>EEO's own copy of Mini Helix<\/b> \(41\/1\.eelvl in campaigns\.zip\): 16 × 12 tiles, \d+ blocks\. &#10003; The same blocks as EEO&#39;s own copy/.test($('lvMsg').innerHTML) &&
+			P.FILE.md5 === md5(F.copy) && P.FILE.name === 'Mini Helix (EEO\'s copy).eelvl' && src0 && src0.md5 === md5(F.copy) && src1 === null,
+			pe ? pe.message : JSON.stringify({ g, ga, name: LV.name, msg: $('lvMsg').innerHTML.slice(0, 200), file: P && P.FILE, src0, src1 }));
+		const h = P ? P.checkHtml(ED.levelOf(F.damaged).check) : '';
+		check('the page\'s checkHtml: the warnings, the "Use EEO\'s copy" button (data-eeo = the entry), both md5s; the checks list and "not found" have the button too; the solve, ' +
+			'the AutoTASer and the checks send the source', /class="msg warn"/.test(h) && /<button class="small" data-eeo="41\/1\.eelvl" data-name="Mini Helix"[^>]*>Use EEO's copy<\/button>/.test(h) &&
+			h.includes(`this file: md5 ${md5(F.damaged)} · EEO's copy: md5 ${md5(F.copy)}`) && (PAGE.match(/data-eeo="\$\{esc\(k\.entry\)\}"/g) || []).length === 3 &&
+			/postJson\('\/api\/editor\/check', \{ level: levelJson\(\), source: fileSource\(\) \}\)/.test(PAGE) && /name: LV\.name, source: fileSource\(\) \};/.test(PAGE) &&
+			/postJson\('\/api\/editor\/autotas', \{[^\n]*source: fileSource\(\) \}\)/.test(PAGE) && /closest\('\[data-eeo\]'\)/.test(PAGE), h.slice(0, 300));
+	} finally {
+		if (listening) await new Promise((res) => SV.server.close(res));
+		if (envBefore === undefined) delete process.env.EEO_TAS; else process.env.EEO_TAS = envBefore;
+	}
+}
+
 (async () => {
 	roundtripSection();
 	checksSection();
 	await physicsCheckSection();
 	if (want('app')) await appSection();
+	// (after app: that section expects no route search before its own)
+	if (want('levelcheck')) await levelCheckSection();
 	if (want('passes')) await passesSection();
 	if (want('cpu')) await cpuSection();
 	if (want('prove')) await proveSection();

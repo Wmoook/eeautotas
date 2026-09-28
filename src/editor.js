@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const LC = require('./levelcheck.js');   // (EEO's own copy of a campaign level, effect blocks that do nothing, the md5)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -152,8 +153,12 @@ function levelOf(buf) {
 	}
 	const warnings = p.warnings.slice(0, 20);
 	if (odd.size) warnings.push(`block ids the editor cannot keep were left out: ${[...odd].slice(0, 10).join(', ')}`);
+	// the level check of the file as opened (src/levelcheck.js): its md5, EEO's own copy of a campaign level of this name and
+	// size (the same blocks, or how it differs: the page offers EEO's copy), effect blocks that can never do anything
+	let check = null;
+	try { check = LC.brief(LC.checkLevel(buf, p)); } catch (e) { check = null; }
 	return { name: p.name, width: W, height: p.height, gravity: p.gravity, bgColor: p.bgColor, owner: p.owner, description: p.description,
-		cells, bg, warnings };
+		cells, bg, warnings, md5: LC.md5(buf), check };
 }
 
 // ---------------------------------------------------------------- block info (the palette, and any level's ids)
@@ -259,12 +264,13 @@ function physicsRun() {
 	// (a failed check: no note, and not asked again for this level; a search says why)
 	reachInfo(job.buf, job.hash).then((r) => { physicsMemo.set(job.hash, r); }, () => { physicsMemo.set(job.hash, { failed: true }); }).then(physicsRun);
 }
-/** the "no way up" note (null: none): the physics check proves the trophy out of reach */
-function noWayNote(ph) {
+/** the "no way up" note (null: none): the physics check proves the trophy out of reach (tag: the level file it is about,
+ *  LC.fileTag: a proof about a level is a proof about a file) */
+function noWayNote(ph, tag) {
 	if (!ph || ph.pending || ph.failed || ph.mode !== 'physics' || ph.startCost >= 0) return null;
 	const ex = ph.explain;
 	const high = ex && ex.row >= 0 && ex.trophyRow >= 0 && ex.row > ex.trophyRow ? ` (the ball's centre gets no higher than row ${ex.row}; the trophy is in row ${ex.trophyRow})` : '';
-	return `No way up: the physics check finds no way from the start to the trophy${high}. A search checks that for up to a minute, then says so.`;
+	return `No way up: the physics check finds no way from the start to the trophy${high}${tag ? ` (${tag})` : ''}. A search checks that for up to a minute, then says so.`;
 }
 /** the "only through a death" note (null: none): the physics check's only way to the trophy is a death (a respawn at a
  *  checkpoint or another spawn), which the searches do not follow (they drop dead balls) */
@@ -273,16 +279,25 @@ function deathNote(ph) {
 	if (ph.deathMoves) return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches take a death as a move where it pays.';
 	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls here (deaths as moves are off), so they cannot find it.';
 }
+/** the file a level came from, as the page sends it (source {name, md5}: the level as opened, unchanged), else null */
+const sourceOf = (s) => (s && typeof s === 'object' && /^[0-9a-f]{32}$/.test(String(s.md5 || '')) ? { name: String(s.name || 'level.eelvl').slice(0, 120), md5: String(s.md5) } : null);
 /**
  * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes (with
- * opts.physics also the physics check's "no way up").
- * Returns { problems: [{code, text}], notes: [text], start: [x, y] | null, trophies, level (prepared), json }.
+ * opts.physics also the physics check's "no way up"). opts.source: the file the level came from ({name, md5}, the page's
+ * level as opened): the verdicts that say there is no way name it (else the md5 of these bytes).
+ * Returns { problems: [{code, text}], notes: [text], start: [x, y] | null, trophies, level (prepared), json, lc (the level
+ * check: src/levelcheck.js), tag (the file the verdicts name) }.
  */
 function inspect(buf, opts) {
 	let p;
 	try { p = EL.readEelvl(buf); } catch (e) { throw new Error(`not an .eelvl level (${e.message})`); }
 	if (p.width * p.height > MAX_CELLS) throw new Error(`the level is ${p.width} x ${p.height} tiles; the editor's search takes up to ${MAX_CELLS / 1e6} million tiles`);
 	for (const r of p.records) if (r.id < 0 || r.id > 65535) throw new Error(`block id ${r.id} is not an EEO block`);
+	// the level check (EEO's own copy of a campaign level of this name and size, effect blocks that do nothing) and the file
+	// the verdicts name
+	let lc = null;
+	try { lc = LC.checkLevel(buf, p); } catch (e) { lc = null; }
+	const tag = LC.fileTag(buf, sourceOf(opts && opts.source));
 	const json = EL.toSimLevel(p, { id: 'editor', file: 'editor.eelvl' });
 	const level = E.prepareLevel(json);
 	const W = level.width, N = W * level.height;
@@ -311,7 +326,7 @@ function inspect(buf, opts) {
 				notes.push('The way to the trophy goes through portals (the search follows them).');
 			} else {
 				reach = 'none';
-				problems.push({ code: 'unreachable', text: 'The trophy cannot be reached: it is walled in (no open tiles lead from the start to it, not even through portals).' });
+				problems.push({ code: 'unreachable', text: `The trophy cannot be reached: it is walled in (no open tiles lead from the start to it, not even through portals; ${tag}).` });
 			}
 		}
 	}
@@ -320,15 +335,16 @@ function inspect(buf, opts) {
 	if (opts && opts.physics && start && trophies.length && reach !== 'none') {
 		const ph = physicsOf(buf, level);
 		physicsPending = !!(ph && ph.pending);
-		for (const n of [noWayNote(ph), deathNote(ph)]) if (n) notes.push(n);
+		for (const n of [noWayNote(ph, tag), deathNote(ph)]) if (n) notes.push(n);
 	}
-	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json, physicsPending };
+	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json, physicsPending, lc, tag };
 }
-/** inspect() for the page: no engine objects (physicsPending: the physics check runs in a worker thread; ask again) */
-function check(buf) {
-	const r = inspect(buf, { physics: true });
+/** inspect() for the page: no engine objects (physicsPending: the physics check runs in a worker thread; ask again);
+ *  levelCheck: the level check (LC.brief: md5, campaign, noops, warnings, notes; the page shows it with "Use EEO's copy") */
+function check(buf, source) {
+	const r = inspect(buf, { physics: true, source });
 	return { problems: r.problems, notes: r.notes, start: r.start, noSpawn: r.noSpawn, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height,
-		physicsPending: r.physicsPending };
+		physicsPending: r.physicsPending, levelCheck: r.lc ? LC.brief(r.lc) : null, file: r.tag };
 }
 
 // ---------------------------------------------------------------- the route search (one at a time)
@@ -1407,7 +1423,7 @@ function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
 	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
 	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
-	const ins = inspect(buf);
+	const ins = inspect(buf, { source: b.source });
 	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
 	const [tool, ...toolArgs] = test && test.tool ? test.tool : [G.nativeTool()];
 	// no GPU search: no native engine in this build, no NVIDIA GPU, or a level the native engine cannot run
@@ -1462,6 +1478,9 @@ function start(b, gpu, test) {
 	const t0 = Date.now();
 	S = { running: true, stage: 'checking the physics', started: t0, searchStarted: 0, prepSec: 0, elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
+		// (the level file every "no route" verdict names, and its level check: a file that differs from EEO's own copy of a
+		// campaign level, effect blocks that do nothing)
+		file: ins.tag, levelCheck: ins.lc ? LC.brief(ins.lc) : null,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
@@ -1591,7 +1610,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (noGpu && !S.searchStarted) S.searchStarted = Date.now();   // (the CPU alone: the search's clock from its start)
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${S.width} states per tick`}, up to ${S.seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu && which.includes('goexplore') ? ` (${cur.opts.workers} CPU thread${cur.opts.workers > 1 ? 's' : ''})` : ''));
-	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
+	if (noWayUp) note(`the physics check finds no way from the start to the trophy on this level (${S.file}; checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
 	if (S.physics.viaDeath) note(deathNote(S.physics));
 	save();
 	if (brk) brk.at = Date.now();   // (the stall clock from the search's start)
@@ -1648,7 +1667,7 @@ function proofDone(r) {
 		why: r.why || null, error: r.error || null, cached: !!r.cached, checkS: PROOF_CHECK_S };
 	const took = `${r.cached ? 'from the cache' : `${(+r.sec || 0).toFixed(1)} s`}`;
 	if (r.verdict === 'impossible') {
-		note(`the proof: no input sequence reaches the trophy (${(r.cells || 0).toLocaleString('en-US')} boxes of states, ${took}); the search ends once it has searched ${PROOF_CHECK_S} s (a check)`);
+		note(`the proof: no input sequence reaches the trophy on this level (${S.file}; ${(r.cells || 0).toLocaleString('en-US')} boxes of states, ${took}); the search ends once it has searched ${PROOF_CHECK_S} s (a check)`);
 		if (S.result) proofMiss(S.result.strategy, S.result.inputs);
 		else capSearch();
 	} else if (r.verdict === 'reached') note(`the proof: it cannot rule a route out (its model reaches the trophy; ${took})`);
@@ -2434,6 +2453,10 @@ function finish() {
 			S.message = `No route found: "every move" ran out of new situations by tick ${XE.exhausted.tick.toLocaleString('en-US')}${tries} (positions and speeds told apart to ${XE.exhausted.grain}, ` +
 				'and every gravity, jump and pickup state; the physics check ruled out the rest). That is evidence, not proof: a route that needs pixel-exact moves can hide between merged situations. A longer search tries more.';
 		}
+		// (a verdict about a level is about a FILE: its md5, so a wrong file shows, and the level check's warnings: a file that
+		// differs from EEO's own copy of a campaign level (the night of 2026-09-27 "proved" Forgotten Helix impossible on a
+		// copy whose gravity effects were all down), effect blocks that can never do anything)
+		S.message += ` The level: ${S.file}.${S.levelCheck && S.levelCheck.warnings.length ? ` ${S.levelCheck.warnings.join(' ')}` : ''}`;
 		// (the model's only way is a death: the searches cannot find it)
 		if (S.physics && S.physics.viaDeath) S.message += ` ${deathNote(S.physics)}`;
 	}

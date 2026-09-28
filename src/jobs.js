@@ -11,6 +11,7 @@ const { spawn, spawnSync } = require('child_process');
 const C = require('./common.js');
 const EELVL = require('./eelvl.js');
 const B = require('./blocks.js');
+const LC = require('./levelcheck.js');
 const E = C.E, RNG = C.RNG, fmt = C.fmt;
 
 const JOBS = C.JOBS, DATA = C.DATA;
@@ -137,6 +138,10 @@ function checkLevelLimits(p) {
 function checkTicks(n, what) {
 	if (n > MAX_TICKS) throw new Error(`${what} has ${n} ticks (${fmt(n)} of play); the limit is ${MAX_TICKS} ticks (${fmt(MAX_TICKS)}): is this really an .eetas?`);
 }
+/** the level check of a file (src/levelcheck.js; null when it fails: it never stops an import) */
+function levelCheckOf(buf, p) {
+	try { return LC.checkLevel(buf, p); } catch (e) { return null; }
+}
 const normStart = (s) => {
 	const v = String(s || 'reset').toLowerCase();
 	if (!START_MODES[v]) throw new Error(`unknown start "${s}" (use reset or load)`);
@@ -148,14 +153,34 @@ const normStart = (s) => {
  * finds the random-portal outcomes the TAS needs (rng.js), checks that it finishes, writes src/jobs/<id>/ and
  * src/data/job_<id>.json. Throws a readable error if the TAS does not finish the level.
  * startMode: 'reset' (default) or 'load', how the TAS was started in eeo-tas (see START_MODES).
+ * The level check (src/levelcheck.js, meta.level.check, meta.level.md5): a file with the name and size of one of EEO's
+ * built-in campaign levels that differs from EEO's own copy is said so (the game plays its own copy), and so are effect
+ * blocks that can never do anything. eeoCopy: true imports EEO's own copy of that campaign level instead of the file
+ * (meta.level.eeoCopy: the entry and the file it replaced). A TAS that does not finish a file that differs from EEO's
+ * copy: the error says so, and whether it finishes on EEO's copy.
  */
-function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode, deaths }) {
+function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode, deaths, eeoCopy }) {
 	if (!eelvl || !eelvl.length) throw new Error('no .eelvl level file');
 	if (!eetas || !eetas.length) throw new Error('no .eetas TAS file');
 	const start = normStart(startMode);
 	let p;
 	try { p = EELVL.readEelvl(eelvl); } catch (e) { throw new Error(`this does not look like an .eelvl level file (${e.message})`); }
 	checkLevelLimits(p);
+	let lc = levelCheckOf(eelvl, p);
+	if (eeoCopy) {
+		const c = lc && lc.campaign;
+		const bytes = c ? LC.campaignCopy(c.entry) : null;
+		if (!bytes) {
+			const z = LC.campaignsZip();
+			throw new Error(`EEO has no campaign level "${p.name}" of ${p.width} x ${p.height} tiles, so there is no EEO copy to use${z.file ? '' : ` (${z.why})`}: import the file itself`);
+		}
+		const replaced = { file: eelvlName || 'level.eelvl', md5: lc.md5, cells: c.cells, same: c.same };
+		eelvl = bytes;
+		eelvlName = `${c.name} (EEO's copy).eelvl`;
+		p = EELVL.readEelvl(eelvl);
+		lc = levelCheckOf(eelvl, p);
+		if (lc) lc.eeoCopy = { entry: c.entry, title: c.title, tier: c.tier, tiers: c.tiers, replaced };
+	}
 	checkTicks(eetas.length, 'the .eetas file');
 	let masks = C.parseEetasBuffer(eetas);
 	if (!masks.length) throw new Error('the .eetas file has no inputs');
@@ -222,8 +247,28 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode, deaths
 		level = lv;
 		C.writeAtomic(dataFile, JSON.stringify(ld));
 		// what to check when it does not finish: the other start mode, else the file itself
-		const advice = () => startHint() || (` Check that the .eetas belongs to this level` +
-			(odd ? ` (it contains ${odd} bytes that are not inputs eeo-tas writes, e.g. line breaks; EEO plays them as inputs too)` : '') + '.');
+		// the file differs from EEO's own copy of this campaign level: say so, and whether the TAS finishes on EEO's copy
+		const campaignHint = () => {
+			const c = lc && lc.campaign;
+			if (!c || c.same || lc.eeoCopy) return '';
+			let on = false;
+			try {
+				const q = EELVL.toSimLevel(EELVL.readEelvl(LC.campaignCopy(c.entry)), { id: lid, file: 'eeo copy.eelvl' });
+				q.start_mode = start;
+				const lq = E.prepareLevel(q);
+				const mm = new Uint8Array(fileTicks + TAIL_TICKS);   // (with EEO's play-on after the last input)
+				mm.set(masks.subarray(0, fileTicks));
+				const a = RNG.analyze(lq, mm);
+				if (a.draws && a.bestScript) lq.rngScript = Int32Array.from(a.bestScript);
+				on = C.replay(lq, mm).complete >= 0;
+			} catch (e) { on = false; }
+			return ` ${c.text} ${on ? 'The TAS does finish on EEO\'s own copy: import it again with EEO\'s copy ("Use EEO\'s copy" on the page, `tas.js import --eeo-copy`).'
+				: 'It does not finish on EEO\'s own copy either.'} (This file: md5 ${lc.md5}; EEO's copy: md5 ${c.eeoMd5}.)`;
+		};
+		// effect blocks that can never do anything (gravity effects all down: the damaged Forgotten Helix copy)
+		const noopHint = () => (lc && lc.noops.length ? ` Also: ${lc.noops.map((x) => x.text).join(' ')}` : '');
+		const advice = () => (startHint() || campaignHint() || (` Check that the .eetas belongs to this level` +
+			(odd ? ` (it contains ${odd} bytes that are not inputs eeo-tas writes, e.g. line breaks; EEO plays them as inputs too)` : '') + '.')) + noopHint();
 		const after = ` (also after ${TAIL_TICKS / 100} more seconds with no key held)`;
 		if (r.complete < 0 && rng.draws && rng.chance === 0) {
 			const lo = rng.drawsMin || 1, hi = Math.max(lo, rng.drawsMax || 1);
@@ -241,7 +286,8 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode, deaths
 		const meta = {
 			id, levelId: lid, name: String(name || p.name || slug(eelvlName)).slice(0, 80), created: Date.now(),
 			level: { name: p.name || '', owner: p.owner || '', file: eelvlName || 'level.eelvl', width: p.width, height: p.height,
-				compression: p.compression, warnings: p.warnings.slice(0, 20) },
+				compression: p.compression, warnings: p.warnings.slice(0, 20), md5: LC.md5(eelvl), check: lc ? LC.brief(lc) : null,
+				...(lc && lc.eeoCopy ? { eeoCopy: lc.eeoCopy } : {}) },
 			tas: { file: eetasName || 'input.eetas', ticks: fileTicks, tailTicks: tail, completeTick: r.complete, runTicks: r.runTicks, time: fmt(r.runTicks),
 				timerStart: r.timerStart, coins: r.coins, blueCoins: r.blueCoins, deaths: r.deaths, oddBytes: odd },
 			rng: { chance: rng.draws ? rng.chance : 1, uses: rng.uses, truncated: rng.truncated },
@@ -938,7 +984,9 @@ function formatStatus(s) {
 	if (s.live) L.push(`speed now  ${liveText(s.live)}`);
 	if (s.remote) L.push(`rented     ${remoteText(s.remote)}`);
 	if (s.error) L.push(`error: ${s.error}`);
-	L.push(`level      ${s.level ? `${s.level.name} by ${s.level.owner || '?'} ${s.level.width}x${s.level.height} (${s.level.file})` : '?'}; data ${s.files.level}`);
+	L.push(`level      ${s.level ? `${s.level.name} by ${s.level.owner || '?'} ${s.level.width}x${s.level.height} (${s.level.file}${s.level.md5 ? `, md5 ${s.level.md5}` : ''})` : '?'}; data ${s.files.level}`);
+	// (the level check at import, src/levelcheck.js: a file that differs from EEO's own copy, effect blocks that do nothing)
+	for (const w of (s.level && s.level.check && s.level.check.warnings) || []) L.push(`WARNING    ${w}`);
 	L.push(`start      TAS started ${START_MODES[s.startMode] || s.startMode} in eeo-tas` + (s.startMatters === false ? ' (makes no difference on this level: one spawn point, no time doors)'
 		: s.startMatters ? ` (matters here: ${s.spawns >= 2 ? `${s.spawns} spawn points` : ''}${s.spawns >= 2 && s.timeDoors ? ', ' : ''}${s.timeDoors ? 'time doors' : ''}${!(s.spawns >= 2) && !s.timeDoors ? 'the start states differ' : ''})` : ''));
 	L.push(`times      original ${s.original.time} (${s.original.runTicks}) -> best ${s.best.time} (${s.best.runTicks}): ` +

@@ -96,6 +96,63 @@ function wallRecords(W, H, floorY) {
 }
 const loadRecords = (W, H, records, opts) => E.prepareLevel(V.toSimLevel(V.readEelvl(writeEelvl({ W, H, records }))), opts);
 
+// ---------------------------------------------------------------- a fake EEO campaigns.zip (src/levelcheck.js; test/editor.js too)
+const CRC_T = (() => { const t = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; } return t; })();
+const crc32 = (b) => { let c = -1; for (let i = 0; i < b.length; i++) c = CRC_T[(c ^ b[i]) & 0xff] ^ (c >>> 8); return (c ^ -1) >>> 0; };
+/** a zip of [{name, data (Buffer), deflate}]: stored or deflated entries, as EEO's campaigns.zip holds them */
+function makeZip(entries) {
+	const zlib = require('zlib');
+	const parts = [], cen = [];
+	let off = 0;
+	for (const e of entries) {
+		const name = Buffer.from(e.name, 'utf8'), data = e.deflate ? zlib.deflateRawSync(e.data) : e.data, crc = crc32(e.data), m = e.deflate ? 8 : 0;
+		const h = Buffer.alloc(30);
+		h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(m, 8); h.writeUInt32LE(crc, 14); h.writeUInt32LE(data.length, 18);
+		h.writeUInt32LE(e.data.length, 22); h.writeUInt16LE(name.length, 26);
+		const c = Buffer.alloc(46);
+		c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(m, 10); c.writeUInt32LE(crc, 16); c.writeUInt32LE(data.length, 20);
+		c.writeUInt32LE(e.data.length, 24); c.writeUInt16LE(name.length, 28); c.writeUInt32LE(off, 42);
+		parts.push(h, name, data); cen.push(c, name);
+		off += 30 + name.length + data.length;
+	}
+	const cd = Buffer.concat(cen), end = Buffer.alloc(22);
+	end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
+	return Buffer.concat([...parts, cd, end]);
+}
+/**
+ * A fake EEO campaign (the damaged Forgotten Helix in small): "Mini Helix" (campaign 41 "Worst", level 2 of 3; 16 x 12):
+ * walk right onto a gravity effect set to up at (6, 9), stopped by a wall at x 7: the ball falls up the shaft to the
+ * trophy at (6, 1) (the TAS: right x 200, run 0:00.68). `damaged` stores every gravity effect as 0 = down (the fault of
+ * the Downloads copy of Forgotten Helix): the ball stays down (a jump rises ~4 rows). `resaved`: EEO's copy written again
+ * by another writer (other bytes, the same cells). The zip: 00/0 "Tiny Tutorial" (stored), 41/0 "Be Here", 41/1 Mini Helix
+ * (deflated), the .info files and campaign.info (split on U+1399, CampaignPage.as).
+ */
+function campaignFixture() {
+	const W = 16, H = 12, ys = [];
+	for (let y = 1; y <= 9; y++) ys.push(y);
+	const recs = (g) => [...wallRecords(W, H, 10), { id: 255, xs: [2], ys: [9] }, { id: 9, xs: ys.map(() => 7), ys }, { id: 121, xs: [6], ys: [1] },
+		{ id: 1517, xs: [6], ys: [9], args: [g[0]] }, { id: 1517, xs: [10], ys: [9], args: [g[1]] }, { id: 1517, xs: [12], ys: [9], args: [g[2]] }];
+	const copy = writeEelvl({ W, H, records: recs([2, 3, 1]), name: 'Mini Helix' });
+	const damaged = writeEelvl({ W, H, records: recs([0, 0, 0]), name: 'Mini Helix' });
+	const resaved = V.writeEelvl({ width: W, height: H, records: recs([2, 3, 1]).reverse(), name: 'Mini Helix', owner: 'someone else', ownerId: 'other writer', gravity: 1 });
+	const tiny = writeEelvl({ W: 10, H: 6, records: [...wallRecords(10, 6, 4), { id: 255, xs: [2], ys: [3] }, { id: 121, xs: [7], ys: [3] }], name: 'Tiny Tutorial' });
+	const beHere = writeEelvl({ W: 12, H: 6, records: [...wallRecords(12, 6, 4), { id: 255, xs: [2], ys: [3] }, { id: 121, xs: [9], ys: [3] }], name: 'Be Here' });
+	const txt = (s) => Buffer.from(s, 'utf8');
+	const zip = makeZip([
+		{ name: '00/0.eelvl', data: tiny }, { name: '00/0.info', data: txt('0᎙staff᎙4000᎙3000᎙2500᎙2250᎙1913'), deflate: true },
+		{ name: '00/campaign.info', data: txt('0᎙Tests᎙Learn the tests'), deflate: true },
+		{ name: '41/0.eelvl', data: beHere, deflate: true }, { name: '41/0.info', data: txt('9᎙muffin'), deflate: true },
+		{ name: '41/1.eelvl', data: copy, deflate: true }, { name: '41/1.info', data: txt('9᎙muffin'), deflate: true },
+		{ name: '41/2.info', data: txt('9᎙muffin'), deflate: true }, { name: '41/campaign.info', data: txt('9᎙Worst᎙???'), deflate: true }]);
+	return { zip, copy, damaged, resaved, tiny, W, H, tas: Buffer.from('4'.repeat(200)), runTicks: 68 };
+}
+/** a fake eeo-tas folder with that campaigns.zip (media/campaigns/campaigns.zip) under dir */
+function fakeEeoTas(dir, zip) {
+	fs.mkdirSync(path.join(dir, 'media', 'campaigns'), { recursive: true });
+	fs.writeFileSync(path.join(dir, 'media', 'campaigns', 'campaigns.zip'), zip);
+	return dir;
+}
+
 // ================================================================ music
 function musicSection() {
 	section('music: a piano / drum / guitar number without a sound aborts the tick (Me.as:131-149, SoundManager.as:402-414)');
@@ -1151,10 +1208,10 @@ async function editorLinkChecks(S, port, id, page, appLevel) {
 		location: { get hash() { return H.hash; }, pathname: '/editor', search: '' }, history: { replaceState: (a, b, u) => H.replaced.push(u) },
 		toast: (h, err) => H.toasts.push([h, !!err]), ensureInfo: async () => {}, fit: () => {}, currentSig: () => `sig${H.wholeLevel}`,
 		wholeLevel: (fn) => { H.wholeLevel++; fn(); } };
-	const code = [pageConst(eds, 'esc'), pageConst(eds, 'postJson'), pageConst(eds, 'levelFacts'), pageConst(eds, 'JOB'),
-		...['api', 'b64', 'loadJson', 'lvMsg', 'openEelvl', 'b64i32', 'jobClear', 'openJob', 'jobPath', 'jobFromHash'].map((n) => pageFn(eds, n))].join('\n');
+	const code = [pageConst(eds, 'esc'), pageConst(eds, 'postJson'), pageConst(eds, 'levelFacts'), pageConst(eds, 'JOB'), pageConst(eds, 'FILE'), pageConst(eds, 'fileSource'),
+		...['api', 'b64', 'loadJson', 'lvMsg', 'openEelvl', 'checkHtml', 'useEeoCopy', 'b64i32', 'jobClear', 'openJob', 'jobPath', 'jobFromHash'].map((n) => pageFn(eds, n))].join('\n');
 	let P = null;
-	e = errOf(() => { P = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { jobFromHash, jobPath, JOB };`)(...Object.values(env)); });
+	e = errOf(() => { P = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { jobFromHash, jobPath, JOB, FILE, fileSource, useEeoCopy };`)(...Object.values(env)); });
 	check('the editor\'s job functions cut out of the page run', !!P, e ? e.message : undefined);
 	if (!P) return;
 	const tr = (await request(port, 'GET', `/api/jobs/${id}/trajectory?which=best`)).json;
@@ -1199,6 +1256,122 @@ async function editorLinkChecks(S, port, id, page, appLevel) {
 	const none2 = P.jobFromHash();
 	check('no #job= in the hash: the editor does nothing (no fetch, no message, the hash stays)', none === null && none2 === null && H.replaced.length === n0 && H.wholeLevel === w0 &&
 		$('lvMsg').innerHTML === m0);
+}
+/**
+ * Broken level files (src/levelcheck.js; 2026-09-28: a damaged Forgotten Helix copy, every gravity effect stored as down,
+ * cost a night): a fake eeo-tas with a campaigns.zip (campaignFixture: "Mini Helix"), found through $EEO_TAS and through the
+ * viewer's folder (settings.json eegfxDir); the index (titles, tiers, md5s); POST /api/levelcheck on the damaged copy (differs
+ * in 3 cells, e.g. 3 gravity effects: the game plays its own copy; all 3 gravity effects down: no-ops, with their cells), on
+ * EEO's copy written again (the same blocks), on a level of the same name and another size (nothing); GET
+ * /api/levelcheck/eeo-copy (the exact bytes; unknown or bad entries 404); the import of a TAS that finishes only on EEO's
+ * copy: refused, saying the file differs, that it does finish on EEO's copy and both md5s; eeoCopy (import and HTTP): EEO's
+ * copy imported (original.eelvl = its bytes, meta.level.eeoCopy names the file it replaced); a level with effect blocks that
+ * do nothing: imported with the warnings in meta.level.check, `tas.js status`; the page's levelCheckHtml (cut out of
+ * index.html): the warnings escaped, the checkbox, the md5s.
+ */
+async function levelCheckChecks(S, port, page) {
+	const { J, C } = S;
+	const LC = require(path.join(S.src, 'levelcheck.js'));
+	const crypto = require('crypto');
+	const md5 = (b) => crypto.createHash('md5').update(b).digest('hex');
+	const F = campaignFixture();
+	const eeo = fakeEeoTas(path.join(S.dir, 'fake-eeo-campaigns'), F.zip);
+	const envBefore = process.env.EEO_TAS;
+	const post = (p, b) => request(port, 'POST', p, Buffer.from(JSON.stringify(b)), { 'Content-Type': 'application/json' });
+	process.env.EEO_TAS = eeo;
+	try {
+		const z = LC.campaignsZip(), idx = LC.campaignIndex();
+		const mh = idx.levels.find((l) => l.name === 'Mini Helix');
+		check('campaigns.zip found through $EEO_TAS; its index: 3 levels, Mini Helix = 41/1.eelvl of campaign "Worst", level 2 of 3, its md5; kept in <data>/campaigns_index.json',
+			z.file === path.join(eeo, 'media', 'campaigns', 'campaigns.zip') && z.source === 'env' && idx.levels.length === 3 && mh && mh.entry === '41/1.eelvl' &&
+			mh.title === 'Worst' && mh.tier === 2 && mh.tiers === 3 && mh.md5 === md5(F.copy) && mh.width === F.W && mh.height === F.H &&
+			idx.levels.some((l) => l.name === 'Tiny Tutorial' && l.title === 'Tests' && l.tier === 1 && l.tiers === 1) && fs.existsSync(path.join(C.DATA, 'campaigns_index.json')),
+			JSON.stringify({ z, levels: idx.levels }).slice(0, 400));
+		let r = await post('/api/levelcheck', { eelvlB64: F.damaged.toString('base64') });
+		const d = r.json || {}, k = d.campaign || {}, n0 = (d.noops || [])[0] || {};
+		check('POST /api/levelcheck, the damaged copy: "differs from EEO\'s own copy of Mini Helix (campaign Worst, level 2 of 3) in 3 cells (e.g. 3 gravity effects): the game plays its own copy", ' +
+			'the cells (down here, up in EEO\'s copy), both md5s', r.status === 200 && k.same === false && k.cells === 3 && k.entry === '41/1.eelvl' && k.eeoMd5 === md5(F.copy) && d.md5 === md5(F.damaged) &&
+			k.text === 'This file differs from EEO\'s own copy of Mini Helix (campaign Worst, level 2 of 3) in 3 cells (e.g. 3 gravity effects): the game plays its own copy.' &&
+			d.warnings[0] === k.text && k.examples.some((e) => e.x === 6 && e.y === 9 && e.here === 'gravity effect down' && e.eeo === 'gravity effect up') && JSON.stringify(k.kinds) === '[{"id":1517,"n":3,"what":"3 gravity effects"}]',
+			JSON.stringify(d).slice(0, 600));
+		check('... and its gravity effects, all 0 = down: no-ops, listed with their cells (the damaged-copy hint)', d.noops && d.noops.length === 1 && n0.id === 1517 && n0.n === 3 &&
+			JSON.stringify(n0.cells) === '[[6,9],[10,9],[12,9]]' && /^All 3 gravity effects \(1517\) are set to 0 = down \(at \(6, 9\), \(10, 9\), \(12, 9\)\): gravity starts down .* can never do anything\. A damaged copy/.test(n0.text) &&
+			d.warnings.length === 2 && d.warnings[1] === n0.text, JSON.stringify(d.noops));
+		r = await post('/api/levelcheck', { eelvlB64: F.resaved.toString('base64') });
+		check('POST /api/levelcheck, EEO\'s copy written again (other bytes, the same cells): "the same blocks as EEO\'s own copy", no warnings', r.status === 200 && r.json.campaign.same === true &&
+			r.json.warnings.length === 0 && r.json.notes[0] === 'The same blocks as EEO\'s own copy of Mini Helix (campaign Worst, level 2 of 3).' && r.json.md5 === md5(F.resaved) && md5(F.resaved) !== md5(F.copy),
+			JSON.stringify(r.json).slice(0, 300));
+		const other = writeEelvl({ W: F.W + 1, H: F.H, records: wallRecords(F.W + 1, F.H, 10), name: 'Mini Helix' });
+		const r2 = await post('/api/levelcheck', { eelvlB64: other.toString('base64') });
+		const r3 = await post('/api/levelcheck', { eelvlB64: Buffer.from('junk').toString('base64') });
+		check('a level of the same name and another size: no campaign match; junk: 400 with the reason', r2.status === 200 && r2.json.campaign === null && r2.json.warnings.length === 0 &&
+			r3.status === 400 && /does not look like an \.eelvl/.test(r3.json.error), `${JSON.stringify(r2.json).slice(0, 200)} | ${r3.status} ${r3.json && r3.json.error}`);
+		r = await request(port, 'GET', '/api/levelcheck/eeo-copy?entry=41/1.eelvl');
+		const bad = [];
+		for (const e of ['41/9.eelvl', '..%2F..%2Fsrc%2Fserver.js', '41/1.info', '']) {
+			const x = await request(port, 'GET', `/api/levelcheck/eeo-copy?entry=${e}`);
+			if (!(x.status === 404 && x.json && /EEO has no campaign level/.test(x.json.error))) bad.push(`${e}: ${x.status}`);
+		}
+		check('GET /api/levelcheck/eeo-copy?entry=41/1.eelvl: EEO\'s copy, the exact bytes of campaigns.zip (a download "Mini Helix (EEO\'s copy).eelvl"); unknown or bad entries: 404',
+			r.status === 200 && Buffer.compare(r.body, F.copy) === 0 && !bad.length, `${r.status} ${r.body && r.body.length} vs ${F.copy.length}; ${bad.join(', ')}`);
+		// the import of a TAS that finishes only on EEO's copy (the Helix case): refused, and the error says why
+		const before = fs.existsSync(C.JOBS) ? fs.readdirSync(C.JOBS).sort().join() : '';
+		let e = errOf(() => J.importJob({ eelvl: F.damaged, eetas: F.tas, name: 'mini', eelvlName: 'Mini Helix.eelvl', eetasName: 'mini.eetas' }));
+		check('import on the damaged copy: "does not finish", the file differs from EEO\'s copy (e.g. 3 gravity effects), the TAS does finish on EEO\'s copy (Use EEO\'s copy), both md5s, the no-op gravity effects; nothing left behind',
+			e && /does not finish this level/.test(e.message) && e.message.includes('This file differs from EEO\'s own copy of Mini Helix (campaign Worst, level 2 of 3) in 3 cells (e.g. 3 gravity effects)') &&
+			/The TAS does finish on EEO's own copy: import it again with EEO's copy/.test(e.message) && e.message.includes(`This file: md5 ${md5(F.damaged)}; EEO's copy: md5 ${md5(F.copy)}`) &&
+			/Also: All 3 gravity effects \(1517\) are set to 0 = down/.test(e.message) && (fs.existsSync(C.JOBS) ? fs.readdirSync(C.JOBS).sort().join() : '') === before, e ? e.message : 'imported');
+		let m = null;
+		e = errOf(() => { m = J.importJob({ eelvl: F.damaged, eetas: F.tas, name: 'mini eeo', eelvlName: 'Mini Helix.eelvl', eetasName: 'mini.eetas', eeoCopy: true }); });
+		const orig = m ? fs.readFileSync(path.join(J.jobDir(m.id), 'original.eelvl')) : null;
+		check('import with eeoCopy: EEO\'s copy instead (original.eelvl = its bytes, md5), the TAS finishes (0:00.68), meta.level.eeoCopy names the file it replaced; its check: the same blocks',
+			m && m.tas.runTicks === F.runTicks && Buffer.compare(orig, F.copy) === 0 && m.level.md5 === md5(F.copy) && m.level.eeoCopy && m.level.eeoCopy.entry === '41/1.eelvl' &&
+			m.level.eeoCopy.replaced.file === 'Mini Helix.eelvl' && m.level.eeoCopy.replaced.md5 === md5(F.damaged) && m.level.eeoCopy.replaced.cells === 3 && m.level.file === 'Mini Helix (EEO\'s copy).eelvl' &&
+			m.level.check.warnings.length === 0 && /^The same blocks as EEO's own copy of Mini Helix/.test(m.level.check.notes[0]), e ? e.message : JSON.stringify(m && m.level));
+		if (m) J.deleteJob(m.id);
+		r = await post('/api/jobs', { name: 'mini http', eelvlName: 'Mini Helix.eelvl', eetasName: 'mini.eetas', eelvlB64: F.damaged.toString('base64'), eetasB64: F.tas.toString('base64'), eeoCopy: true });
+		check('POST /api/jobs {eeoCopy: true}: the same over HTTP', r.status === 200 && r.json.job.level.eeoCopy && r.json.job.level.md5 === md5(F.copy) && r.json.job.tas.runTicks === F.runTicks,
+			`${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
+		if (r.json && r.json.job) J.deleteJob(r.json.job.id);
+		e = errOf(() => J.importJob({ eelvl: other, eetas: F.tas, eeoCopy: true }));
+		check('eeoCopy for a level EEO has no copy of: refused, saying so', e && /EEO has no campaign level "Mini Helix" of 17 x 12 tiles, so there is no EEO copy to use/.test(e.message), e ? e.message : 'imported');
+		// a level (no campaign) with effect blocks that do nothing: imported, the warnings in meta.level.check and `status`
+		const fx = writeEelvl({ W: 24, H: 8, name: 'effects', records: [...wallRecords(24, 8, 6), { id: 255, xs: [2], ys: [5] }, { id: 421, xs: [6, 8], ys: [5, 5], args: [0] },
+			{ id: 1618, xs: [10], ys: [5] }, { id: 417, xs: [12], ys: [5], args: [0] }, { id: 121, xs: [20], ys: [5] }] });
+		e = errOf(() => { m = J.importJob({ eelvl: fx, eetas: Buffer.from('4'.repeat(300)), name: 'effects', eelvlName: 'effects.eelvl', eetasName: 'fx.eetas' }); });
+		const ws = m && m.level.check ? m.level.check.warnings : [];
+		const st = m ? J.formatStatus(J.summary(m.id)) : '';
+		check('a level whose curse removers, effect reset and jump effect can do nothing: imported, the three warnings with their cells in meta.level.check, the md5, and `tas.js status` says them',
+			m && m.level.check.campaign === null && ws.length === 3 && ws.some((w) => /^The jump effect \(417\) is set to 0 = normal jumps \(at \(12, 5\)\): the ball starts that way/.test(w)) &&
+			ws.some((w) => /^The 2 curse effects \(421\) are set to 0, which lifts the curse effect \(at \(6, 5\), \(8, 5\)\), but nothing in this level gives it/.test(w)) &&
+			ws.some((w) => /^The effect reset \(1618\) \(at \(10, 5\)\) resets jump, speed, fly, protection, low gravity, multijump and gravity effects, but nothing/.test(w)) &&
+			m.level.md5 === md5(fx) && /md5 [0-9a-f]{32}\)/.test(st) && (st.match(/^WARNING {4}/gm) || []).length === 3, e ? e.message : `${JSON.stringify(ws)}\n${st}`);
+		if (m) J.deleteJob(m.id);
+		// the page's rendering (levelCheckHtml cut out of index.html): the warnings escaped, the checkbox (import only), the md5s
+		const grab = (re) => { const x = page.match(re); return x ? x[0] : ''; };
+		let P = null;
+		const pe = errOf(() => { P = new Function(`${grab(/^const esc = .*$/m)}\n${pageFn(page, 'levelCheckHtml')}\nreturn { levelCheckHtml };`)(); });
+		const evil = LC.brief(LC.checkLevel(F.damaged));
+		evil.warnings = evil.warnings.map((w) => `${w} <img src=x onerror=alert(1)>`);
+		const h1 = P ? P.levelCheckHtml(evil, true) : '', h2 = P ? P.levelCheckHtml(evil, false) : '', h3 = P ? P.levelCheckHtml(LC.brief(LC.checkLevel(F.resaved)), true) : '';
+		check('the page: the level check under the files (the warnings, "Use EEO\'s own copy" as a checkbox that the import sends as eeoCopy, both md5s), after an import without the checkbox, ' +
+			'"the same blocks" as a ✓ line; no raw tag from the texts', !pe && /class="msg warn"/.test(h1) && /<input type="checkbox" id="eeoCopy"> Use EEO's own copy of Mini Helix instead of this file/.test(h1) &&
+			h1.includes(`this file: md5 ${md5(F.damaged)} · EEO's copy (41/1.eelvl in campaigns.zip): md5 ${md5(F.copy)}`) && !/<img/.test(h1) && /&lt;img/.test(h1) &&
+			!/eeoCopy/.test(h2) && /class="msg warn"/.test(h2) && /class="lvok">&#10003; The same blocks as EEO&#39;s own copy of Mini Helix/.test(h3) && !/msg warn/.test(h3) &&
+			/eeoCopy: !!\(\$\('eeoCopy'\) && \$\('eeoCopy'\)\.checked\)/.test(page) && /if \(files\.eelvl && \(!lvCheck \|\| lvCheck\.file !== files\.eelvl\)\) checkLevelFile\(files\.eelvl\);/.test(page) &&
+			/\$\{jobCheckHtml\(j\)\}/.test(page), pe ? pe.message : h1.slice(0, 300));
+		// the viewer's eeo-tas folder (settings.json eegfxDir) comes first: its campaigns.zip, else $EEO_TAS
+		const set = fakeEeoTas(path.join(S.dir, 'fake-eeo-settings'), makeZip([]));
+		C.writeJSON(path.join(C.DATA, 'settings.json'), { eegfxDir: set });
+		const zs = LC.campaignsZip();
+		fs.unlinkSync(path.join(set, 'media', 'campaigns', 'campaigns.zip'));
+		const zn = LC.campaignsZip();
+		try { fs.unlinkSync(path.join(C.DATA, 'settings.json')); } catch (x) { /* none */ }
+		check('the folder set in the viewer (settings.json eegfxDir) comes first; without a campaigns.zip there, $EEO_TAS', zs.source === 'settings' && zs.dir === path.resolve(set) &&
+			zn.source === 'env' && zn.file === z.file, `${JSON.stringify(zs)} | ${JSON.stringify(zn)}`);
+	} finally {
+		if (envBefore === undefined) delete process.env.EEO_TAS; else process.env.EEO_TAS = envBefore;
+	}
 }
 async function appSection() {
 	section('app: jobs / server / grind / render / common (in a temp copy of src/)');
@@ -1341,6 +1514,7 @@ async function appSection() {
 		await viewerEffectsChecks(S, port, id, page, r3.json);
 		await remoteChecks(S, port, id, page);
 		await editorLinkChecks(S, port, id, page, appLevel);
+		await levelCheckChecks(S, port, page);
 		const fake = path.join(S.dir, 'fake-eeo-tas');
 		fs.mkdirSync(path.join(fake, 'media'), { recursive: true });
 		fs.mkdirSync(path.join(fake, 'src', 'items'), { recursive: true });
@@ -1433,7 +1607,7 @@ async function appSection() {
 }
 
 // ================================================================ run
-module.exports = { kitchenSink, randMasks, teleports, applyTp, partA, partB, partC, mkLevel, writeEelvl, wallRecords, loadRecords };
+module.exports = { kitchenSink, randMasks, teleports, applyTp, partA, partB, partC, mkLevel, writeEelvl, wallRecords, loadRecords, makeZip, campaignFixture, fakeEeoTas };
 if (require.main === module) (async () => {
 	if (want('music')) musicSection();
 	if (want('portals')) portalsSection();

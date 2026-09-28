@@ -45,6 +45,16 @@ That is all: no `npm install`, no Godot, no Python.
    A run can only be created (and started) for a TAS that finishes the level: it then shows **✓ TAS verified to
    completion**. If it does not finish, you get a clear message (where the ball ended up, coins, deaths) and no run
    is created.
+   **Is it the level EEO plays?** As soon as you drop a level, the page checks the file. EEO has its campaign levels
+   built in (eeo-tas `media/campaigns/campaigns.zip`, found like the EE graphics: the folder set in the viewer,
+   `EEO_TAS`, or `~/eeo-tas`). A file with the name and size of one of them is compared with EEO's own copy, and a
+   difference is said plainly, e.g. "this file differs from EEO's own copy of Forgotten Helix (campaign Worst, level 2
+   of 5) in 160 cells (e.g. 160 gravity effects): the game plays its own copy", with both files' md5. Tick **Use EEO's
+   own copy** to import that one instead. It also warns about effect blocks that can never do anything, with their
+   cells (for example every gravity effect set to 0 = down: the damaged copy of Forgotten Helix looked like that). A
+   TAS that does not finish a file that differs from EEO's copy: the message says so, and whether it finishes on EEO's
+   copy. In the level editor, **Use EEO's copy** opens EEO's copy, and every "no route" verdict names the level file
+   and its md5, so a wrong file shows.
 2. Pick how many **threads** to use and press **Start**. It uses the CPU heavily. The first time the app starts it
    measures how fast your CPU runs the physics (a few seconds, once; the page names the CPU it found), and the
    thread list shows the measured speed for each count, e.g. "8 · 26 M/s (fastest)". On many laptops more threads
@@ -231,7 +241,8 @@ each random portal on the route, its time, how many exits it has and how many of
 - `src/jobs/<id>/best.eetas` is the current best run of a job. `best_<ticks>.eetas` keeps every improvement, and
   `grind.log` is the optimizer's log. `src/data/` holds the levels converted for the optimizer, the CPU speed
   measurement (`_system.json`; delete it to measure again), the viewer's eeo-tas folder setting (`settings.json`) and
-  the sprite map read from it (`eegfx.json`, rebuilt when eeo-tas changes), and the level editor's last route search
+  the sprite map read from it (`eegfx.json`, rebuilt when eeo-tas changes), the index of EEO's campaign levels
+  (`campaigns_index.json`, rebuilt when campaigns.zip changes), and the level editor's last route search
   (`editor/`: `level.eelvl`, `route.eetas`, `solve.json`). Both folders stay on your computer (git ignores them).
 - Delete a run with the **Delete** button (click twice).
 
@@ -250,7 +261,10 @@ node src/tas.js focus <job> 1:08 1:14 120      search that part harder
 node src/tas.js endgame <job> [K]              try every input in the last K ticks before the trophy (exact; it
                                                proves when nothing faster exists there)
 node src/tas.js import level.eelvl run.eetas   create a run without the page (--start=load: started right after
-                                               loading the level); then: start <job>, stop <job>
+                                               loading the level; --eeo-copy: EEO's own copy of that campaign
+                                               level instead of the file); then: start <job>, stop <job>
+node src/levelcheck.js level.eelvl             is it EEO's own copy of a campaign level? effect blocks that do
+                                               nothing? its md5 (--list: the campaign levels EEO has built in)
 node src/bench.js                              measure the CPU's physics speed (1 thread and all threads)
 ```
 

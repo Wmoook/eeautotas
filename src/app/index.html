@@ -67,6 +67,12 @@ button.watch { background: var(--gold-soft); color: var(--gold); border-color: c
 .msg { margin-top: 10px; padding: 10px 12px; border-radius: 9px; font-size: 13px; }
 .msg.err { background: var(--bad-soft); color: var(--bad); }
 .msg.info { background: var(--panel2); color: var(--muted); }
+/* the level check (src/levelcheck.js): a file that differs from EEO's own copy, effect blocks that do nothing */
+.msg.warn { background: var(--gold-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line)); overflow-wrap: anywhere; }
+.msg.warn b.w { color: var(--gold); }
+.msg.warn label { display: flex; gap: 7px; align-items: center; margin-top: 8px; font-weight: 600; cursor: pointer; }
+.lvok { font-size: 12px; color: var(--good); margin-top: 4px; }
+.md5 { font: 11.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
 	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes sp { to { transform: rotate(360deg); } }
@@ -323,6 +329,7 @@ pre.log { margin: 8px 0 0; padding: 10px 12px; border-radius: 10px; background: 
 					<input type="file" id="pick" accept=".eelvl,.eetas" multiple hidden>
 				</div>
 				<div class="files" id="files"></div>
+				<div id="lvCheck"></div>
 				<label class="f" for="name">Name</label>
 				<input type="text" id="name" placeholder="e.g. Forgotten Veil">
 				<label class="f" for="startMode">How did you start the TAS in eeo-tas?</label>
@@ -457,7 +464,40 @@ function setFiles(list) {
 	}
 	if (files.eelvl && !$('name').value) $('name').value = files.eelvl.name.replace(/\.eelvl$/i, '');
 	renderFiles();
+	if (files.eelvl && (!lvCheck || lvCheck.file !== files.eelvl)) checkLevelFile(files.eelvl);
 }
+// the level check of the chosen .eelvl (POST /api/levelcheck, src/levelcheck.js): a file with the name and size of one of
+// EEO's campaign levels that differs from EEO's own copy (the game plays its own copy: "Use EEO's own copy" imports that
+// one instead), effect blocks that can never do anything, the file's md5; lvCheck = {file, r} for the file it is about
+let lvCheck = null;
+async function checkLevelFile(f) {
+	lvCheck = { file: f, r: null };
+	renderLvCheck();
+	let r;
+	try {
+		const x = await fetch('/api/levelcheck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eelvlB64: b64(await f.arrayBuffer()) }) });
+		const j = await x.json().catch(() => ({}));
+		r = x.ok ? j : { error: j.error || x.statusText };
+	} catch (e) { r = { error: e.message }; }
+	if (lvCheck && lvCheck.file === f) { lvCheck.r = r; renderLvCheck(); }
+}
+/** the level check as HTML (r: POST /api/levelcheck's answer, or a job's meta.level.check): the warnings with the md5s,
+ *  the notes ("the same blocks as EEO's own copy"); box: the import's "Use EEO's own copy" checkbox (#eeoCopy) */
+function levelCheckHtml(r, box) {
+	if (!r || r.error) return '';
+	const c = r.campaign, warn = r.warnings || [];
+	let h = '';
+	if (warn.length) {
+		h += `<div class="msg warn">${warn.map((w) => `<div><b class="w">&#9888;</b> ${esc(w)}</div>`).join('')}` +
+			(box && c && !c.same ? `<label><input type="checkbox" id="eeoCopy"> Use EEO's own copy of ${esc(c.name)} instead of this file</label>` : '') +
+			`<div class="md5">this file: md5 ${esc(r.md5)}${c && !c.same ? ` · EEO's copy (${esc(c.entry)} in campaigns.zip): md5 ${esc(c.eeoMd5)}` : ''}</div></div>`;
+	}
+	for (const n of r.notes || []) h += `<div class="lvok">&#10003; ${esc(n)}</div>`;
+	return h;
+}
+function renderLvCheck() { $('lvCheck').innerHTML = lvCheck && lvCheck.r ? levelCheckHtml(lvCheck.r, true) : ''; }
+/** the job page: its level check at import (meta.level.check; jobs imported before it have none) */
+const jobCheckHtml = (j) => (j.level && j.level.check ? levelCheckHtml(j.level.check, false) : '');
 function renderFiles() {
 	const chip = (tag, f, what) => `<div class="file ${f ? '' : 'missing'}"><span class="tag">${tag}</span><span class="nm">${f ? esc(f.name) : 'no ' + what + ' yet'}</span></div>`;
 	$('files').innerHTML = chip('.eelvl', files.eelvl, 'level') + chip('.eetas', files.eetas, 'TAS');
@@ -485,16 +525,19 @@ $('importBtn').onclick = async () => {
 	$('importMsg').innerHTML = `<div class="msg info"><span class="spin"></span>Reading the level exactly like EE Offline does, then replaying your TAS in the exact physics…</div>`;
 	try {
 		// both files go up as their raw bytes: eeo-tas plays every byte of an .eetas as one tick (no text decoding)
+		// (eeoCopy: the level check's "Use EEO's own copy": the server imports EEO's copy of that campaign level instead)
 		const body = { name: $('name').value.trim(), eelvlName: files.eelvl.name, eetasName: files.eetas.name, startMode: $('startMode').value,
-			eelvlB64: b64(await files.eelvl.arrayBuffer()), eetasB64: b64(await files.eetas.arrayBuffer()) };
+			eelvlB64: b64(await files.eelvl.arrayBuffer()), eetasB64: b64(await files.eetas.arrayBuffer()), eeoCopy: !!($('eeoCopy') && $('eeoCopy').checked) };
 		const r = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 		const j = await r.json();
 		if (!r.ok) throw new Error(j.error || 'import failed');
-		const t = j.job.tas;
+		const t = j.job.tas, ec = j.job.level && j.job.level.eeoCopy;
 		const st = j.job.startMatters ? ` Started ${START_LABEL[j.job.startMode]} (this level has ${j.job.spawns >= 2 ? j.job.spawns + ' spawn points' : 'time doors'}, so it matters).`
 			: ' (How you started it makes no difference on this level.)';
-		$('importMsg').innerHTML = `<div class="msg info"><span class="verified">✓ TAS verified to completion:</span> it finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}).${esc(st)} Press <b>Start</b> to optimize it.</div>`;
+		$('importMsg').innerHTML = `<div class="msg info"><span class="verified">✓ TAS verified to completion:</span> it finishes <b>${esc(j.job.name)}</b> in <b>${t.time}</b> (${t.coins} coins${t.deaths ? `, ${t.deaths} deaths` : ''}).${esc(st)} Press <b>Start</b> to optimize it.` +
+			(ec ? ` The level is EEO's own copy (${esc(ec.entry)} in campaigns.zip) instead of ${esc(ec.replaced.file)}.` : '') + `</div>${levelCheckHtml(j.job.level && j.job.level.check, false)}`;
 		files = { eelvl: null, eetas: null }; $('name').value = '';
+		lvCheck = null; renderLvCheck();
 		selected = j.job.id; store.set('tasopt.sel', selected);
 		await refresh();
 	} catch (e) {
@@ -798,7 +841,8 @@ function renderDetail() {
 		<div class="hero">
 			<div>
 				<h3>${esc(j.name)}</h3>
-				<div class="meta"><span class="verified" title="Checked at import: your .eetas was replayed in the exact physics and finishes the level in ${esc(j.original.time)}. A run is only created for a TAS that finishes.">✓ TAS verified to completion</span> · ${esc(j.level.name || j.level.file)} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}${esc(startNote)}</div>
+				<div class="meta"><span class="verified" title="Checked at import: your .eetas was replayed in the exact physics and finishes the level in ${esc(j.original.time)}. A run is only created for a TAS that finishes.">✓ TAS verified to completion</span> · <span title="${esc(j.level.file || '')}${j.level.md5 ? `, md5 ${esc(j.level.md5)}` : ''}">${esc(j.level.name || j.level.file)}</span>${j.level.eeoCopy ? ' (EEO\'s own copy)' : ''} · ${j.level.width}×${j.level.height} · TAS ${esc(j.tas.file)} · ${j.tas.coins} coins${j.tas.deaths ? ` · ${j.tas.deaths} deaths` : ''}${esc(startNote)}</div>
+				${jobCheckHtml(j)}
 			</div>
 			<div class="row">
 				<button class="watch" id="watchBtn" title="Play the current best run in the level, with your original .eetas as a ghost (the optimizer keeps running)">Watch</button>

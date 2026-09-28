@@ -20,6 +20,7 @@ const G = require('./gpu.js');
 const BENCH = require('./bench.js');
 const GFX = require('./eegfx.js');
 const ED = require('./editor.js');
+const LC = require('./levelcheck.js');
 
 const APP = path.join(__dirname, 'app', 'index.html');
 const EDITOR = path.join(__dirname, 'app', 'editor.html');
@@ -101,7 +102,9 @@ const ENDPOINTS = [
 	['GET', '/api/state', 'all jobs (summaries, with the live speed of a running job and remote: its copy on a rented machine while src/jobs/<id>/remote.json is fresh), ' +
 		'rented (the rented machines: their jobs, GPUs, speeds, the gains tonight), the CPU model and threads, the processor benchmark'],
 	['GET', '/api/system', 'processors: CPU (measured engine speed, 1 thread and all threads, estimate per thread count) and GPU (name and measured speed, or why not available), and which is faster'],
-	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load"} (files as base64 of their raw bytes)'],
+	['POST', '/api/jobs', 'import: JSON {name, eelvlName, eetasName, eelvlB64, eetasB64, startMode: "reset" | "load", eeoCopy: true (import EEO\'s own copy of that campaign level instead of the file)} (files as base64 of their raw bytes)'],
+	['POST', '/api/levelcheck', 'the level check of an .eelvl (src/levelcheck.js): JSON {eelvlB64} -> {md5, campaign (a file with the name and size of one of EEO\'s campaign levels: the same blocks, or how it differs from EEO\'s own copy), noops (effect blocks that can never do anything, with their cells), warnings, notes}'],
+	['GET', '/api/levelcheck/eeo-copy?entry=41/1.eelvl', 'EEO\'s own copy of a campaign level: its .eelvl bytes from eeo-tas media/campaigns/campaigns.zip (the entry a level check names)'],
 	['GET', '/api/jobs/:id', 'one job summary (best, history, stage, live speed, remote (on a rented machine: machine, GPU, speeds, stage, best, log), inbox, focus, files)'],
 	['POST', '/api/jobs/:id/guide', 'GPU guided search: JSON {from, points: [[x, y], ...] (pixels of the ball centre; tiles with tiles: true), seconds, width}; exact faster rejoins go to the job'],
 	['GET', '/api/jobs/:id/guide', 'the guided search: running, layer, tick, states, ticksPerSec, results, log'],
@@ -251,9 +254,11 @@ async function editorRoute(req, res, parts, q) {
 		return send(res, 200, ED.levelOf(Buffer.from(String(b.eelvlB64 || ''), 'base64')));
 	}
 	if (req.method === 'POST' && what === 'check' && !sub) {
-		const buf = editorLevel(await readJsonBody(req, 64 << 20));
+		const b = await readJsonBody(req, 64 << 20);
+		const buf = editorLevel(b);
 		if (!buf) throw new Error('missing eelvlB64 or level');
-		return send(res, 200, Object.assign(ED.check(buf), { gpu: systemInfo().processors[1] }));
+		// (source {name, md5}: the file the page's level came from, unchanged since it was opened: the verdicts name it)
+		return send(res, 200, Object.assign(ED.check(buf, b.source), { gpu: systemInfo().processors[1] }));
 	}
 	if (what === 'solve') {
 		if (req.method === 'GET' && !sub) return send(res, 200, ED.state());
@@ -279,7 +284,7 @@ async function editorRoute(req, res, parts, q) {
 			if (!buf || !buf.length) return send(res, 400, { error: 'missing eelvlB64 or level' });
 			try {
 				autotas = require('./autotas.js').run({ eelvl: buf, minutes: b.minutes, workers: b.workers, name: b.name ? String(b.name).slice(0, 80) : 'AutoTAS',
-					gpu: systemInfo().processors[1], startJob, stopJob });
+					gpu: systemInfo().processors[1], startJob, stopJob, source: b.source });
 			} catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
 			return send(res, 200, autotasState());
 		}
@@ -333,11 +338,31 @@ const server = http.createServer(async (req, res) => {
 			}
 		}
 		if (parts[1] === 'editor') return await editorRoute(req, res, parts, q);
+		// the level check (src/levelcheck.js): EEO's own copy of a campaign level, effect blocks that do nothing, the md5
+		if (parts[1] === 'levelcheck') {
+			if (req.method === 'POST' && parts.length === 2) {
+				const b = await readJsonBody(req, 64 << 20);
+				const buf = Buffer.from(String(b.eelvlB64 || ''), 'base64');
+				if (!buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
+				let r;
+				try { r = LC.checkLevel(buf); } catch (e) { throw new Error(`this does not look like an .eelvl level file (${e.message})`); }
+				return send(res, 200, LC.brief(r));
+			}
+			if (req.method === 'GET' && parts[2] === 'eeo-copy' && parts.length === 3) {
+				const entry = String(q('entry') || '');
+				const bytes = /^[\w .-]+\/\d+\.eelvl$/.test(entry) ? LC.campaignCopy(entry) : null;
+				if (!bytes) return send(res, 404, { error: `EEO has no campaign level ${JSON.stringify(entry)}${LC.campaignsZip().file ? '' : ` (${LC.campaignsZip().why})`}` });
+				const l = LC.campaignIndex().levels.find((x) => x.entry === entry);
+				const nice = `${String((l && l.name) || 'level').replace(/[^\w .()-]/g, '').trim() || 'level'} (EEO's copy).eelvl`;
+				res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${nice.replace(/'/g, '')}"`, 'Cache-Control': 'no-store' });
+				return res.end(bytes);
+			}
+		}
 		if (req.method === 'POST' && parts[1] === 'jobs' && parts.length === 2) {
 			const b = await readJsonBody(req, 96 << 20);
 			const eetas = b.eetasB64 !== undefined ? Buffer.from(String(b.eetasB64), 'base64') : Buffer.from(String(b.eetasText || ''), 'latin1');
 			const meta = J.importJob({ eelvl: Buffer.from(String(b.eelvlB64 || ''), 'base64'), eetas, name: b.name, eelvlName: b.eelvlName, eetasName: b.eetasName,
-				startMode: b.startMode, deaths: b.deaths === 'forbid' ? 'forbid' : undefined });
+				startMode: b.startMode, deaths: b.deaths === 'forbid' ? 'forbid' : undefined, eeoCopy: b.eeoCopy === true });
 			return send(res, 200, { ok: true, job: meta });
 		}
 		if (parts[1] === 'jobs' && parts[2]) {
