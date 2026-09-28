@@ -94,8 +94,13 @@ function run(o) {
 	};
 	const better = (rt) => { if (S.best === null || rt < S.best) { S.best = rt; S.bestT = since(); return true; } return false; };
 	const gpuOk = !o.cpu && !!G.nativeTool() && !G.unsupported(level) && !(o.gpu && o.gpu.available === false);
-	emit({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` });
-	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W }, o.gpu || { available: gpuOk });
+	// the level check (src/levelcheck.js): the file's md5, a file that differs from EEO's own copy of a campaign level, effect
+	// blocks that can never do anything (warnings: the start event and the timeline say so before any search)
+	let lc = null;
+	try { lc = require('./levelcheck.js').checkLevel(o.eelvl); } catch (e) { lc = null; }
+	emit(Object.assign({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` },
+		lc ? { md5: lc.md5, ...(lc.warnings.length ? { warnings: lc.warnings } : {}), ...(lc.notes.length ? { notes: lc.notes } : {}) } : {}));
+	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, source: o.source }, o.gpu || { available: gpuOk });
 	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})

@@ -63,6 +63,11 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .msg { margin-top: 10px; padding: 9px 11px; border-radius: 9px; font-size: 13px; }
 .msg.err { background: var(--bad-soft); color: var(--bad); }
 .msg.info { background: var(--panel2); color: var(--muted); }
+/* the level check (src/levelcheck.js): a file that differs from EEO's own copy, effect blocks that do nothing */
+.msg.warn { background: var(--gold-soft); color: var(--ink); border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line)); overflow-wrap: anywhere; }
+.msg.warn b.w { color: var(--gold); }
+.msg.warn > div + div { margin-top: 5px; }
+.md5 { font: 11.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
 	animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes sp { to { transform: rotate(360deg); } }
@@ -355,6 +360,11 @@ const LV = { name: 'My level', W: 40, H: 25, fg: new Int32Array(1000), bg: new I
 // the job this level was opened from (#job=<id>: the run viewer's and the job page's "Open in level editor"): its id and
 // name, its best run's path (px, ball centre per tick) once shown, the level's signature then (edited: the path is dashed)
 const JOB = { id: null, name: '', path: null, sig: null, token: 0 };
+// the file the level was opened from (Import .eelvl, a job's level, EEO's copy): its name, md5 and level check (POST
+// /api/editor/parse: src/levelcheck.js); sig = the level's signature then. While the level is that file unchanged, the
+// checks and searches get it as `source` and every "no route" verdict names its md5 (else the md5 of the editor's copy)
+const FILE = { name: null, md5: null, sig: null, check: null };
+const fileSource = () => (FILE.md5 && FILE.sig === currentSig() ? { name: FILE.name, md5: FILE.md5 } : null);
 const needsArgs = (id) => defaultArgs(id).length > 0;
 const sameArgs = (a, b) => (!a && !b) || (!!a && !!b && a.length === b.length && a.every((v, k) => v === b[k]));
 function blankLevel(W, H, border) {
@@ -392,7 +402,8 @@ function unrle(o, n) { const a = new Int32Array(n); let p = 0; for (let k = 0; k
 function saveNow() {
 	const d = { v: 1, name: LV.name, W: LV.W, H: LV.H, gravity: LV.gravity, bgArgb: LV.bgArgb, owner: LV.owner, description: LV.description,
 		fg: rle(LV.fg), args: [...LV.args].map(([i, a]) => [i, ...a]), bg: rle(LV.bg), bgArgs: [...LV.bgArgs].map(([i, a]) => [i, ...a]),
-		guide: GUIDE.strokes, view: { zi: VW.zi, camX: VW.camX, camY: VW.camY }, brush: BR };
+		guide: GUIDE.strokes, view: { zi: VW.zi, camX: VW.camX, camY: VW.camY }, brush: BR,
+		file: FILE.md5 ? { name: FILE.name, md5: FILE.md5, sig: FILE.sig } : null };
 	store.set(SAVE_KEY, JSON.stringify(d));
 }
 function loadSaved() {
@@ -407,6 +418,7 @@ function loadSaved() {
 	GUIDE.strokes = Array.isArray(d.guide) ? d.guide : [];
 	if (d.view && Number.isFinite(d.view.zi)) Object.assign(VW, { zi: clamp(d.view.zi | 0, 0, ZOOMS.length - 1), camX: +d.view.camX || 0, camY: +d.view.camY || 0, fitted: true });
 	if (d.brush && d.brush.id) Object.assign(BR, d.brush);
+	if (d.file && /^[0-9a-f]{32}$/.test(String(d.file.md5))) Object.assign(FILE, { name: String(d.file.name || ''), md5: d.file.md5, sig: d.file.sig || null, check: null });
 	return true;
 }
 /** a short signature of the level (a route found for another version of it is marked as such) */
@@ -1438,9 +1450,38 @@ async function openEelvl(bytes, fileName, name, still) {
 	if (still && !still()) return null;
 	wholeLevel(() => { loadJson(d); if (name) LV.name = String(name).slice(0, 80); else if (!d.name) LV.name = fileName.replace(/\.eelvl$/i, ''); GUIDE.strokes = []; });
 	fit();
+	// (the file it was opened from: the level is that file until it is edited; its md5 and level check)
+	Object.assign(FILE, { name: fileName, md5: d.md5 || null, sig: currentSig(), check: d.check || null });
 	return d;
 }
-const levelFacts = (d) => `${d.width} × ${d.height} tiles, ${d.cells.length.toLocaleString('en-US')} blocks.${d.warnings && d.warnings.length ? ` Notes: ${esc(d.warnings.slice(0, 3).join('; '))}` : ''}`;
+/** the level check of an opened file as HTML (c: parse's `check`, src/levelcheck.js): the warnings (a file that differs
+ *  from EEO's own copy of a campaign level, with "Use EEO's copy"; effect blocks that do nothing) and the md5s, or the
+ *  note "the same blocks as EEO's own copy" */
+function checkHtml(c) {
+	if (!c) return '';
+	const k = c.campaign, w = c.warnings || [];
+	if (!w.length) return (c.notes || []).map((n) => ` &#10003; ${esc(n)}`).join('');
+	return `<div class="msg warn">${w.map((x) => `<div><b class="w">&#9888;</b> ${esc(x)}</div>`).join('')}` +
+		(k && !k.same ? `<div><button class="small" data-eeo="${esc(k.entry)}" data-name="${esc(k.name)}" title="Open the level the game plays: ${esc(k.entry)} of EEO's campaigns.zip (Ctrl+Z brings this file back)">Use EEO's copy</button></div>` : '') +
+		`<div class="md5">this file: md5 ${esc(c.md5)}${k && !k.same ? ` · EEO's copy: md5 ${esc(k.eeoMd5)}` : ''}</div></div>`;
+}
+const levelFacts = (d) => `${d.width} × ${d.height} tiles, ${d.cells.length.toLocaleString('en-US')} blocks.${d.warnings && d.warnings.length ? ` Notes: ${esc(d.warnings.slice(0, 3).join('; '))}` : ''}${checkHtml(d.check)}`;
+/** "Use EEO's copy" (the level check's button, here and in the checks): EEO's own copy of that campaign level (GET
+ *  /api/levelcheck/eeo-copy) through the import path, one undo step */
+async function useEeoCopy(entry, name) {
+	lvMsg(`<span class="spin"></span>Opening EEO's own copy of <b>${esc(name)}</b>…`);
+	try {
+		const r = await fetch(`/api/levelcheck/eeo-copy?entry=${encodeURIComponent(entry)}`);
+		if (!r.ok) { const x = await r.json().catch(() => ({})); throw new Error(x.error || r.statusText); }
+		const d = await openEelvl(await r.arrayBuffer(), `${name} (EEO's copy).eelvl`, name);
+		jobClear();
+		lvMsg(`Opened <b>EEO's own copy of ${esc(name)}</b> (${esc(entry)} in campaigns.zip): ${levelFacts(d)} <b>Ctrl+Z</b> brings back the file you had.`);
+	} catch (e) { lvMsg(`Could not open EEO's copy: ${esc(e.message)}`, true); }
+}
+document.addEventListener('click', (e) => {
+	const b = e.target && e.target.closest ? e.target.closest('[data-eeo]') : null;
+	if (b) { e.preventDefault(); useEeoCopy(b.getAttribute('data-eeo'), b.getAttribute('data-name') || 'level'); }
+});
 $('fImport').onchange = async () => {
 	const f = $('fImport').files[0];
 	$('fImport').value = '';
@@ -1557,7 +1598,7 @@ async function loadGpu() {
 }
 async function runCheck() {
 	const v = editVersion;
-	try { CHECK = await postJson('/api/editor/check', { level: levelJson() }); } catch (e) { CHECK = { error: e.message }; }
+	try { CHECK = await postJson('/api/editor/check', { level: levelJson(), source: fileSource() }); } catch (e) { CHECK = { error: e.message }; }
 	renderChecks();
 	// (the physics check runs in the app's worker thread: ask again for its note, unless an edit asks anyway)
 	if (CHECK && CHECK.physicsPending && v === editVersion) { clearTimeout(checkT); checkT = setTimeout(runCheck, 1500); }
@@ -1585,6 +1626,13 @@ function renderChecks() {
 		else if (CHECK.reach === 'portals') rows.push(li('ok', '✓', 'The way to the trophy goes through portals (the search follows them)'));
 		else if (CHECK.reach === 'none') rows.push(li('no', '✕', 'The trophy is walled in: no open tiles lead from the start to it'));
 		for (const n of CHECK.notes || []) if (!/goes through portals|No start block/.test(n)) rows.push(li('warn', '!', esc(n)));
+		// the level check (src/levelcheck.js): EEO's own copy of a campaign level of this name and size (differs: "Use EEO's
+		// copy"), effect blocks that can never do anything
+		const lc = CHECK.levelCheck, k = lc && lc.campaign;
+		if (k && !k.same) {
+			rows.push(li('no', '!', `${esc(k.text)} <button class="small" data-eeo="${esc(k.entry)}" data-name="${esc(k.name)}" title="Open the level the game plays (Ctrl+Z brings this one back)">Use EEO's copy</button>`));
+		} else if (k) rows.push(li('ok', '✓', esc(k.text)));
+		for (const x of (lc && lc.noops) || []) rows.push(li('warn', '!', esc(x.text)));
 	}
 	const n = guidePoints().length;
 	rows.push(n >= 2 ? li('ok', '✓', `Guide line: ${GUIDE.strokes.length} stroke${GUIDE.strokes.length === 1 ? '' : 's'} (a hint, not a rail) · <a href="#" id="gClear">clear</a>`)
@@ -1608,7 +1656,7 @@ async function solve() {
 	$('solveWhy').textContent = '';
 	try {
 		const bytes = await eelvlBytes();
-		const body = { eelvlB64: b64(bytes), guide: guideForSearch(), seconds: +$('sSec').value || 60, width: +$('sWidth').value || 32768, name: LV.name };
+		const body = { eelvlB64: b64(bytes), guide: guideForSearch(), seconds: +$('sSec').value || 60, width: +$('sWidth').value || 32768, name: LV.name, source: fileSource() };
 		SOLVE.sig = currentSig(); store.set('eeat.editor.solveSig', SOLVE.sig);
 		SOLVE.st = await postJson('/api/editor/solve', body);
 		VW.play = null;
@@ -1641,7 +1689,7 @@ function renderSolve() {
 		if (st.physics && st.physics.noWayUp) h += `<div class="sst">The physics check finds no way up to the trophy; "every move" checks it without the check.</div>`;
 		// (the proof, eegpu prove: whether any route can exist at all)
 		if (st.proof && st.proof.state === 'running') h += `<div class="sst">Proof: checking whether any route can exist…</div>`;
-		else if (st.proof && st.proof.verdict === 'impossible' && !st.result) h += `<div class="sst"><b>Proven: no route exists.</b> The search ends once it has searched ${st.proof.checkS || 10} s (a check).</div>`;
+		else if (st.proof && st.proof.verdict === 'impossible' && !st.result) h += `<div class="sst"><b>Proven: no route exists</b> on this level (${esc(st.file || 'this file')}). The search ends once it has searched ${st.proof.checkS || 10} s (a check).</div>`;
 		h += `<div class="prog"><i style="width:${pct.toFixed(1)}%"></i></div>`;
 		h += `<div class="sst">tick <b>${(st.tick || 0).toLocaleString('en-US')}</b> (${fmt(st.tick || 0)} of play) · ${((st.ticksPerSec || 0) / 1e6).toFixed((st.ticksPerSec || 0) < 1e7 ? 1 : 0)} M moves/s</div>`;
 		if (st.strategies && st.strategies.length) {
@@ -1673,7 +1721,11 @@ function renderSolve() {
 			<div class="row"><button class="small" id="rEetas">Download .eetas</button><button class="small" id="rEelvl">Download .eelvl</button></div>
 			<div id="rMsg"></div></div>`;
 	} else if (!st.running && st.stage !== 'idle') {
-		h += `<div class="msg ${st.stage === 'error' ? 'err' : 'info'}">${st.stage === 'not found' ? (st.impossible ? '<b>No route.</b> ' : '<b>No route found.</b> ') : ''}${esc(st.message || st.stage)}</div>`;
+		// (the verdict names the level file's md5, src/editor.js finish(); a file that differs from EEO's own copy of a
+		// campaign level: "Use EEO's copy" next to it)
+		const k = st.stage === 'not found' && st.levelCheck && st.levelCheck.campaign;
+		h += `<div class="msg ${st.stage === 'error' ? 'err' : 'info'}">${st.stage === 'not found' ? (st.impossible ? '<b>No route.</b> ' : '<b>No route found.</b> ') : ''}${esc(st.message || st.stage)}` +
+			(k && !k.same ? ` <button class="small" data-eeo="${esc(k.entry)}" data-name="${esc(k.name)}">Use EEO's copy</button>` : '') + '</div>';
 	}
 	const c = !r && st.closest;
 	if (c) {
@@ -1747,7 +1799,7 @@ async function autotas() {
 	try {
 		const bytes = await eelvlBytes();
 		SOLVE.sig = currentSig(); store.set('eeat.editor.solveSig', SOLVE.sig);
-		AUTO.st = await postJson('/api/editor/autotas', { eelvlB64: b64(bytes), minutes: Math.max(0.5, (+$('sSec').value || 60) / 60), name: LV.name });
+		AUTO.st = await postJson('/api/editor/autotas', { eelvlB64: b64(bytes), minutes: Math.max(0.5, (+$('sSec').value || 60) / 60), name: LV.name, source: fileSource() });
 		VW.play = null;
 		pollSolve();
 		pollAuto();
@@ -1762,7 +1814,10 @@ async function pollAuto() {
 	const s = AUTO.st;
 	if (s && s.state && s.state !== 'none') {
 		const what = s.state === 'finding' ? 'finding a route' : s.state === 'optimizing' ? (s.handoff ? 'optimizing (the GPU is the optimizer\'s now)' : 'optimizing next to Find a route') : 'done: the run is paused with its best';
-		$('autoSt').innerHTML = `<div class="msg info">Find and optimize: ${what}${s.best != null ? ` · best ${fmt(s.best)}` : ''}${s.job ? ' · <a href="/" id="autoOpen">open the run</a>' : ''}</div>`;
+		// (ended without a run: why, e.g. Find a route's "no route" verdict, which names the level file's md5)
+		const end = !s.job && s.state === 'done' ? (s.events || []).filter((e) => e.ev === 'end').pop() : null;
+		$('autoSt').innerHTML = `<div class="msg info">Find and optimize: ${what}${s.best != null ? ` · best ${fmt(s.best)}` : ''}${s.job ? ' · <a href="/" id="autoOpen">open the run</a>' : ''}` +
+			`${end && end.why ? ` (${esc(end.why)})` : ''}</div>`;
 		if ($('autoOpen')) $('autoOpen').onclick = () => store.set('tasopt.sel', s.job);
 	}
 	$('bStop').hidden = !(SOLVE.st && SOLVE.st.running) && !(s && s.running);
