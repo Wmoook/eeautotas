@@ -45,6 +45,7 @@ const E = C.E;
 const RF = require('./reach.js');
 const G = require('./gpu.js');
 const BK = require('./blocks.js');
+const SF = require('./steer.js');
 
 // the burst's settings (explore --cqx --cqv --qy --qvy and --cap, the states kept per tick layer, nearest the targets first):
 // 1/16 px/tick speeds with 4 px positions (the relay from Infinity Pain's own states reached its long low-gravity
@@ -94,6 +95,17 @@ const UNTRIED = 1.5;
 const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
+// the plan arm (goexplore.js --planEvery, default 3; 0: off): on a level whose steer field has the coin DP (a coin door
+// the walk plan must pass), every k-th burst goes to the coin plan's FRONTIER: the room of the one search's nearest
+// attempt (by the steer field its DP value falls with every coin of the plan) while it holds fewer coins than the door
+// needs, aimed at the plan's next gate (steer.js nextGate from that attempt's state: the missing coin of the door that
+// cannot open yet), re-aimed after every switch (the gate is the plan's, never "tried"): on Good Egg new rooms keep coming
+// (2,214 in 45 min: purple switch sets x coin counts x the time doors) and the untried-first bandit gave the frontier room
+// one burst; every from-scratch run sat at 14 of 17 coins without the three portal-pocket coins
+// ((50, 72) -> (5, 186), each trip changed by a purple switch), the plan's next gate from there (src/out/night/n2_3_good_egg.md)
+const PLAN_BACK = [30, 150, 60, 400];
+// (the plan's gates tried per pick: its order's first PLAN_GATES untaken coins, the first the room's walk reaches)
+const PLAN_GATES = 6, PLAN_ROOMS = 4;
 const CUT = 0xffff;
 
 /** trigger components of level L: comp (Int32Array per tile, -1 = none), n (count) */
@@ -180,6 +192,12 @@ function create(o) {
 	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
+	// the plan arm (PLAN_BACK): the steer field with its coin DP (o.steer, goexplore.js's copy) and each coin bit's tile
+	const planEvery = o.steer && o.steer.dp && a.planEvery > 0 ? Math.round(a.planEvery) : 0;
+	const bitTile = new Map();
+	if (planEvery) for (let q = 0; q < N; q++) { const b = L.coinBit ? L.coinBit[q] : -1; if (b >= 0 && !bitTile.has(b)) bitTile.set(b, q); }
+	const plan = { picks: 0, bursts: 0, reached: 0, back: 0, last: null, rot: 0, why: {} };
+	const no = (w) => { plan.why[w] = (plan.why[w] || 0) + 1; return null; };
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
 	 *  want different cells): each once, then its mean reward in the room (the level's mean as a prior worth 2 tries) +
 	 *  CONF_C x sqrt(ln(1 + the room's bursts) / tries) */
@@ -207,7 +225,7 @@ function create(o) {
 	const entry = (r, tile) => {
 		if (!(tile >= 0 && tile < N) || r.entries.has(tile)) return;
 		r.entries.add(tile);
-		if (r.info && !r.info.seen[tile]) { r.info = null; r.fc = null; r.done = false; r.pa.fc = null; r.pa.done = false; }
+		if (r.info && !r.info.seen[tile]) { r.info = null; r.fc = null; r.done = false; r.pa.fc = null; r.pa.done = false; r.planF = null; r.plan = undefined; }
 	};
 	/** a room (from a worker, a burst or the start): {room (key), desc, tile, t, inputs} */
 	const room = (m) => {
@@ -384,6 +402,92 @@ function create(o) {
 			}
 		}
 		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
+	};
+	/** room r's walk field (fifths) to the goal tiles `goals` alone (the plan arm's gate), through portals, the room's
+	 *  other triggers no way through (as fieldOf0); null when the room's walk does not reach them */
+	const goalField = (r, goals) => {
+		const I = infoOf(r);
+		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
+		let qh = 0, qt = 0, mx = 0;
+		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
+		while (qh < qt) {
+			const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+			const src = PT.srcOf.get(t);
+			if (src) for (const p of src) if (walk[p] === CUT && I.pass[p] && !I.term[p]) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (walk[j] !== CUT || !I.pass[j] || I.term[j]) continue;
+					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
+					walk[j] = d; if (d > mx) mx = d; q[qt++] = j;
+				}
+			}
+		}
+		let any = false;
+		for (let t = 0; t < N && !any; t++) if (I.seen[t] && walk[t] !== CUT) any = true;
+		return any ? { walk, mx, triggers: goals.length, trophies: 0 } : null;
+	};
+	/** the coin plan's gates from room r's first arrival: its untaken coins in the plan's order (steer.js nextGate's
+	 *  choice first: the leg from there + the rest of the tour), the room's coin count (null: no plan here) */
+	const planOf = (r) => {
+		if (r.plan !== undefined) return r.plan;
+		r.plan = null;
+		let sim;
+		try { sim = simAt(r.inputs); } catch (e) { return null; }
+		const D = o.steer.dp;
+		if (sim.is_dead || !(sim.coins < D.T)) return null;
+		let m = 0;
+		for (let i = 0; i < D.n; i++) { const b = D.bit[i]; if (b >= 0 && ((sim._coinBits[b >> 5] >>> (b & 31)) & 1) === 1) m |= 1 << i; }
+		const cand = [];
+		for (let q = 0; q < D.n; q++) {
+			if (m & (1 << q)) continue;
+			const rest = D.h[(m | (1 << q)) * D.n + q];
+			if (!(rest < Infinity)) continue;
+			const c = RF.fifthsAt(o.steer.bodies[D.leg[q]], sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
+			const tile = bitTile.get(D.bit[q]);
+			if (tile !== undefined) cand.push({ tile, v: (c < 0 || c >= CUT - 1 ? 1e7 : c) + rest });
+		}
+		cand.sort((x, y) => x.v - y.v);
+		r.plan = cand.length ? { coins: sim.coins, cand } : null;
+		return r.plan;
+	};
+	/** the plan arm's next burst (PLAN_BACK): {r (a frontier room), f (its walk field to the gate), gate (tile)} or null.
+	 *  The frontier: the rooms holding the most coins (below the door's count), newest first, taken in turn (PLAN_ROOMS);
+	 *  per room the first of its plan's gates (PLAN_GATES) its walk reaches (its doors as they are: a coin behind a
+	 *  switch's door waits for the room the switch makes). Not the nearest attempt's room: on Good Egg that attempt (coins
+	 *  14, the steer field's 314 tiles) was a dead end (4 cells in 170 M ticks from its state), where the trophy arm's
+	 *  and the breaker's starts sat */
+	const planPick = () => {
+		const list = [];
+		for (const r of rooms.values()) {
+			if (r.busy) continue;
+			const mc = /\bcoins=(\d+)/.exec(r.desc || '');
+			list.push({ r, c: mc ? +mc[1] : 0 });
+		}
+		if (!list.length) return no('room');
+		list.sort((x, y) => y.c - x.c || y.r.seq - x.r.seq);
+		const top = list.slice(0, PLAN_ROOMS);
+		for (let k = 0; k < top.length; k++) {
+			const r = top[(plan.rot + k) % top.length].r;
+			const pl = planOf(r);
+			if (!pl) continue;
+			if (!r.planF) r.planF = new Map();
+			for (const cd of pl.cand.slice(0, PLAN_GATES)) {
+				let g = r.planF.get(cd.tile);
+				if (g === undefined) {
+					// (the gate's trigger component: the tiles the walk reaches it by)
+					const c = TR.comp[cd.tile], goals = [];
+					if (c >= 0) { for (let t = 0; t < N; t++) if (TR.comp[t] === c) goals.push(t); } else goals.push(cd.tile);
+					try { g = goalField(r, goals); } catch (e) { g = null; }
+					r.planF.set(cd.tile, g);
+				}
+				if (g) { plan.rot = (plan.rot + k + 1) % Math.max(1, top.length); return { r, f: g, gate: cd.tile }; }
+			}
+		}
+		return no('field');
 	};
 	/** every worker's cell of room r nearest the field's goals (the nearest of all; null when none has one) */
 	const nearestCell = (r, walk) => new Promise((res) => {
@@ -572,7 +676,13 @@ function create(o) {
 			const left = a.seconds - now;
 			if (left < 3) break;
 			let job = null;
-			const p = next ? null : pick();
+			let p = null;
+			if (!next) {
+				// (the plan arm: every planEvery-th burst, the coin plan's frontier room aimed at its next gate)
+				plan.picks++;
+				if (planEvery && plan.picks % planEvery === 0) p = planPick();
+				if (!p) p = pick();
+			}
 			if (next) {
 				job = Object.assign(next, { seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))) });
 				next = null;
@@ -585,14 +695,17 @@ function create(o) {
 				// (a cell of this room standing on a target: that trigger does not change the room from here: tried, and no burst)
 				if (cell && cell.v === 0 && cell.tile >= 0 && TR.comp[cell.tile] >= 0 && !TR.eaten[TR.comp[cell.tile]] && !r.tried.has(TR.comp[cell.tile])) { r.tried.add(TR.comp[cell.tile]); st.skipped++; r.busy = false; continue; }
 				r.lastField = p.f;
-				const k = r.k++;
+				const k = p.gate !== undefined ? plan.back++ : r.k++;
 				let inputs = cell ? cell.inputs : r.inputs, v = cell ? cell.v : p.f.walk[r.tile];
-				const back = BACK[k % BACK.length];
+				const back = p.gate !== undefined ? PLAN_BACK[k % PLAN_BACK.length] : BACK[k % BACK.length];
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
+				if (p.gate !== undefined) { plan.bursts++; plan.last = p.gate; }
 				job = { lane, r, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
-					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
+					startDist: v / 5, chain: 0, plan: p.gate !== undefined,
+					what: p.gate !== undefined ? `the plan: room "${r.desc}" -> the coin (${p.gate % W}, ${(p.gate / W) | 0}), settings ${ci}, ${back} back`
+						: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
@@ -636,13 +749,14 @@ function create(o) {
 			oom = 0;
 			fails = 0;
 			st.bursts++; st.sec += r.sec; if (r.reached) st.reached++; st.newRooms += r.fresh;
+			if (job.plan && r.reached) plan.reached++;
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
 			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
 			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
-				reached: r.reached, changed: r.changed, newRooms: r.fresh, dist: Number.isFinite(r.near) ? Math.round(r.near * 10) / 10 : null, startDist: Math.round(job.startDist * 10) / 10,
+				plan: job.plan ? 1 : undefined, reached: r.reached, changed: r.changed, newRooms: r.fresh, dist: Number.isFinite(r.near) ? Math.round(r.near * 10) / 10 : null, startDist: Math.round(job.startDist * 10) / 10,
 				states: r.states, layers: r.layers, reward: Math.round(reward * 100) / 100, chain: job.chain || 0, at: o.sec() });
 			// the chain: nearer without reaching a target: on from its nearest attempt, the same targets (the same steer file)
 			if (!r.reached && r.best && Number.isFinite(r.near) && r.near < job.startDist - 1 && job.chain < CHAIN_MAX) {
@@ -679,7 +793,7 @@ function create(o) {
 			for (const ch of children) { try { ch.kill(); } catch (e) { /* gone */ } }
 			if (loopP) await loopP;
 		},
-		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' ') }, st),
+		stats: () => Object.assign({ rooms: rooms.size, triggers: TR.n, confs: confs.map((c) => `${c.n}:${c.n ? (c.y / c.n).toFixed(2) : '-'}`).join(' '), plan: planEvery ? { bursts: plan.bursts, reached: plan.reached, last: plan.last, why: plan.why } : null }, st),
 	};
 }
 
