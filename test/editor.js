@@ -38,7 +38,8 @@
 //   escape     the stall escape (the real src/goexplore.js --prefix next to a stand-in CPU search that stalls): the escape
 //              from the nearest attempt 60 ticks back routes, on half the workers (the stalled search parks the rest and
 //              gets them back), its attempts into the stalled search's archive; the rotation: a nearest attempt in a pit (the
-//              first escape ends there), the next from 600 ticks back routes; escape: false = none
+//              first escape ends there), the next from 600 ticks back routes; the frontier (a short nearest attempt by the
+//              spawn: the escape starts from a room's long attempt); escape: false = none
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
@@ -1651,6 +1652,7 @@ const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 say({ ev: 'start', workers: 4, seeds: [1, 2, 3, 4], mode: 'physics', cells: 'coarse', startCost: 40 });
 setTimeout(() => say({ ev: 'closest', dist: SC.dist, tick: SC.attempt.length, inputs: SC.attempt }), 200);
+if (SC.source) setTimeout(() => say({ ev: 'source', kind: 'room', room: 777, desc: 'coins=1', gain: 5, tick: SC.source.length, dist: SC.dist + 20, inputs: SC.source }), 300);
 const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: SC.dist, found: 0, refined: 0, workers: 4, rooms: 1 }), 300);
 const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
 let buf = '';
@@ -1683,9 +1685,9 @@ async function escapeSection() {
 	const endTile = (ms) => { const sim = new E.EESim(L); sim.reset(); const inp = new E.EEInput(); for (const m of ms) { E.applyMask(inp, m); sim.tick(inp); } return [Math.trunc(sim.px + 8) >> 4, Math.trunc(sim.py + 8) >> 4]; };
 	const fake = path.join(HOME, 'fake-cpu-stall.js');
 	fs.writeFileSync(fake, FAKE_CPU_STALL);
-	const scenario = async (name, attempt, dist, seconds) => {
+	const scenario = async (name, attempt, dist, seconds, source) => {
 		const sc = path.join(HOME, `esc_${name}.json`), stdinLog = path.join(HOME, `esc_${name}_stdin.log`);
-		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog }));
+		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog, ...(source ? { source: str(source) } : {}) }));
 		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1 });
 		const t0 = Date.now();
 		let st = ED.state();
@@ -1735,7 +1737,15 @@ async function escapeSection() {
 		x2 === 30 && y2 > 25 && !!res2 && !!E2 && res2.strategy === E2.label && !!rv2 && rv2.runTicks === res2.runTicks && !!r2.st.escape && r2.st.escape.runs === 2 &&
 		res2.inputs.startsWith(str(a2.subarray(0, a2.length - 600))) && !res2.inputs.startsWith(str(a2.subarray(0, a2.length - 60))),
 		res2 ? `${res2.time} after ${res2.foundAfter} s, ${r2.st.escape.runs} escapes; ${(r2.st.log || []).filter((l) => /escape/.test(l)).slice(-3).join(' | ')}` : `no route (${r2.st.stage}); ${(r2.st.log || []).slice(-4).join(' | ')}`);
-	// (3) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
+	// (3) the frontier: the nearest attempt by the search's measure a short one by the spawn (110 ticks idle), a room's
+	// attempt far longer (it runs right to x 24): the escape starts from the room's attempt, not from near the start
+	const a4 = run([[0, 110]]), s4 = run([[0, 60], [4, 95]]);
+	const r4 = await scenario('front', a4, 5, 60, s4);
+	const res4 = r4.st.result;
+	check('the frontier: no escape from a short nearest attempt by the spawn (under half the longest attempt): it starts from the room\'s long attempt 60 ticks back, and routes',
+		!!res4 && res4.inputs.startsWith(str(s4.subarray(0, s4.length - 60))) && (r4.st.log || []).some((l) => /from tick 95 of room "coins=1"'s nearest attempt/.test(l)),
+		res4 ? `${res4.time}; ${(r4.st.log || []).filter((l) => /escape/.test(l)).slice(0, 1).join(' | ')}` : `no route (${r4.st.stage}); ${(r4.st.log || []).slice(-3).join(' | ')}`);
+	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 30, width: 1024, workers: 4, escape: false }, { available: false }, { cpu: [process.execPath, fake, sc3], escape: true, escWait: 1 });
