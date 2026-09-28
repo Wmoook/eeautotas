@@ -197,7 +197,8 @@
 //        cell off the route's (room, tile) schedule by its key-blind lead, the route's first tick at its tile in any room:
 //        a skipped room, another coin / switch subset or another path that gets somewhere sooner; 0: off)] [--wPhase=0
 //        (time-door levels: 1 keys head W's schedule per (tile, the doors' phase bucket); 0: per tile at any phase)] [--wYield=1
-//        (head W's share follows its yield like head L's; 0: --pW all the time)]
+//        (head W's share follows its yield like head L's; 0: --pW all the time)] [--wLead=1 (a faster route from a head-W
+//        pick restarts head L's grace too; 0: only head L's own routes)]
 //        [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
@@ -236,9 +237,10 @@ const SEED_EVERY = 30;
 // Fox: none in 15 min, while heads A / B found main's 7,680 -> 6,789 at 630-834 s: src/out/night/macro_fix.md)
 const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 // head W (a route known, the path gap: another WAY): a cell off head L's schedule gets the key-blind lead = its tick - the
-// best route's first tick at its tile in any room (on time-door levels: in the same doors' phase bucket); WAY_PICK x
-// sqrt(its picks): 25 picks cost 200 ticks of lead (a region ahead but walled in by a door the route opened runs out
-// sooner than head L's)
+// best route's first tick at its tile in any room (at any phase of the time doors: --wPhase=1 keys it by the phase
+// bucket like head L's, which on Stupid Fox left head W almost nothing: 10,727 vs 5,717 per tile, main 10,529,
+// src/out/night/n2_2_head_W.md); WAY_PICK x sqrt(its picks): 25 picks cost 200 ticks of lead (a region ahead but
+// walled in by a door the route opened runs out sooner than head L's)
 const WAY_PICK = 40;
 // (--wYield=1: head W's share follows its yield like head L's: --pW for LEAD_GRACE_S after the first route and after
 // every faster route that descends from a head-W pick, then halved every LEAD_HALF_S down to LEAD_FLOOR x --pW;
@@ -910,14 +912,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// On time-door levels the schedule is per (room, tile, the doors' phase bucket: the cell key's, --phase ticks): a lead
 	// then keeps the doors' phase (whole periods sooner, within a bucket), where by (room, tile) alone a cell "ahead" by a
 	// part of a period meets the doors the route passed open shut (Stupid Fox: leads of 625 and 1,351 ticks, doomed).
-	// head W (--pW of the picks head L leaves): a cell off that schedule, by its key-blind lead (tsched: per tile, and per
-	// phase bucket on time-door levels, the route's first tick there in any room): a skipped room, another coin / switch
-	// subset or another path in a room that gets somewhere sooner than the best route did is pushed on, where head L sees
-	// nothing (cycle 6 after the first route: Stupid Fox 3,749 vs 6,114, Octorage 7,039 vs 7,194)
+	// head W (its yield-following share of the picks head L leaves, --pW at most): a cell off that schedule, by its
+	// key-blind lead (tsched: per tile the route's first tick there in any room, at any phase; --wPhase=1: per phase
+	// bucket too): a skipped room, another coin / switch subset or another path in a room that gets somewhere sooner than
+	// the best route did is pushed on, where head L sees nothing (after the first route, 15 min, 1 worker, 2 pairs each:
+	// Stupid Fox 5,184 / 5,883 vs main 10,171 / 10,148 (the door-free way), Octorage 7,861 / 7,872 vs 7,951 / 7,897,
+	// Egg Quest II 19,316 / 19,285 vs 19,288 / 19,297: src/out/night/n2_2_head_W.md)
 	let sched = null, tsched = null;
 	const TDL = coarse && !!L.hasTimeDoors, clock0 = sim.level_ticks(), NPH = Math.ceil(E.TIMEDOOR_PERIOD / a.phase);
 	const phaseOf = (lt) => ((lt % E.TIMEDOOR_PERIOD) / a.phase) | 0;
-	// (head W's schedule per (tile, phase bucket) on time-door levels; --wPhase=0: per tile at any phase)
+	// (head W's schedule per (tile, phase bucket) on time-door levels with --wPhase=1; the default 0: per tile)
 	const WTD = TDL && a.wPhase !== 0;
 	const leadHeap = () => heapOf((c) => c.lead + LEAD_PICK * Math.sqrt(c.picks));
 	const wayHeap = () => heapOf((c) => c.wlead + WAY_PICK * Math.sqrt(c.picks));
