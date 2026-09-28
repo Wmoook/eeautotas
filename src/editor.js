@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const BU = require('./bursts.js');     // (roomAim: the wall breaker's room target, roomGate)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -1026,6 +1027,51 @@ function breakGate(inputs) {
 		return { x: t % cur.level.width, y: Math.floor(t / cur.level.width), reach };
 	} catch (e) { return null; }
 }
+// The room's next target (the guidance study, 2026-09-28): where the coin plan gives no gate (no steer field, a late
+// one, or one with no value there: Forgotten Helix's has none at the start), a breaker run aims at the targets the
+// state's own room reaches (bursts.js roomAim: the walk with the doors as that room holds them, killing tiles closed,
+// portals forward; its goals the triggers whose touch makes a room the search has not seen, and the trophy), not at
+// the trophy by the reach field's walk through every door. On Forgotten Helix that walk ranked a viewing pocket behind
+// two 16-coin doors (15 coins in the level) nearest of all, and every breaker round went there (58 runs, 'nothing
+// nearer, no new room'), while the frontier (3 coins) needed coin 4. Its closest attempt on a goal is a gate as with the
+// coin plan (GATE_AT). No such target: the trophy, as before. `b.roomGate === false`: off.
+function roomGate(inputs) {
+	if (!cur || !cur.opts.roomGate || !cur.reachLookup) return null;
+	try {
+		const L = cur.level;
+		if (!cur.roomAimT) cur.roomAimT = { RM: GX.roomOf(L), TR: BU.triggersOf(L), PT: BU.portalsOf(L), fp: G.blobFp(G.levelBlob(L)), n: 0 };
+		const T = cur.roomAimT;
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		if (sim.is_dead) return null;
+		const known = (k) => sources.has(k) || (!!brk && brk.seen.has(k));
+		const aim = BU.roomAim(L, T.RM, sim, known, T);
+		if (!aim || !(aim.start < RF.CUT)) return null;
+		const reach = path.join(dir(), `gate_room_${T.n++ % 8}.rch3`);
+		const f = Object.assign({}, cur.reachLookup, { mode: 'walk', walk: aim.walk, prioShift: Math.max(0, (32 - Math.clz32(aim.mx)) - 12) });
+		RF.writeReachFile(f, reach, T.fp);
+		return { x: aim.x, y: aim.y, reach, room: true, goals: aim.goals.length };
+	} catch (e) { return null; }
+}
+/** the coins the state after inputs holds, as the room keys count them (gold where a coin door or gate reads them, blue
+ *  where a blue one does; goexplore.js roomOf): the wall breaker's progress order of its starting points */
+function coinsOf(inputs) {
+	const L = cur.level;
+	if (!cur.countDoors) {
+		let gold = false, blue = false;
+		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
+		cur.countDoors = { gold, blue };
+	}
+	const D = cur.countDoors;
+	if (!D.gold && !D.blue) return 0;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+	return (D.gold ? sim.coins | 0 : 0) + (D.blue ? sim.blue_coins | 0 : 0);
+}
+/** a room's coins from its description (goexplore.js roomOf desc: 'coins=N', 'bluecoins=N' where a door reads them) */
+const coinsOfDesc = (desc) => { let n = 0; for (const m of String(desc || '').matchAll(/(?:^|\s)(?:blue)?coins=(\d+)/g)) n += +m[1]; return n; };
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1042,27 +1088,34 @@ function breakProgress(why) {
 function breakStarts() {
 	// (breakFrom, the measurements' walls: the one starting point of the first round)
 	if (cur.opts.breakFrom) return brk.rounds ? [] : [{ inputs: cur.opts.breakFrom, what: 'the given start', dist: 0, key: 'from', room: undefined }];
+	// (the progress order, `breakProg`: the candidates' coins held first, the most first (a coin-sequence level's frontier:
+	// Forgotten Helix's rounds started from its viewing pocket at 0 coins, the trophy-nearest attempt by a walk through
+	// every door, and from rooms 0-2, while the search's frontier held 3 coins); among equals the order as before. No
+	// coin door (no coins in the room keys): the order as before)
+	const prog = cur.opts.breakProg, lim = prog ? 4 * BREAK_STARTS : BREAK_STARTS;
 	const out = [], seen = new Set();
-	const add = (inputs, keep, what, dist, room) => {
+	const add = (inputs, keep, what, dist, room, coins) => {
 		keep = Math.min(keep, inputs.length);
-		if (out.length >= BREAK_STARTS || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
+		if (out.length >= lim || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen.has(key) || brk.tried.has(key)) return;
 		seen.add(key);
-		out.push({ inputs: pre, what, dist, key, room });
+		out.push({ inputs: pre, what, dist, key, room, coins: prog ? (coins !== undefined ? coins : coinsOf(pre)) : 0, n: out.length });
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
-	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
+	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined, Infinity);
 	const c = S.closest;
 	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
-		if (out.length >= BREAK_STARTS) break;
-		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room);
-		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room);
+		if (out.length >= lim) break;
+		const k = coinsOfDesc(r.desc);
+		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k);
+		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k);
 	}
-	return out;
+	if (prog) out.sort((x, y) => y.coins - x.coins || x.n - y.n);
+	return out.slice(0, BREAK_STARTS);
 }
 /** every 5 s (checkStalls): a stalled search starts a round of the wall breaker */
 function breakKick() {
@@ -1118,7 +1171,7 @@ function breakLaunch(n) {
 	}
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
-	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
+	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs) || roomGate(ch.inputs);
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
@@ -1127,7 +1180,7 @@ function breakLaunch(n) {
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, passes: (V.passes || 0) + 1,
-		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to the coin at (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${BREAK_GRAIN_TEXT[ch.grain]} px/tick, 2^${cellLog} of them` });
+		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to ${ch.gate.room ? `the room's next target${ch.gate.goals > 1 ? ` (of ${ch.gate.goals} goal tiles)` : ''} at` : 'the coin at'} (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${BREAK_GRAIN_TEXT[ch.grain]} px/tick, 2^${cellLog} of them` });
 	kids[n] = launch(n);
 	return true;
 }
@@ -1390,7 +1443,8 @@ function start(b, gpu, test) {
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
+		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
+		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],

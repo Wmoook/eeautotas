@@ -700,4 +700,101 @@ function create(o) {
 	};
 }
 
-module.exports = { create, triggersOf, portalsOf, CONFS };
+/**
+ * roomAim(L, RM, sim, known, T) -> {walk (Uint16Array, fifths: 5 a step), mx, goals (tiles), x, y (the nearest goal's
+ * tile from the ball), n (goal components)} or null: the room's NEXT TARGETS from the ball's state (the wall breaker's
+ * stall target where no coin plan gives one; the guidance study of Forgotten Helix, 2026-09-28: its breaker aimed at
+ * the trophy by a walk through every door and so at a viewing pocket behind two 16-coin doors that never open, while
+ * the search's frontier (3 coins) needed coin 4). The walk: 8-way from the ball's tile, through portals forward, doors
+ * as the ball's room holds them (sim.is_tile_solid_now), killing tiles closed unless the ball is protected (the bursts'
+ * infoOf passable set). Its goals: the trigger components (triggersOf) it reaches whose touch (the ball's state, its
+ * centre on the tile, one tick without input: the bursts' test) changes the room into one the search has not seen yet
+ * (known(key) false; coins already taken are none), and the trophy where the walk reaches it. A trigger that changes
+ * the room into a KNOWN room is a way through (the walk goes on: past a low-gravity reset the next coin may lie). The
+ * field is the walk backwards from the goals (portals backwards, 5 a portal: src/reach.js's units). Only an order: the
+ * breaker's explore keeps every state its table holds; nothing is pruned by it. T: {TR, PT} (triggersOf, portalsOf; made
+ * when not given).
+ */
+function roomAim(L, RM, sim, known, T) {
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const TR = (T && T.TR) || triggersOf(L), PT = (T && T.PT) || portalsOf(L);
+	const pass = new Uint8Array(N), wall = new Uint8Array(N);
+	for (let k = 0; k < N; k++) {
+		const id = fg[k], f = id >= 0 && id < fl.length ? fl[id] : 0;
+		const door = (f & 1) !== 0 && (f & 16) !== 0;
+		const solid = (f & 1) !== 0 && (f & (2 | 4 | 8)) === 0 && !door;
+		const deadly = id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0;
+		wall[k] = solid ? 1 : 0;
+		pass[k] = solid ? 0 : door ? (sim.is_tile_solid_now(k % W, (k / W) | 0) ? 0 : 1) : deadly && !sim.is_invulnerable ? 0 : 1;
+	}
+	const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+	const key0 = RM.key(sim), cz0 = RM.cause(sim), snap0 = sim.snapshot(), inp0 = new E.EEInput(), acts = new Map();
+	/** touching component c at tile t: 2 = into a room not seen yet, 1 = into a known room, 0 = no change */
+	const act = (c, t) => {
+		let v = acts.get(c);
+		if (v === undefined) {
+			sim.restore(snap0);
+			sim.px = (t % W) * 16; sim.py = ((t / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0;
+			try {
+				sim.tick(inp0);
+				if (sim.is_dead) v = 0;
+				else if (!RM.byTrigger(cz0, RM.cause(sim))) v = 0;
+				else { const k2 = RM.key(sim); v = k2 === key0 ? 0 : known(k2) ? 1 : 2; }
+			} catch (e) { v = 0; }
+			sim.restore(snap0);
+			acts.set(c, v);
+		}
+		return v;
+	};
+	const seen = new Uint8Array(N), term = new Uint8Array(N), q = new Int32Array(N);
+	let qh = 0, qt = 0;
+	seen[s0] = 1; q[qt++] = s0; pass[s0] = 1;
+	const goals = [], comps = new Set();
+	let first = -1;
+	while (qh < qt) {
+		const t = q[qh++], x = t % W, y = (t / W) | 0;
+		const c = TR.comp[t];
+		if (t !== s0 && fg[t] === 121) { goals.push(t); term[t] = 1; if (first < 0) first = t; continue; }
+		if (c >= 0 && t !== s0 && !(TR.eaten[c] && sim.is_coin_collected(x, y))) {
+			const v = act(c, t);
+			if (v === 2) { goals.push(t); comps.add(c); term[t] = 1; if (first < 0) first = t; continue; }
+		}
+		const ex = PT.exits.get(t);
+		if (ex) for (const e of ex) if (!seen[e] && pass[e]) { seen[e] = 1; q[qt++] = e; }
+		for (let dy = -1; dy <= 1; dy++) {
+			for (let dx = -1; dx <= 1; dx++) {
+				if (!dx && !dy) continue;
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const j = yy * W + xx;
+				if (seen[j] || !pass[j]) continue;
+				if (dx && dy && wall[y * W + xx] && wall[yy * W + x]) continue;
+				seen[j] = 1; q[qt++] = j;
+			}
+		}
+	}
+	if (!goals.length) return null;
+	const walk = new Uint16Array(N).fill(CUT);
+	let mx = 0;
+	qh = 0; qt = 0;
+	for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
+	while (qh < qt) {
+		const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+		const src = PT.srcOf.get(t);
+		if (src) for (const p of src) if (walk[p] === CUT && pass[p] && !term[p]) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
+		for (let dy = -1; dy <= 1; dy++) {
+			for (let dx = -1; dx <= 1; dx++) {
+				if (!dx && !dy) continue;
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const j = yy * W + xx;
+				if (walk[j] !== CUT || !pass[j] || term[j]) continue;
+				if (dx && dy && wall[y * W + xx] && wall[yy * W + x]) continue;
+				walk[j] = d; if (d > mx) mx = d; q[qt++] = j;
+			}
+		}
+	}
+	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
+}
+
+module.exports = { create, triggersOf, portalsOf, roomAim, CONFS };
