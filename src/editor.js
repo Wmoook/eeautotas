@@ -1232,13 +1232,15 @@ function stallCegarCheck() {
 		sim.reset();
 		for (let t = 0; t < d.masks.length; t++) { E.applyMask(inp, d.masks[t] & 31); sim.tick(inp); }
 		const bl = SF.stallBlocker(st0, sim, d.entered, d.K);
-		if (!bl || !bl.tiles.length) { parentPort.postMessage({ none: true }); return; }
+		if (!bl || !bl.tiles.length) parentPort.postMessage({ none: true });
+		else {
 		const st = SF.buildSteer(L, Object.assign({}, d.o0, { refute: { tiles: bl.tiles, modeled: d.modeled.length ? d.modeled : (st0.info ? st0.info.features : st0.feats.map((f) => f.key)) } }));
 		let lfp = null;
 		try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 		const b = SF.steerFileBytes(st, lfp);
 		fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file);
-		parentPort.postMessage({ refuted: st.info.refuted, features: st.info.features, layers: st.info.layers, dp: st.info.dp, walls: st.info.walls, ms: st.info.ms, bytes: b.length, tiles: bl.tiles.length, stuck: bl.stuck });`;
+		parentPort.postMessage({ refuted: st.info.refuted, features: st.info.features, layers: st.info.layers, dp: st.info.dp, walls: st.info.walls, ms: st.info.ms, bytes: b.length, tiles: bl.tiles.length, stuck: bl.stuck });
+		}`;
 	const gen = searchGen, t0 = Date.now();
 	let w;
 	try {
