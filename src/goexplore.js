@@ -565,6 +565,104 @@ function rngOf(seed) {
 	};
 }
 const fmix = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); return h ^ (h >>> 16); };
+/** one word into a room / discrete hash (roomOf, discreteOf): h = (h ^ v) x 0x5bd1e995, then h ^= h >>> 13 */
+const mixW = (h, v) => { h = Math.imul(h ^ v, 0x5bd1e995); return h ^ (h >>> 13); };
+
+/**
+ * The archive's cell index: a Map of cell key (a 53-bit number, hashKV's) -> cell with Map's semantics where explore
+ * uses them (get, set, delete, size, values(), entries in insertion order; an entry deleted while its iteration runs is
+ * skipped, a key deleted and set again goes to the end), without Map's costs: its double keys were a heap number each
+ * and a hash of their bits per lookup, at every simulated tick of the one search. Open addressing (linear probing,
+ * backward-shift deletion: no tombstones) over typed arrays: slot -> entry index; the entries in insertion order (keys in
+ * a Float64Array, values in an array; a deleted entry's value undefined, compacted in order when they pile up, never
+ * while an iteration runs: only set compacts and grows, and explore sets no cell while it iterates). The same order as
+ * a Map, so the sweeps and head L's pushes go in the same order and the search is the same (test/fastpath.js).
+ */
+class CellMap {
+	constructor() {
+		this.size = 0;
+		this.n = 0;   // entries appended (the deleted too)
+		this.ek = new Float64Array(1 << 12);
+		this.ev = new Array(1 << 12);
+		this.mask = (1 << 13) - 1;
+		this.tab = new Int32Array(1 << 13).fill(-1);
+	}
+	/** the home slot of key k: its high lane (hashKV: fmix of the first 32-bit lane x 2^21 + 21 bits of the second) */
+	home(k) { return ((k / 2097152) >>> 0) & this.mask; }
+	get(k) {
+		const tab = this.tab, ek = this.ek, m = this.mask;
+		for (let i = this.home(k); ; i = (i + 1) & m) {
+			const e = tab[i];
+			if (e < 0) return undefined;
+			if (ek[e] === k) return this.ev[e];
+		}
+	}
+	has(k) { return this.get(k) !== undefined; }
+	set(k, v) {
+		const tab = this.tab, ek = this.ek, m = this.mask;
+		let i = this.home(k);
+		for (; ; i = (i + 1) & m) {
+			const e = tab[i];
+			if (e < 0) break;
+			if (ek[e] === k) { this.ev[e] = v; return this; }
+		}
+		if (this.n === this.ek.length) { this.makeRoom(); return this.set(k, v); }
+		const e = this.n++;
+		this.ek[e] = k; this.ev[e] = v;
+		tab[i] = e;
+		if (++this.size * 2 > m + 1) this.rehash((m + 1) * 2);
+		return this;
+	}
+	delete(k) {
+		const tab = this.tab, ek = this.ek, m = this.mask;
+		let i = this.home(k), e;
+		for (; ; i = (i + 1) & m) {
+			e = tab[i];
+			if (e < 0) return false;
+			if (ek[e] === k) break;
+		}
+		this.ev[e] = undefined;
+		this.size--;
+		// backward-shift deletion: the entries after i in its probe run that may move into the hole do
+		for (let j = (i + 1) & m; ; j = (j + 1) & m) {
+			const f = tab[j];
+			if (f < 0) break;
+			const h = this.home(ek[f]);
+			if (i <= j ? (h <= i || h > j) : (h <= i && h > j)) { tab[i] = f; i = j; }
+		}
+		tab[i] = -1;
+		return true;
+	}
+	/** the entry arrays are full: drop the deleted entries (in order) when they are at least a quarter, else grow */
+	makeRoom() {
+		if (this.n - this.size >= this.n / 4) {
+			let w = 0;
+			for (let r = 0; r < this.n; r++) if (this.ev[r] !== undefined) { this.ek[w] = this.ek[r]; this.ev[w] = this.ev[r]; w++; }
+			for (let r = w; r < this.n; r++) this.ev[r] = undefined;
+			this.n = w;
+		} else {
+			const k2 = new Float64Array(this.ek.length * 2);
+			k2.set(this.ek);
+			this.ek = k2;
+			this.ev.length = k2.length;
+		}
+		this.rehash(this.mask + 1);
+	}
+	rehash(cap) {
+		this.mask = cap - 1;
+		const tab = this.tab = new Int32Array(cap).fill(-1), m = this.mask, ek = this.ek, ev = this.ev;
+		for (let e = 0; e < this.n; e++) {
+			if (ev[e] === undefined) continue;
+			let i = this.home(ek[e]);
+			while (tab[i] >= 0) i = (i + 1) & m;
+			tab[i] = e;
+		}
+	}
+	* values() { for (let e = 0; e < this.n; e++) { const v = this.ev[e]; if (v !== undefined) yield v; } }
+	* keys() { for (let e = 0; e < this.n; e++) if (this.ev[e] !== undefined) yield this.ek[e]; }
+	* entries() { for (let e = 0; e < this.n; e++) { const v = this.ev[e]; if (v !== undefined) yield [this.ek[e], v]; } }
+	[Symbol.iterator]() { return this.entries(); }
+}
 
 /** the discrete state's hash (what a cell tells apart besides the ball's motion): coins (and which ones), keys,
  *  switches, crowns, effects, checkpoint, team, the time-door phase, gates, death count (death doors), portal draws */
@@ -614,27 +712,28 @@ function roomOf(L) {
 		else if (id === 1094 || id === 1095) crown = true;
 		else if (id === 1152 || id === 1153) silver = true;
 	}
-	const onSum = (m, salt) => { let s = 0; for (const [id, v] of m) if (v === true) s = (s + fmix((id ^ salt) | 0)) | 0; return s; };
+	// (the sum of the switches on: a sum mod 2^32, so the Map's order does not matter; forEach makes no entry arrays)
+	const onSum = (m, salt) => { let s = 0; m.forEach((v, id) => { if (v === true) s = (s + fmix((id ^ salt) | 0)) | 0; }); return s; };
 	const onList = (m) => { const a = []; for (const [id, v] of m) if (v === true) a.push(id); return a.sort((x, y) => x - y); };
 	// (full: the room key; else the part of it only the ball's own touches change: without the keys, which expire, and the
-	// time doors, which flip on the clock)
+	// time doors, which flip on the clock. The live state's room at every simulated tick of the one search: mixW, a
+	// function of the module, instead of a closure over h per call; the same words in the same order)
 	const hash = (sim, full) => {
 		let h = 0x3c6ef372;
-		const w = (v) => { h = Math.imul(h ^ v, 0x5bd1e995); h ^= h >>> 13; };
-		if (full) w(sim._keysMask);
-		w((crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
+		if (full) h = mixW(h, sim._keysMask);
+		h = mixW(h, (crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
 			(sim.is_cursed ? 16 : 0) | (sim.is_zombie ? 32 : 0) | (sim.is_on_fire ? 64 : 0) | (sim.is_poisoned ? 128 : 0) | (sim.has_levitation ? 256 : 0) |
 			(full && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
-		w(sim.max_jumps); w(sim.jump_boost); w(sim.speed_boost); w(sim.flip_gravity);
-		if (team) w(sim.team);
-		if (coins) w(sim.coins);
-		if (L.hasCoinGate) w(sim._show_coin_gate);
-		if (blue) w(sim.blue_coins);
-		if (L.hasBlueCoinGate) w(sim._show_blue_coin_gate);
-		if (L.hasDeathDoor) w(sim.deaths);
-		if (L.hasDeathGate) w(sim._show_death_gate);
-		if (sim._switches.size !== 0) w(onSum(sim._switches, 0x1234567));
-		if (sim._oswitches.size !== 0) w(onSum(sim._oswitches, 0x7654321));
+		h = mixW(h, sim.max_jumps); h = mixW(h, sim.jump_boost); h = mixW(h, sim.speed_boost); h = mixW(h, sim.flip_gravity);
+		if (team) h = mixW(h, sim.team);
+		if (coins) h = mixW(h, sim.coins);
+		if (L.hasCoinGate) h = mixW(h, sim._show_coin_gate);
+		if (blue) h = mixW(h, sim.blue_coins);
+		if (L.hasBlueCoinGate) h = mixW(h, sim._show_blue_coin_gate);
+		if (L.hasDeathDoor) h = mixW(h, sim.deaths);
+		if (L.hasDeathGate) h = mixW(h, sim._show_death_gate);
+		if (sim._switches.size !== 0) h = mixW(h, onSum(sim._switches, 0x1234567));
+		if (sim._oswitches.size !== 0) h = mixW(h, onSum(sim._oswitches, 0x7654321));
 		return h | 0;
 	};
 	const key = (sim) => hash(sim, true);
@@ -1427,7 +1526,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1)
 		return hashKV(n);
 	};
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
-	const cells = new Map();
+	const cells = process.env.EEAT_CELLMAP === '0' ? new Map() : new CellMap();   // (EEAT_CELLMAP=0: a Map, the equality test)
 	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c));
 	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
 	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out.
@@ -3313,5 +3412,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { CellMap, mixW, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, roomFields, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
