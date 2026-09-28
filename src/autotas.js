@@ -240,7 +240,7 @@ module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MI
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
 	const file = process.argv.slice(2).find((x) => !x.startsWith('--'));
-	if (!file || !fs.existsSync(file)) { console.log('usage: node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1]\n(its job pauses any other running job, yours included: one job at a time)'); process.exit(2); }
+	if (!file || !fs.existsSync(file)) { console.log('usage: node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1] [--seed=1]\n(its job pauses any other running job, yours included: one job at a time)'); process.exit(2); }
 	const name = args.name || path.basename(file, path.extname(file));
 	const out = path.resolve(args.out || path.join(__dirname, 'out', 'autotas', name.replace(/[^\w.-]+/g, '_')));
 	const ctl = run({ eelvl: fs.readFileSync(file), minutes: args.minutes, workers: args.workers, name, out, handoffMin: args.handoffMin, cpu: args.cpu === '1',
