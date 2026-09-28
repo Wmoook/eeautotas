@@ -197,7 +197,9 @@ function reachField(level, opts) {
 	opts = opts || {};
 	const t0 = Date.now();
 	const f = reachField1(level, opts);
-	if (!f.livePortals || opts.portalForced || opts.liveOrder === false) return f;
+	// (not for the time-to-go fields to a reference route's positions, explore --hunt / sweep.js / routearm.js: opts.goals
+	// without portalForced; their values stay as they were, unless opts.liveOrder === true)
+	if (!f.livePortals || opts.portalForced || opts.liveOrder === false || (opts.goals && opts.liveOrder !== true)) return f;
 	const g = reachField1(level, Object.assign({}, opts, { portalForced: true, check: false, explain: false, debug: false }));
 	let raised = 0;
 	const merge = (a, b) => {
@@ -362,8 +364,11 @@ function reachField1(level, opts) {
 	// ---- live portals (scoreLivePortals): the portal tiles a ball is on only for one tick (a tick that starts there
 	// teleports it): the forced set above (with exits, not an exit, not 4-connected to an exit through portal tiles, so no
 	// ball keeps lastPortal there), always computed
+	// (none in the time-to-go fields to a reference route's positions: opts.goals without portalForced, whose goals are the
+	// route's own tiles, a live portal among them; the steer fields (goals with portalForced) score them)
 	let liveP = forcedP;
-	if (!opts.portalForced && portalExits.size) {
+	if (opts.goals && !opts.portalForced && opts.liveOrder !== true) liveP = new Uint8Array(N);
+	else if (!opts.portalForced && portalExits.size) {
 		liveP = new Uint8Array(N);
 		for (const i of portalExits.keys()) if (!srcOf.has(i)) liveP[i] = 1;
 		unforceChains(W, H, liveP, portalExits, srcOf);
