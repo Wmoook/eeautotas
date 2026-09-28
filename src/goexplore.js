@@ -3883,8 +3883,11 @@ async function main() {
 		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i] }, transferList: list,
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
-		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
-		w.on('exit', () => res());
+		// (a worker that dies (its V8 heap limit: ERR_WORKER_OUT_OF_MEMORY, a throw) says so with the heap numbers: the
+		// editor's supervisor logs the one search's end, src/editor.js oneEnded)
+		const heapNow = () => { const d = stats.get(seed) || {}; const m = process.memoryUsage(); return { heapMB: d.heapMB || 0, memMB: d.memMB || 0, cells: d.cells || 0, mainHeapMB: Math.round(m.heapUsed / 1048576), rssMB: Math.round(m.rss / 1048576) }; };
+		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}`, workerError: true, code: e && e.code ? e.code : null, ...heapNow() }); res(); });
+		w.on('exit', (code) => { if (code) say({ ev: 'warning', text: `worker ${seed} exited with code ${code}`, workerExit: code, ...heapNow() }); res(); });
 	}));
 	if (one && a.bursts) {
 		const BU = require('./bursts.js');
