@@ -70,7 +70,14 @@ const LEVEL_JSON = C.levelData(LEVEL_ID);
 fs.mkdirSync(INBOX, { recursive: true });
 fs.mkdirSync(PIECES, { recursive: true });
 const level = E.loadLevel(LEVEL_JSON);
-const W = +a.workers || os.cpus().length;
+const W_ALL = +a.workers || os.cpus().length;
+// the corridor beam's own CPU share (--flybeamShare=K or EEAT_FLYBEAM_SHARE=K threads; flybeamLane): K threads run
+// flybeam.js next to the stages for the whole session, the stages get the rest (W); 0 (the default): no lane
+const FLY_K = (() => {
+	const k = Math.floor(+(a.flybeamShare !== undefined ? a.flybeamShare : process.env.EEAT_FLYBEAM_SHARE || 0)) || 0;
+	return k > 0 && W_ALL >= 2 ? Math.min(k, W_ALL - 1) : 0;
+})();
+const W = W_ALL - FLY_K;
 // Find a route next to this job (the AutoTASer, src/autotas.js, until its handoff): while <job>/cpu_share is fresh (touched
 // every few seconds) a stage starts with the thread count in it instead of W
 const CPU_SHARE = path.join(OUT, 'cpu_share');
@@ -1019,7 +1026,7 @@ async function skipfindStage(round) {
  * --flybeam=1 (or EEAT_FLYBEAM=1).
  */
 async function flybeamStage(round) {
-	if (a.flybeam !== '1' && process.env.EEAT_FLYBEAM !== '1') return;
+	if (FLY_K || (a.flybeam !== '1' && process.env.EEAT_FLYBEAM !== '1')) return;
 	// (a join needs its whole task: Infinity Pain's shaft find took 1,115 layers at W 2048, 326 s on one loaded EPYC thread)
 	const secs = a.flybeamS ? +a.flybeamS : Math.max(150, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
 	if (deadline - Date.now() < (secs + 120) * 1000) return;
@@ -1032,6 +1039,41 @@ async function flybeamStage(round) {
 		`--order=stretch`, `--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], fo, (secs + 120) * 1000,
 		'every-move beam along the run own path, joined back exactly');
 	if (res) addResult(fo);
+}
+/**
+ * The corridor beam as a CPU share instead of a slice of the rounds (--flybeamShare=K, EEAT_FLYBEAM_SHARE=K): K threads
+ * run flybeam.js for the whole session, next to the stages (which get W = the workers - K), in calls of
+ * --flybeamShareS (600) s on their own copy of the best (`grind_flyref.eetas`: the stages' copy changes under them), the
+ * same starts, settings and stretch order as the stage (`grind_flybeam.json`); every call's find is offered at once
+ * (a stale one spliced with the best). A pass over every start of an unchanged best is not repeated (flybeam.js
+ * --wrap=0): the lane waits for a new best. Its first call comes at once, so the stretches it ranks first are searched
+ * in the session's first minutes, not after round 1's mutate and sweep (Infinity Pain from 39,410 at 3 threads: the
+ * stage's first slice ~25 min in).
+ */
+async function flybeamLane() {
+	const secs = Math.max(150, +a.flybeamShareS || 600);
+	const ref = path.join(OUT, 'grind_flyref.eetas');
+	const logFile = path.join(OUT, 'grind_flybeam_lane.log');
+	log(`flybeam lane: ${FLY_K} thread${FLY_K > 1 ? 's' : ''} for the corridor beam, ${W} for the stages`);
+	let k = 0, waitFor = -1;
+	while (FOREVER || Date.now() < deadline - (secs / 2 + 120) * 1000) {
+		if (waitFor >= 0 && best.runTicks === waitFor) { await new Promise((r) => setTimeout(r, 15000)); continue; }
+		waitFor = -1;
+		const s = FOREVER ? secs : Math.min(secs, Math.floor((deadline - Date.now()) / 1000) - 120);
+		const fo = path.join(OUT, `grind_flyb_lane${++k}.eetas`);
+		try { fs.unlinkSync(fo); } catch (e) { /* none */ }
+		C.writeEetas(ref, best.ms);
+		const from = best.runTicks;
+		log(`flybeam lane ${k} (${s} s on ${fmt(from)})...`);
+		const res = await runTool('flybeam.js', [`--tas=${ref}`, LVL, `--out=${fo}`, `--threads=${FLY_K}`, `--nocoins=${NC}`, `--seconds=${s}`,
+			`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 2048}`, `--timeS=${s}`,
+			`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`, '--order=stretch', '--wrap=0',
+			`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], (s + 120) * 1000, logFile);
+		if (fs.existsSync(fo)) { consider(fo, `flybeam lane ${k}`); addResult(fo); }
+		else log(`flybeam lane ${k}: nothing faster`);
+		if (res && /every start done/.test(res.out)) { waitFor = from; log('flybeam lane: every start of this best searched; waiting for a new best'); }
+		else if (!res || res.code !== 0) await new Promise((r) => setTimeout(r, 30000));
+	}
 }
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */
 async function shortcutsStage(round, R) {
@@ -1082,6 +1124,7 @@ async function main() {
 	if (a.gpu === '1') { log('GPU on: the GPU searcher runs next to the CPU stages'); startGpu(); }
 	checkInbox();
 	try { recoverOutputs(); } catch (e) { log(`earlier stage outputs: ${e && e.message || e}`); }
+	if (FLY_K) flybeamLane().catch((e) => log(`flybeam lane: ${e && e.stack || e}`));
 	// the round to continue: the one in progress when the grind stopped, else the next
 	const rounds = +status.rounds || (+a.rot || 0);
 	let round = cur.stage && cur.round > rounds ? cur.round : rounds + 1;

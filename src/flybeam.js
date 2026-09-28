@@ -28,7 +28,9 @@
 //   [--state=<file> (a pass continued across calls: the next start by tick + state hash)] [--cfg=<json list of setting
 //   overrides: each start runs every one>] [--out=<file.eetas> (written only when judged faster)] [--json=<file>]
 //   [--debug=<every N layers>] [--axes=1 (diagnostic: children whose x or y state alone equals a later run state)]
-//   [--order=stretch (with --starts: the starts by their longest low-contact stretch first; --state then keeps the starts done)]
+//   [--order=stretch (with --starts: the starts by their longest low-contact stretch first; --state then keeps the starts done;
+//   a start whose task the call's end cut short is not done)] [--wrap=0 (with --order=stretch: every start done = no search,
+//   "every start done"; default: the pass starts over)]
 const { Worker, isMainThread, workerData, parentPort } = require('worker_threads');
 const fs = require('fs');
 const C = require('./common.js');
@@ -173,9 +175,11 @@ function runTask(task) {
 		if (saving > bestSaving) bestSaving = saving;
 	};
 	const pr = { g: 0, d2: 0 };
+	let timeCut = false;
 	for (let k = 0; ; k++) {
 		const tick = A + k;           // the beam's states are at run tick A+k (after k inputs)
-		if (beam.length === 0 || tick >= Zend || beam[0].g >= Zend || (Date.now() - t0) / 1000 > task.timeS) break;
+		if (beam.length === 0 || tick >= Zend || beam[0].g >= Zend) break;
+		if ((Date.now() - t0) / 1000 > task.timeS) { timeCut = true; break; }
 		layers = k;
 		const cells = new Map(), cellsB = new Map();
 		const slots = [], slotsB = [];
@@ -336,6 +340,7 @@ function runTask(task) {
 	}
 	if (task.axes) console.error(`[flybeam ${task.name}] axis hits: x ${hitX} (max lead ${leadX}), y ${hitY} (max lead ${leadY})`);
 	return { A, B: task.B, name: task.name, cfg: task.cfg, layers, sims, direct, tails, bestSaving, maxLead, secs: (Date.now() - t0) / 1000,
+		callCut: timeCut && task.shortened === true,
 		found: [...found.values()] };
 }
 
@@ -382,11 +387,12 @@ async function main() {
 	// starts done (by their state hash: a start whose state the run still has is not searched again) until all are done
 	const STRETCH = a.order === 'stretch' && every > 0 && !a.startList;
 	let stateH = null, doneH = null;
+	const taskKey = (h, ci) => `${h}|${JSON.stringify(cfgs[ci])}`;
 	const trace = a.state || STRETCH ? traceRun(level, ms.slice(0, n), a.nocoins === '1') : null;
 	if (a.state) {
 		const st = C.readJSON(a.state, null);
 		stateH = trace.H;
-		if (STRETCH) doneH = new Set(st && Array.isArray(st.done) ? st.done : []);
+		if (STRETCH) doneH = new Set(st && Array.isArray(st.done) ? st.done.filter((x) => typeof x === 'string') : []);
 		else if (st && st.t >= 0) {
 			let t = Math.min(n - 1, st.t | 0);
 			for (let d = 0; d <= n; d++) {
@@ -403,14 +409,19 @@ async function main() {
 	else if (STRETCH) {
 		let rows = stretchOrder(trace.K, n, from, to, every);
 		if (doneH) {
-			const left = rows.filter((r) => !doneH.has(trace.H[r.s]));
+			// (done = per task: the start's state hash and the setting; a start with one setting done runs only the other)
+			const left = rows.filter((r) => cfgs.some((c, ci) => !doneH.has(taskKey(trace.H[r.s], ci))));
 			if (left.length) rows = left;
+			else if (a.wrap === '0') { console.log('[flybeam] every start done (--wrap=0: not searched again)'); return; }
 			else doneH.clear();   // every start done: the pass starts over
 		}
 		for (const r of rows) starts.push(r.s);
 		console.log(`[flybeam] stretch order: ${rows.slice(0, 8).map((r) => `${r.s} (${r.best})`).join(', ')}${rows.length > 8 ? `, ... (${rows.length})` : ''}`);
 	} else for (let s = from; s < to; s += every > 0 ? every : to - from) starts.push(s);
-	for (const A of starts) for (let ci = 0; ci < cfgs.length; ci++) tasks.push(Object.assign({}, base, cfgs[ci], { A, B: every > 0 && a.toEnd !== '1' ? Math.min(to, A + every) : to, name: `A${A}c${ci}`, cfg: ci }));
+	for (const A of starts) for (let ci = 0; ci < cfgs.length; ci++) {
+		if (doneH && doneH.has(taskKey(trace.H[A], ci))) continue;
+		tasks.push(Object.assign({}, base, cfgs[ci], { A, B: every > 0 && a.toEnd !== '1' ? Math.min(to, A + every) : to, name: `A${A}c${ci}`, cfg: ci }));
+	}
 	// the time budget: --seconds (all tasks) and --deadline (ms since the epoch): no task starts past it, and each gets at
 	// most what is left
 	const t0 = Date.now();
@@ -428,7 +439,7 @@ async function main() {
 			const left = endAt - Date.now();
 			if (next >= tasks.length || left < 5000) { if (live === 0) resolve(); return; }
 			const task = tasks[next++];
-			if (isFinite(left)) task.timeS = Math.min(task.timeS, Math.max(5, left / 1000 - 3));
+			if (isFinite(left) && left / 1000 - 3 < task.timeS) { task.timeS = Math.max(5, left / 1000 - 3); task.shortened = true; }
 			live++;
 			const w = new Worker(__filename, { workerData: { flybeam: task, ticksBuf: meter.buf } });
 			w.on('message', (r) => {
@@ -442,10 +453,11 @@ async function main() {
 		for (let i = 0; i < threads; i++) spawn();
 	});
 	if (a.state && tasks.length && STRETCH) {
-		// a start is done when every one of its settings started
-		const all = new Map();
-		tasks.forEach((tk, i) => all.set(tk.A, (all.has(tk.A) ? all.get(tk.A) : true) && i < next));
-		for (const [A, ok] of all) if (ok) doneH.add(stateH[A]);
+		// a task (start, setting) is done when it ran to its own end (the beam's end or its whole --timeS): one the call's
+		// end cut short (--seconds / --deadline) is left for the next call (the grind's slices: a start begun 20 s before
+		// the end was marked done and never searched again while the run kept its state; the lane's first call on the ice
+		// level ran start 2800's plain task to its end, 109 s, and its homing task was cut after 38 s)
+		for (const r of results) if (!r.callCut) doneH.add(taskKey(stateH[r.A], r.cfg));
 		C.writeJSON(a.state, { order: 'stretch', done: [...doneH] });
 	} else if (a.state && tasks.length) {
 		// the next start: the first task not started (its start again: some of its settings may have run), else past the

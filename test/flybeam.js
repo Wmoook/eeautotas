@@ -88,6 +88,20 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 	check('--order=stretch --state keeps the starts done across calls', !!s1 && s1.order === 'stretch' && s1.done.length > 0 && !!s2 && (s2.done.length > s1.done.length || s2.done.length > 0),
 		`${s1 && s1.done.length} -> ${s2 && s2.done.length}`);
 }
+// 6) a start whose task the call's end cut short is not done; --wrap=0: every start done = no search
+{
+	const st = path.join(TMP, 'state_cut.json');
+	// (W 16384: a beam that cannot reach the run's end in the 3 s the call leaves its first task)
+	const r = run(['--starts=20', '--to=200', '--ext=400', '--timeS=30', '--seconds=6', '--threads=1', '--W=16384', '--order=stretch', `--state=${st}`]);
+	const s1 = C.readJSON(st, null);
+	check('a start cut short by the call\'s end (--seconds) is not marked done', !!s1 && s1.done.length === 0, `${s1 && s1.done.length} done; ${(r.stdout || '').split('\n').filter((l) => /layers/.test(l)).length} task(s) ran`);
+	const st2 = path.join(TMP, 'state_wrap.json');
+	run(['--starts=20', '--to=60', '--ext=100', '--timeS=2', '--seconds=60', '--threads=2', '--order=stretch', `--state=${st2}`]);
+	const w1 = C.readJSON(st2, null);
+	const r2 = run(['--starts=20', '--to=60', '--ext=100', '--timeS=2', '--seconds=60', '--threads=2', '--order=stretch', '--wrap=0', `--state=${st2}`]);
+	check('every start done after a call whose tasks ran to their own end', !!w1 && w1.done.length === 3, `${w1 && w1.done.length}`);
+	check('--wrap=0 then searches nothing ("every start done")', /every start done/.test(r2.stdout || '') && !/ tasks \(starts/.test(r2.stdout || ''), (r2.stdout || '').slice(-200));
+}
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`flybeam: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
