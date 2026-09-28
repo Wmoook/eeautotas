@@ -59,7 +59,7 @@ const DEFAULTS = {
 	cap: 60000, log2: 24,   // (the cell table: 2^24 x 8 bytes a worker; full at 70%: the search ends there)
 	perS: 100, bfsShare: 0.85,   // seconds per search (start x pick) and the main bfs's share of them
 	joinTop: 4, hitsPerSeg: 4, hitsClose: 4, quickOffs: [0, -2, 2, -4, 4, -6, 6, -10, 10], quickMax: 400, quickS: 8, tailBack: 90, tailStep: 3, offBack: 150, offAhead: 60, tailH: 400, tailDiverge: 320, tailS: 4, anchors: 3, anchorD: 12, looseD: 4,
-	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackLost: 150, trackLostK: 30, trackS: 8,
+	trackTop: 8, trackW: 400, trackH: 600, trackPhase: 4, trackVw: 3, trackLost: 150, trackLostK: 30, trackS: 8,
 	joinBfs: 0, joinDepth: 280, joinCap: 25000, joinMargin: 6,
 	maxCands: 40,
 	unjoinedTop: 2, gpuMin: 60, gpuModes: 'rejoin,finish', gpuS: 30, gpuRejoinDepth: 700, gpuCells: 27, gpuCap: 65536, gpuCqx: 0.25, gpuCqv: 16, gpuQy: 0.25, gpuQvy: 16,
@@ -565,7 +565,7 @@ function tail(info, sim, inp, sn, te, r0, o, played) {
 function track(info, sn, te, r0, o) {
 	const { n, hashTick, X, Y, VX, VY, hashOf } = info;
 	const sim = new E.EESim(info.level), inp = new E.EEInput();
-	const W = o.trackW, PH = o.trackPhase;
+	const W = o.trackW, PH = o.trackPhase, VW = o.trackVw;
 	let cur = [sn], lostK = 0;
 	const layers = [];
 	for (let k = 0; k < o.trackH && r0 + k + 1 + PH < n; k++) {
@@ -603,7 +603,7 @@ function track(info, sn, te, r0, o) {
 				const cell = Math.floor(sim.px) * 1e6 + Math.floor(sim.py) * 97 + Math.floor(sim.speed_x * 8) * 7919 + Math.floor(sim.speed_y * 8) * 104729 + (sim.on_ground ? 0.5 : 0) + sim.jump_count * 0.25;
 				let dd = Infinity;
 				for (let rq = Math.max(0, rr - PH); rq <= Math.min(n, rr + PH); rq++) {
-					const d = Math.abs(sim.px - X[rq]) + Math.abs(sim.py - Y[rq]) + 3 * (Math.abs(sim.speed_x - VX[rq]) + Math.abs(sim.speed_y - VY[rq]));
+					const d = Math.abs(sim.px - X[rq]) + Math.abs(sim.py - Y[rq]) + VW * (Math.abs(sim.speed_x - VX[rq]) + Math.abs(sim.speed_y - VY[rq]));
 					if (d < dd) dd = d;
 				}
 				const had = seen.get(cell);
