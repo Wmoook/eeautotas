@@ -60,7 +60,7 @@ function runTask(task) {
 	const n = Math.min(R.n, R.complete > 0 ? R.complete : R.n);
 	const A = task.A, Zend = Math.min(n, task.B + task.ext);
 	const W = task.W, Q = task.Q, V = task.V, alpha = task.alpha, corridor2 = task.corridor * task.corridor, rM2 = task.rMatch * task.rMatch;
-	const LOOK = task.look, tailP = task.tailP, tailH = task.tailH, capT = task.capT || Math.max(4, W >> 5), convF = task.convF === undefined ? 0 : task.convF, VW = task.vw || 16, homeMax = task.homeMax || 64;
+	const LOOK = task.look, tailP = task.tailP, tailH = task.tailH, capT = task.capT || Math.max(4, W >> 5), convF = task.convF === undefined ? 0 : task.convF, VW = task.vw || 16, homeMax = task.homeMax || 64, homeFine = task.homing === 'fine';
 	const WB = Math.round(W * convF);
 	const GX = require('./goexplore.js');
 	const disc = GX.discreteOf(level);
@@ -190,7 +190,7 @@ function runTask(task) {
 				}
 				// the homing channel: a state ahead of the run, by its distance to the run's state (position + VW x velocity)
 				// at its progress tick +-2, one per fine cell (1 px, 1/16 px/tick): the nearest kept
-				if (WB > 0 && g - tick - 1 >= 1) {
+				if (WB > 0 && homeFine && g - tick - 1 >= 1) {
 					const vx = sim.speed_x, vy = sim.speed_y;
 					let bc = Infinity;
 					for (let t = Math.max(tick + 2, g - 2), e = Math.min(n - 1, g + 2); t <= e; t++) {
@@ -224,7 +224,23 @@ function runTask(task) {
 		// are nearest the run's own state there: they ride along the run's line in less time, so where the run's state is
 		// absorbed (a wall stop, the grid alignment of a slow ball, a thrust run out) they are absorbed into it too: an
 		// exact rejoin. Channel A (the rest): by score, at most capT per tile first.
-		if (WB > 0) {
+		if (WB > 0 && !homeFine) {
+			// (the default homing, 'slots': the WB states ahead of the run nearest its own state among the score cells'
+			// states; Infinity Pain's shaft, 32627 -> 34365: -121, where the beam without it found no rejoin at all)
+			for (const o of slots) {
+				if (o.g - tick - 1 < 1) continue;
+				let bc = Infinity;
+				for (let t = Math.max(tick + 2, o.g - 2), e = Math.min(n - 1, o.g + 2); t <= e; t++) {
+					const c = Math.abs(o.x - X[t]) + Math.abs(o.y - Y[t]) + VW * (Math.abs(o.vx - VX[t]) + Math.abs(o.vy - VY[t]));
+					if (c < bc) bc = c;
+				}
+				o.c = bc; o.pick = -1; slotsB.push(o);
+			}
+			slotsB.sort((a, b) => a.c - b.c);
+			const nb = Math.min(WB, slotsB.length);
+			for (let i = 0; i < nb; i++) { slotsB[i].pick = tick + 1; next.push(slotsB[i]); }
+			if (task.debug && k % task.debug === 0 && slotsB.length) console.error(`[flybeam ${task.name}] tick ${tick + 1}: homing ${slotsB.length}, nearest c ${slotsB[0].c.toFixed(4)} (lead ${slotsB[0].g - tick - 1})`);
+		} else if (WB > 0) {
 			slotsB.sort((a, b) => a.c - b.c);
 			const nb = Math.min(WB, slotsB.length);
 			for (let i = 0; i < nb; i++) next.push(slotsB[i]);
@@ -233,6 +249,7 @@ function runTask(task) {
 		}
 		const perTile = new Map(), rest = [];
 		for (const o of slots) {
+			if (!homeFine && o.pick === tick + 1) continue;
 			if (next.length >= W) { rest.push(o); continue; }
 			const c = perTile.get(o.tile) || 0;
 			if (c < capT) { perTile.set(o.tile, c + 1); next.push(o); } else rest.push(o);
@@ -316,7 +333,7 @@ async function main() {
 	const a = C.parseArgs(process.argv.slice(2));
 	const num = (k, d) => (a[k] === undefined ? d : +a[k]);
 	const base = { level: a.level, tas: a.tas, W: num('W', 4096), Q: num('Q', 4), V: num('V', 0.25), alpha: num('alpha', 0.3), corridor: num('corridor', 48),
-		rMatch: num('rMatch', 12), debug: num('debug', 0), capT: num('capT', 0), axes: num('axes', 0), convF: num('convF', 0), vw: num('vw', 16), look: num('look', 800), ext: num('ext', 600), tailP: num('tailP', 24), tailH: num('tailH', 300), timeS: num('timeS', 300) };
+		rMatch: num('rMatch', 12), debug: num('debug', 0), capT: num('capT', 0), axes: num('axes', 0), convF: num('convF', 0), vw: num('vw', 16), homing: a.homing || 'slots', look: num('look', 800), ext: num('ext', 600), tailP: num('tailP', 24), tailH: num('tailH', 300), timeS: num('timeS', 300) };
 	const cfgs = a.cfg ? JSON.parse(a.cfg) : [{}];
 	const level = C.loadLevel(a.level);
 	const ms = C.readEetas(a.tas);
