@@ -993,7 +993,8 @@ function buildSteer(level, opts) {
 	let refuted = null;
 	const forced = new Set(opts.features || []), ordWalls = new Set(opts.walls || []);
 	if (opts.refute && opts.refute.tiles && opts.refute.tiles.length) {
-		const known = new Set(opts.refute.modeled || []);
+		// (the running steer's features by key: its info names a coin feature of classes "coins classes (0 16)")
+		const known = new Set((opts.refute.modeled || []).map((k) => String(k).split(' ')[0]));
 		for (const t of opts.refute.tiles) {
 			const k = t >= 0 && t < A.N && A.cls[t] === 3 ? A.gateFeat[t] : null;
 			if (!k || k === 'open' || k === 'static' || known.has(k) || forced.has(k) || !A.feats.has(k)) continue;
@@ -1002,7 +1003,9 @@ function buildSteer(level, opts) {
 			if (k === 'coins' && A.gatePol[t] === 1) opts = Object.assign({}, opts, { coinT: Math.max(opts.coinT || 0, A.gateParam[t]) });
 			break;
 		}
-		if (!refuted) { refuted = { kind: 'wall', t: opts.refute.tiles[0] }; ordWalls.add(opts.refute.tiles[0]); }
+		// (never a trophy or the start: the model keeps those, so such a wall was a refutation that changed nothing)
+		const w = refuted ? -1 : opts.refute.tiles.find((t) => t >= 0 && t < A.N && !A.trophies.includes(t) && !(A.start && A.start.t === t));
+		if (!refuted && w !== undefined) { refuted = { kind: 'wall', t: w }; ordWalls.add(w); }
 	}
 	for (const k of forced) if (A.feats.has(k)) modeled.add(k);
 	if (ordWalls.size) {
