@@ -1187,26 +1187,23 @@ function pastPlanCheck() {
 // and the proofs never read it. `b.stallCegar === false` / EEAT_STALLCEGAR=0: off.
 const CEGAR_MAX = 4, CEGAR_K = 8, CEGAR_MS = 60000, CEGAR_REPLAY = 2000000;
 function stallCegarCheck() {
-	if (!cur || !cur.opts.stallCegar || !cur.files.steerCpu || !brk || !S || S.result || !S.running || S.halted || !S.steer) return;
-	const R = cur.cegar || (cur.cegar = { n: 0, at: 0, busy: false, walls: [], feats: [], modeled: null, coinT: 0, file: '' });
+	if (!cur || !cur.opts.stallCegar || !brk || !S || S.result || !S.running || S.halted) return;
+	if (!S.strategies.some((q, k) => q.cpu && alive(kids[k]))) return;
+	const R = cur.cegar || (cur.cegar = { n: 0, at: 0, busy: false, walls: [], feats: [], modeled: null, coinT: 0, file: '', told: false });
 	if (R.busy || R.n >= CEGAR_MAX || !S.closest || !S.closest.inputs || S.closest.cut) return;
 	// (a fresh stall: the breaker's first wait since the last progress AND since the last refutation)
 	if (Date.now() - Math.max(brk.at, R.at) < cur.opts.breakWait[0] * 1000) return;
 	R.at = Date.now();
-	let bl = null, why = '';
+	// the tiles the attempts entered: the nearest attempt's and the sources' lowest-cost attempts' (CEGAR_REPLAY ticks at most)
+	let masks, entered;
 	try {
-		const file = R.file || (cur.pastOn ? cur.past.file : cur.files.steerCpu);
-		if (!R.st || R.stFile !== file) { R.st = SF.readSteerFile(fs.readFileSync(file)); R.stFile = file; }
-		const masks = C.parseEetasBuffer(Buffer.from(S.closest.inputs, 'latin1'));
+		masks = C.parseEetasBuffer(Buffer.from(S.closest.inputs, 'latin1'));
 		const L = cur.level, W = L.width, H = L.height;
-		const entered = new Uint8Array(W * H);
+		entered = new Uint8Array(W * H);
 		const sim = new E.EESim(L), inp = new E.EEInput();
-		sim.reset();
 		const mark = () => { const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4; if (tx >= 0 && ty >= 0 && tx < W && ty < H) entered[ty * W + tx] = 1; };
-		mark();
+		sim.reset(); mark();
 		for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t] & 31); sim.tick(inp); mark(); }
-		// (the tiles the sources' lowest-cost attempts entered: every room's, CEGAR_REPLAY ticks at most)
-		const end = sim.snapshot();
 		let budget = CEGAR_REPLAY;
 		for (const q of sources.values()) {
 			const ins = q && q.best && q.best.inputs;
@@ -1215,50 +1212,66 @@ function stallCegarCheck() {
 			sim.reset(); mark();
 			for (let t = 0; t < ins.length; t++) { E.applyMask(inp, (ins.charCodeAt(t) - 48) & 31); sim.tick(inp); mark(); }
 		}
-		sim.restore(end);
-		bl = SF.stallBlocker(R.st, sim, entered, CEGAR_K);
-		if (!bl) why = 'the field\'s descent stays on tiles the attempts entered';
-	} catch (e) { why = e.message; }
-	if (!bl || !bl.tiles.length) { if (why) note(`the stall's refutation: nothing to refute (${why})`); return; }
+	} catch (e) { return; }
 	R.busy = true;
 	const n = R.n + 1;
 	const out = `${steerBase(cur.levelHash)}_refute${n}.bin`;
-	const o = { refute: { tiles: bl.tiles, modeled: R.modeled || S.steer.features || [] }, features: R.feats.slice(), walls: R.walls.slice(), coinT: Math.max(R.coinT, cur.pastOn && cur.past ? cur.past.T : 0), maxMs: CEGAR_MS };
+	// (the field the search orders by now: the last refutation's, the plan past its count, the steer worker's; none (a
+	// level whose field models nothing: the search orders by the reach field): the worker builds it, with the refutations
+	// so far)
+	const base = R.file || (cur.pastOn && cur.past ? cur.past.file : cur.files.steerCpu) || '';
+	const o0 = { features: R.feats.slice(), walls: R.walls.slice(), coinT: Math.max(R.coinT, cur.pastOn && cur.past ? cur.past.T : 0), maxMs: CEGAR_MS };
+	const modeled = R.modeled || (S.steer && S.steer.features) || [];
 	const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
 		const E = require(d.mods.eesim), EL = require(d.mods.eelvl), SF = require(d.mods.steer), G = require(d.mods.gpu);
 		const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
-		const st = SF.buildSteer(L, d.o);
+		let st0 = null;
+		if (d.base) { try { st0 = SF.readSteerFile(fs.readFileSync(d.base)); } catch (e) { st0 = null; } }
+		if (!st0) st0 = SF.buildSteer(L, d.o0);
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < d.masks.length; t++) { E.applyMask(inp, d.masks[t] & 31); sim.tick(inp); }
+		const bl = SF.stallBlocker(st0, sim, d.entered, d.K);
+		if (!bl || !bl.tiles.length) { parentPort.postMessage({ none: true }); return; }
+		const st = SF.buildSteer(L, Object.assign({}, d.o0, { refute: { tiles: bl.tiles, modeled: d.modeled.length ? d.modeled : (st0.info ? st0.info.features : st0.feats.map((f) => f.key)) } }));
 		let lfp = null;
 		try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 		const b = SF.steerFileBytes(st, lfp);
 		fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file);
-		parentPort.postMessage({ refuted: st.info.refuted, features: st.info.features, layers: st.info.layers, dp: st.info.dp, walls: st.info.walls, ms: st.info.ms, bytes: b.length, over: st.info.over });`;
+		parentPort.postMessage({ refuted: st.info.refuted, features: st.info.features, layers: st.info.layers, dp: st.info.dp, walls: st.info.walls, ms: st.info.ms, bytes: b.length, tiles: bl.tiles.length, stuck: bl.stuck });`;
 	const gen = searchGen, t0 = Date.now();
 	let w;
 	try {
-		w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(cur.buf), file: out, o,
+		w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(cur.buf), file: out, base, o0, modeled, masks: Uint8Array.from(masks), entered, K: CEGAR_K,
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
 	} catch (e) { R.busy = false; return; }
-	const done = () => { R.busy = false; };
-	w.once('error', (e) => { done(); note(`the stall's refutation: the rebuild failed (${e.message})`); });
-	w.once('exit', done);
+	w.once('error', (e) => { R.busy = false; note(`the stall's refutation: the rebuild failed (${e.message})`); });
+	w.once('exit', () => { R.busy = false; });
 	w.on('message', (r) => {
 		R.busy = false;
-		if (gen !== searchGen || !cur || !S || !S.running || S.result || !r || !r.refuted) return;
+		if (gen !== searchGen || !cur || !S || !S.running || S.result || !r) return;
+		if (r.none) { note('the stall\'s refutation: nothing to refute (the field\'s descent from the nearest attempt stays on tiles the attempts entered)'); return; }
+		if (!r.refuted) return;
 		R.n = n; R.file = out; R.modeled = r.features;
 		if (r.refuted.kind === 'gate') { R.feats.push(r.refuted.feat); if (r.dp && r.dp.T) R.coinT = Math.max(R.coinT, r.dp.T); }
 		R.walls = r.walls || R.walls;
+		// (the CPU search: `refute <file>` where it orders by a steer field (its own lookup rule), else the field as a late
+		// one (`steer <file>`: head A's second heap from then on))
+		const had = !!cur.files.steerCpu || R.told;
 		let told = 0;
 		S.strategies.forEach((q, k) => {
 			const ch = kids[k];
-			if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`refute ${out}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
+			if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${had ? 'refute' : 'steer'} ${out}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
 		});
-		if (r.dp) { cur.cegarFile = out; cur.gateSteer = undefined; }
+		if (told) R.told = true;
+		if (r.dp && cur.files.steerCpu) { cur.cegarFile = out; cur.gateSteer = undefined; }
 		const after = Math.round((Date.now() - S.started) / 100) / 10;
 		const what = r.refuted.kind === 'gate' ? `the gate ${r.refuted.feat} at (${r.refuted.x}, ${r.refuted.y}) (the field did not model it)` : `(${r.refuted.x}, ${r.refuted.y}) an ordering wall (the field's way there no attempt took)`;
-		const line = { n, after, kind: r.refuted.kind, feat: r.refuted.feat, x: r.refuted.x, y: r.refuted.y, tiles: bl.tiles.length, near: S.closest ? S.closest.tiles : null, features: r.features, layers: r.layers, dp: r.dp ? r.dp.T : 0, walls: (r.walls || []).length, ms: Date.now() - t0, told };
-		if (S.steer) { S.steer.refuted = S.steer.refuted || []; S.steer.refuted.push(line); }
-		note(`the stall's refutation ${n}: ${what}; the steer field rebuilt in ${((Date.now() - t0) / 1000).toFixed(1)} s (${r.layers} layers${r.dp ? `, coin plan ${r.dp.T}` : ''}), ${told ? 'the CPU search orders by it' : 'no CPU search to tell'}`);
+		const line = { n, after, kind: r.refuted.kind, feat: r.refuted.feat, x: r.refuted.x, y: r.refuted.y, tiles: r.tiles, stuck: r.stuck, near: S.closest ? S.closest.tiles : null, features: r.features, layers: r.layers, dp: r.dp ? r.dp.T : 0, walls: (r.walls || []).length, ms: Date.now() - t0, told, as: had ? 'refute' : 'steer' };
+		S.stallCegar = S.stallCegar || [];
+		S.stallCegar.push(line);
+		if (S.steer) S.steer.refuted = S.stallCegar;
+		note(`the stall's refutation ${n}: ${what}; the steer field rebuilt in ${((Date.now() - t0) / 1000).toFixed(1)} s (${r.layers} layers${r.dp ? `, coin plan ${r.dp.T}` : ''}${(r.walls || []).length ? `, ${(r.walls || []).length} ordering walls` : ''}), ${told ? 'the CPU search orders by it' : 'no CPU search to tell'}`);
 		save();
 	});
 }
