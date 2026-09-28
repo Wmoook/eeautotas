@@ -73,6 +73,21 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 	const s2 = C.readJSON(st, null);
 	check('the next call continues from it', !!s2 && s1 && (s2.t > s1.t || s2.wrapped === true || s2.t === 0), `${s1 && s1.t} -> ${s2 && s2.t}`);
 }
+// 5) --order=stretch: the starts by their longest contact-free stretch; --state keeps the starts done
+{
+	const K = new Uint8Array(101).fill(1);
+	for (let t = 45; t < 90; t++) K[t] = 0;   // one 45-tick stretch through the windows at 40, 60, 80
+	for (let t = 5; t < 15; t++) K[t] = 0;   // a 10-tick one in the window at 0
+	const rows = FB.stretchOrder(K, 100, 0, 100, 20);
+	check('stretchOrder ranks the windows on the longest stretch first (then the free share)', rows.map((r) => r.s).join(',') === '60,40,80,0,20', rows.map((r) => `${r.s}:${r.best}`).join(' '));
+	const st = path.join(TMP, 'state_stretch.json');
+	run(['--starts=20', '--to=200', '--ext=400', '--timeS=3', '--seconds=8', '--order=stretch', `--state=${st}`]);
+	const s1 = C.readJSON(st, null);
+	run(['--starts=20', '--to=200', '--ext=400', '--timeS=3', '--seconds=8', '--order=stretch', `--state=${st}`]);
+	const s2 = C.readJSON(st, null);
+	check('--order=stretch --state keeps the starts done across calls', !!s1 && s1.order === 'stretch' && s1.done.length > 0 && !!s2 && (s2.done.length > s1.done.length || s2.done.length > 0),
+		`${s1 && s1.done.length} -> ${s2 && s2.done.length}`);
+}
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`flybeam: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

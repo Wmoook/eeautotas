@@ -28,6 +28,7 @@
 //   [--state=<file> (a pass continued across calls: the next start by tick + state hash)] [--cfg=<json list of setting
 //   overrides: each start runs every one>] [--out=<file.eetas> (written only when judged faster)] [--json=<file>]
 //   [--debug=<every N layers>] [--axes=1 (diagnostic: children whose x or y state alone equals a later run state)]
+//   [--order=stretch (with --starts: the starts by their longest low-contact stretch first; --state then keeps the starts done)]
 const { Worker, isMainThread, workerData, parentPort } = require('worker_threads');
 const fs = require('fs');
 const C = require('./common.js');
@@ -42,13 +43,45 @@ function traceRun(level, ms, noCoins) {
 	const sim = new E.EESim(level); sim.reset();
 	const inp = new E.EEInput();
 	const X = new Float64Array(n + 1), Y = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1), H = new Float64Array(n + 1);
-	const rec = (t) => { X[t] = sim.px; Y[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; H[t] = sim.stateHash(false, noCoins === true); };
+	// K[t] = 1: a contact at tick t (on the ground, or a velocity stopped by a wall / ceiling): where lines re-merge
+	const K = new Uint8Array(n + 1);
+	const rec = (t) => {
+		X[t] = sim.px; Y[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; H[t] = sim.stateHash(false, noCoins === true);
+		K[t] = sim.on_ground || (t > 0 && ((VX[t] === 0 && VX[t - 1] !== 0) || (VY[t] === 0 && VY[t - 1] !== 0))) ? 1 : 0;
+	};
 	rec(0);
 	let complete = -1;
 	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); };
 	for (let t = 0; t < n; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); rec(t + 1); }
 	sim.onEvent = null;
-	return { n, X, Y, VX, VY, H, complete };
+	return { n, X, Y, VX, VY, H, K, complete };
+}
+
+/**
+ * The starts in the stretch order (--order=stretch): every `every` ticks in [from, to), ranked by the longest contact-free
+ * stretch (no ground, no wall / ceiling stop: K) through the start's window [s, s + every), then by the window's
+ * contact-free share, then by tick. The beam pays only there (a faster line in a long low-contact stretch shares no exact
+ * state with the run for 1,000+ ticks); in tick order a few threads reach the late stretches after hours: Infinity Pain's
+ * 39,410 run has 99 starts and the shaft (the -142 at 33250 -> 34365) ranks 1-6 by this order, 83-88 by tick; the ice
+ * level's arc (2400 -> 3278 -49) ranks 1-2 of 12.
+ */
+function stretchOrder(K, n, from, to, every) {
+	const runLen = new Int32Array(n + 1);
+	for (let t = 0; t <= n;) {
+		if (K[t]) { t++; continue; }
+		let u = t; while (u <= n && !K[u]) u++;
+		for (let k = t; k < u; k++) runLen[k] = u - t;
+		t = u;
+	}
+	const rows = [];
+	for (let s = from; s < to; s += every) {
+		let best = 0, free = 0;
+		const e = Math.min(n, s + every);
+		for (let t = s; t < e; t++) { if (runLen[t] > best) best = runLen[t]; if (!K[t]) free++; }
+		rows.push({ s, best, free: free / Math.max(1, e - s) });
+	}
+	rows.sort((x, y) => y.best - x.best || y.free - x.free || x.s - y.s);
+	return rows;
 }
 
 function runTask(task) {
@@ -345,11 +378,16 @@ async function main() {
 	let from = num('from', 0), to = Math.min(n, num('to', n));
 	// --state=<file>: a pass over the run continued across calls (the grind's slices): the next start as {t, h} (tick +
 	// state hash, found again by hash when the run changed), wrapping to the run's start after its end
-	let stateH = null;
+	// --order=stretch (with --starts): the starts by their longest low-contact stretch (stretchOrder), and --state keeps the
+	// starts done (by their state hash: a start whose state the run still has is not searched again) until all are done
+	const STRETCH = a.order === 'stretch' && every > 0 && !a.startList;
+	let stateH = null, doneH = null;
+	const trace = a.state || STRETCH ? traceRun(level, ms.slice(0, n), a.nocoins === '1') : null;
 	if (a.state) {
 		const st = C.readJSON(a.state, null);
-		stateH = traceRun(level, ms.slice(0, n), a.nocoins === '1').H;
-		if (st && st.t >= 0) {
+		stateH = trace.H;
+		if (STRETCH) doneH = new Set(st && Array.isArray(st.done) ? st.done : []);
+		else if (st && st.t >= 0) {
 			let t = Math.min(n - 1, st.t | 0);
 			for (let d = 0; d <= n; d++) {
 				if (t - d >= 0 && stateH[t - d] === st.h) { t = t - d; break; }
@@ -362,7 +400,16 @@ async function main() {
 	const tasks = [];
 	const starts = [];
 	if (a.startList) for (const x of a.startList.split(',')) starts.push(+x);
-	else for (let s = from; s < to; s += every > 0 ? every : to - from) starts.push(s);
+	else if (STRETCH) {
+		let rows = stretchOrder(trace.K, n, from, to, every);
+		if (doneH) {
+			const left = rows.filter((r) => !doneH.has(trace.H[r.s]));
+			if (left.length) rows = left;
+			else doneH.clear();   // every start done: the pass starts over
+		}
+		for (const r of rows) starts.push(r.s);
+		console.log(`[flybeam] stretch order: ${rows.slice(0, 8).map((r) => `${r.s} (${r.best})`).join(', ')}${rows.length > 8 ? `, ... (${rows.length})` : ''}`);
+	} else for (let s = from; s < to; s += every > 0 ? every : to - from) starts.push(s);
 	for (const A of starts) for (let ci = 0; ci < cfgs.length; ci++) tasks.push(Object.assign({}, base, cfgs[ci], { A, B: every > 0 && a.toEnd !== '1' ? Math.min(to, A + every) : to, name: `A${A}c${ci}`, cfg: ci }));
 	// the time budget: --seconds (all tasks) and --deadline (ms since the epoch): no task starts past it, and each gets at
 	// most what is left
@@ -394,7 +441,13 @@ async function main() {
 		};
 		for (let i = 0; i < threads; i++) spawn();
 	});
-	if (a.state && tasks.length) {
+	if (a.state && tasks.length && STRETCH) {
+		// a start is done when every one of its settings started
+		const all = new Map();
+		tasks.forEach((tk, i) => all.set(tk.A, (all.has(tk.A) ? all.get(tk.A) : true) && i < next));
+		for (const [A, ok] of all) if (ok) doneH.add(stateH[A]);
+		C.writeJSON(a.state, { order: 'stretch', done: [...doneH] });
+	} else if (a.state && tasks.length) {
 		// the next start: the first task not started (its start again: some of its settings may have run), else past the
 		// range's end (the run's start again once the whole run was covered)
 		const nextA = next >= tasks.length ? (to >= n ? 0 : to) : tasks[next].A;
@@ -435,4 +488,4 @@ if (!isMainThread && workerData && workerData.flybeam) {
 }
 else if (require.main === module) main().catch((e) => { console.log(`[flybeam] error: ${e.stack || e.message}`); process.exitCode = 1; });
 
-module.exports = { traceRun, runTask, pickSet, splice, MASKS };
+module.exports = { traceRun, runTask, pickSet, splice, stretchOrder, MASKS };

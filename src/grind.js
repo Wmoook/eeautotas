@@ -1026,7 +1026,7 @@ async function flybeamStage(round) {
 		// two settings per start: the plain beam (the ice level's finds) and the homing share with velocity-weighted tails
 		// (Infinity Pain's shaft: -121 where the plain beam found no rejoin)
 		`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`,
-		`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], fo, (secs + 120) * 1000,
+		`--order=stretch`, `--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], fo, (secs + 120) * 1000,
 		'every-move beam along the run own path, joined back exactly');
 	if (res) addResult(fo);
 }
