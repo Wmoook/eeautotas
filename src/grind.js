@@ -78,6 +78,9 @@ const FLY_K = (() => {
 	return k > 0 && W_ALL >= 2 ? Math.min(k, W_ALL - 1) : 0;
 })();
 const W = W_ALL - FLY_K;
+// the corridor beam's per-axis joins (flybeam.js --axisTails; --flybeamAxis=0: off): Infinity Pain's shaft start 33000 -41
+// where the beam without them joined nothing
+const FLY_AXIS = a.flybeamAxis !== undefined ? Math.max(0, Math.floor(+a.flybeamAxis) || 0) : 8;
 // Find a route next to this job (the AutoTASer, src/autotas.js, until its handoff): while <job>/cpu_share is fresh (touched
 // every few seconds) a stage starts with the thread count in it instead of W
 const CPU_SHARE = path.join(OUT, 'cpu_share');
@@ -1036,7 +1039,7 @@ async function flybeamStage(round) {
 		// two settings per start: the plain beam (the ice level's finds) and the homing share with velocity-weighted tails
 		// (Infinity Pain's shaft: -121 where the plain beam found no rejoin)
 		`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`,
-		`--order=stretch`, `--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], fo, (secs + 120) * 1000,
+		`--order=stretch`, `--axisTails=${FLY_AXIS}`, `--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], fo, (secs + 120) * 1000,
 		'every-move beam along the run own path, joined back exactly');
 	if (res) addResult(fo);
 }
@@ -1067,7 +1070,7 @@ async function flybeamLane() {
 		log(`flybeam lane ${k} (${s} s on ${fmt(from)})...`);
 		const res = await runTool('flybeam.js', [`--tas=${ref}`, LVL, `--out=${fo}`, `--threads=${FLY_K}`, `--nocoins=${NC}`, `--seconds=${s}`,
 			`--starts=${+a.flybeamStep || 400}`, `--ext=${+a.flybeamExt || 1200}`, `--W=${+a.flybeamW || 2048}`, `--timeS=${s}`,
-			`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`, '--order=stretch', '--wrap=0',
+			`--cfg=${JSON.stringify([{}, { convF: 0.25, vw: 64 }])}`, '--order=stretch', '--wrap=0', `--axisTails=${FLY_AXIS}`,
 			`--state=${path.join(OUT, 'grind_flybeam.json')}`, ...(FOREVER ? [] : [`--deadline=${deadline.getTime() - 90e3}`])], (s + 120) * 1000, logFile);
 		if (fs.existsSync(fo)) { consider(fo, `flybeam lane ${k}`); addResult(fo); }
 		else log(`flybeam lane ${k}: nothing faster`);
