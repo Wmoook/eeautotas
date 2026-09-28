@@ -266,7 +266,7 @@ async function main() {
 			const cand = spliceRun(R, edges, shift);
 			if (!cand) continue;
 			const ev = C.evaluate(level, cand);
-			const v = C.judge(ev, base, base.deaths);
+			const v = C.judge(ev, base, C.deathCapFor(a.tas, base.deaths));
 			if (v.accept && (!bestRun || ev.runTicks < bestRun.ev.runTicks)) { bestRun = { ev, edges, shift, tag }; }
 		}
 	};

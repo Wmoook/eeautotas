@@ -410,7 +410,7 @@ async function main() {
 		`${a.workers} workers, ${mutationsAt(masks0, 100, false).length} single / ${mutationsAt(masks0, 100, true).length} pair mutations per tick` +
 		(flags.length ? `; ${flags.join(', ')}` : ''));
 	const ev0 = C.evaluate(level, masks0);   // THE rule's baseline (finish, deaths, random-portal chance)
-	const baseDeaths = ev0 ? ev0.deaths : 0;
+	const baseDeaths = C.deathCapFor(a.tas, ev0 ? ev0.deaths : 0);   // (deaths are moves unless the job forbids them)
 	const t0 = Date.now();
 	const secs = () => ((Date.now() - t0) / 1000).toFixed(0);
 	const stopBuf = new SharedArrayBuffer(4), stop = new Int32Array(stopBuf);

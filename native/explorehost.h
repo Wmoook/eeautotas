@@ -192,7 +192,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		const bool up = dl.upload(B.bytes.data(), B.bytes.size()) && dA.alloc(SB * cap) && dB.alloc(SB * cap) && dcells.alloc(8ull << cellLog) &&
 			dout.alloc(4ull * cap) && dnout.alloc(4) && dhits.alloc(sizeof(ExploreHit) * hitCap) && dnhits.alloc(4) && dpick.alloc(4ull * cap) &&
 			dbest.alloc(8ull << cellLog) && dck.alloc(8 * nCandMax) && dcp.alloc(8 * nCandMax) && dcs.alloc(4 * nCandMax) && dnwin.alloc(4) && dhist.alloc(4 * 4096) &&
-			dstats.alloc(16) && dlost.alloc(4);
+			dstats.alloc(32) && dlost.alloc(4);
 		if (up) break;
 		if (cu::lastCode != 2 || cellLog <= 24) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 		for (cu::Buf* b : { &dl, &dA, &dB, &dcells, &dout, &dnout, &dhits, &dnhits, &dpick, &dbest, &dck, &dcp, &dcs, &dnwin, &dhist, &dstats, &dlost }) b->free();
@@ -201,7 +201,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (cellLog != cellLogWanted) { printf("{\"warn\":\"out of GPU memory for 2^%u cells: 2^%u\",\"cellLog\":%u}\n", cellLogWanted, cellLog, cellLog); fflush(stdout); }
 	const uint32_t cellCount = 1u << cellLog;
 	lk::memset8(dbest.p, 0xff, 8ull * cellCount, "memset");
-	cu::cuMemsetD8_v2(dstats.p, 0, 16);
+	cu::cuMemsetD8_v2(dstats.p, 0, 32);
 	ExploreClaim Q;
 	memset(&Q, 0, sizeof Q);
 	Q.cells = (u64*)(uintptr_t)dcells.p; Q.cellBest = (u64*)(uintptr_t)dbest.p; Q.mask = cellCount - 1;
@@ -248,6 +248,9 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	if (wantNear) { P.goalDist = haveGoal ? (const float*)(uintptr_t)dgoal.p : nullptr; P.closest = (unsigned long long*)(uintptr_t)dclose.p; }
 	P.reach = reachF;
 	P.prune = reachF.on && opt(argc, argv, "prune", "0") == "1" ? 1 : 0;
+	// --deaths=1: deaths are moves (kernels.cu exploreKeepDead): a dying child whose respawn pays goes on through its dead
+	// ticks; the routes and rejoins found may die on the way (the replays below let them)
+	P.deaths = opt(argc, argv, "deaths", "0") == "1" ? 1 : 0;
 	// --steer=<file> (src/steer.js RCH4, loaded above): the priority and the closest attempt read the gate-aware steer field
 	if (reachF.on) P.steer = steerF;
 	if (P.steer.on) printf("{\"ev\":\"steer\",\"layers\":%d,\"bodies\":%d,\"coinDP\":%d,\"mb\":%.1f,\"samePre\":%d}\n", P.steer.S, P.steer.nBodies, P.steer.dpN, steerGpu.raw.size() / 1048576.0, P.steer.samePre);
@@ -346,7 +349,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;
-	uint64_t ticks = 0, twins = 0, totalStates = 1;
+	uint64_t ticks = 0, twins = 0, totalStates = 1, deathsKept = 0;
 	uint64_t overflow = 0;   // new cells the layers could not keep (over the cap, or no table slot): an "exhausted" end is a proof only without them
 	uint32_t hitsSeen = 0;
 	std::vector<ExploreHit> hits;
@@ -414,9 +417,11 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		const char* why = forced ? forced : finishLayer >= 0 ? "finish" : totalStates > cellCount / 2 ? "full" : nParents <= 0 ? "exhausted" : d >= depthMax ? "depth" : "time";
 		// overflow: the new cells left out over all layers (over the cap, or no table slot); "exhausted" with overflow 0
 		// means every move was tried (up to the cells' grain), with overflow > 0 it is no proof
-		printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d,\"lanes\":%d%s}\n",
+		char dk[64] = "";
+		if (P.deaths) snprintf(dk, sizeof dk, ",\"deathsKept\":%llu", (unsigned long long)deathsKept);
+		printf("{\"ev\":\"done\",\"gpu\":%s,\"layers\":%d,\"states\":%llu,\"ticks\":%llu,\"ticksPerSec\":%.0f,\"hits\":%u,\"seconds\":%.1f,\"end\":\"%s\",\"overflow\":%llu,\"twins\":%llu,\"cellLog\":%u,\"cap\":%d,\"salt\":%llu,\"tries\":%d,\"exhaustedTries\":%d,\"lanes\":%d%s%s}\n",
 			g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
-			(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries, lanes, lk::doneFields().c_str());
+			(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries, lanes, dk, lk::doneFields().c_str());
 	};
 	lk::onStop = [&]() { finale("stopped"); };
 	// the launches (launch.h): each phase of a layer (expand, the claim's passes, materialize) runs over its index range
@@ -453,9 +458,10 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 		void* a1[] = { &P };
 		lk::over(ckExp, (uint64_t)nParents, 128, fexp, a1, "explore expand", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; }, expandTook);
 		{
-			unsigned long long st[2] = { 0, 0 };
-			cu::cuMemcpyDtoH_v2(st, dstats.p, 16);
+			unsigned long long st[4] = { 0, 0, 0, 0 };
+			cu::cuMemcpyDtoH_v2(st, dstats.p, 32);
 			ticks = st[0]; twins = st[1];   // (the ticks really simulated: twins of a lower option are skipped)
+			deathsKept = st[3];
 		}
 		if (wantNear) {
 			unsigned long long cl = ~0ull;
@@ -518,7 +524,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 					memcpy(st, start, SB);
 					Sim<TW> vs(L, *st);
 					bool ok = true;
-					for (size_t k = prefixStr.size(); k < in.size() && ok; k++) { Input x = maskInput((in[k] - '0') & 31); vs.tick(x); if (st->is_dead || st->broken) ok = false; }
+					for (size_t k = prefixStr.size(); k < in.size() && ok; k++) { Input x = maskInput((in[k] - '0') & 31); vs.tick(x); if ((st->is_dead && !P.deaths) || st->broken) ok = false; }
 					ok = ok && vs.hash(ncR) == refH[j] && vs.hash2(ncR) == refH2[j];
 					free(st);
 					if (!ok) continue;
@@ -603,7 +609,8 @@ static int runExplore(int argc, char** argv, const LevelBlob& B) {
 				for (char c : in) {
 					Input x = maskInput((c - '0') & 31);
 					vs.tick(x);
-					if (st->is_dead || st->broken) break;
+					if (st->broken || (st->is_dead && !P.deaths)) break;
+					if (st->is_dead) continue;
 					refSet.insert(exploreSituation(st->py, st->speed_y, st->on_ground != 0, st->jump_count, truncI(st->px + 8.0) >> 4));
 				}
 			}

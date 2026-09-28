@@ -665,7 +665,7 @@ async function main() {
 			if (!c) return;
 			if (dpBest && c.saved <= dpBest.saved && !avoidRng) return;
 			const ev = C.evaluate(level, c.ms);
-			const v = C.judge(ev, evRef, evRef.deaths);
+			const v = C.judge(ev, evRef, C.deathCapFor(a.tas, evRef.deaths));
 			if (!v.accept) { if (!avoidRng && C.isRandom(level)) continue; console.log(`[skips]   DP of ${c.used.length} rejoins not written: ${v.reason}`); return; }
 			if (written && !(ev.runTicks < written.runTicks || (ev.runTicks === written.runTicks && ev.chance > written.chance + 1e-9))) return;
 			C.writeEetas(a.out, ev.ms);
@@ -694,7 +694,7 @@ async function main() {
 			const ms = new Uint8Array(h.b + h.seq.length + T.finish - h.j);
 			ms.set(masks.subarray(0, h.b), 0); ms.set(h.seq, h.b); ms.set(T.masks.subarray(h.j, T.finish), h.b + h.seq.length);
 			const ev = C.evaluate(level, ms);
-			const v = C.judge(ev, evRef, evRef.deaths);
+			const v = C.judge(ev, evRef, C.deathCapFor(a.tas, evRef.deaths));
 			if (!v.accept) continue;
 			if (written && !(ev.runTicks < written.runTicks || (ev.runTicks === written.runTicks && ev.chance > written.chance + 1e-9))) continue;
 			C.writeEetas(a.out, ev.ms);

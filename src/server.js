@@ -336,7 +336,7 @@ const server = http.createServer(async (req, res) => {
 			const b = await readJsonBody(req, 96 << 20);
 			const eetas = b.eetasB64 !== undefined ? Buffer.from(String(b.eetasB64), 'base64') : Buffer.from(String(b.eetasText || ''), 'latin1');
 			const meta = J.importJob({ eelvl: Buffer.from(String(b.eelvlB64 || ''), 'base64'), eetas, name: b.name, eelvlName: b.eelvlName, eetasName: b.eetasName,
-				startMode: b.startMode });
+				startMode: b.startMode, deaths: b.deaths === 'forbid' ? 'forbid' : undefined });
 			return send(res, 200, { ok: true, job: meta });
 		}
 		if (parts[1] === 'jobs' && parts[2]) {

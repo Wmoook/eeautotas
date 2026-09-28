@@ -207,21 +207,35 @@ function evaluate(level, masks, withChance = true) {
 }
 /**
  * THE acceptance rule (grind.js consider(), the job inbox, tas.js try): a candidate replaces the best run if it
- * finishes with no more deaths than `baseDeaths` and is faster with no lower random-portal chance, or equally
- * fast with a higher chance. `cand` null = does not finish.
+ * finishes with no more deaths than `baseDeaths` (deathCap: any number unless the job opts out) and is faster with no
+ * lower random-portal chance, or equally fast with a higher chance, or equally fast and as likely with fewer deaths (a
+ * death that saves nothing goes: the optimizer's variants without it win). `cand` null = does not finish.
  */
 function judge(cand, best, baseDeaths) {
 	if (!cand) return { accept: false, reason: 'does not finish the level' };
 	if (!best) return { accept: true, saved: 0, reason: 'the current best does not finish (engine changed?)' };
-	if (cand.deaths > baseDeaths) return { accept: false, reason: `dies ${cand.deaths} time(s) (allowed: ${baseDeaths})` };
+	if (cand.deaths > baseDeaths) return { accept: false, reason: `dies ${cand.deaths} time(s) (allowed: ${baseDeaths}; the job forbids more deaths)` };
 	if (cand.runTicks > best.runTicks) return { accept: false, reason: `slower: ${fmt(cand.runTicks)} vs best ${fmt(best.runTicks)}` };
 	const pc = (x) => `${(x * 100).toFixed(1)}%`;
 	if (cand.runTicks < best.runTicks) {
-		if (cand.chance >= best.chance - 1e-9) return { accept: true, saved: best.runTicks - cand.runTicks };
+		if (cand.chance >= best.chance - 1e-9) return { accept: true, saved: best.runTicks - cand.runTicks, ...(cand.deaths > (best.deaths || 0) ? { deaths: cand.deaths } : {}) };
 		return { accept: false, reason: `faster (${fmt(cand.runTicks)}) but finishes in only ${pc(cand.chance)} of EEO plays (need ${pc(best.chance)})` };
 	}
 	if (cand.chance > best.chance + 1e-9) return { accept: true, saved: 0, safer: true };
+	if (cand.chance >= best.chance - 1e-9 && (cand.deaths || 0) < (best.deaths || 0)) return { accept: true, saved: 0, fewerDeaths: true };
 	return { accept: false, reason: `same time as the best (${fmt(best.runTicks)}), not more likely to work` };
+}
+/**
+ * The most deaths a candidate may have (judge's baseDeaths) against a best that dies `deaths` times. Deaths (checkpoint
+ * respawns) are moves like any other (the user: "deaths / checkpoint respawns are allowed"; OC's Good Egg TAS dies once
+ * on purpose), so any number, unless the job opts out (meta.json "deaths": "forbid"; `tas.js import --deaths=forbid`):
+ * then no more than its best's, the rule before 2026-09-28. `meta`: the job's meta.json (or null: allowed).
+ */
+function deathCap(meta, deaths) { return meta && meta.deaths === 'forbid' ? (deaths || 0) : Infinity; }
+/** deathCap for a run file: the job it lies in (src/jobs/<id>/...: its meta.json), else allowed */
+function deathCapFor(file, deaths) {
+	const id = jobOfFile(file);
+	return deathCap(id ? readJSON(path.join(JOBS, id, 'meta.json'), null) : null, deaths);
 }
 
 /**
@@ -327,6 +341,6 @@ module.exports = {
 	writeAtomic, writeJSON, readJSON, lock, sleepMs,
 	fmt, parseTime, tickOf,
 	jobIds, findJob, jobLevelId, jobOfFile, levelData, loadLevel,
-	replay, isRandom, chanceOf, evaluate, judge, coinsIrrelevant, COIN_DOOR_IDS, coinFreeTick, coinFreeOk,
+	replay, isRandom, chanceOf, evaluate, judge, deathCap, deathCapFor, coinsIrrelevant, COIN_DOOR_IDS, coinFreeTick, coinFreeOk,
 	maskName, inputRuns, parseArgs, tickMeter, cpuName,
 };

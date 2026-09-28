@@ -149,7 +149,7 @@ const normStart = (s) => {
  * src/data/job_<id>.json. Throws a readable error if the TAS does not finish the level.
  * startMode: 'reset' (default) or 'load', how the TAS was started in eeo-tas (see START_MODES).
  */
-function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
+function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode, deaths }) {
 	if (!eelvl || !eelvl.length) throw new Error('no .eelvl level file');
 	if (!eetas || !eetas.length) throw new Error('no .eetas TAS file');
 	const start = normStart(startMode);
@@ -247,6 +247,9 @@ function importJob({ eelvl, eetas, name, eelvlName, eetasName, startMode }) {
 			rng: { chance: rng.draws ? rng.chance : 1, uses: rng.uses, truncated: rng.truncated },
 			// how the TAS was started in eeo-tas (level JSON start_mode); it only changes anything when startMatters
 			startMode: start, startMatters, spawns: level.spawnsX.length, timeDoors: !!level.hasTimeDoors,
+			// deaths (checkpoint respawns) are moves the optimizer may add when the run gets faster (C.deathCap); "forbid":
+			// never more deaths than the best has (tas.js import --deaths=forbid, the API's deaths)
+			deaths: deaths === 'forbid' ? 'forbid' : 'allow',
 		};
 		C.writeJSON(path.join(dir, 'meta.json'), meta);
 		C.writeJSON(path.join(dir, 'status.json'), { state: 'new', bestRunTicks: r.runTicks, chance: meta.rng.chance, history: [], updated: Date.now() });
@@ -400,9 +403,13 @@ function summary(id, extraPid) {
 	const lv = pid ? C.readJSON(path.join(dir, 'live.json'), null) : null;
 	const live = lv && lv.cpu && Date.now() - (+lv.t || 0) < 5000 ? lv : null;
 	const remote = remoteState(id, st, orig, Date.now());
-	return { ...meta, startMode: meta.startMode || 'reset', levelId: meta.levelId || C.jobLevelId(id), running: !!pid, pid: pid || null, bestVersion,
+	// the best's deaths: the last accepted run's (history entries carry them since 2026-09-28), else the original's while
+	// nothing was accepted (null: not known)
+	const hist = st.history || [], last = hist.length ? hist[hist.length - 1] : null;
+	const bestDeaths = last ? (Number.isFinite(last.deaths) ? last.deaths : null) : (meta.tas ? meta.tas.deaths || 0 : null);
+	return { ...meta, startMode: meta.startMode || 'reset', deaths: meta.deaths === 'forbid' ? 'forbid' : 'allow', levelId: meta.levelId || C.jobLevelId(id), running: !!pid, pid: pid || null, bestVersion,
 		state: pid ? 'running' : (st.state === 'error' ? 'error' : (st.state === 'finished' ? 'finished' : 'stopped')), error: st.error || null,
-		best: { runTicks: bestTicks, time: fmt(bestTicks) }, original: { runTicks: orig, time: fmt(orig) },
+		best: { runTicks: bestTicks, time: fmt(bestTicks), deaths: bestDeaths }, original: { runTicks: orig, time: fmt(orig), deaths: meta.tas ? meta.tas.deaths || 0 : 0 },
 		savedTicks: orig - bestTicks, history: st.history || [], stage: pid ? (st.stage || '') : '', round: st.rounds || 0,
 		coinsOptional: st.coinsOptional, optimizingSince: pid ? st.sessionStarted : null, lastUpdate: st.updated || null, workers: st.workers,
 		chance: st.chance !== undefined ? st.chance : (meta.rng ? meta.rng.chance : 1), report, live, remote,
@@ -446,7 +453,8 @@ async function tryCandidate(id, buf, opts) {
 	const level = loadJobLevel(id);
 	const cand = C.evaluate(level, C.parseEetasBuffer(buf));
 	const best = C.evaluate(level, C.readEetas(path.join(dir, 'best.eetas')));
-	const res = { job: id, source, candidate: brief(cand), best: brief(best), verdict: C.judge(cand, best, best ? best.deaths : Infinity), accepted: false, handed: false };
+	const meta = C.readJSON(path.join(dir, 'meta.json'), null);
+	const res = { job: id, source, candidate: brief(cand), best: brief(best), verdict: C.judge(cand, best, best ? C.deathCap(meta, best.deaths) : Infinity), accepted: false, handed: false };
 	if (!cand) return res;
 	if (runningPid(id)) {
 		const name = `${stamp()}_${slug(source)}.eetas`;
@@ -464,14 +472,14 @@ async function tryCandidate(id, buf, opts) {
 	const release = C.lock(path.join(dir, '.lock'));
 	try {
 		const cur = C.evaluate(level, C.readEetas(path.join(dir, 'best.eetas')));   // re-read under the lock
-		const v = C.judge(cand, cur, cur ? cur.deaths : Infinity);
+		const v = C.judge(cand, cur, cur ? C.deathCap(meta, cur.deaths) : Infinity);
 		res.verdict = v; res.best = brief(cur); res.handed = 'direct';
 		if (v.accept) {
 			const was = cur ? cur.runTicks : cand.runTicks;
 			C.writeEetas(path.join(dir, `best_${cand.runTicks}.eetas`), cand.ms);
 			C.writeEetas(path.join(dir, 'best.eetas'), cand.ms);
 			updateStatus(id, (st) => {
-				st.history.push({ t: Date.now(), runTicks: cand.runTicks, saved: was - cand.runTicks, what: `try: ${source}`, chance: cand.chance });
+				st.history.push({ t: Date.now(), runTicks: cand.runTicks, saved: was - cand.runTicks, what: `try: ${source}`, chance: cand.chance, deaths: cand.deaths });
 				st.bestRunTicks = cand.runTicks; st.chance = cand.chance; st.updated = Date.now();
 			});
 			logLine(id, `${source}: ${fmt(was)} -> ${fmt(cand.runTicks)} (-${was - cand.runTicks}) accepted`);
