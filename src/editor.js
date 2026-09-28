@@ -233,7 +233,11 @@ function reachFp() {
 	return RF_FP;
 }
 const levelHashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
-const reachBase = (hash) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}`);
+/** the searches take deaths as moves (EEAT_DEATHS=moves; the deaths-as-moves design): their reach file keeps the death
+ *  edges. Otherwise (today: every search drops a dead ball) the file the searches read is the field without them, where a
+ *  state only a death leads to the trophy from is cut off (src/reach.js opts.deaths; the verdicts keep them) */
+const deathsTaken = () => process.env.EEAT_DEATHS === 'moves';
+const reachBase = (hash) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}${deathsTaken() ? '_dm' : ''}`);
 /** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
  *  cache (memo, or the search's file); none yet: null, and for a level up to 40k tiles the check starts in a worker
  *  thread (the newest level asked for; the page asks again while `pending`) */
@@ -391,13 +395,13 @@ const STRATEGIES = {
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deathFree ? [] : ['--deaths=1']), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : [])] : [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1'] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deathFree ? [] : ['--deaths=1'])] },
 };
 // the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
 const ROLL_BATCH = 4096;
@@ -1473,6 +1477,8 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 		S.seconds = Math.min(S.seconds, NO_WAY_UP_S);
 	}
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
+	// (the reach file the searches read has no death edges: goexplore.js builds its field the same way, --deaths)
+	cur.opts.deathFree = !!rf.deathFree;
 	cur.opts.noWayUp = noWayUp;
 	// (the check of a level the reach field calls impossible runs as before: no steer field)
 	if (noWayUp) { cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
@@ -1595,12 +1601,17 @@ function reachInfo(buf, hash) {
 			const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
 			const f = RF.reachField(L, { explain: true });
 			const sim = new E.EESim(L); sim.reset();
+			// (the searches' file: without the death edges when they drop dead balls, unless that cuts the start off: then the
+			// only way is a death, and the file keeps them as before, the verdict's note says so)
+			let fs2 = f, deathFree = false;
+			if (!d.deathsTaken && f.deaths) { const g = RF.reachField(L, { deaths: false }); if (RF.costAt(g, sim) >= 0) { fs2 = g; deathFree = true; } }
 			// (the level's fingerprint in the file: eegpu prove uses a field only for its own level; none: it does not use it)
 			let lfp = null;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
-			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(f, lfp)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
-			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms });`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(),
+			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(fs2, lfp)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
+			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms, deathFree,
+				...(deathFree ? { searchStartCost: RF.costAt(fs2, sim) } : {}), ...(f.prot ? { prot: f.prot } : {}) });`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(), deathsTaken: deathsTaken(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), reach: require.resolve('./reach.js'), gpu: require.resolve('./gpu.js') } } });
 		w.once('message', (r) => {
 			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneReachCache(); } catch (e) { /* read-only data folder */ }
@@ -1670,7 +1681,7 @@ function pruneSteerCache() {
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {
 	const d = dir(), fp = reachFp();
-	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+(_[0-9a-f]+)?\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_v${RF_VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
+	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+(_[0-9a-f]+)?(_dm)?\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_v${RF_VERSION}_${fp}.json`) || f.endsWith(`_v${RF_VERSION}_${fp}_dm.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
 	for (const { f } of fl.filter((x, k) => k >= 8 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }

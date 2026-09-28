@@ -250,7 +250,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, deaths: 0 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -297,6 +297,23 @@ const REG_STALE_MS = 10 * 60 * 1000;   // a registry file not refreshed for this
 const SOURCE_S = 5, SOURCE_MIN_TICKS = 100;
 // (EEAT_PICKLOG=1: the picks' log every PICKLOG_S s: an event 'picklog', observation only)
 const PICKLOG_S = 30;
+// The dead-end brake (--sat=1, coarse cells; --sat=0: the picks as before). A REGION is a room and a zone of SAT_ZONE x
+// SAT_ZONE tiles (the GPU runs' cells carry no tile: a room and a band of SAT_BAND tiles of the reach cost). Every pick of a
+// cell adds 1 to its region's EXCESS and to its room's, every new cell its runs make takes SAT_CELL off (never below 0: a
+// region whose picks make a new cell per SAT_CELL picks or better stays at 0), and a new room or a nearer attempt from the
+// pick sets both to 0 (the region recovers). Head A's priority gets + SAT_MU x sqrt(excess) tiles, head B's cell weight
+// / (1 + sqrt(excess) / SAT_B) and its room weight the same by the room's excess: a region whose exploration saturates
+// (Forgotten Helix: head A's picks in the hub by the portal (274, 188) and in the spectator box it leads to, 21,831 /
+// 12,893 picks that made 281 / 102 new cells, a new cell per 78 / 126 picks, where head B's picks elsewhere made one per
+// 3-4) sinks behind the rest, however low its reach cost, and comes back when something new appears there. The reach
+// field's -1 is still the only prune: this only orders. SAT_SLACK: head A takes a cell whose priority rose by more since
+// it was queued back into the queue (lazily, at its pop).
+const SAT_ZONE = 8, SAT_BAND = 8, SAT_CELL = 20, SAT_N = 200, SAT_MU = 1, SAT_B = 10, SAT_SLACK = 1;
+/** the brake of a region (or room) of excess ex: 0 up to SAT_N (a region is saturated after SAT_N picks beyond its yield), then
+ *  sqrt(ex - SAT_N): head A adds SAT_MU x that (tiles), head B divides by 1 + that / SAT_B */
+const satOver = (ex) => (ex > SAT_N ? Math.sqrt(ex - SAT_N) : 0);
+// (the memory of a region's excess: an entry of its room's Map, bytes)
+const B_SATZ = 48;
 // --gpu=1: head B's seen counts every SEEN_BATCHES batches, or one batch per SEEN_CELLS cells when that is more (the
 // download of millions of cells); the cells' states in host memory: ROLL_HOST_SHARE of the machine's memory, at most
 // half of the free memory, ROLL_HOST_MIN MB at least
@@ -334,6 +351,10 @@ function parseArgs(argv) {
 	if (a.gpu && a.cells === 'fine') throw new Error('--gpu=1 runs coarse cells only');
 	return a;
 }
+/** the reach field's options for this search: --deaths=0 (the default: the runs end at a death, so a way through one is
+ *  no way of theirs) builds it without death edges (src/reach.js opts.deaths: a state only a death leads to the trophy
+ *  from is cut off: its runs end there); --deaths=1 keeps them (a search that takes deaths as moves) */
+const fieldOpts = (a) => (a.deaths ? {} : { deaths: false });
 /** the cells for level L: 'fine' up to FINE_MAX_TILES tiles, else 'coarse' */
 const cellsFor = (L) => (L.width * L.height > FINE_MAX_TILES ? 'coarse' : 'fine');
 /** the process memory (MB) of a search of `workers` workers with `mem` MB each (see RSS_F) */
@@ -747,7 +768,7 @@ function inputsOf(node) {
  *  entry's version: stale when the cell's own has moved on); compact() drops the stale entries */
 function heapOf(prio) {
 	const hv = [], hc = [], hver = [];
-	const H = { popVer: 0, size: () => hv.length };
+	const H = { popVer: 0, popVal: 0, size: () => hv.length };
 	H.push = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -763,6 +784,7 @@ function heapOf(prio) {
 	H.pop = () => {
 		const c = hc[0];
 		H.popVer = hver[0];
+		H.popVal = hv[0];
 		const v = hv.pop(), lc = hc.pop(), lver = hver.pop();
 		const n = hv.length;
 		if (n > 0) {
@@ -843,6 +865,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// coarse cells: the rooms (roomOf), each with its fields (roomFields: territory gain, trophy walkable), its cells
 	// (head B samples them), its picks, its lowest-cost cell and how often it was a source; roomKey = the live state's
 	const RM = coarse ? roomOf(L) : null;
+	// (the dead-end brake: see SAT_ZONE; a room's zones' excess in room.sat (zone -> excess), the room's own in room.ex)
+	const SAT = coarse && a.sat !== 0, ZW = Math.ceil(W / SAT_ZONE);
+	let nSatZ = 0;
+	const zoneOf = (tile) => (((tile % W) / SAT_ZONE) | 0) + (((tile / W) / SAT_ZONE) | 0) * ZW;
+	/** the excess of cell c's region (0 without the brake) */
+	const exOf = (c) => { if (!SAT || c.room === null) return 0; const v = c.room.sat.get(zoneOf(c.tile)); return v === undefined ? 0 : v; };
+	/** head A's brake for cell c (tiles) */
+	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c)) : 0);
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
@@ -858,7 +888,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const newRoom = (key, t, parent) => {
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
-		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
+		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), arr: [], best: null, isNew: true, sent: 0, sentAt: null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
 		rooms.set(key, r);
 		roomList.push(r);
@@ -901,11 +931,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	};
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
 	const cells = new Map();
-	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks));
+	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c));
 	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
 	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out
 	const ST = a.steerData || null;
-	const HS = ST ? heapOf((c) => c.sc + a.lambda * Math.sqrt(c.picks)) : null;
+	const HS = ST ? heapOf((c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c)) : null;
 	// head L (the one search once a route is known: the main thread's 'route' message): the lead. The best route's
 	// schedule (sched: per (room, tile) the tick it first gets there); a cell at (room, tile) that the route passes gets
 	// lead = its tick - the route's there (below 0: ahead of the best route, which finishes that much sooner from there if
@@ -972,7 +1002,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
 	const archiveBytes = () => cells.size * (ST ? B_CELL + B_SC : B_CELL) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
-		roomList.length * B_ROOM + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
+		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
 	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
@@ -1131,6 +1161,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		while (H.size() > 0) {
 			const c = H.pop();
 			if (H.popVer !== c.ver || c.t >= maxT) continue;
+			// (the brake: its region's excess grew since the cell was queued: back into the queue at its priority now)
+			if (SAT && satPen(c) > 0) { const v = (H === HS ? c.sc : c.rc) + a.lambda * Math.sqrt(c.picks) + satPen(c); if (v > H.popVal + SAT_SLACK) { H.push(c); continue; } }
 			return c;
 		}
 		return null;
@@ -1142,7 +1174,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		for (let k = 0; k < 4; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
 			if (!r.arr.length) continue;
-			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50);
+			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex) / SAT_B : 1);
 			if (w > bw) { bw = w; br = r; }
 		}
 		if (br === null) return popA();
@@ -1151,7 +1183,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
-			const sc = 1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks);
+			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c)) / SAT_B : 1);
 			if (sc > bs) { bs = sc; bc = c; }
 		}
 		return bc || popA();
@@ -1214,7 +1246,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 					r.arr = r.arr.filter((c) => c.ver >= 0);
 					if (r.sentAt !== null && r.sentAt.ver < 0) r.sentAt = null;
 					if (r.arr.length || r === room0) roomList[n++] = r;
-					else rooms.delete(r.key);
+					else { rooms.delete(r.key); nSatZ -= r.sat.size; }
 				}
 				roomList.length = n;
 			}
@@ -1426,7 +1458,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (e === null) { end = 'exhausted'; break; }
 			// (EEAT_PICKLOG=1: the picks per head, room and 10 x 10-tile zone, with the cells they made; observation only)
 			const plRow = plog !== null ? plogRow(head, e) : null;
-			const cells0 = cells.size, impr0 = impr;
+			const cells0 = cells.size, impr0 = impr, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
 			e.picks++; e.ver++; picks++; e.touch = picks;
 			if (coarse) e.room.picks++;
 			hpush(e);
@@ -1516,6 +1548,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				if (end) break;
 			}
 			if (plRow !== null) { plRow[1] += cells.size - cells0; plRow[2] += impr - impr0; }
+			// (the brake: the pick's region and room, by what its runs made)
+			if (SAT && room1 !== null) {
+				const fresh = roomList.length > rooms0 || minRc < minRc0 - 0.05;
+				const d = 1 - SAT_CELL * (cells.size - cells0);
+				const v0 = room1.sat.get(zone1);
+				if (v0 === undefined) nSatZ++;
+				room1.sat.set(zone1, fresh ? 0 : Math.max(0, (v0 || 0) + d));
+				room1.ex = fresh ? 0 : Math.max(0, room1.ex + d);
+			}
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
 		pickL = false; pickW = false;
@@ -1556,7 +1597,7 @@ async function gpuMain(a, L, m) {
 	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
 	a.cells = 'coarse';
-	const field = RF.reachField(L);
+	const field = RF.reachField(L, fieldOpts(a));
 	const sim = new E.EESim(L);
 	sim.reset();
 	const inp = new E.EEInput();
@@ -1736,14 +1777,19 @@ async function gpuMain(a, L, m) {
 		for (let s = 0; s < ms.length; s++) { E.applyMask(inp, ms[s]); sim.tick(inp); }
 		if (RM.key(sim) !== key) keyMismatch++;
 		const f = fields.enter(sim);
-		const r = { idx: roomList.length, key, desc: RM.desc(sim), t: cT[c], gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: -1, isNew: true, sent: 0, sentAt: -1 };
+		const r = { idx: roomList.length, key, desc: RM.desc(sim), t: cT[c], gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, arr: [], best: -1, isNew: true, sent: 0, sentAt: -1 };
 		rooms.set(key, r);
 		roomList.push(r);
 		return r;
 	};
+	// ---- the dead-end brake (explore()'s, see SAT_ZONE): a region = (room, band of SAT_BAND tiles of the reach cost: the GPU's
+	// cells carry no tile), its excess in satG, the room's in room.ex
+	const SAT = a.sat !== 0, satG = new Map();
+	const regionOf = (c) => cRoom[c] * 4096 + Math.min(4095, (cRc[c] / SAT_BAND) | 0);
+	const exG = (c) => { const v = satG.get(regionOf(c)); return v === undefined ? 0 : v; };
 	// ---- head A's heap (explore()'s): (priority, cell, version)
 	const hv = [], hc = [], hver = [];
-	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]);
+	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c)) : 0);
 	const hpush = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -1756,10 +1802,11 @@ async function gpuMain(a, L, m) {
 		}
 		hv[i] = v; hc[i] = c; hver[i] = cVer[c];
 	};
-	let popVer = 0;
+	let popVer = 0, popVal = 0;
 	const hpop = () => {
 		const c = hc[0];
 		popVer = hver[0];
+		popVal = hv[0];
 		const v = hv.pop(), lc = hc.pop(), lver = hver.pop();
 		const n = hv.length;
 		if (n > 0) {
@@ -1802,6 +1849,8 @@ async function gpuMain(a, L, m) {
 		while (hv.length) {
 			const c = hpop();
 			if (popVer !== cVer[c] || cT[c] >= maxT) continue;
+			// (the brake grew since the cell was queued: back into the queue at its priority now)
+			if (SAT && prio(c) > popVal + SAT_SLACK) { hpush(c); continue; }
 			return c;
 		}
 		return -1;
@@ -1811,7 +1860,7 @@ async function gpuMain(a, L, m) {
 		for (let k = 0; k < 4; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
 			if (!r.arr.length) continue;
-			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50);
+			const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex) / SAT_B : 1);
 			if (w > bw) { bw = w; br = r; }
 		}
 		if (br === null) return popA();
@@ -1820,7 +1869,7 @@ async function gpuMain(a, L, m) {
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (cT[c] >= maxT) continue;
-			const sc = 1 / Math.sqrt(1 + cSeen[c]) + 1 / Math.sqrt(1 + cPicks[c]);
+			const sc = (1 / Math.sqrt(1 + cSeen[c]) + 1 / Math.sqrt(1 + cPicks[c])) / (SAT ? 1 + satOver(exG(c)) / SAT_B : 1);
 			if (sc > bs) { bs = sc; bc = c; }
 		}
 		return bc >= 0 ? bc : popA();
@@ -1897,6 +1946,8 @@ async function gpuMain(a, L, m) {
 	// (each pick's path node when it was picked: the GPU plays its runs from the state the cell had then, and a record
 	// of the same batch may give the cell a sooner state and path before its runs' records are read)
 	const pickNode = new Int32Array(a.batch);
+	// (the brake: each pick's region at its pick, the new cells its runs made, whether they found a room or a nearer attempt)
+	const pickReg = new Float64Array(a.batch), pickNew = new Int32Array(a.batch), pickFresh = new Uint8Array(a.batch), newPk = new Map();
 	const bFirst = []; // (per batch: each room's first new cell, by room index)
 	// (head B's seen counts: every SEEN_BATCHES batches, more batches apart as the cells grow (a download of millions of
 	// cells takes a while): by the batch count, not the clock, so a seed's search is the same every time)
@@ -1936,6 +1987,7 @@ async function gpuMain(a, L, m) {
 			roomList[cRoom[e]].picks++;
 			hpush(e);
 			pickNode[K] = cNode[e];
+			if (SAT) { pickReg[K] = regionOf(e); pickNew[K] = 0; pickFresh[K] = 0; }
 			pickBuf[K++] = e;
 		}
 		if (!K) { end = 'exhausted'; break; }
@@ -1971,7 +2023,7 @@ async function gpuMain(a, L, m) {
 			const run = rs & 0xffff, step = rs >>> 16;
 			const node = newNode(pickNode[pk], rollSeed(bs, pk, run), step + 1);
 			const isNew = d >= n0;
-			if (isNew) { grow(d + 1); if (d < nCells) reordered++; else nCells = d + 1; cPicks[d] = 0; cVer[d] = 0; cSeen[d] = 0; }
+			if (isNew) { grow(d + 1); if (d < nCells) reordered++; else nCells = d + 1; cPicks[d] = 0; cVer[d] = 0; cSeen[d] = 0; if (SAT && pk < K) { pickNew[pk]++; newPk.set(d, pk); } }
 			else if (t >= cT[d]) continue;
 			cT[d] = t; cNode[d] = node;
 			const rc = costOf(fifths, node);
@@ -1980,7 +2032,7 @@ async function gpuMain(a, L, m) {
 			hpush(d);
 			if (t > deepest) deepest = t;
 			if (rc < minRc - 0.05) minRc = rc;
-			if (rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) near = { rc, t, c: d };
+			if (rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) { if (SAT && rc < near.rc - 0.05 && pk < K) pickFresh[pk] = 1; near = { rc, t, c: d }; }
 			let r = rooms.get(roomKey);
 			if (isNew) {
 				if (r === undefined) { r = { pending: true, key: roomKey, cells: [] }; rooms.set(roomKey, r); }
@@ -1997,6 +2049,7 @@ async function gpuMain(a, L, m) {
 			for (const c of p.cells) if (cT[c] < cT[c0]) c0 = c;
 			rooms.delete(p.key);
 			const r = newRoom(p.key, c0);
+			if (SAT && newPk.has(c0)) pickFresh[newPk.get(c0)] = 1;
 			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; }
 			r.isNew = false;
 			if (r.gain > 0 && a.burst > 0) discovery.push([c0, a.burst]);
@@ -2004,6 +2057,15 @@ async function gpuMain(a, L, m) {
 				if (r.gain <= 0) lastBlandSource = Date.now();
 				source('room', r, c0);
 			}
+		}
+		// the brake: every pick's region and room by what its runs made
+		if (SAT) {
+			for (let k = 0; k < K; k++) {
+				const rr = roomList[cRoom[pickBuf[k]]], d = 1 - SAT_CELL * pickNew[k], v0 = satG.get(pickReg[k]) || 0;
+				satG.set(pickReg[k], pickFresh[k] ? 0 : Math.max(0, v0 + d));
+				if (rr) rr.ex = pickFresh[k] ? 0 : Math.max(0, rr.ex + d);
+			}
+			newPk.clear();
 		}
 		// finishes: the fastest one of the batch, replayed in the exact engine
 		if (nf) {
@@ -2089,7 +2151,7 @@ async function main() {
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
-	const field = RF.shareField(RF.reachField(L));
+	const field = RF.shareField(RF.reachField(L, fieldOpts(a)));
 	const sim0 = new E.EESim(L);
 	sim0.reset();
 	const pre0 = prefixOf(a);
