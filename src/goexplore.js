@@ -291,7 +291,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0, dback: 1, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -1936,13 +1936,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		// the quick look before the dead ticks are played (the room as it is now; the respawn's own after them): a death
 		// that throws the ball back (its target farther from the trophy by the reach field than the state's own way, by
 		// more than the way a death costs), then the earliest arrival there
-		{ const r0 = respawnCost(); if (r0 < 0 || r0 > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; } }
+		// (--dback=0, an experiment (the Good Egg anatomy, 2026-09-28): no throw-back guard, the respawn's cost unchecked; the
+		// earliest-arrival rule stays)
+		{ const r0 = respawnCost(); if (r0 < 0 || (a.dback !== 0 && r0 > rcPrev + DEATH_TILES)) { dBack++; dDrop++; return; } }
 		const v0 = rspAt.get(rspRoom() * 2097152 + rt);
 		if (v0 !== undefined && v0 <= t + DEATH_TICKS - 1) { dDrop++; return; }
 		// (with the steer field, gate-aware, the same bound by it against the run's pick: the reach field is door-blind, and
 		// on Good Egg it puts the spawn as near as the level's upper right, so deaths from there back to the spawn with 7
 		// coins passed it: gate ge#14 failed in 3 of 3 seeds; OC's pit death: 318.8 at the pit, 326.4 at the checkpoint)
-		if (ST && e.sc < STEER_NONE) { const sr = atRespawn(() => SF.steerFifths(ST, sim)); if (sr >= 0 && sr / 5 > e.sc + DEATH_TILES) { dBack++; dDrop++; return; } }
+		if (ST && e.sc < STEER_NONE && a.dback !== 0) { const sr = atRespawn(() => SF.steerFifths(ST, sim)); if (sr >= 0 && sr / 5 > e.sc + DEATH_TILES) { dBack++; dDrop++; return; } }
 		let nd = 0;
 		while (sim.is_dead && nd < DEATHBLK_N) { E.applyMask(inp, 0); sim.tick(inp); nd++; ticks++; }
 		dTicks += nd;
@@ -1951,7 +1953,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const rc = costOf();
 		if (rc < 0) { dDrop++; return; }
 		const raw = RF.costAt(field, sim);
-		if (raw > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; }
+		if (a.dback !== 0 && raw > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; }
 		const byCost = raw + DEATH_TILES < rcPrev;
 		// (the earliest arrival first: a room is made only for a death that is kept, never for one dropped after it)
 		if (coarse) roomKey = RM.key(sim);
