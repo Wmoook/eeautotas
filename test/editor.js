@@ -578,6 +578,25 @@ const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stoppe
 process.stdin.on('data', (d) => { if (SC.stdinLog) fs.appendFileSync(SC.stdinLog, String(d)); if (/stop/.test(String(d))) end(); });
 process.stdin.on('end', end);
 `;
+// A stand-in for the CPU search that ends on its own (the one search's supervisor, src/editor.js oneEnded): logs its
+// arguments (argLog) and its stdin (stdinLog); its first launch (a --seed below 1000) prints the scenario's sources, then
+// after crashMs ends with exit code 137 (how: 'exit', as the OOM killer's SIGKILL shows in a container's shell) or an
+// uncaught throw (how: 'throw'); a restart (seed + 1000 x k) runs until "stop" or the end of its stdin.
+const FAKE_CPU_CRASH = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const seed = +((process.argv.find((x) => x.startsWith('--seed=')) || '--seed=0').slice(7));
+if (SC.argLog) fs.appendFileSync(SC.argLog, JSON.stringify(process.argv.slice(3)) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [seed], mode: 'physics', cells: 'coarse', startCost: 40 });
+const first = seed < 1000;
+if (first) setTimeout(() => { for (const s of SC.sources || []) say(Object.assign({ ev: 'source', seed: 1 }, s)); }, SC.wait || 0);
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 40, found: 0, refined: 0, rooms: 3, workers: 1, heapMB: 123 }), 200);
+if (first) setTimeout(() => { clearInterval(iv); process.stderr.write('FATAL ERROR: stand-in heap limit\\n'); if (SC.how === 'throw') throw new Error('stand-in worker crash'); process.exit(137); }, SC.crashMs);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (!first && SC.stdinLog) fs.appendFileSync(SC.stdinLog, String(d)); if (/stop/.test(String(d))) end(); });
+process.stdin.on('end', end);
+`;
 // A stand-in for the GPU random runs (src/goexplore.js --gpu=1): logs its arguments, says ready and start, after `wait` ms
 // reports the scenario's route, then progress lines until its --stopfile appears (logged "stopped"); what comes on its
 // stdin is logged.
@@ -809,6 +828,60 @@ async function passesSection() {
 			'the source with territory gain relayed from least, 1000 back, the larger table, the next salt',
 			JSON.stringify(runs) === JSON.stringify(want) && (str.sources || []).length === 4 && /key:blue:1/.test(so) && /key:red:1/.test(so) && /key:green:0/.test(so),
 			`runs ${runs.join(' | ')}; sources ${so}`);
+	}
+	// the one search's supervisor (src/editor.js oneEnded): the CPU search ends on its own (exit code 137, as the OOM
+	// killer's SIGKILL shows in a shell; an uncaught throw) with no route known: the cause is logged (V.crashes: the code,
+	// the stderr tail, the last progress line), it starts again with seed + 1000 and its archive gets the sources' attempts
+	// on stdin ("seed <inputs>"); with a route known it is not started again
+	for (const how of ['exit', 'throw']) {
+		const scR = path.join(HOME, `sup_${how}.json`), logR = path.join(HOME, `sup_${how}.log`), scC = path.join(HOME, `sup_${how}cpu.json`), fakeCpu = path.join(HOME, 'fake-cpu-crash.js');
+		const argLog = path.join(HOME, `sup_${how}_args.log`), inLog = path.join(HOME, `sup_${how}_stdin.log`);
+		fs.writeFileSync(fakeCpu, FAKE_CPU_CRASH);
+		fs.writeFileSync(scR, JSON.stringify({ log: logR, R, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 30, tick: 1200, ch: '0' } }] }, beam: null }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100, crashMs: 1500, how, argLog, stdinLog: inLog, sources: [
+			{ kind: 'room', room: 111, desc: 'key:red', gain: 40, tick: 300, dist: 50, inputs: '2'.repeat(300) },
+			{ kind: 'room', room: 333, desc: 'key:blue', gain: 25, tick: 500, dist: 60, inputs: '1'.repeat(500) }] }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 200, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scR], cpu: [process.execPath, fakeCpu, scC], salts: false });
+		const argsOf = () => (fs.existsSync(argLog) ? fs.readFileSync(argLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+		const t0s = Date.now();
+		while (ED.state().running && (argsOf().length < 2 || !fs.existsSync(inLog)) && Date.now() - t0s < 20000) await new Promise((z) => setTimeout(z, 100));
+		await new Promise((z) => setTimeout(z, 500));
+		const st = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		const seeds = argsOf().map((a) => +((a.find((x) => x.startsWith('--seed=')) || '--seed=-1').slice(7)));
+		const V = (st.strategies || []).find((q) => q.key === 'goexplore') || {};
+		const fedIn = fs.existsSync(inLog) ? fs.readFileSync(inLog, 'utf8').split('\n').filter((l) => l.startsWith('seed ')) : [];
+		const cr = (V.crashes || [])[0] || {};
+		check(`the one search ends on its own (${how === 'exit' ? 'exit code 137' : 'an uncaught throw'}) with no route: logged (code, stderr, last progress), started again with seed + 1000, its archive fed with the sources' attempts`,
+			seeds.length === 2 && seeds[1] === seeds[0] + 1000 && V.restarts === 1 && cr.code === (how === 'exit' ? 137 : 1) && cr.restarted === true &&
+			(cr.stderr || []).some((l) => /stand-in heap limit/.test(l)) && cr.progress && cr.progress.heapMB === 123 &&
+			fedIn.some((l) => /^seed 2{300}$/.test(l)) && fedIn.some((l) => /^seed 1+$/.test(l)) && (st.notes || st.log || []).concat([]).length >= 0,
+			`seeds ${seeds.join(',')}; restarts ${V.restarts}; crash ${JSON.stringify(cr).slice(0, 300)}; fed ${fedIn.length}; state ${V.state}`);
+	}
+	// ... and with a route already known (every move's first pass finishes; its next pass holds the GPU, so the CPU search
+	// is not stopped by cpuDone): the end is logged, and the search is not started again
+	{
+		const scR = path.join(HOME, 'sup_route.json'), logR = path.join(HOME, 'sup_route.log'), scC = path.join(HOME, 'sup_routecpu.json'), fakeCpu = path.join(HOME, 'fake-cpu-crash.js');
+		const argLog = path.join(HOME, 'sup_route_args.log');
+		fs.writeFileSync(fakeCpu, FAKE_CPU_CRASH);
+		fs.writeFileSync(scR, JSON.stringify({ log: logR, R, runs: { '-1': [{ end: 'finish', idle: 20, layers: 3 }], 0: [{ end: 'time', layers: 5000, wait: 8000, hold: 8000 }] }, beam: null }));
+		fs.writeFileSync(scC, JSON.stringify({ wait: 100, crashMs: 3000, how: 'exit', argLog }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 200, width: 1024, workers: 1 }, { available: true },
+			{ tool: [process.execPath, fake, scR], cpu: [process.execPath, fakeCpu, scC], salts: false });
+		const t0s = Date.now();
+		const V0 = () => (ED.state().strategies || []).find((q) => q.key === 'goexplore') || {};
+		while (ED.state().running && !(V0().crashes || []).length && Date.now() - t0s < 15000) await new Promise((z) => setTimeout(z, 100));
+		await new Promise((z) => setTimeout(z, 1000));
+		const st = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		const n = fs.existsSync(argLog) ? fs.readFileSync(argLog, 'utf8').split('\n').filter(Boolean).length : 0;
+		const V = (st.strategies || []).find((q) => q.key === 'goexplore') || {};
+		const cr = (V.crashes || [])[0] || {};
+		check('the one search ends on its own with a route known: logged, not started again',
+			!!st.result && n === 1 && !V.restarts && cr.code === 137 && cr.restarted === false, `route ${!!st.result}; launches ${n}; restarts ${V.restarts}; crash ${JSON.stringify(cr).slice(0, 200)}; state ${V.state}`);
 	}
 	// the wall breaker (strategy 'breaker'; clocks shortened: a round after 1 s without progress, a 2^26 table): every move's
 	// nearest attempt (600 ticks) stalls, the relay's runs fill their tables and get no nearer, the CPU search reports

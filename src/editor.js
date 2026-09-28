@@ -417,7 +417,7 @@ const STRATEGIES = {
 		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
-	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
+	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed + (q.seedAdd || 0)}`,
 		// (--deaths=0 where deaths as moves are off: goexplore.js then builds its reach field without death edges and cuts
 		// the room dead ends (roomDead), like the reach file the editor gives the GPU tools then; where they are on the flag's
 		// auto (deathMovesFor, the same test as the editor's) keeps the death edges and no room dead ends)
@@ -2399,6 +2399,8 @@ function launch(n) {
 		q.seconds = V.share = Math.max(1, Math.min(RELAY_S * (q.big ? 2 : 1), Math.round(S.seconds - searchClock(Date.now()))));
 		q.depth = S.result ? Math.max(1, boundTicks() - 1 - V.relay.keep) : 0;
 	}
+	// (the one search started again by its supervisor, oneEnded: other seeds, 1000 x the restart count)
+	if (V.key === 'goexplore' && V.restarts) q.seedAdd = 1000 * V.restarts;
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	// (the stall escape: its start's inputs as --prefix, its share of the workers, its own seed and bursts' folder; the
 	// search's time left)
@@ -2693,10 +2695,11 @@ function launch(n) {
 			let ev;
 			try { ev = JSON.parse(line); } catch (e) { continue; }
 			if (EVLOG) evlog(V.key, ev);
+			if (ev.ev === 'progress' && cpu) ch.lastProgress = ev;   // (the one search's supervisor logs it: oneEnded)
 			onEvent(ev);
 		}
 	});
-	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-2000); });
+	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-(cpu ? 8000 : 2000)); });
 	ch.on('error', (e) => { err += e.message; });
 	ch.on('close', (code, sig) => {
 		busy.delete(ch);
@@ -2879,6 +2882,8 @@ function launch(n) {
 				if (breakAfter(n, how)) { save(); return; }
 			} else if (brk && brk.round) breakEnd(n);   // (a stop, a route, a failed GPU: the round is over)
 		}
+		// (the one search ended on its own before its time: the cause logged, and again while no route is known: oneEnded)
+		if (V.key === 'goexplore' && cpu && !V.lane && !V.precision && oneEnded(n, ch, code, sig, err, end)) { totals(); save(); return; }
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
 				V.state = 'error';
@@ -2894,6 +2899,60 @@ function launch(n) {
 	ch.cpuSearch = cpu;
 	ch.rollsSearch = rolls;
 	return ch;
+}
+// THE ONE SEARCH'S SUPERVISOR (2026-09-28). The CPU search (node src/goexplore.js) sometimes ended with no error line
+// (seen after 2,110 s and 632 s on the rented boxes): its close handler took any end without an exit code (a signal:
+// the container's OOM killer's SIGKILL, V8's fatal "heap out of memory" abort (SIGABRT) of its main thread, which runs
+// with V8's default heap limit: C.workerHeapEnv drops --max-old-space-size so that the workers' own limits hold) as a
+// plain end, and the product's core search was gone for the rest of the run. Now an end the editor did not ask for
+// (no halt), with more than ONE_RESTART_LEFT_S s of the search left, is logged (the exit code or signal, the last 20
+// stderr lines, the last progress line: V.crashes, the page's notes, the server's stderr) and, while no route is known,
+// the search starts again with other seeds (1000 x the restart count), at most ONE_RESTARTS times: the late steer field
+// with it (cur.files.steerCpu: its --steer), the plan past its count re-sent (stdin "steer"), and its archive fed at
+// once (stdin "seed") with the nearest attempt and every room's earliest arrival and best attempt (the sources).
+const ONE_RESTARTS = 3, ONE_RESTART_LEFT_S = 60;
+/** the one search (strategy n, process ch) ended: true when it was started again (the close handler returns) */
+function oneEnded(n, ch, code, sig, err, end) {
+	const V = S.strategies[n];
+	if (ch.stopWhy || ch.killed) return false;
+	const left = S.seconds - usedSec(V);
+	const on = S.running && !S.halted && S.stage !== 'stopped';
+	// (its own time ran out, a stop, or the reach field rules the start out: an end it was meant to have)
+	if (!on || left <= ONE_RESTART_LEFT_S || end === 'unreachable') return false;
+	const after = Math.round((Date.now() - S.started) / 100) / 10;
+	const why = code === null ? `signal ${sig || '?'}` : `exit code ${code}`;
+	const lines = String(err || '').trim().split('\n').filter((l) => l.trim());
+	const tail = lines.slice(-20);
+	const p = ch.lastProgress || null;
+	const prog = p ? { tick: p.tick, states: p.states, ticks: p.ticks, sec: p.sec, heapMB: p.heapMB, memMB: p.memMB, rooms: p.rooms, workers: Array.isArray(p.workers) ? p.workers.length : undefined } : null;
+	const rec = { after, code, signal: sig || null, end: end || null, stderr: tail, progress: prog, restarted: false };
+	V.crashes = (V.crashes || []).concat([rec]).slice(-ONE_RESTARTS - 2);
+	try { console.error(`[editor] the one search ended after ${after} s without being stopped (${why}, end ${end || 'none'}); stderr: ${tail.join(' | ').slice(-3000)}; last progress: ${JSON.stringify(prog)}`); } catch (e) { /* none */ }
+	if (EVLOG) evlog(V.key, { ev: 'oneEnded', ...rec });
+	const last = tail.length ? `: ${tail[tail.length - 1].slice(0, 200)}` : '';
+	const k = (V.restarts || 0) + 1;
+	if (S.result || k > ONE_RESTARTS) {
+		note(`${V.label}: ended after ${after} s (${why}${end ? `, end ${end}` : ''})${last}${S.result ? '' : `; not started again (${ONE_RESTARTS} restarts)`}`);
+		if (code !== 0) V.error = V.error || `ended after ${after} s (${why})${last}`;
+		return false;
+	}
+	rec.restarted = true;
+	note(`${V.label}: ended after ${after} s without a route (${why}${end ? `, end ${end}` : ''})${last}; started again with other seeds (restart ${k} of ${ONE_RESTARTS}), its archive fed with the nearest attempt and the rooms' sources`);
+	Object.assign(V, { restarts: k, state: 'starting', detail: `started again after ${why} (restart ${k} of ${ONE_RESTARTS})`, error: null });
+	kids[n] = launch(n);
+	const c2 = kids[n];
+	const tell = (line) => { if (alive(c2) && c2.stdin && !c2.stdin.destroyed) { try { c2.stdin.write(`${line}\n`); return true; } catch (e) { /* gone */ } } return false; };
+	// (the plan past its count, when it was on: the launch's --steer is the late field's)
+	if (cur && cur.pastOn && cur.past && cur.past.file) tell(`steer ${cur.past.file}`);
+	// (a stall escape running: the new search parks its share of the workers again, as escLaunch told the old one)
+	if (esc && esc.run && esc.run.mainKeep) tell(`workers ${esc.run.mainKeep}`);
+	const feed = [];
+	if (S.closest && S.closest.inputs && !S.closest.cut) feed.push(S.closest.inputs);
+	for (const s of sources.values()) { if (s.early && s.early.inputs) feed.push(s.early.inputs); if (s.best && s.best.inputs) feed.push(s.best.inputs); }
+	let fed = 0;
+	for (const x of new Set(feed)) if (/^[0-O]+$/.test(x) && tell(`seed ${x}`)) fed++;
+	V.restartFed = fed;
+	return true;
 }
 /** every GPU strategy has ended with a route known (the exploration's finest passes found none faster): the CPU search
  *  stops too, and the GPU random runs with it (a search like the CPU one); not when one of them failed (then the CPU
