@@ -232,7 +232,7 @@ function reachField(level, opts) {
 	// its 39,724 spikes were air for the whole level, and a spectator box between two spike clouds, reached by a portal,
 	// looked 106 tiles from the trophy)
 	let protP = null;
-	if (protect) {
+	if (protect && !opts._unprot) {   // (opts._unprot: the unprotected ball's field below: every killing tile deadly)
 		protP = new Uint8Array(N);
 		const q = [];
 		for (const i of protOn) if (!wallAt(i)) { protP[i] = 1; q.push(i); }
@@ -631,6 +631,52 @@ function reachField(level, opts) {
 		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
 	const costOf = (t, ty, l) => { const s = slotOf(t, ty); if (s < 0) return CUT; return COST[ty][s * NLV[ty] + idxOf(ty, Math.max(LO[ty], Math.min(HI[ty], l)))]; };
+	// ---- physics mode with protection: the unprotected ball's way first (walk mode's rule above, now in physics mode too).
+	// The field so far opens every killing tile a protected ball can be in (protP); where that is most of the level, a
+	// spike gap an unprotected ball cannot pass looks open to every ball (Octorage: its one protection tile (195, 6), and
+	// its only two spikes (10, 141-142) close the left shaft; the shaft and the water pool below it were 76-141 tiles from
+	// the trophy through them, where the known route's way from there is 5,500 ticks: 407-430 tiles without them; every
+	// search sat in that pool). So every state costs what an unprotected ball needs (every killing tile deadly, the
+	// protection tiles goals at this field's cost there: it becomes protected there) where that is finite, else this
+	// field's cost + PROT_COST (a protected ball's way, behind every real one like a death's), else -1: -1 exactly where it
+	// was (the unprotected field is finite only where this one is: fewer open tiles, the same goals or more), so the proof
+	// is unchanged; only the order moves. Not with opts.check (the Bellman check is of the field before this).
+	field.prot && (field.prot.order = null);
+	if (protP !== null && !opts.check && opts.protOrder !== false) {
+		let open = 0;
+		for (let i = 0; i < N; i++) if (protP[i] && cls[i] !== WALL && cls[i] !== DEADLY && fg[i] >= 0 && fg[i] < nFlags && (gF[fg[i]] & 4) !== 0) open++;
+		const t1 = Date.now();
+		let U = null;
+		if (open) {
+			const g0 = opts.goals ? opts.goals.slice() : [];
+			if (!opts.goals) for (let i = 0; i < N; i++) if (trophy(i)) g0.push({ tile: i, cost: 0 });
+			for (const p of protOn) {
+				let m = CUT;
+				for (let ty = 0; ty < NT; ty++) { if (slotOf(p, ty) < 0) continue; for (let l = LO[ty]; l <= HI[ty]; l++) { const c = costOf(p, ty, l); if (c < m) m = c; } }
+				if (m < FAR) g0.push({ tile: p, cost: m / 5 });
+			}
+			U = reachField(level, Object.assign({}, opts, { _unprot: true, goals: g0, explain: false, debug: false, check: false }));
+		}
+		if (U && U.mode === 'physics' && U.Q === Q) {
+			const UC = [U.costR, U.costF, U.costX, U.costC, U.costL];
+			let fb = 0, mf = 0;
+			for (let t = 0; t < N; t++) for (let ty = 0; ty < NT; ty++) {
+				const sP = slotOf(t, ty); if (sP < 0) continue;
+				const sU = ty === C_ ? U.rowC[t] : ty === X_ ? U.rowX[t] : t, nl = NLV[ty], A = COST[ty], B = UC[ty];
+				for (let li = 0; li < nl; li++) {
+					const k = sP * nl + li, c = A[k];
+					if (c === CUT) continue;
+					const u = sU >= 0 ? B[sU * nl + li] : CUT;
+					const v = u !== CUT ? u : Math.min(FAR, c + PROT_COST);
+					A[k] = v;
+					if (u === CUT) fb++; else if (v < FAR && v > mf) mf = v;   // (the order's scale: the real ways, as prioShiftOf)
+				}
+			}
+			field.prioShift = Math.max(0, bitLen(Math.min(mf, FAR)) - 12);
+			if (fb > 0) field.deaths = true;
+			field.prot.order = { open, fallback: fb, ms: Date.now() - t1 };
+		}
+	}
 	/** every edge out of (t, ty, l): emit(t2, ty2, l2, cost) */
 	const edgesOf = (t, ty, l, emit) => {
 		if (fg[t] === TROPHY) return;
