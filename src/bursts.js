@@ -88,7 +88,7 @@ const STALL_WALL = WALL.concat(STALL_FAR);
 // keeps the FASTEST state of each fine cell (the GPU bursts keep the first), from the room's first arrival and from the
 // stalled burst's start LEG_BACK ticks further back (each once per arm), inside the tiles the arm's walk reaches; one
 // at a time, LEG_MS each; its find (a new room by a trigger) is replayed and goes into every archive like a burst's
-const LEG_BACK = 400, LEG_MS = 90000, LEG_DEPTH = 800, LEG_CAP = 15000;
+const LEG_BACK = 400, LEG_MS = 900000, LEG_DEPTH = 900, LEG_CAP = 80000;
 // (a chain link after a full table: the settings with the next smaller layer cap)
 const GREEDIER = [2, 4, 4, 4, 4, 2];
 // how far back along the start cell's run a burst starts, in turn per room (ticks; never 0: the cell nearest the targets

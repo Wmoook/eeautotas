@@ -192,7 +192,7 @@
 //        [--stallLadder=1 (0: off; an arm whose last 3 bursts gained nothing sends its start up the wall ladder at any
 //        distance, then 1000 and 2000 ticks further back: bursts.js STALL_N / STALL_FAR)] [--legs=0 (1: OPT-IN, not
 //        measured: such an arm also gets one CPU leg search in a worker thread, src/legsearch.js: fine cells keeping the
-//        fastest state, from the room's first arrival or 400 ticks before the stalled start; one at a time, 90 s each)]
+//        fastest state, from the room's first arrival or 400 ticks before the stalled start; one at a time, 900 s each, 80 K states a layer)]
 //        [--prefix=<run.eetas | .eetas characters> (the gate benchmark, tools/gatebench.js: the search starts after those
 //        inputs; every path begins with them, only finds after the start state count; CPU cells only)]
 //        [--rooms=0|1 (an event "room" for every room the one search registers: its cause, the inputs; coarse cells)]

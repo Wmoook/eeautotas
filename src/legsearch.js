@@ -22,7 +22,7 @@ const E = require('./eesim.js');
 // the 18 inputs (left / none / right x up / none / down x jump or not)
 const OPT = [];
 for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const j of [0, 1]) OPT.push(h | v | j);
-const DEFAULTS = { depth: 600, cap: 15000, ms: 90000 };
+const DEFAULTS = { depth: 900, cap: 80000, ms: 900000 };
 
 function legSearch(L, prefix, o) {
 	o = Object.assign({}, DEFAULTS, o || {});
