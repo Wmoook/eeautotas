@@ -385,6 +385,13 @@ __device__ __forceinline__ u64 exploreKeyOf(const ExploreParams& p, Sim<TW>& sim
  * reach field rules it out: the earliest arrival there (the claim drops it anyway if a live ball got there first by
  * then). Every other dying child is dropped as before.
  */
+/** deaths as moves: the mark of a respawn place (its tile rt; a spawn: -1 - its index) in a ball's discrete state
+ *  (Sim::hashDiscrete: coins, keys, switches, effects, the checkpoint, the doors' state): set by the first death that goes
+ *  there and by every live ball at its own checkpoint, so a death is kept only as the first arrival there */
+template <int TW>
+__device__ __forceinline__ u64 deathMark(Sim<TW>& sm, i32 rt, u32 lane) {
+	return splitmix(sm.hashDiscrete() ^ splitmix((u64)(u32)rt ^ 0x72657370776e2121ull ^ ((u64)lane << 40))) | 1ull;
+}
 /** deaths as moves: does the death of the ball s (its last live state at px, py with vertical speed vy, gravity queue q0,
  *  q1, slipperiness sl) throw it back? Its respawn target (standing there: the checkpoint it holds, else the next spawn)
  *  farther from the trophy by the reach field than that live state, by more than a death's ticks (EE_DEATH_F); a state
@@ -408,8 +415,7 @@ __device__ __forceinline__ bool exploreKeepDead(const ExploreParams& p, const St
 		State<TW> c = s;
 		Sim<TW> cs(p.L, c);
 		const i32 rt = c.checkpoint_x != -1 ? c.checkpoint_y * p.L.W + c.checkpoint_x : -1 - c.next_spawn;
-		const u64 mark = splitmix(cs.hashDiscrete() ^ splitmix((u64)(u32)rt ^ 0x72657370776e2121ull ^ ((u64)lane << 40)));
-		if (!exploreMarkOnce(p.cells, p.cellMask, mark & ~0xfffull, (u32)p.layer)) return false;
+		if (!exploreMarkOnce(p.cells, p.cellMask, deathMark<TW>(cs, rt, lane) & ~0xfffull, (u32)p.layer)) return false;
 	}
 	State<TW> r = s;
 	Sim<TW> rs(p.L, r);
@@ -468,6 +474,10 @@ __device__ __forceinline__ void exploreExpandParent(const ExploreParams& p, cons
 		}
 		const i32 cx = truncI(s.px + 8.0) >> 4, cy = truncI(s.py + 8.0) >> 4;
 		if (cx < p.rx0 || cx > p.rx1 || cy < p.ry0 || cy > p.ry1) continue;
+		// (--deaths=1: a live ball at its own checkpoint: that respawn place is reached in its discrete state, so a later
+		// death there is no earliest arrival: exploreKeepDead's mark, goexplore.js rspAt)
+		if (p.deaths && s.checkpoint_x == cx && s.checkpoint_y == cy && cx != -1)
+			(void)exploreMarkOnce(p.cells, p.cellMask, deathMark<TW>(sim, cy * p.L.W + cx, lane) & ~0xfffull, (u32)p.layer);
 		// the finish first: this tick took the trophy (the silver crown); report, do not expand (the crown comes from the
 		// tick-start tile, so the tick-end position may be anywhere, e.g. over a spike the physics model cuts off)
 		if (p.target == 3 && s.has_silver_crown && !par->has_silver_crown) {
@@ -762,6 +772,9 @@ __device__ void rollBody(const RollParams& p) {
 				// and the respawn is not one the reach field rules out. Every other death ends the run, as before.
 				if (ext > 0 && k < p.Lr + ext) continue;   // (the kept death's dead ticks: no cell)
 				if (!p.deaths || ext > 0 || deathThrowsBack<TW>(p.reach, p.L, s, lpx, lpy, lvy, lq0, lq1, lsl)) { nDead++; break; }
+				const i32 rt = s.checkpoint_x != -1 ? s.checkpoint_y * p.L.W + s.checkpoint_x : -1 - s.next_spawn;
+				const i32 ms = rollSlot(p, deathMark<TW>(sim, rt, 0u), true);
+				if (ms < 0 || p.doneT[ms] <= (u32)t) { nDead++; break; }   // (reached there already, alive or by a death)
 				State<TW> q = s;
 				Sim<TW> qs(p.L, q);
 				i32 n = 0;
@@ -770,15 +783,17 @@ __device__ void rollBody(const RollParams& p) {
 				const i32 tR = t + n;
 				if (q.is_dead || q.broken || tR >= p.maxT || k + n >= 250) { nDead++; break; }
 				if (p.reach.on && p.prune && reachFifths(p.reach, q.px, q.py, q.speed_y, q.q0, q.q1, q.slippery) < 0) { nDead++; break; }
-				const i32 rt = s.checkpoint_x != -1 ? s.checkpoint_y * p.L.W + s.checkpoint_x : -1 - s.next_spawn;
-				const u64 mk = splitmix(qs.hashDiscrete() ^ splitmix((u64)(u32)rt ^ 0x72657370776e2121ull)) | 1ull;
-				const i32 ms = rollSlot(p, mk, true);
-				if (ms < 0 || atomicMin(&p.doneT[ms], (u32)tR) <= (u32)tR) { nDead++; break; }
+				if (atomicMin(&p.doneT[ms], (u32)tR) <= (u32)tR) { nDead++; break; }
 				ext = n;
 				if (p.stats) atomicAdd(&p.stats[4], 1ull);
 				continue;
 			}
 			if (p.reach.on && p.prune && reachFifths(p.reach, s.px, s.py, s.speed_y, s.q0, s.q1, s.slippery) < 0) { nCut++; break; }
+			// (--deaths=1: a live ball at its own checkpoint marks that respawn place as reached in its discrete state)
+			if (p.deaths && s.checkpoint_x != -1 && (truncI(s.px + 8.0) >> 4) == s.checkpoint_x && (truncI(s.py + 8.0) >> 4) == s.checkpoint_y) {
+				const i32 as = rollSlot(p, deathMark<TW>(sim, s.checkpoint_y * p.L.W + s.checkpoint_x, 0u), true);
+				if (as >= 0) atomicMin(&p.doneT[as], (u32)t);
+			}
 			if (t >= p.maxT) continue;   // (a route from here would not be faster: the next tick ends the run)
 			const i32 slot = rollSlot(p, rollCellKey<TW>(p, s, rollRoom<TW>(p, s)), !p.full);
 			if (slot < 0) continue;
