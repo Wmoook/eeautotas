@@ -599,14 +599,16 @@ function create(o) {
 				const t0 = Date.now();
 				const r = await RA.run(lane, { child: (ch, on) => { if (on) children.add(ch); else children.delete(ch); }, stopped: () => stopped });
 				if (stopped) break;
-				if (!r) { await sleep(500); continue; }
-				st.arm++; st.armSec += (Date.now() - t0) / 1000;
-				o.say({ ev: 'burst', n: st.bursts + st.arm, arm: true, room: null, what: `the route arm from tick ${r.s} (potential ${r.pot})`, from: r.s, sec: Math.round(r.sec * 10) / 10, end: r.ends.join(' / '),
-					hits: r.hits, saved: r.saved, how: r.how, at: o.sec() });
-				// (the GPU's memory full: the start goes again after a short wait, longer while it lasts, at most ARM_OOM_MAX_S; the
-				// room bursts' back-off is their own)
-				if (r.oom) { const w = Math.min(ARM_OOM_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 + armOom)); armOom++; for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100); } else armOom = 0;
-				continue;
+				// (no start (an attempt whose landings were all searched): this turn is a burst's)
+				if (!r && RA.onAttempt()) { /* a burst below */ } else if (!r) { await sleep(500); continue; } else {
+					st.arm++; st.armSec += (Date.now() - t0) / 1000;
+					o.say({ ev: 'burst', n: st.bursts + st.arm, arm: true, room: null, what: `the route arm from tick ${r.s} (potential ${r.pot})`, from: r.s, sec: Math.round(r.sec * 10) / 10, end: r.ends.join(' / '),
+						hits: r.hits, saved: r.saved, how: r.how, at: o.sec() });
+					// (the GPU's memory full: the start goes again after a short wait, longer while it lasts, at most ARM_OOM_MAX_S; the
+					// room bursts' back-off is their own)
+					if (r.oom) { const w = Math.min(ARM_OOM_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 + armOom)); armOom++; for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100); } else armOom = 0;
+					continue;
+				}
 			}
 			const p = next ? null : pick();
 			if (next) {

@@ -262,6 +262,10 @@ function create(o, opts = {}) {
 			// (opts.starts: only these start ticks, in that order: tests, the path benchmark)
 			if (p.starts) { if (!p.starts.length) return null; s = p.starts.shift(); }
 			else if (ls >= 0) s = ls;
+			// (an attempt: only its landings (where a path is chosen), each landing state once: before any route the arm's
+			// GPU time is the bursts', which find the rooms the first route needs (Stupid Fox: 15-26 bursts in 600 s with
+			// the arm's pass on the attempts, 42 without, and no route))
+			else if (R.attempt && !p.attemptPass) return null;
 			else cursor += p.step;
 			const jEnd = Math.min(R.n, s + p.maxSpan);
 			const t0 = Date.now();

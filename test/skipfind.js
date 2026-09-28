@@ -187,7 +187,12 @@ console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: hit.length, s
 	const blob = G.levelBlob(level);
 	const shorts = [];
 	const ra = RA.create({ L: level, field: RF.reachField(level, {}), tool: stand, bin: path.join(work, 'level.bin'), fp: G.blobFp(blob), work, cacheArgs: [], a: { gpuCells: 20, burstCap: 4096 },
-		bound: () => 1e9, say: () => {}, finish: () => {}, broadcast: () => {}, shortcut: (ms, saved, how) => shorts.push({ ms, saved, how }) }, { minPot: -1e9, localTries: 1 });
+		bound: () => 1e9, say: () => {}, finish: () => {}, broadcast: () => {}, shortcut: (ms, saved, how) => shorts.push({ ms, saved, how }) }, { minPot: -1e9, localTries: 1, attemptPass: true });
+	// (by default an attempt's starts are its landings after a long fall only: this room has none)
+	const ra0 = RA.create({ L: level, field: RF.reachField(level, {}), tool: stand, bin: path.join(work, 'level.bin'), fp: G.blobFp(blob), work, cacheArgs: [], a: { gpuCells: 20, burstCap: 4096 },
+		bound: () => 1e9, say: () => {}, finish: () => {}, broadcast: () => {} }, { minPot: -1e9, localTries: 1 });
+	ra0.setAttempt(att);
+	check('an attempt without a landing after a long fall: no start (before any route only landings are searched)', (await ra0.run(0, {})) === null);
 	ra.setAttempt(att);
 	check('the arm takes the attempt as its target (no route yet)', ra.ready() && ra.onAttempt());
 	const r = await ra.run(0, {});
