@@ -295,7 +295,7 @@ function bfs(info, start, t0, o) {
 	const segCount = new Map(), closeBy = new Map();
 	const layers = [null];
 	let cur = [start], curN = 1, nxtPool = [];
-	const st = { layers: 0, cells: 1, ticks: 0, skipJ: 0, dead: 0, out: 0, cut: 0, peak: 1, full: false, time: false };
+	const st = { layers: 0, cells: 1, ticks: 0, skipJ: 0, resim: 0, dead: 0, out: 0, cut: 0, peak: 1, full: false, time: false };
 	const lastVis = o.lastVis;   // per tile the run's latest visit in the goal window (-1 none)
 	const nTargets = info.targets ? info.targets.length : 0;
 	// this layer's candidates: one slot per new cell, found through a per-layer open-addressing table (LA/LB keys, LS slot)
@@ -342,14 +342,17 @@ function bfs(info, start, t0, o) {
 					if (LA[p] === ka && LB[p] === kb) break;
 					p = (p + 1) & LMASK;
 				}
+				// (a snapshot only for the layer's first `cap` cells: past that the cut drops most, and a kept one is
+				// simulated again from its parent after the cut: ~1 GB a search down to ~0.4)
 				if (LA[p] !== 0) {
 					const sl = LS[p];
 					if (slotScore[sl] <= score) continue;
-					slotSnap[sl] = sim.snapshot(slotSnap[sl]); slotPar[sl] = i; slotMsk[sl] = m; slotScore[sl] = score;
+					if (slotSnap[sl] !== null) slotSnap[sl] = sim.snapshot(slotSnap[sl]);
+					slotPar[sl] = i; slotMsk[sl] = m; slotScore[sl] = score;
 					continue;
 				}
 				LA[p] = ka; LB[p] = kb; LS[p] = ns; slotPos[ns] = p;
-				slotSnap[ns] = sim.snapshot(nxtPool[ns]); slotPar[ns] = i; slotMsk[ns] = m; slotScore[ns] = score; slotTile[ns] = tile;
+				slotSnap[ns] = ns < o.cap ? sim.snapshot(nxtPool[ns]) : null; slotPar[ns] = i; slotMsk[ns] = m; slotScore[ns] = score; slotTile[ns] = tile;
 				slotKa[ns] = ka; slotKb[ns] = kb; slotCid[ns] = cid;
 				ns++;
 			}
@@ -380,10 +383,22 @@ function bfs(info, start, t0, o) {
 		const nk = order ? order.length : ns;
 		const par = new Int32Array(nk), msk = new Uint8Array(nk);
 		const nxt = new Array(nk);
+		// the dropped cells' snapshots, for the kept ones without one (simulated again from their parent)
+		let spare = null;
+		if (order && ns > o.cap) {
+			const kept = new Uint8Array(ns);
+			for (const q of order) kept[q] = 1;
+			spare = [];
+			for (let q = 0; q < ns; q++) if (!kept[q] && slotSnap[q] !== null) spare.push(slotSnap[q]);
+		}
 		for (let r = 0; r < nk; r++) {
 			const q = order ? order[r] : r;
 			ka = slotKa[q]; kb = slotKb[q]; insert();
 			par[r] = slotPar[q]; msk[r] = slotMsk[q]; nxt[r] = slotSnap[q];
+			if (nxt[r] === null) {
+				sim.restore(cur[slotPar[q]]); E.applyMask(inp, slotMsk[q]); sim.tick(inp); st.ticks++; st.resim++;
+				nxt[r] = sim.snapshot(spare && spare.length ? spare.pop() : undefined);
+			}
 			const tile = slotTile[q];
 			tileSeen[tile]++;
 			// a lead: the run is in this tile at least minGain ticks later. Per run stretch the first arrivals (hitsPerSeg,
