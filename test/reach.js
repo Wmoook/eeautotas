@@ -792,6 +792,71 @@ function storedCoinDeadEnds() {
 			`${found ? `${found.ticks} ticks after ${found.sec} s, replayed ${rep ? `${rep.runTicks} run ticks` : 'NO FINISH'}` : `no route${err ? ` (${err})` : ''}`}; cells ${start && start.cells}, deaths as moves ${start && start.deathMoves}`);
 	}
 }
+/** the room dead ends and a DEFERRED trigger (the n2-int soundness review's blocker 1, its repro rvs_defer60.eelvl): a
+ *  60 x 50 level (coarse cells; nothing kills, so deaths as moves are off and roomDead is on) whose only route walks off a
+ *  ledge into a 1-wide shaft, touches purple switch 1 while its box overlaps switch 1's gate just below (the press waits in
+ *  the engine's tile queue, eesim.js _pressPurpleSwitch), falls through the still-open gate onto a one-way portal and comes
+ *  out in a room sealed by switch 1's doors; the press lands one tick later, the doors open, the trophy is a short walk.
+ *  roomDead calls the states after the teleport (the switch pending) dead ends of the old room: without goexplore.js
+ *  pendingTrigger the one search (roomDead on) found no route in 42 M ticks where --roomDead=0 found one in 0.2 s */
+function deferredTriggerDeadEnds() {
+	const GX = require('../src/goexplore.js');
+	const W = 60, H = 50, S = 40, R0 = 1, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9], [6, y, 9]);
+	for (let y = 1; y < H - 1; y++) for (let x = 1; x <= 4; x++) if (y !== R0) cells.push([x, y, 9]);   // the corridor at row R0
+	for (let y = 1; y < R0; y++) cells.push([5, y, 9]);                                                  // the shaft from row R0 down
+	cells.push([2, R0, 255]);
+	cells.push([5, S, 113, 1], [5, S + 1, 185, 1], [5, S + 2, 242, 1, 1, 2]);   // switch 1, its gate, the portal down
+	for (let y = S + 3; y < H - 1; y++) cells.push([5, y, 9]);
+	cells.push([10, H - 2, 242, 1, 2, 9]);                 // the exit (one way)
+	for (let y = 1; y < H - 1; y++) cells.push([30, y, 184, 1]);   // switch 1's doors
+	cells.push([45, H - 2, 121]);
+	const buf = ED.eelvlOf({ name: 'defer1', width: W, height: H, cells });
+	const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf), { id: 't', file: 'defer1.eelvl' }));
+	const route = new Uint8Array(400).fill(4);
+	const ev = C.evaluate(L, route);
+	// along the route: the states roomDead calls dead ends of their room, and those the product cuts (not while pending)
+	const RD = GX.roomDead(L, 1 << 24);
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	let n = 0, dead = 0, pendDead = 0, cut = 0, firstCut = -1;
+	for (let t = 0; ev && t <= ev.ms.length; t++) {
+		if (t > 0) { E.applyMask(inp, route[t - 1]); sim.tick(inp); }
+		if (sim.has_silver_crown || sim.is_dead) break;
+		const tile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
+		n++;
+		if (GX.liveAt(RD.liveFor(sim), tile)) continue;
+		dead++;
+		if (GX.pendingTrigger(sim)) pendDead++;
+		else { cut++; if (firstCut < 0) firstCut = t; }
+	}
+	check('a purple switch pressed while its gate overlaps the ball (the press deferred) and a one-way portal into its doors\' room: holding right finishes; the states roomDead calls dead ends all have the press pending, none is cut (goexplore.js pendingTrigger)',
+		!!ev && ev.deaths === 0 && GX.deathMovesFor(L) === false && pendDead > 0 && cut === 0,
+		`${ev ? `${ev.ms.length} ticks, ${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; ${n} states, ${dead} not live in their room, ${pendDead} of them with a trigger pending, ${cut} cut${firstCut >= 0 ? ` (first at tick ${firstCut})` : ''}`);
+	// the one search itself (roomDead on): a route
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reachH-'));
+	const file = path.join(dir, 'defer1.eelvl');
+	fs.writeFileSync(file, buf);
+	let found = null, start = null, err = '';
+	const wk = [];
+	try {
+		const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), file, '--seconds=20', '--workers=1', '--seed=1', '--first=1', '--mem=200'], { encoding: 'utf8', timeout: 60000 });
+		for (const line of out.split('\n')) {
+			if (!line.startsWith('{')) continue;
+			const e = JSON.parse(line);
+			if (e.ev === 'start') start = e;
+			if (e.ev === 'done' && Array.isArray(e.workers)) wk.push(...e.workers);
+			if (e.ev === 'result' && e.kind === 'finish' && !found) found = e;
+		}
+	} catch (e) { err = e.message.slice(0, 200); }
+	try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* in use */ }
+	const rep = found ? C.evaluate(L, Uint8Array.from(found.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31)) : null;
+	const w0 = wk.find((w) => w && w.roomDead !== undefined) || null;
+	check('the one search on it (goexplore.js, 1 worker, roomDead on): a route through the deferred press, replayed',
+		!!start && start.cells === 'coarse' && start.deathMoves === false && !!rep && rep.deaths === 0,
+		`${found ? `${found.ticks} ticks after ${found.sec} s, replayed ${rep ? `${rep.runTicks} run ticks` : 'NO FINISH'}` : `no route${err ? ` (${err})` : ''}`}; cells ${start && start.cells}, deaths as moves ${start && start.deathMoves}${w0 ? `, roomDead ${w0.roomDead}, cut ${w0.deadCut}` : ''}`);
+}
 /** the room-aware dead ends (goexplore.js roomDead, --roomDead): random rooms of coin / switch / key / team doors and
  *  gates, their triggers, spikes, protection, time doors, portals; states of random runs on a tile that is not live in
  *  their room, each checked by a bounded exhaustive search from it (1 px / 1/8 px/tick cells): it never finishes and never
@@ -827,7 +892,7 @@ function roomDeadFuzz() {
 				E.applyMask(inp, m); sim.tick(inp);
 				if (sim.is_dead || sim.has_silver_crown) break;
 				const tile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
-				if (GX.liveAt(RD.liveFor(sim), tile)) continue;
+				if (GX.liveAt(RD.liveFor(sim), tile) || GX.pendingTrigger(sim)) continue;   // (the product's cut: not live, nothing pending)
 				dead++;
 				if (checked >= (QUICK ? 40 : 120)) continue;
 				checked++;
@@ -857,17 +922,23 @@ function roomDeadFuzz() {
 		}
 	}
 	// the corpus: every state of every job's original and best run up to its first death (the searches drop dead balls; a run
-	// that dies uses the death as a move) is live in its room, and so is every state of the death-free field's corpus
+	// that dies uses the death as a move) is live in its room (or has a trigger pending: the product's cut), and none is cut
+	// off by the death-free field; only levels where deaths are not moves (goexplore.js deathMovesFor false): roomDead and
+	// the death-free field apply only there (with deaths as moves a run may die on purpose: Good Egg's runs 1-2 ticks
+	// before a deliberate death are dead ends of their room, and the product uses neither there: the soundness review's
+	// blocker 2)
 	const JOBS = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
 	let jobs = [];
 	try { jobs = fs.readdirSync(JOBS).filter((d) => !d.startsWith('_') && fs.existsSync(path.join(JOBS, d, 'meta.json'))); } catch (e) { /* none */ }
-	let cn = 0, cdead = 0, cfirst = null, cruns = 0, cndf = 0, cdf = 0, cfirstDf = null, cdfDying = 0;
+	let cn = 0, cdead = 0, cfirst = null, cruns = 0, cndf = 0, cdf = 0, cfirstDf = null, cdfDying = 0, cdm = 0, clv = 0;
 	const seenLv = new Map();
 	for (const id of jobs) {
 		const lf = path.join(JOBS, '..', 'data', `job_${id.replace(/-/g, '_')}.json`);
 		let L;
 		try { L = fs.existsSync(lf) ? E.loadLevel(lf) : E.prepareLevel(EL.toSimLevel(EL.readEelvl(fs.readFileSync(path.join(JOBS, id, 'original.eelvl'))))); } catch (e) { continue; }
 		if (L.width * L.height <= 2500) continue;   // (coarse cells only: the levels above 50 x 50)
+		if (GX.deathMovesFor(L)) { cdm++; continue; }   // (deaths as moves: neither roomDead nor the death-free field)
+		clv++;
 		const RM = GX.roomOf(L), RD = GX.roomDead(L, 1 << 26), FD = R.reachField(L, { deaths: false });
 		for (const run of ['original.eetas', 'best.eetas']) {
 			const file = path.join(JOBS, id, run);
@@ -881,14 +952,22 @@ function roomDeadFuzz() {
 				if (sim.is_dead || sim.has_silver_crown) break;
 				const tile = (Math.trunc(sim.py + 8) >> 4) * L.width + (Math.trunc(sim.px + 8) >> 4);
 				cn++;
-				if (!GX.liveAt(RD.liveFor(sim), tile)) { cdead++; if (!cfirst) cfirst = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0], room: RM.desc(sim) }; }
+				if (!GX.liveAt(RD.liveFor(sim), tile) && !GX.pendingTrigger(sim)) { cdead++; if (!cfirst) cfirst = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0], room: RM.desc(sim) }; }
 				cndf++;
 				if (R.costAt(FD, sim) < 0) { const nx = t < masks.length ? (() => { const s3 = new E.EESim(L); s3.restore(sim.snapshot()); const i3 = new E.EEInput(); E.applyMask(i3, masks[t]); s3.tick(i3); return s3.is_dead; })() : false; if (!nx) { cdf++; if (!cfirstDf) cfirstDf = { id, run, t, tile: [tile % L.width, (tile / L.width) | 0] }; } else cdfDying++; }
 			}
 		}
 	}
-	check(`every state of every job's runs above 50 x 50 up to its first death (${cruns} runs): live in its room (roomDead) and not cut off by the death-free field`, cdead === 0 && cdf === 0,
-		`${cn} states, ${cdead} not live, ${cdf} cut off by the death-free field (${cdfDying} more on a killing tile the tick before the run's death)${cfirst ? `; first ${JSON.stringify(cfirst)}` : ''}${cfirstDf ? `; first cut ${JSON.stringify(cfirstDf)}` : ''}${jobs.length ? '' : ` (no jobs in ${JOBS})`}`);
+	// (nothing to test: no jobs folder, or no job above 50 x 50 without deaths as moves: said, not passed; with --jobs= given
+	// that is a failure: the green run of a worktree without src/jobs tested nothing)
+	if (cruns === 0) {
+		const why = `${jobs.length} jobs in ${JOBS}, ${clv} levels above 50 x 50 without deaths as moves, ${cdm} with them (skipped)`;
+		if (arg('jobs', null) !== null) check('the job corpus (roomDead, the death-free field): tested something', false, `NOTHING TESTED: ${why}`);
+		else console.log(`  (skipped: the job corpus tested nothing: ${why}; give --jobs=<the app's src/jobs>)`);
+	} else {
+		check(`every state of every job's runs above 50 x 50 without deaths as moves up to its first death (${cruns} runs of ${clv} levels; ${cdm} levels with deaths as moves skipped): live in its room (roomDead, or a trigger pending) and not cut off by the death-free field`, cdead === 0 && cdf === 0,
+			`${cn} states, ${cdead} cut as dead ends, ${cdf} cut off by the death-free field (${cdfDying} more on a killing tile the tick before the run's death)${cfirst ? `; first ${JSON.stringify(cfirst)}` : ''}${cfirstDf ? `; first cut ${JSON.stringify(cfirstDf)}` : ''}`);
+	}
 	check(`the room-aware dead ends (goexplore roomDead): ${rooms} random rooms of doors, triggers, spikes, portals; ${runs} random runs: from every state on a tile not live in its room that a bounded exhaustive search checked (90 ticks), no finish and no room change alive`,
 		viol === 0 && checked > 0, `${dead} dead states, ${checked} checked, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
 }
@@ -916,7 +995,7 @@ function trapLevel() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
-	if (want('H')) { sectionH(); storedCoinDeadEnds(); roomDeadFuzz(); }
+	if (want('H')) { sectionH(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

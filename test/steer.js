@@ -4,7 +4,8 @@
 //              layers, the steer cost at the start counts the detour to the key / coins / switch (the reach field's
 //              does not), with the key (switch, coins) taken it is the reach field's again; the RCH4 file round trip
 //              (readSteerFile gives the same numbers); another level's file is refused by the native tool; the build's
-//              byte budget: one body's bytes leave the key out (info.over)
+//              byte budget: one body's bytes leave the key out (info.over); the forced portals' lastPortal chains (a
+//              portal next to an exit walked: reach.js unforceChains), with --jobs Good Egg along OC's run
 //   B agree    the JS lookup and the native tool's (eegpu steertest: the host, and with --gpu the GPU) along random input
 //              runs in the rooms and, with --jobs=<dir> (default src/jobs), along the big jobs' best runs: the same fifths
 //              and the beam's score to the bit (skipped without a native tool that reads RCH4)
@@ -118,8 +119,52 @@ function sectionA() {
 		try { out = execFileSync(toolPath, ['steertest', path.join(tmp, 'a.bin'), path.join(tmp, 'b.steer'), path.join(tmp, 'r.eetas')], { encoding: 'utf8' }); } catch (e) { out = String(e.stdout || ''); }
 		check('another level\'s steer file is refused by the native tool', /another level/.test(out), out.trim().slice(0, 120));
 	}
+	forcedChains();
 }
 
+/** the ordering fields' forced portals and a ball that a teleport put on a portal exit (the n2-int gate study's defect,
+ *  reach.js unforceChains): it keeps lastPortal over every portal tile it moves on to (eesim.js processPortals), so a
+ *  portal next to an exit is walked, not a teleport. A corridor: the start, portal 1 across it (to 2), its exit 2 with a
+ *  column of portal 4 (to 5, back by the start) right of it and the trophy; holding right finishes in the engine. Forced,
+ *  portal 4 sent the model back to the start: the trophy out of reach, the ordering field cut and the steer without a
+ *  value there. With --jobs (default src/jobs), Good Egg along its OC run (the pocket columns x = 1 / 3:
+ *  the steer had no value and no next gate in 2,258 of its 4,204 states, coins 0-8) */
+function forcedChains() {
+	const W = 40, H = 8, y = H - 2, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let yy = 1; yy < H - 1; yy++) cells.push([0, yy, 9], [W - 1, yy, 9]);
+	// portal 1 (to 2) and portal 4 (to 5) across the corridor; the exit 2 left of portal 4's column; 5 by the start
+	for (let yy = 1; yy < H - 1; yy++) cells.push([6, yy, 242, 1, 1, 2], [21, yy, 242, 1, 4, 5]);
+	cells.push([2, y, 255], [20, y, 242, 1, 2, 9], [3, 1, 242, 1, 5, 9], [34, y, 121]);
+	const buf = ED.eelvlOf({ name: 'chain', width: W, height: H, cells });
+	const L = levelOf(buf);
+	const ev = C.evaluate(L, new Uint8Array(600).fill(4));
+	const sim = new E.EESim(L); sim.reset();
+	const st = SF.buildSteer(L), f = R.reachField(L, { oneWayEntry: true, portalForced: true });
+	const s0 = SF.steerAt(st, sim), f0 = R.costAt(f, sim);
+	check('a portal next to the exit a teleport put the ball on is walked (lastPortal), not forced: holding right finishes; the ordering field (portalForced) and the steer have a value at the start',
+		!!ev && ev.deaths === 0 && f0 >= 0 && Number.isFinite(s0),
+		`${ev ? `${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; field ${f0}, steer ${s0}`);
+	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
+	let ids = [];
+	try { ids = fs.readdirSync(jobs).filter((d) => /good-egg-galaxy-oc/.test(d) && fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'original.eetas'))); } catch (e) { /* no jobs */ }
+	if (!ids.length) { console.log(`  (skipped: no Good Egg job with OC's run in ${jobs})`); return; }
+	const G2 = levelOf(fs.readFileSync(path.join(jobs, ids[0], 'original.eelvl')));
+	const ms = C.readEetas(path.join(jobs, ids[0], 'original.eetas'));
+	const sg = SF.buildSteer(G2), s2 = new E.EESim(G2), in2 = new E.EEInput();
+	s2.reset();
+	let n = 0, nan = 0, noGate = 0, dpn = 0;
+	for (let t = 0; t <= ms.length; t++) {
+		if (t > 0) { E.applyMask(in2, ms[t - 1]); s2.tick(in2); }
+		if (s2.has_silver_crown) break;
+		if (s2.is_dead) continue;
+		n++;
+		if (Number.isNaN(SF.steerAt(sg, s2))) nan++;
+		if (sg.dp && s2.coins < sg.dp.T) { dpn++; if (!SF.nextGate(sg, s2)) noGate++; }
+	}
+	check(`Good Egg along OC's run (${ids[0]}): the steer has a value and the coin plan a next gate almost everywhere (at most 1% without)`,
+		!!sg.dp && n > 1000 && nan <= n / 100 && noGate <= dpn / 100, `${n} states, ${nan} without a value, ${noGate} of ${dpn} without a next gate; coin DP ${sg.dp ? sg.dp.n : 0}`);
+}
 function agree(name, L, st, runs) {
 	const blob = G.levelBlob(L);
 	fs.writeFileSync(path.join(tmp, 'l.bin'), blob);

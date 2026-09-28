@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const LC = require('./levelcheck.js');   // (EEO's own copy of a campaign level, effect blocks that do nothing, the md5)
 const BU = require('./bursts.js');     // (roomAim: the wall breaker's room target, roomGate; slowYOf: the fine-y cells)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
@@ -153,8 +154,12 @@ function levelOf(buf) {
 	}
 	const warnings = p.warnings.slice(0, 20);
 	if (odd.size) warnings.push(`block ids the editor cannot keep were left out: ${[...odd].slice(0, 10).join(', ')}`);
+	// the level check of the file as opened (src/levelcheck.js): its md5, EEO's own copy of a campaign level of this name and
+	// size (the same blocks, or how it differs: the page offers EEO's copy), effect blocks that can never do anything
+	let check = null;
+	try { check = LC.brief(LC.checkLevel(buf, p)); } catch (e) { check = null; }
 	return { name: p.name, width: W, height: p.height, gravity: p.gravity, bgColor: p.bgColor, owner: p.owner, description: p.description,
-		cells, bg, warnings };
+		cells, bg, warnings, md5: LC.md5(buf), check };
 }
 
 // ---------------------------------------------------------------- block info (the palette, and any level's ids)
@@ -267,12 +272,13 @@ function physicsRun() {
 	// (a failed check: no note, and not asked again for this level; a search says why)
 	reachInfo(job.buf, job.hash).then((r) => { physicsMemo.set(job.hash, r); }, () => { physicsMemo.set(job.hash, { failed: true }); }).then(physicsRun);
 }
-/** the "no way up" note (null: none): the physics check proves the trophy out of reach */
-function noWayNote(ph) {
+/** the "no way up" note (null: none): the physics check proves the trophy out of reach (tag: the level file it is about,
+ *  LC.fileTag: a proof about a level is a proof about a file) */
+function noWayNote(ph, tag) {
 	if (!ph || ph.pending || ph.failed || ph.mode !== 'physics' || ph.startCost >= 0) return null;
 	const ex = ph.explain;
 	const high = ex && ex.row >= 0 && ex.trophyRow >= 0 && ex.row > ex.trophyRow ? ` (the ball's centre gets no higher than row ${ex.row}; the trophy is in row ${ex.trophyRow})` : '';
-	return `No way up: the physics check finds no way from the start to the trophy${high}. A search checks that for up to a minute, then says so.`;
+	return `No way up: the physics check finds no way from the start to the trophy${high}${tag ? ` (${tag})` : ''}. A search checks that for up to a minute, then says so.`;
 }
 /** the "only through a death" note (null: none): the physics check's only way to the trophy is a death (a respawn at a
  *  checkpoint or another spawn), which the searches do not follow (they drop dead balls) */
@@ -283,16 +289,25 @@ function deathNote(ph) {
 	if (ph.deathMoves) return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches take a death as a move where it pays.';
 	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls here (deaths as moves are off), so they cannot find it.';
 }
+/** the file a level came from, as the page sends it (source {name, md5}: the level as opened, unchanged), else null */
+const sourceOf = (s) => (s && typeof s === 'object' && /^[0-9a-f]{32}$/.test(String(s.md5 || '')) ? { name: String(s.name || 'level.eelvl').slice(0, 120), md5: String(s.md5) } : null);
 /**
  * What stands in the way of a route search on this level (.eelvl bytes): problems (it cannot run) and notes (with
- * opts.physics also the physics check's "no way up").
- * Returns { problems: [{code, text}], notes: [text], start: [x, y] | null, trophies, level (prepared), json }.
+ * opts.physics also the physics check's "no way up"). opts.source: the file the level came from ({name, md5}, the page's
+ * level as opened): the verdicts that say there is no way name it (else the md5 of these bytes).
+ * Returns { problems: [{code, text}], notes: [text], start: [x, y] | null, trophies, level (prepared), json, lc (the level
+ * check: src/levelcheck.js), tag (the file the verdicts name) }.
  */
 function inspect(buf, opts) {
 	let p;
 	try { p = EL.readEelvl(buf); } catch (e) { throw new Error(`not an .eelvl level (${e.message})`); }
 	if (p.width * p.height > MAX_CELLS) throw new Error(`the level is ${p.width} x ${p.height} tiles; the editor's search takes up to ${MAX_CELLS / 1e6} million tiles`);
 	for (const r of p.records) if (r.id < 0 || r.id > 65535) throw new Error(`block id ${r.id} is not an EEO block`);
+	// the level check (EEO's own copy of a campaign level of this name and size, effect blocks that do nothing) and the file
+	// the verdicts name
+	let lc = null;
+	try { lc = LC.checkLevel(buf, p); } catch (e) { lc = null; }
+	const tag = LC.fileTag(buf, sourceOf(opts && opts.source));
 	const json = EL.toSimLevel(p, { id: 'editor', file: 'editor.eelvl' });
 	const level = E.prepareLevel(json);
 	const W = level.width, N = W * level.height;
@@ -321,7 +336,7 @@ function inspect(buf, opts) {
 				notes.push('The way to the trophy goes through portals (the search follows them).');
 			} else {
 				reach = 'none';
-				problems.push({ code: 'unreachable', text: 'The trophy cannot be reached: it is walled in (no open tiles lead from the start to it, not even through portals).' });
+				problems.push({ code: 'unreachable', text: `The trophy cannot be reached: it is walled in (no open tiles lead from the start to it, not even through portals; ${tag}).` });
 			}
 		}
 	}
@@ -330,15 +345,16 @@ function inspect(buf, opts) {
 	if (opts && opts.physics && start && trophies.length && reach !== 'none') {
 		const ph = physicsOf(buf, level);
 		physicsPending = !!(ph && ph.pending);
-		for (const n of [noWayNote(ph), deathNote(ph)]) if (n) notes.push(n);
+		for (const n of [noWayNote(ph, tag), deathNote(ph)]) if (n) notes.push(n);
 	}
-	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json, physicsPending };
+	return { problems, notes, start, noSpawn, trophies: trophies.map((i) => [i % W, Math.floor(i / W)]), reach, level, json, physicsPending, lc, tag };
 }
-/** inspect() for the page: no engine objects (physicsPending: the physics check runs in a worker thread; ask again) */
-function check(buf) {
-	const r = inspect(buf, { physics: true });
+/** inspect() for the page: no engine objects (physicsPending: the physics check runs in a worker thread; ask again);
+ *  levelCheck: the level check (LC.brief: md5, campaign, noops, warnings, notes; the page shows it with "Use EEO's copy") */
+function check(buf, source) {
+	const r = inspect(buf, { physics: true, source });
 	return { problems: r.problems, notes: r.notes, start: r.start, noSpawn: r.noSpawn, trophies: r.trophies, reach: r.reach, width: r.level.width, height: r.level.height,
-		physicsPending: r.physicsPending };
+		physicsPending: r.physicsPending, levelCheck: r.lc ? LC.brief(r.lc) : null, file: r.tag };
 }
 
 // ---------------------------------------------------------------- the route search (one at a time)
@@ -405,7 +421,7 @@ const STRATEGIES = {
 		// (--deaths=0 where deaths as moves are off: goexplore.js then builds its reach field without death edges and cuts
 		// the room dead ends (roomDead), like the reach file the editor gives the GPU tools then; where they are on the flag's
 		// auto (deathMovesFor, the same test as the editor's) keeps the death edges and no room dead ends)
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
@@ -414,7 +430,7 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0'])] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : [])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
@@ -722,11 +738,17 @@ const SOURCE_REPLAY_MS = 1000;
 // a room's gain comes from the CPU search's source events alone (its walks run in its own threads), 0 until one names it
 const SOURCE_WALK_TILES = 160000;
 let sources = new Map(), sourceSeq = 0;   // room key -> {room, desc, gain, runs, at, from, early, best}
-let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain)}
+let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain), useful, cul}
 const srcPending = new Map();             // strategy index -> {at (its last replay), next (the attempt waiting), timer}
+// the useful territory (goexplore.js USEFUL TERRITORY): an attempt that ends in a cul-de-sac of its room (as the replay
+// entered the room) is no nearest attempt while a useful one is known, and no room's best source (the wall breaker's
+// and the relay's starting points): on Forgotten Helix main's nearest attempt sat 106.2 tiles out in the door-16 viewing
+// box by the trophy (a door the level's 15 coins never open) for the whole 10 minutes, the breaker's round 1 starting
+// there. The rooms' cul-de-sacs from the first replay that entered them, CUL_ROOMS kept (the walks: SOURCE_WALK_TILES)
+const CUL_ROOMS = 256;
 /** the running search's room key function (goexplore.js), made at the first use; its room fields at the first walk */
 function roomsOfSearch() {
-	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map() };
+	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map(), useful: null, cul: new Map() };
 	return roomsCur;
 }
 /** forgets the sources and the rooms (a new search, or the end of one: the attempts' inputs, up to 100000 characters
@@ -744,7 +766,7 @@ function publishSources() {
 		entered: s.early ? s.early.ticks : null, best: s.best ? { ticks: s.best.ticks, tiles: Math.round(s.best.dist * 10) / 10 } : null }));
 }
 /** a starting point o: {room, desc, gain, from, inputs, dist, arrival (the ticks of its inputs up to where it entered the
- *  room; 0 = not known)} */
+ *  room; 0 = not known), cul (it ends in a cul-de-sac of its room: not the room's best)} */
 function addSource(o) {
 	let s = sources.get(o.room);
 	if (!s) {
@@ -768,7 +790,7 @@ function addSource(o) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
 		s.early = { inputs: inputs.slice(0, o.arrival), ticks: o.arrival, dist: o.dist };
 	}
-	if (!s.best || o.dist < s.best.dist - 1e-3) s.best = { inputs, ticks: inputs.length, dist: o.dist };
+	if (!o.cul && (!s.best || o.dist < s.best.dist - 1e-3)) s.best = { inputs, ticks: inputs.length, dist: o.dist };
 	publishSources();
 }
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
@@ -784,12 +806,17 @@ function pickSource(step, c) {
 	return b;
 }
 /** masks replayed in the JS engine like common.js replay (to the finish, if any): the path, run ticks, deaths, and the
- *  room of its last state ({key, desc, since: the tick it entered that room}) */
-function replayRooms(masks, withPath) {
+ *  room of its last state ({key, desc, since: the tick it entered that room, cul: it ends in a cul-de-sac of that room});
+ *  withCul: the room's cul-de-sacs made when not known yet (closer(): the nearest attempt's candidates, CUL_ROOMS; a
+ *  walk of the level on the server's thread, 20-80 ms on 200 x 200 - 400 x 200), else only those known */
+function replayRooms(masks, withPath, withCul = false) {
 	const R = roomsOfSearch();
 	const sim = new E.EESim(cur.level), inp = new E.EEInput();
 	sim.reset();
 	let deaths = 0, complete = -1, key = R.RM.key(sim), since = 0;
+	// (the state that entered the room the replay ends in: its cul-de-sacs, when not known yet; a dead ball has no tile)
+	const needCul = withCul && R.walk && cur.opts.useful !== false && !R.cul.has(key);
+	let entry = needCul ? sim.snapshot() : null;
 	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); else if (k === 'death') deaths++; };
 	const path = withPath ? [[Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]] : null;
 	for (let t = 0; t < masks.length && complete < 0; t++) {
@@ -797,7 +824,22 @@ function replayRooms(masks, withPath) {
 		sim.tick(inp);
 		if (path) path.push([Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]);
 		const k = R.RM.key(sim);
-		if (k !== key) { key = k; since = t + 1; }
+		if (k !== key) { key = k; since = t + 1; entry = withCul && R.walk && cur.opts.useful !== false && !R.cul.has(k) && !sim.is_dead ? sim.snapshot() : null; }
+	}
+	// (the useful territory: whether the attempt ends in a cul-de-sac of its room)
+	let cul = false;
+	if (R.walk && cur.opts.useful !== false) {
+		if (!R.cul.has(key) && entry !== null) {
+			try {
+				if (!R.useful) R.useful = GX.roomUseful(cur.level);
+				const s2 = new E.EESim(cur.level);
+				s2.reset(); s2.restore(entry);
+				R.cul.set(key, R.useful.of(s2, false).cul);
+				if (R.cul.size > CUL_ROOMS) R.cul.delete(R.cul.keys().next().value);
+			} catch (e) { R.cul.set(key, null); }
+		}
+		const b = R.cul.get(key);
+		if (b) { const W = cur.level.width, tl = Math.min(W * cur.level.height - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4))); cul = (b[tl >> 3] & (1 << (tl & 7))) !== 0; }
 	}
 	// (the room's territory gain: from the state it ends in, once per room; 0 above SOURCE_WALK_TILES)
 	let gain = R.gain.get(key);
@@ -815,7 +857,7 @@ function replayRooms(masks, withPath) {
 	}
 	// (with the steer field the attempts' distances are its own; the page shows the reach field's: reachTiles)
 	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
-	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
+	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain, cul }, reachTiles: rc >= 0 ? rc : null };
 }
 /** the distance (tiles) from which an attempt's way is a death's: RF.DEATH_TILES, but none (1e4: cut off) when the searches'
  *  reach file has no death edges (cur.opts.fileDeaths false: the death-free file, or a level without deaths; a long real way,
@@ -848,7 +890,7 @@ function attemptSource(n, a, rm) {
 		p.at = now;
 		rm = replayRooms(Uint8Array.from(a.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), false).room;
 	}
-	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since });
+	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since, cul: !!rm.cul });
 }
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
 // states going back the way the relay came. With the steer field a state is dropped only above both fields' ceilings
@@ -1273,7 +1315,10 @@ function coinsOf(inputs) {
 	if (!cur.countDoors) {
 		let gold = false, blue = false;
 		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
-		cur.countDoors = { gold, blue };
+		// (a counter whose doors guard nothing on the way to the trophy is no progress: goexplore.js counterRelevance, as
+		// the room keys count it; Good Egg's blue coins)
+		const rel = GX.counterRelevance(L);
+		cur.countDoors = { gold: gold && rel.gold, blue: blue && rel.blue };
 	}
 	const D = cur.countDoors;
 	if (!D.gold && !D.blue) return 0;
@@ -1403,8 +1448,9 @@ function breakStarts() {
 	// (with the progress order by its own coins, first among equals: a room target's gate can be a lateral room, e.g.
 	// Forgotten Helix's low gravity at 2 coins, and the frontier of 3 coins goes first then)
 	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
+	// (not from an attempt in a cul-de-sac of its room: see CUL_ROOMS)
 	const c = S.closest;
-	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
+	if (c && !c.cut && !c.cul && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
@@ -1815,7 +1861,7 @@ function start(b, gpu, test) {
 	if (running()) throw new Error('a route search is already running (one at a time): wait for it, or stop it');
 	const buf = b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? eelvlOf(b.level) : null;
 	if (!buf || !buf.length) throw new Error('missing eelvlB64 (the level as .eelvl bytes, base64)');
-	const ins = inspect(buf);
+	const ins = inspect(buf, { source: b.source });
 	if (ins.problems.length) { const e = new Error(ins.problems.map((q) => q.text).join(' ')); e.problems = ins.problems; throw e; }
 	const [tool, ...toolArgs] = test && test.tool ? test.tool : [G.nativeTool()];
 	// no GPU search: no native engine in this build, no NVIDIA GPU, or a level the native engine cannot run
@@ -1875,6 +1921,9 @@ function start(b, gpu, test) {
 	const t0 = Date.now();
 	S = { running: true, stage: 'checking the physics', started: t0, searchStarted: 0, prepSec: 0, elapsed: 0, seconds, width, depth, guidePoints: guide.length, name,
 		size: [ins.level.width, ins.level.height], start: ins.start, trophies: ins.trophies.length, notes: ins.notes, reach: ins.reach, levelHash,
+		// (the level file every "no route" verdict names, and its level check: a file that differs from EEO's own copy of a
+		// campaign level, effect blocks that do nothing)
+		file: ins.tag, levelCheck: ins.lc ? LC.brief(ins.lc) : null,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
@@ -1884,7 +1933,10 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
+	// (the useful territory, 2026-09-28 (goexplore.js USEFUL TERRITORY): the CPU search's and the GPU random runs' rooms, the
+	// sources' gains, the nearest attempt; body useful: false or EEAT_USEFUL=0: as before)
+	const useful = b.useful !== false && process.env.EEAT_USEFUL !== '0';
+	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves, useful,
 		// (the big burst sizing: opt-in (b.burstBig === true / EEAT_BURST_BIG=1): its A/B (n2c4c) mixed it with the round rules,
 		// and the laptop GPUs it is meant to match never get it)
 		burstBig: (b.burstBig === true || !!(test && test.burstBig === true) || process.env.EEAT_BURST_BIG === '1') && process.env.EEAT_BURST_BIG !== '0',
@@ -2062,7 +2114,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (noGpu && !S.searchStarted) S.searchStarted = Date.now();   // (the CPU alone: the search's clock from its start)
 	note(`searching ${ins.level.width} x ${ins.level.height}${noGpu ? '' : `, ${S.width} states per tick`}, up to ${S.seconds} s: ${S.strategies.map((q) => q.label).join(' and ')}` +
 		(guide.length && !noGpu ? ` (a ${guide.length}-point line)` : '') + (cpu && which.includes('goexplore') ? ` (${cur.opts.workers} CPU thread${cur.opts.workers > 1 ? 's' : ''})` : ''));
-	if (noWayUp) note(`the physics check finds no way from the start to the trophy (checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
+	if (noWayUp) note(`the physics check finds no way from the start to the trophy on this level (${S.file}; checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
 	if (S.physics.viaDeath) note(deathNote(S.physics));
 	save();
 	if (brk) brk.at = Date.now();   // (the stall clock from the search's start)
@@ -2119,7 +2171,7 @@ function proofDone(r) {
 		why: r.why || null, error: r.error || null, cached: !!r.cached, checkS: PROOF_CHECK_S };
 	const took = `${r.cached ? 'from the cache' : `${(+r.sec || 0).toFixed(1)} s`}`;
 	if (r.verdict === 'impossible') {
-		note(`the proof: no input sequence reaches the trophy (${(r.cells || 0).toLocaleString('en-US')} boxes of states, ${took}); the search ends once it has searched ${PROOF_CHECK_S} s (a check)`);
+		note(`the proof: no input sequence reaches the trophy on this level (${S.file}; ${(r.cells || 0).toLocaleString('en-US')} boxes of states, ${took}); the search ends once it has searched ${PROOF_CHECK_S} s (a check)`);
 		if (S.result) proofMiss(S.result.strategy, S.result.inputs);
 		else capSearch();
 	} else if (r.verdict === 'reached') note(`the proof: it cannot rule a route out (its model reaches the trophy; ${took})`);
@@ -2955,6 +3007,10 @@ function finish() {
 			S.message = `No route found: "every move" ran out of new situations by tick ${XE.exhausted.tick.toLocaleString('en-US')}${tries} (positions and speeds told apart to ${XE.exhausted.grain}, ` +
 				'and every gravity, jump and pickup state; the physics check ruled out the rest). That is evidence, not proof: a route that needs pixel-exact moves can hide between merged situations. A longer search tries more.';
 		}
+		// (a verdict about a level is about a FILE: its md5, so a wrong file shows, and the level check's warnings: a file that
+		// differs from EEO's own copy of a campaign level (the night of 2026-09-27 "proved" Forgotten Helix impossible on a
+		// copy whose gravity effects were all down), effect blocks that can never do anything)
+		S.message += ` The level: ${S.file}.${S.levelCheck && S.levelCheck.warnings.length ? ` ${S.levelCheck.warnings.join(' ')}` : ''}`;
 		// (the model's only way is a death: the searches cannot find it)
 		if (S.physics && S.physics.viaDeath) S.message += ` ${deathNote(S.physics)}`;
 	}
@@ -3297,12 +3353,16 @@ function closer(ev, n) {
 	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
 	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
-	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
+	// (a nearest attempt in a cul-de-sac of its room (old.cul, see CUL_ROOMS) gives way to any attempt outside one: the
+	// replay below tells)
+	if (old && !(old.cul && !cut) && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
 	// (one replay: the path, and the room it ends in for the sources)
-	const tr = replayRooms(masks, true);
+	const tr = replayRooms(masks, true, true);
 	if (own) attemptSource(n, own, tr.room);
+	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
+	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
 	const pathPts = tr.path;
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
@@ -3311,9 +3371,9 @@ function closer(ev, n) {
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
-	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
-	if (prec && !cut && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
-	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	if (brk && !cut && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
+	if (prec && !cut && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
+	S.closest = { dist, cut, viaDeath, cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
 	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)

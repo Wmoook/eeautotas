@@ -51,6 +51,7 @@ const E = C.E;
 const RF = require('./reach.js');
 const G = require('./gpu.js');
 const BK = require('./blocks.js');
+const TMD = require('./timed.js');
 
 // the burst's settings (explore --cqx --cqv --qy --qvy and --cap, the states kept per tick layer, nearest the targets first):
 // 1/16 px/tick speeds with 4 px positions (the relay from Infinity Pain's own states reached its long low-gravity
@@ -370,7 +371,7 @@ function create(o) {
 		let r = rooms.get(m.room);
 		if (!r) {
 			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null,
-				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1 };
+				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1, grp: m.grp || null };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
 			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null, fl: 0, nt: 1, ntI: null, ntK: -1 });
@@ -441,19 +442,43 @@ function create(o) {
 		// of them nearer than the wall's (199, 151) from the archive's cells by the tunnel (7 ticks short of it for 70 min);
 		// with this rule 2: (189, 159) and the wall's
 		const cz0 = o.RM.cause(sim), snap0 = sim.snapshot(), inp0 = new E.EEInput(), acts = new Map();
+		// (a room entered with a timed killer running (src/timed.js: a curse, zombie, fire or poison with a time): a trigger
+		// that only clears it (the room it makes is this room without the killer: the curse-off tiles) is a WAY, not a goal:
+		// the walk goes on through it and the targets beyond it count, so a burst aims past the remover and every nearer
+		// attempt on the way is one that cleared the killer and still goes on. As a goal, the first attempt that touched it
+		// ended the burst and marked it tried: on Forgotten Helix's curse leg the first touch falls through the remover
+		// (262-264, 165) into the arrows below, where the route dips into it by a pixel and climbs back up)
+		const K0 = [sim.is_cursed, sim.is_zombie, sim.is_on_fire, sim.is_poisoned];
+		let czClear = null;
+		if (TMD.timedLeft(sim) > 0) {
+			sim.is_cursed = false; sim.is_zombie = false; sim.is_on_fire = false; sim.is_poisoned = false;
+			czClear = o.RM.cause(sim);
+			sim.restore(snap0);
+		}
+		// (--dom=1: a touch that only turns mono switches off (goexplore.js roomOf shrinks: into a room the room itself
+		// dominates) is no target: Good Egg's switch staircase, pressed again on the way back)
+		const d0 = a.dom !== 0 && o.RM.dom ? o.RM.dom(sim) : null;
+		/** touching trigger component c at tile t from the room's first arrival: 0 nothing changes, 1 a change (a target),
+		 *  2 it only clears the timed killer the room carries (a way) */
 		const changes = (c, t) => {
 			let v = acts.get(c);
 			if (v === undefined) {
 				sim.restore(snap0);
 				sim.px = (t % W) * 16; sim.py = ((t / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0;
 				// (a death or an error says nothing: a target, as before the test)
-				try { sim.tick(inp0); v = sim.is_dead || o.RM.byTrigger(cz0, o.RM.cause(sim)); } catch (e) { v = true; }
+				try {
+					sim.tick(inp0);
+					const cz = o.RM.cause(sim);
+					v = sim.is_dead || (o.RM.byTrigger(cz0, cz) && !(d0 !== null && o.RM.shrinks(d0, o.RM.dom(sim)))) ? 1 : 0;
+					if (v === 1 && czClear !== null && !sim.is_dead && cz.sub === czClear.sub && cz.keys === czClear.keys &&
+						(K0[0] && !sim.is_cursed || K0[1] && !sim.is_zombie || K0[2] && !sim.is_on_fire || K0[3] && !sim.is_poisoned)) v = 2;
+				} catch (e) { v = 1; }
 				sim.restore(snap0);
 				acts.set(c, v);
 			}
 			return v;
 		};
-		const comps = new Map(), trophies = [];
+		const comps = new Map(), trophies = [], ways = new Map();
 		// (through portals: Forgotten Veil's coin 4 and Good Egg's portal pockets are behind one; 8-connected only, they
 		// were no target and a room entered in such a pocket had none. The walk goes 8-connected first and through the
 		// portals it met after that, so `via` marks the tiles reached only through a portal: the portal arm's (fieldOf0))
@@ -470,8 +495,9 @@ function create(o) {
 			if (phase2) via[t] = 1;
 			const c = TR.comp[t];
 			// (a coin already collected at the room's first arrival is no trigger of it)
-			const live = c >= 0 && !(TR.eaten[c] && sim.is_coin_collected(x, y)) && changes(c, t);
+			const act = c >= 0 && !(TR.eaten[c] && sim.is_coin_collected(x, y)) ? changes(c, t) : 0, live = act === 1;
 			if (live) { let l = comps.get(c); if (!l) comps.set(c, l = []); l.push(t); }
+			else if (act === 2) { let l = ways.get(c); if (!l) ways.set(c, l = []); l.push(t); }
 			if (fg[t] === 121) trophies.push(t);
 			// (a trigger that changes the room: a goal, no way through; the places the room was entered at are ways out)
 			if (live && qh > nSrc) { term[t] = 1; continue; }
@@ -493,10 +519,14 @@ function create(o) {
 		const c0 = r.trig ? compNear(s0) : -1;
 		const R = r.base || r;
 		if (c0 >= 0 && !R.info0) { R.tried.add(c0); R.info0 = true; }
+		// (the killer's removers are the targets only when nothing beyond them is one: the room must still aim somewhere)
+		let other = false;
+		for (const c of comps.keys()) if (c !== c0) { other = true; break; }
+		if (!other) for (const [c, tiles] of ways) comps.set(c, tiles);
 		// (a component the walk reached only through a portal: the portal arm's target)
 		const pOnly = new Set();
 		for (const [c, tiles] of comps) if (tiles.every((t) => via[t])) pOnly.add(c);
-		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly };
+		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly, ways };
 		return R.info;
 	};
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
@@ -508,20 +538,9 @@ function create(o) {
 		r.fc = { n: nk, f };
 		return f;
 	};
-	const fieldOf0 = (r) => {
-		const I = infoOf(r);
-		const goals = [];
-		// (a room's two arms: the targets its walk reaches without a portal (the room itself) and those only through one
-		// (its portal arm r.pa); together, Forgotten Veil's coin 4 ranked 14th of the coins=3 room's 17 targets from the
-		// route's entry: every nearer one first, a burst each)
-		const arm = !!r.portal;
-		const rest = r.rest && r.rest.size ? r.rest : null;
-		// (every untried target resting: they all come back)
-		if (rest) { let live = 0; for (const [c] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !rest.has(c)) live++; if (!live) { rest.clear(); r.fails = new Map(); } }
-		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
-		const n = goals.length;
-		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) goals.push(t);
-		if (!goals.length) return null;
+	/** walking distance (fifths, 5 per step) to `goals` in the room's passable set (walk: Uint16Array, CUT = none), its
+	 *  largest value mx: backwards from the goals, through portals, never through another room-changing trigger */
+	const walkTo = (I, goals) => {
 		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
 		let qh = 0, qt = 0, mx = 0;
 		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
@@ -543,6 +562,31 @@ function create(o) {
 				}
 			}
 		}
+		return { walk, mx };
+	};
+	/** a room with a timed killer's removers (ways): the walk to them (a burst start's time slack: goexplore.js nearestOf);
+	 *  null without */
+	const wayField = (r) => {
+		const I = infoOf(r);
+		if (!I.ways || !I.ways.size) return null;
+		if (!I.wayF) { const g = []; for (const tiles of I.ways.values()) for (const t of tiles) g.push(t); I.wayF = walkTo(I, g).walk; }
+		return I.wayF;
+	};
+	const fieldOf0 = (r) => {
+		const I = infoOf(r);
+		const goals = [];
+		// (a room's two arms: the targets its walk reaches without a portal (the room itself) and those only through one
+		// (its portal arm r.pa); together, Forgotten Veil's coin 4 ranked 14th of the coins=3 room's 17 targets from the
+		// route's entry: every nearer one first, a burst each)
+		const arm = !!r.portal;
+		const rest = r.rest && r.rest.size ? r.rest : null;
+		// (every untried target resting: they all come back)
+		if (rest) { let live = 0; for (const [c] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !rest.has(c)) live++; if (!live) { rest.clear(); r.fails = new Map(); } }
+		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
+		const n = goals.length;
+		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) goals.push(t);
+		if (!goals.length) return null;
+		const { walk, mx } = walkTo(I, goals);
 		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
 	};
 	/** every worker's cell of room r nearest the field's goals, outside the arm's dead zones (the nearest of all; null when
@@ -554,14 +598,20 @@ function create(o) {
 		q.done = () => {
 			if (timer) clearTimeout(timer);
 			pending.delete(id);
+			// (the most time slack first: 0 for a cell with enough time or no timed killer, see goexplore.js nearestOf)
 			let b = null;
-			for (const m of q.replies) if (m.v >= 0 && (!b || m.v < b.v || (m.v === b.v && m.t < b.t))) b = m;
+			for (const m of q.replies) {
+				if (!(m.v >= 0)) continue;
+				const sl = m.sl || 0, bl = b ? b.sl || 0 : 0;
+				if (!b || sl > bl || (sl === bl && (m.v < b.v || (m.v === b.v && m.t < b.t)))) b = m;
+			}
 			res(b);
 		};
 		pending.set(id, q);
 		timer = setTimeout(q.done, NEAREST_WAIT_MS);
+		const way = wayField(r.base || r);
 		const avoid = r.dead && r.dead.size ? [...r.dead] : null;
-		for (const p of o.ports) p.postMessage({ type: 'nearest', id, room: r.key, field: walk, ...(avoid ? { avoid, zone: DEAD_ZONE } : {}) });
+		for (const p of o.ports) p.postMessage({ type: 'nearest', id, room: r.key, field: walk, way, ...(avoid ? { avoid, zone: DEAD_ZONE } : {}) });
 	});
 	/** an attempt (inputs, from the level start) replayed: its rooms registered (the new ones counted), the room and tile
 	 *  it ends in; null when it dies */
@@ -579,7 +629,9 @@ function create(o) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys })) fresh++;
+				const d2 = o.RM.dom ? o.RM.dom(sim) : null;
+				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys,
+					...(d2 ? { dcls: d2.cls, dmask: Array.from(d2.mask) } : {}) })) fresh++;
 				cz = cz2;
 			}
 			key = k2;
@@ -637,6 +689,10 @@ function create(o) {
 		// level of many switches has thousands of rooms)
 		const cand = [];
 		for (const r0 of rooms.values()) {
+			// (--dom=1: a room whose novelty group is dominated (goexplore.js domIndex: a room of its class with more mono
+			// switches on holds everything it can reach) is no burst's room: Good Egg's hour from the level alone gave 277
+			// of its 361 bursts to switch-subset rooms at coins = 8, src/out/ge_anat)
+			if (r0.grp && r0.grp.dom) continue;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
 				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
@@ -961,6 +1017,9 @@ function create(o) {
 	};
 	return {
 		room, edge, triggers: TR.n,
+		/** (tests) room `key`'s walk: its targets (comps: component -> tiles), the ways through (the timed killer's
+		 *  removers), the trophies; null for a room not known */
+		info: (key) => { const r = rooms.get(key); return r ? infoOf(r) : null; },
 		/** the best route (masks): the route arm's (a newer, faster one replaces it; its cursor keeps its tick) */
 		route: (masks) => { if (RA) { try { RA.setRoute(masks); } catch (e) { o.say({ ev: 'warning', text: `route arm: ${e.message}` }); } } },
 		/** before any route: the search's nearest attempt (inputs), the route arm's target at its --rArmPre share */
@@ -1008,6 +1067,8 @@ function roomAim(L, RM, sim, known, T) {
 	}
 	const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 	const key0 = RM.key(sim), cz0 = RM.cause(sim), snap0 = sim.snapshot(), inp0 = new E.EEInput(), acts = new Map();
+	// (a touch that only turns mono switches off, into a room this one dominates: no goal; goexplore.js roomOf shrinks)
+	const d0 = RM.dom && RM.shrinks ? RM.dom(sim) : null;
 	/** touching component c at tile t: 2 = into a room not seen yet, 1 = into a known room, 0 = no change */
 	const act = (c, t) => {
 		let v = acts.get(c);
@@ -1018,6 +1079,7 @@ function roomAim(L, RM, sim, known, T) {
 				sim.tick(inp0);
 				if (sim.is_dead) v = 0;
 				else if (!RM.byTrigger(cz0, RM.cause(sim))) v = 0;
+				else if (d0 !== null && RM.shrinks(d0, RM.dom(sim))) v = 0;
 				else { const k2 = RM.key(sim); v = k2 === key0 ? 0 : known(k2) ? 1 : 2; }
 			} catch (e) { v = 0; }
 			sim.restore(snap0);
