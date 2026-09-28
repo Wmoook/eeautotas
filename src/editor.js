@@ -1499,7 +1499,8 @@ function precEvent(V, ev) {
 // An escape whose own nearest attempt has not got nearer by ESC_TILES and that made no new room with territory gain for
 // ESC_STALL_S (after at least ESC_MIN_S) gives way to the next one at once (escStarts, in rotation: the nearest attempt
 // ESC_BACK[0] ticks back, which after an escape that got nearer is that escape's own (a chain); then the nearest attempt
-// of each other room, rooms of another coin count first; then the nearest attempt further back); each start once a search;
+// of each other room, rooms of another coin count first; then the nearest attempt further back; only starts at the
+// frontier: ESC_FRONT of the longest attempt the search holds or more); each start once a search;
 // so does an escape the rest of the search left behind (its nearest attempt clearly nearer: ESC_RETARGET_S).
 // A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
 // none (tests: test.escape === true; test.escWait / escStall / escMin: its clocks in s).
@@ -1507,6 +1508,10 @@ const ESC_WAIT_S = 180, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_T
 // (an escape the rest of the search has left behind: the nearest attempt clearly nearer (3 tiles or 10%, the relay's rule)
 // than the escape's start and its own nearest, ESC_RETARGET_S after its start at least: the next one from there)
 const ESC_RETARGET_S = 60;
+// (the frontier: an escape starts only from ESC_FRONT or more of the longest attempt the search holds. Measured: n2-int
+// Good Egg seed 1 with the escape, 2026-09-28: its nearest attempt by the steer field was a 182-tick dead end by the start
+// (280 tiles) while its rooms held 7 coins after 37 s; the first escape started there, a second search from scratch)
+const ESC_FRONT = 0.5;
 // the escape's own work folder for its GPU bursts (the one search's is <data>/editor/bursts)
 const ESC_WORK = 'escape_bursts';
 // the stall clock of the escape: {at (the search's last progress: a nearer attempt by BREAK_TILES or a new room with
@@ -1520,9 +1525,15 @@ const coinSig = (desc) => { const m = /(?:^| )coins=(\d+)/.exec(String(desc || '
 /** the escape's next starting points, in rotation: [{inputs, what, dist, key, room, sig}] not used before in this search */
 function escStarts() {
 	const out = [], seen = new Set();
+	// (the frontier: a start at least ESC_FRONT as long as the longest attempt the search holds (the nearest and the rooms'
+	// attempts): an escape from near the level's start would only redo the search's own opening with half its workers)
+	const c0 = S.closest;
+	let longest = c0 && !c0.cut ? c0.ticks : 0;
+	for (const s of sources.values()) longest = Math.max(longest, s.best ? s.best.ticks : 0, s.early ? s.early.ticks : 0);
+	const front = Math.max(RELAY_MIN_KEEP, Math.floor(ESC_FRONT * longest));
 	const add = (inputs, keep, what, dist, room, desc) => {
 		keep = Math.min(keep, inputs.length);
-		if (keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
+		if (keep < front || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen.has(key) || esc.tried.has(key)) return;
 		seen.add(key);
