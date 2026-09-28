@@ -1061,9 +1061,18 @@ async function flybeamLane() {
 	const ref = path.join(OUT, 'grind_flyref.eetas');
 	const logFile = path.join(OUT, 'grind_flybeam_lane.log');
 	log(`flybeam lane: ${FLY_K} thread${FLY_K > 1 ? 's' : ''} for the corridor beam, ${W} for the stages`);
-	let k = 0, waitFor = -1;
+	let k = 0, waitFor = -1, held = false;
 	while (FOREVER || Date.now() < deadline - (secs / 2 + 120) * 1000) {
 		if (waitFor >= 0 && best.runTicks === waitFor) { await new Promise((r) => setTimeout(r, 15000)); continue; }
+		// (while Find a route holds the CPU (the AutoTASer's fresh cpu_share: the stages run on its share) the lane waits: its
+		// thread would come out of Find a route's)
+		if (stageWorkers() < W) {
+			if (!held) log('flybeam lane: waiting while Find a route holds the CPU (cpu_share)');
+			held = true;
+			await new Promise((r) => setTimeout(r, 15000));
+			continue;
+		}
+		held = false;
 		waitFor = -1;
 		const s = FOREVER ? secs : Math.min(secs, Math.floor((deadline - Date.now()) / 1000) - 120);
 		const fo = path.join(OUT, `grind_flyb_lane${++k}.eetas`);
