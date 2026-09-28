@@ -195,7 +195,9 @@
 //        [--pL=0.3 (head L, the one search once a route is known: the picks by the lead on the best route's schedule, its
 //        share by its yield: LEAD_GRACE_S)] [--pW=0.3 (head W, of the picks head L leaves once a route is known: a
 //        cell off the route's (room, tile) schedule by its key-blind lead, the route's first tick at its tile in any room:
-//        a skipped room, another coin / switch subset or another path that gets somewhere sooner; 0: off)] [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
+//        a skipped room, another coin / switch subset or another path that gets somewhere sooner; 0: off)] [--wPhase=1
+//        (time-door levels: head W's schedule per (tile, the doors' phase bucket); 0: per tile at any phase)]
+//        [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -239,7 +241,7 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 1, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -910,13 +912,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let sched = null, tsched = null;
 	const TDL = coarse && !!L.hasTimeDoors, clock0 = sim.level_ticks(), NPH = Math.ceil(E.TIMEDOOR_PERIOD / a.phase);
 	const phaseOf = (lt) => ((lt % E.TIMEDOOR_PERIOD) / a.phase) | 0;
+	// (head W's schedule per (tile, phase bucket) on time-door levels; --wPhase=0: per tile at any phase)
+	const WTD = TDL && a.wPhase !== 0;
 	const leadHeap = () => heapOf((c) => c.lead + LEAD_PICK * Math.sqrt(c.picks));
 	const wayHeap = () => heapOf((c) => c.wlead + WAY_PICK * Math.sqrt(c.picks));
 	let HL = coarse && port ? leadHeap() : null;
 	let HW = coarse && port && a.pW > 0 ? wayHeap() : null;
 	/** head W: a cell head L has no lead for, by its tile's (and phase's) first tick on the route */
 	const wpush = (c, ph) => {
-		const w = TDL ? tsched[c.tile * NPH + ph] : tsched[c.tile];
+		const w = WTD ? tsched[c.tile * NPH + ph] : tsched[c.tile];
 		if (w <= 0) return;
 		c.wlead = c.t - w;
 		HW.push(c);
@@ -1281,7 +1285,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const setRoute = (str, byL) => {
 		const ms = Uint8Array.from(str, (ch) => (ch.charCodeAt(0) - 48) & 31);
 		const s2 = new E.EESim(L), in2 = new E.EEInput(), m = new Map();
-		const tm = HW !== null ? new Int32Array(TDL ? N * NPH : N) : null;
+		const tm = HW !== null ? new Int32Array(WTD ? N * NPH : N) : null;
 		s2.reset();
 		for (let k = 0; k < ms.length; k++) {
 			E.applyMask(in2, ms[k]);
@@ -1293,7 +1297,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				if (v === undefined) m.set(key, v = new Int32Array(NPH).fill(-1));
 				const ph = phaseOf(s2.level_ticks());
 				if (v[ph] < 0) v[ph] = k + 1;
-				if (tm !== null && tm[tl * NPH + ph] === 0) tm[tl * NPH + ph] = k + 1;
+				if (tm !== null) { const i = WTD ? tl * NPH + ph : tl; if (tm[i] === 0) tm[i] = k + 1; }
 			} else {
 				if (!m.has(key)) m.set(key, k + 1);
 				if (tm !== null && tm[tl] === 0) tm[tl] = k + 1;
