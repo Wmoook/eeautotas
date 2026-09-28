@@ -698,6 +698,10 @@ function blindTrace(ms) {
 // --sweepLoops=lane (default): the 2 longest loops in the sweep's lanes; first: the 2 longest loop windows with all the threads
 // before the sweep (an experiment: Forgotten Veil's loop at (326, 90) found -46 with 8 threads and 4 in a 2-thread lane)
 const SWEEP_LOOP_MODE = a.sweepLoops || process.env.EEAT_SWEEP_LOOPS || 'lane';
+// --sweepFirst=1 (default; 0 or EEAT_SWEEP_FIRST=0: off): on time-door levels the job's first whole-run sweep opens the
+// session's first round, before mutate, phase, the endgame and phaseB (sweep.js roundStages: there the first sweep began
+// 6.5-13.1 min after the job, and its first windows saved 300-1106 ticks each)
+const SWEEP_FIRST = String(a.sweepFirst !== undefined ? a.sweepFirst : (process.env.EEAT_SWEEP_FIRST || '1')) !== '0';
 /** the longest loop of the run (48 px, then 96, then 160) not tried yet (tried: the state hashes at its ends) and not
  *  resting in the window memory (those are added to tried); null when none: {l, m: memoWin of its window} */
 function nextLoop(round, tried) {
@@ -917,7 +921,8 @@ async function loopWindows(round, max = 5) {
 async function deepStage(round, R) {
 	const WSZ = R([600, 400, 500, 350]);
 	if (SWEEP_LOOP_MODE === 'first') await loopWindows(round, 2);
-	await sweepStage(round);
+	if (cur.sweep0 === round) log(`deep${round}: the sweep ran first in this round`);   // (sweep.js roundStages)
+	else await sweepStage(round);
 	await loopWindows(round);
 	let done = 0, rested = 0;
 	while ((done === 0 || roundUsed() < 0.55 * ROUND_MS) && Date.now() < deadline - 120000) {
@@ -1160,16 +1165,20 @@ async function main() {
 	for (; Date.now() < deadline - 120000; round++) {
 		curRound = round;
 		redecideCoins();
-		const STAGES = phaseOn() ? STAGES_PHASE : STAGES_ALL;
+		// (time doors: the job's first whole-run sweep opens the session's first round, sweep.js roundStages)
+		const STAGES = SW.roundStages(phaseOn() ? STAGES_PHASE : STAGES_ALL, { on: SWEEP_FIRST, timeDoors: !!level.hasTimeDoors,
+			first: round === firstRound, swept: !!cur.swept, off: a.sweep === '0' || skip1.has('deep') });
 		const R = (arr) => arr[(round - 1) % arr.length];   // the settings rotate with the round (it continues after a restart)
 		const resume = cur.round === round && STAGES.includes(cur.stage) ? cur.stage : '';
 		roundT0 = Date.now() - (resume ? Math.min(+cur.used || 0, ROUND_MS) : 0);
-		if (resume && resume !== 'mutA') log(`round ${round}: continuing at ${resume} (${Math.round(roundUsed() / 60e3)} of ${ROUND_MS / 60e3} min used)`);
+		if (resume && resume !== STAGES[0]) log(`round ${round}: continuing at ${resume} (${Math.round(roundUsed() / 60e3)} of ${ROUND_MS / 60e3} min used)`);
+		else if (STAGES[0] === 'sweep0') log(`round ${round}: the whole-run sweep first (time doors: mutate's exact rejoins find nothing there; phase, the endgame and phaseB after it)`);
 		const resumedAt = resume ? STAGES.indexOf(resume) : -1;
 		for (let si = resume ? resumedAt : 0; si < STAGES.length && Date.now() < deadline - 120000; si++) {
 			const sname = STAGES[si];
 			saveCursor({ round, stage: sname, used: roundUsed() });
-			if (sname === 'mutA') await mutateLoop(`${round}a`);
+			if (sname === 'sweep0') { await sweepStage(round); saveCursor({ sweep0: round }); }
+			else if (sname === 'mutA') await mutateLoop(`${round}a`);
 			else if (sname === 'endgame') await endgameStage(round);
 			else if (sname === 'deep') await deepStage(round, R);
 			else if (sname === 'skips') await skipsStage(round);

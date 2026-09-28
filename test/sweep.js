@@ -142,6 +142,34 @@ console.log('estimates');
 	check('lossEstimate and leadEstimate give a number for every window', loss.every(Number.isFinite) && lead.every(Number.isFinite), `loss ${loss.join(' ')} | lead ${lead.join(' ')}`);
 }
 
+console.log('roundStages (the sweep first on time-door levels)');
+{
+	const PH = ['mutA', 'skipfA', 'phase', 'endgame', 'phaseB', 'deep', 'skips', 'skipf', 'flyb', 'mutB', 'sc', 'mutC', 'beam', 'splice'];
+	const ALL = ['mutA', 'skipfA', 'endgame', 'deep', 'skips', 'skipf', 'flyb', 'mutB', 'sc', 'phase', 'mutC', 'beam', 'splice'];
+	const td = { on: true, timeDoors: true, first: true, swept: false, off: false };
+	const s1 = SW.roundStages(PH, td);
+	check('time doors, the session\'s first round, never swept: the sweep first, then the usual order', s1[0] === 'sweep0' && s1.slice(1).join() === PH.join(), s1.slice(0, 4).join(' '));
+	check('the input list is not changed', PH[0] === 'mutA' && PH.length === 14 && !PH.includes('sweep0'));
+	check('a later round: the usual order', SW.roundStages(PH, { ...td, first: false }).join() === PH.join());
+	check('the job covered the run once already (a restarted session): the usual order', SW.roundStages(PH, { ...td, swept: true }).join() === PH.join());
+	check('no time doors (coin doors, plain levels): the usual order', SW.roundStages(PH, { ...td, timeDoors: false }).join() === PH.join() &&
+		SW.roundStages(ALL, { ...td, timeDoors: false }).join() === ALL.join());
+	check('--sweepFirst=0: the usual order', SW.roundStages(PH, { ...td, on: false }).join() === PH.join());
+	check('no sweep this round (--sweep=0, --skip=deep): no sweep0', SW.roundStages(PH, { ...td, off: true }).join() === PH.join());
+	check('no options: the usual order', SW.roundStages(ALL).join() === ALL.join());
+	const again = SW.roundStages(s1, td);
+	check('applied twice: one sweep0', again.filter((s) => s === 'sweep0').length === 1 && again[0] === 'sweep0');
+	// grind.js's resume: a session restarted in the same round after the sweep covered the run (cursor swept 1) resumes
+	// at its stage in the usual order; one restarted mid-sweep (not covered yet) resumes in sweep0
+	const resumeAt = (st, stage) => st.includes(stage) ? st.indexOf(stage) : -1;
+	check('a restart mid-sweep resumes in sweep0; after it, at its stage', resumeAt(SW.roundStages(PH, td), 'sweep0') === 0 &&
+		resumeAt(SW.roundStages(PH, { ...td, swept: true }), 'phase') === 2 && resumeAt(SW.roundStages(PH, td), 'phase') === 3);
+	// grind.js wiring: the stage and the deep stage's skip (a source check: the grind is a process, not a module)
+	const g = fs.readFileSync(path.join(__dirname, '..', 'src', 'grind.js'), 'utf8');
+	check('grind.js runs sweep0 and its deep stage leaves out a sweep that ran first', /sname === 'sweep0'\) \{ await sweepStage\(round\); saveCursor\(\{ sweep0: round \}\)/.test(g) &&
+		/cur\.sweep0 === round\) log\([^\n]*\n\telse await sweepStage\(round\)/.test(g) && /SW\.roundStages\(/.test(g));
+}
+
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { /* kept */ }
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

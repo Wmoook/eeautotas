@@ -181,4 +181,23 @@ class Memo {
 	}
 }
 
-module.exports = { windows, sigOf, innerOf, lossEstimate, leadEstimate, mapWindow, keptShare, Memo, SAMPLE, FAILS_N, CHANGED, EDGE };
+/**
+ * The stages of one grind round (grind.js main) with the sweep first: on a time-door level the job's first whole-run
+ * sweep ('sweep0') opens the session's first round, before mutate, phase, the endgame solver and phaseB (grind.js's deep
+ * stage then leaves out its own sweep in that round). There an exact rejoin needs a saving that is a multiple of 1000
+ * ticks: mutate found nothing in 11 of 11 fetched time-door runs, phase / phaseB 65-246 ticks each, and the first sweep
+ * started 6.5-13.1 min after the job (median 10.4), where its windows then saved 300-1106 each (Good Egg: 686, 571, 467,
+ * 305 in its first 2 min, reaching the best mostly through the GPU searcher's union combine); the time-door levels had
+ * a median 58% of their whole gain 10 min after the first route, the others 91% (the route-quality analysis of
+ * 2026-09-28, 70 fetched runs). Other levels keep the usual order (mutate's gains come first there).
+ * o: {on (the switch: grind --sweepFirst), timeDoors, first (the session's first round), swept (the job covered the
+ * whole run with a sweep once already), off (no sweep in this round: --sweep=0, --skip=deep)}. Returns a new array.
+ */
+function roundStages(stages, o) {
+	const q = o || {};
+	const first = q.on !== false && !!q.timeDoors && !!q.first && !q.swept && !q.off;
+	const rest = stages.filter((s) => s !== 'sweep0');
+	return first ? ['sweep0', ...rest] : rest;
+}
+
+module.exports = { roundStages, windows, sigOf, innerOf, lossEstimate, leadEstimate, mapWindow, keptShare, Memo, SAMPLE, FAILS_N, CHANGED, EDGE };
