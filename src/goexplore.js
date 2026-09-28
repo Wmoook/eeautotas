@@ -210,7 +210,7 @@
 //        its states into every archive; a "route" event, no result).
 //        [--rArm=0.5 (with --bursts=1: the route arm's share of the bursts once a route is known, src/routearm.js: from
 //        the route's own states, searches aimed by the route's schedule (a time-to-go field to its later tiles) for ways
-//        that meet its later points sooner, spliced into verified routes; 0: off)] [--rArmPre=0.2 (before any route: the
+//        that meet its later points sooner, spliced into verified routes; 0: off)] [--rArmPre=0 (opt-in, e.g. 0.2; before any route: the
 //        arm's share on the search's nearest attempt (its landings after a long fall only, each landing state once), a later point
 //        of the attempt reached sooner = a shortened attempt: into every archive and a "shortcut" event (the editor splices
 //        every route with them); 0 (or EEAT_RARMPRE=0): off)]
