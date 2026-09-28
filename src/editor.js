@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const AN = require('./anat.js');   // (EEAT_ANAT: the anatomy log, a measuring aid; off by default)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -1149,6 +1150,7 @@ function breakLaunch(n) {
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	if (AN.on) AN.log('ed', { ev: 'brk', sec: Math.round((Date.now() - S.started) / 100) / 10, round: brk.rounds, run: R.runs + 1, step: ch.step, grain: ch.grain, gates: ch.gates || 0, what: ch.what, gate: ch.gate ? { x: ch.gate.x, y: ch.gate.y } : null, cellLog, seconds: V.brk.seconds, ticks: ch.inputs.length, inputs: ch.inputs });
 	R.runs++;
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
@@ -1165,6 +1167,7 @@ function breakAfter(n, how) {
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
 	const hit = V.brk && V.brk.gateHit;
+	if (AN.on) AN.log('ed', { ev: 'brkEnd', sec: Math.round((Date.now() - S.started) / 100) / 10, round: brk.rounds, how, hit: hit ? hit.length : 0, best: b ? { ticks: b.ticks, dist: b.dist } : null, hitInputs: hit || '', bestInputs: b ? b.inputs : '' });
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
@@ -1336,7 +1339,7 @@ function save() {
 	saveTimer = setTimeout(saveNow, SAVE_MS);
 	if (saveTimer.unref) saveTimer.unref();
 }
-function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); }
+function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); if (AN.on) AN.log('ed', { ev: 'note', sec: S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null, text: s }); }
 // The clocks. Each eegpu process first loads its kernels (the first load after a build is the NVIDIA driver compiling
 // them for this graphics card: a minute or more on a laptop CPU, then seconds) and says {"ev":"ready"}; its --seconds
 // count from there. A strategy's time (V.usedMs + the running process's time since its ready) is what its passes and
@@ -2794,6 +2797,7 @@ function closer(ev, n) {
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
 	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)
 	if (tr.reachTiles !== null && !(S.nearestReach && S.nearestReach.tiles <= tr.reachTiles)) S.nearestReach = { tiles: Math.round(tr.reachTiles * 10) / 10, ticks: masks.length, after: S.closest.foundAfter };
+	if (AN.on) AN.log('ed', { ev: 'closest', sec: S.closest.foundAfter, dist, tiles: S.closest.tiles, ticks: masks.length, deaths: tr.deaths, strategy: S.strategies[n].key, room: tr.room, inputs: S.closest.inputs });
 	save();
 }
 /** stops the running search (a route found so far stays) */

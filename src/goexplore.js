@@ -236,6 +236,7 @@ const EL = require('./eelvl.js');
 const RF = require('./reach.js');
 const SF = require('./steer.js');
 const V8 = require('v8');
+const AN = require('./anat.js');   // (EEAT_ANAT: the anatomy log, a measuring aid; off by default)
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
 const OPTIONS = [];
@@ -1070,6 +1071,18 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const DEATHBLK_N = DEATH_TICKS + 25;
 	const DEADBLK = { b: new Uint8Array(DEATHBLK_N), refs: 0 };   // (the dead ticks' inputs: the engine reads none)
 	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0, dTicks = 0;   // (dTicks: the dead ticks played)
+	// (EEAT_ANAT, the anatomy log: per room key the picks by head [A, B, C, L, W] and its cells at most, never swept; the
+	// kept deaths per (death tile, respawn tile); the dying states per death tile. Logging only)
+	const ANR = AN.on ? new Map() : null, AND = AN.on ? new Map() : null, ANDT = AN.on ? new Map() : null;
+	let anHead = 0, anLast = Date.now();
+	const anRoom = (r) => { let v = ANR.get(r.key); if (v === undefined) ANR.set(r.key, v = { desc: r.desc, h: [0, 0, 0, 0, 0], cells: 0, t: r.t, parent: r.parent, tile: r.tile, trig: r.trig }); return v; };
+	const anDump = (final) => {
+		const rs = [];
+		for (const [k, v] of ANR) { const r = rooms.get(k); if (r !== undefined && r.arr.length > v.cells) v.cells = r.arr.length; rs.push([k, v.desc, v.h, v.cells, v.t, v.parent, v.tile, v.trig ? 1 : 0, r !== undefined && r.best !== null ? Math.round(distOf(r.best) * 10) / 10 : null]); }
+		const ds = [...AND].map(([k, v]) => [k, v.n, v.cost, v.first, v.t, v.from, v.to, v.newRoom]);
+		const dt = [...ANDT].sort((x, y) => y[1] - x[1]).slice(0, 200);
+		AN.log(`w_${process.pid}_${seed}`, { final: !!final, seed, sec: Math.round((Date.now() - t0) / 1000), ticks, picks, cells: cells.size, rooms: rs, deaths: ds, deathTiles: dt, dSeen, dCost, dNew, dDrop, dBack, dCells });
+	};
 	// (the sound lower bound of the live state: with deaths also DEATH_TICKS + its respawn target's, see lowerBoundTiles)
 	// (without a checkpoint every death moves the spawn rotation on: any spawn, after enough deaths)
 	const lbSpawn = DI !== null && LBT !== null ? Math.min(...DI.spawnT.map((t) => LBT[t])) : 0xffff;
@@ -1655,6 +1668,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const dying = (up, blk, o, n, t, rcPrev, room, e) => {
 		dSeen++;
 		const rt = respawnTileOf(DI, sim, W);
+		const anDt = ANDT !== null ? centreTile() : 0;
+		if (ANDT !== null) ANDT.set(anDt, (ANDT.get(anDt) || 0) + 1);
 		if (t + DEATH_TICKS - 1 >= maxT) { dDrop++; return; }
 		// the quick look before the dead ticks are played (the room as it is now; the respawn's own after them): a death
 		// that throws the ball back (its target farther from the trophy by the reach field than the state's own way, by
@@ -1688,6 +1703,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			else { full = true; needSweep = true; dDrop++; return; }
 		}
 		if (byCost) dCost++; else dNew++;
+		if (AND !== null) {
+			const ak = `${anDt}>${centreTile()}`;
+			let v = AND.get(ak);
+			if (v === undefined) AND.set(ak, v = { n: 0, cost: 0, first: Math.round((Date.now() - t0) / 1000), t: tR, from: room !== null ? room.desc : '', to: rm !== null ? rm.desc : '', newRoom: rm !== null && rm.isNew ? 1 : 0 });
+			v.n++; if (byCost) v.cost++;
+		}
 		const upD = mkNode(up, blk, o, n);
 		const nc = add(tR, rc, null, upD, DEADBLK, 0, nd, rm);
 		release(upD);
@@ -1708,6 +1729,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		// (at most every SWEEP_GAP picks: a sweep that could not get under the share, all protected, is not redone at once)
 		if ((needSweep || archiveBytes() > capA) && picks - sweptAt >= SWEEP_GAP) sweep();
 		if (now - lastStat >= 250) { lastStat = now; post(stat()); }
+		if (ANR !== null && coarse && now - anLast >= 300000) { anLast = now; anDump(false); }
 		if (now - lastSent >= 250) { lastSent = now; sendNear(); }
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (port) inbox();
@@ -1723,21 +1745,23 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e = d[0];
 				if (--d[1] <= 0) discovery.pop();
 				if (e.t >= maxT) continue;
+				anHead = 2;
 			} else if (lShare > 0 && rnd() < lShare) {
 				// head L (a route known): the cell most ahead of the best route (none: heads A / B as without it)
 				while (HL.size() > 0) { const c = HL.pop(); if (HL.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
-				if (e === null) e = rnd() < a.pA ? popA() : popB();
-				else { leadPicks++; pickL = true; }
+				if (e === null) { const hA = rnd() < a.pA; anHead = hA ? 0 : 1; e = hA ? popA() : popB(); }
+				else { leadPicks++; pickL = true; anHead = 3; }
 			} else if (wShare > 0 && rnd() < wShare) {
 				// head W (a route known): the off-schedule cell most ahead of the route by its tile alone
 				while (HW.size() > 0) { const c = HW.pop(); if (HW.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
-				if (e === null) e = rnd() < a.pA ? popA() : popB();
-				else { wayPicks++; pickW = true; }
-			} else if (rnd() < a.pA) e = popA();
-			else e = popB();
+				if (e === null) { const hA = rnd() < a.pA; anHead = hA ? 0 : 1; e = hA ? popA() : popB(); }
+				else { wayPicks++; pickW = true; anHead = 4; }
+			} else if (rnd() < a.pA) { e = popA(); anHead = 0; }
+			else { e = popB(); anHead = 1; }
 			if (e === null) { end = 'exhausted'; break; }
 			e.picks++; e.ver++; picks++; e.touch = picks;
 			if (coarse) e.room.picks++;
+			if (ANR !== null && coarse) anRoom(e.room).h[anHead]++;
 			hpush(e);
 			if (e.snap === null) {
 				// its state: its run's inputs from its parent's snapshot, else its whole path from the start
@@ -1835,6 +1859,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		pickL = false; pickW = false;
 	}
 	sendNear();
+	if (ANR !== null && coarse) anDump(true);
 	E.flushTicks();
 	if (typeof global.gc === 'function') global.gc();   // (node --expose-gc: the done event's heapMB is what the heap holds)
 	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000 }));
@@ -1867,8 +1892,13 @@ function rollInputs(seed, n, keep, out, o) {
 async function gpuMain(a, L, m) {
 	const { spawn } = require('child_process');
 	const G = require('./gpu.js');
-	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
+	// (EEAT_ANAT: every event but the progress lines (those every 15 s) to the anatomy log too)
+	let anProg = 0;
+	const say = (o) => {
+		process.stdout.write(JSON.stringify(o) + '\n');
+		if (AN.on && (o.ev !== 'progress' || Date.now() - anProg >= 15000)) { if (o.ev === 'progress') anProg = Date.now(); AN.log(`gpu_${process.pid}`, Object.assign({ sec: Math.round((Date.now() - t0) / 100) / 10 }, o)); }
+	};
 	a.cells = 'coarse';
 	const field = RF.reachField(L);
 	const sim = new E.EESim(L);
@@ -2399,9 +2429,14 @@ async function main() {
 	const claimed = processMB(a.workers, a.mem) * 1048576;
 	registryClaim(claimed);
 	process.on('exit', () => registryClaim(0));
-	const say = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 	const t0 = Date.now();
 	const sec = () => Math.round((Date.now() - t0) / 100) / 10;
+	// (EEAT_ANAT: every event but the progress lines (those every 15 s) to the anatomy log too)
+	let anProg = 0;
+	const say = (o) => {
+		process.stdout.write(JSON.stringify(o) + '\n');
+		if (AN.on && (o.ev !== 'progress' || Date.now() - anProg >= 15000)) { if (o.ev === 'progress') anProg = Date.now(); AN.log(`gox_${process.pid}`, Object.assign({ sec: sec() }, o)); }
+	};
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
 	const field = RF.shareField(RF.reachField(L));
@@ -2655,6 +2690,7 @@ async function main() {
 			const r = one.rooms.get(m.room);
 			if (r) { if (m.t < r.t) { r.t = m.t; if (bursts) bursts.room(m); } return false; }
 			one.rooms.set(m.room, { t: m.t, desc: m.desc, tile: m.tile });
+			if (AN.on) AN.log(`gox_${process.pid}`, { ev: 'aroom', sec: sec(), room: m.room, desc: m.desc, t: m.t, by: m.seed === undefined ? 'gpu' : 'cpu', seed: m.seed, parent: m.parent, tile: m.tile, trig: m.trig, gain: m.gain, inputs: m.inputs || '' });
 			if (bursts) bursts.room(m);
 			// (--rooms=1: every room found, with the inputs that reach it: the gate benchmark watches for its target room)
 			if (a.rooms && m.inputs && m.t > (pre0 ? pre0.length : 0)) say({ ev: 'room', room: m.room, desc: m.desc, t: m.t, sec: sec(), by: m.seed === undefined ? 'gpu' : 'cpu', sub: m.sub, keys: m.keys, ...(m.wt !== undefined ? { wt: m.wt } : {}), inputs: m.inputs });
