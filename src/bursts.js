@@ -95,7 +95,7 @@ const UNTRIED = 1.5;
 const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
-// the plan arm (goexplore.js --planEvery, default 3; 0: off): on a level whose steer field has the coin DP (a coin door
+// the plan arm (goexplore.js --planEvery=k, off by default: no gain measured, n2_3_good_egg.md): on a level whose steer field has the coin DP (a coin door
 // the walk plan must pass), every k-th burst goes to the coin plan's FRONTIER: the room of the one search's nearest
 // attempt (by the steer field its DP value falls with every coin of the plan) while it holds fewer coins than the door
 // needs, aimed at the plan's next gate (steer.js nextGate from that attempt's state: the missing coin of the door that

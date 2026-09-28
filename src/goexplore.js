@@ -189,8 +189,11 @@
 //        --burstPar=2 --gpuCells=26 --burstCap=0) [--burstSteer=<RCH4 file> (the steer field for the bursts' trophy arm:
 //        its order, as the editor's relay had it; the GPU tool must read RCH4)] [--burstOomS=5 (a burst that found the GPU's
 //        memory full waits this long, doubled while it lasts, up to 120 s: no try of its arm, never the bursts' end)]
-//        [--planEvery=3 (with the steer field's coin DP: every k-th burst from the coin plan's frontier room (the nearest
-//        attempt's) aimed at the plan's next gate, the missing coin of the door (src/bursts.js PLAN_BACK); 0: off)]
+//        [--planEvery=0 (k: with the steer field's coin DP: every k-th burst from the coin plan's frontier rooms (the most coins
+//        below the door) aimed at the plan's first gate their walk reaches, a missing coin of the door (src/bursts.js
+//        PLAN_BACK); 0: off)] [--deaths=1 (the death warp: a CPU run that dies with a checkpoint set goes on idle to the respawn there, and the
+//        respawned state is a cell with head C's picks, once per room and respawn point unless earlier; 0: a death ends
+//        the run, as before)]
 //        [--prefix=<run.eetas | .eetas characters> (the gate benchmark, tools/gatebench.js: the search starts after those
 //        inputs; every path begins with them, only finds after the start state count; CPU cells only)]
 //        [--rooms=0|1 (an event "room" for every room the one search registers: its cause, the inputs; coarse cells)]
@@ -251,7 +254,7 @@ const WAY_PICK = 40;
 // head L refines the new way at its full share (0: only head L's own routes, as before)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, planEvery: 3, deaths: 1, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, planEvery: 0, deaths: 1, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -259,9 +262,9 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
 const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
-const CHUNK = 16;
+const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // the death warp's wait at most (ticks): EE's respawn comes 54 ticks after a death (--deaths)
-const DEATH_MAX = 120;   // picks between two looks at the clock, the shared bound and the stop flag
+const DEATH_MAX = 120;
 /** the process's CPU seconds so far (user + system, every thread) */
 const cpuSec = () => { const u = process.cpuUsage(); return Math.round((u.user + u.system) / 1e5) / 10; };
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
@@ -1485,8 +1488,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						// they routed in 0.46 M. The run goes on idle to the respawn (a block of its own: its inputs so far + the idle
 						// ticks, counted in the budget like an imported run's) and the respawned state is a cell; only a death earlier
 						// than the last one of its room and respawn point is played through (warpT)
-						if (!a.deaths || t >= maxT) break;
-						const wk = `${room !== null ? room.key : ''}|${sim.checkpoint.x},${sim.checkpoint.y}`;
+						// (only to a checkpoint: a death without one goes back to a spawn point, the start, and those warps cost the
+						// gate benchmark ge#14 (4 / 4 -> 0 / 4 seeds) and sf#0 (2 / 4 -> 0 / 4); keyed by the room without its time
+						// doors (the room's sub key): the doors' flips would make a new key every 500 ticks)
+						if (!a.deaths || t >= maxT || sim.checkpoint.x === -1) break;
+						const wk = `${room !== null && room.cause ? room.cause.sub : ''}|${sim.checkpoint.x},${sim.checkpoint.y}`;
 						const w0 = warpT.get(wk);
 						if (w0 !== undefined && w0 <= t) break;
 						warpT.set(wk, t);
