@@ -1030,6 +1030,25 @@ async function cpuSection() {
 	// route here, 416 ticks, after 8,163 simulated ticks
 	check('coarse cells pick like the research prototype where every room opens territory: the first route 416 ticks after 8,163 simulated ticks (seed 3)',
 		k1.results.length > 0 && k1.results[0].ticks === 416 && k1.results[0].simTicks === 8163, `${k1.results.length ? `${k1.results[0].ticks}@${k1.results[0].simTicks}` : 'no route'}`);
+	// the speed cells (--spd, coarse cells): a 60 x 50 level whose trophy stands behind a 5-coin door and no coin exists:
+	// the search stalls at the door, so after --spd seconds without progress the frontier room gets the fastest arrival's
+	// cells next to the earliest (EEAT_SPDLOG records the flag); --spd=0 never flags; neither finds a route (the door never
+	// opens: the flags add cells, they never let a state through)
+	const sd = room(60, 50);
+	for (let y = 1; y < 49; y++) sd.push([30, y, 43, 5]);
+	for (let x = 5; x < 28; x += 4) sd.push([x, 44 - (x % 8), 9]);
+	sd.push([3, 48, 255], [50, 48, 121]);
+	const sdFile = path.join(HOME, 'spdstall.eelvl');
+	fs.writeFileSync(sdFile, ED.eelvlOf({ name: 'speed cells stall', width: 60, height: 50, cells: sd }));
+	const sdLog = path.join(HOME, 'spdstall.jsonl');
+	const sdOn = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=2'], null, { env: Object.assign({}, process.env, { EEAT_SPDLOG: sdLog }) });
+	const sdOff = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=0']);
+	const sdFlags = fs.existsSync(sdLog) ? fs.readFileSync(sdLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.ev === 'flag') : [];
+	const sdW = (r) => (r.done && r.done.workers && r.done.workers[0]) || {};
+	check('speed cells: a search stalled for --spd seconds flags its frontier room (the fastest arrival next to the earliest cell); --spd=0 flags nothing; no route in either (the 5-coin door never opens)',
+		sdFlags.length >= 1 && sdFlags[0].s >= 2 && sdW(sdOn).spdFlags >= 1 && sdW(sdOn).spdPeak >= 1 && sdW(sdOff).spdFlags === 0 && sdOn.results.length === 0 && sdOff.results.length === 0 &&
+		sdOn.done.end === 'time' && sdOff.done.end === 'time',
+		`flags ${sdFlags.map((e) => `${e.s} s ${e.desc}`).join(', ')}; on: spdFlags ${sdW(sdOn).spdFlags}, cells ${sdW(sdOn).cells}; off: spdFlags ${sdW(sdOff).spdFlags}, cells ${sdW(sdOff).cells}`);
 	// the source events: the key's room once (its first cell: its inputs end where the ball entered it, with the key)
 	const RM = GX.roomOf(kdLevel);
 	const roomAt = (inputs) => { const s = new E.EESim(kdLevel), inp = new E.EEInput(); s.reset(); let k = RM.key(s), prev = k; for (const ch of inputs) { E.applyMask(inp, ch.charCodeAt(0) - 48); s.tick(inp); prev = k; k = RM.key(s); } return { key: k, entered: k !== prev, desc: RM.desc(s) }; };
@@ -1077,6 +1096,13 @@ async function cpuSection() {
 	// tick short of the key: the operator goes on into the room the trigger makes (its last input again), and the attempt
 	// goes into every worker's archive
 	const BU = require('../src/bursts.js');
+	// target-fair rooms (--burstFair): a room's score divided by 1 + failed chains / (3 x its untried targets): after 6
+	// failed chains a room of 1 target (a phantom behind a lid) ranks below a room of 13 targets with the same bandit score;
+	// a room with no failure keeps its score; the order only (an untried room's UNTRIED score is never divided)
+	const fs1 = BU.fairScore(0.5, 6, 1), fs13 = BU.fairScore(0.5, 6, 13);
+	check('target-fair rooms: the score per untried target not yet failed (1 target, 6 failed chains: a third; 13 targets: 0.87 of it; no failure: as before; 0 targets counts 1)',
+		Math.abs(fs1 - 0.5 / 3) < 1e-9 && Math.abs(fs13 - 0.5 / (1 + 6 / 39)) < 1e-9 && fs13 > fs1 && BU.fairScore(0.5, 0, 1) === 0.5 && BU.fairScore(0.5, 3, 0) === BU.fairScore(0.5, 3, 1),
+		`1 target ${fs1.toFixed(3)}, 13 targets ${fs13.toFixed(3)}`);
 	const TRk = BU.triggersOf(kdLevel);
 	const standin = path.join(HOME, 'burst_standin.js');
 	fs.writeFileSync(standin, [

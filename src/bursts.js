@@ -89,6 +89,15 @@ const FINE_Y = { cqx: 0.25, cqv: 16, qy: 1, qvy: 16, cap: 262144 };
 // tiles away through a one-way lid the ball cannot pass from that side (exhaustive at 0.5 px), and never at the 6th
 // coin (36, 49), 100 walk tiles away, that the ball can reach (the explore found it in 21 s with the target given)
 const REST_AFTER = 3;
+// target-fair rooms (--burstFair=1, the default; 0: the rooms' bandit as before): a room's score (its mean reward + the
+// UCB term) is divided by 1 + its failed chains / (REST_AFTER x its untried targets), so the bursts go to the rooms with
+// the most targets not yet failed, not evenly over the rooms: the bandit's arms were the rooms, and every stalled room
+// got ~1/k of the bursts whatever its targets. Wine Quest I's run from the level alone (wq-watch 858e0fd, 37 min):
+// 5 rooms whose 1-3 leftover targets were phantoms (behind a door or a lid by the walk, 86-312 walk tiles) took most of
+// the bursts after the stall; the frontier room (13 untried targets + the trophy, the 6th coin among them) got 41. The
+// order of the rooms only (an untried room first as before; nothing is ruled out); the trophy arm competes with the
+// chosen room's own score as before
+const fairScore = (raw, fails, targets) => (fails > 0 ? raw / (1 + fails / (REST_AFTER * Math.max(1, targets))) : raw);
 const FINE_Y_TEXT = '4 px x 1 px and 1/16';
 /** a level with tiles where the ball rises slowly (climbables, liquids): the fine-y cells are worth a try there */
 function slowYOf(L) {
@@ -269,10 +278,10 @@ function create(o) {
 		let r = rooms.get(m.room);
 		if (!r) {
 			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(),
-				trig: m.t > 0 && m.trig !== false };
+				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1 };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
-			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null });
+			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, fl: 0, nt: 1, ntI: null, ntK: -1 });
 			rooms.set(m.room, r);
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
@@ -508,6 +517,23 @@ function create(o) {
 		for (let i = 0; !r && i < OPTS.length; i++) r = tryMasks([OPTS[i]]);
 		return r;
 	};
+	// (--burstFair, off with --burstFair=0)
+	const fair = a.burstFair === undefined || a.burstFair === null ? true : !!+a.burstFair;
+	/** room r's untried targets (its arm's trigger components + the trophy where the walk aims at it), rested ones too:
+	 *  from its info while it has one, else the last count */
+	const targetsOf = (r) => {
+		const R = r.base || r, I = R.info;
+		if (!I) return r.nt;
+		// (cached while the room's info and its tried set stay: a pick scores every room burst from)
+		if (r.ntI === I && r.ntK === R.tried.size) return r.nt;
+		r.ntI = I; r.ntK = R.tried.size;
+		const arm = !!r.portal;
+		let n = 0;
+		for (const [c] of I.comps) if (!R.tried.has(c) && I.pOnly.has(c) === arm) n++;
+		if (o.field.mode === 'walk' && I.trophies.some((t) => !!I.via[t] === arm)) n++;
+		r.nt = Math.max(1, n);
+		return r.nt;
+	};
 	/** the next burst: {r (room, or null: the trophy arm), f (its field)} */
 	const pick = () => {
 		let best = null, bs = -Infinity;
@@ -518,15 +544,17 @@ function create(o) {
 		for (const r0 of rooms.values()) {
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
-				cand.push([r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n), r]);
+				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
+				// (--burstFair: the order by the score per untried target not yet failed)
+				cand.push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
 		}
 		cand.sort((x, y) => y[0] - x[0]);
-		for (const [sc, r] of cand) {
+		for (const [, r, raw] of cand) {
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
-			bs = sc; best = { r, f };
+			bs = raw; best = { r, f };
 			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
@@ -767,6 +795,9 @@ function create(o) {
 	};
 	/** the untried target (component) nearest the end of job's inputs by the room's walk: one more failure of it */
 	const failAt = (job) => {
+		// (every chain that ended short of its targets: the room's failures, --burstFair)
+		job.r.fl = (job.r.fl || 0) + 1;
+		st.failedChains = (st.failedChains || 0) + 1;
 		try {
 			const rr = job.r.base || job.r, arm = !!job.r.portal;
 			const I = rr.info;
@@ -822,4 +853,4 @@ function create(o) {
 	};
 }
 
-module.exports = { create, triggersOf, portalsOf, CONFS, FINE_Y, slowYOf };
+module.exports = { create, triggersOf, portalsOf, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER };
