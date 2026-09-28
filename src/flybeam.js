@@ -450,9 +450,14 @@ async function main() {
 	}
 	const tasks = [];
 	const starts = [];
+	// a start at or before the run's first input moves to the tick after it: from there every join saves run ticks (a join
+	// from before it mostly moved the timer's start: the ice level's start 0 found 66-70 raw ticks in every grind slice,
+	// all refused in run ticks, 2 of the slice's 9 tasks)
+	const F0 = ms.findIndex((m) => m !== 0);
 	if (a.startList) for (const x of a.startList.split(',')) starts.push(+x);
 	else if (STRETCH) {
 		let rows = stretchOrder(trace.K, n, from, to, every);
+		if (F0 >= 0) rows = rows.map((r) => (r.s <= F0 && F0 + 1 < n ? Object.assign({}, r, { s: F0 + 1 }) : r));
 		if (doneH) {
 			// (done = per task: the start's state hash and the setting; a start with one setting done runs only the other)
 			const left = rows.filter((r) => cfgs.some((c, ci) => !doneH.has(taskKey(trace.H[r.s], ci))));
@@ -463,6 +468,11 @@ async function main() {
 		for (const r of rows) starts.push(r.s);
 		console.log(`[flybeam] stretch order: ${rows.slice(0, 8).map((r) => `${r.s} (${r.best})`).join(', ')}${rows.length > 8 ? `, ... (${rows.length})` : ''}`);
 	} else for (let s = from; s < to; s += every > 0 ? every : to - from) starts.push(s);
+	if (F0 >= 0 && !a.startList) {
+		for (let i = 0; i < starts.length; i++) if (starts[i] <= F0 && F0 + 1 < n) starts[i] = F0 + 1;
+		const u = [...new Set(starts)];
+		starts.length = 0; starts.push(...u);
+	}
 	for (const A of starts) for (let ci = 0; ci < cfgs.length; ci++) {
 		if (doneH && doneH.has(taskKey(trace.H[A], ci))) continue;
 		tasks.push(Object.assign({}, base, cfgs[ci], { A, B: every > 0 && a.toEnd !== '1' ? Math.min(to, A + every) : to, name: `A${A}c${ci}`, cfg: ci }));
@@ -473,6 +483,7 @@ async function main() {
 	const endAt = Math.min(a.seconds ? t0 + 1000 * +a.seconds : Infinity, a.deadline ? +a.deadline : Infinity);
 	if (a.workers && !a.threads) a.threads = a.workers;
 	if (a.nocoins === '1') for (const t of tasks) t.noCoins = true;
+	if (!tasks.length) { console.log('[flybeam] every start done (no task left)'); return; }
 	const threads = Math.min(num('threads', 8), tasks.length);
 	console.log(`[flybeam] ${tasks.length} tasks (starts ${starts.join(',')}; ${cfgs.length} settings) on ${threads} threads`);
 	const results = [];

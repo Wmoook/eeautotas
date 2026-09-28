@@ -102,6 +102,14 @@ const run = (extra) => spawnSync(process.execPath, [path.join(__dirname, '..', '
 	check('every start done after a call whose tasks ran to their own end', !!w1 && w1.done.length === 3, `${w1 && w1.done.length}`);
 	check('--wrap=0 then searches nothing ("every start done")', /every start done/.test(r2.stdout || '') && !/ tasks \(starts/.test(r2.stdout || ''), (r2.stdout || '').slice(-200));
 }
+// 7) a start at or before the run's first input moves to the tick after it (its joins then save run ticks)
+{
+	const F0 = C.readEetas(refFile).findIndex((m) => m !== 0);
+	const r = run(['--starts=20', '--to=60', '--ext=100', '--timeS=2', '--seconds=30', '--threads=2']);
+	const m = /tasks \(starts ([\d,]+);/.exec(r.stdout || '');
+	const st = m ? m[1].split(',').map(Number) : [];
+	check('a start at or before the first input moves past it', F0 >= 0 && st.length > 0 && st.every((s) => s > F0) && st.includes(F0 + 1), `first input ${F0}, starts ${st.join(',')}`);
+}
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`flybeam: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
