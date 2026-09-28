@@ -922,7 +922,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const rspAt = DI ? new Map() : null;
 	const DEATHBLK_N = DEATH_TICKS + 25;
 	const DEADBLK = { b: new Uint8Array(DEATHBLK_N), refs: 0 };   // (the dead ticks' inputs: the engine reads none)
-	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0;
+	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0, dTicks = 0;   // (dTicks: the dead ticks played)
 	// (the sound lower bound of the live state: with deaths also DEATH_TICKS + its respawn target's, see lowerBoundTiles)
 	// (without a checkpoint every death moves the spawn rotation on: any spawn, after enough deaths)
 	const lbSpawn = DI !== null && LBT !== null ? Math.min(...DI.spawnT.map((t) => LBT[t])) : 0xffff;
@@ -1208,7 +1208,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, dSeen, dCost, dNew, dDrop, dCells, dBack, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1521,6 +1521,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (ST && e.sc < STEER_NONE) { const sr = atRespawn(() => SF.steerFifths(ST, sim)); if (sr >= 0 && sr / 5 > e.sc + DEATH_TILES) { dBack++; dDrop++; return; } }
 		let nd = 0;
 		while (sim.is_dead && nd < DEATHBLK_N) { E.applyMask(inp, 0); sim.tick(inp); nd++; ticks++; }
+		dTicks += nd;
 		const tR = t + nd;
 		if (sim.is_dead || tR >= maxT || sim.has_silver_crown) { dDrop++; return; }
 		const rc = costOf();
@@ -2298,7 +2299,7 @@ async function main() {
 	const bound = (d) => { if (d < Atomics.load(ctrl, 0)) Atomics.store(ctrl, 0, Math.max(0, d)); };
 	// (deaths as moves: the workers' dying states, kept by the cost (i) or as the earliest arrival (ii), dropped, and the
 	// respawns' new cells)
-	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), cells: total('dCells') } } : {});
+	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), cells: total('dCells'), deadTicks: total('dTicks') } } : {});
 	const progress = () => {
 		const now = Date.now(), tk = total('ticks');
 		samples.push([now, tk]);
