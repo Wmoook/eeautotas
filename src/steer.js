@@ -554,6 +554,11 @@ function layerLevel(A, M, s, opts) {
 	const protOn = nProt >= 0 ? M.valOf(s, nProt) === 1 : null;
 	const goalTiles = [];
 	const goal = new Uint8Array(N);
+	// (gold coin classes are no static coins: past 18 coins there is no DP, and a class layer below a coin door's count
+	// then had no way to the trophy at all (Torava's 50 coins: no value at the start); a coin tile steps the class, its
+	// goal seeded with the re-touches the step skips, buildPhysics skipFifths)
+	const nCoin = M.names.indexOf('coins');
+	const staticCoins = opts.staticCoins && !(nCoin >= 0 && M.feats[nCoin].classes);
 	for (let i = 0; i < N; i++) {
 		const c = A.cls[i], id = fg[i];
 		if (c === 3) fg[i] = M.gateOpen(i, s) ? 0 : 9;
@@ -561,7 +566,7 @@ function layerLevel(A, M, s, opts) {
 		const k = A.specialAt[i];
 		if (k >= 0) {
 			const ts = M.transAll(s, k);
-			if ((ts.length !== 1 || ts[0] !== s) && !(opts.staticCoins && A.special[k][1] === 'coins')) { fg[i] = TROPHY; goalTiles.push([i, k]); goal[i] = 1; continue; }
+			if ((ts.length !== 1 || ts[0] !== s) && !(staticCoins && A.special[k][1] === 'coins')) { fg[i] = TROPHY; goalTiles.push([i, k]); goal[i] = 1; continue; }
 			const kind = A.special[k][1];
 			if (nProt >= 0 && (kind === 'prot' || kind === 'reset')) fg[i] = 0;
 			if (nFx >= 0 && (kind === 'fx' || kind === 'reset') && M.valOf(s, nFx) === 0) fg[i] = 0;
