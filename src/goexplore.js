@@ -200,6 +200,11 @@
 //        (head W's share follows its yield like head L's; 0: --pW all the time)] [--wLead=0 (1: a faster route from a head-W
 //        pick restarts head L's grace too; 0: only head L's own routes, as before)]
 //        [--lb=1 (the sound lower bound per tile prunes states: lowerBoundTiles)]
+//        [--sat=1 (coarse cells: the dead-end brake, SAT_ZONE: a region whose picks stop making new cells sinks behind the
+//        rest in heads A and B; 0: the picks as before)] [--deaths=0 (the reach field without death edges: the runs end at a
+//        death, so a way through one is none of theirs; 1: with them, for a search that takes deaths as moves)]
+//        [--roomDead=1 (coarse cells, --deaths=0: per room the tiles from which neither the trophy nor a trigger is walkable,
+//        roomDead, end a run; 0: off)] (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -301,13 +306,14 @@ const PICKLOG_S = 30;
 // SAT_ZONE tiles (the GPU runs' cells carry no tile: a room and a band of SAT_BAND tiles of the reach cost). Every pick of a
 // cell adds 1 to its region's EXCESS and to its room's, every new cell its runs make takes SAT_CELL off (never below 0: a
 // region whose picks make a new cell per SAT_CELL picks or better stays at 0), and a new room or a nearer attempt from the
-// pick sets both to 0 (the region recovers). Head A's priority gets + SAT_MU x sqrt(excess) tiles, head B's cell weight
-// / (1 + sqrt(excess) / SAT_B) and its room weight the same by the room's excess: a region whose exploration saturates
-// (Forgotten Helix: head A's picks in the hub by the portal (274, 188) and in the spectator box it leads to, 21,831 /
-// 12,893 picks that made 281 / 102 new cells, a new cell per 78 / 126 picks, where head B's picks elsewhere made one per
-// 3-4) sinks behind the rest, however low its reach cost, and comes back when something new appears there. The reach
-// field's -1 is still the only prune: this only orders. SAT_SLACK: head A takes a cell whose priority rose by more since
-// it was queued back into the queue (lazily, at its pop).
+// pick sets both to 0 (the region recovers). Past SAT_N of excess (satOver) head A's priority gets + SAT_MU x
+// sqrt(excess - SAT_N) tiles, head B's cell weight / (1 + sqrt(excess - SAT_N) / SAT_B) and its room weight the same by the
+// room's excess: a region whose exploration saturates (Forgotten Helix, main 592fde4, 20 min on the EPYC, 12 workers: head
+// A's picks in the hub and in the spectator box by the trophy that its portal (274, 188) leads to, 41% of all 67 M picks,
+// made a new cell per 1,500-2,700 picks, head B's in the start area one per 194) sinks behind the rest, however low its
+// reach cost, and comes back when something new appears there. The reach field's -1 is still the only prune: this only
+// orders. SAT_SLACK: head A puts a cell whose priority rose by more since it was queued back into the queue (lazily, at
+// its pop).
 const SAT_ZONE = 8, SAT_BAND = 8, SAT_CELL = 20, SAT_N = 200, SAT_MU = 1, SAT_B = 10, SAT_SLACK = 1;
 /** the brake of a region (or room) of excess ex: 0 up to SAT_N (a region is saturated after SAT_N picks beyond its yield), then
  *  sqrt(ex - SAT_N): head A adds SAT_MU x that (tiles), head B divides by 1 + that / SAT_B */
