@@ -30,7 +30,9 @@
 //              state finite, in walk and physics mode, with and without the death edges; killing tiles no protected ball
 //              reaches stay deadly), the death-free field (opts.deaths: false: a pocket only a death leaves is cut off, its
 //              -1 a superset of the default field's), the viewing-room trap (walk mode: a spectator box by the trophy behind
-//              spikes, reached by a portal, ranks behind the start: Forgotten Helix's box looked 106 tiles from the trophy)
+//              spikes, reached by a portal, ranks behind the start: Forgotten Helix's box looked 106 tiles from the trophy);
+//              the coins stored as collected (110 / 111, coins again after 'reset'): triggers of the room dead ends (a 60 x 50
+//              level with one, a 1-coin door and the trophy: every state of the route live, and the one search routes it)
 // usage: node test/reach.js [--only=A,B,..] [--gpu] [--tool=<eegpu.exe>] [--jobs=<dir>] [--bench=<file>] [--quick]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
@@ -736,6 +738,60 @@ function sectionH() {
 			`box ${at(70, 9)} tiles, start ${at(2, 38)}, the real way's portal ${at(6, 37)}, its exit ${at(45, 37)}`);
 	}
 }
+/** the room dead ends and the coins the FILE stores as collected (110 gold / 111 blue): the default 'reset' start turns
+ *  them back into coins that count for coin doors (eesim.js _resetCoinTiles), so they are triggers of roomDead
+ *  (goexplore.js TRIGGER_IDS). The wq-int-1 review's repro: a 60 x 50 level with one such coin, a 1-coin door across the
+ *  level and the trophy behind it; holding right takes the coin, opens the door and finishes. Before the fix the start
+ *  was a dead end (no trigger walkable from it with the door shut): every state before the coin not live, and the one
+ *  search (roomDead on) kept 1 cell and found no route in 10 s where --roomDead=0 found it in 0.2 s */
+function storedCoinDeadEnds() {
+	const GX = require('../src/goexplore.js');
+	for (const [coin, door, what] of [[110, 43, 'gold'], [111, 213, 'blue']]) {
+		const W = 60, H = 50, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([12, y, door, 1]);
+		cells.push([2, H - 2, 255], [6, H - 2, coin], [20, H - 2, 121]);
+		const buf = ED.eelvlOf({ name: `stored${coin}`, width: W, height: H, cells });
+		const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf), { id: 't', file: `stored${coin}.eelvl` }));
+		const route = new Uint8Array(400).fill(4);
+		const ev = C.evaluate(L, route);
+		// every state of the route in its room: live (roomDead), and its reach cost finite (the death-free field too)
+		const RD = GX.roomDead(L, 1 << 24), f = R.reachField(L), fnd = R.reachField(L, { deaths: false });
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let n = 0, dead = 0, cut = 0, firstDead = -1;
+		for (let t = 0; ev && t <= ev.ms.length; t++) {
+			if (t > 0) { E.applyMask(inp, route[t - 1]); sim.tick(inp); }
+			if (sim.has_silver_crown) break;
+			const tile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
+			n++;
+			if (!GX.liveAt(RD.liveFor(sim), tile)) { dead++; if (firstDead < 0) firstDead = t; }
+			if (R.costAt(f, sim) < 0 || R.costAt(fnd, sim) < 0) cut++;
+		}
+		check(`a ${what} coin stored as collected (${coin}, 'reset' makes it a coin), a 1-coin door (${door}) and the trophy: holding right finishes, every state of it live in its room (roomDead) and finite`,
+			!!ev && ev.deaths === 0 && n > 20 && dead === 0 && cut === 0,
+			`${ev ? `${ev.ms.length} ticks, ${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; ${n} states, ${dead} not live${firstDead >= 0 ? ` (first at tick ${firstDead})` : ''}, ${cut} cut off`);
+		// the one search itself (coarse cells: above 50 x 50; roomDead on, deaths as moves off: nothing kills): a route
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reachH-'));
+		const file = path.join(dir, `stored${coin}.eelvl`);
+		fs.writeFileSync(file, buf);
+		let found = null, start = null, err = '';
+		try {
+			const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), file, '--seconds=20', '--workers=1', '--first=1', '--mem=200'], { encoding: 'utf8', timeout: 60000 });
+			for (const line of out.split('\n')) {
+				if (!line.startsWith('{')) continue;
+				const e = JSON.parse(line);
+				if (e.ev === 'start') start = e;
+				if (e.ev === 'result' && e.kind === 'finish' && !found) found = e;
+			}
+		} catch (e) { err = e.message.slice(0, 200); }
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* in use */ }
+		const rep = found ? C.evaluate(L, Uint8Array.from(found.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31)) : null;
+		check(`the one search on it (goexplore.js, 1 worker, roomDead on): a route, replayed`, !!start && start.cells === 'coarse' && start.deathMoves === false && !!rep && rep.deaths === 0,
+			`${found ? `${found.ticks} ticks after ${found.sec} s, replayed ${rep ? `${rep.runTicks} run ticks` : 'NO FINISH'}` : `no route${err ? ` (${err})` : ''}`}; cells ${start && start.cells}, deaths as moves ${start && start.deathMoves}`);
+	}
+}
 /** the room-aware dead ends (goexplore.js roomDead, --roomDead): random rooms of coin / switch / key / team doors and
  *  gates, their triggers, spikes, protection, time doors, portals; states of random runs on a tile that is not live in
  *  their room, each checked by a bounded exhaustive search from it (1 px / 1/8 px/tick cells): it never finishes and never
@@ -860,7 +916,7 @@ function trapLevel() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
-	if (want('H')) { sectionH(); roomDeadFuzz(); }
+	if (want('H')) { sectionH(); storedCoinDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

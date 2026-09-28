@@ -1036,14 +1036,17 @@ async function cpuSection() {
 	// route here, 416 ticks, after 8,163 simulated ticks
 	check('coarse cells pick like the research prototype where every room opens territory: the first route 416 ticks after 8,163 simulated ticks (seed 3)',
 		k1.results.length > 0 && k1.results[0].ticks === 416 && k1.results[0].simTicks === 8163, `${k1.results.length ? `${k1.results[0].ticks}@${k1.results[0].simTicks}` : 'no route'}`);
-	// the speed cells (--spd, coarse cells): a 60 x 50 level whose trophy stands behind a 5-coin door and no coin exists:
-	// the search stalls at the door, so after --spd seconds without progress the frontier room gets the fastest arrival's
-	// cells next to the earliest (EEAT_SPDLOG records the flag); --spd=0 never flags; neither finds a route (the door never
-	// opens: the flags add cells, they never let a state through). --roomDead=0: the room dead ends (dead-end-traps) prove
-	// this start a dead end (no coin to open the door: the whole room is cut at once, 1 cell), and the stall is the point
+	// the speed cells (--spd, coarse cells): a 60 x 50 level whose trophy stands behind a 5-coin door, the level's 5 coins
+	// behind it too: the search stalls at the door, so after --spd seconds without progress the frontier room gets the
+	// fastest arrival's cells next to the earliest (EEAT_SPDLOG records the flag); --spd=0 never flags; neither finds a route
+	// (the door never opens: the flags add cells, they never let a state through). --roomDead=0: the room dead ends
+	// (dead-end-traps) prove this start a dead end (no coin on its side: the whole room is cut at once, 1 cell), and the
+	// stall is the point. (The coins exist: with none, the reach field's never-open coin doors (reach.js neverOpenDoors,
+	// hx-int-1) make the door a wall, the start is cut off and the search ends at once: sound, but no stall either)
 	const sd = room(60, 50);
 	for (let y = 1; y < 49; y++) sd.push([30, y, 43, 5]);
 	for (let x = 5; x < 28; x += 4) sd.push([x, 44 - (x % 8), 9]);
+	for (let x = 40; x < 45; x++) sd.push([x, 30, 100]);
 	sd.push([3, 48, 255], [50, 48, 121]);
 	const sdFile = path.join(HOME, 'spdstall.eelvl');
 	fs.writeFileSync(sdFile, ED.eelvlOf({ name: 'speed cells stall', width: 60, height: 50, cells: sd }));

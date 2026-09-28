@@ -776,7 +776,12 @@ function roomFields(L, budget) {
  * (the doors' states and protection), the least recently used dropped beyond `budget` bytes.
  */
 const KEEP_DOORS = new Set([43, 165, 213, 214, 184, 185, 1079, 1080, 1094, 1095, 1152, 1153, 1027, 1028, 23, 24, 25, 1005, 1006, 1007]);
-const TRIGGER_IDS = new Set([5, 121, 113, 1619, 467, 1620, 6, 7, 8, 408, 409, 410, 100, 101, 119, 369, 416, 1585, 368, 417, 418, 419, 420, 421, 422, 423, 453, 461, 1517,
+// (the coins as the FILE stores them: 100 / 101, and 110 / 111 = collected coins saved in the level, which the default
+// start ('reset': eeo-tas /reset, World.resetCoins, eesim.js _resetCoinTiles) turns back into 100 / 101 coins that count
+// for coin doors; without 110 / 111 here a 60 x 50 level with one 110 coin before a 1-coin door and the trophy cut its
+// start as a dead end and lost its 161-tick route (the wq-int-1 review, 2026-09-28; test/reach.js H). In the 'load'
+// start they stay collected: then a trigger that changes nothing, which is only over-inclusive, as sound as before)
+const TRIGGER_IDS = new Set([5, 121, 113, 1619, 467, 1620, 6, 7, 8, 408, 409, 410, 100, 101, 110, 111, 119, 369, 416, 1585, 368, 417, 418, 419, 420, 421, 422, 423, 453, 461, 1517,
 	1584, 1618, ...EL.NPC_IDS]);
 function roomDead(L, budget) {
 	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
@@ -1584,7 +1589,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dTicks, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, deadCut, spdOn, spdFlags, spdPeak }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -3146,7 +3151,8 @@ async function main() {
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
-			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0 } : {});
+			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0,
+				roomDead: !!d.roomDead, deadCut: d.deadCut || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
