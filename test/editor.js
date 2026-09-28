@@ -39,7 +39,8 @@
 //              from the nearest attempt 60 ticks back routes, on half the workers (the stalled search parks the rest and
 //              gets them back), its attempts into the stalled search's archive; the rotation: a nearest attempt in a pit (the
 //              first escape ends there), the next from 600 ticks back routes; the frontier (a short nearest attempt by the
-//              spawn: the escape starts from a room's long attempt); escape: false = none
+//              spawn: the escape starts from a room's long attempt); the retarget (that escape stays while nothing gets
+//              nearer, and gives way once the search gets clearly nearer after its start); escape: false = none
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
@@ -1789,6 +1790,7 @@ const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 say({ ev: 'start', workers: 4, seeds: [1, 2, 3, 4], mode: 'physics', cells: 'coarse', startCost: 40 });
 setTimeout(() => say({ ev: 'closest', dist: SC.dist, tick: SC.attempt.length, inputs: SC.attempt }), 200);
 if (SC.source) setTimeout(() => say({ ev: 'source', kind: 'room', room: 777, desc: 'coins=1', gain: 5, tick: SC.source.length, dist: SC.dist + 20, inputs: SC.source }), 300);
+if (SC.later) setTimeout(() => say({ ev: 'closest', dist: SC.later.dist, tick: SC.later.attempt.length, inputs: SC.later.attempt }), SC.later.at);
 const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: SC.dist, found: 0, refined: 0, workers: 4, rooms: 1 }), 300);
 const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
 let buf = '';
@@ -1801,6 +1803,15 @@ process.stdin.on('data', (d) => {
 		if (line === 'stop') end();
 	}
 });
+process.stdin.on('end', end);
+`;
+// A stand-in for an escape that never gets anywhere (no attempt, no room): the retarget alone decides when it goes
+const FAKE_ESC_IDLE = `'use strict';
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 2, seeds: [1001, 1002], mode: 'physics', cells: 'coarse', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 1, tick: 1, states: 1, ticks: 1000, ticksPerSec: 1000, picks: 1, found: 0, refined: 0, workers: 2, rooms: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 1, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/(^|\\n)stop(\\n|$)/.test(String(d))) end(); });
 process.stdin.on('end', end);
 `;
 async function escapeSection() {
@@ -1881,6 +1892,32 @@ async function escapeSection() {
 	check('the frontier: no escape from a short nearest attempt by the spawn (under half the longest attempt): it starts from the room\'s long attempt 60 ticks back, and routes',
 		!!res4 && res4.inputs.startsWith(str(s4.subarray(0, s4.length - 60))) && (r4.st.log || []).some((l) => /from tick 95 of room "coins=1"'s nearest attempt/.test(l)),
 		res4 ? `${res4.time}; ${(r4.st.log || []).filter((l) => /escape/.test(l)).slice(0, 1).join(' | ')}` : `no route (${r4.st.stage}); ${(r4.st.log || []).slice(-3).join(' | ')}`);
+	// (3b) the retarget (the soundness review's repro, 2026-09-28): the frontier's escape from the room's attempt (its start
+	// 25 tiles out, the nearest attempt a short one by the spawn at 5 tiles all along) is not sent away as "left behind"
+	// while nothing gets nearer (before: after the retarget clock, 1 s here, every such escape went); once the search gets
+	// clearly nearer after its start (a 1-tile attempt at 12 s) the next one starts from there. The escape a stand-in that
+	// never gets anywhere, its own stall clock 60 s
+	const fakeEsc = path.join(HOME, 'fake-esc-idle.js');
+	fs.writeFileSync(fakeEsc, FAKE_ESC_IDLE);
+	const s5 = run([[0, 60], [4, 95], [0, 40]]);
+	const sc5 = path.join(HOME, 'esc_retarget.json');
+	fs.writeFileSync(sc5, JSON.stringify({ attempt: str(a4), dist: 5, stdinLog: path.join(HOME, 'esc_retarget_stdin.log'), source: str(s4), later: { at: 12000, attempt: str(s5), dist: 1 } }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
+		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1 });
+	const t5 = Date.now();
+	let st5 = ED.state(), away5 = null;
+	while (st5.running && Date.now() - t5 < 35000 && !(st5.escape && st5.escape.runs >= 2)) {
+		await new Promise((z) => setTimeout(z, 100));
+		st5 = ED.state();
+		if (away5 === null && (st5.log || []).some((l) => /clearly nearer elsewhere/.test(l))) away5 = (Date.now() - t5) / 1000;
+	}
+	const log5 = (st5.log || []).filter((l) => /escape/.test(l));
+	ED.stop();
+	while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+	check('the retarget: an escape from a room\'s attempt keeps going while the nearest attempt (nearer than its start all along) stays; the search clearly nearer after its start (12 s): the next one from there',
+		away5 !== null && away5 >= 12 && !!st5.escape && st5.escape.runs === 2 && log5.some((l) => /escape: a fresh one search from the nearest attempt 1: .*from tick 95 of room "coins=1"'s nearest attempt/.test(l)) &&
+		log5.some((l) => /escape: a fresh one search from the nearest attempt 2: .*from tick 135 of the nearest attempt/.test(l)),
+		`sent away after ${away5 === null ? '-' : away5.toFixed(1)} s, ${st5.escape ? st5.escape.runs : 0} escapes; ${log5.slice(-3).join(' | ')}`);
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));

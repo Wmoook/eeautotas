@@ -1503,10 +1503,12 @@ function precEvent(V, ev) {
 // frontier: ESC_FRONT of the longest attempt the search holds or more); each start once a search;
 // so does an escape the rest of the search left behind (its nearest attempt clearly nearer: ESC_RETARGET_S).
 // A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
-// none (tests: test.escape === true; test.escWait / escStall / escMin: its clocks in s).
+// none (tests: test.escape === true; test.escWait / escStall / escMin / escRetarget: its clocks in s).
 const ESC_WAIT_S = 180, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
 // (an escape the rest of the search has left behind: the nearest attempt clearly nearer (3 tiles or 10%, the relay's rule)
-// than the escape's start and its own nearest, ESC_RETARGET_S after its start at least: the next one from there)
+// than the escape's start, its own nearest and the search's nearest when it started (near0: an escape from a room's attempt
+// starts farther out than the nearest attempt by design, and before near0 every such escape was sent away after 60 s),
+// ESC_RETARGET_S after its start at least: the next one from there)
 const ESC_RETARGET_S = 60;
 // (the frontier: an escape starts only from ESC_FRONT or more of the longest attempt the search holds. Measured: n2-int
 // Good Egg seed 1 with the escape, 2026-09-28: its nearest attempt by the steer field was a 182-tick dead end by the start
@@ -1564,9 +1566,11 @@ function escKick() {
 			note(`${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${esc.stall} s: the next one`);
 			esc.next = true;
 			halt(kids[n], 'escstall');
-		} else if (R && !kids[n].stopWhy && c && !c.cut && c.strategy !== V.label && now - R.t0 >= ESC_RETARGET_S * 1000 &&
-			c.dist < Math.min(R.best, R.start.dist) - Math.max(3, 0.1 * Math.min(R.best, R.start.dist))) {
-			// (the others got clearly nearer than this escape ever did (its start included): the next one from there)
+		} else if (R && !kids[n].stopWhy && c && !c.cut && c.strategy !== V.label && now - R.t0 >= esc.retarget * 1000 &&
+			c.dist < Math.min(R.best, R.start.dist, R.near0) - Math.max(3, 0.1 * Math.min(R.best, R.start.dist, R.near0))) {
+			// (the others got clearly nearer than this escape ever did (its start included) and than the search's nearest
+			// attempt when it started (near0): an escape from a room's attempt (the rotation, the frontier) is not sent away
+			// after 60 s only because the nearest attempt, which it did not start from, was nearer all along)
 			note(`${V.label}: the search got clearly nearer elsewhere (${c.tiles} tiles, ${c.strategy}): the next one from there`);
 			esc.next = true;
 			halt(kids[n], 'escstall');
@@ -1591,14 +1595,16 @@ function escLaunch(n, st) {
 	const file = path.join(dir(), `escape_${esc.runs}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(st.inputs, 'latin1')); } catch (e) { esc.at = Date.now(); return; }
 	// the CPU: ESC_CPU of the one search's workers (it parks as many), at least one each
-	const W = cur.opts.workers, E = Math.max(1, Math.floor(W * ESC_CPU)), keep = Math.max(1, W - E);
+	// (W: the one search's workers as goexplore.js runs them: it takes at most 64, so a 192-thread box's W parks some too)
+	const W = Math.max(1, Math.min(64, cur.opts.workers || 1)), E = Math.max(1, Math.floor(W * ESC_CPU)), keep = Math.max(1, W - E);
 	const mainCh = k >= 0 ? kids[k] : null;
 	if (alive(mainCh) && mainCh.stdin && !mainCh.stdin.destroyed && keep < W) { try { mainCh.stdin.write(`workers ${keep}\n`); } catch (e) { /* gone */ } }
 	// (its own work folder for the bursts, fresh: the steer files of an earlier escape's level must not steer it)
 	const work = path.join(dir(), ESC_WORK);
 	try { fs.rmSync(work, { recursive: true, force: true }); } catch (e) { /* none */ }
 	V.esc = { file, keep: st.inputs.length, workers: E, seed: ((cur.opts.seed || 1) + 1000 * esc.runs) >>> 0, work, what: st.what };
-	esc.run = { t0: Date.now(), progAt: Date.now(), best: Infinity, start: st, mainKeep: keep };
+	// (near0: the search's nearest attempt when it starts, for the retarget: escKick)
+	esc.run = { t0: Date.now(), progAt: Date.now(), best: Infinity, start: st, mainKeep: keep, near0: S.closest && !S.closest.cut ? S.closest.dist : Infinity };
 	if (S.escape) S.escape = Object.assign(S.escape, { runs: esc.runs, run: { n: esc.runs, from: st.what, ticks: st.inputs.length, tiles: Math.round(st.dist * 10) / 10, workers: E, after: Math.round((Date.now() - S.started) / 100) / 10 } });
 	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.wait} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${E} of the ${W} CPU workers`);
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
@@ -1901,7 +1907,7 @@ function start(b, gpu, test) {
 	S.precision = which.includes('precision') ? { runs: 0, last: null } : null;
 	// (the stall escape's clock and rotation; tests: its clocks in s)
 	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : ESC_WAIT_S, stall: test && test.escStall ? test.escStall : ESC_STALL_S, min: test && test.escMin !== undefined ? test.escMin : ESC_MIN_S,
-		runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null };
+		retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null };
 	closestRoom = null;
 	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
