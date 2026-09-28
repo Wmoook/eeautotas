@@ -2674,12 +2674,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const v = rspAt.get(rspRoom() * 2097152 + centreTile());
 		if (v !== undefined && v <= tR) { dDrop++; return; }
 		let rm = room;
-		// (--dom=1: no death is kept into a dominated room: a room of the same class with more mono switches on holds
-		// everything it can reach; before it, Good Egg's hour from the level alone kept deaths back to the checkpoint
-		// (139, 143) in each of ~100 K switch-subset rooms, every one with a discovery burst)
+		// (--dom=1: a death kept into a dominated room gets no discovery burst: before it, Good Egg's hour from the
+		// level alone kept deaths back to the checkpoint (139, 143) in each of ~100 K switch-subset rooms, every one with
+		// a discovery burst; the death itself is kept as main keeps it: dominance only orders (an open door is no floor:
+		// the ge-int-1 soundness review's level needs a death into a room with FEWER mono switches on, and dropping it
+		// lost the only route))
+		let domDeath = false;
 		if (DOM !== null && coarse) {
 			const r = roomKey === room.key ? room : rooms.get(roomKey);
-			if (r !== undefined ? domOf(r) : groupNow().dom) { dDom++; dDrop++; return; }
+			if (r !== undefined ? domOf(r) : groupNow().dom) { dDom++; domDeath = true; }
 		}
 		if (coarse && roomKey !== room.key) {
 			const r = rooms.get(roomKey);
@@ -2698,7 +2701,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (nc === null) return;
 		dCells++;
 		if (rm !== null && rm.isNew) firstCell(rm, nc, tR);
-		else if (coarse && a.burst > 0 && a.dburst !== 0) discovery.push([nc, a.burst]);
+		else if (coarse && a.burst > 0 && a.dburst !== 0 && !domDeath) discovery.push([nc, a.burst]);
 	};
 	/** the plan past its count (the editor's `steer <file>`, src/editor.js pastPlan): head A's steer heap from now on by
 	 *  that field with the coin DP's value first (dpFirst: its layer fields count a coin at every touch, so they reach the
