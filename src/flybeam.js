@@ -28,6 +28,7 @@
 //   [--state=<file> (a pass continued across calls: the next start by tick + state hash)] [--cfg=<json list of setting
 //   overrides: each start runs every one>] [--out=<file.eetas> (written only when judged faster)] [--json=<file>]
 //   [--debug=<every N layers>] [--axes=1 (diagnostic: children whose x or y state alone equals a later run state)]
+//   [--carry=M (a task's end inside a contact-free stretch moves to the stretch's end, at most M ticks later)]
 //   [--axisTails=P (per layer the P children most ahead whose y state alone equals a later run state play the run's y
 //   inputs from there with 4 x-input patterns: the per-axis join; default 0)]
 //   [--order=stretch (with --starts: the starts by their longest low-contact stretch first; --state then keeps the starts done;
@@ -433,7 +434,18 @@ async function main() {
 	const STRETCH = a.order === 'stretch' && every > 0 && !a.startList;
 	let stateH = null, doneH = null;
 	const taskKey = (h, ci) => `${h}|${JSON.stringify(cfgs[ci])}`;
-	const trace = a.state || STRETCH ? traceRun(level, ms.slice(0, n), a.nocoins === '1') : null;
+	const CARRY = Math.max(0, num('carry', 0));
+	const trace = a.state || STRETCH || CARRY ? traceRun(level, ms.slice(0, n), a.nocoins === '1') : null;
+	// --carry=M: a task's end (B + ext) inside a contact-free stretch of the run moves to that stretch's end (the first
+	// tick after it with a contact: ground, a wall or ceiling stop) + 25, at most M ticks later: faster lines re-merge
+	// where the run's line is absorbed (Infinity Pain's shaft joins all land at tick 34365 of the 39,410 run, past the
+	// B + ext of every start before 33100: 0 joins from 32700 / 33000 at ext 1200; 32627 -121 when searched to 36133)
+	const endOf = (e) => {
+		if (!CARRY || e >= n) return Math.min(n, e);
+		let t = e;
+		while (t < n && t < e + CARRY && !trace.K[t]) t++;
+		return Math.min(n, t + 25);
+	};
 	if (a.state) {
 		const st = C.readJSON(a.state, null);
 		stateH = trace.H;
@@ -475,7 +487,9 @@ async function main() {
 	}
 	for (const A of starts) for (let ci = 0; ci < cfgs.length; ci++) {
 		if (doneH && doneH.has(taskKey(trace.H[A], ci))) continue;
-		tasks.push(Object.assign({}, base, cfgs[ci], { A, B: every > 0 && a.toEnd !== '1' ? Math.min(to, A + every) : to, name: `A${A}c${ci}`, cfg: ci }));
+		const B = every > 0 && a.toEnd !== '1' ? Math.min(to, A + every) : to;
+		const ext = CARRY ? endOf(B + (cfgs[ci].ext !== undefined ? cfgs[ci].ext : base.ext)) - B : undefined;
+		tasks.push(Object.assign({}, base, cfgs[ci], { A, B, name: `A${A}c${ci}`, cfg: ci }, ext !== undefined ? { ext } : {}));
 	}
 	// the time budget: --seconds (all tasks) and --deadline (ms since the epoch): no task starts past it, and each gets at
 	// most what is left
