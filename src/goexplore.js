@@ -251,7 +251,7 @@ const WAY_PICK = 40;
 // head L refines the new way at its full share (0: only head L's own routes, as before)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, planEvery: 3, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, planEvery: 3, deaths: 1, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -259,7 +259,9 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
 const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', ...GPU_STRINGS]);
-const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
+const CHUNK = 16;
+// the death warp's wait at most (ticks): EE's respawn comes 54 ticks after a death (--deaths)
+const DEATH_MAX = 120;   // picks between two looks at the clock, the shared bound and the stop flag
 /** the process's CPU seconds so far (user + system, every thread) */
 const cpuSec = () => { const u = process.cpuUsage(); return Math.round((u.user + u.system) / 1e5) / 10; };
 // memory: what each piece of a worker's archive costs on the V8 heap (bytes; measured with node --expose-gc on Node 20
@@ -1097,10 +1099,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (rc < 0) end = 'unreachable';
 	}
 	let ticks = 0, lastProgress = 0, refined = 0, minRc = Infinity, imports = 0, importAdded = 0, seeded = 0, seedCells = 0;
+	// (the death warps: deaths a run went on through to the respawn (--deaths); warpT: per room and respawn point the
+	// earliest death that became a cell)
+	let warps = 0, warpCells = 0;
+	const warpT = new Map();
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, warps, warpCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1471,7 +1477,46 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						if (a.first) end = 'finish';
 						break;
 					}
-					if (sim.is_dead) break;
+					if (sim.is_dead) {
+						// the death warp (--deaths=1): the ball comes back DEATH ticks later at the checkpoint touched last (else a
+						// spawn point), with its coins, switches and keys: a move no run made before (every run ended at a death).
+						// Good Egg's known route dies on purpose at its tick 3,364 to come back at the checkpoint (107, 52); from its
+						// state before the death the CPU runs never reached coin 13 in 20 M ticks, from the state after the respawn
+						// they routed in 0.46 M. The run goes on idle to the respawn (a block of its own: its inputs so far + the idle
+						// ticks, counted in the budget like an imported run's) and the respawned state is a cell; only a death earlier
+						// than the last one of its room and respawn point is played through (warpT)
+						if (!a.deaths || t >= maxT) break;
+						const wk = `${room !== null ? room.key : ''}|${sim.checkpoint.x},${sim.checkpoint.y}`;
+						const w0 = warpT.get(wk);
+						if (w0 !== undefined && w0 <= t) break;
+						warpT.set(wk, t);
+						const n0 = s + 1;
+						let k = 0;
+						E.applyMask(inp, 0);
+						while (sim.is_dead && k < DEATH_MAX) { sim.tick(inp); ticks++; k++; }
+						if (sim.is_dead || t + k >= maxT) break;
+						warps++;
+						const b2 = new Uint8Array(n0 + k);
+						b2.set(buf.subarray(o, o + n0));
+						const blk2 = { b: b2, refs: 0, x: b2.length };
+						const rc2 = costOf();
+						if (rc2 < 0) break;
+						let room2 = room;
+						if (coarse) {
+							roomKey = RM.key(sim);
+							if (roomKey !== room.key) {
+								const r2 = rooms.get(roomKey);
+								if (r2 !== undefined) room2 = r2;
+								else if (roomFor()) room2 = newRoom(roomKey, t + k, room.key);
+								else { full = true; needSweep = true; break; }
+							}
+						}
+						const nc2 = add(t + k, rc2, e, up, blk2, 0, n0 + k, room2);
+						// (a new place of the room: head C's discovery picks, as a new room's first cell gets: the steer field saw the
+						// respawn point (107, 52) at the pre-death area's cost, 318 tiles, and head A never picked it in 20 M ticks)
+						if (nc2 !== null) { warpCells++; if (room2 !== null && room2.isNew) firstCell(room2, nc2, t + k); else if (a.burst > 0) { discovery.push([nc2, a.burst]); bursts++; } }
+						break;
+					}
 					const rc = costOf();
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
@@ -2131,7 +2176,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}, total('warps') ? { warps: total('warps'), warpCells: total('warpCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -2296,7 +2341,7 @@ async function main() {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
-				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
+				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, warps: d.warps || 0, warpCells: d.warpCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0 } : {});
 		}) });
