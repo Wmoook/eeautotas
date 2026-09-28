@@ -219,10 +219,11 @@
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run; never with deaths as moves: a death can take the ball out of a dead end; 0: off)]
 //        (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
-//        [--useful=1 (coarse cells: the useful territory, see USEFUL TERRITORY: cells in a cul-de-sac of their room or off
-//        its band demoted, a room whose territory gain is all off the band gets gain 0, a death kept as the earliest arrival
-//        not into a cul-de-sac; the progress and done events carry "useful": {culPicks, culCells, zeroed
-//        (rooms), culSets, culDropped}, "deaths" "useless"; 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
+//        [--useful=1 (coarse cells: the useful territory, see USEFUL TERRITORY: cells in a cul-de-sac of their room
+//        demoted (head A: CUL_A tiles more; head B: only when its sample holds no other cell), a room whose territory gain
+//        is all off the band gets gain 0, a death kept as the earliest arrival not into a cul-de-sac; the progress and
+//        done events carry "useful": {culPicks, culCells, zeroed (rooms), culSets, culDropped, reculs}, "deaths"
+//        "useless"; 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
@@ -669,16 +670,18 @@ function roomOf(L) {
 // whose portal leads back to the hub (a loop, no cul-de-sac); the walk is gravity-blind, so a physical way (a ramp for a
 // shaft) may be off it too.
 //   Cells in a cul-de-sac of their room (c.u = 2) are DEMOTED, never pruned (the reach field's -1 stays the only prune):
-// CUL_A more tiles in head A's priority, head B's weight divided by CUL_B, no nearest attempt, no source, no room's
-// lowest-cost cell and no burst start while another cell is. (The known TASes spend 0-0.6% of their ticks in a cul-de-sac of
-// their room, 0.7-22% off its band: FV 17%, NC Naos 22%: the band is no ground to demote a cell on.) A room's
+// CUL_A more tiles in head A's priority, no head B pick (its sample's cells), no nearest attempt, no source, no room's
+// lowest-cost cell and no burst start while another cell is (head B: its weight divided by 10 left the Helix viewing
+// boxes 10.9-14.0% of its picks: a fresh box cell outweighed the much-picked cells outside). (The known TASes spend
+// 0-0.6% of their ticks in a cul-de-sac of their room, 0.7-22% off its band: FV 17%, NC Naos 22%: the band is no
+// ground to demote a cell on.) A room's
 // USEFUL GAIN is its territory gain on the band: a room whose useful gain is 0 (the territory it opens is all off the
 // band: a viewing room behind a coin door, a sealed pocket) keeps its raw gain in `graw` and gets gain 0: no novelty
 // weight (head B), no discovery burst (head C), no "room" source at once and no gain for the editor's relay, wall
 // breaker and its stall clock. A death kept only as the earliest arrival (deathPays) must not respawn in a cul-de-sac. A room
 // entered again at one of its cul-de-sac tiles (a run, an import, a seed: the clock's rooms, time doors and keys running
 // out, are entered wherever the ball is) gets its cul-de-sacs again with its entries as terminals (reentry, REENTRY_MAX).
-const CUL_A = 2000, CUL_B = 10, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
+const CUL_A = 2000, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
 /**
  * roomUseful(L) -> {of(sim, band, extra) -> {cul, off, targets, walked}}: the useful territory of the room the live state
  * is in, from its tile (see USEFUL TERRITORY above): cul / off bitsets (a bit per tile; null when no tile is in one), off
@@ -1916,13 +1919,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		}
 		if (br === null) return popA();
 		const arr = br.arr;
-		let bc = null, bs = -1;
+		let bc = null, bs = -1, bu = false;
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
-			// (a cell in a cul-de-sac of its room or off its band: CUL_B times less, see USEFUL TERRITORY)
-			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1) / (c.u === 2 ? CUL_B : 1);
-			if (sc > bs) { bs = sc; bc = c; }
+			// (a cell in a cul-de-sac of its room loses to any cell outside one: see USEFUL TERRITORY)
+			const sc = (1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1), cu = c.u === 2;
+			if (bc === null || (bu && !cu) || (bu === cu && sc > bs)) { bs = sc; bc = c; bu = cu; }
 		}
 		return bc || popA();
 	};
@@ -3453,4 +3456,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, roomFields, roomUseful, bitAt, CUL_A, CUL_B, roomDead, liveAt, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
