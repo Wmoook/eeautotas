@@ -793,6 +793,15 @@ async function passesSection() {
 	// the others' GPU slice between two breaker runs: a quarter of the run's search time, at most 5 s
 	check("the wall breaker's slices: the others get 1/4 of a run's search time before its next run, at most 5 s",
 		[0, 1000, 12000, 20000, 60000].map(ED.breakSliceMs).join() === '0,250,3000,5000,5000', [0, 1000, 12000, 20000, 60000].map(ED.breakSliceMs).join());
+	// the round's idle end (night 2 cycle 2, EX Crew: a 302-s round with nothing nearer and no new room): 60 s from its
+	// start, its last progress or its last new gate; and a round waits for the one search's bursts to try the stall
+	{
+		const idle = [ED.breakRoundLeft({ t0: 0 }, 50000, 300, true, 60), ED.breakRoundLeft({ t0: 0, progAt: 100000 }, 130000, 300, true, 60),
+			ED.breakRoundLeft({ t0: 0, clock: 200000, progAt: 100000 }, 230000, 300, true, 60), ED.breakRoundLeft({ t0: 0, progAt: 100000 }, 130000, 300, true, 0)];
+		const go = [[90, 90, 8], [90, 90, 7], [179, 90, 0], [180, 90, 0], [90, 90, null], [89, 90, 20]].map(([w, t, b]) => ED.breakBurstsDone(w, t, b));
+		check("the wall breaker's idle end: a round ends 60 s after its start, its last progress or its last new gate (off: the old clocks); a round starts once the bursts made 8 since the last progress, or after 2 x the wait",
+			idle.join() === '10,30,30,170' && go.join() === 'true,false,false,true,true,false', `idle ${idle.join()}; go ${go.join()}`);
+	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
