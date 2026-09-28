@@ -1481,8 +1481,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						break;
 					}
 					if (sim.is_dead) {
-						// the death warp (--deaths=1): the ball comes back DEATH ticks later at the checkpoint touched last (else a
-						// spawn point), with its coins, switches and keys: a move no run made before (every run ended at a death).
+						// the death warp (--deaths=1): the ball comes back 54 ticks later at the checkpoint touched last (without one:
+						// a spawn point), with its coins, switches and keys: a move no run made before (every run ended at a death).
 						// Good Egg's known route dies on purpose at its tick 3,364 to come back at the checkpoint (107, 52); from its
 						// state before the death the CPU runs never reached coin 13 in 20 M ticks, from the state after the respawn
 						// they routed in 0.46 M. The run goes on idle to the respawn (a block of its own: its inputs so far + the idle

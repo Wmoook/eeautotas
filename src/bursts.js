@@ -95,14 +95,15 @@ const UNTRIED = 1.5;
 const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
-// the plan arm (goexplore.js --planEvery=k, off by default: no gain measured, n2_3_good_egg.md): on a level whose steer field has the coin DP (a coin door
-// the walk plan must pass), every k-th burst goes to the coin plan's FRONTIER: the room of the one search's nearest
-// attempt (by the steer field its DP value falls with every coin of the plan) while it holds fewer coins than the door
-// needs, aimed at the plan's next gate (steer.js nextGate from that attempt's state: the missing coin of the door that
-// cannot open yet), re-aimed after every switch (the gate is the plan's, never "tried"): on Good Egg new rooms keep coming
-// (2,214 in 45 min: purple switch sets x coin counts x the time doors) and the untried-first bandit gave the frontier room
-// one burst; every from-scratch run sat at 14 of 17 coins without the three portal-pocket coins
-// ((50, 72) -> (5, 186), each trip changed by a purple switch), the plan's next gate from there (src/out/night/n2_3_good_egg.md)
+// the plan arm (goexplore.js --planEvery=k; OFF by default: no gain measured, src/out/night/n2_3_good_egg.md): on a
+// level whose steer field has the coin DP (a coin door the walk plan must pass), every k-th burst goes to the coin plan's
+// frontier rooms (planPick: the most coins below the door, newest first, PLAN_ROOMS in turn), aimed at the first of the
+// plan's gates (steer.js nextGate's order: leg + rest of the tour) the room's walk reaches, re-aimed in every new room
+// (after each switch: the gate is the plan's, never "tried"). Why: on Good Egg new rooms keep coming (2,214 in 45 min:
+// purple switch sets x coin counts x the time doors) and the untried-first bandit gives a room one burst; every
+// from-scratch run sat at 14 of 17 coins without the three portal-pocket coins ((50, 72) -> (5, 186)). Measured: no gain
+// there (those coins need the death warp, goexplore.js --deaths); starting from the nearest attempt's room (the first
+// version) it never fired: that attempt was a dead end with no leg value
 const PLAN_BACK = [30, 150, 60, 400];
 // (the plan's gates tried per pick: its order's first PLAN_GATES untaken coins, the first the room's walk reaches)
 const PLAN_GATES = 6, PLAN_ROOMS = 4;
