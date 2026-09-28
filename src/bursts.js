@@ -75,6 +75,34 @@ const FINE = [{ cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16, cap: 1048576 }, { cqx: 1, c
 const FINE_TEXT = ['2 px and 1/16', '1 px and 1/32'];
 const WALL = [{ back: 150, fine: 0 }, { back: 400, fine: 0 }, { back: 150, fine: 1 }, { back: 400, fine: 2 }];
 const FINE_NEAR = 8;
+// the fine-y cells (FINE_Y): 4 px across, 1 px up and down, 1/16 px/tick. A climb (chains, vines, ladders, slow dots) or
+// a swim rises 1-2 px a tick, so in 4 px (or coarser) cells a tick's move stays in its cell and the explore drops the child
+// (a cell seen before): Wine Quest I's chain (75, 77..81) out of its stalled 5-coin room: every explore from there ran out
+// of situations at its foot (4 px: 99.5 M states in 5.8 s) or filled its table (2 px and 1 px: 2^29 cells), while these
+// cells climbed it and reached (45, 71) in 9.5 s (then the 6th coin (36, 49) in 11.3 s more). Only on levels with
+// climbables or liquids (`slowY`); the others keep their settings and bandit exactly
+const FINE_Y = { cqx: 0.25, cqv: 16, qy: 1, qvy: 16, cap: 262144 };
+// a target the room's burst chains ended short of REST_AFTER times (a chain = its links; the target it failed at = the
+// untried one nearest the chain's last start by the room's walk) rests: the room's aim field leaves it out until every
+// other untried target rests too (then all come back). The walk is blind to gravity and to up-drafts, so a trigger it
+// reaches may be no target at all from here: Wine Quest I's 5-coin room aimed every burst at the coin (119, 65), 38 walk
+// tiles away through a one-way lid the ball cannot pass from that side (exhaustive at 0.5 px), and never at the 6th
+// coin (36, 49), 100 walk tiles away, that the ball can reach (the explore found it in 21 s with the target given)
+const REST_AFTER = 3;
+const FINE_Y_TEXT = '4 px x 1 px and 1/16';
+/** a level with tiles where the ball rises slowly (climbables, liquids): the fine-y cells are worth a try there */
+function slowYOf(L) {
+	const B = require('./blocks.js');
+	const seen = new Map();
+	for (let i = 0; i < L.fg.length; i++) {
+		const id = L.fg[i];
+		if (!id) continue;
+		let v = seen.get(id);
+		if (v === undefined) { const k = B.kindOf(id).kind; v = k === 'climbable' || k === 'liquid'; seen.set(id, v); }
+		if (v) return true;
+	}
+	return false;
+}
 // (a chain link after a full table: the settings with the next smaller layer cap)
 const GREEDIER = [2, 4, 4, 4, 4, 2];
 // how far back along the start cell's run a burst starts, in turn per room (ticks; never 0: the cell nearest the targets
@@ -169,6 +197,9 @@ function portalsOf(L) {
 function create(o) {
 	const L = o.L, a = o.a, W = L.width, H = L.height, N = W * H;
 	const TR = triggersOf(L), PT = portalsOf(L);
+	// (the settings: CONFS, and FINE_Y last on a level with slow climbs: a.fineY 0 leaves it out, 1 forces it)
+	const slowY = a.fineY === undefined || a.fineY === null ? slowYOf(L) : !!+a.fineY;
+	const CF = slowY ? CONFS.concat([FINE_Y]) : CONFS, GR = slowY ? GREEDIER.concat([CONFS.length]) : GREEDIER, FY = slowY ? CONFS.length : -1;
 	const work = a.work || fs.mkdtempSync(path.join(os.tmpdir(), 'gx-bursts-'));
 	fs.mkdirSync(work, { recursive: true });
 	const bin = path.join(work, 'level.bin');
@@ -185,7 +216,7 @@ function create(o) {
 	const pending = new Map();   // request id -> {replies, want, done}
 	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
 	const trophyArm = { n: 0, y: 0, back: 0 };
-	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
+	const confs = CF.map(() => ({ n: 0, y: 0 }));
 	// the route arm (src/routearm.js; goexplore.js --rArm, a share of the bursts once a route is known): searches from the
 	// route's own states for ways that meet its later points sooner, spliced into verified routes
 	const RA = a.rArm > 0 ? require('./routearm.js').create({ L, field: o.field, tool, bin, fp, work, cacheArgs, a, bound: o.bound, say: o.say,
@@ -197,7 +228,7 @@ function create(o) {
 	 *  want different cells): each once, then its mean reward in the room (the level's mean as a prior worth 2 tries) +
 	 *  CONF_C x sqrt(ln(1 + the room's bursts) / tries) */
 	const pickConf = (r) => {
-		const own = r ? (r.confs || (r.confs = CONFS.map(() => ({ n: 0, y: 0 })))) : confs;
+		const own = r ? (r.confs || (r.confs = CF.map(() => ({ n: 0, y: 0 })))) : confs;
 		let b = 0, bs = -Infinity;
 		const total = own.reduce((x, c) => x + c.n, 0);
 		own.forEach((c, i) => {
@@ -359,9 +390,10 @@ function create(o) {
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
 	const fieldOf = (r) => {
 		// (cached while no trigger of the room was tried since)
-		if (r.fc && r.fc.n === r.tried.size) return r.fc.f;
+		const nk = r.tried.size * 4096 + (r.rest ? r.rest.size : 0);
+		if (r.fc && r.fc.n === nk) return r.fc.f;
 		const f = fieldOf0(r);
-		r.fc = { n: r.tried.size, f };
+		r.fc = { n: nk, f };
 		return f;
 	};
 	const fieldOf0 = (r) => {
@@ -371,7 +403,10 @@ function create(o) {
 		// (its portal arm r.pa); together, Forgotten Veil's coin 4 ranked 14th of the coins=3 room's 17 targets from the
 		// route's entry: every nearer one first, a burst each)
 		const arm = !!r.portal;
-		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm) for (const t of tiles) goals.push(t);
+		const rest = r.rest && r.rest.size ? r.rest : null;
+		// (every untried target resting: they all come back)
+		if (rest) { let live = 0; for (const [c] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !rest.has(c)) live++; if (!live) { rest.clear(); r.fails = new Map(); } }
+		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
 		const n = goals.length;
 		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) goals.push(t);
 		if (!goals.length) return null;
@@ -619,7 +654,7 @@ function create(o) {
 				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
-				job = { lane, r, inputs, conf: ci, cells: CONFS[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
+				job = { lane, r, inputs, conf: ci, cells: CF[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
 					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
@@ -632,7 +667,7 @@ function create(o) {
 				const ci = pickConf(null);
 				// (the steer field, when the editor passes it: the trophy arm's order, the relay's; its ceiling then counts both fields)
 				const d0 = nr.rc >= STEER_MISS ? nr.rc - STEER_MISS : nr.rc;
-				job = { lane, r: null, inputs, conf: ci, cells: CONFS[ci], reach: rf, steer: a.burstSteer || '', slack: Math.min(SLACK_MAX, Math.round(SLACK + SLACK_F * d0)),
+				job = { lane, r: null, inputs, conf: ci, cells: CF[ci], reach: rf, steer: a.burstSteer || '', slack: Math.min(SLACK_MAX, Math.round(SLACK + SLACK_F * d0)),
 					seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
 					startDist: nr.rc, chain: 0, what: `the trophy (the nearest attempt, ${back} back)` };
 			} else { await sleep(1000); continue; }
@@ -679,11 +714,11 @@ function create(o) {
 				// (a table that filled before a target: the next link greedier, a smaller layer (CONFS' caps 1 M -> 64 K -> 16 K);
 				// Infinity Pain's wall: 4 px / 1/16 px/tick with 1 M states a layer filled its table 33 tiles short three times
 				// in a row, where 64 K and 16 K passed from the route's own states 150 and 400 ticks back)
-				const ci2 = r.end === 'full' ? GREEDIER[job.conf] : job.conf;
+				const ci2 = r.end === 'full' ? GR[job.conf] : job.conf;
 				// (a link after finer cells keeps them unless its table filled)
 				const keep = job.fine && r.end !== 'full';
 				next = Object.assign({}, job, { inputs, startDist: r.near, slack: Math.min(job.r ? Infinity : SLACK_MAX, Math.round(SLACK + SLACK_F * r.near)), chain: c, conf: ci2,
-					cells: keep ? job.cells : CONFS[ci2], fine: keep ? job.fine : 0,
+					cells: keep ? job.cells : CF[ci2], fine: keep ? job.fine : 0,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '').replace(/settings \d+/, `settings ${ci2}`)}${keep ? ` · finer ${FINE_TEXT[job.fine - 1]}` : ''} · chain ${c}${back ? ` (${back} back)` : ''}` });
 				st.chained++;
 			} else if (job.r && !r.reached && r.end === 'exhausted' && Number.isFinite(r.near) && r.near <= FINE_NEAR && (job.wall || 0) < WALL.length && job.chain < CHAIN_MAX) {
@@ -693,8 +728,56 @@ function create(o) {
 				next = Object.assign({}, job, { inputs, from0: from, chain: job.chain + 1, wall: k + 1, fine: w.fine, cells: w.fine ? FINE[w.fine - 1] : job.cells,
 					what: `${job.what.replace(/ · (chain|finer|wall) .*$/, '')} · wall ${w.back} back${w.fine ? `, ${FINE_TEXT[w.fine - 1]}` : ''}` });
 				st.fine++;
+			} else if (FY >= 0 && job.r && !r.reached && r.end === 'exhausted' && job.conf !== FY && !job.fineY && job.chain < CHAIN_MAX) {
+				// every situation tried far from the targets (the wall ladder's case is near them): coarse cells may have cut a
+				// slow climb (FINE_Y): the same start again in fine-y cells, once a chain
+				next = Object.assign({}, job, { chain: job.chain + 1, conf: FY, cells: FINE_Y, fineY: 1, fine: 0,
+					what: `${job.what.replace(/ · (chain|finer|wall|fine-y) .*$/, '').replace(/settings \d+/, `settings ${FY}`)} · fine-y (${FINE_Y_TEXT})` });
+				st.fine++;
 			}
+			// (a chain that ended short of its targets: a failure of the target nearest its last start; REST_AFTER of them rest it)
+			if (!next && job.r && !r.reached) failAt(job);
 		}
+	};
+	/** the untried target (component) nearest the end of job's inputs by the room's walk: one more failure of it */
+	const failAt = (job) => {
+		try {
+			const rr = job.r.base || job.r, arm = !!job.r.portal;
+			const I = rr.info;
+			if (!I) return;
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			for (let k = 0; k < job.inputs.length; k++) { E.applyMask(inp, (job.inputs.charCodeAt(k) - 48) & 31); sim.tick(inp); }
+			const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
+			const goal = new Map();
+			for (const [c, tiles] of I.comps) if (!job.r.tried.has(c) && I.pOnly.has(c) === arm && !(job.r.rest && job.r.rest.has(c))) for (const t of tiles) goal.set(t, c);
+			if (!goal.size) return;
+			const seen = new Uint8Array(N), q = new Int32Array(N);
+			let qh = 0, qt = 0, hit = -1;
+			seen[s0] = 1; q[qt++] = s0;
+			while (qh < qt && hit < 0) {
+				const t = q[qh++];
+				if (goal.has(t)) { hit = goal.get(t); break; }
+				const x = t % W, y = (t / W) | 0;
+				const ex = PT.exits.get(t);
+				if (ex) for (const e of ex) if (!seen[e] && I.pass[e]) { seen[e] = 1; q[qt++] = e; }
+				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (seen[j] || !I.pass[j]) continue;
+					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
+					seen[j] = 1; q[qt++] = j;
+				}
+			}
+			if (hit < 0) return;
+			const R = job.r;
+			if (!R.fails) R.fails = new Map();
+			const n = (R.fails.get(hit) || 0) + 1;
+			R.fails.set(hit, n);
+			if (n >= REST_AFTER) { if (!R.rest) R.rest = new Set(); R.rest.add(hit); R.fails.set(hit, 0); st.rested = (st.rested || 0) + 1; }
+		} catch (e) { /* a record only */ }
 	};
 	return {
 		room, edge, triggers: TR.n,
@@ -713,4 +796,4 @@ function create(o) {
 	};
 }
 
-module.exports = { create, triggersOf, portalsOf, CONFS };
+module.exports = { create, triggersOf, portalsOf, CONFS, FINE_Y, slowYOf };

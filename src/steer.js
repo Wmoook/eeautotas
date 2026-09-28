@@ -156,13 +156,17 @@ function analyze(level, opts) {
 			for (const j of list) { if (!portalSrcOf.has(j)) portalSrcOf.set(j, []); portalSrcOf.get(j).push(i); }
 		}
 	}
+	// forced portals (reach.js opts.portalForced): a portal tile with exits, not itself an exit, whose target is another id:
+	// the ball entering it is teleported, so the walk model leaves it only through its exits
+	const forcedP = new Uint8Array(N);
+	for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!portalSrcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 	// one-way platforms: the pass direction (0 left, 1 up, 2 right, 3 down); the walk model blocks the entry against it
 	const oneWay = new Int8Array(N).fill(-1);
 	for (let i = 0; i < N; i++) { const f = fl(fg[i]); if ((f & F_JUMPTHRU) === 0 || cls[i] !== 2) continue; oneWay[i] = (f & F_ROTHALF) ? (lk[i] & 3) : 1; }
 	const specialAt = new Int32Array(N).fill(-1);
 	special.forEach((s, k) => { specialAt[s[0]] = k; });
 	const start = { t: ((Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)) };
-	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, trophies, start, opts };
+	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts };
 }
 /** a feature's value index in the sim's state */
 function featureOf(k, sim, values) {
@@ -299,7 +303,7 @@ function layeredField(A, M) {
 	const specialAt = A.specialAt, identity = M.identity, pass = M.pass;
 	const isTrophy = new Uint8Array(N); for (const t of A.trophies) isTrophy[t] = 1;
 	let cur = 0, pops = 0;
-	const srcList = A.portalSrcOf;
+	const srcList = A.portalSrcOf, forcedP = A.forcedP;
 	while (queued > 0) {
 		const b = cur & MASK;
 		for (let n = 0; n < bn[b]; n++) {
@@ -320,7 +324,7 @@ function layeredField(A, M) {
 					const x = x2 - DX8[di], y = y2 - DY8[di];
 					if (x < 0 || y < 0 || x >= W || y >= H) continue;
 					const t = y * W + x;
-					if (isTrophy[t] || pass(t, s) !== 1) continue;
+					if (isTrophy[t] || pass(t, s) !== 1 || forcedP[t]) continue;
 					if (ow2 >= 0 && owBlocked(ow2, DX8[di], DY8[di])) continue;
 					if (DX8[di] !== 0 && DY8[di] !== 0 && pass(y * W + x2, s) === 0 && pass(y2 * W + x, s) === 0) continue;
 					push(base + t, cur + (DX8[di] && DY8[di] ? 7 : 5));
@@ -583,7 +587,7 @@ function wildField(A, M, s, goals, kappa) {
 			const x = x2 - DX8[di], y = y2 - DY8[di];
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
 			const t = y * W + x;
-			if (goalT.has(t) || isTrophy.has(t) || M.pass(t, s) !== 1 || M.pass(t2, s) === 0) continue;
+			if (goalT.has(t) || isTrophy.has(t) || M.pass(t, s) !== 1 || M.pass(t2, s) === 0 || A.forcedP[t]) continue;
 			if (DX8[di] && DY8[di] && M.pass(y * W + x2, s) === 0 && M.pass(y2 * W + x, s) === 0) continue;
 			const c = v + (DX8[di] && DY8[di] ? 7 : 5) * kappa;
 			if (c < d[t]) { d[t] = c; hpush(t, c); }
@@ -608,7 +612,7 @@ function buildPhysics(B, opts) {
 	for (const e of fr.edges) succ[Math.floor(e / S)].add(e % S);
 	const comps = sccs(S, fr.layers, succ);
 	const fields = new Array(S).fill(null), goalsOf = new Array(S).fill(null), copies = new Array(S).fill(null);
-	const rfOpts = { oneWayEntry: true };
+	const rfOpts = { oneWayEntry: true, portalForced: true };
 	const kappa = A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	const solve = (s) => {
@@ -730,7 +734,7 @@ function coinLegsPhys(B, PH, base, opts) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+		return RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
 	};
 	const fields = new Map(), countOf = new Map();
 	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
@@ -998,6 +1002,23 @@ function nextGate(st, sim) {
 	}
 	return best;
 }
+/** past the coin plan's count (nextGate null): the untaken coin with the least leg from the state ({i, bit, v}, null:
+ *  none with a value; `skip`: a Set of coin indices left out). The plan's count comes from the walk plan, which is blind to gravity: Wine Quest I's walk plan
+ *  passes its 5-coin door and a 16-row shaft whose steps are 10-coin gates; the level needs all 10 coins */
+function nextCoin(st, sim, skip) {
+	const D = st.dp;
+	if (!D) return null;
+	let best = null;
+	for (let q = 0; q < D.n; q++) {
+		const b = D.bit[q];
+		if (b >= 0 && ((sim._coinBits[b >> 5] >>> (b & 31)) & 1) === 1) continue;
+		if (skip && skip.has(q)) continue;
+		const c = bodyAt(st.bodies[D.leg[q]], sim, 0, 0);
+		if (c < 0 || c >= CUT - 1) continue;
+		if (!best || c < best.v) best = { i: q, bit: b, v: c };
+	}
+	return best;
+}
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
@@ -1111,6 +1132,6 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, coinLegsPhys, coinDP, arriveCost };
