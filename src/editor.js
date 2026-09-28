@@ -519,12 +519,16 @@ function schedule() {
 	// (breakSlice: only while its run searches (from its ready event); while a run starts and in the slice between two
 	// runs the others take their turns as below, the breaker's starting process not paused)
 	// (breakDuty: also in the give phase of a searching run's duty cycle, the breaker then paused)
+	let inRound;   // (the one search's index, when the others' turn in a round goes to it first)
 	const bkReady = BK >= 0 && gpu.includes(BK) && S.strategies[BK].brk && S.strategies[BK].brk.readyAt > 0 ? S.strategies[BK].brk.readyAt : 0;
 	const bkGive = !!bkReady && !!cur && cur.opts.breakDuty && breakDutyGive(bkReady, now);
 	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round)) && cur && (bkGive || (cur.opts.breakSlice && !bkReady))) {
 		if (gpu.includes(BK)) { setPaused(BK, bkGive); gpu.splice(gpu.indexOf(BK), 1); }
 		if (sched && sched.owner === BK) sched = null;
 		if (!gpu.length) { S.gpuTurn = 'breaker'; return; }
+		// (in a round the others' turn goes to the one search's bursts first, not to the lowest index (a paused beam); the GPU
+		// random runs still take theirs by their yield, below)
+		if (brk && brk.round && cur.opts.breakDuty) inRound = gpu.find((k) => S.strategies[k].gpuShare);
 	} else if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
 		// (on a GPU of BURST_BIG_MB or more the one search's bursts go on beside the round (`breakShare`): before, the rounds held
@@ -568,7 +572,7 @@ function schedule() {
 	} else if (probing) {
 		if (owner !== X && !rollsSlice) sched = { owner: X, since: now, slices: 1 };
 	} else if (owner < 0) {
-		sched = { owner: gpu[0], since: now, slices: 1 };
+		sched = { owner: inRound !== undefined ? inRound : gpu[0], since: now, slices: 1 };
 	} else if (now - sched.since >= SLICE_MS) {
 		const q = S.strategies[owner];
 		let lead = Infinity, leader = -1;
