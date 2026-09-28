@@ -38,8 +38,8 @@ function check(name, ok, detail) {
 	console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail !== undefined ? ': ' + detail : ''}`);
 }
 const section = (s) => console.log(`\n== ${s}`);
-// ASCII levels: # wall, . air, S spawn, T trophy, C checkpoint, x spike, o coin, d coin door (1 coin)
-const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], d: [43, 1] };
+// ASCII levels: # wall, . air, S spawn, T trophy, C checkpoint, x spike, o coin, d coin door (1 coin), L / l low gravity on / off
+const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], d: [43, 1], L: [453, 1], l: [453, 0] };
 const box = (inner) => ['#'.repeat(inner[0].length + 2), ...inner.map((r) => `#${r}#`), '#'.repeat(inner[0].length + 2)];
 function levelFile(name, rows) {
 	const cells = [];
@@ -161,6 +161,20 @@ function sectionCpu() {
 	const same = JSON.stringify(routesOf(p0).map((e) => [e.ticks, e.simTicks, e.inputs])) === JSON.stringify(routesOf(p1).map((e) => [e.ticks, e.simTicks, e.inputs]));
 	check('a level without a checkpoint: the default search = --deaths=0 (the same routes after the same ticks)', same && routesOf(p1).length > 0 && (p1.find((e) => e.ev === 'start') || {}).deathMoves === false,
 		`${routesOf(p1).length} routes`);
+	// the effect transport (hx2-r1-deaths): the respawn keeps the static effects, so a death carries low gravity back to the
+	// checkpoint C past its remover l; the trophy is 11 rows above C (a jump climbs 4, a low-gravity one many more). The
+	// only way: C first, back through the tunnel (low gravity off there) to L, die on the spikes by it, the respawn at C in
+	// low gravity, the high jump. Without the checkpoint in the cell key the state that comes back to L holding C shares
+	// its cells with the first visit's (checkpoint none) and is not kept; --cpkey=2 keys a far checkpoint
+	const tr = levelFile('transport', box([
+		'.................#.....T....',
+		...Array(10).fill('.................#..........'),
+		'..S......L.xx....l....C.....',
+	]));
+	const t2 = gox(tr.file, ['--workers=1', '--cells=coarse', '--cpkey=2', '--maxTicks=6000000', '--seconds=90'], 150000);
+	const rt = routesOf(t2), bt = rt[rt.length - 1], evt = bt ? C.evaluate(tr.level, masksOf(bt.inputs)) : null;
+	check('the effect transport (low gravity carried to a far checkpoint by a death): --cpkey=2 routes through the death, replayed', !!evt && evt.deaths >= 1 && evt.ms.length === bt.ticks,
+		bt ? `${rt.length} routes, the best ${bt.ticks} ticks, ${evt ? evt.deaths : '?'} death(s), first after ${doneOf(t2).first ? doneOf(t2).first.simTicks : '-'} ticks; ${JSON.stringify(doneOf(t2).deaths || {})}` : 'none');
 }
 
 function sectionGpu() {

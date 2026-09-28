@@ -211,6 +211,9 @@
 //        death is kept only where it pays: deathPays in explore(); the progress and done events carry "deaths": {seen,
 //        byCost, byNew, dropped, cells}; the GPU random runs get eegpu roll --deaths=1. The reach field keeps its death
 //        edges only with deaths as moves: off, the runs end at a death, so a way through one is none of theirs)]
+//        [--cpkey=0 (coarse cells, deaths as moves: 1 = the checkpoint in the cell key on levels of at most CPK_MAX 32
+//        checkpoints; 2 = only while the ball is more than --cpfar=2 tiles from its checkpoint, any number of them: the
+//        effect-transport death, a respawn away from the ball with its effects kept; both opt-in, the cost not measured)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger is
 //        walkable, roomDead, end a run; 0: off)] (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
@@ -281,7 +284,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dsub: 0, roomDead: 1 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, cpfar: 2, dburst: 1, dsub: 0, roomDead: 1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -1260,7 +1263,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// (the checkpoint in the coarse cell key: on levels of at most CPK_MAX checkpoints; Infinity Pain's 107, one every few
 	// tiles of its route, made 2.5x the cells of the CPU runs (47 K -> 119 K in 300 s, 4 workers) for 22 deaths kept of
 	// 20.9 M: there the last one touched is nearly always the one just behind the ball)
-	const CPK = DI !== null && DI.cps > 0 && DI.cps <= CPK_MAX && a.cpkey !== 0;
+	// --cpkey=2 (the far checkpoint, any number of checkpoints): the checkpoint in the key only while the ball is more than
+	// --cpfar tiles (Chebyshev) from it: a death near its checkpoint moves the ball little, a far one is a teleport, and it
+	// carries every static effect with it (Player.respawn keeps them: low gravity carried back past its remover, the
+	// hx2-r1-deaths transport level (test/deaths.js): no route with the key off in 90 s (70.7 M / 73.1 M ticks, seeds 1 /
+	// 2), --cpkey=1 after 139 K simulated ticks, --cpkey=2 with --cpfar 0 / 2 / 4 after 153 K / 110 K / 224 K, with 8 none
+	// (73 M ticks, 2 seeds: the unkeyed zone around the checkpoint held the tunnel back, where the returning state is
+	// merged with the first visit's); the cost where checkpoints stand every few tiles (Infinity Pain) is not measured)
+	const CPK = DI !== null && DI.cps > 0 && ((a.cpkey === 1 && DI.cps <= CPK_MAX) || a.cpkey === 2);
+	const CPFAR = a.cpkey === 2 ? Math.max(0, a.cpfar) : -1;
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
 	const KV = new Int32Array(10);
@@ -1275,7 +1286,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			// deaths as moves on a level of checkpoints the checkpoint too: where a death takes the ball, which the
 			// earliest state of a cell must not decide for the others)
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (TD ? (((sim.level_ticks() % E.TIMEDOOR_PERIOD) / a.phase) | 0) << 8 : 0);
-			KV[2] = CPK ? (sim.checkpoint.x + 1) | ((sim.checkpoint.y + 1) << 16) : 0; KV[3] = 0; KV[4] = 0; KV[5] = roomKey;
+			KV[2] = CPK && (CPFAR < 0 || (sim.checkpoint.x !== -1 && Math.max(Math.abs(tx - sim.checkpoint.x), Math.abs(ty - sim.checkpoint.y)) > CPFAR)) ? (sim.checkpoint.x + 1) | ((sim.checkpoint.y + 1) << 16) : 0; KV[3] = 0; KV[4] = 0; KV[5] = roomKey;
 		} else {
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (r << 1); KV[2] = sim.jump_count; KV[3] = sim._q0; KV[4] = sim._q1; KV[5] = disc(sim);
 		}
