@@ -39,6 +39,7 @@ const SF = require('./steer.js');
 const PV = require('./prove.js');
 const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
+const BU = require('./bursts.js');     // (roomAim: the wall breaker's room target, roomGate; slowYOf: the fine-y cells)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -233,7 +234,14 @@ function reachFp() {
 	return RF_FP;
 }
 const levelHashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16);
-const reachBase = (hash) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}`);
+/** the searches' reach file for a search that takes deaths as moves (dm: start()'s deathMoves, where a death can move
+ *  the ball and the request does not turn them off; EEAT_DEATHS=moves forces it): it keeps the death edges (a way
+ *  through a death is a way of theirs), in its own file (`_dm`). Otherwise (every death ends its run) the file the
+ *  searches read is the field without them where that still reaches the start, where a state only a death leads to the
+ *  trophy from is cut off (src/reach.js opts.deaths; the verdicts keep them): the same field goexplore.js builds itself
+ *  then (fieldOpts), with the room dead ends (roomDead) */
+const deathsTaken = (dm) => process.env.EEAT_DEATHS === 'moves' || !!dm;
+const reachBase = (hash, dm) => path.join(dir(), `reach_${hash}_v${RF_VERSION}_${reachFp()}${deathsTaken(dm) ? '_dm' : ''}`);
 /** the physics check of a level (.eelvl bytes, prepared level): {mode, startCost (tiles; -1 = no way), explain}, from the
  *  cache (memo, or the search's file); none yet: null, and for a level up to 40k tiles the check starts in a worker
  *  thread (the newest level asked for; the page asks again while `pending`) */
@@ -269,7 +277,9 @@ function noWayNote(ph) {
 /** the "only through a death" note (null: none): the physics check's only way to the trophy is a death (a respawn at a
  *  checkpoint or another spawn), which the searches do not follow (they drop dead balls) */
 function deathNote(ph) {
-	if (!ph || ph.pending || ph.failed || !(ph.startCost >= RF.DEATH_TILES)) return null;
+	// (onlyDeath: the start is cut off without the death edges and finite with them; a check of an older cache: the start's
+	// cost priced as a death's. Infinity Pain's way around by the walk is 3,178 tiles, above DEATH_TILES)
+	if (!ph || ph.pending || ph.failed || !(ph.onlyDeath !== undefined ? ph.onlyDeath : ph.startCost >= RF.DEATH_TILES)) return null;
 	if (ph.deathMoves) return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches take a death as a move where it pays.';
 	return 'The physics check finds a way to the trophy only through a death (the respawn at a checkpoint or another spawn point). The searches drop dead balls here (deaths as moves are off), so they cannot find it.';
 }
@@ -392,11 +402,15 @@ const STRATEGIES = {
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
 	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
+		// (--deaths=0 where deaths as moves are off: goexplore.js then builds its reach field without death edges and cuts
+		// the room dead ends (roomDead), like the reach file the editor gives the GPU tools then; where they are on the flag's
+		// auto (deathMovesFor, the same test as the editor's) keeps the death edges and no room dead ends)
 		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
-		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : [])] : [])] },
+		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
+			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : [])] },
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
@@ -417,6 +431,12 @@ const STRATEGIES = {
 // exact local search goes on; every route replayed in the JS engine. A landing's nearer state goes to the CPU search
 // (seedCpu) and the page's nearest attempt. Its lookups run on PREC_WORKERS threads at most (half the CPU search's).
 const PREC_TILES = 0.5, PREC_WAIT_S = 10, PREC_WAIT_MAX_S = 240, PREC_S = 90, PREC_AFTER_S = 5, PREC_SLACK = 3, PREC_ATTEMPTS = 8, PREC_WORKERS = 4;
+// the one search's bursts sized by the GPU (goexplore.js --burstPar / --gpuCells / --burstCap): the laptop sizing (1 lane,
+// 2^25 cells, at most 262,144 states a layer) was every GPU's, the A100's 40 GB and the H100's 80 GB too; from BURST_BIG_MB of GPU
+// memory 2 lanes of 2^26 cells with the settings' own layer caps (up to 1 M), the research's A100 sizing (`b.burstBig === false`
+// or EEAT_BURST_BIG=0: the laptop sizing everywhere)
+const BURST_BIG_MB = 20000;
+const burstSizeArgs = (memMB) => memMB >= BURST_BIG_MB ? ['--burstPar=2', '--gpuCells=26', '--burstCap=0'] : [];
 // the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
 const ROLL_BATCH = 4096;
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(f.steerBeam && !(q.V && q.V.noSteer) ? [`--steer=${f.steerBeam}`] : [])];
@@ -426,8 +446,10 @@ const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, 
 // beams too when four copies fit), to the CPU search whenever it models anything
 const steerArg = (f, V) => (f.steer && !(V && V.noSteer) ? [`--steer=${f.steer}`] : []);
 const STEER_GPU_SHARE = 1 / 40;
-// the steer build: at most this long before the search starts (it goes on in its worker, cached for the next search; this
-// one orders by the reach field)
+// the steer build: at most this long before the search starts. A later field is taken when it arrives (lateSteer: the
+// CPU search's second heap, the wall breaker's coin plan); before, it was dropped for the whole search, and a run from the
+// level alone has one search: on a loaded box (cycle 8) Forgotten Veil, Octorage and Good Egg ran without it.
+// (EEAT_STEER_WAIT_MS or test.steerWaitMs: another wait, for tests of a late build)
 const STEER_WAIT_MS = 15000;
 // The one search (the friend's "one optimal search" instead of three searches built one after another): on levels above
 // 50 x 50 tiles (goexplore.js coarse cells) with the GPU, the CPU search's archive is the only one: its random runs, and
@@ -547,7 +569,25 @@ function schedule() {
 	const BK = S.strategies.findIndex((q) => q.key === 'breaker');
 	if (BK >= 0 && (gpu.includes(BK) || (!!brk && !!brk.round))) {
 		if (!sched || sched.owner !== BK) sched = { owner: BK, since: now, slices: 1 };
-		for (const k of gpu) setPaused(k, k !== BK);
+		// (on a GPU of BURST_BIG_MB or more the one search's bursts go on beside the round (`breakShare`): before, the rounds held
+		// the GPU 38-66% of the time before the first route on Octorage, Infinity Pain, Endeavor and Forgotten Veil, and the
+		// search made 0.6-1.2 new rooms a minute in them against 3.4-4.2 outside (src/out/night/n2_1_time_to_route.md); the
+		// round's explore fits its table to the memory left (--reserve), a burst that finds none waits (goexplore --burstOomS))
+		// Gated (cycle 2): the round keeps the GPU to itself until one of its runs ends with no gate entered and no progress
+		// of its own (a nearer attempt by BREAK_TILES or a new room with territory gain from the breaker's own attempts:
+		// R.dry); a later run of its own that gets on closes it again. Cycle 1's ungated share (every round from its first
+		// run) slowed the rounds that pass Octorage's wall (1,856 s vs main's 862 s; one pair). Timed (cycle 3): runs often
+		// end in 2-8 s (out of situations at the coarse grain), so the first dry run had opened 85% of Octorage's round
+		// time; now also a whole breakStep (20 s) of the round without its own progress or a gate (R.quiet). Opt-in until
+		// an A/B shows it (src/out/night/n2_3_time_to_route.md): b.breakShare === true / EEAT_BREAK_SHARE=1
+		const R = brk && brk.round;
+		const share = !!cur && breakShareOpen(cur.opts, toolInfo && toolInfo.memMB, R, now);
+		if (R && share !== !!R.shareOn) {
+			R.shareOn = share;
+			note(share ? `${S.strategies[BK].label}: round ${brk.rounds} got nothing of its own for ${cur.opts.breakStep} s: the one search's bursts go on beside the round`
+				: `${S.strategies[BK].label}: round ${brk.rounds} got on: the round has the GPU to itself again`);
+		}
+		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare));
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
 		return;
@@ -598,6 +638,7 @@ function schedule() {
 function checkStalls() {
 	if (!S || !S.running) return;
 	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
+	pastPlanCheck();   // (a search stalled at the plan's coin count: the plan past it, before the breaker picks its gates)
 	breakKick();   // (a stalled search: a round of the wall breaker)
 	precKick();    // (a stalled search: exact landings from its nearest attempts)
 	const now = Date.now();
@@ -708,7 +749,7 @@ function addSource(o) {
 	if (o.gain > s.gain) s.gain = o.gain;
 	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
 	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
-	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room'); }
+	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room', S.strategies.some((q) => q.key === 'breaker' && q.label === o.from)); }
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
@@ -720,7 +761,7 @@ function addSource(o) {
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
 function pickSource(step, c) {
 	const same = (a) => !!c && a.ticks === c.ticks && Math.abs(a.dist - c.dist) < 1e-3;
-	const usable = (a) => !!a && a.ticks >= RELAY_MIN_TICKS && a.dist < RF.DEATH_TILES && !same(a);
+	const usable = (a) => !!a && a.ticks >= RELAY_MIN_TICKS && a.dist < deathTiles() && !same(a);
 	let b = null;
 	for (const s of sources.values()) {
 		if (step === 'new') {
@@ -763,6 +804,10 @@ function replayRooms(masks, withPath) {
 	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
 	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
 }
+/** the distance (tiles) from which an attempt's way is a death's: RF.DEATH_TILES, but none (1e4: cut off) when the searches'
+ *  reach file has no death edges (cur.opts.fileDeaths false: the death-free file, or a level without deaths; a long real way,
+ *  Infinity Pain's 3,178 tiles without the deaths, Egg Quest II's start 3,386, is no death) */
+const deathTiles = () => (cur && cur.opts && cur.opts.fileDeaths === false ? 1e4 : RF.DEATH_TILES);
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
  *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
@@ -939,6 +984,12 @@ const BREAK_WAIT_S = [90, 180, 360], BREAK_TILES = 0.5, BREAK_STARTS = 8, BREAK_
 const BREAK_STEP_S = 20, BREAK_ROUND_S = 300, BREAK_CAP = 2097152, BREAK_MEM_F = 0.42, BREAK_REGION = 40, BREAK_REGION_LOG = 28;
 const BREAK_GRAINS = [{ cqx: 0.25, cqv: 16, qy: 0.25, qvy: 16 }, { cqx: 0.5, cqv: 16, qy: 0.5, qvy: 16 }, { cqx: 1, cqv: 32, qy: 1, qvy: 32 }];
 const BREAK_GRAIN_TEXT = ['4 px and 1/16', '2 px and 1/16', '1 px and 1/32'];
+// on a level with climbables or liquids (bursts.js slowYOf): the fine-y cells (4 px x 1 px, 1/16 px/tick) second: a climb
+// rises 1-2 px a tick and coarse cells drop its every tick (bursts.js FINE_Y: Wine Quest I's chain)
+const BREAK_GRAINS_Y = [BREAK_GRAINS[0], { cqx: 0.25, cqv: 16, qy: 1, qvy: 16 }, BREAK_GRAINS[1], BREAK_GRAINS[2]];
+const BREAK_GRAIN_TEXT_Y = [BREAK_GRAIN_TEXT[0], '4 px x 1 px and 1/16', BREAK_GRAIN_TEXT[1], BREAK_GRAIN_TEXT[2]];
+const breakGrains = () => (cur && cur.slowY ? BREAK_GRAINS_Y : BREAK_GRAINS);
+const breakGrainText = () => (cur && cur.slowY ? BREAK_GRAIN_TEXT_Y : BREAK_GRAIN_TEXT);
 // the GPU memory its table leaves free (explore --reserve, MB: BREAK_RESERVE_F of the GPU's, at least 1 GB): its table
 // and states fit the free memory less that, so on a shared GPU the other processes keep room (on the rented H100, shared
 // with 31-42 GB of other work, a 2^31 table left the relay's new processes no memory for a context)
@@ -949,6 +1000,16 @@ const BREAK_RESERVE_F = 0.15;
 // the first seconds on the shared H100 cost Infinity Pain every move, straight and the GPU random runs for 30 min). The
 // breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one.
 const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
+// the gated share (breakShare, schedule()): the round's runs in a row with no gate and no progress of their own before the
+// one search's bursts go on beside it (and a whole opts.breakStep of the round's time without them: R.quiet)
+const BREAK_SHARE_DRY = 1;
+/** the gated share (schedule()): does the one search's bursts' GPU turn go on beside the round R at now (ms)? (opts: the
+ *  search's opts, memMB: its GPU's memory; R.quiet: the round's last own progress or gate, else its start R.t0) */
+const breakShareOpen = (opts, memMB, R, now) => !!(opts && opts.breakShare && memMB >= BURST_BIG_MB && R && (R.dry || 0) >= BREAK_SHARE_DRY &&
+	(now || Date.now()) - (R.quiet || R.t0 || 0) >= (opts.breakStep || BREAK_STEP_S) * 1000);
+/** the round's dry count after a run (breakAfter): 0 when it entered a gate or got on by itself (own > own0: the round's
+ *  own progress count after / before the run), else one more */
+const breakDryAfter = (dry, hit, own, own0) => hit || (own || 0) > (own0 || 0) ? 0 : (dry || 0) + 1;
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
 const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
@@ -1017,6 +1078,57 @@ const breakHolds = () => !!S && S.running && !S.halted && S.stage !== 'stopped' 
 // way that needs no more coins, before Forgotten Veil's coins 1-4 and Stupid Fox's 1-8: the search went for a way the
 // known routes never take. No DP (or no leg with a value): the trophy, as before. `b.breakGate === false`: off.
 const BREAK_GATES = 16;
+// The plan past its count (Wine Quest I, 2026-09-28). The coin plan's count T comes from the walk plan, which is blind to
+// gravity, one-way directions and speed, and whose layers count a coin at every touch (the physics layers too: a coin
+// tile is a goal seeded with the next count's cost, so from any coin tile the ball "has" every coin). On Wine Quest I the
+// walk plan passes the 5-coin door and T = 5, but the trophy's shaft has only 10-coin GATES for footholds: the level needs
+// all 10 coins, in the order its doors and gates force. Past 5 coins the coin DP had no value (coins >= T), the steer
+// lookup was the layer field's "the trophy, 189.8 tiles" through the 5-coin corridor, and every tool aimed at the trophy
+// (the user's run: "closest 197.6 tiles", at the 5-coin door; the product's runs: 5 coins by 140-162 s, then 13 rooms and
+// 189.8 tiles for 25-37 min). So next to the field the steer worker builds the plan past its count (steer.js buildSteer
+// coinT = fullCoinT: the highest count a coin door reads, at most the level's coins; the DP's legs layered by the count
+// held, coinLegsLayered: on Wine Quest I its tour is the level's own order, (123,84) (152,90) (188,9) (132,45) (136,133)
+// (36,49) (1,136) (2,158) (106,189) (119,65), and its value falls along a real 7-coin run 2,174 -> 750), and once the
+// search holds the plan's count in some room and has stalled for the breaker's first wait (a counterexample: the tools
+// aimed at the trophy that long from there), the search turns to it: the CPU search's head A and closest attempt by it
+// with the DP first (goexplore.js stdin `steer <file>`), the page's nearest from the CPU search's attempts only (one
+// measure), and the wall breaker's gates from its DP (breakGate). Only on levels whose walk plan's count is below the
+// full one (of the known levels: Wine Quest I 5 < 10, Forgotten Helix 13 < 15 once its 16-coin doors count as walls,
+// Edge Of Insanity 14 < 15; Forgotten Veil, Stupid Fox, Good Egg, Octorage, the ice level, Egg Quest II: none).
+// `b.pastPlan === false`: off.
+const PAST_MAX_MS = 180000;
+const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
+/** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
+const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
+/** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
+function pastArrived(hash, past) {
+	if (!cur || cur.levelHash !== hash || !S || !S.running) return;
+	cur.past = past && fs.existsSync(past.file) ? past : null;
+	if (S.steer) S.steer.past = cur.past ? { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false } : null;
+	if (cur.past) note(`the plan past its count is ready (the coin DP over ${cur.past.T} coins, legs by the count held; built in ${(cur.past.ms / 1000).toFixed(1)} s): the search turns to it once it holds ${cur.past.planT} coins and stalls there`);
+}
+/** every 5 s (checkStalls): a search that holds the plan's count and has stalled for the breaker's first wait turns to
+ *  the plan past its count */
+function pastPlanCheck() {
+	if (!cur || !cur.opts.pastPlan || cur.pastOn || !cur.past || !cur.files.steerCpu || !brk || !S || S.result || !S.running || S.halted) return;
+	if (Date.now() - brk.at < cur.opts.breakWait[0] * 1000) return;
+	let held = 0;
+	for (const r of sources.values()) held = Math.max(held, goldOfDesc(r.desc));
+	if (held < cur.past.planT || !fs.existsSync(cur.past.file)) return;
+	cur.pastOn = true;
+	cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
+	S.closest = null;            // (another measure: the CPU search's attempts by it)
+	brk.mark = Infinity;
+	let told = 0;
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${cur.past.file}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
+	});
+	const after = Math.round((Date.now() - S.started) / 100) / 10;
+	if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
+	note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
+	save();
+}
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
 const GATE_AT = 0.2;
 /** the coin plan's next gate from the state after inputs: {x, y} (tiles) or null; the steer file read once a search */
@@ -1025,7 +1137,7 @@ function breakGate(inputs) {
 	try {
 		if (cur.gateSteer === undefined) {
 			cur.gateSteer = null;
-			const buf = fs.readFileSync(cur.files.steerCpu);
+			const buf = fs.readFileSync(cur.pastOn ? cur.past.file : cur.files.steerCpu);
 			const st = SF.readSteerFile(buf);
 			if (st && st.dp) {
 				const tiles = new Map(), cb = cur.level.coinBit;
@@ -1038,7 +1150,16 @@ function breakGate(inputs) {
 		const sim = new E.EESim(cur.level), inp = new E.EEInput();
 		sim.reset();
 		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
-		const g = SF.nextGate(G0.st, sim);
+		// (past the plan: the coin plan's count is reached but a whole round aimed at the trophy found nothing (breakEnd):
+		// the walk plan behind the count is blind to gravity (Wine Quest I: its plan passes the 5-coin door and a 16-row shaft,
+		// the level needs all 10 coins), so the untaken coin with the least leg is the gate)
+		let g = SF.nextGate(G0.st, sim);
+		if (!g && brk && brk.pastPlan && cur.opts.breakPast) {
+			// (the coins a whole round aimed at without entering one rest until every untaken coin has had its round)
+			g = SF.nextCoin(G0.st, sim, brk.coinSkip);
+			if (!g && brk.coinSkip && brk.coinSkip.size) { brk.coinSkip.clear(); g = SF.nextCoin(G0.st, sim); }
+			if (g && brk.round) (brk.round.coins || (brk.round.coins = new Set())).add(g.i);
+		}
 		const t = g ? G0.tiles.get(g.bit) : undefined;
 		if (t === undefined) return null;
 		// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
@@ -1046,50 +1167,134 @@ function breakGate(inputs) {
 		const b = G0.st.dp.leg[g.i];
 		let reach = G0.files.get(b);
 		if (!reach) {
-			reach = path.join(dir(), `gate_${b}.rch3`);
+			reach = path.join(dir(), `gate_${cur.pastOn ? 'p' : ''}${b}.rch3`);
 			fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
 			G0.files.set(b, reach);
 		}
 		return { x: t % cur.level.width, y: Math.floor(t / cur.level.width), reach };
 	} catch (e) { return null; }
 }
+// The room's next target (the guidance study, 2026-09-28): where the coin plan gives no gate (no steer field, a late
+// one, or one with no value there: Forgotten Helix's has none at the start), a breaker run aims at the targets the
+// state's own room reaches (bursts.js roomAim: the walk with the doors as that room holds them, killing tiles closed,
+// portals forward; its goals the triggers whose touch makes a room the search has not seen, and the trophy), not at
+// the trophy by the reach field's walk through every door. On Forgotten Helix that walk ranked a viewing pocket behind
+// two 16-coin doors (15 coins in the level) nearest of all, and every breaker round went there (58 runs, 'nothing
+// nearer, no new room'), while the frontier (3 coins) needed coin 4. Its closest attempt on a goal is a gate as with the
+// coin plan (GATE_AT). No such target: the trophy, as before. `b.roomGate === false`: off.
+function roomGate(inputs) {
+	if (!cur || !cur.opts.roomGate) return null;
+	try {
+		const L = cur.level;
+		// (the reach file's header and classes: cur.reachLookup only while the steer field is used, so read here once)
+		if (!cur.roomAimT) cur.roomAimT = { RM: GX.roomOf(L), TR: BU.triggersOf(L), PT: BU.portalsOf(L), fp: G.blobFp(G.levelBlob(L)), n: 0,
+			look: cur.reachLookup || SF.readReachBytes(fs.readFileSync(cur.files.reach)) };
+		const T = cur.roomAimT;
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		if (sim.is_dead) return null;
+		const known = (k) => sources.has(k) || (!!brk && brk.seen.has(k));
+		const aim = BU.roomAim(L, T.RM, sim, known, T);
+		if (!aim || !(aim.start < RF.CUT)) return null;
+		const reach = path.join(dir(), `gate_room_${T.n++ % 8}.rch3`);
+		const f = Object.assign({}, T.look, { mode: 'walk', walk: aim.walk, prioShift: Math.max(0, (32 - Math.clz32(aim.mx)) - 12) });
+		RF.writeReachFile(f, reach, T.fp);
+		return { x: aim.x, y: aim.y, reach, room: true, goals: aim.goals.length };
+	} catch (e) {
+		if (cur && !cur.roomAimErr) { cur.roomAimErr = true; note(`past the wall: no room target (${e.message}); the trophy as before`); }
+		return null;
+	}
+}
+/** a gate hit's inputs, extended by up to GATE_ENTER ticks of its last input until the room changes (the trigger acts
+ *  on a later tick than the centre's arrival on its tile); the hit itself when the room does not change or the ball dies;
+ *  level: the running search's when not given */
+const GATE_ENTER = 3;
+function gateEnter(inputs, level) {
+	try {
+		const L = level || (cur && cur.level);
+		if (!inputs || !L) return inputs;
+		const RM = !level && cur.roomAimT ? cur.roomAimT.RM : GX.roomOf(L);
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		const k0 = RM.key(sim), last = inputs.charCodeAt(inputs.length - 1);
+		let out = inputs;
+		for (let k = 0; k < GATE_ENTER; k++) {
+			E.applyMask(inp, (last - 48) & 31); sim.tick(inp);
+			if (sim.is_dead) return inputs;
+			out += String.fromCharCode(last);
+			if (RM.key(sim) !== k0) return out;
+		}
+		return inputs;
+	} catch (e) { return inputs; }
+}
+/** the coins the state after inputs holds, as the room keys count them (gold where a coin door or gate reads them, blue
+ *  where a blue one does; goexplore.js roomOf): the wall breaker's progress order of its starting points */
+function coinsOf(inputs) {
+	const L = cur.level;
+	if (!cur.countDoors) {
+		let gold = false, blue = false;
+		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
+		cur.countDoors = { gold, blue };
+	}
+	const D = cur.countDoors;
+	if (!D.gold && !D.blue) return 0;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+	return (D.gold ? sim.coins | 0 : 0) + (D.blue ? sim.blue_coins | 0 : 0);
+}
+/** a room's coins from its description (goexplore.js roomOf desc: 'coins=N', 'bluecoins=N' where a door reads them) */
+const coinsOfDesc = (desc) => { let n = 0; for (const m of String(desc || '').matchAll(/(?:^|\s)(?:blue)?coins=(\d+)/g)) n += +m[1]; return n; };
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
 // level (BREAK_WAIT_S index), tried (the starting points used: sha1 of the inputs), rounds, round, seeds}
 let brk = null;
 /** the search got somewhere (why: 'nearer' by BREAK_TILES, or 'room' for a new room): the stall clock starts over */
-function breakProgress(why) {
+function breakProgress(why, own) {
 	if (!brk) return;
 	brk.at = Date.now();
 	if (brk.round) brk.round.progress.push(why);
+	// (the breaker's own progress: its runs' nearer attempts and their new rooms; the gated share, schedule())
+	if (brk.round && own) { brk.round.own = (brk.round.own || 0) + 1; brk.round.quiet = Date.now(); }
 	if (S.breaker) S.breaker.last = { why, after: Math.round((Date.now() - S.started) / 100) / 10 };
 }
 /** the round's starting points: up to BREAK_STARTS {inputs, what, dist, key, room} not used before in this search */
 function breakStarts() {
 	// (breakFrom, the measurements' walls: the one starting point of the first round)
 	if (cur.opts.breakFrom) return brk.rounds ? [] : [{ inputs: cur.opts.breakFrom, what: 'the given start', dist: 0, key: 'from', room: undefined }];
+	// (the progress order, `breakProg`: the candidates' coins held first, the most first (a coin-sequence level's frontier:
+	// Forgotten Helix's rounds started from its viewing pocket at 0 coins, the trophy-nearest attempt by a walk through
+	// every door, and from rooms 0-2, while the search's frontier held 3 coins); among equals the order as before. No
+	// coin door (no coins in the room keys): the order as before)
+	const prog = cur.opts.breakProg, lim = prog ? 4 * BREAK_STARTS : BREAK_STARTS;
 	const out = [], seen = new Set();
-	const add = (inputs, keep, what, dist, room) => {
+	const add = (inputs, keep, what, dist, room, coins) => {
 		keep = Math.min(keep, inputs.length);
-		if (out.length >= BREAK_STARTS || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
+		if (out.length >= lim || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen.has(key) || brk.tried.has(key)) return;
 		seen.add(key);
-		out.push({ inputs: pre, what, dist, key, room });
+		out.push({ inputs: pre, what, dist, key, room, coins: prog ? (coins !== undefined ? coins : coinsOf(pre)) : 0, n: out.length });
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
+	// (with the progress order by its own coins, first among equals: a room target's gate can be a lateral room, e.g.
+	// Forgotten Helix's low gravity at 2 coins, and the frontier of 3 coins goes first then)
 	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
 	const c = S.closest;
 	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
-		if (out.length >= BREAK_STARTS) break;
-		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room);
-		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room);
+		if (out.length >= lim) break;
+		const k = coinsOfDesc(r.desc);
+		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k);
+		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k);
 	}
-	return out;
+	if (prog) out.sort((x, y) => y.coins - x.coins || x.n - y.n);
+	return out.slice(0, BREAK_STARTS);
 }
 /** every 5 s (checkStalls): a stalled search starts a round of the wall breaker */
 function breakKick() {
@@ -1145,16 +1350,18 @@ function breakLaunch(n) {
 	}
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
-	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs);
+	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs) || roomGate(ch.inputs);
+	if (!ch.gate) R.trophyRuns = (R.trophyRuns || 0) + 1;
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
-	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
+	V.brk = { file, keep: ch.inputs.length, cells: breakGrains()[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
+	R.own0 = R.own || 0;   // (the gated share: this run's own progress, breakAfter)
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, passes: (V.passes || 0) + 1,
-		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to the coin at (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${BREAK_GRAIN_TEXT[ch.grain]} px/tick, 2^${cellLog} of them` });
+		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to ${ch.gate.room ? `the room's next target${ch.gate.goals > 1 ? ` (of ${ch.gate.goals} goal tiles)` : ''} at` : 'the coin at'} (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${breakGrainText()[ch.grain]} px/tick, 2^${cellLog} of them` });
 	kids[n] = launch(n);
 	return true;
 }
@@ -1164,8 +1371,19 @@ function breakAfter(n, how) {
 	if (!R) return breakEnd(n);
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
-	const hit = V.brk && V.brk.gateHit;
+	// (a gate hit is the ball's centre on the gate's tile; the trigger acts a tick or two later (a coin: the next tick's touch),
+	// so the chain goes on from the state in the gate's room: without it the next room target was taken from the state
+	// before the coin, where the coin after it leads into the room the search already knows (NC Naos: from coin 7's hit the
+	// next target was a red key 486 tiles away, not coin 8 at 38): gateEnter)
+	const hit = V.brk && V.brk.gateHit ? gateEnter(V.brk.gateHit) : null;
+	// (the gated share: a run with no gate and no progress of its own opens the one search's bursts beside the round, one
+	// that got on closes them again; schedule())
+	// (its open / close notes: schedule())
+	R.dry = breakDryAfter(R.dry, hit, R.own, R.own0);
+	if (hit) R.quiet = Date.now();
+	if (S.breaker && S.breaker.round) S.breaker.round.dry = R.dry;
 	if (hit) {
+		R.gateHits = (R.gateHits || 0) + 1;
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
 		// chain's next step starts from it with the next gate (at most BREAK_GATES a chain)
@@ -1174,7 +1392,7 @@ function breakAfter(n, how) {
 		// its last gate), and the next round starts from its last gate first: breakStarts)
 		if (cur.opts.breakFront) { R.clock = Date.now(); brk.front = { inputs: hit, gates: (ch.gates || 0) + 1 }; }
 		R.chain = (ch.gates || 0) + 1 < BREAK_GATES ? { inputs: hit, step: ch.step, grain: 0, what: ch.what, gates: (ch.gates || 0) + 1 } : null;
-	} else if (how === 'exhausted' && ch.grain + 1 < BREAK_GRAINS.length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
+	} else if (how === 'exhausted' && ch.grain + 1 < breakGrains().length) ch.grain++;   // (every situation tried at this grain: finer, the same start)
 	else if (b && ch.step < BREAK_CHAIN && b.ticks - BREAK_RESTART >= ch.inputs.length + BREAK_RESTART) {
 		// its nearest attempt went on: the next step from 60 ticks short of it (a fresh table)
 		R.chain = { inputs: b.inputs.slice(0, b.ticks - BREAK_RESTART), step: ch.step + 1, grain: 0, what: ch.what };
@@ -1193,6 +1411,10 @@ function breakEnd(n) {
 		brk.round = null;
 		if (R && cur) {
 			brk.level = R.progress.length ? 0 : Math.min(brk.level + 1, cur.opts.breakWait.length - 1);
+			// (a round aimed at the trophy (no gate: the coin plan's count held) that brought nothing: the next rounds aim at
+			// the untaken coins: breakGate)
+			if (!R.progress.length && R.trophyRuns > 0 && S.steer && S.steer.dp && !brk.pastPlan) { brk.pastPlan = true; note(`${V.label}: the coin plan's count holds but the trophy was not got nearer: the next rounds aim at the untaken coins`); }
+			if (!R.progress.length && R.coins && !R.gateHits) { if (!brk.coinSkip) brk.coinSkip = new Set(); for (const q of R.coins) brk.coinSkip.add(q); }
 			note(`${V.label}: round ${brk.rounds} over (${R.runs} run${R.runs === 1 ? '' : 's'}, ${Math.round((Date.now() - R.t0) / 1000)} s): ` +
 				`${R.progress.length ? `the search got on (${[...new Set(R.progress)].join(', ')})` : 'nothing nearer, no new room'}; the next after ${cur.opts.breakWait[brk.level]} s without progress`);
 			if (S.breaker) S.breaker.round = null;
@@ -1336,6 +1558,17 @@ function save() {
 	saveTimer = setTimeout(saveNow, SAVE_MS);
 	if (saveTimer.unref) saveTimer.unref();
 }
+// EEAT_EVLOG=<file> (a lab's record, off by default): every event of every strategy's process (and each launch's
+// arguments) appended as one JSON line {T: s since the search's start, k: the strategy, ...}; a run's inputs kept only
+// for a room's first arrival ('source' kind 'room'), elsewhere their length
+const EVLOG = process.env.EEAT_EVLOG || '';
+function evlog(k, ev) {
+	try {
+		const o = Object.assign({ T: S && S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null, k }, ev);
+		if (typeof o.inputs === 'string' && !(ev.ev === 'source' && ev.kind === 'room')) o.inputs = o.inputs.length;
+		fs.appendFileSync(EVLOG, JSON.stringify(o) + '\n');
+	} catch (e) { /* a record only */ }
+}
 function note(s) { S.log.push(`${new Date().toTimeString().slice(0, 8)} ${s}`); S.log = S.log.slice(-30); }
 // The clocks. Each eegpu process first loads its kernels (the first load after a build is the NVIDIA driver compiling
 // them for this graphics card: a minute or more on a laptop CPU, then seconds) and says {"ev":"ready"}; its --seconds
@@ -1429,8 +1662,13 @@ function start(b, gpu, test) {
 	const d = dir();
 	fs.mkdirSync(d, { recursive: true });
 	const levelHash = levelHashOf(buf);
+	// (deaths as moves, 2026-09-28: where something kills and a checkpoint or 2+ spawns exist (goexplore.js deathMovesFor),
+	// the searches keep a death that pays (goexplore.js deathPays; the GPU tools' --deaths=1: kernels.cu exploreKeepDead,
+	// rollBody); body deaths: false: every death ends its run, as before. The searches' reach file follows it (reachBase
+	// dm): with deaths as moves the field with its death edges, without them the death-free field where it reaches the start)
+	const deathMoves = b.deaths !== false && GX.deathMovesFor(ins.level);
 	const files = { eelvl: path.join(d, 'level.eelvl'), bin: path.join(d, 'level.bin'), guide: path.join(d, 'guide.txt'), route: path.join(d, 'route.eetas'),
-		reach: `${reachBase(levelHash)}.bin` };
+		reach: `${reachBase(levelHash, deathMoves)}.bin` };
 	fs.writeFileSync(files.eelvl, buf);
 	if (!noGpu) fs.writeFileSync(files.bin, G.levelBlob(ins.level));
 	try { fs.unlinkSync(files.route); } catch (e) { /* none */ }
@@ -1471,16 +1709,19 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	// (deaths as moves, 2026-09-28: where something kills and a checkpoint or 2+ spawns exist (goexplore.js deathMovesFor),
-	// the searches keep a death that pays (goexplore.js deathPays; the GPU tools' --deaths=1: kernels.cu exploreKeepDead,
-	// rollBody); body deaths: false: every death ends its run, as before)
-	const deathMoves = b.deaths !== false && GX.deathMovesFor(ins.level);
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
+	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
+		burstBig: b.burstBig !== false && !(test && test.burstBig === false) && process.env.EEAT_BURST_BIG !== '0',
+		breakShare: b.breakShare === true || !!(test && test.breakShare === true) || process.env.EEAT_BREAK_SHARE === '1',
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
-		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false) },
+		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
+		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false),
+		// (the plan past its count: `b.pastPlan === false` off)
+		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
+		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
+		breakPast: b.breakPast !== false && !(test && test.breakPast === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		laneCmd: test && Array.isArray(test.laneCmd) ? test.laneCmd : [process.execPath, path.join(__dirname, 'skipfind.js')],
@@ -1512,10 +1753,18 @@ function start(b, gpu, test) {
 	if (!schedTimer) { schedTimer = setInterval(schedule, 250); if (schedTimer.unref) schedTimer.unref(); }
 	// (the steer field next to it: its own worker; b.steer === false or test.steer === false: none)
 	const wantSteer = b.steer !== false && !(test && test.steer === false);
-	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerInfo(buf, levelHash), new Promise((res) => { const t = setTimeout(() => res({ late: true }), STEER_WAIT_MS); if (t.unref) t.unref(); })]);
-	const ready = Promise.all([reachInfo(buf, levelHash), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), steerP]);
+	const steerWait = test && test.steerWaitMs >= 0 ? test.steerWaitMs : +process.env.EEAT_STEER_WAIT_MS >= 0 && process.env.EEAT_STEER_WAIT_MS !== '' ? +process.env.EEAT_STEER_WAIT_MS : STEER_WAIT_MS;
+	const steerBuild = wantSteer ? steerInfo(buf, levelHash) : null;
+	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerBuild, new Promise((res) => { const t = setTimeout(() => res({ late: true }), steerWait); if (t.unref) t.unref(); })]);
+	const ready = Promise.all([reachInfo(buf, levelHash, deathMoves), noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]), steerP]);
 	const gen = ++searchGen;
-	ready.then(([rf, toolWhy, sf]) => { if (gen === searchGen) { useSteer(sf, noGpu || toolWhy); launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide); } }, (e) => {
+	ready.then(([rf, toolWhy, sf]) => {
+		if (gen !== searchGen) return;
+		useSteer(sf, noGpu || toolWhy);
+		launchAll(test && test.reach ? Object.assign({}, rf, test.reach) : rf, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide);
+		// (a late field: taken when its build ends, after the launches)
+		if (sf && sf.late) steerBuild.then((sf2) => lateSteer(gen, sf2));
+	}, (e) => {
 		if (gen !== searchGen) return;   // (stopped while checking, maybe another search since)
 		building = false;
 		S.stage = 'error'; S.running = false;
@@ -1534,7 +1783,7 @@ function useSteer(sf, noGpu) {
 	if (!cur) return;
 	cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
 	S.steer = null;
-	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field (the next one uses it, once built)'); return; }
+	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field until it is built'); return; }
 	if (sf && sf.over) note(`the steer field ${sf.over}`);
 	if (!sf || !sf.useful || !fs.existsSync(sf.file)) return;
 	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
@@ -1549,10 +1798,42 @@ function useSteer(sf, noGpu) {
 	cur.distBySteer = cur.files.steerDist = gpuOk || !!noGpu;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
 	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true };
+	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
+	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
+	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
 	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
+}
+/** a steer field built after the search started (start()'s race: sf {late}): gen, the search it was built for; sf2
+ *  steerInfo's answer. From now on the CPU search's head A orders by it too (goexplore.js stdin "steer <file>"; a CPU
+ *  search launched later gets --steer) and the wall breaker's coin plan (breakGate) aims at its gates. The GPU tools and
+ *  the bursts' trophy arm stay on the reach field, and every distance stays the reach field's (--steerDist=0): the
+ *  attempts of all strategies are ranked on one scale, which a switch in the middle of the search would break. */
+function lateSteer(gen, sf2) {
+	if (gen !== searchGen || !cur || !S.running || S.halted || cur.opts.noWayUp || cur.files.steerCpu) return;
+	const sec = S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null;
+	if (!sf2 || !sf2.useful || !fs.existsSync(sf2.file)) {
+		note(`the steer field was built ${sec !== null ? `${sec} s into the search` : 'late'}: ${sf2 ? 'it models nothing the reach field does not' : 'it could not be built'}`);
+		return;
+	}
+	if (sf2.over) note(`the steer field ${sf2.over}`);
+	cur.files.steerCpu = sf2.file;
+	cur.files.steerDist = false;
+	const mb = sf2.bytes / 1048576;
+	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
+	// (the plan past its count, when the cache had it; else it comes after the field from the same build: pastArrived)
+	if (!cur.past && sf2.past && fs.existsSync(pastFileOf(sf2.file))) cur.past = Object.assign({ file: pastFileOf(sf2.file) }, sf2.past);
+	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
+	let sent = 0;
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${sf2.file}\n`); sent++; } catch (e) { /* gone */ } }
+	});
+	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
+		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''}; the GPU tools and the distances stay on the reach field`);
+	save();
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
  *  why the GPU strategies do not run ('' = they do); stale: the reason is an old search tool */
@@ -1582,6 +1863,13 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 		S.seconds = Math.min(S.seconds, NO_WAY_UP_S);
 	}
 	cur.opts.prune = rf.mode === 'physics' && !noWayUp;
+	// (the reach file the searches read has no death edges: deaths as moves are off (reachInfo's dm), and goexplore.js,
+	// passed --deaths=0 then, builds its field the same way (fieldOpts) with the room dead ends; a deaths-as-moves search
+	// reads the file with the death edges, never this one)
+	cur.opts.deathFree = !!rf.deathFree;
+	// (the searches' file has death edges: a distance of RF.DEATH_TILES or more is a way through a death; an older cache
+	// without the flag: as it had)
+	cur.opts.fileDeaths = rf.deaths === undefined ? true : !!rf.deaths && !rf.deathFree;
 	cur.opts.noWayUp = noWayUp;
 	// (the check of a level the reach field calls impossible runs as before: no steer field)
 	if (noWayUp) { cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
@@ -1691,15 +1979,19 @@ function proofAlone() {
 const cpuOnlyText = (why, workers, guide) => `No GPU search: ${why}. The CPU searches alone (random runs on ${workers} thread${workers > 1 ? 's' : ''}): it finds routes, ` +
 	`but not always the fastest one${guide.length ? ', and it does not follow the guide line' : ''}; with an NVIDIA GPU "every move" also looks for the fastest.`;
 /** the reach field of a level (.eelvl bytes, its hash) for a search and the page's check: {v, fp, mode, startCost (tiles;
- *  -1 = cut off), explain, ms}, and its RCH3 file for eegpu (reachBase(hash).bin). Built in a worker thread (a big level
- *  takes seconds; one build per level at a time) and cached next to it (reachBase(hash).json / .bin; the newest few
- *  kept). */
+ *  -1 = cut off), explain, ms}, and its RCH3 file for eegpu (reachBase(hash, dm).bin). Built in a worker thread (a big
+ *  level takes seconds; one build per level and file at a time) and cached next to it (reachBase(hash, dm).json / .bin;
+ *  the newest few kept). dm: the search takes deaths as moves (start()'s deathMoves): the file keeps the death edges;
+ *  else the death-free field where it reaches the start (deathFree). The verdict's numbers (startCost, onlyDeath) are
+ *  the full field's either way. */
 const reachBuilds = new Map();
-function reachInfo(buf, hash) {
-	const base = reachBase(hash), meta = `${base}.json`, file = `${base}.bin`;
+function reachInfo(buf, hash, dm) {
+	const base = reachBase(hash, dm), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
 	if (cached && cached.v === RF_VERSION && cached.fp === reachFp() && fs.existsSync(file)) return Promise.resolve(cached);
-	if (reachBuilds.has(hash)) return reachBuilds.get(hash);
+	// (one build per file: the searches' death-free file and a deaths-as-moves search's file of one level are two)
+	const bkey = path.basename(base);
+	if (reachBuilds.has(bkey)) return reachBuilds.get(bkey);
 	const p = new Promise((resolve, reject) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
 		const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
@@ -1707,12 +1999,17 @@ function reachInfo(buf, hash) {
 			const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
 			const f = RF.reachField(L, { explain: true });
 			const sim = new E.EESim(L); sim.reset();
+			// (the searches' file: without the death edges when they drop dead balls, unless that cuts the start off: then the
+			// only way is a death, and the file keeps them as before, the verdict's note says so)
+			let fs2 = f, deathFree = false, onlyDeath = false;
+			if (f.deaths) { const g = RF.reachField(L, { deaths: false }); if (RF.costAt(g, sim) >= 0) { if (!d.deathsTaken) { fs2 = g; deathFree = true; } } else onlyDeath = RF.costAt(f, sim) >= 0; }
 			// (the level's fingerprint in the file: eegpu prove uses a field only for its own level; none: it does not use it)
 			let lfp = null;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
-			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(f, lfp)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
-			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms });`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(),
+			try { fs.writeFileSync(d.file + '.tmp', RF.reachFileBytes(fs2, lfp)); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ }
+			parentPort.postMessage({ v: d.v, fp: d.fp, mode: f.mode, startCost: RF.costAt(f, sim), explain: f.explain || null, ms: f.ms, deathFree, onlyDeath, deaths: !!f.deaths,
+				...(deathFree ? { searchStartCost: RF.costAt(fs2, sim) } : {}), ...(f.prot ? { prot: f.prot } : {}) });`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: RF_VERSION, fp: reachFp(), deathsTaken: deathsTaken(dm),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), reach: require.resolve('./reach.js'), gpu: require.resolve('./gpu.js') } } });
 		w.once('message', (r) => {
 			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneReachCache(); } catch (e) { /* read-only data folder */ }
@@ -1721,8 +2018,8 @@ function reachInfo(buf, hash) {
 		w.once('error', reject);
 		w.once('exit', (code) => { if (code) reject(new Error(`the physics check stopped (exit code ${code})`)); });
 	});
-	reachBuilds.set(hash, p);
-	const done = () => { reachBuilds.delete(hash); };
+	reachBuilds.set(bkey, p);
+	const done = () => { reachBuilds.delete(bkey); };
 	p.then(done, done);
 	return p;
 }
@@ -1744,7 +2041,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -1757,10 +2054,36 @@ function steerInfo(buf, hash) {
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
-				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null });`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: SF.VERSION, fp: steerFp(),
+				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
+				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
+			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
+			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
+			if (useful && st.info.dp && st.info.fullT > st.info.dp.T) {
+				let past = null;
+				try {
+					const sp = SF.buildSteer(L, { coinT: st.info.fullT, maxMs: d.pastMs });
+					if (sp.dp && sp.info.dp && sp.info.dp.tour && sp.info.dp.tour.length) {   // (a DP with no value from the start, e.g. Forgotten Helix's at 15 coins: none)
+						const b = SF.steerFileBytes(sp, lfp);
+						fs.writeFileSync(d.past + '.tmp', b); fs.renameSync(d.past + '.tmp', d.past);
+						past = { T: sp.dp.T, n: sp.dp.n, planT: st.info.dp.T, tour: sp.info.dp.tour, start: Number.isFinite(sp.info.start) ? sp.info.start : null, ms: sp.info.ms, bytes: b.length };
+					}
+				} catch (e) { past = null; }
+				parentPort.postMessage({ past: past || { none: true } });
+			}`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
-		w.once('message', (r) => {
+		let main = null;
+		w.on('message', (r) => {
+			if (r && r.past) {
+				// (the plan past its count, built after the field: into the cache's record and to the running search)
+				if (!main) return;
+				main.past = r.past.none ? null : r.past;
+				main.pastWanted = false;
+				try { C.writeJSON(meta, Object.assign({}, main, { file: undefined })); } catch (e) { /* read-only data folder */ }
+				pastArrived(hash, main.past ? Object.assign({ file: pastFileOf(file) }, main.past) : null);
+				return;
+			}
+			main = r;
 			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneSteerCache(); } catch (e) { /* read-only data folder */ }
 			resolve(Object.assign(r, { file }));
 		});
@@ -1777,12 +2100,12 @@ function pruneSteerCache() {
 	const d = dir(), fp = steerFp();
 	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_s\d+_[0-9a-f]+\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_s${SF.VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
-	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {
 	const d = dir(), fp = reachFp();
-	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+(_[0-9a-f]+)?\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_v${RF_VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
+	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_v\d+(_[0-9a-f]+)?(_dm)?\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_v${RF_VERSION}_${fp}.json`) || f.endsWith(`_v${RF_VERSION}_${fp}_dm.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
 	for (const { f } of fl.filter((x, k) => k >= 8 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
@@ -1893,6 +2216,7 @@ function launch(n) {
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
 	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined,
 		detached: !cpu });
+	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)) });
 	ch.stopFile = stopFile;
 	ch.startedAt = Date.now();
 	ch.paused = pausedNow;
@@ -1992,7 +2316,11 @@ function launch(n) {
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu || rolls) {
 				V.detail = `${rolls ? 'GPU' : `${ev.workers} thread${ev.workers > 1 ? 's' : ''}`}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
-					(ev.rooms > 1 ? ` in ${ev.allRooms > ev.rooms ? ev.allRooms : ev.rooms} rooms` : '') + (ev.gpu && ev.gpu.bursts ? `, ${ev.gpu.bursts} GPU bursts` : '') +
+					(ev.rooms > 1 ? ` in ${ev.allRooms > ev.rooms ? ev.allRooms : ev.rooms} rooms` : '') + (ev.gpu && ev.gpu.bursts ? `, ${ev.gpu.bursts} GPU bursts` +
+						// (their longest launch, by the GPU's clock where eegpu has it: the 50 ms rule on the big sizing, burstSizeArgs;
+						// and how often the big sizing met a full GPU: bursts.js SMALL)
+						(ev.gpu.maxKernelMs > 0 || ev.gpu.maxLaunchMs > 0 ? ` (longest launch ${Math.round(ev.gpu.maxKernelMs > 0 ? ev.gpu.maxKernelMs : ev.gpu.maxLaunchMs)} ms` +
+							`${ev.gpu.oom ? `, ${ev.gpu.oom} out of GPU memory${ev.gpu.small ? `, ${ev.gpu.small} to the small sizing` : ''}` : ''})` : '') : '') +
 					(ev.fed ? `, ${ev.fed} GPU random runs taken in` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
 					(V.found ? ', looking for a faster route' : '');
 			}
@@ -2062,6 +2390,9 @@ function launch(n) {
 			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
+		} else if (ev.ev === 'steer') {
+			// (the CPU search took a late steer field: lateSteer)
+			if (S.steer) S.steer.cpuAt = ev.sec;
 		} else if (ev.ev === 'closest') {
 			closer(ev, n);
 			// (a landing's nearer state: the CPU search goes on from it)
@@ -2133,6 +2464,7 @@ function launch(n) {
 			if (!line.startsWith('{') || (i !== lastProgress && isProgress(line))) continue;
 			let ev;
 			try { ev = JSON.parse(line); } catch (e) { continue; }
+			if (EVLOG) evlog(V.key, ev);
 			onEvent(ev);
 		}
 	});
@@ -2760,11 +3092,11 @@ function closer(ev, n) {
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
-	const deathTiles = cur.distBySteer ? STEER_MISS : RF.DEATH_TILES;
+	const deathTilesNow = cur.distBySteer ? STEER_MISS : deathTiles();
 	let own = null;
 	if (Number.isFinite(dist) && dist < 1e4 && (!(Vn.best >= 0) || dist < Vn.best - 1e-3)) {
 		Vn.best = dist; Vn.bestAt = Date.now();
-		if (ev.inputs && !ev.cut && dist < deathTiles) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
+		if (ev.inputs && !ev.cut && dist < deathTilesNow) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
 	// (the path skips' targets before any route: every search's own nearest attempt as it reports it (a tool reports its
 	// closest attempt when it got nearer by its own measure), also where the steer field has no value: on Egg Quest II the
@@ -2772,6 +3104,9 @@ function closer(ev, n) {
 	// per search, at most one batch per LANE_FEED_MS)
 	if (!Vn.lane && ev.inputs && !ev.cut) laneAttempt(String(ev.inputs), Vn.key);
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
+	// (past the plan: the CPU search measures by the plan past its count, the GPU tools by the field; one measure for the
+	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
+	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
@@ -2783,11 +3118,11 @@ function closer(ev, n) {
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
-	const viaDeath = !cut && !cur.distBySteer && dist >= RF.DEATH_TILES;
+	const viaDeath = !cut && !cur.distBySteer && dist >= deathTiles();
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
-	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer'); }
+	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
 	if (prec && !cut && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
 	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
@@ -2859,4 +3194,5 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, sourcesOf, classRoutes, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
