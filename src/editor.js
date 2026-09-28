@@ -1794,7 +1794,7 @@ function steerInfo(buf, hash) {
 				let past = null;
 				try {
 					const sp = SF.buildSteer(L, { coinT: st.info.fullT, maxMs: d.pastMs });
-					if (sp.dp) {
+					if (sp.dp && sp.info.dp && sp.info.dp.tour && sp.info.dp.tour.length) {   // (a DP with no value from the start, e.g. Forgotten Helix's at 15 coins: none)
 						const b = SF.steerFileBytes(sp, lfp);
 						fs.writeFileSync(d.past + '.tmp', b); fs.renameSync(d.past + '.tmp', d.past);
 						past = { T: sp.dp.T, n: sp.dp.n, planT: st.info.dp.T, tour: sp.info.dp.tour, start: Number.isFinite(sp.info.start) ? sp.info.start : null, ms: sp.info.ms, bytes: b.length };

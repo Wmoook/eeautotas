@@ -11,6 +11,10 @@
 //   node test/pastplan.js
 const fs = require('fs'), os = require('os'), path = require('path');
 const { spawn } = require('child_process');
+// (before src/ is required: the editor's data (the steer cache, the search's state) in a temp folder; no proof)
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'pastplan-home-'));
+process.env.EEAT_HOME = HOME;
+process.env.EEAT_PROOF = '0';
 const E = require('../src/eesim.js');
 const EL = require('../src/eelvl.js');
 const ED = require('../src/editor.js');
@@ -101,6 +105,16 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	check('... the worker takes it and the search goes on to its end (no error, no warning; its closest attempts after it carry the switch: sg)', doneEv && doneEv.end !== 'error' && !warn.length && closestAfter > 0,
 		`end ${doneEv && doneEv.end}, closest attempts by the new field: ${closestAfter}${warn.length ? `, warnings: ${warn.join(' | ').slice(0, 200)}` : ''}`);
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* temp */ }
+
+	console.log('\n== the editor: the steer worker builds the plan past its count, the running search gets it');
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 8, workers: 1 }, { available: false, why: 'test: no GPU' });
+	let es = ED.state();
+	for (const t0 = Date.now(); es.running && Date.now() - t0 < 30000 && !(es.steer && es.steer.past); es = ED.state()) await new Promise((r) => setTimeout(r, 100));
+	const ready = (es.log || []).find((x) => /the plan past its count is ready/.test(x));
+	check('the running search has the plan past its count (T 3, the plan\'s own 2) and says so', !!(es.steer && es.steer.past && es.steer.past.T === 3 && es.steer.past.planT === 2 && ready),
+		`${JSON.stringify(es.steer && es.steer.past)}; ${ready || 'no note'}`);
+	if (ED.state().running) { ED.stop(); for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 50)); }
+	try { fs.rmSync(HOME, { recursive: true, force: true }); } catch (e) { /* temp */ }
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })();
