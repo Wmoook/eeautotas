@@ -1036,7 +1036,7 @@ function pastPlanCheck() {
 	let told = 0;
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${cur.past.file}\n`); told++; } catch (e) { /* gone */ } }
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${cur.past.file}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
 	});
 	const after = Math.round((Date.now() - S.started) / 100) / 10;
 	if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
