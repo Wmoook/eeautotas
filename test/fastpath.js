@@ -7,7 +7,8 @@
 //            the gravity queue known and unknown, and a tile over (scoreAt's lookups); both fields (death edges or not)
 //   search   goexplore.js, one worker, the same seed and tick budget, the cell index as a Map (EEAT_CELLMAP=0) and as a
 //            CellMap: the same done event (cells, picks, rooms, snapshots, sweeps, routes: everything but the clocks),
-//            with --maxCells small enough that the sweeps delete cells while they iterate
+//            with --maxCells small enough that the sweeps delete cells while they iterate; --spd=0: the speed cells' stall
+//            clock is wall time (a run of more than --spd s is another search on a faster or slower machine or arm)
 // The engine (src/eesim.js) is not changed by these: its runs are the same tick for tick by construction.
 // usage: node test/fastpath.js [--only=cellmap,fifths,search] [--levels=<folder of .eelvl>] [--ticks=4000000]
 //   (--levels: every level there too, e.g. the user's campaign copies, which are never in git)
@@ -125,7 +126,7 @@ if (want('search')) {
 		let file = lv.file;
 		if (!file) { file = path.join(HOME, 'arena.eelvl'); fs.writeFileSync(file, lv.buf); }
 		const run = (cellmap) => {
-			const r = spawnSync(process.execPath, [GOX, file, '--workers=1', '--seed=3', `--maxTicks=${TICKS}`, '--seconds=900', '--mem=400', '--maxCells=1500'],
+			const r = spawnSync(process.execPath, [GOX, file, '--workers=1', '--seed=3', `--maxTicks=${TICKS}`, '--seconds=900', '--mem=400', '--maxCells=1500', '--spd=0'],
 				{ env: Object.assign({}, process.env, { EEAT_CELLMAP: cellmap }), encoding: 'utf8', maxBuffer: 256 << 20 });
 			const lines = (r.stdout || '').split('\n').filter((s) => s.startsWith('{'));
 			const done = lines.map((s) => { try { return JSON.parse(s); } catch (e) { return null; } }).find((o) => o && o.ev === 'done');
