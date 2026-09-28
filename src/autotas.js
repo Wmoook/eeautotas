@@ -26,7 +26,7 @@
 // The first route's job is started like the app's Resume: one job at a time, so a job that runs (the user's too) is
 // paused; at the end the AutoTASer pauses its own job only if it still runs the session it started.
 // Every TAS on the way is replayed (C.evaluate) and judged by the job's own rule (common.judge).
-//   node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1]
+//   node src/autotas.js <level.eelvl> [--minutes=30] [--workers=N] [--name=] [--out=<dir>] [--handoffMin=20] [--cpu=1] [--seed=N]
 // (Like the app's Resume, its job pauses any other running job, the user's own included: one job at a time.)
 // Prints one JSON line per event ({t, ev: start|route|job|fed|best|handoff|end, ...}; t = seconds since the start) and
 // writes them to <out>/timeline.jsonl with <out>/final.eetas (default out: src/out/autotas/<level name>).
@@ -100,7 +100,8 @@ function run(o) {
 	try { lc = require('./levelcheck.js').checkLevel(o.eelvl); } catch (e) { lc = null; }
 	emit(Object.assign({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` },
 		lc ? { md5: lc.md5, ...(lc.warnings.length ? { warnings: lc.warnings } : {}), ...(lc.notes.length ? { notes: lc.notes } : {}) } : {}));
-	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, source: o.source }, o.gpu || { available: gpuOk });
+	// o.seed: Find a route's seed (editor.js start(): 1 when none), so two runs of one level can differ (problem 10)
+	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, source: o.source, seed: o.seed }, o.gpu || { available: gpuOk });
 	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
@@ -248,7 +249,7 @@ if (require.main === module) {
 	const name = args.name || path.basename(file, path.extname(file));
 	const out = path.resolve(args.out || path.join(__dirname, 'out', 'autotas', name.replace(/[^\w.-]+/g, '_')));
 	const ctl = run({ eelvl: fs.readFileSync(file), minutes: args.minutes, workers: args.workers, name, out, handoffMin: args.handoffMin, cpu: args.cpu === '1',
-		onEvent: (e) => console.log(JSON.stringify(e)), onEnd: () => setTimeout(() => process.exit(0), 3000) });
+		seed: args.seed != null ? +args.seed : undefined, onEvent: (e) => console.log(JSON.stringify(e)), onEnd: () => setTimeout(() => process.exit(0), 3000) });
 	const stop = () => ctl.stop();
 	process.on('SIGINT', stop);
 	process.on('SIGTERM', stop);

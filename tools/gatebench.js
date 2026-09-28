@@ -36,6 +36,9 @@ const LEVELS = {
 	sf: ['stupid-fox-oc-a93a88', 'stupid-fox-lictor-da5517'],
 	ip: ['infinity-pain-kiraninja-pwe7zf-v-b42e94', 'infinity-pain-kiraninja-pwe7zf-v-38843e'],
 	ice: ['ice-level-oc-850ef2'],
+	// (Are You A God: no known TAS, our AutoTAS's best; its U gate (coins=13 -> the U's way out) is the momentum trap of
+	// goexplore --spd; not in the default --levels)
+	ayg: ['autotas-are-you-a-god-from-the-l-537419', 'autotas-are-you-a-god-from-the-l-9fc05c'],
 };
 
 const argv = process.argv.slice(2);
