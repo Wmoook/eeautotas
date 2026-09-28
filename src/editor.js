@@ -522,7 +522,12 @@ function schedule() {
 		// the GPU 38-66% of the time before the first route on Octorage, Infinity Pain, Endeavor and Forgotten Veil, and the
 		// search made 0.6-1.2 new rooms a minute in them against 3.4-4.2 outside (src/out/night/n2_1_time_to_route.md); the
 		// round's explore fits its table to the memory left (--reserve), a burst that finds none waits (goexplore --burstOomS))
-		const share = !!(cur && cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB);
+		// Gated (cycle 2): the round keeps the GPU to itself until one of its runs ends with no gate entered and no progress
+		// of its own (a nearer attempt by BREAK_TILES or a new room with territory gain from the breaker's own attempts:
+		// R.dry); a later run of its own that gets on closes it again. Cycle 1's ungated share (every round from its first
+		// run) slowed the rounds that pass Octorage's wall (1,856 s vs main's 862 s; one pair)
+		const R = brk && brk.round;
+		const share = !!(cur && cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB && R && (R.dry || 0) >= BREAK_SHARE_DRY);
 		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare));
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
@@ -683,7 +688,7 @@ function addSource(o) {
 	if (o.gain > s.gain) s.gain = o.gain;
 	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
 	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
-	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room'); }
+	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room', S.strategies.some((q) => q.key === 'breaker' && q.label === o.from)); }
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
@@ -924,6 +929,9 @@ const BREAK_RESERVE_F = 0.15;
 // the first seconds on the shared H100 cost Infinity Pain every move, straight and the GPU random runs for 30 min). The
 // breaker waits the same way for the table it planned (BREAK_MEM_WAITS a round) before it takes a smaller one.
 const GPU_RETRY_S = [5, 20, 60], BREAK_MEM_WAITS = 3;
+// the gated share (breakShare, schedule()): the round's runs in a row with no gate and no progress of their own before the
+// one search's bursts go on beside it
+const BREAK_SHARE_DRY = 1;
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
 const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
@@ -1034,10 +1042,12 @@ const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((me
 // level (BREAK_WAIT_S index), tried (the starting points used: sha1 of the inputs), rounds, round, seeds}
 let brk = null;
 /** the search got somewhere (why: 'nearer' by BREAK_TILES, or 'room' for a new room): the stall clock starts over */
-function breakProgress(why) {
+function breakProgress(why, own) {
 	if (!brk) return;
 	brk.at = Date.now();
 	if (brk.round) brk.round.progress.push(why);
+	// (the breaker's own progress: its runs' nearer attempts and their new rooms; the gated share, schedule())
+	if (brk.round && own) brk.round.own = (brk.round.own || 0) + 1;
 	if (S.breaker) S.breaker.last = { why, after: Math.round((Date.now() - S.started) / 100) / 10 };
 }
 /** the round's starting points: up to BREAK_STARTS {inputs, what, dist, key, room} not used before in this search */
@@ -1125,6 +1135,7 @@ function breakLaunch(n) {
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
 	V.brk = { file, keep: ch.inputs.length, cells: BREAK_GRAINS[ch.grain], cellLog, region, reserve, gateReach: ch.gate ? ch.gate.reach : '', gateHit: null, seconds: Math.max(1, Math.round(Math.min(cur.opts.breakStep, roundLeft, left))) };
 	R.runs++;
+	R.own0 = R.own || 0;   // (the gated share: this run's own progress, breakAfter)
 	if (S.breaker && S.breaker.round) S.breaker.round.runs = R.runs;
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
@@ -1140,6 +1151,15 @@ function breakAfter(n, how) {
 	if (!R.chain) return breakLaunch(n);   // (its run failed: the next starting point)
 	const ch = R.chain, b = V.bestTry;
 	const hit = V.brk && V.brk.gateHit;
+	// (the gated share: a run with no gate and no progress of its own opens the one search's bursts beside the round, one
+	// that got on closes them again; schedule())
+	R.dry = hit || (R.own || 0) > (R.own0 || 0) ? 0 : (R.dry || 0) + 1;
+	if (S.breaker && S.breaker.round) S.breaker.round.dry = R.dry;
+	if (cur.opts.breakShare && toolInfo && toolInfo.memMB >= BURST_BIG_MB && S.strategies.some((q) => q.gpuShare)) {
+		if (R.dry === BREAK_SHARE_DRY) note(`${V.label}: round ${brk.rounds} run ${R.runs} got nothing of its own: the one search's bursts go on beside the round`);
+		else if (!R.dry && (R.shared || 0) >= BREAK_SHARE_DRY) note(`${V.label}: round ${brk.rounds} run ${R.runs} got on: the round has the GPU to itself again`);
+		R.shared = R.dry;
+	}
 	if (hit) {
 		// the coin plan's next gate entered: the attempt goes to the other strategies (the CPU search's archive: a new
 		// room where a door reads the coins; a new room with territory gain is the stall clock's progress there) and the
@@ -2490,7 +2510,7 @@ function closer(ev, n) {
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES)
-	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer'); }
+	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
 	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
