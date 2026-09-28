@@ -1033,7 +1033,8 @@ async function cpuSection() {
 	// the speed cells (--spd, coarse cells): a 60 x 50 level whose trophy stands behind a 5-coin door and no coin exists:
 	// the search stalls at the door, so after --spd seconds without progress the frontier room gets the fastest arrival's
 	// cells next to the earliest (EEAT_SPDLOG records the flag); --spd=0 never flags; neither finds a route (the door never
-	// opens: the flags add cells, they never let a state through)
+	// opens: the flags add cells, they never let a state through). --roomDead=0: the room dead ends (dead-end-traps) prove
+	// this start a dead end (no coin to open the door: the whole room is cut at once, 1 cell), and the stall is the point
 	const sd = room(60, 50);
 	for (let y = 1; y < 49; y++) sd.push([30, y, 43, 5]);
 	for (let x = 5; x < 28; x += 4) sd.push([x, 44 - (x % 8), 9]);
@@ -1041,8 +1042,8 @@ async function cpuSection() {
 	const sdFile = path.join(HOME, 'spdstall.eelvl');
 	fs.writeFileSync(sdFile, ED.eelvlOf({ name: 'speed cells stall', width: 60, height: 50, cells: sd }));
 	const sdLog = path.join(HOME, 'spdstall.jsonl');
-	const sdOn = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=2'], null, { env: Object.assign({}, process.env, { EEAT_SPDLOG: sdLog }) });
-	const sdOff = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=0']);
+	const sdOn = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=2', '--roomDead=0'], null, { env: Object.assign({}, process.env, { EEAT_SPDLOG: sdLog }) });
+	const sdOff = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=0', '--roomDead=0']);
 	const sdFlags = fs.existsSync(sdLog) ? fs.readFileSync(sdLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.ev === 'flag') : [];
 	const sdW = (r) => (r.done && r.done.workers && r.done.workers[0]) || {};
 	check('speed cells: a search stalled for --spd seconds flags its frontier room (the fastest arrival next to the earliest cell); --spd=0 flags nothing; no route in either (the 5-coin door never opens)',
