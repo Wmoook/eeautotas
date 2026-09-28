@@ -1920,10 +1920,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (bg !== null) {
 				if (bg.rooms.length === 1) br = bg.rooms[0];
 				else {
-					let n = 0;
-					for (const r of bg.rooms) n += r.arr.length;
-					let u = (rnd() * n) | 0;
-					for (const r of bg.rooms) { if (u < r.arr.length) { br = r; break; } u -= r.arr.length; }
+					// (its rooms (the time doors' two states) by main's room weight: the one picked least, as a tournament of them)
+					let rw = -1;
+					for (const r of bg.rooms) {
+						if (!r.arr.length) continue;
+						const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1);
+						if (w > rw) { rw = w; br = r; }
+					}
 				}
 			}
 		} else {
@@ -2808,10 +2811,13 @@ async function gpuMain(a, L, m) {
 			if (bg !== null) {
 				if (bg.rooms.length === 1) br = bg.rooms[0];
 				else {
-					let n = 0;
-					for (const r of bg.rooms) n += r.arr.length;
-					let u = (rnd() * n) | 0;
-					for (const r of bg.rooms) { if (u < r.arr.length) { br = r; break; } u -= r.arr.length; }
+					// (its rooms (the time doors' two states) by main's room weight: the one picked least, as a tournament of them)
+					let rw = -1;
+					for (const r of bg.rooms) {
+						if (!r.arr.length) continue;
+						const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1);
+						if (w > rw) { rw = w; br = r; }
+					}
 				}
 			}
 		} else {
