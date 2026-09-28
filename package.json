@@ -1,6 +1,6 @@
 {
   "name": "eeautotas",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Automatic TAS optimizer for Everybody Edits Offline (eeo-tas .eetas files)",
   "private": true,
   "scripts": {
