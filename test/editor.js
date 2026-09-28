@@ -745,6 +745,26 @@ async function passesSection() {
 	// the table by the GPU's memory (BREAK_MEM_F at 16 bytes a cell): 8 GB 2^27, 24 GB 2^29, 40 GB 2^30, 80 GB 2^31
 	check("the wall breaker's table: 2^27 cells on 8 GB, 2^29 on 24 GB, 2^30 on 40 GB (40,326 MB), 2^31 on 80 GB (81,559 MB)",
 		[8192, 24564, 40326, 81559].map(ED.breakCells).join() === '27,29,30,31', [8192, 24564, 40326, 81559].map(ED.breakCells).join());
+	// the one search's bursts by the GPU's memory (burstBig): the laptop sizing below 20 GB, 2 lanes of 2^26 cells with the
+	// settings' own caps from 20 GB; the gated share (breakShare): the bursts go on beside a breaker round only on such a GPU
+	// and only once a run of the round got no gate and no progress of its own (a run that got on closes it again)
+	{
+		const sz = [8192, 16384, 24564, 40326, 81559].map((mb) => ED.burstSizeArgs(mb).join(' ') || '-');
+		const on = { breakShare: true }, off = { breakShare: false };
+		const open = [
+			ED.breakShareOpen(on, 40326, { dry: 1 }), ED.breakShareOpen(on, 40326, { dry: 0 }), ED.breakShareOpen(on, 40326, {}),
+			ED.breakShareOpen(on, 8192, { dry: 3 }), ED.breakShareOpen(off, 81559, { dry: 3 }), ED.breakShareOpen(on, 81559, null),
+			// the time gate: a whole breakStep (20 s) of the round without its own progress or a gate (R.quiet, else R.t0)
+			ED.breakShareOpen(on, 40326, { dry: 1, t0: 1e6 }, 1e6 + 5000), ED.breakShareOpen(on, 40326, { dry: 1, t0: 1e6 }, 1e6 + 20000),
+			ED.breakShareOpen(on, 40326, { dry: 2, t0: 1e6, quiet: 1e6 + 50000 }, 1e6 + 60000), ED.breakShareOpen({ breakShare: true, breakStep: 5 }, 40326, { dry: 1, t0: 1e6 }, 1e6 + 6000)];
+		// runs: no gate / no own progress, again, a gate, own progress, nothing
+		let d = 0; const dry = [];
+		for (const [hit, own, own0] of [[false, 0, 0], [false, 2, 2], [true, 2, 2], [false, 3, 3], [false, 5, 3], [false, 5, 5]]) { d = ED.breakDryAfter(d, hit, own, own0); dry.push(d); }
+		check('the bursts by the GPU: the laptop sizing below 20 GB, --burstPar=2 --gpuCells=26 --burstCap=0 from 20 GB; the gated share opens only on such a GPU after a dry run and a whole breakStep of the round without its own progress, and a gate or its own progress closes it',
+			sz.join('|') === '-|-|--burstPar=2 --gpuCells=26 --burstCap=0|--burstPar=2 --gpuCells=26 --burstCap=0|--burstPar=2 --gpuCells=26 --burstCap=0' &&
+			open.join() === 'true,false,false,false,false,false,false,true,false,true' && dry.join() === '1,2,0,1,0,1',
+			`sizes ${sz.join(' | ')}; open ${open.join()}; dry ${dry.join()}`);
+	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
 	// its stdin and goes on; once every other GPU strategy has ended with the route known it stops with the CPU search
@@ -1016,6 +1036,29 @@ async function cpuSection() {
 	// route here, 416 ticks, after 8,163 simulated ticks
 	check('coarse cells pick like the research prototype where every room opens territory: the first route 416 ticks after 8,163 simulated ticks (seed 3)',
 		k1.results.length > 0 && k1.results[0].ticks === 416 && k1.results[0].simTicks === 8163, `${k1.results.length ? `${k1.results[0].ticks}@${k1.results[0].simTicks}` : 'no route'}`);
+	// the speed cells (--spd, coarse cells): a 60 x 50 level whose trophy stands behind a 5-coin door, the level's 5 coins
+	// behind it too: the search stalls at the door, so after --spd seconds without progress the frontier room gets the
+	// fastest arrival's cells next to the earliest (EEAT_SPDLOG records the flag); --spd=0 never flags; neither finds a route
+	// (the door never opens: the flags add cells, they never let a state through). --roomDead=0: the room dead ends
+	// (dead-end-traps) prove this start a dead end (no coin on its side: the whole room is cut at once, 1 cell), and the
+	// stall is the point. (The coins exist: with none, the reach field's never-open coin doors (reach.js neverOpenDoors,
+	// hx-int-1) make the door a wall, the start is cut off and the search ends at once: sound, but no stall either)
+	const sd = room(60, 50);
+	for (let y = 1; y < 49; y++) sd.push([30, y, 43, 5]);
+	for (let x = 5; x < 28; x += 4) sd.push([x, 44 - (x % 8), 9]);
+	for (let x = 40; x < 45; x++) sd.push([x, 30, 100]);
+	sd.push([3, 48, 255], [50, 48, 121]);
+	const sdFile = path.join(HOME, 'spdstall.eelvl');
+	fs.writeFileSync(sdFile, ED.eelvlOf({ name: 'speed cells stall', width: 60, height: 50, cells: sd }));
+	const sdLog = path.join(HOME, 'spdstall.jsonl');
+	const sdOn = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=2', '--roomDead=0'], null, { env: Object.assign({}, process.env, { EEAT_SPDLOG: sdLog }) });
+	const sdOff = await goexplore(sdFile, ['--workers=1', '--seed=3', '--seconds=6', '--spd=0', '--roomDead=0']);
+	const sdFlags = fs.existsSync(sdLog) ? fs.readFileSync(sdLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.ev === 'flag') : [];
+	const sdW = (r) => (r.done && r.done.workers && r.done.workers[0]) || {};
+	check('speed cells: a search stalled for --spd seconds flags its frontier room (the fastest arrival next to the earliest cell); --spd=0 flags nothing; no route in either (the 5-coin door never opens)',
+		sdFlags.length >= 1 && sdFlags[0].s >= 2 && sdW(sdOn).spdFlags >= 1 && sdW(sdOn).spdPeak >= 1 && sdW(sdOff).spdFlags === 0 && sdOn.results.length === 0 && sdOff.results.length === 0 &&
+		sdOn.done.end === 'time' && sdOff.done.end === 'time',
+		`flags ${sdFlags.map((e) => `${e.s} s ${e.desc}`).join(', ')}; on: spdFlags ${sdW(sdOn).spdFlags}, cells ${sdW(sdOn).cells}; off: spdFlags ${sdW(sdOff).spdFlags}, cells ${sdW(sdOff).cells}`);
 	// the source events: the key's room once (its first cell: its inputs end where the ball entered it, with the key)
 	const RM = GX.roomOf(kdLevel);
 	const roomAt = (inputs) => { const s = new E.EESim(kdLevel), inp = new E.EEInput(); s.reset(); let k = RM.key(s), prev = k; for (const ch of inputs) { E.applyMask(inp, ch.charCodeAt(0) - 48); s.tick(inp); prev = k; k = RM.key(s); } return { key: k, entered: k !== prev, desc: RM.desc(s) }; };
@@ -1026,6 +1069,32 @@ async function cpuSection() {
 		!!kr && kr.desc === 'key:red' && kr.gain > 0 && kr.tick === kr.inputs.length && at.key === kr.room && at.entered && at.desc === 'key:red' &&
 		ks.filter((e) => e.kind === 'room').length === new Set(ks.filter((e) => e.kind === 'room').map((e) => e.room)).size,
 		ks.map((e) => `${e.kind} "${e.desc}" gain ${e.gain} tick ${e.tick}`).join('; '));
+	// the viewing-room trap (test/reach.js H; Forgotten Helix's spectator box): 80 x 40, walk mode, the trophy's half a dot
+	// field behind a spike wall, reached by a portal; a spectator box by the trophy (spike walls) whose only way out is its
+	// portal back; the protection effect by the trophy; a pocket only a death leaves. When the protection effect made every
+	// spike air the box was 8.6 tiles from the trophy, the start 19.6, and the CPU search's first route came after 47,878 /
+	// 81,202 / 99,482 simulated ticks (seeds 1-3, one worker); the box now ranks behind the start (53.8 vs 50.8 tiles):
+	// 8,358 / 12,105 / 7,188
+	{
+		const W = 80, H = 40, c = room(W, H);
+		for (let y = 1; y < H - 1; y++) for (let x = 42; x < W - 1; x++) c.push([x, y, 4]);
+		for (let y = 1; y < H - 1; y++) c.push([40, y, 361, 1]);
+		for (let x = 68; x <= 72; x++) c.push([x, 6, 361, 1], [x, 10, 9]);
+		for (let y = 7; y <= 9; y++) c.push([68, y, 361, 1], [72, y, 361, 1], [69, y, 0], [70, y, 0], [71, y, 0]);
+		c.push([70, 9, 242, 0, 3, 4], [12, 38, 242, 0, 4, 3], [6, 38, 242, 0, 1, 2], [45, 38, 242, 0, 2, 1], [18, 38, 242, 0, 5, 7]);
+		for (let x = 23; x <= 27; x++) c.push([x, 2, 9], [x, 6, 9]);
+		for (let y = 3; y <= 5; y++) c.push([23, y, 9], [27, y, 9]);
+		c.push([25, 5, 361, 1], [25, 3, 242, 0, 7, 99], [2, 38, 255], [30, 38, 360], [77, 5, 121], [77, 3, 420, 1], [78, 38, 453, 0]);
+		const trapBuf = ED.eelvlOf({ name: 'viewing room trap', width: W, height: H, cells: c });
+		const trapFile = path.join(HOME, 'trap.eelvl');
+		fs.writeFileSync(trapFile, trapBuf);
+		const trapLevel = E.prepareLevel(EL.toSimLevel(EL.readEelvl(trapBuf)));
+		const tr = [];
+		for (const sd of [1, 2, 3]) tr.push(await goexplore(trapFile, ['--workers=1', `--seed=${sd}`, '--maxTicks=30000', '--seconds=30', '--mem=300', '--first=1']));
+		check('the viewing-room trap: the CPU search\'s first route within 30,000 simulated ticks (seeds 1-3, one worker; when every spike was air: 47,878-99,482), each one finishing in the JS engine',
+			tr.every((r) => r.results.length > 0 && r.results[0].simTicks <= 30000) && tr.every((r) => replays(trapLevel, r.results)),
+			tr.map((r) => (r.results.length ? `${r.results[0].ticks}@${r.results[0].simTicks}` : `none (${r.summary})`)).join(', '));
+	}
 	// a full archive sweeps: a 60 x 50 level of 10 purple switches, a purple door wall and a trophy walled in (no route;
 	// --prune=0, as the editor runs a level the reach field calls impossible). With room for 300 cells (--maxCells) the
 	// cells no run touched for longest go and the search goes on; no room is left without cells (a room is made with its
@@ -1063,6 +1132,13 @@ async function cpuSection() {
 	// tick short of the key: the operator goes on into the room the trigger makes (its last input again), and the attempt
 	// goes into every worker's archive
 	const BU = require('../src/bursts.js');
+	// target-fair rooms (--burstFair): a room's score divided by 1 + failed chains / (3 x its untried targets): after 6
+	// failed chains a room of 1 target (a phantom behind a lid) ranks below a room of 13 targets with the same bandit score;
+	// a room with no failure keeps its score; the order only (an untried room's UNTRIED score is never divided)
+	const fs1 = BU.fairScore(0.5, 6, 1), fs13 = BU.fairScore(0.5, 6, 13);
+	check('target-fair rooms: the score per untried target not yet failed (1 target, 6 failed chains: a third; 13 targets: 0.87 of it; no failure: as before; 0 targets counts 1)',
+		Math.abs(fs1 - 0.5 / 3) < 1e-9 && Math.abs(fs13 - 0.5 / (1 + 6 / 39)) < 1e-9 && fs13 > fs1 && BU.fairScore(0.5, 0, 1) === 0.5 && BU.fairScore(0.5, 3, 0) === BU.fairScore(0.5, 3, 1),
+		`1 target ${fs1.toFixed(3)}, 13 targets ${fs13.toFixed(3)}`);
 	const TRk = BU.triggersOf(kdLevel);
 	const standin = path.join(HOME, 'burst_standin.js');
 	fs.writeFileSync(standin, [
@@ -1081,6 +1157,25 @@ async function cpuSection() {
 	check('the one search\'s GPU bursts (a stand-in for eegpu): the key is the level\'s one trigger; a burst from the start\'s room reaches it, goes on into the key\'s room and its attempt goes into the archive',
 		TRk.n === 1 && !!b1 && b1.room === '(start)' && b1.reached && b1.changed && !!ob.done && ob.done.gpu && ob.done.gpu.imports >= 1 && ob.done.workers[0].imports >= 1 &&
 		!ob.events.some((e) => e.ev === 'warning'), `${TRk.n} trigger(s); ${JSON.stringify(b1 || null)}; ${JSON.stringify(ob.done && ob.done.gpu)}; ${ob.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ')}`);
+	// the stall ladder (bursts.js stallStep, --stallLadder): an arm's bursts that gained nothing (no target, no room, not a
+	// tile nearer) count; at STALL_N the start goes up the ladder, once per start (by its length); a gain starts over; a
+	// ladder's own bursts do not count
+	{
+		const arm = {}, st1 = [];
+		const job = (len, extra) => Object.assign({ inputs: 'x'.repeat(len), startDist: 40, chain: 0 }, extra || {});
+		const miss = { reached: false, fresh: 0, near: 40 };
+		for (let k = 0; k < 3; k++) st1.push(BU.stallStep(arm, job(500), miss));
+		const again = [BU.stallStep(arm, job(500), miss), BU.stallStep(arm, job(500), miss), BU.stallStep(arm, job(500), miss)];
+		const other = [BU.stallStep(arm, job(300), miss), BU.stallStep(arm, job(300), miss), BU.stallStep(arm, job(300), miss)];
+		const arm2 = {};
+		const gainReset = [BU.stallStep(arm2, job(500), miss), BU.stallStep(arm2, job(500), miss), BU.stallStep(arm2, job(500), { reached: false, fresh: 0, near: 30 }),
+			BU.stallStep(arm2, job(500), miss), BU.stallStep(arm2, job(500), { reached: false, fresh: 1, near: 40 }), BU.stallStep(arm2, job(500), miss)];
+		const ladderOwn = BU.stallStep({ stall: 5 }, job(500, { stallLadder: true }), miss);
+		check('the stall ladder: 3 bursts of an arm that gain nothing send the start up the ladder (the 3rd), the same start never again, another start at once while the arm stays stalled; a nearer tile or a new room starts the count over; a ladder\'s own bursts do not count',
+			BU.STALL_N === 3 && st1.join() === 'false,false,true' && again.join() === 'false,false,false' && other.join() === 'true,false,false' &&
+			gainReset.every((x) => x === false) && ladderOwn === false && BU.STALL_WALL.length > 4,
+			`${st1} / ${again} / ${other} / ${gainReset} / ${ladderOwn}`);
+	}
 	// after the first route (src/out/night/macro.md). The sound lower bound per tile (goexplore.js lowerBoundTiles): along
 	// every route of the key level, at every tick t, t + the bound at the ball's tile is at most the route's length (it never
 	// cuts a real route), and it is not all zeros
@@ -1143,6 +1238,35 @@ async function cpuSection() {
 	check('the one search\'s bursts on a full GPU: 4 "out of memory" failures wait and try again, 3 dying starts count as their arms\' failures only, then bursts run; never "no more GPU bursts"',
 		!!og && og.oom === 4 && og.failed === 7 && og.bursts >= 1 && !oo.events.some((e) => e.ev === 'warning' && /no more GPU bursts/.test(e.text)),
 		`${JSON.stringify(og)}; ${oo.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 400)}`);
+	// the big sizing (the editor's burstBig: 2 lanes, 2^26 cells, 1 M layers) on a full GPU: its first out-of-memory failure
+	// takes the small sizing at once (lane 0 alone, 2^25 cells, <= 262,144 states a layer, no wait) for --burstSmallS, then
+	// the big one again; the bursts' longest launch (eegpu's done lines) is kept
+	const bigTool = path.join(HOME, 'burst_big.js'), bigLog = path.join(HOME, 'burst_big.log');
+	fs.writeFileSync(bigTool, [
+		"'use strict';",
+		"const fs = require('fs');",
+		`const f = ${JSON.stringify(bigLog)};`,
+		"const a = process.argv.slice(2), opt = (k) => (a.find((x) => x.startsWith('--' + k + '=')) || '').split('=')[1];",
+		// (the first launch of either lane, by an exclusive create: the one out-of-memory failure)
+		"let oom = false; try { fs.closeSync(fs.openSync(f + '.oom', 'wx')); oom = true; } catch (e) { /* not the first */ }",
+		"fs.appendFileSync(f, JSON.stringify({ t: Date.now(), cells: +opt('cells'), cap: +opt('cap'), oom }) + '\\n');",
+		"if (oom) { console.log(JSON.stringify({ error: 'cuMemAlloc_v2(&p, bytes) failed: CUDA error 2 (out of memory)' })); process.exit(4); }",
+		"console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
+		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1, maxLaunchMs: 12.5, maxKernelMs: 7.25 })), 200);",
+	].join('\n'));
+	const ogb = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=16', '--mem=300', '--bursts=1', `--tool=${bigTool}`, `--work=${path.join(HOME, 'bursts5')}`,
+		'--burstPar=2', '--gpuCells=26', '--burstCap=0', '--burstSmallS=4']);
+	const gb = ogb.done && ogb.done.gpu;
+	let bl = [];
+	try { bl = fs.readFileSync(bigLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch (e) { /* none */ }
+	const b0 = bl.find((x) => x.oom), tOom = b0 ? b0.t : 0;
+	const inSmall = bl.filter((x) => x.t > tOom + 400 && x.t < tOom + 3600), after = bl.filter((x) => x.t > tOom + 5000);
+	check('the big burst sizing on a full GPU: the first "out of memory" takes the small sizing at once (lane 0 alone, 2^25 cells, 262,144 states a layer) for --burstSmallS, then the big one again; the longest launch kept',
+		!!gb && gb.oom === 1 && gb.small === 1 && !!b0 && b0.cells === 26 && inSmall.length >= 2 && inSmall.every((x) => x.cells === 25 && x.cap <= 262144) &&
+		// (lane 0 alone: one burst of 200 ms at a time, not two side by side)
+		inSmall.every((x, i) => i === 0 || x.t - inSmall[i - 1].t >= 150) && after.some((x) => x.cells === 26) &&
+		gb.maxLaunchMs === 12.5 && gb.maxKernelMs === 7.25 && !ogb.events.some((e) => e.ev === 'warning' && /again in/.test(e.text)),
+		`${JSON.stringify(gb)}; launches ${bl.map((x) => `${x.t - tOom}:${x.cells}/${x.cap}`).join(' ')}; ${ogb.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
@@ -1176,6 +1300,18 @@ async function cpuSection() {
 		st.stage === 'not found' && st.impossible && st.impossible.by === 'physics' && st.elapsed >= 4 && st.elapsed < 15 && st.log.some((x) => /checking that with random runs \(CPU\), without the physics check/.test(x)),
 		`${st.elapsed.toFixed(1)} s: ${st.message}`);
 	check('... and no proof (eegpu prove) runs: the physics check has proven it already', !st.proof, JSON.stringify(st.proof || null));
+	// a steer field built after the search started (the wait forced to 0 ms; a key off the way: 2 layers, on a level no
+	// earlier search built it for): the CPU search takes it when it arrives (goexplore.js stdin "steer <file>", its
+	// "steer" event), the distances stay the reach field's
+	const LW = 44, LH = 7, lcells = [...room(LW, LH), [18, 5, 255], [1, 5, 6], [LW - 4, 5, 121]];
+	for (let y = 1; y < LH - 1; y++) lcells.push([LW - 6, y, 23]);
+	const kdLate = ED.eelvlOf({ name: 'late steer', width: LW, height: LH, cells: lcells });
+	ED.start({ eelvlB64: kdLate.toString('base64'), seconds: 6, workers: 1 }, { available: false, why: 'test: no GPU' }, { steerWaitMs: 0 });
+	st = await waitDone(25000);
+	check('a late steer field: taken when its build ends (the CPU search\'s head A from then on, its "steer" event), the distances still the reach field\'s',
+		st.stage === 'found' && !!st.steer && Number.isFinite(st.steer.late) && Number.isFinite(st.steer.cpuAt) && !st.steer.gpu && st.log.some((x) => /the steer field is still building/.test(x)) &&
+		st.log.some((x) => /arrived [\d.]+ s into the search: from now on it orders the CPU search/.test(x)) && !(st.closest && st.closest.steer !== undefined),
+		`${st.stage}; steer ${JSON.stringify(st.steer)}; ${st.log.filter((x) => /steer/.test(x)).join(' | ')}`);
 
 	// the precision stage (src/precision.js, "exact landings"): the user's pocket puzzle (test.eelvl's shape: a trophy pocket
 	// under a spike whose right side is a half block) at x 1976: the ball must drop in with px == 1976.0 exactly. The
