@@ -233,7 +233,22 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, nice: 0,
-	jumpP: 0, jumpNear: 0.75 };
+	jumpP: 0, jumpNear: 0.75, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300 };
+// --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
+// distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
+// room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
+// buckets (round(vx), round(vy)) instead of the vx sign / vy class, so a faster arrival at a tile is a new cell and
+// survives (energy pumping, run-ups: Are You A God's U held main's search 17.7 min; 1 px/tick buckets got out in 7.7 s,
+// but everywhere they blow the cells up 2.6 K -> 269 K a worker). Every further S seconds of stall flags the next
+// frontier room, at most --spdMax; a room made from a flagged room is flagged too (--spdKids=1; the way out of the trap); the flags all
+// go when the nearest distance drops by SPD_PROGRESS (the cells made meanwhile stay: they are valid states).
+// --spdMode=1 (the default): a flagged room keeps its coarse cells as they are (the earliest state) and next to each one
+// a second cell with the FASTEST arrival (the most vx^2 + vy^2; the pick runs' states only): at most 2x the cells (the U
+// from its coins=13 state: out in 77 s, as with the buckets; the buckets (--spdMode=0) grew the cells 17-28x and
+// their A/B pair from scratch lost: a slower first route). --spdSlack=T (mode 1; 0 = off, default 300): a fast cell takes only arrivals
+// at most T ticks after its coarse cell's earliest (default 300; the fastest arrival of ANY lineage made the first routes 1,000-1,700
+// ticks slower in both A/B pairs: the lineage that escaped had come the slow way).
+const SPD_PROGRESS = 1;
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -827,6 +842,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03))) : null;   // (its walk cache: 3%)
 	const rooms = new Map(), roomList = [];
 	let roomKey = 0, bursts = 0;
+	// (--spd: the flagged rooms; the flags the stall clock set since the last progress; the nearest distance at the clock's
+	// last reset and when; for the stats: flagged now, flags set in all, the most flagged at once)
+	const spdRooms = [];
+	let spdTrig = 0, spdAt = Date.now(), spdBest = Infinity, spdOn = 0, spdFlags = 0, spdPeak = 0;
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
@@ -841,6 +860,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
 		const r = { key, desc: RM.desc(sim), t, gain: f.gain, troOk: f.troOk, picks: 0, arr: [], best: null, isNew: true, sent: 0, sentAt: null,
 			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true };
+		if (a.spdKids && pr !== undefined && pr.spd) { r.spd = true; spdRooms.push(r); }
 		rooms.set(key, r);
 		roomList.push(r);
 		return r;
@@ -849,7 +869,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
 	const KV = new Int32Array(10);
-	let tile = 0;
+	let tile = 0, spdCur = false, spdFast = false, spdT0 = 0;
 	const cellKey = () => {
 		const px = sim.px, py = sim.py;
 		const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
@@ -862,7 +882,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (r << 1); KV[2] = sim.jump_count; KV[3] = sim._q0; KV[4] = sim._q1; KV[5] = disc(sim);
 		}
 		let n;
-		if (r === 0) {
+		if (r === 0 && spdFast) {
+			// (--spdMode=1: the fastest arrival's cell next to the coarse one: the class keys and a 9th number)
+			const vy = sim.speed_y;
+			KV[6] = Math.sign(sim.speed_x); KV[7] = vy < -3 ? 0 : vy < 0 ? 1 : vy === 0 ? 2 : 3; KV[8] = 0x5f;
+			n = 9;
+		} else if (r === 0 && spdCur) {
+			// (--spd: a stuck room's cells by speed, 1 px/tick buckets; the 9th number keeps them apart from the class keys)
+			KV[6] = Math.round(sim.speed_x); KV[7] = Math.round(sim.speed_y); KV[8] = 0x5d;
+			n = 9;
+		} else if (r === 0) {
 			const vy = sim.speed_y;
 			KV[6] = Math.sign(sim.speed_x); KV[7] = vy < -3 ? 0 : vy < 0 ? 1 : vy === 0 ? 2 : 3;
 			n = 8;
@@ -980,15 +1009,21 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let deepest = 0, full = false, impr = 0, needSweep = false, sweeps = 0, evicted = 0, picks = 0, sweptAt = -1e9;
 	/** the live state (tick t, reach cost rc; reached from cell pc's state by the inputs blk.b[o ..+ n) after path node up;
 	 *  coarse cells: in room) into the archive; returns the cell when it is new */
-	const add = (t, rc, pc, up, blk, o, n, room) => {
+	const add = (t, rc, pc, up, blk, o, n, room, fast) => {
 		if (t >= maxT) return null;   // (a route from there would not be faster)
 		// (nor from a state whose sound lower bound to the trophy ends past it: lowerBoundTiles)
 		if (LBT !== null && t + Math.max(1, LBT[centreTile()]) > maxT) { lbCut++; return null; }
+		spdFast = fast === true;
+		spdCur = !spdFast && a.spdMode === 0 && room !== null && room !== undefined && room.spd === true;
 		const k = cellKey();
 		const c = cells.get(k);
+		const v2 = spdFast ? sim.speed_x * sim.speed_x + sim.speed_y * sim.speed_y : 0;
+		if (!spdFast) spdT0 = c !== undefined && c.t < t ? c.t : t;   // (the coarse cell's earliest after this add: --spdSlack)
+		else if (a.spdSlack > 0 && t > spdT0 + a.spdSlack) return null;
 		if (c !== undefined) {
 			c.seen++; c.touch = picks;
-			if (c.t <= t) return null;
+			if (spdFast ? c.v2 >= v2 : c.t <= t) return null;
+			if (spdFast) c.v2 = v2;
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
 			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL);
@@ -1007,6 +1042,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl }
 			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl };
 		if (ST) nearSteer(nc);
+		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
 		hpush(nc);
 		if (t > deepest) deepest = t;
@@ -1064,7 +1100,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, spdOn, spdFlags, spdPeak }, fields.stats()) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -1326,6 +1362,30 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (room !== null && room.isNew) firstCell(room, nc, t);
 		}
 	};
+	/** --spd: the stall clock (between chunks). Progress (the nearest distance down by SPD_PROGRESS) clears the flags;
+	 *  --spd seconds without it flag the frontier room (the unflagged room whose best cell is nearest), at most --spdMax */
+	const spdClock = (now) => {
+		const d = near !== null ? near.rc : Infinity;
+		if (d < spdBest - SPD_PROGRESS || spdBest === Infinity) {
+			if (d < Infinity) spdBest = d;
+			spdAt = now;
+			if (spdRooms.length) { for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
+			spdTrig = 0; spdOn = 0;
+			return;
+		}
+		spdOn = spdRooms.length;
+		if (now - spdAt < a.spd * 1000 || spdTrig >= a.spdMax) return;
+		let br = null, bd = Infinity;
+		for (const r of roomList) {
+			if (r.spd || r.best === null || r.best.t >= maxT) continue;
+			const v = distOf(r.best);
+			if (v < bd) { bd = v; br = r; }
+		}
+		spdAt = now;
+		if (br === null) return;
+		br.spd = true; spdRooms.push(br); spdTrig++; spdFlags++;
+		spdOn = spdRooms.length; if (spdOn > spdPeak) spdPeak = spdOn;
+	};
 	while (!end) {
 		// between chunks: the clock, the stop flag, the shared bound (a faster route from another worker or the editor)
 		const now = Date.now();
@@ -1340,6 +1400,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (port) inbox();
 		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) addSeed(String(m.message));
 		lShare = leadShare(now);
+		if (coarse && a.spd > 0) spdClock(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
 			pickL = false;
@@ -1442,6 +1503,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 						near = { rc, t, node };
 					}
 					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
+					// (--spdMode=1: a flagged room's fastest arrivals next to the earliest)
+					if (into && a.spdMode === 1 && room !== null && room.spd === true) {
+						const nf = add(t, rc, e, up, blk, o, s + 1, room, true);
+						if (nf !== null && room.isNew) firstCell(room, nf, t);
+					}
 					if (nc !== null && room !== null && room.isNew) firstCell(room, nc, t);
 				}
 				if (end) break;
@@ -2079,7 +2145,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), leadRoutes: nLead, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -2245,7 +2311,7 @@ async function main() {
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0 },
-			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0 } : {});
+			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
