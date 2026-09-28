@@ -1579,8 +1579,13 @@ async function laneSection() {
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
 		{ cpu: [process.execPath, fake, sc], skips: true, laneArgs: ['--depth=200', '--deepDepth=200', '--horizon=600', '--cap=20000', '--log2=22', '--deepLog2=22', '--perS=20', '--deepPerS=20'] });
 	const t0 = Date.now();
-	let st = ED.state();
-	while (st.running && !(st.result && st.result.strategy === 'path skips') && Date.now() - t0 < 60000) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+	let st = ED.state(), firstR = null;
+	while (st.running && !(st.result && /path skips/.test(st.result.strategy)) && Date.now() - t0 < 60000) {
+		await new Promise((z) => setTimeout(z, 50));
+		st = ED.state();
+		if (st.result && !firstR) firstR = st.result;
+	}
+	if (st.result && !firstR) firstR = st.result;
 	ED.stop();
 	while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
 	const lines = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8').split('\n').filter(Boolean) : [];
@@ -1593,12 +1598,13 @@ async function laneSection() {
 	const short = seeds.filter((ms) => ms.length <= attempt.length - 20 && endOf(ms) === hEnd);
 	check('before any route: a later point of the nearest attempt reached sooner, into the CPU search\'s archive (a seed line: the attempt\'s end state, 20+ ticks sooner)',
 		short.length > 0, `${seeds.length} seed line(s), ${short.length} ending in the attempt's end state sooner${short.length ? ` (${attempt.length} -> ${Math.min(...short.map((x) => x.length))} ticks)` : ''}; ${(st.log || []).filter((x) => /path skips/.test(x)).slice(-2).join(' | ')}`);
-	// the CPU search's slow route: the path skips splice their shortened attempt into it (or search it): a faster route,
-	// replayed, S.result
-	const r = st.result;
+	// the CPU search's slow route: spliced with the path skips' shortened attempt before it counts (found(): the editor's
+	// library of the lane's shortcuts), so the FIRST route the search reports already takes the skip: replayed, S.result
+	const r = firstR;
 	const rv = r ? C.evaluate(L, Uint8Array.from(r.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
-	check('after the route: a faster route from the path skips (replayed in the JS engine), the search\'s result, at least 20 run ticks faster than the CPU search\'s',
-		!!r && r.strategy === 'path skips' && !!rv && rv.runTicks === r.runTicks && r.runTicks <= ev.runTicks - 20, r ? `${ev.runTicks} -> ${r.runTicks} (${r.strategy}) after ${r.foundAfter} s` : `no result (${st.stage}); ${(st.log || []).slice(-3).join(' | ')}`);
+	check('the first route the search reports already takes the skip: the CPU search\'s slow route spliced with the path skips\' shortcut (replayed in the JS engine), at least 20 run ticks faster',
+		!!r && /path skips/.test(r.strategy) && !!rv && rv.runTicks === r.runTicks && r.runTicks <= ev.runTicks - 20, r ? `${ev.runTicks} -> ${r.runTicks} (${r.strategy}${r.spliced ? `: ${r.spliced}` : ''}) after ${r.foundAfter} s` : `no result (${st.stage}); ${(st.log || []).slice(-3).join(' | ')}`);
+	// (the lane's own route search: test/skipfind.js, "the whole run as the best route -> a faster route")
 }
 const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI82XaOefMxXxnmpIYjp5JX1zb50/uq31559pX7os7AE41z97hA2PESD3e3rv2qN8fPAxdIPlViN941TgJFlhkiWVWSLLKGinW2WCTLdJss0OGXfbY54BDshxxTI4TLGzyFCjiUKJMhSo16jRo0qJNhy49+Lc5PZsindVfmW/LWPn7c1iTtensZ2d1JrgnG4qsmXEGy4ii9d9n5nDr3tf19yPmuchGPjKSk6zkJTO5yU5+MpSjLOUpU7nKVr4ylrOs5S1zucte/uqAeqAuBLEn5McUxhQnOAFKAcrfUvkBVYNaiHqIhkEzQitCO0InQjdCbw7A2/j+4zjes8j0x+fnGp8=';
 

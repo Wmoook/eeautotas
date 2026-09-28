@@ -1030,7 +1030,73 @@ function carryOver(level, src, info, o) {
 	return best;
 }
 
-module.exports = { DEFAULTS, prepare, stateAt, excessOf, startsOf, goalsOf, bfs, pathOf, join, tail, track, quickTails, searchStart, ctxKey, physKey, attemptOf, attemptJudge, carryOver };
+/**
+ * The library of runs a shortcut came from (the lane's: every attempt, shortened attempt and route it has seen; the
+ * editor's: the path skips' shortened attempts, to splice every route with before it counts): per run a map from its
+ * states (physical state + room: goexplore.js roomOf, what Find a route's cells tell apart) to the earliest tick it holds
+ * them. `splice(ms, kind, ev)`: the target (an attempt: kind 'attempt'; a route: 'route', ev = its C.evaluate) reaches a
+ * state at tick t that a library run reached at tick r < t (the most gain first, at most o.tries candidates): the library
+ * run's inputs to r + the target's own from t, replayed and judged (a route: C.evaluate + C.judge, fewer run ticks; an
+ * attempt: attemptJudge) -> {ms, ev, saved, how, route} | null. o: {max (newest kept, 24), minGain (20), tries (4)}
+ */
+function makeLibrary(level, o = {}) {
+	const max = Math.max(1, o.max || 24), minGain = o.minGain || DEFAULTS.minGain, tries = o.tries || 4;
+	const lib = [];
+	const RK = roomKeyOf(level);
+	const keyOf = (sim) => { const k = physKey(sim), r = RK(sim) >>> 0; return (k + r * 2654435761) % 9007199254740881; };
+	/** a run's keys per tick 0..n (index t = after t inputs), up to its first death or finish */
+	const keysOf = (ms) => {
+		const sim = new E.EESim(level), inp = new E.EEInput();
+		sim.reset();
+		const K = new Float64Array(ms.length + 1);
+		K[0] = keyOf(sim);
+		for (let t = 0; t < ms.length; t++) {
+			E.applyMask(inp, ms[t]);
+			sim.tick(inp);
+			if (sim.is_dead || sim.has_silver_crown) return K.subarray(0, t + 1);
+			K[t + 1] = keyOf(sim);
+		}
+		return K;
+	};
+	// (skipAt: a shortened attempt's first tick off the attempt it shortened: its states from there on are the early ones)
+	const add = (ms, what, skipAt = -1) => {
+		const K = keysOf(ms), map = new Map();
+		for (let t = K.length - 1; t >= 0; t--) map.set(K[t], t);   // (the earliest tick of each key wins)
+		lib.push({ ms: Uint8Array.from(ms), map, what, skipAt });
+		if (lib.length > max) lib.shift();
+	};
+	const splice = (ms, kind, ev) => {
+		if (!lib.length) return null;
+		const K = keysOf(ms), cands = [];
+		for (const R of lib) {
+			let bg = 0, br = -1, bt = -1;
+			for (let t = K.length - 1; t > minGain; t--) {
+				const r = R.map.get(K[t]);
+				if (r !== undefined && t - r > bg) { bg = t - r; br = r; bt = t; }
+			}
+			if (bg >= minGain) cands.push({ R, r: br, t: bt, g: bg });
+		}
+		cands.sort((x, y) => y.g - x.g);
+		let info = null;
+		for (const c of cands.slice(0, tries)) {
+			const cand = concat([c.R.ms.subarray(0, c.r), ms.subarray(c.t)]);
+			if (kind === 'attempt') {
+				if (!info) info = prepare(level, ms, { attempt: true, nocoins: 0 });
+				if (!info || !info.attempt) return null;
+				const v = attemptJudge(info, cand);
+				if (v.accept) return { ms: v.ev.ms, ev: v.ev, saved: v.saved, route: v.route || null, how: `the library's ${c.R.what} to its tick ${c.r}, then the attempt's own from its tick ${c.t} (-${c.g})` };
+			} else {
+				const e2 = C.evaluate(level, cand);
+				const v = C.judge(e2, ev, ev.deaths);
+				if (v.accept && e2.runTicks < ev.runTicks) return { ms: e2.ms, ev: e2, saved: ev.runTicks - e2.runTicks, how: `the library's ${c.R.what} to its tick ${c.r}, then the route's own from its tick ${c.t}` };
+			}
+		}
+		return null;
+	};
+	return { lib, add, splice, keysOf, get size() { return lib.length; } };
+}
+
+module.exports = { DEFAULTS, prepare, stateAt, excessOf, startsOf, goalsOf, bfs, pathOf, join, tail, track, quickTails, searchStart, ctxKey, physKey, attemptOf, attemptJudge, carryOver, makeLibrary };
 
 // ---------------------------------------------------------------- workers
 if (!isMainThread && workerData && workerData.skipfind) {
@@ -1051,9 +1117,10 @@ if (!isMainThread && workerData && workerData.skipfind) {
 			let r;
 			// (a deep start: the coarse levels' sparse starts search deeper: --deepDepth layers, a 2^--deepLog2 table, --deepPerS seconds)
 			const deep = msg.task.deep ? { depth: wd.o.deepDepth || DEFAULTS.deepDepth, log2: wd.o.deepLog2 || DEFAULTS.deepLog2, perS: wd.o.deepPerS || DEFAULTS.deepPerS } : {};
-			// (the lane: an attempt's searches with the attempt cap, but from a landing after a long fall: the default cap
-			// there (Egg Quest II's GPU random runs' route from its landing: the chimney line at 60,000, not at 30,000))
-			const att = info && info.attempt && !msg.task.land ? { cap: wd.o.attemptCap || DEFAULTS.attemptCap } : {};
+			// (the lane: an attempt's searches with the attempt cap; a landing after a long fall once with it and once with the
+			// default cap (capK 'd': Egg Quest II's GPU random runs' route from its landing, the chimney line at 60,000, not at
+			// 30,000))
+			const att = info && info.attempt && msg.task.capK !== 'd' ? { cap: wd.o.attemptCap || DEFAULTS.attemptCap } : {};
 			try { r = searchStart(info, s, pick, Object.assign({}, wd.o, deep, att, { deadline: msg.deadline })); } catch (e) { r = { error: String(e && e.stack || e) }; }
 			E.flushTicks();
 			const out = Object.assign({ s, pick, version, h: info.H[s] }, r);
@@ -1130,31 +1197,9 @@ async function lane(a) {
 	let target = null, version = 0, route = null, queue = [], ended = false;
 	const done = new Set(), stateDone = new Set();
 	const stats = { searches: 0, shortcuts: 0, splices: 0, leads: 0, routes: 0, attempts: 0 };
-	// ---- the library: {ms, map: physical state + room key -> the earliest tick}
-	const lib = [];
-	const RK = roomKeyOf(level);
-	const keyOf = (sim) => { const k = physKey(sim), r = RK(sim) >>> 0; return (k + r * 2654435761) % 9007199254740881; };
-	/** a run's keys per tick 0..n (index t = after t inputs), up to its first death or finish */
-	const keysOf = (ms) => {
-		const sim = new E.EESim(level), inp = new E.EEInput();
-		sim.reset();
-		const K = new Float64Array(ms.length + 1);
-		K[0] = keyOf(sim);
-		for (let t = 0; t < ms.length; t++) {
-			E.applyMask(inp, ms[t]);
-			sim.tick(inp);
-			if (sim.is_dead || sim.has_silver_crown) return K.subarray(0, t + 1);
-			K[t + 1] = keyOf(sim);
-		}
-		return K;
-	};
-	// (skipAt: a shortened attempt's first tick off the attempt it shortened: its states from there on are the early ones)
-	const libAdd = (ms, what, skipAt = -1) => {
-		const K = keysOf(ms), map = new Map();
-		for (let t = K.length - 1; t >= 0; t--) map.set(K[t], t);   // (the earliest tick of each key wins)
-		lib.push({ ms: Uint8Array.from(ms), map, what, skipAt });
-		if (lib.length > libMax) lib.shift();
-	};
+	// ---- the library: {ms, map: physical state + room key -> the earliest tick} (makeLibrary)
+	const LB = makeLibrary(level, { max: libMax, minGain: P.minGain });
+	const lib = LB.lib, libAdd = LB.add;
 	const CROSS_LIB = 3;
 	const libCross = (info) => carryOver(level, lib.filter((R) => R.skipAt >= 0).slice(-CROSS_LIB).reverse(), info, P);
 	/**
@@ -1162,34 +1207,7 @@ async function lane(a) {
 	 * candidates by claimed gain (the library reaches the target's state at tick t by tick r < t), each replayed and
 	 * judged; -> {ms, ev, saved, how, route} | null
 	 */
-	const libSplice = (ms, kind, ev) => {
-		if (!lib.length) return null;
-		const K = keysOf(ms), cands = [];
-		for (const R of lib) {
-			let bg = 0, br = -1, bt = -1;
-			for (let t = K.length - 1; t > P.minGain; t--) {
-				const r = R.map.get(K[t]);
-				if (r !== undefined && t - r > bg) { bg = t - r; br = r; bt = t; }
-			}
-			if (bg >= P.minGain) cands.push({ R, r: br, t: bt, g: bg });
-		}
-		cands.sort((x, y) => y.g - x.g);
-		let info = null;
-		for (const c of cands.slice(0, 4)) {
-			const cand = concat([c.R.ms.subarray(0, c.r), ms.subarray(c.t)]);
-			if (kind === 'attempt') {
-				if (!info) info = prepare(level, ms, { attempt: true, nocoins: 0 });
-				if (!info || !info.attempt) return null;
-				const v = attemptJudge(info, cand);
-				if (v.accept) return { ms: v.ev.ms, ev: v.ev, saved: v.saved, route: v.route || null, how: `the library's ${c.R.what} to its tick ${c.r}, then the attempt's own from its tick ${c.t} (-${c.g})` };
-			} else {
-				const e2 = C.evaluate(level, cand);
-				const v = C.judge(e2, ev, ev.deaths);
-				if (v.accept && e2.runTicks < ev.runTicks) return { ms: e2.ms, ev: e2, saved: ev.runTicks - e2.runTicks, how: `the library's ${c.R.what} to its tick ${c.r}, then the route's own from its tick ${c.t}` };
-			}
-		}
-		return null;
-	};
+	const libSplice = (ms, kind, ev) => LB.splice(ms, kind, ev);
 	const str = (ms) => C.eetasBytes(ms).toString('latin1');
 	// ---- the starts
 	const depthOf = (deep) => (deep ? P.deepDepth : P.depth);
@@ -1227,17 +1245,24 @@ async function lane(a) {
 				for (const s of ticks) {
 					if (!ok(s, deep, complete)) continue;
 					seen.add(s);
-					list.push({ s, deep, land: land.has(s) });
+					list.push({ s, deep, land: land.has(s), grp: complete ? li : 3 + li });
 				}
 			}
 		}
-		const fresh = [], again = [];
+		// (an attempt's landings twice: first with the attempt's layer cap (fast: the one search's attempt, the chimney line
+		// from its landing in 57 s on the loaded EPYC, where the default cap took 129 s on the GPU random runs' attempt and
+		// came after their first route), then once more with the default cap right after the deep level of the complete
+		// windows (the GPU random runs' landing: the chimney at 60,000, not at 30,000))
+		const fresh = [], again = [], later = [];
 		for (const x of list) for (const pk of picks) {
-			const key = keyOfStart(info, x.s, x.deep, pk);
-			if (done.has(key)) continue;
-			(stateDone.has(stateOfKey(key)) ? again : fresh).push({ s: x.s, pick: pk, deep: x.deep, land: !!x.land, key, complete: target.kind === 'route' || x.s + depthOf(x.deep) + P.horizon <= n });
+			for (const ck of target.kind === 'attempt' && x.land ? ['a', 'd'] : ['']) {
+				const key = keyOfStart(info, x.s, x.deep, ck ? `${pk}/${ck}` : pk);
+				if (done.has(key)) continue;
+				const t = { s: x.s, pick: pk, deep: x.deep, land: !!x.land, capK: ck, grp: x.grp, key, complete: target.kind === 'route' || x.s + depthOf(x.deep) + P.horizon <= n };
+				(ck === 'd' ? later : stateDone.has(stateOfKey(key)) ? again : fresh).push(t);
+			}
 		}
-		queue = fresh.concat(again);
+		queue = [...fresh.filter((t) => t.grp === 0), ...later.filter((t) => t.grp === 0), ...fresh.filter((t) => t.grp !== 0), ...later.filter((t) => t.grp !== 0), ...again];
 	};
 	const give = (w) => {
 		if (ended || w.dead || !target || Date.now() > deadlineAll - 2000) return;
@@ -1322,7 +1347,7 @@ async function lane(a) {
 		stats.searches++;
 		const kind = w.kind, cur = !!target && r.version === target.version;
 		if (r.error) emit({ ev: 'search', s: r.s, error: String(r.error).slice(0, 300) });
-		else emit({ ev: 'search', kind, s: r.s, pick: r.pick, deep: !!(w.task && w.task.deep), layers: r.stats.layers, cells: r.stats.cells, sec: Math.round(r.stats.ms / 100) / 10, hits: r.hits, top: r.top, saved: r.best ? r.best.saved : 0, cur });
+		else emit({ ev: 'search', kind, s: r.s, pick: r.pick, deep: !!(w.task && w.task.deep), ...(w.task && w.task.capK ? { cap: w.task.capK } : {}), layers: r.stats.layers, cells: r.stats.cells, sec: Math.round(r.stats.ms / 100) / 10, hits: r.hits, top: r.top, saved: r.best ? r.best.saved : 0, cur });
 		if (r.best && r.best.route) offerRoute(r.best.ms, `a route from the attempt's tick ${r.s}: ${r.best.how}`, true);
 		else if (r.best && kind === 'route') {
 			// a faster route (made on an older best: spliced with the current one)

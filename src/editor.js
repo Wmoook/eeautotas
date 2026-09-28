@@ -2342,7 +2342,7 @@ function found(inputs, n, more) {
 	const V = S.strategies[n];
 	if (!cur) return;
 	const masks = Uint8Array.from(String(inputs), (c) => (c.charCodeAt(0) - 48) & 31);
-	const ev = C.evaluate(cur.level, masks);
+	let ev = C.evaluate(cur.level, masks);
 	// a beam ends at the first finish (the fastest it reached); the tool would still re-check every other state that
 	// finished in the same tick before it exits, which only costs time
 	if (!more) halt(kids[n], 'finish');
@@ -2362,17 +2362,27 @@ function found(inputs, n, more) {
 	}
 	if (S.proof && S.proof.verdict === 'impossible') proofMiss(V.label, C.eetasBytes(ev.ms).toString('latin1'));
 	if (!V.found || ev.runTicks < V.found.runTicks) V.found = { ticks: ev.ms.length, runTicks: ev.runTicks, time: C.fmt(ev.runTicks) };
+	// (the path skips' shortcuts so far, spliced into every route before it counts: a route of another search's lineage,
+	// e.g. the GPU random runs' (their archive takes no imports), that passes a state a shortened attempt reached sooner
+	// takes that shortcut at once: the first route too, when the shortcut came before it)
+	let how = '';
+	if (!V.lane && laneLib && laneLib.S === S && laneLib.L.size) {
+		const sp = laneLib.L.splice(ev.ms, 'route', ev);
+		if (sp) { how = ` + path skips (-${sp.saved}: ${sp.how})`; note(`${V.label}: its route ${C.fmt(ev.runTicks)} spliced with the path skips' shortcuts: ${C.fmt(sp.ev.runTicks)} (-${sp.saved})`); ev = sp.ev; }
+	}
 	const better = !S.result || ev.runTicks < S.result.runTicks || (ev.runTicks === S.result.runTicks && ev.ms.length < S.result.ticks);
 	// (the fastest route as found: the search's bounds, as without the cleanup; each one is cleaned, and a cleaned route
 	// replaces S.result when it is better)
 	const rb = S.rawBest, rawBetter = !rb || ev.runTicks < rb.runTicks || (ev.runTicks === rb.runTicks && ev.ms.length < rb.ticks);
 	if (rawBetter) S.rawBest = { runTicks: ev.runTicks, ticks: ev.ms.length };
 	if (first || ((V.cpu || V.rolls) && better)) note(`${V.label}: ${first ? 'route' : 'a faster route'} ${C.fmt(ev.runTicks)} (${ev.ms.length} ticks)`);
+	const label = how ? `${V.label} + path skips` : V.label;
 	if (better) {
 		setResult(cur.level, ev, { foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
-			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, strategy: V.label });
+			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, strategy: label });
+		if (how) S.result.spliced = how.slice(3);
 	}
-	if (rawBetter) cleanLater(ev, V.label);
+	if (rawBetter) cleanLater(ev, label);
 	S.stage = 'found';
 	// the other strategies: those already deeper than this route cannot find a faster one; the CPU search is told the
 	// bound (it goes on looking for a faster route)
@@ -2505,6 +2515,15 @@ function feedOne(inputs, room) {
 }
 // ---------------------------------------------------------------- the path skips (the skip finder's lane)
 let laneQ = new Map(), laneAt = 0, laneTimer = null, laneS = null;
+// the path skips' shortcuts of this search (skipfind.js makeLibrary: per run its states (physical state + room) and the
+// earliest tick it holds them), which found() splices into every route before it counts: {S, L}
+let laneLib = null;
+const LANE_LIB_MAX = 24;
+function laneLibAdd(inputs, what) {
+	if (!S || !cur) return;
+	if (!laneLib || laneLib.S !== S) laneLib = { S, L: require('./skipfind.js').makeLibrary(cur.level, { max: LANE_LIB_MAX }) };
+	try { laneLib.L.add(Uint8Array.from(inputs, (c) => (c.charCodeAt(0) - 48) & 31), what); } catch (e) { /* a run the engine cannot play: none */ }
+}
 /** a strategy's own nearest attempt to the path skips (before any route: their targets; src: the strategy's key, so each
  *  search's lineage is followed: the first route comes from any of them, e.g. the GPU random runs' own archive, which
  *  takes no imports), at most one batch per LANE_FEED_MS, the newest per strategy */
@@ -2553,6 +2572,8 @@ function laneEvent(V, n, ev) {
 			if (Number.isFinite(+ev.saved) && +ev.saved > (V.bestSaved || 0)) V.bestSaved = +ev.saved;
 			// (the notes: the skips themselves, not every carry-over)
 			if (ev.kind === 'skip') note(`${V.label}: a later point of the nearest attempt ${ev.saved} ticks sooner (from its tick ${ev.s}; into the CPU search's archive)`);
+			// (every shortened attempt into the library found() splices each route with)
+			laneLibAdd(inputs, `${ev.kind === 'skip' ? 'shortened attempt' : ev.kind === 'carry' ? 'carried-over attempt' : 'spliced attempt'} (-${ev.saved})`);
 		}
 		if (!S.result && toArchive(inputs)) V.fed = (V.fed || 0) + 1;
 		V.state = V.found ? 'found' : 'running';
