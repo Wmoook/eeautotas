@@ -215,7 +215,8 @@
 //        where it reaches the start, with the room dead ends (--roomDead): a state either cuts off (no way on but a death)
 //        is kept only while a trigger of its room is walkable from it or its death could pay now (deathMayPay: the quick
 //        look of deathPays), priced as its death; else the field with death edges; 1 = always the death edges (before
-//        hx2-r2-deaths: no killing dead end pruned, Good Egg's search collapsed); 0 = always death-free)]
+//        hx2-r2-deaths: no killing dead end pruned, Good Egg's search collapsed; also EEAT_DFIELD=1, which the editor's
+//        searches inherit with its _dm reach file); 0 = always death-free)]
 //        [--cpkey=0 (coarse cells, deaths as moves: 1 = the checkpoint in the cell key on levels of at most CPK_MAX 32
 //        checkpoints; 2 = only while the ball is more than --cpfar=2 tiles from its checkpoint, any number of them: the
 //        effect-transport death, a respawn away from the ball with its effects kept; both opt-in, the cost not measured)]
@@ -289,7 +290,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, cpfar: 2, dburst: 1, dsub: 0, roomDead: 1, dfield: -1 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, deaths: -1, dprice: 1, cpkey: 0, cpfar: 2, dburst: 1, dsub: 0, roomDead: 1, dfield: process.env.EEAT_DFIELD === '1' ? 1 : -1 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
