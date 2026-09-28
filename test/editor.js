@@ -35,8 +35,12 @@
 //              limits kept), the CPU search stopping with the GPU strategies while the proof runs. Elsewhere EEAT_PROOF=0.
 //   lane       the path skips (src/skipfind.js --lane=1, the real one) next to a stand-in CPU search: a shortened attempt
 //              into the CPU search's archive before any route, a faster route from its slow route after
+//   escape     the stall escape (the real src/goexplore.js --prefix next to a stand-in CPU search that stalls): the escape
+//              from the nearest attempt 60 ticks back routes, on half the workers (the stalled search parks the rest and
+//              gets them back), its attempts into the stalled search's archive; the rotation: a nearest attempt in a pit (the
+//              first escape ends there), the next from 600 ticks back routes; escape: false = none
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
-// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,gpu]      Exit code 1 if any check
+// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
 const fs = require('fs');
 const path = require('path');
@@ -48,7 +52,7 @@ const GPU = argv.includes('--gpu');
 // --gpuOnly=a,b: only the GPU cases whose names contain one of these (short GPU runs, one at a time)
 const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)).split(',').filter(Boolean);
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
-// --only=a,b: only the sections whose names are given (app, passes, cpu, prove, lane, gpu); the fast ones always run
+// --only=a,b: only the sections whose names are given (app, passes, cpu, prove, lane, escape, gpu); the fast ones always run
 const ONLY = ((argv.find((a) => a.startsWith('--only=')) || '').slice(7)).split(',').filter(Boolean);
 const want = (k) => !ONLY.length || ONLY.includes(k);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
@@ -1775,6 +1779,109 @@ async function laneSection() {
 		!!r && /path skips/.test(r.strategy) && !!rv && rv.runTicks === r.runTicks && r.runTicks <= ev.runTicks - 20, r ? `${ev.runTicks} -> ${r.runTicks} (${r.strategy}${r.spliced ? `: ${r.spliced}` : ''}) after ${r.foundAfter} s` : `no result (${st.stage}); ${(st.log || []).slice(-3).join(' | ')}`);
 	// (the lane's own route search: test/skipfind.js, "the whole run as the best route -> a faster route")
 }
+// A stand-in for a stalled CPU search (next to the stall escape, whose goexplore.js is the real one): it reports the
+// scenario's attempt as its closest attempt and then only progress (a stall), logs every stdin line
+const FAKE_CPU_STALL = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 4, seeds: [1, 2, 3, 4], mode: 'physics', cells: 'coarse', startCost: 40 });
+setTimeout(() => say({ ev: 'closest', dist: SC.dist, tick: SC.attempt.length, inputs: SC.attempt }), 200);
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: SC.dist, found: 0, refined: 0, workers: 4, rooms: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let buf = '';
+process.stdin.on('data', (d) => {
+	buf += String(d);
+	let k;
+	while ((k = buf.indexOf('\\n')) >= 0) {
+		const line = buf.slice(0, k); buf = buf.slice(k + 1);
+		fs.appendFileSync(SC.stdinLog, line + '\\n');
+		if (line === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`;
+async function escapeSection() {
+	section('the stall escape: a fresh one search (the real src/goexplore.js --prefix) from a stalled search\'s nearest attempt (a stand-in CPU search; no GPU)');
+	// a 160 x 45 level (coarse cells: the CPU search's big-level path): a floor at row 20 over solid ground, the spawn at the
+	// left, the trophy at the right; a pit (1 tile wide, 12 deep) at x 30: a ball that falls in never gets out (the reach
+	// field rules the trophy out from its bottom); a coin at x 40 and a coin door (1 coin) across the corridor at x 100: the
+	// coin's room is a new room that opens territory (the escape's source event, into the stalled search's archive)
+	const W = 160, H = 45, cells = room(W, H);
+	for (let x = 1; x < W - 1; x++) for (let y = 21; y < H - 1; y++) if (!(x === 30 && y <= 32)) cells.push([x, y, 9]);
+	cells.push([2, 20, 255], [W - 4, 20, 121], [40, 20, 100]);
+	for (let y = 1; y <= 20; y++) cells.push([100, y, 43, 1]);
+	const buf = ED.eelvlOf({ name: 'escape pit', width: W, height: H, cells });
+	const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf), { id: 'editor', file: 'editor.eelvl' }));
+	const str = (ms) => C.eetasBytes(ms).toString('latin1');
+	const run = (parts) => { const raw = []; for (const [m, n] of parts) for (let k = 0; k < n; k++) raw.push(m); return Uint8Array.from(raw); };
+	// (where a run ends: its tile; replayed)
+	const endTile = (ms) => { const sim = new E.EESim(L); sim.reset(); const inp = new E.EEInput(); for (const m of ms) { E.applyMask(inp, m); sim.tick(inp); } return [Math.trunc(sim.px + 8) >> 4, Math.trunc(sim.py + 8) >> 4]; };
+	const fake = path.join(HOME, 'fake-cpu-stall.js');
+	fs.writeFileSync(fake, FAKE_CPU_STALL);
+	const scenario = async (name, attempt, dist, seconds) => {
+		const sc = path.join(HOME, `esc_${name}.json`), stdinLog = path.join(HOME, `esc_${name}_stdin.log`);
+		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1 });
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && !st.result && Date.now() - t0 < seconds * 1000 + 5000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
+		// (after the route: the escape's end and the one search's workers back)
+		const t1 = Date.now();
+		while (st.running && st.strategies.some((q) => q.key === 'escape' && q.live) && Date.now() - t1 < 10000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
+		await new Promise((z) => setTimeout(z, 500));
+		st = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		const lines = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8').split('\n').filter(Boolean) : [];
+		return { st, lines, sec: (t1 - t0) / 1000 };
+	};
+	// (1) the stand-in stalls with its nearest attempt on the floor 5 tiles short of the pit (it never gets further):
+	// the escape starts after the stall clock (2 s here) from that attempt ESC_BACK[0] (60) ticks back, on half of the 4
+	// workers (the stalled search parks 2: "workers 2"), finds the route (replayed), and the stalled search gets its
+	// workers back ("workers 0") and the escape's attempts as seeds (CPU only: no one search)
+	const a1 = run([[0, 60], [4, 100]]);
+	const [x1] = endTile(a1);
+	const r1 = await scenario('near', a1, 31, 60);
+	const E1 = r1.st.strategies.find((q) => q.key === 'escape');
+	const res1 = r1.st.result;
+	const rv1 = res1 ? C.evaluate(L, Uint8Array.from(res1.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
+	check(`a stall escaped by a fresh search from the nearest attempt (${a1.length} ticks, ending at x ${x1}, before the pit): the escape's route over the pit, replayed`,
+		!!res1 && !!E1 && res1.strategy === E1.label && !!rv1 && rv1.runTicks === res1.runTicks && res1.inputs.startsWith(str(a1.subarray(0, a1.length - 60))),
+		res1 ? `${res1.time} (${res1.strategy}) after ${res1.foundAfter} s` : `no route (${r1.st.stage}); ${(r1.st.log || []).slice(-4).join(' | ')}`);
+	const w1 = r1.lines.filter((l) => /^workers \d+$/.test(l));
+	check('the escape on half of the CPU search\'s 4 workers: the stalled search parks 2 while it runs ("workers 2"), gets them back after ("workers 0")',
+		w1.length >= 2 && w1[0] === 'workers 2' && w1[w1.length - 1] === 'workers 0', w1.join(', ') || 'no workers line');
+	const seeds1 = r1.lines.filter((l) => l.startsWith('seed '));
+	check('the escape\'s attempts into the stalled search\'s archive (CPU only: "seed" lines, whole runs from the level\'s start through its prefix)',
+		seeds1.length > 0 && seeds1.every((l) => l.slice(5).startsWith(str(a1.subarray(0, a1.length - 60)))), `${seeds1.length} seed line(s)`);
+	check('the escape\'s notes and state: the escape 1 after the stall, from the nearest attempt; its process gone after the route',
+		!!r1.st.escape && r1.st.escape.runs === 1 && (r1.st.log || []).some((l) => /escape: a fresh one search from the nearest attempt 1: no attempt nearer/.test(l)) && !!E1 && !E1.live,
+		`${JSON.stringify(r1.st.escape)}; ${E1 ? E1.state : '-'}`);
+	// (2) the rotation: the stand-in's nearest attempt ends in the pit (it idles 900 ticks first): the first escape (60
+	// ticks back: in the pit) finds the trophy ruled out and ends; after the stall clock the next one starts from the nearest
+	// attempt 600 ticks back (still idling by the spawn) and finds the route over the pit
+	const a2 = run([[0, 900], [4, 160], [0, 140]]);
+	const [x2, y2] = endTile(a2);
+	const r2 = await scenario('pit', a2, 5, 90);
+	const E2 = r2.st.strategies.find((q) => q.key === 'escape');
+	const res2 = r2.st.result;
+	const rv2 = res2 ? C.evaluate(L, Uint8Array.from(res2.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
+	check(`the rotation: the nearest attempt a trap (in the pit at (${x2}, ${y2})): the first escape ends there, the next from 600 ticks back finds the route (replayed)`,
+		x2 === 30 && y2 > 25 && !!res2 && !!E2 && res2.strategy === E2.label && !!rv2 && rv2.runTicks === res2.runTicks && !!r2.st.escape && r2.st.escape.runs === 2 &&
+		res2.inputs.startsWith(str(a2.subarray(0, a2.length - 600))) && !res2.inputs.startsWith(str(a2.subarray(0, a2.length - 60))),
+		res2 ? `${res2.time} after ${res2.foundAfter} s, ${r2.st.escape.runs} escapes; ${(r2.st.log || []).filter((l) => /escape/.test(l)).slice(-3).join(' | ')}` : `no route (${r2.st.stage}); ${(r2.st.log || []).slice(-4).join(' | ')}`);
+	// (3) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
+	const sc3 = path.join(HOME, 'esc_off.json');
+	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 30, width: 1024, workers: 4, escape: false }, { available: false }, { cpu: [process.execPath, fake, sc3], escape: true, escWait: 1 });
+	await new Promise((z) => setTimeout(z, 4000));
+	const st3 = ED.state();
+	ED.stop();
+	while (ED.state().running) await new Promise((z) => setTimeout(z, 100));
+	check('the escape off (escape: false): no escape strategy, no workers line', !st3.strategies.some((q) => q.key === 'escape') && !st3.escape &&
+		!(fs.existsSync(path.join(HOME, 'esc_off_stdin.log')) && /workers/.test(fs.readFileSync(path.join(HOME, 'esc_off_stdin.log'), 'utf8'))), st3.strategies.map((q) => q.key).join(', '));
+}
 const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI82XaOefMxXxnmpIYjp5JX1zb50/uq31559pX7os7AE41z97hA2PESD3e3rv2qN8fPAxdIPlViN941TgJFlhkiWVWSLLKGinW2WCTLdJss0OGXfbY54BDshxxTI4TLGzyFCjiUKJMhSo16jRo0qJNhy49+Lc5PZsindVfmW/LWPn7c1iTtensZ2d1JrgnG4qsmXEGy4ii9d9n5nDr3tf19yPmuchGPjKSk6zkJTO5yU5+MpSjLOUpU7nKVr4ylrOs5S1zucte/uqAeqAuBLEn5McUxhQnOAFKAcrfUvkBVYNaiHqIhkEzQitCO0InQjdCbw7A2/j+4zjes8j0x+fnGp8=';
 
 (async () => {
@@ -1786,6 +1893,7 @@ const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI
 	if (want('cpu')) await cpuSection();
 	if (want('prove')) await proveSection();
 	if (want('lane')) await laneSection();
+	if (want('escape')) await escapeSection();
 	if (GPU && want('gpu')) await gpuSection();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
