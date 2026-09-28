@@ -569,6 +569,7 @@ function schedule() {
 function checkStalls() {
 	if (!S || !S.running) return;
 	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
+	pastPlanCheck();   // (a search stalled at the plan's coin count: the plan past it, before the breaker picks its gates)
 	breakKick();   // (a stalled search: a round of the wall breaker)
 	const now = Date.now();
 	S.strategies.forEach((q, k) => {
@@ -991,6 +992,57 @@ const breakHolds = () => !!S && S.running && !S.halted && S.stage !== 'stopped' 
 // way that needs no more coins, before Forgotten Veil's coins 1-4 and Stupid Fox's 1-8: the search went for a way the
 // known routes never take. No DP (or no leg with a value): the trophy, as before. `b.breakGate === false`: off.
 const BREAK_GATES = 16;
+// The plan past its count (Wine Quest I, 2026-09-28). The coin plan's count T comes from the walk plan, which is blind to
+// gravity, one-way directions and speed, and whose layers count a coin at every touch (the physics layers too: a coin
+// tile is a goal seeded with the next count's cost, so from any coin tile the ball "has" every coin). On Wine Quest I the
+// walk plan passes the 5-coin door and T = 5, but the trophy's shaft has only 10-coin GATES for footholds: the level needs
+// all 10 coins, in the order its doors and gates force. Past 5 coins the coin DP had no value (coins >= T), the steer
+// lookup was the layer field's "the trophy, 189.8 tiles" through the 5-coin corridor, and every tool aimed at the trophy
+// (the user's run: "closest 197.6 tiles", at the 5-coin door; the product's runs: 5 coins by 140-162 s, then 13 rooms and
+// 189.8 tiles for 25-37 min). So next to the field the steer worker builds the plan past its count (steer.js buildSteer
+// coinT = fullCoinT: the highest count a coin door reads, at most the level's coins; the DP's legs layered by the count
+// held, coinLegsLayered: on Wine Quest I its tour is the level's own order, (123,84) (152,90) (188,9) (132,45) (136,133)
+// (36,49) (1,136) (2,158) (106,189) (119,65), and its value falls along a real 7-coin run 2,174 -> 750), and once the
+// search holds the plan's count in some room and has stalled for the breaker's first wait (a counterexample: the tools
+// aimed at the trophy that long from there), the search turns to it: the CPU search's head A and closest attempt by it
+// with the DP first (goexplore.js stdin `steer <file>`), the page's nearest from the CPU search's attempts only (one
+// measure), and the wall breaker's gates from its DP (breakGate). Only on levels whose walk plan's count is below the
+// full one (of the known levels: Wine Quest I 5 < 10, Forgotten Helix 13 < 15 once its 16-coin doors count as walls,
+// Edge Of Insanity 14 < 15; Forgotten Veil, Stupid Fox, Good Egg, Octorage, the ice level, Egg Quest II: none).
+// `b.pastPlan === false`: off.
+const PAST_MAX_MS = 180000;
+const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
+/** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
+const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
+/** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
+function pastArrived(hash, past) {
+	if (!cur || cur.levelHash !== hash || !S || !S.running) return;
+	cur.past = past && fs.existsSync(past.file) ? past : null;
+	if (S.steer) S.steer.past = cur.past ? { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false } : null;
+	if (cur.past) note(`the plan past its count is ready (the coin DP over ${cur.past.T} coins, legs by the count held; built in ${(cur.past.ms / 1000).toFixed(1)} s): the search turns to it once it holds ${cur.past.planT} coins and stalls there`);
+}
+/** every 5 s (checkStalls): a search that holds the plan's count and has stalled for the breaker's first wait turns to
+ *  the plan past its count */
+function pastPlanCheck() {
+	if (!cur || !cur.opts.pastPlan || cur.pastOn || !cur.past || !cur.files.steerCpu || !brk || !S || S.result || !S.running || S.halted) return;
+	if (Date.now() - brk.at < cur.opts.breakWait[0] * 1000) return;
+	let held = 0;
+	for (const r of sources.values()) held = Math.max(held, goldOfDesc(r.desc));
+	if (held < cur.past.planT || !fs.existsSync(cur.past.file)) return;
+	cur.pastOn = true;
+	cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
+	S.closest = null;            // (another measure: the CPU search's attempts by it)
+	brk.mark = Infinity;
+	let told = 0;
+	S.strategies.forEach((q, k) => {
+		const ch = kids[k];
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${cur.past.file}\n`); told++; } catch (e) { /* gone */ } }
+	});
+	const after = Math.round((Date.now() - S.started) / 100) / 10;
+	if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
+	note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
+	save();
+}
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
 const GATE_AT = 0.2;
 /** the coin plan's next gate from the state after inputs: {x, y} (tiles) or null; the steer file read once a search */
@@ -999,7 +1051,7 @@ function breakGate(inputs) {
 	try {
 		if (cur.gateSteer === undefined) {
 			cur.gateSteer = null;
-			const buf = fs.readFileSync(cur.files.steerCpu);
+			const buf = fs.readFileSync(cur.pastOn ? cur.past.file : cur.files.steerCpu);
 			const st = SF.readSteerFile(buf);
 			if (st && st.dp) {
 				const tiles = new Map(), cb = cur.level.coinBit;
@@ -1020,7 +1072,7 @@ function breakGate(inputs) {
 		const b = G0.st.dp.leg[g.i];
 		let reach = G0.files.get(b);
 		if (!reach) {
-			reach = path.join(dir(), `gate_${b}.rch3`);
+			reach = path.join(dir(), `gate_${cur.pastOn ? 'p' : ''}${b}.rch3`);
 			fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
 			G0.files.set(b, reach);
 		}
@@ -1445,13 +1497,15 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
+	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, opts: { width, depth, cpuDepth, prune: false, workers, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one,
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
-		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false) },
+		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false),
+		// (the plan past its count: `b.pastPlan === false` off)
+		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
 		rollsCmd: test && Array.isArray(test.rollsCmd) ? test.rollsCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
@@ -1514,6 +1568,9 @@ function useSteer(sf, noGpu) {
 	cur.distBySteer = cur.files.steerDist = gpuOk || !!noGpu;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
 	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true };
+	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
+	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
+	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
 	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
@@ -1716,7 +1773,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -1729,10 +1786,36 @@ function steerInfo(buf, hash) {
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
-				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null });`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, v: SF.VERSION, fp: steerFp(),
+				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
+				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
+			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
+			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
+			if (useful && st.info.dp && st.info.fullT > st.info.dp.T) {
+				let past = null;
+				try {
+					const sp = SF.buildSteer(L, { coinT: st.info.fullT, maxMs: d.pastMs });
+					if (sp.dp) {
+						const b = SF.steerFileBytes(sp, lfp);
+						fs.writeFileSync(d.past + '.tmp', b); fs.renameSync(d.past + '.tmp', d.past);
+						past = { T: sp.dp.T, n: sp.dp.n, planT: st.info.dp.T, tour: sp.info.dp.tour, start: Number.isFinite(sp.info.start) ? sp.info.start : null, ms: sp.info.ms, bytes: b.length };
+					}
+				} catch (e) { past = null; }
+				parentPort.postMessage({ past: past || { none: true } });
+			}`;
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
-		w.once('message', (r) => {
+		let main = null;
+		w.on('message', (r) => {
+			if (r && r.past) {
+				// (the plan past its count, built after the field: into the cache's record and to the running search)
+				if (!main) return;
+				main.past = r.past.none ? null : r.past;
+				main.pastWanted = false;
+				try { C.writeJSON(meta, Object.assign({}, main, { file: undefined })); } catch (e) { /* read-only data folder */ }
+				pastArrived(hash, main.past ? Object.assign({ file: pastFileOf(file) }, main.past) : null);
+				return;
+			}
+			main = r;
 			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneSteerCache(); } catch (e) { /* read-only data folder */ }
 			resolve(Object.assign(r, { file }));
 		});
@@ -1749,7 +1832,7 @@ function pruneSteerCache() {
 	const d = dir(), fp = steerFp();
 	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_s\d+_[0-9a-f]+\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_s${SF.VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
-	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {
@@ -2574,6 +2657,9 @@ function closer(ev, n) {
 		if (ev.inputs && !ev.cut && dist < deathTilesNow) own = Vn.bestTry = { inputs: String(ev.inputs), ticks: String(ev.inputs).length, dist };
 	}
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
+	// (past the plan: the CPU search measures by the plan past its count, the GPU tools by the field; one measure for the
+	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
+	if (cur.pastOn && !Vn.cpu) { if (own) attemptSource(n, own); return; }
 	const cut = !!ev.cut || dist >= 1e4;
 	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);

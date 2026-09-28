@@ -1196,8 +1196,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c));
 	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
 	// cells only), picked --mix of head A's picks (the research's ngxAB.js); the reach field alone rules states out
-	const ST = a.steerData || null;
-	const HS = ST ? heapOf((c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c)) : null;
+	// (ST and HS change once the editor sends the plan past its count: `steer <file>` on stdin, switchSteer)
+	let ST = a.steerData || null;
+	const hsPrio = (c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c);
+	let HS = ST ? heapOf(hsPrio) : null;
+	// (after a switch: the cells scored by the new field; the others are scored when next picked. null: no switch yet)
+	let scFresh = null;
 	// head L (the one search once a route is known: the main thread's 'route' message): the lead. The best route's
 	// schedule (sched: per (room, tile) the tick it first gets there); a cell at (room, tile) that the route passes gets
 	// lead = its tick - the route's there (below 0: ahead of the best route, which finishes that much sooner from there if
@@ -1325,7 +1329,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL); c.viaW = pickW || (pc !== null && pc.viaW);
 			release(old);
 			impr++;
-			if (ST) { c.sc = steerOf(); nearSteer(c); }
+			if (ST) { c.sc = steerOf(); if (scFresh !== null) scFresh.add(c); nearSteer(c); }
 			hpush(c);
 			if (room !== null && (room.best === null || distOf(c) < distOf(room.best))) room.best = c;
 			return null;
@@ -1337,7 +1341,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		const vl = pickL || (pc !== null && pc.viaL), vw = pickW || (pc !== null && pc.viaW);
 		const nc = ST ? { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, sc: steerOf(), picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw }
 			: { t, snap: null, pc, pgen: pc !== null ? pc.gen : 0, node: mkNode(up, blk, o, n), rc, picks: 0, seen: 1, tile, room, ver: 0, gen: 0, used: false, touch: picks, viaL: vl, viaW: vw };
-		if (ST) nearSteer(nc);
+		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		cells.set(k, nc);
 		hpush(nc);
 		if (t > deepest) deepest = t;
@@ -1419,7 +1423,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// the picks: head A, the lowest priority whose entry is live and whose state is early enough (with --steer from the
 	// steer field's heap --mix of the time)
 	const popA = () => {
-		const H = HS !== null && rnd() < a.mix ? HS : HA;
+		const H = HS !== null && HS.size() > 0 && rnd() < a.mix ? HS : HA;
 		while (H.size() > 0) {
 			const c = H.pop();
 			if (H.popVer !== c.ver || c.t >= maxT) continue;
@@ -1682,6 +1686,28 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			if (room !== null && room.isNew) firstCell(room, nc, t);
 		}
 	};
+	/** the plan past its count (the editor's `steer <file>`, src/editor.js pastPlan): head A's steer heap from now on by
+	 *  that field with the coin DP's value first (dpFirst: its layer fields count a coin at every touch, so they reach the
+	 *  trophy from any coin tile; the DP counts distinct coins); the cells holding a snapshot are scored at once, the
+	 *  others when next picked; the closest state starts over (another measure) */
+	const switchSteer = (sab) => {
+		if (ST === null) return;
+		let sd = null;
+		try { sd = SF.readSteerFile(Buffer.from(sab)); } catch (e) { return; }
+		if (!sd || sd.W !== W || sd.H !== H) return;
+		ST = Object.assign(sd, { dpFirst: true });
+		scFresh = new WeakSet();
+		HS = heapOf(hsPrio);
+		if (near !== null) { release(near.node); near = null; }
+		nearSent = null;
+		for (const c of cells.values()) {
+			if (c.snap === null) continue;
+			sim.restore(c.snap);
+			c.sc = steerOf(); scFresh.add(c); c.ver++;
+			hpush(c);
+			nearSteer(c);
+		}
+	};
 	// (a class worker: the best route up to its avoided gate, its cells every SEED_EVERY ticks: the class differs only from
 	// the gate on, so the search starts from the route's own way there, not from the level's start)
 	if (a.seedInputs && !end) addSeed(a.seedInputs);
@@ -1698,7 +1724,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
-		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) addSeed(String(m.message));
+		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) switchSteer(x.steer); else addSeed(String(x)); }
 		lShare = leadShare(now); wShare = wayShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
@@ -1730,7 +1756,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const cells0 = cells.size, impr0 = impr, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
 			e.picks++; e.ver++; picks++; e.touch = picks;
 			if (coarse) e.room.picks++;
-			hpush(e);
+			const stale = scFresh !== null && !scFresh.has(e);
+			if (!stale) hpush(e);
 			if (e.snap === null) {
 				// its state: its run's inputs from its parent's snapshot, else its whole path from the start
 				const q = e.node, p = e.pc;
@@ -1749,6 +1776,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				e.pc = null;
 			}
 			e.used = true;
+			if (stale) { sim.restore(e.snap); e.sc = steerOf(); scFresh.add(e); nearSteer(e); hpush(e); }
 			if (HA.size() > 3 * cells.size + 4096 || (HL !== null && HL.size() > 3 * cells.size + 4096) || (HW !== null && HW.size() > 3 * cells.size + 4096)) compact();
 			// stuck: finer cells around here
 			if (picks - lastProgress > a.stall && e.picks % a.refine === 0) {
@@ -2527,6 +2555,21 @@ async function main() {
 					const inputs = line.slice(7);
 					if (/^[0-O]+$/.test(inputs)) { one.broadcast(inputs, -1); one.fed++; }
 				} else if (line.startsWith('route ') && /^[0-O]+$/.test(line.slice(6))) adopt(line.slice(6));
+				else if (line.startsWith('steer ') && steerBuf) {
+					// (the editor's plan past its count, src/editor.js pastPlan: every worker's head A by it, dpFirst; the
+					// closest attempt starts over: another measure)
+					try {
+						const bytes = fs.readFileSync(line.slice(6));
+						const sab = new SharedArrayBuffer(bytes.length);
+						new Uint8Array(sab).set(bytes);
+						const sd = SF.readSteerFile(Buffer.from(sab));
+						if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
+						for (const p of seedPorts) p.postMessage({ steer: sab });
+						near = null; nearPending = false;
+						const s0 = SF.steerAt(Object.assign(sd, { dpFirst: true }), sim0);
+						say({ ev: 'steer', dp: sd.dp ? { n: sd.dp.n, T: sd.dp.T } : null, start: Number.isFinite(s0) ? Math.round(s0 * 100) / 100 : null });
+					} catch (e) { say({ ev: 'warning', text: `the steer field past the plan is not used: ${e.message}` }); }
+				}
 			}
 		});
 		// the end of stdin: the editor went away (a crash, or a kill that missed its children): stop, rather than run on
