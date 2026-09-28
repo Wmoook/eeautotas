@@ -308,7 +308,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -1740,7 +1740,7 @@ const TIMED_KT = 3;
  * SharedArrayBuffer): [0] the longest route that still counts (ticks), [1] stop. post(msg): to the main thread
  * ('finish', 'closest', 'source', 'stat', 'done').
  */
-function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
+function explore(L, field, a, seed, ctrl, post, port, seedPort = null, ofield = null) {
 	const W = L.width, H = L.height, N = W * H;
 	const rnd = rngOf(seed);
 	const sim = new E.EESim(L);
@@ -1855,8 +1855,21 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		sim.px = (rt % W) * 16; sim.py = ((rt / W) | 0) * 16; sim.speed_x = 0; sim.speed_y = 0;
 		try { return fn(); } finally { sim.px = px; sim.py = py; sim.speed_x = vx; sim.speed_y = vy; }
 	};
-	/** the reach cost (tiles) at the live state's respawn target, standing (-1: cut off) */
-	const respawnCost = () => { const rt = respawnTileOf(DI, sim, W); return RF.costAt(field, (rt % W) * 16, ((rt / W) | 0) * 16, 0); };
+	// --dord=1 (deaths as moves; the default): the ORDER by the death-free field (OF: reachField {deaths: false}, the
+	// main thread's shared copy, else built here). The field with its death edges prices every death at DEATH_COST to the
+	// best respawn tile of all, so every state whose death-free walk is longer than that cost the same (a flat plateau:
+	// Infinity Pain's order was 1661.8 tiles for t0-t27000 of its known route); it stays the file for the -1 prune. A
+	// state the death-free field has no value for (its only way is a death) costs DEATH_TILES + its own respawn
+	// target's order (costOf); --dord=0: the order by the field with its death edges, as before
+	const OF = DI !== null && a.dord !== 0 ? (ofield || RF.reachField(L, { deaths: false })) : null;
+	/** the order's reach cost (tiles) of a state (the live sim) or at a place (x, y, vy): the death-free field's where it
+	 *  has a value, else the field's (-1: cut off) */
+	const ordAt = (x, y, vy) => {
+		if (OF !== null) { const v = RF.costAt(OF, x, y, vy); if (v >= 0) return v; }
+		return RF.costAt(field, x, y, vy);
+	};
+	/** the reach cost (tiles) at the live state's respawn target, standing (-1: cut off; the order's field with --dord) */
+	const respawnCost = () => { const rt = respawnTileOf(DI, sim, W); return ordAt((rt % W) * 16, ((rt / W) | 0) * 16, 0); };
 	const lbOf = () => {
 		const b = LBT[centreTile()];
 		if (DI === null) return b;
@@ -2204,12 +2217,20 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		// (deaths as moves: the field prices a death edge at DEATH_COST, behind every real way, to the best respawn tile of
 		// all; a state whose only way is a death costs its real price: DEATH_TILES + its own respawn target's cost)
 		viaDeath = DI !== null && rc >= RF.DEATH_TILES;
+		// (--dord: the order by the death-free field where it has a value; the -1 prune stays the field's)
+		let nf = -1;
+		if (OF !== null && rc >= 0) { nf = RF.costAt(OF, sim); viaDeath = nf < 0; }
 		// (--timed: a doomed state is ordered as the death it is: DEATH_TILES + its respawn target's cost with deaths as moves,
 		// else behind every state that can still clear its killer; never ruled out: only the reach field's -1 prunes)
 		if (rc >= 0 && TM !== null && doomedNow()) {
 			tDoomed++; viaDeath = true;
 			if (DI !== null) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
 			return rc + DOOM_TILES;
+		}
+		if (OF !== null && rc >= 0) {
+			if (nf >= 0) return nf;
+			if (a.dprice !== 0) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
+			return rc;
 		}
 		if (viaDeath && a.dprice !== 0) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + r < rc) return DEATH_TILES + r; }
 		if (rc >= 0 || a.prune) return rc;
@@ -2638,7 +2659,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (sim.is_dead || tR >= maxT || sim.has_silver_crown) { dDrop++; return; }
 		const rc = costOf();
 		if (rc < 0) { dDrop++; return; }
-		const raw = RF.costAt(field, sim);
+		const raw = ordAt(sim);
 		if (raw > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; }
 		const byCost = raw + DEATH_TILES < rcPrev;
 		// (the earliest arrival first: a room is made only for a death that is kept, never for one dropped after it)
@@ -3502,7 +3523,7 @@ function workerMain() {
 	// (the steer field: views on the main thread's shared bytes, no copy per worker)
 	const a = Object.assign({}, d.a, d.steerBuf ? { steerData: Object.assign(SF.readSteerFile(Buffer.from(d.steerBuf)), { dpFirst: d.a.dpFirst === 1 }) } : {}, d.lb ? { lbTiles: d.lb } : {},
 		d.avoid ? { avoidTiles: d.avoid } : {});
-	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null);
+	explore(L, d.field, a, d.seed, d.ctrl, (m) => parentPort.postMessage(m), d.port || null, d.seedPort || null, d.ofield || null);
 }
 
 async function main() {
@@ -3533,6 +3554,8 @@ async function main() {
 	// the field's tables in shared memory: the workers read them, and a copy per worker (the cost tables are about 120 MB
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
 	const field = RF.shareField(RF.reachField(L, fieldOpts(a)));
+	// (--dord: the death-free field for the workers' order, shared like the field; only with deaths as moves)
+	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(RF.reachField(L, { deaths: false })) : null;
 	// (timed killers in the level: src/timed.js; the workers build their own bounds)
 	const TMD_L = TMD.timedOf(L) !== null;
 	const sim0 = new E.EESim(L);
@@ -3773,7 +3796,7 @@ async function main() {
 		const seed = (a.seed + 7001 + CW.runs * 13) >>> 0;
 		CW.runs++;
 		const pre = CW.bestMs ? C.eetasBytes(CW.bestMs.subarray(0, Math.max(0, g.t - CLASS_BACK))).toString('latin1') : '';
-		const w = new Worker(__filename, { workerData: { goexplore: true, a: Object.assign({}, a, { seconds: Math.min(a.classS, left - 2), seedInputs: pre }), seed, ctrl: cctrl, field, steerBuf, lb, port: null, seedPort: null,
+		const w = new Worker(__filename, { workerData: { goexplore: true, a: Object.assign({}, a, { seconds: Math.min(a.classS, left - 2), seedInputs: pre }), seed, ctrl: cctrl, field, ofield, steerBuf, lb, port: null, seedPort: null,
 			avoid: avoidTilesOf(CW.G, g) },
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		const rec = { w, gate: g, ctrl: cctrl, seed, ticks: 0 };
@@ -3880,7 +3903,7 @@ async function main() {
 		let port = null;
 		const list = [seedIn[i]];
 		if (one) { const ch = new MessageChannel(); port = ch.port2; list.push(port); one.ports.push(ch.port1); }
-		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, steerBuf, lb, port, seedPort: seedIn[i] }, transferList: list,
+		const w = new Worker(__filename, { workerData: { goexplore: true, a, seed, ctrl, field, ofield, steerBuf, lb, port, seedPort: seedIn[i] }, transferList: list,
 			resourceLimits: { maxOldGenerationSizeMb: Math.round(HEAP_F * a.mem + HEAP_ADD), maxYoungGenerationSizeMb: HEAP_YOUNG } });
 		w.on('message', onMessage);
 		w.on('error', (e) => { say({ ev: 'warning', text: `worker ${seed}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}` }); res(); });
