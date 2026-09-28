@@ -1157,6 +1157,35 @@ async function cpuSection() {
 	check('the one search\'s bursts on a full GPU: 4 "out of memory" failures wait and try again, 3 dying starts count as their arms\' failures only, then bursts run; never "no more GPU bursts"',
 		!!og && og.oom === 4 && og.failed === 7 && og.bursts >= 1 && !oo.events.some((e) => e.ev === 'warning' && /no more GPU bursts/.test(e.text)),
 		`${JSON.stringify(og)}; ${oo.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 400)}`);
+	// the big sizing (the editor's burstBig: 2 lanes, 2^26 cells, 1 M layers) on a full GPU: its first out-of-memory failure
+	// takes the small sizing at once (lane 0 alone, 2^25 cells, <= 262,144 states a layer, no wait) for --burstSmallS, then
+	// the big one again; the bursts' longest launch (eegpu's done lines) is kept
+	const bigTool = path.join(HOME, 'burst_big.js'), bigLog = path.join(HOME, 'burst_big.log');
+	fs.writeFileSync(bigTool, [
+		"'use strict';",
+		"const fs = require('fs');",
+		`const f = ${JSON.stringify(bigLog)};`,
+		"const a = process.argv.slice(2), opt = (k) => (a.find((x) => x.startsWith('--' + k + '=')) || '').split('=')[1];",
+		// (the first launch of either lane, by an exclusive create: the one out-of-memory failure)
+		"let oom = false; try { fs.closeSync(fs.openSync(f + '.oom', 'wx')); oom = true; } catch (e) { /* not the first */ }",
+		"fs.appendFileSync(f, JSON.stringify({ t: Date.now(), cells: +opt('cells'), cap: +opt('cap'), oom }) + '\\n');",
+		"if (oom) { console.log(JSON.stringify({ error: 'cuMemAlloc_v2(&p, bytes) failed: CUDA error 2 (out of memory)' })); process.exit(4); }",
+		"console.log(JSON.stringify({ ev: 'ready', loadMs: 1 }));",
+		"setTimeout(() => console.log(JSON.stringify({ ev: 'done', end: 'exhausted', layers: 1, states: 1, maxLaunchMs: 12.5, maxKernelMs: 7.25 })), 200);",
+	].join('\n'));
+	const ogb = await goexplore(kdFile, ['--workers=1', '--seed=3', '--seconds=16', '--mem=300', '--bursts=1', `--tool=${bigTool}`, `--work=${path.join(HOME, 'bursts5')}`,
+		'--burstPar=2', '--gpuCells=26', '--burstCap=0', '--burstSmallS=4']);
+	const gb = ogb.done && ogb.done.gpu;
+	let bl = [];
+	try { bl = fs.readFileSync(bigLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch (e) { /* none */ }
+	const b0 = bl.find((x) => x.oom), tOom = b0 ? b0.t : 0;
+	const inSmall = bl.filter((x) => x.t > tOom + 400 && x.t < tOom + 3600), after = bl.filter((x) => x.t > tOom + 5000);
+	check('the big burst sizing on a full GPU: the first "out of memory" takes the small sizing at once (lane 0 alone, 2^25 cells, 262,144 states a layer) for --burstSmallS, then the big one again; the longest launch kept',
+		!!gb && gb.oom === 1 && gb.small === 1 && !!b0 && b0.cells === 26 && inSmall.length >= 2 && inSmall.every((x) => x.cells === 25 && x.cap <= 262144) &&
+		// (lane 0 alone: one burst of 200 ms at a time, not two side by side)
+		inSmall.every((x, i) => i === 0 || x.t - inSmall[i - 1].t >= 150) && after.some((x) => x.cells === 26) &&
+		gb.maxLaunchMs === 12.5 && gb.maxKernelMs === 7.25 && !ogb.events.some((e) => e.ev === 'warning' && /again in/.test(e.text)),
+		`${JSON.stringify(gb)}; launches ${bl.map((x) => `${x.t - tOom}:${x.cells}/${x.cap}`).join(' ')}; ${ogb.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));

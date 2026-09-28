@@ -83,6 +83,12 @@ const SLACK_MAX = 200, STEER_MISS = 6000;
 // a burst that found the GPU's memory full waits goexplore.js --burstOomS (5) s, doubled while that lasts, at most
 // OOM_WAIT_MAX_S
 const OOM_WAIT_MAX_S = 120;
+// the big sizing's fallback (the editor's burstBig from 20 GB: goexplore.js --burstPar=2 --gpuCells=26 --burstCap=0, 3-5.7 GB
+// of tables): a burst that found the GPU's memory full takes the small sizing (goexplore's defaults: lane 0 alone, 2^25
+// cells, at most 262,144 states a layer) at once, for --burstSmallS (300) s, then the big sizing again; it waits
+// (--burstOomS) only when the small one finds no memory either. The EPYC's 24 GB RTX 4090 is often nearly full, and two
+// searches on one 40 GB A100 had 11 such waits against 0 (src/out/night/n2_2_time_to_route.md)
+const SMALL = { cells: 25, cap: 262144 };
 // a room never burst from scores this (the newest first among them): above a room whose bursts only got nearer, below
 // one whose bursts keep finding rooms (a level of many switch states has thousands of rooms: each once would take all
 // the GPU)
@@ -177,7 +183,12 @@ function create(o) {
 	// (the trophy arm's steer file: written by this search, once: the work folder may hold another level's)
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0 };
+	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0 };
+	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
+	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
+	let smallUntil = 0;
+	const small = () => big && Date.now() < smallUntil;
 	const trophyArm = { n: 0, y: 0, back: 0 };
 	const confs = CONFS.map(() => ({ n: 0, y: 0 }));
 	/** the next burst's settings for room r (null: the trophy arm): a bandit per room (a low-gravity room and a fly room
@@ -489,9 +500,10 @@ function create(o) {
 		fs.writeFileSync(pre, Buffer.from(job.inputs, 'latin1'));
 		const T = o.bound();
 		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
-		const c = job.cells;
+		const c = job.cells, sm = small();
+		const cells = sm ? Math.min(a.gpuCells, SMALL.cells) : a.gpuCells, cap = Math.min(c.cap, a.burstCap > 0 ? a.burstCap : Infinity, sm ? SMALL.cap : Infinity);
 		const args = ['explore', bin, '-', `--prefix=${pre}`, '--finish=1', '--discrete=1', `--depth=${depth}`, `--seconds=${job.seconds}`, '--coarse=0',
-			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${a.gpuCells}`, `--cap=${a.burstCap > 0 ? Math.min(c.cap, a.burstCap) : c.cap}`,
+			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${cells}`, `--cap=${cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), ...(job.steer ? [`--steer=${job.steer}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();
 		let ch;
@@ -507,7 +519,12 @@ function create(o) {
 			let e;
 			try { e = JSON.parse(line); } catch (x) { return; }
 			if (e.ev === 'ready') { readyAt = Date.now(); return; }
-			if (e.ev === 'done') { done = e; return; }
+			if (e.ev === 'done') {
+				done = e;
+				if (e.maxLaunchMs > st.maxLaunchMs) st.maxLaunchMs = e.maxLaunchMs;
+				if (e.maxKernelMs > st.maxKernelMs) st.maxKernelMs = e.maxKernelMs;
+				return;
+			}
 			if (e.error) { err = String(e.error); return; }
 			if (e.ev === 'hit' && e.inputs) {
 				const masks = Uint8Array.from(e.inputs, (ch2) => (ch2.charCodeAt(0) - 48) & 31);
@@ -571,6 +588,8 @@ function create(o) {
 			const now = o.sec();
 			const left = a.seconds - now;
 			if (left < 3) break;
+			// (the small sizing after an out-of-memory failure: lane 0 alone; a chain's next link waits for the big sizing)
+			if (lane > 0 && small()) { await sleep(1000); continue; }
 			let job = null;
 			const p = next ? null : pick();
 			if (next) {
@@ -618,6 +637,13 @@ function create(o) {
 				// failures in their first 20 s)
 				if (/out of memory/i.test(r.end)) {
 					st.oom++;
+					// (the big sizing: the small one at once, SMALL for --burstSmallS s)
+					if (big && !small() && !stopped) {
+						smallUntil = Date.now() + (a.burstSmallS > 0 ? a.burstSmallS : 300) * 1000;
+						st.small++;
+						o.say({ ev: 'warning', text: `burst: ${r.end}: the small sizing (one lane, 2^${SMALL.cells} cells, ${SMALL.cap.toLocaleString('en-US')} states a layer) for ${a.burstSmallS > 0 ? a.burstSmallS : 300} s` });
+						continue;
+					}
 					const w = Math.min(OOM_WAIT_MAX_S, (a.burstOomS > 0 ? a.burstOomS : 5) * (1 << oom));
 					o.say({ ev: 'warning', text: `burst: ${r.end}: again in ${w} s` });
 					for (let k = 0; k < 10 * w && !stopped; k++) await sleep(100);

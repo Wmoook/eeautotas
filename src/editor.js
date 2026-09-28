@@ -1902,7 +1902,11 @@ function launch(n) {
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu || rolls) {
 				V.detail = `${rolls ? 'GPU' : `${ev.workers} thread${ev.workers > 1 ? 's' : ''}`}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
-					(ev.rooms > 1 ? ` in ${ev.allRooms > ev.rooms ? ev.allRooms : ev.rooms} rooms` : '') + (ev.gpu && ev.gpu.bursts ? `, ${ev.gpu.bursts} GPU bursts` : '') +
+					(ev.rooms > 1 ? ` in ${ev.allRooms > ev.rooms ? ev.allRooms : ev.rooms} rooms` : '') + (ev.gpu && ev.gpu.bursts ? `, ${ev.gpu.bursts} GPU bursts` +
+						// (their longest launch, by the GPU's clock where eegpu has it: the 50 ms rule on the big sizing, burstSizeArgs;
+						// and how often the big sizing met a full GPU: bursts.js SMALL)
+						(ev.gpu.maxKernelMs > 0 || ev.gpu.maxLaunchMs > 0 ? ` (longest launch ${Math.round(ev.gpu.maxKernelMs > 0 ? ev.gpu.maxKernelMs : ev.gpu.maxLaunchMs)} ms` +
+							`${ev.gpu.oom ? `, ${ev.gpu.oom} out of GPU memory${ev.gpu.small ? `, ${ev.gpu.small} to the small sizing` : ''}` : ''})` : '') : '') +
 					(ev.fed ? `, ${ev.fed} GPU random runs taken in` : '') + (Number.isFinite(ev.bestCost) && !V.found ? `, nearest ${ev.bestCost.toFixed(1)} tiles from the trophy` : '') +
 					(V.found ? ', looking for a faster route' : '');
 			}
