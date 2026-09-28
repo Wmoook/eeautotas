@@ -1236,7 +1236,10 @@ function coinsOf(inputs) {
 	if (!cur.countDoors) {
 		let gold = false, blue = false;
 		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
-		cur.countDoors = { gold, blue };
+		// (a counter whose doors guard nothing on the way to the trophy is no progress: goexplore.js counterRelevance, as
+		// the room keys count it; Good Egg's blue coins)
+		const rel = GX.counterRelevance(L);
+		cur.countDoors = { gold: gold && rel.gold, blue: blue && rel.blue };
 	}
 	const D = cur.countDoors;
 	if (!D.gold && !D.blue) return 0;
