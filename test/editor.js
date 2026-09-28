@@ -35,8 +35,14 @@
 //              limits kept), the CPU search stopping with the GPU strategies while the proof runs. Elsewhere EEAT_PROOF=0.
 //   lane       the path skips (src/skipfind.js --lane=1, the real one) next to a stand-in CPU search: a shortened attempt
 //              into the CPU search's archive before any route, a faster route from its slow route after
+//   escape     the stall escape (the real src/goexplore.js --prefix next to a stand-in CPU search that stalls): the escape
+//              from the nearest attempt 60 ticks back routes, on half the workers (the stalled search parks the rest and
+//              gets them back), its attempts into the stalled search's archive; the rotation: a nearest attempt in a pit (the
+//              first escape ends there), the next from 600 ticks back routes; the frontier (a short nearest attempt by the
+//              spawn: the escape starts from a room's long attempt); the retarget (that escape stays while nothing gets
+//              nearer, and gives way once the search gets clearly nearer after its start); escape: false = none
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
-// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,gpu]      Exit code 1 if any check
+// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
 const fs = require('fs');
 const path = require('path');
@@ -48,7 +54,7 @@ const GPU = argv.includes('--gpu');
 // --gpuOnly=a,b: only the GPU cases whose names contain one of these (short GPU runs, one at a time)
 const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)).split(',').filter(Boolean);
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
-// --only=a,b: only the sections whose names are given (app, passes, cpu, prove, lane, gpu); the fast ones always run
+// --only=a,b: only the sections whose names are given (app, passes, cpu, prove, lane, escape, gpu); the fast ones always run
 const ONLY = ((argv.find((a) => a.startsWith('--only=')) || '').slice(7)).split(',').filter(Boolean);
 const want = (k) => !ONLY.length || ONLY.includes(k);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
@@ -306,10 +312,133 @@ function request(port, method, p, body) {
 		rq.end(b || undefined);
 	});
 }
+/** a function of the page's script by its name (`function name(` at column 0 up to its closing `}` at column 0), and a
+ *  one-line `const name = ...` (the review suite's way of running the page's own code) */
+function pageFnSrc(name) {
+	const lines = PAGE.split('\n');
+	const k = lines.findIndex((l) => new RegExp(`^(async )?function ${name}\\(`).test(l));
+	const e = k < 0 ? -1 : lines.indexOf('}', k);
+	return e < 0 ? '' : lines.slice(k, e + 1).join('\n');
+}
+const pageConstSrc = (name) => { const x = PAGE.match(new RegExp(`^const ${name} = .*$`, 'm')); return x ? x[0] : ''; };
+/** a stand-in for a canvas 2D context: the calls (with the styles they drew in), the standard methods the page may use */
+function fakeCtx() {
+	const calls = [], st = [];
+	const g = { calls, strokeStyle: '#000', fillStyle: '#000', lineWidth: 1, globalAlpha: 1, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', lineJoin: 'miter', lineCap: 'butt', dash: [] };
+	const rec = (name) => (...a) => { calls.push({ name, a, stroke: g.strokeStyle, fill: g.fillStyle, width: g.lineWidth, alpha: g.globalAlpha, dash: g.dash.slice(), font: g.font }); };
+	for (const m of ['beginPath', 'moveTo', 'lineTo', 'arc', 'arcTo', 'closePath', 'stroke', 'fill', 'fillText', 'clearRect', 'fillRect', 'strokeRect', 'rect', 'ellipse', 'quadraticCurveTo', 'bezierCurveTo']) g[m] = rec(m);
+	g.save = () => { st.push({ strokeStyle: g.strokeStyle, fillStyle: g.fillStyle, lineWidth: g.lineWidth, globalAlpha: g.globalAlpha, dash: g.dash }); calls.push({ name: 'save', a: [] }); };
+	g.restore = () => { Object.assign(g, st.pop() || {}); calls.push({ name: 'restore', a: [] }); };
+	g.setLineDash = (d) => { g.dash = d.slice(); };
+	g.getLineDash = () => g.dash.slice();
+	g.measureText = (s) => ({ width: String(s).length * 7 });
+	return g;
+}
+/**
+ * The search frontier (editor.html: frontierOf, drawFrontier, gotoFrontier, glideStep cut out of the page and run): the
+ * toggle in the map toolbar (on by default, remembered), F and the closest attempt's "Go to", the layer above the map; the
+ * marker's drawing on a fake canvas context from a sample closest path: the ring at the path's end (its size at every
+ * zoom), the pulse while the search runs (none once it stopped or the level changed), the brighter trail, the label;
+ * off the view an arrow on its edge; hidden once a route is known or turned off.
+ */
+function frontierChecks() {
+	const tools = (PAGE.match(/<div class="tools" id="tools">[\s\S]*?<\/div>/) || [''])[0];
+	check('the search frontier: a "search frontier" toggle in the map toolbar (on by default, remembered), its own layer above the map (clicks pass through), F and the closest attempt\'s "Go to" take the map there',
+		/<label class="ck"[^>]*><input type="checkbox" id="cFrontier" checked> search frontier<\/label>/.test(tools) &&
+		/<canvas id="cv"><\/canvas><canvas id="cvFx" class="fx" aria-hidden="true"><\/canvas>/.test(PAGE) && /\.stage canvas\.fx \{ pointer-events: none; \}/.test(PAGE) &&
+		/^const FX = \{ on: store\.get\('eeat\.editor\.frontier'\) !== '0',/m.test(PAGE) && /store\.set\('eeat\.editor\.frontier', FX\.on \? '1' : '0'\)/.test(PAGE) &&
+		/^\$\('cFrontier'\)\.checked = FX\.on;$/m.test(PAGE) && /if \(k === 'f' \|\| k === 'F'\) \{ gotoFrontier\(\); return; \}/.test(PAGE) &&
+		/<button class="small" id="cGoto"[^>]*>[^<]*Go to<\/button>/.test(PAGE) && /\$\('cGoto'\)\.onclick = \(\) => gotoFrontier\(\);/.test(PAGE) &&
+		// (the layer redraws with the map, and on its own while it pulses; it follows the window's size)
+		/if \(VW\.dirty\) \{ VW\.dirty = false; draw\(\); FX\.dirty = true; \}\n\tif \(FX\.dirty \|\| \(FX\.live && now - FX\.at >= FX_FRAME_MS\)\) drawFx\(now\);/.test(PAGE) &&
+		/fx\.width = w; fx\.height = h; FX\.dirty = true;/.test(PAGE));
+	const env = { $: () => ({ textContent: '' }), SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false }, performance: { now: () => 1000 }, changedView: () => {} };
+	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), ...['frontierOf', 'drawFrontier', 'gotoFrontier', 'glideStep'].map(pageFnSrc)].join('\n');
+	let F = null;
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { frontierOf, drawFrontier, gotoFrontier, glideStep, ZOOMS };`)(...Object.values(env)); });
+	check('the search frontier\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
+	if (!F) return;
+	// a sample closest attempt: 320 ticks right along a floor, up a step, a portal jump (not joined) and on
+	const path = [];
+	for (let t = 0; t <= 320; t++) path.push(t < 200 ? [40 + t * 2, 88] : t < 260 ? [440 + (t - 200), 88 - (t - 200)] : [900 + (t - 260) * 3, 40]);
+	const closest = { dist: 13.4, tiles: 13.4, ticks: 320, runTicks: 312, time: '0:03.12', path, strategy: 'random runs (CPU)', inputs: '4'.repeat(320) };
+	const st = { running: true, stage: 'searching', result: null, closest };
+	const f = F.frontierOf(st, true, false);
+	const end = path[path.length - 1];
+	check('frontierOf: the end of the closest attempt\'s path, "nearest: <tiles> · <time> · <strategy>", pulsing while the search runs',
+		f && f.x === end[0] && f.y === end[1] && f.label === 'nearest: 13.4 tiles · 0:03.12 · random runs (CPU)' && f.pulse && !f.stale && f.P === path, JSON.stringify(f && { x: f.x, y: f.y, label: f.label, pulse: f.pulse }));
+	const lab = (c) => { const x = F.frontierOf({ running: true, closest: Object.assign({}, closest, c) }, true, false); return x && x.label; };
+	const stopped = F.frontierOf(Object.assign({}, st, { running: false, stage: 'stopped' }), true, false), stale = F.frontierOf(st, true, true);
+	check('frontierOf: a stopped search keeps it (still), an edited level dims it (still); hidden once a route is known, with the toggle off, without a closest attempt or its path; labels',
+		stopped && !stopped.pulse && !stopped.stale && stale && !stale.pulse && stale.stale &&
+		F.frontierOf(Object.assign({}, st, { result: { time: '0:05.00', path } }), true, false) === null && F.frontierOf(st, false, false) === null &&
+		F.frontierOf({ running: true, closest: null }, true, false) === null && F.frontierOf({ running: true, closest: Object.assign({}, closest, { path: [] }) }, true, false) === null &&
+		F.frontierOf(null, true, false) === null && lab({ tiles: 280 }) === 'nearest: 280 tiles · 0:03.12 · random runs (CPU)' && lab({ tiles: 1 }) === 'nearest: 1 tile · 0:03.12 · random runs (CPU)' &&
+		lab({ tiles: 0 }) === 'nearest: at the trophy · 0:03.12 · random runs (CPU)' && lab({ strategy: 'x'.repeat(60) }).endsWith(`${'x'.repeat(42)}…`),
+		JSON.stringify([stopped && stopped.pulse, stale && stale.pulse, lab({ tiles: 280 }), lab({ tiles: 1 }), lab({ tiles: 0 })]));
+	// drawn: the level's origin (30, 20) on a 1200 x 700 canvas, 16 px a tile (s = 1), device pixel ratio 1
+	const draw = (fr, s, d, now, ox, oy, cw, ch) => { const g = fakeCtx(); const e = errOf(() => F.drawFrontier(g, fr, ox, oy, s, d, now, cw, ch)); return { g, e, c: g.calls }; };
+	const finite = (c) => c.every((q) => q.a.every((v) => typeof v !== 'number' || Number.isFinite(v)));
+	const inside = (c, cw, ch) => c.filter((q) => q.name === 'fillText').every((q) => q.a[1] >= 0 && q.a[1] <= cw && q.a[2] >= 0 && q.a[2] <= ch);
+	const X = 30 + end[0], Y = 20 + end[1];
+	const A = draw(f, 1, 1, 250, 30, 20, 1200, 700);
+	const arcs = A.c.filter((q) => q.name === 'arc' && Math.abs(q.a[0] - X) < 1e-9 && Math.abs(q.a[1] - Y) < 1e-9);
+	const ring = arcs.filter((q) => q.a[2] === 12), pulse = arcs.filter((q) => q.a[2] > 12 + 1e-9);
+	const text = A.c.filter((q) => q.name === 'fillText').map((q) => q.a[0]).join('');
+	// the trail: the last 300 ticks in 6 pieces (a glow and a bright core each), older fainter; the jump of more than 40 px not joined
+	const trail = A.c.filter((q) => (q.name === 'moveTo' || q.name === 'lineTo') && q.a[1] <= 20 + 88 + 1e-9 && q.a[0] >= 30 + path[20][0]);
+	const alphas = A.c.filter((q) => q.name === 'stroke' && /^rgba\(255,228,184,/.test(q.stroke)).map((q) => +q.stroke.split(',')[3].replace(')', ''));
+	check('drawFrontier (a fake canvas context, the sample path, 16 px a tile): the ring at the path\'s end (12 px of the level), two pulse rings outside it, the attempt\'s last 300 ticks brighter toward the end, ' +
+		'the label "nearest: 13.4 tiles · 0:03.12 · random runs (CPU)" inside the map, nothing but finite numbers, save / restore paired',
+		!A.e && ring.length === 1 && pulse.length === 2 && text === 'nearest: 13.4 tiles · 0:03.12 · random runs (CPU)' && finite(A.c) && inside(A.c, 1200, 700) &&
+		A.c.filter((q) => q.name === 'save').length === A.c.filter((q) => q.name === 'restore').length &&
+		alphas.length === 6 && alphas.every((a, k) => k === 0 || a > alphas[k - 1]) && Math.abs(alphas[5] - 0.95) < 1e-9 &&
+		trail.filter((q) => q.name === 'lineTo').length >= 290 * 2 - 30 && A.c.filter((q) => q.name === 'moveTo' && q.a[0] === 30 + 900 && q.a[1] === 20 + 40).length >= 2,
+		A.e ? A.e.stack : JSON.stringify({ ring: ring.length, pulse: pulse.map((q) => q.a[2]), text, alphas, trail: trail.length }));
+	// the pulse moves; a stopped search and an edited level: no pulse; the edited level dashed and dim
+	const B = draw(f, 1, 1, 700, 30, 20, 1200, 700), S = draw(stopped, 1, 1, 0, 30, 20, 1200, 700), D = draw(stale, 1, 1, 0, 30, 20, 1200, 700);
+	const radii = (r) => r.c.filter((q) => q.name === 'arc' && q.a[2] > 12 + 1e-9 && Math.abs(q.a[0] - X) < 1e-9).map((q) => q.a[2]).sort((a, b) => a - b).join();
+	const dashedRing = D.c.some((q) => q.name === 'arc' && q.a[2] === 12) && D.c.some((q) => q.name === 'stroke' && q.dash.length === 2 && q.stroke === '#ff9f43' && q.alpha === 0.55);
+	check('drawFrontier: the pulse rings grow with the time; a stopped search: the ring alone (no pulse); an edited level: no pulse, the ring dashed at 55%',
+		!B.e && !S.e && !D.e && radii(A) !== radii(B) && radii(B).split(',').length === 2 && radii(S) === '' && radii(D) === '' && dashedRing &&
+		S.c.some((q) => q.name === 'arc' && q.a[2] === 12), `${radii(A)} | ${radii(B)} | ${radii(S)} | ${radii(D)} dashed ${dashedRing}`);
+	// its size at every zoom: 12 px of the level, at least 10 and at most 56 CSS px (d: the device pixel ratio)
+	const ringR = (s, d) => { const r = draw(f, s, d, 0, 0, 0, 1e5, 1e5); const q = r.c.filter((c) => c.name === 'arc' && Math.abs(c.a[0] - end[0] * s) < 1e-9 && Math.abs(c.a[1] - end[1] * s) < 1e-9); return r.e ? NaN : Math.min(...q.map((c) => c.a[2]).filter((v) => v > 4 * d)); };
+	const sizes = [[1 / 16, 1], [1 / 16, 2], [0.5, 1], [1, 1], [2, 1.5], [4, 1], [4, 2], [8, 1]].map(([s, d]) => ringR(s, d));
+	check('drawFrontier: the ring 12 px of the level (3/4 of a tile), at least 10 and at most 56 CSS px (canvas px: x the device pixel ratio): 10 at 1 canvas px a tile (20 at a ratio of 2), ' +
+		'10 at 8, 12 at 16, 24 at 32, 48 at 64, 56 at 128', sizes.join() === [10, 20, 10, 12, 24, 48, 48, 56].join(), sizes.join());
+	// off the view: an arrow on the right edge pointing at it, the label with "F goes there", no ring
+	const O = draw(f, 1, 1, 0, 30 + 2000, 20, 1200, 700);
+	const tri = O.c.findIndex((q) => q.name === 'fill' && q.fill === '#ff9f43');
+	const otext = O.c.filter((q) => q.name === 'fillText').map((q) => q.a[0]).join('');
+	const pts = O.c.slice(0, tri).filter((q) => q.name === 'moveTo' || q.name === 'lineTo').slice(-3);
+	check('drawFrontier off the view: an orange arrow on the map\'s edge (pointing at it), the label "... · F goes there" inside the map, no ring',
+		!O.e && tri > 0 && pts.length === 3 && pts.every((q) => q.a[0] > 1150 && q.a[0] <= 1200 && q.a[1] > 0 && q.a[1] < 700) && pts[0].a[0] > pts[1].a[0] &&
+		otext === 'nearest: 13.4 tiles · 0:03.12 · random runs (CPU) · F goes there' && inside(O.c, 1200, 700) && finite(O.c) &&
+		!O.c.some((q) => q.name === 'arc' && q.a[2] === 12), O.e ? O.e.stack : JSON.stringify({ tri, pts: pts.map((q) => q.a), otext }));
+	// F / "Go to": at least 16 px a tile, the map glides to the end of the path
+	env.SOLVE.st = st;
+	F.gotoFrontier();
+	const g0 = env.VW.glide && Object.assign({}, env.VW.glide), z0 = env.VW.zi;
+	F.glideStep(1150);
+	const mid = [env.VW.camX, env.VW.camY];
+	if (env.VW.glide) F.glideStep(1400);
+	const at = [env.VW.camX, env.VW.camY];
+	env.VW.zi = 12;   // (already nearer: the zoom stays)
+	F.gotoFrontier();
+	const z1 = env.VW.zi;
+	env.SOLVE.st = Object.assign({}, st, { result: { time: '0:05.00', path } });
+	env.VW.glide = null; env.VW.zi = 3;
+	F.gotoFrontier();
+	check('F / "Go to": the map glides to the frontier (300 ms) at 16 px a tile or more, a nearer zoom kept; nothing once a route is known',
+		g0 && g0.x1 === end[0] && g0.y1 === end[1] && F.ZOOMS[z0] === 16 && z1 === 12 && mid[0] > 0 && mid[0] < end[0] && at[0] === end[0] && at[1] === end[1] &&
+		env.VW.glide === null && env.VW.zi === 3, JSON.stringify({ g0, z0, z1, mid, at, zi: env.VW.zi }));
+}
 async function appSection() {
 	section('app: the page and the HTTP API (in-process server, temp data folder)');
 	const scripts = [...PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 	check('the editor page\'s script parses', scripts.length === 1 && !errOf(() => new Function(scripts[0])), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
+	frontierChecks();
 	const SV = require('../src/server.js');
 	await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
 	const port = SV.server.address().port;
@@ -1786,6 +1915,154 @@ async function laneSection() {
 		!!r && /path skips/.test(r.strategy) && !!rv && rv.runTicks === r.runTicks && r.runTicks <= ev.runTicks - 20, r ? `${ev.runTicks} -> ${r.runTicks} (${r.strategy}${r.spliced ? `: ${r.spliced}` : ''}) after ${r.foundAfter} s` : `no result (${st.stage}); ${(st.log || []).slice(-3).join(' | ')}`);
 	// (the lane's own route search: test/skipfind.js, "the whole run as the best route -> a faster route")
 }
+// A stand-in for a stalled CPU search (next to the stall escape, whose goexplore.js is the real one): it reports the
+// scenario's attempt as its closest attempt and then only progress (a stall), logs every stdin line
+const FAKE_CPU_STALL = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 4, seeds: [1, 2, 3, 4], mode: 'physics', cells: 'coarse', startCost: 40 });
+setTimeout(() => say({ ev: 'closest', dist: SC.dist, tick: SC.attempt.length, inputs: SC.attempt }), 200);
+if (SC.source) setTimeout(() => say({ ev: 'source', kind: 'room', room: 777, desc: 'coins=1', gain: 5, tick: SC.source.length, dist: SC.dist + 20, inputs: SC.source }), 300);
+if (SC.later) setTimeout(() => say({ ev: 'closest', dist: SC.later.dist, tick: SC.later.attempt.length, inputs: SC.later.attempt }), SC.later.at);
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: SC.dist, found: 0, refined: 0, workers: 4, rooms: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let buf = '';
+process.stdin.on('data', (d) => {
+	buf += String(d);
+	let k;
+	while ((k = buf.indexOf('\\n')) >= 0) {
+		const line = buf.slice(0, k); buf = buf.slice(k + 1);
+		fs.appendFileSync(SC.stdinLog, line + '\\n');
+		if (line === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`;
+// A stand-in for an escape that never gets anywhere (no attempt, no room): the retarget alone decides when it goes
+const FAKE_ESC_IDLE = `'use strict';
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 2, seeds: [1001, 1002], mode: 'physics', cells: 'coarse', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 1, tick: 1, states: 1, ticks: 1000, ticksPerSec: 1000, picks: 1, found: 0, refined: 0, workers: 2, rooms: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 1, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/(^|\\n)stop(\\n|$)/.test(String(d))) end(); });
+process.stdin.on('end', end);
+`;
+async function escapeSection() {
+	section('the stall escape: a fresh one search (the real src/goexplore.js --prefix) from a stalled search\'s nearest attempt (a stand-in CPU search; no GPU)');
+	// a 160 x 45 level (coarse cells: the CPU search's big-level path): a floor at row 20 over solid ground, the spawn at the
+	// left, the trophy at the right; a pit (1 tile wide, 12 deep) at x 30: a ball that falls in never gets out (the reach
+	// field rules the trophy out from its bottom); a coin at x 40 and a coin door (1 coin) across the corridor at x 100: the
+	// coin's room is a new room that opens territory (the escape's source event, into the stalled search's archive)
+	const W = 160, H = 45, cells = room(W, H);
+	for (let x = 1; x < W - 1; x++) for (let y = 21; y < H - 1; y++) if (!(x === 30 && y <= 32)) cells.push([x, y, 9]);
+	cells.push([2, 20, 255], [W - 4, 20, 121], [40, 20, 100]);
+	for (let y = 1; y <= 20; y++) cells.push([100, y, 43, 1]);
+	const buf = ED.eelvlOf({ name: 'escape pit', width: W, height: H, cells });
+	const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(buf), { id: 'editor', file: 'editor.eelvl' }));
+	const str = (ms) => C.eetasBytes(ms).toString('latin1');
+	const run = (parts) => { const raw = []; for (const [m, n] of parts) for (let k = 0; k < n; k++) raw.push(m); return Uint8Array.from(raw); };
+	// (where a run ends: its tile; replayed)
+	const endTile = (ms) => { const sim = new E.EESim(L); sim.reset(); const inp = new E.EEInput(); for (const m of ms) { E.applyMask(inp, m); sim.tick(inp); } return [Math.trunc(sim.px + 8) >> 4, Math.trunc(sim.py + 8) >> 4]; };
+	const fake = path.join(HOME, 'fake-cpu-stall.js');
+	fs.writeFileSync(fake, FAKE_CPU_STALL);
+	const scenario = async (name, attempt, dist, seconds, source) => {
+		const sc = path.join(HOME, `esc_${name}.json`), stdinLog = path.join(HOME, `esc_${name}_stdin.log`);
+		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog, ...(source ? { source: str(source) } : {}) }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1 });
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && !st.result && Date.now() - t0 < seconds * 1000 + 5000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
+		// (after the route: the escape's end and the one search's workers back)
+		const t1 = Date.now();
+		while (st.running && st.strategies.some((q) => q.key === 'escape' && q.live) && Date.now() - t1 < 10000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
+		await new Promise((z) => setTimeout(z, 500));
+		st = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		const lines = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8').split('\n').filter(Boolean) : [];
+		return { st, lines, sec: (t1 - t0) / 1000 };
+	};
+	// (1) the stand-in stalls with its nearest attempt on the floor 5 tiles short of the pit (it never gets further):
+	// the escape starts after the stall clock (2 s here) from that attempt ESC_BACK[0] (60) ticks back, on half of the 4
+	// workers (the stalled search parks 2: "workers 2"), finds the route (replayed), and the stalled search gets its
+	// workers back ("workers 0") and the escape's attempts as seeds (CPU only: no one search)
+	const a1 = run([[0, 60], [4, 100]]);
+	const [x1] = endTile(a1);
+	const r1 = await scenario('near', a1, 31, 60);
+	const E1 = r1.st.strategies.find((q) => q.key === 'escape');
+	const res1 = r1.st.result;
+	const rv1 = res1 ? C.evaluate(L, Uint8Array.from(res1.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
+	check(`a stall escaped by a fresh search from the nearest attempt (${a1.length} ticks, ending at x ${x1}, before the pit): the escape's route over the pit, replayed`,
+		!!res1 && !!E1 && res1.strategy === E1.label && !!rv1 && rv1.runTicks === res1.runTicks && res1.inputs.startsWith(str(a1.subarray(0, a1.length - 60))),
+		res1 ? `${res1.time} (${res1.strategy}) after ${res1.foundAfter} s` : `no route (${r1.st.stage}); ${(r1.st.log || []).slice(-4).join(' | ')}`);
+	const w1 = r1.lines.filter((l) => /^workers \d+$/.test(l));
+	check('the escape on half of the CPU search\'s 4 workers: the stalled search parks 2 while it runs ("workers 2"), gets them back after ("workers 0")',
+		w1.length >= 2 && w1[0] === 'workers 2' && w1[w1.length - 1] === 'workers 0', w1.join(', ') || 'no workers line');
+	const seeds1 = r1.lines.filter((l) => l.startsWith('seed '));
+	check('the escape\'s attempts into the stalled search\'s archive (CPU only: "seed" lines, whole runs from the level\'s start through its prefix)',
+		seeds1.length > 0 && seeds1.every((l) => l.slice(5).startsWith(str(a1.subarray(0, a1.length - 60)))), `${seeds1.length} seed line(s)`);
+	check('the escape\'s notes and state: the escape 1 after the stall, from the nearest attempt; its process gone after the route',
+		!!r1.st.escape && r1.st.escape.runs === 1 && (r1.st.log || []).some((l) => /escape: a fresh one search from the nearest attempt 1: no attempt nearer/.test(l)) && !!E1 && !E1.live,
+		`${JSON.stringify(r1.st.escape)}; ${E1 ? E1.state : '-'}`);
+	// (2) the rotation: the stand-in's nearest attempt ends in the pit (it idles 900 ticks first): the first escape (60
+	// ticks back: in the pit) finds the trophy ruled out and ends; after the stall clock the next one starts from the nearest
+	// attempt 600 ticks back (still idling by the spawn) and finds the route over the pit
+	const a2 = run([[0, 900], [4, 160], [0, 140]]);
+	const [x2, y2] = endTile(a2);
+	const r2 = await scenario('pit', a2, 5, 90);
+	const E2 = r2.st.strategies.find((q) => q.key === 'escape');
+	const res2 = r2.st.result;
+	const rv2 = res2 ? C.evaluate(L, Uint8Array.from(res2.inputs, (c) => (c.charCodeAt(0) - 48) & 31)) : null;
+	check(`the rotation: the nearest attempt a trap (in the pit at (${x2}, ${y2})): the first escape ends there, the next from 600 ticks back finds the route (replayed)`,
+		x2 === 30 && y2 > 25 && !!res2 && !!E2 && res2.strategy === E2.label && !!rv2 && rv2.runTicks === res2.runTicks && !!r2.st.escape && r2.st.escape.runs === 2 &&
+		res2.inputs.startsWith(str(a2.subarray(0, a2.length - 600))) && !res2.inputs.startsWith(str(a2.subarray(0, a2.length - 60))),
+		res2 ? `${res2.time} after ${res2.foundAfter} s, ${r2.st.escape.runs} escapes; ${(r2.st.log || []).filter((l) => /escape/.test(l)).slice(-3).join(' | ')}` : `no route (${r2.st.stage}); ${(r2.st.log || []).slice(-4).join(' | ')}`);
+	// (3) the frontier: the nearest attempt by the search's measure a short one by the spawn (110 ticks idle), a room's
+	// attempt far longer (it runs right to x 24): the escape starts from the room's attempt, not from near the start
+	const a4 = run([[0, 110]]), s4 = run([[0, 60], [4, 95]]);
+	const r4 = await scenario('front', a4, 5, 60, s4);
+	const res4 = r4.st.result;
+	check('the frontier: no escape from a short nearest attempt by the spawn (under half the longest attempt): it starts from the room\'s long attempt 60 ticks back, and routes',
+		!!res4 && res4.inputs.startsWith(str(s4.subarray(0, s4.length - 60))) && (r4.st.log || []).some((l) => /from tick 95 of room "coins=1"'s nearest attempt/.test(l)),
+		res4 ? `${res4.time}; ${(r4.st.log || []).filter((l) => /escape/.test(l)).slice(0, 1).join(' | ')}` : `no route (${r4.st.stage}); ${(r4.st.log || []).slice(-3).join(' | ')}`);
+	// (3b) the retarget (the soundness review's repro, 2026-09-28): the frontier's escape from the room's attempt (its start
+	// 25 tiles out, the nearest attempt a short one by the spawn at 5 tiles all along) is not sent away as "left behind"
+	// while nothing gets nearer (before: after the retarget clock, 1 s here, every such escape went); once the search gets
+	// clearly nearer after its start (a 1-tile attempt at 12 s) the next one starts from there. The escape a stand-in that
+	// never gets anywhere, its own stall clock 60 s
+	const fakeEsc = path.join(HOME, 'fake-esc-idle.js');
+	fs.writeFileSync(fakeEsc, FAKE_ESC_IDLE);
+	const s5 = run([[0, 60], [4, 95], [0, 40]]);
+	const sc5 = path.join(HOME, 'esc_retarget.json');
+	fs.writeFileSync(sc5, JSON.stringify({ attempt: str(a4), dist: 5, stdinLog: path.join(HOME, 'esc_retarget_stdin.log'), source: str(s4), later: { at: 12000, attempt: str(s5), dist: 1 } }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
+		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1 });
+	const t5 = Date.now();
+	let st5 = ED.state(), away5 = null;
+	while (st5.running && Date.now() - t5 < 35000 && !(st5.escape && st5.escape.runs >= 2)) {
+		await new Promise((z) => setTimeout(z, 100));
+		st5 = ED.state();
+		if (away5 === null && (st5.log || []).some((l) => /clearly nearer elsewhere/.test(l))) away5 = (Date.now() - t5) / 1000;
+	}
+	const log5 = (st5.log || []).filter((l) => /escape/.test(l));
+	ED.stop();
+	while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+	check('the retarget: an escape from a room\'s attempt keeps going while the nearest attempt (nearer than its start all along) stays; the search clearly nearer after its start (12 s): the next one from there',
+		away5 !== null && away5 >= 12 && !!st5.escape && st5.escape.runs === 2 && log5.some((l) => /escape: a fresh one search from the nearest attempt 1: .*from tick 95 of room "coins=1"'s nearest attempt/.test(l)) &&
+		log5.some((l) => /escape: a fresh one search from the nearest attempt 2: .*from tick 135 of the nearest attempt/.test(l)),
+		`sent away after ${away5 === null ? '-' : away5.toFixed(1)} s, ${st5.escape ? st5.escape.runs : 0} escapes; ${log5.slice(-3).join(' | ')}`);
+	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
+	const sc3 = path.join(HOME, 'esc_off.json');
+	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));
+	ED.start({ eelvlB64: buf.toString('base64'), seconds: 30, width: 1024, workers: 4, escape: false }, { available: false }, { cpu: [process.execPath, fake, sc3], escape: true, escWait: 1 });
+	await new Promise((z) => setTimeout(z, 4000));
+	const st3 = ED.state();
+	ED.stop();
+	while (ED.state().running) await new Promise((z) => setTimeout(z, 100));
+	check('the escape off (escape: false): no escape strategy, no workers line', !st3.strategies.some((q) => q.key === 'escape') && !st3.escape &&
+		!(fs.existsSync(path.join(HOME, 'esc_off_stdin.log')) && /workers/.test(fs.readFileSync(path.join(HOME, 'esc_off_stdin.log'), 'utf8'))), st3.strategies.map((q) => q.key).join(', '));
+}
 const USER50 = 'xZTZTsJAFIY/wA3FBcUNxRYo++4LeGG8MPEBjHdGS2KCkJio8c431/yVQqc1xMSI82XaOefMxXxnmpIYjp5JX1zb50/uq31559pX7os7AE41z97hA2PESD3e3rv2qN8fPAxdIPlViN941TgJFlhkiWVWSLLKGinW2WCTLdJss0OGXfbY54BDshxxTI4TLGzyFCjiUKJMhSo16jRo0qJNhy49+Lc5PZsindVfmW/LWPn7c1iTtensZ2d1JrgnG4qsmXEGy4ii9d9n5nDr3tf19yPmuchGPjKSk6zkJTO5yU5+MpSjLOUpU7nKVr4ylrOs5S1zucte/uqAeqAuBLEn5McUxhQnOAFKAcrfUvkBVYNaiHqIhkEzQitCO0InQjdCbw7A2/j+4zjes8j0x+fnGp8=';
 
 // ---------------------------------------------------------------- broken level files (src/levelcheck.js)
@@ -1937,6 +2214,7 @@ async function levelCheckSection() {
 	if (want('cpu')) await cpuSection();
 	if (want('prove')) await proveSection();
 	if (want('lane')) await laneSection();
+	if (want('escape')) await escapeSection();
 	if (GPU && want('gpu')) await gpuSection();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);

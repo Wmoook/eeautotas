@@ -427,6 +427,10 @@ const STRATEGIES = {
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
 			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : [])] },
+	// the stall escape (see ESC_WAIT_S): a second one search (goexplore.js, its own archive and GPU bursts) from a stalled
+	// search's nearest attempt (--prefix), on a share of the CPU search's workers
+	escape: { label: 'escape: a fresh one search from the nearest attempt', cpu: true, args: (f, o, q) => [...STRATEGIES.goexplore.args(f, Object.assign({}, o, { workers: q.workers, seed: q.seed }), q),
+		`--prefix=${q.prefixFile}`] },
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
@@ -657,6 +661,7 @@ function checkStalls() {
 	pastPlanCheck();   // (a search stalled at the plan's coin count: the plan past it, before the breaker picks its gates)
 	breakKick();   // (a stalled search: a round of the wall breaker)
 	precKick();    // (a stalled search: exact landings from its nearest attempts)
+	escKick();     // (a stalled search: an escape, a fresh one search from its nearest attempt; a stalled escape: the next)
 	const now = Date.now();
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
@@ -1299,6 +1304,7 @@ const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((me
 let brk = null;
 /** the search got somewhere (why: 'nearer' by BREAK_TILES, or 'room' for a new room): the stall clock starts over */
 function breakProgress(why, own) {
+	if (esc) esc.at = Date.now();   // (the stall escape's clock too)
 	if (!brk) return;
 	brk.at = Date.now();
 	if (brk.round) brk.round.progress.push(why);
@@ -1524,12 +1530,163 @@ function precEvent(V, ev) {
 	else if (ev.ev === 'progress' && ev.phase === 'tables' && Number.isFinite(ev.library)) V.detail = `landing: ${ev.library.toLocaleString('en-US')} input pieces, ${ev.arrivals.toLocaleString('en-US')} arrivals (step ${ev.step + 1})`;
 	else if (ev.ev === 'progress' && ev.phase === 'search') V.detail = `landing at x = ${ev.target} px: ${(ev.lookups / 1e6).toFixed(ev.lookups < 1e7 ? 1 : 0)} M combinations tried, ${ev.landed} exact landing${ev.landed === 1 ? '' : 's'} (step ${ev.step + 1})`;
 }
-/** the CPU search's workers make cells along an attempt (goexplore.js "seed <inputs>") */
+// ---------------------------------------------------------------- the stall escape (strategy 'escape')
+// The one search after a long stall keeps its effort spread over every room it ever made (Good Egg: 80-106 k rooms after
+// 30 min, 97-99% of them switch subsets and blue-coin / time-door twins of rooms it had), so a way that one fresh search
+// from its own nearest attempt finds is not found (the Good Egg anatomy's escape test, 2026-09-28: goexplore.js --prefix =
+// a from-scratch run's own nearest attempt with 17 coins, a fresh archive, 2 CPU workers, no GPU: the route in 2 of 2
+// runs, after 976 / 1,119 s, where the run itself had stalled 40+ min there). So once the search has had no attempt
+// nearer by BREAK_TILES and no new room that opens territory (the wall breaker's stall clock) for ESC_WAIT_S, and no
+// route: an ESCAPE, a second one search (node src/goexplore.js --prefix=<the start's inputs> with its own archive, GPU
+// bursts on its own pause file and work folder, the same settings) on ESC_CPU of the CPU search's workers (the one search
+// parks as many: its stdin "workers K"), its GPU bursts a GPU strategy for the scheduler. Its routes are the search's
+// (found(): S.result, the AutoTASer's feed), its attempts every strategy's (closer(): the nearest attempt, the sources,
+// the path skips), and its new rooms and nearer attempts go into the one search's archive (feedOne: stdin "import").
+// An escape whose own nearest attempt has not got nearer by ESC_TILES and that made no new room with territory gain for
+// ESC_STALL_S (after at least ESC_MIN_S) gives way to the next one at once (escStarts, in rotation: the nearest attempt
+// ESC_BACK[0] ticks back, which after an escape that got nearer is that escape's own (a chain); then the nearest attempt
+// of each other room, rooms of another coin count first; then the nearest attempt further back; only starts at the
+// frontier: ESC_FRONT of the longest attempt the search holds or more); each start once a search;
+// so does an escape the rest of the search left behind (its nearest attempt clearly nearer: ESC_RETARGET_S).
+// A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
+// none (tests: test.escape === true; test.escWait / escStall / escMin / escRetarget: its clocks in s).
+const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
+// (an escape the rest of the search has left behind: the nearest attempt clearly nearer (3 tiles or 10%, the relay's rule)
+// than the escape's start, its own nearest and the search's nearest when it started (near0: an escape from a room's attempt
+// starts farther out than the nearest attempt by design, and before near0 every such escape was sent away after 60 s),
+// ESC_RETARGET_S after its start at least: the next one from there)
+const ESC_RETARGET_S = 60;
+// (the frontier: an escape starts only from ESC_FRONT or more of the longest attempt the search holds. Measured: n2-int
+// Good Egg seed 1 with the escape, 2026-09-28: its nearest attempt by the steer field was a 182-tick dead end by the start
+// (280 tiles) while its rooms held 7 coins after 37 s; the first escape started there, a second search from scratch)
+const ESC_FRONT = 0.5;
+// the escape's own work folder for its GPU bursts (the one search's is <data>/editor/bursts)
+const ESC_WORK = 'escape_bursts';
+// the stall clock of the escape: {at (the search's last progress: a nearer attempt by BREAK_TILES or a new room with
+// territory gain), wait, stall, min (s), runs, tried (the starting points used: sha1 of the inputs), rooms (the rooms
+// escaped from), sigs (their coin counts), next (the next escape at once), run (the live one: {t0, progAt, best, start})}
+let esc = null;
+/** the room key and desc an attempt ends in (the nearest attempt's is kept when it is replayed: closer()) */
+let closestRoom = null;
+/** a room desc's coin count ('' where the room key holds none: a level without coin doors) */
+const coinSig = (desc) => { const m = /(?:^| )coins=(\d+)/.exec(String(desc || '')); return m ? m[1] : ''; };
+/** the escape's next starting points, in rotation: [{inputs, what, dist, key, room, sig}] not used before in this search */
+function escStarts() {
+	const out = [], seen = new Set();
+	// (the frontier: a start at least ESC_FRONT as long as the longest attempt the search holds (the nearest and the rooms'
+	// attempts): an escape from near the level's start would only redo the search's own opening with half its workers)
+	const c0 = S.closest;
+	let longest = c0 && !c0.cut ? c0.ticks : 0;
+	for (const s of sources.values()) longest = Math.max(longest, s.best ? s.best.ticks : 0, s.early ? s.early.ticks : 0);
+	const front = Math.max(RELAY_MIN_KEEP, Math.floor(ESC_FRONT * longest));
+	const add = (inputs, keep, what, dist, room, desc) => {
+		keep = Math.min(keep, inputs.length);
+		if (keep < front || (S.result && keep >= boundTicks() - 1)) return;
+		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
+		if (seen.has(key) || esc.tried.has(key)) return;
+		seen.add(key);
+		out.push({ inputs: pre, what, dist, key, room, sig: coinSig(desc) });
+	};
+	const c = S.closest;
+	// (the nearest attempt a little back: after an escape that got the search nearer, its own nearest attempt, a chain)
+	if (c && !c.cut && c.inputs) add(String(c.inputs), c.ticks - ESC_BACK[0], 'the nearest attempt', c.dist, closestRoom ? closestRoom.key : undefined, closestRoom ? closestRoom.desc : '');
+	// (the nearest attempt of each other room: rooms of a coin count not escaped from first, then rooms not escaped from,
+	// then the nearest)
+	const rank = (s) => (esc.sigs.has(coinSig(s.desc)) ? 2 : 0) + (esc.rooms.has(s.room) ? 1 : 0);
+	const rooms = [...sources.values()].filter((s) => s.best && s.best.dist < RF.DEATH_TILES && (!closestRoom || s.room !== closestRoom.key))
+		.sort((x, y) => rank(x) - rank(y) || x.best.dist - y.best.dist);
+	for (const s of rooms) add(s.best.inputs, s.best.ticks - ESC_BACK[0], `room "${s.desc}"'s nearest attempt`, s.best.dist, s.room, s.desc);
+	// (the nearest attempt further back)
+	if (c && !c.cut && c.inputs) for (const b of ESC_BACK.slice(1)) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined, '');
+	return out;
+}
+/** every 5 s (checkStalls): a stalled search without a route starts an escape; a live escape that stalled itself gives way */
+function escKick() {
+	if (!S || !S.running || S.halted || S.stage === 'stopped' || !esc || !cur) return;
+	const n = S.strategies.findIndex((q) => q.key === 'escape');
+	if (n < 0) return;
+	const V = S.strategies[n], now = Date.now();
+	if (alive(kids[n])) {
+		const R = esc.run, c = S.closest;
+		if (R && !kids[n].stopWhy && now - R.t0 >= esc.min * 1000 && now - R.progAt >= esc.stall * 1000) {
+			note(`${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${esc.stall} s: the next one`);
+			esc.next = true;
+			halt(kids[n], 'escstall');
+		} else if (R && !kids[n].stopWhy && c && !c.cut && c.strategy !== V.label && now - R.t0 >= esc.retarget * 1000 &&
+			c.dist < Math.min(R.best, R.start.dist, R.near0) - Math.max(3, 0.1 * Math.min(R.best, R.start.dist, R.near0))) {
+			// (the others got clearly nearer than this escape ever did (its start included) and than the search's nearest
+			// attempt when it started (near0): an escape from a room's attempt (the rotation, the frontier) is not sent away
+			// after 60 s only because the nearest attempt, which it did not start from, was nearer all along)
+			note(`${V.label}: the search got clearly nearer elsewhere (${c.tiles} tiles, ${c.strategy}): the next one from there`);
+			esc.next = true;
+			halt(kids[n], 'escstall');
+		}
+		return;
+	}
+	if (S.result || V.state !== 'waiting') return;
+	const left = S.seconds - searchClock(now);
+	if (left < 30 || (!esc.next && now - esc.at < esc.wait * 1000)) return;
+	const starts = escStarts();
+	if (!starts.length) { esc.next = false; esc.at = now; return; }   // (nothing new to start from: the stall clock again)
+	escLaunch(n, starts[0]);
+}
+/** an escape from start st (escStarts) */
+function escLaunch(n, st) {
+	const V = S.strategies[n], k = S.strategies.findIndex((q) => q.key === 'goexplore');
+	esc.tried.add(st.key);
+	if (st.room !== undefined) esc.rooms.add(st.room);
+	if (st.sig !== '') esc.sigs.add(st.sig);
+	esc.next = false;
+	esc.runs++;
+	const file = path.join(dir(), `escape_${esc.runs}.eetas`);
+	try { fs.writeFileSync(file, Buffer.from(st.inputs, 'latin1')); } catch (e) { esc.at = Date.now(); return; }
+	// the CPU: ESC_CPU of the one search's workers (it parks as many), at least one each
+	// (W: the one search's workers as goexplore.js runs them: it takes at most 64, so a 192-thread box's W parks some too)
+	const W = Math.max(1, Math.min(64, cur.opts.workers || 1)), E = Math.max(1, Math.floor(W * ESC_CPU)), keep = Math.max(1, W - E);
+	const mainCh = k >= 0 ? kids[k] : null;
+	if (alive(mainCh) && mainCh.stdin && !mainCh.stdin.destroyed && keep < W) { try { mainCh.stdin.write(`workers ${keep}\n`); } catch (e) { /* gone */ } }
+	// (its own work folder for the bursts, fresh: the steer files of an earlier escape's level must not steer it)
+	const work = path.join(dir(), ESC_WORK);
+	try { fs.rmSync(work, { recursive: true, force: true }); } catch (e) { /* none */ }
+	V.esc = { file, keep: st.inputs.length, workers: E, seed: ((cur.opts.seed || 1) + 1000 * esc.runs) >>> 0, work, what: st.what };
+	// (near0: the search's nearest attempt when it starts, for the retarget: escKick)
+	esc.run = { t0: Date.now(), progAt: Date.now(), best: Infinity, start: st, mainKeep: keep, near0: S.closest && !S.closest.cut ? S.closest.dist : Infinity };
+	if (S.escape) S.escape = Object.assign(S.escape, { runs: esc.runs, run: { n: esc.runs, from: st.what, ticks: st.inputs.length, tiles: Math.round(st.dist * 10) / 10, workers: E, after: Math.round((Date.now() - S.started) / 100) / 10 } });
+	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.wait} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${E} of the ${W} CPU workers`);
+	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
+		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${E} thread${E > 1 ? 's' : ''}` });
+	kids[n] = launch(n);
+	save();
+}
+/** the escape's process ended (how: its stop or end): the one search gets its workers back; after a stall of its own the
+ *  next escape starts at once (escKick), else after the next stall */
+function escAfter(n, how) {
+	const V = S.strategies[n], k = S.strategies.findIndex((q) => q.key === 'goexplore');
+	const mainCh = k >= 0 ? kids[k] : null;
+	if (alive(mainCh) && mainCh.stdin && !mainCh.stdin.destroyed) { try { mainCh.stdin.write('workers 0\n'); } catch (e) { /* gone */ } }
+	const R = esc && esc.run;
+	if (esc) {
+		esc.run = null;
+		if (how !== 'escstall') esc.at = Date.now();
+		if (S.escape) S.escape.last = { n: esc.runs, how: how || 'ended', sec: R ? Math.round((Date.now() - R.t0) / 100) / 10 : 0, best: R && Number.isFinite(R.best) ? Math.round(R.best * 10) / 10 : null };
+		if (S.escape) S.escape.run = null;
+	}
+	if (V.state === 'found' || !S.running || S.halted || S.stage === 'stopped' || S.result) { if (V.state !== 'found') V.state = S.stage === 'stopped' ? 'stopped' : 'ended'; return; }
+	Object.assign(V, { state: 'waiting', detail: esc && esc.next ? 'the next escape starts' : `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc ? esc.wait : ESC_WAIT_S} s)` });
+}
+/** the escape's own progress (its nearest attempt nearer by ESC_TILES, or a new room with territory gain): its stall clock */
+function escOwnProgress(dist) {
+	const R = esc && esc.run;
+	if (!R) return;
+	if (dist === undefined || dist < R.best - ESC_TILES) { if (dist !== undefined) R.best = dist; R.progAt = Date.now(); }
+}
+/** the CPU search's workers make cells along an attempt (goexplore.js "seed <inputs>"; not the escape's: its runs start
+ *  after its prefix) */
 function seedCpu(inputs) {
 	if (!S || !inputs || !brk) return;
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu && !q.lane && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`seed ${inputs}\n`); } catch (e) { /* gone */ } }
+		if (q.cpu && !q.lane && q.key !== 'escape' && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`seed ${inputs}\n`); } catch (e) { /* gone */ } }
 	});
 	brk.seeds = (brk.seeds || 0) + 1;
 	if (S.breaker) S.breaker.seeds = brk.seeds;
@@ -1731,9 +1888,12 @@ function start(b, gpu, test) {
 	const one = !noGpu && cpu && ins.level.width * ins.level.height > GX.FINE_MAX_TILES && b.one !== false && (!test || test.one === true);
 	// (the precision stage: a CPU strategy started when the search stalls; b.precision === false: none; tests: test.precision)
 	const precision = cpu && b.precision !== false && (!test || test.precision === true);
+	// (the stall escape: the CPU search on coarse cells (the one search with a GPU: its bursts too); b.escape === false or
+	// EEAT_ESCAPE=0: none; tests: test.escape === true)
+	const escape = cpu && GX.cellsFor(ins.level) === 'coarse' && b.escape !== false && process.env.EEAT_ESCAPE !== '0' && (!test || test.escape === true);
 	const which = [...(noGpu ? [] : !beams ? ['explore'] : guide.length ? ['explore', 'guide', 'goal'] : ['explore', 'goal']), ...(noGpu || !relay || one ? [] : ['relay']), ...(noGpu || !breaker ? [] : ['breaker']),
 		...(rolls ? ['gorolls'] : []),
-		...(cpu ? ['goexplore'] : []), ...(precision ? ['precision'] : [])];
+		...(cpu ? ['goexplore'] : []), ...(escape ? ['escape'] : []), ...(precision ? ['precision'] : [])];
 	let workers = cpuWorkers(b.workers);
 	// (the path skips: coarse cells (the big levels), the CPU search on; b.skips === false or EEAT_SKIPS=0: none; tests:
 	// test.skips === true)
@@ -1754,7 +1914,7 @@ function start(b, gpu, test) {
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, ...(STRATEGIES[k].precision ? { precision: true } : {}),
 			...(STRATEGIES[k].lane ? { lane: true } : {}),
-			...(k === 'goexplore' && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
+			...((k === 'goexplore' || k === 'escape') && one ? { gpuShare: true } : {}), state: 'starting', layer: 0, deepest: 0, states: 0, ticksPerSec: 0,
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
@@ -1776,6 +1936,9 @@ function start(b, gpu, test) {
 		breakPast: b.breakPast !== false && !(test && test.breakPast === false) },
 		cpuCmd: test && Array.isArray(test.cpu) ? test.cpu : [process.execPath, path.join(__dirname, 'goexplore.js')],
 		cpuNice: !(test && Array.isArray(test.cpu)),   // (goexplore.js takes --nice; a test's stand-in need not)
+		// (the stall escape: goexplore.js itself, also next to a test's stand-in CPU search; tests: test.escapeCmd)
+		escapeCmd: test && Array.isArray(test.escapeCmd) ? test.escapeCmd : [process.execPath, path.join(__dirname, 'goexplore.js')],
+		escapeNice: !(test && Array.isArray(test.escapeCmd)),
 		laneCmd: test && Array.isArray(test.laneCmd) ? test.laneCmd : [process.execPath, path.join(__dirname, 'skipfind.js')],
 		laneNice: !(test && Array.isArray(test.laneCmd)),
 		precisionCmd: test && Array.isArray(test.precisionCmd) ? test.precisionCmd : [process.execPath, path.join(__dirname, 'precision.js')],
@@ -1794,6 +1957,11 @@ function start(b, gpu, test) {
 	// (the precision stage's stall clock; test.precWait: its first wait in s)
 	prec = { mark: Infinity, at: Date.now(), wait: test && test.precWait ? test.precWait : PREC_WAIT_S, wait0: test && test.precWait ? test.precWait : PREC_WAIT_S, runs: 0 };
 	S.precision = which.includes('precision') ? { runs: 0, last: null } : null;
+	// (the stall escape's clock and rotation; tests: its clocks in s)
+	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : ESC_WAIT_S, stall: test && test.escStall ? test.escStall : ESC_STALL_S, min: test && test.escMin !== undefined ? test.escMin : ESC_MIN_S,
+		retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null };
+	closestRoom = null;
+	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
@@ -1936,8 +2104,11 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	save();
 	if (brk) brk.at = Date.now();   // (the stall clock from the search's start)
 	if (prec) prec.at = Date.now();
+	if (esc) esc.at = Date.now();
 	kids = which.map((k, n) => {
 		if (k === 'breaker') { breakEnd(n); return null; }
+		// (the stall escape waits for a stall of the search)
+		if (k === 'escape') { Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc ? esc.wait : ESC_WAIT_S} s)` }); return null; }
 		// (the precision stage waits for a stall; its distances are the reach field's, ranked like a steerless strategy's)
 		if (k === 'precision') { Object.assign(S.strategies[n], { state: 'waiting', noSteer: true, detail: `waits for the search to stall near a spot (no attempt nearer by ${PREC_TILES} tiles for ${prec ? prec.wait : PREC_WAIT_S} s)` }); return null; }
 		if (k !== 'relay') return launch(n);
@@ -2229,6 +2400,9 @@ function launch(n) {
 		q.depth = S.result ? Math.max(1, boundTicks() - 1 - V.relay.keep) : 0;
 	}
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
+	// (the stall escape: its start's inputs as --prefix, its share of the workers, its own seed and bursts' folder; the
+	// search's time left)
+	if (V.key === 'escape') { q.prefixFile = V.esc.file; q.workers = V.esc.workers; q.seed = V.esc.seed; q.work = V.esc.work; q.seconds = Math.max(1, Math.round(S.seconds - searchClock(Date.now()))); }
 	if (V.key === 'precision') { q.attemptsFile = V.prec.file; q.seconds = V.prec.seconds; q.workers = V.prec.workers; q.depth = S.result ? Math.max(1, boundTicks() - 1) : 0; }
 	if (V.key === 'breaker') {
 		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
@@ -2261,8 +2435,8 @@ function launch(n) {
 	// rented cloud GPU) lacks, and next to busy CPU threads "every move" was 3-7x slower without it. Before, the whole
 	// process was reniced, so its main thread and the one search's GPU bursts (its eegpu children inherit the main
 	// thread's value) ran at nice 10 too: below every normal process of a shared machine (the cycle 7 test's A100).)
-	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && !V.precision && (V.lane ? cur.laneNice : cur.cpuNice);
-	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : V.lane ? cur.laneCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
+	const niceCpu = cpu && !S.cpuOnly && process.platform === 'linux' && !V.precision && (V.lane ? cur.laneNice : V.key === 'escape' ? cur.escapeNice : cur.cpuNice);
+	const cmd = cpu ? [...(V.precision ? cur.precisionCmd : V.lane ? cur.laneCmd : V.key === 'escape' ? cur.escapeCmd : cur.cpuCmd), ...args, ...(niceCpu ? ['--nice=10'] : [])] : [...(rolls ? cur.rollsCmd : [cur.tool, ...cur.toolArgs]), ...args, ...G.cacheArgs(), `--stopfile=${stopFile}`, `--pausefile=${pauseFile}`,
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
@@ -2367,7 +2541,7 @@ function launch(n) {
 				V.detail = `${(ev.states / 1e6).toFixed(ev.states < 1e7 ? 1 : 0)} M places tried, table ${Math.round(Math.min(1, ev.full) * 100)}% full · pass ${V.passes}, ` +
 					`cells of ${passGrain(V.pass)}${lanesNow > 1 ? ` · ${lanesNow} tries side by side` : ''}`;
 			} else if (cpu || rolls) {
-				V.detail = `${rolls ? 'GPU' : `${ev.workers} thread${ev.workers > 1 ? 's' : ''}`}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
+				V.detail = `${V.key === 'escape' && V.esc && esc ? `escape ${esc.runs} from tick ${V.esc.keep} of ${V.esc.what}: ` : ''}${rolls ? 'GPU' : `${ev.workers} thread${ev.workers > 1 ? 's' : ''}`}, ${ev.states >= 1e6 ? `${(ev.states / 1e6).toFixed(1)} M` : `${Math.round(ev.states / 1e3)} k`} situations kept` +
 					(ev.rooms > 1 ? ` in ${ev.allRooms > ev.rooms ? ev.allRooms : ev.rooms} rooms` : '') + (ev.gpu && ev.gpu.bursts ? `, ${ev.gpu.bursts} GPU bursts` +
 						// (their longest launch, by the GPU's clock where eegpu has it: the 50 ms rule on the big sizing, burstSizeArgs;
 						// and how often the big sizing met a full GPU: bursts.js SMALL)
@@ -2455,9 +2629,11 @@ function launch(n) {
 			// (the GPU random runs' too: their distances the reach field's, steerDist)
 			const dist = steerDist(V, +ev.dist), inputs = String(ev.inputs || '');
 			if (cur && inputs && Number.isFinite(dist) && Number.isFinite(+ev.room)) {
+				// (the stall escape: a room new to the search that opens territory is its own progress too)
+				if (V.key === 'escape' && ev.kind === 'room' && +ev.gain > 0 && brk && !brk.rooms.has(+ev.room)) escOwnProgress();
 				addSource({ room: +ev.room, desc: ev.desc, gain: +ev.gain || 0, from: V.label, inputs, dist, arrival: ev.kind === 'room' ? inputs.length : 0 });
-				// (the GPU random runs' first arrival in a room: into the one search's archive)
-				if (rolls && ev.kind === 'room') feedOne(inputs, true);
+				// (the GPU random runs' and the stall escape's first arrival in a room: into the one search's archive)
+				if ((rolls || V.key === 'escape') && ev.kind === 'room') feedOne(inputs, true, V.key === 'escape');
 				// (the path skips' targets before any route, by the rooms reached too: a new room's first arrival that opens
 				// territory, one per strategy (on Octorage and Forgotten Veil the nearest attempt by the steer field sat in a
 				// dead end by the start, 271 / 690 ticks, for the whole search))
@@ -2567,6 +2743,20 @@ function launch(n) {
 					Object.assign(V, { state: 'waiting', detail: `${what}; again after ${prec.wait} s without a nearer attempt (${prec.wait0} s after a nearer one)` });
 				} else if (V.state !== 'beaten') V.state = S.stage === 'stopped' ? 'stopped' : 'ended';
 			}
+			totals();
+			proofAlone();
+			if (!running()) finish();
+			else save();
+			return;
+		}
+		if (V.key === 'escape') {
+			// the stall escape's process ended: the one search's workers back; the next escape at once after its own stall
+			// (escKick), else after the next stall of the search
+			const how = ch.stopWhy || (code === 0 ? end : '');
+			const failed = !ch.stopWhy && code !== 0 && code !== null;
+			if (failed) note(`${V.label}: error: ${V.error || `exit code ${code}`}${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 200)}` : ''}`);
+			V.error = null;
+			escAfter(n, how || (failed ? 'error' : 'ended'));
 			totals();
 			proofAlone();
 			if (!running()) finish();
@@ -2915,6 +3105,9 @@ function found(inputs, n, more) {
 	else if (V.lane && S.result) laneRoute(S.result.inputs);
 	// (a route: every move, if it gave way to the relay, goes on and looks for a faster one)
 	if (better) setImmediate(resumeExplore);
+	// (a route: the stall escape's work is done; the one search gets its workers back and the route: head L)
+	const ke = S.strategies.findIndex((q) => q.key === 'escape');
+	if (ke >= 0 && alive(kids[ke]) && !kids[ke].stopWhy) halt(kids[ke], 'finish');
 	save();
 }
 /** S.result from a replayed route (ev: C.evaluate) and route.eetas; o: {foundAfter, cpuAfter, strategy, cleaned} */
@@ -3014,10 +3207,12 @@ function cleanDone(job, r) {
  *  (a room's first arrival before a nearer attempt) */
 const ONE_FEED_MS = 250;
 let feedQ = [], feedAt = 0, feedTimer = null, feedS = null;
-function feedOne(inputs, room) {
-	if (!cur || !cur.opts.bursts || !inputs || !/^[0-O]+$/.test(inputs)) return;
+function feedOne(inputs, room, escape = false) {
+	if (!cur || !inputs || !/^[0-O]+$/.test(inputs) || !(cur.opts.bursts || escape)) return;
+	// (the CPU search without the one search (no GPU): the stall escape's runs go in as seeds, a cell every SEED_EVERY ticks)
+	const cmd = cur.opts.bursts ? 'import' : 'seed';
 	if (feedS !== S) { feedS = S; feedQ = []; }   // (a new search: nothing of the last one's)
-	const k = S.strategies.findIndex((q) => q.gpuShare);
+	const k = S.strategies.findIndex((q) => q.key === 'goexplore');
 	if (k < 0) return;
 	if (room) feedQ.unshift({ inputs, room }); else { feedQ = feedQ.filter((x) => x.room); feedQ.push({ inputs, room }); }
 	if (feedQ.length > 64) feedQ.length = 64;
@@ -3028,7 +3223,7 @@ function feedOne(inputs, room) {
 		const ch = kids[k];
 		if (!alive(ch) || !ch.stdin || ch.stdin.destroyed) { feedQ = []; return; }
 		const x = feedQ.shift();
-		try { ch.stdin.write(`import ${x.inputs}\n`); S.strategies[k].fed = (S.strategies[k].fed || 0) + 1; } catch (e) { /* gone */ }
+		try { ch.stdin.write(`${cmd} ${x.inputs}\n`); S.strategies[k].fed = (S.strategies[k].fed || 0) + 1; } catch (e) { /* gone */ }
 		feedAt = Date.now();
 		if (feedQ.length) { feedTimer = setTimeout(flush, ONE_FEED_MS); if (feedTimer.unref) feedTimer.unref(); }
 	};
@@ -3067,7 +3262,7 @@ function laneAttempt(inputs, src) {
 		// arm's tables take GPU memory, and before any route the random runs' own start matters most (Egg Quest II pair v9c:
 		// with the arm from the first seconds their first start waited 5 + 20 + 60 s on a full shared GPU, their first route
 		// came at 132 s where main's came at 74 s). goexplore.js starts the arm before any route only after this line came.
-		const ko = S.strategies.findIndex((q) => q.gpuShare), cho = ko >= 0 ? kids[ko] : null;
+		const ko = S.strategies.findIndex((q) => q.gpuShare && q.key === 'goexplore'), cho = ko >= 0 ? kids[ko] : null;
 		const rollsOn = S.strategies.every((q, kq) => !q.rolls || (alive(kids[kq]) && q.state === 'running'));
 		if (alive(cho) && cho.stdin && !cho.stdin.destroyed && !retryHolds() && rollsOn) {
 			const others = [...laneQ].filter(([sk]) => sk !== S.strategies[ko].key && !/Room$/.test(sk));
@@ -3142,9 +3337,11 @@ function closer(ev, n) {
 		if (ev.inputs && !ev.cut && d <= GATE_AT && !Vn.brk.gateHit) { Vn.brk.gateHit = String(ev.inputs); halt(kids[n], 'gate'); }
 		return;
 	}
-	// (the GPU random runs' nearer attempts: into the one search's archive)
-	if (Vn.rolls && ev.inputs && !ev.cut && (!(Vn.best >= 0) || steerDist(Vn, +ev.dist) < Vn.best - 1e-3)) feedOne(String(ev.inputs), false);
+	// (the GPU random runs' and the stall escape's nearer attempts: into the one search's archive)
+	if ((Vn.rolls || Vn.key === 'escape') && ev.inputs && !ev.cut && (!(Vn.best >= 0) || steerDist(Vn, +ev.dist) < Vn.best - 1e-3)) feedOne(String(ev.inputs), false, Vn.key === 'escape');
 	const dist = steerDist(Vn, +ev.dist), old = S.closest;
+	// (the stall escape's own clock: its nearest attempt nearer by ESC_TILES)
+	if (Vn.key === 'escape' && ev.inputs && !ev.cut && Number.isFinite(dist) && dist < 1e4) escOwnProgress(dist);
 	// (each strategy's own nearest, and when it last got nearer: a beam still closing in keeps the GPU, yieldBeams; its
 	// room becomes a source for the relay: attemptSource)
 	// (by the steer field: no deaths in it, and its "no value" states at STEER_MISS tiles and more)
@@ -3174,6 +3371,7 @@ function closer(ev, n) {
 	if (own) attemptSource(n, own, tr.room);
 	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
 	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
+	closestRoom = { key: tr.room.key, desc: tr.room.desc };   // (the stall escape's rotation: the rooms escaped from)
 	const pathPts = tr.path;
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
