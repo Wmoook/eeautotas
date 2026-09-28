@@ -1004,8 +1004,10 @@ async function skipfindStage(round) {
 	const secs = a.skipfindS ? +a.skipfindS : Math.max(120, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
 	if (deadline - Date.now() < (secs + 120) * 1000) return;
 	const so = path.join(OUT, `grind_skipf_${round}.eetas`);
+	// (a deep start's budget within the slice, its joins included: a slice of 180 s cut every 200-s deep start)
 	const res = await stage(`skipfind${round}`, 'skipfind.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`,
-		`--done=${path.join(OUT, 'grind_skipfind.txt')}`, ...dl()], so, (secs + 120) * 1000, 'from states all along the run: every move to later points of the run');
+		`--deepPerS=${Math.min(200, Math.max(60, secs - 20))}`, `--done=${path.join(OUT, 'grind_skipfind.txt')}`, ...dl()], so, (secs + 120) * 1000,
+		'from states all along the run: every move to later points of the run');
 	if (res) addResult(so);
 }
 /** 2) a slice of the dense local-shortcut pass (alternating settings): from its cursor, sized to the round's time */

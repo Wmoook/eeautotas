@@ -690,7 +690,7 @@ function mineCmd() {
 }
 
 // ------------------------------------------------------------------ run: score a finder
-const BUILTIN = ['none', 'ref', 'known', 'optwin', 'gox', 'goxb', 'goxr', 'goxleap', 'leaps', 'skipfind'];
+const BUILTIN = ['none', 'ref', 'known', 'optwin', 'gox', 'goxb', 'goxr', 'goxleap', 'leaps', 'skipfind', 'routearm'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** ends a finder: its stop file first (finders that watch it end their children between two GPU launches), then the tree */
 async function endProcess(p, stopFile, graceMs) {
@@ -717,7 +717,7 @@ async function runCase(cs, finder, o) {
 	let p;
 	const env = Object.assign({}, process.env, { PB_CASE: caseFile, PB_OUT: out, PB_SECONDS: String(o.seconds), PB_THREADS: String(o.threads) });
 	if (BUILTIN.includes(finder)) {
-		const pass = argv.filter((x) => /^--(code|leapsCode|tool|cachedir|mem|gx|leapArgs|seed|targets|kappa|sfEvery|sfArgs)=/.test(x));
+		const pass = argv.filter((x) => /^--(code|leapsCode|tool|cachedir|mem|gx|leapArgs|seed|targets|kappa|sfEvery|sfArgs|raStep|raArgs)=/.test(x));
 		p = spawn(process.execPath, [__filename, 'finder', finder, caseFile, ...pass], { stdio: ['ignore', 'pipe', 'pipe'], env, detached: process.platform !== 'win32', windowsHide: true });
 	} else p = spawn(sub(finder), { shell: true, stdio: ['ignore', 'pipe', 'pipe'], env, detached: process.platform !== 'win32', windowsHide: true });
 	const t0 = Date.now();
@@ -1022,6 +1022,52 @@ async function finderCmd() {
 			try { fs.copyFileSync(sfOut, path.join(out, f)); say({ candidate: f }); } catch (e) { /* the next find */ }
 		} });
 		if (r.code > 1) say({ error: `skipfind exit ${r.code}`, last: r.last.slice(-5) });
+		return;
+	}
+	if (name === 'routearm') {
+		// Find a route's route arm (src/routearm.js, NOT told the goal) with our run as the route: its GPU searches from our
+		// run's own states, starts from the case's start every --raStep ticks (default the arm's own step) over 3/4 of our
+		// way to the goal, then the same starts shifted by half a step; every route it splices (a whole run faster than
+		// ours, replayed) is a candidate. --tool / --cachedir: the eegpu to use; --raArgs="k=v ...": the arm's options.
+		const RA = require(path.join(code, 'src', 'routearm.js'));
+		const G = require(path.join(code, 'src', 'gpu.js'));
+		const RF = require(path.join(code, 'src', 'reach.js'));
+		const L = E.loadLevel(cs.level);
+		const ref = C.evaluate(L, C.readEetas(cs.ref));
+		const work = path.join(out, 'arm');
+		fs.mkdirSync(work, { recursive: true });
+		const blob = G.levelBlob(L), bin = path.join(work, 'level.bin');
+		fs.writeFileSync(bin, blob);
+		const field = RF.reachField(L, {});
+		const extra = {};
+		for (const kv of (opt.raArgs || '').split(' ').filter(Boolean)) { const [k, v] = kv.split('='); extra[k] = +v; }
+		const step = +(opt.raStep || RA.DEFAULTS.step);
+		const to = Math.max(cs.startMax || cs.fixed, cs.fixed + Math.floor(cs.ours * 0.75));
+		const starts = [];
+		for (let s = cs.fixed; s <= to; s += step) starts.push(s);
+		for (let s = cs.fixed + Math.floor(step / 2); s <= to; s += step) starts.push(s);
+		say({ starts });
+		let bound = ref.ms.length - 1, k = 0;
+		const ra = RA.create({ L, field, tool: opt.tool || G.nativeTool(), bin, fp: G.blobFp(blob), work, cacheArgs: opt.cachedir ? [`--cachedir=${opt.cachedir}`] : [],
+			a: { gpuCells: 25, burstCap: 262144 }, bound: () => bound, say,
+			finish: (ms, how) => {
+				const f = `routearm_${k++}.eetas`;
+				C.writeEetas(path.join(out, f), ms);
+				bound = Math.min(bound, ms.length - 1);
+				say({ candidate: f, ticks: ms.length, how, sec: Math.round((Date.now() - t0) / 1000) });
+			},
+			broadcast: () => {} }, Object.assign({ starts }, extra));
+		ra.setRoute(ref.ms);
+		let oomN = 0, oomS = 0;
+		while (!stopped() && left() > 5) {
+			const r = await ra.run(0, { stopped: () => stopped() || left() < 0 });
+			if (!r) break;
+			say({ start: r.s, pot: r.pot, hits: r.hits, saved: r.saved, ends: r.ends, sec: Math.round((Date.now() - t0) / 1000) });
+			// (the GPU's memory full: the start goes again after a wait, as in the one search's lanes, bursts.js)
+			if (r.oom) { const w = Math.min(30, 5 * (1 + oomN++)); oomS += w; for (let q = 0; q < 10 * w && !stopped() && left() > 5; q++) await sleep(100); } else oomN = 0;
+		}
+		if (oomS) say({ oomWaitS: oomS });
+		say({ stats: ra.stats() });
 		return;
 	}
 	throw new Error(`unknown finder ${name} (${BUILTIN.join(', ')})`);
