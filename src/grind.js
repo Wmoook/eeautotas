@@ -698,10 +698,12 @@ function blindTrace(ms) {
 // --sweepLoops=lane (default): the 2 longest loops in the sweep's lanes; first: the 2 longest loop windows with all the threads
 // before the sweep (an experiment: Forgotten Veil's loop at (326, 90) found -46 with 8 threads and 4 in a 2-thread lane)
 const SWEEP_LOOP_MODE = a.sweepLoops || process.env.EEAT_SWEEP_LOOPS || 'lane';
-// --sweepFirst=1 (default; 0 or EEAT_SWEEP_FIRST=0: off): on time-door levels the job's first whole-run sweep opens the
-// session's first round, before mutate, phase, the endgame and phaseB (sweep.js roundStages: there the first sweep began
-// 6.5-13.1 min after the job, and its first windows saved 300-1106 ticks each)
-const SWEEP_FIRST = String(a.sweepFirst !== undefined ? a.sweepFirst : (process.env.EEAT_SWEEP_FIRST || '1')) !== '0';
+// --sweepFirst=1 or EEAT_SWEEP_FIRST=1 (OPT-IN, off by default): on time-door levels the job's first whole-run sweep opens
+// the session's first round, before mutate, phase, the endgame and phaseB (sweep.js roundStages: there the first sweep
+// began 6.5-13.1 min after the job, and its first windows saved 300-1106 ticks each). The A/B (CLAUDE.md, sweep.js row):
+// ahead at +5 / +10 min in every pair, not at +20 (after its sweep has covered the run it goes on to phase while the
+// usual order's sweep, begun at +6.5..+10 min, still finds)
+const SWEEP_FIRST = String(a.sweepFirst !== undefined ? a.sweepFirst : (process.env.EEAT_SWEEP_FIRST || '0')) === '1';
 /** the longest loop of the run (48 px, then 96, then 160) not tried yet (tried: the state hashes at its ends) and not
  *  resting in the window memory (those are added to tried); null when none: {l, m: memoWin of its window} */
 function nextLoop(round, tried) {

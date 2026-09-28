@@ -189,7 +189,8 @@ class Memo {
  * started 6.5-13.1 min after the job (median 10.4), where its windows then saved 300-1106 each (Good Egg: 686, 571, 467,
  * 305 in its first 2 min, reaching the best mostly through the GPU searcher's union combine); the time-door levels had
  * a median 58% of their whole gain 10 min after the first route, the others 91% (the route-quality analysis of
- * 2026-09-28, 70 fetched runs). Other levels keep the usual order (mutate's gains come first there).
+ * 2026-09-28, 70 fetched runs). Other levels keep the usual order. OPT-IN (grind --sweepFirst=1): ahead at +5 / +10 min
+ * in 4 of 4 A/B pairs, at +20 in 2 of 4 (CLAUDE.md, the grind cycle).
  * o: {on (the switch: grind --sweepFirst), timeDoors, first (the session's first round), swept (the job covered the
  * whole run with a sweep once already), off (no sweep in this round: --sweep=0, --skip=deep)}. Returns a new array.
  */
