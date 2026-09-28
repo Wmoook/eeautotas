@@ -239,9 +239,12 @@ const LEAD_PICK = 20, LEAD_GRACE_S = 120, LEAD_HALF_S = 120, LEAD_FLOOR = 0.1;
 // sqrt(its picks): 25 picks cost 200 ticks of lead (a region ahead but walled in by a door the route opened runs out
 // sooner than head L's)
 const WAY_PICK = 40;
+// (--wYield=1: head W's share follows its yield like head L's: --pW for LEAD_GRACE_S after the first route and after
+// every faster route that descends from a head-W pick, then halved every LEAD_HALF_S down to LEAD_FLOOR x --pW;
+// --wYield=0: --pW all the time)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 1, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, lb: 1, pL: 0.3, pW: 0.3, wPhase: 1, wYield: 1, nice: 0,
 	jumpP: 0, jumpNear: 0.75 };
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
@@ -937,6 +940,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	// (head L's share now: see LEAD_GRACE_S; lastL: the first route's or head L's last faster route's time)
 	let lastL = 0, lShare = 0, pickL = false, pickW = false;   // (pickW / viaW: the same bookkeeping for head W, counted only)
 	const leadShare = (now) => (sched === null || a.pL <= 0 ? 0 : a.pL * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastL) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
+	let lastW = 0, wShare = 0;
+	const wayShare = (now) => (sched === null || HW === null ? 0 : !a.wYield ? a.pW : a.pW * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastW) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
 	const hpush = HS ? (c) => { HA.push(c); HS.push(c); if (sched !== null) lpush(c); } : (c) => { HA.push(c); if (sched !== null) lpush(c); };
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value) */
@@ -1086,7 +1091,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	let first = null, best = null;   // routes: {t, sec, simTicks}
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576) },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded }, fields.stats()) : {});
@@ -1282,7 +1287,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	/** the best route (the main thread's 'route': any operator's, or the editor's): head L's schedule, and every cell on it
 	 *  into head L (a separate engine: the live state belongs to the picks) */
 	let leadPicks = 0, leadRoutes = 0, wayPicks = 0;
-	const setRoute = (str, byL) => {
+	const setRoute = (str, byL, byW) => {
 		const ms = Uint8Array.from(str, (ch) => (ch.charCodeAt(0) - 48) & 31);
 		const s2 = new E.EESim(L), in2 = new E.EEInput(), m = new Map();
 		const tm = HW !== null ? new Int32Array(WTD ? N * NPH : N) : null;
@@ -1304,6 +1309,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			}
 		}
 		if (sched === null || byL) lastL = Date.now();
+		if (sched === null || byW) lastW = Date.now();
 		if (byL) leadRoutes++;
 		sched = m;
 		tsched = tm;
@@ -1318,7 +1324,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 			const x = m.message;
 			if (x.type === 'import' && coarse) importRun(x.inputs);
 			else if (x.type === 'nearest') nearestOf(x);
-			else if (x.type === 'route' && HL !== null) setRoute(x.inputs, !!x.byL);
+			else if (x.type === 'route' && HL !== null) setRoute(x.inputs, !!x.byL, !!x.byW);
 		}
 	};
 	/** a seed (stdin "seed <inputs>": the editor's wall breaker's attempts): its states every SEED_EVERY ticks back from
@@ -1371,7 +1377,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (port) inbox();
 		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) addSeed(String(m.message));
-		lShare = leadShare(now);
+		lShare = leadShare(now); wShare = wayShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
 			pickL = false; pickW = false;
@@ -1387,7 +1393,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 				while (HL.size() > 0) { const c = HL.pop(); if (HL.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
 				if (e === null) e = rnd() < a.pA ? popA() : popB();
 				else { leadPicks++; pickL = true; }
-			} else if (HW !== null && sched !== null && rnd() < a.pW) {
+			} else if (wShare > 0 && rnd() < wShare) {
 				// head W (a route known): the off-schedule cell most ahead of the route by its tile alone
 				while (HW.size() > 0) { const c = HW.pop(); if (HW.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
 				if (e === null) e = rnd() < a.pA ? popA() : popB();
@@ -2178,7 +2184,7 @@ async function main() {
 		if (byL) nLead++;
 		if (byW) nWay++;
 		// (head L of every worker: the new best route's schedule; byL: a head-L pick found it, its share's yield)
-		if (one && (a.pL > 0 || a.pW > 0)) for (const p of one.ports) p.postMessage({ type: 'route', inputs, byL });
+		if (one && (a.pL > 0 || a.pW > 0)) for (const p of one.ports) p.postMessage({ type: 'route', inputs, byL, byW });
 		if (!first) first = { ticks: t, sec: route.sec, simTicks, seed };
 		say({ ev: 'result', kind: 'finish', ticks: t, runTicks: ev.runTicks, time: C.fmt(ev.runTicks), inputs, seed, simTicks, sec: route.sec, ...(seed ? {} : { by: 'gpu' }), ...(byL ? { byL: true } : {}), ...(byW ? { byW: true } : {}) });
 		if (a.out) { try { C.writeEetas(a.out, ev.ms); } catch (e) { say({ ev: 'warning', text: `cannot write ${a.out}: ${e.message}` }); } }
@@ -2282,7 +2288,7 @@ async function main() {
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
-				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0 },
+				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
