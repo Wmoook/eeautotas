@@ -1001,8 +1001,10 @@ async function skipfindStage(round) {
 	const secs = a.skipfindS ? +a.skipfindS : Math.max(120, Math.min(300, Math.round(0.3 * ROUND_MS / 1000)));
 	if (deadline - Date.now() < (secs + 120) * 1000) return;
 	const so = path.join(OUT, `grind_skipf_${round}.eetas`);
+	// (a deep start's budget within the slice, its joins included: a slice of 180 s cut every 200-s deep start)
 	const res = await stage(`skipfind${round}`, 'skipfind.js', [TAS, LVL, `--out=${so}`, `--workers=${W}`, `--nocoins=${NC}`, `--seconds=${secs}`,
-		`--done=${path.join(OUT, 'grind_skipfind.txt')}`, ...dl()], so, (secs + 120) * 1000, 'from states all along the run: every move to later points of the run');
+		`--deepPerS=${Math.min(200, Math.max(60, secs - 20))}`, `--done=${path.join(OUT, 'grind_skipfind.txt')}`, ...dl()], so, (secs + 120) * 1000,
+		'from states all along the run: every move to later points of the run');
 	if (res) addResult(so);
 }
 /**
@@ -1012,7 +1014,8 @@ async function skipfindStage(round) {
  * along the run, one state per position / velocity cell, the run's own state always kept), up to --flybeamExt (1200)
  * ticks past its window, joined back exactly (a child equal to a later run state, or the run's own inputs from the
  * nearest states ahead) and judged. A slice per round (--flybeamS, default 30% of a round, 150-300 s) on every thread,
- * continuing its pass over the run (`grind_flybeam.json`: the next start as tick + state hash). Opt-in:
+ * the starts by their longest low-contact stretch first (flybeam.js --order=stretch; `grind_flybeam.json`: the starts
+ * done, by state hash: Infinity Pain's shaft ranks 1-6 of 99 starts, 83-88 in tick order). Opt-in:
  * --flybeam=1 (or EEAT_FLYBEAM=1).
  */
 async function flybeamStage(round) {
