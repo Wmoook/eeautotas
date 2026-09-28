@@ -1324,10 +1324,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null) {
 	 *  the earliest among equals, to the main thread (a GPU burst starts there) */
 	const nearestOf = (m) => {
 		const r = rooms.get(m.room), f = m.field;
+		// (the burst arm's dead zones: its starts that ran out of situations with nothing gained, bursts.js DEAD_ZONE)
+		const avoid = m.avoid ? new Set(m.avoid) : null, zw = m.zone ? Math.ceil(W / m.zone) : 0;
 		let best = null, bv = 0xffff;
 		if (r !== undefined) {
 			for (const c of r.arr) {
 				if (c.t >= maxT) continue;
+				if (avoid !== null && avoid.has((((c.tile % W) / m.zone) | 0) + (((c.tile / W) / m.zone) | 0) * zw)) continue;
 				const v = f[c.tile];
 				if (v === 0xffff) continue;
 				if (best === null || v < bv || (v === bv && c.t < best.t)) { best = c; bv = v; }
