@@ -142,13 +142,17 @@ function sectionA() {
  *  the effects air), where the high coin has no leg: every 2-coin tour misses it and the steer has no value at the start.
  *  With the leg from the wild layer (walk x kappa) the DP has a start value; the floor coin's leg is the same body; past
  *  its time the file is the one without it byte for byte; a level where every coin has a leg is untouched */
-function altLegsToy() {
+function altToyLevel() {
 	const W = 40, H = 18, cells = [];
 	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
 	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
 	cells.push([16, H - 2, 255], [34, H - 2, 121], [8, H - 2, 100], [4, H - 2, 418, 1], [12, 2, 100], [12, 3, 9], [11, 3, 9], [13, 3, 9]);
 	for (let y = 1; y < H - 1; y++) cells.push([28, y, 43, 2]);
-	const L = levelOf(ED.eelvlOf({ name: 'alt legs', width: W, height: H, cells }));
+	return levelOf(ED.eelvlOf({ name: 'alt legs', width: W, height: H, cells }));
+}
+function altLegsToy() {
+	const W = 40, H = 18;
+	const L = altToyLevel();
 	const sim = new E.EESim(L); sim.reset();
 	const sha = (b) => require('crypto').createHash('sha1').update(b).digest('hex');
 	const bodySha = (b) => { const h = require('crypto').createHash('sha1'); for (const k of Object.keys(b).sort()) { const v = b[k]; if (ArrayBuffer.isView(v)) h.update(k).update(Buffer.from(v.buffer, v.byteOffset, v.byteLength)); else h.update(`${k}:${v}`); } return h.digest('hex'); };
@@ -422,6 +426,8 @@ function sectionB() {
 	section('B agree: the JS lookup = eegpu steertest');
 	if (!toolOk) { console.log(`  (skipped: ${toolPath ? `${toolPath} has no steertest (older than the app: rebuild it, node tools/build-native.js)` : 'no native tool'})`); return; }
 	Object.entries(ROOMS).forEach(([name, r], k) => { const L = levelOf(r.buf); agree(name, L, SF.buildSteer(L), randomRuns(k, 6, 600)); });
+	// (the coin legs across the other layers: a DP leg from the wild layer, a walk-mode body x kappa: altLegs)
+	{ const L = altToyLevel(), st = SF.buildSteer(L, { altLegs: true }); if (st.info.altLegs && st.info.altLegs.legs) agree('the alt-legs toy (a walk leg of the wild layer in the DP)', L, st, randomRuns(7, 6, 600)); else check('the alt-legs toy has its alt leg', false, JSON.stringify(st.info.altLegs)); }
 	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
 	let ids = [];
 	try { ids = fs.readdirSync(jobs).filter((d) => fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'best.eetas'))); } catch (e) { /* no jobs */ }
