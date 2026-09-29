@@ -248,6 +248,10 @@
 //        burst and enters the room there (reentry); the progress and done events carry "useful": {culPicks, culCells,
 //        zeroed (rooms), culSets, culDropped, reculs}, "deaths" "useless" (such deaths, kept); 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
+//        [--swsig=1 (coarse cells, SWITCH SETS: a room whose walk from its entry repeats an earlier live room's of its base
+//        (the key without the switches) is a repeat: its group draws with the dominated ones (head B's --domShare), no
+//        source, the bursts give it the dominated rooms' turn; order only; the workers' stats "repRooms", the bursts' "gpu"
+//        "repRooms"; 0 or EEAT_SWSIG=0: as before)]
 //        [--frontier=0 (1: OPT-IN, coarse cells: the frontier field, head F, see FR_MIN_PICKS below; 0: the search exactly as
 //        before) --fLo=0.1 --fHi=0.4 --fStall=75000 --fEvery=25000 --fGrow=0.1 --fK=4096 --fLambda=4 --fDil=1 --fYield=0
 //        --fBrake=0 --fPhys=0 (EEAT_FRLOG=<file>: a line per field, observation only)]
@@ -324,7 +328,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, swsig: process.env.EEAT_SWSIG !== undefined ? +process.env.EEAT_SWSIG : 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
@@ -1053,7 +1057,8 @@ function roomOf(L, opts = {}) {
 	};
 	const onList = (m, read) => { const a = []; for (const [id, v] of m) if (v === true && (read === null || read.has(id))) a.push(id); return a.sort((x, y) => x - y); };
 	// (mode 0: the room key; 1: the part only the ball's own touches change: without the keys, which expire, and the time
-	// doors, which flip on the clock; 2: the dominance class: the key without the time doors and the mono switches. The
+	// doors, which flip on the clock; 2: the dominance class: the key without the time doors and the mono switches; 3: the
+	// key without the switches (the room's non-switch features: base, the switch-set signature SWITCH SETS). The
 	// live state's room at every simulated tick of the one search: mixW, a function of the module, instead of a closure
 	// over h per call; the same words in the same order)
 	const hash = (sim, mode) => {
@@ -1061,7 +1066,7 @@ function roomOf(L, opts = {}) {
 		if (mode !== 1) h = mixW(h, sim._keysMask);
 		h = mixW(h, (crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
 			(sim.is_cursed ? 16 : 0) | (sim.is_zombie ? 32 : 0) | (sim.is_on_fire ? 64 : 0) | (sim.is_poisoned ? 128 : 0) | (sim.has_levitation ? 256 : 0) |
-			(mode === 0 && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
+			((mode === 0 || mode === 3) && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
 		h = mixW(h, sim.max_jumps); h = mixW(h, sim.jump_boost); h = mixW(h, sim.speed_boost); h = mixW(h, sim.flip_gravity);
 		if (team) h = mixW(h, sim.team);
 		if (coins) h = mixW(h, rel.gold ? sim.coins : cnt(cTh, sim.coins, upG));
@@ -1070,12 +1075,15 @@ function roomOf(L, opts = {}) {
 		if (L.hasBlueCoinGate) h = mixW(h, rel.blue ? sim._show_blue_coin_gate : cnt(bTh, sim._show_blue_coin_gate, upB));
 		if (L.hasDeathDoor) h = mixW(h, sim.deaths);
 		if (L.hasDeathGate) h = mixW(h, sim._show_death_gate);
+		if (mode === 3) return h | 0;
 		const bp = mode === 2 ? bitP : null, bo = mode === 2 ? bitO : null;
 		if (sim._switches.size !== 0) { const s = onSum(sim._switches, 0x1234567, readP, bp); if (legacy || s !== 0) h = mixW(h, s); }
 		if (sim._oswitches.size !== 0) { const s = onSum(sim._oswitches, 0x7654321, readO, bo); if (legacy || s !== 0) h = mixW(h, s); }
 		return h | 0;
 	};
 	const key = (sim) => hash(sim, 0);
+	/** the room's key without its switches: rooms of one base differ only by the switches on */
+	const base = (sim) => hash(sim, 3);
 	/** what a room change's cause is judged by: {sub (the key without keys and time doors), keys} */
 	const cause = (sim) => ({ sub: hash(sim, 1), keys: sim._keysMask });
 	/** a change from a room of cause a to one of cause b came from a trigger the ball touched (a key picked up, an
@@ -1120,7 +1128,7 @@ function roomOf(L, opts = {}) {
 	/** a change from dominance info d0 to d1 only turned mono switches off (the same class, a strict subset: into a room
 	 *  the one before dominates; roomOf dom) */
 	const shrinks = (d0, d1) => d0.cls === d1.cls && maskIn(d1.mask, d0.mask) && !maskEq(d1.mask, d0.mask);
-	return { key, desc, cause, byTrigger, dom, shrinks, mono: [monoP, monoO], rel, words };
+	return { key, base, desc, cause, byTrigger, dom, shrinks, mono: [monoP, monoO], rel, words };
 }
 
 /** a (Int32Array mask) within b: every bit of a is in b */
@@ -1139,29 +1147,40 @@ const maskEq = (a, b) => { for (let k = 0; k < a.length; k++) if (a[k] !== b[k])
  */
 function domIndex() {
 	const groups = new Map(), maxi = new Map(), list = [], dlist = [];
-	let dominated = 0;
+	let dominated = 0, repeats = 0;
+	const outOf = (L, g, f) => { const i = g[f]; if (i >= 0) { const last = L.pop(); if (last !== g) { L[i] = last; last[f] = i; } g[f] = -1; } };
 	const drop = (g) => {
 		if (g.dom) return;
-		g.dom = true; dominated++; dlist.push(g);
-		const i = g.li;
-		if (i >= 0) { const last = list.pop(); if (last !== g) { list[i] = last; last.li = i; } g.li = -1; }
+		g.dom = true; dominated++;
+		// (a repeat group is in dlist already: dominated now, for good)
+		if (g.rep) { g.rep = false; repeats--; } else { g.di = dlist.length; dlist.push(g); }
+		outOf(list, g, 'li');
 	};
 	const groupOf = (d) => {
 		let ks = String(d.cls);
 		for (let k = 0; k < d.mask.length; k++) ks += ':' + d.mask[k];
 		let g = groups.get(ks);
 		if (g) return g;
-		g = { key: ks, cls: d.cls, mask: d.mask, dom: false, rooms: [], picks: 0, gain: 0, troOk: false, li: -1 };
+		g = { key: ks, cls: d.cls, mask: d.mask, dom: false, rep: false, rooms: [], picks: 0, gain: 0, troOk: false, li: -1, di: -1 };
 		groups.set(ks, g);
 		let M = maxi.get(d.cls);
 		if (!M) maxi.set(d.cls, M = []);
-		for (const h of M) if (maskIn(d.mask, h.mask) && !maskEq(d.mask, h.mask)) { g.dom = true; dominated++; dlist.push(g); return g; }
+		for (const h of M) if (maskIn(d.mask, h.mask) && !maskEq(d.mask, h.mask)) { g.dom = true; dominated++; g.di = dlist.length; dlist.push(g); return g; }
 		for (let k = M.length - 1; k >= 0; k--) if (maskIn(M[k].mask, d.mask)) { drop(M[k]); M.splice(k, 1); }
 		M.push(g);
 		g.li = list.length; list.push(g);
 		return g;
 	};
-	return { groupOf, list, dlist, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
+	// (SWITCH SETS: a REPEAT group (every room of it a switch set that opens only what an earlier room of its base does)
+	// draws with the dominated ones (head B's --domShare), out of `list`; not dominated: g.dom stays false. `repeat(g,
+	// on)`: in or out of it; a dominated group stays dominated)
+	const repeat = (g, on) => {
+		if (g.dom || g.rep === on) return;
+		g.rep = on;
+		if (on) { repeats++; outOf(list, g, 'li'); g.di = dlist.length; dlist.push(g); }
+		else { repeats--; outOf(dlist, g, 'di'); g.li = list.length; list.push(g); }
+	};
+	return { groupOf, repeat, list, dlist, stats: () => ({ groups: groups.size, dominated, maximal: list.length, repeats }) };
 }
 
 /**
@@ -1222,6 +1241,21 @@ function domPick(DOM, share, rnd, weightOf) {
 // entered again at one of its cul-de-sac tiles (a run, an import, a seed: the clock's rooms, time doors and keys running
 // out, are entered wherever the ball is) gets its cul-de-sacs again with its entries as terminals (reentry, REENTRY_MAX).
 const CUL_A = 2000, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
+// SWITCH SETS (--swsig=1, the default; EEAT_SWSIG=0 / --swsig=0: off; night 3 cycle 6). Purple / orange switch sets made
+// hundreds of rooms on the switch-puzzle levels (sweep 5, the failing runs' rooms: Soul Quest 273 of 275 purple sets, all
+// after its 5-tile nearest at 26 s, then no progress for 274 s; Bridge Builder 334 of 342, Switcher Puzzle 325 of 330).
+// Each is a new room (novelty key), so each got head B's fresh-room weight, a room source and the GPU bursts' untried-room
+// score (newest first), whether or not it opened anything. A room's TERRITORY SIGNATURE = its walk from its entry
+// (roomFields: the passable set as the room holds it, a hash of the walked tiles) with its BASE (roomOf base: the key
+// without the switches); a room whose signature is an earlier live room's is a REPEAT: a switch set that opens only what
+// that room's does (its gain is 0 already: the walk adds nothing to the union). A repeat is DEMOTED, never pruned: its
+// group draws with the dominated ones (head B's --domShare; domIndex repeat), no source, and the bursts give it only the
+// dominated rooms' turn (bursts.js, its own walk's signature); its cells stay and head A picks them by their cost as
+// before. The walk is gravity-blind and whole (every tile of the component the room was entered in), so a repeat's switch
+// differences all lie outside that component: they matter only after another room change (a later switch, an effect, a
+// death's respawn elsewhere), which makes a room of its own; the room keeps the verdict of its first entry (a later entry
+// in another component, e.g. a respawn, does not lift it): a demotion, not a proof
+const REP_B = 10;
 /**
  * roomUseful(L) -> {of(sim, band, extra) -> {cul, off, targets, walked}}: the useful territory of the room the live state
  * is in, from its tile (see USEFUL TERRITORY above): cul / off bitsets (a bit per tile; null when no tile is in one), off
@@ -1475,7 +1509,7 @@ function roomFields(L, budget, opts = {}) {
 				// (the useful territory is the room's own, from its entry: a known walk has no gain, its cells are still ordered)
 				const U = US !== null ? US.of(sim, false) : null;
 				ms += Date.now() - t0;
-				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
+				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1, sig: c.sig };
 			}
 		}
 		const U = US !== null ? US.of(sim, true) : null;
@@ -1484,12 +1518,14 @@ function roomFields(L, budget, opts = {}) {
 		const pass = (i) => !wall[i] && !shut[i] && (prot || !deadly[i]);
 		const g = ++gen;
 		const bits = new Uint8Array((N + 7) >> 3);
-		let qh = 0, qt = 0, gain = 0, ugain = 0, troOk = false;
+		let qh = 0, qt = 0, gain = 0, ugain = 0, troOk = false, s1 = 0, s2 = 0;
 		const off = U !== null ? U.off : null;
 		seen[tile] = g; q[qt++] = tile;
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
 			bits[t >> 3] |= 1 << (t & 7);
+			// (the walk's territory signature: two sums over its tiles, any order; SWITCH SETS)
+			s1 = (s1 + fmix(t ^ 0x2545f491)) | 0; s2 = (s2 + fmix(Math.imul(t + 1, 0x9e3779b1))) | 0;
 			if (!union[t]) { union[t] = 1; gain++; if (!bitAt(off, t)) ugain++; }
 			if (fg[t] === 121) troOk = true;
 			const ex = exits.get(t);
@@ -1508,14 +1544,15 @@ function roomFields(L, budget, opts = {}) {
 		}
 		for (let k = 0; k < doors.length; k++) shut[doors[k]] = 0;
 		walks++;
-		const c = { bits, troOk, used: ++clock };
+		const sig = `${s1 >>> 0}.${s2 >>> 0}.${qt}`;
+		const c = { bits, troOk, used: ++clock, sig };
 		if (list) list.push(c); else cache.set(hk, [c]);
 		bytes += bits.length + WALK_BYTES;
 		while (bytes > budget && evict()) { /* the least recently used first */ }
 		ms += Date.now() - t0;
 		// (a room whose new territory is all off the band: no gain)
 		if (U !== null && gain > 0 && ugain === 0) zeroed++;
-		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
+		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1, sig };
 	};
 	// the rooms' cul-de-sac and off-band bitsets, one copy per content (FNV-1a over the bytes): rooms that share doors and
 	// targets often share them; counted in bytes() with the walks, at most `budget` bytes of them (past that a new room gets
@@ -2225,6 +2262,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// room its own, as before)
 	const DOM = coarse && a.dom !== 0 ? domIndex() : null;
 	let dDom = 0, domShared = 0;   // (domShared: head B's tournaments over the dominated groups, --domShare)
+	// (SWITCH SETS, --swsig=1 (EEAT_SWSIG=0: off); coarse cells: repOf (base key | walk signature) -> the first live room
+	// of that territory; nRep: the rooms made as repeats)
+	const SWSIG = coarse && a.swsig !== 0, repOf = new Map();
+	let nRep = 0;
 	/** the live state's novelty group (made when new; DOM on) */
 	const groupNow = () => DOM.groupOf(RM.dom(sim));
 	/** a new room of the live state; bk: made by a death that throws the ball back (deathPays): a BACK room, kept but
@@ -2234,7 +2275,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const f = fields.enter(sim);
 		const cz = RM.cause(sim), pr = parent === undefined ? undefined : rooms.get(parent);
 		const r = { key, desc: RM.desc(sim), t, gain: f.gain, graw: f.graw, cul: f.cul, troOk: f.troOk, picks: 0, ex: 0, sat: new Map(), live: RDEAD !== null ? RDEAD.liveFor(sim) : null, arr: [], best: null, isNew: bk !== true, sent: 0, sentAt: null,
-			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true, grp: null, dm: null, bk: bk === true };
+			parent: parent === undefined ? null : parent, tile: centreTile(), cause: cz, trig: pr ? RM.byTrigger(pr.cause, cz) : true, grp: null, dm: null, bk: bk === true, rep: false };
 		if (DOM !== null) {
 			r.dm = RM.dom(sim);
 			const g = DOM.groupOf(r.dm);
@@ -2243,6 +2284,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (f.gain > g.gain) g.gain = f.gain;
 				if (f.troOk) g.troOk = true;
 			}
+		}
+		// (SWITCH SETS: a room whose walk from its entry is an earlier live room's of its base (the key without the switches),
+		// a switch set that opens nothing that one does not, is a REPEAT, demoted; not when that room is dominated (by this
+		// one: its mono switches and more): this room stands for the territory then)
+		if (SWSIG && f.sig !== undefined) {
+			const sk = RM.base(sim) + '|' + f.sig, o = repOf.get(sk), or = o !== undefined && o !== key ? rooms.get(o) : undefined;
+			if (or !== undefined && !domOf(or)) { r.rep = true; nRep++; }
+			else repOf.set(sk, key);
+			// (a group all of whose rooms are repeats draws with the dominated ones: out of head B's tournaments but for --domShare)
+			if (r.grp !== null) DOM.repeat(r.grp, r.grp.rooms.every((x) => x.rep));
 		}
 		if (a.spdKids && pr !== undefined && pr.spd) { r.spd = true; spdRooms.push(r); }
 		rooms.set(key, r);
@@ -2673,7 +2724,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared, repRooms: nRep }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -2691,7 +2742,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	 *  (by (1 + ln(1 + gain)) / (1 + sources)), when it is not the one already sent */
 	const bestSources = () => {
 		const cand = [];
-		for (const r of roomList) if (r.best !== null && r.best.node !== null && r.best.t >= SOURCE_MIN_TICKS && r.best !== r.sentAt && !domOf(r) && !r.bk) cand.push(r);
+		for (const r of roomList) if (r.best !== null && r.best.node !== null && r.best.t >= SOURCE_MIN_TICKS && r.best !== r.sentAt && !domOf(r) && !r.bk && !r.rep) cand.push(r);
 		cand.sort((x, y) => (1 + Math.log(1 + y.gain)) / (1 + y.sent) - (1 + Math.log(1 + x.gain)) / (1 + x.sent) || x.t - y.t);
 		for (let k = 0; k < 4 && k < cand.length; k++) source('best', cand[k], cand[k].best);
 	};
@@ -2745,7 +2796,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			for (let k = 0; k < 4; k++) {
 				const r = roomList[(rnd() * roomList.length) | 0];
 				if (!r.arr.length || r.bk) continue;
-				const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1);
+				// (--dom=0: a repeat's weight / REP_B, SWITCH SETS)
+				const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1) / (r.rep ? REP_B : 1);
 				if (w > bw) { bw = w; br = r; }
 			}
 		}
@@ -2843,7 +2895,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (room.gain > 0 && !dm) { if (a.burst > 0) { discovery.push([nc, a.burst]); bursts++; } }
 		// (--frontier: a room that opens territory gets the next field at once: its doors let the ball where no cell was)
 		if (FR !== null && room.gain > 0 && !dm) FR.fresh = room;
-		if (!dm && (room.gain > 0 || Date.now() - lastBlandSource >= SOURCE_S * 1000) && t >= SOURCE_MIN_TICKS) {
+		// (a repeat, SWITCH SETS: no source; no discovery burst either: its walk is an earlier room's, gain 0)
+		if (!dm && !room.rep && (room.gain > 0 || Date.now() - lastBlandSource >= SOURCE_S * 1000) && t >= SOURCE_MIN_TICKS) {
 			if (room.gain <= 0) lastBlandSource = Date.now();
 			source('room', room, nc);
 		}
@@ -3855,7 +3908,8 @@ async function gpuMain(a, L, m) {
 			for (let k = 0; k < 4; k++) {
 				const r = roomList[(rnd() * roomList.length) | 0];
 				if (!r.arr.length || r.bk) continue;
-				const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1);
+				// (--dom=0: a repeat's weight / REP_B, SWITCH SETS)
+				const w = (1 + Math.log(1 + r.gain)) * (r.troOk ? 2 : 1) / Math.sqrt(1 + r.picks / 50) / (SAT ? 1 + satOver(r.ex, a.satN) / SAT_B : 1) / (r.rep ? REP_B : 1);
 				if (w > bw) { bw = w; br = r; }
 			}
 		}
@@ -4251,7 +4305,7 @@ async function main() {
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
+		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared'), repRooms: total('repRooms') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
 		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
@@ -4585,7 +4639,7 @@ async function main() {
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0,
-				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0 } : {});
+				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0, repRooms: d.repRooms || 0, repeats: d.repeats || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +

@@ -158,6 +158,8 @@ const SMALL = { cells: 25, cap: 262144 };
 // one whose bursts keep finding rooms (a level of many switch states has thousands of rooms: each once would take all
 // the GPU)
 const UNTRIED = 1.5;
+/** murmur3's 32-bit finalizer (the rooms' territory signatures, SWITCH SETS) */
+const fmix32 = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return h | 0; };
 // a burst that got nearer its targets without reaching one goes on from its nearest attempt with the same targets (the
 // relay's chain: its attempt may end in another room, e.g. after a team toggle, where the room's own next burst would
 // aim elsewhere; Infinity Pain's fly rooms: bursts from the same cell, 54 tiles out, again and again got to 28-33 and
@@ -270,7 +272,21 @@ function create(o) {
 	const pending = new Map();   // request id -> {replies, want, done}
 	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
 	const st = { bursts: 0, domBursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
-		servers: 0, served: 0 };
+		servers: 0, served: 0, repRooms: 0 };
+	// (SWITCH SETS, goexplore.js --swsig (EEAT_SWSIG=0: off): a room whose walk signature (infoOf sig) an earlier room (by
+	// its registration, seq) has too is a REPEAT: a switch set that opens nothing more from where it was entered; it gets the
+	// dominated rooms' turn only (--domBurst), like them. sigFirst: signature -> the earliest room with it)
+	const swsig = a.swsig === undefined || a.swsig === null ? true : +a.swsig !== 0;
+	const sigFirst = new Map();
+	/** room R (not a portal arm) is a repeat: its info's signature is an earlier room's (R's info must be made); the
+	 *  earliest room of a signature whose group is not dominated stands for it (a dominated one only while none is) */
+	const repeatOf = (R) => {
+		const s = R.info && R.info.sig;
+		if (!s) return false;
+		const f = sigFirst.get(s), dmn = (x) => !!(x.grp && x.grp.dom);
+		if (f === undefined || f === R || !rooms.has(f.key) || (dmn(f) && !dmn(R)) || (R.seq < f.seq && dmn(R) === dmn(f))) { sigFirst.set(s, R); return false; }
+		return true;
+	};
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
 	let smallUntil = 0;
@@ -528,7 +544,15 @@ function create(o) {
 		// (a component the walk reached only through a portal: the portal arm's target)
 		const pOnly = new Set();
 		for (const [c, tiles] of comps) if (tiles.every((t) => via[t])) pOnly.add(c);
-		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly, ways };
+		// (SWITCH SETS: the walk's territory signature with the room's base, the key without the switches (goexplore.js
+		// roomOf base): two sums over the walked tiles, any order)
+		let sig = null;
+		if (swsig && o.RM.base) {
+			let s1 = 0, s2 = 0;
+			for (let k = 0; k < qt; k++) { const t = q[k]; s1 = (s1 + fmix32(t ^ 0x2545f491)) | 0; s2 = (s2 + fmix32(Math.imul(t + 1, 0x9e3779b1))) | 0; }
+			sig = `${o.RM.base(sim)}|${s1 >>> 0}.${s2 >>> 0}.${qt}`;
+		}
+		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly, ways, sig };
 		return R.info;
 	};
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
@@ -701,7 +725,8 @@ function create(o) {
 			// of its 361 bursts to switch-subset rooms at coins = 8, src/out/ge_anat; but "dominated" is the walk's view (an
 			// open door is no floor: a floor-door switch turned off again, a backtracking room), so such rooms keep every
 			// --domBurst-th turn: dominance only orders)
-			const dm = !!(r0.grp && r0.grp.dom);
+			// (a repeat, SWITCH SETS: the dominated rooms' turn too)
+			const dm = !!(r0.grp && r0.grp.dom) || r0.rep === true;
 			if (dm && !domTurn) continue;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
@@ -714,12 +739,22 @@ function create(o) {
 		dcand.sort((x, y) => y[0] - x[0]);
 		let domChosen = false;
 		for (const [, r, raw] of dcand.length ? dcand.concat(cand) : cand) {
+			// (SWITCH SETS: its walk (infoOf, which fieldOf makes anyway) repeats an earlier room's: from now on with the
+			// dominated rooms, and out of this pick unless it is their turn; an earlier room found later takes the original's
+			// place, and the verdict is made again at each dominated turn)
+			if (swsig) {
+				const R = r.base || r;
+				let rep = false;
+				try { infoOf(R); rep = repeatOf(R); } catch (e) { rep = false; }
+				if (rep !== (R.rep === true)) { R.rep = rep; if (rep) st.repRooms++; }
+				if (rep && !domTurn) continue;
+			}
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
 			bs = raw; best = { r, f };
 			// (r.pa inherits its room's grp)
-			if (r.grp && r.grp.dom) { domChosen = true; st.domBursts++; }
+			if ((r.grp && r.grp.dom) || (r.base || r).rep === true) { domChosen = true; st.domBursts++; }
 			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
