@@ -1262,18 +1262,22 @@ function doomOf(L) {
 	let gen = 0, bytes = 0, gGates = false, bGates = false;
 	for (let i = 0; i < N; i++) { if (kind[i] === 3) gGates = true; else if (kind[i] === 5) bGates = true; }
 	const LEVS = bGates && !gGates ? [1] : bGates ? [0, 1] : [0];
-	const cache = new Map();
-	const S = { floods: 0, hits: 0, doomed: 0, skipped: 0, ms: 0, bytes: 0 };
+	const cache = new Map(), ccache = new Map();
+	// (the coin tiles of each colour in the level: the COARSE test's potential, held + all of them, whichever are left)
+	let totG = 0, totB = 0;
+	for (let k = 0; k < L.coinTiles.length; k++) { if (L.coinBaseId[k] === 100) totG++; else if (L.coinBaseId[k] === 101) totB++; }
+	const S = { floods: 0, coarse: 0, hits: 0, doomed: 0, skipped: 0, ms: 0, bytes: 0 };
 	/** the flood from seeds with the counts held g / b (the live sim's tiles: its untaken coins), one colour by LEVEL (lev 0:
 	 *  gold, 1: blue): its count is raised only when the flood has run out, to the least of its coin doors blocked on the
 	 *  flood's edge that its potential (held + the untaken coins of its colour reached) reaches, and its gates at or below
 	 *  the level are shut from then on (a count only goes up: a way that needs a door of m before a gate of n <= m has
 	 *  none); the other colour by its potential (doors up to it open, gates above the count held open). {reached (the
-	 *  trophy), n (tiles in q), n0 (the tiles reached before the first raise: at the count held)} */
-	const flood = (sim, seeds, g, b, lev) => {
+	 *  trophy), n (tiles in q), n0 (the tiles reached before the first raise: at the count held)}. bound: the potential
+	 *  held + every coin tile of the colour in the level (the COARSE test: its verdict holds whatever coins are left) */
+	const flood = (sim, seeds, g, b, lev, bound) => {
 		if (++gen >= 0x7fffffff) { st.fill(0); bst.fill(0); gen = 1; }
 		const tiles = sim.tiles;
-		let qt = 0, pg = g, pb = b, cg = g, cb = b, n0 = -1;
+		let qt = 0, pg = bound ? g + totG : g, pb = bound ? b + totB : b, cg = g, cb = b, n0 = -1;
 		const blocked = [];
 		for (const s of seeds) if (s >= 0 && s < N && st[s] !== gen) { st[s] = gen; q[qt++] = s; }
 		const pass = (j) => {
@@ -1294,8 +1298,7 @@ function doomOf(L) {
 			for (; qh < qt; qh++) {
 				const t = q[qh];
 				if (tro[t] === 1) return { reached: true, n: qt };
-				const id = tiles[t];
-				if (id === 100) pg++; else if (id === 101) pb++;
+				if (!bound) { const id = tiles[t]; if (id === 100) pg++; else if (id === 101) pb++; }
 				const x = t % W, y = (t / W) | 0;
 				for (let dy = -1; dy <= 1; dy++) {
 					const yy = y + dy;
@@ -1343,6 +1346,13 @@ function doomOf(L) {
 	 *  cache miss is "not doomed": the caller's time budget) */
 	const test = (sim, tile, allow = true) => {
 		const rc = !kills ? -1 : sim.checkpoint.x >= 0 ? sim.checkpoint.y * W + sim.checkpoint.x : -2;
+		// (the COARSE test first: keyed by the counts and the respawn alone, its potential every coin of the level; a doomed
+		// one holds for every collected set (Booty Return: a state per collected set made 88 k floods in 300 s, 11.5 M
+		// tests skipped by the budget); one that is not doomed says nothing about the collected set: the fine test then)
+		const kc = (sim.coins * 4096 + sim.blue_coins) * 2097152 + rc + 3;
+		const cl = ccache.get(kc);
+		let cfree = false;
+		if (cl !== undefined) for (const e of cl) if ((e.bits[tile >> 3] & (1 << (tile & 7))) !== 0) { if (e.doomed) { S.hits++; return true; } cfree = true; break; }
 		const k = keyOf(sim, rc);
 		let list = cache.get(k);
 		if (list !== undefined) {
@@ -1351,22 +1361,32 @@ function doomOf(L) {
 		if (!allow) { S.skipped++; return false; }
 		const f0 = performance.now();
 		const seeds = rc === -1 ? [tile] : rc === -2 ? [tile, ...spawns] : [tile, rc];
+		const nb = (N + 7) >> 3;
+		const keep = (map, key, r, e) => {
+			if (bytes + nb > DOOM_CACHE_BYTES) return;
+			const bits = new Uint8Array(nb), nn = r.reached ? r.n : r.n0;
+			for (let i = 0; i < nn; i++) { const t = q[i]; bits[t >> 3] |= 1 << (t & 7); }
+			let li = map.get(key);
+			if (li === undefined) map.set(key, li = []);
+			if (li.length >= DOOM_PER_KEY) { bytes -= li.shift().bits.length; }
+			e.bits = bits; li.push(e);
+			bytes += nb; S.bytes = bytes;
+		};
+		if (!cfree && (gGates || bGates)) {
+			let rc0 = null;
+			for (const lev of LEVS) { rc0 = flood(sim, seeds, sim.coins, sim.blue_coins, lev, true); if (!rc0.reached) break; }
+			S.coarse++;
+			keep(ccache, kc, rc0, { doomed: !rc0.reached });
+			if (!rc0.reached) { S.floods++; S.doomed++; S.ms += performance.now() - f0; return true; }
+		}
 		// (a colour with gates by level, each a relaxation of its own: doomed when either has no way; no gates: gold's alone)
 		let r = null;
 		for (const lev of LEVS) { r = flood(sim, seeds, sim.coins, sim.blue_coins, lev); if (!r.reached) break; }
 		S.floods++;
 		if (!r.reached) S.doomed++;
-		const nb = (N + 7) >> 3;
-		if (bytes + nb <= DOOM_CACHE_BYTES) {
-			// (the cache: a doomed flood's tiles reached at the count held (a state there has no more way than this one), a
-			// flood that reached the trophy all its tiles (a state there taken as not doomed: the safe side))
-			const bits = new Uint8Array(nb), nn = r.reached ? r.n : r.n0;
-			for (let i = 0; i < nn; i++) { const t = q[i]; bits[t >> 3] |= 1 << (t & 7); }
-			if (list === undefined) cache.set(k, list = []);
-			if (list.length >= DOOM_PER_KEY) { bytes -= list.shift().bits.length; }
-			list.push({ c: sim.coins, b: sim.blue_coins, bits, doomed: !r.reached });
-			bytes += nb; S.bytes = bytes;
-		}
+		// (the cache: a doomed flood's tiles reached at the count held (a state there has no more way than this one), a
+		// flood that reached the trophy all its tiles (a state there taken as not doomed: the safe side))
+		keep(cache, k, r, { c: sim.coins, b: sim.blue_coins, doomed: !r.reached });
 		S.ms += performance.now() - f0;
 		return !r.reached;
 	};
