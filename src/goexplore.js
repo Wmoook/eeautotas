@@ -174,6 +174,12 @@
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--jumpP=0 (the CPU runs: 0 = one of the 18 options, jump in half; p = jump with p, --jumpNear=0.75 on the
 //        ground by a wall or a gap the way it goes)]
+//        [--prior=<model.json> (LEARNED MOVES, OFF by default: src/prior.js's input prior P(input | the ball's context, the
+//        last input and its hold) learned from finished routes; --priorP=0.5 of the CPU runs draw every tick from it,
+//        --priorEps=0.02 of each draw one of the 18 (0.1 made the runs flip every ~4 ticks: 31 changes in 120 ticks vs the
+//        sticky 17, and no gain); --priorMode=0: every tick's input from the model, 1: the sticky
+//        timing (--keep) and the model's choice of each new input (an input other than the last); the other runs as
+//        before; without it no draw changes)]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
 //        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
@@ -281,6 +287,7 @@ const EL = require('./eelvl.js');
 const RF = require('./reach.js');
 const SF = require('./steer.js');
 const TMD = require('./timed.js');
+const PR = require('./prior.js');
 const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
@@ -317,7 +324,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
@@ -376,7 +383,7 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', ...GPU_STRINGS]);
 // --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
 // random runs' batches take their run length and keep probability from these classes in turn, each class the same share
 // of the GPU's simulated ticks (times its weight): the next batch goes to the class furthest below its share, from the
@@ -473,7 +480,7 @@ const B_SATZ = 48;
 const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '', prior: '' });
 	const given = new Set();
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
@@ -2042,6 +2049,26 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		}
 		return h | v | (rnd() < p ? 1 : 0);
 	};
+	// LEARNED MOVES (--prior=<model.json>, off by default; src/prior.js): --priorP of the runs draw every tick's input
+	// from the model's P(input | the ball's context, the last input and how long it was held) (with --priorEps of each
+	// draw one of the 18), starting from the pick's last input; the other runs as before. Without --prior no draw
+	// changes: the same seed makes the same search
+	const PRI = a.prior ? PR.policyOf(a.prior, { eps: a.priorEps }) : null;
+	let priorRuns = 0;
+	/** the last input of path node q and how many ticks it was held (at most 64), for a prior run's start */
+	const lastHeld = (q, out) => {
+		while (q !== null && q.n === 0) q = q.up;
+		if (q === null) { out[0] = 0; out[1] = 1; return; }
+		const m = PR.canon(q.blk.b[q.o + q.n - 1]);
+		let h = 0;
+		for (let p = q; p !== null && h < 64; p = p.up) {
+			let k = p.o + p.n - 1;
+			while (k >= p.o && h < 64 && PR.canon(p.blk.b[k]) === m) { k--; h++; }
+			if (k >= p.o) break;
+		}
+		out[0] = m; out[1] = Math.max(1, h);
+	};
+	const lh = [0, 1];
 	const coarse = a.cells === 'coarse';
 	const disc = coarse ? null : discreteOf(L);
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
@@ -2621,7 +2648,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
-		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, visTiles: nVis, maxCoins },
+		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
 	const sendNear = () => {
@@ -3358,12 +3385,24 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
 				const o = r * a.roll;
-				let m = draw();
+				// (a prior run: its inputs from the model, from the pick's last input; see LEARNED MOVES)
+				const pri = PRI !== null && rnd() < a.priorP;
+				let m = 0, pm = 0, ph = 1;
+				if (pri) {
+					priorRuns++; lastHeld(up, lh); pm = lh[0]; ph = lh[1];
+					// (--priorMode=1: the first input a switch from the pick's last one, as the sticky rule draws a new one)
+					if (a.priorMode === 1) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; pm = m; }
+				} else m = draw();
 				let room = e.room, rcPrev = e.rc;
 				for (let s = 0; s < a.roll; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
-					if (rnd() >= a.keep) m = draw();
+					if (pri) {
+						// (mode 0: every tick's input from the model; mode 1: the sticky timing (--keep), the model's choice of the new input)
+						if (a.priorMode === 1) { if (rnd() >= a.keep) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; } else ph++; }
+						else { m = PRI.draw(sim, pm, ph, rnd); if (m === pm) ph++; else ph = 1; }
+						pm = m;
+					} else if (rnd() >= a.keep) m = draw();
 					buf[o + s] = m;
 					E.applyMask(inp, m);
 					sim.tick(inp);
@@ -3445,7 +3484,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	sendNear();
 	E.flushTicks();
 	if (typeof global.gc === 'function') global.gc();   // (node --expose-gc: the done event's heapMB is what the heap holds)
-	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000 }));
+	// (observation only: the tiles of the archive's cells at the end, a bit per tile, for the done event's "tiles")
+	const tileBits = new Uint8Array(N);
+	for (const c of cells.values()) if (c.tile >= 0 && c.tile < N) tileBits[c.tile] = 1;
+	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000, tileBits }));
 }
 
 // ---------------------------------------------------------------- random runs on the GPU (--gpu=1)
@@ -4070,6 +4112,8 @@ function workerMain() {
 async function main() {
 	let a;
 	try { a = parseArgs(process.argv.slice(2)); } catch (e) { console.log(JSON.stringify({ error: e.message })); process.exitCode = 2; return; }
+	// (--prior: the model is read once here, so a bad file fails at the start, not in every worker)
+	if (a.prior) { try { PR.readModel(a.prior); } catch (e) { console.log(JSON.stringify({ error: `--prior: ${e.message}` })); process.exitCode = 2; return; } }
 	let L;
 	try { L = levelOf(a); } catch (e) { console.log(JSON.stringify({ error: `cannot read the level: ${e.message}` })); process.exitCode = 2; return; }
 	// the memory budget (for the workers too): the machine's memory, what is free, what the other searches on it claim (the
@@ -4505,8 +4549,15 @@ async function main() {
 	const tk = total('ticks'), secs = (Date.now() - t0) / 1000;
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
+	// (the tiles some worker's archive holds a cell in at the end; the prior's runs: observation only)
+	let tiles = 0;
+	{
+		const u = new Uint8Array(L.width * L.height);
+		for (const d of dones.values()) if (d.tileBits) for (let i = 0; i < u.length && i < d.tileBits.length; i++) u[i] |= d.tileBits[i];
+		for (let i = 0; i < u.length; i++) tiles += u[i];
+	}
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...frontierNow(), ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
