@@ -49,5 +49,26 @@ ok(ED.rollsDryAfter(2, false, 7, 7) === 2, 'dry: no batch completed in the slice
 ok(ED.rollsDryAfter(undefined, false, 0, 0) === 0 && ED.rollsDryAfter(undefined, false, 1, 0) === 1, 'dry: from none');
 ok(ED.rollsDryAfter(4, false, 9, 7) === 4, 'dry: at most ROLLS_DRY_MAX');
 ok(ED.rollsDryAfter(2, false, 7, 7, false) === 3, 'dry: per slice (EEAT_ROLLSIZE=0) every slice judged, as before');
+// (the time to go once a route is known, --rollsAstar (n3-slow-first-route-hunt): head A by cost + tick / kappa, kappa =
+// the route's pace; no bound (before any route) or no finite start cost: 0 = the cost alone, as before)
+ok(GX.astarKappa(100000, 100000, 320.4) === 0, 'astar: no bound before any route (maxT = depth): kappa 0, head A as before');
+ok(Math.abs(GX.astarKappa(19666, 100000, 320.4) - 19667 / 320.4) < 1e-9, 'astar: a route of 19,667 ticks from 320.4 tiles: kappa = its pace (61.4 ticks a tile)');
+ok(GX.astarKappa(5000, 100000, 0) === 0 && GX.astarKappa(5000, 100000, -1) === 0 && GX.astarKappa(5000, 100000, 1e4) === 0, 'astar: no finite start cost: 0');
+{
+	// (EXCrew Trolled Minis, seed 1 of main: its first route's detour through the middle's false near vs the 6.9 k way
+	// up the right edge, from the reach field along both runs (src/out/n3/slow-first-route-hunt/fcurve.txt))
+	const kp = GX.astarKappa(19666, 100000, 320.4), f = (rc, t, k) => rc + (k > 0 ? t / k : 0);
+	const edge = [222, 4000], detour = [208, 6000], trap = [172, 9000];
+	ok(f(detour[0], detour[1], 0) < f(edge[0], edge[1], 0) && f(trap[0], trap[1], 0) < f(edge[0], edge[1], 0), 'astar: before a route the false near comes first (cost alone)');
+	ok(f(edge[0], edge[1], kp) < f(detour[0], detour[1], kp) && f(edge[0], edge[1], kp) < f(trap[0], trap[1], kp), 'astar: with the route\'s pace the cell that got there early comes first');
+}
+{
+	const a1 = GX.parseArgs(['x.eelvl', '--gpu=1']), a0 = GX.parseArgs(['x.eelvl', '--gpu=1', '--rollsAstar=0']);
+	ok(a1.rollsAstar === 1 && a0.rollsAstar === 0, 'astar: on by default, --rollsAstar=0 off');
+	const cp = require('child_process');
+	const envOff = cp.execFileSync(process.execPath, ['-e', 'console.log(require("./src/goexplore.js").parseArgs(["x.eelvl"]).rollsAstar)'],
+		{ cwd: require('path').join(__dirname, '..'), env: Object.assign({}, process.env, { EEAT_ROLLS_ASTAR: '0' }) }).toString().trim();
+	ok(envOff === '0', 'astar: EEAT_ROLLS_ASTAR=0 turns it off');
+}
 console.log(`${n - fails} / ${n} passed`);
 process.exitCode = fails ? 1 : 0;
