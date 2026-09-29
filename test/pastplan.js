@@ -77,6 +77,53 @@ const s0 = stateAt();
 const v0 = SF.steerAt(Object.assign({}, sp, { dpFirst: true }), s0), v2 = SF.steerAt(Object.assign({}, sp, { dpFirst: true }), s2);
 check('the plan past its count with the DP first: a value at the start, falling as the coins come', Number.isFinite(v0) && Number.isFinite(v2) && v2 < v0, `${v0} -> ${v2}`);
 
+// The coin plan of a steer field that models no coins (the zero count; night 3's coin stall: MKco Mushroom Cup, The 7
+// Depths of Hell, Mr Nutty's Wild World, ...): the same level without the coin doors at x 8 and 14, so the walk plan
+// passes no shut coin door (the shaft's gates are open at 0 coins, and a gate the model leaves out is open): no coins
+// modelled, no DP, while the closet's door reads 3 coins (the full count 3)
+const c0 = c.filter(([x, y, id]) => !(id === 43 && (x === 8 || x === 14)));
+const buf0 = levelOfCells(W, H, c0).eelvl;
+const L0 = prep(buf0);
+console.log('\n== the zero count: a field that models no coins, and its coin plan');
+const st0 = SF.buildSteer(L0);
+check('the field models no coins (no DP), while a coin door reads 3 (the full count 3)', !st0.dp && st0.info.features.indexOf('coins') < 0 && st0.info.fullT === 3,
+	JSON.stringify({ features: st0.info.features, dp: st0.info.dp, fullT: st0.info.fullT }));
+const sp0 = SF.buildSteer(L0, { coinT: 3, features: ['coins'] });
+const sim00 = new E.EESim(L0);
+sim00.reset();
+check('the coin plan (the coins modelled from the start, buildSteer opts.features): the DP over the 3 coins, a value at the start with the DP first',
+	sp0.dp && sp0.dp.T === 3 && sp0.dp.n === 3 && sp0.info.features.indexOf('coins') >= 0 && Number.isFinite(SF.steerAt(Object.assign({}, sp0, { dpFirst: true }), sim00)),
+	JSON.stringify({ features: sp0.info.features, dp: sp0.info.dp, start: sp0.info.start }));
+const spCap = SF.buildSteer(L0, { coinT: 3, features: ['coins'], maxLayers: 1 });
+check('... a feature asked for is modelled only within the layer cap (maxLayers 1: no coins, no DP, said in info.over)', !spCap.dp && spCap.info.features.indexOf('coins') < 0 && /coins/.test(spCap.info.over || ''),
+	JSON.stringify({ features: spCap.info.features, over: spCap.info.over }));
+
+/** a stand-in for the CPU search (src/goexplore.js) that never gets nearer: it logs every stdin line with its time (ms
+ *  since it started) and, after a switch ("steer <file>"), sends a closest attempt of the new measure (sg) */
+const stubOf = (dir, log) => {
+	const f = path.join(dir, `stub_${path.basename(log, '.log')}.js`);
+	fs.writeFileSync(f, `'use strict';
+const fs = require('fs'), t0 = Date.now();
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 50, found: 0, refined: 0, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let sb = '', sg = 0;
+process.stdin.on('data', (d) => {
+	sb += d;
+	for (let k; (k = sb.indexOf('\\n')) >= 0;) {
+		const line = sb.slice(0, k); sb = sb.slice(k + 1);
+		fs.appendFileSync(${JSON.stringify(log)}, (Date.now() - t0) + ' ' + line + '\\n');
+		if (line.startsWith('steerd ') || line.startsWith('steer ')) { sg++; say({ ev: 'steer', sec: 1 }); say({ ev: 'closest', dist: 30, tick: 14, inputs: '4'.repeat(14), sg }); }
+		if (line === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`);
+	return f;
+};
+const linesOf = (log) => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => { const k = l.indexOf(' '); return { t: +l.slice(0, k), line: l.slice(k + 1) }; }) : []);
+
 console.log('\n== goexplore.js: `steer <file>` on stdin');
 (async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pastplan-'));
@@ -169,6 +216,52 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	check('the running search has the plan past its count (T 3, the plan\'s own 2) and says so', !!(es.steer && es.steer.past && es.steer.past.T === 3 && es.steer.past.planT === 2 && ready),
 		`${JSON.stringify(es.steer && es.steer.past)}; ${ready || 'no note'}`);
 	if (ED.state().running) { ED.stop(); for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 50)); }
+	const stopEd = async () => { if (ED.state().running) { ED.stop(); for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 50)); } };
+	const WAIT = 2;   // (the breaker's first wait, s: test.breakWait)
+
+	console.log('\n== the editor: the coin stall (a CPU search that never gets nearer; the rooms hold fewer coins than the plan\'s count)');
+	// (the plan's own count 2 < the full 3: the plan past its count waits for 2 coins held; the rooms hold 0, so at the first
+	// stall the search turns to its own field's DP first: "steer <its own file>", once, not before the stall)
+	{
+		const log = path.join(HOME, 'stall.log'), stub = stubOf(HOME, log);
+		const t0 = Date.now();
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 20, workers: 1 }, { available: false, why: 'test: no GPU' }, { cpu: [process.execPath, stub], breakWait: [WAIT] });
+		let es2 = ED.state();
+		for (; es2.running && Date.now() - t0 < 20000 && !(es2.steer && es2.steer.dpFirst && linesOf(log).length); es2 = ED.state()) await new Promise((r) => setTimeout(r, 100));
+		await new Promise((r) => setTimeout(r, 1500));
+		es2 = ED.state();
+		const L2 = linesOf(log), sw = L2.filter((x) => x.line.startsWith('steer '));
+		const note2 = (es2.log || []).find((x) => /the coin stall: no progress for 2 s and the rooms hold 0 of the plan's 2 coins/.test(x));
+		check('at the first stall the CPU search turns to its OWN field with the DP first ("steer <its file>", once, not the plan past its count; after the wait)',
+			sw.length === 1 && !/_past\.bin$/.test(sw[0].line) && /\.bin$/.test(sw[0].line) && sw[0].t >= WAIT * 1000 - 500 && !L2.some((x) => x.line.startsWith('steerd ')),
+			L2.map((x) => `${x.t} ${x.line.slice(0, 12)}...${x.line.slice(-12)}`).join(' | '));
+		check('... says so (the note, S.steer.dpFirst {held 0, T 2}) and the nearest attempt is the new measure\'s (the stand-in\'s sg 1 closest)',
+			!!note2 && es2.steer.dpFirst && es2.steer.dpFirst.held === 0 && es2.steer.dpFirst.T === 2 && es2.closest && es2.closest.dist === 30,
+			`${note2 || 'no note'}; ${JSON.stringify(es2.steer && es2.steer.dpFirst)}; closest ${es2.closest && es2.closest.dist}`);
+		await stopEd();
+	}
+
+	console.log('\n== the editor: the coin plan of a field that models no coins (the zero count)');
+	// (no coin DP and a field of one layer: the steer worker builds the coin plan (kind 'coins', planT 0); at the first stall
+	// the plan's file becomes the search's field (a late one: "steerd") and the switch follows ("steer": the DP first))
+	{
+		const log = path.join(HOME, 'coins.log'), stub = stubOf(HOME, log);
+		const t0 = Date.now();
+		ED.start({ eelvlB64: buf0.toString('base64'), seconds: 25, workers: 1 }, { available: false, why: 'test: no GPU' }, { cpu: [process.execPath, stub], breakWait: [WAIT] });
+		let es3 = ED.state();
+		for (; es3.running && Date.now() - t0 < 25000 && !(linesOf(log).filter((x) => x.line.startsWith('steer ')).length); es3 = ED.state()) await new Promise((r) => setTimeout(r, 100));
+		await new Promise((r) => setTimeout(r, 1000));
+		es3 = ED.state();
+		const L3 = linesOf(log), ld = L3.findIndex((x) => x.line.startsWith('steerd ')), ls = L3.findIndex((x) => x.line.startsWith('steer '));
+		const ready3 = (es3.log || []).find((x) => /the coin plan is ready \(the steer field models no coins; the coin DP over 3 of 3 coins/.test(x));
+		const note3 = (es3.log || []).find((x) => /the coin plan: no progress for 2 s with 0 coins held and a steer field that models no coins: the search turns to the coin plan over 3 coins/.test(x));
+		check('the steer worker builds the coin plan (T 3 of 3, the plan\'s count 0) and the search says so', !!ready3 && es3.steer && es3.steer.past && es3.steer.past.T === 3 && es3.steer.past.planT === 0,
+			`${ready3 || 'no note'}; ${JSON.stringify(es3.steer && es3.steer.past)}`);
+		check('... at the first stall its file becomes the search\'s field ("steerd <plan>"), then the switch ("steer <plan>": the DP first), after the wait', ld >= 0 && ls > ld &&
+			/_past\.bin$/.test(L3[ld].line) && L3[ls].line.slice(6) === L3[ld].line.slice(7) && L3[ld].t >= WAIT * 1000 - 500 && !!note3 && es3.steer.past.on === true,
+			`${L3.map((x) => `${x.t} ${x.line.slice(0, 8)}...${x.line.slice(-12)}`).join(' | ')}; ${note3 || 'no note'}`);
+		await stopEd();
+	}
 	try { fs.rmSync(HOME, { recursive: true, force: true }); } catch (e) { /* temp */ }
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
