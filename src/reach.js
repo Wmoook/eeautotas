@@ -682,7 +682,9 @@ function reachField(level, opts) {
 		invArr[key] = tab;
 		return tab;
 	}
-	// ---- the backward label-setting search in cost buckets (integer costs; edges cost 0, 5 or 7)
+	// ---- the side-arrow and slot prices (ordering only: the -1 set is the plain model's, only the prices of moves change)
+	const SA = sideArrowPrices(level, opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy });
+	// ---- the backward label-setting search in cost buckets (integer costs; edges cost 0, 5 or 7, a priced move more)
 	let seeds = [];
 	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
 	else for (let i = 0; i < N; i++) if (trophy(i)) seeds.push([i, 0]);
@@ -697,9 +699,9 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
-	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD,
+	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
 		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
@@ -717,7 +719,8 @@ function reachField(level, opts) {
 			const t2 = y2 * W + x2;
 			if (!passable(t2) && !(deaths && cls[t2] === DEADLY)) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
-			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, dx && dy ? 7 : 5));
+			const add = (dx && dy ? 7 : 5) + (SA.pen !== null && SA.pen[t * 8 + di] !== 0 ? SA.cost : 0);
+			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, add));
 		}
 	};
 
@@ -781,9 +784,12 @@ function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
 		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
 	const K1 = S.KF + 1;
-	const NB = 8;
+	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
+	// price, its buckets made when first used)
+	const pen = S.pen || null, penCost = pen !== null ? S.penCost : 0;
+	const NB = pen !== null ? 1 << bitLen(penCost + 8) : 8;
 	const bk = [], bn = new Int32Array(NB);
-	for (let b = 0; b < NB; b++) bk.push(new Int32Array(4096));
+	for (let b = 0; b < NB; b++) bk.push(NB === 8 ? new Int32Array(4096) : null);
 	let queued = 0, cur = 0;
 	// the lowest level pushed per slot and its cost: a later push at a level and cost no lower is dominated
 	const pendL = new Int16Array(front.length).fill(32767), pendC = new Int32Array(front.length);
@@ -795,6 +801,7 @@ function labelSearch(S) {
 		if (i < pendL[s]) { pendL[s] = i; pendC[s] = c; }
 		const b = c & (NB - 1);
 		let a = bk[b];
+		if (a === null) bk[b] = a = new Int32Array(256);
 		if (bn[b] === a.length) { const a2 = new Int32Array(a.length * 2); a2.set(a); bk[b] = a = a2; }
 		a[bn[b]++] = t * 2048 + ty * 256 + i;
 		queued++;
@@ -858,7 +865,7 @@ function labelSearch(S) {
 				const pt = pid[t];
 				let tab = invArr[(pt * nP + pt2) * 8 + di];
 				if (tab === null) tab = invTable(pt, pt2, di);
-				const step = cur + (dx !== 0 && dy !== 0 ? 7 : 5);
+				const step = cur + (dx !== 0 && dy !== 0 ? 7 : 5) + (pen !== null && pen[t * 8 + di] !== 0 ? penCost : 0);
 				for (let ty = 0; ty < 5; ty++) { const lm = tab[o + ty]; if (lm !== NONE8) push(t, ty, lm - LO[ty], step); }
 			}
 		}
@@ -868,6 +875,149 @@ function labelSearch(S) {
 	return { labels, maxFin };
 }
 
+/**
+ * The side-arrow and slot prices (n3 side-arrow-sideways, 2026-09-29): ORDERING only. The model keeps no horizontal
+ * speed: it crosses side arrows against their push at any speed and enters a 1-tile-tall slot sideways from any height.
+ * Two moves the engine makes only with what the model does not track get a price (`SA_COST` fifths more), never a cut:
+ * the edge set is the plain model's, so the -1 set (the proof) is the same, and every finite cost stays finite.
+ * (1) Arrows: a side arrow (1 / 411 left, 3 / 413 right, by the current tile) under horizontal gravity takes the input's
+ * hold on x away, so a ball moving against its push only coasts on the speed it carried in, decelerating like a jump.
+ * The engine's crossing table (a runway, k opposing arrows in a row, R held; src/out/n3/side-arrow-sideways crosstab.js,
+ * test/reach.js K): the least entry speed that carries the centre past k tiles is 1.05 / 3.15 / 4.55 / 5.65 / 6.75 /
+ * 7.5 px/tick for k = 1..6; the running speed tends to 6.78 and reaches 6.7 only after ~60 tiles of runway (Sentinel
+ * Ravines' 34-tile runway: 6.15), so at running speed at most `SA_KRUN` (4) tiles are crossed. The price: a move with a
+ * horizontal part against the push FROM a tile with 5+ opposing tiles still ahead in its row (itself included) TO a tile
+ * with fewer (or out of the run): every crossing of 5+ tiles makes exactly one such move wherever the ball joined the
+ * run (from the side, or dropped in from above with its speed), and a ball that joined 4 or fewer from the end pays
+ * nothing. Exempt (the ball may carry more): runs that a fast flight from a speed source reaches (a side boost of the
+ * move's direction: 16 px/tick, decaying toward 6.78, > 7.5 for ~75 tiles held; a portal exit: up to 16 x 1.42; an
+ * arrow pushing the move's way: up to 13.55): its cone goes column by column the move's way, a row up or down at most
+ * per column, through tiles that are not walls or killers, `SA_FEED_X` (80) columns (Crypts of Anubis: its route crosses
+ * a 5-run at 8.9 px/tick, 41 columns and 9 rows past a side boost; a box of 40 x 10 missed it and priced every way).
+ * (2) Slots: a tile with walls above and below fits the 16-px box only at py = 16 y exactly, which a ball under
+ * vertical gravity has only on a floor (no auto-align: eesim.js aligns y only while no gravity pulls on y). The price: a
+ * move with a horizontal part into such a slot from a tile that is not one (the ball enters from outside), unless the
+ * source is a field that lets the ball hold its height (dots / side arrows / side boosts, climbables, liquids) or the
+ * move is level and the source has a floor under it; never into a trophy.
+ * opts.sideArrow (default on; EEAT_SIDEARROW=0 off = the plain model's prices), off for fields with opts.maxCost (a
+ * price past the cap would cut). Returns {pen: Uint8Array over tile x 8 directions (1 = priced) or null, cost, info}.
+ */
+const SA_COST = 12500;   // fifths (2,500 tiles): behind a real way (a death is 1,638 tiles) and past the doctors' detours (<= 1,882)
+const SA_KRUN = 4, SA_FEED_X = 80;
+function sideArrowPrices(level, opts, M) {
+	const env = process.env.EEAT_SIDEARROW;
+	const mode = opts.sideArrow !== undefined ? (opts.sideArrow === true ? 'arrows' : opts.sideArrow || 'off') : env === '0' ? 'off' : env === 'all' ? 'all' : 'arrows';
+	const on = mode !== 'off';
+	const info = { on: on && !(opts.maxCost >= 0), mode, arrows: 0, runs: 0, fed: 0, slots: 0 };
+	if (!info.on) return { pen: null, cost: 0, info };
+	const { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy } = M;
+	const gmx = level.gMox, nG = gmx ? gmx.length : 0;
+	const push = new Int8Array(N);   // the side push of the tile (its current tile's): -1 left, 1 right
+	let anyPush = false;
+	for (let i = 0; i < N; i++) {
+		if (cls[i] !== DOTS) continue;
+		const j = curOf[i], id = j < 0 ? -1 : fg[j];
+		if (id >= 0 && id < nG && gmx[id] !== 0) { push[i] = gmx[id] < 0 ? -1 : 1; anyPush = true; }
+	}
+	const slot = new Uint8Array(N);
+	let anySlot = false;
+	if (mode === 'all') for (let i = W; i < N - W; i++) if (passable(i) && cls[i - W] === WALL && cls[i + W] === WALL && !trophy(i)) { slot[i] = 1; anySlot = true; }
+	if (!anyPush && !anySlot) return { pen: null, cost: 0, info };
+	const pen = new Uint8Array(N * 8);
+	const DXS = [-1, 0, 1, -1, 1, -1, 0, 1], DYS = [-1, -1, -1, 0, 0, 1, 1, 1];
+	if (anyPush) {
+		// rem[d][i]: opposing tiles from i on in direction d (0: right, against a left push; 1: left, against a right push)
+		const rem = [new Uint16Array(N), new Uint16Array(N)], fed = [new Uint8Array(N), new Uint8Array(N)];
+		const exitT = new Uint8Array(N);
+		for (const e of srcOf.keys()) exitT[e] = 1;
+		const source = (i, dx) => exitT[i] === 1 || push[i] === dx || fg[i] === (dx > 0 ? 115 : 114);
+		// the fast flight's cone per direction: from every speed source, column by column the way it goes (a row up or down
+		// at most per column: a jump rises ~4 rows over ~12 columns at that speed), through tiles that are not walls or
+		// killers, at most SA_FEED_X columns (a boost's 16 px/tick decays to the 7.5 six tiles need in ~75 tiles, held)
+		const cone = [new Uint8Array(N).fill(255), new Uint8Array(N).fill(255)];
+		const flies = (i) => cls[i] !== WALL && cls[i] !== DEADLY;
+		for (const d of [0, 1]) {
+			const dx = d === 0 ? 1 : -1, cd = cone[d];
+			for (let i = 0; i < N; i++) if (flies(i) && source(i, dx)) cd[i] = 0;
+			for (let s = 0; s < W - 1; s++) {
+				const x = d === 0 ? s : W - 1 - s, x2 = x + dx;
+				for (let y = 0; y < H; y++) {
+					const c0 = cd[y * W + x];
+					if (c0 >= SA_FEED_X) continue;
+					for (let dy = -1; dy <= 1; dy++) {
+						const y2 = y + dy;
+						if (y2 < 0 || y2 >= H) continue;
+						const j = y2 * W + x2;
+						if (flies(j) && c0 + 1 < cd[j]) cd[j] = c0 + 1;
+					}
+				}
+			}
+		}
+		for (let y = 0; y < H; y++) {
+			for (let x = W - 1; x >= 0; x--) { const i = y * W + x; rem[0][i] = push[i] === -1 ? 1 + (x + 1 < W ? rem[0][i + 1] : 0) : 0; }
+			for (let x = 0; x < W; x++) { const i = y * W + x; rem[1][i] = push[i] === 1 ? 1 + (x > 0 ? rem[1][i - 1] : 0) : 0; }
+			// the runs of SA_KRUN + 1 or more: fed when the fast flight's cone reaches a tile of them (the price is on the
+			// move out of the run's end: a ball in the run with speed anywhere may make it)
+			for (const d of [0, 1]) {
+				const dx = d === 0 ? 1 : -1;
+				for (let x = 0; x < W; x++) {
+					const i = y * W + x;
+					const start = d === 0 ? (x === 0 || push[i - 1] !== -1) : (x === W - 1 || push[i + 1] !== 1);
+					if (!start || rem[d][i] <= SA_KRUN) continue;
+					const len = rem[d][i];
+					info.runs++;
+					let f = false;
+					for (let k = 0; k < len && !f; k++) if (cone[d][i + dx * k] <= SA_FEED_X) f = true;
+					if (f) { info.fed++; for (let k = 0; k < len; k++) fed[d][i + dx * k] = 1; }
+				}
+			}
+		}
+		// (hard[d][i]: i is in a run of SA_KRUN + 1 or more opposing tiles of its row, not fed)
+		const hard = [new Uint8Array(N), new Uint8Array(N)];
+		for (let y = 0; y < H; y++) for (const d of [0, 1]) {
+			const dx = d === 0 ? 1 : -1;
+			for (let x = 0; x < W; x++) {
+				const i = y * W + x;
+				const start = d === 0 ? (x === 0 || push[i - 1] !== -1) : (x === W - 1 || push[i + 1] !== 1);
+				if (!start || rem[d][i] <= SA_KRUN || fed[d][i]) continue;
+				for (let k = 0; k < rem[d][i]; k++) hard[d][i + dx * k] = 1;
+			}
+		}
+		for (let t = 0; t < N; t++) {
+			if (push[t] === 0) continue;
+			const d = push[t] === -1 ? 0 : 1, dx = d === 0 ? 1 : -1;
+			if (!hard[d][t]) continue;
+			const x = t % W, y = (t / W) | 0;
+			for (let di = 0; di < 8; di++) {
+				if (DXS[di] !== dx) continue;
+				const x2 = x + dx, y2 = y + DYS[di];
+				if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
+				const t2 = y2 * W + x2;
+				if (hard[d][t2]) continue;   // (still in a hard run: the move out of it pays)
+				pen[t * 8 + di] = 1; info.arrows++;
+			}
+		}
+	}
+	if (anySlot) {
+		const yField = (c) => c === DOTS || c === CLIMB || c === WATER || c === MUD;
+		for (let t = 0; t < N; t++) {
+			if (!passable(t) || slot[t] || yField(cls[t])) continue;
+			const x = t % W, y = (t / W) | 0;
+			for (let di = 0; di < 8; di++) {
+				const dx = DXS[di], dy = DYS[di];
+				if (dx === 0) continue;
+				const x2 = x + dx, y2 = y + dy;
+				if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
+				const t2 = y2 * W + x2;
+				if (!slot[t2]) continue;
+				if (dy === 0 && isFloor(t + W)) continue;
+				if (!pen[t * 8 + di]) { pen[t * 8 + di] = 1; info.slots++; }
+			}
+		}
+	}
+	if (!info.arrows && !info.slots) return { pen: null, cost: 0, info };
+	return { pen, cost: SA_COST, info };
+}
 const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
 function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] < DEATH_COST && a[i] > m) m = a[i]; return Math.max(0, bitLen(m) - 12); }

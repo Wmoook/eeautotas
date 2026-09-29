@@ -235,6 +235,7 @@ function reachFp() {
 	if (!RF_FP) {
 		const h = crypto.createHash('sha1');
 		for (const f of ['reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
+		h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);   // (the side-arrow prices' knob: a flip never reads the other's file)
 		RF_FP = h.digest('hex').slice(0, 10);
 	}
 	return RF_FP;
@@ -568,6 +569,16 @@ const ROLLS_WAIT_MS = 2500, ROLLS_PROBE_TILES = 10000;
 // Infinity Pain the GPU engine does ~0.4 M ticks/s in the play area, where the rolls do not pay, and every other slice
 // was theirs)
 const ROLLS_DRY_MAX = 4;
+// (judged per completed batch (n3-roll-launch-sizing, 2026-09-29; EEAT_ROLLSIZE=0: every slice judged): a slice in which
+// no batch of theirs completed says nothing of their yield and leaves the wait as it is; before, the roll mix's long
+// batches (5 s of kernels each on The Flighty Slighty, eegpu roll's launch floor) spanned slices, and every slice that
+// ended mid-batch doubled the wait, up to a slice every 12-30 s)
+const ROLLS_DRY_BATCH = process.env.EEAT_ROLLSIZE !== '0';
+/** the random runs' dry count after their slice: 0 when it got nearer or found a room; else one more (at most
+ *  ROLLS_DRY_MAX) when a batch of theirs completed in it (batches > batches0; perBatch false: every slice), else as it
+ *  was */
+const rollsDryAfter = (dry, got, batches, batches0, perBatch = ROLLS_DRY_BATCH) =>
+	(got ? 0 : !perBatch || (batches || 0) > (batches0 || 0) ? Math.min(ROLLS_DRY_MAX, (dry || 0) + 1) : dry || 0);
 // the GPU strategies whose GPU memory is fixed once they run (the random runs' cell table, the beams' buffers): they may
 // take the GPU while the wall breaker's round has no GPU work of its own (schedule: its next process loading, a retry wait)
 const FIXED_MEM = new Set(['gorolls', 'goal', 'guide']);
@@ -650,12 +661,12 @@ function schedule() {
 	// (the random runs' slice that just ended: did it find anything? with the one search, their next wait follows it)
 	if (RW >= 0 && sched && sched.owner === RW && sched.rollsFrom && now - sched.since >= SLICE_MS) {
 		const q = S.strategies[RW], got = (q.bestAt || 0) > sched.since || (q.rooms || 0) > sched.rollsFrom.rooms;
-		q.dry = got ? 0 : Math.min(ROLLS_DRY_MAX, (q.dry || 0) + 1);
+		q.dry = rollsDryAfter(q.dry, got, q.batches, sched.rollsFrom.batches);
 		sched.rollsFrom = null;
 	}
 	const rollsWait = RW >= 0 && cur && cur.opts.bursts ? ROLLS_WAIT_MS * (1 << (S.strategies[RW].dry || 0)) : ROLLS_WAIT_MS;
 	if (RW >= 0 && gpu.includes(RW) && owner !== RW && !probeAlone && (owner < 0 || now - sched.since >= SLICE_MS) && now - (kids[RW].lastTurn || kids[RW].startedAt) >= rollsWait) {
-		sched = { owner: RW, since: now, slices: 1, lastOther: sched ? sched.lastOther : undefined, rollsFrom: { rooms: S.strategies[RW].rooms || 0 } };
+		sched = { owner: RW, since: now, slices: 1, lastOther: sched ? sched.lastOther : undefined, rollsFrom: { rooms: S.strategies[RW].rooms || 0, batches: S.strategies[RW].batches || 0 } };
 	} else if (probing) {
 		if (owner !== X && !rollsSlice) sched = { owner: X, since: now, slices: 1 };
 	} else if (owner < 0) {
@@ -1893,11 +1904,12 @@ function rollsTurn(cfg) {
 /** the GPU random runs' own measures when the rotation starts them again (the close handler's 'rotate' relaunch): a fresh
  *  archive, so they start over as an escape's do (escLaunch): the wait for their slices (dry: ROLLS_WAIT_MS x 2^dry, up to
  *  40 s, schedule), their nearest attempt (best / bestAt / bestTry: their attempts reach the one search only nearer than
- *  best, closer(); the old process's were fed already) and their rooms (a slice's yield, schedule); V.found, rollFlags,
- *  rollCfg and rollRuns stay (the rotation's review, 2026-09-29, non-blocking (1): the fresh runs waited up to 40 s for their
- *  first slice and fed nothing until past the old process's best). Returns V */
+ *  best, closer(); the old process's were fed already), their rooms and completed batches (a slice's yield, schedule,
+ *  rollsDryAfter: the new process counts its batches from 0); V.found, rollFlags, rollCfg and rollRuns stay (the
+ *  rotation's review, 2026-09-29, non-blocking (1): the fresh runs waited up to 40 s for their first slice and fed nothing
+ *  until past the old process's best). Returns V */
 function rollsFresh(V) {
-	return Object.assign(V, { error: null, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `again with ${V.rollCfg}`, dry: 0, best: undefined, bestAt: 0, bestTry: null, rooms: 0 });
+	return Object.assign(V, { error: null, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `again with ${V.rollCfg}`, dry: 0, best: undefined, bestAt: 0, bestTry: null, rooms: 0, batches: 0 });
 }
 /** the escape's process ended (how: its stop or end): the one search gets its workers back; after a stall of its own the
  *  next escape starts at once (escKick), else after the next stall */
@@ -2565,6 +2577,7 @@ function steerFp() {
 	if (steerFpMemo) return steerFpMemo;
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
+	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
@@ -2854,6 +2867,7 @@ function launch(n) {
 		}
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			if ((cpu || rolls) && Number.isFinite(ev.rooms)) V.rooms = ev.rooms;
+			if (rolls && Number.isFinite(ev.batches)) V.batches = ev.batches;   // (the random runs' completed batches: their dry slices)
 			if (cpu && Number.isFinite(ev.cpuS)) V.cpuS = ev.cpuS;   // (the CPU search's CPU seconds: a route's time per core-second)
 			Object.assign(V, { state: (cpu || rolls) && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
@@ -3859,6 +3873,6 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };

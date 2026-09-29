@@ -2221,11 +2221,11 @@ async function escapeSection() {
 	// (the GPU random runs started again by the rotation: their own measures start over, as an escape's (the rotation's
 	// soundness review, non-blocking (1)); the route, the configuration and the restart count stay)
 	{
-		const Vr = { key: 'gorolls', rolls: true, label: 'random runs (GPU)', error: 'x', state: 'running', dry: 4, best: 12.5, bestAt: 123, bestTry: { inputs: '44', ticks: 2, dist: 12.5 }, rooms: 57,
+		const Vr = { key: 'gorolls', rolls: true, label: 'random runs (GPU)', error: 'x', state: 'running', dry: 4, best: 12.5, bestAt: 123, bestTry: { inputs: '44', ticks: 2, dist: 12.5 }, rooms: 57, batches: 412,
 			layer: 9, states: 99, ticksPerSec: 5, found: null, rollFlags: ['--rollMix=40:0.85:1'], rollCfg: 'lr3', rollRuns: 2 };
 		const Rf = ED.rollsFresh(Vr);
-		check('the GPU random runs started again by the rotation: their slices\' wait (dry), nearest (best, its time and try), rooms and error start over; the configuration, its flags and the restart count stay',
-			Rf === Vr && Vr.dry === 0 && Vr.best === undefined && Vr.bestAt === 0 && Vr.bestTry === null && Vr.rooms === 0 && Vr.error === null && Vr.state === 'starting' &&
+		check('the GPU random runs started again by the rotation: their slices\' wait (dry), nearest (best, its time and try), rooms, completed batches and error start over; the configuration, its flags and the restart count stay',
+			Rf === Vr && Vr.dry === 0 && Vr.best === undefined && Vr.bestAt === 0 && Vr.bestTry === null && Vr.rooms === 0 && Vr.batches === 0 && Vr.error === null && Vr.state === 'starting' &&
 			Vr.layer === 0 && Vr.states === 0 && Vr.rollCfg === 'lr3' && Vr.rollRuns === 2 && Vr.rollFlags.join() === '--rollMix=40:0.85:1' && Vr.detail === 'again with lr3', JSON.stringify(Vr));
 	}
 	const rotX = ED.escRotOf('plain, --pA=0.2+--sample=4+--prefix=x+--workers=64, nosuch, longruns');

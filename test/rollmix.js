@@ -41,5 +41,13 @@ ok(GX.mixCostOf({}) === 0 && GX.mixCostOf({ kernelMs: -1 }) === 0, 'no time: 0')
 // (parseArgs keeps the mix the default)
 const a = GX.parseArgs(['x.eelvl', '--gpu=1']);
 ok(a.rollMix === '40:0.85,120:0.95,240:0.97', 'the default mix unchanged');
+// (the editor's dry slices of the random runs (editor.js rollsDryAfter): judged per completed batch; n3-roll-launch-sizing)
+const ED = require('../src/editor.js');
+ok(ED.rollsDryAfter(2, true, 7, 7) === 0, 'dry: a slice that got nearer or found a room starts over (no batch completed: still 0)');
+ok(ED.rollsDryAfter(2, false, 8, 7) === 3, 'dry: a batch completed and nothing found: one more');
+ok(ED.rollsDryAfter(2, false, 7, 7) === 2, 'dry: no batch completed in the slice: as it was');
+ok(ED.rollsDryAfter(undefined, false, 0, 0) === 0 && ED.rollsDryAfter(undefined, false, 1, 0) === 1, 'dry: from none');
+ok(ED.rollsDryAfter(4, false, 9, 7) === 4, 'dry: at most ROLLS_DRY_MAX');
+ok(ED.rollsDryAfter(2, false, 7, 7, false) === 3, 'dry: per slice (EEAT_ROLLSIZE=0) every slice judged, as before');
 console.log(`${n - fails} / ${n} passed`);
 process.exitCode = fails ? 1 : 0;
