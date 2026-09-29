@@ -26,6 +26,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const GPU = process.argv.includes('--gpu');
+// --only=judge,rules,editor,cpu,chain: those sections alone
+const ONLY = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7).split(',').filter(Boolean);
+const want = (k) => !ONLY.length || ONLY.includes(k);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-deaths-'));
 process.env.EEAT_HOME = HOME;
 process.env.EEAT_PROOF = '0';
@@ -223,6 +226,47 @@ function sectionCpu() {
 		`${routesOf(p1).length} routes`);
 }
 
+// the death-chain order (goexplore.js --dord=2, the default; reach.js deathChainField): the checkpoints' standing values
+// to a fixpoint, the walk to the nearest killer, and a state ordered by the lesser of its own way and a death now; an
+// order only (the RCH3 field and its -1 untouched)
+function sectionChain() {
+	section('the death-chain order (--dord=2)');
+	const RF = require('../src/reach.js');
+	const pit = levelFile('pit_chain', PIT), L = pit.level, W = L.width;
+	const f0 = RF.reachField(L, { deaths: false }), ch = RF.deathChainField(L);
+	const at = (f, x, y) => RF.costAt(f, x * 16, y * 16, 0);
+	check('the pit: the chain field stable, the checkpoint\'s standing value the death-free one, the shaft\'s bottom still cut off (no death edges in it)',
+		ch.chain.stable && ch.chain.cps === 1 && ch.chain.finite === 1 && at(ch, 4, 1) === at(f0, 4, 1) && at(ch, 11, 8) === -1 && at(f0, 11, 8) === -1,
+		`${JSON.stringify(ch.chain)}; C ${at(ch, 4, 1)} / ${at(f0, 4, 1)}, coin ${at(ch, 11, 8)}`);
+	check('the walk to the nearest killer: 0 on the spike, 3 tiles from the coin, none walkable from inside a wall',
+		ch.toDeath[8 * W + 14] === 0 && ch.toDeath[8 * W + 11] === 15 && ch.toDeath[5 * W + 8] === RF.CUT, `spike ${ch.toDeath[8 * W + 14]}, coin ${ch.toDeath[8 * W + 11]}`);
+	let refused = false;
+	try { RF.writeReachFile(ch, path.join(HOME, 'chain.rch3'), 'x'); } catch (e) { refused = true; }
+	check('the chain field is never an RCH3 file (an order, no proof: toGoals)', refused && ch.toGoals === true);
+	// the long way back: the pit's bottom has a death-free way (a dot column 50 tiles on, the upper corridor, another
+	// dot column: ~127 tiles) where a death back to the start costs ~40: the order takes the lesser, every route replays
+	const G = Array.from({ length: 16 }, () => Array(64).fill('#'));
+	const air = (x, y) => { G[y][x] = '.'; };
+	for (let x = 1; x <= 12; x++) air(x, 6);
+	for (let y = 7; y <= 13; y++) { air(1, y); air(2, y); }
+	for (let x = 1; x <= 62; x++) air(x, 13);
+	for (let x = 6; x <= 61; x++) air(x, 1);
+	for (let y = 1; y <= 5; y++) G[y][6] = 'D';
+	for (let y = 1; y <= 12; y++) G[y][61] = 'D';
+	G[6][1] = 'S'; G[6][3] = 'C'; G[6][10] = 'd'; G[6][12] = 'T'; G[13][10] = 'o'; G[14][5] = 'x';
+	ID.D = [4];
+	const lp = levelFile('longpit', G.map((r) => r.join('')));
+	const lf0 = RF.reachField(lp.level, { deaths: false });
+	const runs = [1, 2].map((dord) => gox(lp.file, ['--workers=1', '--cells=coarse', `--dord=${dord}`, '--maxTicks=4000000', '--seconds=60']));
+	const ok = runs.every((ev) => routesOf(ev).length > 0 && routesOf(ev).every((e) => { const v = C.evaluate(lp.level, masksOf(e.inputs)); return !!v && v.ms.length === e.ticks; }));
+	check('the long way back (a finite death-free way of ~127 tiles from the coin): routes with --dord=2 and --dord=1, every one replayed',
+		ok && at(lf0, 10, 13) > 100, `coin ${at(lf0, 10, 13)}; dord 1: ${routesOf(runs[0]).map((e) => `${e.ticks}/${e.deaths}`).join(' ')}; dord 2: ${routesOf(runs[1]).map((e) => `${e.ticks}/${e.deaths}`).join(' ')}; kept ${JSON.stringify(doneOf(runs[1]).deaths || {})}`);
+	// no deaths as moves (no checkpoint): --dord changes nothing (the same routes after the same ticks)
+	const plain = levelFile('plain_dord', box(['...........', '...........', '...........', 'S.....x...T']));
+	const q = [1, 2].map((dord) => gox(plain.file, ['--workers=1', `--dord=${dord}`, '--maxTicks=2000000', '--seconds=60']));
+	check('a level without deaths as moves: --dord=2 = --dord=1 (the same routes after the same ticks)',
+		routesOf(q[1]).length > 0 && JSON.stringify(routesOf(q[0]).map((e) => [e.ticks, e.simTicks, e.inputs])) === JSON.stringify(routesOf(q[1]).map((e) => [e.ticks, e.simTicks, e.inputs])));
+}
 function sectionGpu() {
 	section('gpu: eegpu explore / roll --deaths=1');
 	const G = require('../src/gpu.js');
@@ -254,10 +298,11 @@ function sectionGpu() {
 }
 
 (async () => {
-	sectionJudge();
-	sectionRules();
-	await sectionEditor();
-	sectionCpu();
+	if (want('judge')) sectionJudge();
+	if (want('rules')) sectionRules();
+	if (want('editor')) await sectionEditor();
+	if (want('cpu')) sectionCpu();
+	if (want('chain')) sectionChain();
 	if (GPU) sectionGpu();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exitCode = fail ? 1 : 0;

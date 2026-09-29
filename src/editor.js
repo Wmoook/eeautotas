@@ -3457,7 +3457,7 @@ function closer(ev, n) {
 	// nearest and the escape's and the breaker's start). Such a plateau attempt is ranked behind every attempt on the CPU
 	// search's scale, and among its own kind as before)
 	const flat = !cut && !!cur.opts.deaths && !cur.distBySteer && !Vn.cpu && dist >= deathTiles();
-	if (old && !old.flat !== !flat && !old.cut) { if (flat) { if (own) attemptSource(n, own); return; } }
+	if (old && !cut && !old.cut && !old.flat !== !flat) { if (flat) { if (own) attemptSource(n, own); return; } }
 	else if (old && !(old.cul && !cut) && ((cut && !old.cut) ||(cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
@@ -3475,8 +3475,11 @@ function closer(ev, n) {
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
-	if (brk && !cut && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
-	if (prec && !cut && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
+	// (a plateau attempt moves no stall clock; the first attempt on the CPU search's scale after one starts the marks over:
+	// another measure, as at the steer field's switch)
+	if (old && old.flat && !flat && !cut) { if (brk) brk.mark = Infinity; if (prec) prec.mark = Infinity; }
+	if (brk && !cut && !flat && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
+	if (prec && !cut && !flat && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
 	S.closest = { dist, cut, viaDeath, ...(flat ? { flat: true } : {}), cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };

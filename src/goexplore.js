@@ -2166,7 +2166,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value; deaths as moves: a state it has no value
 	 *  for, DEATH_TILES + its respawn target's value where that has one: the layer bodies have no death edges) */
-	const steerOf = () => {
+	const steerOf = (own = false) => {
 		// (--timed: a doomed state as the death it is, as in costOf)
 		if (TM !== null && doomedNow()) {
 			if (DI !== null) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0) return DEATH_TILES + r / 5; }
@@ -2174,7 +2174,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			return v0 >= 0 ? v0 / 5 + DOOM_TILES : STEER_NONE;
 		}
 		const v = SF.steerFifths(ST, sim);
-		if (v >= 0) return v / 5;
+		if (v >= 0) {
+			// (--dord=2: the lesser of the state's own steer value and a death now, as costOf: the walk to the nearest killer,
+			// DEATH_TILES, its respawn target's steer value in its own layer; OCTO's Fun Castle's nearest by the steer field
+			// stayed a 39-tick attempt by the start while the one search held checkpoints far on)
+			if (DCH && a.dprice !== 0 && !own) {
+				const td = DTW === null ? 0 : DTW[centreTile()];
+				if (td !== RF.CUT && DEATH_TILES + td / 5 < v / 5) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0 && DEATH_TILES + (td + r) / 5 < v / 5) return DEATH_TILES + (td + r) / 5; }
+			}
+			return v / 5;
+		}
 		if (DI !== null && a.dprice !== 0 && RF.costAt(field, sim) >= RF.DEATH_TILES) { const r = atRespawn(() => SF.steerFifths(ST, sim)); if (r >= 0) return DEATH_TILES + r / 5; }
 		return STEER_NONE;
 	};
@@ -2330,6 +2339,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	 *  field rules out) nothing is ruled out: a ruled-out state costs 1e4 + its walking distance (behind the others) */
 	let viaDeath = false;   // (the last costOf: the field's only way from there is a death)
 	let ownRc = -1;   // (the last costOf's own way (--dord=2: before the min with a death now): deathPays' rcPrev)
+	let pickSO = STEER_NONE;   // (the picked cell's own steer value, before --dord=2's death price: deathPays' steer bound)
 	/** --timed: the live state cannot clear its soonest timed killer (nor finish) before it fires (src/timed.js doomed: a
 	 *  sound bound), so its only future is that death */
 	const doomedNow = () => {
@@ -2808,7 +2818,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// (with the steer field, gate-aware, the same bound by it against the run's pick: the reach field is door-blind, and
 		// on Good Egg it puts the spawn as near as the level's upper right, so deaths from there back to the spawn with 7
 		// coins passed it: gate ge#14 failed in 3 of 3 seeds; OC's pit death: 318.8 at the pit, 326.4 at the checkpoint)
-		if (ST && e.sc < STEER_NONE) { const sr = atRespawn(() => SF.steerFifths(ST, sim)); if (sr >= 0 && sr / 5 > e.sc + DEATH_TILES) { dBack++; dDrop++; return; } }
+		// (--dord=2: against the pick's own steer value (pickSO), not its death-priced one: no death dropped that was kept before)
+		if (ST && pickSO < STEER_NONE) { const sr = atRespawn(() => SF.steerFifths(ST, sim)); if (sr >= 0 && sr / 5 > pickSO + DEATH_TILES) { dBack++; dDrop++; return; } }
 		let nd = 0;
 		while (sim.is_dead && nd < DEATHBLK_N) { E.applyMask(inp, 0); sim.tick(inp); nd++; ticks++; }
 		dTicks += nd;
@@ -3008,6 +3019,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (ST !== null && e.sc === undefined) { sim.restore(e.snap); e.sc = steerOf(); HS.push(e); }
 			// the pick's runs: one input buffer for all of them (run r at r x roll)
 			const blk = { b: new Uint8Array(a.rolls * a.roll), refs: 0 }, buf = blk.b, base = e.snap, up = e.node;
+			// (deathPays' steer bound: the pick's own steer value; --dord=2 prices a cell's by a death now too)
+			pickSO = e.sc === undefined ? STEER_NONE : e.sc;
+			if (DCH && ST !== null && e.sc !== undefined) { sim.restore(base); pickSO = steerOf(true); }
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
 				const o = r * a.roll;
