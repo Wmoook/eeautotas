@@ -216,6 +216,17 @@ function sectionCpu() {
 				&& d0.back > 0 && d0.backKept === 0 && routesOf(t0).length > 0,
 			`default: ${r1.length} routes, first after ${doneOf(t1).first ? doneOf(t1).first.simTicks : '-'} ticks, ${JSON.stringify(d1)}; --dback=0: ${routesOf(t0).length} routes, first after ${doneOf(t0).first ? doneOf(t0).first.simTicks : '-'} ticks, back ${d0.back} kept ${d0.backKept}`);
 	}
+	// a sooner throw-back keeps its cell demoted (the n3 soundness review: add()'s improvement cleared the demotion on ANY
+	// earlier arrival, a throw-back death's too; bkLive then missed the cell and every later paying death at that place
+	// was dropped by the rspAt checks with no promotion: seeds 2 and 4 routed after 166 K / 179 K simulated ticks vs
+	// 60 K / 58 K with --dback=0, 0 promotions): up to the first route a paying death promotes the kept throw-back
+	for (const s of [2, 4]) {
+		const tf = gox(tb.file, ['--workers=1', '--cells=coarse', `--seed=${s}`, '--maxTicks=8000000', '--seconds=60', '--first=1']);
+		const df = doneOf(tf).deaths || {};
+		check(`the throw-back pit, seed ${s}, to the first route: a sooner throw-back keeps the cell demoted, so the paying death there promotes it (backPromoted >= 1)`,
+			routesOf(tf).length > 0 && df.backKept >= 1 && df.backPromoted >= 1,
+			`${routesOf(tf).length} routes, first after ${doneOf(tf).first ? doneOf(tf).first.simTicks : '-'} ticks, ${JSON.stringify(df)}`);
+	}
 	// fine cells: a death warp between two spawns (the start is the second spawn after /reset; the death brings the ball to
 	// the first, by the trophy): the only way
 	const warp = levelFile('warp', box(['S...T#......', '######S....x']));

@@ -1956,6 +1956,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (dBack: the deaths that throw the ball back; dBackKept: those kept as demoted respawn cells, dBackR / dBackS: caught
 	// by the order's field / by the steer field)
 	let dBackKept = 0, dBackR = 0, dBackS = 0, dPromote = 0;
+	// (addBack: the death add() is making a cell for is a throw-back (true), one that pays (false), none (null: a run))
+	let addBack = null;
 	// (per (room, respawn tile) the kept throw-back's cell while it is the earliest arrival there: a later death that
 	// pays reaches it too, and promotes it (a demoted cell must not hold the place from the death main keeps: the
 	// throw-back pit of test/deaths.js routed after 3.3x / 2.8x the ticks while it did))
@@ -2299,7 +2301,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
 			release(old);
 			impr++;
-			if (c.bk === true) c.bk = false;   // (an earlier arrival: its lineage is no throw-back death)
+			// (an earlier arrival: its lineage is no throw-back death, unless it is one itself: a throw-back death that
+			// comes sooner keeps the cell demoted, so bkLive still finds it and the next paying death there promotes it
+			// (clearing it here had the rspAt checks drop every later paying death at that place: the n3 soundness review))
+			if (c.bk === true && addBack !== true) c.bk = false;
 			if (ST) { c.sc = steerOf(); if (scFresh !== null) scFresh.add(c); nearSteer(c); }
 			hpush(c);
 			if (room !== null && betterBest(c, room.best)) room.best = c;
@@ -2895,7 +2900,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (culDeath) { if (!back) dCul++; reentry(rm); }
 		if (back) { /* counted as dBackKept below */ } else if (byCost) dCost++; else dNew++;
 		const upD = mkNode(up, blk, o, n);
+		addBack = back;
 		const nc = add(tR, rc, null, upD, DEADBLK, 0, nd, rm);
+		addBack = null;
 		release(upD);
 		if (nc === null) return;
 		dCells++;
