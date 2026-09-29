@@ -101,7 +101,7 @@ function run(o) {
 	emit(Object.assign({ ev: 'start', name: o.name || '', minutes: budgetMs / 60e3, workers: W, gpu: gpuOk, level: `${level.width}x${level.height}` },
 		lc ? { md5: lc.md5, ...(lc.warnings.length ? { warnings: lc.warnings } : {}), ...(lc.notes.length ? { notes: lc.notes } : {}) } : {}));
 	// o.seed: Find a route's seed (editor.js start(): 1 when none), so two runs of one level can differ (problem 10)
-	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, source: o.source, seed: o.seed }, o.gpu || { available: gpuOk });
+	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, seed: o.seed, source: o.source }, o.gpu || { available: gpuOk });
 	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
