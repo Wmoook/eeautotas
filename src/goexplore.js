@@ -1126,7 +1126,8 @@ function switchReaders(L) {
  * team (team doors 1027 / 1028), the coin and blue-coin counts (coin doors and gates 43 / 165, 213 / 214; a gate's shown
  * count too; a counter no reader on the way to the trophy needs by the number of its thresholds met: counterRelevance),
  * the crowns (crown doors 1094 / 1095, 1152 / 1153: what the doors read, _collide_crown and _collide_silver_crown), the
- * deaths (death doors and gates). Coin identities, secrets, the checkpoint, key timers and portal draws are left out
+ * deaths (death doors and gates: the count and the gates' shown count raw up to their highest threshold, one word
+ * from there). Coin identities, secrets, the checkpoint, key timers and portal draws are left out
  * (they would split every room into thousands; merged cells cost completeness only: every route is replayed).
  * opts.legacy: the key as the GPU's rollRoom computes it (every switch that is on, every counter's count: goexplore.js
  * --gpu=1 keeps its archive by the GPU's keys; test/gpulaunch.js).
@@ -1169,6 +1170,26 @@ function roomOf(L, opts = {}) {
 	// there the thresholds met (the gate's own count is one of them: >= 1), distinct from every count below)
 	const upG = rel.upTo ? rel.upTo.gold : 0, upB = rel.upTo ? rel.upTo.blue : 0;
 	const cnt = (th, v, up) => (up > 0 && v < up ? v : (up > 0 ? up : 0) + met(th, v));
+	// (the deaths (EEAT_DEATHKEY=0: main's raw words, byte for byte): the engine reads the count only at its death doors
+	// (1011, open when lookup <= deaths) and gates (1012, solid unless lookup > the shown count; the shown count becomes the
+	// count at every tick's start unless the ball then overlaps a solid block, and nothing else reads it); a death adds 1,
+	// a reset (/reset) sets the count to 0. Keyed raw, every death at any checkpoint was a new room: Cold World (6 gates at 1
+	// and 10, no door) had 638-786 room keys for 10-11 rooms, 25-28 stall-clock resets by those rooms and its first escape
+	// at 215-361 s. So each count's word = min(it, T), T = the HIGHEST threshold of the death doors AND gates: main's own
+	// word (the same hash) up to T, one word from there, where every door is open and every gate shut for good (a death
+	// keeps the count past T, a tick's start makes the shown count the count, a reset takes the count to 0).
+	// Exact: states of one word open and shut the same doors and gates now and after any tick (a bisimulation: test/rooms.js
+	// deaths). Raw below the highest threshold, not only below the highest gate (main's irrelevant-counter rule, upTo) nor
+	// the highest door (cw-death-rooms 112d4b0): deathPays keeps a death only as the earliest arrival at its respawn in its
+	// ROOM (rspAt), so deaths merged below a threshold drop every death that climbs toward it (the soundness review's bridge
+	// of death gates at 3 over spikes: main 4 of 8 seeds, 112d4b0 0 of 8, this the same search as main; keyed raw only
+	// below the highest gate, a column of death doors at 3 above a gate at 1 routed 2 of 8 vs 8 of 8, both with dying()'s
+	// quick look at the count + 1: cw-death-precheck). Cold World: 11 words (0..9, 10+) instead of one a death)
+	const deathKey = !legacy && process.env.EEAT_DEATHKEY !== '0' && L.hasDeathDoor;
+	let upD = 0;
+	if (deathKey) for (let i = 0; i < L.width * L.height; i++) { const id = L.fg[i]; if ((id === 1011 || id === 1012) && L.lookup0[i] > upD) upD = L.lookup0[i]; }
+	const dWord = deathKey ? (sim) => (sim.deaths < upD ? sim.deaths : upD) : (sim) => sim.deaths;
+	const gWord = deathKey ? (sim) => (sim._show_death_gate < upD ? sim._show_death_gate : upD) : (sim) => sim._show_death_gate;
 	// (the sum of the switches on that the key reads, without the mono ones (bits) in the dominance class: a sum mod
 	// 2^32, so the Map's order does not matter; forEach makes no entry arrays)
 	const onSum = (m, salt, read, bits) => {
@@ -1193,8 +1214,8 @@ function roomOf(L, opts = {}) {
 		if (L.hasCoinGate) h = mixW(h, rel.gold ? sim._show_coin_gate : cnt(cTh, sim._show_coin_gate, upG));
 		if (blue) h = mixW(h, rel.blue ? sim.blue_coins : cnt(bTh, sim.blue_coins, upB));
 		if (L.hasBlueCoinGate) h = mixW(h, rel.blue ? sim._show_blue_coin_gate : cnt(bTh, sim._show_blue_coin_gate, upB));
-		if (L.hasDeathDoor) h = mixW(h, sim.deaths);
-		if (L.hasDeathGate) h = mixW(h, sim._show_death_gate);
+		if (L.hasDeathDoor) h = mixW(h, dWord(sim));
+		if (L.hasDeathGate) h = mixW(h, gWord(sim));
 		const bp = mode === 2 ? bitP : null, bo = mode === 2 ? bitO : null;
 		if (sim._switches.size !== 0) { const s = onSum(sim._switches, 0x1234567, readP, bp); if (legacy || s !== 0) h = mixW(h, s); }
 		if (sim._oswitches.size !== 0) { const s = onSum(sim._oswitches, 0x7654321, readO, bo); if (legacy || s !== 0) h = mixW(h, s); }
@@ -1234,7 +1255,7 @@ function roomOf(L, opts = {}) {
 		if (team && sim.team) p.push(`team=${sim.team}`);
 		if (coins) { if (rel.gold || sim.coins < upG) p.push(`coins=${sim.coins}`); else { const n = met(cTh, sim.coins); if (n) p.push(`coins>=${cTh[n - 1]}`); } }
 		if (blue) { if (rel.blue || sim.blue_coins < upB) p.push(`bluecoins=${sim.blue_coins}`); else { const n = met(bTh, sim.blue_coins); if (n) p.push(`bluecoins>=${bTh[n - 1]}`); } }
-		if (L.hasDeathDoor) p.push(`deaths=${sim.deaths}`);
+		if (L.hasDeathDoor) p.push(!deathKey || sim.deaths < upD ? `deaths=${sim.deaths}` : `deaths>=${upD}`);
 		const s = onList(sim._switches, readP), o = onList(sim._oswitches, readO);
 		if (s.length) p.push(`purple=[${s.join(',')}]`);
 		if (o.length) p.push(`orange=[${o.join(',')}]`);
