@@ -15,8 +15,12 @@
 //   Waypoint: where a plan step must bring the ball (goalOf below gives its exact test):
 //     { kind: 'trigger', tiles: number[], trig: number, expect: Expect|null, label: string }  the centre tile in `tiles`
 //        (one trigger: a component of touching tiles of one block, the model's trigger `trig`) and, if given, `expect` holds
-//     { kind: 'region', tiles: number[], label }   the centre tile in `tiles` (a region, a portal's exit tiles, a door's
-//        far side)
+//     { kind: 'region', tiles: number[], expect: Expect|null, label }   the centre tile in `tiles` (a region, a portal's
+//        exit tiles, a door's far side) and, if given, `expect` holds
+//     A death step (a respawn at a checkpoint / the next spawn, a death count a death door or gate reads): kind 'region',
+//        tiles = the respawn tile(s), expect {feat: 'deaths', value: d + 1}, allowDeath: true (playTo / the searches keep
+//        the dying runs for this step only)
+//     every test also needs the ball alive (not in its 54 dead ticks)
 //     { kind: 'trophy', label }                    the level is complete (sim.has_silver_crown)
 //   Expect: { feat: string, value: number }: featValue(sim, feat) === value after the touch. feat keys (steer.js names,
 //     plus a few): 'key0'..'key5' (red green blue cyan magenta yellow), 'psw:<id>', 'osw:<id>', 'team', 'prot', 'coins',
@@ -116,22 +120,23 @@ function featValue(sim, feat) {
 	}
 }
 /**
- * goalOf(L, wp) -> {kind, tiles: Int32Array (the goal tiles for a goal field; empty for the trophy: use the level's
- * trophies), mask: Uint8Array(N) | null, test(sim) -> bool}: THE success rule of a waypoint, the same in every part (the
- * primitives' A*, the leg search, the GPU finds' replay check, the planner's truth scoring).
+ * goalOf(L, wp) -> {kind, tiles: Int32Array (the goal tiles for a goal field; for the trophy the level's trophies),
+ * mask: Uint8Array(N) | null, test(sim) -> bool, allowDeath (the step may die on its way: playTo(..., {allowDeath}))}:
+ * THE success rule of a waypoint, the same in every part (the primitives' A*, the leg search, the GPU finds' replay
+ * check, the planner's truth scoring).
  */
 function goalOf(L, wp) {
 	const W = L.width, H = L.height, N = W * H;
 	if (wp.kind === 'trophy') {
 		const tr = [];
 		for (let i = 0; i < N; i++) if (L.fg[i] === 121) tr.push(i);
-		return { kind: 'trophy', tiles: Int32Array.from(tr), mask: null, test: (sim) => !!sim.has_silver_crown };
+		return { kind: 'trophy', tiles: Int32Array.from(tr), mask: null, test: (sim) => !!sim.has_silver_crown, allowDeath: !!wp.allowDeath };
 	}
 	const mask = new Uint8Array(N);
 	for (const t of wp.tiles) if (t >= 0 && t < N) mask[t] = 1;
-	const ex = wp.kind === 'trigger' && wp.expect ? wp.expect : null;
-	const test = ex ? (sim) => mask[tileOf(sim, W, H)] === 1 && featValue(sim, ex.feat) === ex.value : (sim) => mask[tileOf(sim, W, H)] === 1;
-	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test };
+	const ex = wp.expect ? wp.expect : null;
+	const test = ex ? (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1 && featValue(sim, ex.feat) === ex.value : (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
+	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath };
 }
 
 // ---------------------------------------------------------------- arrivals

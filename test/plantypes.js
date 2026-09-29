@@ -63,5 +63,23 @@ list.push(list[0]);
 const d = T.pickDiverse(list, 4);
 check('pickDiverse: the earliest first, the fastest second, no duplicate', d[0].tick === 10 && d[1].tick === 30 && new Set(d.map((x) => x.hash)).size === d.length, d.map((x) => x.tick).join(','));
 
+// a death step: a checkpoint, then a spike; the waypoint is the checkpoint tile with deaths = 1 (allowDeath)
+const rows2 = [
+	'############',
+	'#..........#',
+	'#S..C...x..#',
+	'############',
+];
+const ID2 = { '#': [9], S: [255], C: [360], x: [361, 1] };
+const cells2 = [];
+rows2.forEach((r2, y) => [...r2].forEach((ch, x) => { if (ch !== '.') cells2.push([x, y, ...ID2[ch]]); }));
+const L2 = E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'd', width: rows2[0].length, height: rows2.length, cells: cells2 }))));
+const gd = T.goalOf(L2, { kind: 'region', tiles: [2 * L2.width + 4], expect: { feat: 'deaths', value: 1 }, allowDeath: true, label: 'die, back at the checkpoint' });
+const runD = new Uint8Array(260).map((v, i) => (i < 60 ? 4 : 0));
+const noD = T.playTo(L2, runD, { goal: gd });
+const withD = T.playTo(L2, runD, { goal: gd, allowDeath: gd.allowDeath });
+check('a death step: without allowDeath the replay stops at the death; with it the respawn at the checkpoint meets deaths = 1',
+	gd.allowDeath && noD.goalAt < 0 && noD.dead > 0 && withD.dead > 0 && withD.goalAt > withD.dead, `dead ${withD.dead}, goalAt ${withD.goalAt}`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
