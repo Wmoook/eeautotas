@@ -454,7 +454,7 @@ function walkBuild(level, A, opts) {
 		if (!cx || modeled.has(cx.feat)) break;
 		const f = A.feats.get(cx.feat);
 		if (!f) break;
-		if (M.S * f.values.length > maxLayers) { capped = { feat: cx.feat, why: 'layers' }; break; }
+		if (M.S * f.values.length > (opts.capOf ? opts.capOf(cx.feat) : maxLayers)) { capped = { feat: cx.feat, why: 'layers' }; break; }
 		if (opts.deadline && Date.now() > opts.deadline) { capped = { feat: cx.feat, why: 'time' }; break; }
 		modeled.add(cx.feat);
 	}
@@ -576,11 +576,20 @@ function sccs(S, on, succ) {
 	for (let v = 0; v < S; v++) if (on[v] && idx[v] < 0) visit(v);
 	return out;
 }
-/** the median ratio of the physics cost to the walking cost over the tiles both reach (effect tiles removed) */
-function kappaOf(A, rfOpts) {
+/** a field's bytes as a steer body (its typed arrays: what the RCH4 file and the lookup hold) */
+function fieldBytes(f) {
+	let n = 0;
+	for (const k of ['cls', 'seg', 'rowC', 'rowX', 'walk', 'costR', 'costF', 'costL', 'costC', 'costX']) if (f[k] && f[k].byteLength) n += f[k].byteLength;
+	if (f.mode === 'walk') n += f.W * f.H * 9;   // (the file's empty seg / rowC / rowX of a walk body)
+	return n;
+}
+/** the median ratio of the physics cost to the walking cost over the tiles both reach (effect tiles removed); out.bytes:
+ *  that field's bytes as a body (steer-budget-walk: the physics budget by a body's real size) */
+function kappaOf(A, rfOpts, out) {
 	const L = A.level, fg = Int32Array.from(L.fg);
 	for (let i = 0; i < A.N; i++) if ([417, 418, 419, 453, 461, 1517, 1618].includes(fg[i])) fg[i] = 0;
 	const f = RF.reachField(Object.assign({}, L, { fg }), rfOpts);
+	if (out) out.bytes = fieldBytes(f);
 	if (f.mode !== 'physics') return 1;
 	const r = [];
 	for (let t = 0; t < A.N; t++) {
@@ -643,11 +652,19 @@ function buildPhysics(B, opts) {
 	// the layers the walk from the start reaches first; opts.dpReserve: bodies kept for the coin DP's legs. Order only.
 	const nFxM = M.names.indexOf('fx');
 	const wildOf = (s) => nFxM >= 0 && M.valOf(s, nFxM) === 1;
-	let walkOnly = null, walkOver = 0;
+	let walkOnly = null, walkOver = 0, kappa0 = null;
 	if (opts.physCap) {
 		const plain = fr.order.filter((s) => !wildOf(s));
 		if (plain.length > opts.physCap) {
-			const keep = Math.max(1, opts.physCap - (opts.dpReserve || 0));
+			// (the physics bodies by their real size: the layer cap's BODY_BYTES_TILE estimate is a mean, and a level's body
+			// can be twice it (Weird Perfection: 69 physics bodies were 1.2 GB); the walk bodies and the DP's legs first)
+			const probe = {};
+			kappa0 = kappaOf(A, rfOpts, probe);
+			const physB = Math.max(A.N * BODY_BYTES_TILE, probe.bytes || 0), walkB = A.N * WALK_BYTES_TILE;
+			const nWild = fr.order.length - plain.length, dpr = opts.dpReserve || 0;
+			const room = (opts.maxBytes || STEER_MAX_BYTES) - (plain.length + nWild) * walkB - dpr * physB;
+			const byBytes = Math.floor(room / Math.max(1, physB - walkB));
+			const keep = Math.max(1, Math.min(opts.physCap - dpr, byBytes));
 			walkOnly = new Uint8Array(S).fill(1);
 			const pref = B.plan && B.plan.path ? B.plan.path.map((p) => p.s) : [];
 			let n = 0;
@@ -659,7 +676,7 @@ function buildPhysics(B, opts) {
 			for (const s of plain) if (walkOnly[s]) walkOver++;
 		}
 	}
-	const kappa = A.feats.has('fx') || walkOver ? kappaOf(A, rfOpts) : 0;
+	const kappa = kappa0 !== null ? kappa0 : A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	const solve = (s) => {
 		if (!copies[s]) copies[s] = layerLevel(A, M, s, opts);
@@ -988,15 +1005,20 @@ function buildSteer(level, opts) {
 	// WALK_BYTES_TILE a tile (buildPhysics physCap); the model's own cap is the walk budget's. opts.walkOver === false: the
 	// physics cap is the model's, as before)
 	const walkCap = opts.walkOver === false ? maxLayers : Math.max(maxLayers, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / (A.N * WALK_BYTES_TILE) / (A.feats.has('fx') ? 2 : 1))));
+	// (gold coins past the physics budget only where the coin DP can be (at most 18 coins): the coin layers take no coin
+	// as a way (the coin way is the DP's), so without it every layer below the door count has no value at all, where the
+	// field without the coins has one (Weird Perfection's 99 coins: the start had none))
+	const nGold = A.special.reduce((n, x) => n + (x[1] === 'coins' ? 1 : 0), 0);
+	const capOf = (k) => (k === 'coins' && (nGold > 18 || opts.noDP) ? maxLayers : walkCap);
 	let over = null;
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers: walkCap, deadline: t0 + maxMs / 2 });
-		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${walkCap} layers (${mb})`}`;
+		B = walkBuild(level, A, { features: [...modeled], maxLayers: walkCap, capOf, deadline: t0 + maxMs / 2 });
+		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${capOf(B.capped.feat)} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
 		const cp0 = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
-		PH = buildPhysics(B, { staticCoins: true, debug: true, physCap: maxLayers, dpReserve: cp0 && cp0.coins.length <= 18 ? cp0.coins.length : 0 });
+		PH = buildPhysics(B, { staticCoins: true, debug: true, physCap: maxLayers, maxBytes, dpReserve: cp0 && cp0.coins.length <= 18 ? cp0.coins.length : 0 });
 		const sim = new E.EESim(level); sim.reset();
 		const pl = layeredPlan(PH, sim);
 		const path = [];
@@ -1009,7 +1031,7 @@ function buildSteer(level, opts) {
 		const cx = path.length > 1 ? counterexample(A, { path }, { floors: opts.floors !== false, modeled }) : null;
 		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, walk: PH.walkOver || undefined, cx: cx && cx.feat, floor: cx && cx.floor ? [cx.t % A.W, Math.floor(cx.t / A.W)] : undefined });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
-		if (B.M.S * A.feats.get(cx.feat).values.length > walkCap) { over = over || `${cx.feat}: over ${walkCap} layers (${mb})`; break; }
+		if (B.M.S * A.feats.get(cx.feat).values.length > capOf(cx.feat)) { over = over || `${cx.feat}: over ${capOf(cx.feat)} layers (${mb})`; break; }
 		// (the next build takes longer than this one)
 		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
 		modeled.add(cx.feat);
@@ -1031,11 +1053,12 @@ function buildSteer(level, opts) {
 	let dp = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
 	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
-	// (the bodies' bytes: with walk layers past the physics budget a walk body counts WALK_BYTES_TILE a tile; else every
-	// body a physics body's, as before)
-	const have = PH.walkOver ? bodies.reduce((a, f) => a + (f.mode === 'walk' ? N * WALK_BYTES_TILE : bodyBytes), 0) : bodies.length * bodyBytes;
-	if (cp && (have + cp.coins.length * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
-		over = over || `the coin DP: ${have + cp.coins.length * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+	// (the bodies' bytes: with walk layers past the physics budget each body by its real size, a coin leg by the largest
+	// physics body's; else every body a physics body's estimate, as before)
+	let have = bodies.length * bodyBytes, legB = bodyBytes;
+	if (PH.walkOver) { have = 0; for (const f of bodies) { const b = fieldBytes(f); have += b; if (f.mode !== 'walk' && b > legB) legB = b; } }
+	if (cp && (have + cp.coins.length * legB > maxBytes || Date.now() - t0 > maxMs)) {
+		over = over || `the coin DP: ${have + cp.coins.length * legB > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
 	if (cp) {
