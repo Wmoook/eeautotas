@@ -1279,7 +1279,8 @@ function breakGate(inputs) {
 		if (t === undefined) return null;
 		// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
 		// steer field, which on Forgotten Veil points the other way (the layer field) and cut the states heading for the coin
-		const b = G0.st.dp.leg[g.i];
+		// (the blue DP's legs are per layer: the body nextGate valued the coin by, the state's own layer's)
+		const b = g.body !== undefined && g.body >= 0 ? g.body : G0.st.dp.leg[g.i];
 		let reach = G0.files.get(b);
 		if (!reach) {
 			reach = path.join(dir(), `gate_${cur.pastOn ? 'p' : ''}${b}.rch3`);
@@ -2428,7 +2429,7 @@ function useSteer(sf, noGpu) {
 	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
 	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
-	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
+	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the ${sf.dp.kind === 'bcoins' ? 'blue ' : ''}coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
@@ -2473,7 +2474,7 @@ function lateSteer(gen, sf2) {
 		const dist = q.key === 'goexplore' || q.key === 'escape';
 		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${cur.files.steerCpu}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
-	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
+	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the ${sf2.dp.kind === 'bcoins' ? 'blue ' : ''}coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
 		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
 	save();
 }
@@ -2700,6 +2701,8 @@ function steerFp() {
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	// (the blue DP's knob: a flip builds the field again)
+	if (process.env.EEAT_BLUEDP) h.update(`bluedp:${process.env.EEAT_BLUEDP}`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
