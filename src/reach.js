@@ -889,9 +889,11 @@ function labelSearch(S) {
  * horizontal part against the push FROM a tile with 5+ opposing tiles still ahead in its row (itself included) TO a tile
  * with fewer (or out of the run): every crossing of 5+ tiles makes exactly one such move wherever the ball joined the
  * run (from the side, or dropped in from above with its speed), and a ball that joined 4 or fewer from the end pays
- * nothing. Exempt (the ball may carry more): runs with a speed source in the box before them (`SA_FEED_X` tiles back,
- * `SA_FEED_Y` rows up to 2 down): a side boost of the move's direction (16 px/tick, decaying toward 6.78: > 7.5 for ~75
- * tiles), a portal exit (up to 16 x 1.42), an arrow pushing the move's way (up to 13.55).
+ * nothing. Exempt (the ball may carry more): runs that a fast flight from a speed source reaches (a side boost of the
+ * move's direction: 16 px/tick, decaying toward 6.78, > 7.5 for ~75 tiles held; a portal exit: up to 16 x 1.42; an
+ * arrow pushing the move's way: up to 13.55): its cone goes column by column the move's way, a row up or down at most
+ * per column, through tiles that are not walls or killers, `SA_FEED_X` (80) columns (Crypts of Anubis: its route crosses
+ * a 5-run at 8.9 px/tick, 41 columns and 9 rows past a side boost; a box of 40 x 10 missed it and priced every way).
  * (2) Slots: a tile with walls above and below fits the 16-px box only at py = 16 y exactly, which a ball under
  * vertical gravity has only on a floor (no auto-align: eesim.js aligns y only while no gravity pulls on y). The price: a
  * move with a horizontal part into such a slot from a tile that is not one (the ball enters from outside), unless the
@@ -901,7 +903,7 @@ function labelSearch(S) {
  * price past the cap would cut). Returns {pen: Uint8Array over tile x 8 directions (1 = priced) or null, cost, info}.
  */
 const SA_COST = 12500;   // fifths (2,500 tiles): behind a real way (a death is 1,638 tiles) and past the doctors' detours (<= 1,882)
-const SA_KRUN = 4, SA_FEED_X = 40, SA_FEED_Y = 8;
+const SA_KRUN = 4, SA_FEED_X = +(process.env.EEAT_SA_FEED || 80);
 function sideArrowPrices(level, opts, M) {
 	const env = process.env.EEAT_SIDEARROW;
 	const mode = opts.sideArrow !== undefined ? (opts.sideArrow === true ? 'arrows' : opts.sideArrow || 'off') : env === '0' ? 'off' : env === 'all' ? 'all' : 'arrows';
@@ -929,21 +931,43 @@ function sideArrowPrices(level, opts, M) {
 		const exitT = new Uint8Array(N);
 		for (const e of srcOf.keys()) exitT[e] = 1;
 		const source = (i, dx) => exitT[i] === 1 || push[i] === dx || fg[i] === (dx > 0 ? 115 : 114);
+		// the fast flight's cone per direction: from every speed source, column by column the way it goes (a row up or down
+		// at most per column: a jump rises ~4 rows over ~12 columns at that speed), through tiles that are not walls or
+		// killers, at most SA_FEED_X columns (a boost's 16 px/tick decays to the 7.5 six tiles need in ~75 tiles, held)
+		const cone = [new Uint8Array(N).fill(255), new Uint8Array(N).fill(255)];
+		const flies = (i) => cls[i] !== WALL && cls[i] !== DEADLY;
+		for (const d of [0, 1]) {
+			const dx = d === 0 ? 1 : -1, cd = cone[d];
+			for (let i = 0; i < N; i++) if (flies(i) && source(i, dx)) cd[i] = 0;
+			for (let s = 0; s < W - 1; s++) {
+				const x = d === 0 ? s : W - 1 - s, x2 = x + dx;
+				for (let y = 0; y < H; y++) {
+					const c0 = cd[y * W + x];
+					if (c0 >= SA_FEED_X) continue;
+					for (let dy = -1; dy <= 1; dy++) {
+						const y2 = y + dy;
+						if (y2 < 0 || y2 >= H) continue;
+						const j = y2 * W + x2;
+						if (flies(j) && c0 + 1 < cd[j]) cd[j] = c0 + 1;
+					}
+				}
+			}
+		}
 		for (let y = 0; y < H; y++) {
 			for (let x = W - 1; x >= 0; x--) { const i = y * W + x; rem[0][i] = push[i] === -1 ? 1 + (x + 1 < W ? rem[0][i + 1] : 0) : 0; }
 			for (let x = 0; x < W; x++) { const i = y * W + x; rem[1][i] = push[i] === 1 ? 1 + (x > 0 ? rem[1][i - 1] : 0) : 0; }
-			// the runs of SA_KRUN + 1 or more: fed by a speed source in the box before them?
+			// the runs of SA_KRUN + 1 or more: fed when the fast flight's cone reaches a tile of them (the price is on the
+			// move out of the run's end: a ball in the run with speed anywhere may make it)
 			for (const d of [0, 1]) {
 				const dx = d === 0 ? 1 : -1;
 				for (let x = 0; x < W; x++) {
 					const i = y * W + x;
 					const start = d === 0 ? (x === 0 || push[i - 1] !== -1) : (x === W - 1 || push[i + 1] !== 1);
 					if (!start || rem[d][i] <= SA_KRUN) continue;
-					const len = rem[d][i], xEnd = x + dx * (len - 1);
+					const len = rem[d][i];
 					info.runs++;
 					let f = false;
-					const xa = Math.max(0, Math.min(x - dx * SA_FEED_X, xEnd)), xb = Math.min(W - 1, Math.max(x - dx * SA_FEED_X, xEnd));
-					for (let yy = Math.max(0, y - SA_FEED_Y); yy <= Math.min(H - 1, y + 2) && !f; yy++) for (let xx = xa; xx <= xb && !f; xx++) if (source(yy * W + xx, dx)) f = true;
+					for (let k = 0; k < len && !f; k++) if (cone[d][i + dx * k] <= SA_FEED_X) f = true;
 					if (f) { info.fed++; for (let k = 0; k < len; k++) fed[d][i + dx * k] = 1; }
 				}
 			}
