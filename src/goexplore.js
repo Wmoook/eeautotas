@@ -180,6 +180,10 @@
 //        sticky 17, and no gain); --priorMode=0: every tick's input from the model, 1: the sticky
 //        timing (--keep) and the model's choice of each new input (an input other than the last); the other runs as
 //        before; without it no draw changes)]
+//        [--opts=0|1 (EVENT OPTIONS, OFF by default: src/options.js; --optP=0.5 of a pick's CPU runs are option runs:
+//        an input from the runs' draw held until a physical event (landing, lift-off, a wall, the apex, a field
+//        change, a room change) or its cap of 4 x luby(j) ticks (at most 256), the run 40 x luby(k) ticks (at most
+//        320); the done event's opts {runs, cells, ends}; without it no draw changes)]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
 //        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
@@ -288,6 +292,7 @@ const RF = require('./reach.js');
 const SF = require('./steer.js');
 const TMD = require('./timed.js');
 const PR = require('./prior.js');
+const OP = require('./options.js');
 const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
@@ -324,7 +329,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
@@ -2070,6 +2075,19 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	};
 	const lh = [0, 1];
 	const coarse = a.cells === 'coarse';
+	// EVENT OPTIONS (--opts=1, off by default; src/options.js): --optP of a pick's runs are option runs (one rnd() per
+	// run, drawn before the runs: the pick's input block holds each run's own length): an input from draw() held until a
+	// physical event (OP.NAMES) or its cap of 4 x luby(j) ticks, then the next option; the run 40 x luby(k) ticks (j, k:
+	// this worker's counters). Without --opts no draw changes: the same seed makes the same search
+	const OT = a.opts ? new OP.Option(sim, OP.fieldClasses(L), W, N) : null;
+	let optRuns = 0, optCells = 0, optJ = 0, optK = 0;
+	const optEnds = new Float64Array(OP.N_EVENTS + 1);
+	const optRun = OT !== null ? new Uint8Array(a.rolls) : null, optOff = OT !== null ? new Int32Array(a.rolls) : null, optLen = OT !== null ? new Int32Array(a.rolls) : null;
+	/** the next option from the live state, its input m (first: before the run's first tick, the room key computed) */
+	const optNew = (m, first) => {
+		const T = (rnd() * OP.N_EVENTS) | 0;
+		OT.start(m, T, OP.capOf(++optJ), T === OP.T_ROOM && coarse ? (first ? RM.key(sim) : roomKey) : 0);
+	};
 	const disc = coarse ? null : discreteOf(L);
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
 	const t0 = Date.now(), tEnd = t0 + a.seconds * 1000;
@@ -2650,7 +2668,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {},
+	OT !== null ? Object.assign({ optRuns, optCells }, ...OP.NAMES.map((n, i) => ({ ['optE_' + n]: optEnds[i] }))) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -3380,21 +3399,31 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			}
 			// (a cell made before a late steer field: its steer cost at its first pick since, into the steer heap)
 			if (ST !== null && e.sc === undefined) { sim.restore(e.snap); e.sc = steerOf(); HS.push(e); }
-			// the pick's runs: one input buffer for all of them (run r at r x roll)
-			const blk = { b: new Uint8Array(a.rolls * a.roll), refs: 0 }, buf = blk.b, base = e.snap, up = e.node;
+			// the pick's runs: one input buffer for all of them (run r at r x roll; with --opts at the sum of the runs'
+			// lengths before it: an option run's length is its own)
+			let blk;
+			if (OT === null) blk = { b: new Uint8Array(a.rolls * a.roll), refs: 0 };
+			else {
+				let tot = 0;
+				for (let r = 0; r < a.rolls; r++) { const on = rnd() < a.optP; optRun[r] = on ? 1 : 0; optOff[r] = tot; optLen[r] = on ? OP.lenOf(++optK) : a.roll; tot += optLen[r]; }
+				blk = { b: new Uint8Array(tot), refs: 0, x: Math.max(0, tot - a.rolls * a.roll) };
+			}
+			const buf = blk.b, base = e.snap, up = e.node;
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
-				const o = r * a.roll;
-				// (a prior run: its inputs from the model, from the pick's last input; see LEARNED MOVES)
-				const pri = PRI !== null && rnd() < a.priorP;
+				const isOpt = OT !== null && optRun[r] === 1;
+				const o = OT === null ? r * a.roll : optOff[r], len = OT === null ? a.roll : optLen[r];
+				// (a prior run: its inputs from the model, from the pick's last input; see LEARNED MOVES; not an option run)
+				const pri = !isOpt && PRI !== null && rnd() < a.priorP;
 				let m = 0, pm = 0, ph = 1;
 				if (pri) {
 					priorRuns++; lastHeld(up, lh); pm = lh[0]; ph = lh[1];
 					// (--priorMode=1: the first input a switch from the pick's last one, as the sticky rule draws a new one)
 					if (a.priorMode === 1) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; pm = m; }
 				} else m = draw();
+				if (isOpt) { optRuns++; optNew(m, true); }
 				let room = e.room, rcPrev = e.rc;
-				for (let s = 0; s < a.roll; s++) {
+				for (let s = 0; s < len; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
 					if (pri) {
@@ -3402,7 +3431,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 						if (a.priorMode === 1) { if (rnd() >= a.keep) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; } else ph++; }
 						else { m = PRI.draw(sim, pm, ph, rnd); if (m === pm) ph++; else ph = 1; }
 						pm = m;
-					} else if (rnd() >= a.keep) m = draw();
+					} else if (!isOpt && rnd() >= a.keep) m = draw();
 					buf[o + s] = m;
 					E.applyMask(inp, m);
 					sim.tick(inp);
@@ -3457,6 +3486,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 						if (nf !== null && room.isNew) firstCell(room, nf, t);
 					}
 					if (nc !== null && room !== null && room.isNew) firstCell(room, nc, t);
+					// (an option run: its option ends at an event or its cap; the next one from this state)
+					if (isOpt) {
+						if (nc !== null) optCells++;
+						const k = OT.after(roomKey);
+						if (k >= 0) { optEnds[k]++; m = draw(); optNew(m, false); }
+					}
 				}
 				if (end) break;
 			}
@@ -4557,7 +4592,7 @@ async function main() {
 		for (let i = 0; i < u.length; i++) tiles += u[i];
 	}
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...frontierNow(), ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
