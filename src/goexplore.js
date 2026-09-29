@@ -256,7 +256,8 @@
 //        [--pareto=0 (1 or EEAT_PARETO=1: OPT-IN, coarse cells: HEAD P, --pP (0.15) of the picks taken from head A only:
 //        the rooms on the non-dominated front of (useful resources held: gold / blue coins up to the highest coin door,
 //        the key colours a door or gate reads; the room's best order cost), the least picked of them but the cheapest,
-//        then the best of --sample cells of it by head A's priority (--pCell=1: by head B's count weights); CPU workers and
+//        then the best of --sample cells of it by head B's count weights (--pCell=0: by head A's priority, the first
+//        version, not kept in the A/B); CPU workers and
 //        the GPU random runs' host (not a blind class). Order only. The progress and done events carry "pareto": {picks,
 //        front, gold, blue, keys}. See PARETO HEAD)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
@@ -349,7 +350,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
-	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 0,
+	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 1,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
@@ -1314,7 +1315,8 @@ function domPick(DOM, share, rnd, weightOf) {
 // and their costs change all the time; the rooms not in a cul-de-sac or throw-back: no bk, cells left). Head P takes --pP
 // of the picks from head A only (the last branch: one more draw there, rnd() < pP / pA): among the front's rooms but the
 // cheapest (head A has it), the least picked of a tournament of 2 (weight 1 / sqrt(1 + picks / 50)), then the best of
-// --sample of its cells by head A's own priority (--pCell=1: by head B's count weights, the room's least visited cells:
+// --sample of its cells by head B's count weights (--pCell=1, the default: the room's least visited cells; --pCell=0, the
+// first version: head A's own priority, which the product A/B did not keep:
 // in a room ordered by the door-blind reach field (the GPU random runs' host, or no steer value) head A's priority is the
 // cell nearest the false near; a cell with no steer value costs 6000 + its reach cost, distOf's rank); nothing: head A.
 // Order only: nothing is pruned, the reach field's -1 stays the only prune. Heads B, C, F, L and W are untouched; a blind
