@@ -39,6 +39,11 @@
 //              "blank": a way, 136 "disappear": none); a 2-high column of it: the field goes over it as over 9s, every
 //              state of the engine's routes finite; random rooms with 50 walls: the field = the room with 50 made 9, its
 //              -1 set holds the one of 50 as an open door (only tighter), no state finite right after a cut-off one
+//   K fx       physics until an effect is held (reach.js fxHybrid): a level whose only wildness is a multijump tile gets
+//              the no-effect physics field with the trophy and the effect tile as goals (Bellman-consistent), the walk
+//              where it cuts off (-1 only where the walk says -1); the start and the pillar's foot farther than the walk's
+//              false near; a route through the multijump finite at every state by costAt and by the tables alone, a ball
+//              holding the effect at the walk's value; a plain level, world gravity 0.5 and EEAT_FXPHYS=0 as before
 // usage: node test/reach.js [--only=A,B,..] [--gpu] [--tool=<eegpu.exe>] [--jobs=<dir>] [--bench=<file>] [--quick]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
@@ -70,7 +75,7 @@ const levelOfB64 = (b) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(
 // a / z / y the secret blocks 50 "appear" (always blocks), 243 "blank" (air), 136 "disappear" (a plain solid)
 const ID = { e: [420, 1], f: [420, 0], '#': [9], S: [255], T: [121], o: [4], '^': [2], '<': [1], '>': [3], '~': [119], H: [120], x: [361, 1], '-': [1052, 1], _: [1041, 1], B: [116], D: [117],
 	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2],
-	k: [100], b: [101], '1': [43, 1], '2': [43, 2], '3': [213, 1], '4': [213, 2], a: [50], z: [243], y: [136] };
+	k: [100], b: [101], '1': [43, 1], '2': [43, 2], '3': [213, 1], '4': [213, 2], a: [50], z: [243], y: [136], m: [461, 4] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -876,14 +881,16 @@ function sectionH() {
 	section('H dead ends: protection where a protected ball can be, the death-free field, the viewing-room trap');
 	// a route through a spike with the protection effect: hold right from the spawn through e, then over x to T
 	const rows = ['..........', '..........', 'S.e...x.T.', '##########'];
-	for (const [what, extra] of [['physics', '.'], ['walk', 'g']]) {
+	// (the low-gravity tile: a level with an effect tile, the physics until an effect is held (fxHybrid, reach.js), and with
+	// fxPhys false the walk mode, as world gravity or EEAT_FXPHYS=0 give it)
+	for (const [what, extra, fo] of [['physics', '.', {}], ['fxHybrid (physics)', 'g', {}], ['walk', 'g', { fxPhys: false }]]) {
 		const L = ascii(box(rows.map((r, y) => (y === 0 ? r.slice(0, 9) + extra : r))));
 		const route = seqOf([4, 120]);
 		const ev = C.evaluate(L, route);
-		const f = R.reachField(L), fnd = R.reachField(L, { deaths: false });
+		const f = R.reachField(L, fo), fnd = R.reachField(L, Object.assign({ deaths: false }, fo));
 		const a = walk(L, f, route), b = walk(L, fnd, route);
 		check(`${what} mode: a route through a spike with the protection effect finishes (0 deaths) and every state of it is finite, with and without the death edges`,
-			f.mode === what && ev && ev.deaths === 0 && a.finished && a.cut === 0 && b.cut === 0 && f.prot && f.prot.on === 1,
+			f.mode === (what === 'walk' ? 'walk' : 'physics') && !!f.fxW === (extra === 'g' && what !== 'walk') && ev && ev.deaths === 0 && a.finished && a.cut === 0 && b.cut === 0 && f.prot && f.prot.on === 1,
 			`mode ${f.mode}, ${ev ? `${ev.runTicks} run ticks, ${ev.deaths} deaths` : 'no finish'}; ${a.n} states, cut ${a.cut} / ${b.cut}${a.first ? ` first ${JSON.stringify(a.first)}` : ''}; prot ${JSON.stringify(f.prot)}`);
 	}
 	// killing tiles no protected ball reaches stay deadly: the protection effect behind the trophy's wall, a spike pit the start
@@ -920,13 +927,14 @@ function sectionH() {
 	// portal; in it by the trophy a spectator box (spike walls, a solid floor) whose only way out is its portal back; the
 	// protection effect by the trophy. The box ranks behind the start (before: the spikes were air, the box 8.6 tiles from
 	// the trophy, the start 19.6)
-	{
+	// (its low-gravity tile: walk mode with fxPhys false; the fxHybrid field keeps the same walk array)
+	for (const fo of [{ fxPhys: false }, {}]) {
 		const t = trapLevel();
 		const L = levelOfCells(t.W, t.H, t.cells);
-		const f = R.reachField(L);
+		const f = R.reachField(L, fo);
 		const at = (x, y) => f.walk[y * t.W + x] / 5;
-		check('the viewing-room trap: the spectator box by the trophy ranks behind the start and the real way\'s portal (its only way out is its portal back)',
-			f.mode === 'walk' && at(70, 9) > at(2, 38) && at(70, 9) > at(6, 37) && at(45, 37) < at(2, 38),
+		check(`the viewing-room trap (${f.fxW ? 'fxHybrid: its walk array' : 'walk mode'}): the spectator box by the trophy ranks behind the start and the real way's portal (its only way out is its portal back)`,
+			f.mode === (fo.fxPhys === false ? 'walk' : 'physics') && at(70, 9) > at(2, 38) && at(70, 9) > at(6, 37) && at(45, 37) < at(2, 38),
 			`box ${at(70, 9)} tiles, start ${at(2, 38)}, the real way's portal ${at(6, 37)}, its exit ${at(45, 37)}`);
 	}
 }
@@ -1179,7 +1187,135 @@ function trapLevel() {
 	return { W, H, cells: c };
 }
 
+// ---------------------------------------------------------------- K physics until an effect is held
+/**
+ * reach.js fxHybrid (n3 fx-physics-until-held): a level whose only wildness is its effect tiles (world gravity plain) gets
+ * the physics field of a ball WITHOUT an effect, its goals the trophy and every tile where the ball picks an effect up (at
+ * the walk-mode field's value there), and every state that field cuts off the walk's value (a ball holding an effect, or a
+ * doomed one); costAt(field, sim) reads the walk for a ball holding an effect. Before, one effect tile anywhere put the whole
+ * level in walk mode. The level: the multijump tile (461, 4 jumps) at the left end of a corridor, the spawn in the middle,
+ * the trophy on top of an 8-row pillar at the right end (one jump climbs 4 rows): the walk says the pillar's foot is 8 rows
+ * from the trophy, the ball without an effect has to fetch the multijump first
+ */
+function sectionK() {
+	section('K physics until an effect is held (fxHybrid): the no-effect physics field with the effect tiles as goals, the walk where it cuts off');
+	const rows = box([
+		'....................',
+		'.................T..',
+		'...............#####',
+		'...............#####',
+		'...............#####',
+		'...............#####',
+		'...............#####',
+		'...............#####',
+		'...............#####',
+		'm.......S......#####',
+	]);
+	const L = ascii(rows);
+	const hy = R.reachField(L, { check: true }), wk = R.reachField(L, { fxPhys: false });
+	check('a level whose only wildness is its effect tile: the physics mode (fxHybrid); fxPhys false: the walk mode as before', hy.mode === 'physics' && hy.fxW === true && wk.mode === 'walk' && !wk.fxW,
+		`${hy.mode} (seeds ${hy.fx && hy.fx.seeds}, filled ${hy.fx && hy.fx.filled}), fxPhys false: ${wk.mode}`);
+	check('the physics part (before the fill) is Bellman-consistent with the trophy and the effect tiles as goals', hy.mismatches === 0, `${hy.mismatches} mismatches`);
+	// -1 only where the walk says -1: every cost table entry CUT at a tile implies the walk CUT there
+	const N = hy.W * hy.H, NR = hy.Q + 3, K1 = R.KF + 1;
+	let bad = 0, walkCut = 0;
+	for (let t = 0; t < N; t++) {
+		if (hy.walk[t] !== R.CUT) {
+			for (let x = 0; x < NR; x++) if (hy.costR[t * NR + x] === R.CUT) bad++;
+			for (let x = 0; x < K1; x++) if (hy.costF[t * K1 + x] === R.CUT || hy.costL[t * K1 + x] === R.CUT) bad++;
+			if (hy.rowC[t] >= 0) for (let x = 0; x < R.NL; x++) if (hy.costC[hy.rowC[t] * R.NL + x] === R.CUT) bad++;
+			if (hy.rowX[t] >= 0) for (let x = 0; x < R.NL; x++) if (hy.costX[hy.rowX[t] * R.NL + x] === R.CUT) bad++;
+		} else walkCut++;
+		if (hy.walk[t] !== wk.walk[t]) bad++;
+	}
+	check('-1 only where the walk says -1 (every state of a tile with a walk value is finite; the walk array = the walk mode\'s)', bad === 0, `${bad} cut states on tiles with a walk value, ${walkCut} tiles cut by the walk`);
+	// the start: the ball without an effect has to fetch the multijump (left), the walk goes straight to the pillar (right)
+	const s0 = startSim(L, 30), cH = R.costAt(hy, s0), cW = R.costAt(wk, s0);
+	check('the start (no effect): the way by the multijump tile, farther than the walk\'s straight line', cH > cW + 10, `hybrid ${fmt(cH)}, walk ${fmt(cW)}`);
+	// the pillar's foot: the walk's false near (8 rows below the trophy), the physics field's way back to the multijump
+	const foot = new E.EESim(L); foot.reset();
+	foot.px = 15 * 16; foot.py = 10 * 16; foot.speed_x = 0; foot.speed_y = 0;
+	const fH = R.costAt(hy, foot), fW = R.costAt(wk, foot);
+	check('the pillar\'s foot without an effect: no false near (the walk\'s 8 rows; the physics field back to the multijump first)', fH > fW + 10 && fH > cH - 20, `hybrid ${fmt(fH)}, walk ${fmt(fW)}, start ${fmt(cH)}`);
+	// a route by the engine (left to the multijump, right to the pillar, climb): every state finite, by costAt and by the
+	// tables alone (fifthsAt: the native lookup's view), and a ball holding the effect reads the walk
+	const OPTS = [0, 2, 4, 1, 3, 5];
+	const route = [];
+	{
+		// hand-made: left to the tile, then right to the pillar and jumps (a small search for the jump timing)
+		const sim = new E.EESim(L); sim.reset(); const I = new E.EEInput();
+		const play = (m) => { E.applyMask(I, m); sim.tick(I); route.push(m); };
+		for (let t = 0; t < 400 && sim.max_jumps === 1; t++) play(2);
+		for (let t = 0; t < 400 && Math.trunc(sim.px + 8) >> 4 < 14; t++) play(4);
+		// climb: a search over (right, right+jump) with the multijump held
+		const s0c = sim.snapshot();
+		let found = null;
+		const layerOf = (arr) => arr;
+		let layer = [{ snap: s0c, ms: [] }];
+		const seen = new Set();
+		for (let d = 0; d < 250 && !found && layer.length; d++) {
+			const next = [];
+			for (const nd of layerOf(layer)) {
+				for (const m of [4, 5, 0, 1]) {
+					sim.restore(nd.snap); E.applyMask(I, m); sim.tick(I);
+					if (sim.is_dead) continue;
+					if (sim.has_silver_crown) { found = nd.ms.concat([m]); break; }
+					const key = `${Math.round(sim.px)},${Math.round(sim.py)},${Math.round(sim.speed_x * 4)},${Math.round(sim.speed_y * 4)},${sim.jump_count}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
+					next.push({ snap: sim.snapshot(), ms: nd.ms.concat([m]) });
+				}
+				if (found) break;
+			}
+			layer = next.length > 3000 ? next.slice(0, 3000) : next;
+		}
+		if (found) for (const m of found) route.push(m); else route.length = 0;
+		void OPTS;
+	}
+	let held = 0, heldWalk = 0, tabCut = 0, n = 0;
+	if (route.length) {
+		const sim = new E.EESim(L); sim.reset(); const I = new E.EEInput();
+		for (const m of route) {
+			E.applyMask(I, m); sim.tick(I);
+			if (sim.has_silver_crown) break;
+			n++;
+			if (R.fifthsAt(hy, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery) < 0) tabCut++;
+			if (R.fxHeld(sim)) {
+				held++;
+				const w = hy.walk[(Math.trunc(sim.py + 8) >> 4) * hy.W + (Math.trunc(sim.px + 8) >> 4)];
+				if (R.costAt(hy, sim) === w / 5) heldWalk++;
+			}
+		}
+	}
+	const wr = route.length ? walk(L, hy, route) : null;
+	check('a route through the multijump: finishes, every state finite by costAt and by the tables alone (the native view); a ball holding the effect reads the walk',
+		!!wr && wr.finished && wr.cut === 0 && tabCut === 0 && held > 0 && heldWalk === held,
+		`route ${route.length} ticks, ${n} states, ${wr ? wr.cut : '-'} cut by costAt, ${tabCut} by the tables, ${held} holding the effect (${heldWalk} at the walk's value)`);
+	// the lookup of a ball holding an effect on a field that is no fxHybrid: unchanged (the table)
+	const plain = ascii(box(['S......T']));
+	const pf = R.reachField(plain), ps = startSim(plain, 30);
+	const v0 = R.costAt(pf, ps); ps.max_jumps = 3; const v1 = R.costAt(pf, ps);
+	check('a plain level: no fxHybrid, costAt the same for a ball holding an effect', pf.mode === 'physics' && !pf.fxW && v0 === v1, `${fmt(v0)} / ${fmt(v1)}`);
+	// world gravity not 1: the walk mode as before (the whole level is wild)
+	const Lg = Object.assign({}, L, { gravityMult: 0.5 });
+	const fg = R.reachField(Lg);
+	check('world gravity not 1: the walk mode as before', fg.mode === 'walk' && !fg.fxW, fg.mode);
+	// EEAT_FXPHYS=0: the walk mode (the knob, read when reach.js loads)
+	const cells = [];
+	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') cells.push([x, y, ...ID[ch]]); }));
+	const tmp = path.join(os.tmpdir(), `reachK_${process.pid}.eelvl`);
+	fs.writeFileSync(tmp, ED.eelvlOf({ name: 't', width: rows[0].length, height: rows.length, cells }));
+	const src = (f) => JSON.stringify(path.join(__dirname, '..', 'src', f));
+	const knob = (v) => execFileSync(process.execPath, ['-e', `const R=require(${src('reach.js')}),E=require(${src('eesim.js')}),EL=require(${src('eelvl.js')});` +
+		`const L=E.prepareLevel(EL.toSimLevel(EL.readEelvl(require('fs').readFileSync(${JSON.stringify(tmp)}))));process.stdout.write(R.reachField(L).mode)`],
+	{ env: Object.assign({}, process.env, { EEAT_FXPHYS: v }), stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+	const k0 = knob('0'), k1 = knob('1');
+	try { fs.unlinkSync(tmp); } catch (e) { /* gone */ }
+	check('EEAT_FXPHYS=0: the walk mode as before (main); unset / 1: the physics mode', k0 === 'walk' && k1 === 'physics', `${k0} / ${k1}`);
+}
+
 (async () => {
+	if (want('K')) { sectionK(); if (ONLY.length === 1) { console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0); } }
 	if (want('A')) sectionA();
 	if (want('B')) sectionB();
 	if (want('C')) sectionC();
