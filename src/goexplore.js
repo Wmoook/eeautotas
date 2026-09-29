@@ -324,7 +324,8 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0,
+	ru: process.env.EEAT_RUNUP !== undefined ? +process.env.EEAT_RUNUP : 1, ruR: 12, ruB: 1.5, ruSlack: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
@@ -378,6 +379,31 @@ const FR_ZCELL = 20, FR_ZN = 100, FR_ZMU = 2;
 // at most T ticks after its coarse cell's earliest (default 300; the fastest arrival of ANY lineage made the first routes 1,000-1,700
 // ticks slower in both A/B pairs: the lineage that escaped had come the slow way).
 const SPD_PROGRESS = 1;
+// --ru=1 (the default; --ru=0 or EEAT_RUNUP=0: the search exactly as before), RUN-UP CELLS (night 3, n3-run-up-cells):
+// when the stall clock above flags a room (--spd), and a SPEED FEATURE (an arrow 1 / 2 / 3 / 1518 or its invisible
+// 411-413 / 1519, a boost 114-117, a portal 242 / 381, a one-way: the engine's jump-through flag) lies within --ruR tiles
+// (Chebyshev) of that room's best cell, the (2 --ruR + 1)^2 tiles around the best cell are a RUN-UP ZONE: while the room
+// is flagged, a state of it in the zone ALSO makes a speed-bucketed cell next to its coarse one (the coarse key with
+// (sign(vx) (1 + floor(|vx| / --ruB)), sign(vy) (1 + floor(|vy| / --ruB))), 0 for a speed of 0, and a 9th number
+// 0x5b), which keeps the FASTEST arrival (vx^2 + vy^2) of its bucket; in the zone these replace --spdMode=1's one fast
+// cell (the fastest overall is the fastest of its bucket); the pick runs' states and the imported runs' (the GPU
+// operators'); --ruSlack=T (0 = none, the default): a bucket cell takes only arrivals at most T ticks after the coarse
+// cell's earliest. The coarse cells stay as they are: more cells, nothing dropped (a run-up that ends in the same
+// coarse cell as the slow arrival, e.g. a loop back into a speed-gated chute or side exit, kept apart from it: the
+// campaign doctor's run-up class, src/out/n3/catalog.md 16). The one search's bursts (nearestOf) from a zone room:
+// every other request, among the cells equally near its targets the fastest first (else the earliest, as before).
+// The zones go when the flags go (progress). Stats ruZones / ruCells / ruBetter / ruBursts.
+const RU_ARROWS = [1, 2, 3, 1518, 411, 412, 413, 1519, 114, 115, 116, 117, 242, 381];
+/** the run-up zones' speed features of level L (see --ru): a byte per tile, or null when the level has none */
+function runupFeatures(L) {
+	const N = L.width * L.height, fg = L.fg, fl = L.flags, set = new Set(RU_ARROWS), out = new Uint8Array(N);
+	let n = 0;
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		if (id !== 0 && (set.has(id) || (fl[id] & 2) !== 0)) { out[i] = 1; n++; }
+	}
+	return n > 0 ? out : null;
+}
 // --gpu=1: the options passed on to `eegpu roll` (paths, and the editor's stop / pause files; --parent is the editor's pid:
 // its end closes this process's stdin, which stops the search); --bursts=1 (the one search's GPU operator, src/bursts.js)
 // reads tool, cachedir and pausefile too
@@ -2154,6 +2180,33 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let gNear = Infinity;
 	const spdMaxT0 = maxT, spdLog = process.env.EEAT_SPDLOG || '';
 	const spdSay = (o) => { if (spdLog) try { fs.appendFileSync(spdLog, JSON.stringify(Object.assign({ s: Math.round((Date.now() - t0) / 100) / 10, seed }, o)) + '\n'); } catch (e) { /* */ } };
+	// (--ru: RUN-UP CELLS, see the header; RUF the level's speed features (null: none, or --ru=0: nothing changes), ruZone the
+	// zones' tiles (made at the first zone), ruN the zones now; the stats)
+	const RUF = coarse && a.ru !== 0 && a.spd > 0 ? runupFeatures(L) : null;
+	let ruZone = null, ruN = 0, ruZones = 0, ruCells = 0, ruBetter = 0, ruBursts = 0, ruFlip = 0, ruFast = false;
+	/** --ru: a zone around tile c0 when a speed feature lies within --ruR tiles of it (true: made) */
+	const ruMark = (c0) => {
+		if (RUF === null || c0 < 0) return false;
+		const R = Math.max(1, Math.round(a.ruR)), cx = c0 % W, cy = (c0 / W) | 0;
+		const x0 = Math.max(0, cx - R), x1 = Math.min(W - 1, cx + R), y0 = Math.max(0, cy - R), y1 = Math.min(H - 1, cy + R);
+		let hit = false;
+		for (let y = y0; y <= y1 && !hit; y++) for (let x = x0; x <= x1; x++) if (RUF[y * W + x] === 1) { hit = true; break; }
+		if (!hit) return false;
+		if (ruZone === null) ruZone = new Uint8Array(N);
+		for (let y = y0; y <= y1; y++) ruZone.fill(1, y * W + x0, y * W + x1 + 1);
+		ruN++; ruZones++;
+		return true;
+	};
+	/** --ru: the zones go (the flags went) */
+	const ruClear = () => { if (ruN > 0) { ruZone.fill(0); ruN = 0; } };
+	/** --ru: the live state's zone cell (after its coarse cell: add's --ruSlack reads that one's earliest) when its room is
+	 *  flagged and its tile in a zone; returns the new cell (null: none made, or an existing one improved or not) */
+	const ruAdd = (t, rc, pc, up, blk, o, n, room) => {
+		if (ruN === 0 || room === null || room.spd !== true || ruZone[centreTile()] !== 1) return undefined;
+		const nf = add(t, rc, pc, up, blk, o, n, room, 2);
+		if (nf !== null) ruCells++;
+		return nf;
+	};
 	// (the one search, coarse cells: every new room's first cell goes to the main thread with the room it came from and the
 	// tile where it changed: the other workers' archives and the GPU operator's rooms; a room change between two known
 	// rooms once per (room, tile): the trigger tried there)
@@ -2324,7 +2377,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			KV[0] = tile; KV[1] = (sim.on_ground ? 1 : 0) | (r << 1); KV[2] = sim.jump_count; KV[3] = sim._q0; KV[4] = sim._q1; KV[5] = disc(sim);
 		}
 		let n;
-		if (r === 0 && spdFast) {
+		if (r === 0 && ruFast) {
+			// (--ru: a run-up zone's speed-bucketed cell next to the coarse one: the buckets and a 9th number)
+			const vx = sim.speed_x, vy = sim.speed_y, B = a.ruB;
+			KV[6] = vx === 0 ? 0 : Math.sign(vx) * (1 + Math.floor(Math.abs(vx) / B)); KV[7] = vy === 0 ? 0 : Math.sign(vy) * (1 + Math.floor(Math.abs(vy) / B)); KV[8] = 0x5b;
+			n = 9;
+		} else if (r === 0 && spdFast) {
 			// (--spdMode=1: the fastest arrival's cell next to the coarse one: the class keys and a 9th number)
 			const vy = sim.speed_y;
 			KV[6] = Math.sign(sim.speed_x); KV[7] = vy < -3 ? 0 : vy < 0 ? 1 : vy === 0 ? 2 : 3; KV[8] = 0x5f;
@@ -2514,7 +2572,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (t >= maxT) return null;   // (a route from there would not be faster)
 		// (nor from a state whose sound lower bound to the trophy ends past it: lowerBoundTiles)
 		if (LBT !== null && t + Math.max(1, lbOf()) > maxT) { lbCut++; return null; }
-		spdFast = fast === true;
+		// (fast: true = --spdMode=1's fast cell, 2 = --ru's speed-bucketed cell; both keep their fastest arrival)
+		ruFast = fast === 2;
+		spdFast = fast === true || ruFast;
 		spdCur = !spdFast && a.spdMode === 0 && room !== null && room !== undefined && room.spd === true;
 		keyRc = rc;
 		const k = cellKey();
@@ -2526,7 +2586,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const c = cells.get(k);
 		const v2 = spdFast ? sim.speed_x * sim.speed_x + sim.speed_y * sim.speed_y : 0;
 		if (!spdFast) spdT0 = c !== undefined && c.t < t ? c.t : t;   // (the coarse cell's earliest after this add: --spdSlack)
-		else if (a.spdSlack > 0 && t > spdT0 + a.spdSlack) return null;
+		else if (ruFast ? a.ruSlack > 0 && t > spdT0 + a.ruSlack : a.spdSlack > 0 && t > spdT0 + a.spdSlack) return null;
 		if (c !== undefined) {
 			c.seen++; c.touch = picks;
 			if (spdFast ? c.v2 >= v2 : c.t <= t) {
@@ -2534,7 +2594,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (!spdFast && tBucket > 0 && !TBK && tBucket > TMD.bucketOf(c.tm >> 4)) tMore++;
 				return null;
 			}
-			if (spdFast) c.v2 = v2;
+			if (spdFast) { c.v2 = v2; if (ruFast) ruBetter++; }
 			if (c.snap !== null) { c.snap = null; nSnaps--; }
 			const old = c.node;
 			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL); c.viaW = pickW || (pc !== null && pc.viaW);
@@ -2673,7 +2733,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {},
+	RUF !== null ? { ruOn: ruN, ruZones, ruCells, ruBetter, ruBursts } : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -2904,6 +2965,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			}
 			const nc = add(t, rc, null, null, blk, 0, t, room);
 			if (nc !== null) { added++; if (room.isNew) firstCell(room, nc, t); }
+			// (--ru: the imported run's state in a run-up zone of a flagged room: its speed-bucketed cell too)
+			const nu = ruAdd(t, rc, null, null, blk, 0, t, room);
+			if (nu !== undefined && nu !== null) { added++; if (room.isNew) firstCell(room, nu, t); }
 		}
 		imports++; importAdded += added;
 	};
@@ -2914,6 +2978,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// (the burst arm's dead zones: its starts that ran out of situations with nothing gained, bursts.js DEAD_ZONE)
 		const avoid = m.avoid ? new Set(m.avoid) : null, zw = m.zone ? Math.ceil(W / m.zone) : 0;
 		let best = null, bv = 0xffff, bs = 0;
+		// (--ru: a flagged room while a run-up zone stands: every other request the fastest of the cells equally near
+		// the targets (--spdMode=1's and --ru's cells keep their speed), else the earliest as before)
+		const fastTie = ruN > 0 && r !== undefined && r.spd === true && (ruFlip++ & 1) === 1;
+		const v2Of = (c) => (c.v2 !== undefined ? c.v2 : 0);
+		const later = fastTie ? (c, b) => v2Of(c) > v2Of(b) || (v2Of(c) === v2Of(b) && c.t < b.t) : (c, b) => c.t < b.t;
 		if (r !== undefined) {
 			// (--timed, a cell whose state carries a timed killer: its slack = the ticks left - TIMED_KT x the walk to the
 			// killer's removers (m.way: bursts.js wayField; else to the targets); the cells with slack >= 0 first, the nearest of
@@ -2929,8 +2998,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				// (a cell outside the room's cul-de-sacs before any in one: see USEFUL TERRITORY; with a timed killer the time
 				// slack before that)
 				const tl = TKEY ? c.tm >> 4 : 0, dw = wf !== null && wf[c.tile] !== 0xffff ? wf[c.tile] : v, sl = tl > 0 ? Math.min(0, tl - TIMED_KT * dw / 5) : 0;
-				if (best === null || sl > bs || (sl === bs && ((c.u === 2) !== (best.u === 2) ? c.u !== 2 : (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && c.t < best.t))))))) { best = c; bv = v; bs = sl; }
+				if (best === null || sl > bs || (sl === bs && ((c.u === 2) !== (best.u === 2) ? c.u !== 2 : (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && later(c, best)))))))) { best = c; bv = v; bs = sl; }
 			}
+			if (fastTie && best !== null && v2Of(best) > 0) ruBursts++;
 		}
 		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, sl: best !== null ? bs : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
 			inputs: best !== null ? C.eetasBytes(inputsOf(best.node)).toString('latin1') : '' });
@@ -2994,7 +3064,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		steerGen++;
 		spdBest = Infinity; gNear = Infinity; spdAt = Date.now();
 		if (spdRooms.length) { for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
-		spdTrig = 0; spdOn = 0;
+		spdTrig = 0; spdOn = 0; ruClear();
 		if (near !== null) { release(near.node); near = null; }
 		nearSent = null;
 		for (const c of cells.values()) {
@@ -3177,7 +3247,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// field's; the flags go as at progress)
 		spdBest = Infinity; gNear = Infinity; spdAt = Date.now();
 		if (spdRooms.length) { for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
-		spdTrig = 0; spdOn = 0;
+		spdTrig = 0; spdOn = 0; ruClear();
 		HS = heapOf(hsPrio);
 		if (near !== null) { release(near.node); near = null; }
 		nearSent = null;
@@ -3203,7 +3273,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (d < Infinity) spdBest = d;
 			spdAt = now;
 			if (spdRooms.length) { spdSay({ ev: 'clear', d, d0, n: spdRooms.length, routed }); for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
-			spdTrig = 0; spdOn = 0;
+			spdTrig = 0; spdOn = 0; ruClear();
 			return;
 		}
 		spdOn = spdRooms.length;
@@ -3217,7 +3287,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		spdAt = now;
 		if (br === null) return;
 		br.spd = true; spdRooms.push(br); spdTrig++; spdFlags++;
-		spdSay({ ev: 'flag', d, d0, room: br.key, desc: br.desc, bd, cells: cells.size, n: spdRooms.length });
+		// (--ru: a run-up zone around the room's best cell when a speed feature is near it)
+		const rz = ruMark(br.best.tile);
+		spdSay({ ev: 'flag', d, d0, room: br.key, desc: br.desc, bd, cells: cells.size, n: spdRooms.length, ru: rz, tile: br.best.tile });
 		spdOn = spdRooms.length; if (spdOn > spdPeak) spdPeak = spdOn;
 	};
 	/** --frontier --fBrake: the extra cost (tiles) of cell c's zone in head F's order */
@@ -3474,8 +3546,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 						near = { rc, t, node, room };
 					}
 					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
-					// (--spdMode=1: a flagged room's fastest arrivals next to the earliest)
-					if (into && a.spdMode === 1 && room !== null && room.spd === true) {
+					// (--ru: a flagged room's state in a run-up zone: its speed-bucketed cell; else --spdMode=1: a flagged
+					// room's fastest arrivals next to the earliest)
+					const nu = into ? ruAdd(t, rc, e, up, blk, o, s + 1, room) : undefined;
+					if (nu !== undefined) { if (nu !== null && room.isNew) firstCell(room, nu, t); }
+					else if (into && a.spdMode === 1 && room !== null && room.spd === true) {
 						const nf = add(t, rc, e, up, blk, o, s + 1, room, true);
 						if (nf !== null && room.isNew) firstCell(room, nf, t);
 					}
@@ -4252,7 +4327,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, total('ruZones') ? { ru: { on: total('ruOn'), zones: total('ruZones'), cells: total('ruCells'), better: total('ruBetter'), bursts: total('ruBursts') } } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -4585,7 +4660,8 @@ async function main() {
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0,
-				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0 } : {});
+				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0 } : {},
+			d.ruZones ? { ruZones: d.ruZones, ruCells: d.ruCells || 0, ruBetter: d.ruBetter || 0, ruBursts: d.ruBursts || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
