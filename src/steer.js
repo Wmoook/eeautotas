@@ -261,6 +261,9 @@ function qMoveLayer(A, M, t, di, s) {
 	if (q === 1) return false;
 	return qMoveOK(A, t, di, (i) => !M.gateOpen(i, s), (i) => M.pass(i, s) !== 0);
 }
+/** the exit from the entry in the steer's reach fields (reach.js opts.exitEntry: a same-rotation portal's teleport maps
+ *  the entry state to the exit state; default on; EEAT_EXITENTRY=0: the most any teleport gives, as before) */
+function exitEntryOn() { return process.env.EEAT_EXITENTRY !== '0'; }
 /** the time doors' class on (default; EEAT_TIMEDOOR=0 or opts.timeDoors === false: static walls, as before 2026-09-29) */
 function timeDoorsOn(opts) { return opts && opts.timeDoors !== undefined ? !!opts.timeDoors : process.env.EEAT_TIMEDOOR !== '0'; }
 /** key expiry in the layer graph (default; EEAT_TIMEDOOR=0, EEAT_KEYEXPIRY=0 or opts.keyExpiry === false: off) */
@@ -804,7 +807,7 @@ function buildPhysics(B, opts) {
 	for (const e of fr.edges) succ[Math.floor(e / S)].add(e % S);
 	const comps = sccs(S, fr.layers, succ);
 	const fields = new Array(S).fill(null), goalsOf = new Array(S).fill(null), copies = new Array(S).fill(null);
-	const rfOpts = { oneWayEntry: true, portalForced: true };
+	const rfOpts = { oneWayEntry: true, portalForced: true, exitEntry: exitEntryOn() };
 	const kappa = A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	// (the layer memo: key -> {f, n: this call's layers holding it, gen: the call that built it}; opts.memo: buildSteer's,
@@ -964,10 +967,10 @@ function fullCoinT(A) {
  *  coin out of reach from the start and from every other coin (a portal chain the model misreads: the plan would have
  *  no value at all); then without them, as main's legs were */
 function legFieldOf(lv, fg, q, coins, start) {
-	const f = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true });
+	const f = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, portalForced: true, exitEntry: exitEntryOn() });
 	if (arriveCost(f, start) < CUT) return f;
 	for (const c of coins) if (c !== q && arriveCost(f, c) < CUT) return f;
-	const g = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+	const g = RF.reachField(Object.assign({}, lv, { fg }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true, exitEntry: exitEntryOn() });
 	g.unforced = true;
 	return g;
 }
@@ -1657,7 +1660,7 @@ function buildSteer(level, opts) {
 		const freeTour = freeOn && opts.tourFirst !== true && planCoinT(B) >= 1;
 		const T = freeTour ? Math.min(nCoins, planCoinT(B)) : Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0));
 		if (T >= 1 && (modelled || opts.tourFirst === true || freeTour) && (nCoins >= TOUR_MIN_COINS || coinsOver || freeTour)) {
-			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
+			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true, exitEntry: exitEntryOn() });
 			const R = buildTour(A, level, T, freeTour ? 2 : !modelled, kappa, T0() + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 			if (R) {
 				steer.tour = R;

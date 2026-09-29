@@ -1404,6 +1404,36 @@ function sectionQ() {
 		}
 		check('knob: EEAT_HALFQUAD=0 = halfQuad false byte for byte; the random rooms without half blocks: the same fields with the rule', same && plain === 0, `${n} rooms without half blocks, ${plain} differ`);
 	}
+	// (e) the exit from the entry (opts.exitEntry, the steer's ordering fields): a walk-in portal P (rotation 0) whose exit
+	// Q (rotation 0) is the floor of a shaft, the trophy on a ledge 9 rows up: the engine never reaches the ledge (a jump from
+	// Q rises ~4 rows; the ball walks into P); the field without it reads the exit's teleport rise ("R(cap)") and the ledge
+	// near, with it the start cut off; the random rooms (their portal pairs of rotation 0) keep the self-check and every
+	// state the engine reached the trophy from finite
+	{
+		const W = 30, H = 16, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) c.push([12, y, 9]);   // the wall between the start room and the shaft
+		for (let y = 1; y < H - 1; y++) c.push([18, y, 9]);
+		c.push([3, H - 2, 255], [9, H - 2, 242, 0, 1, 2], [15, H - 2, 242, 0, 2, 3]);   // S, P (1 -> 2) on the floor, Q (id 2) at the shaft's bottom
+		c.push([13, 5, 9], [14, 5, 9], [13, 4, 121]);   // the ledge (rows up from Q) with the trophy
+		const L = levelOfCells(W, H, c), s = startSim(L, 0);
+		const on = R.reachField(L, { exitEntry: true, check: true }), off = R.reachField(L, {});
+		const tr = engineRoute(L, 500, 4000);
+		check('exit from the entry: a walk-in portal into a shaft, the trophy 9 rows up: the engine finds no route; without the rule the field reads the ledge (the teleport\'s rise), with it the start cut off (ordering only)',
+			!tr && R.costAt(off, s) >= 0 && R.costAt(on, s) < 0 && on.mismatches === 0, `engine ${tr ? tr.length : 'none'}, start ${fmt(R.costAt(on, s))} (off ${fmt(R.costAt(off, s))})`);
+		let bad = 0, cut = 0, st = 0, routed = 0;
+		for (const { level } of randomLevels()) {
+			const f = R.reachField(level, { exitEntry: true, check: true });
+			if (f.mismatches) bad++;
+			const t = engineRoute(level, 400, 2500, true, 10);
+			if (!t.route) continue;
+			routed++;
+			const a = aheadCut(level, f, t.ahead);
+			st += a.n; cut += a.cut;
+		}
+		check('exit from the entry on the random rooms (portal pairs of one rotation): the self-check holds, every state the engine reached the trophy from finite', bad === 0 && cut === 0 && routed > 0, `${routed} routed, ${st} states, ${cut} cut, ${bad} self-check failures`);
+	}
 	// (d) the steer's walk layers: the capsule's portal out of the walk model's reach (layeredField), the old rule reached it
 	{
 		const SF = require('../src/steer.js');

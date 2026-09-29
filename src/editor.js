@@ -2601,6 +2601,7 @@ function steerFp() {
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
 	if (process.env.EEAT_HALFQUAD === '0') h.update('halfquad:0');
+	if (process.env.EEAT_EXITENTRY === '0') h.update('exitentry:0');   // (the steer's exit from the entry, reach.js opts.exitEntry)
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);

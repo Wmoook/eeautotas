@@ -396,6 +396,24 @@ function reachField(level, opts) {
 	const rcT = new Int8Array(N), rpT = new Int8Array(N).fill(INF);
 	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceR));
 	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
+	// ---- THE EXIT FROM THE ENTRY (opts.exitEntry, src/steer.js's ordering fields; d4-portal-exact): a portal p whose exits
+	// all have its own rotation (eesim.js _portalTeleport: dir 0, the speeds kept, no x 1.42) puts the ball at an exit's tile
+	// corner with the speed it had: a ball rising into p rises about as far from the exit, a falling one falls on. So its
+	// teleports map the entry state to the exit state (R(q) -> R(q + 2): the centre moves to the exit's middle, <= 8 px up
+	// from anywhere in p, + < 1 px of kept sub-pixel remainders; F(k) / L(k) -> F(k + 1)), instead of the most any teleport
+	// of p can give (R(rpT[p]), F(KF): "rise 20 rows from the exit" for a ball walking in: Ice-O-Slide's (68, 159) -> (32,
+	// 175), the steer's 193 tiles at the portal vs 245 for the ball standing at the exit, the portal a false near). XR
+	// entries and exits in a field / boost or over ice (eesim.js resets slippery there: more ice ticks than the entry's
+	// state counts): as before. Marks: exitE[p] = 1
+	let exitE = null;
+	if (opts.exitEntry && level.pRot) {
+		for (const [p, list] of portalExits) {
+			const sp = level.portalSlot[p];
+			let ok = sp >= 0;
+			for (const e of list) { const se = level.portalSlot[e]; if (se < 0 || level.pRot[se] !== level.pRot[sp] || cls[e] !== NORM || (e + W < N && fg[e + W] === ICE)) ok = false; }
+			if (ok) { if (!exitE) exitE = new Uint8Array(N); exitE[p] = 1; }
+		}
+	}
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
 	const trophy = (i) => fg[i] === TROPHY && passable(i);
@@ -637,7 +655,7 @@ function reachField(level, opts) {
 	/** the edges of (t, ty, l) to other tiles: emit(t2, ty2, l2, cost). A death: the respawned ball stands still in the
 	 *  respawn tile's middle, its gravity queue from where it died (a pull there lifts it a pixel or so: R(0), which the
 	 *  lookup gives it; F(0) without one) */
-	function crossEdges(t, ty, emit) {
+	function crossEdges(t, ty, l, emit) {
 		if (deaths && dsrcT[t] === 1) for (const r of respawn) { emit(r, F_, 0, DEATH_COST); if (cls[r] === NORM) emit(r, R_, 0, DEATH_COST); }
 		if (cls[t] === DEADLY) return;
 		// (the exit: R(rpT[t]) (the rise cap of t's teleports), F(16), and in a field C(16 px/tick): the rotated speed is clamped
@@ -645,7 +663,14 @@ function reachField(level, opts) {
 		// entry under a 117) keeps R(INF): R has no moves in a down boost (fwd returns there), but the teleport tick moves
 		// the ball up out of the exit tile, so no tick of it starts in the boost: fwd's INF branch is its rise (the n3
 		// rise-q16 soundness review: R(rpT) there was a false -1))
-		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
+		if (ty !== C_ && portalExits.has(t)) {
+			if (exitE !== null && exitE[t] === 1 && ty !== X_) {   // (the exit from the entry: opts.exitEntry)
+				for (const e of portalExits.get(t)) {
+					if (ty === R_) emit(e, R_, l === INF || l + 2 > Q ? INF : l + 2, 5);
+					else emit(e, F_, Math.min(KF, l + 1), 5);   // (F, L)
+				}
+			} else for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
+		}
 	}
 
 	// ---- storage: R, F and L per tile, C per field tile, XR per xrOK tile
@@ -707,7 +732,7 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk, exitE, Q, INF });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
 	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
@@ -717,7 +742,7 @@ function reachField(level, opts) {
 	/** every edge out of (t, ty, l): emit(t2, ty2, l2, cost) */
 	const edgesOf = (t, ty, l, emit) => {
 		if (fg[t] === TROPHY) return;
-		crossEdges(t, ty, emit);
+		crossEdges(t, ty, l, emit);
 		if (cls[t] === DEADLY) return;
 		sameTile(t, ty, l, (ty2, l2) => emit(t, ty2, l2, 0));
 		const x = t % W, y = (t / W) | 0;
@@ -792,7 +817,7 @@ function reachField(level, opts) {
 function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
 		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
-	const blk = S.blk || null;   // (the half-block quadrants' closed moves)
+	const blk = S.blk || null, exitE = S.exitE || null, Q = S.Q, INF = S.INF;   // (the half-block quadrants' closed moves; the exit from the entry)
 	const K1 = S.KF + 1;
 	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
 	// price, its buckets made when first used)
@@ -859,6 +884,14 @@ function labelSearch(S) {
 			else if (c2 === BUP) { if (ty2 === R_ && l2 <= rcT[t2]) pushAllLow(t2, cur); }
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
 			if (srcList[t2] !== null && (ty2 === F_ || ty2 === R_ || (ty2 === C_ && c2 >= DOTS && c2 <= UP))) for (const p of srcList[t2]) {
+				if (exitE !== null && exitE[p] === 1) {
+					// (the exit from the entry, opts.exitEntry: R(l) -> R(l + 2) (INF past Q), F(k) / L(k) -> F(k + 1); XR as before)
+					if (ty2 === R_) {
+						push(p, R_, (l2 === INF ? Q - 1 : Math.max(-1, l2 - 2)) + 1, cur + 5);
+						if (l2 <= rpT[p]) push(p, X_, 0, cur + 5);
+					} else if (ty2 === F_) { const i0 = Math.max(0, l2 - 1); push(p, F_, i0, cur + 5); push(p, L_, i0, cur + 5); push(p, X_, 0, cur + 5); }
+					continue;
+				}
 				if (ty2 === R_ && c2 !== BDOWN && l2 > rpT[p]) continue;
 				push(p, R_, 0, cur + 5); push(p, F_, 0, cur + 5); push(p, X_, 0, cur + 5); push(p, L_, 0, cur + 5);
 			}
