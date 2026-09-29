@@ -95,14 +95,18 @@ function section1() {
 	check('the plain (GPU) file = the build with freeDP false, byte for byte', Buffer.compare(SF.steerFileBytes(st, null), SF.steerFileBytes(stOff, null)) === 0);
 	check('... its bodies the layer bodies only, the leg bodies after them', st.nPlain === stOff.bodies.length && st.bodies.length === st.nPlain + 6, `${st.nPlain} + ${st.bodies.length - st.nPlain}`);
 	const rd = SF.readSteerFile(fs.readFileSync(cpuFile)), rp = SF.readSteerFile(fs.readFileSync(plainFile));
-	check('the CPU file: the DP first (flags 1 | 4), the plain file: no DP', !!rd.dp && rd.dp.first === true && rd.dp.n === 6 && !rp.dp);
+	check('the CPU file: the DP (flags 1 | 4: the larger of it and the layer field\'s), the plain file: no DP', !!rd.dp && rd.dp.max === true && rd.dp.n === 6 && !rp.dp);
 	const [same, n] = sameAlongRun(D6.L, st, rd);
 	check('the CPU file\'s lookup = the build\'s along a random run', same === n, `${same} / ${n}`);
 	const sim = new E.EESim(D6.L); sim.reset();
 	const v = SF.steerAt(st, sim), v0 = SF.steerAt(stOff, sim);
 	const g = SF.nextGate(st, sim), c0 = st.info.dp.tour[0];
-	check('the start value: the DP\'s (not the layer field\'s walk through the coin door), its next gate the tour\'s first coin',
-		Number.isFinite(v) && Number.isFinite(v0) && v !== v0 && !!g && g.bit === D6.L.coinBit[c0[1] * W + c0[0]] && Math.abs(g.v / 5 - v) < 0.2, `${v} vs ${v0} tiles, gate ${g && g.bit}`);
+	check('the start value: the larger of the DP\'s and the layer field\'s; the DP\'s next gate the tour\'s first coin',
+		Number.isFinite(v) && Number.isFinite(v0) && !!g && g.bit === D6.L.coinBit[c0[1] * W + c0[0]] && Math.abs(v - Math.max(v0, g.v / 5)) < 0.2, `${v}: DP ${g && g.v / 5}, layer ${v0} tiles, gate ${g && g.bit}`);
+	// (by the coin door with no coin: the layer field's walk through the door is short, the DP's way over the coins long)
+	setCoins(D6.L, sim, []); place(sim, 55, 42);
+	const vd = SF.steerAt(st, sim), vl = SF.steerAt(stOff, sim);
+	check('at the coin door with no coin: the DP\'s value (the coins to fetch), far above the layer field\'s', vd > vl + 10, `${vd} vs ${vl} tiles`);
 }
 
 function section2() {
@@ -120,6 +124,13 @@ function section2() {
 		prev = v;
 	}
 	check('along the DP\'s tour the value falls at every coin', falls === order.length, `${falls} / ${order.length}: ${vals.map((x) => (x / 5).toFixed(0)).join(' ')}`);
+	let larger = 0;
+	for (let k = 0; k < order.length; k++) {
+		setCoins(D6.L, sim, order.slice(0, k)); place(sim, order[k][0], order[k][1]);
+		const g = SF.nextGate(st, sim), l = SF.steerFifths(stOff, sim), x = SF.steerFifths(st, sim);
+		if (g && x === Math.max(l, Math.floor(g.v + 0.5))) larger++;
+	}
+	check('... the larger of the DP\'s and the layer field\'s there', larger === order.length, `${larger} / ${order.length}`);
 	setCoins(D6.L, sim, order); place(sim, 50, 42);
 	check('past T coins: the layer field\'s value (the DP says nothing)', SF.steerFifths(st, sim) === SF.steerFifths(stOff, sim) && SF.steerFifths(st, sim) >= 0, `${SF.steerAt(st, sim)} tiles`);
 }
@@ -147,11 +158,11 @@ function section4() {
 	const off = SF.buildSteer(D20.L, { maxLayers: ML, freeDP: false });
 	const t = s.info.tour;
 	check('the budget leaves the coins out, the switch kept', s.info.features.indexOf('coins') < 0 && s.info.features.indexOf('psw:1') >= 0 && /^coins/.test(String(s.info.over)), `${JSON.stringify(s.info.features)}, ${s.info.over}`);
-	check('no DP (20 > 18), the walk-leg tour first below T 20 (the plan\'s door)', !s.dp && !!t && t.first === true && t.T === 20 && t.n === 20, JSON.stringify(t));
+	check('no DP (20 > 18), the walk-leg tour below T 20 (the plan\'s door), the larger of it and the layer field\'s', !s.dp && !!t && t.max === true && t.T === 20 && t.n === 20, JSON.stringify(t));
 	check('the plain (GPU) file = the build with freeDP false, byte for byte', Buffer.compare(SF.steerFileBytes(s, null), SF.steerFileBytes(off, null)) === 0);
 	const sim = new E.EESim(D20.L); sim.reset();
 	const rd = SF.readSteerFile(SF.steerFileBytes(s, null, true));
-	check('the CPU file carries the tour (first), its start value = the build\'s', !!rd.tour && rd.tour.first === 1 && SF.steerAt(rd, sim) === SF.steerAt(s, sim), `${SF.steerAt(rd, sim)} vs ${SF.steerAt(s, sim)}`);
+	check('the CPU file carries the tour (first 2), its start value = the build\'s = the larger of both', !!rd.tour && rd.tour.first === 2 && SF.steerAt(rd, sim) === SF.steerAt(s, sim) && SF.steerAt(s, sim) >= SF.steerAt(off, sim), `${SF.steerAt(rd, sim)} vs ${SF.steerAt(s, sim)} (layer ${SF.steerAt(off, sim)})`);
 }
 
 function section5() {
