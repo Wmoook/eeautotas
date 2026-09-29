@@ -156,6 +156,10 @@ function sectionToys() {
 		check('--tedge=1: the same seed and budget give the same search', sig(again) === sig(again2) && teSig(again) === teSig(again2), `${doneOf(again).picks} / ${doneOf(again2).picks} picks`);
 		const env1 = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--tedge=1', '--useful=0']), off1 = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--useful=0']);
 		check('--tedge=1 --useful=0 = --useful=0 (head T needs the useful territory\'s targets)', sig(env1) === sig(off1) && doneOf(env1).tedge === undefined);
+		// (--tPhys=1: a physics field to the goals, at most one build per TE_PHYS_PK picks: built, a route replayed, the same search again)
+		const ph = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--tedge=1', '--tPhys=1']), ph2 = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--tedge=1', '--tPhys=1']), rp = routesOf(ph), dp = doneOf(ph);
+		check('--tedge=1 --tPhys=1: a physics field built, a route (replayed), the same search again', dp.tedge && dp.tedge.physBuilds > 0 && rp.length > 0 && !!C.evaluate(L, masksOf(rp[0].inputs)) && sig(ph) === sig(ph2),
+			rp.length ? `${rp[0].ticks} ticks after ${(rp[0].simTicks / 1e6).toFixed(2)} M simulated, ${dp.tedge.physBuilds} physics builds in ${dp.tedge.physMs} ms` : 'no route');
 		const m = (x) => (x == null ? 'none' : `${(x / 1e6).toFixed(2)} M`);
 		const med = (a) => { const v = a.filter((x) => x != null).sort((p, q) => p - q); return v.length ? v[v.length >> 1] : null; };
 		console.log(`  (the simulated ticks to the first route, off / on: ${rows.map((r) => `s${r.seed} ${m(r.f0)} / ${m(r.f1)}`).join(', ')})`);
