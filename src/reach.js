@@ -262,10 +262,14 @@ function reachField(level, opts) {
 	// "protection somewhere: no tile kills anywhere" (Forgotten Helix: its one protection tile is 2 tiles from the trophy,
 	// its 39,724 spikes were air for the whole level, and a spectator box between two spike clouds, reached by a portal,
 	// looked 106 tiles from the trophy)
+	const shut = neverOpenDoors(level);   // coin doors above the level's coins: walls for good
+	// the half-block quadrants (halfQuadOn): the moves the box cannot make next to half blocks (exact), or null
+	const Qg = halfQuadOn(opts) ? quadOf(W, H, fg, flags, lk, shut) : null;
 	let protP = null;
 	if (protect) {
 		protP = new Uint8Array(N);
 		const q = [];
+		const blkP = Qg ? moveBlocks(W, H, Qg, (i) => !wallAt(i)) : null;
 		for (const i of protOn) if (!wallAt(i)) { protP[i] = 1; q.push(i); }
 		const exitsOf = (i) => {
 			const s = level.portalSlot ? level.portalSlot[i] : -1;
@@ -276,19 +280,19 @@ function reachField(level, opts) {
 			const t = q.pop(), x = t % W, y = (t / W) | 0;
 			const ex = exitsOf(t);
 			if (ex) for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N && !protP[j] && !wallAt(j)) { protP[j] = 1; q.push(j); } }
-			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-				if (!dx && !dy) continue;
+			for (let di = 0; di < 8; di++) {
+				const dx = QDX[di], dy = QDY[di];
 				const xx = x + dx, yy = y + dy;
 				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
 				const j = yy * W + xx;
 				if (protP[j] || wallAt(j)) continue;
 				if (dx && dy && wallAt(y * W + xx) && wallAt(yy * W + x)) continue;
+				if (blkP && blkP[t * 8 + di]) continue;
 				protP[j] = 1; q.push(j);
 			}
 		}
 	}
 	const cls = new Uint8Array(N), sp = new Uint8Array(N);
-	const shut = neverOpenDoors(level);   // coin doors above the level's coins: walls for good
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		const hr = hgeo(i);
@@ -301,6 +305,9 @@ function reachField(level, opts) {
 		if (isField(c) || c === BUP || c === BDOWN) anyField = true;
 	}
 	const passable = (i) => cls[i] !== WALL && cls[i] !== DEADLY;
+	// (the half-block quadrants' closed moves, for every move of the walk and the physics model: the centre can be in any
+	// tile that is not a wall on the way, a deadly one too: it dies only by its tick-start tile)
+	const blk = Qg ? moveBlocks(W, H, Qg, (i) => cls[i] !== WALL) : null;
 	// ---- deaths: the ball comes back at the checkpoint it touched last, else at the next spawn point of EE's rotation
 	// (255 and 1582 #0, level.spawnsX / spawnsY; none: tile (1, 1)); every checkpoint and spawn is a respawn tile. It dies
 	// where its current tile kills (spikes, fire, toxic; also with protection somewhere, and a half block's tile under a
@@ -391,6 +398,24 @@ function reachField(level, opts) {
 	const rcT = new Int8Array(N), rpT = new Int8Array(N).fill(INF);
 	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceR));
 	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
+	// ---- THE EXIT FROM THE ENTRY (opts.exitEntry, src/steer.js's ordering fields; d4-portal-exact): a portal p whose exits
+	// all have its own rotation (eesim.js _portalTeleport: dir 0, the speeds kept, no x 1.42) puts the ball at an exit's tile
+	// corner with the speed it had: a ball rising into p rises about as far from the exit, a falling one falls on. So its
+	// teleports map the entry state to the exit state (R(q) -> R(q + 2): the centre moves to the exit's middle, <= 8 px up
+	// from anywhere in p, + < 1 px of kept sub-pixel remainders; F(k) / L(k) -> F(k + 1)), instead of the most any teleport
+	// of p can give (R(rpT[p]), F(KF): "rise 20 rows from the exit" for a ball walking in: Ice-O-Slide's (68, 159) -> (32,
+	// 175), the steer's 193 tiles at the portal vs 245 for the ball standing at the exit, the portal a false near). XR
+	// entries and exits in a field / boost or over ice (eesim.js resets slippery there: more ice ticks than the entry's
+	// state counts): as before. Marks: exitE[p] = 1
+	let exitE = null;
+	if (opts.exitEntry && level.pRot) {
+		for (const [p, list] of portalExits) {
+			const sp = level.portalSlot[p];
+			let ok = sp >= 0;
+			for (const e of list) { const se = level.portalSlot[e]; if (se < 0 || level.pRot[se] !== level.pRot[sp] || cls[e] !== NORM || (e + W < N && fg[e + W] === ICE)) ok = false; }
+			if (ok) { if (!exitE) exitE = new Uint8Array(N); exitE[p] = 1; }
+		}
+	}
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
 	// the field transit tables (the n3 rise-exit-apex fix: ORDERING fields only, see exitApexOn; on ice only the classes
@@ -415,7 +440,7 @@ function reachField(level, opts) {
 
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
-	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
+	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP, blk);
 	// walk mode with protection: that walk (killing tiles open where a protected ball can be) is a protected ball's way. An
 	// unprotected ball's (every killing tile deadly; the protection tiles goals at the protected walk's cost from there)
 	// orders every ball, and the protected walk + PROT_COST only where the unprotected one has no way. Sound: a protected
@@ -430,7 +455,7 @@ function reachField(level, opts) {
 		if (goalF) for (const [i, c] of goalF) seedU.set(i, c);
 		else for (let i = 0; i < N; i++) if (trophy(i)) seedU.set(i, 0);
 		for (const p of protOn) { const v = walk[p]; if (v !== CUT && !(seedU.get(p) <= v)) seedU.set(p, v); }
-		const walkU = walkField(W, H, cls, passU, trophy, seedU, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
+		const walkU = walkField(W, H, cls, passU, trophy, seedU, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP, blk);
 		walkOut = new Uint16Array(N).fill(CUT);
 		for (let i = 0; i < N; i++) {
 			if (walkU[i] !== CUT) walkOut[i] = walkU[i];
@@ -438,6 +463,7 @@ function reachField(level, opts) {
 		}
 	}
 	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
+		halfQuad: blk ? blk.reduce((a, x) => a + x, 0) : 0,
 		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
 
@@ -669,7 +695,7 @@ function reachField(level, opts) {
 	/** the edges of (t, ty, l) to other tiles: emit(t2, ty2, l2, cost). A death: the respawned ball stands still in the
 	 *  respawn tile's middle, its gravity queue from where it died (a pull there lifts it a pixel or so: R(0), which the
 	 *  lookup gives it; F(0) without one) */
-	function crossEdges(t, ty, emit) {
+	function crossEdges(t, ty, l, emit) {
 		if (deaths && dsrcT[t] === 1) for (const r of respawn) { emit(r, F_, 0, DEATH_COST); if (cls[r] === NORM) emit(r, R_, 0, DEATH_COST); }
 		if (cls[t] === DEADLY) return;
 		// (the exit: R(rpT[t]) (the rise cap of t's teleports), F(16), and in a field C(16 px/tick): the rotated speed is clamped
@@ -677,7 +703,14 @@ function reachField(level, opts) {
 		// entry under a 117) keeps R(INF): R has no moves in a down boost (fwd returns there), but the teleport tick moves
 		// the ball up out of the exit tile, so no tick of it starts in the boost: fwd's INF branch is its rise (the n3
 		// rise-q16 soundness review: R(rpT) there was a false -1))
-		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
+		if (ty !== C_ && portalExits.has(t)) {
+			if (exitE !== null && exitE[t] === 1 && ty !== X_) {   // (the exit from the entry: opts.exitEntry)
+				for (const e of portalExits.get(t)) {
+					if (ty === R_) emit(e, R_, Math.min(rpT[t], l === INF || l + 2 > Q ? INF : l + 2), 5);   // (and never past the teleport's own cap)
+					else emit(e, F_, Math.min(KF, l + 1), 5);   // (F, L)
+				}
+			} else for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
+		}
 	}
 
 	// ---- storage: R, F and L per tile, C per field tile, XR per xrOK tile
@@ -739,7 +772,7 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost, blk, exitE, Q, INF });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
 	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
@@ -750,7 +783,7 @@ function reachField(level, opts) {
 	/** every edge out of (t, ty, l): emit(t2, ty2, l2, cost) */
 	const edgesOf = (t, ty, l, emit) => {
 		if (fg[t] === TROPHY) return;
-		crossEdges(t, ty, emit);
+		crossEdges(t, ty, l, emit);
 		if (cls[t] === DEADLY) return;
 		sameTile(t, ty, l, (ty2, l2) => emit(t, ty2, l2, 0));
 		const x = t % W, y = (t / W) | 0;
@@ -760,6 +793,7 @@ function reachField(level, opts) {
 			const t2 = y2 * W + x2;
 			if (!passable(t2) && !(deaths && cls[t2] === DEADLY)) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
+			if (blk && blk[t * 8 + di]) continue;
 			const add = (dx && dy ? 7 : 5) + (SA.pen !== null && SA.pen[t * 8 + di] !== 0 ? SA.cost : 0);
 			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, add));
 		}
@@ -824,6 +858,7 @@ function reachField(level, opts) {
 function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
 		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
+	const blk = S.blk || null, exitE = S.exitE || null, Q = S.Q, INF = S.INF;   // (the half-block quadrants' closed moves; the exit from the entry)
 	const K1 = S.KF + 1;
 	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
 	// price, its buckets made when first used)
@@ -890,6 +925,16 @@ function labelSearch(S) {
 			else if (c2 === BUP) { if (ty2 === R_ && l2 <= rcT[t2]) pushAllLow(t2, cur); }
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
 			if (srcList[t2] !== null && (ty2 === F_ || ty2 === R_ || (ty2 === C_ && c2 >= DOTS && c2 <= UP))) for (const p of srcList[t2]) {
+				if (exitE !== null && exitE[p] === 1) {
+					// (the exit from the entry, opts.exitEntry: R(l) -> R(min(l + 2 (INF past Q), rpT[p])), F(k) / L(k) -> F(k + 1);
+					// XR as before)
+					if (ty2 === R_) {
+						if (l2 > rpT[p]) continue;
+						push(p, R_, (l2 === INF ? Q - 1 : Math.max(-1, l2 - 2)) + 1, cur + 5);
+						push(p, X_, 0, cur + 5);
+					} else if (ty2 === F_) { const i0 = Math.max(0, l2 - 1); push(p, F_, i0, cur + 5); push(p, L_, i0, cur + 5); push(p, X_, 0, cur + 5); }
+					continue;
+				}
 				if (ty2 === R_ && c2 !== BDOWN && l2 > rpT[p]) continue;
 				push(p, R_, 0, cur + 5); push(p, F_, 0, cur + 5); push(p, X_, 0, cur + 5); push(p, L_, 0, cur + 5);
 			}
@@ -903,6 +948,7 @@ function labelSearch(S) {
 				const t = y * W + x;
 				if (srcP[t] === 0) continue;
 				if (dx !== 0 && dy !== 0 && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
+				if (blk !== null && blk[t * 8 + di] !== 0) continue;
 				const pt = pid[t];
 				let tab = invArr[(pt * nP + pt2) * 8 + di];
 				if (tab === null) tab = invTable(pt, pt2, di);
@@ -1197,9 +1243,90 @@ function silentPortals(level) {
 	silentCache.set(level, out);
 	return out;
 }
+/**
+ * THE HALF-BLOCK QUADRANTS (d4-portal-exact, 2026-09-29): which moves of the tile models the ball's 16 x 16 box can make
+ * next to half blocks. EXACT (a necessary condition of the engine's movement, never a guess), so the RCH3 proof field
+ * takes it too: its -1 set only grows where the box cannot pass.
+ * A tile's quadrants (8 x 8 px): 1 upper-left, 2 upper-right, 4 lower-left, 8 lower-right; a plain wall all four, a half
+ * block (F_HALF, the engine's rectHit by its stored rotation: 0 the right half, 1 the lower, 2 the left, 3 the upper) its
+ * two, any other rotation none (the engine: a full solid; taken as open, which errs toward reachable), every other tile
+ * none (doors, one-ways, coins: open; the model's walls are the engine's static walls). Out of the world: solid (the
+ * engine's overlaps() is 1 there).
+ * The engine moves the box 1 px at a time, x then y, with a collision test after each (eesim.js tick's loop; the
+ * auto-align only moves the centre toward its own tile's middle, never across a boundary, and never onto a quadrant the
+ * box did not already overlap), so the centre crosses tile edges one axis at a time. At a crossing of the vertical edge
+ * x = 16 X (between columns X - 1 and X) in row Y, the boxes just before and after it (both collision-free) overlap
+ * column X - 1's right quadrants and column X's left ones; in y the box overlaps row Y's upper quadrants always (the
+ * centre is in row Y), and row Y's lower ones unless cy = 16 Y exactly, where it overlaps row Y - 1's lower ones
+ * instead: hCross(X, Y) = upper free && (row Y lower free || row Y - 1 lower free). A crossing of y = 16 Y in column X
+ * likewise: column X's left quadrants at the edge always, and column X's right ones unless cx = 16 X exactly, where
+ * column X - 1's right ones: vCross(X, Y). A diagonal move of the tile models is two crossings through a side tile the
+ * centre can be in (moveOK: via the horizontal neighbour or the vertical one); with only whole tiles this is the old
+ * rule (a diagonal closed between two walls), so a level without half blocks gets the same fields byte for byte.
+ * What it closes, e.g.: a right half block's tile holds the centre only at cx = 16 X (its left edge), so it is entered
+ * from below or above only where column X - 1's right quadrants are open there (NSFW Spring Relics: its capsule's portal
+ * (10, 188) is reached only through (11, 188), a right half block over a shut team door: no way in, where the tile
+ * models read the diagonal open and the capsule 1.4 tiles from the portal); from the right, never.
+ * EEAT_HALFQUAD=0 (or opts.halfQuad === false): off, the fields as before.
+ */
+const halfQuadOn = (opts) => (opts && opts.halfQuad !== undefined ? !!opts.halfQuad : process.env.EEAT_HALFQUAD !== '0');
+/** a tile's quadrant bits by the static geometry (flags: guideFlags; shut: never-open doors, walls) */
+function quadOf(W, H, fg, flags, lk, shut) {
+	const N = W * H, nF = flags.length, Q = new Uint8Array(N);
+	let half = false;
+	for (let i = 0; i < N; i++) {
+		const id = fg[i], f = id >= 0 && id < nF ? flags[id] : 0;
+		if ((shut && shut[i]) || ((f & F_SOLID) !== 0 && (f & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0)) Q[i] = 15;
+		else if ((f & F_HALF) !== 0) {
+			const r = lk[i];
+			Q[i] = r === 0 ? 10 : r === 1 ? 12 : r === 2 ? 5 : r === 3 ? 3 : 0;
+			if (Q[i]) half = true;
+		}
+	}
+	return { Q, half };
+}
+const QDX = [-1, 0, 1, -1, 1, -1, 0, 1], QDY = [-1, -1, -1, 0, 0, 1, 1, 1];
+/** the move from tile (x, y) in direction di (QDX / QDY order) by the quadrants qa(x, y) (15 out of the world) and the
+ *  tiles the centre can be in on the way, transit(x, y) (the side tile of a diagonal) */
+function moveOK(qa, transit, x, y, di) {
+	const dx = QDX[di], dy = QDY[di];
+	const hC = (X, Y) => { const L = qa(X - 1, Y), R = qa(X, Y); if ((L & 2) || (R & 1)) return false; if (!(L & 8) && !(R & 4)) return true; return !(qa(X - 1, Y - 1) & 8) && !(qa(X, Y - 1) & 4); };
+	const vC = (X, Y) => { const U = qa(X, Y - 1), D = qa(X, Y); if ((U & 4) || (D & 1)) return false; if (!(U & 8) && !(D & 2)) return true; return !(qa(X - 1, Y - 1) & 8) && !(qa(X - 1, Y) & 2); };
+	const bx = dx > 0 ? x + 1 : x, by = dy > 0 ? y + 1 : y;
+	if (dy === 0) return hC(bx, y);
+	if (dx === 0) return vC(x, by);
+	return (transit(x + dx, y) && hC(bx, y) && vC(x + dx, by)) || (transit(x, y + dy) && vC(x, by) && hC(bx, y + dy));
+}
+/** the quadrant rule's blocked moves: Uint8Array(N x 8) (1: the move from tile t in direction di closed), only where a
+ *  half block is in the 5 x 5 tiles around (elsewhere the rule is the old one); null: no half block, or the knob off */
+function moveBlocks(W, H, Qg, transitT) {
+	if (!Qg.half) return null;
+	const N = W * H, Q = Qg.Q, blk = new Uint8Array(N * 8);
+	const qa = (x, y) => (x < 0 || y < 0 || x >= W || y >= H ? 15 : Q[y * W + x]);
+	const tr = (x, y) => x >= 0 && y >= 0 && x < W && y < H && transitT(y * W + x);
+	const near = new Uint8Array(N);   // a half block within 2 tiles
+	for (let i = 0; i < N; i++) {
+		const q = Q[i];
+		if (q === 0 || q === 15) continue;
+		const x = i % W, y = (i / W) | 0;
+		for (let yy = Math.max(0, y - 2); yy <= Math.min(H - 1, y + 2); yy++) for (let xx = Math.max(0, x - 2); xx <= Math.min(W - 1, x + 2); xx++) near[yy * W + xx] = 1;
+	}
+	let n = 0;
+	for (let t = 0; t < N; t++) {
+		if (!near[t]) continue;
+		const x = t % W, y = (t / W) | 0;
+		for (let di = 0; di < 8; di++) {
+			const x2 = x + QDX[di], y2 = y + QDY[di];
+			if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
+			if (!moveOK(qa, tr, x, y, di)) { blk[t * 8 + di] = 1; n++; }
+		}
+	}
+	return n ? blk : null;
+}
 /** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
- *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
-function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP) {
+ *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile; blk: the half-block quadrants'
+ *  closed moves, moveBlocks, or null) */
+function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP, blk) {
 	const N = W * H, dist = new Uint16Array(N).fill(CUT);
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
@@ -1218,13 +1345,14 @@ function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF
 		if (srcOf.has(t2)) for (const p of srcOf.get(t2)) relax(p, v + 5);
 		if (resp && resp.has(t2)) { resp = null; for (const i of deaths.src) relax(i, v + DEATH_COST); }   // (the nearest respawn tile)
 		// the tiles that move into t2 (a deadly t2 too: the ball moves in and dies; a deadly tile itself is left only by dying)
-		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-			if (!dx && !dy) continue;
+		for (let di = 0; di < 8; di++) {
+			const dx = QDX[di], dy = QDY[di];
 			const x = x2 - dx, y = y2 - dy;
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
 			const t = y * W + x;
 			if (!passable(t) || (forcedP && forcedP[t])) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
+			if (blk && blk[t * 8 + di]) continue;
 			relax(t, v + (dx && dy ? 7 : 5));
 		}
 	}
@@ -1432,7 +1560,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

@@ -14,7 +14,11 @@
 //   C prune    the native explore with a garbage steer field (random costs) still finds the key room's route: the steer
 //              field only orders (only the reach field's -1 rules states out); the CPU search (goexplore.js --steer)
 //              finds it too, and one worker with a tick budget is reproducible
-// usage: node test/steer.js [--only=A,B,C] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
+//   D floors   the floor probe (steer.js probeFloors; EEAT_GATEFLOOR=0 off): a trophy in a pocket reachable only by
+//              standing on a 2-coin gate: without the probe no feature and no start value; with it the coins modelled,
+//              the floor's count the coin DP's T (the CPU file's, the larger of it and the layer field's), the plain file
+//              without the DP; rooms where no floor is needed: the same files byte for byte; the CPU search routes sooner
+// usage: node test/steer.js [--only=A,B,C,D] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
 const os = require('os');
@@ -437,8 +441,94 @@ function sectionC() {
 	check('... one worker with a tick budget is reproducible', !!g1.route && !!g2.route && g1.route.inputs === g2.route.inputs && g1.route.simTicks === g2.route.simTicks);
 }
 
+/** a 40 x 12 room, the spawn at (18, 10), 2 coins far left on the floor; `pocket`: the trophy at (30, 5) in a pocket open
+ *  only from below (the jump from the floor peaks a row short; from the 2-coin gates (29-31, 10) under it, solid from 2
+ *  coins on, it touches the trophy), else the trophy at (30, row) on the floor's side of the gates */
+function floorRoom(pocket, row, sw) {
+	const W = 40, H = 12, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	if (pocket) { for (let x = 28; x <= 32; x++) cells.push([x, row - 1, 9]); cells.push([28, row, 9], [32, row, 9], [30, row, 121]); } else cells.push([34, row, 121]);
+	// (sw: purple switch 1's gates (solid while it is on) and the switch at x 2, no coins)
+	for (let x = 29; x <= 31; x++) cells.push(sw ? [x, 10, 185, 1] : [x, 10, 165, 2]);
+	cells.push(...(sw ? [[2, 10, 113, 1]] : [[2, 10, 100], [4, 10, 100]]), [18, 10, 255]);
+	const buf = ED.eelvlOf({ name: 'gatefloor', width: W, height: H, cells });
+	return { buf, L: levelOf(buf) };
+}
+/** THE FLOOR PROBE (steer.js probeFloors, d4-count-gate-floor; default on, gateFloor false / EEAT_GATEFLOOR=0 off): the
+ *  gates of a feature the model leaves out, and the count gates, were air in every layer copy, so no plan stood on one:
+ *  the trophy reachable only from a coin gate had no steer value at all (Aedan Garden, Rotcil Illusions, Nightmare Relics
+ *  in the campaign). The probe's plan (those gates as doors: passable and a floor) jumps from the gate, air in the full
+ *  state: the coins modelled, the floor's count the coin DP's T (the CPU file's, the larger of it and the layer field's) */
+function sectionD() {
+	section('D floors: a gate the way stands on');
+	const { buf, L } = floorRoom(true, 5);
+	const sim = new E.EESim(L); sim.reset();
+	const off = SF.buildSteer(L, { legThreads: 0, gateFloor: false }), on = SF.buildSteer(L, { legThreads: 0 });
+	check('without the probe: no feature, no steer value at the start (the gates air in every copy)', off.info.features.length === 0 && Number.isNaN(SF.steerAt(off, sim)), `${JSON.stringify(off.info.features)} ${SF.steerAt(off, sim)}`);
+	const fl = on.info.floors || [];
+	check('the probe: its plan jumps from a 2-coin gate, air at 0 coins: the coins modelled, the floor\'s count 2', on.info.features.includes('coins') && fl.length > 0 && fl[0].feat === 'coins' && fl[0].at[1] === 10 && fl[0].at[0] >= 29 && fl[0].at[0] <= 31 && on.info.floorT === 2 && on.info.cegar[0].cx === 'coins', JSON.stringify({ features: on.info.features, floors: fl, floorT: on.info.floorT }));
+	check('... the coin DP over the floor\'s count (T 2, the CPU file\'s: dp.max, dp.free)', !!on.dp && on.dp.T === 2 && on.dp.max && on.dp.free && on.info.dp.floor === true, JSON.stringify(on.info.dp));
+	const v0 = SF.steerAt(on, sim);
+	// (the coins at x 2 / 4, the spawn at 18, the gates at 29-31: the detour 14 tiles out and 25 back at least)
+	check('... a start value that counts the detour to the coins', v0 > 39, `${v0} tiles`);
+	const s2 = new E.EESim(L); s2.reset();
+	setCoinsOf(L, s2, [[2, 10], [4, 10]]);
+	const f = R.reachField(L);
+	check('... the coins held: the layer field\'s value (the gates solid), the reach field\'s', Math.abs(SF.steerAt(on, s2) - R.costAt(f, s2)) <= 1, `${SF.steerAt(on, s2)} vs ${R.costAt(f, s2)}`);
+	const plain = SF.readSteerFile(SF.steerFileBytes(on, null)), cpu = SF.readSteerFile(SF.steerFileBytes(on, null, true));
+	check('... the plain (GPU) file: the layer bodies, no DP; the CPU file: the DP, flags 1 | 4', plain.dp === null && plain.bodies.length === on.nPlain && !!cpu.dp && cpu.dp.max === true && cpu.dp.T === 2, `plain bodies ${plain.bodies.length}, cpu bodies ${cpu.bodies.length}`);
+	let same = true;
+	const s3 = new E.EESim(L); s3.reset();
+	const inp = new E.EEInput();
+	for (let t = 0; t < 600 && same; t++) { E.applyMask(inp, [2, 2, 3, 4, 5, 0][(t / 29 | 0) % 6]); s3.tick(inp); if (SF.steerFifths(on, s3) !== SF.steerFifths(cpu, s3)) same = false; }
+	check('... the CPU file round trip gives the build\'s numbers', same);
+	// (no floor the way needs: the trophy on the floor right of the gates, or the pocket a row lower (the jump from the
+	// floor reaches it): the file as without the probe, byte for byte)
+	for (const [name, r] of [['the trophy on the floor', floorRoom(false, 10)], ['the pocket a row lower', floorRoom(true, 6)]]) {
+		const a = SF.buildSteer(r.L, { legThreads: 0, gateFloor: false }), b = SF.buildSteer(r.L, { legThreads: 0 });
+		const eq = Buffer.compare(SF.steerFileBytes(a, null), SF.steerFileBytes(b, null)) === 0 && Buffer.compare(SF.steerFileBytes(a, null, true), SF.steerFileBytes(b, null, true)) === 0;
+		check(`${name}: no floor step, the same files as without the probe`, eq && !(b.info.floors || []).length, `floors ${JSON.stringify(b.info.floors || [])}, features ${JSON.stringify(b.info.features)}`);
+	}
+	// (the same pocket on purple switch 1's gates: the count gates only by default, so no floor step there (the files as
+	// without the probe); 'all' (EEAT_GATEFLOOR=all): the switch modelled from its gate's floor)
+	{
+		const S = floorRoom(true, 5, true).L;
+		const a = SF.buildSteer(S, { legThreads: 0, gateFloor: false }), b = SF.buildSteer(S, { legThreads: 0 }), c = SF.buildSteer(S, { legThreads: 0, gateFloor: 'all' });
+		const eq = Buffer.compare(SF.steerFileBytes(a, null, true), SF.steerFileBytes(b, null, true)) === 0;
+		check('a switch\'s gate as the floor: by default (the count gates) no floor step, the files as without the probe; \'all\': the switch modelled', eq && !(b.info.floors || []).length && c.info.features.includes('psw:1') && (c.info.floors || []).some((q) => q.feat === 'psw:1'),
+			`default floors ${JSON.stringify(b.info.floors || [])}; all: ${JSON.stringify(c.info.features)} ${JSON.stringify(c.info.floors || [])}`);
+	}
+	const prev = process.env.EEAT_GATEFLOOR;
+	process.env.EEAT_GATEFLOOR = '0';
+	const k0 = SF.buildSteer(L, { legThreads: 0 });
+	process.env.EEAT_GATEFLOOR = 'all';
+	const kA = SF.buildSteer(L, { legThreads: 0 });
+	if (prev !== undefined) process.env.EEAT_GATEFLOOR = prev; else delete process.env.EEAT_GATEFLOOR;
+	check('EEAT_GATEFLOOR=0: the build without the probe, byte for byte; =all: the coin floor too', Buffer.compare(SF.steerFileBytes(k0, null, true), SF.steerFileBytes(off, null, true)) === 0 && Buffer.compare(SF.steerFileBytes(kA, null, true), SF.steerFileBytes(on, null, true)) === 0);
+	// the CPU search (1 worker, seed 1, a tick budget, coarse cells): with the CPU file a route in fewer simulated ticks
+	// than with the file without the probe
+	const lf = path.join(tmp, 'gatefloor.eelvl'), fa = path.join(tmp, 'gf_cpu.steer'), fb = path.join(tmp, 'gf_off.steer');
+	fs.writeFileSync(lf, buf);
+	fs.writeFileSync(fa, SF.steerFileBytes(on, null, true));
+	fs.writeFileSync(fb, SF.steerFileBytes(off, null, true));
+	const goex = (file) => {
+		const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lf, '--workers=1', '--seed=1', '--maxTicks=20000000', '--mem=300', '--seconds=120', '--first=1', '--cells=coarse', `--steer=${file}`], { encoding: 'utf8', maxBuffer: 1 << 28 });
+		const r = out.split('\n').map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).find((j) => j && j.ev === 'result');
+		return r ? r.simTicks : Infinity;
+	};
+	const ta = goex(fa), tb = goex(fb);
+	check('the CPU search with the floor DP routes in fewer simulated ticks than without the probe', ta < tb, `${ta} vs ${tb}`);
+}
+function setCoinsOf(L, sim, taken) {
+	sim._coinBits = new Int32Array(L.coinWords); sim._coinOwned = true;
+	for (const [x, y] of taken) { const b = L.coinBit[y * L.width + x]; sim._coinBits[b >> 5] |= 1 << (b & 31); }
+	sim.coins = taken.length;
+}
+
 if (want('A')) sectionA();
 if (want('B')) sectionB();
 if (want('C')) sectionC();
+if (want('D')) sectionD();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

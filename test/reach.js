@@ -1421,6 +1421,138 @@ function sectionX() {
 		check('steer fallback: a start with a value with the tables (chain top, the trophy 1 row over it) keeps the tables\' steer', b1.v >= 0 && !b1.st.info.exitApex, `tables ${fmt(b1.v)}`);
 	}
 }
+/** Q: the half-block quadrants (exact: the moves the box cannot make next to half blocks). (a) The Spring Relics capsule:
+ *  a portal P (id 1 -> 2) at (6, 5) under a roof, a wall under it (the shut team door), a right half block (1043, rotation
+ *  0) at (7, 5) beside it: the ball below reaches P neither up the half block's tile (its centre only at x = 16 x 7, where
+ *  the box overlaps the wall under P) nor diagonally past it; the trophy is behind P's exit. The engine's search finds no
+ *  route; the field with the rule cuts the start off (a proof), without it the diagonal was open. With the wall under P
+ *  made air the engine routes and the field is finite. (b) Random rooms full of half blocks at every rotation: every state
+ *  from which a small engine search reached the trophy finite; the Bellman self-check. (c) The knob and the byte-for-byte
+ *  fields of a level without half blocks. */
+function sectionQ() {
+	section('Q: half-block quadrants (exact)');
+	const capsule = (doorWall) => {
+		// the ball's room: x 7-14 (6 too without the door wall), y 6-7 on a floor (row 8); over it row 5: P (6, 5), the
+		// right half block (7, 5), air (8, 5), a left half block (9, 5), walls; a roof (row 4)
+		const W = 24, H = 12, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let x = 1; x <= 15; x++) c.push([x, 4, 9], [x, 8, 9]);
+		for (let y = 5; y <= 7; y++) c.push([5, y, 9], [15, y, 9]);
+		c.push([6, 7, 9]);
+		for (let x = 10; x <= 14; x++) c.push([x, 5, 9]);
+		c.push([6, 5, 242, 0, 1, 2], [7, 5, 1043, 0], [9, 5, 1043, 2]);
+		if (doorWall) c.push([6, 6, 9]);
+		// the trophy's box (x 17-22, y 1-3), P's exit Q (id 2 -> 3, nothing is id 3) at (18, 2)
+		for (let x = 16; x <= 22; x++) c.push([x, 4, 9]);
+		for (let y = 1; y <= 3; y++) c.push([16, y, 9]);
+		c.push([18, 2, 242, 0, 2, 3], [20, 2, 121], [12, 7, 255]);
+		return levelOfCells(W, H, c);
+	};
+	{
+		const L = capsule(true), s = startSim(L, 0);
+		const on = R.reachField(L, { halfQuad: true, check: true }), off = R.reachField(L, { halfQuad: false });
+		const tr = engineRoute(L, 700, 4000);
+		check('capsule (wall under the portal): the engine finds no route; the field with the rule cuts the start off, without it the start was finite (the diagonal past the half block)',
+			!tr && R.costAt(on, s) < 0 && R.costAt(off, s) >= 0 && on.mismatches === 0 && on.halfQuad > 0, `engine ${tr ? tr.length : 'none'}, start ${fmt(R.costAt(on, s))} (off ${fmt(R.costAt(off, s))}), ${on.halfQuad} closed moves`);
+		const L2 = capsule(false), s2 = startSim(L2, 0), on2 = R.reachField(L2, { halfQuad: true, check: true });
+		const tr2 = engineRoute(L2, 700, 4000, true, 20);
+		const a = tr2.route ? aheadCut(L2, on2, tr2.ahead) : null;
+		check('capsule with the wall under the portal made air: the engine routes (through the portal), the start finite, no state leading to the trophy cut off',
+			!!tr2.route && R.costAt(on2, s2) >= 0 && a && a.cut === 0 && on2.mismatches === 0, `engine ${tr2.route ? tr2.route.length : 'none'}, start ${fmt(R.costAt(on2, s2))}, ${a ? `${a.n} states, ${a.cut} cut` : ''}`);
+	}
+	// (b) random rooms with half blocks (1043 at rotations 0-3, 1041, presents): every state the engine's search reached the
+	// trophy from is finite, the self-check holds
+	{
+		let seed = 77;
+		const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+		let rooms = 0, routed = 0, states = 0, cut = 0, bad = 0, closed = 0, first = null;
+		for (let k = 0; k < (QUICK ? 8 : 24); k++) {
+			const W = 12 + (k % 3) * 3, H = 9 + (k % 2) * 3, cells = [];
+			for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+			for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+			for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+				const r = rnd();
+				if (r < 0.14) cells.push([x, y, 9]);
+				else if (r < 0.34) cells.push([x, y, [1043, 1041, 1101][Math.floor(rnd() * 3)], Math.floor(rnd() * 4)]);
+			}
+			cells.push([W - 3, 1, 121], [2, H - 2, 255]);
+			const L = levelOfCells(W, H, cells), f = R.reachField(L, { halfQuad: true, check: true });
+			rooms++;
+			closed += f.halfQuad;
+			if (f.mismatches) bad++;
+			const tr = engineRoute(L, 500, 3000, true, 15);
+			if (!tr.route) continue;
+			routed++;
+			const a = aheadCut(L, f, tr.ahead);
+			states += a.n; cut += a.cut;
+			if (a.cut && !first) first = { k, state: a.first };
+		}
+		check(`random half-block rooms (${rooms}): every state from which the engine reached the trophy finite, the self-check holds`, cut === 0 && bad === 0 && routed > 0 && closed > 0,
+			`${routed} routed, ${states} states, ${cut} cut, ${bad} self-check failures, ${closed} closed moves${first ? `; first ${JSON.stringify(first)}` : ''}`);
+	}
+	// (c) the knob: EEAT_HALFQUAD=0 = halfQuad false byte for byte; a level without half blocks: the same field with the rule
+	{
+		const L = capsule(true);
+		const prev = process.env.EEAT_HALFQUAD;
+		process.env.EEAT_HALFQUAD = '0';
+		const a = R.reachField(L);
+		if (prev === undefined) delete process.env.EEAT_HALFQUAD; else process.env.EEAT_HALFQUAD = prev;
+		const b = R.reachField(L, { halfQuad: false });
+		let same = a.halfQuad === 0 && Buffer.compare(Buffer.from(a.walk.buffer), Buffer.from(b.walk.buffer)) === 0;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) if (Buffer.compare(Buffer.from(a[k].buffer), Buffer.from(b[k].buffer)) !== 0) same = false;
+		let plain = 0, n = 0;
+		for (const { level } of randomLevels()) {
+			let half = false;
+			for (let i = 0; i < level.fg.length; i++) if ((level.flags[level.fg[i]] & 8) !== 0) half = true;
+			if (half) continue;
+			n++;
+			const x = R.reachField(level, { halfQuad: true }), y = R.reachField(level, { halfQuad: false });
+			if (Buffer.compare(Buffer.from(x.walk.buffer), Buffer.from(y.walk.buffer)) !== 0) plain++;
+			if (x.mode === 'physics') for (const k of ['costR', 'costF', 'costL']) if (Buffer.compare(Buffer.from(x[k].buffer), Buffer.from(y[k].buffer)) !== 0) plain++;
+		}
+		check('knob: EEAT_HALFQUAD=0 = halfQuad false byte for byte; the random rooms without half blocks: the same fields with the rule', same && plain === 0, `${n} rooms without half blocks, ${plain} differ`);
+	}
+	// (e) the exit from the entry (opts.exitEntry, the steer's ordering fields): a walk-in portal P (rotation 0) whose exit
+	// Q (rotation 0) is the floor of a shaft, the trophy on a ledge 9 rows up: the engine never reaches the ledge (a jump from
+	// Q rises ~4 rows; the ball walks into P); the field without it reads the exit's teleport rise ("R(cap)") and the ledge
+	// near, with it the start cut off; the random rooms (their portal pairs of rotation 0) keep the self-check and every
+	// state the engine reached the trophy from finite
+	{
+		const W = 30, H = 16, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) c.push([12, y, 9]);   // the wall between the start room and the shaft
+		for (let y = 1; y < H - 1; y++) c.push([18, y, 9]);
+		c.push([3, H - 2, 255], [9, H - 2, 242, 0, 1, 2], [15, H - 2, 242, 0, 2, 3]);   // S, P (1 -> 2) on the floor, Q (id 2) at the shaft's bottom
+		c.push([13, 5, 9], [14, 5, 9], [13, 4, 121]);   // the ledge (rows up from Q) with the trophy
+		const L = levelOfCells(W, H, c), s = startSim(L, 0);
+		const on = R.reachField(L, { exitEntry: true, check: true }), off = R.reachField(L, {});
+		const tr = engineRoute(L, 500, 4000);
+		check('exit from the entry: a walk-in portal into a shaft, the trophy 9 rows up: the engine finds no route; without the rule the field reads the ledge (the teleport\'s rise), with it the start cut off (ordering only)',
+			!tr && R.costAt(off, s) >= 0 && R.costAt(on, s) < 0 && on.mismatches === 0, `engine ${tr ? tr.length : 'none'}, start ${fmt(R.costAt(on, s))} (off ${fmt(R.costAt(off, s))})`);
+		let bad = 0, cut = 0, st = 0, routed = 0;
+		for (const { level } of randomLevels()) {
+			const f = R.reachField(level, { exitEntry: true, check: true });
+			if (f.mismatches) bad++;
+			const t = engineRoute(level, 400, 2500, true, 10);
+			if (!t.route) continue;
+			routed++;
+			const a = aheadCut(level, f, t.ahead);
+			st += a.n; cut += a.cut;
+		}
+		check('exit from the entry on the random rooms (portal pairs of one rotation): the self-check holds, every state the engine reached the trophy from finite', bad === 0 && cut === 0 && routed > 0, `${routed} routed, ${st} states, ${cut} cut, ${bad} self-check failures`);
+	}
+	// (d) the steer's walk layers: the capsule's portal out of the walk model's reach (layeredField), the old rule reached it
+	{
+		const SF = require('../src/steer.js');
+		const L = capsule(true);
+		const A1 = SF.analyze(L, { halfQuad: true }), A0 = SF.analyze(L, { halfQuad: false });
+		const c1 = SF.layeredField(A1, SF.makeModel(A1, new Set())).cost, c0 = SF.layeredField(A0, SF.makeModel(A0, new Set())).cost;
+		const st = A1.start.t;
+		check('steer walk layers: the trophy out of reach from the start with the rule (the old rule: reached through the capsule portal)', c1[st] > 1e9 && c0[st] < 1e9, `start ${c1[st]} (old ${c0[st]})`);
+	}
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -1449,6 +1581,7 @@ function trapLevel() {
 	if (want('J')) sectionJ();
 	if (want('S')) sectionS();
 	if (want('X')) sectionX();
+	if (want('Q')) sectionQ();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });
