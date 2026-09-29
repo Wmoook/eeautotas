@@ -201,7 +201,7 @@ function readModel(file) {
 function policyOf(file, opts = {}) {
 	const j = typeof file === 'string' ? readModel(file) : file;
 	const M = makeModel(j.counts, opts.alpha || j.alpha || 4);
-	const eps = opts.eps === undefined ? 0.1 : opts.eps;
+	const eps = opts.eps === undefined ? 0.02 : opts.eps;
 	const cdf = M.cdf, fo = [0, 1];
 	const OPT = [];
 	for (const h of [0, 2, 4]) for (const v of [0, 8, 16]) for (const jj of [0, 1]) OPT.push(h | v | jj);
