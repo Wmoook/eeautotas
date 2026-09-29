@@ -845,7 +845,17 @@ function addSource(o) {
 	if (o.gain > s.gain) s.gain = o.gain;
 	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
 	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
-	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room', S.strategies.some((q) => q.key === 'breaker' && q.label === o.from)); }
+	// (breakChain, OPT-IN (b9cw2-b9): where the CPU file carries the switch chain, only a room of a NEW MOST chain progress
+	// (chainProg: waves complete, then the ids ON of the first unfinished wave) resets it: on Bad EE Level 9 every switch
+	// toggle and 1619 reset makes a room that opens territory (216-299 of 541-631 rooms a switch-off regression), so the
+	// clock never ran out and the breaker, whose runs aim at the chain's next switch from the rooms of the most progress
+	// (switchGate, breakStarts), had 0 rounds in 1200 s while each wave's last switch took 175-230 s)
+	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) {
+		brk.rooms.add(o.room);
+		let count = true;
+		if (cur && cur.opts.breakChain && cur.chainW) { const cp = chainProg(s.desc); count = cp > (brk.chainMax === undefined ? -1 : brk.chainMax); if (count) brk.chainMax = cp; }
+		if (count) breakProgress('room', S.strategies.some((q) => q.key === 'breaker' && q.label === o.from));
+	}
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
@@ -2436,6 +2446,10 @@ function start(b, gpu, test) {
 		// (b9cw-b9, OPT-IN: `b.rollsChain === true` or EEAT_ROLLS_CHAIN=1: where the CPU file carries the switch chain, the GPU
 		// random runs' new rooms are no yield for their GPU share (rollsDryAfter); see ROLLS_DRY_MAX)
 		rollsChain: b.rollsChain === true || process.env.EEAT_ROLLS_CHAIN === '1',
+		// (b9cw2-b9, OPT-IN: `b.breakChain === true` or EEAT_BREAK_CHAIN=1: where the CPU file carries the switch chain, a new
+		// room resets the stall clock (the wall breaker's and the escape's) only when it holds a new most chain progress:
+		// see the stall clock in addSource)
+		breakChain: b.breakChain === true || process.env.EEAT_BREAK_CHAIN === '1',
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
