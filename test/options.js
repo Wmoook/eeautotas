@@ -9,7 +9,8 @@
 //            the tick the coin is taken), the cap (a hold that meets no event), WALL with no direction held (cap only)
 //   search   goexplore.js with --opts=1 (fine and coarse cells): a route (replayed), option runs about --optP of the runs,
 //            the ends counted, the same seed and tick budget = the same search; without --opts no opts in the done
-//            event; with --main=<main's goexplore.js> also the flag off = main (the same done numbers); all with
+//            event; --optEv=0 (the ablation) ends options at their caps only; with --main=<main's goexplore.js> also
+//            the flag off = main (the same done numbers); all with
 //            --classW=0 (the class workers' routes come in by the clock)
 // usage: node test/options.js [--main=<path to origin/main's src/goexplore.js>]   Exit code 1 if any check fails.
 const fs = require('fs');
@@ -214,6 +215,13 @@ function sectionSearch() {
 		if (cells === 'coarse') check('coarse cells: a ROOM end (the coin)', ends.room > 0, `room ${ends.room}`);
 		check(`${cells} cells with --opts: the same seed and tick budget give the same search`, sig(a1) === sig(a2), sig(a1));
 		check(`${cells} cells: --opts changes the search`, sig(a1) !== sig(off));
+	}
+	// --optEv=0 (the ablation: the scale-free holds alone): every option ends at its cap
+	{
+		const a1 = gox(GOX, LC.file, [...base, '--cells=coarse', '--opts=1', '--optEv=0']);
+		const o = doneOf(a1).opts || {}, ends = o.ends || {};
+		const rr = routesOf(a1), ev = rr.length ? C.evaluate(LC.L, masksOf(rr[rr.length - 1].inputs)) : null;
+		check('--optEv=0: every option ends at its cap (no event), a route replayed', o.runs > 0 && ends.cap > 0 && OP.NAMES.slice(0, OP.N_EVENTS).every((n) => ends[n] === 0) && !!ev, JSON.stringify(o));
 	}
 	// the longer level: option runs up to 320 ticks, their paths replayed from the blocks (a tick budget that makes many)
 	{

@@ -183,7 +183,8 @@
 //        [--opts=0|1 (EVENT OPTIONS, OFF by default: src/options.js; --optP=0.5 of a pick's CPU runs are option runs:
 //        an input from the runs' draw held until a physical event (landing, lift-off, a wall, the apex, a field
 //        change, a room change) or its cap of 4 x luby(j) ticks (at most 256), the run 40 x luby(k) ticks (at most
-//        320); the done event's opts {runs, cells, ends}; without it no draw changes)]
+//        320); the done event's opts {runs, cells, ends}; --optEv=0: no event ends an option, only its cap (the
+//        ablation: the scale-free holds alone); without --opts no draw changes)]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
 //        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
@@ -329,7 +330,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
@@ -2085,7 +2086,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const optRun = OT !== null ? new Uint8Array(a.rolls) : null, optOff = OT !== null ? new Int32Array(a.rolls) : null, optLen = OT !== null ? new Int32Array(a.rolls) : null;
 	/** the next option from the live state, its input m (first: before the run's first tick, the room key computed) */
 	const optNew = (m, first) => {
-		const T = (rnd() * OP.N_EVENTS) | 0;
+		const T = a.optEv ? (rnd() * OP.N_EVENTS) | 0 : -1;   // (--optEv=0, the ablation: no event, every option ends at its cap)
 		OT.start(m, T, OP.capOf(++optJ), T === OP.T_ROOM && coarse ? (first ? RM.key(sim) : roomKey) : 0);
 	};
 	const disc = coarse ? null : discreteOf(L);
