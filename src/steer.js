@@ -1209,6 +1209,8 @@ function coinDPDrop(CL, A, maxN = 18) {
 // no more features (the layers they would add) and no coin DP (its legs are bodies too; more than 18 coins: none anyway).
 // The five big jobs' levels fit (Forgotten Veil: 17 layers + the DP over 16 coins, 539 MB).
 const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
+// (the coin DP chain's largest value from the start, fifths: the searches' distance scale, STEER_REAL_MAX 5999 tiles)
+const DP_START_MAX = 5999 * 5;
 /**
  * The steer field of a prepared level. opts: {maxLayers (4096), maxBytes (STEER_MAX_BYTES), maxMs (STEER_MAX_MS),
  * maxIters (12), noDP} -> steer: {version, W, H, feats [{key, kind, param, radix, stride}], team [values], S, layerBody
@@ -1289,7 +1291,11 @@ function buildSteer(level, opts) {
 		dpHow = `${opts.coinT ? 'layered' : 'phys'} T ${cp.T}`;
 		// (no value from the start (a coin that needs another layer has no leg in the legs' one; the wrong T): the chain
 		// coinLegsLayered at the same T, at fullCoinT, at the count by physics; then the DP with the unreachable coins
-		// dropped at a penalty (dpDrop) of the first that has one. Ordering values only: nothing is cut)
+		// dropped at a penalty (dpDrop) of the first that has one. Ordering values only: nothing is cut. A replacement whose
+		// value from the start is past the searches' distance scale (DP_START_MAX: goexplore.js / native/beam.h
+		// STEER_REAL_MAX 5999 tiles) is not taken: every attempt's distance would read 5999 (Cave Exploration's layered
+		// T 7 tour: 6,136 tiles at the start; the A/B's var arm had no nearer attempt for its stall clocks))
+		const fits = (x, y) => dpStart(x, y, st0) <= DP_START_MAX;
 		if (opts.dpChain !== false && process.env.EEAT_COINFIX !== '0' && !(dpStart(CL, D, st0) < Infinity)) {
 			const drops = [];
 			const d0 = CL && !CL.layered ? coinDPDrop(CL, A) : null;
@@ -1303,10 +1309,10 @@ function buildSteer(level, opts) {
 				if (Date.now() > deadline) break;
 				const CL2 = coinLegsLayered(B, PH, { T: T2, coins: cp.coins }, deadline, Object.assign({}, opts, { drop: true }));
 				if (!CL2) continue;
-				if (CL2.layered.start < Infinity && !CL2.dropped) { CL = CL2; D = CL2.layered.D; dpHow = `layered T ${T2}`; got = true; break; }
-				if (CL2.layered.start < Infinity) drops.push({ CL: CL2, D: CL2.layered.D, how: `layered T ${T2} + ${CL2.dropped} dropped` });
+				if (fits(CL2, CL2.layered.D) && !CL2.dropped) { CL = CL2; D = CL2.layered.D; dpHow = `layered T ${T2}`; got = true; break; }
+				if (fits(CL2, CL2.layered.D)) drops.push({ CL: CL2, D: CL2.layered.D, how: `layered T ${T2} + ${CL2.dropped} dropped` });
 			}
-			if (!got && drops.length) { const d = drops.find((x) => dpStart(x.CL, x.D, st0) < Infinity); if (d) { CL = d.CL; D = d.D; dpHow = d.how; } }
+			if (!got && drops.length) { const d = drops.find((x) => fits(x.CL, x.D)); if (d) { CL = d.CL; D = d.D; dpHow = d.how; } }
 		}
 		if (D) {
 			const none = new Uint8Array(N);
