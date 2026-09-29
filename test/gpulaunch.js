@@ -317,6 +317,51 @@ check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summa
 		`${dn} records (${deep} from picked cells), ${dBad} different, ${unordered} out of order, ${noPath} without a path; switches on and off again ${offAgain}, team ${team}, coins ${coins}, ` +
 		`key ${keys}, ${phases.size} door phases${d.code ? `; exit ${d.code} ${d.err}` : ''}`);
 }
-console.log(`\n${pass} passed, ${fail} failed`);
-fs.rmSync(TMP, { recursive: true, force: true });
-process.exit(fail ? 1 : 0);
+// 7. the GPU memory budget (cudadrv.h: EEAT_GPU_BUDGET_MB): a process sizes by its share, not the whole GPU; `gpu` says
+// both (memMB the budget, totalMB the GPU's, freeMB the free memory at the report)
+{
+	const prev = process.env.EEAT_GPU_BUDGET_MB;
+	process.env.EEAT_GPU_BUDGET_MB = '2048';
+	const r = eegpu(['explore', bin, '-', '--finish=1', '--discrete=1', '--depth=1000', '--seconds=6', '--coarse=0', '--cqx=0.5', '--cqv=16', '--qy=1', '--qvy=16', `--reach=${reach}`, '--prune=1']);
+	if (prev === undefined) delete process.env.EEAT_GPU_BUDGET_MB; else process.env.EEAT_GPU_BUDGET_MB = prev;
+	const d = summary(r), g = d.gpu || {};
+	check('EEAT_GPU_BUDGET_MB=2048: explore sizes by the budget (memMB 2048 < totalMB; a table of 2^25 cells, as on a small GPU) and still finishes',
+		r.code === 0 && g.memMB === 2048 && g.totalMB > 2048 && Number.isFinite(g.freeMB) && d.cellLog === 25 && d.end === 'finish',
+		`memMB ${g.memMB}, totalMB ${g.totalMB}, freeMB ${g.freeMB}, cellLog ${d.cellLog}, cap ${d.cap}, end ${d.end}${r.code ? `, exit ${r.code} ${r.err}` : ''}`);
+}
+// 8. the parent watchdog (launch.h parentWatchdog): an eegpu whose --parent has exited ends within about a second
+// wherever it waits: (a) a burst server idle on its stdin (which another process still holds open: the stop checks
+// between launches never run there), (b) a command held between launches by its pause file
+(async () => {
+	const { spawn } = require('child_process');
+	const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+	const until = async (f, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (f()) return Date.now() - t0; await new Promise((r) => setTimeout(r, 50)); } return -1; };
+	/** a stand-in parent (a node process that lives `lifeMs`), the eegpu child started by this test with --parent=<it>:
+	 *  once eegpu has printed `readyEv`, the parent's exit and then how long eegpu lived on (ms; -1: still alive after 6 s) */
+	const orphan = async (a, readyEv, lifeMs) => {
+		const par = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${lifeMs})`], { stdio: 'ignore', windowsHide: true });
+		const full = [...a, `--parent=${par.pid}`, `--launch-ms=${TARGET}`, ...(args.ptxdir ? [`--ptxdir=${path.resolve(args.ptxdir)}`] : [])];
+		// (stdin a pipe this test holds open: the idle server's getchar never sees its end)
+		const ch = spawn(TOOL, full, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, detached: true });
+		let out = '';
+		ch.stdout.on('data', (d) => { out += d; });
+		const readyMs = await until(() => out.includes(`"ev":"${readyEv}"`), 120000);
+		const parGone = await until(() => par.exitCode !== null || !alive(par.pid), lifeMs + 30000);
+		const lived = readyMs < 0 || parGone < 0 ? -2 : await until(() => ch.exitCode !== null || !alive(ch.pid), 6000);
+		if (ch.exitCode === null && alive(ch.pid)) { try { ch.stdin.end(); } catch (e) { /* gone */ } await until(() => ch.exitCode !== null, 3000); if (ch.exitCode === null) try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } }
+		try { par.kill(); } catch (e) { /* gone */ }
+		return { lived, readyMs, out };
+	};
+	const s = await orphan(['explore', bin, '--serve=1'], 'serving', 3000);
+	check('parent watchdog: an idle burst server (explore --serve, stdin still open) ends within 2 s of its --parent\'s exit', s.lived >= 0 && s.lived <= 2000,
+		s.lived === -2 ? `no serving line (${s.out.slice(-200)})` : s.lived < 0 ? 'still alive 6 s after' : `ended ${s.lived} ms after`);
+	const pause = path.join(TMP, 'pause');
+	fs.writeFileSync(pause, '1');
+	const p = await orphan(['explore', bin, '-', '--finish=1', '--discrete=1', '--depth=1000', '--seconds=60', '--coarse=0', '--cqx=0.5', '--cqv=16', '--qy=1', '--qvy=16', `--reach=${reach}`, `--pausefile=${pause}`], 'ready', 3000);
+	check('parent watchdog: a command held by its pause file ends within 2 s of its --parent\'s exit', p.lived >= 0 && p.lived <= 2000,
+		p.lived === -2 ? `no ready line (${p.out.slice(-200)})` : p.lived < 0 ? 'still alive 6 s after' : `ended ${p.lived} ms after`);
+	try { fs.unlinkSync(pause); } catch (e) { /* gone */ }
+	console.log(`\n${pass} passed, ${fail} failed`);
+	fs.rmSync(TMP, { recursive: true, force: true });
+	process.exit(fail ? 1 : 0);
+})();

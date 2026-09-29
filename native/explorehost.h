@@ -160,9 +160,14 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 	const size_t SB = sizeof(S);
 	// the visited-cell table: 1 GB (2^27 cells) on GPUs with 6 GB or more, else smaller; stop before it is half full
 	// (probing degrades). The state buffers take at most about a third of the memory.
-	const size_t memB = g.d.mem ? g.d.mem : (size_t)4 << 30;
+	// (sized by the GPU's memory, or EEAT_GPU_BUDGET_MB when less; with EEAT_GPU_FIT=1 (opt-in, cudadrv.h fitOn) at most
+	// half the free memory less the headroom (cudadrv.h freeShare), the share the fit below keeps the table and states to;
+	// --reserve: the wall breaker's own rule, the free memory less the reserve)
+	const bool reserveGiven = !opt(argc, argv, "reserve", "").empty();
+	const size_t share = reserveGiven || !cu::fitOn() ? SIZE_MAX : cu::freeShare(g.d.totalMem, 0.5);
+	const size_t memB = std::min(g.d.mem ? g.d.mem : (size_t)4 << 30, std::max(share, (size_t)1 << 30));
 	uint32_t cellLog = memB >= ((size_t)11 << 30) ? 27 : memB >= ((size_t)5 << 30) ? 26 : 25;   // (16 bytes per cell)
-	const int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
+	int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
 	// --lanes: the tries of a batch share the table, so it is twice as large where the free memory allows (the 8 GB
 	// laptop GPU: 2 GB of cells + ~2.7 GB of states and candidates, 1 GB to spare); --refine likewise: a refined try keeps
 	// up to ~6x the states (a 50x50 level with a 477-tick route filled 2^26 cells at tick 295 of its first refined try)
@@ -186,6 +191,21 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 			if (cellLog != asked) { printf("{\"warn\":\"2^%u cells do not fit the free memory less the reserve: 2^%u\",\"cellLog\":%u,\"freeMB\":%zu}\n", asked, cellLog, cellLog, fr >> 20); fflush(stdout); }
 		}
 	}
+	// the free-memory fit (EEAT_GPU_FIT=1, without --reserve): the table and the state buffers within this process's share of the free
+	// memory (freeShare: half of it less the headroom), the table first (down to 2^24 cells), then the layer cap (down to
+	// 2^18 states: the bursts' small sizing), instead of allocating the largest and failing (an "out of memory" burst, or a
+	// context the next process could not create); the halving below stays the last resort
+	uint32_t fitFrom = 0;
+	int capFrom = 0;
+	if (!reserveGiven && share != SIZE_MAX) {
+		const auto need = [&](uint32_t cl, int cp) { return (16ull << cl) + 2 * sizeof(S) * (size_t)cp + 20ull * 18 * cp + ((size_t)64 << 20); };
+		const uint32_t asked = cellLog;
+		const int capAsked = cap;
+		while (cellLog > 24 && need(cellLog, cap) > share) cellLog--;
+		while (cap > (1 << 18) && need(cellLog, cap) > share) cap = std::max(1 << 18, cap / 2);
+		if (cellLog != asked) fitFrom = asked;
+		if (cap != capAsked) capFrom = capAsked;
+	}
 	const uint32_t hitCap = 1u << 16;
 	cu::Buf dl, dA, dB, dcells, dout, dnout, dhits, dnhits, dpick, dbest, dck, dcp, dcs, dnwin, dhist, dstats, dlost;
 	const size_t nCandMax = (size_t)cap * 18;
@@ -203,6 +223,8 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 		cellLog--;
 	}
 	if (cellLog != cellLogWanted) { printf("{\"warn\":\"out of GPU memory for 2^%u cells: 2^%u\",\"cellLog\":%u}\n", cellLogWanted, cellLog, cellLog); fflush(stdout); }
+	// (the free-memory fit's sizing, when it took less than asked: {"ev":"fit","cellLog":..,"from":..,"cap":..,"capFrom":..,"shareMB":..})
+	if (fitFrom || capFrom) { printf("{\"ev\":\"fit\",\"cellLog\":%u,\"from\":%u,\"cap\":%d,\"capFrom\":%d,\"shareMB\":%zu}\n", cellLog, fitFrom ? fitFrom : cellLog, cap, capFrom ? capFrom : cap, share >> 20); fflush(stdout); }
 	const uint32_t cellCount = 1u << cellLog;
 	lk::memset8(dbest.p, 0xff, 8ull * cellCount, "memset");
 	cu::cuMemsetD8_v2(dstats.p, 0, 32);

@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 
 namespace cu {
@@ -90,6 +91,14 @@ CU_FN(nvrtcResult, nvrtcDestroyProgram, (nvrtcProgram*))
 
 inline std::string lastError;
 inline CUresult lastCode = 0;   // (the last failure's code: 2 = CUDA_ERROR_OUT_OF_MEMORY)
+/** driver work in flight that an exit must not cut (a kernel launch and its wait, launch.h timed(); a module load, which
+ *  may write the kernel cache): launch.h's parent watchdog ends an orphaned process only while this is 0 */
+inline std::atomic<int> busy{ 0 };
+struct Busy { Busy() { busy++; } ~Busy() { busy--; } };
+/** what one more eegpu process's context takes on this GPU (set by Device::open): the stack every resident thread may
+ *  use (stackBytes x SMs x threads per SM: 1.8 GB on an A100) + ~256 MB for the context itself; an idle burst server held
+ *  1.9 GB on the A100 before any buffer. freeShare's headroom keeps two of them free. */
+inline size_t ctxBytes = 0;
 
 inline bool fail(const char* what, CUresult r) {
 	lastCode = r;
@@ -150,7 +159,8 @@ struct Device {
 	CUcontext ctx = nullptr;
 	char name[256] = {0};
 	int sms = 0, clockMHz = 0, ccMajor = 0, ccMinor = 0, driver = 0, maxThreadsPerSM = 0;
-	size_t mem = 0;
+	size_t mem = 0;        // the memory this process sizes by: the GPU's, or EEAT_GPU_BUDGET_MB when less
+	size_t totalMem = 0;   // the GPU's
 	size_t stackBytes = 8192;   // per thread: the sim state (~0.7 KB) and the call frames of the engine
 	bool open() {
 		if (!loadDriver()) return false;
@@ -169,11 +179,43 @@ struct Device {
 		clockMHz = clk / 1000;
 		cuDriverGetVersion(&driver);
 		cuDeviceTotalMem_v2(&mem, dev);
+		totalMem = mem;
+		// EEAT_GPU_BUDGET_MB: this run's share of the GPU (e.g. two searches on one GPU: half each); every consumer that
+		// sizes by the GPU's memory (explore's table and states, the random runs' pool, the search's records, `info`'s
+		// memMB, which the editor sizes the wall breaker and the bursts by) sees the budget instead of the whole GPU
+		{
+			const char* b = getenv("EEAT_GPU_BUDGET_MB");
+			const double mb = b && *b ? atof(b) : 0;
+			if (mb >= 256) mem = std::min(mem, (size_t)(mb * 1048576.0));
+		}
 		CU_TRY(cuCtxCreate_v2(&ctx, 0, dev));
 		CU_TRY(cuCtxSetLimit(0 /* CU_LIMIT_STACK_SIZE */, stackBytes));
+		ctxBytes = stackBytes * (size_t)std::max(1, sms) * (size_t)std::max(1, maxThreadsPerSM) + ((size_t)256 << 20);
 		return true;
 	}
 };
+
+/** The GPU memory one consumer may take now: `frac` of the free memory less a headroom (the largest of 1.5 GB, 1/20 of
+ *  the GPU's and two contexts, ctxBytes: the A/B's first var runs still failed bursts at cuCtxSetLimit "out of memory",
+ *  the stack reservation of a new process's context), so every consumer leaves room for the next ones (their contexts,
+ *  their tables): consumers that start one
+ *  after another split the free memory geometrically and the GPU never runs dry. Sweep2: 34 of 52 runs at two searches
+ *  a GPU failed bursts with cuCtxCreate "out of memory" because one consumer (the random runs' pool, every move's states,
+ *  the breaker's table) had sized itself by the whole GPU and taken nearly all that was free. SIZE_MAX: unknown (no
+ *  cuMemGetInfo). */
+inline size_t freeShare(size_t total, double frac) {
+	size_t fr = 0, tot = 0;
+	if (!cuMemGetInfo_v2 || cuMemGetInfo_v2(&fr, &tot)) return SIZE_MAX;
+	const size_t head = std::max<size_t>({ (size_t)1536 << 20, (total ? total : tot) / 20, 2 * ctxBytes });
+	return fr > head ? (size_t)((double)(fr - head) * frac) : 0;
+}
+/** EEAT_GPU_FIT=1 (OPT-IN): explore and roll size by freeShare (explorehost.h, rollhost.h). Off by default: its A/B
+ *  (n3-gpu-mem-orphans, box 2 A100, two searches of one arm a GPU) had far fewer burst "out of memory" failures, but every
+ *  move started when half the free memory was 2-5 GB and got a 2^25 table instead of 2^27 (16 M places tried instead of
+ *  66 M): Crypts of Anubis routed 1.3x / 1.7x slower, Soul Quest 0 of 2 vs 1 of 2 */
+inline bool fitOn() { const char* v = getenv("EEAT_GPU_FIT"); return v && v[0] == '1'; }
+/** the free memory now (bytes; 0: unknown) */
+inline size_t freeNow() { size_t fr = 0, tot = 0; return cuMemGetInfo_v2 && !cuMemGetInfo_v2(&fr, &tot) ? fr : 0; }
 
 /** Loads a module image: PTX text (the driver compiles it for this GPU, cached by the driver) or a cubin. */
 inline bool loadImage(CUmodule* mod, const void* image) {
@@ -284,7 +326,8 @@ inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::s
 	info.waitMs = std::chrono::duration<double, std::milli>(Clk::now() - w0).count();
 	const uint64_t before = folderBytes(dir);
 	const auto l0 = Clk::now();
-	const bool ok = loadModule(mod, ptx);
+	bool ok;
+	{ Busy b; ok = loadModule(mod, ptx); }   // (a compile writes the kernel cache: no watchdog exit meanwhile)
 	// (a hit takes well under a second; a compile adds megabytes, unless the driver dropped as much to make room)
 	const double ms = std::chrono::duration<double, std::milli>(Clk::now() - l0).count();
 	info.how = folderBytes(dir) > before + 65536 || ms > 5000 ? "compiled" : "cache";
