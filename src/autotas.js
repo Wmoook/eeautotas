@@ -69,8 +69,10 @@ const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
  * whose cleanup takes 3-6 s, the job waited 5-19 s after the first route was found: EXCrew Trolled Minis 5.3-19.1 s,
  * Weird Perfection 5.1-6.9 s, The 7 Depths of Hell 2.5-14.6 s, Gingerbread House 2.6-7.9 s vs 0.4-2.9 s on the others)
  */
+/** a route's key for the gate: a new key = a new route, or its cleaned version */
+const routeKey = (r) => `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
 function routeGate(g, r, now) {
-	const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
+	const key = routeKey(r);
 	if (key === g.lastKey) return false;
 	const first = !g.lastKey;
 	if (r.clean === 'pending' && g.waitKey !== key && !(first && g.waitAt !== null)) { g.waitKey = key; g.waitAt = now; }
@@ -125,6 +127,8 @@ function run(o) {
 	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, seed: o.seed, source: o.source }, o.gpu || { available: gpuOk });
 	const gate = { lastKey: '', waitKey: '', waitAt: null };
 	let frDone = false, hist = 0, ended = false, busy = false;
+	const escSeen = new Set();   // (the escapes already in the timeline: escapeEvents)
+	let escNow = null;           // (Find a route's escape state at the last poll: routeEscape)
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
 	let jobAt = 0, frAt = 0;
@@ -157,7 +161,11 @@ function run(o) {
 		const faster = !S.job && !ended ? better(ev.runTicks) : false;
 		// (cpuS: the CPU search's CPU seconds when Find a route found it, editor.js cpuAfter: the time to route per
 		// core-second on a shared machine, next to t)
-		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
+		const rx = routeEscape(r, escNow);
+		// (the GPU random runs' configuration when they were last started again by the rotation: editor.js rollsTurn)
+		const rr = escNow && Array.isArray(escNow.rolls) && escNow.rolls.length ? escNow.rolls[escNow.rolls.length - 1] : null;
+		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, rx ? { escape: rx } : {}, rr ? { rolls: { cfg: rr.cfg, after: rr.after } } : {},
+			r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
 			r.foundAfter > 0 ? { foundAfter: r.foundAfter } : {}, r.cleaned ? { cleanedFrom: r.cleaned.fromRunTicks, presses: r.cleaned.presses, cleanS: r.cleaned.sec } : {}));
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
 		if (!S.job) {
@@ -199,9 +207,16 @@ function run(o) {
 		try {
 			const st = ED.state();
 			const r = st.result;
+			// (the stall rotation's escapes: which configuration and start each one had, in the timeline; a route of an
+			// escape names its configuration)
+			for (const x of escapeEvents(escSeen, st.escape)) emit(x);
+			escNow = st.escape || null;
+			let key = '';
 			if (r && r.inputs) {
 				// (a route being cleaned (editor.js cleanLater) waits for its cleanup, at most CLEAN_WAIT_MS: the job's base
 				// is the cleaned route; a route handed on before its cleanup ended goes again once cleaned)
+				// (the first route waits at most FIRST_CLEAN_WAIT_MS from the first one seen: routeGate)
+				key = routeKey(r);
 				if (routeGate(gate, r, Date.now())) onRoute(r);
 			}
 			// routes of another class (editor.js classRoutes: other doors / triggers than the best's, even slower ones): saved
@@ -218,7 +233,13 @@ function run(o) {
 					pending.push({ ms, runTicks: c.runTicks, strategy: `another class, avoiding ${c.avoid}` });
 				}
 			}
-			if (!frDone && !st.running) {
+			// (Find a route can end with its first route still in the cleanup: it stops as soon as a strategy finds a route,
+			// e.g. the relay. The end waits for the cleaned route, and after the gate's cap (routeGate: FIRST_CLEAN_WAIT_MS for
+			// the first route) the route as found is taken above;
+			// before, the same poll saw the route 'pending' and the search ended, and the AutoTASer ended "without a route
+			// (found)": the defaults A/B's Desolate Caverns, 4 runs)
+			const cleaning = !S.job && !!(r && r.inputs) && r.clean === 'pending' && key !== gate.lastKey;
+			if (!frDone && !st.running && !cleaning) {
 				frDone = true;
 				holdShare(false);
 				emit({ ev: 'handoff', why: `Find a route ended (${st.stage})` });
@@ -258,7 +279,27 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, handoffWhy, routeGate, CLEAN_WAIT_MS, FIRST_CLEAN_WAIT_MS, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
+/** the stall rotation's escapes (editor.js state().escape.hist) not yet in the timeline: one event each {ev: 'escape', n,
+ *  cfg (the configuration's name), kind (of start), from, ticks, tiles, after (s into the search)}; seen: a Set of the
+ *  escapes' numbers already emitted (updated) */
+function escapeEvents(seen, e) {
+	const out = [];
+	for (const r of (e && Array.isArray(e.hist) ? e.hist : [])) {
+		if (!r || seen.has(r.n)) continue;
+		seen.add(r.n);
+		out.push({ ev: 'escape', n: r.n, cfg: r.cfg, kind: r.kind, from: r.from, ticks: r.ticks, tiles: r.tiles, after: r.after });
+	}
+	return out;
+}
+/** the escape (its number and configuration) that found route r, from editor.js state().escape: the live one, else the
+ *  last; null when the route is not an escape's */
+function routeEscape(r, e) {
+	if (!r || !/^escape/.test(String(r.strategy || '')) || !e) return null;
+	const x = e.run || e.last || null;
+	return x && x.cfg !== undefined ? { n: x.n, cfg: x.cfg } : null;
+}
+
+module.exports = { run, handoffWhy, routeGate, routeKey, escapeEvents, routeEscape, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT, CLEAN_WAIT_MS, FIRST_CLEAN_WAIT_MS };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));

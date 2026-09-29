@@ -297,6 +297,22 @@ function sectionKnob() {
 	check('set: the --name=value words, in order, in all three (bogus words dropped)', knob.every((k, i) => extra(plain[i], k).join(' ') === '--dom=0 --dord=0 --useful=0'),
 		knob.map((k, i) => extra(plain[i], k).join(' ')).join(' | '));
 	check('after the editor\'s own options (a later option wins in goexplore.js parseArgs)', knob[0].indexOf('--dom=0') > knob[0].indexOf('--stdin=1') && GX.parseArgs(['l.eelvl', '--dom=1', '--dom=0']).dom === 0);
+	// Find a route's goexplore.js defaults (editor.js GX_DEFAULTS, the DEFAULTS flip of 2026-09-29): event options and the
+	// frontier field in all three, before EEAT_GX (which turns one off), none with EEAT_GXDEF=0; goexplore.js's own
+	// defaults stay off
+	const D = ED.GX_DEFAULTS;
+	const on = (a) => { const p = GX.parseArgs(a.length ? a : ['l.eelvl']); return [p.opts, p.frontier, p.fBrake, p.fPhys].join(','); };
+	check('the defaults: --opts=1 --frontier=1 --fBrake=1 --fPhys=1 in the CPU search, the escape and the GPU random runs',
+		D.join(' ') === '--opts=1 --frontier=1 --fBrake=1 --fPhys=1' && plain.every((a) => D.every((s) => a.includes(s)) && on(a) === '1,1,1,1'), plain.map(on).join(' | '));
+	process.env.EEAT_GX = '--opts=0 --frontier=0';
+	const off = [S.goexplore.args(f, o, q), S.escape.args(f, o, q), S.gorolls.args(f, o, q)];
+	delete process.env.EEAT_GX;
+	check('EEAT_GX="--opts=0 --frontier=0" comes after the defaults and turns them off', off.every((a) => a.lastIndexOf('--opts=0') > a.indexOf('--opts=1') && on(a).startsWith('0,0')), off.map(on).join(' | '));
+	process.env.EEAT_GXDEF = '0';
+	const none = [S.goexplore.args(f, o, q), S.escape.args(f, o, q), S.gorolls.args(f, o, q)];
+	delete process.env.EEAT_GXDEF;
+	check('EEAT_GXDEF=0: no default flag (the editor before the flip)', none.every((a) => !a.some((s) => /^--(opts|frontier|fBrake|fPhys)=/.test(s)) && on(a) === '0,0,0,0'), none.map(on).join(' | '));
+	check('goexplore.js\'s own defaults stay off (its CLI and tests: off = exactly as before)', on([]) === '0,0,0,0');
 }
 
 sectionRelevance();
