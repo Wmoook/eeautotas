@@ -838,6 +838,8 @@ function addSource(o) {
 	}
 	if (!o.cul && (!s.best || o.dist < s.best.dist - 1e-3)) s.best = { inputs, ticks: inputs.length, dist: o.dist };
 	publishSources();
+	// (the rank: a room better by the rank than the nearest attempt's gives it its attempt; closer() decides its own)
+	if (rr && !o.noPromote) rankPromote(s);
 }
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
 function pickSource(step, c) {
@@ -918,7 +920,7 @@ function steerDist(V, d) {
 }
 /** strategy n's own nearer attempt a {inputs, ticks, dist}: a source for its room (at most every SOURCE_REPLAY_MS per
  *  strategy; the latest one waiting is taken then). rm: its room, when the attempt was replayed already. */
-function attemptSource(n, a, rm) {
+function attemptSource(n, a, rm, noPromote) {
 	const V = S.strategies[n];
 	if (!rm) {
 		const now = Date.now();
@@ -936,7 +938,7 @@ function attemptSource(n, a, rm) {
 		p.at = now;
 		rm = replayRooms(Uint8Array.from(a.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), false).room;
 	}
-	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since, cul: !!rm.cul });
+	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since, cul: !!rm.cul, ...(noPromote ? { noPromote: true } : {}) });
 }
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
 // states going back the way the relay came. With the steer field a state is dropped only above both fields' ceilings
@@ -1021,6 +1023,8 @@ function relayFrom(n) {
 	// (src.best: the nearest of all attempts when this run began: "nearer" means nearer than that, also for a run from
 	// another strategy's farther attempt)
 	Object.assign(R, { file, keep, src: { dist: c.dist, ticks: c.ticks, best: S.closest ? Math.min(S.closest.dist, c.dist) : c.dist } });
+	// (the rank: "nearer" is a higher class than the nearest attempt's when this run began, or the same class and nearer)
+	if (rr) R.src.cls = S.closest ? S.closest.cls : -Infinity;
 	R.runs++; R.cycleRuns = (R.cycleRuns || 0) + 1;
 	R.what = src ? `an attempt in room "${src.desc}"` : 'the nearest attempt';
 	if (src) { src.runs++; publishSources(); }
@@ -1037,7 +1041,7 @@ function relayKick() {
 			// (a relay that went through its starting points waits for a nearer attempt than its last, or a new source: then
 			// its plan from that step)
 			const c0 = S.closest, R0 = q.relay;
-			const nearer = !(R0 && R0.src) || !!(c0 && c0.dist < R0.src.best - 0.5);
+			const nearer = !(R0 && R0.src) || (rr ? rankNearer(c0, R0.src, 0.5) : !!(c0 && c0.dist < R0.src.best - 0.5));
 			if (!nearer && !pickSource('new', c0)) return;
 			// (another starting point: its own cells, not the finer ones a run that ran out of situations left behind)
 			if (R0) { R0.back = nearer ? 0 : RELAY_PLAN.indexOf('new'); R0.pick = null; R0.cellsSet = false; }
@@ -1053,9 +1057,10 @@ function relayKick() {
 		// (only a run that got nearer itself: a run from further back whose nearest attempt is an earlier run's was sent
 		// back there after 8 s, so on the ice level the relay went between two starting points for 2 minutes)
 		if (R && R.src && c && c.strategy === q.label && alive(kids[k]) && !kids[k].stopWhy && q.bestAt > kids[k].startedAt && Date.now() - q.bestAt > RELAY_STALL_MS &&
-			Date.now() - kids[k].startedAt > RELAY_STALL_MS && c.ticks > R.keep + RELAY_BACK[0] + 30) { R.src = { dist: c.dist + 1, ticks: c.ticks, best: c.dist + 1 }; halt(kids[k], 'nearer'); return; }
+			Date.now() - kids[k].startedAt > RELAY_STALL_MS && c.ticks > R.keep + RELAY_BACK[0] + 30) { R.src = { dist: c.dist + 1, ticks: c.ticks, best: c.dist + 1 }; if (rr) R.src.cls = c.cls; halt(kids[k], 'nearer'); return; }
 		// (not for its own nearer attempts: it is making them, and a restart would throw its table away)
-		if (R && R.src && c && c.strategy !== q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS && c.dist < R.src.best - Math.max(3, 0.1 * R.src.best)) halt(kids[k], 'nearer');
+		if (R && R.src && c && c.strategy !== q.label && alive(kids[k]) && !kids[k].stopWhy && Date.now() - kids[k].startedAt > RELAY_SWITCH_MS &&
+			(rr ? rankNearer(c, R.src, Math.max(3, 0.1 * R.src.best)) : c.dist < R.src.best - Math.max(3, 0.1 * R.src.best))) halt(kids[k], 'nearer');
 	});
 }
 // The wall breaker (strategy 'breaker', "past the wall", GPU). The walls analysis (the night of 2026-09-27: the fillers'
@@ -1223,6 +1228,7 @@ function pastPlanCheck() {
 	cur.pastOn = true;
 	cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
 	S.closest = null;            // (another measure: the CPU search's attempts by it)
+	nearD = null;
 	brk.mark = Infinity;
 	let told = 0;
 	S.strategies.forEach((q, k) => {
@@ -1568,6 +1574,8 @@ function precAttempts() {
 	for (const q of S.strategies) if (q.bestTry) add(q.bestTry.inputs, q.bestTry.dist);
 	for (const s of sources.values()) if (s.best) add(s.best.inputs, s.best.dist);
 	const lim = (c && !c.cut ? c.dist : Infinity) + PREC_SLACK, seen = new Set();
+	// (the rank: the nearest attempt by rank first, whatever its distance)
+	if (rr && c && !c.cut && c.inputs) list.forEach((a) => { if (a.inputs === String(c.inputs)) a.dist = -1; });
 	return list.filter((a) => a.dist <= lim).sort((a, b) => a.dist - b.dist).filter((a) => !seen.has(a.inputs) && seen.add(a.inputs)).slice(0, PREC_ATTEMPTS).map((a) => a.inputs);
 }
 /** every 5 s (checkStalls): a stalled search without a route starts a run of the precision stage */
@@ -1752,6 +1760,75 @@ const ESC_WORK = 'escape_bursts';
 let esc = null;
 /** the room key and desc an attempt ends in (the nearest attempt's is kept when it is replayed: closer()) */
 let closestRoom = null;
+// ---------------------------------------------------------------- ROUTE-RANK (src/rrank.js, tools/rrank.js; OPT-IN)
+// EEAT_RRANK=1 / body rrank: 1 (test.rrank): the nearest attempt (S.closest: the page's ring, the relay, the wall
+// breaker's and the stall escape's near starts, the precision stage) compares by the RANK CLASS of the room it ends in
+// first (a room progress rank learned from the GPU filler's routes: src/rrank.json) and by the distance second; the stall
+// clocks (the wall breaker's, the precision stage's, the escape's) stay on the distance (the nearest by distance alone:
+// nearD, main's S.closest; S.nearestDist). 2: a rise of the rank class restarts the stall clocks too. Off (the default):
+// rr null, main's search. Order and measure only: nothing is pruned.
+let rr = null;     // {mode, R (the ranker), promotions, kept, best} or null
+let nearD = null;  // (with rr) the nearest attempt by distance alone: the distance filter of closer() and the stall clocks
+/** the route-rank mode of a search: 0 off, 1 S.closest by rank, 2 also the stall clocks (body rrank, test.rrank, EEAT_RRANK) */
+function rrankModeOf(b, test) {
+	const v = test && test.rrank !== undefined ? test.rrank : b && b.rrank !== undefined ? b.rrank : process.env.EEAT_RRANK;
+	if (v === true) return 1;
+	const n = Math.round(+v);
+	return n === 1 || n === 2 ? n : 0;
+}
+/** a better than b for S.closest with the rank: an attempt outside a cul-de-sac of its room over one in one, an attempt
+ *  with a way over one cut off, the higher rank class, then the nearer, then the shorter (closer()'s rule within a class) */
+function rankBetter(a, b) {
+	if (!b) return true;
+	if (!!a.cul !== !!b.cul) return !a.cul;
+	if (!!a.cut !== !!b.cut) return !a.cut;
+	if (a.cls !== b.cls) return a.cls > b.cls;
+	return a.dist < b.dist - 1e-3 || (Math.abs(a.dist - b.dist) <= 1e-3 && a.ticks < b.ticks);
+}
+/** the relay's "nearer" with the rank: the nearest attempt's class above the run's start's, or the same class and nearer
+ *  by m tiles */
+const rankNearer = (c, src, m) => !!c && !!src && (c.cls > src.cls || (c.cls === src.cls && c.dist < src.best - m));
+/** a room seen (its desc and class): the rank-best room of the search (S.rank.best) */
+function rankSeen(desc, cls) {
+	if (!rr || !S.rank) return;
+	if (!S.rank.best || cls > S.rank.best.cls) S.rank.best = { desc: String(desc || ''), cls, after: Math.round((Date.now() - S.started) / 100) / 10 };
+}
+/** S.closest = e (an attempt better by the rank: rankBetter), with its room (key, desc) and inputs (masks); a rise of the
+ *  class with mode 2: the stall clocks start over */
+function rankSet(e, room, masks) {
+	const up = !S.closest || e.cls > S.closest.cls;
+	S.closest = e;
+	closestRoom = { key: room.key, desc: room.desc };
+	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (err) { /* read-only data folder */ }
+	setImmediate(relayKick);
+	if (S.rank) S.rank.cls = e.cls;
+	if (up && rr.mode === 2) { breakProgress('rank', false); if (prec) { prec.at = Date.now(); prec.wait = prec.wait0; } }
+}
+/** a source s (addSource) better by the rank than S.closest: its lowest-cost attempt (else its first arrival) becomes the
+ *  nearest attempt (one replay: its path and room) */
+function rankPromote(s) {
+	if (!rr || !cur || !S.running || cur.pastOn) return;
+	const a = s.best || s.early;
+	if (!a || !a.inputs || !(a.dist < 2e4)) return;
+	const cls0 = rr.R.cls(s.desc);
+	rankSeen(s.desc, cls0);
+	if (!rankBetter({ cls: cls0, dist: a.dist, cut: a.dist >= 1e4, cul: false, ticks: a.ticks }, S.closest)) return;
+	const masks = Uint8Array.from(String(a.inputs), (c) => (c.charCodeAt(0) - 48) & 31);
+	if (!masks.length) return;
+	const tr = replayRooms(masks, true, true);
+	if (tr.room.cul) return;
+	const cls = rr.R.cls(tr.room.desc), dist = a.dist, cut = dist >= 1e4;
+	const e = { dist, cut, viaDeath: !cut && !cur.distBySteer && dist >= deathTiles(), cul: false, ticks: masks.length };
+	e.cls = cls;
+	if (!rankBetter(e, S.closest)) return;
+	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : e.viaDeath ? dist - RF.DEATH_TILES : dist;
+	Object.assign(e, { tiles: Math.round(shown * 10) / 10, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths, inputs: C.eetasBytes(masks).toString('latin1'), path: tr.path,
+		strategy: s.from, foundAfter: Math.round((Date.now() - S.started) / 100) / 10, ...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}), desc: tr.room.desc, promoted: true });
+	rr.promotions++;
+	if (S.rank) S.rank.promotions = rr.promotions;
+	rankSet(e, tr.room, masks);
+	save();
+}
 /** a room desc's coin count ('' where the room key holds none: a level without coin doors) */
 const coinSig = (desc) => { const m = /(?:^| )coins=(\d+)/.exec(String(desc || '')); return m ? m[1] : ''; };
 /** the escape's next starting points by kind, each in its order: {near, arrival, frontier} of [{inputs, what, dist, key,
@@ -2246,6 +2323,20 @@ function start(b, gpu, test) {
 		rot: escRot, from: escFrom, cfgTurn: 0, fromTurn: 0, nextFrom: null,
 		rolls: test && test.escRolls !== undefined ? !!test.escRolls : b.escRolls !== undefined ? b.escRolls !== false : process.env.EEAT_ESC_ROLLS !== undefined ? process.env.EEAT_ESC_ROLLS !== '0' : ESC_ROLLS };
 	closestRoom = null;
+	// (ROUTE-RANK, opt-in: the ranker of this level; no model file: off, with a note)
+	rr = null; nearD = null;
+	const rrMode = rrankModeOf(b, test);
+	if (rrMode) {
+		try {
+			const RK = require('./rrank.js');
+			const R = RK.ranker(ins.level, { lmMs: 1500, model: test && test.rrankModel ? test.rrankModel : undefined });
+			if (R) {
+				rr = { mode: rrMode, R, promotions: 0, kept: 0 };
+				S.rank = { mode: rrMode, step: R.M.step, landmarks: R.info.lmN, cls: null, best: null, promotions: 0, kept: 0 };
+				note(`route-rank ${rrMode}: the nearest attempt by the rank class of its room first (a model of ${R.M.levels || '?'} levels' routes, class step ${R.M.step}; this level's landmarks: ${R.info.lmN}), the distance second${rrMode === 2 ? '; a class rise restarts the stall clocks' : ''}`);
+			} else note('route-rank: no model (src/rrank.json): off');
+		} catch (e) { rr = null; note(`route-rank: ${e.message}: off`); }
+	}
 	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null, hist: [], rot: esc.rot.map((c) => c.name), from: esc.from.slice() } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
@@ -2355,6 +2446,7 @@ function lateSteer(gen, sf2) {
 	cur.distBySteer = true;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
 	S.closest = null;
+	nearD = null;
 	if (brk) brk.mark = Infinity;
 	if (prec) prec.mark = Infinity;
 	for (const q of S.strategies) { q.best = undefined; q.bestTry = null; }
@@ -3230,7 +3322,7 @@ function launch(n) {
 				if (how === 'nearer') V.state = 'starting';
 				// ("the prefix dies" and the like: another point, not an error of the search)
 				V.error = null;
-				const nearer = S.closest && R.src && S.closest.dist < R.src.best - 0.5;
+				const nearer = rr ? rankNearer(S.closest, R.src, 0.5) : S.closest && R.src && S.closest.dist < R.src.best - 0.5;
 				// (ran out of situations: finer cells from the same point first, however deep it got: the ice level's 4 px
 				// relay ran 900 ticks through everything its cells could tell apart and never climbed the one-tile staircase
 				// shaft at (69, 96) that its finest cells climb in 113 ticks; only then further back)
@@ -3792,7 +3884,8 @@ function closer(ev, n) {
 	}
 	// (the GPU random runs' and the stall escape's nearer attempts: into the one search's archive)
 	if ((Vn.rolls || Vn.key === 'escape') && ev.inputs && !ev.cut && (!(Vn.best >= 0) || steerDist(Vn, +ev.dist) < Vn.best - 1e-3)) feedOne(String(ev.inputs), false, Vn.key === 'escape');
-	const dist = steerDist(Vn, +ev.dist), old = S.closest;
+	// (with the rank: the distance filter and the stall clocks by the nearest by distance alone, nearD; S.closest by rank)
+	const dist = steerDist(Vn, +ev.dist), old = rr ? nearD : S.closest;
 	// (a late steer field's switch (lateSteer): a CPU search's closest from before it (on its way when the switch came) is
 	// the reach field's: not its own nearest, not the nearest; before, it set the strategy's own best (Forgotten Helix: a
 	// reach cost ~925 against the steer field's 1000-2100) and the attempts measured by the steer field never beat it)
@@ -3829,13 +3922,15 @@ function closer(ev, n) {
 	// (one replay: the path, and the room it ends in for the sources)
 	const tr = replayRooms(masks, true, true);
 	if (EXV && tr.path) { EXV.pending.delete(`${Vn.key}#c`); exploreTrail(Vn.key, Vn.label, tr.path, masks.length); }
-	if (own) attemptSource(n, own, tr.room);
+	if (own) attemptSource(n, own, tr.room, !!rr);
 	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
 	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
-	closestRoom = { key: tr.room.key, desc: tr.room.desc };   // (the stall escape's rotation: the rooms escaped from)
 	const pathPts = tr.path;
-	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
-	setImmediate(relayKick);
+	if (!rr) {
+		closestRoom = { key: tr.room.key, desc: tr.room.desc };   // (the stall escape's rotation: the rooms escaped from)
+		try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
+		setImmediate(relayKick);
+	}
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
 	const viaDeath = !cut && !cur.distBySteer && dist >= deathTiles();
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
@@ -3843,9 +3938,24 @@ function closer(ev, n) {
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
 	if (brk && !cut && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
 	if (prec && !cut && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
-	S.closest = { dist, cut, viaDeath, cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	const entry = { dist, cut, viaDeath, cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
+	if (rr) {
+		// (THE RANK: the nearest by distance is nearD (the measurement's yardstick: S.nearestDist, the same scale as without
+		// the rank); S.closest takes this attempt only when it is better by the rank: a higher class of its room, or the same
+		// class and nearer)
+		nearD = entry;
+		S.nearestDist = { tiles: entry.tiles, dist: entry.dist, ticks: entry.ticks, runTicks: entry.runTicks, deaths: entry.deaths, strategy: entry.strategy, foundAfter: entry.foundAfter, ...(entry.steer !== undefined ? { steer: entry.steer } : {}) };
+		if (tr.reachTiles !== null && !(S.nearestReach && S.nearestReach.tiles <= tr.reachTiles)) S.nearestReach = { tiles: Math.round(tr.reachTiles * 10) / 10, ticks: masks.length, after: entry.foundAfter };
+		const e = Object.assign({}, entry, { cls: rr.R.cls(tr.room.desc), desc: tr.room.desc });
+		rankSeen(tr.room.desc, e.cls);
+		if (rankBetter(e, S.closest)) rankSet(e, tr.room, masks);
+		else { rr.kept++; if (S.rank) S.rank.kept = rr.kept; }
+		save();
+		return;
+	}
+	S.closest = entry;
 	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)
 	if (tr.reachTiles !== null && !(S.nearestReach && S.nearestReach.tiles <= tr.reachTiles)) S.nearestReach = { tiles: Math.round(tr.reachTiles * 10) / 10, ticks: masks.length, after: S.closest.foundAfter };
 	save();
