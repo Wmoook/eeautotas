@@ -260,6 +260,13 @@
 //        version, not kept in the A/B); CPU workers and
 //        the GPU random runs' host (not a blind class). Order only. The progress and done events carry "pareto": {picks,
 //        front, gold, blue, keys}. See PARETO HEAD)]
+//        [--tedge=0 (1 or EEAT_TEDGE=1: OPT-IN, coarse cells with the useful territory (--useful=1): HEAD T, the subgoal
+//        head, --pT (0.15) of the picks taken from head A only (before head P's draw): a room chosen by a UCB over the
+//        rooms' subtree rewards (--tGamma 0.8, --tC 0.5) among the rooms with an untried relevant trigger, its --tNear (5)
+//        untried triggers nearest its entry as goals of a walk field (the room's own doors), its --tK (4096) cells nearest
+//        them by --tLambda (4) x sqrt(picks), for --tBlock (256) of head T's picks; CPU workers only (--gpu=1 ignores it).
+//        Order only. The progress and done events carry "tedge": {picks, builds, hits, ms, fetched, byKind, choices,
+//        noGoal, rested, rooms, rewards}; EEAT_TELOG=<file>: a line per room choice (observation only). See SUBGOAL HEAD T)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
@@ -352,6 +359,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
 	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 1,
+	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, heat: 0 };
@@ -1383,6 +1391,112 @@ function paretoRooms(rooms, live, cost) {
 	return { front: f.length, list };
 }
 
+// SUBGOAL HEAD T (--tedge=1 / EEAT_TEDGE=1, coarse cells with the useful territory; OPT-IN, default off: the flag off
+// draws no random number more and computes nothing more, the search exactly as before; INNOLOOP box-4 round 2, lane
+// subgoal-mcts). The search goes to FETCH THE NEXT STATE-CHANGER (a coin or blue coin a door reads, a key a door reads, a
+// read switch, an effect, the team, a crown) from the right room: along the filler's routes 62% of the sustained detours
+// end at a trigger (212 of 331 at a coin), and 140 of 166 route plateaus of 30 s or more broke after a room made by a
+// new trigger; the guidance (head A's reach / steer order) leaves such a trigger out when it is behind the ball, and no
+// head of the search goes to fetch it. Step 0 (src/out/il4/r2/tedge/tedge_go.js, 143 replayed routes, 3,373 room changes
+// by a trigger): the trigger the route took is its room's nearest untried target by the room's walk from its entry in
+// 67% (86% among the 3 nearest, 93% among 5), and the nearest from the route's place 60 ticks before in 87%; 96% of the
+// stalled runs' nearest attempts end in a room that holds an untried relevant trigger with a finite walk value.
+//   TARGETS (per room at its creation, the flag on only): roomUseful's targets from the state that made the room (the
+// trigger components its walk reaches whose touch changes the room by a trigger: the engine's own test, so only what
+// roomOf reads, filtered by counterRelevance and switchReaders), with their walk steps from its entry; and SECONDARY
+// targets, goals only once no primary one is untried: the coins of a counter the room key keeps that the making state
+// holds already (the room keys the count, not which coins: its other lineages may lack them; the test toy's 3-coin room
+// whose cells nearest the missing coin held it); TRIED: a target is
+// tried once a room change BY A TRIGGER leaves the room with the target within the 3 x 3 tiles around the ball's centre
+// (a worker's run or an imported run; a coin only when the ball holds it then), or a cell of the room is made on it (not a
+// coin: coins are consumed, and the room keys their count, so its lineages hold different ones: bursts.js's rule); and
+// RESTED (tried) after TE_REST x --tBlock of head T's picks in the room with no target of it tried (the nearest untried
+// one: a coin the room's cells nearest it hold already, a trigger past a wall the walk does not see). The test toy of
+// 4 coins behind the spawn: before the rest rule, and with every coin tile a cell stood on "tried", a room of 3 coins had
+// its creator's missing coin marked tried by the cells of lineages that held it: no 4th coin in 20 M ticks.
+//   REWARD (paid when a new room's first cell arrives, firstCell): 1 if its useful resources (paretoOf) are dominated by
+// no earlier room's + min(1, its useful territory gain / 50 tiles) + 2 if the trophy is walkable in it and not in its
+// parent room; added to its ancestors (the rooms it came from) with weight --tGamma per step (1 for its parent): a room's
+// value V = its subtree's discounted mean reward (vs / vn).
+//   THE CHOICE (every --tBlock of head T's picks, or when its room ran dry, went, or has no untried target left): a
+// tournament of 4 draws among the rooms with an untried target, by V + --tC x sqrt(ln(1 + head T's picks) / (1 + the
+// room's head-T picks)); a dominated room, a back room or one without cells is skipped.
+//   THE GOAL FIELD: a walk (8-way, no corner cut between two walls, portals, the room's own doors and protection, killing
+// tiles closed unless protected) from its --tNear untried targets nearest its entry (0: all of them); per the room's
+// untried set (the field again when one gets tried), cached (TE_CACHE, by the passable set and the goals).
+//   THE PICK: the room's --tK cells nearest the goals (not in a cul-de-sac, no kept throw-back), by the steps +
+// --tLambda x sqrt(picks); a new cell of the room enters at its tile's steps when it is among them. --pT of head A's
+// picks (one draw more there, rnd() < pT / pA, before head P's); none once a route is known (the shared bound dropped).
+// Order only: nothing is pruned, the reach field's -1 stays the only prune. Not for the GPU random runs' host (gpuMain):
+// their cells carry no tile. Counted in archiveBytes: the static arrays, each room's targets, tried set, doors and
+// numbers (B_TE), head T's heap and its values, the cached fields. Portal entries as position triggers and physics goal
+// fields are not built (the next steps: see test/tedge.js).
+const B_TE = 160, B_TV = 48, TE_CACHE = 4, TE_REST = 2;
+/** --tedge: the level's static data for head T (one per worker): the trigger components (bursts.js triggersOf) and each
+ *  one's kind (0 coin, 1 blue coin, 2 key, 3 switch, 4 effect, 5 other), the walk's walls / killers / doors / portal
+ *  sources (roomUseful's rules), and the level's useful resources (paretoOf) */
+function teLevel(L) {
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
+	const TR = require('./bursts.js').triggersOf(L);
+	const kind = new Uint8Array(TR.n), seen = new Uint8Array(TR.n);
+	for (let i = 0; i < N; i++) {
+		const c = TR.comp[i];
+		if (c < 0 || seen[c]) continue;
+		seen[c] = 1;
+		const id = fg[i];
+		kind[c] = id === 100 || id === 110 ? 0 : id === 101 || id === 111 ? 1 : KEY_TRIG.has(id) ? 2 : id === 113 || id === 1619 || id === 467 || id === 1620 ? 3 : id === 5 ? 5 : 4;
+	}
+	const wall = new Uint8Array(N), deadly = new Uint8Array(N), doorIx = new Int32Array(N).fill(-1), doors = [];
+	for (let i = 0; i < N; i++) {
+		const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0;
+		if ((f & 1) !== 0 && (f & 16) !== 0) { doorIx[i] = doors.length; doors.push(i); }
+		else if ((f & 1) !== 0 && (f & (2 | 4 | 8)) === 0) wall[i] = 1;
+		if (id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0) deadly[i] = 1;
+	}
+	// (the portals that send the ball to a tile: the goal field runs backwards from the goals)
+	const srcs = new Map();
+	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);
+		for (let i = 0; i < N; i++) {
+			const s = L.portalSlot[i];
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
+			const ex = L.portalsById.get(L.pTarget[s]);
+			if (!ex) continue;
+			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N && j !== i) { let l = srcs.get(j); if (!l) srcs.set(j, l = []); if (!l.includes(i)) l.push(i); } }
+		}
+	}
+	for (const [k, v] of srcs) srcs.set(k, Int32Array.from(v));
+	return { W, H, N, comp: TR.comp, kind, wall, deadly, doorIx, doors: Int32Array.from(doors), srcs, par: paretoOf(L), bytes: N * 11 + TR.n * 2 + doors.length * 4 };
+}
+/** --tedge: the walk steps to the nearest goal tile (goals: tiles) over a room's passable set (shut: a bit per door of
+ *  S.doors, prot: protected), backwards through the portals; 0xffff = none. q: a scratch Int32Array of S.N */
+function teField(S, goals, shut, prot, q) {
+	const { W, H, N, wall, deadly, doorIx, srcs } = S;
+	const D = new Uint16Array(N).fill(0xffff);
+	const pass = (i) => !wall[i] && (prot || !deadly[i]) && (doorIx[i] < 0 || (shut[doorIx[i] >> 3] & (1 << (doorIx[i] & 7))) === 0);
+	let qh = 0, qt = 0;
+	for (const g of goals) if (D[g] !== 0) { D[g] = 0; q[qt++] = g; }
+	while (qh < qt) {
+		const u = q[qh++], d = D[u] + 1;
+		if (d >= 0xffff) break;
+		const x = u % W, y = (u / W) | 0;
+		for (let dy = -1; dy <= 1; dy++) {
+			for (let dx = -1; dx <= 1; dx++) {
+				if (!dx && !dy) continue;
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const v = yy * W + xx;
+				if (D[v] !== 0xffff || !pass(v)) continue;
+				if (dx && dy && wall[y * W + xx] && wall[yy * W + x]) continue;
+				D[v] = d; q[qt++] = v;
+			}
+		}
+		const sp = srcs.get(u);
+		if (sp) for (let k = 0; k < sp.length; k++) { const v = sp[k]; if (D[v] === 0xffff && pass(v)) { D[v] = d; q[qt++] = v; } }
+	}
+	return D;
+}
+
 // USEFUL TERRITORY (roomUseful; the playbook's P1 (c) / (d), 2026-09-28; the user on Forgotten Helix: "it keeps going
 // into the viewing rooms still ... the viewing room leads to nowhere!!!"). A room's walk reaches territory the room
 // cannot use: a hub of portals into "viewing rooms" behind coin doors whose own portals lead back (not a physical dead
@@ -1478,7 +1592,7 @@ function roomUseful(L) {
 		if (k < 8 + ne + ns) { const j = sp[k - 8 - ne]; return stamp[j] === gen ? j : -1; }
 		return -2;
 	};
-	const of = (sim, band, extra) => {
+	const of = (sim, band, extra, want) => {
 		if (++gen > 2e9) { stamp = new Int32Array(N); gen = 1; }
 		prot = !!sim.is_invulnerable;
 		for (let k = 0; k < doors.length; k++) shut[k] = sim.is_tile_solid_now(doors[k] % W, (doors[k] / W) | 0) ? 1 : 0;
@@ -1499,13 +1613,19 @@ function roomUseful(L) {
 		const snap = sim.snapshot(), cz0 = RM.cause(sim);
 		tested.clear();
 		let targets = 0, restored = true;
+		// (want: the coins of a counter the room key keeps (RM.rel) that this state holds already: head T's SECONDARY targets,
+		// [tile, steps, ...]: the room keys the count, not which coins, so other lineages in the room may lack them)
+		const sec = want ? [] : null;
 		for (let k = 0; k < walked; k++) {
 			const t = q[k];
 			term[t] = 0;
 			if (tro[t]) { term[t] = 1; targets++; continue; }
 			const c = TR.comp[t];
 			if (c < 0) continue;
-			if (TR.eaten[c]) { if (!restored) { sim.restore(snap); restored = true; } if (sim.is_coin_collected(t % W, (t / W) | 0)) continue; }
+			if (TR.eaten[c]) {
+				if (!restored) { sim.restore(snap); restored = true; }
+				if (sim.is_coin_collected(t % W, (t / W) | 0)) { if (sec !== null && ((fg[t] === 100 || fg[t] === 110) ? RM.rel.gold : RM.rel.blue)) sec.push(t, dE[t]); continue; }
+			}
 			let v = tested.get(c);
 			if (v === undefined) {
 				if (!restored) sim.restore(snap);
@@ -1517,6 +1637,17 @@ function roomUseful(L) {
 			if (v) { term[t] = 1; targets++; }
 		}
 		if (!restored) sim.restore(snap);
+		// (want, --tedge=1's head T: the target tiles that are no trophy, with their walk steps from the entry: [tile, steps, ...];
+		// tl2 the secondary ones, see sec)
+		let tl = null, tl2 = null;
+		if (want) {
+			let n = 0;
+			for (let k = 0; k < walked; k++) { const t = q[k]; if (term[t] && !tro[t]) n++; }
+			tl = new Int32Array(2 * n);
+			n = 0;
+			for (let k = 0; k < walked; k++) { const t = q[k]; if (term[t] && !tro[t]) { tl[n++] = t; tl[n++] = dE[t]; } }
+			tl2 = Int32Array.from(sec);
+		}
 		// (the room's other entries: terminals of the cul-de-sac test, not targets of the band)
 		const ext = [];
 		if (extra) for (const x of extra) if (x >= 0 && x < N && stamp[x] === gen && !term[x]) { term[x] = 1; ext.push(x); }
@@ -1552,7 +1683,7 @@ function roomUseful(L) {
 			}
 		}
 		for (const x of ext) term[x] = 0;
-		if (!band) return { cul, off: null, targets, walked, nCul, nOff: 0 };
+		if (!band) return { cul, off: null, targets, walked, nCul, nOff: 0, tl, tl2 };
 		// the band: g(t) = min over the targets T of d(t, T) - dE(T) (+ OFF: every key >= 0), buckets over the reverse walk
 		let maxD = 0;
 		for (let k = 0; k < walked; k++) if (dE[q[k]] > maxD) maxD = dE[q[k]];
@@ -1581,7 +1712,7 @@ function roomUseful(L) {
 			if (off === null) off = new Uint8Array((N + 7) >> 3);
 			off[t >> 3] |= 1 << (t & 7); nOff++;
 		}
-		return { cul, off, targets, walked, nCul, nOff };
+		return { cul, off, targets, walked, nCul, nOff, tl, tl2 };
 	};
 	return { of };
 }
@@ -1603,6 +1734,8 @@ const bitAt = (b, t) => b !== null && (b[t >> 3] & (1 << (t & 7))) !== 0;
  */
 function roomFields(L, budget, opts = {}) {
 	const US = opts.useful === false ? null : roomUseful(L);
+	// (opts.targets, --tedge=1's head T: each room's target tiles with their walk steps from its entry, `tl`; else null)
+	const WANT = !!opts.targets;
 	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), doors = [], trophies = [];
@@ -1668,12 +1801,12 @@ function roomFields(L, budget, opts = {}) {
 				if ((c.bits[tile >> 3] & (1 << (tile & 7))) === 0) continue;
 				c.used = ++clock; hits++;
 				// (the useful territory is the room's own, from its entry: a known walk has no gain, its cells are still ordered)
-				const U = US !== null ? US.of(sim, false) : null;
+				const U = US !== null ? US.of(sim, false, undefined, WANT) : null;
 				ms += Date.now() - t0;
-				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
+				return { gain: 0, graw: 0, troOk: c.troOk, cached: true, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1, tl: U !== null ? U.tl : null, tl2: U !== null ? U.tl2 : null };
 			}
 		}
-		const U = US !== null ? US.of(sim, true) : null;
+		const U = US !== null ? US.of(sim, true, undefined, WANT) : null;
 		// the walk (8-way, no corner cut between two walls, through portals) from the room's tile
 		for (let k = 0; k < doors.length; k++) if (words[k >> 5] & (1 << (k & 31))) shut[doors[k]] = 1;
 		const pass = (i) => !wall[i] && !shut[i] && (prot || !deadly[i]);
@@ -1710,7 +1843,7 @@ function roomFields(L, budget, opts = {}) {
 		ms += Date.now() - t0;
 		// (a room whose new territory is all off the band: no gain)
 		if (U !== null && gain > 0 && ugain === 0) zeroed++;
-		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1 };
+		return { gain: U === null || ugain > 0 ? gain : 0, graw: gain, troOk, cached: false, cul: U !== null ? share(U.cul) : null, targets: U !== null ? U.targets : -1, tl: U !== null ? U.tl : null, tl2: U !== null ? U.tl2 : null };
 	};
 	// the rooms' cul-de-sac and off-band bitsets, one copy per content (FNV-1a over the bytes): rooms that share doors and
 	// targets often share them; counted in bytes() with the walks, at most `budget` bytes of them (past that a new room gets
@@ -2321,7 +2454,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const exOf = (c) => { if (!SAT || c.room === null) return 0; const v = c.room.sat.get(zoneOf(c.tile)); return v === undefined ? 0 : v; };
 	/** head A's brake for cell c (tiles) */
 	const satPen = (c) => (SAT ? SAT_MU * satOver(exOf(c), a.satN) : 0);
-	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03)), { useful: a.useful !== 0 }) : null;   // (its walk cache: 3%)
+	const fields = coarse ? roomFields(L, Math.max(1 << 20, Math.min(64 << 20, mem * 1048576 * 0.03)), { useful: a.useful !== 0, targets: a.tedge !== 0 }) : null;   // (its walk cache: 3%; --tedge: each room's targets too)
 	// (the useful territory: a cell's `u`, 2 in a cul-de-sac of its room, 0 else, demotes it: see USEFUL TERRITORY; culPicks,
 	// culCells: counted)
 	let culPicks = 0, culCells = 0, dCul = 0;
@@ -2450,6 +2583,74 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const kb = bitsOf(v[2]);
 		if (kb > parMax[2]) parMax[2] = kb;
 	};
+	// (--tedge=1, coarse cells with the useful territory: head T, see SUBGOAL HEAD T; null: the flag off, no draw more and
+	// nothing computed, the search exactly as without the flag. S: the level's static data; R: head T's room now, H its heap
+	// over val (cell -> the goal field's steps), D the field, thr the candidates' bound, bp the picks since the choice; list:
+	// the rooms with an untried target (lazily cleaned); front: the maximal useful-resource vectors (the reward's first
+	// term); fk: the triggers head T's picks fetched, by kind)
+	const TE = coarse && a.tedge !== 0 && a.useful !== 0 && !a.avoidTiles ? { S: teLevel(L), R: null, H: null, val: new Map(), D: null, thr: Infinity, bp: 0, gen: -1, list: [], front: [], q: null, cache: new Map(), cacheBytes: 0, clock: 0,
+		picks: 0, builds: 0, hits: 0, ms: 0, fetched: 0, fk: new Float64Array(6), choices: 0, noGoal: 0, rewards: 0, rested: 0, tBytes: 0, log: process.env.EEAT_TELOG || "" } : null;
+	if (TE !== null) TE.q = new Int32Array(TE.S.N);
+	let pickT = false;   // (the pick is head T's: the triggers its runs try are head T's fetches)
+	/** --tedge: a new room's head-T numbers (the live state made it): its targets by component, nearest its entry first
+	 *  (tc, their steps tcd, the tiles tt with their component index tti, tried, tLeft, tGen: the untried set's version,
+	 *  tDead: the version found with no finite goal), its doors (tds: a bit per door shut, tprot), its useful resources
+	 *  (tres), its subtree reward (vs / vn) and head T's picks in it (tn) */
+	const teRoom = (r, tl, tl2) => {
+		const S = TE.S;
+		// (the components by their nearest tile's steps: the primary targets (tl) first, then the secondary coins (tl2: coins
+		// this state holds, which other lineages the room merges may lack), each group nearest the entry first)
+		const byC = new Map(), sec = new Set();
+		const note = (list, s2) => { if (list !== null && list !== undefined) for (let k = 0; k < list.length; k += 2) { const c = S.comp[list[k]]; if (c < 0 || (s2 && byC.has(c) && !sec.has(c))) continue; const d = byC.get(c); if (d === undefined || list[k + 1] < d) byC.set(c, list[k + 1]); if (s2) sec.add(c); } };
+		note(tl, false); note(tl2, true);
+		const cs = [...byC.entries()].sort((x, y) => (sec.has(x[0]) ? 1 : 0) - (sec.has(y[0]) ? 1 : 0) || x[1] - y[1] || x[0] - y[0]);
+		const nc = cs.length, tc = new Int32Array(nc), tcd = new Int32Array(nc), ix = new Map();
+		for (let k = 0; k < nc; k++) { tc[k] = cs[k][0]; tcd[k] = cs[k][1]; ix.set(cs[k][0], k); }
+		let nt = 0;
+		for (const list of [tl, tl2]) if (list !== null && list !== undefined) for (let k = 0; k < list.length; k += 2) if (ix.has(S.comp[list[k]])) nt++;
+		const tt = new Int32Array(nt), tti = new Int32Array(nt);
+		nt = 0;
+		for (const list of [tl, tl2]) if (list !== null && list !== undefined) for (let k = 0; k < list.length; k += 2) { const j = ix.get(S.comp[list[k]]); if (j !== undefined) { tt[nt] = list[k]; tti[nt++] = j; } }
+		r.t2 = sec.size;
+		const tds = new Uint8Array((S.doors.length + 7) >> 3);
+		for (let k = 0; k < S.doors.length; k++) if (sim.is_tile_solid_now(S.doors[k] % W, (S.doors[k] / W) | 0)) tds[k >> 3] |= 1 << (k & 7);
+		r.tc = tc; r.tcd = tcd; r.tt = tt; r.tti = tti; r.tried = new Uint8Array(nc); r.tLeft = nc; r.tGen = 0; r.tDead = -1;
+		r.tds = tds; r.tprot = !!sim.is_invulnerable; r.tres = TE.S.par !== null ? TE.S.par.of(sim) : null; r.vs = 0; r.vn = 0; r.tn = 0; r.tq = 0;
+		r.tb = nt * 8 + nc * 9 + tds.length;
+		TE.tBytes += r.tb;
+		if (nc > 0) TE.list.push(r);
+	};
+	/** --tedge: target component c of room r tried (a room change by a trigger there, or a cell of r made on it) */
+	const teMark = (r, c) => {
+		const tc = r.tc;
+		for (let k = 0; k < tc.length; k++) {
+			if (tc[k] !== c) continue;
+			if (r.tried[k]) return;
+			r.tried[k] = 1; r.tLeft--; r.tGen++; r.tq = 0;
+			if (pickT) { TE.fetched++; TE.fk[TE.S.kind[c]]++; }
+			return;
+		}
+	};
+	/** --tedge: the live state left room r (its room key differs): by a trigger, the targets of r within the 3 x 3 tiles
+	 *  around the ball's centre are tried */
+	const teLeave = (r) => {
+		if (!RM.byTrigger(r.cause, RM.cause(sim))) return;
+		const t = centreTile(), x = t % W, y = (t / W) | 0, comp = TE.S.comp, kind = TE.S.kind;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			const xx = x + dx, yy = y + dy;
+			if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+			const c = comp[yy * W + xx];
+			// (a coin only when the ball holds it now: taken this tick or before, never one it has not reached)
+			if (c >= 0 && (kind[c] > 1 || sim.is_coin_collected(xx, yy))) teMark(r, c);
+		}
+	};
+	/** --tedge: head T's room R got TE_REST x --tBlock of its picks since a target of it was last tried: its nearest untried
+	 *  target rests (tried: a coin a room's lineages cannot all take, a trigger past a wall the walk does not see; the
+	 *  bursts' REST_AFTER), so the room's field moves on to the next ones */
+	const teRest = (R) => {
+		for (let k = 0; k < R.tc.length; k++) if (!R.tried[k]) { R.tried[k] = 1; R.tLeft--; R.tGen++; TE.rested++; break; }
+		R.tq = 0;
+	};
 	/** a new room of the live state; bk: made by a death that throws the ball back (deathPays): a BACK room, kept but
 	 *  demoted until a run or an import enters it another way (unback): no first cell (no discovery burst, no source, not
 	 *  reported to the one search), no head-B draw, no gain for its novelty group */
@@ -2469,6 +2670,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		}
 		if (a.spdKids && pr !== undefined && pr.spd) { r.spd = true; spdRooms.push(r); }
 		if (PAR !== null) parNote(r);
+		if (TE !== null) teRoom(r, f.tl, f.tl2);
 		rooms.set(key, r);
 		roomList.push(r);
 		return r;
@@ -2680,7 +2882,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const frGap = Math.max(FR_MIN_PICKS, Math.round(N * FR_TILE_PK));
 	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { const q = RF.fifthsAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0, -1, -1, FR.field.ice ? 2 : 0); v = q < 0 ? -1 : q / 5; FR.FT[t] = v; } return v; };
 	// (a cell of head F's current field: back into its heap at every push of its own, a pick or an earlier arrival)
-	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); if (FR !== null && FR.HF !== null && c.fg === FR.gen) FR.HF.push(c); };
+	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); if (FR !== null && FR.HF !== null && c.fg === FR.gen) FR.HF.push(c); if (TE !== null && TE.H !== null && TE.val.has(c)) TE.H.push(c); };
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value; deaths as moves: a state it has no value
 	 *  for, DEATH_TILES + its respawn target's value where that has one: the layer bodies have no death edges) */
@@ -2716,7 +2918,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (--jcell=1: every cell's jw, B_JW more; the flag off: none, the count as before)
 	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0) + (JC ? B_JW : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0) +
-		(FR !== null ? FR.bytes + (FR.HF !== null ? FR.HF.size() * B_HEAPE : 0) : 0) + (PAR !== null ? roomList.length * B_PR : 0);
+		(FR !== null ? FR.bytes + (FR.HF !== null ? FR.HF.size() * B_HEAPE : 0) : 0) + (PAR !== null ? roomList.length * B_PR : 0) +
+		(TE !== null ? TE.S.bytes + TE.S.N * 4 + TE.tBytes + roomList.length * B_TE + TE.list.length * 8 + (TE.H !== null ? TE.H.size() * B_HEAPE : 0) + TE.val.size * B_TV + TE.cacheBytes : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
 	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
@@ -2858,6 +3061,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (VIS !== null && VIS[tile] === 0) { VIS[tile] = 1; nVis++; }
 		if (sim.coins > maxCoins) maxCoins = sim.coins;
 		if (FR !== null) { nc.fc = -1; nc.fg = -1; if (FR.HF !== null && room === FR.room && cu !== 2) { const v = ftAt(tile); if (v >= 0 && v <= FR.thr) { nc.fc = v; nc.fg = FR.gen; } } }
+		// (--tedge: a cell of a room made on one of its targets tried it; a new cell of head T's room enters its heap at its
+		// tile's steps when it is among the nearest)
+		if (TE !== null && room !== null && room !== undefined) {
+			// (not a coin: coins are consumed, and a room's lineages hold different ones (the room keys their count), so a cell
+			// on a coin's tile proves nothing about it: bursts.js's rule)
+			if (room.tLeft > 0) { const c = TE.S.comp[tile]; if (c >= 0 && TE.S.kind[c] > 1) teMark(room, c); }
+			if (TE.H !== null && room === TE.R && cu !== 2 && addBack !== true) { const v = TE.D[tile]; if (v !== 0xffff && v <= TE.thr) TE.val.set(nc, v); }
+		}
 		hpush(nc);
 		if (t > deepest) deepest = t;
 		if (room !== null) {
@@ -2953,7 +3164,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {},
 	OT !== null ? Object.assign({ optRuns, optCells }, ...OP.NAMES.map((n, i) => ({ ['optE_' + n]: optEnds[i] }))) : {},
-	PAR !== null ? { parP, parFront, parG: parMax[0], parB: parMax[1], parK: parMax[2] } : {});
+	PAR !== null ? { parP, parFront, parG: parMax[0], parB: parMax[1], parK: parMax[2] } : {},
+	TE !== null ? { teP: TE.picks, teB: TE.builds, teH: TE.hits, teMs: TE.ms, teF: TE.fetched, teF0: TE.fk[0], teF1: TE.fk[1], teF2: TE.fk[2], teF3: TE.fk[3], teF4: TE.fk[4], teF5: TE.fk[5],
+		teCh: TE.choices, teNG: TE.noGoal, teRs: TE.rested, teRooms: TE.list.length, teRw: Math.round(TE.rewards * 100) / 100 } : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -3078,6 +3291,104 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		parP++;
 		return bc;
 	};
+	/** --tedge: a new room's first cell arrived: its reward (see SUBGOAL HEAD T) to the rooms it came from, --tGamma a step */
+	const teReward = (room) => {
+		const P0 = room.parent !== null ? rooms.get(room.parent) : undefined;
+		let rw = 0;
+		const v = room.tres;
+		if (v !== null && v !== undefined) {
+			if (!TE.front.length && room0 !== null && room0.tres) TE.front.push(room0.tres);
+			let dom = false;
+			for (const u of TE.front) if (u[0] >= v[0] && u[1] >= v[1] && (v[2] & ~u[2]) === 0) { dom = true; break; }
+			if (!dom) { rw += 1; TE.front = TE.front.filter((u) => !(v[0] >= u[0] && v[1] >= u[1] && (u[2] & ~v[2]) === 0)); TE.front.push(v); }
+		}
+		rw += Math.min(1, room.gain / 50);
+		if (room.troOk && P0 !== undefined && !P0.troOk) rw += 2;
+		TE.rewards += rw;
+		let P = P0, w = 1;
+		for (let d = 0; P !== undefined && d < 16; d++) { P.vs += w * rw; P.vn += w; w *= a.tGamma; P = P.parent !== null ? rooms.get(P.parent) : undefined; }
+	};
+	/** --tedge: room r can be head T's: still in the archive with cells, not a back room nor dominated, an untried target
+	 *  left, and a finite goal at its untried set's version */
+	const teLive = (r) => rooms.get(r.key) === r && r.arr.length > 0 && !r.bk && !domOf(r) && r.tLeft > 0 && r.tDead !== r.tGen;
+	/** --tedge: head T's field and heap for room R (its untried targets nearest its entry as goals, --tNear) */
+	const teBuild = (R) => {
+		const tb = Date.now();
+		TE.builds++; TE.R = R; TE.gen = R.tGen; TE.val.clear(); TE.H = null; TE.D = null; TE.thr = Infinity;
+		const goals = [], sel = new Uint8Array(R.tc.length);
+		let h = mixW(0x2f1a, R.tprot ? 1 : 0), ng = 0;
+		for (let k = 0; k < R.tds.length; k++) h = mixW(h, R.tds[k]);
+		// (the primary targets first; the secondary coins (R.t2, last in R.tc) only once no primary one is untried)
+		const n1 = R.tc.length - R.t2;
+		for (let k = 0; k < R.tc.length; k++) {
+			if (R.tried[k]) continue;
+			if (k >= n1 && ng > 0) break;
+			h = mixW(h, R.tc[k]); sel[k] = 1;
+			if (a.tNear > 0 && ++ng >= a.tNear) break;
+		}
+		for (let j = 0; j < R.tt.length; j++) if (sel[R.tti[j]]) goals.push(R.tt[j]);
+		// (the field: from the cache (the same passable set and goals), else walked; the cache keeps TE_CACHE, the least
+		// recently used goes)
+		const ck = (h >>> 0) * 1024 + (goals.length & 1023);
+		let e = TE.cache.get(ck), D;
+		if (e !== undefined) { e.used = ++TE.clock; D = e.D; TE.hits++; }
+		else {
+			D = teField(TE.S, goals, R.tds, R.tprot, TE.q);
+			if (TE.cache.size >= TE_CACHE) { let bk = null, bu = Infinity; for (const [k, x] of TE.cache) if (x.used < bu) { bu = x.used; bk = k; } TE.cache.delete(bk); TE.cacheBytes -= TE.S.N * 2; }
+			TE.cache.set(ck, { D, used: ++TE.clock });
+			TE.cacheBytes += TE.S.N * 2;
+		}
+		// (the heap: the room's --tK cells nearest the goals, not in a cul-de-sac, no kept throw-back, early enough)
+		const cand = [];
+		for (const c of R.arr) {
+			if (c.t >= maxT || c.u === 2 || c.bk === true) continue;
+			const v = D[c.tile];
+			if (v !== 0xffff) cand.push(c);
+		}
+		if (!cand.length) { R.tDead = R.tGen; TE.noGoal++; TE.R = null; TE.ms += Date.now() - tb; return; }
+		cand.sort((x, y) => D[x.tile] - D[y.tile] || x.t - y.t);
+		if (cand.length > a.tK) { cand.length = a.tK; TE.thr = D[cand[cand.length - 1].tile]; }
+		TE.D = D;
+		TE.H = heapOf((c) => TE.val.get(c) + a.tLambda * Math.sqrt(c.picks));
+		for (const c of cand) { TE.val.set(c, D[c.tile]); TE.H.push(c); }
+		TE.ms += Date.now() - tb;
+	};
+	/** --tedge: head T's room by the UCB tournament (see SUBGOAL HEAD T), its field and heap; none: TE.R null */
+	const teChoose = () => {
+		TE.R = null; TE.H = null; TE.D = null; TE.val.clear(); TE.bp = 0; TE.choices++;
+		const lnN = Math.log(1 + TE.picks), L2 = TE.list;
+		let best = null, bs = -Infinity;
+		for (let k = 0; k < 4 && L2.length; k++) {
+			const i = (rnd() * L2.length) | 0, r = L2[i];
+			// (a room gone from the archive, or with no untried target left, leaves the list)
+			if (rooms.get(r.key) !== r || r.tLeft <= 0) { const last = L2.pop(); if (i < L2.length) L2[i] = last; continue; }
+			if (!teLive(r)) continue;
+			const s = (r.vn > 0 ? r.vs / r.vn : 0) + a.tC * Math.sqrt(lnN / (1 + r.tn));
+			if (s > bs) { bs = s; best = r; }
+		}
+		if (best !== null) teBuild(best);
+		// (EEAT_TELOG=<file>: observation only, a line per choice: the list, the room chosen, its numbers)
+		if (TE.log) { try { fs.appendFileSync(TE.log, JSON.stringify({ seed, picks, tp: TE.picks, list: L2.length, room: best ? best.desc : null, v: best ? [Math.round(best.vs * 100) / 100, Math.round(best.vn * 100) / 100, best.tn, best.tLeft, best.tc.length] : null, R: TE.R ? TE.R.desc : null, H: TE.H ? TE.H.size() : 0 }) + '\n'); } catch (x) { /* */ } }
+	};
+	/** head T (--tedge=1): a cell of its room nearest the room's untried targets; none: head A's */
+	const popT = () => {
+		if (!TE.list.length) return popA();   // (no room with an untried target: head A's pick)
+		for (let tries = 0; tries < 3; tries++) {
+			if (TE.R === null || TE.H === null || TE.bp >= a.tBlock || !teLive(TE.R)) teChoose();
+			else if (TE.gen !== TE.R.tGen) teBuild(TE.R);
+			if (TE.R === null || TE.H === null) return popA();   // (the tournament found no live room this time)
+			const H = TE.H;
+			while (H.size() > 0) {
+				const c = H.pop();
+				if (H.popVer !== c.ver || c.t >= maxT || !TE.val.has(c)) continue;
+				TE.bp++; TE.picks++; TE.R.tn++; pickT = true;
+				if (++TE.R.tq >= TE_REST * a.tBlock) teRest(TE.R);
+				return c;
+			}
+			TE.R = null;
+		}
+		return popA();
+	};
 	const discovery = [];   // head C (coarse cells): [cell, picks left], the newest room's last
 	// (EEAT_PICKLOG=1, observation only: per head, room and zone of 10 x 10 tiles the picks and the new and improved cells
 	// their runs made, posted every PICKLOG_S s: where the search's picks go, src/out/night/deadends.md)
@@ -3138,6 +3449,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 					if (r.arr.length || r === room0) roomList[n++] = r;
 					else {
 						rooms.delete(r.key); nSatZ -= r.sat.size; fields.release(r.cul);
+						if (TE !== null) TE.tBytes -= r.tb;
 						if (r.grp !== null) { const i = r.grp.rooms.indexOf(r); if (i >= 0) r.grp.rooms.splice(i, 1); }
 					}
 				}
@@ -3152,6 +3464,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	 *  room to the main thread */
 	const firstCell = (room, nc, t) => {
 		room.isNew = false;
+		if (TE !== null) teReward(room);
 		// (a dominated room: no discovery burst and no source; the main thread hears of it, with its class and mask)
 		const dm = domOf(room);
 		if (room.gain > 0 && !dm) { if (a.burst > 0) { discovery.push([nc, a.burst]); bursts++; } }
@@ -3204,6 +3517,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (rc < 0) break;
 			roomKey = RM.key(sim);
 			if (roomKey !== room.key) {
+				if (TE !== null && room.tLeft > 0) teLeave(room);
 				const r = rooms.get(roomKey);
 				if (r !== undefined) { room = r; if (r.bk) unback(r); reentry(r); }
 				else if (roomFor()) room = newRoom(roomKey, t, room.key);
@@ -3646,7 +3960,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (FR !== null) fShare = frShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
-			pickL = false; pickW = false;
+			pickL = false; pickW = false; pickT = false;
 			let head = 'A';
 			if (!coarse) e = popA();
 			else if (discovery.length && rnd() < 0.5) {
@@ -3673,8 +3987,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
 				else { FR.picks++; head = 'F'; if (FR.log) { const k = e.tile; FR.pk.set(k, (FR.pk.get(k) || 0) + 1); } }
 			} else if (rnd() < a.pA) {
-				// (head P, --pareto=1: its share of head A's picks, one draw more only with the flag on a level with resources)
-				if (PAR !== null && rnd() < a.pP / a.pA) { e = popP(); head = 'P'; } else e = popA();
+				// (head T, --tedge=1: its share of head A's picks before any route, one draw more only with the flag on; then head P,
+				// --pareto=1: its share, one draw more only with the flag on a level with resources)
+				if (TE !== null && maxT >= spdMaxT0 && rnd() < a.pT / a.pA) { e = popT(); head = 'T'; }
+				else if (PAR !== null && rnd() < a.pP / a.pA) { e = popP(); head = 'P'; } else e = popA();
 			} else { e = popB(); head = 'B'; }
 			if (e === null) { end = 'exhausted'; break; }
 			// (EEAT_PICKLOG=1: the picks per head, room and 10 x 10-tile zone, with the cells they made; observation only)
@@ -3786,6 +4102,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 						roomKey = RM.key(sim);
 						if (roomKey !== room.key) {
 							if (AV !== null && AV[centreTile()] === 2 && RM.byTrigger(room.cause, RM.cause(sim))) { avoided++; break; }
+							// (--tedge: a room change by a trigger tries the room's targets around the ball)
+							if (TE !== null && room.tLeft > 0) teLeave(room);
 							const r = rooms.get(roomKey);
 							if (r !== undefined) { if (report) edge(room, r); room = r; if (r.bk) unback(r); reentry(r); }
 							else if (t < maxT && roomFor()) room = newRoom(roomKey, t, room.key);
@@ -3837,7 +4155,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			}
 			if (a.maxTicks && ticks >= a.maxTicks && !end) end = 'ticks';
 		}
-		pickL = false; pickW = false;
+		pickL = false; pickW = false; pickT = false;
 	}
 	sendNear();
 	if (HEATM !== null && heatN > 0) heatPost();
@@ -4701,6 +5019,11 @@ async function main() {
 	const jcellNow = () => (a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom'), kept: total('jKept'), bytes: total('jwB') } } : {});
 	// (--pareto=1: head P's picks over the workers, the largest front, the most useful gold / blue / key colours a room holds)
 	const paretoNow = () => (a.pareto && a.cells === 'coarse' ? { pareto: { picks: total('parP'), front: most('parFront'), gold: most('parG'), blue: most('parB'), keys: most('parK') } } : {});
+	// (--tedge=1: head T's picks, field builds (and cache hits), their ms, the triggers its picks' runs tried (by kind: coin,
+	// blue coin, key, switch, effect, other), its room choices and those with no finite goal, the most rooms with an untried
+	// target, the rewards paid)
+	const tedgeNow = () => (a.tedge && a.useful !== 0 && a.cells === 'coarse' && !a.gpu ? { tedge: { picks: total('teP'), builds: total('teB'), hits: total('teH'), ms: total('teMs'), fetched: total('teF'),
+		byKind: { coin: total('teF0'), blue: total('teF1'), key: total('teF2'), switch: total('teF3'), effect: total('teF4'), other: total('teF5') }, choices: total('teCh'), noGoal: total('teNG'), rested: total('teRs'), rooms: most('teRooms'), rewards: Math.round(total('teRw') * 100) / 100 } } : {});
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), backKept: total('dBackKept'), backByOrder: total('dBackR'), backBySteer: total('dBackS'), backPromoted: total('dPromote'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
@@ -4719,7 +5042,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), jcellNow(), paretoNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), jcellNow(), paretoNow(), tedgeNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -5056,7 +5379,7 @@ async function main() {
 		for (let i = 0; i < u.length; i++) tiles += u[i];
 	}
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...jcellNow(), ...paretoNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...jcellNow(), ...paretoNow(), ...tedgeNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...frontierNow(), ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
