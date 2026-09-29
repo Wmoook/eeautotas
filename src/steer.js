@@ -915,7 +915,8 @@ function coinLegsPhys(B, PH, base, opts) {
 	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
 	const nC = M.names.indexOf('coins');
 	s = M.withVal(s, nC, base.T - 1);
-	const L = legsOf(A, M, s, nC, base.coins, opts);
+	// (opts.carry {forcedOf, deadline, stats}: the carried legs, LEG KEYS above)
+	const L = opts && opts.carry ? carryLegsOf(A, M, s, nC, base.coins, opts.carry.forcedOf, opts.carry.deadline, opts.carry.stats) : legsOf(A, M, s, nC, base.coins, opts);
 	const fields = new Map(), countOf = new Map();
 	try {
 		const f0 = L.fields(base.coins.map((q) => [q, base.T - 1]));
@@ -964,6 +965,108 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 		close() { if (pool) pool.close(); },
 	};
 }
+// LEG KEYS (night 3, branch n3-steer-legs-keys, 2026-09-29; EEAT_LEGKEYS=0 / buildSteer(level, {legKeys: false}): off):
+// a coin leg's copy (legsOf: layerLevel at the leg's count) keeps every tile that changes a feature other than the coins
+// (a key, a switch, a team or protection tile, an effect) as a trophy tile with no goal cost: a SINK, so a leg whose way
+// crosses one had no value past it (Mr Nutty's Wild World: the green key (83, 31) on the only way, the 15-coin DP without
+// a value at the start). A carried leg is the value iteration of buildPhysics at the leg's count k: the sub-layers
+// {s' : coins k} closed under those tiles' changes and key expiry (at most CARRY_MAX_SUB), a field each with the coin the
+// goal (0) and each tile that changes the sub-layer a goal at the next sub-layer's arrival cost there (a toggle's by its 8
+// neighbours), every tile a goal at the key-off sub-layer's cost in a key-on one (expiry); the leg = its own sub-layer's
+// field (the leg's layer as before). The forced portals as the plain leg chose them (legFieldOf's fallback), so opening
+// the tiles never flips that choice (with the forcing kept where the plain leg had dropped it, the forced legs cut the
+// tour). Ordering only: the lookup's bodies and the DP are as before, the RCH3 field and its -1 untouched. Used only where
+// the DP had no value at the start (buildSteer): elsewhere the build is main's byte for byte.
+const CARRY_MAX_SUB = 8;
+function legKeysOn(opts) { return opts && opts.legKeys !== undefined ? !!opts.legKeys : process.env.EEAT_LEGKEYS !== '0'; }
+/** the carried legs of one build (legsOf's shape: fields([[q, k]]), close()); forcedOf(q): the plain leg's choice (true:
+ *  forced portals); a leg with nothing to carry, too many sub-layers or past the deadline: the plain leg */
+function carryLegsOf(A, M, s, nC, coins, forcedOf, deadline, stats) {
+	const kinds = new Map();
+	A.special.forEach((sp, i) => { if (sp[1] !== 'coins') { const key = `${sp[1]}:${sp[2]}`; if (!kinds.has(key)) kinds.set(key, i); } });
+	const subOf = new Map();
+	const subs = (k) => {
+		if (subOf.has(k)) return subOf.get(k);
+		const s0 = M.withVal(s, nC, k);
+		const seen = new Set([s0]), list = [s0], succ = new Map();
+		for (let i = 0; i < list.length && list.length <= CARRY_MAX_SUB; i++) {
+			const u = list[i], nx = new Set();
+			for (const sp of kinds.values()) for (const v of M.transAll(u, sp)) if (v !== u && M.valOf(v, nC) === k) nx.add(v);
+			for (const v of M.expire(u)) nx.add(v);
+			succ.set(u, nx);
+			for (const v of nx) if (!seen.has(v)) { seen.add(v); list.push(v); }
+		}
+		let r = null;
+		if (list.length <= CARRY_MAX_SUB && list.length > 1) {
+			const on = new Uint8Array(M.S), sc = new Array(M.S).fill(null).map(() => new Set());
+			for (const u of list) { on[u] = 1; for (const v of succ.get(u) || []) sc[u].add(v); }
+			r = { s0, list, comps: sccs(M.S, on, sc) };
+		}
+		subOf.set(k, r);
+		return r;
+	};
+	const copyOf = new Map();
+	const copy = (u) => {
+		if (!copyOf.has(u)) {
+			const c = layerLevel(A, M, u, {});
+			const fg0 = Int32Array.from(c.lv.fg);
+			for (const q of coins) if (fg0[q] === TROPHY) fg0[q] = 0;
+			copyOf.set(u, { lv: c.lv, fg0, goal: c.goal, goalTiles: c.goalTiles.filter(([, sp]) => A.special[sp][1] !== 'coins') });
+		}
+		return copyOf.get(u);
+	};
+	const plain = (q, k) => { const C = copy(M.withVal(s, nC, k)); const fg = Int32Array.from(C.fg0); fg[q] = TROPHY; return legFieldOf(C.lv, fg, q, coins, A.start.t); };
+	const leg = (q, k) => {
+		const S = subs(k);
+		if (!S || (deadline && Date.now() > deadline)) { if (stats) stats.plain++; return plain(q, k); }
+		const forced = forcedOf(q) !== false;
+		const F = new Map(), keyOf = new Map();
+		const solve = (u) => {
+			const C = copy(u);
+			const goals = [{ tile: q, cost: 0 }];
+			for (const [t, sp] of C.goalTiles) {
+				let g = CUT;
+				for (const v of M.transAll(u, sp)) {
+					if (v === u) continue;
+					const f2 = F.get(v);
+					if (!f2) continue;
+					const c = copy(v).goal[t] ? arriveNear(f2, t, A) : arriveCost(f2, t);
+					if (c < g) g = c;
+				}
+				if (g < CUT) goals.push({ tile: t, cost: g / 5 });
+			}
+			const fs2 = M.expire(u).map((v) => F.get(v)).filter(Boolean);
+			if (fs2.length) {
+				for (let t = 0; t < A.N; t++) {
+					if (t === q) continue;
+					let g = CUT;
+					for (const f2 of fs2) { const v = arriveCost(f2, t); if (v < g) g = v; }
+					if (g < CUT) goals.push({ tile: t, cost: g / 5 });
+				}
+			}
+			const key = goalsKey(goals);
+			if (keyOf.get(u) === key && F.get(u)) return false;
+			keyOf.set(u, key);
+			const fg = Int32Array.from(C.fg0); fg[q] = TROPHY;
+			F.set(u, RF.reachField(Object.assign({}, C.lv, { fg }), forced ? { goals, oneWayEntry: true, portalForced: true } : { goals, oneWayEntry: true }));
+			if (stats) stats.fields++;
+			return true;
+		};
+		for (const comp of S.comps) {
+			for (let it = 0; it < (comp.length > 1 ? 8 : 1); it++) {
+				let changed = false;
+				for (const u of comp) if (solve(u)) changed = true;
+				if (!changed) break;
+			}
+		}
+		const f = F.get(S.s0);
+		if (!f) { if (stats) stats.plain++; return plain(q, k); }
+		if (!forced) f.unforced = true;
+		if (stats) { stats.carried++; stats.subs = Math.max(stats.subs, S.list.length); }
+		return f;
+	};
+	return { fields(list) { return list.map(([q, k]) => leg(q, k)); }, costs() { throw new Error('carryLegsOf: no costs'); }, close() {} };
+}
 function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 	const sT = M.withVal(s, nC, Math.min(base.T, M.radix[nC] - 1));
 	const tail = new Map();
@@ -974,17 +1077,31 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 	// opens every coin door below T: on Forgotten Veil (doors for every count 1..16) coin 4's leg from coin 3 ran through
 	// doors shut at 3 coins, not the known route's 1195-tick loop)
 	if (!opts || opts.legTour !== false) {
+		// (carried legs, LEG KEYS: a round whose recounted legs leave the DP no whole tour from the start is undone: on Mr
+		// Nutty's the 9..14 coin-door staircase shut at the tour's counts cut every tour of round 1; the plain legs keep
+		// main's rounds)
+		const guard = !!(opts && opts.carry);
+		const whole = () => { const D = coinDP(CL); return !!D && coinTour(CL, D, A.start.t).length >= Math.min(D.T, D.n); };
+		let prev = null;
 		for (let round = 0; round < 3; round++) {
 			const D = coinDP(CL);
 			if (!D) break;
 			const tour = coinTour(CL, D, A.start.t);
+			if (guard && prev && tour.length < Math.min(D.T, D.n)) break;
 			// (the legs whose count changed, one batch: each leg is its own field)
 			const ch = tour.map((q, k) => [q, k]).filter(([q, k]) => countOf.get(q) !== k);
+			if (guard) prev = ch.length && tour.length >= Math.min(D.T, D.n) ? { fields: new Map(fields), countOf: new Map(countOf), rounds: CL.rounds } : null;
 			const f2 = ch.length ? L.fields(ch) : [];
 			ch.forEach(([q, k], i) => { fields.set(q, f2[i]); countOf.set(q, k); });
 			const changed = ch.length;
 			CL.rounds = round + 1;
 			if (!changed) break;
+		}
+		if (guard && prev && !whole()) {
+			for (const [q, f] of prev.fields) fields.set(q, f);
+			for (const [q, k] of prev.countOf) countOf.set(q, k);
+			CL.rounds = prev.rounds;
+			CL.undone = true;
 		}
 	}
 	return CL;
@@ -1362,8 +1479,10 @@ function buildSteer(level, opts) {
 	}
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) cp = null;
+	const nLayerBodies = bodies.length;
+	let CL = null;
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
+		CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (D) {
 			const none = new Uint8Array(N);
@@ -1382,6 +1501,53 @@ function buildSteer(level, opts) {
 	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0 };
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
+	// LEG KEYS (carryLegsOf): the plan's DP without a value at the start: its legs again with the other features carried
+	// (the same tour rounds); taken when the start gets a value, else the DP as it was. Then, still none: the walk tour
+	// over the DP's coins (buildTour, T the DP's, the CPU file's alone: the lookup the least of the layer field, the DP and
+	// it) instead of no value (Phina and the Rose's 18-coin DP: no tour from the start)
+	let legKeys = null;
+	if (dp && CL && !CL.layered && !opts.coinT && legKeysOn(opts) && !(steerAt(steer, sim0) >= 0)) {
+		const lt0 = Date.now();
+		const stats = { carried: 0, plain: 0, fields: 0, subs: 0 };
+		const forced = new Map(CL.coins.map((q) => [q, !(CL.fields.get(q) && CL.fields.get(q).unforced)]));
+		const CL2 = coinLegsPhys(B, PH, cp, Object.assign({}, opts, { carry: { forcedOf: (q) => forced.get(q), deadline: t0 + 2 * maxMs, stats } }));
+		const D2 = stats.carried ? coinDP(CL2) : null;
+		legKeys = Object.assign({ used: false, ms: 0, rounds: CL2.rounds }, stats);
+		if (D2) {
+			const keep = { bodies: bodies.slice(), goals: goals.slice(), keys: new Map(bodyKey), dp };
+			bodies.length = nLayerBodies; goals.length = nLayerBodies;
+			for (const [k, v] of [...bodyKey]) if (v >= nLayerBodies) bodyKey.delete(k);
+			const none = new Uint8Array(N);
+			const bit = Int32Array.from(CL2.coins, (q) => level.coinBit[q]);
+			const leg = Int32Array.from(CL2.coins, (q) => addBody(CL2.fields.get(q), none));
+			steer.dp = { n: D2.n, T: D2.T, bit, leg, h: D2.h, rounds: CL2.rounds, tour: null };
+			if (steerAt(steer, sim0) >= 0) { dp = steer.dp; legKeys.used = true; steer.prioShift = prioShiftOf(steer); }
+			else {
+				bodies.length = 0; bodies.push(...keep.bodies); goals.length = 0; goals.push(...keep.goals);
+				bodyKey.clear(); for (const [k, v] of keep.keys) bodyKey.set(k, v);
+				steer.dp = keep.dp;
+			}
+		}
+		if (!(steerAt(steer, sim0) >= 0)) {
+			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
+			const R = buildTour(A, level, dp.T, false, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
+			if (R) {
+				steer.tour = R;
+				let s1 = tourFifths(steer, sim0);
+				if (s1 > TOUR_MAX_TILES * 5) {
+					const f = TOUR_MAX_TILES * 5 / s1;
+					for (let k = 0; k < R.legs.length; k++) if (R.legs[k] < CUT) R.legs[k] = Math.round(R.legs[k] * f);
+					for (let k = 0; k < R.C.length; k++) R.C[k] *= f;
+					for (let k = 0; k < R.tail.length; k++) R.tail[k] *= f;
+					R.scale = f;
+					s1 = tourFifths(steer, sim0);
+				}
+				if (s1 < 0) delete steer.tour;
+				else legKeys.tour = { n: R.n, T: R.T, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, start: s1 / 5 };
+			}
+		}
+		legKeys.ms = Date.now() - lt0;
+	}
 	// the coin tour (no DP; the plan's coin door, or the full count where the coins are modelled: the min with the layer
 	// field keeps the ways that need no more coins; the CPU file's alone: steerFileBytes(st, fp, true); after prioShift,
 	// so the GPU's file stays as it was)
@@ -1421,6 +1587,7 @@ function buildSteer(level, opts) {
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
 		tour: tourInfo };
+	if (legKeys) steer.info.legKeys = legKeys;
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1550,7 +1717,13 @@ function steerFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
 	// (the coin tour, the CPU file's (no DP): the min with the layer field's, like the DP's; first below T where the coins
 	// are not modelled: the layer field walks through their doors)
-	if (st.tour) { const t = tourFifths(st, sim); return t < 0 ? v : v < 0 || st.tour.first ? t : Math.min(v, t); }
+	if (st.tour) {
+		const t = tourFifths(st, sim);
+		// (a tour next to a DP (LEG KEYS: the DP had no value at the start): the least of the three)
+		let w = v;
+		if (st.dp && !st.tour.first) { const d = dpFifths(st, sim, v >= 0 ? v : Infinity); if (d >= 0 && (w < 0 || d < w)) w = d; }
+		return t < 0 ? w : w < 0 || st.tour.first ? t : Math.min(w, t);
+	}
 	// (st.dpFirst: the coin DP's value wherever it has one, the layer field's only past the coins (goexplore.js --dpFirst):
 	// the layer's own way needs no more coins, and on Forgotten Veil it is a false one (the portal at (77,109)))
 	if (st.dpFirst) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
