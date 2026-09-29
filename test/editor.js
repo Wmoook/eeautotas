@@ -987,7 +987,7 @@ async function passesSection() {
 		if (d0 === undefined) delete process.env.EEAT_GPUMEM_DIR; else process.env.EEAT_GPUMEM_DIR = d0;
 		if (c0 === undefined) delete process.env.CUDA_VISIBLE_DEVICES; else process.env.CUDA_VISIBLE_DEVICES = c0;
 		check("the run's GPU memory budget: EEAT_GPUMEM_GB, else min(free at the start, the GPU / its runs); the tools' estimates; every move's table and the breaker's sized to the share; the device's live runs (a dead run's file removed)",
-			B.join() === '20480,18000,14100,16384,0,1536' && est.join() === '5720,1624,4696,6296,4848,1312,1000' && cells.join() === '27,27,26,26,24' && brk.join() === '29,28,30,27,24' &&
+			B.join() === '20480,18000,14100,16384,0,1536' && est.join() === '5420,1324,6698,8746,8148,2362,1000' && cells.join() === '27,27,26,24,24' && brk.join() === '29,28,30,27,24' &&
 			runs === 2 && left === ['6~' + process.pid, '6~' + process.ppid, '7~' + process.pid].sort().join(','),
 			`budgets ${B.join()}; estimates ${est.join()}; every move ${cells.join()}; breaker ${brk.join()}; runs ${runs} (${left})`);
 	}
