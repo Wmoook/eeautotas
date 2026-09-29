@@ -442,7 +442,7 @@ const STRATEGIES = {
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
-			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : []), ...gxDefaults(), ...gxExtra()] },
+			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : []), ...(o.burstRel ? ['--burstRel=1'] : [])] : []), ...gxDefaults(), ...gxExtra()] },
 	// the stall escape (see ESC_WAIT_S): a second one search (goexplore.js, its own archive and GPU bursts) from a stalled
 	// search's starting point (--prefix), on a share of the CPU search's workers, with the rotation's configuration (its
 	// flags after the search's own: the last one wins in goexplore.js)
@@ -475,6 +475,31 @@ const PREC_TILES = 0.5, PREC_WAIT_S = 10, PREC_WAIT_MAX_S = 240, PREC_S = 90, PR
 // or EEAT_BURST_BIG=0: the laptop sizing everywhere)
 const BURST_BIG_MB = 20000;
 const burstSizeArgs = (memMB) => memMB >= BURST_BIG_MB ? ['--burstPar=2', '--gpuCells=26', '--burstCap=0'] : [];
+// THE BURST SERVER'S RELEASE AND THE FREE-MEMORY FIT (OPT-IN: body burstRel: true / EEAT_BURSTREL=1; NIGHT3 cycle 8,
+// n3-burst-server-release). Sweep 7: "out of memory" in 15 of 57 runs (two searches a 40 GB A100), the bursts at the
+// small sizing in 24 (Booty Return 20 OOM, Starlight 14, Nightmare Relics 13); gpu-mem-fit's hard split of the GPU cut the
+// OOM 90-100% but left memory idle and starved the stall tools (Purple Depths, Soul Quest, Planets, Cave Exploration
+// lost or slower). So no split: (1) a PAUSED burst job holds nothing (the one search's and the escape's burst servers get
+// goexplore.js --burstRel=1: native/launch.h checkRelease / waitUnpaused: a pause that outlives the job's seconds ends
+// it at once, a job sent during a pause waits before it allocates), and while the wall breaker's round has the GPU
+// their pause files read "release" (pauseHowOf): their paused jobs end at once, so the round's table (--reserve: the free
+// memory less its reserve) sizes itself with their memory back; (2) each of those GPU tools takes at most the free
+// memory less a headroom (gpuFitEnv: native EEAT_GPU_FIT with the share 1, cudadrv.h fitHeadroom): main's greedy size
+// wherever that fits, a smaller table and layer cap where it does not (an OOM burst went to the small sizing for 300 s);
+// the stall tools first: the stall escape's bursts leave room for one more context (EEAT_GPU_FIT_CTX=1), the one
+// search's bursts and the GPU random runs for two (the native rule); every move, the beams and the breaker keep their
+// own sizing (the breaker its --reserve rule). Sizing and order only: nothing pruned.
+/** the environment a GPU tool of `key` gets for the free-memory fit (null: none, main's sizing) */
+const gpuFitEnv = (key, on) => {
+	if (!on) return null;
+	if (key === 'escape') return { EEAT_GPU_FIT: '1', EEAT_GPU_FIT_SHARE: '1', EEAT_GPU_FIT_CTX: '1' };
+	if (key === 'goexplore' || key === 'gorolls') return { EEAT_GPU_FIT: '1', EEAT_GPU_FIT_SHARE: '1' };
+	return null;
+};
+/** what a paused strategy's pause file says: "release" for a burst server's strategy (the one search, the escape) while
+ *  the wall breaker's round has the GPU and the release is on; else "pause" (a turn of the others: its jobs keep their
+ *  tables unless the pause outlives them) */
+const pauseHowOf = (q, breakerRound, on) => (on && breakerRound && q && q.gpuShare ? 'release' : 'pause');
 // the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
 const ROLL_BATCH = 4096;
 const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(f.steerBeam && !(q.V && q.V.noSteer) ? [`--steer=${f.steerBeam}`] : [])];
@@ -597,10 +622,16 @@ const FIXED_MEM = new Set(['gorolls', 'goal', 'guide']);
 const EARLY_KEYS = new Set(['gorolls', 'skips']);
 let sched = null, schedTimer = null;   // { owner: strategy index, since, slices, lastOther }
 const pauseFileOf = (k) => path.join(dir(), `pause_${k}`);
-function setPaused(k, on) {
+function setPaused(k, on, how = 'pause') {
 	const ch = kids[k];
-	if (!ch || !!ch.paused === on) return;
-	try { if (on) fs.writeFileSync(pauseFileOf(k), 'pause'); else fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* gone */ }
+	if (!ch) return;
+	// (a paused strategy's file rewritten when what it says changes: "pause" <-> "release", BURST_REL)
+	if (!!ch.paused === on) {
+		if (on && (ch.pauseHow || 'pause') !== how) { try { fs.writeFileSync(pauseFileOf(k), how); } catch (e) { /* gone */ } ch.pauseHow = how; }
+		return;
+	}
+	try { if (on) fs.writeFileSync(pauseFileOf(k), how); else fs.unlinkSync(pauseFileOf(k)); } catch (e) { /* gone */ }
+	ch.pauseHow = on ? how : '';
 	ch.paused = on;
 	if (on) ch.pausedSince = Date.now();
 	else {
@@ -633,7 +664,8 @@ function schedule() {
 	const bkIdle = BK >= 0 && !gpu.includes(BK) && !!brk && !!brk.round && !(cur && cur.opts.breakShare && brk.round.shareOn);
 	if (bkIdle) {
 		const fixed = gpu.filter((k) => FIXED_MEM.has(S.strategies[k].key));
-		for (const k of gpu) if (!fixed.includes(k)) setPaused(k, true);
+		// (BURST_REL: the burst servers' paused jobs end at once and give their tables back: pauseHowOf)
+		for (const k of gpu) if (!fixed.includes(k)) setPaused(k, true, pauseHowOf(S.strategies[k], true, !!(cur && cur.opts.burstRel)));
 		S.gpuTurn = 'breaker';
 		if (!fixed.length) return;
 		gpu = fixed;
@@ -657,7 +689,7 @@ function schedule() {
 			note(share ? `${S.strategies[BK].label}: round ${brk.rounds} got nothing of its own for ${cur.opts.breakStep} s: the one search's bursts go on beside the round`
 				: `${S.strategies[BK].label}: round ${brk.rounds} got on: the round has the GPU to itself again`);
 		}
-		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare));
+		for (const k of gpu) setPaused(k, k !== BK && !(share && S.strategies[k].gpuShare), pauseHowOf(S.strategies[k], !!R, !!(cur && cur.opts.burstRel)));
 		if (gpu.includes(BK)) { kids[BK].hadTurn = true; kids[BK].lastTurn = now; }
 		S.gpuTurn = 'breaker';
 		return;
@@ -2195,6 +2227,8 @@ function start(b, gpu, test) {
 	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves, useful,
 		burstBig: b.burstBig !== false && !(test && test.burstBig === false) && process.env.EEAT_BURST_BIG !== '0',
 		breakShare: b.breakShare === true || !!(test && test.breakShare === true) || process.env.EEAT_BREAK_SHARE === '1',
+		// (the burst server's release and the free-memory fit, OPT-IN: BURST_REL)
+		burstRel: b.burstRel === true || !!(test && test.burstRel === true) || process.env.EEAT_BURSTREL === '1',
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
 		// (the wall breaker's clocks and table; tests: shorter, and a small table)
 		breakWait: test && Array.isArray(test.breakWait) ? test.breakWait : BREAK_WAIT_S, breakStep: test && test.breakStep ? test.breakStep : BREAK_STEP_S,
@@ -2786,9 +2820,13 @@ function launch(n) {
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined,
+	// (BURST_REL: the one search's and the escape's burst servers and the GPU random runs' eegpu roll inherit the
+	// free-memory fit, gpuFitEnv)
+	const fitEnv = gpuFitEnv(V.key, !!cur.opts.burstRel && (!!V.gpuShare || rolls));
+	const env0 = cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined;
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: fitEnv ? Object.assign({}, env0 || process.env, fitEnv) : env0,
 		detached: !cpu });
-	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)) });
+	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)), ...(fitEnv ? { fit: fitEnv } : {}) });
 	ch.stopFile = stopFile;
 	ch.startedAt = Date.now();
 	ch.paused = pausedNow;
@@ -3888,6 +3926,6 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, gpuFitEnv, pauseHowOf, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };

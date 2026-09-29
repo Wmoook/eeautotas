@@ -154,6 +154,15 @@ const OOM_WAIT_MAX_S = 120;
 // (--burstOomS) only when the small one finds no memory either. The EPYC's 24 GB RTX 4090 is often nearly full, and two
 // searches on one 40 GB A100 had 11 such waits against 0 (src/out/night/n2_2_time_to_route.md)
 const SMALL = { cells: 25, cap: 262144 };
+// the burst server's release (goexplore.js --burstRel=1 / EEAT_BURSTREL=1, OPT-IN; native/launch.h checkRelease and
+// waitUnpaused, explorehost.h serveExplore): the server's own arguments. A paused job held its tables (2 lanes x ~4 GB at
+// the A100 sizing) through every other tool's turn, and a burst's --seconds count through the pause: after a wall
+// breaker round the job ran one more layer and ended "time", having held its memory while the round's table sized
+// itself by the memory left. With --release=1 a pause that outlives the job's seconds ends it at once ("time"), a pause
+// file reading "release" (the editor, when a stall tool takes the GPU) or a pause of --burstRelS s ends it at once
+// ("released": an ended burst with the attempts it made, like a time-out), the server frees its buffers, and a job sent
+// during a pause waits for its turn before it allocates anything. An older eegpu ignores the flags (the same as before).
+const relArgs = (a) => (+a.burstRel === 1 ? ['--release=1', ...(+a.burstRelS > 0 ? [`--release-ms=${Math.round(+a.burstRelS * 1000)}`] : [])] : []);
 // a room never burst from scores this (the newest first among them): above a room whose bursts only got nearer, below
 // one whose bursts keep finding rooms (a level of many switch states has thousands of rooms: each once would take all
 // the GPU)
@@ -270,7 +279,7 @@ function create(o) {
 	const pending = new Map();   // request id -> {replies, want, done}
 	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
 	const st = { bursts: 0, domBursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
-		servers: 0, served: 0 };
+		servers: 0, served: 0, released: 0, relTime: 0, heldSec: 0 };
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
 	let smallUntil = 0;
@@ -752,7 +761,7 @@ function create(o) {
 		const s = { ch: null, served: false, dead: false, job: null, buf: '', err: '' };
 		servers.set(lane, s);
 		s.ready = new Promise((resolve) => {
-			const sargs = ['explore', bin, '--serve=1', `--parent=${process.pid}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), ...cacheArgs];
+			const sargs = ['explore', bin, '--serve=1', `--parent=${process.pid}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), ...relArgs(a), ...cacheArgs];
 			let ch;
 			try { ch = spawn(tool, sargs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true }); } catch (e) { s.dead = true; resolve(null); return; }
 			s.ch = ch;
@@ -776,7 +785,7 @@ function create(o) {
 						const j = s.job;
 						s.job = null;
 						if (!stopped) hold(s, false);
-						j.resolve({ ok: true, code: e.code | 0 });
+						j.resolve({ ok: true, code: e.code | 0, release: typeof e.release === 'string' ? e.release : '', heldMs: +e.heldMs || 0 });
 						continue;
 					}
 					s.job.onLine(line);
@@ -875,11 +884,11 @@ function create(o) {
 				}
 			}
 		};
-		// the burst's end (its process's exit code, or its job's in a server)
-		const end = (code) => {
+		// the burst's end (its process's exit code, or its job's in a server; rel: the server's idle line, its release)
+		const end = (code, rel) => {
 			const sec = (Date.now() - (readyAt || t0)) / 1000;
 			res({ end: done ? done.end : `exit ${code}${err ? `: ${err.trim().split('\n').pop()}` : ''}`, sec, wall: (Date.now() - t0) / 1000, reached, changed, fresh, near, best, fail: !done && !ended && !stopped,
-				states: done ? done.states : 0, layers: done ? done.layers : 0 });
+				states: done ? done.states : 0, layers: done ? done.layers : 0, release: (rel && rel.release) || '', heldMs: (rel && rel.heldMs) || 0 });
 		};
 		const perProcess = () => {
 			let ch;
@@ -899,7 +908,7 @@ function create(o) {
 		if (serveOff) { perProcess(); return; }
 		// (the server's own arguments: the level, --serve, --parent, --pausefile and the cache folder; the job's: the rest)
 		serveJob(job.lane, args.slice(3).filter((x) => !/^--(parent|pausefile|cachedir)=/.test(x)), onLine, (d) => { err = (err + d).slice(-400); })
-			.then((r) => { if (r.ok) end(r.code); else perProcess(); }, () => perProcess());
+			.then((r) => { if (r.ok) end(r.code, r); else perProcess(); }, () => perProcess());
 	});
 	/** the steer file for a field (walk mode: the explore's order, layer cap, nearest attempt and cost ceiling) */
 	const steerFile = (walk, mx, lane) => {
@@ -1008,6 +1017,10 @@ function create(o) {
 			}
 			oom = 0;
 			fails = 0;
+			// (the burst server's release, --burstRel: a job a pause ended ("time": its seconds ran out in the pause; "released":
+			// the editor's release or --burstRelS) is an ended burst like a time-out, its nearer attempts already taken)
+			if (r.release === 'released' || r.end === 'released') st.released++; else if (r.release === 'time') st.relTime++;
+			if (r.heldMs > 0) st.heldSec = Math.round((st.heldSec + r.heldMs / 1000) * 10) / 10;
 			st.bursts++; st.sec += r.sec; if (r.reached) st.reached++; st.newRooms += r.fresh;
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
@@ -1239,4 +1252,4 @@ function roomAim(L, RM, sim, known, T) {
 	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
 }
 
-module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
+module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL, relArgs };

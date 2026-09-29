@@ -116,6 +116,13 @@ struct Guard {
 	uint64_t gaps = 0;
 	bool serve = false;        // eegpu explore --serve: a stop request (the job's stop file) ends the job, not the process
 	double hostCpu0 = 0;       // (--serve: the process's CPU time at the job's start: "hostCpuMs" is the job's)
+	// --serve --release=1 (the burst server's release, src/bursts.js --burstRel; OPT-IN): a paused job gives its GPU
+	// buffers back instead of holding its table through the pause (checkPause, releaseJob; explorehost.h serveExplore)
+	bool release = false;      // --release=1
+	double releaseMs = 0;      // --release-ms=T: a pause that has lasted T ms ends the job ("released"; 0: no such limit)
+	double jobEndMs = 0;       // (the job's --seconds run out at this nowMs(); 0: not known)
+	const char* stopEnd = "stopped";   // (the end its final line gives: "stopped", a release's "time" or "released")
+	const char* released = "";         // (the job's release: "", "time" or "released")
 };
 /** --serve: thrown by checkStop after the job's final line (a stop file; a parent that exited still ends the process) */
 struct JobStop {};
@@ -235,6 +242,7 @@ inline void jobStart(const std::string& stopFile) {
 	G.maxMs = G.maxKernelMs = G.totalMs = G.totalKernelMs = 0; G.launches = 0; G.maxWhat.clear(); G.maxKernelWhat.clear();
 	G.pausedMs = 0; G.lastPauseCheck = -1e9; G.searching = false; G.lastStopCheck = -1e9; G.stopping = false;
 	G.havePrev = false; G.gapMs = 0; G.gaps = 0;
+	G.jobEndMs = 0; G.stopEnd = "stopped"; G.released = "";
 	G.hostCpu0 = hostCpuMs();
 }
 /** --stopfile / --parent: has a stop been requested? (the file exists, or the parent has exited; looked at most every
@@ -262,6 +270,54 @@ inline bool pauseRequested() { return !G.pauseFile.empty() && GetFileAttributesA
 inline bool pauseRequested() { return !G.pauseFile.empty() && fileExists(G.pauseFile); }
 #endif
 inline void checkStop(bool now = false);
+inline void sleep5() {
+#ifdef _WIN32
+	Sleep(5);
+#else
+	const timespec d = { 0, 5 * 1000000L };
+	nanosleep(&d, nullptr);
+#endif
+}
+/** --release=1: the pause file's content asks the paused job to give its buffers back at once ("release": the editor's
+ *  wall breaker round, a stall tool that sizes its table by the free memory; "pause" or empty: a turn of the others) */
+inline bool releaseAsked() {
+	if (G.pauseFile.empty()) return false;
+	FILE* f = fopen(G.pauseFile.c_str(), "rb");
+	if (!f) return false;
+	char b[8] = { 0 };
+	const size_t n = fread(b, 1, 7, f);
+	fclose(f);
+	return n == 7 && std::string(b, 7) == "release";
+}
+/** --serve --release=1: ends the paused job now (between two launches, nothing running): its final line with the end
+ *  `why` (the explore's done line: its nearest attempt, its counts), then the server frees its buffers (JobStop) */
+inline void releaseJob(const char* why) {
+	G.stopping = true;
+	G.stopEnd = why;
+	G.released = why;
+	if (onStop) onStop();
+	else printf("{\"ev\":\"done\",\"end\":\"%s\"%s}\n", why, doneFields().c_str());
+	fflush(stdout);
+	throw JobStop{};
+}
+/** The burst server's release (--serve --release=1, OPT-IN: src/bursts.js --burstRel, editor.js EEAT_BURSTREL=1): a paused
+ *  job held its whole table (2 lanes x ~4 GB on the A100 sizing) through every other tool's turn, and a pause often
+ *  outlived the job: its --seconds count through the pause (a burst's 15 s), so after a wall breaker round (tens of
+ *  seconds with the GPU to itself) the burst ran one more layer and ended "time", having held its memory all along
+ *  while the round's table sized itself by the memory left (sweep 7: "out of memory" in 15 of 57 runs, bursts at the
+ *  small sizing in 24). Now, in a pause: the job's time run out -> it ends at once, end "time" (what it would have
+ *  ended with after the pause, less the rest of one layer); the pause file reading "release" (the editor, for a stall
+ *  tool) or a pause of --release-ms -> it ends at once, end "released" (its nearest attempt and counts as at a
+ *  time-out: the caller takes it as an ended burst). The server then frees the job's buffers (freeTracked) and holds
+ *  only its context; a job that arrives while the pause file exists waits before its allocations (waitUnpaused). */
+inline void checkRelease(double pausedAt) {
+	if (!G.serve || !G.release || G.stopping) return;
+	const double n = nowMs();
+	const char* why = G.jobEndMs > 0 && n >= G.jobEndMs ? "time" : (G.releaseMs > 0 && n - pausedAt >= G.releaseMs) || releaseAsked() ? "released" : nullptr;
+	if (!why) return;
+	G.pausedMs += n - pausedAt;
+	releaseJob(why);
+}
 inline void checkPause() {
 	if (G.pauseFile.empty() || !G.searching) return;
 	const double t = nowMs();
@@ -269,13 +325,29 @@ inline void checkPause() {
 	G.lastPauseCheck = t;
 	if (!pauseRequested()) return;
 	// (a stop's own final work is never held by a pause: checkStop does nothing once stopping, so the wait would never end)
-#ifdef _WIN32
-	while (!G.stopping && pauseRequested()) { Sleep(5); checkStop(true); }
-#else
-	while (!G.stopping && pauseRequested()) { const timespec d = { 0, 5 * 1000000L }; nanosleep(&d, nullptr); checkStop(true); }
-#endif
+	// (--release: looked at every 20 ms of the pause, the file's content read then)
+	double relCheck = -1e9;
+	while (!G.stopping && pauseRequested()) {
+		sleep5();
+		checkStop(true);
+		if (G.release && nowMs() - relCheck >= 20) { relCheck = nowMs(); checkRelease(t); }
+	}
 	G.pausedMs += nowMs() - t;
 	G.havePrev = false;   // (the time across a pause is no gap between two commands)
+}
+/** --serve --release=1: a job that arrives while the pause file exists waits here, before its allocations, so it holds
+ *  no table through the others' turns; false: its stop file (or the parent's exit) came first. waitedMs: the wait. */
+inline bool waitUnpaused(double& waitedMs) {
+	waitedMs = 0;
+	if (!G.serve || !G.release || !pauseRequested()) return true;
+	const double t = nowMs();
+	bool go = true;
+	while (pauseRequested()) {
+		sleep5();
+		if (stopRequested(true)) { go = false; break; }
+	}
+	waitedMs = nowMs() - t;
+	return go;
 }
 /** between launches (no kernel running): a stop request ends the command here, cleanly: its final line, exit 0 */
 inline void checkStop(bool now) {

@@ -91,7 +91,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		if (cu::cuMemGetInfo_v2) cu::cuMemGetInfo_v2(&fr, &tot);
 		const double mb = atof(opt(argc, argv, "mem", "0").c_str());
 		const size_t share = total <= ((size_t)12 << 30) ? total / 8 : total / 4;
-		const size_t freeCap = cu::fitOn() ? std::max(cu::freeShare(g.d.totalMem, 0.5), (size_t)256 << 20)
+		const size_t freeCap = cu::fitOn() ? std::max(cu::freeShare(g.d.totalMem, cu::fitShare(0.5)), (size_t)256 << 20)
 			: fr > ((size_t)1 << 30) + ((size_t)256 << 20) ? fr - ((size_t)1 << 30) : (size_t)256 << 20;
 		memB = mb > 0 ? (size_t)(mb * 1048576.0) : std::min(share, freeCap);
 	}

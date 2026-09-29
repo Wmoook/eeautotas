@@ -384,6 +384,14 @@ struct Device {
 	}
 };
 
+/** EEAT_GPU_FIT_CTX=<n> (the burst server's release, editor.js EEAT_BURSTREL=1): the fit's headroom is n contexts (n x
+ *  ctxBytes, at least 512 MB) instead of freeShare's rule (the largest of 1.5 GB, 1/20 of the GPU and two contexts): the
+ *  stall tools (the escape's bursts) leave room for one more context, the others for two; unset: the rule */
+inline size_t fitHeadroom(size_t total, size_t tot) {
+	const char* v = getenv("EEAT_GPU_FIT_CTX");
+	if (v && *v >= '0' && *v <= '9') return std::max<size_t>((size_t)512 << 20, (size_t)atoi(v) * ctxBytes);
+	return std::max<size_t>({ (size_t)1536 << 20, (total ? total : tot) / 20, 2 * ctxBytes });
+}
 /** The GPU memory one consumer may take now: `frac` of the free memory less a headroom (the largest of 1.5 GB, 1/20 of
  *  the GPU's and two contexts, ctxBytes: the A/B's first var runs still failed bursts at cuCtxSetLimit "out of memory",
  *  the stack reservation of a new process's context), so every consumer leaves room for the next ones (their contexts,
@@ -395,8 +403,18 @@ struct Device {
 inline size_t freeShare(size_t total, double frac) {
 	size_t fr = 0, tot = 0;
 	if (!cuMemGetInfo_v2 || cuMemGetInfo_v2(&fr, &tot)) return SIZE_MAX;
-	const size_t head = std::max<size_t>({ (size_t)1536 << 20, (total ? total : tot) / 20, 2 * ctxBytes });
+	// (EEAT_GPU_FREE_MB, tests only: the free memory the fit sees, at most the driver's: a stubbed probe, test/burstrel.js)
+	if (const char* v = getenv("EEAT_GPU_FREE_MB")) { const double mb = atof(v); if (mb > 0) fr = std::min(fr, (size_t)(mb * 1048576.0)); }
+	const size_t head = fitHeadroom(total, tot);
 	return fr > head ? (size_t)((double)(fr - head) * frac) : 0;
+}
+/** EEAT_GPU_FIT_SHARE=<f> (0 < f <= 1; editor.js EEAT_BURSTREL=1 sets 1): the fit's share of the free memory less the
+ *  headroom, so a tool takes min(its own size, the free memory less the headroom) and keeps main's size wherever that
+ *  fits; unset: `dflt` (0.5, the opt-in fit's half share) */
+inline double fitShare(double dflt) {
+	const char* v = getenv("EEAT_GPU_FIT_SHARE");
+	const double f = v && *v ? atof(v) : 0;
+	return f > 0 && f <= 1 ? f : dflt;
 }
 /** EEAT_GPU_FIT=1 (OPT-IN): explore and roll size by freeShare (explorehost.h, rollhost.h). Off by default: its A/B
  *  (n3-gpu-mem-orphans, box 2 A100, two searches of one arm a GPU) had far fewer burst "out of memory" failures, but every

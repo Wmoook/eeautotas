@@ -164,8 +164,12 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 	// half the free memory less the headroom (cudadrv.h freeShare), the share the fit below keeps the table and states to;
 	// --reserve: the wall breaker's own rule, the free memory less the reserve)
 	const bool reserveGiven = !opt(argc, argv, "reserve", "").empty();
-	const size_t share = reserveGiven || !cu::fitOn() ? SIZE_MAX : cu::freeShare(g.d.totalMem, 0.5);
-	const size_t memB = std::min(g.d.mem ? g.d.mem : (size_t)4 << 30, std::max(share, (size_t)1 << 30));
+	// (EEAT_GPU_FIT_SHARE=1, the burst server's release: main's sizing by the GPU's memory, and the fit below takes the table
+	// and the layer cap down to the share only where they do not fit it: min(the size asked, the free memory less the
+	// headroom); a share below 1 also sizes by the share, as the opt-in fit did)
+	const double fitSh = cu::fitShare(0.5);
+	const size_t share = reserveGiven || !cu::fitOn() ? SIZE_MAX : cu::freeShare(g.d.totalMem, fitSh);
+	const size_t memB = std::min(g.d.mem ? g.d.mem : (size_t)4 << 30, fitSh >= 1.0 ? SIZE_MAX : std::max(share, (size_t)1 << 30));
 	uint32_t cellLog = memB >= ((size_t)11 << 30) ? 27 : memB >= ((size_t)5 << 30) ? 26 : 25;   // (16 bytes per cell)
 	int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
 	// --lanes: the tries of a batch share the table, so it is twice as large where the free memory allows (the 8 GB
@@ -372,6 +376,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 		return false;
 	};
 	g.ready(tStart);   // (the kernels and the tables are on the GPU: --seconds counts from here)
+	lk::G.jobEndMs = lk::nowMs() + seconds * 1000.0;   // (launch.h --release: a pause past this ends the job, "time")
 	std::vector<std::vector<uint32_t>> lineage;
 	int nParents = 1;
 	cu::CUdeviceptr cur = dA.p, nxt = dB.p;
@@ -449,7 +454,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 			g.json().c_str(), d, (unsigned long long)totalStates, (unsigned long long)ticks, ticks / std::max(1e-9, elapsed()), hitsSeen, elapsed(), why,
 			(unsigned long long)overflow, (unsigned long long)twins, cellLog, cap, (unsigned long long)(P.salt + lanes - 1), tries, exhaustedTries, lanes, dk, lk::doneFields().c_str());
 	};
-	lk::onStop = [&]() { finale("stopped"); };
+	lk::onStop = [&]() { finale(lk::G.stopEnd); };   // ("stopped"; a release's "time" / "released", launch.h)
 	// the launches (launch.h): each phase of a layer (expand, the claim's passes, materialize) runs over its index range
 	// in launches sized to the target, every chunk of a phase before the next phase: the same result as one launch each
 	// (a size per kernel: their costs per item differ)
@@ -694,7 +699,11 @@ static int serveExplore(int argc, char** argv, const LevelBlob& B) {
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); fflush(stdout); return 4; }
 	if (!layoutOrError(g, TW)) { fflush(stdout); return 4; }
-	printf("{\"ev\":\"serving\",\"ctxMs\":%.0f,\"loadMs\":%.0f,\"module\":\"%s\",\"waitMs\":%.0f,\"ms\":%.0f,\"gpu\":%s}\n", g.ctxMs, g.loadMs, g.how.how.c_str(), g.how.waitMs, msSince(t0), g.json().c_str());
+	// (--release=1 [--release-ms=T]: a paused job gives its buffers back, launch.h checkRelease / waitUnpaused; OPT-IN)
+	lk::G.release = opt(argc, argv, "release", "0") == "1";
+	lk::G.releaseMs = std::max(0.0, atof(opt(argc, argv, "release-ms", "0").c_str()));
+	printf("{\"ev\":\"serving\",\"ctxMs\":%.0f,\"loadMs\":%.0f,\"module\":\"%s\",\"waitMs\":%.0f,\"ms\":%.0f,\"release\":%d,\"releaseMs\":%.0f,\"gpu\":%s}\n", g.ctxMs, g.loadMs, g.how.how.c_str(), g.how.waitMs, msSince(t0),
+		lk::G.release ? 1 : 0, lk::G.releaseMs, g.json().c_str());
 	fflush(stdout);
 	g.ctxMs = 0; g.loadMs = 0; g.how.how = "serve"; g.how.waitMs = 0;
 	std::vector<cu::CUdeviceptr> track;
@@ -729,6 +738,15 @@ static int serveExplore(int argc, char** argv, const LevelBlob& B) {
 		av.push_back(nullptr);
 		const int ac = (int)args.size();
 		lk::jobStart(opt(ac, av.data(), "stopfile", ""));
+		// (--release: a job that arrives during a pause waits for its turn before it allocates anything: its --seconds
+		// then count from its turn; stopped while it waits: a done line "stopped" with nothing searched)
+		double heldMs = 0;
+		if (!lk::waitUnpaused(heldMs)) {
+			jobs++;
+			printf("{\"ev\":\"done\",\"end\":\"stopped\",\"layers\":0,\"states\":0,\"heldMs\":%.0f}\n{\"ev\":\"idle\",\"job\":%d,\"code\":0,\"heldMs\":%.0f}\n", heldMs, jobs, heldMs);
+			fflush(stdout);
+			continue;
+		}
 		g.opened = Clock::now();
 		int rc = 0;
 		try { rc = runExplore<TW>(ac, av.data(), B, &g); } catch (lk::JobStop&) { rc = 0; }
@@ -737,7 +755,8 @@ static int serveExplore(int argc, char** argv, const LevelBlob& B) {
 		cu::cuCtxSynchronize();
 		cu::freeTracked();
 		jobs++;
-		printf("{\"ev\":\"idle\",\"job\":%d,\"code\":%d}\n", jobs, rc);
+		// (release: "time" / "released" when a pause ended the job and gave its buffers back; heldMs: its wait before its turn)
+		printf("{\"ev\":\"idle\",\"job\":%d,\"code\":%d,\"release\":\"%s\",\"heldMs\":%.0f,\"freeMB\":%zu}\n", jobs, rc, lk::G.released, heldMs, cu::freeNow() >> 20);
 		fflush(stdout);
 	}
 	cu::gTrack = nullptr;
