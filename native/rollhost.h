@@ -2,7 +2,7 @@
 // persistent GPU server for the Go-Explore of goexplore.js with coarse cells (explore.h RollParams). Included by
 // eegpu.cpp.
 //   eegpu roll <level.bin> [--reach=<RCH3>] [--prune=1] [--rolls=8] [--roll=40] [--keep=0.85] [--phase=50]
-//              [--cap=<cells>] [--mem=<MB>] [--hostmem=<MB>] [--maxPicks=65536]
+//              [--cap=<cells>] [--mem=<MB>] [--hostmem=<MB>] [--maxPicks=65536] [--rollMax=<the longest batch Lr>]
 // It keeps the cell table on the GPU and one state per cell (the pool, by dense id; the start is cell 0) in host memory,
 // and reads jobs from stdin (binary mode):
 //   "batch K maxT seed [Lr keep]\n" + K x u32 (the picked cells' dense ids): every pick plays --rolls runs of up to

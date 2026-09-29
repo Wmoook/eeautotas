@@ -161,8 +161,10 @@
 // the dense ids differ (the GPU's atomics hand them out), and so may the cells kept in the batch that fills the pool.
 // Every route is replayed in the exact JS engine; the reach field's -1 is still the only prune (in the kernel). eegpu
 // roll ending by a failed launch or a crash (exit 6 / 7, above 255, a signal, no done line) is an error line with
-// launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7.
-//   [--gpu=1] [--batch=4096] [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
+// launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7. The roll mix (--rollMix,
+// ROLL_MIX): each batch's run length and keep from a class of long sticky runs or short ones, a node keeps its class.
+//   [--gpu=1] [--batch=4096] [--rollMix=40:0.85,120:0.95,240:0.97 (the default unless --roll / --keep is given; 0 = off)]
+//   [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
 //   default: an eighth of the machine's memory, at most half of the free memory>] [--tool=<eegpu>] [--bin=<level blob>]
 //   [--reach=<RCH3 file>]
 //   [--stopfile= --pausefile= --cachedir= --launch-ms= (passed to eegpu)]
