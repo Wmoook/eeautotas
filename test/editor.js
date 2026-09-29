@@ -2266,6 +2266,53 @@ async function escapeSection() {
 		away5 !== null && away5 >= 12 && !!st5.escape && st5.escape.runs === 2 && log5.some((l) => /escape: a fresh one search from the nearest attempt 1: .*from tick 95 of room "coins=1"'s nearest attempt/.test(l)) &&
 		log5.some((l) => /escape: a fresh one search from the nearest attempt 2: .*from tick 135 of the nearest attempt/.test(l)),
 		`sent away after ${away5 === null ? '-' : away5.toFixed(1)} s, ${st5.escape ? st5.escape.runs : 0} escapes; ${log5.slice(-3).join(' | ')}`);
+	// (3c) THE LUBY CLOCK (n3-escape-clock; EEAT_ESCLUBY=0 / test.escLuby false: main's clocks). The pure parts: the
+	// sequence, the first wait max(wait, 0.2 x the search's seconds), escape k's clocks the unit x luby(k) (main's: the
+	// same for every k), the retry once every start has had an escape (the same start, a longer term: the pure Luby
+	// restart)
+	const lub = Array.from({ length: 15 }, (_, i) => ED.luby(i + 1)).join(',');
+	check('the Luby clock: luby(1..15) = 1,1,2,1,1,2,4,1,1,2,1,1,2,4,8; luby(31) = 16', lub === '1,1,2,1,1,2,4,1,1,2,1,1,2,4,8' && ED.luby(31) === 16 && ED.luby(32) === 1, `${lub}; ${ED.luby(31)}`);
+	check('the Luby clock\'s first wait: max(30 s, 0.2 x the search\'s seconds) (a pin at 4 s: the first escape ~35 s in); main\'s 120 s whatever the time',
+		ED.escWaitOf(30, 20, true) === 30 && ED.escWaitOf(30, 400, true) === 80 && ED.escWaitOf(120, 400, false) === 120 && ED.escWaitOf(120, 4000, false) === 120,
+		`${ED.escWaitOf(30, 20, true)} / ${ED.escWaitOf(30, 400, true)} / ${ED.escWaitOf(120, 400, false)}`);
+	const lives = [1, 2, 3, 7, 15].map((k) => ED.escLifeOf(k, 60, 60, true).stall).join(','), mainLives = [1, 3, 7].map((k) => ED.escLifeOf(k, 600, 600, false));
+	check('an escape\'s clocks: escape k lives 60 s x luby(k) (60, 60, 120, 240, 480) without progress of its own, at least that long; the chain\'s carry keeps a longer term; main: 600 / 600 for every escape',
+		lives === '60,60,120,240,480' && ED.escLifeOf(7, 60, 60, true).min === 240 && ED.escLifeOf(1, 60, 60, true, 4).stall === 240 && mainLives.every((x) => x.min === 600 && x.stall === 600),
+		`${lives}; carry ${ED.escLifeOf(1, 60, 60, true, 4).stall}`);
+	const rs = [{ key: 'near' }, { key: 'room' }];
+	const q1 = ED.lubyRetry(rs, new Map([['near', 1], ['room', 1]]), 3), q2 = ED.lubyRetry(rs, new Map([['near', 2], ['room', 1]]), 4);
+	const q3 = ED.lubyRetry(rs, new Map([['near', 2], ['room', 2]]), 5), q4 = ED.lubyRetry(rs, new Map([['near', 8], ['room', 8]]), 8);
+	check('the Luby retry: every start had term 1: the nearest again at term 2 (k 3); then the room\'s at term 2 (k 6); then the nearest at 4 (k 7); both had 8: term 16 (k 31); no start: none',
+		q1.st.key === 'near' && q1.term === 2 && q1.k === 3 && q2.st.key === 'room' && q2.term === 2 && q2.k === 6 && q3.st.key === 'near' && q3.term === 4 && q3.k === 7 &&
+		q4.term === 16 && q4.k === 31 && ED.lubyRetry([], new Map(), 5) === null,
+		JSON.stringify([q1, q2, q3, q4].map((r) => r && [r.st.key, r.k, r.term])));
+	// ... and in the editor: the stand-in stalls at the nearest attempt (a1, start tick 100) with a room's attempt (s4, start
+	// tick 95) and an escape that never gets anywhere (the idle stand-in), the unit 1 s: escape 1 from the nearest attempt
+	// (term 1), escape 2 from the room's (term 1: the rotation, each start once), escape 3 the nearest again with a longer
+	// life (term 2: the Luby retry); main's clocks (the same test values, escLuby false): escape 1 and 2 the same starts,
+	// then no start left and no escape 3
+	const sc6 = path.join(HOME, 'esc_luby.json');
+	fs.writeFileSync(sc6, JSON.stringify({ attempt: str(a1), dist: 31, stdinLog: path.join(HOME, 'esc_luby_stdin.log'), source: str(s4) }));
+	const lubyRun = async (on, wantRuns, capS) => {
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 90, width: 1024, workers: 4 }, { available: false },
+			{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 1, escStall: 1, escMin: 1, escLuby: on });
+		const t6 = Date.now();
+		let st6 = ED.state();
+		while (st6.running && Date.now() - t6 < capS * 1000 && !(st6.escape && st6.escape.runs >= wantRuns)) { await new Promise((z) => setTimeout(z, 100)); st6 = ED.state(); }
+		const log6 = (st6.log || []).filter((l) => /escape: a fresh one search from the nearest attempt \d+:/.test(l));
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		return { runs: st6.escape ? st6.escape.runs : 0, log: log6 };
+	};
+	const L6 = await lubyRun(true, 3, 45);
+	const e6 = (n, what, term) => L6.log.some((l) => new RegExp(`nearest attempt ${n}: .*from tick ${what}.*the Luby clock: term ${term}, `).test(l));
+	check('the Luby clock in the editor: escape 1 from the nearest attempt (term 1), escape 2 from the room\'s attempt (term 1), escape 3 the nearest attempt again, term 2',
+		L6.runs >= 3 && e6(1, '100 of the nearest attempt', 1) && e6(2, '95 of room "coins=1"', 1) && e6(3, '100 of the nearest attempt', 2),
+		`${L6.runs} escapes; ${L6.log.map((l) => l.replace(/^.*nearest attempt (\d+): /, '$1: ').slice(0, 110)).join(' | ')}`);
+	const M6 = await lubyRun(false, 3, 32);
+	check('main\'s clocks (escLuby false): the same two starts, then none left: no escape 3 (and no Luby note)',
+		M6.runs === 2 && M6.log.some((l) => /nearest attempt 1: .*from tick 100 of the nearest attempt/.test(l)) && M6.log.some((l) => /nearest attempt 2: .*from tick 95 of room/.test(l)) &&
+		!M6.log.some((l) => /Luby/.test(l)), `${M6.runs} escapes; ${M6.log.map((l) => l.replace(/^.*nearest attempt (\d+): /, '$1: ').slice(0, 90)).join(' | ')}`);
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));

@@ -1613,6 +1613,48 @@ function precEvent(V, ev) {
 // A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
 // none (tests: test.escape === true; test.escWait / escStall / escMin / escRetarget: its clocks in s).
 const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
+// THE LUBY CLOCK (n3-escape-clock, 2026-09-29; EEAT_ESCLUBY=0: the clocks above, main's). Sweep6 (main 9b88070): 14 of
+// the 26 campaign levels it did not route pinned in their first 3-18 s and never got nearer, while the first escape came
+// at 129-188 s (ESC_WAIT_S of the stall clock after the pin, the steer build first) and then held half the CPU workers
+// 600 s or more: a 300-s run got ONE escape from ONE start (the nearest attempt) and never reached the rotation's other
+// starts (rooms of another coin count, the nearest attempt further back). Restarts have paid on this search (INNOLOOP R1:
+// the Luby caps alone equalled the event options; the stall rotation's escapes at 60 / 120 s stalls), and a long escape
+// is still sometimes the way (the Good Egg anatomy: 976-1,119 s from the nearest attempt), so not a flat cut: (1) an
+// escape starts once the stall clock (the breaker's: nothing nearer by BREAK_TILES, no new room with territory) reaches
+// max(ESC_FIRST_S, ESC_FIRST_F x the search's seconds so far) (a pin at 4 s: the first escape at ~35 s, not 124 s; a
+// search that got somewhere late waits in proportion); (2) escape k lives ESC_UNIT_S x luby(k) (60, 60, 120, 60, 60, 120,
+// 240, ..., 960 at k = 31): it gives way once it is that old AND has made no progress of its own for that long (its
+// nearest attempt nearer by ESC_TILES or a new room with territory: its stall clock starts over, as main's), and the
+// escape after one that got nearer than its start (the chain: escStarts' first start is then its own nearest attempt)
+// gets at least that one's term; (3) the starts rotate as escStarts orders them (each start once), and once every start
+// has had an escape, a start whose escapes were all shorter than the next term gets another (the pure Luby restart: the
+// same start, a new seed, a longer life; the Luby index skips ahead to a term longer than the least one a start had).
+// Nothing is pruned: only when and for how long an escape holds its share of the workers. (4) The GPU random runs have no
+// restart clock of their own on main (the stall rotation's rollsTurn, not merged, restarts them at an escape's start):
+// nothing to offset from here. Tests: test.escWait = ESC_FIRST_S, test.escStall / escMin = the unit of the stall / the
+// age (escape k: x luby(k)); test.escLuby true / false: the clock regardless of EEAT_ESCLUBY.
+const ESC_LUBY = process.env.EEAT_ESCLUBY !== '0';
+const ESC_FIRST_S = 30, ESC_FIRST_F = 0.2, ESC_UNIT_S = 60;
+/** the Luby sequence (1-based): 1, 1, 2, 1, 1, 2, 4, 1, 1, 2, 1, 1, 2, 4, 8, ... (i < 1: 1) */
+function luby(i) {
+	i = Math.max(1, Math.floor(i));
+	for (;;) {
+		let k = 1;
+		while ((2 ** k) - 1 < i) k++;
+		if (i === (2 ** k) - 1) return 2 ** (k - 1);
+		i -= (2 ** (k - 1)) - 1;
+	}
+}
+/** the stall the next escape waits for (s): the Luby clock's max(wait, ESC_FIRST_F x the search's seconds so far), else
+ *  wait */
+const escWaitOf = (wait, elapsed, on) => (on ? Math.max(wait, ESC_FIRST_F * Math.max(0, elapsed || 0)) : wait);
+/** escape k's clocks {min, stall} (s) from the units (the Luby clock: each x term, term = max(luby(k), carry)), else
+ *  {min, stall} as given */
+const escLifeOf = (k, min, stall, on, carry = 0) => {
+	if (!on) return { min, stall, term: 1 };
+	const term = Math.max(luby(k), carry || 0);
+	return { min: min * term, stall: stall * term, term };
+};
 // (an escape the rest of the search has left behind: the nearest attempt clearly nearer (3 tiles or 10%, the relay's rule)
 // than the escape's start, its own nearest and the search's nearest when it started (near0: an escape from a room's attempt
 // starts farther out than the nearest attempt by design, and before near0 every such escape was sent away after 60 s),
@@ -1632,8 +1674,9 @@ let esc = null;
 let closestRoom = null;
 /** a room desc's coin count ('' where the room key holds none: a level without coin doors) */
 const coinSig = (desc) => { const m = /(?:^| )coins=(\d+)/.exec(String(desc || '')); return m ? m[1] : ''; };
-/** the escape's next starting points, in rotation: [{inputs, what, dist, key, room, sig}] not used before in this search */
-function escStarts() {
+/** the escape's next starting points, in rotation: [{inputs, what, dist, key, room, sig}] not used before in this search
+ *  (below: those whose escapes all had a Luby term under below too: the Luby clock's retries) */
+function escStarts(below = 0) {
 	const out = [], seen = new Set();
 	// (the frontier: a start at least ESC_FRONT as long as the longest attempt the search holds (the nearest and the rooms'
 	// attempts): an escape from near the level's start would only redo the search's own opening with half its workers)
@@ -1645,7 +1688,7 @@ function escStarts() {
 		keep = Math.min(keep, inputs.length);
 		if (keep < front || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
-		if (seen.has(key) || esc.tried.has(key)) return;
+		if (seen.has(key) || (esc.tried.has(key) && !(esc.tried.get(key) < below))) return;
 		seen.add(key);
 		out.push({ inputs: pre, what, dist, key, room, sig: coinSig(desc) });
 	};
@@ -1670,8 +1713,12 @@ function escKick() {
 	const V = S.strategies[n], now = Date.now();
 	if (alive(kids[n])) {
 		const R = esc.run, c = S.closest;
-		if (R && !kids[n].stopWhy && now - R.t0 >= esc.min * 1000 && now - R.progAt >= esc.stall * 1000) {
-			note(`${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${esc.stall} s: the next one`);
+		const rMin = R && R.min !== undefined ? R.min : esc.min, rStall = R && R.stall !== undefined ? R.stall : esc.stall;
+		if (R && !kids[n].stopWhy && now - R.t0 >= rMin * 1000 && now - R.progAt >= rStall * 1000) {
+			note(`${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${rStall} s: the next one`);
+			// (the Luby clock: an escape that got nearer than its start passes its term on to the next, the chain from its
+			// own nearest attempt)
+			if (esc.luby) esc.carry = R.best < R.start.dist - ESC_TILES ? R.term : 0;
 			esc.next = true;
 			halt(kids[n], 'escstall');
 		} else if (R && !kids[n].stopWhy && c && !c.cut && c.strategy !== V.label && now - R.t0 >= esc.retarget * 1000 &&
@@ -1680,22 +1727,49 @@ function escKick() {
 			// attempt when it started (near0): an escape from a room's attempt (the rotation, the frontier) is not sent away
 			// after 60 s only because the nearest attempt, which it did not start from, was nearer all along)
 			note(`${V.label}: the search got clearly nearer elsewhere (${c.tiles} tiles, ${c.strategy}): the next one from there`);
+			esc.carry = 0;
 			esc.next = true;
 			halt(kids[n], 'escstall');
 		}
 		return;
 	}
 	if (S.result || V.state !== 'waiting') return;
-	const left = S.seconds - searchClock(now);
-	if (left < 30 || (!esc.next && now - esc.at < esc.wait * 1000)) return;
-	const starts = escStarts();
-	if (!starts.length) { esc.next = false; esc.at = now; return; }   // (nothing new to start from: the stall clock again)
-	escLaunch(n, starts[0]);
+	const clock = searchClock(now), left = S.seconds - clock;
+	if (left < 30 || (!esc.next && now - esc.at < escWaitOf(esc.wait, clock, esc.luby) * 1000)) return;
+	const pick = escPick();
+	if (!pick) { esc.next = false; esc.at = now; return; }   // (nothing new to start from: the stall clock again)
+	escLaunch(n, pick.st, pick.k, clock);
+}
+/** the next escape's start and Luby index {st, k}: the rotation's next start not used before (k: the next index); the
+ *  Luby clock, once every start has had an escape: the first in the rotation whose escapes were all shorter than the
+ *  term of k (k: the next index whose term is longer than the least term a start had); null: none */
+function escPick() {
+	const k0 = esc.k + 1, starts = escStarts();
+	if (starts.length) return { st: starts[0], k: k0 };
+	if (!esc.luby) return null;
+	return lubyRetry(escStarts(Infinity), esc.tried, k0, esc.carry);
+}
+/** the Luby clock's retry once every start has had an escape: starts (in rotation) and tried (key -> the longest term a
+ *  start had): the Luby index k from k0 on whose term (max(luby(k), carry)) is longer than the least term a start had,
+ *  and the first start in the rotation whose escapes were all shorter than it: {st, k, term}; null: no start */
+function lubyRetry(starts, tried, k0, carry = 0) {
+	if (!starts.length) return null;
+	const had = (s) => (tried.has(s.key) ? tried.get(s.key) : 0);
+	const least = Math.min(...starts.map(had));
+	let k = Math.max(1, k0);
+	while (escLifeOf(k, 1, 1, true, carry).term <= least && k < k0 + 4096) k++;
+	const term = escLifeOf(k, 1, 1, true, carry).term, st = starts.find((s) => had(s) < term);
+	return st ? { st, k, term } : null;
 }
 /** an escape from start st (escStarts) */
-function escLaunch(n, st) {
+function escLaunch(n, st, lk, clock) {
 	const V = S.strategies[n], k = S.strategies.findIndex((q) => q.key === 'goexplore');
-	esc.tried.add(st.key);
+	// (its clocks: the Luby clock's term for index lk (esc.k: the last index used), else main's)
+	lk = lk || esc.k + 1;
+	const life = escLifeOf(lk, esc.min, esc.stall, esc.luby, esc.carry);
+	esc.k = lk;
+	esc.carry = 0;
+	esc.tried.set(st.key, Math.max(esc.tried.get(st.key) || 0, life.term));
 	if (st.room !== undefined) esc.rooms.add(st.room);
 	if (st.sig !== '') esc.sigs.add(st.sig);
 	esc.next = false;
@@ -1712,9 +1786,13 @@ function escLaunch(n, st) {
 	try { fs.rmSync(work, { recursive: true, force: true }); } catch (e) { /* none */ }
 	V.esc = { file, keep: st.inputs.length, workers: E, seed: ((cur.opts.seed || 1) + 1000 * esc.runs) >>> 0, work, what: st.what };
 	// (near0: the search's nearest attempt when it starts, for the retarget: escKick)
-	esc.run = { t0: Date.now(), progAt: Date.now(), best: Infinity, start: st, mainKeep: keep, near0: S.closest && !S.closest.cut ? S.closest.dist : Infinity };
-	if (S.escape) S.escape = Object.assign(S.escape, { runs: esc.runs, run: { n: esc.runs, from: st.what, ticks: st.inputs.length, tiles: Math.round(st.dist * 10) / 10, workers: E, after: Math.round((Date.now() - S.started) / 100) / 10 } });
-	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.wait} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${E} of the ${W} CPU workers`);
+	esc.run = { t0: Date.now(), progAt: Date.now(), best: Infinity, start: st, mainKeep: keep, near0: S.closest && !S.closest.cut ? S.closest.dist : Infinity,
+		min: life.min, stall: life.stall, term: life.term, k: lk };
+	if (S.escape) S.escape = Object.assign(S.escape, { runs: esc.runs, run: { n: esc.runs, from: st.what, ticks: st.inputs.length, tiles: Math.round(st.dist * 10) / 10, workers: E, after: Math.round((Date.now() - S.started) / 100) / 10,
+		...(esc.luby ? { k: lk, life: life.stall } : {}) } });
+	const waited = Math.round(escWaitOf(esc.wait, clock !== undefined ? clock : searchClock(Date.now()), esc.luby) * 10) / 10;
+	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${waited} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${E} of the ${W} CPU workers` +
+		(esc.luby ? ` (the Luby clock: term ${life.term}, ${life.stall} s without progress of its own)` : ''));
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
 		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${E} thread${E > 1 ? 's' : ''}` });
 	kids[n] = launch(n);
@@ -1729,13 +1807,15 @@ function escAfter(n, how) {
 	const R = esc && esc.run;
 	if (esc) {
 		esc.run = null;
-		if (how !== 'escstall') esc.at = Date.now();
+		if (how !== 'escstall') { esc.at = Date.now(); esc.carry = 0; }
 		if (S.escape) S.escape.last = { n: esc.runs, how: how || 'ended', sec: R ? Math.round((Date.now() - R.t0) / 100) / 10 : 0, best: R && Number.isFinite(R.best) ? Math.round(R.best * 10) / 10 : null };
 		if (S.escape) S.escape.run = null;
 	}
 	if (V.state === 'found' || !S.running || S.halted || S.stage === 'stopped' || S.result) { if (V.state !== 'found') V.state = S.stage === 'stopped' ? 'stopped' : 'ended'; return; }
-	Object.assign(V, { state: 'waiting', detail: esc && esc.next ? 'the next escape starts' : `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc ? esc.wait : ESC_WAIT_S} s)` });
+	Object.assign(V, { state: 'waiting', detail: esc && esc.next ? 'the next escape starts' : `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${escWaitText()})` });
 }
+/** the stall the escape waits for, as the page says it ('120 s'; the Luby clock: 'max(30 s, 0.2 x the search's time)') */
+const escWaitText = () => (!esc ? `${ESC_WAIT_S} s` : esc.luby ? `max(${esc.wait} s, ${ESC_FIRST_F} x the search's time)` : `${esc.wait} s`);
 /** the escape's own progress (its nearest attempt nearer by ESC_TILES, or a new room with territory gain): its stall clock */
 function escOwnProgress(dist) {
 	const R = esc && esc.run;
@@ -2020,8 +2100,11 @@ function start(b, gpu, test) {
 	prec = { mark: Infinity, at: Date.now(), wait: test && test.precWait ? test.precWait : PREC_WAIT_S, wait0: test && test.precWait ? test.precWait : PREC_WAIT_S, runs: 0 };
 	S.precision = which.includes('precision') ? { runs: 0, last: null } : null;
 	// (the stall escape's clock and rotation; tests: its clocks in s)
-	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : ESC_WAIT_S, stall: test && test.escStall ? test.escStall : ESC_STALL_S, min: test && test.escMin !== undefined ? test.escMin : ESC_MIN_S,
-		retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null };
+	// (the Luby clock (ESC_LUBY; test.escLuby): wait = ESC_FIRST_S, stall / min = the unit, escape k's x its term)
+	const lubyOn = test && typeof test.escLuby === 'boolean' ? test.escLuby : ESC_LUBY;
+	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : lubyOn ? ESC_FIRST_S : ESC_WAIT_S, stall: test && test.escStall ? test.escStall : lubyOn ? ESC_UNIT_S : ESC_STALL_S,
+		min: test && test.escMin !== undefined ? test.escMin : lubyOn ? ESC_UNIT_S : ESC_MIN_S, luby: lubyOn, k: 0, carry: 0,
+		retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Map(), rooms: new Set(), sigs: new Set(), next: false, run: null };
 	closestRoom = null;
 	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
@@ -2208,7 +2291,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide, defer) {
 	kids = which.map((k, n) => {
 		if (k === 'breaker') { breakEnd(n); return null; }
 		// (the stall escape waits for a stall of the search)
-		if (k === 'escape') { Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc ? esc.wait : ESC_WAIT_S} s)` }); return null; }
+		if (k === 'escape') { Object.assign(S.strategies[n], { state: 'waiting', detail: `waits for the search to stall (no attempt nearer by ${BREAK_TILES} tiles and no new room for ${escWaitText()})` }); return null; }
 		// (the precision stage waits for a stall; its distances are the reach field's, ranked like a steerless strategy's)
 		if (k === 'precision') { Object.assign(S.strategies[n], { state: 'waiting', noSteer: true, detail: `waits for the search to stall near a spot (no attempt nearer by ${PREC_TILES} tiles for ${prec ? prec.wait : PREC_WAIT_S} s)` }); return null; }
 		// (the early start: a strategy that reads the steer field starts once it is built or its wait is over: launchDeferred)
@@ -3660,5 +3743,5 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, luby, escWaitOf, escLifeOf, lubyRetry, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
