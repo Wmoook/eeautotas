@@ -182,7 +182,7 @@ constexpr size_t STACK_MARGIN = 256;  // over the measured need (x 221,184 threa
  *  and the deepest chain of .local depots from a kernel down its calls (bytes; ptxas's own frames can add to it) */
 struct PtxStack { bool bounded = true; std::string why; std::vector<std::pair<std::string, size_t>> entries; size_t chainMax = 0; std::string chainKernel; };
 inline PtxStack ptxStack(const std::string& ptx) {
-	struct Fn { bool entry = false; size_t depot = 0; std::vector<std::string> calls; int mark = 0; size_t chain = 0; };
+	struct Fn { bool entry = false; size_t depot = 0; std::vector<std::string> calls; int mark = 0; size_t chain = 0; bool body = false; };
 	std::vector<std::pair<std::string, Fn>> fns;   // (in PTX order; looked up by name below)
 	auto isId0 = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$'; };
 	auto isId = [&](char c) { return isId0(c) || (c >= '0' && c <= '9'); };
@@ -254,8 +254,13 @@ inline PtxStack ptxStack(const std::string& ptx) {
 			}
 		}
 		for (char c : L) {
-			if (c == '{') depth++;
+			if (c == '{') { if (depth++ == 0 && cur >= 0) fns[cur].second.body = true; }
 			else if (c == '}' && depth > 0 && --depth == 0) { cur = -1; pending = false; }
+		}
+		// (a declaration, ".func (...) name(...)" then ";": no body; what follows at depth 0 is not its body)
+		if (depth == 0 && cur >= 0 && !fns[cur].second.body) {
+			size_t e2 = L.find_last_not_of(" \t\r");
+			if (e2 != std::string::npos && L[e2] == ';') cur = -1;
 		}
 	}
 	// the deepest chain of depots from each kernel; a cycle (recursion) or a callee with no body: not bounded
@@ -272,7 +277,7 @@ inline PtxStack ptxStack(const std::string& ptx) {
 			Fn& F = fns[t.f].second;
 			if (t.k < F.calls.size()) {
 				const int g = find(F.calls[t.k++]);
-				if (g < 0) { R.bounded = false; R.why = "a call to " + F.calls[t.k - 1] + " (no body in the PTX)"; continue; }
+				if (g < 0 || !fns[g].second.body) { R.bounded = false; R.why = "a call to " + F.calls[t.k - 1] + " (no body in the PTX)"; continue; }
 				Fn& G = fns[g].second;
 				if (G.mark == 1) { R.bounded = false; R.why = "recursion (" + fns[g].first + ")"; continue; }
 				if (G.mark == 0) { G.mark = 1; st.push_back({ g, 0 }); }

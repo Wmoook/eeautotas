@@ -1291,10 +1291,28 @@ static int cmdSteerTest(int argc, char** argv) {
 	return 3;
 }
 
+/** eegpu stackscan <file.ptx>: what the stack fit reads from a PTX module (cudadrv.h ptxStack; CPU only, no driver):
+ *  {"bounded","why","kernels","chainMax","chainKernel","chains":{kernel: bytes}} */
+static int cmdStackScan(int argc, char** argv) {
+	if (argc < 3) { fprintf(stderr, "usage: eegpu stackscan <file.ptx>\n"); return 2; }
+	FILE* f = fopen(argv[2], "rb");
+	if (!f) { printf("{\"error\":%s}\n", jsonStr(std::string("cannot open ") + argv[2]).c_str()); return 3; }
+	fclose(f);
+	const auto t0 = std::chrono::steady_clock::now();
+	const cu::PtxStack P = cu::ptxStack(readText(argv[2]));
+	std::string ch;
+	for (const auto& e : P.entries) ch += (ch.empty() ? "" : ",") + jsonStr(e.first) + ":" + std::to_string(e.second);
+	printf("{\"bounded\":%s,\"why\":%s,\"kernels\":%zu,\"chainMax\":%zu,\"chainKernel\":%s,\"ms\":%.1f,\"chains\":{%s}}\n", P.bounded ? "true" : "false",
+		jsonStr(P.why).c_str(), P.entries.size(), P.chainMax, jsonStr(P.chainKernel).c_str(),
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), ch.c_str());
+	return 0;
+}
+
 int main(int argc, char** argv) {
-	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|roll|twins|reachtest|steertest|prove ...\n"); return 2; }
+	if (argc < 2) { fprintf(stderr, "eegpu trace|state|info|ptx|search|bench|beam|explore|roll|twins|reachtest|steertest|prove|stackscan ...\n"); return 2; }
 	std::string cmd = argv[1];
 	if (cmd == "prove") return cmdProve(argc, argv);   // (CPU only: before anything that may touch the driver)
+	if (cmd == "stackscan") return cmdStackScan(argc, argv);   // (CPU only)
 	gCacheDir = opt(argc, argv, "cachedir", "");
 	if (gCacheDir == "1") gCacheDir.clear();   // (a bare --cachedir names no folder)
 	if (!gCacheDir.empty()) cu::useJitCache(gCacheDir);   // (before the driver loads)
