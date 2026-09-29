@@ -1432,7 +1432,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

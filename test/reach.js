@@ -1409,6 +1409,17 @@ function sectionX() {
 		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f0[k].length; i++) { if (f0[k][i] !== R.CUT && f1[k][i] === R.CUT) cut++; else if (f0[k][i] === R.CUT && f1[k][i] !== R.CUT) free++; }
 	}
 	check(`random rooms (${fields} physics fields): the Bellman self-check with the tables`, mis === 0, `${mis} mismatches; ${cut} states cut by the tables, ${free} freed`);
+	// (e) the steer (steer.js buildSteer) with the tables on: a start they leave without a value (their error on a level,
+	// which is beatable: the d4 A/B's Happy Spookaween) takes the plain model's steer; a start with a value keeps theirs
+	{
+		const SF = require('../src/steer.js'), prev = process.env.EEAT_EXITAPEX;
+		const steerOf = (L, xa) => { process.env.EEAT_EXITAPEX = xa; try { const st = SF.buildSteer(L, {}); return { st, v: SF.steerAt(st, startSim(L)) }; } finally { if (prev === undefined) delete process.env.EEAT_EXITAPEX; else process.env.EEAT_EXITAPEX = prev; } };
+		const L9 = chain(9), a0 = steerOf(L9, '0'), a1 = steerOf(L9, '1');
+		check('steer fallback: the tables leave the start without a value (chain top, the trophy 13 rows over it): the plain model\'s steer, its start value, the fallback in info.exitApex',
+			a0.v >= 0 && a1.v === a0.v && !!a1.st.info.exitApex && a1.st.info.exitApex.start === null && !a0.st.info.exitApex, `plain ${fmt(a0.v)}, tables ${fmt(a1.v)}${a1.st.info.exitApex ? ` (${a1.st.info.exitApex.off})` : ''}`);
+		const L21 = chain(21), b1 = steerOf(L21, '1');
+		check('steer fallback: a start with a value with the tables (chain top, the trophy 1 row over it) keeps the tables\' steer', b1.v >= 0 && !b1.st.info.exitApex, `tables ${fmt(b1.v)}`);
+	}
 }
 function trapLevel() {
 	const W = 80, H = 40, c = [];

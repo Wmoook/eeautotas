@@ -1302,6 +1302,23 @@ const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
  * builds, kappa, ms, cegar, dp, over (what the budget left out, or null)}}
  */
 function buildSteer(level, opts) {
+	const st = buildSteerOnce(level, opts);
+	// (the field transit tables (reach.js exitApexOn: the ordering fields only, EEAT_EXITAPEX) are no proof: a ball that
+	// only grazes a field between two tick starts has none of its drag. A level is beatable, so a start they leave without
+	// a value is their error on this level (Happy Spookaween: the tables' plan went through a coin door and the coin
+	// layers found no way; the steer blind at the start): the plain model's steer there, whose start has one; the tables'
+	// steer where it has a value too (a reorder only, both ways))
+	if (st.info.start >= 0 || !RF.exitApexOn({ oneWayEntry: true })) return st;
+	const env = process.env.EEAT_EXITAPEX;
+	process.env.EEAT_EXITAPEX = '0';   // (the build is synchronous; its leg workers copy the environment when made)
+	let plain;
+	try { plain = buildSteerOnce(level, opts); } finally { if (env === undefined) delete process.env.EEAT_EXITAPEX; else process.env.EEAT_EXITAPEX = env; }
+	if (!(plain.info.start >= 0)) return st;
+	plain.info.exitApex = { off: 'no value at the start with the tables', start: null, cegar: st.info.cegar, ms: st.info.ms };
+	plain.info.ms += st.info.ms;
+	return plain;
+}
+function buildSteerOnce(level, opts) {
 	opts = opts || {};
 	const t0 = Date.now();
 	const A = analyze(level, opts);
