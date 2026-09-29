@@ -41,7 +41,9 @@
 //   there), the bodies (RCH3 bytes, identical ones shared), with the coin DP: i32 dpBit[dpN] (the engine's coin bit),
 //   i32 dpLeg[dpN] (its leg field's body), f32 h[2^dpN x dpN]; the CPU file alone (steerFileBytes(st, fp, true), flags
 //   2: the coin tour, no DP) its tour section at the u64 offset at 56: i32 [n, T, first, 0], i32 bit[n], i32 order[n],
-//   f32 tail[n], f32 C[n x n], u16 legs[n x N] (the GPU tools never get flags 2: editor.js's steerCpu file).
+//   f32 tail[n], f32 C[n x n], u16 legs[n x N] (the GPU tools never get flags 2: editor.js's steerCpu file); flags 4 (the
+//   CPU file alone, with 1): the coin DP outside the layer product (the budget left the coins out), first below dpT, its
+//   leg bodies after the layer bodies (the GPU file has neither).
 const crypto = require('crypto');
 const E = require('./eesim.js');
 const RF = require('./reach.js');
@@ -930,7 +932,9 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 	const lvOf = new Map();
 	const layer = (k) => {
 		if (!lvOf.has(k)) {
-			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
+			// (nC < 0: the coins are no feature of M (the budget left them out, coinLegsFree): layer s's copy with its coin
+			// doors and gates as they stand at k coins, wall or open, the kept features' gates open)
+			const { lv } = nC >= 0 ? layerLevel(A, M, M.withVal(s, nC, k), {}) : coinDoorsAt(A, M, layerLevel(A, M, s, {}), k);
 			const fg0 = Int32Array.from(lv.fg);
 			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
 			lvOf.set(k, { lv, fg0, delta: lvDelta(A.level, lv) });
@@ -969,10 +973,62 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 	const tail = new Map();
 	for (const q of base.coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
 	const CL = { T: base.T, coins: base.coins, fields, tail, s, countOf, rounds: 0 };
-	// (opts.legTour, default on: a coin's leg in the layer of the count the ball holds on its way to it along the DP's own
-	// tour (the k-th coin of the tour: coins = k - 1), rebuilt until the tour stays (at most 3 rounds). The T - 1 layer
-	// opens every coin door below T: on Forgotten Veil (doors for every count 1..16) coin 4's leg from coin 3 ran through
-	// doors shut at 3 coins, not the known route's 1195-tick loop)
+	legTourRounds(A, CL, L, opts);
+	return CL;
+}
+/** a layerLevel copy ({lv}) of a model that has no coin feature (makeModel's gateOpen: open) with its coin doors and
+ *  gates as they stand at k gold coins (0 open, 9 a wall) and every other gate of a modelled feature OPEN, its tiles
+ *  that change the layer back to the level's own blocks (no goals): the kept layers' union, a relaxation (ordering only;
+ *  CTM_2's coins sit in pockets behind purple doors, one of them the modelled switch's, shut in the plan's layer: that
+ *  coin's leg reached neither the start nor another coin, and every 16-coin tour had no value) */
+function coinDoorsAt(A, M, c, k) {
+	const fg = Int32Array.from(c.lv.fg), L = A.level;
+	const kept = new Set(M.names);
+	for (let i = 0; i < A.N; i++) {
+		if (A.cls[i] === 3) {
+			const g = A.gateFeat[i];
+			if (g === 'coins') fg[i] = testGate('coins', A.gatePol[i], A.gateParam[i], k) ? 0 : 9;
+			else if (kept.has(g)) fg[i] = 0;
+		} else if (c.goal[i]) fg[i] = L.fg[i] === 360 ? 0 : L.fg[i];
+	}
+	return { lv: Object.assign({}, c.lv, { fg }), goalTiles: [], goal: new Uint8Array(A.N) };
+}
+/** THE COIN DP OUTSIDE THE LAYER PRODUCT (the budget left the coins out: "coins: over 31 layers", CTM_2's 16-coin door):
+ *  the legs of coinLegsPhys in the kept model's layer s of the walk plan at its first coin door (its effects; the kept
+ *  features' gates open, the coin doors by count: coinDoorsAt), at T - 1 coins first, then per the count the ball holds
+ *  on the DP's own tour (legTourRounds); the tail at T: the least over the kept layers of the same effects of the layer
+ *  field's arrival cost at the coin (its coin doors all open: a lower bound, ordering only). -> the coinLegsPhys shape
+ *  {T, coins, fields, tail, s, countOf, rounds} */
+function coinLegsFree(B, PH, T, coins, opts) {
+	const { A } = B;
+	const M = PH.M;
+	let sPlan = B.M.s0;
+	for (const p of B.plan.path) if (A.cls[p.t] === 3 && A.gateFeat[p.t] === 'coins' && A.gatePol[p.t] === 1) break; else sPlan = p.s;
+	let s = 0;
+	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
+	const nFx = M.names.indexOf('fx');
+	const same = [];
+	for (let s2 = 0; s2 < M.S; s2++) if ((nFx < 0 || M.valOf(s2, nFx) === M.valOf(s, nFx)) && PH.fields[s2]) same.push(s2);
+	const L = legsOf(A, M, s, -1, coins, opts);
+	try {
+		const fields = new Map(), countOf = new Map(), tail = new Map();
+		const f0 = L.fields(coins.map((q) => [q, T - 1]));
+		coins.forEach((q, i) => {
+			let tl = CUT;
+			for (const s2 of same) { const v = arriveCost(PH.fields[s2], q); if (v < tl) tl = v; }
+			fields.set(q, f0[i]); countOf.set(q, T - 1); tail.set(q, tl);
+		});
+		const CL = { T, coins, fields, tail, s, countOf, rounds: 0 };
+		legTourRounds(A, CL, L, opts);
+		return CL;
+	} finally { L.close(); }
+}
+/** (opts.legTour, default on: a coin's leg in the layer of the count the ball holds on its way to it along the DP's own
+ *  tour (the k-th coin of the tour: coins = k - 1), rebuilt until the tour stays (at most 3 rounds). The T - 1 layer
+ *  opens every coin door below T: on Forgotten Veil (doors for every count 1..16) coin 4's leg from coin 3 ran through
+ *  doors shut at 3 coins, not the known route's 1195-tick loop) */
+function legTourRounds(A, CL, L, opts) {
+	const { fields, countOf } = CL;
 	if (!opts || opts.legTour !== false) {
 		for (let round = 0; round < 3; round++) {
 			const D = coinDP(CL);
@@ -987,7 +1043,6 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 			if (!changed) break;
 		}
 	}
-	return CL;
 }
 /** the plan past its count (opts.coinT, editor.js pastPlan): every leg in the layer of the count the ball holds when it
  *  walks it. legTour starts from the T - 1 layer and re-rounds along the DP's own tour; with coin GATES that is no start:
@@ -1372,6 +1427,33 @@ function buildSteer(level, opts) {
 			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
 		}
 	}
+	// THE COIN DP OUTSIDE THE LAYER PRODUCT (the budget left the coins out and the walk plan passes a coin door: CTM_2's
+	// 16-coin door, "coins: over 31 layers"): the DP over the level's gold coins (18 or fewer) with coinLegsFree's legs
+	// (n more bodies: within the budget's bytes and time, else none), first below T (dp.first: the layer field walks
+	// through the coin doors it does not model, so the least of both was its way; past T coins, or where no leg has a
+	// value, the layer field's). The CPU file's alone (steerFileBytes(st, fp, true): flags 1 | 4, its leg bodies after
+	// the layer bodies); the plain (GPU) file stays as it was (its bodies [0, nPlain), no DP, prioShift without them).
+	// Order only: nothing prunes by it (opts.freeDP === false: none, as before)
+	const nPlain = bodies.length;
+	const freeOn = !dp && !opts.noDP && !opts.coinT && opts.freeDP !== false && !!over && M.names.indexOf('coins') < 0 && M.S > 1;
+	if (freeOn) {
+		const T = planCoinT(B);
+		const coinsF = A.special.filter((x) => x[1] === 'coins').map((x) => x[0]).filter((q) => level.coinBit[q] >= 0);
+		const n = coinsF.length;
+		if (T >= 1 && T <= n && n <= 18) {
+			if ((bodies.length + n) * bodyBytes > maxBytes || Date.now() - t0 > maxMs) over = `${over}; the coin DP: ${(bodies.length + n) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+			else {
+				const CL = coinLegsFree(B, PH, T, coinsF, opts);
+				const D = coinDP(CL);
+				if (D) {
+					const none = new Uint8Array(N);
+					const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
+					const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
+					dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: coinTour(CL, D, A.start.t), free: true, first: true };
+				}
+			}
+		}
+	}
 	const feats = M.feats.map((f, n) => {
 		const k = f.key;
 		const kind = k.startsWith('key') ? 1 : k.startsWith('psw:') ? 2 : k.startsWith('osw:') ? 3 : k === 'team' ? 4 : k === 'prot' ? 5 : k === 'coins' ? 6 : k === 'bcoins' ? 7 : k === 'crown' ? 8 : 9;
@@ -1379,8 +1461,9 @@ function buildSteer(level, opts) {
 		return { key: k, kind, param, radix: M.radix[n], stride: M.stride[n] };
 	});
 	const teamF = M.feats.find((f) => f.key === 'team');
-	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0 };
-	steer.prioShift = prioShiftOf(steer);
+	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0, nPlain };
+	// (the DP outside the layer product is the CPU file's alone: the plain file's shift as without it)
+	steer.prioShift = dp && dp.free ? prioShiftOf({ bodies: bodies.slice(0, nPlain), dp: null }) : prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	// the coin tour (no DP; the plan's coin door, or the full count where the coins are modelled: the min with the layer
 	// field keeps the ways that need no more coins; the CPU file's alone: steerFileBytes(st, fp, true); after prioShift,
@@ -1399,8 +1482,13 @@ function buildSteer(level, opts) {
 		// (coins not modelled, opt-in only: the plan's own coin door, or the full count where the budget left the coins out
 		// (LoZ Skyward Sword: "coins: over 31 layers"); a walk plan that passes no coin door and no refusal: no tour)
 		const coinsOver = !!over && /^coins|coin DP/.test(over);
-		const T = Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0));
-		if (T >= 1 && (modelled || opts.tourFirst === true) && (nCoins >= TOUR_MIN_COINS || coinsOver)) {
+		// (THE TOUR OUTSIDE THE LAYER PRODUCT, day 4, default on: the budget left the coins out (more than 18 coins, or no
+		// DP) and the walk plan passes a coin door: the tour first below the PLAN'S door count, not the level's full count
+		// (Weird Perfection's 99 where the routes take 70, Evolution Revolution's 45 where they take 36: the full count
+		// over-demands); opts.freeDP === false: none, as before)
+		const freeTour = freeOn && opts.tourFirst !== true && planCoinT(B) >= 1;
+		const T = freeTour ? Math.min(nCoins, planCoinT(B)) : Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0));
+		if (T >= 1 && (modelled || opts.tourFirst === true || freeTour) && (nCoins >= TOUR_MIN_COINS || coinsOver || freeTour)) {
 			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
 			const R = buildTour(A, level, T, !modelled, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 			if (R) {
@@ -1419,7 +1507,7 @@ function buildSteer(level, opts) {
 		}
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}) } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
 		tour: tourInfo };
 	return steer;
 }
@@ -1553,7 +1641,7 @@ function steerFifths(st, sim) {
 	if (st.tour) { const t = tourFifths(st, sim); return t < 0 ? v : v < 0 || st.tour.first ? t : Math.min(v, t); }
 	// (st.dpFirst: the coin DP's value wherever it has one, the layer field's only past the coins (goexplore.js --dpFirst):
 	// the layer's own way needs no more coins, and on Forgotten Veil it is a false one (the portal at (77,109)))
-	if (st.dpFirst) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
+	if (st.dpFirst || (st.dp && st.dp.first)) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
 	const d = dpFifths(st, sim, v >= 0 ? v : Infinity);
 	return d < 0 ? v : v < 0 ? d : Math.min(v, d);
 }
@@ -1581,16 +1669,20 @@ function steerFileBytes(st, levelFp, withTour) {
 	const N = st.N;
 	// (the coin tour: the CPU file's alone, flags 2, its section's offset a u64 at 56; the plain file stays as it was)
 	const R = withTour && st.tour ? st.tour : null;
-	const bodyBytes = st.bodies.map((f) => RF.reachFileBytes(f, levelFp));
-	const dp = st.dp;
+	// (the coin DP outside the layer product (dp.free): the CPU file's alone, flags 1 | 4 (first below T), its leg bodies
+	// after the layer bodies; the plain file: the bodies [0, nPlain), no DP, as without it)
+	const plainOnly = !!(st.dp && st.dp.free && !withTour);
+	const dp = plainOnly ? null : st.dp;
+	const bodiesOut = plainOnly ? st.bodies.slice(0, st.nPlain) : st.bodies, goalsOut = plainOnly ? st.goals.slice(0, st.nPlain) : st.goals;
+	const bodyBytes = bodiesOut.map((f) => RF.reachFileBytes(f, levelFp));
 	const parts = [];
 	const i32 = (a) => Buffer.from(Int32Array.from(a).buffer);
 	parts.push(i32(st.feats.flatMap((f) => [f.kind, f.param, f.radix, f.stride])));
 	parts.push(i32(st.team));
 	parts.push(i32(st.layerBody));
 	const offIdx = parts.length;
-	parts.push(Buffer.alloc(8 * st.bodies.length), Buffer.alloc(8 * st.bodies.length));
-	parts.push(Buffer.concat(st.goals.map((g) => Buffer.from(g.buffer, g.byteOffset, N))));
+	parts.push(Buffer.alloc(8 * bodiesOut.length), Buffer.alloc(8 * bodiesOut.length));
+	parts.push(Buffer.concat(goalsOut.map((g) => Buffer.from(g.buffer, g.byteOffset, N))));
 	const bodyIdx = parts.length;
 	for (const b of bodyBytes) parts.push(b);
 	if (dp) { parts.push(i32(dp.bit)); parts.push(i32(dp.leg)); parts.push(Buffer.from(Float32Array.from(dp.h).buffer)); }
@@ -1603,12 +1695,12 @@ function steerFileBytes(st, levelFp, withTour) {
 	let size = 64;
 	const offs = [];
 	for (const p of parts) { size = al8(size); offs.push(size); size += p.length; }
-	const offB = Buffer.alloc(8 * st.bodies.length), sizB = Buffer.alloc(8 * st.bodies.length);
+	const offB = Buffer.alloc(8 * bodiesOut.length), sizB = Buffer.alloc(8 * bodiesOut.length);
 	bodyBytes.forEach((b, k) => { offB.writeBigUInt64LE(BigInt(offs[bodyIdx + k]), 8 * k); sizB.writeBigUInt64LE(BigInt(b.length), 8 * k); });
 	parts[offIdx] = offB; parts[offIdx + 1] = sizB;
 	const buf = Buffer.alloc(al8(size));
 	buf.write('RCH4', 0, 'latin1');
-	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
+	[VERSION, st.W, st.H, st.feats.length, st.S, bodiesOut.length, (dp ? 1 : 0) | (R ? 2 : 0) | (dp && dp.first ? 4 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
 	if (levelFp) { buf.writeUInt32LE(levelFp[0] >>> 0, 48); buf.writeUInt32LE(levelFp[1] >>> 0, 52); }
 	if (R) buf.writeBigUInt64LE(BigInt(offs[tourIdx]), 56);
 	parts.forEach((p, k) => p.copy(buf, offs[k]));
@@ -1665,7 +1757,7 @@ function readSteerFile(buf) {
 		let h;
 		if ((buf.byteOffset + o) % 4 === 0) h = new Float32Array(buf.buffer, buf.byteOffset + o, nh);
 		else { h = new Float32Array(nh); for (let k = 0; k < nh; k++) h[k] = buf.readFloatLE(o + 4 * k); }
-		dp = { n: dpN, T: dpT, bit, leg, h };
+		dp = { n: dpN, T: dpT, bit, leg, h, ...(flags & 4 ? { first: true, free: true } : {}) };
 	}
 	// (the coin tour: views on the file's bytes where aligned)
 	let tour = null;
