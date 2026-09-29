@@ -1084,6 +1084,7 @@ function deathChainField(level, opts) {
 	const cps = [], trophies = [];
 	for (let i = 0; i < N; i++) { if (fg[i] === CHECKPOINT) cps.push(i); else if (fg[i] === TROPHY) trophies.push(i); }
 	let f = reachField(level, { deaths: false });
+	const f0 = f;
 	const standing = (fl, t) => { const v = fifthsAt(fl, (t % W) * 16, ((t / W) | 0) * 16, 0, -1, -1, fl.ice ? 2 : 0); return v < 0 ? -1 : v; };
 	let V = cps.map((t) => standing(f, t));
 	let rounds = 0, stable = cps.length === 0;
@@ -1099,7 +1100,10 @@ function deathChainField(level, opts) {
 	}
 	let finite = 0;
 	for (const v of V) if (v >= 0) finite++;
-	return Object.assign(f, { toDeath: deathWalk(level, f), chain: { rounds, cps: cps.length, finite, ms: Date.now() - t0, stable } });
+	// (plain: the death-free field before the seeds where they changed a cost: goexplore.js's deathPays bounds; null: the same)
+	let plain = null;
+	if (f !== f0) for (const k of Object.keys(f0)) { const x = f0[k], y = f[k]; if (ArrayBuffer.isView(x) && ArrayBuffer.isView(y) && (x.length !== y.length || x.some((v, i) => v !== y[i]))) { plain = opts.share ? shareField(f0) : f0; break; } }
+	return Object.assign(f, { toDeath: deathWalk(level, f), plain, chain: { rounds, cps: cps.length, finite, ms: Date.now() - t0, stable, changed: plain !== null } });
 }
 /**
  * deathWalk(level, f) -> Uint16Array (fifths; CUT = no killer walkable): per tile the plain walk (8-way, a diagonal step

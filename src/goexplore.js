@@ -1986,6 +1986,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const VRP = POF !== null ? new Float64Array(N).fill(NaN) : null;
 	// (--dord=2: V per respawn tile, looked up once: a respawn is a ball standing there; NaN = not looked up yet)
 	const VR = DCH ? new Float64Array(N).fill(NaN) : null;
+	// (--dord=2: deathPays' bounds (the run's rcPrev, the respawn's cost, byCost) stay exactly --dord=1's, with the plain
+	// death-free field (OFB: the chain field itself where its fixpoint changed nothing, as on every level measured), so the
+	// death order drops no death that search kept: an order only)
+	const OFB = DCH && OF.plain ? OF.plain : OF;
+	const VRB = DCH ? new Float64Array(N).fill(NaN) : null;
+	const ordAtB = (x, y, vy) => { const v = RF.costAt(OFB, x, y, vy); return v >= 0 ? v : RF.costAt(field, x, y, vy); };
+	const respawnCostB = () => { const rt = respawnTileOf(DI, sim, W); let v = VRB[rt]; if (v !== v) v = VRB[rt] = ordAtB((rt % W) * 16, ((rt / W) | 0) * 16, 0); return v; };
 	/** the order's reach cost (tiles) of a state (the live sim) or at a place (x, y, vy): the death-free field's where it
 	 *  has a value, else the field's (-1: cut off) */
 	const ordAt = (x, y, vy) => {
@@ -2346,7 +2353,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	/** the reach cost of the live state (tiles); -1 = ruled out. With --prune=0 (the editor's check of a level the reach
 	 *  field rules out) nothing is ruled out: a ruled-out state costs 1e4 + its walking distance (behind the others) */
 	let viaDeath = false;   // (the last costOf: the field's only way from there is a death)
-	let ownRc = -1;   // (the last costOf's own way (--dord=2: before the min with a death now): deathPays' rcPrev)
+	let baseVal = 0, baseVia = false;   // (--dord=2: the last costOf's value and viaDeath by --dord=1's rules: deathPays' rcPrev)
 	let pickSO = STEER_NONE;   // (the picked cell's own steer value, before --dord=2's death price: deathPays' steer bound)
 	/** --timed: the live state cannot clear its soonest timed killer (nor finish) before it fires (src/timed.js doomed: a
 	 *  sound bound), so its only future is that death */
@@ -2355,15 +2362,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const l = TMD.timedLeft(sim);
 		return l > 0 && TMD.doomed(TM, centreTile(), l);
 	};
-	const costOf = () => {
+	const costOf = (count = true) => {
 		const rc = RF.costAt(field, sim);
-		ownRc = -1;
 		// (deaths as moves: the field prices a death edge at DEATH_COST, behind every real way, to the best respawn tile of
 		// all; a state whose only way is a death costs its real price: DEATH_TILES + its own respawn target's cost)
 		viaDeath = DI !== null && rc >= RF.DEATH_TILES;
 		// (--dord: the order by the death-free field where it has a value; the -1 prune stays the field's)
 		let nf = -1;
-		if (OF !== null && rc >= 0) { nf = RF.costAt(OF, sim); if (nf >= 0 && POF !== null && !sim.is_invulnerable && POF[centreTile()]) nf = -1; viaDeath = nf < 0; }
+		if (OF !== null && rc >= 0) { nf = RF.costAt(OF, sim); viaDeath = nf < 0; }
+		if (DCH) return chainCost(rc, nf, count);
 		// (--timed: a doomed state is ordered as the death it is: DEATH_TILES + its respawn target's cost with deaths as moves,
 		// else behind every state that can still clear its killer; never ruled out: only the reach field's -1 prunes)
 		if (rc >= 0 && TM !== null && doomedNow()) {
@@ -2372,16 +2379,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			return rc + DOOM_TILES;
 		}
 		if (OF !== null && rc >= 0) {
-			// (--dord=2: the lesser of the state's own way and a death now, its respawn target's value + DEATH_TILES)
-			// (a death now costs the walk to the nearest killer too: DTW, reach.js deathWalk; none walkable: no death term)
-			if (nf >= 0) {
-				ownRc = nf;
-				if (DCH && a.dprice !== 0) {
-					const td = DTW === null ? 0 : DTW[centreTile()];
-					if (td !== RF.CUT && DEATH_TILES + td / 5 < nf) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + td / 5 + r < nf) return DEATH_TILES + td / 5 + r; }
-				}
-				return nf;
-			}
+			if (nf >= 0) return nf;
 			if (a.dprice !== 0) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
 			return rc;
 		}
@@ -2390,6 +2388,44 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
 		const w = tx >= 0 && ty >= 0 && tx < field.W && ty < field.H ? field.walk[ty * field.W + tx] : RF.CUT;
 		return 1e4 + (w === RF.CUT ? 9999 : w / 5);
+	};
+	/** --dord=2's order (rc: the field's cost, nf0: the chain field's; count: the doomed counter): the lesser of the state's
+	 *  own way and a death now (the walk to the nearest killer, DEATH_TILES, its respawn target's value); a protected-only
+	 *  value is no way of an unprotected ball; beside it baseVal / baseVia, --dord=1's value with the plain field */
+	const chainCost = (rc, nf0, count) => {
+		const doomed = rc >= 0 && TM !== null && doomedNow();
+		// --dord=1's (c30f499's costOf with OFB)
+		const nfb = rc < 0 ? -1 : OFB === OF ? nf0 : RF.costAt(OFB, sim);
+		baseVia = rc >= 0 ? nfb < 0 : rc >= RF.DEATH_TILES;
+		if (doomed) { baseVia = true; const r = respawnCostB(); baseVal = r >= 0 ? DEATH_TILES + r : rc + DOOM_TILES; }
+		else if (rc >= 0) { if (nfb >= 0) baseVal = nfb; else { const r = a.dprice !== 0 ? respawnCostB() : -1; baseVal = r >= 0 ? DEATH_TILES + r : rc; } }
+		// the order
+		if (doomed) {
+			if (count) tDoomed++;
+			viaDeath = true;
+			const r = respawnCost(); if (r >= 0) return DEATH_TILES + r;
+			return rc + DOOM_TILES;
+		}
+		if (rc >= 0) {
+			let nf = nf0;
+			if (nf >= 0 && POF !== null && !sim.is_invulnerable && POF[centreTile()]) nf = -1;
+			viaDeath = nf < 0;
+			if (nf >= 0) {
+				if (a.dprice !== 0) {
+					const td = DTW === null ? 0 : DTW[centreTile()];
+					if (td !== RF.CUT && DEATH_TILES + td / 5 < nf) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + td / 5 + r < nf) return DEATH_TILES + td / 5 + r; }
+				}
+				return nf;
+			}
+			if (a.dprice !== 0) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
+			return rc;
+		}
+		// (cut off by the field: as --dord=1)
+		if (rc >= 0 || a.prune) { baseVal = rc; return rc; }
+		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+		const w = tx >= 0 && ty >= 0 && tx < field.W && ty < field.H ? field.walk[ty * field.W + tx] : RF.CUT;
+		baseVal = 1e4 + (w === RF.CUT ? 9999 : w / 5);
+		return baseVal;
 	};
 	let room0 = null, cell0 = null, preMs = null;
 	{
@@ -2820,7 +2856,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// the quick look before the dead ticks are played (the room as it is now; the respawn's own after them): a death
 		// that throws the ball back (its target farther from the trophy by the reach field than the state's own way, by
 		// more than the way a death costs), then the earliest arrival there
-		{ const r0 = respawnCost(); if (r0 < 0 || r0 > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; } }
+		{ const r0 = DCH ? respawnCostB() : respawnCost(); if (r0 < 0 || r0 > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; } }
 		const v0 = rspAt.get(rspRoom() * 2097152 + rt);
 		if (v0 !== undefined && v0 <= t + DEATH_TICKS - 1) { dDrop++; return; }
 		// (with the steer field, gate-aware, the same bound by it against the run's pick: the reach field is door-blind, and
@@ -2835,7 +2871,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (sim.is_dead || tR >= maxT || sim.has_silver_crown) { dDrop++; return; }
 		const rc = costOf();
 		if (rc < 0) { dDrop++; return; }
-		const raw = ordAt(sim);
+		const raw = DCH ? ordAtB(sim) : ordAt(sim);
 		if (raw > rcPrev + DEATH_TILES) { dBack++; dDrop++; return; }
 		const byCost = raw + DEATH_TILES < rcPrev;
 		// (the earliest arrival first: a room is made only for a death that is kept, never for one dropped after it)
@@ -3030,11 +3066,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			// (deathPays' steer bound: the pick's own steer value; --dord=2 prices a cell's by a death now too)
 			pickSO = e.sc === undefined ? STEER_NONE : e.sc;
 			if (DCH && ST !== null && e.sc !== undefined) { sim.restore(base); pickSO = steerOf(true); }
+			// (--dord=2: the runs' first rcPrev is the pick's value by --dord=1's rules, as its cell's rc was there)
+			let rcPrev0 = e.rc;
+			if (DCH) { sim.restore(base); costOf(false); rcPrev0 = baseVal; }
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
 				const o = r * a.roll;
 				let m = draw();
-				let room = e.room, rcPrev = e.rc;
+				let room = e.room, rcPrev = rcPrev0;
 				for (let s = 0; s < a.roll; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
@@ -3061,7 +3100,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					// (deathPays: the reach cost of the last state that had a way of its own; a state whose only way is a death
 					// keeps the one before it, so a fall into a pit does not make a death back to the spawn look free)
-					if (!viaDeath) rcPrev = ownRc >= 0 ? ownRc : rc;
+					if (DCH ? !baseVia : !viaDeath) rcPrev = DCH ? baseVal : rc;
 					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
 					// first cell can enter the archive: a full archive or a state too late for a faster route would leave an
 					// empty room, and walks for nothing, outside the memory budget)
@@ -3746,7 +3785,7 @@ async function main() {
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
 	const field = RF.shareField(RF.reachField(L, fieldOpts(a)));
 	// (--dord: the death-free field for the workers' order, shared like the field; only with deaths as moves)
-	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(a.dord >= 2 ? RF.deathChainField(L, { deathTiles: DEATH_TILES }) : RF.reachField(L, { deaths: false })) : null;
+	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(a.dord >= 2 ? RF.deathChainField(L, { deathTiles: DEATH_TILES, share: true }) : RF.reachField(L, { deaths: false })) : null;
 	// (timed killers in the level: src/timed.js; the workers build their own bounds)
 	const TMD_L = TMD.timedOf(L) !== null;
 	const sim0 = new E.EESim(L);
