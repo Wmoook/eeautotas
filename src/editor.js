@@ -2793,6 +2793,7 @@ function steerFp() {
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js', 'exitapex.json']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
 	h.update(`exitapex:${process.env.EEAT_EXITAPEX || ''}`);   // (the ordering fields' transit tables: reach.js exitApexOn)
+	if (process.env.EEAT_STEER_WALLS) h.update(`walls:${process.env.EEAT_STEER_WALLS}`);   // (steer.js steerWallsOf, an experiment)
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);

@@ -1426,7 +1426,36 @@ const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
  * Int32Array(S), bodies [field], goals [Uint8Array(N)], dp {n, T, bit, leg, h} | null, prioShift, info {features, layers,
  * builds, kappa, ms, cegar, dp, over (what the budget left out, or null)}}
  */
+/** (EEAT_STEER_WALLS="x,y;x,y", an EXPERIMENT knob, b9cw-cw: unset = the level itself, main byte for byte) the level with
+ *  the 4-way component of each given tile's block kind (at most 400 tiles) a wall in the steer's model only (ordering:
+ *  the steer never prunes): the oracle for a stall-driven refinement that walls a pinned attempt's place and rebuilds the
+ *  plan. Cold World: "227,151;195,144" (the pool's 33333 exit and the air around the exit-apex pin) makes the CEGAR model
+ *  the blue coins, the start 429.6 at no blue coin vs 145.8 with one (the chapter-2 blue coin that opens 6 chapters) */
+function steerWallsOf(level) {
+	const spec = process.env.EEAT_STEER_WALLS;
+	if (!spec) return level;
+	const B = require('./blocks.js');
+	const W = level.width, H = level.height, fg = level.fg.slice();
+	const kind = (id) => B.kindOf(id).kind;
+	for (const part of spec.split(';')) {
+		const [sx, sy] = part.split(',').map(Number);
+		if (!(sx >= 0 && sx < W && sy >= 0 && sy < H)) continue;
+		const s0 = sy * W + sx, k0 = kind(level.fg[s0]);
+		const seen = new Set([s0]), q = [s0];
+		while (q.length && seen.size < 400) {
+			const i = q.shift(), x = i % W, y = (i / W) | 0;
+			for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+				const nx = x + dx, ny = y + dy, j = ny * W + nx;
+				if (nx < 0 || nx >= W || ny < 0 || ny >= H || seen.has(j) || kind(level.fg[j]) !== k0) continue;
+				seen.add(j); q.push(j);
+			}
+		}
+		for (const i of seen) fg[i] = 9;
+	}
+	return Object.assign({}, level, { fg });
+}
 function buildSteer(level, opts) {
+	level = steerWallsOf(level);
 	const st = buildSteerOnce(level, opts);
 	// (the field transit tables (reach.js exitApexOn: the ordering fields only, EEAT_EXITAPEX) are no proof: a ball that
 	// only grazes a field between two tick starts has none of its drag. A level is beatable, so a start they leave without
