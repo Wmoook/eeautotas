@@ -9,7 +9,9 @@
 //            with the default (replayed; the dying states counted: kept by the earliest arrival, the others dropped);
 //            a death warp between two spawns (fine cells: the death kept by the cost, the only way); a level of
 //            checkpoints and spikes where no death pays (the routes die 0 times); a level without a checkpoint: deaths
-//            as moves off by default, the same search as --deaths=0 (the same routes after the same ticks)
+//            as moves off by default, the same search as --deaths=0 (the same routes after the same ticks); the pocket pit
+//            (64x48: coarse cells, the useful territory on): a death that respawns in a 'cul-de-sac' (the gravity-blind
+//            walk's) is the route, kept (seeds 1, 2)
 //   rules    goexplore.js deathMovesFor (levels with a checkpoint or 2+ spawns and something that kills), the editor's
 //            GPU tools get --deaths=1 there
 //   editor   the searches' reach file follows deaths as moves (the pit: the _dm file with the death edges with them, the
@@ -180,6 +182,22 @@ function sectionCpu() {
 		`bound ${bnd}: ${rb.map((e) => `${e.ticks}/${e.deaths}`).join(' ')}`);
 	const on2 = gox(pit.file, ['--workers=1', '--cells=coarse', '--maxTicks=4000000', '--seconds=60']);
 	check('the same seed and tick budget: the same routes (deaths change no draw)', JSON.stringify(routesOf(on2).map((e) => [e.ticks, e.inputs])) === JSON.stringify(rs.map((e) => [e.ticks, e.inputs])));
+	// the pocket pit on a level past 2,500 tiles (the default cells coarse, the useful territory on): the spawn and the
+	// checkpoint in a 3-deep pocket above the corridor, the coin at the bottom of the shaft, a spike at its end, a 1-coin
+	// door before the trophy. The gravity-blind cul-de-sac walk counts the pocket as a cul-de-sac of the room after the
+	// coin, yet the death back into it is the route: such a death is demoted, never dropped (the god-int soundness
+	// review's pocketpit64: dropped, 0 routes on 3 of 3 seeds, 4.7-9.8 K deaths 'useless'; --useful=0 3 of 3)
+	const PP = ['#####S##########', '#####C##########', '#####.##########', '#.......d..T...#', '#..#############', '#..#############',
+		'#..#############', '#..#############', '#..#############', '#..#############', '#..........o..x#'];
+	const pocket = levelFile('pocketpit64', Array.from({ length: 48 }, (_, y) => (y >= 1 && y <= PP.length ? PP[y - 1] + '#'.repeat(48) : '#'.repeat(64))));
+	for (const s of [1, 2]) {
+		const pp = gox(pocket.file, ['--workers=1', `--seed=${s}`, '--maxTicks=16000000', '--seconds=90']);
+		const pr = routesOf(pp), pd = doneOf(pp).deaths || {};
+		const pev = pr.length ? C.evaluate(pocket.level, masksOf(pr[pr.length - 1].inputs)) : null;
+		check(`the pocket pit (64x48, coarse cells, the useful territory on), seed ${s}: a route through its death, replayed (a death respawning in a 'cul-de-sac' is kept and enters the room there)`,
+			!!pev && pev.deaths >= 1 && pev.ms.length === pr[pr.length - 1].ticks,
+			`${pr.length} routes${pr.length ? `, the best ${pr[pr.length - 1].ticks} ticks, ${pev ? pev.deaths : '?'} death(s)` : ''}; ${JSON.stringify(pd)}`);
+	}
 	// fine cells: a death warp between two spawns (the start is the second spawn after /reset; the death brings the ball to
 	// the first, by the trophy): the only way
 	const warp = levelFile('warp', box(['S...T#......', '######S....x']));

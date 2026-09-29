@@ -371,7 +371,7 @@ function create(o) {
 		let r = rooms.get(m.room);
 		if (!r) {
 			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null,
-				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1 };
+				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1, grp: m.grp || null };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
 			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null, fl: 0, nt: 1, ntI: null, ntK: -1 });
@@ -455,6 +455,9 @@ function create(o) {
 			czClear = o.RM.cause(sim);
 			sim.restore(snap0);
 		}
+		// (--dom=1: a touch that only turns mono switches off (goexplore.js roomOf shrinks: into a room the room itself
+		// dominates) is no target: Good Egg's switch staircase, pressed again on the way back)
+		const d0 = a.dom !== 0 && o.RM.dom ? o.RM.dom(sim) : null;
 		/** touching trigger component c at tile t from the room's first arrival: 0 nothing changes, 1 a change (a target),
 		 *  2 it only clears the timed killer the room carries (a way) */
 		const changes = (c, t) => {
@@ -466,7 +469,7 @@ function create(o) {
 				try {
 					sim.tick(inp0);
 					const cz = o.RM.cause(sim);
-					v = sim.is_dead || o.RM.byTrigger(cz0, cz) ? 1 : 0;
+					v = sim.is_dead || (o.RM.byTrigger(cz0, cz) && !(d0 !== null && o.RM.shrinks(d0, o.RM.dom(sim)))) ? 1 : 0;
 					if (v === 1 && czClear !== null && !sim.is_dead && cz.sub === czClear.sub && cz.keys === czClear.keys &&
 						(K0[0] && !sim.is_cursed || K0[1] && !sim.is_zombie || K0[2] && !sim.is_on_fire || K0[3] && !sim.is_poisoned)) v = 2;
 				} catch (e) { v = 1; }
@@ -626,7 +629,9 @@ function create(o) {
 				const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys })) fresh++;
+				const d2 = o.RM.dom ? o.RM.dom(sim) : null;
+				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys,
+					...(d2 ? { dcls: d2.cls, dmask: Array.from(d2.mask) } : {}) })) fresh++;
 				cz = cz2;
 			}
 			key = k2;
@@ -684,6 +689,10 @@ function create(o) {
 		// level of many switches has thousands of rooms)
 		const cand = [];
 		for (const r0 of rooms.values()) {
+			// (--dom=1: a room whose novelty group is dominated (goexplore.js domIndex: a room of its class with more mono
+			// switches on holds everything it can reach) is no burst's room: Good Egg's hour from the level alone gave 277
+			// of its 361 bursts to switch-subset rooms at coins = 8, src/out/ge_anat)
+			if (r0.grp && r0.grp.dom) continue;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
 				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
@@ -1058,6 +1067,8 @@ function roomAim(L, RM, sim, known, T) {
 	}
 	const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 	const key0 = RM.key(sim), cz0 = RM.cause(sim), snap0 = sim.snapshot(), inp0 = new E.EEInput(), acts = new Map();
+	// (a touch that only turns mono switches off, into a room this one dominates: no goal; goexplore.js roomOf shrinks)
+	const d0 = RM.dom && RM.shrinks ? RM.dom(sim) : null;
 	/** touching component c at tile t: 2 = into a room not seen yet, 1 = into a known room, 0 = no change */
 	const act = (c, t) => {
 		let v = acts.get(c);
@@ -1068,6 +1079,7 @@ function roomAim(L, RM, sim, known, T) {
 				sim.tick(inp0);
 				if (sim.is_dead) v = 0;
 				else if (!RM.byTrigger(cz0, RM.cause(sim))) v = 0;
+				else if (d0 !== null && RM.shrinks(d0, RM.dom(sim))) v = 0;
 				else { const k2 = RM.key(sim); v = k2 === key0 ? 0 : known(k2) ? 1 : 2; }
 			} catch (e) { v = 0; }
 			sim.restore(snap0);

@@ -417,11 +417,11 @@ const STRATEGIES = {
 		`--cells=${q.cellLog}`, `--reserve=${q.reserve}`, `--cap=${BREAK_CAP}`, ...(q.region ? [`--region=${q.region}`] : []), ...(o.prune && !q.gateReach ? ['--prune=1'] : [])] },
 	guide: { label: 'along your line', args: (f, o, q) => [...beamArgs(f, o, q), `--guide=${f.guide}`, '--guideWeight=4', '--goalWeight=4'] },
 	goal: { label: 'straight for the trophy', args: (f, o, q) => beamArgs(f, o, q) },
-	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed}`,
+	goexplore: { label: 'random runs (CPU)', cpu: true, args: (f, o, q) => [f.eelvl, `--seconds=${q.seconds}`, `--workers=${o.workers}`, `--seed=${o.seed + (q.seedAdd || 0)}`,
 		// (--deaths=0 where deaths as moves are off: goexplore.js then builds its reach field without death edges and cuts
 		// the room dead ends (roomDead), like the reach file the editor gives the GPU tools then; where they are on the flag's
 		// auto (deathMovesFor, the same test as the editor's) keeps the death edges and no room dead ends)
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
@@ -434,7 +434,7 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0'])] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : [])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
@@ -730,11 +730,17 @@ const SOURCE_REPLAY_MS = 1000;
 // a room's gain comes from the CPU search's source events alone (its walks run in its own threads), 0 until one names it
 const SOURCE_WALK_TILES = 160000;
 let sources = new Map(), sourceSeq = 0;   // room key -> {room, desc, gain, runs, at, from, early, best}
-let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain)}
+let roomsCur = null;                      // the running search's rooms: {RM, fields, walk, gain: Map(room key -> gain), useful, cul}
 const srcPending = new Map();             // strategy index -> {at (its last replay), next (the attempt waiting), timer}
+// the useful territory (goexplore.js USEFUL TERRITORY): an attempt that ends in a cul-de-sac of its room (as the replay
+// entered the room) is no nearest attempt while a useful one is known, and no room's best source (the wall breaker's
+// and the relay's starting points): on Forgotten Helix main's nearest attempt sat 106.2 tiles out in the door-16 viewing
+// box by the trophy (a door the level's 15 coins never open) for the whole 10 minutes, the breaker's round 1 starting
+// there. The rooms' cul-de-sacs from the first replay that entered them, CUL_ROOMS kept (the walks: SOURCE_WALK_TILES)
+const CUL_ROOMS = 256;
 /** the running search's room key function (goexplore.js), made at the first use; its room fields at the first walk */
 function roomsOfSearch() {
-	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map() };
+	if (!roomsCur && cur) roomsCur = { RM: GX.roomOf(cur.level), fields: null, walk: cur.level.width * cur.level.height <= SOURCE_WALK_TILES, gain: new Map(), useful: null, cul: new Map() };
 	return roomsCur;
 }
 /** forgets the sources and the rooms (a new search, or the end of one: the attempts' inputs, up to 100000 characters
@@ -752,7 +758,7 @@ function publishSources() {
 		entered: s.early ? s.early.ticks : null, best: s.best ? { ticks: s.best.ticks, tiles: Math.round(s.best.dist * 10) / 10 } : null }));
 }
 /** a starting point o: {room, desc, gain, from, inputs, dist, arrival (the ticks of its inputs up to where it entered the
- *  room; 0 = not known)} */
+ *  room; 0 = not known), cul (it ends in a cul-de-sac of its room: not the room's best)} */
 function addSource(o) {
 	let s = sources.get(o.room);
 	if (!s) {
@@ -776,7 +782,7 @@ function addSource(o) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
 		s.early = { inputs: inputs.slice(0, o.arrival), ticks: o.arrival, dist: o.dist };
 	}
-	if (!s.best || o.dist < s.best.dist - 1e-3) s.best = { inputs, ticks: inputs.length, dist: o.dist };
+	if (!o.cul && (!s.best || o.dist < s.best.dist - 1e-3)) s.best = { inputs, ticks: inputs.length, dist: o.dist };
 	publishSources();
 }
 /** the source for the relay plan's step ('new' or 'gain'); c: the nearest attempt (its own step, not again here) */
@@ -792,12 +798,17 @@ function pickSource(step, c) {
 	return b;
 }
 /** masks replayed in the JS engine like common.js replay (to the finish, if any): the path, run ticks, deaths, and the
- *  room of its last state ({key, desc, since: the tick it entered that room}) */
-function replayRooms(masks, withPath) {
+ *  room of its last state ({key, desc, since: the tick it entered that room, cul: it ends in a cul-de-sac of that room});
+ *  withCul: the room's cul-de-sacs made when not known yet (closer(): the nearest attempt's candidates, CUL_ROOMS; a
+ *  walk of the level on the server's thread, 20-80 ms on 200 x 200 - 400 x 200), else only those known */
+function replayRooms(masks, withPath, withCul = false) {
 	const R = roomsOfSearch();
 	const sim = new E.EESim(cur.level), inp = new E.EEInput();
 	sim.reset();
 	let deaths = 0, complete = -1, key = R.RM.key(sim), since = 0;
+	// (the state that entered the room the replay ends in: its cul-de-sacs, when not known yet; a dead ball has no tile)
+	const needCul = withCul && R.walk && cur.opts.useful !== false && !R.cul.has(key);
+	let entry = needCul ? sim.snapshot() : null;
 	sim.onEvent = (k) => { if (k === 'complete' && complete < 0) complete = sim.ticks(); else if (k === 'death') deaths++; };
 	const path = withPath ? [[Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]] : null;
 	for (let t = 0; t < masks.length && complete < 0; t++) {
@@ -805,7 +816,22 @@ function replayRooms(masks, withPath) {
 		sim.tick(inp);
 		if (path) path.push([Math.round((sim.px + 8) * 10) / 10, Math.round((sim.py + 8) * 10) / 10]);
 		const k = R.RM.key(sim);
-		if (k !== key) { key = k; since = t + 1; }
+		if (k !== key) { key = k; since = t + 1; entry = withCul && R.walk && cur.opts.useful !== false && !R.cul.has(k) && !sim.is_dead ? sim.snapshot() : null; }
+	}
+	// (the useful territory: whether the attempt ends in a cul-de-sac of its room)
+	let cul = false;
+	if (R.walk && cur.opts.useful !== false) {
+		if (!R.cul.has(key) && entry !== null) {
+			try {
+				if (!R.useful) R.useful = GX.roomUseful(cur.level);
+				const s2 = new E.EESim(cur.level);
+				s2.reset(); s2.restore(entry);
+				R.cul.set(key, R.useful.of(s2, false).cul);
+				if (R.cul.size > CUL_ROOMS) R.cul.delete(R.cul.keys().next().value);
+			} catch (e) { R.cul.set(key, null); }
+		}
+		const b = R.cul.get(key);
+		if (b) { const W = cur.level.width, tl = Math.min(W * cur.level.height - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4))); cul = (b[tl >> 3] & (1 << (tl & 7))) !== 0; }
 	}
 	// (the room's territory gain: from the state it ends in, once per room; 0 above SOURCE_WALK_TILES)
 	let gain = R.gain.get(key);
@@ -823,7 +849,7 @@ function replayRooms(masks, withPath) {
 	}
 	// (with the steer field the attempts' distances are its own; the page shows the reach field's: reachTiles)
 	const rc = cur.reachLookup ? RF.costAt(cur.reachLookup, sim) : -1;
-	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain }, reachTiles: rc >= 0 ? rc : null };
+	return { path, runTicks: sim.run_ticks, deaths, room: { key, desc: R.RM.desc(sim), since, gain, cul }, reachTiles: rc >= 0 ? rc : null };
 }
 /** the distance (tiles) from which an attempt's way is a death's: RF.DEATH_TILES, but none (1e4: cut off) when the searches'
  *  reach file has no death edges (cur.opts.fileDeaths false: the death-free file, or a level without deaths; a long real way,
@@ -856,7 +882,7 @@ function attemptSource(n, a, rm) {
 		p.at = now;
 		rm = replayRooms(Uint8Array.from(a.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), false).room;
 	}
-	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since });
+	addSource({ room: rm.key, desc: rm.desc, gain: rm.gain, from: V.label, inputs: a.inputs, dist: a.dist, arrival: rm.since, cul: !!rm.cul });
 }
 // the relay's cost ceiling (explore --costslack): the ice level's open arrow fields filled even the large table with
 // states going back the way the relay came. With the steer field a state is dropped only above both fields' ceilings
@@ -1257,7 +1283,10 @@ function coinsOf(inputs) {
 	if (!cur.countDoors) {
 		let gold = false, blue = false;
 		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
-		cur.countDoors = { gold, blue };
+		// (a counter whose doors guard nothing on the way to the trophy is no progress: goexplore.js counterRelevance, as
+		// the room keys count it; Good Egg's blue coins)
+		const rel = GX.counterRelevance(L);
+		cur.countDoors = { gold: gold && rel.gold, blue: blue && rel.blue };
 	}
 	const D = cur.countDoors;
 	if (!D.gold && !D.blue) return 0;
@@ -1305,8 +1334,9 @@ function breakStarts() {
 	// (with the progress order by its own coins, first among equals: a room target's gate can be a lateral room, e.g.
 	// Forgotten Helix's low gravity at 2 coins, and the frontier of 3 coins goes first then)
 	if (brk.front) add(brk.front.inputs, brk.front.inputs.length, `the last gate the breaker entered (gate ${brk.front.gates} of its chain)`, 0, undefined);
+	// (not from an attempt in a cul-de-sac of its room: see CUL_ROOMS)
 	const c = S.closest;
-	if (c && !c.cut && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
+	if (c && !c.cut && !c.cul && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
@@ -1888,7 +1918,10 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
-	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves,
+	// (the useful territory, 2026-09-28 (goexplore.js USEFUL TERRITORY): the CPU search's and the GPU random runs' rooms, the
+	// sources' gains, the nearest attempt; body useful: false or EEAT_USEFUL=0: as before)
+	const useful = b.useful !== false && process.env.EEAT_USEFUL !== '0';
+	cur = { level: ins.level, buf, levelHash, tool, toolArgs, files, slowY: b.fineY === false ? false : BU.slowYOf(ins.level), opts: { width, depth, cpuDepth, prune: false, workers, laneWorkers: lw.lane, laneArgs: test && Array.isArray(test.laneArgs) ? test.laneArgs : [] /* (tests: the lane's search options) */, seed, salts: !(test && test.salts === false), lanes, tool, bursts: one, deaths: deathMoves, useful,
 		burstBig: b.burstBig !== false && !(test && test.burstBig === false) && process.env.EEAT_BURST_BIG !== '0',
 		breakShare: b.breakShare === true || !!(test && test.breakShare === true) || process.env.EEAT_BREAK_SHARE === '1',
 		refine: b.refine !== false && !(test && test.refine === false), probeS: test && test.probeS ? test.probeS : PROBE_S,
@@ -2384,6 +2417,8 @@ function launch(n) {
 		q.seconds = V.share = Math.max(1, Math.min(RELAY_S * (q.big ? 2 : 1), Math.round(S.seconds - searchClock(Date.now()))));
 		q.depth = S.result ? Math.max(1, boundTicks() - 1 - V.relay.keep) : 0;
 	}
+	// (the one search started again by its supervisor, oneEnded: other seeds, 1000 x the restart count)
+	if (V.key === 'goexplore' && V.restarts) q.seedAdd = 1000 * V.restarts;
 	if (V.gpuShare) { q.tool = cur.tool; q.pauseFile = pauseFileOf(n); q.work = path.join(dir(), 'bursts'); }
 	// (the stall escape: its start's inputs as --prefix, its share of the workers, its own seed and bursts' folder; the
 	// search's time left)
@@ -2684,10 +2719,11 @@ function launch(n) {
 			let ev;
 			try { ev = JSON.parse(line); } catch (e) { continue; }
 			if (EVLOG) evlog(V.key, ev);
+			if (ev.ev === 'progress' && cpu) ch.lastProgress = ev;   // (the one search's supervisor logs it: oneEnded)
 			onEvent(ev);
 		}
 	});
-	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-2000); });
+	ch.stderr.on('data', (chunk) => { err = (err + chunk).slice(-(cpu ? 8000 : 2000)); });
 	ch.on('error', (e) => { err += e.message; });
 	ch.on('close', (code, sig) => {
 		busy.delete(ch);
@@ -2870,6 +2906,8 @@ function launch(n) {
 				if (breakAfter(n, how)) { save(); return; }
 			} else if (brk && brk.round) breakEnd(n);   // (a stop, a route, a failed GPU: the round is over)
 		}
+		// (the one search ended on its own before its time: the cause logged, and again while no route is known: oneEnded)
+		if (V.key === 'goexplore' && cpu && !V.lane && !V.precision && oneEnded(n, ch, code, sig, err, end)) { totals(); save(); return; }
 		if (V.state === 'running' || V.state === 'starting') {
 			if (V.error || (code !== 0 && code !== null && !ch.killed)) {
 				V.state = 'error';
@@ -2885,6 +2923,60 @@ function launch(n) {
 	ch.cpuSearch = cpu;
 	ch.rollsSearch = rolls;
 	return ch;
+}
+// THE ONE SEARCH'S SUPERVISOR (2026-09-28). The CPU search (node src/goexplore.js) sometimes ended with no error line
+// (seen after 2,110 s and 632 s on the rented boxes): its close handler took any end without an exit code (a signal:
+// the container's OOM killer's SIGKILL, V8's fatal "heap out of memory" abort (SIGABRT) of its main thread, which runs
+// with V8's default heap limit: C.workerHeapEnv drops --max-old-space-size so that the workers' own limits hold) as a
+// plain end, and the product's core search was gone for the rest of the run. Now an end the editor did not ask for
+// (no halt), with more than ONE_RESTART_LEFT_S s of the search left, is logged (the exit code or signal, the last 20
+// stderr lines, the last progress line: V.crashes, the page's notes, the server's stderr) and, while no route is known,
+// the search starts again with other seeds (1000 x the restart count), at most ONE_RESTARTS times: the late steer field
+// with it (cur.files.steerCpu: its --steer), the plan past its count re-sent (stdin "steer"), and its archive fed at
+// once (stdin "seed") with the nearest attempt and every room's earliest arrival and best attempt (the sources).
+const ONE_RESTARTS = 3, ONE_RESTART_LEFT_S = 60;
+/** the one search (strategy n, process ch) ended: true when it was started again (the close handler returns) */
+function oneEnded(n, ch, code, sig, err, end) {
+	const V = S.strategies[n];
+	if (ch.stopWhy || ch.killed) return false;
+	const left = S.seconds - usedSec(V);
+	const on = S.running && !S.halted && S.stage !== 'stopped';
+	// (its own time ran out, a stop, or the reach field rules the start out: an end it was meant to have)
+	if (!on || left <= ONE_RESTART_LEFT_S || end === 'unreachable') return false;
+	const after = Math.round((Date.now() - S.started) / 100) / 10;
+	const why = code === null ? `signal ${sig || '?'}` : `exit code ${code}`;
+	const lines = String(err || '').trim().split('\n').filter((l) => l.trim());
+	const tail = lines.slice(-20);
+	const p = ch.lastProgress || null;
+	const prog = p ? { tick: p.tick, states: p.states, ticks: p.ticks, sec: p.sec, heapMB: p.heapMB, memMB: p.memMB, rooms: p.rooms, workers: Array.isArray(p.workers) ? p.workers.length : undefined } : null;
+	const rec = { after, code, signal: sig || null, end: end || null, stderr: tail, progress: prog, restarted: false };
+	V.crashes = (V.crashes || []).concat([rec]).slice(-ONE_RESTARTS - 2);
+	try { console.error(`[editor] the one search ended after ${after} s without being stopped (${why}, end ${end || 'none'}); stderr: ${tail.join(' | ').slice(-3000)}; last progress: ${JSON.stringify(prog)}`); } catch (e) { /* none */ }
+	if (EVLOG) evlog(V.key, { ev: 'oneEnded', ...rec });
+	const last = tail.length ? `: ${tail[tail.length - 1].slice(0, 200)}` : '';
+	const k = (V.restarts || 0) + 1;
+	if (S.result || k > ONE_RESTARTS) {
+		note(`${V.label}: ended after ${after} s (${why}${end ? `, end ${end}` : ''})${last}${S.result ? '' : `; not started again (${ONE_RESTARTS} restarts)`}`);
+		if (code !== 0) V.error = V.error || `ended after ${after} s (${why})${last}`;
+		return false;
+	}
+	rec.restarted = true;
+	note(`${V.label}: ended after ${after} s without a route (${why}${end ? `, end ${end}` : ''})${last}; started again with other seeds (restart ${k} of ${ONE_RESTARTS}), its archive fed with the nearest attempt and the rooms' sources`);
+	Object.assign(V, { restarts: k, state: 'starting', detail: `started again after ${why} (restart ${k} of ${ONE_RESTARTS})`, error: null });
+	kids[n] = launch(n);
+	const c2 = kids[n];
+	const tell = (line) => { if (alive(c2) && c2.stdin && !c2.stdin.destroyed) { try { c2.stdin.write(`${line}\n`); return true; } catch (e) { /* gone */ } } return false; };
+	// (the plan past its count, when it was on: the launch's --steer is the late field's)
+	if (cur && cur.pastOn && cur.past && cur.past.file) tell(`steer ${cur.past.file}`);
+	// (a stall escape running: the new search parks its share of the workers again, as escLaunch told the old one)
+	if (esc && esc.run && esc.run.mainKeep) tell(`workers ${esc.run.mainKeep}`);
+	const feed = [];
+	if (S.closest && S.closest.inputs && !S.closest.cut) feed.push(S.closest.inputs);
+	for (const s of sources.values()) { if (s.early && s.early.inputs) feed.push(s.early.inputs); if (s.best && s.best.inputs) feed.push(s.best.inputs); }
+	let fed = 0;
+	for (const x of new Set(feed)) if (/^[0-O]+$/.test(x) && tell(`seed ${x}`)) fed++;
+	V.restartFed = fed;
+	return true;
 }
 /** every GPU strategy has ended with a route known (the exploration's finest passes found none faster): the CPU search
  *  stops too, and the GPU random runs with it (a search like the CPU one); not when one of them failed (then the CPU
@@ -3359,12 +3451,16 @@ function closer(ev, n) {
 	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
 	if (stale) return;
 	const cut = !!ev.cut || dist >= 1e4;
-	if (old && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
+	// (a nearest attempt in a cul-de-sac of its room (old.cul, see CUL_ROOMS) gives way to any attempt outside one: the
+	// replay below tells)
+	if (old && !(old.cul && !cut) && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
 	// (one replay: the path, and the room it ends in for the sources)
-	const tr = replayRooms(masks, true);
+	const tr = replayRooms(masks, true, true);
 	if (own) attemptSource(n, own, tr.room);
+	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
+	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
 	closestRoom = { key: tr.room.key, desc: tr.room.desc };   // (the stall escape's rotation: the rooms escaped from)
 	const pathPts = tr.path;
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
@@ -3374,9 +3470,9 @@ function closer(ev, n) {
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
-	if (brk && !cut && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
-	if (prec && !cut && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
-	S.closest = { dist, cut, viaDeath, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	if (brk && !cut && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
+	if (prec && !cut && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
+	S.closest = { dist, cut, viaDeath, cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
 	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)
