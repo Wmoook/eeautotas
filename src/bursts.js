@@ -281,7 +281,7 @@ function create(o) {
 	// where the room's walk reaches one untried (not resting), else at every untried target as before; (2) the rooms at
 	// the most chain progress (waves complete x 1000 + ids ON of the first unfinished wave, editor.js chainProgW) whose
 	// field aims at the chain (or not built yet) score CHAIN_BONUS more. ORDER only: every room and every target stays.
-	const CH = o.chainAim || null;
+	const CH = o.chainAim || null, CH2 = !!CH && +a.bchain === 2;
 	if (CH) { st.chainAimed = 0; st.chainFirst = 0; }
 	const CHAIN_BONUS = 1.5;
 	/** room r's chain progress and next ids {p, want (Set, null: the chain done)}; null: no chain */
@@ -291,15 +291,27 @@ function create(o) {
 		if (R.chG === CH.gen) return R.ch;
 		const m = /(?:^|\s)purple=\[([^\]]*)\]/.exec(String(R.desc || ''));
 		const on = new Set(m ? m[1].split(',').map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x)) : []);
-		let p = 0, want = null;
-		for (const w of CH.W) {
+		let p = 0, want = null, wi = -1;
+		for (let j = 0; j < CH.W.length; j++) {
+			const w = CH.W[j];
 			let k = 0;
 			for (const id of w) if (on.has(id)) k++;
-			if (k < w.length) { want = new Set(w.filter((id) => !on.has(id))); p = p * 1000 + k; break; }
+			if (k < w.length) { want = new Set(w.filter((id) => !on.has(id))); p = p * 1000 + k; wi = j; break; }
 			p++;
 		}
 		if (!want) p *= 1000;
-		R.chG = CH.gen; R.ch = { p, want };
+		// (--bchain=2: the later waves' OFF ids too, each wave's a goal set of its own, in order: where the first unfinished
+		// wave's are all tried, resting or out of the walk, the next wave's (Bad EE Level 9 seed 2: 4 waves + 6 of wave 5 at
+		// 697 s, its world switch 44 missing, 45 of wave 6 ON at 800 s, and the aim stayed on 44 to the run's end); the
+		// progress x 100 + the later waves' ids ON (a tie-break: that room ranks first among equal waves)
+		let wants = null;
+		if (CH2 && want) {
+			wants = [want];
+			let later = 0;
+			for (let j = wi + 1; j < CH.W.length; j++) { const off = CH.W[j].filter((id) => !on.has(id)); later += CH.W[j].length - off.length; if (off.length) wants.push(new Set(off)); }
+			p = p * 100 + Math.min(99, later);
+		} else if (CH2) p *= 100;
+		R.chG = CH.gen; R.ch = { p, want, wants };
 		return R.ch;
 	};
 	// THE CHAIN'S FRONT (EEAT_BFRONT=<bonus>, OPT-IN with CHAIN AIM; b9cw2-b9, 2026-09-29): the most chain progress counts
@@ -694,10 +706,14 @@ function create(o) {
 		const ch = CH ? chainOf(r) : null;
 		let chainGoals = false;
 		if (ch && ch.want && ch.want.size) {
-			for (const [c, tiles] of I.comps) {
-				if (r.tried.has(c) || I.pOnly.has(c) !== arm || (r.rest && r.rest.has(c))) continue;
-				// (a component: 4-connected tiles of one block, so two switches side by side are one: any of its tiles)
-				if (tiles.some((t) => L.fg[t] === 113 && ch.want.has(L.lookup0[t]))) for (const t of tiles) goals.push(t);
+			// (--bchain=2: the first wave in order with a goal)
+			for (const want of ch.wants || [ch.want]) {
+				for (const [c, tiles] of I.comps) {
+					if (r.tried.has(c) || I.pOnly.has(c) !== arm || (r.rest && r.rest.has(c))) continue;
+					// (a component: 4-connected tiles of one block, so two switches side by side are one: any of its tiles)
+					if (tiles.some((t) => L.fg[t] === 113 && want.has(L.lookup0[t]))) for (const t of tiles) goals.push(t);
+				}
+				if (goals.length) break;
 			}
 			if (goals.length) { chainGoals = true; st.chainAimed++; }
 			// (the chain's way, EEAT_BWAY: no next switch among the room's targets: aim at them through the triggers and doors

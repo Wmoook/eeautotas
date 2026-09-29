@@ -271,7 +271,8 @@
 //        [--bchain=0 (1 or EEAT_BCHAIN=1: OPT-IN, the one search's GPU bursts (--bursts=1) with the switch chain of the
 //        steer file (steer.js flags 8, the CPU file where the chain is built): a room's bursts aim at the chain's NEXT
 //        switches (the OFF ids of the first unfinished wave by the room's purple switches) where its walk reaches one
-//        untried, else at every untried trigger as before; the untried rooms at the most chain progress first. Order
+//        untried, else at every untried trigger as before; the untried rooms at the most chain progress first (2: also
+//        the later waves' OFF ids, a wave at a time, where the first unfinished wave's are all tried or resting). Order
 //        only (bursts.js CHAIN AIM); no chain in the file, or the flag off: nothing changes)]
 //        [--tchain=0 (1 or EEAT_TCHAIN=1: OPT-IN, with --tedge=1 and the steer file's switch chain: head T's goals are the
 //        chain's next switches (the OFF ids of the first unfinished wave by the room's purple switches) among the room's
