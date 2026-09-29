@@ -377,7 +377,7 @@ static int runBeam(int argc, char** argv, const LevelBlob& B) {
 	if (!layoutOrError(g, TW)) return 4;
 	cu::CUfunction fexp = g.fn("beamExpand_" + std::to_string(TW)), fmat = g.fn("beamMaterialize_" + std::to_string(TW));
 	cu::CUfunction fIns = g.fn("beamSelInsert"), fWin = g.fn("beamSelWinners"), fHist = g.fn("beamSelHist"), fPick = g.fn("beamSelPick"), fFill = g.fn("beamSelFill");
-	if (!fexp || !fmat || !fIns || !fWin || !fHist || !fPick || !fFill) { printf("{\"error\":\"beam kernels missing\"}\n"); return 4; }
+	if (!fexp || !fmat || !fIns || !fWin || !fHist || !fPick || !fFill) { printf("{\"error\":%s}\n", jsonStr("beam kernels missing: " + cu::lastError).c_str()); return 4; }
 	cu::Buf dl, dA, dB, dout, dpick, dgx, dgy, dgs, dgoal, dK, dV, dq, drt, drx, dry, drsx, drsy;
 	std::vector<float> fX(X.begin(), X.end()), fY(Y.begin(), Y.end()), fSX(SX.begin(), SX.end()), fSY(SY.begin(), SY.end());
 	const size_t SB = sizeof(S);

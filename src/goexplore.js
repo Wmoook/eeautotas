@@ -386,15 +386,33 @@ const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir'
 const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', ...GPU_STRINGS]);
 // --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
 // random runs' batches take their run length and keep probability from these classes in turn, each class the same share
-// of the GPU's simulated ticks (times its weight): the next batch goes to the class furthest below its share, from the
-// first batch on. The long sticky runs (120 ticks kept with p 0.95, 240 with 0.97) cross whole corridors and rooms from a
-// pick where the 40-tick runs of p 0.85 stay near it: PORTFOLIO's sweep sw1 (febeeb2, 15 never-routed campaign levels,
+// of the GPU's TIME (its batches' kernel ms, times its weight; n3-regression-pins, 2026-09-29: before, the same share of
+// the simulated ticks: a class whose ticks cost more GPU time took the more of it; on The Flighty Slighty the mix's
+// random runs made 1.2-1.4 M ticks per kernel second against 32-36 M without the mix (eegpu roll sizes a batch's
+// launches for its Lr ticks a run, and there the runs end early: the long classes' launches came out tiny), 82 M ticks
+// in 150 s against 1,315 M, and 8c00c75 / c30f499 routed it in 25-56 s where main did not in 150 s): the next batch goes
+// to the class furthest below its share (a class not yet run first), from the first batch on. (The measured times make
+// the class order, so with the mix the same seed no longer makes exactly the same search; one class, --roll / --keep or
+// --rollMix=0, as before.) The long sticky runs (120 ticks kept with p 0.95, 240 with 0.97) cross whole corridors and
+// rooms from a pick where the 40-tick runs of p 0.85 stay near it: PORTFOLIO's sweep sw1 (febeeb2, 15 never-routed campaign levels,
 // 180 s; src/out/pf/sweep/sw1) routed 0 with every 40 / 0.85 config and 4 with --roll=120 --keep=0.95 (Relics of Athena,
 // Hold Jump Challenge, Level 1 Overworld, The Mansion; 3 of 4 with the long runs on the GPU random runs alone, 0 of 4 on
 // the CPU runs alone), OCTOS_ROLLERCOASTER only with 240 / 0.97. Each path node keeps its class, so the host rebuilds its
 // inputs (rollInputs) with the keep the GPU drew them with. Default: this mix unless --roll or --keep is given (then that
 // one class, as before); an eegpu roll without the mix (its start event has no "mix") plays the first class throughout.
 const ROLL_MIX = '40:0.85,120:0.95,240:0.97';
+/** a batch's GPU cost for the roll mix's shares (ms): its kernels' time (eegpu roll's batch event kernelMs), else its
+ *  roll kernel's (rollMs), else its wall (ms: an older tool) */
+const mixCostOf = (ev) => Math.max(0, +(ev.kernelMs != null ? ev.kernelMs : ev.rollMs != null ? ev.rollMs : ev.ms) || 0);
+/** the roll mix's next class: a class with no batch yet first (in order), else the one furthest below its share of the
+ *  GPU time (st[j].ms / its weight; ties to the first). Order only: which runs the next batch plays. */
+function mixPick(st, classes) {
+	if (classes.length === 1) return 0;
+	for (let j = 0; j < classes.length; j++) if (!st[j].batches) return j;
+	let bj = 0, bv = Infinity;
+	for (let j = 0; j < classes.length; j++) { const v = st[j].ms / classes[j].w; if (v < bv) { bv = v; bj = j; } }
+	return bj;
+}
 /** the roll mix of --rollMix: [{roll, keep, w}] (null: off) */
 function rollMixOf(s) {
 	if (s === undefined || s === null || s === '' || s === '0' || s === 'off') return null;
@@ -829,9 +847,10 @@ function counterRelevance(L) {
 	}
 	const exits = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1223,9 +1242,10 @@ function roomUseful(L) {
 	// portals: tile -> its exits (forward) and exit -> the portals that send the ball there (reverse)
 	const exits = new Map(), srcs = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1402,9 +1422,10 @@ function roomFields(L, budget, opts = {}) {
 	// portals: tile -> its exits' tiles
 	const exits = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1569,9 +1590,10 @@ function roomDead(L, budget) {
 	// portals reversed: exit tile -> the portal tiles that send the ball there
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const sl = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[sl]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); if (!l.includes(i)) l.push(i); } }
@@ -1681,9 +1703,10 @@ function lowerBoundTiles(L) {
 	// the portals reversed: exit tile -> the portal tiles that lead there
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); l.push(i); } }
@@ -3647,15 +3670,11 @@ async function gpuMain(a, L, m) {
 	// (an eegpu roll without the mix plays its --roll / --keep, the first class, in every batch)
 	const mixOn = !!mixAsk && classes.length > 1 && info.mix === 1;
 	if (mixAsk && classes.length > 1 && !mixOn) { say({ ev: 'warning', text: `eegpu roll has no roll mix (rebuild it: node tools/build-native.js): every batch ${classes[0].roll} ticks, keep ${classes[0].keep}` }); classes = [classes[0]]; }
-	// (per class: its batches, simulated ticks, records (new or sooner cells), new cells, nearer attempts, new rooms,
-	// finishes; the next batch's class = the one furthest below its share of the ticks)
-	const mixSt = classes.map((c) => ({ roll: c.roll, keep: c.keep, w: c.w, batches: 0, ticks: 0, records: 0, fresh: 0, nearer: 0, rooms: 0, fin: 0 }));
-	const pickClass = () => {
-		if (classes.length === 1) return 0;
-		let bj = 0, bv = Infinity;
-		for (let j = 0; j < classes.length; j++) { const v = mixSt[j].ticks / classes[j].w; if (v < bv) { bv = v; bj = j; } }
-		return bj;
-	};
+	// (per class: its batches, simulated ticks, GPU ms (the batches' kernel time: `ms`), records (new or sooner cells), new
+	// cells, nearer attempts, new rooms, finishes; the next batch's class = the one furthest below its share of the GPU
+	// time: mixPick)
+	const mixSt = classes.map((c) => ({ roll: c.roll, keep: c.keep, w: c.w, batches: 0, ticks: 0, ms: 0, records: 0, fresh: 0, nearer: 0, rooms: 0, fin: 0 }));
+	const pickClass = () => mixPick(mixSt, classes);
 	say({ ev: 'start', workers: 1, seeds: [a.seed], mode: field.mode, cells: 'coarse', gpu: info.gpu ? info.gpu.name : null, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100,
 		cap: info.cap, memMB: info.memMB, hostMB: info.hostMB, batch: a.batch, rolls: a.rolls, roll: classes[0].roll, mix: mixOn ? classes.map((c) => `${c.roll}:${c.keep}`).join(',') : null });
 	// ---- the archive (by dense id: the GPU's pool index; cell 0 = the start)
@@ -3982,7 +4001,7 @@ async function gpuMain(a, L, m) {
 		if (m.ev.ev !== 'batch') continue;
 		batches++;
 		ticks += m.ev.ticks;
-		bst.batches++; bst.ticks += m.ev.ticks; bst.records += m.ev.n;
+		bst.batches++; bst.ticks += m.ev.ticks; bst.records += m.ev.n; bst.ms += mixCostOf(m.ev);
 		gpuMs += m.ev.ms;
 		rollMs += m.ev.rollMs || 0;
 		kernelMs += m.ev.kernelMs || 0;
@@ -4579,5 +4598,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { CellMap, mixW, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { CellMap, mixW, mixPick, mixCostOf, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
