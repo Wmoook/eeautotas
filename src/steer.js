@@ -403,14 +403,28 @@ function applyFull(A, st, t) {
 	else if (kind === 'crown') { if (st.crown !== undefined) st.crown = 1; }
 	else if (kind === 'reset') { if (st.prot !== undefined) st.prot = 0; }
 }
-/** the first feature that makes a plan invalid under the full state (a closed gate / a killer it walks through), or null */
-function counterexample(A, plan) {
+/** the first feature that makes a plan invalid under the full state (a closed gate / a killer it walks through), or null.
+ *  opts.floors (the physics plan only: a walk plan is blind to gravity) with opts.modeled (the modelled features): also a
+ *  step that stands on a gate of a feature not modelled that is open (air) in the full state: the tile below the step
+ *  (world gravity: down) is that gate and the next step does not fall (it goes up or sideways), so the plan needs the
+ *  tile solid where the full state has air; that gate's feature is named (steer-budget-walk: MoonBase's plan rises onto
+ *  the purple switch 0 above its own gate, Springopolis's, The Glitch's, Hunt's) */
+function counterexample(A, plan, opts) {
 	const st = fullState(A);
+	const floors = !!(opts && opts.floors), modeled = (opts && opts.modeled) || null, W = A.W;
 	for (let n = 1; n < plan.path.length; n++) {
 		const p = plan.path[n];
+		if (floors && n + 1 < plan.path.length && plan.path[n + 1].via !== 'portal') {
+			const t = p.t, y = Math.floor(t / W), b = t + W;
+			const y2 = Math.floor(plan.path[n + 1].t / W);
+			if (y + 1 < A.H && y2 <= y && A.cls[b] === 3) {
+				const k = A.gateFeat[b];
+				if (k !== 'open' && k !== 'static' && st[k] !== undefined && !(modeled && modeled.has(k)) && testGate(k, A.gatePol[b], A.gateParam[b], st[k])) return { feat: k, step: n, t: b, floor: true };
+			}
+		}
 		if (p.via === 'portal' || p.via === 'death') continue;
 		const t = p.t, c = A.cls[t];
-		const q = plan.path[n - 1].t, W = A.W;
+		const q = plan.path[n - 1].t;
 		const ddx = (t % W) - (q % W), ddy = Math.floor(t / W) - Math.floor(q / W);
 		if (ddx && ddy && Math.abs(ddx) === 1 && Math.abs(ddy) === 1) {
 			const a = q + ddx, b = q + ddy * W;
@@ -484,7 +498,9 @@ function forwardLayers(A, M) {
 	const q = new Int32Array(S * N);
 	let qh = 0, qt = 0;
 	const edges = new Set();
-	const add = (s, t) => { const k = s * N + t; if (!seen[k]) { seen[k] = 1; q[qt++] = k; } };
+	// (order: the layers in the order the walk from the start first reaches them)
+	const order = [], met = new Uint8Array(S);
+	const add = (s, t) => { const k = s * N + t; if (!seen[k]) { seen[k] = 1; q[qt++] = k; if (!met[s]) { met[s] = 1; order.push(s); } } };
 	add(M.s0, A.start.t);
 	const isTrophy = new Uint8Array(N); for (const t of A.trophies) isTrophy[t] = 1;
 	while (qh < qt) {
@@ -505,7 +521,7 @@ function forwardLayers(A, M) {
 	}
 	const layers = new Uint8Array(S);
 	for (let k = 0; k < S * N; k++) if (seen[k]) layers[(k / N) | 0] = 1;
-	return { layers, edges };
+	return { layers, edges, order };
 }
 /** layer s's copy of the level: gates shut -> 9, open -> 0; killers by protection; tiles that change the layer -> the
  *  trophy (goal tiles); opts.staticCoins: coins change no layer here (the coin way is the DP's) */
@@ -621,7 +637,29 @@ function buildPhysics(B, opts) {
 	const comps = sccs(S, fr.layers, succ);
 	const fields = new Array(S).fill(null), goalsOf = new Array(S).fill(null), copies = new Array(S).fill(null);
 	const rfOpts = { oneWayEntry: true, portalForced: true };
-	const kappa = A.feats.has('fx') ? kappaOf(A, rfOpts) : 0;
+	// the physics budget (opts.physCap: the plain layers that get a physics body; steer-budget-walk): past it the other
+	// plain layers are walk layers (walking distance x kappa, as the wild layers), so the feature that passed the budget
+	// is still modelled instead of left out; the physics bodies go to the walk plan's layers first (in its order), then to
+	// the layers the walk from the start reaches first; opts.dpReserve: bodies kept for the coin DP's legs. Order only.
+	const nFxM = M.names.indexOf('fx');
+	const wildOf = (s) => nFxM >= 0 && M.valOf(s, nFxM) === 1;
+	let walkOnly = null, walkOver = 0;
+	if (opts.physCap) {
+		const plain = fr.order.filter((s) => !wildOf(s));
+		if (plain.length > opts.physCap) {
+			const keep = Math.max(1, opts.physCap - (opts.dpReserve || 0));
+			walkOnly = new Uint8Array(S).fill(1);
+			const pref = B.plan && B.plan.path ? B.plan.path.map((p) => p.s) : [];
+			let n = 0;
+			for (const s of [M.s0, ...pref, ...fr.order]) {
+				if (n >= keep) break;
+				if (s < 0 || s >= S || !fr.layers[s] || wildOf(s) || !walkOnly[s]) continue;
+				walkOnly[s] = 0; n++;
+			}
+			for (const s of plain) if (walkOnly[s]) walkOver++;
+		}
+	}
+	const kappa = A.feats.has('fx') || walkOver ? kappaOf(A, rfOpts) : 0;
 	let builds = 0, sweeps = 0;
 	const solve = (s) => {
 		if (!copies[s]) copies[s] = layerLevel(A, M, s, opts);
@@ -643,7 +681,7 @@ function buildPhysics(B, opts) {
 		const key = goals.map((g) => `${g.tile}:${g.cost}`).join(',');
 		if (goalsOf[s] === key && fields[s]) return false;
 		goalsOf[s] = key;
-		fields[s] = lv._wild && kappa ? wildField(A, M, s, goals, kappa) : RF.reachField(lv, Object.assign({ goals, debug: !!opts.debug }, rfOpts));
+		fields[s] = (lv._wild || (walkOnly && walkOnly[s])) && kappa ? wildField(A, M, s, goals, kappa) : RF.reachField(lv, Object.assign({ goals, debug: !!opts.debug }, rfOpts));
 		builds++;
 		return true;
 	};
@@ -655,7 +693,7 @@ function buildPhysics(B, opts) {
 			if (!changed) break;
 		}
 	}
-	return { kappa, A, M, fields, goals: copies.map((c) => (c ? c.goal : null)), sweeps, builds, layers: comps.flat().length, ms: Date.now() - t0 };
+	return { kappa, A, M, fields, goals: copies.map((c) => (c ? c.goal : null)), sweeps, builds, layers: comps.flat().length, walkOver, ms: Date.now() - t0 };
 }
 /** the reach field's own plan: greedy descent over its abstract states (reach.js debug edges) */
 function descend(f, st0, maxSteps = 50000) {
@@ -927,6 +965,9 @@ function coinDP(CL, maxN = 18) {
 // no more features (the layers they would add) and no coin DP (its legs are bodies too; more than 18 coins: none anyway).
 // The five big jobs' levels fit (Forgotten Veil: 17 layers + the DP over 16 coins, 539 MB).
 const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
+// a walk body (RCH3 walk mode: cls, seg, rowC, rowX, walk = 12 bytes a tile) and its goal bitmap (1), with room: the walk
+// layers past the physics budget (steer-budget-walk)
+const WALK_BYTES_TILE = 16;
 /**
  * The steer field of a prepared level. opts: {maxLayers (4096), maxBytes (STEER_MAX_BYTES), maxMs (STEER_MAX_MS),
  * maxIters (12), noDP} -> steer: {version, W, H, feats [{key, kind, param, radix, stride}], team [values], S, layerBody
@@ -943,14 +984,19 @@ function buildSteer(level, opts) {
 	const maxBytes = opts.maxBytes || STEER_MAX_BYTES, maxMs = opts.maxMs || STEER_MAX_MS;
 	const bodyBytes = A.N * BODY_BYTES_TILE;
 	const maxLayers = Math.max(1, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / bodyBytes / (A.feats.has('fx') ? 2 : 1))));
+	// (steer-budget-walk: a feature past the physics layers is still modelled, its extra layers walk layers of
+	// WALK_BYTES_TILE a tile (buildPhysics physCap); the model's own cap is the walk budget's. opts.walkOver === false: the
+	// physics cap is the model's, as before)
+	const walkCap = opts.walkOver === false ? maxLayers : Math.max(maxLayers, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / (A.N * WALK_BYTES_TILE) / (A.feats.has('fx') ? 2 : 1))));
 	let over = null;
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: t0 + maxMs / 2 });
-		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
+		B = walkBuild(level, A, { features: [...modeled], maxLayers: walkCap, deadline: t0 + maxMs / 2 });
+		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${walkCap} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
-		PH = buildPhysics(B, { staticCoins: true, debug: true });
+		const cp0 = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
+		PH = buildPhysics(B, { staticCoins: true, debug: true, physCap: maxLayers, dpReserve: cp0 && cp0.coins.length <= 18 ? cp0.coins.length : 0 });
 		const sim = new E.EESim(level); sim.reset();
 		const pl = layeredPlan(PH, sim);
 		const path = [];
@@ -960,10 +1006,10 @@ function buildSteer(level, opts) {
 			const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
 			path.push({ t, via: tele ? 'portal' : 'move' });
 		}
-		const cx = path.length > 1 ? counterexample(A, { path }) : null;
-		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, cx: cx && cx.feat });
+		const cx = path.length > 1 ? counterexample(A, { path }, { floors: opts.floors !== false, modeled }) : null;
+		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, walk: PH.walkOver || undefined, cx: cx && cx.feat, floor: cx && cx.floor ? [cx.t % A.W, Math.floor(cx.t / A.W)] : undefined });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
-		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
+		if (B.M.S * A.feats.get(cx.feat).values.length > walkCap) { over = over || `${cx.feat}: over ${walkCap} layers (${mb})`; break; }
 		// (the next build takes longer than this one)
 		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
 		modeled.add(cx.feat);
@@ -985,8 +1031,11 @@ function buildSteer(level, opts) {
 	let dp = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
 	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
-	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
-		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+	// (the bodies' bytes: with walk layers past the physics budget a walk body counts WALK_BYTES_TILE a tile; else every
+	// body a physics body's, as before)
+	const have = PH.walkOver ? bodies.reduce((a, f) => a + (f.mode === 'walk' ? N * WALK_BYTES_TILE : bodyBytes), 0) : bodies.length * bodyBytes;
+	if (cp && (have + cp.coins.length * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
+		over = over || `the coin DP: ${have + cp.coins.length * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
 	if (cp) {
@@ -1009,7 +1058,7 @@ function buildSteer(level, opts) {
 	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0 };
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
-	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
+	steer.info = { features: M.names, layers: PH.layers, walkLayers: PH.walkOver, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
 	return steer;
 }

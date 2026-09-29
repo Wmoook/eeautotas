@@ -70,6 +70,44 @@ const toolPath = arg('tool', G.nativeTool());
 let toolOk = false;
 if (toolPath) { try { execFileSync(toolPath, ['steertest'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { toolOk = /steertest/.test(String(e.stderr || '')); } }
 
+/** two team doors over a tiny byte budget (steer-budget-walk): the start between a team 1 effect far left and, on the
+ *  right, a team 1 door, a team 2 effect, a team 2 door and the trophy; with the bytes of one physics body the team is
+ *  still modelled (3 layers, the ones past the budget walk layers), nothing left out, and the steer counts the detour */
+function teamDoors() {
+	const w = 44, mid = '.'.repeat(w - 2);
+	const cells = [];
+	for (let x = 0; x < w; x++) { cells.push([x, 0, 9]); cells.push([x, 6, 9]); }
+	for (let y = 1; y < 6; y++) { cells.push([0, y, 9]); cells.push([w - 1, y, 9]); }
+	cells.push([2, 5, 423, 1], [20, 5, 255], [w - 10, 5, 423, 2], [w - 4, 5, 121]);
+	for (let y = 1; y < 6; y++) { cells.push([w - 12, y, 1027, 1]); cells.push([w - 8, y, 1027, 2]); }
+	void mid;
+	const L = levelOf(ED.eelvlOf({ name: 'teams', width: w, height: 7, cells }));
+	const N = L.width * L.height;
+	const st = SF.buildSteer(L, { maxBytes: N * 120 });
+	const sim = new E.EESim(L); sim.reset();
+	const s0 = SF.steerAt(st, sim), r0 = R.costAt(R.reachField(L), sim);
+	check(`two team doors over one physics body's bytes: team modelled in walk layers (${st.info.features.join(', ')}; ${st.S} layers, ${st.info.walkLayers} walk), info.over empty`, st.info.features.includes('team') && st.S >= 3 && st.info.walkLayers >= 1 && !st.info.over, `${st.S} ${st.info.walkLayers} ${st.info.over}`);
+	check(`two team doors: the steer at the start counts the detour to the team 1 effect (steer ${s0}, reach ${r0})`, s0 > r0 + 25, `${s0} vs ${r0}`);
+	const old = SF.buildSteer(L, { maxBytes: N * 120, walkOver: false });
+	check('two team doors, walkOver false: the team left out (info.over)', !old.info.features.includes('team') && /team: over/.test(old.info.over || ''), `${old.info.features} ${old.info.over}`);
+}
+/** a plan standing on an open gate (steer-budget-walk): the spawn at the bottom of a shaft, above it a purple gate 1 (air
+ *  while switch 1 is off), the switch right on top of it and the trophy 2 tiles higher: the physics plan rises through the
+ *  gate onto the switch and on up (the next step does not fall), so the gate below that step names psw:1 */
+function floorGate() {
+	const cells = [];
+	const w = 7, h = 8;
+	for (let x = 0; x < w; x++) { cells.push([x, 0, 9]); cells.push([x, h - 1, 9]); }
+	for (let y = 1; y < h - 1; y++) { cells.push([0, y, 9]); cells.push([w - 1, y, 9]); cells.push([1, y, 9]); cells.push([w - 2, y, 9]); }
+	cells.push([3, 6, 255], [3, 5, 185, 1], [3, 4, 113, 1], [3, 2, 121]);
+	const L = levelOf(ED.eelvlOf({ name: 'floorgate', width: w, height: h, cells }));
+	const st = SF.buildSteer(L);
+	const cx = st.info.cegar.find((c) => c.floor);
+	check(`a plan standing on an open gate names its feature (${st.info.features.join(', ')}; cegar ${JSON.stringify(st.info.cegar.map((c) => [c.cx, c.floor]))})`, st.info.features.includes('psw:1') && !!cx && cx.cx === 'psw:1' && cx.floor[0] === 3 && cx.floor[1] === 5);
+	const off = SF.buildSteer(L, { floors: false });
+	check('the same level with floors false: psw:1 not modelled', !off.info.features.includes('psw:1'), `${off.info.features}`);
+}
+
 function sectionA() {
 	section('A the model: layers, detours, the file');
 	for (const [name, r] of Object.entries(ROOMS)) {
@@ -104,12 +142,31 @@ function sectionA() {
 			check('coins: no next gate with the door\'s coins taken', SF.nextGate(rd, s3) === null);
 		}
 	}
-	// the build's budget: a byte budget of one body leaves the key out (one layer), said in info.over
+	// the build's budget (steer-budget-walk): a byte budget of one physics body models the key in a walk layer (the
+	// layer past the physics budget: walking distance x kappa), nothing left out; walkOver false (as before): the key left
+	// out (one layer, info.over); a budget of one walk body: left out too
 	{
 		const L = levelOf(ROOMS.key.buf);
-		const b1 = SF.buildSteer(L, { maxBytes: L.width * L.height * 120 });
-		check('the build\'s budget: one body\'s bytes leave the key out (one layer, info.over)', b1.S === 1 && /key0: over 1 layers/.test(b1.info.over || ''), `${b1.S} ${b1.info.over}`);
+		const N = L.width * L.height;
+		const b1 = SF.buildSteer(L, { maxBytes: N * 120 });
+		const sim = new E.EESim(L); sim.reset();
+		const s0 = SF.steerAt(b1, sim), r0 = R.costAt(R.reachField(L), sim);
+		check('the build\'s budget: one physics body\'s bytes model the key in a walk layer (2 layers, 1 walk, info.over empty)', b1.S === 2 && b1.info.walkLayers === 1 && !b1.info.over && b1.bodies.some((f) => f.mode === 'walk'), `${b1.S} ${b1.info.walkLayers} ${b1.info.over}`);
+		check(`the build's budget: the walk layer still counts the detour (steer ${s0}, reach ${r0})`, s0 > r0 + 25, `${s0} vs ${r0}`);
+		const rd = SF.readSteerFile(SF.steerFileBytes(b1, G.blobFp(G.levelBlob(L))));
+		sim._keysMask |= 1;
+		check('the build\'s budget: the walk layer\'s file round trip, taken: a value', SF.steerFifths(rd, sim) === SF.steerFifths(b1, sim) && SF.steerFifths(b1, sim) >= 0, `${SF.steerFifths(rd, sim)} ${SF.steerFifths(b1, sim)}`);
+		const b0 = SF.buildSteer(L, { maxBytes: N * 120, walkOver: false });
+		check('the build\'s budget, walkOver false: one body\'s bytes leave the key out (one layer, info.over)', b0.S === 1 && /key0: over 1 layers/.test(b0.info.over || ''), `${b0.S} ${b0.info.over}`);
+		const bw = SF.buildSteer(L, { maxBytes: N * 16 });
+		check('the build\'s budget: one walk body\'s bytes leave the key out (info.over)', bw.S === 1 && /key0: over 1 layers/.test(bw.info.over || ''), `${bw.S} ${bw.info.over}`);
+		// the same key room with the default budget: every layer a physics body, as before
+		const bf = SF.buildSteer(L);
+		const fp = G.blobFp(G.levelBlob(L));
+		check('the key room under the budget: no walk layer, the same file as with walkOver false', bf.info.walkLayers === 0 && SF.steerFileBytes(bf, fp).equals(SF.steerFileBytes(SF.buildSteer(L, { walkOver: false }), fp)));
 	}
+	teamDoors();
+	floorGate();
 	if (toolOk) {
 		const a = levelOf(ROOMS.key.buf), b = levelOf(ROOMS.switch.buf);
 		fs.writeFileSync(path.join(tmp, 'a.bin'), G.levelBlob(a));
