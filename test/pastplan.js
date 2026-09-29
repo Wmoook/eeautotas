@@ -8,6 +8,10 @@
 //   from a state holding the plan's count is the next coin, where the plan's own next gate is none;
 // - a coin door of more coins than the level holds is a static wall (it never opens), and no count above the coins;
 // - goexplore.js takes `steer <file>` on stdin (a 'steer' event) and goes on searching.
+// The count by physics (d4-coin-physT): the default build's T is the least count whose layer field reaches the trophy
+// (3 here, the walk plan's 2), at most fullCoinT; a raised T's rounds end by newDPMs; where the walk plan passes no coin
+// door (main: no DP) the new DP is left out past its time or bytes, the file then main's byte for byte; EEAT_PHYST=0 or
+// physT: false = main.
 //   node test/pastplan.js
 const fs = require('fs'), os = require('os'), path = require('path');
 const { spawn } = require('child_process');
@@ -63,8 +67,56 @@ check('a coin door of more coins than the level holds (5 of 3) is a static wall,
 check('... a coin door within the count stays a coins gate', A.gateFeat[at(24, 19)] === 'coins' && A.gateFeat[at(8, 19)] === 'coins', `${A.gateFeat[at(24, 19)]} ${A.gateFeat[at(8, 19)]}`);
 check('fullCoinT: the highest coin DOOR within the level\'s coins (3; the 5-coin door and the gates do not count above it)', SF.fullCoinT(A) === 3, SF.fullCoinT(A));
 
-console.log('\n== the walk plan\'s count vs the plan past it');
-const st = SF.buildSteer(L);
+console.log('\n== the count by physics (d4-coin-physT: physCoinT only, no chain)');
+const sph = SF.buildSteer(L);
+check('the default build: T by physics = the full count (no foothold in the shaft below 3 coins), the DP over 3 coins with a value at the start',
+	sph.info.physT === 3 && sph.info.planT < 3 && !!sph.dp && sph.dp.T === 3 && sph.dp.n === 3 && sph.info.dp.physT === true && Number.isFinite(sph.info.start),
+	JSON.stringify({ planT: sph.info.planT, physT: sph.info.physT, dp: sph.info.dp, start: sph.info.start }));
+check('... no plan past its count wanted (the editor builds one only where the full count is above the DP\'s)', !(sph.info.fullT > sph.info.dp.T));
+check('... physCoinT: the least count whose layer field reaches the trophy from the start (a lookup in the build\'s fields)', SF.physCoinT(SF.buildPhysics(SF.walkBuild(L, SF.analyze(L, {}), { features: ['coins'] }), { staticCoins: true }), L) === 3);
+{
+	// (a raised T keeps the walk plan's DP work (the same legs, another layer): its legTour rounds end by newDPMs; the legs
+	// themselves are not cut, as main's DP)
+	const sr = SF.buildSteer(L, { newDPMs: 1 });
+	check('a raised T past its time: the rounds cut (dpCut rounds), the DP over 3 coins kept', !!sr.dp && sr.dp.T === 3 && sr.info.dpCut === 'rounds', JSON.stringify({ dp: sr.info.dp, dpCut: sr.info.dpCut }));
+}
+const bytesOf = (s) => SF.steerFileBytes(s, null);
+{
+	const s0 = SF.buildSteer(L, { physT: false });
+	process.env.EEAT_PHYST = '0';
+	const s1 = SF.buildSteer(L);
+	delete process.env.EEAT_PHYST;
+	check('EEAT_PHYST=0 = physT: false (the walk plan\'s count: main\'s coin DP), the file byte for byte', !!s0.dp && s0.dp.T < 3 && s0.info.physT === null && bytesOf(s0).equals(bytesOf(s1)), `T ${s0.dp && s0.dp.T} / ${s1.dp && s1.dp.T}`);
+}
+
+console.log('\n== the new DP: the walk plan passes no coin door (main: no DP), the physics needs coins');
+// (a campaign level, not in the repository: --levels=<campaign dir>, else the main checkout's src/out/god/levels/campaign
+// when it is there: 01_2 Desolate Caverns, walk plan T 0 (the gravity-blind walk needs none of its coins), physics T 3 of
+// 5; a toy of this file cannot show it: without a coin door on the walk plan's way the counterexample loop never models
+// the coins, so there is no count by physics either)
+{
+	const la = process.argv.find((x) => x.startsWith('--levels='));
+	const dirs = [la ? la.slice(9) : null, path.join(__dirname, '..', 'src', 'out', 'god', 'levels', 'campaign'), path.join(__dirname, '..', '..', '..', '..', 'src', 'out', 'god', 'levels', 'campaign')];
+	const lf = dirs.filter(Boolean).map((d) => path.join(d, '01_2_Desolate_Caverns.eelvl')).find((f) => fs.existsSync(f));
+	if (!lf) console.log('  skipped: no campaign levels (--levels=<a folder with 01_2_Desolate_Caverns.eelvl>)');
+	else {
+		const L2 = prep(fs.readFileSync(lf));
+		const n0 = SF.buildSteer(L2, { physT: false });
+		const n1 = SF.buildSteer(L2);
+		check('the walk plan\'s count 0: main\'s build has no DP and no start value', !n0.dp && n0.info.planT === 0 && n0.info.fullT === 5 && !Number.isFinite(n0.info.start),
+			JSON.stringify({ dp: n0.info.dp, planT: n0.info.planT, fullT: n0.info.fullT, start: n0.info.start }));
+		check('... the count by physics 3: the new DP over its 5 coins at T 3, a value at the start, nothing cut', !!n1.dp && n1.dp.T === 3 && n1.dp.n === 5 && n1.info.physT === 3 && n1.info.dpCut === null && Number.isFinite(n1.info.start),
+			JSON.stringify({ dp: n1.info.dp, physT: n1.info.physT, dpCut: n1.info.dpCut, start: n1.info.start }));
+		const nt = SF.buildSteer(L2, { newDPMs: 1 });
+		check('... past its time (newDPMs): no DP (dpCut time), the file = main\'s byte for byte', !nt.dp && nt.info.dpCut === 'time' && bytesOf(nt).equals(bytesOf(n0)), nt.info.dpCut);
+		const nz = SF.buildSteer(L2, { newDPMaxBytes: 1 });
+		check('... over its bytes (newDPMaxBytes): no DP (dpCut size), the file = main\'s byte for byte', !nz.dp && nz.info.dpCut === 'size' && bytesOf(nz).equals(bytesOf(n0)), nz.info.dpCut);
+	}
+	check('the bounds as constants: 9 s, 100 MB', SF.NEW_DP_MS === 9000 && SF.NEW_DP_MAX_BYTES === 100 << 20);
+}
+
+console.log('\n== the walk plan\'s count vs the plan past it (physT false: the coin DP as before)');
+const st = SF.buildSteer(L, { physT: false });
 check('the walk plan\'s count is below the full count (it walks up the shaft without the footholds)', st.info.dp && st.info.dp.T < 3 && st.info.fullT === 3, JSON.stringify({ dp: st.info.dp, fullT: st.info.fullT }));
 const sp = SF.buildSteer(L, { coinT: st.info.fullT });
 check('the plan past its count: the coin DP over 3 coins', sp.dp && sp.dp.T === 3 && sp.dp.n === 3, JSON.stringify(sp.info.dp));
@@ -161,7 +213,8 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	}
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* temp */ }
 
-	console.log('\n== the editor: the steer worker builds the plan past its count, the running search gets it');
+	console.log('\n== the editor: the steer worker builds the plan past its count, the running search gets it (EEAT_PHYST=0: the walk plan\'s count 2)');
+	process.env.EEAT_PHYST = '0';
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 8, workers: 1 }, { available: false, why: 'test: no GPU' });
 	let es = ED.state();
 	for (const t0 = Date.now(); es.running && Date.now() - t0 < 30000 && !(es.steer && es.steer.past); es = ED.state()) await new Promise((r) => setTimeout(r, 100));

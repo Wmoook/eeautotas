@@ -805,6 +805,27 @@ function fullCoinT(A) {
 	for (let i = 0; i < A.N; i++) if (A.cls[i] === 3 && A.gateFeat[i] === 'coins' && A.gatePol[i] === 1) cap = Math.max(cap, A.gateParam[i]);
 	return Math.min(cap, A.special.filter((x) => x[1] === 'coins').length);
 }
+/** the count by physics: the least coin count c whose layer field (the start's other feature values, c coins held: coin
+ *  doors <= c open, coin gates <= c solid; its goals the trophy and the other layers' ways) has a value at the start
+ *  (null: none, or no coins feature). The walk plan's count is blind to gravity: too low on Sand Castles (2 where the
+ *  physics needs 3), 0 on Floating Temples and the cake is a lie (the walk passes diagonally between gates or climbs
+ *  hidden blocks). A lookup in the fields the build already has: no field is built here */
+function physCoinT(PH, level) {
+	const M = PH.M, nC = M.names.indexOf('coins');
+	if (nC < 0) return null;
+	const sim = new E.EESim(level); sim.reset();
+	const s0 = M.layerOf(sim);
+	for (let c = 0; c < M.radix[nC]; c++) {
+		const f = PH.fields[M.withVal(s0, nC, c)];
+		if (!f) continue;
+		const v = RF.fifthsAt(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
+		if (v >= 0 && v < CUT - 1) return c;
+	}
+	return null;
+}
+/** the count by physics on (opts.physT === false or EEAT_PHYST=0: the walk plan's count alone, as before; the env is in the
+ *  editor's steer cache fingerprint) */
+const physTOn = (opts) => !(opts && opts.physT === false) && process.env.EEAT_PHYST !== '0';
 /** a coin leg's field (the level lv with the tiles fg: the coin q the goal): with the forced portals, unless they leave the
  *  coin out of reach from the start and from every other coin (a portal chain the model misreads: the plan would have
  *  no value at all); then without them, as main's legs were */
@@ -905,8 +926,10 @@ function lvDelta(L, lv) {
 	return d;
 }
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
- *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
-function coinLegsPhys(B, PH, base, opts) {
+ *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost). lim {first, rounds} (deadlines,
+ *  ms since the epoch; 0 or none: none, as before): the legs not all built by lim.first: null (no DP); a legTour round not
+ *  done by lim.rounds: the rounds end with the last whole one (CL.cut) */
+function coinLegsPhys(B, PH, base, opts, lim) {
 	const { A } = B;
 	const M = PH.M;
 	let sPlan = B.M.s0;
@@ -918,9 +941,10 @@ function coinLegsPhys(B, PH, base, opts) {
 	const L = legsOf(A, M, s, nC, base.coins, opts);
 	const fields = new Map(), countOf = new Map();
 	try {
-		const f0 = L.fields(base.coins.map((q) => [q, base.T - 1]));
+		const f0 = L.fields(base.coins.map((q) => [q, base.T - 1]), lim && lim.first);
+		if (!f0) return null;
 		base.coins.forEach((q, i) => { fields.set(q, f0[i]); countOf.set(q, base.T - 1); });
-		return coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf);
+		return coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf, lim && lim.rounds);
 	} finally { L.close(); }
 }
 /** the coin legs of one build: layerLevel's copies per count k (made once) and the leg fields, on the leg workers when
@@ -946,9 +970,18 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 		return pool.run(jobs, { deltas, fg0, trophy: TROPHY, coins, start: A.start.t, deadline: deadline || 0 });
 	};
 	return {
-		fields(list) {
-			if (!pool || list.length < 2) return list.map(([q, k]) => legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t));
-			return run(list, false).map((r) => r.f);
+		// (deadline: a leg not started by then is not built and the batch answers null; none: every leg, as before)
+		fields(list, deadline) {
+			if (!pool || list.length < 2) {
+				const out = [];
+				for (const [q, k] of list) {
+					if (deadline && Date.now() > deadline) return null;
+					out.push(legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t));
+				}
+				return out;
+			}
+			const rs = run(list, false, deadline);
+			return rs.some((r) => r.late) ? null : rs.map((r) => r.f);
 		},
 		costs(list, deadline) {
 			if (!pool) {
@@ -964,7 +997,7 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 		close() { if (pool) pool.close(); },
 	};
 }
-function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
+function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf, roundsBy) {
 	const sT = M.withVal(s, nC, Math.min(base.T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of base.coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
@@ -975,12 +1008,15 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 	// doors shut at 3 coins, not the known route's 1195-tick loop)
 	if (!opts || opts.legTour !== false) {
 		for (let round = 0; round < 3; round++) {
+			if (roundsBy && Date.now() > roundsBy) { CL.cut = true; break; }
 			const D = coinDP(CL);
 			if (!D) break;
 			const tour = coinTour(CL, D, A.start.t);
-			// (the legs whose count changed, one batch: each leg is its own field)
+			// (the legs whose count changed, one batch: each leg is its own field; roundsBy: a batch not built by then is
+			// dropped whole, the legs stay the last round's)
 			const ch = tour.map((q, k) => [q, k]).filter(([q, k]) => countOf.get(q) !== k);
-			const f2 = ch.length ? L.fields(ch) : [];
+			const f2 = ch.length ? L.fields(ch, roundsBy) : [];
+			if (!f2) { CL.cut = true; break; }
 			ch.forEach(([q, k], i) => { fields.set(q, f2[i]); countOf.set(q, k); });
 			const changed = ch.length;
 			CL.rounds = round + 1;
@@ -1295,9 +1331,16 @@ function tourFifths(st, sim) {
 // no more features (the layers they would add) and no coin DP (its legs are bodies too; more than 18 coins: none anyway).
 // The five big jobs' levels fit (Forgotten Veil: 17 layers + the DP over 16 coins, 539 MB).
 const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
+// the DP a count by physics raises (buildSteer: physCoinT): its legTour rounds, and where the walk plan has no count (main's
+// build: no DP) its legs, only until NEW_DP_MS after the build's start; the new DP's file at most NEW_DP_MAX_BYTES (4
+// copies fit STEER_GPU_SHARE, 1/40, of a 16 GB GPU's memory: the editor's GPU tools keep their copies). The editor waits
+// STEER_WAIT_MS (15 s) from the worker's start, which parses the level first and writes the file after: the rest
+// (coinDP, the bodies, the file) fits the ~5 s left (the recheck's chain cut at 12 s landed 15.1-17.4 s in)
+const NEW_DP_MS = 9000, NEW_DP_MAX_BYTES = 100 << 20;
 /**
  * The steer field of a prepared level. opts: {maxLayers (4096), maxBytes (STEER_MAX_BYTES), maxMs (STEER_MAX_MS),
- * maxIters (12), noDP} -> steer: {version, W, H, feats [{key, kind, param, radix, stride}], team [values], S, layerBody
+ * maxIters (12), noDP, physT (false: the coin DP's count by the walk plan alone), newDPMs (NEW_DP_MS), newDPMaxBytes
+ * (NEW_DP_MAX_BYTES)} -> steer: {version, W, H, feats [{key, kind, param, radix, stride}], team [values], S, layerBody
  * Int32Array(S), bodies [field], goals [Uint8Array(N)], dp {n, T, bit, leg, h} | null, prioShift, info {features, layers,
  * builds, kappa, ms, cegar, dp, over (what the budget left out, or null)}}
  */
@@ -1342,12 +1385,14 @@ function buildSteer(level, opts) {
 	const M = PH.M, N = A.N;
 	// the bodies: identical fields (and goal tiles) shared
 	const bodies = [], goals = [], bodyKey = new Map();
-	const addBody = (f, goal) => {
-		const bytes = RF.reachFileBytes(f);
+	let fileBytes = 0;   // (the bodies' part of the file: each body's bytes and its goal bitmap)
+	const addBody = (f, goal, bytes0) => {
+		const bytes = bytes0 || RF.reachFileBytes(f);
 		const key = crypto.createHash('sha1').update(bytes).update(goal).digest('hex');
 		if (bodyKey.has(key)) return bodyKey.get(key);
 		bodyKey.set(key, bodies.length);
 		bodies.push(stripField(f)); goals.push(goal);
+		fileBytes += bytes.length + N;
 		return bodies.length - 1;
 	};
 	const layerBody = new Int32Array(M.S).fill(-1);
@@ -1356,20 +1401,50 @@ function buildSteer(level, opts) {
 	let dp = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
 	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
+	// (the count by physics (physTOn; the first build only: the plan past its count, opts.coinT, has the full count): T =
+	// max(the walk plan's T, physCoinT), at most fullCoinT. The walk plan is blind to gravity: Sand Castles' plan T 2 where
+	// its physics needs 3 coins, the cake is a lie / Floating Temples T 0. A raised T's legTour rounds end by dpBy; where the
+	// walk plan has no count at all (newDP: main's build has no DP) the DP is new work: its legs only when they fit before
+	// dpBy and the file with them stays within NEW_DP_MAX_BYTES, else the field is the one without it (dpCut), so the
+	// field with its file lands inside the editor's steer wait (STEER_WAIT_MS) as the build without it did)
+	const fullT = fullCoinT(A), planT = cp ? cp.T : 0;
+	let physT = null, raised = false, newDP = false, dpCut = null;
+	if (!opts.noDP && !opts.coinT && physTOn(opts) && fullT > planT && M.names.indexOf('coins') >= 0) {
+		physT = physCoinT(PH, level);
+		const T = physT === null ? 0 : Math.min(physT, fullT);
+		if (T > planT) { raised = true; newDP = !cp; cp = { T, coins: A.special.filter((x) => x[1] === 'coins').map((x) => x[0]) }; }
+	}
+	const dpBy = raised ? t0 + (opts.newDPMs || NEW_DP_MS) : 0;
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
-		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+		// (the new DP left out: no note, the field as without it)
+		if (newDP) dpCut = 'budget';
+		else over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
-	if (cp && cp.coins.length > 18) cp = null;
+	if (cp && cp.coins.length > 18) { if (newDP) dpCut = 'coins'; cp = null; }
+	// (the new DP's first batch of legs, the coins over the leg threads at about a layer field's time each (this build's
+	// physics fields: PH.ms / PH.builds), must end by dpBy)
+	if (cp && newDP) {
+		const th = legThreadsOf(A, cp.coins.length, opts) || 1, per = PH.ms / Math.max(1, PH.builds);
+		if (Date.now() + Math.ceil(cp.coins.length / th) * per > dpBy) { dpCut = 'time'; cp = null; }
+	}
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
-		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts, raised ? { first: newDP ? dpBy : 0, rounds: dpBy } : null);
+		let D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		if (!CL && newDP) dpCut = 'time';
+		if (CL && CL.cut) dpCut = 'rounds';
+		let legBytes = null;
+		if (D && newDP) {
+			legBytes = CL.coins.map((q) => RF.reachFileBytes(CL.fields.get(q)));
+			const add = legBytes.reduce((a, b) => a + b.length + N, 0) + 4 * D.h.length + 8 * D.n;
+			if (fileBytes + add > (opts.newDPMaxBytes || NEW_DP_MAX_BYTES)) { dpCut = 'size'; D = null; legBytes = null; }
+		}
 		if (D) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
-			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
+			const leg = Int32Array.from(CL.coins, (q, i) => addBody(CL.fields.get(q), none, legBytes && legBytes[i]));
+			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null, raised };
 		}
 	}
 	const feats = M.feats.map((f, n) => {
@@ -1419,7 +1494,8 @@ function buildSteer(level, opts) {
 		}
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, physT: dp.raised || undefined } : null, fullT, planT, physT, dpCut,
+		start: steerAt(steer, sim0), ms: Date.now() - t0, over,
 		tour: tourInfo };
 	return steer;
 }
@@ -1682,6 +1758,6 @@ function readSteerFile(buf) {
 
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, physCoinT, NEW_DP_MS, NEW_DP_MAX_BYTES, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)
 	_legFieldOf: legFieldOf };

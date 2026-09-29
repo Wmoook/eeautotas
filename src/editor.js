@@ -2593,6 +2593,8 @@ function steerFp() {
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	// (EEAT_PHYST=0: the coin DP's count by the walk plan alone, steer.js physTOn)
+	if (process.env.EEAT_PHYST === '0') h.update('physT:0');
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
