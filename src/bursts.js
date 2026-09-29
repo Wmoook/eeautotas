@@ -311,6 +311,45 @@ function create(o) {
 	// more when it is not at the most progress (those get CHAIN_BONUS). Order only.
 	const FRONT = CH && process.env.EEAT_BFRONT ? +process.env.EEAT_BFRONT || 0 : 0;
 	if (FRONT > 0) st.chainFront = 0;
+	// THE CHAIN'S WAY (EEAT_BWAY=1, OPT-IN with CHAIN AIM; b9cw2-b9, 2026-09-29): a room's walk ends at the first trigger
+	// that changes its room, so where the chain's next switch lies past a team switch, a key, an effect or a coin (Bad EE
+	// Level 9: at 1w+6 only 9-29 of 71-120 bursts found the world switch among the room's targets) the bursts aimed at every
+	// nearby trigger and churned between key:blue / lowgrav / speed / team rooms for 150-230 s. With the flag, such a room's
+	// bursts aim at the chain's next switches THROUGH the triggers and doors on the way (a relaxed walk: walls and killers
+	// block, everything else passes; ordering only: the burst's exhaustive explore decides what is reachable), at most
+	// BWAY_TRIES failed bursts a room (then every target as before).
+	const BWAY = !!CH && process.env.EEAT_BWAY === '1', BWAY_TRIES = 6;
+	if (BWAY) st.chainWay = 0;
+	/** the purple switches' tiles by id (the chain's way goals) */
+	let swTiles = null;
+	const swTilesOf = (id) => {
+		if (swTiles === null) { swTiles = new Map(); for (let k = 0; k < N; k++) if (L.fg[k] === 113) { const i = L.lookup0[k]; let l = swTiles.get(i); if (!l) swTiles.set(i, l = []); l.push(k); } }
+		return swTiles.get(id) || [];
+	};
+	/** the relaxed walk (fifths) to goals: through triggers and doors, walls and (unprotected) killers block */
+	const walkWay = (I, goals) => {
+		const walk = new Uint16Array(N).fill(CUT), q = new Int32Array(N);
+		let qh = 0, qt = 0, mx = 0;
+		const ok = (j) => !I.wall[j] && (I.pass[j] || I.door[j]);
+		for (const g of goals) if (walk[g] === CUT) { walk[g] = 0; q[qt++] = g; }
+		while (qh < qt) {
+			const t = q[qh++], x = t % W, y = (t / W) | 0, d = Math.min(0xfffd, walk[t] + 5);
+			const src = PT.srcOf.get(t);
+			if (src) for (const p of src) if (walk[p] === CUT && ok(p)) { walk[p] = d; if (d > mx) mx = d; q[qt++] = p; }
+			for (let dy = -1; dy <= 1; dy++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const j = yy * W + xx;
+					if (walk[j] !== CUT || !ok(j)) continue;
+					if (dx && dy && I.wall[y * W + xx] && I.wall[yy * W + x]) continue;
+					walk[j] = d; if (d > mx) mx = d; q[qt++] = j;
+				}
+			}
+		}
+		return { walk, mx };
+	};
 	/** base room R's chain ids ON as a bit mask (the waves' ids in order) */
 	const chainMask = (R) => {
 		if (R.cmG === CH.gen) return R.cm;
@@ -485,13 +524,14 @@ function create(o) {
 		if (r.info) return r.info;
 		const sim = simAt(r.inputs);
 		const fg = L.fg, fl = RF.guideFlags(L);
-		const pass = new Uint8Array(N), wall = new Uint8Array(N);
+		const pass = new Uint8Array(N), wall = new Uint8Array(N), doorT = BWAY ? new Uint8Array(N) : null;
 		for (let k = 0; k < N; k++) {
 			const id = fg[k], f = id >= 0 && id < fl.length ? fl[id] : 0;
 			const door = (f & 1) !== 0 && (f & 16) !== 0;
 			const solid = (f & 1) !== 0 && (f & (2 | 4 | 8)) === 0 && !door;
 			const deadly = id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0;
 			wall[k] = solid ? 1 : 0;
+			if (doorT !== null && door) doorT[k] = 1;
 			pass[k] = solid ? 0 : door ? (sim.is_tile_solid_now(k % W, (k / W) | 0) ? 0 : 1) : deadly && !sim.is_invulnerable ? 0 : 1;
 		}
 		const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
@@ -593,13 +633,14 @@ function create(o) {
 		// (a component the walk reached only through a portal: the portal arm's target)
 		const pOnly = new Set();
 		for (const [c, tiles] of comps) if (tiles.every((t) => via[t])) pOnly.add(c);
-		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly, ways };
+		R.info = doorT !== null ? { pass, wall, comps, trophies, seen, term, via, pOnly, ways, door: doorT } : { pass, wall, comps, trophies, seen, term, via, pOnly, ways };
 		return R.info;
 	};
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
 	const fieldOf = (r) => {
 		// (cached while no trigger of the room was tried since)
-		const nk = r.tried.size * 4096 + (r.rest ? r.rest.size : 0) + (CH ? CH.gen * 1e8 : 0);
+		const nk0 = r.tried.size * 4096 + (r.rest ? r.rest.size : 0) + (CH ? CH.gen * 1e8 : 0);
+		const nk = BWAY ? `${nk0}:${Math.min(r.cwFails || 0, BWAY_TRIES)}` : nk0;
 		if (r.fc && r.fc.n === nk) return r.fc.f;
 		const f = fieldOf0(r);
 		r.fc = { n: nk, f };
@@ -659,6 +700,18 @@ function create(o) {
 				if (tiles.some((t) => L.fg[t] === 113 && ch.want.has(L.lookup0[t]))) for (const t of tiles) goals.push(t);
 			}
 			if (goals.length) { chainGoals = true; st.chainAimed++; }
+			// (the chain's way, EEAT_BWAY: no next switch among the room's targets: aim at them through the triggers and doors
+			// on the way, where the room's walk reaches a tile of that relaxed walk)
+			if (!chainGoals && BWAY && !arm && I.door && (r.cwFails || 0) < BWAY_TRIES) {
+				const wt = [];
+				for (const id of ch.want) for (const t of swTilesOf(id)) wt.push(t);
+				if (wt.length) {
+					const ww = walkWay(I, wt);
+					let on = false;
+					for (let k = 0; k < N; k++) if (I.seen[k] && ww.walk[k] !== CUT) { on = true; break; }
+					if (on) { st.chainWay++; return { walk: ww.walk, mx: ww.mx, triggers: wt.length, trophies: 0, chain: true, way: true }; }
+				}
+			}
 		}
 		if (!chainGoals) for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
 		const n = goals.length;
@@ -1045,7 +1098,8 @@ function create(o) {
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
 				job = { lane, r, inputs, tile: cell && cell.tile >= 0 ? cell.tile : r.tile, conf: ci, cells: CF[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
-					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back` };
+					startDist: v / 5, chain: 0, what: `room "${r.desc}" (${p.f.triggers} trigger tile${p.f.triggers === 1 ? '' : 's'}${p.f.trophies ? ' + the trophy' : ''} left${r.portal ? ' through portals' : ''}), settings ${ci}, ${back} back${p.f.way ? ' · chain way' : ''}` };
+				if (p.f.way) job.way = true;
 			} else if (p) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
@@ -1099,6 +1153,8 @@ function create(o) {
 			const prog = Number.isFinite(r.near) && job.startDist > 0 ? Math.max(0, Math.min(1, (job.startDist - r.near) / job.startDist)) : 0;
 			const reward = Math.min(NEW_ROOMS_MAX, r.fresh) + (r.changed ? 0.3 : 0) + 0.3 * prog;
 			if (job.r) { job.r.n++; job.r.y += reward; job.r.sec += r.sec; if (r.near < job.r.best) job.r.best = r.near; } else { trophyArm.n++; trophyArm.y += reward; st.trophy++; }
+			// (EEAT_BWAY: a way burst that reached no target counts against its room's way tries)
+			if (job.way && job.r && !r.reached) job.r.cwFails = (job.r.cwFails || 0) + 1;
 			// (a dead start: out of situations and nothing gained: its zone dead for this arm; the arm's run of empty bursts)
 			if (job.r) {
 				job.r.zero = reward > 0 ? 0 : job.r.zero + 1;
