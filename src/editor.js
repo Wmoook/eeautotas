@@ -566,6 +566,16 @@ const ROLLS_WAIT_MS = 2500, ROLLS_PROBE_TILES = 10000;
 // Infinity Pain the GPU engine does ~0.4 M ticks/s in the play area, where the rolls do not pay, and every other slice
 // was theirs)
 const ROLLS_DRY_MAX = 4;
+// (judged per completed batch (n3-roll-launch-sizing, 2026-09-29; EEAT_ROLLSIZE=0: every slice judged): a slice in which
+// no batch of theirs completed says nothing of their yield and leaves the wait as it is; before, the roll mix's long
+// batches (5 s of kernels each on The Flighty Slighty, eegpu roll's launch floor) spanned slices, and every slice that
+// ended mid-batch doubled the wait, up to a slice every 12-30 s)
+const ROLLS_DRY_BATCH = process.env.EEAT_ROLLSIZE !== '0';
+/** the random runs' dry count after their slice: 0 when it got nearer or found a room; else one more (at most
+ *  ROLLS_DRY_MAX) when a batch of theirs completed in it (batches > batches0; perBatch false: every slice), else as it
+ *  was */
+const rollsDryAfter = (dry, got, batches, batches0, perBatch = ROLLS_DRY_BATCH) =>
+	(got ? 0 : !perBatch || (batches || 0) > (batches0 || 0) ? Math.min(ROLLS_DRY_MAX, (dry || 0) + 1) : dry || 0);
 // the GPU strategies whose GPU memory is fixed once they run (the random runs' cell table, the beams' buffers): they may
 // take the GPU while the wall breaker's round has no GPU work of its own (schedule: its next process loading, a retry wait)
 const FIXED_MEM = new Set(['gorolls', 'goal', 'guide']);
@@ -648,12 +658,12 @@ function schedule() {
 	// (the random runs' slice that just ended: did it find anything? with the one search, their next wait follows it)
 	if (RW >= 0 && sched && sched.owner === RW && sched.rollsFrom && now - sched.since >= SLICE_MS) {
 		const q = S.strategies[RW], got = (q.bestAt || 0) > sched.since || (q.rooms || 0) > sched.rollsFrom.rooms;
-		q.dry = got ? 0 : Math.min(ROLLS_DRY_MAX, (q.dry || 0) + 1);
+		q.dry = rollsDryAfter(q.dry, got, q.batches, sched.rollsFrom.batches);
 		sched.rollsFrom = null;
 	}
 	const rollsWait = RW >= 0 && cur && cur.opts.bursts ? ROLLS_WAIT_MS * (1 << (S.strategies[RW].dry || 0)) : ROLLS_WAIT_MS;
 	if (RW >= 0 && gpu.includes(RW) && owner !== RW && !probeAlone && (owner < 0 || now - sched.since >= SLICE_MS) && now - (kids[RW].lastTurn || kids[RW].startedAt) >= rollsWait) {
-		sched = { owner: RW, since: now, slices: 1, lastOther: sched ? sched.lastOther : undefined, rollsFrom: { rooms: S.strategies[RW].rooms || 0 } };
+		sched = { owner: RW, since: now, slices: 1, lastOther: sched ? sched.lastOther : undefined, rollsFrom: { rooms: S.strategies[RW].rooms || 0, batches: S.strategies[RW].batches || 0 } };
 	} else if (probing) {
 		if (owner !== X && !rollsSlice) sched = { owner: X, since: now, slices: 1 };
 	} else if (owner < 0) {
@@ -2653,6 +2663,7 @@ function launch(n) {
 		}
 		if (ev.ev === 'progress' || ev.ev === 'layer') {
 			if ((cpu || rolls) && Number.isFinite(ev.rooms)) V.rooms = ev.rooms;
+			if (rolls && Number.isFinite(ev.batches)) V.batches = ev.batches;   // (the random runs' completed batches: their dry slices)
 			if (cpu && Number.isFinite(ev.cpuS)) V.cpuS = ev.cpuS;   // (the CPU search's CPU seconds: a route's time per core-second)
 			Object.assign(V, { state: (cpu || rolls) && V.found ? 'found' : 'running', layer: ev.layer, deepest: Math.max(V.deepest || 0, ev.layer), states: ev.ev === 'layer' ? ev.kept : ev.states,
 				ticksPerSec: Math.round(movesPerSec(ev)) });
@@ -3647,5 +3658,5 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };

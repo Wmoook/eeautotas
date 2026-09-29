@@ -210,9 +210,13 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	fflush(stdout);
 	uint64_t batches = 0;
 	unsigned long long st[5] = { 0, 0, 0, 0, 0 };
+	// (EEAT_ROLLSIZE: the launch floor's sizing, below; the done line's rollSize / rollFloorMs: on or off, the largest
+	// class floor measured)
+	const bool sizeOn = [] { const char* v = getenv("EEAT_ROLLSIZE"); return !(v && v[0] == '0'); }();
+	double floorMax = 0;
 	auto finale = [&](const char* why) {
-		printf("{\"ev\":\"done\",\"end\":\"%s\",\"batches\":%llu,\"ticks\":%llu,\"runs\":%llu,\"seconds\":%.1f%s}\n", why, (unsigned long long)batches, st[0], st[1],
-			std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count(), lk::doneFields().c_str());
+		printf("{\"ev\":\"done\",\"end\":\"%s\",\"batches\":%llu,\"ticks\":%llu,\"runs\":%llu,\"seconds\":%.1f,\"rollSize\":%d,\"rollFloorMs\":%.1f%s}\n", why, (unsigned long long)batches,
+			st[0], st[1], std::chrono::duration<double>(std::chrono::steady_clock::now() - tStart).count(), sizeOn ? 1 : 0, floorMax, lk::doneFields().c_str());
 		fflush(stdout);
 	};
 	lk::onStop = [&]() { finale("stopped"); };
@@ -220,22 +224,55 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	// (the roll launches' sizes, one per run length: a batch of the roll mix may play runs of another length than the
 	// batch before; a new length's first size is the last one's scaled by the lengths, so 240-tick runs after 40-tick
 	// ones do not start with a launch 6x the target)
-	std::vector<std::pair<int, lk::Chunk>> ckRolls;
+	// THE LAUNCH FLOOR (n3-roll-launch-sizing, 2026-09-29; EEAT_ROLLSIZE=0: the sizing before, below): a launch takes at
+	// least its longest run's ticks one after the other (a thread's ticks are sequential), however few runs it holds: on
+	// the A100 ~80 ms for a run of 240 ticks (The Flighty Slighty: the mix's 240-tick batches took 5.1 s of kernels each,
+	// 120-tick ones 2.1 s, 40-tick ones 47 ms; 0.7 / 1.3 / 22 M ticks per kernel second). A launch over the target
+	// shrank the next one (lk::Chunk), which cannot go under the floor: the long classes' launches fell to a few hundred
+	// runs, each as long as a full one. Now per class the floor F = the least time of its last 16 launches (another
+	// process on the GPU only adds time), and the launches are sized by the time past it: the target for that part is
+	// max(--launch-ms, 1.3 F) - F, and the part is the measured time less F (the observed runs, not Lr ticks each). The
+	// worst case (every run of the launch the batch's Lr ticks, at the least time per simulated tick any launch of this
+	// process measured: an upper bound of the GPU's cost per tick) stays under 2 x max(--launch-ms, 1.3 F) (TDR); until a
+	// launch of 16,384 ticks or more has measured it, the sizing before.
+	struct RollClass {
+		int lr; lk::Chunk ck; double win[16]; int nWin, iWin;
+		RollClass(int lr_, double size) : lr(lr_), ck(size, 128, 1u << 30, 128), nWin(0), iWin(0) {}
+		double floorMs() const { double f = 1e30; for (int i = 0; i < nWin; i++) f = std::min(f, win[i]); return nWin ? f : 0; }
+	};
+	std::vector<RollClass> ckRolls;
 	ckRolls.reserve(256);   // (at most 255 lengths: the references handed out stay valid)
+	RollClass* rcNow = nullptr;
 	auto ckRollFor = [&](int lr) -> lk::Chunk& {
-		for (auto& c : ckRolls) if (c.first == lr) return c.second;
+		for (auto& c : ckRolls) if (c.lr == lr) { rcNow = &c; return c.ck; }
 		double size = 2048;
-		if (!ckRolls.empty()) size = std::max(128.0, std::min((double)(1u << 30), ckRolls.back().second.size * ckRolls.back().first / (double)lr));
-		ckRolls.emplace_back(lr, lk::Chunk(size, 128, 1u << 30, 128));
-		return ckRolls.back().second;
+		if (!ckRolls.empty()) size = std::max(128.0, std::min((double)(1u << 30), ckRolls.back().ck.size * ckRolls.back().lr / (double)lr));
+		ckRolls.emplace_back(lr, size);
+		rcNow = &ckRolls.back();
+		return ckRolls.back().ck;
 	};
 	ckRollFor(Lr);
 	unsigned long long simSeen = 0;
+	double tickUB = 0;   // (ms per simulated tick: the least of any launch of 16,384 ticks or more; 0 = none yet)
 	auto rollTook = [&](lk::Chunk& c, double items, double ms) {
 		unsigned long long sim = simSeen;
 		cu::cuMemcpyDtoH_v2(&sim, dctr.p + 32, 8);
-		c.tookWorst(items, ms, (double)(sim - simSeen), items * P.Lr);   // (a run that ends early is cheaper: sized for the batch's Lr ticks each)
+		const double units = (double)(sim - simSeen);
 		simSeen = sim;
+		if (sizeOn && rcNow && &rcNow->ck == &c) {
+			RollClass& rc = *rcNow;
+			rc.win[rc.iWin] = ms; rc.iWin = (rc.iWin + 1) % 16; rc.nWin = std::min(16, rc.nWin + 1);
+			if (units >= 16384 && ms > 0) tickUB = tickUB > 0 ? std::min(tickUB, ms / units) : ms / units;
+			if (tickUB > 0) {
+				const double T = lk::G.targetMs, F = rc.floorMs(), tal = std::max(T, 1.3 * F);
+				floorMax = std::max(floorMax, F);
+				c.scale = std::max(0.05, (tal - F) / T);
+				c.took(items, std::max(0.02, ms - F));
+				c.size = std::max(c.lo, std::min(c.size, (2 * tal - F) / (P.Lr * tickUB)));
+				return;
+			}
+		}
+		c.tookWorst(items, ms, units, items * P.Lr);   // (a run that ends early is cheaper: sized for the batch's Lr ticks each)
 	};
 	std::vector<uint32_t> picks(maxPicks);
 	std::vector<int32_t> outAll, sorted, lastD;
