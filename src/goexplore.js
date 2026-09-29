@@ -164,6 +164,8 @@
 // launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7. The roll mix (--rollMix,
 // ROLL_MIX): each batch's run length and keep from a class of long sticky runs or short ones, a node keeps its class.
 //   [--gpu=1] [--batch=4096] [--rollMix=40:0.85,120:0.95,240:0.97 (the default unless --roll / --keep is given; 0 = off)]
+//   [--mixBandit=0 (1 / EEAT_MIXBANDIT=1: the roll mix's classes by their own yield, MIX_BANDIT) [--mixHalf=20] [--mixC=0.5] [--mixFloor=0.5]
+//    [--mixRoom=0.3] [--mixNear=0.01] [--mixFresh=100000] (a class's --rollMix weight: its mean x that, a data prior)]
 //   [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
 //   default: an eighth of the machine's memory, at most half of the free memory>] [--tool=<eegpu>] [--bin=<level blob>]
 //   [--reach=<RCH3 file>]
@@ -180,7 +182,7 @@
 //        sticky 17, and no gain); --priorMode=0: every tick's input from the model, 1: the sticky
 //        timing (--keep) and the model's choice of each new input (an input other than the last); the other runs as
 //        before; without it no draw changes)]
-//        [--opts=0|1 (EVENT OPTIONS, OFF by default: src/options.js; --optP=0.5 of a pick's CPU runs are option runs:
+//        [--opts=0|1 (EVENT OPTIONS, OFF by default here; Find a route passes --opts=1, editor.js GX_DEFAULTS: src/options.js; --optP=0.5 of a pick's CPU runs are option runs:
 //        an input from the runs' draw held until a physical event (landing, lift-off, a wall, the apex, a field
 //        change, a room change) or its cap of 4 x luby(j) ticks (at most 256), the run 40 x luby(k) ticks (at most
 //        320); the done event's opts {runs, cells, ends}; --optEv=0: no event ends an option, only its cap (the
@@ -261,7 +263,7 @@
 //        burst and enters the room there (reentry); the progress and done events carry "useful": {culPicks, culCells,
 //        zeroed (rooms), culSets, culDropped, reculs}, "deaths" "useless" (such deaths, kept); 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
-//        [--frontier=0 (1: OPT-IN, coarse cells: the frontier field, head F, see FR_MIN_PICKS below; 0: the search exactly as
+//        [--frontier=0 (1: coarse cells: the frontier field, head F, see FR_MIN_PICKS below; Find a route passes it with --fBrake=1 --fPhys=1, editor.js GX_DEFAULTS; 0: the search exactly as
 //        before) --fLo=0.1 --fHi=0.4 --fStall=75000 --fEvery=25000 --fGrow=0.1 --fK=4096 --fLambda=4 --fDil=1 --fYield=0
 //        --fBrake=0 --fPhys=0 (EEAT_FRLOG=<file>: a line per field, observation only)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
@@ -341,8 +343,9 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
+	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
-// --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
+// --frontier=1 (coarse cells; the default here 0 = the search exactly as before; Find a route passes --frontier=1 --fBrake=1 --fPhys=1: editor.js GX_DEFAULTS): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
 // (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
 // picks (or sooner, at least max(FR_MIN_PICKS, FR_TILE_PK x the level's tiles) apart, when VIS grew by --fGrow; and
@@ -428,15 +431,82 @@ function mixPick(st, classes) {
 	for (let j = 0; j < classes.length; j++) { const v = st[j].ms / classes[j].w; if (v < bv) { bv = v; bj = j; } }
 	return bj;
 }
-/** the roll mix of --rollMix: [{roll, keep, w}] (null: off) */
+// --mixBandit=1 (EEAT_MIXBANDIT=1; default 0 = the fixed shares of mixPick, exactly as before): THE YIELD MIX (innovation
+// round 2, il2-yield-mix, 2026-09-29). The filler's dataset (src/out/fill/res, tools/mixdata.js): on the levels main still
+// fails, ONLY the pure 120:0.95 runs routed 20_3, 25_1, 30_2, 37_1, 37_3, only the distance-blind config (--pA=0) 14_2
+// and 38_5, and per level the config with the most new rooms in its first 30 s is a config that routes it on 24 of 41
+// levels against 11.9 by chance: a class's early yield picks the winner. So the classes' shares of the GPU time follow
+// their own yield inside the run: a discounted UCB1 (mixBanditPick) over MIX_BANDIT's classes (unless --rollMix names
+// others): main's three, the kernel's longest runs (255 ticks, keep 0.985) and a BLIND class (a part ending in ":b": its
+// batch's picks with pA = 0, heads B and C only: the distance-blind config inside the mix). A batch's reward
+// (mixReward): its new rooms (MB_ROOM_G each that opens territory, MB_ROOM the others), its nearer attempts (MB_NEAR),
+// its new cells (MB_FRESH each), per kernel second of the batch (mixCostOf); the classes' reward and time decay with a
+// half-life of --mixHalf s of GPU time; each class once first (in order), and every class keeps at least --mixFloor / K of
+// the recent GPU time (nothing starves). Order only: which runs the next batch plays, no prune (the reach field's -1
+// stays the only one). The done event's mix block has each class's share of the GPU ms and its reward; a 'mixBandit'
+// event every MB_EVENT_S s. v1 (the first A/B: nearer x1, new cells / 2000, no prior; `--mixNear=1 --mixFresh=2000
+// --rollMix=40:0.85,120:0.95,240:0.97,255:0.985,120:0.95:b`): the nearer steps (0.05 tiles each) and new cells, which
+// the cheap 40-tick class makes fastest per kernel second, gave it 37-55% of the GPU and 120:0.95 10-16%, below main's
+// third: 6 vs 6 target routes. v2 (these defaults): rooms first (nearer x0.01, new cells / 100000) and the data prior
+// (tools/mixdata.js: the classes' routed-run rates 0.149 / 0.382 / 0.128 / 0.091 / 0.154, the square roots of their
+// ratios to the mean as the weights).
+const MIX_BANDIT = '40:0.85:0.91,120:0.95:1.45,240:0.97:0.84,255:0.985:0.71,120:0.95:0.92:b';
+// (the weights: --mixRoom (MB_ROOM), --mixNear (MB_NEAR), --mixFresh (new cells a unit: 1 / MB_FRESH); a class's weight in
+// --rollMix (w, 1 by default) multiplies its mean in the index: a data prior (tools/mixdata.js))
+const MB_ROOM_G = 1, MB_ROOM = 0.3, MB_NEAR = 0.01, MB_FRESH = 1 / 100000;
+// (the UCB bonus: --mixC x the best class's mean x sqrt(ln(1 + T / MB_TAU) / (T_j / MB_TAU)), T the classes' discounted
+// kernel seconds; a class's mean over at least MB_TMIN s)
+const MB_TAU = 1, MB_TMIN = 0.05, MB_EVENT_S = 20;
+/** a batch's reward for the yield mix: d = {roomsG (new rooms that open territory), rooms (all new rooms), nearer, fresh} */
+const mixReward = (d, o = {}) => MB_ROOM_G * d.roomsG + (o.room != null ? o.room : MB_ROOM) * Math.max(0, d.rooms - d.roomsG) + (o.near != null ? o.near : MB_NEAR) * d.nearer +
+	d.fresh / (o.fresh > 0 ? o.fresh : 1 / MB_FRESH);
+/** the yield mix's state for K classes (half: the half-life in s of GPU time; c: the bonus; floor: the least share x K) */
+const mixBanditNew = (K, o = {}) => ({ half: o.half > 0 ? o.half : 20, c: o.c >= 0 ? o.c : 0.5, floor: Math.max(0, Math.min(1, o.floor >= 0 ? o.floor : 0.5)) / K,
+	T: new Float64Array(K), R: new Float64Array(K) });
+/** after a batch of class j that cost `ms` of kernel time and earned `r`: every class's time and reward decay by the
+ *  batch's time, then j's grow */
+function mixBanditAdd(b, j, ms, r) {
+	const s = Math.max(0, +ms || 0) / 1000, g = Math.pow(0.5, s / b.half);
+	for (let k = 0; k < b.T.length; k++) { b.T[k] *= g; b.R[k] *= g; }
+	b.T[j] += s; b.R[j] += Math.max(0, +r || 0);
+}
+/** the yield mix's next class: a class with no batch yet first (in order); a class under the floor of the recent GPU time
+ *  (the lowest share); else the highest discounted UCB1 index (ties to the first); no yield anywhere yet: mixPick's equal
+ *  shares. Order only. */
+function mixBanditPick(b, st, classes) {
+	const K = classes.length;
+	if (K === 1) return 0;
+	for (let j = 0; j < K; j++) if (!st[j].batches) return j;
+	let tot = 0;
+	for (let j = 0; j < K; j++) tot += b.T[j];
+	if (tot > 0 && b.floor > 0) {
+		let fj = -1, fv = Infinity;
+		for (let j = 0; j < K; j++) { const sh = b.T[j] / tot; if (sh < b.floor && sh < fv) { fv = sh; fj = j; } }
+		if (fj >= 0) return fj;
+	}
+	let top = 0;
+	const mu = new Array(K);
+	for (let j = 0; j < K; j++) { mu[j] = (classes[j].w > 0 ? classes[j].w : 1) * b.R[j] / Math.max(b.T[j], MB_TMIN); if (mu[j] > top) top = mu[j]; }
+	if (!(top > 0)) return mixPick(st, classes);
+	const ln = Math.log(1 + tot / MB_TAU);
+	let bj = 0, bv = -Infinity;
+	for (let j = 0; j < K; j++) {
+		const v = mu[j] + b.c * top * Math.sqrt(ln / Math.max(b.T[j] / MB_TAU, 1e-3));
+		if (v > bv) { bv = v; bj = j; }
+	}
+	return bj;
+}
+/** the roll mix of --rollMix: [{roll, keep, w}] (a part ending in ":b": blind, {..., blind: true}; null: off) */
 function rollMixOf(s) {
 	if (s === undefined || s === null || s === '' || s === '0' || s === 'off') return null;
 	const out = [];
 	for (const part of String(s).split(',')) {
 		const f = part.split(':');
+		const blind = f.length > 2 && f[f.length - 1] === 'b';
+		if (blind) f.pop();
 		const roll = Math.round(+f[0]), keep = +f[1], w = f.length > 2 ? +f[2] : 1;
-		if (f.length < 2 || f.length > 3 || !(roll >= 1 && roll <= 255) || !(keep >= 0 && keep <= 1) || !(w > 0)) throw new Error(`bad --rollMix part ${part} (roll 1-255 : keep 0-1 [: weight > 0])`);
-		out.push({ roll, keep, w });
+		if (f.length < 2 || f.length > 3 || !(roll >= 1 && roll <= 255) || !(keep >= 0 && keep <= 1) || !(w > 0)) throw new Error(`bad --rollMix part ${part} (roll 1-255 : keep 0-1 [: weight > 0] [:b])`);
+		out.push(blind ? { roll, keep, w, blind } : { roll, keep, w });
 	}
 	if (!out.length || out.length > 16) throw new Error('bad --rollMix (1 to 16 classes)');
 	return out;
@@ -544,7 +614,7 @@ function parseArgs(argv) {
 	a.phase = Math.max(1, Math.round(a.phase));
 	a.batch = Math.max(1, Math.min(1 << 20, Math.round(a.batch)));
 	// (the roll mix: the default unless --roll / --keep ask for one class; checked here, used by --gpu=1 only)
-	if (!given.has('rollMix')) a.rollMix = given.has('roll') || given.has('keep') ? '0' : ROLL_MIX;
+	if (!given.has('rollMix')) a.rollMix = given.has('roll') || given.has('keep') ? '0' : a.mixBandit ? MIX_BANDIT : ROLL_MIX;
 	rollMixOf(a.rollMix);
 	if (a.gpu && a.cells === 'fine') throw new Error('--gpu=1 runs coarse cells only');
 	return a;
@@ -3762,9 +3832,20 @@ async function gpuMain(a, L, m) {
 	// cells, nearer attempts, new rooms, finishes; the next batch's class = the one furthest below its share of the GPU
 	// time: mixPick)
 	const mixSt = classes.map((c) => ({ roll: c.roll, keep: c.keep, w: c.w, batches: 0, ticks: 0, ms: 0, records: 0, fresh: 0, nearer: 0, rooms: 0, fin: 0 }));
-	const pickClass = () => mixPick(mixSt, classes);
+	// (--mixBandit=1: the yield mix, mixBanditPick; per class also its rooms that open territory, its reward, blind)
+	const band = mixOn && a.mixBandit ? mixBanditNew(classes.length, { half: a.mixHalf, c: a.mixC, floor: a.mixFloor }) : null;
+	if (band) mixSt.forEach((q, j) => Object.assign(q, { blind: !!classes[j].blind, roomsG: 0, reward: 0 }));
+	const pickClass = () => (band ? mixBanditPick(band, mixSt, classes) : mixPick(mixSt, classes));
+	/** the yield mix's record: each class's share of the GPU ms, its reward, its discounted mean */
+	const bandRec = () => {
+		const tot = mixSt.reduce((x, q) => x + q.ms, 0) || 1;
+		return { T: Math.round((Date.now() - tReady) / 100) / 10, share: mixSt.map((q) => Math.round(1000 * q.ms / tot) / 1000), reward: mixSt.map((q) => Math.round(q.reward * 100) / 100),
+			mean: mixSt.map((q, j) => Math.round(1000 * band.R[j] / Math.max(band.T[j], MB_TMIN)) / 1000), batches: mixSt.map((q) => q.batches) };
+	};
+	let bandSaid = Date.now();
 	say({ ev: 'start', workers: 1, seeds: [a.seed], mode: field.mode, cells: 'coarse', gpu: info.gpu ? info.gpu.name : null, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100,
-		cap: info.cap, memMB: info.memMB, hostMB: info.hostMB, batch: a.batch, rolls: a.rolls, roll: classes[0].roll, mix: mixOn ? classes.map((c) => `${c.roll}:${c.keep}`).join(',') : null });
+		cap: info.cap, memMB: info.memMB, hostMB: info.hostMB, batch: a.batch, rolls: a.rolls, roll: classes[0].roll, mix: mixOn ? classes.map((c) => `${c.roll}:${c.keep}${c.blind ? ':b' : ''}`).join(',') : null,
+		...(band ? { mixBandit: { half: band.half, c: band.c, floor: Math.round(band.floor * 1000) / 1000 } } : {}) });
 	// ---- the archive (by dense id: the GPU's pool index; cell 0 = the start)
 	let capN = 1 << 16;
 	let cT = new Int32Array(capN), cRc = new Float32Array(capN), cPicks = new Int32Array(capN), cRoom = new Int32Array(capN), cNode = new Int32Array(capN),
@@ -4056,6 +4137,9 @@ async function gpuMain(a, L, m) {
 		const h0 = Date.now();
 		// the picks (explore()'s heads, one pick after the other)
 		if (hv.length > 3 * nCells + 4096) compact();
+		// (the batch's class first: pickClass draws no random number and nothing below changes mixSt before the batch is
+		// sent, so this is the same class as after the picks; a blind class's picks: heads B and C only, pA 0)
+		const bc = pickClass(), bst = mixSt[bc], pA = classes[bc].blind ? 0 : a.pA;
 		let K = 0;
 		for (let k = 0; k < a.batch; k++) {
 			let e = -1;
@@ -4064,7 +4148,7 @@ async function gpuMain(a, L, m) {
 				e = d[0];
 				if (--d[1] <= 0) discovery.pop();
 				if (cT[e] >= maxT) continue;
-			} else if (rnd() < a.pA) e = popA();
+			} else if (rnd() < pA) e = popA();
 			else e = popB();
 			if (e < 0) break;
 			cPicks[e]++; cVer[e]++; picks++;
@@ -4076,7 +4160,6 @@ async function gpuMain(a, L, m) {
 		}
 		if (!K) { end = 'exhausted'; break; }
 		const bs = fmixU((Math.imul(a.seed, 0x9e3779b1) + batches + 1) | 0);
-		const bc = pickClass(), bst = mixSt[bc];
 		ch.stdin.write(mixOn ? `batch ${K} ${maxT} ${bs} ${classes[bc].roll} ${classes[bc].keep}\n` : `batch ${K} ${maxT} ${bs}\n`);
 		ch.stdin.write(Buffer.from(pickBytes.subarray(0, 4 * K)));
 		const hw = Date.now();
@@ -4089,6 +4172,7 @@ async function gpuMain(a, L, m) {
 		if (m.ev.ev !== 'batch') continue;
 		batches++;
 		ticks += m.ev.ticks;
+		const b0 = band ? { rooms: bst.rooms, roomsG: bst.roomsG, nearer: bst.nearer, fresh: bst.fresh } : null;
 		bst.batches++; bst.ticks += m.ev.ticks; bst.records += m.ev.n; bst.ms += mixCostOf(m.ev);
 		gpuMs += m.ev.ms;
 		rollMs += m.ev.rollMs || 0;
@@ -4137,6 +4221,7 @@ async function gpuMain(a, L, m) {
 			rooms.delete(p.key);
 			const r = newRoom(p.key, c0);
 			bst.rooms++;
+			if (band && r.gain > 0) bst.roomsG++;
 			if (SAT && newPk.has(c0)) pickFresh[newPk.get(c0)] = 1;
 			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; }
 			r.isNew = false;
@@ -4147,6 +4232,13 @@ async function gpuMain(a, L, m) {
 				if (r.gain <= 0) lastBlandSource = Date.now();
 				source('room', r, c0);
 			}
+		}
+		// (the yield mix: the batch's reward, its class's time)
+		if (band) {
+			const rw = mixReward({ roomsG: bst.roomsG - b0.roomsG, rooms: bst.rooms - b0.rooms, nearer: bst.nearer - b0.nearer, fresh: bst.fresh - b0.fresh }, { room: a.mixRoom, near: a.mixNear, fresh: a.mixFresh });
+			bst.reward += rw;
+			mixBanditAdd(band, bc, mixCostOf(m.ev), rw);
+			if (Date.now() - bandSaid >= MB_EVENT_S * 1000) { bandSaid = Date.now(); say(Object.assign({ ev: 'mixBandit' }, bandRec())); }
 		}
 		// the brake: every pick's region and room by what its runs made
 		if (SAT) {
@@ -4194,7 +4286,7 @@ async function gpuMain(a, L, m) {
 	const secs = (Date.now() - tReady) / 1000;
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
-		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null,
+		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null, ...(band ? { mixBandit: bandRec() } : {}),
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
 			.map((k) => [k, toolDone[k]])), tool: toolDone || null });
@@ -4689,5 +4781,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { CellMap, mixW, mixPick, mixCostOf, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { CellMap, mixW, mixPick, mixCostOf, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
