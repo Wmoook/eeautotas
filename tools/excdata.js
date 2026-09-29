@@ -21,7 +21,12 @@
 // Prints / writes: n levels / routes / rows / commits; the profile of the routes (every level with a route: the
 // EXC_BANDS goexplore.js bakes), of the routes on the levels that also have a stalled run (matched) and of those stalled
 // runs' nearest attempts; the per-level GAP list (route >= 20 share minus stalled >= 20 share, largest first: the A/B
-// target list).
+// target list); THE DEPARTURES (excursionsOf): the first route's sustained excursions (>= 20 tiles above the room's
+// running minimum for >= 100 ticks), how many leave from > 20 tiles above the stalled runs' pin (the lowest cost their
+// nearest attempts reach), how many happen in the pin's room and in a room the stalled SEARCHES registered (result.json
+// find.roomsSeen), and the levels whose route leaves on a >= 150-tile detour within its first 500 ticks (the start is
+// the pin). 2026-09-29: 373 excursions on 71 levels, 281 leave > 20 tiles above the pin, 35 in the pin's room, 282 in a
+// room the stalled searches had: the routes' detours leave from points the stalled searches passed, in rooms they had.
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -92,15 +97,36 @@ function runFiles(r, P) {
 		let names = [];
 		try { names = fs.readdirSync(d); } catch (e) { return null; }
 		const rf = names.find(isRoute1);
-		return { route: rf ? fs.readFileSync(path.join(d, rf)) : null, closest: names.includes('closest.eetas') ? fs.readFileSync(path.join(d, 'closest.eetas')) : null };
+		return { route: rf ? fs.readFileSync(path.join(d, rf)) : null, closest: names.includes('closest.eetas') ? fs.readFileSync(path.join(d, 'closest.eetas')) : null,
+			rooms: names.includes('result.json') ? roomsSeenOf(fs.readFileSync(path.join(d, 'result.json'))) : null };
 	}
 	const t = path.join(P.res, r._src, 'runs', `${base}__${r.config}__s${r.seed || 1}.tgz`);
 	if (!fs.existsSync(t)) return null;
 	let m;
-	try { m = tarEntries(fs.readFileSync(t), (b) => isRoute1(b) || b === 'closest.eetas'); } catch (e) { return null; }
+	try { m = tarEntries(fs.readFileSync(t), (b) => isRoute1(b) || b === 'closest.eetas' || b === 'result.json'); } catch (e) { return null; }
 	let route = null;
 	for (const [k, v] of m) if (isRoute1(k)) route = v;
-	return { route, closest: m.get('closest.eetas') || null };
+	return { route, closest: m.get('closest.eetas') || null, rooms: m.has('result.json') ? roomsSeenOf(m.get('result.json')) : null };
+}
+/** the room keys (goexplore.js roomOf) a run's whole search registered: result.json find.roomsSeen [key, desc, s, n] */
+function roomsSeenOf(buf) {
+	try { const R = JSON.parse(buf.toString('utf8')); return (R && R.find && R.find.roomsSeen || []).map((q) => q[0] | 0); } catch (e) { return null; }
+}
+/** a lineage's SUSTAINED excursions (the departures analysis): the stretches of at least minLen ticks whose samples stay
+ *  >= minEx tiles above the running minimum since the room was entered; each {at (tick), dep (the running minimum when it
+ *  starts: where the detour leaves from), peak, len (ticks), room} */
+function excursionsOf(samples, every, minEx = 20, minLen = 100) {
+	const out = [];
+	let rk, mn = Infinity, ep = null;
+	const close = () => { if (ep && ep.len >= minLen) out.push(ep); ep = null; };
+	samples.forEach(([c, k], i) => {
+		if (i === 0 || k !== rk) { close(); rk = k; mn = Infinity; }
+		if (c < mn) mn = c;
+		const x = c - mn;
+		if (x >= minEx) { if (!ep) ep = { at: (i + 1) * every, dep: mn, peak: x, len: 0, room: k }; ep.len += every; if (x > ep.peak) ep.peak = x; } else close();
+	});
+	close();
+	return out;
 }
 
 // ---- the replay (the engine and the search's own field / cost / rooms)
@@ -141,22 +167,39 @@ function levelNumbers(task, P) {
 	const X = levelCtx(task.file, P);
 	if (X === null) return { file: task.file, md5: task.md5, skip: 'no level file' };
 	const R = [], S = [];
+	let first = null;   // (the first route's samples: the departures analysis)
 	for (const r of task.R) {
 		if (R.length >= P.routes) break;
 		const f = runFiles(r, P);
 		if (!f || !f.route) continue;
-		const p = profileOf(samplesOf(X, X.C.parseEetasBuffer(f.route), P.every));
-		if (p.n) R.push(p);
+		const sm = samplesOf(X, X.C.parseEetasBuffer(f.route), P.every);
+		const p = profileOf(sm);
+		if (p.n) { R.push(p); if (first === null) first = sm; }
 	}
+	// (the stalled runs: their nearest attempts' profile; their pin = the lowest cost those attempts reach, its room; the rooms
+	// their whole searches registered)
+	let pin = Infinity, pinRoom = null;
+	const sRooms = new Set();
 	for (const r of task.S) {
 		if (S.length >= P.stalled) break;
 		const f = runFiles(r, P);
 		if (!f || !f.closest) continue;
-		const p = profileOf(samplesOf(X, X.C.parseEetasBuffer(f.closest), P.every));
+		const sm = samplesOf(X, X.C.parseEetasBuffer(f.closest), P.every);
+		for (const [c, k] of sm) if (c < pin) { pin = c; pinRoom = k; }
+		if (f.rooms) for (const k of f.rooms) sRooms.add(k);
+		const p = profileOf(sm);
 		if (p.n) S.push(p);
 	}
+	// THE DEPARTURES: the first route's sustained excursions against the stalled runs' pin
+	let dep = null;
+	if (first !== null && S.length && Number.isFinite(pin)) {
+		const eps = excursionsOf(first, P.every);
+		dep = { n: eps.length, abovePin: eps.filter((e) => e.dep > pin + 20).length, inPinRoom: eps.filter((e) => e.room === pinRoom).length,
+			inSearchRooms: sRooms.size ? eps.filter((e) => sRooms.has(e.room | 0)).length : null, pin: Math.round(pin * 10) / 10,
+			first: eps.length ? { at: eps[0].at, dep: Math.round(eps[0].dep), peak: Math.round(eps[0].peak), len: eps[0].len } : null };
+	}
 	return { file: task.file, md5: task.md5, routes: R.length, stalledRuns: S.length, route: meanOf(R.map(sharesOf)), stalled: meanOf(S.map(sharesOf)),
-		samples: R.reduce((x, p) => x + p.n, 0) + S.reduce((x, p) => x + p.n, 0) };
+		samples: R.reduce((x, p) => x + p.n, 0) + S.reduce((x, p) => x + p.n, 0), dep };
 }
 
 // ---- the dataset
@@ -231,6 +274,17 @@ async function main() {
 	console.log(`  routes, every level with a route : ${f(out.routesAll)}`);
 	console.log(`  routes, matched levels           : ${f(out.routesMatched)}`);
 	console.log(`  stalled nearest attempts, matched: ${f(out.stalledMatched)}`);
+	// THE DEPARTURES (where the routes' sustained excursions leave from, against the stalled runs' pin and rooms)
+	const D = matched.filter((l) => l.dep);
+	const sum = (k) => D.reduce((x, l) => x + (l.dep[k] || 0), 0);
+	const withRooms = D.filter((l) => l.dep.inSearchRooms !== null);
+	out.departures = { levels: D.length, excursions: sum('n'), abovePin: sum('abovePin'), inPinRoom: sum('inPinRoom'),
+		inSearchRooms: withRooms.reduce((x, l) => x + l.dep.inSearchRooms, 0), ofExcursionsWithRooms: withRooms.reduce((x, l) => x + l.dep.n, 0),
+		startFalseNear: D.filter((l) => l.dep.first && l.dep.first.at <= 500 && l.dep.first.peak >= 150).map((l) => ({ file: l.file, ...l.dep.first })) };
+	out.perLevel.forEach((p) => { const l = lv.find((x) => x.file === p.file); if (l && l.dep) p.dep = l.dep; });
+	const dd = out.departures;
+	console.log(`departures: the first routes' sustained excursions (>= 20 tiles above the room's running min for >= 100 ticks) on ${dd.levels} matched levels: ${dd.excursions}; leaving > 20 tiles above the stalled runs' pin ${dd.abovePin}; in the pin's room ${dd.inPinRoom}; in a room the stalled searches registered ${dd.inSearchRooms} of ${dd.ofExcursionsWithRooms}`);
+	console.log(`  the start is the pin (the first excursion within 500 ticks, >= 150 tiles up): ${dd.startFalseNear.map((s) => `${s.file.replace(/\.eelvl$/, '')} (t${s.at}, +${s.peak}, ${s.len} ticks)`).join('; ') || '-'}`);
 	console.log('gap (route >= 20 share - stalled >= 20 share), largest first:');
 	for (const g of out.gap) console.log(`  ${g.gap.toFixed(3)}  route ${g.route.toFixed(3)} stalled ${g.stalled.toFixed(3)}  ${g.file}`);
 	if (opt.json) fs.writeFileSync(opt.json, JSON.stringify(out, null, 1));
@@ -242,4 +296,4 @@ if (!WT.isMainThread && WT.workerData && WT.workerData.excdata) {
 	const P = WT.workerData.excdata;
 	WT.parentPort.on('message', (m) => { let r; try { r = levelNumbers(m.task, P); } catch (e) { r = { file: m.task.file, md5: m.task.md5, skip: String(e && e.message || e) }; } WT.parentPort.postMessage({ i: m.i, r }); });
 } else if (require.main === module) main().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
-module.exports = { EXC_EDGES, bandOf, profileOf, sharesOf, meanOf, upOf, gapList, tarEntries };
+module.exports = { EXC_EDGES, bandOf, profileOf, sharesOf, meanOf, upOf, gapList, excursionsOf, tarEntries, roomsSeenOf, readRows, tasksOf, runFiles, levelCtx, samplesOf };

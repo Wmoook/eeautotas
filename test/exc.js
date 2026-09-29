@@ -87,6 +87,15 @@ function sectionUnits() {
 	check('excdata meanOf: each lineage weight 1, null ones skipped', near(m[0], 0.5) && near(m[2], 0.5) && XD.meanOf([null]) === null);
 	const g = XD.gapList([{ file: 'a', route: [0.5, 0.1, 0.2, 0.1, 0.1], stalled: [0.9, 0.1, 0, 0, 0] }, { file: 'b', route: [0.8, 0.1, 0.1, 0, 0], stalled: [0.8, 0.1, 0.05, 0.05, 0] }, { file: 'c', route: [1, 0, 0, 0, 0], stalled: null }]);
 	check('excdata gapList: route >= 20 share minus stalled >= 20 share, largest first, only levels with both', g.length === 2 && g[0].file === 'a' && near(g[0].gap, 0.4) && near(g[1].gap, 0), JSON.stringify(g));
+	// (3b) the departures: sustained excursions (>= 20 above the room's running min for >= 100 ticks, samples every 5)
+	const sm = [];
+	for (let i = 0; i < 10; i++) sm.push([50 - i, 1]);   // down to 41 in room 1
+	for (let i = 0; i < 30; i++) sm.push([41 + 25 + i, 1]);   // 150 ticks at 66..95: >= 20 above 41
+	for (let i = 0; i < 10; i++) sm.push([60, 1]);   // 19 above: ends it
+	for (let i = 0; i < 10; i++) sm.push([100, 2]);   // room 2: reset (0 above)
+	for (let i = 0; i < 10; i++) sm.push([130, 2]);   // 30 above for 50 ticks: too short
+	const ex = XD.excursionsOf(sm, 5);
+	check('excdata excursionsOf: one sustained excursion (tick 55, from 41, peak 54, 150 ticks); the short one and the room change none', ex.length === 1 && ex[0].at === 55 && ex[0].dep === 41 && ex[0].peak === 54 && ex[0].len === 150 && ex[0].room === 1, JSON.stringify(ex));
 	// (4) excdata's tar reader on a hand-made gzip'd tar (ustar, two files, a directory)
 	const hdr = (name, size, type) => { const b = Buffer.alloc(512); b.write(name, 0, 'latin1'); b.write('0000644\0', 100); b.write('0000000\0', 108); b.write('0000000\0', 116); b.write(size.toString(8).padStart(11, '0') + '\0', 124); b.write('00000000000\0', 136); b.write('        ', 148); b[156] = type.charCodeAt(0); b.write('ustar\0', 257); b.write('00', 263); let sum = 0; for (const x of b) sum += x; b.write(sum.toString(8).padStart(6, '0') + '\0 ', 148); return b; };
 	const pad = (buf) => Buffer.concat([buf, Buffer.alloc((512 - (buf.length % 512)) % 512)]);
