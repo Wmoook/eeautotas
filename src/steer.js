@@ -1641,14 +1641,17 @@ function buildSteer(level, opts) {
 	// layers leave out an id the chain needs
 	let chainInfo = null;
 	if (!opts.noChain && process.env.EEAT_CHAIN !== '0') {
-		const CP = chainPlan(A, t0 + 2 * maxMs);
+		// (its own clock: the plan and the legs take ~1 s where the layers took the build's budget; on a loaded box
+		// MKco's layers took 115 s and a deadline from the build's start left the chain out)
+		const c0 = Date.now();
+		const CP = chainPlan(A, c0 + maxMs);
 		if (CP.none) chainInfo = { none: CP.none };
 		else {
 			const miss = CP.need.flat().filter((id) => M.names.indexOf(`psw:${id}`) < 0);
 			if (!miss.length) chainInfo = { none: 'every needed id modelled', n: CP.need.flat().length };
 			else {
 				const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
-				const R = buildChain(A, CP, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
+				const R = buildChain(A, CP, kappa, c0 + maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 				if (R) {
 					steer.chain = R;
 					let s1 = chainFifths(steer, sim0);
