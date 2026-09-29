@@ -2211,6 +2211,14 @@ async function escapeSection() {
 			ED.rollsOf(raw[0]).join(' ') === '--pA=0.2' && ED.rollsOf(raw[1]).join(' ') === '--rollMix=40:0.85:1,240:0.97:5' && ED.rollsOf(raw[2]) === null &&
 			nx[0].join(' ') === rl[0].join(' ') && nx[1] === null && nx[2] === null && nx[3] === null && nx[4] === null && nx[5].length === 0,
 			`${rl.map((f, j) => `${rotD[j].name}: ${f ? f.join(' ') || '(own)' : '-'}`).join('; ')}; raw ${raw.map((c) => JSON.stringify(ED.rollsOf(c))).join(' ')}; next ${nx.map((x) => JSON.stringify(x)).join(' ')}`);
+		// (INNOLOOP round 2 merge: the weighted restarts keep their fixed shares with the yield mix on: --mixBandit=0 after
+		// EEAT_GX, as the gorolls args put q.rollFlags after gxExtra; base's restart (the search's own mix) keeps the flag)
+		const args = (f) => GXP.parseArgs(['x.eelvl', '--gpu=1', ...ED.GX_DEFAULTS, '--mixBandit=1', ...f]);
+		const on = [0, 1, 2].map((j) => args(rl[j])), own = args(rl[5]), off = GXP.parseArgs(['x.eelvl', '--gpu=1', ...rl[0]]);
+		check('the rotation\'s weighted restarts run fixed shares with the yield mix on (--mixBandit=0 last), base\'s restart keeps it; flag off the same as before',
+			[0, 1, 2].every((j) => rl[j][rl[j].length - 1] === '--mixBandit=0' && on[j].mixBandit === 0 && on[j].rollMix === mixOf(rl[j])) &&
+			own.mixBandit === 1 && own.rollMix === GXP.MIX_BANDIT && off.mixBandit === 0 && off.rollMix === mixOf(rl[0]),
+			`${on.map((a) => `${a.mixBandit} ${a.rollMix}`).join('; ')}; base ${own.mixBandit} ${own.rollMix}; off ${off.mixBandit}`);
 	}
 	// (the merge's soundness review, 2026-09-29: goexplore.js --deaths=1 with the death-free reach file keeps dying balls and
 	// prunes by a -1 that only a death reaches; the reach file is the proof field of the search's own deaths setting)

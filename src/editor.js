@@ -1655,7 +1655,12 @@ const ESC_FIRST_S = 60, ESC_TURN_S = 120;
 // 3 shares of the simulated ticks, the others 1). lr3's class is 255 ticks with keep 0.985: eegpu roll plays at most 255
 // ticks a run (kernels.cu rollBody `k < 255`, the batch's best packs the step in 8 bits: a kernel cap, not a host one),
 // which is what pf-rotation's lr3 (--roll=480) played on the GPU too (goexplore.js min(255, roll)). The escape's CPU
-// process keeps the sweep's --roll / --keep (its CPU runs have no mix).
+// process keeps the sweep's --roll / --keep (its CPU runs have no mix). The weighted restarts carry --mixBandit=0
+// (after EEAT_GX: the last flag wins; the INNOLOOP round 2 merge, 2026-09-29): with the yield mix on (goexplore.js
+// --mixBandit=1, opt-in) their 3-to-1 weights would become the bandit's priors and its floor / UCB would undo the
+// rotation's heavy class (the soundness review's stand-in: lr1 gave 120:0.95 17% of the GPU, not 60%); the rotation's
+// A/B measured fixed weights and the yield mix's A/B had no weighted restarts (its base 1ab745c restarted one class), so
+// the restarts keep the fixed shares; flag off: --mixBandit=0 is the default, the same search.
 const ESC_MIX = { base: '40:0.85:1,120:0.95:1,240:0.97:1', lr1: '40:0.85:1,120:0.95:3,240:0.97:1', lr2: '40:0.85:1,120:0.95:1,240:0.97:3',
 	lr3: '40:0.85:1,120:0.95:1,240:0.97:1,255:0.985:3' };
 const ESC_CONFIGS = {
@@ -1663,9 +1668,9 @@ const ESC_CONFIGS = {
 	reach: { label: 'the reach field alone', flags: ['--mix=0', '--burstSteer='], needs: 'steer' },
 	plain: { label: 'no useful territory, no dominance', flags: ['--useful=0', '--dom=0'] },
 	fine: { label: 'speed cells early', flags: ['--spd=10', '--spdMax=6'] },
-	longruns: { label: 'long random runs', flags: ['--roll=120', '--keep=0.95'], rolls: [`--rollMix=${ESC_MIX.lr1}`] },
-	lr2: { label: 'longer random runs', flags: ['--roll=240', '--keep=0.97'], rolls: [`--rollMix=${ESC_MIX.lr2}`] },
-	lr3: { label: 'the longest random runs', flags: ['--roll=480', '--keep=0.985'], rolls: [`--rollMix=${ESC_MIX.lr3}`] },
+	longruns: { label: 'long random runs', flags: ['--roll=120', '--keep=0.95'], rolls: [`--rollMix=${ESC_MIX.lr1}`, '--mixBandit=0'] },
+	lr2: { label: 'longer random runs', flags: ['--roll=240', '--keep=0.97'], rolls: [`--rollMix=${ESC_MIX.lr2}`, '--mixBandit=0'] },
+	lr3: { label: 'the longest random runs', flags: ['--roll=480', '--keep=0.985'], rolls: [`--rollMix=${ESC_MIX.lr3}`, '--mixBandit=0'] },
 	base: { label: 'as the search', flags: [], rolls: [] },
 };
 // the rotation and the kinds of start in rotation. The head (longruns, lr3, lr2) is the portfolio sweep's greedy set cover
