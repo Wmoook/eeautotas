@@ -182,7 +182,7 @@
 //        sticky 17, and no gain); --priorMode=0: every tick's input from the model, 1: the sticky
 //        timing (--keep) and the model's choice of each new input (an input other than the last); the other runs as
 //        before; without it no draw changes)]
-//        [--opts=0|1 (EVENT OPTIONS, OFF by default: src/options.js; --optP=0.5 of a pick's CPU runs are option runs:
+//        [--opts=0|1 (EVENT OPTIONS, OFF by default here; Find a route passes --opts=1, editor.js GX_DEFAULTS: src/options.js; --optP=0.5 of a pick's CPU runs are option runs:
 //        an input from the runs' draw held until a physical event (landing, lift-off, a wall, the apex, a field
 //        change, a room change) or its cap of 4 x luby(j) ticks (at most 256), the run 40 x luby(k) ticks (at most
 //        320); the done event's opts {runs, cells, ends}; --optEv=0: no event ends an option, only its cap (the
@@ -255,7 +255,7 @@
 //        burst and enters the room there (reentry); the progress and done events carry "useful": {culPicks, culCells,
 //        zeroed (rooms), culSets, culDropped, reculs}, "deaths" "useless" (such deaths, kept); 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
-//        [--frontier=0 (1: OPT-IN, coarse cells: the frontier field, head F, see FR_MIN_PICKS below; 0: the search exactly as
+//        [--frontier=0 (1: coarse cells: the frontier field, head F, see FR_MIN_PICKS below; Find a route passes it with --fBrake=1 --fPhys=1, editor.js GX_DEFAULTS; 0: the search exactly as
 //        before) --fLo=0.1 --fHi=0.4 --fStall=75000 --fEvery=25000 --fGrow=0.1 --fK=4096 --fLambda=4 --fDil=1 --fYield=0
 //        --fBrake=0 --fPhys=0 (EEAT_FRLOG=<file>: a line per field, observation only)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
@@ -336,7 +336,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
-// --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
+// --frontier=1 (coarse cells; the default here 0 = the search exactly as before; Find a route passes --frontier=1 --fBrake=1 --fPhys=1: editor.js GX_DEFAULTS): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
 // (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
 // picks (or sooner, at least max(FR_MIN_PICKS, FR_TILE_PK x the level's tiles) apart, when VIS grew by --fGrow; and

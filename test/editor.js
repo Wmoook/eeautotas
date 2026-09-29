@@ -40,7 +40,12 @@
 //              gets them back), its attempts into the stalled search's archive; the rotation: a nearest attempt in a pit (the
 //              first escape ends there), the next from 600 ticks back routes; the frontier (a short nearest attempt by the
 //              spawn: the escape starts from a room's long attempt); the retarget (that escape stays while nothing gets
-//              nearer, and gives way once the search gets clearly nearer after its start); escape: false = none
+//              nearer, and gives way once the search gets clearly nearer after its start); escape: false = none (these
+//              with the rotation of before: every escape as the search, from the nearest attempt's starts); the stall
+//              rotation: its configurations' list, kinds of start and turns (pure), then with stand-ins (escapes that log
+//              their command line): the configurations in order on each escape's command line (reach skipped without a
+//              steer field, deaths taken where something kills), the starts in rotation (a room's first arrival, the least
+//              explored room, the nearest attempt), the first escape after escFirst, the next one at once
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
 // usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
@@ -1515,11 +1520,13 @@ async function cpuSection() {
 		gb.maxLaunchMs === 12.5 && gb.maxKernelMs === 7.25 && !ogb.events.some((e) => e.ev === 'warning' && /again in/.test(e.text)),
 		`${JSON.stringify(gb)}; launches ${bl.map((x) => `${x.t - tOom}:${x.cells}/${x.cap}`).join(' ')}; ${ogb.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
+	// (entered: the key is 9 tiles from the spawn, ~55 ticks of running from rest at the least; the search before the
+	// DEFAULTS flip entered the key's room after 100+ ticks, Find a route's defaults (editor.js GX_DEFAULTS) after 94)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
 	const ss = ED.state();
 	check('the editor keeps the CPU search\'s sources (per room: where it was entered, its nearest attempt, the relay runs from it)', ss.stage === 'found' && Array.isArray(ss.sources) &&
-		ss.sources.some((s) => s.desc === 'key:red' && s.gain > 0 && s.entered >= 100 && s.best && s.runs === 0 && s.from === 'random runs (CPU)'),
+		ss.sources.some((s) => s.desc === 'key:red' && s.gain > 0 && s.entered >= 50 && s.best && s.runs === 0 && s.from === 'random runs (CPU)'),
 		JSON.stringify(ss.sources));
 
 	// the editor without an NVIDIA GPU: the CPU search alone, with a note
@@ -2139,6 +2146,7 @@ say({ ev: 'start', workers: 4, seeds: [1, 2, 3, 4], mode: 'physics', cells: 'coa
 setTimeout(() => say({ ev: 'closest', dist: SC.dist, tick: SC.attempt.length, inputs: SC.attempt }), 200);
 if (SC.source) setTimeout(() => say({ ev: 'source', kind: 'room', room: 777, desc: 'coins=1', gain: 5, tick: SC.source.length, dist: SC.dist + 20, inputs: SC.source }), 300);
 if (SC.later) setTimeout(() => say({ ev: 'closest', dist: SC.later.dist, tick: SC.later.attempt.length, inputs: SC.later.attempt }), SC.later.at);
+for (const s of SC.sources || []) setTimeout(() => say({ ev: 'source', kind: s.kind || 'room', room: s.room, desc: s.desc, gain: s.gain, tick: s.inputs.length, dist: s.dist, inputs: s.inputs }), s.at || 300);
 const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: SC.dist, found: 0, refined: 0, workers: 4, rooms: 1 }), 300);
 const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
 let buf = '';
@@ -2162,7 +2170,81 @@ const end = () => { clearInterval(iv); say({ ev: 'done', layers: 1, end: 'stoppe
 process.stdin.on('data', (d) => { if (/(^|\\n)stop(\\n|$)/.test(String(d))) end(); });
 process.stdin.on('end', end);
 `;
+// The same, and it logs its command line (the stall rotation: the configuration's flags each escape gets)
+const FAKE_ESC_ARGV = `'use strict';
+require('fs').appendFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)) + '\\n');
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 2, seeds: [1001, 1002], mode: 'physics', cells: 'coarse', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 1, tick: 1, states: 1, ticks: 1000, ticksPerSec: 1000, picks: 1, found: 0, refined: 0, workers: 2, rooms: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 1, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/(^|\\n)stop(\\n|$)/.test(String(d))) end(); });
+process.stdin.on('end', end);
+`;
+// (the escape tests of before the stall rotation: every escape as the search (base), its starts the nearest attempt's
+// rotation (near); the rotation's own tests below)
+const ESC_OLD = { rot: ['base'], from: ['near'] };
 async function escapeSection() {
+	// the stall rotation's pure parts: the configurations' list, the kinds of start, the turns
+	section('the stall rotation: its configurations, kinds of start and turns');
+	const rotD = ED.escRotOf(ED.ESC_ROTATION);
+	check('the default rotation (the set cover of the portfolio sweep and the filler): long random runs, the longest, the longer, the reach field alone, no useful territory / dominance, the search as is; each with its goexplore.js flags; the GPU random runs follow it',
+		rotD.map((c) => c.name).join(',') === 'longruns,lr3,lr2,reach,plain,base' && rotD[0].flags.join(' ') === '--roll=120 --keep=0.95' && rotD[1].flags.join(' ') === '--roll=480 --keep=0.985' &&
+		rotD[2].flags.join(' ') === '--roll=240 --keep=0.97' && rotD[3].flags.join(' ') === '--mix=0 --burstSteer=' && rotD[4].flags.join(' ') === '--useful=0 --dom=0' && rotD[5].flags.length === 0 && ED.ESC_ROLLS === true &&
+		ED.escRotOf('blind,reach,deaths').map((c) => c.flags.join(' ')).join('|') === '--pA=0 --burst=16|--mix=0 --burstSteer=', rotD.map((c) => `${c.name}: ${c.flags.join(' ')}`).join('; '));
+	// (n3-rotation-rollmix: the GPU random runs started again by the rotation keep main's roll mix, weighted toward the
+	// configuration's class; never --roll / --keep, which would turn the mix off in goexplore.js)
+	{
+		const GXP = require('../src/goexplore.js');
+		const rl = rotD.map((c) => ED.rollsOf(c));
+		const mixOf = (f) => { const x = (f || []).find((y) => y.startsWith('--rollMix=')); return x ? x.slice(10) : null; };
+		// (each mix as goexplore.js --gpu=1 reads it: its classes; roll at most 255, eegpu roll's cap)
+		let parsed = true;
+		for (const f of rl) if (f && f.length) { try { const a = GXP.parseArgs(['x.eelvl', '--gpu=1', ...f]); if (a.rollMix !== mixOf(f)) parsed = false; } catch (e) { parsed = false; } }
+		const cls = (m) => m.split(',').map((c) => c.split(':'));
+		const heavy = (m) => cls(m).filter((c) => +c[2] === 3).map((c) => c[0]).join();
+		const raw = ED.escRotOf(['--roll=240+--keep=0.97+--pA=0.2', '--rollMix=40:0.85:1,240:0.97:5', '--roll=90']);
+		const nx = [ED.rollsNext([], rotD[0]), ED.rollsNext(rl[0], rotD[0]), ED.rollsNext(rl[0], rotD[3]), ED.rollsNext(rl[0], rotD[4]), ED.rollsNext([], rotD[5]), ED.rollsNext(rl[2], rotD[5])];
+		check('the GPU random runs in the rotation: longruns / lr3 / lr2 start them again with the roll mix of main weighted 3 to 1 toward 120 / 255 (keep 0.985: the kernel 255-tick cap) / 240 ticks, never --roll / --keep; reach and plain leave them as they are; base back to the own mix of the search; raw flags without --roll / --keep',
+			rl.every((f) => !f || f.every((x) => !/^--(roll|keep)=/.test(x))) && parsed &&
+			heavy(mixOf(rl[0])) === '120' && heavy(mixOf(rl[1])) === '255' && heavy(mixOf(rl[2])) === '240' && cls(mixOf(rl[1])).some((c) => c[0] === '255' && c[1] === '0.985') &&
+			cls(mixOf(rl[0])).map((c) => c[0]).join() === '40,120,240' && rl[3] === null && rl[4] === null && rl[5].length === 0 &&
+			ED.rollsOf(raw[0]).join(' ') === '--pA=0.2' && ED.rollsOf(raw[1]).join(' ') === '--rollMix=40:0.85:1,240:0.97:5' && ED.rollsOf(raw[2]) === null &&
+			nx[0].join(' ') === rl[0].join(' ') && nx[1] === null && nx[2] === null && nx[3] === null && nx[4] === null && nx[5].length === 0,
+			`${rl.map((f, j) => `${rotD[j].name}: ${f ? f.join(' ') || '(own)' : '-'}`).join('; ')}; raw ${raw.map((c) => JSON.stringify(ED.rollsOf(c))).join(' ')}; next ${nx.map((x) => JSON.stringify(x)).join(' ')}`);
+	}
+	// (the merge's soundness review, 2026-09-29: goexplore.js --deaths=1 with the death-free reach file keeps dying balls and
+	// prunes by a -1 that only a death reaches; the reach file is the proof field of the search's own deaths setting)
+	// (and --dback=0: goexplore.js drops the deaths thrown back past their parent's cost, kept demoted by default: the
+	// rotation's soundness review, non-blocking (4))
+	const rotP = ED.escRotOf('--deaths=1+--reach=x.bin+--bin=y.bin+--useful=0, --deaths=1, deaths, --dback=0, --dback=0+--pA=0.2');
+	check('no configuration prunes without a proof: no "deaths" configuration, and --deaths / --reach / --bin / --dback left out of raw flags',
+		!Object.prototype.hasOwnProperty.call(ED.ESC_CONFIGS, 'deaths') && Object.values(ED.ESC_CONFIGS).every((c) => !c.flags.some((x) => /^--(deaths|reach|bin|dback)=/.test(x))) &&
+		rotP.map((c) => c.flags.join(' ')).join('|') === '--useful=0|--pA=0.2', JSON.stringify(rotP.map((c) => [c.name, c.flags])));
+	// (the GPU random runs started again by the rotation: their own measures start over, as an escape's (the rotation's
+	// soundness review, non-blocking (1)); the route, the configuration and the restart count stay)
+	{
+		const Vr = { key: 'gorolls', rolls: true, label: 'random runs (GPU)', error: 'x', state: 'running', dry: 4, best: 12.5, bestAt: 123, bestTry: { inputs: '44', ticks: 2, dist: 12.5 }, rooms: 57, batches: 412,
+			layer: 9, states: 99, ticksPerSec: 5, found: null, rollFlags: ['--rollMix=40:0.85:1'], rollCfg: 'lr3', rollRuns: 2 };
+		const Rf = ED.rollsFresh(Vr);
+		check('the GPU random runs started again by the rotation: their slices\' wait (dry), nearest (best, its time and try), rooms, completed batches and error start over; the configuration, its flags and the restart count stay',
+			Rf === Vr && Vr.dry === 0 && Vr.best === undefined && Vr.bestAt === 0 && Vr.bestTry === null && Vr.rooms === 0 && Vr.batches === 0 && Vr.error === null && Vr.state === 'starting' &&
+			Vr.layer === 0 && Vr.states === 0 && Vr.rollCfg === 'lr3' && Vr.rollRuns === 2 && Vr.rollFlags.join() === '--rollMix=40:0.85:1' && Vr.detail === 'again with lr3', JSON.stringify(Vr));
+	}
+	const rotX = ED.escRotOf('plain, --pA=0.2+--sample=4+--prefix=x+--workers=64, nosuch, longruns');
+	check('a rotation from a string: names and raw flags joined by "+" (flags that would change the escape\'s own start, share or files left out), unknown names left out',
+		rotX.map((c) => c.name).join('|') === 'plain|--pA=0.2+--sample=4+--prefix=x+--workers=64|longruns' && rotX[1].flags.join(' ') === '--pA=0.2 --sample=4' &&
+		rotX[0].flags.join(' ') === '--useful=0 --dom=0', JSON.stringify(rotX.map((c) => c.flags)));
+	check('nothing usable: the search\'s own configuration alone; the kinds of start: known names, else the default rotation',
+		ED.escRotOf('zzz,--prefix=1').map((c) => c.name).join() === 'base' && ED.escFromOf('near, bogus').join() === 'near' && ED.escFromOf('').join() === ED.ESC_FROM.join() &&
+		ED.ESC_FROM.join() === 'arrival,frontier,near');
+	const turns = [1, 4, 5, 8, 9, 13, 50].map((k) => ED.escTurnOf(k, 4, 120, 600, 600).stall);
+	check('the turns: ESC_TURN_S (120 s) in the rotation\'s first round, doubled every round, at most the escape\'s own clocks (600 s); a test\'s clocks cap it',
+		turns.join() === '120,120,240,240,480,600,600' && ED.escTurnOf(3, 4, 120, 1, 3).min === 1 && ED.escTurnOf(3, 4, 120, 1, 3).stall === 3 && ED.ESC_FIRST_S === 60 && ED.ESC_FIRST_S <= ED.ESC_WAIT_S,
+		turns.join(', '));
+	const args = ED.STRATEGIES.escape.args({ eelvl: 'l.eelvl', steerCpu: 's.bin', steer: 's.bin', steerDist: true }, { workers: 8, seed: 1, cpuDepth: 100000, deaths: false, bursts: false },
+		{ seconds: 60, workers: 4, seed: 1001, prefixFile: 'p.eetas', escFlags: ['--deaths=1'] });
+	check('the escape\'s command line: the configuration\'s flags after the search\'s own (goexplore.js: the last one wins)',
+		args.indexOf('--deaths=0') >= 0 && args.lastIndexOf('--deaths=1') > args.indexOf('--deaths=0') && args[args.length - 1] === '--deaths=1' && args.includes('--prefix=p.eetas'), args.join(' '));
 	section('the stall escape: a fresh one search (the real src/goexplore.js --prefix) from a stalled search\'s nearest attempt (a stand-in CPU search; no GPU)');
 	// a 160 x 45 level (coarse cells: the CPU search's big-level path): a floor at row 20 over solid ground, the spawn at the
 	// left, the trophy at the right; a pit (1 tile wide, 12 deep) at x 30: a ball that falls in never gets out (the reach
@@ -2183,7 +2265,7 @@ async function escapeSection() {
 	const scenario = async (name, attempt, dist, seconds, source) => {
 		const sc = path.join(HOME, `esc_${name}.json`), stdinLog = path.join(HOME, `esc_${name}_stdin.log`);
 		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog, ...(source ? { source: str(source) } : {}) }));
-		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1 });
+		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from });
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && !st.result && Date.now() - t0 < seconds * 1000 + 5000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
@@ -2217,7 +2299,7 @@ async function escapeSection() {
 	check('the escape\'s attempts into the stalled search\'s archive (CPU only: "seed" lines, whole runs from the level\'s start through its prefix)',
 		seeds1.length > 0 && seeds1.every((l) => l.slice(5).startsWith(str(a1.subarray(0, a1.length - 60)))), `${seeds1.length} seed line(s)`);
 	check('the escape\'s notes and state: the escape 1 after the stall, from the nearest attempt; its process gone after the route',
-		!!r1.st.escape && r1.st.escape.runs === 1 && (r1.st.log || []).some((l) => /escape: a fresh one search from the nearest attempt 1: no attempt nearer/.test(l)) && !!E1 && !E1.live,
+		!!r1.st.escape && r1.st.escape.runs === 1 && (r1.st.log || []).some((l) => /escape: a fresh one search 1: no attempt nearer/.test(l)) && !!E1 && !E1.live,
 		`${JSON.stringify(r1.st.escape)}; ${E1 ? E1.state : '-'}`);
 	// (2) the rotation: the stand-in's nearest attempt ends in the pit (it idles 900 ticks first): the first escape (60
 	// ticks back: in the pit) finds the trophy ruled out and ends; after the stall clock the next one starts from the nearest
@@ -2251,7 +2333,7 @@ async function escapeSection() {
 	const sc5 = path.join(HOME, 'esc_retarget.json');
 	fs.writeFileSync(sc5, JSON.stringify({ attempt: str(a4), dist: 5, stdinLog: path.join(HOME, 'esc_retarget_stdin.log'), source: str(s4), later: { at: 12000, attempt: str(s5), dist: 1 } }));
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
-		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1 });
+		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from });
 	const t5 = Date.now();
 	let st5 = ED.state(), away5 = null;
 	while (st5.running && Date.now() - t5 < 35000 && !(st5.escape && st5.escape.runs >= 2)) {
@@ -2263,9 +2345,50 @@ async function escapeSection() {
 	ED.stop();
 	while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
 	check('the retarget: an escape from a room\'s attempt keeps going while the nearest attempt (nearer than its start all along) stays; the search clearly nearer after its start (12 s): the next one from there',
-		away5 !== null && away5 >= 12 && !!st5.escape && st5.escape.runs === 2 && log5.some((l) => /escape: a fresh one search from the nearest attempt 1: .*from tick 95 of room "coins=1"'s nearest attempt/.test(l)) &&
-		log5.some((l) => /escape: a fresh one search from the nearest attempt 2: .*from tick 135 of the nearest attempt/.test(l)),
+		away5 !== null && away5 >= 12 && !!st5.escape && st5.escape.runs === 2 && log5.some((l) => /escape: a fresh one search 1: .*from tick 95 of room "coins=1"'s nearest attempt/.test(l)) &&
+		log5.some((l) => /escape: a fresh one search 2: .*from tick 135 of the nearest attempt/.test(l)),
 		`sent away after ${away5 === null ? '-' : away5.toFixed(1)} s, ${st5.escape ? st5.escape.runs : 0} escapes; ${log5.slice(-3).join(' | ')}`);
+	// (5) THE STALL ROTATION (stand-ins: the stalled search above with two rooms' first arrivals as its sources, escapes
+	// that never get anywhere and log their command line): escape k runs with the rotation's configuration k (the body's
+	// escRot; "reach" skipped: no steer field, the search's own ordering; "deaths" taken: a spike far above the corridor
+	// kills and there is no checkpoint, so deaths are no moves of the search) and a start of the rotation's kind k (the
+	// rooms' first arrivals, the least explored room, the nearest attempt); the first escape after escFirst (1 s) though
+	// escWait is 1000 s; each one's own turn 1 s and the next one at once
+	const bufK = ED.eelvlOf({ name: 'escape pit spike', width: W, height: H, cells: cells.concat([[80, 5, 361]]) });
+	const fakeArgv = path.join(HOME, 'fake-esc-argv.js'), argvLog = path.join(HOME, 'esc_rot_argv.log');
+	fs.writeFileSync(fakeArgv, FAKE_ESC_ARGV);
+	try { fs.unlinkSync(argvLog); } catch (e) { /* none */ }
+	const aR = run([[0, 200], [4, 100]]), s1R = run([[0, 180], [4, 100]]), s2R = run([[0, 160], [4, 100]]);
+	const sc6 = path.join(HOME, 'esc_rot.json');
+	fs.writeFileSync(sc6, JSON.stringify({ attempt: str(aR), dist: 30, stdinLog: path.join(HOME, 'esc_rot_stdin.log'),
+		sources: [{ room: 777, desc: 'coins=1', gain: 5, dist: 50, inputs: str(s1R), at: 300 }, { room: 778, desc: 'coins=2', gain: 5, dist: 40, inputs: str(s2R), at: 400 }] }));
+	const rot6 = ['blind', 'reach', '--pA=0.25+--sample=4+--seed=9', 'deaths', '--deaths=1+--useful=0+--reach=x.bin', 'base'];
+	ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: rot6 }, { available: false },
+		{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeArgv, argvLog], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
+	const t6 = Date.now();
+	let st6 = ED.state();
+	while (st6.running && Date.now() - t6 < 70000 && !(st6.escape && st6.escape.runs >= 6)) { await new Promise((z) => setTimeout(z, 200)); st6 = ED.state(); }
+	ED.stop();
+	while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+	const hist6 = (st6.escape && st6.escape.hist) || [];
+	const argv6 = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+	const extra6 = argv6.map((a) => a.slice(a.findIndex((x) => String(x).startsWith('--prefix=')) + 1).filter((x) => x !== '--nice=10').join(' '));
+	const log6 = (st6.log || []).filter((l) => /escape/.test(l));
+	check('the rotation\'s configurations in order, each passed to its escape only (reach skipped without a steer field; a raw flag list without --seed; no "deaths" configuration, a raw list without --deaths / --reach), then round again',
+		hist6.length >= 5 && hist6.slice(0, 5).map((h) => h.cfg).join('|') === 'blind|--pA=0.25+--sample=4+--seed=9|--deaths=1+--useful=0+--reach=x.bin|base|blind' &&
+		extra6.slice(0, 5).join('|') === '--pA=0 --burst=16|--pA=0.25 --sample=4|--useful=0||--pA=0 --burst=16' && argv6.length >= 3 && argv6[2].includes('--deaths=0') &&
+		argv6.every((a) => !a.includes('--deaths=1') && !a.includes('--reach=x.bin')),
+		`${hist6.map((h) => h.cfg).join(', ')}; ${extra6.map((x) => `[${x}]`).join(' ')}`);
+	const want6 = [['arrival', 'where room "coins=2" was entered', s2R.length], ['frontier', 'the least explored room "coins=1"\'s nearest attempt', s1R.length - 60],
+		['near', 'the nearest attempt', aR.length - 60], ['arrival', 'where room "coins=1" was entered', s1R.length], ['frontier', 'the least explored room "coins=2"\'s nearest attempt', s2R.length - 60]];
+	check('diverse starts in rotation: a room\'s first arrival (the nearer room first), the least explored room (the one no escape started from), the nearest attempt, then round again; each start once',
+		hist6.length >= 5 && want6.every(([k, w, t], j) => hist6[j].kind === k && hist6[j].from === w && hist6[j].ticks === t),
+		hist6.map((h) => `${h.n}: ${h.kind} ${h.from} @${h.ticks}`).join('; '));
+	const gaps6 = hist6.slice(1).map((h, j) => h.after - hist6[j].after);
+	check('the first escape after escFirst (not escWait\'s 1000 s); each escape\'s turn 1 s, the next one at once (within a stall check of 5 s)',
+		hist6.length >= 5 && hist6[0].after < 20 && hist6.every((h) => h.turn === 1) && gaps6.length >= 4 && gaps6.every((g) => g < 8) &&
+		log6.some((l) => /escape: a fresh one search 1: no attempt nearer by .* for 1 s: from tick 260 of where room "coins=2" was entered, distance-blind novelty \(--pA=0 --burst=16\)/.test(l)),
+		`first after ${hist6.length ? hist6[0].after : '-'} s, gaps ${gaps6.map((g) => g.toFixed(1)).join(', ')} s; ${log6.slice(0, 1).join(' | ')}`);
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));
