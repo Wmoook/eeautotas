@@ -2393,10 +2393,11 @@ function steerInfo(buf, hash) {
 			if (useful && st.tour) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
-				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
+				pastWanted: useful && !!st.info.dp && !st.info.dp.kind && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
 			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
-			if (useful && st.info.dp && st.info.fullT > st.info.dp.T) {
+			// (a blue coin DP (info.dp.kind 'bcoins'): no gold plan past its count)
+			if (useful && st.info.dp && !st.info.dp.kind && st.info.fullT > st.info.dp.T) {
 				let past = null;
 				try {
 					const sp = SF.buildSteer(L, { coinT: st.info.fullT, maxMs: d.pastMs });

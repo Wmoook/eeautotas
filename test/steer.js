@@ -40,8 +40,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-steer-'));
 process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* gone */ } });
 
 // ASCII rooms: # wall, . air, S spawn, T trophy, k red key, d red door, $ coin, c coin door (2 coins), s purple switch 1,
-// g purple switch door 1
-const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1] };
+// g purple switch door 1, b blue coin, B blue coin door (3 blue coins)
+const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1], b: [101], B: [213, 3] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -66,6 +66,17 @@ function room(k) {
 	return ascii([wall(w), row(t), row(t), row(t), row(t), row(floor.join('')), wall(w)]);
 }
 const ROOMS = { key: room('key'), coins: room('coins'), switch: room('switch') };
+// the blue coin room: 3 blue coins on the far left (x 2, 4, 6), the spawn at x 19, a column of 3-blue-coin doors at x 35,
+// the trophy at x 37 (the blue coin DP; test/steer.js B takes it with the rooms above)
+function blueRoom() {
+	const w = 40, mid = '.'.repeat(w - 2);
+	const floor = [...mid];
+	floor[1] = 'b'; floor[3] = 'b'; floor[5] = 'b'; floor[18] = 'S'; floor[w - 6] = 'B'; floor[w - 4] = 'T';
+	const top = [...mid]; top[w - 6] = 'B';
+	const t = top.join('');
+	return ascii([wall(w), row(t), row(t), row(t), row(t), row(floor.join('')), wall(w)]);
+}
+const BLUE = blueRoom();
 const toolPath = arg('tool', G.nativeTool());
 let toolOk = false;
 if (toolPath) { try { execFileSync(toolPath, ['steertest'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { toolOk = /steertest/.test(String(e.stderr || '')); } }
@@ -131,8 +142,50 @@ function sectionA() {
 	secretWall();
 	timeDoors();
 	keyExpiry();
+	blueCoins();
 }
 
+/** THE BLUE COIN DP (n3 blue-coin-dp): 3 blue coins and a 3-blue-coin door. Before, the walk model and the physics layers
+ *  counted a blue coin at every touch (the walk plan touched one coin 3 times), so the door looked near; now the distinct
+ *  blue coin DP (flags 4 in the file: the native lookup's gold count check passes, its T after h) prices all 3 coins;
+ *  opts.blueDP false (EEAT_BLUEDP=0) = main's build (no DP). Ordering only: the reach field and its -1 are untouched */
+function blueCoins() {
+	const L = levelOf(BLUE.buf);
+	const st = SF.buildSteer(L), st0 = SF.buildSteer(L, { blueDP: false });
+	const f = R.reachField(L);
+	const sim = new E.EESim(L); sim.reset();
+	const s1 = SF.steerAt(st, sim), s0 = SF.steerAt(st0, sim), r0 = R.costAt(f, sim);
+	check(`blue coins: the blue coin DP (${st.info.dp ? `${st.info.dp.kind} n ${st.info.dp.n} T ${st.info.dp.T}` : 'none'}); blueDP false: none (main)`, !!st.dp && st.dp.blue && st.dp.n === 3 && st.dp.T === 3 && st.info.dp.kind === 'bcoins' && !st0.dp && !!st.info.blue && st.info.blue.used);
+	// (the coins at x 2, 4, 6: the DP walks from x 6 to x 2 and back past x 6, more than one coin touched 3 times)
+	check(`blue coins: the start counts every coin (steer ${s1}, main's relaxed count ${s0}, reach ${r0})`, s1 > s0 + 2 && s0 > r0, `${s1} vs ${s0}`);
+	const take = (xs) => {
+		const s = new E.EESim(L); s.reset();
+		s._coinBits = Int32Array.from(s._coinBits); s._coinOwned = true;
+		for (const x of xs) { const b = L.coinBit[5 * L.width + x]; s._coinBits[b >> 5] |= 1 << (b & 31); }
+		s.blue_coins = xs.length;
+		return SF.steerAt(st, s);
+	};
+	const v1 = take([6]), v2 = take([6, 4]), v3 = take([6, 4, 2]);
+	// (the coins lie on the way to the far one: a coin taken never raises the value; all 3 taken: the door open)
+	check(`blue coins: a coin taken never raises it (${s1} -> ${v1} -> ${v2}), all 3 = the reach field's (${v3} vs ${r0})`, v1 <= s1 && v2 <= v1 && v2 > r0 && Math.abs(v3 - r0) <= 1, `${v1} ${v2} ${v3}`);
+	// the file: flags 4, the header's dpT the "any" value, the DP's T after h; the round trip gives the same numbers
+	const bytes = SF.steerFileBytes(st, G.blobFp(G.levelBlob(L)));
+	const rd = SF.readSteerFile(bytes);
+	let same = true;
+	const sim2 = new E.EESim(L); sim2.reset();
+	const inp = new E.EEInput();
+	for (let t = 0; t < 600 && same; t++) { E.applyMask(inp, [2, 2, 3, 2, 4, 5, 4, 0][(t / 45 | 0) % 8]); sim2.tick(inp); if (SF.steerFifths(st, sim2) !== SF.steerFifths(rd, sim2) || SF.steerScore(st, sim2) !== SF.steerScore(rd, sim2)) same = false; }
+	check('blue coins: the file (flags 4, header dpT 0x7fffffff, T 3 after h) round trip gives the same numbers', same && (bytes.readInt32LE(28) & 4) === 4 && bytes.readInt32LE(44) === 0x7fffffff && rd.dp.blue === true && rd.dp.T === 3, `flags ${bytes.readInt32LE(28)}, dpT ${bytes.readInt32LE(44)}, T ${rd.dp && rd.dp.T}`);
+	// the coin plan's next gate: a blue coin of the room from the start, none with all 3 taken
+	const g = SF.nextGate(rd, sim);
+	const tile = g ? [...L.coinBit].indexOf(g.bit) : -1;
+	check(`blue coins: the next gate from the start is a blue coin (tile ${tile % L.width},${Math.floor(tile / L.width)})`, tile >= 0 && L.fg[tile] === 101);
+	// the gold rooms: the same build with the knob either way (no blue coin there)
+	for (const name of ['coins', 'key']) {
+		const Lg = levelOf(ROOMS[name].buf);
+		check(`blue coins: the ${name} room's file is the same with blueDP false`, Buffer.compare(SF.steerFileBytes(SF.buildSteer(Lg), null), SF.steerFileBytes(SF.buildSteer(Lg, { blueDP: false }), null)) === 0);
+	}
+}
 /** a 40 x 7 corridor, the spawn at x 5, the trophy at x 30, full-height columns of the given ids from x 20 on */
 function corridor(cols) {
 	const W = 40, H = 7, cells = [];
@@ -303,6 +356,8 @@ function sectionB() {
 	section('B agree: the JS lookup = eegpu steertest');
 	if (!toolOk) { console.log(`  (skipped: ${toolPath ? `${toolPath} has no steertest (older than the app: rebuild it, node tools/build-native.js)` : 'no native tool'})`); return; }
 	Object.entries(ROOMS).forEach(([name, r], k) => { const L = levelOf(r.buf); agree(name, L, SF.buildSteer(L), randomRuns(k, 6, 600)); });
+	// (the blue coin DP: the file's flags 4 and dpT; the native lookup reads neither, its gold count check passes)
+	{ const L = levelOf(BLUE.buf); const st = SF.buildSteer(L); agree(`blue (DP ${st.dp ? 'blue' : 'none'})`, L, st, randomRuns(7, 6, 900)); }
 	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
 	let ids = [];
 	try { ids = fs.readdirSync(jobs).filter((d) => fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'best.eetas'))); } catch (e) { /* no jobs */ }
