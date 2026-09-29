@@ -343,6 +343,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
+	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells; the default here 0 = the search exactly as before; Find a route passes --frontier=1 --fBrake=1 --fPhys=1: editor.js GX_DEFAULTS): THE FRONTIER FIELD, head F (directed
@@ -422,6 +423,12 @@ const ROLL_MIX = '40:0.85,120:0.95,240:0.97';
 /** a batch's GPU cost for the roll mix's shares (ms): its kernels' time (eegpu roll's batch event kernelMs), else its
  *  roll kernel's (rollMs), else its wall (ms: an older tool) */
 const mixCostOf = (ev) => Math.max(0, +(ev.kernelMs != null ? ev.kernelMs : ev.rollMs != null ? ev.rollMs : ev.ms) || 0);
+/** the GPU random runs' time-to-go pace (--rollsAstar): ticks per tile of the reach model's cost, the known route's own
+ *  (a bound maxT below the search's depth: a route of maxT + 1 ticks, from a start startCost tiles out), 0 = no bound
+ *  (before any route, or no finite start cost): head A then orders by the cost alone, as before */
+function astarKappa(maxT, depth, startCost) {
+	return maxT < depth && startCost > 0 && startCost < 1e4 ? (maxT + 1) / startCost : 0;
+}
 /** the roll mix's next class: a class with no batch yet first (in order), else the one furthest below its share of the
  *  GPU time (st[j].ms / its weight; ties to the first). Order only: which runs the next batch plays. */
 function mixPick(st, classes) {
@@ -3937,7 +3944,18 @@ async function gpuMain(a, L, m) {
 	const exG = (c) => { const v = satG.get(regionOf(c)); return v === undefined ? 0 : v; };
 	// ---- head A's heap (explore()'s): (priority, cell, version)
 	const hv = [], hc = [], hver = [];
-	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
+	// (--rollsAstar=1, the default; EEAT_ROLLS_ASTAR=0 or --rollsAstar=0: off, head A as before at every time: THE TIME
+	// TO GO once a route is known. Before any route head A orders by the reach cost alone, so the first route is whatever
+	// way the frontier reached the trophy first, however long: on EXCrew Trolled Minis the GPU random runs' seed 1 went
+	// through the middle's false near ((110, 113): 172 tiles, then the whole left side round) for 19-23 k ticks where a
+	// 6.9 k way up the right edge exists, and every later strategy and the optimizer refined that class (17.6 k at the
+	// end). Once a bound T is known (their own route, or `depth` on stdin: anyone's), head A orders by
+	// cost + tick / kappa, kappa = T / the start's cost (the route's own pace in ticks per tile of the reach model): an
+	// A*-like time to go, so the cells that got somewhere early (the right edge's column at t 4000, f 287) come before the
+	// route's own late detour (f 306-437). Order only: the cells at or past the bound are skipped as before, nothing is
+	// dropped; heads B and C are unchanged; the first route itself is unchanged (no bound before it).)
+	let kappa = 0, kappaHeap = 0;
+	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0) + (kappa > 0 ? cT[c] / kappa : 0);
 	const hpush = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -3992,6 +4010,13 @@ async function gpuMain(a, L, m) {
 		}
 	};
 	let maxT = a.depth;
+	// (--rollsAstar: every cell below the bound into head A at its time-to-go priority, then the heap made (compact))
+	let astarBuilds = 0;
+	const astarRebuild = () => {
+		hv.length = 0; hc.length = 0; hver.length = 0;
+		for (let c = 0; c < nCells; c++) if (cT[c] < maxT) { hv.push(prio(c)); hc.push(c); hver.push(cVer[c]); }
+		compact();
+	};
 	const rnd = rngOf(a.seed);
 	const popA = () => {
 		while (hv.length) {
@@ -4131,6 +4156,12 @@ async function gpuMain(a, L, m) {
 		if (now >= tEnd) { end = 'time'; break; }
 		if (tickBudget && ticks >= tickBudget) { end = 'ticks'; break; }
 		if (a.first && route) { end = 'finish'; break; }
+		// (--rollsAstar: a route bound known -> head A by the time to go; the heap rebuilt when its pace changed by 10%)
+		const k = a.rollsAstar ? astarKappa(maxT, a.depth, startCost) : 0;
+		if (k > 0) {
+			kappa = k;
+			if (!(kappaHeap > 0) || Math.abs(k / kappaHeap - 1) > 0.1) { astarRebuild(); kappaHeap = k; astarBuilds++; }
+		}
 		if (batches - lastSeen >= Math.max(SEEN_BATCHES, Math.ceil(nCells / SEEN_CELLS)) && roomList.length > 0) {
 			lastSeen = batches;
 			ch.stdin.write('seen\n');
@@ -4295,6 +4326,7 @@ async function gpuMain(a, L, m) {
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
 		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null, ...(band ? { mixBandit: bandRec() } : {}),
+		astar: a.rollsAstar ? { builds: astarBuilds, kappa: Math.round(kappa * 100) / 100 } : null,
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
 			.map((k) => [k, toolDone[k]])), tool: toolDone || null });
@@ -4790,5 +4822,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { B_JW, CellMap, mixW, mixPick, mixCostOf, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { B_JW, CellMap, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };

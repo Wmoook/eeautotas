@@ -5,8 +5,11 @@
 //     gains it nothing: only the job's history entries of Find a route's runs count, FR_WHAT)
 //   - due when in the last window the optimizer's own stages gained more than the routes; not while the routes gain more
 //   - due when in the last window the routes gained the job less than HANDOFF_MIN_GAIN (1%) of its best
+// routeGate: the first route waits for its cleanup at most FIRST_CLEAN_WAIT_MS from the first one seen (faster pending routes
+// do not restart its clock), later routes at most CLEAN_WAIT_MS each, as before.
 // run() against stand-ins for the editor and the jobs (a few seconds): Find a route ending while its route is still in
-// the cleanup waits for the cleaned route (at most CLEAN_WAIT_MS, then the route as found); no route: it ends at once.
+// the cleanup waits for the cleaned route (the first route at most FIRST_CLEAN_WAIT_MS, then the route as found); no
+// route: it ends at once.
 // usage: node test/autotas.js        Exit code 1 if any check fails.
 const AT = require('../src/autotas.js');
 
@@ -47,6 +50,28 @@ check('gains before the window do not count', why({ now: 70 * s, jobAt: 30 * s, 
 check('FR_WHAT: a route\'s inbox run and its splice', AT.FR_WHAT.test('inbox (Find a route (random runs (GPU)))') &&
 	AT.FR_WHAT.test('inbox (Find a route (route)) + best (splice, 2 switches)') && AT.FR_WHAT.test('try: Find a route (route)') &&
 	!AT.FR_WHAT.test('inbox (gpu m1 3)') && !AT.FR_WHAT.test('sweep1_2') && !AT.FR_WHAT.test('try: focus 0:01.00-0:02.00'));
+
+console.log('routeGate (the route to the job; its cleanup wait)');
+{
+	const R = (runTicks, clean) => ({ runTicks, ticks: runTicks + 5, inputs: 'x'.repeat(runTicks + 5), clean });
+	// a first route whose cleanup is done at once: handed on at once
+	let g = { lastKey: '', waitKey: '', waitAt: null };
+	check('a cleaned first route: at once', AT.routeGate(g, R(900, 'done'), 0) === true);
+	check('the same route again: not twice', AT.routeGate(g, R(900, 'done'), 100) === false);
+	// the first route pending, a faster pending route every second (EXCrew: the cleanup of a 20 k-tick route takes 3-6 s)
+	g = { lastKey: '', waitKey: '', waitAt: null };
+	let at = -1;
+	for (let t = 0; t <= 20; t++) if (at < 0 && AT.routeGate(g, R(20000 - 100 * t, 'pending'), t * s)) at = t;
+	check('the first route: the clock not restarted by faster pending routes, handed on after FIRST_CLEAN_WAIT_MS', at * s === AT.FIRST_CLEAN_WAIT_MS, `at ${at} s`);
+	check('its cleaned version goes again', AT.routeGate(g, R(20000 - 100 * at, 'done'), (at + 3) * s) === true);
+	// later routes: the wait per route as before (CLEAN_WAIT_MS, restarted by a newer one)
+	let later = -1;
+	for (let t = 30; t <= 60; t++) if (later < 0 && AT.routeGate(g, R(15000 - (t < 40 ? 10 * t : 400), 'pending'), t * s)) later = t;
+	check('a later route: CLEAN_WAIT_MS from the newest pending route, as before', later * s === 40 * s + AT.CLEAN_WAIT_MS, `at ${later} s`);
+	g = { lastKey: '', waitKey: '', waitAt: null };
+	check('a first route cleaned before the cap: at once', AT.routeGate(g, R(5000, 'pending'), 0) === false && AT.routeGate(g, R(4900, 'done'), 2 * s) === true);
+	check('routeKey: the gate\'s key (the race test\'s "still in the cleanup" reads it)', AT.routeKey(R(900, 'pending')) === '900:905:905:p' && AT.routeKey(R(900, 'done')) === '900:905:905:c');
+}
 
 // the stall rotation in the timeline: each escape of Find a route once (its configuration and kind of start), a route
 // of an escape names its configuration
@@ -151,9 +176,10 @@ function runRace(o) {
 			!!jobA && imported.length === 1 && imported[0] === cleaned.inputs && !/without a route/.test(endA && endA.why), `${endA && endA.why}; job ${jobA ? jobA.runTicks : 'none'}, imported ${imported.map((x) => x.length).join(',') || 'nothing'}`);
 		const iH = a.evs.findIndex((e) => e.ev === 'handoff'), iJ = a.evs.findIndex((e) => e.ev === 'job');
 		check('then the handoff: "Find a route ended (found)", after the job', iJ >= 0 && iH > iJ && /Find a route ended \(found\)/.test(a.evs[iH].why), iH >= 0 ? a.evs[iH].why : 'no handoff');
-		const b = await runRace({ cleanAfter: Infinity, jump: AT.CLEAN_WAIT_MS + 1000 });
+		// (the first route's cap is FIRST_CLEAN_WAIT_MS since n3-slow-first-route-hunt: routeGate; later routes CLEAN_WAIT_MS)
+		const b = await runRace({ cleanAfter: Infinity, jump: AT.FIRST_CLEAN_WAIT_MS + 1000 });
 		const endB = b.evs.find((e) => e.ev === 'end');
-		check(`the cleanup never comes back: after CLEAN_WAIT_MS (${AT.CLEAN_WAIT_MS} ms) the route as found is the job's base`,
+		check(`the cleanup never comes back: after FIRST_CLEAN_WAIT_MS (${AT.FIRST_CLEAN_WAIT_MS} ms) the route as found is the job's base`,
 			imported.length === 1 && imported[0] === raw.inputs && !/without a route/.test(endB && endB.why), `${endB && endB.why}; imported ${imported.map((x) => x.length).join(',') || 'nothing'}`);
 	}
 	const c = await runRace({ route: false });
