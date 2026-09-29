@@ -571,7 +571,7 @@ const B_JW = 40;
 // 684,355 samples every 5 ticks, commits 39de5b9 95cc669 c7623ee febeeb2): the routes on the 71 levels that ALSO have a
 // stalled run (the hard ones; every routed level: 0.691 0.138 0.096 0.045 0.030), the stalled runs' nearest attempts
 // there 0.769 0.125 0.076 0.025 0.005 (>= 20 tiles uphill: 22.5% vs 10.6% of the time); `--excBands=a,b,c,d,e` another.
-// MEASURED (the product A/B, box 4, 75 strict pairs, 3 seeds; CLAUDE.md's row): NOT KEPT: targets routed 7 vs 7 of 36,
+// MEASURED (the product A/B, box 4, 93 strict pairs, 3-4 seeds; CLAUDE.md's row): NOT KEPT: targets routed 10 vs 9 of 48,
 // controls 19 vs 17 of 21 (x1.00): the picks reach this profile in every strategy and the pins stay; the flag-off CPU
 // search's picks already spend 26% of the picks >= 20 tiles uphill. Kept opt-in as the measurement it is (the observer).
 // --excDeep=1 (with --exc=1; v2, 2026-09-29: v1's uniform band draws spread head X over thousands of uphill cells, a new
