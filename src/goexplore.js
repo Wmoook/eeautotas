@@ -195,6 +195,8 @@
 //        alone, 2^25 cells, 262,144 states a layer) at once for this long, then its own sizing again)]
 //        [--burstFair=1 (0: the bursts' rooms by the bandit alone; 1: its score per untried target not yet failed,
 //        src/bursts.js fairScore)]
+//        [--burstServe=1 (the bursts through a long-lived eegpu explore --serve per lane, which keeps its CUDA context and
+//        kernels between bursts; 0 (or EEAT_BURST_SERVE=0): a process per burst, as before; an eegpu without --serve: the same)]
 //        [--stallLadder=0 (1: OPT-IN, no gain in its A/B (hx-r1-power: Forgotten Helix / NC Naos, the same coins and rooms): an arm whose last 3 bursts gained nothing sends its start up the wall ladder at any
 //        distance, then 1000 and 2000 ticks further back: bursts.js STALL_N / STALL_FAR)] [--legs=0 (1: OPT-IN, not
 //        measured: such an arm also gets one CPU leg search in a worker thread, src/legsearch.js: fine cells keeping the
@@ -309,7 +311,7 @@ const WAY_PICK = 40;
 // head L refines the new way at its full share (0: only head L's own routes, as before)
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
-	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
+	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest

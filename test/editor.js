@@ -2064,6 +2064,11 @@ async function laneSection() {
 	const lane = st.strategies.find((q) => q.key === 'skips');
 	check('the path skips run next to the CPU search: "path skips", its own threads (a quarter of the CPU search\'s 4, from idle threads or its own)',
 		!!lane && lane.label === 'path skips' && lane.cpu && st.strategies.some((q) => q.key === 'goexplore'), st.strategies.map((q) => `${q.key}:${q.label}:${q.state}`).join(', '));
+	// the early start (fast-start): the path skips never read the steer field, so they start from the reach field's end,
+	// the CPU search (which reads it) once the steer field is built
+	const gx = st.strategies.find((q) => q.key === 'goexplore');
+	check('the early start: the path skips launched no later than the CPU search (it waits for the steer field)',
+		!!lane && !!gx && lane.launchedAt > 0 && gx.launchedAt > 0 && lane.launchedAt <= gx.launchedAt, `${lane && lane.launchedAt} vs ${gx && gx.launchedAt}`);
 	// the CPU search got the shortcut as a seed (CPU only: no one search): whole inputs that end in the attempt's end state,
 	// sooner
 	const seeds = lines.filter((l) => l.startsWith('seed ')).map((l) => Uint8Array.from(l.slice(5), (c) => (c.charCodeAt(0) - 48) & 31));

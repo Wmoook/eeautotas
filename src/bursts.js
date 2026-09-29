@@ -268,7 +268,8 @@ function create(o) {
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
 	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0 };
+	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
+		servers: 0, served: 0 };
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
 	let smallUntil = 0;
@@ -720,6 +721,84 @@ function create(o) {
 		return best;
 	};
 	const sleep = (ms) => new Promise((res) => { const t = setTimeout(res, ms); if (t.unref) t.unref(); });
+	// the burst servers (eegpu explore --serve, one per lane): a burst is a job line to its lane's server, which keeps its
+	// CUDA context and kernels between bursts (a process per burst spent 1.9-4.3 s from its spawn to its ready line, 15-26%
+	// of the bursts' wall time; box 1's A100s under load: 6.5 s for the context alone). The job's output lines are a
+	// process's, ending with {"ev":"idle","code"}; its stop file, the pause file and the launches are the process's. An
+	// eegpu without --serve (an older build: it reads --serve=1 as its run file and exits 2 before loading the driver),
+	// a .js stand-in (tests) or --burstServe=0: a process per burst, as before. A server that ends (a launch error: its
+	// context is gone) ends its job like a process's exit; the next burst starts a new one.
+	const servers = new Map();   // lane -> {ch, served, dead, job, ready}
+	let serveOff = /\.js$/i.test(tool) || String(a.burstServe) === '0' || process.env.EEAT_BURST_SERVE === '0';
+	/** a server keeps this Node alive while it starts or runs a job (as a burst's process does), not while it is idle
+	 *  (its --parent ends it once Node has gone) */
+	const hold = (s, on) => { try { for (const p of [s.ch, s.ch.stdin, s.ch.stdout, s.ch.stderr]) if (p) { if (on) p.ref(); else p.unref(); } } catch (e) { /* gone */ } };
+	const serverOf = (lane) => {
+		const s0 = servers.get(lane);
+		if (s0 && !s0.dead) return s0.ready;
+		const s = { ch: null, served: false, dead: false, job: null, buf: '', err: '' };
+		servers.set(lane, s);
+		s.ready = new Promise((resolve) => {
+			const sargs = ['explore', bin, '--serve=1', `--parent=${process.pid}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), ...cacheArgs];
+			let ch;
+			try { ch = spawn(tool, sargs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true }); } catch (e) { s.dead = true; resolve(null); return; }
+			s.ch = ch;
+			children.add(ch);
+			st.servers++;
+			ch.stdin.on('error', () => { /* the server has gone: its close ends the job */ });
+			ch.stdout.on('data', (d) => {
+				s.buf += d;
+				let k;
+				while ((k = s.buf.indexOf('\n')) >= 0) {
+					const line = s.buf.slice(0, k);
+					s.buf = s.buf.slice(k + 1);
+					if (!s.served) {
+						if (line.startsWith('{"ev":"serving"')) { s.served = true; resolve(s); } else if (line.startsWith('{"error"')) s.err = line;
+						continue;
+					}
+					if (!s.job) continue;
+					if (line.startsWith('{"ev":"idle"')) {
+						let e = {};
+						try { e = JSON.parse(line); } catch (x) { /* a cut line */ }
+						const j = s.job;
+						s.job = null;
+						if (!stopped) hold(s, false);
+						j.resolve({ ok: true, code: e.code | 0 });
+						continue;
+					}
+					s.job.onLine(line);
+				}
+			});
+			ch.stderr.on('data', (d) => { s.err = (s.err + d).slice(-400); if (s.job) s.job.onErr(String(d)); });
+			ch.on('error', (e) => { s.err = e.message; });
+			ch.on('close', (code) => {
+				children.delete(ch);
+				s.dead = true;
+				if (!s.served) {
+					resolve(null);
+					// (an older eegpu: its run file "--serve=1" cannot be opened; any other failure to start (the GPU's memory
+					// full, ...) only this burst runs as a process, which meets it the way it always did)
+					if (code === 2 || /cannot open --serve/.test(s.err)) {
+						if (!serveOff) o.say({ ev: 'warning', text: 'burst: this eegpu has no --serve (an older build): a process per burst' });
+						serveOff = true;
+					}
+				}
+				if (s.job) { const j = s.job; s.job = null; j.resolve({ ok: true, code }); }
+			});
+		});
+		return s.ready;
+	};
+	/** one burst's explore through its lane's server: {ok: false} when there is none (the caller starts a process),
+	 *  else {ok, code} once the job has ended (its lines went to onLine) */
+	const serveJob = async (lane, jobArgs, onLine, onErr) => {
+		const s = await serverOf(lane);
+		if (!s || s.dead || stopped) return { ok: false };
+		return new Promise((resolve) => {
+			s.job = { onLine, onErr, resolve };
+			hold(s, true);
+			try { s.ch.stdin.write(`${jobArgs.join('\t')}\n`); st.served++; } catch (e) { s.job = null; resolve({ ok: false }); }
+		});
+	};
 	/** one burst: from `inputs` (a prefix), the steer file `reach`, the cells; resolves {end, sec, reached, fresh, nearest} */
 	const burst = (job) => new Promise((res) => {
 		const pre = path.join(work, `prefix_${job.lane}.eetas`), stop = path.join(work, `stop_${job.lane}`);
@@ -733,11 +812,6 @@ function create(o) {
 			`--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${job.reach}`, `--cells=${cells}`, `--cap=${cap}`,
 			...(job.slack > 0 ? [`--costslack=${job.slack}`] : []), ...(job.steer ? [`--steer=${job.steer}`] : []), `--stopfile=${stop}`, ...(a.pausefile ? [`--pausefile=${a.pausefile}`] : []), `--parent=${process.pid}`, ...cacheArgs];
 		const t0 = Date.now();
-		let ch;
-		// (a .js tool: a stand-in for eegpu run by this Node, test/editor.js)
-		const cmd = /\.js$/i.test(tool) ? [process.execPath, tool, ...args] : [tool, ...args];
-		try { ch = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true }); } catch (e) { res({ end: `spawn: ${e.message}`, sec: 0, fail: true }); return; }
-		children.add(ch);
 		let buf = '', done = null, reached = false, changed = false, fresh = 0, near = Infinity, readyAt = 0, err = '', ended = false, best = null;
 		const halt = () => { if (!ended) { ended = true; try { fs.writeFileSync(stop, '1'); } catch (e) { /* gone */ } } };
 		job.halt = halt;
@@ -788,19 +862,31 @@ function create(o) {
 				}
 			}
 		};
-		ch.stdout.on('data', (d) => {
-			buf += d;
-			let k;
-			while ((k = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, k)); buf = buf.slice(k + 1); }
-		});
-		ch.stderr.on('data', (d) => { err = (err + d).slice(-400); });
-		ch.on('error', (e) => { err = e.message; });
-		ch.on('close', (code) => {
-			children.delete(ch);
+		// the burst's end (its process's exit code, or its job's in a server)
+		const end = (code) => {
 			const sec = (Date.now() - (readyAt || t0)) / 1000;
 			res({ end: done ? done.end : `exit ${code}${err ? `: ${err.trim().split('\n').pop()}` : ''}`, sec, wall: (Date.now() - t0) / 1000, reached, changed, fresh, near, best, fail: !done && !ended && !stopped,
 				states: done ? done.states : 0, layers: done ? done.layers : 0 });
-		});
+		};
+		const perProcess = () => {
+			let ch;
+			// (a .js tool: a stand-in for eegpu run by this Node, test/editor.js)
+			const cmd = /\.js$/i.test(tool) ? [process.execPath, tool, ...args] : [tool, ...args];
+			try { ch = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true }); } catch (e) { res({ end: `spawn: ${e.message}`, sec: 0, fail: true }); return; }
+			children.add(ch);
+			ch.stdout.on('data', (d) => {
+				buf += d;
+				let k;
+				while ((k = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, k)); buf = buf.slice(k + 1); }
+			});
+			ch.stderr.on('data', (d) => { err = (err + d).slice(-400); });
+			ch.on('error', (e) => { err = e.message; });
+			ch.on('close', (code) => { children.delete(ch); end(code); });
+		};
+		if (serveOff) { perProcess(); return; }
+		// (the server's own arguments: the level, --serve, --parent, --pausefile and the cache folder; the job's: the rest)
+		serveJob(job.lane, args.slice(3).filter((x) => !/^--(parent|pausefile|cachedir)=/.test(x)), onLine, (d) => { err = (err + d).slice(-400); })
+			.then((r) => { if (r.ok) end(r.code); else perProcess(); }, () => perProcess());
 	});
 	/** the steer file for a field (walk mode: the explore's order, layer cap, nearest attempt and cost ceiling) */
 	const steerFile = (walk, mx, lane) => {
@@ -934,7 +1020,7 @@ function create(o) {
 			}
 			confs[job.conf].n++; confs[job.conf].y += reward;
 			if (job.r && job.r.confs) { job.r.confs[job.conf].n++; job.r.confs[job.conf].y += reward; }
-			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, end: r.end,
+			o.say({ ev: 'burst', n: st.bursts, room: job.r ? job.r.desc : null, what: job.what, from: job.inputs.length, sec: Math.round(r.sec * 10) / 10, wall: Math.round((r.wall || 0) * 10) / 10, end: r.end,
 				reached: r.reached, changed: r.changed, newRooms: r.fresh, dist: Number.isFinite(r.near) ? Math.round(r.near * 10) / 10 : null, startDist: Math.round(job.startDist * 10) / 10,
 				states: r.states, layers: r.layers, reward: Math.round(reward * 100) / 100, chain: job.chain || 0, at: o.sec(), ...(job.tile >= 0 && !job.chain ? { tile: [job.tile % W, (job.tile / W) | 0] } : {}) });
 			// the chain: nearer without reaching a target: on from its nearest attempt, the same targets (the same steer file)
@@ -1029,6 +1115,8 @@ function create(o) {
 		stop: async () => {
 			stopped = true;
 			for (let k = 0; k < Math.max(1, a.burstPar); k++) { try { fs.writeFileSync(path.join(work, `stop_${k}`), '1'); } catch (e) { /* none */ } }
+			// (the burst servers: the end of their input ends them after their job, which the stop file ends)
+			for (const s of servers.values()) { if (s.ch && !s.dead) { hold(s, true); try { s.ch.stdin.end(); } catch (e) { /* gone */ } } }
 			for (let k = 0; k < 150 && children.size; k++) await sleep(100);
 			for (const ch of children) { try { ch.kill(); } catch (e) { /* gone */ } }
 			for (const w of legWorkers) { try { await w.terminate(); } catch (e) { /* gone */ } }
