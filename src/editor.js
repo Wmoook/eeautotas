@@ -1280,28 +1280,47 @@ function gateEnter(inputs, level) {
 		return inputs;
 	} catch (e) { return inputs; }
 }
-/** the coins the state after inputs holds, as the room keys count them (gold where a coin door or gate reads them, blue
- *  where a blue one does; goexplore.js roomOf): the wall breaker's progress order of its starting points */
+/** the coin counters the room keys count, as the wall breaker's progress order reads them (goexplore.js roomOf): gold
+ *  where a coin door or gate reads them, blue where a blue one does; a counter whose doors guard nothing on the way to
+ *  the trophy is no progress (goexplore.js counterRelevance; Good Egg's blue coins), unless it has gates: then it counts
+ *  up to its highest gate (counterRelevance upTo, as the room keys do). {gold, blue, upGold, upBlue} per level */
+const COUNT_DOORS = new WeakMap();
+function countDoorsOf(L) {
+	let D = COUNT_DOORS.get(L);
+	if (D) return D;
+	let gold = false, blue = false;
+	for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
+	const rel = GX.counterRelevance(L), up = rel.upTo || { gold: 0, blue: 0 };
+	D = { gold: gold && (rel.gold || up.gold > 0), blue: blue && (rel.blue || up.blue > 0), upGold: rel.gold ? Infinity : up.gold, upBlue: rel.blue ? Infinity : up.blue };
+	COUNT_DOORS.set(L, D);
+	return D;
+}
+/** the coins the state after inputs holds, as the room keys count them (countDoorsOf): the wall breaker's progress order
+ *  of its starting points */
 function coinsOf(inputs) {
-	const L = cur.level;
-	if (!cur.countDoors) {
-		let gold = false, blue = false;
-		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
-		// (a counter whose doors guard nothing on the way to the trophy is no progress: goexplore.js counterRelevance, as
-		// the room keys count it; Good Egg's blue coins)
-		// (an irrelevant counter with gates counts up to its highest gate: counterRelevance upTo, as the room keys do)
-		const rel = GX.counterRelevance(L), up = rel.upTo || { gold: 0, blue: 0 };
-		cur.countDoors = { gold: gold && (rel.gold || up.gold > 0), blue: blue && (rel.blue || up.blue > 0), upGold: rel.gold ? Infinity : up.gold, upBlue: rel.blue ? Infinity : up.blue };
-	}
-	const D = cur.countDoors;
+	const L = cur.level, D = countDoorsOf(L);
 	if (!D.gold && !D.blue) return 0;
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
 	return (D.gold ? Math.min(sim.coins | 0, D.upGold) : 0) + (D.blue ? Math.min(sim.blue_coins | 0, D.upBlue) : 0);
 }
-/** a room's coins from its description (goexplore.js roomOf desc: 'coins=N', 'bluecoins=N' where a door reads them) */
-const coinsOfDesc = (desc) => { let n = 0; for (const m of String(desc || '').matchAll(/(?:^|\s)(?:blue)?coins=(\d+)/g)) n += +m[1]; return n; };
+/** a room's coins from its description (goexplore.js roomOf desc: 'coins=N' / 'bluecoins=N' where the key reads the
+ *  count, 'coins>=T' where it reads the thresholds met) as coinsOf counts them: with the level L, each counter of
+ *  countDoorsOf capped at its highest gate, so a room past the gate ('bluecoins>=3' on The 7 Depths of Hell) counts the
+ *  gate's count, at or above the rooms below it (the n3 soundness review: it read 0 there, and breakStarts' progress
+ *  order put the frontier room past the gate behind even the start room), a counter that is no progress 0; without L
+ *  only 'coins=N' counts */
+const coinsOfDesc = (desc, L) => {
+	const D = L ? countDoorsOf(L) : null;
+	let n = 0;
+	for (const m of String(desc || '').matchAll(/(?:^|\s)(blue)?coins(>?=)(\d+)/g)) {
+		if (!D) { if (m[2] === '=') n += +m[3]; continue; }
+		const b = m[1] === 'blue';
+		if (b ? D.blue : D.gold) n += Math.min(+m[3], b ? D.upBlue : D.upGold);
+	}
+	return n;
+};
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1346,7 +1365,7 @@ function breakStarts() {
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
 		if (out.length >= lim) break;
-		const k = coinsOfDesc(r.desc);
+		const k = coinsOfDesc(r.desc, cur.level);
 		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k);
 		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k);
 	}

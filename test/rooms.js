@@ -111,6 +111,13 @@ function sectionRelevance() {
 	check('two (the gate shuts): another room', sg.blue_coins === 2 && g2 !== g1 && g2 !== g0 && /bluecoins>=2/.test(gd2), `'${gd2}'`);
 	touchG(8, 1);
 	check('three (past the gate, no threshold above): the same room as two', sg.blue_coins === 3 && RG.key(sg) === g2, RG.desc(sg));
+	// the wall breaker's progress order (editor.js breakStarts: coinsOf for its attempts, coinsOfDesc for the rooms'
+	// starts) reads the count the key reads: the room past the gate ranks at the gate's count, at or above the rooms below
+	// it (the n3 soundness review: coinsOfDesc read 'bluecoins>=2' as 0, behind 'bluecoins=1' and the start room)
+	const ord = ['', gd1, gd2, RG.desc(sg)].map((d) => ED.coinsOfDesc(d, G));
+	check('the breaker\'s order by the rooms\' descriptions (coinsOfDesc with the level): the start 0, one coin 1, past the gate 2 (the gate\'s count), three coins 2', ord.join(',') === '0,1,2,2', `${ord.join(',')} for '${gd1}' '${gd2}'`);
+	check('... a door pocket (no gate: its thresholds are no progress) 0 as before, and without the level only coins=N counts',
+		ED.coinsOfDesc(d2, A) === 0 && ED.coinsOfDesc('bluecoins=1') === 1 && ED.coinsOfDesc('coins=2 bluecoins>=2') === 2, `${ED.coinsOfDesc(d2, A)} ${ED.coinsOfDesc('bluecoins=1')} ${ED.coinsOfDesc('coins=2 bluecoins>=2')}`);
 	const B = levelOf('pocket_cp', POCKET_CP).level;
 	check('a checkpoint in the pocket: blue relevant', GX.counterRelevance(B).blue === true, JSON.stringify(GX.counterRelevance(B)));
 	const Cr = levelOf('pocket_crown', POCKET_CROWN).level;
