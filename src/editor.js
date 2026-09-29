@@ -911,8 +911,13 @@ function replayRooms(masks, withPath, withCul = false) {
 const deathTiles = () => (cur && cur.opts && cur.opts.fileDeaths === false ? 1e4 : RF.DEATH_TILES);
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
- *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
-const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam) || (!V.cpu && !cur.files.steer));
+ *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d. Where the CPU file
+ *  carries the switch chain (cur.chainW: the CPU search's values the LARGER of the chain and the layer field's, Bad EE Level
+ *  9's start 4,000 tiles vs the layer field's 238), a GPU tool's plain-file value (the layer field's, its unmodelled doors
+ *  open) is another scale too: ranked the same way (d4-switch-chain-2; before, every move's attempt of the first seconds
+ *  stayed the nearest for the whole search on the chain's campaign levels, Evolution Revolution's and Purple Depths' at
+ *  349 / 387 ticks, and its stall clocks fired the escapes at 65 / 105 s while the CPU search got nearer on its own scale) */
+const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam) || (!V.cpu && (!cur.files.steer || !!cur.chainW)));
 function steerDist(V, d) {
 	return steerless(V) && d < 1e4 ? Math.min(9990, STEER_MISS + d) : d;
 }
