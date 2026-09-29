@@ -1005,7 +1005,7 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 			if (!changed) break;
 		}
 	}
-	if ((!opts || opts.altLegs !== false) && process.env.EEAT_COINFIX !== '0') altLegs(A, PH, M, s, nC, CL);
+	if ((!opts || opts.altLegs !== false) && process.env.EEAT_COINFIX !== '0') altLegs(A, PH, M, s, nC, CL, opts && opts.chainUntil);
 	return CL;
 }
 /** legs across the other layers (the coin DP's legs are all in ONE layer: the start's key / team / fx / switch values):
@@ -1013,9 +1013,10 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
  *  reaches either) takes its leg in another layer the build reached (its non-coin values; at most ALT_LAYERS), the one with
  *  the least arrival cost from the start, where that leg reaches at least as many coins; a wild layer's walk x kappa.
  *  Floating Temples: its 5 coins need the purple switch or an effect first, no leg had a value from the start and the DP
- *  none at all. Ordering values only */
+ *  none at all. Ordering values only. until (ms clock, 0 none): no more alt legs past it (buildSteer's chain time: the
+ *  field must reach the search within the editor's steer wait) */
 const ALT_LAYERS = 6;
-function altLegs(A, PH, M, s, nC, CL) {
+function altLegs(A, PH, M, s, nC, CL, until) {
 	const st = A.start.t, coins = CL.coins;
 	const has = (f, t) => !!f && arriveCost(f, t) < CUT;
 	const into = (f, q) => { let k = 0; for (const c of coins) if (c !== q && has(f, c)) k++; return k; };
@@ -1041,6 +1042,7 @@ function altLegs(A, PH, M, s, nC, CL) {
 		const k = CL.countOf.get(q), n0 = into(CL.fields.get(q), q);
 		let best = null;
 		for (const a of alts) {
+			if (until && Date.now() > until) { CL.altCut = true; break; }
 			const { lv, fg0 } = copyOf(M.withVal(a, nC, k));
 			const fg = Int32Array.from(fg0); fg[q] = TROPHY;
 			const f = legFieldOf(lv, fg, q, coins, st);
@@ -1452,6 +1454,13 @@ function tourFifths(st, sim) {
 const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
 // (the coin DP chain's largest value from the start, fifths: the searches' distance scale, STEER_REAL_MAX 5999 tiles)
 const DP_START_MAX = 5999 * 5;
+// (the chain's time (the cross-layer legs and the coinLegsLayered tries, EEAT_COINFIX): only until DP_CHAIN_MS after the
+// build's start (opts.chainMs), so the field reaches the search within the editor's steer wait (editor.js STEER_WAIT_MS,
+// 15 s from the worker's start); past it the chain stops and the DP is what it has (main's where the chain had not
+// replaced it). The review's measure (box 1, 137b073): Cave Exploration 19.6 s vs main's 5.6 s for a chain whose tour
+// did not fit DP_START_MAX (main's file in the end), the cake is a lie 15.4 vs 4.6 s, The Memory Game 18.0 vs 11.5 s. The
+// plan past its count (opts.coinT: built after the field is answered, never waited for) keeps the build's deadline)
+const DP_CHAIN_MS = 12000;
 /**
  * The steer field of a prepared level. opts: {maxLayers (4096), maxBytes (STEER_MAX_BYTES), maxMs (STEER_MAX_MS),
  * maxIters (12), noDP} -> steer: {version, W, H, feats [{key, kind, param, radix, stride}], team [values], S, layerBody
@@ -1529,10 +1538,11 @@ function buildSteer(level, opts) {
 	}
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) cp = null;
-	let dpHow = null;
+	let dpHow = null, chainCut = false;
 	if (cp) {
 		const deadline = t0 + maxMs, st0 = A.start.t;
-		let CL = opts.coinT ? coinLegsLayered(B, PH, cp, deadline, opts) : coinLegsPhys(B, PH, cp, opts);
+		const chainEnd = opts.coinT ? deadline : Math.min(deadline, t0 + (opts.chainMs > 0 ? opts.chainMs : DP_CHAIN_MS));
+		let CL = opts.coinT ? coinLegsLayered(B, PH, cp, deadline, opts) : coinLegsPhys(B, PH, cp, Object.assign({}, opts, { chainUntil: chainEnd }));
 		let D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		dpHow = `${opts.coinT ? 'layered' : 'phys'} T ${cp.T}`;
 		// (no value from the start (a coin that needs another layer has no leg in the legs' one; the wrong T): the chain
@@ -1542,6 +1552,7 @@ function buildSteer(level, opts) {
 		// STEER_REAL_MAX 5999 tiles) is not taken: every attempt's distance would read 5999 (Cave Exploration's layered
 		// T 7 tour: 6,136 tiles at the start; the A/B's var arm had no nearer attempt for its stall clocks))
 		const fits = (x, y) => dpStart(x, y, st0) <= DP_START_MAX;
+		chainCut = !!(CL && CL.altCut);
 		if (opts.dpChain !== false && process.env.EEAT_COINFIX !== '0' && !(dpStart(CL, D, st0) < Infinity)) {
 			const drops = [];
 			const d0 = CL && !CL.layered ? coinDPDrop(CL, A) : null;
@@ -1552,8 +1563,9 @@ function buildSteer(level, opts) {
 			for (const T2 of [cp.T, fullT, physT]) {
 				if (!(T2 >= 1) || tried.has(T2) || T2 > cp.coins.length) continue;
 				tried.add(T2);
-				if (Date.now() > deadline) break;
-				const CL2 = coinLegsLayered(B, PH, { T: T2, coins: cp.coins }, deadline, Object.assign({}, opts, { drop: true }));
+				if (Date.now() > chainEnd) { chainCut = true; break; }
+				const CL2 = coinLegsLayered(B, PH, { T: T2, coins: cp.coins }, chainEnd, Object.assign({}, opts, { drop: true }));
+				if (!CL2 && Date.now() > chainEnd) { chainCut = true; break; }
 				if (!CL2) continue;
 				if (fits(CL2, CL2.layered.D) && !CL2.dropped) { CL = CL2; D = CL2.layered.D; dpHow = `layered T ${T2}`; got = true; break; }
 				if (fits(CL2, CL2.layered.D)) drops.push({ CL: CL2, D: CL2.layered.D, how: `layered T ${T2} + ${CL2.dropped} dropped` });
@@ -1614,7 +1626,7 @@ function buildSteer(level, opts) {
 		}
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, how: dpHow } : null, fullT, planT, physT, start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, how: dpHow } : null, fullT, planT, physT, chainCut, start: steerAt(steer, sim0), ms: Date.now() - t0, over,
 		tour: tourInfo };
 	return steer;
 }

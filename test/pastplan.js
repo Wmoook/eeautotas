@@ -69,6 +69,27 @@ check('the default build: T by physics = the full count (no foothold in the shaf
 	sph.info.physT === 3 && sph.info.planT < 3 && !!sph.dp && sph.dp.T === 3 && sph.dp.n === 3 && Number.isFinite(sph.info.start), JSON.stringify({ planT: sph.info.planT, physT: sph.info.physT, dp: sph.info.dp, start: sph.info.start }));
 check('... no plan past its count wanted (the editor builds one only where the full count is above the DP\'s)', !(sph.info.fullT > sph.info.dp.T));
 
+console.log('\n== the chain\'s time (n3-coin-dp-wrong-T-recheck: the field reaches the search within the steer wait)');
+{
+	// 40 x 8, floor row 6: spawn (1, 5); coins in the air above the corridor (off the walk plan's way): (3, 2), then past
+	// a coin GATE of 2 at x 6 (shut once 2 coins are held: behind the ball by then) (8, 2) and (12, 2); a coin door of 3
+	// at x 24; the trophy (30, 5). coinLegsPhys's legs are in the T - 1 = 2 layer, where the gate is shut between the
+	// start and 2 of the coins: its DP has no value from the start; the chain's layered DP (the leg to the k-th coin at
+	// k - 1 coins) has one
+	const W2 = 40, H2 = 8, c2 = [];
+	for (let x = 0; x < W2; x++) c2.push([x, 0, 9], [x, 6, 9], [x, 7, 9]);
+	for (let y = 1; y < 6; y++) c2.push([0, y, 9], [W2 - 1, y, 9], [6, y, 165, 2], [24, y, 43, 3]);
+	c2.push([1, 5, 255], [3, 2, 100], [8, 2, 100], [12, 2, 100], [30, 5, 121]);
+	const L2 = prep(levelOfCells(W2, H2, c2).eelvl);
+	const s0 = SF.buildSteer(L2), s1 = SF.buildSteer(L2, { chainMs: 1 }), s2 = SF.buildSteer(L2, { dpChain: false, altLegs: false });
+	check('the default build: the DP from the chain (layered T 3) with a value at the start, not cut', !!s0.dp && /^layered T 3/.test(s0.info.dp.how) && Number.isFinite(s0.info.start) && !s0.info.chainCut,
+		JSON.stringify({ dp: s0.info.dp, start: s0.info.start, chainCut: s0.info.chainCut, ms: s0.info.ms }));
+	check('... the chain past its time (chainMs 1): cut, the DP of coinLegsPhys (no value from the start: the gate is shut in its legs\' layer)',
+		s1.info.chainCut === true && !!s1.info.dp && /^phys T 3/.test(s1.info.dp.how) && !Number.isFinite(s1.info.start), JSON.stringify({ dp: s1.info.dp, start: s1.info.start, chainCut: s1.info.chainCut }));
+	check('... the cut build\'s file = the build without the chain and the cross-layer legs, byte for byte',
+		Buffer.compare(SF.steerFileBytes(s1, null), SF.steerFileBytes(s2, null)) === 0);
+}
+
 console.log('\n== the walk plan\'s count vs the plan past it (physT, dpChain, altLegs false / EEAT_COINFIX=0: the coin DP as before)');
 const st = SF.buildSteer(L, { physT: false, dpChain: false, altLegs: false });
 check('the walk plan\'s count is below the full count (it walks up the shaft without the footholds)', st.info.dp && st.info.dp.T < 3 && st.info.fullT === 3, JSON.stringify({ dp: st.info.dp, fullT: st.info.fullT }));
