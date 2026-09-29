@@ -990,6 +990,12 @@ async function passesSection() {
 			B.join() === '20480,18000,14100,16384,0,1536' && est.join() === '5420,1324,6698,8746,8148,2362,1000' && cells.join() === '27,27,26,24,24' && brk.join() === '29,28,30,27,24' &&
 			runs === 2 && left === ['6~' + process.pid, '6~' + process.ppid, '7~' + process.pid].sort().join(','),
 			`budgets ${B.join()}; estimates ${est.join()}; every move ${cells.join()}; breaker ${brk.join()}; runs ${runs} (${left})`);
+		// the one search's big burst lanes by the budget (main: 2 from 20 GB of GPU memory): none below 20 GB, 1 from 20 GB
+		// (half an A100), 2 from 24 GB; a lane's estimate with the steer copy; the random runs' pool a sixth of the budget
+		const lanes = [14000, 20220, 24576, 39000].map(ED.burstLanesFor), le = [ED.toolMemMB('goexplore', 1, { lanes: 1 }), ED.toolMemMB('goexplore', 1, { lanes: 2, steerMB: 300 }), ED.toolMemMB('escape', 1, { lanes: 0, steerMB: 300 })];
+		check("the run's GPU memory budget: the bursts' big lanes by the budget (0 below 20 GB, 1 from 20 GB, 2 from 24 GB), their estimates with the steer copy, the random runs' pool",
+			lanes.join() === '0,1,2,2' && le.join() === '4074,8748,2662' && [20220, 14000, 4000].map(ED.rollPoolMB).join() === '3370,2333,1024',
+			`lanes ${lanes.join()}; estimates ${le.join()}; pools ${[20220, 14000, 4000].map(ED.rollPoolMB).join()}`);
 	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
