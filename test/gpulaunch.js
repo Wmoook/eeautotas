@@ -180,7 +180,7 @@ check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summa
 // path, then this run's inputs)
 {
 	const GX = require('../src/goexplore.js');
-	const field = RF.reachField(level), RM = GX.roomOf(level);
+	const field = RF.reachField(level), RM = GX.roomOf(level, { legacy: true });
 	const K = 512, seeds = [11, 12, 13];
 	const job = Buffer.concat(seeds.flatMap((sd) => [Buffer.from(`batch ${K} 100000 ${sd}\n`), Buffer.alloc(4 * K)]).concat([Buffer.from('stop\n')]));
 	const roll = (extra, lvBin, lvReach, input) => {
@@ -233,7 +233,7 @@ check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summa
 	const dl = E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'roll doors', width: W, height: H, cells: dc }))));
 	const dBin = path.join(TMP, 'doors.bin'), dReach = path.join(TMP, 'doors_reach.bin');
 	fs.writeFileSync(dBin, G.levelBlob(dl));
-	const dField = RF.reachField(dl), dRM = GX.roomOf(dl);
+	const dField = RF.reachField(dl), dRM = GX.roomOf(dl, { legacy: true });
 	RF.writeReachFile(dField, dReach);
 	// (batch 1 picks the start, batch 2 the cells 1..128, batch 3 the cells 150..277, 4 picks each: dense ids the batches
 	// before gave out)

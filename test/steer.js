@@ -102,6 +102,14 @@ function sectionA() {
 			check(`coins: the coin plan's next gate from the start is a coin of the room (tile ${tile % L.width},${Math.floor(tile / L.width)})`, tile >= 0 && L.fg[tile] !== 0);
 			s3.coins = 2;
 			check('coins: no next gate with the door\'s coins taken', SF.nextGate(rd, s3) === null);
+			// the coin legs on worker threads (steer.js legPool) = the legs one after another: the same file, bit for bit;
+			// also the plan past its count's layered legs (coinLegsLayered: arrival costs from the workers)
+			const bytesOf = (o) => SF.steerFileBytes(SF.buildSteer(L, Object.assign({ maxMs: 600000 }, o)), null);
+			const same0 = Buffer.compare(bytesOf({ legThreads: 0 }), bytesOf({ legThreads: 2 })) === 0;
+			check('coins: the coin legs on 2 worker threads give the same steer file as one after another', same0);
+			const T = st.dp ? st.dp.T : 2;
+			const p0 = bytesOf({ legThreads: 0, coinT: T }), p2 = bytesOf({ legThreads: 2, coinT: T });
+			check(`coins: the layered legs (coinT ${T}) on 2 worker threads give the same steer file`, Buffer.compare(p0, p2) === 0);
 		}
 	}
 	// the build's budget: a byte budget of one body leaves the key out (one layer), said in info.over
