@@ -1278,8 +1278,10 @@ function pinRefineCheck() {
 	// (a place walled already: the attempt came before the switch (its generation's events still arrive) or the model
 	// still leads there; no second build for it: its clock again)
 	// (EEAT_PINREFINE=2, the layered pins: the place walled only in the steer's layer of the pinned attempt's end state
-	// (steer.js EEAT_STEER_LWALLS); a place is walled again for another room's resources (coins, switches, team))
-	const ctx = PM === '2' ? '|' + String(closestRoom ? closestRoom.desc : '').replace(/(?:timedoors|deaths)\S*/g, '').replace(/\s+/g, ' ').trim() : '';
+	// (steer.js EEAT_STEER_LWALLS); a place is walled again only for other coin counts (the room's coin words: the counters
+	// a steer models first; by the whole desc every team / switch variant of one layer pinned the same place again: CLX2's
+	// (195,141) twice in 7 of 7 runs, ~75 s each)
+	const ctx = PM === '2' ? '|' + (String(closestRoom ? closestRoom.desc : '').match(/(?:^|\s)(?:blue)?coins>?=\d+/g) || []).join('').trim() : '';
 	if (pinR.seeds.includes(`${tx},${ty}${ctx}`) || (pinR.switchAfter !== undefined && !(c.foundAfter > pinR.switchAfter))) { pinR.at = Date.now(); pinR.best = c.dist; return; }
 	pinR.seeds.push(`${tx},${ty}${ctx}`);
 	if (PM === '2') pinR.lw.push({ x: tx, y: ty, inputs: String(c.inputs || '') });
