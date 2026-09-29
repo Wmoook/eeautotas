@@ -103,11 +103,13 @@ function sectionUnits() {
 // (6, 5-8); the coin at (396, 8), at the end of a corridor (rows 5-8) with a step every 10 tiles (1-tile blocks on the
 // floor), so the way to it is a long walk away from the trophy (past head F's first field, FR_MIN_PICKS picks in); the
 // door-blind reach field puts the start 10 tiles from the trophy and every tile to the right farther.
-function falseNear(file) {
+function falseNear(file, wild = false) {
 	const W = 400, H = 12, g = Array.from({ length: H }, () => Array(W).fill(9));
 	for (let y = 5; y <= 8; y++) for (let x = 1; x <= 398; x++) g[y][x] = 0;
 	for (let x = 20; x < 395; x += 10) g[8][x] = 9;
 	const extra = [[12, 8, 255], [2, 8, 121], [396, 8, 100]];
+	// (wild: a fly effect sealed in the rock at (200, 2): the reach field of a level with an effect is a walk)
+	if (wild) extra.push([200, 2, 418, 1]);
 	for (let y = 5; y <= 8; y++) extra.push([6, y, 43, 1]);
 	return levelOf(file, 'frontier false near', W, H, g, extra);
 }
@@ -146,6 +148,16 @@ function sectionCpu() {
 	const rx = routesOf(x1), dx1 = doneOf(x1), dx2 = doneOf(x2);
 	check('--fYield=1 --fBrake=1 --fPhys=1: a route (replayed)', rx.length > 0 && !!C.evaluate(L, masksOf(rx[0].inputs)), rx.length ? `${rx[0].ticks} ticks, ${JSON.stringify(dx1.frontier)}` : 'none');
 	check('--fYield=1 --fBrake=1 --fPhys=1: the same seed and budget give the same search', dx1.ticks === dx2.ticks && dx1.picks === dx2.picks && dx1.states === dx2.states, `${dx1.picks} / ${dx2.picks} picks`);
+	// a walk-mode level (a sealed effect block): --fPhys=1 builds physics fields next to the search's walk field (their
+	// tables are not the search field's: the box A/B's first --fPhys build of the reshaped field lost them, every worker
+	// failed in fifthsAt), no worker fails, a route (replayed)
+	const fw = path.join(HOME, 'falsenear_wild.eelvl');
+	const Lw = falseNear(fw, true);
+	check('the wild variant: the reach field is a walk', RF.reachField(Lw, { deaths: false }).mode === 'walk');
+	const ew = gox(fw, [...base, '--seed=1', '--frontier=1', '--fPhys=1', '--fBrake=1']);
+	const rw = routesOf(ew), bad = ew.filter((e) => e.ev === 'warning');
+	check('--fPhys=1 on a walk-mode level: no worker fails, a route (replayed)', !bad.length && rw.length > 0 && !!C.evaluate(Lw, masksOf(rw[0].inputs)),
+		bad.length ? bad[0].text.slice(0, 200) : rw.length ? `${rw[0].ticks} ticks, ${JSON.stringify(doneOf(ew).frontier)}` : 'no route');
 	const simOf = (r) => (r.length ? r[0].simTicks : Infinity);
 	// what it is for: the corridor is walked in the first picks; the coin's room opens the door (territory no room walked),
 	// its field's frontier is behind the door, and head F pulls that room's cells back to it (the backtracking a coin door

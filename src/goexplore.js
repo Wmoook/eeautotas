@@ -2313,7 +2313,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (--frontier=1: head F's state: the field's generation, heap, room, field, per-tile costs FT (-2: not looked up yet), the
 	// candidates' cost bound, when and at what VIS count it was built, the nearest attempt's best and when it improved)
 	const FR = coarse && a.frontier > 0 ? { gen: 0, HF: null, room: null, field: null, FT: null, dil: null, thr: Infinity, at: -1e15, visAt: 0, best: Infinity, gainAt: 0,
-		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map(), fresh: null, fb: new WeakMap() } : null;
+		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map(), fresh: null, fb: new WeakMap(),
+		// (a level whose effects (or world gravity) make the reach field a walk: reach.js's wild blocks)
+		wild: L.gravityMult !== 1 || L.fg.some((id) => FR_WILD.has(id) && id !== 1618) } : null;
 	/** --frontier: head F's field's cost (tiles) at tile t for a ball at rest there (-1: no way to the frontier), looked up once */
 	const frGap = Math.max(FR_MIN_PICKS, Math.round(N * FR_TILE_PK));
 	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { const q = RF.fifthsAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0, -1, -1, FR.field.ice ? 2 : 0); v = q < 0 ? -1 : q / 5; FR.FT[t] = v; } return v; };
@@ -3159,18 +3161,19 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (FR.doors === null) FR.doors = doorTiles(L);
 		if (FR.dil === null) FR.dil = new Uint8Array(N);
 		// (--fPhys=1: a room without an effect gets a physics field on a level whose effects make the reach field a walk)
-		const strip = !!a.fPhys && L.gravityMult === 1 && FR.wild === true && !FR_FX.test(R.desc || '');
-		const { fg, goals } = frontierGoals(L, sim, FR.doors, VIS, { cul: R.cul, walk: FR.walk === true && !strip, dil: a.fDil, D: FR.dil });
+		const strip = !!a.fPhys && L.gravityMult === 1 && FR.wild && !FR_FX.test(R.desc || '');
+		const { fg, goals } = frontierGoals(L, sim, FR.doors, VIS, { cul: R.cul, walk: (FR.walk === true || FR.wild) && !strip, dil: a.fDil, D: FR.dil });
 		let f = null;
 		try { f = frontierField(L, fg, goals, strip); } catch (e) { f = null; }
 		// (the field object with the search field's keys in its order, through the structured clone that made the worker's: one hidden
 		// class for both, so the reach lookup of every simulated tick (costAt / fifthsAt) stays monomorphic ("wrong map" deopts)
-		if (f !== null) { const g = {}; for (const k of Object.keys(field)) g[k] = f[k]; f = structuredClone(g); }
+		// (then its own keys the search field lacks: a physics field (--fPhys) next to a walk-mode search field needs its tables)
+		if (f !== null) { const g = {}; for (const k of Object.keys(field)) g[k] = f[k]; for (const k of Object.keys(f)) if (!(k in g)) g[k] = f[k]; f = structuredClone(g); }
 		FR.phys = f !== null && f.mode === 'physics';
 		FR.goals = goals.length;
 		FR.gen++; FR.room = R; FR.field = f; FR.HF = null; FR.cand = 0; FR.thr = Infinity; FR.bytes = N;
 		if (f === null) { FR.FT = null; FR.ms += Date.now() - tb; return; }
-		if (FR.walk === null) { FR.walk = f.mode === 'walk'; FR.wild = FR.walk; }
+		if (FR.walk === null) FR.walk = f.mode === 'walk';
 		FR.FT = FR.FT !== null && FR.FT.length === N ? FR.FT.fill(-2) : new Float32Array(N).fill(-2);
 		for (const k in f) if (ArrayBuffer.isView(f[k])) FR.bytes += f[k].byteLength;
 		FR.bytes += FR.FT.byteLength;
