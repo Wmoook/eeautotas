@@ -1446,6 +1446,8 @@ const CHAIN_KILL = 10, CHAIN_MAX_WAVES = 64, CHAIN_MAX_TILES = 4000;
 const CHAIN_SEQ_F = 0.5;
 // (the fewest waves a chain has: chainPlan)
 const CHAIN_MIN_WAVES = 2;
+// (b9cw-b9) the chain only where the layers leave out more than this share of its needed ids (buildSteer)
+const CHAIN_MISS_F = 0.5;
 /** the chain walk's passability with the purple ids `on` ON: 0 blocked, 1 open, 2 a killer (passable, priced) */
 function chainPass(A, on) {
 	const P = new Uint8Array(A.N);
@@ -1860,7 +1862,13 @@ function buildSteer(level, opts) {
 		if (CP.none) chainInfo = { none: CP.none };
 		else {
 			const miss = CP.need.flat().filter((id) => M.names.indexOf(`psw:${id}`) < 0);
+			// (b9cw-b9: the chain only where the layers leave out MORE than CHAIN_MISS_F of its needed ids: Gravitational
+			// Tower's 2 of 4 (2 waves) lost its route in 1 of 3 seeds and was slower in the other 2 (box 3, f28338d: 161.5 /
+			// none / 171.8 s vs main 141.9 / 152.2 / 169.2), the layers model half its switches; Bad EE Level 9's 50 of 54
+			// keep the chain. EEAT_CHAIN_MISSF=<f> another share, 0: every level with a missing id as f28338d)
+			const missF = process.env.EEAT_CHAIN_MISSF !== undefined ? +process.env.EEAT_CHAIN_MISSF : CHAIN_MISS_F;
 			if (!miss.length) chainInfo = { none: 'every needed id modelled', n: CP.need.flat().length };
+			else if (missF > 0 && miss.length <= missF * CP.need.flat().length) chainInfo = { none: `the layers model most of its ids (${miss.length} of ${CP.need.flat().length} missing)`, n: CP.need.flat().length };
 			else {
 				const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
 				const R = buildChain(A, CP, kappa, c0 + maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
