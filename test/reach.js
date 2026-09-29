@@ -33,6 +33,12 @@
 //              spikes, reached by a portal, ranks behind the start: Forgotten Helix's box looked 106 tiles from the trophy);
 //              the coins stored as collected (110 / 111, coins again after 'reset'): triggers of the room dead ends (a 60 x 50
 //              level with one, a 1-coin door and the trophy: every state of the route live, and the one search routes it)
+//   J secrets  50, the secret "appear" block (eesim.js F_DOOR, but it always blocks), is a wall to every guidance test
+//              (reach.js guideFlags): a corridor with it between the start and the trophy has no way for the engine, the
+//              reach field, goexplore.js's lower bound and room dead ends, timed.js's bound and the editor's walk (243
+//              "blank": a way, 136 "disappear": none); a 2-high column of it: the field goes over it as over 9s, every
+//              state of the engine's routes finite; random rooms with 50 walls: the field = the room with 50 made 9, its
+//              -1 set holds the one of 50 as an open door (only tighter), no state finite right after a cut-off one
 // usage: node test/reach.js [--only=A,B,..] [--gpu] [--tool=<eegpu.exe>] [--jobs=<dir>] [--bench=<file>] [--quick]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
@@ -60,10 +66,11 @@ const levelOfB64 = (b) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(
 // - one-way rot 1, _ lower half block, B up boost, D down boost, C checkpoint, t time door, v down arrow, I ice, g low gravity,
 // P portal id 1 -> 2 (rot 1), Q portal id 2 -> 1 (rot 3)
 // c curse (1 s), w spawn 1582 #0, p / q / r present 1101 at rotation 1 / 0 / 3, h half block 1116 at rotation 2, e / f the
-// protection effect on / off, k / b a gold / blue coin, 1 / 2 a gold coin door of 1 / 2, 3 / 4 a blue coin door of 1 / 2
+// protection effect on / off, k / b a gold / blue coin, 1 / 2 a gold coin door of 1 / 2, 3 / 4 a blue coin door of 1 / 2,
+// a / z / y the secret blocks 50 "appear" (always blocks), 243 "blank" (air), 136 "disappear" (a plain solid)
 const ID = { e: [420, 1], f: [420, 0], '#': [9], S: [255], T: [121], o: [4], '^': [2], '<': [1], '>': [3], '~': [119], H: [120], x: [361, 1], '-': [1052, 1], _: [1041, 1], B: [116], D: [117],
 	C: [360], t: [156], v: [1518], P: [242, 1, 1, 2], Q: [242, 3, 2, 1], L: [118], I: [1064], g: [453], c: [421, 1], w: [1582, 0], p: [1101, 1], q: [1101, 0], r: [1101, 3], h: [1116, 2],
-	k: [100], b: [101], '1': [43, 1], '2': [43, 2], '3': [213, 1], '4': [213, 2] };
+	k: [100], b: [101], '1': [43, 1], '2': [43, 2], '3': [213, 1], '4': [213, 2], a: [50], z: [243], y: [136] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -593,6 +600,110 @@ function sectionI() {
 	check('a way over the never-open door stays open', e.start >= 0, fmt(e.start));
 }
 
+// ---------------------------------------------------------------- J secret blocks
+/**
+ * 50, the secret "appear" block: eesim.js flags it F_DOOR, but overlaps() reveals it and then blocks in every state
+ * (eesim.js _ovSlow, eecore.h overlaps; docs/eeo_spec/blocks.md 3.2), so every guidance wall test takes it for a wall
+ * (reach.js guideFlags); before 2026-09-28 they took it for an open door (the campaign doctor: Snowblind's ball inside a
+ * box of 64, This is not snow's trophy fenced by six). 243 ("blank") is not solid (air), 136 ("disappear") a plain solid.
+ */
+function sectionJ() {
+	section('J secret blocks: 50 ("appear", always blocks) a wall to every guidance test, 243 ("blank") air, 136 ("disappear") a wall');
+	const GX = require('../src/goexplore.js'), TMD = require('../src/timed.js');
+	const corridor = (ch) => ascii(box([`S.${ch}.T`]));
+	const L0 = corridor('a'), gf = R.guideFlags(L0);
+	let other = 0;
+	for (let id = 0; id < gf.length; id++) if (id !== 50 && gf[id] !== L0.flags[id]) other++;
+	check('guideFlags: 50 a plain solid (F_SOLID, no F_DOOR) = 9\'s flags; the engine\'s own table keeps its F_DOOR; every other id as the engine\'s; one table per level',
+		gf[50] === gf[9] && (gf[50] & 16) === 0 && (L0.flags[50] & 17) === 17 && other === 0 && R.guideFlags(L0) === gf && R.ALWAYS_SHUT.length === 1,
+		`guide ${gf[50]} (9: ${gf[9]}), engine ${L0.flags[50]}, ${other} other ids differ`);
+	// a 1-row corridor: the block between the start and the trophy
+	for (const [ch, name, open] of [['a', '50 (appear)', false], ['z', '243 (blank)', true], ['y', '136 (disappear)', false], ['.', 'air', true], ['#', '9 (a wall)', false]]) {
+		const L = corridor(ch), f = R.reachField(L, { check: true }), c = R.costAt(f, startSim(L, 0));
+		const eng = engineRoute(L, 200, 2000) !== null;
+		const tile = (Math.trunc(startSim(L, 0).py + 8) >> 4) * L.width + (Math.trunc(startSim(L, 0).px + 8) >> 4), trophy = L.fg.indexOf(121);
+		const lb = GX.lowerBoundTiles(L)[tile], lbT = TMD.lowerBoundTo(L, [trophy])[tile];
+		const live = GX.liveAt(GX.roomDead(L, 1 << 24).liveFor(startSim(L, 0)), tile);
+		const walked = ED.reachFrom(L, tile % L.width, (tile / L.width) | 0, true)[trophy] === 1;
+		const all = [c >= 0, lb !== 0xffff, lbT !== 0xffff, live, walked];
+		check(`a corridor with ${name} between the start and the trophy: ${open ? 'a way' : 'no way'} for the engine, the reach field, goexplore's lower bound and room dead ends, timed.js's bound, the editor's walk`,
+			eng === open && all.every((v) => v === open) && f.mismatches === 0,
+			`engine ${eng ? 'route' : 'none'}; reach ${fmt(c)}, lb ${lb}, timed lb ${lbT}, live ${live}, walk ${walked}`);
+	}
+	// a 2-high column with the way over it: the field goes around (as over a wall of 9), not through (as through air)
+	const over = (ch) => ascii(box(['.........', '.........', '.........', `....${ch}....`, `S...${ch}...T`]));
+	const Lo = over('a'), fo = R.reachField(Lo, { check: true }), fw = R.reachField(over('#')), fa = R.reachField(over('.'));
+	const co = R.costAt(fo, startSim(Lo, 30)), cw = R.costAt(fw, startSim(over('#'), 30)), ca = R.costAt(fa, startSim(over('.'), 30));
+	let sameCls = true;
+	for (let i = 0; i < fo.cls.length; i++) if (fo.cls[i] !== fw.cls[i]) sameCls = false;
+	const tr = engineRoute(Lo, 300, 2000, true, 20);
+	const w = tr.route ? walk(Lo, fo, tr.route) : null, a = tr.route ? aheadCut(Lo, fo, tr.ahead) : null;
+	let on50 = 0;
+	if (tr.route) { const s = new E.EESim(Lo); s.reset(); const I = new E.EEInput(); for (const m of tr.route) { E.applyMask(I, m); s.tick(I); if (Lo.fg[(Math.trunc(s.py + 8) >> 4) * Lo.width + (Math.trunc(s.px + 8) >> 4)] === 50) on50++; } }
+	check('a 2-high column of 50 with the way over it: the field goes over it (the cost of a column of 9, the same classes; more than through air), and every state from which the engine reached the trophy is finite',
+		co >= 0 && co === cw && sameCls && co > ca && fo.mismatches === 0 && !!w && w.finished && w.cut === 0 && a.cut === 0 && on50 === 0,
+		`50 ${fmt(co)}, 9 ${fmt(cw)}, air ${fmt(ca)}; engine route ${tr.route ? tr.route.length : '-'} ticks (${a ? a.n : 0} states lead to the trophy, ${a ? a.cut : '-'} cut off, ${on50} on a 50 tile)`);
+	secretFuzz();
+}
+/** random rooms with 50 in the mix: its field = the same room with 50 made 9 (a plain wall), its -1 set holds the one of
+ *  50 as an open door (the room with 156, a door the model opens: the fields before 2026-09-28), and D's property along
+ *  random runs in the engine (cut off at tick t implies cut off at t + 1) */
+function secretFuzz() {
+	let seed = 20260928;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+	const IDS = [9, 9, 4, 2, 1, 3, 119, 120, 361, 1052, 1041, 360, 50, 50, 50];
+	const OPTS = [0, 1, 2, 4, 8, 16, 3, 5, 9, 10, 12, 17, 18, 20, 24, 11, 13];
+	const ROOMSN = QUICK ? 10 : 30, RUNS = QUICK ? 15 : 40, TICKS = 300;
+	let rooms = 0, pairs = 0, cutNew = 0, cutOld = 0, diffWall = 0, loose = 0, viol = 0, first = null, tighter = 0;
+	for (let k = 0; k < ROOMSN; k++) {
+		const W = 12 + Math.floor(rnd() * 18), H = 10 + Math.floor(rnd() * 10), cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+			if (rnd() >= 0.2) continue;
+			const id = IDS[Math.floor(rnd() * IDS.length)];
+			cells.push(id === 1052 || id === 1041 ? [x, y, id, Math.floor(rnd() * 4)] : [x, y, id]);
+		}
+		// (a column and a row of 50 across the room: the walls the fields used to walk through)
+		const cx = 2 + Math.floor(rnd() * (W - 4)), cy = 2 + Math.floor(rnd() * (H - 4));
+		for (let y = 1; y < H - 1; y++) if (rnd() < 0.8) cells.push([cx, y, 50]);
+		for (let x = 1; x < W - 1; x++) if (rnd() < 0.5) cells.push([x, cy, 50]);
+		if (k % 3 === 0) cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 0, 1, 2], [1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 242, 1, 2, 1]);
+		cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * Math.max(1, (H - 2) / 2)), 121], [1 + Math.floor(rnd() * (W - 2)), H - 2, 255]);
+		const as = (from, to) => cells.map((c) => (c[2] === from ? [c[0], c[1], to] : c));
+		let L, Lw, Ld;
+		try { L = levelOfCells(W, H, cells); Lw = levelOfCells(W, H, as(50, 9)); Ld = levelOfCells(W, H, as(50, 156)); } catch (e) { continue; }
+		rooms++;
+		const f = R.reachField(L), fw = R.reachField(Lw), fd = R.reachField(Ld);
+		for (let i = 0; i < f.cls.length; i++) if (f.cls[i] !== fw.cls[i]) diffWall++;
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		for (let r = 0; r < RUNS; r++) {
+			sim.reset();
+			let m = OPTS[Math.floor(rnd() * OPTS.length)];
+			const at = (ff) => R.fifthsAt(ff, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
+			let prev = at(f);
+			for (let t = 0; t < TICKS; t++) {
+				if (rnd() < 0.12) m = OPTS[Math.floor(rnd() * OPTS.length)];
+				E.applyMask(inp, m);
+				sim.tick(inp);
+				if (sim.has_silver_crown || sim.is_dead) break;
+				const now = at(f), nw = at(fw), nd = at(fd);
+				pairs++;
+				if (now < 0) cutNew++;
+				if (nd < 0) cutOld++;
+				if (now !== nw) diffWall++;
+				if (nd < 0 && now >= 0) loose++;
+				if (now < 0 && nd >= 0) tighter++;
+				if (prev < 0 && now >= 0) { viol++; if (!first) first = { room: k, run: r, tick: t, state: R.stateAt(f, sim) }; }
+				prev = now;
+			}
+		}
+	}
+	check(`${rooms} random rooms with 50 walls, ${pairs} run states: the field = the room with 50 made 9 (classes and fifths), its -1 set holds the one of 50 as an open door, and no state finite right after a cut-off one`,
+		rooms > 0 && pairs > 0 && diffWall === 0 && loose === 0 && viol === 0,
+		`${cutNew} cut off (50 as an open door: ${cutOld}; ${tighter} newly cut), ${diffWall} differences to 9, ${loose} looser, ${viol} violations${first ? `; first ${JSON.stringify(first)}` : ''}`);
+}
+
 // ---------------------------------------------------------------- F agree
 function sectionF() {
 	section(`F agree: the JS lookup = the native tool's (host${GPU ? ' and GPU' : ''})`);
@@ -997,6 +1108,7 @@ function trapLevel() {
 	if (want('G')) await sectionG();
 	if (want('H')) { sectionH(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
+	if (want('J')) sectionJ();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });

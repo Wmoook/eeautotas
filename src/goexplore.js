@@ -728,7 +728,7 @@ const KEY_DOOR = new Set([23, 24, 25, 26, 27, 28, 1005, 1006, 1007, 1008, 1009, 
 function counterRelevance(L) {
 	const had = RELV.get(L);
 	if (had) return had;
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags, lk = L.lookup0;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L), lk = L.lookup0;
 	const out = { gold: true, blue: true, cut: { gold: 0, blue: 0 }, why: { gold: 'no reader', blue: 'no reader' }, upTo: { gold: 0, blue: 0 } };
 	let goldR = false, blueR = false, prot = false, crownD = false, teamD = false, keyD = false;
 	for (let i = 0; i < N; i++) {
@@ -1105,7 +1105,7 @@ const CUL_A = 2000, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
  * restored exactly after the targets' tests.
  */
 function roomUseful(L) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const RM = roomOf(L), TR = require('./bursts.js').triggersOf(L);
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), tro = new Uint8Array(N), dIdx = new Int32Array(N).fill(-1), doors = [];
 	for (let i = 0; i < N; i++) {
@@ -1283,7 +1283,7 @@ const bitAt = (b, t) => b !== null && (b[t >> 3] & (1 << (t & 7))) !== 0;
  */
 function roomFields(L, budget, opts = {}) {
 	const US = opts.useful === false ? null : roomUseful(L);
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), doors = [], trophies = [];
 	for (let i = 0; i < N; i++) {
@@ -1450,7 +1450,7 @@ const KEEP_DOORS = new Set([43, 165, 213, 214, 184, 185, 1079, 1080, 1094, 1095,
 const TRIGGER_IDS = new Set([5, 121, 113, 1619, 467, 1620, 6, 7, 8, 408, 409, 410, 100, 101, 110, 111, 119, 369, 416, 1585, 368, 417, 418, 419, 420, 421, 422, 423, 453, 461, 1517,
 	1584, 1618, ...EL.NPC_IDS]);
 function roomDead(L, budget) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), keep = [], goals = [];
 	for (let i = 0; i < N; i++) {
@@ -1568,7 +1568,7 @@ const pendingTrigger = (sim) => sim._tileQueue.length !== 0 || sim._stateQueue.l
  * touching another checkpoint first and dying then is never less (the bound is a metric: d(x) <= d(x, c) + d(c)).
  */
 function lowerBoundTiles(L) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	if (!fg.includes(121)) return null;   // (no trophy: no bound)
 	const out = new Uint16Array(new SharedArrayBuffer(2 * N)).fill(0xffff);
 	const wall = new Uint8Array(N);
@@ -1765,7 +1765,7 @@ function avoidTilesOf(G, g) {
 /** whether the trophy stays walkable (8-connected over every tile but the permanent walls, every door open, portals) from
  *  the start tile with gate g's tiles blocked: a gate every way needs is not avoided */
 function gateAvoidable(L, G, g, startTile) {
-	const av = avoidTilesOf(G, g), fg = L.fg, fl = L.flags, W = G.W, N = G.N;
+	const av = avoidTilesOf(G, g), fg = L.fg, fl = RF.guideFlags(L), W = G.W, N = G.N;
 	const wall = (i) => { const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0; return (f & 1) !== 0 && (f & 16) === 0 && (f & (2 | 4 | 8)) === 0; };
 	const blocked = (i) => wall(i) || av[i] === 1 || (g.kind !== 'door' && G.TR.comp[i] === g.comp);
 	const seen = new Uint8Array(N), q = new Int32Array(N);
