@@ -435,7 +435,8 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : [])] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []),
+		...(q.rollFlags || []), ...(q.rollSeed ? [`--seed=${q.rollSeed}`] : [])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
@@ -1600,10 +1601,19 @@ const ESC_CONFIGS = {
 	plain: { label: 'no useful territory, no dominance', flags: ['--useful=0', '--dom=0'] },
 	fine: { label: 'speed cells early', flags: ['--spd=10', '--spdMax=6'] },
 	longruns: { label: 'long random runs', flags: ['--roll=120', '--keep=0.95'] },
+	lr2: { label: 'longer random runs', flags: ['--roll=240', '--keep=0.97'] },
+	lr3: { label: 'the longest random runs', flags: ['--roll=480', '--keep=0.985'] },
 	base: { label: 'as the search', flags: [] },
 };
-// the rotation (the merge stage sets it from the portfolio sweep) and the kinds of start in rotation
-const ESC_ROTATION = ['blind', 'reach', 'deaths', 'base'];
+// the rotation and the kinds of start in rotation. The rotation is the portfolio sweep's greedy set cover (src/out/pf/sw1,
+// main febeeb2, 39 never-routed campaign levels, 180 s runs from the level alone): longruns routed 6 (Relics of Athena,
+// Hold Jump Challenge, Overworld, The Mansion, EZ Spooky Shack, Snowblind), lr3 +1 (Snow Is Falling), lr2 +1 (OCTOS
+// ROLLERCOASTER), plain +1 (The Glitch), base +1 (Escape the Lava); blind, reach, early, deaths and fine routed none.
+// The long random runs routed through the GPU random runs (on the GPU alone 3 of 4, on the CPU alone 0 of 4): an
+// escape's configuration also starts the GPU random runs again with its flags (ESC_ROLLS, rollsTurn)
+const ESC_ROTATION = ['longruns', 'lr3', 'lr2', 'plain', 'base'];
+// the GPU random runs follow the rotation (body escRolls:false or EEAT_ESC_ROLLS=0: only the escape's CPU process does)
+const ESC_ROLLS = true;
 const ESC_FROM = ['arrival', 'frontier', 'near'];
 const ESC_KINDS = ['arrival', 'frontier', 'near'];
 // (flags a configuration may not set: the escape's own start, share, seed, files and clock)
@@ -1764,6 +1774,7 @@ function escLaunch(n, st) {
 	if (esc.nextFrom) esc.nextFrom = null;
 	else esc.fromTurn++;
 	const cfg = escCfgNext();
+	rollsTurn(cfg);
 	esc.runs++;
 	const turn = escTurnOf(esc.runs, esc.rot.length, esc.turn, esc.min, esc.stall);
 	const file = path.join(dir(), `escape_${esc.runs}.eetas`);
@@ -1792,6 +1803,23 @@ function escLaunch(n, st) {
 		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${cfg.label}, ${E} thread${E > 1 ? 's' : ''}` });
 	kids[n] = launch(n);
 	save();
+}
+/** THE GPU RANDOM RUNS IN THE ROTATION (ESC_ROLLS): the portfolio sweep's long random runs routed through the GPU random
+ *  runs, so an escape whose configuration differs from the one the GPU random runs run with (their search's own at first)
+ *  stops them (halt 'rotate') and they start again from the level's start with its flags and a seed of their own (the
+ *  sweep's condition: a fresh archive); the escape's CPU process gets the flags as before */
+function rollsTurn(cfg) {
+	if (!esc || !esc.rolls) return;
+	const RW = S.strategies.findIndex((q) => q.rolls);
+	if (RW < 0) return;
+	const V = S.strategies[RW];
+	if ((V.rollFlags || []).join(' ') === cfg.flags.join(' ')) return;
+	if (!alive(kids[RW]) || kids[RW].stopWhy || V.found) return;   // (ended, stopping or with a route: as it is)
+	V.rollFlags = cfg.flags.slice();
+	V.rollCfg = cfg.name;
+	V.rollRuns = (V.rollRuns || 0) + 1;
+	note(`${V.label}: again from the start with ${cfg.label}${cfg.flags.length ? ` (${cfg.flags.join(' ')})` : ''} (the rotation)`);
+	halt(kids[RW], 'rotate');
 }
 /** the escape's process ended (how: its stop or end): the one search gets its workers back; after a stall of its own the
  *  next escape starts at once (escKick), else after the next stall */
@@ -2102,7 +2130,8 @@ function start(b, gpu, test) {
 	const escFirst = test && test.escFirst ? test.escFirst : test && test.escWait ? test.escWait : process.env.EEAT_ESC_FIRST !== undefined && +process.env.EEAT_ESC_FIRST > 0 ? +process.env.EEAT_ESC_FIRST : ESC_FIRST_S;
 	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : ESC_WAIT_S, first: escFirst, stall: test && test.escStall ? test.escStall : ESC_STALL_S, min: test && test.escMin !== undefined ? test.escMin : ESC_MIN_S,
 		turn: test && test.escTurn ? test.escTurn : ESC_TURN_S, retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null,
-		rot: escRot, from: escFrom, cfgTurn: 0, fromTurn: 0, nextFrom: null };
+		rot: escRot, from: escFrom, cfgTurn: 0, fromTurn: 0, nextFrom: null,
+		rolls: test && test.escRolls !== undefined ? !!test.escRolls : b.escRolls !== undefined ? b.escRolls !== false : process.env.EEAT_ESC_ROLLS !== undefined ? process.env.EEAT_ESC_ROLLS !== '0' : ESC_ROLLS };
 	closestRoom = null;
 	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null, hist: [], rot: esc.rot.map((c) => c.name), from: esc.from.slice() } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
@@ -2610,6 +2639,8 @@ function launch(n) {
 	// (the stall escape: its start's inputs as --prefix, its share of the workers, its own seed and bursts' folder; the
 	// search's time left)
 	if (V.key === 'escape') { q.prefixFile = V.esc.file; q.workers = V.esc.workers; q.seed = V.esc.seed; q.work = V.esc.work; q.escFlags = V.esc.flags || []; q.seconds = Math.max(1, Math.round(S.seconds - searchClock(Date.now()))); }
+	// (the GPU random runs started again by the rotation, rollsTurn: its configuration's flags, a seed of their own)
+	if (V.rolls && V.rollRuns) { q.rollFlags = V.rollFlags || []; q.rollSeed = ((cur.opts.seed || 1) + 1000 * V.rollRuns) >>> 0; }
 	if (V.key === 'precision') { q.attemptsFile = V.prec.file; q.seconds = V.prec.seconds; q.workers = V.prec.workers; q.depth = S.result ? Math.max(1, boundTicks() - 1) : 0; }
 	if (V.key === 'breaker') {
 		q.prefixFile = V.brk.file; q.cells = V.brk.cells; q.cellLog = V.brk.cellLog; q.region = V.brk.region; q.reserve = V.brk.reserve; q.gateReach = V.brk.gateReach;
@@ -2932,6 +2963,15 @@ function launch(n) {
 			note(`${V.label}: error: ${V.error}`);
 		}
 		if (!cpu && V.error && (code === 6 || code === 7 || crashed)) gpuFailed(n);
+		// (the GPU random runs stopped for the rotation's next configuration (rollsTurn): again from the level's start with it)
+		if (rolls && ch.stopWhy === 'rotate' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && !S.result && S.seconds - usedSec(V) > 2) {
+			V.error = null;
+			Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `again with ${V.rollCfg}` });
+			totals();
+			kids[n] = launch(n);
+			save();
+			return;
+		}
 		// (out of GPU memory, at its context or an allocation: another process holds it for now; the strategy starts again
 		// after a back-off, gpuRetry. The relay and the breaker go on their own way below.)
 		else if (!cpu && V.error && !ch.stopWhy && gpuTransient(V.error) && V.key !== 'relay' && V.key !== 'breaker' && gpuRetry(n, ch)) {
@@ -3739,4 +3779,4 @@ function shutdown() {
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
-	ESC_CONFIGS, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S };
+	ESC_CONFIGS, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };

@@ -2139,9 +2139,10 @@ async function escapeSection() {
 	// the stall rotation's pure parts: the configurations' list, the kinds of start, the turns
 	section('the stall rotation: its configurations, kinds of start and turns');
 	const rotD = ED.escRotOf(ED.ESC_ROTATION);
-	check('the default rotation: distance-blind novelty first, then the reach field alone, deaths as moves, the search\'s own; each with its goexplore.js flags',
-		rotD.map((c) => c.name).join(',') === 'blind,reach,deaths,base' && rotD[0].flags.join(' ') === '--pA=0 --burst=16' && rotD[1].flags.join(' ') === '--mix=0 --burstSteer=' &&
-		rotD[2].flags.join(' ') === '--deaths=1' && rotD[3].flags.length === 0, rotD.map((c) => `${c.name}: ${c.flags.join(' ')}`).join('; '));
+	check('the default rotation (the set cover of the portfolio sweep): long random runs, the longest, the longer, no useful territory / dominance, the search as is; each with its goexplore.js flags; the GPU random runs follow it',
+		rotD.map((c) => c.name).join(',') === 'longruns,lr3,lr2,plain,base' && rotD[0].flags.join(' ') === '--roll=120 --keep=0.95' && rotD[1].flags.join(' ') === '--roll=480 --keep=0.985' &&
+		rotD[2].flags.join(' ') === '--roll=240 --keep=0.97' && rotD[3].flags.join(' ') === '--useful=0 --dom=0' && rotD[4].flags.length === 0 && ED.ESC_ROLLS === true &&
+		ED.escRotOf('blind,reach,deaths').map((c) => c.flags.join(' ')).join('|') === '--pA=0 --burst=16|--mix=0 --burstSteer=|--deaths=1', rotD.map((c) => `${c.name}: ${c.flags.join(' ')}`).join('; '));
 	const rotX = ED.escRotOf('plain, --pA=0.2+--sample=4+--prefix=x+--workers=64, nosuch, longruns');
 	check('a rotation from a string: names and raw flags joined by "+" (flags that would change the escape\'s own start, share or files left out), unknown names left out',
 		rotX.map((c) => c.name).join('|') === 'plain|--pA=0.2+--sample=4+--prefix=x+--workers=64|longruns' && rotX[1].flags.join(' ') === '--pA=0.2 --sample=4' &&
