@@ -1532,7 +1532,7 @@ function buildSteer(level, opts) {
 	const T0 = () => t0 - saved;
 	const N = A.N;
 	/** one build from the features modelled so far: the CEGAR loop over the walk and physics plans, the bodies, the coin
-	 *  DP (and the DP outside the layer product) -> {B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs} (legs:
+	 *  DP (and the DP outside the layer product) -> {B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs, freeOn} (legs:
 	 *  {CL, D} the DP's own legs for the leg CEGAR; null for the plan past its count or without a DP) */
 	const oneBuild = () => {
 		let over = null;
@@ -1629,7 +1629,7 @@ function buildSteer(level, opts) {
 				}
 			}
 		}
-		return { B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs };
+		return { B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs, freeOn };
 	};
 	// THE LEG CEGAR (d4-cegar-dp-legs, 2026-09-29; default on, EEAT_LEGCEGAR=0 or opts.legCegar false: off). The loop in
 	// oneBuild replays the physics plan from the start, which takes no coin, so on a level whose walk plan passes a coin
@@ -1662,7 +1662,7 @@ function buildSteer(level, opts) {
 		rec.added = true;
 		modeled.add(cx.feat);
 	}
-	const { B, PH, M, bodies, goals, layerBody, dp, nPlain } = R;
+	const { B, PH, M, bodies, goals, layerBody, dp, nPlain, freeOn } = R;
 	const over = R.over;
 	const feats = M.feats.map((f, n) => {
 		const k = f.key;
