@@ -158,6 +158,12 @@ function sectionLevels() {
 		const off = gox(GOX, file, [...base, '--exc=0'], 600000), m = gox(main, file, base, 600000);
 		const d = doneOf(off);
 		check(`${id}: --exc=0 = main (ticks, cells, picks, replays, rooms, routes)`, sig(off) === sig(m) && d.ticks > 0 && d.exc === undefined, `${d.states} cells, ${d.picks} picks, ${((d.workers || [])[0] || {}).rooms} rooms, ${routesOf(off).length} routes`);
+		// (the observer: --exc=1 --pX=0 draws no random number more and picks nothing by head X: the same search where the
+		// budget does not bind (rm's bytes are counted), the picks' bands measured: the A/B's profile of the base arm)
+		if (id === '04_1' || id === '33_3') {
+			const ob = gox(GOX, file, [...base, '--exc=1', '--pX=0'], 600000), x = doneOf(ob).exc || {};
+			check(`${id}: the observer (--exc=1 --pX=0) = the flag off, its picks' bands counted`, sig(ob) === sig(off) && x.picks === 0 && x.pickShare && x.pickShare.reduce((u, v) => u + v, 0) > 0.99, JSON.stringify(x.pickShare));
+		}
 	}
 }
 

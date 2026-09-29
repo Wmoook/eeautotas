@@ -3611,8 +3611,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
 				else { FR.picks++; head = 'F'; if (FR.log) { const k = e.tile; FR.pk.set(k, (FR.pk.get(k) || 0) + 1); } }
 			} else if (rnd() < a.pA) {
-				// (--exc: head X takes --pX of the picks from head A's slot: one rnd() more with the flag, none without)
-				if (EXC !== null && rnd() < EXC.q) { const x0 = EXC.picks; e = popX(); if (EXC.picks !== x0) head = 'X'; } else e = popA();
+				// (--exc: head X takes --pX of the picks from head A's slot: one rnd() more with the flag, none without; --pX=0: none
+				// either, the observer: the same search as the flag off, the picks' bands counted)
+				if (EXC !== null && EXC.q > 0 && rnd() < EXC.q) { const x0 = EXC.picks; e = popX(); if (EXC.picks !== x0) head = 'X'; } else e = popA();
 			} else { e = popB(); head = 'B'; }
 			if (e === null) { end = 'exhausted'; break; }
 			if (EXC !== null) excCount(e);
@@ -4325,7 +4326,7 @@ async function gpuMain(a, L, m) {
 				e = d[0];
 				if (--d[1] <= 0) discovery.pop();
 				if (cT[e] >= maxT) continue;
-			} else if (rnd() < pA) e = EXg !== null && rnd() < EXg.q ? popX() : popA();   // (--exc: head X in head A's slot; a blind batch: never)
+			} else if (rnd() < pA) e = EXg !== null && EXg.q > 0 && rnd() < EXg.q ? popX() : popA();   // (--exc: head X in head A's slot; a blind batch: never; --pX=0: the observer)
 			else e = popB();
 			if (e < 0) break;
 			if (EXg !== null) excCountG(e);
