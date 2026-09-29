@@ -3910,7 +3910,7 @@ async function main() {
 	// second goal heap; a file of another level (or one that cannot be read) is ignored with a warning
 	// (stdin "steer <file>" with --stdin=1: the same, late, for a search that started without it: steerLate below)
 	const loadSteer = (file, dist) => {
-		const bytes = file === 'build' ? SF.steerFileBytes(SF.buildSteer(L)) : fs.readFileSync(file);
+		const bytes = file === 'build' ? SF.steerFileBytes(SF.buildSteer(L), null, true) : fs.readFileSync(file);
 		const sab = new SharedArrayBuffer(bytes.length);
 		new Uint8Array(sab).set(bytes);
 		const sd = SF.readSteerFile(Buffer.from(sab));
