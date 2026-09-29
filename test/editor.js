@@ -2983,7 +2983,7 @@ async function escapeSection() {
 		hist6.length >= 5 && hist6[0].after < 20 && hist6.every((h) => h.turn === 1) && gaps6.length >= 4 && gaps6.every((g) => g < 8) &&
 		log6.some((l) => /escape: a fresh one search 1: no attempt nearer by .* for 1 s: from tick 260 of where room "coins=2" was entered, distance-blind novelty \(--pA=0 --burst=16\)/.test(l)),
 		`first after ${hist6.length ? hist6[0].after : '-'} s, gaps ${gaps6.map((g) => g.toFixed(1)).join(', ')} s; ${log6.slice(0, 1).join(' | ')}`);
-	// (6) THE PROGRESS-FIRST STARTS (cw-progress-starts, 2026-09-29; `progStart`, EEAT_PROGSTART=0 off): the helpers
+	// (6) THE PROGRESS-FIRST STARTS (cw-progress-starts, 2026-09-29; `progStart`, OPT-IN: EEAT_PROGSTART=1 on): the helpers
 	// alone, then the stalled search above with three rooms: 'coins=1 purple=[1]' entered at tick 280 (the most progress),
 	// 'coins=1' at 260, and a 'coins=0' room whose lowest-cost attempt is 1,200 ticks long (so the frontier rule, half the
 	// longest attempt held, drops every start under 600 ticks); the nearest attempt's room holds no coin
@@ -3016,15 +3016,15 @@ async function escapeSection() {
 	const sP = run([[0, 180], [4, 100]]), s2P = run([[0, 160], [4, 100]]), sLong = run([[0, 1100], [4, 100]]);
 	// (on: the progress start, then main's first (the frontier room's attempt), then nothing new; off: main's first, then
 	// nothing new: the stall clock again)
-	const progRun = async (tag, off, want) => {
+	const progRun = async (tag, on, want) => {
 		const sc = path.join(HOME, `esc_prog_${tag}.json`);
 		fs.writeFileSync(sc, JSON.stringify({ attempt: str(aR), dist: 30, stdinLog: path.join(HOME, `esc_prog_${tag}_stdin.log`),
 			sources: [{ room: 777, desc: 'coins=1 purple=[1]', gain: 5, dist: 50, inputs: str(sP), at: 300 }, { room: 778, desc: 'coins=1', gain: 5, dist: 40, inputs: str(s2P), at: 350 },
 				{ room: 779, kind: 'best', desc: 'coins=0', gain: 5, dist: 60, inputs: str(sLong), at: 400 }] }));
-		if (off) process.env.EEAT_PROGSTART = '0';
+		if (on) process.env.EEAT_PROGSTART = '1';
 		ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: ['base'], escFrom: ['arrival', 'frontier', 'near'] }, { available: false },
 			{ cpu: [process.execPath, fake, sc], escapeCmd: [process.execPath, fakeArgvP, argvLogP], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
-		if (off) delete process.env.EEAT_PROGSTART;
+		if (on) delete process.env.EEAT_PROGSTART;
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && Date.now() - t0 < 30000 && !(st.escape && st.escape.runs >= want)) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
@@ -3035,7 +3035,7 @@ async function escapeSection() {
 		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
 		return { hist: (st.escape && st.escape.hist) || [], log: (st.log || []).filter((l) => /escape/.test(l)) };
 	};
-	const pOn = await progRun('on', false, 2), pOff = await progRun('off', true, 1);
+	const pOn = await progRun('on', true, 2), pOff = await progRun('off', false, 1);
 	const fmtH = (h) => h.map((x) => `${x.n}: ${x.kind} ${x.from} @${x.ticks}`).join('; ');
 	check('progress first: a room holding a new most of progress (coins=1 purple=[1]) over the nearest attempt\'s room: the first escape starts where it was entered (280 ticks, though the longest attempt held is 1,200: exempt from the frontier rule), said so in the log',
 		pOn.hist.length >= 1 && pOn.hist[0].kind === 'progress' && pOn.hist[0].ticks === sP.length && /^where room "coins=1 purple=\[1\]" was entered \(progress 1 coins \/ 1 switches over the nearest attempt's room's 0 \/ 0\)$/.test(pOn.hist[0].from) &&
@@ -3043,7 +3043,7 @@ async function escapeSection() {
 	check('after a progress start the rotation is main\'s: the next escape = main\'s first (its kind, start and ticks), no second progress start (coins=1 is no new most), each start once',
 		pOn.hist.length === 2 && pOff.hist.length >= 1 && pOn.hist[1].kind === pOff.hist[0].kind && pOn.hist[1].from === pOff.hist[0].from && pOn.hist[1].ticks === pOff.hist[0].ticks &&
 		pOn.hist.slice(1).every((h) => h.kind !== 'progress') && new Set(pOn.hist.map((h) => `${h.from}@${h.ticks}`)).size === pOn.hist.length, `on ${fmtH(pOn.hist)} | off ${fmtH(pOff.hist)}`);
-	check('EEAT_PROGSTART=0: main\'s picks (no progress start; the frontier rule drops the short arrivals: the 1,200-tick room\'s attempt first)',
+	check('the default (off, no EEAT_PROGSTART): main\'s picks (no progress start; the frontier rule drops the short arrivals: the 1,200-tick room\'s attempt first)',
 		pOff.hist.length === 1 && pOff.hist.every((h) => h.kind !== 'progress') && pOff.hist[0].kind === 'frontier' && pOff.hist[0].ticks === sLong.length - 60 &&
 		pOff.hist.every((h) => h.ticks >= sLong.length / 2), fmtH(pOff.hist));
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)

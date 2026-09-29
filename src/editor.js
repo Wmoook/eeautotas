@@ -2302,8 +2302,10 @@ function start(b, gpu, test) {
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
 		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false),
 		// (the progress-first starts: the stall escape's and the wall breaker's starts by real progress, the sources' eviction
-		// keeping the most progress; `b.progStart === false`, test.progStart false or EEAT_PROGSTART=0: off, as before)
-		progStart: b.progStart !== false && !(test && test.progStart === false) && process.env.EEAT_PROGSTART !== '0',
+		// keeping the most progress; OPT-IN: `b.progStart === true`, test.progStart true or EEAT_PROGSTART=1; its A/B, box 4,
+		// 2026-09-29: no target routed either way (Cold World x4, Bad EE Level 9 x2, Daybreak, Moving Ice Puzzle), the
+		// controls Soul Quest and Planets routed 3 of 4 with it vs 1 of 4: not a default until a target gains)
+		progStart: b.progStart === true || !!(test && test.progStart === true) || process.env.EEAT_PROGSTART === '1',
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
