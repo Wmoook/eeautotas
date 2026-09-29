@@ -226,7 +226,9 @@
 //        [--gpuVal=0 (1, OPT-IN: the GPU random runs' head A orders by the ROOM VALUE, src/roomval.js: the reach cost +
 //        the room's offset (tiles, <= 0) from its useful coins, blue coins and keys with doors, learned from the routes by
 //        tools/roomval_train.js; a level with no coin, blue-coin or key doors: as without it; 0: head A as before)]
-//        [--gpuValW=<weights.json> (the room value's weights; default src/roomval_w.json)]
+//        [--gpuValW=<weights.json> (the room value's weights; default src/roomval_w.json)] [--gpuValMix=0.5 (with
+//        --gpuVal=1: the value orders a second heap that takes that share of head A's picks, in a fixed alternation;
+//        the first keeps the plain order; 1: the value heap alone, whose A/B lost diversity: see gpuMain)]
 //        [--deaths=-1 (deaths as moves: -1 auto = where something kills and a checkpoint or 2+ spawns exist
 //        (deathMovesFor), 1 wherever something kills (a lone spawn too), 0 off: every death ends its run, as before; a
 //        death is kept only where it pays: deathPays in explore(); the progress and done events carry "deaths": {seen,
@@ -331,7 +333,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
-	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, gpuVal: 0 };
+	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, gpuVal: 0, gpuValMix: 0.5 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
 // (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
@@ -3758,8 +3760,14 @@ async function gpuMain(a, L, m) {
 	const exG = (c) => { const v = satG.get(regionOf(c)); return v === undefined ? 0 : v; };
 	// ---- head A's heap (explore()'s): (priority, cell, version)
 	const hv = [], hc = [], hver = [];
-	const prio = VAL === null ? (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0)
-		: (c) => cRc[c] + roomList[cRoom[c]].vOff + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
+	// (--gpuValMix: with --gpuVal=1 the room value orders a SECOND heap that takes that share of head A's picks in a fixed
+	// alternation (no rnd() draw), the first heap keeping the plain order; 1 = the value heap alone. The value alone
+	// (the A/B of 2026-09-29) put every head-A pick into the richest room: the GPU runs found fewer rooms and stalled
+	// sooner (Aedan Garden 6 coins in 2 of 2 seeds vs 9-10, Imps Paradise's route lost))
+	const MIX = VAL !== null ? Math.max(0, Math.min(1, a.gpuValMix)) : 1;
+	const prioPlain = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
+	const prioVal = (c) => cRc[c] + roomList[cRoom[c]].vOff + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
+	const prio = VAL === null || MIX < 1 ? prioPlain : prioVal;
 	const hpush = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -3815,7 +3823,60 @@ async function gpuMain(a, L, m) {
 	};
 	let maxT = a.depth;
 	const rnd = rngOf(a.seed);
+	// (--gpuValMix < 1: the value heap, the same (priority, cell, version) heap on prioVal; every push goes to both)
+	const H2 = VAL !== null && MIX < 1 ? (() => {
+		const v2 = [], c2 = [], ver2 = [];
+		const H = { popVer: 0, popVal: 0, len: () => v2.length };
+		const down = (i, x, c, ver, n) => {
+			for (;;) {
+				const l = 2 * i + 1, r = l + 1;
+				let m = i, mv = x;
+				if (l < n && v2[l] < mv) { m = l; mv = v2[l]; }
+				if (r < n && v2[r] < mv) { m = r; mv = v2[r]; }
+				if (m === i) break;
+				v2[i] = v2[m]; c2[i] = c2[m]; ver2[i] = ver2[m];
+				i = m;
+			}
+			v2[i] = x; c2[i] = c; ver2[i] = ver;
+		};
+		H.push = (c) => {
+			let i = v2.length;
+			const x = prioVal(c);
+			v2.push(x); c2.push(c); ver2.push(cVer[c]);
+			while (i > 0) { const p = (i - 1) >> 1; if (v2[p] <= x) break; v2[i] = v2[p]; c2[i] = c2[p]; ver2[i] = ver2[p]; i = p; }
+			v2[i] = x; c2[i] = c; ver2[i] = cVer[c];
+		};
+		H.pop = () => {
+			const c = c2[0];
+			H.popVer = ver2[0]; H.popVal = v2[0];
+			const x = v2.pop(), lc = c2.pop(), lver = ver2.pop();
+			if (v2.length > 0) down(0, x, lc, lver, v2.length);
+			return c;
+		};
+		H.compact = () => {
+			let n = 0;
+			for (let i = 0; i < v2.length; i++) if (ver2[i] === cVer[c2[i]]) { v2[n] = v2[i]; c2[n] = c2[i]; ver2[n] = ver2[i]; n++; }
+			v2.length = n; c2.length = n; ver2.length = n;
+			for (let i = (n >> 1) - 1; i >= 0; i--) down(i, v2[i], c2[i], ver2[i], n);
+		};
+		return H;
+	})() : null;
+	const hpushAll = H2 === null ? hpush : (c) => { hpush(c); H2.push(c); };
+	let mixAcc = 0, valPicks = 0;
 	const popA = () => {
+		if (H2 !== null) {
+			mixAcc += MIX;
+			if (mixAcc >= 1) {
+				mixAcc -= 1;
+				while (H2.len()) {
+					const c = H2.pop();
+					if (H2.popVer !== cVer[c] || cT[c] >= maxT) continue;
+					if (SAT && prioVal(c) > H2.popVal + SAT_SLACK) { H2.push(c); continue; }
+					valPicks++;
+					return c;
+				}
+			}
+		}
 		while (hv.length) {
 			const c = hpop();
 			if (popVer !== cVer[c] || cT[c] >= maxT) continue;
@@ -3877,7 +3938,7 @@ async function gpuMain(a, L, m) {
 	const room0 = newRoom(info.room | 0, 0);
 	room0.isNew = false;
 	cRoom[0] = room0.idx; room0.arr.push(0); room0.best = 0;
-	hpush(0);
+	hpushAll(0);
 	let end = startCost < 0 && a.prune ? 'unreachable' : '';
 	// ---- the events (explore()'s and main()'s)
 	let ticks = 0, picks = 0, batches = 0, deepest = 0, minRc = cRc[0], full = false, gpuMs = 0, hostMs = 0, rollMs = 0, kernelMs = 0, records = 0, touched = 0, colMs = 0, rollWallMs = 0,
@@ -3967,6 +4028,7 @@ async function gpuMain(a, L, m) {
 		const h0 = Date.now();
 		// the picks (explore()'s heads, one pick after the other)
 		if (hv.length > 3 * nCells + 4096) compact();
+		if (H2 !== null && H2.len() > 3 * nCells + 4096) H2.compact();
 		let K = 0;
 		for (let k = 0; k < a.batch; k++) {
 			let e = -1;
@@ -3980,7 +4042,7 @@ async function gpuMain(a, L, m) {
 			if (e < 0) break;
 			cPicks[e]++; cVer[e]++; picks++;
 			{ const pr = roomList[cRoom[e]]; pr.picks++; if (pr.grp !== null) pr.grp.picks++; }
-			hpush(e);
+			hpushAll(e);
 			pickNode[K] = cNode[e];
 			if (SAT) { pickReg[K] = regionOf(e); pickNew[K] = 0; pickFresh[K] = 0; }
 			pickBuf[K++] = e;
@@ -4028,7 +4090,7 @@ async function gpuMain(a, L, m) {
 			cRc[d] = rc;
 			if (!isNew) { cVer[d]++; if (SAT && pk < K) pickNew[pk]++; }   // (an earlier arrival is yield too: the brake, above)
 			// (--gpuVal: a new cell's priority reads its room's offset: queued once its room is known, below)
-			if (VAL === null || !isNew) hpush(d);
+			if (VAL === null || !isNew) hpushAll(d);
 			if (t > deepest) deepest = t;
 			if (rc < minRc - 0.05) minRc = rc;
 			if (rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) { if (SAT && rc < near.rc - 0.05 && pk < K) pickFresh[pk] = 1; if (rc < near.rc - 0.05) bst.nearer++; near = { rc, t, c: d }; }
@@ -4038,7 +4100,7 @@ async function gpuMain(a, L, m) {
 				if (r.pending) { r.cells.push(d); if (!bFirst.includes(r)) bFirst.push(r); continue; }
 				cRoom[d] = r.idx;
 				r.arr.push(d);
-				if (VAL !== null) hpush(d);
+				if (VAL !== null) hpushAll(d);
 			}
 			const rr = roomList[cRoom[d]];
 			if (rr.best < 0 || rc < cRc[rr.best]) rr.best = d;
@@ -4051,7 +4113,7 @@ async function gpuMain(a, L, m) {
 			const r = newRoom(p.key, c0);
 			bst.rooms++;
 			if (SAT && newPk.has(c0)) pickFresh[newPk.get(c0)] = 1;
-			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; if (VAL !== null) hpush(c); }
+			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; if (VAL !== null) hpushAll(c); }
 			r.isNew = false;
 			// (a dominated room: no discovery burst, no source)
 			const dm = r.grp !== null && r.grp.dom;
@@ -4108,7 +4170,7 @@ async function gpuMain(a, L, m) {
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
 		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null,
-		...(VAL !== null ? { val: { rooms: VAL.n, minOff: Math.round(VAL.lo * 10) / 10 } } : {}),
+		...(VAL !== null ? { val: { rooms: VAL.n, minOff: Math.round(VAL.lo * 10) / 10, mix: MIX, valPicks } } : {}),
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
 			.map((k) => [k, toolDone[k]])), tool: toolDone || null });

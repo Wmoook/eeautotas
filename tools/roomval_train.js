@@ -5,7 +5,7 @@
 // routes (--dirs: <dir>/<run>/**/route_*.eetas, e.g. the innovation panel's ok/ and r/).
 //   node tools/roomval_train.js [--out=src/roomval_w.json] [--fill=src/out/fill/res] [--dirs=<dir>,...]
 //        [--levels=src/out/god/levels/campaign,src/out/god/levels/hard] [--cache=tools/.cache/roomval] [--it=600]
-//        [--l2=0.001] [--beta=1] [--folds=3] [--dry=1]
+//        [--l2=0.001] [--beta=1] [--folds=3] [--fit=rank | togo] [--dry=1]
 // RETRAIN (as the filler grows): sh src/out/fill/fetch.sh && node tools/roomval_train.js   (then commit src/roomval_w.json)
 //
 // Samples: every trajectory is replayed in the JS engine from the level's start; every 20 ticks a sample [t, RCH3 (the
@@ -189,6 +189,37 @@ function train(pairs) {
 	}
 	return w;
 }
+// --fit=togo: the CALIBRATED value instead of the ranking: least squares of the time to go along each route, in tiles
+// of that route's own pace (y = (T - t) / kappa, kappa = T / RCH3 at its start), on the same features (each route
+// weighs 1, the same projection). The ranking's scale says only "counts first"; this one says how many tiles of the
+// reach cost a count is worth on the way to the trophy (a search priority's scale).
+function trainTogo(routes) {
+	const X = [], Y = [], WT = [];
+	for (const T of routes) {
+		const S = T.S, Tend = S[S.length - 1][0] + EVERY, kappa = Tend / Math.max(1, S[0][1]);
+		for (const s of S) { X.push(xOf(s)); Y.push((Tend - s[0]) / kappa / 100); WT.push(1 / S.length); }
+	}
+	const w = new Float64Array(NF); w[0] = 1;
+	if (!X.length) return w;
+	const m = new Float64Array(NF), v = new Float64Array(NF), b1 = 0.9, b2 = 0.999, lr = 0.02;
+	let W = 0; for (const x of WT) W += x;
+	for (let it = 1; it <= IT * 2; it++) {
+		const g = new Float64Array(NF);
+		for (let i = 0; i < X.length; i++) {
+			let z = -Y[i]; for (let f = 0; f < NF; f++) z += w[f] * X[i][f];
+			for (let f = 0; f < NF; f++) g[f] += WT[i] * z * X[i][f];
+		}
+		for (let f = 0; f < NF; f++) {
+			const gf = g[f] / W + L2 * w[f];
+			m[f] = b1 * m[f] + (1 - b1) * gf; v[f] = b2 * v[f] + (1 - b2) * gf * gf;
+			w[f] -= lr * (m[f] / (1 - b1 ** it)) / (Math.sqrt(v[f] / (1 - b2 ** it)) + 1e-8);
+		}
+		project(w);
+	}
+	return w;
+}
+const FIT = opt.fit || 'rank';
+const fitOf = (routes, pairs) => (FIT === 'togo' ? trainTogo(routes) : train(pairs));
 // the share of pairs ordered right (ties: half), per level averaged
 function acc(list, w) {
 	const by = new Map();
@@ -209,7 +240,7 @@ const cv = [];
 for (let k = 0; k < FOLDS; k++) {
 	const tr = pairsOf(R.filter((T) => fold(T.lvl) !== k), P.filter((T) => fold(T.lvl) !== k));
 	const te = pairsOf(R.filter((T) => fold(T.lvl) === k), P.filter((T) => fold(T.lvl) === k));
-	const w = train(tr);
+	const w = fitOf(R.filter((T) => fold(T.lvl) !== k), tr);
 	const row = { fold: k, levels: lvls.filter((l) => fold(l) === k).length, pairsA: te.A.length, pairsB: te.B.length,
 		routeRch: acc(te.A, W_RC), routeNaive: acc(te.A, W_NAIVE), routeLearned: acc(te.A, w),
 		pinRch: acc(te.B, W_RC), pinNaive: acc(te.B, W_NAIVE), pinLearned: acc(te.B, w), w: Array.from(w) };
@@ -218,12 +249,12 @@ for (let k = 0; k < FOLDS; k++) {
 }
 const mean = (k) => { const a = cv.map((r) => r[k]).filter(Number.isFinite); return a.length ? Math.round(1000 * a.reduce((x, y) => x + y, 0) / a.length) / 1000 : null; };
 const all = pairsOf(R, P);
-const w = train(all);
+const w = fitOf(R, all);
 const res = { version: RV.VERSION, feats: RV.FEATS, w: Array.from(w).map((x) => Math.round(x * 1e4) / 1e4),
 	offsetPer: RV.FEATS.slice(1).map((f, k) => Math.round(100 * w[k + 1] / w[0] * 10) / 10),
 	n: { routes: R.length, pins: P.length, routedLevels: lvls.length, pairsA: all.A.length, pairsB: all.B.length },
 	cv: { folds: FOLDS, routeRch: mean('routeRch'), routeNaive: mean('routeNaive'), routeLearned: mean('routeLearned'), pinRch: mean('pinRch'), pinNaive: mean('pinNaive'), pinLearned: mean('pinLearned') },
-	train: { it: IT, l2: L2, beta: BETA, every: EVERY, gap: GAP, rcCap: RC_CAP }, trained: new Date().toISOString().slice(0, 10) };
+	train: { fit: FIT, it: IT, l2: L2, beta: BETA, every: EVERY, gap: GAP, rcCap: RC_CAP }, trained: new Date().toISOString().slice(0, 10) };
 log(`all: w ${res.w.join(' ')}; tiles per unit of each feature: ${RV.FEATS.slice(1).map((f, k) => `${f} ${res.offsetPer[k]}`).join(', ')}`);
 log(`cv means: route RCH3 ${res.cv.routeRch} naive ${res.cv.routeNaive} learned ${res.cv.routeLearned} | pin RCH3 ${res.cv.pinRch} naive ${res.cv.pinNaive} learned ${res.cv.pinLearned}`);
 if (opt.dry !== '1') { fs.writeFileSync(OUT, JSON.stringify(res, null, 1) + '\n'); log(`wrote ${OUT}`); }

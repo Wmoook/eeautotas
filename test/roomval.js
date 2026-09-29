@@ -7,8 +7,9 @@
 //   weights   the committed weights (src/roomval_w.json) read and checked; a weights file with a positive count
 //             weight or a w_rc <= 0 is refused
 //   search    (only with --tool=<eegpu>: needs a GPU) goexplore.js --gpu=1 on the toy level (the coins behind the spawn,
-//             the door towards the trophy): with --gpuVal=1 a route and rooms with an offset in the done event; the same
-//             seed and tick budget give the same search twice; flag off vs --main=<main's src/goexplore.js>: the same
+//             the door towards the trophy): with --gpuVal=1 a route and rooms with an offset in the done event, the value
+//             heap's share of head A's picks (--gpuValMix 0.5; 1 = the value heap alone, its picks counted as the plain
+//             heap's); the same seed and tick budget give the same search twice; flag off vs --main=<main's goexplore.js>: the same
 //             done numbers (picks, cells, rooms, records, batches); a missing weights file fails at the start
 // usage: node test/roomval.js [--tool=<eegpu>] [--main=<path to origin/main's src/goexplore.js>]   Exit code 1 if any check fails.
 const fs = require('fs');
@@ -108,6 +109,9 @@ function sectionSearch(file) {
 	check('--gpuVal=1: a route', routesOf(v1).length > 0, routesOf(v1).map((r) => r.ticks).join(',') || JSON.stringify(d1).slice(0, 200));
 	check('--gpuVal=1: rooms with an offset (done val)', !!d1.val && d1.val.rooms > 0 && d1.val.minOff < 0, JSON.stringify(d1.val));
 	check('--gpuVal=1: the same seed and tick budget give the same search', sig(v1) === sig(v2), `${sig(v1)} vs ${sig(v2)}`);
+	check('--gpuVal=1: the value heap takes about half of head A\'s picks (--gpuValMix 0.5)', !!d1.val && d1.val.mix === 0.5 && d1.val.valPicks > 0, JSON.stringify(d1.val));
+	const w1 = gox(GOX, file, [...base, '--gpuVal=1', '--gpuValMix=1']), dw = doneOf(w1);
+	check('--gpuValMix=1 (the value heap alone): a route, every head-A pick by the value', routesOf(w1).length > 0 && !!dw.val && dw.val.mix === 1 && dw.val.valPicks === 0, JSON.stringify(dw.val));
 	const off1 = gox(GOX, file, base), off2 = gox(GOX, file, base);
 	check('flag off: no val in the done event', doneOf(off1).val === undefined);
 	check('flag off: the same search twice', sig(off1) === sig(off2), sig(off1));
