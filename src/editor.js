@@ -432,7 +432,7 @@ const STRATEGIES = {
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
-			...(o.burstBig && !q.small ? burstSizeArgs(sizingMB()) : []), ...(q.gpuMem ? [`--burstSmallS=${GPUMEM_SMALL_S}`, `--burstOomS=${GPUMEM_OOM_S}`] : [])] : []), ...gxExtra()] },
+			...(q.burstArgs ? q.burstArgs : o.burstBig ? burstSizeArgs(sizingMB()) : []), ...(q.gpuMem ? [`--burstSmallS=${GPUMEM_SMALL_S}`, `--burstOomS=${GPUMEM_OOM_S}`] : [])] : []), ...gxExtra()] },
 	// the stall escape (see ESC_WAIT_S): a second one search (goexplore.js, its own archive and GPU bursts) from a stalled
 	// search's nearest attempt (--prefix), on a share of the CPU search's workers
 	escape: { label: 'escape: a fresh one search from the nearest attempt', cpu: true, args: (f, o, q) => [...STRATEGIES.goexplore.args(f, Object.assign({}, o, { workers: q.workers, seed: q.seed }), q),
@@ -1136,12 +1136,15 @@ function toolMemMB(key, s, q) {
 		// (rollhost.h: its --mem (goexplore --gmem: rollPoolMB), else a quarter of its share, an eighth up to 12 GB)
 		case 'gorolls': return ROLL_CTX_MB + Math.round(q.pool || (s > 12288 ? s / 4 : s / 8));
 		case 'goal': case 'guide': return BEAM_MB;
-		case 'explore': return exploreMB(s, q.cellLog || 27, 2097152);
-		case 'relay': return exploreMB(s, q.cellLog || 25, q.big || q.alone ? 1048576 : 262144);
-		case 'breaker': return exploreMB(s, q.cellLog || 24, BREAK_CAP);
-		// (the one search / the escape: their bursts' lanes, each a server with its context, its table and a layer cap of
-		// states while a job runs: 2 lanes of 2^26 and 1 M, else 1 lane of 2^25 and 262,144)
-		case 'goexplore': case 'escape': return q.big ? 2 * exploreMB(Infinity, 26, 1048576) : exploreMB(Infinity, 25, 262144);
+		// (and the steer field's copy each process uploads: q.steerMB)
+		case 'explore': return exploreMB(s, q.cellLog || 27, 2097152) + (q.steerMB || 0);
+		case 'relay': return exploreMB(s, q.cellLog || 25, q.big || q.alone ? 1048576 : 262144) + (q.steerMB || 0);
+		case 'breaker': return exploreMB(s, q.cellLog || 24, BREAK_CAP) + (q.steerMB || 0);
+		// (the one search / the escape: their bursts' lanes (q.lanes big lanes, else q.big: 2; none: the small sizing),
+		// each a server with its context, its table and a layer cap of states while a job runs (a big lane 2^26 and 1 M, the
+		// small one 2^25 and 262,144), and the trophy arm's steer copy)
+		case 'goexplore': case 'escape': { const L = q.lanes !== undefined ? q.lanes : q.big ? 2 : 0;
+			return (L ? L * exploreMB(Infinity, 26, 1048576) : exploreMB(Infinity, 25, 262144)) + Math.max(1, L) * (q.steerMB || 0); }
 		default: return EXPLORE_CTX_MB;
 	}
 }
@@ -1151,6 +1154,14 @@ function exploreMB(s, cellLog, capReq) {
 	const cap = Math.min(capReq, Math.floor(s / 3 * 1048576 / STATE_B));
 	return EXPLORE_CTX_MB + Math.round(16 * 2 ** cellLog / 1048576) + Math.round(cap * STATE_B / 1048576);
 }
+/** the one search's big burst lanes on a budget of B MB (main: 2 from BURST_BIG_MB of GPU memory, else the small
+ *  sizing): 2 from BURST_TWO_MB, 1 from BURST_BIG_MB (the stall tools, the wall breaker's table and the escape's bursts,
+ *  keep room: a 20 GB half of an A100 held 2 lanes (8.1 GB) + the random runs, and the escape got 1.5 GB), else 0 */
+const BURST_TWO_MB = 24576;
+const burstLanesFor = (B) => (B >= BURST_TWO_MB ? 2 : B >= BURST_BIG_MB ? 1 : 0);
+const burstLaneArgs = (L) => (L >= 2 ? ['--burstPar=2', '--gpuCells=26', '--burstCap=0'] : L === 1 ? ['--burstPar=1', '--gpuCells=26', '--burstCap=0'] : []);
+/** the steer field's GPU copy (MB) each GPU tool that reads it uploads */
+const steerMBNow = () => (cur && cur.files && cur.files.steer && S && S.steer && S.steer.gpu ? S.steer.mb || 0 : 0);
 /** the GPU random runs' pool (MB, goexplore --gmem = eegpu roll --mem) on a budget of B MB */
 const rollPoolMB = (B) => Math.max(1024, Math.round(B * ROLL_F));
 /** the explore table (log2 cells) main takes on a GPU of memMB (explorehost.h: 2^27 from 11 GB, 2^26 from 5 GB), at most
@@ -1213,7 +1224,7 @@ function plannedMB(k, B) {
 	if (!V || (V.state !== 'starting' && V.state !== 'waiting')) return 0;
 	if (V.key === 'gorolls') return toolMemMB('gorolls', B, { pool: rollPoolMB(B) });
 	if (V.key === 'goal' || V.key === 'guide') return BEAM_MB;
-	if (V.key === 'goexplore' && V.gpuShare) return toolMemMB('goexplore', B, { big: !!(cur && cur.opts.burstBig) && burstSizeArgs(B).length > 0 });
+	if (V.key === 'goexplore' && V.gpuShare) return toolMemMB('goexplore', B, { lanes: cur && cur.opts.burstBig ? burstLanesFor(B) : 0, steerMB: steerMBNow() });
 	return 0;
 }
 /** strategy n's share (MB) for a process launched now: the budget less the others' holdings (their estimates while their
@@ -1585,7 +1596,7 @@ function breakLaunch(n) {
 	try { fs.writeFileSync(file, Buffer.from(ch.inputs, 'latin1')); } catch (e) { return breakEnd(n); }
 	// (the run's GPU memory budget: the largest table the breaker's share holds, at most main's rule on the budget)
 	const BG = gpuBudget();
-	const cellLog = cur.opts.breakCells || (BG ? breakCellsFit(BG, gpuShareOf(n, BG)) : breakCells(toolInfo && toolInfo.memMB));
+	const cellLog = cur.opts.breakCells || (BG ? breakCellsFit(BG, Math.max(GPUMEM_MIN_MB, gpuShareOf(n, BG) - (V.noSteer ? 0 : steerMBNow()))) : breakCells(toolInfo && toolInfo.memMB));
 	// (a small table: a box of BREAK_REGION tiles around the start, as the analysis's 2^28 runs had)
 	let region = '';
 	if (cellLog <= BREAK_REGION_LOG) {
@@ -2699,17 +2710,22 @@ function launch(n) {
 	const gB = !V.cpu || V.gpuShare || V.rolls ? gpuBudget() : 0;
 	let gMB = gB ? gpuShareOf(n, gB) : 0;
 	if (gMB) {
-		if (V.key === 'explore') q.cellLog = exploreCellsFor(gB, gMB);
+		if (V.key === 'explore') q.cellLog = exploreCellsFor(gB, Math.max(GPUMEM_MIN_MB, gMB - (V.noSteer ? 0 : steerMBNow())));
 		// (the random runs' pool: the plan's, at most the share)
 		if (V.key === 'gorolls') q.pool = Math.max(512, Math.min(rollPoolMB(gB), gMB - ROLL_CTX_MB));
-		let big = (V.key === 'goexplore' || V.key === 'escape') && cur.opts.burstBig && burstSizeArgs(gB).length > 0;
-		const bigMB = toolMemMB('goexplore', gB, { big: true });
-		// (the one search's bursts were reserved in the plan (plannedMB): their share at least that; the escape's big
-		// sizing only where its share holds it, else the small one)
-		if (V.key === 'goexplore' && big) gMB = Math.max(gMB, bigMB);
-		if (V.key === 'escape' && big && gMB < bigMB) { big = false; q.small = true; }
+		// (the bursts' lanes by the budget, burstLanesFor: the one search's were reserved in the plan (plannedMB), their share
+		// at least that; the escape's as many as its share holds)
+		const sMB = V.key === 'explore' || V.key === 'relay' || V.key === 'breaker' ? (V.noSteer || (V.key === 'breaker' && V.brk && V.brk.gateReach) ? 0 : steerMBNow()) : V.gpuShare ? steerMBNow() : 0;
+		let lanes = (V.key === 'goexplore' || V.key === 'escape') && cur.opts.burstBig ? burstLanesFor(gB) : 0;
+		if (V.key === 'goexplore' && V.gpuShare) gMB = Math.max(gMB, toolMemMB('goexplore', gB, { lanes, steerMB: sMB }));
+		if (V.key === 'escape') while (lanes > 0 && toolMemMB('escape', gB, { lanes, steerMB: sMB }) > gMB) lanes--;
+		if (V.gpuShare) q.burstArgs = burstLaneArgs(lanes);
 		q.gpuMem = gMB;
-		memHeld.set(n, toolMemMB(V.key, gMB, { cellLog: V.key === 'breaker' ? V.brk.cellLog : V.key === 'relay' ? (q.alone ? 27 : q.big ? 26 : 25) : q.cellLog, big, alone: q.alone, pool: q.pool }));
+		// (the bursts' servers inherit the process's EEAT_GPU_BUDGET_MB: each lane's own part, so explore's layer cap (a
+		// third of it at most) binds per lane; the state size depends on the level's state width, the estimates on the
+		// A100's width-8 kernels)
+		q.gpuEnvMB = V.gpuShare ? Math.max(GPUMEM_MIN_MB, Math.floor(gMB / Math.max(1, lanes))) : gMB;
+		memHeld.set(n, toolMemMB(V.key, gMB, { cellLog: V.key === 'breaker' ? V.brk.cellLog : V.key === 'relay' ? (q.alone ? 27 : q.big ? 26 : 25) : q.cellLog, lanes, alone: q.alone, pool: q.pool, steerMB: sMB }));
 	} else memHeld.delete(n);
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
@@ -2737,7 +2753,7 @@ function launch(n) {
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
 	const env0 = cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined;
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: gMB ? Object.assign(env0 || { ...process.env }, { EEAT_GPU_BUDGET_MB: String(gMB) }) : env0,
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: gMB ? Object.assign(env0 || { ...process.env }, { EEAT_GPU_BUDGET_MB: String(q.gpuEnvMB || gMB) }) : env0,
 		detached: !cpu });
 	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)), ...(gMB ? { gpuMB: gMB, budgetMB: gB } : {}) });
 	ch.stopFile = stopFile;
@@ -3833,5 +3849,5 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, runBudgetMB, toolMemMB, exploreCellsFor, breakCellsFit, rollPoolMB, gpuRunsNow, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, runBudgetMB, toolMemMB, exploreCellsFor, breakCellsFit, rollPoolMB, burstLanesFor, gpuRunsNow, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
