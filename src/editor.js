@@ -826,7 +826,11 @@ function addSource(o) {
 	if (o.gain > s.gain) s.gain = o.gain;
 	// (the wall breaker's stall clock: a room no attempt was in before that opens territory; on Good Egg, a level of time
 	// doors, rooms without it kept coming (1,355 in 900 s) and the breaker never started)
-	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) { brk.rooms.add(o.room); breakProgress('room', S.strategies.some((q) => q.key === 'breaker' && q.label === o.from)); }
+	// (the stall escape's clock: with the stall clock by progress only such a room that is progress, escRoomProgress)
+	if (brk && s.gain > 0 && !brk.rooms.has(o.room)) {
+		brk.rooms.add(o.room);
+		breakProgress('room', S.strategies.some((q) => q.key === 'breaker' && q.label === o.from), escRoomProgress({ dist: o.dist, desc: o.desc || s.desc, cul: o.cul }));
+	}
 	const inputs = String(o.inputs);
 	if (o.arrival > 0 && (!s.early || o.arrival < s.early.ticks)) {
 		if (!s.early) s.at = ++sourceSeq;   // ("newest": when its room's entry became known)
@@ -1220,6 +1224,7 @@ function pastPlanCheck() {
 	cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
 	S.closest = null;            // (another measure: the CPU search's attempts by it)
 	brk.mark = Infinity;
+	if (esc) esc.pm.d = Infinity;   // (the rooms' distance record too: THE STALL CLOCK BY PROGRESS)
 	let told = 0;
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
@@ -1376,9 +1381,12 @@ const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((me
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
 // level (BREAK_WAIT_S index), tried (the starting points used: sha1 of the inputs), rounds, round, seeds}
 let brk = null;
-/** the search got somewhere (why: 'nearer' by BREAK_TILES, or 'room' for a new room): the stall clock starts over */
-function breakProgress(why, own) {
-	if (esc) esc.at = Date.now();   // (the stall escape's clock too)
+/** the search got somewhere (why: 'nearer' by BREAK_TILES, or 'room' for a new room): the stall clock starts over; prog
+ *  false: a new room that is no progress (THE STALL CLOCK BY PROGRESS: escRoomProgress), which leaves the stall escape's
+ *  clock as it is */
+function breakProgress(why, own, prog) {
+	// (the stall escape's clock too; by progress, only a new room that is progress)
+	if (esc && !(why === 'room' && prog === false)) { esc.at = Date.now(); esc.flat = 0; }
 	if (!brk) return;
 	brk.at = Date.now();
 	if (brk.round) brk.round.progress.push(why);
@@ -1640,6 +1648,48 @@ function precEvent(V, ev) {
 const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
 // (the first escape's wait and an escape's own turn in the rotation's first round, s)
 const ESC_FIRST_S = 60, ESC_TURN_S = 120;
+// THE STALL CLOCK BY PROGRESS (n3-stall-clock-progress, NIGHT3 cycle 8, 2026-09-29; OPT-IN: body stallProg: true,
+// test.stallProg, EEAT_STALLPROG=1; off = main): any new room that opens territory restarted the escape's stall clock
+// (breakProgress 'room'), so a room explosion (switch subsets, blue coins, keys: FINAL-MEASURE main 0f246d9, 13 of its
+// 46 failures with 250-490 rooms and the nearest attempt pinned from 3-16 s; Moving Ice Puzzle 380 rooms and no escape in
+// 300 s, Daybreak / Switcher Puzzle the first one at 236 / 265 s, CTM_2, Ice Cream, Hunt, Cold World, Pretty How Town,
+// Bridge Builder at 75-100 s though pinned from 3-16 s) hid the pin from the stall escape, and an escape's own new rooms
+// kept it from giving way to the next configuration (escape 1 lived 125-205 s). With it a new room restarts those clocks
+// only when it is PROGRESS (`roomProgress`): its attempt's distance (the search's measure) a record of the rooms by at
+// least max(BREAK_TILES, ESC_PROG_F of the record) (the record moves only on progress, like the breaker's mark: a creep
+// counts once it adds up), or its coins toward a door (`coinsOfDesc`: counters no door reads are 0) more than any room's
+// before (the rooms of the strategies' own nearer attempts count too, attemptSource: the record is at most the nearest
+// attempt's distance when its room was new, so a room of an explosion is progress when it gets nearer than that or brings
+// coins); an attempt with no value on the search's measure (the GPU random runs' reach-field distances next to the steer
+// field: STEER_MISS on; a way through a death) or one in a cul-de-sac of its room counts by its coins alone. The search's
+// clock (esc.at: the first escape after ESC_FIRST_S, the next after ESC_WAIT_S) keeps the record of the whole search
+// (esc.pm), an escape its own (run.pm: its turn, ESC_TURN_S); a new measure (the late steer field, the plan past its count)
+// starts the distance records over. A heuristic trigger only: nothing is pruned or reordered, ESC_WAIT_S / ESC_FIRST_S /
+// ESC_MIN_S are unchanged, the wall breaker's clock (brk.at) and the precision stage's as before; its restarts are a subset
+// of main's (a room restarts a clock only where main's rule does and it is progress), so an escape only comes sooner.
+const ESC_PROG_F = 0.02, STALL_PROG = false;
+/** a new room (first seen by the search, territory gain) as progress for the stall escape's clocks (THE STALL CLOCK BY
+ *  PROGRESS): its attempt's distance d a record of pm.d by max(BREAK_TILES, ESC_PROG_F x pm.d) (the first real one always),
+ *  or its coins k (coinsOfDesc) above pm.c; pm moves only on progress. cul: the attempt ends in a cul-de-sac of its room;
+ *  miss: a distance at or past it has no value on the search's measure (both: no distance record) */
+function roomProgress(pm, d, k, cul, miss) {
+	let prog = false;
+	if (k > pm.c) { pm.c = k; prog = true; }
+	if (!cul && Number.isFinite(d) && d < miss && (pm.d === Infinity || d < pm.d - Math.max(BREAK_TILES, ESC_PROG_F * pm.d))) { pm.d = d; prog = true; }
+	return prog;
+}
+/** the search's measure's "no value" distances (roomProgress): the steer field's STEER_MISS on, else a way through a death */
+const progMiss = () => (cur && cur.distBySteer ? STEER_MISS : deathTiles());
+/** the stall clock by progress's view of a new room o {dist, desc, cul} (THE STALL CLOCK BY PROGRESS): true = it restarts
+ *  the search's clock (the flag off: every new room does, as before); a room that is no progress is counted (esc.flat since
+ *  the last progress, esc.flatAll in all) */
+function escRoomProgress(o) {
+	if (!esc || !esc.prog) return true;
+	const prog = roomProgress(esc.pm, o.dist, coinsOfDesc(o.desc, cur && cur.level), !!o.cul, progMiss());
+	if (!prog) { esc.flat++; esc.flatAll++; }
+	if (S && S.escape) S.escape.clock = { by: 'progress', flat: esc.flat, flatAll: esc.flatAll };
+	return prog;
+}
 // the configurations by name (the portfolio sweep's names, src/out/pf/pfsweep.js; `base` = the search's own). reach: the
 // sweep's arm has no steer field at all (body steer:false); an escape keeps it for its distances (the nearest attempt,
 // the stall clocks: one measure for every strategy) and orders by the reach field alone (--mix=0: head A's steer heap
@@ -1831,7 +1881,8 @@ function escKick() {
 	if (alive(kids[n])) {
 		const R = esc.run, c = S.closest;
 		if (R && !kids[n].stopWhy && now - R.t0 >= R.min * 1000 && now - R.progAt >= R.stall * 1000) {
-			note(`${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${R.stall} s: the next one`);
+			note(esc.prog ? `${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own that is progress for ${R.stall} s (${R.flat} new room${R.flat === 1 ? '' : 's'} of its own without progress): the next one`
+				: `${V.label}: nothing nearer by ${ESC_TILES} tiles and no new room of its own for ${R.stall} s: the next one`);
 			// (an escape that made the search's nearest attempt: the next one goes on from there, a chain)
 			if (c && !c.cut && c.strategy === V.label && c.dist < R.near0 - ESC_TILES) esc.nextFrom = 'near';
 			esc.next = true;
@@ -1862,6 +1913,7 @@ function escLaunch(n, st) {
 	esc.tried.add(st.key);
 	if (st.room !== undefined) esc.rooms.add(st.room);
 	if (st.sig !== '') esc.sigs.add(st.sig);
+	const atOnce = esc.next;   // (the next one at once after an escape's own stall; else after the search's stall clock)
 	esc.next = false;
 	// (the kinds of start in rotation: a start put first once (nextFrom) does not move the rotation on)
 	if (esc.nextFrom) esc.nextFrom = null;
@@ -1882,16 +1934,21 @@ function escLaunch(n, st) {
 	try { fs.rmSync(work, { recursive: true, force: true }); } catch (e) { /* none */ }
 	V.esc = { file, keep: st.inputs.length, workers: E, seed: ((cur.opts.seed || 1) + 1000 * esc.runs) >>> 0, work, what: st.what, cfg: cfg.name, flags: cfg.flags.slice() };
 	// (near0: the search's nearest attempt when it starts, for the retarget: escKick)
+	// (pm, flat: its own rooms' record and the rooms of its own without progress, THE STALL CLOCK BY PROGRESS)
 	esc.run = { t0: Date.now(), progAt: Date.now(), best: Infinity, start: st, mainKeep: keep, near0: S.closest && !S.closest.cut ? S.closest.dist : Infinity,
-		min: turn.min, stall: turn.stall, cfg: cfg.name };
+		min: turn.min, stall: turn.stall, cfg: cfg.name, pm: { d: Infinity, c: 0 }, flat: 0 };
 	const cfgText = `${cfg.label}${cfg.flags.length ? ` (${cfg.flags.join(' ')})` : ''}`;
+	// (by progress: the new rooms since the search's last progress that were none; the flag off: no such field)
+	const flat = esc.prog && !atOnce ? esc.flat : undefined;
 	if (S.escape) {
 		const run = { n: esc.runs, from: st.what, kind: st.kind, cfg: cfg.name, ticks: st.inputs.length, tiles: Math.round(st.dist * 10) / 10, workers: E, turn: turn.stall,
-			after: Math.round((Date.now() - S.started) / 100) / 10 };
+			after: Math.round((Date.now() - S.started) / 100) / 10, ...(flat !== undefined ? { flat } : {}) };
 		S.escape = Object.assign(S.escape, { runs: esc.runs, run });
 		S.escape.hist = (S.escape.hist || []).concat([run]).slice(-32);
 	}
-	note(`${V.label} ${esc.runs}: ${esc.runs === 1 ? `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.first} s` : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${cfgText}, ${E} of the ${W} CPU workers`);
+	const why = esc.prog ? `no attempt nearer by ${BREAK_TILES} tiles and no new room that is progress (a room attempt nearer than every one before, or more coins) for ${esc.runs === 1 ? esc.first : esc.wait} s (${esc.flat} new room${esc.flat === 1 ? '' : 's'} without progress meanwhile)`
+		: `no attempt nearer by ${BREAK_TILES} tiles and no new room for ${esc.first} s`;
+	note(`${V.label} ${esc.runs}: ${esc.runs === 1 || (esc.prog && !atOnce) ? why : 'the next'}: from tick ${st.inputs.length} of ${st.what}, ${cfgText}, ${E} of the ${W} CPU workers`);
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
 		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${cfg.label}, ${E} thread${E > 1 ? 's' : ''}` });
 	kids[n] = launch(n);
@@ -1945,10 +2002,17 @@ function escAfter(n, how) {
 	// idle per switch)
 	if (esc && esc.next) { const S0 = S, t = setTimeout(() => { if (S === S0) escKick(); }, 100); if (t.unref) t.unref(); }
 }
-/** the escape's own progress (its nearest attempt nearer by ESC_TILES, or a new room with territory gain): its stall clock */
-function escOwnProgress(dist) {
+/** the escape's own progress (its nearest attempt nearer by ESC_TILES, or a new room with territory gain): its stall clock;
+ *  room {dist, desc} (THE STALL CLOCK BY PROGRESS): a new room of its own restarts it only when it is progress of the
+ *  escape's own (roomProgress on run.pm), else it is counted (run.flat) */
+function escOwnProgress(dist, room) {
 	const R = esc && esc.run;
 	if (!R) return;
+	if (room) {
+		if (roomProgress(R.pm, room.dist, coinsOfDesc(room.desc, cur && cur.level), false, progMiss())) R.progAt = Date.now();
+		else R.flat++;
+		return;
+	}
 	if (dist === undefined || dist < R.best - ESC_TILES) { if (dist !== undefined) R.best = dist; R.progAt = Date.now(); }
 }
 /** the CPU search's workers make cells along an attempt (goexplore.js "seed <inputs>"; not the escape's: its runs start
@@ -2236,9 +2300,13 @@ function start(b, gpu, test) {
 	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : ESC_WAIT_S, first: escFirst, stall: test && test.escStall ? test.escStall : ESC_STALL_S, min: test && test.escMin !== undefined ? test.escMin : ESC_MIN_S,
 		turn: test && test.escTurn ? test.escTurn : ESC_TURN_S, retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null,
 		rot: escRot, from: escFrom, cfgTurn: 0, fromTurn: 0, nextFrom: null,
-		rolls: test && test.escRolls !== undefined ? !!test.escRolls : b.escRolls !== undefined ? b.escRolls !== false : process.env.EEAT_ESC_ROLLS !== undefined ? process.env.EEAT_ESC_ROLLS !== '0' : ESC_ROLLS };
+		rolls: test && test.escRolls !== undefined ? !!test.escRolls : b.escRolls !== undefined ? b.escRolls !== false : process.env.EEAT_ESC_ROLLS !== undefined ? process.env.EEAT_ESC_ROLLS !== '0' : ESC_ROLLS,
+		// (THE STALL CLOCK BY PROGRESS: test.stallProg, else the body's stallProg, else EEAT_STALLPROG=1, else STALL_PROG;
+		// pm: the rooms' records, flat / flatAll: the new rooms without progress since the last progress / in all)
+		prog: test && test.stallProg !== undefined ? !!test.stallProg : b.stallProg !== undefined ? b.stallProg === true : process.env.EEAT_STALLPROG !== undefined && process.env.EEAT_STALLPROG !== '' ? process.env.EEAT_STALLPROG !== '0' : STALL_PROG,
+		pm: { d: Infinity, c: 0 }, flat: 0, flatAll: 0 };
 	closestRoom = null;
-	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null, hist: [], rot: esc.rot.map((c) => c.name), from: esc.from.slice() } : null;
+	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null, hist: [], rot: esc.rot.map((c) => c.name), from: esc.from.slice(), ...(esc.prog ? { clock: { by: 'progress', flat: 0, flatAll: 0 } } : {}) } : null;
 	if (S.cpuOnly) note(S.cpuOnly);
 	saveNow();
 	// the physics check (src/reach.js, in a worker thread; cached per level) and the search tool's version, then the
@@ -2350,8 +2418,10 @@ function lateSteer(gen, sf2) {
 	if (brk) brk.mark = Infinity;
 	if (prec) prec.mark = Infinity;
 	for (const q of S.strategies) { q.best = undefined; q.bestTry = null; }
-	// (a stall escape running now: its own nearest was the reach field's too)
-	if (esc && esc.run) esc.run.best = Infinity;
+	// (a stall escape running now: its own nearest was the reach field's too; the rooms' distance records likewise: THE
+	// STALL CLOCK BY PROGRESS)
+	if (esc && esc.run) { esc.run.best = Infinity; esc.run.pm.d = Infinity; }
+	if (esc) esc.pm.d = Infinity;
 	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	const mb = sf2.bytes / 1048576;
 	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
@@ -2985,7 +3055,8 @@ function launch(n) {
 			if (V.sgMin && !(ev.sg >= V.sgMin) && dist < STEER_MISS) dist = Math.min(9990, STEER_MISS + dist);
 			if (cur && inputs && Number.isFinite(dist) && Number.isFinite(+ev.room)) {
 				// (the stall escape: a room new to the search that opens territory is its own progress too)
-				if (V.key === 'escape' && ev.kind === 'room' && +ev.gain > 0 && brk && !brk.rooms.has(+ev.room)) escOwnProgress();
+				// (the stall clock by progress: only such a room that is progress of its own, escOwnProgress)
+				if (V.key === 'escape' && ev.kind === 'room' && +ev.gain > 0 && brk && !brk.rooms.has(+ev.room)) escOwnProgress(undefined, esc && esc.prog ? { dist, desc: ev.desc } : null);
 				addSource({ room: +ev.room, desc: ev.desc, gain: +ev.gain || 0, from: V.label, inputs, dist, arrival: ev.kind === 'room' ? inputs.length : 0 });
 				// (the GPU random runs' and the stall escape's first arrival in a room: into the one search's archive)
 				if ((rolls || V.key === 'escape') && ev.kind === 'room') feedOne(inputs, true, V.key === 'escape');
@@ -3890,4 +3961,4 @@ function shutdown() {
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
-	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };
+	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS, roomProgress, ESC_PROG_F, STALL_PROG };

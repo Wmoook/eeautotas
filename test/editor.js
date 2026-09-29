@@ -2180,6 +2180,21 @@ const end = () => { clearInterval(iv); say({ ev: 'done', layers: 1, end: 'stoppe
 process.stdin.on('data', (d) => { if (/(^|\\n)stop(\\n|$)/.test(String(d))) end(); });
 process.stdin.on('end', end);
 `;
+// An escape that makes a new room of its own every 250 ms (a room explosion: territory gain, the same distance, no coins)
+// and never an attempt nearer (the stall clock by progress: its own turn)
+const FAKE_ESC_ROOMS = `'use strict';
+const fs = require('fs');
+const pf = (process.argv.find((a) => a.startsWith('--prefix=')) || '').slice(9);
+const pre = pf && fs.existsSync(pf) ? fs.readFileSync(pf, 'latin1') : '0';
+const base = 900000 + (Date.now() % 100000) * 10;
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 2, seeds: [1001, 1002], mode: 'physics', cells: 'coarse', startCost: 40 });
+let k = 0;
+const iv = setInterval(() => { say({ ev: 'source', kind: 'room', room: base + k, desc: 'purple=[' + k + ']', gain: 5, tick: pre.length, dist: 60, inputs: pre }); k++; }, 250);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 1, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/(^|\\n)stop(\\n|$)/.test(String(d))) end(); });
+process.stdin.on('end', end);
+`;
 // (the escape tests of before the stall rotation: every escape as the search (base), its starts the nearest attempt's
 // rotation (near); the rotation's own tests below)
 const ESC_OLD = { rot: ['base'], from: ['near'] };
@@ -2397,6 +2412,64 @@ async function escapeSection() {
 		hist6.length >= 5 && hist6[0].after < 20 && hist6.every((h) => h.turn === 1) && gaps6.length >= 4 && gaps6.every((g) => g < 8) &&
 		log6.some((l) => /escape: a fresh one search 1: no attempt nearer by .* for 1 s: from tick 260 of where room "coins=2" was entered, distance-blind novelty \(--pA=0 --burst=16\)/.test(l)),
 		`first after ${hist6.length ? hist6[0].after : '-'} s, gaps ${gaps6.map((g) => g.toFixed(1)).join(', ')} s; ${log6.slice(0, 1).join(' | ')}`);
+	// (6) THE STALL CLOCK BY PROGRESS (stallProg, opt-in; n3-stall-clock-progress): a room explosion no longer hides the pin.
+	// The pure rule first (roomProgress: a record of the rooms' distances by max(BREAK_TILES, ESC_PROG_F of it), the record
+	// moving only on progress; more coins; no distance record in a cul-de-sac or without a value on the measure)
+	{
+		const pm = { d: Infinity, c: 0 }, rp = (d, k = 0, cul = false) => ED.roomProgress(pm, d, k, cul, 6000);
+		const seq = [rp(100), rp(99), rp(98.1), rp(97.9), rp(97.5), rp(96), rp(95.9), rp(10, 0, true), rp(7000), rp(7000, 1), rp(7000, 1), rp(NaN, 2)];
+		check('the stall clock by progress\'s rule (roomProgress): the first real distance, then a record by max(0.5 tiles, 2% of it) (a creep counts once it adds up), more coins; not a room in a cul-de-sac or without a value on the measure; opt-in (STALL_PROG false)',
+			seq.join() === 'true,false,false,true,false,false,true,false,false,true,false,true' && pm.d === 95.9 && pm.c === 2 && ED.ESC_PROG_F === 0.02 && ED.STALL_PROG === false,
+			`${seq.join()}; ${JSON.stringify(pm)}`);
+	}
+	section('the stall clock by progress: a room explosion (a new room every 250 ms, the same distance) no longer hides the pin from the stall escape (stand-ins)');
+	const fakeRooms = path.join(HOME, 'fake-esc-rooms.js');
+	fs.writeFileSync(fakeRooms, FAKE_ESC_ROOMS);
+	// (the stalled search's rooms: 64 new rooms with territory gain every 250 ms from 0.3 s (16 s), none with coins; its
+	// nearest attempt 300 tiles out from 0.2 s on: its room (the start room, a new room with gain through the attempt's own
+	// source) is the first record, 300)
+	const stream = (dist) => Array.from({ length: 64 }, (_, k) => ({ room: 2000 + k, desc: `purple=[${k}]`, gain: 5, dist: dist(k), inputs: str(s1R), at: 300 + 250 * k }));
+	const clockRun = async (name, sources, o, maxS, done) => {
+		const sc = path.join(HOME, `esc_clock_${name}.json`);
+		fs.writeFileSync(sc, JSON.stringify({ attempt: str(aR), dist: 300, stdinLog: path.join(HOME, `esc_clock_${name}_stdin.log`), sources }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false }, { available: false },
+			Object.assign({ cpu: [process.execPath, fake, sc], escapeCmd: [process.execPath, fakeEsc], escape: true, escFirst: 2, escWait: 2, escStall: 1000, escMin: 1000, escTurn: 1000, escRetarget: 1000,
+				escRot: ESC_OLD.rot, escFrom: ESC_OLD.from }, o));
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && Date.now() - t0 < maxS * 1000 && !(done && done(st))) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		return { st, hist: (st.escape && st.escape.hist) || [], log: (st.log || []).filter((l) => /escape/.test(l)) };
+	};
+	// (a) the flat stream, the stall clock by progress: the first room a record, the rest no progress: the first escape after
+	// the 2-s wait (at the next 5-s stall check) while the rooms still come, with the rooms it passed over counted
+	const cA = await clockRun('flat_on', stream(() => 60), { stallProg: true }, 14, (st) => st.escape && st.escape.runs >= 1);
+	const noteA = cA.log.find((l) => /fresh one search 1: /.test(l)) || '';
+	const mA = /no new room that is progress \(.*\) for 2 s \((\d+) new rooms? without progress meanwhile\)/.exec(noteA);
+	check('the flat room stream with the stall clock by progress: the first escape after the 2-s wait while the new rooms still come (they are no progress: the same distance, no coins), their count in the note and the escape\'s record',
+		cA.hist.length >= 1 && cA.hist[0].after < 12 && !!mA && +mA[1] >= 3 && cA.hist[0].flat === +mA[1] && !!cA.st.escape.clock && cA.st.escape.clock.by === 'progress',
+		`${cA.hist.length ? `first after ${cA.hist[0].after} s, flat ${cA.hist[0].flat}` : 'no escape'}; ${noteA.slice(0, 260)}`);
+	// (b) the same stream, the flag off (main): every new room restarts the clock, so no escape while the rooms come
+	const cB = await clockRun('flat_off', stream(() => 60), { stallProg: false }, 14);
+	check('the same stream with the flag off (main): every new room that opens territory restarts the clock: no escape in 14 s of rooms, no progress count',
+		cB.hist.length === 0 && !!cB.st.escape && !cB.st.escape.clock, `${cB.hist.length} escape(s); ${cB.log.slice(0, 1).join(' | ')}`);
+	// (c) a progressing stream (each room 3 tiles nearer: a record every other room at most), the stall clock by progress:
+	// never fires while the rooms come
+	const cC = await clockRun('prog_on', stream((k) => 250 - 3 * k), { stallProg: true }, 14);
+	check('a progressing room stream (each room 3 tiles nearer than the one before) with the stall clock by progress: every record restarts the clock: no escape in 14 s, the rooms under the margin counted',
+		cC.hist.length === 0 && !!cC.st.escape.clock && cC.st.escape.clock.flatAll > 0 && cC.st.escape.clock.flatAll < 64,
+		`${cC.hist.length} escape(s); ${JSON.stringify(cC.st.escape && cC.st.escape.clock)}`);
+	// (d) an escape's own turn: an escape that makes a new room of its own every 250 ms (the same distance) and nothing
+	// nearer gives way after its 2-s turn with the stall clock by progress; with the flag off its rooms keep it
+	const src2 = [{ room: 777, desc: 'coins=1', gain: 5, dist: 50, inputs: str(s1R), at: 300 }, { room: 778, desc: 'coins=2', gain: 5, dist: 40, inputs: str(s2R), at: 400 }];
+	const own = { escapeCmd: [process.execPath, fakeRooms], escFirst: 1, escStall: 2, escMin: 2, escTurn: 2 };
+	const cD = await clockRun('own_on', src2, Object.assign({ stallProg: true }, own), 18, (st) => st.escape && st.escape.runs >= 2);
+	const noteD = cD.log.find((l) => /no new room of its own that is progress for 2 s \(\d+ new rooms? of its own without progress\): the next one/.test(l)) || '';
+	const cE = await clockRun('own_off', src2, Object.assign({ stallProg: false }, own), 14);
+	check('an escape\'s own turn by progress: its own new rooms at the same distance are no progress, so it gives way after its 2-s turn to the next one; with the flag off (main) its rooms keep it going',
+		cD.hist.length >= 2 && !!noteD && cE.hist.length === 1 && !cE.log.some((l) => /the next one/.test(l)),
+		`on: ${cD.hist.length} escapes, ${noteD.slice(0, 200)}; off: ${cE.hist.length} escape(s)`);
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));

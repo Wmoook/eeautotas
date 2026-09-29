@@ -84,6 +84,10 @@ check('escapeEvents: one event per escape, in order, with its configuration and 
 	x1.length === 2 && x1[0].ev === 'escape' && x1[0].n === 1 && x1[0].cfg === 'blind' && x1[0].kind === 'arrival' && x1[1].cfg === 'reach' && x1[1].ticks === 220 && x2.length === 0,
 	JSON.stringify(x1));
 check('escapeEvents: no escape state (escape off, a small level): nothing', AT.escapeEvents(new Set(), null).length === 0 && AT.escapeEvents(new Set(), { runs: 0, run: null }).length === 0);
+// (the stall clock by progress, editor.js: an escape's hist entry carries flat, the new rooms without progress before it)
+const xf = AT.escapeEvents(new Set(), { runs: 1, hist: [{ n: 1, cfg: 'longruns', kind: 'arrival', from: 'x', ticks: 9, tiles: 2, after: 64.1, flat: 37 }] });
+check('escapeEvents: the stall clock by progress\'s count of new rooms without progress (flat) when the escape has one; none in the events above',
+	xf.length === 1 && xf[0].flat === 37 && !('flat' in x1[0]), JSON.stringify(xf));
 const rx = AT.routeEscape({ strategy: 'escape: a fresh one search' }, e1), rl = AT.routeEscape({ strategy: 'escape: a fresh one search + path skips' }, { run: null, last: { n: 1, cfg: 'blind' } });
 check('routeEscape: an escape\'s route names the live escape (else the last one) and its configuration; another strategy\'s route none',
 	!!rx && rx.n === 2 && rx.cfg === 'reach' && !!rl && rl.cfg === 'blind' && AT.routeEscape({ strategy: 'random runs (GPU)' }, e1) === null && AT.routeEscape({ strategy: 'escape: a fresh one search' }, null) === null,
