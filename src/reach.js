@@ -73,6 +73,7 @@ const TROPHY = 121, CHECKPOINT = 360, PROTECTION = 420, ICE = 1064, CURSE = 421,
 // effects that change jumps, speeds or gravity: walk mode (417 jump, 418 fly, 419 speed, 453 low gravity, 461
 // multijump, 1517 gravity)
 const WILD = new Set([417, 418, 419, 453, 461, 1517]);
+const FXPHYS = process.env.EEAT_FXPHYS !== '0';
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
 
 /**
@@ -219,11 +220,12 @@ function reachField(level, opts) {
 	const W = level.width, H = level.height, N = W * H;
 	const fg = level.fg, flags = guideFlags(level), nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
-	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
+	const worldWild = !(level.gravityMult === 1);
+	let wild = worldWild, anyWildTile = false, protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
 	const protOn = [];   // the protection effect's "on" tiles (its number is not 0: Me.as, eesim.js EFFECT_PROTECTION)
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
-		if (WILD.has(id)) wild = true;
+		if (WILD.has(id)) { wild = true; anyWildTile = true; }
 		if (id === PROTECTION && lk[i] !== 0) { protect = true; protOn.push(i); }
 		if (id === ICE) ice = true;
 		if (id === CHECKPOINT) checkpoints = true;
@@ -385,7 +387,16 @@ function reachField(level, opts) {
 	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceR));
 	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
 	let mode = wild ? 'walk' : 'physics';
-	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
+	// (physics until an effect is held, the n3 fx-physics-until-held fix: a level whose only wildness is its effect tiles
+	// (the world gravity plain) gets the physics field of a ball WITHOUT an effect, whose goals are the trophy and every
+	// tile where the ball picks an effect up, each valued by the walk-mode field there; the states that field cuts off take
+	// the walk-mode field's value (a ball holding an effect, or a doomed one): -1 only where the walk says -1, so the
+	// proof is the walk's, as before. Before, one effect tile anywhere put the WHOLE level in walk mode (Be gone's one
+	// multijump tile, far along: a gravity-blind walk up shafts only an effect can climb). EEAT_FXPHYS=0 / opts.fxPhys
+	// false: walk mode as before)
+	let fxHybrid = mode === 'walk' && !worldWild && anyWildTile && FXPHYS && opts.fxPhys !== false;
+	if (fxHybrid) mode = 'physics';
+	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) { mode = 'walk'; fxHybrid = false; }
 	const trophy = (i) => fg[i] === TROPHY && passable(i);
 
 	// ---- goals (explore.js --hunt): tile -> cost in fifths
@@ -413,7 +424,7 @@ function reachField(level, opts) {
 	// its own. (Physics mode: protP's killing tiles open in the one field, as above.) The fallback's costs are ways "through
 	// a death" to the lookups' blend (scoreAt, native reachScore: the deaths flag), behind every real way.
 	let walkOut = walk, protFallback = 0;
-	if (mode === 'walk' && protP !== null) {
+	if ((mode === 'walk' || fxHybrid) && protP !== null) {
 		const killT = (i) => cls[i] !== WALL && fg[i] >= 0 && fg[i] < nFlags && (gF[fg[i]] & 4) !== 0;
 		const passU = (i) => passable(i) && !killT(i);
 		const seedU = new Map();
@@ -427,7 +438,7 @@ function reachField(level, opts) {
 			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
 		}
 	}
-	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
+	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ, fxW: false, fx: null,
 		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
 
@@ -678,8 +689,23 @@ function reachField(level, opts) {
 		return tab;
 	}
 	// ---- the backward label-setting search in cost buckets (integer costs; edges cost 0, 5 or 7)
+	// (fxHybrid: the goals (the trophy, or opts.goals) and every tile whose current tile is an effect tile (a half block's
+	// current tile is the one above or to its left: curOf), where a ball without an effect picks one up (eesim.js
+	// _touchBlock reads the current tile), at the walk-mode field's value there: from then on the walk is the ball's field)
+	let seedF = goalF, fxSeeds = 0;
+	if (fxHybrid) {
+		seedF = new Map(goalF ? goalF : []);
+		if (!goalF) for (let i = 0; i < N; i++) if (trophy(i)) seedF.set(i, 0);
+		for (let i = 0; i < N; i++) {
+			const j = curOf[i];
+			if (j < 0 || !WILD.has(fg[j]) || !passable(i)) continue;
+			const w = walkOut[i];
+			if (w === CUT || w > maxF) continue;
+			if (!(seedF.get(i) <= w)) { seedF.set(i, w); fxSeeds++; }
+		}
+	}
 	let seeds = [];
-	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
+	if (seedF) seeds = [...seedF].sort((a, b) => a[1] - b[1]);
 	else for (let i = 0; i < N; i++) if (trophy(i)) seeds.push([i, 0]);
 	const srcP = new Uint8Array(N);
 	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY && !forcedP[i] ? 1 : 0;   // (move sources: the trophy ends the way; a forced portal is left by its exits only)
@@ -725,7 +751,7 @@ function reachField(level, opts) {
 			for (let ty = 0; ty < NT; ty++) {
 				if (slotOf(t, ty) < 0) continue;
 				for (let l = LO[ty]; l <= HI[ty]; l++) {
-					let best = goalF ? (goalF.has(t) ? goalF.get(t) : Infinity) : trophy(t) ? 0 : Infinity;
+					let best = seedF ? (seedF.has(t) ? seedF.get(t) : Infinity) : trophy(t) ? 0 : Infinity;
 					edgesOf(t, ty, l, (t2, ty2, l2, add) => { const c = costOf(t2, ty2, l2); if (c !== CUT && c + add < best) best = c + add; });
 					const have = COST[ty][slotOf(t, ty) * NLV[ty] + idxOf(ty, l)];
 					if (have === FAR) continue;
@@ -735,6 +761,25 @@ function reachField(level, opts) {
 			}
 		}
 		field.mismatches = bad;
+	}
+	// ---- fxHybrid: every state the physics field cuts off takes the walk-mode field's value at its tile (a ball holding an
+	// effect, whose way the walk bounds, or a ball without one that is doomed: the lookup cannot tell them apart, and the
+	// walk's -1 stays the only proof). The costs of the physics part are not changed (after the self-check: the filled
+	// states are no Bellman states). costAt(field, sim) reads the walk for a ball that holds an effect (fxHeld).
+	if (fxHybrid) {
+		let filled = 0;
+		const K1 = KF + 1;
+		const fillA = (a, o, n, w) => { for (let x = o; x < o + n; x++) if (a[x] === CUT) { a[x] = w; filled++; } };
+		for (let t = 0; t < N; t++) {
+			const w = walkOut[t];
+			if (w === CUT) continue;
+			fillA(costR, t * NR, NR, w); fillA(costF, t * K1, K1, w); fillA(costL, t * K1, K1, w);
+			if (rowC[t] >= 0) fillA(costC, rowC[t] * NL, NL, w);
+			if (rowX[t] >= 0) fillA(costX, rowX[t] * NL, NL, w);
+		}
+		field.fxW = true;
+		field.fx = { seeds: fxSeeds, filled };
+		field.prioShift = Math.max(field.prioShift, prioShiftOf(walkOut));
 	}
 	// ---- opts.explain: when the start is cut off, the highest row its centre can reach in the model (a forward search:
 	// small then; from a start that is not cut off it would walk the whole model, so it is skipped: explain null)
@@ -1075,8 +1120,20 @@ function scoreAt(f, px, py, vy, q0, q1, slip) {
 /** the cost to the trophy in tiles (-1 = cut off): costAt(field, sim), or costAt(field, px, py, vy, onGround) with the
  *  gravity queue unknown (taken as the strongest pull) */
 function costAt(f, a, py, vy) {
-	const v = typeof a === 'object' && a !== null ? fifthsAt(f, a.px, a.py, a.speed_y, a._q0, a._q1, a._slippery) : fifthsAt(f, a, py, vy, -1, -1, f.ice ? 2 : 0);
+	const v = typeof a === 'object' && a !== null ? (f.fxW && fxHeld(a) ? walkAt(f, a.px, a.py) : fifthsAt(f, a.px, a.py, a.speed_y, a._q0, a._q1, a._slippery)) : fifthsAt(f, a, py, vy, -1, -1, f.ice ? 2 : 0);
 	return v < 0 ? -1 : v / 5;
+}
+/** a ball that holds a static effect which changes its moves (jump, speed, low gravity, multijump, gravity, fly): the
+ *  physics part of an fxHybrid field is a ball without one, so costAt(field, sim) reads the walk for it */
+function fxHeld(s) {
+	return s.jump_boost !== 0 || s.speed_boost !== 0 || s.low_gravity === true || s.max_jumps !== 1 || s.flip_gravity !== 0 || s.has_levitation === true;
+}
+/** the walk value (fifths) at the ball's centre tile, -1 = cut off */
+function walkAt(f, px, py) {
+	const tx = Math.trunc(px + 8) >> 4, ty = Math.trunc(py + 8) >> 4;
+	if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
+	const w = f.walk[ty * f.W + tx];
+	return w === CUT ? -1 : w;
 }
 /** debugging: the ball's abstract state and cost */
 function stateAt(f, sim) {
@@ -1134,7 +1191,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, fxHeld, WILD, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
