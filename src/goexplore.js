@@ -359,6 +359,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
+	coinloc: process.env.EEAT_COINLOC !== undefined ? +process.env.EEAT_COINLOC : 0,
 	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 1,
 	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5, tPhys: 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
@@ -946,6 +947,47 @@ function discreteOf(L) {
 const RELV = new WeakMap();
 const KEY_TRIG = new Set([6, 7, 8, 408, 409, 410]);
 const KEY_DOOR = new Set([23, 24, 25, 26, 27, 28, 1005, 1006, 1007, 1008, 1009, 1010]);
+/** COIN-LOCAL (--coinloc=D, b9cw2-cw): per tile the coins (gold and blue: L.coinBit indices) within D walk steps
+ *  (4-way over the tiles that are no wall: counterRelevance's wall, doors passable; portals not followed), the nearest
+ *  first, at most COINLOC_MAX a tile: {start: Int32Array(N + 1), idx} (CSR). Cached per level object and D. */
+const COINLOC_MAX = 12;
+const coinLocMemo = new WeakMap();
+function coinLocalOf(L, D) {
+	let m = coinLocMemo.get(L); if (!m) { m = new Map(); coinLocMemo.set(L, m); }
+	if (m.has(D)) return m.get(D);
+	const W = L.width, H = L.height, N = W * H, fl = RF.guideFlags(L);
+	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
+	const wall = new Uint8Array(N);
+	for (let i = 0; i < N; i++) { const f = fl[L.fg[i]] | 0; if ((f & F_SOLID) !== 0 && (f & F_DOOR) === 0 && (f & (F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0) wall[i] = 1; }
+	const per = new Array(N);   // [dist, coin] lists
+	const dist = new Int32Array(N);
+	const CT = L.coinTiles || [];
+	for (let k = 0; k < CT.length; k++) {
+		dist.fill(-1); const q = [CT[k]]; dist[CT[k]] = 0;
+		for (let h = 0; h < q.length; h++) {
+			const i = q[h], d = dist[i];
+			(per[i] = per[i] || []).push(d * 65536 + k);
+			if (d >= D) continue;
+			const x = i % W, y = (i / W) | 0;
+			if (x > 0 && dist[i - 1] < 0 && !wall[i - 1]) { dist[i - 1] = d + 1; q.push(i - 1); }
+			if (x < W - 1 && dist[i + 1] < 0 && !wall[i + 1]) { dist[i + 1] = d + 1; q.push(i + 1); }
+			if (y > 0 && dist[i - W] < 0 && !wall[i - W]) { dist[i - W] = d + 1; q.push(i - W); }
+			if (y < H - 1 && dist[i + W] < 0 && !wall[i + W]) { dist[i + W] = d + 1; q.push(i + W); }
+		}
+	}
+	const start = new Int32Array(N + 1); const out = [];
+	for (let i = 0; i < N; i++) {
+		start[i] = out.length;
+		const p = per[i]; if (!p) continue;
+		p.sort((u, v) => u - v);
+		const ks = p.slice(0, COINLOC_MAX).map((v) => v % 65536).sort((u, v) => u - v);
+		for (const k of ks) out.push(k);
+	}
+	start[N] = out.length;
+	const r = { start, idx: Int32Array.from(out) };
+	m.set(D, r);
+	return r;
+}
 function counterRelevance(L) {
 	const had = RELV.get(L);
 	if (had) return had;
@@ -2736,8 +2778,18 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	};
 	// the cell key: two 32-bit hash lanes over the cell's numbers (53 bits; two cells collide with probability ~2^-53 per
 	// pair, and a collision only merges two cells of this archive: every route is replayed exactly anyway)
-	const KV = new Int32Array(11);
+	const KV = new Int32Array(13);
 	let tile = 0, spdCur = false, spdFast = false, spdT0 = 0;
+	// COIN-LOCAL WORD (--coinloc=D / EEAT_COINLOC=D, coarse cells; OPT-IN, b9cw2-cw; 0 = off: the key as before, byte for
+	// byte): the room keys a coin COUNT, not which coins, and a coarse cell keeps its earliest state, so a lineage that
+	// took coin X and then explored X's region in the new count's room holds every cell there before a lineage of the
+	// same count that took another coin arrives: the latter is dropped at every cell and can never take X (Cold World:
+	// chapter coins 1 each in 8 of 8 runs, both coins' tiles visited, coins=2 never). With D > 0, at a tile within D walk
+	// steps of a coin (the doors passable, portals not followed; coinLocalOf) the taken bits of those coins (at most 12,
+	// the nearest) are one more word: a lineage with X untaken near X is its own cell. A finer key: more cells, nothing
+	// dropped that the key without the word kept apart (no prune). clCells: the cells made with the word.
+	const CL = coarse && a.coinloc > 0 ? coinLocalOf(L, a.coinloc) : null;
+	let clCells = 0, clW = false;
 	// timed killers (src/timed.js; TM null: the level has none, and every key and cost is exactly as before): the live
 	// state's ticks left on its soonest killer (tLeft, 0: none), that killer's kind bit (tKind) and bucket (tBucket), set by
 	// cellKey. With --timed=1 (the default) the bucket is one more word of the cell key while a killer runs, so a later
@@ -2808,6 +2860,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			const qp = QP[r], qv = QV[r];
 			KV[6] = Math.floor(px * qp); KV[7] = Math.floor(py * qp); KV[8] = Math.floor(sim.speed_x * qv); KV[9] = Math.floor(sim.speed_y * qv);
 			n = 10;
+		}
+		// (--coinloc: the taken bits of the coins near the tile as one more word; flag off or no coin near, none)
+		if (CL !== null) {
+			const s0 = CL.start[tile], s1 = CL.start[tile + 1];
+			clW = s1 > s0;
+			if (clW) {
+				const cb = sim._coinBits; let m = 0;
+				for (let q = s0; q < s1; q++) { const k = CL.idx[q]; if ((cb[k >> 5] >>> (k & 31)) & 1) m |= 1 << (q - s0); }
+				KV[n++] = 0x63000000 | m;
+			}
 		}
 		// (--jcell: the air jumps left as one more word; flag off, on the ground or on a level of 1 or 1000+ jumps, none)
 		if (JC) {
@@ -3071,6 +3133,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (PB !== null && inBox(tile)) boxCells++;
 		// (a level with timed killers: the ticks left at arrival and the killer's kind bit, tLeft x 16 + kind; B_TM more)
 		if (TM !== null) { nc.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0); if (tLeft > 0) tCells++; }
+		if (clW) clCells++;
 		// (--jcell: every cell's air jumps left, jw (3: no word), for nearestOf's order; jCells: the cells with the word)
 		if (JC) {
 			nc.jw = jw;
@@ -3186,7 +3249,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	let parked = 0;   // (the chunks this worker sat out: stdin "workers K" parked it)
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, jDom, jCells, jKept, jwB: JC ? cells.size * B_JW : 0, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, jDom, jCells, jKept, clCells, jwB: JC ? cells.size * B_JW : 0, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
@@ -5074,7 +5137,7 @@ async function main() {
 	// (--jcell=1: the cells made with the air-jumps word, the states dropped as dominated by a cell with more jumps left, and
 	// the later arrivals with more jumps left kept as their own cells, which the key without the word dropped; bytes: what
 	// the archives' budget counts for the cells' jw now, B_JW each)
-	const jcellNow = () => (a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom'), kept: total('jKept'), bytes: total('jwB') } } : {});
+	const jcellNow = () => Object.assign(a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom'), kept: total('jKept'), bytes: total('jwB') } } : {}, a.coinloc > 0 ? { coinloc: { d: a.coinloc, cells: total('clCells') } } : {});
 	// (--pareto=1: head P's picks over the workers, the largest front, the most useful gold / blue / key colours a room holds)
 	const paretoNow = () => (a.pareto && a.cells === 'coarse' ? { pareto: { picks: total('parP'), front: most('parFront'), gold: most('parG'), blue: most('parB'), keys: most('parK') } } : {});
 	// (--tedge=1: head T's picks, field builds (and cache hits), their ms, the triggers its picks' runs tried (by kind: coin,
@@ -5459,5 +5522,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { B_JW, CellMap, paretoOf, paretoFront, paretoRooms, PAR_EVERY, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { B_JW, CellMap, coinLocalOf, paretoOf, paretoFront, paretoRooms, PAR_EVERY, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
