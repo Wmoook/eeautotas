@@ -256,9 +256,9 @@
 //        [--pareto=0 (1 or EEAT_PARETO=1: OPT-IN, coarse cells: HEAD P, --pP (0.15) of the picks taken from head A only:
 //        the rooms on the non-dominated front of (useful resources held: gold / blue coins up to the highest coin door,
 //        the key colours a door or gate reads; the room's best order cost), the least picked of them but the cheapest,
-//        then the best of --sample cells of it by head A's priority; CPU workers and the GPU random runs' host (not a
-//        blind class). Order only. The progress and done events carry "pareto": {picks, front, gold, blue, keys}. See
-//        PARETO HEAD)]
+//        then the best of --sample cells of it by head A's priority (--pCell=1: by head B's count weights); CPU workers and
+//        the GPU random runs' host (not a blind class). Order only. The progress and done events carry "pareto": {picks,
+//        front, gold, blue, keys}. See PARETO HEAD)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
@@ -1314,8 +1314,11 @@ function domPick(DOM, share, rnd, weightOf) {
 // and their costs change all the time; the rooms not in a cul-de-sac or throw-back: no bk, cells left). Head P takes --pP
 // of the picks from head A only (the last branch: one more draw there, rnd() < pP / pA): among the front's rooms but the
 // cheapest (head A has it), the least picked of a tournament of 2 (weight 1 / sqrt(1 + picks / 50)), then the best of
-// --sample of its cells by head A's own priority; nothing: head A. Order only: nothing is pruned, the reach field's -1
-// stays the only prune. Heads B, C, F, L and W are untouched; a blind roll class (pA 0) gets no head P.
+// --sample of its cells by head A's own priority (--pCell=1: by head B's count weights, the room's least visited cells:
+// in a room ordered by the door-blind reach field (the GPU random runs' host, or no steer value) head A's priority is the
+// cell nearest the false near; a cell with no steer value costs 6000 + its reach cost, distOf's rank); nothing: head A.
+// Order only: nothing is pruned, the reach field's -1 stays the only prune. Heads B, C, F, L and W are untouched; a blind
+// roll class (pA 0) gets no head P.
 const PAR_EVERY = 1000, B_PR = 48;
 /** the level's useful resources (see PARETO HEAD): {gMax (the highest coin door, 43), bMax (blue, 213), keys (the key
  *  colours some key door or gate reads, bits as sim._keysMask), of(sim) -> [gold, blue, keys]}; null: none */

@@ -9,7 +9,8 @@
 //            from it, down a stepped corridor: the door-blind reach field pins head A at the door): the flag off = no
 //            head P and no "pareto" numbers; --pareto=1: head P picks, its front, the most useful gold; routes replayed;
 //            the same seed and budget = the same search; the ticks to the first room holding N coins and to the first
-//            route, --pareto=1 vs 0 over seeds 1-3 (printed: a measurement, not a pass / fail)
+//            route, --pareto=1 vs 0 over seeds 1-3 (printed: a measurement, not a pass / fail); --pCell=1 (head P's cell
+//            by head B's count weights): picks, a route replayed, deterministic; --pCell=0 = the flag as first built
 //   noop     a level without a coin door or key door (05_2 On And On And On, when the campaign folder is there, and the
 //            toy with its door removed): --pareto=1 = the flag off, the same search (no draw more)
 //   levels   (with --main=<main's src/goexplore.js>) 1 worker + a tick budget: the flag off = main (ticks, cells, picks,
@@ -159,6 +160,13 @@ function sectionToy() {
 	const again = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--pareto=1']);
 	const on0 = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--pareto=1']);
 	check('--pareto=1: the same seed and budget give the same search', sig(again) === sig(on0) && JSON.stringify(doneOf(again).pareto) === JSON.stringify(doneOf(on0).pareto), `${doneOf(again).picks} / ${doneOf(on0).picks} picks`);
+	// --pCell=1 (head P's cell of its room by head B's count weights): head P picks, a route (replayed), deterministic
+	const c1 = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--pareto=1', '--pCell=1']), c2 = gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--pareto=1', '--pCell=1']);
+	const rc = routesOf(c1), dc = doneOf(c1);
+	check('--pareto=1 --pCell=1: head P picks, a route (replayed), the same search again', dc.pareto && dc.pareto.picks > 0 && rc.length > 0 && !!C.evaluate(L, masksOf(rc[0].inputs)) && sig(c1) === sig(c2),
+		rc.length ? `${rc[0].ticks} ticks after ${(rc[0].simTicks / 1e6).toFixed(2)} M simulated, ${JSON.stringify(dc.pareto)}` : 'no route');
+	// --pCell=0 is the first version's search (the option only chooses the cell)
+	check('--pCell=0 = the flag as first built', sig(gox(GOX, file, [...base, `--seed=${seeds[0]}`, '--pareto=1', '--pCell=0'])) === sig(on0));
 	const m = (x) => (x == null ? 'none' : `${(x / 1e6).toFixed(2)} M`);
 	console.log(`  (the worker's simulated ticks to the first room with ${N} coins, off / on: ${rows.map((r) => `seed ${r.seed} ${m(r.n0)} / ${m(r.n1)}`).join(', ')})`);
 	console.log(`  (the simulated ticks to the first route, off / on: ${rows.map((r) => `seed ${r.seed} ${m(r.f0)} / ${m(r.f1)}`).join(', ')})`);
