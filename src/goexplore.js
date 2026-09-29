@@ -3135,8 +3135,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const frBuild = (now) => {
 		const tb = Date.now();
 		FR.at = picks; FR.visAt = nVis; FR.builds++;
-		// (the room: every other build the nearest attempt's, else a tournament of 4 by raw territory gain, the trophy
-		// walkable, few frontier builds; never a dominated room or one without cells)
+		// (the room: a room that just opened territory (FR.fresh: the frontier its doors let in), else every other build the
+		// nearest attempt's, else a tournament of 4 by raw territory gain, the trophy walkable, few frontier builds; never a
+		// dominated room or one without cells)
 		let R = null;
 		const ok = (r) => r !== null && r !== undefined && r.arr.length > 0 && !domOf(r);
 		if (FR.fresh !== null && ok(FR.fresh) && rooms.get(FR.fresh.key) === FR.fresh) R = FR.fresh;
