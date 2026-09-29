@@ -232,9 +232,14 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	// runs, each as long as a full one. Now per class the floor F = the least time of its last 16 launches (another
 	// process on the GPU only adds time), and the launches are sized by the time past it: the target for that part is
 	// max(--launch-ms, 1.3 F) - F, and the part is the measured time less F (the observed runs, not Lr ticks each). The
-	// worst case (every run of the launch the batch's Lr ticks, at the least time per simulated tick any launch of this
-	// process measured: an upper bound of the GPU's cost per tick) stays under 2 x max(--launch-ms, 1.3 F) (TDR); until a
-	// launch of 16,384 ticks or more has measured it, the sizing before.
+	// worst case (every run of the launch the batch's Lr ticks) is held under 2 x max(--launch-ms, 1.3 F) (TDR) at tickMs,
+	// the least time per simulated tick of the LAST 16 launches of 16,384 ticks or more (a window, like F's): a launch's
+	// ms / ticks is at least the GPU's cost per tick at full occupancy while it ran, so the least of a window is an upper
+	// bound of that cost at the GPU's speed during that window. The least over the whole process (the first version)
+	// kept the speed of a cool GPU: a laptop GPU that throttles 3-5.8x after 35-55 s (and the floor F with it) then got
+	// launches ~2x over the bound (the soundness review's model of this code: 292-376 ms against a claimed 199 ms, 1-3 a
+	// 120 s over 300 ms; with the window every launch at or under the bound, the longest 77-112 ms: rollsize_sim.js mode
+	// fix, src/out/n3/review_roll_sizing/); until a launch of 16,384 ticks or more has measured it, the sizing before.
 	struct RollClass {
 		int lr; lk::Chunk ck; double win[16]; int nWin, iWin;
 		RollClass(int lr_, double size) : lr(lr_), ck(size, 128, 1u << 30, 128), nWin(0), iWin(0) {}
@@ -253,7 +258,8 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	};
 	ckRollFor(Lr);
 	unsigned long long simSeen = 0;
-	double tickUB = 0;   // (ms per simulated tick: the least of any launch of 16,384 ticks or more; 0 = none yet)
+	// (ms per simulated tick: the least of the last 16 launches of 16,384 ticks or more; 0 = none yet)
+	double tickMs = 0, tickWin[16]; int tickN = 0, tickI = 0;
 	auto rollTook = [&](lk::Chunk& c, double items, double ms) {
 		unsigned long long sim = simSeen;
 		cu::cuMemcpyDtoH_v2(&sim, dctr.p + 32, 8);
@@ -262,13 +268,17 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		if (sizeOn && rcNow && &rcNow->ck == &c) {
 			RollClass& rc = *rcNow;
 			rc.win[rc.iWin] = ms; rc.iWin = (rc.iWin + 1) % 16; rc.nWin = std::min(16, rc.nWin + 1);
-			if (units >= 16384 && ms > 0) tickUB = tickUB > 0 ? std::min(tickUB, ms / units) : ms / units;
-			if (tickUB > 0) {
+			if (units >= 16384 && ms > 0) {
+				tickWin[tickI] = ms / units; tickI = (tickI + 1) % 16; tickN = std::min(16, tickN + 1);
+				tickMs = tickWin[0];
+				for (int i = 1; i < tickN; i++) tickMs = std::min(tickMs, tickWin[i]);
+			}
+			if (tickMs > 0) {
 				const double T = lk::G.targetMs, F = rc.floorMs(), tal = std::max(T, 1.3 * F);
 				floorMax = std::max(floorMax, F);
 				c.scale = std::max(0.05, (tal - F) / T);
 				c.took(items, std::max(0.02, ms - F));
-				c.size = std::max(c.lo, std::min(c.size, (2 * tal - F) / (P.Lr * tickUB)));
+				c.size = std::max(c.lo, std::min(c.size, (2 * tal - F) / (P.Lr * tickMs)));
 				return;
 			}
 		}
