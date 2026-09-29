@@ -216,6 +216,24 @@ function policyOf(file, opts = {}) {
 			while (y < NY - 1 && cdf[c + y] <= u) y++;
 			return fromFrame(y, fo[0], fo[1]);
 		},
+		/** a switch (--priorMode=1: the sticky timing, the model's choice): an input other than prev, by the model's
+		 *  distribution without prev (eps of the draws: one of the other 17). One rnd() per draw */
+		drawSwitch(sim, prev, hold, rnd) {
+			const r = rnd();
+			const c = contextOf(sim, prev, hold, fo) * NY;
+			const py = toFrame(canon(prev), fo[0], fo[1]);
+			if (r < eps) { const k = ((r / eps) * (NY - 1)) | 0; return fromFrame(k < py ? k : k + 1, fo[0], fo[1]); }
+			const pp = cdf[c + py] - (py > 0 ? cdf[c + py - 1] : 0);
+			const u = ((r - eps) / (1 - eps)) * Math.max(1e-12, 1 - pp);
+			let acc = 0, y = 0, last = py === 0 ? 1 : 0;
+			for (; y < NY; y++) {
+				if (y === py) continue;
+				last = y;
+				acc += cdf[c + y] - (y > 0 ? cdf[c + y - 1] : 0);
+				if (acc > u) break;
+			}
+			return fromFrame(y < NY ? y : last, fo[0], fo[1]);
+		},
 	};
 }
 

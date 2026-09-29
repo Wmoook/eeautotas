@@ -153,7 +153,20 @@ function sectionPolicy(L, m) {
 		worst = Math.max(worst, Math.abs((freq.get(mk) || 0) / n - want));
 	}
 	check('40,000 draws: each input\'s share within 1% of (1 - eps) p + eps / 18', worst < 0.01, `worst ${worst.toFixed(4)}; R+J ${((freq.get(5) || 0) / n).toFixed(3)}`);
-	check('a draw reads the live state only (the state is unchanged)', sim.px === sim.px && (() => { const h = sim.stateHash(); P.draw(sim, 4, held, rnd); return sim.stateHash() === h; })());
+	check('a draw reads the live state only (the state is unchanged)', (() => { const h = sim.stateHash(); P.draw(sim, 4, held, rnd); P.drawSwitch(sim, 4, held, rnd); return sim.stateHash() === h; })());
+	// --priorMode=1: a switch is never the last input, and follows the model without it
+	const fs2 = new Map();
+	let same = 0;
+	for (let k = 0; k < n; k++) { const x = P.drawSwitch(sim, 4, held, rnd); if (x === 4) same++; fs2.set(x, (fs2.get(x) || 0) + 1); }
+	const pr = M.probs[c * 18 + PR.toFrame(4, out[0], out[1])];
+	let worst2 = 0;
+	for (let y = 0; y < 18; y++) {
+		const mk = PR.fromFrame(y, out[0], out[1]);
+		if (mk === 4) continue;
+		const want = 0.9 * M.probs[c * 18 + y] / (1 - pr) + 0.1 / 17;
+		worst2 = Math.max(worst2, Math.abs((fs2.get(mk) || 0) / n - want));
+	}
+	check('a switch (mode 1): never the last input; each other input\'s share within 1% of (1 - eps) p / (1 - p(last)) + eps / 17', same === 0 && worst2 < 0.01, `same ${same}, worst ${worst2.toFixed(4)}`);
 }
 
 function sectionSearch(file, L) {
@@ -171,13 +184,15 @@ function sectionSearch(file, L) {
 	for (const [k, v] of cnt) counts[k] = Array.from(v);
 	const mf = path.join(HOME, 'm_route.json');
 	fs.writeFileSync(mf, JSON.stringify({ version: PR.VERSION, dims: PR.DIMS, alpha: 4, counts }));
-	for (const cells of ['fine', 'coarse']) {
-		const a1 = gox(GOX, file, [...base, `--cells=${cells}`, `--prior=${mf}`]), a2 = gox(GOX, file, [...base, `--cells=${cells}`, `--prior=${mf}`]);
+	for (const [cells, mode] of [['fine', 0], ['coarse', 0], ['coarse', 1]]) {
+		const arg = [...base, `--cells=${cells}`, `--prior=${mf}`, `--priorMode=${mode}`];
+		const a1 = gox(GOX, file, arg), a2 = gox(GOX, file, arg);
 		const d1 = doneOf(a1), rr = routesOf(a1);
 		const ev = rr.length ? C.evaluate(L, masksOf(rr[rr.length - 1].inputs)) : null;
-		check(`${cells} cells with --prior: a route (replayed)`, !!ev, rr.length ? `${rr[rr.length - 1].ticks} ticks, ${ev ? ev.runTicks + ' run ticks' : 'does not replay'}` : 'none');
-		check(`${cells} cells with --prior: prior runs, about --priorP (0.5) of the runs`, d1.priorRuns > 0 && Math.abs(d1.priorRuns / (d1.picks * 8) - 0.5) < 0.05, `${d1.priorRuns} of ${d1.picks * 8}`);
-		check(`${cells} cells with --prior: the same seed and tick budget give the same search`, sig(a1) === sig(a2), sig(a1));
+		const what = `${cells} cells with --prior (mode ${mode})`;
+		check(`${what}: a route (replayed)`, !!ev, rr.length ? `${rr[rr.length - 1].ticks} ticks, ${ev ? ev.runTicks + ' run ticks' : 'does not replay'}` : 'none');
+		check(`${what}: prior runs, about --priorP (0.5) of the runs`, d1.priorRuns > 0 && Math.abs(d1.priorRuns / (d1.picks * 8) - 0.5) < 0.05, `${d1.priorRuns} of ${d1.picks * 8}`);
+		check(`${what}: the same seed and tick budget give the same search`, sig(a1) === sig(a2), sig(a1));
 	}
 	const bad = gox(GOX, file, [...base, `--prior=${path.join(HOME, 'nope.json')}`]);
 	check('a missing model fails at the start (an error line, no search)', bad.some((e) => e.error && /--prior/.test(e.error)) && !bad.some((e) => e.ev === 'done'));

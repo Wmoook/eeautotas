@@ -174,7 +174,9 @@
 //        ground by a wall or a gap the way it goes)]
 //        [--prior=<model.json> (LEARNED MOVES, OFF by default: src/prior.js's input prior P(input | the ball's context, the
 //        last input and its hold) learned from finished routes; --priorP=0.5 of the CPU runs draw every tick from it,
-//        --priorEps=0.1 of each draw one of the 18; the other runs as before; without it no draw changes)]
+//        --priorEps=0.1 of each draw one of the 18; --priorMode=0: every tick's input from the model, 1: the sticky
+//        timing (--keep) and the model's choice of each new input (an input other than the last); the other runs as
+//        before; without it no draw changes)]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
 //        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
@@ -316,7 +318,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.1, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -3015,12 +3017,21 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				// (a prior run: its inputs from the model, from the pick's last input; see LEARNED MOVES)
 				const pri = PRI !== null && rnd() < a.priorP;
 				let m = 0, pm = 0, ph = 1;
-				if (pri) { priorRuns++; lastHeld(up, lh); pm = lh[0]; ph = lh[1]; } else m = draw();
+				if (pri) {
+					priorRuns++; lastHeld(up, lh); pm = lh[0]; ph = lh[1];
+					// (--priorMode=1: the first input a switch from the pick's last one, as the sticky rule draws a new one)
+					if (a.priorMode === 1) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; pm = m; }
+				} else m = draw();
 				let room = e.room, rcPrev = e.rc;
 				for (let s = 0; s < a.roll; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
-					if (pri) { m = PRI.draw(sim, pm, ph, rnd); if (m === pm) ph++; else ph = 1; pm = m; } else if (rnd() >= a.keep) m = draw();
+					if (pri) {
+						// (mode 0: every tick's input from the model; mode 1: the sticky timing (--keep), the model's choice of the new input)
+						if (a.priorMode === 1) { if (rnd() >= a.keep) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; } else ph++; }
+						else { m = PRI.draw(sim, pm, ph, rnd); if (m === pm) ph++; else ph = 1; }
+						pm = m;
+					} else if (rnd() >= a.keep) m = draw();
 					buf[o + s] = m;
 					E.applyMask(inp, m);
 					sim.tick(inp);
