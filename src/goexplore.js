@@ -240,6 +240,9 @@
 //        burst and enters the room there (reentry); the progress and done events carry "useful": {culPicks, culCells,
 //        zeroed (rooms), culSets, culDropped, reculs}, "deaths" "useless" (such deaths, kept); 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
+//        [--frontier=0 (1: OPT-IN, coarse cells: the frontier field, head F, see FR_MIN_PICKS below; 0: the search exactly as
+//        before) --fLo=0.1 --fHi=0.4 --fStall=75000 --fEvery=25000 --fGrow=0.1 --fK=4096 --fLambda=4 --fDil=1 --fYield=0
+//        --fBrake=0 --fPhys=0 (EEAT_FRLOG=<file>: a line per field, observation only)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -317,15 +320,19 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
-// (any room; kept with the flag off too, for the progress events' visTiles). Every --fEvery picks (or sooner, at least
-// FR_MIN_PICKS apart, when VIS grew by --fGrow; by the count, not the clock: one worker with a tick budget stays exactly
-// reproducible) it builds ONE frontier field for ONE room: the reach field's machinery
+// (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
+// picks (or sooner, at least max(FR_MIN_PICKS, FR_TILE_PK x the level's tiles) apart, when VIS grew by --fGrow; and
+// FR_FRESH_PK picks after the last when a room that opens territory appeared: then that room's; by the count, not the
+// clock: one worker with a tick budget stays exactly reproducible) it builds ONE frontier field for ONE room: the reach
+// field's machinery
 // (src/reach.js, physics where the level allows, else its walk) with the room's doors as the room holds them (a shut door
 // a wall, an open one air: a false near behind a coin door is no frontier for a room without the coins) and as GOALS the
 // tiles no cell was ever in, --fDil tiles away from every visited one (the holes the random runs left inside the explored
 // region are no frontier), outside the room's cul-de-sacs, and on a walk-mode level only tiles the ball can be held in (a
-// solid tile below, or a block of its own: dots, arrows, liquids, climbables); no death edges. Its room: every other build
-// the room of this worker's nearest attempt (the stall), else a tournament of 4 by territory gain and few builds. The
+// solid tile below, or a block of its own: dots, arrows, liquids, climbables; --fPhys=1: a room without an effect gets a
+// physics field there, the effect blocks air in it); no death edges. Its room: a room that just opened territory (the
+// door a coin opened: the frontier it let in, behind the ball, so head F pulls the ball back to it), else every other
+// build the room of this worker's nearest attempt (the stall), else a tournament of 4 by territory gain and few builds. The
 // field's cost of a cell = its tile's cost at rest (costAt(x, y, vy 0): a ball in the air cannot rise to the frontier
 // above it): the --fK cells of that room nearest the frontier (not in a cul-de-sac, early enough) go into head F's heap
 // by cost + --fLambda x sqrt(picks); a new cell of that room enters it at its tile's cost (the frontier's own new cells
