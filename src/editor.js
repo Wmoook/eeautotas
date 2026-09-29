@@ -2366,6 +2366,8 @@ function steerFp() {
 	if (steerFpMemo) return steerFpMemo;
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
+	// (the gate as floor's knob changes the file: EEAT_GATEFLOOR=0 never reads a field built with it on, nor the other way)
+	if (process.env.EEAT_GATEFLOOR === '0') h.update('gatefloor0');
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);

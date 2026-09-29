@@ -15,6 +15,9 @@ const { spawn } = require('child_process');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'pastplan-home-'));
 process.env.EEAT_HOME = HOME;
 process.env.EEAT_PROOF = '0';
+// (the plan past its count is what this test checks: the level's top foothold is a 3-coin gate under the trophy, which
+// the gate as floor (steer.js gateFloors, n3-gate-as-floor) takes as the count at once; off here, checked once below)
+process.env.EEAT_GATEFLOOR = '0';
 const E = require('../src/eesim.js');
 const EL = require('../src/eelvl.js');
 const ED = require('../src/editor.js');
@@ -76,6 +79,14 @@ check(`holding the plan's count (${s2.coins} coins): the plan's own next gate is
 const s0 = stateAt();
 const v0 = SF.steerAt(Object.assign({}, sp, { dpFirst: true }), s0), v2 = SF.steerAt(Object.assign({}, sp, { dpFirst: true }), s2);
 check('the plan past its count with the DP first: a value at the start, falling as the coins come', Number.isFinite(v0) && Number.isFinite(v2) && v2 < v0, `${v0} -> ${v2}`);
+{
+	const stF = SF.buildSteer(L, { gateFloor: true });
+	delete process.env.EEAT_GATEFLOOR;
+	const stF2 = SF.buildSteer(L);
+	process.env.EEAT_GATEFLOOR = '0';
+	check('with the gate as floor (the 3-coin gate under the trophy): the field\'s own plan is the full count, DP first', stF2.info.dp && stF2.info.dp.T === 3 && stF2.floorFirst === true && stF.info.floor === undefined,
+		JSON.stringify({ dp: stF2.info.dp, floor: stF2.info.floor }));
+}
 
 console.log('\n== goexplore.js: `steer <file>` on stdin');
 (async () => {
