@@ -94,7 +94,16 @@ function setCoins(sim, taken) {
 function section2() {
 	section('2 the value');
 	const sim = new E.EESim(L); sim.reset();
-	check('below 25 coins the layer field has no value (plain), the tour has', !(SF.steerFifths(stPlain, sim) >= 0) && SF.steerFifths(st, sim) >= 0, `${SF.steerAt(stPlain, sim)} vs ${SF.steerAt(st, sim)} tiles`);
+	// (one layer per count (coinClasses false, main before the threshold classes): no value below the door's count; with
+	// the classes (2: 0-24, 25) the plain file's class body has one (its coins are goals), and where the ball's class
+	// cannot reach the trophy the CPU lookup is the tour's (steer.js ccOwed): the tour's value at the start)
+	const stCount = SF.buildSteer(L, { noTour: true, coinClasses: false });
+	check('below 25 coins the per-count layer field has no value, the tour has', !(SF.steerFifths(stCount, sim) >= 0) && SF.steerFifths(st, sim) >= 0, `${SF.steerAt(stCount, sim)} vs ${SF.steerAt(st, sim)} tiles`);
+	const rdc = SF.readSteerFile(SF.steerFileBytes(st, null, true)), rdp = SF.readSteerFile(SF.steerFileBytes(st, null));
+	const tourOnly = SF.steerFifths(Object.assign({}, st, { cc: null, layerBody: new Int32Array(st.S).fill(-1) }), sim);
+	check('with the threshold classes the plain file (the GPU tools\') has the class body\'s value at the start, the CPU file the tour\'s (the class cannot reach the trophy)',
+		SF.steerFifths(rdp, sim) >= 0 && !!rdc.cc && SF.ccOwed(rdc, sim) === 0 && tourOnly >= 0 && SF.steerFifths(rdc, sim) === tourOnly && SF.steerFifths(st, sim) === tourOnly,
+		`plain ${SF.steerAt(rdp, sim)}, CPU ${SF.steerAt(rdc, sim)}, the tour ${tourOnly / 5} tiles`);
 	const R = st.tour;
 	const order = Array.from(R.order).map((i) => { const t = R.coin[i]; return [t % W, Math.floor(t / W)]; });
 	let falls = 0, prev = Infinity;
@@ -145,8 +154,8 @@ function section3() {
 // opt-in `tourFirst` keeps the unmodelled tour for measurement
 function section4() {
 	section('4 no tour where the coins are not modelled');
-	const s4 = SF.buildSteer(L, { maxLayers: 4 });
-	const s4n = SF.buildSteer(L, { maxLayers: 4, noTour: true });
+	const s4 = SF.buildSteer(L, { maxLayers: 4, coinClasses: false });
+	const s4n = SF.buildSteer(L, { maxLayers: 4, noTour: true, coinClasses: false });
 	const unmod = s4.info.features.indexOf('coins') < 0;
 	check('the budget leaves the coins out (not modelled)', unmod && /^coins/.test(String(s4.info.over)), `features ${JSON.stringify(s4.info.features)}, over ${s4.info.over}`);
 	check('no tour (info.tour null, no tour section)', !s4.tour && s4.info.tour === null, JSON.stringify(s4.info.tour));
@@ -164,7 +173,7 @@ function section4() {
 		if (SF.steerFifths(s4, sim) === SF.steerFifths(s4n, sim)) same++;
 	}
 	check('the lookup = the build without a tour along a random run', same === n, `${same} / ${n}`);
-	const s4f = SF.buildSteer(L, { maxLayers: 4, tourFirst: true });
+	const s4f = SF.buildSteer(L, { maxLayers: 4, tourFirst: true, coinClasses: false });
 	check('opt-in tourFirst: the unmodelled tour (first below T) as before', !!s4f.tour && s4f.info.tour && s4f.info.tour.first === true && s4f.info.tour.T === NEED, JSON.stringify(s4f.info.tour));
 }
 

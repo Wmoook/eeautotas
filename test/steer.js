@@ -130,6 +130,73 @@ function sectionA() {
 	forcedChains();
 	secretWall();
 	coinClasses();
+	coinClassCount();
+}
+
+/** the count inside a coin class (steer.js ccOwed / ccFifths, the CPU file's flags 4): 20 coins behind the start and a
+ *  10-coin door before the trophy (2 classes, 0-9 and 10+): the plain (GPU) file has no such section and its lookup is
+ *  the class body's, the same at every count 0-9; the CPU file (round trip) holds the classes, the leg and the free
+ *  tiles (the trophy's side of the door free, the start's not); its lookup at the start falls with every coin held
+ *  (the coin tour's there; without a tour the body less the owed legs: one leg a coin), past the door (a free tile) it
+ *  is the plain file's; wherever the plain lookup has a value the CPU one has one (no -1 made: ordering only);
+ *  EEAT_COINCLS=0 builds main's file (no classes) byte for byte */
+function classCountRoom() {
+	const W = 60, H = 8, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	for (let k = 0; k < 20; k++) cells.push([1 + (k % 10), H - 2 - Math.floor(k / 10), 100]);
+	for (let y = 1; y < H - 1; y++) cells.push([36, y, 43, 10]);
+	cells.push([16, H - 2, 255], [54, H - 2, 121]);
+	return levelOf(ED.eelvlOf({ name: 'classcount', width: W, height: H, cells }));
+}
+function coinClassCount() {
+	const L = classCountRoom(), W = 60, H = 8;
+	const st = SF.buildSteer(L, { maxMs: 120000 });
+	const plain = SF.readSteerFile(SF.steerFileBytes(st, null)), cpu = SF.readSteerFile(SF.steerFileBytes(st, null, true));
+	const noTour = SF.buildSteer(L, { maxMs: 120000, noTour: true });
+	const cpuNT = SF.readSteerFile(SF.steerFileBytes(noTour, null, true));
+	const sim = new E.EESim(L); sim.reset();
+	const at = (f, c) => { sim.coins = c; return SF.steerFifths(f, sim); };
+	const pv = [], cv = [], nv = [];
+	for (let c = 0; c < 10; c++) { pv.push(at(plain, c)); cv.push(at(cpu, c)); nv.push(at(cpuNT, c)); }
+	sim.coins = 0;
+	const fallsBy = (a, d) => a.every((v, i) => i === 0 || (v >= 0 && v < a[i - 1] && (d === undefined || a[i - 1] - v === d)));
+	const startT = 16 + (H - 2) * W, pastT = 45 + (H - 2) * W;
+	check('the count inside a coin class: the plain (GPU) file has no count section and its lookup at the start is the class body\'s at every count 0-9; the CPU file holds the 2 classes, the leg and the free tiles (past the door free, the start not)',
+		!plain.cc && !!cpu.cc && cpu.cc.th.length === 2 && cpu.cc.th[1] === 10 && cpu.cc.leg > 0 && cpu.cc.free.length === 1 && cpu.cc.free[0][pastT] === 1 && cpu.cc.free[0][startT] === 0 && pv.every((v) => v === pv[0] && v > 0),
+		`plain ${pv.join(',')}; th ${cpu.cc ? Array.from(cpu.cc.th) : '-'} leg ${cpu.cc ? cpu.cc.leg : '-'}`);
+	check('the count inside a coin class: the CPU lookup at the start falls with every coin held (the tour); without a tour the body less one leg a coin',
+		fallsBy(cv) && fallsBy(nv, cpuNT.cc.leg) && nv[0] === pv[0],
+		`tour ${cv.join(',')}; no tour ${nv.join(',')} (leg ${cpuNT.cc.leg})`);
+	// past the door with 10+ coins, and along random runs with every count held: no value lost, free tiles the plain file's
+	let n = 0, lost = 0, freeDiff = 0;
+	for (const m of randomRuns(11, 10, 400)) {
+		const s2 = new E.EESim(L); s2.reset();
+		const inp = new E.EEInput();
+		for (let t = 0; t < m.length; t++) {
+			E.applyMask(inp, m[t]); s2.tick(inp);
+			if (t % 5) continue;
+			const c0 = s2.coins;
+			for (let c = 0; c <= 12; c += 3) {
+				s2.coins = c;
+				const p = SF.steerFifths(plain, s2), q = SF.steerFifths(cpuNT, s2);
+				n++;
+				if (p >= 0 && q < 0) lost++;
+				if (SF.ccOwed(cpuNT, s2) < 0 && p !== q) freeDiff++;
+			}
+			s2.coins = c0;
+		}
+	}
+	check('the count inside a coin class: wherever the plain lookup has a value the CPU one has one, and where the class reaches the trophy (or the top class) it is the plain one',
+		n > 500 && lost === 0 && freeDiff === 0, `${n} states: ${lost} lost, ${freeDiff} free states differ`);
+	const prev = process.env.EEAT_COINCLS;
+	process.env.EEAT_COINCLS = '0';
+	let knob;
+	try { knob = SF.buildSteer(L, { maxMs: 120000 }); } finally { if (prev === undefined) delete process.env.EEAT_COINCLS; else process.env.EEAT_COINCLS = prev; }
+	const mainF = SF.buildSteer(L, { maxMs: 120000, coinClasses: false });
+	check('the count inside a coin class: EEAT_COINCLS=0 builds main\'s file (one layer per count, no count section) byte for byte, the CPU file too',
+		Buffer.compare(SF.steerFileBytes(knob, null), SF.steerFileBytes(mainF, null)) === 0 && Buffer.compare(SF.steerFileBytes(knob, null, true), SF.steerFileBytes(mainF, null, true)) === 0 && !knob.cc,
+		`classes ${knob.info.coinClasses} vs ${mainF.info.coinClasses}`);
 }
 
 /** coin count layers by threshold classes (steer.js analyze: {0} + the coin door / gate counts): (1) a corridor with 6
@@ -253,6 +320,8 @@ function forcedChains() {
 		!!sg.dp && n > 1000 && nan <= n / 100 && noGate <= dpn / 100, `${n} states, ${nan} without a value, ${noGate} of ${dpn} without a next gate; coin DP ${sg.dp ? sg.dp.n : 0}`);
 }
 function agree(name, L, st, runs) {
+	// (the plain file, the native tools': no coin tour, no count section (the CPU file's alone))
+	st = Object.assign({}, st, { tour: null, cc: null });
 	const blob = G.levelBlob(L);
 	fs.writeFileSync(path.join(tmp, 'l.bin'), blob);
 	fs.writeFileSync(path.join(tmp, 's.steer'), SF.steerFileBytes(st, G.blobFp(blob)));
@@ -290,6 +359,9 @@ function sectionB() {
 	section('B agree: the JS lookup = eegpu steertest');
 	if (!toolOk) { console.log(`  (skipped: ${toolPath ? `${toolPath} has no steertest (older than the app: rebuild it, node tools/build-native.js)` : 'no native tool'})`); return; }
 	Object.entries(ROOMS).forEach(([name, r], k) => { const L = levelOf(r.buf); agree(name, L, SF.buildSteer(L), randomRuns(k, 6, 600)); });
+	// (coin threshold classes: the plain file's layers by the count, each its class's body: native/beam.h reads
+	// min(coins, radix - 1) as for one layer per count)
+	{ const L = classCountRoom(); agree('coin threshold classes (20 coins, a 10-coin door)', L, SF.buildSteer(L, { maxMs: 120000 }), randomRuns(21, 6, 900)); }
 	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
 	let ids = [];
 	try { ids = fs.readdirSync(jobs).filter((d) => fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'best.eetas'))); } catch (e) { /* no jobs */ }
