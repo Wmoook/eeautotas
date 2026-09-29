@@ -257,14 +257,15 @@ function run(o) {
 }
 
 /** the stall rotation's escapes (editor.js state().escape.hist) not yet in the timeline: one event each {ev: 'escape', n,
- *  cfg (the configuration's name), kind (of start), from, ticks, tiles, after (s into the search)}; seen: a Set of the
+ *  cfg (the configuration's name), kind (of start), from, ticks, tiles, after (s into the search), flat (with the stall
+ *  clock by progress: the new rooms without progress since the search's last progress; else none)}; seen: a Set of the
  *  escapes' numbers already emitted (updated) */
 function escapeEvents(seen, e) {
 	const out = [];
 	for (const r of (e && Array.isArray(e.hist) ? e.hist : [])) {
 		if (!r || seen.has(r.n)) continue;
 		seen.add(r.n);
-		out.push({ ev: 'escape', n: r.n, cfg: r.cfg, kind: r.kind, from: r.from, ticks: r.ticks, tiles: r.tiles, after: r.after });
+		out.push({ ev: 'escape', n: r.n, cfg: r.cfg, kind: r.kind, from: r.from, ticks: r.ticks, tiles: r.tiles, after: r.after, ...(r.flat !== undefined ? { flat: r.flat } : {}) });
 	}
 	return out;
 }
