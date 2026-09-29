@@ -583,9 +583,11 @@ function kappaOf(A, rfOpts) {
 	r.sort((a, b) => a - b);
 	return Math.max(1, r[r.length >> 1]);
 }
-/** a wild layer's field: walking distance in layer s x kappa from the goals, as a walk-mode field */
+/** a wild layer's field: walking distance in layer s x kappa from the goals, as a walk-mode field; a step against an
+ *  arrow's or boost's push costs RF.FXDIR_STEP x kappa more, as reach.js's walk mode (RF.pushDirs; the same edges) */
 function wildField(A, M, s, goals, kappa) {
 	const { W, H, N } = A;
+	const push = RF.pushDirs(A.level), pen = RF.FXDIR_STEP * kappa;
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
 	const hpush = (i, v) => { heap.push([v, i]); let n = heap.length - 1; while (n > 0) { const p = (n - 1) >> 1; if (heap[p][0] <= v) break; [heap[p], heap[n]] = [heap[n], heap[p]]; n = p; } };
@@ -603,7 +605,7 @@ function wildField(A, M, s, goals, kappa) {
 			const t = y * W + x;
 			if (goalT.has(t) || isTrophy.has(t) || M.pass(t, s) !== 1 || M.pass(t2, s) === 0 || A.forcedP[t]) continue;
 			if (DX8[di] && DY8[di] && M.pass(y * W + x2, s) === 0 && M.pass(y2 * W + x, s) === 0) continue;
-			const c = v + (DX8[di] && DY8[di] ? 7 : 5) * kappa;
+			const c = v + (DX8[di] && DY8[di] ? 7 : 5) * kappa + (push && push[t] && RF.PUSH_X[push[t]] * DX8[di] + RF.PUSH_Y[push[t]] * DY8[di] < 0 ? pen : 0);   // (against t's push)
 			if (c < d[t]) { d[t] = c; hpush(t, c); }
 		}
 		const ps = A.portalSrcOf.get(t2);

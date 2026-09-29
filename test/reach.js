@@ -60,6 +60,7 @@ let pass = 0, fail = 0;
 const check = (name, ok, detail) => { if (ok) pass++; else fail++; console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail !== undefined ? `: ${detail}` : ''}`); };
 const section = (s) => console.log(`\n== ${s}`);
 const fmt = (v) => (v < 0 ? 'CUT' : v.toFixed(1));
+const CUTV = 0xffff;
 const levelOfCells = (W, H, cells) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 't', width: W, height: H, cells }))));
 const levelOfB64 = (b) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(b, 'base64'))));
 // ASCII rooms: # wall, . air, S spawn, T trophy, o dot, ^ up arrow, < left arrow, > right arrow, ~ water, H ladder, x spike,
@@ -726,6 +727,96 @@ function sectionJ() {
 		`50 ${fmt(co)}, 9 ${fmt(cw)}, air ${fmt(ca)}; engine route ${tr.route ? tr.route.length : '-'} ticks (${a ? a.n : 0} states lead to the trophy, ${a ? a.cut : '-'} cut off, ${on50} on a 50 tile)`);
 	secretFuzz();
 }
+/**
+ * L: walk mode's push directions (reach.js pushDirs, EEAT_FXDIR): a step against an arrow's or boost's push costs
+ * FXDIR_STEP more; the walk's edges, and so its -1 set, are main's. main = a child process with EEAT_FXDIR=0
+ */
+function mainWalks(levels) {
+	const code = `const R=require(${JSON.stringify(path.join(__dirname, '../src/reach.js'))}),E=require(${JSON.stringify(path.join(__dirname, '../src/eesim.js'))}),EL=require(${JSON.stringify(path.join(__dirname, '../src/eelvl.js'))}),ED=require(${JSON.stringify(path.join(__dirname, '../src/editor.js'))});
+const ls=JSON.parse(require('fs').readFileSync(0,'utf8'));const out=[];
+for(const [W,H,cells] of ls){const L=E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({name:'t',width:W,height:H,cells}))));const f=R.reachField(L);out.push({mode:f.mode,fxDir:f.fxDir||null,walk:Array.from(f.walk)});}
+process.stdout.write(JSON.stringify(out));`;
+	return JSON.parse(execFileSync(process.execPath, ['-e', code], { input: JSON.stringify(levels), env: Object.assign({}, process.env, { EEAT_FXDIR: '0' }), maxBuffer: 1 << 28 }).toString());
+}
+function sectionL() {
+	section('L walk mode\'s push directions: a step against an arrow / boost costs FXDIR_STEP more; the -1 set = main\'s (EEAT_FXDIR=0)');
+	if (!R.FXDIR) { check('EEAT_FXDIR=0: pushDirs is off', R.pushDirs(ascii(box(['S^.T']))) === null); return; }
+	// a low-gravity room (walk mode): the short way down an up-arrow column (5 against steps), the long way around
+	// through the open shaft on the right; the ball starts above the column
+	const rows = box([
+		'S.........',
+		'.#^######.',
+		'.#^######.',
+		'.#^######.',
+		'.#^######.',
+		'.#^######.',
+		'.#.######.',
+		'g#T.......',
+	]);
+	const cellsOf = (rs) => { const c = []; rs.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') c.push([x, y, ...ID[ch]]); })); return [rs[0].length, rs.length, c]; };
+	const L = ascii(rows), f = R.reachField(L), [m] = mainWalks([cellsOf(rows)]);
+	const W = L.width, at = (x, y) => f.walk[y * W + x], mt = (x, y) => m.walk[y * W + x];
+	const push = R.pushDirs(L);
+	check('walk mode, push codes: the up arrows 2 (up), no other tile', f.mode === 'walk' && push !== null && push[2 * W + 3] === 2 && push.reduce((n, v) => n + (v ? 1 : 0), 0) === 5 && f.fxDir && f.fxDir.tiles === 5,
+		`mode ${f.mode}, ${f.fxDir ? f.fxDir.tiles : '-'} push tiles`);
+	check('above the column (3, 1): main walks down it (7 steps: 35 fifths); directed, the way around through the shaft (cheaper than 5 steps against the arrows), never cheaper than main',
+		mt(3, 1) === 35 && at(3, 1) > mt(3, 1) && at(3, 1) < 35 + 5 * R.FXDIR_STEP, `main ${mt(3, 1)}, directed ${at(3, 1)} fifths`);
+	check('below the column (3, 7) and along the shaft: the same as main (no step against a push)', at(3, 7) === mt(3, 7) && at(10, 3) === mt(10, 3), `${at(3, 7)} / ${mt(3, 7)}, ${at(10, 3)} / ${mt(10, 3)}`);
+	check('in the column (3, 4): up and out is along the push, down is against it', at(3, 4) > mt(3, 4), `${at(3, 4)} vs main ${mt(3, 4)}`);
+	// a room whose only way goes against a push: finite (a price, not a cut), exactly FXDIR_STEP per step more
+	const rows2b = box(['g.......', 'S>>>>>>T']);
+	const L2 = ascii(rows2b), f2 = R.reachField(L2), [m2] = mainWalks([cellsOf(rows2b)]);
+	const s2 = startSim(L2, 0), c2 = R.costAt(f2, s2);
+	check('a corridor along right arrows to the trophy: no step against the push, the cost is main\'s', f2.mode === 'walk' && f2.walk.every((v, i) => v === m2.walk[i] || push === null || (v >= m2.walk[i])) && c2 >= 0, `start ${fmt(c2)}`);
+	const rows3 = box(['g.......', 'T<<<<<<S']);
+	const L3 = ascii(rows3), f3 = R.reachField(L3), [m3] = mainWalks([cellsOf(rows3)]);
+	const W3 = L3.width;
+	let againstOk = true;
+	for (let x = 2; x <= 7; x++) { const v = f3.walk[2 * W3 + x], mv = m3.walk[2 * W3 + x]; if (v !== CUTV && mv !== CUTV && v < mv) againstOk = false; }
+	check('a corridor along left arrows (they push toward the trophy): the same as main', f3.mode === 'walk' && againstOk && f3.walk[2 * W3 + 8] === m3.walk[2 * W3 + 8], `${f3.walk[2 * W3 + 8]} / ${m3.walk[2 * W3 + 8]}`);
+	const rows4 = box(['S<<<<<<T', '########', 'g.......']);
+	const L4 = ascii(rows4), f4 = R.reachField(L4), [m4] = mainWalks([cellsOf(rows4)]);
+	const W4 = L4.width, s4 = 1 * W4 + 1;
+	check('a 1-high corridor whose only way is against 6 left arrows: finite (a price, not a cut): main + 6 x FXDIR_STEP at the start (a step out of each arrow tile against its push)',
+		f4.walk[s4] !== CUTV && f4.walk[s4] === m4.walk[s4] + 6 * R.FXDIR_STEP, `directed ${f4.walk[s4]}, main ${m4.walk[s4]}, step ${R.FXDIR_STEP}`);
+	// random walk-mode rooms with arrows and boosts: the -1 set is main's, every value >= main's, equal without push tiles
+	let seed = 20260929;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+	const IDS = [9, 9, 9, 1, 2, 3, 1518, 114, 115, 116, 117, 4, 361, 360, 242];
+	const levels = [];
+	for (let k = 0; k < (QUICK ? 12 : 40); k++) {
+		const W = 10 + Math.floor(rnd() * 20), H = 8 + Math.floor(rnd() * 14), cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		const noPush = k % 5 === 4;
+		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+			if (rnd() >= 0.3) continue;
+			let id = IDS[Math.floor(rnd() * IDS.length)];
+			if (noPush && [1, 2, 3, 1518, 114, 115, 116, 117].includes(id)) id = 9;
+			cells.push(id === 242 ? [x, y, 242, Math.floor(rnd() * 4), 1 + (x & 1), 2 - (x & 1)] : [x, y, id]);
+		}
+		cells.push([1 + Math.floor(rnd() * (W - 2)), 1 + Math.floor(rnd() * (H - 2)), 121], [1 + Math.floor(rnd() * (W - 2)), H - 2, 255], [1 + Math.floor(rnd() * (W - 2)), 1, [417, 418, 453, 461][k & 3]]);
+		levels.push([W, H, cells]);
+	}
+	const mains = mainWalks(levels);
+	let n = 0, walkN = 0, cutDiff = 0, lower = 0, higher = 0, noPushDiff = 0, first = null;
+	levels.forEach(([W, H, cells], k) => {
+		let Lk;
+		try { Lk = levelOfCells(W, H, cells); } catch (e) { return; }
+		const fk = R.reachField(Lk), mk = mains[k];
+		n++;
+		if (fk.mode !== 'walk') return;
+		walkN++;
+		for (let i = 0; i < fk.walk.length; i++) {
+			const v = fk.walk[i], mv = mk.walk[i];
+			if ((v === CUTV) !== (mv === CUTV)) { cutDiff++; if (!first) first = { k, i }; }
+			else if (v !== CUTV && v < mv) lower++;
+			else if (v !== CUTV && v > mv) { higher++; if (!fk.fxDir) noPushDiff++; }
+		}
+	});
+	check(`random walk-mode rooms with arrows, boosts, portals, spikes, checkpoints (${walkN} of ${n}): the -1 set = main's, no value below main's, rooms with no push tile = main`,
+		walkN >= n * 0.8 && cutDiff === 0 && lower === 0 && noPushDiff === 0 && higher > 0, `${cutDiff} -1 differences${first ? ` (room ${first.k} tile ${first.i})` : ''}, ${lower} lower, ${higher} higher (${noPushDiff} without push tiles)`);
+}
 /** random rooms with 50 in the mix: its field = the same room with 50 made 9 (a plain wall), its -1 set holds the one of
  *  50 as an open door (the room with 156, a door the model opens: the fields before 2026-09-28), and D's property along
  *  random runs in the engine (cut off at tick t implies cut off at t + 1) */
@@ -1246,6 +1337,7 @@ function trapLevel() {
 	if (want('H')) { sectionH(); silentPortalRooms(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
 	if (want('J')) sectionJ();
+	if (want('L')) sectionL();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });

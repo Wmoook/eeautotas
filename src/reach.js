@@ -74,6 +74,15 @@ const TROPHY = 121, CHECKPOINT = 360, PROTECTION = 420, ICE = 1064, CURSE = 421,
 // multijump, 1517 gravity)
 const WILD = new Set([417, 418, 419, 453, 461, 1517]);
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
+// walk mode's push directions (EEAT_FXDIR=0: main's undirected walk). Arrows (1 / 411 left, 2 / 412 up, 3 / 413 right,
+// 1518 / 1519 down) and boosts (114 left, 115 right, 116 up, 117 down) push the ball one way whatever the gravity effect
+// (eesim.js: rotate_mo / rotate_mor false for arrows; a boost sets the speed): see pushDirs
+const FXDIR = process.env.EEAT_FXDIR !== '0';
+const PUSH_X = [0, -1, 0, 1, 0], PUSH_Y = [0, 0, -1, 0, 1];   // push codes: 0 none, 1 left, 2 up, 3 right, 4 down
+const pushCodeOf = (id) => (id === 1 || id === 411 || id === 114 ? 1 : id === 2 || id === 412 || id === 116 ? 2 : id === 3 || id === 413 || id === 115 ? 3 : id === 1518 || id === 1519 || id === 117 ? 4 : 0);
+// walk mode: a step against a push costs this many fifths more (a jump, a fall or levitation can take the ball a tile or
+// two against an arrow, so a price, not a missing edge: the walk keeps every way it had, the -1 set is main's)
+const FXDIR_STEP = +(process.env.EEAT_FXDIR_STEP || 100);
 
 /**
  * The block flags every guidance wall test reads (this file's fields, src/steer.js, src/goexplore.js, src/bursts.js,
@@ -410,7 +419,9 @@ function reachField(level, opts) {
 
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
-	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
+	// (walk mode: directed by the pushes, pushDirs; physics mode's fallback score stays the plain walk)
+	const push = mode === 'walk' ? pushDirs(level) : null;
+	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP, push);
 	// walk mode with protection: that walk (killing tiles open where a protected ball can be) is a protected ball's way. An
 	// unprotected ball's (every killing tile deadly; the protection tiles goals at the protected walk's cost from there)
 	// orders every ball, and the protected walk + PROT_COST only where the unprotected one has no way. Sound: a protected
@@ -425,7 +436,7 @@ function reachField(level, opts) {
 		if (goalF) for (const [i, c] of goalF) seedU.set(i, c);
 		else for (let i = 0; i < N; i++) if (trophy(i)) seedU.set(i, 0);
 		for (const p of protOn) { const v = walk[p]; if (v !== CUT && !(seedU.get(p) <= v)) seedU.set(p, v); }
-		const walkU = walkField(W, H, cls, passU, trophy, seedU, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
+		const walkU = walkField(W, H, cls, passU, trophy, seedU, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP, push);
 		walkOut = new Uint16Array(N).fill(CUT);
 		for (let i = 0; i < N; i++) {
 			if (walkU[i] !== CUT) walkOut[i] = walkU[i];
@@ -433,7 +444,8 @@ function reachField(level, opts) {
 		}
 	}
 	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
-		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
+		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback },
+		fxDir: push === null ? null : { tiles: push.reduce((s, x) => s + (x ? 1 : 0), 0), step: FXDIR_STEP } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
 
 	// ---- per tile: floors, jumps, landing jumps, ceilings, segments
@@ -958,9 +970,39 @@ function silentPortals(level) {
 	silentCache.set(level, out);
 	return out;
 }
+/**
+ * pushDirs(level) -> Uint8Array over the tiles (push codes: 0 none, 1 left, 2 up, 3 right, 4 down; PUSH_X / PUSH_Y) of
+ * the engine's current tile when the ball's centre is in the tile (a half block's: the tile above or to the left, as
+ * reachField's curOf), or null when the level has no arrow or boost (or EEAT_FXDIR=0). Walk mode (the wild levels)
+ * walks a tile only along or across its push, never against it (an up-arrow column is not walked down, a side-arrow run
+ * not against its arrows, a boost never against its speed): the plain walk went down Snake Snake SNAAKE's up-arrow
+ * column (the n3 catalog, effects-wild-walk). An ORDERING rule only: a step against a push costs FXDIR_STEP fifths more
+ * (a hard "never" priced Snake's start through a death: its way goes against a push somewhere), so the walk's edges and
+ * its -1 set stay the undirected walk's: nothing is cut that main keeps
+ */
+const pushCache = new WeakMap();
+function pushDirs(level) {
+	if (!FXDIR) return null;
+	if (pushCache.has(level)) return pushCache.get(level);
+	const W = level.width, H = level.height, N = W * H, fg = level.fg, flags = guideFlags(level), nFlags = flags.length, lk = level.lookup0, xfl = level.xflags;
+	let out = null;
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		// (the current tile: a half block's is the tile above (rotation 1, every non-rotating half) or to the left (0))
+		let j = i;
+		if (id >= 0 && id < nFlags && (flags[id] & F_HALF) !== 0) { const hc = (xfl[id] & X_NONROT_HALF) ? 1 : lk[i]; j = hc === 1 ? (i >= W ? i - W : -1) : hc === 0 ? (i % W > 0 ? i - 1 : -1) : i; }
+		if (j < 0) continue;
+		const jd = fg[j];
+		const c = jd >= 0 && jd < nFlags && (flags[jd] & F_CLIMB) !== 0 ? 0 : pushCodeOf(jd);
+		if (c) { if (!out) out = new Uint8Array(N); out[i] = c; }
+	}
+	pushCache.set(level, out);
+	return out;
+}
 /** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
- *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
-function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP) {
+ *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile; push: pushDirs or null, a step from
+ *  a tile against its push FXDIR_STEP more) */
+function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP, push) {
 	const N = W * H, dist = new Uint16Array(N).fill(CUT);
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
@@ -986,7 +1028,7 @@ function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF
 			const t = y * W + x;
 			if (!passable(t) || (forcedP && forcedP[t])) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
-			relax(t, v + (dx && dy ? 7 : 5));
+			relax(t, v + (dx && dy ? 7 : 5) + (push !== null && push !== undefined && push[t] && PUSH_X[push[t]] * dx + PUSH_Y[push[t]] * dy < 0 ? FXDIR_STEP : 0));   // (against t's push: pushDirs)
 		}
 	}
 	for (let i = 0; i < N; i++) if (d[i] !== Infinity && d[i] <= maxF) dist[i] = d[i] > FAR ? FAR : d[i];
@@ -1193,7 +1235,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST, FXDIR, FXDIR_STEP, PUSH_X, PUSH_Y, pushDirs, walkField,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
