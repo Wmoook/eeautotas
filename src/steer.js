@@ -1145,23 +1145,36 @@ function buildSteer(level, opts) {
 	// RCH3, every door open, and pinned at a door or a portal false near): the layers again with the coins as goals (a
 	// coin tile changes the count's layer, so each layer's field leads to the coins, and the value drops as they are
 	// taken: backtracking to a coin door is progress; 34 of the 46), then with the time doors passable too (6 more). Only
-	// while the build's time lasts; ordering only (nothing prunes by the steer field). opts.noFallback: none.
+	// while the build's time lasts; ordering only (nothing prunes by the steer field). opts.noFallback: none (editor.js
+	// answers the plain field first and runs fallbackSteer after it: on MIHB's Dream, where no fallback has a value, the
+	// fallback inside the build delayed its field 14-18 s).
 	if (!Number.isFinite(steer.info.start) && !opts.noFallback && !opts.fallback && Date.now() - t0 < maxMs) {
-		const hasCoins = A.feats.has('coins') || A.feats.has('bcoins');
-		let hasTime = false;
-		for (let i = 0; i < N && !hasTime; i++) if (level.fg[i] === 156 || level.fg[i] === 157) hasTime = true;
-		const tries = [];
-		if (hasCoins) tries.push({ coinGoals: true, fallback: 'coins' });
-		if (hasTime) tries.push({ coinGoals: hasCoins, timeOpen: true, fallback: hasCoins ? 'coins+time' : 'time' });
-		for (const t of tries) {
-			const left = maxMs - (Date.now() - t0);
-			if (left < 1000) break;
-			let st2 = null;
-			try { st2 = buildSteer(level, Object.assign({}, opts, t, { maxMs: Math.max(5000, left) })); } catch (e) { st2 = null; }
-			if (st2 && Number.isFinite(st2.info.start)) { st2.info.ms = Date.now() - t0; return st2; }
-		}
+		const st2 = fallbackSteer(level, opts, maxMs - (Date.now() - t0));
+		if (st2) { st2.info.ms = Date.now() - t0; return st2; }
 	}
 	return steer;
+}
+/** the fallback builds of a steer field with no value at the start (buildSteer's NO VALUE AT THE START): the layers with
+ *  the coins as goals, then with the time doors passable too (each only where the level has them), each a whole build
+ *  within budgetMs (at least 5 s) -> the first with a value at the start (info.fallback), or null */
+function fallbackSteer(level, opts, budgetMs) {
+	opts = opts || {};
+	const t0 = Date.now(), budget = budgetMs > 0 ? budgetMs : (opts.maxMs || STEER_MAX_MS);
+	const A = analyze(level, opts);
+	const hasCoins = A.feats.has('coins') || A.feats.has('bcoins');
+	let hasTime = false;
+	for (let i = 0; i < A.N && !hasTime; i++) if (level.fg[i] === 156 || level.fg[i] === 157) hasTime = true;
+	const tries = [];
+	if (hasCoins) tries.push({ coinGoals: true, fallback: 'coins' });
+	if (hasTime) tries.push({ coinGoals: hasCoins, timeOpen: true, fallback: hasCoins ? 'coins+time' : 'time' });
+	for (const t of tries) {
+		const left = budget - (Date.now() - t0);
+		if (left < 1000) break;
+		let st2 = null;
+		try { st2 = buildSteer(level, Object.assign({}, opts, t, { noFallback: false, maxMs: Math.max(5000, left) })); } catch (e) { st2 = null; }
+		if (st2 && Number.isFinite(st2.info.start)) return st2;
+	}
+	return null;
 }
 /**
  * THE INTERIM FIELD (editor.js: the CPU search's order from its launch until the steer field is built, and the fallback
@@ -1435,7 +1448,7 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, interimSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, fallbackSteer, interimSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)

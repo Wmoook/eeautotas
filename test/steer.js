@@ -312,6 +312,8 @@ function sectionD() {
 		sim.coins = 20;
 		const v20 = SF.steerAt(st, sim);
 		check(`20-coin door: the value drops as the coins are taken (0: ${v0}, 10: ${v10}, 20: ${v20})`, v10 < v0 && v20 < v10, `${v0} ${v10} ${v20}`);
+		const fb = SF.fallbackSteer(L, {}, 0);
+		check(`20-coin door: fallbackSteer alone (the editor's, after the plain field) has the value (${fb && fb.info.fallback}, ${fb && fb.info.start})`, !!fb && fb.info.fallback === 'coins' && fb.info.start === st.info.start);
 		const it = SF.interimSteer(L);
 		check(`20-coin door: the interim field leads to the coins (${it.info.aim})`, it.info.aim === 'collectibles' && Number.isFinite(it.info.start));
 	}
