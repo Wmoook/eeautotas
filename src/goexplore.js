@@ -1468,6 +1468,8 @@ function roomFields(L, budget, opts = {}) {
 		}
 	}
 	const union = new Uint8Array(N), shut = new Uint8Array(N), seen = new Int32Array(N), q = new Int32Array(N);
+	const isDoor = new Uint8Array(N);
+	for (const d of doors) isDoor[d] = 1;
 	const words = new Int32Array(((doors.length + 31) >> 5) + 1);
 	const cache = new Map();   // passable-set hash -> [{bits, troOk, used}]
 	let gen = 0, clock = 0, bytes = 0, walks = 0, hits = 0, ms = 0;
@@ -1518,14 +1520,15 @@ function roomFields(L, budget, opts = {}) {
 		const pass = (i) => !wall[i] && !shut[i] && (prot || !deadly[i]);
 		const g = ++gen;
 		const bits = new Uint8Array((N + 7) >> 3);
-		let qh = 0, qt = 0, gain = 0, ugain = 0, troOk = false, s1 = 0, s2 = 0;
+		let qh = 0, qt = 0, gain = 0, ugain = 0, troOk = false, s1 = 0, s2 = 0, ns = 0;
 		const off = U !== null ? U.off : null;
 		seen[tile] = g; q[qt++] = tile;
 		while (qh < qt) {
 			const t = q[qh++], x = t % W, y = (t / W) | 0;
 			bits[t >> 3] |= 1 << (t & 7);
-			// (the walk's territory signature: two sums over its tiles, any order; SWITCH SETS)
-			s1 = (s1 + fmix(t ^ 0x2545f491)) | 0; s2 = (s2 + fmix(Math.imul(t + 1, 0x9e3779b1))) | 0;
+			// (the walk's territory signature: two sums over its tiles but the doors and gates, any order; SWITCH SETS: a
+			// switch's own gate the ball walks through open or around shut is no territory of its own)
+			if (!isDoor[t]) { s1 = (s1 + fmix(t ^ 0x2545f491)) | 0; s2 = (s2 + fmix(Math.imul(t + 1, 0x9e3779b1))) | 0; ns++; }
 			if (!union[t]) { union[t] = 1; gain++; if (!bitAt(off, t)) ugain++; }
 			if (fg[t] === 121) troOk = true;
 			const ex = exits.get(t);
@@ -1544,7 +1547,7 @@ function roomFields(L, budget, opts = {}) {
 		}
 		for (let k = 0; k < doors.length; k++) shut[doors[k]] = 0;
 		walks++;
-		const sig = `${s1 >>> 0}.${s2 >>> 0}.${qt}`;
+		const sig = `${s1 >>> 0}.${s2 >>> 0}.${ns}`;
 		const c = { bits, troOk, used: ++clock, sig };
 		if (list) list.push(c); else cache.set(hk, [c]);
 		bytes += bits.length + WALK_BYTES;

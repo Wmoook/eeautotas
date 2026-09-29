@@ -277,7 +277,7 @@ function create(o) {
 	// its registration, seq) has too is a REPEAT: a switch set that opens nothing more from where it was entered; it gets the
 	// dominated rooms' turn only (--domBurst), like them. sigFirst: signature -> the earliest room with it)
 	const swsig = a.swsig === undefined || a.swsig === null ? true : +a.swsig !== 0;
-	const sigFirst = new Map();
+	const sigFirst = new Map(), doorT = new Uint8Array(N);   // (doorT: the door and gate tiles, set by infoOf)
 	/** room R (not a portal arm) is a repeat: its info's signature is an earlier room's (R's info must be made); the
 	 *  earliest room of a signature whose group is not dominated stands for it (a dominated one only while none is) */
 	const repeatOf = (R) => {
@@ -444,6 +444,7 @@ function create(o) {
 			const deadly = id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0;
 			wall[k] = solid ? 1 : 0;
 			pass[k] = solid ? 0 : door ? (sim.is_tile_solid_now(k % W, (k / W) | 0) ? 0 : 1) : deadly && !sim.is_invulnerable ? 0 : 1;
+			if (door) doorT[k] = 1;
 		}
 		const s0 = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 		const seen = new Uint8Array(N), q = new Int32Array(N), term = new Uint8Array(N);
@@ -548,9 +549,10 @@ function create(o) {
 		// roomOf base): two sums over the walked tiles, any order)
 		let sig = null;
 		if (swsig && o.RM.base) {
-			let s1 = 0, s2 = 0;
-			for (let k = 0; k < qt; k++) { const t = q[k]; s1 = (s1 + fmix32(t ^ 0x2545f491)) | 0; s2 = (s2 + fmix32(Math.imul(t + 1, 0x9e3779b1))) | 0; }
-			sig = `${o.RM.base(sim)}|${s1 >>> 0}.${s2 >>> 0}.${qt}`;
+			// (the doors and gates left out: a switch's own gate walked through open or around shut is no territory)
+			let s1 = 0, s2 = 0, ns = 0;
+			for (let k = 0; k < qt; k++) { const t = q[k]; if (doorT[t]) continue; s1 = (s1 + fmix32(t ^ 0x2545f491)) | 0; s2 = (s2 + fmix32(Math.imul(t + 1, 0x9e3779b1))) | 0; ns++; }
+			sig = `${o.RM.base(sim)}|${s1 >>> 0}.${s2 >>> 0}.${ns}`;
 		}
 		R.info = { pass, wall, comps, trophies, seen, term, via, pOnly, ways, sig };
 		return R.info;
