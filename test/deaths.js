@@ -290,6 +290,16 @@ function sectionChain() {
 	const ok = runs.every((ev) => routesOf(ev).length > 0 && routesOf(ev).every((e) => { const v = C.evaluate(lp.level, masksOf(e.inputs)); return !!v && v.ms.length === e.ticks; }));
 	check('the long way back (a finite death-free way of ~127 tiles from the coin): routes with --dord=2 and --dord=1, every one replayed',
 		ok && at(lf0, 10, 13) > 100, `coin ${at(lf0, 10, 13)}; dord 1: ${routesOf(runs[0]).map((e) => `${e.ticks}/${e.deaths}`).join(' ')}; dord 2: ${routesOf(runs[1]).map((e) => `${e.ticks}/${e.deaths}`).join(' ')}; kept ${JSON.stringify(doneOf(runs[1]).deaths || {})}`);
+	// the merge with main's throw-back demote (--dback=1): under --dord=2 dying()'s bounds stay --dord=1's (respawnCostB,
+	// ordAtB, pickSO), so a throw-back is kept demoted in both orders, never dropped (the throw-back pit of sectionCpu)
+	const TB = ['o1CS' + '.'.repeat(34) + '##', ...Array.from({ length: 7 }, () => '#'.repeat(36) + '..##'), '#'.repeat(30) + 'x...o...2T'];
+	const tb = levelFile('throwback_chain', box(TB));
+	const tq = [1, 2].map((dord) => gox(tb.file, ['--workers=1', '--cells=coarse', '--seed=1', `--dord=${dord}`, '--maxTicks=8000000', '--seconds=60']));
+	const tqd = tq.map((ev) => doneOf(ev).deaths || {});
+	const tqr = tq.map((ev) => { const r = routesOf(ev); return r.length ? C.evaluate(tb.level, masksOf(r[r.length - 1].inputs)) : null; });
+	check('the throw-back pit with --dord=1 and --dord=2: throw-backs kept demoted in both (backKept >= 1, back = by the order + by the steer), a route through a death in both, replayed',
+		tqd.every((d) => d.back > 0 && d.backKept >= 1 && d.back === d.backByOrder + d.backBySteer) && tqr.every((v) => !!v && v.deaths >= 1),
+		tqd.map((d, k) => `dord ${k + 1}: back ${d.back} kept ${d.backKept} promoted ${d.backPromoted}, route ${tqr[k] ? `${tqr[k].ms.length} ticks / ${tqr[k].deaths} deaths` : '-'}`).join('; '));
 	// no deaths as moves (no checkpoint): --dord changes nothing (the same routes after the same ticks)
 	const plain = levelFile('plain_dord', box(['...........', '...........', '...........', 'S.....x...T']));
 	const q = [1, 2].map((dord) => gox(plain.file, ['--workers=1', `--dord=${dord}`, '--maxTicks=2000000', '--seconds=60']));
