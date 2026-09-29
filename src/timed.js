@@ -89,9 +89,10 @@ function lowerBoundTo(L, goals) {
 	for (let i = 0; i < N; i++) { const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0; wall[i] = (f & 1) !== 0 && (f & 16) === 0 && (f & (2 | 4 | 8)) === 0 ? 1 : 0; }
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = require('./reach.js').silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); l.push(i); } }

@@ -1011,6 +1011,62 @@ function livePortalPockets() {
 			`on P ${fmt(onP)} (exit ${fmt(exitP)}; the engine: at (${tx}, ${ty}) the next tick), on R ${fmt(onR)}, on V ${fmt(onV)}, cut set ${sameCut ? 'the same' : 'CHANGED'}, live ${f.livePortals}`);
 	}
 }
+/**
+ * the silent portals (reach.js silentPortals: portal tiles EE never teleports from, no exits in any builder). A trophy
+ * pocket open to the left holds a self-target portal A (id 0 -> 0) next to the trophy; another id-0 self-target B sits
+ * by the spawn (Christmas Tree Quest: 611 id-0 portals, one 5 tiles from the trophy). A portal S (id 5 -> 7) sends the ball
+ * to T (id 7 -> 8), whose 8 neighbours are walls: a ball there keeps lastPortal and can never leave, so T's own exit U
+ * (id 8, by the pocket) is none of its ways (a sealed exit read lower than the start). An open exit X (id 12 -> 8) of V
+ * (id 11 -> 12) keeps its exits. Checked: the marks, the engine (S puts the ball on T and it stays there through random
+ * inputs; a ball on B never reaches A), the reach field (T cut off: a proof, it truly never gets out; S and B far), the
+ * burst walk's and the steer field's portal tables, the searches' sound lower bounds (goexplore.js, timed.js).
+ */
+function silentPortalRooms() {
+	const GX = require('../src/goexplore.js'), BU = require('../src/bursts.js'), SF = require('../src/steer.js'), TM = require('../src/timed.js');
+	const W = 40, H = 14, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	for (let x = 28; x <= 32; x++) cells.push([x, 2, 9], [x, 4, 9]);
+	cells.push([32, 3, 9], [30, 3, 121], [31, 3, 242, 0, 0, 0], [27, 3, 242, 0, 8, 9]);   // the pocket, A, U
+	for (let x = 35; x <= 37; x++) cells.push([x, 6, 9], [x, 8, 9]);
+	cells.push([35, 7, 9], [37, 7, 9], [36, 7, 242, 0, 7, 8]);   // T sealed
+	cells.push([2, H - 2, 255], [6, H - 2, 242, 0, 0, 0], [10, H - 2, 242, 0, 5, 7], [14, H - 2, 242, 0, 11, 12], [20, H - 2, 242, 0, 12, 8]);   // spawn, B, S, V, X
+	const L = levelOfCells(W, H, cells);
+	const at = (x, y) => y * W + x, A = at(31, 3), U = at(27, 3), T = at(36, 7), B = at(6, H - 2), S = at(10, H - 2), V = at(14, H - 2), X = at(20, H - 2);
+	const sil = R.silentPortals(L);
+	check('silent portals: self-target A and B, the sealed exit T; not S, U, V or the open exit X', sil[A] && sil[B] && sil[T] && !sil[S] && !sil[U] && !sil[V] && !sil[X],
+		`A ${sil[A]} B ${sil[B]} T ${sil[T]} S ${sil[S]} U ${sil[U]} V ${sil[V]} X ${sil[X]}`);
+	// the engine: S -> T, then T holds the ball whatever it presses; B never teleports
+	const sim = new E.EESim(L); sim.reset();
+	sim.px = 10 * 16; sim.py = (H - 2) * 16; sim.speed_x = 0.5; sim.speed_y = 0; sim._last_portal_set = false;
+	const inp = new E.EEInput();
+	sim.tick(inp);
+	const onT = () => ((sim.px + 8) >> 4) === 36 && ((sim.py + 8) >> 4) === 7;
+	let arrived = onT(), stayed = arrived, rnd = 12345;
+	for (let t = 0; t < 400 && stayed; t++) { rnd = (rnd * 1103515245 + 12345) >>> 0; E.applyMask(inp, (rnd >>> 16) % 32); sim.tick(inp); if (!onT()) stayed = false; }
+	const sb = new E.EESim(L); sb.reset();
+	sb.px = 6 * 16; sb.py = (H - 2) * 16; sb.speed_x = 0.5; sb._last_portal_set = false;
+	let neverA = true;
+	for (let t = 0; t < 60; t++) { E.applyMask(inp, t < 20 ? 0 : 4); sb.tick(inp); if (((sb.px + 8) >> 4) === 31 && ((sb.py + 8) >> 4) === 3) neverA = false; }
+	check('the engine: S puts the ball on the sealed T, where it stays through 400 random ticks; a ball on the self-target B never reaches A', arrived && stayed && neverA,
+		`arrived ${arrived}, stayed ${stayed}, B never at A ${neverA}`);
+	for (const deaths of [true, false]) {
+		const f = R.reachField(L, { deaths });
+		const c = (x, y) => R.costAt(f, x * 16, y * 16, 0);
+		const cT = c(36, 7), cS = c(10, H - 2), cB = c(6, H - 2), cX = c(20, H - 2), cU = c(27, 3);
+		check(`reach field (${deaths ? 'with' : 'without'} death edges): the sealed T cut off, S and B not near the trophy through teleports EE never makes, the open exit X keeps U's way`,
+			cT < 0 && (cS < 0 || cS > 10) && (cB < 0 || cB > 10) && cX >= 0 && cU >= 0 && (cX <= cU + 1.5),
+			`T ${fmt(cT)}, S ${fmt(cS)}, B ${fmt(cB)}, X ${fmt(cX)}, U ${fmt(cU)}`);
+	}
+	const pe = BU.portalsOf(L).exits, st = SF.analyze(L, {}).portalExits;
+	const tab = (m) => [A, B, T, S, V, X].map((i) => (m.has(i) ? 1 : 0)).join('');
+	check('the burst walk (bursts.js portalsOf) and the steer field (steer.js analyze) give A, B and T no exits, S, V and X theirs', tab(pe) === '000111' && tab(st) === '000111',
+		`A B T S V X: bursts ${tab(pe)}, steer ${tab(st)}`);
+	const lb = GX.lowerBoundTiles(L), tro = [at(30, 3)], lt = TM.lowerBoundTo(L, tro);
+	check('the sound lower bounds (goexplore.js lowerBoundTiles, timed.js lowerBoundTo): the sealed T no way to the trophy, S by its walk to V (V -> X -> U; not through T)',
+		lb[T] === 0xffff && lb[S] >= 2 && lb[S] > lb[U] && lt[T] === 0xffff && lt[S] >= 2 && lt[S] > lt[U],
+		`goexplore T ${lb[T]} S ${lb[S]} U ${lb[U]}; timed T ${lt[T]} S ${lt[S]} U ${lt[U]}`);
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -1034,7 +1090,7 @@ function trapLevel() {
 	if (want('E')) sectionE();
 	if (want('F')) sectionF();
 	if (want('G')) await sectionG();
-	if (want('H')) { sectionH(); livePortalPockets(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
+	if (want('H')) { sectionH(); livePortalPockets(); silentPortalRooms(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
