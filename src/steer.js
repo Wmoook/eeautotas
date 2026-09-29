@@ -736,6 +736,24 @@ function fullCoinT(A) {
 	for (let i = 0; i < A.N; i++) if (A.cls[i] === 3 && A.gateFeat[i] === 'coins' && A.gatePol[i] === 1) cap = Math.max(cap, A.gateParam[i]);
 	return Math.min(cap, A.special.filter((x) => x[1] === 'coins').length);
 }
+/** the count by physics: the least coin count c whose layer field (the start's other feature values, c coins held: coin
+ *  doors <= c open, coin gates <= c solid; its goals the trophy and the other layers' ways) has a value at the start
+ *  (null: none, or no coins feature). The walk plan's count is blind to gravity: too low on Sand Castles (2 where the
+ *  physics needs 3), 0 on Floating Temples and the cake is a lie (the walk passes diagonally between gates or climbs
+ *  hidden blocks) */
+function physCoinT(PH, level) {
+	const M = PH.M, nC = M.names.indexOf('coins');
+	if (nC < 0) return null;
+	const sim = new E.EESim(level); sim.reset();
+	const s0 = M.layerOf(sim);
+	for (let c = 0; c < M.radix[nC]; c++) {
+		const f = PH.fields[M.withVal(s0, nC, c)];
+		if (!f) continue;
+		const v = RF.fifthsAt(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
+		if (v >= 0 && v < CUT - 1) return c;
+	}
+	return null;
+}
 /** a coin leg's field (the level lv with the tiles fg: the coin q the goal): with the forced portals, unless they leave the
  *  coin out of reach from the start and from every other coin (a portal chain the model misreads: the plan would have
  *  no value at all); then without them, as main's legs were */
@@ -918,7 +936,51 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 			if (!changed) break;
 		}
 	}
+	if (!opts || opts.altLegs !== false) altLegs(A, PH, M, s, nC, CL);
 	return CL;
+}
+/** legs across the other layers (the coin DP's legs are all in ONE layer: the start's key / team / fx / switch values):
+ *  a coin whose leg has no value from the start there (every coin's, when none has one; else a coin no other coin's leg
+ *  reaches either) takes its leg in another layer the build reached (its non-coin values; at most ALT_LAYERS), the one with
+ *  the least arrival cost from the start, where that leg reaches at least as many coins; a wild layer's walk x kappa.
+ *  Floating Temples: its 5 coins need the purple switch or an effect first, no leg had a value from the start and the DP
+ *  none at all. Ordering values only */
+const ALT_LAYERS = 6;
+function altLegs(A, PH, M, s, nC, CL) {
+	const st = A.start.t, coins = CL.coins;
+	const has = (f, t) => !!f && arriveCost(f, t) < CUT;
+	const into = (f, q) => { let k = 0; for (const c of coins) if (c !== q && has(f, c)) k++; return k; };
+	const none = !coins.some((q) => has(CL.fields.get(q), st));
+	const want = coins.filter((q) => !has(CL.fields.get(q), st) && (none || !into(CL.fields.get(q), q)));
+	if (!want.length) return;
+	const proj = (x) => M.withVal(x, nC, 0);
+	const seen = new Set([proj(s)]), alts = [];
+	for (let x = 0; x < M.S && alts.length < ALT_LAYERS; x++) if (PH.fields[x] && !seen.has(proj(x))) { seen.add(proj(x)); alts.push(proj(x)); }
+	if (!alts.length) return;
+	const copies = new Map();
+	const copyOf = (sx) => {
+		if (!copies.has(sx)) {
+			const { lv } = layerLevel(A, M, sx, {});
+			const fg0 = Int32Array.from(lv.fg);
+			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
+			copies.set(sx, { lv, fg0 });
+		}
+		return copies.get(sx);
+	};
+	CL.alt = 0;
+	for (const q of want) {
+		const k = CL.countOf.get(q), n0 = into(CL.fields.get(q), q);
+		let best = null;
+		for (const a of alts) {
+			const { lv, fg0 } = copyOf(M.withVal(a, nC, k));
+			const fg = Int32Array.from(fg0); fg[q] = TROPHY;
+			const f = legFieldOf(lv, fg, q, coins, st);
+			if (lv._wild && f.mode === 'walk' && PH.kappa > 1) f.walk = Uint16Array.from(f.walk, (v) => (v >= CUT ? CUT : Math.min(CUT - 1, Math.round(v * PH.kappa))));
+			const c = arriveCost(f, st);
+			if (c < CUT && into(f, q) >= n0 && (!best || c < best.c)) best = { f, c };
+		}
+		if (best) { CL.fields.set(q, best.f); CL.alt++; }
+	}
 }
 /** the plan past its count (opts.coinT, editor.js pastPlan): every leg in the layer of the count the ball holds when it
  *  walks it. legTour starts from the T - 1 layer and re-rounds along the DP's own tour; with coin GATES that is no start:
@@ -956,10 +1018,10 @@ function coinLegsLayered(B, PH, base, deadline, opts) {
 		const cs = LG.costs(list, deadline);
 		if (cs.some((c) => !c)) return null;
 		list.forEach(([, k, , j, from], x) => from.forEach((i, y) => { const v = cs[x][y]; if (v < CUT) L[(k * (n + 1) + i) * n + j] = v; }));
-		return coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG);
+		return coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG, opts);
 	} finally { LG.close(); }
 }
-function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG) {
+function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG, opts) {
 	const sT = M.withVal(s, nC, Math.min(T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
@@ -982,24 +1044,93 @@ function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG) {
 		}
 	}
 	// the best tour from the start: each coin's place on it
-	const place = new Int32Array(n).fill(-1), tour = [];
-	let m = 0, last = n, start = Infinity;
-	for (let k = 0; k < T; k++) {
-		let best = -1, bv = Infinity;
-		for (let q = 0; q < n; q++) {
-			if (m & (1 << q)) continue;
-			const v = Lat(k, last, q) + h[(m | (1 << q)) * n + q];
-			if (v < bv) { bv = v; best = q; }
+	const tourOf = (h, pen) => {
+		const place = new Int32Array(n).fill(-1), tour = [];
+		let m = 0, last = n, start = Infinity;
+		for (let k = 0; k < T; k++) {
+			let best = -1, bv = Infinity, drop = false;
+			for (let q = 0; q < n; q++) {
+				if (m & (1 << q)) continue;
+				const v = Lat(k, last, q) + h[(m | (1 << q)) * n + q];
+				if (v < bv) { bv = v; best = q; drop = false; }
+				// (a dropped coin (pen): the tour goes on from the same coin; never the first step)
+				if (pen && last < n && pen[q] < Infinity) { const w = pen[q] + h[(m | (1 << q)) * n + last]; if (w < bv) { bv = w; best = q; drop = true; } }
+			}
+			if (best < 0 || !(bv < Infinity)) break;
+			if (k === 0) start = bv;
+			m |= 1 << best;
+			if (!drop) { place[best] = k; tour.push(coins[best]); last = best; }
 		}
-		if (best < 0) break;
-		if (k === 0) start = bv;
-		place[best] = k; tour.push(coins[best]); m |= 1 << best; last = best;
+		return { place, tour, start };
+	};
+	let tr = tourOf(h, null), H = h, dropped = 0;
+	// (no value from the start: a coin no leg reaches from the start (through the other coins) is dropped from the tour
+	// with a penalty (dropPen) instead of blanking the DP)
+	if (!(tr.start < Infinity) && opts && opts.drop) {
+		const legAny = (i, j) => { for (let k = 0; k < T; k++) if (Lat(k, i, j) < Infinity) return true; return false; };
+		const pen = dropPen(A, coins, (q) => Lat(0, n, q) < Infinity, legAny, null);
+		if (pen) {
+			const h2 = dpDrop(n, T, Lat, coins.map((q) => { const v = tail.get(q); return v >= CUT ? Infinity : v; }), pen);
+			const tr2 = tourOf(h2, pen);
+			if (tr2.start < Infinity) { tr = tr2; H = h2; dropped = pen.filter((v) => v < Infinity).length; }
+		}
 	}
+	const { place, tour, start } = tr;
 	const fields = new Map(), countOf = new Map();
 	const fl = coins.map((q, x) => [q, place[x] >= 0 ? place[x] : T - 1]);
 	const f2 = LG.fields(fl);
 	fl.forEach(([q, k], x) => { fields.set(q, f2[x]); countOf.set(q, k); });
-	return { T, coins, fields, tail, s, countOf, rounds: 0, layered: { D: { n, T, h }, tour, start } };
+	return { T, coins, fields, tail, s, countOf, rounds: 0, dropped, layered: { D: { n, T, h: H }, tour, start } };
+}
+/** the penalty (fifths) of dropping each coin from the tour: Infinity for a coin a finite leg reaches from the start
+ *  (fromStart(q)), directly or through other such coins (leg(i, j)); for the rest, the walk distance to it (walk(q), fifths;
+ *  null or none: the 8-way straight-line distance from the start) x DROP_KAPPA. null: no coin to drop, or none reached */
+const DROP_KAPPA = 2;
+function dropPen(A, coins, fromStart, leg, walk) {
+	const n = coins.length, R = new Uint8Array(n), q = [];
+	for (let j = 0; j < n; j++) if (fromStart(j)) { R[j] = 1; q.push(j); }
+	if (!q.length) return null;
+	while (q.length) { const i = q.pop(); for (let j = 0; j < n; j++) if (!R[j] && leg(i, j)) { R[j] = 1; q.push(j); } }
+	if (R.every((r) => r)) return null;
+	const sx = A.start.t % A.W, sy = Math.floor(A.start.t / A.W);
+	return coins.map((t, j) => {
+		if (R[j]) return Infinity;
+		const w = walk ? walk(j) : Infinity;
+		const dx = Math.abs(t % A.W - sx), dy = Math.abs(Math.floor(t / A.W) - sy);
+		const oct = 5 * Math.max(dx, dy) + 2 * Math.min(dx, dy);
+		return (w < Infinity ? Math.max(w, oct) : oct) * DROP_KAPPA;
+	});
+}
+/** the coin DP with drops (the fallback when the exact DP has no value from the start): h as coinDP's, where a coin with
+ *  pen[j] < Infinity may also be taken as dropped, at pen[j], the tour going on from the same coin. legAt(k, i, j): the
+ *  leg from coin i to coin j holding k coins; tl: the tails. An ordering value only: nothing is cut */
+function dpDrop(n, T, legAt, tl, pen) {
+	const NM = 1 << n, h = new Float32Array(NM * n).fill(Infinity);
+	const pc = new Uint8Array(NM);
+	for (let m = 1; m < NM; m++) pc[m] = pc[m >> 1] + (m & 1);
+	const byPc = [];
+	for (let k = 0; k <= T; k++) byPc.push([]);
+	for (let m = 1; m < NM; m++) if (pc[m] <= T) byPc[pc[m]].push(m);
+	for (let k = T; k >= 1; k--) {
+		for (const m of byPc[k]) {
+			for (let last = 0; last < n; last++) {
+				if (!(m & (1 << last))) continue;
+				let v;
+				if (k >= T) v = tl[last];
+				else {
+					v = Infinity;
+					for (let q = 0; q < n; q++) {
+						if (m & (1 << q)) continue;
+						const c = legAt(k, last, q) + h[(m | (1 << q)) * n + q];
+						if (c < v) v = c;
+						if (pen[q] < Infinity) { const d = pen[q] + h[(m | (1 << q)) * n + last]; if (d < v) v = d; }
+					}
+				}
+				h[m * n + last] = v;
+			}
+		}
+	}
+	return h;
 }
 /** the DP's tour from tile t0 (the coins in order; T of them, or fewer where no leg has a value) */
 function coinTour(CL, D, t0) {
@@ -1046,6 +1177,30 @@ function coinDP(CL, maxN = 18) {
 		}
 	}
 	return { n, T, h };
+}
+/** the DP's value from tile t0 (fifths; Infinity: none): the least first leg + the rest of the tour */
+function dpStart(CL, D, t0) {
+	if (!CL || !D) return Infinity;
+	if (CL.layered) return CL.layered.start;
+	let v = Infinity;
+	CL.coins.forEach((q, i) => { const a = arriveCost(CL.fields.get(q), t0); if (a < CUT) { const w = a + D.h[(1 << i) * D.n + i]; if (w < v) v = w; } });
+	return v;
+}
+/** coinDP with drops (dpDrop): a coin no leg reaches from t0 (through the other coins) dropped at its walk distance x
+ *  DROP_KAPPA; null: no coin to drop (or over maxN coins) */
+function coinDPDrop(CL, A, maxN = 18) {
+	const t0 = A.start.t;
+	const n = CL.coins.length;
+	if (n > maxN || CL.T > n) return null;
+	const leg = new Float64Array(n * n);
+	for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = i === j ? Infinity : arriveCost(CL.fields.get(CL.coins[j]), CL.coins[i]); leg[i * n + j] = v >= CUT ? Infinity : v; }
+	const fs = CL.coins.map((q) => CL.fields.get(q));
+	const pen = dropPen(A, CL.coins, (j) => arriveCost(fs[j], t0) < CUT, (i, j) => leg[i * n + j] < Infinity,
+		(j) => { const w = fs[j] && fs[j].walk ? fs[j].walk[t0] : CUT; return w < CUT ? w : Infinity; });
+	if (!pen) return null;
+	const tl = CL.coins.map((q) => { const v = CL.tail.get(q); return v >= CUT ? Infinity : v; });
+	const h = dpDrop(n, CL.T, (k, i, j) => leg[i * n + j], tl, pen);
+	return { n, T: CL.T, h, dropped: pen.filter((v) => v < Infinity).length };
 }
 
 // ------------------------------------------------------------------ build
@@ -1112,13 +1267,47 @@ function buildSteer(level, opts) {
 	let dp = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
 	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
+	// (the count by physics, opts.physT !== false: T = max(the walk plan's T, the least count whose layer field reaches the
+	// trophy from the start), at most fullCoinT; the walk plan's T 0: fullCoinT. The walk plan is blind
+	// to gravity: Sand Castles' plan T 2 where its physics needs 3 coins, the cake is a lie / Floating Temples T 0)
+	const fullT = fullCoinT(A), planT = cp ? cp.T : 0;
+	let physT = null;
+	if (!opts.noDP && opts.physT !== false && M.names.indexOf('coins') >= 0 && fullT > 0) {
+		physT = physCoinT(PH, level);
+		const T = !planT ? fullT : physT === null ? planT : Math.max(planT, Math.min(physT, fullT));
+		if (T > planT) cp = { T, coins: A.special.filter((x) => x[1] === 'coins').map((x) => x[0]) };
+	}
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
 		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
+	let dpHow = null;
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
-		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		const deadline = t0 + maxMs, st0 = A.start.t;
+		let CL = opts.coinT ? coinLegsLayered(B, PH, cp, deadline, opts) : coinLegsPhys(B, PH, cp, opts);
+		let D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		dpHow = `${opts.coinT ? 'layered' : 'phys'} T ${cp.T}`;
+		// (no value from the start (a coin that needs another layer has no leg in the legs' one; the wrong T): the chain
+		// coinLegsLayered at the same T, at fullCoinT, at the count by physics; then the DP with the unreachable coins
+		// dropped at a penalty (dpDrop) of the first that has one. Ordering values only: nothing is cut)
+		if (opts.dpChain !== false && !(dpStart(CL, D, st0) < Infinity)) {
+			const drops = [];
+			const d0 = CL && !CL.layered ? coinDPDrop(CL, A) : null;
+			if (d0) drops.push({ CL, D: d0, how: `${dpHow} + ${d0.dropped} dropped` });
+			else if (CL && CL.layered && CL.dropped) drops.push({ CL, D, how: `${dpHow} + ${CL.dropped} dropped` });
+			let got = false;
+			const tried = new Set(opts.coinT ? [cp.T] : []);
+			for (const T2 of [cp.T, fullT, physT]) {
+				if (!(T2 >= 1) || tried.has(T2) || T2 > cp.coins.length) continue;
+				tried.add(T2);
+				if (Date.now() > deadline) break;
+				const CL2 = coinLegsLayered(B, PH, { T: T2, coins: cp.coins }, deadline, Object.assign({}, opts, { drop: true }));
+				if (!CL2) continue;
+				if (CL2.layered.start < Infinity && !CL2.dropped) { CL = CL2; D = CL2.layered.D; dpHow = `layered T ${T2}`; got = true; break; }
+				if (CL2.layered.start < Infinity) drops.push({ CL: CL2, D: CL2.layered.D, how: `layered T ${T2} + ${CL2.dropped} dropped` });
+			}
+			if (!got && drops.length) { const d = drops.find((x) => dpStart(x.CL, x.D, st0) < Infinity); if (d) { CL = d.CL; D = d.D; dpHow = d.how; } }
+		}
 		if (D) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
@@ -1137,7 +1326,7 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, how: dpHow } : null, fullT, planT, physT, start: steerAt(steer, sim0), ms: Date.now() - t0, over };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1377,6 +1566,6 @@ function readSteerFile(buf) {
 
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, physCoinT, coinLegsPhys, coinLegsLayered, coinDP, coinDPDrop, dpDrop, dropPen, dpStart, arriveCost,
 	// (the leg workers)
 	_legFieldOf: legFieldOf };
