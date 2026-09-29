@@ -35,8 +35,8 @@ function check(name, ok, detail) {
 	console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail !== undefined ? ': ' + detail : ''}`);
 }
 const section = (s) => console.log(`\n== ${s}`);
-function gox(file, args, timeoutMs = 240000) {
-	const r = spawnSync(process.execPath, [GOX, file, ...args], { encoding: 'utf8', maxBuffer: 1 << 28, timeout: timeoutMs });
+function gox(file, args, timeoutMs = 240000, env) {
+	const r = spawnSync(process.execPath, [GOX, file, ...args], { encoding: 'utf8', maxBuffer: 1 << 28, timeout: timeoutMs, env: env ? Object.assign({}, process.env, env) : process.env });
 	return String(r.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return {}; } });
 }
 const doneOf = (ev) => ev.find((e) => e.ev === 'done') || {};
@@ -153,11 +153,16 @@ function sectionCpu() {
 	// failed in fifthsAt), no worker fails, a route (replayed)
 	const fw = path.join(HOME, 'falsenear_wild.eelvl');
 	const Lw = falseNear(fw, true);
-	check('the wild variant: the reach field is a walk', RF.reachField(Lw, { deaths: false }).mode === 'walk');
-	const ew = gox(fw, [...base, '--seed=1', '--frontier=1', '--fPhys=1', '--fBrake=1']);
-	const rw = routesOf(ew), bad = ew.filter((e) => e.ev === 'warning');
-	check('--fPhys=1 on a walk-mode level: no worker fails, a route (replayed)', !bad.length && rw.length > 0 && !!C.evaluate(Lw, masksOf(rw[0].inputs)),
-		bad.length ? bad[0].text.slice(0, 200) : rw.length ? `${rw[0].ticks} ticks, ${JSON.stringify(doneOf(ew).frontier)}` : 'no route');
+	// (its effect block makes the reach field the physics until an effect is held (reach.js fxHybrid); EEAT_FXPHYS=0: the walk
+	// mode as before: both searches)
+	check('the wild variant: the reach field is a walk with fxPhys false (EEAT_FXPHYS=0), the fxHybrid physics field by default',
+		RF.reachField(Lw, { deaths: false, fxPhys: false }).mode === 'walk' && RF.reachField(Lw, { deaths: false }).mode === 'physics');
+	for (const [what, env] of [['a walk-mode level (EEAT_FXPHYS=0)', { EEAT_FXPHYS: '0' }], ['the fxHybrid level', null]]) {
+		const ew = gox(fw, [...base, '--seed=1', '--frontier=1', '--fPhys=1', '--fBrake=1'], undefined, env);
+		const rw = routesOf(ew), bad = ew.filter((e) => e.ev === 'warning');
+		check(`--fPhys=1 on ${what}: no worker fails, a route (replayed)`, !bad.length && rw.length > 0 && !!C.evaluate(Lw, masksOf(rw[0].inputs)),
+			bad.length ? bad[0].text.slice(0, 200) : rw.length ? `${rw[0].ticks} ticks, ${JSON.stringify(doneOf(ew).frontier)}` : 'no route');
+	}
 	const simOf = (r) => (r.length ? r[0].simTicks : Infinity);
 	// what it is for: the corridor is walked in the first picks; the coin's room opens the door (territory no room walked),
 	// its field's frontier is behind the door, and head F pulls that room's cells back to it (the backtracking a coin door
