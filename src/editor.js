@@ -2376,7 +2376,9 @@ function steerInfo(buf, hash) {
 			// the field models none (no DP: its plan passes no shut coin door), so the plan comes from the coins modelled
 			// from the start (and the blue coins where a blue door reads them), its count the full one and the switch at the
 			// first stall (planT 0): pastPlanCheck)
-			const pastKind = st.info.dp ? (useful && st.info.fullT > st.info.dp.T ? 'past' : '') : st.info.fullT > 0 ? 'coins' : '';
+			// (the coin plan only where the field does not model the coins: one that does and has no DP left it out over the
+			// build's budget, e.g. Polar Eclipse's 16 coins, and a longer build would only use a thread for up to PAST_MAX_MS)
+			const pastKind = st.info.dp ? (useful && st.info.fullT > st.info.dp.T ? 'past' : '') : st.info.fullT > 0 && st.info.features.indexOf('coins') < 0 ? 'coins' : '';
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
 				fullT: st.info.fullT, pastWanted: !!pastKind });
