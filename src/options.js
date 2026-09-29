@@ -22,12 +22,11 @@ const WALL_V = 0.5;
 
 /** the Luby sequence's i-th term (i from 1): 1 1 2 1 1 2 4 1 1 2 1 1 2 4 8 ... */
 function luby(i) {
-	i = Math.max(1, Math.floor(i));
+	i = Math.max(1, Math.min(0x3fffffff, Math.floor(i)));
 	for (;;) {
-		let k = 1;
-		while ((2 ** k) - 1 < i) k++;
-		if ((2 ** k) - 1 === i) return 2 ** (k - 1);
-		i -= (2 ** (k - 1)) - 1;
+		const k = 32 - Math.clz32(i);   // the least k with 2^k - 1 >= i
+		if (i === (1 << k) - 1) return 1 << (k - 1);
+		i -= (1 << (k - 1)) - 1;
 	}
 }
 /** an option's cap (ticks) for the j-th option */
