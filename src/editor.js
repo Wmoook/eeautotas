@@ -2604,6 +2604,8 @@ function steerFp() {
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
 	// (the blue DP's knob: a flip builds the field again)
 	if (process.env.EEAT_BLUEDP) h.update(`bluedp:${process.env.EEAT_BLUEDP}`);
+	// (the floor probe's knob: EEAT_GATEFLOOR=0 / all build other files)
+	h.update(`gatefloor:${process.env.EEAT_GATEFLOOR === '0' ? 0 : process.env.EEAT_GATEFLOOR === 'all' ? 'all' : 1}`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);

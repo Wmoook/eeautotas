@@ -9,7 +9,9 @@
 // coin counts up to the highest door, the crown for crown doors, and 'fx' = the static effects plain / wild), chosen by
 // counterexample (CEGAR): start with none modelled (the reach field's optimism), take the plan (the walk plan, then the
 // physics plan), replay it with the full state; the first closed gate it walks through names a feature to model; rebuild
-// until the plans are valid (or 4096 layers). Per reached layer (walk model, from the start): reach.js's field on a copy
+// until the plans are valid (or 4096 layers); then the floor probe (probeFloors): a gate the physics plan, with the gates
+// it cannot stand on made doors, jumps from while it is air in the full state names its feature too (a coin gate's count
+// the coin DP's T). Per reached layer (walk model, from the start): reach.js's field on a copy
 // of the level with that layer's gates shut (solid) or open (air), killers per protection, and every tile that changes
 // the layer turned into a goal seeded with the next layer's cost there (value iteration over the layer graph's strongly
 // connected components, sinks first); a wild layer (an effect on: jump / fly / speed / low gravity / multijump / gravity)
@@ -328,7 +330,14 @@ function makeModel(A, modeled) {
 	const keyN = A.keyExpiry ? feats.map((f, n) => (f.key.startsWith('key') ? n : -1)).filter((n) => n >= 0) : [];
 	/** the layers a ball in layer s reaches by keys running out, one colour at a time (EMPTY: none) */
 	const expire = (s) => { let out = null; for (const n of keyN) if (valOf(s, n) === 1) (out || (out = [])).push(withVal(s, n, 0)); return out || EMPTY; };
-	return { feats, S, s0, radix, stride, valOf, withVal, pass, trans, transAll, inv, layerOf, identity, gateOpen, keyN, expire, names: feats.map((f) => f.key) };
+	/** a gate of a feature the model leaves out (open in every layer: the floor probe's copies keep it a door) */
+	function unmodelledGate(i) {
+		const k = A.gateFeat[i];
+		if (!k || k === 'open' || k === 'time' || k === 'static' || idx.has(k)) return false;
+		const f = allF.get(k);
+		return !!f && !f.static;
+	}
+	return { feats, S, s0, radix, stride, valOf, withVal, pass, trans, transAll, inv, layerOf, identity, gateOpen, unmodelledGate, keyN, expire, names: feats.map((f) => f.key) };
 }
 
 // ------------------------------------------------------------------ the walk model: a backward Dijkstra over tile x layer
@@ -558,7 +567,11 @@ function forwardLayers(A, M) {
 	return { layers, edges, seen };
 }
 /** layer s's copy of the level: gates shut -> 9, open -> 0; killers by protection; tiles that change the layer -> the
- *  trophy (goal tiles); opts.staticCoins: coins change no layer here (the coin way is the DP's) */
+ *  trophy (goal tiles); opts.staticCoins: coins change no layer here (the coin way is the DP's); opts.probeDoors (the
+ *  floor probe, probeFloors): a count gate or door (gold / blue coins) the model leaves out, and a count gate (solid from
+ *  its count on) open in this layer, keep their door block: passable AND a floor, as the RCH3 field has every door;
+ *  probeDoors 'all': every gate of a feature the model leaves out too (keys, switches, team, crown) (`doors`: how many;
+ *  0 = the plain copy) */
 function layerLevel(A, M, s, opts) {
 	const L = A.level, N = A.N;
 	const fg = Int32Array.from(L.fg);
@@ -566,10 +579,15 @@ function layerLevel(A, M, s, opts) {
 	const protOn = nProt >= 0 ? M.valOf(s, nProt) === 1 : null;
 	const goalTiles = [];
 	const goal = new Uint8Array(N);
+	let doors = 0;
 	for (let i = 0; i < N; i++) {
 		const c = A.cls[i], id = fg[i];
-		if (c === 3) fg[i] = M.gateOpen(i, s) ? 0 : 9;
-		else if (c === 1 && protOn === true) fg[i] = 0;
+		if (c === 3) {
+			const open = M.gateOpen(i, s);
+			const cnt = A.gateFeat[i] === 'coins' || A.gateFeat[i] === 'bcoins';
+			if (opts.probeDoors && ((M.unmodelledGate(i) && (cnt || opts.probeDoors === 'all')) || (open && A.gatePol[i] === 0 && cnt))) doors++;
+			else fg[i] = open ? 0 : 9;
+		} else if (c === 1 && protOn === true) fg[i] = 0;
 		const k = A.specialAt[i];
 		if (k >= 0) {
 			const ts = M.transAll(s, k);
@@ -584,7 +602,7 @@ function layerLevel(A, M, s, opts) {
 	const lv = Object.assign({}, L, { fg, gravityMult: wild ? 0.999 : L.gravityMult });
 	lv._wild = wild;
 	if (L.spawnsX.length > 1) { lv.spawnsX = L.spawnsX.slice(0, 1); lv.spawnsY = L.spawnsY.slice(0, 1); }
-	return { lv, goalTiles, goal };
+	return { lv, goalTiles, goal, doors };
 }
 /** Tarjan's strongly connected components of the reached layers, sinks first */
 function sccs(S, on, succ) {
@@ -711,6 +729,39 @@ function layerMemoKey(c, goals, tag) {
 	goals.forEach((x, i) => { g[2 * i] = x.tile; g[2 * i + 1] = x.cost; });
 	return `${c.fgHash}:${c.lv._wild ? 1 : 0}:${tag}:${crypto.createHash('sha1').update(Buffer.from(g.buffer)).digest('hex')}`;
 }
+/** layer s's goals ({tile, cost} tiles): the trophies at 0, each tile that changes the layer at the next layer's arrival
+ *  cost there (fields: the layers' fields so far; isGoal(s2, t): tile t changes layer s2 too), and with key expiry every
+ *  tile at the key-off layer's arrival cost */
+function layerGoals(A, M, s, goalTiles, fields, isGoal) {
+	const goals = A.trophies.map((t) => ({ tile: t, cost: 0 }));
+	for (const [t, k] of goalTiles) {
+		let g = CUT;
+		for (const s2 of M.transAll(s, k)) {
+			const f2 = fields[s2];
+			if (!f2) continue;
+			// (a toggle: the tile changes layer s2 back too, so in s2's field it is a goal of its own (its cost is only
+			// its seed): the ball that pressed it stands there and walks off, the least of its 8 neighbours + a step,
+			// as the lookup prices it)
+			const v = isGoal(s2, t) ? arriveNear(f2, t, A) : arriveCost(f2, t);
+			if (v < g) g = v;
+		}
+		if (g < CUT) goals.push({ tile: t, cost: g / 5 });
+	}
+	// (key expiry, makeModel expire: every tile a goal at the key-off layer's arrival cost there; the tile-change bitmap
+	// (the lookup's neighbour rule) stays the layer's own)
+	const ex = M.expire(s);
+	if (ex.length) {
+		const fs2 = ex.map((s2) => fields[s2]).filter(Boolean);
+		if (fs2.length) {
+			for (let t = 0; t < A.N; t++) {
+				let g = CUT;
+				for (const f2 of fs2) { const v = arriveCost(f2, t); if (v < g) g = v; }
+				if (g < CUT) goals.push({ tile: t, cost: g / 5 });
+			}
+		}
+	}
+	return goals;
+}
 /** B: walkBuild() -> {M (with fx), fields: [layer] -> field | null, goals: [layer] -> goal tile bitmap, ...} */
 function buildPhysics(B, opts) {
 	const t0 = Date.now();
@@ -737,33 +788,7 @@ function buildPhysics(B, opts) {
 	const solve = (s) => {
 		if (!copies[s]) copies[s] = layerLevel(A, M, s, opts);
 		const { lv, goalTiles } = copies[s];
-		const goals = A.trophies.map((t) => ({ tile: t, cost: 0 }));
-		for (const [t, k] of goalTiles) {
-			let g = CUT;
-			for (const s2 of M.transAll(s, k)) {
-				const f2 = fields[s2];
-				if (!f2) continue;
-				// (a toggle: the tile changes layer s2 back too, so in s2's field it is a goal of its own (its cost is only
-				// its seed): the ball that pressed it stands there and walks off, the least of its 8 neighbours + a step,
-				// as the lookup prices it)
-				const v = copies[s2] && copies[s2].goal[t] ? arriveNear(f2, t, A) : arriveCost(f2, t);
-				if (v < g) g = v;
-			}
-			if (g < CUT) goals.push({ tile: t, cost: g / 5 });
-		}
-		// (key expiry, makeModel expire: every tile a goal at the key-off layer's arrival cost there; the tile-change bitmap
-		// (the lookup's neighbour rule) stays the layer's own)
-		const ex = M.expire(s);
-		if (ex.length) {
-			const fs2 = ex.map((s2) => fields[s2]).filter(Boolean);
-			if (fs2.length) {
-				for (let t = 0; t < A.N; t++) {
-					let g = CUT;
-					for (const f2 of fs2) { const v = arriveCost(f2, t); if (v < g) g = v; }
-					if (g < CUT) goals.push({ tile: t, cost: g / 5 });
-				}
-			}
-		}
+		const goals = layerGoals(A, M, s, goalTiles, fields, (s2, t) => !!(copies[s2] && copies[s2].goal[t]));
 		const key = goalsKey(goals);
 		if (goalsOf[s] === key && fields[s]) return false;
 		goalsOf[s] = key;
@@ -856,6 +881,139 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
 	}
 	return { tiles, legs, expAt, end: why };
+}
+
+// ------------------------------------------------------------------ gates as floors (d4-count-gate-floor, 2026-09-29)
+// The layer copies make a gate of a feature the model leaves out AIR (makeModel gateOpen: open), and a count gate (coin
+// gate 165 / blue coin gate 214: solid from its count on) is air in every layer below its count. So no plan ever stood on
+// one, and the CEGAR, which checks the plans for closed gates they pass, never saw a gate the way NEEDS as its floor:
+// Aedan Garden's trophy is reached only from its two 10-coin gates (the steer: 1 layer, no features), Rotcil Illusions'
+// from its 4-coin gate (the coin DP's T 1, from the walk plan's door), Nightmare Relics' from its 4-coin gate (fx only);
+// the plans found other ways the relaxed physics allows (a dot column pumped, a ladder's exit carried along a row, an up
+// boost's rise carried sideways) and the searches pinned there (6.8 / 9.4 / 10.2 tiles out in every sweep).
+// THE FLOOR PROBE (probeFloors): once the plans are valid (no closed gate), the physics plan again on copies where those
+// gates keep their door block (layerLevel probeDoors: passable AND a floor, the RCH3 field's own relaxation of a door), in
+// the layers it walks (at most PROBE_LAYERS new fields; a wild layer (walk mode, no floors) ends it), replayed with the
+// full state; a jump whose supports (the tile under the ball, a ledge beside it: reach.js J) are all no floor in the full
+// state while one is such a gate, AIR there, names that gate's feature (a closed gate the probe's plan passes, or a killer,
+// ends the probe: those are the plans' own check). The CEGAR models the feature as for a closed gate; a coin gate's count
+// is the coin plan's count at least (floorT: the DP / tour over at least that count, the larger of it and the layer
+// field's below it, the CPU file's alone: floorDP). Ordering only; RCH3 and its -1 untouched. Levels where no probe finds
+// such a jump: the same file as before, byte for byte (the probe's time is off the build's budget clock).
+// The COUNT gates only by default (gold / blue coin gates and doors): with every gate of a feature the model leaves out
+// ('all': keys, switches, team, crown) the box A/B's two changed levels that route on main came slower in 2 of 2 seeds
+// each (Don't Stop Jumping psw:0 46.5 / 47.1 vs 34.8 / 28.2 s, Egg Quest II key1 32.7 / 31.6 vs 30.3 / 25.6 s: the probe's
+// relaxed plan took a switch's / key's gate as its floor where the level's own way needs none, and the modelled feature
+// sent the searches for it), the coin floors' levels gained (Aedan Garden, Springopolis).
+// EEAT_GATEFLOOR=0 / buildSteer(level, {gateFloor: false}): off (the build before); EEAT_GATEFLOOR=all / gateFloor 'all':
+// every unmodelled gate a floor candidate.
+const PROBE_LAYERS = 4;
+/** the probe's mode: false (off), 'count' (the default: gold / blue coin gates) or 'all' */
+function gateFloorOn(opts) {
+	const v = opts && opts.gateFloor !== undefined ? opts.gateFloor : process.env.EEAT_GATEFLOOR === '0' ? false : process.env.EEAT_GATEFLOOR === 'all' ? 'all' : true;
+	return v === 'all' ? 'all' : v ? 'count' : false;
+}
+/** the floor probe of a build whose plans are valid (PH: its physics layers; mode 'count' or 'all': gateFloorOn) ->
+ *  {feat, t, param, pol, count} (the gate the probe's plan jumped from, air in the full state; count: a coin / blue coin
+ *  gate that is solid from its count on) or null. deadline: no new probe field past it */
+function probeFloors(level, A, PH, deadline, mode) {
+	const M = PH.M, N = A.N, W = A.W;
+	const flags = RF.guideFlags(level), nF = flags.length, fg0 = level.fg, lk = level.lookup0;
+	const fl = (id) => (id >= 0 && id < nF ? flags[id] : 0);
+	const full = fullState(A);
+	// (a floor in the full state: a gate by its state there (a door of no feature, a time door: a floor, as some state has
+	// it shut), else reach.js isFloor's blocks)
+	const floorAt = (j) => {
+		if (j >= N) return true;
+		if (A.cls[j] === 3) {
+			const k = A.gateFeat[j];
+			if (k === 'open' || k === 'time') return true;
+			if (k === 'static') return A.gatePol[j] !== 1;
+			return full[k] === undefined || !testGate(k, A.gatePol[j], A.gateParam[j], full[k]);
+		}
+		const f = fl(fg0[j]);
+		if ((f & (F_SOLID | F_JUMPTHRU | F_HALF | F_ROTHALF | F_DOOR)) === 0) return false;
+		return !((f & F_JUMPTHRU) && (f & F_ROTHALF) && lk[j] === 3);
+	};
+	const airGate = (j) => j < N && A.cls[j] === 3 && !['open', 'time', 'static'].includes(A.gateFeat[j]) && (mode === 'all' || A.gateFeat[j] === 'coins' || A.gateFeat[j] === 'bcoins') && !floorAt(j);
+	const half = (i) => i >= 0 && i < N && (fl(fg0[i]) & (F_HALF | F_ROTHALF)) !== 0 && (fl(fg0[i]) & F_JUMPTHRU) === 0;
+	const probe = new Map();
+	let built = 0;
+	const fieldOf = (s) => {
+		if (probe.has(s)) return probe.get(s);
+		let f = null;
+		const base = PH.fields[s];
+		if (base && base.mode !== 'walk' && base._m) {
+			const c = layerLevel(A, M, s, { staticCoins: true, probeDoors: mode === 'all' ? 'all' : 'count' });
+			if (!c.doors) f = base;
+			else if (built < PROBE_LAYERS && Date.now() < deadline) {
+				built++;
+				const goals = layerGoals(A, M, s, c.goalTiles, PH.fields, (s2, t) => !!(PH.goals[s2] && PH.goals[s2][t]));
+				f = RF.reachField(c.lv, { goals, debug: true, oneWayEntry: true, portalForced: true });
+				if (f.mode === 'walk' || !f._m) f = null;
+			}
+		}
+		probe.set(s, f);
+		return f;
+	};
+	const sim = new E.EESim(level); sim.reset();
+	let s = M.layerOf(sim);
+	let f = fieldOf(s);
+	if (!f) return null;
+	const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
+	let cur = null;
+	if (st) for (const [ty, l] of [...(st.base ? [st.base] : []), ...(st.rise || [])]) { const c = f._m.costOf(st.t, ty, l); if (c !== CUT && (!cur || c < cur.c)) cur = { t: st.t, ty, l, c }; }
+	let prev = -1;
+	for (let leg = 0; leg < 200 && cur; leg++) {
+		const path = descend(f, cur);
+		const J = f._m.J, cls = f.cls;
+		for (let n = 0; n < path.length; n++) {
+			const p = path[n], t = p.t;
+			if (t !== prev) {
+				// (the replay: a gate shut in the full state or a killer on the way ends the probe: not a floor's matter)
+				const c = A.cls[t];
+				if (c === 3) { const k = A.gateFeat[t]; if (k !== 'open' && k !== 'static' && k !== 'time' && full[k] !== undefined && !testGate(k, A.gatePol[t], A.gateParam[t], full[k])) return null; }
+				else if (c === 1 && full.prot !== undefined && full.prot !== 1) return null;
+				applyFull(A, full, t);
+				prev = t;
+			}
+			// (a jump: the same tile into R at its jump level (reach.js sameTile's J edge); its supports: the tile under it and
+			// the ledges beside it (reach.js J), a lower half block there (real, never a gate))
+			const q = n > 0 ? path[n - 1] : null;
+			if (!q || q.t !== t || p.ty !== RF.R_ || J[t] === -128 || p.l !== J[t] || (q.ty === RF.R_ && q.l === p.l)) continue;
+			const x = t % W;
+			if (half(t) || (x > 0 && half(t - 1)) || (x < W - 1 && half(t + 1))) continue;
+			const sup = [t + W];
+			if (x > 0 && cls[t - 1] !== RF.WALL) sup.push(t - 1 + W);
+			if (x < W - 1 && cls[t + 1] !== RF.WALL) sup.push(t + 1 + W);
+			if (sup.some(floorAt)) continue;
+			const j = sup.find(airGate);
+			if (j === undefined) continue;
+			const k = A.gateFeat[j];
+			return { feat: k, t: j, from: t, param: A.gateParam[j], pol: A.gatePol[j], count: (k === 'coins' || k === 'bcoins') && A.gatePol[j] === 0 };
+		}
+		const end = path[path.length - 1];
+		if (A.trophies.includes(end.t)) break;
+		// (the next layer as layeredPlan picks it, by the layers' own fields; key expiry: the key off from here on)
+		const k = A.specialAt[end.t];
+		const exp = M.keyN.filter((n) => M.valOf(s, n) === 1).map((n) => [M.withVal(s, n, 0), M.feats[n].key]);
+		if (k < 0 && !exp.length) break;
+		let best = null;
+		for (const [s2, feat] of (k >= 0 ? M.transAll(s, k).map((s2) => [s2, null]) : []).concat(exp)) {
+			const f2 = PH.fields[s2]; if (!f2) continue;
+			const c0 = f2.mode === 'walk' ? f2.walk[end.t] : f2.costF[end.t * (RF.KF + 1)];
+			if (c0 < CUT && (!best || c0 < best.c)) best = { s2, c: c0, feat };
+		}
+		if (!best) break;
+		if (best.feat && full[best.feat] !== undefined) full[best.feat] = 0;
+		s = best.s2; f = fieldOf(s);
+		if (!f) break;
+		// (the probe's own cost there: a leg start the probe field prices)
+		const c1 = f._m.costOf(end.t, RF.F_, 0);
+		if (c1 === CUT) break;
+		cur = { t: end.t, ty: RF.F_, l: 0, c: c1 };
+	}
+	return null;
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
@@ -1674,7 +1832,11 @@ function buildSteer(level, opts) {
 	// (the budget's clock: T0() = t0 less the time the memo saved in 'same' mode (each repeat's first build's ms), so the
 	// budget decides as if every repeat were built again; off or 'spend': t0)
 	let saved = 0;
-	const T0 = () => t0 - saved;
+	// (the floor probe's time is off the budget clock too: a level where it finds nothing gets the same file as without it)
+	let probeMs = 0;
+	const T0 = () => t0 - saved - probeMs;
+	const floorOn = gateFloorOn(opts), floors = [];
+	let floorT = 0;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
 		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: T0() + maxMs / 2 });
 		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
@@ -1693,12 +1855,25 @@ function buildSteer(level, opts) {
 			const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
 			path.push({ t, via: tele ? 'portal' : 'move' });
 		}
-		const cx = path.length > 1 ? counterexample(A, { path }) : null;
-		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, ...(PH.memoHits ? { memo: PH.memoHits } : {}), cx: cx && cx.feat });
+		let cx = path.length > 1 ? counterexample(A, { path }) : null;
+		// (the plans are valid: the floor probe, a gate the way stands on that is air in the full state)
+		let gx = null;
+		if (!cx && floorOn) {
+			const tp = Date.now();
+			gx = probeFloors(level, A, PH, Date.now() + maxMs / 2, floorOn);
+			probeMs += Date.now() - tp;
+			if (gx) {
+				floors.push({ feat: gx.feat, at: [gx.t % A.W, Math.floor(gx.t / A.W)], from: [gx.from % A.W, Math.floor(gx.from / A.W)], param: gx.param, modelled: modeled.has(gx.feat) });
+				if (gx.count && gx.feat === 'coins') floorT = Math.max(floorT, gx.param);
+				if (!modeled.has(gx.feat) && A.feats.has(gx.feat)) cx = gx;
+			}
+		}
+		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, ...(PH.memoHits ? { memo: PH.memoHits } : {}), cx: cx && cx.feat, ...(gx ? { floor: gx.feat } : {}) });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
-		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
+		// (a floor the budget cannot model: left out quietly, the plans' own refusals name what `over` says)
+		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { if (cx !== gx) over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; else floors[floors.length - 1].over = 'layers'; break; }
 		// (the next build takes longer than this one)
-		if (Date.now() - T0() > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
+		if (Date.now() - T0() > maxMs / 2) { if (cx !== gx) over = over || `${cx.feat}: ${secs}`; else floors[floors.length - 1].over = 'time'; break; }
 		modeled.add(cx.feat);
 	}
 	const M = PH.M, N = A.N;
@@ -1716,8 +1891,15 @@ function buildSteer(level, opts) {
 	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
 	// the coin DP
 	let dp = null;
-	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
-	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
+	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan; floorT: the count of a coin
+	// gate the floor probe's plan stood on)
+	let cp = opts.noDP ? null : coinPlan(B, Math.max(opts.coinT || 0, floorT));
+	// (THE FLOOR'S COUNT (the floor probe): a coin gate the way stands on raised the plan's count: below it the LARGER of
+	// the DP's value and the layer field's (dp.max: the layer field's ways at fewer coins are ways the relaxed physics
+	// allows without that floor, which the probe's plan did not take), the CPU file's alone (dp.free: flags 1 | 4, its leg
+	// bodies after the layer bodies), as the DP outside the layer product; the plain (GPU) file: the layer bodies, no DP)
+	const floorDP = !!cp && !opts.coinT && floorT > planCoinT(B);
+	const nPlain0 = bodies.length;
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - T0() > maxMs)) {
 		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
@@ -1725,13 +1907,15 @@ function buildSteer(level, opts) {
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) cp = null;
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
-		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		let CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
+		let D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		// (the floor's count: coin gates at T - 1 can cut every tour (Wine Quest I's): the legs by the count held)
+		if (!D && floorDP) { CL = coinLegsLayered(B, PH, cp, T0() + maxMs, opts); D = CL && CL.layered ? CL.layered.D : null; }
 		if (D) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
 			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
+			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null, ...(floorDP ? { free: true, max: true, floor: true } : {}) };
 		}
 	}
 	// THE COIN DP OUTSIDE THE LAYER PRODUCT (the budget left the coins out and the walk plan passes a coin door: CTM_2's
@@ -1742,7 +1926,7 @@ function buildSteer(level, opts) {
 	// go, the larger the better informed; past T coins, or where no leg has a value, the layer field's). The CPU file's alone (steerFileBytes(st, fp, true): flags 1 | 4, its leg bodies after
 	// the layer bodies); the plain (GPU) file stays as it was (its bodies [0, nPlain), no DP, prioShift without them).
 	// Order only: nothing prunes by it (opts.freeDP === false: none, as before)
-	const nPlain = bodies.length;
+	const nPlain = dp && dp.floor ? nPlain0 : bodies.length;
 	// (only where the budget's cut WAS the coins ("coins: over ..."): the plan's counterexample named them next. Where it
 	// cut another feature first (Fizio1 "team: over 31 layers", its keys kept) the coins are no known next obstacle and
 	// the walk tour, blind to the keys, lost coins there in the product: 48 vs 87 and 32 vs 34 in 2 A/B pairs)
@@ -1801,10 +1985,12 @@ function buildSteer(level, opts) {
 		// replacing the layer field (first 1) dropped its key and switch guidance: Fizio1's keys); opts.freeDP === false:
 		// none, as before)
 		const freeTour = freeOn && opts.tourFirst !== true && planCoinT(B) >= 1;
-		const T = freeTour ? Math.min(nCoins, planCoinT(B)) : Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0));
-		if (T >= 1 && (modelled || opts.tourFirst === true || freeTour) && (nCoins >= TOUR_MIN_COINS || coinsOver || freeTour)) {
+		// (the floor's count past the DP (more than 18 coins, or no DP): the tour over at least it, the larger of both)
+		const floorTour = !freeTour && modelled && opts.tourFirst !== true && floorT > planCoinT(B);
+		const T = freeTour ? Math.min(nCoins, planCoinT(B)) : Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0, floorTour ? floorT : 0));
+		if (T >= 1 && (modelled || opts.tourFirst === true || freeTour) && (nCoins >= TOUR_MIN_COINS || coinsOver || freeTour || floorTour)) {
 			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
-			const R = buildTour(A, level, T, freeTour ? 2 : !modelled, kappa, T0() + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
+			const R = buildTour(A, level, T, freeTour || floorTour ? 2 : !modelled, kappa, T0() + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 			if (R) {
 				steer.tour = R;
 				let s1 = tourFifths(steer, sim0);
@@ -1842,8 +2028,9 @@ function buildSteer(level, opts) {
 		steer.dp = dp;
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}), ...(dp.kind ? { kind: dp.kind } : {}) } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
-		tour: tourInfo, ...(blue ? { blue: blue.info } : {}) };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}), ...(dp.floor ? { floor: true } : {}), ...(dp.kind ? { kind: dp.kind } : {}) } : null,
+		fullT: Math.max(fullCoinT(A), floorT), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		tour: tourInfo, ...(blue ? { blue: blue.info } : {}), ...(floors.length || probeMs >= 1 ? { floors, floorT, probeMs } : {}) };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
