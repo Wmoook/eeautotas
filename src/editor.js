@@ -1258,7 +1258,9 @@ function pastPlanCheck() {
  *  tile's same-kind component is walled in the steer's model (steer.js steerWallsOf, EEAT_STEER_WALLS, the seeds of every
  *  pin so far), the steer is built again in a worker and the CPU search turns to it (`steer <file>`, as the plan past its
  *  count does); at most PIN_MAX times a search. Ordering only: the steer never prunes (RCH3's -1 stays the only one) */
-const PIN_S = 60, PIN_MAX = 6;
+// (b9cw2-cw knobs, unset = 60 s / 6: EEAT_PINREFINE_S the pin clock (s), EEAT_PINREFINE_MAX the refinements a search)
+const pinKnob = (k, d, lo) => { const v = +process.env[k]; return process.env[k] !== undefined && Number.isFinite(v) && v >= lo ? v : d; };
+const PIN_S = pinKnob('EEAT_PINREFINE_S', 60, 5), PIN_MAX = pinKnob('EEAT_PINREFINE_MAX', 6, 1);
 let pinR = null;
 function pinRefineCheck() {
 	if (process.env.EEAT_PINREFINE !== '1' || !cur || !S || !S.running || S.result || S.halted || !cur.files.steerCpu || !cur.distBySteer || cur.pastOn) return;
