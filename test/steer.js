@@ -454,6 +454,12 @@ function sectionD() {
 	const A = SF.analyze(L, {});
 	const CP = SF.chainPlan(A);
 	check('the waves: switch 1 with nothing on, switch 2 with 1 on, the trophy with both (K 2)', !CP.none && CP.K === 2 && JSON.stringify(CP.need) === '[[1],[2]]', JSON.stringify(CP.none || CP.need));
+	check('a sequence (every needed id of the waves needed by the fixpoint)', CP.seq === true);
+	// (one wave is no chain: switch 1 alone before the trophy: CHAIN_MIN_WAVES)
+	const cells1 = cells.filter((c) => !(c[0] === 40 && c[2] === 184) && !(c[0] === 33 && c[2] === 113));
+	const L1 = levelOf(ED.eelvlOf({ name: 'chain1', width: W, height: H, cells: cells1 }));
+	const CP1 = SF.chainPlan(SF.analyze(L1, {})), st1 = SF.buildSteer(L1, { maxLayers: 1 });
+	check('one wave (switch 1 alone): no chain (the layers\'), the CPU file = the plain file', !!CP1.none && /one wave/.test(CP1.none) && !st1.chain && Buffer.compare(SF.steerFileBytes(st1, null, true), SF.steerFileBytes(st1, null)) === 0, JSON.stringify(CP1.none || CP1.need));
 	// (with the budget the layers model switch 1, whose detour their plan meets; switch 2 lies on the way: its door open in
 	// every layer, as the chain's wave 2 has it: the chain raises no value at the start)
 	const full = SF.buildSteer(L), fs0 = new E.EESim(L); fs0.reset();

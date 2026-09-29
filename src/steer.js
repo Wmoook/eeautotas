@@ -1444,6 +1444,8 @@ function tourFifths(st, sim) {
 const CHAIN_KILL = 10, CHAIN_MAX_WAVES = 64, CHAIN_MAX_TILES = 4000;
 // (a sequence: the fixpoint needs at least this share of the waves' ids: the chain over every id of the waves; chainPlan)
 const CHAIN_SEQ_F = 0.5;
+// (the fewest waves a chain has: chainPlan)
+const CHAIN_MIN_WAVES = 2;
 /** the chain walk's passability with the purple ids `on` ON: 0 blocked, 1 open, 2 a killer (passable, priced) */
 function chainPass(A, on) {
 	const P = new Uint8Array(A.N);
@@ -1540,6 +1542,11 @@ function chainPlan(A, deadline) {
 	// way to a wave's switches)
 	const byWave = [], waveOf = [];
 	waves.forEach((ids, w) => { const nd = ids.filter((id) => need.has(id)); if (nd.length) { byWave.push(nd); waveOf.push(w); } });
+	// (one wave is no chain: the chain orders ACROSS waves, the switches that gate the next ones, which the layers cannot
+	// hold; a single set of switches is the layers' / the coin plan's. Measured with one wave (box 3 pairs, W5, findS 300):
+	// Good Egg's id 888 its nearest attempt pinned at a 182-tick attempt in 2 of 2 runs (the base routed once, 264.5 s),
+	// Evolution Revolution's id 55 routed 299.4 vs 217.6 s and none vs none, Booty Return, Moving Ice no route either way)
+	if (byWave.length < CHAIN_MIN_WAVES) return { none: `one wave (${byWave.flat().length} ids): the layers'`, K };
 	return { waves, need: byWave, waveOf, K, tilesOf, seq };
 }
 /** the chain of a level (kappa: the walk's scale) -> {n, nW, id, wave, order, tail, C, legs ((n + 1) x N u16: row n the
