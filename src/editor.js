@@ -2077,7 +2077,7 @@ function useSteer(sf, noGpu) {
 	cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
 	cur.interimOn = false;
 	S.steer = null;
-	if (sf && sf.interim) { useInterim(sf); return; }
+	if (sf && sf.isInterim === true) { useInterim(sf); return; }
 	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field until it is built'); return; }
 	if (sf && sf.over) note(`the steer field ${sf.over}`);
 	if (!steerOk(sf)) return;
@@ -2109,7 +2109,7 @@ function useSteer(sf, noGpu) {
  *  the reach field's by more than a tile and 2% (Christmas Eve: RCH3 392 tiles through a portal staircase that does not
  *  teleport, the one layer 654; before, a one-layer steer was always dropped) */
 function steerOk(sf) {
-	if (!sf || sf.late || sf.interim || !sf.file || !fs.existsSync(sf.file)) return false;
+	if (!sf || sf.late || sf.isInterim === true || !sf.file || !fs.existsSync(sf.file)) return false;
 	if (sf.useful) return true;
 	const r = cur ? cur.reachStart : undefined;
 	return !!sf.single && sf.start !== null && r >= 0 && Math.abs(sf.start - r) > Math.max(1, 0.02 * r);
@@ -2120,8 +2120,8 @@ function steerOk(sf) {
  *  ordered by RCH3, every door open, and pinned at a door or portal false near within seconds); else as before */
 function pickSteer(sf, it) {
 	const itOk = !!it && it.start !== null && !!it.file && fs.existsSync(it.file);
-	if (sf && sf.late) return itOk ? Object.assign({}, it, { interim: true, why: 'late' }) : sf;
-	if (steerOk(sf) && sf.start === null && itOk) return Object.assign({}, it, { interim: true, why: 'nostart', over: sf.over });
+	if (sf && sf.late) return itOk ? Object.assign({}, it, { isInterim: true, why: 'late' }) : sf;
+	if (steerOk(sf) && sf.start === null && itOk) return Object.assign({}, it, { isInterim: true, why: 'nostart', over: sf.over });
 	return sf;
 }
 /** the interim field as the CPU search's order (useSteer's; the GPU tools stay on the reach field, their attempts ranked
