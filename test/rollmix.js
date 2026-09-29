@@ -72,12 +72,15 @@ ok(mb.length === 5 && mb[3].roll === 255 && mb[4].blind === true && mb[4].roll =
 ok(GX.rollMixOf('120:0.95:2:b')[0].w === 2 && GX.rollMixOf('120:0.95:2:b')[0].blind === true, 'a blind part with a weight');
 let bad = false; try { GX.rollMixOf('120:b'); } catch (e) { bad = true; }
 ok(bad, 'a part with no keep is refused');
-ok(Math.abs(GX.mixReward({ roomsG: 2, rooms: 5, nearer: 1, fresh: 4000 }) - (2 + 0.9 + 1 + 2)) < 1e-9, 'the reward: rooms that open territory x1, other rooms x0.3, nearer x1, new cells / 2000');
+ok(Math.abs(GX.mixReward({ roomsG: 2, rooms: 5, nearer: 100, fresh: 400000 }) - (2 + 0.9 + 1 + 4)) < 1e-9, 'the reward (v2 defaults): rooms that open territory x1, other rooms x0.3, nearer x0.01, new cells / 100000');
+ok(Math.abs(GX.mixReward({ roomsG: 2, rooms: 5, nearer: 1, fresh: 4000 }, { near: 1, fresh: 2000 }) - (2 + 0.9 + 1 + 2)) < 1e-9, 'the reward (v1: --mixNear=1 --mixFresh=2000)');
+ok(mb.map((c) => c.w).join() === '0.91,1.45,0.84,0.71,0.92', 'MIX_BANDIT carries the data prior (tools/mixdata.js): 120:0.95 x1.45');
 // (flag on, synthetic yields: class 3 yields 4x per GPU second, the others 1x, noisy; batch costs differ)
 const sim = (yieldOf, B, seed) => {
 	let x = seed >>> 0;
 	const rnd = () => { x = (Math.imul(x, 1664525) + 1013904223) >>> 0; return x / 4294967296; };
-	const cls = mb, st3 = cls.map(() => ({ batches: 0, ms: 0 })), b = GX.mixBanditNew(cls.length, { half: 20, c: 0.5, floor: 0.5 });
+	// (the classes without the prior: the bandit's own behaviour)
+	const cls = mb.map((c) => Object.assign({}, c, { w: 1 })), st3 = cls.map(() => ({ batches: 0, ms: 0 })), b = GX.mixBanditNew(cls.length, { half: 20, c: 0.5, floor: 0.5 });
 	const costs = [40, 120, 240, 255, 120], trace = [];
 	let minRecent = 1;
 	for (let t = 0; t < B; t++) {
@@ -118,6 +121,6 @@ ok(Math.abs(GX.mixReward({ roomsG: 2, rooms: 5, nearer: 100, fresh: 50000 }, { r
 	const tt = st5.reduce((s, q) => s + q.ms, 0), sh = st5.map((q) => q.ms / tt);
 	ok(sh[1] === Math.max(...sh) && sh.every((v) => v >= 0.08), `a prior weight 1.5 on 120:0.95 with equal yields: it leads, the floor holds (${sh.map((v) => v.toFixed(3)).join(' / ')})`);
 }
-ok(GX.parseArgs(['x.eelvl', '--gpu=1', '--mixBandit=1']).mixNear === 1 && GX.parseArgs(['x.eelvl', '--mixNear=0.01']).mixNear === 0.01, 'the reward weights are options');
+ok(GX.parseArgs(['x.eelvl', '--gpu=1', '--mixBandit=1']).mixNear === 0.01 && GX.parseArgs(['x.eelvl', '--mixNear=1']).mixNear === 1 && GX.parseArgs(['x.eelvl', '--mixFresh=2000']).mixFresh === 2000, 'the reward weights are options (defaults v2)');
 console.log(`${n - fails} / ${n} passed`);
 process.exitCode = fails ? 1 : 0;

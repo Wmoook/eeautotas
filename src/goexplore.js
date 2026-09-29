@@ -165,7 +165,7 @@
 // ROLL_MIX): each batch's run length and keep from a class of long sticky runs or short ones, a node keeps its class.
 //   [--gpu=1] [--batch=4096] [--rollMix=40:0.85,120:0.95,240:0.97 (the default unless --roll / --keep is given; 0 = off)]
 //   [--mixBandit=0 (1 / EEAT_MIXBANDIT=1: the roll mix's classes by their own yield, MIX_BANDIT) [--mixHalf=20] [--mixC=0.5] [--mixFloor=0.5]
-//    [--mixRoom=0.3] [--mixNear=1] [--mixFresh=2000] (a class's --rollMix weight: its mean x that, a data prior)]
+//    [--mixRoom=0.3] [--mixNear=0.01] [--mixFresh=100000] (a class's --rollMix weight: its mean x that, a data prior)]
 //   [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
 //   default: an eighth of the machine's memory, at most half of the free memory>] [--tool=<eegpu>] [--bin=<level blob>]
 //   [--reach=<RCH3 file>]
@@ -334,7 +334,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
-	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 1, mixFresh: 2000,
+	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
@@ -435,11 +435,16 @@ function mixPick(st, classes) {
 // half-life of --mixHalf s of GPU time; each class once first (in order), and every class keeps at least --mixFloor / K of
 // the recent GPU time (nothing starves). Order only: which runs the next batch plays, no prune (the reach field's -1
 // stays the only one). The done event's mix block has each class's share of the GPU ms and its reward; a 'mixBandit'
-// event every MB_EVENT_S s.
-const MIX_BANDIT = '40:0.85,120:0.95,240:0.97,255:0.985,120:0.95:b';
+// event every MB_EVENT_S s. v1 (the first A/B: nearer x1, new cells / 2000, no prior; `--mixNear=1 --mixFresh=2000
+// --rollMix=40:0.85,120:0.95,240:0.97,255:0.985,120:0.95:b`): the nearer steps (0.05 tiles each) and new cells, which
+// the cheap 40-tick class makes fastest per kernel second, gave it 37-55% of the GPU and 120:0.95 10-16%, below main's
+// third: 6 vs 6 target routes. v2 (these defaults): rooms first (nearer x0.01, new cells / 100000) and the data prior
+// (tools/mixdata.js: the classes' routed-run rates 0.149 / 0.382 / 0.128 / 0.091 / 0.154, the square roots of their
+// ratios to the mean as the weights).
+const MIX_BANDIT = '40:0.85:0.91,120:0.95:1.45,240:0.97:0.84,255:0.985:0.71,120:0.95:0.92:b';
 // (the weights: --mixRoom (MB_ROOM), --mixNear (MB_NEAR), --mixFresh (new cells a unit: 1 / MB_FRESH); a class's weight in
 // --rollMix (w, 1 by default) multiplies its mean in the index: a data prior (tools/mixdata.js))
-const MB_ROOM_G = 1, MB_ROOM = 0.3, MB_NEAR = 1, MB_FRESH = 1 / 2000;
+const MB_ROOM_G = 1, MB_ROOM = 0.3, MB_NEAR = 0.01, MB_FRESH = 1 / 100000;
 // (the UCB bonus: --mixC x the best class's mean x sqrt(ln(1 + T / MB_TAU) / (T_j / MB_TAU)), T the classes' discounted
 // kernel seconds; a class's mean over at least MB_TMIN s)
 const MB_TAU = 1, MB_TMIN = 0.05, MB_EVENT_S = 20;
