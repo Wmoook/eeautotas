@@ -324,8 +324,8 @@ struct Gpu {
 	}
 	std::string json() const {
 		char b[512];
-		snprintf(b, sizeof b, "{\"name\":%s,\"sms\":%d,\"clockMHz\":%d,\"cc\":\"%d.%d\",\"memMB\":%zu,\"driver\":%d}",
-			jsonStr(d.name).c_str(), d.sms, d.clockMHz, d.ccMajor, d.ccMinor, d.mem >> 20, d.driver);
+		snprintf(b, sizeof b, "{\"name\":%s,\"sms\":%d,\"clockMHz\":%d,\"cc\":\"%d.%d\",\"memMB\":%zu,\"totalMB\":%zu,\"freeMB\":%zu,\"driver\":%d}",
+			jsonStr(d.name).c_str(), d.sms, d.clockMHz, d.ccMajor, d.ccMinor, d.mem >> 20, d.totalMem >> 20, cu::freeNow() >> 20, d.driver);
 		return b;
 	}
 };
