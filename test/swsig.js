@@ -5,7 +5,9 @@
 // never pruned. Night 3 cycle 6: purple switch sets made 169-334 rooms on the switch-puzzle levels (Soul Quest 273 of 275).
 //   base       roomOf base: a switch on changes the key, not the base; a coin does
 //   walk       roomFields enter's signature: switch 1 opens a door in a sealed pocket (the walk from the corridor the
-//              same: the same signature), switch 2 the door before the trophy (another signature)
+//              same: the same signature), switch 2 the door before the trophy (another signature); a switch's own gate
+//              in the walk shut (its tile alone: door and gate tiles are left out: the same), one that shuts a tile off
+//              behind it (another)
 //   groups     domIndex repeat: a repeat group leaves the list for dlist and comes back; a dominated one stays dominated
 //   search     goexplore.js on the two-switch corridor: routes with --swsig=1 and 0 (replayed), repeats counted only with
 //              it; a level without switches: the same search either way (1 worker, a tick budget)
@@ -31,8 +33,8 @@ function check(name, ok, detail) {
 	console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail !== undefined ? ': ' + detail : ''}`);
 }
 const section = (s) => console.log(`\n== ${s}`);
-// # wall, . air, S spawn, T trophy, 1 / 2 purple switches, e / f purple doors 1 / 2, g a purple gate 1, o gold coin, d coin door (1)
-const ID = { '#': [9], S: [255], T: [121], o: [100], d: [43, 1], 1: [113, 1], 2: [113, 2], e: [184, 1], f: [184, 2], g: [185, 1] };
+// # wall, . air, S spawn, T trophy, 1 / 2 purple switches, e / f purple doors 1 / 2, g / h purple gates 1 / 3, o gold coin, d coin door (1)
+const ID = { '#': [9], S: [255], T: [121], o: [100], d: [43, 1], 1: [113, 1], 2: [113, 2], 3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 1], h: [185, 3] };
 function levelOf(name, rows) {
 	const cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') { if (!ID[ch]) throw new Error(`legend ${ch}`); cells.push([x, y, ...ID[ch]]); } }));
@@ -94,6 +96,20 @@ function sectionWalk() {
 	check('switch 2 on too (the trophy\'s door): another signature, gain', f2.sig !== f0.sig && f2.graw > 0, `${f2.sig}, graw ${f2.graw}`);
 	const f3 = F.enter(sim);
 	check('the same passable set again (a cached walk): its signature', f3.cached && f3.sig === f2.sig);
+	// (v2: a switch's own gate in the walk: shut, its tile leaves the walk, and that alone is no other territory (Soul
+	// Quest: each of its 18 switches shuts a gate the ball stands by); a gate that shuts a tile off behind it is)
+	const sigs = (rows) => {
+		const A = levelOf('alc', rows).level, FA = GX.roomFields(A, 1 << 20, { useful: true });
+		const s = new E.EESim(A); s.reset();
+		s.px = 2 * 16; s.py = 16;
+		const a0 = FA.enter(s);
+		touch(s, 3, 1); s.px = 5 * 16; s.py = 16; s.speed_x = 0;
+		return [a0.sig, FA.enter(s).sig];
+	};
+	const one = sigs(['##########', '#S.3....T#', '####h#####', '##########']);
+	check('a switch\'s own gate in the walk shut: the same signature (door and gate tiles are left out)', one[0] === one[1], one.join(' / '));
+	const deep = sigs(['##########', '#S.3....T#', '####h#####', '####.#####', '##########']);
+	check('a gate that shuts a tile off behind it: another signature', deep[0] !== deep[1], deep.join(' / '));
 }
 
 function sectionGroups() {
