@@ -92,6 +92,9 @@ function analyze(level, opts) {
 		const id = fg[i];
 		const hr = (fl(id) & F_HALF) ? lk[i] : -1;
 		let g = GATE.get(id);
+		// (opts.timeOpen: the time doors / gates passable (a wait of up to 5 s there): buildSteer's fallback when the field
+		// with them shut has no value at the start)
+		if (g && opts && opts.timeOpen && (id === 156 || id === 157)) g = ['open', 1];
 		if (g && g[0] === 'coins' && lk[i] > goldCoins) g = ['static', g[1] === 1 ? 0 : 1];
 		if (g) {
 			const [f, pol] = g;
@@ -202,7 +205,8 @@ function testGate(k, pol, param, v) {
 const owBlocked = (ow, dx, dy) => (ow === 1 ? dy === 1 : ow === 3 ? dy === -1 : ow === 2 ? dx === -1 : ow === 0 ? dx === 1 : false);
 
 // ------------------------------------------------------------------ the layered model for a set of modelled features
-function makeModel(A, modeled) {
+function makeModel(A, modeled, mopts) {
+	const shut = !!(mopts && mopts.shut);
 	const feats = [...modeled].map((k) => A.feats.get(k)).filter((f) => f && !f.static);
 	const radix = [], stride = [];
 	let S = 1;
@@ -213,7 +217,8 @@ function makeModel(A, modeled) {
 	let s0 = 0;
 	feats.forEach((f, n) => { s0 += f.init * stride[n]; });
 	const allF = A.feats;
-	/** a gate's state in layer s: modelled features by the layer's value; statics exact; the others open */
+	/** a gate's state in layer s: modelled features by the layer's value; statics exact; the others open (mopts.shut: as
+	 *  they stand at the start: interimSteer) */
 	function gateOpen(i, s) {
 		const k = A.gateFeat[i];
 		if (k === 'open') return true;
@@ -222,7 +227,7 @@ function makeModel(A, modeled) {
 		const n = idx.get(k);
 		let v;
 		if (n !== undefined) v = f.values[valOf(s, n)];
-		else if (f && f.static) v = f.values[f.init];
+		else if (f && (f.static || shut)) v = f.values[f.init];
 		else return true;
 		return testGate(k, A.gatePol[i], A.gateParam[i], v);
 	}
@@ -1074,7 +1079,7 @@ function buildSteer(level, opts) {
 		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: t0 + maxMs / 2 });
 		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
-		PH = buildPhysics(B, { staticCoins: true, debug: true });
+		PH = buildPhysics(B, { staticCoins: !opts.coinGoals, debug: true });
 		const sim = new E.EESim(level); sim.reset();
 		const pl = layeredPlan(PH, sim);
 		const path = [];
@@ -1134,7 +1139,65 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
+		fallback: opts.fallback || null };
+	// NO VALUE AT THE START (the doctor's g2all: 46 of 203 campaign levels, 36 of them failing; the search then ordered by
+	// RCH3, every door open, and pinned at a door or a portal false near): the layers again with the coins as goals (a
+	// coin tile changes the count's layer, so each layer's field leads to the coins, and the value drops as they are
+	// taken: backtracking to a coin door is progress; 34 of the 46), then with the time doors passable too (6 more). Only
+	// while the build's time lasts; ordering only (nothing prunes by the steer field). opts.noFallback: none.
+	if (!Number.isFinite(steer.info.start) && !opts.noFallback && !opts.fallback && Date.now() - t0 < maxMs) {
+		const hasCoins = A.feats.has('coins') || A.feats.has('bcoins');
+		let hasTime = false;
+		for (let i = 0; i < N && !hasTime; i++) if (level.fg[i] === 156 || level.fg[i] === 157) hasTime = true;
+		const tries = [];
+		if (hasCoins) tries.push({ coinGoals: true, fallback: 'coins' });
+		if (hasTime) tries.push({ coinGoals: hasCoins, timeOpen: true, fallback: hasCoins ? 'coins+time' : 'time' });
+		for (const t of tries) {
+			const left = maxMs - (Date.now() - t0);
+			if (left < 1000) break;
+			let st2 = null;
+			try { st2 = buildSteer(level, Object.assign({}, opts, t, { maxMs: Math.max(5000, left) })); } catch (e) { st2 = null; }
+			if (st2 && Number.isFinite(st2.info.start)) { st2.info.ms = Date.now() - t0; return st2; }
+		}
+	}
+	return steer;
+}
+/**
+ * THE INTERIM FIELD (editor.js: the CPU search's order from its launch until the steer field is built, and the fallback
+ * when the built one has no value at the start): one layer, every gate as it stands at the start (a key, coin, switch
+ * or team door the start state shuts is a wall; RCH3 opens them all), forced portals and one-way entries (as every steer
+ * layer); the goal is the trophy, or, when the trophy has no value from the start (it is behind a gate), every
+ * collectible and trigger the ball reaches with the gates as they stand (coins, keys, switches, team and protection
+ * tiles, the crown): a multi-source field toward them. One reach field: built in about the time of RCH3's. Ordering only.
+ * -> a steer (S 1, no features; info {aim: 'trophy' | 'collectibles' | null, start (tiles, NaN: none), goals, ms})
+ */
+const INTERIM_KINDS = new Set(['key', 'psw', 'pswR', 'osw', 'oswR', 'team', 'prot', 'coins', 'bcoins', 'crown']);
+function interimSteer(level) {
+	const t0 = Date.now();
+	const A = analyze(level, {});
+	const M = makeModel(A, new Set(), { shut: true });
+	const { lv } = layerLevel(A, M, 0, { staticCoins: true });
+	const rfOpts = { oneWayEntry: true, portalForced: true };
+	const sim = new E.EESim(level); sim.reset();
+	const N = A.N;
+	const goal = new Uint8Array(N);
+	let f = RF.reachField(lv, Object.assign({ goals: A.trophies.map((t) => ({ tile: t, cost: 0 })) }, rfOpts)), aim = 'trophy', nGoals = A.trophies.length;
+	if (!(RF.costAt(f, sim) >= 0)) {
+		aim = null;
+		// (the trophy behind a gate: toward what opens gates. A collectible's own tile is a goal (the lookup there: 0), so
+		// the ball on one is at the field's floor; the steer field, when it arrives, knows which ones count)
+		const g2 = [];
+		for (const [t, kind] of A.special) if (INTERIM_KINDS.has(kind)) g2.push({ tile: t, cost: 0 });
+		if (g2.length) {
+			const f2 = RF.reachField(lv, Object.assign({ goals: g2 }, rfOpts));
+			if (RF.costAt(f2, sim) >= 0) { f = f2; aim = 'collectibles'; nGoals = g2.length; }
+		}
+	}
+	const steer = { version: VERSION, W: A.W, H: A.H, N, feats: [], team: [], S: 1, layerBody: Int32Array.of(0), bodies: [stripField(f)], goals: [goal], dp: null, prioShift: 0 };
+	steer.prioShift = prioShiftOf(steer);
+	const start = aim ? steerAt(steer, sim) : NaN;
+	steer.info = { interim: true, aim, goals: nGoals, features: [], layers: 1, bodies: 1, dp: null, start, ms: Date.now() - t0, over: null };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1372,7 +1435,7 @@ function readSteerFile(buf) {
 	return { version: ver, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, interimSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)

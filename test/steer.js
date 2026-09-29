@@ -9,6 +9,11 @@
 //   B agree    the JS lookup and the native tool's (eegpu steertest: the host, and with --gpu the GPU) along random input
 //              runs in the rooms and, with --jobs=<dir> (default src/jobs), along the big jobs' best runs: the same fifths
 //              and the beam's score to the bit (skipped without a native tool that reads RCH4)
+//   D interim  the interim field (interimSteer: one layer, the gates as they stand at the start, forced portals): the
+//              trophy behind a shut key / coin / switch door -> a field toward the collectibles, with a value at the
+//              start; an open room -> toward the trophy (the reach field's cost); and buildSteer's fallback: a 20-coin
+//              door (no coin DP past 18) has no value at the start with the coins static, the layers with the coins as
+//              goals give one, and it drops as the coins are taken
 //   C prune    the native explore with a garbage steer field (random costs) still finds the key room's route: the steer
 //              field only orders (only the reach field's -1 rules states out); the CPU search (goexplore.js --steer)
 //              finds it too, and one worker with a tick budget is reproducible
@@ -40,8 +45,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-steer-'));
 process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* gone */ } });
 
 // ASCII rooms: # wall, . air, S spawn, T trophy, k red key, d red door, $ coin, c coin door (2 coins), s purple switch 1,
-// g purple switch door 1
-const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1] };
+// g purple switch door 1, C coin door (20 coins: over the coin DP's 18)
+const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1], C: [43, 20] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -268,7 +273,52 @@ function sectionC() {
 	check('... one worker with a tick budget is reproducible', !!g1.route && !!g2.route && g1.route.inputs === g2.route.inputs && g1.route.simTicks === g2.route.simTicks);
 }
 
+function sectionD() {
+	section('D the interim field and the no-start-value fallback');
+	for (const [name, r] of Object.entries(ROOMS)) {
+		const L = levelOf(r.buf);
+		const it = SF.interimSteer(L);
+		const sim = new E.EESim(L); sim.reset();
+		const v = SF.steerAt(it, sim), r0 = R.costAt(R.reachField(L), sim);
+		// (the key / switch / coins 15-17 tiles left of the start; the trophy 18 right behind the shut door)
+		check(`${name}: the interim field leads to the collectibles (aim ${it.info.aim}, ${v} tiles at the start; reach ${r0})`, it.info.aim === 'collectibles' && v >= 10 && v <= 22, `${it.info.aim} ${v}`);
+		const rd = SF.readSteerFile(SF.steerFileBytes(it, null));
+		check(`${name}: the interim's RCH4 round trip`, SF.steerFifths(rd, sim) === SF.steerFifths(it, sim));
+	}
+	{
+		// an open room (no door): toward the trophy, the reach field's cost within a tile
+		const w = 30, f = [...'.'.repeat(w - 2)]; f[3] = 'S'; f[w - 5] = 'T';
+		const L = levelOf(ascii([wall(w), row('.'.repeat(w - 2)), row('.'.repeat(w - 2)), row(f.join('')), wall(w)]).buf);
+		const it = SF.interimSteer(L);
+		const sim = new E.EESim(L); sim.reset();
+		const v = SF.steerAt(it, sim), r0 = R.costAt(R.reachField(L), sim);
+		check(`open room: the interim aims at the trophy (${v} vs reach ${r0})`, it.info.aim === 'trophy' && Math.abs(v - r0) <= 1, `${it.info.aim} ${v}`);
+	}
+	{
+		// 20 coins left of the start, a 20-coin door right: the coin DP stops at 18, the static-coin layers have no value
+		const w = 60, mid = '.'.repeat(w - 2), floor = [...mid], top = [...mid];
+		for (let x = 1; x <= 20; x++) floor[x] = '$';
+		floor[28] = 'S'; floor[w - 6] = 'C'; top[w - 6] = 'C'; floor[w - 4] = 'T';
+		const t = top.join('');
+		const L = levelOf(ascii([wall(w), row(t), row(t), row(t), row(t), row(floor.join('')), wall(w)]).buf);
+		const sim = new E.EESim(L); sim.reset();
+		const st0 = SF.buildSteer(L, { noFallback: true });
+		check('20-coin door: without the fallback no value at the start', !Number.isFinite(st0.info.start), `${st0.info.start}`);
+		const st = SF.buildSteer(L);
+		const v0 = SF.steerAt(st, sim);
+		check(`20-coin door: the fallback (coins as goals) has a value at the start (${st.info.fallback}, ${v0})`, st.info.fallback === 'coins' && Number.isFinite(v0), `${st.info.fallback} ${v0}`);
+		sim.coins = 10;
+		const v10 = SF.steerAt(st, sim);
+		sim.coins = 20;
+		const v20 = SF.steerAt(st, sim);
+		check(`20-coin door: the value drops as the coins are taken (0: ${v0}, 10: ${v10}, 20: ${v20})`, v10 < v0 && v20 < v10, `${v0} ${v10} ${v20}`);
+		const it = SF.interimSteer(L);
+		check(`20-coin door: the interim field leads to the coins (${it.info.aim})`, it.info.aim === 'collectibles' && Number.isFinite(it.info.start));
+	}
+}
+
 if (want('A')) sectionA();
+if (want('D')) sectionD();
 if (want('B')) sectionB();
 if (want('C')) sectionC();
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -2020,8 +2020,14 @@ function start(b, gpu, test) {
 	// (the steer field next to it: its own worker; b.steer === false or test.steer === false: none)
 	const wantSteer = b.steer !== false && !(test && test.steer === false);
 	const steerWait = test && test.steerWaitMs >= 0 ? test.steerWaitMs : +process.env.EEAT_STEER_WAIT_MS >= 0 && process.env.EEAT_STEER_WAIT_MS !== '' ? +process.env.EEAT_STEER_WAIT_MS : STEER_WAIT_MS;
-	const steerBuild = wantSteer ? steerInfo(buf, levelHash) : null;
-	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerBuild, new Promise((res) => { const t = setTimeout(() => res({ late: true }), steerWait); if (t.unref) t.unref(); })]);
+	// (the interim field (steer.js interimSteer: the gates as they stand at the start, forced portals; toward the trophy
+	// or the collectibles): the CPU search's order while the steer field builds, and when it has no value at the start
+	// (pickSteer). b.interim === false, test.interim === false or EEAT_INTERIM=0: none, the reach field's order as before)
+	const wantInterim = wantSteer && b.interim !== false && !(test && test.interim === false) && process.env.EEAT_INTERIM !== '0';
+	const steerBuild = wantSteer ? steerInfo(buf, levelHash, wantInterim) : null;
+	const steerTimeout = new Promise((res) => { const t = setTimeout(() => res({ late: true }), steerWait); if (t.unref) t.unref(); });
+	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerBuild, steerTimeout]);
+	const interimP = wantInterim && steerBuild && steerBuild.interim ? Promise.race([steerBuild.interim, steerTimeout.then(() => null)]) : Promise.resolve(null);
 	const reachP = reachInfo(buf, levelHash, deathMoves), toolP = noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]);
 	const gen = ++searchGen;
 	// (the early start: the strategies that never read the steer field (EARLY_KEYS: the GPU random runs, the path skips)
@@ -2029,12 +2035,13 @@ function start(b, gpu, test) {
 	// is over (launchDeferred). b.earlyStart === false, test.earlyStart === false or EEAT_EARLY=0: every strategy after the
 	// steer wait, as before)
 	const early = wantSteer && which.some((k) => EARLY_KEYS.has(k)) && b.earlyStart !== false && !(test && test.earlyStart === false) && process.env.EEAT_EARLY !== '0';
-	const ready = early ? Promise.all([reachP, toolP]) : Promise.all([reachP, toolP, steerP]);
-	ready.then(([rf, toolWhy, sf]) => {
+	const ready = early ? Promise.all([reachP, toolP]) : Promise.all([reachP, toolP, steerP, interimP]);
+	ready.then(([rf, toolWhy, sf, it]) => {
 		if (gen !== searchGen) return;
 		const rf2 = test && test.reach ? Object.assign({}, rf, test.reach) : rf;
+		if (cur) cur.reachStart = rf2.startCost;
 		if (!early) {
-			useSteer(sf, noGpu || toolWhy);
+			useSteer(pickSteer(sf, it), noGpu || toolWhy);
 			launchAll(rf2, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide);
 			// (a late field: taken when its build ends, after the launches)
 			if (sf && sf.late) steerBuild.then((sf2) => lateSteer(gen, sf2));
@@ -2042,9 +2049,9 @@ function start(b, gpu, test) {
 		}
 		if (cur) { cur.early = []; cur.deferred = []; }
 		launchAll(rf2, noGpu || toolWhy, !!toolWhy, which, cpu, ins, guide, true);
-		steerP.then((sf1) => {
+		Promise.all([steerP, interimP]).then(([sf1, it]) => {
 			if (gen !== searchGen || !cur) return;
-			useSteer(sf1, noGpu || toolWhy);
+			useSteer(pickSteer(sf1, it), noGpu || toolWhy);
 			// (as launchAll does after it: the check of a level the reach field calls impossible runs without the steer field)
 			if (cur.opts.noWayUp) { cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.distBySteer = false; }
 			launchDeferred();
@@ -2068,10 +2075,12 @@ function start(b, gpu, test) {
 function useSteer(sf, noGpu) {
 	if (!cur) return;
 	cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
+	cur.interimOn = false;
 	S.steer = null;
+	if (sf && sf.interim) { useInterim(sf); return; }
 	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field until it is built'); return; }
 	if (sf && sf.over) note(`the steer field ${sf.over}`);
-	if (!sf || !sf.useful || !fs.existsSync(sf.file)) return;
+	if (!steerOk(sf)) return;
 	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
 	// (STEER_GPU_SHARE in all: two copies (every move, the relay), four with the beams')
 	const copies = mb * 4 <= gpuMB * STEER_GPU_SHARE ? 4 : mb * 2 <= gpuMB * STEER_GPU_SHARE ? 2 : 0;
@@ -2095,6 +2104,38 @@ function useSteer(sf, noGpu) {
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
 }
+/** a steer field the search can order by (steerInfo's answer): it models something the reach field does not (2+
+ *  layers or the coin DP), or it is one layer (forced portals, one-way entries) whose value at the start differs from
+ *  the reach field's by more than a tile and 2% (Christmas Eve: RCH3 392 tiles through a portal staircase that does not
+ *  teleport, the one layer 654; before, a one-layer steer was always dropped) */
+function steerOk(sf) {
+	if (!sf || sf.late || sf.interim || !sf.file || !fs.existsSync(sf.file)) return false;
+	if (sf.useful) return true;
+	const r = cur ? cur.reachStart : undefined;
+	return !!sf.single && sf.start !== null && r >= 0 && Math.abs(sf.start - r) > Math.max(1, 0.02 * r);
+}
+/** the field the search orders by (sf: steerInfo's answer, or {late} past the steer wait; it: the interim field or null):
+ *  the steer field when it can order and has a value at the start; the interim one while the steer field builds (late)
+ *  or when the steer field has no value at the start (the doctor's g2all: 46 of 203 campaign levels; the search then
+ *  ordered by RCH3, every door open, and pinned at a door or portal false near within seconds); else as before */
+function pickSteer(sf, it) {
+	const itOk = !!it && it.start !== null && !!it.file && fs.existsSync(it.file);
+	if (sf && sf.late) return itOk ? Object.assign({}, it, { interim: true, why: 'late' }) : sf;
+	if (steerOk(sf) && sf.start === null && itOk) return Object.assign({}, it, { interim: true, why: 'nostart', over: sf.over });
+	return sf;
+}
+/** the interim field as the CPU search's order (useSteer's; the GPU tools stay on the reach field, their attempts ranked
+ *  behind: steerless); lateSteer swaps the steer field in when it is built (goexplore.js stdin "steerx") */
+function useInterim(it) {
+	cur.files.steerCpu = it.file;
+	cur.files.steerDist = true;
+	cur.distBySteer = true;
+	cur.interimOn = true;
+	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
+	S.steer = { layers: 1, bodies: 1, features: [], dp: null, mb: Math.round(it.bytes / 1048576 * 10) / 10, start: it.start, ms: it.ms, gpu: false, beams: false, cpu: true, interim: it.aim };
+	note(`the interim field (one layer: the gates as they stand at the start, forced portals; toward ${it.aim === 'trophy' ? 'the trophy' : `the ${it.goals} collectibles and triggers (the trophy is behind a gate)`}; ${Math.round(it.start * 10) / 10} tiles at the start) orders the CPU search ` +
+		(it.why === 'late' ? 'until the steer field is built' : `: the steer field has no value at the start${it.over ? ` (it ${it.over})` : ''}`));
+}
 /** a steer field built after the search started (start()'s race: sf {late}): gen, the search it was built for; sf2
  *  steerInfo's answer. From now on the CPU search's head A orders by it too (goexplore.js stdin "steerd <file>"; a CPU
  *  search launched later gets --steer) and the wall breaker's coin plan (breakGate) aims at its gates. The GPU tools and
@@ -2103,12 +2144,16 @@ function useSteer(sf, noGpu) {
  *  best too, and the rooms' attempts kept so far rank behind the new ones (STEER_MISS + their distance). Before, every
  *  distance stayed the reach field's for the whole search (Forgotten Helix's 614 MB field arrives ~30 s in). */
 function lateSteer(gen, sf2) {
-	if (gen !== searchGen || !cur || !S.running || S.halted || cur.opts.noWayUp || cur.files.steerCpu) return;
+	if (gen !== searchGen || !cur || !S.running || S.halted || cur.opts.noWayUp || (cur.files.steerCpu && !cur.interimOn)) return;
 	const sec = S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null;
-	if (!sf2 || !sf2.useful || !fs.existsSync(sf2.file)) {
-		note(`the steer field was built ${sec !== null ? `${sec} s into the search` : 'late'}: ${sf2 ? 'it models nothing the reach field does not' : 'it could not be built'}`);
+	// (the interim field in use: swapped out only for a steer field with a value at the start; the goexplore processes
+	// that read it get "steerx")
+	const swap = !!cur.interimOn;
+	if (!steerOk(sf2) || (swap && sf2.start === null)) {
+		note(`the steer field was built ${sec !== null ? `${sec} s into the search` : 'late'}: ${!sf2 ? 'it could not be built' : steerOk(sf2) ? 'it has no value at the start' : 'it models nothing the reach field does not'}${swap ? ': the interim field goes on ordering the CPU search' : ''}`);
 		return;
 	}
+	cur.interimOn = false;
 	if (sf2.over) note(`the steer field ${sf2.over}`);
 	cur.files.steerCpu = sf2.file;
 	// (a CPU search launched from now on reports the steer field's distances from its start)
@@ -2133,7 +2178,7 @@ function lateSteer(gen, sf2) {
 		// (the CPU searches with distances (the one search, the escape): "steerd"; their closest attempts count from its switch
 		// on (sgMin): one sent before it is the reach field's)
 		const dist = q.key === 'goexplore' || q.key === 'escape';
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${sf2.file}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? (swap ? 'steerx' : 'steerd') : 'steer'} ${sf2.file}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
 	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
 		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
@@ -2369,23 +2414,47 @@ const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${ste
  *  (steerBase(hash).bin). Built in a worker thread next to the reach field's (2-8 s on a 200 x 200 level of gates and
  *  coins), cached like it (the newest 4). null when it cannot be built (the search then orders by the reach field). */
 const steerBuilds = new Map();
-function steerInfo(buf, hash) {
-	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
+const interimFileOf = (file) => file.replace(/\.bin$/, '_int.bin');
+function steerInfo(buf, hash, wantInterim) {
+	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`, ifile = interimFileOf(file);
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!(cached.useful || cached.single) || fs.existsSync(file)) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) {
+		const cp = Promise.resolve(Object.assign(cached, { file }));
+		cp.interim = Promise.resolve(cached.interim && fs.existsSync(ifile) ? Object.assign({}, cached.interim, { file: ifile }) : null);
+		return cp;
+	}
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
+	let interimDone = null;
+	const interimP = new Promise((r) => { interimDone = r; });
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
 		const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
 			const E = require(d.mods.eesim), EL = require(d.mods.eelvl), SF = require(d.mods.steer), G = require(d.mods.gpu);
 			const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
-			const st = SF.buildSteer(L);
-			const useful = st.S > 1 || !!st.dp;
 			let lfp = null, bytes = 0;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
-			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
-			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
+			// (the interim field first: one reach field, answered before the steer field's build (steerInfo's p.interim))
+			let interim = null;
+			if (d.interim) {
+				try {
+					const it = SF.interimSteer(L);
+					if (Number.isFinite(it.info.start)) {
+						const b = SF.steerFileBytes(it, lfp);
+						fs.writeFileSync(d.interim + '.tmp', b); fs.renameSync(d.interim + '.tmp', d.interim);
+						interim = { aim: it.info.aim, goals: it.info.goals, start: it.info.start, ms: it.info.ms, bytes: b.length };
+					}
+				} catch (e) { interim = null; }
+				parentPort.postMessage({ interim: interim || { none: true } });
+			}
+			const st = SF.buildSteer(L);
+			const useful = st.S > 1 || !!st.dp;
+			// (one layer with a value at the start: the reach field's physics with forced portals and one-way entries; the
+			// search takes it when its start value differs from the reach field's (steerOk): Christmas Eve's portal staircase)
+			const single = !useful && Number.isFinite(st.info.start);
+			if (useful || single) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
+			parentPort.postMessage({ v: d.v, fp: d.fp, useful, single, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
+				fallback: st.info.fallback || null, interim,
 				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
 			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
@@ -2401,10 +2470,11 @@ function steerInfo(buf, hash) {
 				} catch (e) { past = null; }
 				parentPort.postMessage({ past: past || { none: true } });
 			}`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, interim: wantInterim ? ifile : '', past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
 		let main = null;
 		w.on('message', (r) => {
+			if (r && r.interim && r.v === undefined) { interimDone(r.interim.none ? null : Object.assign({}, r.interim, { file: ifile })); return; }
 			if (r && r.past) {
 				// (the plan past its count, built after the field: into the cache's record and to the running search)
 				if (!main) return;
@@ -2415,12 +2485,14 @@ function steerInfo(buf, hash) {
 				return;
 			}
 			main = r;
+			interimDone(null);
 			try { fs.mkdirSync(dir(), { recursive: true }); C.writeJSON(meta, r); pruneSteerCache(); } catch (e) { /* read-only data folder */ }
 			resolve(Object.assign(r, { file }));
 		});
-		w.once('error', () => resolve(null));
-		w.once('exit', (code) => { if (code) resolve(null); });
+		w.once('error', () => { interimDone(null); resolve(null); });
+		w.once('exit', (code) => { interimDone(null); if (code) resolve(null); });
 	});
+	p.interim = interimP;
 	steerBuilds.set(hash, p);
 	const done = () => { steerBuilds.delete(hash); };
 	p.then(done, done);
@@ -2431,7 +2503,7 @@ function pruneSteerCache() {
 	const d = dir(), fp = steerFp();
 	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_s\d+_[0-9a-f]+\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_s${SF.VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
-	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin'), f.replace(/\.json$/, '_int.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {

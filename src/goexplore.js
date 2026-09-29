@@ -2946,12 +2946,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	 *  that field with the coin DP's value first (dpFirst: its layer fields count a coin at every touch, so they reach the
 	 *  trophy from any coin tile; the DP counts distinct coins); the cells holding a snapshot are scored at once, the
 	 *  others when next picked; the closest state starts over (another measure) */
-	const switchSteer = (sab) => {
+	const switchSteer = (sab, dpFirst = true) => {
 		if (ST === null) return;   // (a field in use: from the start, or late (steerOn), which the main thread sent first)
 		let sd = null;
 		try { sd = SF.readSteerFile(Buffer.from(sab)); } catch (e) { return; }
 		if (!sd || sd.W !== W || sd.H !== H) return;
-		ST = Object.assign(sd, { dpFirst: true });
+		ST = Object.assign(sd, { dpFirst });
 		scFresh = new WeakSet();
 		steerGen++;
 		// (--spd: another measure, so the stall clock starts over: its best and the whole search's nearest were the old
@@ -3014,7 +3014,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
-		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else steerOn(x.steer, !!x.dist); } else addSeed(String(x)); }
+		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else if (x.swap) switchSteer(x.steer, a.dpFirst === 1); else steerOn(x.steer, !!x.dist); } else addSeed(String(x)); }
 		// (parked: stdin "workers K" keeps only the first K workers searching, e.g. while the editor's stall escape has the
 		// rest of the CPU; a parked worker keeps its archive and still answers its port (the bursts' "nearest" questions, the
 		// imports) and its seeds, and searches again once K allows it)
@@ -3864,6 +3864,18 @@ async function main() {
 			say(Object.assign({ ev: 'steer', sec: sec() }, r.note, dist ? { dist: true } : {}));
 		} catch (e) { say({ ev: 'warning', text: `the late steer field is not used: ${e.message}` }); }
 	};
+	/** stdin "steerx <file>": another field in place of the one in use (the editor's interim field -> its steer field):
+	 *  the workers switch (switchSteer, their own dpFirst), the closest attempt and the sources' lowest distances start
+	 *  over (another measure); later class workers read it */
+	const steerSwap = (file) => {
+		try {
+			const r = loadSteer(file, a.steerDist !== 0);
+			steerBuf = r.sab; steerNote = r.note;
+			near = null; nearPending = false; steerGen++; for (const q of sourcesSent.values()) q.dist = Infinity;
+			for (const p of seedPorts) p.postMessage({ steer: r.sab, swap: true });
+			say(Object.assign({ ev: 'steer', sec: sec() }, r.note, { dist: a.steerDist !== 0, swap: true }));
+		} catch (e) { say({ ev: 'warning', text: `the steer field in place of the interim one is not used: ${e.message}` }); }
+	};
 	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, steer: steerNote, deathMoves: !!a.deathMoves, mem: a.mem, memWhy: a.memWhy,
 		processMB: Math.round(claimed / 1048576), machineMB: Math.round(m.total / 1048576), freeMB: Math.round(m.free / 1048576), othersMB: Math.round(m.others / 1048576),
 		maxCells: a.maxCells, maxSnaps: a.maxSnaps });
@@ -3949,6 +3961,9 @@ async function main() {
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
 				else if (line.startsWith('steer ') && line.length > 6 && !steerBuf) steerLate(line.slice(6));
 				else if (line.startsWith('steerd ') && line.length > 7 && !steerBuf) steerLate(line.slice(7), true);
+				// (the editor's steer field in place of its interim field (editor.js lateSteer): every worker's head A by it, the
+				// distances by it, the closest attempt starts over; a search without a field takes it as "steerd")
+				else if (line.startsWith('steerx ') && line.length > 7) { if (!steerBuf) steerLate(line.slice(7), true); else steerSwap(line.slice(7)); }
 				// (the editor's stall escape: only the first K workers search, the others park; 0 or K >= the workers: all)
 				else if (/^workers \d+$/.test(line)) {
 					const k = +line.slice(8), act = k > 0 && k < a.workers ? k : 0;
