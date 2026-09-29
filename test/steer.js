@@ -134,6 +134,43 @@ function sectionA() {
 	timeDoors();
 	keyExpiry();
 	layerMemo();
+	altLegsToy();
+}
+/** the coin legs across the other layers (steer.js altLegs, default on; altLegs false / EEAT_ALTLEGS=0 off): a 2-coin door
+ *  before the trophy, one coin on the floor by the spawn and one high above it, out of the physics' reach unless a fly
+ *  effect is on (the effect tile on the floor). The DP's legs are in the walk plan's layer at its first coin (fx plain:
+ *  the effects air), where the high coin has no leg: every 2-coin tour misses it and the steer has no value at the start.
+ *  With the leg from the wild layer (walk x kappa) the DP has a start value; the floor coin's leg is the same body; past
+ *  its time the file is the one without it byte for byte; a level where every coin has a leg is untouched */
+function altLegsToy() {
+	const W = 40, H = 18, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	cells.push([16, H - 2, 255], [34, H - 2, 121], [8, H - 2, 100], [4, H - 2, 418, 1], [12, 2, 100], [12, 3, 9], [11, 3, 9], [13, 3, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([28, y, 43, 2]);
+	const L = levelOf(ED.eelvlOf({ name: 'alt legs', width: W, height: H, cells }));
+	const sim = new E.EESim(L); sim.reset();
+	const sha = (b) => require('crypto').createHash('sha1').update(b).digest('hex');
+	const bodySha = (b) => { const h = require('crypto').createHash('sha1'); for (const k of Object.keys(b).sort()) { const v = b[k]; if (ArrayBuffer.isView(v)) h.update(k).update(Buffer.from(v.buffer, v.byteOffset, v.byteLength)); else h.update(`${k}:${v}`); } return h.digest('hex'); };
+	const off = SF.buildSteer(L, { altLegs: false }), on = SF.buildSteer(L);
+	const s0 = SF.steerAt(off, sim), s1 = SF.steerAt(on, sim);
+	const fOff = sha(SF.steerFileBytes(off, null)), fOn = sha(SF.steerFileBytes(on, null));
+	check(`altLegs: the high coin has no leg in the plan's layer (no steer value at the start without it); with the wild layer's leg the coin DP has a start value (${on.info.features.join(', ')}; ${JSON.stringify(on.info.altLegs)})`,
+		!!off.dp && !!on.dp && !Number.isFinite(s0) && Number.isFinite(s1) && on.info.altLegs && on.info.altLegs.legs === 1 && fOff !== fOn, `${s0} -> ${s1}`);
+	// (the floor coin's leg: the same body in both files; the same count of bodies)
+	const qi = (st, x, y) => [...st.dp.bit].findIndex((b, i) => b === L.coinBit[y * W + x]);
+	const floorOff = off.bodies[off.dp.leg[qi(off, 8, H - 2)]], floorOn = on.bodies[on.dp.leg[qi(on, 8, H - 2)]];
+	check('altLegs: the floor coin\'s leg (it has one) is the same body with it; no body added', bodySha(floorOff) === bodySha(floorOn) && on.bodies.length <= off.bodies.length + 0, `${off.bodies.length} / ${on.bodies.length} bodies`);
+	const env = process.env.EEAT_ALTLEGS;
+	process.env.EEAT_ALTLEGS = '0';
+	const k0 = SF.buildSteer(L);
+	if (env === undefined) delete process.env.EEAT_ALTLEGS; else process.env.EEAT_ALTLEGS = env;
+	check('altLegs: EEAT_ALTLEGS=0 = altLegs false byte for byte', sha(SF.steerFileBytes(k0, null)) === fOff && !k0.info.altLegs);
+	// (past its time: the file without it; a start value there means the time is bound to the steer wait's clock)
+	const cut = SF.buildSteer(L, { altEndMs: -1, altMs: -1 });
+	check('altLegs: past its time (altMs -1) none of it: the file without it byte for byte, info.altLegs.cut', sha(SF.steerFileBytes(cut, null)) === fOff && cut.info.altLegs && cut.info.altLegs.cut === 'time', JSON.stringify(cut.info.altLegs));
+	const c0 = SF.buildSteer(levelOf(ROOMS.coins.buf), { altLegs: false }), c1 = SF.buildSteer(levelOf(ROOMS.coins.buf));
+	check('altLegs: the coin room (every coin a leg) is untouched', sha(SF.steerFileBytes(c0, null)) === sha(SF.steerFileBytes(c1, null)) && !c1.info.altLegs);
 }
 
 /** a 40 x 7 corridor of the given cells ([x, y, id, ...args]) inside walls */

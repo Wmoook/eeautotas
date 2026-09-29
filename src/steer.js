@@ -917,7 +917,7 @@ parentPort.on('message', (m) => {
 			else {
 				const fg = Int32Array.from(m.fg0[j.k]); fg[j.q] = m.trophy;
 				const f = SF._legFieldOf(Object.assign({}, d.level, m.deltas[j.k]), fg, j.q, m.coins, m.start);
-				r = j.at ? { i, costs: Float64Array.from(j.at, (t) => SF.arriveCost(f, t)) } : { i, f };
+				r = j.at ? { i, costs: Float64Array.from(j.at, (t) => SF.arriveCost(f, t)), walk: f.mode === 'walk' } : { i, f };
 			}
 		} catch (e) { r = { i, err: String(e && e.stack || e) }; }
 		const bufs = new Set();
@@ -964,7 +964,7 @@ function legPool(L, n) {
 				const j = jobs[i];
 				const fg = Int32Array.from(extra.fg0[j.k]); fg[j.q] = extra.trophy;
 				const f = legFieldOf(Object.assign({}, L, extra.deltas[j.k]), fg, j.q, extra.coins, extra.start);
-				return j.at ? { i, costs: Float64Array.from(j.at, (t) => arriveCost(f, t)) } : { i, f };
+				return j.at ? { i, costs: Float64Array.from(j.at, (t) => arriveCost(f, t)), walk: f.mode === 'walk' } : { i, f };
 			});
 		},
 		close() { for (const x of ws) { try { x.port.close(); x.w.terminate(); } catch (e) { /* gone */ } } },
@@ -978,7 +978,7 @@ function lvDelta(L, lv) {
 }
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
  *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
-function coinLegsPhys(B, PH, base, opts) {
+function coinLegsPhys(B, PH, base, opts, alt) {
 	const { A } = B;
 	const M = PH.M;
 	let sPlan = B.M.s0;
@@ -992,15 +992,27 @@ function coinLegsPhys(B, PH, base, opts) {
 	try {
 		const f0 = L.fields(base.coins.map((q) => [q, base.T - 1]));
 		base.coins.forEach((q, i) => { fields.set(q, f0[i]); countOf.set(q, base.T - 1); });
-		return coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf);
+		return coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf, alt);
 	} finally { L.close(); }
 }
 /** the coin legs of one build: layerLevel's copies per count k (made once) and the leg fields, on the leg workers when
- *  there are enough legs (legThreadsOf): fields([[q, k]]) -> the fields in that order; costs([[q, k, tiles]], deadline)
- *  -> the arrival costs at those tiles (null: past the deadline); close() */
+ *  there are enough legs (legThreadsOf): fields([[q, k]], deadline?) -> the fields in that order (null: past the
+ *  deadline); costs([[q, k, tiles]], deadline) -> the arrival costs at those tiles (null: past the deadline; `.walk`: a
+ *  walk-mode field's); a key 's<state>' instead of a count k: layer <state>'s own copy (altLegs: another layer's leg);
+ *  wild(k): that copy is a wild layer's; close() */
 function legsOf(A, M, s, nC, coins, opts, legs) {
 	const lvOf = new Map();
 	const layer = (k) => {
+		if (typeof k === 'string') {
+			// (altLegs: the copy of the whole layer state k.slice(1), its coin tiles no goal, as the count copies)
+			if (!lvOf.has(k)) {
+				const { lv } = layerLevel(A, M, +k.slice(1), {});
+				const fg0 = Int32Array.from(lv.fg);
+				for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
+				lvOf.set(k, { lv, fg0, delta: lvDelta(A.level, lv) });
+			}
+			return lvOf.get(k);
+		}
 		if (!lvOf.has(k)) {
 			// (nC < 0: the coins are no feature of M (the budget left them out, coinLegsFree): layer s's copy with its coin
 			// doors and gates as they stand at k coins, wall or open, the kept features' gates open)
@@ -1020,9 +1032,15 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 		return pool.run(jobs, { deltas, fg0, trophy: TROPHY, coins, start: A.start.t, deadline: deadline || 0 });
 	};
 	return {
-		fields(list) {
-			if (!pool || list.length < 2) return list.map(([q, k]) => legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t));
-			return run(list, false).map((r) => r.f);
+		fields(list, deadline) {
+			if (!pool || list.length < 2) {
+				let late = false;
+				return list.map(([q, k]) => {
+					if (late || (deadline && Date.now() > deadline)) { late = true; return null; }
+					return legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t);
+				});
+			}
+			return run(list, false, deadline).map((r) => (r.late ? null : r.f));
 		},
 		costs(list, deadline) {
 			if (!pool) {
@@ -1030,21 +1048,112 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 				return list.map(([q, k, at]) => {
 					if (late || (deadline && Date.now() > deadline)) { late = true; return null; }
 					const f = legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t);
-					return Float64Array.from(at, (t) => arriveCost(f, t));
+					const c = Float64Array.from(at, (t) => arriveCost(f, t));
+					c.walk = f.mode === 'walk';
+					return c;
 				});
 			}
-			return run(list, true, deadline).map((r) => (r.late ? null : r.costs));
+			return run(list, true, deadline).map((r) => { if (r.late) return null; r.costs.walk = !!r.walk; return r.costs; });
 		},
+		wild(k) { return !!layer(k).lv._wild; },
 		close() { if (pool) pool.close(); },
 	};
 }
-function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
+function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf, alt) {
 	const sT = M.withVal(s, nC, Math.min(base.T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of base.coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
 	const CL = { T: base.T, coins: base.coins, fields, tail, s, countOf, rounds: 0 };
 	legTourRounds(A, CL, L, opts);
+	if (alt && altLegsOn(opts)) altLegs(A, PH, M, s, nC, CL, L, alt);
 	return CL;
+}
+/** THE COIN LEGS ACROSS THE OTHER LAYERS (d4-coin-legs-layers, 2026-09-29; default on: `EEAT_ALTLEGS=0` or
+ *  `buildSteer(level, {altLegs: false})` = the build without it). The DP's legs are all in ONE layer, the walk plan's at
+ *  its first coin (its key / switch / team / fx values), so a coin that needs a gravity flip, a team, a key or a switch
+ *  first has no leg there: LOEE Demonic Citadel 4 of 13 coins, VVVVVV 6 of 9 (the flips), Polar Eclipse 2 of 16 (fx 1),
+ *  and every T-coin tour then misses one, so the DP had no value at the start or along any attempt (the steer NaN). A coin
+ *  with NO LEG (its field reaches it neither from the start nor from any other coin; where no coin's leg has a value from
+ *  the start, every coin without one) takes the least leg from the start over the other layers the build reached (their
+ *  non-coin values at the coin's own count; at most ALT_LAYERS of them, the fewest features away from the plan's layer
+ *  first), a wild layer's walk x kappa as the wild bodies are, where that leg reaches at least as many other coins as its
+ *  own. Every other leg is unchanged; no leg, no body and no layer is added (the same count of bodies). Bounded: its
+ *  fields (on the leg workers) end ALT_MS after its own start and, unless the steer without it has no value at the start
+ *  (`useless`: then it is the only value the file can have there), by `alt.end` (the build's budget clock T0() +
+ *  ALT_END_MS: the file then still comes inside the product's steer wait); a batch past that = none of it, so the file is
+ *  the build without it byte for byte (`CL.alt` {cut}). Ordering
+ *  only: RCH3 and its -1 are not touched (the chain / physT / drops of n3-coin-dp-wrong-T are not in it) */
+const ALT_LAYERS = 8, ALT_MS = 6000, ALT_END_MS = 9000, ALT_MIN_MS = 300;
+function altLegsOn(opts) {
+	if (opts && opts.altLegs !== undefined) return opts.altLegs !== false && opts.altLegs !== 0;
+	return process.env.EEAT_ALTLEGS !== '0';
+}
+function altLegs(A, PH, M, s, nC, CL, L, alt) {
+	const t0 = Date.now(), st = A.start.t, coins = CL.coins;
+	const has = (f, t) => !!f && arriveCost(f, t) < CUT;
+	const into = (f, q) => { let k = 0; for (const c of coins) if (c !== q && has(f, c)) k++; return k; };
+	const none = !coins.some((q) => has(CL.fields.get(q), st));
+	const want = coins.filter((q) => !has(CL.fields.get(q), st) && (none || !into(CL.fields.get(q), q)));
+	if (!want.length) return;
+	// (the other layers reached, their coin count 0: the fewest features away from the plan's layer s first)
+	const proj = (x) => M.withVal(x, nC, 0);
+	const away = (x) => { let d = 0; for (let n = 0; n < M.names.length; n++) if (n !== nC && M.valOf(x, n) !== M.valOf(s, n)) d++; return d; };
+	const seen = new Set([proj(s)]), cand = [];
+	for (let x = 0; x < M.S; x++) if (PH.fields[x] && !seen.has(proj(x))) { seen.add(proj(x)); cand.push(proj(x)); }
+	cand.sort((a, b) => away(a) - away(b) || a - b);
+	const alts = cand.slice(0, ALT_LAYERS);
+	if (!alts.length) { CL.alt = { want: want.length, layers: 0 }; return; }
+	// (its time: where the steer without it has no value at the start (no DP value from the start over the legs as they
+	// are, and none in the start layer's field: LOEE Demonic Citadel, VVVVVV, Polar Eclipse, whose steer was NaN at the
+	// start and along every attempt), the time buys the only value the file can have there: ALT_MS from its start; else
+	// the file already orders the search and must still come inside the product's steer wait: also by alt.end, the
+	// budget clock's T0() + ALT_END_MS)
+	const D0 = coinDP(CL);
+	let v0 = Infinity;
+	if (D0) for (let q = 0; q < D0.n; q++) { const lg = arriveCost(CL.fields.get(coins[q]), st); if (lg < CUT) v0 = Math.min(v0, lg + D0.h[(1 << q) * D0.n + q]); }
+	const f0 = PH.fields[M.s0];
+	const useless = !(v0 < Infinity) && !(f0 && arriveCost(f0, st) < CUT);
+	const deadline = Math.min(useless ? Infinity : alt.end, t0 + (alt.ms !== undefined ? alt.ms : ALT_MS));
+	if (deadline - t0 < ALT_MIN_MS) { CL.alt = { want: want.length, useless, cut: 'time' }; return; }
+	// (a wild layer's walk-mode leg x kappa, as wildField's bodies: on the physics legs' scale)
+	const kappa = PH.kappa > 1 ? PH.kappa : 1;
+	const scale = (v, walk, key) => (walk && kappa > 1 && L.wild(key) && v < CUT ? Math.min(CUT - 1, Math.round(v * kappa)) : v);
+	const at = [st].concat(coins);
+	const list = [];
+	for (const q of want) for (const a of alts) list.push([q, `s${M.withVal(a, nC, CL.countOf.get(q))}`, at]);
+	const cs = L.costs(list, deadline);
+	if (cs.some((c) => !c) || Date.now() > deadline) { CL.alt = { want: want.length, useless, layers: alts.length, cut: 'time' }; return; }
+	const pick = new Map();
+	list.forEach(([q, key], x) => {
+		const c = cs[x], v = scale(c[0], c.walk, key);
+		if (!(v < CUT)) return;
+		let n = 0;
+		for (let y = 1; y < at.length; y++) if (at[y] !== q && c[y] < CUT) n++;
+		if (n < into(CL.fields.get(q), q)) return;
+		const b = pick.get(q);
+		if (!b || v < b.v) pick.set(q, { key, v });
+	});
+	const chosen = want.filter((q) => pick.has(q)).map((q) => [q, pick.get(q).key]);
+	if (!chosen.length) { CL.alt = { want: want.length, useless, layers: alts.length, legs: 0, ms: Date.now() - t0 }; return; }
+	const fs2 = L.fields(chosen, deadline);
+	if (fs2.some((f) => !f) || Date.now() > deadline) { CL.alt = { want: want.length, useless, layers: alts.length, cut: 'time' }; return; }
+	chosen.forEach(([q, key], i) => {
+		const f = fs2[i];
+		if (f.mode === 'walk' && kappa > 1 && L.wild(key)) f.walk = Uint16Array.from(f.walk, (v) => (v >= CUT ? CUT : Math.min(CUT - 1, Math.round(v * kappa))));
+		CL.fields.set(q, f);
+	});
+	// (such a coin's tail at T coins, where the plan's layer field has none (LOEE Demonic Citadel: the coins that need the
+	// effect sit where the plain layer at 12 coins reaches no trophy, so no 12-coin tour ending there had a value): the
+	// least over the layers reached at that count, as coinLegsFree's tail; the other coins' tails unchanged)
+	const nT = Math.min(CL.T, M.radix[nC] - 1);
+	let tails = 0;
+	for (const [q] of chosen) {
+		if (CL.tail.get(q) < CUT) continue;
+		let tl = CUT;
+		for (let x = 0; x < M.S; x++) if (PH.fields[x] && M.valOf(x, nC) === nT) { const v = arriveCost(PH.fields[x], q); if (v < tl) tl = v; }
+		if (tl < CUT) { CL.tail.set(q, tl); tails++; }
+	}
+	CL.alt = { want: want.length, useless, layers: alts.length, legs: chosen.length, tails, ms: Date.now() - t0 };
 }
 /** a layerLevel copy ({lv}) of a model that has no coin feature (makeModel's gateOpen: open) with its coin doors and
  *  gates as they stand at k gold coins (0 open, 9 a wall) and every other gate of a modelled feature OPEN, its tiles
@@ -1485,7 +1594,7 @@ function buildSteer(level, opts) {
 	const layerBody = new Int32Array(M.S).fill(-1);
 	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
 	// the coin DP
-	let dp = null;
+	let dp = null, altInfo = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
 	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - T0() > maxMs)) {
@@ -1495,8 +1604,10 @@ function buildSteer(level, opts) {
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) cp = null;
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
+		// (the legs across the other layers end by the budget clock's T0() + ALT_END_MS: altLegs)
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts, { end: T0() + (opts.altEndMs !== undefined ? opts.altEndMs : ALT_END_MS), ms: opts.altMs });
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+		if (CL && CL.alt) altInfo = CL.alt;
 		if (D) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
@@ -1592,7 +1703,7 @@ function buildSteer(level, opts) {
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}) } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
-		tour: tourInfo };
+		tour: tourInfo, ...(altInfo ? { altLegs: altInfo } : {}) };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
