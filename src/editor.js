@@ -1198,7 +1198,7 @@ const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
 // (the CPU search's steer file where it differs from the GPU tools': the coin tour, steer.js buildTour: flags 2, which the
 // native lookup does not read; the GPU tools keep the plain file)
 const cpuFileOf = (file) => file.replace(/\.bin$/, '_cpu.bin');
-const steerCpuOf = (sf) => (sf.tour && sf.tour.n && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
+const steerCpuOf = (sf) => (((sf.tour && sf.tour.n) || (sf.dp && sf.dp.free)) && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
 /** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
 const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
 /** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
@@ -2604,7 +2604,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (!cached.tour || !cached.tour.n || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (((!cached.tour || !cached.tour.n) && !(cached.dp && cached.dp.free)) || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -2616,14 +2616,14 @@ function steerInfo(buf, hash) {
 			let lfp = null, bytes = 0;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
-			// (the coin tour: the CPU search's file alone)
-			if (useful && st.tour) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
+			// (the coin tour, the coin DP outside the layer product: the CPU search's file alone)
+			if (useful && (st.tour || (st.dp && st.dp.free))) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
-				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
+				pastWanted: useful && !!st.info.dp && !st.info.dp.free && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
 			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
-			if (useful && st.info.dp && st.info.fullT > st.info.dp.T) {
+			if (useful && st.info.dp && !st.info.dp.free && st.info.fullT > st.info.dp.T) {
 				let past = null;
 				try {
 					const sp = SF.buildSteer(L, { coinT: st.info.fullT, maxMs: d.pastMs });
