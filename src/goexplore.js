@@ -248,7 +248,8 @@
 //        words (and before a timed killer's bucket); a new state is dropped only when a cell of the same place with at least
 //        as many air jumps left (and, with a timed killer running, a bucket at least as high) got there no later (dominated);
 //        the one search's bursts start, among equally near cells, from the one with the most air jumps left (nearestOf).
-//        Where max_jumps is 1 or 1000+ nothing changes. The progress and done events carry "jcell": {cells, dominated};
+//        Where max_jumps is 1 or 1000+ nothing changes. The progress and done events carry "jcell": {cells, dominated,
+//        kept (the later arrivals with more jumps left kept, which the key without the word dropped)};
 //        0: the key as before. See JCELL in explore())]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
@@ -2332,10 +2333,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// after the class words, before a timed bucket; only in the air on a multijump level, 1 < max_jumps < 1000), and a new
 	// state is dropped only when a cell of the same place with at least as many air jumps left (and a timed bucket at least
 	// as high) got there no later (jDom). jn: the word's index in KV (-1: none), jw: its value (3 without one: nothing
-	// spent, the ground's or a single-jump level's), jCells: the cells made with the word. The laptop panel (1 worker, no
+	// spent, the ground's or a single-jump level's), jCells: the cells made with the word, jKept: the new cells whose
+	// state the earliest-arrival rule would have dropped (a cell of the same place with fewer air jumps left got there no
+	// later: the later arrival with a jump in hand, kept; observation only). The laptop panel (1 worker, no
 	// steer, 150 M ticks, same seed): Just One More Time routed on 3 of 3 seeds vs 0 of 3, The Burj on seed 1 vs none.
 	const JC = coarse && a.jcell !== 0;
-	let jn = -1, jw = 3, jDom = 0, jCells = 0;
+	let jn = -1, jw = 3, jDom = 0, jCells = 0, jKept = 0;
 	/** the cell key of KV[0 .. n): two 32-bit hash lanes (see cellKey) */
 	const hashKV = (n) => {
 		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
@@ -2631,7 +2634,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// (a level with timed killers: the ticks left at arrival and the killer's kind bit, tLeft x 16 + kind; B_TM more)
 		if (TM !== null) { nc.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0); if (tLeft > 0) tCells++; }
 		// (--jcell: every cell's air jumps left, jw (3: no word), for nearestOf's order; jCells: the cells with the word)
-		if (JC) { nc.jw = jw; if (jn >= 0) jCells++; }
+		if (JC) {
+			nc.jw = jw;
+			if (jn >= 0) {
+				jCells++;
+				for (let j = 0; j < jw; j++) { KV[jn] = 0x6a00 | j; const c2 = cells.get(hashKV(kn)); if (c2 !== undefined && c2.t <= t) { jKept++; break; } }
+				KV[jn] = 0x6a00 | jw;
+			}
+		}
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
@@ -2729,7 +2739,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	let parked = 0;   // (the chunks this worker sat out: stdin "workers K" parked it)
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, jDom, jCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, jDom, jCells, jKept, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
@@ -4312,8 +4322,9 @@ async function main() {
 	// same place with more time left got there no later), with --timed=0 the states dropped though they had more time left
 	// than the kept one, the doomed states priced as their death)
 	const timedNow = () => (TMD_L ? { timed: { on: a.timed !== 0, cells: total('tCells'), dominated: total('tDom'), droppedMore: total('tMore'), doomed: total('tDoomed') } } : {});
-	// (--jcell=1: the cells made with the air-jumps word and the states dropped as dominated by a cell with more jumps left)
-	const jcellNow = () => (a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom') } } : {});
+	// (--jcell=1: the cells made with the air-jumps word, the states dropped as dominated by a cell with more jumps left, and
+	// the later arrivals with more jumps left kept as their own cells, which the key without the word dropped)
+	const jcellNow = () => (a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom'), kept: total('jKept') } } : {});
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), backKept: total('dBackKept'), backByOrder: total('dBackR'), backBySteer: total('dBackS'), backPromoted: total('dPromote'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
