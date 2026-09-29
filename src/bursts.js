@@ -222,6 +222,22 @@ function triggersOf(L) {
 
 /** level L's portals as walk edges (goexplore.js roomFields' map): exits (portal tile -> its exits' tiles) and srcOf
  *  (exit tile -> the portal tiles that lead there: the aim field's walk runs backwards from the goals) */
+/** (EEAT_BURSTLIVE, bursts' liveCut) a prefix `cut` of the run `full` (input strings, from the level start): when its
+ *  replay ends in a death's dead ticks, the prefix of `full` up to its first live tick after that (the respawn), else
+ *  `cut` itself (alive, or `full` never lives again). Exact: the returned inputs are `full`'s own. */
+function liveCutOf(L, full, cut) {
+	if (!full || cut.length >= full.length) return cut;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	for (let k = 0; k < cut.length; k++) { E.applyMask(inp, (cut.charCodeAt(k) - 48) & 31); sim.tick(inp); }
+	if (!sim.is_dead) return cut;
+	for (let k = cut.length; k < full.length; k++) {
+		E.applyMask(inp, (full.charCodeAt(k) - 48) & 31);
+		sim.tick(inp);
+		if (!sim.is_dead) return full.slice(0, k + 1);
+	}
+	return cut;
+}
 function portalsOf(L) {
 	const W = L.width, N = W * L.height, fg = L.fg;
 	const exits = new Map(), srcOf = new Map();
@@ -650,16 +666,9 @@ function create(o) {
 	if (burstLive) st.liveCuts = 0;
 	const liveCut = (full, cut) => {
 		if (!burstLive || !a.deathMoves || !full || cut.length >= full.length) return cut;
-		const sim = new E.EESim(L), inp = new E.EEInput();
-		sim.reset();
-		for (let k = 0; k < cut.length; k++) { E.applyMask(inp, (cut.charCodeAt(k) - 48) & 31); sim.tick(inp); }
-		if (!sim.is_dead) return cut;
-		for (let k = cut.length; k < full.length; k++) {
-			E.applyMask(inp, (full.charCodeAt(k) - 48) & 31);
-			sim.tick(inp);
-			if (!sim.is_dead) { st.liveCuts++; return full.slice(0, k + 1); }
-		}
-		return cut;
+		const r = liveCutOf(L, full, cut);
+		if (r !== cut) st.liveCuts++;
+		return r;
 	};
 	/** an attempt that reached a target tile: the room changes when the trigger acts (a tick or two later for some): up to
 	 *  3 more ticks of its last input, else each of the 18 inputs for one tick; the attempt with them when the room
@@ -1259,4 +1268,4 @@ function roomAim(L, RM, sim, known, T) {
 	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
 }
 
-module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
+module.exports = { create, triggersOf, portalsOf, liveCutOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
