@@ -921,8 +921,13 @@ function replayRooms(masks, withPath, withCul = false) {
 const deathTiles = () => (cur && cur.opts && cur.opts.fileDeaths === false ? 1e4 : RF.DEATH_TILES);
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
- *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
-const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam) || (!V.cpu && !cur.files.steer));
+ *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d. Where the CPU file
+ *  carries the switch chain (cur.chainW: the CPU search's values the LARGER of the chain and the layer field's, Bad EE Level
+ *  9's start 4,000 tiles vs the layer field's 238), a GPU tool's plain-file value (the layer field's, its unmodelled doors
+ *  open) is another scale too: ranked the same way (d4-switch-chain-2; before, every move's attempt of the first seconds
+ *  stayed the nearest for the whole search on the chain's campaign levels, Evolution Revolution's and Purple Depths' at
+ *  349 / 387 ticks, and its stall clocks fired the escapes at 65 / 105 s while the CPU search got nearer on its own scale) */
+const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam) || (!V.cpu && (!cur.files.steer || !!cur.chainW)));
 function steerDist(V, d) {
 	return steerless(V) && d < 1e4 ? Math.min(9990, STEER_MISS + d) : d;
 }
@@ -1212,7 +1217,11 @@ const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
 // (the CPU search's steer file where it differs from the GPU tools': the coin tour, steer.js buildTour: flags 2, which the
 // native lookup does not read; the GPU tools keep the plain file)
 const cpuFileOf = (file) => file.replace(/\.bin$/, '_cpu.bin');
-const steerCpuOf = (sf) => (((sf.tour && sf.tour.n) || (sf.dp && sf.dp.free)) && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
+// (the CPU file's own sections: the coin tour, the coin DP outside the layer product, the switch chain)
+const cpuOnly = (sf) => !!((sf.tour && sf.tour.n) || (sf.dp && sf.dp.free) || (sf.chain && sf.chain.n));
+const steerCpuOf = (sf) => (cpuOnly(sf) && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
+/** the switch chain's part of the steer note (steer.js buildChain: the CPU file's) */
+const chainNote = (sf) => (sf.chain && sf.chain.n ? `, the switch chain over ${sf.chain.n} purple switch ids in ${sf.chain.waves} waves (${sf.chain.unmodelled} not in the layers; the CPU search's)` : '');
 /** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
 const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
 /** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
@@ -1318,6 +1327,97 @@ function roomGate(inputs) {
 		return { x: aim.x, y: aim.y, reach, room: true, goals: aim.goals.length };
 	} catch (e) {
 		if (cur && !cur.roomAimErr) { cur.roomAimErr = true; note(`past the wall: no room target (${e.message}); the trophy as before`); }
+		return null;
+	}
+}
+// The switch chain in the parts that pick where to search (d4-switch-chain-2): where the steer field's CPU file carries
+// the switch chain (steer.js buildChain: the purple switch waves of a portal / switch maze; Bad EE Level 9: 8 worlds of
+// 5 minis, each mini's switch opens the door in front of the portal to the next), (1) the stall escape's and the wall
+// breaker's starting points go first from the rooms furthest along the chain (chainProg: the waves complete, then the
+// ids ON of the first unfinished wave, read from the room key's purple=[...]; ties as before, i.e. by the chain value
+// the CPU search's distances carry), and (2) the wall breaker aims at the chain's next OFF switch (switchGate: steer.js
+// nextSwitch from the start state, its tiles the goals of the chain's walk with the ball's own switches: a walk-mode RCH3
+// like the room target's), before the room target. Before, all 3 escapes of the sweep's Bad EE Level 9 run started from
+// rooms the doors-open layer field picked (purple=[2,3,41,101], [3,4,101], [3,41,101]) and the breaker's room target is
+// any unseen room (a toggle back included). ORDERING only: every start is still used once, a gate run keeps --finish and
+// has no --prune (RCH3's -1 stays the only prune). No chain in the CPU file (the campaign's other 196 levels): main's
+// code path. EEAT_CHAIN=0 (no chain built) or EEAT_CHAIN_AIM=0 (the chain in the CPU search only): off.
+/** the chain's waves [[id]] from a steer build's info (its `ids`: 'a,b | c'), where the search's CPU file carries it */
+function chainWavesOf(sf) {
+	if (process.env.EEAT_CHAIN_AIM === '0' || !cur || !sf || !sf.chain || !sf.chain.n || typeof sf.chain.ids !== 'string') return null;
+	if (!cur.files.steerCpu || cur.files.steerCpu === sf.file) return null;
+	return chainWavesParse(sf.chain.ids);
+}
+/** the waves [[id]] of a chain's info ids ('a,b | c'); null: none */
+function chainWavesParse(ids) {
+	const W = String(ids || '').split('|').map((s) => s.split(',').map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x))).filter((w) => w.length);
+	return W.length ? W : null;
+}
+/** the purple switch ids ON in a room desc (goexplore.js roomOf desc: 'purple=[1,2,101]') */
+function purpleOnOf(desc) {
+	const m = /(?:^|\s)purple=\[([^\]]*)\]/.exec(String(desc || ''));
+	return new Set(m ? m[1].split(',').map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x)) : []);
+}
+/** the chain progress over waves W of the ids ON (a Set): waves complete x 1000 + the ids ON of the first unfinished wave */
+function chainProgW(W, on) {
+	let p = 0;
+	for (const w of W) {
+		let k = 0;
+		for (const id of w) if (on.has(id)) k++;
+		if (k < w.length) return p * 1000 + k;
+		p++;
+	}
+	return p * 1000;
+}
+/** the chain progress of the ids ON in the running search (chainProgW); -1: no chain */
+const chainProgOn = (on) => (cur && cur.chainW ? chainProgW(cur.chainW, on) : -1);
+/** a room desc's chain progress (the room keys hold the switches a door or gate reads, which the chain's ids are); -1:
+ *  no chain */
+const chainProg = (desc) => (cur && cur.chainW ? chainProgW(cur.chainW, purpleOnOf(desc)) : -1);
+/** the chain progress of the state after inputs (a replay); -1: no chain */
+function chainProgOf(inputs) {
+	if (!cur || !cur.chainW) return -1;
+	const sim = new E.EESim(cur.level), inp = new E.EEInput();
+	sim.reset();
+	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+	const on = new Set();
+	for (const [id, v] of sim._switches) if (v === true) on.add(id);
+	return chainProgOn(on);
+}
+/** the chain's next OFF switch from the state after inputs as the wall breaker's gate: {x, y, reach, sw, goals} or null
+ *  (no chain, the chain ON, no walk from the state to it: the room target then) */
+function switchGate(inputs) {
+	if (!cur || !cur.chainW || !cur.files.steerCpu) return null;
+	try {
+		const L = cur.level;
+		if (cur.chainSteer === undefined) {
+			cur.chainSteer = null;
+			// (the chain's section alone: Bad EE Level 9's CPU file is 280 MB, its chain 9.5 MB)
+			const st = SF.readChainFile(cur.files.steerCpu);
+			if (st && st.chain) cur.chainSteer = { st, A: SF.analyze(L, {}), fp: G.blobFp(G.levelBlob(L)), n: 0, look: cur.reachLookup || SF.readReachBytes(fs.readFileSync(cur.files.reach)) };
+		}
+		const K = cur.chainSteer;
+		if (!K) return null;
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		if (sim.is_dead) return null;
+		const g = SF.nextSwitch(K.st, sim);
+		if (!g) return null;
+		const on = new Set();
+		for (const [id, v] of sim._switches) if (v === true) on.add(id);
+		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+		const aim = SF.switchAim(K.A, on, g.id, tx >= 0 && ty >= 0 && tx < L.width && ty < L.height ? ty * L.width + tx : -1);
+		if (!aim || !(aim.start < RF.CUT) || !aim.mx) return null;
+		const reach = path.join(dir(), `gate_sw_${K.n++ % 8}.rch3`);
+		const f = Object.assign({}, K.look, { mode: 'walk', walk: aim.walk, prioShift: Math.max(0, (32 - Math.clz32(aim.mx)) - 12) });
+		RF.writeReachFile(f, reach, K.fp);
+		// (the nearest of its tiles by the straight line: the page's detail only)
+		let best = aim.tiles[0], bd = Infinity;
+		for (const t of aim.tiles) { const dx = (t % L.width) - tx, dy = Math.floor(t / L.width) - ty, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = t; } }
+		return { x: best % L.width, y: Math.floor(best / L.width), reach, sw: g.id, goals: aim.tiles.length };
+	} catch (e) {
+		if (cur && !cur.chainAimErr) { cur.chainAimErr = true; note(`past the wall: no switch-chain target (${e.message}); the room target as before`); }
 		return null;
 	}
 }
@@ -1469,9 +1569,12 @@ function breakStarts() {
 	// coin door (no coins in the room keys): the order as before)
 	// (progStart: then the switches held (progOfDesc: the read switches on, crowns) among equal coins, the most first: a
 	// switch-chain level's frontier; a level without read switches and crowns: the order as before)
-	const prog = cur.opts.breakProg, lim = prog ? 4 * BREAK_STARTS : BREAK_STARTS, sw = prog && cur.opts.progStart;
+	// (the switch chain, where the CPU file carries it: the candidates' chain progress before their coins, the furthest
+	// along the chain first; chainProg, switchGate's comment)
+	const chainOn = !!cur.chainW;
+	const prog = cur.opts.breakProg, lim = prog || chainOn ? 4 * BREAK_STARTS : BREAK_STARTS, sw = prog && cur.opts.progStart;
 	const out = [], seen = new Set();
-	const add = (inputs, keep, what, dist, room, coins, sws) => {
+	const add = (inputs, keep, what, dist, room, coins, sws, cp) => {
 		keep = Math.min(keep, inputs.length);
 		if (out.length >= lim || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
@@ -1479,7 +1582,7 @@ function breakStarts() {
 		seen.add(key);
 		let k = prog ? coins : 0, s = 0;
 		if (sw) { if (coins !== undefined) s = sws | 0; else { const p = progOf(pre); k = p.c; s = p.s; } } else if (prog && coins === undefined) k = coinsOf(pre);
-		out.push({ inputs: pre, what, dist, key, room, coins: k, sw: s, n: out.length });
+		out.push({ inputs: pre, what, dist, key, room, coins: k, sw: s, cp: chainOn ? (cp !== undefined ? cp : chainProgOf(pre)) : 0, n: out.length });
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
 	// (with the progress order by its own coins, first among equals: a room target's gate can be a lateral room, e.g.
@@ -1489,14 +1592,16 @@ function breakStarts() {
 	const c = S.closest;
 	if (c && !c.cut && !c.cul && c.inputs) for (const b of BREAK_BACK) add(String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined);
 	const far = (x) => (x.best ? x.best.dist : 1e9);
-	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
+	const cpR = chainOn ? new Map([...sources.values()].map((r) => [r, chainProg(r.desc)])) : null;
+	const rooms = [...sources.values()].sort((x, y) => (cpR ? cpR.get(y) - cpR.get(x) : 0) || (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
 		if (out.length >= lim) break;
-		const k = coinsOfDesc(r.desc, cur.level), s = sw ? progOfDesc(r.desc, null).s : 0;
-		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k, s);
-		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k, s);
+		const k = coinsOfDesc(r.desc, cur.level), s = sw ? progOfDesc(r.desc, null).s : 0, cp = cpR ? cpR.get(r) : undefined;
+		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k, s, cp);
+		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k, s, cp);
 	}
-	if (prog) out.sort(breakCmp);
+	// (the chain progress first where the chain is on; all 0 else: breakCmp alone, as before)
+	if (prog || chainOn) out.sort((x, y) => y.cp - x.cp || breakCmp(x, y));
 	return out.slice(0, BREAK_STARTS);
 }
 /** every 5 s (checkStalls): a stalled search starts a round of the wall breaker */
@@ -1553,7 +1658,8 @@ function breakLaunch(n) {
 	}
 	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
-	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs) || roomGate(ch.inputs);
+	// (the switch chain's next OFF switch, where the CPU file carries the chain: switchGate)
+	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs) || switchGate(ch.inputs) || roomGate(ch.inputs);
 	if (!ch.gate) R.trophyRuns = (R.trophyRuns || 0) + 1;
 	// (a gate run keeps --finish, ordered by the coin's leg field, and its closest attempt at the coin (cost 0) is the
 	// gate: closer(); explore --enter would report no closest attempt, so no chain)
@@ -1564,7 +1670,7 @@ function breakLaunch(n) {
 	if (S.breaker) S.breaker.cellLog = cellLog;   // (the table asked; a warn line says when it got less)
 	// (its own nearest attempt per run: the chain's next step starts from it, and each run's nearer attempts are sources)
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, passes: (V.passes || 0) + 1,
-		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to ${ch.gate.room ? `the room's next target${ch.gate.goals > 1 ? ` (of ${ch.gate.goals} goal tiles)` : ''} at` : 'the coin at'} (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${breakGrainText()[ch.grain]} px/tick, 2^${cellLog} of them` });
+		detail: `round ${brk.rounds}: from tick ${ch.inputs.length} of ${ch.what}${ch.step > 1 ? ` (step ${ch.step})` : ''}${ch.gate ? `, to ${ch.gate.room ? `the room's next target${ch.gate.goals > 1 ? ` (of ${ch.gate.goals} goal tiles)` : ''} at` : ch.gate.sw !== undefined ? `the switch chain's next switch, purple ${ch.gate.sw}${ch.gate.goals > 1 ? ` (${ch.gate.goals} tiles)` : ''}, at` : 'the coin at'} (${ch.gate.x}, ${ch.gate.y})` : ''}, cells of ${breakGrainText()[ch.grain]} px/tick, 2^${cellLog} of them` });
 	kids[n] = launch(n);
 	return true;
 }
@@ -1863,30 +1969,42 @@ function escStarts() {
 		}
 	}
 	const c = S.closest;
+	// (the switch chain, where the CPU file carries it: every kind's rooms by their chain progress first, the most first;
+	// among equals the order below: chainProg, switchGate's comment)
+	const cpOf = cur.chainW ? new Map([...sources.values()].map((s) => [s, chainProg(s.desc)])) : null;
+	const cpBy = (x, y) => (cpOf ? cpOf.get(y) - cpOf.get(x) : 0);
+	const cpC = cpOf ? chainProg(closestRoom ? closestRoom.desc : '') : 0;
 	// NEAR: the nearest attempt a little back (after an escape that got the search nearer, its own nearest attempt: a
 	// chain); then the nearest attempt of each other room (rooms of a coin count not escaped from first, then rooms not
-	// escaped from, then the nearest); then the nearest attempt further back
-	if (c && !c.cut && c.inputs) add('near', String(c.inputs), c.ticks - ESC_BACK[0], 'the nearest attempt', c.dist, closestRoom ? closestRoom.key : undefined, closestRoom ? closestRoom.desc : '');
+	// escaped from, then the nearest); then the nearest attempt further back (the chain: the rooms further along it than
+	// the nearest attempt's before it)
 	const rank = (s) => (esc.sigs.has(coinSig(s.desc)) ? 2 : 0) + (esc.rooms.has(s.room) ? 1 : 0);
 	const rooms = [...sources.values()].filter((s) => s.best && s.best.dist < RF.DEATH_TILES && (!closestRoom || s.room !== closestRoom.key))
-		.sort((x, y) => rank(x) - rank(y) || x.best.dist - y.best.dist);
-	for (const s of rooms) add('near', s.best.inputs, s.best.ticks - ESC_BACK[0], `room "${s.desc}"'s nearest attempt`, s.best.dist, s.room, s.desc);
+		.sort((x, y) => cpBy(x, y) || rank(x) - rank(y) || x.best.dist - y.best.dist);
+	const nearC = () => { if (c && !c.cut && c.inputs) add('near', String(c.inputs), c.ticks - ESC_BACK[0], 'the nearest attempt', c.dist, closestRoom ? closestRoom.key : undefined, closestRoom ? closestRoom.desc : ''); };
+	if (!cpOf) nearC();
+	let cDone = !cpOf;
+	for (const s of rooms) {
+		if (!cDone && cpOf.get(s) <= cpC) { nearC(); cDone = true; }
+		add('near', s.best.inputs, s.best.ticks - ESC_BACK[0], `room "${s.desc}"'s nearest attempt${cpOf && cpOf.get(s) > cpC ? ' (further along the switch chain)' : ''}`, s.best.dist, s.room, s.desc);
+	}
+	if (!cDone) nearC();
 	if (c && !c.cut && c.inputs) for (const b of ESC_BACK.slice(1)) add('near', String(c.inputs), c.ticks - b, `the nearest attempt, ${b} ticks back`, c.dist, undefined, '');
 	// ARRIVAL: the rooms' first arrivals (the state that entered the room: its coins, keys and switches, not the place
 	// where the search's nearest attempt ended in it): the nearest attempt's own room first, then the rooms of a coin count
-	// not escaped from, rooms not escaped from, rooms that open territory, nearest first
+	// not escaped from, rooms not escaped from, rooms that open territory, nearest first (the chain: by its progress first)
 	const cr = closestRoom ? sources.get(closestRoom.key) : null;
-	if (cr && cr.early) add('arrival', cr.early.inputs, cr.early.ticks, `where room "${cr.desc}" was entered`, cr.early.dist, cr.room, cr.desc);
 	const near = (s) => (s.best ? s.best.dist : s.early.dist);
-	const arr = [...sources.values()].filter((s) => s.early && s !== cr)
-		.sort((x, y) => rank(x) - rank(y) || (y.gain > 0) - (x.gain > 0) || near(x) - near(y));
+	const arr = [...sources.values()].filter((s) => s.early && (cpOf || s !== cr))
+		.sort((x, y) => cpBy(x, y) || (y === cr) - (x === cr) || rank(x) - rank(y) || (y.gain > 0) - (x.gain > 0) || near(x) - near(y));
+	if (!cpOf && cr && cr.early) add('arrival', cr.early.inputs, cr.early.ticks, `where room "${cr.desc}" was entered`, cr.early.dist, cr.room, cr.desc);
 	for (const s of arr) add('arrival', s.early.inputs, s.early.ticks, `where room "${s.desc}" was entered`, s.early.dist, s.room, s.desc);
 	// FRONTIER: the least explored rooms (the fewest relay runs, breaker runs and escapes from them), the newest first
 	// (entered last: the search has had the least time there), rooms that open territory first; their nearest attempt a
-	// little back
+	// little back (the chain: by its progress first)
 	const used = (s) => (s.runs || 0) + (s.brk || 0) + (esc.rooms.has(s.room) ? 1 : 0);
 	const fr = [...sources.values()].filter((s) => s.best && s.best.dist < RF.DEATH_TILES)
-		.sort((x, y) => used(x) - used(y) || (y.gain > 0) - (x.gain > 0) || y.at - x.at);
+		.sort((x, y) => cpBy(x, y) || used(x) - used(y) || (y.gain > 0) - (x.gain > 0) || y.at - x.at);
 	for (const s of fr) add('frontier', s.best.inputs, s.best.ticks - ESC_BACK[0], `the least explored room "${s.desc}"'s nearest attempt`, s.best.dist, s.room, s.desc);
 	return out;
 }
@@ -2406,6 +2524,7 @@ function start(b, gpu, test) {
 function useSteer(sf, noGpu) {
 	if (!cur) return;
 	cur.files.steer = ''; cur.files.steerBeam = ''; cur.files.steerCpu = ''; cur.files.steerDist = false; cur.reachLookup = null; cur.distBySteer = false;
+	cur.chainW = null; cur.chainSteer = undefined;   // (the switch chain's waves and file: chainWavesOf, switchGate)
 	S.steer = null;
 	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field until it is built'); return; }
 	if (sf && sf.over) note(`the steer field ${sf.over}`);
@@ -2424,11 +2543,13 @@ function useSteer(sf, noGpu) {
 	// rooms behind the coin doors the level's coins never open)
 	cur.distBySteer = cur.files.steerDist = true;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
-	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true };
+	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true, chain: sf.chain && sf.chain.n ? { n: sf.chain.n, waves: sf.chain.waves, start: sf.chain.start } : undefined };
+	cur.chainW = chainWavesOf(sf);
+	if (cur.chainW && S.steer.chain) S.steer.chain.aim = true;   // (the escape's and the breaker's starts and aim by it)
 	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
 	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
-	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
+	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}${chainNote(sf)}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
@@ -2461,7 +2582,9 @@ function lateSteer(gen, sf2) {
 	if (esc && esc.run) esc.run.best = Infinity;
 	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	const mb = sf2.bytes / 1048576;
-	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
+	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec, chain: sf2.chain && sf2.chain.n ? { n: sf2.chain.n, waves: sf2.chain.waves, start: sf2.chain.start } : undefined };
+	cur.chainW = chainWavesOf(sf2); cur.chainSteer = undefined;
+	if (cur.chainW && S.steer.chain) S.steer.chain.aim = true;
 	// (the plan past its count, when the cache had it; else it comes after the field from the same build: pastArrived)
 	if (!cur.past && sf2.past && fs.existsSync(pastFileOf(sf2.file))) cur.past = Object.assign({ file: pastFileOf(sf2.file) }, sf2.past);
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
@@ -2473,7 +2596,7 @@ function lateSteer(gen, sf2) {
 		const dist = q.key === 'goexplore' || q.key === 'escape';
 		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${cur.files.steerCpu}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
-	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
+	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}${cur.files.steerCpu !== sf2.file ? chainNote(sf2) : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
 		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
 	save();
 }
@@ -2711,7 +2834,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (((!cached.tour || !cached.tour.n) && !(cached.dp && cached.dp.free)) || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (!cpuOnly(cached) || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -2723,9 +2846,9 @@ function steerInfo(buf, hash) {
 			let lfp = null, bytes = 0;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
-			// (the coin tour, the coin DP outside the layer product: the CPU search's file alone)
-			if (useful && (st.tour || (st.dp && st.dp.free))) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
-			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour,
+			// (the coin tour, the coin DP outside the layer product, the switch chain: the CPU search's file alone)
+			if (useful && (st.tour || (st.dp && st.dp.free) || st.chain)) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
+			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour, chain: st.info.chain,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
 				pastWanted: useful && !!st.info.dp && !st.info.dp.free && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
@@ -4122,6 +4245,6 @@ function shutdown() {
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
 	EXP_REPLAY_MS, EXP_TIP, IMPROVE_KEEP,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, chainWavesParse, purpleOnOf, chainProgW, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };

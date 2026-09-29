@@ -437,8 +437,118 @@ function sectionC() {
 	check('... one worker with a tick budget is reproducible', !!g1.route && !!g2.route && g1.route.inputs === g2.route.inputs && g1.route.simTicks === g2.route.simTicks);
 }
 
+/** D the switch chain (steer.js chainPlan / buildChain / chainFifths / nextSwitch, the CPU file's section, flags 8; switchAim, the wall breaker's gate): a
+ *  corridor, the spawn in the middle, purple switch 1 at the far left, door 1 (184, a whole column) right of the spawn,
+ *  switch 2 behind it, door 2, the trophy: the walk reaches switch 1 with nothing on, switch 2 with 1 on, the trophy with
+ *  both: waves [1] [2]. With one layer (maxLayers 1: no switch modelled) the layer field walks through both doors (the
+ *  false near); the chain counts the detour to switch 1, falls when it is pressed, rises when it is pressed again (off);
+ *  the plain (GPU) file is the build without the chain byte for byte; goexplore.js on the CPU file routes the level */
+function sectionD() {
+	section('D the switch chain (a monotone counter over purple switch waves; the CPU file only)');
+	const W = 60, H = 8, y = H - 2, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let yy = 1; yy < H - 1; yy++) cells.push([0, yy, 9], [W - 1, yy, 9], [25, yy, 184, 1], [40, yy, 184, 2]);
+	cells.push([15, y, 255], [1, y, 113, 1], [33, y, 113, 2], [52, y, 121]);
+	const buf = ED.eelvlOf({ name: 'chain', width: W, height: H, cells });
+	const L = levelOf(buf);
+	const A = SF.analyze(L, {});
+	const CP = SF.chainPlan(A);
+	check('the waves: switch 1 with nothing on, switch 2 with 1 on, the trophy with both (K 2)', !CP.none && CP.K === 2 && JSON.stringify(CP.need) === '[[1],[2]]', JSON.stringify(CP.none || CP.need));
+	check('a sequence (every needed id of the waves needed by the fixpoint)', CP.seq === true);
+	// (one wave is no chain: switch 1 alone before the trophy: CHAIN_MIN_WAVES)
+	const cells1 = cells.filter((c) => !(c[0] === 40 && c[2] === 184) && !(c[0] === 33 && c[2] === 113));
+	const L1 = levelOf(ED.eelvlOf({ name: 'chain1', width: W, height: H, cells: cells1 }));
+	const CP1 = SF.chainPlan(SF.analyze(L1, {})), st1 = SF.buildSteer(L1, { maxLayers: 1 });
+	check('one wave (switch 1 alone): no chain (the layers\'), the CPU file = the plain file', !!CP1.none && /one wave/.test(CP1.none) && !st1.chain && Buffer.compare(SF.steerFileBytes(st1, null, true), SF.steerFileBytes(st1, null)) === 0, JSON.stringify(CP1.none || CP1.need));
+	// (with the budget the layers model switch 1, whose detour their plan meets; switch 2 lies on the way: its door open in
+	// every layer, as the chain's wave 2 has it: the chain raises no value at the start)
+	const full = SF.buildSteer(L), fs0 = new E.EESim(L); fs0.reset();
+	const fc = SF.readSteerFile(SF.steerFileBytes(full, null, true)), fp = SF.readSteerFile(SF.steerFileBytes(full, null));
+	check('with the budget the layers model switch 1 (its detour): the chain changes no value at the start', full.info.features.includes('psw:1') && SF.steerFifths(fc, fs0) === SF.steerFifths(fp, fs0), `${full.info.features} ${SF.steerFifths(fc, fs0)} vs ${SF.steerFifths(fp, fs0)}`);
+	const st = SF.buildSteer(L, { maxLayers: 1 }), st0 = SF.buildSteer(L, { maxLayers: 1, noChain: true });
+	check('one layer (no switch modelled): the chain over 2 ids in 2 waves', !!st.chain && st.chain.n === 2 && st.info.chain.waves === 2 && st.info.chain.unmodelled === 2, JSON.stringify(st.info.chain));
+	const plain = SF.steerFileBytes(st, null), plain0 = SF.steerFileBytes(st0, null), cpu = SF.steerFileBytes(st, null, true);
+	check('the plain (GPU) file = the build without the chain, byte for byte (no flags 8)', Buffer.compare(plain, plain0) === 0 && (plain.readInt32LE(28) & 8) === 0);
+	const rc = SF.readSteerFile(cpu), rp = SF.readSteerFile(plain);
+	check('the CPU file: flags 8 (not 4: the free coin DP dp.max), the chain section read back', (cpu.readInt32LE(28) & 8) !== 0 && (cpu.readInt32LE(28) & 4) === 0 && !!rc.chain && rc.chain.n === 2 && !rp.chain && !(rc.dp && rc.dp.max));
+	// (the chain's section alone, read without the bodies: editor.js switchGate)
+	const cf = path.join(tmp, 'chain_cpu_only.bin'), pf = path.join(tmp, 'chain_plain_only.bin');
+	fs.writeFileSync(cf, cpu); fs.writeFileSync(pf, plain);
+	const rcf = SF.readChainFile(cf), same = (a, b) => a.length === b.length && a.every((v, k) => v === b[k] || (Number.isNaN(v) && Number.isNaN(b[k])));
+	check('readChainFile: the chain section alone = readSteerFile\'s (every array), none in the plain file',
+		!!rcf && rcf.N === st.N && rcf.W === st.W && rcf.chain.n === rc.chain.n && rcf.chain.nW === rc.chain.nW && ['id', 'wave', 'order', 'tail', 'C', 'legs'].every((k) => same(rcf.chain[k], rc.chain[k])) && SF.readChainFile(pf) === null);
+	const prev = process.env.EEAT_CHAIN;
+	process.env.EEAT_CHAIN = '0';
+	const off = SF.buildSteer(L, { maxLayers: 1 });
+	if (prev === undefined) delete process.env.EEAT_CHAIN; else process.env.EEAT_CHAIN = prev;
+	check('EEAT_CHAIN=0: no chain', !off.chain && off.info.chain === null);
+	// the route: left onto switch 1, right through both doors (switch 2 on the way) to the trophy
+	const ms = [...new Array(80).fill(2), ...new Array(700).fill(4)];
+	const ev = C.evaluate(L, Uint8Array.from(ms));
+	check('left to switch 1, then right finishes in the engine (0 deaths)', !!ev && ev.deaths === 0, ev ? `${ev.runTicks} run ticks` : 'no finish');
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	const c0 = SF.steerFifths(rc, sim), p0 = SF.steerFifths(rp, sim), n0 = SF.nextSwitch(rc, sim);
+	check('at the start the chain counts the detour to switch 1 (CPU file above the layer field\'s false near by 20+ tiles); its next switch is 1', c0 > p0 + 100 && n0 && n0.id === 1, `${c0 / 5} vs ${p0 / 5} tiles; next ${n0 && n0.id}`);
+	let lower = 0, states = 0, on1 = -1, v1b = -1, v1a = -1, n1 = null, prevV = c0, rises = 0;
+	for (let t = 0; t < ms.length && !sim.has_silver_crown; t++) {
+		const was = sim._switches.get(1) === true;
+		const vb = SF.steerFifths(rc, sim);
+		E.applyMask(inp, ms[t]); sim.tick(inp);
+		if (sim.has_silver_crown || sim.is_dead) break;
+		const vc = SF.steerFifths(rc, sim), vp = SF.steerFifths(rp, sim);
+		states++;
+		if (vp >= 0 && vc >= 0 && vc < vp) lower++;
+		if (!was && sim._switches.get(1) === true && on1 < 0) { on1 = t; v1b = vb; v1a = vc; n1 = SF.nextSwitch(rc, sim); }
+		if (on1 >= 0 && t > on1 + 20 && vc > prevV + 10) rises++;
+		prevV = vc;
+	}
+	check('along the route the chain never lowers the value (the larger of the two relaxations)', states > 100 && lower === 0, `${lower} of ${states}`);
+	check('switch 1 pressed: the value does not jump up (the tour goes on from it) and the next switch is 2', on1 >= 0 && v1a <= v1b + 10 && n1 && n1.id === 2, `tick ${on1}: ${v1b / 5} -> ${v1a / 5} tiles; next ${n1 && n1.id}`);
+	check('after switch 1 the value falls on the way right (no rise of 2+ tiles)', on1 >= 0 && rises === 0, `${rises} rises`);
+	// pressed again (off): the value rises back to the tour through switch 1
+	const s2 = new E.EESim(L); s2.reset();
+	for (let t = 0; t <= 80 + 100; t++) { E.applyMask(inp, ms[t]); s2.tick(inp); }
+	const von = SF.steerFifths(rc, s2);
+	s2._switches.set(1, false);
+	const voff = SF.steerFifths(rc, s2);
+	check('switch 1 off again (a toggle, or its 1619 reset) behind its shut door: the chain has no way there (-2); a sequence (both ids needed): no value (-1, ranked behind; the layer field would say near)', SF.chainFifths(rc, s2) === -2 && rc.chain.seq === true && voff === -1 && von >= 0, `${von / 5} tiles -> ${voff}`);
+	// (not a sequence (the flag off, as where most ids are alternatives): the layers' value, the chain never takes one away)
+	const rn = Object.assign({}, rc, { chain: Object.assign({}, rc.chain, { seq: false }) });
+	check('... not a sequence: the layers value there (main)', SF.steerFifths(rn, s2) === SF.steerFifths(rp, s2) && SF.steerFifths(rn, s2) >= 0);
+	check('the sequence flag through the file (readSteerFile, readChainFile) and the build info', st.chain.seq === true && st.info.chain.seq === true && rc.chain.seq === true && SF.readChainFile(cf).chain.seq === true);
+	const s3 = new E.EESim(L); s3.reset();
+	for (let t = 0; t <= 80 + 30; t++) { E.applyMask(inp, ms[t]); s3.tick(inp); }
+	const w1 = SF.steerFifths(rc, s3);
+	s3._switches.set(1, false);
+	const w0 = SF.steerFifths(rc, s3);
+	check('switch 1 off again before its door: the value rises by the way back to it', w0 > w1 + 20, `${w1 / 5} -> ${w0 / 5} tiles`);
+	// the wall breaker's gate (editor.js switchGate): the next OFF switch's walk with the ball's own switches (switchAim)
+	const s0 = new E.EESim(L); s0.reset();
+	const t0 = (Math.trunc(s0.py + 8) >> 4) * W + (Math.trunc(s0.px + 8) >> 4);
+	const a1 = SF.switchAim(A, new Set(), 1, t0), a2off = SF.switchAim(A, new Set(), 2, t0), a2on = SF.switchAim(A, new Set([1]), 2, t0);
+	const sw = (id) => { const r = []; for (let t = 0; t < W * H; t++) if (L.fg[t] === 113 && L.lookup0[t] === id) r.push(t); return r; };
+	check('switchAim: switch 1 from the start, its tile the goal (0), the start 14+ tiles out (5 fifths a step)', !!a1 && sw(1).every((t) => a1.walk[t] === 0) && a1.start >= 70 && a1.start < 0xffff, a1 && `${a1.start} fifths, ${a1.tiles.length} tile`);
+	check('switchAim: switch 2 behind door 1 with nothing on: no walk from the start (CUT); with 1 on: a walk (the ball\'s own switches, not the leg\'s waves)', !!a2off && a2off.start === 0xffff && !!a2on && a2on.start < 0xffff && sw(2).every((t) => a2on.walk[t] === 0), `${a2off && a2off.start} / ${a2on && a2on.start}`);
+	check('switchAim: an id with no switch tile: null', SF.switchAim(A, new Set(), 77, t0) === null);
+	// the escape's and the breaker's starts by the chain's progress (editor.js chainWavesParse / purpleOnOf / chainProgW)
+	const WV = ED.chainWavesParse('1,2,3,4,5,101 | 6,7,8,9,10,41,202 | 36,37');
+	const pr = (d) => ED.chainProgW(WV, ED.purpleOnOf(d));
+	check('chain progress: the waves parsed from the build\'s ids', JSON.stringify(WV) === '[[1,2,3,4,5,101],[6,7,8,9,10,41,202],[36,37]]');
+	check('chain progress: waves complete x 1000 + the ids ON of the first unfinished wave (a later wave\'s id before it counts nothing)',
+		pr('(start)') === 0 && pr('coins=1 purple=[1,2,3,41,101]') === 4 && pr('purple=[1,2,3,4,5,101]') === 1000 && pr('purple=[1,2,3,4,5,101,6,8,202] key:red') === 1003 && pr('purple=[2,3,4,5,101,6,7,8,9,10,41,202]') === 5,
+		[pr('(start)'), pr('coins=1 purple=[1,2,3,41,101]'), pr('purple=[1,2,3,4,5,101]'), pr('purple=[1,2,3,4,5,101,6,8,202] key:red'), pr('purple=[2,3,4,5,101,6,7,8,9,10,41,202]')].join(' '));
+	// the CPU search on the CPU file routes the level (1 worker, a tick budget)
+	const lf = path.join(tmp, 'chain.eelvl'), sf = path.join(tmp, 'chain_cpu.bin');
+	fs.writeFileSync(lf, buf); fs.writeFileSync(sf, cpu);
+	const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'src', 'goexplore.js'), lf, '--workers=1', '--seed=3', '--maxTicks=3000000', '--mem=200', '--seconds=60', '--first=1', `--steer=${sf}`], { encoding: 'utf8' });
+	const res = out.split('\n').map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).find((j) => j && j.ev === 'result');
+	check('goexplore --steer=<the CPU file with the chain>: a route (replayed)', !!res, res ? `${res.ticks} ticks after ${res.simTicks} simulated` : 'none');
+}
+
 if (want('A')) sectionA();
 if (want('B')) sectionB();
 if (want('C')) sectionC();
+if (want('D')) sectionD();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
