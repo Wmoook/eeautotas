@@ -506,7 +506,11 @@ function sectionD() {
 	const von = SF.steerFifths(rc, s2);
 	s2._switches.set(1, false);
 	const voff = SF.steerFifths(rc, s2);
-	check('switch 1 off again (a toggle, or its 1619 reset) behind its shut door: the chain has no way there (-2) and the value is the layers\' (main\'s: the chain never takes one away)', SF.chainFifths(rc, s2) === -2 && voff === SF.steerFifths(rp, s2) && von >= 0, `${von / 5} tiles -> ${voff / 5}`);
+	check('switch 1 off again (a toggle, or its 1619 reset) behind its shut door: the chain has no way there (-2); a sequence (both ids needed): no value (-1, ranked behind; the layer field would say near)', SF.chainFifths(rc, s2) === -2 && rc.chain.seq === true && voff === -1 && von >= 0, `${von / 5} tiles -> ${voff}`);
+	// (not a sequence (the flag off, as where most ids are alternatives): the layers' value, the chain never takes one away)
+	const rn = Object.assign({}, rc, { chain: Object.assign({}, rc.chain, { seq: false }) });
+	check('... not a sequence: the layers value there (main)', SF.steerFifths(rn, s2) === SF.steerFifths(rp, s2) && SF.steerFifths(rn, s2) >= 0);
+	check('the sequence flag through the file (readSteerFile, readChainFile) and the build info', st.chain.seq === true && st.info.chain.seq === true && rc.chain.seq === true && SF.readChainFile(cf).chain.seq === true);
 	const s3 = new E.EESim(L); s3.reset();
 	for (let t = 0; t <= 80 + 30; t++) { E.applyMask(inp, ms[t]); s3.tick(inp); }
 	const w1 = SF.steerFifths(rc, s3);

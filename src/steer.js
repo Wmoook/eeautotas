@@ -1442,6 +1442,8 @@ function tourFifths(st, sim) {
 // tile (the physics jumps them), coin doors / keys / other gates open (a relaxation), purple doors (184) open and gates
 // (185) shut when their id is ON.
 const CHAIN_KILL = 10, CHAIN_MAX_WAVES = 64, CHAIN_MAX_TILES = 4000;
+// (a sequence: the fixpoint needs at least this share of the waves' ids: the chain over every id of the waves; chainPlan)
+const CHAIN_SEQ_F = 0.5;
 /** the chain walk's passability with the purple ids `on` ON: 0 blocked, 1 open, 2 a killer (passable, priced) */
 function chainPass(A, on) {
 	const P = new Uint8Array(A.N);
@@ -1526,11 +1528,19 @@ function chainPlan(A, deadline) {
 		if (deadline && Date.now() > deadline) return { none: 'time' };
 	}
 	if (!need.size) return { none: `no id every way needs (${on.size} ids in ${K} waves)`, K };
+	// (a SEQUENCE, d4-switch-chain-2: where the fixpoint needs most of the waves' ids (CHAIN_SEQ_F; Bad EE Level 9 35 of 54,
+	// its world / hub switches alternatives only to the gravity-blind walk), the chain asks for EVERY id of the waves, as the
+	// first chain's fallback did (Bad EE Level 9 with the needed ids alone: 5 of 35 ids ON in every seed, no wave complete,
+	// vs 14-19 of 54 and 1-2 waves with every id, box 3 pairs, 1200 s); where most are alternatives (Evolution Revolution 1
+	// of 11, Purple Depths 0 of 3: routed with 1 of its 3 switches) only the needed ones. A sequence's ball behind a door
+	// its own switch shut again has no value (-2 -> -1, ranked behind); elsewhere it keeps the rest's value)
+	const all = waves.flat(), seq = need.size >= CHAIN_SEQ_F * all.length;
+	if (seq) for (const id of all) need.add(id);
 	// (the needed ids by their wave; the legs' doors: every id of the earlier waves ON, needed or not: the walk's own
 	// way to a wave's switches)
 	const byWave = [], waveOf = [];
 	waves.forEach((ids, w) => { const nd = ids.filter((id) => need.has(id)); if (nd.length) { byWave.push(nd); waveOf.push(w); } });
-	return { waves, need: byWave, waveOf, K, tilesOf };
+	return { waves, need: byWave, waveOf, K, tilesOf, seq };
 }
 /** the chain of a level (kappa: the walk's scale) -> {n, nW, id, wave, order, tail, C, legs ((n + 1) x N u16: row n the
  *  walk to the trophy with the chain ON), ...} or null */
@@ -1580,7 +1590,7 @@ function buildChain(A, CP, kappa, deadline, maxBytes) {
 	}
 	const legs = new Uint16Array((n + 1) * N);
 	for (let i = 0; i <= n; i++) { const d = ds[i], o = i * N; for (let t = 0; t < N; t++) legs[o + t] = d[t] < Infinity ? Math.min(CUT - 1, Math.round(d[t] * q)) : CUT; }
-	return { n, nW: CP.need.length, id: Int32Array.from(ids), wave: Int32Array.from(wave), order, tail, C, legs, ms: Date.now() - t0, bytes: legs.byteLength + C.byteLength };
+	return { n, nW: CP.need.length, seq: !!CP.seq, id: Int32Array.from(ids), wave: Int32Array.from(wave), order, tail, C, legs, ms: Date.now() - t0, bytes: legs.byteLength + C.byteLength };
 }
 /** the chain's value of a sim's state (fifths; -1: none (no chain, off the map, the chain ON and no walk to the trophy);
  *  -2: the chain's walk reaches none of the first unfinished wave's OFF switches from here: a ball behind a door its own
@@ -1858,7 +1868,7 @@ function buildSteer(level, opts) {
 						R.scale = f;
 						s1 = chainFifths(steer, sim0);
 					}
-					chainInfo = { n: R.n, waves: R.nW, K: CP.K, ids0: CP.waves.flat().length, unmodelled: miss.length, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, mb: Math.round(R.bytes / 104857.6) / 10, start: s1 >= 0 ? s1 / 5 : null,
+					chainInfo = { n: R.n, waves: R.nW, K: CP.K, ids0: CP.waves.flat().length, seq: !!CP.seq, unmodelled: miss.length, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, mb: Math.round(R.bytes / 104857.6) / 10, start: s1 >= 0 ? s1 / 5 : null,
 						ids: CP.need.map((w) => w.join(',')).join(' | ') };
 				} else chainInfo = { none: 'no leg from the start', K: CP.K };
 			}
@@ -2000,7 +2010,8 @@ function steerFifths(st, sim) {
 	// (-2: the chain's walk takes the ball to none of the switches it still needs, with the earlier waves' doors open:
 	// behind a door its own switch shut again, or out of the chain's order with other switches on; the rest's value, as
 	// main: the chain never takes a value away)
-	if (st.chain) { const c = chainFifths(st, sim); return c < 0 ? v : v < 0 ? c : Math.max(v, c); }
+	// (-2 in a sequence (chainPlan seq): no value, ranked behind every valued state: its layer value is the false near)
+	if (st.chain) { const c = chainFifths(st, sim); return c === -2 && st.chain.seq ? -1 : c < 0 ? v : v < 0 ? c : Math.max(v, c); }
 	return v;
 }
 /** the steer cost without the switch chain (fifths, -1 = no value) */
@@ -2070,7 +2081,7 @@ function steerFileBytes(st, levelFp, withTour) {
 	}
 	const chainIdx = parts.length;
 	if (K) {
-		parts.push(i32([K.n, K.nW, 0, 0]), i32(K.id), i32(K.wave), i32(K.order));
+		parts.push(i32([K.n, K.nW, K.seq ? 1 : 0, 0]), i32(K.id), i32(K.wave), i32(K.order));
 		parts.push(Buffer.from(Float32Array.from(K.tail).buffer), Buffer.from(Float32Array.from(K.C).buffer));
 		parts.push(Buffer.from(K.legs.buffer, K.legs.byteOffset, K.legs.byteLength));
 	}
@@ -2160,7 +2171,7 @@ function readSteerFile(buf) {
 		const id = ints(n), wave = ints(n), order = ints(n);
 		const view = (Ctor, len) => { o = al8(o); let a; if ((buf.byteOffset + o) % Ctor.BYTES_PER_ELEMENT === 0) a = new Ctor(buf.buffer, buf.byteOffset + o, len); else a = new Ctor(Uint8Array.from(buf.subarray(o, o + len * Ctor.BYTES_PER_ELEMENT)).buffer); o += len * Ctor.BYTES_PER_ELEMENT; return a; };
 		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, (n + 1) * N);
-		chain = { n, nW: hd[1], id, wave, order, tail, C, legs };
+		chain = { n, nW: hd[1], seq: hd[2] === 1, id, wave, order, tail, C, legs };
 	}
 	return { version: ver, tour, chain, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
@@ -2186,7 +2197,7 @@ function readChainFile(file) {
 		const h4 = ints(4), n = h4[0];
 		const id = ints(n), wave = ints(n), order = ints(n);
 		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, (n + 1) * N);
-		return { W, H, N, chain: { n, nW: h4[1], id, wave, order, tail, C, legs } };
+		return { W, H, N, chain: { n, nW: h4[1], seq: h4[2] === 1, id, wave, order, tail, C, legs } };
 	} finally { fs.closeSync(fd); }
 }
 
