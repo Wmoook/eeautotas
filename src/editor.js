@@ -1377,7 +1377,8 @@ function switchGate(inputs) {
 		const L = cur.level;
 		if (cur.chainSteer === undefined) {
 			cur.chainSteer = null;
-			const st = SF.readSteerFile(fs.readFileSync(cur.files.steerCpu));
+			// (the chain's section alone: Bad EE Level 9's CPU file is 280 MB, its chain 9.5 MB)
+			const st = SF.readChainFile(cur.files.steerCpu);
 			if (st && st.chain) cur.chainSteer = { st, A: SF.analyze(L, {}), fp: G.blobFp(G.levelBlob(L)), n: 0, look: cur.reachLookup || SF.readReachBytes(fs.readFileSync(cur.files.reach)) };
 		}
 		const K = cur.chainSteer;

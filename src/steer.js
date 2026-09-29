@@ -2160,8 +2160,33 @@ function readSteerFile(buf) {
 	}
 	return { version: ver, tour, chain, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
+/** the switch chain's section alone of a CPU steer file (flags 8), read without its bodies (Bad EE Level 9's CPU file is
+ *  280 MB, its chain 9.5 MB): {W, H, N, chain} for nextSwitch / chainFifths, or null (no chain, not an RCH4 file) */
+function readChainFile(file) {
+	const fs = require('fs');
+	const fd = fs.openSync(file, 'r');
+	try {
+		const size = fs.fstatSync(fd).size, hd = Buffer.alloc(64);
+		if (size < 72 || fs.readSync(fd, hd, 0, 64, 0) !== 64 || hd.toString('latin1', 0, 4) !== 'RCH4' || hd.readInt32LE(4) !== VERSION) return null;
+		const W = hd.readInt32LE(8), H = hd.readInt32LE(12), N = W * H;
+		if (!(hd.readInt32LE(28) & 8)) return null;
+		const tl = Buffer.alloc(8);
+		fs.readSync(fd, tl, 0, 8, size - 8);
+		const base = Number(tl.readBigUInt64LE(0));
+		if (!(base >= 64 && base < size - 8)) return null;
+		const b = Buffer.alloc(size - 8 - base);
+		fs.readSync(fd, b, 0, b.length, base);
+		let o = base;
+		const ints = (n) => { o = al8(o); const a = new Int32Array(n); for (let k = 0; k < n; k++) a[k] = b.readInt32LE(o - base + 4 * k); o += 4 * n; return a; };
+		const view = (Ctor, len) => { o = al8(o); const a = new Ctor(Uint8Array.from(b.subarray(o - base, o - base + len * Ctor.BYTES_PER_ELEMENT)).buffer); o += len * Ctor.BYTES_PER_ELEMENT; return a; };
+		const h4 = ints(4), n = h4[0];
+		const id = ints(n), wave = ints(n), order = ints(n);
+		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, (n + 1) * N);
+		return { W, H, N, chain: { n, nW: h4[1], id, wave, order, tail, C, legs } };
+	} finally { fs.closeSync(fd); }
+}
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, nextSwitch, switchAim, chainFifths, chainPlan, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, nextSwitch, switchAim, chainFifths, chainPlan, steerFileBytes, writeSteerFile, readSteerFile, readChainFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)

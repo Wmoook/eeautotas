@@ -465,6 +465,12 @@ function sectionD() {
 	check('the plain (GPU) file = the build without the chain, byte for byte (no flags 8)', Buffer.compare(plain, plain0) === 0 && (plain.readInt32LE(28) & 8) === 0);
 	const rc = SF.readSteerFile(cpu), rp = SF.readSteerFile(plain);
 	check('the CPU file: flags 8 (not 4: the free coin DP dp.max), the chain section read back', (cpu.readInt32LE(28) & 8) !== 0 && (cpu.readInt32LE(28) & 4) === 0 && !!rc.chain && rc.chain.n === 2 && !rp.chain && !(rc.dp && rc.dp.max));
+	// (the chain's section alone, read without the bodies: editor.js switchGate)
+	const cf = path.join(tmp, 'chain_cpu_only.bin'), pf = path.join(tmp, 'chain_plain_only.bin');
+	fs.writeFileSync(cf, cpu); fs.writeFileSync(pf, plain);
+	const rcf = SF.readChainFile(cf), same = (a, b) => a.length === b.length && a.every((v, k) => v === b[k] || (Number.isNaN(v) && Number.isNaN(b[k])));
+	check('readChainFile: the chain section alone = readSteerFile\'s (every array), none in the plain file',
+		!!rcf && rcf.N === st.N && rcf.W === st.W && rcf.chain.n === rc.chain.n && rcf.chain.nW === rc.chain.nW && ['id', 'wave', 'order', 'tail', 'C', 'legs'].every((k) => same(rcf.chain[k], rc.chain[k])) && SF.readChainFile(pf) === null);
 	const prev = process.env.EEAT_CHAIN;
 	process.env.EEAT_CHAIN = '0';
 	const off = SF.buildSteer(L, { maxLayers: 1 });
