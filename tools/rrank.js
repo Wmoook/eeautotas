@@ -318,6 +318,21 @@ function pickOf(run, f, step) {
 	return best;
 }
 
+/** a room's SOFT route position: the position of the route room nearest it by its features (L1; ties: the furthest), so
+ *  a room of the route's coins with another key or switch subset counts where the route holds that much (an exact
+ *  description match is too strict: the routes are 1-3 of many ways) */
+function softPos(lp, d) {
+	if (d === null || d === undefined) return null;
+	const f = lp.feat.get(d) || RR.featuresOf(lp.I, d, 0);
+	let best = Infinity, pos = null;
+	for (const [r, p] of lp.route) {
+		const g = lp.feat.get(r) || RR.featuresOf(lp.I, r, 0);
+		let s = 0;
+		for (let k = 0; k < NF; k++) s += Math.abs(f[k] - g[k]);
+		if (s < best - 1e-9 || (Math.abs(s - best) <= 1e-9 && p > pos)) { best = s; pos = p; }
+	}
+	return pos;
+}
 function loadData() {
 	const j = JSON.parse(fs.readFileSync(P.data, 'utf8'));
 	return j.levels.map((lv) => Object.assign(pairsOf(lv), { lv }));
@@ -349,9 +364,9 @@ function cv(lps) {
 		// (the counterfactual: every stalled run of the level)
 		const cf = [];
 		for (const run of lp.lv.stalled) {
-			const row = { run: `${run.config}/s${run.seed}`, dist: run.fn, distRoute: run.fn !== null && lp.route.has(run.fn), distPos: run.fn !== null && lp.route.has(run.fn) ? lp.route.get(run.fn) : null, picks: {} };
-			for (const st of steps) { const p = pickOf(run, R.model, st); row.picks[`model@${st}`] = { d: p, route: p !== null && lp.route.has(p), pos: p !== null && lp.route.has(p) ? lp.route.get(p) : null }; }
-			for (const nm of ['hand', 'pareto', 'hybrid']) { const p = pickOf(run, R[nm], null); row.picks[nm] = { d: p, route: p !== null && lp.route.has(p), pos: p !== null && lp.route.has(p) ? lp.route.get(p) : null }; }
+			const row = { run: `${run.config}/s${run.seed}`, dist: run.fn, distRoute: run.fn !== null && lp.route.has(run.fn), distPos: run.fn !== null && lp.route.has(run.fn) ? lp.route.get(run.fn) : null, distSoft: softPos(lp, run.fn), picks: {} };
+			for (const st of steps) { const p = pickOf(run, R.model, st); row.picks[`model@${st}`] = { d: p, route: p !== null && lp.route.has(p), pos: p !== null && lp.route.has(p) ? lp.route.get(p) : null, soft: softPos(lp, p) }; }
+			for (const nm of ['hand', 'pareto', 'hybrid']) { const p = pickOf(run, R[nm], null); row.picks[nm] = { d: p, route: p !== null && lp.route.has(p), pos: p !== null && lp.route.has(p) ? lp.route.get(p) : null, soft: softPos(lp, p) }; }
 			cf.push(row);
 		}
 		res.push({ file: lp.lv.file, pairs: lp.pairs.length, acc, cf, w });
@@ -368,8 +383,8 @@ function cv(lps) {
 	const tally = (key) => { const x = runs.filter((c) => c.picks[key]); return { n: x.length, route: x.filter((c) => c.picks[key].route).length, pos: mean(x.filter((c) => c.picks[key].route).map((c) => c.picks[key].pos)) }; };
 	const dT = { n: runs.length, route: runs.filter((c) => c.distRoute).length, pos: mean(runs.filter((c) => c.distRoute).map((c) => c.distPos)) };
 	console.log(`COUNTERFACTUAL (${runs.length} stalled runs of ${res.filter((r) => r.cf.length).length} levels another run routed; held-out model): the room S.closest picks is a ROUTE room of the level / its mean position along the route`);
-	console.log(`  distance (the run's own nearest attempt): ${dT.route} of ${dT.n} (${r3(dT.pos)})`);
-	for (const k of [...steps.map((s) => `model@${s}`), 'hand', 'pareto', 'hybrid']) { const t = tally(k); console.log(`  ${k.padEnd(12)}: ${t.route} of ${t.n} (${r3(t.pos)})`); }
+	console.log(`  distance (the run's own nearest attempt): ${dT.route} of ${dT.n} (${r3(dT.pos)}); soft position (the feature-nearest route room's) ${r3(mean(runs.map((c) => c.distSoft)))}`);
+	for (const k of [...steps.map((s) => `model@${s}`), 'hand', 'pareto', 'hybrid']) { const t = tally(k); console.log(`  ${k.padEnd(12)}: ${t.route} of ${t.n} (${r3(t.pos)}); soft position ${r3(mean(runs.filter((c) => c.picks[k]).map((c) => c.picks[k].soft)))}; soft further / behind the distance ${runs.filter((c) => c.picks[k] && c.picks[k].soft > c.distSoft + 1e-9).length} / ${runs.filter((c) => c.picks[k] && c.picks[k].soft < c.distSoft - 1e-9).length}`); }
 	// (the pick farther along the route than the distance's: route room vs not, or a later position)
 	const stepK = `model@${opt.step || 0.5}`;
 	const cmp = (c, k) => { const a = c.picks[k], dr = c.distRoute; if (a.route && !dr) return 1; if (!a.route && dr) return -1; if (a.route && dr) return a.pos > c.distPos + 1e-9 ? 1 : a.pos < c.distPos - 1e-9 ? -1 : 0; return 0; };
