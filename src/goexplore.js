@@ -391,8 +391,10 @@ const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefi
 // random runs made 1.2-1.4 M ticks per kernel second against 32-36 M without the mix (eegpu roll sizes a batch's
 // launches for its Lr ticks a run, and there the runs end early: the long classes' launches came out tiny), 82 M ticks
 // in 150 s against 1,315 M, and 8c00c75 / c30f499 routed it in 25-56 s where main did not in 150 s): the next batch goes
-// to the class furthest below its share (a class not yet run first), from the first batch on. The long sticky runs (120 ticks kept with p 0.95, 240 with 0.97) cross whole corridors and rooms from a
-// pick where the 40-tick runs of p 0.85 stay near it: PORTFOLIO's sweep sw1 (febeeb2, 15 never-routed campaign levels,
+// to the class furthest below its share (a class not yet run first), from the first batch on. (The measured times make
+// the class order, so with the mix the same seed no longer makes exactly the same search; one class, --roll / --keep or
+// --rollMix=0, as before.) The long sticky runs (120 ticks kept with p 0.95, 240 with 0.97) cross whole corridors and
+// rooms from a pick where the 40-tick runs of p 0.85 stay near it: PORTFOLIO's sweep sw1 (febeeb2, 15 never-routed campaign levels,
 // 180 s; src/out/pf/sweep/sw1) routed 0 with every 40 / 0.85 config and 4 with --roll=120 --keep=0.95 (Relics of Athena,
 // Hold Jump Challenge, Level 1 Overworld, The Mansion; 3 of 4 with the long runs on the GPU random runs alone, 0 of 4 on
 // the CPU runs alone), OCTOS_ROLLERCOASTER only with 240 / 0.97. Each path node keeps its class, so the host rebuilds its
