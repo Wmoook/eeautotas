@@ -5,7 +5,9 @@
 //              does not), with the key (switch, coins) taken it is the reach field's again; the RCH4 file round trip
 //              (readSteerFile gives the same numbers); another level's file is refused by the native tool; the build's
 //              byte budget: one body's bytes leave the key out (info.over); the forced portals' lastPortal chains (a
-//              portal next to an exit walked: reach.js unforceChains), with --jobs Good Egg along OC's run
+//              portal next to an exit walked: reach.js unforceChains), with --jobs Good Egg along OC's run; the layer
+//              memo (opt-in EEAT_STEER_MEMO): the same file on 7 toys, identical layers one field, the spares, the knob,
+//              the budget clock ('same' cuts what the build without it cuts; 'spend' does not) on a fake clock
 //   B agree    the JS lookup and the native tool's (eegpu steertest: the host, and with --gpu the GPU) along random input
 //              runs in the rooms and, with --jobs=<dir> (default src/jobs), along the big jobs' best runs: the same fifths
 //              and the beam's score to the bit (skipped without a native tool that reads RCH4)
