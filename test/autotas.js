@@ -1,10 +1,12 @@
 'use strict';
-// src/autotas.js's handoff rule (handoffWhy), pure, no GPU, no jobs (instant):
+// src/autotas.js's handoff rule (handoffWhy), pure, no GPU, no jobs:
 //   - no job yet: never; the window = the time the first route took, within [handoffMin, HANDOFF_WIN_MAX_S]
 //   - due once no route gained the job anything for a window (a faster route that the job's best is already ahead of
 //     gains it nothing: only the job's history entries of Find a route's runs count, FR_WHAT)
 //   - due when in the last window the optimizer's own stages gained more than the routes; not while the routes gain more
 //   - due when in the last window the routes gained the job less than HANDOFF_MIN_GAIN (1%) of its best
+// run() against stand-ins for the editor and the jobs (a few seconds): Find a route ending while its route is still in
+// the cleanup waits for the cleaned route (at most CLEAN_WAIT_MS, then the route as found); no route: it ends at once.
 // usage: node test/autotas.js        Exit code 1 if any check fails.
 const AT = require('../src/autotas.js');
 
@@ -46,5 +48,104 @@ check('FR_WHAT: a route\'s inbox run and its splice', AT.FR_WHAT.test('inbox (Fi
 	AT.FR_WHAT.test('inbox (Find a route (route)) + best (splice, 2 switches)') && AT.FR_WHAT.test('try: Find a route (route)') &&
 	!AT.FR_WHAT.test('inbox (gpu m1 3)') && !AT.FR_WHAT.test('sweep1_2') && !AT.FR_WHAT.test('try: focus 0:01.00-0:02.00'));
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+// ---- run(): Find a route ending while its route is still in the cleanup (editor.js cleanLater), stand-ins for the editor
+// and the jobs (a real 12 x 6 level, every route replayed). The race (the defaults A/B, Desolate Caverns): Find a route
+// stopped as soon as a strategy found a route; the same 250-ms poll saw the route 'pending' and the search ended, and the
+// AutoTASer ended "without a route (found)", dropping the route the editor kept.
+const Module = require('module');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const C = require('../src/common.js');
+const EL = require('../src/eelvl.js');
+const stubs = {};
+function stub(rel, exp) {
+	const f = require.resolve(`../src/${rel}`);
+	const m = new Module(f);
+	m.filename = f; m.loaded = true; m.exports = exp;
+	require.cache[f] = m;
+	stubs[rel] = exp;
+}
+// the level: a closed room, the trophy 4 tiles right of the spawn; the route: one input held (found by trying each)
+const LW = 12, LH = 6, bx = [], by = [];
+for (let x = 0; x < LW; x++) { bx.push(x, x); by.push(0, LH - 1); }
+for (let y = 1; y < LH - 1; y++) { bx.push(0, LW - 1); by.push(y, y); }
+const eelvl = EL.writeEelvl({ width: LW, height: LH, name: 'race', records: [{ id: 9, xs: bx, ys: by }, { id: 255, xs: [2], ys: [4] }, { id: 121, xs: [6], ys: [4] }] });
+const level = C.E.prepareLevel(Object.assign(EL.toSimLevel(EL.readEelvl(eelvl)), { start_mode: 'reset' }));
+let held = null;
+for (let m = 1; m < 32 && !held; m++) { const ev = C.evaluate(level, new Uint8Array(300).fill(m)); if (ev) held = ev; }
+const inputsOf = (ms) => C.eetasBytes(ms).toString('latin1');
+// the cleaned route (the held input alone) and the raw one (as found: another button pressed with it that changes nothing
+// the route needs, still finishing): the job's base tells which one it was made from
+let rawEv = null;
+for (let b = 1; b < 32 && held && !rawEv; b <<= 1) {
+	if (held.ms[0] & b) continue;
+	const ev = C.evaluate(level, held.ms.map((m) => m | b));
+	if (ev) rawEv = ev;
+}
+const asRoute = (ev) => ({ inputs: inputsOf(ev.ms), runTicks: ev.runTicks, ticks: ev.ms.length });
+const raw = rawEv ? asRoute(rawEv) : null;
+const cleaned = held ? asRoute(held) : null;
+const jobsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-autotas-test-'));
+let imported = [];
+stub('jobs.js', {
+	jobDir: (id) => path.join(jobsDir, id),
+	importJob: (o) => { imported.push(o.eetas.toString('latin1')); fs.mkdirSync(path.join(jobsDir, `j${imported.length}`), { recursive: true }); return { id: `j${imported.length}` }; },
+	runningPid: () => 0, loadJobLevel: () => level, tryCandidate: async () => ({ handed: true, best: null }),
+});
+// the editor: searching for `endAt` ms, then ended ('found') with the raw route 'pending'; the cleaned route (clean 'done')
+// `cleanAfter` ms later (Infinity: the cleanup never comes back); `route` false: ended without a route ('stopped')
+let ed = null;
+stub('editor.js', {
+	start: () => { ed.at = Date.now(); },
+	stop: () => {},
+	state: () => {
+		const t = Date.now() - ed.at;
+		if (t < ed.endAt) return { running: true, stage: 'searching', result: null };
+		if (!ed.route) return { running: false, stage: 'stopped', message: 'The search was stopped before it found a route.', result: null };
+		const done = t >= ed.endAt + ed.cleanAfter;
+		return { running: false, stage: 'found', result: Object.assign({}, done ? cleaned : raw, { clean: done ? 'done' : 'pending' }) };
+	},
+});
+let skew = 0;
+const realNow = Date.now;
+Date.now = () => realNow() + skew;
+/** one AutoTASer run against the stand-ins; its events; `onPending` once the route is pending (the clock can jump) */
+function runRace(o) {
+	ed = Object.assign({ at: Date.now(), endAt: 300, route: true, cleanAfter: 700 }, o);
+	imported = [];
+	return new Promise((resolve) => {
+		const evs = [];
+		const t0 = realNow();
+		let ctl = null, jumped = false;
+		const guard = setTimeout(() => ctl && ctl.stop(), 8000);
+		const poke = setInterval(() => { if (!jumped && o.jump && realNow() - t0 > ed.endAt + 600) { jumped = true; skew += o.jump; } }, 50);
+		ctl = AT.run({ eelvl, minutes: 5, workers: 1, cpu: true, name: 'race', startJob: () => ({ pid: 0 }), stopJob: () => {},
+			onEvent: (e) => { evs.push(e); if (e.ev === 'job') setTimeout(() => ctl.stop(), 300); },
+			onEnd: () => { clearTimeout(guard); clearInterval(poke); resolve({ evs, ms: realNow() - t0 }); } });
+	});
+}
+(async () => {
+	console.log('\nrun(): Find a route ends while its route is in the cleanup (the race)');
+	check('the stand-in level has a route, raw and cleaned', !!held && !!rawEv && raw.inputs !== cleaned.inputs, held ? `${held.runTicks} run ticks` : 'none');
+	if (held && rawEv) {
+		const a = await runRace({});
+		const endA = a.evs.find((e) => e.ev === 'end'), jobA = a.evs.find((e) => e.ev === 'job');
+		check('the search ended with the route pending: the AutoTASer waits for the cleanup and makes the job from the cleaned route',
+			!!jobA && imported.length === 1 && imported[0] === cleaned.inputs && !/without a route/.test(endA && endA.why), `${endA && endA.why}; job ${jobA ? jobA.runTicks : 'none'}, imported ${imported.map((x) => x.length).join(',') || 'nothing'}`);
+		const iH = a.evs.findIndex((e) => e.ev === 'handoff'), iJ = a.evs.findIndex((e) => e.ev === 'job');
+		check('then the handoff: "Find a route ended (found)", after the job', iJ >= 0 && iH > iJ && /Find a route ended \(found\)/.test(a.evs[iH].why), iH >= 0 ? a.evs[iH].why : 'no handoff');
+		const b = await runRace({ cleanAfter: Infinity, jump: AT.CLEAN_WAIT_MS + 1000 });
+		const endB = b.evs.find((e) => e.ev === 'end');
+		check(`the cleanup never comes back: after CLEAN_WAIT_MS (${AT.CLEAN_WAIT_MS} ms) the route as found is the job's base`,
+			imported.length === 1 && imported[0] === raw.inputs && !/without a route/.test(endB && endB.why), `${endB && endB.why}; imported ${imported.map((x) => x.length).join(',') || 'nothing'}`);
+	}
+	const c = await runRace({ route: false });
+	const endC = c.evs.find((e) => e.ev === 'end');
+	check('no route when the search ended: the AutoTASer ends at once, as before', !!endC && /Find a route ended without a route \(stopped: The search was stopped/.test(endC.why) && imported.length === 0 && c.ms < 2000,
+		`${endC && endC.why} after ${c.ms} ms`);
+	Date.now = realNow;
+	try { fs.rmSync(jobsDir, { recursive: true, force: true }); } catch (e) { /* in use */ }
+	console.log(`\n${pass} passed, ${fail} failed`);
+	process.exit(fail ? 1 : 0);
+})();
