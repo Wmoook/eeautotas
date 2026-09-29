@@ -1312,6 +1312,88 @@ function sectionS() {
 		check('knob: EEAT_SIDEARROW=0 = the plain model byte for byte; the default prices (arrows)', same && d.sideArrow.on && d.sideArrow.mode === 'arrows' && d.sideArrow.arrows > 0);
 	}
 }
+/** U: the sideways air prices (ordering only): the flight tables against the engine (a jump at the running limit never
+ *  gets further sideways at a row than the table's reach there), a gap only a glide crosses priced (the -1 set the
+ *  plain model's, the Bellman self-check), a gap a jump crosses not, a ledge only a glide reaches is no live launch, the
+ *  random rooms' -1 sets and self-check, the knob */
+function sectionU() {
+	section('U: sideways air prices (ordering only)');
+	// (a) the engine: from a floor at the running limit, a jump (and a walk off) held right over a deep pit: per row
+	// (relative to the launch row) the furthest column the centre reaches there, never past the floor class's reach
+	{
+		const W = 200, H = 90, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 0; y < H; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let x = 1; x <= 20; x++) c.push([x, 10, 9]);
+		c.push([2, 9, 255], [W - 3, H - 2, 121]);
+		const L = levelOfCells(W, H, c), { up, D } = R.AIR_TAB[0];
+		let worst = -Infinity, at = '';
+		for (const jump of [true, false]) for (const x0 of [19 * 16, 19 * 16 + 7]) {
+			const sim = new E.EESim(L); sim.reset(); const I = new E.EEInput();
+			sim.px = x0; sim.py = 9 * 16; sim.speed_x = R.AIR_TAB && (1 / 7.752) * R.BD / (1 - R.BD); sim.speed_y = 0;
+			const cx0 = (Math.trunc(sim.px + 8) >> 4);
+			for (let t = 0; t < 400; t++) {
+				E.applyMask(I, jump && t === 0 ? 5 : 4); sim.tick(I);
+				const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4, dy = cy - 9;
+				if (dy < -up || dy > 60) continue;
+				const over = (cx - cx0) - D[dy + up];
+				if (over > worst) { worst = over; at = `${jump ? 'jump' : 'walk'} t${t} dy ${dy}: ${cx - cx0} vs ${D[dy + up]}`; }
+			}
+		}
+		check('engine: a flight from a floor at the running limit (jump or walk off) never gets past the floor class\'s reach at its row', worst <= 0, at);
+	}
+	// (b) a toy: the spawn on a floor (x 1-10, row 11) under a ceiling (row 9), a pit of `gap` columns (x 11 ..), the far
+	// floor with the trophy; the way round: down the pit, along its bottom (row 22), up a ladder in its last column
+	const toy = (gap, ledge) => {
+		const W = 80, H = 24, c = [], xe = 10 + gap;   // (xe: the pit's last column, the ladder)
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9], [x, 9, 9]);
+		for (let y = 0; y < H; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let x = 1; x <= 10; x++) for (let y = 12; y < H - 1; y++) c.push([x, y, 9]);
+		for (let x = xe + 1; x < W - 1; x++) for (let y = 12; y < H - 1; y++) c.push([x, y, 9]);
+		if (ledge) c.push([11 + (gap >> 1), 12, 9]);
+		for (let y = 12; y <= H - 2; y++) c.push([xe, y, 120]);
+		c.push([2, 11, 255], [xe + 4, 11, 121]);
+		return levelOfCells(W, H, c);
+	};
+	const same = (f0, f1) => { for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f0[k].length; i++) if ((f0[k][i] === R.CUT) !== (f1[k][i] === R.CUT)) return false; return true; };
+	{
+		const L = toy(50, false), sim = new E.EESim(L), W = L.width, mid = 11 + 25;
+		sim.reset();
+		const f0 = R.reachField(L, { sideAir: false }), f1 = R.reachField(L, { sideAir: true, check: true, debug: true });
+		const s0 = R.costAt(f0, sim), s1 = R.costAt(f1, sim), A = R._airDebug;
+		check('toy, a 50-column pit: the -1 set = the plain model (no prices), the Bellman self-check holds with the prices', same(f0, f1) && f1.mismatches === 0, `${f1.mismatches} mismatches`);
+		check('toy, a 50-column pit: its middle at the floor height beyond every live launch envelope, the floor edges not', A.beyond[11 * W + mid] === 1 && A.beyond[11 * W + 12] === 0 && A.beyond[11 * W + 59] === 0, `mid ${A.beyond[11 * W + mid]} near ${A.beyond[11 * W + 12]} far ${A.beyond[11 * W + 59]}`);
+		check('toy, a 50-column pit: the start valued by the way round through the pit (dearer than the glide, below the glide prices)', s1 > s0 + 2 && s1 < s0 + 2000, `${s0.toFixed(1)} -> ${s1.toFixed(1)}`);
+		const L2 = toy(50, true), f2 = R.reachField(L2, { sideAir: true, debug: true }), A2 = R._airDebug;
+		check('toy with a ledge mid-pit only a glide reaches: no live launch (the air beside it still beyond)', A2.beyond[11 * W + mid - 2] === 1 && A2.beyond[11 * W + mid + 2] === 1 && R.costAt(f2, sim) > s0 + 2, `${A2.beyond[11 * W + mid - 2]} ${A2.beyond[11 * W + mid + 2]} start ${R.costAt(f2, sim).toFixed(1)}`);
+	}
+	{
+		const L = toy(10, false), sim = new E.EESim(L); sim.reset();
+		const f0 = R.reachField(L, { sideAir: false }), f1 = R.reachField(L, { sideAir: true, debug: true }), A = R._airDebug;
+		check('toy, a 10-column pit a jump crosses: nothing over it beyond, the start value the plain one', R.costAt(f1, sim) === R.costAt(f0, sim) && A.beyond[11 * L.width + 15] === 0, `${R.costAt(f0, sim).toFixed(1)} / ${R.costAt(f1, sim).toFixed(1)}`);
+	}
+	// (c) random rooms: the -1 sets with the prices = without, the self-check
+	let diff = 0, priced = 0, n = 0;
+	for (const { level } of randomLevels()) {
+		const f0 = R.reachField(level, { sideAir: false }), f1 = R.reachField(level, { sideAir: true, check: true });
+		n++;
+		if (f1.mismatches) diff += 1000;
+		if (f1.sideArrow && f1.sideArrow.air) priced += f1.sideArrow.air.moves;
+		if (f0.mode !== 'walk' && !same(f0, f1)) diff++;
+	}
+	check(`random rooms (${n} fields): the -1 sets with the air prices = without, the Bellman self-check holds`, diff === 0, `${diff} differ, ${priced} priced moves`);
+	// (d) the knob: EEAT_SIDEAIR=0 = sideAir false byte for byte
+	{
+		const L = toy(50, false), prev = process.env.EEAT_SIDEAIR;
+		process.env.EEAT_SIDEAIR = '0';
+		const a = R.reachField(L);
+		if (prev === undefined) delete process.env.EEAT_SIDEAIR; else process.env.EEAT_SIDEAIR = prev;
+		const b = R.reachField(L, { sideAir: false }), d = R.reachField(L);
+		let eq = true;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) if (Buffer.compare(Buffer.from(a[k].buffer), Buffer.from(b[k].buffer)) !== 0) eq = false;
+		check('knob: EEAT_SIDEAIR=0 = no air prices byte for byte; the default prices', eq && d.sideArrow.air.on && d.sideArrow.air.moves > 0);
+	}
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -1339,6 +1421,7 @@ function trapLevel() {
 	if (want('I')) sectionI();
 	if (want('J')) sectionJ();
 	if (want('S')) sectionS();
+	if (want('U')) sectionU();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });

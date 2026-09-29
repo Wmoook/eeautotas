@@ -1066,17 +1066,18 @@ function sideArrowPrices(level, opts, M) {
 	}
 	if (info.air.on) {
 		const t0 = Date.now();
-		// the launch tiles, a bit per class (1 floor: it can stand there, a spawn / checkpoint; 2 field / boost / portal exit:
-		// a rise of up to 16 px/tick; 4 fast: a portal exit, a side arrow or side boost: up to 16 x 1.42 px/tick sideways)
+		// the launch tiles, a bit per class (1 floor: it can stand there, a spawn / checkpoint, a field it rises out of at the
+		// running limit or less (dots, climbables, liquids); 2 up arrows, up boosts, portal exits: a rise of up to 16 px/tick;
+		// 4 fast: a portal exit, a side arrow or side boost: up to 16 x 1.42 px/tick sideways)
 		const lc = new Uint8Array(N);
 		const exitT = new Uint8Array(N);
 		for (const e of srcOf.keys()) exitT[e] = 1;
 		for (let i = 0; i < N; i++) {
 			const c = cls[i];
 			if (c === WALL) continue;
-			if (exitT[i] || push[i] !== 0 || fg[i] === 114 || fg[i] === 115) lc[i] |= 6;
-			if (isField(c) || c === BUP || c === BDOWN) lc[i] |= 2;
-			if (c !== DEADLY && isFloor(i + W)) lc[i] |= 1;
+			if (exitT[i] || push[i] !== 0 || fg[i] === 114 || fg[i] === 115) lc[i] |= 4;   // (sideways at up to 16 x 1.42)
+			if (exitT[i] || c === UP || c === BUP) lc[i] |= 2;                            // (up at 13.55 / 16 / 16 x 1.42)
+			if (isField(c) || c === BDOWN || (c !== DEADLY && isFloor(i + W))) lc[i] |= 1;   // (dots, climbables, liquids: up at <= 6.78)
 		}
 		for (const r of respawn) lc[r] |= 1;
 		// (the same inputs give the same beyond set: the steer's layers and coin legs share it; a hash of them, the newest
