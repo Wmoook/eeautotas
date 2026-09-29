@@ -239,9 +239,29 @@ function sectionBursts() {
 	check('roomAim from the room with switch 1 on: switch 1 is no goal (it only shuts its door), switch 2 is', !goals.includes('3,1') && goals.includes('8,1'), goals.join(' '));
 }
 
+// the A/B knob EEAT_GX (editor.js gxExtra): extra goexplore.js options after the editor's own, for the CPU search, the
+// escape and the GPU random runs; only --name=value words
+function sectionKnob() {
+	section('knob: EEAT_GX appends goexplore.js options (the CPU search, the escape, the GPU random runs)');
+	const f = { eelvl: 'l.eelvl', bin: 'l.bin', reach: 'l.reach', steer: '', steerCpu: '', steerBeam: '' };
+	const q = { seconds: 10, depth: 0, tool: 'eegpu', pauseFile: 'p', work: 'w', pass: 0, prefixFile: 'x.eetas', workers: 1, seed: 2 };
+	const o = { deaths: true, workers: 1, seed: 1, cpuDepth: 1000, bursts: false, noWayUp: false, tool: 'eegpu', prune: true };
+	const S = ED.STRATEGIES;
+	const plain = [S.goexplore.args(f, o, q), S.escape.args(f, o, q), S.gorolls.args(f, o, q)];
+	process.env.EEAT_GX = '--dom=0  --dord=0 bogus --x --useful=0';
+	const knob = [S.goexplore.args(f, o, q), S.escape.args(f, o, q), S.gorolls.args(f, o, q)];
+	delete process.env.EEAT_GX;
+	const extra = (a, b) => b.filter((s) => !a.includes(s));
+	check('unset: no extra option', plain.every((a) => !a.some((s) => /^--(dom|dord)=/.test(s))));
+	check('set: the --name=value words, in order, in all three (bogus words dropped)', knob.every((k, i) => extra(plain[i], k).join(' ') === '--dom=0 --dord=0 --useful=0'),
+		knob.map((k, i) => extra(plain[i], k).join(' ')).join(' | '));
+	check('after the editor\'s own options (a later option wins in goexplore.js parseArgs)', knob[0].indexOf('--dom=0') > knob[0].indexOf('--stdin=1') && GX.parseArgs(['l.eelvl', '--dom=1', '--dom=0']).dom === 0);
+}
+
 sectionRelevance();
 sectionReaders();
 sectionSearch();
 sectionBursts();
+sectionKnob();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
