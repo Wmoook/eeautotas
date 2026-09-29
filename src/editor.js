@@ -674,7 +674,12 @@ function schedule() {
 	const probeAlone = probing && S.size && S.size[0] * S.size[1] <= ROLLS_PROBE_TILES;
 	// (the random runs' slice that just ended: did it find anything? with the one search, their next wait follows it)
 	if (RW >= 0 && sched && sched.owner === RW && sched.rollsFrom && now - sched.since >= SLICE_MS) {
-		const q = S.strategies[RW], got = (q.bestAt || 0) > sched.since || (q.rooms || 0) > sched.rollsFrom.rooms;
+		// (rollsChain, where the CPU file carries the switch chain: their new rooms are no yield. Bad EE Level 9 (54 ids,
+		// every one a door and a gate, a 1619 reset of each beside it): their own room table grew all run long (205 rooms
+		// in 1,200 s, mostly a switch turned off again: 216-299 of the one search's 541-631 rooms were a strict subset of
+		// an earlier room's switches) while their nearest stayed at 25.2 tiles from 16 s on, so they never went dry and
+		// took every other slice from the bursts, the chain's climbers)
+		const q = S.strategies[RW], got = (q.bestAt || 0) > sched.since || (!(cur && cur.opts.rollsChain && cur.chainW) && (q.rooms || 0) > sched.rollsFrom.rooms);
 		q.dry = rollsDryAfter(q.dry, got, q.batches, sched.rollsFrom.batches);
 		sched.rollsFrom = null;
 	}
@@ -2428,6 +2433,9 @@ function start(b, gpu, test) {
 		// 2026-09-29: no target routed either way (Cold World x4, Bad EE Level 9 x2, Daybreak, Moving Ice Puzzle), the
 		// controls Soul Quest and Planets routed 3 of 4 with it vs 1 of 4: not a default until a target gains)
 		progStart: b.progStart === true || !!(test && test.progStart === true) || process.env.EEAT_PROGSTART === '1',
+		// (b9cw-b9, OPT-IN: `b.rollsChain === true` or EEAT_ROLLS_CHAIN=1: where the CPU file carries the switch chain, the GPU
+		// random runs' new rooms are no yield for their GPU share (rollsDryAfter); see ROLLS_DRY_MAX)
+		rollsChain: b.rollsChain === true || process.env.EEAT_ROLLS_CHAIN === '1',
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
