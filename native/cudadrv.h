@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 
 namespace cu {
@@ -90,6 +91,14 @@ CU_FN(nvrtcResult, nvrtcDestroyProgram, (nvrtcProgram*))
 
 inline std::string lastError;
 inline CUresult lastCode = 0;   // (the last failure's code: 2 = CUDA_ERROR_OUT_OF_MEMORY)
+/** driver work in flight that an exit must not cut (a kernel launch and its wait, launch.h timed(); a module load, which
+ *  may write the kernel cache): launch.h's parent watchdog ends an orphaned process only while this is 0 */
+inline std::atomic<int> busy{ 0 };
+struct Busy { Busy() { busy++; } ~Busy() { busy--; } };
+/** what one more eegpu process's context takes on this GPU (set by Device::open and fitStack): the stack every resident
+ *  thread may use (stackBytes x SMs x threads per SM: 1.8 GB on an A100 at main's fixed 8 KB) + ~256 MB for the context
+ *  itself; an idle burst server held 1.9 GB on the A100 before any buffer. freeShare's headroom keeps two of them free. */
+inline size_t ctxBytes = 0;
 
 inline bool fail(const char* what, CUresult r) {
 	lastCode = r;
@@ -145,13 +154,201 @@ inline bool loadNvrtc(const std::string& dir) {
 	return true;
 }
 
+// ------------------------------------------------------------------ the per-thread stack (CU_LIMIT_STACK_SIZE)
+// The driver reserves the stack limit for every thread the GPU can hold at once (x SMs x threads per SM: 8 KB = 1.8 GB
+// on an A100) in every context, at cuCtxSetLimit, before any buffer: a Find a route search runs 6-7 eegpu processes, and
+// their cuCtxCreate / cuCtxSetLimit "out of memory" failures were these reservations (n3-gpu-mem-orphans). The kernels'
+// real need is known once the module is loaded: a kernel's local memory (CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES: the
+// driver's compile of it, its frames, spills and the calls below it: exploreExpand_8 5,152 bytes, roll_8 2,888 on the
+// A100), at least the deepest chain of .local depots down its PTX call graph. So the limit is fitted per process to the
+// kernels it takes (Device::fitKernel from Gpu::fn, which every command calls for its kernels before its buffers): the
+// largest need + STACK_MARGIN, raised by cuCtxSetLimit there, so an "out of memory" still comes before the buffers, as
+// the fixed limit's did at the open. Only where the stack is bounded: no recursion and no indirect call in the PTX
+// (ptxStack); else the compiler cannot bound it, a too-small stack is a launch error or worse, and main's fixed 8 KB is
+// set at the load. A kernel that needs more than the limit still gets it: the driver raises the limit at its launch
+// (cuCtxSetLimit's documented behavior), so the fit changes the memory reserved, never what a kernel may use.
+// EEAT_GPU_STACK=<bytes>: that fixed limit at the context's open instead (8192 = main).
+
+/** the fixed per-thread stack of EEAT_GPU_STACK (bytes; 0: unset, the fit) */
+inline size_t stackEnv() {
+	const char* v = getenv("EEAT_GPU_STACK");
+	const double b = v && *v ? atof(v) : 0;
+	return b >= 16 ? (size_t)b : 0;
+}
+constexpr size_t STACK_MAIN = 8192;   // main's fixed limit: kept where the PTX's stack is not bounded
+constexpr size_t STACK_MARGIN = 256;  // over the measured need (x 221,184 threads on an A100: 54 MB)
+
+/** what the PTX says about the stack: its kernels (.entry), whether every call is direct and none recursive (bounded),
+ *  and the deepest chain of .local depots from a kernel down its calls (bytes; ptxas's own frames can add to it) */
+struct PtxStack { bool bounded = true; std::string why; std::vector<std::pair<std::string, size_t>> entries; size_t chainMax = 0; std::string chainKernel; };
+inline PtxStack ptxStack(const std::string& ptx) {
+	struct Fn { bool entry = false; size_t depot = 0; std::vector<std::string> calls; int mark = 0; size_t chain = 0; bool body = false; };
+	std::vector<std::pair<std::string, Fn>> fns;   // (in PTX order; looked up by name below)
+	auto isId0 = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$'; };
+	auto isId = [&](char c) { return isId0(c) || (c >= '0' && c <= '9'); };
+	auto skipWs = [](const std::string& s, size_t i) { while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++; return i; };
+	auto idAt = [&](const std::string& s, size_t i) { size_t j = i; if (j >= s.size() || !isId0(s[j])) return std::string(); while (j < s.size() && isId(s[j])) j++; return s.substr(i, j - i); };
+	PtxStack R;
+	int cur = -1, depth = 0;
+	bool pending = false;   // a call whose callee is on the next line ("call.uni (retval0), \n _Z...,")
+	// the callee of a call's operands: 1 named, -1 indirect (a register), 0 not on this line
+	auto callee = [&](const std::string& L, size_t i) -> int {
+		i = skipWs(L, i);
+		if (i < L.size() && L[i] == '(') {   // (the return value list)
+			const size_t k = L.find(')', i);
+			if (k == std::string::npos) return 0;
+			i = skipWs(L, k + 1);
+			if (i < L.size() && L[i] == ',') i = skipWs(L, i + 1);
+		}
+		if (i >= L.size()) return 0;
+		if (L[i] == '%') return -1;
+		const std::string n = idAt(L, i);
+		if (n.empty()) return 0;
+		fns[cur].second.calls.push_back(n);
+		return 1;
+	};
+	size_t p = 0;
+	while (p < ptx.size()) {
+		size_t e = ptx.find('\n', p);
+		if (e == std::string::npos) e = ptx.size();
+		std::string L = ptx.substr(p, e - p);
+		p = e + 1;
+		const size_t cm = L.find("//");
+		if (cm != std::string::npos) L.resize(cm);
+		if (L.find(".callprototype") != std::string::npos) { R.bounded = false; R.why = "an indirect call (.callprototype)"; }
+		if (depth == 0) {
+			size_t k = L.find(".entry ");
+			const bool ent = k != std::string::npos;
+			if (!ent) k = L.find(".func ");
+			if (k != std::string::npos) {
+				size_t i = skipWs(L, k + (ent ? 7 : 6));
+				if (i < L.size() && L[i] == '(') { const size_t c = L.find(')', i); i = c == std::string::npos ? L.size() : skipWs(L, c + 1); }
+				const std::string n = idAt(L, i);
+				if (!n.empty()) {
+					cur = -1;
+					for (size_t f = 0; f < fns.size(); f++) if (fns[f].first == n) cur = (int)f;   // (a declaration before its body)
+					if (cur < 0) { fns.push_back({ n, Fn() }); cur = (int)fns.size() - 1; }
+					fns[cur].second.entry = ent;
+					fns[cur].second.calls.clear();
+				}
+			}
+		}
+		if (cur >= 0) {
+			const size_t d = L.find("__local_depot");
+			if (d != std::string::npos && L.find(".local") != std::string::npos) {
+				const size_t b = L.find('[', d);
+				if (b != std::string::npos) fns[cur].second.depot = (size_t)strtoull(L.c_str() + b + 1, nullptr, 10);
+			}
+			if (pending) {
+				const int c = callee(L, 0);
+				if (c < 0) { R.bounded = false; R.why = "an indirect call"; }
+				if (c) pending = false;
+			}
+			const size_t i = skipWs(L, 0);
+			if (L.compare(i, 4, "call") == 0 && (i + 4 >= L.size() || L[i + 4] == '.' || L[i + 4] == ' ' || L[i + 4] == '\t')) {
+				size_t j = i + 4;
+				while (j < L.size() && L[j] != ' ' && L[j] != '\t') j++;   // (call.uni)
+				const int c = callee(L, j);
+				if (c < 0) { R.bounded = false; R.why = "an indirect call"; }
+				pending = c == 0;
+			}
+		}
+		for (char c : L) {
+			if (c == '{') { if (depth++ == 0 && cur >= 0) fns[cur].second.body = true; }
+			else if (c == '}' && depth > 0 && --depth == 0) { cur = -1; pending = false; }
+		}
+		// (a declaration, ".func (...) name(...)" then ";": no body; what follows at depth 0 is not its body)
+		if (depth == 0 && cur >= 0 && !fns[cur].second.body) {
+			size_t e2 = L.find_last_not_of(" \t\r");
+			if (e2 != std::string::npos && L[e2] == ';') cur = -1;
+		}
+	}
+	// the deepest chain of depots from each kernel; a cycle (recursion) or a callee with no body: not bounded
+	auto find = [&](const std::string& n) { for (size_t f = 0; f < fns.size(); f++) if (fns[f].first == n) return (int)f; return -1; };
+	std::vector<int> stack;
+	for (size_t f0 = 0; f0 < fns.size(); f0++) {
+		if (!fns[f0].second.entry) continue;
+		// (iterative depth-first: mark 1 = on the path, 2 = done)
+		struct It { int f; size_t k; };
+		std::vector<It> st;
+		if (fns[f0].second.mark == 0) { st.push_back({ (int)f0, 0 }); fns[f0].second.mark = 1; }
+		while (!st.empty()) {
+			It& t = st.back();
+			Fn& F = fns[t.f].second;
+			if (t.k < F.calls.size()) {
+				const int g = find(F.calls[t.k++]);
+				if (g < 0 || !fns[g].second.body) { R.bounded = false; R.why = "a call to " + F.calls[t.k - 1] + " (no body in the PTX)"; continue; }
+				Fn& G = fns[g].second;
+				if (G.mark == 1) { R.bounded = false; R.why = "recursion (" + fns[g].first + ")"; continue; }
+				if (G.mark == 0) { G.mark = 1; st.push_back({ g, 0 }); }
+				continue;
+			}
+			size_t best = 0;
+			for (const std::string& c : F.calls) { const int g = find(c); if (g >= 0 && fns[g].second.mark == 2) best = std::max(best, fns[g].second.chain); }
+			F.chain = F.depot + best;
+			F.mark = 2;
+			st.pop_back();
+		}
+		R.entries.push_back({ fns[f0].first, fns[f0].second.chain });
+		if (fns[f0].second.chain > R.chainMax) { R.chainMax = fns[f0].second.chain; R.chainKernel = fns[f0].first; }
+	}
+	if (R.entries.empty()) { R.bounded = false; if (R.why.empty()) R.why = "no kernel found in the PTX"; }
+	return R;
+}
+
 struct Device {
 	CUdevice dev = 0;
 	CUcontext ctx = nullptr;
 	char name[256] = {0};
 	int sms = 0, clockMHz = 0, ccMajor = 0, ccMinor = 0, driver = 0, maxThreadsPerSM = 0;
-	size_t mem = 0;
-	size_t stackBytes = 8192;   // per thread: the sim state (~0.7 KB) and the call frames of the engine
+	size_t mem = 0;        // the memory this process sizes by: the GPU's, or EEAT_GPU_BUDGET_MB when less
+	size_t totalMem = 0;   // the GPU's
+	size_t stackBytes = STACK_MAIN;   // per thread: the sim state (~0.7 KB) and the call frames of the engine (fitStack)
+	std::string stackHow = "main";    // how stackBytes was set: "fit" (the kernels taken), "env" (EEAT_GPU_STACK), "main" (8 KB: the stack not bounded)
+	size_t stackNeed = 0;             // the fit: the largest need of the kernels taken (bytes)
+	std::string stackKernel;          // the kernel that needs it
+	std::string stackWhy;             // "main": why the PTX's stack is not bounded
+	double stackMs = 0;               // the PTX scan's time
+	std::vector<std::pair<std::string, size_t>> chains;   // each kernel's deepest depot chain in the PTX (ptxStack)
+	void setCtxBytes() { ctxBytes = stackBytes * (size_t)std::max(1, sms) * (size_t)std::max(1, maxThreadsPerSM) + ((size_t)256 << 20); }
+	/** the stack limit now (the driver raises it at a launch that needs more) */
+	size_t stackNow() const { size_t v = 0; return cuCtxGetLimit && !cuCtxGetLimit(&v, 0) ? v : 0; }
+	/** after the module load: the PTX's stack bounded -> the fit (fitKernel per kernel taken; until then the context's
+	 *  default limit, 1 KB); not bounded -> main's fixed 8 KB now. EEAT_GPU_STACK set: nothing (open set it). */
+	bool fitStack(const std::string& ptx) {
+		if (stackHow == "env") return true;
+		const auto t0 = std::chrono::steady_clock::now();
+		PtxStack P = ptxStack(ptx);
+		stackMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		chains = std::move(P.entries);
+		if (getenv("EEAT_GPU_STACK_LOG")) fprintf(stderr, "[stack] PTX: %zu kernels, bounded %d%s%s, deepest depot chain %zu (%s), %.0f ms\n", chains.size(), P.bounded ? 1 : 0,
+			P.why.empty() ? "" : ": ", P.why.c_str(), P.chainMax, P.chainKernel.c_str(), stackMs);
+		if (P.bounded) { stackHow = "fit"; stackBytes = 0; setCtxBytes(); return true; }
+		stackHow = "main";
+		stackWhy = P.why;
+		stackBytes = STACK_MAIN;
+		CU_TRY(cuCtxSetLimit(0 /* CU_LIMIT_STACK_SIZE */, stackBytes));
+		setCtxBytes();
+		return true;
+	}
+	/** a kernel taken (Gpu::fn): the fit's limit raised to its need where it is more (false: the raise failed, lastError
+	 *  says why, e.g. "out of memory"; or its attributes could not be read) */
+	bool fitKernel(CUfunction f, const std::string& name) {
+		if (stackHow != "fit") return true;
+		int local = -1;
+		CU_TRY(cuFuncGetAttribute(&local, 3 /* CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES */, f));
+		size_t need = local > 0 ? (size_t)local : 0;
+		for (const auto& c : chains) if (c.first == name) need = std::max(need, c.second);
+		const size_t lim = need ? ((need + 15) & ~(size_t)15) + STACK_MARGIN : 0;
+		if (getenv("EEAT_GPU_STACK_LOG")) fprintf(stderr, "[stack] %s: local %d, need %zu -> limit %zu (now %zu)\n", name.c_str(), local, need, lim, stackBytes);
+		if (lim <= stackBytes) return true;
+		CU_TRY(cuCtxSetLimit(0 /* CU_LIMIT_STACK_SIZE */, lim));
+		stackBytes = lim;
+		stackNeed = need;
+		stackKernel = name;
+		setCtxBytes();
+		return true;
+	}
 	bool open() {
 		if (!loadDriver()) return false;
 		CU_TRY(cuInit(0));
@@ -169,11 +366,45 @@ struct Device {
 		clockMHz = clk / 1000;
 		cuDriverGetVersion(&driver);
 		cuDeviceTotalMem_v2(&mem, dev);
+		totalMem = mem;
+		// EEAT_GPU_BUDGET_MB: this run's share of the GPU (e.g. two searches on one GPU: half each); every consumer that
+		// sizes by the GPU's memory (explore's table and states, the random runs' pool, the search's records, `info`'s
+		// memMB, which the editor sizes the wall breaker and the bursts by) sees the budget instead of the whole GPU
+		{
+			const char* b = getenv("EEAT_GPU_BUDGET_MB");
+			const double mb = b && *b ? atof(b) : 0;
+			if (mb >= 256) mem = std::min(mem, (size_t)(mb * 1048576.0));
+		}
 		CU_TRY(cuCtxCreate_v2(&ctx, 0, dev));
-		CU_TRY(cuCtxSetLimit(0 /* CU_LIMIT_STACK_SIZE */, stackBytes));
+		// the stack: EEAT_GPU_STACK's fixed limit now (8192 = main); else fitStack sets it after the module load (until
+		// then the context's default, 1 KB)
+		if (const size_t s = stackEnv()) { stackBytes = s; stackHow = "env"; CU_TRY(cuCtxSetLimit(0 /* CU_LIMIT_STACK_SIZE */, stackBytes)); }
+		setCtxBytes();
 		return true;
 	}
 };
+
+/** The GPU memory one consumer may take now: `frac` of the free memory less a headroom (the largest of 1.5 GB, 1/20 of
+ *  the GPU's and two contexts, ctxBytes: the A/B's first var runs still failed bursts at cuCtxSetLimit "out of memory",
+ *  the stack reservation of a new process's context), so every consumer leaves room for the next ones (their contexts,
+ *  their tables): consumers that start one
+ *  after another split the free memory geometrically and the GPU never runs dry. Sweep2: 34 of 52 runs at two searches
+ *  a GPU failed bursts with cuCtxCreate "out of memory" because one consumer (the random runs' pool, every move's states,
+ *  the breaker's table) had sized itself by the whole GPU and taken nearly all that was free. SIZE_MAX: unknown (no
+ *  cuMemGetInfo). */
+inline size_t freeShare(size_t total, double frac) {
+	size_t fr = 0, tot = 0;
+	if (!cuMemGetInfo_v2 || cuMemGetInfo_v2(&fr, &tot)) return SIZE_MAX;
+	const size_t head = std::max<size_t>({ (size_t)1536 << 20, (total ? total : tot) / 20, 2 * ctxBytes });
+	return fr > head ? (size_t)((double)(fr - head) * frac) : 0;
+}
+/** EEAT_GPU_FIT=1 (OPT-IN): explore and roll size by freeShare (explorehost.h, rollhost.h). Off by default: its A/B
+ *  (n3-gpu-mem-orphans, box 2 A100, two searches of one arm a GPU) had far fewer burst "out of memory" failures, but every
+ *  move started when half the free memory was 2-5 GB and got a 2^25 table instead of 2^27 (16 M places tried instead of
+ *  66 M): Crypts of Anubis routed 1.3x / 1.7x slower, Soul Quest 0 of 2 vs 1 of 2 */
+inline bool fitOn() { const char* v = getenv("EEAT_GPU_FIT"); return v && v[0] == '1'; }
+/** the free memory now (bytes; 0: unknown) */
+inline size_t freeNow() { size_t fr = 0, tot = 0; return cuMemGetInfo_v2 && !cuMemGetInfo_v2(&fr, &tot) ? fr : 0; }
 
 /** Loads a module image: PTX text (the driver compiles it for this GPU, cached by the driver) or a cubin. */
 inline bool loadImage(CUmodule* mod, const void* image) {
@@ -284,7 +515,8 @@ inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::s
 	info.waitMs = std::chrono::duration<double, std::milli>(Clk::now() - w0).count();
 	const uint64_t before = folderBytes(dir);
 	const auto l0 = Clk::now();
-	const bool ok = loadModule(mod, ptx);
+	bool ok;
+	{ Busy b; ok = loadModule(mod, ptx); }   // (a compile writes the kernel cache: no watchdog exit meanwhile)
 	// (a hit takes well under a second; a compile adds megabytes, unless the driver dropped as much to make room)
 	const double ms = std::chrono::duration<double, std::milli>(Clk::now() - l0).count();
 	info.how = folderBytes(dir) > before + 65536 || ms > 5000 ? "compiled" : "cache";
