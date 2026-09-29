@@ -683,7 +683,7 @@ function reachField(level, opts) {
 		return tab;
 	}
 	// ---- the side-arrow and slot prices (ordering only: the -1 set is the plain model's, only the prices of moves change)
-	const SA = sideArrowPrices(level, opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy });
+	const SA = sideArrowPrices(level, opts, { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy, respawn, ice });
 	// ---- the backward label-setting search in cost buckets (integer costs; edges cost 0, 5 or 7, a priced move more)
 	let seeds = [];
 	if (goalF) seeds = [...goalF].sort((a, b) => a[1] - b[1]);
@@ -719,7 +719,7 @@ function reachField(level, opts) {
 			const t2 = y2 * W + x2;
 			if (!passable(t2) && !(deaths && cls[t2] === DEADLY)) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
-			const add = (dx && dy ? 7 : 5) + (SA.pen !== null && SA.pen[t * 8 + di] !== 0 ? SA.cost : 0);
+			const add = (dx && dy ? 7 : 5) + (SA.pen !== null ? SA.pen[t * 8 + di] : 0);
 			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, add));
 		}
 	};
@@ -786,7 +786,7 @@ function labelSearch(S) {
 	const K1 = S.KF + 1;
 	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
 	// price, its buckets made when first used)
-	const pen = S.pen || null, penCost = pen !== null ? S.penCost : 0;
+	const pen = S.pen || null, penCost = pen !== null ? S.penCost : 0;   // (pen: the fifths each move pays; penCost the dearest)
 	const NB = pen !== null ? 1 << bitLen(penCost + 8) : 8;
 	const bk = [], bn = new Int32Array(NB);
 	for (let b = 0; b < NB; b++) bk.push(NB === 8 ? new Int32Array(4096) : null);
@@ -865,7 +865,7 @@ function labelSearch(S) {
 				const pt = pid[t];
 				let tab = invArr[(pt * nP + pt2) * 8 + di];
 				if (tab === null) tab = invTable(pt, pt2, di);
-				const step = cur + (dx !== 0 && dy !== 0 ? 7 : 5) + (pen !== null && pen[t * 8 + di] !== 0 ? penCost : 0);
+				const step = cur + (dx !== 0 && dy !== 0 ? 7 : 5) + (pen !== null ? pen[t * 8 + di] : 0);
 				for (let ty = 0; ty < 5; ty++) { const lm = tab[o + ty]; if (lm !== NONE8) push(t, ty, lm - LO[ty], step); }
 			}
 		}
@@ -899,18 +899,65 @@ function labelSearch(S) {
  * move with a horizontal part into such a slot from a tile that is not one (the ball enters from outside), unless the
  * source is a field that lets the ball hold its height (dots / side arrows / side boosts, climbables, liquids) or the
  * move is level and the source has a floor under it; never into a trophy.
+ * (3) Sideways air (n3 sideways-air-budget, 2026-09-29; `EEAT_SIDEAIR=0` / opts.sideAir false: off): the model keeps
+ * F(k) and R(q) on a sideways move, so a ball in the air glides any distance at one height (the steer's plans flew 31
+ * tiles along MYSTERY MANSION's top rows and 70 over Skypolis' spike floor, where a jump carries ~17). A ball in free
+ * flight is where some LAUNCH put it: a tile it can stand in (a floor under it: the jump), a spawn / checkpoint, a field
+ * or boost (it can rise at up to 16 px/tick out of it), a portal exit, a side arrow / side boost (it leaves them at up
+ * to 16 x 1.42 px/tick sideways). The flight tables (`AIR_TAB`, the engine's own speed update, module load): per class
+ * and per row dy relative to the launch row, the last tick T(dy) the centre can still be at that row or above (a jump of
+ * JV from a floor, a 16 px/tick rise from the others), and the columns D(dy) the centre can cover by then (6.78 px/tick,
+ * the running limit, from the first tick; the fast class 22.7 px/tick decaying under the 16 cap), + 1 tile for a centre
+ * over a gap beside the floor it stands on; above the rise no row. A tile no launch's envelope covers (every launch row
+ * within `AIR_DOWN` 64 rows above it or its rise below it: a deeper fall counts as covered) is BEYOND: a move with a
+ * horizontal part into it costs `AIR_COST` fifths more (a glide of n tiles beyond, n prices: "a cost that grows with the
+ * sideways run"); a vertical move never pays; a launch tile is never beyond. The envelope ignores walls (it only grows
+ * the covered set). Off on ice levels (their speeds are not the running limit's).
  * opts.sideArrow (default on; EEAT_SIDEARROW=0 off = the plain model's prices), off for fields with opts.maxCost (a
- * price past the cap would cut). Returns {pen: Uint8Array over tile x 8 directions (1 = priced) or null, cost, info}.
+ * price past the cap would cut). Returns {pen: Uint16Array over tile x 8 directions (the fifths a move pays) or null,
+ * cost (the dearest price), info}.
  */
 const SA_COST = 12500;   // fifths (2,500 tiles): behind a real way (a death is 1,638 tiles) and past the doctors' detours (<= 1,882)
 const SA_KRUN = 4, SA_FEED_X = 80;
+const AIR_COST = 500;    // fifths (100 tiles) per sideways move into a tile beyond every launch's flight envelope
+const AIR_DOWN = 400;    // rows of the tables (a longer fall: the reach at 400)
+const AIR_ROUNDS = 400;  // rounds of the live launches (a chain of launches longer than that: no price)
+const AIR_CACHE = new Map(), AIR_CACHE_N = 8;
+const AIR_VRUN = (1 / MULT) * BD / (1 - BD);   // the running limit (6.78 px/tick)
+/** the flight envelope of a launch class: D[dy + up] = the columns the centre covers at row dy (-up .. AIR_DOWN) relative
+ *  to the launch row (-1: never at that row), from a vertical start v0 (JV: a jump; -16: a field / boost / exit) and a
+ *  horizontal start h0 (AIR_VRUN, or 16 x 1.42 for the fast class, decaying under the 16 cap toward the running limit) */
+function airTable(v0, h0) {
+	const ys = [8], xs = [0];   // the centre's offset below the launch row's top edge; the horizontal distance covered
+	let v = v0, y = 8, h = h0, x = 0;
+	for (let t = 1; t < 4000 && y < 16 * (AIR_DOWN + 1); t++) {
+		v = vstep(v, G, BD); y += v;
+		x += h; h = h0 > AIR_VRUN ? Math.max(AIR_VRUN, Math.min(16, (h + 1 / MULT) * BD)) : h;
+		ys.push(y); xs.push(x);
+	}
+	let up = 0;
+	for (const yy of ys) up = Math.max(up, -Math.floor(yy / 16));
+	const D = new Int16Array(up + AIR_DOWN + 1).fill(-1), lastAt = new Int32Array(up + AIR_DOWN + 2).fill(-1);
+	for (let t = 0; t < ys.length; t++) { const r = Math.floor(ys[t] / 16) + up; if (r >= 0 && r < lastAt.length) lastAt[r] = t; }
+	let T = -1;
+	for (let dy = -up; dy <= AIR_DOWN; dy++) {
+		T = Math.max(T, lastAt[dy + up]);   // (the last tick at that row or above)
+		if (T >= 0) D[dy + up] = Math.min(0x7ffe, Math.ceil((xs[T] + 8) / 16) + 1);
+	}
+	return { up, D };
+}
+const AIR_TAB = [airTable(JV, AIR_VRUN), airTable(-16, AIR_VRUN * 1.42), airTable(-AIR_VRUN * 1.42, 16 * 1.42)];   // floor, field, fast
+// (the inverse: per class, the least row dy (relative to the launch) at which the reach D(dy) is d columns or more)
+const AIR_DYMIN = AIR_TAB.map(({ up, D }) => { const m = new Int16Array(D[D.length - 1] + 1); let k = 0; for (let d = 0; d < m.length; d++) { while (D[k] < d) k++; m[d] = k - up; } return m; });
 function sideArrowPrices(level, opts, M) {
 	const env = process.env.EEAT_SIDEARROW;
 	const mode = opts.sideArrow !== undefined ? (opts.sideArrow === true ? 'arrows' : opts.sideArrow || 'off') : env === '0' ? 'off' : env === 'all' ? 'all' : 'arrows';
 	const on = mode !== 'off';
-	const info = { on: on && !(opts.maxCost >= 0), mode, arrows: 0, runs: 0, fed: 0, slots: 0 };
-	if (!info.on) return { pen: null, cost: 0, info };
-	const { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy } = M;
+	const airMode = opts.sideAir !== undefined ? !!opts.sideAir : process.env.EEAT_SIDEAIR !== '0';
+	const { N, W, H, cls, curOf, passable, isFloor, fg, srcOf, trophy, respawn, ice } = M;
+	const info = { on: on && !(opts.maxCost >= 0), mode, arrows: 0, runs: 0, fed: 0, slots: 0,
+		air: { on: airMode && !(opts.maxCost >= 0) && !ice, moves: 0, beyond: 0, ms: 0 } };
+	if (!info.on && !info.air.on) return { pen: null, cost: 0, info };
 	const gmx = level.gMox, nG = gmx ? gmx.length : 0;
 	const push = new Int8Array(N);   // the side push of the tile (its current tile's): -1 left, 1 right
 	let anyPush = false;
@@ -921,11 +968,11 @@ function sideArrowPrices(level, opts, M) {
 	}
 	const slot = new Uint8Array(N);
 	let anySlot = false;
-	if (mode === 'all') for (let i = W; i < N - W; i++) if (passable(i) && cls[i - W] === WALL && cls[i + W] === WALL && !trophy(i)) { slot[i] = 1; anySlot = true; }
-	if (!anyPush && !anySlot) return { pen: null, cost: 0, info };
-	const pen = new Uint8Array(N * 8);
+	if (info.on && mode === 'all') for (let i = W; i < N - W; i++) if (passable(i) && cls[i - W] === WALL && cls[i + W] === WALL && !trophy(i)) { slot[i] = 1; anySlot = true; }
+	const pen = new Uint16Array(N * 8);
+	let maxPen = 0;
 	const DXS = [-1, 0, 1, -1, 1, -1, 0, 1], DYS = [-1, -1, -1, 0, 0, 1, 1, 1];
-	if (anyPush) {
+	if (info.on && anyPush) {
 		// rem[d][i]: opposing tiles from i on in direction d (0: right, against a left push; 1: left, against a right push)
 		const rem = [new Uint16Array(N), new Uint16Array(N)], fed = [new Uint8Array(N), new Uint8Array(N)];
 		const exitT = new Uint8Array(N);
@@ -994,29 +1041,158 @@ function sideArrowPrices(level, opts, M) {
 				if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
 				const t2 = y2 * W + x2;
 				if (hard[d][t2]) continue;   // (still in a hard run: the move out of it pays)
-				pen[t * 8 + di] = 1; info.arrows++;
+				pen[t * 8 + di] = SA_COST; info.arrows++;
 			}
 		}
+		if (info.arrows) maxPen = SA_COST;
 	}
 	if (anySlot) {
+		// (a SIDE entry: the ball's box enters the slot's column only at the slot's own height, py = 16 y exactly, so its
+		// centre is in the slot's row then: a diagonal centre move into the slot is left to the plain model; the price is on
+		// a level entry from a tile the ball cannot stand in at that height)
 		const yField = (c) => c === DOTS || c === CLIMB || c === WATER || c === MUD;
 		for (let t = 0; t < N; t++) {
 			if (!passable(t) || slot[t] || yField(cls[t])) continue;
 			const x = t % W, y = (t / W) | 0;
-			for (let di = 0; di < 8; di++) {
-				const dx = DXS[di], dy = DYS[di];
-				if (dx === 0) continue;
-				const x2 = x + dx, y2 = y + dy;
-				if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
-				const t2 = y2 * W + x2;
+			for (const di of [3, 4]) {
+				const x2 = x + DXS[di];
+				if (x2 < 0 || x2 >= W) continue;
+				const t2 = y * W + x2;
 				if (!slot[t2]) continue;
-				if (dy === 0 && isFloor(t + W)) continue;
-				if (!pen[t * 8 + di]) { pen[t * 8 + di] = 1; info.slots++; }
+				if (isFloor(t + W)) continue;
+				if (!pen[t * 8 + di]) { pen[t * 8 + di] = SA_COST; info.slots++; maxPen = SA_COST; }
 			}
 		}
 	}
-	if (!info.arrows && !info.slots) return { pen: null, cost: 0, info };
-	return { pen, cost: SA_COST, info };
+	if (info.air.on) {
+		const t0 = Date.now();
+		// the launch tiles, a bit per class (1 floor: it can stand there, a spawn / checkpoint; 2 field / boost / portal exit:
+		// a rise of up to 16 px/tick; 4 fast: a portal exit, a side arrow or side boost: up to 16 x 1.42 px/tick sideways)
+		const lc = new Uint8Array(N);
+		const exitT = new Uint8Array(N);
+		for (const e of srcOf.keys()) exitT[e] = 1;
+		for (let i = 0; i < N; i++) {
+			const c = cls[i];
+			if (c === WALL) continue;
+			if (exitT[i] || push[i] !== 0 || fg[i] === 114 || fg[i] === 115) lc[i] |= 6;
+			if (isField(c) || c === BUP || c === BDOWN) lc[i] |= 2;
+			if (c !== DEADLY && isFloor(i + W)) lc[i] |= 1;
+		}
+		for (const r of respawn) lc[r] |= 1;
+		// (the same inputs give the same beyond set: the steer's layers and coin legs share it; a hash of them, the newest
+		// AIR_CACHE_N kept)
+		let hk = 0x811c9dc5 | 0, hk2 = 0x12345 | 0;
+		const mix = (v) => { hk = Math.imul(hk ^ v, 0x01000193); hk2 = Math.imul(hk2 ^ v, 0x5bd1e995) + 0x6b43a9b5 | 0; };
+		mix(W); mix(H);
+		for (let i = 0; i < N; i++) mix((cls[i] === WALL ? 16 : 0) | lc[i]);
+		for (const [e, ps] of srcOf) { mix(e); for (const q of ps) mix(q + 1); }
+		for (const r of respawn) mix(r + 7);
+		const akey = `${W}x${H}:${hk >>> 0}:${hk2 >>> 0}`;
+		const hit = AIR_CACHE.get(akey);
+		// the flight's way, wall-aware two ways (an L: the envelope's own geometry ignores walls): (a) along the launch's row
+		// (no wall between) to the target's column, then up or down that column (no wall between); (b) up or down the
+		// launch's column, then along the target's row. (a): per class and row, the columns to the nearest launch tile of the
+		// row's run of non-wall tiles; the target's column run's rows. (b): per class and tile, the topmost launch row of its
+		// column run (the latest point of a flight is the most sideways), its reach D at the tile's row, swept along the row.
+		const envelope = () => {
+		const BIG = 0x7fff;
+		const colTop = new Int32Array(N), colBot = new Int32Array(N);   // the column run of non-wall tiles: its first / last row
+		for (let x = 0; x < W; x++) {
+			let y = 0;
+			while (y < H) {
+				if (cls[y * W + x] === WALL) { y++; continue; }
+				let y1 = y;
+				while (y1 + 1 < H && cls[(y1 + 1) * W + x] !== WALL) y1++;
+				for (let k = y; k <= y1; k++) { colTop[k * W + x] = y; colBot[k * W + x] = y1; }
+				y = y1 + 1;
+			}
+		}
+		const Dat = (c, dy) => { const { up, D } = AIR_TAB[c]; if (dy < -up) return -1; return D[Math.min(dy, AIR_DOWN) + up]; };
+		// the launches the ball can get to: from the spawns and checkpoints, a launch tile is live once a live launch's
+		// envelope covers it (a portal exit once one of its portal tiles is covered), rounds until none is new (a launch
+		// only a glide leads to, e.g. the top of a wall between two rooms, validates no glide)
+		const live = new Uint8Array(N), covered = new Uint8Array(N);
+		for (const r of respawn) live[r] = lc[r];
+		const dc = new Int16Array(N), reach = new Int16Array(N);
+		let rounds = 0, grew = true;
+		while (grew && rounds < AIR_ROUNDS) {
+			rounds++; grew = false;
+			for (let c = 0; c < 3; c++) {
+				const bit = 1 << c, up = AIR_TAB[c].up;
+				dc.fill(BIG);
+				for (let y = 0; y < H; y++) {
+					const o = y * W;
+					let last = -BIG;
+					for (let x = 0; x < W; x++) { if (cls[o + x] === WALL) { last = -BIG; continue; } if (live[o + x] & bit) last = x; if (last > -BIG) dc[o + x] = x - last; }
+					last = BIG;
+					for (let x = W - 1; x >= 0; x--) { if (cls[o + x] === WALL) { last = BIG; continue; } if (live[o + x] & bit) last = x; if (last < BIG && last - x < dc[o + x]) dc[o + x] = last - x; }
+				}
+				// (a): D is monotone in the row, so a launch row yL at distance d covers its column run from yL + dyMin(d) down
+				const dyMin = AIR_DYMIN[c];
+				for (let x = 0; x < W; x++) {
+					let y = 0;
+					while (y < H) {
+						const i0 = y * W + x;
+						if (cls[i0] === WALL) { y++; continue; }
+						const yb = colBot[i0];
+						let from = BIG;
+						for (let yL = y; yL <= yb; yL++) { const d = dc[yL * W + x]; if (d < dyMin.length) { const f = yL + dyMin[d]; if (f < from) from = f; } }
+						for (let k = Math.max(y, from); k <= yb; k++) covered[k * W + x] = 1;
+						y = yb + 1;
+					}
+				}
+				// (b)
+				reach.fill(-1);
+				for (let x = 0; x < W; x++) {
+					let top = -1, runTop = -1;
+					for (let y = 0; y < H; y++) {
+						const i = y * W + x;
+						if (cls[i] === WALL) { top = -1; runTop = -1; continue; }
+						if (colTop[i] !== runTop) {
+							runTop = colTop[i]; top = -1;
+							for (let k = colTop[i]; k <= colBot[i]; k++) if (live[k * W + x] & bit) { top = k; break; }
+						}
+						if (top >= 0) reach[i] = Dat(c, y - top);
+					}
+				}
+				for (let y = 0; y < H; y++) {
+					const o = y * W;
+					let far = -BIG;
+					for (let x = 0; x < W; x++) { const i = o + x; if (cls[i] === WALL) { far = -BIG; continue; } if (reach[i] >= 0 && x + reach[i] > far) far = x + reach[i]; if (far >= x) covered[i] = 1; }
+					far = BIG;
+					for (let x = W - 1; x >= 0; x--) { const i = o + x; if (cls[i] === WALL) { far = BIG; continue; } if (reach[i] >= 0 && x - reach[i] < far) far = x - reach[i]; if (far <= x) covered[i] = 1; }
+				}
+			}
+			for (let i = 0; i < N; i++) if (covered[i] && lc[i] !== live[i]) { live[i] = lc[i]; grew = true; }
+			for (const [e, ps] of srcOf) if (live[e] !== lc[e] && ps.some((q) => covered[q])) { live[e] = lc[e]; covered[e] = 1; grew = true; }
+		}
+		info.air.rounds = rounds;
+		if (grew) { info.air.unsettled = true; covered.fill(1); }   // (not settled within AIR_ROUNDS: no price)
+		const beyond = new Uint8Array(N);
+		for (let t2 = 0; t2 < N; t2++) if (!covered[t2] && lc[t2] === 0 && passable(t2) && !trophy(t2)) { beyond[t2] = 1; info.air.beyond++; }
+		AIR_CACHE.set(akey, { beyond, rounds, unsettled: !!info.air.unsettled });
+		if (AIR_CACHE.size > AIR_CACHE_N) AIR_CACHE.delete(AIR_CACHE.keys().next().value);
+		return beyond;
+		};
+		const beyond = hit ? (info.air.cached = true, info.air.rounds = hit.rounds, info.air.unsettled = hit.unsettled || undefined, info.air.beyond = hit.beyond.reduce((s, v) => s + v, 0), hit.beyond) : envelope();
+		for (let t2 = 0; t2 < N; t2++) {
+			if (!beyond[t2]) continue;
+			const x2 = t2 % W, y2 = (t2 / W) | 0;
+			for (let di = 0; di < 8; di++) {
+				if (DXS[di] === 0) continue;
+				const x = x2 - DXS[di], y = y2 - DYS[di];
+				if (x < 0 || y < 0 || x >= W || y >= H) continue;
+				const t = y * W + x;
+				if (!passable(t)) continue;
+				pen[t * 8 + di] += AIR_COST; info.air.moves++;
+				if (pen[t * 8 + di] > maxPen) maxPen = pen[t * 8 + di];
+			}
+		}
+		info.air.ms = Date.now() - t0;
+		if (opts.debug) module.exports._airDebug = { lc, beyond };
+	}
+	if (!maxPen) return { pen: null, cost: 0, info };
+	return { pen, cost: maxPen, info };
 }
 const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
@@ -1346,7 +1522,7 @@ module.exports = {
 	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
-	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
+	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_, AIR_TAB, AIR_COST, SA_COST,
 	WALL, DEADLY, NORM, DOTS, CLIMB, WATER, MUD, UP, BUP, BDOWN, A_CLASS, CAP_CLASS,
 	// v2 names (src/out scripts): the classes
 	C_SOLID: WALL, C_DEADLY: DEADLY, C_NORMAL: NORM, C_UP: UP, C_BOOSTUP: BUP,

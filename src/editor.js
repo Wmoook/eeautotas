@@ -236,6 +236,7 @@ function reachFp() {
 		const h = crypto.createHash('sha1');
 		for (const f of ['reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 		h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);   // (the side-arrow prices' knob: a flip never reads the other's file)
+		h.update(`sideair:${process.env.EEAT_SIDEAIR || ''}`);   // (the sideways air prices' knob)
 		RF_FP = h.digest('hex').slice(0, 10);
 	}
 	return RF_FP;
@@ -2368,6 +2369,7 @@ function steerFp() {
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	h.update(`sideair:${process.env.EEAT_SIDEAIR || ''}`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
