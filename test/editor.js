@@ -811,7 +811,8 @@ function drawExploreChecks() {
  * stand-in canvases, a stand-in clock, the simple block drawing counted): at the fit zoom the overview, one blit, no block
  * drawn; its bands with the block images within MAP_BUDGET_MS a frame; nearer, the chunks within the budget and the rest from
  * the overview (no part of the view left blank, however slow the drawing); a pan reuses the chunks (no block drawn again);
- * an edited cell drops only its chunk(s).
+ * an edited cell drops only its chunk(s); in the page's frames an edit at the fit zoom (an undo) and a loaded level's last
+ * band are drawn after the overview painted them.
  */
 function mapCacheChecks() {
 	const clock = { t: 0, now() { return this.t; } };
@@ -906,6 +907,38 @@ function mapCacheChecks() {
 	check('an edited cell drops only its chunk (a cell at a chunk\'s corner the 4 around it), the others kept; its 3 x 3 cells of the overview again; the next frame builds only those',
 		n0 - n1 === 1 && n1 - n2 === 4 && ovd.length === 1 && ovd[0].join() === `${9 * CH + 6},${9 * CH + 6},${9 * CH + 9},${9 * CH + 9}` && rebuilt === 5 * CH * CH,
 		JSON.stringify({ n0, n1, n2, ovd, rebuilt, CH }));
+	// ---- the page's frames (frame(): the map drawn when dirty, else mapIdle), 16 ms apart. The merge review (2026-09-29):
+	// at the fit zoom the map is the overview, and the overview's work that ended within OV_FRAME_MS of the last draw was
+	// never shown: an undo at Fit (no pointer-up redraw after it) left 13 of 13 undone blocks drawn, a loaded level's last
+	// bands stayed in minimap colours. Now the map is drawn once more after the overview's last paint.
+	const run = (max) => {
+		let paintAt = -1, drawAt = -1, draws = 0, k = 0;
+		for (; k < max; k++) {
+			const t0 = tiles;
+			if (VW.dirty) { VW.dirty = false; M.draw(); drawAt = k; draws++; } else {
+				M.mapIdle(clock.t);
+				if (tiles > t0) paintAt = k; else if (!VW.dirty && !M.ovBuilding()) break;
+			}
+			clock.t += 16;
+		}
+		return { paintAt, drawAt, draws, k };
+	};
+	VW.zi = M.fitZi(); VW.dirty = true; tileCost = 0.002;
+	const settle = run(400);
+	M.dirtyCell(150 * 300 + 150);   // (an undo: applyCell -> dirtyCell, nothing else)
+	tiles = 0; g.calls.length = 0;
+	const ed = run(50), edTiles = tiles, edBlit = imgs().filter((q) => q.a[0] === OV.c).length;
+	check('an edit at the fit zoom (an undo: no redraw after it) is shown: the map drawn again after the overview painted the edited cells (it was drawn only before them)',
+		settle.k < 400 && ed.paintAt >= 0 && ed.drawAt > ed.paintAt && edTiles === 9 && edBlit === 2 && ed.k < 50 && !VW.dirty, JSON.stringify({ settle, ed, edTiles, edBlit }));
+	// (a level loaded at the fit zoom: the overview made again, its bands with the block images, the last one shown too;
+	// with several drawing speeds, so that the last band also ends within OV_FRAME_MS of a draw)
+	const loads = [0.0014, 0.0018, 0.002, 0.0024, 0.003, 0.0036, 0.0042, 0.005].map((c) => {
+		tileCost = c; OV.c = null; VW.chunks.clear(); VW.px = 0; VW.dirty = true; tiles = 0;
+		const ld = run(5000);
+		return Object.assign(ld, { c, tiles, ok: !M.ovBuilding() && tiles === 90000 && ld.paintAt > 0 && ld.drawAt > ld.paintAt && ld.draws > 2 && ld.k < 5000 && OV.unshown === false });
+	});
+	check('a level loaded at the fit zoom (8 drawing speeds): the map drawn again after the overview\'s last band (none left in minimap colours), shown as the bands come (at most every OV_FRAME_MS), then nothing more to draw',
+		loads.every((q) => q.ok), JSON.stringify(loads));
 }
 /**
  * The best route's panel and the improvements (editor.html: impUpdate, bestRoute, changedSpan, impJob, bestPanel,
