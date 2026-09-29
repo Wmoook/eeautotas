@@ -4675,4 +4675,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { CellMap, mixW, mixPick, mixCostOf, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES, runupFeatures };
