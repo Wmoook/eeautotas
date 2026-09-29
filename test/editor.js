@@ -9,7 +9,13 @@
 //              refused clearly; the physics check of the page's checks (from the cache, else in a worker thread: check()
 //              answers at once, the page asks again; the "No way up" note; the cache named by the model's fingerprint)
 //   app        the page's script parses; the HTTP API (in-process server, temp data folder): the page, blocks, eelvl,
-//              parse, check, solve refusals, a job from a route (Watch / Optimize)
+//              parse, check, solve refusals, a job from a route (Watch / Optimize); the search frontier, the exploration
+//              view (the heat merged from the server's answers, its pixels, the trails) and Follow (its replay, camera,
+//              route switch, what stops it): the page's code cut out and run on fake canvases
+//   explore    the exploration view's data: src/heat.js; goexplore.js --heat=1 (one worker: its heat's tiles = the tiles its
+//              archive made cells in; off: the same search, no event); the GPU random runs' heat with a stand-in for eegpu
+//              roll (on or off: the same search); the editor's merge of a stand-in search's heat and attempts, its trails,
+//              GET /api/editor/solve/heat (deltas since a version, another search starting over)
 //   passes     the "every move" pass ladder (src/editor.js passCells / passSeconds / nextPass) and the whole search
 //              driven by a stand-in for eegpu (a Node script playing scripted passes; no GPU): coarse first with pass 0's
 //              speed cells, a share of the time, finer passes bounded by the route found (--depth), the "ran out of
@@ -47,7 +53,7 @@
 //              steer field, deaths taken where something kills), the starts in rotation (a room's first arrival, the least
 //              explored room, the nearest attempt), the first escape after escFirst, the next one at once
 //   gpu        (--gpu) short route searches on the GPU (at most 60 s each), verified in the JS engine
-// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
+// usage: node test/editor.js [--gpu] [--seed=N] [--only=app,explore,passes,cpu,prove,lane,escape,gpu]      Exit code 1 if any check
 //        fails. Writes nothing inside the repo.
 const fs = require('fs');
 const path = require('path');
@@ -59,7 +65,7 @@ const GPU = argv.includes('--gpu');
 // --gpuOnly=a,b: only the GPU cases whose names contain one of these (short GPU runs, one at a time)
 const GPU_ONLY = ((argv.find((a) => a.startsWith('--gpuOnly=')) || '').slice(10)).split(',').filter(Boolean);
 const SEED = +((argv.find((a) => a.startsWith('--seed=')) || '--seed=1').slice(7));
-// --only=a,b: only the sections whose names are given (app, passes, cpu, prove, lane, escape, gpu); the fast ones always run
+// --only=a,b: only the sections whose names are given (app, explore, passes, cpu, prove, lane, escape, gpu); the fast ones always run
 const ONLY = ((argv.find((a) => a.startsWith('--only=')) || '').slice(7)).split(',').filter(Boolean);
 const want = (k) => !ONLY.length || ONLY.includes(k);
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'eeautotas-editor-'));
@@ -71,6 +77,7 @@ const EL = require('../src/eelvl.js');
 const E = require('../src/eesim.js');
 const C = require('../src/common.js');
 const ED = require('../src/editor.js');
+const HX = require('../src/heat.js');
 
 let pass = 0, fail = 0;
 function check(name, ok, detail) {
@@ -337,6 +344,8 @@ function fakeCtx() {
 	g.setLineDash = (d) => { g.dash = d.slice(); };
 	g.getLineDash = () => g.dash.slice();
 	g.measureText = (s) => ({ width: String(s).length * 7 });
+	g.createRadialGradient = (...a) => ({ a, stops: [], addColorStop(k, c) { this.stops.push([k, c]); } });
+	g.drawImage = rec('drawImage');
 	return g;
 }
 /**
@@ -357,7 +366,9 @@ function frontierChecks() {
 		// (the layer redraws with the map, and on its own while it pulses; it follows the window's size)
 		/if \(VW\.dirty\) \{ VW\.dirty = false; draw\(\); FX\.dirty = true; \}\n\tif \(FX\.dirty \|\| \(FX\.live && now - FX\.at >= FX_FRAME_MS\)\) drawFx\(now\);/.test(PAGE) &&
 		/fx\.width = w; fx\.height = h; FX\.dirty = true;/.test(PAGE));
-	const env = { $: () => ({ textContent: '' }), SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false }, performance: { now: () => 1000 }, changedView: () => {} };
+	// (FOL, followSet: F / "Go to" stop Follow, see followChecks)
+	const env = { $: () => ({ textContent: '' }), SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false }, performance: { now: () => 1000 }, changedView: () => {},
+		FOL: { on: false }, followSet: () => {} };
 	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), ...['frontierOf', 'drawFrontier', 'gotoFrontier', 'glideStep'].map(pageFnSrc)].join('\n');
 	let F = null;
 	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { frontierOf, drawFrontier, gotoFrontier, glideStep, ZOOMS };`)(...Object.values(env)); });
@@ -439,11 +450,198 @@ function frontierChecks() {
 		g0 && g0.x1 === end[0] && g0.y1 === end[1] && F.ZOOMS[z0] === 16 && z1 === 12 && mid[0] > 0 && mid[0] < end[0] && at[0] === end[0] && at[1] === end[1] &&
 		env.VW.glide === null && env.VW.zi === 3, JSON.stringify({ g0, z0, z1, mid, at, zi: env.VW.zi }));
 }
+/** a `const name = ...` of the page's script over as many lines as its brackets take (to a line ending in ';' where they
+ *  balance) */
+function pageBlockSrc(name) {
+	const lines = PAGE.split('\n');
+	const k = lines.findIndex((l) => l.startsWith(`const ${name} = `));
+	if (k < 0) return '';
+	let depth = 0;
+	for (let e = k; e < lines.length; e++) {
+		for (const ch of lines[e]) { if ('{(['.includes(ch)) depth++; else if ('})]'.includes(ch)) depth--; }
+		if (depth === 0 && /;\s*$/.test(lines[e])) return lines.slice(k, e + 1).join('\n');
+	}
+	return '';
+}
+/** a stand-in for a page element: text, html, hidden, a class list, children by selector none */
+function fakeEl() { const cls = new Set(); return { textContent: '', innerHTML: '', hidden: true, classList: { toggle: (c, on) => { if (on) cls.add(c); else cls.delete(c); }, contains: (c) => cls.has(c) } }; }
+/**
+ * The exploration view and Follow (editor.html: heatApply, heatFill, drawTrails, followSrc, sameStart, followStep, followSet,
+ * drawFollow cut out of the page and run): the toolbar's "exploration" toggle (on by default, remembered) and Follow (V),
+ * their canvases under the frontier's; the page's merge of the server's heat answers (src/heat.js HeatMap.since: a full
+ * answer, a delta, another search starting over; the trails kept, at most EXP_TRAILS); the heat's pixels (fresh = cyan,
+ * old = purple, stronger with more visits (log), unvisited clear, a glow only for fresh tiles); the trails on a fake canvas
+ * context (a jump not joined, faded by age, gone after EXP_TRAIL_FADE, the newest brightest, at most EXP_TRAILS_K a search);
+ * Follow's replay (the tick moves on by the speed, holds at the end and loops, the camera eased toward the smiley at 16 px
+ * a tile or more, a new nearest attempt from the same tick when it shares its start, else from its start, the route once
+ * found), leaving Follow (a pan, a drag, the wheel, a zoom, Fit, F), the smiley drawn where the replay is.
+ */
+function exploreViewChecks() {
+	const tools = (PAGE.match(/<div class="tools" id="tools">[\s\S]*?<\/div>/) || [''])[0];
+	check('the exploration view: an "exploration" toggle in the map toolbar (on by default, remembered), a Follow button and V, the heat and trail canvases under the frontier\'s (clicks pass through), the heat polled with the search\'s state',
+		/<input type="checkbox" id="cExplore" checked> exploration<\/label>/.test(tools) && /<button id="bFollow"[^>]*>[^<]*Follow<\/button>/.test(tools) &&
+		/<canvas id="cvHeat" class="fx" aria-hidden="true"><\/canvas><canvas id="cvTrail" class="fx" aria-hidden="true"><\/canvas>/.test(PAGE) &&
+		/#cvHeat \{ z-index: 1; mix-blend-mode: screen; \} #cvTrail \{ z-index: 2; \} #cvFx \{ z-index: 3; \}/.test(PAGE) &&
+		/^const EXP = \{ on: store\.get\('eeat\.editor\.explore'\) !== '0',/m.test(PAGE) && /store\.set\('eeat\.editor\.explore', EXP\.on \? '1' : '0'\)/.test(PAGE) &&
+		/if \(k === 'v' \|\| k === 'V'\) \{ followSet\(!FOL\.on\); return; \}/.test(PAGE) && /\n\tif \(EXP\.on\) pollHeat\(\);/.test(PAGE) &&
+		/\/api\/editor\/solve\/heat\?search=\$\{EXP\.search\}&since=\$\{EXP\.version\}&trail=\$\{EXP\.trailId\}/.test(PAGE) &&
+		/if \(EXP\.on \|\| EXP\.shown\) drawExplore\(now\);/.test(PAGE) && /if \(FOL\.on\) followStep\(now\);/.test(PAGE));
+	// (a pan, a drag or a click on the map, the wheel, a zoom (the buttons, + / -), Fit and F / "Go to" stop Follow)
+	const stops = ['cv.addEventListener(\'pointerdown\'', 'cv.addEventListener(\'wheel\'', 'function zoom(', 'function fit(', 'function gotoFrontier('].map((h) => {
+		const i = PAGE.indexOf(h);
+		return i >= 0 && /if \(FOL\.on\) followSet\(false\);/.test(PAGE.slice(i, i + 260));
+	});
+	check('Follow stops on a pan, a drag or a click on the map, the wheel, a zoom, Fit and F / "Go to"', stops.every(Boolean), stops.join());
+	// ---- the page's merge of the server's answers (the server's own HeatMap)
+	const perf = { t: 0, now() { return this.t; } };
+	const env = { performance: perf, atob: (s) => Buffer.from(String(s), 'base64').toString('latin1') };
+	const consts = ['EXP_HEAT_MS', 'HEAT_TAU', 'HEAT_STOPS', 'EXP_COLORS'].map(pageConstSrc).join('\n');
+	const code = [pageConstSrc('clamp'), consts, pageBlockSrc('HEAT_LUT'), pageConstSrc('expColor'), ...['b64u8', 'heatApply', 'heatFill', 'drawTrails'].map(pageFnSrc)].join('\n');
+	let F = null;
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { heatApply, heatFill, drawTrails, EXP_TRAILS, EXP_TRAILS_K, EXP_TRAIL_FADE, EXP_TAIL, HEAT_TAU, HEAT_GLOW, expColor };`)(...Object.values(env)); });
+	check('the exploration view\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
+	if (!F) return;
+	const W = 30, H = 20, HM = new HX.HeatMap(W, H);
+	HM.merge([5, 6, 7], 1000); HM.merge([7, 100], 3000);
+	const E = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
+	const answer = (since, extra) => Object.assign({ search: 111, running: true, t: 3500, w: W, h: H }, HM.since(since), { trailId: 0, trails: [] }, extra || {});
+	F.heatApply(E, answer(0), 50);
+	const s1 = { v: E.version, visited: E.visited, c7: E.count[7], l7: E.last[7], c5: E.count[5], l100: E.last[100], list: E.list.slice().sort((a, b) => a - b).join() };
+	HM.merge([100, 200], 5000);
+	F.heatApply(E, answer(E.version, { t: 5200 }), 90);
+	const s2 = { v: E.version, visited: E.visited, c100: E.count[100], l100: E.last[100], c200: E.count[200], c7: E.count[7], t: E.t, tAt: E.tAt };
+	check('the page\'s heat from the server\'s answers (src/heat.js HeatMap.since): every visited tile at first (counts, last visits), then the delta since its version (a tile seen again: its new count and last visit)',
+		s1.v === 2 && s1.visited === 4 && s1.c7 === 2 && s1.l7 === 3000 && s1.c5 === 1 && s1.l100 === 3000 && s1.list === '5,6,7,100' &&
+		s2.v === 3 && s2.visited === 5 && s2.c100 === 2 && s2.l100 === 5000 && s2.c200 === 1 && s2.c7 === 2 && s2.t === 5200 && s2.tAt === 90, JSON.stringify({ s1, s2 }));
+	// another search: from scratch (another level size too)
+	const HM2 = new HX.HeatMap(10, 10);
+	HM2.merge([3], 100);
+	F.heatApply(E, Object.assign({ search: 222, running: true, t: 200, w: 10, h: 10 }, HM2.since(0), { trailId: 0, trails: [] }), 100);
+	check('another search starts the page\'s heat over (its size, no tile of the last one)', E.search === 222 && E.W === 10 && E.count.length === 100 && E.visited === 1 && E.count[3] === 1 && E.version === 1,
+		JSON.stringify({ search: E.search, W: E.W, visited: E.visited, v: E.version }));
+	// the trails: appended, at most EXP_TRAILS (the newest)
+	const mk = (id, k, t) => ({ id, k, label: k, t, ticks: 100, pts: [0, 0, 16, 0, 32, 0, 48, 16], br: [] });
+	F.heatApply(E, Object.assign({ search: 222, running: true, t: 300, w: 10, h: 10 }, HM2.since(1), { trailId: 70, trails: Array.from({ length: 70 }, (_, k) => mk(k + 1, 'goexplore', k * 10)) }), 110);
+	check('the trails: appended as they come, the newest EXP_TRAILS (60) kept, the page\'s trail id the newest', E.trails.length === F.EXP_TRAILS && F.EXP_TRAILS === 60 && E.trails[0].id === 11 && E.trails[59].id === 70 && E.trailId === 70,
+		`${E.trails.length} ${E.trails[0] && E.trails[0].id} ${E.trailId}`);
+	// ---- the heat's pixels: lone tiles (no visited neighbour: their own colours), at tNow 100 s
+	const P = { W: 9, H: 9, list: [10, 16, 64, 70], count: new Uint16Array(81), last: new Uint32Array(81) };
+	P.count[10] = 1; P.last[10] = 100000;   // just now, once
+	P.count[16] = 16; P.last[16] = 100000;  // just now, 16 times
+	P.count[64] = 1; P.last[64] = 40000;    // a minute ago
+	P.count[70] = 16; P.last[70] = 99000;   // a second ago, 16 times
+	const px = new Uint8ClampedArray(81 * 4), gl = new Uint8ClampedArray(81 * 4);
+	const glowed = F.heatFill(P, 100000, px, gl);
+	const rgba = (a, i) => Array.from(a.slice(4 * i, 4 * i + 4));
+	const [f1, f16, old, sec] = [10, 16, 64, 70].map((i) => rgba(px, i));
+	check('the heat\'s pixels: fresh tiles cyan-white, a minute old purple (red above green), more visits stronger (16 visits vs 1 at the same age), unvisited clear, a glow only around fresh tiles (blurred: the tile and its neighbours)',
+		glowed && f1[1] > 200 && f1[2] > 200 && old[0] > old[1] && old[2] > 100 && f16[3] > f1[3] && f1[3] > old[3] && sec[3] > 0 &&
+		rgba(px, 0)[3] === 0 && rgba(px, 40)[3] === 0 && rgba(gl, 10)[3] > 0 && rgba(gl, 11)[3] > 0 && rgba(gl, 64)[3] === 0 && rgba(gl, 63)[3] === 0 && rgba(gl, 10)[3] > rgba(gl, 11)[3],
+		JSON.stringify({ f1, f16, old, sec, g10: rgba(gl, 10), g11: rgba(gl, 11), g64: rgba(gl, 64) }));
+	const px2 = new Uint8ClampedArray(81 * 4), gl2 = new Uint8ClampedArray(81 * 4);
+	check('... and no glow at all once every tile is older than HEAT_GLOW', F.heatFill(P, 100000 + F.HEAT_GLOW + 1, px2, gl2) === false && gl2.every((v, i) => i % 4 !== 3 || v === 0));
+	// ---- the trails on a fake canvas context (s = 1, the origin (10, 20), d = 1)
+	const draw = (trails, tNow) => { const g = fakeCtx(); let n = -1; const e = errOf(() => { n = F.drawTrails(g, trails, 10, 20, 1, 1, tNow); }); return { g, e, n, c: g.calls }; };
+	const pts = [];
+	for (let i = 0; i < 20; i++) pts.push(i * 8, 50);
+	pts.push(400, 300, 408, 300);   // (a portal: points 20, 21 a piece of their own)
+	const T1 = { id: 1, k: 'explore', label: 'every move', t: 0, ticks: 300, pts, br: [20] }, T2 = { id: 2, k: 'gorolls', label: 'random runs (GPU)', t: 5000, ticks: 200, pts: pts.slice(0, 20), br: [] };
+	const A = draw([T1, T2], 6000);
+	const strokes = (r, col) => r.c.filter((q) => q.name === 'stroke' && q.stroke === col);
+	const tip = (r, col) => Math.max(...strokes(r, col).filter((q) => q.width < 3).map((q) => q.alpha));
+	const jumped = A.c.filter((q) => q.name === 'lineTo' && q.a[0] === 10 + 400);
+	const moved = A.c.filter((q) => q.name === 'moveTo' && q.a[0] === 10 + 400 && q.a[1] === 20 + 300);
+	check('drawTrails: each attempt in its search\'s colour (every move pink, the GPU random runs mint), a faint tail and a bright tip, the portal\'s jump not joined, the newer brighter, a dot at its end',
+		!A.e && A.n === 2 && strokes(A, F.expColor('explore')).length >= 2 && strokes(A, F.expColor('gorolls')).length >= 2 && F.expColor('explore') !== F.expColor('gorolls') &&
+		jumped.length === 0 && moved.length === 1 && tip(A, F.expColor('gorolls')) > tip(A, F.expColor('explore')) &&
+		A.c.filter((q) => q.name === 'arc').length === 2 && A.c.filter((q) => q.name === 'save').length === A.c.filter((q) => q.name === 'restore').length,
+		A.e ? A.e.stack : JSON.stringify({ n: A.n, jumped: jumped.length, moved: moved.length, tips: [tip(A, F.expColor('explore')), tip(A, F.expColor('gorolls'))] }));
+	const fade = [0, 2000, 5000, 9000].map((t) => tip(draw([T1], t), F.expColor('explore')));
+	const gone = draw([T1, T2], 5000 + F.EXP_TRAIL_FADE);
+	check('drawTrails: fading with age (EXP_TRAIL_FADE 10 s), then gone', fade.every((a, k) => k === 0 || a < fade[k - 1]) && fade[3] > 0 && gone.n === 0 && !gone.c.some((q) => q.name === 'stroke'),
+		JSON.stringify({ fade, gone: gone.n }));
+	const many = Array.from({ length: 14 }, (_, k) => Object.assign({}, T2, { id: 10 + k, k: 'goexplore', t: 1000 + k }));
+	const M = draw([T1, ...many], 2000);
+	check('drawTrails: at most EXP_TRAILS_K (10) a search (its newest), the other searches\' too', M.n === F.EXP_TRAILS_K + 1 && F.EXP_TRAILS_K === 10, `${M.n}`);
+	// ---- Follow
+	followChecks();
+}
+/** Follow (see exploreViewChecks): its replay, camera, route switch and smiley, cut out of the page */
+function followChecks() {
+	const els = {};
+	const $ = (id) => (els[id] = els[id] || fakeEl());
+	const env = { $, SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false, play: null }, FX: { dirty: false }, store: { get: () => null, set: () => {} },
+		document: { querySelectorAll: () => [] }, gxReady: () => false, GX: {}, toolInfo: () => {}, renderSolve: () => {}, changedView: () => {} };
+	const code = [pageConstSrc('fmt'), pageConstSrc('ZOOMS'), pageBlockSrc('FOL'), pageConstSrc('FOL_TAU'), ...['followSrc', 'sameStart', 'followStep', 'followHud', 'followSet', 'drawFollow', 'ball'].map(pageFnSrc)].join('\n');
+	let F = null;
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { FOL, FOL_HOLD, followSrc, sameStart, followStep, followSet, drawFollow, ZOOMS };`)(...Object.values(env)); });
+	check('Follow\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
+	if (!F) return;
+	const { FOL } = F, VW = env.VW;
+	// a nearest attempt: 400 ticks right along a floor at y 88 (2 px a tick), then 100 ticks up
+	const path = [];
+	for (let t = 0; t <= 500; t++) path.push(t <= 400 ? [40 + 2 * t, 88] : [840, 88 - (t - 400)]);
+	const closest = { dist: 13, tiles: 13, ticks: 500, runTicks: 490, time: '0:04.90', path, strategy: 'one search (CPU runs + GPU bursts)', foundAfter: 12.3 };
+	env.SOLVE.st = { running: true, closest, result: null };
+	F.followSet(true);
+	const on = { on: FOL.on, zi: VW.zi, hud: !$('fHud').hidden, btn: $('bFollow').classList.contains('on') };
+	F.followStep(1000);
+	const t0 = FOL.tick;
+	F.followStep(1100);   // (100 ms at 1x: 10 ticks)
+	const t1 = FOL.tick, x1 = FOL.x, cam1 = VW.camX;
+	FOL.speed = 4;
+	F.followStep(1200);   // (100 ms at 4x: 40 ticks)
+	const t2 = FOL.tick;
+	let now = 1200;
+	for (let k = 0; k < 60; k++) { now += 20; F.followStep(now); }   // (1.2 s at 4x, 8 ticks a frame: to the end at tick 500, where it holds)
+	const atEnd = FOL.tick, held = FOL.endAt > 0 && now - FOL.endAt < F.FOL_HOLD;
+	F.followStep(FOL.endAt + F.FOL_HOLD + 10);
+	const looped = FOL.tick;
+	check('Follow: on (V, the button): the zoom at least 16 px a tile, its panel shown; the tick moves on by the speed (100 ticks a second at 1x, 4x at 4x), the smiley between ticks, the camera eased toward it; it holds at the end, then plays again from the start',
+		on.on && F.ZOOMS[on.zi] === 16 && on.hud && on.btn && t0 === 0 && Math.abs(t1 - 10) < 1e-9 && Math.abs(x1 - (40 + 2 * 10)) < 1e-9 && cam1 > 0 && cam1 < x1 &&
+		Math.abs(t2 - 50) < 1e-9 && atEnd === 500 && held && looped === 0,
+		JSON.stringify({ on, t0, t1, x1, cam1, t2, atEnd, held, looped }));
+	// a new nearest attempt: sharing its start with the one playing (the same ticks up to now): from the same tick; another
+	// start: from its start; a route: the route
+	FOL.speed = 1;
+	for (let k = 0; k < 30; k++) F.followStep(10000 + 10 * k);   // (to tick ~29)
+	const before = FOL.tick;
+	const longer = path.concat(Array.from({ length: 100 }, (_, k) => [840, -12 - k]));
+	env.SOLVE.st = { running: true, closest: Object.assign({}, closest, { path: longer, ticks: 600, runTicks: 590, foundAfter: 20 }), result: null };
+	F.followStep(10300);
+	const kept = FOL.tick, keptLen = FOL.P.length;
+	const other = path.map(([x, y]) => [x, y + 32]);
+	env.SOLVE.st = { running: true, closest: Object.assign({}, closest, { path: other, foundAfter: 25 }), result: null };
+	F.followStep(10310);
+	const restarted = FOL.tick;
+	const route = { time: '0:05.00', runTicks: 500, ticks: 510, path: other.concat([[900, 0]]), strategy: 'every move', foundAfter: 30 };
+	env.SOLVE.st = { running: false, closest: null, result: route };
+	F.followStep(10320);
+	const kind = FOL.kind, rtick = FOL.tick;
+	check('Follow: a new nearest attempt that shares its start plays on from the same tick, one from another start from its start, a found route replaces it (from the same tick when it shares the start)',
+		before > 25 && Math.abs(kept - before - 1) < 1e-6 && keptLen === 601 && Math.abs(restarted - 1) < 1e-6 && kind === 'route' && Math.abs(rtick - 2) < 1e-6 &&
+		F.sameStart(path, longer, 400) && !F.sameStart(path, other, 0) && !F.sameStart(path, longer.slice(0, 10), 20), JSON.stringify({ before, kept, keptLen, restarted, kind, rtick }));
+	// the smiley drawn (no EE graphics: the drawn ball) where the replay is; off: nothing more, the panel hidden
+	const g = fakeCtx();
+	const de = errOf(() => F.drawFollow(g, 5, 7, 1, 1));
+	const X = 5 + FOL.x, Y = 7 + FOL.y;
+	const ballArc = g.calls.find((q) => q.name === 'arc' && Math.abs(q.a[0] - X) < 1e-9 && Math.abs(q.a[1] - Y) < 1e-9 && q.fill === '#ffd23f');
+	F.followSet(false);
+	check('Follow: the smiley (the drawn one without EE graphics) where the replay is, a light under it; off: its panel hidden, the button off', !de && !!ballArc &&
+		g.calls.some((q) => q.name === 'fill') && !FOL.on && $('fHud').hidden && !$('bFollow').classList.contains('on'), de ? de.stack : JSON.stringify({ X, Y, arcs: g.calls.filter((q) => q.name === 'arc').map((q) => q.a.slice(0, 3)) }));
+	// nothing to follow yet: waiting (the panel says so)
+	env.SOLVE.st = { running: true, closest: null, result: null };
+	F.followSet(true);
+	F.followStep(20000);
+	check('Follow with no attempt yet: waits (the panel says so), draws nothing', FOL.P === null && /waiting for the search's first attempt/.test($('fWhat').textContent), $('fWhat').textContent);
+	F.followSet(false);
+}
 async function appSection() {
 	section('app: the page and the HTTP API (in-process server, temp data folder)');
 	const scripts = [...PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 	check('the editor page\'s script parses', scripts.length === 1 && !errOf(() => new Function(scripts[0])), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
 	frontierChecks();
+	exploreViewChecks();
 	const SV = require('../src/server.js');
 	await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
 	const port = SV.server.address().port;
@@ -2080,6 +2278,232 @@ process.stdin.on('data', (d) => {
 });
 process.stdin.on('end', end);
 `;
+// ---------------------------------------------------------------- the exploration view's data (src/heat.js)
+/** a storeyed test level W x H (coarse cells above 50 x 50): floors 12 rows apart, each with holes and a staircase of
+ *  short platforms under every hole, coins; the start bottom left, the trophy on the top floor at the right */
+function storeys(W, H, seed) {
+	const rnd = rngOf(seed);
+	const set = new Map();
+	const put = (x, y, id, ...a) => { if (x >= 1 && y >= 1 && x < W - 1 && y < H - 1) set.set(y * W + x, [x, y, id, ...a]); };
+	const del = (x, y) => set.delete(y * W + x);
+	for (let x = 0; x < W; x++) { set.set(x, [x, 0, 9]); set.set((H - 1) * W + x, [x, H - 1, 9]); }
+	for (let y = 0; y < H; y++) { set.set(y * W, [0, y, 9]); set.set(y * W + W - 1, [W - 1, y, 9]); }
+	let top = H - 1;
+	for (let fy = H - 13; fy > 6; fy -= 12) {
+		top = fy;
+		for (let x = 1; x < W - 1; x++) put(x, fy, 9);
+		for (let x = 6 + ((rnd() * 20) | 0); x < W - 6; x += 18 + ((rnd() * 30) | 0)) {
+			for (let i = 0; i < 4; i++) del(x + i, fy);
+			const dir = rnd() < 0.5 ? -1 : 1;
+			for (let k = 1; k <= 3; k++) for (let i = -1; i <= 1; i++) put(x + 1 + dir * 4 * k + i, fy + 3 * k, 9);
+		}
+		for (let k = 0; k < W / 12; k++) { const px = 2 + ((rnd() * (W - 4)) | 0), py = fy + 11; if (!set.has(py * W + px) && set.has((py + 1) * W + px)) put(px, py, 100); }
+	}
+	for (let x = 1; x < 5; x++) del(x, H - 2);
+	put(2, H - 2, 255);
+	for (let x = W - 6; x < W - 1; x++) for (let y = top - 4; y < top; y++) del(x, y);
+	put(W - 3, top - 1, 121);
+	return { name: `storeys ${W}x${H}`, width: W, height: H, cells: [...set.values()] };
+}
+// A stand-in for the CPU search (the editor's view of goexplore.js --heat=1): logs its arguments (argLog), then plays the
+// scenario's events (heat, closest, source) SC.gap ms apart, progress lines until "stop" or the end of its stdin
+const FAKE_HEAT = `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (SC.argLog) fs.writeFileSync(SC.argLog, JSON.stringify(process.argv.slice(3)));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', startCost: 40 });
+let k = 0;
+const next = () => { const e = SC.events[k++]; if (!e) return; say(e); setTimeout(next, SC.gap || 150); };
+setTimeout(next, SC.wait || 100);
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 40, found: 0, refined: 0, rooms: 1, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/stop/.test(String(d))) end(); });
+process.stdin.on('end', end);
+`;
+// A stand-in for eegpu roll (goexplore.js --gpu=1: its protocol, no GPU): ready and start (the start's room 0), then per
+// "batch K ..." line and its K pick ids a record of a new cell for each of the first 64 picks (room 0, its run's first 20
+// ticks), "seen" the seen counts, "stop" or the end of stdin its done line
+const FAKE_ROLL = `'use strict';
+const say = (o, data) => { const b = Buffer.from(JSON.stringify(data ? Object.assign({}, o, { bytes: data.length }) : o) + '\\n'); process.stdout.write(data ? Buffer.concat([b, data]) : b); };
+say({ ev: 'ready', loadMs: 1, allocMs: 1 });
+say({ ev: 'start', room: 0, cap: 1 << 20, memMB: 1, hostMB: 1, gpu: { name: 'stand-in' } });
+let buf = Buffer.alloc(0), cells = 1, batches = 0, want = 0, done = false;
+const end = () => { if (done) return; done = true; say({ ev: 'done', end: 'stopped', batches }); process.exit(0); };
+process.stdin.on('data', (c) => {
+	buf = Buffer.concat([buf, c]);
+	for (;;) {
+		if (want) {
+			if (buf.length < want * 4) return;
+			const K = want;
+			buf = buf.subarray(K * 4); want = 0; batches++;
+			const n = Math.min(K, 64), rec = Buffer.alloc(24 * n);
+			for (let j = 0; j < n; j++) {
+				const d = cells++;
+				rec.writeInt32LE(d, 24 * j); rec.writeInt32LE(batches * 20, 24 * j + 4); rec.writeInt32LE(Math.max(5, 50000 - 5 * d), 24 * j + 8);
+				rec.writeInt32LE(0, 24 * j + 12); rec.writeInt32LE(j, 24 * j + 16); rec.writeInt32LE((j % 8) | (19 << 16), 24 * j + 20);
+			}
+			say({ ev: 'batch', n, fin: 0, ticks: K * 8 * 20, ms: 2, kernelMs: 2, rollMs: 1 }, rec);
+			continue;
+		}
+		const k = buf.indexOf(10);
+		if (k < 0) return;
+		const w = buf.subarray(0, k).toString().trim().split(' ');
+		buf = buf.subarray(k + 1);
+		if (w[0] === 'batch') want = +w[1];
+		else if (w[0] === 'seen') say({ ev: 'seen' }, Buffer.alloc(4 * cells));
+		else if (w[0] === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`;
+/**
+ * The exploration view's data: src/heat.js (the heat events' encodings, the marks, the HeatMap's merge and its deltas since
+ * a version, the downsampled trails, the trails' cap); goexplore.js --heat=1 with one worker (its heat events' tiles = the
+ * tiles of every cell its archive made; the flag off: the same search, no heat event); the GPU random runs' heat (a stand-in
+ * for eegpu roll: the sampled runs replayed, the tiles in the level, the start's; the flag off: the same search); the
+ * editor's merge of a stand-in search's heat events and the tips of its attempts, its trails (the nearest attempts replayed
+ * anyway, the sources in turn), GET /api/editor/solve/heat (deltas since a version, the trails since an id, another search
+ * starting over), --heat=1 on the CPU search's command line.
+ */
+async function exploreSection() {
+	section('explore: the exploration view\'s data (src/heat.js; goexplore.js --heat=1; the editor\'s heat and trails, GET /api/editor/solve/heat)');
+	// ---- src/heat.js
+	{
+		const e1 = HX.heatEvent(40, 20, [0, 5, 799]), t1 = HX.heatTiles(e1, 40, 20);
+		const many = Array.from({ length: 300 }, (_, k) => (k * 7) % 800), e2 = HX.heatEvent(40, 20, [...new Set(many)]), t2 = HX.heatTiles(e2);
+		const bad = HX.heatTiles(e1, 41, 20), odd = HX.heatTiles({ ev: 'heat', w: 2, h: 2, enc: 'idx', tiles: Buffer.from(new Uint32Array([1, 9]).buffer).toString('base64') });
+		const M = HX.heatMarks(10);
+		M.mark(3); M.mark(3); M.mark(7); M.add([7, 8, 20, -1]);
+		const took = Array.from(M.take()), after = M.n;
+		M.mark(3);
+		check('heat.js: the heat event\'s encodings (a few tiles: their indices; many: a bitset of the level) read back the same; another level\'s event refused, indices outside the level dropped; the marks (each tile once until taken)',
+			e1.enc === 'idx' && e1.n === 3 && Array.from(t1).join() === '0,5,799' && e2.enc === 'bits' && Array.from(t2).sort((a, b) => a - b).join() === [...new Set(many)].sort((a, b) => a - b).join() &&
+			bad === null && Array.from(odd).join() === '1' && took.join() === '3,7,8' && after === 0 && M.n === 1, JSON.stringify({ e1: e1.enc, e2: e2.enc, took, odd: odd && Array.from(odd) }));
+		const HM = new HX.HeatMap(10, 10);
+		HM.merge([1, 2], 100); HM.merge([2, 3], 250); HM.merge([], 300);
+		const full = HM.since(0), delta = HM.since(1), none = HM.since(2);
+		const dec = (r) => { const I = Buffer.from(r.idx, 'base64'), Cn = Buffer.from(r.count, 'base64'), Ls = Buffer.from(r.last, 'base64'); return Array.from({ length: r.n }, (_, i) => `${I.readUInt32LE(4 * i)}:${Cn.readUInt16LE(2 * i)}@${Ls.readUInt32LE(4 * i)}`).sort().join(' '); };
+		HM.count[5] = 65534; HM.merge([5], 400); HM.merge([5], 500);
+		check('heat.js HeatMap: per tile the visits and the last visit, a version per update; since(0) every visited tile, since(v) the tiles changed after v, since(the version) nothing; the count saturates at 65535',
+			full.full && full.version === 2 && dec(full) === '1:1@100 2:2@250 3:1@250' && !delta.full && dec(delta) === '2:2@250 3:1@250' && !none.full && none.n === 0 && none.version === 2 &&
+			HM.count[5] === 65535 && HM.visited === 3, JSON.stringify({ full: dec(full), delta: dec(delta), none: none.n, c5: HM.count[5] }));
+		const H2 = new HX.HeatMap(4, 4);
+		for (let k = 0; k < 600; k++) H2.merge([k % 16], k);
+		const old = H2.since(5);
+		check('heat.js HeatMap: a version older than its change log keeps (at most 512 updates): every visited tile (full)', old.full && old.n === 16 && H2.log.length <= 512, `${old.full} ${old.n} ${H2.log.length}`);
+		const P = [];
+		for (let t = 0; t <= 1000; t++) P.push(t < 600 ? [8 + t * 0.5, 100.4] : [2000 + (t - 600), 50]);
+		const d = HX.downsample(P, 200), short = HX.downsample(P.slice(0, 50), 200);
+		const brk = d.br.map((i) => [d.pts[2 * i], d.pts[2 * i + 1]]);
+		check('heat.js downsample: at most ~200 points of whole px, the first and the last kept, a jump of more than 40 px (a portal, a respawn) a new piece; a short path whole',
+			d.pts.length / 2 <= 205 && d.pts.length / 2 >= 150 && d.pts[0] === 8 && d.pts[1] === 100 && d.pts[d.pts.length - 2] === 2400 && d.br.length === 1 && brk[0][0] === 2000 &&
+			d.pts[2 * d.br[0] - 2] === Math.round(8 + 599 * 0.5) && short.pts.length === 100 && short.br.length === 0, JSON.stringify({ n: d.pts.length / 2, br: d.br, brk }));
+		const TR = new HX.Trails();
+		for (let k = 0; k < 70; k++) TR.add({ k: 'x', t: k });
+		check('heat.js Trails: the newest TRAIL_MAX (60), an id each, since(id) the newer ones', TR.list.length === 60 && TR.list[0].id === 11 && TR.id === 70 && TR.since(65).map((x) => x.id).join() === '66,67,68,69,70' && TR.since(70).length === 0);
+	}
+	// ---- goexplore.js --heat=1: the CPU search, one worker, a tick budget (the same search with the flag on or off)
+	const lv = storeys(80, 40, 7), lvFile = path.join(HOME, 'storeys80.eelvl');
+	fs.writeFileSync(lvFile, ED.eelvlOf(lv));
+	{
+		const opts = ['--workers=1', '--seed=1', '--maxTicks=6000000', '--seconds=60'];
+		const [on, off] = [await goexplore(lvFile, [...opts, '--heat=1']), await goexplore(lvFile, opts)];
+		const heats = on.events.filter((e) => e.ev === 'heat'), U = new Set();
+		let okTiles = true;
+		for (const e of heats) { const t = HX.heatTiles(e, 80, 40); if (!t || t.length !== e.n) okTiles = false; else for (const x of t) U.add(x); }
+		const d1 = on.done || {}, d0 = off.done || {}, w1 = (d1.workers || [])[0] || {}, w0 = (d0.workers || [])[0] || {};
+		const same = ['ticks', 'states', 'picks', 'finish', 'tiles', 'end'].every((k) => d1[k] === d0[k]) && ['cells', 'picks', 'impr', 'rooms', 'evicted'].every((k) => w1[k] === w0[k]) &&
+			on.results.map((r) => r.inputs).join() === off.results.map((r) => r.inputs).join();
+		check('goexplore.js --heat=1 (one worker): heat events at most every 2 s (and a last one), their tiles every tile its archive made a cell in (its done event\'s tiles, no cell swept)',
+			heats.length >= 2 && heats.length <= Math.ceil(d1.seconds / 2) + 2 && okTiles && w1.evicted === 0 && U.size === d1.tiles && d1.tiles > 100,
+			JSON.stringify({ events: heats.length, n: heats.map((e) => e.n), union: U.size, tiles: d1.tiles, evicted: w1.evicted, seconds: d1.seconds }));
+		check('goexplore.js without --heat: no heat event, the same search (the same ticks, cells, picks, improvements, rooms, routes as with it)', !off.events.some((e) => e.ev === 'heat') && same,
+			JSON.stringify({ on: [d1.ticks, d1.states, d1.picks, d1.finish, w1.impr], off: [d0.ticks, d0.states, d0.picks, d0.finish, w0.impr], routes: [on.results.length, off.results.length] }));
+	}
+	// ---- the GPU random runs' heat (goexplore.js --gpu=1 with a stand-in for eegpu roll: no GPU)
+	{
+		const fake = path.join(HOME, 'fake-roll.js');
+		fs.writeFileSync(fake, FAKE_ROLL);
+		const opts = ['--gpu=1', `--tool=${fake}`, '--rollMix=0', '--seed=1', '--maxTicks=6000000', '--seconds=60', '--batch=512'];
+		const [on, off] = [await goexplore(lvFile, [...opts, '--heat=1']), await goexplore(lvFile, opts)];
+		const heats = on.events.filter((e) => e.ev === 'heat'), U = new Set();
+		for (const e of heats) for (const x of HX.heatTiles(e, 80, 40) || []) U.add(x);
+		const sim = new E.EESim(ED.inspect(ED.eelvlOf(lv)).level);
+		sim.reset();
+		const startTile = (Math.trunc(sim.py + 8) >> 4) * 80 + (Math.trunc(sim.px + 8) >> 4);
+		const d1 = on.done || {}, d0 = off.done || {};
+		check('the GPU random runs\' heat (a stand-in eegpu roll): the sampled cells\' runs replayed while the GPU plays (heatReplays), their tiles and the start\'s in the heat, every tile in the level',
+			d1.end === 'ticks' && d1.heatReplays > 0 && heats.length >= 1 && U.has(startTile) && U.size > 5 && [...U].every((t) => t >= 0 && t < 3200),
+			JSON.stringify({ end: d1.end, batches: d1.batches, replays: d1.heatReplays, events: heats.length, tiles: U.size, err: on.err.slice(-300) }));
+		check('... without --heat: no heat event, the same search (the same batches, ticks, cells, picks)', !off.events.some((e) => e.ev === 'heat') && d0.heatReplays === undefined &&
+			['batches', 'ticks', 'states', 'picks', 'rooms', 'end'].every((k) => d1[k] === d0[k]), JSON.stringify({ on: [d1.batches, d1.ticks, d1.states, d1.picks], off: [d0.batches, d0.ticks, d0.states, d0.picks] }));
+	}
+	// ---- the editor: a stand-in search's heat events and attempts, GET /api/editor/solve/heat
+	{
+		const fake = path.join(HOME, 'fake-heat.js'), sc = path.join(HOME, 'heat-sc.json'), argLog = path.join(HOME, 'heat-args.json');
+		fs.writeFileSync(fake, FAKE_HEAT);
+		const A = [81, 82, 83, 162], B = [83, 84, 400];
+		const inp = (ch, n) => ch.repeat(n);
+		fs.writeFileSync(sc, JSON.stringify({ argLog, wait: 200, gap: 150, events: [HX.heatEvent(80, 40, A), { ev: 'closest', dist: 30, tick: 150, inputs: inp('4', 150) }, HX.heatEvent(80, 40, B),
+			{ ev: 'closest', dist: 20, tick: 250, inputs: inp('4', 250) }, { ev: 'source', kind: 'room', room: 5, desc: 'x', gain: 3, tick: 120, dist: 25, inputs: inp('5', 120) }] }));
+		const buf = ED.eelvlOf(lv);
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, workers: 1 }, { available: false, why: 'test' }, { cpu: [process.execPath, fake, sc], steer: false });
+		const t0 = Date.now();
+		while (ED.state().running && !(ED.heatState(0, 0, 0).trails.length >= 3) && Date.now() - t0 < 20000) await new Promise((res) => setTimeout(res, 100));
+		const st = ED.state(), h0 = ED.heatState(0, 0, 0);
+		// (the expected tips: each attempt replayed as the editor does, its last EXP_TIP ticks' tiles)
+		const L = ED.inspect(buf).level;
+		const tipTiles = (inputs) => {
+			const s = new E.EESim(L), ip = new E.EEInput();
+			s.reset();
+			const P = [[s.px + 8, s.py + 8]];
+			for (const c of inputs) { E.applyMask(ip, (c.charCodeAt(0) - 48) & 31); s.tick(ip); P.push([s.px + 8, s.py + 8]); }
+			const T = new Set();
+			for (let i = Math.max(0, P.length - ED.EXP_TIP); i < P.length; i++) T.add(Math.floor(P[i][1] / 16) * 80 + Math.floor(P[i][0] / 16));
+			return T;
+		};
+		const want = new Set([...A, ...B, ...tipTiles(inp('4', 150)), ...tipTiles(inp('4', 250)), ...tipTiles(inp('5', 120))]);
+		const dec = (r) => { const I = Buffer.from(r.idx, 'base64'), Cn = Buffer.from(r.count, 'base64'); const m = new Map(); for (let i = 0; i < r.n; i++) m.set(I.readUInt32LE(4 * i), Cn.readUInt16LE(2 * i)); return m; };
+		const m0 = dec(h0);
+		const args = fs.existsSync(argLog) ? JSON.parse(fs.readFileSync(argLog, 'utf8')) : [];
+		const trs = h0.trails;
+		check('the editor\'s heat: the CPU search started with --heat=1; its heat events and the tips of its attempts (the nearest ones replayed anyway, the room source in turn) merged: every such tile, a tile of two events counted twice',
+			args.includes('--heat=1') && h0.search === st.started && h0.w === 80 && h0.h === 40 && h0.full && m0.size === want.size && [...want].every((t) => m0.has(t)) && m0.get(83) === 2 && m0.get(81) === 1 && h0.visited === want.size,
+			JSON.stringify({ args: args.includes('--heat=1'), visited: h0.visited, want: want.size, c83: m0.get(83), missing: [...want].filter((t) => !m0.has(t)).slice(0, 8) }));
+		check('the editor\'s trails: the attempts downsampled (at most ~200 points, whole px, from the start), each with its search, its ticks and its time; the newer ones since an id',
+			trs.length === 3 && trs.every((x) => x.k === 'goexplore' && x.label === 'random runs (CPU)' && x.pts.length >= 4 && x.pts.length <= 2 * (HX.TRAIL_PTS + 4) && Number.isInteger(x.pts[0]) && x.t > 0) &&
+			trs.map((x) => x.ticks).sort((a, b) => a - b).join() === '120,150,250' && ED.heatState(h0.version, h0.trailId, h0.search).trails.length === 0 &&
+			ED.heatState(h0.version, trs[0].id, h0.search).trails.length === 2, JSON.stringify(trs.map((x) => ({ id: x.id, k: x.k, ticks: x.ticks, n: x.pts.length / 2 }))));
+		const hv = ED.heatState(h0.version, h0.trailId, h0.search), hOld = ED.heatState(h0.version - 1, 0, h0.search), mOld = dec(hOld);
+		check('GET heat since the page\'s version: nothing new (not full), since the version before: that update\'s tiles only', !hv.full && hv.n === 0 && hv.version === h0.version && !hOld.full && hOld.n > 0 && hOld.n < h0.n &&
+			[...mOld.keys()].every((t) => m0.has(t)), JSON.stringify({ hv: [hv.full, hv.n], old: [hOld.full, hOld.n, h0.n] }));
+		// over HTTP (an in-process server on its own port)
+		const SV = require('../src/server.js');
+		await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
+		const port = SV.server.address().port;
+		let r1, r2;
+		try {
+			r1 = await request(port, 'GET', `/api/editor/solve/heat?search=${h0.search}&since=${h0.version}&trail=${h0.trailId}`);
+			r2 = await request(port, 'GET', '/api/editor/solve/heat');
+		} finally { await new Promise((res) => SV.server.close(res)); }
+		check('GET /api/editor/solve/heat: the same answers (the page\'s version and trail id: nothing new; no search given: every tile and trail)', r1.status === 200 && r1.json.n === 0 && !r1.json.full && r1.json.trails.length === 0 &&
+			r2.status === 200 && r2.json.full && r2.json.n === h0.n && r2.json.trails.length === 3 && r2.json.search === h0.search, `${r1.status} ${JSON.stringify(r1.json && [r1.json.n, r1.json.full])} ${r2.status}`);
+		ED.stop();
+		while (ED.state().running) await new Promise((res) => setTimeout(res, 50));
+		const hEnd = ED.heatState(h0.version, h0.trailId, h0.search), hEnd2 = ED.heatState(h0.version, h0.trailId, h0.search);
+		// another search: from scratch (the page's old version and search: every tile of the new one)
+		fs.writeFileSync(sc, JSON.stringify({ wait: 100, gap: 100, events: [HX.heatEvent(80, 40, [5])] }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, workers: 1 }, { available: false, why: 'test' }, { cpu: [process.execPath, fake, sc], steer: false });
+		const t1 = Date.now();
+		while (ED.state().running && ED.heatState(0, 0, 0).visited < 1 && Date.now() - t1 < 10000) await new Promise((res) => setTimeout(res, 50));
+		const hNew = ED.heatState(h0.version, h0.trailId, h0.search);
+		ED.stop();
+		while (ED.state().running) await new Promise((res) => setTimeout(res, 50));
+		check('a stopped search\'s heat stays (its clock stopped at its end); another search starts it over (the page\'s old version: every tile of the new one)', !hEnd.running && hEnd.t === hEnd2.t && hEnd.t > 0 &&
+			hNew.search !== h0.search && hNew.full && hNew.visited === 1 && hNew.version === 1 && hNew.trails.length === 0, JSON.stringify({ end: [hEnd.running, hEnd.t, hEnd2.t], new: [hNew.search, hNew.visited, hNew.version] }));
+	}
+}
 async function laneSection() {
 	section('path skips: the skip finder inside Find a route (the real src/skipfind.js --lane=1 next to a stand-in CPU search; no GPU)');
 	// the skip finder's loop room (test/skipfind.js room 2): the run walks right, turns back left for a while (a misguided
@@ -2554,6 +2978,7 @@ async function levelCheckSection() {
 	await physicsCheckSection();
 	if (want('app')) await appSection();
 	// (after app: that section expects no route search before its own)
+	if (want('explore')) await exploreSection();
 	if (want('levelcheck')) await levelCheckSection();
 	if (want('passes')) await passesSection();
 	if (want('cpu')) await cpuSection();

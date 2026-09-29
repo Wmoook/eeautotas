@@ -135,6 +135,7 @@ const ENDPOINTS = [
 	['POST', '/api/editor/check', 'what stands in the way of a route search: JSON {eelvlB64} or {level}: problems (no start, no trophy, walled in), notes, start, trophies'],
 	['POST', '/api/editor/solve', 'find a route to the trophy on the GPU and the CPU (the CPU alone without an NVIDIA GPU; one at a time, in the background): JSON {eelvlB64, guide: [[x, y], ...] (px, ball centre; optional), seconds, width, workers (CPU threads), seed}'],
 	['GET', '/api/editor/solve', 'the route search: running, stage, layer, tick, states, ticksPerSec, result {time, runTicks, inputs, path}, message'],
+	['GET', '/api/editor/solve/heat?search=&since=&trail=', 'the route search\'s exploration view (the page\'s heat and trails, src/heat.js): search (its start, ms), running, t (ms since its start), w, h, version, full, n, visited, idx / count / last (base64: uint32 LE tiles, uint16 LE visit counts, uint32 LE last visits in ms) changed since version `since` (every visited tile for another search or since=0), trailId, trails [{id, k, label, t, ticks, pts, br}] newer than `trail`'],
 	['POST', '/api/editor/solve/stop', 'stop the route search'],
 	['GET', '/api/editor/solve/route.eetas', 'download the found route (also level.eelvl: the level it was found on)'],
 	['POST', '/api/editor/autotas', 'the AutoTASer: from the level alone to a near-optimal TAS within a time budget (Find a route, a job from its first route optimized at once, fed with its newer routes, the GPU handed to the optimizer when Find a route stops finding faster routes): JSON {eelvlB64, minutes (30), workers, name}'],
@@ -262,6 +263,8 @@ async function editorRoute(req, res, parts, q) {
 	}
 	if (what === 'solve') {
 		if (req.method === 'GET' && !sub) return send(res, 200, ED.state());
+		// (the page's exploration view: where the search has been, its latest attempts; src/heat.js)
+		if (req.method === 'GET' && sub === 'heat') return send(res, 200, ED.heatState(q('since'), q('trail'), q('search')));
 		if (req.method === 'POST' && !sub) {
 			const b = await readJsonBody(req, 64 << 20);
 			try { return send(res, 200, ED.start(b, systemInfo().processors[1])); } catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }

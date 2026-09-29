@@ -296,6 +296,7 @@ const SF = require('./steer.js');
 const TMD = require('./timed.js');
 const PR = require('./prior.js');
 const OP = require('./options.js');
+const HX = require('./heat.js');
 const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
@@ -336,7 +337,15 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
-	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
+	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, heat: 0 };
+// --heat=1 (the level editor's exploration view, src/heat.js; off by default: no mark, no event): WHERE THE SEARCH HAS BEEN.
+// Each worker marks the tile of every cell it makes and of every cell it picks (a byte per tile and a
+// list, outside the memory budget) and sends the tiles marked since the last time at most every HX.HEAT_POST_MS; the
+// main thread prints their union at most every HX.HEAT_MS: {"ev":"heat","w","h","n","enc","tiles"} (HX.heatEvent).
+// --gpu=1: the tiles of the cells the GPU random runs register, sampled (HEAT_SAMPLE a batch: the run that reached the
+// cell replayed on the host while the GPU plays the next batch, at most HEAT_REPLAY_MS a batch) and of every new room's
+// first cell. Order and draws untouched: the same seed makes the same search with the heat on or off.
+const HEAT_SAMPLE = 24, HEAT_REPLAY_MS = 3, HEAT_QUEUE = 256;
 // --frontier=1 (coarse cells; the default here 0 = the search exactly as before; Find a route passes --frontier=1 --fBrake=1 --fPhys=1: editor.js GX_DEFAULTS): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
 // (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
@@ -2514,6 +2523,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// head F's goals, see FR_MIN_PICKS)
 	const VIS = coarse ? new Uint8Array(N) : null;
 	let nVis = 0, maxCoins = 0, fShare = 0;
+	// (--heat=1, the editor's exploration view: the tiles of the cells made and of the cells picked since
+	// the last heat message, each once (HEATM a byte per tile, HEATL their list); observation only, outside the budget)
+	const HEATM = a.heat ? new Uint8Array(N) : null, HEATL = a.heat ? new Int32Array(N) : null;
+	let heatN = 0, lastHeat = 0;
+	const heatPost = () => {
+		const tiles = HEATL.slice(0, heatN);
+		for (let k = 0; k < heatN; k++) HEATM[HEATL[k]] = 0;
+		heatN = 0;
+		post({ type: 'heat', seed, tiles });
+	};
 	// (--frontier=1: head F's state: the field's generation, heap, room, field, per-tile costs FT (-2: not looked up yet), the
 	// candidates' cost bound, when and at what VIS count it was built, the nearest attempt's best and when it improved)
 	const FR = coarse && a.frontier > 0 ? { gen: 0, HF: null, room: null, field: null, FT: null, dil: null, thr: Infinity, at: -1e15, visAt: 0, best: Infinity, gainAt: 0,
@@ -2672,6 +2691,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
+		if (HEATM !== null && HEATM[tile] === 0) { HEATM[tile] = 1; HEATL[heatN++] = tile; }
 		// (the visited tiles and the most coins: measurements; --frontier=1: a new cell of head F's room at its tile's cost,
 		// into head F's heap with hpush when it is among the nearest)
 		if (VIS !== null && VIS[tile] === 0) { VIS[tile] = 1; nVis++; }
@@ -3410,6 +3430,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if ((needSweep || archiveBytes() > capA) && picks - sweptAt >= SWEEP_GAP) sweep();
 		if (now - lastStat >= 250) { lastStat = now; post(stat()); }
 		if (now - lastSent >= 250) { lastSent = now; sendNear(); }
+		if (HEATM !== null && heatN > 0 && now - lastHeat >= HX.HEAT_POST_MS) { lastHeat = now; heatPost(); }
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
@@ -3460,6 +3481,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			const plRow = plog !== null ? plogRow(head, e) : null;
 			const cells0 = cells.size, impr0 = impr, vis0 = nVis, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
 			e.picks++; e.ver++; picks++; e.touch = picks;
+			if (HEATM !== null && HEATM[e.tile] === 0) { HEATM[e.tile] = 1; HEATL[heatN++] = e.tile; }
 			if (e.u === 2) culPicks++;
 			if (PB !== null && inBox(e.tile)) boxPicks++;
 			if (coarse) { e.room.picks++; if (e.room.grp !== null) { e.room.grp.picks++; if (e.room.grp.dom) picksDom++; } }
@@ -3618,6 +3640,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		pickL = false; pickW = false;
 	}
 	sendNear();
+	if (HEATM !== null && heatN > 0) heatPost();
 	E.flushTicks();
 	if (typeof global.gc === 'function') global.gc();   // (node --expose-gc: the done event's heapMB is what the heap holds)
 	// (observation only: the tiles of the archive's cells at the end, a bit per tile, for the done event's "tiles")
@@ -3662,6 +3685,21 @@ async function gpuMain(a, L, m) {
 	const inp = new E.EEInput();
 	const startSnap = sim.snapshot();
 	const startCost = RF.costAt(field, sim);
+	// (--heat=1, the editor's exploration view (see HEAT_SAMPLE): the tiles of the cells registered, sampled: the run that
+	// reached a cell replayed in an engine of its own (hsim) while the GPU plays the next batch, at most HEAT_REPLAY_MS a
+	// batch, the newest HEAT_QUEUE waiting; every new room's first cell (its replay is newRoom's own); printed at most
+	// every HX.HEAT_MS. Observation only: no random draw, the archive and the batches as without it)
+	const HM = a.heat ? HX.heatMarks(L.width * L.height) : null;
+	const hsim = HM !== null ? new E.EESim(L) : null, hinp = HM !== null ? new E.EEInput() : null;
+	if (hsim !== null) hsim.reset();
+	const hStart = hsim !== null ? hsim.snapshot() : null, heatQ = [];
+	let heatSaid = Date.now(), heatReplays = 0, lastWait = 0;
+	const tileOf = (q) => Math.min(L.width * L.height - 1, Math.max(0, (Math.trunc(q.py + 8) >> 4) * L.width + (Math.trunc(q.px + 8) >> 4)));
+	const heatSay = (force) => {
+		if (HM === null || !HM.n || (!force && Date.now() - heatSaid < HX.HEAT_MS)) return;
+		heatSaid = Date.now();
+		say(HX.heatEvent(L.width, L.height, HM.take()));
+	};
 	// the tool, the level blob and the reach file (the editor passes its own; else written next to --out or in the
 	// system's temp folder)
 	const tool = a.tool || G.nativeTool();
@@ -3690,7 +3728,9 @@ async function gpuMain(a, L, m) {
 	const args = ['roll', bin, `--rolls=${a.rolls}`, `--roll=${classes[0].roll}`, `--keep=${classes[0].keep}`, ...(mixAsk ? [`--rollMax=${rollMax}`] : []), `--phase=${a.phase}`, `--prune=${a.prune ? 1 : 0}`,
 		...(reachFile ? [`--reach=${reachFile}`] : []), ...(a.gmem ? [`--mem=${a.gmem}`] : []), `--hostmem=${hmem}`, `--maxPicks=${Math.max(a.batch, 1)}`, ...(a.deathMoves ? ['--deaths=1'] : []),
 		...['stopfile', 'pausefile', 'cachedir', 'launch-ms'].filter((k) => a[k]).map((k) => `--${k}=${a[k]}`), `--parent=${process.pid}`];
-	const ch = spawn(tool, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true });
+	// (a .js stand-in for eegpu roll: tests, test/editor.js explore)
+	const ch = /\.js$/i.test(tool) ? spawn(process.execPath, [tool, ...args], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+		: spawn(tool, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true });
 	// (this process picks every batch while the GPU waits: above normal priority like eegpu's own, next to the CPU search's
 	// busy workers; EEGPU_PRIORITY=normal: off; where it is not allowed (Linux without CAP_SYS_NICE) it stays as it is)
 	if (process.env.EEGPU_PRIORITY !== 'normal') { try { os.setPriority(os.constants.priority.PRIORITY_ABOVE_NORMAL); } catch (e) { /* not allowed */ } }
@@ -3861,6 +3901,7 @@ async function gpuMain(a, L, m) {
 		const ms = c === 0 ? new Uint8Array(0) : pathOf(cNode[c]);
 		sim.restore(startSnap);
 		for (let s = 0; s < ms.length; s++) { E.applyMask(inp, ms[s]); sim.tick(inp); }
+		if (HM !== null) HM.mark(tileOf(sim));
 		if (RM.key(sim) !== key) keyMismatch++;
 		const f = fields.enter(sim);
 		const r = { idx: roomList.length, key, desc: RM.desc(sim), t: cT[c], gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, arr: [], best: -1, isNew: true, sent: 0, sentAt: -1, grp: null };
@@ -4077,7 +4118,18 @@ async function gpuMain(a, L, m) {
 		process.stdin.on('error', () => { stopReq = true; });
 	}
 	const stopFile = () => !!a.stopfile && fs.existsSync(a.stopfile);
-	const timer = setInterval(() => { progress(); sendNear(); }, 500);
+	const timer = setInterval(() => { progress(); sendNear(); heatSay(false); }, 500);
+	/** --heat=1: the newest sampled cells' runs replayed (hsim), the tiles of each run's own ticks marked, for at most
+	 *  HEAT_REPLAY_MS (the GPU plays the batch meanwhile) */
+	const heatWork = (budget) => {
+		const h0 = performance.now();
+		while (heatQ.length && performance.now() - h0 < budget) {
+			const node = heatQ.pop(), ms = pathOf(node), from = ms.length - nLen[node];
+			hsim.restore(hStart);
+			for (let s = 0; s < ms.length; s++) { E.applyMask(hinp, ms[s]); hsim.tick(hinp); if (s >= from) HM.mark(tileOf(hsim)); }
+			heatReplays++;
+		}
+	};
 	// ---- the batches
 	const pickBuf = new Uint32Array(a.batch);
 	const pickBytes = Buffer.from(pickBuf.buffer);
@@ -4144,9 +4196,13 @@ async function gpuMain(a, L, m) {
 		const hw = Date.now();
 		pickMs += hw - h0;
 		hostMs += hw - h0;
+		// (--heat=1: the sampled runs replayed while the GPU plays this batch; the batch was sent before)
+		// (at most HEAT_REPLAY_MS, and a quarter of the last batch's wait: the GPU's batch takes longer, so no reply waits)
+		if (HM !== null && heatQ.length) { await new Promise((res) => setImmediate(res)); heatWork(Math.min(HEAT_REPLAY_MS, 0.25 * lastWait)); }
 		const m = await reply();
 		const h1 = Date.now();
 		waitMs += h1 - hw;
+		lastWait = h1 - hw;
 		if (m === null) { end = toolDone && toolDone.end === 'stopped' ? 'stopped' : 'error'; break; }
 		if (m.ev.ev !== 'batch') continue;
 		batches++;
@@ -4165,7 +4221,7 @@ async function gpuMain(a, L, m) {
 		// (new cells: the dense ids from this batch's on; they come in any order, a record's index and its new id are two
 		// separate atomics: judged by the count before the batch, else a new id below one read before was taken for a known
 		// cell and dropped)
-		const n0 = nCells;
+		const n0 = nCells, hStride = HM !== null ? Math.max(1, Math.floor(n / HEAT_SAMPLE)) : 0;
 		for (let j = 0; j < n; j++) {
 			const d = rec[6 * j], t = rec[6 * j + 1], fifths = rec[6 * j + 2], roomKey = rec[6 * j + 3], pk = rec[6 * j + 4], rs = rec[6 * j + 5];
 			if (d < 0) continue;   // (the pool is full: not kept)
@@ -4175,6 +4231,7 @@ async function gpuMain(a, L, m) {
 			if (isNew) bst.fresh++;
 			if (isNew) { grow(d + 1); if (d < nCells) reordered++; else nCells = d + 1; cPicks[d] = 0; cVer[d] = 0; cSeen[d] = 0; if (SAT && pk < K) { pickNew[pk]++; newPk.set(d, pk); } }
 			else if (t >= cT[d]) continue;
+			if (HM !== null && j % hStride === 0) heatQ.push(node);
 			cT[d] = t; cNode[d] = node;
 			const rc = costOf(fifths, node);
 			cRc[d] = rc;
@@ -4193,6 +4250,7 @@ async function gpuMain(a, L, m) {
 			const rr = roomList[cRoom[d]];
 			if (rr.best < 0 || rc < cRc[rr.best]) rr.best = d;
 		}
+		if (heatQ.length > HEAT_QUEUE) heatQ.splice(0, heatQ.length - HEAT_QUEUE);
 		// the batch's new rooms: fields from the earliest of their new cells (explore(): a room's first cell)
 		for (const p of bFirst) {
 			let c0 = p.cells[0];
@@ -4262,10 +4320,11 @@ async function gpuMain(a, L, m) {
 	cleanup();
 	progress();
 	sendNear();
+	heatSay(true);
 	const secs = (Date.now() - tReady) / 1000;
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
-		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null, ...(band ? { mixBandit: bandRec() } : {}),
+		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null, ...(band ? { mixBandit: bandRec() } : {}), ...(HM !== null ? { heatReplays } : {}),
 		astar: a.rollsAstar ? { builds: astarBuilds, kappa: Math.round(kappa * 100) / 100 } : null,
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
@@ -4440,10 +4499,19 @@ async function main() {
 	// (armGate: with --stdin=1 the arm starts before any route only after the editor's first "arm" line (it sends them once
 	// the GPU random runs run and no GPU strategy waits on memory); without stdin at once)
 	let armRouted = false, armGate = !a.stdin;
+	// (--heat=1: the workers' marked tiles, their union printed at most every HX.HEAT_MS: the editor's exploration view)
+	const heatAgg = a.heat ? HX.heatMarks(L.width * L.height) : null;
+	let heatSaid = Date.now();
+	const heatSay = (force) => {
+		if (heatAgg === null || !heatAgg.n || (!force && Date.now() - heatSaid < HX.HEAT_MS)) return;
+		heatSaid = Date.now();
+		say(HX.heatEvent(L.width, L.height, heatAgg.take()));
+	};
 	let lastClaim = Date.now();
 	const timer = setInterval(() => {
 		progress();
 		flushNear();
+		heatSay(false);
 		if (Date.now() - lastClaim >= 60000) { lastClaim = Date.now(); registryClaim(claimed); }
 	}, 500);
 	if (a.stdin) {
@@ -4590,6 +4658,7 @@ async function main() {
 		w.on('message', (m) => {
 			if (m.type === 'stat' || m.type === 'done') rec.ticks = m.ticks || rec.ticks;
 			if (m.type === 'finish') classFound(Uint8Array.from(m.inputs, (ch) => (ch.charCodeAt(0) - 48) & 31), rec);
+			if (m.type === 'heat' && heatAgg !== null && m.tiles) heatAgg.add(m.tiles);
 		});
 		w.on('error', (e) => say({ ev: 'warning', text: `class worker (${g.desc}): ${e && e.message ? e.message : e}` }));
 		w.on('exit', () => {
@@ -4663,6 +4732,8 @@ async function main() {
 			}
 		} else if (msg.type === 'source') {
 			onSource(msg);
+		} else if (msg.type === 'heat') {
+			if (heatAgg !== null && msg.tiles) heatAgg.add(msg.tiles);
 		} else if (msg.type === 'room') {
 			if (one && one.register(msg) && a.share && a.workers > 1) { one.broadcast(msg.inputs, msg.seed); one.shared++; }
 		} else if (msg.type === 'edge') {
@@ -4722,6 +4793,7 @@ async function main() {
 	if (a.stdin) { try { process.stdin.pause(); process.stdin.destroy(); } catch (e) { /* gone */ } }
 	progress();
 	flushNear();
+	heatSay(true);
 	const ends = [...dones.values()].map((d) => d.end);
 	const end = ends.includes('unreachable') ? 'unreachable' : ends.includes('stopped') && !(a.first && route) ? 'stopped' : a.first && route ? 'finish'
 		: ends.includes('time') ? 'time' : ends.includes('ticks') ? 'ticks' : ends.length && ends.every((x) => x === 'exhausted') ? 'exhausted' : ends[0] || 'error';
