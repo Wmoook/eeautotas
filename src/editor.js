@@ -1209,11 +1209,20 @@ function dpSwitch(file, kind) {
  *  count (or at a coin door it cannot open) turns to its own coin DP first */
 function pastPlanCheck() {
 	if (!cur || !cur.opts.pastPlan || cur.pastOn === 'past' || cur.opts.noWayUp || !brk || !S || S.result || !S.running || S.halted) return;
-	if (Date.now() - brk.at < cur.opts.breakWait[0] * 1000) return;
+	// (stalled: no nearer attempt and no new room for the breaker's first wait; pinned: no nearer attempt that long, new
+	// rooms or not: Palmia Ville's nearest attempt sat by its 10-coin door from 6.5 s while coin rooms kept coming, and the
+	// stall clock ran its 90 s only at ~200 s)
+	const wait = cur.opts.breakWait[0] * 1000, now = Date.now();
+	const stalled = now - brk.at >= wait, pinned = now - (brk.nearAt || brk.at) >= wait;
+	if (!stalled && !pinned) return;
 	let held = 0;
 	for (const r of sources.values()) held = Math.max(held, goldOfDesc(r.desc));
 	const after = Math.round((Date.now() - S.started) / 100) / 10;
-	if (cur.past && held >= cur.past.planT && fs.existsSync(cur.past.file)) {
+	// (the nearest attempt by a coin door or gate of more coins than it holds, below the plan's count)
+	const T = S.steer && S.steer.dp ? S.steer.dp.T : cur.past ? cur.past.T : 0;
+	const nc = closestRoom ? goldOfDesc(closestRoom.desc) : 0, dr = !cur.pastOn && nc < T ? coinDoorNear(S.closest, nc) : null;
+	const doorWhy = dr ? `the nearest attempt (${nc} coins) ends by the ${dr.n}-coin ${cur.level.fg[dr.y * cur.level.width + dr.x] === 43 ? 'door' : 'gate'} at (${dr.x}, ${dr.y})` : '';
+	if (cur.past && held >= cur.past.planT && (stalled || (dr && cur.past.kind === 'coins')) && fs.existsSync(cur.past.file)) {
 		// (the coin plan of a search without a field (its own models nothing: one layer, no DP): the plan's file becomes the
 		// search's field first, as a late one (lateSteer), then the switch)
 		if (!cur.files.steerCpu && cur.past.kind === 'coins') lateSteer(searchGen, { useful: true, file: cur.past.file, layers: cur.past.layers, bodies: cur.past.bodies, features: cur.past.features, dp: { n: cur.past.n, T: cur.past.T }, bytes: cur.past.bytes, start: cur.past.start, ms: cur.past.ms });
@@ -1221,24 +1230,18 @@ function pastPlanCheck() {
 		const told = dpSwitch(cur.past.file, 'past');
 		cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
 		if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
-		if (cur.past.kind === 'coins') note(`the coin plan: no progress for ${cur.opts.breakWait[0]} s with ${held} coins held and a steer field that models no coins: the search turns to the coin plan over ${cur.past.T} coins, the DP first (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
+		if (cur.past.kind === 'coins') note(`the coin plan: no ${stalled ? 'progress' : 'nearer attempt'} for ${cur.opts.breakWait[0]} s with ${held} coins held${stalled ? '' : ` (${doorWhy})`} and a steer field that models no coins: the search turns to the coin plan over ${cur.past.T} coins, the DP first (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
 		else note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
 		save();
 		return;
 	}
 	// (the coin stall: the field's own coin DP first; once a search, and not after the plan past its count)
-	if (cur.pastOn || !cur.files.steerCpu || !S.steer || !S.steer.dp || !(S.steer.dp.T > 0) || !fs.existsSync(cur.files.steerCpu)) return;
-	const T = S.steer.dp.T;
-	let why = '';
-	if (held < T) why = `the rooms hold ${held} of the plan's ${T} coins`;
-	else {
-		const nc = closestRoom ? goldOfDesc(closestRoom.desc) : 0, dr = nc < T ? coinDoorNear(S.closest, nc) : null;
-		if (dr) why = `the nearest attempt (${nc} coins) ends by the ${dr.n}-coin ${cur.level.fg[dr.y * cur.level.width + dr.x] === 43 ? 'door' : 'gate'} at (${dr.x}, ${dr.y})`;
-	}
+	if (cur.pastOn || !cur.files.steerCpu || !S.steer || !S.steer.dp || !(T > 0) || !fs.existsSync(cur.files.steerCpu)) return;
+	const why = doorWhy || (stalled && held < T ? `the rooms hold ${held} of the plan's ${T} coins` : '');
 	if (!why) return;
 	const told = dpSwitch(cur.files.steerCpu, 'stall');
 	if (S.steer) S.steer.dpFirst = { after, held, T, why };
-	note(`the coin stall: no progress for ${cur.opts.breakWait[0]} s and ${why}: the search turns to its coin DP first (${told ? 'the CPU search\'s order and ' : ''}the nearest attempt; the wall breaker's gates are that DP's)`);
+	note(`the coin stall: no ${dr ? 'nearer attempt' : 'progress'} for ${cur.opts.breakWait[0]} s and ${why}: the search turns to its coin DP first (${told ? 'the CPU search\'s order and ' : ''}the nearest attempt; the wall breaker's gates are that DP's)`);
 	save();
 }
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
@@ -1372,6 +1375,8 @@ function breakProgress(why, own) {
 	if (esc) esc.at = Date.now();   // (the stall escape's clock too)
 	if (!brk) return;
 	brk.at = Date.now();
+	// (the nearest attempt's own clock: pastPlanCheck's coin door, pinned while new rooms come)
+	if (why === 'nearer') brk.nearAt = brk.at;
 	if (brk.round) brk.round.progress.push(why);
 	// (the breaker's own progress: its runs' nearer attempts and their new rooms; the gated share, schedule())
 	if (brk.round && own) { brk.round.own = (brk.round.own || 0) + 1; brk.round.quiet = Date.now(); }
@@ -2192,7 +2197,7 @@ function launchAll(rf, noGpu, stale, which, cpu, ins, guide) {
 	if (noWayUp) note(`the physics check finds no way from the start to the trophy on this level (${S.file}; checking that with ${S.strategies.map((q) => q.label).join(' and ')}, without the physics check, for up to ${S.seconds} s)`);
 	if (S.physics.viaDeath) note(deathNote(S.physics));
 	save();
-	if (brk) brk.at = Date.now();   // (the stall clock from the search's start)
+	if (brk) brk.at = brk.nearAt = Date.now();   // (the stall clock from the search's start)
 	if (prec) prec.at = Date.now();
 	if (esc) esc.at = Date.now();
 	kids = which.map((k, n) => {
