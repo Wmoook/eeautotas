@@ -113,7 +113,11 @@ struct Guard {
 	bool havePrev = false;
 	double gapMs = 0;          // the GPU clock's time between one timed command's end and the next one's start, summed
 	uint64_t gaps = 0;
+	bool serve = false;        // eegpu explore --serve: a stop request (the job's stop file) ends the job, not the process
+	double hostCpu0 = 0;       // (--serve: the process's CPU time at the job's start: "hostCpuMs" is the job's)
 };
+/** --serve: thrown by checkStop after the job's final line (a stop file; a parent that exited still ends the process) */
+struct JobStop {};
 inline Guard G;
 /** the command's final line for a stop request (end "stopped"); none set: a bare done event */
 inline std::function<void()> onStop;
@@ -171,7 +175,7 @@ inline std::string doneFields() {
 	snprintf(b, sizeof b, ",\"maxLaunchMs\":%.1f,\"maxLaunchKernel\":\"%s\",\"maxKernelMs\":%.1f,\"maxKernelKernel\":\"%s\",\"gpuClock\":%s,\"launchTarget\":%.0f,\"kernelLaunches\":%llu,"
 		"\"launchTotalMs\":%.0f,\"kernelTotalMs\":%.0f,\"gapMs\":%.0f,\"wait\":\"%s\",\"hostCpuMs\":%.0f",
 		G.maxMs, G.maxWhat.c_str(), G.maxKernelMs, G.maxKernelWhat.c_str(), G.events == 1 ? "true" : "false", G.targetMs, (unsigned long long)G.launches,
-		G.totalMs, G.totalKernelMs, G.gapMs, G.wait && G.events == 1 && cu::cuEventQuery && cu::cuEventSynchronize ? "block" : "spin", hostCpuMs());
+		G.totalMs, G.totalKernelMs, G.gapMs, G.wait && G.events == 1 && cu::cuEventQuery && cu::cuEventSynchronize ? "block" : "spin", hostCpuMs() - G.hostCpu0);
 #ifdef _WIN32
 	return b;
 #else
@@ -190,6 +194,22 @@ inline void watchParent(const std::string& pid) {
 #else
 	if (p && p < 0x7fffffffUL) G.parent.open((int)p);
 #endif
+}
+/** --parent: that process has exited */
+inline bool parentExited() {
+#ifdef _WIN32
+	return G.parent && WaitForSingleObject(G.parent, 0) == WAIT_OBJECT_0;
+#else
+	return G.parent && G.parent.exited();
+#endif
+}
+/** --serve: a new job (its own stop file; the stats, the pause's hold and the stop from zero) */
+inline void jobStart(const std::string& stopFile) {
+	G.stopFile = stopFile;
+	G.maxMs = G.maxKernelMs = G.totalMs = G.totalKernelMs = 0; G.launches = 0; G.maxWhat.clear(); G.maxKernelWhat.clear();
+	G.pausedMs = 0; G.lastPauseCheck = -1e9; G.searching = false; G.lastStopCheck = -1e9; G.stopping = false;
+	G.havePrev = false; G.gapMs = 0; G.gaps = 0;
+	G.hostCpu0 = hostCpuMs();
 }
 /** --stopfile / --parent: has a stop been requested? (the file exists, or the parent has exited; looked at most every
  *  20 ms unless `now`) */
@@ -237,6 +257,7 @@ inline void checkStop(bool now) {
 	if (onStop) onStop();
 	else printf("{\"ev\":\"done\",\"end\":\"stopped\"%s}\n", doneFields().c_str());
 	fflush(stdout);
+	if (G.serve && !parentExited()) throw JobStop{};   // (--serve: the job ends here, the server waits for the next)
 	exit(0);
 }
 

@@ -298,13 +298,28 @@ inline bool loadModuleCached(CUmodule* mod, const std::string& ptx, const std::s
 	return ok;
 }
 
+/** the device buffers allocated and not freed since tracking began (eegpu explore --serve: a job's buffers are its
+ *  commands' locals, which a process of its own never frees; the server frees them all after each job); null: off */
+inline std::vector<CUdeviceptr>* gTrack = nullptr;
 /** A device buffer. */
 struct Buf {
 	CUdeviceptr p = 0; size_t bytes = 0;
-	bool alloc(size_t n) { free(); bytes = n ? n : 8; CU_TRY(cuMemAlloc_v2(&p, bytes)); return true; }
+	bool alloc(size_t n) { free(); bytes = n ? n : 8; CU_TRY(cuMemAlloc_v2(&p, bytes)); if (gTrack) gTrack->push_back(p); return true; }
 	bool upload(const void* src, size_t n) { if (!alloc(n)) return false; if (n) CU_TRY(cuMemcpyHtoD_v2(p, src, n)); return true; }
-	void free() { if (p) cuMemFree_v2(p); p = 0; }
+	void free() {
+		if (p) {
+			cuMemFree_v2(p);
+			if (gTrack) { auto it = std::find(gTrack->begin(), gTrack->end(), p); if (it != gTrack->end()) gTrack->erase(it); }
+		}
+		p = 0;
+	}
 };
+/** frees every buffer tracked (gTrack) and empties the list */
+inline void freeTracked() {
+	if (!gTrack) return;
+	for (CUdeviceptr q : *gTrack) cuMemFree_v2(q);
+	gTrack->clear();
+}
 /** a host buffer for copies to and from the GPU: page-locked where the driver gives it (faster copies), else malloc */
 struct HostBuf {
 	uint8_t* p = nullptr; size_t bytes = 0; bool locked = false;
