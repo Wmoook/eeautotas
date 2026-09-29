@@ -713,6 +713,7 @@ function checkStalls() {
 	if (!S || !S.running) return;
 	relayKick();   // (a relay still waiting: the nearest attempt came before the search's first seconds)
 	pastPlanCheck();   // (a search stalled at the plan's coin count: the plan past it, before the breaker picks its gates)
+	pinRefineCheck();  // (EEAT_PINREFINE=1: a pinned nearest attempt walls its place in the steer's model)
 	breakKick();   // (a stalled search: a round of the wall breaker)
 	precKick();    // (a stalled search: exact landings from its nearest attempts)
 	escKick();     // (a stalled search: an escape, a fresh one search from its nearest attempt; a stalled escape: the next)
@@ -1249,6 +1250,66 @@ function pastPlanCheck() {
 	if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
 	note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
 	save();
+}
+/** PIN REFINEMENT (EEAT_PINREFINE=1, OPT-IN, b9cw-cw; off = main: nothing runs): the steer's CEGAR is optimistic (it
+ *  models only the features its plan's replay meets), so a plan through a false near never models what the true route
+ *  needs, and the search pins there (Cold World: the pool 36.6 from ~10 s in every run, blue coins worth 0). A nearest
+ *  attempt (by the steer) not nearer by BREAK_TILES for PIN_S s is a counterexample to the plan's next step: its end
+ *  tile's same-kind component is walled in the steer's model (steer.js steerWallsOf, EEAT_STEER_WALLS, the seeds of every
+ *  pin so far), the steer is built again in a worker and the CPU search turns to it (`steer <file>`, as the plan past its
+ *  count does); at most PIN_MAX times a search. Ordering only: the steer never prunes (RCH3's -1 stays the only one) */
+const PIN_S = 60, PIN_MAX = 6;
+let pinR = null;
+function pinRefineCheck() {
+	if (process.env.EEAT_PINREFINE !== '1' || !cur || !S || !S.running || S.result || S.halted || !cur.files.steerCpu || !cur.distBySteer || cur.pastOn) return;
+	if (!pinR || pinR.search !== S.started) pinR = { search: S.started, best: Infinity, at: Date.now(), seeds: [], n: 0, busy: false };
+	const c = S.closest;
+	if (!c || c.cut || !(c.dist >= 0)) return;
+	if (c.dist < pinR.best - BREAK_TILES) { pinR.best = c.dist; pinR.at = Date.now(); return; }
+	if (pinR.busy || pinR.n >= PIN_MAX || Date.now() - pinR.at < PIN_S * 1000) return;
+	const p = c.path && c.path[c.path.length - 1];
+	const L = cur.level;
+	if (!p) return;
+	const tx = Math.floor(p[0] / 16), ty = Math.floor(p[1] / 16);
+	if (!(tx >= 0 && tx < L.width && ty >= 0 && ty < L.height)) return;
+	pinR.seeds.push(`${tx},${ty}`);
+	pinR.busy = true;
+	const k = ++pinR.n, R = pinR, seeds = pinR.seeds.join(';'), t0 = Date.now();
+	const file = `${steerBase(cur.levelHash)}_pin${k}.bin`;
+	const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
+		process.env.EEAT_STEER_WALLS = d.seeds;
+		const E = require(d.mods.eesim), EL = require(d.mods.eelvl), SF = require(d.mods.steer), G = require(d.mods.gpu);
+		const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
+		const st = SF.buildSteer(L);
+		let lfp = null; try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* none */ }
+		const b = SF.steerFileBytes(st, lfp, !!(st.tour || (st.dp && st.dp.free)));
+		fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file);
+		parentPort.postMessage({ ok: true, layers: st.info.layers, features: st.info.features, start: Number.isFinite(st.info.start) ? st.info.start : null, over: st.info.over || null, ms: st.info.ms });`;
+	let w;
+	try {
+		w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(cur.buf), file, seeds,
+			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
+	} catch (e) { R.busy = false; return; }
+	note(`pin refinement ${k}: the nearest attempt (${c.tiles} tiles, ${Math.round(c.dist * 10) / 10} by the steer) has not got nearer for ${PIN_S} s: its place (${tx}, ${ty}) is walled in the steer's model, the steer is built again`);
+	w.once('message', (r) => {
+		R.busy = false;
+		if (pinR !== R || !S || !S.running || S.result || !r || !r.ok || !fs.existsSync(file)) return;
+		S.closest = null;   // (another measure: the CPU search's attempts by it)
+		nearD = null;
+		if (brk) brk.mark = Infinity;
+		R.best = Infinity; R.at = Date.now();
+		let told = 0;
+		S.strategies.forEach((q, j) => {
+			const ch = kids[j];
+			if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${file}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
+		});
+		const after = Math.round((Date.now() - S.started) / 100) / 10;
+		if (S.steer) S.steer.pins = (S.steer.pins || []).concat([{ k, seed: `${tx},${ty}`, start: r.start, layers: r.layers, features: r.features, ms: Date.now() - t0, after, told }]);
+		note(`pin refinement ${k}: the steer without (${seeds.replace(/;/g, ') (')}): ${r.layers} layers (${(r.features || []).join(', ') || 'none'}), start ${r.start}; the CPU search turns to it (${told})`);
+		save();
+	});
+	w.once('error', () => { R.busy = false; });
+	w.once('exit', (code2) => { if (code2) R.busy = false; });
 }
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
 const GATE_AT = 0.2;
