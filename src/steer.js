@@ -1487,11 +1487,12 @@ function kindLegs(A, PH, kind, T, coins, deadline, opts, lim) {
 	const succ = new Array(SL).fill(null).map(() => new Set());
 	for (const e of fr.edges) succ[Math.floor(e / SL)].add(e % SL);
 	const comps = sccs(SL, fr.layers, succ);
-	// (the budget, before any field: n x the reached layers of leg bodies within the bytes left; two sweeps of them at
-	// this build's own ms per field within the time left)
-	const nL = comps.flat().length;
+	// (the budget, before any field: n x the reached layers of leg bodies within the bytes left; the fields' builds (a
+	// layer alone once, a strongly connected group's layers ~4 sweeps each: E.T. Ecosystems' plain / wild pair took 8)
+	// at this build's own ms per field within the time left)
+	const nL = comps.flat().length, per = comps.reduce((a, c) => a + (c.length > 1 ? 4 * c.length : 1), 0);
 	if (lim && n * nL > lim.maxFields) return { over: `the blue coin DP: ${n} x ${nL} leg fields over the bytes` };
-	if (lim && deadline && Date.now() + 2 * n * nL * lim.msPer > deadline) return { over: `the blue coin DP: ${n} x ${nL} leg fields past the build's time` };
+	if (lim && deadline && Date.now() + n * per * lim.msPer > deadline) return { over: `the blue coin DP: ${n} x ${nL} leg fields past the build's time` };
 	// (the layers of the two models: ML's features are MP's without the kind, in MP's order)
 	const mIdx = ML.names.map((k) => MP.names.indexOf(k));
 	const toL = new Int32Array(MP.S);
