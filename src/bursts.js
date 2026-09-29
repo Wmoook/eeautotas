@@ -418,7 +418,7 @@ function create(o) {
 	const infoOf = (r) => {
 		if (r.info) return r.info;
 		const sim = simAt(r.inputs);
-		const fg = L.fg, fl = L.flags;
+		const fg = L.fg, fl = RF.guideFlags(L);
 		const pass = new Uint8Array(N), wall = new Uint8Array(N);
 		for (let k = 0; k < N; k++) {
 			const id = fg[k], f = id >= 0 && id < fl.length ? fl[id] : 0;
@@ -1142,7 +1142,7 @@ function create(o) {
  * when not given).
  */
 function roomAim(L, RM, sim, known, T) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const TR = (T && T.TR) || triggersOf(L), PT = (T && T.PT) || portalsOf(L);
 	const pass = new Uint8Array(N), wall = new Uint8Array(N);
 	for (let k = 0; k < N; k++) {

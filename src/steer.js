@@ -51,7 +51,9 @@ const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 const CUT = RF.CUT;
 const INF = 0xffffffff;
 // door / gate ids -> [feature, polarity (1: open when on / satisfied)]; exact statics (gold border: off; silver crown:
-// only the trophy gives it); time doors shut (a door that opens every 10 s is a wait of up to 5 s); the rest open
+// only the trophy gives it); time doors shut (a door that opens every 10 s is a wait of up to 5 s); death doors and zombie
+// doors / gates open. 50 (the secret "appear" block, eesim.js F_DOOR) is no door: it always blocks, a wall by
+// reach.js guideFlags (before 2026-09-28 it fell through to open: This is not snow's trophy fenced by six of them)
 const GATE = new Map([
 	[23, ['key0', 1]], [24, ['key1', 1]], [25, ['key2', 1]], [26, ['key0', 0]], [27, ['key1', 0]], [28, ['key2', 0]],
 	[1005, ['key3', 1]], [1006, ['key4', 1]], [1007, ['key5', 1]], [1008, ['key3', 0]], [1009, ['key4', 0]], [1010, ['key5', 0]],
@@ -72,7 +74,8 @@ const plainFx = (sim) => !sim.has_levitation && sim.flip_gravity === 0 && sim.ma
 // ------------------------------------------------------------------ the level's static analysis
 function analyze(level, opts) {
 	const W = level.width, H = level.height, N = W * H;
-	const fg = level.fg, flags = level.flags, nF = flags.length, gF = level.gFlags, lk = level.lookup0;
+	// (the guidance's flags, reach.js guideFlags: 50, the secret "appear" block, is a wall, not a door of "the rest open")
+	const fg = level.fg, flags = RF.guideFlags(level), nF = flags.length, gF = level.gFlags, lk = level.lookup0;
 	const fl = (id) => (id >= 0 && id < nF ? flags[id] : 0);
 	const isWallId = (id) => (fl(id) & F_SOLID) !== 0 && (fl(id) & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0;
 	// static class: 0 wall, 1 killer, 2 open, 3 gate (per layer)

@@ -25,6 +25,7 @@
 //   0 without a timer): the searches' cells tell apart states whose soonest killer has more time left.
 // doomed(TM, sim or tile, left) -> true when the ball cannot clear its soonest timed killer (nor finish) before it fires
 //   (the lower bound above is more than the ticks left): its only future is that death.
+const RF = require('./reach.js');   // (guideFlags: the walls of the bound, 50 the secret "appear" block one of them)
 
 const KIND_CURSE = 1, KIND_ZOMBIE = 2, KIND_FIRE = 4, KIND_POISON = 8;
 const KINDS = [KIND_CURSE, KIND_ZOMBIE, KIND_FIRE, KIND_POISON];
@@ -82,7 +83,7 @@ function goalsOf(L, kind) {
 
 /** the lower bound (ticks) per tile to the goal tiles or a tile next to one (see the header); 0xffff: none */
 function lowerBoundTo(L, goals) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const out = new Uint16Array(new SharedArrayBuffer(2 * N)).fill(0xffff);
 	if (!goals.length) return out;
 	const wall = new Uint8Array(N);
