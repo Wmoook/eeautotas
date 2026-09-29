@@ -1197,17 +1197,23 @@ function domPick(DOM, share, rnd, weightOf) {
 // attempt holds 4 coins with 0 more reachable before its 5-coin door, The Glitch 14 + 6 blue coins before a 21 door).
 // Coins and blue coins only go up in a run (the engine resets them only at /reset), so a coin GATE of count n at or below
 // the count held is shut for good, and a coin DOOR opens only if the coins held + the coins still reachable reach it.
-// doomOf(L).test(sim, tile): the coin closure from the live state (the walk: 8-way with no corner cut between two
-// tiles solid then, portal exits as extra steps, every non-coin door and gate open, one-ways and half blocks passable, killing tiles
-// not entered (passable on a level with a protection effect), id 50 a wall (RF.guideFlags); coin gates open only above the count held; coin doors open at most the count
-// held + the untaken coins the walk reached so far, grown to a fixpoint), seeded at the ball's tile and, where something
-// can kill, the respawn target (the checkpoint, else every spawn). No trophy reached = DOOMED: a relaxation of the
-// engine, so a doomed state cannot finish; it is only DEMOTED (goexplore.js explore(): DOOM_A tiles in head A, last in
-// head B's samples and room draws, no nearest attempt, source, discovery or GPU burst while a state that is not doomed
-// is there), never dropped: the reach field's -1 stays the only prune. Cached per (coins, blue coins, the collected set,
-// the respawn code) with the flood's reached tiles: a tile inside a doomed flood is doomed (its own flood is a subset
-// of that one), a tile inside a flood that reached the trophy is taken as not doomed (the safe side). null: the level
-// has no coin door or gate, or no trophy. EEAT_DOOM=0 / --doom=0: off (= main).
+// doomOf(L).test(sim, tile): the coin closure from the live state, a relaxation of the engine: the walk (8-way with no
+// corner cut between two tiles solid then, portal exits as extra steps, every non-coin door and gate open, one-ways and
+// half blocks passable, killing tiles not entered (passable on a level with a protection effect), id 50 a wall:
+// RF.guideFlags), seeded at the ball's tile and, where something can kill, the respawn target (the checkpoint, else every
+// spawn); a colour with coin gates by LEVEL: its count starts at the count held and is raised, once the flood has run
+// out, to the least of its coin doors on the flood's edge that its potential (held + the untaken coins of that colour the
+// flood reached) covers, its gates at or below the level shut from then on (any real way crosses its doors in an order
+// whose count is at least the doors' and below the gates' after them; Booty Return's door of 221 next to its gate of 10);
+// the other colour by potential (its doors up to it open, its gates above the count held open); each gated colour one
+// such flood, doomed when either finds no way. No trophy reached = DOOMED: a doomed state cannot finish; it is only
+// DEMOTED (goexplore.js explore(): DOOM_A tiles in head A, last in head B's samples and room draws, no nearest attempt,
+// source, discovery or GPU burst while a state that is not doomed is there), never dropped: the reach field's -1 stays
+// the only prune. Cached per (coins, blue coins, the collected set, the respawn code) with the flood's tiles: a tile a
+// doomed flood reached at the count held is doomed (its own flood reaches no more), a tile of a flood that reached the
+// trophy is taken as not doomed (the safe side). Along 59 routed campaign finals (470 k states) and the user's 280
+// finishing job runs (1.4 M states) no state is doomed. null: the level has no coin door or gate, or no trophy.
+// EEAT_DOOM=0 / --doom=0: off (= main).
 const DOOMV = new WeakMap();
 const DOOM_A = 2000;               // (head A: a doomed cell's tiles more, like CUL_A)
 const DOOM_CACHE_BYTES = 16 << 20; // (the floods' reached-tile bitsets kept, per analyzer (a worker's own))
@@ -1250,15 +1256,21 @@ function doomOf(L) {
 	for (let k = 0; k < L.spawnsX.length; k++) { const t = L.spawnsY[k] * W + L.spawnsX[k]; if (t >= 0 && t < N) spawns.push(t); }
 	if (!spawns.length) { const s = new E.EESim(L); s.reset(); spawns.push(Math.min(N - 1, Math.max(0, (Math.trunc(s.py + 8) >> 4) * W + (Math.trunc(s.px + 8) >> 4)))); }
 	const st = new Int32Array(N), bst = new Int32Array(N), q = new Int32Array(N);
-	let gen = 0, bytes = 0;
+	let gen = 0, bytes = 0, gGates = false, bGates = false;
+	for (let i = 0; i < N; i++) { if (kind[i] === 3) gGates = true; else if (kind[i] === 5) bGates = true; }
+	const LEVS = bGates && !gGates ? [1] : bGates ? [0, 1] : [0];
 	const cache = new Map();
 	const S = { floods: 0, hits: 0, doomed: 0, skipped: 0, ms: 0, bytes: 0 };
-	/** the flood from seeds with the counts held g / b (the live sim's tiles: its untaken coins): {reached (the trophy),
-	 *  n (tiles in q)} */
-	const flood = (sim, seeds, g, b) => {
+	/** the flood from seeds with the counts held g / b (the live sim's tiles: its untaken coins), one colour by LEVEL (lev 0:
+	 *  gold, 1: blue): its count is raised only when the flood has run out, to the least of its coin doors blocked on the
+	 *  flood's edge that its potential (held + the untaken coins of its colour reached) reaches, and its gates at or below
+	 *  the level are shut from then on (a count only goes up: a way that needs a door of m before a gate of n <= m has
+	 *  none); the other colour by its potential (doors up to it open, gates above the count held open). {reached (the
+	 *  trophy), n (tiles in q), n0 (the tiles reached before the first raise: at the count held)} */
+	const flood = (sim, seeds, g, b, lev) => {
 		if (++gen >= 0x7fffffff) { st.fill(0); bst.fill(0); gen = 1; }
 		const tiles = sim.tiles;
-		let qt = 0, pg = g, pb = b;
+		let qt = 0, pg = g, pb = b, cg = g, cb = b, n0 = -1;
 		const blocked = [];
 		for (const s of seeds) if (s >= 0 && s < N && st[s] !== gen) { st[s] = gen; q[qt++] = s; }
 		const pass = (j) => {
@@ -1266,7 +1278,8 @@ function doomOf(L) {
 			if (k === 0) return true;
 			if (k === 1 || k === 6) return false;
 			const n = lk[j];
-			return k === 2 ? n <= pg : k === 3 ? n > g : k === 4 ? n <= pb : n > b;
+			if (lev === 0) return k === 2 ? n <= cg : k === 3 ? n > cg : k === 4 ? n <= pb : n > b;
+			return k === 2 ? n <= pg : k === 3 ? n > g : k === 4 ? n <= cb : n > cb;
 		};
 		const visit = (j) => {
 			if (st[j] === gen) return;
@@ -1296,14 +1309,24 @@ function doomOf(L) {
 				const ex = exits.get(t);
 				if (ex !== undefined) for (const e of ex) visit(e);
 			}
-			// (the coin doors the potential opens now: the flood goes on through them)
+			// (the other colour's coin doors its potential opens now: the flood goes on through them)
 			let grew = false, m = 0;
 			for (const j of blocked) {
 				if (st[j] === gen) continue;
 				if (pass(j)) { st[j] = gen; q[qt++] = j; grew = true; } else blocked[m++] = j;
 			}
 			blocked.length = m;
-			if (!grew) return { reached: false, n: qt };
+			if (grew) continue;
+			// (the levelled colour: raised to its least blocked door its potential reaches, else no way)
+			const dk = lev === 0 ? 2 : 4, pot = lev === 0 ? pg : pb;
+			let nx = Infinity;
+			for (const j of blocked) if (kind[j] === dk && lk[j] <= pot && lk[j] < nx) nx = lk[j];
+			if (nx === Infinity) return { reached: false, n: qt, n0: n0 < 0 ? qt : n0 };
+			if (n0 < 0) n0 = qt;
+			if (lev === 0) cg = nx; else cb = nx;
+			m = 0;
+			for (const j of blocked) { if (pass(j)) { st[j] = gen; q[qt++] = j; } else blocked[m++] = j; }
+			blocked.length = m;
 		}
 	};
 	/** the key of the live state's counts, collected set and respawn code (rc: -1 none, -2 every spawn, else the tile) */
@@ -1325,13 +1348,17 @@ function doomOf(L) {
 		if (!allow) { S.skipped++; return false; }
 		const f0 = performance.now();
 		const seeds = rc === -1 ? [tile] : rc === -2 ? [tile, ...spawns] : [tile, rc];
-		const r = flood(sim, seeds, sim.coins, sim.blue_coins);
+		// (a colour with gates by level, each a relaxation of its own: doomed when either has no way; no gates: gold's alone)
+		let r = null;
+		for (const lev of LEVS) { r = flood(sim, seeds, sim.coins, sim.blue_coins, lev); if (!r.reached) break; }
 		S.floods++;
 		if (!r.reached) S.doomed++;
 		const nb = (N + 7) >> 3;
 		if (bytes + nb <= DOOM_CACHE_BYTES) {
-			const bits = new Uint8Array(nb);
-			for (let i = 0; i < r.n; i++) { const t = q[i]; bits[t >> 3] |= 1 << (t & 7); }
+			// (the cache: a doomed flood's tiles reached at the count held (a state there has no more way than this one), a
+			// flood that reached the trophy all its tiles (a state there taken as not doomed: the safe side))
+			const bits = new Uint8Array(nb), nn = r.reached ? r.n : r.n0;
+			for (let i = 0; i < nn; i++) { const t = q[i]; bits[t >> 3] |= 1 << (t & 7); }
 			if (list === undefined) cache.set(k, list = []);
 			if (list.length >= DOOM_PER_KEY) { bytes -= list.shift().bits.length; }
 			list.push({ c: sim.coins, b: sim.blue_coins, bits, doomed: !r.reached });
