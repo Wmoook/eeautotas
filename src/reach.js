@@ -1056,6 +1056,47 @@ function reachFileBytes(f, levelFp) {
 }
 
 /** the field's typed arrays in shared memory (worker threads read them without a copy each) */
+/**
+ * deathChainField(level, opts) -> the death-chain ORDER field of a level whose deaths are moves (src/goexplore.js --dord=2):
+ * the death-free field (reachField {deaths: false}) seeded at the trophy (cost 0) and at every checkpoint cp at
+ * opts.deathTiles + V(cp), where V(cp) is this field's own cost of a ball standing at cp (the respawn state: Player.respawn
+ * puts the ball there at rest), iterated to a fixpoint (V only falls; at most opts.rounds rounds, default 8, or opts.ms,
+ * default 20000). A ball that touches cp can die and come back there standing: the seed is that way's price (the death's
+ * ticks as tiles; the walk to a killing tile left out, an order needs no bound). The field with death edges instead sends
+ * every death to the best respawn of ALL checkpoints at DEATH_COST: every state past that cost is one flat plateau
+ * (Infinity Pain: 1638.4 + 22.4 tiles from t0 to t27000 of its known route), with no pull toward the checkpoint that leads
+ * on. Walk mode: the seeds never beat the walk through cp (a standing ball there is any ball there), so it is the
+ * death-free walk; physics mode: a ball falling through cp comes back standing, which can have a way the arrival lacks.
+ * NEVER a proof: states it has no value for are only unordered here (the RCH3 field's -1 stays the one prune), and
+ * toGoals is set (writeReachFile refuses it). null V (no death-free way from cp) seeds nothing.
+ * The result is the field with .chain = {rounds, cps, finite, ms, stable}.
+ */
+function deathChainField(level, opts) {
+	opts = opts || {};
+	const t0 = Date.now();
+	const W = level.width, H = level.height, N = W * H, fg = level.fg;
+	const dT = opts.deathTiles >= 0 ? opts.deathTiles : 55 * 6.78 / 16;
+	const maxRounds = opts.rounds > 0 ? opts.rounds : 8, maxMs = opts.ms > 0 ? opts.ms : 20000;
+	const cps = [], trophies = [];
+	for (let i = 0; i < N; i++) { if (fg[i] === CHECKPOINT) cps.push(i); else if (fg[i] === TROPHY) trophies.push(i); }
+	let f = reachField(level, { deaths: false });
+	const standing = (fl, t) => { const v = fifthsAt(fl, (t % W) * 16, ((t / W) | 0) * 16, 0, -1, -1, fl.ice ? 2 : 0); return v < 0 ? -1 : v; };
+	let V = cps.map((t) => standing(f, t));
+	let rounds = 0, stable = cps.length === 0;
+	while (!stable && rounds < maxRounds && Date.now() - t0 < maxMs) {
+		rounds++;
+		const goals = trophies.map((t) => ({ tile: t, cost: 0 }));
+		for (let k = 0; k < cps.length; k++) if (V[k] >= 0) goals.push({ tile: cps[k], cost: dT + V[k] / 5 });
+		const f2 = reachField(level, { deaths: false, goals });
+		const V2 = cps.map((t) => standing(f2, t));
+		stable = true;
+		for (let k = 0; k < cps.length; k++) if (V2[k] !== V[k]) { stable = false; break; }
+		f = f2; V = V2;
+	}
+	let finite = 0;
+	for (const v of V) if (v >= 0) finite++;
+	return Object.assign(f, { chain: { rounds, cps: cps.length, finite, ms: Date.now() - t0, stable } });
+}
 function shareField(f) {
 	const out = Object.assign({}, f);
 	for (const k of Object.keys(f)) {
@@ -1066,7 +1107,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, deathChainField, neverOpenDoors, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,

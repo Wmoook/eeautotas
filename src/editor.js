@@ -3451,9 +3451,14 @@ function closer(ev, n) {
 	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
 	if (stale) return;
 	const cut = !!ev.cut || dist >= 1e4;
-	// (a nearest attempt in a cul-de-sac of its room (old.cul, see CUL_ROOMS) gives way to any attempt outside one: the
-	// replay below tells)
-	if (old && !(old.cul && !cut) && ((cut && !old.cut) || (cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
+	// (deaths as moves: the CPU search orders by the death-chain field (goexplore.js --dord=2: a long death-free way, or its
+	// respawn's value + a death); the other tools report the file's field, whose every state past RF.DEATH_TILES is one flat
+	// plateau (the best respawn of all: OCTO's Fun Castle 1,686.2 from tick 39 on, so a 39-tick attempt was the page's
+	// nearest and the escape's and the breaker's start). Such a plateau attempt is ranked behind every attempt on the CPU
+	// search's scale, and among its own kind as before)
+	const flat = !cut && !!cur.opts.deaths && !cur.distBySteer && !Vn.cpu && dist >= deathTiles();
+	if (old && !old.flat !== !flat && !old.cut) { if (flat) { if (own) attemptSource(n, own); return; } }
+	else if (old && !(old.cul && !cut) && ((cut && !old.cut) ||(cut === !!old.cut && !(dist < old.dist - 1e-3 || (Math.abs(dist - old.dist) <= 1e-3 && ev.tick < old.ticks))))) { if (own) attemptSource(n, own); return; }
 	const masks = Uint8Array.from(String(ev.inputs || ''), (c) => (c.charCodeAt(0) - 48) & 31);
 	if (!masks.length) return;
 	// (one replay: the path, and the room it ends in for the sources)
@@ -3466,13 +3471,13 @@ function closer(ev, n) {
 	try { C.writeEetas(path.join(dir(), 'closest.eetas'), masks); } catch (e) { /* read-only data folder */ }
 	setImmediate(relayKick);
 	// (a way through a death: the reach field prices the death at RF.DEATH_TILES; the tiles shown leave it out)
-	const viaDeath = !cut && !cur.distBySteer && dist >= deathTiles();
+	const viaDeath = !cut && !cur.distBySteer && dist >= deathTiles() && !(cur.opts.deaths && Vn.cpu);
 	// (the tiles shown: the reach field's, also when the steer field ranks the attempts)
 	const shown = cur.distBySteer && tr.reachTiles !== null ? tr.reachTiles : cut ? dist - 1e4 : viaDeath ? dist - RF.DEATH_TILES : dist;
 	// (the wall breaker's stall clock: a nearer attempt by BREAK_TILES; the precision stage's: by PREC_TILES)
 	if (brk && !cut && !tr.room.cul && dist < brk.mark - BREAK_TILES) { brk.mark = dist; breakProgress('nearer', Vn.key === 'breaker'); }
 	if (prec && !cut && !tr.room.cul && dist < prec.mark - PREC_TILES) { prec.mark = dist; prec.at = Date.now(); prec.wait = prec.wait0; }
-	S.closest = { dist, cut, viaDeath, cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
+	S.closest = { dist, cut, viaDeath, ...(flat ? { flat: true } : {}), cul: !!tr.room.cul, tiles: Math.round(shown * 10) / 10, ticks: masks.length, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), deaths: tr.deaths,
 		inputs: C.eetasBytes(masks).toString('latin1'), path: pathPts, strategy: S.strategies[n].label, foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 		...(cur.distBySteer ? { steer: Math.round(dist * 10) / 10 } : {}) };
 	// (the nearest by the reach field among the attempts kept: the yardstick of a search without the steer field)

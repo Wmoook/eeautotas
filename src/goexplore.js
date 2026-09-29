@@ -310,7 +310,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 2, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -1968,8 +1968,17 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// best respawn tile of all, so every state whose death-free walk is longer than that cost the same (a flat plateau:
 	// Infinity Pain's order was 1661.8 tiles for t0-t27000 of its known route); it stays the file for the -1 prune. A
 	// state the death-free field has no value for (its only way is a death) costs DEATH_TILES + its own respawn
-	// target's order (costOf); --dord=0: the order by the field with its death edges, as before
-	const OF = DI !== null && a.dord !== 0 ? (ofield || RF.reachField(L, { deaths: false })) : null;
+	// target's order (costOf); --dord=0: the order by the field with its death edges, as before.
+	// --dord=2 (the default): the death-chain field (reach.js deathChainField: the death-free field seeded at every
+	// checkpoint at DEATH_TILES + its own standing value, to a fixpoint) and a state's order is the lesser of its own way
+	// and a death now: min(OF, DEATH_TILES + V(its own respawn target)). With dord 1 a state with a long death-free way
+	// (Infinity Pain's start: 3,178 tiles; OCTO's Fun Castle 2,493) was ordered by it even where its checkpoint lies 20
+	// tiles from the trophy: the checkpoints the ball touched gave the order no pull (god-int's nearest on Infinity Pain
+	// 1,646 tiles against main's 21.4 by the respawn price). Order only: the -1 prune stays the field's
+	const OF = DI !== null && a.dord !== 0 ? (ofield || (a.dord >= 2 ? RF.deathChainField(L, { deathTiles: DEATH_TILES }) : RF.reachField(L, { deaths: false }))) : null;
+	const DCH = OF !== null && a.dord >= 2;
+	// (--dord=2: V per respawn tile, looked up once: a respawn is a ball standing there; NaN = not looked up yet)
+	const VR = DCH ? new Float64Array(N).fill(NaN) : null;
 	/** the order's reach cost (tiles) of a state (the live sim) or at a place (x, y, vy): the death-free field's where it
 	 *  has a value, else the field's (-1: cut off) */
 	const ordAt = (x, y, vy) => {
@@ -1977,7 +1986,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		return RF.costAt(field, x, y, vy);
 	};
 	/** the reach cost (tiles) at the live state's respawn target, standing (-1: cut off; the order's field with --dord) */
-	const respawnCost = () => { const rt = respawnTileOf(DI, sim, W); return ordAt((rt % W) * 16, ((rt / W) | 0) * 16, 0); };
+	const respawnCost = () => {
+		const rt = respawnTileOf(DI, sim, W);
+		if (VR !== null) { let v = VR[rt]; if (v !== v) v = VR[rt] = ordAt((rt % W) * 16, ((rt / W) | 0) * 16, 0); return v; }
+		return ordAt((rt % W) * 16, ((rt / W) | 0) * 16, 0);
+	};
 	const lbOf = () => {
 		const b = LBT[centreTile()];
 		if (DI === null) return b;
@@ -2315,6 +2328,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	/** the reach cost of the live state (tiles); -1 = ruled out. With --prune=0 (the editor's check of a level the reach
 	 *  field rules out) nothing is ruled out: a ruled-out state costs 1e4 + its walking distance (behind the others) */
 	let viaDeath = false;   // (the last costOf: the field's only way from there is a death)
+	let ownRc = -1;   // (the last costOf's own way (--dord=2: before the min with a death now): deathPays' rcPrev)
 	/** --timed: the live state cannot clear its soonest timed killer (nor finish) before it fires (src/timed.js doomed: a
 	 *  sound bound), so its only future is that death */
 	const doomedNow = () => {
@@ -2324,6 +2338,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	};
 	const costOf = () => {
 		const rc = RF.costAt(field, sim);
+		ownRc = -1;
 		// (deaths as moves: the field prices a death edge at DEATH_COST, behind every real way, to the best respawn tile of
 		// all; a state whose only way is a death costs its real price: DEATH_TILES + its own respawn target's cost)
 		viaDeath = DI !== null && rc >= RF.DEATH_TILES;
@@ -2338,7 +2353,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			return rc + DOOM_TILES;
 		}
 		if (OF !== null && rc >= 0) {
-			if (nf >= 0) return nf;
+			// (--dord=2: the lesser of the state's own way and a death now, its respawn target's value + DEATH_TILES)
+			if (nf >= 0) { ownRc = nf; if (DCH && a.dprice !== 0) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + r < nf) return DEATH_TILES + r; } return nf; }
 			if (a.dprice !== 0) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
 			return rc;
 		}
@@ -3014,7 +3030,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 					if (rc < 0) break;   // the reach field rules it out: no route from here
 					// (deathPays: the reach cost of the last state that had a way of its own; a state whose only way is a death
 					// keeps the one before it, so a fall into a pit does not make a death back to the spawn look free)
-					if (!viaDeath) rcPrev = rc;
+					if (!viaDeath) rcPrev = ownRc >= 0 ? ownRc : rc;
 					// (coarse cells: the live state's room; a new one is made (its fields walked from this state) only when its
 					// first cell can enter the archive: a full archive or a state too late for a faster route would leave an
 					// empty room, and walks for nothing, outside the memory budget)
@@ -3699,7 +3715,7 @@ async function main() {
 	// on a 1000 x 1000 level) would cost memory and start-up time on every thread
 	const field = RF.shareField(RF.reachField(L, fieldOpts(a)));
 	// (--dord: the death-free field for the workers' order, shared like the field; only with deaths as moves)
-	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(RF.reachField(L, { deaths: false })) : null;
+	const ofield = a.deathMoves && a.dord !== 0 ? RF.shareField(a.dord >= 2 ? RF.deathChainField(L, { deathTiles: DEATH_TILES }) : RF.reachField(L, { deaths: false })) : null;
 	// (timed killers in the level: src/timed.js; the workers build their own bounds)
 	const TMD_L = TMD.timedOf(L) !== null;
 	const sim0 = new E.EESim(L);
