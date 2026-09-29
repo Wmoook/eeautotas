@@ -245,6 +245,14 @@
 //        say how many states with more time left the earliest-arrival rule dropped). On a level without a timed killer
 //        every key and cost is the same either way. The progress and done events carry "timed": {on, cells, dominated,
 //        droppedMore, doomed})]
+//        [--jcell=0 (1 or EEAT_JCELL=1: OPT-IN, coarse cells: the AIR JUMPS LEFT as one more word of a cell's key, 0x6a00 |
+//        min(3, max_jumps - jump_count), for a ball in the air on a multijump level (1 < max_jumps < 1000), after the class
+//        words (and before a timed killer's bucket); a new state is dropped only when a cell of the same place with at least
+//        as many air jumps left (and, with a timed killer running, a bucket at least as high) got there no later (dominated);
+//        the one search's bursts start, among equally near cells, from the one with the most air jumps left (nearestOf).
+//        Where max_jumps is 1 or 1000+ nothing changes. The progress and done events carry "jcell": {cells, dominated,
+//        kept (the later arrivals with more jumps left kept, which the key without the word dropped)};
+//        0: the key as before. See JCELL in explore())]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
@@ -334,6 +342,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
+	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
@@ -529,6 +538,13 @@ const B_SC = 24;
 // a level with timed killers (src/timed.js): a cell's ticks left and kind (`tm`, a property added to every cell there: its
 // slot in the object's out-of-object properties)
 const B_TM = 32;
+// --jcell=1 (coarse cells): a cell's air jumps left (`jw`, a property added to every cell then, as `tm` is): the most one
+// more property added after the cell's literal costs it. Measured (node --expose-gc, Node 24 x64, 200 K cells made as
+// add() makes them, in a Map): the first such property makes the object's property array, 16 bytes of header + 3 slots
+// (228.7 -> 268.7 bytes a cell, jw alone); the 2nd and 3rd fill its free slots (tm + jw, or the frontier's fc + fg + jw:
+// +0); the 4th grows it by 3 slots (+24: tm + bk + jw + v2 308.7 vs tm + bk + v2 284.7). Counted for every cell with the
+// flag on, whatever else the cell holds: an upper bound in every layout, so the budget never undercounts the archive.
+const B_JW = 40;
 // a worker's budget (--mem MB): the archive (cells, their paths, the heap, the rooms, the walk cache) up to
 // ARCHIVE_SHARE of it; past that a sweep drops the cells no run or pick has touched for longest down to EVICT_TO of that
 // share; the snapshots (at least MIN_SNAPS) in what the archive leaves, up to SNAP_TOP of the budget (the rest: the
@@ -2394,6 +2410,19 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// route either way; there the doomed states' ordering alone)
 	const TBK = TKEY && coarse;
 	let tLeft = 0, tKind = 0, tBucket = 0, kn = 0, tDom = 0, tMore = 0, tDoomed = 0, tCells = 0;
+	// JCELL (--jcell=1, coarse cells; OPT-IN): the coarse cell keeps its EARLIEST state and has no jump count, and on a
+	// multijump level the held-jump repeat spends the air jump some 15 ticks after the first jump, so nearly every air cell
+	// holds a state with no air jump left and the later arrival that still has it is dropped (the timed killers' failure
+	// shape). With the flag the air jumps left, min(3, max_jumps - jump_count), are one more word of the key (0x6a00 | jw,
+	// after the class words, before a timed bucket; only in the air on a multijump level, 1 < max_jumps < 1000), and a new
+	// state is dropped only when a cell of the same place with at least as many air jumps left (and a timed bucket at least
+	// as high) got there no later (jDom). jn: the word's index in KV (-1: none), jw: its value (3 without one: nothing
+	// spent, the ground's or a single-jump level's), jCells: the cells made with the word, jKept: the new cells whose
+	// state the earliest-arrival rule would have dropped (a cell of the same place with fewer air jumps left got there no
+	// later: the later arrival with a jump in hand, kept; observation only). The laptop panel (1 worker, no
+	// steer, 150 M ticks, same seed): Just One More Time routed on 3 of 3 seeds vs 0 of 3, The Burj on seed 1 vs none.
+	const JC = coarse && a.jcell !== 0;
+	let jn = -1, jw = 3, jDom = 0, jCells = 0, jKept = 0;
 	/** the cell key of KV[0 .. n): two 32-bit hash lanes (see cellKey) */
 	const hashKV = (n) => {
 		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
@@ -2437,6 +2466,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			const qp = QP[r], qv = QV[r];
 			KV[6] = Math.floor(px * qp); KV[7] = Math.floor(py * qp); KV[8] = Math.floor(sim.speed_x * qv); KV[9] = Math.floor(sim.speed_y * qv);
 			n = 10;
+		}
+		// (--jcell: the air jumps left as one more word; flag off, on the ground or on a level of 1 or 1000+ jumps, none)
+		if (JC) {
+			jn = -1; jw = 3;
+			if (!sim.on_ground && sim.max_jumps > 1 && sim.max_jumps < 1000) { jw = Math.min(3, Math.max(0, sim.max_jumps - sim.jump_count)); jn = n; KV[n++] = 0x6a00 | jw; }
 		}
 		// (a timed killer running: its bucket as one more word; without one the key is exactly as before)
 		tLeft = 0; tBucket = 0;
@@ -2557,7 +2591,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
-	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
+	// (--jcell=1: every cell's jw, B_JW more; the flag off: none, the count as before)
+	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0) + (JC ? B_JW : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0) +
 		(FR !== null ? FR.bytes + (FR.HF !== null ? FR.HF.size() * B_HEAPE : 0) : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
@@ -2657,6 +2692,20 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			}
 			KV[kn - 1] = b0;
 		}
+		// (--jcell: a cell of the same place with more air jumps left (and, a timed killer running, a bucket at least as
+		// high) that got there no later: this state is dominated; not for --spdMode=1's fast cells, as with --timed)
+		if (jn >= 0 && jw < 3 && !spdFast) {
+			const tb = TBK && tBucket > 0, bmax = tb ? TMD.bucketMax() : 0, b0 = tBucket, j0 = jw;
+			let dom = null;
+			for (let j = j0 + 1; j <= 3 && dom === null; j++) {
+				KV[jn] = 0x6a00 | j;
+				if (!tb) { const c2 = cells.get(hashKV(kn)); if (c2 !== undefined && c2.t <= t) dom = c2; }
+				else for (let b = b0; b <= bmax; b++) { KV[kn - 1] = b; const c2 = cells.get(hashKV(kn)); if (c2 !== undefined && c2.t <= t) { dom = c2; break; } }
+			}
+			KV[jn] = 0x6a00 | j0;
+			if (tb) KV[kn - 1] = b0;
+			if (dom !== null) { dom.seen++; dom.touch = picks; jDom++; return null; }
+		}
 		if (!roomFor()) { full = true; needSweep = true; return null; }
 		// (--steer: the cell's steer cost too, B_SC more; without --steer the cell has no such property)
 		// (viaL: the cell descends from a head-L pick's runs, its share's yield: a route head L's earlier arrivals led to is
@@ -2669,6 +2718,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (PB !== null && inBox(tile)) boxCells++;
 		// (a level with timed killers: the ticks left at arrival and the killer's kind bit, tLeft x 16 + kind; B_TM more)
 		if (TM !== null) { nc.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0); if (tLeft > 0) tCells++; }
+		// (--jcell: every cell's air jumps left, jw (3: no word), for nearestOf's order; jCells: the cells with the word)
+		if (JC) {
+			nc.jw = jw;
+			if (jn >= 0) {
+				jCells++;
+				for (let j = 0; j < jw; j++) { KV[jn] = 0x6a00 | j; const c2 = cells.get(hashKV(kn)); if (c2 !== undefined && c2.t <= t) { jKept++; break; } }
+				KV[jn] = 0x6a00 | jw;
+			}
+		}
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
@@ -2750,6 +2808,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const c = ST ? { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, sc: steerOf(), picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0, viaL: false, viaW: false, u: 0 }
 			: { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0, viaL: false, viaW: false, u: 0 };
 		if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
+		if (JC) c.jw = jw;
 		cells.set(k, c);
 		cell0 = c;
 		if (VIS !== null) { VIS[tile] = 1; nVis = 1; }
@@ -2765,7 +2824,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	let parked = 0;   // (the chunks this worker sat out: stdin "workers K" parked it)
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, jDom, jCells, jKept, jwB: JC ? cells.size * B_JW : 0, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
@@ -3026,7 +3085,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				// (a cell outside the room's cul-de-sacs before any in one: see USEFUL TERRITORY; with a timed killer the time
 				// slack before that)
 				const tl = TKEY ? c.tm >> 4 : 0, dw = wf !== null && wf[c.tile] !== 0xffff ? wf[c.tile] : v, sl = tl > 0 ? Math.min(0, tl - TIMED_KT * dw / 5) : 0;
-				if (best === null || sl > bs || (sl === bs && ((c.u === 2) !== (best.u === 2) ? c.u !== 2 : (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && c.t < best.t))))))) { best = c; bv = v; bs = sl; }
+				// (--jcell: among equally near cells with as much time left, the most air jumps left first, then the earliest)
+				if (best === null || sl > bs || (sl === bs && ((c.u === 2) !== (best.u === 2) ? c.u !== 2 : (v < bv || (v === bv && (tl > (best.tm >> 4) || (tl === (best.tm >> 4) && (JC && c.jw !== best.jw ? c.jw > best.jw : c.t < best.t)))))))) { best = c; bv = v; bs = sl; }
 			}
 		}
 		port.postMessage({ type: 'nearest', id: m.id, seed, v: best !== null ? bv : -1, t: best !== null ? best.t : 0, sl: best !== null ? bs : 0, tile: best !== null ? best.tile : -1, cells: r !== undefined ? r.arr.length : 0,
@@ -4394,6 +4454,10 @@ async function main() {
 	// same place with more time left got there no later), with --timed=0 the states dropped though they had more time left
 	// than the kept one, the doomed states priced as their death)
 	const timedNow = () => (TMD_L ? { timed: { on: a.timed !== 0, cells: total('tCells'), dominated: total('tDom'), droppedMore: total('tMore'), doomed: total('tDoomed') } } : {});
+	// (--jcell=1: the cells made with the air-jumps word, the states dropped as dominated by a cell with more jumps left, and
+	// the later arrivals with more jumps left kept as their own cells, which the key without the word dropped; bytes: what
+	// the archives' budget counts for the cells' jw now, B_JW each)
+	const jcellNow = () => (a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom'), kept: total('jKept'), bytes: total('jwB') } } : {});
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), backKept: total('dBackKept'), backByOrder: total('dBackR'), backBySteer: total('dBackS'), backPromoted: total('dPromote'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
@@ -4412,7 +4476,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), jcellNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -4736,7 +4800,7 @@ async function main() {
 		for (let i = 0; i < u.length; i++) tiles += u[i];
 	}
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...jcellNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...frontierNow(), ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
@@ -4758,5 +4822,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { CellMap, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { B_JW, CellMap, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
