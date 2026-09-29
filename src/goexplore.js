@@ -253,6 +253,12 @@
 //        Where max_jumps is 1 or 1000+ nothing changes. The progress and done events carry "jcell": {cells, dominated,
 //        kept (the later arrivals with more jumps left kept, which the key without the word dropped)};
 //        0: the key as before. See JCELL in explore())]
+//        [--exc=0 (1 or EEAT_EXC=1: OPT-IN, coarse cells: THE EXCURSION HEAD X, --pX (0.15) of the picks from head A's slot:
+//        a cell of the excursion band (its reach cost above the running minimum of its lineage since the lineage last changed
+//        room: [0,5) [5,20) [20,60) [60,150) [150,inf) tiles) whose share of the picks is furthest below the routes' share
+//        (EXC_BANDS, from tools/excdata.js; --excBands=a,b,c,d,e another profile); CPU workers and --gpu=1; order only. The
+//        progress and done events carry "exc": {picks, pickShare, target, xPicks, archive, bytes}; 0: no head X, no rm. See
+//        EXC_BANDS)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
@@ -343,6 +349,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
+	exc: process.env.EEAT_EXC !== undefined ? +process.env.EEAT_EXC : 0, pX: 0.15,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
@@ -402,7 +409,7 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', 'excBands', ...GPU_STRINGS]);
 // --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
 // random runs' batches take their run length and keep probability from these classes in turn, each class the same share
 // of the GPU's TIME (its batches' kernel ms, times its weight; n3-regression-pins, 2026-09-29: before, the same share of
@@ -545,6 +552,50 @@ const B_TM = 32;
 // +0); the 4th grows it by 3 slots (+24: tm + bk + jw + v2 308.7 vs tm + bk + v2 284.7). Counted for every cell with the
 // flag on, whatever else the cell holds: an upper bound in every layout, so the budget never undercounts the archive.
 const B_JW = 40;
+// THE EXCURSION HEAD X (--exc=1 / EEAT_EXC=1, coarse cells; OPT-IN, default off: without it no cell has `rm`, no random
+// number is drawn and the search is exactly as before). A cell's EXCURSION = its reach cost rc minus the running minimum
+// `rm` of rc along its lineage since the lineage last changed room (roomOf: coins, keys, switches, effects, team: the
+// reference resets at every room change, so a detour a coin door or a switch asks for starts at 0 in the new room);
+// the CPU runs keep the minimum tick by tick along a pick's run (from the picked cell's own), the GPU random runs from
+// the parent cell (the pick). The data (tools/excdata.js over the GPU filler's runs): the winning lineages spend a share
+// of their time far above that minimum that the stalled runs' nearest attempts never reach (the greedy heads pick by
+// rc, so they rarely pick such a cell). Head X takes --pX of the picks from head A's slot (one rnd() more with the flag)
+// and picks a cell of the band whose share of this worker's picks (every head's, decayed with a half-life of
+// EXC_HALF picks) is furthest BELOW its share in EXC_BANDS: EXC_DRAWS random cells (a random room, a random cell of it;
+// no dominated room, no throw-back room, no cul-de-sac cell, no doomed cell, no death-priced cell), the fewest-picked
+// of that band (tie: lower rc); none: the next band short of its share; none at all or no band short: head A. Order
+// only: nothing pruned (the reach field's -1 stays the only prune). `rm` is kept in fifths of a tile (an integer, exact
+// for the field's fifths: the min of such values), B_EX a cell with the flag on (one more property: as B_JW, the most
+// it can cost), counted in the budget. EXC_BANDS: the routes' profile from tools/excdata.js (see its header; 2026-09-29
+// 12:0x EDT, the GPU filler's box1-4 + the portfolio's sw1: 1,583 rows (824 used), 134 levels with a route (328 routes),
+// 684,355 samples every 5 ticks, commits 39de5b9 95cc669 c7623ee febeeb2): the routes on the 71 levels that ALSO have a
+// stalled run (the hard ones; every routed level: 0.691 0.138 0.096 0.045 0.030), the stalled runs' nearest attempts
+// there 0.769 0.125 0.076 0.025 0.005 (>= 20 tiles uphill: 22.5% vs 10.6% of the time); `--excBands=a,b,c,d,e` another.
+const B_EX = 40, EXC_EDGES = [5, 20, 60, 150], EXC_HALF = 20000, EXC_DRAWS = 64, EXC_ARCH_MS = 10000;
+const EXC_BANDS = [0.611, 0.164, 0.123, 0.061, 0.041];
+/** the excursion band of x tiles above the running minimum: [0,5) [5,20) [20,60) [60,150) [150,inf) */
+const excBand = (x) => (x < EXC_EDGES[0] ? 0 : x < EXC_EDGES[1] ? 1 : x < EXC_EDGES[2] ? 2 : x < EXC_EDGES[3] ? 3 : 4);
+/** the target profile: --excBands=a,b,c,d,e (normalized), else EXC_BANDS */
+function excBandsOf(a) {
+	if (!a.excBands) return EXC_BANDS.slice();
+	const v = String(a.excBands).split(',').map(Number);
+	if (v.length !== 5 || v.some((x) => !(x >= 0))) throw new Error(`bad --excBands=${a.excBands} (5 shares >= 0)`);
+	const s = v.reduce((x, y) => x + y, 0);
+	if (!(s > 0)) throw new Error(`bad --excBands=${a.excBands} (all 0)`);
+	return v.map((x) => x / s);
+}
+/** head X's target band: the band b >= 1 furthest below its target share, then the next ones (a list; [] = none short).
+ *  pb: the decayed pick counts per band */
+function excOrder(bands, pb) {
+	let tot = 0;
+	for (let b = 0; b < pb.length; b++) tot += pb[b];
+	const out = [];
+	for (let b = 1; b < bands.length; b++) { const d = bands[b] - (tot > 0 ? pb[b] / tot : 0); if (d > 0) out.push([d, b]); }
+	out.sort((x, y) => y[0] - x[0] || x[1] - y[1]);
+	return out.map((x) => x[1]);
+}
+/** the running minimum (fifths) after a state of cost rc: a room change resets it (same: the room did not change) */
+const excRm = (rm5, rc, same) => { const r5 = Math.round(rc * 5); return same && rm5 < r5 ? rm5 : r5; };
 // a worker's budget (--mem MB): the archive (cells, their paths, the heap, the rooms, the walk cache) up to
 // ARCHIVE_SHARE of it; past that a sweep drops the cells no run or pick has touched for longest down to EVICT_TO of that
 // share; the snapshots (at least MIN_SNAPS) in what the archive leaves, up to SNAP_TOP of the budget (the rest: the
@@ -597,7 +648,7 @@ const B_SATZ = 48;
 const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '', prior: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '', prior: '', excBands: '' });
 	const given = new Set();
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
@@ -630,6 +681,7 @@ function parseArgs(argv) {
 	// (the roll mix: the default unless --roll / --keep ask for one class; checked here, used by --gpu=1 only)
 	if (!given.has('rollMix')) a.rollMix = given.has('roll') || given.has('keep') ? '0' : a.mixBandit ? MIX_BANDIT : ROLL_MIX;
 	rollMixOf(a.rollMix);
+	if (a.exc) excBandsOf(a);
 	if (a.gpu && a.cells === 'fine') throw new Error('--gpu=1 runs coarse cells only');
 	return a;
 }
@@ -2423,6 +2475,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// steer, 150 M ticks, same seed): Just One More Time routed on 3 of 3 seeds vs 0 of 3, The Burj on seed 1 vs none.
 	const JC = coarse && a.jcell !== 0;
 	let jn = -1, jw = 3, jDom = 0, jCells = 0, jKept = 0;
+	// THE EXCURSION HEAD X (--exc=1, coarse cells; see EXC_BANDS): every cell's `rm` (the running minimum of rc in fifths
+	// since its lineage last changed room); pb: this worker's picks per band, decayed (EXC_HALF); q: head X's share of head
+	// A's slot; picks / pickB: head X's picks (by band); arch: the archive's cells per band (every EXC_ARCH_MS); addRm: the
+	// running minimum a run hands add() (null: add() starts it at the cell's own rc: imports, seeds, deaths)
+	const EXC = coarse && a.exc !== 0 ? { bands: excBandsOf(a), pb: new Float64Array(5), dec: Math.pow(0.5, 1 / EXC_HALF), q: a.pA > 0 ? a.pX / a.pA : 0,
+		picks: 0, pickB: new Float64Array(5), arch: [0, 0, 0, 0, 0], at: 0 } : null;
+	let addRm = null;
+	const excOf = (c) => c.rc - c.rm / 5;
 	/** the cell key of KV[0 .. n): two 32-bit hash lanes (see cellKey) */
 	const hashKV = (n) => {
 		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
@@ -2591,8 +2651,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// the memory budget (see the header): the archive's bytes as its structures change, the snapshots in what it leaves
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
-	// (--jcell=1: every cell's jw, B_JW more; the flag off: none, the count as before)
-	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0) + (JC ? B_JW : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
+	// (--jcell=1: every cell's jw, B_JW more; --exc=1: every cell's rm, B_EX more; the flags off: none, the count as before)
+	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0) + (JC ? B_JW : 0) + (EXC !== null ? B_EX : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
 		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0) +
 		(FR !== null ? FR.bytes + (FR.HF !== null ? FR.HF.size() * B_HEAPE : 0) : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
@@ -2670,6 +2730,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			const old = c.node;
 			c.t = t; c.pc = pc; c.pgen = pc !== null ? pc.gen : 0; c.node = mkNode(up, blk, o, n); c.rc = rc; c.gen++; c.ver++; c.viaL = pickL || (pc !== null && pc.viaL); c.viaW = pickW || (pc !== null && pc.viaW);
 			if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
+			// (--exc: the new lineage's running minimum)
+			if (EXC !== null) c.rm = addRm !== null ? addRm : Math.round(rc * 5);
 			release(old);
 			impr++;
 			// (an earlier arrival: its lineage is no throw-back death, unless it is one itself: a throw-back death that
@@ -2727,6 +2789,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				KV[jn] = 0x6a00 | jw;
 			}
 		}
+		// (--exc: the running minimum of rc since the lineage last changed room, fifths; B_EX more)
+		if (EXC !== null) nc.rm = addRm !== null ? addRm : Math.round(rc * 5);
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
@@ -2809,6 +2873,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			: { t: t0c, snap: null, pc: null, pgen: 0, node: node0, rc, picks: 0, seen: 1, tile, room: room0, ver: 0, gen: 0, used: false, touch: 0, viaL: false, viaW: false, u: 0 };
 		if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
 		if (JC) c.jw = jw;
+		if (EXC !== null) c.rm = Math.round(rc * 5);
 		cells.set(k, c);
 		cell0 = c;
 		if (VIS !== null) { VIS[tile] = 1; nVis = 1; }
@@ -2829,7 +2894,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {},
-	OT !== null ? Object.assign({ optRuns, optCells }, ...OP.NAMES.map((n, i) => ({ ['optE_' + n]: optEnds[i] }))) : {});
+	OT !== null ? Object.assign({ optRuns, optCells }, ...OP.NAMES.map((n, i) => ({ ['optE_' + n]: optEnds[i] }))) : {},
+	// (--exc: head X's picks, the decayed pick counts per band, head X's picks per band, the archive per band, rm's bytes)
+	EXC !== null ? { excP: EXC.picks, excPb: Array.from(EXC.pb, (x) => Math.round(x * 10) / 10), excXb: Array.from(EXC.pickB), excArch: EXC.arch, exB: cells.size * B_EX } : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -2920,6 +2987,34 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		}
 		return bc || popA();
 	};
+	// head X (--exc=1, see EXC_BANDS): EXC_DRAWS random cells (a random room, a random cell of it), per band the fewest
+	// picked (tie: lower rc); the first band of excOrder (the bands short of their target share, the furthest first) that
+	// has one; none: head A
+	const excBest = [null, null, null, null, null];
+	const popX = () => {
+		const ord = excOrder(EXC.bands, EXC.pb);
+		if (!ord.length || !roomList.length) return popA();
+		excBest.fill(null);
+		for (let k = 0; k < EXC_DRAWS; k++) {
+			const r = roomList[(rnd() * roomList.length) | 0];
+			if (!r.arr.length || r.bk || domOf(r)) continue;
+			const c = r.arr[(rnd() * r.arr.length) | 0];
+			if (c.t >= maxT || c.u === 2 || c.bk === true || !(c.rc < RF.DEATH_TILES)) continue;
+			if (TKEY && c.tm >= 16 && TMD.doomed(TM, c.tile, c.tm >> 4, c.tm & 15)) continue;
+			const b = excBand(excOf(c)), q = excBest[b];
+			if (q === null || c.picks < q.picks || (c.picks === q.picks && c.rc < q.rc)) excBest[b] = c;
+		}
+		for (const b of ord) if (excBest[b] !== null) { EXC.picks++; EXC.pickB[b]++; return excBest[b]; }
+		return popA();
+	};
+	/** every pick of every head: its band into the decayed pick counts */
+	const excCount = (c) => {
+		const pb = EXC.pb, d = EXC.dec;
+		for (let b = 0; b < 5; b++) pb[b] *= d;
+		pb[excBand(excOf(c))] += 1;
+	};
+	/** the archive's cells per band (observation: every EXC_ARCH_MS and at the end) */
+	const excArch = () => { const h = [0, 0, 0, 0, 0]; for (const c of cells.values()) h[excBand(excOf(c))]++; EXC.arch = h; };
 	const discovery = [];   // head C (coarse cells): [cell, picks left], the newest room's last
 	// (EEAT_PICKLOG=1, observation only: per head, room and zone of 10 x 10 tiles the picks and the new and improved cells
 	// their runs made, posted every PICKLOG_S s: where the search's picks go, src/out/night/deadends.md)
@@ -3468,6 +3563,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		maxT = Math.min(maxT, Atomics.load(ctrl, 0));
 		// (at most every SWEEP_GAP picks: a sweep that could not get under the share, all protected, is not redone at once)
 		if ((needSweep || archiveBytes() > capA) && picks - sweptAt >= SWEEP_GAP) sweep();
+		// (--exc: the archive's cells per band, an observation every EXC_ARCH_MS)
+		if (EXC !== null && now - EXC.at >= EXC_ARCH_MS) { EXC.at = now; excArch(); }
 		if (now - lastStat >= 250) { lastStat = now; post(stat()); }
 		if (now - lastSent >= 250) { lastSent = now; sendNear(); }
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
@@ -3513,9 +3610,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				while (HF.size() > 0) { const c = HF.pop(); if (HF.popVer !== c.ver || c.t >= maxT || c.fg !== FR.gen) continue; if (a.fBrake && frPrio(c) > HF.popVal + 1) { HF.push(c); continue; } e = c; break; }
 				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
 				else { FR.picks++; head = 'F'; if (FR.log) { const k = e.tile; FR.pk.set(k, (FR.pk.get(k) || 0) + 1); } }
-			} else if (rnd() < a.pA) e = popA();
-			else { e = popB(); head = 'B'; }
+			} else if (rnd() < a.pA) {
+				// (--exc: head X takes --pX of the picks from head A's slot: one rnd() more with the flag, none without)
+				if (EXC !== null && rnd() < EXC.q) { const x0 = EXC.picks; e = popX(); if (EXC.picks !== x0) head = 'X'; } else e = popA();
+			} else { e = popB(); head = 'B'; }
 			if (e === null) { end = 'exhausted'; break; }
+			if (EXC !== null) excCount(e);
 			// (EEAT_PICKLOG=1: the picks per head, room and 10 x 10-tile zone, with the cells they made; observation only)
 			const plRow = plog !== null ? plogRow(head, e) : null;
 			const cells0 = cells.size, impr0 = impr, vis0 = nVis, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
@@ -3584,6 +3684,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				} else m = draw();
 				if (isOpt) { optRuns++; optNew(m, true); }
 				let room = e.room, rcPrev = e.rc;
+				// (--exc: the run's running minimum of rc (fifths) from the picked cell's, reset at every room change)
+				let xRm = EXC !== null ? e.rm : 0, xRoom = room;
 				for (let s = 0; s < len; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
@@ -3640,12 +3742,14 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 						if (near !== null) release(near.node);
 						near = { rc, t, node, room };
 					}
+					if (EXC !== null) { xRm = excRm(xRm, rc, room === xRoom); xRoom = room; addRm = xRm; }
 					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
 					// (--spdMode=1: a flagged room's fastest arrivals next to the earliest)
 					if (into && a.spdMode === 1 && room !== null && room.spd === true) {
 						const nf = add(t, rc, e, up, blk, o, s + 1, room, true);
 						if (nf !== null && room.isNew) firstCell(room, nf, t);
 					}
+					addRm = null;
 					if (nc !== null && room !== null && room.isNew) firstCell(room, nc, t);
 					// (an option run: its option ends at an event or its cap; the next one from this state)
 					if (isOpt) {
@@ -3683,6 +3787,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (observation only: the tiles of the archive's cells at the end, a bit per tile, for the done event's "tiles")
 	const tileBits = new Uint8Array(N);
 	for (const c of cells.values()) if (c.tile >= 0 && c.tile < N) tileBits[c.tile] = 1;
+	if (EXC !== null) excArch();
 	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000, tileBits }));
 }
 
@@ -3865,6 +3970,11 @@ async function gpuMain(a, L, m) {
 	let capN = 1 << 16;
 	let cT = new Int32Array(capN), cRc = new Float32Array(capN), cPicks = new Int32Array(capN), cRoom = new Int32Array(capN), cNode = new Int32Array(capN),
 		cVer = new Int32Array(capN), cSeen = new Uint32Array(capN);
+	// (--exc=1, head X (see EXC_BANDS): cRm = a cell's running minimum of its reach cost since its lineage last changed room,
+	// from its parent cell (the pick) or its own cost at a room change; pb / pickB / arch / q as explore()'s; the flag off: none)
+	const EXg = a.exc !== 0 ? { bands: excBandsOf(a), pb: new Float64Array(5), dec: Math.pow(0.5, 1 / EXC_HALF), q: a.pA > 0 ? a.pX / a.pA : 0,
+		picks: 0, pickB: new Float64Array(5), arch: [0, 0, 0, 0, 0] } : null;
+	let cRm = EXg !== null ? new Float32Array(capN) : null;
 	let nCells = 0;
 	const grow = (need) => {
 		if (need <= capN) return;
@@ -3873,6 +3983,7 @@ async function gpuMain(a, L, m) {
 		const g = (A, T) => { const B = new T(n); B.set(A); return B; };
 		cT = g(cT, Int32Array); cRc = g(cRc, Float32Array); cPicks = g(cPicks, Int32Array); cRoom = g(cRoom, Int32Array); cNode = g(cNode, Int32Array);
 		cVer = g(cVer, Int32Array); cSeen = g(cSeen, Uint32Array);
+		if (cRm !== null) cRm = g(cRm, Float32Array);
 		capN = n;
 	};
 	// path nodes: (up, seed, length, roll class: its keep); -1 = the start
@@ -4072,11 +4183,38 @@ async function gpuMain(a, L, m) {
 		}
 		return bc >= 0 ? bc : popA();
 	};
+	// head X (--exc=1): explore()'s popX on the dense archive (no cul-de-sacs or timed killers here: the GPU's cells carry no tile)
+	const excBestG = [-1, -1, -1, -1, -1];
+	const excOfG = (c) => cRc[c] - cRm[c];
+	const popX = () => {
+		const ord = excOrder(EXg.bands, EXg.pb);
+		if (!ord.length || !roomList.length) return popA();
+		excBestG.fill(-1);
+		for (let k = 0; k < EXC_DRAWS; k++) {
+			const r = roomList[(rnd() * roomList.length) | 0];
+			if (!r.arr.length || r.bk || (r.grp !== null && r.grp !== undefined && r.grp.dom)) continue;
+			const c = r.arr[(rnd() * r.arr.length) | 0];
+			if (cT[c] >= maxT || !(cRc[c] < RF.DEATH_TILES)) continue;
+			const b = excBand(excOfG(c)), q = excBestG[b];
+			if (q < 0 || cPicks[c] < cPicks[q] || (cPicks[c] === cPicks[q] && cRc[c] < cRc[q])) excBestG[b] = c;
+		}
+		for (const b of ord) if (excBestG[b] >= 0) { EXg.picks++; EXg.pickB[b]++; return excBestG[b]; }
+		return popA();
+	};
+	const excCountG = (c) => {
+		const pb = EXg.pb, d = EXg.dec;
+		for (let b = 0; b < 5; b++) pb[b] *= d;
+		pb[excBand(excOfG(c))] += 1;
+	};
+	const excArchG = () => { const h = [0, 0, 0, 0, 0]; for (let c = 0; c < nCells; c++) h[excBand(excOfG(c))]++; EXg.arch = h; };
+	const excRec = () => (EXg !== null ? { exc: { picks: EXg.picks, pickShare: (() => { const t = EXg.pb.reduce((x, y) => x + y, 0); return Array.from(EXg.pb, (x) => (t > 0 ? Math.round(1000 * x / t) / 1000 : 0)); })(),
+		target: EXg.bands.map((x) => Math.round(1000 * x) / 1000), xPicks: Array.from(EXg.pickB), archive: EXg.arch } } : {});
 	const discovery = [];
 	// ---- the start cell
 	grow(1);
 	nCells = 1;
 	cT[0] = 0; cNode[0] = -1; cRc[0] = startCost >= 0 ? startCost : costOf(-1, -1);
+	if (cRm !== null) cRm[0] = cRc[0];
 	const room0 = newRoom(info.room | 0, 0);
 	room0.isNew = false;
 	cRoom[0] = room0.idx; room0.arr.push(0); room0.best = 0;
@@ -4187,9 +4325,10 @@ async function gpuMain(a, L, m) {
 				e = d[0];
 				if (--d[1] <= 0) discovery.pop();
 				if (cT[e] >= maxT) continue;
-			} else if (rnd() < pA) e = popA();
+			} else if (rnd() < pA) e = EXg !== null && rnd() < EXg.q ? popX() : popA();   // (--exc: head X in head A's slot; a blind batch: never)
 			else e = popB();
 			if (e < 0) break;
+			if (EXg !== null) excCountG(e);
 			cPicks[e]++; cVer[e]++; picks++;
 			{ const pr = roomList[cRoom[e]]; pr.picks++; if (pr.grp !== null) pr.grp.picks++; }
 			hpush(e);
@@ -4238,6 +4377,8 @@ async function gpuMain(a, L, m) {
 			cT[d] = t; cNode[d] = node;
 			const rc = costOf(fifths, node);
 			cRc[d] = rc;
+			// (--exc: the parent's (the pick's) running minimum while the room is the parent's, else this cell's own cost)
+			if (cRm !== null) { const par = pk < K ? pickBuf[pk] : -1, pr = par >= 0 ? roomList[cRoom[par]] : null; cRm[d] = pr && pr.key === roomKey && cRm[par] < cRc[d] ? cRm[par] : cRc[d]; }
 			if (!isNew) { cVer[d]++; if (SAT && pk < K) pickNew[pk]++; }   // (an earlier arrival is yield too: the brake, above)
 			hpush(d);
 			if (t > deepest) deepest = t;
@@ -4322,10 +4463,11 @@ async function gpuMain(a, L, m) {
 	cleanup();
 	progress();
 	sendNear();
+	if (EXg !== null) excArchG();
 	const secs = (Date.now() - tReady) / 1000;
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
-		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null, ...(band ? { mixBandit: bandRec() } : {}),
+		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null, ...(band ? { mixBandit: bandRec() } : {}), ...excRec(),
 		astar: a.rollsAstar ? { builds: astarBuilds, kappa: Math.round(kappa * 100) / 100 } : null,
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
@@ -4458,6 +4600,12 @@ async function main() {
 	// the later arrivals with more jumps left kept as their own cells, which the key without the word dropped; bytes: what
 	// the archives' budget counts for the cells' jw now, B_JW each)
 	const jcellNow = () => (a.jcell ? { jcell: { cells: total('jCells'), dominated: total('jDom'), kept: total('jKept'), bytes: total('jwB') } } : {});
+	// (--exc=1, coarse cells: head X's picks; the picks' band shares (every head's, the workers' decayed counts summed) against
+	// the target; head X's picks per band; the archive's cells per band; the bytes the budget counts for rm)
+	const sumArr = (k) => { const s = [0, 0, 0, 0, 0]; for (const v of stats.values()) if (Array.isArray(v[k])) for (let b = 0; b < 5; b++) s[b] += v[k][b] || 0; return s; };
+	const shares = (s) => { const t = s.reduce((x, y) => x + y, 0); return s.map((x) => (t > 0 ? Math.round(1000 * x / t) / 1000 : 0)); };
+	const excNow = () => (a.exc && a.cells === 'coarse' ? { exc: { picks: total('excP'), pickShare: shares(sumArr('excPb')), target: excBandsOf(a).map((x) => Math.round(1000 * x) / 1000),
+		xPicks: sumArr('excXb'), archive: sumArr('excArch'), bytes: total('exB') } } : {});
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), backKept: total('dBackKept'), backByOrder: total('dBackR'), backBySteer: total('dBackS'), backPromoted: total('dPromote'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)
@@ -4476,7 +4624,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), jcellNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), jcellNow(), excNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -4800,7 +4948,7 @@ async function main() {
 		for (let i = 0; i < u.length; i++) tiles += u[i];
 	}
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...jcellNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(a.opts ? { opts: { runs: total('optRuns'), cells: total('optCells'), ends: Object.assign({}, ...OP.NAMES.map((n) => ({ [n]: total('optE_' + n) }))) } } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...jcellNow(), ...excNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...frontierNow(), ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
@@ -4822,5 +4970,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { B_JW, CellMap, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { B_JW, B_EX, EXC_BANDS, EXC_EDGES, excBand, excBandsOf, excOrder, excRm, CellMap, mixW, mixPick, mixCostOf, astarKappa, mixReward, mixBanditNew, mixBanditAdd, mixBanditPick, rollMixOf, MIX_BANDIT, ROLL_MIX, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, fieldOpts, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
