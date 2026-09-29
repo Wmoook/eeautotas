@@ -587,7 +587,7 @@ function kappaOf(A, rfOpts) {
  *  arrow's or boost's push costs RF.FXDIR_STEP x kappa more, as reach.js's walk mode (RF.pushDirs; the same edges) */
 function wildField(A, M, s, goals, kappa) {
 	const { W, H, N } = A;
-	const push = RF.pushDirs(A.level), pen = RF.FXDIR_STEP * kappa;
+	const push = RF.FXDIR_FREE < 0 ? RF.pushDirs(A.level) : null, pen = RF.FXDIR_STEP * kappa;   // (the runs variant, EEAT_FXDIR_FREE: reach.js only)
 	const d = new Float64Array(N).fill(Infinity);
 	const heap = [];
 	const hpush = (i, v) => { heap.push([v, i]); let n = heap.length - 1; while (n > 0) { const p = (n - 1) >> 1; if (heap[p][0] <= v) break; [heap[p], heap[n]] = [heap[n], heap[p]]; n = p; } };

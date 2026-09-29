@@ -731,12 +731,12 @@ function sectionJ() {
  * L: walk mode's push directions (reach.js pushDirs, EEAT_FXDIR): a step against an arrow's or boost's push costs
  * FXDIR_STEP more; the walk's edges, and so its -1 set, are main's. main = a child process with EEAT_FXDIR=0
  */
-function mainWalks(levels) {
+function mainWalks(levels, env) {
 	const code = `const R=require(${JSON.stringify(path.join(__dirname, '../src/reach.js'))}),E=require(${JSON.stringify(path.join(__dirname, '../src/eesim.js'))}),EL=require(${JSON.stringify(path.join(__dirname, '../src/eelvl.js'))}),ED=require(${JSON.stringify(path.join(__dirname, '../src/editor.js'))});
 const ls=JSON.parse(require('fs').readFileSync(0,'utf8'));const out=[];
 for(const [W,H,cells] of ls){const L=E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({name:'t',width:W,height:H,cells}))));const f=R.reachField(L);out.push({mode:f.mode,fxDir:f.fxDir||null,walk:Array.from(f.walk)});}
 process.stdout.write(JSON.stringify(out));`;
-	return JSON.parse(execFileSync(process.execPath, ['-e', code], { input: JSON.stringify(levels), env: Object.assign({}, process.env, { EEAT_FXDIR: '0' }), maxBuffer: 1 << 28 }).toString());
+	return JSON.parse(execFileSync(process.execPath, ['-e', code], { input: JSON.stringify(levels), env: Object.assign({}, process.env, env || { EEAT_FXDIR: '0' }), maxBuffer: 1 << 28 }).toString());
 }
 function sectionL() {
 	section('L walk mode\'s push directions: a step against an arrow / boost costs FXDIR_STEP more; the -1 set = main\'s (EEAT_FXDIR=0)');
@@ -816,6 +816,28 @@ function sectionL() {
 	});
 	check(`random walk-mode rooms with arrows, boosts, portals, spikes, checkpoints (${walkN} of ${n}): the -1 set = main's, no value below main's, rooms with no push tile = main`,
 		walkN >= n * 0.8 && cutDiff === 0 && lower === 0 && noPushDiff === 0 && higher > 0, `${cutDiff} -1 differences${first ? ` (room ${first.k} tile ${first.i})` : ''}, ${lower} lower, ${higher} higher (${noPushDiff} without push tiles)`);
+	// the runs variant (EEAT_FXDIR_FREE = K, walkFieldRun): K = 0 is the per-step price (this process's default: the same
+	// walk); K = 3: the -1 set is main's and every value between main's and the per-step one
+	if (R.FXDIR_FREE < 0) {
+		const f0 = mainWalks(levels, { EEAT_FXDIR_FREE: '0' }), f3 = mainWalks(levels, { EEAT_FXDIR_FREE: '3' });
+		let same0 = 0, all0 = 0, out3 = 0, cut3 = 0, below3 = 0;
+		levels.forEach(([W, H, cells], k) => {
+			let Lk;
+			try { Lk = levelOfCells(W, H, cells); } catch (e) { return; }
+			const fk = R.reachField(Lk);
+			if (fk.mode !== 'walk') return;
+			all0++;
+			if (fk.walk.every((v, i) => v === f0[k].walk[i])) same0++;
+			for (let i = 0; i < fk.walk.length; i++) {
+				const v3 = f3[k].walk[i], mv = mains[k].walk[i], v = fk.walk[i];
+				if ((v3 === CUTV) !== (mv === CUTV)) cut3++;
+				else if (v3 !== CUTV && (v3 < mv || v3 > v)) out3++;
+				if (v3 !== CUTV && v3 < v) below3++;
+			}
+		});
+		check('the runs variant: EEAT_FXDIR_FREE=0 = the per-step walk on every room; =3: the -1 set = main\'s, every value between main\'s and the per-step one (and below it somewhere)',
+			all0 > 0 && same0 === all0 && cut3 === 0 && out3 === 0 && below3 > 0, `${same0} / ${all0} rooms the same at K 0; K 3: ${cut3} -1 differences, ${out3} values outside, ${below3} below the per-step walk`);
+	}
 }
 /** random rooms with 50 in the mix: its field = the same room with 50 made 9 (a plain wall), its -1 set holds the one of
  *  50 as an open door (the room with 156, a door the model opens: the fields before 2026-09-28), and D's property along
