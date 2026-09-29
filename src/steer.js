@@ -198,6 +198,8 @@ function analyze(level, opts) {
 }
 /** the blue coin DP's build stops trying past BLUE_MAX_X x the build's time (STEER_MAX_MS) from its start */
 const BLUE_MAX_X = 1.5;
+/** the blue coin DP's carried legs (OPT-IN: EEAT_BLUECARRY=1 or opts.blueCarry true) */
+function blueCarryOn(opts) { return opts && opts.blueCarry !== undefined ? !!opts.blueCarry : process.env.EEAT_BLUECARRY === '1'; }
 /** the blue coin DP on (default; EEAT_BLUEDP=0 or opts.blueDP === false: off, main's build byte for byte) */
 function blueDpOn(opts) { return opts && opts.blueDP !== undefined ? !!opts.blueDP : process.env.EEAT_BLUEDP !== '0'; }
 /** the time doors' class on (default; EEAT_TIMEDOOR=0 or opts.timeDoors === false: static walls, as before 2026-09-29) */
@@ -1587,8 +1589,10 @@ function buildSteer(level, opts) {
 					const CLL = coinLegsLayered(B, PH2, cp2, t0 + BLUE_MAX_X * maxMs, opts);
 					if (CLL) { got = tryDP(CLL, CLL.layered.D); if (got) blue.layered = true; }
 				}
-				// (the plain legs leave the start without a value, on a model with a feature other than the blue coins: carried)
-				if (!got && M.names.some((k) => k !== 'bcoins') && Date.now() - t0 < BLUE_MAX_X * maxMs) {
+				// (the plain legs leave the start without a value, on a model with a feature other than the blue coins: carried;
+				// OPT-IN, blueCarryOn: the lookup reads one leg body per coin, the sub-layer of the plan's state before its first
+				// blue coin, so after a team change the leg is the old team's (Animaly in the A/B: 1 blue coin vs main's 2))
+				if (!got && blueCarryOn(opts) && M.names.some((k) => k !== 'bcoins') && Date.now() - t0 < BLUE_MAX_X * maxMs) {
 					const stats = { carried: 0, plain: 0, fields: 0, subs: 0 };
 					const forced = new Map(CL.coins.map((q) => [q, !(CL.fields.get(q) && CL.fields.get(q).unforced)]));
 					const CL2 = coinLegsPhys(B, PH2, cp2, Object.assign({}, opts, { carry: { forcedOf: (q) => forced.get(q), deadline: t0 + BLUE_MAX_X * maxMs, stats } }));
