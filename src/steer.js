@@ -577,6 +577,12 @@ function layerLevel(A, M, s, opts) {
 		}
 		if (id === 360) fg[i] = 0;   // checkpoints: no death edges (the searches drop dead balls)
 	}
+	// (EEAT_STEER_LWALLS: a pinned place walled in its own layer only)
+	if (A.lwalls) for (const w of A.lwalls) {
+		let ls = w.lay.get(M);
+		if (ls === undefined) { ls = M.layerOf(w.sim); w.lay.set(M, ls); }
+		if (ls === s) for (const i of w.comp) if (!goal[i]) fg[i] = 9;
+	}
 	const wild = nFx >= 0 && M.valOf(s, nFx) === 1;
 	const lv = Object.assign({}, L, { fg, gravityMult: wild ? 0.999 : L.gravityMult });
 	lv._wild = wild;
@@ -1472,10 +1478,47 @@ function buildSteer(level, opts) {
 	plain.info.ms += st.info.ms;
 	return plain;
 }
+/** (EEAT_STEER_LWALLS, b9cw2-cw, the layered pins: EEAT_PINREFINE=2; unset = nothing) a JSON list [{x, y, inputs}]:
+ *  each the same-kind component (at most 400 tiles, steerWallsOf's) of (x, y), a wall in ONE layer of every model the
+ *  build makes: the layer of the state after inputs (a pinned attempt's end: the model's layerOf). A counterexample is a
+ *  state's: the shaft under Cold World's blue coin is a false near for the ball without it (the model rises from below)
+ *  and its way out once it holds it (the coin's gate shuts above): walled in every layer (EEAT_STEER_WALLS) the steer's
+ *  start went 432 -> 761. Ordering only. A.lwalls: [{comp (tile indices), sim, lay (Map model -> layer)}] */
+function layerWallsOf(level) {
+	const spec = process.env.EEAT_STEER_LWALLS;
+	if (!spec) return null;
+	let list; try { list = JSON.parse(spec); } catch (e) { return null; }
+	if (!Array.isArray(list) || !list.length) return null;
+	const B = require('./blocks.js'), E = require('./eesim.js');
+	const W = level.width, H = level.height;
+	const kind = (id) => B.kindOf(id).kind;
+	const out = [];
+	for (const w of list) {
+		const sx = +w.x, sy = +w.y;
+		if (!(sx >= 0 && sx < W && sy >= 0 && sy < H)) continue;
+		const s0 = sy * W + sx, k0 = kind(level.fg[s0]);
+		const seen = new Set([s0]), q = [s0];
+		while (q.length && seen.size < 400) {
+			const i = q.shift(), x = i % W, y = (i / W) | 0;
+			for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+				const nx = x + dx, ny = y + dy, j = ny * W + nx;
+				if (nx < 0 || nx >= W || ny < 0 || ny >= H || seen.has(j) || kind(level.fg[j]) !== k0) continue;
+				seen.add(j); q.push(j);
+			}
+		}
+		const sim = new E.EESim(level), inp = new E.EEInput();
+		sim.reset();
+		const ins = String(w.inputs || '');
+		for (let t = 0; t < ins.length; t++) { E.applyMask(inp, (ins.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+		out.push({ comp: Int32Array.from(seen), sim, lay: new WeakMap() });
+	}
+	return out.length ? out : null;
+}
 function buildSteerOnce(level, opts) {
 	opts = opts || {};
 	const t0 = Date.now();
 	const A = analyze(level, opts);
+	A.lwalls = layerWallsOf(level);
 	const modeled = new Set();
 	const cegar = [];
 	// (the budget as a layer cap: the effects double the physics layers)

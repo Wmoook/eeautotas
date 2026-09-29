@@ -1263,8 +1263,9 @@ const pinKnob = (k, d, lo) => { const v = +process.env[k]; return process.env[k]
 const PIN_S = pinKnob('EEAT_PINREFINE_S', 60, 5), PIN_MAX = pinKnob('EEAT_PINREFINE_MAX', 6, 1);
 let pinR = null;
 function pinRefineCheck() {
-	if (process.env.EEAT_PINREFINE !== '1' || !cur || !S || !S.running || S.result || S.halted || !cur.files.steerCpu || !cur.distBySteer || cur.pastOn) return;
-	if (!pinR || pinR.search !== S.started) pinR = { search: S.started, best: Infinity, at: Date.now(), seeds: [], n: 0, busy: false };
+	const PM = process.env.EEAT_PINREFINE;
+	if ((PM !== '1' && PM !== '2') || !cur || !S || !S.running || S.result || S.halted || !cur.files.steerCpu || !cur.distBySteer || cur.pastOn) return;
+	if (!pinR || pinR.search !== S.started) pinR = { search: S.started, best: Infinity, at: Date.now(), seeds: [], lw: [], n: 0, busy: false };
 	const c = S.closest;
 	if (!c || c.cut || !(c.dist >= 0)) return;
 	if (c.dist < pinR.best - BREAK_TILES) { pinR.best = c.dist; pinR.at = Date.now(); return; }
@@ -1276,15 +1277,21 @@ function pinRefineCheck() {
 	if (!(tx >= 0 && tx < L.width && ty >= 0 && ty < L.height)) return;
 	// (a place walled already: the attempt came before the switch (its generation's events still arrive) or the model
 	// still leads there; no second build for it: its clock again)
-	if (pinR.seeds.includes(`${tx},${ty}`) || (pinR.switchAfter !== undefined && !(c.foundAfter > pinR.switchAfter))) { pinR.at = Date.now(); pinR.best = c.dist; return; }
-	pinR.seeds.push(`${tx},${ty}`);
+	// (EEAT_PINREFINE=2, the layered pins: the place walled only in the steer's layer of the pinned attempt's end state
+	// (steer.js EEAT_STEER_LWALLS); a place is walled again for another room's resources (coins, switches, team))
+	const ctx = PM === '2' ? '|' + String(closestRoom ? closestRoom.desc : '').replace(/(?:timedoors|deaths)\S*/g, '').replace(/\s+/g, ' ').trim() : '';
+	if (pinR.seeds.includes(`${tx},${ty}${ctx}`) || (pinR.switchAfter !== undefined && !(c.foundAfter > pinR.switchAfter))) { pinR.at = Date.now(); pinR.best = c.dist; return; }
+	pinR.seeds.push(`${tx},${ty}${ctx}`);
+	if (PM === '2') pinR.lw.push({ x: tx, y: ty, inputs: String(c.inputs || '') });
 	pinR.busy = true;
 	// (the walls the search's steer was built with, EEAT_STEER_WALLS, stay: the pins add to them; before, the first pin's
 	// rebuild dropped them)
-	const k = ++pinR.n, R = pinR, seeds = [process.env.EEAT_STEER_WALLS, ...pinR.seeds].filter(Boolean).join(';'), t0 = Date.now();
+	const k = ++pinR.n, R = pinR, seeds = [process.env.EEAT_STEER_WALLS, ...(PM === '2' ? [] : pinR.seeds)].filter(Boolean).join(';'), t0 = Date.now();
+	const lwalls = PM === '2' ? JSON.stringify(pinR.lw) : '';
 	const file = `${steerBase(cur.levelHash)}_pin${k}.bin`;
 	const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
-		process.env.EEAT_STEER_WALLS = d.seeds;
+		if (d.seeds) process.env.EEAT_STEER_WALLS = d.seeds; else delete process.env.EEAT_STEER_WALLS;
+		if (d.lwalls) process.env.EEAT_STEER_LWALLS = d.lwalls;
 		const E = require(d.mods.eesim), EL = require(d.mods.eelvl), SF = require(d.mods.steer), G = require(d.mods.gpu);
 		const L = E.prepareLevel(EL.toSimLevel(EL.readEelvl(Buffer.from(d.buf)), { id: 'editor', file: 'editor.eelvl' }));
 		const st = SF.buildSteer(L);
@@ -1294,7 +1301,7 @@ function pinRefineCheck() {
 		parentPort.postMessage({ ok: true, layers: st.info.layers, features: st.info.features, start: Number.isFinite(st.info.start) ? st.info.start : null, over: st.info.over || null, ms: st.info.ms });`;
 	let w;
 	try {
-		w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(cur.buf), file, seeds,
+		w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(cur.buf), file, seeds, lwalls,
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
 	} catch (e) { R.busy = false; return; }
 	note(`pin refinement ${k}: the nearest attempt (${c.tiles} tiles, ${Math.round(c.dist * 10) / 10} by the steer) has not got nearer for ${PIN_S} s: its place (${tx}, ${ty}) is walled in the steer's model, the steer is built again`);
