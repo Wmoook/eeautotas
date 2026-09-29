@@ -2,12 +2,14 @@
 // persistent GPU server for the Go-Explore of goexplore.js with coarse cells (explore.h RollParams). Included by
 // eegpu.cpp.
 //   eegpu roll <level.bin> [--reach=<RCH3>] [--prune=1] [--rolls=8] [--roll=40] [--keep=0.85] [--phase=50]
-//              [--cap=<cells>] [--mem=<MB>] [--hostmem=<MB>] [--maxPicks=65536]
+//              [--cap=<cells>] [--mem=<MB>] [--hostmem=<MB>] [--maxPicks=65536] [--rollMax=<the longest batch Lr>]
 // It keeps the cell table on the GPU and one state per cell (the pool, by dense id; the start is cell 0) in host memory,
 // and reads jobs from stdin (binary mode):
-//   "batch K maxT seed\n" + K x u32 (the picked cells' dense ids): every pick plays --rolls runs of up to --roll ticks
-//       (goexplore.js's inputs: explore.h rollSeed / rollDraw); a state at tick >= maxT is not added and a run ends past
-//       maxT. Reply: {"ev":"batch","n":N,"fin":F,"cells":C,"full":0|1,"touched":..,"ticks":..,"runs":..,"cut":..,
+//   "batch K maxT seed [Lr keep]\n" + K x u32 (the picked cells' dense ids): every pick plays --rolls runs of up to
+//       --roll ticks (goexplore.js's inputs: explore.h rollSeed / rollDraw); a state at tick >= maxT is not added and a
+//       run ends past maxT. Lr and keep (optional; goexplore.js --rollMix, the start event's "mix":1 says the tool reads
+//       them): this batch's run length (1 .. --roll, which sizes the buffers) and keep probability instead of --roll /
+//       --keep. Reply: {"ev":"batch","n":N,"fin":F,"cells":C,"full":0|1,"touched":..,"ticks":..,"runs":..,"cut":..,
 //       "dead":..,"ms":..,"kernelMs":..,"bytes":B}\n + N records of 6 i32 (dense id or -1 (the pool is full: not
 //       kept), tick, reach fifths (-1: cut off), room (goexplore.js roomOf key), pick index, run | step << 16: the
 //       cell's state is the pick's state after steps 0..step of that run) + F finishes of 4 u32 (pick index, run,
@@ -39,6 +41,10 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	typedef State<TW> S;
 	const int R = std::max(1, std::min(4095, atoi(opt(argc, argv, "rolls", "8").c_str())));
 	const int Lr = std::max(1, std::min(255, atoi(opt(argc, argv, "roll", "40").c_str())));
+	// (--rollMax: the longest run a batch may ask for, "batch K maxT seed Lr keep": the buffers are sized for it; an older
+	// tool ignores it and plays --roll / --keep in every batch, which goexplore.js then does too: its start event has no
+	// "mix")
+	const int LrMax = std::max(Lr, std::min(255, atoi(opt(argc, argv, "rollMax", "0").c_str())));
 	const double keep = atof(opt(argc, argv, "keep", "0.85").c_str());
 	const uint32_t maxPicks = (uint32_t)std::max(1, std::min(1 << 20, atoi(opt(argc, argv, "maxPicks", "65536").c_str())));
 	auto tStart = std::chrono::steady_clock::now();
@@ -88,8 +94,8 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	const size_t hostB = (size_t)(std::max(16.0, atof(opt(argc, argv, "hostmem", "1024").c_str())) * 1048576.0);
 	// (the records of one collect launch range come down with their states: ~64 MB)
 	const uint32_t stageCap = (uint32_t)std::max<size_t>(4096, std::min<size_t>(65536, ((size_t)64 << 20) / SB));
-	// (per pick: its id, its state's copy, and R x Lr touched slots at most)
-	const size_t fixedB = (size_t)maxPicks * (4 + SB + 4 * (size_t)R * Lr) + (size_t)stageCap * (SB + 24) + B.bytes.size() + 4096;
+	// (per pick: its id, its state's copy, and R x LrMax touched slots at most)
+	const size_t fixedB = (size_t)maxPicks * (4 + SB + 4 * (size_t)R * LrMax) + (size_t)stageCap * (SB + 24) + B.bytes.size() + 4096;
 	const size_t devB = memB > fixedB ? memB - fixedB : 0;
 	// (on the GPU per cell: its tick, slot and seen count, and two table slots of 28 bytes; in host memory its state)
 	const bool capGiven = opt(argc, argv, "cap", "").size() > 0;
@@ -102,7 +108,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	while (!capGiven && slots > 8192 && 28 * slots + 12 * cap > devB) { slots >>= 1; cap = std::min<uint64_t>(cap, slots / 2); }
 	// (the records of one collect launch range: at most one per touched slot; the touched slots of a batch are collected in
 	// ranges of at most recCap)
-	const uint32_t touchedCap = (uint32_t)std::min<uint64_t>((uint64_t)maxPicks * R * Lr, slots);
+	const uint32_t touchedCap = (uint32_t)std::min<uint64_t>((uint64_t)maxPicks * R * LrMax, slots);
 	const uint32_t recCap = (uint32_t)std::min<uint64_t>(std::min<uint64_t>(touchedCap, cap), stageCap);
 	const uint32_t finCap = 4096;
 	cu::Buf dl, dstage, dcellT, dkeys, dbest, ddone, dseen, ddense, dslot, dseenOut, dtouched, dpicks, dpickS, dfin, dout, dctr;
@@ -194,9 +200,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 	g.ready(tStart);
-	printf("{\"ev\":\"start\",\"stateBytes\":%d,\"cap\":%llu,\"slots\":%llu,\"fifths\":%d,\"room\":%d,\"memMB\":%.0f,\"hostMB\":%.0f,\"locked\":%d,\"rolls\":%d,\"roll\":%d,\"phase\":%d,\"gpu\":%s}\n",
+	printf("{\"ev\":\"start\",\"stateBytes\":%d,\"cap\":%llu,\"slots\":%llu,\"fifths\":%d,\"room\":%d,\"memMB\":%.0f,\"hostMB\":%.0f,\"locked\":%d,\"rolls\":%d,\"roll\":%d,\"rollMax\":%d,\"mix\":1,\"phase\":%d,\"gpu\":%s}\n",
 		(int)SB, (unsigned long long)cap, (unsigned long long)slots, fifths0, (int32_t)room0, (double)devUsed / 1048576.0, (double)(SB * cap + pickH.bytes + stageH.bytes) / 1048576.0,
-		pickH.locked && stageH.locked ? 1 : 0, R, Lr, P.phase, g.json().c_str());
+		pickH.locked && stageH.locked ? 1 : 0, R, Lr, LrMax, P.phase, g.json().c_str());
 	fflush(stdout);
 	uint64_t batches = 0;
 	unsigned long long st[5] = { 0, 0, 0, 0, 0 };
@@ -206,12 +212,25 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		fflush(stdout);
 	};
 	lk::onStop = [&]() { finale("stopped"); };
-	lk::Chunk ckRoll(2048, 128, 1u << 30, 128), ckCol(4096, 128, 1u << 30, 128), ckSeen(1 << 16, 256, 1u << 31, 256);
+	lk::Chunk ckCol(4096, 128, 1u << 30, 128), ckSeen(1 << 16, 256, 1u << 31, 256);
+	// (the roll launches' sizes, one per run length: a batch of the roll mix may play runs of another length than the
+	// batch before; a new length's first size is the last one's scaled by the lengths, so 240-tick runs after 40-tick
+	// ones do not start with a launch 6x the target)
+	std::vector<std::pair<int, lk::Chunk>> ckRolls;
+	ckRolls.reserve(256);   // (at most 255 lengths: the references handed out stay valid)
+	auto ckRollFor = [&](int lr) -> lk::Chunk& {
+		for (auto& c : ckRolls) if (c.first == lr) return c.second;
+		double size = 2048;
+		if (!ckRolls.empty()) size = std::max(128.0, std::min((double)(1u << 30), ckRolls.back().second.size * ckRolls.back().first / (double)lr));
+		ckRolls.emplace_back(lr, lk::Chunk(size, 128, 1u << 30, 128));
+		return ckRolls.back().second;
+	};
+	ckRollFor(Lr);
 	unsigned long long simSeen = 0;
 	auto rollTook = [&](lk::Chunk& c, double items, double ms) {
 		unsigned long long sim = simSeen;
 		cu::cuMemcpyDtoH_v2(&sim, dctr.p + 32, 8);
-		c.tookWorst(items, ms, (double)(sim - simSeen), items * Lr);   // (a run that ends early is cheaper: sized for Lr ticks each)
+		c.tookWorst(items, ms, (double)(sim - simSeen), items * P.Lr);   // (a run that ends early is cheaper: sized for the batch's Lr ticks each)
 		simSeen = sim;
 	};
 	std::vector<uint32_t> picks(maxPicks);
@@ -240,7 +259,11 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 			fflush(stdout);
 			continue;
 		}
-		if (sscanf(line, "batch %llu %llu %llu", &k, &mt, &seed) != 3 || k < 1 || k > maxPicks) { printf("{\"error\":\"bad job: %.60s\"}\n", line); fflush(stdout); return 3; }
+		int lrB = Lr;
+		double keepB = keep;
+		const int nf0 = sscanf(line, "batch %llu %llu %llu %d %lf", &k, &mt, &seed, &lrB, &keepB);
+		if ((nf0 != 3 && nf0 != 5) || k < 1 || k > maxPicks || lrB < 1 || lrB > LrMax || !(keepB >= 0 && keepB <= 1)) { printf("{\"error\":\"bad job: %.60s\"}\n", line); fflush(stdout); return 3; }
+		if (nf0 == 3) { lrB = Lr; keepB = keep; }
 		if (fread(picks.data(), 4, (size_t)k, stdin) != (size_t)k) break;
 		const auto tb = std::chrono::steady_clock::now();
 		const double k0 = lk::G.totalKernelMs;
@@ -253,8 +276,9 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 		cu::cuMemcpyHtoD_v2(dpickS.p, pickH.p, SB * k);
 		cu::cuMemsetD8_v2(dctr.p, 0, 12);   // (touched, finishes, records)
 		P.nPicks = (u32)k; P.maxT = (i32)std::min<unsigned long long>(mt, 0x7fffffff); P.batchSeed = (u32)seed; P.full = nd >= cap ? 1 : 0;
+		P.Lr = lrB; P.keep = keepB;   // (this batch's roll and collect kernels: its run length and keep)
 		void* ap[] = { &P };
-		lk::over(ckRoll, k * (uint64_t)R, 128, fRoll, ap, "roll", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; }, rollTook);
+		lk::over(ckRollFor(lrB), k * (uint64_t)R, 128, fRoll, ap, "roll", [&](uint32_t lo, uint32_t hi) { P.lo = lo; P.hi = hi; }, rollTook);
 		const double rollMs = lk::G.totalKernelMs - k0, rollWall = lk::sinceMs(tb);
 		cu::cuMemcpyDtoH_v2(ctr, dctr.p, 32);
 		const uint32_t nt = std::min(ctr[0], touchedCap);
