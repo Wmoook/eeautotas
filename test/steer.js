@@ -169,6 +169,11 @@ function altLegsToy() {
 	// (past its time: the file without it; a start value there means the time is bound to the steer wait's clock)
 	const cut = SF.buildSteer(L, { altEndMs: -1, altMs: -1, altLegs: true });
 	check('altLegs: past its time (altMs -1) none of it: the file without it byte for byte, info.altLegs.cut', sha(SF.steerFileBytes(cut, null)) === fOff && cut.info.altLegs && cut.info.altLegs.cut === 'time', JSON.stringify(cut.info.altLegs));
+	// (the steer wait's clock: past alt.end the useless file (no start value without it) gets its time only once the build
+	// is late anyway (ALT_LATE_MS of the real clock: here 0 vs 1e9 ms))
+	const late = SF.buildSteer(L, { altEndMs: -1, altLateMs: 0, altLegs: true }), early = SF.buildSteer(L, { altEndMs: -1, altLateMs: 1e9, altLegs: true });
+	check('altLegs: past the budget clock\'s end a useless file gets its legs only when the build is late anyway (the same file as with time; else the file without it)',
+		sha(SF.steerFileBytes(late, null)) === fOn && late.info.altLegs.late === true && sha(SF.steerFileBytes(early, null)) === fOff && early.info.altLegs.cut === 'time', `${JSON.stringify(late.info.altLegs)} / ${JSON.stringify(early.info.altLegs)}`);
 	const c0 = SF.buildSteer(levelOf(ROOMS.coins.buf), { altLegs: false }), c1 = SF.buildSteer(levelOf(ROOMS.coins.buf));
 	check('altLegs: the coin room (every coin a leg) is untouched', sha(SF.steerFileBytes(c0, null)) === sha(SF.steerFileBytes(c1, null)) && !c1.info.altLegs);
 }

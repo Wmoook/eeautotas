@@ -1077,13 +1077,16 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf, alt) 
  *  the start, every coin without one) takes the least leg from the start over the other layers the build reached (their
  *  non-coin values at the coin's own count; at most ALT_LAYERS of them, the fewest features away from the plan's layer
  *  first), a wild layer's walk x kappa as the wild bodies are, where that leg reaches at least as many other coins as its
- *  own. Every other leg is unchanged; no leg, no body and no layer is added (the same count of bodies). Bounded: its
- *  fields (on the leg workers) end ALT_MS after its own start and, unless the steer without it has no value at the start
- *  (`useless`: then it is the only value the file can have there), by `alt.end` (the build's budget clock T0() +
- *  ALT_END_MS: the file then still comes inside the product's steer wait); a batch past that = none of it, so the file is
- *  the build without it byte for byte (`CL.alt` {cut}). Ordering
+ *  own; such a coin's tail at T, where the plan's layer field has none, the least over the layers reached at T. Every
+ *  other leg and tail is unchanged; no leg, no body and no layer is added (the same count of bodies). Bounded: its fields
+ *  (on the leg workers) end ALT_MS after its own start and by `alt.end` (the build's budget clock T0() + ALT_END_MS: the
+ *  file still comes inside the product's steer wait, STEER_WAIT_MS 15 s), except where the steer without it has no value
+ *  at the start AND the build is past ALT_LATE_MS on the real clock (`useless` and late: that file orders nothing at the
+ *  start and comes after the wait anyway, so the time buys the only start value it can have: VVVVVV 31 s, Forgotten
+ *  Helix 34 s, Trail Blazer 26 s); a batch past that = none of it, so the file is the build without it byte for byte
+ *  (`CL.alt` {cut}). Ordering
  *  only: RCH3 and its -1 are not touched (the chain / physT / drops of n3-coin-dp-wrong-T are not in it) */
-const ALT_LAYERS = 8, ALT_MS = 6000, ALT_END_MS = 9000, ALT_MIN_MS = 300;
+const ALT_LAYERS = 8, ALT_MS = 6000, ALT_END_MS = 9000, ALT_LATE_MS = 13000, ALT_MIN_MS = 300;
 function altLegsOn(opts) {
 	if (opts && opts.altLegs !== undefined) return opts.altLegs !== false && opts.altLegs !== 0;
 	return process.env.EEAT_ALTLEGS !== '0';
@@ -1103,18 +1106,20 @@ function altLegs(A, PH, M, s, nC, CL, L, alt) {
 	cand.sort((a, b) => away(a) - away(b) || a - b);
 	const alts = cand.slice(0, ALT_LAYERS);
 	if (!alts.length) { CL.alt = { want: want.length, layers: 0 }; return; }
-	// (its time: where the steer without it has no value at the start (no DP value from the start over the legs as they
-	// are, and none in the start layer's field: LOEE Demonic Citadel, VVVVVV, Polar Eclipse, whose steer was NaN at the
-	// start and along every attempt), the time buys the only value the file can have there: ALT_MS from its start; else
-	// the file already orders the search and must still come inside the product's steer wait: also by alt.end, the
-	// budget clock's T0() + ALT_END_MS)
+	// (its time: by alt.end (the budget clock's T0() + ALT_END_MS: inside the product's steer wait), except where the steer
+	// without it has no value at the start (no DP value from the start over the legs as they are, and none in the start
+	// layer's field: VVVVVV, LOEE Demonic Citadel, whose steer was NaN at the start and along every attempt) and the build
+	// is already past ALT_LATE_MS of the real clock (alt.t0: the wait is real time): ALT_MS from its start. A useless
+	// field that is early still must not push the file past the wait: Mr Nutty's Wild World (15 coins, its legs through
+	// the key tile's sink: 45 alt fields and no leg) spent 5.9 s at 1 thread there, 13.2 -> 18.8 s)
 	const D0 = coinDP(CL);
 	let v0 = Infinity;
 	if (D0) for (let q = 0; q < D0.n; q++) { const lg = arriveCost(CL.fields.get(coins[q]), st); if (lg < CUT) v0 = Math.min(v0, lg + D0.h[(1 << q) * D0.n + q]); }
 	const f0 = PH.fields[M.s0];
 	const useless = !(v0 < Infinity) && !(f0 && arriveCost(f0, st) < CUT);
-	const deadline = Math.min(useless ? Infinity : alt.end, t0 + (alt.ms !== undefined ? alt.ms : ALT_MS));
-	if (deadline - t0 < ALT_MIN_MS) { CL.alt = { want: want.length, useless, cut: 'time' }; return; }
+	const late = useless && alt.t0 !== undefined && t0 - alt.t0 >= (alt.lateMs !== undefined ? alt.lateMs : ALT_LATE_MS);
+	const deadline = Math.min(late ? Infinity : alt.end, t0 + (alt.ms !== undefined ? alt.ms : ALT_MS));
+	if (deadline - t0 < ALT_MIN_MS) { CL.alt = { want: want.length, useless, late, cut: 'time' }; return; }
 	// (a wild layer's walk-mode leg x kappa, as wildField's bodies: on the physics legs' scale)
 	const kappa = PH.kappa > 1 ? PH.kappa : 1;
 	const scale = (v, walk, key) => (walk && kappa > 1 && L.wild(key) && v < CUT ? Math.min(CUT - 1, Math.round(v * kappa)) : v);
@@ -1122,7 +1127,7 @@ function altLegs(A, PH, M, s, nC, CL, L, alt) {
 	const list = [];
 	for (const q of want) for (const a of alts) list.push([q, `s${M.withVal(a, nC, CL.countOf.get(q))}`, at]);
 	const cs = L.costs(list, deadline);
-	if (cs.some((c) => !c) || Date.now() > deadline) { CL.alt = { want: want.length, useless, layers: alts.length, cut: 'time' }; return; }
+	if (cs.some((c) => !c) || Date.now() > deadline) { CL.alt = { want: want.length, useless, late, layers: alts.length, cut: 'time' }; return; }
 	const pick = new Map();
 	list.forEach(([q, key], x) => {
 		const c = cs[x], v = scale(c[0], c.walk, key);
@@ -1134,9 +1139,9 @@ function altLegs(A, PH, M, s, nC, CL, L, alt) {
 		if (!b || v < b.v) pick.set(q, { key, v });
 	});
 	const chosen = want.filter((q) => pick.has(q)).map((q) => [q, pick.get(q).key]);
-	if (!chosen.length) { CL.alt = { want: want.length, useless, layers: alts.length, legs: 0, ms: Date.now() - t0 }; return; }
+	if (!chosen.length) { CL.alt = { want: want.length, useless, late, layers: alts.length, legs: 0, ms: Date.now() - t0 }; return; }
 	const fs2 = L.fields(chosen, deadline);
-	if (fs2.some((f) => !f) || Date.now() > deadline) { CL.alt = { want: want.length, useless, layers: alts.length, cut: 'time' }; return; }
+	if (fs2.some((f) => !f) || Date.now() > deadline) { CL.alt = { want: want.length, useless, late, layers: alts.length, cut: 'time' }; return; }
 	chosen.forEach(([q, key], i) => {
 		const f = fs2[i];
 		if (f.mode === 'walk' && kappa > 1 && L.wild(key)) f.walk = Uint16Array.from(f.walk, (v) => (v >= CUT ? CUT : Math.min(CUT - 1, Math.round(v * kappa))));
@@ -1153,7 +1158,7 @@ function altLegs(A, PH, M, s, nC, CL, L, alt) {
 		for (let x = 0; x < M.S; x++) if (PH.fields[x] && M.valOf(x, nC) === nT) { const v = arriveCost(PH.fields[x], q); if (v < tl) tl = v; }
 		if (tl < CUT) { CL.tail.set(q, tl); tails++; }
 	}
-	CL.alt = { want: want.length, useless, layers: alts.length, legs: chosen.length, tails, ms: Date.now() - t0 };
+	CL.alt = { want: want.length, useless, late, layers: alts.length, legs: chosen.length, tails, ms: Date.now() - t0 };
 }
 /** a layerLevel copy ({lv}) of a model that has no coin feature (makeModel's gateOpen: open) with its coin doors and
  *  gates as they stand at k gold coins (0 open, 9 a wall) and every other gate of a modelled feature OPEN, its tiles
@@ -1605,7 +1610,7 @@ function buildSteer(level, opts) {
 	if (cp && cp.coins.length > 18) cp = null;
 	if (cp) {
 		// (the legs across the other layers end by the budget clock's T0() + ALT_END_MS: altLegs)
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts, { end: T0() + (opts.altEndMs !== undefined ? opts.altEndMs : ALT_END_MS), ms: opts.altMs });
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts, { end: T0() + (opts.altEndMs !== undefined ? opts.altEndMs : ALT_END_MS), ms: opts.altMs, t0, lateMs: opts.altLateMs });
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (CL && CL.alt) altInfo = CL.alt;
 		if (D) {
