@@ -1336,7 +1336,7 @@ const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
 // copies fit STEER_GPU_SHARE, 1/40, of a 16 GB GPU's memory: the editor's GPU tools keep their copies). The editor waits
 // STEER_WAIT_MS (15 s) from the worker's start, which parses the level first and writes the file after: the rest
 // (coinDP, the bodies, the file) fits the ~5 s left (the recheck's chain cut at 12 s landed 15.1-17.4 s in)
-const NEW_DP_MS = 9000, NEW_DP_MAX_BYTES = 100 << 20;
+const NEW_DP_MS = 9000, NEW_DP_MAX_BYTES = 100 << 20, NEW_DP_LEG_F = 2;
 /**
  * The steer field of a prepared level. opts: {maxLayers (4096), maxBytes (STEER_MAX_BYTES), maxMs (STEER_MAX_MS),
  * maxIters (12), noDP, physT (false: the coin DP's count by the walk plan alone), newDPMs (NEW_DP_MS), newDPMaxBytes
@@ -1423,11 +1423,14 @@ function buildSteer(level, opts) {
 	}
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) { if (newDP) dpCut = 'coins'; cp = null; }
-	// (the new DP's first batch of legs, the coins over the leg threads at about a layer field's time each (this build's
-	// physics fields: PH.ms / PH.builds), must end by dpBy)
+	// (the new DP's first batch of legs, the coins over the leg threads at up to NEW_DP_LEG_F layer fields' time each (this
+	// build's physics fields: PH.ms / PH.builds; a leg may build its field twice, legFieldOf), must end by dpBy, and its
+	// bodies (about the mean body's bytes each) fit NEW_DP_MAX_BYTES: else no leg is built (the census's Terror In The North
+	// spent 4.5 s on legs past the time and the cake 3.6 s on legs past the bytes before either was checked)
 	if (cp && newDP) {
 		const th = legThreadsOf(A, cp.coins.length, opts) || 1, per = PH.ms / Math.max(1, PH.builds);
-		if (Date.now() + Math.ceil(cp.coins.length / th) * per > dpBy) { dpCut = 'time'; cp = null; }
+		if (Date.now() + Math.ceil(cp.coins.length / th) * per * NEW_DP_LEG_F > dpBy) { dpCut = 'time'; cp = null; }
+		else if (fileBytes + cp.coins.length * fileBytes / Math.max(1, bodies.length) > (opts.newDPMaxBytes || NEW_DP_MAX_BYTES)) { dpCut = 'size'; cp = null; }
 	}
 	if (cp) {
 		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts, raised ? { first: newDP ? dpBy : 0, rounds: dpBy } : null);
