@@ -672,8 +672,10 @@ function goalsKey(goals) {
  *  campaign's late steer fields (the product's STEER_WAIT_MS 15 s: the search ordered by RCH3 until they came) spent
  *  most of their build on such repeats (the laptop, one thread): Kerred Megaman 51 layer fields, 9 distinct (42 repeats,
  *  9.3 of 15.0 s), The 5 Realms Of Afar 172 fields, 26 distinct (146 repeats, 34.3 of 44.2 s). The file is the same byte
- *  for byte (the bodies are deduplicated by their bytes anyway); a build that hit its time budget before can now fit more
- *  (a feature, the coin DP), as a faster machine's would. Ordering only; the reach field and its -1 are not touched.
+ *  for byte (the bodies are deduplicated by their bytes anyway); the build's time budget (buildSteer: no feature past half
+ *  of maxMs, no DP past maxMs, the tour's deadline) decides on a clock that counts each repeat as built again ('same', the
+ *  default of the knob), so a budget-cut build cuts the same things, sooner; 'spend' lets the saved time buy more
+ *  (layerMemoOn). Ordering only; the reach field and its -1 are not touched.
  *  Where the fields live: an entry goes when no layer holds it, except (1) the last `MEMO_SPARE_BYTES` of fields this
  *  call built and let go (a strongly connected pair of layers, a key layer and its expiry, iterates 3-8 sweeps, and the
  *  next pair with the same copies goes through the same sweeps: with only the held fields kept The 5 Realms built 98 of
@@ -683,7 +685,16 @@ function goalsKey(goals) {
  *  (wildField: the walk x kappa) also reads the model's killers (makeModel pass: protection modelled or not), so its key
  *  carries the modelled features (`tag`); a physics layer's reachField reads its level copy alone. */
 const MEMO_SPARE_BYTES = 128 << 20;
-function layerMemoOn(opts) { return opts && opts.layerMemo !== undefined ? !!opts.layerMemo : process.env.EEAT_STEER_MEMO === '1'; }
+/** the memo's mode: false (off), 'same' (opts.layerMemo true / EEAT_STEER_MEMO=1: the build's budget decides on a clock
+ *  that counts every repeat as built again, so the same features, coin DP and tour as without the memo, sooner) or
+ *  'spend' (opts.layerMemo 'spend' / EEAT_STEER_MEMO=2: the real clock, so the time saved can buy a feature, the DP or
+ *  the tour the budget cut before: The 5 Realms Of Afar under load key0 and 62 layers in 16.5 s where the base dropped
+ *  key0 at 19.5 s, but YMCK Puzzle Parade 100 s where the base stopped at 33 s: a feature let in at 14 s is not bounded) */
+function layerMemoOn(opts) {
+	const env = process.env.EEAT_STEER_MEMO;
+	const v = opts && opts.layerMemo !== undefined ? opts.layerMemo : env === '1' ? true : env === '2' || env === 'spend' ? 'spend' : false;
+	return v === 'spend' ? 'spend' : v ? 'same' : false;
+}
 /** the memo's key of layer copy c with goals: sha1 of its fg, the wild flag, the tag and the goals' (tile, cost) in
  *  order (the fg's hash once per copy) */
 function layerMemoKey(c, goals, tag) {
@@ -714,7 +725,7 @@ function buildPhysics(B, opts) {
 	const gen = {}, spare = [], spareMax = memo ? Math.min(32, Math.floor(MEMO_SPARE_BYTES / (A.N * BODY_BYTES_TILE))) : 0;
 	const wildTag = memo ? `w${M.names.join(',')}` : '';
 	if (memo) for (const e of memo.values()) e.n = 0;
-	let memoHits = 0;
+	let memoHits = 0, memoSavedMs = 0;
 	const solve = (s) => {
 		if (!copies[s]) copies[s] = layerLevel(A, M, s, opts);
 		const { lv, goalTiles } = copies[s];
@@ -761,7 +772,8 @@ function buildPhysics(B, opts) {
 				}
 			}
 			let e = memo.get(mk);
-			if (e) { if (old !== mk) e.n++; memoHits++; } else { e = { f: build(), n: 1, gen }; memo.set(mk, e); }
+			// (a hit saves its field's first build: ms, which buildSteer's budget clock counts in 'same' mode)
+			if (e) { if (old !== mk) e.n++; memoHits++; memoSavedMs += e.ms; } else { const tb = Date.now(); e = { f: build(), n: 1, gen, ms: 0 }; e.ms = Date.now() - tb; memo.set(mk, e); }
 			memoOf[s] = mk;
 			fields[s] = e.f;
 		} else fields[s] = build();
@@ -778,7 +790,7 @@ function buildPhysics(B, opts) {
 	}
 	// (the memo keeps the fields this call's layers hold, nothing else)
 	if (memo) for (const [k, e] of memo) if (e.n <= 0) memo.delete(k);
-	return { kappa, A, M, fields, goals: copies.map((c) => (c ? c.goal : null)), sweeps, builds, memoHits, layers: comps.flat().length, ms: Date.now() - t0 };
+	return { kappa, A, M, fields, goals: copies.map((c) => (c ? c.goal : null)), sweeps, builds, memoHits, memoSavedMs, layers: comps.flat().length, ms: Date.now() - t0 };
 }
 /** the reach field's own plan: greedy descent over its abstract states (reach.js debug edges) */
 function descend(f, st0, maxSteps = 50000) {
@@ -1370,12 +1382,17 @@ function buildSteer(level, opts) {
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
 	// (the layer memo, opt-in: one for the whole build, so a CEGAR build reuses the previous one's fields: buildPhysics)
-	const memo = layerMemoOn(opts) ? new Map() : null;
+	const memoMode = layerMemoOn(opts), memo = memoMode ? new Map() : null;
+	// (the budget's clock: T0() = t0 less the time the memo saved in 'same' mode (each repeat's first build's ms), so the
+	// budget decides as if every repeat were built again; off or 'spend': t0)
+	let saved = 0;
+	const T0 = () => t0 - saved;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: t0 + maxMs / 2 });
+		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: T0() + maxMs / 2 });
 		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
 		PH = buildPhysics(B, { staticCoins: true, debug: true, memo });
+		if (memoMode === 'same') saved += PH.memoSavedMs;
 		const sim = new E.EESim(level); sim.reset();
 		const pl = layeredPlan(PH, sim);
 		const path = [];
@@ -1393,7 +1410,7 @@ function buildSteer(level, opts) {
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
 		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
 		// (the next build takes longer than this one)
-		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
+		if (Date.now() - T0() > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
 		modeled.add(cx.feat);
 	}
 	const M = PH.M, N = A.N;
@@ -1413,14 +1430,14 @@ function buildSteer(level, opts) {
 	let dp = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
 	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
-	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
+	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - T0() > maxMs)) {
 		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
 	}
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) cp = null;
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (D) {
 			const none = new Uint8Array(N);
@@ -1459,7 +1476,7 @@ function buildSteer(level, opts) {
 		const T = Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0));
 		if (T >= 1 && (modelled || opts.tourFirst === true) && (nCoins >= TOUR_MIN_COINS || coinsOver)) {
 			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
-			const R = buildTour(A, level, T, !modelled, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
+			const R = buildTour(A, level, T, !modelled, kappa, T0() + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 			if (R) {
 				steer.tour = R;
 				let s1 = tourFifths(steer, sim0);

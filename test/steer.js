@@ -185,6 +185,22 @@ function layerMemo() {
 		if (prev !== undefined) process.env.EEAT_STEER_MEMO = prev;
 		check('EEAT_STEER_MEMO=1: the memo on (the knob); unset: off (no hits, the fields as before)', k1.hits > 0 && k0.hits === 0 && k0.calls === c0.calls && Buffer.compare(k0.bytes, k1.bytes) === 0, `hits ${k1.hits} / ${k0.hits}, fields ${k1.calls} / ${k0.calls}`);
 	} finally { R.reachField = orig; }
+	// the budget's clock, on a fake clock (every reach field 100 ms, nothing else takes time): the coin corridor's 7 layer
+	// fields take 700 ms without the memo, 200 with it; a 600-ms budget drops the coin DP without the memo ("the coin DP:
+	// the build's time") and with it in 'same' mode (the clock counts the 5 repeats: 700), the same file; 'spend' (the
+	// real clock: 200) builds the DP
+	const realNow = Date.now;
+	let fake = 1e12;
+	Date.now = () => fake;
+	R.reachField = function (lv, o) { const f = orig.call(this, lv, o); fake += 100; return f; };
+	try {
+		const arm = (m) => { const st = SF.buildSteer(coinCorr, { maxMs: 600, legThreads: 0, layerMemo: m }); return { st, bytes: SF.steerFileBytes(st, null), cpu: st.tour ? SF.steerFileBytes(st, null, true) : null }; };
+		const off = arm(false), same = arm(true), spend = arm('spend');
+		const eq = (a, b) => Buffer.compare(a.bytes, b.bytes) === 0 && (a.cpu === null) === (b.cpu === null) && (!a.cpu || Buffer.compare(a.cpu, b.cpu) === 0);
+		check('the memo\'s budget clock (fake: 100 ms a reach field, a 600-ms budget): without the memo the coin DP is dropped by the time, with it (\'same\') the same file, \'spend\' builds the DP',
+			/coin DP: the build's time/.test(off.st.info.over || '') && !off.st.dp && eq(off, same) && !!spend.st.dp && !eq(off, spend),
+			`off: ${off.st.info.over}, dp ${!!off.st.dp}; same: ${same.st.info.over}, the same file ${eq(off, same)}; spend: ${spend.st.info.over}, dp ${spend.st.dp ? `${spend.st.dp.n}/${spend.st.dp.T}` : 'none'}`);
+	} finally { Date.now = realNow; R.reachField = orig; }
 }
 
 /** a 40 x 7 corridor, the spawn at x 5, the trophy at x 30, full-height columns of the given ids from x 20 on */
