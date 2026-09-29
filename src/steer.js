@@ -1299,12 +1299,12 @@ function tourFifths(st, sim) {
 // trophy the walk reaches only after every world's switches). The chain is a monotone counter instead, like the coins:
 // WAVES by the fixpoint (every purple switch the walk reaches, pressed ON; again with those doors open / gates shut, until
 // the trophy is reached): wave k = the ids newly reached once every id of the earlier waves is ON. The ids the trophy
-// needs (backward: an id whose doors every way to the trophy, or to a needed id of a later wave, passes) are the chain;
-// the value = the walk to the nearest OFF id of the first unfinished wave + the rest of the chain in its order (the wave's
-// other OFF ids, then the later waves', then the walk to the trophy), each leg a walk field with the earlier waves ON.
-// Pressing an ON id again (a toggle) or touching its 1619 reset turns it OFF: the value rises by its leg (a step back),
-// and a ball the chain's walk no longer takes to any OFF switch of its wave (behind the door that switch shuts again) has
-// no value (-2 -> -1: ranked behind every valued state, never dropped). The lookup (steerFifths) is the LARGER of the chain
+// needs (an id without which that fixpoint reaches no trophy; alternatives, any one of which would do, are needed by
+// none: left to the layers) are the chain; the value = the walk to the nearest OFF id of the first unfinished wave + the
+// rest of the chain in its order (the wave's other OFF ids, then the later waves', then the walk to the trophy), each
+// leg a walk field with every id of the earlier waves ON. Pressing an ON id again (a toggle) or touching its 1619 reset
+// turns it OFF: the value rises by its leg (a step back); a ball the chain's walk takes to none of its wave's OFF
+// switches (behind the door that switch shuts again) keeps the rest's value (-2). The lookup (steerFifths) is the LARGER of the chain
 // and the rest (layers, coin DP / tour): both relax, the layers with the chain's unmodelled doors open (the false near),
 // the chain blind to coins, keys, gravity and one-ways; so the chain only raises a value or gives one where there is none.
 // ORDERING only (the CPU search's lookup, the CPU file's chain section, flags 4; the GPU tools' plain file is main's byte
@@ -1377,31 +1377,33 @@ function chainPlan(A, deadline) {
 	}
 	if (K === 0) return { none: 'the walk reaches the trophy with no switch on' };
 	if (K < 0) return { none: `no trophy after ${waves.length} waves` };
-	// the ids the trophy needs, backward: an id is needed when the walk with every other id ON misses the trophy or a
-	// needed id of a later wave (each group: reached when any of its tiles is)
-	const need = new Set();
-	for (let w = K - 1; w >= 0; w--) {
-		const groups = [A.trophies];
-		for (let v = w + 1; v < K; v++) for (const id of waves[v]) if (need.has(id)) groups.push(tilesOf.get(id));
-		for (const id of waves[w]) {
-			const o2 = new Set(on); o2.delete(id);
-			const seen = chainFlood(A, chainPass(A, o2));
-			if (groups.some((g) => !g.some((t) => seen[t]))) need.add(id);
+	// the ids the trophy needs: an id without which the fixpoint (every OTHER reached switch pressed ON, wave after wave)
+	// reaches no trophy. Alternatives (parallel doors where any one would do: Purple Depths' three switches) are needed
+	// by none of them and stay out: the chain asks only for what every way of the walk needs (before, a backward test
+	// with every other id ON, whose open door banks made nearly nothing needed, fell back to EVERY id: Purple Depths
+	// routed with 1 of its 3 "needed" ids, 296 vs 195 s)
+	const reachesWithout = (x) => {
+		const on2 = new Set();
+		for (let w = 0; w <= CHAIN_MAX_WAVES; w++) {
+			const seen = chainFlood(A, chainPass(A, on2));
+			if (trophyIn(seen)) return true;
+			let add = false;
+			for (const [id, ts] of tilesOf) if (id !== x && !on2.has(id) && ts.some((t) => seen[t])) { on2.add(id); add = true; }
+			if (!add) return false;
 		}
+		return false;
+	};
+	const need = new Set();
+	for (const ids of waves) {
+		for (const id of ids) if (!reachesWithout(id)) need.add(id);
 		if (deadline && Date.now() > deadline) return { none: 'time' };
 	}
-	// (checked forward: the needed ids alone, wave by wave; else every id of the waves: parallel doors where each one
-	// alone would do make none of them "needed")
-	let ok = need.size > 0;
-	const acc = new Set();
-	for (let w = 0; ok && w < K; w++) {
-		const seen = chainFlood(A, chainPass(A, acc));
-		for (const id of waves[w]) if (need.has(id) && !tilesOf.get(id).some((t) => seen[t])) ok = false;
-		for (const id of waves[w]) if (need.has(id)) acc.add(id);
-	}
-	if (ok && !trophyIn(chainFlood(A, chainPass(A, acc)))) ok = false;
-	const byWave = waves.map((ids) => ids.filter((id) => !ok || need.has(id))).filter((ids) => ids.length);
-	return { waves, need: byWave, K, allNeeded: !ok, tilesOf };
+	if (!need.size) return { none: `no id every way needs (${on.size} ids in ${K} waves)`, K };
+	// (the needed ids by their wave; the legs' doors: every id of the earlier waves ON, needed or not: the walk's own
+	// way to a wave's switches)
+	const byWave = [], waveOf = [];
+	waves.forEach((ids, w) => { const nd = ids.filter((id) => need.has(id)); if (nd.length) { byWave.push(nd); waveOf.push(w); } });
+	return { waves, need: byWave, waveOf, K, tilesOf };
 }
 /** the chain of a level (kappa: the walk's scale) -> {n, nW, id, wave, order, tail, C, legs ((n + 1) x N u16: row n the
  *  walk to the trophy with the chain ON), ...} or null */
@@ -1414,14 +1416,14 @@ function buildChain(A, CP, kappa, deadline, maxBytes) {
 	if (!n || (n + 1) * N * 2 > maxBytes) return null;
 	const Hs = { key: new Float64Array(1 << 16), id: new Int32Array(1 << 16) };
 	const ds = [];
-	const onBefore = new Set();
 	for (let k = 0; k < CP.need.length; k++) {
+		const onBefore = new Set();
+		for (let w = 0; w < CP.waveOf[k]; w++) for (const id of CP.waves[w]) onBefore.add(id);
 		const P = chainPass(A, onBefore);
 		for (let i = 0; i < n; i++) if (wave[i] === k) ds[i] = walkDist(A, P, CP.tilesOf.get(ids[i]).map((t) => ({ tile: t, cost: 0 })), kappa, Hs, CHAIN_KILL);
-		for (const id of CP.need[k]) onBefore.add(id);
 		if (deadline && Date.now() > deadline) return null;
 	}
-	ds[n] = walkDist(A, chainPass(A, onBefore), A.trophies.map((t) => ({ tile: t, cost: 0 })), kappa, Hs, CHAIN_KILL);
+	ds[n] = walkDist(A, chainPass(A, new Set(CP.waves.flat())), A.trophies.map((t) => ({ tile: t, cost: 0 })), kappa, Hs, CHAIN_KILL);
 	let reach0 = false;
 	for (let i = 0; i < n; i++) if (wave[i] === 0 && ds[i][A.start.t] < Infinity) reach0 = true;
 	if (!reach0) return null;
@@ -1663,7 +1665,7 @@ function buildSteer(level, opts) {
 						R.scale = f;
 						s1 = chainFifths(steer, sim0);
 					}
-					chainInfo = { n: R.n, waves: R.nW, K: CP.K, allNeeded: CP.allNeeded, unmodelled: miss.length, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, mb: Math.round(R.bytes / 104857.6) / 10, start: s1 >= 0 ? s1 / 5 : null,
+					chainInfo = { n: R.n, waves: R.nW, K: CP.K, ids0: CP.waves.flat().length, unmodelled: miss.length, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, mb: Math.round(R.bytes / 104857.6) / 10, start: s1 >= 0 ? s1 / 5 : null,
 						ids: CP.need.map((w) => w.join(',')).join(' | ') };
 				} else chainInfo = { none: 'no leg from the start', K: CP.K };
 			}
@@ -1802,8 +1804,10 @@ function steerFifths(st, sim) {
 	// (the switch chain, the CPU file's: the larger of it and the rest: both are relaxations, the layer field's with the
 	// chain's unmodelled doors open (a false near), the chain's blind to coins, keys and gravity; the chain only raises a
 	// value, or gives one where the rest has none)
-	// (-2: no walk to the switches the chain still needs: no value, ranked behind every valued state; never a prune)
-	if (st.chain) { const c = chainFifths(st, sim); return c === -2 ? -1 : c < 0 ? v : v < 0 ? c : Math.max(v, c); }
+	// (-2: the chain's walk takes the ball to none of the switches it still needs, with the earlier waves' doors open:
+	// behind a door its own switch shut again, or out of the chain's order with other switches on; the rest's value, as
+	// main: the chain never takes a value away)
+	if (st.chain) { const c = chainFifths(st, sim); return c < 0 ? v : v < 0 ? c : Math.max(v, c); }
 	return v;
 }
 /** the steer cost without the switch chain (fifths, -1 = no value) */
