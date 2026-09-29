@@ -1560,7 +1560,11 @@ function buildSteer(level, opts) {
 			else if (CL && CL.layered && CL.dropped) drops.push({ CL, D, how: `${dpHow} + ${CL.dropped} dropped` });
 			let got = false;
 			const tried = new Set(opts.coinT ? [cp.T] : []);
-			for (const T2 of [cp.T, fullT, physT]) {
+			// (the tries cheapest first: n x T fields each, so the least count first, a count below the walk plan's last as
+			// before (the walk plan's door is on its way); the cake is a lie (plan T 0: T = fullCoinT 11, physT 7): the
+			// layered T 11 try (121 fields) took the build's time on a loaded box before the T 7 one that fits)
+			const order = [cp.T, fullT, physT].filter((x) => x >= 1).sort((a, b) => ((a < planT) - (b < planT)) || (a - b));
+			for (const T2 of order) {
 				if (!(T2 >= 1) || tried.has(T2) || T2 > cp.coins.length) continue;
 				tried.add(T2);
 				if (Date.now() > chainEnd) { chainCut = true; break; }
