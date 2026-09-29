@@ -109,6 +109,13 @@ function section1() {
 	setCoins(D6.L, sim, []); place(sim, 55, 42);
 	const vd = SF.steerAt(st, sim), vl = SF.steerAt(stOff, sim);
 	check('at the coin door with no coin: the DP\'s value (the coins to fetch), far above the layer field\'s', vd > vl + 10, `${vd} vs ${vl} tiles`);
+	// the switch chain (d4-switch-chain-2) on the same CPU file: flags 8 next to the free DP's 4; both sections read back
+	const Nn = st.N, ch = { n: 1, nW: 1, id: Int32Array.from([1]), wave: Int32Array.from([0]), order: Int32Array.from([0]), tail: Float32Array.from([7]), C: Float32Array.from([0]), legs: new Uint16Array(2 * Nn).map((_, k) => k % 1000) };
+	const stc = Object.assign(Object.create(Object.getPrototypeOf(st)), st, { chain: ch });
+	const bc = SF.steerFileBytes(stc, null, true), rc = SF.readSteerFile(bc), fl = bc.readInt32LE(28);
+	check('the chain next to the free DP on one CPU file: flags 1 | 4 | 8, the DP (max) and the chain read back; the plain file neither',
+		fl === (1 | 4 | 8) && !!rc.dp && rc.dp.max === true && rc.dp.n === 6 && !!rc.chain && rc.chain.n === 1 && rc.chain.legs.length === 2 * Nn && rc.chain.legs[1500] === 500 && Buffer.compare(SF.steerFileBytes(stc, null), SF.steerFileBytes(stOff, null)) === 0,
+		`flags ${fl}`);
 }
 
 function section2() {
@@ -183,7 +190,11 @@ function section6() {
 	const s = SF.buildSteer(D.L, { maxLayers: 3 });
 	const off = SF.buildSteer(D.L, { maxLayers: 3, freeDP: false });
 	check('the budget cut the second switch first (the coins never tried), switch 1 kept', /^psw:2:/.test(String(s.info.over)) && s.info.features.indexOf('psw:1') >= 0 && s.info.features.indexOf('coins') < 0, `${JSON.stringify(s.info.features)}, ${s.info.over}`);
-	check('no free DP, no tour: the CPU file = the plain file = main\'s', !s.dp && !s.tour && Buffer.compare(SF.steerFileBytes(s, null, true), SF.steerFileBytes(off, null)) === 0);
+	// (the switch chain, the CPU file's own section too, where the layers leave out an id the walk plan needs: this level's
+	// switch 2 cut by the budget; without it the CPU file is the plain file = main's)
+	const sn = SF.buildSteer(D.L, { maxLayers: 3, noChain: true });
+	check('no free DP, no tour: the CPU file = the plain file = main\'s (the switch chain left out)', !s.dp && !s.tour && !sn.chain && Buffer.compare(SF.steerFileBytes(sn, null, true), SF.steerFileBytes(off, null)) === 0);
+	check('... with the chain the plain file the same, the CPU file difference only its chain section (flags 8)', Buffer.compare(SF.steerFileBytes(s, null), SF.steerFileBytes(off, null)) === 0 && (!s.chain || (SF.steerFileBytes(s, null, true).readInt32LE(28) & ~8) === SF.steerFileBytes(off, null).readInt32LE(28)), s.chain ? `chain over ${s.chain.n} ids` : 'no chain');
 }
 if (want('5')) section5();
 if (want('6')) section6();
