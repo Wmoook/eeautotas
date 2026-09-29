@@ -1020,8 +1020,9 @@ function coinLegsPhys(B, PH, base, opts) {
 }
 /** the coin legs of one build: layerLevel's copies per count k (made once) and the leg fields, on the leg workers when
  *  there are enough legs (legThreadsOf): fields([[q, k]]) -> the fields in that order; costs([[q, k, tiles]], deadline)
- *  -> the arrival costs at those tiles (null: past the deadline); close() */
-function legsOf(A, M, s, nC, coins, opts, legs) {
+ *  -> the arrival costs at those tiles (null: past the deadline); close(). patch(fg): changes every copy's tiles (the
+ *  leg CEGAR's check, legLost: a feature's gates as they stand at its first value) */
+function legsOf(A, M, s, nC, coins, opts, legs, patch) {
 	const lvOf = new Map();
 	const layer = (k) => {
 		if (!lvOf.has(k)) {
@@ -1030,6 +1031,7 @@ function legsOf(A, M, s, nC, coins, opts, legs) {
 			const { lv } = nC >= 0 ? layerLevel(A, M, M.withVal(s, nC, k), {}) : coinDoorsAt(A, M, layerLevel(A, M, s, {}), k);
 			const fg0 = Int32Array.from(lv.fg);
 			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
+			if (patch) patch(fg0);
 			lvOf.set(k, { lv, fg0, delta: lvDelta(A.level, lv) });
 		}
 		return lvOf.get(k);
@@ -1524,31 +1526,33 @@ function legCounterexample(A, PH, CL, D) {
 	return null;
 }
 
-/** the leg CEGAR's check before a build again (buildSteer): the DP's legs of the next build lie in one layer of the
- *  modelled features (the plan's before its first coin), where a newly modelled feature has (as a rule) its first value;
- *  so the coin of the counterexample's leg, its leg field with that feature's gates as they stand at its first value
- *  (the other gates as in its leg now), reaches neither the start nor another coin, and the DP needs every coin (n - 1
- *  < T): the next build's DP would have no tour from the start, and the build would be reverted (Endeavor: psw:3's doors
- *  on the way to its coin (347, 124), a second 20-s build for main's file). -> the coin's [x, y], or null (build again;
- *  the tail's leg, a feature without gates such as protection: no check) */
-function legLost(A, R, cx) {
+/** the leg CEGAR's check before a build again (buildSteer): the next build's DP legs lie in one layer of the modelled
+ *  features (the plan's before its first coin), where a newly modelled feature has (as a rule) its first value; so the
+ *  DP's legs are made again with that feature's gates as they stand at its first value (legsOf's patch; each coin at
+ *  its count on the DP's tour now, on the leg workers), and when that DP has no value at the start (dpStartOf) the build
+ *  again would only be reverted: not made (Endeavor: psw:3's doors, a second 20-s build for main's file; Ethereal
+ *  Ground: psw:0, the only way out of coin (226, 101)'s pocket). -> the counterexample's coin [x, y] (the DP would lose
+ *  its tour), or null (build again; a feature without gates, such as protection: no check) */
+function legLost(A, R, cx, level, opts) {
 	const CL = R.legs.CL, M = R.PH.M;
 	const f = A.feats.get(cx.feat);
-	if (!f || cx.feat === 'prot' || cx.feat === 'fx' || CL.coins.length - 1 >= CL.T) return null;
+	if (!f || cx.feat === 'prot' || cx.feat === 'fx') return null;
+	const v0 = f.values[f.init];
+	const gates = [];
+	for (let i = 0; i < A.N; i++) if (A.gateFeat[i] === cx.feat) gates.push(i);
+	const patch = (fg) => { for (const i of gates) fg[i] = testGate(cx.feat, A.gatePol[i], A.gateParam[i], v0) ? 0 : 9; };
+	const nC = M.names.indexOf('coins');
+	const LG = legsOf(A, M, CL.s, nC, CL.coins, opts, undefined, patch);
+	let fl;
+	try { fl = LG.fields(CL.coins.map((q) => [q, CL.countOf.get(q)])); } finally { LG.close(); }
+	const CL2 = { T: CL.T, coins: CL.coins, fields: new Map(CL.coins.map((q, i) => [q, fl[i]])), tail: CL.tail };
+	const D2 = coinDP(CL2);
+	if (!D2) return null;
+	const dp = { n: D2.n, T: D2.T, bit: Int32Array.from(CL.coins, (q) => level.coinBit[q]), leg: Int32Array.from(CL.coins, (q, i) => i), h: D2.h };
+	if (dpStartOf(dp, fl, level) < Infinity) return null;
 	const tour = coinTour(CL, R.legs.D, A.start.t);
 	const q = tour[cx.leg - 1];
-	if (q === undefined) return null;
-	const nC = M.names.indexOf('coins'), k = CL.countOf.get(q);
-	const c = nC >= 0 ? layerLevel(A, M, M.withVal(CL.s, nC, k), {}) : coinDoorsAt(A, M, layerLevel(A, M, CL.s, {}), k);
-	const fg = Int32Array.from(c.lv.fg);
-	for (const x of CL.coins) if (fg[x] === TROPHY) fg[x] = 0;
-	fg[q] = TROPHY;
-	const v0 = f.values[f.init];
-	for (let i = 0; i < A.N; i++) if (A.gateFeat[i] === cx.feat) fg[i] = testGate(cx.feat, A.gatePol[i], A.gateParam[i], v0) ? 0 : 9;
-	const g = legFieldOf(c.lv, fg, q, CL.coins, A.start.t);
-	if (arriveCost(g, A.start.t) < CUT) return null;
-	for (const x of CL.coins) if (x !== q && arriveCost(g, x) < CUT) return null;
-	return [q % A.W, Math.floor(q / A.W)];
+	return q === undefined ? [cx.t % A.W, Math.floor(cx.t / A.W)] : [q % A.W, Math.floor(q / A.W)];
 }
 
 // ------------------------------------------------------------------ build
@@ -1711,7 +1715,7 @@ function buildSteer(level, opts) {
 		if (Date.now() - T0() > maxMs / 2) { rec.why = secs; break; }
 		// (a build again that would only be reverted: the counterexample's coin, its leg with the feature's gates as they
 		// stand at the feature's first value, reaches neither the start nor another coin and the DP has no coin to spare)
-		const lost = legOn !== 'keep' ? legLost(A, R, cx) : null;
+		const lost = legOn !== 'keep' ? legLost(A, R, cx, level, opts) : null;
 		if (lost) { rec.why = `the DP would lose the coin (${lost.join(', ')})`; break; }
 		rec.added = true;
 		modeled.add(cx.feat);
