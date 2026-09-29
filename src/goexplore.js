@@ -333,9 +333,12 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 // share: --fLo while the nearest attempt improves (by 1 tile), rising to --fHi over --fStall picks of stall; none once
 // a route is known. The trophy guidance is untouched (heads A / B keep the rest); it only orders (the reach field's -1
 // stays the only prune). Progress / done: visTiles, maxCoins, frontier {builds, ms, picks, cand, goals}.
-// (and at least FR_TILE_PK picks a tile of the level apart: a build costs about 4 simulated ticks' time a tile, so this keeps
-// the builds near 3% of a worker's time: Barrel Cannon Canyon (300 x 300) spent 9% on them at 5,000 picks)
-const FR_MIN_PICKS = 5000, FR_TILE_PK = 0.4;
+// (and at least FR_TILE_PK picks a tile of the level apart: a build costs about 4 simulated ticks' time a tile, so this keeps them
+// near 5% of a worker's time: Barrel Cannon Canyon (300 x 300) spent 9% on them at 5,000 picks)
+const FR_MIN_PICKS = 5000, FR_TILE_PK = 0.25;
+// (a new room that opens territory (firstCell: its walk reaches tiles no earlier room's did, e.g. a coin door it opens): the next
+// field is its own, FR_FRESH_PK picks after the last at the soonest: the frontier the door let in, backtracking included)
+const FR_FRESH_PK = 1000;
 // --fYield=1: head F's share times its yield over the other heads' (FR_ROOM_W tiles a new room; decayed by FR_DECAY a pick;
 // a prior of FR_PRIOR new tiles a pick over FR_PN picks on both sides), within [FR_YMIN, FR_YMAX]
 const FR_ROOM_W = 20, FR_DECAY = 0.9995, FR_PRIOR = 0.05, FR_PN = 200, FR_YMIN = 0.25, FR_YMAX = 2;
@@ -2234,7 +2237,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (--frontier=1: head F's state: the field's generation, heap, room, field, per-tile costs FT (-2: not looked up yet), the
 	// candidates' cost bound, when and at what VIS count it was built, the nearest attempt's best and when it improved)
 	const FR = coarse && a.frontier > 0 ? { gen: 0, HF: null, room: null, field: null, FT: null, dil: null, thr: Infinity, at: -1e15, visAt: 0, best: Infinity, gainAt: 0,
-		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map() } : null;
+		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map(), fresh: null } : null;
 	/** --frontier: head F's field's cost (tiles) at tile t for a ball at rest there (-1: no way to the frontier), looked up once */
 	const frGap = Math.max(FR_MIN_PICKS, Math.round(N * FR_TILE_PK));
 	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { v = RF.costAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0); FR.FT[t] = v; } return v; };
@@ -2646,6 +2649,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// (a dominated room: no discovery burst and no source; the main thread hears of it, with its class and mask)
 		const dm = domOf(room);
 		if (room.gain > 0 && !dm) { if (a.burst > 0) { discovery.push([nc, a.burst]); bursts++; } }
+		// (--frontier: a room that opens territory gets the next field at once: its doors let the ball where no cell was)
+		if (FR !== null && room.gain > 0 && !dm) FR.fresh = room;
 		if (!dm && (room.gain > 0 || Date.now() - lastBlandSource >= SOURCE_S * 1000) && t >= SOURCE_MIN_TICKS) {
 			if (room.gain <= 0) lastBlandSource = Date.now();
 			source('room', room, nc);
@@ -3016,7 +3021,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// walkable, few frontier builds; never a dominated room or one without cells)
 		let R = null;
 		const ok = (r) => r !== null && r !== undefined && r.arr.length > 0 && !domOf(r);
-		if ((FR.builds & 1) === 1 && near !== null && ok(near.room) && rooms.get(near.room.key) === near.room) R = near.room;
+		if (FR.fresh !== null && ok(FR.fresh) && rooms.get(FR.fresh.key) === FR.fresh) R = FR.fresh;
+		else if ((FR.builds & 1) === 1 && near !== null && ok(near.room) && rooms.get(near.room.key) === near.room) R = near.room;
+		FR.fresh = null;
 		if (R === null) {
 			let bw = -1;
 			for (let k = 0; k < 4 && roomList.length; k++) {
@@ -3087,9 +3094,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (idx >= 0 && ctrl.length > 2) { const act = Atomics.load(ctrl, 2); if (act > 0 && idx >= act) { parked++; Atomics.wait(ctrl, 3, 0, PARK_MS); continue; } }
 		lShare = leadShare(now); wShare = wayShare(now);
 		if (coarse && a.spd > 0) spdClock(now);
-		// (--frontier: a new field every --fEvery picks, or at least FR_MIN_PICKS apart once VIS grew by --fGrow; none once a
+		// (--frontier: the first field after FR_MIN_PICKS picks (at the start nothing is visited: every tile a goal), then a new one
+		// every --fEvery picks, or at least frGap apart once VIS grew by --fGrow; none once a
 		// route is known)
-		if (FR !== null && maxT >= spdMaxT0 && (picks - FR.at >= Math.max(a.fEvery, frGap) || (nVis > FR.visAt * (1 + a.fGrow) + 16 && picks - FR.at >= frGap))) frBuild(now);
+		if (FR !== null && maxT >= spdMaxT0 && ((FR.fresh !== null && picks - FR.at >= FR_FRESH_PK) || (FR.builds === 0 ? picks >= FR_MIN_PICKS : picks - FR.at >= Math.max(a.fEvery, frGap) || (nVis > FR.visAt * (1 + a.fGrow) + 16 && picks - FR.at >= frGap)))) frBuild(now);
 		if (FR !== null) fShare = frShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;

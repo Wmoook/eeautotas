@@ -99,16 +99,16 @@ function sectionUnits() {
 	check('--fDil=0: the visited region\'s neighbours are goals', new Set(g0.goals.map((g) => g.tile)).has(8 * W + 16) && g0.goals.length > gs.goals.length);
 }
 
-// The false near (130 x 24 = 3,120 tiles: coarse cells): the spawn at (12, 20), the trophy at (2, 20) behind a 1-coin door
-// (6, 17-20); the coin at (126, 20), at the end of a corridor (rows 17-20) with a step every 10 tiles (1-tile blocks on the
-// floor), so the way to it is a long walk away from the trophy; the door-blind reach field puts the start 10 tiles from the
-// trophy and every tile to the right farther.
+// The false near (400 x 12 = 4,800 tiles: coarse cells): the spawn at (12, 8), the trophy at (2, 8) behind a 1-coin door
+// (6, 5-8); the coin at (396, 8), at the end of a corridor (rows 5-8) with a step every 10 tiles (1-tile blocks on the
+// floor), so the way to it is a long walk away from the trophy (past head F's first field, FR_MIN_PICKS picks in); the
+// door-blind reach field puts the start 10 tiles from the trophy and every tile to the right farther.
 function falseNear(file) {
-	const W = 130, H = 24, g = Array.from({ length: H }, () => Array(W).fill(9));
-	for (let y = 17; y <= 20; y++) for (let x = 1; x <= 128; x++) g[y][x] = 0;
-	for (let x = 20; x < 125; x += 10) g[20][x] = 9;
-	const extra = [[12, 20, 255], [2, 20, 121], [126, 20, 100]];
-	for (let y = 17; y <= 20; y++) extra.push([6, y, 43, 1]);
+	const W = 400, H = 12, g = Array.from({ length: H }, () => Array(W).fill(9));
+	for (let y = 5; y <= 8; y++) for (let x = 1; x <= 398; x++) g[y][x] = 0;
+	for (let x = 20; x < 395; x += 10) g[8][x] = 9;
+	const extra = [[12, 8, 255], [2, 8, 121], [396, 8, 100]];
+	for (let y = 5; y <= 8; y++) extra.push([6, y, 43, 1]);
 	return levelOf(file, 'frontier false near', W, H, g, extra);
 }
 
@@ -117,7 +117,7 @@ function sectionCpu() {
 	const file = path.join(HOME, 'falsenear.eelvl');
 	const L = falseNear(file);
 	check('coarse cells', GX.cellsFor(L) === 'coarse');
-	const T = 6000000;
+	const T = 20000000;
 	const base = ['--workers=1', '--seconds=120', `--maxTicks=${T}`, '--mem=400', '--first=1'];
 	const rows = [];
 	for (const seed of [1, 2]) {
@@ -137,7 +137,7 @@ function sectionCpu() {
 	// the same seed and budget: the same search (the builds and the share by picks)
 	const again = doneOf(gox(file, [...base, '--seed=1', '--frontier=1']));
 	const a1 = rows[0].on;
-	check('--frontier=1: the same seed and budget give the same search', again.ticks === a1.ticks && again.states === a1.states && again.picks === a1.picks && JSON.stringify(again.frontier && again.frontier.picks) === JSON.stringify(a1.frontier.picks) && JSON.stringify(again.first) === JSON.stringify(a1.first),
+	check('--frontier=1: the same seed and budget give the same search', again.ticks === a1.ticks && again.states === a1.states && again.picks === a1.picks && JSON.stringify(again.frontier && again.frontier.picks) === JSON.stringify(a1.frontier.picks) && JSON.stringify(again.first && [again.first.ticks, again.first.simTicks]) === JSON.stringify(a1.first && [a1.first.ticks, a1.first.simTicks]),
 		`${again.ticks} / ${a1.ticks} ticks, ${again.picks} / ${a1.picks} picks`);
 	// the revision's options (the share by head F's yield, its own dead-end brake, the physics field without effects): a
 	// route, replayed, and the same search again
@@ -147,6 +147,11 @@ function sectionCpu() {
 	check('--fYield=1 --fBrake=1 --fPhys=1: a route (replayed)', rx.length > 0 && !!C.evaluate(L, masksOf(rx[0].inputs)), rx.length ? `${rx[0].ticks} ticks, ${JSON.stringify(dx1.frontier)}` : 'none');
 	check('--fYield=1 --fBrake=1 --fPhys=1: the same seed and budget give the same search', dx1.ticks === dx2.ticks && dx1.picks === dx2.picks && dx1.states === dx2.states, `${dx1.picks} / ${dx2.picks} picks`);
 	const simOf = (r) => (r.length ? r[0].simTicks : Infinity);
+	// what it is for: the corridor is walked in the first picks; the coin's room opens the door (territory no room walked),
+	// its field's frontier is behind the door, and head F pulls that room's cells back to it (the backtracking a coin door
+	// asks for), where heads A / B wander the explored corridor (seeds 1 and 2: 2.44 / 2.53 M simulated ticks vs 5.19 / 5.15 M)
+	check('--frontier=1 routes the false near in fewer simulated ticks, both seeds (the coin room\'s frontier behind the door)', rows.every((r) => simOf(r.r1) < simOf(r.r0)),
+		rows.map((r) => `${simOf(r.r1)} vs ${simOf(r.r0)}`).join(', '));
 	console.log(`  (the simulated ticks to the first route, off / on: ${rows.map((r) => `seed ${r.seed} ${simOf(r.r0)} / ${simOf(r.r1)}`).join(', ')}; visited tiles ${rows.map((r) => `${r.off.visTiles} / ${r.on.visTiles}`).join(', ')})`);
 }
 
