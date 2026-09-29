@@ -1152,39 +1152,104 @@ function pastArrived(hash, past) {
 	if (!cur || cur.levelHash !== hash || !S || !S.running) return;
 	cur.past = past && fs.existsSync(past.file) ? past : null;
 	if (S.steer) S.steer.past = cur.past ? { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false } : null;
-	if (cur.past) note(`the plan past its count is ready (the coin DP over ${cur.past.T} coins, legs by the count held; built in ${(cur.past.ms / 1000).toFixed(1)} s): the search turns to it once it holds ${cur.past.planT} coins and stalls there`);
+	if (cur.past && cur.past.kind === 'coins') note(`the coin plan is ready (the steer field models no coins; the coin DP over ${cur.past.T} of ${cur.past.n} coins, legs by the count held; built in ${(cur.past.ms / 1000).toFixed(1)} s): the search turns to it at its first stall`);
+	else if (cur.past) note(`the plan past its count is ready (the coin DP over ${cur.past.T} coins, legs by the count held; built in ${(cur.past.ms / 1000).toFixed(1)} s): the search turns to it once it holds ${cur.past.planT} coins and stalls there`);
 }
-/** every 5 s (checkStalls): a search that holds the plan's count and has stalled for the breaker's first wait turns to
- *  the plan past its count */
-function pastPlanCheck() {
-	if (!cur || !cur.opts.pastPlan || cur.pastOn || !cur.past || !cur.files.steerCpu || !brk || !S || S.result || !S.running || S.halted) return;
-	if (Date.now() - brk.at < cur.opts.breakWait[0] * 1000) return;
-	let held = 0;
-	for (const r of sources.values()) held = Math.max(held, goldOfDesc(r.desc));
-	if (held < cur.past.planT || !fs.existsSync(cur.past.file)) return;
-	cur.pastOn = true;
-	cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
+// The coin stall (night 3, 2026-09-28): ~14 failing campaign levels whose steer field HAS the coin DP stalled at a coin
+// door with too few coins (Palmia Ville 4 of 10, the door 29.8 tiles away from 6.5 s on; Cave Exploration 6 / 11, Snow
+// Is Falling 6 / 10, Get Wet 6 / 9, ...): the lookup is the least of the DP and the layer field, and the layer field counts
+// a coin at every touch, so "the nearest coin, touched again" wins over the untaken ones; the DP first came only with the
+// plan past its count (above), which these levels (the plan's count = the full one) never build. So at the breaker's first
+// wait, when the rooms hold fewer coins than the plan's count (or the nearest attempt ends within COIN_NEAR tiles of a
+// coin door / gate of more coins than it holds), the CPU search turns to the DP first on its own field (goexplore.js stdin
+// `steer <file>`: the same switch as the plan past its count; the breaker's gates already come from that DP). A field
+// that models no coins at all (its plan passes no shut coin door: MKco Mushroom Cup, The 7 Depths of Hell, Mr Nutty's
+// Wild World, ...) has no DP: the steer worker builds the coin plan (buildSteer with the coins modelled from the start,
+// the blue coins too where a blue door reads them; `past.kind` 'coins', planT 0) and the search turns to it at the first
+// stall. Before the stall nothing changes (the DP first from the start was negative on the gate benchmark); an order
+// only: nothing is pruned. `b.pastPlan === false`: off (both).
+const COIN_NEAR = 6;
+/** a coin door or gate of more coins than `coins` within COIN_NEAR tiles of the end of attempt c (its path: the ball's
+ *  centre in px): {x, y, n} or null */
+function coinDoorNear(c, coins) {
+	const L = cur && cur.level;
+	if (!c || !Array.isArray(c.path) || !c.path.length || !L || !L.fg || !L.lookup0) return null;
+	const [px, py] = c.path[c.path.length - 1];
+	const tx = Math.floor(px / 16), ty = Math.floor(py / 16), W = L.width, H = L.height;
+	for (let dy = -COIN_NEAR; dy <= COIN_NEAR; dy++) {
+		for (let dx = -COIN_NEAR; dx <= COIN_NEAR; dx++) {
+			const x = tx + dx, y = ty + dy;
+			if (x < 0 || y < 0 || x >= W || y >= H) continue;
+			const i = y * W + x, id = L.fg[i];
+			if ((id === 43 || id === 165) && L.lookup0[i] > coins) return { x, y, n: L.lookup0[i] };
+		}
+	}
+	return null;
+}
+/** the CPU searches (the one search, the escape) turn to `file` with the coin DP first (goexplore.js stdin `steer <file>`):
+ *  another measure, so the nearest attempt, the stall mark and every strategy's own best start over, and the rooms'
+ *  attempts kept so far rank behind the new ones (as at a late field's switch). -> the processes told */
+function dpSwitch(file, kind) {
+	cur.pastOn = kind;
+	cur.dpFile = file;
 	S.closest = null;            // (another measure: the CPU search's attempts by it)
 	brk.mark = Infinity;
+	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	let told = 0;
 	S.strategies.forEach((q, k) => {
 		const ch = kids[k];
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${cur.past.file}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
+		// (sgMin: the switch's generation in that process; its closest attempts from before it are the old measure's)
+		if ((q.key === 'goexplore' || q.key === 'escape') && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${file}\n`); told++; q.best = undefined; q.bestTry = null; q.sgMin = (q.sgMin || 0) + 1; } catch (e) { /* gone */ } }
 	});
+	if (esc && esc.run) esc.run.best = Infinity;
+	return told;
+}
+/** every 5 s (checkStalls): a search that holds the plan's count and has stalled for the breaker's first wait turns to
+ *  the plan past its count (the coin plan: at the first stall); a search stalled with fewer coins than its own plan's
+ *  count (or at a coin door it cannot open) turns to its own coin DP first */
+function pastPlanCheck() {
+	if (!cur || !cur.opts.pastPlan || cur.pastOn === 'past' || cur.opts.noWayUp || !brk || !S || S.result || !S.running || S.halted) return;
+	if (Date.now() - brk.at < cur.opts.breakWait[0] * 1000) return;
+	let held = 0;
+	for (const r of sources.values()) held = Math.max(held, goldOfDesc(r.desc));
 	const after = Math.round((Date.now() - S.started) / 100) / 10;
-	if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
-	note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
+	if (cur.past && held >= cur.past.planT && fs.existsSync(cur.past.file)) {
+		// (the coin plan of a search without a field (its own models nothing: one layer, no DP): the plan's file becomes the
+		// search's field first, as a late one (lateSteer), then the switch)
+		if (!cur.files.steerCpu && cur.past.kind === 'coins') lateSteer(searchGen, { useful: true, file: cur.past.file, layers: cur.past.layers, bodies: cur.past.bodies, features: cur.past.features, dp: { n: cur.past.n, T: cur.past.T }, bytes: cur.past.bytes, start: cur.past.start, ms: cur.past.ms });
+		if (!cur.files.steerCpu) return;
+		const told = dpSwitch(cur.past.file, 'past');
+		cur.gateSteer = undefined;   // (breakGate reads the plan past its count from now on)
+		if (S.steer) S.steer.past = Object.assign(S.steer.past || {}, { on: true, after, held });
+		if (cur.past.kind === 'coins') note(`the coin plan: no progress for ${cur.opts.breakWait[0]} s with ${held} coins held and a steer field that models no coins: the search turns to the coin plan over ${cur.past.T} coins, the DP first (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
+		else note(`past the plan: ${held} coins held (the plan's count ${cur.past.planT}) and no progress for ${cur.opts.breakWait[0]} s: the search turns to the coin plan over ${cur.past.T} coins (${told ? 'the CPU search, ' : ''}the wall breaker's gates, the nearest attempt)`);
+		save();
+		return;
+	}
+	// (the coin stall: the field's own coin DP first; once a search, and not after the plan past its count)
+	if (cur.pastOn || !cur.files.steerCpu || !S.steer || !S.steer.dp || !(S.steer.dp.T > 0) || !fs.existsSync(cur.files.steerCpu)) return;
+	const T = S.steer.dp.T;
+	let why = '';
+	if (held < T) why = `the rooms hold ${held} of the plan's ${T} coins`;
+	else {
+		const nc = closestRoom ? goldOfDesc(closestRoom.desc) : 0, dr = nc < T ? coinDoorNear(S.closest, nc) : null;
+		if (dr) why = `the nearest attempt (${nc} coins) ends by the ${dr.n}-coin ${cur.level.fg[dr.y * cur.level.width + dr.x] === 43 ? 'door' : 'gate'} at (${dr.x}, ${dr.y})`;
+	}
+	if (!why) return;
+	const told = dpSwitch(cur.files.steerCpu, 'stall');
+	if (S.steer) S.steer.dpFirst = { after, held, T, why };
+	note(`the coin stall: no progress for ${cur.opts.breakWait[0]} s and ${why}: the search turns to its coin DP first (${told ? 'the CPU search\'s order and ' : ''}the nearest attempt; the wall breaker's gates are that DP's)`);
 	save();
 }
 // a gate run's closest attempt at most this far (tiles, by the coin's leg field) is at the gate: 0 = on the coin's tile
 const GATE_AT = 0.2;
 /** the coin plan's next gate from the state after inputs: {x, y} (tiles) or null; the steer file read once a search */
 function breakGate(inputs) {
-	if (!cur || !cur.opts.breakGate || !S.steer || !S.steer.dp || !cur.files.steerCpu) return null;
+	if (!cur || !cur.opts.breakGate || !S.steer || !(S.steer.dp || cur.pastOn === 'past') || !cur.files.steerCpu) return null;
 	try {
 		if (cur.gateSteer === undefined) {
 			cur.gateSteer = null;
-			const buf = fs.readFileSync(cur.pastOn ? cur.past.file : cur.files.steerCpu);
+			const buf = fs.readFileSync(cur.pastOn === 'past' ? cur.past.file : cur.files.steerCpu);
 			const st = SF.readSteerFile(buf);
 			if (st && st.dp) {
 				const tiles = new Map(), cb = cur.level.coinBit;
@@ -1214,7 +1279,7 @@ function breakGate(inputs) {
 		const b = G0.st.dp.leg[g.i];
 		let reach = G0.files.get(b);
 		if (!reach) {
-			reach = path.join(dir(), `gate_${cur.pastOn ? 'p' : ''}${b}.rch3`);
+			reach = path.join(dir(), `gate_${cur.pastOn === 'past' ? 'p' : ''}${b}.rch3`);
 			fs.writeFileSync(reach, G0.buf.subarray(G0.st.bodyOff[b], G0.st.bodyOff[b] + G0.st.bodySize[b]));
 			G0.files.set(b, reach);
 		}
@@ -1656,6 +1721,9 @@ function escLaunch(n, st) {
 	Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', best: undefined, bestAt: 0, bestTry: null, found: V.found || null, passes: esc.runs,
 		detail: `escape ${esc.runs}: from tick ${st.inputs.length} of ${st.what}, ${E} thread${E > 1 ? 's' : ''}` });
 	kids[n] = launch(n);
+	// (the coin DP first when the search turned to it (pastPlanCheck): the escape measures by it too; its --steer is the field)
+	const ch = kids[n];
+	if (cur.pastOn && cur.dpFile && cur.files.steerCpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${cur.dpFile}\n`); V.sgMin = 1; } catch (e) { /* gone */ } }
 	save();
 }
 /** the escape's process ended (how: its stop or end): the one search gets its workers back; after a stall of its own the
@@ -2005,6 +2073,8 @@ function useSteer(sf, noGpu) {
 	S.steer = null;
 	if (sf && sf.late) { note('the steer field is still building: this search orders by the reach field until it is built'); return; }
 	if (sf && sf.over) note(`the steer field ${sf.over}`);
+	// (the coin plan of a field that models nothing, when the cache has it: the search turns to it at its first stall)
+	cur.past = sf && sf.file && sf.past && sf.past.kind === 'coins' && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
 	if (!sf || !sf.useful || !fs.existsSync(sf.file)) return;
 	const mb = sf.bytes / 1048576, gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
 	// (STEER_GPU_SHARE in all: two copies (every move, the relay), four with the beams')
@@ -2040,6 +2110,8 @@ function lateSteer(gen, sf2) {
 	if (gen !== searchGen || !cur || !S.running || S.halted || cur.opts.noWayUp || cur.files.steerCpu) return;
 	const sec = S.started ? Math.round((Date.now() - S.started) / 100) / 10 : null;
 	if (!sf2 || !sf2.useful || !fs.existsSync(sf2.file)) {
+		// (the coin plan, when the cache had it: pastPlanCheck turns the search to it at its first stall)
+		if (!cur.past && sf2 && sf2.file && sf2.past && sf2.past.kind === 'coins' && fs.existsSync(pastFileOf(sf2.file))) cur.past = Object.assign({ file: pastFileOf(sf2.file) }, sf2.past);
 		note(`the steer field was built ${sec !== null ? `${sec} s into the search` : 'late'}: ${sf2 ? 'it models nothing the reach field does not' : 'it could not be built'}`);
 		return;
 	}
@@ -2294,19 +2366,28 @@ function steerInfo(buf, hash) {
 			let lfp = null, bytes = 0;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
+			// (the plan past its count: the walk plan's count is below the full one; the coin plan: a coin door reads coins and
+			// the field models none (no DP: its plan passes no shut coin door), so the plan comes from the coins modelled
+			// from the start (and the blue coins where a blue door reads them), its count the full one and the switch at the
+			// first stall (planT 0): pastPlanCheck)
+			const pastKind = st.info.dp ? (useful && st.info.fullT > st.info.dp.T ? 'past' : '') : st.info.fullT > 0 ? 'coins' : '';
 			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
-				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
+				fullT: st.info.fullT, pastWanted: !!pastKind });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
-			// plan's count is below that; after the field above is answered, so the search never waits for it: pastPlan)
-			if (useful && st.info.dp && st.info.fullT > st.info.dp.T) {
+			// plan's count is below that, or the coin plan above; after the field above is answered, so the search never
+			// waits for it: pastPlan)
+			if (pastKind) {
 				let past = null;
 				try {
-					const sp = SF.buildSteer(L, { coinT: st.info.fullT, maxMs: d.pastMs });
+					let blue = false;
+					for (let i = 0; i < L.fg.length && !blue; i++) blue = L.fg[i] === 213 || L.fg[i] === 214;
+					const sp = SF.buildSteer(L, pastKind === 'coins' ? { coinT: st.info.fullT, maxMs: d.pastMs, features: blue ? ['coins', 'bcoins'] : ['coins'] } : { coinT: st.info.fullT, maxMs: d.pastMs });
 					if (sp.dp && sp.info.dp && sp.info.dp.tour && sp.info.dp.tour.length) {   // (a DP with no value from the start, e.g. Forgotten Helix's at 15 coins: none)
 						const b = SF.steerFileBytes(sp, lfp);
 						fs.writeFileSync(d.past + '.tmp', b); fs.renameSync(d.past + '.tmp', d.past);
-						past = { T: sp.dp.T, n: sp.dp.n, planT: st.info.dp.T, tour: sp.info.dp.tour, start: Number.isFinite(sp.info.start) ? sp.info.start : null, ms: sp.info.ms, bytes: b.length };
+						past = { kind: pastKind, T: sp.dp.T, n: sp.dp.n, planT: pastKind === 'coins' ? 0 : st.info.dp.T, tour: sp.info.dp.tour, start: Number.isFinite(sp.info.start) ? sp.info.start : null, ms: sp.info.ms, bytes: b.length,
+							layers: sp.info.layers, bodies: sp.bodies.length, features: sp.info.features };
 					}
 				} catch (e) { past = null; }
 				parentPort.postMessage({ past: past || { none: true } });
@@ -2967,7 +3048,7 @@ function oneEnded(n, ch, code, sig, err, end) {
 	const c2 = kids[n];
 	const tell = (line) => { if (alive(c2) && c2.stdin && !c2.stdin.destroyed) { try { c2.stdin.write(`${line}\n`); return true; } catch (e) { /* gone */ } } return false; };
 	// (the plan past its count, when it was on: the launch's --steer is the late field's)
-	if (cur && cur.pastOn && cur.past && cur.past.file) tell(`steer ${cur.past.file}`);
+	if (cur && cur.pastOn && cur.dpFile && tell(`steer ${cur.dpFile}`)) V.sgMin = 1;
 	// (a stall escape running: the new search parks its share of the workers again, as escLaunch told the old one)
 	if (esc && esc.run && esc.run.mainKeep) tell(`workers ${esc.run.mainKeep}`);
 	const feed = [];
@@ -3448,7 +3529,7 @@ function closer(ev, n) {
 	if (!Number.isFinite(dist) || dist >= 2e4) { if (own) attemptSource(n, own); return; }
 	// (past the plan: the CPU search measures by the plan past its count, the GPU tools by the field; one measure for the
 	// nearest: the CPU search's, into whose archive every other strategy's attempts go anyway)
-	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= 1))) { if (own) attemptSource(n, own); return; }
+	if (cur.pastOn && (!Vn.cpu || !(ev.sg >= (Vn.sgMin || 1)))) { if (own) attemptSource(n, own); return; }
 	if (stale) return;
 	const cut = !!ev.cut || dist >= 1e4;
 	// (a nearest attempt in a cul-de-sac of its room (old.cul, see CUL_ROOMS) gives way to any attempt outside one: the

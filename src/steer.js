@@ -944,6 +944,15 @@ function buildSteer(level, opts) {
 	const bodyBytes = A.N * BODY_BYTES_TILE;
 	const maxLayers = Math.max(1, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / bodyBytes / (A.feats.has('fx') ? 2 : 1))));
 	let over = null;
+	// (opts.features: modelled from the start, each while the layers stay within the cap: the coin plan of a level whose
+	// walk plan passes no coin door (editor.js, the coin stall: the steer field models no coins, so no DP), whose own
+	// counterexample never names the coins)
+	for (const k of opts.features || []) {
+		if (!A.feats.has(k) || modeled.has(k)) continue;
+		const trial = new Set(modeled).add(k);
+		if (makeModel(A, trial).S <= maxLayers) modeled.add(k);
+		else if (!over) over = `${k}: over ${maxLayers} layers`;
+	}
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
