@@ -12,6 +12,15 @@
 //              dominated, equal = the same group (the time doors' two states), incomparable masks both maximal
 //   search     goexplore.js on a switch corridor: the route with --dom=1 and --dom=0, dominated groups counted, no death
 //              kept into a dominated room (the pit of test/deaths.js still routes through its death)
+//   deaths     the death counts' key words (roomOf, EEAT_DEATHKEY=0 = the raw counts as before): raw up to the highest
+//              death door / gate threshold T, one word from there (main's own key up to T): gates at 1 and 10: deaths
+//              0..9 ten rooms, 10+ one; a door at 3 + a gate at 10 the same; a door at 12 above gates at 1 and 10: 0..11
+//              twelve rooms (a door counts); a door at 3 alone: 0, 1, 2, 3+; the shown count raw below T; exactness on
+//              all four levels (one key = one state of every death door and gate, and one key again after a death, a
+//              tick's start and a reset: a bisimulation over (deaths, shown) in 0..T+4; no two counts below T share a
+//              key); byTrigger / dom follow; the legacy key and the knob off keep the raw counts; the soundness review's
+//              toy (a bridge of death gates at 3 over spikes, 112d4b0 0 of 8 seeds): a route through 3 deaths on seed 1,
+//              the same first route after the same simulated ticks as EEAT_DEATHKEY=0
 //   bursts     the GPU bursts' target test: a touch that only turns a mono switch off is no target (bursts.js infoOf via a
 //              stand-in create); roomAim likewise
 // usage: node test/rooms.js      Exit code 1 if any check fails. Writes only in a temp folder.
@@ -41,7 +50,7 @@ const section = (s) => console.log(`\n== ${s}`);
 // d coin door (1), 1 / 2 / 3 purple switches 1 / 2 / 3, e / f purple doors 1 / 2, g purple gate 3, 7 a purple switch no
 // door reads, k crown
 const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], D: [213, 2], G: [214, 2], d: [43, 1], 1: [113, 1], 2: [113, 2],
-	3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 3], 7: [113, 7], k: [5] };
+	3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 3], 7: [113, 7], k: [5], h: [1012, 1], H: [1012, 10], j: [1012, 3], q: [1011, 3], Q: [1011, 12], t: [156] };
 function levelOf(name, rows) {
 	const cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') { if (!ID[ch]) throw new Error(`legend ${ch}`); cells.push([x, y, ...ID[ch]]); } }));
@@ -266,6 +275,121 @@ function sectionSearch() {
 	check('the pit: a route through its death with --dom=1 (the default)', res.length > 0 && res[0].deaths >= 1, res.length ? `${res[0].ticks} ticks, ${res[0].deaths} death(s)` : 'none');
 }
 
+// death gates at 1 and 10 (h, H) off the corridor, a checkpoint and a spike: no door
+const DGATES = [
+	'############',
+	'#S.C..x...T#',
+	'#.######h#H#',
+	'############',
+];
+// a death door at 3 (q) and a gate at 10; a door at 12 (Q) above gates at 1 and 10; a door at 3 alone
+const DDOOR = DGATES.map((r, y) => (y === 2 ? '#.######q#H#' : r));
+const DHIGH = DGATES.map((r, y) => (y === 2 ? '#.####Q#h#H#' : r));
+const DONLY = DGATES.map((r, y) => (y === 2 ? '#.######q###' : r));
+// the soundness review's toy (cw-death-rooms, 2026-09-29; its gatefloor.js): the only way to the trophy is a bridge of death
+// gates at 3 (j) over spikes, open until 3 deaths; a checkpoint by the spawn; a time door sealed in the wall (t: the room
+// key carries the clock's phase, as on the levels where deathPays' earliest arrival per room keeps the climbing deaths)
+const BRIDGE = [
+	'.'.repeat(38),
+	'S.C.....' + '.'.repeat(20) + '.....T....',
+	'########' + 'j'.repeat(20) + '##########',
+	'########' + '.'.repeat(20) + '##########',
+	'########' + 'x'.repeat(20) + '##########',
+	't' + '#'.repeat(37),
+].map((r) => `#${r}#`);
+BRIDGE.unshift('#'.repeat(40)); BRIDGE.push('#'.repeat(40));
+/** the death readers' states (true = passable) for a count and a shown count: the engine's own door / gate switch */
+function readers(L, sim, d, s) {
+	sim.deaths = d; sim._show_death_gate = s;
+	let sig = '';
+	for (let i = 0; i < L.width * L.height; i++) { const id = L.fg[i]; if (id === 1011 || id === 1012) sig += sim._doorPassable(id, i) ? '1' : '0'; }
+	return sig;
+}
+/** the key's partition of (deaths, shown) in 0..N x 0..N is exact: one key = one readers' state, and one key again after
+ *  every step the engine takes on the two counts (a death: d + 1; a tick's start: the shown count = the count; a
+ *  reset: d = 0), so no two states of one key ever differ at a reader (a bisimulation); and no two counts below the
+ *  highest threshold share a key (no class merge below a door or a gate) */
+function exactness(L, RM, top, N) {
+	const sim = new E.EESim(L); sim.reset();
+	const key = (d, s) => { sim.deaths = d; sim._show_death_gate = s; return RM.key(sim); };
+	const cls = new Map();
+	let viol = 0, steps = 0, merged = 0;
+	for (let d = 0; d <= N; d++) for (let s = 0; s <= N; s++) {
+		const k = key(d, s), sig = readers(L, sim, d, s), succ = [key(d + 1, s), key(d, d), key(0, s)].join(',');
+		const c = cls.get(k);
+		if (c === undefined) cls.set(k, { sig, succ });
+		else { if (c.sig !== sig) viol++; if (c.succ !== succ) steps++; }
+	}
+	const low = new Set(); for (let d = 0; d < top; d++) low.add(key(d, d));
+	merged = top - low.size;
+	return { keys: cls.size, viol, steps, merged };
+}
+function toyRun(file, seed, knobOff) {
+	const env = { ...process.env }; if (knobOff) env.EEAT_DEATHKEY = '0'; else delete env.EEAT_DEATHKEY;
+	const r = spawnSync(process.execPath, [GOX, file, '--cells=coarse', '--workers=1', '--first=1', '--seconds=300', '--maxTicks=16000000', `--seed=${seed}`],
+		{ encoding: 'utf8', maxBuffer: 1 << 28, timeout: 400000, env });
+	const ev = String(r.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return {}; } });
+	const res = ev.find((e) => e.ev === 'result'), done = ev.find((e) => e.ev === 'done') || {};
+	return { res, done, first: done.first ? `${done.first.ticks} ticks after ${done.first.simTicks} simulated` : 'none', rooms: ((done.workers || [])[0] || {}).rooms };
+}
+function sectionDeaths() {
+	section("deaths: the count raw below the highest death door / gate threshold, one word from there (EEAT_DEATHKEY=0: raw)");
+	const A = levelOf('dgates', DGATES).level;
+	check('the gate level: death gates, no death door (hasDeathDoor is doors or gates)', A.hasDeathDoor && A.hasDeathGate && ![...A.fg].includes(1011));
+	const RM = GX.roomOf(A), LG = GX.roomOf(A, { legacy: true });
+	const sim = new E.EESim(A); sim.reset();
+	const at = (n) => { sim.deaths = n; sim._show_death_gate = n; return { k: RM.key(sim), d: RM.desc(sim), l: LG.key(sim), c: RM.cause(sim), m: RM.dom(sim).cls }; };
+	const v = []; for (let n = 0; n <= 14; n++) v.push(at(n));
+	check("gates at 1 and 10: deaths 0..9 ten rooms ('deaths=N'), 10..14 one ('deaths>=10')",
+		new Set(v.slice(0, 11).map((x) => x.k)).size === 11 && v.slice(0, 10).every((x, n) => x.d === `deaths=${n}`) && v.slice(10).every((x) => x.k === v[10].k && x.d === 'deaths>=10'),
+		v.map((x) => x.d).join(','));
+	check("main's own key up to the highest threshold (= the legacy key here: no switch, no counter), one key past it",
+		v.slice(0, 11).every((x) => x.k === x.l) && v.slice(11).every((x) => x.k !== x.l));
+	check('the desc is a function of the key (one desc per key)', (() => { const m = new Map(); return v.every((x) => { if (!m.has(x.k)) m.set(x.k, x.d); return m.get(x.k) === x.d; }); })());
+	check('every death below the highest threshold changes the room by a trigger, none past it (cause / byTrigger)',
+		v.slice(0, 10).every((x, n) => RM.byTrigger(x.c, v[n + 1].c)) && !RM.byTrigger(v[10].c, v[11].c) && !RM.byTrigger(v[12].c, v[14].c));
+	check('the dominance class follows (dom cls)', new Set(v.slice(0, 11).map((x) => x.m)).size === 11 && v.slice(10).every((x) => x.m === v[10].m));
+	check("the legacy key (the GPU's): the raw count, 15 keys for 0..14", new Set(v.map((x) => x.l)).size === 15);
+	// the shown count (kept while the ball overlaps a gate): raw below the highest gate, one word from there
+	sim.deaths = 12; const sk = (s) => { sim._show_death_gate = s; return RM.key(sim); };
+	check('the shown count: raw below the highest gate (3 and 5 two words), one word from it (10 = 12 = 14)', sk(3) !== sk(5) && sk(10) === sk(12) && sk(12) === sk(14) && sk(9) !== sk(10));
+	const D = levelOf('ddoor', DDOOR).level, H = levelOf('dhigh', DHIGH).level, O = levelOf('donly', DONLY).level;
+	const words = (L2, n) => { const R2 = GX.roomOf(L2), s2 = new E.EESim(L2); s2.reset(); const w = []; for (let d = 0; d <= n; d++) { s2.deaths = d; s2._show_death_gate = d; w.push([R2.key(s2), R2.desc(s2)]); } return w; };
+	const split = (w, T) => new Set(w.slice(0, T + 1).map((x) => x[0])).size === T + 1 && w.slice(T).every((x) => x[0] === w[T][0] && x[1] === `deaths>=${T}`) && w.slice(0, T).every((x, n) => x[1] === `deaths=${n}`);
+	const wD = words(D, 14), wH = words(H, 16), wO = words(O, 8);
+	check('a death door at 3 and a gate at 10: deaths 0..9 ten rooms, 10+ one', split(wD, 10), wD.map((x) => x[1]).join(','));
+	check('a death door at 12 above gates at 1 and 10: deaths 0..11 twelve rooms (a door is a threshold too), 12+ one', split(wH, 12), wH.map((x) => x[1]).join(','));
+	check('a death door at 3 alone (no gate, no shown-count word): deaths 0, 1, 2 three rooms, 3+ one', !O.hasDeathGate && split(wO, 3), wO.map((x) => x[1]).join(','));
+	// exactness on all four levels: the readers' states and the counts' steps agree within every key; no merge below the top
+	for (const [nm, L2, top] of [['gates 1, 10', A, 10], ['door 3, gate 10', D, 10], ['door 12, gates 1, 10', H, 12], ['door 3', O, 3]]) {
+		const x = exactness(L2, GX.roomOf(L2), top, top + 4);
+		check(`exact (${nm}): one key = one state of every death door and gate, now and after a death / a tick / a reset; no merge below ${top}`,
+			x.viol === 0 && x.steps === 0 && x.merged === 0, JSON.stringify(x));
+	}
+	// the knob off: the raw count (= the legacy key here: no switch, no counter)
+	process.env.EEAT_DEATHKEY = '0';
+	const off = [A, D, H, O].map((L2) => [L2, GX.roomOf(L2)]);
+	delete process.env.EEAT_DEATHKEY;
+	let same = true, descs = true;
+	for (const [L2, R0] of off) {
+		const LG2 = GX.roomOf(L2, { legacy: true }), s2 = new E.EESim(L2); s2.reset();
+		for (let d = 0; d <= 16; d++) for (const s of [0, d, 16]) {
+			s2.deaths = d; s2._show_death_gate = s;
+			if (R0.key(s2) !== LG2.key(s2)) same = false;
+			if (R0.desc(s2) !== `deaths=${d}`) descs = false;
+		}
+	}
+	check("EEAT_DEATHKEY=0: the raw counts (main's keys: = the legacy key here; desc 'deaths=N')", same && descs);
+	// the soundness review's toy (goexplore.js, coarse cells, 1 worker, 16 M ticks at most): the first route through its 3
+	// deaths, the SAME search as main's raw key (EEAT_DEATHKEY=0): every count it meets is at most the highest threshold,
+	// where the words are main's (112d4b0 routed it in 0 of 8 seeds, main in 4 of 8)
+	const { file: fb } = levelOf('bridge3', BRIDGE);
+	const b1 = toyRun(fb, 1, false), b0 = toyRun(fb, 1, true);
+	check('the bridge of death gates at 3 (seed 1): a route through 3 deaths, replayed', !!(b1.res && b1.res.deaths === 3), b1.first);
+	check('the bridge: the same first route after the same simulated ticks as the raw key (EEAT_DEATHKEY=0)',
+		!!(b1.res && b0.res && b1.res.inputs === b0.res.inputs && b1.done.first.simTicks === b0.done.first.simTicks && b1.rooms === b0.rooms), `${b1.first} / ${b0.first}`);
+}
+
 function sectionBursts() {
 	section('bursts: a touch that only turns a mono switch off is no target');
 	const L = levelOf('sw2', SW.map((r) => r.padEnd(14, '#'))).level;
@@ -318,6 +442,7 @@ function sectionKnob() {
 sectionRelevance();
 sectionReaders();
 sectionSearch();
+sectionDeaths();
 sectionBursts();
 sectionKnob();
 console.log(`\n${pass} passed, ${fail} failed`);
