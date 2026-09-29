@@ -131,6 +131,43 @@ function sectionA() {
 	secretWall();
 	timeDoors();
 	keyExpiry();
+	legKeys();
+}
+/** LEG KEYS (steer.js carryLegsOf): the coin DP's legs carry the key state. A corridor: the red key left of the spawn, a
+ *  red key DOOR (23: open while the key is on) and a red key GATE (26: shut while it is on) to the right, then two coins, a
+ *  2-coin door and the trophy: the way takes the key, passes the door, waits at the gate for the key to run out and takes
+ *  the coins. The plan's DP builds its legs in the layer before its first coin (key off): the door shut and the key tile a
+ *  sink in the leg's copy, so no leg had a value at the start and the steer none at all (below 2 coins the layer fields
+ *  have no way: the coins are the DP's). With the legs carried: a value at the start that counts the key's detour; the
+ *  knob EEAT_LEGKEYS=0 (and legKeys false) the file of before; a level whose DP has a start value (the coin room) the same
+ *  file either way */
+function legKeysLevel() {
+	const W = 50, H = 7, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9], [20, y, 23], [24, y, 26], [40, y, 43, 2]);
+	// (the coins two rows up, off the floor: the walk plan passes the coin door without them, so the coins are modelled)
+	cells.push([2, H - 2, 6], [12, H - 2, 255], [30, H - 4, 100], [34, H - 4, 100], [45, H - 2, 121]);
+	return levelOf(ED.eelvlOf({ name: 'lk', width: W, height: H, cells }));
+}
+function legKeys() {
+	const L = legKeysLevel();
+	const at = (o) => { const st = SF.buildSteer(L, o); const sim = new E.EESim(L); sim.reset(); return { st, v: SF.steerAt(st, sim) }; };
+	const off = at({ legKeys: false }), on = at({ legKeys: true });
+	const r0 = R.costAt(R.reachField(L), (() => { const s = new E.EESim(L); s.reset(); return s; })());
+	const lk = on.st.info.legKeys || {};
+	check('leg keys: the coin DP\'s legs across a key and its gate (no steer value at the start before; with the legs carried a value that counts the key\'s detour, the DP\'s)',
+		!!off.st.dp && !Number.isFinite(off.v) && !!on.st.dp && Number.isFinite(on.v) && on.v > r0 + 15 && lk.used === true && lk.carried > 0,
+		`before ${off.v} (DP ${off.st.dp ? off.st.dp.n : 0}), carried ${on.v} (reach ${r0}; legKeys ${JSON.stringify(lk)})`);
+	const prev = process.env.EEAT_LEGKEYS;
+	process.env.EEAT_LEGKEYS = '0';
+	const knob = SF.steerFileBytes(SF.buildSteer(L), null, true);
+	if (prev === undefined) delete process.env.EEAT_LEGKEYS; else process.env.EEAT_LEGKEYS = prev;
+	check('leg keys: EEAT_LEGKEYS=0 builds the file of before (legKeys false), byte for byte; unset: the carried one',
+		Buffer.compare(knob, SF.steerFileBytes(off.st, null, true)) === 0 && Buffer.compare(knob, SF.steerFileBytes(on.st, null, true)) !== 0);
+	const Lc = levelOf(ROOMS.coins.buf);
+	const a = SF.buildSteer(Lc, { legKeys: true }), b = SF.buildSteer(Lc, { legKeys: false });
+	check('leg keys: a coin DP with a value at the start (the coin room) builds the same file either way (nothing carried)',
+		!!a.dp && !a.info.legKeys && Buffer.compare(SF.steerFileBytes(a, null, true), SF.steerFileBytes(b, null, true)) === 0);
 }
 
 /** a 40 x 7 corridor, the spawn at x 5, the trophy at x 30, full-height columns of the given ids from x 20 on */
@@ -303,6 +340,8 @@ function sectionB() {
 	section('B agree: the JS lookup = eegpu steertest');
 	if (!toolOk) { console.log(`  (skipped: ${toolPath ? `${toolPath} has no steertest (older than the app: rebuild it, node tools/build-native.js)` : 'no native tool'})`); return; }
 	Object.entries(ROOMS).forEach(([name, r], k) => { const L = levelOf(r.buf); agree(name, L, SF.buildSteer(L), randomRuns(k, 6, 600)); });
+	// (the carried coin legs, LEG KEYS: the DP's bodies in the GPU file)
+	{ const L = legKeysLevel(); const st = SF.buildSteer(L, { legKeys: true }); if (st.info.legKeys && st.info.legKeys.used) agree('leg keys', L, st, randomRuns(7, 6, 900)); else check('leg keys: the carried DP built', false); }
 	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
 	let ids = [];
 	try { ids = fs.readdirSync(jobs).filter((d) => fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'best.eetas'))); } catch (e) { /* no jobs */ }
