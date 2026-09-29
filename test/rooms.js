@@ -99,23 +99,39 @@ function sectionRelevance() {
 	check('the door pocket: no gate, nothing keyed up to one (upTo 0)', r.upTo.blue === 0 && r.upTo.gold === 0, JSON.stringify(r.upTo));
 	const G = levelOf('pocket_gate', POCKET_GATE).level, rg = GX.counterRelevance(G);
 	check('the gate pocket: blue irrelevant, keyed up to its gate at 2', rg.blue === false && rg.upTo.blue === 2 && /gates at 2/.test(rg.why.blue), JSON.stringify(rg));
-	const RG = GX.roomOf(G), sg = new E.EESim(G); sg.reset();
-	// (a second tick: the gates' shown count follows the count a tick later, eesim.js _show_blue_coin_gate)
-	const touchG = (x, y) => { touch(G, sg, x, y); sg.tick(new E.EEInput()); };
-	const g0 = RG.key(sg);
-	touchG(3, 1);
-	const g1 = RG.key(sg), gd1 = RG.desc(sg);
-	check('there one blue coin (toward the gate) is another room', sg.blue_coins === 1 && g1 !== g0 && /bluecoins=1/.test(gd1), `'${gd1}'`);
-	touchG(6, 1);
-	const g2 = RG.key(sg), gd2 = RG.desc(sg);
-	check('two (the gate shuts): another room', sg.blue_coins === 2 && g2 !== g1 && g2 !== g0 && /bluecoins>=2/.test(gd2), `'${gd2}'`);
-	touchG(8, 1);
-	check('three (past the gate, no threshold above): the same room as two', sg.blue_coins === 3 && RG.key(sg) === g2, RG.desc(sg));
+	// (the gate cell, the default: the count below the gate is a word of the coarse cell (roomOf gate.word), the room is
+	// keyed by the thresholds met; EEAT_GATECELL=0: the count in the room key, as c7623ee had it)
+	const gateRooms = (gc) => {
+		const was = process.env.EEAT_GATECELL;
+		if (gc) delete process.env.EEAT_GATECELL; else process.env.EEAT_GATECELL = '0';
+		try {
+			const RG = GX.roomOf(G), sg = new E.EESim(G); sg.reset();
+			// (a second tick: the gates' shown count follows the count a tick later, eesim.js _show_blue_coin_gate)
+			const touchG = (x, y) => { touch(G, sg, x, y); sg.tick(new E.EEInput()); };
+			const o = { gate: RG.gate, keys: [RG.key(sg)], descs: [RG.desc(sg)], words: [RG.gate ? RG.gate.word(sg) : null] };
+			for (const x of [3, 6, 8]) { touchG(x, 1); o.keys.push(RG.key(sg)); o.descs.push(RG.desc(sg)); o.words.push(RG.gate ? RG.gate.word(sg) : null); }
+			o.blue = sg.blue_coins;
+			return o;
+		} finally { if (was === undefined) delete process.env.EEAT_GATECELL; else process.env.EEAT_GATECELL = was; }
+	};
+	const oc = gateRooms(false);
+	check('EEAT_GATECELL=0 (c7623ee): one blue coin (toward the gate) is another room', oc.keys[1] !== oc.keys[0] && /bluecoins=1/.test(oc.descs[1]) && oc.gate === null, `'${oc.descs[1]}'`);
+	check('... two (the gate shuts): another room; three (past the gate, no threshold above): the same room as two',
+		oc.keys[2] !== oc.keys[1] && oc.keys[2] !== oc.keys[0] && /bluecoins>=2/.test(oc.descs[2]) && oc.keys[3] === oc.keys[2] && oc.blue === 3, oc.descs.join(' | '));
+	const og = gateRooms(true);
+	check('the gate cell (default): one blue coin is the same ROOM (the thresholds met) and another cell word (0 -> 1)',
+		og.gate !== null && og.gate.upB === 2 && og.keys[1] === og.keys[0] && og.words[0] === 0 && og.words[1] === 1 && !/bluecoins=/.test(og.descs[1]), `${og.descs.join(' | ')} words ${og.words.join(',')}`);
+	check('... two (the gate shuts): another room, word 2; three: the room of two, the word capped at the gate (2)',
+		og.keys[2] !== og.keys[0] && /bluecoins>=2/.test(og.descs[2]) && og.words[2] === 2 && og.keys[3] === og.keys[2] && og.words[3] === 2, `${og.descs.join(' | ')} words ${og.words.join(',')}`);
+	check('... the legacy key (the GPU\'s) has no gate cell', GX.roomOf(G, { legacy: true }).gate === null);
+	const gd1 = oc.descs[1], gd2 = oc.descs[2];
 	// the wall breaker's progress order (editor.js breakStarts: coinsOf for its attempts, coinsOfDesc for the rooms'
 	// starts) reads the count the key reads: the room past the gate ranks at the gate's count, at or above the rooms below
 	// it (the n3 soundness review: coinsOfDesc read 'bluecoins>=2' as 0, behind 'bluecoins=1' and the start room)
-	const ord = ['', gd1, gd2, RG.desc(sg)].map((d) => ED.coinsOfDesc(d, G));
+	const ord = ['', gd1, gd2, oc.descs[3]].map((d) => ED.coinsOfDesc(d, G));
 	check('the breaker\'s order by the rooms\' descriptions (coinsOfDesc with the level): the start 0, one coin 1, past the gate 2 (the gate\'s count), three coins 2', ord.join(',') === '0,1,2,2', `${ord.join(',')} for '${gd1}' '${gd2}'`);
+	const ordg = og.descs.map((d) => ED.coinsOfDesc(d, G));
+	check('... with the gate cell the rooms below the gate are one (0) and past it the gate\'s count', ordg.join(',') === '0,0,2,2', `${ordg.join(',')} for ${og.descs.join(' | ')}`);
 	check('... a door pocket (no gate: its thresholds are no progress) 0 as before, and without the level only coins=N counts',
 		ED.coinsOfDesc(d2, A) === 0 && ED.coinsOfDesc('bluecoins=1') === 1 && ED.coinsOfDesc('coins=2 bluecoins>=2') === 2, `${ED.coinsOfDesc(d2, A)} ${ED.coinsOfDesc('bluecoins=1')} ${ED.coinsOfDesc('coins=2 bluecoins>=2')}`);
 	const B = levelOf('pocket_cp', POCKET_CP).level;
@@ -230,6 +246,31 @@ function sectionSearch() {
 	const ev = gox(pit, ['--cells=coarse', '--workers=1', '--seconds=20', '--first=1']);
 	const res = ev.filter((e) => e.ev === 'result');
 	check('the pit: a route through its death with --dom=1 (the default)', res.length > 0 && res[0].deaths >= 1, res.length ? `${res[0].ticks} ticks, ${res[0].deaths} death(s)` : 'none');
+	// the gate bridge (the gate cell, n3-gate-rule-losses): a spike pit whose only bridge is a row of blue gates at 2 (shut,
+	// they are the floor), one blue coin left of the spawn (a detour back) and one on the way: blue is irrelevant to the walk
+	// (the gates close a pocket of nothing), keyed up to the gates at 2. The thresholds-met key drops every one-coin state
+	// at the cells a coinless state reached first, so the detour's lineage dies (c30f499 / EEAT_UPTO=0: no route); the gate
+	// cell keeps it as a cell of its own (its count a word of the cell), the rooms by the thresholds met
+	const WB = 64, padB = (s) => s + '#'.repeat(WB - s.length);
+	const BRIDGE = [
+		'#'.repeat(WB), padB('#' + '.'.repeat(WB - 2)), padB('#' + '.'.repeat(WB - 2)),
+		padB('#b' + '.'.repeat(14) + 'S' + '.'.repeat(6) + 'b' + '.'.repeat(WB - 27) + 'T.'),
+		padB('#'.repeat(26) + 'G'.repeat(26)), padB('#'.repeat(26) + '.'.repeat(26)), padB('#'.repeat(26) + 'x'.repeat(26)), '#'.repeat(WB),
+	];
+	const { file: bridge, level: BL } = levelOf('gate_bridge', BRIDGE);
+	const rb = GX.counterRelevance(BL);
+	check('the gate bridge: blue irrelevant to the walk, keyed up to its gates at 2', rb.blue === false && rb.upTo.blue === 2, JSON.stringify(rb.upTo));
+	const runB = (env) => {
+		const r = spawnSync(process.execPath, [GOX, bridge, '--cells=coarse', '--workers=1', '--maxTicks=4000000', '--mem=400', '--first=1', '--seed=1'],
+			{ encoding: 'utf8', maxBuffer: 1 << 28, timeout: 120000, env: Object.assign({}, process.env, env) });
+		const evs = String(r.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return {}; } });
+		return { res: evs.filter((e) => e.ev === 'result'), done: evs.find((e) => e.ev === 'done') || {} };
+	};
+	const bg = runB({}), bu = runB({ EEAT_UPTO: '0' });
+	check('the gate cell (default): a route over the shut gates within 4 M ticks, states dominated by a cell with more coins counted (gateDom)',
+		bg.res.length > 0 && (bg.done.gateDom || 0) > 0, bg.res.length ? `${bg.res[0].ticks} ticks, gateDom ${bg.done.gateDom}, ${bg.done.ticks} simulated` : `none, ${bg.done.ticks} simulated`);
+	check('... the thresholds-met key (EEAT_UPTO=0, c30f499): none in the same 4 M ticks (the coin detour\'s lineage dropped)',
+		bu.res.length === 0, bu.res.length ? `a route of ${bu.res[0].ticks} ticks` : `none, ${bu.done.ticks} simulated`);
 }
 
 function sectionBursts() {
