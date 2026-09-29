@@ -819,8 +819,16 @@ function descend(f, st0, maxSteps = 50000) {
 	return path;
 }
 /** the layered physics field's own plan from a sim state: the tiles it passes */
-function layeredPlan(PH, sim, maxLegs = 200) {
+function layeredPlan(PH, sim, maxLegs = 200, opts) {
 	const A = PH.A, M = PH.M;
+	// (opts.walkOff, the leg CEGAR's (buildSteer): a leg that ends on a toggle (a tile that changes the next layer back,
+	// a goal of its field too: a purple switch) starts the next one from the tile's best neighbour in the next layer's
+	// field, not from the toggle's own goal state: there the descent stops at once (the goal is a sink) and the plan
+	// pressed the same switch again and again. Endeavor: the physics plan from the start pressed switch 8 at (85, 198)
+	// 200 times, never walked on, and its CEGAR saw no gate past it (psw:8 alone modelled); a (tile, layer) the plan
+	// began a leg at before ends it ('loop'))
+	const walkOff = !!(opts && opts.walkOff);
+	const began = walkOff ? new Set() : null;
 	let s = M.layerOf(sim);
 	let f = PH.fields[s];
 	const tiles = [], legs = [], expAt = new Map();
@@ -851,6 +859,21 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 		s = best.s2; f = PH.fields[s];
 		if (f.mode === 'walk' || !f._m) { why = 'walk layer'; break; }
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
+		if (walkOff && PH.goals[s] && PH.goals[s][end.t]) {
+			// (the toggle: the neighbour with the least F(0) cost in this layer's field that is no goal of it)
+			const x = end.t % A.W, y = (end.t - x) / A.W;
+			let nb = null;
+			for (let di = 0; di < 8; di++) {
+				const x2 = x + DX8[di], y2 = y + DY8[di];
+				if (x2 < 0 || y2 < 0 || x2 >= A.W || y2 >= A.H) continue;
+				const t2 = y2 * A.W + x2;
+				if (PH.goals[s][t2]) continue;
+				const c2 = f._m.costOf(t2, RF.F_, 0);
+				if (c2 !== CUT && (!nb || c2 < nb.c)) nb = { t: t2, ty: RF.F_, l: 0, c: c2 };
+			}
+			if (nb) { tiles.push(nb.t); cur = nb; }
+		}
+		if (walkOff) { const k = `${cur.t},${s}`; if (began.has(k)) { why = 'loop'; break; } began.add(k); }
 	}
 	return { tiles, legs, expAt, end: why };
 }
@@ -1571,7 +1594,7 @@ function buildSteer(level, opts) {
 			PH = buildPhysics(B, { staticCoins: true, debug: true, memo });
 			if (memoMode === 'same') saved += PH.memoSavedMs;
 			const sim = new E.EESim(level); sim.reset();
-			const pl = layeredPlan(PH, sim);
+			const pl = layeredPlan(PH, sim, 200, { walkOff: !!legOn });
 			const path = [];
 			for (let i = 0; i < pl.tiles.length; i++) {
 				const t = pl.tiles[i];
