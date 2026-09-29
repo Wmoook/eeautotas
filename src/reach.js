@@ -122,6 +122,18 @@ function neverOpenDoors(level) {
 	}
 	return out;
 }
+/** the class of block id as the ball's current tile (the field's tile classes; flags = guideFlags(level)) */
+function classOfId(flags, gMox, gMoy, id) {
+	if (id < 0 || id >= flags.length) return NORM;
+	if ((flags[id] & F_CLIMB) !== 0) return CLIMB;
+	if (id === 116) return BUP;
+	if (id === 117) return BDOWN;
+	if (id === 119) return WATER;
+	if (id === 369 || id === 416) return MUD;
+	if (gMox[id] !== 0 || id === 4 || id === 414 || id === 114 || id === 115) return DOTS;
+	if (gMoy[id] < 0) return UP;
+	return NORM;
+}
 const LOWER = 1, RIGHT = 2;                   // half blocks the centre can be in (on the edge): lower half, right half
 // the field classes' upward pull (the largest -modifier of their ids, input held) and terminal speeds (px/tick)
 const A_CLASS = [0, 0, 0, 1 / MULT, 1 / MULT, 1.5 / MULT, 0.8 / MULT, 2 / MULT, 0, 0];
@@ -241,17 +253,7 @@ function reachField(level, opts) {
 	for (let i = 0; i < N; i++) { const hc = hcur(i); curOf[i] = hc === 1 ? (i >= W ? i - W : -1) : hc === 0 ? (i % W > 0 ? i - 1 : -1) : i; }
 	const kills = (i) => i >= 0 && (gF[fg[i]] & 4) !== 0;
 	const isWallId = (id) => (fl(id) & F_SOLID) !== 0 && (fl(id) & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0;
-	const gclass = (id) => {
-		if (id < 0 || id >= nFlags) return NORM;
-		if ((flags[id] & F_CLIMB) !== 0) return CLIMB;
-		if (id === 116) return BUP;
-		if (id === 117) return BDOWN;
-		if (id === 119) return WATER;
-		if (id === 369 || id === 416) return MUD;
-		if (gMox[id] !== 0 || id === 4 || id === 414 || id === 114 || id === 115) return DOTS;
-		if (gMoy[id] < 0) return UP;
-		return NORM;
-	};
+	const gclass = (id) => classOfId(flags, gMox, gMoy, id);
 	const wallAt = (i) => { const hr = hgeo(i); return isWallId(fg[i]) || hr === 2 || hr === 3; };
 	// ---- protection: a protected ball passes killing tiles (nothing kills it), but it is protected only on its way from a
 	// protection tile: the tiles a protected ball can be in (protP) are the 8-way walk from the "on" tiles through every tile
@@ -391,6 +393,9 @@ function reachField(level, opts) {
 	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
+	// the field transit tables (the n3 rise-exit-apex fix: ORDERING fields only, see exitApexOn; on ice only the classes
+	// whose drag the engine takes before the ice's: segTablesOf)
+	const XA = exitApexOn(opts) ? exitApexTab() : null;
 	const trophy = (i) => fg[i] === TROPHY && passable(i);
 
 	// ---- goals (explore.js --hunt): tile -> cost in fifths
@@ -449,21 +454,22 @@ function reachField(level, opts) {
 	// row segments of normal and field tiles; with a field: its push, top speed, pull and exit table are the strongest of
 	// its fields (a ball can go sideways from one to the other in the row); normal tiles in it hold XR states
 	const segOf = new Uint8Array(N);
-	const segKey = new Map(), segPush = [0], segCap = [0], segA = [0], segRd = [0];
+	const segKey = new Map(), segPush = [0], segCap = [0], segA = [0], segRd = [0], segMask = [0];
 	for (let y = 0; y < H; y++) {
 		for (let x = 0; x < W;) {
 			const i0 = y * W + x;
 			if (cls[i0] !== NORM && !isField(cls[i0])) { x++; continue; }
-			let x1 = x, A = 0, cap = 0, rd = 0, any = false;
+			let x1 = x, A = 0, cap = 0, rd = 0, any = false, mask = 0;
 			while (x1 < W && (cls[y * W + x1] === NORM || isField(cls[y * W + x1]))) {
 				const c = cls[y * W + x1];
-				if (isField(c)) { any = true; A = Math.max(A, A_CLASS[c]); cap = Math.max(cap, CAP_CLASS[c]); if (c === UP || c === WATER) rd = 1; }
+				if (isField(c)) { any = true; A = Math.max(A, A_CLASS[c]); cap = Math.max(cap, CAP_CLASS[c]); if (c === UP || c === WATER) rd = 1; mask |= 1 << c; }
 				x1++;
 			}
 			if (any) {
-				const key = `${A}|${cap}|${rd}`;
+				// (with the transit tables the row's field classes too: dots and a chain share A and cap, not their tables)
+				const key = XA !== null ? `${A}|${cap}|${rd}|${mask}` : `${A}|${cap}|${rd}`;
 				let s = segKey.get(key);
-				if (s === undefined) { s = segPush.length; segKey.set(key, s); segPush.push(32 * A); segCap.push(cap); segA.push(A); segRd.push(rd); }
+				if (s === undefined) { s = segPush.length; segKey.set(key, s); segPush.push(32 * A); segCap.push(cap); segA.push(A); segRd.push(rd); segMask.push(mask); }
 				if (s > 255) throw new Error('reach: too many segment kinds');
 				for (let k = x; k < x1; k++) segOf[y * W + k] = s;
 			}
@@ -529,7 +535,7 @@ function reachField(level, opts) {
 		if (p === undefined) {
 			p = prof.length; profKey.set(key, p);
 			const s = segOf[i];
-			prof.push({ ow: owOf[i], cls: cls[i], sp: sp[i], lowWall: lowWall[i], lj: lj[i], xrOK: xrOK(i) ? 1 : 0, push: segPush[s], cap: segCap[s], A: segA[s], rd: segRd[s], rc: cls[i] === BUP ? rcT[i] : INF });
+			prof.push({ ow: owOf[i], cls: cls[i], sp: sp[i], lowWall: lowWall[i], lj: lj[i], xrOK: xrOK(i) ? 1 : 0, push: segPush[s], cap: segCap[s], A: segA[s], rd: segRd[s], rc: cls[i] === BUP ? rcT[i] : INF, seg: s });
 		}
 		pid[i] = p;
 	}
@@ -538,12 +544,23 @@ function reachField(level, opts) {
 	const Pexit = (P, v) => v + interp(P.rd ? T.RD : T.RC, v);          // a field's exit: the centre's apex above the row's top edge
 	// (XR: its apex by the exit table of its row's fields: the queue holds one of them; the +v margin covers one tick of another
 	// kind's pull left from the row below)
-	const enterR = (P2, e, emit) => {
+	// (the transit tables, XA: per row segment the largest of its field classes' tables, like its push and top speed; up / in:
+	// the C level at the row's top edge from a speed at its bottom edge / anywhere in it; exit: the apex over its top edge)
+	const segT = XA !== null ? segMask.map((m) => segTablesOf(XA, m, ice)) : null;
+	const xUp = (P, v) => segT[P.seg].up[cOfV(v)], xIn = (P, v) => segT[P.seg].in[cOfV(v)];
+	const xExit = (P, v) => (XA !== null && P.seg !== 0 ? Math.min(Pexit(P, v), segT[P.seg].exit[cOfV(v)]) : Pexit(P, v));
+	const enterR = (P2, e, emit, below) => {
 		const c = P2.cls;
 		if (c === BUP) emit(R_, P2.rc);
 		else if (c === BDOWN) emit(F_, KF);
 		else if (c === NORM || c === DEADLY) { const q = qOfQ(e); if (q >= 0 || !P2.lowWall) emit(R_, q); }
-		else if (isField(c)) emit(C_, cOfV(vfieldP(P2, RaInv(e + 16), 1)));
+		else if (isField(c)) {
+			// (below: over the row's bottom edge at <= RaInv(e + 16) (e is then the apex above this row's top edge less 16:
+			// RaInv of the apex above the edge crossed); else anywhere in the row at that speed)
+			const u = RaInv(e + 16);
+			const cl = cOfV(vfieldP(P2, u, 1));
+			emit(C_, XA !== null ? Math.min(cl, below ? xUp(P2, u) : xIn(P2, u)) : cl);
+		}
 	};
 	const enterDown = (P2, k, emit) => {
 		const c = P2.cls;
@@ -551,7 +568,7 @@ function reachField(level, opts) {
 		else if (c === BDOWN) emit(F_, KF);
 		else emit(F_, Math.min(KF, k + KSTEP));
 	};
-	const ljump = (P, P2, k, emit) => { if (P.cls === NORM && P2.lj && k >= KLJ) emit(C_, cOfV(vfieldP(P2, -JV, 1))); };
+	const ljump = (P, P2, k, emit) => { if (P.cls === NORM && P2.lj && k >= KLJ) { const cl = cOfV(vfieldP(P2, -JV, 1)); emit(C_, XA !== null ? Math.min(cl, xIn(P2, -JV)) : cl); } };
 	/** the forward model: a move from a tile of profile P to a neighbour of profile P2 by (dx, dy) of a state (ty, l) */
 	function fwd(P, P2, dx, dy, ty, l, emit) {
 		if ((P2.sp === LOWER && dy < 0) || (P.sp === LOWER && dy > 0) || (P2.sp === RIGHT && dx < 0) || (P.sp === RIGHT && dx > 0)) return;
@@ -581,16 +598,27 @@ function reachField(level, opts) {
 		if (src === NORM || src === BUP) {
 			if (ty === C_) return;
 			if (ty === X_) {
-				const v = vOfC(l), e = Pexit(P, v), q = qOfQ(e);
-				if (dy === 0) { if (isField(dst)) emit(C_, l); else if (dst === NORM && P2.xrOK) emit(X_, l); else enterR(P2, e, emit); }
-				else if (dy === -1) { if (q >= 1) enterR(P2, e - 16, emit); }
+				const v = vOfC(l), e = xExit(P, v), q = qOfQ(e);
+				// (back into a field of this row: no faster (no pumping); with the tables, a drag field's tick takes its share)
+				if (dy === 0) { if (isField(dst)) emit(C_, XA !== null ? Math.min(l, xIn(P2, v)) : l); else if (dst === NORM && P2.xrOK) emit(X_, l); else enterR(P2, e, emit, false); }
+				else if (dy === -1) {
+					// (with the tables, up into a field: over its bottom edge at the XR state's own speed, not at the speed of its
+					// apex, which the exit margin makes more; up into a normal tile of a row with a field: an XR state again, at
+					// the speed of the apex left there (less than its own: an XR ball never gains by going up in the air), not
+					// an R state, whose entry into a field there takes RaInv(the apex + 16))
+					if (q >= 1) {
+						if (XA !== null && isField(dst)) emit(C_, Math.min(cOfV(vfieldP(P2, v, 1)), xUp(P2, v)));
+						else if (XA !== null && dst === NORM && P2.xrOK) { if (qOfQ(e - 16) >= 0 || !P2.lowWall) emit(X_, Math.min(l, cOfV(RaInv(e - 16)))); }
+						else enterR(P2, e - 16, emit, true);
+					}
+				}
 				else { const kb = kOfX(e + 16); enterDown(P2, kb, emit); ljump(P, P2, kb, emit); }
 				return;
 			}
 			// R(q)
 			const e = 8 * l - TOL;
-			if (dy === -1) { if (l >= 1) enterR(P2, e - 16, emit); }
-			else if (dy === 0) enterR(P2, e, emit);
+			if (dy === -1) { if (l >= 1) enterR(P2, e - 16, emit, true); }
+			else if (dy === 0) enterR(P2, e, emit, false);
 			else { const kb = kOfX(e + 16); enterDown(P2, kb, emit); ljump(P, P2, kb, emit); }
 			return;
 		}
@@ -598,12 +626,24 @@ function reachField(level, opts) {
 		if (ty !== C_ || !isField(src)) return;
 		const v = vOfC(l);
 		if (dy === -1) {
-			if (isField(dst)) emit(C_, cOfV(vfieldP(P2, Math.min(16, v + 2 * Math.max(0, P.A - P2.A)), 1)));   // (the queue: 2 ticks of the old pull)
-			else enterR(P2, Pexit(P, v) - 16, emit);
+			if (isField(dst)) {
+				const vin = Math.min(16, v + 2 * Math.max(0, P.A - P2.A));   // (the queue: 2 ticks of the old pull)
+				const cl = cOfV(vfieldP(P2, vin, 1));
+				emit(C_, XA !== null ? Math.min(cl, xUp(P2, vin)) : cl);
+			} else {
+				const e = xExit(P, v) - 16;
+				// (with the tables: out over the top edge into a normal tile of a row with a field, an XR state (it left a field)
+				// at the speed of the apex left over that edge (at most its own), not an R state: an R ball entering a field
+				// again takes RaInv(its apex + 16), the margin of a ball anywhere in the row, and field -> air -> field climbed a
+				// column and the air beside it at a gain every row (Barrel Cannon Canyon's dot rail to 16 px/tick, Happy
+				// Spookaween's chain 24 rows up))
+				if (XA !== null && dst === NORM && P2.xrOK) { if (qOfQ(e) >= 0 || !P2.lowWall) emit(X_, Math.min(l, cOfV(RaInv(e)))); }
+				else enterR(P2, e, emit, true);
+			}
 		} else if (dy === 0) {
 			if (isField(dst)) emit(C_, l);
 			else if (dst === NORM && P2.xrOK) emit(X_, l);
-			else enterR(P2, Pexit(P, v), emit);
+			else enterR(P2, xExit(P, v), emit, false);
 		}
 	}
 	// ---- the stop in a field, the up-arrow bounce
@@ -705,6 +745,7 @@ function reachField(level, opts) {
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
 		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
+	if (XA !== null) field.exitApex = true;
 	const costOf = (t, ty, l) => { const s = slotOf(t, ty); if (s < 0) return CUT; return COST[ty][s * NLV[ty] + idxOf(ty, Math.max(LO[ty], Math.min(HI[ty], l)))]; };
 	/** every edge out of (t, ty, l): emit(t2, ty2, l2, cost) */
 	const edgesOf = (t, ty, l, emit) => {
@@ -1017,6 +1058,54 @@ function sideArrowPrices(level, opts, M) {
 	}
 	if (!info.arrows && !info.slots) return { pen: null, cost: 0, info };
 	return { pen, cost: SA_COST, info };
+}
+/**
+ * The field transit tables (the n3 rise-exit-apex fix, 2026-09-29): ORDERING only. The model's C state kept the speed a
+ * ball came into a field with, row after row (vfieldP never lowers it), and a ball that left a field over its top edge
+ * into the air beside a field column was an R state, which the next field entry prices at RaInv(apex + 16) (a ball
+ * anywhere in the row): field -> air -> field went up a column and the air beside it at a gain every row (Happy
+ * Spookaween: a jump lifted 24 rows by a 6-tile chain; Barrel Cannon Canyon: a dot rail to 16 px/tick; Cold World: a
+ * jump through 4 rows of water and a one-way row; the engine: 200 of 200 rollouts bob under the one-way). With the tables
+ * (src/exitapex.json, measured by tools/exitapex.js with the engine's own ticks: per field class, the speed at a row's
+ * top edge from a speed at its bottom edge (up) or anywhere in it (in), and the apex over its top edge (exit); a
+ * climbable's tick takes x 0.888 of the speed, water's x 0.934, mud's x 0.886) the C levels follow them (the least of
+ * the model's bound and the table), and a ball out over a field's top edge into a normal tile of a row with a field
+ * is an XR state (at most its own speed; and so on up the air of such rows). Not a proof (a ball whose centre only
+ * grazes a field tile between two tick starts has none of its drag), so never in the RCH3 field of the searches' prune:
+ * opts.exitApex true / false; unset, only the ordering fields (opts.oneWayEntry: src/steer.js's bodies and legs) follow
+ * EEAT_EXITAPEX (1 on, 0 off; unset EXITAPEX_DEFAULT: OFF, opt-in until the product A/B).
+ */
+const EXITAPEX_DEFAULT = false;
+function exitApexOn(opts) {
+	if (opts.exitApex !== undefined) return opts.exitApex === true;
+	if (!opts.oneWayEntry) return false;
+	const env = process.env.EEAT_EXITAPEX;
+	return env === '1' ? true : env === '0' ? false : EXITAPEX_DEFAULT;
+}
+let XA_TAB;
+function exitApexTab() {
+	if (XA_TAB === undefined) { try { XA_TAB = require('./exitapex.json'); } catch (e) { XA_TAB = null; } }
+	return XA_TAB;
+}
+/** a row segment's tables: per C level the largest over its field classes (mask: bit c for class c); a class without a
+ *  table: no limit (the model's own bound). On a level with ice (ice) a ball may carry slipperiness into a field, and the
+ *  engine's ice drag branch then takes the place of the base drag for dots, arrows and the air after an exit (not for
+ *  climbables, water or mud, whose drag comes first): there only those three classes' up / in tables, no exit table */
+function segTablesOf(XA, mask, ice) {
+	const up = new Int16Array(NL), inn = new Int16Array(NL), exit = new Float64Array(NL);
+	if (!mask) return { up: up.fill(NL - 1), in: inn.fill(NL - 1), exit: exit.fill(Infinity) };
+	if (ice) exit.fill(Infinity);
+	for (let c = DOTS; c <= UP; c++) {
+		if (!(mask & (1 << c))) continue;
+		const k = ice && (c === DOTS || c === UP) ? null : XA.kinds[c];
+		for (let i = 0; i < NL; i++) {
+			const a = k ? k.up[i] : NL - 1, b = k ? k.in[i] : NL - 1, x = k ? k.exit[i] : Infinity;
+			if (a > up[i]) up[i] = a;
+			if (b > inn[i]) inn[i] = b;
+			if (x > exit[i]) exit[i] = x;
+		}
+	}
+	return { up, in: inn, exit };
 }
 const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
@@ -1343,7 +1432,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
