@@ -105,6 +105,34 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .stage { position: relative; flex: 1; min-height: 240px; background: #0b0c10; overflow: hidden; touch-action: none; outline: none; }
 .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .stage canvas.fx { pointer-events: none; }   /* the search frontier's layer: the clicks go to the map under it */
+/* the layers: the map, the exploration's heat (a light the map's dark background takes: screen) and trails, the frontier */
+.stage { isolation: isolate; }
+#cv { z-index: 0; } #cvHeat { z-index: 1; mix-blend-mode: screen; } #cvTrail { z-index: 2; } #cvFx { z-index: 3; } .stage .ghint { z-index: 6; }
+/* the exploration's legend (bottom left) and Follow's panel (bottom centre) */
+.exleg { position: absolute; left: 10px; bottom: 10px; z-index: 5; pointer-events: none; min-width: 172px; max-width: 270px; padding: 7px 10px 8px; border-radius: 10px;
+	background: rgba(10, 12, 18, .82); border: 1px solid #242a36; box-shadow: 0 6px 22px rgba(0, 0, 0, .45); font: 11.5px/1.4 "Segoe UI", system-ui, sans-serif; color: #c3cad8; }
+.exleg.up { bottom: 54px; }   /* (above Follow's panel) */
+.exleg .et { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #7d88a0; }
+.exleg .et b { letter-spacing: 0; text-transform: none; font-weight: 600; color: #9fe9ff; }
+.exleg .eg { height: 6px; margin: 5px 0 2px; border-radius: 3px; background: linear-gradient(90deg, #aafcff, #46e1ff 12%, #3296ff 35%, #5a5fff 60%, #8c46f0 80%, #7332cd);
+	box-shadow: 0 0 12px rgba(90, 225, 255, .35); }
+.exleg .ea { display: flex; justify-content: space-between; font-size: 10px; color: #7d88a0; margin-bottom: 4px; }
+.exleg .er { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.exleg .er i { width: 15px; height: 3px; border-radius: 2px; flex: none; box-shadow: 0 0 6px currentColor; }
+.exleg .er span { overflow: hidden; text-overflow: ellipsis; color: #c3cad8; }
+.exleg .er b { margin-left: auto; padding-left: 8px; font-weight: 600; color: #e9edf5; }
+.fhud { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 5; display: flex; align-items: center; gap: 9px; max-width: calc(100% - 24px);
+	padding: 4px 5px 4px 12px; border-radius: 999px; background: rgba(10, 12, 18, .88); border: 1px solid #4a3d18; white-space: nowrap;
+	box-shadow: 0 6px 22px rgba(0, 0, 0, .5), 0 0 18px rgba(255, 210, 63, .12); font: 12px "Segoe UI", system-ui, sans-serif; color: #e9ecf2; }
+.fhud .fw { color: #ffd23f; font-weight: 600; }
+.fhud .fl { color: #9aa3b5; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 250px; }
+.fhud .ft { font: 600 13px var(--mono); color: #fff; }
+.fhud .ft small { font-weight: 400; color: #7d88a0; }
+.fhud .fs { display: inline-flex; padding: 1px; border-radius: 999px; background: #181b22; border: 1px solid #2f3440; }
+.stagewrap .fhud button { padding: 2px 8px; border: 0; border-radius: 999px; background: transparent; color: #9aa3b5; font-size: 11.5px; }
+.stagewrap .fhud button.on { background: #3a2f14; color: #ffd76a; }
+.stagewrap .fhud button:hover:not(.on) { color: #e9ecf2; }
+.fhud input[type=range] { width: 130px; min-width: 60px; flex: 0 1 130px; height: 14px; margin: 0; padding: 0; accent-color: #ffd23f; cursor: pointer; background: transparent; border: 0; }
 .stage.pan canvas { cursor: grab; } .stage.panning canvas { cursor: grabbing; }
 .stage.guide canvas, .stage.paint canvas, .stage.erase canvas, .stage.rect canvas { cursor: crosshair; }
 .stage.pick canvas { cursor: copy; }
@@ -154,6 +182,9 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 	.right { grid-template-columns: 1fr; }
 	.stagewrap { order: -1; height: 64vh; }
 	.status .keys { display: none; }
+	.exleg { display: none; }
+	.fhud .fl { display: none; }
+	.fhud input[type=range] { width: 70px; flex-basis: 70px; }
 }
 </style>
 </head>
@@ -191,11 +222,20 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 				<label class="ck" title="Everybody Edits' own block images, from your eeo-tas folder (off: simple colors)"><input type="checkbox" id="cGfx" checked> EE graphics</label>
 				<label class="ck"><input type="checkbox" id="cGrid" checked> grid</label>
 				<label class="ck" title="Where Find a route has got: a pulsing ring at the end of its closest attempt so far, with how near it is (F goes there)"><input type="checkbox" id="cFrontier" checked> search frontier</label>
+				<label class="ck" title="Where Find a route has been: the tiles it explored light up by when it first got there (white and cyan: just found, the frontier; blue, then purple: back to the search's start; brighter: searched more often), and its latest attempts as lines in each search's colour, fading out"><input type="checkbox" id="cExplore" checked> exploration</label>
+				<button id="bFollow" title="Follow (V): a smiley plays the search's nearest attempt (the route once found) over and over and the map follows it; End jumps to where the search has got; moving, zooming or clicking the map (or Esc) stops it">&#9786; Follow</button>
 				<label class="ck" id="lJobPath" hidden title="The job's best run over the level, drawn like a found route (dashed once you change the level)"><input type="checkbox" id="cJobPath"> job's run</label>
 			</div>
-			<div class="stage" id="stage" tabindex="0"><canvas id="cv"></canvas><canvas id="cvFx" class="fx" aria-hidden="true"></canvas><div class="ghint" id="gHint" hidden></div></div>
+			<div class="stage" id="stage" tabindex="0"><canvas id="cv"></canvas><canvas id="cvFx" class="fx" aria-hidden="true"></canvas><canvas id="cvHeat" class="fx" aria-hidden="true"></canvas><canvas id="cvTrail" class="fx" aria-hidden="true"></canvas>
+				<div class="exleg" id="exLeg" hidden></div>
+				<div class="fhud" id="fHud" hidden><span class="fw">&#9786; Following</span><span class="fl" id="fWhat"></span>
+					<input type="range" id="fSeek" min="0" max="0" step="1" value="0" title="Where the smiley is in the attempt: drag to move it (Home: back to the start)"><span class="ft" id="fTime">0:00.00</span>
+					<button id="fEnd" title="To the frontier: the attempt's last 3 seconds, where the search has got (End)">&#9197;</button>
+					<span class="fs" id="fSpd"><button data-spd="1" title="Real speed">1&times;</button><button data-spd="2" title="Twice as fast">2&times;</button><button data-spd="4" title="Four times as fast">4&times;</button></span>
+					<button id="fOff" title="Stop following (V or Esc)">&#10005;</button></div>
+				<div class="ghint" id="gHint" hidden></div></div>
 			<div class="status"><span id="stPos">&nbsp;</span><span id="stInfo"></span>
-				<span class="keys">drag with the right mouse button (or Space) to move · wheel zooms · <kbd>Q</kbd> rotates · <kbd>Ctrl+Z</kbd> undo</span></div>
+				<span class="keys">drag with the right mouse button (or Space) to move · wheel zooms · <kbd>Q</kbd> rotates · <kbd>V</kbd> follows (<kbd>End</kbd>: to the frontier) · <kbd>Ctrl+Z</kbd> undo</span></div>
 		</div>
 		<div class="col right">
 			<div class="card" id="routeCard">
@@ -972,6 +1012,7 @@ function resizeCanvas() {
 	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; VW.dirty = true; if (!VW.fitted) fit(); }
 	const fx = $('cvFx');
 	if (fx.width !== w || fx.height !== h) { fx.width = w; fx.height = h; FX.dirty = true; }
+	for (const id of ['cvHeat', 'cvTrail']) { const c = $(id); if (c.width !== w || c.height !== h) { c.width = w; c.height = h; EXP.viewDirty = true; } }
 }
 function origin() {
 	const cv = $('cv'), T = tileT(), s = T / 16;
@@ -1018,8 +1059,8 @@ function draw() {
 	const marks = startAndTrophies();
 	if (marks.start >= 0) {
 		const sx = ox + (marks.start % LV.W) * T, sy = oy + ((marks.start / LV.W) | 0) * T;
-		if (ee && GX.m.smiley && !VW.play) { const sm = GX.m.smiley; g.globalAlpha = 0.95; g.drawImage(GX.img[sm.sheet], sm.frame * sm.size, 0, sm.size, sm.size, sx + sm.dx * s, sy + sm.dy * s, sm.size * s, sm.size * s); g.globalAlpha = 1; }
-		else if (!VW.play) ball(g, sx + T / 2, sy + T / 2, Math.max(4, 7.6 * s));
+		if (ee && GX.m.smiley && !VW.play && !FOL.on) { const sm = GX.m.smiley; g.globalAlpha = 0.95; g.drawImage(GX.img[sm.sheet], sm.frame * sm.size, 0, sm.size, sm.size, sx + sm.dx * s, sy + sm.dy * s, sm.size * s, sm.size * s); g.globalAlpha = 1; }
+		else if (!VW.play && !FOL.on) ball(g, sx + T / 2, sy + T / 2, Math.max(4, 7.6 * s));
 		if (T < 14 * d) ring(g, sx + T / 2, sy + T / 2, Math.max(7 * d, T), '#ffd23f');
 	}
 	if (T < 14 * d) for (const i of marks.trophies) ring(g, ox + (i % LV.W) * T + T / 2, oy + ((i / LV.W) | 0) * T + T / 2, Math.max(7 * d, T), '#2fcf72');
@@ -1063,13 +1104,18 @@ function startAndTrophies() {
 function frame() {
 	requestAnimationFrame(frame);
 	const now = performance.now();
+	if (FOL.on) followStep(now);
 	if (VW.glide) glideStep(now);
 	if (VW.play) { VW.dirty = true; }
+	if (VW.dirty) EXP.viewDirty = true;
 	// (the map when something changed; the search frontier's layer with it, and on its own while it pulses)
 	if (VW.dirty) { VW.dirty = false; draw(); FX.dirty = true; }
 	if (FX.dirty || (FX.live && now - FX.at >= FX_FRAME_MS)) drawFx(now);
+	// (the exploration view: the heat and the trails, on canvases of their own under the frontier's)
+	if (EXP.on || EXP.shown) drawExplore(now);
 }
 function fit() {
+	if (FOL.on) followSet(false);
 	const cv = $('cv');
 	let zi = 0;
 	for (let k = ZOOMS.length - 1; k >= 0; k--) { const T = tileT(k); if (LV.W * T <= cv.width * 0.96 && LV.H * T <= cv.height * 0.94) { zi = k; break; } }
@@ -1077,6 +1123,7 @@ function fit() {
 	changedView();
 }
 function zoom(step, fx, fy) {
+	if (FOL.on) followSet(false);
 	const nz = clamp(VW.zi + step, 0, ZOOMS.length - 1);
 	VW.glide = null;
 	if (nz === VW.zi) return;
@@ -1278,15 +1325,19 @@ function drawFx(now) {
 	FX.dirty = false; FX.at = now;
 	const f = frontierOf(SOLVE.st, FX.on, !!(SOLVE.sig && SOLVE.sig !== currentSig()));
 	FX.live = !!(f && f.pulse);
-	if (!f && !FX.shown) return;
+	// (Follow's smiley on this layer too)
+	const fol = FOL.on && !!FOL.P;
+	if (!f && !fol && !FX.shown) return;
 	g.clearRect(0, 0, c.width, c.height);
-	FX.shown = !!f;
-	if (!f) return;
+	FX.shown = !!f || fol;
+	if (!f && !fol) return;
 	const { s, ox, oy } = origin();
-	drawFrontier(g, f, ox, oy, s, dpr(), now, c.width, c.height);
+	if (f) drawFrontier(g, f, ox, oy, s, dpr(), now, c.width, c.height);
+	if (fol) drawFollow(g, ox, oy, s, dpr());
 }
 /** F / the closest attempt's "Go to": the map glides to the frontier (at least 16 CSS px a tile; also with the toggle off) */
 function gotoFrontier() {
+	if (FOL.on) followSet(false);
 	const f = frontierOf(SOLVE.st, true, false);
 	if (!f) { $('stInfo').textContent = 'No search frontier to go to: Find a route shows one while it has no route yet.'; return; }
 	VW.zi = Math.max(VW.zi, ZOOMS.indexOf(16));
@@ -1298,6 +1349,431 @@ function glideStep(now) {
 	VW.camX = G.x0 + (G.x1 - G.x0) * e; VW.camY = G.y0 + (G.y1 - G.y0) * e;
 	VW.dirty = true;
 	if (q >= 1) { VW.glide = null; changedView(); }
+}
+
+// ------------------------------------------------------------ the exploration view: where Find a route has been
+// (the user: "a super cool ui that i can see all of the routes its trying like maybe the bg changes"; the server side:
+// src/editor.js heatState, src/heat.js). THE HEAT: per tile the search's visits (GET /api/editor/solve/heat: a count, the
+// first and the last visit, as deltas since the page's version), drawn at tile resolution into an offscreen canvas
+// (heatFill) and scaled onto a canvas of its own under the frontier's (#cvHeat, blended "screen": it lights the map's dark
+// background), the solid blocks cut out of it (heatMaskFill: they stay as they are), rebuilt at most every EXP_HEAT_MS.
+// Its colour is WHEN the search first got there (the UI review, 2026-09-29: by the last visit 59-97% of the explored
+// tiles were "fresh" during a search, one cyan wash): white and cyan for the tiles found last, with a glow for those of
+// the last HEAT_GLOW, then blue, violet and deep purple back to the search's start (the scale: the search's time so far,
+// at least HEAT_SPAN_MIN): a wave from the start to the frontier; brighter the more often the search came back (log of
+// the count), at most HEAT_A. THE TRAILS: the latest attempts of every strategy as thin lines in its colour (EXP_COLORS)
+// on #cvTrail, the newest brightest with a glow and a dot at its end, fading out over EXP_TRAIL_FADE; a small legend (the
+// heat's scale, the searches with attempts on the map). The toolbar's "exploration" (on by default, eeat.editor.explore)
+// turns it off.
+const EXP = { on: store.get('eeat.editor.explore') !== '0', search: 0, version: 0, trailId: 0, W: 0, H: 0, count: null, first: null, last: null, list: [], visited: 0, t: 0, tAt: 0,
+	running: false, trails: [], final: false, busy: false, img: null, glow: null, mask: null, masked: 0, glowOn: false, imgAt: -1e9, dataDirty: false, heatDirty: false, viewDirty: true,
+	trailAt: -1e9, trailsDirty: false, trailShown: false, shown: false, legendKey: '' };
+const EXP_HEAT_MS = 500, EXP_TRAIL_FADE = 10000, EXP_TRAIL_MS = 90, EXP_TRAILS = 60, EXP_TRAILS_K = 10, EXP_TAIL = 0.6;
+const HEAT_SPAN_MIN = 8000, HEAT_A = 0.55, HEAT_GLOW = 3000, HEAT_GLOW_A = 110;
+// (the heat's colours by when a tile was found: white-cyan (just now), cyan, sky blue, blue, violet, deep purple (the
+// search's start); a 256-step table)
+const HEAT_STOPS = [[0, 170, 252, 255], [0.12, 70, 225, 255], [0.35, 50, 150, 255], [0.6, 90, 95, 255], [0.8, 140, 70, 240], [1, 115, 50, 205]];
+const HEAT_LUT = (() => {
+	const L = new Uint8Array(256 * 3);
+	for (let k = 0; k < 256; k++) {
+		const u = k / 255;
+		let j = 0;
+		while (j < HEAT_STOPS.length - 2 && u > HEAT_STOPS[j + 1][0]) j++;
+		const A = HEAT_STOPS[j], B = HEAT_STOPS[j + 1], f = (u - A[0]) / (B[0] - A[0]);
+		for (let c = 0; c < 3; c++) L[k * 3 + c] = Math.round(A[c + 1] + (B[c + 1] - A[c + 1]) * f);
+	}
+	return L;
+})();
+// (each search's colour on the map: the trails and the legend; none gold, orange, red-pink or light blue: the route, the
+// nearest attempt and Follow's streak, the guide line, the job's run; none cyan or blue: the heat (the wall breaker's
+// lavender far lighter than its violets). The relay (levels up to 50 x 50) and the escape (above) never run in one search,
+// the path skips and exact landings rarely leave a trail)
+const EXP_COLORS = { goexplore: '#b6ff3b', gorolls: '#ffffff', explore: '#ff4fd8', goal: '#ff4a4a', guide: '#ffa6d8', breaker: '#a98bff', escape: '#3dffb8', relay: '#3dffb8',
+	precision: '#aab4c8', skips: '#aab4c8' };
+const expColor = (k) => EXP_COLORS[k] || '#dfe6ff';
+function b64u8(s) { const b = atob(s || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+/** a GET /api/editor/solve/heat answer r into E (EXP): another search starts it over; the tiles' counts, first and last
+ *  visits (an older server without the first visits: a tile's first is its last visit when the page first sees it), the
+ *  version, the search's clock (t at now: performance.now()), its new trails (the newest EXP_TRAILS kept) */
+function heatApply(E, r, now) {
+	if (!r) return;
+	if (r.search !== E.search || r.w !== E.W || r.h !== E.H) {
+		Object.assign(E, { search: r.search, W: r.w, H: r.h, version: 0, trailId: 0, trails: [], list: [], visited: 0, final: false, img: null, glow: null, mask: null, glowOn: false });
+		E.count = new Uint16Array(r.w * r.h); E.first = new Uint32Array(r.w * r.h); E.last = new Uint32Array(r.w * r.h);
+	}
+	if (r.full && E.list.length) { E.count.fill(0); E.first.fill(0); E.last.fill(0); E.list = []; }
+	const N = E.W * E.H, I = new DataView(b64u8(r.idx).buffer), Cn = new DataView(b64u8(r.count).buffer), Ls = new DataView(b64u8(r.last).buffer);
+	const Fs = r.first ? new DataView(b64u8(r.first).buffer) : null;
+	const n = Math.min(r.n | 0, I.byteLength >> 2, Cn.byteLength >> 1, Ls.byteLength >> 2, Fs ? Fs.byteLength >> 2 : Infinity);
+	for (let i = 0; i < n; i++) {
+		const t = I.getUint32(4 * i, true);
+		if (t >= N) continue;
+		const l = Ls.getUint32(4 * i, true);
+		if (!E.count[t]) { E.list.push(t); E.first[t] = l; }
+		if (Fs) E.first[t] = Fs.getUint32(4 * i, true);
+		E.count[t] = Cn.getUint16(2 * i, true); E.last[t] = l;
+	}
+	Object.assign(E, { version: r.version, visited: E.list.length, t: r.t, tAt: now, running: !!r.running });
+	if (Array.isArray(r.trails) && r.trails.length) {
+		E.trails.push(...r.trails);
+		if (E.trails.length > EXP_TRAILS) E.trails.splice(0, E.trails.length - EXP_TRAILS);
+		E.trailsDirty = true;
+	}
+	E.trailId = Math.max(E.trailId, r.trailId || 0);
+	E.dataDirty = true;
+}
+/** the heat's time scale at tNow (ms since the search's start): the colour runs from the tiles found just now to those
+ *  found this long ago (the search's start once it has run HEAT_SPAN_MIN) */
+const heatSpan = (tNow) => Math.max(HEAT_SPAN_MIN, tNow);
+/** the heat's pixels (RGBA per tile, px) and its glow's (gl) at tNow (ms since the search's start), for E's visited tiles:
+ *  the colour by the tile's first visit, the alpha by its visits; returns whether anything glows */
+function heatFill(E, tNow, px, gl) {
+	const lut = HEAT_LUT, list = E.list, W = E.W, H = E.H, N = W * H, first = E.first || E.last, span = heatSpan(tNow);
+	const buf = (k) => (E[k] && E[k].length === N ? E[k] : (E[k] = new Float32Array(N)));
+	// (the colour: each visited tile's newness (1 when found just now, 0 when found span ago or earlier) averaged over its
+	// visited neighbours ([1 2 1] each way): smooth bands where the search got at about the same time, not a speckle)
+	const F = buf('hF'), V = buf('hV'), T = buf('hT');
+	F.fill(0); V.fill(0);
+	for (let k = 0; k < list.length; k++) { const i = list[k]; F[i] = 1 - Math.min(1, Math.max(0, tNow - first[i]) / span); V[i] = 1; }
+	const blur = (A) => {
+		for (let y = 0; y < H; y++) for (let x = 0, r = y * W; x < W; x++) T[r + x] = 2 * A[r + x] + (x > 0 ? A[r + x - 1] : 0) + (x < W - 1 ? A[r + x + 1] : 0);
+		for (let y = 0; y < H; y++) for (let x = 0, r = y * W; x < W; x++) A[r + x] = 2 * T[r + x] + (y > 0 ? T[r + x - W] : 0) + (y < H - 1 ? T[r + x + W] : 0);
+	};
+	blur(F); blur(V);
+	// (the glow: the tiles found in the last HEAT_GLOW, blurred likewise: a lone new tile a faint spark, the frontier the
+	// search is pushing now a bright cloud)
+	const G = gl ? buf('gA') : null;
+	if (G) G.fill(0);
+	let glow = false;
+	for (let k = 0; k < list.length; k++) {
+		const i = list[k], o = i * 4, age = Math.max(0, tNow - first[i]);
+		const u = Math.min(1, Math.max(0, 1 - F[i] / V[i])), q = Math.min(255, (u * 255) | 0) * 3;
+		const a = HEAT_A * (0.6 + 0.4 * Math.min(1, Math.log2(1 + E.count[i]) / 4)) * (0.55 + 0.45 * (1 - u));
+		px[o] = lut[q]; px[o + 1] = lut[q + 1]; px[o + 2] = lut[q + 2]; px[o + 3] = Math.round(255 * a);
+		if (G && age < HEAT_GLOW) { const f = 1 - age / HEAT_GLOW; G[i] = f * f; glow = true; }
+	}
+	if (!gl) return false;
+	if (glow) blur(G);
+	for (let i = 0, o = 0; i < N; i++, o += 4) { gl[o] = 150; gl[o + 1] = 240; gl[o + 2] = 255; gl[o + 3] = glow ? Math.round(Math.min(1, G[i] / 16) * HEAT_GLOW_A) : 0; }
+	return glow;
+}
+/** the heat's cut (RGBA per tile, m): opaque on the level's solid blocks (fg: the block ids, solid(id)) the search never
+ *  visited (a door it went through stays lit), so the heat and its glow, scaled up smoothly, leave the blocks as they
+ *  are; returns how many */
+function heatMaskFill(E, fg, solid, m) {
+	const N = E.W * E.H, cnt = E.count;
+	let n = 0;
+	for (let i = 0, o = 3; i < N; i++, o += 4) {
+		const id = fg[i], on = id > 0 && !cnt[i] && solid(id);
+		m[o] = on ? 255 : 0;
+		if (on) n++;
+	}
+	return n;
+}
+const solidIds = new Map();
+/** a plain solid block (not a door, a half block or a one-way: the ball goes into their tiles) */
+function solidBlock(id) {
+	let s = solidIds.get(id);
+	if (s === undefined) { const k = LV.kind.get(id); if (!k) return false; s = k.kind === 'solid'; solidIds.set(id, s); }
+	return s;
+}
+/** the heat's offscreen canvases (a pixel a tile: the heat, its glow, the blocks' cut) drawn again at tNow */
+function heatImage(tNow) {
+	if (!EXP.W) return;
+	if (!EXP.img || EXP.img.c.width !== EXP.W || EXP.img.c.height !== EXP.H) {
+		const mk = () => { const c = document.createElement('canvas'); c.width = EXP.W; c.height = EXP.H; const g = c.getContext('2d'); return { c, g, d: g.createImageData(EXP.W, EXP.H) }; };
+		EXP.img = mk(); EXP.glow = mk(); EXP.mask = mk();
+	}
+	EXP.glowOn = heatFill(EXP, tNow, EXP.img.d.data, EXP.glow.d.data);
+	EXP.masked = EXP.W === LV.W && EXP.H === LV.H ? heatMaskFill(EXP, LV.fg, solidBlock, EXP.mask.d.data) : 0;
+	EXP.img.g.putImageData(EXP.img.d, 0, 0);
+	EXP.glow.g.putImageData(EXP.glow.d, 0, 0);
+	EXP.mask.g.putImageData(EXP.mask.d, 0, 0);
+}
+/** the heat's layer: the visible part of its image scaled to the map (smoothed), the fresh tiles' glow over it, then the
+ *  solid blocks cut out (tile by tile, no smoothing); dim once the level changed since the search */
+function drawHeatLayer() {
+	const c = $('cvHeat'), g = c.getContext('2d');
+	g.clearRect(0, 0, c.width, c.height);
+	if (!EXP.img) return;
+	const { T, ox, oy } = origin();
+	const x0 = clamp(Math.floor(-ox / T) - 1, 0, EXP.W), x1 = clamp(Math.ceil((c.width - ox) / T) + 1, 0, EXP.W);
+	const y0 = clamp(Math.floor(-oy / T) - 1, 0, EXP.H), y1 = clamp(Math.ceil((c.height - oy) / T) + 1, 0, EXP.H);
+	if (x1 <= x0 || y1 <= y0) return;
+	const stale = !!(SOLVE.sig && SOLVE.sig !== currentSig());
+	const blit = (cv) => g.drawImage(cv, x0, y0, x1 - x0, y1 - y0, ox + x0 * T, oy + y0 * T, (x1 - x0) * T, (y1 - y0) * T);
+	g.globalAlpha = stale ? 0.35 : 1;
+	g.imageSmoothingEnabled = true;
+	blit(EXP.img.c);
+	if (EXP.glowOn && !stale) {
+		g.globalCompositeOperation = 'lighter';
+		blit(EXP.glow.c);
+	}
+	if (EXP.masked) {
+		g.globalAlpha = 1;
+		g.imageSmoothingEnabled = false;
+		g.globalCompositeOperation = 'destination-out';
+		blit(EXP.mask.c);
+	}
+	g.globalCompositeOperation = 'source-over';
+	g.globalAlpha = 1;
+}
+/** the trails on g (ox, oy: the level's origin, s: canvas px per level px, d: device px per CSS px, tNow: ms since the
+ *  search's start): each attempt a thin line in its search's colour (a jump of a portal or a respawn not joined: br),
+ *  alpha by its age (gone after EXP_TRAIL_FADE), the newest with a glow, a dot at its end; the oldest first. Returns how
+ *  many it drew. */
+function drawTrails(g, trails, ox, oy, s, d, tNow) {
+	let shown = 0;
+	// (at most EXP_TRAILS_K a search: its newest; the CPU search alone sends a bundle of nearly the same attempts)
+	const per = new Map(), skip = new Set();
+	for (let k = trails.length - 1; k >= 0; k--) { const n = (per.get(trails[k].k) || 0) + 1; per.set(trails[k].k, n); if (n > EXP_TRAILS_K) skip.add(k); }
+	g.save();
+	g.lineJoin = 'round'; g.lineCap = 'round';
+	for (let k = 0; k < trails.length; k++) {
+		const tr = trails[k], age = Math.max(0, tNow - tr.t), P = tr.pts;
+		if (skip.has(k) || !(age < EXP_TRAIL_FADE) || !P || P.length < 4) continue;
+		const a = (1 - age / EXP_TRAIL_FADE) ** 1.5, col = expColor(tr.k), n = P.length >> 1, br = tr.br || [];
+		// (its first EXP_TAIL of the points faint (every attempt shares its way out of the start), its tip bright)
+		const h = Math.floor((n - 1) * EXP_TAIL);
+		const piece = (i0, i1) => {
+			g.beginPath();
+			for (let i = i0, b = 0; i <= i1; i++) {
+				const x = ox + P[2 * i] * s, y = oy + P[2 * i + 1] * s;
+				while (b < br.length && br[b] < i) b++;
+				if (i === i0 || br[b] === i) g.moveTo(x, y); else g.lineTo(x, y);
+			}
+		};
+		g.strokeStyle = col;
+		piece(0, h);
+		g.globalAlpha = 0.3 * a; g.lineWidth = Math.max(1, 1.1 * d); g.stroke();
+		piece(h, n - 1);
+		if (age < 2000) { g.globalAlpha = 0.25 * a * (1 - age / 2000); g.lineWidth = Math.max(3, 5 * d); g.stroke(); }
+		g.globalAlpha = 0.9 * a; g.lineWidth = Math.max(1, 1.4 * d); g.stroke();
+		g.beginPath(); g.arc(ox + P[2 * n - 2] * s, oy + P[2 * n - 1] * s, Math.max(2, 2.6 * d), 0, Math.PI * 2);
+		g.fillStyle = col; g.globalAlpha = a; g.fill();
+		shown++;
+	}
+	g.restore();
+	return shown;
+}
+/** "12 s ago", "1:05 ago": the heat's oldest colour */
+const agoText = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? `${s} s ago` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} ago`; };
+/** the legend: the heat's scale (found just now .. at the search's start, or span ago), the tiles explored, the searches
+ *  whose attempts are on the map (written when it changes) */
+function expLegend(tNow) {
+	const el = $('exLeg');
+	if (!EXP.shown) { if (!el.hidden) { el.hidden = true; EXP.legendKey = ''; } return; }
+	const by = new Map();
+	for (const tr of EXP.trails) if (tNow - tr.t < EXP_TRAIL_FADE) { const x = by.get(tr.k); if (x) x.n++; else by.set(tr.k, { label: tr.label || tr.k, n: 1 }); }
+	const tH = EXP.running ? tNow : EXP.t, span = heatSpan(tH), old = span > tH ? agoText(span) : 'at the start';
+	const key = `${[...by].map(([k, x]) => `${k}:${x.n}`).join()}|${EXP.visited}|${old}`;
+	if (key === EXP.legendKey && !el.hidden) return;
+	EXP.legendKey = key;
+	el.innerHTML = `<div class="et"><span>explored</span><b>${EXP.visited.toLocaleString('en-US')} tile${EXP.visited === 1 ? '' : 's'}</b></div><div class="eg"></div>` +
+		`<div class="ea"><span>found just now</span><span>${old}</span></div>` +
+		[...by].map(([k, x]) => `<div class="er" style="color:${expColor(k)}"><i style="background:${expColor(k)}"></i><span>${esc(x.label)}</span><b>${x.n}</b></div>`).join('');
+	el.hidden = false;
+}
+/** the exploration view's layers, every frame: the heat's image at most every EXP_HEAT_MS (new data, or its colours'
+ *  ageing while the search runs; also on a move of the map: a blit), the trails when they change, fade (every
+ *  EXP_TRAIL_MS) or the map moved; nothing for another level's size or with the toggle off */
+function drawExplore(now) {
+	const show = EXP.on && EXP.search > 0 && EXP.W === LV.W && EXP.H === LV.H && (EXP.visited > 0 || EXP.trails.length > 0);
+	if (!show) {
+		if (EXP.shown) {
+			for (const id of ['cvHeat', 'cvTrail']) { const c = $(id); c.getContext('2d').clearRect(0, 0, c.width, c.height); }
+			EXP.shown = false; EXP.trailShown = false; expLegend(0);
+		}
+		return;
+	}
+	if (!EXP.shown) { EXP.shown = true; EXP.viewDirty = true; }
+	const tHeat = EXP.running ? EXP.t + (now - EXP.tAt) : EXP.t, tTrail = EXP.t + (now - EXP.tAt);
+	if ((EXP.dataDirty || (EXP.running && now - EXP.imgAt >= 1000)) && now - EXP.imgAt >= EXP_HEAT_MS) { heatImage(tHeat); EXP.imgAt = now; EXP.dataDirty = false; EXP.heatDirty = true; }
+	if (EXP.heatDirty || EXP.viewDirty) { drawHeatLayer(); EXP.heatDirty = false; }
+	if (EXP.viewDirty || EXP.trailsDirty || (EXP.trailShown && now - EXP.trailAt >= EXP_TRAIL_MS)) {
+		const c = $('cvTrail'), g = c.getContext('2d');
+		g.clearRect(0, 0, c.width, c.height);
+		const { s, ox, oy } = origin();
+		const stale = !!(SOLVE.sig && SOLVE.sig !== currentSig());
+		EXP.trailShown = !stale && drawTrails(g, EXP.trails, ox, oy, s, dpr(), tTrail) > 0;
+		EXP.trailAt = now; EXP.trailsDirty = false;
+		expLegend(tTrail);
+	}
+	EXP.viewDirty = false;
+}
+/** the heat since the page's version (with the search's state: pollSolve); a finished search's once more, then no more */
+async function pollHeat() {
+	const st = SOLVE.st;
+	if (!EXP.on || EXP.busy || !st || !st.started) return;
+	if (!st.running && EXP.search === st.started && EXP.final) return;
+	EXP.busy = true;
+	try {
+		const r = await api(`/api/editor/solve/heat?search=${EXP.search}&since=${EXP.version}&trail=${EXP.trailId}`);
+		heatApply(EXP, r, performance.now());
+		if (!r.running && r.search === st.started) EXP.final = true;
+	} catch (e) { /* keep the last */ }
+	EXP.busy = false;
+}
+
+// ------------------------------------------------------------ Follow: a smiley plays the search's nearest attempt
+// (the user: "a follow smiley place for viewing") The toolbar's Follow (V): the EE smiley (the eegfx sprite; else a drawn
+// one) plays the search's nearest attempt (GET /api/editor/solve closest.path: the ball's centre per tick), the found
+// route once there is one, at 1x / 2x / 4x (100 ticks a second at 1x), over and over (a short hold at the end), and the
+// map follows it smoothly at its zoom (at least 16 px a tile when it starts): eased toward where the smiley will be
+// FOL_TAU on (followAim: no lag at a steady speed, 4x included; corners anticipated), kept inside the level. A new nearest
+// attempt goes on without a restart (followRetarget): from the same tick when it shares its start with the one playing,
+// else from its point nearest the smiley (the tick nearest the one playing among those within FOL_SNAP px), else from the
+// same tick. The panel's bar seeks, its end button (End) jumps to the attempt's last FOL_END ticks (where the search has
+// got), Home to its start. Any pan, zoom or drag of the map, a click on it (which then paints nothing), Escape, Fit and F
+// stop it. Drawn on the frontier's layer; the panel under the map shows what it plays, the run time and the speed.
+const FOL = { on: false, speed: [1, 2, 4].includes(+store.get('eeat.editor.followSpeed')) ? +store.get('eeat.editor.followSpeed') : 1, P: null, key: '', kind: '', ticks: 0, runTicks: 0,
+	label: '', tick: 0, at: 0, endAt: 0, x: 0, y: 0, hud: '', seeking: false };
+const FOL_TAU = 160, FOL_HOLD = 900, FOL_SNAP = 48, FOL_END = 300, FOL_SMOOTH = 4;
+/** what Follow plays (st: GET /api/editor/solve): the route once found, else the nearest attempt; null: nothing yet */
+function followSrc(st) {
+	if (!st) return null;
+	const r = st.result, c = st.closest;
+	if (r && Array.isArray(r.path) && r.path.length > 1) return { kind: 'route', P: r.path, ticks: r.ticks, runTicks: r.runTicks, label: r.strategy || '', key: `r|${r.foundAfter}|${r.ticks}|${r.path.length}` };
+	if (c && Array.isArray(c.path) && c.path.length > 1) return { kind: 'closest', P: c.path, ticks: c.ticks, runTicks: c.runTicks, label: c.strategy || '', key: `c|${c.foundAfter}|${c.ticks}|${c.path.length}` };
+	return null;
+}
+/** path Q starts as path P does, up to tick t (sampled every n / 64 ticks, and t itself) */
+function sameStart(P, Q, t) {
+	const k = Math.floor(t);
+	if (!P || !Q || k < 0 || k >= P.length || k >= Q.length) return false;
+	const step = Math.max(1, Math.floor((k + 1) / 64));
+	for (let i = 0; i <= k; i += step) if (P[i][0] !== Q[i][0] || P[i][1] !== Q[i][1]) return false;
+	return P[k][0] === Q[k][0] && P[k][1] === Q[k][1];
+}
+/** where the replay goes on in a new path P (oldP played at tick, the smiley at x, y; px, ball centre): the same tick when
+ *  P shares its start with oldP up to there; else P's tick nearest `tick` among those within FOL_SNAP px of the smiley;
+ *  else the same tick (at most P's end): never back to the start in the middle of a replay (the UI review: a real search's
+ *  new nearest attempts sent the smiley back to the spawn 5 times in 50 s); 0 with nothing played yet */
+function followRetarget(oldP, P, tick, x, y) {
+	const n = P.length;
+	if (!oldP || !(tick > 0)) return 0;
+	if (sameStart(oldP, P, tick)) return Math.min(tick, n - 1);
+	const r2 = FOL_SNAP * FOL_SNAP;
+	let best = -1, bt = Infinity;
+	for (let i = 0; i < n; i++) {
+		const dx = P[i][0] - x, dy = P[i][1] - y;
+		if (dx * dx + dy * dy <= r2 && Math.abs(i - tick) < bt) { bt = Math.abs(i - tick); best = i; }
+	}
+	return best >= 0 ? best : Math.min(tick, n - 1);
+}
+/** where the camera aims: the smiley's way `ahead` ticks on (fractional), its position then averaged over FOL_SMOOTH ticks
+ *  either side (a random run's jitter smoothed), not past a jump (a portal, a respawn) or the path's end, never behind the
+ *  smiley: aiming where it will be as far ahead as the easing lags cancels the lag (a steady speed: the camera on the
+ *  smiley, 4x included) and turns the view into a corner before the smiley gets there */
+function followAim(P, tick, ahead) {
+	const n = P.length, i0 = Math.min(n - 1, Math.floor(tick));
+	let end = Math.min(n - 1, Math.floor(tick + ahead) + FOL_SMOOTH + 1);
+	for (let k = i0 + 1; k <= end; k++) if (Math.abs(P[k][0] - P[k - 1][0]) + Math.abs(P[k][1] - P[k - 1][1]) > 40) { end = k - 1; break; }
+	const at = (t) => { const i = Math.floor(t), j = Math.min(end, i + 1), f = t - i; return [P[i][0] + (P[j][0] - P[i][0]) * f, P[i][1] + (P[j][1] - P[i][1]) * f]; };
+	const lo = Math.min(tick, end), c = Math.min(end, tick + ahead);
+	let sx = 0, sy = 0;
+	for (let j = -FOL_SMOOTH; j <= FOL_SMOOTH; j++) { const q = at(Math.min(end, Math.max(lo, c + j))); sx += q[0]; sy += q[1]; }
+	return [sx / (2 * FOL_SMOOTH + 1), sy / (2 * FOL_SMOOTH + 1)];
+}
+/** one frame of Follow at now (ms): the tick moves on by the speed, the smiley between two ticks, the map eased toward it */
+function followStep(now) {
+	const src = followSrc(SOLVE.st), dt = FOL.at ? Math.min(100, Math.max(0, now - FOL.at)) : 0;
+	FOL.at = now;
+	if (!src) { FOL.P = null; FOL.key = ''; followHud(); return; }
+	if (src.key !== FOL.key) {
+		FOL.tick = followRetarget(FOL.P, src.P, FOL.tick, FOL.x, FOL.y);
+		FOL.endAt = 0;
+	}
+	Object.assign(FOL, { P: src.P, key: src.key, kind: src.kind, ticks: src.ticks, runTicks: src.runTicks, label: src.label });
+	const n = FOL.P.length;
+	if (FOL.seeking) FOL.endAt = 0;
+	else if (FOL.endAt) { if (now - FOL.endAt >= FOL_HOLD) { FOL.tick = 0; FOL.endAt = 0; } }
+	else { FOL.tick += dt / 10 * FOL.speed; if (FOL.tick >= n - 1) { FOL.tick = n - 1; FOL.endAt = now; } }
+	FOL.tick = Math.min(Math.max(0, FOL.tick), n - 1);
+	const i = Math.min(n - 1, Math.floor(FOL.tick)), j = Math.min(n - 1, i + 1), f = FOL.tick - i, A = FOL.P[i], B = FOL.P[j];
+	const jump = Math.abs(B[0] - A[0]) + Math.abs(B[1] - A[1]) > 40;
+	FOL.x = jump ? A[0] : A[0] + (B[0] - A[0]) * f; FOL.y = jump ? A[1] : A[1] + (B[1] - A[1]) * f;
+	// (the map: eased toward where the smiley will be as far ahead as the easing lags (~FOL_TAU of the replay: followAim; the
+	// smiley itself while it holds or is dragged), its zoom kept, the view kept in the level (a tile past its edge at most;
+	// centred on a level smaller than the view))
+	const e = dt > 0 ? 1 - Math.exp(-dt / FOL_TAU) : 0, leadMs = e > 0 ? dt * (1 - e) / e : FOL_TAU;
+	let [tx, ty] = FOL.endAt || FOL.seeking || jump ? [FOL.x, FOL.y] : followAim(FOL.P, FOL.tick, leadMs * FOL.speed / 10);
+	const cvs = $('cv'), s = tileT() / 16;
+	if (cvs && cvs.width > 0 && cvs.height > 0 && s > 0) {
+		const hw = cvs.width / 2 / s, hh = cvs.height / 2 / s, Wp = LV.W * 16, Hp = LV.H * 16;
+		tx = Wp + 32 > 2 * hw ? clamp(tx, hw - 16, Wp - hw + 16) : Wp / 2;
+		ty = Hp + 32 > 2 * hh ? clamp(ty, hh - 16, Hp - hh + 16) : Hp / 2;
+	}
+	const nx = VW.camX + (tx - VW.camX) * e, ny = VW.camY + (ty - VW.camY) * e;
+	if (Math.abs(nx - VW.camX) + Math.abs(ny - VW.camY) > 0.005) { VW.camX = nx; VW.camY = ny; VW.dirty = true; }
+	FX.dirty = true;
+	followHud();
+}
+/** Follow's panel: what it plays and from which search, the run time now / in all, the seek bar, the speed */
+function followHud(force) {
+	const run = FOL.P ? Math.max(0, Math.floor(FOL.tick) - (FOL.ticks - FOL.runTicks)) : 0;
+	const what = !FOL.P ? 'waiting for the search\'s first attempt…' : `${FOL.kind === 'route' ? 'the route' : 'nearest attempt'}${FOL.label ? ` · ${FOL.label}` : ''}`;
+	const time = FOL.P ? `${fmt(Math.min(run, FOL.runTicks))} <small>/ ${fmt(FOL.runTicks)}</small>` : '';
+	const n = FOL.P ? FOL.P.length - 1 : 0, at = Math.floor(FOL.tick);
+	const key = `${what}|${time}|${FOL.speed}|${n}|${at}`;
+	if (!force && key === FOL.hud) return;
+	FOL.hud = key;
+	$('fWhat').textContent = what; $('fTime').innerHTML = time;
+	const sk = $('fSeek');
+	sk.disabled = !FOL.P;
+	if (+sk.max !== n) sk.max = String(n);
+	if (!FOL.seeking) sk.value = String(at);
+	for (const b of document.querySelectorAll('#fSpd button')) b.classList.toggle('on', +b.dataset.spd === FOL.speed);
+}
+/** Follow's replay to tick t (the seek bar, Home) */
+function followSeek(t) {
+	if (!FOL.P) return;
+	FOL.tick = clamp(+t || 0, 0, FOL.P.length - 1); FOL.endAt = 0; FX.dirty = true;
+	followHud(true);
+}
+/** Follow's replay to the attempt's last FOL_END ticks: where the search has got (the panel's end button, End) */
+function followToEnd() { if (FOL.P) followSeek(Math.max(0, FOL.P.length - 1 - FOL_END)); }
+/** Follow on / off (V, the toolbar, the panel's ✕; a pan, zoom, drag or click on the map, Escape: off) */
+function followSet(on) {
+	on = !!on;
+	if (on === FOL.on) return;
+	FOL.on = on;
+	$('bFollow').classList.toggle('on', on);
+	$('fHud').hidden = !on;
+	$('exLeg').classList.toggle('up', on);
+	if (on) {
+		const played = !!VW.play;
+		VW.play = null; VW.glide = null;
+		VW.zi = Math.max(VW.zi, ZOOMS.indexOf(16));
+		Object.assign(FOL, { at: 0, key: '', P: null, tick: 0, endAt: 0, seeking: false });
+		followHud(true);
+		if (played) { toolInfo(); renderSolve(); }
+	} else changedView();
+	VW.dirty = true; FX.dirty = true;
+}
+/** the smiley on g at Follow's position (ox, oy: the level's origin, s: canvas px per level px, d: device px per CSS
+ *  px): the last half second of its way as a fading golden streak, a soft light under it, the smiley */
+function drawFollow(g, ox, oy, s, d) {
+	if (!FOL.P) return;
+	const X = ox + FOL.x * s, Y = oy + FOL.y * s, P = FOL.P, i = Math.min(P.length - 1, Math.floor(FOL.tick));
+	g.save();
+	g.lineCap = 'round'; g.lineJoin = 'round';
+	for (let k = Math.max(1, i - 50); k <= i; k++) {
+		const A = P[k - 1], B = P[k];
+		if (Math.abs(B[0] - A[0]) + Math.abs(B[1] - A[1]) > 40) continue;
+		g.strokeStyle = '#ffd23f'; g.globalAlpha = 0.75 * ((k - (i - 50)) / 51) ** 2; g.lineWidth = Math.max(2, 5 * s * ((k - (i - 50)) / 51));
+		g.beginPath(); g.moveTo(ox + A[0] * s, oy + A[1] * s); g.lineTo(ox + B[0] * s, oy + B[1] * s); g.stroke();
+	}
+	g.globalAlpha = 1;
+	const R = Math.max(14 * d, 22 * s), glow = g.createRadialGradient(X, Y, 4 * s, X, Y, R);
+	glow.addColorStop(0, 'rgba(255,220,90,0.45)'); glow.addColorStop(1, 'rgba(255,220,90,0)');
+	g.fillStyle = glow; g.beginPath(); g.arc(X, Y, R, 0, Math.PI * 2); g.fill();
+	if (gxReady() && GX.m.smiley) {
+		const sm = GX.m.smiley;
+		g.imageSmoothingEnabled = false;
+		g.drawImage(GX.img[sm.sheet], sm.frame * sm.size, 0, sm.size, sm.size, ox + (FOL.x - 8 + sm.dx) * s, oy + (FOL.y - 8 + sm.dy) * s, sm.size * s, sm.size * s);
+	} else ball(g, X, Y, Math.max(4, 7.6 * s));
+	g.restore();
 }
 
 // ------------------------------------------------------------ tools and input
@@ -1376,6 +1852,11 @@ cv.addEventListener('contextmenu', (e) => e.preventDefault());
 cv.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });   // (no auto-scroll on a middle-button drag)
 cv.addEventListener('pointerdown', (e) => {
 	$('stage').focus({ preventScroll: true });
+	if (FOL.on) {
+		followSet(false);   // (a pan, a drag, a click on the map: Follow stops)
+		// (a plain click only stops it: it paints nothing, so the level stays the one searched)
+		if (e.button === 0 && !VW.space) { e.preventDefault(); return; }
+	}
 	const c = cellAt(e);
 	if (e.button === 1 || e.button === 2 || VW.space) {
 		e.preventDefault();
@@ -1430,6 +1911,7 @@ cv.addEventListener('pointercancel', pointerUp);
 cv.addEventListener('pointerleave', () => { if (!VW.stroke && !VW.rect && !VW.pan) { VW.hover = null; VW.dirty = true; } });
 cv.addEventListener('wheel', (e) => {
 	e.preventDefault();
+	if (FOL.on) followSet(false);
 	const r = cv.getBoundingClientRect();
 	zoom(e.deltaY < 0 ? 1 : -1, (e.clientX - r.left) * dpr(), (e.clientY - r.top) * dpr());
 }, { passive: false });
@@ -1451,11 +1933,13 @@ document.addEventListener('keydown', (e) => {
 	if ((e.ctrlKey || e.metaKey) && (k === 'y' || k === 'Y')) { e.preventDefault(); redo(); return; }
 	if (e.ctrlKey || e.metaKey) return;
 	if (k === ' ') { e.preventDefault(); if (!VW.space) { VW.space = true; updateStageCursor(); } return; }
-	if (k === 'Escape') { VW.rect = null; if (VW.stroke) { VW.stroke = null; end(); } VW.dirty = true; return; }
+	if (k === 'Escape') { if (FOL.on) followSet(false); VW.rect = null; if (VW.stroke) { VW.stroke = null; end(); } VW.dirty = true; return; }
+	if (FOL.on && (k === 'End' || k === 'Home')) { e.preventDefault(); if (k === 'End') followToEnd(); else followSeek(0); return; }   // (Follow: to the frontier, to the start)
 	const tools = { b: 'paint', p: 'paint', e: 'erase', r: 'rect', i: 'pick', g: 'guide' };
 	if (tools[k.toLowerCase()]) { setTool(tools[k.toLowerCase()]); return; }
 	if (k === 'q' || k === 'Q') { rotateBrush(e.shiftKey ? -1 : 1); return; }
 	if (k === 'f' || k === 'F') { gotoFrontier(); return; }   // (the search frontier: where Find a route has got)
+	if (k === 'v' || k === 'V') { followSet(!FOL.on); return; }   // (Follow: a smiley plays the nearest attempt)
 	if (k === '+' || k === '=') zoom(1);
 	else if (k === '-' || k === '_') zoom(-1);
 	else if (k === '0') fit();
@@ -1533,6 +2017,21 @@ $('cGrid').checked = VW.grid;
 $('cGrid').onchange = () => { VW.grid = $('cGrid').checked; store.set('eeat.editor.grid', VW.grid ? '1' : '0'); VW.dirty = true; };
 $('cFrontier').checked = FX.on;
 $('cFrontier').onchange = () => { FX.on = $('cFrontier').checked; store.set('eeat.editor.frontier', FX.on ? '1' : '0'); FX.dirty = true; };
+$('cExplore').checked = EXP.on;
+$('cExplore').onchange = () => { EXP.on = $('cExplore').checked; store.set('eeat.editor.explore', EXP.on ? '1' : '0'); EXP.final = false; EXP.viewDirty = true; if (EXP.on) pollHeat(); };
+$('bFollow').onclick = () => followSet(!FOL.on);
+$('fOff').onclick = () => followSet(false);
+$('fEnd').onclick = () => followToEnd();
+{
+	// (the seek bar: the smiley waits where it is dragged, plays on from there when let go)
+	const sk = $('fSeek');
+	sk.addEventListener('pointerdown', () => { FOL.seeking = true; });
+	sk.addEventListener('input', () => followSeek(+sk.value));
+	const done = () => { if (FOL.seeking) { FOL.seeking = false; FOL.at = 0; } };
+	sk.addEventListener('change', () => { done(); sk.blur(); });
+	document.addEventListener('pointerup', done);
+}
+for (const b of document.querySelectorAll('#fSpd button')) b.onclick = () => { FOL.speed = +b.dataset.spd; store.set('eeat.editor.followSpeed', String(FOL.speed)); followHud(true); };
 
 // ------------------------------------------------------------ level: name, size, new / clear, import / export
 $('lvName').oninput = () => { LV.name = $('lvName').value.slice(0, 80); clearTimeout(saveT); saveT = setTimeout(saveNow, 350); };
@@ -1806,6 +2305,7 @@ async function pollSolve() {
 	clearTimeout(SOLVE.poll);
 	try { SOLVE.st = await api('/api/editor/solve'); } catch (e) { /* keep the last */ }
 	renderSolve();
+	if (EXP.on) pollHeat();   // (the exploration view: the heat and the trails since the page's version)
 	if (SOLVE.st && SOLVE.st.running) SOLVE.poll = setTimeout(pollSolve, 700);
 }
 function renderSolve() {
@@ -1874,13 +2374,13 @@ function renderSolve() {
 	el.innerHTML = h;
 	if (c) {
 		$('cGoto').onclick = () => gotoFrontier();
-		$('cPlay').onclick = () => { VW.play = VW.play ? null : { t0: performance.now() }; if (!VW.play) toolInfo(); renderSolve(); VW.dirty = true; };
+		$('cPlay').onclick = () => { followSet(false); VW.play = VW.play ? null : { t0: performance.now() }; if (!VW.play) toolInfo(); renderSolve(); VW.dirty = true; };
 		$('cEetas').onclick = () => { location.href = '/api/editor/solve/closest.eetas'; };
 	}
 	if (r) {
 		$('rWatch').onclick = () => routeJob(false);
 		$('rOpt').onclick = () => routeJob(true);
-		$('rPlay').onclick = () => { VW.play = VW.play ? null : { t0: performance.now() }; if (!VW.play) toolInfo(); renderSolve(); VW.dirty = true; };
+		$('rPlay').onclick = () => { followSet(false); VW.play = VW.play ? null : { t0: performance.now() }; if (!VW.play) toolInfo(); renderSolve(); VW.dirty = true; };
 		$('rEetas').onclick = () => { location.href = '/api/editor/solve/route.eetas'; };
 		$('rEelvl').onclick = () => { location.href = '/api/editor/solve/level.eelvl'; };
 		const j = SOLVE.jobs[routeKey(st)];
