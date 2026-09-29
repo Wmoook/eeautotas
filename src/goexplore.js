@@ -273,6 +273,9 @@
 //        switches (the OFF ids of the first unfinished wave by the room's purple switches) where its walk reaches one
 //        untried, else at every untried trigger as before; the untried rooms at the most chain progress first. Order
 //        only (bursts.js CHAIN AIM); no chain in the file, or the flag off: nothing changes)]
+//        [--tchain=0 (1 or EEAT_TCHAIN=1: OPT-IN, with --tedge=1 and the steer file's switch chain: head T's goals are the
+//        chain's next switches (the OFF ids of the first unfinished wave by the room's purple switches) among the room's
+//        untried targets, all of them, where it has one; else its --tNear nearest as before. Order only)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
@@ -365,7 +368,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
 	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 1,
-	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, bchain: process.env.EEAT_BCHAIN !== undefined ? +process.env.EEAT_BCHAIN : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5, tPhys: 0,
+	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, bchain: process.env.EEAT_BCHAIN !== undefined ? +process.env.EEAT_BCHAIN : 0, tchain: process.env.EEAT_TCHAIN !== undefined ? +process.env.EEAT_TCHAIN : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5, tPhys: 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, heat: 0 };
@@ -3323,6 +3326,20 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	/** --tedge: room r can be head T's: still in the archive with cells, not a back room nor dominated, an untried target
 	 *  left, and a finite goal at its untried set's version */
 	const teLive = (r) => rooms.get(r.key) === r && r.arr.length > 0 && !r.bk && !domOf(r) && r.tLeft > 0 && r.tDead !== r.tGen;
+	/** --tchain: the OFF ids of the steer file's switch chain's first unfinished wave by a room desc's purple switches (a
+	 *  Set); null: every wave ON */
+	const teChainWant = (desc) => {
+		const C = ST.chain;
+		if (C._W === undefined) {
+			const byW = new Map();
+			for (let k = 0; k < C.n; k++) { const q = C.order[k], w = C.wave[q]; if (!byW.has(w)) byW.set(w, []); byW.get(w).push(C.id[q]); }
+			C._W = [...byW.keys()].sort((x, y) => x - y).map((w) => byW.get(w));
+		}
+		const m = /(?:^|\s)purple=\[([^\]]*)\]/.exec(String(desc || ''));
+		const on = new Set(m ? m[1].split(',').map((x) => parseInt(x, 10)) : []);
+		for (const w of C._W) { const off = w.filter((id) => !on.has(id)); if (off.length) return new Set(off); }
+		return null;
+	};
 	/** --tedge: head T's field and heap for room R (its untried targets nearest its entry as goals, --tNear) */
 	const teBuild = (R) => {
 		const tb = Date.now();
@@ -3330,9 +3347,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const goals = [], sel = new Uint8Array(R.tc.length);
 		let h = mixW(0x2f1a, R.tprot ? 1 : 0), ng = 0;
 		for (let k = 0; k < R.tds.length; k++) h = mixW(h, R.tds[k]);
+		// (--tchain with the steer file's switch chain: the chain's next switches (the OFF ids of the first unfinished wave
+		// by the room's purple switches) among its untried targets, all of them, else as below)
+		if (a.tchain && ST !== null && ST.chain && ST.chain.n > 0) {
+			const want = teChainWant(R.desc);
+			if (want !== null) for (let j = 0; j < R.tt.length; j++) { const k = R.tti[j], t = R.tt[j]; if (!R.tried[k] && !sel[k] && L.fg[t] === 113 && want.has(L.lookup0[t])) { h = mixW(h, R.tc[k]); sel[k] = 1; ng++; } }
+			if (ng > 0) TE.chainB = (TE.chainB || 0) + 1;
+		}
 		// (the primary targets first; the secondary coins (R.t2, last in R.tc) only once no primary one is untried)
 		const n1 = R.tc.length - R.t2;
-		for (let k = 0; k < R.tc.length; k++) {
+		if (ng === 0) for (let k = 0; k < R.tc.length; k++) {
 			if (R.tried[k]) continue;
 			if (k >= n1 && ng > 0) break;
 			h = mixW(h, R.tc[k]); sel[k] = 1;
