@@ -1312,15 +1312,22 @@ function buildSteer(level, opts) {
 	// the coin tour (no DP; the plan's coin door, or the full count where the coins are modelled: the min with the layer
 	// field keeps the ways that need no more coins; the CPU file's alone: steerFileBytes(st, fp, true); after prioShift,
 	// so the GPU's file stays as it was)
+	// ONLY where the coins are modelled (first = false: the min with the layer field, whose coin layers still hold the
+	// ways that need no more coins). Where they are not (the budget left the coin feature out, or the walk plan's own
+	// coin door with the coins unmodelled) the tour would come FIRST below T, i.e. replace the layer field there, and its
+	// T (the plan's door, or the level's full count) can over-demand coins: Weird Perfection T 99 where the known routes
+	// take 70 (the tour's value 3998.6 tiles AT the trophy, main's field 1), Evolution Revolution T 45 where the route
+	// takes 36 (1117 tiles 12 ticks before the finish, main's 5.8); that path was never measured in the product, so the
+	// layer field stays main's there (`opts.tourFirst === true`: the unmodelled tour as it was, for measurement only)
 	let tourInfo = null;
 	if (!dp && !opts.noDP && !opts.noTour && !opts.coinT) {
 		const modelled = M.names.indexOf('coins') >= 0;
 		const nCoins = A.special.filter((x) => x[1] === 'coins').length;
-		// (coins not modelled: the plan's own coin door, or the full count where the budget left the coins out (LoZ Skyward
-		// Sword: "coins: over 31 layers"); a walk plan that passes no coin door and no refusal: no tour)
+		// (coins not modelled, opt-in only: the plan's own coin door, or the full count where the budget left the coins out
+		// (LoZ Skyward Sword: "coins: over 31 layers"); a walk plan that passes no coin door and no refusal: no tour)
 		const coinsOver = !!over && /^coins|coin DP/.test(over);
 		const T = Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0));
-		if (T >= 1 && (nCoins >= TOUR_MIN_COINS || coinsOver)) {
+		if (T >= 1 && (modelled || opts.tourFirst === true) && (nCoins >= TOUR_MIN_COINS || coinsOver)) {
 			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
 			const R = buildTour(A, level, T, !modelled, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 			if (R) {

@@ -2137,7 +2137,7 @@ function lateSteer(gen, sf2) {
 		// (the CPU searches with distances (the one search, the escape): "steerd"; their closest attempts count from its switch
 		// on (sgMin): one sent before it is the reach field's)
 		const dist = q.key === 'goexplore' || q.key === 'escape';
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${sf2.file}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${cur.files.steerCpu}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
 	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
 		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);

@@ -10,7 +10,9 @@
 //     touched again does not
 //   3 the CPU search (goexplore.js, 1 worker, seed 1, a tick budget): with the CPU file a route in fewer simulated ticks
 //     than with the plain file (the search before the tour); both reproducible
-// usage: node test/cointour.js [--only=1,2,3] [--ticks=40000000]
+//   4 the coins not modelled (the budget leaves the coin feature out): no tour, the CPU file = the plain file = the
+//     build without a tour, the same lookup; opt-in tourFirst keeps the unmodelled tour (first below T)
+// usage: node test/cointour.js [--only=1,2,3,4] [--ticks=40000000]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -137,8 +139,38 @@ function section3() {
 	check('... reproducible (one worker, a tick budget)', !!a2.route && a2.route.inputs === a.route.inputs && a2.route.simTicks === sa);
 }
 
+// the coins NOT modelled (the build's budget leaves the coin feature out: 26 coin layers over 4): no tour, the layer
+// field as main's (the unmodelled tour came FIRST below T, replacing the layer field, and over-demanded coins on routed
+// campaign levels: Weird Perfection T 99 vs the 70 its routes take); the CPU file = the plain file byte for byte; the
+// opt-in `tourFirst` keeps the unmodelled tour for measurement
+function section4() {
+	section('4 no tour where the coins are not modelled');
+	const s4 = SF.buildSteer(L, { maxLayers: 4 });
+	const s4n = SF.buildSteer(L, { maxLayers: 4, noTour: true });
+	const unmod = s4.info.features.indexOf('coins') < 0;
+	check('the budget leaves the coins out (not modelled)', unmod && /^coins/.test(String(s4.info.over)), `features ${JSON.stringify(s4.info.features)}, over ${s4.info.over}`);
+	check('no tour (info.tour null, no tour section)', !s4.tour && s4.info.tour === null, JSON.stringify(s4.info.tour));
+	check('the CPU file = the plain file = the build without a tour, byte for byte',
+		Buffer.compare(SF.steerFileBytes(s4, null, true), SF.steerFileBytes(s4, null)) === 0 && Buffer.compare(SF.steerFileBytes(s4, null), SF.steerFileBytes(s4n, null)) === 0);
+	const sim = new E.EESim(L); sim.reset();
+	const inp = new E.EEInput();
+	let seed = 9, same = 0, n = 0;
+	const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+	for (let t = 0; t < 3000; t++) {
+		E.applyMask(inp, [0, 2, 4, 5, 3, 1][(rnd() * 6) | 0]);
+		sim.tick(inp);
+		if (t % 10) continue;
+		n++;
+		if (SF.steerFifths(s4, sim) === SF.steerFifths(s4n, sim)) same++;
+	}
+	check('the lookup = the build without a tour along a random run', same === n, `${same} / ${n}`);
+	const s4f = SF.buildSteer(L, { maxLayers: 4, tourFirst: true });
+	check('opt-in tourFirst: the unmodelled tour (first below T) as before', !!s4f.tour && s4f.info.tour && s4f.info.tour.first === true && s4f.info.tour.T === NEED, JSON.stringify(s4f.info.tour));
+}
+
 if (want('1')) section1();
 if (want('2')) section2();
 if (want('3')) section3();
+if (want('4')) section4();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
