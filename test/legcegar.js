@@ -11,7 +11,7 @@
 //   1 main (legCegar false): switch 1 not modelled; the DP's tour A, B (the leg to B through the shut door)
 //   2 the leg CEGAR: the replay of the DP's tour names psw:1 at the door (10, 11) on leg 2, models it and builds again:
 //     the DP's tour C, A (B's leg, in the layer of switch 1 off, has no way from the start or A), its value at the start
-//     finite and higher than main's (the real detour); EEAT_LEGCEGAR=0 = main byte for byte
+//     finite and higher than main's (the real detour); OPT-IN: the default = main byte for byte, EEAT_LEGCEGAR=1 on
 //   3 the pocket's entrance a purple GATE (185: open while switch 1 is off): the leg passes an open gate, no
 //     counterexample, the files = main's byte for byte (the GPU and the CPU file)
 //   4 no coin C: modelling switch 1 would leave the DP no 2-coin tour (B cut off): the check before a build again
@@ -97,7 +97,7 @@ if (want('1') || want('2')) {
 	const v0 = SF.steerAt(st0, sim);
 	if (want('2')) {
 		section('2 the leg CEGAR');
-		const st1 = SF.buildSteer(L, {});
+		const st1 = SF.buildSteer(L, { legCegar: true });
 		const lg = st1.info.legCegar || [];
 		check('the replay names psw:1 at the door (10, 11) on leg 2', lg.length >= 1 && lg[0].feat === 'psw:1' && lg[0].at[0] === 10 && lg[0].at[1] === 11 && lg[0].leg === 2, JSON.stringify(lg));
 		check('psw:1 modelled (added, not reverted)', st1.info.features.includes('psw:1') && lg[0] && lg[0].added && !lg[0].reverted, st1.info.features.join('+'));
@@ -107,10 +107,13 @@ if (want('1') || want('2')) {
 		check('the start value finite and above main\'s (the real detour to C)', Number.isFinite(v1) && v1 > v0, `${v1} vs ${v0}`);
 		check('the files differ from main\'s', files(st1)[0] !== files(st0)[0]);
 		const envWas = process.env.EEAT_LEGCEGAR;
-		process.env.EEAT_LEGCEGAR = '0';
+		delete process.env.EEAT_LEGCEGAR;
 		const st2 = SF.buildSteer(L, {});
+		process.env.EEAT_LEGCEGAR = '1';
+		const st3 = SF.buildSteer(L, {});
 		if (envWas === undefined) delete process.env.EEAT_LEGCEGAR; else process.env.EEAT_LEGCEGAR = envWas;
-		check('EEAT_LEGCEGAR=0: main byte for byte', JSON.stringify(files(st2)) === JSON.stringify(files(st0)) && st2.info.legCegar === undefined);
+		check('the default (off): main byte for byte', JSON.stringify(files(st2)) === JSON.stringify(files(st0)) && st2.info.legCegar === undefined);
+		check('EEAT_LEGCEGAR=1: the leg CEGAR\'s file', JSON.stringify(files(st3)) === JSON.stringify(files(st1)));
 		// the lookup: the DP's value at a ball in the corridor under the pocket; main points it up into the pocket
 		const g0 = SF.nextGate(st0, sim), g1 = SF.nextGate(st1, sim);
 		check('the next gate from the start: A on main (then B), C with the leg CEGAR', g0 && g1 && JSON.stringify(bitToXY(st0, g0.i)) === JSON.stringify(A) && JSON.stringify(bitToXY(st1, g1.i)) === JSON.stringify(C));
@@ -119,14 +122,14 @@ if (want('1') || want('2')) {
 if (want('3')) {
 	section('3 the pocket behind a purple gate (open at the start): no counterexample');
 	const Lg = levelOf({ gate: true });
-	const a = SF.buildSteer(Lg, { legCegar: false }), b = SF.buildSteer(Lg, {});
+	const a = SF.buildSteer(Lg, { legCegar: false }), b = SF.buildSteer(Lg, { legCegar: true });
 	check('no leg counterexample', b.info.legCegar === undefined, JSON.stringify(b.info.legCegar));
 	check('the GPU and CPU files = main\'s byte for byte', JSON.stringify(files(a)) === JSON.stringify(files(b)));
 }
 if (want('4')) {
 	section('4 no coin C: the DP would lose its tour: no build again, main\'s file');
 	const Ln = levelOf({ noC: true });
-	const a = SF.buildSteer(Ln, { legCegar: false }), b = SF.buildSteer(Ln, {});
+	const a = SF.buildSteer(Ln, { legCegar: false }), b = SF.buildSteer(Ln, { legCegar: true });
 	const lg = b.info.legCegar || [];
 	check('psw:1 named on the leg', lg.length === 1 && lg[0].feat === 'psw:1', JSON.stringify(lg));
 	check('not built again: the DP would lose the coin B (10, 10)', lg[0] && !lg[0].added && /would lose the coin \(10, 10\)/.test(lg[0].why || ''), JSON.stringify(lg[0]));

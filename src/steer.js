@@ -1442,9 +1442,13 @@ function tourFifths(st, sim) {
 // ------------------------------------------------------------------ the leg CEGAR (buildSteer)
 // at most LEG_ROUNDS features a build from the DP's legs (like legTour's rounds: bounded, and the build's time on T0())
 const LEG_ROUNDS = 2;
-/** the leg CEGAR on (default; EEAT_LEGCEGAR=0 or opts.legCegar === false: off, main's build) */
+/** the leg CEGAR: OPT-IN (EEAT_LEGCEGAR=1 or opts.legCegar true; 'keep': without the check before a build again and
+ *  the revert, for measurement); off (the default): main's build. Its A/B (box 3, W5, findS 300; CLAUDE.md's steer row):
+ *  Good Egg 0 of 2 routed vs 2 of 2, EZ Spooky Shack 2.1x / 1.9x slower (the steer 15-21 s vs 7-9 s: past the search's
+ *  15-s wait), Stupid Fox s1 54 vs 133 s; Endeavor's file unchanged (its DP loses a coin with the switch modelled) */
 function legCegarOn(opts) {
-	const v = opts && opts.legCegar !== undefined ? opts.legCegar : process.env.EEAT_LEGCEGAR === 'keep' ? 'keep' : process.env.EEAT_LEGCEGAR !== '0';
+	const env = process.env.EEAT_LEGCEGAR;
+	const v = opts && opts.legCegar !== undefined ? opts.legCegar : env === 'keep' ? 'keep' : env === '1' || env === 'on';
 	return v === 'keep' ? 'keep' : !!v;
 }
 /** the coin DP's value at the level's start state (fifths; Infinity: none): the lookup's own DP part (dpFifths) */
@@ -1685,7 +1689,7 @@ function buildSteer(level, opts) {
 		}
 		return { B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs, freeOn };
 	};
-	// THE LEG CEGAR (d4-cegar-dp-legs, 2026-09-29; default on, EEAT_LEGCEGAR=0 or opts.legCegar false: off). The loop in
+	// THE LEG CEGAR (d4-cegar-dp-legs, 2026-09-29; OPT-IN: EEAT_LEGCEGAR=1 or opts.legCegar true, legCegarOn). The loop in
 	// oneBuild replays the physics plan from the start, which takes no coin, so on a level whose walk plan passes a coin
 	// door the DP's legs are built in ONE layer of the modelled features with every gate of a feature the build does not
 	// model OPEN (makeModel gateOpen): a leg may run through a switch door that is shut when the ball walks it (Endeavor:
