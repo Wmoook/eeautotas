@@ -506,7 +506,7 @@ function sectionD() {
 	const von = SF.steerFifths(rc, s2);
 	s2._switches.set(1, false);
 	const voff = SF.steerFifths(rc, s2);
-	check('switch 1 off again (a toggle, or its 1619 reset) behind its shut door: no value (ranked behind every valued state; the layer field would say near)', voff === -1 && von >= 0, `${von / 5} tiles -> ${voff}`);
+	check('switch 1 off again (a toggle, or its 1619 reset) behind its shut door: the chain has no way there (-2) and the value is the layers\' (main\'s: the chain never takes one away)', SF.chainFifths(rc, s2) === -2 && voff === SF.steerFifths(rp, s2) && von >= 0, `${von / 5} tiles -> ${voff / 5}`);
 	const s3 = new E.EESim(L); s3.reset();
 	for (let t = 0; t <= 80 + 30; t++) { E.applyMask(inp, ms[t]); s3.tick(inp); }
 	const w1 = SF.steerFifths(rc, s3);
