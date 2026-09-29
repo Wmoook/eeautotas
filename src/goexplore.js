@@ -1219,6 +1219,9 @@ const DOOM_A = 2000;               // (head A: a doomed cell's tiles more, like 
 const DOOM_CACHE_BYTES = 16 << 20; // (the floods' reached-tile bitsets kept, per analyzer (a worker's own))
 const DOOM_PER_KEY = 8;            // (floods kept per (counts, collected set, respawn))
 const DOOM_BUDGET = 0.03;          // (a worker's floods: at most this share of its time, after DOOM_FREE_MS)
+const DOOM_IDLE = 0.005;           // (the same once DOOM_IDLE_N floods found nothing doomed: Sandcastle Safari's 7,596
+                                   // floods of new collected sets in 45 s, none doomed, 9% of its workers' time)
+const DOOM_IDLE_N = 256;
 const DOOM_FREE_MS = 2000;
 const DOOM_SHARE = 0.0625;         // (head B: a doomed room's draw kept this often while rooms that are not wait)
 function doomOf(L) {
@@ -1367,7 +1370,7 @@ function doomOf(L) {
 		S.ms += performance.now() - f0;
 		return !r.reached;
 	};
-	const out = { test, stats: () => Object.assign({}, S, { ms: Math.round(S.ms) }), ms: () => S.ms, kills, readers };
+	const out = { test, stats: () => Object.assign({}, S, { ms: Math.round(S.ms) }), ms: () => S.ms, idle: () => S.doomed === 0 && S.floods >= DOOM_IDLE_N, kills, readers };
 	DOOMV.set(L, out);
 	return out;
 }
@@ -2313,7 +2316,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	/** the live state is doomed (DOOMED COUNTS) */
 	const dmNow = () => {
 		if (!dmOn) return false;
-		if ((++dmCalls & 255) === 0) dmAllow = DM.ms() <= DOOM_BUDGET * (Date.now() - t0) + DOOM_FREE_MS;
+		if ((++dmCalls & 255) === 0) dmAllow = DM.ms() <= (DM.idle() ? DOOM_IDLE : DOOM_BUDGET) * (Date.now() - t0) + DOOM_FREE_MS;
 		return DM.test(sim, centreTile(), dmAllow);
 	};
 	/** room r has a cell that is not doomed: no longer dmAll (and the one search hears of it) */
