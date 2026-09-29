@@ -2475,7 +2475,9 @@ function steerInfo(buf, hash, wantInterim) {
 				try {
 					const t1 = Date.now();
 					const sf = SF.fallbackSteer(L, {}, 0);
-					if (sf) {
+					// (a fallback that lost the plain field's coin DP (its build's time) is not taken: The Memory Game's coin-goal
+					// field without its 18-coin DP held 0 coins and 7-9 rooms where the plain field with it held 6 and 17)
+					if (sf && !(st.dp && !sf.dp)) {
 						const b = SF.steerFileBytes(sf, lfp);
 						fs.writeFileSync(d.fb + '.tmp', b); fs.renameSync(d.fb + '.tmp', d.fb);
 						fb = { useful: true, single: false, layers: sf.info.layers, bodies: sf.bodies.length, features: sf.info.features, dp: sf.info.dp, bytes: b.length,
@@ -3785,5 +3787,5 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase, steerInfo,
 	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
