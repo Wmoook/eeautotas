@@ -829,9 +829,10 @@ function counterRelevance(L) {
 	}
 	const exits = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1223,9 +1224,10 @@ function roomUseful(L) {
 	// portals: tile -> its exits (forward) and exit -> the portals that send the ball there (reverse)
 	const exits = new Map(), srcs = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1402,9 +1404,10 @@ function roomFields(L, budget, opts = {}) {
 	// portals: tile -> its exits' tiles
 	const exits = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1569,9 +1572,10 @@ function roomDead(L, budget) {
 	// portals reversed: exit tile -> the portal tiles that send the ball there
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const sl = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[sl]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); if (!l.includes(i)) l.push(i); } }
@@ -1681,9 +1685,10 @@ function lowerBoundTiles(L) {
 	// the portals reversed: exit tile -> the portal tiles that lead there
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); l.push(i); } }
