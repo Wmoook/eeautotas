@@ -192,6 +192,31 @@ function sectionReaders() {
 	check('a later superset: the smaller ones dominated, the list its one group', g1.dom && g2.dom && !g3.dom && D.list.length === 1 && D.list[0] === g3);
 	check('the same class and mask: the same group', D.groupOf(m(3)) === g3 && D.groupOf({ cls: 6, mask: Int32Array.of(0) }).dom === false, JSON.stringify(D.stats()));
 	check('a mask of no mono switch (length 0): one group per class, never dominated', (() => { const D2 = GX.domIndex(); const a = D2.groupOf({ cls: 1, mask: new Int32Array(0) }); const b = D2.groupOf({ cls: 1, mask: new Int32Array(0) }); return a === b && !a.dom; })());
+	// dominance-share (night 3): the dominated groups (dlist) keep --domShare of head B's tournaments; order only
+	check('dlist: every dominated group, in the order they fell', D.dlist.length === 3 && D.dlist.includes(g0) && D.dlist.includes(g1) && D.dlist.includes(g2) && !D.dlist.includes(g3));
+	{
+		const rng = (seed) => { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; };
+		const w1 = () => 1;
+		let fromD = 0, fromL = 0;
+		const r1 = rng(7);
+		for (let k = 0; k < 4000; k++) { const p = GX.domPick(D, 0.125, r1, w1); if (p.shared) { fromD++; if (!p.g.dom) fromD = -1e9; } else { fromL++; if (p.g.dom) fromL = -1e9; } }
+		check('--domShare 0.125: ~1 in 8 tournaments over the dominated groups, the rest over the maximal ones', fromD > 380 && fromD < 620 && fromL > 3300, `${fromD} / ${fromL}`);
+		const r0 = rng(7);
+		let none = true;
+		for (let k = 0; k < 500; k++) if (GX.domPick(D, 0, r0, w1).shared) none = false;
+		check('--domShare 0: never a dominated group (the search before)', none);
+		// no dominated group: no extra random draw, so a level without one searches exactly as before
+		const D3 = GX.domIndex();
+		const only = D3.groupOf({ cls: 1, mask: Int32Array.of(1) });
+		let calls = 0;
+		const rc = () => { calls++; return 0.01; };
+		const p3 = GX.domPick(D3, 0.125, rc, w1);
+		check('no dominated group: the base tournament, the same number of draws (4)', p3.g === only && !p3.shared && calls === 4, `draws ${calls}`);
+		// a dominated group with no cell to pick (weight -1): the maximal ones instead
+		const r2 = rng(3);
+		const p4 = GX.domPick(D, 1, r2, (g) => (g.dom ? -1 : 1));
+		check('dominated groups with nothing to pick: head B draws from the maximal ones', p4.g !== null && !p4.g.dom && !p4.shared);
+	}
 }
 
 // the switch corridor: switch 1 in the corridor (passed there and back), door e before the trophy's shaft
@@ -212,6 +237,15 @@ function sectionSearch() {
 		const w = (done.workers || [])[0] || {};
 		check(`--dom=${dom}: a route, replayed`, res.length > 0, `${res.length ? res[0].ticks : '-'} ticks; groups ${w.groups}, dominated ${w.dominated}, picks in dominated rooms ${w.picksDom}`);
 		if (dom === 1) check('--dom=1: groups counted', (w.groups || 0) >= 2, JSON.stringify({ groups: w.groups, dominated: w.dominated, maximal: w.maximal }));
+	}
+	// dominance-share: with every head-B tournament over the dominated groups (--domShare=1) the route is still found (an
+	// order, no prune) and the tournaments are counted; --domShare=0 counts none
+	for (const sh of [1, 0]) {
+		const ev = gox(file, ['--cells=coarse', '--workers=1', '--seconds=4', '--dom=1', `--domShare=${sh}`, '--seed=3']);
+		const res = ev.filter((e) => e.ev === 'result'), done = ev.find((e) => e.ev === 'done') || {};
+		const w = (done.workers || [])[0] || {};
+		check(`--domShare=${sh}: a route, replayed; head B's tournaments over dominated groups ${sh ? '> 0' : '0'}`, res.length > 0 && (sh ? (w.domShared || 0) > 0 : (w.domShared || 0) === 0),
+			`${res.length ? res[0].ticks : '-'} ticks; dominated ${w.dominated}, domShared ${w.domShared}, picksDom ${w.picksDom}`);
 	}
 	// the pit of test/deaths.js: the death that pays is kept (its room is no dominated one)
 	const PIT = [

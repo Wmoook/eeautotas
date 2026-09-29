@@ -280,6 +280,16 @@ function sectionGpu() {
 	const gr = routesOf(g1);
 	const gev = gr.length ? C.evaluate(pit.level, masksOf(gr[0].inputs)) : null;
 	check('the GPU random runs (eegpu roll): no route without deaths, one through the death with them', routesOf(g0).length === 0 && !!gev && gev.deaths === 1, gev ? `${gev.ms.length} ticks` : '-');
+	// the roll mix (goexplore.js --rollMix): by default every class plays batches, each path rebuilt with its class's keep
+	// (the route above replayed); --roll given: that one class, no mix
+	const gs1 = g1.find((e) => e.ev === 'start') || {}, gd1 = doneOf(g1);
+	check('the GPU random runs take the roll mix by default, the route rebuilt from its classes replays', gs1.mix === '40:0.85,120:0.95,240:0.97' && Array.isArray(gd1.mix) && gd1.mix.length === 3 &&
+		(gd1.batches < 3 || gd1.mix.every((c) => c.batches > 0)) && !!gev && !g1.some((e) => e.ev === 'warning' && /does not replay/.test(e.text || '')),
+		`start mix ${gs1.mix}; ${(gd1.mix || []).map((c) => `${c.roll}/${c.keep}: ${c.batches} batches, ${c.fresh} new cells, ${c.fin} finishes`).join('; ')}`);
+	const g2 = gox(pit.file, ['--gpu=1', `--tool=${tool}`, '--seconds=30', '--first=1', '--roll=40']);
+	const gs2 = g2.find((e) => e.ev === 'start') || {}, gr2 = routesOf(g2);
+	const gev2 = gr2.length ? C.evaluate(pit.level, masksOf(gr2[0].inputs)) : null;
+	check('--roll given: one class (no mix), a route through the death as before', gs2.mix === null && doneOf(g2).mix === null && !!gev2 && gev2.deaths === 1, `start mix ${gs2.mix}, ${gev2 ? gev2.ms.length : '-'} ticks`);
 }
 
 (async () => {
