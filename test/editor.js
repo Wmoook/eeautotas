@@ -514,12 +514,14 @@ const FAKE = `'use strict';
 const fs = require('fs');
 const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')), args = process.argv.slice(3);
 const opt = (k) => { const a = args.find((x) => x.startsWith('--' + k + '=')); return a === undefined ? undefined : a.slice(k.length + 3); };
-if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach, steer: SC.steer || 0 }) + '\\n'), SC.infoDelay || 0);
+if (args[0] === 'info') return void setTimeout(() => process.stdout.write(JSON.stringify({ gpu: SC.gpu || { name: 'fake' }, reach: SC.reach === undefined ? 3 : SC.reach, steer: SC.steer || 0 }) + '\\n'), SC.infoDelay || 0);
 const passOf =(a) => Math.round(Math.log2(+a.find((x) => x.startsWith('--cqx=')).slice(6) / 0.5));
 const prev = fs.existsSync(SC.log) ? fs.readFileSync(SC.log, 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 // (a relay's --prefix: its length and first input logged with the launch, as "#pf=<length>:<first>")
 const pfx = opt('prefix'), pfs = pfx && fs.existsSync(pfx) ? fs.readFileSync(pfx, 'latin1') : null;
-fs.appendFileSync(SC.log, JSON.stringify(pfs === null ? args : args.concat(['#pf=' + pfs.length + ':' + pfs.slice(0, 1)])) + '\\n');
+// (logMem: the run's GPU memory share the editor gave this process, EEAT_GPU_BUDGET_MB, as "#mem=<MB>")
+const args2 = SC.logMem && process.env.EEAT_GPU_BUDGET_MB ? args.concat(['#mem=' + process.env.EEAT_GPU_BUDGET_MB]) : args;
+fs.appendFileSync(SC.log, JSON.stringify(pfs === null ? args2 : args2.concat(['#pf=' + pfs.length + ':' + pfs.slice(0, 1)])) + '\\n');
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (SC.fail) return void setTimeout(() => { say({ error: 'test: the GPU failed' }); process.exit(1); }, SC.fail);
 // (oom: the first oom launches of each command find no GPU memory for a context, as next to another process holding it)
@@ -966,6 +968,28 @@ async function passesSection() {
 			sz.join('|') === '-|-|--burstPar=2 --gpuCells=26 --burstCap=0|--burstPar=2 --gpuCells=26 --burstCap=0|--burstPar=2 --gpuCells=26 --burstCap=0' &&
 			open.join() === 'true,false,false,false,false,false,false,true,false,true' && dry.join() === '1,2,0,1,0,1',
 			`sizes ${sz.join(' | ')}; open ${open.join()}; dry ${dry.join()}`);
+	}
+	// THE RUN'S GPU MEMORY BUDGET (fake sizes): EEAT_GPUMEM_GB first; else the free memory at the start and at most the GPU
+	// split by the runs on it; the tools' estimates; every move's table (main's on a GPU of the budget, where its share
+	// holds it); the breaker's (main's rule on the budget, at most what its share holds); the device's registry of runs
+	{
+		const B = [ED.runBudgetMB({ totalMB: 40960, freeMB: 40000, runs: 2 }), ED.runBudgetMB({ totalMB: 40960, freeMB: 18000, runs: 2 }), ED.runBudgetMB({ totalMB: 16303, freeMB: 14100, runs: 1 }),
+			ED.runBudgetMB({ totalMB: 40960, freeMB: 40000, runs: 1, gb: 16 }), ED.runBudgetMB({ totalMB: 0, freeMB: 0, runs: 1 }), ED.runBudgetMB({ totalMB: 40960, freeMB: 500, runs: 3 })];
+		const est = [ED.toolMemMB('gorolls', 20480), ED.toolMemMB('gorolls', 8192), ED.toolMemMB('explore', 14760, { cellLog: 27 }), ED.toolMemMB('breaker', 9912, { cellLog: 28 }),
+			ED.toolMemMB('goexplore', 10000, { big: true }), ED.toolMemMB('escape', 10000, { big: false }), ED.toolMemMB('goal', 1)];
+		const cells = [ED.exploreCellsFor(20480, 14760), ED.exploreCellsFor(14100, 10000), ED.exploreCellsFor(8192, 8000), ED.exploreCellsFor(20480, 2500), ED.exploreCellsFor(20480, 1536)];
+		const brk = [ED.breakCellsFit(20480, 20480), ED.breakCellsFit(20480, 9912), ED.breakCellsFit(40960, 40960), ED.breakCellsFit(14100, 6000), ED.breakCellsFit(20480, 1536)];
+		const rd = path.join(HOME, 'gpumem-reg'), d0 = process.env.EEAT_GPUMEM_DIR, c0 = process.env.CUDA_VISIBLE_DEVICES;
+		fs.mkdirSync(rd, { recursive: true });
+		process.env.EEAT_GPUMEM_DIR = rd; process.env.CUDA_VISIBLE_DEVICES = '6';
+		for (const f of ['6~' + process.pid, '6~999999', '7~' + process.pid, '6~' + process.ppid]) fs.writeFileSync(path.join(rd, f), '{}');
+		const runs = ED.gpuRunsNow(), left = fs.readdirSync(rd).sort().join(',');
+		if (d0 === undefined) delete process.env.EEAT_GPUMEM_DIR; else process.env.EEAT_GPUMEM_DIR = d0;
+		if (c0 === undefined) delete process.env.CUDA_VISIBLE_DEVICES; else process.env.CUDA_VISIBLE_DEVICES = c0;
+		check("the run's GPU memory budget: EEAT_GPUMEM_GB, else min(free at the start, the GPU / its runs); the tools' estimates; every move's table and the breaker's sized to the share; the device's live runs (a dead run's file removed)",
+			B.join() === '20480,18000,14100,16384,0,1536' && est.join() === '5720,1624,4696,6296,4848,1312,1000' && cells.join() === '27,27,26,26,24' && brk.join() === '29,28,30,27,24' &&
+			runs === 2 && left === ['6~' + process.pid, '6~' + process.ppid, '7~' + process.pid].sort().join(','),
+			`budgets ${B.join()}; estimates ${est.join()}; every move ${cells.join()}; breaker ${brk.join()}; runs ${runs} (${left})`);
 	}
 	// the GPU random runs (strategy 'gorolls': node src/goexplore.js --gpu=1, here a stand-in): a GPU strategy with the
 	// stop and pause files, the level blob, the reach file and the tool; its route counts, it is told the depth bound on
@@ -1783,6 +1807,28 @@ process.stdin.on('end', end);
 		st.log.filter((x) => /out of memory\); again in 5 s \(retry 1\)/.test(x)).length === 2 && st.stage === 'found' && st.elapsed >= 5,
 		`GPU strategies ${G4.map((q) => `${q.key} ${q.state}${q.error ? ` (${q.error})` : ''}`).join(', ')}; launches explore ${n4('explore')}, beam ${n4('beam')}; ` +
 		`${st.log.filter((x) => /again in/.test(x)).join(' | ')}; ${st.stage}; ${st.elapsed.toFixed(1)} s`);
+	// with the run's GPU memory budget (the tool's info gives the GPU's totals: 16 GB, 12 GB free; one run on the device):
+	// every GPU tool gets its share as EEAT_GPU_BUDGET_MB, every move a --cells of its share; out of memory at its start,
+	// the strategy starts again at once (0.5 s) with its share halved, not after 5 s
+	{
+		const sc5 = path.join(HOME, 'cpu-oom-budget.json'), log5 = path.join(HOME, 'cpu-oom-budget.log'), rd = path.join(HOME, 'gpumem-reg5'), d0 = process.env.EEAT_GPUMEM_DIR;
+		process.env.EEAT_GPUMEM_DIR = rd;
+		fs.writeFileSync(sc5, JSON.stringify({ log: log5, R, runs: {}, beam: null, oom: 1, logMem: true, gpu: { name: 'fake', memMB: 16384, totalMB: 16384, freeMB: 12000 } }));
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 9, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc5], salts: false });
+		st = await waitDone(40000);
+		if (d0 === undefined) delete process.env.EEAT_GPUMEM_DIR; else process.env.EEAT_GPUMEM_DIR = d0;
+		const L5 = fs.readFileSync(log5, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+		const mem5 = (c) => L5.filter((a) => a[0] === c).map((a) => { const m = a.find((x) => String(x).startsWith('#mem=')); return m ? +m.slice(5) : 0; });
+		const ex = mem5('explore'), bm = mem5('beam'), exCells = L5.filter((a) => a[0] === 'explore').map((a) => (a.find((x) => String(x).startsWith('--cells=')) || '-'));
+		const G5 = st.strategies.filter((q) => !q.cpu);
+		check('with the run\'s GPU memory budget: every GPU tool gets its share (EEAT_GPU_BUDGET_MB, at most the 12 GB free), every move a --cells; out of memory at the start: again at once (0.5 s) with the share halved',
+			G5.length === 2 && G5.every((q) => q.state !== 'error') && ex.length >= 2 && bm.length >= 2 && ex.every((m) => m > 0 && m <= 12000) && bm.every((m) => m > 0 && m <= 12000) &&
+			ex[1] <= Math.ceil(ex[0] / 2) + 1000 && bm[1] <= Math.ceil(bm[0] / 2) + 1000 && exCells.every((c) => /^--cells=2[4-7]$/.test(c)) &&
+			st.log.filter((x) => /out of memory\); again in 0\.5 s \(retry 1\)/.test(x)).length === 2 && st.stage === 'found' && !!st.gpuMem && st.gpuMem.budgetMB === 12000 && st.gpuMem.runs === 1 &&
+			fs.readdirSync(rd).length === 0,
+			`explore shares ${ex.join(', ')} (${exCells.join(', ')}), beam ${bm.join(', ')}; ${st.log.filter((x) => /again in/.test(x)).join(' | ')}; gpuMem ${JSON.stringify(st.gpuMem)}; ` +
+			`registry left ${fs.existsSync(rd) ? fs.readdirSync(rd).join(',') || '-' : 'none'}; ${st.stage}; ${st.elapsed.toFixed(1)} s`);
+	}
 }
 
 // ---------------------------------------------------------------- the proof (eegpu prove: CPU only, no GPU)

@@ -404,7 +404,7 @@ const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
 		...(q.salt ? [`--salt=${q.salt}`] : []), ...(q.salts ? ['--salts=1000000'] : []), ...(q.refine ? ['--refine=1'] : []),
-		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : [])]; } },
+		...(q.lanes ? ['--lanes=auto', `--lanesMax=${q.lanes.max}`, `--lanesStart=${q.lanes.start}`] : []), ...(q.cellLog ? [`--cells=${q.cellLog}`] : [])]; } },
 	// the relay: "every move" again from a point of the nearest attempt so far (its inputs as --prefix, a fresh table,
 	// coarse speed cells: see RELAY_CELLS)
 	relay: { label: 'from the nearest attempt', args: (f, o, q) => ['explore', f.bin, '-', `--prefix=${q.prefixFile}`, '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
@@ -432,7 +432,7 @@ const STRATEGIES = {
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
-			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : []), ...gxExtra()] },
+			...(o.burstBig ? burstSizeArgs(sizingMB()) : []), ...(q.gpuMem ? [`--burstSmallS=${GPUMEM_SMALL_S}`, `--burstOomS=${GPUMEM_OOM_S}`] : [])] : []), ...gxExtra()] },
 	// the stall escape (see ESC_WAIT_S): a second one search (goexplore.js, its own archive and GPU bursts) from a stalled
 	// search's nearest attempt (--prefix), on a share of the CPU search's workers
 	escape: { label: 'escape: a fresh one search from the nearest attempt', cpu: true, args: (f, o, q) => [...STRATEGIES.goexplore.args(f, Object.assign({}, o, { workers: q.workers, seed: q.seed }), q),
@@ -639,7 +639,7 @@ function schedule() {
 		// time; now also a whole breakStep (20 s) of the round without its own progress or a gate (R.quiet). Opt-in until
 		// an A/B shows it (src/out/night/n2_3_time_to_route.md): b.breakShare === true / EEAT_BREAK_SHARE=1
 		const R = brk && brk.round;
-		const share = !!cur && breakShareOpen(cur.opts, toolInfo && toolInfo.memMB, R, now);
+		const share = !!cur && breakShareOpen(cur.opts, sizingMB(), R, now);
 		if (R && share !== !!R.shareOn) {
 			R.shareOn = share;
 			note(share ? `${S.strategies[BK].label}: round ${brk.rounds} got nothing of its own for ${cur.opts.breakStep} s: the one search's bursts go on beside the round`
@@ -1097,6 +1097,107 @@ const breakShareOpen = (opts, memMB, R, now) => !!(opts && opts.breakShare && me
 const breakDryAfter = (dry, hit, own, own0) => hit || (own || 0) > (own0 || 0) ? 0 : (dry || 0) + 1;
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
+// THE RUN'S GPU MEMORY BUDGET (n3-gpu-mem-fit, 2026-09-29; EEAT_GPUMEM=0: none, main's sizing). Each GPU tool sized
+// itself by the WHOLE GPU (the random runs' pool a quarter of it, every move's table and states, the bursts' big sizing
+// from 20 GB, the wall breaker's table 0.42 of it), so one Find a route run held ~20 GB, two on one 40 GB A100 (the
+// sweeps) had "out of memory" in 25 of 58 runs (sweep 6: contexts at cuCtxCreate / cuCtxSetLimit, tables at cuMemAlloc;
+// the bursts at the small sizing for 300 s, the others waiting 5-60 s), and the user's RTX 5080 has 16 GB. Now a run has
+// a budget B: EEAT_GPUMEM_GB (GB) when set, else the GPU's free memory at its start (the tool's `info`) and at most the
+// GPU's memory split by the Find a route runs on that device (a registry of the live runs: <tmp>/eeat-gpumem/<device>~<pid>,
+// EEAT_GPUMEM_DIR). Each GPU tool of the run gets its SHARE as EEAT_GPU_BUDGET_MB (the native tools size everything by
+// it: cudadrv.h Device.mem; the one search's and the escape's bursts inherit it): B less what the run's other live GPU
+// tools hold (memHeld: an estimate per tool from its sizing, set at its launch, dropped at its exit), at least
+// GPUMEM_MIN_MB; every move asks the table main takes on a GPU of B (2^27 from 11 GB) where its share holds it, the wall
+// breaker the largest table its share holds (at most main's rule on B); the bursts' big sizing, the breaker's reserve and
+// the gated share read B as the GPU's memory. A tool that still finds no memory starts again at once at the next size
+// down (its share halved, memDown: GPUMEM_RETRY_S, then GPU_RETRY_S as before); the one search's bursts leave the small
+// sizing after GPUMEM_SMALL_S and wait GPUMEM_OOM_S. Sizing only: the same searches, nothing pruned.
+const GPUMEM_MIN_MB = 1536, GPUMEM_CTX_MB = 600, GPUMEM_RETRY_S = [0.5, 2], GPUMEM_DOWN_MAX = 3, GPUMEM_SMALL_S = 60, GPUMEM_OOM_S = 1;
+const gpuMemOn = () => process.env.EEAT_GPUMEM !== '0';
+/** the run's budget (MB) from {totalMB, freeMB (at the start), runs (on the device, this one included), gb (EEAT_GPUMEM_GB)};
+ *  0: unknown (no totals: an older tool), the sizing stays main's */
+function runBudgetMB(o) {
+	const gb = +(o && o.gb);
+	if (gb > 0) return Math.round(gb * 1024);
+	if (!o || !(o.totalMB > 0)) return 0;
+	const split = Math.floor(o.totalMB / Math.max(1, Math.floor(o.runs) || 1));
+	return Math.max(GPUMEM_MIN_MB, Math.min(o.freeMB > 0 ? o.freeMB : o.totalMB, split));
+}
+/** a GPU tool's memory (MB, an estimate: its tables, states and context) at share s (MB) and its launch's sizing q */
+function toolMemMB(key, s, q) {
+	q = q || {};
+	const mb = (log2, perCell) => Math.round((2 ** log2) * perCell / 1048576);
+	switch (key) {
+		case 'gorolls': return GPUMEM_CTX_MB + Math.round(s > 12288 ? s / 4 : s / 8);   // (rollhost.h: a quarter, an eighth up to 12 GB)
+		case 'goal': case 'guide': return 1000;   // (measured: 958 MB a beam on the A100)
+		case 'explore': return GPUMEM_CTX_MB + mb(q.cellLog || 27, 16) + Math.min(2048, Math.round(s / 3));
+		case 'relay': return GPUMEM_CTX_MB + mb(q.cellLog || 25, 16) + (q.big || q.alone ? 800 : 200);
+		case 'breaker': return GPUMEM_CTX_MB + mb(q.cellLog || 24, 16) + Math.round(BREAK_CAP * 800 / 1048576);
+		// (the one search / the escape: their bursts' lanes, each a server's context, its table and a layer of states)
+		case 'goexplore': case 'escape': return q.big ? 2 * (GPUMEM_CTX_MB + 1024 + 800) : GPUMEM_CTX_MB + 512 + 200;
+		default: return GPUMEM_CTX_MB;
+	}
+}
+/** the explore table (log2 cells) main takes on a GPU of memMB (explorehost.h: 2^27 from 11 GB, 2^26 from 5 GB), at most
+ *  what share s (MB) holds with a third of it for the states and a context */
+function exploreCellsFor(memMB, s) {
+	let c = memMB >= 11 * 1024 ? 27 : memMB >= 5 * 1024 ? 26 : 25;
+	while (c > 24 && 16 * 2 ** c / 1048576 + s / 3 + GPUMEM_CTX_MB > s) c--;
+	return c;
+}
+/** the wall breaker's table (log2 cells) for share s (MB): main's rule on the budget (breakCells), at most what s holds
+ *  with its states (BREAK_CAP) and a context; 2^24 .. 2^31 */
+const breakCellsFit = (budgetMB, s) => {
+	let c = breakCells(budgetMB);
+	while (c > 24 && toolMemMB('breaker', s, { cellLog: c }) > s) c--;
+	return c;
+};
+// the registry of the live Find a route runs per device (a file per run: <device>~<pid>)
+const gpuRegDir = () => process.env.EEAT_GPUMEM_DIR || path.join(os.tmpdir(), 'eeat-gpumem');
+const gpuDevKey = () => String(process.env.CUDA_VISIBLE_DEVICES || 'all').replace(/[^\w.,-]/g, '_') || 'all';
+let gpuRegFile = '';
+function gpuRegister() {
+	try {
+		fs.mkdirSync(gpuRegDir(), { recursive: true });
+		gpuRegFile = path.join(gpuRegDir(), `${gpuDevKey()}~${process.pid}`);
+		fs.writeFileSync(gpuRegFile, JSON.stringify({ pid: process.pid, at: Date.now() }));
+	} catch (e) { gpuRegFile = ''; }
+}
+function gpuUnregister() { if (gpuRegFile) { try { fs.unlinkSync(gpuRegFile); } catch (e) { /* gone */ } gpuRegFile = ''; } }
+process.on('exit', gpuUnregister);
+/** the live Find a route runs on this device (this one included when registered; a dead run's file is removed) */
+function gpuRunsNow() {
+	let n = 0;
+	try {
+		const pre = `${gpuDevKey()}~`;
+		for (const f of fs.readdirSync(gpuRegDir())) {
+			if (!f.startsWith(pre)) continue;
+			const pid = +f.slice(pre.length);
+			let live = pid === process.pid;
+			if (!live && pid > 0) { try { process.kill(pid, 0); live = true; } catch (e) { live = !!e && e.code === 'EPERM'; } }
+			if (live) n++; else { try { fs.unlinkSync(path.join(gpuRegDir(), f)); } catch (e) { /* gone */ } }
+		}
+	} catch (e) { /* no registry */ }
+	return Math.max(1, n);
+}
+const memHeld = new Map();   // strategy index -> its tool's estimated memory (MB) while its process lives
+/** the run's budget now (MB; 0: none): recomputed at each launch from the latest `info` and the runs on the device */
+function gpuBudget() {
+	if (!gpuMemOn() || !toolInfo || S && S.cpuOnly) return 0;
+	const runs = gpuRunsNow(), B = runBudgetMB({ totalMB: toolInfo.totalMB, freeMB: toolInfo.freeMB, runs, gb: process.env.EEAT_GPUMEM_GB });
+	if (B && S) S.gpuMem = { budgetMB: B, totalMB: toolInfo.totalMB || 0, freeMB: toolInfo.freeMB || 0, runs };
+	return B;
+}
+/** the GPU memory the editor sizes by (the breaker's table and reserve, the bursts' big sizing, the gated share): the
+ *  run's budget, else the GPU's */
+const sizingMB = () => gpuBudget() || (toolInfo && toolInfo.memMB) || 0;
+/** strategy n's share (MB) for a process launched now: the budget less the others' holdings, halved per memDown */
+function gpuShareOf(n, B) {
+	let held = 0;
+	for (const [k, mb] of memHeld) if (k !== n && alive(kids[k])) held += mb;
+	const V = S.strategies[n];
+	return Math.max(GPUMEM_MIN_MB, Math.floor(Math.max(GPUMEM_MIN_MB, B - held) / 2 ** Math.min(GPUMEM_DOWN_MAX, V.memDown || 0)));
+}
 const retryTimers = [];   // (strategy k's pending start again, a timeout; the search holds open while one waits)
 const retryHolds = () => retryTimers.some(Boolean);
 function clearRetries() { for (let k = 0; k < retryTimers.length; k++) { if (retryTimers[k]) clearTimeout(retryTimers[k]); retryTimers[k] = null; } }
@@ -1107,7 +1208,11 @@ function gpuRetry(n, ch, again) {
 	if (!S.running || S.halted || S.stage === 'stopped' || S.gpuFailed) return false;
 	// (a process that ran a while before it failed: the back-off starts over)
 	const k = V.retries = ch && ch.startedAt && Date.now() - ch.startedAt > 120000 ? 1 : wait0 + 1;
-	const wait = GPU_RETRY_S[Math.min(k - 1, GPU_RETRY_S.length - 1)];
+	// (with the run's GPU memory budget: at once at the next size down, its share halved (memDown), GPUMEM_RETRY_S; then
+	// the back-off as before)
+	const B = gpuBudget();
+	if (B) V.memDown = k === 1 && ch && ch.startedAt && Date.now() - ch.startedAt > 120000 ? 1 : Math.min(GPUMEM_DOWN_MAX, (V.memDown || 0) + 1);
+	const wait = B && k <= GPUMEM_RETRY_S.length ? GPUMEM_RETRY_S[k - 1] : GPU_RETRY_S[Math.min(k - 1, GPU_RETRY_S.length - 1)];
 	if (S.seconds - searchClock(Date.now()) - wait < 3) return false;
 	S.gpuRetries = (S.gpuRetries || 0) + 1;
 	note(`${V.label}: ${V.error}; again in ${wait} s (retry ${k})`);
@@ -1452,7 +1557,9 @@ function breakLaunch(n) {
 	if (!R.chain || S.result || roundLeft < 3 || left < 3) return breakEnd(n);
 	const ch = R.chain, file = path.join(dir(), `break_${n}.eetas`);
 	try { fs.writeFileSync(file, Buffer.from(ch.inputs, 'latin1')); } catch (e) { return breakEnd(n); }
-	const cellLog = cur.opts.breakCells || breakCells(toolInfo && toolInfo.memMB);
+	// (the run's GPU memory budget: the largest table the breaker's share holds, at most main's rule on the budget)
+	const BG = gpuBudget();
+	const cellLog = cur.opts.breakCells || (BG ? breakCellsFit(BG, gpuShareOf(n, BG)) : breakCells(toolInfo && toolInfo.memMB));
 	// (a small table: a box of BREAK_REGION tiles around the start, as the analysis's 2^28 runs had)
 	let region = '';
 	if (cellLog <= BREAK_REGION_LOG) {
@@ -1462,7 +1569,7 @@ function breakLaunch(n) {
 		const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
 		region = `${tx - BREAK_REGION},${ty - BREAK_REGION},${tx + BREAK_REGION},${ty + BREAK_REGION}`;
 	}
-	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (toolInfo && toolInfo.memMB > 0 ? toolInfo.memMB : 8192)));
+	const reserve = Math.max(1024, Math.round(BREAK_RESERVE_F * (sizingMB() || 8192)));
 	// (the stall target: the coin plan's next gate from this start, once per chain step; none: the trophy)
 	if (ch.gate === undefined) ch.gate = breakGate(ch.inputs) || roomGate(ch.inputs);
 	if (!ch.gate) R.trophyRuns = (R.trophyRuns || 0) + 1;
@@ -2039,6 +2146,9 @@ function start(b, gpu, test) {
 	const steerBuild = wantSteer ? steerInfo(buf, levelHash) : null;
 	const steerP = !wantSteer ? Promise.resolve(null) : Promise.race([steerBuild, new Promise((res) => { const t = setTimeout(() => res({ late: true }), steerWait); if (t.unref) t.unref(); })]);
 	const reachP = reachInfo(buf, levelHash, deathMoves), toolP = noGpu ? Promise.resolve('') : toolVersionProblem([tool, ...toolArgs]);
+	// (the run's GPU memory budget: this run in the device's registry, the free memory at its start: gpuBudget)
+	memHeld.clear();
+	if (!noGpu && gpuMemOn()) { gpuRegister(); gpuInfoRefresh([tool, ...toolArgs]); }
 	const gen = ++searchGen;
 	// (the early start: the strategies that never read the steer field (EARLY_KEYS: the GPU random runs, the path skips)
 	// start as soon as the reach field and the tool check are done; the others when the steer field is built or its wait
@@ -2459,6 +2569,20 @@ function pruneReachCache() {
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
 	for (const { f } of fl.filter((x, k) => k >= 8 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
+/** the tool's `info` as the editor keeps it: {steer, memMB (the GPU's, or EEAT_GPU_BUDGET_MB), totalMB, freeMB (now), at} */
+const gpuInfoOf = (info) => ({ steer: info.steer || 0, memMB: info.gpu && info.gpu.memMB > 0 ? info.gpu.memMB : 0, totalMB: info.gpu && info.gpu.totalMB > 0 ? info.gpu.totalMB : 0,
+	freeMB: info.gpu && info.gpu.freeMB > 0 ? info.gpu.freeMB : 0, at: Date.now() });
+/** the free GPU memory at a search's start (the budget, gpuBudget): the tool's `info` again when the one the version check
+ *  kept is older than GPUMEM_INFO_MS (the app's later searches); until it answers the older one counts */
+const GPUMEM_INFO_MS = 30000;
+function gpuInfoRefresh(cmd) {
+	if (!gpuMemOn() || !toolInfo || Date.now() - (toolInfo.at || 0) < GPUMEM_INFO_MS || cmd[0] === process.execPath) return;
+	try {
+		require('child_process').execFile(cmd[0], [...cmd.slice(1), 'info', ...G.cacheArgs(), `--parent=${process.pid}`], { encoding: 'utf8', windowsHide: true, detached: true }, (err, out) => {
+			for (const line of String(out || '').split(/\r?\n/)) { try { const j = JSON.parse(line); if (j && j.reach === RF_VERSION && toolInfo) toolInfo = gpuInfoOf(j); } catch (e) { /* not JSON */ } }
+		});
+	} catch (e) { /* the older one */ }
+}
 /** why the native tool cannot run this app's searches ('' = it can): its `info` must say it reads the reach file of this
  *  version (an older build refuses every RCH3 file); asked once per build of the tool */
 const toolChecked = new Map();
@@ -2477,7 +2601,8 @@ function toolVersionProblem(cmd) {
 			let info = null;
 			for (const line of String(out || '').split('\n')) { try { const j = JSON.parse(line); if (j && typeof j === 'object') info = j; } catch (e) { /* not JSON */ } }
 			// (its steer file version and the GPU's memory: the steer field's budget, launchAll)
-			if (info && info.reach === RF_VERSION) { toolInfo = { steer: info.steer || 0, memMB: info.gpu && info.gpu.memMB > 0 ? info.gpu.memMB : 0 }; resolve(''); }
+			// (and its totals, the free memory now: the run's GPU memory budget, gpuBudget)
+			if (info && info.reach === RF_VERSION) { toolInfo = gpuInfoOf(info); resolve(''); }
 			// (its one kernel launch failed: launch.h's {"error":...,"launchError":true} line, exit 6 / 7)
 			else if (info && info.launchError) resolve(`the GPU failed (${String(info.error || 'a kernel launch failed').slice(0, 200)})`);
 			else resolve('the search tool is older than the app: rebuild it (node tools/build-native.js)');
@@ -2544,6 +2669,14 @@ function launch(n) {
 		// a route of T ticks known: only the first T - 1 ticks (a route there is faster)
 		q.depth = V.depthCap = S.result ? Math.max(1, boundTicks() - 1) : 0;
 	}
+	// (the run's GPU memory budget: this process's share, its sizing, its entry in the ledger and EEAT_GPU_BUDGET_MB)
+	const gB = !V.cpu || V.gpuShare || V.rolls ? gpuBudget() : 0, gMB = gB ? gpuShareOf(n, gB) : 0;
+	if (gMB) {
+		q.gpuMem = gMB;
+		if (V.key === 'explore') q.cellLog = exploreCellsFor(gB, gMB);
+		const big = (V.key === 'goexplore' || V.key === 'escape') && cur.opts.burstBig && burstSizeArgs(gB).length > 0;
+		memHeld.set(n, toolMemMB(V.key, gMB, { cellLog: V.key === 'breaker' ? V.brk.cellLog : V.key === 'relay' ? (q.alone ? 27 : q.big ? 26 : 25) : q.cellLog, big, alone: q.alone }));
+	} else memHeld.delete(n);
 	const args = STRATEGIES[V.key].args(cur.files, cur.opts, q);
 	const cpu = V.cpu;
 	// (the GPU random runs: node src/goexplore.js --gpu=1, a GPU strategy (stop and pause files for its eegpu) that is told
@@ -2569,9 +2702,10 @@ function launch(n) {
 		`--parent=${process.pid}`];
 	// (the CPU search sizes its workers' heaps from its memory budget: no heap flag for it, which would cap them all; the
 	// GPU random runs are one thread, their cells' states outside the V8 heap)
-	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined,
+	const env0 = cpu ? C.workerHeapEnv() : rolls ? C.heapEnv(4096) : undefined;
+	const ch = spawn(cmd[0], cmd.slice(1), { stdio: [cpu || rolls ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, env: gMB ? Object.assign(env0 || { ...process.env }, { EEAT_GPU_BUDGET_MB: String(gMB) }) : env0,
 		detached: !cpu });
-	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)) });
+	if (EVLOG) evlog(V.key, { ev: 'spawn', args: cmd.slice(1).map((x) => String(x).slice(0, 200)), ...(gMB ? { gpuMB: gMB, budgetMB: gB } : {}) });
 	ch.stopFile = stopFile;
 	ch.startedAt = Date.now();
 	ch.paused = pausedNow;
@@ -2799,7 +2933,8 @@ function launch(n) {
 			if (brk && brk.cellLogNoted !== ev.cellLog) { brk.cellLogNoted = ev.cellLog; note(`${V.label}: ${ev.warn}${Number.isFinite(ev.freeMB) ? ` (${ev.freeMB} MB free)` : ''}`); }
 			// (under a quarter of the table it planned: another process holds the memory; it waits for it, the round's
 			// first BREAK_MEM_WAITS times, rather than run on a table too small for its wall (2^24 on the shared H100))
-			if (V.brk && ev.cellLog <= V.brk.cellLog - 2 && brk && brk.round && brk.round.chain && (brk.round.memWaits || 0) < BREAK_MEM_WAITS) halt(ch, 'memwait');
+			// (with the run's GPU memory budget: the table it got, at once: the next size down, no wait)
+			if (V.brk && ev.cellLog <= V.brk.cellLog - 2 && brk && brk.round && brk.round.chain && (brk.round.memWaits || 0) < BREAK_MEM_WAITS && !gpuBudget()) halt(ch, 'memwait');
 		} else if (ev.error && ev.steer === 0 && !V.noSteer) {
 			// the tool cannot use the steer file (the GPU's memory, a stale file): this strategy again without it, now and
 			// from now on (its distances the reach field's: closer() ranks them behind the steer field's)
@@ -3147,6 +3282,7 @@ function markBusy() {
 }
 function finish() {
 	S.running = false;
+	gpuUnregister(); memHeld.clear();
 	if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
 	if (schedTimer) { clearInterval(schedTimer); schedTimer = null; }
 	clearRetries();
@@ -3660,5 +3796,5 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, runBudgetMB, toolMemMB, exploreCellsFor, breakCellsFit, gpuRunsNow, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
