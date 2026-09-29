@@ -3883,7 +3883,8 @@ function solveFile(what) {
 
 // ---------------------------------------------------------------- the exploration view (the page's heat and trails)
 // The page's "exploration" layer (src/app/editor.html, GET /api/editor/solve/heat; src/heat.js): WHERE THE SEARCH HAS
-// BEEN, per tile (the heat: a visit count and the last visit), and the LATEST ATTEMPTS of every strategy (the trails).
+// BEEN, per tile (the heat: a visit count, the first and the last visit), and the LATEST ATTEMPTS of every strategy (the
+// trails).
 // The heat: the CPU search's, the stall escape's and the GPU random runs' own heat events (goexplore.js --heat=1: the
 // tiles of the cells they make and pick; the GPU random runs' a sample of the cells they register), and the
 // tips of every strategy's attempts (their last EXP_TIP ticks: every move, the relay, the wall breaker, the beams, the
@@ -3976,7 +3977,7 @@ function exploreTick() {
 /** GET /api/editor/solve/heat: the running (or last) search's heat since version `since` (all of it when the page's
  *  search is another: `search`), its trails newer than `trail`; t = ms since the search's start (stopped at its end) */
 function heatState(since, trail, search) {
-	if (!EXV || !S || EXV.search !== S.started) return { search: 0, running: false, t: 0, w: 0, h: 0, version: 0, full: true, n: 0, visited: 0, idx: '', count: '', last: '', trailId: 0, trails: [] };
+	if (!EXV || !S || EXV.search !== S.started) return { search: 0, running: false, t: 0, w: 0, h: 0, version: 0, full: true, n: 0, visited: 0, idx: '', count: '', first: '', last: '', trailId: 0, trails: [] };
 	const mine = +search === EXV.search;
 	const t = S.running ? Date.now() - S.started : EXV.endT !== undefined ? EXV.endT : Math.round((S.elapsed || 0) * 1000);
 	return Object.assign({ search: EXV.search, running: !!S.running, t, w: EXV.W, h: EXV.H }, EXV.heat.since(mine ? since : 0),

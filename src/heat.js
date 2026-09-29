@@ -10,7 +10,8 @@
 //   indices as little-endian uint32, or a bitset of W x H bits when that is smaller). The editor (src/editor.js) merges
 //   every strategy's heat events, and the tips of the other strategies' attempts (every move, the relay, the wall
 //   breaker, the escape: their closest attempts and sources, sampled), into a HeatMap: per tile a visit count (uint16,
-//   saturating: the updates that marked it) and the last visit (uint32 ms since the search's start), versioned: GET
+//   saturating: the updates that marked it), the first visit and the last visit (uint32 ms since the search's start; the
+//   page colours a tile by its first visit: where the search got to when, the frontier the newest), versioned: GET
 //   /api/editor/solve/heat?since=<version> gives the tiles changed since that version, or every visited tile (since=0,
 //   another search, or a version older than the change log keeps).
 //
@@ -71,16 +72,17 @@ function heatTiles(ev, W, H) {
 	return m === n ? out : out.slice(0, m);
 }
 
-/** a W x H level's heat for one search: per tile its visit count (uint16, saturating) and last visit (ms since the
- *  search's start), versioned for the page's deltas */
+/** a W x H level's heat for one search: per tile its visit count (uint16, saturating), first and last visit (ms since
+ *  the search's start), versioned for the page's deltas */
 class HeatMap {
 	constructor(W, H) {
 		this.W = W; this.H = H; this.N = W * H;
-		this.count = new Uint16Array(this.N); this.last = new Uint32Array(this.N);
+		this.count = new Uint16Array(this.N); this.first = new Uint32Array(this.N); this.last = new Uint32Array(this.N);
 		this.version = 0; this.visited = 0; this.log = []; this.logTiles = 0;
 		this.scratch = new Uint8Array(this.N);
 	}
-	/** tiles (each once) visited at tMs (ms since the search's start): their counts +1, their last visits tMs */
+	/** tiles (each once) visited at tMs (ms since the search's start): their counts +1, their last visits tMs (and the
+	 *  first visit of a tile new to the heat) */
 	merge(tiles, tMs) {
 		if (!tiles || !tiles.length) return;
 		const tm = Math.max(0, Math.min(0xffffffff, Math.round(tMs)));
@@ -88,7 +90,7 @@ class HeatMap {
 		for (let i = 0; i < tiles.length; i++) {
 			const t = tiles[i];
 			if (!(t >= 0 && t < N)) continue;
-			if (c[t] === 0) this.visited++;
+			if (c[t] === 0) { this.visited++; this.first[t] = tm; }
 			if (c[t] < 65535) c[t]++;
 			l[t] = tm;
 			keep.push(t);
@@ -100,8 +102,9 @@ class HeatMap {
 		this.logTiles += tl.length;
 		while (this.log.length > 1 && (this.logTiles > LOG_TILES || this.log.length > LOG_ENTRIES)) this.logTiles -= this.log.shift().tiles.length;
 	}
-	/** the changes since version v: {version, full, n, idx, count, last} (base64: uint32 LE tiles, uint16 LE counts, uint32
-	 *  LE last visits); every visited tile when v is 0, newer than this map's or older than the change log keeps */
+	/** the changes since version v: {version, full, n, idx, count, first, last} (base64: uint32 LE tiles, uint16 LE counts,
+	 *  uint32 LE first and last visits); every visited tile when v is 0, newer than this map's or older than the change log
+	 *  keeps */
 	since(v) {
 		v = Math.max(0, Math.floor(+v || 0));
 		let tiles;
@@ -117,9 +120,13 @@ class HeatMap {
 			for (const t of out) f[t] = 0;
 			tiles = Int32Array.from(out);
 		}
-		const n = tiles.length, bi = Buffer.alloc(4 * n), bc = Buffer.alloc(2 * n), bl = Buffer.alloc(4 * n);
-		for (let i = 0; i < n; i++) { const t = tiles[i]; bi.writeUInt32LE(t, 4 * i); bc.writeUInt16LE(this.count[t], 2 * i); bl.writeUInt32LE(this.last[t], 4 * i); }
-		return { version: this.version, full: full && !(v === this.version && v > 0), n, visited: this.visited, idx: bi.toString('base64'), count: bc.toString('base64'), last: bl.toString('base64') };
+		const n = tiles.length, bi = Buffer.alloc(4 * n), bc = Buffer.alloc(2 * n), bf = Buffer.alloc(4 * n), bl = Buffer.alloc(4 * n);
+		for (let i = 0; i < n; i++) {
+			const t = tiles[i];
+			bi.writeUInt32LE(t, 4 * i); bc.writeUInt16LE(this.count[t], 2 * i); bf.writeUInt32LE(this.first[t], 4 * i); bl.writeUInt32LE(this.last[t], 4 * i);
+		}
+		return { version: this.version, full: full && !(v === this.version && v > 0), n, visited: this.visited, idx: bi.toString('base64'), count: bc.toString('base64'),
+			first: bf.toString('base64'), last: bl.toString('base64') };
 	}
 }
 
