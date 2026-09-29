@@ -1152,6 +1152,26 @@ function roomOf(L, opts = {}) {
 	// there the thresholds met (the gate's own count is one of them: >= 1), distinct from every count below)
 	const upG = rel.upTo ? rel.upTo.gold : 0, upB = rel.upTo ? rel.upTo.blue : 0;
 	const cnt = (th, v, up) => (up > 0 && v < up ? v : (up > 0 ? up : 0) + met(th, v));
+	// (the deaths (EEAT_DEATHKEY=0: main's raw words, byte for byte): the engine reads the count only at its death doors
+	// (1011, open when lookup <= deaths) and gates (1012, solid unless lookup > the shown count, the count kept while the
+	// ball overlaps one). Keyed raw, every death at any checkpoint was a new room: Cold World (6 gates at 1 and 10, no
+	// door) had 638-786 room keys for 10-11 rooms, 25-28 stall-clock resets by those rooms and its first escape at 215-361 s.
+	// So the count's word = cnt(the doors' and gates' thresholds, deaths, the highest DOOR): the raw count below the
+	// highest door (every death toward a door is a new room, as before), from there the thresholds met; a gate-only level
+	// keys the thresholds met (Cold World 3 classes: 0, 1-9, 10+). The shown count's word = the gates it opens (met). Exact
+	// now (one class opens and shuts the same doors and gates); deaths 1 and 9 still differ in how soon a gate at 10
+	// shuts: a merge of cells like coin identities and the irrelevant counters' thresholds-met key, no prune)
+	const deathKey = !legacy && process.env.EEAT_DEATHKEY !== '0' && L.hasDeathDoor;
+	let dDoor = [], dGate = [], dTh = [];
+	if (deathKey) {
+		const sd = new Set(), sg = new Set(), lk = L.lookup0;
+		for (let i = 0; i < L.width * L.height; i++) { const id = L.fg[i]; if (id === 1011) sd.add(lk[i]); else if (id === 1012) sg.add(lk[i]); }
+		const up = (a, b) => a - b;
+		dDoor = [...sd].sort(up); dGate = [...sg].sort(up); dTh = [...new Set([...sd, ...sg])].sort(up);
+	}
+	const upD = dDoor.length ? dDoor[dDoor.length - 1] : 0;
+	const dWord = deathKey ? (sim) => cnt(dTh, sim.deaths, upD) : (sim) => sim.deaths;
+	const gWord = deathKey ? (sim) => met(dGate, sim._show_death_gate) : (sim) => sim._show_death_gate;
 	// (the sum of the switches on that the key reads, without the mono ones (bits) in the dominance class: a sum mod
 	// 2^32, so the Map's order does not matter; forEach makes no entry arrays)
 	const onSum = (m, salt, read, bits) => {
@@ -1176,8 +1196,8 @@ function roomOf(L, opts = {}) {
 		if (L.hasCoinGate) h = mixW(h, rel.gold ? sim._show_coin_gate : cnt(cTh, sim._show_coin_gate, upG));
 		if (blue) h = mixW(h, rel.blue ? sim.blue_coins : cnt(bTh, sim.blue_coins, upB));
 		if (L.hasBlueCoinGate) h = mixW(h, rel.blue ? sim._show_blue_coin_gate : cnt(bTh, sim._show_blue_coin_gate, upB));
-		if (L.hasDeathDoor) h = mixW(h, sim.deaths);
-		if (L.hasDeathGate) h = mixW(h, sim._show_death_gate);
+		if (L.hasDeathDoor) h = mixW(h, dWord(sim));
+		if (L.hasDeathGate) h = mixW(h, gWord(sim));
 		const bp = mode === 2 ? bitP : null, bo = mode === 2 ? bitO : null;
 		if (sim._switches.size !== 0) { const s = onSum(sim._switches, 0x1234567, readP, bp); if (legacy || s !== 0) h = mixW(h, s); }
 		if (sim._oswitches.size !== 0) { const s = onSum(sim._oswitches, 0x7654321, readO, bo); if (legacy || s !== 0) h = mixW(h, s); }
@@ -1217,7 +1237,7 @@ function roomOf(L, opts = {}) {
 		if (team && sim.team) p.push(`team=${sim.team}`);
 		if (coins) { if (rel.gold || sim.coins < upG) p.push(`coins=${sim.coins}`); else { const n = met(cTh, sim.coins); if (n) p.push(`coins>=${cTh[n - 1]}`); } }
 		if (blue) { if (rel.blue || sim.blue_coins < upB) p.push(`bluecoins=${sim.blue_coins}`); else { const n = met(bTh, sim.blue_coins); if (n) p.push(`bluecoins>=${bTh[n - 1]}`); } }
-		if (L.hasDeathDoor) p.push(`deaths=${sim.deaths}`);
+		if (L.hasDeathDoor) { if (!deathKey || sim.deaths < upD) p.push(`deaths=${sim.deaths}`); else { const n = met(dTh, sim.deaths); p.push(n ? `deaths>=${dTh[n - 1]}` : 'deaths=0'); } }
 		const s = onList(sim._switches, readP), o = onList(sim._oswitches, readO);
 		if (s.length) p.push(`purple=[${s.join(',')}]`);
 		if (o.length) p.push(`orange=[${o.join(',')}]`);

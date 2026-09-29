@@ -12,6 +12,11 @@
 //              dominated, equal = the same group (the time doors' two states), incomparable masks both maximal
 //   search     goexplore.js on a switch corridor: the route with --dom=1 and --dom=0, dominated groups counted, no death
 //              kept into a dominated room (the pit of test/deaths.js still routes through its death)
+//   deaths     the death count's key word (roomOf, EEAT_DEATHKEY=0 = the raw count as before): gates at 1 and 10 and no
+//              door: deaths 1..9 one room ('deaths>=1'), 0 and 10+ others; a death door at 3: deaths 0, 1, 2 distinct
+//              rooms, 3+ one; the shown count by the gates it opens; a death changes the room by a trigger only when its
+//              class does; the legacy key (the GPU's) and the knob off keep the raw count (the knob off = the legacy key
+//              on a level without switches or counters, desc 'deaths=N')
 //   bursts     the GPU bursts' target test: a touch that only turns a mono switch off is no target (bursts.js infoOf via a
 //              stand-in create); roomAim likewise
 // usage: node test/rooms.js      Exit code 1 if any check fails. Writes only in a temp folder.
@@ -41,7 +46,7 @@ const section = (s) => console.log(`\n== ${s}`);
 // d coin door (1), 1 / 2 / 3 purple switches 1 / 2 / 3, e / f purple doors 1 / 2, g purple gate 3, 7 a purple switch no
 // door reads, k crown
 const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], D: [213, 2], G: [214, 2], d: [43, 1], 1: [113, 1], 2: [113, 2],
-	3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 3], 7: [113, 7], k: [5] };
+	3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 3], 7: [113, 7], k: [5], h: [1012, 1], H: [1012, 10], q: [1011, 3] };
 function levelOf(name, rows) {
 	const cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') { if (!ID[ch]) throw new Error(`legend ${ch}`); cells.push([x, y, ...ID[ch]]); } }));
@@ -266,6 +271,55 @@ function sectionSearch() {
 	check('the pit: a route through its death with --dom=1 (the default)', res.length > 0 && res[0].deaths >= 1, res.length ? `${res[0].ticks} ticks, ${res[0].deaths} death(s)` : 'none');
 }
 
+// death gates at 1 and 10 (h, H) off the corridor, a checkpoint and a spike: no door
+const DGATES = [
+	'############',
+	'#S.C..x...T#',
+	'#.######h#H#',
+	'############',
+];
+// a death door at 3 (q) and a gate at 10
+const DDOOR = DGATES.map((r, y) => (y === 2 ? '#.######q#H#' : r));
+function sectionDeaths() {
+	section("deaths: the count keyed by the doors' and gates' thresholds (EEAT_DEATHKEY=0: the raw count)");
+	const A = levelOf('dgates', DGATES).level;
+	check('the gate level: death gates, no death door (hasDeathDoor is doors or gates)', A.hasDeathDoor && A.hasDeathGate && ![...A.fg].includes(1011));
+	const RM = GX.roomOf(A), LG = GX.roomOf(A, { legacy: true });
+	const sim = new E.EESim(A); sim.reset();
+	const at = (n) => { sim.deaths = n; sim._show_death_gate = n; return { k: RM.key(sim), d: RM.desc(sim), l: LG.key(sim), c: RM.cause(sim), m: RM.dom(sim).cls }; };
+	const v = []; for (let n = 0; n <= 14; n++) v.push(at(n));
+	check("deaths 1..9: one room, desc 'deaths>=1'",v.slice(1, 10).every((x) => x.k === v[1].k && x.d === 'deaths>=1'), v.slice(1, 10).map((x) => x.d).join(','));
+	check("deaths 0 and 10+: other rooms (0 'deaths=0', 10..14 one room 'deaths>=10')",v[0].k !== v[1].k && v[10].k !== v[1].k && v[10].k !== v[0].k && v.slice(10).every((x) => x.k === v[10].k && x.d === 'deaths>=10') && v[0].d === 'deaths=0',
+		`${v[0].d} / ${v[10].d}`);
+	check('the desc is a function of the key (one desc per key)', (() => { const m = new Map(); return v.every((x) => { if (!m.has(x.k)) m.set(x.k, x.d); return m.get(x.k) === x.d; }); })());
+	check('a death changes the room by a trigger only when its class does (cause / byTrigger)', !RM.byTrigger(v[1].c, v[5].c) && RM.byTrigger(v[0].c, v[1].c) && RM.byTrigger(v[9].c, v[10].c));
+	check('the dominance class follows (dom cls)', v[2].m === v[7].m && v[0].m !== v[1].m && v[9].m !== v[10].m);
+	check("the legacy key (the GPU's): the raw count, 15 keys for 0..14",new Set(v.map((x) => x.l)).size === 15);
+	// the shown count (kept while the ball overlaps a gate): the gates it opens now
+	sim.deaths = 5; sim._show_death_gate = 5; const s5 = RM.key(sim);
+	sim._show_death_gate = 0; const s0 = RM.key(sim);
+	sim._show_death_gate = 3; const s3 = RM.key(sim);
+	check('the shown count: its gates met (0 another word than 3 or 5; 3 = 5)', s0 !== s5 && s3 === s5);
+	const D = levelOf('ddoor', DDOOR).level;
+	const RD = GX.roomOf(D), sd = new E.EESim(D); sd.reset();
+	const w = []; for (let n = 0; n <= 12; n++) { sd.deaths = n; sd._show_death_gate = n; w.push([RD.key(sd), RD.desc(sd)]); }
+	check("a death door at 3: deaths 0, 1, 2 distinct rooms ('deaths=N'), 3..9 one ('deaths>=3'), 10+ another ('deaths>=10')",
+		new Set([w[0][0], w[1][0], w[2][0], w[3][0]]).size === 4 && w.slice(0, 3).every((x, n) => x[1] === `deaths=${n}`) && w.slice(3, 10).every((x) => x[0] === w[3][0] && x[1] === 'deaths>=3') &&
+		w.slice(10).every((x) => x[0] === w[10][0] && x[1] === 'deaths>=10') && w[10][0] !== w[3][0], w.map((x) => x[1]).join(','));
+	// the knob off: the raw count (= the legacy key here: no switch, no counter)
+	process.env.EEAT_DEATHKEY = '0';
+	const R0 = GX.roomOf(A), R0d = GX.roomOf(D);
+	delete process.env.EEAT_DEATHKEY;
+	let same = true, descs = true;
+	for (let n = 0; n <= 14; n++) {
+		sim.deaths = n; sim._show_death_gate = n; if (R0.key(sim) !== LG.key(sim)) same = false; if (R0.desc(sim) !== `deaths=${n}`) descs = false;
+		sim._show_death_gate = 0; if (R0.key(sim) !== LG.key(sim)) same = false;
+	}
+	const LGd = GX.roomOf(D, { legacy: true });
+	for (let n = 0; n <= 12; n++) { sd.deaths = n; sd._show_death_gate = n; if (R0d.key(sd) !== LGd.key(sd) || R0d.desc(sd) !== `deaths=${n}`) same = false; }
+	check("EEAT_DEATHKEY=0: the raw count (main's keys: = the legacy key here; desc 'deaths=N')", same && descs);
+}
+
 function sectionBursts() {
 	section('bursts: a touch that only turns a mono switch off is no target');
 	const L = levelOf('sw2', SW.map((r) => r.padEnd(14, '#'))).level;
@@ -318,6 +372,7 @@ function sectionKnob() {
 sectionRelevance();
 sectionReaders();
 sectionSearch();
+sectionDeaths();
 sectionBursts();
 sectionKnob();
 console.log(`\n${pass} passed, ${fail} failed`);
