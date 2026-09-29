@@ -2838,6 +2838,8 @@ async function escapeSection() {
 	check('the escape\'s command line: the configuration\'s flags after the search\'s own (goexplore.js: the last one wins)',
 		args.indexOf('--deaths=0') >= 0 && args.lastIndexOf('--deaths=1') > args.indexOf('--deaths=0') && args[args.length - 1] === '--deaths=1' && args.includes('--prefix=p.eetas'), args.join(' '));
 	section('the stall escape: a fresh one search (the real src/goexplore.js --prefix) from a stalled search\'s nearest attempt (a stand-in CPU search; no GPU)');
+	// (scenarios (1)-(5) pin main's start rule, test.progStart false: their rooms' coins would make the first start a
+	// progress start; (6) is the progress-first starts, on and off)
 	// a 160 x 45 level (coarse cells: the CPU search's big-level path): a floor at row 20 over solid ground, the spawn at the
 	// left, the trophy at the right; a pit (1 tile wide, 12 deep) at x 30: a ball that falls in never gets out (the reach
 	// field rules the trophy out from its bottom); a coin at x 40 and a coin door (1 coin) across the corridor at x 100: the
@@ -2857,7 +2859,7 @@ async function escapeSection() {
 	const scenario = async (name, attempt, dist, seconds, source) => {
 		const sc = path.join(HOME, `esc_${name}.json`), stdinLog = path.join(HOME, `esc_${name}_stdin.log`);
 		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog, ...(source ? { source: str(source) } : {}) }));
-		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from });
+		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from, progStart: false });
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && !st.result && Date.now() - t0 < seconds * 1000 + 5000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
@@ -2925,7 +2927,7 @@ async function escapeSection() {
 	const sc5 = path.join(HOME, 'esc_retarget.json');
 	fs.writeFileSync(sc5, JSON.stringify({ attempt: str(a4), dist: 5, stdinLog: path.join(HOME, 'esc_retarget_stdin.log'), source: str(s4), later: { at: 12000, attempt: str(s5), dist: 1 } }));
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
-		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from });
+		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from, progStart: false });
 	const t5 = Date.now();
 	let st5 = ED.state(), away5 = null;
 	while (st5.running && Date.now() - t5 < 35000 && !(st5.escape && st5.escape.runs >= 2)) {
@@ -2956,7 +2958,7 @@ async function escapeSection() {
 		sources: [{ room: 777, desc: 'coins=1', gain: 5, dist: 50, inputs: str(s1R), at: 300 }, { room: 778, desc: 'coins=2', gain: 5, dist: 40, inputs: str(s2R), at: 400 }] }));
 	const rot6 = ['blind', 'reach', '--pA=0.25+--sample=4+--seed=9', 'deaths', '--deaths=1+--useful=0+--reach=x.bin', 'base'];
 	ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: rot6 }, { available: false },
-		{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeArgv, argvLog], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
+		{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeArgv, argvLog], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000, progStart: false });
 	const t6 = Date.now();
 	let st6 = ED.state();
 	while (st6.running && Date.now() - t6 < 70000 && !(st6.escape && st6.escape.runs >= 6)) { await new Promise((z) => setTimeout(z, 200)); st6 = ED.state(); }
@@ -2981,6 +2983,69 @@ async function escapeSection() {
 		hist6.length >= 5 && hist6[0].after < 20 && hist6.every((h) => h.turn === 1) && gaps6.length >= 4 && gaps6.every((g) => g < 8) &&
 		log6.some((l) => /escape: a fresh one search 1: no attempt nearer by .* for 1 s: from tick 260 of where room "coins=2" was entered, distance-blind novelty \(--pA=0 --burst=16\)/.test(l)),
 		`first after ${hist6.length ? hist6[0].after : '-'} s, gaps ${gaps6.map((g) => g.toFixed(1)).join(', ')} s; ${log6.slice(0, 1).join(' | ')}`);
+	// (6) THE PROGRESS-FIRST STARTS (cw-progress-starts, 2026-09-29; `progStart`, EEAT_PROGSTART=0 off): the helpers
+	// alone, then the stalled search above with three rooms: 'coins=1 purple=[1]' entered at tick 280 (the most progress),
+	// 'coins=1' at 260, and a 'coins=0' room whose lowest-cost attempt is 1,200 ticks long (so the frontier rule, half the
+	// longest attempt held, drops every start under 600 ticks); the nearest attempt's room holds no coin
+	{
+		const P = ED.progOfDesc('coins=1 purple=[1,3] orange=[2] crown silvercrown key:red team=1 deaths=5 protection timedoors:open', null);
+		check('progOfDesc: coins, then the read switches on (purple + orange ids) + a crown + a silver crown; keys, effects, team, deaths and time doors count nothing',
+			P.c === 1 && P.s === 5 && ED.progOfDesc('deaths=99 key:red team=2 fly', null).c === 0 && ED.progOfDesc('deaths=99 key:red team=2 fly', null).s === 0 &&
+			ED.progOfDesc('(start)', null).s === 0 && ED.progGt({ c: 1, s: 0 }, { c: 0, s: 9 }) && ED.progGt({ c: 1, s: 2 }, { c: 1, s: 1 }) && !ED.progGt({ c: 1, s: 1 }, { c: 1, s: 1 }),
+			JSON.stringify(P));
+		const list = [{ desc: 'coins=1 purple=[1]', early: { ticks: 3000 }, at: 5 }, { desc: 'coins=1 purple=[1]', early: { ticks: 2500 }, at: 9 }, { desc: 'coins=1', early: { ticks: 100 }, at: 1 },
+			{ desc: 'coins=0 purple=[1,2]', early: { ticks: 50 }, at: 2 }, { desc: 'deaths=99 key:red', early: { ticks: 10 }, at: 3 }, { desc: 'coins=2', early: null, at: 4 }];
+		const pc = ED.progressCands(list, { c: 0, s: 0 }, null, null);
+		const same = ED.progressCands(list, { c: 1, s: 1 }, null, null), used = ED.progressCands(list, { c: 0, s: 0 }, { c: 1, s: 1 }, null);
+		check('the progress starts: only the rooms of the most progress above the nearest attempt\'s room (coins first, then switches; a room without a first arrival none), the earliest arrival first; the same progress as the nearest attempt\'s room, or no more than a progress start before: none',
+			!!pc.top && pc.top.c === 1 && pc.top.s === 1 && pc.cand.map((s) => s.early.ticks).join(',') === '2500,3000' && same.cand.length === 0 && used.cand.length === 0,
+			`${JSON.stringify(pc.top)} ${pc.cand.map((s) => s.early.ticks).join(',')}; same ${same.cand.length}, used ${used.cand.length}`);
+		const bs = [{ coins: 1, sw: 0, n: 0 }, { coins: 1, sw: 2, n: 1 }, { coins: 2, sw: 0, n: 2 }, { coins: 0, sw: 5, n: 3 }, { coins: 1, sw: 2, n: 4 }].sort(ED.breakCmp);
+		const bm = [{ coins: 1, sw: 0, n: 0 }, { coins: 1, sw: 0, n: 1 }, { coins: 2, sw: 0, n: 2 }].sort(ED.breakCmp);
+		check('the wall breaker\'s progress order: coins first, then the switches held, then the order before (a coin level without read switches: main\'s order)',
+			bs.map((x) => x.n).join(',') === '2,1,4,0,3' && bm.map((x) => x.n).join(',') === '2,0,1', `${bs.map((x) => x.n).join(',')} / ${bm.map((x) => x.n).join(',')}`);
+		const srcs = [{ room: 1, desc: 'coins=1 purple=[1]', runs: 3, gain: 0, at: 1 }, { room: 2, desc: 'deaths=5', runs: 0, gain: 4, at: 2 }, { room: 3, desc: 'deaths=6', runs: 1, gain: 0, at: 3 },
+			{ room: 4, desc: 'coins=1', runs: 0, gain: 2, at: 4 }];
+		const v1 = ED.evictVictim(srcs, null, true), v0 = ED.evictVictim(srcs, null, false);
+		const flat = [{ room: 5, desc: 'deaths=1', runs: 0, gain: 0, at: 1 }, { room: 6, desc: 'deaths=2', runs: 1, gain: 0, at: 2 }];
+		check('the sources\' eviction: never the source of the most progress (a relayed-from, gainless, oldest room of coins=1 purple=[1] stays, the next goes); off, or every source equal: main\'s rank',
+			v1.room === 3 && v0.room === 1 && ED.evictVictim(flat, null, true).room === 6, `on ${v1.room}, off ${v0.room}, equal ${ED.evictVictim(flat, null, true).room}`);
+	}
+	const fakeArgvP = path.join(HOME, 'fake-esc-argv-p.js'), argvLogP = path.join(HOME, 'esc_prog_argv.log');
+	fs.writeFileSync(fakeArgvP, FAKE_ESC_ARGV);
+	const sP = run([[0, 180], [4, 100]]), s2P = run([[0, 160], [4, 100]]), sLong = run([[0, 1100], [4, 100]]);
+	// (on: the progress start, then main's first (the frontier room's attempt), then nothing new; off: main's first, then
+	// nothing new: the stall clock again)
+	const progRun = async (tag, off, want) => {
+		const sc = path.join(HOME, `esc_prog_${tag}.json`);
+		fs.writeFileSync(sc, JSON.stringify({ attempt: str(aR), dist: 30, stdinLog: path.join(HOME, `esc_prog_${tag}_stdin.log`),
+			sources: [{ room: 777, desc: 'coins=1 purple=[1]', gain: 5, dist: 50, inputs: str(sP), at: 300 }, { room: 778, desc: 'coins=1', gain: 5, dist: 40, inputs: str(s2P), at: 350 },
+				{ room: 779, kind: 'best', desc: 'coins=0', gain: 5, dist: 60, inputs: str(sLong), at: 400 }] }));
+		if (off) process.env.EEAT_PROGSTART = '0';
+		ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: ['base'], escFrom: ['arrival', 'frontier', 'near'] }, { available: false },
+			{ cpu: [process.execPath, fake, sc], escapeCmd: [process.execPath, fakeArgvP, argvLogP], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
+		if (off) delete process.env.EEAT_PROGSTART;
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && Date.now() - t0 < 30000 && !(st.escape && st.escape.runs >= want)) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+		// (a few more stall checks: no further escape)
+		const t1 = Date.now();
+		while (st.running && Date.now() - t1 < 11000) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		return { hist: (st.escape && st.escape.hist) || [], log: (st.log || []).filter((l) => /escape/.test(l)) };
+	};
+	const pOn = await progRun('on', false, 2), pOff = await progRun('off', true, 1);
+	const fmtH = (h) => h.map((x) => `${x.n}: ${x.kind} ${x.from} @${x.ticks}`).join('; ');
+	check('progress first: a room holding a new most of progress (coins=1 purple=[1]) over the nearest attempt\'s room: the first escape starts where it was entered (280 ticks, though the longest attempt held is 1,200: exempt from the frontier rule), said so in the log',
+		pOn.hist.length >= 1 && pOn.hist[0].kind === 'progress' && pOn.hist[0].ticks === sP.length && /^where room "coins=1 purple=\[1\]" was entered \(progress 1 coins \/ 1 switches over the nearest attempt's room's 0 \/ 0\)$/.test(pOn.hist[0].from) &&
+		pOn.log.some((l) => /escape: a fresh one search 1: .*from tick 280 of where room "coins=1 purple=\[1\]" was entered \(progress/.test(l)), fmtH(pOn.hist));
+	check('after a progress start the rotation is main\'s: the next escape = main\'s first (its kind, start and ticks), no second progress start (coins=1 is no new most), each start once',
+		pOn.hist.length === 2 && pOff.hist.length >= 1 && pOn.hist[1].kind === pOff.hist[0].kind && pOn.hist[1].from === pOff.hist[0].from && pOn.hist[1].ticks === pOff.hist[0].ticks &&
+		pOn.hist.slice(1).every((h) => h.kind !== 'progress') && new Set(pOn.hist.map((h) => `${h.from}@${h.ticks}`)).size === pOn.hist.length, `on ${fmtH(pOn.hist)} | off ${fmtH(pOff.hist)}`);
+	check('EEAT_PROGSTART=0: main\'s picks (no progress start; the frontier rule drops the short arrivals: the 1,200-tick room\'s attempt first)',
+		pOff.hist.length === 1 && pOff.hist.every((h) => h.kind !== 'progress') && pOff.hist[0].kind === 'frontier' && pOff.hist[0].ticks === sLong.length - 60 &&
+		pOff.hist.every((h) => h.ticks >= sLong.length / 2), fmtH(pOff.hist));
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));

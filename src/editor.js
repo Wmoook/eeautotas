@@ -810,6 +810,16 @@ const sourcesOf = () => [...sources.values()].map((x) => ({ room: x.room, desc: 
 function publishSources() {
 	S.sources = [...sources.values()].sort((x, y) => y.at - x.at).map((s) => ({ room: s.room, desc: s.desc, gain: s.gain, runs: s.runs, from: s.from,
 		entered: s.early ? s.early.ticks : null, best: s.best ? { ticks: s.best.ticks, tiles: Math.round(s.best.dist * 10) / 10 } : null }));
+	// (progStart: the page's progress frontier: the source of the most progress (progOfDesc), its earliest arrival first)
+	if (cur && cur.opts.progStart) {
+		let f = null, fp = null;
+		for (const s of sources.values()) {
+			if (!s.early) continue;
+			const p = progOfDesc(s.desc, cur.level);
+			if (!f || progGt(p, fp) || (!progGt(fp, p) && s.early.ticks < f.early.ticks)) { f = s; fp = p; }
+		}
+		S.progressFront = f ? { desc: f.desc, coins: fp.c, switches: fp.s, ticks: f.early.ticks } : null;
+	}
 }
 /** a starting point o: {room, desc, gain, from, inputs, dist, arrival (the ticks of its inputs up to where it entered the
  *  room; 0 = not known), cul (it ends in a cul-de-sac of its room: not the room's best)} */
@@ -818,9 +828,9 @@ function addSource(o) {
 	if (!s) {
 		if (sources.size >= RELAY_SOURCES) {
 			// (the least useful goes: relayed from already, no territory gain, the oldest)
-			let v = null;
-			const rank = (x) => (x.runs > 0 ? 4 : 0) + (x.gain > 0 ? 0 : 2);
-			for (const x of sources.values()) if (!v || rank(x) > rank(v) || (rank(x) === rank(v) && x.at < v.at)) v = x;
+			// (progStart: never a source of the most progress any source holds (progOfDesc; on a level of death doors a
+			// thousand rooms of death counts would push the real ones out); none left: as before)
+			const v = evictVictim([...sources.values()], cur ? cur.level : null, !!(cur && cur.opts.progStart));
 			sources.delete(v.room);
 		}
 		s = { room: o.room, desc: String(o.desc || ''), gain: 0, runs: 0, at: 0, from: o.from, early: null, best: null };
@@ -1375,6 +1385,65 @@ const coinsOfDesc = (desc, L) => {
 	}
 	return n;
 };
+/** a room desc's progress (the progress-first starts, `progStart`): {c: its coins as coinsOfDesc counts them, s: the
+ *  switches on that some door or gate reads (the ids in 'purple=[..]' and 'orange=[..]': roomOf's desc lists only those)
+ *  + 1 for 'crown' + 1 for 'silvercrown'}; keys, effects, team, deaths and time doors are no progress here. progGt: more
+ *  coins, else as many coins and more switches */
+const progOfDesc = (desc, L) => {
+	const d = String(desc || '');
+	let s = 0;
+	for (const m of d.matchAll(/(?:^|\s)(?:purple|orange)=\[([^\]]*)\]/g)) s += m[1].split(',').filter((x) => x.trim() !== '').length;
+	if (/(?:^|\s)crown(?=\s|$)/.test(d)) s++;
+	if (/(?:^|\s)silvercrown(?=\s|$)/.test(d)) s++;
+	return { c: coinsOfDesc(d, L), s };
+};
+const progGt = (a, b) => a.c > b.c || (a.c === b.c && a.s > b.s);
+/** the progress-first escape starts (escStarts' kind 'progress'): of the sources with a first arrival (list: {desc, early
+ *  {ticks}, at}), those holding more progress than pc (the nearest attempt's room's) and than progMax (every progress start
+ *  before; null: none), only those of the most: {top (that progress, null: none), cand (the earliest arrival first, then
+ *  the room known first)} */
+function progressCands(list, pc, progMax, L) {
+	const cand = [];
+	let top = null;
+	for (const s of list) {
+		if (!s.early) continue;
+		const p = progOfDesc(s.desc, L);
+		if (!progGt(p, pc) || (progMax && !progGt(p, progMax))) continue;
+		if (!top || progGt(p, top)) { top = p; cand.length = 0; }
+		if (!progGt(top, p)) cand.push(s);
+	}
+	cand.sort((x, y) => x.early.ticks - y.early.ticks || x.at - y.at);
+	return { top, cand };
+}
+/** the wall breaker's progress order (breakProg): the coins held first, the most first, then (progStart) the switches
+ *  held, then the order as before */
+const breakCmp = (x, y) => y.coins - x.coins || (y.sw || 0) - (x.sw || 0) || x.n - y.n;
+/** the source the relay's sources give up when full (RELAY_SOURCES): relayed from already, no territory gain, the
+ *  oldest; with keepProg never one of the most progress any source holds (progOfDesc; all of them: as before) */
+function evictVictim(list, L, keepProg) {
+	const rank = (x) => (x.runs > 0 ? 4 : 0) + (x.gain > 0 ? 0 : 2);
+	let keep = null;
+	if (keepProg) {
+		let top = null;
+		const P = new Map();
+		for (const x of list) { const p = progOfDesc(x.desc, L); P.set(x, p); if (!top || progGt(p, top)) top = p; }
+		keep = (x) => { const p = P.get(x); return p.c === top.c && p.s === top.s; };
+		if (list.every(keep)) keep = null;
+	}
+	let v = null;
+	for (const x of list) if ((!keep || !keep(x)) && (!v || rank(x) > rank(v) || (rank(x) === rank(v) && x.at < v.at))) v = x;
+	return v;
+}
+/** the progress the state after inputs holds: coins as coinsOf counts them, switches as progOfDesc from the room key's
+ *  desc of that state (one replay) */
+function progOf(inputs) {
+	const L = cur.level, D = countDoorsOf(L), RM = roomsOfSearch().RM;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
+	const c = (D.gold ? Math.min(sim.coins | 0, D.upGold) : 0) + (D.blue ? Math.min(sim.blue_coins | 0, D.upBlue) : 0);
+	return { c, s: progOfDesc(RM.desc(sim), null).s };
+}
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1398,15 +1467,19 @@ function breakStarts() {
 	// Forgotten Helix's rounds started from its viewing pocket at 0 coins, the trophy-nearest attempt by a walk through
 	// every door, and from rooms 0-2, while the search's frontier held 3 coins); among equals the order as before. No
 	// coin door (no coins in the room keys): the order as before)
-	const prog = cur.opts.breakProg, lim = prog ? 4 * BREAK_STARTS : BREAK_STARTS;
+	// (progStart: then the switches held (progOfDesc: the read switches on, crowns) among equal coins, the most first: a
+	// switch-chain level's frontier; a level without read switches and crowns: the order as before)
+	const prog = cur.opts.breakProg, lim = prog ? 4 * BREAK_STARTS : BREAK_STARTS, sw = prog && cur.opts.progStart;
 	const out = [], seen = new Set();
-	const add = (inputs, keep, what, dist, room, coins) => {
+	const add = (inputs, keep, what, dist, room, coins, sws) => {
 		keep = Math.min(keep, inputs.length);
 		if (out.length >= lim || keep < RELAY_MIN_KEEP || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen.has(key) || brk.tried.has(key)) return;
 		seen.add(key);
-		out.push({ inputs: pre, what, dist, key, room, coins: prog ? (coins !== undefined ? coins : coinsOf(pre)) : 0, n: out.length });
+		let k = prog ? coins : 0, s = 0;
+		if (sw) { if (coins !== undefined) s = sws | 0; else { const p = progOf(pre); k = p.c; s = p.s; } } else if (prog && coins === undefined) k = coinsOf(pre);
+		out.push({ inputs: pre, what, dist, key, room, coins: k, sw: s, n: out.length });
 	};
 	// (the gate front: the last gate a breaker chain entered, that state itself, so the next gate is the plan's next)
 	// (with the progress order by its own coins, first among equals: a room target's gate can be a lateral room, e.g.
@@ -1419,11 +1492,11 @@ function breakStarts() {
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
 		if (out.length >= lim) break;
-		const k = coinsOfDesc(r.desc, cur.level);
-		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k);
-		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k);
+		const k = coinsOfDesc(r.desc, cur.level), s = sw ? progOfDesc(r.desc, null).s : 0;
+		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k, s);
+		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k, s);
 	}
-	if (prog) out.sort((x, y) => y.coins - x.coins || x.n - y.n);
+	if (prog) out.sort(breakCmp);
 	return out.slice(0, BREAK_STARTS);
 }
 /** every 5 s (checkStalls): a stalled search starts a round of the wall breaker */
@@ -1757,21 +1830,38 @@ const coinSig = (desc) => { const m = /(?:^| )coins=(\d+)/.exec(String(desc || '
 /** the escape's next starting points by kind, each in its order: {near, arrival, frontier} of [{inputs, what, dist, key,
  *  room, sig, kind}] not used before in this search */
 function escStarts() {
-	const out = { near: [], arrival: [], frontier: [] }, seen = { near: new Set(), arrival: new Set(), frontier: new Set() };
+	const out = { near: [], arrival: [], frontier: [], progress: [] }, seen = { near: new Set(), arrival: new Set(), frontier: new Set(), progress: new Set() };
 	// (the frontier: a start at least ESC_FRONT as long as the longest attempt the search holds (the nearest and the rooms'
 	// attempts): an escape from near the level's start would only redo the search's own opening with half its workers)
 	const c0 = S.closest;
 	let longest = c0 && !c0.cut ? c0.ticks : 0;
 	for (const s of sources.values()) longest = Math.max(longest, s.best ? s.best.ticks : 0, s.early ? s.early.ticks : 0);
 	const front = Math.max(RELAY_MIN_KEEP, Math.floor(ESC_FRONT * longest));
-	const add = (kind, inputs, keep, what, dist, room, desc) => {
+	// (a 'progress' start is exempt from the frontier's length: a death lineage 50,000 ticks long makes every early
+	// arrival at new progress, 2-4 thousand ticks, too short for it)
+	const add = (kind, inputs, keep, what, dist, room, desc, prog) => {
 		keep = Math.min(keep, inputs.length);
-		if (keep < front || (S.result && keep >= boundTicks() - 1)) return;
+		if (keep < (kind === 'progress' ? RELAY_MIN_KEEP : front) || (S.result && keep >= boundTicks() - 1)) return;
 		const pre = inputs.slice(0, keep), key = crypto.createHash('sha1').update(pre).digest('hex');
 		if (seen[kind].has(key) || esc.tried.has(key)) return;
 		seen[kind].add(key);
-		out[kind].push({ inputs: pre, what, dist, key, room, sig: coinSig(desc), kind });
+		const st = { inputs: pre, what, dist, key, room, sig: coinSig(desc), kind };
+		if (prog) st.prog = prog;
+		out[kind].push(st);
 	};
+	// PROGRESS (progStart; not a kind of the rotation: escPick puts it first): the rooms holding more progress (progOfDesc:
+	// coins, then the read switches on and crowns) than the nearest attempt's room and than every progress start before
+	// (esc.progMax), only those of the most; their first arrivals, the earliest first (the fewest detours and deaths). The
+	// nearest attempt by the guidance distance can sit in a false near (a pool under a one-way row on a 300 x 300 hub
+	// level, 35 tiles out for 10 minutes) while the search's rooms already hold the chapter's coin and switch
+	if (cur.opts.progStart) {
+		const pc = progOfDesc(closestRoom ? closestRoom.desc : '', cur.level);
+		const { top, cand } = progressCands(sources.values(), pc, esc.progMax, cur.level);
+		for (const s of cand) {
+			add('progress', s.early.inputs, s.early.ticks, `where room "${s.desc}" was entered (progress ${top.c} coins / ${top.s} switches over the nearest attempt's room's ${pc.c} / ${pc.s})`,
+				Number.isFinite(s.early.dist) ? s.early.dist : Infinity, s.room, s.desc, top);
+		}
+	}
 	const c = S.closest;
 	// NEAR: the nearest attempt a little back (after an escape that got the search nearer, its own nearest attempt: a
 	// chain); then the nearest attempt of each other room (rooms of a coin count not escaped from first, then rooms not
@@ -1804,6 +1894,8 @@ function escStarts() {
  *  chain), else the next kind in the rotation that has one; null: none left */
 function escPick() {
 	const all = escStarts(), F = esc.from, want = esc.nextFrom || F[esc.fromTurn % F.length];
+	// (progStart: a start at a new most progress first, before the rotation's kinds; escLaunch keeps the rotation where it is)
+	if (cur.opts.progStart && all.progress.length) return all.progress[0];
 	const k0 = Math.max(0, F.indexOf(want)), order = [want, ...F.map((_, j) => F[(k0 + 1 + j) % F.length]).filter((k) => k !== want)];
 	for (const k of order) if (all[k] && all[k].length) return all[k][0];
 	return null;
@@ -1867,8 +1959,10 @@ function escLaunch(n, st) {
 	if (st.room !== undefined) esc.rooms.add(st.room);
 	if (st.sig !== '') esc.sigs.add(st.sig);
 	esc.next = false;
-	// (the kinds of start in rotation: a start put first once (nextFrom) does not move the rotation on)
-	if (esc.nextFrom) esc.nextFrom = null;
+	// (the kinds of start in rotation: a start put first once (nextFrom, or a progress start: escPick) does not move the
+	// rotation on; a progress start leaves nextFrom for the escape after it)
+	if (st.kind === 'progress') esc.progMax = st.prog;
+	else if (esc.nextFrom) esc.nextFrom = null;
 	else esc.fromTurn++;
 	const cfg = escCfgNext();
 	rollsTurn(cfg);
@@ -2207,6 +2301,9 @@ function start(b, gpu, test) {
 		breakRound: test && test.breakRound ? test.breakRound : BREAK_ROUND_S, breakCells: test && test.breakCells ? test.breakCells : 0, breakFront: b.breakFront !== false,
 		breakFrom: test && test.breakFrom ? String(test.breakFrom) : '', breakGate: b.breakGate !== false && !(test && test.breakGate === false),
 		roomGate: b.roomGate !== false && !(test && test.roomGate === false), breakProg: b.breakProg !== false && !(test && test.breakProg === false),
+		// (the progress-first starts: the stall escape's and the wall breaker's starts by real progress, the sources' eviction
+		// keeping the most progress; `b.progStart === false`, test.progStart false or EEAT_PROGSTART=0: off, as before)
+		progStart: b.progStart !== false && !(test && test.progStart === false) && process.env.EEAT_PROGSTART !== '0',
 		// (the plan past its count: `b.pastPlan === false` off)
 		pastPlan: b.pastPlan !== false && !(test && test.pastPlan === false),
 		// (past the plan, wq-watch: after a trophy round that brought nothing, the untaken coins; `b.breakPast === false`: off)
@@ -2241,7 +2338,7 @@ function start(b, gpu, test) {
 	const escFirst = test && test.escFirst ? test.escFirst : test && test.escWait ? test.escWait : process.env.EEAT_ESC_FIRST !== undefined && +process.env.EEAT_ESC_FIRST > 0 ? +process.env.EEAT_ESC_FIRST : ESC_FIRST_S;
 	esc = { at: Date.now(), wait: test && test.escWait ? test.escWait : ESC_WAIT_S, first: escFirst, stall: test && test.escStall ? test.escStall : ESC_STALL_S, min: test && test.escMin !== undefined ? test.escMin : ESC_MIN_S,
 		turn: test && test.escTurn ? test.escTurn : ESC_TURN_S, retarget: test && test.escRetarget ? test.escRetarget : ESC_RETARGET_S, runs: 0, tried: new Set(), rooms: new Set(), sigs: new Set(), next: false, run: null,
-		rot: escRot, from: escFrom, cfgTurn: 0, fromTurn: 0, nextFrom: null,
+		rot: escRot, from: escFrom, cfgTurn: 0, fromTurn: 0, nextFrom: null, progMax: null,
 		rolls: test && test.escRolls !== undefined ? !!test.escRolls : b.escRolls !== undefined ? b.escRolls !== false : process.env.EEAT_ESC_ROLLS !== undefined ? process.env.EEAT_ESC_ROLLS !== '0' : ESC_ROLLS };
 	closestRoom = null;
 	S.escape = which.includes('escape') ? { runs: 0, run: null, last: null, hist: [], rot: esc.rot.map((c) => c.name), from: esc.from.slice() } : null;
@@ -4007,6 +4104,6 @@ function shutdown() {
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
 	EXP_REPLAY_MS, EXP_TIP,
-	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
+	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, progOfDesc, progGt, progressCands, breakCmp, evictVictim, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };
