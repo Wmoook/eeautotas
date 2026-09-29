@@ -2984,6 +2984,9 @@ function launch(n) {
 		// No next pass, no salt rerun (V.error), and the other GPU searches stop too: the GPU gets no new work now
 		// (a crash: an exception code above 255 on Windows; on Linux a signal, exit code null, that no halt sent)
 		const crashed = (Number.isFinite(code) && (code < 0 || code > 255)) || (code === null && !!sig && !ch.stopWhy);
+		// (the run's GPU memory budget: a process of a sized-down share that ran without a memory error: the next one a
+		// size up again)
+		if (V.memDown && !V.error && (code === 0 || !!ch.stopWhy)) V.memDown--;
 		if (!cpu && !ch.stopWhy && !V.error && (code === 6 || code === 7 || crashed)) {
 			V.error = `the GPU tool ${code === 7 ? 'was stopped by the display driver\'s watchdog' : code === 6 ? 'had a GPU launch failure' : `crashed (${code === null ? `signal ${sig}` : `exit code ${code}`})`}` +
 				`${err.trim() ? `: ${err.trim().split('\n').pop().slice(0, 200)}` : ''}`;
