@@ -715,7 +715,10 @@ function discreteOf(L) {
  * counts: the doors' exact state), not by the count (Good Egg: its blue doors at 31 / 32 close a pocket with a crown and
  * no crown door; every blue coin made a new room, 118,758 of the 118,854 rooms of an hour's search from the level alone,
  * src/out/ge_anat). A walk is no physics (a door that is a floor when shut is not seen), so this only merges rooms whose
- * doors are shut alike; a relevant counter keys its count, as before. EEAT_ROOMREL=0: every counter relevant.
+ * doors are shut alike; a relevant counter keys its count, as before. An irrelevant counter with GATES (165 / 214: they
+ * shut at their count, a new solid block the gravity-blind walk cannot see as the floor it may be) keys its count below
+ * its highest gate (upTo), the thresholds met from there: each coin toward a gate is progress again (The 7 Depths of Hell:
+ * the trophy past 3 blue gates at 3). EEAT_ROOMREL=0: every counter relevant.
  */
 const RELV = new WeakMap();
 const KEY_TRIG = new Set([6, 7, 8, 408, 409, 410]);
@@ -724,7 +727,7 @@ function counterRelevance(L) {
 	const had = RELV.get(L);
 	if (had) return had;
 	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags, lk = L.lookup0;
-	const out = { gold: true, blue: true, cut: { gold: 0, blue: 0 }, why: { gold: 'no reader', blue: 'no reader' } };
+	const out = { gold: true, blue: true, cut: { gold: 0, blue: 0 }, why: { gold: 'no reader', blue: 'no reader' }, upTo: { gold: 0, blue: 0 } };
 	let goldR = false, blueR = false, prot = false, crownD = false, teamD = false, keyD = false;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
@@ -847,8 +850,19 @@ function counterRelevance(L) {
 		}
 		return { cut, why: null };
 	};
-	if (goldR) { const r = test(new Set([43, 165]), new Set([100, 110])); out.gold = r.why !== null; out.cut.gold = r.cut; out.why.gold = r.why || 'a pocket of nothing'; }
-	if (blueR) { const r = test(new Set([213, 214]), new Set([101, 111])); out.blue = r.why !== null; out.cut.blue = r.cut; out.why.blue = r.why || 'a pocket of nothing'; }
+	// (the gates: a gate SHUTS at its count, a solid block from then on: a floor or a ceiling the gravity-blind walk
+	// cannot see, so an irrelevant counter with gates keys its count up to its highest gate (upTo): each coin toward a
+	// gate is a new room again; The 7 Depths of Hell: 3 blue gates at 3 over its trophy pit, main's route came 7 s after
+	// its first bluecoins=3 room, the thresholds-met key made blue coins 1 and 2 no room and 0 of 3 runs routed)
+	const gateMax = (gid) => { let m = 0; for (let i = 0; i < N; i++) if (fg[i] === gid && lk[i] > m) m = lk[i]; return m; };
+	if (goldR) {
+		const r = test(new Set([43, 165]), new Set([100, 110])); out.gold = r.why !== null; out.cut.gold = r.cut; out.why.gold = r.why || 'a pocket of nothing';
+		if (!out.gold) { out.upTo.gold = gateMax(165); if (out.upTo.gold > 0) out.why.gold += `; keyed up to its gates at ${out.upTo.gold}`; }
+	}
+	if (blueR) {
+		const r = test(new Set([213, 214]), new Set([101, 111])); out.blue = r.why !== null; out.cut.blue = r.cut; out.why.blue = r.why || 'a pocket of nothing';
+		if (!out.blue) { out.upTo.blue = gateMax(214); if (out.upTo.blue > 0) out.why.blue += `; keyed up to its gates at ${out.upTo.blue}`; }
+	}
 	RELV.set(L, out);
 	return out;
 }
@@ -904,7 +918,7 @@ function roomOf(L, opts = {}) {
 		else if (id === 1152 || id === 1153) silver = true;
 	}
 	const legacy = !!opts.legacy;
-	const rel = legacy ? { gold: true, blue: true, cut: { gold: 0, blue: 0 } } : counterRelevance(L);
+	const rel = legacy ? { gold: true, blue: true, cut: { gold: 0, blue: 0 }, upTo: { gold: 0, blue: 0 } } : counterRelevance(L);
 	const SR = switchReaders(L);
 	// (the switch ids the keys read: every one in the legacy key, else those some door or gate reads)
 	const readP = legacy ? null : SR.purple, readO = legacy ? null : SR.orange;
@@ -917,6 +931,10 @@ function roomOf(L, opts = {}) {
 	const cTh = L.coinDoorThresholds || new Int32Array(0), bTh = L.blueCoinDoorThresholds || new Int32Array(0);
 	/** the thresholds (doors and gates) a count has met */
 	const met = (th, v) => { let n = 0; while (n < th.length && th[n] <= v) n++; return n; };
+	// (an irrelevant counter's key word: the count itself below its highest gate (counterRelevance upTo; 0 = no gate), from
+	// there the thresholds met (the gate's own count is one of them: >= 1), distinct from every count below)
+	const upG = rel.upTo ? rel.upTo.gold : 0, upB = rel.upTo ? rel.upTo.blue : 0;
+	const cnt = (th, v, up) => (up > 0 && v < up ? v : (up > 0 ? up : 0) + met(th, v));
 	// (the sum of the switches on that the key reads, without the mono ones (bits) in the dominance class: a sum mod
 	// 2^32, so the Map's order does not matter; forEach makes no entry arrays)
 	const onSum = (m, salt, read, bits) => {
@@ -937,10 +955,10 @@ function roomOf(L, opts = {}) {
 			(mode === 0 && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
 		h = mixW(h, sim.max_jumps); h = mixW(h, sim.jump_boost); h = mixW(h, sim.speed_boost); h = mixW(h, sim.flip_gravity);
 		if (team) h = mixW(h, sim.team);
-		if (coins) h = mixW(h, rel.gold ? sim.coins : met(cTh, sim.coins));
-		if (L.hasCoinGate) h = mixW(h, rel.gold ? sim._show_coin_gate : met(cTh, sim._show_coin_gate));
-		if (blue) h = mixW(h, rel.blue ? sim.blue_coins : met(bTh, sim.blue_coins));
-		if (L.hasBlueCoinGate) h = mixW(h, rel.blue ? sim._show_blue_coin_gate : met(bTh, sim._show_blue_coin_gate));
+		if (coins) h = mixW(h, rel.gold ? sim.coins : cnt(cTh, sim.coins, upG));
+		if (L.hasCoinGate) h = mixW(h, rel.gold ? sim._show_coin_gate : cnt(cTh, sim._show_coin_gate, upG));
+		if (blue) h = mixW(h, rel.blue ? sim.blue_coins : cnt(bTh, sim.blue_coins, upB));
+		if (L.hasBlueCoinGate) h = mixW(h, rel.blue ? sim._show_blue_coin_gate : cnt(bTh, sim._show_blue_coin_gate, upB));
 		if (L.hasDeathDoor) h = mixW(h, sim.deaths);
 		if (L.hasDeathGate) h = mixW(h, sim._show_death_gate);
 		const bp = mode === 2 ? bitP : null, bo = mode === 2 ? bitO : null;
@@ -980,8 +998,8 @@ function roomOf(L, opts = {}) {
 		if (sim.flip_gravity) p.push(`grav=${sim.flip_gravity}`);
 		if (L.hasTimeDoors) p.push(sim._timedoor_state ? 'timedoors:open' : 'timedoors:shut');
 		if (team && sim.team) p.push(`team=${sim.team}`);
-		if (coins) { if (rel.gold) p.push(`coins=${sim.coins}`); else { const n = met(cTh, sim.coins); if (n) p.push(`coins>=${cTh[n - 1]}`); } }
-		if (blue) { if (rel.blue) p.push(`bluecoins=${sim.blue_coins}`); else { const n = met(bTh, sim.blue_coins); if (n) p.push(`bluecoins>=${bTh[n - 1]}`); } }
+		if (coins) { if (rel.gold || sim.coins < upG) p.push(`coins=${sim.coins}`); else { const n = met(cTh, sim.coins); if (n) p.push(`coins>=${cTh[n - 1]}`); } }
+		if (blue) { if (rel.blue || sim.blue_coins < upB) p.push(`bluecoins=${sim.blue_coins}`); else { const n = met(bTh, sim.blue_coins); if (n) p.push(`bluecoins>=${bTh[n - 1]}`); } }
 		if (L.hasDeathDoor) p.push(`deaths=${sim.deaths}`);
 		const s = onList(sim._switches, readP), o = onList(sim._oswitches, readO);
 		if (s.length) p.push(`purple=[${s.join(',')}]`);

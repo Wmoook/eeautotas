@@ -1289,15 +1289,16 @@ function coinsOf(inputs) {
 		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
 		// (a counter whose doors guard nothing on the way to the trophy is no progress: goexplore.js counterRelevance, as
 		// the room keys count it; Good Egg's blue coins)
-		const rel = GX.counterRelevance(L);
-		cur.countDoors = { gold: gold && rel.gold, blue: blue && rel.blue };
+		// (an irrelevant counter with gates counts up to its highest gate: counterRelevance upTo, as the room keys do)
+		const rel = GX.counterRelevance(L), up = rel.upTo || { gold: 0, blue: 0 };
+		cur.countDoors = { gold: gold && (rel.gold || up.gold > 0), blue: blue && (rel.blue || up.blue > 0), upGold: rel.gold ? Infinity : up.gold, upBlue: rel.blue ? Infinity : up.blue };
 	}
 	const D = cur.countDoors;
 	if (!D.gold && !D.blue) return 0;
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
-	return (D.gold ? sim.coins | 0 : 0) + (D.blue ? sim.blue_coins | 0 : 0);
+	return (D.gold ? Math.min(sim.coins | 0, D.upGold) : 0) + (D.blue ? Math.min(sim.blue_coins | 0, D.upBlue) : 0);
 }
 /** a room's coins from its description (goexplore.js roomOf desc: 'coins=N', 'bluecoins=N' where a door reads them) */
 const coinsOfDesc = (desc) => { let n = 0; for (const m of String(desc || '').matchAll(/(?:^|\s)(?:blue)?coins=(\d+)/g)) n += +m[1]; return n; };

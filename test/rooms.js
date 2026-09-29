@@ -40,7 +40,7 @@ const section = (s) => console.log(`\n== ${s}`);
 // ASCII levels: # wall, . air, S spawn, T trophy, C checkpoint, x spike, o gold coin, b blue coin, D blue door (2),
 // d coin door (1), 1 / 2 / 3 purple switches 1 / 2 / 3, e / f purple doors 1 / 2, g purple gate 3, 7 a purple switch no
 // door reads, k crown
-const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], D: [213, 2], d: [43, 1], 1: [113, 1], 2: [113, 2],
+const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], D: [213, 2], G: [214, 2], d: [43, 1], 1: [113, 1], 2: [113, 2],
 	3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 3], 7: [113, 7], k: [5] };
 function levelOf(name, rows) {
 	const cells = [];
@@ -69,6 +69,9 @@ const POCKET = [
 	'############',
 ];
 const POCKET_CP = POCKET.map((r, y) => (y === 3 ? '#.##.C######' : r));
+// the same pocket behind a blue GATE (2) and a third blue coin: the gate shuts at 2 (a solid block: a floor the walk
+// cannot see), so the count is keyed up to it
+const POCKET_GATE = POCKET.map((r, y) => (y === 1 ? '#S.b..b.b.T#' : y === 2 ? '#.##G#######' : r));
 const POCKET_CROWN = POCKET.map((r, y) => (y === 3 ? '#.##.k######' : r));
 // the blue door in the corridor, the trophy also reachable the long way round: a shortcut
 const SHORT = [
@@ -93,6 +96,21 @@ function sectionRelevance() {
 	touch(A, sim, 6, 1);
 	const k2 = RM.key(sim), d2 = RM.desc(sim);
 	check('two (the door opens): another room, its description says so', sim.blue_coins === 2 && k2 !== k1 && /bluecoins>=2/.test(d2), `'${d2}'`);
+	check('the door pocket: no gate, nothing keyed up to one (upTo 0)', r.upTo.blue === 0 && r.upTo.gold === 0, JSON.stringify(r.upTo));
+	const G = levelOf('pocket_gate', POCKET_GATE).level, rg = GX.counterRelevance(G);
+	check('the gate pocket: blue irrelevant, keyed up to its gate at 2', rg.blue === false && rg.upTo.blue === 2 && /gates at 2/.test(rg.why.blue), JSON.stringify(rg));
+	const RG = GX.roomOf(G), sg = new E.EESim(G); sg.reset();
+	// (a second tick: the gates' shown count follows the count a tick later, eesim.js _show_blue_coin_gate)
+	const touchG = (x, y) => { touch(G, sg, x, y); sg.tick(new E.EEInput()); };
+	const g0 = RG.key(sg);
+	touchG(3, 1);
+	const g1 = RG.key(sg), gd1 = RG.desc(sg);
+	check('there one blue coin (toward the gate) is another room', sg.blue_coins === 1 && g1 !== g0 && /bluecoins=1/.test(gd1), `'${gd1}'`);
+	touchG(6, 1);
+	const g2 = RG.key(sg), gd2 = RG.desc(sg);
+	check('two (the gate shuts): another room', sg.blue_coins === 2 && g2 !== g1 && g2 !== g0 && /bluecoins>=2/.test(gd2), `'${gd2}'`);
+	touchG(8, 1);
+	check('three (past the gate, no threshold above): the same room as two', sg.blue_coins === 3 && RG.key(sg) === g2, RG.desc(sg));
 	const B = levelOf('pocket_cp', POCKET_CP).level;
 	check('a checkpoint in the pocket: blue relevant', GX.counterRelevance(B).blue === true, JSON.stringify(GX.counterRelevance(B)));
 	const Cr = levelOf('pocket_crown', POCKET_CROWN).level;
