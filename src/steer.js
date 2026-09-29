@@ -1153,8 +1153,10 @@ function tourPass(A, k) {
 	return P;
 }
 /** a backward walk field (fifths: 5 / 7 a step x kappa, a portal 5) from the goals [{tile, cost fifths}] over P ->
- *  Float64Array(N) (Infinity: none); H: scratch {key Float64Array, id Int32Array} */
-function walkDist(A, P, goals, kappa, H) {
+ *  Float64Array(N) (Infinity: none); H: scratch {key Float64Array, id Int32Array}; kill (the switch chain's): fifths
+ *  added for a step onto a tile P marks 2 (a killer, passable at a price; the tour's P has none) */
+function walkDist(A, P, goals, kappa, H, kill) {
+	const kc = kill || 0;
 	const { W, H: HH, N } = A;
 	const d = new Float64Array(N).fill(Infinity);
 	const goalT = new Uint8Array(N);
@@ -1190,7 +1192,7 @@ function walkDist(A, P, goals, kappa, H) {
 			if (goalT[t] || isTrophy[t] || !P[t] || A.forcedP[t]) continue;
 			const diag = DX8[di] && DY8[di];
 			if (diag && !P[y * W + x2] && !P[y2 * W + x]) continue;
-			const c = v + (diag ? s7 : s5);
+			const c = P[t2] === 2 ? v + (diag ? s7 : s5) + kc : v + (diag ? s7 : s5);
 			if (c < d[t]) { d[t] = c; push(t, c); }
 		}
 		const ps = A.portalSrcOf.get(t2);
@@ -1287,6 +1289,223 @@ function tourFifths(st, sim) {
 		if (l + rest < best) best = l + rest;
 	}
 	return best < Infinity ? Math.min(499999, Math.floor(best + 0.5)) : -1;
+}
+
+// ------------------------------------------------------------------ the switch chain (d4-switch-chain, 2026-09-29)
+// A portal / switch maze (Bad EE Level 9: 56 purple switch ids, 8 worlds of 5 minis, every mini's switch opens the door in
+// front of the portal to the next one) is a CHAIN: reach a switch, the door it opens, the portal behind it, the next room.
+// The layers cannot hold it: 56 ids are 2^56 layers, the CEGAR stops at the budget with 4 of them modelled, and every
+// other purple door is OPEN in the layer model (a false near: the steer's value 238 tiles at the start of a level whose
+// trophy the walk reaches only after every world's switches). The chain is a monotone counter instead, like the coins:
+// WAVES by the fixpoint (every purple switch the walk reaches, pressed ON; again with those doors open / gates shut, until
+// the trophy is reached): wave k = the ids newly reached once every id of the earlier waves is ON. The ids the trophy
+// needs (backward: an id whose doors every way to the trophy, or to a needed id of a later wave, passes) are the chain;
+// the value = the walk to the nearest OFF id of the first unfinished wave + the rest of the chain in its order (the wave's
+// other OFF ids, then the later waves', then the walk to the trophy), each leg a walk field with the earlier waves ON.
+// Pressing an ON id again (a toggle) or touching its 1619 reset turns it OFF: the value rises by its leg (a step back),
+// and a ball the chain's walk no longer takes to any OFF switch of its wave (behind the door that switch shuts again) has
+// no value (-2 -> -1: ranked behind every valued state, never dropped). The lookup (steerFifths) is the LARGER of the chain
+// and the rest (layers, coin DP / tour): both relax, the layers with the chain's unmodelled doors open (the false near),
+// the chain blind to coins, keys, gravity and one-ways; so the chain only raises a value or gives one where there is none.
+// ORDERING only (the CPU search's lookup, the CPU file's chain section, flags 4; the GPU tools' plain file is main's byte
+// for byte): nothing is pruned; RCH3's -1 stays the proof. Only where the walk reaches no trophy with every switch off and
+// the steer's layers leave out an id the chain needs (the campaign: 7 of 203 levels, Good Egg's one id 888 among them).
+// EEAT_CHAIN=0 / buildSteer(level, {noChain: true}): off (= main).
+// The walk: 8 neighbours, portals directed (a random portal's exits as a set), killers passable at CHAIN_KILL fifths a
+// tile (the physics jumps them), coin doors / keys / other gates open (a relaxation), purple doors (184) open and gates
+// (185) shut when their id is ON.
+const CHAIN_KILL = 10, CHAIN_MAX_WAVES = 64, CHAIN_MAX_TILES = 4000;
+/** the chain walk's passability with the purple ids `on` ON: 0 blocked, 1 open, 2 a killer (passable, priced) */
+function chainPass(A, on) {
+	const P = new Uint8Array(A.N);
+	for (let i = 0; i < A.N; i++) {
+		const c = A.cls[i];
+		if (c === 2) P[i] = 1;
+		else if (c === 1) P[i] = 2;
+		else if (c === 3) {
+			const g = A.gateFeat[i];
+			if (g === 'static') P[i] = A.gatePol[i] === 1 ? 1 : 0;
+			else if (g.startsWith('psw:')) P[i] = (A.gatePol[i] === 1) === on.has(A.gateParam[i]) ? 1 : 0;
+			else P[i] = 1;
+		}
+	}
+	return P;
+}
+/** the tiles the chain walk reaches from the start over P (Uint8Array(N)) */
+function chainFlood(A, P) {
+	const { W, H, N } = A;
+	const seen = new Uint8Array(N), q = new Int32Array(N);
+	let qh = 0, qt = 0;
+	seen[A.start.t] = 1; q[qt++] = A.start.t;
+	while (qh < qt) {
+		const t = q[qh++];
+		const ex = A.portalExits.get(t);
+		if (ex) for (const e of ex) if (!seen[e] && P[e]) { seen[e] = 1; q[qt++] = e; }
+		if (A.forcedP[t]) continue;
+		const x = t % W, y = (t - x) / W;
+		for (let di = 0; di < 8; di++) {
+			const x2 = x + DX8[di], y2 = y + DY8[di];
+			if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
+			const t2 = y2 * W + x2;
+			if (seen[t2] || !P[t2]) continue;
+			if (DX8[di] && DY8[di] && !P[y * W + x2] && !P[y2 * W + x]) continue;
+			seen[t2] = 1; q[qt++] = t2;
+		}
+	}
+	return seen;
+}
+/** the chain's plan: {waves: [[id]], need: [[id]] (the needed ids by wave, empty waves dropped), K (the trophy's wave),
+ *  tilesOf} or {none: why} */
+function chainPlan(A, deadline) {
+	const tilesOf = new Map();
+	for (const [t, kind, id] of A.special) if (kind === 'psw' && id !== 1000) { if (!tilesOf.has(id)) tilesOf.set(id, []); tilesOf.get(id).push(t); }
+	if (!tilesOf.size) return { none: 'no purple switch' };
+	if (!A.trophies.length) return { none: 'no trophy' };
+	const trophyIn = (seen) => A.trophies.some((t) => seen[t]);
+	const on = new Set(), waves = [];
+	let K = -1;
+	for (let w = 0; w < CHAIN_MAX_WAVES; w++) {
+		const seen = chainFlood(A, chainPass(A, on));
+		if (trophyIn(seen)) { K = w; break; }
+		const add = [];
+		for (const [id, ts] of tilesOf) if (!on.has(id) && ts.some((t) => seen[t])) add.push(id);
+		if (!add.length) break;
+		add.sort((a, b) => a - b);
+		waves.push(add);
+		for (const id of add) on.add(id);
+		if (deadline && Date.now() > deadline) return { none: 'time' };
+	}
+	if (K === 0) return { none: 'the walk reaches the trophy with no switch on' };
+	if (K < 0) return { none: `no trophy after ${waves.length} waves` };
+	// the ids the trophy needs, backward: an id is needed when the walk with every other id ON misses the trophy or a
+	// needed id of a later wave (each group: reached when any of its tiles is)
+	const need = new Set();
+	for (let w = K - 1; w >= 0; w--) {
+		const groups = [A.trophies];
+		for (let v = w + 1; v < K; v++) for (const id of waves[v]) if (need.has(id)) groups.push(tilesOf.get(id));
+		for (const id of waves[w]) {
+			const o2 = new Set(on); o2.delete(id);
+			const seen = chainFlood(A, chainPass(A, o2));
+			if (groups.some((g) => !g.some((t) => seen[t]))) need.add(id);
+		}
+		if (deadline && Date.now() > deadline) return { none: 'time' };
+	}
+	// (checked forward: the needed ids alone, wave by wave; else every id of the waves: parallel doors where each one
+	// alone would do make none of them "needed")
+	let ok = need.size > 0;
+	const acc = new Set();
+	for (let w = 0; ok && w < K; w++) {
+		const seen = chainFlood(A, chainPass(A, acc));
+		for (const id of waves[w]) if (need.has(id) && !tilesOf.get(id).some((t) => seen[t])) ok = false;
+		for (const id of waves[w]) if (need.has(id)) acc.add(id);
+	}
+	if (ok && !trophyIn(chainFlood(A, chainPass(A, acc)))) ok = false;
+	const byWave = waves.map((ids) => ids.filter((id) => !ok || need.has(id))).filter((ids) => ids.length);
+	return { waves, need: byWave, K, allNeeded: !ok, tilesOf };
+}
+/** the chain of a level (kappa: the walk's scale) -> {n, nW, id, wave, order, tail, C, legs ((n + 1) x N u16: row n the
+ *  walk to the trophy with the chain ON), ...} or null */
+function buildChain(A, CP, kappa, deadline, maxBytes) {
+	const t0 = Date.now();
+	const { N } = A;
+	const ids = [], wave = [];
+	CP.need.forEach((w, k) => { for (const id of w) { ids.push(id); wave.push(k); } });
+	const n = ids.length;
+	if (!n || (n + 1) * N * 2 > maxBytes) return null;
+	const Hs = { key: new Float64Array(1 << 16), id: new Int32Array(1 << 16) };
+	const ds = [];
+	const onBefore = new Set();
+	for (let k = 0; k < CP.need.length; k++) {
+		const P = chainPass(A, onBefore);
+		for (let i = 0; i < n; i++) if (wave[i] === k) ds[i] = walkDist(A, P, CP.tilesOf.get(ids[i]).map((t) => ({ tile: t, cost: 0 })), kappa, Hs, CHAIN_KILL);
+		for (const id of CP.need[k]) onBefore.add(id);
+		if (deadline && Date.now() > deadline) return null;
+	}
+	ds[n] = walkDist(A, chainPass(A, onBefore), A.trophies.map((t) => ({ tile: t, cost: 0 })), kappa, Hs, CHAIN_KILL);
+	let reach0 = false;
+	for (let i = 0; i < n; i++) if (wave[i] === 0 && ds[i][A.start.t] < Infinity) reach0 = true;
+	if (!reach0) return null;
+	// (one scale for every leg: the largest finite value fits u16)
+	let mx = 0;
+	for (const d of ds) for (let t = 0; t < N; t++) if (d[t] < Infinity && d[t] > mx) mx = d[t];
+	const q = mx > CUT - 2 ? (CUT - 2) / mx : 1;
+	const at = ids.map((id) => CP.tilesOf.get(id)[0]);
+	const C = new Float32Array(n * n), tail = new Float32Array(n);
+	let cMax = 0;
+	for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { const v = i === j ? 0 : ds[j][at[i]] * q; C[i * n + j] = v; if (v < Infinity && v > cMax) cMax = v; }
+	for (let k = 0; k < n * n; k++) if (!(C[k] < Infinity)) C[k] = 2 * cMax + 5;
+	let tMax = 0;
+	for (let i = 0; i < n; i++) { tail[i] = ds[n][at[i]] * q; if (tail[i] < Infinity && tail[i] > tMax) tMax = tail[i]; }
+	for (let i = 0; i < n; i++) if (!(tail[i] < Infinity)) tail[i] = 2 * Math.max(tMax, cMax) + 5;
+	// the order: wave by wave, nearest neighbour within a wave from the last id of the one before (the start first)
+	const order = new Int32Array(n);
+	let m = 0, last = -1;
+	for (let k = 0; k < CP.need.length; k++) {
+		const left = [];
+		for (let i = 0; i < n; i++) if (wave[i] === k) left.push(i);
+		while (left.length) {
+			let b = 0, bv = Infinity;
+			left.forEach((j, x) => { const v = last < 0 ? ds[j][A.start.t] : C[last * n + j]; if (v < bv) { bv = v; b = x; } });
+			last = left[b]; order[m++] = last; left.splice(b, 1);
+		}
+	}
+	const legs = new Uint16Array((n + 1) * N);
+	for (let i = 0; i <= n; i++) { const d = ds[i], o = i * N; for (let t = 0; t < N; t++) legs[o + t] = d[t] < Infinity ? Math.min(CUT - 1, Math.round(d[t] * q)) : CUT; }
+	return { n, nW: CP.need.length, id: Int32Array.from(ids), wave: Int32Array.from(wave), order, tail, C, legs, ms: Date.now() - t0, bytes: legs.byteLength + C.byteLength };
+}
+/** the chain's value of a sim's state (fifths; -1: none (no chain, off the map, the chain ON and no walk to the trophy);
+ *  -2: the chain's walk reaches none of the first unfinished wave's OFF switches from here: a ball behind a door its own
+ *  switch shut again (a toggle, a 1619 reset), which the layer field (that door open) would price as near) */
+function chainFifths(st, sim) {
+	const R = st.chain;
+	if (!R) return -1;
+	const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+	if (tx < 0 || ty < 0 || tx >= st.W || ty >= st.H) return -1;
+	const tile = ty * st.W + tx, n = R.n, N = st.N, sw = sim._switches;
+	if (!R.U) { R.U = new Int32Array(n); R.L = new Int32Array(n); }
+	const U = R.U, Lt = R.L;
+	let w = -1, u = 0, l = 0;
+	for (let k = 0; k < n; k++) {
+		const q = R.order[k];
+		if (sw.get(R.id[q]) === true) continue;
+		if (w < 0) w = R.wave[q];
+		if (R.wave[q] === w) U[u++] = q; else Lt[l++] = q;
+	}
+	// (the chain ON: the walk to the trophy)
+	if (w < 0) { const v = R.legs[n * N + tile]; return v >= CUT ? -1 : v; }
+	let rest = 0;
+	for (let k = 1; k < l; k++) rest += R.C[Lt[k - 1] * n + Lt[k]];
+	if (l) rest += R.tail[Lt[l - 1]];
+	let best = Infinity;
+	for (let p = 0; p < u; p++) {
+		const lg = R.legs[U[p] * N + tile];
+		if (lg >= CUT) continue;
+		// (the wave's other OFF ids from here in its order, wrapping; then the later waves'; then the trophy)
+		let c = lg, prev = U[p];
+		for (let k = 1; k < u; k++) { const q = U[(p + k) % u]; c += R.C[prev * n + q]; prev = q; }
+		c += l ? R.C[prev * n + Lt[0]] + rest : R.tail[prev];
+		if (c < best) best = c;
+	}
+	return best < Infinity ? Math.min(499999, Math.floor(best + 0.5)) : -2;
+}
+/** the chain's next switch from a sim's state: the OFF id of the first unfinished wave with the least leg ({i, id, v}
+ *  or null: no chain, the chain ON, off every leg): the wall breaker's aim */
+function nextSwitch(st, sim) {
+	const R = st.chain;
+	if (!R) return null;
+	const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+	if (tx < 0 || ty < 0 || tx >= st.W || ty >= st.H) return null;
+	const tile = ty * st.W + tx, N = st.N;
+	let w = -1, best = null;
+	for (let k = 0; k < R.n; k++) {
+		const q = R.order[k];
+		if (sim._switches.get(R.id[q]) === true) continue;
+		if (w < 0) w = R.wave[q];
+		if (R.wave[q] !== w) continue;
+		const lg = R.legs[q * N + tile];
+		if (lg < CUT && (!best || lg < best.v)) best = { i: q, id: R.id[q], v: lg };
+	}
+	return best;
 }
 
 // ------------------------------------------------------------------ build
@@ -1418,9 +1637,38 @@ function buildSteer(level, opts) {
 			} else tourInfo = { none: true, T };
 		}
 	}
+	// the switch chain (the CPU file's alone, like the tour): where the walk reaches no trophy with every switch off and the
+	// layers leave out an id the chain needs
+	let chainInfo = null;
+	if (!opts.noChain && process.env.EEAT_CHAIN !== '0') {
+		const CP = chainPlan(A, t0 + 2 * maxMs);
+		if (CP.none) chainInfo = { none: CP.none };
+		else {
+			const miss = CP.need.flat().filter((id) => M.names.indexOf(`psw:${id}`) < 0);
+			if (!miss.length) chainInfo = { none: 'every needed id modelled', n: CP.need.flat().length };
+			else {
+				const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
+				const R = buildChain(A, CP, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
+				if (R) {
+					steer.chain = R;
+					let s1 = chainFifths(steer, sim0);
+					if (s1 > CHAIN_MAX_TILES * 5) {
+						const f = CHAIN_MAX_TILES * 5 / s1;
+						for (let k = 0; k < R.legs.length; k++) if (R.legs[k] < CUT) R.legs[k] = Math.round(R.legs[k] * f);
+						for (let k = 0; k < R.C.length; k++) R.C[k] *= f;
+						for (let k = 0; k < R.tail.length; k++) R.tail[k] *= f;
+						R.scale = f;
+						s1 = chainFifths(steer, sim0);
+					}
+					chainInfo = { n: R.n, waves: R.nW, K: CP.K, allNeeded: CP.allNeeded, unmodelled: miss.length, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, mb: Math.round(R.bytes / 104857.6) / 10, start: s1 >= 0 ? s1 / 5 : null,
+						ids: CP.need.map((w) => w.join(',')).join(' | ') };
+				} else chainInfo = { none: 'no leg from the start', K: CP.K };
+			}
+		}
+	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
-		tour: tourInfo };
+		tour: tourInfo, chain: chainInfo };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1547,6 +1795,16 @@ function nextCoin(st, sim, skip) {
 }
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
+	const v = baseFifths(st, sim);
+	// (the switch chain, the CPU file's: the larger of it and the rest: both are relaxations, the layer field's with the
+	// chain's unmodelled doors open (a false near), the chain's blind to coins, keys and gravity; the chain only raises a
+	// value, or gives one where the rest has none)
+	// (-2: no walk to the switches the chain still needs: no value, ranked behind every valued state; never a prune)
+	if (st.chain) { const c = chainFifths(st, sim); return c === -2 ? -1 : c < 0 ? v : v < 0 ? c : Math.max(v, c); }
+	return v;
+}
+/** the steer cost without the switch chain (fifths, -1 = no value) */
+function baseFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
 	// (the coin tour, the CPU file's (no DP): the min with the layer field's, like the DP's; first below T where the coins
 	// are not modelled: the layer field walks through their doors)
@@ -1581,6 +1839,8 @@ function steerFileBytes(st, levelFp, withTour) {
 	const N = st.N;
 	// (the coin tour: the CPU file's alone, flags 2, its section's offset a u64 at 56; the plain file stays as it was)
 	const R = withTour && st.tour ? st.tour : null;
+	// (the switch chain: the CPU file's alone too, flags 4, its section's offset a u64 in the file's last 8 bytes)
+	const K = withTour && st.chain ? st.chain : null;
 	const bodyBytes = st.bodies.map((f) => RF.reachFileBytes(f, levelFp));
 	const dp = st.dp;
 	const parts = [];
@@ -1600,17 +1860,24 @@ function steerFileBytes(st, levelFp, withTour) {
 		parts.push(Buffer.from(Float32Array.from(R.tail).buffer), Buffer.from(Float32Array.from(R.C).buffer));
 		parts.push(Buffer.from(R.legs.buffer, R.legs.byteOffset, R.legs.byteLength));
 	}
+	const chainIdx = parts.length;
+	if (K) {
+		parts.push(i32([K.n, K.nW, 0, 0]), i32(K.id), i32(K.wave), i32(K.order));
+		parts.push(Buffer.from(Float32Array.from(K.tail).buffer), Buffer.from(Float32Array.from(K.C).buffer));
+		parts.push(Buffer.from(K.legs.buffer, K.legs.byteOffset, K.legs.byteLength));
+	}
 	let size = 64;
 	const offs = [];
 	for (const p of parts) { size = al8(size); offs.push(size); size += p.length; }
 	const offB = Buffer.alloc(8 * st.bodies.length), sizB = Buffer.alloc(8 * st.bodies.length);
 	bodyBytes.forEach((b, k) => { offB.writeBigUInt64LE(BigInt(offs[bodyIdx + k]), 8 * k); sizB.writeBigUInt64LE(BigInt(b.length), 8 * k); });
 	parts[offIdx] = offB; parts[offIdx + 1] = sizB;
-	const buf = Buffer.alloc(al8(size));
+	const buf = Buffer.alloc(al8(size) + (K ? 8 : 0));
 	buf.write('RCH4', 0, 'latin1');
-	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
+	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0) | (K ? 4 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
 	if (levelFp) { buf.writeUInt32LE(levelFp[0] >>> 0, 48); buf.writeUInt32LE(levelFp[1] >>> 0, 52); }
 	if (R) buf.writeBigUInt64LE(BigInt(offs[tourIdx]), 56);
+	if (K) buf.writeBigUInt64LE(BigInt(offs[chainIdx]), buf.length - 8);
 	parts.forEach((p, k) => p.copy(buf, offs[k]));
 	return buf;
 }
@@ -1677,10 +1944,20 @@ function readSteerFile(buf) {
 		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, n * N);
 		tour = { n, T: hd[1], first: hd[2], bit, order, tail, C, legs };
 	}
-	return { version: ver, tour, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
+	// (the switch chain: its offset in the file's last 8 bytes)
+	let chain = null;
+	if (flags & 4) {
+		o = Number(buf.readBigUInt64LE(buf.length - 8));
+		const hd = ints(4), n = hd[0];
+		const id = ints(n), wave = ints(n), order = ints(n);
+		const view = (Ctor, len) => { o = al8(o); let a; if ((buf.byteOffset + o) % Ctor.BYTES_PER_ELEMENT === 0) a = new Ctor(buf.buffer, buf.byteOffset + o, len); else a = new Ctor(Uint8Array.from(buf.subarray(o, o + len * Ctor.BYTES_PER_ELEMENT)).buffer); o += len * Ctor.BYTES_PER_ELEMENT; return a; };
+		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, (n + 1) * N);
+		chain = { n, nW: hd[1], id, wave, order, tail, C, legs };
+	}
+	return { version: ver, tour, chain, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
-module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
+module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, nextSwitch, chainFifths, chainPlan, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)

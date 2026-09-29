@@ -1198,7 +1198,10 @@ const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
 // (the CPU search's steer file where it differs from the GPU tools': the coin tour, steer.js buildTour: flags 2, which the
 // native lookup does not read; the GPU tools keep the plain file)
 const cpuFileOf = (file) => file.replace(/\.bin$/, '_cpu.bin');
-const steerCpuOf = (sf) => (sf.tour && sf.tour.n && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
+const cpuOnly = (sf) => !!((sf.tour && sf.tour.n) || (sf.chain && sf.chain.n));
+const steerCpuOf = (sf) => (cpuOnly(sf) && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
+/** the switch chain's part of the steer note (steer.js buildChain: the CPU file's) */
+const chainNote = (sf) => (sf.chain && sf.chain.n ? `, the switch chain over ${sf.chain.n} purple switch ids in ${sf.chain.waves} waves (${sf.chain.unmodelled} not in the layers; the CPU search's)` : '');
 /** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
 const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
 /** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
@@ -2317,11 +2320,11 @@ function useSteer(sf, noGpu) {
 	// rooms behind the coin doors the level's coins never open)
 	cur.distBySteer = cur.files.steerDist = true;
 	try { cur.reachLookup = SF.readReachBytes(fs.readFileSync(cur.files.reach)); } catch (e) { /* no reach file: the page shows the steer tiles */ }
-	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true };
+	S.steer = { layers: sf.layers, bodies: sf.bodies, features: sf.features, dp: sf.dp, mb: Math.round(mb * 10) / 10, start: sf.start, ms: sf.ms, gpu: gpuOk, beams: gpuOk && copies === 4, cpu: true, chain: sf.chain && sf.chain.n ? { n: sf.chain.n, waves: sf.chain.waves, start: sf.chain.start } : undefined };
 	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
 	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
-	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
+	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}${chainNote(sf)}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
@@ -2354,7 +2357,7 @@ function lateSteer(gen, sf2) {
 	if (esc && esc.run) esc.run.best = Infinity;
 	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	const mb = sf2.bytes / 1048576;
-	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
+	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec, chain: sf2.chain && sf2.chain.n ? { n: sf2.chain.n, waves: sf2.chain.waves, start: sf2.chain.start } : undefined };
 	// (the plan past its count, when the cache had it; else it comes after the field from the same build: pastArrived)
 	if (!cur.past && sf2.past && fs.existsSync(pastFileOf(sf2.file))) cur.past = Object.assign({ file: pastFileOf(sf2.file) }, sf2.past);
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
@@ -2366,7 +2369,7 @@ function lateSteer(gen, sf2) {
 		const dist = q.key === 'goexplore' || q.key === 'escape';
 		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${cur.files.steerCpu}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
-	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
+	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}${cur.files.steerCpu !== sf2.file ? chainNote(sf2) : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
 		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
 	save();
 }
@@ -2604,7 +2607,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (!cached.tour || !cached.tour.n || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (!cpuOnly(cached) || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -2617,8 +2620,8 @@ function steerInfo(buf, hash) {
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
 			// (the coin tour: the CPU search's file alone)
-			if (useful && st.tour) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
-			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour,
+			if (useful && (st.tour || st.chain)) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
+			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour, chain: st.info.chain,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
 				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
