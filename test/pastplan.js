@@ -241,6 +241,38 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 		await stopEd();
 	}
 
+	console.log('\n== the editor: the coin door (the nearest attempt pinned by a door it cannot open while new rooms keep coming)');
+	// (Palmia Ville: the nearest attempt sat by its coin door from 6.5 s while coin rooms kept resetting the stall clock, which
+	// ran its 90 s only at ~200 s; here the stand-in's nearest attempt holds 1 coin 4 tiles before the 2-coin door (14, y) and
+	// a new room with territory gain comes every 0.4 s: no stall, but no nearer attempt either: the switch after the wait)
+	{
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let ms = '';
+		for (let t = 0; t < 400; t++) {
+			E.applyMask(inp, 4); sim.tick(inp);
+			if (sim.coins > 1 || ((sim.px + 8) >> 4) > 10) break;
+			ms += '4';
+		}
+		const endX = (sim.px + 8) >> 4;
+		const log = path.join(HOME, 'door.log'), stub = stubOf(HOME, log);
+		const stub2 = stub.replace(/\.js$/, '_rooms.js');
+		fs.writeFileSync(stub2, fs.readFileSync(stub, 'utf8').replace(`say({ ev: 'start'`, `setTimeout(() => say({ ev: 'closest', dist: 20, tick: ${ms.length}, inputs: '${ms}' }), 300);
+let rk = 100; const rv = setInterval(() => { rk++; say({ ev: 'source', kind: 'room', room: rk, desc: 'coins=1', gain: 5, tick: 3, dist: 25, inputs: '444', seed: 1 }); }, 400);
+say({ ev: 'start'`));
+		const t0 = Date.now();
+		ED.start({ eelvlB64: buf.toString('base64'), seconds: 20, workers: 1 }, { available: false, why: 'test: no GPU' }, { cpu: [process.execPath, stub2], breakWait: [WAIT] });
+		let es4 = ED.state();
+		for (; es4.running && Date.now() - t0 < 20000 && !(linesOf(log).length && es4.steer && es4.steer.dpFirst); es4 = ED.state()) await new Promise((r) => setTimeout(r, 100));
+		es4 = ED.state();
+		const L4 = linesOf(log), sw4 = L4.filter((x) => x.line.startsWith('steer '));
+		const note4 = (es4.log || []).find((x) => /the coin stall: no nearer attempt for 2 s and the nearest attempt \(1 coins\) ends by the 2-coin door at \(14, \d+\)/.test(x));
+		check(`the nearest attempt (${ms.length} ticks, 1 coin, ending at x ${endX}) pinned by the 2-coin door while new rooms keep coming: the switch to the own field's DP first after the wait (rooms seen ${(es4.sources || []).length})`,
+			sw4.length === 1 && !/_past\.bin$/.test(sw4[0].line) && sw4[0].t >= WAIT * 1000 - 500 && !!note4 && (es4.sources || []).length >= 5,
+			`${L4.map((x) => `${x.t} ${x.line.slice(0, 6)}`).join(' | ')}; ${note4 || (es4.log || []).filter((x) => /coin/.test(x)).slice(-2).join(' | ')}`);
+		await stopEd();
+	}
+
 	console.log('\n== the editor: the coin plan of a field that models no coins (the zero count)');
 	// (no coin DP and a field of one layer: the steer worker builds the coin plan (kind 'coins', planT 0); at the first stall
 	// the plan's file becomes the search's field (a late one: "steerd") and the switch follows ("steer": the DP first))

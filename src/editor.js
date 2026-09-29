@@ -1176,15 +1176,16 @@ function coinDoorNear(c, coins) {
 	if (!c || !Array.isArray(c.path) || !c.path.length || !L || !L.fg || !L.lookup0) return null;
 	const [px, py] = c.path[c.path.length - 1];
 	const tx = Math.floor(px / 16), ty = Math.floor(py / 16), W = L.width, H = L.height;
+	let best = null;
 	for (let dy = -COIN_NEAR; dy <= COIN_NEAR; dy++) {
 		for (let dx = -COIN_NEAR; dx <= COIN_NEAR; dx++) {
 			const x = tx + dx, y = ty + dy;
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
-			const i = y * W + x, id = L.fg[i];
-			if ((id === 43 || id === 165) && L.lookup0[i] > coins) return { x, y, n: L.lookup0[i] };
+			const i = y * W + x, id = L.fg[i], d = dx * dx + dy * dy;
+			if ((id === 43 || id === 165) && L.lookup0[i] > coins && (!best || d < best.d)) best = { x, y, n: L.lookup0[i], d };
 		}
 	}
-	return null;
+	return best;
 }
 /** the CPU searches (the one search, the escape) turn to `file` with the coin DP first (goexplore.js stdin `steer <file>`):
  *  another measure, so the nearest attempt, the stall mark and every strategy's own best start over, and the rooms'
