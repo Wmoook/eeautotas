@@ -1279,7 +1279,9 @@ function pinRefineCheck() {
 	if (pinR.seeds.includes(`${tx},${ty}`) || (pinR.switchAfter !== undefined && !(c.foundAfter > pinR.switchAfter))) { pinR.at = Date.now(); pinR.best = c.dist; return; }
 	pinR.seeds.push(`${tx},${ty}`);
 	pinR.busy = true;
-	const k = ++pinR.n, R = pinR, seeds = pinR.seeds.join(';'), t0 = Date.now();
+	// (the walls the search's steer was built with, EEAT_STEER_WALLS, stay: the pins add to them; before, the first pin's
+	// rebuild dropped them)
+	const k = ++pinR.n, R = pinR, seeds = [process.env.EEAT_STEER_WALLS, ...pinR.seeds].filter(Boolean).join(';'), t0 = Date.now();
 	const file = `${steerBase(cur.levelHash)}_pin${k}.bin`;
 	const code = `const { workerData: d, parentPort } = require('worker_threads'); const fs = require('fs');
 		process.env.EEAT_STEER_WALLS = d.seeds;
