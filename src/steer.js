@@ -1501,6 +1501,33 @@ function legCounterexample(A, PH, CL, D) {
 	return null;
 }
 
+/** the leg CEGAR's check before a build again (buildSteer): the DP's legs of the next build lie in one layer of the
+ *  modelled features (the plan's before its first coin), where a newly modelled feature has (as a rule) its first value;
+ *  so the coin of the counterexample's leg, its leg field with that feature's gates as they stand at its first value
+ *  (the other gates as in its leg now), reaches neither the start nor another coin, and the DP needs every coin (n - 1
+ *  < T): the next build's DP would have no tour from the start, and the build would be reverted (Endeavor: psw:3's doors
+ *  on the way to its coin (347, 124), a second 20-s build for main's file). -> the coin's [x, y], or null (build again;
+ *  the tail's leg, a feature without gates such as protection: no check) */
+function legLost(A, R, cx) {
+	const CL = R.legs.CL, M = R.PH.M;
+	const f = A.feats.get(cx.feat);
+	if (!f || cx.feat === 'prot' || cx.feat === 'fx' || CL.coins.length - 1 >= CL.T) return null;
+	const tour = coinTour(CL, R.legs.D, A.start.t);
+	const q = tour[cx.leg - 1];
+	if (q === undefined) return null;
+	const nC = M.names.indexOf('coins'), k = CL.countOf.get(q);
+	const c = nC >= 0 ? layerLevel(A, M, M.withVal(CL.s, nC, k), {}) : coinDoorsAt(A, M, layerLevel(A, M, CL.s, {}), k);
+	const fg = Int32Array.from(c.lv.fg);
+	for (const x of CL.coins) if (fg[x] === TROPHY) fg[x] = 0;
+	fg[q] = TROPHY;
+	const v0 = f.values[f.init];
+	for (let i = 0; i < A.N; i++) if (A.gateFeat[i] === cx.feat) fg[i] = testGate(cx.feat, A.gatePol[i], A.gateParam[i], v0) ? 0 : 9;
+	const g = legFieldOf(c.lv, fg, q, CL.coins, A.start.t);
+	if (arriveCost(g, A.start.t) < CUT) return null;
+	for (const x of CL.coins) if (x !== q && arriveCost(g, x) < CUT) return null;
+	return [q % A.W, Math.floor(q / A.W)];
+}
+
 // ------------------------------------------------------------------ build
 // the build's budget: the bodies' bytes (layers x tiles; a body ~BODY_BYTES_TILE bytes per tile: 107 on the review's
 // 200 x 40 level of 10 switch ids, 1024 layers in an 873 MB file and 2.86 GB of the process) and its time. Past either,
@@ -1659,6 +1686,10 @@ function buildSteer(level, opts) {
 		if (!f || modeled.has(cx.feat)) { rec.why = 'modelled'; break; }
 		if (R.B.M.S * f.values.length > maxLayers) { rec.why = `over ${maxLayers} layers`; break; }
 		if (Date.now() - T0() > maxMs / 2) { rec.why = secs; break; }
+		// (a build again that would only be reverted: the counterexample's coin, its leg with the feature's gates as they
+		// stand at the feature's first value, reaches neither the start nor another coin and the DP has no coin to spare)
+		const lost = legOn !== 'keep' ? legLost(A, R, cx) : null;
+		if (lost) { rec.why = `the DP would lose the coin (${lost.join(', ')})`; break; }
 		rec.added = true;
 		modeled.add(cx.feat);
 	}

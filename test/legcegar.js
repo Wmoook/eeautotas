@@ -14,8 +14,8 @@
 //     finite and higher than main's (the real detour); EEAT_LEGCEGAR=0 = main byte for byte
 //   3 the pocket's entrance a purple GATE (185: open while switch 1 is off): the leg passes an open gate, no
 //     counterexample, the files = main's byte for byte (the GPU and the CPU file)
-//   4 no coin C: modelling switch 1 leaves the DP no 2-coin tour (B cut off): the build before (main's) is kept, byte
-//     for byte, the log says reverted
+//   4 no coin C: modelling switch 1 would leave the DP no 2-coin tour (B cut off): the check before a build again
+//     (legLost) says so, no build again, main's files byte for byte; legCegar 'keep' builds again (for measurement)
 // usage: node test/legcegar.js [--only=1,2,3,4]
 const crypto = require('crypto');
 const E = require('../src/eesim.js');
@@ -124,12 +124,15 @@ if (want('3')) {
 	check('the GPU and CPU files = main\'s byte for byte', JSON.stringify(files(a)) === JSON.stringify(files(b)));
 }
 if (want('4')) {
-	section('4 no coin C: the DP would lose its tour, the build before is kept');
+	section('4 no coin C: the DP would lose its tour: no build again, main\'s file');
 	const Ln = levelOf({ noC: true });
 	const a = SF.buildSteer(Ln, { legCegar: false }), b = SF.buildSteer(Ln, {});
 	const lg = b.info.legCegar || [];
 	check('psw:1 named on the leg', lg.length === 1 && lg[0].feat === 'psw:1', JSON.stringify(lg));
-	check('reverted: the DP lost its start value', lg[0] && !!lg[0].reverted, JSON.stringify(lg[0]));
+	check('not built again: the DP would lose the coin B (10, 10)', lg[0] && !lg[0].added && /would lose the coin \(10, 10\)/.test(lg[0].why || ''), JSON.stringify(lg[0]));
+	const c = SF.buildSteer(Ln, { legCegar: 'keep' });
+	const lk = c.info.legCegar || [];
+	check("'keep' builds again (no check) and keeps it: psw:1 modelled", lk[0] && lk[0].added && !lk[0].reverted && c.info.features.includes('psw:1'), JSON.stringify(lk));
 	check('the files = main\'s byte for byte', JSON.stringify(files(a)) === JSON.stringify(files(b)));
 	check('psw:1 not in the features', !b.info.features.includes('psw:1'), b.info.features.join('+'));
 }
