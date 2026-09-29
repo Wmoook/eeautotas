@@ -8,6 +8,10 @@
 //            (with a spike: deaths move the ball) makes the spawn side's respawn a way: not doomed
 //   door     a 5-coin door, 4 coins in the open and the 5th behind a gate of 4: the 4 open coins first = doomed (4 held +
 //            0 reachable), the pocket coin first and 3 open = not; the same with blue coins, blue doors and gates
+//   deferred the engine's deferred coin gate (the doomed-count soundness review's gaterow16): a corridor of a coin, 16
+//            gates of 1, the spawn, a 1-coin door and the trophy; the coin taken next to the gates, the ball walks back
+//            through them (the gates keep the old count while the box overlaps one): no state of that finishing route
+//            doomed; the box on a gate with the shown count lagging not doomed, off the gates or with the count shown doomed
 //   cache    a tile inside a doomed flood is answered from the cache; allow false: a miss is "not doomed"; no analyzer
 //            for a level without a coin door or gate, nor with EEAT_DOOM=0
 //   routes   along each toy level's own finishing route no state is doomed
@@ -39,7 +43,7 @@ function check(name, ok, detail) {
 const section = (s) => console.log(`\n== ${s}`);
 // # wall, S spawn, T trophy, C checkpoint, x spike, o gold coin, b blue coin, 1 gold gate 1, 4 gold gate 4, 5 gold door 5,
 // 6 blue gate 4, 7 blue door 5
-const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], 1: [165, 1], 4: [165, 4], 5: [43, 5], 6: [214, 4], 7: [213, 5] };
+const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], 1: [165, 1], 4: [165, 4], 5: [43, 5], 6: [214, 4], 7: [213, 5], d: [43, 1] };
 function levelOf(name, rows) {
 	const cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') { if (!ID[ch]) throw new Error(`legend ${ch}`); cells.push([x, y, ...ID[ch]]); } }));
@@ -122,6 +126,45 @@ for (const [name, rows, blue] of [['doomdoor', DOOR, false], ['doomblue', BLUE, 
 	sim.restore(s0);
 	for (const x of [3, 5, 7]) touch(sim, x, 1);
 	check(`${name}: 3 held, the gate of 4 open: not doomed`, D.test(sim, at(sim, 11, 1)) === false);
+}
+
+section('deferred');
+{
+	// o the coin, 1 x 16 the gates of 1, S the spawn, d the 1-coin door, T the trophy
+	const mid = 'o' + '1'.repeat(16) + 'S' + '.'.repeat(10) + 'd..T';
+	const ROWS = ['#'.repeat(mid.length + 2), '#' + mid + '#', '#'.repeat(mid.length + 2)];
+	const { level: L } = levelOf('doomgaterow', ROWS);
+	const D = GX.doomOf(L), W = L.width;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	const tileOf = (q) => (Math.trunc(q.py + 8) >> 4) * W + (Math.trunc(q.px + 8) >> 4);
+	check('the start is not doomed', D.test(sim, tileOf(sim)) === false);
+	// the hand route: left to the coin (running while far, then single taps at rest, so the coin is taken with the box
+	// still on the gate next to it), then right through the gates, the door and to the trophy
+	let t = 0, left = true, n = 0, bad = 0, lag = 0;
+	while (t < 3000 && !sim.has_silver_crown && !sim.is_dead) {
+		if (left && sim.coins >= 1) left = false;
+		inp.left = left && (sim.px > 64 || Math.abs(sim.speed_x) < 0.05); inp.right = !left;
+		inp.up = false; inp.down = false; inp.jump = false;
+		sim.tick(inp); t++;
+		if (sim.has_silver_crown || sim.is_dead) break;
+		n++;
+		if (sim._show_coin_gate < sim.coins) lag++;
+		if (D.test(sim, tileOf(sim))) bad++;
+	}
+	check('the route back through the gates finishes', sim.has_silver_crown === true, `${t} ticks, coins ${sim.coins}`);
+	check('the gates kept the old count on the way back (the engine\'s deferred gate)', lag > 16, `${lag} states with the shown count lagging`);
+	check('no state of that finishing route doomed', bad === 0 && D.stats().deferred >= 1, `${n} states, ${bad} doomed, ${D.stats().deferred} on a deferred gate`);
+	// the rule itself: the coin held left of the gates
+	const s2 = new E.EESim(L); s2.reset();
+	touch(s2, 1, 1);
+	check('the coin taken', s2.coins === 1, `coins ${s2.coins}`);
+	s2._show_coin_gate = 0; s2.px = 24; s2.py = 16;
+	check('the box on the first gate, the shown count lagging: not doomed', D.test(s2, tileOf(s2)) === false);
+	s2._show_coin_gate = 1;
+	check('the same with the count shown (the gates shut): doomed', D.test(s2, tileOf(s2)) === true);
+	s2._show_coin_gate = 0; s2.px = 16;
+	check('off the gates with the shown count lagging (the next tick shows it): doomed', D.test(s2, tileOf(s2)) === true);
 }
 
 section('cache');

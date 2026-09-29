@@ -1266,7 +1266,7 @@ function doomOf(L) {
 	// (the coin tiles of each colour in the level: the COARSE test's potential, held + all of them, whichever are left)
 	let totG = 0, totB = 0;
 	for (let k = 0; k < L.coinTiles.length; k++) { if (L.coinBaseId[k] === 100) totG++; else if (L.coinBaseId[k] === 101) totB++; }
-	const S = { floods: 0, coarse: 0, hits: 0, doomed: 0, skipped: 0, ms: 0, bytes: 0 };
+	const S = { floods: 0, coarse: 0, hits: 0, doomed: 0, skipped: 0, deferred: 0, ms: 0, bytes: 0 };
 	/** the flood from seeds with the counts held g / b (the live sim's tiles: its untaken coins), one colour by LEVEL (lev 0:
 	 *  gold, 1: blue): its count is raised only when the flood has run out, to the least of its coin doors blocked on the
 	 *  flood's edge that its potential (held + the untaken coins of its colour reached) reaches, and its gates at or below
@@ -1345,6 +1345,22 @@ function doomOf(L) {
 	/** doomed (true) or not (false) for the live sim with its ball's centre tile at `tile`; allow false: no new flood (a
 	 *  cache miss is "not doomed": the caller's time budget) */
 	const test = (sim, tile, allow = true) => {
+		// (the engine's DEFERRED coin gates: PlayState's three overlaps() snapshots at a tick's start (eesim.js tick())
+		// keep a gate at its old count (_show_coin_gate / _show_blue_coin_gate) while the ball's box overlaps a tile the
+		// new count would shut, so a ball that takes a coin next to a row of gates of that count walks back through them:
+		// while a shown count lags the count held and the box (eesim.js _ovClass's tiles) overlaps a door or gate tile,
+		// the closure above (gates by the count held) is no relaxation: not doomed, the safe side. The doomed-count
+		// soundness review's gaterow16: 79 of a 216-tick finishing route's states were doomed without this. Elsewhere
+		// the next tick's first snapshot sets the count: the one-tick lag after a pickup is not exempted)
+		if (sim._show_coin_gate < sim.coins || sim._show_blue_coin_gate < sim.blue_coins) {
+			const ox = Math.trunc(sim.px) >> 4, oy = Math.trunc(sim.py) >> 4;
+			const x2 = sim.px + 16 > ox * 16 + 16 ? 1 : 0, y2 = sim.py + 16 > oy * 16 + 16 ? 1 : 0;
+			for (let yy = oy; yy <= oy + y2; yy++) for (let xx = ox; xx <= ox + x2; xx++) {
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const id = fg[yy * W + xx];
+				if (id >= 0 && id < fl.length && (fl[id] & 16) !== 0) { S.deferred++; return false; }
+			}
+		}
 		const rc = !kills ? -1 : sim.checkpoint.x >= 0 ? sim.checkpoint.y * W + sim.checkpoint.x : -2;
 		// (the COARSE test first: keyed by the counts and the respawn alone, its potential every coin of the level; a doomed
 		// one holds for every collected set (Booty Return: a state per collected set made 88 k floods in 300 s, 11.5 M
