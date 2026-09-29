@@ -1312,6 +1312,104 @@ function sectionS() {
 		check('knob: EEAT_SIDEARROW=0 = the plain model byte for byte; the default prices (arrows)', same && d.sideArrow.on && d.sideArrow.mode === 'arrows' && d.sideArrow.arrows > 0);
 	}
 }
+// ---------------------------------------------------------------- X the field transit tables (ordering only)
+function sectionX() {
+	section('X: the field transit tables (src/exitapex.json; reach.js opts.exitApex, ordering fields only)');
+	const XT = require('../src/exitapex.json');
+	const XG = require('../tools/exitapex.js');
+	// (a) the table is this engine's, monotone, and bounds the engine on ids of every class (not only the ids it measured)
+	const eng = require('crypto').createHash('sha1').update(fs.readFileSync(path.join(__dirname, '..', 'src', 'eesim.js'))).digest('hex').slice(0, 12);
+	check('the table was measured on this engine (tools/exitapex.js; after an engine change run it again)', XT.engine === eng, `${XT.engine} / ${eng}`);
+	let mono = true;
+	for (const k of Object.values(XT.kinds)) for (const a of [k.up, k.in, k.exit]) for (let i = 1; i < a.length; i++) if (a[i] < a[i - 1]) mono = false;
+	check('every table non-decreasing in the speed class (an upper bound for every speed up to c / 8)', mono && Object.keys(XT.kinds).length === 5);
+	const CS = QUICK ? [40, 127] : [0, 13, 40, 61, 90, 127];
+	let over = 0, n = 0, worst = '';
+	for (const id of QUICK ? [4, 120, 119] : [1, 2, 4, 114, 414, 98, 120, 459, 1602, 119, 369, 416]) {
+		const L = levelOfCells(4, 4, [[1, 1, 255]]);
+		const cl = R.classOfId(R.guideFlags(L), L.gMox, L.gMoy, id), k = XT.kinds[cl];
+		const m = XG.measure(id, CS);
+		CS.forEach((c, j) => {
+			n++;
+			const bad = !k || R.cOfV(m.up[j]) > k.up[c] || R.cOfV(m.in[j]) > k.in[c] || m.exit[j] > k.exit[c] + 1e-9;
+			if (bad) { over++; if (!worst) worst = `id ${id} c ${c}: up ${m.up[j].toFixed(3)} in ${m.in[j].toFixed(3)} exit ${m.exit[j].toFixed(2)}`; }
+		});
+	}
+	check(`the engine never exceeds the table (block ids x speed classes, ${n} cases)`, over === 0, worst || `${n} cases`);
+	// (b) rooms: the ordering field (the steer bodies' options) without / with the tables, the proof field, the engine
+	const ORD = (xa) => ({ oneWayEntry: true, portalForced: true, deaths: false, exitApex: xa });
+	const room = (W, H, extra) => {
+		const c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 0; y < H; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		return levelOfCells(W, H, [...c, ...extra]);
+	};
+	// the hand-made input plans (walk right, hold up (or up + right), then up / jump / none: the climbs of these rooms), and
+	// the small breadth-first engine search: the first plan that finishes, else the search's route, else none
+	const PLANS = [];
+	for (const w of [10, 14, 18, 22, 26]) for (const up of [60, 120, 200]) for (const tail of [8, 9, 12, 13, 0]) PLANS.push(seqOf([4, w], [8, up], [tail, 60]));
+	for (const w of [10, 14, 18, 22]) for (const up of [60, 120, 200]) PLANS.push(seqOf([4, w], [12, up], [8, 60]));
+	const finishes = (L, p) => { const s = new E.EESim(L); s.reset(); const I = new E.EEInput(); for (const m of p) { E.applyMask(I, m); s.tick(I); if (s.has_silver_crown) return true; } return false; };
+	const routeOf = (L, maxT) => {
+		for (const p of PLANS) if (finishes(L, p)) return p;
+		const eng = engineRoute(L, maxT, 4000);
+		return eng || null;
+	};
+	const probe = (name, L, reach, maxT) => {
+		const f0 = R.reachField(L, ORD(false)), f1 = R.reachField(L, ORD(true));
+		const sim = startSim(L), s0 = R.costAt(f0, sim), s1 = R.costAt(f1, sim);
+		const route = routeOf(L, maxT || 260);
+		if (reach) {
+			const w = route ? walk(L, f1, route) : null;
+			check(`${name}: the engine reaches the trophy; with the tables the start and every state of the route finite`, !!route && s1 >= 0 && w.cut === 0 && w.finished, `route ${route ? route.length + ' ticks' : 'none'}, start ${fmt(s0)} -> ${fmt(s1)}${w ? `, ${w.cut} of ${w.n} cut` : ''}`);
+		} else check(`${name}: the engine never reaches the trophy; the plain ordering field says it does (the pump), with the tables not`, !route && s0 >= 0 && s1 < 0, `engine ${route ? 'reached' : 'none'}, start ${fmt(s0)} -> ${fmt(s1)}`);
+		return { f0, f1 };
+	};
+	// a chain top: a 6-tile chain (rows 22-27) on the floor, air beside it; the trophy 13 rows over its top (Happy
+	// Spookaween: the model climbed the chain and the air beside it to a 24-row launch), or 1 row over it
+	const chain = (ty) => room(20, 30, [...[22, 23, 24, 25, 26, 27].map((y) => [10, y, 120]), [8, 27, 255], [10, ty, 121]]);
+	probe('chain top, the trophy 13 rows over it', chain(9), false);
+	probe('chain top, the trophy 1 row over it', chain(21), true);
+	// a dot rail: 8 dots (rows 30-37) on the floor, air beside; the trophy 14 rows over its top (Barrel Cannon Canyon: the
+	// rail and the air beside it pumped to 16 px/tick) or 4 rows over it (the rail's own top speed 6.8 px/tick: 5.4 rows)
+	const rail = (ty) => room(20, 40, [...[30, 31, 32, 33, 34, 35, 36, 37].map((y) => [10, y, 4]), [8, 37, 255], [10, ty, 121]]);
+	probe('dot rail, the trophy 14 rows over it', rail(16), false);
+	probe('dot rail, the trophy 4 rows over it', rail(26), true, 320);
+	// a liquid pool under a one-way row (Cold World): the ball in a hole in the pool's floor, 4 rows of water, a row of
+	// air, a one-way row; the model kept the jump's speed through the water. The trophy 5 rows over the pool's surface:
+	// without the tables finite from the hole (a jump through 4 rows of water rises 6 rows over it), with them the water's
+	// drag takes it (the engine: 6.7 -> 3.6 px/tick at the surface, the centre 2 rows over it)
+	const pool = (ty, oneway) => {
+		const c = [];
+		for (let x = 1; x <= 14; x++) { c.push([x, 20, 9]); for (let y = 16; y <= 19; y++) c.push([x, y, 119]); if (oneway) c.push([x, 14, 1052, 1]); }
+		c.push([7, 20, 0], [7, 21, 9], [7, 20, 255], [7, ty, 121]);
+		return room(16, 24, c);
+	};
+	probe('pool, the trophy 5 rows over the water', pool(10, false), false, 200);
+	probe('pool under a one-way row, the trophy right over the water', pool(15, true), true, 200);
+	// (c) the proof field (no oneWayEntry) is never touched, whatever the knob; the knob off = the plain model byte for byte
+	{
+		const L = chain(9), prev = process.env.EEAT_EXITAPEX;
+		process.env.EEAT_EXITAPEX = '1';
+		const p1 = R.reachField(L), o1 = R.reachField(L, ORD(undefined));
+		process.env.EEAT_EXITAPEX = '0';
+		const p0 = R.reachField(L), o0 = R.reachField(L, ORD(undefined));
+		if (prev === undefined) delete process.env.EEAT_EXITAPEX; else process.env.EEAT_EXITAPEX = prev;
+		const ob = R.reachField(L, ORD(false));
+		const same = (a, b) => ['costR', 'costF', 'costL', 'costC', 'costX', 'seg', 'rowC', 'rowX'].every((k) => Buffer.compare(Buffer.from(a[k].buffer), Buffer.from(b[k].buffer)) === 0);
+		check('knob: the proof field the same bytes with EEAT_EXITAPEX=1 and 0; the ordering field on with 1, the plain model with 0 (byte for byte)', same(p1, p0) && !p1.exitApex && o1.exitApex && !o0.exitApex && same(o0, ob));
+	}
+	// (d) random rooms: the Bellman self-check holds with the tables; the states they free (plain -1, finite with them)
+	let mis = 0, cut = 0, free = 0, fields = 0;
+	for (const { level } of randomLevels()) {
+		const f0 = R.reachField(level, ORD(false)), f1 = R.reachField(level, Object.assign(ORD(true), { check: true }));
+		if (f1.mode === 'walk') continue;
+		fields++;
+		mis += f1.mismatches;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f0[k].length; i++) { if (f0[k][i] !== R.CUT && f1[k][i] === R.CUT) cut++; else if (f0[k][i] === R.CUT && f1[k][i] !== R.CUT) free++; }
+	}
+	check(`random rooms (${fields} physics fields): the Bellman self-check with the tables`, mis === 0, `${mis} mismatches; ${cut} states cut by the tables, ${free} freed`);
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -1339,6 +1437,7 @@ function trapLevel() {
 	if (want('I')) sectionI();
 	if (want('J')) sectionJ();
 	if (want('S')) sectionS();
+	if (want('X')) sectionX();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });

@@ -2591,8 +2591,9 @@ let steerFpMemo = null;
 function steerFp() {
 	if (steerFpMemo) return steerFpMemo;
 	const h = crypto.createHash('sha1');
-	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
+	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js', 'exitapex.json']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	h.update(`exitapex:${process.env.EEAT_EXITAPEX || ''}`);   // (the ordering fields' transit tables: reach.js exitApexOn)
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
