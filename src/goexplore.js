@@ -959,7 +959,7 @@ function roomOf(L, opts = {}) {
 	// (goexplore.js add: dropped only where a cell of the same place holds at least as many of each gated counter and got
 	// there no later), which is what the thresholds-met key lost on The 7 Depths of Hell (a later coin carrier dropped at
 	// every cell a coinless state reached first). The legacy key (the GPU's) is not changed.
-	const gateCell = !legacy && process.env.EEAT_GATECELL !== '0';
+	const gateCell = !legacy && !opts.gateRoom && process.env.EEAT_GATECELL !== '0';
 	const upG = rel.upTo ? rel.upTo.gold : 0, upB = rel.upTo ? rel.upTo.blue : 0;
 	const upGk = gateCell ? 0 : upG, upBk = gateCell ? 0 : upB;
 	const cnt = (th, v, up) => (up > 0 && v < up ? v : (up > 0 ? up : 0) + met(th, v));
@@ -3431,8 +3431,10 @@ async function gpuMain(a, L, m) {
 	// ---- rooms (explore()'s: fields from the state that entered the room, replayed here in the JS engine)
 	// (the GPU keys its rooms as the legacy key does, rollRoom; --dom=1: the novelty groups and their dominance from the
 	// JS key's class and mask (roomOf dom: blue coins no door on the way needs and the time doors' two states in one
-	// group), head B and C as explore()'s)
-	const RM = roomOf(L, { legacy: true }), RMn = a.dom !== 0 ? roomOf(L) : null, DOMg = RMn !== null ? domIndex() : null;
+	// group), head B and C as explore()'s; the count below a gate stays in its class (gateRoom: the random runs' novelty
+	// follows every coin toward a gate, a portfolio with the one search's gate cell: Ice Slide Ride's route came from these runs
+	// in 28 s with it (two A/Bs) and 70.1 / 79.7 s without))
+	const RM = roomOf(L, { legacy: true }), RMn = a.dom !== 0 ? roomOf(L, { gateRoom: true }) : null, DOMg = RMn !== null ? domIndex() : null;
 	const fields = roomFields(L, 64 << 20, { useful: a.useful !== 0 });
 	const rooms = new Map(), roomList = [];
 	let keyMismatch = 0;

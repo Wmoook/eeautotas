@@ -124,6 +124,14 @@ function sectionRelevance() {
 	check('... two (the gate shuts): another room, word 2; three: the room of two, the word capped at the gate (2)',
 		og.keys[2] !== og.keys[0] && /bluecoins>=2/.test(og.descs[2]) && og.words[2] === 2 && og.keys[3] === og.keys[2] && og.words[3] === 2, `${og.descs.join(' | ')} words ${og.words.join(',')}`);
 	check('... the legacy key (the GPU\'s) has no gate cell', GX.roomOf(G, { legacy: true }).gate === null);
+	{
+		// (the GPU random runs' novelty groups: roomOf(L, {gateRoom: true}), the count below the gate in the room's class as
+		// c7623ee had it: a portfolio with the one search's gate cell)
+		const RR = GX.roomOf(G, { gateRoom: true }), sr = new E.EESim(G); sr.reset();
+		const c0 = RR.dom(sr).cls;
+		touch(G, sr, 3, 1); sr.tick(new E.EEInput());
+		check('... gateRoom (the GPU random runs\' novelty groups): no gate cell, one blue coin another class', RR.gate === null && RR.dom(sr).cls !== c0 && /bluecoins=1/.test(RR.desc(sr)), RR.desc(sr));
+	}
 	const gd1 = oc.descs[1], gd2 = oc.descs[2];
 	// the wall breaker's progress order (editor.js breakStarts: coinsOf for its attempts, coinsOfDesc for the rooms'
 	// starts) reads the count the key reads: the room past the gate ranks at the gate's count, at or above the rooms below
