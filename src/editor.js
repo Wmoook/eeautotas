@@ -1635,6 +1635,12 @@ const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_T
 // age (escape k: x luby(k)); test.escLuby true / false: the clock regardless of EEAT_ESCLUBY.
 const ESC_LUBY = process.env.EEAT_ESCLUBY !== '0';
 const ESC_FIRST_S = 30, ESC_FIRST_F = 0.2, ESC_UNIT_S = 60;
+// (the early share, OPT-IN: EEAT_ESCEARLY=<share> (default 0 = off): an escape the Luby clock starts while the search's
+// stall is still under ESC_WAIT_S takes that share of the workers (at least one) instead of ESC_CPU. The A/B of the clock
+// as specified (box 1 GPU 4, seed 1): the cake is a lie lost its route (base 220.6 s): its one search sat on a 47-s
+// plateau (1,596.8 tiles, 13-60 s) that base's 5 workers broke at 60 s, and the first escape at 45 s parked 2 of 5 for
+// the rest of the run; the 20-120 s plateaus that end by themselves are why ESC_WAIT_S was 120 s)
+const ESC_EARLY_CPU = Math.max(0, Math.min(ESC_CPU, +(process.env.EEAT_ESCEARLY || 0) || 0));
 /** the Luby sequence (1-based): 1, 1, 2, 1, 1, 2, 4, 1, 1, 2, 1, 1, 2, 4, 8, ... (i < 1: 1) */
 function luby(i) {
 	i = Math.max(1, Math.floor(i));
@@ -1778,7 +1784,9 @@ function escLaunch(n, st, lk, clock) {
 	try { fs.writeFileSync(file, Buffer.from(st.inputs, 'latin1')); } catch (e) { esc.at = Date.now(); return; }
 	// the CPU: ESC_CPU of the one search's workers (it parks as many), at least one each
 	// (W: the one search's workers as goexplore.js runs them: it takes at most 64, so a 192-thread box's W parks some too)
-	const W = Math.max(1, Math.min(64, cur.opts.workers || 1)), E = Math.max(1, Math.floor(W * ESC_CPU)), keep = Math.max(1, W - E);
+	// (the Luby clock's early share, opt-in: ESC_EARLY_CPU while the search's stall is under ESC_WAIT_S)
+	const early = esc.luby && ESC_EARLY_CPU > 0 && Date.now() - esc.at < ESC_WAIT_S * 1000;
+	const W = Math.max(1, Math.min(64, cur.opts.workers || 1)), E = Math.max(1, Math.floor(W * (early ? ESC_EARLY_CPU : ESC_CPU))), keep = Math.max(1, W - E);
 	const mainCh = k >= 0 ? kids[k] : null;
 	if (alive(mainCh) && mainCh.stdin && !mainCh.stdin.destroyed && keep < W) { try { mainCh.stdin.write(`workers ${keep}\n`); } catch (e) { /* gone */ } }
 	// (its own work folder for the bursts, fresh: the steer files of an earlier escape's level must not steer it)
