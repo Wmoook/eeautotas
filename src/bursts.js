@@ -715,6 +715,27 @@ function create(o) {
 	// (--domBurst=K, dominance-share: every K-th pick goes to the rooms of dominated novelty groups first; 0: never)
 	const domBurst = a.domBurst === undefined || a.domBurst === null ? 8 : Math.max(0, Math.round(+a.domBurst) || 0);
 	let domTick = 0;
+	// PROGRESS FIRST (EEAT_BPROG=B, OPT-IN, b9cw2-cw; unset or 0 = off: the scores as before): a room's resources by its
+	// desc (roomOf's words: the coin counts 'coins=N' / 'coins>=N' / 'bluecoins=N' summed, then the read switches on,
+	// 'purple=[..]' / 'orange=[..]', and 'crown' / 'silvercrown'), p = coins x 1000 + switches; the rooms at the most p of
+	// the rooms known score B more, those at the most coins with fewer switches B / 2 more. On a level whose room key
+	// holds the team, the death count, the time doors and switch subsets next to its coins (Cold World: 150-450 rooms by
+	// 8 min, 100+ at each coin count) the bandit spread the bursts over every one of them and the 1-2 rooms of the most
+	// resources got a burst in minutes. ORDER only: every room keeps its turn by its score.
+	const BPROG = +(process.env.EEAT_BPROG || 0) || 0;
+	const progOf = (r) => {
+		const R = r.base || r;
+		if (R.pg !== undefined) return R.pg;
+		const d = String(R.desc || '');
+		let c = 0, sw = 0;
+		for (const m of d.matchAll(/(?:^|\s)(?:blue)?coins>?=(\d+)/g)) c += +m[1];
+		for (const m of d.matchAll(/(?:^|\s)(?:purple|orange)=\[([^\]]*)\]/g)) sw += m[1].split(',').filter((x) => x.trim() !== '').length;
+		if (/(?:^|\s)crown(?=\s|$)/.test(d)) sw++;
+		if (/(?:^|\s)silvercrown(?=\s|$)/.test(d)) sw++;
+		R.pg = c * 1000 + Math.min(999, sw);
+		return R.pg;
+	};
+	if (BPROG) st.progFirst = 0;
 	/** the next burst: {r (room, or null: the trophy arm), f (its field)} */
 	const pick = () => {
 		let best = null, bs = -Infinity;
@@ -724,6 +745,8 @@ function create(o) {
 		const cand = [], dcand = [];
 		// (a dominated room's turn: --domBurst)
 		const domTurn = domBurst > 0 && ++domTick % domBurst === 0;
+		let maxP = -1;
+		if (BPROG) for (const r0 of rooms.values()) { const p = progOf(r0); if (p > maxP) maxP = p; }
 		for (const r0 of rooms.values()) {
 			// (--dom=1: a room whose novelty group is dominated (goexplore.js domIndex: a room of its class with more mono
 			// switches on holds everything it can reach) is no burst's room: Good Egg's hour from the level alone gave 277
@@ -734,7 +757,9 @@ function create(o) {
 			if (dm && !domTurn) continue;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
-				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
+				let raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
+				// (EEAT_BPROG: the rooms of the most resources first)
+				if (BPROG && maxP >= 0) { const p = progOf(r0); if (p === maxP) raw += BPROG; else if (Math.floor(p / 1000) === Math.floor(maxP / 1000)) raw += BPROG / 2; }
 				// (--burstFair: the order by the score per untried target not yet failed)
 				(dm ? dcand : cand).push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
@@ -749,6 +774,7 @@ function create(o) {
 			bs = raw; best = { r, f };
 			// (r.pa inherits its room's grp)
 			if (r.grp && r.grp.dom) { domChosen = true; st.domBursts++; }
+			if (BPROG && maxP >= 0 && progOf(r) === maxP) st.progFirst++;
 			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
