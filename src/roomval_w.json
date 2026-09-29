@@ -1,0 +1,57 @@
+{
+ "version": 1,
+ "feats": [
+  "rc100",
+  "fracC",
+  "metC",
+  "lgC",
+  "fracB",
+  "metB",
+  "lgB",
+  "keys"
+ ],
+ "w": [
+  0.5089,
+  -3.5542,
+  -3.1073,
+  -4.5262,
+  -1.5018,
+  -0.3271,
+  -2.758,
+  -0.2043
+ ],
+ "offsetPer": [
+  -698.4,
+  -610.6,
+  -889.4,
+  -295.1,
+  -64.3,
+  -542,
+  -40.2
+ ],
+ "n": {
+  "routes": 101,
+  "pins": 277,
+  "routedLevels": 87,
+  "pairsA": 965929,
+  "pairsB": 15718
+ },
+ "cv": {
+  "folds": 3,
+  "routeRch": 0.805,
+  "routeNaive": 0.926,
+  "routeLearned": 0.944,
+  "pinRch": 0.278,
+  "pinNaive": 0.934,
+  "pinLearned": 0.98
+ },
+ "train": {
+  "it": 600,
+  "l2": 0.001,
+  "beta": 1,
+  "every": 20,
+  "gap": 15,
+  "rcCap": 1700
+ },
+ "trained": "2026-09-29"
+}

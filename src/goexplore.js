@@ -223,6 +223,10 @@
 //        [--sat=1 (coarse cells: the dead-end brake, SAT_ZONE: a region whose picks stop making new cells sinks behind the
 //        rest in heads A and B; 0: the picks as before)] [--satN=20000 (the excess past which a region is braked)]
 //        [--satGpu=0 (1: the brake in the GPU random runs too, --gpu=1; off by default: Egg Quest II's first route)]
+//        [--gpuVal=0 (1, OPT-IN: the GPU random runs' head A orders by the ROOM VALUE, src/roomval.js: the reach cost +
+//        the room's offset (tiles, <= 0) from its useful coins, blue coins and keys with doors, learned from the routes by
+//        tools/roomval_train.js; a level with no coin, blue-coin or key doors: as without it; 0: head A as before)]
+//        [--gpuValW=<weights.json> (the room value's weights; default src/roomval_w.json)]
 //        [--deaths=-1 (deaths as moves: -1 auto = where something kills and a checkpoint or 2+ spawns exist
 //        (deathMovesFor), 1 wherever something kills (a lone spawn too), 0 off: every death ends its run, as before; a
 //        death is kept only where it pays: deathPays in explore(); the progress and done events carry "deaths": {seen,
@@ -288,6 +292,7 @@ const RF = require('./reach.js');
 const SF = require('./steer.js');
 const TMD = require('./timed.js');
 const PR = require('./prior.js');
+const RVAL = require('./roomval.js');
 const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
@@ -326,7 +331,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
-	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
+	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, gpuVal: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
 // (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
@@ -383,7 +388,7 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', 'gpuValW', ...GPU_STRINGS]);
 // --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
 // random runs' batches take their run length and keep probability from these classes in turn, each class the same share
 // of the GPU's simulated ticks (times its weight): the next batch goes to the class furthest below its share, from the
@@ -480,7 +485,7 @@ const B_SATZ = 48;
 const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '', prior: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '', prior: '', gpuValW: '' });
 	const given = new Set();
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
@@ -3719,13 +3724,20 @@ async function gpuMain(a, L, m) {
 	const fields = roomFields(L, 64 << 20, { useful: a.useful !== 0 });
 	const rooms = new Map(), roomList = [];
 	let keyMismatch = 0;
+	// (--gpuVal=1: THE ROOM VALUE, src/roomval.js: head A's priority = the reach cost + the room's offset (tiles, <= 0) from
+	// the counts its key holds (useful coins, blue coins, key colours with doors), computed once in newRoom from the state
+	// that entered it. A level with no coin, blue-coin or key doors: VAL null, head A exactly as with the flag off. Ordering
+	// only: nothing is pruned, the reach field's -1 (unreachable cells) as before; head B / C, the bursts, the nearest as
+	// before; no rnd() draw added)
+	const VAL = a.gpuVal !== 0 ? (() => { const I = RVAL.levelInfo(L); return I.any ? { W: RVAL.readWeights(a.gpuValW || undefined), I, n: 0, lo: 0 } : null; })() : null;
 	const newRoom = (key, c) => {
 		const ms = c === 0 ? new Uint8Array(0) : pathOf(cNode[c]);
 		sim.restore(startSnap);
 		for (let s = 0; s < ms.length; s++) { E.applyMask(inp, ms[s]); sim.tick(inp); }
 		if (RM.key(sim) !== key) keyMismatch++;
 		const f = fields.enter(sim);
-		const r = { idx: roomList.length, key, desc: RM.desc(sim), t: cT[c], gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, arr: [], best: -1, isNew: true, sent: 0, sentAt: -1, grp: null };
+		const r = { idx: roomList.length, key, desc: RM.desc(sim), t: cT[c], gain: f.gain, troOk: f.troOk, picks: 0, ex: 0, arr: [], best: -1, isNew: true, sent: 0, sentAt: -1, grp: null, vOff: 0 };
+		if (VAL !== null) { r.vOff = RVAL.offsetOf(VAL.W, RVAL.featsOfSim(VAL.I, sim)); if (r.vOff < 0) VAL.n++; if (r.vOff < VAL.lo) VAL.lo = r.vOff; }
 		if (DOMg !== null) {
 			const g = DOMg.groupOf(RMn.dom(sim));
 			r.grp = g; g.rooms.push(r);
@@ -3746,7 +3758,8 @@ async function gpuMain(a, L, m) {
 	const exG = (c) => { const v = satG.get(regionOf(c)); return v === undefined ? 0 : v; };
 	// ---- head A's heap (explore()'s): (priority, cell, version)
 	const hv = [], hc = [], hver = [];
-	const prio = (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
+	const prio = VAL === null ? (c) => cRc[c] + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0)
+		: (c) => cRc[c] + roomList[cRoom[c]].vOff + a.lambda * Math.sqrt(cPicks[c]) + (SAT ? SAT_MU * satOver(exG(c), a.satN) : 0);
 	const hpush = (c) => {
 		let i = hv.length;
 		const v = prio(c);
@@ -4014,7 +4027,8 @@ async function gpuMain(a, L, m) {
 			const rc = costOf(fifths, node);
 			cRc[d] = rc;
 			if (!isNew) { cVer[d]++; if (SAT && pk < K) pickNew[pk]++; }   // (an earlier arrival is yield too: the brake, above)
-			hpush(d);
+			// (--gpuVal: a new cell's priority reads its room's offset: queued once its room is known, below)
+			if (VAL === null || !isNew) hpush(d);
 			if (t > deepest) deepest = t;
 			if (rc < minRc - 0.05) minRc = rc;
 			if (rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) { if (SAT && rc < near.rc - 0.05 && pk < K) pickFresh[pk] = 1; if (rc < near.rc - 0.05) bst.nearer++; near = { rc, t, c: d }; }
@@ -4024,6 +4038,7 @@ async function gpuMain(a, L, m) {
 				if (r.pending) { r.cells.push(d); if (!bFirst.includes(r)) bFirst.push(r); continue; }
 				cRoom[d] = r.idx;
 				r.arr.push(d);
+				if (VAL !== null) hpush(d);
 			}
 			const rr = roomList[cRoom[d]];
 			if (rr.best < 0 || rc < cRc[rr.best]) rr.best = d;
@@ -4036,7 +4051,7 @@ async function gpuMain(a, L, m) {
 			const r = newRoom(p.key, c0);
 			bst.rooms++;
 			if (SAT && newPk.has(c0)) pickFresh[newPk.get(c0)] = 1;
-			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; }
+			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; if (VAL !== null) hpush(c); }
 			r.isNew = false;
 			// (a dominated room: no discovery burst, no source)
 			const dm = r.grp !== null && r.grp.dom;
@@ -4093,6 +4108,7 @@ async function gpuMain(a, L, m) {
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
 		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null,
+		...(VAL !== null ? { val: { rooms: VAL.n, minOff: Math.round(VAL.lo * 10) / 10 } } : {}),
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
 			.map((k) => [k, toolDone[k]])), tool: toolDone || null });
@@ -4119,6 +4135,7 @@ async function main() {
 	try { a = parseArgs(process.argv.slice(2)); } catch (e) { console.log(JSON.stringify({ error: e.message })); process.exitCode = 2; return; }
 	// (--prior: the model is read once here, so a bad file fails at the start, not in every worker)
 	if (a.prior) { try { PR.readModel(a.prior); } catch (e) { console.log(JSON.stringify({ error: `--prior: ${e.message}` })); process.exitCode = 2; return; } }
+	if (a.gpuVal !== 0) { try { RVAL.readWeights(a.gpuValW || undefined); } catch (e) { console.log(JSON.stringify({ error: `--gpuVal: ${e.message}` })); process.exitCode = 2; return; } }
 	let L;
 	try { L = levelOf(a); } catch (e) { console.log(JSON.stringify({ error: `cannot read the level: ${e.message}` })); process.exitCode = 2; return; }
 	// the memory budget (for the workers too): the machine's memory, what is free, what the other searches on it claim (the
