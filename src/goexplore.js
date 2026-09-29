@@ -571,6 +571,104 @@ function rngOf(seed) {
 	};
 }
 const fmix = (h) => { h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); return h ^ (h >>> 16); };
+/** one word into a room / discrete hash (roomOf, discreteOf): h = (h ^ v) x 0x5bd1e995, then h ^= h >>> 13 */
+const mixW = (h, v) => { h = Math.imul(h ^ v, 0x5bd1e995); return h ^ (h >>> 13); };
+
+/**
+ * The archive's cell index: a Map of cell key (a 53-bit number, hashKV's) -> cell with Map's semantics where explore
+ * uses them (get, set, delete, size, values(), entries in insertion order; an entry deleted while its iteration runs is
+ * skipped, a key deleted and set again goes to the end), without Map's costs: its double keys were a heap number each
+ * and a hash of their bits per lookup, at every simulated tick of the one search. Open addressing (linear probing,
+ * backward-shift deletion: no tombstones) over typed arrays: slot -> entry index; the entries in insertion order (keys in
+ * a Float64Array, values in an array; a deleted entry's value undefined, compacted in order when they pile up, never
+ * while an iteration runs: only set compacts and grows, and explore sets no cell while it iterates). The same order as
+ * a Map, so the sweeps and head L's pushes go in the same order and the search is the same (test/fastpath.js).
+ */
+class CellMap {
+	constructor() {
+		this.size = 0;
+		this.n = 0;   // entries appended (the deleted too)
+		this.ek = new Float64Array(1 << 12);
+		this.ev = new Array(1 << 12);
+		this.mask = (1 << 13) - 1;
+		this.tab = new Int32Array(1 << 13).fill(-1);
+	}
+	/** the home slot of key k: its high lane (hashKV: fmix of the first 32-bit lane x 2^21 + 21 bits of the second) */
+	home(k) { return ((k / 2097152) >>> 0) & this.mask; }
+	get(k) {
+		const tab = this.tab, ek = this.ek, m = this.mask;
+		for (let i = this.home(k); ; i = (i + 1) & m) {
+			const e = tab[i];
+			if (e < 0) return undefined;
+			if (ek[e] === k) return this.ev[e];
+		}
+	}
+	has(k) { return this.get(k) !== undefined; }
+	set(k, v) {
+		const tab = this.tab, ek = this.ek, m = this.mask;
+		let i = this.home(k);
+		for (; ; i = (i + 1) & m) {
+			const e = tab[i];
+			if (e < 0) break;
+			if (ek[e] === k) { this.ev[e] = v; return this; }
+		}
+		if (this.n === this.ek.length) { this.makeRoom(); return this.set(k, v); }
+		const e = this.n++;
+		this.ek[e] = k; this.ev[e] = v;
+		tab[i] = e;
+		if (++this.size * 2 > m + 1) this.rehash((m + 1) * 2);
+		return this;
+	}
+	delete(k) {
+		const tab = this.tab, ek = this.ek, m = this.mask;
+		let i = this.home(k), e;
+		for (; ; i = (i + 1) & m) {
+			e = tab[i];
+			if (e < 0) return false;
+			if (ek[e] === k) break;
+		}
+		this.ev[e] = undefined;
+		this.size--;
+		// backward-shift deletion: the entries after i in its probe run that may move into the hole do
+		for (let j = (i + 1) & m; ; j = (j + 1) & m) {
+			const f = tab[j];
+			if (f < 0) break;
+			const h = this.home(ek[f]);
+			if (i <= j ? (h <= i || h > j) : (h <= i && h > j)) { tab[i] = f; i = j; }
+		}
+		tab[i] = -1;
+		return true;
+	}
+	/** the entry arrays are full: drop the deleted entries (in order) when they are at least a quarter, else grow */
+	makeRoom() {
+		if (this.n - this.size >= this.n / 4) {
+			let w = 0;
+			for (let r = 0; r < this.n; r++) if (this.ev[r] !== undefined) { this.ek[w] = this.ek[r]; this.ev[w] = this.ev[r]; w++; }
+			for (let r = w; r < this.n; r++) this.ev[r] = undefined;
+			this.n = w;
+		} else {
+			const k2 = new Float64Array(this.ek.length * 2);
+			k2.set(this.ek);
+			this.ek = k2;
+			this.ev.length = k2.length;
+		}
+		this.rehash(this.mask + 1);
+	}
+	rehash(cap) {
+		this.mask = cap - 1;
+		const tab = this.tab = new Int32Array(cap).fill(-1), m = this.mask, ek = this.ek, ev = this.ev;
+		for (let e = 0; e < this.n; e++) {
+			if (ev[e] === undefined) continue;
+			let i = this.home(ek[e]);
+			while (tab[i] >= 0) i = (i + 1) & m;
+			tab[i] = e;
+		}
+	}
+	* values() { for (let e = 0; e < this.n; e++) { const v = this.ev[e]; if (v !== undefined) yield v; } }
+	* keys() { for (let e = 0; e < this.n; e++) if (this.ev[e] !== undefined) yield this.ek[e]; }
+	* entries() { for (let e = 0; e < this.n; e++) { const v = this.ev[e]; if (v !== undefined) yield [this.ek[e], v]; } }
+	[Symbol.iterator]() { return this.entries(); }
+}
 
 /** the discrete state's hash (what a cell tells apart besides the ball's motion): coins (and which ones), keys,
  *  switches, crowns, effects, checkpoint, team, the time-door phase, gates, death count (death doors), portal draws */
@@ -819,32 +917,35 @@ function roomOf(L, opts = {}) {
 	const cTh = L.coinDoorThresholds || new Int32Array(0), bTh = L.blueCoinDoorThresholds || new Int32Array(0);
 	/** the thresholds (doors and gates) a count has met */
 	const met = (th, v) => { let n = 0; while (n < th.length && th[n] <= v) n++; return n; };
+	// (the sum of the switches on that the key reads, without the mono ones (bits) in the dominance class: a sum mod
+	// 2^32, so the Map's order does not matter; forEach makes no entry arrays)
 	const onSum = (m, salt, read, bits) => {
 		let s = 0;
-		for (const [id, v] of m) if (v === true && (read === null || read.has(id)) && (bits === null || !bits.has(id))) s = (s + fmix((id ^ salt) | 0)) | 0;
+		m.forEach((v, id) => { if (v === true && (read === null || read.has(id)) && (bits === null || !bits.has(id))) s = (s + fmix((id ^ salt) | 0)) | 0; });
 		return s;
 	};
 	const onList = (m, read) => { const a = []; for (const [id, v] of m) if (v === true && (read === null || read.has(id))) a.push(id); return a.sort((x, y) => x - y); };
 	// (mode 0: the room key; 1: the part only the ball's own touches change: without the keys, which expire, and the time
-	// doors, which flip on the clock; 2: the dominance class: the key without the time doors and the mono switches)
+	// doors, which flip on the clock; 2: the dominance class: the key without the time doors and the mono switches. The
+	// live state's room at every simulated tick of the one search: mixW, a function of the module, instead of a closure
+	// over h per call; the same words in the same order)
 	const hash = (sim, mode) => {
 		let h = 0x3c6ef372;
-		const w = (v) => { h = Math.imul(h ^ v, 0x5bd1e995); h ^= h >>> 13; };
-		if (mode !== 1) w(sim._keysMask);
-		w((crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
+		if (mode !== 1) h = mixW(h, sim._keysMask);
+		h = mixW(h, (crown && sim._collide_crown ? 1 : 0) | (sim.low_gravity ? 2 : 0) | (sim.is_invulnerable ? 4 : 0) | (silver && sim._collide_silver_crown ? 8 : 0) |
 			(sim.is_cursed ? 16 : 0) | (sim.is_zombie ? 32 : 0) | (sim.is_on_fire ? 64 : 0) | (sim.is_poisoned ? 128 : 0) | (sim.has_levitation ? 256 : 0) |
 			(mode === 0 && L.hasTimeDoors && sim._timedoor_state ? 512 : 0));
-		w(sim.max_jumps); w(sim.jump_boost); w(sim.speed_boost); w(sim.flip_gravity);
-		if (team) w(sim.team);
-		if (coins) w(rel.gold ? sim.coins : met(cTh, sim.coins));
-		if (L.hasCoinGate) w(rel.gold ? sim._show_coin_gate : met(cTh, sim._show_coin_gate));
-		if (blue) w(rel.blue ? sim.blue_coins : met(bTh, sim.blue_coins));
-		if (L.hasBlueCoinGate) w(rel.blue ? sim._show_blue_coin_gate : met(bTh, sim._show_blue_coin_gate));
-		if (L.hasDeathDoor) w(sim.deaths);
-		if (L.hasDeathGate) w(sim._show_death_gate);
+		h = mixW(h, sim.max_jumps); h = mixW(h, sim.jump_boost); h = mixW(h, sim.speed_boost); h = mixW(h, sim.flip_gravity);
+		if (team) h = mixW(h, sim.team);
+		if (coins) h = mixW(h, rel.gold ? sim.coins : met(cTh, sim.coins));
+		if (L.hasCoinGate) h = mixW(h, rel.gold ? sim._show_coin_gate : met(cTh, sim._show_coin_gate));
+		if (blue) h = mixW(h, rel.blue ? sim.blue_coins : met(bTh, sim.blue_coins));
+		if (L.hasBlueCoinGate) h = mixW(h, rel.blue ? sim._show_blue_coin_gate : met(bTh, sim._show_blue_coin_gate));
+		if (L.hasDeathDoor) h = mixW(h, sim.deaths);
+		if (L.hasDeathGate) h = mixW(h, sim._show_death_gate);
 		const bp = mode === 2 ? bitP : null, bo = mode === 2 ? bitO : null;
-		if (sim._switches.size !== 0) { const s = onSum(sim._switches, 0x1234567, readP, bp); if (legacy || s !== 0) w(s); }
-		if (sim._oswitches.size !== 0) { const s = onSum(sim._oswitches, 0x7654321, readO, bo); if (legacy || s !== 0) w(s); }
+		if (sim._switches.size !== 0) { const s = onSum(sim._switches, 0x1234567, readP, bp); if (legacy || s !== 0) h = mixW(h, s); }
+		if (sim._oswitches.size !== 0) { const s = onSum(sim._oswitches, 0x7654321, readO, bo); if (legacy || s !== 0) h = mixW(h, s); }
 		return h | 0;
 	};
 	const key = (sim) => hash(sim, 0);
@@ -1986,7 +2087,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		return hashKV(n);
 	};
 	// the archive and the heap of (priority, cell, version): a cell has one live entry (its version); others are stale
-	const cells = new Map();
+	const cells = process.env.EEAT_CELLMAP === '0' ? new Map() : new CellMap();   // (EEAT_CELLMAP=0: a Map, the equality test)
 	// (a cell in a cul-de-sac of its room: CUL_A tiles behind, see USEFUL TERRITORY)
 	const HA = heapOf((c) => c.rc + a.lambda * Math.sqrt(c.picks) + satPen(c) + (c.u === 2 ? CUL_A : 0));
 	// --steer: head A's second heap, on the steer field's cost (src/steer.js: gate-aware; computed for new and improved
@@ -2065,7 +2166,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	};
 	// (--steerDist: the closest attempt's and the sources' distances by the steer field, at most STEER_REAL_MAX; 6000 + the
 	// reach field's cost where it has no value: native/beam.h steerTiles, steerMiss)
-	const distBySteer = !!ST && a.steerDist !== 0;
+	// (a late field with its distances (stdin "steerd <file>": steerOn with dist) turns it on in the middle of the search)
+	let distBySteer = !!ST && a.steerDist !== 0;
 	const distOf = (c) => (!distBySteer ? c.rc : c.sc < STEER_NONE ? Math.min(STEER_REAL_MAX, c.sc) : Math.min(9990, 6000 + c.rc));
 	// Snapshots (about 1150 bytes each) only for picked cells, within the budget. A cell that was not picked yet (most
 	// never are) is its parent cell (the one whose runs reached it; `gen` counts the parent's state changes) plus the
@@ -2286,7 +2388,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let lastBlandSource = -1e9, lastSources = t0;
 	const source = (kind, r, c) => {
 		r.sent++; r.sentAt = c;
-		post({ type: 'source', seed, kind, room: r.key, desc: r.desc, gain: r.gain, t: c.t, rc: distOf(c), inputs: C.eetasBytes(inputsOf(c.node)).toString('latin1') });
+		// (gen: the steer switches made: the main thread ranks one of an older measure behind, onSource)
+		post({ type: 'source', seed, kind, room: r.key, desc: r.desc, gain: r.gain, t: c.t, rc: distOf(c), gen: steerGen, inputs: C.eetasBytes(inputsOf(c.node)).toString('latin1') });
 	};
 	/** every SOURCE_S s: the lowest-cost cell of the 4 rooms with the most territory gain and the fewest sources so far
 	 *  (by (1 + ln(1 + gain)) / (1 + sources)), when it is not the one already sent */
@@ -2581,12 +2684,32 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		}
 	};
 	/** a late steer field (stdin "steer <file>": the main thread's shared bytes): head A's second heap from now on. The
-	 *  distances the search reports stay the reach field's (--steerDist as with 0: the editor ranks every strategy's
-	 *  attempts on one scale, which a switch in the middle of the search would break) */
-	const steerOn = (sab) => {
+	 *  distances the search reports stay the reach field's (--steerDist as with 0), unless dist (stdin "steerd <file>": the
+	 *  editor ranks every strategy's attempts by the steer field from now on): then the closest state, the rooms' best
+	 *  cells and the sources are the steer field's from now on (another measure: the closest state starts over from the
+	 *  cells holding a snapshot, scored at once; the others are scored when a run improves them or they are picked, and
+	 *  until then rank at 6000 + their reach cost, behind every scored one: distOf) */
+	const steerOn = (sab, dist) => {
 		if (ST !== null) return;
 		ST = Object.assign(SF.readSteerFile(Buffer.from(sab)), { dpFirst: a.dpFirst === 1 });
 		HS = steerHeap();
+		if (!dist) return;
+		distBySteer = true;
+		steerGen++;
+		spdBest = Infinity; gNear = Infinity; spdAt = Date.now();
+		if (spdRooms.length) { for (const r of spdRooms) r.spd = false; spdRooms.length = 0; }
+		spdTrig = 0; spdOn = 0;
+		if (near !== null) { release(near.node); near = null; }
+		nearSent = null;
+		for (const c of cells.values()) {
+			if (c.snap === null) continue;
+			sim.restore(c.snap);
+			c.sc = steerOf(); c.ver++;
+			hpush(c);
+			// (a room's best: an unscored cell ranks behind every scored one)
+			if (c.room && (c.room.best === null || distOf(c) < distOf(c.room.best))) c.room.best = c;
+			if (c.node !== null) nearSteer(c);
+		}
 	};
 	/** a seed (stdin "seed <inputs>": the editor's wall breaker's attempts): its states every SEED_EVERY ticks back from
 	 *  its end, and the end, become cells whose path is the seed's inputs (children of the start: their first pick replays
@@ -2782,7 +2905,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (coarse && now - lastSources >= SOURCE_S * 1000) { lastSources = now; bestSources(); }
 		if (plog !== null && now - lastPlog >= PICKLOG_S * 1000) { lastPlog = now; post({ type: 'picklog', seed, rows: [...plog].map(([k, r]) => [k, r[0], r[1], r[2], r[3]]) }); }
 		if (port) inbox();
-		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else steerOn(x.steer); } else addSeed(String(x)); }
+		if (seedPort) for (let m = receiveMessageOnPort(seedPort); m !== undefined && !end; m = receiveMessageOnPort(seedPort)) { const x = m.message; if (x && typeof x === 'object' && x.steer) { if (x.past) switchSteer(x.steer); else steerOn(x.steer, !!x.dist); } else addSeed(String(x)); }
 		// (parked: stdin "workers K" keeps only the first K workers searching, e.g. while the editor's stall escape has the
 		// rest of the CPU; a parked worker keeps its archive and still answers its port (the bursts' "nearest" questions, the
 		// imports) and its seeds, and searches again once K allows it)
@@ -3620,13 +3743,16 @@ async function main() {
 	/** stdin "steer <file>": a steer field that was not ready when the search started (the editor's build on a loaded
 	 *  machine): to every worker (head A's second heap from its next chunk of picks: steerOn); the distances stay the reach
 	 *  field's; a "steer" event says so (or a warning why not). Once per search. */
-	const steerLate = (file) => {
+	const steerLate = (file, dist = false) => {
 		if (steerBuf) return;
 		try {
-			const r = loadSteer(file, false);
-			steerBuf = r.sab; steerNote = r.note; a.steerDist = 0;
-			for (const p of seedPorts) p.postMessage({ steer: r.sab });
-			say(Object.assign({ ev: 'steer', sec: sec() }, r.note));
+			const r = loadSteer(file, dist);
+			steerBuf = r.sab; steerNote = r.note; a.steerDist = dist ? 1 : 0;
+			// (dist, stdin "steerd <file>": the distances by it from now on: another measure, so the closest attempt and
+			// the sources' lowest distances start over; the workers' closest of the reach field's (an older gen) are dropped)
+			if (dist) { near = null; nearPending = false; steerGen++; for (const q of sourcesSent.values()) q.dist = Infinity; }
+			for (const p of seedPorts) p.postMessage(dist ? { steer: r.sab, dist: true } : { steer: r.sab });
+			say(Object.assign({ ev: 'steer', sec: sec() }, r.note, dist ? { dist: true } : {}));
 		} catch (e) { say({ ev: 'warning', text: `the late steer field is not used: ${e.message}` }); }
 	};
 	say({ ev: 'start', workers: a.workers, seeds, mode: field.mode, cells: a.cells, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100, steer: steerNote, deathMoves: !!a.deathMoves, mem: a.mem, memWhy: a.memWhy,
@@ -3669,10 +3795,16 @@ async function main() {
 	// worker finds the same rooms
 	const sourcesSent = new Map();   // room key -> {tick: the earliest "room" arrival sent, dist: the lowest "best" cost sent}
 	const onSource = (msg) => {
+		// (a worker's source by an older measure than the last switch's (a late field with its distances, the plan past its
+		// count; sent before the worker took the switch): ranked behind every one of the new measure, as a cell not scored
+		// yet (6000 + its distance: distOf); a room's first arrival is still one. Before, a reach cost sent just before
+		// "steerd" (Forgotten Helix: ~925 tiles against the steer field's 1000-2100) stayed its room's best for the search)
+		const rc = (msg.gen || 0) < steerGen && msg.rc < 6000 ? Math.min(9990, 6000 + msg.rc) : msg.rc;
 		let s = sourcesSent.get(msg.room);
 		if (!s) sourcesSent.set(msg.room, s = { tick: Infinity, dist: Infinity });
-		if (msg.kind === 'room') { if (msg.t >= s.tick) return; s.tick = msg.t; } else { if (msg.rc >= s.dist - 0.5) return; s.dist = msg.rc; }
-		say({ ev: 'source', kind: msg.kind, room: msg.room, desc: msg.desc, gain: msg.gain, tick: msg.t, dist: Math.round(msg.rc * 1000) / 1000, inputs: msg.inputs, seed: msg.seed });
+		if (msg.kind === 'room') { if (msg.t >= s.tick) return; s.tick = msg.t; } else { if (rc >= s.dist - 0.5) return; s.dist = rc; }
+		// (sg: the steer switches made, as on the closest attempts: the editor ranks a source of an older measure behind)
+		say(Object.assign({ ev: 'source', kind: msg.kind, room: msg.room, desc: msg.desc, gain: msg.gain, tick: msg.t, dist: Math.round(rc * 1000) / 1000, inputs: msg.inputs, seed: msg.seed }, steerGen ? { sg: steerGen } : {}));
 	};
 	const flushNear = () => {
 		if (!nearPending) return;
@@ -3707,6 +3839,7 @@ async function main() {
 				else if (line.startsWith('seed ') && /^[0-O]+$/.test(line.slice(5))) { for (const p of seedPorts) p.postMessage(line.slice(5)); }
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
 				else if (line.startsWith('steer ') && line.length > 6 && !steerBuf) steerLate(line.slice(6));
+				else if (line.startsWith('steerd ') && line.length > 7 && !steerBuf) steerLate(line.slice(7), true);
 				// (the editor's stall escape: only the first K workers search, the others park; 0 or K >= the workers: all)
 				else if (/^workers \d+$/.test(line)) {
 					const k = +line.slice(8), act = k > 0 && k < a.workers ? k : 0;
@@ -3995,5 +4128,5 @@ async function main() {
 if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
-module.exports = { OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
+module.exports = { CellMap, mixW, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
 	roomOf, counterRelevance, switchReaders, domIndex, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };

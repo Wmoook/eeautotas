@@ -1062,6 +1062,45 @@ async function passesSection() {
 			!X.error && st.log.some((x) => /the steer field cannot be used: test: out of memory; again without it/.test(x)),
 			`steer ${JSON.stringify(st.steer)}; explore ${ex.map((a) => (hasSteer(a) ? 'steer' : 'plain')).join(', ')}; beams ${bm.map((a) => (hasSteer(a) ? 'steer' : 'plain')).join(', ')}; error ${X && X.error}`);
 	}
+	// the steer field on the CPU alone (the GPU tools cannot take it: here an older tool; on Forgotten Helix its 614 MB copies
+	// are over the GPU's memory share): the attempts are still measured by it (Helix's viewing rooms: the reach field's walk
+	// through every coin door ranked a pocket behind a door the coins never open nearest). The CPU search gets --steer
+	// without --steerDist=0; every move's attempt (12 tiles by the reach field) ranks behind the CPU search's (50 by the
+	// steer field): STEER_MISS + 12; every move keeps its own nearest attempt (its chain) by its own field
+	{
+		const KW = 40, KH = 7;
+		const kcells = [...room(KW, KH), [18, 5, 255], [1, 5, 6], [KW - 4, 5, 121]];
+		for (let y = 1; y < KH - 1; y++) kcells.push([KW - 6, y, 23]);
+		const kbuf = ED.eelvlOf({ name: 'steerkey', width: KW, height: KH, cells: kcells });
+		const sc = path.join(HOME, 'steer-cpu.json'), log = path.join(HOME, 'steer-cpu.log'), scC = path.join(HOME, 'steer-cpu-c.json'), cpuLog = path.join(HOME, 'steer-cpu-args.log');
+		const stub = path.join(HOME, 'fake-cpu-steer.js');
+		fs.writeFileSync(stub, `'use strict';
+const fs = require('fs');
+const SC = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+fs.writeFileSync(SC.log, JSON.stringify(process.argv.slice(3)));
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'fine', startCost: 40 });
+setTimeout(() => say({ ev: 'closest', dist: 50, tick: 10, inputs: '4'.repeat(10) }), 600);
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 50, found: 0, refined: 0, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+process.stdin.on('data', (d) => { if (/stop/.test(String(d))) end(); });
+process.stdin.on('end', end);
+`);
+		fs.writeFileSync(sc, JSON.stringify({ log, R: 50, runs: { '-1': [{ end: 'exhausted', layers: 5, overflow: 0, closest: { dist: 12, tick: 20, ch: '4' } }] }, beam: null, steer: 0 }));
+		fs.writeFileSync(scC, JSON.stringify({ log: cpuLog }));
+		ED.start({ eelvlB64: kbuf.toString('base64'), seconds: 20, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc], cpu: [process.execPath, stub, scC], salts: false });
+		let st = ED.state();
+		const both = (s) => s.closest && s.closest.dist === 50 && (s.strategies || []).some((q) => q.key === 'explore' && q.best >= 0);
+		for (const t0 = Date.now(); st.running && !both(st) && Date.now() - t0 < 30000; st = ED.state()) await new Promise((res) => setTimeout(res, 40));
+		const X = (st.strategies || []).find((q) => q.key === 'explore') || {};
+		const bestTry = X.bestTry ? X.bestTry.dist : null;
+		if (st.running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 40)); }
+		const ca = fs.existsSync(cpuLog) ? JSON.parse(fs.readFileSync(cpuLog, 'utf8')) : [];
+		check('the steer field on the CPU alone: the CPU search measures by it (--steer, no --steerDist=0), its attempt (50) is the nearest, every move\'s (12 by the reach field) ranks behind (6012) and keeps its own chain',
+			!!st.steer && !st.steer.gpu && ca.some((x) => x.startsWith('--steer=')) && !ca.includes('--steerDist=0') && st.closest && st.closest.dist === 50 && st.closest.steer === 50 &&
+			X.best === 6012 && bestTry === 6012,
+			`steer ${JSON.stringify(st.steer && { gpu: st.steer.gpu, cpu: st.steer.cpu })}; cpu args ${ca.filter((x) => /steer/i.test(x)).join(' ')}; closest ${JSON.stringify(st.closest && { dist: st.closest.dist, steer: st.closest.steer, strategy: st.closest.strategy })}; every move best ${X.best}, own chain ${bestTry}`);
+	}
 }
 
 // ---------------------------------------------------------------- the CPU route search (src/goexplore.js; no GPU)
@@ -1511,17 +1550,68 @@ async function cpuSection() {
 		st.message.includes(`The level: level file md5 ${hiMd5}.`) && st.log.some((x) => x.includes(`the physics check finds no way from the start to the trophy on this level (level file md5 ${hiMd5};`)), st.message);
 	check('... and no proof (eegpu prove) runs: the physics check has proven it already', !st.proof, JSON.stringify(st.proof || null));
 	// a steer field built after the search started (the wait forced to 0 ms; a key off the way: 2 layers, on a level no
-	// earlier search built it for): the CPU search takes it when it arrives (goexplore.js stdin "steer <file>", its
-	// "steer" event), the distances stay the reach field's
+	// earlier search built it for): the CPU search takes it when it arrives (goexplore.js stdin "steerd <file>", its
+	// "steer" event) and measures the attempts by it from then on (Forgotten Helix's field arrives ~30 s in: before, the
+	// reach field's walk through every coin door measured them for the whole search): the nearest attempt starts over,
+	// and one kept after the switch is the steer field's
 	const LW = 44, LH = 7, lcells = [...room(LW, LH), [18, 5, 255], [1, 5, 6], [LW - 4, 5, 121]];
 	for (let y = 1; y < LH - 1; y++) lcells.push([LW - 6, y, 23]);
 	const kdLate = ED.eelvlOf({ name: 'late steer', width: LW, height: LH, cells: lcells });
 	ED.start({ eelvlB64: kdLate.toString('base64'), seconds: 6, workers: 1 }, { available: false, why: 'test: no GPU' }, { steerWaitMs: 0 });
 	st = await waitDone(25000);
-	check('a late steer field: taken when its build ends (the CPU search\'s head A from then on, its "steer" event), the distances still the reach field\'s',
+	check('a late steer field: taken when its build ends (the CPU search\'s head A from then on, its "steer" event), the distances its own from then on',
 		st.stage === 'found' && !!st.steer && Number.isFinite(st.steer.late) && Number.isFinite(st.steer.cpuAt) && !st.steer.gpu && st.log.some((x) => /the steer field is still building/.test(x)) &&
-		st.log.some((x) => /arrived [\d.]+ s into the search: from now on it orders the CPU search/.test(x)) && !(st.closest && st.closest.steer !== undefined),
+		st.log.some((x) => /arrived [\d.]+ s into the search: from now on it orders the CPU search.* and measures the attempts \(the nearest starts over\)/.test(x)) && (!st.closest || st.closest.steer !== undefined),
 		`${st.stage}; steer ${JSON.stringify(st.steer)}; ${st.log.filter((x) => /steer/.test(x)).join(' | ')}`);
+	// ... the attempts on their way at the switch: a CPU search (here a stand-in) that took "steerd" still sends a closest
+	// attempt and a source of the reach field's (without sg: its pipe, a worker's chunk). Neither is its own nearest nor the
+	// nearest, the source ranks behind (STEER_MISS + its distance); the ones after the switch (sg 1) are. Before, the old
+	// closest (10) set the CPU search's own best and its later attempts by the steer field (50) never beat it, and the old
+	// source stayed its room's best (Forgotten Helix: reach costs ~925 against the steer field's 1000-2100)
+	{
+		const SW = 46, SH = 7, scells = [...room(SW, SH), [18, 5, 255], [1, 5, 6], [SW - 4, 5, 121]];
+		for (let y = 1; y < SH - 1; y++) scells.push([SW - 6, y, 23]);
+		const kdSw = ED.eelvlOf({ name: 'late steer race', width: SW, height: SH, cells: scells });
+		const stub = path.join(HOME, 'fake-cpu-steerd.js'), swLog = path.join(HOME, 'steerd-stub.log');
+		fs.writeFileSync(stub, `'use strict';
+const fs = require('fs');
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'coarse', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 50, found: 0, refined: 0, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let sb = '';
+process.stdin.on('data', (d) => {
+	sb += d;
+	for (let k; (k = sb.indexOf('\\n')) >= 0;) {
+		const line = sb.slice(0, k); sb = sb.slice(k + 1);
+		fs.appendFileSync(${JSON.stringify(swLog)}, line + '\\n');
+		if (line.startsWith('steerd ')) {
+			say({ ev: 'closest', dist: 10, tick: 12, inputs: '4'.repeat(12) });
+			say({ ev: 'source', kind: 'best', room: 7, desc: 'test', gain: 0, tick: 12, dist: 10, inputs: '4'.repeat(12), seed: 1 });
+			say({ ev: 'steer', sec: 1, dist: true });
+			setTimeout(() => {
+				say({ ev: 'closest', dist: 50, tick: 14, inputs: '4'.repeat(14), sg: 1 });
+				say({ ev: 'source', kind: 'best', room: 7, desc: 'test', gain: 0, tick: 14, dist: 50, inputs: '4'.repeat(14), seed: 1, sg: 1 });
+			}, 400);
+		}
+		if (line === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`);
+		ED.start({ eelvlB64: kdSw.toString('base64'), seconds: 20, workers: 1 }, { available: false, why: 'test: no GPU' }, { steerWaitMs: 0, cpu: [process.execPath, stub] });
+		let sw = ED.state();
+		const src7 = (x) => (x.sources || []).find((r) => r.room === 7);
+		const cpuOf = (x) => (x.strategies || []).find((q) => q.key === 'goexplore') || {};
+		const settled = (x) => x.closest && x.closest.dist === 50 && src7(x) && src7(x).best && src7(x).best.tiles === 50 && cpuOf(x).best === 50;
+		for (const t0 = Date.now(); sw.running && !settled(sw) && Date.now() - t0 < 25000; sw = ED.state()) await new Promise((res) => setTimeout(res, 50));
+		const G = cpuOf(sw), s7 = src7(sw);
+		if (sw.running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 50)); }
+		const got = fs.existsSync(swLog) ? fs.readFileSync(swLog, 'utf8') : '';
+		check('... an attempt of the reach field\'s on its way at the switch (no sg): not the CPU search\'s own nearest nor the nearest, its source ranked behind; the ones after it (sg 1, 50) are',
+			/^steerd /m.test(got) && sw.closest && sw.closest.dist === 50 && G.best === 50 && G.bestTry && G.bestTry.dist === 50 && s7 && s7.best && s7.best.tiles === 50,
+			`stdin ${JSON.stringify(got.slice(0, 120))}; closest ${sw.closest && sw.closest.dist}; own best ${G.best} (chain ${G.bestTry && G.bestTry.dist}); room 7 ${JSON.stringify(s7 && s7.best)}`);
+	}
 
 	// the precision stage (src/precision.js, "exact landings"): the user's pocket puzzle (test.eelvl's shape: a trophy pocket
 	// under a spike whose right side is a half block) at x 1976: the ball must drop in with px == 1976.0 exactly. The
