@@ -275,10 +275,52 @@ function sectionSearch() {
 		return { res: evs.filter((e) => e.ev === 'result'), done: evs.find((e) => e.ev === 'done') || {} };
 	};
 	const bg = runB({}), bu = runB({ EEAT_UPTO: '0' });
-	check('the gate cell (default): a route over the shut gates within 4 M ticks, states dominated by a cell with more coins counted (gateDom)',
-		bg.res.length > 0 && (bg.done.gateDom || 0) > 0, bg.res.length ? `${bg.res[0].ticks} ticks, gateDom ${bg.done.gateDom}, ${bg.done.ticks} simulated` : `none, ${bg.done.ticks} simulated`);
+	check('the gate cell (default): a route over the shut gates within 4 M ticks (the count below the gate a word of the cell)',
+		bg.res.length > 0, bg.res.length ? `${bg.res[0].ticks} ticks, ${bg.done.ticks} simulated` : `none, ${bg.done.ticks} simulated`);
 	check('... the thresholds-met key (EEAT_UPTO=0, c30f499): none in the same 4 M ticks (the coin detour\'s lineage dropped)',
 		bu.res.length === 0, bu.res.length ? `a route of ${bu.res[0].ticks} ticks` : `none, ${bu.done.ticks} simulated`);
+	// the open gate (the n3 gate-cell soundness review, 2026-09-29, src/out/n3/review_gatecell): more coins is NOT always
+	// better, since a blue gate SHUTS at its count (eesim.js: passable while the count is below it). The trophy chamber is
+	// under a blue gate at 2, the floor of a 1-wide shaft with a forced blue coin above it; a lineage that took the other
+	// blue coin in the fast shaft (x 4) lands on the shut gate, only the coinless detour's lineage (x 44, then the passage
+	// into shaft 4 below its coin) can finish. The gravity-blind walk passes the gate diagonally through a notch the ball
+	// cannot reach from above, so blue is irrelevant, keyed up to 2 (the gate cell on). A state is never dropped for a cell
+	// of the same place with more coins (fd3d76c's gDom did: no route in 44-55 M ticks); the gate word in the cell key
+	// keeps both lineages' cells
+	const WO = 64, HO = 48, XR = 44, XC = 59;
+	const GO = []; for (let y = 0; y < HO; y++) GO.push(new Array(WO).fill('#'));
+	const airO = (x, y) => { GO[y][x] = '.'; };
+	for (let y = 1; y <= 2; y++) for (let x = 1; x <= XR; x++) airO(x, y);
+	GO[2][10] = 'S';
+	for (let y = 3; y <= 19; y++) airO(4, y);
+	GO[5][4] = 'b';
+	for (let y = 3; y <= 9; y++) airO(XR, y);
+	for (let x = 5; x <= XR; x++) airO(x, 9);
+	for (let x = 4; x <= XC; x++) airO(x, 19);
+	for (let y = 19; y <= 27; y++) airO(XC, y);
+	GO[22][XC] = 'b';
+	GO[28][XC] = 'G';
+	airO(XC + 1, 28);
+	for (let y = 29; y <= 30; y++) for (let x = XC - 2; x <= XC + 2; x++) airO(x, y);
+	GO[29][XC] = 'T';
+	const { file: gopen, level: OL } = levelOf('gate_open', GO.map((r) => r.join('')));
+	const ro = GX.counterRelevance(OL), rmO = GX.roomOf(OL);
+	check('the open gate: blue irrelevant to the walk, keyed up to its gate at 2, the gate cell on',
+		ro.blue === false && ro.upTo.blue === 2 && rmO.gate !== null, `${JSON.stringify(ro.upTo)} gate ${rmO.gate ? 'on' : 'off'}`);
+	for (const seed of [1, 2]) {
+		const r = spawnSync(process.execPath, [GOX, gopen, '--cells=coarse', '--workers=1', '--maxTicks=4000000', '--mem=400', '--first=1', `--seed=${seed}`],
+			{ encoding: 'utf8', maxBuffer: 1 << 28, timeout: 120000 });
+		const evs = String(r.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return {}; } });
+		const res = evs.filter((e) => e.ev === 'result'), done = evs.find((e) => e.ev === 'done') || {};
+		let crown = false, blue = -1;
+		if (res.length) {
+			const s = new E.EESim(OL), inp = new E.EEInput(); s.reset();
+			for (const ch of res[0].inputs) { E.applyMask(inp, (ch.charCodeAt(0) - 48) & 31); s.tick(inp); if (s.has_silver_crown) { crown = true; break; } }
+			blue = s.blue_coins;
+		}
+		check(`... the gate cell (default), seed ${seed}: a route through the OPEN gate within 4 M ticks (replayed: the trophy with 1 blue coin)`,
+			res.length > 0 && crown && blue === 1, res.length ? `${res[0].ticks} ticks, ${done.ticks} simulated, crown ${crown}, blue ${blue}` : `none, ${done.ticks} simulated`);
+	}
 }
 
 function sectionBursts() {

@@ -903,8 +903,6 @@ function counterRelevance(L) {
 /** counterRelevance: a region of a counter's readers is a pocket when the places next to it are this many steps (+ its
  *  own size) apart at most around it */
 const SHORTCUT = 12;
-/** the gate cell (roomOf gate): at most this many higher counts looked up for a new state's dominance (goexplore.js add) */
-const GATE_DOM = 16;
 
 /**
  * switchReaders(L) -> {purple: Map(id -> {doors, gates, floors}), orange: ...}: the switch ids that open or shut something (a door
@@ -2155,12 +2153,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const TBK = TKEY && coarse;
 	let tLeft = 0, tKind = 0, tBucket = 0, kn = 0, tDom = 0, tMore = 0, tDoomed = 0, tCells = 0;
 	// (the gate cell, roomOf gate: an irrelevant counter with gates keys its count below the highest gate in the coarse
-	// cell (one word, at gwAt, before the timed bucket), not in the room; a new state is dropped when a cell of the same
-	// place (the other words equal) holding at least as many coins of each gated counter got there no later (gDom:
-	// dominated in both, like the timed bucket's tDom; at most GATE_DOM words looked up, the nearest counts first); the
-	// cells the thresholds-met key (c30f499) kept are all still kept: it holds only the earliest arrival of the place)
+	// cell (one word, before the timed bucket), not in the room: each count below the gate is a cell of its own, and
+	// nothing is dropped for a cell of the same place with more coins: more coins is not always better, since a coin /
+	// blue gate SHUTS at its count (the soundness review's open gate, test/rooms.js: fd3d76c's drop of such "dominated"
+	// states (gDom) lost the only route, the coinless lineage's; no route in 44-55 M ticks); the cells the thresholds-met
+	// key (c30f499) kept are all still kept: it holds only the earliest arrival of the place)
 	const GW = coarse && RM.gate ? RM.gate : null;
-	let gwAt = -1, gDom = 0;
 	/** the cell key of KV[0 .. n): two 32-bit hash lanes (see cellKey) */
 	const hashKV = (n) => {
 		let h1 = 0x9747b28c | 0, h2 = 0x85ebca6b | 0;
@@ -2206,7 +2204,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			n = 10;
 		}
 		// (the gate cell's word: coarse cells only, before the timed bucket, which stays the last word)
-		if (GW !== null) { gwAt = n; KV[n++] = GW.word(sim); }
+		if (GW !== null) KV[n++] = GW.word(sim);
 		// (a timed killer running: its bucket as one more word; without one the key is exactly as before)
 		tLeft = 0; tBucket = 0;
 		if (TM !== null) {
@@ -2401,23 +2399,6 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (room !== null && betterBest(c, room.best)) room.best = c;
 			return null;
 		}
-		// (the gate cell: a cell of the same place holding at least as many coins of each gated counter that got there no
-		// later: this state is dominated; not for the fast cells either)
-		if (GW !== null && gwAt >= 0 && !spdFast) {
-			const w0 = KV[gwAt], nb = GW.upB + 1, g0 = (w0 / nb) | 0, b0 = w0 - g0 * nb;
-			let looked = 0, dom = false;
-			for (let g = g0; g <= GW.upG && !dom && looked < GATE_DOM; g++) {
-				for (let b = b0; b <= GW.upB && looked < GATE_DOM; b++) {
-					if (g === g0 && b === b0) continue;
-					looked++;
-					KV[gwAt] = g * nb + b;
-					const c2 = cells.get(hashKV(kn));
-					if (c2 !== undefined && c2.t <= t) { c2.seen++; c2.touch = picks; dom = true; break; }
-				}
-			}
-			KV[gwAt] = w0;
-			if (dom) { gDom++; return null; }
-		}
 		// (--timed: a cell of the same place in a bucket with more time left that got there no later: this state is dominated;
 		// not for --spdMode=1's fast cells, which keep the fastest arrival, not the earliest)
 		if (TBK && tBucket > 0 && !spdFast) {
@@ -2529,7 +2510,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let near = null, nearSent = null, lastSent = 0, lastStat = 0;   // the closest state: {rc, t, node}
 	let parked = 0;   // (the chunks this worker sat out: stdin "workers K" parked it)
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
-	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, gDom, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
+	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked },
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
@@ -4000,7 +3981,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), total('gDom') ? { gateDom: total('gDom') } : {}, usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -4317,7 +4298,7 @@ async function main() {
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...(total('gDom') ? { gateDom: total('gDom') } : {}), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
 		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
