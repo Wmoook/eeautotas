@@ -1617,6 +1617,52 @@ process.stdin.on('end', end);
 			/^steerd /m.test(got) && sw.closest && sw.closest.dist === 50 && G.best === 50 && G.bestTry && G.bestTry.dist === 50 && s7 && s7.best && s7.best.tiles === 50,
 			`stdin ${JSON.stringify(got.slice(0, 120))}; closest ${sw.closest && sw.closest.dist}; own best ${G.best} (chain ${G.bestTry && G.bestTry.dist}); room 7 ${JSON.stringify(s7 && s7.best)}`);
 	}
+	// ... a late field with the coin tour (steer.js buildTour: 25 coins and a 25-coin door, the coins modelled): the running
+	// CPU search is sent the CPU file (`<field>_cpu.bin`, flags 2: the tour), not the plain one (the GPU tools'); the
+	// cycle-1 branch set steerCpu to the CPU file for later launches but sent the plain file on this line, so the
+	// running one search never read the tour where the field came late (Diamond underground: 17-20 s into the search)
+	{
+		const SFT = require('../src/steer.js');
+		const TW = 48, TH = 30, tcells = [...room(TW, TH)];
+		for (let y = 1; y < 22; y++) for (let x = 1; x < TW - 1; x++) tcells.push([x, y, 9]);
+		let nc = 0;
+		for (let x = 2; x <= 42 && nc < 25; x++) { if (x === 28) continue; tcells.push([x, nc % 2 ? 26 : 28, 100]); nc++; }
+		tcells.push([28, 28, 255]);
+		for (let y = 22; y <= 28; y++) tcells.push([44, y, 43, 25]);
+		tcells.push([46, 28, 121]);
+		const kdT = ED.eelvlOf({ name: 'late steer tour', width: TW, height: TH, cells: tcells });
+		const stubT = path.join(HOME, 'fake-cpu-steertour.js'), tLog = path.join(HOME, 'steertour-stub.log');
+		fs.writeFileSync(stubT, `'use strict';
+const fs = require('fs');
+const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+say({ ev: 'start', workers: 1, seeds: [1], mode: 'physics', cells: 'fine', startCost: 40 });
+const iv = setInterval(() => say({ ev: 'progress', layer: 5, tick: 5, states: 10, ticks: 1000, ticksPerSec: 1000, picks: 1, bestCost: 50, found: 0, refined: 0, workers: 1 }), 300);
+const end = () => { clearInterval(iv); say({ ev: 'done', layers: 5, end: 'stopped', finish: 0 }); process.exit(0); };
+let sb = '';
+process.stdin.on('data', (d) => {
+	sb += d;
+	for (let k; (k = sb.indexOf('\\n')) >= 0;) {
+		const line = sb.slice(0, k); sb = sb.slice(k + 1);
+		fs.appendFileSync(${JSON.stringify(tLog)}, line + '\\n');
+		if (line.startsWith('steerd ')) say({ ev: 'steer', sec: 1, dist: true });
+		if (line === 'stop') end();
+	}
+});
+process.stdin.on('end', end);
+`);
+		ED.start({ eelvlB64: kdT.toString('base64'), seconds: 20, workers: 1 }, { available: false, why: 'test: no GPU' }, { steerWaitMs: 0, cpu: [process.execPath, stubT] });
+		let tw = ED.state();
+		const sent = () => (fs.existsSync(tLog) ? fs.readFileSync(tLog, 'utf8') : '');
+		for (const t0 = Date.now(); tw.running && !/^steerd /m.test(sent()) && Date.now() - t0 < 25000; tw = ED.state()) await new Promise((res) => setTimeout(res, 50));
+		const logT = (ED.state().log || []).slice();
+		if (ED.state().running) { ED.stop(); while (ED.state().running) await new Promise((res) => setTimeout(res, 50)); }
+		const line = (/^steerd (.*)$/m.exec(sent()) || [])[1] || '';
+		let tour = null;
+		try { tour = SFT.readSteerFile(fs.readFileSync(line)).tour; } catch (e) { /* no file */ }
+		check('... a late field with the coin tour: the running CPU search is sent the CPU file (the tour), and the note says so',
+			/_cpu\.bin$/.test(line) && !!tour && tour.n === 25 && tour.T === 25 && !tour.first && logT.some((x) => /the coin tour over 25 coins.*arrived [\d.]+ s into the search/.test(x)),
+			`stdin ${JSON.stringify(sent().slice(0, 160))}; tour ${tour ? `${tour.n} coins, T ${tour.T}, first ${tour.first}` : 'none'}; ${logT.filter((x) => /steer field/.test(x)).join(' | ').slice(0, 300)}`);
+	}
 
 	// the precision stage (src/precision.js, "exact landings"): the user's pocket puzzle (test.eelvl's shape: a trophy pocket
 	// under a spike whose right side is a half block) at x 1976: the ball must drop in with px == 1976.0 exactly. The

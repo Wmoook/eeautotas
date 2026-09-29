@@ -181,9 +181,10 @@ function blockInfo(ids) {
 }
 
 // ---------------------------------------------------------------- checks
-/** tiles the goal field of the GPU search walks through (native/beamhost.h `open`): not a static solid block */
-function openTile(L, i) {
-	const f = L.flags[L.fg[i]] || 0;
+/** tiles the goal field of the GPU search walks through (native/beamhost.h `open`): not a static solid block. fl: the
+ *  guidance's flags (reach.js guideFlags: 50, the secret "appear" block, always blocks: a static solid, not a door) */
+function openTile(L, i, fl) {
+	const f = (fl || RF.guideFlags(L))[L.fg[i]] || 0;
 	return (f & F_SOLID) === 0 || (f & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) !== 0;
 }
 /** tiles reachable from (sx, sy): 8-way over open tiles (no corner cutting, like the goal field), and with
@@ -191,7 +192,7 @@ function openTile(L, i) {
  *  anywhere with a timed killer: curse, zombie, poison with a time, lava) takes it to a checkpoint it touched or, with
  *  2+ spawn points, to the next spawn of EE's rotation: every spawn */
 function reachFrom(L, sx, sy, portals) {
-	const W = L.width, H = L.height, N = W * H;
+	const W = L.width, H = L.height, N = W * H, fl = RF.guideFlags(L);
 	const seen = new Uint8Array(N);
 	const q = [sy * W + sx];
 	seen[q[0]] = 1;
@@ -209,7 +210,7 @@ function reachFrom(L, sx, sy, portals) {
 					const nx = x + dx, ny = y + dy;
 					if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
 					const j = ny * W + nx;
-					if (!openTile(L, j) || (dx && dy && (!openTile(L, y * W + nx) || !openTile(L, ny * W + x)))) continue;
+					if (!openTile(L, j, fl) || (dx && dy && (!openTile(L, y * W + nx, fl) || !openTile(L, ny * W + x, fl)))) continue;
 					push(j);
 				}
 			}
@@ -394,6 +395,10 @@ function check(buf, source) {
 // stops with the CPU search: cpuDone). The ice level (200 x 200) on the rented H100 shared with other work, Find a route
 // for 120 s with 16 CPU workers: the first route after 18.2 / 33.9 s (5,271 / 5,319 ticks), without it 61.5 / 66.9 /
 // 67.0 s (10,297 / 9,894 / 10,297 ticks, the CPU search's and the relay's).
+// EEAT_GX (an A/B knob): extra goexplore.js options for the CPU search (the one search), the stall escape and the GPU
+// random runs, appended after the editor's own (a later option wins), e.g. EEAT_GX="--dom=0 --dord=0 --useful=0";
+// only --name=value words are taken; unset: none
+const gxExtra = () => (process.env.EEAT_GX || '').split(/\s+/).filter((s) => /^--[A-Za-z]+=\S+$/.test(s));
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
@@ -426,7 +431,7 @@ const STRATEGIES = {
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
-			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : [])] },
+			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : []), ...gxExtra()] },
 	// the stall escape (see ESC_WAIT_S): a second one search (goexplore.js, its own archive and GPU bursts) from a stalled
 	// search's starting point (--prefix), on a share of the CPU search's workers, with the rotation's configuration (its
 	// flags after the search's own: the last one wins in goexplore.js)
@@ -435,7 +440,7 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []),
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...gxExtra(),
 		...(q.rollFlags || []), ...(q.rollSeed ? [`--seed=${q.rollSeed}`] : [])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
@@ -1169,6 +1174,10 @@ const BREAK_GATES = 16;
 // `b.pastPlan === false`: off.
 const PAST_MAX_MS = 180000;
 const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
+// (the CPU search's steer file where it differs from the GPU tools': the coin tour, steer.js buildTour: flags 2, which the
+// native lookup does not read; the GPU tools keep the plain file)
+const cpuFileOf = (file) => file.replace(/\.bin$/, '_cpu.bin');
+const steerCpuOf = (sf) => (sf.tour && sf.tour.n && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
 /** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
 const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
 /** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
@@ -1300,27 +1309,47 @@ function gateEnter(inputs, level) {
 		return inputs;
 	} catch (e) { return inputs; }
 }
-/** the coins the state after inputs holds, as the room keys count them (gold where a coin door or gate reads them, blue
- *  where a blue one does; goexplore.js roomOf): the wall breaker's progress order of its starting points */
+/** the coin counters the room keys count, as the wall breaker's progress order reads them (goexplore.js roomOf): gold
+ *  where a coin door or gate reads them, blue where a blue one does; a counter whose doors guard nothing on the way to
+ *  the trophy is no progress (goexplore.js counterRelevance; Good Egg's blue coins), unless it has gates: then it counts
+ *  up to its highest gate (counterRelevance upTo, as the room keys do). {gold, blue, upGold, upBlue} per level */
+const COUNT_DOORS = new WeakMap();
+function countDoorsOf(L) {
+	let D = COUNT_DOORS.get(L);
+	if (D) return D;
+	let gold = false, blue = false;
+	for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
+	const rel = GX.counterRelevance(L), up = rel.upTo || { gold: 0, blue: 0 };
+	D = { gold: gold && (rel.gold || up.gold > 0), blue: blue && (rel.blue || up.blue > 0), upGold: rel.gold ? Infinity : up.gold, upBlue: rel.blue ? Infinity : up.blue };
+	COUNT_DOORS.set(L, D);
+	return D;
+}
+/** the coins the state after inputs holds, as the room keys count them (countDoorsOf): the wall breaker's progress order
+ *  of its starting points */
 function coinsOf(inputs) {
-	const L = cur.level;
-	if (!cur.countDoors) {
-		let gold = false, blue = false;
-		for (let i = 0; i < L.fg.length; i++) { const id = L.fg[i]; if (id === 43 || id === 165) gold = true; else if (id === 213 || id === 214) blue = true; }
-		// (a counter whose doors guard nothing on the way to the trophy is no progress: goexplore.js counterRelevance, as
-		// the room keys count it; Good Egg's blue coins)
-		const rel = GX.counterRelevance(L);
-		cur.countDoors = { gold: gold && rel.gold, blue: blue && rel.blue };
-	}
-	const D = cur.countDoors;
+	const L = cur.level, D = countDoorsOf(L);
 	if (!D.gold && !D.blue) return 0;
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	for (let t = 0; t < inputs.length; t++) { E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31); sim.tick(inp); }
-	return (D.gold ? sim.coins | 0 : 0) + (D.blue ? sim.blue_coins | 0 : 0);
+	return (D.gold ? Math.min(sim.coins | 0, D.upGold) : 0) + (D.blue ? Math.min(sim.blue_coins | 0, D.upBlue) : 0);
 }
-/** a room's coins from its description (goexplore.js roomOf desc: 'coins=N', 'bluecoins=N' where a door reads them) */
-const coinsOfDesc = (desc) => { let n = 0; for (const m of String(desc || '').matchAll(/(?:^|\s)(?:blue)?coins=(\d+)/g)) n += +m[1]; return n; };
+/** a room's coins from its description (goexplore.js roomOf desc: 'coins=N' / 'bluecoins=N' where the key reads the
+ *  count, 'coins>=T' where it reads the thresholds met) as coinsOf counts them: with the level L, each counter of
+ *  countDoorsOf capped at its highest gate, so a room past the gate ('bluecoins>=3' on The 7 Depths of Hell) counts the
+ *  gate's count, at or above the rooms below it (the n3 soundness review: it read 0 there, and breakStarts' progress
+ *  order put the frontier room past the gate behind even the start room), a counter that is no progress 0; without L
+ *  only 'coins=N' counts */
+const coinsOfDesc = (desc, L) => {
+	const D = L ? countDoorsOf(L) : null;
+	let n = 0;
+	for (const m of String(desc || '').matchAll(/(?:^|\s)(blue)?coins(>?=)(\d+)/g)) {
+		if (!D) { if (m[2] === '=') n += +m[3]; continue; }
+		const b = m[1] === 'blue';
+		if (b ? D.blue : D.gold) n += Math.min(+m[3], b ? D.upBlue : D.upGold);
+	}
+	return n;
+};
 /** the breaker's table (log2 cells) for a GPU of memMB: BREAK_MEM_F of it at 16 bytes a cell, 2^24 .. 2^31 */
 const breakCells = (memMB) => Math.max(24, Math.min(31, Math.floor(Math.log2((memMB > 0 ? memMB : 8192) * 1048576 * BREAK_MEM_F / 16))));
 // the stall clock and the rounds: {at (the last progress, ms), mark (S.closest.dist then), rooms (the room keys seen),
@@ -1365,7 +1394,7 @@ function breakStarts() {
 	const rooms = [...sources.values()].sort((x, y) => (x.brk || 0) - (y.brk || 0) || (y.gain > 0) - (x.gain > 0) || far(x) - far(y));
 	for (const r of rooms) {
 		if (out.length >= lim) break;
-		const k = coinsOfDesc(r.desc);
+		const k = coinsOfDesc(r.desc, cur.level);
 		if (r.early) add(r.early.inputs, r.early.ticks, `where room "${r.desc}" was entered`, r.early.dist, r.room, k);
 		if (r.best) add(r.best.inputs, r.best.ticks - BREAK_BACK[0], `room "${r.desc}"'s nearest attempt, ${BREAK_BACK[0]} ticks back`, r.best.dist, r.room, k);
 	}
@@ -2207,7 +2236,7 @@ function useSteer(sf, noGpu) {
 	// (STEER_GPU_SHARE in all: two copies (every move, the relay), four with the beams')
 	const copies = mb * 4 <= gpuMB * STEER_GPU_SHARE ? 4 : mb * 2 <= gpuMB * STEER_GPU_SHARE ? 2 : 0;
 	const gpuOk = !noGpu && toolInfo && toolInfo.steer === SF.VERSION && copies > 0;
-	cur.files.steerCpu = sf.file;
+	cur.files.steerCpu = steerCpuOf(sf);
 	if (gpuOk) cur.files.steer = sf.file;
 	if (gpuOk && copies === 4) cur.files.steerBeam = sf.file;
 	// (the attempts' distances: the steer field's whenever the CPU search orders by it; a GPU tool without it (its copies
@@ -2221,7 +2250,7 @@ function useSteer(sf, noGpu) {
 	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
 	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
-	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
+	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
@@ -2241,7 +2270,7 @@ function lateSteer(gen, sf2) {
 		return;
 	}
 	if (sf2.over) note(`the steer field ${sf2.over}`);
-	cur.files.steerCpu = sf2.file;
+	cur.files.steerCpu = steerCpuOf(sf2);
 	// (a CPU search launched from now on reports the steer field's distances from its start)
 	cur.files.steerDist = true;
 	cur.distBySteer = true;
@@ -2264,9 +2293,9 @@ function lateSteer(gen, sf2) {
 		// (the CPU searches with distances (the one search, the escape): "steerd"; their closest attempts count from its switch
 		// on (sgMin): one sent before it is the reach field's)
 		const dist = q.key === 'goexplore' || q.key === 'escape';
-		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${sf2.file}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
+		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${cur.files.steerCpu}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
-	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
+	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
 		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
 	save();
 }
@@ -2503,7 +2532,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (!cached.tour || !cached.tour.n || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -2515,7 +2544,9 @@ function steerInfo(buf, hash) {
 			let lfp = null, bytes = 0;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
-			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
+			// (the coin tour: the CPU search's file alone)
+			if (useful && st.tour) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
+			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
 				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
@@ -2532,7 +2563,7 @@ function steerInfo(buf, hash) {
 				} catch (e) { past = null; }
 				parentPort.postMessage({ past: past || { none: true } });
 			}`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, cpu: cpuFileOf(file), past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
 		let main = null;
 		w.on('message', (r) => {
@@ -2562,7 +2593,7 @@ function pruneSteerCache() {
 	const d = dir(), fp = steerFp();
 	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_s\d+_[0-9a-f]+\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_s${SF.VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
-	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin'), f.replace(/\.json$/, '_cpu.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {

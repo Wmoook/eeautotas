@@ -40,7 +40,7 @@ const section = (s) => console.log(`\n== ${s}`);
 // ASCII levels: # wall, . air, S spawn, T trophy, C checkpoint, x spike, o gold coin, b blue coin, D blue door (2),
 // d coin door (1), 1 / 2 / 3 purple switches 1 / 2 / 3, e / f purple doors 1 / 2, g purple gate 3, 7 a purple switch no
 // door reads, k crown
-const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], D: [213, 2], d: [43, 1], 1: [113, 1], 2: [113, 2],
+const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], b: [101], D: [213, 2], G: [214, 2], d: [43, 1], 1: [113, 1], 2: [113, 2],
 	3: [113, 3], e: [184, 1], f: [184, 2], g: [185, 3], 7: [113, 7], k: [5] };
 function levelOf(name, rows) {
 	const cells = [];
@@ -69,6 +69,9 @@ const POCKET = [
 	'############',
 ];
 const POCKET_CP = POCKET.map((r, y) => (y === 3 ? '#.##.C######' : r));
+// the same pocket behind a blue GATE (2) and a third blue coin: the gate shuts at 2 (a solid block: a floor the walk
+// cannot see), so the count is keyed up to it
+const POCKET_GATE = POCKET.map((r, y) => (y === 1 ? '#S.b..b.b.T#' : y === 2 ? '#.##G#######' : r));
 const POCKET_CROWN = POCKET.map((r, y) => (y === 3 ? '#.##.k######' : r));
 // the blue door in the corridor, the trophy also reachable the long way round: a shortcut
 const SHORT = [
@@ -93,6 +96,28 @@ function sectionRelevance() {
 	touch(A, sim, 6, 1);
 	const k2 = RM.key(sim), d2 = RM.desc(sim);
 	check('two (the door opens): another room, its description says so', sim.blue_coins === 2 && k2 !== k1 && /bluecoins>=2/.test(d2), `'${d2}'`);
+	check('the door pocket: no gate, nothing keyed up to one (upTo 0)', r.upTo.blue === 0 && r.upTo.gold === 0, JSON.stringify(r.upTo));
+	const G = levelOf('pocket_gate', POCKET_GATE).level, rg = GX.counterRelevance(G);
+	check('the gate pocket: blue irrelevant, keyed up to its gate at 2', rg.blue === false && rg.upTo.blue === 2 && /gates at 2/.test(rg.why.blue), JSON.stringify(rg));
+	const RG = GX.roomOf(G), sg = new E.EESim(G); sg.reset();
+	// (a second tick: the gates' shown count follows the count a tick later, eesim.js _show_blue_coin_gate)
+	const touchG = (x, y) => { touch(G, sg, x, y); sg.tick(new E.EEInput()); };
+	const g0 = RG.key(sg);
+	touchG(3, 1);
+	const g1 = RG.key(sg), gd1 = RG.desc(sg);
+	check('there one blue coin (toward the gate) is another room', sg.blue_coins === 1 && g1 !== g0 && /bluecoins=1/.test(gd1), `'${gd1}'`);
+	touchG(6, 1);
+	const g2 = RG.key(sg), gd2 = RG.desc(sg);
+	check('two (the gate shuts): another room', sg.blue_coins === 2 && g2 !== g1 && g2 !== g0 && /bluecoins>=2/.test(gd2), `'${gd2}'`);
+	touchG(8, 1);
+	check('three (past the gate, no threshold above): the same room as two', sg.blue_coins === 3 && RG.key(sg) === g2, RG.desc(sg));
+	// the wall breaker's progress order (editor.js breakStarts: coinsOf for its attempts, coinsOfDesc for the rooms'
+	// starts) reads the count the key reads: the room past the gate ranks at the gate's count, at or above the rooms below
+	// it (the n3 soundness review: coinsOfDesc read 'bluecoins>=2' as 0, behind 'bluecoins=1' and the start room)
+	const ord = ['', gd1, gd2, RG.desc(sg)].map((d) => ED.coinsOfDesc(d, G));
+	check('the breaker\'s order by the rooms\' descriptions (coinsOfDesc with the level): the start 0, one coin 1, past the gate 2 (the gate\'s count), three coins 2', ord.join(',') === '0,1,2,2', `${ord.join(',')} for '${gd1}' '${gd2}'`);
+	check('... a door pocket (no gate: its thresholds are no progress) 0 as before, and without the level only coins=N counts',
+		ED.coinsOfDesc(d2, A) === 0 && ED.coinsOfDesc('bluecoins=1') === 1 && ED.coinsOfDesc('coins=2 bluecoins>=2') === 2, `${ED.coinsOfDesc(d2, A)} ${ED.coinsOfDesc('bluecoins=1')} ${ED.coinsOfDesc('coins=2 bluecoins>=2')}`);
 	const B = levelOf('pocket_cp', POCKET_CP).level;
 	check('a checkpoint in the pocket: blue relevant', GX.counterRelevance(B).blue === true, JSON.stringify(GX.counterRelevance(B)));
 	const Cr = levelOf('pocket_crown', POCKET_CROWN).level;
@@ -133,6 +158,15 @@ function sectionReaders() {
 	touch(L, sim, 3, 1);
 	check('switch 1 on: another room', sim.is_switch_on(1) && RM.key(sim) !== k0, RM.desc(sim));
 	check('the mono switches: 1 and 2 (3 has a gate, 7 no reader)', RM.mono[0].join(',') === '1,2', RM.mono[0].join(','));
+	// a door in the floor (air above it): shut, the ball stands on it, so turning its switch on takes a floor away
+	const FL = levelOf('monofloor', ['##########', '#S.1....T#', '#####e####', '#........#', '##########']).level;
+	const sf = GX.switchReaders(FL).purple.get(1);
+	check('switchReaders: the door in the floor counts as a floor, the ones under a wall or a door do not', sf.floors === 1 && SR.purple.get(1).floors === 0 && SR.purple.get(2).floors === 0, JSON.stringify([sf, [...SR.purple]]));
+	check('by default mono by doors and gates alone (as before): the floor door\'s switch is mono', GX.roomOf(FL).mono[0].join(',') === '1', GX.roomOf(FL).mono[0].join(','));
+	process.env.EEAT_MONOFLOOR = '1';
+	const monoOpt = GX.roomOf(FL).mono[0].length, monoOptSW = GX.roomOf(levelOf('sw2', SW).level).mono[0].join(',');
+	delete process.env.EEAT_MONOFLOOR;
+	check('EEAT_MONOFLOOR=1 (opt-in): a switch whose door can be a floor is no mono switch; the corridor\'s doors under a wall stay mono', monoOpt === 0 && monoOptSW === '1,2', `${monoOpt} / ${monoOptSW}`);
 	section('dom: the class and the mask; shrinks; domIndex');
 	const s2 = new E.EESim(L); s2.reset();
 	const dA = RM.dom(s2);
@@ -158,6 +192,31 @@ function sectionReaders() {
 	check('a later superset: the smaller ones dominated, the list its one group', g1.dom && g2.dom && !g3.dom && D.list.length === 1 && D.list[0] === g3);
 	check('the same class and mask: the same group', D.groupOf(m(3)) === g3 && D.groupOf({ cls: 6, mask: Int32Array.of(0) }).dom === false, JSON.stringify(D.stats()));
 	check('a mask of no mono switch (length 0): one group per class, never dominated', (() => { const D2 = GX.domIndex(); const a = D2.groupOf({ cls: 1, mask: new Int32Array(0) }); const b = D2.groupOf({ cls: 1, mask: new Int32Array(0) }); return a === b && !a.dom; })());
+	// dominance-share (night 3): the dominated groups (dlist) keep --domShare of head B's tournaments; order only
+	check('dlist: every dominated group, in the order they fell', D.dlist.length === 3 && D.dlist.includes(g0) && D.dlist.includes(g1) && D.dlist.includes(g2) && !D.dlist.includes(g3));
+	{
+		const rng = (seed) => { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; };
+		const w1 = () => 1;
+		let fromD = 0, fromL = 0;
+		const r1 = rng(7);
+		for (let k = 0; k < 4000; k++) { const p = GX.domPick(D, 0.125, r1, w1); if (p.shared) { fromD++; if (!p.g.dom) fromD = -1e9; } else { fromL++; if (p.g.dom) fromL = -1e9; } }
+		check('--domShare 0.125: ~1 in 8 tournaments over the dominated groups, the rest over the maximal ones', fromD > 380 && fromD < 620 && fromL > 3300, `${fromD} / ${fromL}`);
+		const r0 = rng(7);
+		let none = true;
+		for (let k = 0; k < 500; k++) if (GX.domPick(D, 0, r0, w1).shared) none = false;
+		check('--domShare 0: never a dominated group (the search before)', none);
+		// no dominated group: no extra random draw, so a level without one searches exactly as before
+		const D3 = GX.domIndex();
+		const only = D3.groupOf({ cls: 1, mask: Int32Array.of(1) });
+		let calls = 0;
+		const rc = () => { calls++; return 0.01; };
+		const p3 = GX.domPick(D3, 0.125, rc, w1);
+		check('no dominated group: the base tournament, the same number of draws (4)', p3.g === only && !p3.shared && calls === 4, `draws ${calls}`);
+		// a dominated group with no cell to pick (weight -1): the maximal ones instead
+		const r2 = rng(3);
+		const p4 = GX.domPick(D, 1, r2, (g) => (g.dom ? -1 : 1));
+		check('dominated groups with nothing to pick: head B draws from the maximal ones', p4.g !== null && !p4.g.dom && !p4.shared);
+	}
 }
 
 // the switch corridor: switch 1 in the corridor (passed there and back), door e before the trophy's shaft
@@ -178,6 +237,15 @@ function sectionSearch() {
 		const w = (done.workers || [])[0] || {};
 		check(`--dom=${dom}: a route, replayed`, res.length > 0, `${res.length ? res[0].ticks : '-'} ticks; groups ${w.groups}, dominated ${w.dominated}, picks in dominated rooms ${w.picksDom}`);
 		if (dom === 1) check('--dom=1: groups counted', (w.groups || 0) >= 2, JSON.stringify({ groups: w.groups, dominated: w.dominated, maximal: w.maximal }));
+	}
+	// dominance-share: with every head-B tournament over the dominated groups (--domShare=1) the route is still found (an
+	// order, no prune) and the tournaments are counted; --domShare=0 counts none
+	for (const sh of [1, 0]) {
+		const ev = gox(file, ['--cells=coarse', '--workers=1', '--seconds=4', '--dom=1', `--domShare=${sh}`, '--seed=3']);
+		const res = ev.filter((e) => e.ev === 'result'), done = ev.find((e) => e.ev === 'done') || {};
+		const w = (done.workers || [])[0] || {};
+		check(`--domShare=${sh}: a route, replayed; head B's tournaments over dominated groups ${sh ? '> 0' : '0'}`, res.length > 0 && (sh ? (w.domShared || 0) > 0 : (w.domShared || 0) === 0),
+			`${res.length ? res[0].ticks : '-'} ticks; dominated ${w.dominated}, domShared ${w.domShared}, picksDom ${w.picksDom}`);
 	}
 	// the pit of test/deaths.js: the death that pays is kept (its room is no dominated one)
 	const PIT = [
@@ -212,9 +280,29 @@ function sectionBursts() {
 	check('roomAim from the room with switch 1 on: switch 1 is no goal (it only shuts its door), switch 2 is', !goals.includes('3,1') && goals.includes('8,1'), goals.join(' '));
 }
 
+// the A/B knob EEAT_GX (editor.js gxExtra): extra goexplore.js options after the editor's own, for the CPU search, the
+// escape and the GPU random runs; only --name=value words
+function sectionKnob() {
+	section('knob: EEAT_GX appends goexplore.js options (the CPU search, the escape, the GPU random runs)');
+	const f = { eelvl: 'l.eelvl', bin: 'l.bin', reach: 'l.reach', steer: '', steerCpu: '', steerBeam: '' };
+	const q = { seconds: 10, depth: 0, tool: 'eegpu', pauseFile: 'p', work: 'w', pass: 0, prefixFile: 'x.eetas', workers: 1, seed: 2 };
+	const o = { deaths: true, workers: 1, seed: 1, cpuDepth: 1000, bursts: false, noWayUp: false, tool: 'eegpu', prune: true };
+	const S = ED.STRATEGIES;
+	const plain = [S.goexplore.args(f, o, q), S.escape.args(f, o, q), S.gorolls.args(f, o, q)];
+	process.env.EEAT_GX = '--dom=0  --dord=0 bogus --x --useful=0';
+	const knob = [S.goexplore.args(f, o, q), S.escape.args(f, o, q), S.gorolls.args(f, o, q)];
+	delete process.env.EEAT_GX;
+	const extra = (a, b) => b.filter((s) => !a.includes(s));
+	check('unset: no extra option', plain.every((a) => !a.some((s) => /^--(dom|dord)=/.test(s))));
+	check('set: the --name=value words, in order, in all three (bogus words dropped)', knob.every((k, i) => extra(plain[i], k).join(' ') === '--dom=0 --dord=0 --useful=0'),
+		knob.map((k, i) => extra(plain[i], k).join(' ')).join(' | '));
+	check('after the editor\'s own options (a later option wins in goexplore.js parseArgs)', knob[0].indexOf('--dom=0') > knob[0].indexOf('--stdin=1') && GX.parseArgs(['l.eelvl', '--dom=1', '--dom=0']).dom === 0);
+}
+
 sectionRelevance();
 sectionReaders();
 sectionSearch();
 sectionBursts();
+sectionKnob();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
