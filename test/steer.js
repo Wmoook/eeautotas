@@ -129,6 +129,72 @@ function sectionA() {
 	}
 	forcedChains();
 	secretWall();
+	timeDoors();
+	keyExpiry();
+}
+
+/** a 40 x 7 corridor, the spawn at x 5, the trophy at x 30, full-height columns of the given ids from x 20 on */
+function corridor(cols) {
+	const W = 40, H = 7, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	cells.push([5, H - 2, 255], [30, H - 2, 121]);
+	cols.forEach((id, k) => { if (id) for (let y = 1; y < H - 1; y++) cells.push([20 + k, y, id]); });
+	return levelOf(ED.eelvlOf({ name: 'td', width: W, height: H, cells }));
+}
+/** time doors (156 open in the second half of every 1000 ticks, 157 in the first: never both shut) are passable in the
+ *  steer's walk and physics models with a wait in the walk plan (steer.js 'time', TIME_WAIT); before 2026-09-29 they
+ *  were static walls: a level whose only way passes one had 'start has no way' and no steer value (ML's First Samurai,
+ *  SPOT THE DIDFERNECE, MKco, Phina, Mr Nutty's). Held right, the engine waits at the column and finishes */
+function timeDoors() {
+	const air = corridor([]);
+	const walkCost = (L, o) => { const A = SF.analyze(L, o); const B = SF.walkBuild(L, A, { features: [] }); return { B, c: B.plan.ok ? B.F.cost[B.M.s0 * A.N + A.start.t] : Infinity }; };
+	const c0 = walkCost(air, {}).c;
+	// (a door and a gate a tile apart: the phase must turn between them, two waits; side by side the engine traps the
+	// ball in the door that shuts on it, which the model, a relaxation, does not know)
+	for (const [cols, waits] of [[[156], 1], [[157], 1], [[156, 0, 157], 2]]) {
+		const L = corridor(cols);
+		const at = (o) => { const st = SF.buildSteer(L, o); const sim = new E.EESim(L); sim.reset(); return SF.steerAt(st, sim); };
+		const sOff = at({ timeDoors: false }), sOn = at({ timeDoors: true });
+		const off = walkCost(L, { timeDoors: false }), on = walkCost(L, { timeDoors: true });
+		const ev = C.evaluate(L, Uint8Array.from(new Array(1700).fill(4)));
+		check(`a column of ${cols.filter(Boolean).join(' and a column of ')} between the start and the trophy: walls as before with timeDoors false (no walk plan, no steer value), passable with them (a plan; the walk cost the air's + ${waits} x TIME_WAIT; a steer value); held right finishes in the engine`,
+			!off.B.plan.ok && !Number.isFinite(sOff) && on.B.plan.ok && on.c - c0 === waits * SF.TIME_WAIT && Number.isFinite(sOn) && !!ev,
+			`off: plan ${off.B.plan.ok ? 'ok' : off.B.plan.why}, steer ${sOff}; on: plan ${on.B.plan.ok ? 'ok' : on.B.plan.why}, walk ${on.c} vs air ${c0}, steer ${sOn}; engine ${ev ? `${ev.runTicks} run ticks` : 'no finish'}`);
+	}
+	// (EEAT_TIMEDOOR=0: main's walls, read at the build)
+	const L = corridor([156]);
+	const prev = process.env.EEAT_TIMEDOOR;
+	process.env.EEAT_TIMEDOOR = '0';
+	const A0 = SF.analyze(L, {});
+	if (prev === undefined) delete process.env.EEAT_TIMEDOOR; else process.env.EEAT_TIMEDOOR = prev;
+	const A1 = SF.analyze(L, {});
+	check('EEAT_TIMEDOOR=0: time doors static walls again (the knob); unset: the time class', A0.gateFeat[3 * 40 + 20] === 'static' && A1.gateFeat[3 * 40 + 20] === 'time');
+}
+/** key expiry: a key runs out 500 ticks after it is taken, so the layer graph has (tile, key on) -> (tile, key off). A
+ *  corridor: the red key left of the spawn, a red key DOOR (23: open while the key is on) and then a red key GATE (26:
+ *  shut while it is on) to the right, the trophy past both: the way takes the key, passes the door and waits at the gate
+ *  for the key to run out. Without expiry the key layer's gate never reopens: no value at the start */
+function keyExpiry() {
+	const W = 40, H = 7, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9], [20, y, 23], [24, y, 26]);
+	cells.push([2, H - 2, 6], [12, H - 2, 255], [30, H - 2, 121]);
+	const L = levelOf(ED.eelvlOf({ name: 'ke', width: W, height: H, cells }));
+	const at = (o) => { const st = SF.buildSteer(L, o); const sim = new E.EESim(L); sim.reset(); return { st, v: SF.steerAt(st, sim) }; };
+	const off = at({ keyExpiry: false }), on = at({ keyExpiry: true });
+	const r0 = R.costAt(R.reachField(L), (() => { const s = new E.EESim(L); s.reset(); return s; })());
+	const A = SF.analyze(L, { keyExpiry: true });
+	const B = SF.walkBuild(L, A, { features: [] });
+	const exp = B.plan.path.filter((p) => p.via === 'expire').length;
+	const ev = C.evaluate(L, Uint8Array.from([...new Array(90).fill(2), ...new Array(1500).fill(4)]));
+	check('key expiry: the key layer\'s own gate reopens (no steer value at the start without it; with it a value that counts the key\'s detour; the walk plan lets the key run out); left to the key, then right finishes in the engine',
+		!Number.isFinite(off.v) && Number.isFinite(on.v) && on.v > r0 + 15 && on.st.info.features.includes('key0') && B.plan.ok && exp >= 1 && !!ev,
+		`without ${off.v}, with ${on.v} (reach ${r0}; features ${on.st.info.features.join(', ')}); walk plan ${B.plan.ok ? 'ok' : B.plan.why}, ${exp} expiry step(s); engine ${ev ? `${ev.runTicks} run ticks` : 'no finish'}`);
+	// in the key layer past the door, before the gate: a value (the key-off layer's), where it was none
+	const sim = new E.EESim(L); sim.reset(); sim.px = 22 * 16; sim.py = (H - 2) * 16; sim._keysMask = 1;
+	const inOff = SF.steerAt(off.st, sim), inOn = SF.steerAt(on.st, sim);
+	check('key expiry: between the door and the gate with the key on, a value (the key-off layer\'s way through the gate)', !Number.isFinite(inOff) && Number.isFinite(inOn), `${inOff} -> ${inOn}`);
 }
 
 /** 50, the secret "appear" block (eesim.js F_DOOR, but it always blocks: reach.js guideFlags) is a wall to the steer

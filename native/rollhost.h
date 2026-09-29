@@ -56,7 +56,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	if (!layoutOrError(g, TW)) return 4;
 	const std::string tw = std::to_string(TW);
 	cu::CUfunction fRoll = g.fn("roll_" + tw), fCollect = g.fn("rollCollect_" + tw), fSeen = g.fn("rollSeen");
-	if (!fRoll || !fCollect || !fSeen) { printf("{\"error\":\"roll kernels missing\"}\n"); return 4; }
+	if (!fRoll || !fCollect || !fSeen) { printf("{\"error\":%s}\n", jsonStr("roll kernels missing: " + cu::lastError).c_str()); return 4; }
 	RollParams P;
 	memset(&P, 0, sizeof P);
 	P.L = L;   // (host pointers for now: the start cell's key below; the device copy's before the first launch)
