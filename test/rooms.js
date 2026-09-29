@@ -151,6 +151,15 @@ function sectionReaders() {
 	touch(L, sim, 3, 1);
 	check('switch 1 on: another room', sim.is_switch_on(1) && RM.key(sim) !== k0, RM.desc(sim));
 	check('the mono switches: 1 and 2 (3 has a gate, 7 no reader)', RM.mono[0].join(',') === '1,2', RM.mono[0].join(','));
+	// a door in the floor (air above it): shut, the ball stands on it, so turning its switch on takes a floor away
+	const FL = levelOf('monofloor', ['##########', '#S.1....T#', '#####e####', '#........#', '##########']).level;
+	const sf = GX.switchReaders(FL).purple.get(1);
+	check('switchReaders: the door in the floor counts as a floor, the ones under a wall or a door do not', sf.floors === 1 && SR.purple.get(1).floors === 0 && SR.purple.get(2).floors === 0, JSON.stringify([sf, [...SR.purple]]));
+	check('a switch whose door can be a floor is no mono switch (no dominance)', GX.roomOf(FL).mono[0].length === 0, GX.roomOf(FL).mono[0].join(','));
+	process.env.EEAT_MONOFLOOR = '0';
+	const monoOld = GX.roomOf(FL).mono[0].join(',');
+	delete process.env.EEAT_MONOFLOOR;
+	check('EEAT_MONOFLOOR=0: mono by doors and gates alone (as before)', monoOld === '1', monoOld);
 	section('dom: the class and the mask; shrinks; domIndex');
 	const s2 = new E.EESim(L); s2.reset();
 	const dA = RM.dom(s2);
