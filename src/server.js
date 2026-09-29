@@ -527,13 +527,21 @@ function main() {
 		};
 		// the GPU benchmark (once per GPU / build: the driver first compiles the kernels for this card, up to a minute or two
 		// on a laptop CPU, then a few seconds of measuring), after the CPU one so they do not disturb each other
+		// then, in the background, the kernels of the other state sizes (gpu.js warmKernels: once per build; before, the
+		// first Find a route on a level of another size waited minutes for their compile with its GPU strategies stopped)
+		const gpuWarm = () => {
+			if (!gpuBench || !gpuBench.gpu) return;
+			G.warmKernels({ log: (r) => { if (r.module === 'compiled') console.log(`[app] GPU kernels for ${r.tw}-word states compiled (${Math.round(r.loadMs / 1000)} s, once per update)`); } })
+				.catch((e) => console.log(`[app] GPU kernel compile failed: ${e.message}`));
+		};
 		const gpuMeasure = () => {
-			if (gpuBench) return Promise.resolve();
+			if (gpuBench) { gpuWarm(); return Promise.resolve(); }
 			gpuState = 'measuring';
 			console.log('[app] preparing the GPU (once per update: compiling for this graphics card, up to a minute or two)...');
 			return G.runBench().then((r) => {
 				gpuBench = r; gpuState = 'done';
 				console.log(`[app] ${G.describeBench(r)}`);
+				gpuWarm();
 			}).catch((e) => { gpuState = 'error'; console.log(`[app] GPU benchmark failed: ${e.message}`); });
 		};
 		if (bench) { gpuMeasure().finally(resume); return; }

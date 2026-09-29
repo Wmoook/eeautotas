@@ -222,6 +222,61 @@ function runBench() {
 		});
 	});
 }
+// ---------------------------------------------------------------- every state size's kernels compiled ahead of use
+// The GPU engine has one kernel module per state size (eegpu_<tw>.ptx, tw = 8 / 32 / 128 / 512 words: the first that
+// holds the level's tailWords, native/eegpu.cpp twFor), and the driver compiles a module for the card the first time a
+// process loads it (native/cudadrv.h loadModuleCached: into the cache folder, one compile at a time per module). The
+// benchmark loads the 8-word module only, so the first Find a route on a level of another size waited for its compile
+// with every GPU strategy (the random runs, every move, the one search's bursts) stopped: the 12.4 MB 512-word module
+// took 186 s on an idle A100 box and 25 min on a loaded one (DAY4 final measurement, 2026-09-29: Cave Exploration, the
+// one campaign level of that size (tailWords 282), 0 of 7 runs routed, every one pinned at the CPU search's first
+// nearest attempt; 18 levels use the 32-word module, 6 the 128-word one). warmKernels loads each module once, one
+// after another, below normal priority: `eegpu info` with `--ptxdir` = a folder holding that module under the name
+// info loads (eegpu_8.ptx); both the driver's cache and loadModuleCached's lock are keyed by the PTX's content, so the
+// real load of eegpu_<tw>.ptx later finds the machine code ("module":"cache"). The searches themselves are unchanged.
+const WARM_FILE = () => path.join(require('./common.js').DATA, '_gpu_warm.json');
+const WARM_TW = [8, 32, 128, 512];
+const WARM_TIMEOUT_MS = 40 * 60e3;   // (a compile on a loaded CPU: 25 min seen)
+/**
+ * Compiles every state size's kernels into the cache folder (cacheArgs) unless this build's are done (data/_gpu_warm.json,
+ * keyed by toolKey): resolves [{tw, module, loadMs, error}] (module: "cache" = was there, "compiled" = compiled now).
+ * opts: tool (the eegpu path; tests: a stand-in, run as `node <tool>`), force (ignore the record), log (a function).
+ */
+function warmKernels(opts = {}) {
+	const tool = opts.tool || nativeTool();
+	if (!tool) return Promise.resolve([]);
+	const key = toolKey(tool);
+	if (!opts.force) {
+		try { const w = JSON.parse(fs.readFileSync(WARM_FILE(), 'utf8')); if (w.key === key && w.ok) return Promise.resolve(w.tws || []); } catch (e) { /* none */ }
+	}
+	const os = require('os');
+	const cp = require('child_process');
+	const out = [];
+	const one = (tw) => new Promise((resolve) => {
+		const src = path.join(path.dirname(tool), `eegpu_${tw}.ptx`);
+		if (!fs.existsSync(src)) return resolve({ tw, error: 'no module' });
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `eegpu-warm-${tw}-`));
+		const done = (r) => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* busy */ } resolve(r); };
+		try { fs.linkSync(src, path.join(dir, 'eegpu_8.ptx')); } catch (e) { try { fs.copyFileSync(src, path.join(dir, 'eegpu_8.ptx')); } catch (e2) { return done({ tw, error: e2.message }); } }
+		const js = /\.js$/.test(tool);
+		const ch = cp.execFile(js ? process.execPath : tool, [...(js ? [tool] : []), 'info', `--ptxdir=${dir}`, ...cacheArgs()],
+			{ encoding: 'utf8', timeout: WARM_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
+				let r = null;
+				try { r = JSON.parse(String(stdout).trim().split('\n').pop()); } catch (e) { /* none */ }
+				if (!r || !r.gpu || !r.module) return done({ tw, error: (r && r.why) || (err ? err.message : 'no answer') });
+				done({ tw, module: r.module, loadMs: r.loadMs });
+			});
+		try { os.setPriority(ch.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch (e) { /* not allowed */ }
+	});
+	return WARM_TW.reduce((p, tw) => p.then(() => one(tw).then((r) => {
+		out.push(r);
+		if (opts.log) opts.log(r);
+	})), Promise.resolve()).then(() => {
+		const ok = out.length > 0 && out.every((r) => r.module || r.error === 'no module');
+		try { fs.writeFileSync(WARM_FILE(), JSON.stringify({ key, ok, tws: out, at: Date.now() }, null, 1)); } catch (e) { /* read-only */ }
+		return out;
+	});
+}
 /** "NVIDIA GeForce RTX 3080 Laptop GPU: 150 M ticks/s (measured)" or why it is not available. */
 function describeBench(r) {
 	if (!r) return 'GPU: not measured yet';
@@ -229,4 +284,11 @@ function describeBench(r) {
 	return `${r.gpu.name}: ${(r.ticksPerSec / 1e6).toFixed(0)} M ticks/s (measured)`;
 }
 
-module.exports = { levelBlob, blobFp, nativeTool, cacheDir, cacheArgs, unsupported, cachedBench, runBench, describeBench, BLOB_INTS, BLOB_ARRAYS };
+module.exports = { levelBlob, blobFp, nativeTool, cacheDir, cacheArgs, unsupported, cachedBench, runBench, describeBench, warmKernels, BLOB_INTS, BLOB_ARRAYS };
+
+// node src/gpu.js warm [--force]: every state size's kernels into the cache folder (EEAT_GPU_CACHE, else <data>/gpu-cache)
+if (require.main === module && process.argv[2] === 'warm') {
+	warmKernels({ force: process.argv.includes('--force'), log: (r) => console.log(JSON.stringify(r)) }).then((r) => {
+		if (!r.length) console.log('no GPU engine in this build');
+	});
+}
