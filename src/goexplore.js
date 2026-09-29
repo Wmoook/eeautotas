@@ -174,6 +174,12 @@
 //        [--out=<route.eetas>] [--stdin=0|1] [--lambda=2] [--roll=40] [--rolls=8] [--keep=0.85] [--stall=200]
 //        [--jumpP=0 (the CPU runs: 0 = one of the 18 options, jump in half; p = jump with p, --jumpNear=0.75 on the
 //        ground by a wall or a gap the way it goes)]
+//        [--prior=<model.json> (LEARNED MOVES, OFF by default: src/prior.js's input prior P(input | the ball's context, the
+//        last input and its hold) learned from finished routes; --priorP=0.5 of the CPU runs draw every tick from it,
+//        --priorEps=0.02 of each draw one of the 18 (0.1 made the runs flip every ~4 ticks: 31 changes in 120 ticks vs the
+//        sticky 17, and no gain); --priorMode=0: every tick's input from the model, 1: the sticky
+//        timing (--keep) and the model's choice of each new input (an input other than the last); the other runs as
+//        before; without it no draw changes)]
 //        [--refine=6] [--maxres=4 (fine cells)] [--cells=auto|fine|coarse] [--pA=0.5] [--burst=8] [--sample=16]
 //        [--phase=50] [--mem=<MB per worker; see above>] [--memTotal=<MB of process memory for the search>]
 //        [--maxCells= (at most this many cells: sweeps)] [--maxSnaps= (at most this many snapshots)]
@@ -242,6 +248,9 @@
 //        burst and enters the room there (reentry); the progress and done events carry "useful": {culPicks, culCells,
 //        zeroed (rooms), culSets, culDropped, reculs}, "deaths" "useless" (such deaths, kept); 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
+//        [--frontier=0 (1: OPT-IN, coarse cells: the frontier field, head F, see FR_MIN_PICKS below; 0: the search exactly as
+//        before) --fLo=0.1 --fHi=0.4 --fStall=75000 --fEvery=25000 --fGrow=0.1 --fK=4096 --fLambda=4 --fDil=1 --fYield=0
+//        --fBrake=0 --fPhys=0 (EEAT_FRLOG=<file>: a line per field, observation only)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
 //        reniced the whole process, so the one search's GPU bursts ran at nice 10 too, below every normal process of a
@@ -278,6 +287,7 @@ const EL = require('./eelvl.js');
 const RF = require('./reach.js');
 const SF = require('./steer.js');
 const TMD = require('./timed.js');
+const PR = require('./prior.js');
 const V8 = require('v8');
 
 // the 18 inputs: nothing / left / right x nothing / up / down x jump or not (explore.js's order)
@@ -314,8 +324,45 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
-	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
+	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
+	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
+// --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
+// exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
+// (any room; kept with the flag off too, for the progress events' visTiles). After FR_MIN_PICKS picks, then every --fEvery
+// picks (or sooner, at least max(FR_MIN_PICKS, FR_TILE_PK x the level's tiles) apart, when VIS grew by --fGrow; and
+// FR_FRESH_PK picks after the last when a room that opens territory appeared: then that room's; by the count, not the
+// clock: one worker with a tick budget stays exactly reproducible) it builds ONE frontier field for ONE room: the reach
+// field's machinery
+// (src/reach.js, physics where the level allows, else its walk) with the room's doors as the room holds them (a shut door
+// a wall, an open one air: a false near behind a coin door is no frontier for a room without the coins) and as GOALS the
+// tiles no cell was ever in, --fDil tiles away from every visited one (the holes the random runs left inside the explored
+// region are no frontier), outside the room's cul-de-sacs, and on a walk-mode level only tiles the ball can be held in (a
+// solid tile below, or a block of its own: dots, arrows, liquids, climbables; --fPhys=1: a room without an effect gets a
+// physics field there, the effect blocks air in it); no death edges. Its room: a room that just opened territory (the
+// door a coin opened: the frontier it let in, behind the ball, so head F pulls the ball back to it), else every other
+// build the room of this worker's nearest attempt (the stall), else a tournament of 4 by territory gain and few builds. The
+// field's cost of a cell = its tile's cost at rest (costAt(x, y, vy 0): a ball in the air cannot rise to the frontier
+// above it): the --fK cells of that room nearest the frontier (not in a cul-de-sac, early enough) go into head F's heap
+// by cost + --fLambda x sqrt(picks); a new cell of that room enters it at its tile's cost (the frontier's own new cells
+// first: a greedy push into new territory until the next build). Head F takes the picks heads C / L / W leave with its
+// share: --fLo while the nearest attempt improves (by 1 tile), rising to --fHi over --fStall picks of stall; none once
+// a route is known. The trophy guidance is untouched (heads A / B keep the rest); it only orders (the reach field's -1
+// stays the only prune). Progress / done: visTiles, maxCoins, frontier {builds, ms, picks, cand, goals}.
+// (and at least FR_TILE_PK picks a tile of the level apart: a build costs about 4 simulated ticks' time a tile, so this keeps them
+// near 5% of a worker's time: Barrel Cannon Canyon (300 x 300) spent 9% on them at 5,000 picks)
+const FR_MIN_PICKS = 5000, FR_TILE_PK = 0.25;
+// (a new room that opens territory (firstCell: its walk reaches tiles no earlier room's did, e.g. a coin door it opens): the next
+// field is its own, FR_FRESH_PK picks after the last at the soonest: the frontier the door let in, backtracking included)
+const FR_FRESH_PK = 1000;
+// --fYield=1: head F's share times its yield over the other heads' (FR_ROOM_W tiles a new room; decayed by FR_DECAY a pick;
+// a prior of FR_PRIOR new tiles a pick over FR_PN picks on both sides), within [FR_YMIN, FR_YMAX]
+const FR_ROOM_W = 20, FR_DECAY = 0.9995, FR_PRIOR = 0.05, FR_PN = 200, FR_YMIN = 0.25, FR_YMAX = 2;
+// --fBrake=1: head F's own dead-end brake (the frontier's false nears: a frontier the reach model reaches and the ball does
+// not, e.g. a walk-mode level's gap): per zone of SAT_ZONE x SAT_ZONE tiles its excess, +1 a head-F pick of a cell there,
+// -FR_ZCELL a new visited tile the pick's runs found, 0 at a new room; past FR_ZN a cell there costs FR_ZMU x sqrt(excess -
+// FR_ZN) tiles more in head F's order (its candidates and heap; put back at its pop when that grew by more than a tile)
+const FR_ZCELL = 20, FR_ZN = 100, FR_ZMU = 2;
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -336,7 +383,7 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', 'prior', ...GPU_STRINGS]);
 // --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
 // random runs' batches take their run length and keep probability from these classes in turn, each class the same share
 // of the GPU's simulated ticks (times its weight): the next batch goes to the class furthest below its share, from the
@@ -433,7 +480,7 @@ const B_SATZ = 48;
 const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '', prior: '' });
 	const given = new Set();
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
@@ -782,9 +829,10 @@ function counterRelevance(L) {
 	}
 	const exits = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1176,9 +1224,10 @@ function roomUseful(L) {
 	// portals: tile -> its exits (forward) and exit -> the portals that send the ball there (reverse)
 	const exits = new Map(), srcs = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1355,9 +1404,10 @@ function roomFields(L, budget, opts = {}) {
 	// portals: tile -> its exits' tiles
 	const exits = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -1522,9 +1572,10 @@ function roomDead(L, budget) {
 	// portals reversed: exit tile -> the portal tiles that send the ball there
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const sl = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || sl < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[sl]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); if (!l.includes(i)) l.push(i); } }
@@ -1634,9 +1685,10 @@ function lowerBoundTiles(L) {
 	// the portals reversed: exit tile -> the portal tiles that lead there
 	const into = new Map();
 	if (L.portalSlot && L.portalsById) {
+		const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = L.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 			const ex = L.portalsById.get(L.pTarget[s]);
 			if (!ex) continue;
 			for (let k = 0; k < ex.n; k++) { const j = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (j >= 0 && j < N) { let l = into.get(j); if (!l) into.set(j, l = []); l.push(i); } }
@@ -1860,6 +1912,54 @@ function inputsOf(node) {
 	return out;
 }
 
+/** --frontier: the door tiles (solid and a door or gate: roomFields' test), whose state a room decides */
+function doorTiles(L) {
+	const out = [], N = L.width * L.height;
+	for (let i = 0; i < N; i++) { const id = L.fg[i], f = id >= 0 && id < L.flags.length ? L.flags[id] : 0; if ((f & 1) !== 0 && (f & 16) !== 0) out.push(i); }
+	return out;
+}
+/**
+ * --frontier: the frontier field's level and goals for the live state's room (see FR_MIN_PICKS). fg: the level's blocks with
+ * each door as the state holds it (shut: a wall, 9; open: air, 0); goals: [{tile, cost 0}] = the tiles more than opts.dil
+ * (1) tiles (Chebyshev) from every visited one (VIS[t] 1), outside opts.cul (a room's cul-de-sac bitset), and with
+ * opts.walk (a walk-mode level: the walk is blind to gravity) only tiles the ball can be held in (a solid tile below, or a
+ * block of its own: dots, arrows, liquids, climbables, coins, ...); opts.D: a scratch array of N bytes
+ */
+function frontierGoals(L, sim, doors, VIS, opts = {}) {
+	const W = L.width, H = L.height, N = W * H;
+	const fg = Int32Array.from(L.fg);
+	for (const i of doors) fg[i] = sim.is_tile_solid_now(i % W, (i / W) | 0) ? 9 : 0;
+	const D = opts.D || new Uint8Array(N), dl = Math.max(0, Math.round(opts.dil === undefined ? 1 : opts.dil));
+	D.fill(0);
+	for (let i = 0; i < N; i++) {
+		if (VIS[i] === 0) continue;
+		const x = i % W, y = (i / W) | 0;
+		for (let dy = -dl; dy <= dl; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue; for (let dx = -dl; dx <= dl; dx++) { const xx = x + dx; if (xx >= 0 && xx < W) D[yy * W + xx] = 1; } }
+	}
+	const solid = (j) => { const id = fg[j]; return id >= 0 && id < L.flags.length && (L.flags[id] & 1) !== 0; };
+	// (a wall: solid, not a one-way or half block; the field would drop it as a goal anyway)
+	const wall = (j) => { const id = fg[j]; const f = id >= 0 && id < L.flags.length ? L.flags[id] : 0; return (f & 1) !== 0 && (f & 14) === 0; };
+	const cul = opts.cul || null, goals = [];
+	for (let i = 0; i < N; i++) {
+		if (D[i] !== 0 || bitAt(cul, i) || wall(i)) continue;
+		if (opts.walk && fg[i] === 0 && !(i + W < N && solid(i + W))) continue;
+		goals.push({ tile: i, cost: 0 });
+	}
+	return { fg, goals };
+}
+/** --frontier: the field to the goals (src/reach.js, no death edges; ordering only), null without goals. strip (--fPhys=1, a
+ *  room without an effect on a level of world gravity 1): the effect blocks (reach.js's wild ones and the effect reset) are
+ *  air in it, so a level whose effects make the reach field a walk gets a physics field where the ball has none: a walk is
+ *  blind to gravity, and its frontier is every unvisited tile over the ball's head (ordering only: no proof is claimed) */
+const FR_WILD = new Set([417, 418, 419, 453, 461, 1517, 1618]);
+const frontierField = (L, fg, goals, strip = false) => {
+	if (!goals.length) return null;
+	if (strip) for (let i = 0; i < fg.length; i++) if (FR_WILD.has(fg[i])) fg[i] = 0;
+	return RF.reachField(Object.assign({}, L, { fg }), { goals, deaths: false });
+};
+/** --frontier: a room description with an effect on (roomOf desc): its frontier field stays the level's own mode */
+const FR_FX = /\b(fly|lowgrav|speed|jump|multijump|grav=|gravity)/;
+
 /** a min-heap of (priority, cell, version) entries; prio(cell) at push. pop() returns the cell and sets popVer (the
  *  entry's version: stale when the cell's own has moved on); compact() drops the stale entries */
 function heapOf(prio) {
@@ -1954,6 +2054,26 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		}
 		return h | v | (rnd() < p ? 1 : 0);
 	};
+	// LEARNED MOVES (--prior=<model.json>, off by default; src/prior.js): --priorP of the runs draw every tick's input
+	// from the model's P(input | the ball's context, the last input and how long it was held) (with --priorEps of each
+	// draw one of the 18), starting from the pick's last input; the other runs as before. Without --prior no draw
+	// changes: the same seed makes the same search
+	const PRI = a.prior ? PR.policyOf(a.prior, { eps: a.priorEps }) : null;
+	let priorRuns = 0;
+	/** the last input of path node q and how many ticks it was held (at most 64), for a prior run's start */
+	const lastHeld = (q, out) => {
+		while (q !== null && q.n === 0) q = q.up;
+		if (q === null) { out[0] = 0; out[1] = 1; return; }
+		const m = PR.canon(q.blk.b[q.o + q.n - 1]);
+		let h = 0;
+		for (let p = q; p !== null && h < 64; p = p.up) {
+			let k = p.o + p.n - 1;
+			while (k >= p.o && h < 64 && PR.canon(p.blk.b[k]) === m) { k--; h++; }
+			if (k >= p.o) break;
+		}
+		out[0] = m; out[1] = Math.max(1, h);
+	};
+	const lh = [0, 1];
 	const coarse = a.cells === 'coarse';
 	const disc = coarse ? null : discreteOf(L);
 	const res = new Uint8Array(N);   // the cell grain per tile (0 .. maxres)
@@ -2276,8 +2396,21 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const leadShare = (now) => (sched === null || a.pL <= 0 ? 0 : a.pL * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastL) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
 	let lastW = 0, wShare = 0;
 	const wayShare = (now) => (sched === null || HW === null ? 0 : !a.wYield ? a.pW : a.pW * Math.max(LEAD_FLOOR, Math.pow(0.5, Math.max(0, (now - lastW) / 1000 - LEAD_GRACE_S) / LEAD_HALF_S)));
-	// (a cell made before a late steer field has no sc: not in the steer heap until it gets one)
-	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); };
+	// (the visited tiles, any room: VIS, their count nVis, and the most coins a cell held: measurements; with --frontier=1
+	// head F's goals, see FR_MIN_PICKS)
+	const VIS = coarse ? new Uint8Array(N) : null;
+	let nVis = 0, maxCoins = 0, fShare = 0;
+	// (--frontier=1: head F's state: the field's generation, heap, room, field, per-tile costs FT (-2: not looked up yet), the
+	// candidates' cost bound, when and at what VIS count it was built, the nearest attempt's best and when it improved)
+	const FR = coarse && a.frontier > 0 ? { gen: 0, HF: null, room: null, field: null, FT: null, dil: null, thr: Infinity, at: -1e15, visAt: 0, best: Infinity, gainAt: 0,
+		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map(), fresh: null, fb: new WeakMap(),
+		// (a level whose effects (or world gravity) make the reach field a walk: reach.js's wild blocks)
+		wild: L.gravityMult !== 1 || L.fg.some((id) => FR_WILD.has(id) && id !== 1618) } : null;
+	/** --frontier: head F's field's cost (tiles) at tile t for a ball at rest there (-1: no way to the frontier), looked up once */
+	const frGap = Math.max(FR_MIN_PICKS, Math.round(N * FR_TILE_PK));
+	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { const q = RF.fifthsAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0, -1, -1, FR.field.ice ? 2 : 0); v = q < 0 ? -1 : q / 5; FR.FT[t] = v; } return v; };
+	// (a cell of head F's current field: back into its heap at every push of its own, a pick or an earlier arrival)
+	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); if (FR !== null && FR.HF !== null && c.fg === FR.gen) FR.HF.push(c); };
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
 	/** the steer cost of the live state (tiles; STEER_NONE when it has no value; deaths as moves: a state it has no value
 	 *  for, DEATH_TILES + its respawn target's value where that has one: the layer bodies have no death edges) */
@@ -2311,7 +2444,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const budget = mem * 1048576, capA = ARCHIVE_SHARE * budget, BLK = B_BLOCK + a.rolls * a.roll;
 	let nNodes = 0, nBlocks = 0, xBytes = 0;   // (xBytes: the imported runs' inputs past a pick's block of rolls x roll)
 	const archiveBytes = () => cells.size * ((ST ? B_CELL + B_SC : B_CELL) + (TM !== null ? B_TM : 0)) + (HA.size() + (HS ? HS.size() : 0) + (HL ? HL.size() : 0) + (HW ? HW.size() : 0)) * B_HEAPE + nNodes * B_NODE + nBlocks * BLK + xBytes +
-		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0);
+		roomList.length * B_ROOM + nSatZ * B_SATZ + (queue.length - qh) * B_QUEUE + (fields !== null ? fields.bytes() : 0) + (RDEAD !== null ? RDEAD.bytes() : 0) +
+		(FR !== null ? FR.bytes + (FR.HF !== null ? FR.HF.size() * B_HEAPE : 0) : 0);
 	const memBytes = () => archiveBytes() + nSnaps * B_SNAP;
 	/** room for a new cell: --maxCells and the archive's share (else the next sweep makes some) */
 	const roomFor = () => (!a.maxCells || cells.size < a.maxCells) && archiveBytes() < capA;
@@ -2424,6 +2558,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
+		// (the visited tiles and the most coins: measurements; --frontier=1: a new cell of head F's room at its tile's cost,
+		// into head F's heap with hpush when it is among the nearest)
+		if (VIS !== null && VIS[tile] === 0) { VIS[tile] = 1; nVis++; }
+		if (sim.coins > maxCoins) maxCoins = sim.coins;
+		if (FR !== null) { nc.fc = -1; nc.fg = -1; if (FR.HF !== null && room === FR.room && cu !== 2) { const v = ftAt(tile); if (v >= 0 && v <= FR.thr) { nc.fc = v; nc.fg = FR.gen; } } }
 		hpush(nc);
 		if (t > deepest) deepest = t;
 		if (room !== null) {
@@ -2442,7 +2581,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (!near || d < near.rc - 1e-3 || (d <= near.rc + 1e-3 && c.t < near.t)) {
 			c.node.refs++;   // (the closest state holds its node too: see mkNode)
 			if (near !== null) release(near.node);
-			near = { rc: d, t: c.t, node: c.node };
+			near = { rc: d, t: c.t, node: c.node, room: c.room };
 		}
 	};
 	let end = '';
@@ -2499,6 +2638,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (TM !== null) c.tm = tLeft * 16 + (tLeft > 0 ? tKind : 0);
 		cells.set(k, c);
 		cell0 = c;
+		if (VIS !== null) { VIS[tile] = 1; nVis = 1; }
+		// (--frontier: every cell gets head F's two numbers when it is made, the start too: one shape for all, V8's fast path)
+		if (FR !== null) { c.fc = -1; c.fg = -1; }
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
 		keepSnap(c, pre ? sim.snapshot() : startSnap);
@@ -2511,7 +2653,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (memMB: the budget's count; heapMB: the V8 heap in use, garbage included)
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
-		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked },
+		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
+	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
@@ -2680,6 +2823,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// (a dominated room: no discovery burst and no source; the main thread hears of it, with its class and mask)
 		const dm = domOf(room);
 		if (room.gain > 0 && !dm) { if (a.burst > 0) { discovery.push([nc, a.burst]); bursts++; } }
+		// (--frontier: a room that opens territory gets the next field at once: its doors let the ball where no cell was)
+		if (FR !== null && room.gain > 0 && !dm) FR.fresh = room;
 		if (!dm && (room.gain > 0 || Date.now() - lastBlandSource >= SOURCE_S * 1000) && t >= SOURCE_MIN_TICKS) {
 			if (room.gain <= 0) lastBlandSource = Date.now();
 			source('room', room, nc);
@@ -2737,7 +2882,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) && useOf(room, centreTile()) !== 2) {
 				const node = mkNode(null, blk, 0, t);
 				if (near !== null) release(near.node);
-				near = { rc, t, node };
+				near = { rc, t, node, room };
 			}
 			const nc = add(t, rc, null, null, blk, 0, t, room);
 			if (nc !== null) { added++; if (room.isNew) firstCell(room, nc, t); }
@@ -3057,6 +3202,89 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		spdSay({ ev: 'flag', d, d0, room: br.key, desc: br.desc, bd, cells: cells.size, n: spdRooms.length });
 		spdOn = spdRooms.length; if (spdOn > spdPeak) spdPeak = spdOn;
 	};
+	/** --frontier --fBrake: the extra cost (tiles) of cell c's zone in head F's order */
+	const frPen = (c) => { if (!a.fBrake) return 0; const v = FR.zx.get(zoneOf(c.tile)); return v !== undefined && v > FR_ZN ? FR_ZMU * Math.sqrt(v - FR_ZN) : 0; };
+	/** --frontier: head F's priority of cell c (its field cost at its build, the picks, and with --fBrake its zone's brake now) */
+	const frPrio = (c) => c.fc + a.fLambda * Math.sqrt(c.picks) + (a.fBrake ? frPen(c) : 0);
+	/** --frontier: head F's share now: --fLo while the nearest attempt improves (by 1 tile), up to --fHi after --fStall
+	 *  picks of stall; 0 before the first field and once a route is known (the shared bound dropped) */
+	const frShare = (now) => {
+		if (FR.HF === null || maxT < spdMaxT0) return 0;
+		const d = near !== null ? near.rc : Infinity;
+		if (d < FR.best - 1) { FR.best = d; FR.gainAt = picks; }
+		const s = a.fLo + (a.fHi - a.fLo) * Math.min(1, (picks - FR.gainAt) / Math.max(1, a.fStall));
+		if (!a.fYield) return s;
+		// (--fYield=1: times head F's yield over the other heads' (new tiles and rooms a pick, a prior of FR_PRIOR a pick on
+		// both), within [FR_YMIN, FR_YMAX], at most --fHi: head F takes more where it opens territory faster than the rest)
+		const r = FR.r = ((FR.yF + FR_PRIOR * FR_PN) / (FR.nF + FR_PN)) / ((FR.yO + FR_PRIOR * FR_PN) / (FR.nO + FR_PN));
+		return Math.min(a.fHi, s * Math.max(FR_YMIN, Math.min(FR_YMAX, r)));
+	};
+	/** --frontier: a new frontier field (see FR_MIN_PICKS) for one room, and head F's heap from its cells */
+	const frBuild = (now) => {
+		const tb = Date.now();
+		FR.at = picks; FR.visAt = nVis; FR.builds++;
+		// (the room: a room that just opened territory (FR.fresh: the frontier its doors let in), else every other build the
+		// nearest attempt's, else a tournament of 4 by raw territory gain, the trophy walkable, few frontier builds; never a
+		// dominated room or one without cells)
+		let R = null;
+		const ok = (r) => r !== null && r !== undefined && r.arr.length > 0 && !domOf(r);
+		if (FR.fresh !== null && ok(FR.fresh) && rooms.get(FR.fresh.key) === FR.fresh) R = FR.fresh;
+		else if ((FR.builds & 1) === 1 && near !== null && ok(near.room) && rooms.get(near.room.key) === near.room) R = near.room;
+		FR.fresh = null;
+		if (R === null) {
+			let bw = -1;
+			for (let k = 0; k < 4 && roomList.length; k++) {
+				const r = roomList[(rnd() * roomList.length) | 0];
+				if (!ok(r)) continue;
+				const w = (1 + Math.log(1 + (r.graw || 0))) * (r.troOk ? 2 : 1) / Math.sqrt(1 + (FR.fb.get(r) || 0));
+				if (w > bw) { bw = w; R = r; }
+			}
+		}
+		if (R === null) R = ok(room0) ? room0 : null;
+		if (R === null) return;
+		FR.fb.set(R, (FR.fb.get(R) || 0) + 1);   // (a WeakMap: no new property on the room objects the runs read)
+		// (a state of the room: its lowest-cost cell's snapshot, else its path replayed from the start)
+		const c0 = R.best !== null && R.best.ver >= 0 ? R.best : R.arr[0];
+		if (c0.snap !== null) sim.restore(c0.snap);
+		else { const ms = inputsOf(c0.node); sim.restore(startSnap); for (let s = 0; s < ms.length; s++) { E.applyMask(inp, ms[s]); sim.tick(inp); } ticks += ms.length; }
+		if (FR.doors === null) FR.doors = doorTiles(L);
+		if (FR.dil === null) FR.dil = new Uint8Array(N);
+		// (--fPhys=1: a room without an effect gets a physics field on a level whose effects make the reach field a walk)
+		const strip = !!a.fPhys && L.gravityMult === 1 && FR.wild && !FR_FX.test(R.desc || '');
+		const { fg, goals } = frontierGoals(L, sim, FR.doors, VIS, { cul: R.cul, walk: (FR.walk === true || FR.wild) && !strip, dil: a.fDil, D: FR.dil });
+		let f = null;
+		try { f = frontierField(L, fg, goals, strip); } catch (e) { f = null; }
+		// (the field object with the search field's keys in its order, through the structured clone that made the worker's: one hidden
+		// class for both, so the reach lookup of every simulated tick (costAt / fifthsAt) stays monomorphic ("wrong map" deopts)
+		// (then its own keys the search field lacks: a physics field (--fPhys) next to a walk-mode search field needs its tables)
+		if (f !== null) { const g = {}; for (const k of Object.keys(field)) g[k] = f[k]; for (const k of Object.keys(f)) if (!(k in g)) g[k] = f[k]; f = structuredClone(g); }
+		FR.phys = f !== null && f.mode === 'physics';
+		FR.goals = goals.length;
+		FR.gen++; FR.room = R; FR.field = f; FR.HF = null; FR.cand = 0; FR.thr = Infinity; FR.bytes = N;
+		if (f === null) { FR.FT = null; FR.ms += Date.now() - tb; return; }
+		if (FR.walk === null) FR.walk = f.mode === 'walk';
+		FR.FT = FR.FT !== null && FR.FT.length === N ? FR.FT.fill(-2) : new Float32Array(N).fill(-2);
+		for (const k in f) if (ArrayBuffer.isView(f[k])) FR.bytes += f[k].byteLength;
+		FR.bytes += FR.FT.byteLength;
+		// (head F's heap: the room's --fK cells nearest the frontier, not in a cul-de-sac, early enough)
+		const cand = [];
+		for (const c of R.arr) {
+			if (c.t >= maxT || c.u === 2) continue;
+			const v = ftAt(c.tile);
+			if (v < 0) continue;
+			c.fc = v; cand.push(c);
+		}
+		if (a.fBrake) { const kc = cand.map((c) => [c.fc + frPen(c), c]); kc.sort((x, y) => x[0] - y[0] || x[1].t - y[1].t); for (let i = 0; i < kc.length; i++) cand[i] = kc[i][1]; } else cand.sort((x, y) => x.fc - y.fc || x.t - y.t);
+		if (cand.length > a.fK) cand.length = a.fK;
+		FR.thr = Infinity;
+		if (cand.length >= a.fK) { FR.thr = 0; for (const c of cand) if (c.fc > FR.thr) FR.thr = c.fc; }
+		FR.HF = heapOf(frPrio);
+		for (const c of cand) { c.fg = FR.gen; FR.HF.push(c); }
+		FR.cand = cand.length;
+		// (EEAT_FRLOG=<file>: observation only, a line per build: the room, the goals, the nearest candidates, the last build's head-F picks by tile)
+		if (FR.log) { try { fs.appendFileSync(FR.log, JSON.stringify({ seed, b: FR.builds, picks, room: R.desc, goals: goals.length, mode: f.mode, vis: nVis, cand: cand.slice(0, 12).map((c) => [c.tile % W, (c.tile / W) | 0, Math.round(c.fc * 10) / 10, c.picks]), fpk: [...FR.pk].sort((x, y) => y[1] - x[1]).slice(0, 12).map(([t, n]) => [t % W, (t / W) | 0, n]) }) + '\n'); } catch (x) { /* */ } FR.pk.clear(); }
+		FR.ms += Date.now() - tb;
+	};
 	while (!end) {
 		// between chunks: the clock, the stop flag, the shared bound (a faster route from another worker or the editor)
 		const now = Date.now();
@@ -3077,6 +3305,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (idx >= 0 && ctrl.length > 2) { const act = Atomics.load(ctrl, 2); if (act > 0 && idx >= act) { parked++; Atomics.wait(ctrl, 3, 0, PARK_MS); continue; } }
 		lShare = leadShare(now); wShare = wayShare(now);
 		if (coarse && a.spd > 0) spdClock(now);
+		// (--frontier: the first field after FR_MIN_PICKS picks (at the start nothing is visited: every tile a goal), then a new one
+		// every --fEvery picks, or at least frGap apart once VIS grew by --fGrow; none once a
+		// route is known)
+		if (FR !== null && maxT >= spdMaxT0 && ((FR.fresh !== null && picks - FR.at >= FR_FRESH_PK) || (FR.builds === 0 ? picks >= FR_MIN_PICKS : picks - FR.at >= Math.max(a.fEvery, frGap) || (nVis > FR.visAt * (1 + a.fGrow) + 16 && picks - FR.at >= frGap)))) frBuild(now);
+		if (FR !== null) fShare = frShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
 			pickL = false; pickW = false;
@@ -3099,12 +3332,18 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				while (HW.size() > 0) { const c = HW.pop(); if (HW.popVer !== c.ver || c.t >= maxT) continue; e = c; break; }
 				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
 				else { wayPicks++; pickW = true; head = 'W'; }
+			} else if (fShare > 0 && rnd() < fShare) {
+				// head F (--frontier=1): the cell of its field's room nearest the frontier (none: heads A / B as without it)
+				const HF = FR.HF;
+				while (HF.size() > 0) { const c = HF.pop(); if (HF.popVer !== c.ver || c.t >= maxT || c.fg !== FR.gen) continue; if (a.fBrake && frPrio(c) > HF.popVal + 1) { HF.push(c); continue; } e = c; break; }
+				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
+				else { FR.picks++; head = 'F'; if (FR.log) { const k = e.tile; FR.pk.set(k, (FR.pk.get(k) || 0) + 1); } }
 			} else if (rnd() < a.pA) e = popA();
 			else { e = popB(); head = 'B'; }
 			if (e === null) { end = 'exhausted'; break; }
 			// (EEAT_PICKLOG=1: the picks per head, room and 10 x 10-tile zone, with the cells they made; observation only)
 			const plRow = plog !== null ? plogRow(head, e) : null;
-			const cells0 = cells.size, impr0 = impr, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
+			const cells0 = cells.size, impr0 = impr, vis0 = nVis, rooms0 = roomList.length, minRc0 = minRc, room1 = e.room, zone1 = SAT ? zoneOf(e.tile) : 0;
 			e.picks++; e.ver++; picks++; e.touch = picks;
 			if (e.u === 2) culPicks++;
 			if (PB !== null && inBox(e.tile)) boxPicks++;
@@ -3151,12 +3390,24 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			for (let r = 0; r < a.rolls; r++) {
 				sim.restore(base);
 				const o = r * a.roll;
-				let m = draw();
+				// (a prior run: its inputs from the model, from the pick's last input; see LEARNED MOVES)
+				const pri = PRI !== null && rnd() < a.priorP;
+				let m = 0, pm = 0, ph = 1;
+				if (pri) {
+					priorRuns++; lastHeld(up, lh); pm = lh[0]; ph = lh[1];
+					// (--priorMode=1: the first input a switch from the pick's last one, as the sticky rule draws a new one)
+					if (a.priorMode === 1) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; pm = m; }
+				} else m = draw();
 				let room = e.room, rcPrev = e.rc;
 				for (let s = 0; s < a.roll; s++) {
 					const t = e.t + s + 1;
 					if (t > maxT) break;
-					if (rnd() >= a.keep) m = draw();
+					if (pri) {
+						// (mode 0: every tick's input from the model; mode 1: the sticky timing (--keep), the model's choice of the new input)
+						if (a.priorMode === 1) { if (rnd() >= a.keep) { m = PRI.drawSwitch(sim, pm, ph, rnd); ph = 1; } else ph++; }
+						else { m = PRI.draw(sim, pm, ph, rnd); if (m === pm) ph++; else ph = 1; }
+						pm = m;
+					} else if (rnd() >= a.keep) m = draw();
 					buf[o + s] = m;
 					E.applyMask(inp, m);
 					sim.tick(inp);
@@ -3202,7 +3453,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 					if (!distBySteer && (!near || rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) && useOf(room, centreTile()) !== 2) {
 						const node = mkNode(up, blk, o, s + 1);
 						if (near !== null) release(near.node);
-						near = { rc, t, node };
+						near = { rc, t, node, room };
 					}
 					const nc = into ? add(t, rc, e, up, blk, o, s + 1, room) : null;
 					// (--spdMode=1: a flagged room's fastest arrivals next to the earliest)
@@ -3215,6 +3466,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (end) break;
 			}
 			if (plRow !== null) { plRow[1] += cells.size - cells0; plRow[2] += impr - impr0; }
+			// (--frontier --fYield=1: the yield of head F's picks against the others': new visited tiles + FR_ROOM_W x new rooms a pick,
+			// decayed by FR_DECAY a pick of its kind)
+			if (FR !== null) { const dv = nVis - vis0 + FR_ROOM_W * (roomList.length - rooms0); if (head === 'F') { FR.yF = FR.yF * FR_DECAY + dv; FR.nF = FR.nF * FR_DECAY + 1; if (a.fBrake) { const z = zoneOf(e.tile), v = FR.zx.get(z) || 0; FR.zx.set(z, roomList.length > rooms0 ? 0 : Math.max(0, v + 1 - FR_ZCELL * (nVis - vis0))); } } else { FR.yO = FR.yO * FR_DECAY + dv; FR.nO = FR.nO * FR_DECAY + 1; } }
 			// (the brake: the pick's region and room, by what its runs made)
 			if (SAT && room1 !== null) {
 				const fresh = roomList.length > rooms0 || minRc < minRc0 - 0.05;
@@ -3235,7 +3489,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	sendNear();
 	E.flushTicks();
 	if (typeof global.gc === 'function') global.gc();   // (node --expose-gc: the done event's heapMB is what the heap holds)
-	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000 }));
+	// (observation only: the tiles of the archive's cells at the end, a bit per tile, for the done event's "tiles")
+	const tileBits = new Uint8Array(N);
+	for (const c of cells.values()) if (c.tile >= 0 && c.tile < N) tileBits[c.tile] = 1;
+	post(Object.assign(stat(), { type: 'done', end, first, best, sec: (Date.now() - t0) / 1000, tileBits }));
 }
 
 // ---------------------------------------------------------------- random runs on the GPU (--gpu=1)
@@ -3860,6 +4117,8 @@ function workerMain() {
 async function main() {
 	let a;
 	try { a = parseArgs(process.argv.slice(2)); } catch (e) { console.log(JSON.stringify({ error: e.message })); process.exitCode = 2; return; }
+	// (--prior: the model is read once here, so a bad file fails at the start, not in every worker)
+	if (a.prior) { try { PR.readModel(a.prior); } catch (e) { console.log(JSON.stringify({ error: `--prior: ${e.message}` })); process.exitCode = 2; return; } }
 	let L;
 	try { L = levelOf(a); } catch (e) { console.log(JSON.stringify({ error: `cannot read the level: ${e.message}` })); process.exitCode = 2; return; }
 	// the memory budget (for the workers too): the machine's memory, what is free, what the other searches on it claim (the
@@ -3949,6 +4208,9 @@ async function main() {
 	let route = null, first = null, near = null, nearPending = false, heapWarned = false, steerGen = 0;
 	const stats = new Map(), dones = new Map(), plogs = new Map();
 	const total = (k) => { let s = 0; for (const v of stats.values()) s += v[k] || 0; return s; };
+	// (the most of a stat over the workers: visTiles, maxCoins; and --frontier's head F numbers summed)
+	const most = (k) => { let m = 0; for (const v of stats.values()) if ((v[k] || 0) > m) m = v[k]; return m; };
+	const frontierNow = () => (a.cells === 'coarse' ? Object.assign({ visTiles: most('visTiles'), maxCoins: most('maxCoins') }, a.frontier > 0 ? { frontier: { builds: total('frBuilds'), ms: total('frMs'), picks: total('frPicks'), cand: total('frCand'), goals: most('frGoals'), share: most('frShare'), r: most('frR') } } : {}) : {});
 	let nLead = 0, nWay = 0;   // (the routes head-L picks found; the routes that descend from a head-W pick)
 	const samples = [[Date.now(), 0]];
 	const bound = (d) => { if (d < Atomics.load(ctrl, 0)) Atomics.store(ctrl, 0, Math.max(0, d)); };
@@ -3976,7 +4238,7 @@ async function main() {
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
 		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
-		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
+		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
 	// worker finds the same rooms
@@ -4292,10 +4554,17 @@ async function main() {
 	const tk = total('ticks'), secs = (Date.now() - t0) / 1000;
 	let deepest = 0;
 	for (const v of stats.values()) deepest = Math.max(deepest, v.deepest || 0);
+	// (the tiles some worker's archive holds a cell in at the end; the prior's runs: observation only)
+	let tiles = 0;
+	{
+		const u = new Uint8Array(L.width * L.height);
+		for (const d of dones.values()) if (d.tileBits) for (let i = 0; i < u.length && i < d.tileBits.length; i++) u[i] |= d.tileBits[i];
+		for (let i = 0; i < u.length; i++) tiles += u[i];
+	}
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks: tk, ticksPerSec: Math.round(tk / Math.max(1e-3, secs)), states: total('cells'),
-		picks: total('picks'), end, ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
+		picks: total('picks'), end, tiles, ...(a.prior ? { priorRuns: total('priorRuns') } : {}), ...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, leadRoutes: nLead, wayRoutes: nWay, cpuS: cpuSec(), ...deathsNow(), ...timedNow(), ...usefulNow(), ...(a.pickBox ? { pickBox: { picks: total('boxPicks'), cells: total('boxCells') } } : {}),
 		...(CW ? { classes: { runs: CW.runs, found: CW.found, ticks: CW.ticks, best: CW.bestSig, list: [...CW.classes].map(([sig, c]) => ({ sig, ticks: c.ticks, gates: c.gates })) } } : {}),
-		cells: a.cells, ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
+		cells: a.cells, ...frontierNow(), ...(one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}), ...(bursts ? { gpu: bursts.stats() } : {}), workers: seeds.map((s) => {
 			const d = dones.get(s) || stats.get(s) || {};
 			return Object.assign({ seed: s, end: d.end || null, ticks: d.ticks || 0, cells: d.cells || 0, first: d.first || null, best: d.best || null, full: !!d.full,
 				snaps: d.snaps || 0, dropped: d.dropped || 0, replays: d.replays || 0, impr: d.impr || 0, evicted: d.evicted || 0, sweeps: d.sweeps || 0, nodes: d.nodes || 0,
@@ -4316,4 +4585,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { CellMap, mixW, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, doorTiles, frontierGoals, frontierField, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
