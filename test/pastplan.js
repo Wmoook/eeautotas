@@ -63,8 +63,14 @@ check('a coin door of more coins than the level holds (5 of 3) is a static wall,
 check('... a coin door within the count stays a coins gate', A.gateFeat[at(24, 19)] === 'coins' && A.gateFeat[at(8, 19)] === 'coins', `${A.gateFeat[at(24, 19)]} ${A.gateFeat[at(8, 19)]}`);
 check('fullCoinT: the highest coin DOOR within the level\'s coins (3; the 5-coin door and the gates do not count above it)', SF.fullCoinT(A) === 3, SF.fullCoinT(A));
 
-console.log('\n== the walk plan\'s count vs the plan past it');
-const st = SF.buildSteer(L);
+console.log('\n== the count by physics (n3-coin-dp-wrong-T)');
+const sph = SF.buildSteer(L);
+check('the default build: T by physics = the full count (no foothold in the shaft below 3 coins), the DP over 3 coins with a value at the start',
+	sph.info.physT === 3 && sph.info.planT < 3 && !!sph.dp && sph.dp.T === 3 && sph.dp.n === 3 && Number.isFinite(sph.info.start), JSON.stringify({ planT: sph.info.planT, physT: sph.info.physT, dp: sph.info.dp, start: sph.info.start }));
+check('... no plan past its count wanted (the editor builds one only where the full count is above the DP\'s)', !(sph.info.fullT > sph.info.dp.T));
+
+console.log('\n== the walk plan\'s count vs the plan past it (physT, dpChain, altLegs false / EEAT_COINFIX=0: the coin DP as before)');
+const st = SF.buildSteer(L, { physT: false, dpChain: false, altLegs: false });
 check('the walk plan\'s count is below the full count (it walks up the shaft without the footholds)', st.info.dp && st.info.dp.T < 3 && st.info.fullT === 3, JSON.stringify({ dp: st.info.dp, fullT: st.info.fullT }));
 const sp = SF.buildSteer(L, { coinT: st.info.fullT });
 check('the plan past its count: the coin DP over 3 coins', sp.dp && sp.dp.T === 3 && sp.dp.n === 3, JSON.stringify(sp.info.dp));
@@ -161,7 +167,8 @@ console.log('\n== goexplore.js: `steer <file>` on stdin');
 	}
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* temp */ }
 
-	console.log('\n== the editor: the steer worker builds the plan past its count, the running search gets it');
+	console.log('\n== the editor: the steer worker builds the plan past its count, the running search gets it (EEAT_COINFIX=0)');
+	process.env.EEAT_COINFIX = '0';
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 8, workers: 1 }, { available: false, why: 'test: no GPU' });
 	let es = ED.state();
 	for (const t0 = Date.now(); es.running && Date.now() - t0 < 30000 && !(es.steer && es.steer.past); es = ED.state()) await new Promise((r) => setTimeout(r, 100));

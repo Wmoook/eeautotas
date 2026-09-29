@@ -936,7 +936,7 @@ function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 			if (!changed) break;
 		}
 	}
-	if (!opts || opts.altLegs !== false) altLegs(A, PH, M, s, nC, CL);
+	if ((!opts || opts.altLegs !== false) && process.env.EEAT_COINFIX !== '0') altLegs(A, PH, M, s, nC, CL);
 	return CL;
 }
 /** legs across the other layers (the coin DP's legs are all in ONE layer: the start's key / team / fx / switch values):
@@ -1272,7 +1272,7 @@ function buildSteer(level, opts) {
 	// to gravity: Sand Castles' plan T 2 where its physics needs 3 coins, the cake is a lie / Floating Temples T 0)
 	const fullT = fullCoinT(A), planT = cp ? cp.T : 0;
 	let physT = null;
-	if (!opts.noDP && opts.physT !== false && M.names.indexOf('coins') >= 0 && fullT > 0) {
+	if (!opts.noDP && opts.physT !== false && process.env.EEAT_COINFIX !== '0' && M.names.indexOf('coins') >= 0 && fullT > 0) {
 		physT = physCoinT(PH, level);
 		const T = !planT ? fullT : physT === null ? planT : Math.max(planT, Math.min(physT, fullT));
 		if (T > planT) cp = { T, coins: A.special.filter((x) => x[1] === 'coins').map((x) => x[0]) };
@@ -1290,7 +1290,7 @@ function buildSteer(level, opts) {
 		// (no value from the start (a coin that needs another layer has no leg in the legs' one; the wrong T): the chain
 		// coinLegsLayered at the same T, at fullCoinT, at the count by physics; then the DP with the unreachable coins
 		// dropped at a penalty (dpDrop) of the first that has one. Ordering values only: nothing is cut)
-		if (opts.dpChain !== false && !(dpStart(CL, D, st0) < Infinity)) {
+		if (opts.dpChain !== false && process.env.EEAT_COINFIX !== '0' && !(dpStart(CL, D, st0) < Infinity)) {
 			const drops = [];
 			const d0 = CL && !CL.layered ? coinDPDrop(CL, A) : null;
 			if (d0) drops.push({ CL, D: d0, how: `${dpHow} + ${d0.dropped} dropped` });

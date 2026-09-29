@@ -12,7 +12,10 @@
 //   C prune    the native explore with a garbage steer field (random costs) still finds the key room's route: the steer
 //              field only orders (only the reach field's -1 rules states out); the CPU search (goexplore.js --steer)
 //              finds it too, and one worker with a tick budget is reproducible
-// usage: node test/steer.js [--only=A,B,C] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
+//   D drop     the coin DP with a coin no leg reaches (catalog #1, n3-coin-dp-wrong-T): the exact DP has no value from the
+//              start, the DP with drops (coinDPDrop / dpDrop) has one (the reachable coins' legs + the dropped coin's
+//              penalty + the tail), the tour takes the reachable coins; no coin to drop: none (the exact DP is kept)
+// usage: node test/steer.js [--only=A,B,C,D] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
 const os = require('os');
@@ -294,8 +297,36 @@ function sectionC() {
 	check('... one worker with a tick budget is reproducible', !!g1.route && !!g2.route && g1.route.inputs === g2.route.inputs && g1.route.simTicks === g2.route.simTicks);
 }
 
+function sectionD() {
+	section('D drop: a coin no leg reaches is dropped at a penalty, not a blank DP');
+	// (a 10 x 1 strip: the start at 0, coins at 2, 5 and 8; the legs walk fields (5 fifths a tile); coin 8's leg has no
+	// value anywhere (a coin that needs another layer); the tail (the T-coin layer's arrival) at 2 and 5)
+	const W = 10, CUT = R.CUT, A = { W, start: { t: 0 } };
+	const walkTo = (q) => ({ mode: 'walk', W, H: 1, walk: Uint16Array.from({ length: W }, (_, t) => Math.abs(t - q) * 5) });
+	const fields = new Map([[2, walkTo(2)], [5, walkTo(5)], [8, { mode: 'walk', W, H: 1, walk: new Uint16Array(W).fill(CUT) }]]);
+	const CL = { T: 3, coins: [2, 5, 8], fields, tail: new Map([[2, 40], [5, 25], [8, CUT]]), countOf: new Map(), rounds: 0 };
+	const D = SF.coinDP(CL);
+	check('the exact DP over 3 coins with one leg-less coin: no value from the start', !!D && SF.dpStart(CL, D, 0) === Infinity, D ? SF.dpStart(CL, D, 0) : 'no DP');
+	const Dd = SF.coinDPDrop(CL, A);
+	// (start -> 2 (10) -> 5 (15) -> 8 dropped (8 tiles x 5 x 2 = 80) -> the tail at 5 (25) = 130)
+	check('... with drops: one coin dropped, the value from the start = the legs + the penalty + the tail (130 fifths)', !!Dd && Dd.dropped === 1 && SF.dpStart(CL, Dd, 0) === 130,
+		Dd ? `${Dd.dropped} dropped, start ${SF.dpStart(CL, Dd, 0)}` : 'none');
+	check('... the DP arrays keep the file format (h over n = 3 coins, T 3)', !!Dd && Dd.n === 3 && Dd.T === 3 && Dd.h.length === 8 * 3);
+	// (the steer lookup's DP part along the tour: from the start the leg to coin 2 + its rest, falling at each coin)
+	const st = { dp: { n: 3, T: 3, bit: Int32Array.from([0, 1, 2]), leg: Int32Array.from([0, 1, 2]), h: Dd.h }, bodies: [fields.get(2), fields.get(5), fields.get(8)] };
+	const simAt = (x, bits) => ({ px: x * 16, py: 0, speed_y: 0, _q0: 0, _q1: 0, _slippery: 0, coins: [0, 1, 1, 2][bits], _coinBits: [bits] });
+	const vs = [[0, 0], [2, 1], [5, 3]].map(([x, b]) => SF.steerFifths(Object.assign({ feats: [], layerBody: Int32Array.from([-1]), S: 1, team: [] }, st), simAt(x, b)));
+	// (with the reachable coins held only the dropped coin is left: its leg has no value there, so the DP part has none and
+	// the lookup is the layer field's (none in this stand-in); the native lookup is the same code)
+	check('... the lookup falls along the tour: start 130, coin 2 taken 120, then only the dropped coin left: the layer field (none here)', vs[0] === 130 && vs[1] === 120 && vs[2] === -1, vs.join(' -> '));
+	// (every coin reached: nothing to drop)
+	const CL2 = { T: 2, coins: [2, 5], fields: new Map([[2, walkTo(2)], [5, walkTo(5)]]), tail: new Map([[2, 40], [5, 25]]), countOf: new Map(), rounds: 0 };
+	check('... every coin reached from the start: no drop DP (the exact one stays)', SF.coinDPDrop(CL2, A) === null && SF.dpStart(CL2, SF.coinDP(CL2), 0) === 50, SF.dpStart(CL2, SF.coinDP(CL2), 0));
+}
+
 if (want('A')) sectionA();
 if (want('B')) sectionB();
 if (want('C')) sectionC();
+if (want('D')) sectionD();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
