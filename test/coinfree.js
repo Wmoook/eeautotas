@@ -15,7 +15,8 @@
 //     than with the plain file (main's search); reproducible
 //   4 the tour (N 20 > 18): the walk-leg tour first below T 20 (the plan's door), the plain file = freeDP false's
 //   5 freeDP false: no DP, no tour, the CPU file = the plain file (main's build)
-// usage: node test/coinfree.js [--only=1,2,3,4,5] [--ticks=30000000]
+//   6 a cut of another feature first (a second switch; Fizio1's "team: over"): none, main's files
+// usage: node test/coinfree.js [--only=1,2,3,4,5,6] [--ticks=30000000]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -37,7 +38,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-coinfree-'));
 process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* gone */ } });
 
 const W = 64, H = 44, ML = 4;
-function levelOf(N) {
+function levelOf(N, twoSwitches) {
 	const cells = [];
 	for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
 		const inside = x >= 1 && x <= W - 2 && y >= 36 && y <= 42;
@@ -49,6 +50,7 @@ function levelOf(N) {
 	for (const [x, y] of coins) cells.push([x, y, 100]);
 	cells.push([30, 42, 255]);
 	cells.push([24, 42, 113, 1]);
+	if (twoSwitches) { cells.push([20, 42, 113, 2]); for (let y = 36; y <= 42; y++) cells.push([35, y, 184, 2]); }
 	for (let y = 36; y <= 42; y++) cells.push([34, y, 184, 1]);
 	for (let y = 36; y <= 42; y++) cells.push([56, y, 43, N]);
 	cells.push([60, 42, 121]);
@@ -175,6 +177,15 @@ if (want('1')) section1();
 if (want('2')) section2();
 if (want('3')) section3();
 if (want('4')) section4();
+function section6() {
+	section('6 only where the budget\'s cut was the coins');
+	const D = levelOf(6, true);
+	const s = SF.buildSteer(D.L, { maxLayers: 3 });
+	const off = SF.buildSteer(D.L, { maxLayers: 3, freeDP: false });
+	check('the budget cut the second switch first (the coins never tried), switch 1 kept', /^psw:2:/.test(String(s.info.over)) && s.info.features.indexOf('psw:1') >= 0 && s.info.features.indexOf('coins') < 0, `${JSON.stringify(s.info.features)}, ${s.info.over}`);
+	check('no free DP, no tour: the CPU file = the plain file = main\'s', !s.dp && !s.tour && Buffer.compare(SF.steerFileBytes(s, null, true), SF.steerFileBytes(off, null)) === 0);
+}
 if (want('5')) section5();
+if (want('6')) section6();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
