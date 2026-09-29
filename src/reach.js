@@ -666,7 +666,7 @@ function reachField(level, opts) {
 		if (ty !== C_ && portalExits.has(t)) {
 			if (exitE !== null && exitE[t] === 1 && ty !== X_) {   // (the exit from the entry: opts.exitEntry)
 				for (const e of portalExits.get(t)) {
-					if (ty === R_) emit(e, R_, l === INF || l + 2 > Q ? INF : l + 2, 5);
+					if (ty === R_) emit(e, R_, Math.min(rpT[t], l === INF || l + 2 > Q ? INF : l + 2), 5);   // (and never past the teleport's own cap)
 					else emit(e, F_, Math.min(KF, l + 1), 5);   // (F, L)
 				}
 			} else for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
@@ -885,10 +885,12 @@ function labelSearch(S) {
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
 			if (srcList[t2] !== null && (ty2 === F_ || ty2 === R_ || (ty2 === C_ && c2 >= DOTS && c2 <= UP))) for (const p of srcList[t2]) {
 				if (exitE !== null && exitE[p] === 1) {
-					// (the exit from the entry, opts.exitEntry: R(l) -> R(l + 2) (INF past Q), F(k) / L(k) -> F(k + 1); XR as before)
+					// (the exit from the entry, opts.exitEntry: R(l) -> R(min(l + 2 (INF past Q), rpT[p])), F(k) / L(k) -> F(k + 1);
+					// XR as before)
 					if (ty2 === R_) {
+						if (l2 > rpT[p]) continue;
 						push(p, R_, (l2 === INF ? Q - 1 : Math.max(-1, l2 - 2)) + 1, cur + 5);
-						if (l2 <= rpT[p]) push(p, X_, 0, cur + 5);
+						push(p, X_, 0, cur + 5);
 					} else if (ty2 === F_) { const i0 = Math.max(0, l2 - 1); push(p, F_, i0, cur + 5); push(p, L_, i0, cur + 5); push(p, X_, 0, cur + 5); }
 					continue;
 				}
