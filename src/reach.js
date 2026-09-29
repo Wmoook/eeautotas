@@ -692,13 +692,25 @@ function reachField(level, opts) {
 	// (fxHybrid: the goals (the trophy, or opts.goals) and every tile whose current tile is an effect tile (a half block's
 	// current tile is the one above or to its left: curOf), where a ball without an effect picks one up (eesim.js
 	// _touchBlock reads the current tile), at the walk-mode field's value there: from then on the walk is the ball's field)
-	let seedF = goalF, fxSeeds = 0;
+	// (fxHybrid with protection: the physics part is an UNPROTECTED ball's, as the walk mode's first walk is: a killing tile
+	// where a protected ball can be (open in physics mode's one field) is no move source and no portal source here (kP), and
+	// the tiles where the ball picks the protection effect up are goals at the walk-mode field's value there too; the states
+	// this cuts off (a protected ball's past the spikes) take the walk-mode field's value (its protected walk + PROT_COST).
+	// Sound: an unprotected ball dies in a killing tile (its death edges stay), a protected one is in protP, where the fill
+	// gives every state the walk's value wherever its protected walk has one)
+	let seedF = goalF, fxSeeds = 0, kP = null;
 	if (fxHybrid) {
+		if (protP !== null) {
+			kP = new Uint8Array(N);
+			for (let i = 0; i < N; i++) if (protP[i] && cls[i] !== WALL && fg[i] >= 0 && fg[i] < nFlags && (gF[fg[i]] & 4) !== 0) kP[i] = 1;
+		}
+		const protOnT = new Uint8Array(N);
+		for (const p of protOn) protOnT[p] = 1;
 		seedF = new Map(goalF ? goalF : []);
 		if (!goalF) for (let i = 0; i < N; i++) if (trophy(i)) seedF.set(i, 0);
 		for (let i = 0; i < N; i++) {
 			const j = curOf[i];
-			if (j < 0 || !WILD.has(fg[j]) || !passable(i)) continue;
+			if (j < 0 || !(WILD.has(fg[j]) || protOnT[j]) || !passable(i) || (kP !== null && kP[i])) continue;
 			const w = walkOut[i];
 			if (w === CUT || w > maxF) continue;
 			if (!(seedF.get(i) <= w)) { seedF.set(i, w); fxSeeds++; }
@@ -708,7 +720,7 @@ function reachField(level, opts) {
 	if (seedF) seeds = [...seedF].sort((a, b) => a[1] - b[1]);
 	else for (let i = 0; i < N; i++) if (trophy(i)) seeds.push([i, 0]);
 	const srcP = new Uint8Array(N);
-	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY && !forcedP[i] ? 1 : 0;   // (move sources: the trophy ends the way; a forced portal is left by its exits only)
+	for (let i = 0; i < N; i++) srcP[i] = passable(i) && fg[i] !== TROPHY && !forcedP[i] && !(kP !== null && kP[i]) ? 1 : 0;   // (move sources: the trophy ends the way; a forced portal is left by its exits only)
 	const stopT = new Int16Array(N).fill(-1);
 	for (let i = 0; i < N; i++) if (isField(cls[i]) && cls[i] !== UP) stopT[i] = stopC(i);
 	const bounceT = new Int16Array(N * (KF + 1));
@@ -718,7 +730,7 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, kP });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
 	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
@@ -819,7 +831,7 @@ function reachField(level, opts) {
  */
 function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
-		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
+		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT, kP } = S;
 	const K1 = S.KF + 1;
 	const NB = 8;
 	const bk = [], bn = new Int32Array(NB);
@@ -883,6 +895,7 @@ function labelSearch(S) {
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
 			if (srcList[t2] !== null && (ty2 === F_ || ty2 === R_ || (ty2 === C_ && c2 >= DOTS && c2 <= UP))) for (const p of srcList[t2]) {
 				if (ty2 === R_ && c2 !== BDOWN && l2 > rpT[p]) continue;
+				if (kP !== null && kP[p]) continue;   // (fxHybrid: an unprotected ball dies in that portal tile)
 				push(p, R_, 0, cur + 5); push(p, F_, 0, cur + 5); push(p, X_, 0, cur + 5); push(p, L_, 0, cur + 5);
 			}
 			// deaths: (a death source, any) -> (respawn tile, F(0) or R(0))
