@@ -750,7 +750,9 @@ const GF_TICKS = 70, GF_DX = 8, GF_DY = 7;
 function gateFloors(A, level) {
 	const { W, H, N } = A;
 	const gold = A.special.filter((x) => x[1] === 'coins').length;
-	if (!gold || !A.trophies.length) return [];
+	// (past the DP's 18 coins no DP (coinDP, coinLegsLayered): the count would only model the coins, a bigger and slower
+	// field with the same lookup; Tropical Trials' 20-coin gate: 42 layers, a 33.7 s build, no DP)
+	if (!gold || gold > 18 || !A.trophies.length) return [];
 	const cand = [];
 	for (let i = 0; i < N; i++) {
 		if (A.cls[i] !== 3 || A.gateFeat[i] !== 'coins' || A.gatePol[i] !== 0) continue;
