@@ -349,7 +349,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
-	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15,
+	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
@@ -3041,7 +3041,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (c.t >= maxT) continue;
-			const v = parCost(c) + a.lambda * Math.sqrt(c.picks) + satPen(c) + demo(c);
+			// (--pCell=1: the cell by head B's count weights, negated (a cell in a cul-de-sac or a kept throw-back last): the
+			// room's least visited cells, not its trophy-nearest ones; 0: head A's priority)
+			const v = a.pCell ? -(1 / Math.sqrt(1 + c.seen) + 1 / Math.sqrt(1 + c.picks)) / (SAT ? 1 + satOver(exOf(c), a.satN) / SAT_B : 1) + (c.u === 2 || c.bk === true ? 10 : 0)
+				: parCost(c) + a.lambda * Math.sqrt(c.picks) + satPen(c) + demo(c);
 			if (v < bs) { bs = v; bc = c; }
 		}
 		if (bc === null) return popA();
@@ -4234,7 +4237,8 @@ async function gpuMain(a, L, m) {
 		for (let k = 0; k < a.sample; k++) {
 			const c = arr[(rnd() * arr.length) | 0];
 			if (cT[c] >= maxT) continue;
-			const v = prio(c);
+			// (--pCell=1: head B's count weights, as explore()'s popP)
+			const v = a.pCell ? -(1 / Math.sqrt(1 + cSeen[c]) + 1 / Math.sqrt(1 + cPicks[c])) / (SAT ? 1 + satOver(exG(c), a.satN) / SAT_B : 1) : prio(c);
 			if (v < bs) { bs = v; bc = c; }
 		}
 		if (bc < 0) return popA();
