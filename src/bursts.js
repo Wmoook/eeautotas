@@ -268,7 +268,7 @@ function create(o) {
 	let trophyRf = null;
 	const pending = new Map();   // request id -> {replies, want, done}
 	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
-	const st = { bursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
+	const st = { bursts: 0, domBursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
 		servers: 0, served: 0 };
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
@@ -418,7 +418,7 @@ function create(o) {
 	const infoOf = (r) => {
 		if (r.info) return r.info;
 		const sim = simAt(r.inputs);
-		const fg = L.fg, fl = L.flags;
+		const fg = L.fg, fl = RF.guideFlags(L);
 		const pass = new Uint8Array(N), wall = new Uint8Array(N);
 		for (let k = 0; k < N; k++) {
 			const id = fg[k], f = id >= 0 && id < fl.length ? fl[id] : 0;
@@ -682,38 +682,50 @@ function create(o) {
 		r.nt = Math.max(1, n);
 		return r.nt;
 	};
+	// (--domBurst=K, dominance-share: every K-th pick goes to the rooms of dominated novelty groups first; 0: never)
+	const domBurst = a.domBurst === undefined || a.domBurst === null ? 8 : Math.max(0, Math.round(+a.domBurst) || 0);
+	let domTick = 0;
 	/** the next burst: {r (room, or null: the trophy arm), f (its field)} */
 	const pick = () => {
 		let best = null, bs = -Infinity;
 		const total = st.bursts;
 		// (the rooms by score; a room's field (a replay and two walks) only for the best ones until one has a target: a
 		// level of many switches has thousands of rooms)
-		const cand = [];
+		const cand = [], dcand = [];
+		// (a dominated room's turn: --domBurst)
+		const domTurn = domBurst > 0 && ++domTick % domBurst === 0;
 		for (const r0 of rooms.values()) {
 			// (--dom=1: a room whose novelty group is dominated (goexplore.js domIndex: a room of its class with more mono
 			// switches on holds everything it can reach) is no burst's room: Good Egg's hour from the level alone gave 277
-			// of its 361 bursts to switch-subset rooms at coins = 8, src/out/ge_anat)
-			if (r0.grp && r0.grp.dom) continue;
+			// of its 361 bursts to switch-subset rooms at coins = 8, src/out/ge_anat; but "dominated" is the walk's view (an
+			// open door is no floor: a floor-door switch turned off again, a backtracking room), so such rooms keep every
+			// --domBurst-th turn: dominance only orders)
+			const dm = !!(r0.grp && r0.grp.dom);
+			if (dm && !domTurn) continue;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
 				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
 				// (--burstFair: the order by the score per untried target not yet failed)
-				cand.push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
+				(dm ? dcand : cand).push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
 		}
 		cand.sort((x, y) => y[0] - x[0]);
-		for (const [, r, raw] of cand) {
+		dcand.sort((x, y) => y[0] - x[0]);
+		let domChosen = false;
+		for (const [, r, raw] of dcand.length ? dcand.concat(cand) : cand) {
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
 			bs = raw; best = { r, f };
+			// (r.pa inherits its room's grp)
+			if (r.grp && r.grp.dom) { domChosen = true; st.domBursts++; }
 			break;
 		}
 		// the trophy arm (the relay: the reach field's nearest attempt), an arm like the rooms (untried: after the untried
 		// rooms); with a walk-mode field (effects: its trophy distance ignores doors and physics, and Infinity Pain's nearest
 		// attempt by it sat in a pocket 7.8 tiles out for the whole hour) only when no room has a target left: the rooms'
 		// own walks aim at the trophy there
-		const nr = trophyArm.busy || (o.field.mode === 'walk' && best && !(best.r && best.r.zero >= SAT_BURSTS)) ? null : o.nearest();
+		const nr = domChosen || trophyArm.busy || (o.field.mode === 'walk' && best && !(best.r && best.r.zero >= SAT_BURSTS)) ? null : o.nearest();
 		if (nr && nr.inputs.length >= 100) {
 			const s = trophyArm.n === 0 ? UNTRIED - 0.5 : trophyArm.y / trophyArm.n + UCB_C * Math.sqrt(Math.log(1 + total) / trophyArm.n);
 			if (s > bs) { bs = s; best = { trophy: true, nr }; }
@@ -1142,7 +1154,7 @@ function create(o) {
  * when not given).
  */
 function roomAim(L, RM, sim, known, T) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const TR = (T && T.TR) || triggersOf(L), PT = (T && T.PT) || portalsOf(L);
 	const pass = new Uint8Array(N), wall = new Uint8Array(N);
 	for (let k = 0; k < N; k++) {
