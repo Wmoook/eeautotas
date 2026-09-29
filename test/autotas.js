@@ -46,5 +46,21 @@ check('FR_WHAT: a route\'s inbox run and its splice', AT.FR_WHAT.test('inbox (Fi
 	AT.FR_WHAT.test('inbox (Find a route (route)) + best (splice, 2 switches)') && AT.FR_WHAT.test('try: Find a route (route)') &&
 	!AT.FR_WHAT.test('inbox (gpu m1 3)') && !AT.FR_WHAT.test('sweep1_2') && !AT.FR_WHAT.test('try: focus 0:01.00-0:02.00'));
 
+// the stall rotation in the timeline: each escape of Find a route once (its configuration and kind of start), a route
+// of an escape names its configuration
+console.log('the stall rotation in the timeline');
+const seen = new Set();
+const e1 = { runs: 2, run: { n: 2, cfg: 'reach' }, last: { n: 1, cfg: 'blind' }, hist: [{ n: 1, cfg: 'blind', kind: 'arrival', from: 'where room "coins=2" was entered', ticks: 260, tiles: 40, after: 61.2 },
+	{ n: 2, cfg: 'reach', kind: 'frontier', from: 'the least explored room "coins=1"\'s nearest attempt', ticks: 220, tiles: 50, after: 181.5 }] };
+const x1 = AT.escapeEvents(seen, e1), x2 = AT.escapeEvents(seen, e1);
+check('escapeEvents: one event per escape, in order, with its configuration and start; none again at the next poll',
+	x1.length === 2 && x1[0].ev === 'escape' && x1[0].n === 1 && x1[0].cfg === 'blind' && x1[0].kind === 'arrival' && x1[1].cfg === 'reach' && x1[1].ticks === 220 && x2.length === 0,
+	JSON.stringify(x1));
+check('escapeEvents: no escape state (escape off, a small level): nothing', AT.escapeEvents(new Set(), null).length === 0 && AT.escapeEvents(new Set(), { runs: 0, run: null }).length === 0);
+const rx = AT.routeEscape({ strategy: 'escape: a fresh one search' }, e1), rl = AT.routeEscape({ strategy: 'escape: a fresh one search + path skips' }, { run: null, last: { n: 1, cfg: 'blind' } });
+check('routeEscape: an escape\'s route names the live escape (else the last one) and its configuration; another strategy\'s route none',
+	!!rx && rx.n === 2 && rx.cfg === 'reach' && !!rl && rl.cfg === 'blind' && AT.routeEscape({ strategy: 'random runs (GPU)' }, e1) === null && AT.routeEscape({ strategy: 'escape: a fresh one search' }, null) === null,
+	JSON.stringify([rx, rl]));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -103,6 +103,8 @@ function run(o) {
 	// o.seed: Find a route's seed (editor.js start(): 1 when none), so two runs of one level can differ (problem 10)
 	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, seed: o.seed, source: o.source }, o.gpu || { available: gpuOk });
 	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
+	const escSeen = new Set();   // (the escapes already in the timeline: escapeEvents)
+	let escNow = null;           // (Find a route's escape state at the last poll: routeEscape)
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
 	let jobAt = 0, frAt = 0;
@@ -135,7 +137,8 @@ function run(o) {
 		const faster = !S.job && !ended ? better(ev.runTicks) : false;
 		// (cpuS: the CPU search's CPU seconds when Find a route found it, editor.js cpuAfter: the time to route per
 		// core-second on a shared machine, next to t)
-		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
+		const rx = routeEscape(r, escNow);
+		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, rx ? { escape: rx } : {}, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
 			r.foundAfter > 0 ? { foundAfter: r.foundAfter } : {}, r.cleaned ? { cleanedFrom: r.cleaned.fromRunTicks, presses: r.cleaned.presses, cleanS: r.cleaned.sec } : {}));
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
 		if (!S.job) {
@@ -177,6 +180,10 @@ function run(o) {
 		try {
 			const st = ED.state();
 			const r = st.result;
+			// (the stall rotation's escapes: which configuration and start each one had, in the timeline; a route of an
+			// escape names its configuration)
+			for (const x of escapeEvents(escSeen, st.escape)) emit(x);
+			escNow = st.escape || null;
 			if (r && r.inputs) {
 				// (a route being cleaned (editor.js cleanLater) waits for its cleanup, at most CLEAN_WAIT_MS: the job's base
 				// is the cleaned route; a route handed on before its cleanup ended goes again once cleaned)
@@ -240,7 +247,27 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
+/** the stall rotation's escapes (editor.js state().escape.hist) not yet in the timeline: one event each {ev: 'escape', n,
+ *  cfg (the configuration's name), kind (of start), from, ticks, tiles, after (s into the search)}; seen: a Set of the
+ *  escapes' numbers already emitted (updated) */
+function escapeEvents(seen, e) {
+	const out = [];
+	for (const r of (e && Array.isArray(e.hist) ? e.hist : [])) {
+		if (!r || seen.has(r.n)) continue;
+		seen.add(r.n);
+		out.push({ ev: 'escape', n: r.n, cfg: r.cfg, kind: r.kind, from: r.from, ticks: r.ticks, tiles: r.tiles, after: r.after });
+	}
+	return out;
+}
+/** the escape (its number and configuration) that found route r, from editor.js state().escape: the live one, else the
+ *  last; null when the route is not an escape's */
+function routeEscape(r, e) {
+	if (!r || !/^escape/.test(String(r.strategy || '')) || !e) return null;
+	const x = e.run || e.last || null;
+	return x && x.cfg !== undefined ? { n: x.n, cfg: x.cfg } : null;
+}
+
+module.exports = { run, handoffWhy, escapeEvents, routeEscape, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
