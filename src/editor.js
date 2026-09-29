@@ -41,6 +41,7 @@ const BENCH = require('./bench.js');
 const GX = require('./goexplore.js');   // (its rooms: roomOf, roomFields, for the relay's sources)
 const LC = require('./levelcheck.js');   // (EEO's own copy of a campaign level, effect blocks that do nothing, the md5)
 const BU = require('./bursts.js');     // (roomAim: the wall breaker's room target, roomGate; slowYOf: the fine-y cells)
+const HX = require('./heat.js');       // (the page's exploration view: the heat, the trails)
 
 const MAX_SIDE = 1000, MAX_CELLS = 1e6;
 const RF_VERSION = RF.VERSION;   // the reach file eegpu must read (its `info` says "reach": this)
@@ -410,6 +411,9 @@ const gxExtra = () => (process.env.EEAT_GX || '').split(/\s+/).filter((s) => /^-
 // s1, MYSTERY MANSION s2, The Flighty Slighty s2) / losses 1 (Escape the Lava s4); opts alone 2 / 3: not flipped alone
 const GX_DEFAULTS = ['--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
 const gxDefaults = () => (process.env.EEAT_GXDEF === '0' ? [] : GX_DEFAULTS);
+// the page's exploration view (src/heat.js): the CPU search, the stall escape and the GPU random runs mark where they
+// have been (goexplore.js --heat=1: a byte per tile outside the search's budget, no draw changed); EEAT_HEAT=0: none
+const heatArg = () => (process.env.EEAT_HEAT === '0' ? [] : ['--heat=1']);
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
@@ -437,7 +441,7 @@ const STRATEGIES = {
 		// (--deaths=0 where deaths as moves are off: goexplore.js then builds its reach field without death edges and cuts
 		// the room dead ends (roomDead), like the reach file the editor gives the GPU tools then; where they are on the flag's
 		// auto (deathMovesFor, the same test as the editor's) keeps the death edges and no room dead ends)
-		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
+		`--depth=${q.depth || o.cpuDepth}`, '--stdin=1', ...heatArg(), ...(o.noWayUp ? ['--prune=0'] : []), ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...(f.steerCpu && !o.noWayUp ? [`--steer=${f.steerCpu}`, ...(f.steerDist ? [] : ['--steerDist=0'])] : []),
 		// (the one search: the GPU bursts from its archive, src/bursts.js; they wait between two launches while the editor's
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
@@ -451,7 +455,7 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...gxDefaults(), ...gxExtra(),
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...heatArg(), ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...gxDefaults(), ...gxExtra(),
 		...(q.rollFlags || []), ...(q.rollSeed ? [`--seed=${q.rollSeed}`] : [])] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
@@ -2189,6 +2193,8 @@ function start(b, gpu, test) {
 			found: null, error: null, live: false, pass: k === 'explore' && (!test || test.probe) ? PASS_MAX : PASS_START, probe: k === 'explore' && (!test || test.probe) ? 'running' : '',
 			passes: 1, ends: {}, share: 0, depthCap: 0, detail: '', salt: 0, tries: 0, lanes: 1, saltNoted: 0,
 			launchedAt: 0, readyAt: 0, usedMs: 0, prepSec: 0 })) };
+	// (the page's exploration view: the heat and the trails of this search)
+	exploreStart(ins.level, t0);
 	// (the useful territory, 2026-09-28 (goexplore.js USEFUL TERRITORY): the CPU search's and the GPU random runs' rooms, the
 	// sources' gains, the nearest attempt; body useful: false or EEAT_USEFUL=0: as before)
 	const useful = b.useful !== false && process.env.EEAT_USEFUL !== '0';
@@ -2967,6 +2973,9 @@ function launch(n) {
 			if (ev.why === 'full') note(`${V.label}: ${ev.from} tries side by side filled the table at tick ${ev.layers}; ${ev.lanes > 1 ? `${ev.lanes} at a time` : 'one at a time'} now`);
 		} else if (ev.ev === 'warning') {
 			note(`${V.label}: ${ev.text}`);
+		} else if (ev.ev === 'heat') {
+			// (where it has been: the page's exploration view)
+			exploreHeat(ev);
 		} else if (ev.ev === 'steer') {
 			// (the CPU search took a late steer field: lateSteer)
 			if (S.steer) S.steer.cpuAt = ev.sec;
@@ -2987,6 +2996,8 @@ function launch(n) {
 				// (the stall escape: a room new to the search that opens territory is its own progress too)
 				if (V.key === 'escape' && ev.kind === 'room' && +ev.gain > 0 && brk && !brk.rooms.has(+ev.room)) escOwnProgress();
 				addSource({ room: +ev.room, desc: ev.desc, gain: +ev.gain || 0, from: V.label, inputs, dist, arrival: ev.kind === 'room' ? inputs.length : 0 });
+				// (the page's trails: a room reached, an attempt of this strategy)
+				exploreAttempt(n, inputs, 's');
 				// (the GPU random runs' and the stall escape's first arrival in a room: into the one search's archive)
 				if ((rolls || V.key === 'escape') && ev.kind === 'room') feedOne(inputs, true, V.key === 'escape');
 				// (the path skips' targets before any route, by the rooms reached too: a new room's first arrival that opens
@@ -3047,7 +3058,7 @@ function launch(n) {
 			if (!line.startsWith('{') || (i !== lastProgress && isProgress(line))) continue;
 			let ev;
 			try { ev = JSON.parse(line); } catch (e) { continue; }
-			if (EVLOG) evlog(V.key, ev);
+			if (EVLOG && ev.ev !== 'heat') evlog(V.key, ev);
 			if (ev.ev === 'progress' && cpu) ch.lastProgress = ev;   // (the one search's supervisor logs it: oneEnded)
 			onEvent(ev);
 		}
@@ -3374,6 +3385,7 @@ function markBusy() {
 	if (!on && busyTimer) { clearInterval(busyTimer); busyTimer = null; }
 }
 function finish() {
+	exploreEnd();
 	S.running = false;
 	if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
 	if (schedTimer) { clearInterval(schedTimer); schedTimer = null; }
@@ -3750,6 +3762,8 @@ const laneWhat = (V) => `${V.shortcuts ? `${V.shortcuts} shortcut${V.shortcuts =
 function closer(ev, n) {
 	if (!cur) return;
 	const Vn = S.strategies[n];
+	// (the page's trails: every strategy's attempts, replayed in turn; the nearest one below, replayed anyway)
+	if (ev.inputs) exploreAttempt(n, ev.inputs, 'c');
 	// (a wall breaker run aimed at a gate by the gate's own field: its distances are to the gate, not the trophy: only its
 	// own nearest, for its chain; the chain's attempts reach the others as seeds)
 	if (Vn.key === 'breaker' && Vn.brk && Vn.brk.gateReach) {
@@ -3798,6 +3812,7 @@ function closer(ev, n) {
 	if (!masks.length) return;
 	// (one replay: the path, and the room it ends in for the sources)
 	const tr = replayRooms(masks, true, true);
+	if (EXV && tr.path) { EXV.pending.delete(`${Vn.key}#c`); exploreTrail(Vn.key, Vn.label, tr.path, masks.length); }
 	if (own) attemptSource(n, own, tr.room);
 	// (an attempt in a cul-de-sac of its room: no nearest attempt while one outside is known, nor a nearer one of two such)
 	if (old && tr.room.cul && (!old.cul || !(dist < old.dist - 1e-3))) return;
@@ -3866,6 +3881,109 @@ function solveFile(what) {
 	return { file: f, name: nice };
 }
 
+// ---------------------------------------------------------------- the exploration view (the page's heat and trails)
+// The page's "exploration" layer (src/app/editor.html, GET /api/editor/solve/heat; src/heat.js): WHERE THE SEARCH HAS
+// BEEN, per tile (the heat: a visit count, the first and the last visit), and the LATEST ATTEMPTS of every strategy (the
+// trails).
+// The heat: the CPU search's, the stall escape's and the GPU random runs' own heat events (goexplore.js --heat=1: the
+// tiles of the cells they make and pick; the GPU random runs' a sample of the cells they register), and the
+// tips of every strategy's attempts (their last EXP_TIP ticks: every move, the relay, the wall breaker, the beams, the
+// escape: the closest attempts and the sources the editor sees anyway). The trails: those attempts replayed (at most
+// EXP_REPLAY_MS of the server's thread a second, a token bucket saving up EXP_BUCKET_MS; the newest attempt of each
+// strategy and kind waits, the others go; an attempt closer() replays for the nearest anyway costs nothing more),
+// downsampled to HX.TRAIL_PTS points, the newest HX.TRAIL_MAX kept. One search's: a new search starts both over.
+const EXP_REPLAY_MS = 25, EXP_BUCKET_MS = 150, EXP_TIP = 400, EXP_TICK_MS = 250;
+let EXV = null;   // {search (S.started), W, H, heat (HX.HeatMap), trails (HX.Trails), pending (Map), sim, snap0, tokens, at, timer, endT}
+/** the exploration view of a new search on level L (its start: t0) */
+function exploreStart(L, t0) {
+	if (EXV && EXV.timer) clearInterval(EXV.timer);
+	const sim = new E.EESim(L);
+	sim.reset();
+	EXV = { search: t0, W: L.width, H: L.height, heat: new HX.HeatMap(L.width, L.height), trails: new HX.Trails(), pending: new Map(), sim, snap0: sim.snapshot(),
+		inp: new E.EEInput(), tokens: EXP_BUCKET_MS, at: Date.now(), timer: setInterval(exploreTick, EXP_TICK_MS), endT: undefined, replays: 0, replayMs: 0 };
+	if (EXV.timer.unref) EXV.timer.unref();
+}
+/** the search ended: its clock stops (the page's heat keeps its colours), nothing more to replay */
+function exploreEnd() {
+	if (!EXV || !S || EXV.search !== S.started) return;
+	if (EXV.timer) { clearInterval(EXV.timer); EXV.timer = null; }
+	EXV.pending.clear();
+	EXV.endT = Date.now() - S.started;
+}
+const exploreLive = () => !!(EXV && S && EXV.search === S.started && S.running);
+/** a strategy's heat event (goexplore.js --heat=1) into the heat */
+function exploreHeat(ev) {
+	if (!exploreLive()) return;
+	const tiles = HX.heatTiles(ev, EXV.W, EXV.H);
+	if (tiles && tiles.length) EXV.heat.merge(tiles, Date.now() - S.started);
+}
+/** strategy n's attempt (its inputs; kind 'c' a closest attempt, 's' a source): waits for its replay, the newest of each
+ *  strategy and kind (to the end of the queue: the round goes through the others first) */
+function exploreAttempt(n, inputs, kind) {
+	if (!exploreLive() || !inputs) return;
+	const V = S.strategies[n];
+	if (!V) return;
+	const x = String(inputs);
+	if (!/^[0-O]+$/.test(x)) return;
+	const key = `${V.key}#${kind}`;
+	EXV.pending.delete(key);
+	EXV.pending.set(key, { k: V.key, label: V.label, inputs: x });
+}
+/** a replayed attempt (P: the ball's centre per tick, px) of strategy key k: its trail, and its tip's tiles into the heat */
+function exploreTrail(k, label, P, ticks) {
+	if (!exploreLive() || !P || !P.length) return;
+	const t = Date.now() - S.started, d = HX.downsample(P, HX.TRAIL_PTS);
+	EXV.trails.add({ k, label, t, ticks, pts: d.pts, br: d.br });
+	const W = EXV.W, H = EXV.H, tiles = new Set();
+	for (let i = Math.max(0, P.length - EXP_TIP); i < P.length; i++) {
+		const tx = Math.floor(P[i][0] / 16), ty = Math.floor(P[i][1] / 16);
+		if (tx >= 0 && ty >= 0 && tx < W && ty < H) tiles.add(ty * W + tx);
+	}
+	EXV.heat.merge(Int32Array.from(tiles), t);
+}
+/** an attempt's path: the ball's centre (px) per tick, until the finish */
+function explorePath(inputs) {
+	const sim = EXV.sim, inp = EXV.inp;
+	sim.restore(EXV.snap0);
+	let done = false;
+	sim.onEvent = (k) => { if (k === 'complete') done = true; };
+	const P = [[sim.px + 8, sim.py + 8]];
+	for (let t = 0; t < inputs.length && !done; t++) {
+		E.applyMask(inp, (inputs.charCodeAt(t) - 48) & 31);
+		sim.tick(inp);
+		P.push([sim.px + 8, sim.py + 8]);
+	}
+	sim.onEvent = null;
+	return P;
+}
+/** every EXP_TICK_MS: the waiting attempts replayed in turn while the budget lasts */
+function exploreTick() {
+	if (!EXV) return;
+	const now = Date.now();
+	EXV.tokens = Math.min(EXP_BUCKET_MS, EXV.tokens + (now - EXV.at) * EXP_REPLAY_MS / 1000);
+	EXV.at = now;
+	if (!exploreLive()) return;
+	while (EXV.tokens > 0 && EXV.pending.size) {
+		const [key, a] = EXV.pending.entries().next().value;
+		EXV.pending.delete(key);
+		const t0 = performance.now();
+		let P = null;
+		try { P = explorePath(a.inputs); } catch (e) { P = null; }
+		const ms = performance.now() - t0;
+		EXV.tokens -= ms; EXV.replays++; EXV.replayMs += ms;
+		if (P) exploreTrail(a.k, a.label, P, a.inputs.length);
+	}
+}
+/** GET /api/editor/solve/heat: the running (or last) search's heat since version `since` (all of it when the page's
+ *  search is another: `search`), its trails newer than `trail`; t = ms since the search's start (stopped at its end) */
+function heatState(since, trail, search) {
+	if (!EXV || !S || EXV.search !== S.started) return { search: 0, running: false, t: 0, w: 0, h: 0, version: 0, full: true, n: 0, visited: 0, idx: '', count: '', first: '', last: '', trailId: 0, trails: [] };
+	const mine = +search === EXV.search;
+	const t = S.running ? Date.now() - S.started : EXV.endT !== undefined ? EXV.endT : Math.round((S.elapsed || 0) * 1000);
+	return Object.assign({ search: EXV.search, running: !!S.running, t, w: EXV.W, h: EXV.H }, EXV.heat.since(mine ? since : 0),
+		{ trailId: EXV.trails.id, trails: EXV.trails.since(mine ? trail : 0), replays: EXV.replays, replayMs: Math.round(EXV.replayMs) });
+}
+
 // ---------------------------------------------------------------- a job from a found route (Watch / Optimize)
 /** b: { eelvlB64, eetasB64 } (else the last search's level and route), name. Returns the job's meta (jobs.importJob). */
 function makeJob(b) {
@@ -3887,7 +4005,8 @@ function shutdown() {
 	if (alive(proofKid)) { try { proofKid.kill(); } catch (e) { /* gone */ } }
 }
 
-module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
+module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
+	EXP_REPLAY_MS, EXP_TIP,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };
