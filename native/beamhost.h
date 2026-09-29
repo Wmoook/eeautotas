@@ -28,6 +28,10 @@ static bool goalField(const Level& L, std::vector<float>& goalDist) {
 		const bool known = id >= 0 && id < L.nFlags;
 		const u8 fl = known ? L.flags[id] : 0;
 		if (known && (L.gFlags[id] & 4) != 0) return false;   // kills
+		// 50, the secret "appear" block: flagged a door, but overlaps() reveals it and blocks, always (eecore.h overlaps,
+		// eesim.js _ovSlow): a static solid, as src/reach.js guideFlags has it for every guidance test (L.flags is the
+		// engine's own table, so the rule is by id here)
+		if (id == 50) return false;
 		return (fl & F_SOLID) == 0 || (fl & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) != 0;
 	};
 	while (!q.empty()) {
