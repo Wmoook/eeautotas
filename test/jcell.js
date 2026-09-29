@@ -37,10 +37,10 @@ function check(name, ok, detail) {
 	console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail !== undefined ? ': ' + detail : ''}`);
 }
 const section = (s) => console.log(`\n== ${s}`);
-function gox(tool, file, args, timeoutMs = 240000) {
+function gox(tool, file, args, timeoutMs = 240000, nodeArgs = []) {
 	const env = Object.assign({}, process.env);
 	delete env.EEAT_JCELL;   // (the flag only by the command line here)
-	const r = spawnSync(process.execPath, [tool, file, ...args], { encoding: 'utf8', maxBuffer: 1 << 28, timeout: timeoutMs, env });
+	const r = spawnSync(process.execPath, [...nodeArgs, tool, file, ...args], { encoding: 'utf8', maxBuffer: 1 << 28, timeout: timeoutMs, env });
 	return String(r.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return {}; } });
 }
 const doneOf = (ev) => ev.find((e) => e.ev === 'done') || {};
@@ -138,8 +138,69 @@ function sectionLevels() {
 	}
 }
 
+// The switches level (test/editor.js's archive-sweep level: 60 x 50, 10 purple switches on the floor, each read by a door of
+// its own in the top row, a wall of switch-1 doors, the trophy walled in: no route, --prune=0; 1,024 switch states): a
+// single-jump level, so --jcell=1 makes no cell with the word and the search is the flag off's, but every cell carries its
+// `jw` (3): the budget must count it (B_JW a cell, goexplore.js archiveBytes), and the heap holds it.
+function switchesLevel(file) {
+	const W = 60, H = 50, c = [];
+	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) c.push([0, y, 9], [W - 1, y, 9]);
+	for (let k = 0; k < 10; k++) c.push([4 + 2 * k, 48, 113, k + 1], [4 + 2 * k, 1, 184, k + 1]);
+	for (let y = 1; y < 49; y++) c.push([45, y, 184, 1]);
+	c.push([2, 48, 255], [55, 47, 121], [54, 47, 9], [56, 47, 9]);
+	for (let x = 54; x <= 56; x++) c.push([x, 46, 9], [x, 48, 9]);
+	fs.writeFileSync(file, ED.eelvlOf({ name: 'jcell switches', width: W, height: H, cells: c }));
+}
+
+function sectionMem() {
+	section('mem: the budget counts every cell\'s jw with the flag on (B_JW), the --mem cap holds; the flag off counts none');
+	const GX = require(GOX);
+	const MB = 1048576;
+	check('B_JW is 40 bytes (a new out-of-object property array: 16 bytes of header + 3 slots, the most one more property costs a cell)', GX.B_JW === 40, `B_JW ${GX.B_JW}`);
+	const file = path.join(HOME, 'switches.eelvl');
+	switchesLevel(file);
+	const T = +(opt.memTicks || 6000000);
+	const base = ['--workers=1', '--seed=1', '--prune=0', '--cells=coarse', '--classW=0', '--seconds=120', `--maxTicks=${T}`];
+	const gc = ['--expose-gc'];   // (the done event's heapMB after a collection: goexplore.js explore()'s end)
+	// (1) room for everything (--mem=600): the same search either way; the counted archive grows by exactly B_JW a cell
+	const off = gox(GOX, file, [...base, '--mem=600'], 300000, gc), on = gox(GOX, file, [...base, '--mem=600', '--jcell=1'], 300000, gc);
+	const d0 = doneOf(off), d1 = doneOf(on), w0 = (d0.workers || [])[0] || {}, w1 = (d1.workers || [])[0] || {}, j = d1.jcell || {};
+	check('the flag off: no "jcell" in the done event', d0.jcell === undefined && d0.ticks > 0);
+	check('--jcell=1 on a single-jump level: no cell with the word, the same search (cells, picks, replays, rooms)', j.cells === 0 && sig(on) === sig(off) && !w0.full && !w1.full,
+		`${d1.states} / ${d0.states} cells, ${w1.rooms} rooms`);
+	check('the cells the budget counts a jw for: every cell, B_JW each (jcell.bytes = cells x B_JW)', j.bytes === d1.states * GX.B_JW && d1.states > 50000,
+		`${j.bytes} bytes for ${d1.states} cells (${(j.bytes / MB).toFixed(2)} MB)`);
+	const dm = w1.memMB - w0.memMB, want = j.bytes / MB;
+	check('the counted archive (memMB) grows by the jw bytes (within the MB rounding)', Math.abs(dm - want) <= 1 && dm >= 1, `${w1.memMB} vs ${w0.memMB} MB: +${dm}, jw ${want.toFixed(2)} MB`);
+	const dh = w1.heapMB - w0.heapMB;
+	check('the heap after a collection grows by about that too (the count is the property\'s real cost here: no timed killer, no frontier field)', dh >= 0.5 * want - 1 && dh <= want + 1.5,
+		`heap ${w1.heapMB} vs ${w0.heapMB} MB: +${dh}, counted +${want.toFixed(2)}`);
+	// (2) the cap (--mem=24, as test/editor.js): with the flag on the archive's count, jw included, stays within the budget
+	// and the heap within it + 10 MB; it sweeps; at the same total it holds fewer cells
+	const cap = ['--mem=24'];
+	const offC = gox(GOX, file, [...base, ...cap], 300000, gc), onC = gox(GOX, file, [...base, ...cap, '--jcell=1'], 300000, gc);
+	const c0 = (doneOf(offC).workers || [])[0] || {}, c1 = (doneOf(onC).workers || [])[0] || {}, jc = doneOf(onC).jcell || {};
+	const warn = (ev) => ev.some((e) => e.ev === 'warning');
+	check('--mem=24 with the flag on: full, sweeps, counted within the budget (jw included), the heap within it + 10 MB, no warning',
+		c1.full && c1.sweeps > 0 && c1.memMB <= 24 && c1.heapMB <= 34 && jc.bytes === c1.cells * GX.B_JW && !warn(onC),
+		`${c1.cells} cells, ${c1.sweeps} sweeps (${c1.evicted} cells), counted ${c1.memMB} MB (jw ${(jc.bytes / MB).toFixed(2)}), heap ${c1.heapMB} MB`);
+	check('--mem=24 with the flag off: the same budget holds as before', c0.full && c0.sweeps > 0 && c0.memMB <= 24 && c0.heapMB <= 34 && !warn(offC),
+		`${c0.cells} cells, ${c0.sweeps} sweeps (${c0.evicted} cells), counted ${c0.memMB} MB, heap ${c0.heapMB} MB`);
+	check('at the cap both arms count about the same total (the eviction sees the jw bytes: it evicts at the same total, not the same cell count)',
+		Math.abs(c1.memMB - c0.memMB) <= 2, `${c1.memMB} vs ${c0.memMB} MB; cells ${c1.cells} vs ${c0.cells}, evicted ${c1.evicted} vs ${c0.evicted}`);
+	// (3) with --main: the flag off at the cap = main's search (the budget's count, so every sweep, as before)
+	if (opt.main) {
+		const m = gox(opt.main, file, [...base, ...cap], 300000, gc), cm = (doneOf(m).workers || [])[0] || {};
+		const at = (w) => JSON.stringify([w.cells, w.sweeps, w.evicted, w.snaps, w.dropped, w.memMB]);
+		check('--mem=24 with the flag off = main (the same search, cells, sweeps, evictions, snapshots and counted MB)', sig(offC) === sig(m) && at(c0) === at(cm),
+			`${at(c0)} vs main ${at(cm)}`);
+	}
+}
+
 if (want('toy')) sectionToy();
 if (want('single')) sectionSingle();
+if (want('mem')) sectionMem();
 if (want('levels')) sectionLevels();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
