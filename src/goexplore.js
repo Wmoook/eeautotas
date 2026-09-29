@@ -2405,6 +2405,21 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (rspAt's room: coarse cells the room key, or with --dsub=1 its part the ball's own touches change (RM.cause().sub:
 	// without the keys and the time doors, which flip on the clock); fine cells the discrete state)
 	const rspRoom = () => (!coarse ? disc(sim) : a.dsub ? RM.cause(sim).sub : RM.key(sim));
+	// (the quick look's key: the room the ball comes BACK in. The engine adds the death to the count at the respawn (eesim.js,
+	// the end of the last dead tick), so where the key reads the count (a death door or gate: L.hasDeathDoor) the dying ball's
+	// own room has one death less: keyed with it, every death below the highest death threshold looked up the room the ball
+	// dies in, whose respawn tile it had nearly always passed sooner (it walked through its checkpoint to die), and was
+	// dropped there without a proof unless the clock's phase made the room differ (cw-death-precheck: the MERGE2 soundness
+	// review's bridge of death gates routed only through its sealed time door; a column of death doors at 3: main 0 of 4
+	// seeds). EEAT_DEATHPRE=0: the count the ball dies with, as before)
+	const DPRE = L.hasDeathDoor && process.env.EEAT_DEATHPRE !== '0';
+	const rspBackKey = (rt) => {
+		if (!DPRE) return rspRoom() * 2097152 + rt;
+		sim.deaths++;
+		const k = rspRoom() * 2097152 + rt;
+		sim.deaths--;
+		return k;
+	};
 	const DEATHBLK_N = DEATH_TICKS + 25;
 	const DEADBLK = { b: new Uint8Array(DEATHBLK_N), refs: 0 };   // (the dead ticks' inputs: the engine reads none)
 	let dSeen = 0, dCost = 0, dNew = 0, dDrop = 0, dCells = 0, dBack = 0, dTicks = 0;   // (dTicks: the dead ticks played)
@@ -3421,7 +3436,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (r0 < 0) { dDrop++; return; }
 			if (r0 > rcPrev + DEATH_TILES) { dBack++; dBackR++; if (!a.dback) { dDrop++; return; } back = true; }
 		}
-		const k0 = rspRoom() * 2097152 + rt, v0 = rspAt.get(k0);
+		const k0 = rspBackKey(rt), v0 = rspAt.get(k0);   // (the room the ball comes back in: its count + 1, rspBackKey)
 		if (v0 !== undefined && v0 <= t + DEATH_TICKS - 1 && (back || bkLive(k0) === null)) { dDrop++; return; }
 		// (with the steer field, gate-aware, the same bound by it against the run's pick: the reach field is door-blind, and
 		// on Good Egg it puts the spawn as near as the level's upper right, so deaths from there back to the spawn with 7

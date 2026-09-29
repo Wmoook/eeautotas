@@ -17,6 +17,10 @@
 //   editor   the searches' reach file follows deaths as moves (the pit: the _dm file with the death edges with them, the
 //            death-free field without), the CPU search / GPU random runs' flag (none with them, --deaths=0 without), and
 //            goexplore.js's own auto agrees; in cpu: the room dead ends (roomDead) only with deaths as moves off
+//   pre      deathPays' quick look keys the room the ball comes BACK in (the count + 1, cw-death-precheck): a column of
+//            death doors at 3 before the trophy, a spike pit 18 tiles from the checkpoint, a time door sealed in the
+//            wall (coarse, 1 worker, seed 1, 16 M ticks): a route through 3 deaths, replayed; EEAT_DEATHPRE=0 (the
+//            count the ball dies with, before): no route (every climbing death dropped as a later arrival)
 //   gpu      (--gpu, a native build with a GPU) eegpu explore --deaths=1 finds the pit's route through its death (none
 //            without), eegpu roll through goexplore --gpu=1 likewise
 // usage: node test/deaths.js [--gpu]      Exit code 1 if any check fails. Writes only in a temp folder.
@@ -44,7 +48,7 @@ function check(name, ok, detail) {
 }
 const section = (s) => console.log(`\n== ${s}`);
 // ASCII levels: # wall, . air, S spawn, T trophy, C checkpoint, x spike, o coin, d coin door (1 coin)
-const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], d: [43, 1], '1': [43, 1], '2': [43, 2] };
+const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], d: [43, 1], '1': [43, 1], '2': [43, 2], q: [1011, 3], t: [156] };
 const box = (inner) => ['#'.repeat(inner[0].length + 2), ...inner.map((r) => `#${r}#`), '#'.repeat(inner[0].length + 2)];
 function levelFile(name, rows) {
 	const cells = [];
@@ -252,6 +256,34 @@ function sectionCpu() {
 		`${routesOf(p1).length} routes`);
 }
 
+function sectionPre() {
+	section("pre: deathPays' quick look at the room the ball comes back in (the count + 1; EEAT_DEATHPRE=0: before)");
+	// the MERGE2 door toy (src/out/dre/toy.js 'door'): the trophy behind a column of death doors at 3 (open from 3
+	// deaths), a 3-wide spike pit 18 tiles from the checkpoint, a time door sealed in the wall (the room key carries the
+	// clock's phase, as in the soundness review's bridge)
+	const door = levelFile('door3', box([
+		'.'.repeat(30) + 'q' + '.'.repeat(7),
+		'S.C' + '.'.repeat(27) + 'q' + '...T...',
+		'#'.repeat(20) + '...' + '#'.repeat(15),
+		'#'.repeat(20) + '...' + '#'.repeat(15),
+		'#'.repeat(20) + 'xxx' + '#'.repeat(15),
+		't' + '#'.repeat(37),
+	]));
+	const args = ['--cells=coarse', '--workers=1', '--seconds=600', '--maxTicks=16000000', '--seed=1'];
+	const env0 = { ...process.env }; delete env0.EEAT_DEATHPRE;
+	const run = (env, more) => {
+		const r = spawnSync(process.execPath, [GOX, door.file, ...args, ...more], { encoding: 'utf8', maxBuffer: 1 << 28, timeout: 700000, env });
+		return String(r.stdout || '').split('\n').filter((l) => l.startsWith('{')).map((l) => { try { return JSON.parse(l); } catch (e) { return {}; } });
+	};
+	const p1 = run(env0, ['--first=1']), p0 = run({ ...env0, EEAT_DEATHPRE: '0' }, []);
+	const r1 = routesOf(p1), d1 = doneOf(p1), d0 = doneOf(p0);
+	const ev1 = r1.length ? C.evaluate(door.level, masksOf(r1[0].inputs)) : null;
+	check('the door toy: a route through its 3 deaths with the quick look at the count + 1, replayed', !!ev1 && ev1.deaths === 3,
+		ev1 ? `${ev1.ms.length} ticks, ${ev1.deaths} deaths, after ${(d1.first || {}).simTicks} simulated; deaths ${JSON.stringify(d1.deaths)}` : JSON.stringify(d1.deaths));
+	check('EEAT_DEATHPRE=0 (the count the ball dies with, as before): no route in 16 M ticks (the climbing deaths dropped)',
+		routesOf(p0).length === 0 && d0.ticks >= 16000000, `${routesOf(p0).length} routes, ${d0.ticks} ticks, deaths ${JSON.stringify(d0.deaths)}`);
+}
+
 function sectionGpu() {
 	section('gpu: eegpu explore / roll --deaths=1');
 	const G = require('../src/gpu.js');
@@ -297,6 +329,7 @@ function sectionGpu() {
 	sectionRules();
 	await sectionEditor();
 	sectionCpu();
+	sectionPre();
 	if (GPU) sectionGpu();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exitCode = fail ? 1 : 0;
