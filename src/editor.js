@@ -1269,7 +1269,8 @@ function breakGate(inputs) {
 		if (t === undefined) return null;
 		// the run's order: the coin's own leg field (RCH3, the coin its only goal: the file's body, written once), not the
 		// steer field, which on Forgotten Veil points the other way (the layer field) and cut the states heading for the coin
-		const b = G0.st.dp.leg[g.i];
+		// (the blue DP's legs are per layer: the body nextGate valued the coin by, the state's own layer's)
+		const b = g.body !== undefined && g.body >= 0 ? g.body : G0.st.dp.leg[g.i];
 		let reach = G0.files.get(b);
 		if (!reach) {
 			reach = path.join(dir(), `gate_${cur.pastOn ? 'p' : ''}${b}.rch3`);
@@ -2599,6 +2600,8 @@ function steerFp() {
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	// (the blue DP's knob: a flip builds the field again)
+	if (process.env.EEAT_BLUEDP) h.update(`bluedp:${process.env.EEAT_BLUEDP}`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);
