@@ -98,6 +98,31 @@ const spCap = SF.buildSteer(L0, { coinT: 3, features: ['coins'], maxLayers: 1 })
 check('... a feature asked for is modelled only within the layer cap (maxLayers 1: no coins, no DP, said in info.over)', !spCap.dp && spCap.info.features.indexOf('coins') < 0 && /coins/.test(spCap.info.over || ''),
 	JSON.stringify({ features: spCap.info.features, over: spCap.info.over }));
 
+// Walk legs (Snow Is Falling: two coins the physics layer fields reach from neither the start nor any other coin, so the
+// DP over all 10 had no tour and ordered nothing): a coin on a ledge 11 rows above the floor (no physics way: a jump
+// rises ~4 tiles), a 2-coin door before the trophy. The DP over both coins: no tour with walkLegs off; with them (the
+// default) the cut coin's leg is its layer's walking distance: a tour, a value at the start. A DP with a tour is unchanged.
+console.log('\n== walk legs: a DP with no tour from the start');
+{
+	const WW = 40, WH = 24, cw = [];
+	for (let x = 0; x < WW; x++) cw.push([x, 0, 9], [x, 22, 9], [x, 23, 9]);
+	for (let y = 1; y < 22; y++) cw.push([0, y, 9], [WW - 1, y, 9]);
+	for (let y = 1; y < 22; y++) cw.push([30, y, 43, 2]);
+	cw.push([10, 11, 9], [2, 21, 255], [5, 21, 100], [10, 10, 100], [35, 21, 121]);
+	const LW = prep(levelOfCells(WW, WH, cw).eelvl);
+	const sw0 = new E.EESim(LW);
+	sw0.reset();
+	const off = SF.buildSteer(LW, { walkLegs: false }), on = SF.buildSteer(LW);
+	const vOff = SF.steerAt(Object.assign({}, off, { dpFirst: true }), sw0), vOn = SF.steerAt(Object.assign({}, on, { dpFirst: true }), sw0);
+	check('without walk legs the DP over both coins has no value at the start (the ledge coin is cut by the physics legs)', off.dp && off.dp.T === 2 && !Number.isFinite(vOff) && !SF.nextGate(off, sw0),
+		JSON.stringify({ dp: off.info.dp, start: vOff }));
+	check('... with them (the default): the ledge coin\'s leg is the walking distance, the DP has a tour and a value at the start, and a next gate', on.info.dp && on.info.dp.walkLegs === 1 && Number.isFinite(vOn) && !!SF.nextGate(on, sw0),
+		JSON.stringify({ dp: on.info.dp, start: vOn, gate: SF.nextGate(on, sw0) }));
+	check('... a DP the walk does not help is unchanged (the shaft level\'s own DP: its coin C behind the door shut at its count, walk or not; the plan past its count has a tour): no walk legs',
+		!st.info.dp.walkLegs && !sp.info.dp.walkLegs,
+		JSON.stringify({ st: st.info.dp, sp: sp.info.dp }));
+}
+
 /** a stand-in for the CPU search (src/goexplore.js) that never gets nearer: it logs every stdin line with its time (ms
  *  since it started) and, after a switch ("steer <file>"), sends a closest attempt of the new measure (sg) */
 const stubOf = (dir, log) => {

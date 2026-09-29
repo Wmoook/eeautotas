@@ -777,6 +777,7 @@ function coinLegsPhys(B, PH, base, opts) {
 		const f = legFieldOf(lv, fg, q, base.coins, A.start.t);
 		if (!walkOk || !legCut(f, q, base.coins, A.start.t)) return f;
 		const w = RF.reachField(Object.assign({}, lv, { fg, gravityMult: 0.999 }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+		if (legCut(w, q, base.coins, A.start.t)) return f;   // (no walk either, e.g. behind a door shut in its layer: as it was)
 		w.walkLeg = true;
 		return w;
 	};
@@ -813,9 +814,15 @@ function coinLegsPhys(B, PH, base, opts) {
 		if (!D0 || coinTour(CL, D0, A.start.t).length < Math.min(base.T, base.coins.length)) {
 			walkOk = true;
 			let n = 0;
-			for (const q of base.coins) if (legCut(fields.get(q), q, base.coins, A.start.t)) { fields.set(q, legField(q, countOf.get(q))); n++; }
-			CL.walkLegs = n;
+			for (const q of base.coins) {
+				if (!legCut(fields.get(q), q, base.coins, A.start.t)) continue;
+				const g = legField(q, countOf.get(q));
+				if (g.walkLeg) { fields.set(q, g); n++; }
+			}
 			if (n) rounds();
+			n = 0;
+			for (const q of base.coins) if (fields.get(q).walkLeg) n++;
+			CL.walkLegs = n;
 		}
 	}
 	return CL;
