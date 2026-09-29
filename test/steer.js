@@ -73,15 +73,17 @@ if (toolPath) { try { execFileSync(toolPath, ['steertest'], { encoding: 'utf8', 
 /** two team doors over a tiny byte budget (steer-budget-walk): the start between a team 1 effect far left and, on the
  *  right, a team 1 door, a team 2 effect, a team 2 door and the trophy; with the bytes of one physics body the team is
  *  still modelled (3 layers, the ones past the budget walk layers), nothing left out, and the steer counts the detour */
-function teamDoors() {
-	const w = 44, mid = '.'.repeat(w - 2);
+function teamLevel() {
+	const w = 44;
 	const cells = [];
 	for (let x = 0; x < w; x++) { cells.push([x, 0, 9]); cells.push([x, 6, 9]); }
 	for (let y = 1; y < 6; y++) { cells.push([0, y, 9]); cells.push([w - 1, y, 9]); }
 	cells.push([2, 5, 423, 1], [20, 5, 255], [w - 10, 5, 423, 2], [w - 4, 5, 121]);
 	for (let y = 1; y < 6; y++) { cells.push([w - 12, y, 1027, 1]); cells.push([w - 8, y, 1027, 2]); }
-	void mid;
-	const L = levelOf(ED.eelvlOf({ name: 'teams', width: w, height: 7, cells }));
+	return levelOf(ED.eelvlOf({ name: 'teams', width: w, height: 7, cells }));
+}
+function teamDoors() {
+	const L = teamLevel();
 	const N = L.width * L.height;
 	const st = SF.buildSteer(L, { maxBytes: N * 120 });
 	const sim = new E.EESim(L); sim.reset();
@@ -260,6 +262,10 @@ function sectionB() {
 	section('B agree: the JS lookup = eegpu steertest');
 	if (!toolOk) { console.log(`  (skipped: ${toolPath ? `${toolPath} has no steertest (older than the app: rebuild it, node tools/build-native.js)` : 'no native tool'})`); return; }
 	Object.entries(ROOMS).forEach(([name, r], k) => { const L = levelOf(r.buf); agree(name, L, SF.buildSteer(L), randomRuns(k, 6, 600)); });
+	// the walk layers past the physics budget (steer-budget-walk): the key room and the two team doors over one physics
+	// body's bytes (a physics body and walk bodies in one file)
+	{ const L = levelOf(ROOMS.key.buf); const st = SF.buildSteer(L, { maxBytes: L.width * L.height * 120 }); if (st.info.walkLayers) agree('key, a walk layer past the physics budget', L, st, randomRuns(7, 6, 600)); }
+	{ const L = teamLevel(); const st = SF.buildSteer(L, { maxBytes: L.width * L.height * 120 }); if (st.info.walkLayers) agree('two team doors, walk layers past the physics budget', L, st, randomRuns(8, 6, 900)); }
 	const jobs = arg('jobs', path.join(__dirname, '..', 'src', 'jobs'));
 	let ids = [];
 	try { ids = fs.readdirSync(jobs).filter((d) => fs.existsSync(path.join(jobs, d, 'original.eelvl')) && fs.existsSync(path.join(jobs, d, 'best.eetas'))); } catch (e) { /* no jobs */ }
