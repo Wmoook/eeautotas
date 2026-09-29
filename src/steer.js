@@ -744,6 +744,12 @@ function legFieldOf(lv, fg, q, coins, start) {
 	g.unforced = true;
 	return g;
 }
+/** a leg field that reaches coin q neither from the start t0 nor from any other coin */
+function legCut(f, q, coins, t0) {
+	if (!f || arriveCost(f, t0) < CUT) return false;
+	for (const c of coins) if (c !== q && arriveCost(f, c) < CUT) return false;
+	return true;
+}
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
  *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
 function coinLegsPhys(B, PH, base, opts) {
@@ -756,6 +762,9 @@ function coinLegsPhys(B, PH, base, opts) {
 	const nC = M.names.indexOf('coins');
 	s = M.withVal(s, nC, base.T - 1);
 	const lvOf = new Map();
+	// (walkOk: a leg the physics model cuts from the start and from every other coin is the layer's WALK distance, only in a
+	// DP that has no tour from the start without it: see below)
+	let walkOk = false;
 	const legField = (q, k) => {
 		if (!lvOf.has(k)) {
 			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
@@ -765,7 +774,11 @@ function coinLegsPhys(B, PH, base, opts) {
 		}
 		const { lv, fg0 } = lvOf.get(k);
 		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return legFieldOf(lv, fg, q, base.coins, A.start.t);
+		const f = legFieldOf(lv, fg, q, base.coins, A.start.t);
+		if (!walkOk || !legCut(f, q, base.coins, A.start.t)) return f;
+		const w = RF.reachField(Object.assign({}, lv, { fg, gravityMult: 0.999 }), { goals: [{ tile: q, cost: 0 }], oneWayEntry: true });
+		w.walkLeg = true;
+		return w;
 	};
 	const fields = new Map(), countOf = new Map();
 	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
@@ -777,7 +790,8 @@ function coinLegsPhys(B, PH, base, opts) {
 	// tour (the k-th coin of the tour: coins = k - 1), rebuilt until the tour stays (at most 3 rounds). The T - 1 layer
 	// opens every coin door below T: on Forgotten Veil (doors for every count 1..16) coin 4's leg from coin 3 ran through
 	// doors shut at 3 coins, not the known route's 1195-tick loop)
-	if (!opts || opts.legTour !== false) {
+	const rounds = () => {
+		if (opts && opts.legTour === false) return;
 		for (let round = 0; round < 3; round++) {
 			const D = coinDP(CL);
 			if (!D) break;
@@ -786,6 +800,22 @@ function coinLegsPhys(B, PH, base, opts) {
 			tour.forEach((q, k) => { if (countOf.get(q) !== k) { fields.set(q, legField(q, k)); countOf.set(q, k); changed++; } });
 			CL.rounds = round + 1;
 			if (!changed) break;
+		}
+	};
+	rounds();
+	// (walk legs, night 3's coin stall: a DP with no tour from the start orders nothing. On Palmia Ville and Snow Is Falling
+	// (the plan's count = all 10 coins) two coins' physics legs are cut from the start and from every other coin (a model
+	// gap: water, a climb the layer fields do not see), so every coin's rest of the tour was Infinity, the lookup the layer
+	// field's alone and the wall breaker's next gate none: those coins' legs become their layer's walking distance (an
+	// order only; opts.walkLegs === false: off). A DP with a tour is unchanged)
+	if (!(opts && opts.walkLegs === false)) {
+		const D0 = coinDP(CL);
+		if (!D0 || coinTour(CL, D0, A.start.t).length < Math.min(base.T, base.coins.length)) {
+			walkOk = true;
+			let n = 0;
+			for (const q of base.coins) if (legCut(fields.get(q), q, base.coins, A.start.t)) { fields.set(q, legField(q, countOf.get(q))); n++; }
+			CL.walkLegs = n;
+			if (n) rounds();
 		}
 	}
 	return CL;
@@ -1005,7 +1035,7 @@ function buildSteer(level, opts) {
 			const none = new Uint8Array(N);
 			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
 			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
+			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null, walkLegs: CL.walkLegs || 0 };
 		}
 	}
 	const feats = M.feats.map((f, n) => {
@@ -1019,7 +1049,7 @@ function buildSteer(level, opts) {
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
-		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
+		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.walkLegs ? { walkLegs: dp.walkLegs } : {}) } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
