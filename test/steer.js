@@ -156,7 +156,7 @@ function legKeys() {
 	const r0 = R.costAt(R.reachField(L), (() => { const s = new E.EESim(L); s.reset(); return s; })());
 	const lk = on.st.info.legKeys || {};
 	check('leg keys: the coin DP\'s legs across a key and its gate (no steer value at the start before; with the legs carried a value that counts the key\'s detour, the DP\'s)',
-		!!off.st.dp && !Number.isFinite(off.v) && !!on.st.dp && Number.isFinite(on.v) && on.v > r0 + 15 && !!lk.used && lk.carried > 0,
+		!!off.st.dp && !Number.isFinite(off.v) && !!on.st.dp && Number.isFinite(on.v) && on.v > r0 + 15 && lk.used === true && lk.carried > 0,
 		`before ${off.v} (DP ${off.st.dp ? off.st.dp.n : 0}), carried ${on.v} (reach ${r0}; legKeys ${JSON.stringify(lk)})`);
 	const prev = process.env.EEAT_LEGKEYS;
 	process.env.EEAT_LEGKEYS = '0';

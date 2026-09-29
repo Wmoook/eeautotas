@@ -1141,26 +1141,11 @@ function coinLegsLayered(B, PH, base, deadline, opts) {
 		}
 		const cs = LG.costs(list, deadline);
 		if (cs.some((c) => !c)) return null;
-		// (opts.carry, LEG KEYS: a leg the plain copy cuts where the DP needs it, from the start at count 0 or from every
-		// other coin, carried (carryLegsOf): Mr Nutty's green key cuts every first coin off the start)
-		const carried = new Map();
-		if (opts && opts.carry) {
-			const CA = carryLegsOf(A, M, s, nC, coins, opts.carry.forcedOf, deadline, opts.carry.stats);
-			for (let x = 0; x < list.length; x++) {
-				const [q, k, at, , from] = list[x];
-				const cut = k === 0 ? !(cs[x][from.indexOf(n)] < CUT) : !cs[x].some((v) => v < CUT);
-				if (!cut) continue;
-				if (deadline && Date.now() > deadline) return null;
-				const f = CA.fields([[q, k]])[0];
-				carried.set(`${q}:${k}`, f);
-				cs[x] = Float64Array.from(at, (t) => arriveCost(f, t));
-			}
-		}
 		list.forEach(([, k, , j, from], x) => from.forEach((i, y) => { const v = cs[x][y]; if (v < CUT) L[(k * (n + 1) + i) * n + j] = v; }));
-		return coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG, carried);
+		return coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG);
 	} finally { LG.close(); }
 }
-function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG, carried) {
+function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG) {
 	const sT = M.withVal(s, nC, Math.min(T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
@@ -1198,10 +1183,8 @@ function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG, carried) {
 	}
 	const fields = new Map(), countOf = new Map();
 	const fl = coins.map((q, x) => [q, place[x] >= 0 ? place[x] : T - 1]);
-	const fl2 = carried ? fl.filter(([q, k]) => !carried.has(`${q}:${k}`)) : fl;
-	const f2 = LG.fields(fl2);
-	fl2.forEach(([q, k], x) => { fields.set(q, f2[x]); countOf.set(q, k); });
-	if (carried) for (const [q, k] of fl) if (carried.has(`${q}:${k}`)) { fields.set(q, carried.get(`${q}:${k}`)); countOf.set(q, k); }
+	const f2 = LG.fields(fl);
+	fl.forEach(([q, k], x) => { fields.set(q, f2[x]); countOf.set(q, k); });
 	return { T, coins, fields, tail, s, countOf, rounds: 0, layered: { D: { n, T, h }, tour, start } };
 }
 /** the DP's tour from tile t0 (the coins in order; T of them, or fewer where no leg has a value) */
@@ -1527,36 +1510,24 @@ function buildSteer(level, opts) {
 		const lt0 = Date.now();
 		const stats = { carried: 0, plain: 0, fields: 0, subs: 0 };
 		const forced = new Map(CL.coins.map((q) => [q, !(CL.fields.get(q) && CL.fields.get(q).unforced)]));
-		const carry = { forcedOf: (q) => forced.get(q), deadline: t0 + 2 * maxMs, stats };
-		legKeys = Object.assign({ used: false, ms: 0 }, stats);
-		// (a DP of these legs in place of the plan's: kept when the start has a value, else the plan's as it was)
-		const tryDP = (CLx, D, how) => {
-			if (!CLx || !D) return false;
+		const CL2 = coinLegsPhys(B, PH, cp, Object.assign({}, opts, { carry: { forcedOf: (q) => forced.get(q), deadline: t0 + 2 * maxMs, stats } }));
+		const D2 = stats.carried ? coinDP(CL2) : null;
+		legKeys = Object.assign({ used: false, ms: 0, rounds: CL2.rounds }, stats);
+		if (D2) {
 			const keep = { bodies: bodies.slice(), goals: goals.slice(), keys: new Map(bodyKey), dp };
 			bodies.length = nLayerBodies; goals.length = nLayerBodies;
 			for (const [k, v] of [...bodyKey]) if (v >= nLayerBodies) bodyKey.delete(k);
 			const none = new Uint8Array(N);
-			const bit = Int32Array.from(CLx.coins, (q) => level.coinBit[q]);
-			const leg = Int32Array.from(CLx.coins, (q) => addBody(CLx.fields.get(q), none));
-			steer.dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CLx.rounds, tour: CLx.layered ? CLx.layered.tour : null };
-			if (steerAt(steer, sim0) >= 0) { dp = steer.dp; legKeys.used = how; steer.prioShift = prioShiftOf(steer); return true; }
-			bodies.length = 0; bodies.push(...keep.bodies); goals.length = 0; goals.push(...keep.goals);
-			bodyKey.clear(); for (const [k, v] of keep.keys) bodyKey.set(k, v);
-			steer.dp = keep.dp;
-			return false;
-		};
-		// (1) the layered legs (coinLegsLayered: the leg from coin i to coin j at count k from j's field in layer k, the
-		// plan past its count's DP), carried where the plain copy cuts them: count-aware, so a coin-door staircase orders
-		// its coins (Mr Nutty's 9..14 doors: the legs of the T - 1 layer walk through them all); (2) the T - 1 legs carried
-		// with the tour rounds
-		const CLy = coinLegsLayered(B, PH, cp, t0 + 2 * maxMs, Object.assign({}, opts, { carry }));
-		legKeys.layered = !!CLy;
-		if (!(CLy && stats.carried && tryDP(CLy, CLy.layered.D, 'layered'))) {
-			const CL2 = coinLegsPhys(B, PH, cp, Object.assign({}, opts, { carry }));
-			legKeys.rounds = CL2.rounds;
-			if (stats.carried) tryDP(CL2, coinDP(CL2), 'carried');
+			const bit = Int32Array.from(CL2.coins, (q) => level.coinBit[q]);
+			const leg = Int32Array.from(CL2.coins, (q) => addBody(CL2.fields.get(q), none));
+			steer.dp = { n: D2.n, T: D2.T, bit, leg, h: D2.h, rounds: CL2.rounds, tour: null };
+			if (steerAt(steer, sim0) >= 0) { dp = steer.dp; legKeys.used = true; steer.prioShift = prioShiftOf(steer); }
+			else {
+				bodies.length = 0; bodies.push(...keep.bodies); goals.length = 0; goals.push(...keep.goals);
+				bodyKey.clear(); for (const [k, v] of keep.keys) bodyKey.set(k, v);
+				steer.dp = keep.dp;
+			}
 		}
-		Object.assign(legKeys, stats);
 		if (!(steerAt(steer, sim0) >= 0)) {
 			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
 			const R = buildTour(A, level, dp.T, false, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
