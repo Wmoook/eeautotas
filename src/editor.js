@@ -2593,6 +2593,8 @@ function steerFp() {
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	// (the plan-leg check's knobs, steer.js legCheck: a flip never reads the other's file)
+	h.update(`legcheck:${process.env.EEAT_LEGCHECK || ''}:${process.env.EEAT_LEGCHECK_COST || ''}:${process.env.EEAT_LEGCHECK_ROUNDS || ''}`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);

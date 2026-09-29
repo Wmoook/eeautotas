@@ -12,7 +12,12 @@
 //   C prune    the native explore with a garbage steer field (random costs) still finds the key room's route: the steer
 //              field only orders (only the reach field's -1 rules states out); the CPU search (goexplore.js --steer)
 //              finds it too, and one worker with a tick budget is reproducible
-// usage: node test/steer.js [--only=A,B,C] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
+//   L legs     the plan-leg check (steer.js legCheck, opt-in): a boost room whose plan rises 6 rows and 10 columns out of
+//              the boost to a floating trophy (refuted by the engine, priced, the fields rebuilt, the start and the value
+//              above the boost higher, the -1 set the plain model's, off by default), the trophy straight above (real: no
+//              price, the file byte for byte); reach.js opts.legPen (the -1 set, the levels below the threshold unpriced,
+//              no cost lower, the Bellman self-check with the free step down a level)
+// usage: node test/steer.js [--only=A,B,C,L] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
 const os = require('os');
@@ -360,8 +365,90 @@ function sectionC() {
 	check('... one worker with a tick budget is reproducible', !!g1.route && !!g2.route && g1.route.inputs === g2.route.inputs && g1.route.simTicks === g2.route.simTicks);
 }
 
+// the plan-leg check (steer.js legCheck, opt-in): a room with an up boost by the spawn; the trophy floating 6 rows up
+// and 10 columns right of the boost (the model's vx-blind rise out of the boost: no way in the engine) with a real way
+// by two steps on the right, or straight above the boost (a real rise)
+function legRoom(trophyX, trophyY, steps) {
+	const W = 40, H = 26;
+	const g = Array.from({ length: H }, (_, y) => Array.from({ length: W }, (_, x) => (x === 0 || y === 0 || x === W - 1 || y === H - 1 ? '#' : '.')));
+	g[23][2] = 'S'; g[23][6] = 'U'; g[trophyY][trophyX] = 'T';
+	if (steps) {
+		for (let y = 21; y <= 23; y++) for (const x of [24, 25]) g[y][x] = '#';
+		for (let y = 18; y <= 23; y++) for (const x of [21, 22]) g[y][x] = '#';
+	}
+	return ascii(g.map((r) => r.join('')));
+}
+function cutSame(a, b) {
+	if (a.S !== b.S) return false;
+	for (let s = 0; s < a.S; s++) {
+		const fa = a.layerBody[s] >= 0 ? a.bodies[a.layerBody[s]] : null, fb = b.layerBody[s] >= 0 ? b.bodies[b.layerBody[s]] : null;
+		if (!fa !== !fb) return false;
+		if (!fa) continue;
+		for (const k of ['walk', 'costR', 'costF', 'costL', 'costC', 'costX']) {
+			const x = fa[k], y = fb[k];
+			if (!x && !y) continue;
+			if (!x || !y || x.length !== y.length) return false;
+			for (let i = 0; i < x.length; i++) if ((x[i] === R.CUT) !== (y[i] === R.CUT)) return false;
+		}
+	}
+	return true;
+}
+function sectionL() {
+	section('L the plan-leg check (opt-in): a refuted rise priced, a real one not');
+	ID.U = [116];
+	const valueAt = (st, L, x, y) => { const sim = new E.EESim(L); sim.reset(); sim.px = 16 * x; sim.py = 16 * y; sim.speed_x = 0; sim.speed_y = 0; return SF.steerAt(st, sim); };
+	{
+		const L = levelOf(legRoom(16, 17, true).buf);
+		const base = SF.buildSteer(L, { legCheck: false }), v = SF.buildSteer(L, { legCheck: true });
+		const lc = v.info.legCheck || { rounds: [] };
+		const legs = lc.rounds.length ? lc.rounds[0].legs : [];
+		const leg = legs.find((g) => g.a[0] === 6 && g.a[1] === 23 && g.e[0] === 16 && g.e[1] === 17);
+		check('the plan\'s leg out of the boost to the trophy found', !!leg, JSON.stringify(legs.map((g) => [g.a, g.e])));
+		check('... refuted by the engine and priced', !!leg && leg.verdict === 'refuted' && leg.priced > 0, leg && `${leg.verdict}, ${leg.states} states, top row ${leg.top}, ${leg.priced} moves`);
+		check('... the physics fields rebuilt once, not reverted', lc.rebuilds === 1 && !lc.reverted, JSON.stringify({ rebuilds: lc.rebuilds, reverted: lc.reverted }));
+		check('the start value rises (the false way costs more)', v.info.start > base.info.start, `${base.info.start} -> ${v.info.start}`);
+		const a0 = valueAt(base, L, 6, 22), a1 = valueAt(v, L, 6, 22);
+		check('the value above the boost rises', a1 > a0, `${a0} -> ${a1}`);
+		check('the -1 set is the plain model\'s (every layer\'s body)', cutSame(base, v));
+		check('the priced moves are kept on the steer (tools), not in the file', !!v.legPens && v.legPens.size === 1 && SF.readSteerFile(SF.steerFileBytes(v, [0, 0])).S === v.S);
+		const off = SF.buildSteer(L);
+		check('off by default (EEAT_LEGCHECK unset): no check', process.env.EEAT_LEGCHECK === '1' || (!off.info.legCheck && Buffer.compare(SF.steerFileBytes(off, [0, 0]), SF.steerFileBytes(base, [0, 0])) === 0));
+	}
+	{
+		const L = levelOf(legRoom(6, 12, false).buf);
+		const base = SF.buildSteer(L, { legCheck: false }), v = SF.buildSteer(L, { legCheck: true });
+		const lc = v.info.legCheck || { rounds: [] };
+		const legs = lc.rounds.length ? lc.rounds[0].legs : [];
+		const leg = legs.find((g) => g.a[0] === 6 && g.a[1] === 23 && g.e[0] === 6 && g.e[1] === 12);
+		check('a real rise straight up out of the boost: the engine reaches its end', !!leg && leg.verdict === 'real', leg && `${leg.verdict}, ${leg.states} states`);
+		check('... nothing priced, the file the same byte for byte', lc.rebuilds === 0 && Buffer.compare(SF.steerFileBytes(base, [0, 0]), SF.steerFileBytes(v, [0, 0])) === 0);
+	}
+	{
+		// (reach.js opts.legPen: a threshold prices only the levels at or above it; the -1 set unchanged)
+		const L = levelOf(legRoom(16, 17, true).buf);
+		const W = L.width, N = W * L.height;
+		const pen = { r: new Uint8Array(N * 8), c: new Uint8Array(N * 8), f: new Uint8Array(N * 8) };
+		const t = 20 * W + 10;
+		for (let di = 0; di < 3; di++) pen.r[t * 8 + di] = 1 + 1 + 20;   // (R level 20 and up pays moving up out of (10, 20))
+		const f0 = R.reachField(L, { oneWayEntry: true }), f1 = R.reachField(L, { oneWayEntry: true, legPen: pen, legCost: 5000 });
+		let cut = 0, lowSame = true, lower = 0;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f0[k].length; i++) {
+			if ((f0[k][i] === R.CUT) !== (f1[k][i] === R.CUT)) cut++;
+			else if (f1[k][i] < f0[k][i]) lower++;
+		}
+		const NR = f0.costR.length / N;
+		for (let q = -1; q < 20; q++) if (f0.costR[t * NR + q + 1] !== f1.costR[t * NR + q + 1]) lowSame = false;
+		check('reach.js legPen: the -1 set the same', cut === 0, `${cut} differ`);
+		check('... levels below the threshold unpriced at the tile', lowSame);
+		check('... a price never lowers a cost', lower === 0, `${lower} lower`);
+		const chk = R.reachField(L, { oneWayEntry: true, legPen: pen, legCost: 5000, check: true, debug: true });
+		check('... the Bellman self-check holds with the prices (the free step down a level)', chk.mismatches === 0, `${chk.mismatches} mismatches`);
+	}
+}
+
 if (want('A')) sectionA();
 if (want('B')) sectionB();
 if (want('C')) sectionC();
+if (want('L')) sectionL();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

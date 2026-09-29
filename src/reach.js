@@ -30,7 +30,9 @@
 //   trophyRow, startRow}; null when the start is not cut off: the forward search would walk the whole model);
 //   opts.goals [{tile, cost (tiles)}] and opts.maxCost (tiles): explore.js --hunt's time-to-go field (seeded from these
 //   tiles at their own costs, not the trophy; states above maxCost stay -1, which is then no proof); opts.oneWayEntry: one-way
-//   platforms block the centre's entry against their pass direction: NOT sound, for src/steer.js's ordering field only).
+//   platforms block the centre's entry against their pass direction: NOT sound, for src/steer.js's ordering field only);
+//   opts.legPen {r, c, f} + opts.legCost (src/steer.js's plan-leg check only, ordering: level thresholds per move and
+//   type, labelSearch / edgesOf; the -1 set unchanged).
 // fifthsAt(field, px, py, vy, q0, q1, slippery) -> fifths (-1 = cut off); costAt(field, sim) -> tiles (-1 = cut off)
 //   (also costAt(field, px, py, vy, onGround): the gravity queue unknown, taken as the strongest); scoreAt(field, ...
 //   the same) -> the beam's score in tiles, blended between the 4 tile centres around the ball (native/beam.h
@@ -698,10 +700,21 @@ function reachField(level, opts) {
 	if (deaths) for (const r of respawn) respawnT[r] = cls[r] === NORM ? 2 : 1;   // (2: R(0) is a respawn state too)
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
+	// (opts.legPen, src/steer.js's plan-leg check only, ORDERING like the side-arrow prices: {r, c, f}, Uint8Arrays over
+	// tile x 8 directions of level thresholds (0: none; else the least level INDEX + 1 that pays): a move out of the
+	// engine's reach from a refuted leg's launch costs opts.legCost fifths more to a ball in R at least that level (r),
+	// in XR / C (c), in F / L (f); a lower level makes it for free. The label search's least source level of a move
+	// decides (a higher level is priced as the least level that makes the move: the levels' dominance, which the forward
+	// edges spell out as a free step down a level, edgesOf); the edge set is the plain model's, so the -1 set is the
+	// same; off with opts.maxCost, where a price past the cap would cut)
+	const lpOk = (a) => a instanceof Uint8Array && a.length === N * 8;
+	const LP = opts.legPen && opts.legCost > 0 && !(opts.maxCost >= 0) && lpOk(opts.legPen.r) && lpOk(opts.legPen.c) && lpOk(opts.legPen.f) ? opts.legPen : null;
+	const LPC = LP !== null ? Math.round(opts.legCost) : 0;
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pen: SA.pen, penCost: SA.cost,
+		lpR: LP !== null ? LP.r : null, lpC: LP !== null ? LP.c : null, lpF: LP !== null ? LP.f : null, lpenCost: LPC });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
-	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info,
+	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD, sideArrow: SA.info, legPrice: LP !== null ? LPC : 0,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
 		modMin: mm0 });
 	field.prioShift = Math.max(0, bitLen(Math.min(maxFin, FAR)) - 12);
@@ -712,14 +725,18 @@ function reachField(level, opts) {
 		crossEdges(t, ty, emit);
 		if (cls[t] === DEADLY) return;
 		sameTile(t, ty, l, (ty2, l2) => emit(t, ty2, l2, 0));
+		// (with the leg prices: a ball may act as one level lower, free: the dominance the label search's fill assumes)
+		if (LP !== null && l > LO[ty] && slotOf(t, ty) >= 0) emit(t, ty, l - 1, 0);
 		const x = t % W, y = (t / W) | 0;
+		const li = l - LO[ty];
 		for (let di = 0; di < 8; di++) {
 			const [dx, dy] = DIRS[di], x2 = x + dx, y2 = y + dy;
 			if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
 			const t2 = y2 * W + x2;
 			if (!passable(t2) && !(deaths && cls[t2] === DEADLY)) continue;
 			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
-			const add = (dx && dy ? 7 : 5) + (SA.pen !== null && SA.pen[t * 8 + di] !== 0 ? SA.cost : 0);
+			const lp = LP === null ? 0 : (ty === R_ ? LP.r : ty === X_ || ty === C_ ? LP.c : LP.f)[t * 8 + di];
+			const add = (dx && dy ? 7 : 5) + (SA.pen !== null && SA.pen[t * 8 + di] !== 0 ? SA.cost : 0) + (lp !== 0 && li >= lp - 1 ? LPC : 0);
 			fwd(prof[pid[t]], prof[pid[t2]], dx, dy, ty, l, (ty2, l2) => emit(t2, ty2, l2, add));
 		}
 	};
@@ -787,7 +804,10 @@ function labelSearch(S) {
 	// (a ring of cost buckets longer than the dearest edge: 8 for 5 / 7; with the side-arrow prices a power of two past the
 	// price, its buckets made when first used)
 	const pen = S.pen || null, penCost = pen !== null ? S.penCost : 0;
-	const NB = pen !== null ? 1 << bitLen(penCost + 8) : 8;
+	// (the plan-leg prices (steer.js): R by lpR's threshold, XR and C by lpC's, F and L by lpF's (the least level index + 1
+	// that pays; 0 none); a move may carry both prices)
+	const lpR = S.lpR || null, lpC = S.lpC || null, lpF = S.lpF || null, lpenCost = lpR !== null ? S.lpenCost : 0;
+	const NB = pen !== null || lpR !== null ? 1 << bitLen(penCost + lpenCost + 8) : 8;
 	const bk = [], bn = new Int32Array(NB);
 	for (let b = 0; b < NB; b++) bk.push(NB === 8 ? new Int32Array(4096) : null);
 	let queued = 0, cur = 0;
@@ -866,7 +886,15 @@ function labelSearch(S) {
 				let tab = invArr[(pt * nP + pt2) * 8 + di];
 				if (tab === null) tab = invTable(pt, pt2, di);
 				const step = cur + (dx !== 0 && dy !== 0 ? 7 : 5) + (pen !== null && pen[t * 8 + di] !== 0 ? penCost : 0);
-				for (let ty = 0; ty < 5; ty++) { const lm = tab[o + ty]; if (lm !== NONE8) push(t, ty, lm - LO[ty], step); }
+				const pr = lpR !== null ? lpR[t * 8 + di] : 0, pc = lpR !== null ? lpC[t * 8 + di] : 0, pf = lpR !== null ? lpF[t * 8 + di] : 0;
+				if (pr !== 0 || pc !== 0 || pf !== 0) {
+					for (let ty = 0; ty < 5; ty++) {
+						const lm = tab[o + ty];
+						if (lm === NONE8) continue;
+						const li = lm - LO[ty], p = ty === R_ ? pr : ty === X_ || ty === C_ ? pc : pf;
+						push(t, ty, li, p !== 0 && li >= p - 1 ? step + lpenCost : step);
+					}
+				} else for (let ty = 0; ty < 5; ty++) { const lm = tab[o + ty]; if (lm !== NONE8) push(t, ty, lm - LO[ty], step); }
 			}
 		}
 		bn[b] = 0;

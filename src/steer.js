@@ -711,7 +711,9 @@ function buildPhysics(B, opts) {
 		const key = goalsKey(goals);
 		if (goalsOf[s] === key && fields[s]) return false;
 		goalsOf[s] = key;
-		fields[s] = lv._wild && kappa ? wildField(A, M, s, goals, kappa) : RF.reachField(lv, Object.assign({ goals, debug: !!opts.debug }, rfOpts));
+		// (opts.legPen: the plan-leg check's priced moves of this layer, {r, c, f} level thresholds; legCheck below)
+		const lp = opts.legPen ? opts.legPen.get(s) || null : null;
+		fields[s] = lv._wild && kappa ? wildField(A, M, s, goals, kappa) : RF.reachField(lv, Object.assign({ goals, debug: !!opts.debug }, rfOpts, lp ? { legPen: lp, legCost: opts.legCost } : null));
 		builds++;
 		return true;
 	};
@@ -751,14 +753,14 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 	const A = PH.A, M = PH.M;
 	let s = M.layerOf(sim);
 	let f = PH.fields[s];
-	const tiles = [], legs = [], expAt = new Map();
-	if (!f || !f._m) return { tiles, legs, expAt, end: 'no field' };
+	const tiles = [], legs = [], expAt = new Map(), states = [];
+	if (!f || !f._m) return { tiles, legs, expAt, states, end: 'no field' };
 	const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
 	let cur = null, why = 'no state';
 	if (st) for (const [ty, l] of [...(st.base ? [st.base] : []), ...(st.rise || [])]) { const c = f._m.costOf(st.t, ty, l); if (c !== CUT && (!cur || c < cur.c)) cur = { t: st.t, ty, l, c }; }
 	for (let leg = 0; leg < maxLegs && cur; leg++) {
 		const path = descend(f, cur);
-		for (const p of path) tiles.push(p.t);
+		for (const p of path) { tiles.push(p.t); states.push({ t: p.t, ty: p.ty, l: p.l, s }); }
 		const end = path[path.length - 1];
 		if (A.trophies.includes(end.t)) { why = 'trophy'; break; }
 		const k = A.specialAt[end.t];
@@ -780,7 +782,359 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 		if (f.mode === 'walk' || !f._m) { why = 'walk layer'; break; }
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
 	}
-	return { tiles, legs, expAt, end: why };
+	return { tiles, legs, expAt, states, end: why };
+}
+
+// ------------------------------------------------------------------ the plan's rise legs, checked in the engine
+/**
+ * The plan-leg check (OPT-IN: EEAT_LEGCHECK=1 or buildSteer(level, {legCheck: true}); off = main's steer byte for
+ * byte; NIGHT3 cycle 8, plan-leg-engine-check): ORDERING only. The ordering fields keep no horizontal speed, so a rise
+ * out of a field (dots, side arrows, climbables, liquids, up arrows) or an up boost drifts a column a row for every row
+ * its vertical speed gives, a ball that left a field sideways keeps its rise along the row (XR), a ball at its apex
+ * floats sideways (F), and diagonal steps in and out of a field column pump its speed: Aedan Garden's plan rises out of
+ * the dots (71,21) 9 rows up and 9 columns right to (80,12), Nightmare Relics' out of the up boost (92,138) 6 tiles
+ * sideways into the trophy, Rotcil Illusions' along a field row 9 tiles, then up into the trophy; none of them is a way
+ * the engine has (the gate-as-floor fixer's plans, src/out/n3/gate-as-floor/plans_main.txt).
+ * The legs (`riseLegs`): a LAUNCH = a state in a field tile (C) or an up boost right before rising states (R, XR) in
+ * normal tiles, each a move to a neighbour of the one before in the same layer; the leg = that run of rising states (a
+ * same-tile edge, a teleport, a fall or a field ends it), with its launch run (the field / boost states before the exit,
+ * up to LEG_RUN tiles back); it counts when it gains LEG_MIN_ROWS rows, or a row after LEG_MIN_CARRY columns. Checked
+ * (`pickLegs`, `auditLegs`): of every layer's part of the physics plan from the start the first LEG_K legs (the layer's
+ * entry) and the last LEG_K (the approach to the next layer's tile or the trophy), at most LEG_MAX, and of each of the
+ * plan's layers the LEG_AUDIT launches of least cost (the false nears that pin a search are where the field is low, not
+ * only on the start's plan: MoonBase's stall rises by a lone side arrow the start's plan never passes).
+ * The test (`riseLegTest`, the engine; deterministic: a state cap, the time cap only a safety): the ball put in the
+ * launch run's first tile (its middle and 6 px either side, at the tile's middle or 7 px up) with the model's own
+ * vertical speed there (C(c): c / 8 px/tick up; an up boost: at rest, its push acts), every horizontal speed of
+ * -LEG_VX .. LEG_VX (the running speed) and the gravity queue of the tile's block; then every input tick by tick (on
+ * plain blocks: in the air none / left / right, on the ground also the jumps), one state per (LEG_QP px, 1 / LEG_QV
+ * px/tick) cell, a state dropped when it leaves the box of LEG_BOX tiles around the run, the path and the end, or when
+ * its centre enters a field or boost tile not of the run (the leg's claim is a flight through normal tiles; another
+ * launch is another leg); success = a centre in the leg's end row or above within a column of its end tile. Exhausted
+ * (no state left, or LEG_TICKS ticks) without success = REFUTED; hit LEG_STATES (or LEG_MS) = unknown, no price.
+ * The price (`regionMoves`): a move across the BOUNDARY of the engine's reach from the launch (from a tile the ball's
+ * centre was in to one it never was, inside the box) costs `legCost` fifths more (LEG_COST = a death's price;
+ * EEAT_LEGCHECK_COST) to a ball whose level there still reaches the leg's end through it (reach.js opts.legPen
+ * thresholds by type: R, XR / C, F / L), in the leg's layer and in every physics layer whose gates in the box are its
+ * layer's; never a move a leg the engine found real makes; the physics fields rebuilt (LEG_ROUNDS: once;
+ * EEAT_LEGCHECK_ROUNDS) while the build's first half has room. A round whose prices the start's every way pays (its
+ * value up by the price or more, or none) is undone: that orders nothing there and only coarsens the explore's priority
+ * buckets. A price, never a cut: the edge set is the plain model's, so the -1 set is the same. Not a proof either way
+ * (the seeds are not every state a ball can launch with; one state per cell; the model is memoryless, so a real way
+ * from elsewhere across the same boundary pays too: the census's known routes, src/out/n3/plan-leg-engine-check/).
+ * Only the physics layer fields (not the coin legs' fields). `steer.legPens` (not enumerable, not in the file): the
+ * priced moves, for the tools; `info.legCheck`: the rounds, legs, verdicts, the start before / after.
+ */
+const LEG_K = 2, LEG_MAX = 12, LEG_MIN_ROWS = 3, LEG_MIN_CARRY = 3, LEG_BOX = 5, LEG_RUN = 4, LEG_STATES = 40000, LEG_TICKS = 160, LEG_MS = 2000, LEG_ROUNDS = 1, LEG_AUDIT = 8;
+const LEG_VX = 6.8, LEG_COST = RF.DEATH_COST;
+const LEG_MASKS = [0, 2, 4, 8, 10, 12, 1, 3, 5], LEG_GROUND = [0, 2, 4, 1, 3, 5], LEG_AIR = [0, 2, 4], LEG_QP = 2, LEG_QV = 2;
+const LEG_DX = [-1, 0, 1, -1, 1, -1, 0, 1], LEG_DY = [-1, -1, -1, 0, 0, 1, 1, 1];
+function legCheckOn(opts) { return opts && opts.legCheck !== undefined ? !!opts.legCheck : process.env.EEAT_LEGCHECK === '1'; }
+function legCostOf(opts) {
+	if (opts && opts.legCost > 0) return Math.round(opts.legCost);
+	const e = +process.env.EEAT_LEGCHECK_COST;
+	return e > 0 ? Math.round(e) : LEG_COST;
+}
+/** every rise leg of the plan (plan states {t, ty, l, s}), in the plan's order, with its layer part `part` */
+function riseLegs(PH, states) {
+	const W = PH.A.W, out = [];
+	let segS = -1, part = -1;
+	const adj = (a, b) => a !== b && Math.abs(a % W - b % W) <= 1 && Math.abs(Math.floor(a / W) - Math.floor(b / W)) <= 1;
+	for (let i = 0; i + 1 < states.length; i++) {
+		const a = states[i];
+		if (a.s !== segS) { segS = a.s; part++; }
+		const f = PH.fields[a.s];
+		if (!f || f.mode !== 'physics') continue;
+		const cls = f.cls;
+		const launch = (p) => p.s === a.s && ((p.ty === RF.C_ && cls[p.t] >= RF.DOTS && cls[p.t] <= RF.UP) || cls[p.t] === RF.BUP);
+		if (!launch(a)) continue;
+		const rising = (p, q) => p.s === a.s && (p.ty === RF.R_ || p.ty === RF.X_) && cls[p.t] === RF.NORM && adj(q.t, p.t);
+		if (!rising(states[i + 1], a)) continue;
+		let j = i + 1;
+		while (j + 1 < states.length && rising(states[j + 1], states[j])) j++;
+		const e = states[j];
+		const rows = Math.floor(a.t / W) - Math.floor(e.t / W), cols = Math.abs(e.t % W - a.t % W);
+		if (rows >= LEG_MIN_ROWS || (rows >= 1 && cols >= LEG_MIN_CARRY)) {
+			const moves = [];
+			for (let m = i; m < j; m++) {
+				const t = states[m].t, t2 = states[m + 1].t, dx = t2 % W - t % W, dy = Math.floor(t2 / W) - Math.floor(t / W);
+				for (let di = 0; di < 8; di++) if (LEG_DX[di] === dx && LEG_DY[di] === dy) moves.push([t, di]);
+			}
+			// (the launch run: the plan's field / boost states before the exit, up to LEG_RUN tiles back, each a move to a
+			// neighbour: the engine starts at its first with the model's speed there, and the field's own push and drag
+			// over the run are the engine's)
+			let k = i;
+			while (k > 0 && i - k + 1 < LEG_RUN && launch(states[k - 1]) && adj(states[k - 1].t, states[k].t)) k--;
+			const run = [];
+			for (let m = k; m <= i; m++) run.push(states[m].t);
+			const path = [], seq = [];
+			for (let m = i + 1; m <= j; m++) path.push(states[m].t);
+			for (let m = i; m <= j; m++) seq.push({ t: states[m].t, ty: states[m].ty, l: states[m].l });
+			out.push({ s: a.s, part, a: a.t, e: e.t, ty: a.ty, l: a.l, rows, cols, moves, run, path, seq, s0: states[k].t, ty0: states[k].ty, l0: states[k].l });
+		}
+		i = j - 1;
+	}
+	return out;
+}
+/** the legs to check: of every layer part the first k and the last k, at most max, in the plan's order */
+function pickLegs(legs, k, max) {
+	const byPart = new Map();
+	for (const g of legs) { if (!byPart.has(g.part)) byPart.set(g.part, []); byPart.get(g.part).push(g); }
+	const keep = new Set();
+	for (const gs of byPart.values()) { gs.slice(0, k).forEach((g) => keep.add(g)); gs.slice(-k).forEach((g) => keep.add(g)); }
+	return legs.filter((g) => keep.has(g)).slice(0, max);
+}
+/**
+ * The audit: the false nears that pin a search are where the field is low, not only on the start's plan (MoonBase's
+ * stall rises 8 rows by a lone side arrow the start's plan never passes). Of a physics layer the LEG_AUDIT launch tiles
+ * of least cost (a field tile with a normal tile above, beside or diagonally above it, at its stop level: a ball at rest
+ * in the field, `stopC`; an up boost at its cap) whose greedy descent starts with a leg from that tile -> the legs
+ */
+function auditLegs(PH, s, z) {
+	const f = PH.fields[s], out = [];
+	if (!f || f.mode !== 'physics' || !f._m || !(z > 0)) return out;
+	const cls = f.cls, W = PH.A.W, N = PH.A.N, m = f._m;
+	const cand = [];
+	for (let t = W; t < N; t++) {
+		const c = cls[t], field = c >= RF.DOTS && c <= RF.UP;
+		if (!field && c !== RF.BUP) continue;
+		const x = t % W, up = t - W;
+		const open = cls[up] === RF.NORM || (x > 0 && (cls[up - 1] === RF.NORM || cls[t - 1] === RF.NORM)) || (x + 1 < W && (cls[up + 1] === RF.NORM || cls[t + 1] === RF.NORM));
+		if (!open) continue;
+		const ty = field ? RF.C_ : RF.R_, l = field ? m.stopC(t) : f.Q;
+		const v = m.costOf(t, ty, l);
+		if (v < CUT) cand.push([v, t, ty, l]);
+	}
+	cand.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+	let tries = 0;
+	for (const [, t, ty, l] of cand) {
+		if (out.length >= z || tries++ >= 4 * z) break;   // (at most 4 z descents)
+		const path = descend(f, { t, ty, l }, 600).map((p) => ({ t: p.t, ty: p.ty, l: p.l, s }));
+		const legs = riseLegs(PH, path);
+		if (legs.length && legs[0].run[0] === t) out.push(Object.assign(legs[0], { audit: true }));
+	}
+	return out;
+}
+/** the box of a leg (its launch run, the exit and the end, LEG_BOX tiles around): [x0, x1, y0, y1] */
+function legBox(A, leg) {
+	const W = A.W, xs = [leg.a % W, leg.e % W], ys = [Math.floor(leg.a / W), Math.floor(leg.e / W)];
+	for (const t of (leg.run || []).concat(leg.path || [])) { xs.push(t % W); ys.push(Math.floor(t / W)); }
+	return [Math.max(0, Math.min(...xs) - LEG_BOX), Math.min(W - 1, Math.max(...xs) + LEG_BOX), Math.max(0, Math.min(...ys) - LEG_BOX), Math.min(A.H - 1, Math.max(...ys) + LEG_BOX)];
+}
+/** layers s and s2 open and shut the same gates in the box */
+function sameGates(A, M, box, s, s2) {
+	const [x0, x1, y0, y1] = box, W = A.W;
+	for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const t = y * W + x; if (A.cls[t] === 3 && M.gateOpen(t, s) !== M.gateOpen(t, s2)) return false; }
+	return true;
+}
+/**
+ * One leg in the engine (cls: the leg layer's reach classes; base: a snapshot of the start's sim, whose discrete state
+ * must open and shut the box's gates as the leg's layer does) -> {verdict: 'real' | 'refuted' | 'unknown' (a cap) |
+ * 'skip', why, states, ticks, top (the highest row a centre reached), ms}
+ */
+function riseLegTest(level, A, M, cls, leg, base, o) {
+	const t0 = Date.now(), W = A.W;
+	const maxStates = o.maxStates || LEG_STATES, maxTicks = o.maxTicks || LEG_TICKS, maxMs = o.maxMs || LEG_MS, vxMax = o.vx || LEG_VX;
+	const box = legBox(A, leg), [x0, x1, y0, y1] = box;
+	const ya = Math.floor(leg.a / W), xe = leg.e % W, ye = Math.floor(leg.e / W);
+	const sim = new E.EESim(level);
+	sim.restore(base);
+	for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+		const t = y * W + x;
+		if (A.cls[t] === 3 && M.gateOpen(t, leg.s) === sim.is_tile_solid_now(x, y)) return { verdict: 'skip', why: 'gate', states: 0, ticks: 0, top: -1, ms: Date.now() - t0 };
+	}
+	const inp = new E.EEInput();
+	const seen = new Set(), visited = new Set();
+	let frontier = [], states = 0, ticks = 0, top = ya;
+	// (one state per cell of qp px and 1 / qv px/tick)
+	const qp = o.qp || LEG_QP, qv = o.qv || LEG_QV;
+	const keyOf = () => `${Math.round(sim.px / qp)},${Math.round(sim.py / qp)},${Math.round(sim.speed_x * qv)},${Math.round(sim.speed_y * qv)},${sim._q0},${sim._q1},${sim.on_ground ? 1 : 0},${sim.jump_count}`;
+	// (plain blocks: the down gravity of air, no kill, no liquid or climb: there up does nothing, and in the air with its
+	// jump used a jump neither)
+	const plain = (id) => id >= 0 && id < level.gMory.length && level.gMorx[id] === 0 && level.gMory[id] === 2 && level.gMox[id] === 0 && level.gMoy[id] === 2 && (level.gFlags[id] & 4) === 0 && (level.flags[id] & (32 | 64)) === 0;
+	const blocked = (px, py) => {
+		for (let ty = Math.floor(py / 16); ty <= Math.floor((py + 15) / 16); ty++) for (let tx = Math.floor(px / 16); tx <= Math.floor((px + 15) / 16); tx++) if (sim.is_tile_solid_now(tx, ty)) return true;
+		return false;
+	};
+	// (the seeds: at the launch run's first tile, with the model's speed there)
+	const s0 = leg.s0 !== undefined ? leg.s0 : leg.a, ty0 = leg.s0 !== undefined ? leg.ty0 : leg.ty, l0 = leg.s0 !== undefined ? leg.l0 : leg.l;
+	const xs = s0 % W, ys = Math.floor(s0 / W);
+	const inRun = new Set(leg.run || [leg.a]);
+	const vy0 = ty0 === RF.C_ ? -Math.min(16, l0 / 8) : 0, id = level.fg[s0];
+	for (const oy of [0, -7]) for (const ox of [0, -6, 6]) for (const vx of [0, -vxMax / 2, vxMax / 2, -vxMax, vxMax]) {
+		const px = 16 * xs + ox, py = 16 * ys + oy;
+		if (blocked(px, py)) continue;
+		sim.restore(base);
+		sim.px = sim.prev_px = px; sim.py = sim.prev_py = py; sim.speed_x = vx; sim.speed_y = vy0;
+		sim._q0 = sim._q1 = id; sim.on_ground = false;
+		const k = keyOf();
+		if (seen.has(k)) continue;
+		seen.add(k); frontier.push(sim.snapshot()); states++;
+	}
+	if (!frontier.length) return { verdict: 'skip', why: 'no seed', states: 0, ticks: 0, top: -1, ms: Date.now() - t0 };
+	for (let tick = 0; tick < maxTicks && frontier.length; tick++) {
+		const next = [];
+		for (const snap of frontier) {
+			sim.restore(snap);
+			const pl = plain(sim._q0) && plain(sim._q1) && plain(sim.current_tile) && sim.max_jumps <= 1 && !sim.has_levitation && sim.flip_gravity === 0 && sim.world_gravity_multiplier === 1;
+			for (const m of !pl ? LEG_MASKS : sim.on_ground ? LEG_GROUND : sim.jump_count >= 1 ? LEG_AIR : LEG_GROUND) {
+				sim.restore(snap);
+				E.applyMask(inp, m);
+				sim.tick(inp);
+				ticks++;
+				if (sim.is_dead) continue;
+				const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4;
+				if (cy < top) top = cy;
+				visited.add(cy * W + cx);
+				if (cy <= ye && Math.abs(cx - xe) <= 1) return { verdict: 'real', states, ticks, top, tick: tick + 1, ms: Date.now() - t0 };
+				if (cx < x0 || cx > x1 || cy < y0 || cy > y1) continue;
+				const t = cy * W + cx;
+				if (cls[t] !== RF.NORM && !inRun.has(t)) continue;
+				const k = keyOf();
+				if (seen.has(k)) continue;
+				seen.add(k);
+				next.push(sim.snapshot());
+				if (++states >= maxStates) return { verdict: 'unknown', why: 'states', states, ticks, top, ms: Date.now() - t0 };
+			}
+		}
+		if (Date.now() - t0 > maxMs) return { verdict: 'unknown', why: 'time', states, ticks, top, ms: Date.now() - t0 };
+		frontier = next;
+	}
+	return { verdict: 'refuted', states, ticks, top, visited, ms: Date.now() - t0 };
+}
+/**
+ * The priced moves of a refuted leg: [tile, direction, kind ('r': R; 'c': XR and C; 'f': F and L), threshold (the
+ * least level index + 1 that pays)]. The engine refuted every way from the launch to the leg's end, and the model has
+ * many (in open air the next plan went round a single priced move at once: the toy's boost leg through the next
+ * column, Aedan's refuted rise one column over at +1.4 tiles, and past the rising types' prices by floating sideways in
+ * F), so the price is on the BOUNDARY of the engine's reach: every move in the leg's box FROM a tile the engine had the
+ * ball's centre in from the launch (`visited`, and the launch run) INTO one it never had, for a ball whose level at the
+ * source still reaches the leg's end through that move (`need`: the model's own forward moves inside the box, backwards
+ * from the end; a lower level makes the move for free and cannot finish the leg from there, so the forward edges' free
+ * step down a level is no way round the price). Not the moves inside the reach (the leg's first rows are often real,
+ * and other ways share them: Crypts of Anubis' known routes rise straight up the launch column a refuted diagonal leg
+ * leaves at its top; the whole leg priced cost 17 of their rising moves and the start 829 -> 12,302 tiles), nor the
+ * moves inside the unreached part (another way may enter it from its other side: the toy's staircase to the trophy).
+ */
+function regionMoves(A, f, leg, visited, box) {
+	const out = [];
+	if (!f._m) return out;
+	const m = f._m, W = A.W, cls = f.cls, run = new Set(leg.run || [leg.a]);
+	const [x0, x1, y0, y1] = box, bw = x1 - x0 + 1, bh = y1 - y0 + 1, n = bw * bh;
+	const idx = (t) => { const x = t % W, y = Math.floor(t / W); return x < x0 || x > x1 || y < y0 || y > y1 ? -1 : (y - y0) * bw + (x - x0); };
+	const tileOf = (i) => (y0 + Math.floor(i / bw)) * W + x0 + (i % bw);
+	const inside = (t) => cls[t] === RF.NORM || run.has(t);
+	const reached = (t) => run.has(t) || (visited !== undefined && visited.has(t));
+	// need[type][i]: the least level of the model's type (R, F, XR, C, L: reach.js's order) at the tile that reaches the
+	// end (Infinity: none)
+	const LO = [-1, 0, 0, 0, 0], HI = [f.INF, RF.KF, RF.NL - 1, RF.NL - 1, RF.KF], KIND = ['r', 'f', 'c', 'c', 'f'];
+	const need = LO.map(() => new Float64Array(n).fill(Infinity));
+	const ie = idx(leg.e);
+	if (ie < 0) return out;
+	for (let k = 0; k < 5; k++) need[k][ie] = LO[k];
+	const none = (i) => need.every((a) => a[i] === Infinity);
+	/** the least level of type k at t whose move to t2 reaches t2 with a need met (Infinity: none), by bisection: the
+	 *  forward move is monotone in the level */
+	const least = (t, t2, k) => {
+		const i2 = idx(t2), P = m.prof[m.pid[t]], P2 = m.prof[m.pid[t2]];
+		const dx = t2 % W - t % W, dy = Math.floor(t2 / W) - Math.floor(t / W);
+		const ok = (l) => { let r = false; m.fwd(P, P2, dx, dy, k, l, (ty2, l2) => { if (l2 >= need[ty2][i2]) r = true; }); return r; };
+		if (!ok(HI[k])) return Infinity;
+		let lo = LO[k], hi = HI[k];
+		while (lo < hi) { const mid = (lo + hi) >> 1; if (ok(mid)) hi = mid; else lo = mid + 1; }
+		return lo;
+	};
+	const types = (t) => (run.has(t) ? [0, 1, 2, 3, 4] : [0, 1, 2, 4]);   // (C: the launch run's field tiles)
+	const each = (t, fn) => {
+		const x = t % W;
+		for (let di = 0; di < 8; di++) {
+			const x2 = x + LEG_DX[di], t2 = t + LEG_DY[di] * W + LEG_DX[di];
+			if (x2 < 0 || x2 >= W || t2 < 0 || t2 >= A.N || idx(t2) < 0 || !inside(t2)) continue;
+			fn(di, t2);
+		}
+	};
+	// (Bellman-Ford over the box: the needs only fall)
+	for (let sweep = 0, changed = true; changed && sweep < 64; sweep++) {
+		changed = false;
+		for (let i = 0; i < n; i++) {
+			const t = tileOf(i);
+			if (!inside(t) || i === ie) continue;
+			each(t, (di, t2) => {
+				if (none(idx(t2))) return;
+				for (const k of types(t)) { const l = least(t, t2, k); if (l < need[k][i]) { need[k][i] = l; changed = true; } }
+			});
+		}
+	}
+	// the moves across the boundary of the engine's reach
+	for (let i = 0; i < n; i++) {
+		const t = tileOf(i);
+		if (!inside(t) || !reached(t)) continue;
+		each(t, (di, t2) => {
+			if (reached(t2) || none(idx(t2))) return;
+			const th = { r: Infinity, c: Infinity, f: Infinity };
+			for (const k of types(t)) { const l = least(t, t2, k); if (l !== Infinity) th[KIND[k]] = Math.min(th[KIND[k]], l - LO[k] + 1); }
+			for (const kind of ['r', 'c', 'f']) if (th[kind] !== Infinity) out.push([t, di, kind, th[kind]]);
+		});
+	}
+	return out;
+}
+/**
+ * One round of the check on a built physics model: the plan from the start and the audit, their legs not checked
+ * before (`checked`: layer, launch, end), the engine's verdicts; a refuted leg's frontier moves go into `pens` (Map
+ * layer -> {r, c} thresholds) of its layer and of every physics layer with the same gates in its box, except a move
+ * a leg the engine found real makes (`real`: layer, tile, direction, over the rounds: Crypts of Anubis' audit refuted
+ * the field row's leg from (98, 24) while the same row's legs from (95-97, 24) are real and share its frontier move,
+ * which its known routes make) -> {info, added (legs refuted this round with a move priced)}
+ */
+function legCheck(level, PH, deadline, o, checked, pens, real) {
+	const t0 = Date.now(), A = PH.A, M = PH.M, W = A.W;
+	const sim = new E.EESim(level); sim.reset();
+	const base = sim.snapshot();
+	const pl = layeredPlan(PH, sim);
+	const all = riseLegs(PH, pl.states);
+	const keyOf = (g) => `${g.s}:${g.a}:${g.e}`;
+	const legs = pickLegs(all.filter((g) => !checked.has(keyOf(g))), o.k || LEG_K, o.max || LEG_MAX);
+	// (the audit of the plan's layers: their least-cost launches)
+	const z = o.audit !== undefined ? o.audit : LEG_AUDIT, have = new Set(legs.map(keyOf));
+	for (const s of [...new Set(pl.states.map((p) => p.s))]) for (const g of auditLegs(PH, s, z)) if (!checked.has(keyOf(g)) && !have.has(keyOf(g))) { have.add(keyOf(g)); legs.push(g); }
+	const info = { plan: pl.end, found: all.length, legs: [], refuted: 0, priced: 0, ms: 0 };
+	const xy = (t) => [t % W, Math.floor(t / W)];
+	const refuted = [];
+	for (const leg of legs) {
+		checked.add(keyOf(leg));
+		const r = Date.now() > deadline ? { verdict: 'skip', why: 'time', states: 0, ticks: 0, top: -1, ms: 0 } : riseLegTest(level, A, M, PH.fields[leg.s].cls, leg, base, o);
+		const lg = { s: leg.s, a: xy(leg.a), e: xy(leg.e), ty: leg.ty === RF.C_ ? 'C' : 'R', l: leg.l, from: xy(leg.s0), l0: leg.l0, rows: leg.rows, cols: leg.cols, audit: leg.audit ? 1 : undefined, verdict: r.verdict, why: r.why, states: r.states, top: r.top, ms: r.ms };
+		info.legs.push(lg);
+		if (r.verdict === 'real') for (let k = 0; k + 1 < leg.seq.length; k++) real.add(`${leg.s}:${leg.seq[k].t}:${leg.seq[k + 1].t}`);
+		if (r.verdict !== 'refuted') continue;
+		info.refuted++;
+		refuted.push({ leg, lg, moves: regionMoves(A, PH.fields[leg.s], leg, r.visited, legBox(A, leg)) });
+	}
+	// (after every verdict of the round: a move a real leg makes is never priced)
+	for (const { leg, lg, moves: all0 } of refuted) {
+		const moves = all0.filter(([t, di]) => !real.has(`${leg.s}:${t}:${t + LEG_DY[di] * W + LEG_DX[di]}`));
+		lg.priced = moves.length;
+		if (all0.length > moves.length) lg.realMoves = all0.length - moves.length;
+		if (!moves.length) continue;
+		info.priced++;
+		lg.at = [xy(moves[0][0]), moves[0][1], moves[0][2], moves[0][3] - 1];
+		const box = legBox(A, leg);
+		for (let s2 = 0; s2 < M.S; s2++) {
+			const f2 = PH.fields[s2];
+			if (!f2 || f2.mode !== 'physics' || (s2 !== leg.s && !sameGates(A, M, box, leg.s, s2))) continue;
+			let p = pens.get(s2);
+			if (!p) pens.set(s2, (p = { r: new Uint8Array(A.N * 8), c: new Uint8Array(A.N * 8), f: new Uint8Array(A.N * 8) }));
+			// (two legs pricing one move: the lower threshold)
+			for (const [t, di, kind, thr] of moves) { const q = p[kind], i = t * 8 + di; if (q[i] === 0 || thr < q[i]) q[i] = thr; }
+		}
+	}
+	info.ms = Date.now() - t0;
+	return { info, added: info.priced };
+}
+function legRoundsOf(opts) {
+	if (opts && opts.legRounds > 0) return opts.legRounds | 0;
+	const e = +process.env.EEAT_LEGCHECK_ROUNDS;
+	return e > 0 ? e | 0 : LEG_ROUNDS;
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
@@ -1339,6 +1693,39 @@ function buildSteer(level, opts) {
 		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
 		modeled.add(cx.feat);
 	}
+	// the plan-leg check (opt-in): the plan's rise legs in the engine, the refuted ones priced, the physics fields rebuilt
+	// (LEG_ROUNDS: once; each round checks the new plan's legs not checked before) while the build's first half has room
+	// for another build (the coin legs and the DP come after)
+	let legInfo = null, legPens = null;
+	if (legCheckOn(opts)) {
+		const startOf = () => { const s0 = new E.EESim(level); s0.reset(); const f = PH.fields[PH.M.layerOf(s0)]; const v = f ? RF.fifthsAt(f, s0.px, s0.py, s0.speed_y, s0._q0, s0._q1, s0._slippery) : -1; return v >= 0 ? v / 5 : null; };
+		let pens = new Map();
+		const checked = new Set(), real = new Set(), cost = legCostOf(opts), rounds = legRoundsOf(opts);
+		legInfo = { cost, rounds: [], startBefore: startOf(), rebuilds: 0 };
+		for (let r = 0; r < rounds; r++) {
+			const keep = new Map([...pens].map(([s, p]) => [s, { r: p.r.slice(), c: p.c.slice(), f: p.f.slice() }])), PH0 = PH, v0 = startOf();
+			const lc = legCheck(level, PH, t0 + maxMs / 2, opts.legOpts || {}, checked, pens, real);
+			legInfo.rounds.push(lc.info);
+			if (!lc.added) break;
+			if (Date.now() - t0 + PH.ms > maxMs / 2) { legInfo.notRebuilt = 'time'; pens = keep; break; }
+			PH = buildPhysics(B, { staticCoins: true, debug: true, legPen: pens, legCost: cost });
+			legInfo.rebuilds++;
+			// (a round whose prices the start's every way pays reorders nothing there and only coarsens the explore's priority
+			// buckets (prioShift): its prices are undone; so is a start the prices leave without a value)
+			const v1 = startOf();
+			if (v0 !== null && (v1 === null || v1 >= v0 + cost / 5 - 1e-6)) {
+				legInfo.payAll = { round: r + 1, start: v1 };
+				if (opts.legRevert !== false) { PH = PH0; pens = keep; legInfo.reverted = legInfo.payAll; break; }
+			}
+		}
+		legPens = pens;
+		legInfo.layers = pens.size;
+		legInfo.startAfter = startOf();
+		// (the last plan's legs, for the log)
+		const s1 = new E.EESim(level); s1.reset();
+		const pl2 = layeredPlan(PH, s1);
+		legInfo.after = { plan: pl2.end, legs: pickLegs(riseLegs(PH, pl2.states), LEG_K, 6).map((g) => ({ s: g.s, a: [g.a % A.W, Math.floor(g.a / A.W)], e: [g.e % A.W, Math.floor(g.e / A.W)], rows: g.rows, cols: g.cols, checked: checked.has(`${g.s}:${g.a}:${g.e}`), priced: pens.has(g.s) && g.moves.some(([t, di]) => pens.get(g.s).r[t * 8 + di] !== 0 || pens.get(g.s).c[t * 8 + di] !== 0 || pens.get(g.s).f[t * 8 + di] !== 0) })) };
+	}
 	const M = PH.M, N = A.N;
 	// the bodies: identical fields (and goal tiles) shared
 	const bodies = [], goals = [], bodyKey = new Map();
@@ -1421,6 +1808,9 @@ function buildSteer(level, opts) {
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
 		tour: tourInfo };
+	if (legInfo) steer.info.legCheck = legInfo;
+	// (the priced moves per layer, for the tools: not in the file)
+	if (legPens && legPens.size) Object.defineProperty(steer, 'legPens', { value: legPens, enumerable: false });
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1683,5 +2073,6 @@ function readSteerFile(buf) {
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	riseLegs, pickLegs, riseLegTest, legCheck, legCheckOn, LEG_COST,
 	// (the leg workers)
 	_legFieldOf: legFieldOf };
