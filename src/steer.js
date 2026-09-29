@@ -193,7 +193,73 @@ function analyze(level, opts) {
 	special.forEach((s, k) => { specialAt[s[0]] = k; });
 	const start = { t: ((Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)) };
 	const hasTime = gateFeat.includes('time');
-	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts, keyExpiry, hasTime };
+	const A = { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts, keyExpiry, hasTime };
+	halfQuadMoves(A, fg, flags, lk);
+	return A;
+}
+/**
+ * The half-block quadrants in the walk layers (reach.js quadOf / moveOK: the moves the ball's box cannot make next to
+ * half blocks, exact): A.Q the static quadrants (walls, half blocks by rotation; gates free), A.qMove per (tile, 8
+ * directions, DX8 / DY8 order): 0 the old rule (no half block near, or the move open in every layer), 1 closed in every
+ * layer, 2 by the layer's gates (qMoveOK). Null without half blocks or with EEAT_HALFQUAD=0 (opts.halfQuad false): the
+ * layers as before. NSFW Spring Relics: its capsule's portals (10, 188) etc. are reached only through a right half block
+ * over a team-3 door; in the team-0 layers the walk plan went up the half block's tile and the diagonal past it (the
+ * steer's capsule 140 tiles, the portal 1.4 tiles on), which the box cannot do
+ */
+function halfQuadMoves(A, fg, flags, lk) {
+	A.Q = null; A.qMove = null;
+	if (!RF.halfQuadOn(A.opts)) return;
+	const { W, H, N, cls, gateFeat, gatePol } = A;
+	const Qg = RF.quadOf(W, H, fg, flags, lk, null);
+	if (!Qg.half) return;
+	const Q = Qg.Q;
+	// (a gate always open / always shut whatever the layer; the others by the layer)
+	const gAlways = new Int8Array(N);   // 1 open, -1 shut, 0 by the layer (or no gate)
+	for (let i = 0; i < N; i++) {
+		if (cls[i] !== 3) continue;
+		const k = gateFeat[i];
+		gAlways[i] = k === 'open' || k === 'time' ? 1 : k === 'static' ? (gatePol[i] === 1 ? 1 : -1) : 0;
+	}
+	const inW = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+	const qaOf = (shutAll) => (x, y) => { if (!inW(x, y)) return 15; const i = y * W + x; return cls[i] === 3 && (gAlways[i] === -1 || (shutAll && gAlways[i] === 0)) ? 15 : Q[i]; };
+	const trOf = (shutAll) => (x, y) => { if (!inW(x, y)) return false; const i = y * W + x; return cls[i] !== 0 && !(cls[i] === 3 && (gAlways[i] === -1 || (shutAll && gAlways[i] === 0))); };
+	const qaO = qaOf(false), qaS = qaOf(true), trO = trOf(false), trS = trOf(true);
+	const near = new Uint8Array(N);
+	for (let i = 0; i < N; i++) {
+		const q = Q[i];
+		if (q === 0 || q === 15) continue;
+		const x = i % W, y = (i / W) | 0;
+		for (let yy = Math.max(0, y - 2); yy <= Math.min(H - 1, y + 2); yy++) for (let xx = Math.max(0, x - 2); xx <= Math.min(W - 1, x + 2); xx++) near[yy * W + xx] = 1;
+	}
+	const qMove = new Uint8Array(N * 8);
+	let any = 0;
+	for (let t = 0; t < N; t++) {
+		if (!near[t]) continue;
+		const x = t % W, y = (t / W) | 0;
+		for (let di = 0; di < 8; di++) {
+			const x2 = x + DX8[di], y2 = y + DY8[di];
+			if (!inW(x2, y2)) continue;
+			if (!RF.moveOK(qaO, trO, x, y, di)) { qMove[t * 8 + di] = 1; any++; }
+			else if (!RF.moveOK(qaS, trS, x, y, di)) { qMove[t * 8 + di] = 2; any++; }
+		}
+	}
+	if (!any) return;
+	A.Q = Q; A.qMove = qMove; A.qGate = gAlways;
+}
+/** the move from tile t in direction di (DX8 / DY8) by the half-block quadrants, a gate i shut when shut(i) (for
+ *  qMove 2), the side tiles by transit(i) */
+function qMoveOK(A, t, di, shut, transit) {
+	const { W, H, Q, cls } = A;
+	const qa = (x, y) => { if (x < 0 || y < 0 || x >= W || y >= H) return 15; const i = y * W + x; return cls[i] === 3 && shut(i) ? 15 : Q[i]; };
+	const tr = (x, y) => x >= 0 && y >= 0 && x < W && y < H && transit(y * W + x);
+	return RF.moveOK(qa, tr, t % W, (t / W) | 0, di);
+}
+/** qMove in layer s of model M: false = the move is closed there */
+function qMoveLayer(A, M, t, di, s) {
+	const q = A.qMove[t * 8 + di];
+	if (q === 0) return true;
+	if (q === 1) return false;
+	return qMoveOK(A, t, di, (i) => !M.gateOpen(i, s), (i) => M.pass(i, s) !== 0);
 }
 /** the time doors' class on (default; EEAT_TIMEDOOR=0 or opts.timeDoors === false: static walls, as before 2026-09-29) */
 function timeDoorsOn(opts) { return opts && opts.timeDoors !== undefined ? !!opts.timeDoors : process.env.EEAT_TIMEDOOR !== '0'; }
@@ -351,7 +417,7 @@ function layeredField(A, M) {
 	const specialAt = A.specialAt, identity = M.identity, pass = M.pass;
 	const isTrophy = new Uint8Array(N); for (const t of A.trophies) isTrophy[t] = 1;
 	let cur = 0, pops = 0;
-	const srcList = A.portalSrcOf, forcedP = A.forcedP;
+	const srcList = A.portalSrcOf, forcedP = A.forcedP, qMove = A.qMove || null;
 	while (queued > 0) {
 		const b = cur & MASK;
 		for (let n = 0; n < bn[b]; n++) {
@@ -377,6 +443,7 @@ function layeredField(A, M) {
 					if (isTrophy[t] || pass(t, s) !== 1 || forcedP[t]) continue;
 					if (ow2 >= 0 && owBlocked(ow2, DX8[di], DY8[di])) continue;
 					if (DX8[di] !== 0 && DY8[di] !== 0 && pass(y * W + x2, s) === 0 && pass(y2 * W + x, s) === 0) continue;
+					if (qMove !== null && qMove[t * 8 + di] !== 0 && !qMoveLayer(A, M, t, di, s)) continue;
 					push(base + t, cur + stepCost(A, t, t2, DX8[di] !== 0 && DY8[di] !== 0));
 				}
 			}
@@ -408,6 +475,7 @@ function planFrom(A, M, F, t0, s0, maxSteps = 200000) {
 			if (M.pass(t2, s) === 0) continue;
 			if (A.oneWay[t2] >= 0 && owBlocked(A.oneWay[t2], DX8[di], DY8[di])) continue;
 			if (DX8[di] && DY8[di] && M.pass(y * W + x2, s) === 0 && M.pass(y2 * W + x, s) === 0) continue;
+			if (A.qMove && A.qMove[t * 8 + di] !== 0 && !qMoveLayer(A, M, t, di, s)) continue;
 			const k = A.specialAt[t2];
 			for (const s2 of (k >= 0 ? M.transAll(s, k) : [s])) {
 				const c2 = cost[s2 * N + t2];
@@ -457,10 +525,23 @@ function counterexample(A, plan) {
 		const t = p.t, c = A.cls[t];
 		const q = plan.path[n - 1].t, W = A.W;
 		const ddx = (t % W) - (q % W), ddy = Math.floor(t / W) - Math.floor(q / W);
+		const closed = (i) => A.cls[i] === 0 || (A.cls[i] === 3 && A.gateFeat[i] !== 'open' && A.gateFeat[i] !== 'time' && (A.gateFeat[i] === 'static' ? A.gatePol[i] !== 1 : st[A.gateFeat[i]] !== undefined && !testGate(A.gateFeat[i], A.gatePol[i], A.gateParam[i], st[A.gateFeat[i]])));
 		if (ddx && ddy && Math.abs(ddx) === 1 && Math.abs(ddy) === 1) {
 			const a = q + ddx, b = q + ddy * W;
-			const closed = (i) => A.cls[i] === 0 || (A.cls[i] === 3 && A.gateFeat[i] !== 'open' && (A.gateFeat[i] === 'static' ? A.gatePol[i] !== 1 : st[A.gateFeat[i]] !== undefined && !testGate(A.gateFeat[i], A.gatePol[i], A.gateParam[i], st[A.gateFeat[i]])));
 			if (closed(a) && closed(b)) { const g = A.cls[a] === 3 && A.gateFeat[a] !== 'static' ? a : b; if (A.cls[g] === 3 && A.gateFeat[g] !== 'static') return { feat: A.gateFeat[g], step: n, t: g }; }
+		}
+		// (the half-block quadrants: a move the full state's gates close next to a half block names the first closed gate
+		// of the 3 x 3 tiles around its start and end)
+		if (A.qMove && Math.abs(ddx) <= 1 && Math.abs(ddy) <= 1 && (ddx || ddy)) {
+			let di = 0; while (DX8[di] !== ddx || DY8[di] !== ddy) di++;
+			if (A.qMove[q * 8 + di] === 2 && !qMoveOK(A, q, di, closed, (i) => !closed(i))) {
+				const qx = q % W, qy = (q / W) | 0;
+				for (let yy = qy - 2; yy <= qy + 2; yy++) for (let xx = qx - 2; xx <= qx + 2; xx++) {
+					if (xx < 0 || yy < 0 || xx >= W || yy >= A.H) continue;
+					const g = yy * W + xx;
+					if (A.cls[g] === 3 && A.gateFeat[g] !== 'static' && A.gateFeat[g] !== 'open' && A.gateFeat[g] !== 'time' && closed(g)) return { feat: A.gateFeat[g], step: n, t: g };
+				}
+			}
 		}
 		if (c === 3) {
 			const k = A.gateFeat[t];
@@ -544,6 +625,7 @@ function forwardLayers(A, M) {
 			const t2 = y2 * W + x2;
 			if (M.pass(t2, s) !== 1) continue;
 			if (DX8[di] && DY8[di] && M.pass(y * W + x2, s) === 0 && M.pass(y2 * W + x, s) === 0) continue;
+			if (A.qMove && A.qMove[t * 8 + di] !== 0 && !qMoveLayer(A, M, t, di, s)) continue;
 			const sp = A.specialAt[t2];
 			if (sp >= 0) for (const s2 of M.transAll(s, sp)) { add(s2, t2); if (s2 !== s) edges.add(s * S + s2); } else add(s, t2);
 		}
@@ -644,6 +726,7 @@ function wildField(A, M, s, goals, kappa) {
 			const t = y * W + x;
 			if (goalT.has(t) || isTrophy.has(t) || M.pass(t, s) !== 1 || M.pass(t2, s) === 0 || A.forcedP[t]) continue;
 			if (DX8[di] && DY8[di] && M.pass(y * W + x2, s) === 0 && M.pass(y2 * W + x, s) === 0) continue;
+			if (A.qMove && A.qMove[t * 8 + di] !== 0 && !qMoveLayer(A, M, t, di, s)) continue;
 			const c = v + (DX8[di] && DY8[di] ? 7 : 5) * kappa;
 			if (c < d[t]) { d[t] = c; hpush(t, c); }
 		}
@@ -1315,6 +1398,7 @@ function walkDist(A, P, goals, kappa, H) {
 			if (goalT[t] || isTrophy[t] || !P[t] || A.forcedP[t]) continue;
 			const diag = DX8[di] && DY8[di];
 			if (diag && !P[y * W + x2] && !P[y2 * W + x]) continue;
+			if (A.qMove && A.qMove[t * 8 + di] !== 0 && (A.qMove[t * 8 + di] === 1 || !qMoveOK(A, t, di, (i) => !P[i], (i) => !!P[i]))) continue;
 			const c = v + (diag ? s7 : s5);
 			if (c < d[t]) { d[t] = c; push(t, c); }
 		}
@@ -1862,5 +1946,6 @@ function readSteerFile(buf) {
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, TIME_WAIT, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
 	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	layeredField, planFrom, qMoveLayer, qMoveOK, layerLevel,
 	// (the leg workers)
 	_legFieldOf: legFieldOf };
