@@ -150,9 +150,10 @@ function analyze(level, opts) {
 	// portals: tile -> exits that are not walls
 	const portalExits = new Map(), portalSrcOf = new Map();
 	if (level.portalSlot && level.portalsById) {
+		const silent = RF.silentPortals(level);   // (portals EE never teleports from: no exits)
 		for (let i = 0; i < N; i++) {
 			const s = level.portalSlot[i];
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || cls[i] === 0) continue;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || cls[i] === 0 || silent[i]) continue;
 			const ex = level.portalsById.get(level.pTarget[s]);
 			if (!ex) continue;
 			const list = [];

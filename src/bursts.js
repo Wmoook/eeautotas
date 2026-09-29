@@ -226,9 +226,10 @@ function portalsOf(L) {
 	const W = L.width, N = W * L.height, fg = L.fg;
 	const exits = new Map(), srcOf = new Map();
 	if (!L.portalSlot || !L.portalsById) return { exits, srcOf };
+	const silent = RF.silentPortals(L);   // (portals EE never teleports from: no exits)
 	for (let i = 0; i < N; i++) {
 		const s = L.portalSlot[i];
-		if ((fg[i] !== 242 && fg[i] !== 381) || s < 0) continue;
+		if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || silent[i]) continue;
 		const ex = L.portalsById.get(L.pTarget[s]);
 		if (!ex) continue;
 		const list = [];

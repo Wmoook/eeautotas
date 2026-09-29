@@ -215,7 +215,7 @@ function reachFrom(L, sx, sy, portals) {
 				}
 			}
 			const t = L.fg[i], s = L.portalSlot[i];
-			if (portals && (t === 242 || t === 381) && s >= 0) {
+			if (portals && (t === 242 || t === 381) && s >= 0 && !RF.silentPortals(L)[i]) {   // (no exits where EE never teleports)
 				const ex = L.portalsById.get(L.pTarget[s]);
 				if (ex) for (let k = 0; k < ex.n; k++) push((ex.ys[k] >> 4) * W + (ex.xs[k] >> 4));
 			}

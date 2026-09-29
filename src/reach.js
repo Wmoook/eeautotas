@@ -265,7 +265,7 @@ function reachField(level, opts) {
 		for (const i of protOn) if (!wallAt(i)) { protP[i] = 1; q.push(i); }
 		const exitsOf = (i) => {
 			const s = level.portalSlot ? level.portalSlot[i] : -1;
-			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || !level.portalsById) return null;
+			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || !level.portalsById || silentPortals(level)[i]) return null;
 			return level.portalsById.get(level.pTarget[s]) || null;
 		};
 		while (q.length) {
@@ -325,9 +325,14 @@ function reachField(level, opts) {
 	// portals: exits (passable, or deadly with deaths) per portal tile
 	const srcOf = new Map(), portalExits = new Map();
 	if (level.portalSlot && level.portalsById) {
+		const silent = silentPortals(level);
 		for (let i = 0; i < N; i++) {
 			const s = level.portalSlot[i];
 			if ((fg[i] !== 242 && fg[i] !== 381) || s < 0 || !passable(i)) continue;
+			// (a portal EE never teleports from has no exits (silentPortals): a portal whose target is its own id (eesim.js
+			// clears lastPortal there and moves on: Christmas Tree Quest's id-0 border ring was "6 tiles" from the trophy through
+			// teleports EE never makes), a sealed portal cluster (the ball there keeps lastPortal: never teleports again)
+			if (silent[i]) continue;
 			const ex = level.portalsById.get(level.pTarget[s]);
 			if (!ex) continue;
 			const list = [];
@@ -858,6 +863,60 @@ function unforceChains(W, H, forcedP, exits, srcOf) {
 		}
 	}
 }
+/**
+ * silentPortals(level): Uint8Array over the tiles, 1 = a portal tile (242 / 381 with a slot) EE never teleports from, so
+ * every guidance builder gives it no exits (exact, never a prune: the engine has no such edge). eesim.js processPortals
+ * (Player.as:1087): a tick that starts on a portal teleports only when lastPortal is clear, and clears it on any other
+ * tile or on a portal whose target is its own id. (1) SELF-TARGET: pTarget === pId clears lastPortal: never a teleport
+ * (Christmas Tree Quest: 611 id-0 portals wired together, one 5 tiles from the trophy; Desolate Relics: a 1,514-tile fake
+ * shortcut). (2) SEALED CLUSTER: the portal tiles 8-connected to each other, none self-target, none a spawn, every tile
+ * around them in the world and a static wall (solid, no door / one-way / half block, by the engine's level.flags: a subset
+ * of guideFlags' walls, so at most as many marks):
+ * the ball's centre can be there only after a teleport put it there (lastPortal set; no walk in: walls all around), it
+ * can never leave (walls), and moving between portal tiles keeps lastPortal set: it never teleports again (a sealed exit
+ * read lower than the start through the exits of its own id). Deaths there (timed effects) are the fields' own edges.
+ */
+const silentCache = new WeakMap();
+function silentPortals(level) {
+	if (silentCache.has(level)) return silentCache.get(level);
+	const W = level.width, H = level.height, N = W * H, fg = level.fg, flags = level.flags, nFlags = flags ? flags.length : 0;
+	const out = new Uint8Array(N);
+	if (!level.portalSlot || !level.pTarget) { silentCache.set(level, out); return out; }
+	const isP = (i) => (fg[i] === 242 || fg[i] === 381) && level.portalSlot[i] >= 0;
+	const isWallId = (id) => id >= 0 && id < nFlags && (flags[id] & F_SOLID) !== 0 && (flags[id] & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0;
+	const spawn = new Uint8Array(N);
+	if (level.spawnsX) for (let k = 0; k < level.spawnsX.length; k++) { const j = level.spawnsY[k] * W + level.spawnsX[k]; if (j >= 0 && j < N) spawn[j] = 1; }
+	if (!level.spawnsX || level.spawnsX.length === 0) { if (W > 1 && H > 1) spawn[W + 1] = 1; }   // (no spawn: eesim places the ball at (1, 1))
+	const seen = new Uint8Array(N);
+	for (let i0 = 0; i0 < N; i0++) {
+		if (!isP(i0)) continue;
+		const s0 = level.portalSlot[i0];
+		if (level.pTarget[s0] === level.pId[s0]) { out[i0] = 1; continue; }
+		if (seen[i0]) continue;
+		// the cluster of non-self-target portal tiles (8-connected); sealed unless a tile around it is open or out of the world
+		const cl = [i0], q = [i0];
+		seen[i0] = 1;
+		let sealed = true;
+		while (q.length) {
+			const t = q.pop(), x = t % W, y = (t / W) | 0;
+			if (spawn[t]) sealed = false;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				if (!dx && !dy) continue;
+				const x2 = x + dx, y2 = y + dy;
+				if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) { sealed = false; continue; }
+				const u = y2 * W + x2;
+				if (isP(u)) {
+					const su = level.portalSlot[u];
+					if (level.pTarget[su] === level.pId[su]) { sealed = false; continue; }   // (it clears lastPortal)
+					if (!seen[u]) { seen[u] = 1; cl.push(u); q.push(u); }
+				} else if (!isWallId(fg[u])) sealed = false;
+			}
+		}
+		if (sealed) for (const t of cl) out[t] = 1;
+	}
+	silentCache.set(level, out);
+	return out;
+}
 /** walking distance in fifths to the goals (8-way, a diagonal step closed only between two walls; portals; deaths:
  *  {respawn, src} or null, every source DEATH_COST more than the nearest respawn tile) */
 function walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths, maxF, forcedP) {
@@ -1093,7 +1152,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, silentPortals, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
