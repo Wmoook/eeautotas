@@ -312,7 +312,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -1035,14 +1035,17 @@ const maskEq = (a, b) => { for (let k = 0; k < a.length; k++) if (a[k] !== b[k])
  * class the maximal masks (an antichain): a new group whose mask is a strict subset of one of them is dominated at once,
  * and one that is a strict superset of some makes those dominated (for good: a mask once exceeded stays exceeded). The
  * novelty picks (head B), the discovery bursts (head C), the sources and the GPU bursts' rooms leave dominated groups
- * out; head A (the cost heaps) does not look at groups.
+ * out, except for a SHARE (dominance-share, night 3: `--domShare` of head B's tournaments draw from `dlist`, the
+ * dominated groups, and every `--domBurst`-th GPU burst may go to a dominated room): the walk's view (an open door is no
+ * floor) makes "dominated" a heuristic, so it only orders: a floor-door switch turned off again or a backtracking room
+ * still gets novelty picks; head A (the cost heaps) does not look at groups.
  */
 function domIndex() {
-	const groups = new Map(), maxi = new Map(), list = [];
+	const groups = new Map(), maxi = new Map(), list = [], dlist = [];
 	let dominated = 0;
 	const drop = (g) => {
 		if (g.dom) return;
-		g.dom = true; dominated++;
+		g.dom = true; dominated++; dlist.push(g);
 		const i = g.li;
 		if (i >= 0) { const last = list.pop(); if (last !== g) { list[i] = last; last.li = i; } g.li = -1; }
 	};
@@ -1055,13 +1058,37 @@ function domIndex() {
 		groups.set(ks, g);
 		let M = maxi.get(d.cls);
 		if (!M) maxi.set(d.cls, M = []);
-		for (const h of M) if (maskIn(d.mask, h.mask) && !maskEq(d.mask, h.mask)) { g.dom = true; dominated++; return g; }
+		for (const h of M) if (maskIn(d.mask, h.mask) && !maskEq(d.mask, h.mask)) { g.dom = true; dominated++; dlist.push(g); return g; }
 		for (let k = M.length - 1; k >= 0; k--) if (maskIn(M[k].mask, d.mask)) { drop(M[k]); M.splice(k, 1); }
 		M.push(g);
 		g.li = list.length; list.push(g);
 		return g;
 	};
-	return { groupOf, list, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
+	return { groupOf, list, dlist, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
+}
+
+/**
+ * domTourney(GL, pickOf, weightOf) -> the group of a tournament of 4 random draws from GL (the best weight among those
+ * with a cell to pick), or null. domPick(DOM, share, rnd, weightOf, cellsOf) -> the group head B draws: with probability
+ * `share` (and only when some group is dominated: no draw of the random numbers otherwise, so a level without one
+ * searches exactly as before) a tournament over the dominated groups, else (or when none of them has a cell) over the
+ * groups not dominated. {g, shared}.
+ */
+function domTourney(GL, rnd, weightOf) {
+	let bg = null, bw = -1;
+	for (let k = 0; k < 4 && GL.length; k++) {
+		const g = GL[(rnd() * GL.length) | 0];
+		const w = weightOf(g);
+		if (w > bw) { bw = w; bg = g; }
+	}
+	return bg;
+}
+function domPick(DOM, share, rnd, weightOf) {
+	if (share > 0 && DOM.dlist.length && rnd() < share) {
+		const g = domTourney(DOM.dlist, rnd, weightOf);
+		if (g !== null) return { g, shared: true };
+	}
+	return { g: domTourney(DOM.list, rnd, weightOf), shared: false };
 }
 
 // USEFUL TERRITORY (roomUseful; the playbook's P1 (c) / (d), 2026-09-28; the user on Forgotten Helix: "it keeps going
@@ -2028,7 +2055,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// room of it; a dominated group's rooms get no discovery burst, no source, and no death is kept into them; 0: every
 	// room its own, as before)
 	const DOM = coarse && a.dom !== 0 ? domIndex() : null;
-	let dDom = 0;
+	let dDom = 0, domShared = 0;   // (domShared: head B's tournaments over the dominated groups, --domShare)
 	/** the live state's novelty group (made when new; DOM on) */
 	const groupNow = () => DOM.groupOf(RM.dom(sim));
 	/** a new room of the live state; bk: made by a death that throws the ball back (deathPays): a BACK room, kept but
@@ -2454,7 +2481,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked },
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -2498,20 +2525,18 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// the best of --sample random cells of it by Go-Explore's count weights (cells runs rarely come through first)
 	// (--dom=1: the tournament over the novelty groups not dominated (DOM.list: a group's gain the most of its rooms', its
 	// picks all of theirs, its brake the most of theirs), then a room of the group by its share of the group's cells; a
-	// group of one room draws as that room did)
+	// group of one room draws as that room did; --domShare of the tournaments over the dominated groups: domPick)
+	const groupW = (g) => {
+		let n = 0, ex = 0;
+		for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
+		if (!n) return -1;
+		return (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
+	};
 	const popB = () => {
 		let br = null, bw = -1;
 		if (DOM !== null) {
-			const GL = DOM.list;
-			let bg = null;
-			for (let k = 0; k < 4 && GL.length; k++) {
-				const g = GL[(rnd() * GL.length) | 0];
-				let n = 0, ex = 0;
-				for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
-				if (!n) continue;
-				const w = (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
-				if (w > bw) { bw = w; bg = g; }
-			}
+			const dp = domPick(DOM, a.domShare, rnd, groupW), bg = dp.g;
+			if (dp.shared) domShared++;
 			if (bg !== null) {
 				if (bg.rooms.length === 1) br = bg.rooms[0].bk ? null : bg.rooms[0];
 				else {
@@ -3482,19 +3507,19 @@ async function gpuMain(a, L, m) {
 		}
 		return -1;
 	};
+	const groupW = (g) => {
+		let n = 0, ex = 0;
+		for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
+		if (!n) return -1;
+		return (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
+	};
+	let domShared = 0;
 	const popB = () => {
 		let br = null, bw = -1;
 		if (DOMg !== null) {
-			const GL = DOMg.list;
-			let bg = null;
-			for (let k = 0; k < 4 && GL.length; k++) {
-				const g = GL[(rnd() * GL.length) | 0];
-				let n = 0, ex = 0;
-				for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
-				if (!n) continue;
-				const w = (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
-				if (w > bw) { bw = w; bg = g; }
-			}
+			// (--domShare of the tournaments over the dominated groups, as explore()'s)
+			const dp = domPick(DOMg, a.domShare, rnd, groupW), bg = dp.g;
+			if (dp.shared) domShared++;
 			if (bg !== null) {
 				if (bg.rooms.length === 1) br = bg.rooms[0].bk ? null : bg.rooms[0];
 				else {
@@ -3897,7 +3922,7 @@ async function main() {
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
+		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
 		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
@@ -4224,7 +4249,7 @@ async function main() {
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0,
-				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, dDom: d.dDom || 0 } : {});
+				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
@@ -4238,4 +4263,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { CellMap, mixW, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, counterRelevance, switchReaders, domIndex, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
