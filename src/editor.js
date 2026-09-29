@@ -1272,6 +1272,9 @@ function pinRefineCheck() {
 	if (!p) return;
 	const tx = Math.floor(p[0] / 16), ty = Math.floor(p[1] / 16);
 	if (!(tx >= 0 && tx < L.width && ty >= 0 && ty < L.height)) return;
+	// (a place walled already: the attempt came before the switch (its generation's events still arrive) or the model
+	// still leads there; no second build for it: its clock again)
+	if (pinR.seeds.includes(`${tx},${ty}`) || (pinR.switchAfter !== undefined && !(c.foundAfter > pinR.switchAfter))) { pinR.at = Date.now(); pinR.best = c.dist; return; }
 	pinR.seeds.push(`${tx},${ty}`);
 	pinR.busy = true;
 	const k = ++pinR.n, R = pinR, seeds = pinR.seeds.join(';'), t0 = Date.now();
@@ -1303,7 +1306,12 @@ function pinRefineCheck() {
 			const ch = kids[j];
 			if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`steer ${file}\n`); told++; q.best = undefined; } catch (e) { /* gone */ } }
 		});
+		// (the CPU processes launched from now on (the next stall escape) take the refined steer as their --steer: an escape
+		// launched with the file before it reported its attempts at the old scale, and they came back as the nearest and
+		// pinned the same place again (the first probe: pins 3 and 4 at (227, 151) once more))
+		cur.files.steerCpu = file;
 		const after = Math.round((Date.now() - S.started) / 100) / 10;
+		R.switchAfter = after;
 		if (S.steer) S.steer.pins = (S.steer.pins || []).concat([{ k, seed: `${tx},${ty}`, start: r.start, layers: r.layers, features: r.features, ms: Date.now() - t0, after, told }]);
 		note(`pin refinement ${k}: the steer without (${seeds.replace(/;/g, ') (')}): ${r.layers} layers (${(r.features || []).join(', ') || 'none'}), start ${r.start}; the CPU search turns to it (${told})`);
 		save();
