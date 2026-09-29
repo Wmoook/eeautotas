@@ -152,7 +152,7 @@ function altLegsToy() {
 	const sim = new E.EESim(L); sim.reset();
 	const sha = (b) => require('crypto').createHash('sha1').update(b).digest('hex');
 	const bodySha = (b) => { const h = require('crypto').createHash('sha1'); for (const k of Object.keys(b).sort()) { const v = b[k]; if (ArrayBuffer.isView(v)) h.update(k).update(Buffer.from(v.buffer, v.byteOffset, v.byteLength)); else h.update(`${k}:${v}`); } return h.digest('hex'); };
-	const off = SF.buildSteer(L, { altLegs: false }), on = SF.buildSteer(L);
+	const off = SF.buildSteer(L, { altLegs: false }), on = SF.buildSteer(L, process.env.EEAT_ALTLEGS === '0' ? { altLegs: true } : {});
 	const s0 = SF.steerAt(off, sim), s1 = SF.steerAt(on, sim);
 	const fOff = sha(SF.steerFileBytes(off, null)), fOn = sha(SF.steerFileBytes(on, null));
 	check(`altLegs: the high coin has no leg in the plan's layer (no steer value at the start without it); with the wild layer's leg the coin DP has a start value (${on.info.features.join(', ')}; ${JSON.stringify(on.info.altLegs)})`,
@@ -167,7 +167,7 @@ function altLegsToy() {
 	if (env === undefined) delete process.env.EEAT_ALTLEGS; else process.env.EEAT_ALTLEGS = env;
 	check('altLegs: EEAT_ALTLEGS=0 = altLegs false byte for byte', sha(SF.steerFileBytes(k0, null)) === fOff && !k0.info.altLegs);
 	// (past its time: the file without it; a start value there means the time is bound to the steer wait's clock)
-	const cut = SF.buildSteer(L, { altEndMs: -1, altMs: -1 });
+	const cut = SF.buildSteer(L, { altEndMs: -1, altMs: -1, altLegs: true });
 	check('altLegs: past its time (altMs -1) none of it: the file without it byte for byte, info.altLegs.cut', sha(SF.steerFileBytes(cut, null)) === fOff && cut.info.altLegs && cut.info.altLegs.cut === 'time', JSON.stringify(cut.info.altLegs));
 	const c0 = SF.buildSteer(levelOf(ROOMS.coins.buf), { altLegs: false }), c1 = SF.buildSteer(levelOf(ROOMS.coins.buf));
 	check('altLegs: the coin room (every coin a leg) is untouched', sha(SF.steerFileBytes(c0, null)) === sha(SF.steerFileBytes(c1, null)) && !c1.info.altLegs);
