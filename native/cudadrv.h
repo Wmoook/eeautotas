@@ -95,6 +95,10 @@ inline CUresult lastCode = 0;   // (the last failure's code: 2 = CUDA_ERROR_OUT_
  *  may write the kernel cache): launch.h's parent watchdog ends an orphaned process only while this is 0 */
 inline std::atomic<int> busy{ 0 };
 struct Busy { Busy() { busy++; } ~Busy() { busy--; } };
+/** what one more eegpu process's context takes on this GPU (set by Device::open): the stack every resident thread may
+ *  use (stackBytes x SMs x threads per SM: 1.8 GB on an A100) + ~256 MB for the context itself; an idle burst server held
+ *  1.9 GB on the A100 before any buffer. freeShare's headroom keeps two of them free. */
+inline size_t ctxBytes = 0;
 
 inline bool fail(const char* what, CUresult r) {
 	lastCode = r;
@@ -186,12 +190,15 @@ struct Device {
 		}
 		CU_TRY(cuCtxCreate_v2(&ctx, 0, dev));
 		CU_TRY(cuCtxSetLimit(0 /* CU_LIMIT_STACK_SIZE */, stackBytes));
+		ctxBytes = stackBytes * (size_t)std::max(1, sms) * (size_t)std::max(1, maxThreadsPerSM) + ((size_t)256 << 20);
 		return true;
 	}
 };
 
-/** The GPU memory one consumer may take now: `frac` of the free memory less a headroom (the larger of 1.5 GB and 1/20
- *  of the GPU's), so every consumer leaves room for the next ones (their contexts, their tables): consumers that start one
+/** The GPU memory one consumer may take now: `frac` of the free memory less a headroom (the largest of 1.5 GB, 1/20 of
+ *  the GPU's and two contexts, ctxBytes: the A/B's first var runs still failed bursts at cuCtxSetLimit "out of memory",
+ *  the stack reservation of a new process's context), so every consumer leaves room for the next ones (their contexts,
+ *  their tables): consumers that start one
  *  after another split the free memory geometrically and the GPU never runs dry. Sweep2: 34 of 52 runs at two searches
  *  a GPU failed bursts with cuCtxCreate "out of memory" because one consumer (the random runs' pool, every move's states,
  *  the breaker's table) had sized itself by the whole GPU and taken nearly all that was free. SIZE_MAX: unknown (no
@@ -199,7 +206,7 @@ struct Device {
 inline size_t freeShare(size_t total, double frac) {
 	size_t fr = 0, tot = 0;
 	if (!cuMemGetInfo_v2 || cuMemGetInfo_v2(&fr, &tot)) return SIZE_MAX;
-	const size_t head = std::max<size_t>((size_t)1536 << 20, (total ? total : tot) / 20);
+	const size_t head = std::max<size_t>({ (size_t)1536 << 20, (total ? total : tot) / 20, 2 * ctxBytes });
 	return fr > head ? (size_t)((double)(fr - head) * frac) : 0;
 }
 /** the free memory now (bytes; 0: unknown) */
