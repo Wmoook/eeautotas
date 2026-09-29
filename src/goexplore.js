@@ -2313,10 +2313,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (--frontier=1: head F's state: the field's generation, heap, room, field, per-tile costs FT (-2: not looked up yet), the
 	// candidates' cost bound, when and at what VIS count it was built, the nearest attempt's best and when it improved)
 	const FR = coarse && a.frontier > 0 ? { gen: 0, HF: null, room: null, field: null, FT: null, dil: null, thr: Infinity, at: -1e15, visAt: 0, best: Infinity, gainAt: 0,
-		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map(), fresh: null } : null;
+		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map(), fresh: null, fb: new WeakMap() } : null;
 	/** --frontier: head F's field's cost (tiles) at tile t for a ball at rest there (-1: no way to the frontier), looked up once */
 	const frGap = Math.max(FR_MIN_PICKS, Math.round(N * FR_TILE_PK));
-	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { v = RF.costAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0); FR.FT[t] = v; } return v; };
+	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { const q = RF.fifthsAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0, -1, -1, FR.field.ice ? 2 : 0); v = q < 0 ? -1 : q / 5; FR.FT[t] = v; } return v; };
 	// (a cell of head F's current field: back into its heap at every push of its own, a pick or an earlier arrival)
 	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); if (FR !== null && FR.HF !== null && c.fg === FR.gen) FR.HF.push(c); };
 	const compact = () => { HA.compact(); if (HS) HS.compact(); if (HL) HL.compact(); if (HW) HW.compact(); };
@@ -2470,7 +2470,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		// into head F's heap with hpush when it is among the nearest)
 		if (VIS !== null && VIS[tile] === 0) { VIS[tile] = 1; nVis++; }
 		if (sim.coins > maxCoins) maxCoins = sim.coins;
-		if (FR !== null && FR.HF !== null && room === FR.room && cu !== 2) { const v = ftAt(tile); if (v >= 0 && v <= FR.thr) { nc.fc = v; nc.fg = FR.gen; } }
+		if (FR !== null) { nc.fc = -1; nc.fg = -1; if (FR.HF !== null && room === FR.room && cu !== 2) { const v = ftAt(tile); if (v >= 0 && v <= FR.thr) { nc.fc = v; nc.fg = FR.gen; } } }
 		hpush(nc);
 		if (t > deepest) deepest = t;
 		if (room !== null) {
@@ -2547,6 +2547,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		cells.set(k, c);
 		cell0 = c;
 		if (VIS !== null) { VIS[tile] = 1; nVis = 1; }
+		// (--frontier: every cell gets head F's two numbers when it is made, the start too: one shape for all, V8's fast path)
+		if (FR !== null) { c.fc = -1; c.fg = -1; }
 		hpush(c);
 		if (room0 !== null) { room0.arr.push(c); room0.best = c; }
 		keepSnap(c, pre ? sim.snapshot() : startSnap);
@@ -3143,13 +3145,13 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			for (let k = 0; k < 4 && roomList.length; k++) {
 				const r = roomList[(rnd() * roomList.length) | 0];
 				if (!ok(r)) continue;
-				const w = (1 + Math.log(1 + (r.graw || 0))) * (r.troOk ? 2 : 1) / Math.sqrt(1 + (r.fb || 0));
+				const w = (1 + Math.log(1 + (r.graw || 0))) * (r.troOk ? 2 : 1) / Math.sqrt(1 + (FR.fb.get(r) || 0));
 				if (w > bw) { bw = w; R = r; }
 			}
 		}
 		if (R === null) R = ok(room0) ? room0 : null;
 		if (R === null) return;
-		R.fb = (R.fb || 0) + 1;
+		FR.fb.set(R, (FR.fb.get(R) || 0) + 1);   // (a WeakMap: no new property on the room objects the runs read)
 		// (a state of the room: its lowest-cost cell's snapshot, else its path replayed from the start)
 		const c0 = R.best !== null && R.best.ver >= 0 ? R.best : R.arr[0];
 		if (c0.snap !== null) sim.restore(c0.snap);
@@ -3161,6 +3163,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		const { fg, goals } = frontierGoals(L, sim, FR.doors, VIS, { cul: R.cul, walk: FR.walk === true && !strip, dil: a.fDil, D: FR.dil });
 		let f = null;
 		try { f = frontierField(L, fg, goals, strip); } catch (e) { f = null; }
+		// (the field object with the search field's keys in its order, through the structured clone that made the worker's: one hidden
+		// class for both, so the reach lookup of every simulated tick (costAt / fifthsAt) stays monomorphic ("wrong map" deopts)
+		if (f !== null) { const g = {}; for (const k of Object.keys(field)) g[k] = f[k]; f = structuredClone(g); }
 		FR.phys = f !== null && f.mode === 'physics';
 		FR.goals = goals.length;
 		FR.gen++; FR.room = R; FR.field = f; FR.HF = null; FR.cand = 0; FR.thr = Infinity; FR.bytes = N;
@@ -3177,7 +3182,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (v < 0) continue;
 			c.fc = v; cand.push(c);
 		}
-		if (a.fBrake) { for (const c of cand) c.fk = c.fc + frPen(c); cand.sort((x, y) => x.fk - y.fk || x.t - y.t); } else cand.sort((x, y) => x.fc - y.fc || x.t - y.t);
+		if (a.fBrake) { const kc = cand.map((c) => [c.fc + frPen(c), c]); kc.sort((x, y) => x[0] - y[0] || x[1].t - y[1].t); for (let i = 0; i < kc.length; i++) cand[i] = kc[i][1]; } else cand.sort((x, y) => x.fc - y.fc || x.t - y.t);
 		if (cand.length > a.fK) cand.length = a.fK;
 		FR.thr = Infinity;
 		if (cand.length >= a.fK) { FR.thr = 0; for (const c of cand) if (c.fc > FR.thr) FR.thr = c.fc; }
