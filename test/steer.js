@@ -188,7 +188,7 @@ function layerMemo() {
 		process.env.EEAT_STEER_MEMO = '0';
 		const k0 = build(coinCorr, {});
 		if (prev !== undefined) process.env.EEAT_STEER_MEMO = prev; else delete process.env.EEAT_STEER_MEMO;
-		check('the memo's knob: unset on (the default: the hits and fields of layerMemo true), EEAT_STEER_MEMO=1 on, EEAT_STEER_MEMO=0 off (no hits, the fields as before); the same file all three',
+		check('the memo\'s knob: unset on (the default: the hits and fields of layerMemo true), EEAT_STEER_MEMO=1 on, EEAT_STEER_MEMO=0 off (no hits, the fields as before); the same file all three',
 			kd.hits > 0 && kd.hits === c1.hits && kd.calls === c1.calls && k1.hits > 0 && k0.hits === 0 && k0.calls === c0.calls && Buffer.compare(k0.bytes, k1.bytes) === 0 && Buffer.compare(kd.bytes, k1.bytes) === 0,
 			`hits ${kd.hits} / ${k1.hits} / ${k0.hits}, fields ${kd.calls} / ${k1.calls} / ${k0.calls}`);
 	} finally { R.reachField = orig; }
