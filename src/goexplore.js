@@ -349,7 +349,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
-	exc: process.env.EEAT_EXC !== undefined ? +process.env.EEAT_EXC : 0, pX: 0.15,
+	exc: process.env.EEAT_EXC !== undefined ? +process.env.EEAT_EXC : 0, pX: 0.15, excDeep: 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
@@ -571,6 +571,12 @@ const B_JW = 40;
 // 684,355 samples every 5 ticks, commits 39de5b9 95cc669 c7623ee febeeb2): the routes on the 71 levels that ALSO have a
 // stalled run (the hard ones; every routed level: 0.691 0.138 0.096 0.045 0.030), the stalled runs' nearest attempts
 // there 0.769 0.125 0.076 0.025 0.005 (>= 20 tiles uphill: 22.5% vs 10.6% of the time); `--excBands=a,b,c,d,e` another.
+// --excDeep=1 (with --exc=1; v2, 2026-09-29: v1's uniform band draws spread head X over thousands of uphill cells, a new
+// start each pick, where a route's detour is ONE lineage climbing for hundreds of ticks): SUSTAINED EXCURSIONS. After a
+// head-X pick, the new cell its runs made in the pick's room with the most excursion (at least the pick's) goes on a stack
+// (EXC_STACK, the oldest dropped); head X pops the stack first (a cell still live, early enough, not in a cul-de-sac, its band
+// short of its share), so a chain goes on climbing pick after pick until no child climbs or its band is full; else v1's draw
+const EXC_STACK = 1024;
 const B_EX = 40, EXC_EDGES = [5, 20, 60, 150], EXC_HALF = 20000, EXC_DRAWS = 64, EXC_ARCH_MS = 10000;
 const EXC_BANDS = [0.611, 0.164, 0.123, 0.061, 0.041];
 /** the excursion band of x tiles above the running minimum: [0,5) [5,20) [20,60) [60,150) [150,inf) */
@@ -2480,8 +2486,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// A's slot; picks / pickB: head X's picks (by band); arch: the archive's cells per band (every EXC_ARCH_MS); addRm: the
 	// running minimum a run hands add() (null: add() starts it at the cell's own rc: imports, seeds, deaths)
 	const EXC = coarse && a.exc !== 0 ? { bands: excBandsOf(a), pb: new Float64Array(5), dec: Math.pow(0.5, 1 / EXC_HALF), q: a.pA > 0 ? a.pX / a.pA : 0,
-		picks: 0, pickB: new Float64Array(5), arch: [0, 0, 0, 0, 0], at: 0 } : null;
+		picks: 0, pickB: new Float64Array(5), arch: [0, 0, 0, 0, 0], at: 0, deep: a.excDeep !== 0, stack: [], deepP: 0, pushed: 0 } : null;
 	let addRm = null;
+	// (--excDeep: pickX = this pick is head X's; xBest / xBestEx: its runs' new cell of the most excursion in its room)
+	let pickX = false, xBest = null, xBestEx = -Infinity;
 	const excOf = (c) => c.rc - c.rm / 5;
 	/** the cell key of KV[0 .. n): two 32-bit hash lanes (see cellKey) */
 	const hashKV = (n) => {
@@ -2790,7 +2798,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			}
 		}
 		// (--exc: the running minimum of rc since the lineage last changed room, fifths; B_EX more)
-		if (EXC !== null) nc.rm = addRm !== null ? addRm : Math.round(rc * 5);
+		if (EXC !== null) {
+			nc.rm = addRm !== null ? addRm : Math.round(rc * 5);
+			// (--excDeep: a head-X pick's new cell in the pick's room, outside its cul-de-sacs: the chain's candidate)
+			if (pickX && pc !== null && room === pc.room && cu !== 2) { const x = rc - nc.rm / 5; if (x > xBestEx || (x === xBestEx && xBest !== null && t > xBest.t)) { xBestEx = x; xBest = nc; } }
+		}
 		if (ST) { if (scFresh !== null) scFresh.add(nc); nearSteer(nc); }
 		if (spdFast) nc.v2 = v2;
 		cells.set(k, nc);
@@ -2896,7 +2908,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {},
 	OT !== null ? Object.assign({ optRuns, optCells }, ...OP.NAMES.map((n, i) => ({ ['optE_' + n]: optEnds[i] }))) : {},
 	// (--exc: head X's picks, the decayed pick counts per band, head X's picks per band, the archive per band, rm's bytes)
-	EXC !== null ? { excP: EXC.picks, excPb: Array.from(EXC.pb, (x) => Math.round(x * 10) / 10), excXb: Array.from(EXC.pickB), excArch: EXC.arch, exB: cells.size * B_EX } : {});
+	EXC !== null ? { excP: EXC.picks, excPb: Array.from(EXC.pb, (x) => Math.round(x * 10) / 10), excXb: Array.from(EXC.pickB), excArch: EXC.arch, exB: cells.size * B_EX, excDeepP: EXC.deepP, excPushed: EXC.pushed } : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -2994,6 +3006,17 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const popX = () => {
 		const ord = excOrder(EXC.bands, EXC.pb);
 		if (!ord.length || !roomList.length) return popA();
+		// (--excDeep: the chains first: the newest child that climbed, while its band is short of its share)
+		if (EXC.deep) {
+			while (EXC.stack.length) {
+				const c = EXC.stack.pop();
+				if (c.ver < 0 || c.t >= maxT || c.u === 2 || c.bk === true) continue;
+				const b = excBand(excOf(c));
+				if (!ord.includes(b)) continue;
+				EXC.picks++; EXC.pickB[b]++; EXC.deepP++;
+				return c;
+			}
+		}
 		excBest.fill(null);
 		for (let k = 0; k < EXC_DRAWS; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
@@ -3585,6 +3608,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
 			pickL = false; pickW = false;
+			if (pickX) { xBest = null; xBestEx = -Infinity; pickX = false; }
 			let head = 'A';
 			if (!coarse) e = popA();
 			else if (discovery.length && rnd() < 0.5) {
@@ -3613,7 +3637,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			} else if (rnd() < a.pA) {
 				// (--exc: head X takes --pX of the picks from head A's slot: one rnd() more with the flag, none without; --pX=0: none
 				// either, the observer: the same search as the flag off, the picks' bands counted)
-				if (EXC !== null && EXC.q > 0 && rnd() < EXC.q) { const x0 = EXC.picks; e = popX(); if (EXC.picks !== x0) head = 'X'; } else e = popA();
+				if (EXC !== null && EXC.q > 0 && rnd() < EXC.q) { const x0 = EXC.picks; e = popX(); if (EXC.picks !== x0) { head = 'X'; pickX = EXC.deep; } } else e = popA();
 			} else { e = popB(); head = 'B'; }
 			if (e === null) { end = 'exhausted'; break; }
 			if (EXC !== null) excCount(e);
@@ -3760,6 +3784,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 					}
 				}
 				if (end) break;
+			}
+			// (--excDeep: the pick's child of the most excursion, if it climbed at least as high as the pick, goes on the chains' stack)
+			if (pickX) {
+				if (xBest !== null && xBestEx >= excOf(e)) { EXC.stack.push(xBest); EXC.pushed++; if (EXC.stack.length > EXC_STACK) EXC.stack.shift(); }
+				xBest = null; xBestEx = -Infinity; pickX = false;
 			}
 			if (plRow !== null) { plRow[1] += cells.size - cells0; plRow[2] += impr - impr0; }
 			// (--frontier --fYield=1: the yield of head F's picks against the others': new visited tiles + FR_ROOM_W x new rooms a pick,
@@ -3974,8 +4003,10 @@ async function gpuMain(a, L, m) {
 	// (--exc=1, head X (see EXC_BANDS): cRm = a cell's running minimum of its reach cost since its lineage last changed room,
 	// from its parent cell (the pick) or its own cost at a room change; pb / pickB / arch / q as explore()'s; the flag off: none)
 	const EXg = a.exc !== 0 ? { bands: excBandsOf(a), pb: new Float64Array(5), dec: Math.pow(0.5, 1 / EXC_HALF), q: a.pA > 0 ? a.pX / a.pA : 0,
-		picks: 0, pickB: new Float64Array(5), arch: [0, 0, 0, 0, 0] } : null;
+		picks: 0, pickB: new Float64Array(5), arch: [0, 0, 0, 0, 0], deep: a.excDeep !== 0, stack: [], deepP: 0, pushed: 0 } : null;
 	let cRm = EXg !== null ? new Float32Array(capN) : null;
+	// (--excDeep: per pick of the batch, head X's (1) and its runs' new cell of the most excursion in its room)
+	const xIs = EXg !== null && EXg.deep ? new Uint8Array(a.batch) : null, xBestD = xIs !== null ? new Int32Array(a.batch) : null, xBestX = xIs !== null ? new Float32Array(a.batch) : null;
 	let nCells = 0;
 	const grow = (need) => {
 		if (need <= capN) return;
@@ -4190,6 +4221,17 @@ async function gpuMain(a, L, m) {
 	const popX = () => {
 		const ord = excOrder(EXg.bands, EXg.pb);
 		if (!ord.length || !roomList.length) return popA();
+		// (--excDeep: the chains first, as explore()'s)
+		if (EXg.deep) {
+			while (EXg.stack.length) {
+				const c = EXg.stack.pop();
+				if (cT[c] >= maxT) continue;
+				const b = excBand(excOfG(c));
+				if (!ord.includes(b)) continue;
+				EXg.picks++; EXg.pickB[b]++; EXg.deepP++;
+				return c;
+			}
+		}
 		excBestG.fill(-1);
 		for (let k = 0; k < EXC_DRAWS; k++) {
 			const r = roomList[(rnd() * roomList.length) | 0];
@@ -4209,7 +4251,7 @@ async function gpuMain(a, L, m) {
 	};
 	const excArchG = () => { const h = [0, 0, 0, 0, 0]; for (let c = 0; c < nCells; c++) h[excBand(excOfG(c))]++; EXg.arch = h; };
 	const excRec = () => (EXg !== null ? { exc: { picks: EXg.picks, pickShare: (() => { const t = EXg.pb.reduce((x, y) => x + y, 0); return Array.from(EXg.pb, (x) => (t > 0 ? Math.round(1000 * x / t) / 1000 : 0)); })(),
-		target: EXg.bands.map((x) => Math.round(1000 * x) / 1000), xPicks: Array.from(EXg.pickB), archive: EXg.arch } } : {});
+		target: EXg.bands.map((x) => Math.round(1000 * x) / 1000), xPicks: Array.from(EXg.pickB), archive: EXg.arch, ...(EXg.deep ? { deepPicks: EXg.deepP, pushed: EXg.pushed } : {}) } } : {});
 	const discovery = [];
 	// ---- the start cell
 	grow(1);
@@ -4318,7 +4360,7 @@ async function gpuMain(a, L, m) {
 		// (the batch's class first: pickClass draws no random number and nothing below changes mixSt before the batch is
 		// sent, so this is the same class as after the picks; a blind class's picks: heads B and C only, pA 0)
 		const bc = pickClass(), bst = mixSt[bc], pA = classes[bc].blind ? 0 : a.pA;
-		let K = 0;
+		let K = 0, isX = 0;
 		for (let k = 0; k < a.batch; k++) {
 			let e = -1;
 			if (discovery.length && rnd() < 0.5) {
@@ -4326,9 +4368,12 @@ async function gpuMain(a, L, m) {
 				e = d[0];
 				if (--d[1] <= 0) discovery.pop();
 				if (cT[e] >= maxT) continue;
-			} else if (rnd() < pA) e = EXg !== null && EXg.q > 0 && rnd() < EXg.q ? popX() : popA();   // (--exc: head X in head A's slot; a blind batch: never; --pX=0: the observer)
-			else e = popB();
+			} else if (rnd() < pA) {
+				// (--exc: head X in head A's slot; a blind batch: never; --pX=0: the observer)
+				if (EXg !== null && EXg.q > 0 && rnd() < EXg.q) { const x0 = EXg.picks; e = popX(); if (xIs !== null && EXg.picks !== x0) isX = 1; } else e = popA();
+			} else e = popB();
 			if (e < 0) break;
+			if (xIs !== null) { xIs[K] = isX; xBestD[K] = -1; isX = 0; }
 			if (EXg !== null) excCountG(e);
 			cPicks[e]++; cVer[e]++; picks++;
 			{ const pr = roomList[cRoom[e]]; pr.picks++; if (pr.grp !== null) pr.grp.picks++; }
@@ -4379,7 +4424,12 @@ async function gpuMain(a, L, m) {
 			const rc = costOf(fifths, node);
 			cRc[d] = rc;
 			// (--exc: the parent's (the pick's) running minimum while the room is the parent's, else this cell's own cost)
-			if (cRm !== null) { const par = pk < K ? pickBuf[pk] : -1, pr = par >= 0 ? roomList[cRoom[par]] : null; cRm[d] = pr && pr.key === roomKey && cRm[par] < cRc[d] ? cRm[par] : cRc[d]; }
+			if (cRm !== null) {
+				const par = pk < K ? pickBuf[pk] : -1, pr = par >= 0 ? roomList[cRoom[par]] : null, same = !!pr && pr.key === roomKey;
+				cRm[d] = same && cRm[par] < cRc[d] ? cRm[par] : cRc[d];
+				// (--excDeep: a head-X pick's new cell in its room: the chain's candidate)
+				if (xIs !== null && isNew && same && xIs[pk]) { const x = cRc[d] - cRm[d]; if (xBestD[pk] < 0 || x > xBestX[pk]) { xBestD[pk] = d; xBestX[pk] = x; } }
+			}
 			if (!isNew) { cVer[d]++; if (SAT && pk < K) pickNew[pk]++; }   // (an earlier arrival is yield too: the brake, above)
 			hpush(d);
 			if (t > deepest) deepest = t;
@@ -4394,6 +4444,14 @@ async function gpuMain(a, L, m) {
 			}
 			const rr = roomList[cRoom[d]];
 			if (rr.best < 0 || rc < cRc[rr.best]) rr.best = d;
+		}
+		// (--excDeep: each head-X pick's child of the most excursion, if it climbed at least as high as the pick, onto the stack)
+		if (xIs !== null) {
+			for (let k = 0; k < K; k++) {
+				if (!xIs[k] || xBestD[k] < 0 || xBestX[k] < excOfG(pickBuf[k])) continue;
+				EXg.stack.push(xBestD[k]); EXg.pushed++;
+			}
+			if (EXg.stack.length > EXC_STACK) EXg.stack.splice(0, EXg.stack.length - EXC_STACK);
 		}
 		// the batch's new rooms: fields from the earliest of their new cells (explore(): a room's first cell)
 		for (const p of bFirst) {
@@ -4606,7 +4664,7 @@ async function main() {
 	const sumArr = (k) => { const s = [0, 0, 0, 0, 0]; for (const v of stats.values()) if (Array.isArray(v[k])) for (let b = 0; b < 5; b++) s[b] += v[k][b] || 0; return s; };
 	const shares = (s) => { const t = s.reduce((x, y) => x + y, 0); return s.map((x) => (t > 0 ? Math.round(1000 * x / t) / 1000 : 0)); };
 	const excNow = () => (a.exc && a.cells === 'coarse' ? { exc: { picks: total('excP'), pickShare: shares(sumArr('excPb')), target: excBandsOf(a).map((x) => Math.round(1000 * x) / 1000),
-		xPicks: sumArr('excXb'), archive: sumArr('excArch'), bytes: total('exB') } } : {});
+		xPicks: sumArr('excXb'), archive: sumArr('excArch'), bytes: total('exB'), ...(a.excDeep ? { deepPicks: total('excDeepP'), pushed: total('excPushed') } : {}) } } : {});
 	const deathsNow = () => (a.deathMoves ? { deaths: { seen: total('dSeen'), byCost: total('dCost'), byNew: total('dNew'), dropped: total('dDrop'), back: total('dBack'), backKept: total('dBackKept'), backByOrder: total('dBackR'), backBySteer: total('dBackS'), backPromoted: total('dPromote'), useless: total('dCul'), cells: total('dCells'), deadTicks: total('dTicks'), dominated: total('dDom') } } : {});
 	// (the useful territory, coarse cells: the picks and cells in cul-de-sacs of their rooms, the rooms whose territory gain
 	// was all off the band (gain 0), the cul-de-sac bitsets kept)

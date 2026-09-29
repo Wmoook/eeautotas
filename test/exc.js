@@ -138,6 +138,11 @@ function sectionToy() {
 	}
 	const again = gox(GOX, file, [...base, '--exc=1']);
 	check('--exc=1: the same seed and budget give the same search', sig(again) === sig(on) && JSON.stringify(doneOf(again).exc) === JSON.stringify(x), `${doneOf(again).picks} / ${d1.picks} picks`);
+	// (--excDeep=1, v2: the chains: children that climbed picked first; a route, the same search again)
+	const deep = [...base, '--exc=1', '--excDeep=1'];
+	const v1 = gox(GOX, file, deep), v2 = gox(GOX, file, deep), xd = doneOf(v1).exc || {}, rd = routesOf(v1);
+	check('--excDeep=1: chain picks (deepPicks > 0, pushed >= deepPicks), a route (replayed), the same seed = the same search',
+		xd.deepPicks > 0 && xd.pushed >= xd.deepPicks && rd.length > 0 && !!C.evaluate(L, masksOf(rd[0].inputs)) && sig(v1) === sig(v2), JSON.stringify({ deep: xd.deepPicks, pushed: xd.pushed, picks: xd.picks, route: rd.length ? rd[0].ticks : null }));
 	check('--exc=1 with --pA=0 (the distance-blind config): no head X (it takes its picks from head A\'s slot), no crash', (() => { const d = doneOf(gox(GOX, file, [...base, '--exc=1', '--pA=0', `--maxTicks=${Math.min(T, 3000000)}`])); return d.ticks > 0 && d.exc && d.exc.picks === 0; })());
 	void w0; void w1;
 }
