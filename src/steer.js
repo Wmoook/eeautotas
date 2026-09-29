@@ -1638,6 +1638,9 @@ function blueDP(B, PH, level, lim, deadline, opts) {
 	if (!K) return no('past the build\'s time');
 	if (K.over) return no(K.over);
 	Object.assign(info, { layers: K.layers, builds: K.builds, rounds: K.rounds });
+	// (a DP with no complete tour from the start has no value there: its legs miss a coin (This is not snow's 16: a CPU
+	// file twice the size for nothing); none)
+	if (K.tour.length < Math.min(bp.T, coins.length)) return { info: Object.assign(info, { why: `no tour from the start (${K.tour.length} of ${bp.T})` }) };
 	return { info, K };
 }
 
