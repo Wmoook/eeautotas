@@ -2142,7 +2142,13 @@ async function escapeSection() {
 	check('the default rotation (the set cover of the portfolio sweep): long random runs, the longest, the longer, no useful territory / dominance, the search as is; each with its goexplore.js flags; the GPU random runs follow it',
 		rotD.map((c) => c.name).join(',') === 'longruns,lr3,lr2,plain,base' && rotD[0].flags.join(' ') === '--roll=120 --keep=0.95' && rotD[1].flags.join(' ') === '--roll=480 --keep=0.985' &&
 		rotD[2].flags.join(' ') === '--roll=240 --keep=0.97' && rotD[3].flags.join(' ') === '--useful=0 --dom=0' && rotD[4].flags.length === 0 && ED.ESC_ROLLS === true &&
-		ED.escRotOf('blind,reach,deaths').map((c) => c.flags.join(' ')).join('|') === '--pA=0 --burst=16|--mix=0 --burstSteer=|--deaths=1', rotD.map((c) => `${c.name}: ${c.flags.join(' ')}`).join('; '));
+		ED.escRotOf('blind,reach,deaths').map((c) => c.flags.join(' ')).join('|') === '--pA=0 --burst=16|--mix=0 --burstSteer=', rotD.map((c) => `${c.name}: ${c.flags.join(' ')}`).join('; '));
+	// (the merge's soundness review, 2026-09-29: goexplore.js --deaths=1 with the death-free reach file keeps dying balls and
+	// prunes by a -1 that only a death reaches; the reach file is the proof field of the search's own deaths setting)
+	const rotP = ED.escRotOf('--deaths=1+--reach=x.bin+--bin=y.bin+--useful=0, --deaths=1, deaths');
+	check('no configuration prunes without a proof: no "deaths" configuration, and --deaths / --reach / --bin left out of raw flags',
+		!Object.prototype.hasOwnProperty.call(ED.ESC_CONFIGS, 'deaths') && Object.values(ED.ESC_CONFIGS).every((c) => !c.flags.some((x) => /^--(deaths|reach|bin)=/.test(x))) &&
+		rotP.map((c) => c.flags.join(' ')).join('|') === '--useful=0', JSON.stringify(rotP.map((c) => [c.name, c.flags])));
 	const rotX = ED.escRotOf('plain, --pA=0.2+--sample=4+--prefix=x+--workers=64, nosuch, longruns');
 	check('a rotation from a string: names and raw flags joined by "+" (flags that would change the escape\'s own start, share or files left out), unknown names left out',
 		rotX.map((c) => c.name).join('|') === 'plain|--pA=0.2+--sample=4+--prefix=x+--workers=64|longruns' && rotX[1].flags.join(' ') === '--pA=0.2 --sample=4' &&
@@ -2275,7 +2281,7 @@ async function escapeSection() {
 	const sc6 = path.join(HOME, 'esc_rot.json');
 	fs.writeFileSync(sc6, JSON.stringify({ attempt: str(aR), dist: 30, stdinLog: path.join(HOME, 'esc_rot_stdin.log'),
 		sources: [{ room: 777, desc: 'coins=1', gain: 5, dist: 50, inputs: str(s1R), at: 300 }, { room: 778, desc: 'coins=2', gain: 5, dist: 40, inputs: str(s2R), at: 400 }] }));
-	const rot6 = ['blind', 'reach', '--pA=0.25+--sample=4+--seed=9', 'deaths', 'base'];
+	const rot6 = ['blind', 'reach', '--pA=0.25+--sample=4+--seed=9', 'deaths', '--deaths=1+--useful=0+--reach=x.bin', 'base'];
 	ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: rot6 }, { available: false },
 		{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeArgv, argvLog], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
 	const t6 = Date.now();
@@ -2287,9 +2293,10 @@ async function escapeSection() {
 	const argv6 = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 	const extra6 = argv6.map((a) => a.slice(a.findIndex((x) => String(x).startsWith('--prefix=')) + 1).filter((x) => x !== '--nice=10').join(' '));
 	const log6 = (st6.log || []).filter((l) => /escape/.test(l));
-	check('the rotation\'s configurations in order, each passed to its escape only (reach skipped without a steer field; a raw flag list without --seed; deaths as moves where something kills), then round again',
-		hist6.length >= 5 && hist6.slice(0, 5).map((h) => h.cfg).join('|') === 'blind|--pA=0.25+--sample=4+--seed=9|deaths|base|blind' &&
-		extra6.slice(0, 5).join('|') === '--pA=0 --burst=16|--pA=0.25 --sample=4|--deaths=1||--pA=0 --burst=16' && argv6.length >= 3 && argv6[2].includes('--deaths=0'),
+	check('the rotation\'s configurations in order, each passed to its escape only (reach skipped without a steer field; a raw flag list without --seed; no "deaths" configuration, a raw list without --deaths / --reach), then round again',
+		hist6.length >= 5 && hist6.slice(0, 5).map((h) => h.cfg).join('|') === 'blind|--pA=0.25+--sample=4+--seed=9|--deaths=1+--useful=0+--reach=x.bin|base|blind' &&
+		extra6.slice(0, 5).join('|') === '--pA=0 --burst=16|--pA=0.25 --sample=4|--useful=0||--pA=0 --burst=16' && argv6.length >= 3 && argv6[2].includes('--deaths=0') &&
+		argv6.every((a) => !a.includes('--deaths=1') && !a.includes('--reach=x.bin')),
 		`${hist6.map((h) => h.cfg).join(', ')}; ${extra6.map((x) => `[${x}]`).join(' ')}`);
 	const want6 = [['arrival', 'where room "coins=2" was entered', s2R.length], ['frontier', 'the least explored room "coins=1"\'s nearest attempt', s1R.length - 60],
 		['near', 'the nearest attempt', aR.length - 60], ['arrival', 'where room "coins=1" was entered', s1R.length], ['frontier', 'the least explored room "coins=2"\'s nearest attempt', s2R.length - 60]];

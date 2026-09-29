@@ -1580,7 +1580,7 @@ function precEvent(V, ev) {
 // escape k runs with CONFIGURATION k of ESC_ROTATION (goexplore.js flags for that process only, after the search's own:
 // the last flag wins; ESC_CONFIGS) and a start of KIND k of ESC_FROM (escPick: the rooms' first arrivals, the least
 // explored rooms, the nearest attempt; each start still once a search), both in rotation; a configuration that would be
-// the search's own on this level is skipped (reach: no steer field; deaths: already moves, or nothing kills). The first
+// the search's own on this level is skipped (reach: no steer field). The first
 // escape comes after ESC_FIRST_S of stall (the portfolio harness's stall rule: 60 s with no new room and no nearer
 // attempt), the later ones after ESC_WAIT_S; an escape that stalls itself gives way after ESC_TURN_S (at least that long
 // after its start), doubled with every full round of the rotation, at most ESC_STALL_S / ESC_MIN_S: the rotation's
@@ -1593,11 +1593,13 @@ const ESC_FIRST_S = 60, ESC_TURN_S = 120;
 // the configurations by name (the portfolio sweep's names, src/out/pf/pfsweep.js; `base` = the search's own). reach: the
 // sweep's arm has no steer field at all (body steer:false); an escape keeps it for its distances (the nearest attempt,
 // the stall clocks: one measure for every strategy) and orders by the reach field alone (--mix=0: head A's steer heap
-// never picks; its bursts' trophy arm without --burstSteer)
+// never picks; its bursts' trophy arm without --burstSteer). No 'deaths' configuration (the merge's soundness review,
+// 2026-09-29): goexplore.js --deaths=1 (and the GPU random runs' eegpu roll --deaths=1) with the search's reach file,
+// which is the DEATH-FREE field wherever the search's deaths are no moves (editor.js reachBase dm), keeps dying balls
+// but prunes by a -1 that only a death reaches: a prune without a proof (the sweep's deaths arm routed 0 of 3 anyway)
 const ESC_CONFIGS = {
 	blind: { label: 'distance-blind novelty', flags: ['--pA=0', '--burst=16'] },
 	reach: { label: 'the reach field alone', flags: ['--mix=0', '--burstSteer='], needs: 'steer' },
-	deaths: { label: 'deaths as moves', flags: ['--deaths=1'], needs: 'deaths' },
 	plain: { label: 'no useful territory, no dominance', flags: ['--useful=0', '--dom=0'] },
 	fine: { label: 'speed cells early', flags: ['--spd=10', '--spdMax=6'] },
 	longruns: { label: 'long random runs', flags: ['--roll=120', '--keep=0.95'] },
@@ -1616,8 +1618,11 @@ const ESC_ROTATION = ['longruns', 'lr3', 'lr2', 'plain', 'base'];
 const ESC_ROLLS = true;
 const ESC_FROM = ['arrival', 'frontier', 'near'];
 const ESC_KINDS = ['arrival', 'frontier', 'near'];
-// (flags a configuration may not set: the escape's own start, share, seed, files and clock)
-const ESC_OWN = new Set(['prefix', 'workers', 'seed', 'seconds', 'stdin', 'work', 'tool', 'pausefile', 'cachedir', 'bursts', 'nice', 'out', 'level', 'depth', 'first', 'gpu', 'steer']);
+// (flags a configuration may not set: the escape's own start, share, seed, files and clock; deaths / reach / bin: the
+// reach file is the proof field of the search's own deaths setting, and --deaths=1 on the death-free file prunes
+// without a proof)
+const ESC_OWN = new Set(['prefix', 'workers', 'seed', 'seconds', 'stdin', 'work', 'tool', 'pausefile', 'cachedir', 'bursts', 'nice', 'out', 'level', 'depth', 'first', 'gpu', 'steer',
+	'deaths', 'reach', 'bin']);
 /** the rotation's configurations from a list (an array or "a,b,c"): names of ESC_CONFIGS, or goexplore.js flags joined by
  *  '+'; unknown names and flags that would change the escape's own setup are left out; none left: [base] */
 function escRotOf(v) {
@@ -1718,10 +1723,10 @@ function escTurnOf(k, rotLen, turn, min, stall) {
 	return { min: Math.min(min, t), stall: Math.min(stall, t) };
 }
 /** the next escape's configuration: the next one of the rotation that is not the search's own on this level (reach: no
- *  steer field for the CPU search; deaths: deaths are moves already, or nothing kills) */
+ *  steer field for the CPU search) */
 function escCfgNext() {
 	const R = esc.rot;
-	const ok = (c) => c.needs === 'steer' ? !!(cur.files.steerCpu && !cur.opts.noWayUp) : c.needs === 'deaths' ? !cur.opts.deaths && GX.deathsOf(cur.level) !== null : true;
+	const ok = (c) => c.needs === 'steer' ? !!(cur.files.steerCpu && !cur.opts.noWayUp) : true;
 	for (let j = 0; j < R.length; j++) {
 		const c = R[(esc.cfgTurn + j) % R.length];
 		if (ok(c)) { esc.cfgTurn += j + 1; return c; }
