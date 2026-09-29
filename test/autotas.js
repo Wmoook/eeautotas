@@ -163,7 +163,7 @@ function runRace(o) {
 		const poke = setInterval(() => { if (!jumped && o.jump && realNow() - t0 > ed.endAt + 600) { jumped = true; skew += o.jump; } }, 50);
 		ctl = AT.run({ eelvl, minutes: 5, workers: 1, cpu: true, name: 'race', startJob: () => ({ pid: 0 }), stopJob: () => {},
 			onEvent: (e) => { evs.push(e); if (e.ev === 'job') setTimeout(() => ctl.stop(), 300); },
-			onEnd: () => { clearTimeout(guard); clearInterval(poke); resolve({ evs, ms: realNow() - t0 }); } });
+			onEnd: () => { clearTimeout(guard); clearInterval(poke); resolve({ evs, ms: realNow() - t0, st: ctl.state(), t0 }); } });
 	});
 }
 (async () => {
@@ -176,6 +176,11 @@ function runRace(o) {
 			!!jobA && imported.length === 1 && imported[0] === cleaned.inputs && !/without a route/.test(endA && endA.why), `${endA && endA.why}; job ${jobA ? jobA.runTicks : 'none'}, imported ${imported.map((x) => x.length).join(',') || 'nothing'}`);
 		const iH = a.evs.findIndex((e) => e.ev === 'handoff'), iJ = a.evs.findIndex((e) => e.ev === 'job');
 		check('then the handoff: "Find a route ended (found)", after the job', iJ >= 0 && iH > iJ && /Find a route ended \(found\)/.test(a.evs[iH].why), iH >= 0 ? a.evs[iH].why : 'no handoff');
+		// (the editor page's "best route" panel: the AutoTASer's start and the job's bests, its base route first)
+		const bs = a.st.bests || [];
+		check('the state carries its start (t0, ms) and the job\'s bests {t, runTicks, what}: the base route first ("the first route"), at most BESTS_KEEP',
+			typeof a.st.t0 === 'number' && Math.abs(a.st.t0 - a.t0) < 1000 && bs.length === 1 && bs[0].what === 'the first route' && bs[0].runTicks === jobA.runTicks && bs[0].t === jobA.t && AT.BESTS_KEEP === 64,
+			JSON.stringify({ t0: a.st.t0 - a.t0, bs }));
 		// (the first route's cap is FIRST_CLEAN_WAIT_MS since n3-slow-first-route-hunt: routeGate; later routes CLEAN_WAIT_MS)
 		const b = await runRace({ cleanAfter: Infinity, jump: AT.FIRST_CLEAN_WAIT_MS + 1000 });
 		const endB = b.evs.find((e) => e.ev === 'end');

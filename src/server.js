@@ -92,6 +92,14 @@ function trajectoryJson(id, which) {
 	}
 	return cached(`trj|${id}|${w}|${r.version}|${extra.original ? extra.original.version : ''}`, () => JSON.stringify(V.json(r.tr, extra)));
 }
+/** the job's best run as a path only (the level editor's "best route" once its optimizer runs: Find and optimize): its
+ *  version, run ticks and the box's top-left per tick (base64 Int32, px x 16, like the trajectory's x / y); none of the
+ *  trajectory's alignment with the original (a DTW of up to 40 M cells) or its events */
+function pathJson(id) {
+	const r = runTrajectory(id, 'best'), tr = r.tr;
+	const b64 = (a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+	return cached(`path|${id}|${r.version}`, () => JSON.stringify({ version: r.version, ticks: tr.n, runTicks: tr.runTicks, time: C.fmt(tr.runTicks), finished: tr.complete >= 0, posScale: 16, x: b64(tr.X), y: b64(tr.Y) }));
+}
 function levelJson(id) {
 	const lj = J.levelJsonOf(id);
 	return cached(`lv|${id}|${fileVersion(lj)}`, () => JSON.stringify(V.levelView(C.readJSON(lj, null), J.loadJobLevel(id), C.readJSON(path.join(J.jobDir(id), 'meta.json'), {}))));
@@ -124,6 +132,7 @@ const ENDPOINTS = [
 	['GET', '/api/jobs/:id/focus', 'the last focus search: state, results, log tail'],
 	['GET', '/api/jobs/:id/trajectory?which=best', 'per-tick positions (1/16 px, base64 Int32), run timer, inputs, flags, events, door states and effects (protection, curse, ' +
 		'fly, ... with their timers) of the best run (which=original: the uploaded TAS); best also has align (original tick at the same point, per best tick)'],
+	['GET', '/api/jobs/:id/path', 'the best run as a path only: version, runTicks, ticks, x / y (per tick, 1/16 px, base64 Int32): the level editor\'s best route while Find and optimize runs'],
 	['GET', '/api/jobs/:id/level', 'the level for the viewer: width, height, fg/bg ids (base64 Uint16), EE minimap color and block kind per id, door numbers, lookup numbers, portals, spawns'],
 	['GET', '/api/eegfx', 'EE graphics for the viewer, read from your eeo-tas folder: {available, dir, why, sheets, blocks: {id: [sheet, frame, y, layer, shadow]}, sprites, rot, smiley, ...}'],
 	['POST', '/api/eegfx', 'set the eeo-tas folder for EE graphics: JSON {dir} (checked: media/blocks.png and src/items/ItemManager.as; "" = find it automatically)'],
@@ -139,7 +148,7 @@ const ENDPOINTS = [
 	['POST', '/api/editor/solve/stop', 'stop the route search'],
 	['GET', '/api/editor/solve/route.eetas', 'download the found route (also level.eelvl: the level it was found on)'],
 	['POST', '/api/editor/autotas', 'the AutoTASer: from the level alone to a near-optimal TAS within a time budget (Find a route, a job from its first route optimized at once, fed with its newer routes, the GPU handed to the optimizer when Find a route stops finding faster routes): JSON {eelvlB64, minutes (30), workers, name}'],
-	['GET', '/api/editor/autotas', 'the AutoTASer: running, state (finding / optimizing / done), job, best (run ticks), bestT (s), routes, handoff, events [{t, ev, ...}]'],
+	['GET', '/api/editor/autotas', 'the AutoTASer: running, state (finding / optimizing / done), job, best (run ticks), bestT (s), routes, handoff, events [{t, ev, ...}] (the last 60), t0 (its start, ms), bests [{t, runTicks, what}] (the base route of its job and every faster best: the first and the newest 64)'],
 	['POST', '/api/editor/autotas/stop', 'stop the AutoTASer (Find a route stops, the job pauses with its best)'],
 	['POST', '/api/editor/job', 'a job from a found route: JSON {eelvlB64, eetasB64, name, start: true|false, processor: "cpu" | "gpu"} (import, optionally start)'],
 ];
@@ -238,7 +247,7 @@ function startFocus(id, b) {
 // ---------------------------------------------------------------- the level editor (src/editor.js, src/app/editor.html)
 /** the level of an editor request: {eelvlB64} (.eelvl bytes) or {level} (the editor's JSON) */
 let autotas = null;   // the AutoTASer (src/autotas.js), one at a time
-const autotasState = () => { const s = autotas ? autotas.state() : null; return s ? { running: s.state !== 'done', state: s.state, job: s.job, best: s.best, bestT: s.bestT, routes: s.routes, handoff: s.handoff, events: s.events.slice(-60) } : { running: false, state: 'none' }; };
+const autotasState = () => { const s = autotas ? autotas.state() : null; return s ? { running: s.state !== 'done', state: s.state, job: s.job, best: s.best, bestT: s.bestT, routes: s.routes, handoff: s.handoff, events: s.events.slice(-60), t0: s.t0, bests: s.bests } : { running: false, state: 'none' }; };
 const editorLevel = (b) => (b.eelvlB64 ? Buffer.from(String(b.eelvlB64), 'base64') : b.level ? ED.eelvlOf(b.level) : null);
 async function editorRoute(req, res, parts, q) {
 	const what = parts[2] || '', sub = parts[3] || '';
@@ -387,6 +396,7 @@ const server = http.createServer(async (req, res) => {
 				return send(res, 200, { ok: true, processor: proc });
 			}
 			if (req.method === 'GET' && what === 'trajectory') return send(res, 200, trajectoryJson(id, q('which') || 'best'));
+			if (req.method === 'GET' && what === 'path') return send(res, 200, pathJson(id));
 			if (req.method === 'GET' && what === 'level') return send(res, 200, levelJson(id));
 			if (req.method === 'POST' && what === 'stop') { stopJob(id); return send(res, 200, { ok: true }); }
 			if (req.method === 'POST' && what === 'finish') { stopJob(id); return send(res, 200, { ok: true, report: J.finishReport(id) }); }

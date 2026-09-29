@@ -47,6 +47,8 @@ const CLEAN_WAIT_MS = 15000;
 /** the first route (the job's base) waits at most this long from the first route seen, however many faster ones replace
  *  it meanwhile (its cleaned version goes to the job as soon as it is done) */
 const FIRST_CLEAN_WAIT_MS = +(process.env.EEAT_FIRST_CLEAN_WAIT_MS || 1000);
+/** the job's bests kept in the state (the first and the newest) */
+const BESTS_KEEP = 64;
 /** a job history entry that Find a route's route made (its inbox run, that run's splice with the best, or a direct try
  *  while the job's grind was not running) */
 const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
@@ -108,10 +110,16 @@ function run(o) {
 	const out = o.out || null;
 	if (out) fs.mkdirSync(out, { recursive: true });
 	const level = E.prepareLevel(Object.assign(L.toSimLevel(L.readEelvl(o.eelvl)), { start_mode: 'reset' }));
-	const S = { state: 'finding', job: null, best: null, bestT: null, routes: 0, handoff: null, events: [] };
+	// (t0: the start, ms; bests: the job's base route and its every faster best {t, runTicks, what}, at most BESTS_KEEP (the
+	// first and the newest): the editor page's "best route" panel shows the optimizer's gains after the handoff)
+	const S = { state: 'finding', job: null, best: null, bestT: null, routes: 0, handoff: null, events: [], t0, bests: [] };
 	const emit = (ev) => {
 		const rec = Object.assign({ t: since() }, ev);
 		S.events.push(rec);
+		if (ev.ev === 'job' || ev.ev === 'best') {
+			S.bests.push({ t: rec.t, runTicks: ev.runTicks, what: ev.ev === 'job' ? 'the first route' : String(ev.what || '') });
+			if (S.bests.length > BESTS_KEEP) S.bests.splice(1, S.bests.length - BESTS_KEEP);
+		}
 		if (out) { try { fs.appendFileSync(path.join(out, 'timeline.jsonl'), JSON.stringify(rec) + '\n'); } catch (e) { /* read-only */ } }
 		if (o.onEvent) o.onEvent(rec);
 	};
@@ -299,7 +307,7 @@ function routeEscape(r, e) {
 	return x && x.cfg !== undefined ? { n: x.n, cfg: x.cfg } : null;
 }
 
-module.exports = { run, handoffWhy, routeGate, routeKey, escapeEvents, routeEscape, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT, CLEAN_WAIT_MS, FIRST_CLEAN_WAIT_MS };
+module.exports = { run, handoffWhy, routeGate, routeKey, escapeEvents, routeEscape, BESTS_KEEP, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT, CLEAN_WAIT_MS, FIRST_CLEAN_WAIT_MS };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
