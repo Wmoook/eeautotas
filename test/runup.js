@@ -1,5 +1,5 @@
 'use strict';
-// test/runup.js - RUN-UP CELLS (goexplore.js --ru=1, the default; n3-run-up-cells, 2026-09-29): a stalled room's states
+// test/runup.js - RUN-UP CELLS (goexplore.js --ru=1, opt-in; n3-run-up-cells, 2026-09-29): a stalled room's states
 // next to a speed feature also make speed-bucketed cells, so a later, faster arrival at a coarse cell is kept apart from
 // the earlier, slower one (more cells, nothing dropped):
 //   features  runupFeatures: arrows, boosts, portals and one-ways marked; a level without one: null (no zone ever)
@@ -111,10 +111,10 @@ if (on('features')) {
 	const mix = levelFile('mix', ['########', '#S.^=}.#', '#......#', '#.....T#', '########']);
 	const fm = GX.runupFeatures(mix.level), Wm = mix.level.width;
 	check('an up arrow, a one-way and a boost', fm !== null && fm[1 * Wm + 3] === 1 && fm[1 * Wm + 4] === 1 && fm[1 * Wm + 5] === 1 && fm[1 * Wm + 2] === 0 && fm[1 * Wm + 6] === 0);
-	check('the options: --ru / --ruR / --ruB / --ruSlack (defaults 1, 12, 1.5, 0), EEAT_RUNUP', (() => {
+	check('the options: --ru / --ruR / --ruB / --ruSlack (defaults 0 (opt-in), 12, 1.5, 0), EEAT_RUNUP', (() => {
 		const a = GX.parseArgs(['x.eelvl']);
 		const b = GX.parseArgs(['x.eelvl', '--ru=0', '--ruR=20', '--ruB=2', '--ruSlack=100']);
-		return a.ru === (process.env.EEAT_RUNUP !== undefined ? +process.env.EEAT_RUNUP : 1) && a.ruR === 12 && a.ruB === 1.5 && a.ruSlack === 0 && b.ru === 0 && b.ruR === 20 && b.ruB === 2 && b.ruSlack === 100;
+		return a.ru === (process.env.EEAT_RUNUP !== undefined ? +process.env.EEAT_RUNUP : 0) && a.ruR === 12 && a.ruB === 1.5 && a.ruSlack === 0 && b.ru === 0 && b.ruR === 20 && b.ruB === 2 && b.ruSlack === 100;
 	})());
 }
 

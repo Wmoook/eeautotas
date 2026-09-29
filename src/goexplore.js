@@ -325,7 +325,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0,
-	ru: process.env.EEAT_RUNUP !== undefined ? +process.env.EEAT_RUNUP : 1, ruR: 12, ruB: 1.5, ruSlack: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
+	ru: process.env.EEAT_RUNUP !== undefined ? +process.env.EEAT_RUNUP : 0, ruR: 12, ruB: 1.5, ruSlack: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
@@ -379,7 +379,8 @@ const FR_ZCELL = 20, FR_ZN = 100, FR_ZMU = 2;
 // at most T ticks after its coarse cell's earliest (default 300; the fastest arrival of ANY lineage made the first routes 1,000-1,700
 // ticks slower in both A/B pairs: the lineage that escaped had come the slow way).
 const SPD_PROGRESS = 1;
-// --ru=1 (the default; --ru=0 or EEAT_RUNUP=0: the search exactly as before), RUN-UP CELLS (night 3, n3-run-up-cells):
+// --ru=1 (OPT-IN, or EEAT_RUNUP=1; the default --ru=0: the search exactly as before; its A/B showed no attributable gain,
+// src/out/n3/run-up-cells/), RUN-UP CELLS (night 3, n3-run-up-cells):
 // when the stall clock above flags a room (--spd), and a SPEED FEATURE (an arrow 1 / 2 / 3 / 1518 or its invisible
 // 411-413 / 1519, a boost 114-117, a portal 242 / 381, a one-way: the engine's jump-through flag) lies within --ruR tiles
 // (Chebyshev) of that room's best cell, the (2 --ruR + 1)^2 tiles around the best cell are a RUN-UP ZONE: while the room
