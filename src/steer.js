@@ -53,9 +53,16 @@ const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 const CUT = RF.CUT;
 const INF = 0xffffffff;
 // door / gate ids -> [feature, polarity (1: open when on / satisfied)]; exact statics (gold border: off; silver crown:
-// only the trophy gives it); time doors shut (a door that opens every 10 s is a wait of up to 5 s); death doors and zombie
-// doors / gates open. 50 (the secret "appear" block, eesim.js F_DOOR) is no door: it always blocks, a wall by
-// reach.js guideFlags (before 2026-09-28 it fell through to open: This is not snow's trophy fenced by six of them)
+// only the trophy gives it); time doors / gates 'time' (below); death doors and zombie doors / gates open. 50 (the secret
+// "appear" block, eesim.js F_DOOR) is no door: it always blocks, a wall by reach.js guideFlags (before 2026-09-28 it fell
+// through to open: This is not snow's trophy fenced by six of them)
+// TIME DOORS (156 open in the second half of every 1000 ticks, 157 in the first: never both shut): 'time', passable in
+// the walk and physics models (no layer: the phase is the clock's, not the ball's); the walk plan pays TIME_WAIT fifths to
+// enter one from a tile that is not of its own id (half the half period: the mean wait of 250 ticks, as tiles). Until
+// 2026-09-29 they were static walls: a level whose only way passes one had 'start has no way', one layer, no CEGAR and no
+// steer value anywhere (ML's First Samurai's start falls through a column of them; Phina, SPOT THE DIDFERNECE, MKco,
+// Mr Nutty's). EEAT_TIMEDOOR=0 (or opts.timeDoors false): walls, as before (and no key expiry, below)
+const TIME_WAIT = 250;
 const GATE = new Map([
 	[23, ['key0', 1]], [24, ['key1', 1]], [25, ['key2', 1]], [26, ['key0', 0]], [27, ['key1', 0]], [28, ['key2', 0]],
 	[1005, ['key3', 1]], [1006, ['key4', 1]], [1007, ['key5', 1]], [1008, ['key3', 0]], [1009, ['key4', 0]], [1010, ['key5', 0]],
@@ -63,7 +70,7 @@ const GATE = new Map([
 	[43, ['coins', 1]], [165, ['coins', 0]], [213, ['bcoins', 1]], [214, ['bcoins', 0]],
 	[1027, ['team', 1]], [1028, ['team', 0]], [1094, ['crown', 1]], [1095, ['crown', 0]],
 	[200, ['static', 0]], [201, ['static', 1]], [1152, ['static', 0]], [1153, ['static', 1]],
-	[156, ['static', 0]], [157, ['static', 0]], [1011, ['open', 1]], [1012, ['open', 1]], [206, ['open', 1]], [207, ['open', 1]],
+	[156, ['time', 1]], [157, ['time', 1]], [1011, ['open', 1]], [1012, ['open', 1]], [206, ['open', 1]], [207, ['open', 1]],
 ]);
 // the static effects that change jumps, speeds or gravity (reach.js WILD); the value a tile sets is the default one?
 const WILD_FX = new Set([417, 418, 419, 453, 461, 1517]);
@@ -93,17 +100,19 @@ function analyze(level, opts) {
 	// in the level: T 16, and the distinct-coin DP over 15 coins then had no value anywhere)
 	let goldCoins = 0;
 	for (let i = 0; i < N; i++) if (fg[i] === 100 || fg[i] === 110) goldCoins++;
+	const timeDoors = timeDoorsOn(opts), keyExpiry = keyExpiryOn(opts);
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
 		const hr = (fl(id) & F_HALF) ? lk[i] : -1;
 		let g = GATE.get(id);
 		if (g && g[0] === 'coins' && lk[i] > goldCoins) g = ['static', g[1] === 1 ? 0 : 1];
+		if (g && g[0] === 'time' && !timeDoors) g = ['static', 0];
 		if (g) {
 			const [f, pol] = g;
 			const key = f === 'psw' || f === 'osw' ? `${f}:${lk[i]}` : f;
 			gateFeat[i] = key; gatePol[i] = pol; gateParam[i] = lk[i];
 			cls[i] = 3;
-			if (f !== 'static' && f !== 'open') addFeat(key).gates++;
+			if (f !== 'static' && f !== 'open' && f !== 'time') addFeat(key).gates++;
 			continue;
 		}
 		if (isWallId(id) || hr === 2 || hr === 3) { cls[i] = 0; continue; }
@@ -179,7 +188,20 @@ function analyze(level, opts) {
 	const specialAt = new Int32Array(N).fill(-1);
 	special.forEach((s, k) => { specialAt[s[0]] = k; });
 	const start = { t: ((Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)) };
-	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts };
+	const hasTime = gateFeat.includes('time');
+	return { level, W, H, N, cls, oneWay, gateFeat, gatePol, gateParam, special, specialAt, feats, portalExits, portalSrcOf, forcedP, trophies, start, opts, keyExpiry, hasTime };
+}
+/** the time doors' class on (default; EEAT_TIMEDOOR=0 or opts.timeDoors === false: static walls, as before 2026-09-29) */
+function timeDoorsOn(opts) { return opts && opts.timeDoors !== undefined ? !!opts.timeDoors : process.env.EEAT_TIMEDOOR !== '0'; }
+/** key expiry in the layer graph (default; EEAT_TIMEDOOR=0, EEAT_KEYEXPIRY=0 or opts.keyExpiry === false: off) */
+function keyExpiryOn(opts) { return opts && opts.keyExpiry !== undefined ? !!opts.keyExpiry : process.env.EEAT_TIMEDOOR !== '0' && process.env.EEAT_KEYEXPIRY !== '0'; }
+/** the walk plan's cost of the step from tile t into tile t2 (fifths): 5 straight, 7 diagonal, + TIME_WAIT into a time
+ *  door / gate from a tile that is not of its id (a column of one id opens at once; a door next to a gate needs the phase
+ *  to turn) */
+function stepCost(A, t, t2, diag) {
+	const c = diag ? 7 : 5;
+	if (A.gateFeat[t2] !== 'time') return c;
+	return A.gateFeat[t] === 'time' && A.level.fg[t] === A.level.fg[t2] ? c : c + TIME_WAIT;
 }
 /** a feature's value index in the sim's state */
 function featureOf(k, sim, values) {
@@ -221,7 +243,7 @@ function makeModel(A, modeled) {
 	/** a gate's state in layer s: modelled features by the layer's value; statics exact; the others open */
 	function gateOpen(i, s) {
 		const k = A.gateFeat[i];
-		if (k === 'open') return true;
+		if (k === 'open' || k === 'time') return true;
 		if (k === 'static') return A.gatePol[i] === 1;
 		const f = allF.get(k);
 		const n = idx.get(k);
@@ -292,16 +314,25 @@ function makeModel(A, modeled) {
 	}
 	const identity = new Uint8Array(A.special.length);
 	for (let k = 0; k < A.special.length; k++) { let id = 1; for (let s = 0; s < S && id; s++) { const ts = transAll(s, k); if (ts.length !== 1 || ts[0] !== s) id = 0; } identity[k] = id; }
-	return { feats, S, s0, radix, stride, valOf, withVal, pass, trans, transAll, inv, layerOf, identity, gateOpen, names: feats.map((f) => f.key) };
+	// KEY EXPIRY (A.keyExpiry): a key runs out 500 ticks after it is taken (eesim.js KEY_TICKS), so in every layer with a
+	// key colour on, the ball can be at the same tile with it off: an edge (tile, key on) -> (tile, key off) at cost 0 (a
+	// relaxation: the wait is free, as the key's own time is). Without it the layers past a key door with the key run out
+	// were never reached (no field: Super Mario Bros. 3's steer NaN for 16k ticks past its yellow door) and a key layer's
+	// own key gates never reopened (Mr Nutty's green key: no value at the start). keyN: the modelled key features
+	const keyN = A.keyExpiry ? feats.map((f, n) => (f.key.startsWith('key') ? n : -1)).filter((n) => n >= 0) : [];
+	/** the layers a ball in layer s reaches by keys running out, one colour at a time (EMPTY: none) */
+	const expire = (s) => { let out = null; for (const n of keyN) if (valOf(s, n) === 1) (out || (out = [])).push(withVal(s, n, 0)); return out || EMPTY; };
+	return { feats, S, s0, radix, stride, valOf, withVal, pass, trans, transAll, inv, layerOf, identity, gateOpen, keyN, expire, names: feats.map((f) => f.key) };
 }
 
 // ------------------------------------------------------------------ the walk model: a backward Dijkstra over tile x layer
 function layeredField(A, M) {
 	const { W, H, N } = A, S = M.S;
 	const cost = new Uint32Array(S * N).fill(INF);
-	const NB = 8, MASK = NB - 1;
+	// (a ring of cost buckets longer than the longest edge: 7, or 7 + TIME_WAIT into a time door)
+	const NB = A.hasTime ? 512 : 8, MASK = NB - 1;
 	const bk = [], bn = new Int32Array(NB);
-	for (let b = 0; b < NB; b++) bk.push(new Int32Array(4096));
+	for (let b = 0; b < NB; b++) bk.push(new Int32Array(A.hasTime ? 256 : 4096));
 	let queued = 0;
 	const push = (st, c) => {
 		if (c >= cost[st]) return;
@@ -325,6 +356,8 @@ function layeredField(A, M) {
 			if (cost[st] !== cur) continue;
 			pops++;
 			const s2 = (st / N) | 0, t2 = st - s2 * N;
+			// (key expiry: (t2, the key on) -> (t2, s2) at cost 0, where the ball can stand with the key on)
+			for (const n of M.keyN) if (M.valOf(s2, n) === 0) { const s1 = M.withVal(s2, n, 1); if (pass(t2, s1) === 1) push(s1 * N + t2, cur); }
 			const k = specialAt[t2];
 			const pre = k >= 0 && !identity[k] ? M.inv(k, s2) : null;
 			const x2 = t2 % W, y2 = (t2 - x2) / W, ow2 = A.oneWay[t2];
@@ -340,7 +373,7 @@ function layeredField(A, M) {
 					if (isTrophy[t] || pass(t, s) !== 1 || forcedP[t]) continue;
 					if (ow2 >= 0 && owBlocked(ow2, DX8[di], DY8[di])) continue;
 					if (DX8[di] !== 0 && DY8[di] !== 0 && pass(y * W + x2, s) === 0 && pass(y2 * W + x, s) === 0) continue;
-					push(base + t, cur + (DX8[di] && DY8[di] ? 7 : 5));
+					push(base + t, cur + stepCost(A, t, t2, DX8[di] !== 0 && DY8[di] !== 0));
 				}
 			}
 			const ps = srcList.get(t2);
@@ -375,12 +408,14 @@ function planFrom(A, M, F, t0, s0, maxSteps = 200000) {
 			for (const s2 of (k >= 0 ? M.transAll(s, k) : [s])) {
 				const c2 = cost[s2 * N + t2];
 				if (c2 === INF) continue;
-				const tot = c2 + (DX8[di] && DY8[di] ? 7 : 5);
+				const tot = c2 + stepCost(A, t, t2, DX8[di] !== 0 && DY8[di] !== 0);
 				if (tot === c && (!best || tot < best.c)) best = { t: t2, s: s2, c: tot, via: s2 !== s ? 'touch' : 'move' };
 			}
 		}
 		const ex = A.portalExits.get(t);
 		if (ex && !best) for (const e of ex) { const c2 = cost[s * N + e]; if (c2 !== INF && c2 + 5 === c) { best = { t: e, s, c: c2 + 5, via: 'portal', from: t }; break; } }
+		// (a key running out where the ball stands: the same tile, the key's colour off)
+		if (!best) for (const n of M.keyN) { if (M.valOf(s, n) !== 1) continue; const s2 = M.withVal(s, n, 0); if (cost[s2 * N + t] === c) { best = { t, s: s2, c, via: 'expire', feat: M.feats[n].key }; break; } }
 		if (!best) return { path, ok: false, why: `stuck at ${t % W},${(t / W) | 0}` };
 		path.push(best);
 		t = best.t; s = best.s;
@@ -413,6 +448,7 @@ function counterexample(A, plan) {
 	const st = fullState(A);
 	for (let n = 1; n < plan.path.length; n++) {
 		const p = plan.path[n];
+		if (p.via === 'expire') { if (st[p.feat] !== undefined) st[p.feat] = 0; continue; }
 		if (p.via === 'portal' || p.via === 'death') continue;
 		const t = p.t, c = A.cls[t];
 		const q = plan.path[n - 1].t, W = A.W;
@@ -495,6 +531,8 @@ function forwardLayers(A, M) {
 	while (qh < qt) {
 		const k = q[qh++], s = (k / N) | 0, t = k - s * N;
 		if (isTrophy[t]) continue;
+		// (a key running out here: the key-off layer at the same tile)
+		for (const s2 of M.expire(s)) if (M.pass(t, s2) === 1) { add(s2, t); edges.add(s * S + s2); }
 		const x = t % W, y = (t - x) / W;
 		for (let di = 0; di < 8; di++) {
 			const x2 = x + DX8[di], y2 = y + DY8[di];
@@ -612,6 +650,17 @@ function wildField(A, M, s, goals, kappa) {
 	for (let t = 0; t < N; t++) if (d[t] < Infinity) walk[t] = Math.min(CUT - 1, Math.round(d[t]));
 	return { mode: 'walk', W, H, walk, cls: Uint8Array.from(A.cls), deaths: false, ice: false, prioShift: 0 };
 }
+/** a layer's goal list as a short key (the value iteration's "no change"): the count and two 32-bit hashes of (tile,
+ *  fifths) (the list was joined as a string; with key expiry it holds every tile) */
+function goalsKey(goals) {
+	let h1 = 0x811c9dc5, h2 = 0x9e3779b9;
+	for (const g of goals) {
+		const a = g.tile | 0, b = Math.round(g.cost * 5) | 0;
+		h1 = Math.imul(h1 ^ a, 0x01000193); h1 = Math.imul(h1 ^ b, 0x01000193);
+		h2 = Math.imul(h2 ^ b, 0x85ebca6b) + a | 0; h2 ^= h2 >>> 13;
+	}
+	return `${goals.length}:${h1 >>> 0}:${h2 >>> 0}`;
+}
 /** B: walkBuild() -> {M (with fx), fields: [layer] -> field | null, goals: [layer] -> goal tile bitmap, ...} */
 function buildPhysics(B, opts) {
 	const t0 = Date.now();
@@ -645,7 +694,20 @@ function buildPhysics(B, opts) {
 			}
 			if (g < CUT) goals.push({ tile: t, cost: g / 5 });
 		}
-		const key = goals.map((g) => `${g.tile}:${g.cost}`).join(',');
+		// (key expiry, makeModel expire: every tile a goal at the key-off layer's arrival cost there; the tile-change bitmap
+		// (the lookup's neighbour rule) stays the layer's own)
+		const ex = M.expire(s);
+		if (ex.length) {
+			const fs2 = ex.map((s2) => fields[s2]).filter(Boolean);
+			if (fs2.length) {
+				for (let t = 0; t < A.N; t++) {
+					let g = CUT;
+					for (const f2 of fs2) { const v = arriveCost(f2, t); if (v < g) g = v; }
+					if (g < CUT) goals.push({ tile: t, cost: g / 5 });
+				}
+			}
+		}
+		const key = goalsKey(goals);
 		if (goalsOf[s] === key && fields[s]) return false;
 		goalsOf[s] = key;
 		fields[s] = lv._wild && kappa ? wildField(A, M, s, goals, kappa) : RF.reachField(lv, Object.assign({ goals, debug: !!opts.debug }, rfOpts));
@@ -688,8 +750,8 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 	const A = PH.A, M = PH.M;
 	let s = M.layerOf(sim);
 	let f = PH.fields[s];
-	const tiles = [], legs = [];
-	if (!f || !f._m) return { tiles, legs, end: 'no field' };
+	const tiles = [], legs = [], expAt = new Map();
+	if (!f || !f._m) return { tiles, legs, expAt, end: 'no field' };
 	const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
 	let cur = null, why = 'no state';
 	if (st) for (const [ty, l] of [...(st.base ? [st.base] : []), ...(st.rise || [])]) { const c = f._m.costOf(st.t, ty, l); if (c !== CUT && (!cur || c < cur.c)) cur = { t: st.t, ty, l, c }; }
@@ -699,21 +761,25 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 		const end = path[path.length - 1];
 		if (A.trophies.includes(end.t)) { why = 'trophy'; break; }
 		const k = A.specialAt[end.t];
-		if (k < 0) { why = 'stuck'; break; }
+		// (key expiry: a key-on layer's field has every tile a goal, the key-off layer's cost there)
+		const exp = M.keyN.filter((n) => M.valOf(s, n) === 1).map((n) => [M.withVal(s, n, 0), M.feats[n].key]);
+		if (k < 0 && !exp.length) { why = 'stuck'; break; }
 		let best = null;
-		for (const s2 of M.transAll(s, k)) {
+		const cand = (k >= 0 ? M.transAll(s, k).map((s2) => [s2, null]) : []).concat(exp);
+		for (const [s2, feat] of cand) {
 			const f2 = PH.fields[s2]; if (!f2) continue;
 			const c0 = f2.mode === 'walk' ? f2.walk[end.t] : f2.costF[end.t * (RF.KF + 1)];
-			if (c0 < CUT && (!best || c0 < best.c)) best = { s2, c: c0 };
+			if (c0 < CUT && (!best || c0 < best.c)) best = { s2, c: c0, feat };
 		}
-		if (!best) { why = 'no next layer'; break; }
+		if (!best) { why = k < 0 ? 'stuck' : 'no next layer'; break; }
+		if (best.feat) expAt.set(tiles.length, best.feat);
 		// (a leg: the tile that changes the layer, the layers before and after, the cost left there)
 		legs.push({ t: end.t, s, s2: best.s2, c: best.c });
 		s = best.s2; f = PH.fields[s];
 		if (f.mode === 'walk' || !f._m) { why = 'walk layer'; break; }
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
 	}
-	return { tiles, legs, end: why };
+	return { tiles, legs, expAt, end: why };
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
@@ -1255,7 +1321,10 @@ function buildSteer(level, opts) {
 		const sim = new E.EESim(level); sim.reset();
 		const pl = layeredPlan(PH, sim);
 		const path = [];
-		for (const t of pl.tiles) {
+		for (let i = 0; i < pl.tiles.length; i++) {
+			const t = pl.tiles[i];
+			// (a key run out at the leg's end: the replay turns it off there)
+			if (pl.expAt.has(i) && path.length) path.push({ t: path[path.length - 1].t, via: 'expire', feat: pl.expAt.get(i) });
 			if (path.length && path[path.length - 1].t === t) continue;
 			const q = path.length ? path[path.length - 1].t : -1, W = A.W;
 			const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
