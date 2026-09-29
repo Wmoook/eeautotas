@@ -610,6 +610,8 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fsearch = g.fn("search_" + std::to_string(TW));
 	if (!fsearch) { printf("{\"error\":%s}\n", jsonStr("search kernel missing: " + cu::lastError).c_str()); return 4; }
+	// (the twins kernel taken now too, before the buffers: its stack need is fitted here, cudadrv.h fitKernel)
+	if (twGpu && !g.fn("twins_" + std::to_string(TW))) { printf("{\"error\":%s}\n", jsonStr("twins kernel missing: " + cu::lastError).c_str()); return 4; }
 	lk::onStop = [&]() {   // (stopped before the search: an empty edges file; later the finale below)
 		FILE* f = fopen(argv[4], "wb");
 		const uint32_t head[4] = { 0x44454545u, 1u, 0u, (uint32_t)n };
@@ -646,7 +648,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 		const int chunkMax = 8192;   // (the buffer; the launches are sized to the launch target: launch.h)
 		lk::Chunk ck(32, 1, chunkMax);
 		cu::Buf dtw;
-		if (!ftw || !dtw.alloc(4ull * TWIN_WORDS * chunkMax)) { printf("{\"error\":\"twins kernel missing (rebuild: node tools/build-native.js)\"}\n"); return 4; }
+		if (!ftw || !dtw.alloc(4ull * TWIN_WORDS * chunkMax)) { printf("{\"error\":%s}\n", jsonStr("twins kernel missing (rebuild: node tools/build-native.js): " + cu::lastError).c_str()); return 4; }
 		S.twin.assign((size_t)n * TWIN_WORDS, 0u);
 		i32 m1 = twM1 ? 1 : 0, m2 = twM2 ? 1 : 0;
 		u32* dtwp = (u32*)(uintptr_t)dtw.p;
