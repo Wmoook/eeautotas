@@ -129,6 +129,59 @@ function sectionA() {
 	}
 	forcedChains();
 	secretWall();
+	coinClasses();
+}
+
+/** coin count layers by threshold classes (steer.js analyze: {0} + the coin door / gate counts): (1) a corridor with 6
+ *  coins behind the start and coin doors of 2 and 4 before the trophy: 3 classes instead of 5 counts, the same lookup
+ *  as one layer per count at every state (random runs with every count held: an exact quotient), the file round trip;
+ *  (2) 20 coins and a 10-coin door: over a byte budget of 5 bodies one layer per count (11) leaves the coins out
+ *  (info.over, the door open to the steer: its start value is the reach field's walk through the door); 2 classes fit,
+ *  the start value counts the coins, and holding 10 coins it is the reach field's again */
+function coinClasses() {
+	const room = (nCoins, doors) => {
+		const W = 60, H = 8, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let k = 0; k < nCoins; k++) cells.push([1 + (k % 10), H - 2 - Math.floor(k / 10), 100]);
+		for (const [x, n] of doors) for (let y = 1; y < H - 1; y++) cells.push([x, y, 43, n]);
+		cells.push([16, H - 2, 255], [54, H - 2, 121]);
+		return levelOf(ED.eelvlOf({ name: 'classes', width: W, height: H, cells }));
+	};
+	const L1 = room(6, [[30, 2], [42, 4]]);
+	const a = SF.buildSteer(L1, { coinClasses: false, maxMs: 120000 }), b = SF.buildSteer(L1, { maxMs: 120000 });
+	const rd = SF.readSteerFile(SF.steerFileBytes(b, null));
+	let n = 0, diff = 0, rdiff = 0;
+	for (const m of randomRuns(7, 12, 500)) {
+		const sim = new E.EESim(L1); sim.reset();
+		const inp = new E.EEInput();
+		for (let t = 0; t < m.length; t++) {
+			E.applyMask(inp, m[t]); sim.tick(inp);
+			if (t % 5) continue;
+			const c0 = sim.coins;
+			for (let c = 0; c <= 6; c++) {
+				sim.coins = c;
+				n++;
+				if (SF.steerFifths(a, sim) !== SF.steerFifths(b, sim)) diff++;
+				if (SF.steerFifths(rd, sim) !== SF.steerFifths(b, sim)) rdiff++;
+			}
+			sim.coins = c0;
+		}
+	}
+	check('coin threshold classes: doors of 2 and 4 coins make 3 classes, not 5 counts, and the lookup is one layer per count\'s at every state and count held (an exact quotient); the file round trip',
+		b.info.coinClasses === 3 && a.info.coinClasses === 5 && b.info.layers < a.info.layers && n > 1000 && diff === 0 && rdiff === 0,
+		`classes ${b.info.coinClasses} (${b.info.layers} layers) vs ${a.info.coinClasses} (${a.info.layers}); ${diff} of ${n} states differ, the file ${rdiff}`);
+	const L2 = room(20, [[36, 10]]);
+	const budget = { maxBytes: L2.width * L2.height * 120 * 5, maxMs: 120000 };
+	const c = SF.buildSteer(L2, Object.assign({ coinClasses: false }, budget)), d = SF.buildSteer(L2, budget);
+	const f2 = R.reachField(L2);
+	const sim = new E.EESim(L2); sim.reset();
+	const r0 = R.costAt(f2, sim), sc = SF.steerAt(c, sim), sd = SF.steerAt(d, sim);
+	sim.coins = 10;
+	const sd10 = SF.steerAt(d, sim), r10 = R.costAt(f2, sim);
+	check('coin threshold classes: 20 coins and a 10-coin door over a budget of 5 bodies: one layer per count leaves the coins out (the door open, the reach field\'s walk), 2 classes fit and the start value counts the coins; with 10 coins held the reach field\'s cost',
+		/coins: over/.test(c.info.over || '') && !d.info.over && d.info.features.includes('coins') && Math.abs(sc - r0) <= 1 && sd > r0 + 20 && Math.abs(sd10 - r10) <= 1,
+		`counts: ${c.info.over}, start ${sc}; classes: ${d.info.coinClasses} (${d.info.layers} layers, over ${d.info.over}), start ${sd}, 10 coins ${sd10}; reach ${r0} / ${r10}`);
 }
 
 /** 50, the secret "appear" block (eesim.js F_DOOR, but it always blocks: reach.js guideFlags) is a wall to the steer
