@@ -1681,9 +1681,10 @@ const ESC_FROM = ['arrival', 'frontier', 'near'];
 const ESC_KINDS = ['arrival', 'frontier', 'near'];
 // (flags a configuration may not set: the escape's own start, share, seed, files and clock; deaths / reach / bin: the
 // reach file is the proof field of the search's own deaths setting, and --deaths=1 on the death-free file prunes
-// without a proof)
+// without a proof; dback: --dback=0 drops the deaths thrown back past their parent's cost (goexplore.js dying(): kept
+// demoted by default), a drop without a proof (the rotation's soundness review, 2026-09-29, non-blocking (4)))
 const ESC_OWN = new Set(['prefix', 'workers', 'seed', 'seconds', 'stdin', 'work', 'tool', 'pausefile', 'cachedir', 'bursts', 'nice', 'out', 'level', 'depth', 'first', 'gpu', 'steer',
-	'deaths', 'reach', 'bin']);
+	'deaths', 'reach', 'bin', 'dback']);
 /** the rotation's configurations from a list (an array or "a,b,c"): names of ESC_CONFIGS, or goexplore.js flags joined by
  *  '+'; unknown names and flags that would change the escape's own setup are left out; none left: [base] */
 function escRotOf(v) {
@@ -1888,6 +1889,15 @@ function rollsTurn(cfg) {
 	if (S.escape) S.escape.rolls = (S.escape.rolls || []).concat([{ n: esc.runs + 1, cfg: cfg.name, flags: want.join(' '), after: Math.round((Date.now() - S.started) / 100) / 10 }]).slice(-32);
 	note(`${V.label}: again from the start with ${cfg.label}${want.length ? ` (${want.join(' ')})` : ' (the search\'s own roll mix)'} (the rotation)`);
 	halt(kids[RW], 'rotate');
+}
+/** the GPU random runs' own measures when the rotation starts them again (the close handler's 'rotate' relaunch): a fresh
+ *  archive, so they start over as an escape's do (escLaunch): the wait for their slices (dry: ROLLS_WAIT_MS x 2^dry, up to
+ *  40 s, schedule), their nearest attempt (best / bestAt / bestTry: their attempts reach the one search only nearer than
+ *  best, closer(); the old process's were fed already) and their rooms (a slice's yield, schedule); V.found, rollFlags,
+ *  rollCfg and rollRuns stay (the rotation's review, 2026-09-29, non-blocking (1): the fresh runs waited up to 40 s for their
+ *  first slice and fed nothing until past the old process's best). Returns V */
+function rollsFresh(V) {
+	return Object.assign(V, { error: null, layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `again with ${V.rollCfg}`, dry: 0, best: undefined, bestAt: 0, bestTry: null, rooms: 0 });
 }
 /** the escape's process ended (how: its stop or end): the one search gets its workers back; after a stall of its own the
  *  next escape starts at once (escKick), else after the next stall */
@@ -3033,20 +3043,22 @@ function launch(n) {
 			note(`${V.label}: error: ${V.error}`);
 		}
 		if (!cpu && V.error && (code === 6 || code === 7 || crashed)) gpuFailed(n);
-		// (the GPU random runs stopped for the rotation's next configuration (rollsTurn): again from the level's start with it)
-		if (rolls && ch.stopWhy === 'rotate' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && !S.result && S.seconds - usedSec(V) > 2) {
-			V.error = null;
-			Object.assign(V, { layer: 0, states: 0, ticksPerSec: 0, state: 'starting', detail: `again with ${V.rollCfg}` });
-			totals();
-			kids[n] = launch(n);
-			save();
-			return;
-		}
 		// (out of GPU memory, at its context or an allocation: another process holds it for now; the strategy starts again
 		// after a back-off, gpuRetry. The relay and the breaker go on their own way below.)
 		else if (!cpu && V.error && !ch.stopWhy && gpuTransient(V.error) && V.key !== 'relay' && V.key !== 'breaker' && gpuRetry(n, ch)) {
 			if (ch.probeTimer) clearTimeout(ch.probeTimer);
 			totals();
+			save();
+			return;
+		}
+		// (the GPU random runs stopped for the rotation's next configuration (rollsTurn): again from the level's start with
+		// it, their own measures started over (rollsFresh), and a slice of theirs under way ends without a verdict on their
+		// yield (its rooms and nearest were the old process's))
+		if (rolls && ch.stopWhy === 'rotate' && S.running && !S.halted && S.stage !== 'stopped' && !S.gpuFailed && !S.result && S.seconds - usedSec(V) > 2) {
+			rollsFresh(V);
+			if (sched && sched.owner === n) sched.rollsFrom = null;
+			totals();
+			kids[n] = launch(n);
 			save();
 			return;
 		}
@@ -3848,5 +3860,5 @@ function shutdown() {
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
-	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
+	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };

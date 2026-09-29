@@ -2212,10 +2212,22 @@ async function escapeSection() {
 	}
 	// (the merge's soundness review, 2026-09-29: goexplore.js --deaths=1 with the death-free reach file keeps dying balls and
 	// prunes by a -1 that only a death reaches; the reach file is the proof field of the search's own deaths setting)
-	const rotP = ED.escRotOf('--deaths=1+--reach=x.bin+--bin=y.bin+--useful=0, --deaths=1, deaths');
-	check('no configuration prunes without a proof: no "deaths" configuration, and --deaths / --reach / --bin left out of raw flags',
-		!Object.prototype.hasOwnProperty.call(ED.ESC_CONFIGS, 'deaths') && Object.values(ED.ESC_CONFIGS).every((c) => !c.flags.some((x) => /^--(deaths|reach|bin)=/.test(x))) &&
-		rotP.map((c) => c.flags.join(' ')).join('|') === '--useful=0', JSON.stringify(rotP.map((c) => [c.name, c.flags])));
+	// (and --dback=0: goexplore.js drops the deaths thrown back past their parent's cost, kept demoted by default: the
+	// rotation's soundness review, non-blocking (4))
+	const rotP = ED.escRotOf('--deaths=1+--reach=x.bin+--bin=y.bin+--useful=0, --deaths=1, deaths, --dback=0, --dback=0+--pA=0.2');
+	check('no configuration prunes without a proof: no "deaths" configuration, and --deaths / --reach / --bin / --dback left out of raw flags',
+		!Object.prototype.hasOwnProperty.call(ED.ESC_CONFIGS, 'deaths') && Object.values(ED.ESC_CONFIGS).every((c) => !c.flags.some((x) => /^--(deaths|reach|bin|dback)=/.test(x))) &&
+		rotP.map((c) => c.flags.join(' ')).join('|') === '--useful=0|--pA=0.2', JSON.stringify(rotP.map((c) => [c.name, c.flags])));
+	// (the GPU random runs started again by the rotation: their own measures start over, as an escape's (the rotation's
+	// soundness review, non-blocking (1)); the route, the configuration and the restart count stay)
+	{
+		const Vr = { key: 'gorolls', rolls: true, label: 'random runs (GPU)', error: 'x', state: 'running', dry: 4, best: 12.5, bestAt: 123, bestTry: { inputs: '44', ticks: 2, dist: 12.5 }, rooms: 57,
+			layer: 9, states: 99, ticksPerSec: 5, found: null, rollFlags: ['--rollMix=40:0.85:1'], rollCfg: 'lr3', rollRuns: 2 };
+		const Rf = ED.rollsFresh(Vr);
+		check('the GPU random runs started again by the rotation: their slices\' wait (dry), nearest (best, its time and try), rooms and error start over; the configuration, its flags and the restart count stay',
+			Rf === Vr && Vr.dry === 0 && Vr.best === undefined && Vr.bestAt === 0 && Vr.bestTry === null && Vr.rooms === 0 && Vr.error === null && Vr.state === 'starting' &&
+			Vr.layer === 0 && Vr.states === 0 && Vr.rollCfg === 'lr3' && Vr.rollRuns === 2 && Vr.rollFlags.join() === '--rollMix=40:0.85:1' && Vr.detail === 'again with lr3', JSON.stringify(Vr));
+	}
 	const rotX = ED.escRotOf('plain, --pA=0.2+--sample=4+--prefix=x+--workers=64, nosuch, longruns');
 	check('a rotation from a string: names and raw flags joined by "+" (flags that would change the escape\'s own start, share or files left out), unknown names left out',
 		rotX.map((c) => c.name).join('|') === 'plain|--pA=0.2+--sample=4+--prefix=x+--workers=64|longruns' && rotX[1].flags.join(' ') === '--pA=0.2 --sample=4' &&
