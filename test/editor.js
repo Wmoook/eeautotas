@@ -1818,11 +1818,12 @@ process.stdin.on('end', end);
 	// the strategy starts again at once (0.5 s) with its share halved, not after 5 s
 	{
 		const sc5 = path.join(HOME, 'cpu-oom-budget.json'), log5 = path.join(HOME, 'cpu-oom-budget.log'), rd = path.join(HOME, 'gpumem-reg5'), d0 = process.env.EEAT_GPUMEM_DIR;
-		process.env.EEAT_GPUMEM_DIR = rd;
+		process.env.EEAT_GPUMEM_DIR = rd; process.env.EEAT_GPUMEM = '1';   // (opt-in)
 		fs.writeFileSync(sc5, JSON.stringify({ log: log5, R, runs: {}, beam: null, oom: 1, logMem: true, gpu: { name: 'fake', memMB: 16384, totalMB: 16384, freeMB: 12000 } }));
 		ED.start({ eelvlB64: buf.toString('base64'), seconds: 9, width: 1024, workers: 1 }, { available: true }, { tool: [process.execPath, fake, sc5], salts: false });
 		st = await waitDone(40000);
 		if (d0 === undefined) delete process.env.EEAT_GPUMEM_DIR; else process.env.EEAT_GPUMEM_DIR = d0;
+		delete process.env.EEAT_GPUMEM;
 		const L5 = fs.readFileSync(log5, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 		const mem5 = (c) => L5.filter((a) => a[0] === c).map((a) => { const m = a.find((x) => String(x).startsWith('#mem=')); return m ? +m.slice(5) : 0; });
 		const ex = mem5('explore'), bm = mem5('beam'), exCells = L5.filter((a) => a[0] === 'explore').map((a) => (a.find((x) => String(x).startsWith('--cells=')) || '-'));

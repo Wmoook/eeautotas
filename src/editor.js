@@ -1097,7 +1097,11 @@ const breakShareOpen = (opts, memMB, R, now) => !!(opts && opts.breakShare && me
 const breakDryAfter = (dry, hit, own, own0) => hit || (own || 0) > (own0 || 0) ? 0 : (dry || 0) + 1;
 /** a GPU tool's error that another process's memory explains (and that passes when it frees it) */
 const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDevicePrimaryCtx/i.test(String(e || ''));
-// THE RUN'S GPU MEMORY BUDGET (n3-gpu-mem-fit, 2026-09-29; EEAT_GPUMEM=0: none, main's sizing). Each GPU tool sized
+// THE RUN'S GPU MEMORY BUDGET (n3-gpu-mem-fit, 2026-09-29; OPT-IN: EEAT_GPUMEM=1, or EEAT_GPUMEM_GB; off = main's sizing:
+// its A/B (box 1 GPU 6, two runs of one arm on the GPU) cut the out-of-memory events 90-100% but lost routes main made
+// (Soul Quest by the escape, Purple Depths / Planets) and was slower on the others: a hard split leaves memory idle
+// (v3's two runs: median 24.5 GB of 40) while it starves the stall tools (the escape's bursts, the breaker's table)).
+// Each GPU tool sized
 // itself by the WHOLE GPU (the random runs' pool a quarter of it, every move's table and states, the bursts' big sizing
 // from 20 GB, the wall breaker's table 0.42 of it), so one Find a route run held ~20 GB, two on one 40 GB A100 (the
 // sweeps) had "out of memory" in 25 of 58 runs (sweep 6: contexts at cuCtxCreate / cuCtxSetLimit, tables at cuMemAlloc;
@@ -1119,7 +1123,7 @@ const gpuTransient = (e) => /out of memory|CUDA error (2|46)\b|cuCtxCreate|cuDev
 // one search's bursts (planned: launched or not yet) leave.
 const GPUMEM_MIN_MB = 1536, EXPLORE_CTX_MB = 1450, STATE_B = 1600, BEAM_MB = 1000, ROLL_CTX_MB = 300, ROLL_F = 1 / 6;
 const GPUMEM_RETRY_S = [0.5, 2], GPUMEM_DOWN_MAX = 3, GPUMEM_SMALL_S = 60, GPUMEM_OOM_S = 1;
-const gpuMemOn = () => process.env.EEAT_GPUMEM !== '0';
+const gpuMemOn = () => process.env.EEAT_GPUMEM === '1' || +process.env.EEAT_GPUMEM_GB > 0;
 /** the run's budget (MB) from {totalMB, freeMB (at the start), runs (on the device, this one included), gb (EEAT_GPUMEM_GB)};
  *  0: unknown (no totals: an older tool), the sizing stays main's */
 function runBudgetMB(o) {
