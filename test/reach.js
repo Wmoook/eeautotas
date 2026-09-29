@@ -892,6 +892,7 @@ function sectionF() {
 		['every block (portals, deaths)', randomLevels()[4].level], ['death warp (a curse: every tile a death source)', ascii(box(ROUTED[1][1]))], ['ice', ascii(box(['..........', '..........', '....oo..^.', '..S.....^.', 'IIIIIIIIII']))], ['walk (low gravity)', ascii(box(['.....T....', '..######..', '..........', '..S..g....']))],
 		['protection, walk mode (spikes open only where a protected ball can be; the protected walk behind the unprotected one)', ascii(box(['.....T.e..', '..xxxxxx..', '..........', '..S..g..x.']))],
 		['protection, physics mode', ascii(box(['.....T.e..', '..xxxxxx..', '..........', '..S.....x.']))],
+		['walk mode with arrows and boosts (the push directions: section L)', ascii(box(['S.^...<<<.', '.#^##B#...', '.#^##.#D..', '.#..>>>...', 'g#T.......']))],
 		['death warp without the death edges (the searches\' field)', ascii(box(ROUTED[1][1])), { deaths: false }]];
 	for (const [name, L, fo] of rooms) {
 		const f = R.reachField(L, fo);
