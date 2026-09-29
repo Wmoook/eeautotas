@@ -138,7 +138,10 @@ function run(o) {
 		// (cpuS: the CPU search's CPU seconds when Find a route found it, editor.js cpuAfter: the time to route per
 		// core-second on a shared machine, next to t)
 		const rx = routeEscape(r, escNow);
-		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, rx ? { escape: rx } : {}, r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
+		// (the GPU random runs' configuration when they were last started again by the rotation: editor.js rollsTurn)
+		const rr = escNow && Array.isArray(escNow.rolls) && escNow.rolls.length ? escNow.rolls[escNow.rolls.length - 1] : null;
+		emit(Object.assign({ ev: 'route', runTicks: ev.runTicks, verified: true, strategy: r.strategy, best: faster }, rx ? { escape: rx } : {}, rr ? { rolls: { cfg: rr.cfg, after: rr.after } } : {},
+			r.cpuAfter > 0 ? { cpuS: r.cpuAfter } : {},
 			r.foundAfter > 0 ? { foundAfter: r.foundAfter } : {}, r.cleaned ? { cleanedFrom: r.cleaned.fromRunTicks, presses: r.cleaned.presses, cleanS: r.cleaned.sec } : {}));
 		if (out) C.writeEetas(path.join(out, `route_${S.routes}_${ev.runTicks}.eetas`), ev.ms);
 		if (!S.job) {

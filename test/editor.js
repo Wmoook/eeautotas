@@ -2185,10 +2185,31 @@ async function escapeSection() {
 	// the stall rotation's pure parts: the configurations' list, the kinds of start, the turns
 	section('the stall rotation: its configurations, kinds of start and turns');
 	const rotD = ED.escRotOf(ED.ESC_ROTATION);
-	check('the default rotation (the set cover of the portfolio sweep): long random runs, the longest, the longer, no useful territory / dominance, the search as is; each with its goexplore.js flags; the GPU random runs follow it',
-		rotD.map((c) => c.name).join(',') === 'longruns,lr3,lr2,plain,base' && rotD[0].flags.join(' ') === '--roll=120 --keep=0.95' && rotD[1].flags.join(' ') === '--roll=480 --keep=0.985' &&
-		rotD[2].flags.join(' ') === '--roll=240 --keep=0.97' && rotD[3].flags.join(' ') === '--useful=0 --dom=0' && rotD[4].flags.length === 0 && ED.ESC_ROLLS === true &&
+	check('the default rotation (the set cover of the portfolio sweep and the filler): long random runs, the longest, the longer, the reach field alone, no useful territory / dominance, the search as is; each with its goexplore.js flags; the GPU random runs follow it',
+		rotD.map((c) => c.name).join(',') === 'longruns,lr3,lr2,reach,plain,base' && rotD[0].flags.join(' ') === '--roll=120 --keep=0.95' && rotD[1].flags.join(' ') === '--roll=480 --keep=0.985' &&
+		rotD[2].flags.join(' ') === '--roll=240 --keep=0.97' && rotD[3].flags.join(' ') === '--mix=0 --burstSteer=' && rotD[4].flags.join(' ') === '--useful=0 --dom=0' && rotD[5].flags.length === 0 && ED.ESC_ROLLS === true &&
 		ED.escRotOf('blind,reach,deaths').map((c) => c.flags.join(' ')).join('|') === '--pA=0 --burst=16|--mix=0 --burstSteer=', rotD.map((c) => `${c.name}: ${c.flags.join(' ')}`).join('; '));
+	// (n3-rotation-rollmix: the GPU random runs started again by the rotation keep main's roll mix, weighted toward the
+	// configuration's class; never --roll / --keep, which would turn the mix off in goexplore.js)
+	{
+		const GXP = require('../src/goexplore.js');
+		const rl = rotD.map((c) => ED.rollsOf(c));
+		const mixOf = (f) => { const x = (f || []).find((y) => y.startsWith('--rollMix=')); return x ? x.slice(10) : null; };
+		// (each mix as goexplore.js --gpu=1 reads it: its classes; roll at most 255, eegpu roll's cap)
+		let parsed = true;
+		for (const f of rl) if (f && f.length) { try { const a = GXP.parseArgs(['x.eelvl', '--gpu=1', ...f]); if (a.rollMix !== mixOf(f)) parsed = false; } catch (e) { parsed = false; } }
+		const cls = (m) => m.split(',').map((c) => c.split(':'));
+		const heavy = (m) => cls(m).filter((c) => +c[2] === 3).map((c) => c[0]).join();
+		const raw = ED.escRotOf(['--roll=240+--keep=0.97+--pA=0.2', '--rollMix=40:0.85:1,240:0.97:5', '--roll=90']);
+		const nx = [ED.rollsNext([], rotD[0]), ED.rollsNext(rl[0], rotD[0]), ED.rollsNext(rl[0], rotD[3]), ED.rollsNext(rl[0], rotD[4]), ED.rollsNext([], rotD[5]), ED.rollsNext(rl[2], rotD[5])];
+		check('the GPU random runs in the rotation: longruns / lr3 / lr2 start them again with main's roll mix weighted 3 to 1 toward 120 / 255 (keep 0.985: the kernel's 255-tick cap) / 240 ticks, never --roll / --keep; reach and plain leave them as they are; base back to the search's own mix; raw flags without --roll / --keep',
+			rl.every((f) => !f || f.every((x) => !/^--(roll|keep)=/.test(x))) && parsed &&
+			heavy(mixOf(rl[0])) === '120' && heavy(mixOf(rl[1])) === '255' && heavy(mixOf(rl[2])) === '240' && cls(mixOf(rl[1])).some((c) => c[0] === '255' && c[1] === '0.985') &&
+			cls(mixOf(rl[0])).map((c) => c[0]).join() === '40,120,240' && rl[3] === null && rl[4] === null && rl[5].length === 0 &&
+			ED.rollsOf(raw[0]).join(' ') === '--pA=0.2' && ED.rollsOf(raw[1]).join(' ') === '--rollMix=40:0.85:1,240:0.97:5' && ED.rollsOf(raw[2]) === null &&
+			nx[0].join(' ') === rl[0].join(' ') && nx[1] === null && nx[2] === null && nx[3] === null && nx[4] === null && nx[5].length === 0,
+			`${rl.map((f, j) => `${rotD[j].name}: ${f ? f.join(' ') || '(own)' : '-'}`).join('; ')}; raw ${raw.map((c) => JSON.stringify(ED.rollsOf(c))).join(' ')}; next ${nx.map((x) => JSON.stringify(x)).join(' ')}`);
+	}
 	// (the merge's soundness review, 2026-09-29: goexplore.js --deaths=1 with the death-free reach file keeps dying balls and
 	// prunes by a -1 that only a death reaches; the reach file is the proof field of the search's own deaths setting)
 	const rotP = ED.escRotOf('--deaths=1+--reach=x.bin+--bin=y.bin+--useful=0, --deaths=1, deaths');

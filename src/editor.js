@@ -1626,25 +1626,57 @@ const ESC_FIRST_S = 60, ESC_TURN_S = 120;
 // 2026-09-29): goexplore.js --deaths=1 (and the GPU random runs' eegpu roll --deaths=1) with the search's reach file,
 // which is the DEATH-FREE field wherever the search's deaths are no moves (editor.js reachBase dm), keeps dying balls
 // but prunes by a -1 that only a death reaches: a prune without a proof (the sweep's deaths arm routed 0 of 3 anyway)
+// rolls: the GPU random runs' flags when this configuration's escape starts them again (ESC_ROLLS, rollsTurn; none: they
+// go on as they are, the configuration is the escape's CPU process alone). The GPU random runs never get --roll / --keep
+// (n3-rotation-rollmix, 2026-09-29: goexplore.js turns main's roll mix off when either is given, so pf-rotation's
+// restarts with --roll=120 --keep=0.95 ran ONE class where main runs 40 / 120 / 240): a configuration of long runs
+// restarts them with main's roll mix (ROLL_MIX of goexplore.js) weighted toward its class (--rollMix weights: that class
+// 3 shares of the simulated ticks, the others 1). lr3's class is 255 ticks with keep 0.985: eegpu roll plays at most 255
+// ticks a run (kernels.cu rollBody `k < 255`, the batch's best packs the step in 8 bits: a kernel cap, not a host one),
+// which is what pf-rotation's lr3 (--roll=480) played on the GPU too (goexplore.js min(255, roll)). The escape's CPU
+// process keeps the sweep's --roll / --keep (its CPU runs have no mix).
+const ESC_MIX = { base: '40:0.85:1,120:0.95:1,240:0.97:1', lr1: '40:0.85:1,120:0.95:3,240:0.97:1', lr2: '40:0.85:1,120:0.95:1,240:0.97:3',
+	lr3: '40:0.85:1,120:0.95:1,240:0.97:1,255:0.985:3' };
 const ESC_CONFIGS = {
 	blind: { label: 'distance-blind novelty', flags: ['--pA=0', '--burst=16'] },
 	reach: { label: 'the reach field alone', flags: ['--mix=0', '--burstSteer='], needs: 'steer' },
 	plain: { label: 'no useful territory, no dominance', flags: ['--useful=0', '--dom=0'] },
 	fine: { label: 'speed cells early', flags: ['--spd=10', '--spdMax=6'] },
-	longruns: { label: 'long random runs', flags: ['--roll=120', '--keep=0.95'] },
-	lr2: { label: 'longer random runs', flags: ['--roll=240', '--keep=0.97'] },
-	lr3: { label: 'the longest random runs', flags: ['--roll=480', '--keep=0.985'] },
-	base: { label: 'as the search', flags: [] },
+	longruns: { label: 'long random runs', flags: ['--roll=120', '--keep=0.95'], rolls: [`--rollMix=${ESC_MIX.lr1}`] },
+	lr2: { label: 'longer random runs', flags: ['--roll=240', '--keep=0.97'], rolls: [`--rollMix=${ESC_MIX.lr2}`] },
+	lr3: { label: 'the longest random runs', flags: ['--roll=480', '--keep=0.985'], rolls: [`--rollMix=${ESC_MIX.lr3}`] },
+	base: { label: 'as the search', flags: [], rolls: [] },
 };
-// the rotation and the kinds of start in rotation. The rotation is the portfolio sweep's greedy set cover (src/out/pf/sw1,
-// main febeeb2, 39 never-routed campaign levels, 180 s runs from the level alone): longruns routed 6 (Relics of Athena,
-// Hold Jump Challenge, Overworld, The Mansion, EZ Spooky Shack, Snowblind), lr3 +1 (Snow Is Falling), lr2 +1 (OCTOS
-// ROLLERCOASTER), plain +1 (The Glitch), base +1 (Escape the Lava); blind, reach, early, deaths and fine routed none.
-// The long random runs routed through the GPU random runs (on the GPU alone 3 of 4, on the CPU alone 0 of 4): an
-// escape's configuration also starts the GPU random runs again with its flags (ESC_ROLLS, rollsTurn)
-const ESC_ROTATION = ['longruns', 'lr3', 'lr2', 'plain', 'base'];
+// the rotation and the kinds of start in rotation. The head (longruns, lr3, lr2) is the portfolio sweep's greedy set cover
+// (src/out/pf/sw1, main febeeb2, 39 never-routed campaign levels, 180 s runs from the level alone: longruns routed 6
+// (Relics of Athena, Hold Jump Challenge, Overworld, The Mansion, EZ Spooky Shack, Snowblind), lr3 +1 (Snow Is Falling),
+// lr2 +1 (OCTOS ROLLERCOASTER)), the order pf-rotation's A/B measured (18 of 19 target runs vs 1 of 19); the rest by the
+// greedy set cover over the sweep and the filler's runs (tools/esc_cover.js --head=longruns,lr3,lr2 --given=base over
+// src/out/pf/sweep/sw1 and src/out/fill/res/box*: reach and plain add 2 levels each, reach first by its median first
+// route, 34 vs 118.7 s; base's levels are the search's own, which runs on beside every escape: last). The long random
+// runs routed through the GPU random runs (on the GPU alone 3 of 4, on the CPU alone 0 of 4): an escape's configuration
+// with `rolls` also starts the GPU random runs again (ESC_ROLLS, rollsTurn)
+const ESC_ROTATION = ['longruns', 'lr3', 'lr2', 'reach', 'plain', 'base'];
 // the GPU random runs follow the rotation (body escRolls:false or EEAT_ESC_ROLLS=0: only the escape's CPU process does)
 const ESC_ROLLS = true;
+// (the flags the GPU random runs never get from the rotation: one class instead of main's roll mix)
+const ROLL_ONE = new Set(['roll', 'keep']);
+/** the GPU random runs' flags for a configuration (rollsTurn): its `rolls`; a raw flag list's flags without --roll / --keep
+ *  (its --rollMix goes through); null = they go on as they are */
+function rollsOf(cfg) {
+	if (!cfg) return null;
+	if (Array.isArray(cfg.rolls)) return cfg.rolls.slice();
+	if (Object.prototype.hasOwnProperty.call(ESC_CONFIGS, cfg.name)) return null;
+	const f = (cfg.flags || []).filter((x) => !ROLL_ONE.has(x.slice(2, x.indexOf('='))));
+	return f.length ? f : null;
+}
+/** the GPU random runs' next flags when an escape of configuration cfg starts: null = no restart (the configuration has
+ *  none for them, or they already run with these); cur = their flags now ([] = the search's own) */
+function rollsNext(cur, cfg) {
+	const want = rollsOf(cfg);
+	if (!want) return null;
+	return (cur || []).join(' ') === want.join(' ') ? null : want;
+}
 const ESC_FROM = ['arrival', 'frontier', 'near'];
 const ESC_KINDS = ['arrival', 'frontier', 'near'];
 // (flags a configuration may not set: the escape's own start, share, seed, files and clock; deaths / reach / bin: the
@@ -1847,12 +1879,14 @@ function rollsTurn(cfg) {
 	const RW = S.strategies.findIndex((q) => q.rolls);
 	if (RW < 0) return;
 	const V = S.strategies[RW];
-	if ((V.rollFlags || []).join(' ') === cfg.flags.join(' ')) return;
+	const want = rollsNext(V.rollFlags, cfg);
+	if (!want) return;
 	if (!alive(kids[RW]) || kids[RW].stopWhy || V.found) return;   // (ended, stopping or with a route: as it is)
-	V.rollFlags = cfg.flags.slice();
+	V.rollFlags = want;
 	V.rollCfg = cfg.name;
 	V.rollRuns = (V.rollRuns || 0) + 1;
-	note(`${V.label}: again from the start with ${cfg.label}${cfg.flags.length ? ` (${cfg.flags.join(' ')})` : ''} (the rotation)`);
+	if (S.escape) S.escape.rolls = (S.escape.rolls || []).concat([{ n: esc.runs + 1, cfg: cfg.name, flags: want.join(' '), after: Math.round((Date.now() - S.started) / 100) / 10 }]).slice(-32);
+	note(`${V.label}: again from the start with ${cfg.label}${want.length ? ` (${want.join(' ')})` : ' (the search\'s own roll mix)'} (the rotation)`);
 	halt(kids[RW], 'rotate');
 }
 /** the escape's process ended (how: its stop or end): the one search gets its workers back; after a stall of its own the
@@ -3814,5 +3848,5 @@ function shutdown() {
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
-	escRotOf, escFromOf, escTurnOf, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
-	ESC_CONFIGS, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };
+	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
+	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };
