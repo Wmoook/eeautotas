@@ -51,7 +51,9 @@ const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 const CUT = RF.CUT;
 const INF = 0xffffffff;
 // door / gate ids -> [feature, polarity (1: open when on / satisfied)]; exact statics (gold border: off; silver crown:
-// only the trophy gives it); time doors shut (a door that opens every 10 s is a wait of up to 5 s); the rest open
+// only the trophy gives it); time doors shut (a door that opens every 10 s is a wait of up to 5 s); death doors and zombie
+// doors / gates open. 50 (the secret "appear" block, eesim.js F_DOOR) is no door: it always blocks, a wall by
+// reach.js guideFlags (before 2026-09-28 it fell through to open: This is not snow's trophy fenced by six of them)
 const GATE = new Map([
 	[23, ['key0', 1]], [24, ['key1', 1]], [25, ['key2', 1]], [26, ['key0', 0]], [27, ['key1', 0]], [28, ['key2', 0]],
 	[1005, ['key3', 1]], [1006, ['key4', 1]], [1007, ['key5', 1]], [1008, ['key3', 0]], [1009, ['key4', 0]], [1010, ['key5', 0]],
@@ -72,7 +74,8 @@ const plainFx = (sim) => !sim.has_levitation && sim.flip_gravity === 0 && sim.ma
 // ------------------------------------------------------------------ the level's static analysis
 function analyze(level, opts) {
 	const W = level.width, H = level.height, N = W * H;
-	const fg = level.fg, flags = level.flags, nF = flags.length, gF = level.gFlags, lk = level.lookup0;
+	// (the guidance's flags, reach.js guideFlags: 50, the secret "appear" block, is a wall, not a door of "the rest open")
+	const fg = level.fg, flags = RF.guideFlags(level), nF = flags.length, gF = level.gFlags, lk = level.lookup0;
 	const fl = (id) => (id >= 0 && id < nF ? flags[id] : 0);
 	const isWallId = (id) => (fl(id) & F_SOLID) !== 0 && (fl(id) & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) === 0;
 	// static class: 0 wall, 1 killer, 2 open, 3 gate (per layer)
@@ -744,6 +747,94 @@ function legFieldOf(lv, fg, q, coins, start) {
 	g.unforced = true;
 	return g;
 }
+// The coin legs on worker threads (the steer build's 9-14 s of legs on NC / Good Egg; each leg a pure reach field of its
+// own: legFieldOf): LEG_THREADS workers (opts.legThreads; EEAT_STEER_THREADS; 0 or 1: none, the legs one after another),
+// only for LEG_MIN_WORK tiles x legs or more unless opts.legThreads asks. The build stays synchronous: the workers take
+// jobs from a shared counter, answer on their own ports, and the build waits on the counter (Atomics.wait) and reads the
+// answers (receiveMessageOnPort) into the jobs' own places: the same fields in the same order, the same steer field
+// (test/steer.js A: its file's bytes with and without the workers).
+const LEG_THREADS = 6, LEG_MIN_WORK = 200000, LEG_STALL_MS = 180000;
+const legThreadsOf = (A, legs, opts) => {
+	const env = process.env.EEAT_STEER_THREADS;
+	const want = opts && Number.isInteger(opts.legThreads) ? opts.legThreads : env !== undefined && env !== '' && +env >= 0 ? Math.floor(+env) : -1;
+	if (want === 0 || want === 1 || legs < 2) return 0;
+	if (want < 0 && A.N * legs < LEG_MIN_WORK) return 0;
+	const n = want > 0 ? want : Math.min(LEG_THREADS, Math.max(1, (require('os').cpus().length || 1) - 2));
+	return n >= 2 ? Math.min(n, legs) : 0;
+};
+const LEG_WORKER = `const { workerData: d, parentPort } = require('worker_threads');
+const SF = require(d.steer);
+parentPort.on('message', (m) => {
+	const idx = new Int32Array(m.sab);
+	for (;;) {
+		const i = Atomics.add(idx, 0, 1);
+		if (i >= m.jobs.length) break;
+		const j = m.jobs[i];
+		let r;
+		try {
+			if (m.deadline && Date.now() > m.deadline) r = { i, late: true };
+			else {
+				const fg = Int32Array.from(m.fg0[j.k]); fg[j.q] = m.trophy;
+				const f = SF._legFieldOf(Object.assign({}, d.level, m.deltas[j.k]), fg, j.q, m.coins, m.start);
+				r = j.at ? { i, costs: Float64Array.from(j.at, (t) => SF.arriveCost(f, t)) } : { i, f };
+			}
+		} catch (e) { r = { i, err: String(e && e.stack || e) }; }
+		const bufs = new Set();
+		if (r.f) for (const v of Object.values(r.f)) if (ArrayBuffer.isView(v) && !(v.buffer instanceof SharedArrayBuffer)) bufs.add(v.buffer);
+		if (r.costs) bufs.add(r.costs.buffer);
+		try { d.port.postMessage(r, [...bufs]); } catch (e) { d.port.postMessage({ i, err: String(e && e.message || e) }); }   // (an answer that cannot be sent: the caller builds it)
+		Atomics.add(idx, 1, 1); Atomics.notify(idx, 1);
+	}
+});`;
+/** the leg workers for level L (A.level) -> {run(jobs, extra) -> answers in the jobs' order, close()} or null (none) */
+function legPool(L, n) {
+	if (!n) return null;
+	const WT = require('worker_threads');
+	const ws = [];
+	try {
+		for (let k = 0; k < n; k++) {
+			const ch = new WT.MessageChannel();
+			const w = new WT.Worker(LEG_WORKER, { eval: true, workerData: { level: L, steer: __filename, port: ch.port2 }, transferList: [ch.port2] });
+			w.unref();
+			ws.push({ w, port: ch.port1 });
+		}
+	} catch (e) { for (const x of ws) x.w.terminate(); return null; }
+	return {
+		n,
+		/** jobs [{k (the layer: its delta and its fg0), q (the coin: the goal), at?}] with extra {deltas, fg0, trophy, coins, start, deadline}: the answers ({f} | {costs} |
+		 *  {late}) in the jobs' order; a job a worker could not do (an error, a stalled pool) is done here */
+		run(jobs, extra) {
+			const sab = new SharedArrayBuffer(8), idx = new Int32Array(sab);
+			for (const x of ws) x.w.postMessage(Object.assign({ sab, jobs }, extra));
+			const out = new Array(jobs.length).fill(null);
+			let got = 0, at = Date.now();
+			const drain = () => { for (const x of ws) for (let m = WT.receiveMessageOnPort(x.port); m; m = WT.receiveMessageOnPort(x.port)) { const r = m.message; if (!out[r.i]) { out[r.i] = r; got++; at = Date.now(); } } };
+			while (got < jobs.length) {
+				const done = Atomics.load(idx, 1);
+				if (done > got) { drain(); continue; }
+				if (Date.now() - at > LEG_STALL_MS) break;
+				Atomics.wait(idx, 1, done, 1000);
+			}
+			drain();
+			// (claimed by nobody from here on: the jobs left are done in this thread)
+			Atomics.store(idx, 0, jobs.length);
+			return out.map((r, i) => {
+				if (r && !r.err) return r;
+				const j = jobs[i];
+				const fg = Int32Array.from(extra.fg0[j.k]); fg[j.q] = extra.trophy;
+				const f = legFieldOf(Object.assign({}, L, extra.deltas[j.k]), fg, j.q, extra.coins, extra.start);
+				return j.at ? { i, costs: Float64Array.from(j.at, (t) => arriveCost(f, t)) } : { i, f };
+			});
+		},
+		close() { for (const x of ws) { try { x.port.close(); x.w.terminate(); } catch (e) { /* gone */ } } },
+	};
+}
+/** layerLevel's copy lv of L as the leg workers take it: the keys it changes other than fg */
+function lvDelta(L, lv) {
+	const d = {};
+	for (const k of Object.keys(lv)) if (k !== 'fg' && lv[k] !== L[k]) d[k] = lv[k];
+	return d;
+}
 /** per coin, the physics field of the collection layer (the plan's layer before its first coin, T - 1 coins) with that
  *  coin as the only goal; the tail at T coins per coin (the layered field's arrival cost) */
 function coinLegsPhys(B, PH, base, opts) {
@@ -755,20 +846,56 @@ function coinLegsPhys(B, PH, base, opts) {
 	M.feats.forEach((f, n) => { const wn = B.M.names.indexOf(f.key); const v = wn >= 0 ? B.M.valOf(sPlan, wn) : f.init; s += v * M.stride[n]; });
 	const nC = M.names.indexOf('coins');
 	s = M.withVal(s, nC, base.T - 1);
+	const L = legsOf(A, M, s, nC, base.coins, opts);
+	const fields = new Map(), countOf = new Map();
+	try {
+		const f0 = L.fields(base.coins.map((q) => [q, base.T - 1]));
+		base.coins.forEach((q, i) => { fields.set(q, f0[i]); countOf.set(q, base.T - 1); });
+		return coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf);
+	} finally { L.close(); }
+}
+/** the coin legs of one build: layerLevel's copies per count k (made once) and the leg fields, on the leg workers when
+ *  there are enough legs (legThreadsOf): fields([[q, k]]) -> the fields in that order; costs([[q, k, tiles]], deadline)
+ *  -> the arrival costs at those tiles (null: past the deadline); close() */
+function legsOf(A, M, s, nC, coins, opts, legs) {
 	const lvOf = new Map();
-	const legField = (q, k) => {
+	const layer = (k) => {
 		if (!lvOf.has(k)) {
 			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
 			const fg0 = Int32Array.from(lv.fg);
-			for (const c of base.coins) if (fg0[c] === TROPHY) fg0[c] = 0;
-			lvOf.set(k, { lv, fg0 });
+			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
+			lvOf.set(k, { lv, fg0, delta: lvDelta(A.level, lv) });
 		}
-		const { lv, fg0 } = lvOf.get(k);
-		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return legFieldOf(lv, fg, q, base.coins, A.start.t);
+		return lvOf.get(k);
 	};
-	const fields = new Map(), countOf = new Map();
-	for (const q of base.coins) { fields.set(q, legField(q, base.T - 1)); countOf.set(q, base.T - 1); }
+	const fgOf = (q, k) => { const fg = Int32Array.from(layer(k).fg0); fg[q] = TROPHY; return fg; };
+	const pool = legPool(A.level, legThreadsOf(A, legs || coins.length, opts));
+	const run = (list, withAt, deadline) => {
+		const deltas = {};
+		const fg0 = {};
+		const jobs = list.map(([q, k, at]) => { deltas[k] = layer(k).delta; fg0[k] = layer(k).fg0; return withAt ? { k, q, at } : { k, q }; });
+		return pool.run(jobs, { deltas, fg0, trophy: TROPHY, coins, start: A.start.t, deadline: deadline || 0 });
+	};
+	return {
+		fields(list) {
+			if (!pool || list.length < 2) return list.map(([q, k]) => legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t));
+			return run(list, false).map((r) => r.f);
+		},
+		costs(list, deadline) {
+			if (!pool) {
+				let late = false;
+				return list.map(([q, k, at]) => {
+					if (late || (deadline && Date.now() > deadline)) { late = true; return null; }
+					const f = legFieldOf(layer(k).lv, fgOf(q, k), q, coins, A.start.t);
+					return Float64Array.from(at, (t) => arriveCost(f, t));
+				});
+			}
+			return run(list, true, deadline).map((r) => (r.late ? null : r.costs));
+		},
+		close() { if (pool) pool.close(); },
+	};
+}
+function coinLegsPhysTour(A, PH, base, opts, M, s, nC, L, fields, countOf) {
 	const sT = M.withVal(s, nC, Math.min(base.T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of base.coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
@@ -782,8 +909,11 @@ function coinLegsPhys(B, PH, base, opts) {
 			const D = coinDP(CL);
 			if (!D) break;
 			const tour = coinTour(CL, D, A.start.t);
-			let changed = 0;
-			tour.forEach((q, k) => { if (countOf.get(q) !== k) { fields.set(q, legField(q, k)); countOf.set(q, k); changed++; } });
+			// (the legs whose count changed, one batch: each leg is its own field)
+			const ch = tour.map((q, k) => [q, k]).filter(([q, k]) => countOf.get(q) !== k);
+			const f2 = ch.length ? L.fields(ch) : [];
+			ch.forEach(([q, k], i) => { fields.set(q, f2[i]); countOf.set(q, k); });
+			const changed = ch.length;
 			CL.rounds = round + 1;
 			if (!changed) break;
 		}
@@ -798,7 +928,7 @@ function coinLegsPhys(B, PH, base, opts) {
  *  arrival costs from the coins and the start are kept), and each coin's lookup body is its field in the layer of its
  *  place on the DP's best tour from the start (a coin off that tour: layer T - 1). -> the coinLegsPhys shape {T, coins,
  *  fields, tail, s, countOf, rounds: 0, layered: {D, tour, start}} or null (over 18 coins, or past the deadline: ms) */
-function coinLegsLayered(B, PH, base, deadline) {
+function coinLegsLayered(B, PH, base, deadline, opts) {
 	const { A } = B;
 	const M = PH.M;
 	let sPlan = B.M.s0;
@@ -808,33 +938,28 @@ function coinLegsLayered(B, PH, base, deadline) {
 	const nC = M.names.indexOf('coins');
 	const coins = base.coins, n = coins.length, T = Math.min(base.T, n, M.radix[nC] - 1);
 	if (n > 18 || T < 1) return null;
-	const lvOf = new Map();
-	const legField = (q, k) => {
-		if (!lvOf.has(k)) {
-			const { lv } = layerLevel(A, M, M.withVal(s, nC, k), {});
-			const fg0 = Int32Array.from(lv.fg);
-			for (const c of coins) if (fg0[c] === TROPHY) fg0[c] = 0;
-			lvOf.set(k, { lv, fg0 });
-		}
-		const { lv, fg0 } = lvOf.get(k);
-		const fg = Int32Array.from(fg0); fg[q] = TROPHY;
-		return legFieldOf(lv, fg, q, coins, A.start.t);
-	};
 	// L[(k * (n + 1) + i) * n + j]: from coin i (i = n: the start) to coin j holding k coins
 	const L = new Float64Array(T * (n + 1) * n).fill(Infinity);
 	const Lat = (k, i, j) => L[(k * (n + 1) + i) * n + j];
-	for (let k = 0; k < T; k++) {
-		for (let j = 0; j < n; j++) {
-			// (n x T fields: past the build's time, no plan past its count)
-			if (deadline && Date.now() > deadline) return null;
-			const f = legField(coins[j], k);
-			for (let i = 0; i <= n; i++) {
-				if (i === j || (i === n && k > 0)) continue;
-				const v = arriveCost(f, i === n ? A.start.t : coins[i]);
-				if (v < CUT) L[(k * (n + 1) + i) * n + j] = v;
+	// (n x T fields, on the leg workers when there are enough (legsOf): each answers the arrival costs at the start and the
+	// other coins; past the build's time, no plan past its count)
+	const LG = legsOf(A, M, s, nC, coins, opts, n * T);
+	try {
+		const list = [];
+		for (let k = 0; k < T; k++) {
+			for (let j = 0; j < n; j++) {
+				const from = [], at = [];
+				for (let i = 0; i <= n; i++) { if (i === j || (i === n && k > 0)) continue; from.push(i); at.push(i === n ? A.start.t : coins[i]); }
+				list.push([coins[j], k, at, j, from]);
 			}
 		}
-	}
+		const cs = LG.costs(list, deadline);
+		if (cs.some((c) => !c)) return null;
+		list.forEach(([, k, , j, from], x) => from.forEach((i, y) => { const v = cs[x][y]; if (v < CUT) L[(k * (n + 1) + i) * n + j] = v; }));
+		return coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG);
+	} finally { LG.close(); }
+}
+function coinLegsLayeredDP(A, PH, M, s, nC, coins, n, T, L, Lat, LG) {
 	const sT = M.withVal(s, nC, Math.min(T, M.radix[nC] - 1));
 	const tail = new Map();
 	for (const q of coins) tail.set(q, PH.fields[sT] ? arriveCost(PH.fields[sT], q) : CUT);
@@ -871,7 +996,9 @@ function coinLegsLayered(B, PH, base, deadline) {
 		place[best] = k; tour.push(coins[best]); m |= 1 << best; last = best;
 	}
 	const fields = new Map(), countOf = new Map();
-	for (let q = 0; q < n; q++) { const k = place[q] >= 0 ? place[q] : T - 1; fields.set(coins[q], legField(coins[q], k)); countOf.set(coins[q], k); }
+	const fl = coins.map((q, x) => [q, place[x] >= 0 ? place[x] : T - 1]);
+	const f2 = LG.fields(fl);
+	fl.forEach(([q, k], x) => { fields.set(q, f2[x]); countOf.set(q, k); });
 	return { T, coins, fields, tail, s, countOf, rounds: 0, layered: { D: { n, T, h }, tour, start } };
 }
 /** the DP's tour from tile t0 (the coins in order; T of them, or fewer where no leg has a value) */
@@ -990,7 +1117,7 @@ function buildSteer(level, opts) {
 		cp = null;
 	}
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs) : coinLegsPhys(B, PH, cp, opts);
+		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (D) {
 			const none = new Uint8Array(N);
@@ -1250,4 +1377,6 @@ function readSteerFile(buf) {
 
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost };
+	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	// (the leg workers)
+	_legFieldOf: legFieldOf };

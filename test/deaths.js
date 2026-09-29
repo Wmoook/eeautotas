@@ -47,7 +47,7 @@ function check(name, ok, detail) {
 }
 const section = (s) => console.log(`\n== ${s}`);
 // ASCII levels: # wall, . air, S spawn, T trophy, C checkpoint, x spike, o coin, d coin door (1 coin)
-const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], d: [43, 1] };
+const ID = { '#': [9], S: [255], T: [121], C: [360], x: [361, 1], o: [100], d: [43, 1], '1': [43, 1], '2': [43, 2] };
 const box = (inner) => ['#'.repeat(inner[0].length + 2), ...inner.map((r) => `#${r}#`), '#'.repeat(inner[0].length + 2)];
 function levelFile(name, rows) {
 	const cells = [];
@@ -200,6 +200,35 @@ function sectionCpu() {
 		check(`the pocket pit (64x48, coarse cells, the useful territory on), seed ${s}: a route through its death, replayed (a death respawning in a 'cul-de-sac' is kept and enters the room there)`,
 			!!pev && pev.deaths >= 1 && pev.ms.length === pr[pr.length - 1].ticks,
 			`${pr.length} routes${pr.length ? `, the best ${pr[pr.length - 1].ticks} ticks, ${pev ? pev.deaths : '?'} death(s)` : ''}; ${JSON.stringify(pd)}`);
+	}
+	// the throw-back pit (n3-throwback-demote): the spawn at the far left of the top corridor, a 1-coin door and a coin
+	// behind it; a 2-wide shaft at the corridor's right end, 7 rows deep, to a pit with a coin, a spike and a 2-coin door
+	// before the trophy. The only route: fall, take the pit's coin, die on the spike (back to the spawn: 42 tiles from the
+	// trophy by the door-blind order, where the pit is 3-8: a THROW-BACK), open the 1-coin door, take its coin, fall again,
+	// the 2-coin door. A throw-back death is kept demoted (deaths.backKept), never dropped; --dback=0: dropped as before
+	// (that search still routes here through the pit's doomed cells, priced as the death they are)
+	const TB = ['o1CS' + '.'.repeat(34) + '##', ...Array.from({ length: 7 }, () => '#'.repeat(36) + '..##'), '#'.repeat(30) + 'x...o...2T'];
+	const tb = levelFile('throwback', box(TB));
+	for (const s of [1, 2]) {
+		const t1 = gox(tb.file, ['--workers=1', '--cells=coarse', `--seed=${s}`, '--maxTicks=8000000', '--seconds=60']);
+		const t0 = gox(tb.file, ['--workers=1', '--cells=coarse', `--seed=${s}`, '--dback=0', '--maxTicks=8000000', '--seconds=60']);
+		const r1 = routesOf(t1), d1 = doneOf(t1).deaths || {}, d0 = doneOf(t0).deaths || {};
+		const ev1 = r1.length ? C.evaluate(tb.level, masksOf(r1[r1.length - 1].inputs)) : null;
+		check(`the throw-back pit, seed ${s}: a throw-back death kept demoted (backKept >= 1, every one counted: back = by the order + by the steer), a route through a death, replayed; --dback=0 keeps none`,
+			!!ev1 && ev1.deaths >= 1 && ev1.ms.length === r1[r1.length - 1].ticks && d1.back > 0 && d1.backKept >= 1 && d1.back === d1.backByOrder + d1.backBySteer
+				&& d0.back > 0 && d0.backKept === 0 && routesOf(t0).length > 0,
+			`default: ${r1.length} routes, first after ${doneOf(t1).first ? doneOf(t1).first.simTicks : '-'} ticks, ${JSON.stringify(d1)}; --dback=0: ${routesOf(t0).length} routes, first after ${doneOf(t0).first ? doneOf(t0).first.simTicks : '-'} ticks, back ${d0.back} kept ${d0.backKept}`);
+	}
+	// a sooner throw-back keeps its cell demoted (the n3 soundness review: add()'s improvement cleared the demotion on ANY
+	// earlier arrival, a throw-back death's too; bkLive then missed the cell and every later paying death at that place
+	// was dropped by the rspAt checks with no promotion: seeds 2 and 4 routed after 166 K / 179 K simulated ticks vs
+	// 60 K / 58 K with --dback=0, 0 promotions): up to the first route a paying death promotes the kept throw-back
+	for (const s of [2, 4]) {
+		const tf = gox(tb.file, ['--workers=1', '--cells=coarse', `--seed=${s}`, '--maxTicks=8000000', '--seconds=60', '--first=1']);
+		const df = doneOf(tf).deaths || {};
+		check(`the throw-back pit, seed ${s}, to the first route: a sooner throw-back keeps the cell demoted, so the paying death there promotes it (backPromoted >= 1)`,
+			routesOf(tf).length > 0 && df.backKept >= 1 && df.backPromoted >= 1,
+			`${routesOf(tf).length} routes, first after ${doneOf(tf).first ? doneOf(tf).first.simTicks : '-'} ticks, ${JSON.stringify(df)}`);
 	}
 	// fine cells: a death warp between two spawns (the start is the second spawn after /reset; the death brings the ball to
 	// the first, by the trophy): the only way

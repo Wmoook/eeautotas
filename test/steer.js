@@ -102,6 +102,14 @@ function sectionA() {
 			check(`coins: the coin plan's next gate from the start is a coin of the room (tile ${tile % L.width},${Math.floor(tile / L.width)})`, tile >= 0 && L.fg[tile] !== 0);
 			s3.coins = 2;
 			check('coins: no next gate with the door\'s coins taken', SF.nextGate(rd, s3) === null);
+			// the coin legs on worker threads (steer.js legPool) = the legs one after another: the same file, bit for bit;
+			// also the plan past its count's layered legs (coinLegsLayered: arrival costs from the workers)
+			const bytesOf = (o) => SF.steerFileBytes(SF.buildSteer(L, Object.assign({ maxMs: 600000 }, o)), null);
+			const same0 = Buffer.compare(bytesOf({ legThreads: 0 }), bytesOf({ legThreads: 2 })) === 0;
+			check('coins: the coin legs on 2 worker threads give the same steer file as one after another', same0);
+			const T = st.dp ? st.dp.T : 2;
+			const p0 = bytesOf({ legThreads: 0, coinT: T }), p2 = bytesOf({ legThreads: 2, coinT: T });
+			check(`coins: the layered legs (coinT ${T}) on 2 worker threads give the same steer file`, Buffer.compare(p0, p2) === 0);
 		}
 	}
 	// the build's budget: a byte budget of one body leaves the key out (one layer), said in info.over
@@ -120,6 +128,32 @@ function sectionA() {
 		check('another level\'s steer file is refused by the native tool', /another level/.test(out), out.trim().slice(0, 120));
 	}
 	forcedChains();
+	secretWall();
+}
+
+/** 50, the secret "appear" block (eesim.js F_DOOR, but it always blocks: reach.js guideFlags) is a wall to the steer
+ *  field, not a door of GATE's "the rest open": a full-height column of it between the start and the trophy, the way a
+ *  portal behind the start to an exit past the trophy. Before 2026-09-28 the steer walked through it (This is not snow's
+ *  trophy fenced by six: 16.8 tiles at the stall, 272.4 with them as walls) */
+function secretWall() {
+	const W = 40, H = 7, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	cells.push([15, H - 2, 255], [2, H - 2, 242, 1, 1, 2], [38, H - 2, 242, 1, 2, 9], [23, H - 2, 121]);
+	const withCol = (id) => {
+		const c = cells.slice();
+		if (id) for (let y = 1; y < H - 1; y++) c.push([20, y, id]);
+		return levelOf(ED.eelvlOf({ name: 'secret', width: W, height: H, cells: c }));
+	};
+	const La = withCol(50), Lw = withCol(9), L0 = withCol(0);
+	const at = (L) => { const st = SF.buildSteer(L); const sim = new E.EESim(L); sim.reset(); return SF.steerAt(st, sim); };
+	const sa = at(La), sw = at(Lw), s0 = at(L0);
+	const A = SF.analyze(La, {});
+	let cls0 = 0;
+	for (let y = 1; y < H - 1; y++) if (A.cls[y * W + 20] === 0) cls0++;
+	const ev = C.evaluate(La, Uint8Array.from([...new Array(160).fill(2), ...new Array(400).fill(0)]));
+	check('a column of 50 (secret "appear") between the start and the trophy: a wall to the steer (analyze class 0; the cost of a column of 9, the portal detour; more than through air)',
+		cls0 === H - 2 && Number.isFinite(sa) && sa === sw && sa > s0 + 10, `50 ${sa}, 9 ${sw}, air ${s0}; ${cls0} of ${H - 2} tiles walls; left to the portal ${ev ? `finishes (${ev.runTicks} run ticks)` : 'does not finish'}`);
 }
 
 /** the ordering fields' forced portals and a ball that a teleport put on a portal exit (the n2-int gate study's defect,

@@ -74,6 +74,33 @@ const WILD = new Set([417, 418, 419, 453, 461, 1517]);
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
 
 /**
+ * The block flags every guidance wall test reads (this file's fields, src/steer.js, src/goexplore.js, src/bursts.js,
+ * src/timed.js, src/editor.js; native/beamhost.h's goal field keeps the same rule by id): eesim.js's table
+ * (level.flags) with the ids the engine NEVER lets the ball through made plain walls (F_SOLID without F_DOOR).
+ * eesim.js flags 50 (the secret "appear" block) F_DOOR, but World.overlaps() reveals it and then blocks, in every state
+ * (eesim.js _ovSlow: `if (val === 50) this._revealSecret(cx, cy)`, then `return val`; docs/eeo_spec/blocks.md 3.2), so
+ * the tests that take F_DOOR for a door (open in the fields, a door the walks read from the engine but never a wall at a
+ * corner) walked through it: Snowblind's ball sat inside a box of 64 of them, Longing To The Sky's arrow maze is split
+ * by 2,145, This is not snow's trophy fenced by six (the campaign doctor, src/out/n3/catalog.md section 5). The other
+ * secrets are modelled already by the table: 243 (the secret "blank") is not solid (air, eesim.js OV_SECRET: revealed,
+ * never blocking), 136 (the secret "disappear") and 44 are plain solids. Every other F_DOOR id opens in some state
+ * (eesim.js _doorPassable). Sound: a wall only removes tiles the ball's box never overlaps (the reach field's -1 stays a
+ * proof, only tighter). The engine's own table is not changed (the reveal is its state: the secrets' bits).
+ */
+const ALWAYS_SHUT = [50];
+const GUIDE_FLAGS = new WeakMap();
+function guideFlags(level) {
+	const f = level.flags;
+	let g = GUIDE_FLAGS.get(f);
+	if (g === undefined) {
+		g = Uint8Array.from(f);
+		for (const id of ALWAYS_SHUT) if (id < g.length) g[id] &= ~F_DOOR;
+		GUIDE_FLAGS.set(f, g);
+	}
+	return g;
+}
+
+/**
  * The coin doors that can never open: a door (43 gold, 213 blue) opens at `coins >= its number` (eesim.js), and the
  * count never passes the number of coin tiles of its colour (each tile gives one coin, once), so a door whose number is
  * above that is a wall for good (Forgotten Helix: six 16-coin doors, 15 gold coins). Sound: only states behind such a
@@ -188,7 +215,7 @@ function reachField(level, opts) {
 	opts = opts || {};
 	const t0 = Date.now();
 	const W = level.width, H = level.height, N = W * H;
-	const fg = level.fg, flags = level.flags, nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
+	const fg = level.fg, flags = guideFlags(level), nFlags = flags.length, gF = level.gFlags, gMox = level.gMox, gMoy = level.gMoy, lk = level.lookup0, xfl = level.xflags;
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
 	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
 	const protOn = [];   // the protection effect's "on" tiles (its number is not 0: Me.as, eesim.js EFFECT_PROTECTION)
@@ -1154,7 +1181,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, deathChainField, neverOpenDoors, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, deathChainField, neverOpenDoors, guideFlags, ALWAYS_SHUT, unforceChains, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
