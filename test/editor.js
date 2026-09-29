@@ -2266,7 +2266,7 @@ async function escapeSection() {
 		away5 !== null && away5 >= 12 && !!st5.escape && st5.escape.runs === 2 && log5.some((l) => /escape: a fresh one search from the nearest attempt 1: .*from tick 95 of room "coins=1"'s nearest attempt/.test(l)) &&
 		log5.some((l) => /escape: a fresh one search from the nearest attempt 2: .*from tick 135 of the nearest attempt/.test(l)),
 		`sent away after ${away5 === null ? '-' : away5.toFixed(1)} s, ${st5.escape ? st5.escape.runs : 0} escapes; ${log5.slice(-3).join(' | ')}`);
-	// (3c) THE LUBY CLOCK (n3-escape-clock; EEAT_ESCLUBY=0 / test.escLuby false: main's clocks). The pure parts: the
+	// (3c) THE LUBY CLOCK (n3-escape-clock; opt-in EEAT_ESCLUBY=1 / test.escLuby true; off: main's clocks). The pure parts: the
 	// sequence, the first wait max(wait, 0.2 x the search's seconds), escape k's clocks the unit x luby(k) (main's: the
 	// same for every k), the retry once every start has had an escape (the same start, a longer term: the pure Luby
 	// restart)

@@ -1613,7 +1613,8 @@ function precEvent(V, ev) {
 // A route stops it (the one search gets its workers back and the route: head L). b.escape === false or EEAT_ESCAPE=0:
 // none (tests: test.escape === true; test.escWait / escStall / escMin / escRetarget: its clocks in s).
 const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_TILES = 0.5, ESC_BACK = [60, 600, 1500];
-// THE LUBY CLOCK (n3-escape-clock, 2026-09-29; EEAT_ESCLUBY=0: the clocks above, main's). Sweep6 (main 9b88070): 14 of
+// THE LUBY CLOCK (n3-escape-clock, 2026-09-29; OPT-IN: EEAT_ESCLUBY=1, default off = the clocks above, main's: its A/B
+// did not show a gain beyond the base's own run-to-run spread, see the note below the constants). Sweep6 (main 9b88070): 14 of
 // the 26 campaign levels it did not route pinned in their first 3-18 s and never got nearer, while the first escape came
 // at 129-188 s (ESC_WAIT_S of the stall clock after the pin, the steer build first) and then held half the CPU workers
 // 600 s or more: a 300-s run got ONE escape from ONE start (the nearest attempt) and never reached the rotation's other
@@ -1633,7 +1634,17 @@ const ESC_WAIT_S = 120, ESC_STALL_S = 600, ESC_MIN_S = 600, ESC_CPU = 0.5, ESC_T
 // restart clock of their own on main (the stall rotation's rollsTurn, not merged, restarts them at an escape's start):
 // nothing to offset from here. Tests: test.escWait = ESC_FIRST_S, test.escStall / escMin = the unit of the stall / the
 // age (escape k: x luby(k)); test.escLuby true / false: the clock regardless of EEAT_ESCLUBY.
-const ESC_LUBY = process.env.EEAT_ESCLUBY !== '0';
+const ESC_LUBY = process.env.EEAT_ESCLUBY === '1';
+// (the A/B, NIGHT3 cycle 7, box 1 GPU 4, strict pairs K2, W5, findS 300, optS 20, the product harness from the level alone,
+// base main 1ab745c; src/out/n3/escape-clock/: 12 pairs of seed 1 with the clock as specified (then on by default): no
+// target routed by it alone; the cake is a lie lost (base 220.6 s vs none: the first escape at 45 s parked 2 of 5 workers
+// through a plateau base's one search left at 60 s); where its escapes fired: Planets 201.7 s vs none, Two 199.5 vs
+// 273.7 s, DEEPER and Soul Quest none both; 6 of the 12 levels had no escape in either arm: their pins are no stall by the
+// breaker's clock (new rooms with territory keep restarting it: Not Enough Skeletons 248-278 rooms, VVVVVV 374-386).
+// With EEAT_ESCEARLY=0.25 (1 of 5 workers early), the same seed again: the cake is a lie ROUTED by escape 3 (233.6 s, after
+// a retarget) vs base none (422 tiles), Two 264.6 s vs base none (10 tiles), Planets 126.4 vs 68.3 s, Two seed 2 217.7 vs
+// 273.3 s: the base itself routed the cake and Two seed 1 in 1 of its 2 runs of the same seed, Planets in 2 of 2; 4 pairs
+// within that spread: not enough for a default)
 const ESC_FIRST_S = 30, ESC_FIRST_F = 0.2, ESC_UNIT_S = 60;
 // (the early share, OPT-IN: EEAT_ESCEARLY=<share> (default 0 = off): an escape the Luby clock starts while the search's
 // stall is still under ESC_WAIT_S takes that share of the workers (at least one) instead of ESC_CPU. The A/B of the clock
