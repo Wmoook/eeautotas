@@ -108,6 +108,9 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 /* the layers: the map, the exploration's heat (a light the map's dark background takes: screen) and trails, the frontier */
 .stage { isolation: isolate; }
 #cv { z-index: 0; } #cvHeat { z-index: 1; mix-blend-mode: screen; } #cvTrail { z-index: 2; } #cvFx { z-index: 3; } .stage .ghint { z-index: 6; }
+/* the heat: a pixel a tile, placed and scaled over the map by the compositor (its CSS transform): a move or a zoom of the
+   map repaints nothing of it */
+.stage canvas.heat { inset: auto; left: 0; top: 0; width: auto; height: auto; transform-origin: 0 0; will-change: transform; }
 /* the exploration's legend (bottom left) and Follow's panel (bottom centre) */
 .exleg { position: absolute; left: 10px; bottom: 10px; z-index: 5; pointer-events: none; min-width: 172px; max-width: 270px; padding: 7px 10px 8px; border-radius: 10px;
 	background: rgba(10, 12, 18, .82); border: 1px solid #242a36; box-shadow: 0 6px 22px rgba(0, 0, 0, .45); font: 11.5px/1.4 "Segoe UI", system-ui, sans-serif; color: #c3cad8; }
@@ -121,6 +124,18 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .exleg .er i { width: 15px; height: 3px; border-radius: 2px; flex: none; box-shadow: 0 0 6px currentColor; }
 .exleg .er span { overflow: hidden; text-overflow: ellipsis; color: #c3cad8; }
 .exleg .er b { margin-left: auto; padding-left: 8px; font-weight: 600; color: #e9edf5; }
+/* the best route (top right, once a route is known): its time, the improvements, the latest one, a step chart of the best
+   time since the first route; a click folds it to its title line (the map's corner under it: a trophy there) */
+.bestp { position: absolute; right: 10px; top: 10px; z-index: 5; cursor: pointer; width: 232px; padding: 7px 10px 8px; border-radius: 10px;
+	background: rgba(10, 12, 18, .84); border: 1px solid #4a3d18; box-shadow: 0 6px 22px rgba(0, 0, 0, .45); font: 11.5px/1.4 "Segoe UI", system-ui, sans-serif; color: #c3cad8; }
+.bestp .bt { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #9a8a5a; }
+.bestp .bt b { font: 700 17px var(--mono); letter-spacing: -.01em; text-transform: none; color: #ffd23f; }
+.bestp .bs { color: #9aa3b5; font-size: 11px; }
+.bestp .bl { margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bestp .bl b { color: #ffe08a; font-weight: 600; }
+.bestp.new { border-color: #ffd23f; box-shadow: 0 6px 22px rgba(0, 0, 0, .45), 0 0 16px rgba(255, 210, 63, .35); }
+.bestp canvas { position: static; display: block; width: 212px; height: 42px; margin-top: 5px; }
+.bestp.min { width: auto; padding: 4px 10px; } .bestp.min .bs, .bestp.min .bl, .bestp.min canvas { display: none; }
 .fhud { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 5; display: flex; align-items: center; gap: 9px; max-width: calc(100% - 24px);
 	padding: 4px 5px 4px 12px; border-radius: 999px; background: rgba(10, 12, 18, .88); border: 1px solid #4a3d18; white-space: nowrap;
 	box-shadow: 0 6px 22px rgba(0, 0, 0, .5), 0 0 18px rgba(255, 210, 63, .12); font: 12px "Segoe UI", system-ui, sans-serif; color: #e9ecf2; }
@@ -138,9 +153,13 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 .stage.pick canvas { cursor: copy; }
 .ghint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(58, 47, 16, .92); color: #ffd76a; border: 1px solid #7a6220;
 	border-radius: 9px; font-size: 12px; padding: 4px 10px; max-width: calc(100% - 40px); pointer-events: none; }
-.status { display: flex; gap: 6px 16px; flex-wrap: wrap; padding: 6px 12px; border-top: 1px solid #22262e; font: 12px var(--mono); color: #9aa3b5; min-height: 30px; align-items: center; }
+/* (one line, whatever it says: a status line that wrapped to two lines or back as the mouse moved over the map resized the
+   map's canvases, which clears them) */
+.status { display: flex; gap: 6px 16px; flex-wrap: nowrap; padding: 6px 12px; border-top: 1px solid #22262e; font: 12px var(--mono); color: #9aa3b5; height: 30px; align-items: center;
+	white-space: nowrap; overflow: hidden; }
+.status > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .status b { color: #e9ecf2; font-weight: 600; }
-.status .keys { margin-left: auto; font-family: "Segoe UI", system-ui, sans-serif; }
+.status .keys { margin-left: auto; flex: 0 1 auto; font-family: "Segoe UI", system-ui, sans-serif; }
 
 /* route search */
 .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
@@ -226,8 +245,9 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 				<button id="bFollow" title="Follow (V): a smiley plays the search's nearest attempt (the route once found) over and over and the map follows it; End jumps to where the search has got; moving, zooming or clicking the map (or Esc) stops it">&#9786; Follow</button>
 				<label class="ck" id="lJobPath" hidden title="The job's best run over the level, drawn like a found route (dashed once you change the level)"><input type="checkbox" id="cJobPath"> job's run</label>
 			</div>
-			<div class="stage" id="stage" tabindex="0"><canvas id="cv"></canvas><canvas id="cvFx" class="fx" aria-hidden="true"></canvas><canvas id="cvHeat" class="fx" aria-hidden="true"></canvas><canvas id="cvTrail" class="fx" aria-hidden="true"></canvas>
+			<div class="stage" id="stage" tabindex="0"><canvas id="cv"></canvas><canvas id="cvFx" class="fx" aria-hidden="true"></canvas><canvas id="cvHeat" class="fx heat" aria-hidden="true"></canvas><canvas id="cvTrail" class="fx" aria-hidden="true"></canvas>
 				<div class="exleg" id="exLeg" hidden></div>
+				<div class="bestp" id="bestP" title="click: fold / unfold" hidden><div class="bt"><span>best route</span><b id="bpTime"></b></div><div class="bs" id="bpSub"></div><div class="bl" id="bpLast"></div><canvas id="bpChart" width="212" height="42"></canvas></div>
 				<div class="fhud" id="fHud" hidden><span class="fw">&#9786; Following</span><span class="fl" id="fWhat"></span>
 					<input type="range" id="fSeek" min="0" max="0" step="1" value="0" title="Where the smiley is in the attempt: drag to move it (Home: back to the start)"><span class="ft" id="fTime">0:00.00</span>
 					<button id="fEnd" title="To the frontier: the attempt's last 3 seconds, where the search has got (End)">&#9197;</button>
@@ -943,15 +963,30 @@ function vwTile(g, L, i, sx, sy, T) {
 	}
 }
 
-// ------------------------------------------------------------ the view: chunks of the level, the overlays
+// ------------------------------------------------------------ the view: the level drawn once, the overlays
+// (the user, 2026-09-29, Find a route running: "it keeps like flashing the level editor the exploration stuff black etc the
+// ee map has to be more lightweight". The map was drawn from chunks of the level built as they came into view, 14 ms of
+// them a frame; the rest of the view stayed the background (a zoom, Fit, Follow, the start: the map black in parts for up
+// to seconds, Forgotten Helix's bottom half for 3 s at fit), and every redraw stroked the whole nearest attempt / route
+// (13,600 ticks) again: the mouse over the map, every poll and every Follow frame.)
+// THE OVERVIEW (OV): the whole level at a small tile size (OV.T canvas px, the fit zoom's) in one offscreen canvas, first
+// in EE's minimap colours (a pixel a tile: at once), then band by band with the block images within a few ms a frame, the
+// edited cells again as they change: the map at the fit zoom and below is one scaled blit of it, and at a nearer zoom it
+// stands (scaled up) wherever a chunk is not built yet: no part of the map is ever the bare background. THE CHUNKS: the
+// level at the view's tile size in squares of about 256 canvas px, built within MAP_BUDGET_MS a frame (the view's centre
+// first, then the ring around the view while nothing else draws), kept for any later view of that zoom (at most VW_MAX_PX
+// of them, the least recently used dropped): a move of the map (a pan, Follow) blits them, it never draws a block again.
 const ZOOMS = [1, 1.5, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64];   // CSS px per tile
 const VW = { zi: 11, camX: 0, camY: 0, chunks: new Map(), px: 0, frame: 0, dirty: true, tool: 'paint', hover: null, stroke: null, rect: null, pan: null,
-	space: false, grid: store.get('eeat.editor.grid') !== '0', fitted: false, brushImg: new Map(), play: null, drawSt: null };
+	space: false, grid: store.get('eeat.editor.grid') !== '0', fitted: false, brushImg: new Map(), play: null, drawSt: null, pathKey: '' };
 const dpr = () => window.devicePixelRatio || 1;
 const tileT = (zi) => Math.max(1, Math.round(ZOOMS[zi === undefined ? VW.zi : zi] * dpr()));
-const chunkSize = (T) => clamp(2 ** Math.round(Math.log2(512 / T)), 4, 32);
-function redrawAll() { VW.chunks.clear(); VW.px = 0; VW.brushImg.clear(); VW.dirty = true; drawPalette(); }
-/** a cell changed: its chunk and the neighbours' (drop shadows reach 2 px into the next cells; NPCs 16 px up) */
+const chunkSize = (T) => clamp(2 ** Math.round(Math.log2(256 / T)), 4, 32);
+const MAP_BUDGET_MS = 4, VW_MAX_PX = 16e6, VW_KEEP_PX = 10e6, OV_MAX_PX = 6e6, OV_MAX_T = 8, OV_FRAME_MS = 100;
+const OV = { c: null, g: null, T: 0, mode: '', W: 0, H: 0, rows: [0, 0], dirty: [], band: 4, shownAt: 0, unshown: false };
+function redrawAll() { VW.chunks.clear(); VW.px = 0; VW.brushImg.clear(); OV.c = null; VW.dirty = true; drawPalette(); }
+/** a cell changed: its chunk and the neighbours' (drop shadows reach 2 px into the next cells; NPCs 16 px up), its part of
+ *  the overview */
 function dirtyCell(i) {
 	const x = i % LV.W, y = (i / LV.W) | 0, T = tileT(), CH = chunkSize(T), mode = gxReady() ? 'ee' : 's';
 	const seen = new Set();
@@ -966,18 +1001,139 @@ function dirtyCell(i) {
 		}
 	}
 	VW.otherStale = true;   // chunks of other zooms: dropped at the next frame
+	if (OV.c) {
+		// (the overview: the 3 x 3 cells again; many at once (a rectangle, a clear): their rows as a band)
+		const r = [Math.max(0, x - 1), Math.max(0, y - 1), Math.min(LV.W, x + 2), Math.min(LV.H, y + 2)];
+		if (OV.dirty.length < 64) OV.dirty.push(r);
+		else {
+			let a = Math.min(r[1], ...OV.dirty.map((q) => q[1])), b = Math.max(r[3], ...OV.dirty.map((q) => q[3]));
+			if (OV.rows[0] < OV.rows[1]) { a = Math.min(a, OV.rows[0]); b = Math.max(b, OV.rows[1]); }
+			OV.rows = [a, b]; OV.dirty = [];
+		}
+	}
 	VW.dirty = true;
+}
+/** the cells [x0, x1) x [y0, y1) of the level on g, with tile (bx, by) at g's origin, T px a tile (EE's images: World.as's
+ *  order, every block's drop shadow; else the simple colours); the cells around them only where they reach in (shadows,
+ *  NPCs): the caller clips */
+function paintCells(g, x0, y0, x1, y1, bx, by, T, ee) {
+	g.imageSmoothingEnabled = false;
+	if (ee) {
+		gxBelow(g, LV, x0, y0, x1, y1, bx, by, T, S0);
+		g.save(); g.translate((x0 - bx) * T, (y0 - by) * T); gxAbove(g, LV, x0, y0, x1, y1, T); g.restore();
+	} else for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) vwTile(g, LV, y * LV.W + x, (x - bx) * T, (y - by) * T, T);
 }
 function buildChunk(cx, cy, T, CH, ee) {
 	const x0 = cx * CH, y0 = cy * CH, x1 = Math.min(LV.W, x0 + CH), y1 = Math.min(LV.H, y0 + CH);
 	const c = document.createElement('canvas');
 	c.width = (x1 - x0) * T; c.height = (y1 - y0) * T;
 	const g = c.getContext('2d');
-	g.imageSmoothingEnabled = false;
 	g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
-	if (ee) { gxBelow(g, LV, x0, y0, x1, y1, x0, y0, T, S0); gxAbove(g, LV, x0, y0, x1, y1, T); }
-	else for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) vwTile(g, LV, y * LV.W + x, (x - x0) * T, (y - y0) * T, T);
+	paintCells(g, x0, y0, x1, y1, x0, y0, T, ee);
 	return { c, px: c.width * c.height, used: 0 };
+}
+// (a canvas drawn into this 1 x 1 one gives up its drawing now, inside the frame's budget, not later at the page's commit)
+let flushCv = null;
+function flushCanvas(c) {
+	if (!flushCv) { flushCv = document.createElement('canvas'); flushCv.width = flushCv.height = 1; }
+	flushCv.getContext('2d').drawImage(c, 0, 0, 1, 1, 0, 0, 1, 1);
+}
+/** the zoom index Fit takes for this view (the largest at which the level fits) */
+function fitZi() {
+	const cv = $('cv');
+	for (let k = ZOOMS.length - 1; k >= 0; k--) { const T = tileT(k); if (LV.W * T <= cv.width * 0.96 && LV.H * T <= cv.height * 0.94) return k; }
+	return 0;
+}
+/** a block's colour in EE's minimap (the overview before its images) */
+function miniColor(f, b) {
+	const p = f ? LV.pal.get(f) : null;
+	if (p) return p;
+	if (f) { const k = LV.kind.get(f); if (k && (k.kind === 'solid' || k.kind === 'half')) return KIND_FALLBACK.solid; }
+	const q = b ? LV.pal.get(b) : null;
+	return q || null;
+}
+/** the overview for the view's graphics (mode 'ee' / 's'): made again for another level, size or graphics; at first EE's
+ *  minimap colours, a pixel a tile, scaled up (the bands with the block images come in ovStep) */
+function ovEnsure(mode) {
+	if (OV.c && OV.mode === mode && OV.W === LV.W && OV.H === LV.H) return;
+	const W = LV.W, H = LV.H;
+	let T = clamp(tileT(fitZi()), 1, OV_MAX_T);
+	while (T > 1 && W * H * T * T > OV_MAX_PX) T--;
+	const mini = document.createElement('canvas');
+	mini.width = W; mini.height = H;
+	const mg = mini.getContext('2d'), d = mg.createImageData(W, H), px = d.data;
+	const bgc = LV.bgColor ? [parseInt(LV.bgColor.slice(1, 3), 16), parseInt(LV.bgColor.slice(3, 5), 16), parseInt(LV.bgColor.slice(5, 7), 16)] : [0, 0, 0];
+	for (let i = 0, o = 0; i < W * H; i++, o += 4) { const c = miniColor(LV.fg[i], LV.bg[i]) || bgc; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 255; }
+	mg.putImageData(d, 0, 0);
+	const c = document.createElement('canvas');
+	c.width = W * T; c.height = H * T;
+	const g = c.getContext('2d');
+	g.imageSmoothingEnabled = false;
+	g.drawImage(mini, 0, 0, W, H, 0, 0, W * T, H * T);
+	Object.assign(OV, { c, g, T, mode, W, H, rows: [0, H], dirty: [], band: Math.max(1, Math.round(1500 / W)) });
+}
+/** the overview's next bands (and the edited cells first) until `until` (ms, performance.now()), each given up to the canvas
+ *  at once (flushCanvas: the drawing costs now, not at the commit); the band's rows follow the time a band took (~2 ms);
+ *  none while EE's images are loading (they replace it); returns whether it drew anything */
+function ovStep(until) {
+	if (!OV.c || (GX.on && GX.st === 'loading')) return false;
+	const ee = OV.mode === 'ee' && gxReady();
+	let did = false;
+	while (performance.now() < until && (OV.dirty.length || OV.rows[0] < OV.rows[1])) {
+		const t0 = performance.now();
+		let r = OV.dirty.shift(), band = false;
+		if (!r) { band = true; r = [0, OV.rows[0], OV.W, Math.min(OV.rows[1], OV.rows[0] + OV.band)]; OV.rows[0] = r[3]; }
+		const g = OV.g, T = OV.T;
+		g.save();
+		g.beginPath(); g.rect(r[0] * T, r[1] * T, (r[2] - r[0]) * T, (r[3] - r[1]) * T); g.clip();
+		g.fillStyle = '#000'; g.fillRect(r[0] * T, r[1] * T, (r[2] - r[0]) * T, (r[3] - r[1]) * T);
+		paintCells(g, r[0], r[1], r[2], r[3], 0, 0, T, ee);
+		g.restore();
+		flushCanvas(OV.c);
+		did = true; OV.unshown = true;
+		if (band) { const ms = performance.now() - t0; OV.band = clamp(Math.round(OV.band * (ms > 3 ? 0.6 : ms < 1 ? 1.6 : 1)), 1, 256); }
+	}
+	return did;
+}
+const ovBuilding = () => !!OV.c && (OV.dirty.length > 0 || OV.rows[0] < OV.rows[1]);
+/** the overview's cells [x0, x1) x [y0, y1) on g at T px a tile from the level's origin (ox, oy): scaled, smoothed */
+function ovBlit(g, x0, y0, x1, y1, ox, oy, T) {
+	if (!OV.c || x1 <= x0 || y1 <= y0) return;
+	const k = OV.T;
+	g.imageSmoothingEnabled = T !== k;
+	g.drawImage(OV.c, x0 * k, y0 * k, (x1 - x0) * k, (y1 - y0) * k, ox + x0 * T, oy + y0 * T, (x1 - x0) * T, (y1 - y0) * T);
+	g.imageSmoothingEnabled = false;
+}
+/** while the map does not draw: the overview's next bands, else one chunk just outside the view (the ring the next move
+ *  of the map shows first), within the budget; the map again when the overview it shows has new bands (at most every
+ *  OV_FRAME_MS while it builds, and once more when it is done: OV.unshown, set by ovStep and cleared by draw(); the
+ *  merge review: an undo at Fit, or a level's last bands, done within OV_FRAME_MS of the last draw were never shown) */
+function mapIdle(now) {
+	const until = now + MAP_BUDGET_MS;
+	const shows = () => tileT() <= OV.T || VW.holes > 0;
+	if (ovBuilding()) {
+		ovStep(until);
+		if (OV.unshown && shows() && (now - OV.shownAt >= OV_FRAME_MS || !ovBuilding())) VW.dirty = true;
+		return;
+	}
+	if (OV.unshown && shows()) { VW.dirty = true; return; }
+	const T = tileT();
+	if (T <= OV.T || !OV.c) return;
+	const cv = $('cv'), { ox, oy } = origin(), CH = chunkSize(T), CT = CH * T, mode = gxReady() ? 'ee' : 's';
+	const nx = Math.ceil(LV.W / CH), ny = Math.ceil(LV.H / CH);
+	const cx0 = Math.max(0, Math.floor(-ox / CT) - 1), cx1 = Math.min(nx - 1, Math.floor((cv.width - ox) / CT) + 1);
+	const cy0 = Math.max(0, Math.floor(-oy / CT) - 1), cy1 = Math.min(ny - 1, Math.floor((cv.height - oy) / CT) + 1);
+	for (let cy = cy0; cy <= cy1; cy++) {
+		for (let cx = cx0; cx <= cx1; cx++) {
+			const key = `${mode}|${T}|${cx}|${cy}`;
+			if (VW.chunks.has(key)) continue;
+			const c = buildChunk(cx, cy, T, CH, mode === 'ee');
+			flushCanvas(c.c);
+			c.used = VW.frame;
+			VW.chunks.set(key, c); VW.px += c.px;
+			if (performance.now() >= until) return;
+		}
+	}
 }
 /** one block at T px (the palette, the inspector, the brush preview) */
 function drawBlock(g, id, args, T, bgFill) {
@@ -1006,14 +1162,29 @@ function brushImage(T) {
 	}
 	return c;
 }
+/** the map's canvases at the stage's size (device px). A new size clears a canvas, and the observer that calls this runs
+ *  after the frame's drawing and before its paint: everything is drawn again here at once, or that frame is painted blank
+ *  (the whole map black for a frame) */
 function resizeCanvas() {
 	const st = $('stage'), cv = $('cv');
 	const w = Math.max(1, Math.round(st.clientWidth * dpr())), h = Math.max(1, Math.round(st.clientHeight * dpr()));
-	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; VW.dirty = true; if (!VW.fitted) fit(); }
+	let again = false;
+	if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; VW.dirty = true; again = true; if (!VW.fitted) fit(); }
 	const fx = $('cvFx');
-	if (fx.width !== w || fx.height !== h) { fx.width = w; fx.height = h; FX.dirty = true; }
-	for (const id of ['cvHeat', 'cvTrail']) { const c = $(id); if (c.width !== w || c.height !== h) { c.width = w; c.height = h; EXP.viewDirty = true; } }
+	if (fx.width !== w || fx.height !== h) { fx.width = w; fx.height = h; again = true; }
+	// (the trails' canvas TRAIL_MARGIN larger each way: a move of the map within it only moves the canvas)
+	const tc = $('cvTrail'), M = trailMargin();
+	if (tc.width !== w + 2 * M || tc.height !== h + 2 * M) {
+		tc.width = w + 2 * M; tc.height = h + 2 * M; again = true; EXP.trT = -1;
+		Object.assign(tc.style, { inset: 'auto', left: `${-TRAIL_MARGIN}px`, top: `${-TRAIL_MARGIN}px`, width: `${tc.width / dpr()}px`, height: `${tc.height / dpr()}px` });
+	}
+	if (!again || !frameReady) return;
+	const now = performance.now();
+	VW.dirty = false; draw();
+	FX.dirty = false; drawFx(now);
+	EXP.viewDirty = true; drawExplore(now);
 }
+let frameReady = false;   // (the first frame has run: the page's state is complete)
 function origin() {
 	const cv = $('cv'), T = tileT(), s = T / 16;
 	return { T, s, ox: Math.round(cv.width / 2 - VW.camX * s), oy: Math.round(cv.height / 2 - VW.camY * s) };
@@ -1022,31 +1193,63 @@ function draw() {
 	const cv = $('cv'), g = cv.getContext('2d');
 	const cw = cv.width, ch = cv.height, d = dpr();
 	g.imageSmoothingEnabled = false;
-	g.fillStyle = '#15171d'; g.fillRect(0, 0, cw, ch);
 	const { T, s, ox, oy } = origin();
+	// (the background only outside the level: inside, the level's images cover every pixel)
+	g.fillStyle = '#15171d';
+	const lx0 = clamp(ox, 0, cw), ly0 = clamp(oy, 0, ch), lx1 = clamp(ox + LV.W * T, 0, cw), ly1 = clamp(oy + LV.H * T, 0, ch);
+	if (lx1 <= lx0 || ly1 <= ly0) g.fillRect(0, 0, cw, ch);
+	else {
+		if (ly0 > 0) g.fillRect(0, 0, cw, ly0);
+		if (ly1 < ch) g.fillRect(0, ly1, cw, ch - ly1);
+		if (lx0 > 0) g.fillRect(0, ly0, lx0, ly1 - ly0);
+		if (lx1 < cw) g.fillRect(lx1, ly0, cw - lx1, ly1 - ly0);
+	}
 	const ee = gxReady(), mode = ee ? 'ee' : 's', CH = chunkSize(T), CT = CH * T;
 	if (VW.otherStale) { for (const [k, c] of VW.chunks) if (!k.startsWith(`${mode}|${T}|`)) { VW.chunks.delete(k); VW.px -= c.px; } VW.otherStale = false; }
-	const nx = Math.ceil(LV.W / CH), ny = Math.ceil(LV.H / CH);
-	const cx0 = Math.max(0, Math.floor(-ox / CT)), cx1 = Math.min(nx - 1, Math.floor((cw - ox) / CT));
-	const cy0 = Math.max(0, Math.floor(-oy / CT)), cy1 = Math.min(ny - 1, Math.floor((ch - oy) / CT));
-	const frame = ++VW.frame, until = performance.now() + 14;
-	let built = 0;
-	for (let cy = cy0; cy <= cy1; cy++) {
-		for (let cx = cx0; cx <= cx1; cx++) {
-			const key = `${mode}|${T}|${cx}|${cy}`;
-			let c = VW.chunks.get(key);
-			if (!c) {
-				if (built > 0 && performance.now() > until) { VW.dirty = true; continue; }
-				c = buildChunk(cx, cy, T, CH, ee);
-				built++;
-				VW.chunks.set(key, c); VW.px += c.px;
+	const tx0 = Math.max(0, Math.floor(-ox / T)), tx1 = Math.min(LV.W, Math.ceil((cw - ox) / T)), ty0 = Math.max(0, Math.floor(-oy / T)), ty1 = Math.min(LV.H, Math.ceil((ch - oy) / T));
+	ovEnsure(mode);
+	OV.unshown = false;   // (the overview as it is now is what this draw shows, wherever the view uses it)
+	const frame = ++VW.frame;
+	VW.holes = 0;
+	if (T <= OV.T) {
+		// (the fit zoom and below: the overview, one blit)
+		ovBlit(g, tx0, ty0, tx1, ty1, ox, oy, T);
+		OV.shownAt = performance.now();
+	} else {
+		// (nearer: the chunks, the view's centre first; those not built within the budget the overview scaled up, built in
+		// the next frames)
+		const nx = Math.ceil(LV.W / CH), ny = Math.ceil(LV.H / CH);
+		const cx0 = Math.max(0, Math.floor(-ox / CT)), cx1 = Math.min(nx - 1, Math.floor((cw - ox) / CT));
+		const cy0 = Math.max(0, Math.floor(-oy / CT)), cy1 = Math.min(ny - 1, Math.floor((ch - oy) / CT));
+		const miss = [], until = performance.now() + MAP_BUDGET_MS;
+		for (let cy = cy0; cy <= cy1; cy++) {
+			for (let cx = cx0; cx <= cx1; cx++) {
+				const c = VW.chunks.get(`${mode}|${T}|${cx}|${cy}`);
+				if (c) { c.used = frame; g.drawImage(c.c, ox + cx * CT, oy + cy * CT); } else miss.push([cx, cy]);
 			}
-			c.used = frame;
-			g.drawImage(c.c, ox + cx * CT, oy + cy * CT);
+		}
+		if (miss.length) {
+			const mx = (cw / 2 - ox) / CT - 0.5, my = (ch / 2 - oy) / CT - 0.5;
+			miss.sort((a, b) => Math.hypot(a[0] - mx, a[1] - my) - Math.hypot(b[0] - mx, b[1] - my));
+			for (const [cx, cy] of miss) {
+				if (performance.now() < until) {
+					const c = buildChunk(cx, cy, T, CH, ee);
+					VW.chunks.set(`${mode}|${T}|${cx}|${cy}`, c); VW.px += c.px;
+					c.used = frame;
+					g.drawImage(c.c, ox + cx * CT, oy + cy * CT);   // (the chunk's drawing costs here: inside the budget)
+				} else {
+					VW.holes++;
+					ovBlit(g, cx * CH, cy * CH, Math.min(LV.W, cx * CH + CH), Math.min(LV.H, cy * CH + CH), ox, oy, T);
+				}
+			}
+			if (VW.holes) VW.dirty = true;
+			OV.shownAt = performance.now();
+		}
+		if (VW.px > VW_MAX_PX) {
+			const old = [...VW.chunks].filter(([, c]) => c.used !== frame).sort((a, b) => a[1].used - b[1].used);
+			for (const [k, c] of old) { if (VW.px <= VW_KEEP_PX) break; VW.chunks.delete(k); VW.px -= c.px; }
 		}
 	}
-	if (VW.px > 40e6) for (const [k, c] of VW.chunks) { if (VW.px <= 24e6) break; if (c.used === frame) continue; VW.chunks.delete(k); VW.px -= c.px; }
-	const tx0 = Math.max(0, Math.floor(-ox / T)), tx1 = Math.min(LV.W, Math.ceil((cw - ox) / T)), ty0 = Math.max(0, Math.floor(-oy / T)), ty1 = Math.min(LV.H, Math.ceil((ch - oy) / T));
 	// grid and the level's edge
 	if (VW.grid && T >= 8 * d) {
 		g.strokeStyle = 'rgba(255,255,255,.07)'; g.lineWidth = 1; g.beginPath();
@@ -1067,7 +1270,11 @@ function draw() {
 	drawJobPath(g, ox, oy, s, d);
 	drawRoute(g, ox, oy, s, d);
 	drawGuide(g, ox, oy, s, d);
-	// the cursor: the brush's block where it would go, the rectangle, the erase / pick frame
+}
+/** is there a cursor to draw (the brush's block where it would go, the rectangle, the erase / pick frame)? */
+const cursorShown = () => !!VW.rect || (!!VW.hover && VW.hover.x >= 0 && VW.hover.y >= 0 && VW.hover.x < LV.W && VW.hover.y < LV.H && !VW.pan && VW.tool !== 'guide' && !FOL.on);
+/** the cursor on g (the frontier's layer: a move of the mouse draws only that layer, not the map) */
+function drawCursor(g, ox, oy, T, d) {
 	const h = VW.hover;
 	if (VW.rect) {
 		const r = VW.rect, x0 = Math.min(r.x0, r.x1), x1 = Math.max(r.x0, r.x1), y0 = Math.min(r.y0, r.y1), y1 = Math.max(r.y0, r.y1);
@@ -1108,18 +1315,19 @@ function frame() {
 	if (VW.glide) glideStep(now);
 	if (VW.play) { VW.dirty = true; }
 	if (VW.dirty) EXP.viewDirty = true;
-	// (the map when something changed; the search frontier's layer with it, and on its own while it pulses)
-	if (VW.dirty) { VW.dirty = false; draw(); FX.dirty = true; }
+	frameReady = true;
+	// (the map when something changed; the search frontier's layer with it, and on its own while it pulses; while the map
+	// does not change: the overview's next bands, the chunks around the view)
+	if (VW.dirty) { VW.dirty = false; draw(); FX.dirty = true; } else mapIdle(now);
 	if (FX.dirty || (FX.live && now - FX.at >= FX_FRAME_MS)) drawFx(now);
 	// (the exploration view: the heat and the trails, on canvases of their own under the frontier's)
 	if (EXP.on || EXP.shown) drawExplore(now);
+	// (the best route's panel: when a route improves, and its chart's time axis every BEST_CHART_MS)
+	if (IMP.dirty || (impTicking(now) && now - IMP.chartAt >= BEST_CHART_MS)) bestPanel(now);
 }
 function fit() {
 	if (FOL.on) followSet(false);
-	const cv = $('cv');
-	let zi = 0;
-	for (let k = ZOOMS.length - 1; k >= 0; k--) { const T = tileT(k); if (LV.W * T <= cv.width * 0.96 && LV.H * T <= cv.height * 0.94) { zi = k; break; } }
-	VW.zi = zi; VW.camX = LV.W * 8; VW.camY = LV.H * 8; VW.fitted = true; VW.dirty = true; VW.glide = null;
+	VW.zi = fitZi(); VW.camX = LV.W * 8; VW.camY = LV.H * 8; VW.fitted = true; VW.dirty = true; VW.glide = null;
 	changedView();
 }
 function zoom(step, fx, fy) {
@@ -1176,16 +1384,41 @@ function clearGuide() { GUIDE.strokes = []; GUIDE.drawing = null; guideChanged()
 function routeShown() {
 	const st = SOLVE.st;
 	if (!st) return null;
-	if (st.result && st.result.path) return st.result;
+	const b = bestRoute(st);
+	if (b) return b;
 	return st.closest && st.closest.path ? st.closest : null;
 }
-/** a path of [x, y] per tick (px, ball centre) as one line; a jump of more than 40 px (a portal, a respawn) is not joined */
-function strokePath(g, P, ox, oy, s, w, col) {
-	g.strokeStyle = col; g.lineWidth = w; g.beginPath();
-	for (let t = 0; t < P.length; t++) {
+/** the ticks [i0, i1] of a path of [x, y] per tick (px, ball centre) as one polyline on g's current path (ox, oy: the level's
+ *  origin, s: canvas px per level px): only its pieces in the view (a canvas cw x ch, m px around it; the line leaves the
+ *  view where it does), a point at least 0.75 canvas px from the last one drawn (the rest of a stroke's cost: a nearest
+ *  attempt of 13,600 ticks is ~3,000 points at the fit zoom, and at 16 px a tile only what is in the view); a jump of
+ *  more than 40 px (a portal, a respawn) is not joined. Returns how many points it drew. */
+function tracePath(g, P, ox, oy, s, cw, ch, m, i0, i1, dmin) {
+	const a = i0 === undefined ? 0 : i0, b = i1 === undefined ? P.length - 1 : i1, gap = dmin === undefined ? 0.75 : dmin, W = cw === undefined ? Infinity : cw + m, H = ch === undefined ? Infinity : ch + m, lo = cw === undefined ? -Infinity : -m;
+	let lx = NaN, ly = NaN, open = false, n = 0;
+	for (let t = a; t <= b; t++) {
 		const x = ox + P[t][0] * s, y = oy + P[t][1] * s;
-		if (t === 0 || Math.abs(P[t][0] - P[t - 1][0]) + Math.abs(P[t][1] - P[t - 1][1]) > 40) g.moveTo(x, y); else g.lineTo(x, y);
+		const jump = t > a && Math.abs(P[t][0] - P[t - 1][0]) + Math.abs(P[t][1] - P[t - 1][1]) > 40;
+		if (!(x >= lo && x <= W && y >= lo && y <= H)) {
+			if (open && !jump) { g.lineTo(x, y); n++; }   // (to the first point past the view's edge)
+			open = false; lx = x; ly = y;
+			continue;
+		}
+		if (!open || jump) {
+			if (!jump && t > a) { g.moveTo(lx, ly); g.lineTo(x, y); n += 2; } else { g.moveTo(x, y); n++; }
+			open = true; lx = x; ly = y;
+			continue;
+		}
+		if (t !== b && Math.abs(x - lx) + Math.abs(y - ly) < gap) continue;
+		g.lineTo(x, y); lx = x; ly = y; n++;
 	}
+	return n;
+}
+/** a path as one line (tracePath: the part in g's canvas; dmin: its points at least that far apart, canvas px) */
+function strokePath(g, P, ox, oy, s, w, col, dmin) {
+	g.strokeStyle = col; g.lineWidth = w; g.beginPath();
+	const c = g.canvas;
+	tracePath(g, P, ox, oy, s, c ? c.width : undefined, c ? c.height : undefined, w + 2, undefined, undefined, dmin);
 	g.stroke();
 }
 /** the job's best run (#job=<id>&path=1, or the toolbar's "job's run"): drawn like a found route, in blue; dashed once the level changed */
@@ -1195,8 +1428,8 @@ function drawJobPath(g, ox, oy, s, d) {
 	g.lineJoin = 'round'; g.lineCap = 'round';
 	const stale = JOB.sig !== currentSig();
 	if (stale) g.setLineDash([6 * d, 5 * d]);
-	strokePath(g, JOB.path, ox, oy, s, Math.max(4, 4.5 * d), 'rgba(0,0,0,.5)');
-	strokePath(g, JOB.path, ox, oy, s, Math.max(2, 2.2 * d), stale ? 'rgba(110,200,255,.55)' : '#6ec8ff');
+	strokePath(g, JOB.path, ox, oy, s, Math.max(4, 4.5 * d), 'rgba(0,0,0,.5)', Math.max(0.75, 1.2 * d));
+	strokePath(g, JOB.path, ox, oy, s, Math.max(2, 2.2 * d), stale ? 'rgba(110,200,255,.55)' : '#6ec8ff', Math.max(0.75, 1.2 * d));
 	g.restore();
 }
 function drawRoute(g, ox, oy, s, d) {
@@ -1206,7 +1439,9 @@ function drawRoute(g, ox, oy, s, d) {
 	const P = r.path;
 	g.save();
 	g.lineJoin = 'round'; g.lineCap = 'round';
-	const line = (w, col) => strokePath(g, P, ox, oy, s, w, col);
+	// (the outline and the line through the same points, at least 1.2 CSS px apart: a 13,600-tick attempt at the fit zoom is
+	// a few thousand points, not 13,600)
+	const line = (w, col) => strokePath(g, P, ox, oy, s, w, col, Math.max(0.75, 1.2 * d));
 	if (stale) g.setLineDash([6 * d, 5 * d]);
 	line(Math.max(4, 4.5 * d), 'rgba(0,0,0,.5)');
 	const near = r === SOLVE.st.closest;
@@ -1232,7 +1467,7 @@ function drawRoute(g, ox, oy, s, d) {
 // (#cvFx): the pulse redraws only that layer, ~30 times a second, not the level and its paths. The toolbar's "search
 // frontier" turns it off; F or the closest attempt's "Go to" takes the map there.
 const FX = { on: store.get('eeat.editor.frontier') !== '0', dirty: true, live: false, shown: false, at: 0 };
-const FX_FRAME_MS = 33;
+const FX_FRAME_MS = 50;
 /** the frontier of a search (st: GET /api/editor/solve; on: the toggle; stale: the level changed since the search):
  *  {P (the closest attempt's path), x, y (px, the ball's centre at its end), label, pulse, stale}, or null (no closest
  *  attempt with a path, a route known, turned off) */
@@ -1264,10 +1499,7 @@ function drawFrontier(g, f, ox, oy, s, d, now, cw, ch) {
 		if (i1 <= i0) continue;
 		for (const [w, col] of [[Math.max(5, 7 * d), `rgba(255,159,67,${(0.3 * a).toFixed(3)})`], [Math.max(2, 2.4 * d), `rgba(255,228,184,${(0.95 * a).toFixed(3)})`]]) {
 			g.strokeStyle = col; g.lineWidth = w; g.beginPath();
-			for (let t = i0; t <= i1; t++) {
-				const x = ox + P[t][0] * s, y = oy + P[t][1] * s;
-				if (t === i0 || Math.abs(P[t][0] - P[t - 1][0]) + Math.abs(P[t][1] - P[t - 1][1]) > 40) g.moveTo(x, y); else g.lineTo(x, y);
-			}
+			tracePath(g, P, ox, oy, s, cw, ch, w + 2, i0, i1);
 			g.stroke();
 		}
 	}
@@ -1319,21 +1551,24 @@ function drawFrontier(g, f, ox, oy, s, d, now, cw, ch) {
 	g.fillStyle = '#ffe6c7'; g.fillText(rest, lx + pad + hw, ly + h / 2 + 0.5);
 	g.restore();
 }
-/** the frontier's layer, cleared and drawn again: with every map redraw, and ~30 times a second while it pulses */
+/** the frontier's layer, cleared and drawn again: with every map redraw, and ~30 times a second while it pulses (or a new
+ *  best route's flash fades); the mouse's cursor (a move of the mouse draws this layer only), a new best route's flash,
+ *  Follow's smiley on it too */
 function drawFx(now) {
 	const c = $('cvFx'), g = c.getContext('2d');
 	FX.dirty = false; FX.at = now;
 	const f = frontierOf(SOLVE.st, FX.on, !!(SOLVE.sig && SOLVE.sig !== currentSig()));
-	FX.live = !!(f && f.pulse);
-	// (Follow's smiley on this layer too)
-	const fol = FOL.on && !!FOL.P;
-	if (!f && !fol && !FX.shown) return;
+	const fol = FOL.on && !!FOL.P, cur = cursorShown(), flash = impFlashOn(now);
+	FX.live = !!(f && f.pulse) || flash;
+	if (!f && !fol && !cur && !flash && !FX.shown) return;
 	g.clearRect(0, 0, c.width, c.height);
-	FX.shown = !!f || fol;
-	if (!f && !fol) return;
-	const { s, ox, oy } = origin();
-	if (f) drawFrontier(g, f, ox, oy, s, dpr(), now, c.width, c.height);
-	if (fol) drawFollow(g, ox, oy, s, dpr());
+	FX.shown = !!f || fol || cur || flash;
+	if (!FX.shown) return;
+	const { T, s, ox, oy } = origin(), d = dpr();
+	if (flash) drawImpFlash(g, ox, oy, s, d, now, c.width, c.height);
+	if (f) drawFrontier(g, f, ox, oy, s, d, now, c.width, c.height);
+	if (cur) drawCursor(g, ox, oy, T, d);
+	if (fol) drawFollow(g, ox, oy, s, d);
 }
 /** F / the closest attempt's "Go to": the map glides to the frontier (at least 16 CSS px a tile; also with the toggle off) */
 function gotoFrontier() {
@@ -1354,21 +1589,29 @@ function glideStep(now) {
 // ------------------------------------------------------------ the exploration view: where Find a route has been
 // (the user: "a super cool ui that i can see all of the routes its trying like maybe the bg changes"; the server side:
 // src/editor.js heatState, src/heat.js). THE HEAT: per tile the search's visits (GET /api/editor/solve/heat: a count, the
-// first and the last visit, as deltas since the page's version), drawn at tile resolution into an offscreen canvas
-// (heatFill) and scaled onto a canvas of its own under the frontier's (#cvHeat, blended "screen": it lights the map's dark
-// background), the solid blocks cut out of it (heatMaskFill: they stay as they are), rebuilt at most every EXP_HEAT_MS.
-// Its colour is WHEN the search first got there (the UI review, 2026-09-29: by the last visit 59-97% of the explored
-// tiles were "fresh" during a search, one cyan wash): white and cyan for the tiles found last, with a glow for those of
-// the last HEAT_GLOW, then blue, violet and deep purple back to the search's start (the scale: the search's time so far,
-// at least HEAT_SPAN_MIN): a wave from the start to the frontier; brighter the more often the search came back (log of
-// the count), at most HEAT_A. THE TRAILS: the latest attempts of every strategy as thin lines in its colour (EXP_COLORS)
-// on #cvTrail, the newest brightest with a glow and a dot at its end, fading out over EXP_TRAIL_FADE; a small legend (the
-// heat's scale, the searches with attempts on the map). The toolbar's "exploration" (on by default, eeat.editor.explore)
-// turns it off.
+// first and the last visit, as deltas since the page's version), a pixel a tile in one image (#cvHeat, W x H px) that the
+// compositor places and scales over the map (its CSS transform: a move or a zoom of the map repaints nothing of it;
+// smoothed like the bilinear blit it replaces) and blends "screen" (it lights the map's dark background). It is kept up
+// to date a few tiles at a time (heatRefresh: the tiles whose data changed and their neighbours; the glow of the tiles
+// found last; while the search runs the colours' ageing, a slice of rows a frame) and only the changed rectangle goes into
+// the canvas: before, the whole heat was computed again (two blurs of the level, the glow over every tile, the blocks'
+// cut) and three view-sized images drawn every time the map moved (every Follow frame). Its colour is WHEN the search
+// first got there (the UI review, 2026-09-29: by the last visit 59-97% of the explored tiles were "fresh" during a search,
+// one cyan wash): white and cyan for the tiles found last, with a glow for those of the last HEAT_GLOW, then blue, violet
+// and deep purple back to the search's start (the scale: the search's time so far, at least HEAT_SPAN_MIN): a wave from the
+// start to the frontier (a tile's colour: the first visits of the visited tiles around it averaged, [1 2 1] each way:
+// bands, not speckle; heatAdd keeps the sums as tiles come); brighter the more often the search came back (log of the
+// count), at most HEAT_A; the plain solid blocks the search never visited clear (they stay as they are). THE TRAILS: the
+// latest attempts of every strategy as thin lines in its colour (EXP_COLORS) on #cvTrail, the newest brightest with a
+// glow and a dot at its end, fading out over EXP_TRAIL_FADE, only their parts in the view; a small legend (the heat's
+// scale, the searches with attempts on the map). The toolbar's "exploration" (on by default, eeat.editor.explore) turns it
+// off.
 const EXP = { on: store.get('eeat.editor.explore') !== '0', search: 0, version: 0, trailId: 0, W: 0, H: 0, count: null, first: null, last: null, list: [], visited: 0, t: 0, tAt: 0,
-	running: false, trails: [], final: false, busy: false, img: null, glow: null, mask: null, masked: 0, glowOn: false, imgAt: -1e9, dataDirty: false, heatDirty: false, viewDirty: true,
-	trailAt: -1e9, trailsDirty: false, trailShown: false, shown: false, legendKey: '' };
-const EXP_HEAT_MS = 500, EXP_TRAIL_FADE = 10000, EXP_TRAIL_MS = 90, EXP_TRAILS = 60, EXP_TRAILS_K = 10, EXP_TAIL = 0.6;
+	running: false, trails: [], final: false, busy: false,
+	s0: null, s1: null, mark: null, todo: [], fresh: [], gacc: null, galpha: null, gmark: null, glowSet: [], glowAt: -1e9, solid: null, solidV: -1,
+	g: null, img: null, px: null, all: true, ageRow: 0, ageAt: -1e9, placed: '', stale: null, viewDirty: true,
+	trailAt: -1e9, trailsDirty: false, trailShown: false, trOx: 0, trOy: 0, trT: 0, trStale: null, trMove: '', shown: false, legendKey: '', legRows: '' };
+const TRAIL_MARGIN = 160, EXP_TRAIL_FADE = 10000, EXP_TRAIL_MS = 350, EXP_TRAILS = 60, EXP_TRAILS_K = 10, EXP_TAIL = 0.6, EXP_AGE_MS = 1000, EXP_AGE_SLICES = 8, EXP_GLOW_MS = 100;
 const HEAT_SPAN_MIN = 8000, HEAT_A = 0.55, HEAT_GLOW = 3000, HEAT_GLOW_A = 110;
 // (the heat's colours by when a tile was found: white-cyan (just now), cyan, sky blue, blue, violet, deep purple (the
 // search's start); a 256-step table)
@@ -1392,27 +1635,56 @@ const EXP_COLORS = { goexplore: '#b6ff3b', gorolls: '#ffffff', explore: '#ff4fd8
 	precision: '#aab4c8', skips: '#aab4c8' };
 const expColor = (k) => EXP_COLORS[k] || '#dfe6ff';
 function b64u8(s) { const b = atob(s || ''); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+/** E's heat for a W x H level from nothing: the visits, the colour's sums, the glow, everything to draw again */
+function heatReset(E, W, H) {
+	const N = W * H;
+	Object.assign(E, { count: new Uint16Array(N), first: new Uint32Array(N), last: new Uint32Array(N), s0: new Uint8Array(N), s1: new Float64Array(N), mark: new Uint8Array(N), todo: [],
+		fresh: [], gacc: new Float32Array(N), galpha: new Float32Array(N), gmark: new Uint8Array(N), glowSet: [], glowAt: -1e9, list: [], visited: 0, all: true, ageRow: H });
+}
+/** tile j's pixel to draw again (once) */
+function heatTodo(E, j) { if (!E.mark[j]) { E.mark[j] = 1; E.todo.push(j); } }
+/** a visited tile t with its first visit f in (sign 1) or out of (-1) the colour's sums of the 3 x 3 tiles around it (the
+ *  [1 2 1] blur each way: s0 the weights of the visited tiles, s1 their first visits' weighted sum); those tiles to draw
+ *  again */
+function heatAdd(E, t, f, sign) {
+	const W = E.W, H = E.H, x = t % W, y = (t / W) | 0;
+	for (let dy = -1; dy <= 1; dy++) {
+		const yy = y + dy;
+		if (yy < 0 || yy >= H) continue;
+		for (let dx = -1; dx <= 1; dx++) {
+			const xx = x + dx;
+			if (xx < 0 || xx >= W) continue;
+			const j = yy * W + xx, w = (2 - Math.abs(dx)) * (2 - Math.abs(dy));
+			E.s0[j] += sign * w; E.s1[j] += sign * w * f;
+			heatTodo(E, j);
+		}
+	}
+}
 /** a GET /api/editor/solve/heat answer r into E (EXP): another search starts it over; the tiles' counts, first and last
  *  visits (an older server without the first visits: a tile's first is its last visit when the page first sees it), the
- *  version, the search's clock (t at now: performance.now()), its new trails (the newest EXP_TRAILS kept) */
+ *  version, the search's clock (t at now: performance.now()), its new trails (the newest EXP_TRAILS kept); the tiles it
+ *  changed (and their neighbours) to draw again */
 function heatApply(E, r, now) {
 	if (!r) return;
 	if (r.search !== E.search || r.w !== E.W || r.h !== E.H) {
-		Object.assign(E, { search: r.search, W: r.w, H: r.h, version: 0, trailId: 0, trails: [], list: [], visited: 0, final: false, img: null, glow: null, mask: null, glowOn: false });
-		E.count = new Uint16Array(r.w * r.h); E.first = new Uint32Array(r.w * r.h); E.last = new Uint32Array(r.w * r.h);
+		Object.assign(E, { search: r.search, W: r.w, H: r.h, version: 0, trailId: 0, trails: [], final: false });
+		heatReset(E, r.w, r.h);
 	}
-	if (r.full && E.list.length) { E.count.fill(0); E.first.fill(0); E.last.fill(0); E.list = []; }
+	if (r.full && E.list.length) heatReset(E, E.W, E.H);
 	const N = E.W * E.H, I = new DataView(b64u8(r.idx).buffer), Cn = new DataView(b64u8(r.count).buffer), Ls = new DataView(b64u8(r.last).buffer);
 	const Fs = r.first ? new DataView(b64u8(r.first).buffer) : null;
 	const n = Math.min(r.n | 0, I.byteLength >> 2, Cn.byteLength >> 1, Ls.byteLength >> 2, Fs ? Fs.byteLength >> 2 : Infinity);
 	for (let i = 0; i < n; i++) {
 		const t = I.getUint32(4 * i, true);
 		if (t >= N) continue;
-		const l = Ls.getUint32(4 * i, true);
-		if (!E.count[t]) { E.list.push(t); E.first[t] = l; }
-		if (Fs) E.first[t] = Fs.getUint32(4 * i, true);
+		const l = Ls.getUint32(4 * i, true), f = Fs ? Fs.getUint32(4 * i, true) : l;
+		if (!E.count[t]) { E.list.push(t); E.first[t] = f; heatAdd(E, t, f, 1); E.fresh.push(t); }
+		else if (Fs && E.first[t] !== f) { heatAdd(E, t, E.first[t], -1); E.first[t] = f; heatAdd(E, t, f, 1); }
 		E.count[t] = Cn.getUint16(2 * i, true); E.last[t] = l;
+		heatTodo(E, t);
 	}
+	// (the search just ended: its clock stops at its end, the colours once more at that time)
+	if (E.running && !r.running) E.all = true;
 	Object.assign(E, { version: r.version, visited: E.list.length, t: r.t, tAt: now, running: !!r.running });
 	if (Array.isArray(r.trails) && r.trails.length) {
 		E.trails.push(...r.trails);
@@ -1420,55 +1692,85 @@ function heatApply(E, r, now) {
 		E.trailsDirty = true;
 	}
 	E.trailId = Math.max(E.trailId, r.trailId || 0);
-	E.dataDirty = true;
 }
 /** the heat's time scale at tNow (ms since the search's start): the colour runs from the tiles found just now to those
  *  found this long ago (the search's start once it has run HEAT_SPAN_MIN) */
 const heatSpan = (tNow) => Math.max(HEAT_SPAN_MIN, tNow);
-/** the heat's pixels (RGBA per tile, px) and its glow's (gl) at tNow (ms since the search's start), for E's visited tiles:
- *  the colour by the tile's first visit, the alpha by its visits; returns whether anything glows */
-function heatFill(E, tNow, px, gl) {
-	const lut = HEAT_LUT, list = E.list, W = E.W, H = E.H, N = W * H, first = E.first || E.last, span = heatSpan(tNow);
-	const buf = (k) => (E[k] && E[k].length === N ? E[k] : (E[k] = new Float32Array(N)));
-	// (the colour: each visited tile's newness (1 when found just now, 0 when found span ago or earlier) averaged over its
-	// visited neighbours ([1 2 1] each way): smooth bands where the search got at about the same time, not a speckle)
-	const F = buf('hF'), V = buf('hV'), T = buf('hT');
-	F.fill(0); V.fill(0);
-	for (let k = 0; k < list.length; k++) { const i = list[k]; F[i] = 1 - Math.min(1, Math.max(0, tNow - first[i]) / span); V[i] = 1; }
-	const blur = (A) => {
-		for (let y = 0; y < H; y++) for (let x = 0, r = y * W; x < W; x++) T[r + x] = 2 * A[r + x] + (x > 0 ? A[r + x - 1] : 0) + (x < W - 1 ? A[r + x + 1] : 0);
-		for (let y = 0; y < H; y++) for (let x = 0, r = y * W; x < W; x++) A[r + x] = 2 * T[r + x] + (y > 0 ? T[r + x - W] : 0) + (y < H - 1 ? T[r + x + W] : 0);
-	};
-	blur(F); blur(V);
-	// (the glow: the tiles found in the last HEAT_GLOW, blurred likewise: a lone new tile a faint spark, the frontier the
-	// search is pushing now a bright cloud)
-	const G = gl ? buf('gA') : null;
-	if (G) G.fill(0);
-	let glow = false;
-	for (let k = 0; k < list.length; k++) {
-		const i = list[k], o = i * 4, age = Math.max(0, tNow - first[i]);
-		const u = Math.min(1, Math.max(0, 1 - F[i] / V[i])), q = Math.min(255, (u * 255) | 0) * 3;
-		const a = HEAT_A * (0.6 + 0.4 * Math.min(1, Math.log2(1 + E.count[i]) / 4)) * (0.55 + 0.45 * (1 - u));
-		px[o] = lut[q]; px[o + 1] = lut[q + 1]; px[o + 2] = lut[q + 2]; px[o + 3] = Math.round(255 * a);
-		if (G && age < HEAT_GLOW) { const f = 1 - age / HEAT_GLOW; G[i] = f * f; glow = true; }
-	}
-	if (!gl) return false;
-	if (glow) blur(G);
-	for (let i = 0, o = 0; i < N; i++, o += 4) { gl[o] = 150; gl[o + 1] = 240; gl[o + 2] = 255; gl[o + 3] = glow ? Math.round(Math.min(1, G[i] / 16) * HEAT_GLOW_A) : 0; }
-	return glow;
+/** tile i's pixel (RGBA, not premultiplied, into E.px) at tNow (ms since the search's start), span the colour's scale: a
+ *  visited tile by its first visit (the neighbours' average: u = 0 found just now .. 1 found span ago or earlier) with an
+ *  alpha by its visits and newness (at most HEAT_A); the glow of the tiles found in the last HEAT_GLOW added (as a
+ *  "lighter" composite: the sum, premultiplied); an unvisited plain solid block (E.solid) clear, glow and all */
+function heatPixel(E, i, tNow, span) {
+	const px = E.px, o = i * 4, c = E.count[i];
+	let r = 0, g = 0, b = 0, a = 0;
+	if (c) {
+		const u = Math.min(1, Math.max(0, (tNow - E.s1[i] / E.s0[i]) / span)), q = Math.min(255, (u * 255) | 0) * 3;
+		a = HEAT_A * (0.6 + 0.4 * Math.min(1, Math.log2(1 + c) / 4)) * (0.55 + 0.45 * (1 - u));
+		r = HEAT_LUT[q] * a; g = HEAT_LUT[q + 1] * a; b = HEAT_LUT[q + 2] * a;
+	} else if (E.solid && E.solid[i]) { px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0; return; }
+	const ga = E.galpha[i];
+	if (ga > 0) { r += 150 * ga; g += 240 * ga; b += 255 * ga; a += ga; }
+	if (!(a > 0)) { px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0; return; }
+	const A = Math.min(1, a);
+	px[o] = Math.min(255, r / A); px[o + 1] = Math.min(255, g / A); px[o + 2] = Math.min(255, b / A); px[o + 3] = Math.round(255 * A);
 }
-/** the heat's cut (RGBA per tile, m): opaque on the level's solid blocks (fg: the block ids, solid(id)) the search never
- *  visited (a door it went through stays lit), so the heat and its glow, scaled up smoothly, leave the blocks as they
- *  are; returns how many */
-function heatMaskFill(E, fg, solid, m) {
-	const N = E.W * E.H, cnt = E.count;
-	let n = 0;
-	for (let i = 0, o = 3; i < N; i++, o += 4) {
-		const id = fg[i], on = id > 0 && !cnt[i] && solid(id);
-		m[o] = on ? 255 : 0;
-		if (on) n++;
+/** the glow at tNow: each tile found in the last HEAT_GLOW (E.fresh) (1 - age / HEAT_GLOW)^2, blurred [1 2 1] each way
+ *  (/16): its alpha (at most HEAT_GLOW_A / 255) in E.galpha over the 3 x 3 around them; the tiles it lit or left to draw
+ *  again */
+function heatGlow(E, tNow) {
+	const W = E.W, H = E.H, acc = E.gacc, gm = E.gmark, set = [];
+	E.fresh = E.fresh.filter((t) => tNow - E.first[t] < HEAT_GLOW);
+	for (const t of E.fresh) {
+		const f = (1 - Math.max(0, tNow - E.first[t]) / HEAT_GLOW) ** 2, x = t % W, y = (t / W) | 0;
+		for (let dy = -1; dy <= 1; dy++) {
+			const yy = y + dy;
+			if (yy < 0 || yy >= H) continue;
+			for (let dx = -1; dx <= 1; dx++) {
+				const xx = x + dx;
+				if (xx < 0 || xx >= W) continue;
+				const j = yy * W + xx;
+				if (!gm[j]) { gm[j] = 1; set.push(j); }
+				acc[j] += (2 - Math.abs(dx)) * (2 - Math.abs(dy)) * f;
+			}
+		}
 	}
-	return n;
+	for (const j of E.glowSet) if (!gm[j]) { E.galpha[j] = 0; heatTodo(E, j); }
+	for (const j of set) { E.galpha[j] = Math.min(1, acc[j] / 16) * HEAT_GLOW_A / 255; acc[j] = 0; gm[j] = 0; heatTodo(E, j); }
+	E.glowSet = set;
+}
+/** E's image (E.px) brought up to date at tNow (the search's ms; now: the page's clock): every tile after a new search, a
+ *  full answer, the level's blocks or the canvas changed (E.all); else the tiles to draw again (their data or glow
+ *  changed), the glow at most every EXP_GLOW_MS, and while the search runs its colours' ageing: a pass over the rows every
+ *  EXP_AGE_MS, one of EXP_AGE_SLICES slices a frame. Returns the changed rectangle [x0, y0, x1, y1] (inclusive; null:
+ *  none) */
+function heatRefresh(E, tNow, now) {
+	const W = E.W, H = E.H, span = heatSpan(tNow);
+	if (E.all) {
+		E.all = false;
+		heatGlow(E, tNow);
+		for (const j of E.todo) E.mark[j] = 0;
+		E.todo.length = 0;
+		for (let i = 0; i < W * H; i++) heatPixel(E, i, tNow, span);
+		E.ageAt = now; E.ageRow = H; E.glowAt = now;
+		return [0, 0, W - 1, H - 1];
+	}
+	if ((E.fresh.length || E.glowSet.length) && now - E.glowAt >= EXP_GLOW_MS) { heatGlow(E, tNow); E.glowAt = now; }
+	let x0 = W, y0 = H, x1 = -1, y1 = -1;
+	for (const i of E.todo) {
+		E.mark[i] = 0;
+		heatPixel(E, i, tNow, span);
+		const x = i % W, y = (i / W) | 0;
+		if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+	}
+	E.todo.length = 0;
+	if (E.ageRow >= H && E.running && now - E.ageAt >= EXP_AGE_MS) { E.ageRow = 0; E.ageAt = now; }
+	if (E.ageRow < H) {
+		const r0 = E.ageRow, r1 = Math.min(H, r0 + Math.ceil(H / EXP_AGE_SLICES));
+		for (let i = r0 * W; i < r1 * W; i++) if (E.count[i] || E.galpha[i] > 0) heatPixel(E, i, tNow, span);
+		E.ageRow = r1;
+		x0 = 0; x1 = W - 1; y0 = Math.min(y0, r0); y1 = Math.max(y1, r1 - 1);
+	}
+	return x1 >= x0 && y1 >= y0 ? [x0, y0, x1, y1] : null;
 }
 const solidIds = new Map();
 /** a plain solid block (not a door, a half block or a one-way: the ball goes into their tiles) */
@@ -1477,81 +1779,87 @@ function solidBlock(id) {
 	if (s === undefined) { const k = LV.kind.get(id); if (!k) return false; s = k.kind === 'solid'; solidIds.set(id, s); }
 	return s;
 }
-/** the heat's offscreen canvases (a pixel a tile: the heat, its glow, the blocks' cut) drawn again at tNow */
-function heatImage(tNow) {
-	if (!EXP.W) return;
-	if (!EXP.img || EXP.img.c.width !== EXP.W || EXP.img.c.height !== EXP.H) {
-		const mk = () => { const c = document.createElement('canvas'); c.width = EXP.W; c.height = EXP.H; const g = c.getContext('2d'); return { c, g, d: g.createImageData(EXP.W, EXP.H) }; };
-		EXP.img = mk(); EXP.glow = mk(); EXP.mask = mk();
-	}
-	EXP.glowOn = heatFill(EXP, tNow, EXP.img.d.data, EXP.glow.d.data);
-	EXP.masked = EXP.W === LV.W && EXP.H === LV.H ? heatMaskFill(EXP, LV.fg, solidBlock, EXP.mask.d.data) : 0;
-	EXP.img.g.putImageData(EXP.img.d, 0, 0);
-	EXP.glow.g.putImageData(EXP.glow.d, 0, 0);
-	EXP.mask.g.putImageData(EXP.mask.d, 0, 0);
+/** the level's plain solid blocks (E.solid, a byte a tile) for the heat's cut: they stay as they are unless the search
+ *  was in their tile (a door it went through, a block since painted) */
+function heatSolid(E) {
+	const N = E.W * E.H, s = E.solid && E.solid.length === N ? E.solid : (E.solid = new Uint8Array(N)), fg = LV.fg;
+	for (let i = 0; i < N; i++) { const id = fg[i]; s[i] = id > 0 && solidBlock(id) ? 1 : 0; }
+	E.solidV = editVersion;
 }
-/** the heat's layer: the visible part of its image scaled to the map (smoothed), the fresh tiles' glow over it, then the
- *  solid blocks cut out (tile by tile, no smoothing); dim once the level changed since the search */
-function drawHeatLayer() {
-	const c = $('cvHeat'), g = c.getContext('2d');
-	g.clearRect(0, 0, c.width, c.height);
-	if (!EXP.img) return;
-	const { T, ox, oy } = origin();
-	const x0 = clamp(Math.floor(-ox / T) - 1, 0, EXP.W), x1 = clamp(Math.ceil((c.width - ox) / T) + 1, 0, EXP.W);
-	const y0 = clamp(Math.floor(-oy / T) - 1, 0, EXP.H), y1 = clamp(Math.ceil((c.height - oy) / T) + 1, 0, EXP.H);
-	if (x1 <= x0 || y1 <= y0) return;
-	const stale = !!(SOLVE.sig && SOLVE.sig !== currentSig());
-	const blit = (cv) => g.drawImage(cv, x0, y0, x1 - x0, y1 - y0, ox + x0 * T, oy + y0 * T, (x1 - x0) * T, (y1 - y0) * T);
-	g.globalAlpha = stale ? 0.35 : 1;
-	g.imageSmoothingEnabled = true;
-	blit(EXP.img.c);
-	if (EXP.glowOn && !stale) {
-		g.globalCompositeOperation = 'lighter';
-		blit(EXP.glow.c);
+/** the heat's canvas over the map: its CSS transform (the level's origin and tile size, in CSS px), written when the view
+ *  changed */
+function heatPlace() {
+	const c = $('cvHeat'), { T, ox, oy } = origin(), d = dpr();
+	const key = `${ox}|${oy}|${T}|${d}|${EXP.W}x${EXP.H}`;
+	if (key === EXP.placed) return;
+	EXP.placed = key;
+	c.style.width = `${EXP.W}px`; c.style.height = `${EXP.H}px`;
+	c.style.transform = `translate(${ox / d}px, ${oy / d}px) scale(${T / d})`;
+}
+/** the points [i0, i1] of a trail (flat [x, y, ...] whole px; br: the indices where a new piece starts) as one polyline on
+ *  g's current path, like tracePath: its parts in the view only (cw x ch, m around it; none given: all), a point at least
+ *  0.75 canvas px from the last one drawn */
+function traceFlat(g, P, br, i0, i1, ox, oy, s, cw, ch, m) {
+	const W = cw === undefined ? Infinity : cw + m, H = ch === undefined ? Infinity : ch + m, lo = cw === undefined ? -Infinity : -m;
+	let lx = NaN, ly = NaN, open = false, b = 0;
+	for (let i = i0; i <= i1; i++) {
+		const x = ox + P[2 * i] * s, y = oy + P[2 * i + 1] * s;
+		while (b < br.length && br[b] < i) b++;
+		const cut = i > i0 && br[b] === i;
+		if (!(x >= lo && x <= W && y >= lo && y <= H)) {
+			if (open && !cut) g.lineTo(x, y);
+			open = false; lx = x; ly = y;
+			continue;
+		}
+		if (!open || cut) {
+			if (!cut && i > i0) { g.moveTo(lx, ly); g.lineTo(x, y); } else g.moveTo(x, y);
+			open = true; lx = x; ly = y;
+			continue;
+		}
+		if (i !== i1 && Math.abs(x - lx) + Math.abs(y - ly) < 0.75) continue;
+		g.lineTo(x, y); lx = x; ly = y;
 	}
-	if (EXP.masked) {
-		g.globalAlpha = 1;
-		g.imageSmoothingEnabled = false;
-		g.globalCompositeOperation = 'destination-out';
-		blit(EXP.mask.c);
-	}
-	g.globalCompositeOperation = 'source-over';
-	g.globalAlpha = 1;
 }
 /** the trails on g (ox, oy: the level's origin, s: canvas px per level px, d: device px per CSS px, tNow: ms since the
- *  search's start): each attempt a thin line in its search's colour (a jump of a portal or a respawn not joined: br),
- *  alpha by its age (gone after EXP_TRAIL_FADE), the newest with a glow, a dot at its end; the oldest first. Returns how
- *  many it drew. */
-function drawTrails(g, trails, ox, oy, s, d, tNow) {
+ *  search's start; cw, ch: the canvas's size, only what is in it drawn): each attempt a thin line in its search's colour
+ *  (a jump of a portal or a respawn not joined: br), alpha by its age (gone after EXP_TRAIL_FADE), the newest with a glow,
+ *  a dot at its end; the oldest first. The pieces of one colour and alpha (in 16 steps) are one stroke (a stroke each,
+ *  up to 240 a redraw, before). Returns how many it drew. */
+function drawTrails(g, trails, ox, oy, s, d, tNow, cw, ch) {
 	let shown = 0;
 	// (at most EXP_TRAILS_K a search: its newest; the CPU search alone sends a bundle of nearly the same attempts)
 	const per = new Map(), skip = new Set();
 	for (let k = trails.length - 1; k >= 0; k--) { const n = (per.get(trails[k].k) || 0) + 1; per.set(trails[k].k, n); if (n > EXP_TRAILS_K) skip.add(k); }
-	g.save();
-	g.lineJoin = 'round'; g.lineCap = 'round';
+	// (the passes in their order: the glows under the lines, the faint tails, the bright tips, the dots)
+	const groups = new Map(), aq = (a) => Math.max(1, Math.round(a * 16)) / 16;
+	const add = (pass, col, a, w, item) => { const key = `${pass}|${col}|${aq(a)}|${w}`; let q = groups.get(key); if (!q) groups.set(key, q = { pass, col, a: aq(a), w, items: [] }); q.items.push(item); };
 	for (let k = 0; k < trails.length; k++) {
 		const tr = trails[k], age = Math.max(0, tNow - tr.t), P = tr.pts;
 		if (skip.has(k) || !(age < EXP_TRAIL_FADE) || !P || P.length < 4) continue;
 		const a = (1 - age / EXP_TRAIL_FADE) ** 1.5, col = expColor(tr.k), n = P.length >> 1, br = tr.br || [];
 		// (its first EXP_TAIL of the points faint (every attempt shares its way out of the start), its tip bright)
 		const h = Math.floor((n - 1) * EXP_TAIL);
-		const piece = (i0, i1) => {
-			g.beginPath();
-			for (let i = i0, b = 0; i <= i1; i++) {
-				const x = ox + P[2 * i] * s, y = oy + P[2 * i + 1] * s;
-				while (b < br.length && br[b] < i) b++;
-				if (i === i0 || br[b] === i) g.moveTo(x, y); else g.lineTo(x, y);
-			}
-		};
-		g.strokeStyle = col;
-		piece(0, h);
-		g.globalAlpha = 0.3 * a; g.lineWidth = Math.max(1, 1.1 * d); g.stroke();
-		piece(h, n - 1);
-		if (age < 2000) { g.globalAlpha = 0.25 * a * (1 - age / 2000); g.lineWidth = Math.max(3, 5 * d); g.stroke(); }
-		g.globalAlpha = 0.9 * a; g.lineWidth = Math.max(1, 1.4 * d); g.stroke();
-		g.beginPath(); g.arc(ox + P[2 * n - 2] * s, oy + P[2 * n - 1] * s, Math.max(2, 2.6 * d), 0, Math.PI * 2);
-		g.fillStyle = col; g.globalAlpha = a; g.fill();
+		add(1, col, 0.3 * a, Math.max(1, 1.1 * d), [P, br, 0, h, 4]);
+		if (age < 2000) add(0, col, 0.25 * a * (1 - age / 2000), Math.max(3, 5 * d), [P, br, h, n - 1, 8]);
+		add(2, col, 0.9 * a, Math.max(1, 1.4 * d), [P, br, h, n - 1, 8]);
+		add(3, col, a, Math.max(2, 2.6 * d), [ox + P[2 * n - 2] * s, oy + P[2 * n - 1] * s]);
 		shown++;
+	}
+	g.save();
+	g.lineJoin = 'round'; g.lineCap = 'round';
+	for (const pass of [0, 1, 2, 3]) {
+		for (const q of groups.values()) {
+			if (q.pass !== pass) continue;
+			g.beginPath();
+			g.globalAlpha = q.a;
+			if (pass === 3) {
+				for (const [x, y] of q.items) if (cw === undefined || (x > -q.w && y > -q.w && x < cw + q.w && y < ch + q.w)) { g.moveTo(x + q.w, y); g.arc(x, y, q.w, 0, Math.PI * 2); }
+				g.fillStyle = q.col; g.fill();
+			} else {
+				for (const [P, br, i0, i1, m] of q.items) traceFlat(g, P, br, i0, i1, ox, oy, s, cw, ch, m);
+				g.strokeStyle = q.col; g.lineWidth = q.w; g.stroke();
+			}
+		}
 	}
 	g.restore();
 	return shown;
@@ -1559,7 +1867,7 @@ function drawTrails(g, trails, ox, oy, s, d, tNow) {
 /** "12 s ago", "1:05 ago": the heat's oldest colour */
 const agoText = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? `${s} s ago` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} ago`; };
 /** the legend: the heat's scale (found just now .. at the search's start, or span ago), the tiles explored, the searches
- *  whose attempts are on the map (written when it changes) */
+ *  whose attempts are on the map (its rows written when the searches change, else only its numbers) */
 function expLegend(tNow) {
 	const el = $('exLeg');
 	if (!EXP.shown) { if (!el.hidden) { el.hidden = true; EXP.legendKey = ''; } return; }
@@ -1569,38 +1877,69 @@ function expLegend(tNow) {
 	const key = `${[...by].map(([k, x]) => `${k}:${x.n}`).join()}|${EXP.visited}|${old}`;
 	if (key === EXP.legendKey && !el.hidden) return;
 	EXP.legendKey = key;
-	el.innerHTML = `<div class="et"><span>explored</span><b>${EXP.visited.toLocaleString('en-US')} tile${EXP.visited === 1 ? '' : 's'}</b></div><div class="eg"></div>` +
-		`<div class="ea"><span>found just now</span><span>${old}</span></div>` +
-		[...by].map(([k, x]) => `<div class="er" style="color:${expColor(k)}"><i style="background:${expColor(k)}"></i><span>${esc(x.label)}</span><b>${x.n}</b></div>`).join('');
+	const rows = [...by].map(([k, x]) => `${k}|${x.label}`).join('\n'), tiles = `${EXP.visited.toLocaleString('en-US')} tile${EXP.visited === 1 ? '' : 's'}`;
+	if (rows !== EXP.legRows || !el.firstChild) {
+		EXP.legRows = rows;
+		el.innerHTML = `<div class="et"><span>explored</span><b>${tiles}</b></div><div class="eg"></div>` +
+			`<div class="ea"><span>found just now</span><span>${old}</span></div>` +
+			[...by].map(([k, x]) => `<div class="er" style="color:${expColor(k)}"><i style="background:${expColor(k)}"></i><span>${esc(x.label)}</span><b>${x.n}</b></div>`).join('');
+	} else {
+		// (the same searches: their numbers, the tiles, the scale's end)
+		el.querySelector('.et b').textContent = tiles;
+		el.querySelector('.ea span:last-child').textContent = old;
+		const bs = el.querySelectorAll('.er b');
+		[...by].forEach(([, x], k) => { if (bs[k] && bs[k].textContent !== String(x.n)) bs[k].textContent = String(x.n); });
+	}
 	el.hidden = false;
 }
-/** the exploration view's layers, every frame: the heat's image at most every EXP_HEAT_MS (new data, or its colours'
- *  ageing while the search runs; also on a move of the map: a blit), the trails when they change, fade (every
- *  EXP_TRAIL_MS) or the map moved; nothing for another level's size or with the toggle off */
+/** the exploration view's layers, every frame: the heat brought up to date (heatRefresh: a few tiles; its canvas made
+ *  again only for another search size) and placed over the map when the view changed (a CSS transform); the trails when
+ *  they change, fade (every EXP_TRAIL_MS) or the map moved; nothing for another level's size or with the toggle off */
 function drawExplore(now) {
 	const show = EXP.on && EXP.search > 0 && EXP.W === LV.W && EXP.H === LV.H && (EXP.visited > 0 || EXP.trails.length > 0);
+	const hc = $('cvHeat');
 	if (!show) {
 		if (EXP.shown) {
-			for (const id of ['cvHeat', 'cvTrail']) { const c = $(id); c.getContext('2d').clearRect(0, 0, c.width, c.height); }
+			hc.style.visibility = 'hidden';
+			const c = $('cvTrail');
+			c.getContext('2d').clearRect(0, 0, c.width, c.height);
 			EXP.shown = false; EXP.trailShown = false; expLegend(0);
 		}
 		return;
 	}
-	if (!EXP.shown) { EXP.shown = true; EXP.viewDirty = true; }
+	if (!EXP.shown) { EXP.shown = true; EXP.viewDirty = true; EXP.all = true; EXP.trT = -1; hc.style.visibility = ''; }
 	const tHeat = EXP.running ? EXP.t + (now - EXP.tAt) : EXP.t, tTrail = EXP.t + (now - EXP.tAt);
-	if ((EXP.dataDirty || (EXP.running && now - EXP.imgAt >= 1000)) && now - EXP.imgAt >= EXP_HEAT_MS) { heatImage(tHeat); EXP.imgAt = now; EXP.dataDirty = false; EXP.heatDirty = true; }
-	if (EXP.heatDirty || EXP.viewDirty) { drawHeatLayer(); EXP.heatDirty = false; }
-	if (EXP.viewDirty || EXP.trailsDirty || (EXP.trailShown && now - EXP.trailAt >= EXP_TRAIL_MS)) {
-		const c = $('cvTrail'), g = c.getContext('2d');
+	if (hc.width !== EXP.W || hc.height !== EXP.H || !EXP.img) {
+		hc.width = EXP.W; hc.height = EXP.H;
+		EXP.g = hc.getContext('2d'); EXP.img = EXP.g.createImageData(EXP.W, EXP.H); EXP.px = EXP.img.data;
+		EXP.all = true; EXP.placed = '';
+	}
+	if (EXP.solidV !== editVersion) { heatSolid(EXP); EXP.all = true; }
+	const box = heatRefresh(EXP, tHeat, now);
+	if (box) EXP.g.putImageData(EXP.img, 0, 0, box[0], box[1], box[2] - box[0] + 1, box[3] - box[1] + 1);
+	const stale = !!(SOLVE.sig && SOLVE.sig !== currentSig());
+	if (stale !== EXP.stale) { EXP.stale = stale; hc.style.opacity = stale ? '0.35' : ''; }
+	if (EXP.viewDirty) heatPlace();
+	// (the trails: drawn when they change or fade, at most every EXP_TRAIL_MS, on a canvas TRAIL_MARGIN larger than the map
+	// each way; a move of the map within that margin only moves the canvas (its CSS transform): during Follow they were
+	// drawn again every frame)
+	const c = $('cvTrail'), { T, s, ox, oy } = origin(), d = dpr(), M = trailMargin(), dx = ox - EXP.trOx, dy = oy - EXP.trOy;
+	const moved = EXP.viewDirty && (T !== EXP.trT || Math.abs(dx) > M || Math.abs(dy) > M);
+	if (moved || EXP.trailsDirty || stale !== EXP.trStale || (EXP.trailShown && now - EXP.trailAt >= EXP_TRAIL_MS)) {
+		const g = c.getContext('2d');
 		g.clearRect(0, 0, c.width, c.height);
-		const { s, ox, oy } = origin();
-		const stale = !!(SOLVE.sig && SOLVE.sig !== currentSig());
-		EXP.trailShown = !stale && drawTrails(g, EXP.trails, ox, oy, s, dpr(), tTrail) > 0;
-		EXP.trailAt = now; EXP.trailsDirty = false;
+		EXP.trailShown = !stale && drawTrails(g, EXP.trails, ox + M, oy + M, s, d, tTrail, c.width, c.height) > 0;
+		Object.assign(EXP, { trailAt: now, trailsDirty: false, trOx: ox, trOy: oy, trT: T, trStale: stale });
+		if (EXP.trMove) { c.style.transform = ''; EXP.trMove = ''; }
 		expLegend(tTrail);
+	} else if (EXP.viewDirty) {
+		const mv = dx || dy ? `translate(${dx / d}px, ${dy / d}px)` : '';
+		if (mv !== EXP.trMove) { c.style.transform = mv; EXP.trMove = mv; }
 	}
 	EXP.viewDirty = false;
 }
+/** the trails' canvas's margin each way, canvas px */
+const trailMargin = () => Math.round(TRAIL_MARGIN * dpr());
 /** the heat since the page's version (with the search's state: pollSolve); a finished search's once more, then no more */
 async function pollHeat() {
 	const st = SOLVE.st;
@@ -1627,13 +1966,13 @@ async function pollHeat() {
 // got), Home to its start. Any pan, zoom or drag of the map, a click on it (which then paints nothing), Escape, Fit and F
 // stop it. Drawn on the frontier's layer; the panel under the map shows what it plays, the run time and the speed.
 const FOL = { on: false, speed: [1, 2, 4].includes(+store.get('eeat.editor.followSpeed')) ? +store.get('eeat.editor.followSpeed') : 1, P: null, key: '', kind: '', ticks: 0, runTicks: 0,
-	label: '', tick: 0, at: 0, endAt: 0, x: 0, y: 0, hud: '', seeking: false };
-const FOL_TAU = 160, FOL_HOLD = 900, FOL_SNAP = 48, FOL_END = 300, FOL_SMOOTH = 4;
+	label: '', tick: 0, at: 0, endAt: 0, x: 0, y: 0, hud: '', hudHead: '', hudAt: 0, seeking: false };
+const FOL_TAU = 160, FOL_HOLD = 900, FOL_SNAP = 48, FOL_END = 300, FOL_SMOOTH = 4, FOL_HUD_MS = 100;
 /** what Follow plays (st: GET /api/editor/solve): the route once found, else the nearest attempt; null: nothing yet */
 function followSrc(st) {
 	if (!st) return null;
-	const r = st.result, c = st.closest;
-	if (r && Array.isArray(r.path) && r.path.length > 1) return { kind: 'route', P: r.path, ticks: r.ticks, runTicks: r.runTicks, label: r.strategy || '', key: `r|${r.foundAfter}|${r.ticks}|${r.path.length}` };
+	const r = bestRoute(st), c = st.closest;
+	if (r) return { kind: 'route', P: r.path, ticks: r.ticks, runTicks: r.runTicks, label: r.strategy || '', key: `r|${r.foundAfter}|${r.ticks}|${r.path.length}|${r.runTicks}` };
 	if (c && Array.isArray(c.path) && c.path.length > 1) return { kind: 'closest', P: c.path, ticks: c.ticks, runTicks: c.runTicks, label: c.strategy || '', key: `c|${c.foundAfter}|${c.ticks}|${c.path.length}` };
 	return null;
 }
@@ -1709,15 +2048,16 @@ function followStep(now) {
 	FX.dirty = true;
 	followHud();
 }
-/** Follow's panel: what it plays and from which search, the run time now / in all, the seek bar, the speed */
+/** Follow's panel: what it plays and from which search, the run time now / in all, the seek bar, the speed; the time and the
+ *  bar at most every FOL_HUD_MS (a write a frame laid the panel out again every frame) */
 function followHud(force) {
 	const run = FOL.P ? Math.max(0, Math.floor(FOL.tick) - (FOL.ticks - FOL.runTicks)) : 0;
 	const what = !FOL.P ? 'waiting for the search\'s first attempt…' : `${FOL.kind === 'route' ? 'the route' : 'nearest attempt'}${FOL.label ? ` · ${FOL.label}` : ''}`;
 	const time = FOL.P ? `${fmt(Math.min(run, FOL.runTicks))} <small>/ ${fmt(FOL.runTicks)}</small>` : '';
 	const n = FOL.P ? FOL.P.length - 1 : 0, at = Math.floor(FOL.tick);
-	const key = `${what}|${time}|${FOL.speed}|${n}|${at}`;
-	if (!force && key === FOL.hud) return;
-	FOL.hud = key;
+	const head = `${what}|${FOL.speed}|${n}`, key = `${time}|${at}`, now = performance.now();
+	if (!force && head === FOL.hudHead && (key === FOL.hud || now - FOL.hudAt < FOL_HUD_MS)) return;
+	FOL.hudHead = head; FOL.hud = key; FOL.hudAt = now;
 	$('fWhat').textContent = what; $('fTime').innerHTML = time;
 	const sk = $('fSeek');
 	sk.disabled = !FOL.P;
@@ -1758,11 +2098,20 @@ function drawFollow(g, ox, oy, s, d) {
 	const X = ox + FOL.x * s, Y = oy + FOL.y * s, P = FOL.P, i = Math.min(P.length - 1, Math.floor(FOL.tick));
 	g.save();
 	g.lineCap = 'round'; g.lineJoin = 'round';
-	for (let k = Math.max(1, i - 50); k <= i; k++) {
-		const A = P[k - 1], B = P[k];
-		if (Math.abs(B[0] - A[0]) + Math.abs(B[1] - A[1]) > 40) continue;
-		g.strokeStyle = '#ffd23f'; g.globalAlpha = 0.75 * ((k - (i - 50)) / 51) ** 2; g.lineWidth = Math.max(2, 5 * s * ((k - (i - 50)) / 51));
-		g.beginPath(); g.moveTo(ox + A[0] * s, oy + A[1] * s); g.lineTo(ox + B[0] * s, oy + B[1] * s); g.stroke();
+	// (in 5 strokes, older fainter and thinner: 50 strokes a frame before)
+	for (let q = 0; q < 5; q++) {
+		const k0 = Math.max(1, i - 50 + Math.round(q * 51 / 5)), k1 = q === 4 ? i : Math.min(i, i - 50 + Math.round((q + 1) * 51 / 5)), m = (q + 0.5) / 5;
+		if (k1 < k0) continue;
+		g.strokeStyle = '#ffd23f'; g.globalAlpha = 0.75 * m * m; g.lineWidth = Math.max(2, 5 * s * m);
+		g.beginPath();
+		let open = false;
+		for (let k = k0; k <= k1; k++) {
+			const A = P[k - 1], B = P[k];
+			if (Math.abs(B[0] - A[0]) + Math.abs(B[1] - A[1]) > 40) { open = false; continue; }
+			if (!open) { g.moveTo(ox + A[0] * s, oy + A[1] * s); open = true; }
+			g.lineTo(ox + B[0] * s, oy + B[1] * s);
+		}
+		g.stroke();
 	}
 	g.globalAlpha = 1;
 	const R = Math.max(14 * d, 22 * s), glow = g.createRadialGradient(X, Y, 4 * s, X, Y, R);
@@ -1776,6 +2125,163 @@ function drawFollow(g, ox, oy, s, d) {
 	g.restore();
 }
 
+// ------------------------------------------------------------ the best route: how it improves while the search goes on
+// (the user, 2026-09-29: "also when route found it should still show more updates for how its improving route") Find a
+// route goes on looking for faster routes after its first one, and Find and optimize hands the route to the optimizer:
+// the panel on the map's top right (bestPanel) shows the best time, how many faster routes came since the first, the
+// latest one (-N ticks, which search or the optimizer, how long ago) and a step chart of the best time since the first
+// route (Find a route's routes gold, the optimizer's light blue; a click folds the panel to its title line); each new best
+// is drawn on the map's top layer for IMP_FLASH_MS (drawImpFlash: the best before it a faint dashed ghost, the stretch that
+// changed bright gold); the map's route line and Follow take the newest best (bestRoute). The data: GET /api/editor/solve `improve` (src/editor.js
+// improveNote: each faster route {t, runTicks, strategy, clean}); with Find and optimize GET /api/editor/autotas `t0` and
+// `bests` (the job's base route and each faster best of its optimizer) and the job's best run as a path (GET
+// /api/jobs/:id/path, at most every IMP_JOB_MS). Drawn when it changes (the chart's time axis every BEST_CHART_MS).
+const IMP = { list: [], n: 0, key: '', dirty: false, live: false, chartAt: -1e9, newAt: -1e9, lastRun: Infinity, start: 0,
+	prev: null, cur: null, curKey: '', curRun: Infinity, curStart: 0, flashAt: -1e9, span: null,
+	jobPath: null, jobRun: Infinity, jobSearch: 0, jobAt: 0, jobBusy: false, jobFetchAt: -1e9 };
+const BEST_CHART_MS = 2000, IMP_FLASH_MS = 4000, IMP_JOB_MS = 3000, IMP_NEW_MS = 3000;
+/** does this AutoTASer state belong to this search (the AutoTASer starts Find a route at once) */
+const autoOf = (A, st) => !!(A && A.t0 && st && st.started && Math.abs(A.t0 - st.started) < 10000);
+/** the newest best route of a search st (GET /api/editor/solve): the optimizer's (Find and optimize: the job's best run)
+ *  once it is faster than the search's route, else the search's route; null: none. {path, ticks, runTicks, time, strategy,
+ *  foundAfter} */
+function bestRoute(st) {
+	const r = st && st.result && Array.isArray(st.result.path) && st.result.path.length > 1 ? st.result : null;
+	if (IMP.jobPath && st && IMP.jobSearch === st.started && (!r || IMP.jobRun < r.runTicks)) {
+		return { path: IMP.jobPath, ticks: IMP.jobPath.length - 1, runTicks: IMP.jobRun, time: fmt(IMP.jobRun), strategy: 'the optimizer (Find and optimize)', foundAfter: IMP.jobAt, job: true };
+	}
+	return r;
+}
+/** the stretch of path B that is not path A's (paths of [x, y] per tick, px): from the last point they share from their
+ *  starts to the first they share again counted from their ends (within 0.6 px); B whole when they share neither */
+function changedSpan(A, B) {
+	const n = A.length, m = B.length, near = (p, q) => Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) <= 0.6;
+	let i = 0;
+	while (i < n && i < m && near(A[i], B[i])) i++;
+	let j = 0;
+	while (j < n - i && j < m - i && near(A[n - 1 - j], B[m - 1 - j])) j++;
+	return [Math.max(0, i - 1), Math.min(m - 1, m - j)];
+}
+/** the improvements from the search's and the AutoTASer's states (at every poll): the steps of the best time (each faster
+ *  than the one before, by time), whether it goes on; a new best route (faster than the one shown): its flash (the one
+ *  before it the ghost) */
+function impUpdate(now) {
+	const st = SOLVE.st, A = AUTO.st, mine = autoOf(A, st), L = [];
+	if (st && st.started && Array.isArray(st.improve)) for (const e of st.improve) L.push({ at: st.started + e.t * 1000, runTicks: e.runTicks, what: e.clean ? `${e.strategy} · cleaned` : e.strategy, job: false });
+	if (mine && Array.isArray(A.bests)) for (const e of A.bests) L.push({ at: A.t0 + e.t * 1000, runTicks: e.runTicks, what: `the optimizer${e.what ? `: ${e.what}` : ''}`, job: true });
+	L.sort((a, b) => a.at - b.at);
+	const steps = [];
+	for (const e of L) if (!steps.length || e.runTicks < steps[steps.length - 1].runTicks) steps.push(e);
+	const start = st && st.started ? st.started : 0;
+	if (start !== IMP.start) { IMP.start = start; IMP.lastRun = Infinity; IMP.newAt = -1e9; }
+	IMP.live = !!(st && st.running) || !!(mine && A.running);
+	IMP.list = steps; IMP.n = Math.max(0, steps.length - 1);
+	const best = steps.length ? steps[steps.length - 1].runTicks : Infinity;
+	if (best < IMP.lastRun && IMP.lastRun < Infinity) IMP.newAt = now;
+	IMP.lastRun = best;
+	const key = `${start}|${steps.length}|${best}|${IMP.live}`;
+	if (key !== IMP.key) { IMP.key = key; IMP.dirty = true; }
+	const r = bestRoute(st), rk = r ? `${start}|${r.runTicks}|${r.path.length}` : '';
+	if (rk !== IMP.curKey) {
+		if (r && IMP.cur && IMP.curStart === start && r.runTicks < IMP.curRun) { IMP.prev = IMP.cur; IMP.flashAt = now; IMP.span = changedSpan(IMP.prev, r.path); FX.dirty = true; }
+		else if (!r || IMP.curStart !== start) { IMP.prev = null; IMP.flashAt = -1e9; }
+		Object.assign(IMP, { cur: r ? r.path : null, curRun: r ? r.runTicks : Infinity, curKey: rk, curStart: start });
+	}
+}
+/** while Find and optimize runs: the job's best run as a path once the job has a best faster than the one shown (at most
+ *  every IMP_JOB_MS; GET /api/jobs/:id/path) */
+async function impJob() {
+	const A = AUTO.st, st = SOLVE.st;
+	if (!autoOf(A, st) || !A.job || A.best == null || IMP.jobBusy) return;
+	if (IMP.jobSearch === st.started && !(A.best < IMP.jobRun)) return;
+	const now = performance.now();
+	if (now - IMP.jobFetchAt < IMP_JOB_MS) return;
+	IMP.jobBusy = true; IMP.jobFetchAt = now;
+	try {
+		const t = await api(`/api/jobs/${encodeURIComponent(A.job)}/path`);
+		const X = b64i32(t.x), Y = b64i32(t.y), sc = t.posScale || 16, n = Math.min(X.length, Y.length), P = new Array(n);
+		for (let k = 0; k < n; k++) P[k] = [X[k] / sc + 8, Y[k] / sc + 8];
+		if (t.finished && n > 1 && SOLVE.st && SOLVE.st.started === st.started) {
+			Object.assign(IMP, { jobPath: P, jobRun: t.runTicks, jobSearch: st.started, jobAt: Math.round((Date.now() - st.started) / 100) / 10 });
+			impUpdate(performance.now());
+			mapPathCheck();
+		}
+	} catch (e) { /* the next poll again */ }
+	IMP.jobBusy = false;
+}
+const impFlashOn = (now) => !!IMP.cur && now - IMP.flashAt < IMP_FLASH_MS && !(SOLVE.sig && SOLVE.sig !== currentSig());
+/** a new best route's flash on g (ox, oy: the level's origin, s: canvas px per level px, d: device px per CSS px, now: ms;
+ *  cw, ch: the canvas's size), fading over IMP_FLASH_MS: the best before it a faint dashed ghost, the stretch of the new
+ *  one that changed (changedSpan) bright gold with a glow */
+function drawImpFlash(g, ox, oy, s, d, now, cw, ch) {
+	const f = Math.max(0, 1 - (now - IMP.flashAt) / IMP_FLASH_MS);
+	g.save();
+	g.lineJoin = 'round'; g.lineCap = 'round';
+	if (IMP.prev) {
+		g.setLineDash([5 * d, 5 * d]);
+		g.strokeStyle = `rgba(235,240,255,${(0.55 * f).toFixed(3)})`; g.lineWidth = Math.max(1.5, 2 * d);
+		g.beginPath(); tracePath(g, IMP.prev, ox, oy, s, cw, ch, 6); g.stroke();
+		g.setLineDash([]);
+	}
+	const [a, b] = IMP.span || [0, IMP.cur.length - 1];
+	for (const [w, col] of [[Math.max(6, 9 * d), `rgba(255,210,63,${(0.35 * f).toFixed(3)})`], [Math.max(2, 3 * d), `rgba(255,243,176,${f.toFixed(3)})`]]) {
+		g.strokeStyle = col; g.lineWidth = w;
+		g.beginPath(); tracePath(g, IMP.cur, ox, oy, s, cw, ch, w + 2, a, b); g.stroke();
+	}
+	g.restore();
+}
+/** "12 s ago", "3 min ago" */
+const agoShort = (sec) => (sec < 60 ? `${Math.max(0, Math.round(sec))} s ago` : `${Math.floor(sec / 60)} min ago`);
+/** the best route's panel (a route known, the level as searched): its time, the faster routes since the first, the latest
+ *  one, the step chart */
+function bestPanel(now) {
+	IMP.dirty = false; IMP.chartAt = now;
+	const el = $('bestP'), L = IMP.list;
+	if (!L.length || !!(SOLVE.sig && SOLVE.sig !== currentSig())) { if (!el.hidden) el.hidden = true; return; }
+	const last = L[L.length - 1], first = L[0], ago = agoShort((Date.now() - last.at) / 1000);
+	$('bpTime').textContent = fmt(last.runTicks);
+	$('bpSub').textContent = IMP.n ? `${IMP.n} faster since the first (${fmt(first.runTicks)}, −${(first.runTicks - last.runTicks).toLocaleString('en-US')} ticks)${IMP.live ? ' · still looking' : ''}`
+		: `the first route${IMP.live ? ' · looking for a faster one' : ''}`;
+	$('bpLast').innerHTML = IMP.n ? `latest <b>−${(L[L.length - 2].runTicks - last.runTicks).toLocaleString('en-US')} ticks</b> · ${esc(last.what || 'a search')} · ${ago}` : `${esc(last.what || 'a search')} · ${ago}`;
+	el.classList.toggle('new', now - IMP.newAt < IMP_NEW_MS);
+	if (!el.classList.contains('min')) bestChart(L);
+	el.hidden = false;
+}
+/** the step chart: the best time (up: slower) against the time since the first route (to now while the search or the
+ *  optimizer runs), a step at each improvement (Find a route's gold, the optimizer's light blue), a dot at each, the
+ *  latest larger */
+function bestChart(L) {
+	const c = $('bpChart'), d = dpr(), w = Math.round(212 * d), h = Math.round(42 * d);
+	if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+	const g = c.getContext('2d');
+	g.clearRect(0, 0, w, h);
+	const t0 = L[0].at, tEnd = Math.max(L[L.length - 1].at + 1000, IMP.live ? Date.now() : 0);
+	const hi = L[0].runTicks, lo = L[L.length - 1].runTicks, pad = 4 * d;
+	const X = (t) => pad + (w - 2 * pad) * clamp((t - t0) / Math.max(1, tEnd - t0), 0, 1), Y = (rt) => pad + (h - 2 * pad) * (hi === lo ? 0.5 : (hi - rt) / (hi - lo));
+	g.strokeStyle = 'rgba(255,255,255,.08)'; g.lineWidth = 1;
+	g.beginPath(); g.moveTo(pad, Math.round(Y(hi)) + 0.5); g.lineTo(w - pad, Math.round(Y(hi)) + 0.5); g.moveTo(pad, Math.round(Y(lo)) + 0.5); g.lineTo(w - pad, Math.round(Y(lo)) + 0.5); g.stroke();
+	g.lineWidth = Math.max(1.5, 1.6 * d); g.lineJoin = 'round';
+	for (let k = 0; k < L.length; k++) {
+		const e = L[k], x0 = X(e.at), x1 = k + 1 < L.length ? X(L[k + 1].at) : X(tEnd), y = Y(e.runTicks);
+		g.strokeStyle = e.job ? '#6ec8ff' : '#ffd23f';
+		g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); if (k + 1 < L.length) g.lineTo(x1, Y(L[k + 1].runTicks)); g.stroke();
+	}
+	for (let k = 0; k < L.length; k++) {
+		const e = L[k];
+		g.fillStyle = e.job ? '#6ec8ff' : '#ffd23f';
+		g.beginPath(); g.arc(X(e.at), Y(e.runTicks), (k === L.length - 1 ? 3 : 1.8) * d, 0, Math.PI * 2); g.fill();
+	}
+}
+/** the panel while it changes by itself: a search or the optimizer runs, or a new best's highlight fades */
+const impTicking = (now) => IMP.list.length > 0 && (IMP.live || now - IMP.newAt < IMP_NEW_MS + BEST_CHART_MS);
+/** the map again when what it draws of the search changed: the route or nearest attempt shown, the level's staleness (a
+ *  poll that brings nothing new draws nothing) */
+function mapPathCheck() {
+	const st = SOLVE.st, r = routeShown();
+	const key = `${r ? `${r === (st && st.closest) ? 'c' : 'r'}|${r.ticks}|${r.path.length}|${r.runTicks}|${r.foundAfter}|${r.path[r.path.length - 1]}` : ''}|${!!(SOLVE.sig && SOLVE.sig !== currentSig())}`;
+	if (key !== VW.pathKey) { VW.pathKey = key; VW.dirty = true; }
+}
+
 // ------------------------------------------------------------ tools and input
 const BR = { id: 9, args: [] };            // the brush: block id + its arguments
 const lastArgs = {};                       // per block id: the arguments used last
@@ -1787,10 +2293,10 @@ function selectBlock(id, args) {
 	for (const b of document.querySelectorAll('.pb')) b.classList.toggle('sel', +b.dataset.id === id);
 	renderInspector();
 	toolInfo();
-	VW.brushImg.clear(); VW.dirty = true;
+	VW.brushImg.clear(); FX.dirty = true;
 	clearTimeout(saveT); saveT = setTimeout(saveNow, 350);
 }
-function setArgs(a) { BR.args = a; lastArgs[BR.id] = a.slice(); renderInspector(); drawPaletteIcon(BR.id); VW.brushImg.clear(); VW.dirty = true; clearTimeout(saveT); saveT = setTimeout(saveNow, 350); }
+function setArgs(a) { BR.args = a; lastArgs[BR.id] = a.slice(); renderInspector(); drawPaletteIcon(BR.id); VW.brushImg.clear(); FX.dirty = true; clearTimeout(saveT); saveT = setTimeout(saveNow, 350); }
 function rotateBrush(dir) {
 	const s = specOf(BR.id);
 	if (!s) return;
@@ -1802,7 +2308,7 @@ function setTool(t) {
 	VW.tool = t;
 	for (const b of document.querySelectorAll('[data-tool]')) b.classList.toggle('on', b.dataset.tool === t);
 	updateStageCursor();
-	VW.dirty = true;
+	FX.dirty = true;
 	if (t === 'guide') { $('gHint').hidden = false; $('gHint').textContent = 'Drag where you think the ball should go · Shift+drag adds a stroke · the search takes it as a hint, not a rail'; }
 	else gfxUi();
 	toolInfo();
@@ -1876,8 +2382,9 @@ cv.addEventListener('pointerdown', (e) => {
 		GUIDE.drawing = [[Math.round(c.wx * 10) / 10, Math.round(c.wy * 10) / 10]];
 		if (!e.shiftKey) GUIDE.strokes = [];
 		GUIDE.strokes.push(GUIDE.drawing);
+		VW.dirty = true;
 	}
-	VW.dirty = true;
+	FX.dirty = true;
 });
 cv.addEventListener('pointermove', (e) => {
 	const c = cellAt(e);
@@ -1897,18 +2404,20 @@ cv.addEventListener('pointermove', (e) => {
 		if (Math.hypot(c.wx - q[0], c.wy - q[1]) * s >= 4 * dpr()) GUIDE.drawing.push([Math.round(c.wx * 10) / 10, Math.round(c.wy * 10) / 10]);
 	}
 	if (moved) statusAt(c.x, c.y);
-	VW.dirty = true;
+	// (the cursor is on the frontier's layer: a move of the mouse draws that layer, not the map; a guide stroke is on the map)
+	if (GUIDE.drawing) VW.dirty = true;
+	if (moved || VW.rect) FX.dirty = true;
 });
 function pointerUp(e) {
 	if (VW.pan) { VW.pan = null; updateStageCursor(); return; }
 	if (VW.stroke) { VW.stroke = null; end(); }
 	if (VW.rect) { const r = VW.rect; VW.rect = null; begin(); fillRect(r); end(); }
 	if (GUIDE.drawing) { GUIDE.drawing = null; guideChanged(); }
-	VW.dirty = true;
+	FX.dirty = true;
 }
 cv.addEventListener('pointerup', pointerUp);
 cv.addEventListener('pointercancel', pointerUp);
-cv.addEventListener('pointerleave', () => { if (!VW.stroke && !VW.rect && !VW.pan) { VW.hover = null; VW.dirty = true; } });
+cv.addEventListener('pointerleave', () => { if (!VW.stroke && !VW.rect && !VW.pan) { VW.hover = null; FX.dirty = true; } });
 cv.addEventListener('wheel', (e) => {
 	e.preventDefault();
 	if (FOL.on) followSet(false);
@@ -1933,7 +2442,7 @@ document.addEventListener('keydown', (e) => {
 	if ((e.ctrlKey || e.metaKey) && (k === 'y' || k === 'Y')) { e.preventDefault(); redo(); return; }
 	if (e.ctrlKey || e.metaKey) return;
 	if (k === ' ') { e.preventDefault(); if (!VW.space) { VW.space = true; updateStageCursor(); } return; }
-	if (k === 'Escape') { if (FOL.on) followSet(false); VW.rect = null; if (VW.stroke) { VW.stroke = null; end(); } VW.dirty = true; return; }
+	if (k === 'Escape') { if (FOL.on) followSet(false); VW.rect = null; if (VW.stroke) { VW.stroke = null; end(); } FX.dirty = true; return; }
 	if (FOL.on && (k === 'End' || k === 'Home')) { e.preventDefault(); if (k === 'End') followToEnd(); else followSeek(0); return; }   // (Follow: to the frontier, to the start)
 	const tools = { b: 'paint', p: 'paint', e: 'erase', r: 'rect', i: 'pick', g: 'guide' };
 	if (tools[k.toLowerCase()]) { setTool(tools[k.toLowerCase()]); return; }
@@ -2022,6 +2531,9 @@ $('cExplore').onchange = () => { EXP.on = $('cExplore').checked; store.set('eeat
 $('bFollow').onclick = () => followSet(!FOL.on);
 $('fOff').onclick = () => followSet(false);
 $('fEnd').onclick = () => followToEnd();
+// (the best route's panel: a click folds it to its title line and back, remembered)
+$('bestP').classList.toggle('min', store.get('eeat.editor.bestMin') === '1');
+$('bestP').onclick = () => { const m = !$('bestP').classList.contains('min'); $('bestP').classList.toggle('min', m); store.set('eeat.editor.bestMin', m ? '1' : '0'); IMP.dirty = true; };
 {
 	// (the seek bar: the smiley waits where it is dragged, plays on from there when let go)
 	const sk = $('fSeek');
@@ -2312,7 +2824,8 @@ function renderSolve() {
 	const st = SOLVE.st, el = $('solveSt');
 	$('bStop').hidden = !(st && st.running) && !(AUTO.st && AUTO.st.running);
 	renderChecks();
-	if (!st || st.stage === 'idle') { el.innerHTML = ''; VW.dirty = true; return; }
+	impUpdate(performance.now());
+	if (!st || st.stage === 'idle') { el.innerHTML = ''; mapPathCheck(); return; }
 	const stale = SOLVE.sig && SOLVE.sig !== currentSig();
 	let h = '';
 	if (st.running) {
@@ -2348,7 +2861,7 @@ function renderSolve() {
 	const r = st.result;
 	if (r) {
 		h += `<div class="result${stale ? ' stale' : ''}"><div class="rk">Route found</div><div class="rt">${esc(r.time)}</div>
-			<div class="rm">${r.ticks.toLocaleString('en-US')} ticks · found ${r.strategy && st.strategies && st.strategies.length > 1 ? `${esc(r.strategy)} ` : ''}in ${r.foundAfter} s · ${esc(r.verified)}${r.chance < 1 ? ` · works in ${(r.chance * 100).toFixed(0)}% of EEO plays (random portals)` : ''}${st.running ? ' · still looking for a faster one…' : ''}</div>
+			<div class="rm">${r.ticks.toLocaleString('en-US')} ticks · found ${r.strategy && st.strategies && st.strategies.length > 1 ? `${esc(r.strategy)} ` : ''}in ${r.foundAfter} s${IMP.n ? ` · ${IMP.n} faster since the first` : ''} · ${esc(r.verified)}${r.chance < 1 ? ` · works in ${(r.chance * 100).toFixed(0)}% of EEO plays (random portals)` : ''}${st.running ? ' · still looking for a faster one…' : ''}</div>
 			${stale ? '<div class="rm" style="margin-top:6px">The level changed since this search: the route and <b>.eelvl</b> below are for the level as it was then.</div>' : ''}
 			<div class="row"><button class="watch" id="rWatch" title="Open it in the run viewer (a new run in your list)">&#9654; Watch</button>
 				<button class="go" id="rOpt" title="Make it a run and start the optimizer on it (GPU if available)">Optimize this route</button>
@@ -2386,7 +2899,7 @@ function renderSolve() {
 		const j = SOLVE.jobs[routeKey(st)];
 		if (j && j.started) { $('rOpt').textContent = 'Open the run →'; $('rOpt').className = 'primary'; }
 	}
-	VW.dirty = true;
+	mapPathCheck();
 }
 /** the key of the run made from a search's route in SOLVE.jobs: per route, as the search keeps finding faster ones */
 function routeKey(st) { return `${st.started}:${st.result.runTicks}:${st.result.ticks}`; }
@@ -2448,6 +2961,8 @@ async function autotas() {
 async function pollAuto() {
 	clearTimeout(AUTO.poll);
 	try { AUTO.st = await api('/api/editor/autotas'); } catch (e) { /* keep the last */ }
+	// (the best route's panel: the optimizer's gains too; its best run as a path for the map and Follow)
+	impUpdate(performance.now()); impJob(); mapPathCheck();
 	const s = AUTO.st;
 	if (s && s.state && s.state !== 'none') {
 		const what = s.state === 'finding' ? 'finding a route' : s.state === 'optimizing' ? (s.handoff ? 'optimizing (the GPU is the optimizer\'s now)' : 'optimizing next to Find a route') : 'done: the run is paused with its best';

@@ -2185,6 +2185,8 @@ function start(b, gpu, test) {
 		// campaign level, effect blocks that do nothing)
 		file: ins.tag, levelCheck: ins.lc ? LC.brief(ins.lc) : null,
 		layer: 0, tick: 0, states: 0, ticksPerSec: 0, result: null, closest: null, message: '', log: [], workers: cpu ? workers : 0,
+		// (the best route's improvements: the page's "best route" panel and its step chart, improveNote)
+		improve: [],
 		cleanMode: cleanModeOf(b.clean),
 		physics: null, cpuOnly: noGpu ? cpuOnlyText(noGpu, workers, guide) : '',
 		strategies: which.map((k) => ({ key: k, label: k === 'goexplore' && one ? ONE_LABEL : STRATEGIES[k].label, cpu: !!STRATEGIES[k].cpu, rolls: !!STRATEGIES[k].rolls, ...(STRATEGIES[k].precision ? { precision: true } : {}),
@@ -3527,6 +3529,7 @@ function found(inputs, n, more) {
 		setResult(cur.level, ev, { foundAfter: Math.round((Date.now() - S.started) / 100) / 10,
 			cpuAfter: Math.round(S.strategies.reduce((a, q) => a + (q.cpu && q.cpuS > 0 ? q.cpuS : 0), 0) * 10) / 10, strategy: label });
 		if (how) S.result.spliced = how.slice(3);
+		improveNote(S.result, label, false);
 	}
 	if (rawBetter || (better && how)) cleanLater(ev, label);
 	S.stage = 'found';
@@ -3544,6 +3547,18 @@ function found(inputs, n, more) {
 	const ke = S.strategies.findIndex((q) => q.key === 'escape');
 	if (ke >= 0 && alive(kids[ke]) && !kids[ke].stopWhy) halt(kids[ke], 'finish');
 	save();
+}
+/** the best route's improvements (S.improve: the page's "best route" panel and its step chart; the user, 2026-09-29: "also
+ *  when route found it should still show more updates for how its improving route"): each faster best as it comes {t (s
+ *  since the search's start), runTicks, ticks, strategy, clean (the route cleanup's)}, the first route always; at most
+ *  IMPROVE_KEEP (the first and the newest) */
+const IMPROVE_KEEP = 64;
+function improveNote(r, strategy, clean) {
+	if (!S || !r) return;
+	const L = S.improve || (S.improve = []), last = L[L.length - 1];
+	if (last && !(r.runTicks < last.runTicks)) return;
+	L.push(Object.assign({ t: Math.round((Date.now() - S.started) / 100) / 10, runTicks: r.runTicks, ticks: r.ticks, strategy: String(strategy || '') }, clean ? { clean: true } : {}));
+	if (L.length > IMPROVE_KEEP) L.splice(1, L.length - IMPROVE_KEEP);
 }
 /** S.result from a replayed route (ev: C.evaluate) and route.eetas; o: {foundAfter, cpuAfter, strategy, cleaned} */
 function setResult(level, ev, o) {
@@ -3629,6 +3644,7 @@ function cleanDone(job, r) {
 		sec: r.sec };
 	setResult(job.level, ev, { foundAfter: mine ? R0.foundAfter : job.foundAfter, cpuAfter: mine ? R0.cpuAfter : job.cpuAfter, strategy: job.label, cleaned });
 	S.result.clean = 'done';
+	improveNote(S.result, job.label, true);
 	note(`the route cleaned: ${C.fmt(job.runTicks)} -> ${C.fmt(ev.runTicks)}, jump presses ${r.before.pressesPerS} -> ${r.after.pressesPerS} a second (${r.sec.toFixed(1)} s)`);
 	tellCpu(boundTicks(), S.result.inputs, -1);
 	save();
@@ -4006,7 +4022,7 @@ function shutdown() {
 }
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown, heatState,
-	EXP_REPLAY_MS, EXP_TIP,
+	EXP_REPLAY_MS, EXP_TIP, IMPROVE_KEEP,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
 	escRotOf, escFromOf, escTurnOf, rollsOf, rollsNext, rollsFresh, STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S,
 	ESC_CONFIGS, ESC_MIX, ESC_ROTATION, ESC_FROM, ESC_FIRST_S, ESC_TURN_S, ESC_WAIT_S, ESC_ROLLS };
