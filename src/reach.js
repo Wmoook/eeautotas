@@ -354,7 +354,7 @@ function reachField(level, opts) {
 	// ball is in protP, where the protected walk is its way; an unprotected one reaches the trophy or a protection tile by
 	// its own. (Physics mode: protP's killing tiles open in the one field, as above.) The fallback's costs are ways "through
 	// a death" to the lookups' blend (scoreAt, native reachScore: the deaths flag), behind every real way.
-	let walkOut = walk, protFallback = 0;
+	let walkOut = walk, protFallback = 0, protOnly = null;
 	if (mode === 'walk' && protP !== null) {
 		const killT = (i) => cls[i] !== WALL && fg[i] >= 0 && fg[i] < nFlags && (gF[fg[i]] & 4) !== 0;
 		const passU = (i) => passable(i) && !killT(i);
@@ -364,13 +364,17 @@ function reachField(level, opts) {
 		for (const p of protOn) { const v = walk[p]; if (v !== CUT && !(seedU.get(p) <= v)) seedU.set(p, v); }
 		const walkU = walkField(W, H, cls, passU, trophy, seedU, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP);
 		walkOut = new Uint16Array(N).fill(CUT);
+		protOnly = new Uint8Array(N);
 		for (let i = 0; i < N; i++) {
 			if (walkU[i] !== CUT) walkOut[i] = walkU[i];
-			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
+			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; protOnly[i] = 1; }
 		}
+		if (!protFallback) protOnly = null;
 	}
 	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
-		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
+		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback },
+		// (walk mode: 1 where the value is the protected walk's fallback, a protected ball's way only; goexplore.js --dord=2)
+		protOnly };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
 
 	// ---- per tile: floors, jumps, landing jumps, ceilings, segments

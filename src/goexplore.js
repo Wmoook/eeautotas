@@ -1978,6 +1978,12 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const OF = DI !== null && a.dord !== 0 ? (ofield || (a.dord >= 2 ? RF.deathChainField(L, { deathTiles: DEATH_TILES }) : RF.reachField(L, { deaths: false }))) : null;
 	const DCH = OF !== null && a.dord >= 2;
 	const DTW = DCH && OF.toDeath ? OF.toDeath : null;   // (the walk to the nearest killer, fifths: reach.js deathWalk)
+	// (--dord=2, walk mode with protection: the tiles whose value is the protected walk's fallback (PROT_COST + the protected
+	// walk, where the unprotected walk has no way): no way of an UNPROTECTED ball. Ordered by it, Infinity Pain's search sat
+	// at 1,646.2 = PROT_COST + 7.8 tiles of the protected walk through the spikes by the start (god-int and main c30f499's
+	// nearest; main 90f328e's death-edge order had reached 21.4))
+	const POF = DCH && OF.protOnly ? OF.protOnly : null;
+	const VRP = POF !== null ? new Float64Array(N).fill(NaN) : null;
 	// (--dord=2: V per respawn tile, looked up once: a respawn is a ball standing there; NaN = not looked up yet)
 	const VR = DCH ? new Float64Array(N).fill(NaN) : null;
 	/** the order's reach cost (tiles) of a state (the live sim) or at a place (x, y, vy): the death-free field's where it
@@ -1989,6 +1995,8 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	/** the reach cost (tiles) at the live state's respawn target, standing (-1: cut off; the order's field with --dord) */
 	const respawnCost = () => {
 		const rt = respawnTileOf(DI, sim, W);
+		// (a protected-only value at the respawn tile: the field's, with its death edges, for an unprotected ball)
+		if (POF !== null && POF[rt] && !sim.is_invulnerable) { let v = VRP[rt]; if (v !== v) v = VRP[rt] = RF.costAt(field, (rt % W) * 16, ((rt / W) | 0) * 16, 0); return v; }
 		if (VR !== null) { let v = VR[rt]; if (v !== v) v = VR[rt] = ordAt((rt % W) * 16, ((rt / W) | 0) * 16, 0); return v; }
 		return ordAt((rt % W) * 16, ((rt / W) | 0) * 16, 0);
 	};
@@ -2355,7 +2363,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		viaDeath = DI !== null && rc >= RF.DEATH_TILES;
 		// (--dord: the order by the death-free field where it has a value; the -1 prune stays the field's)
 		let nf = -1;
-		if (OF !== null && rc >= 0) { nf = RF.costAt(OF, sim); viaDeath = nf < 0; }
+		if (OF !== null && rc >= 0) { nf = RF.costAt(OF, sim); if (nf >= 0 && POF !== null && !sim.is_invulnerable && POF[centreTile()]) nf = -1; viaDeath = nf < 0; }
 		// (--timed: a doomed state is ordered as the death it is: DEATH_TILES + its respawn target's cost with deaths as moves,
 		// else behind every state that can still clear its killer; never ruled out: only the reach field's -1 prunes)
 		if (rc >= 0 && TM !== null && doomedNow()) {
