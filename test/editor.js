@@ -1515,11 +1515,13 @@ async function cpuSection() {
 		gb.maxLaunchMs === 12.5 && gb.maxKernelMs === 7.25 && !ogb.events.some((e) => e.ev === 'warning' && /again in/.test(e.text)),
 		`${JSON.stringify(gb)}; launches ${bl.map((x) => `${x.t - tOom}:${x.cells}/${x.cap}`).join(' ')}; ${ogb.events.filter((e) => e.ev === 'warning').map((e) => e.text).join(' | ').slice(0, 300)}`);
 	// the editor keeps the CPU search's sources (no GPU: no relay, but they are shown)
+	// (entered: the key is 9 tiles from the spawn, ~55 ticks of running from rest at the least; the search before the
+	// DEFAULTS flip entered the key's room after 100+ ticks, Find a route's defaults (editor.js GX_DEFAULTS) after 94)
 	ED.start({ eelvlB64: kdBuf.toString('base64'), seconds: 3, workers: 1 }, { available: false, why: 'test: no GPU' });
 	for (const t0 = Date.now(); ED.state().running && Date.now() - t0 < 20000;) await new Promise((r) => setTimeout(r, 100));
 	const ss = ED.state();
 	check('the editor keeps the CPU search\'s sources (per room: where it was entered, its nearest attempt, the relay runs from it)', ss.stage === 'found' && Array.isArray(ss.sources) &&
-		ss.sources.some((s) => s.desc === 'key:red' && s.gain > 0 && s.entered >= 100 && s.best && s.runs === 0 && s.from === 'random runs (CPU)'),
+		ss.sources.some((s) => s.desc === 'key:red' && s.gain > 0 && s.entered >= 50 && s.best && s.runs === 0 && s.from === 'random runs (CPU)'),
 		JSON.stringify(ss.sources));
 
 	// the editor without an NVIDIA GPU: the CPU search alone, with a note

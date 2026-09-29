@@ -400,6 +400,16 @@ function check(buf, source) {
 // random runs, appended after the editor's own (a later option wins), e.g. EEAT_GX="--dom=0 --dord=0 --useful=0";
 // only --name=value words are taken; unset: none
 const gxExtra = () => (process.env.EEAT_GX || '').split(/\s+/).filter((s) => /^--[A-Za-z]+=\S+$/.test(s));
+// Find a route's goexplore.js defaults (DEFAULTS FLIPPED 2026-09-29): EVENT OPTIONS and THE FRONTIER FIELD together
+// (goexplore.js --opts=1 --frontier=1 --fBrake=1 --fPhys=1; goexplore.js itself keeps both off: its CLI and tests stay
+// "off = exactly as before"), passed to the CPU search (the one search), the stall escape and the GPU random runs (which
+// carry them but do not use them: gpuMain reads neither), before EEAT_GX, so EEAT_GX="--opts=0" / "--frontier=0" turns
+// one off; EEAT_GXDEF=0: none (the editor before the flip). The product A/B (DEFAULTS-AB, main 1ab745c, pf_atrun GPU on,
+// W5, capS 300, 24 campaign levels, 57 runs an arm; src/out/defaults/): routed base 35 / opts alone 34 / both 39 of 57,
+// both vs base same level + seed gains 5 (Snake Snake SNAAKE s2 never routed before, Snow Is Falling s1, Escape the Lava
+// s1, MYSTERY MANSION s2, The Flighty Slighty s2) / losses 1 (Escape the Lava s4); opts alone 2 / 3: not flipped alone
+const GX_DEFAULTS = ['--opts=1', '--frontier=1', '--fBrake=1', '--fPhys=1'];
+const gxDefaults = () => (process.env.EEAT_GXDEF === '0' ? [] : GX_DEFAULTS);
 const STRATEGIES = {
 	explore: { label: 'every move', args: (f, o, q) => { const c = passCells(q.pass); return ['explore', f.bin, '-', '--finish=1', '--discrete=1', `--depth=${q.depth || 100000}`, ...(o.deaths ? ['--deaths=1'] : []),
 		`--seconds=${q.seconds}`, '--coarse=0', `--cqx=${c.cqx}`, `--cqv=${c.cqv}`, `--qy=${c.qy}`, `--qvy=${c.qvy}`, `--reach=${f.reach}`, ...steerArg(f, q.V), ...(o.prune ? ['--prune=1'] : []),
@@ -432,7 +442,7 @@ const STRATEGIES = {
 		// scheduler gives the GPU to another strategy: its pause file; the trophy arm's bursts order by the steer field when
 		// the GPU tools read it, as the relay did)
 		...(o.bursts ? ['--bursts=1', `--tool=${q.tool}`, ...G.cacheArgs(), `--pausefile=${q.pauseFile}`, `--work=${q.work}`, ...(f.steer && !o.noWayUp ? [`--burstSteer=${f.steer}`] : []),
-			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : []), ...gxExtra()] },
+			...(o.burstBig ? burstSizeArgs(toolInfo && toolInfo.memMB) : [])] : []), ...gxDefaults(), ...gxExtra()] },
 	// the stall escape (see ESC_WAIT_S): a second one search (goexplore.js, its own archive and GPU bursts) from a stalled
 	// search's nearest attempt (--prefix), on a share of the CPU search's workers
 	escape: { label: 'escape: a fresh one search from the nearest attempt', cpu: true, args: (f, o, q) => [...STRATEGIES.goexplore.args(f, Object.assign({}, o, { workers: q.workers, seed: q.seed }), q),
@@ -440,7 +450,7 @@ const STRATEGIES = {
 	// path skips (the skip finder's lane: src/skipfind.js --lane=1; see LANE_FEED_MS)
 	skips: { label: 'path skips', cpu: true, lane: true, args: (f, o, q) => ['--lane=1', `--level=${f.eelvl}`, `--workers=${o.laneWorkers}`, `--seconds=${q.seconds}`, ...(o.laneArgs || [])] },
 	gorolls: { label: 'random runs (GPU)', rolls: true, args: (f, o, q) => [f.eelvl, '--gpu=1', `--tool=${o.tool}`, `--bin=${f.bin}`, `--reach=${f.reach}`, `--seconds=${q.seconds}`,
-		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...gxExtra()] },
+		`--seed=${o.seed}`, `--depth=${q.depth || o.cpuDepth}`, `--batch=${ROLL_BATCH}`, '--stdin=1', ...(o.deaths ? [] : ['--deaths=0']), ...(o.useful === false ? ['--useful=0'] : []), ...gxDefaults(), ...gxExtra()] },
 	// the precision stage (src/precision.js, see PREC_WAIT_S): exact landings from the nearest attempts once the search stalls
 	precision: { label: 'exact landings', cpu: true, precision: true, args: (f, o, q) => [f.eelvl, `--attempts=${q.attemptsFile}`, `--seconds=${q.seconds}`, `--workers=${q.workers}`,
 		`--after=${PREC_AFTER_S}`, '--stdin=1', ...(q.depth ? [`--depth=${q.depth}`] : [])] },
@@ -3661,4 +3671,4 @@ function shutdown() {
 
 module.exports = { normalize, records, eelvlOf, levelOf, blockInfo, inspect, check, reachFrom, start, state, stop, found, solveFile, makeJob, shutdown,
 	safeName, passCells, passGrain, nextPass, passSeconds, cpuWorkers, breakCells, burstSizeArgs, breakShareOpen, breakDryAfter, rollsDryAfter, sourcesOf, classRoutes, coinsOfDesc, gateEnter, reachInfo, reachBase,
-	STRATEGIES, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
+	STRATEGIES, GX_DEFAULTS, MAX_SIDE, MAX_CELLS, PASS_MIN, PASS_MAX, PASS_START, LANES, NO_WAY_UP_S };
