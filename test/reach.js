@@ -1125,10 +1125,10 @@ function silentPortalRooms() {
 	for (const deaths of [true, false]) {
 		const f = R.reachField(L, { deaths });
 		const c = (x, y) => R.costAt(f, x * 16, y * 16, 0);
-		const cT = c(36, 7), cS = c(10, H - 2), cB = c(6, H - 2), cX = c(20, H - 2), cU = c(27, 3);
-		check(`reach field (${deaths ? 'with' : 'without'} death edges): the sealed T cut off, S and B not near the trophy through teleports EE never makes, the open exit X keeps U's way`,
-			cT < 0 && (cS < 0 || cS > 10) && (cB < 0 || cB > 10) && cX >= 0 && cU >= 0 && (cX <= cU + 1.5),
-			`T ${fmt(cT)}, S ${fmt(cS)}, B ${fmt(cB)}, X ${fmt(cX)}, U ${fmt(cU)}`);
+		const cT = c(36, 7), cS = c(10, H - 2), cB = c(6, H - 2), cX = c(20, H - 2), cU = c(27, 3), cV = c(14, H - 2);
+		check(`reach field (${deaths ? 'with' : 'without'} death edges): the sealed T cut off, S and B not near the trophy through teleports EE never makes (their way is the walk to V: V + 3 or more; the base code: S 5 through T, B 2 through A), the open exit X keeps U's way`,
+			cT < 0 && cV >= 0 && (cS < 0 || cS >= cV + 3) && (cB < 0 || cB >= cV + 3) && cX >= 0 && cU >= 0 && (cX <= cU + 1.5),
+			`T ${fmt(cT)}, S ${fmt(cS)}, B ${fmt(cB)}, V ${fmt(cV)}, X ${fmt(cX)}, U ${fmt(cU)}`);
 	}
 	const pe = BU.portalsOf(L).exits, st = SF.analyze(L, {}).portalExits;
 	const tab = (m) => [A, B, T, S, V, X].map((i) => (m.has(i) ? 1 : 0)).join('');
