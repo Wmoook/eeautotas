@@ -11,7 +11,8 @@
 //   ROOM   the room key (goexplore.js roomOf) changes (coarse cells; none with fine cells: the cap ends it)
 // The cap is scale-free: 4 x luby(j) ticks (at most 256), j a per-worker counter of the options drawn; a run of
 // options lasts 40 x luby(k) ticks (at most 320), k per worker. With the sticky rule (keep 0.85) a 60-tick hold has
-// p = 0.85^60 ~ 6e-5; the Luby caps give 1/64 of the options 64+ ticks when no event ends them first.
+// p = 0.85^60 ~ 6e-5; the Luby caps give 1/16 of the options a cap of 64+ ticks (luby >= 16; measured over 2^20
+// options: 0.0625, the mean cap 16 ticks), held that long when no event and no end of the run comes first.
 const BK = require('./blocks.js');
 
 const T_LAND = 0, T_LIFT = 1, T_WALL = 2, T_APEX = 3, T_FIELD = 4, T_ROOM = 5, T_CAP = 6;
