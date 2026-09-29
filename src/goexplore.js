@@ -1977,6 +1977,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// 1,646 tiles against main's 21.4 by the respawn price). Order only: the -1 prune stays the field's
 	const OF = DI !== null && a.dord !== 0 ? (ofield || (a.dord >= 2 ? RF.deathChainField(L, { deathTiles: DEATH_TILES }) : RF.reachField(L, { deaths: false }))) : null;
 	const DCH = OF !== null && a.dord >= 2;
+	const DTW = DCH && OF.toDeath ? OF.toDeath : null;   // (the walk to the nearest killer, fifths: reach.js deathWalk)
 	// (--dord=2: V per respawn tile, looked up once: a respawn is a ball standing there; NaN = not looked up yet)
 	const VR = DCH ? new Float64Array(N).fill(NaN) : null;
 	/** the order's reach cost (tiles) of a state (the live sim) or at a place (x, y, vy): the death-free field's where it
@@ -2354,7 +2355,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		}
 		if (OF !== null && rc >= 0) {
 			// (--dord=2: the lesser of the state's own way and a death now, its respawn target's value + DEATH_TILES)
-			if (nf >= 0) { ownRc = nf; if (DCH && a.dprice !== 0) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + r < nf) return DEATH_TILES + r; } return nf; }
+			// (a death now costs the walk to the nearest killer too: DTW, reach.js deathWalk; none walkable: no death term)
+			if (nf >= 0) {
+				ownRc = nf;
+				if (DCH && a.dprice !== 0) {
+					const td = DTW === null ? 0 : DTW[centreTile()];
+					if (td !== RF.CUT && DEATH_TILES + td / 5 < nf) { const r = respawnCost(); if (r >= 0 && DEATH_TILES + td / 5 + r < nf) return DEATH_TILES + td / 5 + r; }
+				}
+				return nf;
+			}
 			if (a.dprice !== 0) { const r = respawnCost(); if (r >= 0) return DEATH_TILES + r; }
 			return rc;
 		}

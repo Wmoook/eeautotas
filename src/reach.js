@@ -1095,7 +1095,46 @@ function deathChainField(level, opts) {
 	}
 	let finite = 0;
 	for (const v of V) if (v >= 0) finite++;
-	return Object.assign(f, { chain: { rounds, cps: cps.length, finite, ms: Date.now() - t0, stable } });
+	return Object.assign(f, { toDeath: deathWalk(level, f), chain: { rounds, cps: cps.length, finite, ms: Date.now() - t0, stable } });
+}
+/**
+ * deathWalk(level, f) -> Uint16Array (fifths; CUT = no killer walkable): per tile the plain walk (8-way, a diagonal step
+ * closed only between two walls, as walkField) to the nearest tile the ball can die in: a tile whose block kills an
+ * unprotected ball (the field's class opens them where a protected ball can be: Infinity Pain's protection region holds
+ * 38,342 of its tiles, and there by the class no killer was walkable from 39,950 of 40,000 tiles) or a timed killer's
+ * own tile (curse / zombie / poison with a time, lava: the pickup). The price of reaching a death before its DEATH_TILES (goexplore.js --dord=2's costOf): without
+ * it every state after a good checkpoint was "a death away" wherever it stood, a new plateau. Gravity-blind: an order only.
+ */
+function deathWalk(level, f) {
+	const W = f.W, H = f.H, N = W * H, cls = f.cls, fg = level.fg, lk = level.lookup0, gF = level.gFlags, nF = level.flags.length;
+	const killT = new Uint8Array(N);
+	for (let i = 0; i < N; i++) { const id = fg[i]; if (cls[i] !== WALL && (cls[i] === DEADLY || (id >= 0 && id < nF && (gF[id] & 4) !== 0))) killT[i] = 1; }
+	const d = new Float64Array(N).fill(Infinity), out = new Uint16Array(N).fill(CUT);
+	const heap = [];
+	const hpush = (i, v) => { heap.push([v, i]); let n = heap.length - 1; while (n > 0) { const p = (n - 1) >> 1; if (heap[p][0] <= v) break; [heap[p], heap[n]] = [heap[n], heap[p]]; n = p; } };
+	const hpop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let n = 0; for (;;) { const l = 2 * n + 1, r = l + 1; let m = n; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === n) break; [heap[m], heap[n]] = [heap[n], heap[m]]; n = m; } } return top; };
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		const timedK = ((id === CURSE || id === ZOMBIE || id === POISON) && lk && lk[i] > 0) || id === LAVA;
+		if (killT[i] || (cls[i] !== WALL && timedK)) { d[i] = 0; hpush(i, 0); }
+	}
+	while (heap.length) {
+		const [v, t] = hpop();
+		if (v > d[t]) continue;
+		const x = t % W, y = (t / W) | 0;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			if (!dx && !dy) continue;
+			const x2 = x + dx, y2 = y + dy;
+			if (x2 < 0 || y2 < 0 || x2 >= W || y2 >= H) continue;
+			const j = y2 * W + x2;
+			if (cls[j] === WALL || killT[j]) continue;
+			if (dx && dy && cls[y * W + x2] === WALL && cls[y2 * W + x] === WALL) continue;
+			const c = v + (dx && dy ? 7 : 5);
+			if (c < d[j]) { d[j] = c; hpush(j, c); }
+		}
+	}
+	for (let i = 0; i < N; i++) if (d[i] !== Infinity) out[i] = d[i] > FAR ? FAR : d[i];
+	return out;
 }
 function shareField(f) {
 	const out = Object.assign({}, f);
