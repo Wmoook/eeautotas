@@ -1173,8 +1173,9 @@ function roomOf(L, opts = {}) {
 	// deaths). Raw below the highest threshold, not only below the highest gate (main's irrelevant-counter rule, upTo) nor
 	// the highest door (cw-death-rooms 112d4b0): deathPays keeps a death only as the earliest arrival at its respawn in its
 	// ROOM (rspAt), so deaths merged below a threshold drop every death that climbs toward it (the soundness review's bridge
-	// of death gates at 3 over spikes: main 4 of 8 seeds, 112d4b0 0 of 8; a door at 3 the same). Cold World: 11 words
-	// (0..9, 10+) instead of one a death)
+	// of death gates at 3 over spikes: main 4 of 8 seeds, 112d4b0 0 of 8, this the same search as main; keyed raw only
+	// below the highest gate, a column of death doors at 3 above a gate at 1 routed 2 of 8 vs 8 of 8, both with dying()'s
+	// quick look at the count + 1: cw-death-precheck). Cold World: 11 words (0..9, 10+) instead of one a death)
 	const deathKey = !legacy && process.env.EEAT_DEATHKEY !== '0' && L.hasDeathDoor;
 	let upD = 0;
 	if (deathKey) for (let i = 0; i < L.width * L.height; i++) { const id = L.fg[i]; if ((id === 1011 || id === 1012) && L.lookup0[i] > upD) upD = L.lookup0[i]; }
