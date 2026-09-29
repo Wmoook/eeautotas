@@ -1145,6 +1145,10 @@ const BREAK_GATES = 16;
 // `b.pastPlan === false`: off.
 const PAST_MAX_MS = 180000;
 const pastFileOf = (file) => file.replace(/\.bin$/, '_past.bin');
+// (the CPU search's steer file where it differs from the GPU tools': the coin tour, steer.js buildTour: flags 2, which the
+// native lookup does not read; the GPU tools keep the plain file)
+const cpuFileOf = (file) => file.replace(/\.bin$/, '_cpu.bin');
+const steerCpuOf = (sf) => (sf.tour && sf.tour.n && fs.existsSync(cpuFileOf(sf.file)) ? cpuFileOf(sf.file) : sf.file);
 /** the gold coins of a room's description ('coins=N' where a door reads them; goexplore.js roomOf desc) */
 const goldOfDesc = (desc) => { const m = /(?:^|\s)coins=(\d+)/.exec(String(desc || '')); return m ? +m[1] : 0; };
 /** the plan past its count arrived from the steer worker (hash: its level's); the running search of that level takes it */
@@ -2010,7 +2014,7 @@ function useSteer(sf, noGpu) {
 	// (STEER_GPU_SHARE in all: two copies (every move, the relay), four with the beams')
 	const copies = mb * 4 <= gpuMB * STEER_GPU_SHARE ? 4 : mb * 2 <= gpuMB * STEER_GPU_SHARE ? 2 : 0;
 	const gpuOk = !noGpu && toolInfo && toolInfo.steer === SF.VERSION && copies > 0;
-	cur.files.steerCpu = sf.file;
+	cur.files.steerCpu = steerCpuOf(sf);
 	if (gpuOk) cur.files.steer = sf.file;
 	if (gpuOk && copies === 4) cur.files.steerBeam = sf.file;
 	// (the attempts' distances: the steer field's whenever the CPU search orders by it; a GPU tool without it (its copies
@@ -2024,7 +2028,7 @@ function useSteer(sf, noGpu) {
 	// (the plan past its count, when the cache has it; else it may come later from the build: pastArrived)
 	cur.past = sf.past && fs.existsSync(pastFileOf(sf.file)) ? Object.assign({ file: pastFileOf(sf.file) }, sf.past) : null;
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
-	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
+	note(`the steer field (gates, switches, coins: ${(sf.features || []).join(', ') || 'none'}; ${sf.layers} layer${sf.layers === 1 ? '' : 's'}${sf.dp ? `, the coin DP over ${sf.dp.n} coins` : ''}${sf.tour && sf.tour.n ? `, the coin tour over ${sf.tour.n} coins (T ${sf.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf.ms / 1000).toFixed(1)} s) orders the ` +
 		(gpuOk ? `${copies === 4 ? 'GPU' : 'every move, relay'} and CPU searches${copies === 4 ? '' : ` (not the beams': 4 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of the GPU's memory)`}`
 			: `CPU search${noGpu ? '' : ` (not the GPU's: ${toolInfo && toolInfo.steer === SF.VERSION ? `2 copies are over ${Math.round(gpuMB * STEER_GPU_SHARE)} MB, ${Math.round(STEER_GPU_SHARE * 100 * 10) / 10}% of its memory` : 'its tool is older: rebuild it'})`}`) +
 		'; only the reach field rules states out');
@@ -2044,7 +2048,7 @@ function lateSteer(gen, sf2) {
 		return;
 	}
 	if (sf2.over) note(`the steer field ${sf2.over}`);
-	cur.files.steerCpu = sf2.file;
+	cur.files.steerCpu = steerCpuOf(sf2);
 	// (a CPU search launched from now on reports the steer field's distances from its start)
 	cur.files.steerDist = true;
 	cur.distBySteer = true;
@@ -2282,7 +2286,7 @@ const steerBuilds = new Map();
 function steerInfo(buf, hash) {
 	const base = steerBase(hash), meta = `${base}.json`, file = `${base}.bin`;
 	const cached = C.readJSON(meta, null);
-	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
+	if (cached && cached.v === SF.VERSION && cached.fp === steerFp() && (!cached.useful || fs.existsSync(file)) && (!cached.tour || !cached.tour.n || fs.existsSync(cpuFileOf(file))) && !cached.pastWanted && (!cached.past || fs.existsSync(pastFileOf(file)))) return Promise.resolve(Object.assign(cached, { file }));
 	if (steerBuilds.has(hash)) return steerBuilds.get(hash);
 	const p = new Promise((resolve) => {
 		try { fs.mkdirSync(dir(), { recursive: true }); } catch (e) { /* read-only data folder */ }
@@ -2294,7 +2298,9 @@ function steerInfo(buf, hash) {
 			let lfp = null, bytes = 0;
 			try { lfp = G.blobFp(G.levelBlob(L)); } catch (e) { /* a level the native tool cannot take */ }
 			if (useful) { const b = SF.steerFileBytes(st, lfp); bytes = b.length; try { fs.writeFileSync(d.file + '.tmp', b); fs.renameSync(d.file + '.tmp', d.file); } catch (e) { /* read-only data folder */ } }
-			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp,
+			// (the coin tour: the CPU search's file alone)
+			if (useful && st.tour) { try { const b = SF.steerFileBytes(st, lfp, true); fs.writeFileSync(d.cpu + '.tmp', b); fs.renameSync(d.cpu + '.tmp', d.cpu); } catch (e) { /* read-only data folder */ } }
+			parentPort.postMessage({ v: d.v, fp: d.fp, useful, layers: st.info.layers, bodies: st.bodies.length, features: st.info.features, dp: st.info.dp, tour: st.info.tour,
 				bytes, start: Number.isFinite(st.info.start) ? st.info.start : null, ms: st.info.ms, over: st.info.over ? \`leaves out \${st.info.over}\` : null,
 				pastWanted: useful && !!st.info.dp && st.info.fullT > st.info.dp.T });
 			// (the plan past its count: the coin DP over every coin a coin door reads, its legs layered; only where the walk
@@ -2311,7 +2317,7 @@ function steerInfo(buf, hash) {
 				} catch (e) { past = null; }
 				parentPort.postMessage({ past: past || { none: true } });
 			}`;
-		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
+		const w = new Worker(code, { eval: true, workerData: { buf: Uint8Array.from(buf), file, cpu: cpuFileOf(file), past: pastFileOf(file), pastMs: PAST_MAX_MS, v: SF.VERSION, fp: steerFp(),
 			mods: { eesim: require.resolve('./eesim.js'), eelvl: require.resolve('./eelvl.js'), steer: require.resolve('./steer.js'), gpu: require.resolve('./gpu.js') } } });
 		let main = null;
 		w.on('message', (r) => {
@@ -2341,7 +2347,7 @@ function pruneSteerCache() {
 	const d = dir(), fp = steerFp();
 	const fl = fs.readdirSync(d).filter((f) => /^reach_[0-9a-f]+_s\d+_[0-9a-f]+\.json$/.test(f)).map((f) => ({ f, cur: f.endsWith(`_s${SF.VERSION}_${fp}.json`), t: fs.statSync(path.join(d, f)).mtimeMs }))
 		.sort((a, b) => (b.cur - a.cur) || (b.t - a.t));
-	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
+	for (const { f } of fl.filter((x, k) => k >= 4 || !x.cur)) for (const x of [f, f.replace(/\.json$/, '.bin'), f.replace(/\.json$/, '_past.bin'), f.replace(/\.json$/, '_cpu.bin')]) { try { fs.unlinkSync(path.join(d, x)); } catch (e) { /* gone */ } }
 }
 /** the reach cache: the newest 8 levels' files (older versions and fingerprints go first: never read again) */
 function pruneReachCache() {
