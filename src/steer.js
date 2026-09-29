@@ -290,6 +290,12 @@ function makeModel(A, modeled) {
 		const t = trans(s, k);
 		const sp = A.special[k];
 		if (nFx !== undefined && sp[1] === 'fx' && sp[2] === 0 && valOf(s, nFx) === 1) return [t, withVal(t, nFx, 0)];
+		// (a coin in a threshold class wider than one count: the count may stay in the class (its last count alone moves
+		// on), so the ball may stay in the layer too; one class per count: always the next)
+		if (t !== s && (sp[1] === 'coins' || sp[1] === 'bcoins')) {
+			const n = idx.get(sp[1]), vals = feats[n].values, c = valOf(s, n);
+			if (vals[c + 1] - vals[c] > 1) return [t, s];
+		}
 		return [t];
 	}
 	const invCache = new Map();
@@ -547,7 +553,13 @@ function layerLevel(A, M, s, opts) {
 		const k = A.specialAt[i];
 		if (k >= 0) {
 			const ts = M.transAll(s, k);
-			if ((ts.length !== 1 || ts[0] !== s) && !(opts.staticCoins && A.special[k][1] === 'coins')) { fg[i] = TROPHY; goalTiles.push([i, k]); goal[i] = 1; continue; }
+			if ((ts.length !== 1 || ts[0] !== s) && !(opts.staticCoins && A.special[k][1] === 'coins')) {
+				// (a coin that may leave the ball in this layer (a threshold class wider than one count): a goal the way
+				// also goes through, not its end)
+				const cn = A.special[k][1] === 'coins' || A.special[k][1] === 'bcoins';
+				if (!(cn && ts.includes(s))) fg[i] = TROPHY;
+				goalTiles.push([i, k]); goal[i] = 1; continue;
+			}
 			const kind = A.special[k][1];
 			if (nProt >= 0 && (kind === 'prot' || kind === 'reset')) fg[i] = 0;
 			if (nFx >= 0 && (kind === 'fx' || kind === 'reset') && M.valOf(s, nFx) === 0) fg[i] = 0;
@@ -663,9 +675,11 @@ function buildPhysics(B, opts) {
 		const extra = coinExtra(s);
 		for (const [t, k] of goalTiles) {
 			let g = CUT;
+			// (a coin that may leave the ball in this layer: its seed is the next class's; staying is the way through it)
+			const stayCoin = A.special[k][1] === 'coins' || A.special[k][1] === 'bcoins';
 			for (const s2 of M.transAll(s, k)) {
 				const f2 = fields[s2];
-				if (!f2) continue;
+				if (!f2 || (s2 === s && stayCoin)) continue;
 				// (a toggle: the tile changes layer s2 back too, so in s2's field it is a goal of its own (its cost is only
 				// its seed): the ball that pressed it stands there and walks off, the least of its 8 neighbours + a step,
 				// as the lookup prices it)
