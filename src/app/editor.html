@@ -111,6 +111,7 @@ kbd { font: 11px var(--mono); background: var(--panel2); border: 1px solid var(-
 /* the exploration's legend (bottom left) and Follow's panel (bottom centre) */
 .exleg { position: absolute; left: 10px; bottom: 10px; z-index: 5; pointer-events: none; min-width: 172px; max-width: 270px; padding: 7px 10px 8px; border-radius: 10px;
 	background: rgba(10, 12, 18, .82); border: 1px solid #242a36; box-shadow: 0 6px 22px rgba(0, 0, 0, .45); font: 11.5px/1.4 "Segoe UI", system-ui, sans-serif; color: #c3cad8; }
+.exleg.up { bottom: 54px; }   /* (above Follow's panel) */
 .exleg .et { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #7d88a0; }
 .exleg .et b { letter-spacing: 0; text-transform: none; font-weight: 600; color: #9fe9ff; }
 .exleg .eg { height: 6px; margin: 5px 0 2px; border-radius: 3px; background: linear-gradient(90deg, #ecffff, #78faff 10%, #28c8ff 30%, #326ef5 55%, #5f3cdc 78%, #501e96);
@@ -1438,7 +1439,7 @@ function heatFill(E, tNow, px, gl) {
 /** the heat's offscreen canvases (a pixel a tile) drawn again at tNow */
 function heatImage(tNow) {
 	if (!EXP.W) return;
-	if (!EXP.img || EXP.img.width !== EXP.W || EXP.img.height !== EXP.H) {
+	if (!EXP.img || EXP.img.c.width !== EXP.W || EXP.img.c.height !== EXP.H) {
 		const mk = () => { const c = document.createElement('canvas'); c.width = EXP.W; c.height = EXP.H; const g = c.getContext('2d'); return { c, g, d: g.createImageData(EXP.W, EXP.H) }; };
 		EXP.img = mk(); EXP.glow = mk();
 	}
@@ -1627,6 +1628,7 @@ function followSet(on) {
 	FOL.on = on;
 	$('bFollow').classList.toggle('on', on);
 	$('fHud').hidden = !on;
+	$('exLeg').classList.toggle('up', on);
 	if (on) {
 		const played = !!VW.play;
 		VW.play = null; VW.glide = null;

@@ -540,6 +540,19 @@ function exploreViewChecks() {
 		JSON.stringify({ f1, f16, old, sec, g10: rgba(gl, 10), g11: rgba(gl, 11), g64: rgba(gl, 64) }));
 	const px2 = new Uint8ClampedArray(81 * 4), gl2 = new Uint8ClampedArray(81 * 4);
 	check('... and no glow at all once every tile is older than HEAT_GLOW', F.heatFill(P, 100000 + F.HEAT_GLOW + 1, px2, gl2) === false && gl2.every((v, i) => i % 4 !== 3 || v === 0));
+	// the offscreen canvases (a pixel a tile): made once for a search's size, kept for its rebuilds
+	{
+		let made = 0, puts = 0;
+		const doc = { createElement: () => { made++; const c = { width: 0, height: 0, getContext: () => ({ createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData: () => { puts++; } }) }; return c; } };
+		const hcode = [pageBlockSrc('EXP'), 'Object.assign(EXP, EXIN);', ...['EXP_HEAT_MS', 'HEAT_TAU', 'HEAT_STOPS'].map(pageConstSrc), pageBlockSrc('HEAT_LUT'), ...['heatFill', 'heatImage'].map(pageFnSrc)].join('\n');
+		let Hf = null;
+		const he = errOf(() => { Hf = new Function('document', 'store', 'EXIN', `'use strict';\n${hcode}\nreturn { heatImage, EXP };`)(doc, { get: () => null }, { W: 9, H: 9, list: P.list, count: P.count, last: P.last }); });
+		if (Hf) { Hf.heatImage(100000); Hf.heatImage(101000); }
+		const img1 = Hf && Hf.EXP.img;
+		if (Hf) Hf.heatImage(102000);
+		check('heatImage: its offscreen canvases (the heat and its glow, a pixel a tile) made once and drawn again at every rebuild', !he && made === 2 && puts === 6 && Hf.EXP.img === img1 && Hf.EXP.img.c.width === 9,
+			he ? he.message : JSON.stringify({ made, puts }));
+	}
 	// ---- the trails on a fake canvas context (s = 1, the origin (10, 20), d = 1)
 	const draw = (trails, tNow) => { const g = fakeCtx(); let n = -1; const e = errOf(() => { n = F.drawTrails(g, trails, 10, 20, 1, 1, tNow); }); return { g, e, n, c: g.calls }; };
 	const pts = [];
