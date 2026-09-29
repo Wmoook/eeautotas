@@ -1414,6 +1414,93 @@ function tourFifths(st, sim) {
 	return best < Infinity ? Math.min(499999, Math.floor(best + 0.5)) : -1;
 }
 
+// ------------------------------------------------------------------ the leg CEGAR (buildSteer)
+// at most LEG_ROUNDS features a build from the DP's legs (like legTour's rounds: bounded, and the build's time on T0())
+const LEG_ROUNDS = 2;
+/** the leg CEGAR on (default; EEAT_LEGCEGAR=0 or opts.legCegar === false: off, main's build) */
+function legCegarOn(opts) {
+	const v = opts && opts.legCegar !== undefined ? opts.legCegar : process.env.EEAT_LEGCEGAR === 'keep' ? 'keep' : process.env.EEAT_LEGCEGAR !== '0';
+	return v === 'keep' ? 'keep' : !!v;
+}
+/** the coin DP's value at the level's start state (fifths; Infinity: none): the lookup's own DP part (dpFifths) */
+function dpStartOf(dp, bodies, level) {
+	if (!dp) return Infinity;
+	const sim = new E.EESim(level); sim.reset();
+	const v = dpFifths({ dp, bodies }, sim, Infinity);
+	return v < 0 ? Infinity : v;
+}
+const FAR_LEG = CUT - 1;
+/** a field's descent over tiles from tile t0: each step to the 8-neighbour or portal exit with the least tileMin below
+ *  the tile's own (on a plateau an equal one not passed yet), until a goal (0), no way down or maxSteps -> the tiles
+ *  (the leg CEGAR's picture of the way the field's gradient leads a ball: which gates it passes, not the physics) */
+function tileDescent(f, t0, A, maxSteps) {
+	const { W, H } = A;
+	const out = [t0];
+	let t = t0, c = tileMin(f, t0);
+	if (c >= FAR_LEG) return out;
+	const seen = new Set([t0]);
+	const lim = maxSteps || 50000;
+	for (let step = 0; step < lim && c > 0; step++) {
+		let best = -1, bv = FAR_LEG;
+		const consider = (t2) => { const v = tileMin(f, t2); if (v < bv && (v < c || (v === c && !seen.has(t2)))) { bv = v; best = t2; } };
+		const x = t % W, y = (t - x) / W;
+		for (let di = 0; di < 8; di++) { const x2 = x + DX8[di], y2 = y + DY8[di]; if (x2 >= 0 && y2 >= 0 && x2 < W && y2 < H) consider(y2 * W + x2); }
+		const ex = A.portalExits.get(t);
+		if (ex) for (const e of ex) consider(e);
+		if (best < 0) break;
+		t = best; c = bv; out.push(t); seen.add(t);
+	}
+	return out;
+}
+/** THE LEG CEGAR's replay (buildSteer): the coin DP's tour from the start (coinTour), each coin's leg field descended
+ *  from the tile before it (the start, then the coin before: tileDescent), then the layer field at T coins from the last
+ *  coin (the tail; not for the DP outside the layer product, whose tail is no one field), as one path replayed with the
+ *  full state (fullState / applyFull: the switches pressed on the way toggle, keys, team, the coins taken) -> the first
+ *  gate of a feature the build does NOT model that is shut there (also a diagonal step between two shut tiles, one of
+ *  them such a gate, and a killer while protection is off and unmodelled: counterexample's rules): {feat, t, leg
+ *  (1-based; T + 1 the tail)}, or null. The modelled features are the legs' own layer's (the DP is a relaxation over
+ *  them): not checked */
+function legCounterexample(A, PH, CL, D) {
+	const M = PH.M, W = A.W;
+	const tour = coinTour(CL, D, A.start.t);
+	if (!tour.length) return null;
+	const path = [];
+	const add = (tiles, leg) => { for (const t of tiles) if (!path.length || path[path.length - 1][0] !== t) path.push([t, leg]); };
+	let from = A.start.t;
+	tour.forEach((q, i) => { const f = CL.fields.get(q); if (f) add(tileDescent(f, from, A), i + 1); from = q; });
+	const nC = M.names.indexOf('coins');
+	if (nC >= 0 && CL.s !== undefined) {
+		const sT = M.withVal(CL.s, nC, Math.min(CL.T, M.radix[nC] - 1));
+		if (PH.fields[sT]) add(tileDescent(PH.fields[sT], from, A), tour.length + 1);
+	}
+	const mod = new Set(M.names);
+	const st = fullState(A);
+	// (a gate shut under the full state; unm: one of a feature the build does not model)
+	const shutAt = (i, unm) => {
+		if (A.cls[i] === 0) return !unm;
+		if (A.cls[i] !== 3) return false;
+		const k = A.gateFeat[i];
+		if (k === 'open' || k === 'time') return false;
+		if (k === 'static') return !unm && A.gatePol[i] !== 1;
+		if (st[k] === undefined || (unm && mod.has(k))) return false;
+		return !testGate(k, A.gatePol[i], A.gateParam[i], st[k]);
+	};
+	for (let n = 1; n < path.length; n++) {
+		const [t, leg] = path[n], q = path[n - 1][0];
+		const ddx = (t % W) - (q % W), ddy = Math.floor(t / W) - Math.floor(q / W);
+		// (a teleport: counterexample skips the exit tile too)
+		if (Math.abs(ddx) > 1 || Math.abs(ddy) > 1) continue;
+		if (ddx && ddy) {
+			const a = q + ddx, b = q + ddy * W;
+			if (shutAt(a, false) && shutAt(b, false)) { const g = shutAt(a, true) ? a : shutAt(b, true) ? b : -1; if (g >= 0) return { feat: A.gateFeat[g], t: g, leg }; }
+		}
+		if (shutAt(t, true)) return { feat: A.gateFeat[t], t, leg };
+		if (A.cls[t] === 1 && !mod.has('prot') && st.prot !== undefined && st.prot !== 1) return { feat: 'prot', t, leg };
+		applyFull(A, st, t);
+	}
+	return null;
+}
+
 // ------------------------------------------------------------------ build
 // the build's budget: the bodies' bytes (layers x tiles; a body ~BODY_BYTES_TILE bytes per tile: 107 on the review's
 // 200 x 40 level of 10 switch ids, 1024 layers in an 873 MB file and 2.86 GB of the process) and its time. Past either,
@@ -1436,105 +1523,147 @@ function buildSteer(level, opts) {
 	const maxBytes = opts.maxBytes || STEER_MAX_BYTES, maxMs = opts.maxMs || STEER_MAX_MS;
 	const bodyBytes = A.N * BODY_BYTES_TILE;
 	const maxLayers = Math.max(1, Math.min(opts.maxLayers || 4096, Math.floor(maxBytes / bodyBytes / (A.feats.has('fx') ? 2 : 1))));
-	let over = null;
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
-	let B, PH;
 	// (the layer memo, default on: one for the whole build, so a CEGAR build reuses the previous one's fields: buildPhysics)
 	const memoMode = layerMemoOn(opts), memo = memoMode ? new Map() : null;
 	// (the budget's clock: T0() = t0 less the time the memo saved in 'same' mode (each repeat's first build's ms), so the
 	// budget decides as if every repeat were built again; off or 'spend': t0)
 	let saved = 0;
 	const T0 = () => t0 - saved;
-	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: T0() + maxMs / 2 });
-		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
-		for (const f of B.M.names) modeled.add(f);
-		PH = buildPhysics(B, { staticCoins: true, debug: true, memo });
-		if (memoMode === 'same') saved += PH.memoSavedMs;
-		const sim = new E.EESim(level); sim.reset();
-		const pl = layeredPlan(PH, sim);
-		const path = [];
-		for (let i = 0; i < pl.tiles.length; i++) {
-			const t = pl.tiles[i];
-			// (a key run out at the leg's end: the replay turns it off there)
-			if (pl.expAt.has(i) && path.length) path.push({ t: path[path.length - 1].t, via: 'expire', feat: pl.expAt.get(i) });
-			if (path.length && path[path.length - 1].t === t) continue;
-			const q = path.length ? path[path.length - 1].t : -1, W = A.W;
-			const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
-			path.push({ t, via: tele ? 'portal' : 'move' });
+	const N = A.N;
+	/** one build from the features modelled so far: the CEGAR loop over the walk and physics plans, the bodies, the coin
+	 *  DP (and the DP outside the layer product) -> {B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs} (legs:
+	 *  {CL, D} the DP's own legs for the leg CEGAR; null for the plan past its count or without a DP) */
+	const oneBuild = () => {
+		let over = null;
+		let B, PH;
+		for (let it = 0; it < (opts.maxIters || 12); it++) {
+			B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: T0() + maxMs / 2 });
+			if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
+			for (const f of B.M.names) modeled.add(f);
+			PH = buildPhysics(B, { staticCoins: true, debug: true, memo });
+			if (memoMode === 'same') saved += PH.memoSavedMs;
+			const sim = new E.EESim(level); sim.reset();
+			const pl = layeredPlan(PH, sim);
+			const path = [];
+			for (let i = 0; i < pl.tiles.length; i++) {
+				const t = pl.tiles[i];
+				// (a key run out at the leg's end: the replay turns it off there)
+				if (pl.expAt.has(i) && path.length) path.push({ t: path[path.length - 1].t, via: 'expire', feat: pl.expAt.get(i) });
+				if (path.length && path[path.length - 1].t === t) continue;
+				const q = path.length ? path[path.length - 1].t : -1, W = A.W;
+				const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
+				path.push({ t, via: tele ? 'portal' : 'move' });
+			}
+			const cx = path.length > 1 ? counterexample(A, { path }) : null;
+			cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, ...(PH.memoHits ? { memo: PH.memoHits } : {}), cx: cx && cx.feat });
+			if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
+			if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
+			// (the next build takes longer than this one)
+			if (Date.now() - T0() > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
+			modeled.add(cx.feat);
 		}
-		const cx = path.length > 1 ? counterexample(A, { path }) : null;
-		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, ...(PH.memoHits ? { memo: PH.memoHits } : {}), cx: cx && cx.feat });
-		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
-		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; break; }
-		// (the next build takes longer than this one)
-		if (Date.now() - T0() > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
-		modeled.add(cx.feat);
-	}
-	const M = PH.M, N = A.N;
-	// the bodies: identical fields (and goal tiles) shared
-	const bodies = [], goals = [], bodyKey = new Map();
-	const addBody = (f, goal) => {
-		const bytes = RF.reachFileBytes(f);
-		const key = crypto.createHash('sha1').update(bytes).update(goal).digest('hex');
-		if (bodyKey.has(key)) return bodyKey.get(key);
-		bodyKey.set(key, bodies.length);
-		bodies.push(stripField(f)); goals.push(goal);
-		return bodies.length - 1;
-	};
-	const layerBody = new Int32Array(M.S).fill(-1);
-	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
-	// the coin DP
-	let dp = null;
-	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
-	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
-	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - T0() > maxMs)) {
-		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
-		cp = null;
-	}
-	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
-	if (cp && cp.coins.length > 18) cp = null;
-	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
-		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
-		if (D) {
-			const none = new Uint8Array(N);
-			const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
-			const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-			dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
+		const M = PH.M;
+		// the bodies: identical fields (and goal tiles) shared
+		const bodies = [], goals = [], bodyKey = new Map();
+		const addBody = (f, goal) => {
+			const bytes = RF.reachFileBytes(f);
+			const key = crypto.createHash('sha1').update(bytes).update(goal).digest('hex');
+			if (bodyKey.has(key)) return bodyKey.get(key);
+			bodyKey.set(key, bodies.length);
+			bodies.push(stripField(f)); goals.push(goal);
+			return bodies.length - 1;
+		};
+		const layerBody = new Int32Array(M.S).fill(-1);
+		for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
+		// the coin DP
+		let dp = null, legs = null;
+		// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
+		let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
+		if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - T0() > maxMs)) {
+			over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+			cp = null;
 		}
-	}
-	// THE COIN DP OUTSIDE THE LAYER PRODUCT (the budget left the coins out and the walk plan passes a coin door: CTM_2's
-	// 16-coin door, "coins: over 31 layers"): the DP over the level's gold coins (18 or fewer) with coinLegsFree's legs
-	// (n more bodies: within the budget's bytes and time, else none), below T the LARGER of it and the layer field's
-	// (dp.max: the layer field walks through the coin doors it does not model, so the least of both was its way; the
-	// DP's legs are blind to the kept features' gates, which the layer field models: each is a relaxation of the way to
-	// go, the larger the better informed; past T coins, or where no leg has a value, the layer field's). The CPU file's alone (steerFileBytes(st, fp, true): flags 1 | 4, its leg bodies after
-	// the layer bodies); the plain (GPU) file stays as it was (its bodies [0, nPlain), no DP, prioShift without them).
-	// Order only: nothing prunes by it (opts.freeDP === false: none, as before)
-	const nPlain = bodies.length;
-	// (only where the budget's cut WAS the coins ("coins: over ..."): the plan's counterexample named them next. Where it
-	// cut another feature first (Fizio1 "team: over 31 layers", its keys kept) the coins are no known next obstacle and
-	// the walk tour, blind to the keys, lost coins there in the product: 48 vs 87 and 32 vs 34 in 2 A/B pairs)
-	const freeOn = !dp && !opts.noDP && !opts.coinT && opts.freeDP !== false && /^coins:/.test(String(over || '')) && M.names.indexOf('coins') < 0 && M.S > 1;
-	if (freeOn) {
-		const T = planCoinT(B);
-		const coinsF = A.special.filter((x) => x[1] === 'coins').map((x) => x[0]).filter((q) => level.coinBit[q] >= 0);
-		const n = coinsF.length;
-		if (T >= 1 && T <= n && n <= 18) {
-			if ((bodies.length + n) * bodyBytes > maxBytes || Date.now() - T0() > maxMs) over = `${over}; the coin DP:${(bodies.length + n) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
-			else {
-				const CL = coinLegsFree(B, PH, T, coinsF, opts);
-				const D = coinDP(CL);
-				if (D) {
-					const none = new Uint8Array(N);
-					const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
-					const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
-					dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: coinTour(CL, D, A.start.t), free: true, max: true };
+		// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
+		if (cp && cp.coins.length > 18) cp = null;
+		if (cp) {
+			const CL = opts.coinT ? coinLegsLayered(B, PH, cp, T0() + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
+			const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
+			if (D) {
+				const none = new Uint8Array(N);
+				const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
+				const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
+				dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: CL.layered ? CL.layered.tour : null };
+				if (!CL.layered) legs = { CL, D };
+			}
+		}
+		// THE COIN DP OUTSIDE THE LAYER PRODUCT (the budget left the coins out and the walk plan passes a coin door: CTM_2's
+		// 16-coin door, "coins: over 31 layers"): the DP over the level's gold coins (18 or fewer) with coinLegsFree's legs
+		// (n more bodies: within the budget's bytes and time, else none), below T the LARGER of it and the layer field's
+		// (dp.max: the layer field walks through the coin doors it does not model, so the least of both was its way; the
+		// DP's legs are blind to the kept features' gates, which the layer field models: each is a relaxation of the way to
+		// go, the larger the better informed; past T coins, or where no leg has a value, the layer field's). The CPU file's alone (steerFileBytes(st, fp, true): flags 1 | 4, its leg bodies after
+		// the layer bodies); the plain (GPU) file stays as it was (its bodies [0, nPlain), no DP, prioShift without them).
+		// Order only: nothing prunes by it (opts.freeDP === false: none, as before)
+		const nPlain = bodies.length;
+		// (only where the budget's cut WAS the coins ("coins: over ..."): the plan's counterexample named them next. Where it
+		// cut another feature first (Fizio1 "team: over 31 layers", its keys kept) the coins are no known next obstacle and
+		// the walk tour, blind to the keys, lost coins there in the product: 48 vs 87 and 32 vs 34 in 2 A/B pairs)
+		const freeOn = !dp && !opts.noDP && !opts.coinT && opts.freeDP !== false && /^coins:/.test(String(over || '')) && M.names.indexOf('coins') < 0 && M.S > 1;
+		if (freeOn) {
+			const T = planCoinT(B);
+			const coinsF = A.special.filter((x) => x[1] === 'coins').map((x) => x[0]).filter((q) => level.coinBit[q] >= 0);
+			const n = coinsF.length;
+			if (T >= 1 && T <= n && n <= 18) {
+				if ((bodies.length + n) * bodyBytes > maxBytes || Date.now() - T0() > maxMs) over = `${over}; the coin DP:${(bodies.length + n) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
+				else {
+					const CL = coinLegsFree(B, PH, T, coinsF, opts);
+					const D = coinDP(CL);
+					if (D) {
+						const none = new Uint8Array(N);
+						const bit = Int32Array.from(CL.coins, (q) => level.coinBit[q]);
+						const leg = Int32Array.from(CL.coins, (q) => addBody(CL.fields.get(q), none));
+						dp = { n: D.n, T: D.T, bit, leg, h: D.h, rounds: CL.rounds, tour: coinTour(CL, D, A.start.t), free: true, max: true };
+						legs = { CL, D };
+					}
 				}
 			}
 		}
+		return { B, PH, M, over, bodies, goals, layerBody, dp, nPlain, legs };
+	};
+	// THE LEG CEGAR (d4-cegar-dp-legs, 2026-09-29; default on, EEAT_LEGCEGAR=0 or opts.legCegar false: off). The loop in
+	// oneBuild replays the physics plan from the start, which takes no coin, so on a level whose walk plan passes a coin
+	// door the DP's legs are built in ONE layer of the modelled features with every gate of a feature the build does not
+	// model OPEN (makeModel gateOpen): a leg may run through a switch door that is shut when the ball walks it (Endeavor:
+	// 9 coins, 9 purple switch ids, 118 doors; psw:8 alone modelled, its physics plan's 200 legs with no counterexample;
+	// the search pinned at the switch door (188, 93)). legCounterexample replays the DP's own tour (each coin's leg
+	// descended from the tile before it, then the layer field at T coins) with the full state; the first shut gate of a
+	// feature the build does not model is modelled and the build made again (the same memo and budget clock), at most
+	// LEG_ROUNDS times, only while it fits the layers' budget and half of the build's time on T0(), and kept only if its
+	// DP keeps a value at the start (else the build before: a DP lost to the budget guides less than one blind to a
+	// door). No counterexample: the build is main's, byte for byte (the replay only reads). Ordering only (RCH3's -1 and
+	// every prune untouched)
+	const legOn = legCegarOn(opts);
+	const legLog = [];
+	let R = null;
+	for (let lr = 0; ; lr++) {
+		const R1 = oneBuild();
+		if (R && legOn !== 'keep' && dpStartOf(R.dp, R.bodies, level) < Infinity && !(dpStartOf(R1.dp, R1.bodies, level) < Infinity)) { legLog[legLog.length - 1].reverted = 'the DP lost its start value'; break; }
+		R = R1;
+		if (!legOn || opts.noDP || opts.coinT || !R.legs || lr >= LEG_ROUNDS) break;
+		const cx = legCounterexample(A, R.PH, R.legs.CL, R.legs.D);
+		if (!cx) break;
+		const f = A.feats.get(cx.feat);
+		const rec = { round: lr + 1, feat: cx.feat, at: [cx.t % A.W, Math.floor(cx.t / A.W)], leg: cx.leg };
+		legLog.push(rec);
+		if (!f || modeled.has(cx.feat)) { rec.why = 'modelled'; break; }
+		if (R.B.M.S * f.values.length > maxLayers) { rec.why = `over ${maxLayers} layers`; break; }
+		if (Date.now() - T0() > maxMs / 2) { rec.why = secs; break; }
+		rec.added = true;
+		modeled.add(cx.feat);
 	}
+	const { B, PH, M, bodies, goals, layerBody, dp, nPlain } = R;
+	const over = R.over;
 	const feats = M.feats.map((f, n) => {
 		const k = f.key;
 		const kind = k.startsWith('key') ? 1 : k.startsWith('psw:') ? 2 : k.startsWith('osw:') ? 3 : k === 'team' ? 4 : k === 'prot' ? 5 : k === 'coins' ? 6 : k === 'bcoins' ? 7 : k === 'crown' ? 8 : 9;
@@ -1592,7 +1721,7 @@ function buildSteer(level, opts) {
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}) } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
-		tour: tourInfo };
+		tour: tourInfo, ...(legLog.length ? { legCegar: legLog } : {}) };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
