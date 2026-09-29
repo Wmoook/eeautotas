@@ -155,11 +155,11 @@ function sectionReaders() {
 	const FL = levelOf('monofloor', ['##########', '#S.1....T#', '#####e####', '#........#', '##########']).level;
 	const sf = GX.switchReaders(FL).purple.get(1);
 	check('switchReaders: the door in the floor counts as a floor, the ones under a wall or a door do not', sf.floors === 1 && SR.purple.get(1).floors === 0 && SR.purple.get(2).floors === 0, JSON.stringify([sf, [...SR.purple]]));
-	check('a switch whose door can be a floor is no mono switch (no dominance)', GX.roomOf(FL).mono[0].length === 0, GX.roomOf(FL).mono[0].join(','));
-	process.env.EEAT_MONOFLOOR = '0';
-	const monoOld = GX.roomOf(FL).mono[0].join(',');
+	check('by default mono by doors and gates alone (as before): the floor door\'s switch is mono', GX.roomOf(FL).mono[0].join(',') === '1', GX.roomOf(FL).mono[0].join(','));
+	process.env.EEAT_MONOFLOOR = '1';
+	const monoOpt = GX.roomOf(FL).mono[0].length, monoOptSW = GX.roomOf(levelOf('sw2', SW).level).mono[0].join(',');
 	delete process.env.EEAT_MONOFLOOR;
-	check('EEAT_MONOFLOOR=0: mono by doors and gates alone (as before)', monoOld === '1', monoOld);
+	check('EEAT_MONOFLOOR=1 (opt-in): a switch whose door can be a floor is no mono switch; the corridor\'s doors under a wall stay mono', monoOpt === 0 && monoOptSW === '1,2', `${monoOpt} / ${monoOptSW}`);
 	section('dom: the class and the mask; shrinks; domIndex');
 	const s2 = new E.EESim(L); s2.reset();
 	const dA = RM.dom(s2);

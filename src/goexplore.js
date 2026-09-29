@@ -873,10 +873,11 @@ const SHORTCUT = 12;
 /**
  * switchReaders(L) -> {purple: Map(id -> {doors, gates, floors}), orange: ...}: the switch ids that open or shut something (a door
  * or a gate of that id; a reset block's id 1000 resets all). A switch no door or gate reads changes nothing but its own
- * state: the room keys leave it out (Infinity Pain: 36 duplicate purple=[0] rooms). A MONO id has doors and no gate and
- * no door that can be a FLOOR (a tile above it that is no solid block): turning it on only opens (dominance, roomOf dom).
- * A shut door in a floor is where the ball stands, so its switch on is no superset of it off (The Memory Game: its one
- * switch's 2 doors are a floor, --dom=0 found the first route in 64 s vs 123 s; main before dominance 63 s).
+ * state: the room keys leave it out (Infinity Pain: 36 duplicate purple=[0] rooms). A MONO id has doors and no gate:
+ * turning it on only opens (dominance, roomOf dom). floors: its doors with a tile above that is no solid block (shut, the
+ * ball stands there, so its switch on is no superset of it off; EEAT_MONOFLOOR=1 (opt-in) takes such switches out of
+ * the mono ones: The Memory Game's one switch has 2 floor doors, --dom=0 found its first route in 64 / 55 s vs 123 /
+ * 130 s, but Terminal lost its route in both pairs, see roomOf).
  */
 function switchReaders(L) {
 	const W = L.width, N = W * L.height, fg = L.fg, lk = L.lookup0, fl = L.flags;
@@ -927,11 +928,13 @@ function roomOf(L, opts = {}) {
 	// (the switch ids the keys read: every one in the legacy key, else those some door or gate reads)
 	const readP = legacy ? null : SR.purple, readO = legacy ? null : SR.orange;
 	const monoP = [], monoO = [];
-	// (a switch whose doors can be floors (switchReaders floors) is no mono one: turning it on takes a floor away, so the
-	// rooms with it off are no subset (EEAT_MONOFLOOR=0: mono by doors and gates alone, as before))
-	const floorsOk = process.env.EEAT_MONOFLOOR === '0';
-	for (const [id, r] of SR.purple) if (r.doors > 0 && r.gates === 0 && (floorsOk || r.floors === 0)) monoP.push(id);
-	for (const [id, r] of SR.orange) if (r.doors > 0 && r.gates === 0 && (floorsOk || r.floors === 0)) monoO.push(id);
+	// (EEAT_MONOFLOOR=1, OPT-IN: a switch whose doors can be floors (switchReaders floors) is no mono one: turning it on
+	// takes a floor away, so the rooms with it off are no subset. Its A/B (night 3, box 2, W5, findS 300, first route s,
+	// base / opt-in): The Memory Game 123, 130 / 64, 55 (--dom=0); The Flighty Slighty none / 97; Don't Stop Jumping 285 /
+	// 290; Terminal 157.8, 144.8 / none, none (both at 261.6 tiles): dominance pays there, so off by default)
+	const floorRule = process.env.EEAT_MONOFLOOR === '1';
+	for (const [id, r] of SR.purple) if (r.doors > 0 && r.gates === 0 && (!floorRule || r.floors === 0)) monoP.push(id);
+	for (const [id, r] of SR.orange) if (r.doors > 0 && r.gates === 0 && (!floorRule || r.floors === 0)) monoO.push(id);
 	monoP.sort((x, y) => x - y); monoO.sort((x, y) => x - y);
 	const bitP = new Map(monoP.map((id, k) => [id, k])), bitO = new Map(monoO.map((id, k) => [id, monoP.length + k]));
 	const nMono = monoP.length + monoO.length, words = (nMono + 31) >> 5;
