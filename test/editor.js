@@ -331,7 +331,12 @@ function request(port, method, p, body) {
 function pageFnSrc(name) {
 	const lines = PAGE.split('\n');
 	const k = lines.findIndex((l) => new RegExp(`^(async )?function ${name}\\(`).test(l));
-	const e = k < 0 ? -1 : lines.indexOf('}', k);
+	if (k < 0) return '';
+	// (a one-line function: that line)
+	let depth = 0;
+	for (const ch of lines[k]) { if (ch === '{') depth++; else if (ch === '}') depth--; }
+	if (depth === 0 && /\}\s*$/.test(lines[k])) return lines[k];
+	const e = lines.indexOf('}', k);
 	return e < 0 ? '' : lines.slice(k, e + 1).join('\n');
 }
 const pageConstSrc = (name) => { const x = PAGE.match(new RegExp(`^const ${name} = .*$`, 'm')); return x ? x[0] : ''; };
@@ -340,7 +345,7 @@ function fakeCtx() {
 	const calls = [], st = [];
 	const g = { calls, strokeStyle: '#000', fillStyle: '#000', lineWidth: 1, globalAlpha: 1, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', lineJoin: 'miter', lineCap: 'butt', dash: [] };
 	const rec = (name) => (...a) => { calls.push({ name, a, stroke: g.strokeStyle, fill: g.fillStyle, width: g.lineWidth, alpha: g.globalAlpha, dash: g.dash.slice(), font: g.font }); };
-	for (const m of ['beginPath', 'moveTo', 'lineTo', 'arc', 'arcTo', 'closePath', 'stroke', 'fill', 'fillText', 'clearRect', 'fillRect', 'strokeRect', 'rect', 'ellipse', 'quadraticCurveTo', 'bezierCurveTo']) g[m] = rec(m);
+	for (const m of ['beginPath', 'moveTo', 'lineTo', 'arc', 'arcTo', 'closePath', 'stroke', 'fill', 'fillText', 'clearRect', 'fillRect', 'strokeRect', 'rect', 'ellipse', 'quadraticCurveTo', 'bezierCurveTo', 'translate', 'scale', 'clip', 'setTransform']) g[m] = rec(m);
 	g.save = () => { st.push({ strokeStyle: g.strokeStyle, fillStyle: g.fillStyle, lineWidth: g.lineWidth, globalAlpha: g.globalAlpha, dash: g.dash }); calls.push({ name: 'save', a: [] }); };
 	g.restore = () => { Object.assign(g, st.pop() || {}); calls.push({ name: 'restore', a: [] }); };
 	g.setLineDash = (d) => { g.dash = d.slice(); };
@@ -366,12 +371,12 @@ function frontierChecks() {
 		/^\$\('cFrontier'\)\.checked = FX\.on;$/m.test(PAGE) && /if \(k === 'f' \|\| k === 'F'\) \{ gotoFrontier\(\); return; \}/.test(PAGE) &&
 		/<button class="small" id="cGoto"[^>]*>[^<]*Go to<\/button>/.test(PAGE) && /\$\('cGoto'\)\.onclick = \(\) => gotoFrontier\(\);/.test(PAGE) &&
 		// (the layer redraws with the map, and on its own while it pulses; it follows the window's size)
-		/if \(VW\.dirty\) \{ VW\.dirty = false; draw\(\); FX\.dirty = true; \}\n\tif \(FX\.dirty \|\| \(FX\.live && now - FX\.at >= FX_FRAME_MS\)\) drawFx\(now\);/.test(PAGE) &&
-		/fx\.width = w; fx\.height = h; FX\.dirty = true;/.test(PAGE));
+		/if \(VW\.dirty\) \{ VW\.dirty = false; draw\(\); FX\.dirty = true; \} else mapIdle\(now\);\n\tif \(FX\.dirty \|\| \(FX\.live && now - FX\.at >= FX_FRAME_MS\)\) drawFx\(now\);/.test(PAGE) &&
+		/if \(fx\.width !== w \|\| fx\.height !== h\) \{ fx\.width = w; fx\.height = h; again = true; \}/.test(PAGE));
 	// (FOL, followSet: F / "Go to" stop Follow, see followChecks)
 	const env = { $: () => ({ textContent: '' }), SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false }, performance: { now: () => 1000 }, changedView: () => {},
 		FOL: { on: false }, followSet: () => {} };
-	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), ...['frontierOf', 'drawFrontier', 'gotoFrontier', 'glideStep'].map(pageFnSrc)].join('\n');
+	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), ...['tracePath', 'frontierOf', 'drawFrontier', 'gotoFrontier', 'glideStep'].map(pageFnSrc)].join('\n');
 	let F = null;
 	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { frontierOf, drawFrontier, gotoFrontier, glideStep, ZOOMS };`)(...Object.values(env)); });
 	check('the search frontier\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
@@ -468,29 +473,29 @@ function pageBlockSrc(name) {
 /** a stand-in for a page element: text, html, hidden, a class list, children by selector none */
 function fakeEl() { const cls = new Set(); return { textContent: '', innerHTML: '', hidden: true, classList: { toggle: (c, on) => { if (on) cls.add(c); else cls.delete(c); }, contains: (c) => cls.has(c) } }; }
 /**
- * The exploration view and Follow (editor.html: heatApply, heatFill, heatMaskFill, heatImage, drawHeatLayer, drawTrails,
- * followSrc, sameStart, followRetarget, followAim, followStep, followSet, followSeek, followToEnd, drawFollow cut out of
- * the page and run): the toolbar's "exploration" toggle (on by default, remembered) and Follow (V), their canvases under
- * the frontier's; the page's merge of the server's heat answers (src/heat.js HeatMap.since: a full answer, a delta, the
- * first visits (an older server's answer without them: the last visit when first seen), another search starting over;
- * the trails kept, at most EXP_TRAILS); the heat's pixels (the colour by the FIRST visit: just found = cyan, found at the
- * search's start = purple even when visited again now, the scale the search's time; stronger with more visits (log),
- * unvisited clear, a glow only for newly found tiles); the solid blocks cut out of the heat (not a door it went through);
- * the trails on a fake canvas context (a jump not joined, faded by age, gone after EXP_TRAIL_FADE, the newest brightest,
- * at most EXP_TRAILS_K a search) and their palette (no two searches that run together alike, none the route's, the
- * nearest attempt's, the guide line's or the job run's colour, none gold / orange); Follow's replay (the tick moves on
- * by the speed, holds at the end and loops, the camera eased toward the smiley at 16 px a tile or more with no lag at a
- * steady 4x, kept in the level; a new nearest attempt from the same tick when it shares its start, else from its point
- * nearest the smiley, else the same tick: never back to the start; the route once found; the seek bar, End / Home),
- * leaving Follow (a pan, a drag, a click (which paints nothing), the wheel, a zoom, Fit, F, Escape), the smiley drawn
- * where the replay is.
+ * The exploration view and Follow (editor.html: heatReset, heatAdd, heatApply, heatPixel, heatGlow, heatRefresh, heatSolid,
+ * heatPlace, drawTrails, drawExplore, followSrc, sameStart, followRetarget, followAim, followStep, followSet, followSeek,
+ * followToEnd, drawFollow cut out of the page and run): the toolbar's "exploration" toggle (on by default, remembered) and
+ * Follow (V), their canvases under the frontier's; the page's merge of the server's heat answers (src/heat.js
+ * HeatMap.since: a full answer, a delta, the first visits (an older server's answer without them: the last visit when first
+ * seen), another search starting over; the trails kept, at most EXP_TRAILS); the heat's pixels (the colour by the FIRST
+ * visit: just found = cyan, found at the search's start = purple even when visited again now, the scale the search's time;
+ * stronger with more visits (log), unvisited clear, a glow only for newly found tiles, in the same image); the solid blocks
+ * clear (not a door it went through); the heat updated incrementally (the answers one at a time = the whole heat at once; a
+ * new tile draws its 3 x 3; the colours' ageing in slices); the heat's canvas a pixel a tile placed by a CSS transform, never
+ * resized by an update; the trails on a fake canvas context (a jump not joined, faded by age, gone after EXP_TRAIL_FADE, the
+ * newest brightest, at most EXP_TRAILS_K a search, one stroke per colour and alpha, only what is in the canvas) and their
+ * palette; drawExplore on stand-in canvases (a pan moves the layers by their transforms, the trails drawn again past their
+ * margin, on a zoom and while fading); the map's level cache (mapCacheChecks); the best route's panel (improveChecks);
+ * Follow (followChecks).
  */
-function exploreViewChecks() {
+async function exploreViewChecks() {
 	const tools = (PAGE.match(/<div class="tools" id="tools">[\s\S]*?<\/div>/) || [''])[0];
-	check('the exploration view: an "exploration" toggle in the map toolbar (on by default, remembered), a Follow button and V, the heat and trail canvases under the frontier\'s (clicks pass through), the heat polled with the search\'s state',
+	check('the exploration view: an "exploration" toggle in the map toolbar (on by default, remembered), a Follow button and V, the heat and trail canvases under the frontier\'s (clicks pass through; the heat\'s a pixel a tile, placed by a CSS transform), the heat polled with the search\'s state',
 		/<input type="checkbox" id="cExplore" checked> exploration<\/label>/.test(tools) && /<button id="bFollow"[^>]*>[^<]*Follow<\/button>/.test(tools) &&
-		/<canvas id="cvHeat" class="fx" aria-hidden="true"><\/canvas><canvas id="cvTrail" class="fx" aria-hidden="true"><\/canvas>/.test(PAGE) &&
+		/<canvas id="cvHeat" class="fx heat" aria-hidden="true"><\/canvas><canvas id="cvTrail" class="fx" aria-hidden="true"><\/canvas>/.test(PAGE) &&
 		/#cvHeat \{ z-index: 1; mix-blend-mode: screen; \} #cvTrail \{ z-index: 2; \} #cvFx \{ z-index: 3; \}/.test(PAGE) &&
+		/\.stage canvas\.heat \{ inset: auto; left: 0; top: 0; width: auto; height: auto; transform-origin: 0 0; will-change: transform; \}/.test(PAGE) &&
 		/^const EXP = \{ on: store\.get\('eeat\.editor\.explore'\) !== '0',/m.test(PAGE) && /store\.set\('eeat\.editor\.explore', EXP\.on \? '1' : '0'\)/.test(PAGE) &&
 		/if \(k === 'v' \|\| k === 'V'\) \{ followSet\(!FOL\.on\); return; \}/.test(PAGE) && /\n\tif \(EXP\.on\) pollHeat\(\);/.test(PAGE) &&
 		/\/api\/editor\/solve\/heat\?search=\$\{EXP\.search\}&since=\$\{EXP\.version\}&trail=\$\{EXP\.trailId\}/.test(PAGE) &&
@@ -514,12 +519,17 @@ function exploreViewChecks() {
 	}
 	// ---- the page's merge of the server's answers (the server's own HeatMap)
 	const perf = { t: 0, now() { return this.t; } };
-	const env = { performance: perf, atob: (s) => Buffer.from(String(s), 'base64').toString('latin1') };
-	const consts = ['EXP_HEAT_MS', 'HEAT_SPAN_MIN', 'HEAT_STOPS', 'heatSpan'].map(pageConstSrc).join('\n');
-	const code = [pageConstSrc('clamp'), consts, pageBlockSrc('HEAT_LUT'), pageBlockSrc('EXP_COLORS'), pageConstSrc('expColor'), ...['b64u8', 'heatApply', 'heatFill', 'heatMaskFill', 'drawTrails'].map(pageFnSrc)].join('\n');
+	const LVh = { W: 4, H: 2, fg: new Int32Array(8), kind: new Map() };
+	const env = { performance: perf, atob: (s) => Buffer.from(String(s), 'base64').toString('latin1'), LV: LVh, editVersion: 0 };
+	const consts = ['TRAIL_MARGIN', 'HEAT_SPAN_MIN', 'HEAT_STOPS', 'heatSpan', 'solidIds'].map(pageConstSrc).join('\n');
+	const heatFns = ['b64u8', 'heatReset', 'heatTodo', 'heatAdd', 'heatApply', 'heatPixel', 'heatGlow', 'heatRefresh', 'solidBlock', 'heatSolid', 'traceFlat', 'drawTrails'];
+	const code = [pageConstSrc('clamp'), consts, pageBlockSrc('HEAT_LUT'), pageBlockSrc('EXP_COLORS'), pageConstSrc('expColor'), ...heatFns.map(pageFnSrc)].join('\n');
 	let F = null;
-	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { heatApply, heatFill, heatMaskFill, drawTrails, EXP_TRAILS, EXP_TRAILS_K, EXP_TRAIL_FADE, EXP_TAIL, HEAT_SPAN_MIN, HEAT_GLOW, HEAT_A, EXP_COLORS, expColor };`)(...Object.values(env)); });
-	check('the exploration view\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
+	const fe = errOf(() => {
+		F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { ${heatFns.join(', ')}, EXP_TRAILS, EXP_TRAILS_K, EXP_TRAIL_FADE, EXP_TAIL, EXP_GLOW_MS, EXP_AGE_MS, EXP_AGE_SLICES, ` +
+			'HEAT_SPAN_MIN, HEAT_GLOW, HEAT_GLOW_A, HEAT_A, EXP_COLORS, expColor };')(...Object.values(env));
+	});
+	check('the exploration view\'s functions cut out of the page run', !!F && heatFns.every((f) => typeof F[f] === 'function'), fe ? fe.message : undefined);
 	if (!F) return;
 	const W = 30, H = 20, HM = new HX.HeatMap(W, H);
 	HM.merge([5, 6, 7], 1000); HM.merge([7, 100], 3000);
@@ -546,87 +556,130 @@ function exploreViewChecks() {
 	const HM2 = new HX.HeatMap(10, 10);
 	HM2.merge([3], 100);
 	F.heatApply(E, Object.assign({ search: 222, running: true, t: 200, w: 10, h: 10 }, HM2.since(0), { trailId: 0, trails: [] }), 100);
-	check('another search starts the page\'s heat over (its size, no tile of the last one)', E.search === 222 && E.W === 10 && E.count.length === 100 && E.first.length === 100 && E.visited === 1 && E.count[3] === 1 && E.version === 1,
-		JSON.stringify({ search: E.search, W: E.W, visited: E.visited, v: E.version }));
+	check('another search starts the page\'s heat over (its size, no tile of the last one)', E.search === 222 && E.W === 10 && E.count.length === 100 && E.first.length === 100 && E.visited === 1 && E.count[3] === 1 && E.version === 1 &&
+		E.s0.length === 100 && E.all === true, JSON.stringify({ search: E.search, W: E.W, visited: E.visited, v: E.version }));
 	// the trails: appended, at most EXP_TRAILS (the newest)
 	const mk = (id, k, t) => ({ id, k, label: k, t, ticks: 100, pts: [0, 0, 16, 0, 32, 0, 48, 16], br: [] });
 	F.heatApply(E, Object.assign({ search: 222, running: true, t: 300, w: 10, h: 10 }, HM2.since(1), { trailId: 70, trails: Array.from({ length: 70 }, (_, k) => mk(k + 1, 'goexplore', k * 10)) }), 110);
-	check('the trails: appended as they come, the newest EXP_TRAILS (60) kept, the page\'s trail id the newest', E.trails.length === F.EXP_TRAILS && F.EXP_TRAILS === 60 && E.trails[0].id === 11 && E.trails[59].id === 70 && E.trailId === 70,
+	check('the trails: appended as they come, the newest EXP_TRAILS (60) kept, the page\'s trail id the newest', E.trails.length === F.EXP_TRAILS && F.EXP_TRAILS === 60 && E.trails[0].id === 11 && E.trails[59].id === 70 && E.trailId === 70 && E.trailsDirty === true,
 		`${E.trails.length} ${E.trails[0] && E.trails[0].id} ${E.trailId}`);
-	// ---- the heat's pixels: lone tiles (no visited neighbour: their own colours), at tNow 100 s (the scale: 100 s)
-	const P = { W: 9, H: 9, list: [10, 16, 64, 70], count: new Uint16Array(81), first: new Uint32Array(81), last: new Uint32Array(81) };
-	P.count[10] = 1; P.first[10] = 100000; P.last[10] = 100000;   // found just now, once
-	P.count[16] = 16; P.first[16] = 100000; P.last[16] = 100000;  // found just now, 16 visits
-	P.count[64] = 1; P.first[64] = 5000; P.last[64] = 99500;      // found at the start, visited again half a second ago
-	P.count[70] = 16; P.first[70] = 99000; P.last[70] = 99000;    // found a second ago, 16 visits
-	const px = new Uint8ClampedArray(81 * 4), gl = new Uint8ClampedArray(81 * 4);
-	const glowed = F.heatFill(P, 100000, px, gl);
+	// ---- the heat's pixels (heatRefresh into E.px, a pixel a tile, the glow in it): lone tiles (no visited neighbour: their own
+	// colours), at tNow 100 s (the scale: 100 s)
+	const mkE = (w, h) => { const X = { W: w, H: h, running: true, solid: null }; F.heatReset(X, w, h); X.px = new Uint8ClampedArray(w * h * 4); return X; };
+	const visit = (X, t, c, f, l) => { X.count[t] = c; X.first[t] = f; X.last[t] = l; X.list.push(t); F.heatAdd(X, t, f, 1); X.fresh.push(t); };
 	const rgba = (a, i) => Array.from(a.slice(4 * i, 4 * i + 4));
-	const [f1, f16, old, sec] = [10, 16, 64, 70].map((i) => rgba(px, i));
-	check('the heat\'s pixels by the FIRST visit: found just now cyan-white, found at the search\'s start purple (red above green) though visited again just now, more visits stronger (16 vs 1 at the same age), at most HEAT_A, unvisited clear; a glow only around the newly found tiles (blurred: the tile and its neighbours), none for the old tile visited again',
-		glowed && f1[1] > 200 && f1[2] > 200 && old[0] > old[1] && old[2] > 100 && old[1] < 80 && f16[3] > f1[3] && f1[3] > old[3] && sec[3] > 0 && Math.max(f1[3], f16[3], old[3], sec[3]) <= Math.round(255 * F.HEAT_A) &&
-		rgba(px, 0)[3] === 0 && rgba(px, 40)[3] === 0 && rgba(gl, 10)[3] > 0 && rgba(gl, 11)[3] > 0 && rgba(gl, 64)[3] === 0 && rgba(gl, 63)[3] === 0 && rgba(gl, 10)[3] > rgba(gl, 11)[3],
-		JSON.stringify({ f1, f16, old, sec, g10: rgba(gl, 10), g11: rgba(gl, 11), g64: rgba(gl, 64) }));
-	const px2 = new Uint8ClampedArray(81 * 4), gl2 = new Uint8ClampedArray(81 * 4);
-	check('... and no glow at all once every tile was found longer than HEAT_GLOW ago', F.heatFill(P, 100000 + F.HEAT_GLOW + 1, px2, gl2) === false && gl2.every((v, i) => i % 4 !== 3 || v === 0));
+	const P = mkE(9, 9);
+	visit(P, 10, 1, 100000, 100000);   // found just now, once
+	visit(P, 16, 16, 100000, 100000);  // found just now, 16 visits
+	visit(P, 64, 1, 5000, 99500);      // found at the start, visited again half a second ago
+	visit(P, 70, 16, 99000, 99000);    // found a second ago, 16 visits
+	const box0 = F.heatRefresh(P, 100000, 0);
+	const ga = Array.from(P.galpha), lit = [10, 0, 40].map((i) => rgba(P.px, i));
+	P.all = true;
+	F.heatRefresh(P, 100000 + F.HEAT_GLOW + 1, 1000);
+	const [f1, f16, old, sec] = [10, 16, 64, 70].map((i) => rgba(P.px, i));
+	check('the heat\'s pixels by the FIRST visit: found just now cyan-white, found at the search\'s start purple (red above green) though visited again just now, more visits stronger (16 vs 1 at the same age), at most HEAT_A without the glow, unvisited clear',
+		box0 && box0.join() === '0,0,8,8' && f1[1] > 200 && f1[2] > 200 && old[0] > old[1] && old[2] > 100 && old[1] < 80 && f16[3] > f1[3] && f1[3] > old[3] && sec[3] > 0 &&
+		Math.max(f1[3], f16[3], old[3], sec[3]) <= Math.round(255 * F.HEAT_A) && rgba(P.px, 0)[3] === 0 && rgba(P.px, 40)[3] === 0,
+		JSON.stringify({ box0, f1, f16, old, sec }));
+	check('the glow in the heat\'s image: only around the tiles found in the last HEAT_GLOW (the tile and its neighbours, blurred), none for the old tile visited again; brighter where it glows; none at all once every tile was found longer ago',
+		ga[10] > 0 && ga[11] > 0 && ga[10] > ga[11] && ga[70] > 0 && ga[64] === 0 && ga[63] === 0 && Math.abs(ga[10] - 0.25 * F.HEAT_GLOW_A / 255) < 1e-6 &&
+		lit[0][3] > f1[3] && lit[1][3] > 0 && lit[2][3] === 0 && P.galpha.every((v) => v === 0) && P.glowSet.length === 0 && P.fresh.length === 0,
+		JSON.stringify({ g10: ga[10], g11: ga[11], g64: ga[64], lit }));
 	{
 		// (the scale is the search's time: a tile found 100 s ago is purple in a 100-s search, still blue-cyan in a 400-s one)
-		const Q = { W: 9, H: 9, list: [40], count: new Uint16Array(81), first: new Uint32Array(81), last: new Uint32Array(81) };
-		Q.count[40] = 1; Q.first[40] = 300000; Q.last[40] = 300000;
-		const a = new Uint8ClampedArray(81 * 4), b = new Uint8ClampedArray(81 * 4);
-		F.heatFill(Q, 400000, a, null);
-		Q.first[40] = 0; Q.last[40] = 0;
-		F.heatFill(Q, 100000, b, null);
-		const young = rgba(a, 40), aged = rgba(b, 40);
+		const Q = mkE(9, 9), Q2 = mkE(9, 9);
+		visit(Q, 40, 1, 300000, 300000); F.heatRefresh(Q, 400000, 0);
+		visit(Q2, 40, 1, 0, 0); F.heatRefresh(Q2, 100000, 0);
+		const young = rgba(Q.px, 40), aged = rgba(Q2.px, 40);
 		check('the heat\'s colour scale is the search\'s time (at least HEAT_SPAN_MIN): found 100 s ago in a 400-s search blue-cyan (green above red), in a 100-s search at its start deep purple',
 			young[1] > young[0] && young[2] > 200 && aged[0] > aged[1] && F.HEAT_SPAN_MIN === 8000, JSON.stringify({ young, aged }));
 	}
 	{
-		// ---- the blocks cut out of the heat: plain solids the search never visited (not a door, not unknown blocks, not a
-		// visited tile)
-		const M = { W: 4, H: 2, count: new Uint16Array(8) };
-		const fg = new Int32Array([9, 9, 0, 23, 100, 9, 777, 0]);   // 9 solid, 23 a door, 100 a coin, 777 unknown
-		const kinds = new Map([[9, 'solid'], [23, 'door'], [100, 'coin']]);
-		M.count[5] = 2;   // (a solid tile the search was in: e.g. a door that is now shut, or a block since painted)
-		const m = new Uint8ClampedArray(8 * 4);
-		const n = F.heatMaskFill(M, fg, (id) => kinds.get(id) === 'solid', m);
-		const cut = Array.from({ length: 8 }, (_, i) => m[4 * i + 3] === 255 ? 1 : 0).join('');
-		check('the heat\'s cut: opaque on the plain solid blocks the search never visited (a door, a coin, an unknown block, a visited solid tile and the air stay lit)', n === 2 && cut === '11000000', JSON.stringify({ n, cut }));
-	}
-	// the offscreen canvases (a pixel a tile: the heat, its glow, the blocks' cut): made once for a search's size, kept for
-	// its rebuilds; the blocks' cut from the page's level
-	{
-		let made = 0, puts = 0;
-		const doc = { createElement: () => { made++; const c = { width: 0, height: 0, getContext: () => ({ createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData: () => { puts++; } }) }; return c; } };
-		const LVf = { W: 9, H: 9, fg: new Int32Array(81), kind: new Map([[9, { kind: 'solid' }]]) };
-		LVf.fg[0] = 9; LVf.fg[1] = 9; LVf.fg[10] = 9;   // (tile 10 is visited: not cut)
-		const hcode = [pageBlockSrc('EXP'), 'Object.assign(EXP, EXIN);', ...['EXP_HEAT_MS', 'HEAT_SPAN_MIN', 'HEAT_STOPS', 'heatSpan', 'solidIds'].map(pageConstSrc), pageBlockSrc('HEAT_LUT'),
-			...['heatFill', 'heatMaskFill', 'solidBlock', 'heatImage'].map(pageFnSrc)].join('\n');
-		let Hf = null;
-		const he = errOf(() => { Hf = new Function('document', 'store', 'EXIN', 'LV', `'use strict';\n${hcode}\nreturn { heatImage, EXP };`)(doc, { get: () => null }, { W: 9, H: 9, list: P.list, count: P.count, first: P.first, last: P.last }, LVf); });
-		if (Hf) { Hf.heatImage(100000); Hf.heatImage(101000); }
-		const img1 = Hf && Hf.EXP.img;
-		if (Hf) Hf.heatImage(102000);
-		check('heatImage: its offscreen canvases (the heat, its glow, the blocks\' cut; a pixel a tile) made once and drawn again at every rebuild; the cut from the page\'s level (its unvisited solid blocks)',
-			!he && made === 3 && puts === 9 && Hf.EXP.img === img1 && Hf.EXP.img.c.width === 9 && Hf.EXP.masked === 2, he ? he.message : JSON.stringify({ made, puts, masked: Hf && Hf.EXP.masked }));
+		// ---- the blocks cut out of the heat: plain solids the search never visited stay clear, glow and all (not a door, not
+		// unknown blocks, not a visited tile)
+		LVh.fg.set([9, 9, 0, 23, 100, 9, 777, 0]);   // 9 solid, 23 a door, 100 a coin, 777 unknown
+		for (const [id, k] of [[9, 'solid'], [23, 'door'], [100, 'coin']]) LVh.kind.set(id, { kind: k });
+		const M = mkE(4, 2);
+		visit(M, 5, 2, 1000, 1000);        // (a solid tile the search was in: e.g. a door that is now shut, or a block since painted)
+		visit(M, 2, 1, 99000, 99000);      // (found just now: its glow over the tiles around it)
+		F.heatSolid(M);
+		F.heatRefresh(M, 100000, 0);
+		const solid = Array.from(M.solid).join(''), shown = Array.from({ length: 8 }, (_, i) => (M.px[4 * i + 3] > 0 ? 1 : 0)).join('');
+		check('the heat\'s cut: the plain solid blocks the search never visited clear though the glow reaches them (a door, an unknown block, a visited solid tile and the air stay lit)',
+			solid === '11000100' && M.galpha[1] > 0 && shown === '00110111', JSON.stringify({ solid, shown, g1: M.galpha[1] }));
 	}
 	{
-		// ---- the heat's layer: the heat and the glow smoothed, then the blocks cut out tile by tile (no smoothing)
-		const g = fakeCtx();
-		g.drawImage = (...a) => g.calls.push({ name: 'drawImage', a, op: g.globalCompositeOperation, smooth: g.imageSmoothingEnabled, alpha: g.globalAlpha });
-		g.globalCompositeOperation = 'source-over';
-		const canvas = { width: 800, height: 600, getContext: () => g };
-		const cvs = { img: { c: 'IMG' }, glow: { c: 'GLOW' }, mask: { c: 'MASK' } };
-		const denv = { $: () => canvas, origin: () => ({ T: 16, s: 1, ox: 0, oy: 0 }), SOLVE: { sig: null }, currentSig: () => 'x',
-			EXP: { W: 60, H: 40, img: cvs.img, glow: cvs.glow, mask: cvs.mask, glowOn: true, masked: 5 } };
-		let D = null;
-		const de = errOf(() => { D = new Function(...Object.keys(denv), `'use strict';\n${pageConstSrc('clamp')}\n${pageFnSrc('drawHeatLayer')}\nreturn { drawHeatLayer };`)(...Object.values(denv)); D.drawHeatLayer(); });
-		const di = g.calls.filter((q) => q.name === 'drawImage');
-		check('drawHeatLayer: the heat (smoothed), its glow added (lighter), then the unvisited blocks cut out (destination-out, not smoothed, full strength); the context left as it was',
-			!de && di.length === 3 && di[0].a[0] === 'IMG' && di[0].smooth === true && di[0].op === 'source-over' && di[1].a[0] === 'GLOW' && di[1].op === 'lighter' &&
-			di[2].a[0] === 'MASK' && di[2].op === 'destination-out' && di[2].smooth === false && di[2].alpha === 1 && g.globalCompositeOperation === 'source-over' && g.globalAlpha === 1,
-			de ? de.stack : JSON.stringify(di.map((q) => [q.a[0], q.op, q.smooth, q.alpha])));
+		// ---- INCREMENTAL: the answers one by one, each refresh's rectangle copied into a "canvas" (what putImageData does) =
+		// the whole image made at once from the full answer; a new tile draws only the 3 x 3 around it
+		const w = 40, h = 30, HI = new HX.HeatMap(w, h), tNow = 60000;
+		const E1 = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
+		const canvas = new Uint8ClampedArray(w * h * 4);
+		const put = (X, b) => { for (let y = b[1]; y <= b[3]; y++) for (let x = b[0]; x <= b[2]; x++) { const o = 4 * (y * w + x); for (let c = 0; c < 4; c++) canvas[o + c] = X.px[o + c]; } };
+		let rs = 12345;
+		const R = () => ((rs = (rs * 1103515245 + 12345) >>> 0) / 4294967296);
+		const ans = (HMx, X, extra) => Object.assign({ search: 7, running: false, t: tNow, w, h }, HMx.since(X.version), { trailId: 0, trails: [] }, extra || {});
+		let now = 0, boxes = [];
+		for (let step = 0; step < 12; step++) {
+			const tiles = new Set(Array.from({ length: 1 + Math.floor(R() * 30) }, () => Math.floor(R() * w * h)));
+			HI.merge([...tiles], Math.min(tNow - 200, 1000 + step * 5400));   // (the last ones within HEAT_GLOW of tNow: glowing)
+			F.heatApply(E1, ans(HI, E1), now);
+			if (!E1.px) E1.px = new Uint8ClampedArray(w * h * 4);
+			now += 150;
+			const b = F.heatRefresh(E1, tNow, now);
+			if (b) { put(E1, b); boxes.push(b); }
+		}
+		const E2 = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
+		F.heatApply(E2, ans(HI, E2), 0);
+		E2.px = new Uint8ClampedArray(w * h * 4);
+		F.heatRefresh(E2, tNow, 0);
+		let diff = 0;
+		for (let i = 0; i < canvas.length; i++) if (canvas[i] !== E2.px[i]) diff++;
+		const part = boxes.slice(1).filter((b) => (b[2] - b[0] + 1) * (b[3] - b[1] + 1) < w * h).length;
+		// (one more tile, far from the others, found long ago: no glow; the refresh's rectangle the 3 x 3 around it)
+		const E3 = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 }, H3 = new HX.HeatMap(w, h);
+		H3.merge([0, 1, 2], 100);
+		F.heatApply(E3, ans(H3, E3), 0); E3.px = new Uint8ClampedArray(w * h * 4); F.heatRefresh(E3, tNow, 0);
+		H3.merge([15 * w + 20], 200);
+		F.heatApply(E3, ans(H3, E3), 150);
+		const b3 = F.heatRefresh(E3, tNow, 300), b4 = F.heatRefresh(E3, tNow, 450);
+		check('the heat is updated incrementally: 12 answers one at a time, only each refresh\'s rectangle put into the canvas, give the same image as the whole heat made at once; a new tile draws only the 3 x 3 tiles around it, a frame with nothing new nothing',
+			diff === 0 && boxes.length === 12 && boxes[0].join() === `0,0,${w - 1},${h - 1}` && part >= 6 && b3 && b3.join() === '19,14,21,16' && b4 === null,
+			JSON.stringify({ diff, boxes: boxes.map((b) => b.join('-')), b3, b4 }));
+		// (the colours' ageing while the search runs: a pass over the rows every EXP_AGE_MS, EXP_AGE_SLICES slices of rows a
+		// frame; after a pass the image = the whole heat made at that time)
+		const E4 = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
+		F.heatApply(E4, ans(HI, E4, { running: true, t: 80000 }), 0); E4.px = new Uint8ClampedArray(w * h * 4);
+		canvas.fill(0);
+		put(E4, F.heatRefresh(E4, 80000, 0));
+		const quiet = F.heatRefresh(E4, 80000, F.EXP_AGE_MS - 1);
+		const slices = [];
+		for (let k = 0; k < F.EXP_AGE_SLICES; k++) { const b = F.heatRefresh(E4, 95000, F.EXP_AGE_MS + 20 * k); if (b) { put(E4, b); slices.push(b); } }
+		const after = F.heatRefresh(E4, 95000, F.EXP_AGE_MS + 20 * F.EXP_AGE_SLICES + 20);
+		const E5 = { search: 0, W: 0, H: 0, version: 0, trailId: 0, trails: [], list: [], visited: 0 };
+		F.heatApply(E5, ans(HI, E5, { running: true, t: 95000 }), 0); E5.px = new Uint8ClampedArray(w * h * 4); F.heatRefresh(E5, 95000, 0);
+		let d5 = 0;
+		for (let i = 0; i < canvas.length; i++) if (canvas[i] !== E5.px[i]) d5++;
+		const rows = Math.ceil(h / F.EXP_AGE_SLICES);
+		check('the colours\' ageing while the search runs: nothing between passes, then a pass over the rows every EXP_AGE_MS in EXP_AGE_SLICES slices of whole rows (one a frame); after it the image = the whole heat made at that time',
+			quiet === null && slices.length === F.EXP_AGE_SLICES && slices.every((b, k) => b[0] === 0 && b[2] === w - 1 && b[3] - b[1] + 1 <= rows + 2 && b[1] <= k * rows) && after === null && d5 === 0,
+			JSON.stringify({ quiet, slices: slices.map((b) => b.join('-')), after, d5 }));
 	}
+	{
+		// ---- heatPlace: the heat's canvas over the map by a CSS transform (the level's origin in CSS px, the tile's CSS px)
+		const style = {};
+		let sets = 0;
+		const st = new Proxy(style, { set(o, k, v) { sets++; o[k] = v; return true; } });
+		const org = { T: 20, ox: -150, oy: 40 };
+		const penv = { $: () => ({ style: st }), origin: () => Object.assign({}, org), dpr: () => 1.25, EXP: { W: 300, H: 200, placed: '' } };
+		let hp = null;
+		const pe = errOf(() => { hp = new Function(...Object.keys(penv), `'use strict';\n${pageFnSrc('heatPlace')}\nreturn heatPlace;`)(...Object.values(penv)); });
+		let t1, s1, s2, t2;
+		if (hp) { hp(); t1 = style.transform; s1 = sets; hp(); s2 = sets; org.ox = -170; hp(); t2 = style.transform; }
+		check('heatPlace: the heat\'s canvas (a pixel a tile) over the map by a CSS transform (translate: the level\'s origin in CSS px, scale: a tile\'s CSS px), its CSS size the level\'s tiles; written only when the view changed',
+			!pe && t1 === 'translate(-120px, 32px) scale(16)' && style.width === '300px' && style.height === '200px' && s2 === s1 && t2 === 'translate(-136px, 32px) scale(16)', pe ? pe.message : JSON.stringify({ t1, t2, s1, s2 }));
+	}
+	drawExploreChecks();
 	// ---- the trails on a fake canvas context (s = 1, the origin (10, 20), d = 1)
 	const draw = (trails, tNow) => { const g = fakeCtx(); let n = -1; const e = errOf(() => { n = F.drawTrails(g, trails, 10, 20, 1, 1, tNow); }); return { g, e, n, c: g.calls }; };
 	const pts = [];
@@ -649,24 +702,345 @@ function exploreViewChecks() {
 		JSON.stringify({ fade, gone: gone.n }));
 	const many = Array.from({ length: 14 }, (_, k) => Object.assign({}, T2, { id: 10 + k, k: 'goexplore', t: 1000 + k }));
 	const M = draw([T1, ...many], 2000);
-	check('drawTrails: at most EXP_TRAILS_K (10) a search (its newest), the other searches\' too', M.n === F.EXP_TRAILS_K + 1 && F.EXP_TRAILS_K === 10, `${M.n}`);
+	// (the strokes: one per colour, alpha step and pass, not one per attempt: 11 attempts of 2 searches, 4 passes)
+	const nStrokes = M.c.filter((q) => q.name === 'stroke').length;
+	check('drawTrails: at most EXP_TRAILS_K (10) a search (its newest), the other searches\' too; the attempts of one colour, alpha and pass in one stroke (11 attempts, a few strokes)',
+		M.n === F.EXP_TRAILS_K + 1 && F.EXP_TRAILS_K === 10 && nStrokes <= 12, `${M.n} strokes ${nStrokes}`);
+	{
+		// (only what is in the canvas: a trail far outside it draws its dot nowhere and its lines as a few points)
+		const far = { id: 3, k: 'explore', t: 0, ticks: 1000, pts: Array.from({ length: 400 }, (_, i) => (i % 2 ? 50 : 5000 + i * 4)), br: [] };
+		const g = fakeCtx();
+		F.drawTrails(g, [far], 0, 0, 1, 1, 100, 800, 600);
+		const pts2 = g.calls.filter((q) => q.name === 'lineTo' || q.name === 'moveTo').length;
+		check('drawTrails: only the parts in the canvas (a trail far to the right of it: no dot, no points)', pts2 === 0 && !g.calls.some((q) => q.name === 'arc'), `${pts2}`);
+	}
 	{
 		// ---- the palette (the UI review: 3 oranges, 3 pinks and yellows next to the route's gold and Follow's streak): no two
 		// searches that can run together alike (the relay only up to 50 x 50 tiles, the escape only above: they may share; the
 		// path skips and exact landings rarely leave a trail: they may share), none the route's gold, the nearest attempt's
 		// orange, the guide line's red-pink or the job run's light blue, none in the gold / orange hues
-		const hsl = (h) => { const r = parseInt(h.slice(1, 3), 16) / 255, g = parseInt(h.slice(3, 5), 16) / 255, b = parseInt(h.slice(5, 7), 16) / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+		const hsl = (hx) => { const r = parseInt(hx.slice(1, 3), 16) / 255, g = parseInt(hx.slice(3, 5), 16) / 255, b = parseInt(hx.slice(5, 7), 16) / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
 			let hue = 0; if (d) hue = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; hue = (hue * 60 + 360) % 360; const l = (mx + mn) / 2; return { hue, s: d ? d / (1 - Math.abs(2 * l - 1)) : 0 }; };
-		const C = F.EXP_COLORS, keys = Object.keys(C), shared = new Set(['escape|relay', 'relay|escape', 'precision|skips', 'skips|precision']);
+		const Cl = F.EXP_COLORS, keys = Object.keys(Cl), shared = new Set(['escape|relay', 'relay|escape', 'precision|skips', 'skips|precision']);
 		const clash = [];
-		for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) if (C[keys[i]].toLowerCase() === C[keys[j]].toLowerCase() && !shared.has(`${keys[i]}|${keys[j]}`)) clash.push(`${keys[i]}=${keys[j]}`);
-		const reserved = ['#ffd23f', '#ff9f43', '#ff4d6d', '#6ec8ff'], bad = keys.filter((k) => reserved.includes(C[k].toLowerCase()) || (hsl(C[k]).s > 0.3 && hsl(C[k]).hue >= 20 && hsl(C[k]).hue <= 65));
+		for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) if (Cl[keys[i]].toLowerCase() === Cl[keys[j]].toLowerCase() && !shared.has(`${keys[i]}|${keys[j]}`)) clash.push(`${keys[i]}=${keys[j]}`);
+		const reserved = ['#ffd23f', '#ff9f43', '#ff4d6d', '#6ec8ff'], bad = keys.filter((k) => reserved.includes(Cl[k].toLowerCase()) || (hsl(Cl[k]).s > 0.3 && hsl(Cl[k]).hue >= 20 && hsl(Cl[k]).hue <= 65));
 		const all = ['explore', 'relay', 'breaker', 'guide', 'goal', 'goexplore', 'escape', 'skips', 'gorolls', 'precision'];
 		check('the trails\' palette: every search a colour, no two that run together alike, none the route\'s, the nearest attempt\'s, the guide line\'s or the job run\'s colour, none gold / orange',
-			all.every((k) => /^#[0-9a-f]{6}$/i.test(C[k] || '')) && clash.length === 0 && bad.length === 0, JSON.stringify({ clash, bad }));
+			all.every((k) => /^#[0-9a-f]{6}$/i.test(Cl[k] || '')) && clash.length === 0 && bad.length === 0, JSON.stringify({ clash, bad }));
 	}
-	// ---- Follow
+	// ---- the map's level cache; the best route's panel; Follow
+	mapCacheChecks();
+	await improveChecks();
 	followChecks();
+}
+/** a stand-in canvas: its size (every width / height set counted), a style, a context of its own (fakeCtx) */
+function fakeCanvas(w, h, ctx) {
+	const c = { _w: w, _h: h, sizes: 0, style: {} };
+	Object.defineProperty(c, 'width', { get() { return c._w; }, set(v) { c._w = v; c.sizes++; } });
+	Object.defineProperty(c, 'height', { get() { return c._h; }, set(v) { c._h = v; c.sizes++; } });
+	const g = ctx || fakeCtx();
+	g.canvas = c;
+	c.getContext = () => g;
+	c.g = g;
+	return c;
+}
+/**
+ * drawExplore (editor.html, cut out with the heat's functions and run on stand-in canvases): the heat's canvas sized to the
+ * level (a pixel a tile) once, then only the changed rectangle put into it (no canvas resize on a heat update: a resize
+ * clears the canvas, the flash); a pan moves it by its CSS transform alone; the trails drawn again when they change, fade
+ * (EXP_TRAIL_MS), the map moves past their canvas's margin or zooms, else only moved.
+ */
+function drawExploreChecks() {
+	const puts = [];
+	const hctx = fakeCtx();
+	hctx.putImageData = (img, x, y, dx, dy, dw, dh) => puts.push([dx, dy, dw, dh]);
+	hctx.createImageData = (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h });
+	const heatCv = fakeCanvas(300, 150, hctx), trailCv = fakeCanvas(1000 + 400, 700 + 400);
+	const org = { T: 20, s: 1.25, ox: 100, oy: 50 };
+	const els = {};
+	const LVd = { W: 40, H: 30, fg: new Int32Array(1200), kind: new Map() };
+	const denv = { $: (id) => (id === 'cvHeat' ? heatCv : id === 'cvTrail' ? trailCv : (els[id] = els[id] || fakeEl())), origin: () => Object.assign({}, org), dpr: () => 1.25, trailMargin: () => 200,
+		SOLVE: { sig: null }, currentSig: () => 'x', editVersion: 0, LV: LVd, expLegend: () => {}, store: { get: () => null }, atob: (s) => Buffer.from(String(s), 'base64').toString('latin1') };
+	const fns = ['b64u8', 'heatReset', 'heatTodo', 'heatAdd', 'heatApply', 'heatPixel', 'heatGlow', 'heatRefresh', 'solidBlock', 'heatSolid', 'heatPlace', 'traceFlat', 'drawTrails', 'drawExplore'];
+	const code = [pageConstSrc('clamp'), ...['TRAIL_MARGIN', 'HEAT_SPAN_MIN', 'HEAT_STOPS', 'heatSpan', 'solidIds'].map(pageConstSrc), pageBlockSrc('HEAT_LUT'), pageBlockSrc('EXP_COLORS'), pageConstSrc('expColor'),
+		pageBlockSrc('EXP'), ...fns.map(pageFnSrc)].join('\n');
+	let D = null;
+	const de = errOf(() => { D = new Function(...Object.keys(denv), `'use strict';\n${code}\nreturn { drawExplore, heatApply, EXP, EXP_TRAIL_MS };`)(...Object.values(denv)); });
+	check('drawExplore and the heat\'s functions cut out of the page run', !!D, de ? de.stack : undefined);
+	if (!D) return;
+	const { EXP } = D, HM = new HX.HeatMap(40, 30);
+	HM.merge([100, 101, 102, 141, 142], 1000);
+	const tr = { id: 1, k: 'goexplore', label: 'random runs (CPU)', t: 4800, ticks: 100, pts: [0, 0, 160, 0, 160, 160, 320, 160], br: [] };
+	const answer = (extra) => Object.assign({ search: 9, running: true, t: 5000, w: 40, h: 30 }, HM.since(EXP.version), { trailId: 0, trails: [] }, extra || {});
+	const clears = () => trailCv.g.calls.filter((q) => q.name === 'clearRect').length;
+	D.heatApply(EXP, answer({ trailId: 1, trails: [tr] }), 0);
+	D.drawExplore(10);
+	const first = { sizes: heatCv.sizes, w: heatCv.width, h: heatCv.height, puts: puts.slice(), tf: heatCv.style.transform, cw: heatCv.style.width, clears: clears() };
+	// a new tile (found long ago: no glow): only its 3 x 3 put, no resize, the trails as they were
+	HM.merge([15 * 40 + 20], 1200);
+	D.heatApply(EXP, answer(), 50);
+	D.drawExplore(60);
+	const second = { sizes: heatCv.sizes, put: puts[puts.length - 1], n: puts.length, clears: clears() };
+	// a pan within the trails' margin: the heat's transform, the trails' canvas moved (not drawn), nothing put
+	org.ox = 140; EXP.viewDirty = true;
+	D.drawExplore(100);
+	const pan = { tf: heatCv.style.transform, tt: trailCv.style.transform, n: puts.length, clears: clears() };
+	// past the margin: the trails drawn again (the canvas back in place); a zoom: again, the heat's scale
+	org.ox = 400; EXP.viewDirty = true;
+	D.drawExplore(150);
+	const far = { tt: trailCv.style.transform, clears: clears() };
+	org.T = 40; org.s = 2.5; EXP.viewDirty = true;
+	D.drawExplore(200);
+	const zoomed = { tf: heatCv.style.transform, clears: clears() };
+	// fading: again every EXP_TRAIL_MS, not every frame
+	D.drawExplore(300);
+	const c300 = clears();
+	D.drawExplore(200 + D.EXP_TRAIL_MS);
+	const cFade = clears();
+	check('drawExplore: the heat\'s canvas sized to the level (a pixel a tile) once and put whole, placed by its CSS transform; a new tile: only its 3 x 3 put, no canvas resize (a resize clears it: the flash), the trails not drawn again',
+		first.sizes === 2 && first.w === 40 && first.h === 30 && first.puts.length === 1 && first.puts[0].join() === '0,0,40,30' && first.tf === 'translate(80px, 40px) scale(16)' && first.cw === '40px' && first.clears === 1 &&
+		second.sizes === 2 && second.n === 2 && second.put.join() === '19,14,3,3' && second.clears === 1, JSON.stringify({ first, second }));
+	check('drawExplore on a pan: the heat moved by its transform (nothing put), the trails\' canvas moved by its transform within its margin (not drawn); past the margin and on a zoom drawn again; while they fade at most every EXP_TRAIL_MS',
+		pan.tf === 'translate(112px, 40px) scale(16)' && pan.n === 2 && pan.tt === 'translate(32px, 0px)' && pan.clears === 1 && far.clears === 2 && far.tt === '' &&
+		zoomed.tf === 'translate(320px, 40px) scale(32)' && zoomed.clears === 3 && c300 === 3 && cFade === 4 && heatCv.sizes === 2 && puts.length === 2,
+		JSON.stringify({ pan, far, zoomed, c300, cFade, sizes: heatCv.sizes, puts: puts.length }));
+}
+/**
+ * The map's level cache (editor.html: draw, ovEnsure, ovStep, ovBlit, mapIdle, buildChunk, dirtyCell cut out and run on
+ * stand-in canvases, a stand-in clock, the simple block drawing counted): at the fit zoom the overview, one blit, no block
+ * drawn; its bands with the block images within MAP_BUDGET_MS a frame; nearer, the chunks within the budget and the rest from
+ * the overview (no part of the view left blank, however slow the drawing); a pan reuses the chunks (no block drawn again);
+ * an edited cell drops only its chunk(s); in the page's frames an edit at the fit zoom (an undo) and a loaded level's last
+ * band are drawn after the overview painted them.
+ */
+function mapCacheChecks() {
+	const clock = { t: 0, now() { return this.t; } };
+	let tiles = 0, tileCost = 0.002;
+	const seen = new Uint32Array(300 * 300);
+	const LVm = { W: 300, H: 300, fg: new Int32Array(90000).fill(9), bg: new Int32Array(90000), pal: new Map([[9, [100, 100, 100]]]), kind: new Map([[9, { kind: 'solid' }]]), bgColor: null };
+	const vwTile = (g, L, i) => { tiles++; seen[i]++; clock.t += tileCost; };
+	const mkCv = () => {
+		const g = fakeCtx();
+		g.createImageData = (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h });
+		g.putImageData = () => {};
+		return fakeCanvas(0, 0, g);
+	};
+	const cv = fakeCanvas(1165, 850);
+	const env = { $: (id) => (id === 'cv' ? cv : fakeEl()), document: { createElement: () => mkCv() }, performance: clock, store: { get: () => null }, window: { devicePixelRatio: 1.25 },
+		LV: LVm, GX: { on: false }, FOL: { on: false }, gxReady: () => false, vwTile, KIND_FALLBACK: { solid: [110, 118, 134] }, startAndTrophies: () => ({ start: -1, trophies: [] }),
+		ring: () => {}, ball: () => {}, drawJobPath: () => {}, drawRoute: () => {}, drawGuide: () => {}, gxBelow: () => {}, gxAbove: () => {}, S0: null };
+	const fns = ['dirtyCell', 'paintCells', 'buildChunk', 'flushCanvas', 'fitZi', 'miniColor', 'ovEnsure', 'ovStep', 'ovBlit', 'mapIdle', 'origin', 'draw'];
+	const code = [pageConstSrc('clamp'), pageConstSrc('ZOOMS'), pageBlockSrc('VW'), pageConstSrc('dpr'), pageConstSrc('tileT'), pageConstSrc('chunkSize'), pageConstSrc('MAP_BUDGET_MS'), pageConstSrc('OV'),
+		pageConstSrc('ovBuilding'), 'let flushCv = null;', ...fns.map(pageFnSrc)].join('\n');
+	let M = null;
+	const me = errOf(() => { M = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { ${fns.join(', ')}, VW, OV, MAP_BUDGET_MS, tileT, chunkSize, ovBuilding };`)(...Object.values(env)); });
+	check('the map\'s level cache cut out of the page runs', !!M, me ? me.stack : undefined);
+	if (!M) return;
+	const { VW, OV } = M, g = cv.g;
+	const imgs = () => g.calls.filter((q) => q.name === 'drawImage');
+	// ---- at the fit zoom: the overview, one blit
+	VW.zi = M.fitZi(); VW.camX = 2400; VW.camY = 2400;
+	g.calls.length = 0;
+	M.draw();
+	const T0 = M.tileT(), fitImgs = imgs(), o0 = M.origin();
+	const fitOk = fitImgs.length === 1 && fitImgs[0].a[0] === OV.c && OV.T === T0 && tiles === 0 && VW.chunks.size === 0 && VW.holes === 0 &&
+		fitImgs[0].a[5] === o0.ox && fitImgs[0].a[6] === o0.oy && fitImgs[0].a[7] === 300 * T0 && fitImgs[0].a[8] === 300 * T0;
+	// its bands with the block images, within the budget a frame, each cell once
+	let calls = 0, worst = 0, dirtied = 0;
+	while (M.ovBuilding() && calls < 5000) { const t0 = clock.t; VW.dirty = false; M.mapIdle(clock.t); worst = Math.max(worst, clock.t - t0); if (VW.dirty) dirtied++; clock.t += 16; calls++; }
+	const once = seen.every((v) => v === 1);
+	check('the map at the fit zoom: the overview (the whole level at the fit tile size, made at once in EE\'s minimap colours), one blit, no block drawn; then its bands with the block images while nothing else draws, each cell once, within MAP_BUDGET_MS (4 ms) and a band a frame, the map shown again as they come',
+		fitOk && M.MAP_BUDGET_MS === 4 && !M.ovBuilding() && once && tiles === 90000 && worst <= M.MAP_BUDGET_MS + 4 && calls > 20 && dirtied > 0,
+		JSON.stringify({ fitOk, T0, ovT: OV.T, imgs: fitImgs.length, tiles, calls, worst, dirtied, once }));
+	// ---- 16 px a tile: the chunks within the budget, the rest from the overview; every chunk of the view drawn one way or
+	// the other (no hole), until all are built
+	VW.zi = 9; VW.dirty = true; tiles = 0; tileCost = 0.01;
+	const T = M.tileT(), CH = M.chunkSize(T);
+	const covered = () => {
+		const { T: t, ox, oy } = M.origin(), ch = M.chunkSize(t), CT = ch * t, n = Math.ceil(300 / ch), ii = imgs(), miss = [];
+		for (let cy = Math.max(0, Math.floor(-oy / CT)); cy <= Math.min(n - 1, Math.floor((850 - oy) / CT)); cy++) {
+			for (let cx = Math.max(0, Math.floor(-ox / CT)); cx <= Math.min(n - 1, Math.floor((1165 - ox) / CT)); cx++) {
+				const X = ox + cx * CT, Y = oy + cy * CT;
+				if (!ii.some((q) => (q.a.length === 3 && q.a[1] === X && q.a[2] === Y) || (q.a.length === 9 && q.a[0] === OV.c && q.a[5] === X && q.a[6] === Y))) miss.push([cx, cy]);
+			}
+		}
+		return miss;
+	};
+	g.calls.length = 0; clock.t += 16;
+	const t0 = clock.t;
+	M.draw();
+	const firstMs = clock.t - t0, firstHoles = VW.holes, firstMiss = covered(), firstBuilt = VW.chunks.size, centre = VW.chunks.has(`s|${T}|9|9`);
+	let frames = 1;
+	while (VW.dirty && frames < 100) { VW.dirty = false; g.calls.length = 0; clock.t += 16; M.draw(); frames++; if (covered().length) break; }
+	const lastMiss = covered();
+	check('the map nearer (16 px a tile): the chunks of the view built within the budget, the view\'s centre first, the rest the overview scaled up (no part of the view blank), built in the next frames',
+		centre && firstBuilt >= 1 && firstBuilt < 20 && firstHoles > 0 && firstMiss.length === 0 && firstMs <= M.MAP_BUDGET_MS + CH * CH * tileCost + 1 && VW.holes === 0 && lastMiss.length === 0 && frames > 2,
+		JSON.stringify({ T, CH, firstBuilt, firstHoles, firstMiss, firstMs, frames, holes: VW.holes, lastMiss }));
+	// the ring around the view while nothing else draws; then a pan of 3 tiles: every chunk from the cache, no block drawn
+	let idle = 0;
+	for (let k = 0, n = -1; k < 200 && n !== VW.chunks.size; k++) { n = VW.chunks.size; clock.t += 16; M.mapIdle(clock.t); idle++; }
+	tiles = 0; g.calls.length = 0;
+	VW.camX += 48; VW.camY -= 32;
+	M.draw();
+	const panTiles = tiles, panHoles = VW.holes, panMiss = covered();
+	check('a pan (Follow, a drag) reuses the level\'s chunks: after the ring around the view was built while idle, a move of 3 tiles draws no block (the chunks blitted, no hole)',
+		panTiles === 0 && panHoles === 0 && panMiss.length === 0 && idle > 1, JSON.stringify({ panTiles, panHoles, panMiss, idle, chunks: VW.chunks.size }));
+	// ---- a slow machine (a chunk takes 64 ms): the first chunk alone, the whole view still drawn (the overview under the rest)
+	VW.zi = 10; tileCost = 1; tiles = 0; g.calls.length = 0; clock.t += 16;
+	M.draw();
+	const slow = { built: tiles / (M.chunkSize(M.tileT()) ** 2), holes: VW.holes, miss: covered().length, dirty: VW.dirty };
+	check('a slow machine (a chunk\'s blocks 64 ms): one chunk a frame, the rest of the view the overview (no blank part), the map drawn again next frame',
+		slow.built === 1 && slow.holes > 0 && slow.miss === 0 && slow.dirty === true, JSON.stringify(slow));
+	// ---- an edited cell: its chunk (and a neighbour's where the 3 x 3 around it reaches) dropped, the other chunks kept; the
+	// overview's cells again
+	VW.zi = 9; tileCost = 0.001; VW.dirty = true;
+	for (let k = 0; k < 50 && VW.dirty; k++) { VW.dirty = false; clock.t += 16; M.draw(); }
+	const n0 = [...VW.chunks.keys()].filter((k) => k.startsWith(`s|${T}|`)).length;
+	const mid = (9 * CH + 7) * 300 + 9 * CH + 7, corner = (9 * CH) * 300 + 11 * CH;
+	M.dirtyCell(mid);
+	const n1 = [...VW.chunks.keys()].filter((k) => k.startsWith(`s|${T}|`)).length, ovd = OV.dirty.slice();
+	M.dirtyCell(corner);
+	const n2 = [...VW.chunks.keys()].filter((k) => k.startsWith(`s|${T}|`)).length;
+	tiles = 0; clock.t += 16; M.draw();
+	const rebuilt = tiles;
+	check('an edited cell drops only its chunk (a cell at a chunk\'s corner the 4 around it), the others kept; its 3 x 3 cells of the overview again; the next frame builds only those',
+		n0 - n1 === 1 && n1 - n2 === 4 && ovd.length === 1 && ovd[0].join() === `${9 * CH + 6},${9 * CH + 6},${9 * CH + 9},${9 * CH + 9}` && rebuilt === 5 * CH * CH,
+		JSON.stringify({ n0, n1, n2, ovd, rebuilt, CH }));
+	// ---- the page's frames (frame(): the map drawn when dirty, else mapIdle), 16 ms apart. The merge review (2026-09-29):
+	// at the fit zoom the map is the overview, and the overview's work that ended within OV_FRAME_MS of the last draw was
+	// never shown: an undo at Fit (no pointer-up redraw after it) left 13 of 13 undone blocks drawn, a loaded level's last
+	// bands stayed in minimap colours. Now the map is drawn once more after the overview's last paint.
+	const run = (max) => {
+		let paintAt = -1, drawAt = -1, draws = 0, k = 0;
+		for (; k < max; k++) {
+			const t0 = tiles;
+			if (VW.dirty) { VW.dirty = false; M.draw(); drawAt = k; draws++; } else {
+				M.mapIdle(clock.t);
+				if (tiles > t0) paintAt = k; else if (!VW.dirty && !M.ovBuilding()) break;
+			}
+			clock.t += 16;
+		}
+		return { paintAt, drawAt, draws, k };
+	};
+	VW.zi = M.fitZi(); VW.dirty = true; tileCost = 0.002;
+	const settle = run(400);
+	M.dirtyCell(150 * 300 + 150);   // (an undo: applyCell -> dirtyCell, nothing else)
+	tiles = 0; g.calls.length = 0;
+	const ed = run(50), edTiles = tiles, edBlit = imgs().filter((q) => q.a[0] === OV.c).length;
+	check('an edit at the fit zoom (an undo: no redraw after it) is shown: the map drawn again after the overview painted the edited cells (it was drawn only before them)',
+		settle.k < 400 && ed.paintAt >= 0 && ed.drawAt > ed.paintAt && edTiles === 9 && edBlit === 2 && ed.k < 50 && !VW.dirty, JSON.stringify({ settle, ed, edTiles, edBlit }));
+	// (a level loaded at the fit zoom: the overview made again, its bands with the block images, the last one shown too;
+	// with several drawing speeds, so that the last band also ends within OV_FRAME_MS of a draw)
+	const loads = [0.0014, 0.0018, 0.002, 0.0024, 0.003, 0.0036, 0.0042, 0.005].map((c) => {
+		tileCost = c; OV.c = null; VW.chunks.clear(); VW.px = 0; VW.dirty = true; tiles = 0;
+		const ld = run(5000);
+		return Object.assign(ld, { c, tiles, ok: !M.ovBuilding() && tiles === 90000 && ld.paintAt > 0 && ld.drawAt > ld.paintAt && ld.draws > 2 && ld.k < 5000 && OV.unshown === false });
+	});
+	check('a level loaded at the fit zoom (8 drawing speeds): the map drawn again after the overview\'s last band (none left in minimap colours), shown as the bands come (at most every OV_FRAME_MS), then nothing more to draw',
+		loads.every((q) => q.ok), JSON.stringify(loads));
+}
+/**
+ * The best route's panel and the improvements (editor.html: impUpdate, bestRoute, changedSpan, impJob, bestPanel,
+ * bestChart, drawImpFlash cut out of the page and run): the steps of the best time from Find a route's improvements (GET
+ * /api/editor/solve `improve`) and, with Find and optimize, the optimizer's (GET /api/editor/autotas `t0`, `bests`); a new
+ * best route: its flash (the one before it a ghost, the stretch that changed); the job's best run as the route once faster.
+ */
+function improveChecks() {
+	const els = {};
+	const $ = (id) => (els[id] = els[id] || (id === 'bpChart' ? fakeCanvas(212, 42) : fakeEl()));
+	const clock = { t: 100000, now() { return this.t; } };
+	const apiCalls = [];
+	let apiAnswer = null;
+	const env = { $, SOLVE: { st: null, sig: null }, AUTO: { st: null }, FX: { dirty: false }, dpr: () => 1, currentSig: () => 'L', performance: clock, mapPathCheck: () => {},
+		api: async (u) => { apiCalls.push(u); return apiAnswer; }, atob: (s) => Buffer.from(String(s), 'base64').toString('latin1') };
+	const fns = ['bestRoute', 'changedSpan', 'impUpdate', 'impJob', 'tracePath', 'drawImpFlash', 'bestPanel', 'bestChart', 'b64i32'];
+	const code = [pageConstSrc('esc'), pageConstSrc('fmt'), pageConstSrc('clamp'), pageBlockSrc('IMP'), pageConstSrc('BEST_CHART_MS'), pageConstSrc('autoOf'), pageConstSrc('impFlashOn'), pageConstSrc('agoShort'),
+		pageConstSrc('impTicking'), ...fns.map(pageFnSrc)].join('\n');
+	let F = null;
+	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { ${fns.join(', ')}, IMP, impTicking, impFlashOn, IMP_FLASH_MS, IMP_JOB_MS, IMP_NEW_MS };`)(...Object.values(env)); });
+	check('the best route\'s panel: its functions cut out of the page run; the panel on the map (hidden until a route), its chart',
+		!!F && /<div class="bestp" id="bestP" title="click: fold \/ unfold" hidden><div class="bt"><span>best route<\/span><b id="bpTime"><\/b><\/div><div class="bs" id="bpSub"><\/div><div class="bl" id="bpLast"><\/div><canvas id="bpChart" width="212" height="42"><\/canvas><\/div>/.test(PAGE) &&
+		/if \(IMP\.dirty \|\| \(impTicking\(now\) && now - IMP\.chartAt >= BEST_CHART_MS\)\) bestPanel\(now\);/.test(PAGE) && /impUpdate\(performance\.now\(\)\); impJob\(\); mapPathCheck\(\);/.test(PAGE),
+		fe ? fe.stack : undefined);
+	if (!F) return;
+	const { IMP } = F;
+	const S0 = Date.now() - 60000;
+	// paths: P1 a straight line of 200 ticks; P2 the same with a detour in the middle, shorter
+	const P1 = Array.from({ length: 200 }, (_, t) => [16 + 2 * t, 88]);
+	const P2 = [...P1.slice(0, 50), ...Array.from({ length: 50 }, (_, k) => [116 + 4 * k, 60]), ...P1.slice(150)];
+	const res = (P, run, what) => ({ path: P, ticks: P.length - 1, runTicks: run, time: '', strategy: what, foundAfter: 1 });
+	const st = { started: S0, running: true, improve: [{ t: 5, runTicks: 900, ticks: 910, strategy: 'every move' }, { t: 12, runTicks: 850, ticks: 860, strategy: 'one search (CPU runs + GPU bursts)', clean: true }],
+		result: res(P1, 850, 'one search (CPU runs + GPU bursts)') };
+	const A = { t0: S0 + 400, running: true, job: 'j1', best: 800, bests: [{ t: 10, runTicks: 850, what: 'the first route' }, { t: 20, runTicks: 800, what: 'mutate' }, { t: 30, runTicks: 810, what: 'late' }] };
+	env.SOLVE.st = st; env.AUTO.st = A;
+	F.impUpdate(clock.t);
+	const L1 = IMP.list.map((e) => `${e.runTicks}${e.job ? 'j' : ''}:${e.what}`).join(' | '), n1 = IMP.n, live = IMP.live, dirty = IMP.dirty;
+	env.AUTO.st = Object.assign({}, A, { t0: S0 + 60000 });   // (another run's AutoTASer: not this search's)
+	F.impUpdate(clock.t);
+	const L2 = IMP.list.map((e) => e.runTicks).join();
+	check('the improvements: Find a route\'s faster routes (the cleaned ones said so) and, with Find and optimize, the optimizer\'s bests merged by time, each step faster than the one before; another run\'s AutoTASer not counted',
+		L1 === '900:every move | 850j:the optimizer: the first route | 800j:the optimizer: mutate' && n1 === 2 && live && dirty && L2 === '900,850', JSON.stringify({ L1, n1, L2 }));
+	// a new best route (the search's): its flash, the one before it the ghost, the stretch that changed
+	env.AUTO.st = null; env.FX.dirty = false;
+	st.improve.push({ t: 14, runTicks: 820, ticks: 150, strategy: 'every move' });
+	st.result = res(P2, 820, 'every move');
+	clock.t += 500;
+	F.impUpdate(clock.t);
+	const flash = { prev: IMP.prev === P1, cur: IMP.cur === P2, span: IMP.span && IMP.span.join(), at: IMP.flashAt === clock.t, fx: env.FX.dirty, newAt: IMP.newAt === clock.t, on: F.impFlashOn(clock.t + 100), off: F.impFlashOn(clock.t + F.IMP_FLASH_MS + 1) };
+	check('a new best route: flashed on the map for IMP_FLASH_MS (the best before it the ghost, the stretch that changed: changedSpan), the panel "new"', flash.prev && flash.cur && flash.span === '49,100' && flash.at && flash.fx && flash.newAt && flash.on && !flash.off &&
+		F.changedSpan(P1, P1.slice(0, 120).map(([x, y]) => [x, y + 50])).join() === '0,119' && F.changedSpan(P1, P1).join() === '199,199', JSON.stringify(flash));
+	// the flash drawn: the ghost dashed and faint, the changed stretch gold (its points only)
+	{
+		const g = fakeCtx();
+		const e = errOf(() => F.drawImpFlash(g, 0, 0, 1, 1, clock.t + 1000, 4000, 4000));
+		const strokes = g.calls.filter((q) => q.name === 'stroke');
+		const gold = strokes.filter((q) => /^rgba\(255,(210|243),/.test(q.stroke)), ghost = strokes.filter((q) => q.dash.length === 2 && /^rgba\(235,240,255,/.test(q.stroke));
+		const pts = g.calls.filter((q) => q.name === 'lineTo' || q.name === 'moveTo').length;
+		check('the new best\'s flash: the best before it a faint dashed ghost, the stretch that changed gold (a glow and a line), fading', !e && ghost.length === 1 && gold.length === 2 &&
+			+ghost[0].stroke.split(',')[3].replace(')', '') < 0.55 && pts <= 200 + 2 * 60, e ? e.stack : JSON.stringify({ strokes: strokes.map((q) => [q.stroke, q.dash.length]), pts }));
+	}
+	// the panel
+	env.AUTO.st = A; st.improve.pop(); st.result = res(P1, 850, 'one search (CPU runs + GPU bursts)');
+	F.impUpdate(clock.t);
+	F.bestPanel(clock.t);
+	const panel = { hidden: $('bestP').hidden, time: $('bpTime').textContent, sub: $('bpSub').textContent, last: $('bpLast').innerHTML };
+	const cg = $('bpChart').g, cs = cg.calls.filter((q) => q.name === 'stroke'), dots = cg.calls.filter((q) => q.name === 'arc');
+	check('the best route\'s panel: the best time, how many faster routes since the first (and by how much), still looking while the search runs, the latest one\'s gain and source; its step chart: a step a route (the search\'s gold, the optimizer\'s light blue), a dot each, the latest larger',
+		!panel.hidden && panel.time === '0:08.00' && panel.sub === '2 faster since the first (0:09.00, −100 ticks) · still looking' && /^latest <b>−50 ticks<\/b> · the optimizer: mutate · \d+ s ago$/.test(panel.last) &&
+		cs.length === 4 && cs[1].stroke === '#ffd23f' && cs[2].stroke === '#6ec8ff' && cs[3].stroke === '#6ec8ff' && dots.length === 3 && dots[2].a[2] > dots[1].a[2] && dots[0].a[0] === 4,
+		JSON.stringify({ panel, strokes: cs.map((q) => q.stroke), dots: dots.map((q) => q.a.slice(0, 3)) }));
+	// folded (a click): the title line only, no chart drawn
+	cg.calls.length = 0;
+	$('bestP').classList.toggle('min', true);
+	F.bestPanel(clock.t);
+	const folded = { hidden: $('bestP').hidden, time: $('bpTime').textContent, chart: cg.calls.length };
+	$('bestP').classList.toggle('min', false);
+	env.SOLVE.sig = 'other';
+	F.bestPanel(clock.t);
+	const hid = $('bestP').hidden;
+	env.SOLVE.sig = null;
+	check('the panel folded (a click on it, remembered): its title line (the time) only, no chart drawn; hidden once the level changed (the route is not this level\'s)',
+		!folded.hidden && folded.time === '0:08.00' && folded.chart === 0 && hid === true && /\$\('bestP'\)\.onclick = \(\) => \{ const m = !\$\('bestP'\)\.classList\.contains\('min'\);/.test(PAGE) &&
+		/\.bestp\.min \.bs, \.bestp\.min \.bl, \.bestp\.min canvas \{ display: none; \}/.test(PAGE), JSON.stringify({ folded, hid }));
+	// the job's best run (Find and optimize) as the route once it is faster: fetched at most every IMP_JOB_MS, only for a faster best
+	return (async () => {
+		const Pj = Array.from({ length: 150 }, (_, t) => [16 + 3 * t, 88]);
+		const b64 = (a) => Buffer.from(new Int32Array(a).buffer).toString('base64');
+		apiAnswer = { version: 3, ticks: 149, runTicks: 700, finished: true, posScale: 16, x: b64(Pj.map((p) => (p[0] - 8) * 16)), y: b64(Pj.map((p) => (p[1] - 8) * 16)) };
+		env.AUTO.st = Object.assign({}, A, { best: 700 });
+		await F.impJob();
+		const r = F.bestRoute(st);
+		clock.t += 100;
+		await F.impJob();
+		const calls1 = apiCalls.length;
+		clock.t += F.IMP_JOB_MS + 1;
+		await F.impJob();
+		const calls2 = apiCalls.length;
+		check('Find and optimize: the job\'s best run (GET /api/jobs/:id/path) the route shown once faster than the search\'s (Follow and the map take it), fetched only for a faster best and at most every IMP_JOB_MS',
+			apiCalls[0] === '/api/jobs/j1/path' && r && r.job && r.runTicks === 700 && r.path.length === 150 && Math.abs(r.path[10][0] - Pj[10][0]) < 1e-9 && calls1 === 1 && calls2 === 1 &&
+			F.bestRoute(Object.assign({}, st, { started: S0 + 1 })) !== r, JSON.stringify({ calls: apiCalls, r: r && [r.runTicks, r.path.length, r.job] }));
+	})();
 }
 /** Follow (see exploreViewChecks): its replay, camera, route switch, seek and smiley, cut out of the page */
 function followChecks() {
@@ -674,9 +1048,9 @@ function followChecks() {
 	const $ = (id) => (els[id] = els[id] || fakeEl());
 	const env = { $, SOLVE: { st: null }, VW: { zi: 2, camX: 0, camY: 0, glide: null, dirty: false, play: null }, FX: { dirty: false }, store: { get: () => null, set: () => {} },
 		document: { querySelectorAll: () => [] }, gxReady: () => false, GX: {}, toolInfo: () => {}, renderSolve: () => {}, changedView: () => {},
-		LV: { W: 100, H: 60 }, tileT: () => 16 };
-	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), pageBlockSrc('FOL'), pageConstSrc('FOL_TAU'),
-		...['followSrc', 'sameStart', 'followRetarget', 'followAim', 'followStep', 'followHud', 'followSeek', 'followToEnd', 'followSet', 'drawFollow', 'ball'].map(pageFnSrc)].join('\n');
+		LV: { W: 100, H: 60 }, tileT: () => 16, performance: { now: () => 0 } };
+	const code = [pageConstSrc('fmt'), pageConstSrc('clamp'), pageConstSrc('ZOOMS'), pageBlockSrc('FOL'), pageConstSrc('FOL_TAU'), pageBlockSrc('IMP'),
+		...['bestRoute', 'followSrc', 'sameStart', 'followRetarget', 'followAim', 'followStep', 'followHud', 'followSeek', 'followToEnd', 'followSet', 'drawFollow', 'ball'].map(pageFnSrc)].join('\n');
 	let F = null;
 	const fe = errOf(() => { F = new Function(...Object.keys(env), `'use strict';\n${code}\nreturn { FOL, FOL_HOLD, FOL_SNAP, FOL_END, followSrc, sameStart, followRetarget, followStep, followSet, followSeek, followToEnd, drawFollow, ZOOMS };`)(...Object.values(env)); });
 	check('Follow\'s functions cut out of the page run', !!F, fe ? fe.message : undefined);
@@ -792,7 +1166,7 @@ async function appSection() {
 	const scripts = [...PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 	check('the editor page\'s script parses', scripts.length === 1 && !errOf(() => new Function(scripts[0])), scripts.map((s) => { const x = errOf(() => new Function(s)); return x ? x.message : 'ok'; }).join('; '));
 	frontierChecks();
-	exploreViewChecks();
+	await exploreViewChecks();
 	const SV = require('../src/server.js');
 	await new Promise((res) => SV.server.listen(0, '127.0.0.1', res));
 	const port = SV.server.address().port;
@@ -2663,6 +3037,30 @@ async function exploreSection() {
 		check('a stopped search\'s heat stays (its clock stopped at its end); another search starts it over (the page\'s old version: every tile of the new one)', !hEnd.running && hEnd.t === hEnd2.t && hEnd.t > 0 &&
 			hNew.search !== h0.search && hNew.full && hNew.visited === 1 && hNew.version === 1 && hNew.trails.length === 0, JSON.stringify({ end: [hEnd.running, hEnd.t, hEnd2.t], new: [hNew.search, hNew.visited, hNew.version] }));
 	}
+	// ---- the best route's improvements (GET /api/editor/solve `improve`: the page's "best route" panel): a stand-in search
+	// reporting a slow route, then a faster one, then the slow one again and the fast one again (no step either)
+	{
+		const W = 30, H = 8, bufR = ED.eelvlOf({ name: 'improve', width: W, height: H, cells: [...room(W, H), [2, 6, 255], [20, 6, 121]] });
+		const LR = E.prepareLevel(EL.toSimLevel(EL.readEelvl(bufR)));
+		const slowIn = new Uint8Array(400).fill(4);
+		slowIn.fill(2, 0, 20);
+		const fast = C.evaluate(LR, new Uint8Array(400).fill(4)), slow = C.evaluate(LR, slowIn);
+		const str = (ms) => Array.from(ms, (m) => String.fromCharCode(48 + m)).join('');
+		const res = (ev) => ({ ev: 'result', kind: 'finish', ticks: ev.ms.length, inputs: str(ev.ms) });
+		const fake = path.join(HOME, 'fake-heat.js'), sc = path.join(HOME, 'improve-sc.json');
+		fs.writeFileSync(sc, JSON.stringify({ wait: 100, gap: 300, events: [res(slow), res(fast), res(slow), res(fast)] }));
+		ED.start({ eelvlB64: bufR.toString('base64'), seconds: 60, workers: 1, clean: false }, { available: false, why: 'test' }, { cpu: [process.execPath, fake, sc], steer: false });
+		const t0 = Date.now();
+		while (ED.state().running && Date.now() - t0 < 2500) await new Promise((r) => setTimeout(r, 100));
+		const st = ED.state();
+		ED.stop();
+		while (ED.state().running) await new Promise((r) => setTimeout(r, 50));
+		const L = st.improve || [];
+		check('the best route\'s improvements (GET /api/editor/solve improve): the first route and each faster one as they came {t, runTicks, ticks, strategy}, a slower or an equal route none; the best = the result',
+			fast && slow && slow.runTicks > fast.runTicks && L.length === 2 && L[0].runTicks === slow.runTicks && L[1].runTicks === fast.runTicks && L[0].ticks === slow.ms.length &&
+			L[0].t <= L[1].t && L[1].t > 0 && L.every((e) => e.strategy === 'random runs (CPU)' && !e.clean) && st.result && st.result.runTicks === fast.runTicks && ED.IMPROVE_KEEP === 64,
+			JSON.stringify({ L, slow: slow && slow.runTicks, fast: fast && fast.runTicks, result: st.result && st.result.runTicks }));
+	}
 }
 async function laneSection() {
 	section('path skips: the skip finder inside Find a route (the real src/skipfind.js --lane=1 next to a stand-in CPU search; no GPU)');
@@ -2838,6 +3236,8 @@ async function escapeSection() {
 	check('the escape\'s command line: the configuration\'s flags after the search\'s own (goexplore.js: the last one wins)',
 		args.indexOf('--deaths=0') >= 0 && args.lastIndexOf('--deaths=1') > args.indexOf('--deaths=0') && args[args.length - 1] === '--deaths=1' && args.includes('--prefix=p.eetas'), args.join(' '));
 	section('the stall escape: a fresh one search (the real src/goexplore.js --prefix) from a stalled search\'s nearest attempt (a stand-in CPU search; no GPU)');
+	// (scenarios (1)-(5) pin main's start rule, test.progStart false: their rooms' coins would make the first start a
+	// progress start; (6) is the progress-first starts, on and off)
 	// a 160 x 45 level (coarse cells: the CPU search's big-level path): a floor at row 20 over solid ground, the spawn at the
 	// left, the trophy at the right; a pit (1 tile wide, 12 deep) at x 30: a ball that falls in never gets out (the reach
 	// field rules the trophy out from its bottom); a coin at x 40 and a coin door (1 coin) across the corridor at x 100: the
@@ -2857,7 +3257,7 @@ async function escapeSection() {
 	const scenario = async (name, attempt, dist, seconds, source) => {
 		const sc = path.join(HOME, `esc_${name}.json`), stdinLog = path.join(HOME, `esc_${name}_stdin.log`);
 		fs.writeFileSync(sc, JSON.stringify({ attempt: str(attempt), dist, stdinLog, ...(source ? { source: str(source) } : {}) }));
-		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from });
+		ED.start({ eelvlB64: buf.toString('base64'), seconds, width: 1024, workers: 4 }, { available: false }, { cpu: [process.execPath, fake, sc], escape: true, escWait: 2, escStall: 3, escMin: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from, progStart: false });
 		const t0 = Date.now();
 		let st = ED.state();
 		while (st.running && !st.result && Date.now() - t0 < seconds * 1000 + 5000) { await new Promise((z) => setTimeout(z, 100)); st = ED.state(); }
@@ -2925,7 +3325,7 @@ async function escapeSection() {
 	const sc5 = path.join(HOME, 'esc_retarget.json');
 	fs.writeFileSync(sc5, JSON.stringify({ attempt: str(a4), dist: 5, stdinLog: path.join(HOME, 'esc_retarget_stdin.log'), source: str(s4), later: { at: 12000, attempt: str(s5), dist: 1 } }));
 	ED.start({ eelvlB64: buf.toString('base64'), seconds: 60, width: 1024, workers: 4 }, { available: false },
-		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from });
+		{ cpu: [process.execPath, fake, sc5], escapeCmd: [process.execPath, fakeEsc], escape: true, escWait: 2, escStall: 60, escMin: 60, escRetarget: 1, escRot: ESC_OLD.rot, escFrom: ESC_OLD.from, progStart: false });
 	const t5 = Date.now();
 	let st5 = ED.state(), away5 = null;
 	while (st5.running && Date.now() - t5 < 35000 && !(st5.escape && st5.escape.runs >= 2)) {
@@ -2956,7 +3356,7 @@ async function escapeSection() {
 		sources: [{ room: 777, desc: 'coins=1', gain: 5, dist: 50, inputs: str(s1R), at: 300 }, { room: 778, desc: 'coins=2', gain: 5, dist: 40, inputs: str(s2R), at: 400 }] }));
 	const rot6 = ['blind', 'reach', '--pA=0.25+--sample=4+--seed=9', 'deaths', '--deaths=1+--useful=0+--reach=x.bin', 'base'];
 	ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: rot6 }, { available: false },
-		{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeArgv, argvLog], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
+		{ cpu: [process.execPath, fake, sc6], escapeCmd: [process.execPath, fakeArgv, argvLog], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000, progStart: false });
 	const t6 = Date.now();
 	let st6 = ED.state();
 	while (st6.running && Date.now() - t6 < 70000 && !(st6.escape && st6.escape.runs >= 6)) { await new Promise((z) => setTimeout(z, 200)); st6 = ED.state(); }
@@ -2981,6 +3381,69 @@ async function escapeSection() {
 		hist6.length >= 5 && hist6[0].after < 20 && hist6.every((h) => h.turn === 1) && gaps6.length >= 4 && gaps6.every((g) => g < 8) &&
 		log6.some((l) => /escape: a fresh one search 1: no attempt nearer by .* for 1 s: from tick 260 of where room "coins=2" was entered, distance-blind novelty \(--pA=0 --burst=16\)/.test(l)),
 		`first after ${hist6.length ? hist6[0].after : '-'} s, gaps ${gaps6.map((g) => g.toFixed(1)).join(', ')} s; ${log6.slice(0, 1).join(' | ')}`);
+	// (6) THE PROGRESS-FIRST STARTS (cw-progress-starts, 2026-09-29; `progStart`, OPT-IN: EEAT_PROGSTART=1 on): the helpers
+	// alone, then the stalled search above with three rooms: 'coins=1 purple=[1]' entered at tick 280 (the most progress),
+	// 'coins=1' at 260, and a 'coins=0' room whose lowest-cost attempt is 1,200 ticks long (so the frontier rule, half the
+	// longest attempt held, drops every start under 600 ticks); the nearest attempt's room holds no coin
+	{
+		const P = ED.progOfDesc('coins=1 purple=[1,3] orange=[2] crown silvercrown key:red team=1 deaths=5 protection timedoors:open', null);
+		check('progOfDesc: coins, then the read switches on (purple + orange ids) + a crown + a silver crown; keys, effects, team, deaths and time doors count nothing',
+			P.c === 1 && P.s === 5 && ED.progOfDesc('deaths=99 key:red team=2 fly', null).c === 0 && ED.progOfDesc('deaths=99 key:red team=2 fly', null).s === 0 &&
+			ED.progOfDesc('(start)', null).s === 0 && ED.progGt({ c: 1, s: 0 }, { c: 0, s: 9 }) && ED.progGt({ c: 1, s: 2 }, { c: 1, s: 1 }) && !ED.progGt({ c: 1, s: 1 }, { c: 1, s: 1 }),
+			JSON.stringify(P));
+		const list = [{ desc: 'coins=1 purple=[1]', early: { ticks: 3000 }, at: 5 }, { desc: 'coins=1 purple=[1]', early: { ticks: 2500 }, at: 9 }, { desc: 'coins=1', early: { ticks: 100 }, at: 1 },
+			{ desc: 'coins=0 purple=[1,2]', early: { ticks: 50 }, at: 2 }, { desc: 'deaths=99 key:red', early: { ticks: 10 }, at: 3 }, { desc: 'coins=2', early: null, at: 4 }];
+		const pc = ED.progressCands(list, { c: 0, s: 0 }, null, null);
+		const same = ED.progressCands(list, { c: 1, s: 1 }, null, null), used = ED.progressCands(list, { c: 0, s: 0 }, { c: 1, s: 1 }, null);
+		check('the progress starts: only the rooms of the most progress above the nearest attempt\'s room (coins first, then switches; a room without a first arrival none), the earliest arrival first; the same progress as the nearest attempt\'s room, or no more than a progress start before: none',
+			!!pc.top && pc.top.c === 1 && pc.top.s === 1 && pc.cand.map((s) => s.early.ticks).join(',') === '2500,3000' && same.cand.length === 0 && used.cand.length === 0,
+			`${JSON.stringify(pc.top)} ${pc.cand.map((s) => s.early.ticks).join(',')}; same ${same.cand.length}, used ${used.cand.length}`);
+		const bs = [{ coins: 1, sw: 0, n: 0 }, { coins: 1, sw: 2, n: 1 }, { coins: 2, sw: 0, n: 2 }, { coins: 0, sw: 5, n: 3 }, { coins: 1, sw: 2, n: 4 }].sort(ED.breakCmp);
+		const bm = [{ coins: 1, sw: 0, n: 0 }, { coins: 1, sw: 0, n: 1 }, { coins: 2, sw: 0, n: 2 }].sort(ED.breakCmp);
+		check('the wall breaker\'s progress order: coins first, then the switches held, then the order before (a coin level without read switches: main\'s order)',
+			bs.map((x) => x.n).join(',') === '2,1,4,0,3' && bm.map((x) => x.n).join(',') === '2,0,1', `${bs.map((x) => x.n).join(',')} / ${bm.map((x) => x.n).join(',')}`);
+		const srcs = [{ room: 1, desc: 'coins=1 purple=[1]', runs: 3, gain: 0, at: 1 }, { room: 2, desc: 'deaths=5', runs: 0, gain: 4, at: 2 }, { room: 3, desc: 'deaths=6', runs: 1, gain: 0, at: 3 },
+			{ room: 4, desc: 'coins=1', runs: 0, gain: 2, at: 4 }];
+		const v1 = ED.evictVictim(srcs, null, true), v0 = ED.evictVictim(srcs, null, false);
+		const flat = [{ room: 5, desc: 'deaths=1', runs: 0, gain: 0, at: 1 }, { room: 6, desc: 'deaths=2', runs: 1, gain: 0, at: 2 }];
+		check('the sources\' eviction: never the source of the most progress (a relayed-from, gainless, oldest room of coins=1 purple=[1] stays, the next goes); off, or every source equal: main\'s rank',
+			v1.room === 3 && v0.room === 1 && ED.evictVictim(flat, null, true).room === 6, `on ${v1.room}, off ${v0.room}, equal ${ED.evictVictim(flat, null, true).room}`);
+	}
+	const fakeArgvP = path.join(HOME, 'fake-esc-argv-p.js'), argvLogP = path.join(HOME, 'esc_prog_argv.log');
+	fs.writeFileSync(fakeArgvP, FAKE_ESC_ARGV);
+	const sP = run([[0, 180], [4, 100]]), s2P = run([[0, 160], [4, 100]]), sLong = run([[0, 1100], [4, 100]]);
+	// (on: the progress start, then main's first (the frontier room's attempt), then nothing new; off: main's first, then
+	// nothing new: the stall clock again)
+	const progRun = async (tag, on, want) => {
+		const sc = path.join(HOME, `esc_prog_${tag}.json`);
+		fs.writeFileSync(sc, JSON.stringify({ attempt: str(aR), dist: 30, stdinLog: path.join(HOME, `esc_prog_${tag}_stdin.log`),
+			sources: [{ room: 777, desc: 'coins=1 purple=[1]', gain: 5, dist: 50, inputs: str(sP), at: 300 }, { room: 778, desc: 'coins=1', gain: 5, dist: 40, inputs: str(s2P), at: 350 },
+				{ room: 779, kind: 'best', desc: 'coins=0', gain: 5, dist: 60, inputs: str(sLong), at: 400 }] }));
+		if (on) process.env.EEAT_PROGSTART = '1';
+		ED.start({ eelvlB64: bufK.toString('base64'), seconds: 120, width: 1024, workers: 4, steer: false, escRot: ['base'], escFrom: ['arrival', 'frontier', 'near'] }, { available: false },
+			{ cpu: [process.execPath, fake, sc], escapeCmd: [process.execPath, fakeArgvP, argvLogP], escape: true, escFirst: 1, escWait: 1000, escStall: 1, escMin: 1, escTurn: 1, escRetarget: 1000 });
+		if (on) delete process.env.EEAT_PROGSTART;
+		const t0 = Date.now();
+		let st = ED.state();
+		while (st.running && Date.now() - t0 < 30000 && !(st.escape && st.escape.runs >= want)) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+		// (a few more stall checks: no further escape)
+		const t1 = Date.now();
+		while (st.running && Date.now() - t1 < 11000) { await new Promise((z) => setTimeout(z, 200)); st = ED.state(); }
+		ED.stop();
+		while (ED.state().running) await new Promise((z) => setTimeout(z, 50));
+		return { hist: (st.escape && st.escape.hist) || [], log: (st.log || []).filter((l) => /escape/.test(l)) };
+	};
+	const pOn = await progRun('on', true, 2), pOff = await progRun('off', false, 1);
+	const fmtH = (h) => h.map((x) => `${x.n}: ${x.kind} ${x.from} @${x.ticks}`).join('; ');
+	check('progress first: a room holding a new most of progress (coins=1 purple=[1]) over the nearest attempt\'s room: the first escape starts where it was entered (280 ticks, though the longest attempt held is 1,200: exempt from the frontier rule), said so in the log',
+		pOn.hist.length >= 1 && pOn.hist[0].kind === 'progress' && pOn.hist[0].ticks === sP.length && /^where room "coins=1 purple=\[1\]" was entered \(progress 1 coins \/ 1 switches over the nearest attempt's room's 0 \/ 0\)$/.test(pOn.hist[0].from) &&
+		pOn.log.some((l) => /escape: a fresh one search 1: .*from tick 280 of where room "coins=1 purple=\[1\]" was entered \(progress/.test(l)), fmtH(pOn.hist));
+	check('after a progress start the rotation is main\'s: the next escape = main\'s first (its kind, start and ticks), no second progress start (coins=1 is no new most), each start once',
+		pOn.hist.length === 2 && pOff.hist.length >= 1 && pOn.hist[1].kind === pOff.hist[0].kind && pOn.hist[1].from === pOff.hist[0].from && pOn.hist[1].ticks === pOff.hist[0].ticks &&
+		pOn.hist.slice(1).every((h) => h.kind !== 'progress') && new Set(pOn.hist.map((h) => `${h.from}@${h.ticks}`)).size === pOn.hist.length, `on ${fmtH(pOn.hist)} | off ${fmtH(pOff.hist)}`);
+	check('the default (off, no EEAT_PROGSTART): main\'s picks (no progress start; the frontier rule drops the short arrivals: the 1,200-tick room\'s attempt first)',
+		pOff.hist.length === 1 && pOff.hist.every((h) => h.kind !== 'progress') && pOff.hist[0].kind === 'frontier' && pOff.hist[0].ticks === sLong.length - 60 &&
+		pOff.hist.every((h) => h.ticks >= sLong.length / 2), fmtH(pOff.hist));
 	// (4) no stall, no escape: the escape off (b.escape false) is the search as before (no escape strategy at all)
 	const sc3 = path.join(HOME, 'esc_off.json');
 	fs.writeFileSync(sc3, JSON.stringify({ attempt: str(a1), dist: 8, stdinLog: path.join(HOME, 'esc_off_stdin.log') }));
