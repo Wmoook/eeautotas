@@ -387,6 +387,60 @@ function riseCaps() {
 		}
 	}
 }
+/**
+ * The portal exit state (n3 portal-exit-state, reachField's pexitOf, ordering only): a portal pair of the same rotation
+ * (dir 0: the speed kept) from a floor into a walled shaft whose only way in is the pair; a row of trophies k rows above the
+ * exit. The engine: a jump (or a run and a jump) into the portal leaves the exit with its own speed, so it reaches k = 3
+ * and never k = 8 (hold-right-and-jump patterns). Main's exit rises R(rpT) from ANY entry (the trophy 8 and 15 rows up
+ * "a few tiles"); the variant's exit comes from the entry state: k = 3 a few tiles, k = 8 / 15 only by main's exit,
+ * PEXIT_PEN (200 tiles) behind. Every level: the -1 set (every cost array's CUT) = main's byte for byte, the Bellman
+ * self-check 0, and portalExit: false = EEAT_PEXIT=0 = main's field. Also a reversing pair (dir 2): a fall of 30 rows
+ * into it rises as main's (the entry's speed is the most there is).
+ */
+function portalExitState() {
+	const shaft = (k, rotP, rotQ, fall) => {
+		const W = 14, H = 40, recs = [], walls = [];
+		const add = (id, pos, args) => recs.push({ id, layer: 0, xs: pos.map((p) => p[0]), ys: pos.map((p) => p[1]), args: args || [] });
+		for (let x = 0; x < W; x++) walls.push([x, 0], [x, H - 1]);
+		for (let y = 1; y < H - 1; y++) walls.push([0, y], [W - 1, y], [7, y]);
+		add(9, walls);
+		add(255, [[1, fall ? 1 : H - 2]]);
+		add(121, [8, 9, 10, 11, 12].map((x) => [x, H - 2 - k]));
+		add(242, [[fall ? 1 : 5, H - 2]], [rotP, 1, 2]);
+		add(242, [[10, H - 2]], [rotQ, 2, 9]);
+		return E.prepareLevel(EL.toSimLevel(EL.readEelvl(EL.writeEelvl({ width: W, height: H, name: 't', owner: 't', records: recs }))));
+	};
+	const cutSame = (a, b) => { for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) { const x = a[k], y = b[k]; if (x.length !== y.length) return false; for (let i = 0; i < x.length; i++) if ((x[i] === 0xffff) !== (y[i] === 0xffff)) return false; } return true; };
+	const same = (a, b) => { for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) { const x = a[k], y = b[k]; if (x.length !== y.length) return false; for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false; } return true; };
+	const engineReach = (L) => {   // hold right, jump at tick j held h ticks: does any finish?
+		for (let j = 0; j < 40; j += 2) for (const h of [1, 4, 8, 20]) {
+			const s = new E.EESim(L); s.reset(); const I = new E.EEInput();
+			for (let t = 0; t < 400; t++) { E.applyMask(I, 4 | (t >= j && t < j + h ? 1 : 0)); s.tick(I); if (s.has_silver_crown) return true; }
+		}
+		return false;
+	};
+	const res = {};
+	for (const k of [3, 8, 15]) {
+		const L = shaft(k, 0, 0, false);
+		const fv = R.reachField(L, { check: true }), fm = R.reachField(L, { check: true, portalExit: false });
+		const old = process.env.EEAT_PEXIT; process.env.EEAT_PEXIT = '0';
+		const fe = R.reachField(L, {});
+		if (old === undefined) delete process.env.EEAT_PEXIT; else process.env.EEAT_PEXIT = old;
+		const s = startSim(L, 0);
+		res[k] = { v: R.costAt(fv, s), m: R.costAt(fm, s), cut: cutSame(fv, fm), knob: same(fe, fm), mis: fv.mismatches + fm.mismatches, eng: engineReach(L) };
+	}
+	check('portal exit state (dir 0, the speed kept): the engine reaches the trophy 3 rows above the exit and not 8; the variant: 3 rows a few tiles, 8 / 15 behind PEXIT_PEN (200 tiles), main: 8 / 15 a few tiles; the -1 set = main\'s, the self-check 0, EEAT_PEXIT=0 = main',
+		res[3].eng && !res[8].eng && res[3].v >= 0 && res[3].v < 60 && res[8].v >= 200 && res[15].v >= 200 && res[8].m < 60 && res[15].m < 60 && [3, 8, 15].every((k) => res[k].cut && res[k].knob && res[k].mis === 0),
+		[3, 8, 15].map((k) => `k ${k}: var ${fmt(res[k].v)} main ${fmt(res[k].m)} engine ${res[k].eng ? 'yes' : 'no'}${res[k].cut ? '' : ' CUT DIFFERS'}${res[k].knob ? '' : ' KNOB DIFFERS'} mism ${res[k].mis}`).join('; '));
+	{
+		// dir 2 (rotation 1 -> 3): a fall from the top row into the portal reverses x 1.42: the exit rises as main's cap
+		const L = shaft(15, 1, 3, true);
+		const fv = R.reachField(L, { check: true }), fm = R.reachField(L, { portalExit: false });
+		const s = startSim(L, 0), v = R.costAt(fv, s), m = R.costAt(fm, s);
+		check('portal exit state (dir 2, a 37-row fall reversed): the trophy 15 rows above the exit as near as main\'s (no penalty), the -1 set = main\'s',
+			v >= 0 && v < 100 && Math.abs(v - m) < 20 && cutSame(fv, fm) && fv.mismatches === 0, `var ${fmt(v)} main ${fmt(m)}`);
+	}
+}
 function sectionB() {
 	section('B rooms: the start\'s value against the engine\'s answer');
 	for (const [name, want, rows] of ROOMS) {
@@ -408,6 +462,7 @@ function sectionB() {
 		check(`${name}: ${want === 'no' ? 'no way (cut off)' : want === 'yes' ? 'the engine finishes: finite' : 'finite'}`, ok && f.mismatches === 0, detail);
 	}
 	riseCaps();
+	portalExitState();
 	for (const [name, rows, masks] of ROUTED) {
 		const L = ascii(box(rows)), f = R.reachField(L, { check: true });
 		const ev = C.evaluate(L, Uint8Array.from(masks));

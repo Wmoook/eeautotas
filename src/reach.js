@@ -61,6 +61,10 @@ const CUT = 0xffff, FAR = 0xfffe;             // cost table: cut off; finite but
 // a death (the respawn at a checkpoint or another spawn): finite, so no proof is lost, but priced far beyond any real
 // way (fifths: 1638 tiles), so the searches (which drop dead balls) never head for a spike because a checkpoint is near
 const DEATH_COST = 8192;
+// the portal exit state (reachField's pexitOf, ordering only): main's free exit (R(rpT), F(KF)) this many fifths behind the
+// exit states the entry state allows (200 tiles: behind every real way, below DEATH_COST); the running top speed
+// (px/tick) of a portal's entry with no horizontal speed source within PEXIT_FED tiles
+const PEXIT_PEN = 1000, PEXIT_HV = 6.8, PEXIT_FED = 8;
 // walk mode with protection: the protected walk where no unprotected way is (the tiles a protected ball can be in only):
 // behind every real way too, like a death (see reachField)
 const PROT_COST = DEATH_COST;
@@ -389,6 +393,81 @@ function reachField(level, opts) {
 	const rcT = new Int8Array(N), rpT = new Int8Array(N).fill(INF);
 	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceR));
 	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
+	// ---- the exit state from the entry state (n3 portal-exit-state, ORDERING only): the teleport rotates the ball's speed
+	// by dir = (the entry's rotation - the exit's) mod 4 (eesim.js _portalTeleport: 0 keeps it, 2 reverses it x 1.42, 1 / 3
+	// turn the horizontal speed into the vertical one x 1.42), so a ball that walks into a portal does not leave its exit
+	// rising 19 rows (R(rpT): the rise cap of ANY entry) and a fall into a portal whose exit keeps the rotation leaves it
+	// falling. Per entry state (R(l), F(k) / L(k); XR and exits in a down boost or a field as before):
+	//   dir 0: R(l) -> R(l + 2) (the ball is put at the exit tile's centre: < 8 px + a sub-pixel higher in its tile),
+	//          F(k) / L(k) -> F(k + 1);
+	//   dir 2: F(k) -> R(the rise of 1.42 x F(k)'s speed, the teleport tick's move up by that speed), R(l) -> F(1.42 x the
+	//          speed of R(l)'s rise);
+	//   dir 1 / 3: R and F of 1.42 x the horizontal speed, at most the running top speed 6.78 px/tick (the physics cheat
+	//          sheet; measured 6.753) unless a field / side arrow / side boost (DOTS class) or a speed-changing teleport's
+	//          exit is within PEXIT_FED tiles (or ice is in the level): then 16, main's cap.
+	// Every exit state is capped by main's (R(rpT[p]), F(KF)), and main's own exit edges stay at PEXIT_PEN fifths more:
+	// the reachable set (so every -1) is main's byte for byte, only the order changes (NO PRUNE: a state whose only way is
+	// main's free rise keeps a finite cost, behind the ways the entry states allow). Off (main's field) with
+	// opts.portalExit === false, EEAT_PEXIT=0, opts.riseInf (the old model) and with opts.maxCost (the time-to-go fields of
+	// explore.js --hunt / sweep.js / routearm.js, whose costs bound ticks: never raised there).
+	const pexit = opts.portalExit !== false && process.env.EEAT_PEXIT !== '0' && !opts.riseInf && !(opts.maxCost >= 0) && anyPortal;
+	let pexitOf = null;
+	if (pexit) {
+		const rotOf = (i) => { const s = level.portalSlot[i]; return s >= 0 ? level.pRot[s] : 0; };
+		const dirOf = (p, e) => { let o = rotOf(p); const n = rotOf(e); if (o < n) o += 4; const d = o - n; return d >= 1 && d <= 3 ? d : 0; };
+		// the tiles within PEXIT_FED of a horizontal speed source: DOTS-class tiles (side arrows, side boosts, dots) and the
+		// exits of teleports that change the speed (dir 1 / 2 / 3)
+		const src = new Uint8Array(N);
+		let anySrc = false;
+		for (let i = 0; i < N; i++) if (cls[i] === DOTS) { src[i] = 1; anySrc = true; }
+		for (const [p, list] of portalExits) for (const e of list) if (dirOf(p, e) !== 0) { src[e] = 1; anySrc = true; }
+		const fed = new Uint8Array(N);
+		if (ice) fed.fill(1);
+		else if (anySrc) {
+			// a Chebyshev dilation of src by PEXIT_FED (rows then columns, prefix counts)
+			const R = PEXIT_FED, rowD = new Uint8Array(N);
+			for (let y = 0; y < H; y++) { let run = -1e9; for (let x = 0; x < W; x++) { if (src[y * W + x]) run = x; if (x - run <= R) rowD[y * W + x] = 1; } run = 1e9; for (let x = W - 1; x >= 0; x--) { if (src[y * W + x]) run = x; if (run - x <= R) rowD[y * W + x] = 1; } }
+			for (let x = 0; x < W; x++) { let run = -1e9; for (let y = 0; y < H; y++) { if (rowD[y * W + x]) run = y; if (y - run <= R) fed[y * W + x] = 1; } run = 1e9; for (let y = H - 1; y >= 0; y--) { if (rowD[y * W + x]) run = y; if (run - y <= R) fed[y * W + x] = 1; } }
+		}
+		const NRr = Q + 3;   // R levels -1 .. INF
+		const cache = new Map();
+		/** the exits of entry p toward an exit of dir d: { R: Int8Array per entry type [R_, F_, L_] x level (the exit's R level,
+		 *  -2 none), F: the same for the exit's F level (-1 none) } */
+		pexitOf = (p, d) => {
+			const key = p * 4 + d;
+			let o = cache.get(key);
+			if (o !== undefined) return o;
+			const m1 = pull3(p), m2 = modCurR(p), cap = rpT[p];
+			const rOfV = (v) => (v >= 16 ? cap : Math.min(cap, capOf(v - 7 + riseQ(-1.42 * v, m1, m2, nIceR))));
+			const fOfV = (v, move) => (v >= 16 ? KF : Math.min(KF, kOfX(fallD(Math.min(16, 1.42 * v)) + 16 + move)));
+			const uOfR = (l) => (l >= INF ? 16 : RaInv(8 * l + 16 + TOL));
+			const R = [new Int8Array(NRr).fill(-2), new Int8Array(KF + 1).fill(-2), new Int8Array(KF + 1).fill(-2)];
+			const F = [new Int8Array(NRr).fill(-1), new Int8Array(KF + 1).fill(-1), new Int8Array(KF + 1).fill(-1)];
+			if (d === 1 || d === 3) {
+				const hv = fed[p] ? 16 : PEXIT_HV;
+				const r = rOfV(hv), f = fOfV(hv, hv);
+				for (const a of R) a.fill(r);
+				for (const a of F) a.fill(f);
+			} else {
+				for (let l = -1; l <= INF; l++) {
+					const i = l + 1;
+					if (d === 0) R[0][i] = Math.min(cap, l >= INF ? INF : l + 2);
+					else { const u = uOfR(l); F[0][i] = fOfV(u, u); }
+				}
+				for (let k = 0; k <= KF; k++) for (const j of [1, 2]) {
+					if (d === 0) F[j][k] = Math.min(KF, k + 1);
+					else R[j][k] = rOfV(k >= KF ? 16 : VFC[k]);
+				}
+			}
+			// the inverse (the backward search): per entry type, per exit level index, the least entry level index whose exit
+			// reaches at least it (-1: none)
+			const inv = (A, nT) => A.map((a) => { const r = new Int16Array(nT).fill(-1); let e = 0; for (let t = 0; t < nT; t++) { while (e < a.length && a[e] < t - (nT === NRr ? 1 : 0)) e++; if (e < a.length) r[t] = e; } return r; });
+			o = { R, F, IR: inv(R, NRr), IF: inv(F, KF + 1) };
+			cache.set(key, o);
+			return o;
+		};
+		pexitOf.dirOf = dirOf;
+	}
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
 	const trophy = (i) => fg[i] === TROPHY && passable(i);
@@ -629,7 +708,7 @@ function reachField(level, opts) {
 	/** the edges of (t, ty, l) to other tiles: emit(t2, ty2, l2, cost). A death: the respawned ball stands still in the
 	 *  respawn tile's middle, its gravity queue from where it died (a pull there lifts it a pixel or so: R(0), which the
 	 *  lookup gives it; F(0) without one) */
-	function crossEdges(t, ty, emit) {
+	function crossEdges(t, ty, l, emit) {
 		if (deaths && dsrcT[t] === 1) for (const r of respawn) { emit(r, F_, 0, DEATH_COST); if (cls[r] === NORM) emit(r, R_, 0, DEATH_COST); }
 		if (cls[t] === DEADLY) return;
 		// (the exit: R(rpT[t]) (the rise cap of t's teleports), F(16), and in a field C(16 px/tick): the rotated speed is clamped
@@ -637,7 +716,18 @@ function reachField(level, opts) {
 		// entry under a 117) keeps R(INF): R has no moves in a down boost (fwd returns there), but the teleport tick moves
 		// the ball up out of the exit tile, so no tick of it starts in the boost: fwd's INF branch is its rise (the n3
 		// rise-q16 soundness review: R(rpT) there was a false -1))
-		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
+		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) {
+			if (pexitOf !== null && ty !== X_ && cls[e] !== BDOWN) {
+				// the exit state from the entry state (pexitOf), main's exits PEXIT_PEN behind
+				const o = pexitOf(t, pexitOf.dirOf(t, e)), j = ty === R_ ? 0 : ty === F_ ? 1 : 2, x = l - LO[ty];
+				const r = o.R[j][x], f = o.F[j][x];
+				if (r > -2) emit(e, R_, r, 5);
+				if (f >= 0) emit(e, F_, f, 5);
+				if (r < rpT[t]) emit(e, R_, rpT[t], 5 + PEXIT_PEN);
+				if (f < KF) emit(e, F_, KF, 5 + PEXIT_PEN);
+			} else { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); }
+			if (isField(cls[e])) emit(e, C_, NL - 1, 5);
+		}
 	}
 
 	// ---- storage: R, F and L per tile, C per field tile, XR per xrOK tile
@@ -697,7 +787,7 @@ function reachField(level, opts) {
 	const srcList = new Array(N).fill(null);
 	for (const [e, ps] of srcOf) srcList[e] = Int32Array.from(ps);
 	const { labels, maxFin } = labelSearch({ N, W, H, NR, NL, KF, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB,
-		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT });
+		invArr, invTable, nP, stopT, bounceT, srcList, respawnT, dsrc: Int32Array.from(deaths ? dsrc : []), seeds, maxF, rcT, rpT, pexitOf });
 	const kinds = invArr.reduce((a, x) => a + (x !== null ? 1 : 0), 0);
 	const field = Object.assign(base, { ms: 0, labels, kinds, profiles: nP, prioShift: 0, KJD,
 		seg: segOf, segPush: Float64Array.from(segPush), segCap: Float64Array.from(segCap), rowC, rowX, costR, costF, costL, costC, costX, nC, nX,
@@ -707,7 +797,7 @@ function reachField(level, opts) {
 	/** every edge out of (t, ty, l): emit(t2, ty2, l2, cost) */
 	const edgesOf = (t, ty, l, emit) => {
 		if (fg[t] === TROPHY) return;
-		crossEdges(t, ty, emit);
+		crossEdges(t, ty, l, emit);
 		if (cls[t] === DEADLY) return;
 		sameTile(t, ty, l, (ty2, l2) => emit(t, ty2, l2, 0));
 		const x = t % W, y = (t / W) | 0;
@@ -779,7 +869,7 @@ function reachField(level, opts) {
  */
 function labelSearch(S) {
 	const { N, W, H, NR, NL: L, cls, J, ceilJ, KJD, pid, srcP, rowC, rowX, COST, NLV, LO, front, XB, CB, LB, invArr, invTable, nP,
-		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT } = S;
+		stopT, bounceT, srcList, respawnT, dsrc, seeds, maxF, rcT, rpT, pexitOf } = S;
 	const K1 = S.KF + 1;
 	const NB = 8;
 	const bk = [], bn = new Int32Array(NB);
@@ -805,10 +895,22 @@ function labelSearch(S) {
 	// deaths: every death source costs DEATH_COST more than the cheapest respawn state (a respawn tile's F(0), or R(0)), so
 	// the sources are pushed once, when that label is set, at its cost + DEATH_COST (beyond the bucket ring: kept aside)
 	let dState = dsrc.length ? 0 : 2, dAt = 0;   // 0 waiting for a respawn label, 1 pending at dAt, 2 done
-	while (si < seeds.length || queued > 0 || dState === 1) {
-		if (queued === 0) cur = si < seeds.length && !(dState === 1 && dAt < seeds[si][1]) ? seeds[si][1] : dAt;
+	// (pexitOf: main's portal exits PEXIT_PEN behind, beyond the bucket ring: a FIFO, its costs in the order pushed)
+	let qT = new Int32Array(pexitOf ? 1024 : 0), qC = new Int32Array(qT.length), qh = 0, qn = 0;
+	const defer = (t, ty, c) => {
+		if (qn === qT.length) { const a = new Int32Array(qn * 2), b = new Int32Array(qn * 2); a.set(qT); b.set(qC); qT = a; qC = b; }
+		qT[qn] = t * 8 + ty; qC[qn++] = c;
+	};
+	while (si < seeds.length || queued > 0 || dState === 1 || qh < qn) {
+		if (queued === 0) {
+			let nx = si < seeds.length ? seeds[si][1] : Infinity;
+			if (dState === 1 && dAt < nx) nx = dAt;
+			if (qh < qn && qC[qh] < nx) nx = qC[qh];
+			cur = nx;
+		}
 		if (cur > maxF) break;
 		while (si < seeds.length && seeds[si][1] === cur) pushAllLow(seeds[si++][0], cur);
+		while (qh < qn && qC[qh] === cur) { push((qT[qh] / 8) | 0, qT[qh] & 7, 0, cur); qh++; }
 		if (dState === 1 && dAt === cur) { dState = 2; for (let n = 0; n < dsrc.length; n++) pushAllLow(dsrc[n], cur); }
 		const b = cur & (NB - 1), cv = cur > FAR ? FAR : cur;
 		for (let n = 0; n < bn[b]; n++) {
@@ -843,6 +945,17 @@ function labelSearch(S) {
 			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
 			if (srcList[t2] !== null && (ty2 === F_ || ty2 === R_ || (ty2 === C_ && c2 >= DOTS && c2 <= UP))) for (const p of srcList[t2]) {
 				if (ty2 === R_ && c2 !== BDOWN && l2 > rpT[p]) continue;
+				if (pexitOf !== null && ty2 !== C_ && c2 !== BDOWN) {
+					// the entry states whose exit state reaches (t2, ty2, >= l2) (pexitOf's inverse); XR as main; main's exits PEXIT_PEN behind
+					const o = pexitOf(p, pexitOf.dirOf(p, t2)), inv = ty2 === R_ ? o.IR : o.IF;
+					let e = inv[0][i2]; if (e >= 0) push(p, R_, e, cur + 5);
+					e = inv[1][i2]; if (e >= 0) push(p, F_, e, cur + 5);
+					e = inv[2][i2]; if (e >= 0) push(p, L_, e, cur + 5);
+					push(p, X_, 0, cur + 5);
+					const cp = cur + 5 + PEXIT_PEN;
+					if (cp <= maxF) { defer(p, R_, cp); defer(p, F_, cp); defer(p, L_, cp); }
+					continue;
+				}
 				push(p, R_, 0, cur + 5); push(p, F_, 0, cur + 5); push(p, X_, 0, cur + 5); push(p, L_, 0, cur + 5);
 			}
 			// deaths: (a death source, any) -> (respawn tile, F(0) or R(0))
