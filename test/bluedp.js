@@ -18,7 +18,7 @@
 //     right teams) the value falls at every coin; past T blue coins the layer field's value
 //   3 the CPU search (goexplore.js, 1 worker, seed 1, a tick budget): with the CPU file a route; reproducible
 //   4 blueDP false: no DP, the CPU file = the plain file (main's build); EEAT_BLUEDP=0 the same
-//   5 a gold door first on the plan: the gold DP (main's), no blue DP
+//   5 a gold coin DP (a 1-coin door on the plan): main's build, no blue DP (a level with both keeps its gold DP)
 // usage: node test/bluedp.js [--only=1,2,3,4,5] [--ticks=40000000]
 const fs = require('fs');
 const os = require('os');
@@ -42,8 +42,8 @@ process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }
 
 const W = 64, H = 44;
 const TEAMS = [[8, 1], [14, 2], [20, 3]], PITS = [[36, 1], [42, 2], [48, 3]];
-/** the unit level; goldFirst: a 1-gold-coin door column at x 26 left of the spawn... no: at x 33 between the spawn and
- *  the pits, its coin at (31, 36) (the plan passes the gold door first) */
+/** the unit level; goldFirst: a 1-gold-coin door column at x 33 between the spawn and the pits, its coin at (31, 36)
+ *  (the plan passes the gold door first: the gold DP) */
 function levelOf(goldFirst) {
 	const cells = [];
 	const open = new Set();
@@ -183,12 +183,12 @@ function section4() {
 }
 
 function section5() {
-	section('5 a gold door first on the plan: the gold DP');
+	section('5 a gold coin DP: main\'s build');
 	const G = levelOf(true);
 	const s = SF.buildSteer(G.L, { legThreads: 0 });
 	const off = SF.buildSteer(G.L, { legThreads: 0, blueDP: false });
 	const d = s.info.dp;
-	check('the gold DP (main\'s), no blue DP', !!d && !d.kind && !d.free && d.n === 1 && !!s.info.blue && s.info.blue.why === 'a gold door first', `${JSON.stringify(d)}, ${JSON.stringify(s.info.blue)}`);
+	check('the gold DP (main\'s), no blue DP (a level with a gold DP keeps it)', !!d && !d.kind && !d.free && d.n === 1 && !s.info.blue, `${JSON.stringify(d)}, ${JSON.stringify(s.info.blue)}`);
 	check('both files = the build with blueDP false, byte for byte', Buffer.compare(SF.steerFileBytes(s, null), SF.steerFileBytes(off, null)) === 0 && Buffer.compare(SF.steerFileBytes(s, null, true), SF.steerFileBytes(off, null, true)) === 0);
 }
 

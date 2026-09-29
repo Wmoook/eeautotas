@@ -1430,8 +1430,9 @@ function tourFifths(st, sim) {
 // 1): the walk plan touches (16,27) 4 times and the search stalled there with 2 blue coins; Beat the Spikes 2's 4 blue
 // coins in the corners (the plan touches (4,154) 4 times; the search held at most 1). THE BLUE DP: where the walk plan
 // passes a blue door (a door tile, or the corner a diagonal step needs open: Animaly's trophy is entered from the
-// diagonal past its door) before any gold door (the DP of the kind whose door comes first), the level holds 18 blue coins
-// or fewer and the blue count is modelled: the distinct-coin DP over the blue coins, T = the plan's highest blue door,
+// diagonal past its door) before any gold door (the DP of the kind whose door comes first), the gold coins gave no DP,
+// free DP or tour (a level with both keeps main's gold DP: Beaches in Space), the level holds 18 blue coins or fewer and
+// the blue count is modelled: the distinct-coin DP over the blue coins, T = the plan's highest blue door,
 // with LAYERED legs (kindLegs): per coin q and per layer l of the physics model WITHOUT the blue count (team, keys,
 // switches, protection, effects), the field to q in layer l's copy (its blue doors and gates by the count the ball holds
 // on its way to q: T - 1, then its place on the DP's own tour), the tiles that change the layer goals at the next layer's
@@ -1711,13 +1712,8 @@ function buildSteer(level, opts) {
 	for (let s = 0; s < M.S; s++) if (PH.fields[s]) layerBody[s] = addBody(PH.fields[s], PH.goals[s]);
 	// the coin DP
 	let dp = null;
-	// (the blue DP first (d4-blue-coin-dp): where the walk plan's first blue door comes before its first gold door and the
-	// build has it (kindLegs within the bytes and the time left), it is THE DP: the CPU file's alone, its bodies after
-	// nPlain; the gold DP, the free DP and the tour are then left out. Not with the plan past its count (coinT: gold))
-	const blue = opts.noDP || opts.coinT || !blueDPOn(opts) ? null
-		: blueDP(B, PH, level, { maxFields: Math.max(0, Math.floor(maxBytes / bodyBytes) - bodies.length), msPer: PH.ms / Math.max(1, PH.builds) }, T0() + maxMs, opts);
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
-	let cp = opts.noDP || (blue && blue.K) ? null : coinPlan(B, opts.coinT || 0);
+	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - T0() > maxMs)) {
 		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
@@ -1743,18 +1739,6 @@ function buildSteer(level, opts) {
 	// the layer bodies); the plain (GPU) file stays as it was (its bodies [0, nPlain), no DP, prioShift without them).
 	// Order only: nothing prunes by it (opts.freeDP === false: none, as before)
 	const nPlain = bodies.length;
-	if (blue && blue.K) {
-		// (the blue DP's leg bodies: per coin j and layer s of the steer, the body of its leg field in s's layer of the model
-		// without the blue count (legS, -1: none); leg[j] the start layer's (the wall breaker's gate file when nextGate gives
-		// no body))
-		const K = blue.K, n = K.coins.length, S = M.S, none = new Uint8Array(N);
-		const bodyOf = new Map();
-		const bOf = (f) => { if (!f) return -1; let b = bodyOf.get(f); if (b === undefined) bodyOf.set(f, b = addBody(f, none)); return b; };
-		const legS = new Int32Array(n * S).fill(-1);
-		for (let j = 0; j < n; j++) for (let s = 0; s < S; s++) legS[j * S + s] = bOf(K.F[j][K.toL[s]]);
-		const leg = Int32Array.from(K.coins, (q, j) => { let b = legS[j * S + M.s0]; for (let s = 0; b < 0 && s < S; s++) b = legS[j * S + s]; return b; });
-		dp = { n, T: K.T, bit: Int32Array.from(K.coins, (q) => level.coinBit[q]), leg, legS, h: K.D.h, rounds: K.rounds, tour: K.tour, free: true, max: true, kind: 'bcoins' };
-	}
 	// (only where the budget's cut WAS the coins ("coins: over ..."): the plan's counterexample named them next. Where it
 	// cut another feature first (Fizio1 "team: over 31 layers", its keys kept) the coins are no known next obstacle and
 	// the walk tour, blind to the keys, lost coins there in the product: 48 vs 87 and 32 vs 34 in 2 A/B pairs)
@@ -1831,6 +1815,27 @@ function buildSteer(level, opts) {
 				tourInfo = { n: R.n, T: R.T, first: !!R.first, ...(R.first === 2 ? { max: true } : {}), kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, mb: Math.round(R.bytes / 104857.6) / 10, start: s1 >= 0 ? s1 / 5 : null };
 			} else tourInfo = { none: true, T };
 		}
+	}
+	// THE BLUE COIN DP (d4-blue-coin-dp, kindPlan / kindLegs / blueDP above): only where the gold coins gave no DP, no
+	// free DP and no tour (a level with both keeps main's gold DP: Beaches in Space's plan passes its 3-blue door before its
+	// 16-coin door, and its gold DP guides the rest of the way), where the plan's first blue door comes before its first
+	// gold door and the build has it (kindLegs within the bytes and the time left): the CPU file's alone, its bodies after
+	// nPlain (after the tour's place: none there), the plain (GPU) file and its prioShift as without it. Not with the plan
+	// past its count (coinT: gold)
+	const blue = dp || steer.tour || opts.noDP || opts.coinT || !blueDPOn(opts) ? null
+		: blueDP(B, PH, level, { maxFields: Math.max(0, Math.floor(maxBytes / bodyBytes) - bodies.length), msPer: PH.ms / Math.max(1, PH.builds) }, T0() + maxMs, opts);
+	if (blue && blue.K) {
+		// (the blue DP's leg bodies: per coin j and layer s of the steer, the body of its leg field in s's layer of the model
+		// without the blue count (legS, -1: none); leg[j] the start layer's (the wall breaker's gate file when nextGate gives
+		// no body))
+		const K = blue.K, n = K.coins.length, S = M.S, none = new Uint8Array(N);
+		const bodyOf = new Map();
+		const bOf = (f) => { if (!f) return -1; let b = bodyOf.get(f); if (b === undefined) bodyOf.set(f, b = addBody(f, none)); return b; };
+		const legS = new Int32Array(n * S).fill(-1);
+		for (let j = 0; j < n; j++) for (let s = 0; s < S; s++) legS[j * S + s] = bOf(K.F[j][K.toL[s]]);
+		const leg = Int32Array.from(K.coins, (q, j) => { let b = legS[j * S + M.s0]; for (let s = 0; b < 0 && s < S; s++) b = legS[j * S + s]; return b; });
+		dp = { n, T: K.T, bit: Int32Array.from(K.coins, (q) => level.coinBit[q]), leg, legS, h: K.D.h, rounds: K.rounds, tour: K.tour, free: true, max: true, kind: 'bcoins' };
+		steer.dp = dp;
 	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}), ...(dp.kind ? { kind: dp.kind } : {}) } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
