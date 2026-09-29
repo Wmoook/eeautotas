@@ -131,6 +131,60 @@ function sectionA() {
 	secretWall();
 	timeDoors();
 	keyExpiry();
+	layerMemo();
+}
+
+/** a 40 x 7 corridor of the given cells ([x, y, id, ...args]) inside walls */
+function box(name, extra) {
+	const W = 40, H = 7, cells = [];
+	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+	return levelOf(ED.eelvlOf({ name, width: W, height: H, cells: cells.concat(extra) }));
+}
+/** the layer memo (steer.js buildPhysics, opt-in layerMemo / EEAT_STEER_MEMO=1): a layer's field built once per (level
+ *  copy, goals), the file the same byte for byte. The coin corridor: 6 coins left of the spawn, a 6-coin door column
+ *  before the trophy: the layers coins 0..5 are one copy (the door shut; a coin tile is no goal with staticCoins), so 2
+ *  physics fields instead of 7. The effect corridor: 3 coins, a jump effect (wild) and its reset (plain) between the
+ *  spawn and a 3-coin door: each count's plain / wild pair is a strongly connected pair that iterates, and the next
+ *  count's pair with the same copies takes the first one's fields (the spares); the wild fields' key carries the model */
+function layerMemo() {
+	const H = 7;
+	const coinCorr = box('memo coins', [[16, H - 2, 255], [34, H - 2, 121], ...[2, 4, 6, 8, 10, 12].map((x) => [x, H - 2, 100]), ...[1, 2, 3, 4, 5].map((y) => [28, y, 43, 6])]);
+	const fxCorr = box('memo fx', [[16, H - 2, 255], [34, H - 2, 121], [2, H - 2, 100], [4, H - 2, 100], [6, H - 2, 100], [10, H - 2, 417, 1], [20, H - 2, 417, 0], ...[1, 2, 3, 4, 5].map((y) => [28, y, 43, 3])]);
+	const keyCorr = box('memo key', [[2, H - 2, 6], [12, H - 2, 255], [30, H - 2, 121], ...[1, 2, 3, 4, 5].flatMap((y) => [[20, y, 23], [24, y, 26]])]);
+	const levels = [['key room', levelOf(ROOMS.key.buf)], ['coin room', levelOf(ROOMS.coins.buf)], ['switch room', levelOf(ROOMS.switch.buf)], ['coin corridor', coinCorr], ['effect corridor', fxCorr], ['key expiry corridor', keyCorr], ['time door corridor', corridor([156, 0, 157])]];
+	// (the reach fields a build makes: steer.js calls reach.js's reachField through the module, as this test holds it)
+	const orig = R.reachField;
+	let calls = 0;
+	R.reachField = function (lv, o) { calls++; return orig.call(this, lv, o); };
+	const build = (L, o) => { calls = 0; const st = SF.buildSteer(L, Object.assign({ maxMs: 600000, legThreads: 0 }, o)); const sim = new E.EESim(L); sim.reset(); return { st, calls, bytes: SF.steerFileBytes(st, null), cpu: st.tour ? SF.steerFileBytes(st, null, true) : null, v: SF.steerAt(st, sim), hits: st.info.cegar.reduce((a, c) => a + (c.memo || 0), 0) }; };
+	try {
+		const bad = [];
+		const rows = [];
+		for (const [name, L] of levels) {
+			const off = build(L, { layerMemo: false }), on = build(L, { layerMemo: true });
+			const same = Buffer.compare(off.bytes, on.bytes) === 0 && (off.cpu === null) === (on.cpu === null) && (!off.cpu || Buffer.compare(off.cpu, on.cpu) === 0) && Object.is(off.v, on.v);
+			if (!same || off.hits || on.calls > off.calls) bad.push(name);
+			rows.push(`${name} ${off.calls} -> ${on.calls} fields (${on.hits} hits), start ${on.v}`);
+		}
+		check(`the layer memo: the same steer file (GPU and CPU) and start value with and without it on ${levels.length} levels, never more reach fields, no hits with it off`, !bad.length, bad.length ? `differ: ${bad.join(', ')}` : rows.join('; '));
+		const c0 = build(coinCorr, { layerMemo: false }), c1 = build(coinCorr, { layerMemo: true });
+		check('the layer memo: the coin corridor\'s six identical coin layers (the 6-coin door shut) make one field', c1.st.info.features.includes('coins') && c1.hits >= 5 && c0.calls - c1.calls >= 5, `${c0.calls} -> ${c1.calls} reach fields, ${c1.hits} hits, layers ${c1.st.info.layers}`);
+		const f1 = build(fxCorr, { layerMemo: true });
+		const A = SF.analyze(fxCorr, {}), B = SF.walkBuild(fxCorr, A, { features: ['coins'] });
+		const memo = new Map(), PH = SF.buildPhysics(B, { staticCoins: true, debug: true, memo });
+		const held = new Set(PH.fields.filter(Boolean)).size;
+		check('the layer memo: the effect corridor\'s plain / wild pairs of equal copies share their fields (the spares), and after the call the memo holds only the fields its layers hold',
+			f1.hits > 0 && PH.memoHits > 0 && memo.size === held && [...memo.values()].every((e) => PH.fields.includes(e.f)), `hits ${f1.hits} (buildSteer) / ${PH.memoHits} (one call); memo ${memo.size} fields, the layers hold ${held}`);
+		// (EEAT_STEER_MEMO=1: the knob, read at the build; unset: off)
+		const prev = process.env.EEAT_STEER_MEMO;
+		process.env.EEAT_STEER_MEMO = '1';
+		const k1 = build(coinCorr, {});
+		delete process.env.EEAT_STEER_MEMO;
+		const k0 = build(coinCorr, {});
+		if (prev !== undefined) process.env.EEAT_STEER_MEMO = prev;
+		check('EEAT_STEER_MEMO=1: the memo on (the knob); unset: off (no hits, the fields as before)', k1.hits > 0 && k0.hits === 0 && k0.calls === c0.calls && Buffer.compare(k0.bytes, k1.bytes) === 0, `hits ${k1.hits} / ${k0.hits}, fields ${k1.calls} / ${k0.calls}`);
+	} finally { R.reachField = orig; }
 }
 
 /** a 40 x 7 corridor, the spawn at x 5, the trophy at x 30, full-height columns of the given ids from x 20 on */
