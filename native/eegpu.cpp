@@ -301,7 +301,9 @@ struct Gpu {
 		FILE* f = fopen(ptxPath.c_str(), "rb");
 		if (!f) { cu::lastError = "kernels not found: " + ptxPath; return false; }
 		fclose(f);
-		if (!cu::loadModuleCached(&mod, readText(ptxPath), gCacheDir, d.ccMajor, d.ccMinor, how)) return false;
+		const std::string ptx = readText(ptxPath);
+		if (!cu::loadModuleCached(&mod, ptx, gCacheDir, d.ccMajor, d.ccMinor, how)) return false;
+		if (!d.fitStack(ptx)) return false;   // (the stack limit: fitted to the kernels taken, fn(); cudadrv.h)
 		loadMs = msSince(t0);
 		opened = Clock::now();
 		ok = true;
@@ -317,15 +319,22 @@ struct Gpu {
 		tStart = Clock::now();
 		lk::G.searching = true;   // (launch.h: from now on a pause file holds it; the loading and allocations never wait)
 	}
+	/** a kernel (null: missing, or the stack limit its need raises it to did not fit: cu::lastError says why, e.g. "out of
+	 *  memory", which the callers' "kernels missing" errors carry for the editor's retry) */
 	cu::CUfunction fn(const std::string& name) {
 		cu::CUfunction f = nullptr;
-		if (cu::cuModuleGetFunction(&f, mod, name.c_str())) return nullptr;
+		if (cu::cuModuleGetFunction(&f, mod, name.c_str())) { cu::lastError = "no kernel " + name; return nullptr; }
+		if (!d.fitKernel(f, name)) return nullptr;
 		return f;
 	}
 	std::string json() const {
-		char b[512];
-		snprintf(b, sizeof b, "{\"name\":%s,\"sms\":%d,\"clockMHz\":%d,\"cc\":\"%d.%d\",\"memMB\":%zu,\"totalMB\":%zu,\"freeMB\":%zu,\"driver\":%d}",
-			jsonStr(d.name).c_str(), d.sms, d.clockMHz, d.ccMajor, d.ccMinor, d.mem >> 20, d.totalMem >> 20, cu::freeNow() >> 20, d.driver);
+		char b[768];
+		// (stackBytes: the per-thread stack limit set (stackHow: fit / env / main), stackNow: the driver's limit now (a
+		// launch that needs more raises it), ctxMB: the context's estimate, cudadrv.h ctxBytes)
+		snprintf(b, sizeof b, "{\"name\":%s,\"sms\":%d,\"clockMHz\":%d,\"cc\":\"%d.%d\",\"memMB\":%zu,\"totalMB\":%zu,\"freeMB\":%zu,\"driver\":%d,"
+			"\"stackBytes\":%zu,\"stackHow\":\"%s\",\"stackNow\":%zu,\"stackNeed\":%zu,\"stackKernel\":%s,\"stackMs\":%.0f,\"ctxMB\":%zu}",
+			jsonStr(d.name).c_str(), d.sms, d.clockMHz, d.ccMajor, d.ccMinor, d.mem >> 20, d.totalMem >> 20, cu::freeNow() >> 20, d.driver,
+			d.stackBytes, d.stackHow.c_str(), d.stackNow(), d.stackNeed, jsonStr(d.stackKernel).c_str(), d.stackMs, cu::ctxBytes >> 20);
 		return b;
 	}
 };
@@ -600,7 +609,7 @@ static int runSearch(int argc, char** argv, const LevelBlob& B, const std::vecto
 	Gpu g;
 	if (!g.open(ptxFor(argc, argv, TW))) { printf("{\"error\":%s}\n", jsonStr(cu::lastError).c_str()); return 4; }
 	cu::CUfunction fsearch = g.fn("search_" + std::to_string(TW));
-	if (!fsearch) { printf("{\"error\":\"search kernel missing\"}\n"); return 4; }
+	if (!fsearch) { printf("{\"error\":%s}\n", jsonStr("search kernel missing: " + cu::lastError).c_str()); return 4; }
 	lk::onStop = [&]() {   // (stopped before the search: an empty edges file; later the finale below)
 		FILE* f = fopen(argv[4], "wb");
 		const uint32_t head[4] = { 0x44454545u, 1u, 0u, (uint32_t)n };
