@@ -1501,12 +1501,12 @@ function buildSteer(level, opts) {
 	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0 };
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
-	// LEG KEYS (carryLegsOf): the plan's DP without a value at the start: its legs again with the other features carried
-	// (the same tour rounds); taken when the start gets a value, else the DP as it was. Then, still none: the walk tour
-	// over the DP's coins (buildTour, T the DP's, the CPU file's alone: the lookup the least of the layer field, the DP and
-	// it) instead of no value (Phina and the Rose's 18-coin DP: no tour from the start)
+	// LEG KEYS (carryLegsOf): the plan's DP without a value at the start, on a model with a feature other than the coins
+	// (only there can a leg's copy hold a sink): its legs again with the other features carried (the same tour rounds);
+	// taken when the start gets a value, else the DP as it was. (A walk tour over the DP's coins in its place, the CPU file's,
+	// tried in the A/B: routed levels 1.5-2x slower, A Dreary Day 3 of 3 seeds, Sand Castles; Phina and the Rose no better)
 	let legKeys = null;
-	if (dp && CL && !CL.layered && !opts.coinT && legKeysOn(opts) && !(steerAt(steer, sim0) >= 0)) {
+	if (dp && CL && !CL.layered && !opts.coinT && legKeysOn(opts) && PH.M.names.some((k) => k !== 'coins') && !(steerAt(steer, sim0) >= 0)) {
 		const lt0 = Date.now();
 		const stats = { carried: 0, plain: 0, fields: 0, subs: 0 };
 		const forced = new Map(CL.coins.map((q) => [q, !(CL.fields.get(q) && CL.fields.get(q).unforced)]));
@@ -1526,24 +1526,6 @@ function buildSteer(level, opts) {
 				bodies.length = 0; bodies.push(...keep.bodies); goals.length = 0; goals.push(...keep.goals);
 				bodyKey.clear(); for (const [k, v] of keep.keys) bodyKey.set(k, v);
 				steer.dp = keep.dp;
-			}
-		}
-		if (!(steerAt(steer, sim0) >= 0)) {
-			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true });
-			const R = buildTour(A, level, dp.T, false, kappa, t0 + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
-			if (R) {
-				steer.tour = R;
-				let s1 = tourFifths(steer, sim0);
-				if (s1 > TOUR_MAX_TILES * 5) {
-					const f = TOUR_MAX_TILES * 5 / s1;
-					for (let k = 0; k < R.legs.length; k++) if (R.legs[k] < CUT) R.legs[k] = Math.round(R.legs[k] * f);
-					for (let k = 0; k < R.C.length; k++) R.C[k] *= f;
-					for (let k = 0; k < R.tail.length; k++) R.tail[k] *= f;
-					R.scale = f;
-					s1 = tourFifths(steer, sim0);
-				}
-				if (s1 < 0) delete steer.tour;
-				else legKeys.tour = { n: R.n, T: R.T, kappa: Math.round(kappa * 1000) / 1000, scale: R.scale ? Math.round(R.scale * 1000) / 1000 : 1, ms: R.ms, start: s1 / 5 };
 			}
 		}
 		legKeys.ms = Date.now() - lt0;
@@ -1717,13 +1699,7 @@ function steerFifths(st, sim) {
 	const v = layerFifths(st, sim, layerIndex(st, sim));
 	// (the coin tour, the CPU file's (no DP): the min with the layer field's, like the DP's; first below T where the coins
 	// are not modelled: the layer field walks through their doors)
-	if (st.tour) {
-		const t = tourFifths(st, sim);
-		// (a tour next to a DP (LEG KEYS: the DP had no value at the start): the least of the three)
-		let w = v;
-		if (st.dp && !st.tour.first) { const d = dpFifths(st, sim, v >= 0 ? v : Infinity); if (d >= 0 && (w < 0 || d < w)) w = d; }
-		return t < 0 ? w : w < 0 || st.tour.first ? t : Math.min(w, t);
-	}
+	if (st.tour) { const t = tourFifths(st, sim); return t < 0 ? v : v < 0 || st.tour.first ? t : Math.min(v, t); }
 	// (st.dpFirst: the coin DP's value wherever it has one, the layer field's only past the coins (goexplore.js --dpFirst):
 	// the layer's own way needs no more coins, and on Forgotten Veil it is a false one (the portal at (77,109)))
 	if (st.dpFirst) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
