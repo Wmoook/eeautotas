@@ -271,6 +271,37 @@ function create(o) {
 	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
 	const st = { bursts: 0, domBursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
 		servers: 0, served: 0 };
+	// CHAIN AIM (goexplore.js --bchain=1, OPT-IN: o.chainAim {W: [[id]] the waves in the chain's order, gen}, the steer
+	// file's switch chain, steer.js chainPlan / flags 8). On a switch-chain level (Bad EE Level 9: 54 ids in 8 waves, every
+	// id a door AND a gate, so no mono switch and no dominance (goexplore.js domIndex); 216-299 of a run's 541-631 rooms a
+	// strict subset of an earlier room's purple switches with every other word the same: a 1619 reset or a toggle turned
+	// one off) every new room scored UNTRIED and the bursts went to the newest rooms, most of them such a step back, and
+	// aimed at every untried trigger of the room (the resets and the other minis' switches too). With it: (1) a room's
+	// bursts aim at the chain's NEXT switches (the OFF ids of its first unfinished wave by the room's own purple switches)
+	// where the room's walk reaches one untried (not resting), else at every untried target as before; (2) the rooms at
+	// the most chain progress (waves complete x 1000 + ids ON of the first unfinished wave, editor.js chainProgW) whose
+	// field aims at the chain (or not built yet) score CHAIN_BONUS more. ORDER only: every room and every target stays.
+	const CH = o.chainAim || null;
+	if (CH) { st.chainAimed = 0; st.chainFirst = 0; }
+	const CHAIN_BONUS = 1.5;
+	/** room r's chain progress and next ids {p, want (Set, null: the chain done)}; null: no chain */
+	const chainOf = (r) => {
+		if (!CH || !CH.W) return null;
+		const R = r.base || r;
+		if (R.chG === CH.gen) return R.ch;
+		const m = /(?:^|\s)purple=\[([^\]]*)\]/.exec(String(R.desc || ''));
+		const on = new Set(m ? m[1].split(',').map((x) => parseInt(x, 10)).filter((x) => Number.isFinite(x)) : []);
+		let p = 0, want = null;
+		for (const w of CH.W) {
+			let k = 0;
+			for (const id of w) if (on.has(id)) k++;
+			if (k < w.length) { want = new Set(w.filter((id) => !on.has(id))); p = p * 1000 + k; break; }
+			p++;
+		}
+		if (!want) p *= 1000;
+		R.chG = CH.gen; R.ch = { p, want };
+		return R.ch;
+	};
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
 	let smallUntil = 0;
@@ -534,7 +565,7 @@ function create(o) {
 	/** the steer field of room r: walking distance (fifths, 5 per step) to its untried targets; null: none left */
 	const fieldOf = (r) => {
 		// (cached while no trigger of the room was tried since)
-		const nk = r.tried.size * 4096 + (r.rest ? r.rest.size : 0);
+		const nk = r.tried.size * 4096 + (r.rest ? r.rest.size : 0) + (CH ? CH.gen * 1e8 : 0);
 		if (r.fc && r.fc.n === nk) return r.fc.f;
 		const f = fieldOf0(r);
 		r.fc = { n: nk, f };
@@ -584,12 +615,23 @@ function create(o) {
 		const rest = r.rest && r.rest.size ? r.rest : null;
 		// (every untried target resting: they all come back)
 		if (rest) { let live = 0; for (const [c] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !rest.has(c)) live++; if (!live) { rest.clear(); r.fails = new Map(); } }
-		for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
+		// (CHAIN AIM: the chain's next switches first, where the walk reaches one untried and not resting)
+		const ch = CH ? chainOf(r) : null;
+		let chainGoals = false;
+		if (ch && ch.want && ch.want.size) {
+			for (const [c, tiles] of I.comps) {
+				if (r.tried.has(c) || I.pOnly.has(c) !== arm || (r.rest && r.rest.has(c))) continue;
+				// (a component: 4-connected tiles of one block, so two switches side by side are one: any of its tiles)
+				if (tiles.some((t) => L.fg[t] === 113 && ch.want.has(L.lookup0[t]))) for (const t of tiles) goals.push(t);
+			}
+			if (goals.length) { chainGoals = true; st.chainAimed++; }
+		}
+		if (!chainGoals) for (const [c, tiles] of I.comps) if (!r.tried.has(c) && I.pOnly.has(c) === arm && !(r.rest && r.rest.has(c))) for (const t of tiles) goals.push(t);
 		const n = goals.length;
 		if (o.field.mode === 'walk') for (const t of I.trophies) if (!!I.via[t] === arm) goals.push(t);
 		if (!goals.length) return null;
 		const { walk, mx } = walkTo(I, goals);
-		return { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
+		return CH ? { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0, chain: chainGoals } : { walk, mx, triggers: n, trophies: o.field.mode === 'walk' ? I.trophies.length : 0 };
 	};
 	/** every worker's cell of room r nearest the field's goals, outside the arm's dead zones (the nearest of all; null when
 	 *  none has one) */
@@ -695,6 +737,9 @@ function create(o) {
 		const cand = [], dcand = [];
 		// (a dominated room's turn: --domBurst)
 		const domTurn = domBurst > 0 && ++domTick % domBurst === 0;
+		// (CHAIN AIM: the most chain progress of the rooms known)
+		let maxP = -1;
+		if (CH && CH.W) for (const r0 of rooms.values()) { const c = chainOf(r0); if (c.p > maxP) maxP = c.p; }
 		for (const r0 of rooms.values()) {
 			// (--dom=1: a room whose novelty group is dominated (goexplore.js domIndex: a room of its class with more mono
 			// switches on holds everything it can reach) is no burst's room: Good Egg's hour from the level alone gave 277
@@ -705,7 +750,10 @@ function create(o) {
 			if (dm && !domTurn) continue;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
-				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
+				let raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
+				// (CHAIN AIM: a room at the most chain progress whose field aims at the chain's next switches, or is not built
+				// yet: CHAIN_BONUS more)
+				if (maxP >= 0 && chainOf(r).p >= maxP && !(r.fc && r.fc.f && !r.fc.f.chain)) raw += CHAIN_BONUS;
 				// (--burstFair: the order by the score per untried target not yet failed)
 				(dm ? dcand : cand).push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
@@ -718,6 +766,7 @@ function create(o) {
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
 			bs = raw; best = { r, f };
+			if (maxP >= 0 && chainOf(r).p >= maxP) st.chainFirst++;
 			// (r.pa inherits its room's grp)
 			if (r.grp && r.grp.dom) { domChosen = true; st.domBursts++; }
 			break;

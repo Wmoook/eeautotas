@@ -268,6 +268,11 @@
 //        --tPhys=0 (1: a physics field to the same goals, the room's doors, at most one build per TE_PHYS_PK picks).
 //        Order only. The progress and done events carry "tedge": {picks, builds, hits, ms, fetched, byKind, choices,
 //        noGoal, rested, rooms, rewards}; EEAT_TELOG=<file>: a line per room choice (observation only). See SUBGOAL HEAD T)]
+//        [--bchain=0 (1 or EEAT_BCHAIN=1: OPT-IN, the one search's GPU bursts (--bursts=1) with the switch chain of the
+//        steer file (steer.js flags 8, the CPU file where the chain is built): a room's bursts aim at the chain's NEXT
+//        switches (the OFF ids of the first unfinished wave by the room's purple switches) where its walk reaches one
+//        untried, else at every untried trigger as before; the untried rooms at the most chain progress first. Order
+//        only (bursts.js CHAIN AIM); no chain in the file, or the flag off: nothing changes)]
 //        [--roomDead=1 (coarse cells, deaths as moves off: per room the tiles from which neither the trophy nor a trigger
 //        is walkable, roomDead, end a run, except while a trigger's effect is pending (pendingTrigger); never with deaths as
 //        moves: a death can take the ball out of a dead end; 0: off)]
@@ -360,7 +365,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
 	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 1,
-	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5, tPhys: 0,
+	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, bchain: process.env.EEAT_BCHAIN !== undefined ? +process.env.EEAT_BCHAIN : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5, tPhys: 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0, heat: 0 };
@@ -4998,11 +5003,19 @@ async function main() {
 	// --steer=<RCH4 file> (the editor's, src/steer.js) or --steer=build: the steer field in shared memory for the workers'
 	// second goal heap; a file of another level (or one that cannot be read) is ignored with a warning
 	// (stdin "steer <file>" with --stdin=1: the same, late, for a search that started without it: steerLate below)
+	// (--bchain: the switch chain's waves [[id]] in the chain's order, for the bursts' aim; set when a steer file with the
+	// chain loads, at the start or late)
+	const chainAim = { W: null, gen: 0 };
 	const loadSteer = (file, dist) => {
 		const bytes = file === 'build' ? SF.steerFileBytes(SF.buildSteer(L), null, true) : fs.readFileSync(file);
 		const sab = new SharedArrayBuffer(bytes.length);
 		new Uint8Array(sab).set(bytes);
 		const sd = SF.readSteerFile(Buffer.from(sab));
+		if (a.bchain && sd.chain && sd.chain.n > 0) {
+			const byW = new Map();
+			for (let k = 0; k < sd.chain.n; k++) { const q = sd.chain.order[k], w = sd.chain.wave[q]; if (!byW.has(w)) byW.set(w, []); byW.get(w).push(sd.chain.id[q]); }
+			chainAim.W = [...byW.keys()].sort((x, y) => x - y).map((w) => byW.get(w)); chainAim.gen++;
+		}
 		if (sd.W !== L.width || sd.H !== L.height) throw new Error('it was made for another level');
 		if (sd.levelFp[0] || sd.levelFp[1]) {
 			let fp = null;
@@ -5381,7 +5394,7 @@ async function main() {
 		try {
 			bursts = BU.create({ L, a, field, RM: one.RM, ports: one.ports, say, minLen: pre0 ? pre0.length : 0, bound: () => Atomics.load(ctrl, 0), register: one.register, sec: () => (Date.now() - t0) / 1000,
 				broadcast: (inputs) => one.broadcast(inputs, -1), finish: (masks, how) => routeFound(masks, 0, 0, how ? 'the route arm' : 'a GPU burst', false, false, how || ''),
-				nearest: () => (near && near.inputs ? { inputs: near.inputs, rc: near.rc } : null) });
+				nearest: () => (near && near.inputs ? { inputs: near.inputs, rc: near.rc } : null), ...(a.bchain ? { chainAim } : {}) });
 			for (const [k, r] of one.rooms) bursts.room({ room: k, desc: r.desc, tile: r.tile, t: r.t, inputs: preStr });
 			bursts.start();
 		} catch (e) { say({ ev: 'warning', text: `no GPU bursts: ${e.message}` }); bursts = null; }
