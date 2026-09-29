@@ -141,13 +141,13 @@ function analyze(level, opts) {
 	// count >= n), so a class [t_c, t_c+1) passes every door and gate test as each of its counts does: an exact quotient.
 	// Booty Return: 436 counts -> 8 classes, Evolution Revolution 46 -> 5; before, one layer per count 0..coinCap put
 	// them over the byte budget and the CEGAR left the coins out: every coin door open to the steer, a false near at it.
-	// opts.coinClasses false / EEAT_COINCLASS=0: one class per count, as before)
+	// opts.coinClasses false / EEAT_COINCLS=0 (or EEAT_COINCLASS=0): one class per count and no count offset: main's field)
 	const coinTh = new Set([0]), bcoinTh = new Set([0]);
 	for (let i = 0; i < N; i++) {
 		if ((fg[i] === 43 || fg[i] === 165) && lk[i] <= goldCoins) { coinCap = Math.max(coinCap, lk[i]); if (lk[i] > 0) coinTh.add(lk[i]); }
 		if (fg[i] === 213 || fg[i] === 214) { bcoinCap = Math.max(bcoinCap, lk[i]); if (lk[i] > 0) bcoinTh.add(lk[i]); }
 	}
-	const classes = !(opts && opts.coinClasses === false) && process.env.EEAT_COINCLASS !== '0';
+	const classes = !(opts && opts.coinClasses === false) && process.env.EEAT_COINCLASS !== '0' && process.env.EEAT_COINCLS !== '0';
 	const byNum = (a, b) => a - b;
 	for (const [k, f] of feats) {
 		if (k.startsWith('key') || k.startsWith('psw') || k.startsWith('osw') || k === 'prot' || k === 'crown' || k === 'fx') f.values = [0, 1];
@@ -1322,6 +1322,56 @@ function coinFileLayers(M, layerBody) {
 	return { rad, str, S, layerBody: lb };
 }
 
+// ------------------------------------------------------------------ the count inside a coin class (CPU file only)
+// A class body (coinGoals: more than 18 gold coins, a threshold class wider than one count) prices a coin of class k as
+// the next class's arrival + (the class's width - 1) x the coins' leg: the price of a ball at the class's FIRST count,
+// the same for every count in the class (Level 1 Overworld: 79 coins = 0 coins). Where the ball cannot reach the trophy
+// in its class (below: not even by walking with every gate but the coin doors / gates open), every way to the trophy
+// takes the class's next threshold, so its value holds that padding; a ball at count c of class [t_k, t_k+1) is owed
+// (c - t_k) legs less: ccFifths subtracts them (never below 0). Where it can (free[k]), the value may be the trophy's own
+// way and stays as it is. An ORDER (the CPU search's lookup; the GPU tools' file and native lookup unchanged), never a
+// -1: a value stays a value. The walk here is optimistic (gravity-blind, killers passable, keys / switches / team /
+// blue coins open), so 'cannot reach' only where no way exists without more coins.
+/** {th Int32Array (the class starts, from 0), leg (fifths), free [Uint8Array(N) per class below the top: 1 = the trophy
+ *  walkable from the tile with the class's count], ms} */
+function coinClassOffset(A, th, leg) {
+	const t0 = Date.now(), N = A.N, top = th.length - 1, free = [];
+	const H = { key: new Float64Array(1024), id: new Int32Array(1024) };
+	const goals = A.trophies.map((t) => ({ tile: t, cost: 0 }));
+	for (let k = 0; k < top; k++) {
+		const P = new Uint8Array(N);
+		for (let i = 0; i < N; i++) {
+			const c = A.cls[i];
+			if (c === 1 || c === 2) P[i] = 1;
+			else if (c === 3) {
+				const g = A.gateFeat[i];
+				P[i] = g === 'static' ? (A.gatePol[i] === 1 ? 1 : 0) : g === 'coins' ? (testGate('coins', A.gatePol[i], A.gateParam[i], th[k]) ? 1 : 0) : 1;
+			}
+		}
+		const d = walkDist(A, P, goals, 1, H);
+		const fr = new Uint8Array(N);
+		for (let i = 0; i < N; i++) if (d[i] < Infinity) fr[i] = 1;
+		free.push(fr);
+	}
+	return { th: Int32Array.from(th), leg: Math.round(leg), free, ms: Date.now() - t0 };
+}
+/** the fifths a ball's count is owed inside its coin class: (count - the class's start) x the leg where its class cannot
+ *  reach the trophy from its tile (0 at the class's start); -1 where it can (a free tile) or in the top class */
+function ccOwed(st, sim) {
+	const C = st.cc, th = C.th, top = th.length - 1, c = sim.coins;
+	let k = 0;
+	while (k < top && th[k + 1] <= c) k++;
+	if (k >= top) return -1;
+	const tx = Math.trunc(sim.px + 8) >> 4, ty = Math.trunc(sim.py + 8) >> 4;
+	if (tx < 0 || ty < 0 || tx >= st.W || ty >= st.H || C.free[k][ty * st.W + tx]) return -1;
+	return (c - th[k]) * C.leg;
+}
+/** the class offset on a layer value v (fifths; -1 none): v less the owed legs (never below 0, never a -1 made) */
+function ccFifths(st, sim, v) {
+	const owed = ccOwed(st, sim);
+	return owed > 0 && v > 0 ? Math.max(0, v - owed) : v;
+}
+
 // ------------------------------------------------------------------ build
 // the build's budget:the bodies' bytes (layers x tiles; a body ~BODY_BYTES_TILE bytes per tile: 107 on the review's
 // 200 x 40 level of 10 switch ids, 1024 layers in an 873 MB file and 2.86 GB of the process) and its time. Past either,
@@ -1459,9 +1509,16 @@ function buildSteer(level, opts) {
 			} else tourInfo = { none: true, T };
 		}
 	}
+	// the count inside a coin class (the CPU file's alone: steerFileBytes(st, fp, true), flags 4; ccFifths): only where the
+	// class bodies price their coins (coinGoals) and the coins are modelled
+	let ccInfo = null;
+	if (coinGoals && coinLeg > 0 && M.names.indexOf('coins') >= 0 && opts.coinOffset !== false) {
+		steer.cc = coinClassOffset(A, cf.values, coinLeg);
+		ccInfo = { classes: steer.cc.th.length, leg: coinLeg / 5, ms: steer.cc.ms };
+	}
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
-		tour: tourInfo, coinClasses: cf ? cf.values.length : 0, coinGoals: coinGoals ? coinLeg / 5 : 0 };
+		cc: ccInfo, tour: tourInfo, coinClasses: cf ? cf.values.length : 0, coinGoals: coinGoals ? coinLeg / 5 : 0 };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1588,7 +1645,17 @@ function nextCoin(st, sim, skip) {
 }
 /** the steer cost of a sim's state in fifths of a tile (-1 = no value) */
 function steerFifths(st, sim) {
-	const v = layerFifths(st, sim, layerIndex(st, sim));
+	let v = layerFifths(st, sim, layerIndex(st, sim));
+	// (the count inside a coin class, the CPU file's: where the ball's class cannot reach the trophy, every way takes
+	// more coins, and the class body's value is blind to the count and to the coins taken (a taken coin stays its goal):
+	// there the coin tour's value (the untaken coins, the count held) where it has one, else the body less the owed legs)
+	if (st.cc) {
+		const owed = ccOwed(st, sim);
+		if (owed >= 0) {
+			if (st.tour) { const t = tourFifths(st, sim); if (t >= 0) return t; }
+			return owed > 0 && v > 0 ? Math.max(0, v - owed) : v;
+		}
+	}
 	// (the coin tour, the CPU file's (no DP): the min with the layer field's, like the DP's; first below T where the coins
 	// are not modelled: the layer field walks through their doors)
 	if (st.tour) { const t = tourFifths(st, sim); return t < 0 ? v : v < 0 || st.tour.first ? t : Math.min(v, t); }
@@ -1622,6 +1689,8 @@ function steerFileBytes(st, levelFp, withTour) {
 	const N = st.N;
 	// (the coin tour: the CPU file's alone, flags 2, its section's offset a u64 at 56; the plain file stays as it was)
 	const R = withTour && st.tour ? st.tour : null;
+	// (the count inside a coin class: the CPU file's alone, flags 4, its section's offset a u64 in the file's last 8 bytes)
+	const CC = withTour && st.cc ? st.cc : null;
 	const bodyBytes = st.bodies.map((f) => RF.reachFileBytes(f, levelFp));
 	const dp = st.dp;
 	const parts = [];
@@ -1641,15 +1710,18 @@ function steerFileBytes(st, levelFp, withTour) {
 		parts.push(Buffer.from(Float32Array.from(R.tail).buffer), Buffer.from(Float32Array.from(R.C).buffer));
 		parts.push(Buffer.from(R.legs.buffer, R.legs.byteOffset, R.legs.byteLength));
 	}
+	const ccIdx = parts.length;
+	if (CC) { parts.push(i32([CC.th.length, CC.leg, CC.free.length, 0]), i32(CC.th)); parts.push(Buffer.concat(CC.free.map((f) => Buffer.from(f.buffer, f.byteOffset, N)))); }
 	let size = 64;
 	const offs = [];
 	for (const p of parts) { size = al8(size); offs.push(size); size += p.length; }
 	const offB = Buffer.alloc(8 * st.bodies.length), sizB = Buffer.alloc(8 * st.bodies.length);
 	bodyBytes.forEach((b, k) => { offB.writeBigUInt64LE(BigInt(offs[bodyIdx + k]), 8 * k); sizB.writeBigUInt64LE(BigInt(b.length), 8 * k); });
 	parts[offIdx] = offB; parts[offIdx + 1] = sizB;
-	const buf = Buffer.alloc(al8(size));
+	const buf = Buffer.alloc(al8(size) + (CC ? 8 : 0));
 	buf.write('RCH4', 0, 'latin1');
-	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
+	if (CC) buf.writeBigUInt64LE(BigInt(offs[ccIdx]), buf.length - 8);
+	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0) | (CC ? 4 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
 	if (levelFp) { buf.writeUInt32LE(levelFp[0] >>> 0, 48); buf.writeUInt32LE(levelFp[1] >>> 0, 52); }
 	if (R) buf.writeBigUInt64LE(BigInt(offs[tourIdx]), 56);
 	parts.forEach((p, k) => p.copy(buf, offs[k]));
@@ -1718,11 +1790,21 @@ function readSteerFile(buf) {
 		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, n * N);
 		tour = { n, T: hd[1], first: hd[2], bit, order, tail, C, legs };
 	}
-	return { version: ver, tour, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
+	// (the count inside a coin class: views on the file's bytes)
+	let cc = null;
+	if (flags & 4) {
+		o = Number(buf.readBigUInt64LE(buf.length - 8));
+		const hd = ints(4), th = ints(hd[0]);
+		o = al8(o);
+		const free = [];
+		for (let k = 0; k < hd[2]; k++) free.push(new Uint8Array(buf.buffer, buf.byteOffset + o + k * N, N));
+		cc = { th, leg: hd[1], free };
+	}
+	return { version: ver, tour, cc, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	analyze, makeModel, walkBuild, coinClassOffset, ccFifths, ccOwed, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)
 	_legFieldOf: legFieldOf };
