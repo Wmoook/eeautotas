@@ -368,6 +368,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
 	jcell: process.env.EEAT_JCELL !== undefined ? +process.env.EEAT_JCELL : 0,
 	pareto: process.env.EEAT_PARETO !== undefined ? +process.env.EEAT_PARETO : 0, pP: 0.15, pCell: 1,
+	cdom: process.env.EEAT_CHAINDOM !== undefined ? +process.env.EEAT_CHAINDOM : 0,
 	tedge: process.env.EEAT_TEDGE !== undefined ? +process.env.EEAT_TEDGE : 0, bchain: process.env.EEAT_BCHAIN !== undefined ? +process.env.EEAT_BCHAIN : 0, tchain: process.env.EEAT_TCHAIN !== undefined ? +process.env.EEAT_TCHAIN : 0, pT: 0.15, tK: 4096, tLambda: 4, tBlock: 256, tNear: 5, tGamma: 0.8, tC: 0.5, tPhys: 0,
 	rollsAstar: process.env.EEAT_ROLLS_ASTAR !== undefined ? +process.env.EEAT_ROLLS_ASTAR : 1,
 	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 0.01, mixFresh: 100000,
@@ -1294,7 +1295,7 @@ function domIndex() {
 		g.li = list.length; list.push(g);
 		return g;
 	};
-	return { groupOf, list, dlist, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
+	return { groupOf, list, dlist, drop, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
 }
 
 /**
@@ -2583,6 +2584,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	let dDom = 0, domShared = 0;   // (domShared: head B's tournaments over the dominated groups, --domShare)
 	/** the live state's novelty group (made when new; DOM on) */
 	const groupNow = () => DOM.groupOf(RM.dom(sim));
+	// (--cdom=1 / EEAT_CHAINDOM=1, OPT-IN, with --dom and the steer file's switch chain: see CHAIN DOMINANCE where ST is
+	// set; null: the flag off or no chain yet)
+	let cdNote = null, cdDrops = 0, cdRooms = 0;
 	// (--pareto=1, coarse cells: head P, see PARETO HEAD; null: the flag off or a level with no useful resource (no coin
 	// door, no key door or gate): no draw more, the search exactly as without the flag. parList: the front's rooms but the
 	// cheapest, rebuilt every PAR_EVERY picks (parAt); parMax: the most useful gold / blue / key colours a room holds)
@@ -2683,6 +2687,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 				if (f.troOk) g.troOk = true;
 			}
 		}
+		if (cdNote !== null) cdNote(r);
 		if (a.spdKids && pr !== undefined && pr.spd) { r.spd = true; spdRooms.push(r); }
 		if (PAR !== null) parNote(r);
 		if (TE !== null) teRoom(r, f.tl, f.tl2);
@@ -2822,6 +2827,47 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// the cells made before have no steer cost (sc) until a run improves them or they are picked. ST and HS change again
 	// once the editor sends the plan past its count (stdin "steer <file>" when a field is in use: switchSteer)
 	let ST = a.steerData || null;
+	// CHAIN DOMINANCE (--cdom=1 / EEAT_CHAINDOM=1, OPT-IN, with --dom; b9cw2-b9, 2026-09-29, Bad EE Level 9): on a level
+	// whose steer file carries the switch chain (steer.js flags 8) every chain id is a door AND a gate, so none is mono
+	// and main's dominance (roomOf dom) groups nothing: 216-299 of a run's 541-631 rooms held a strict SUBSET of an
+	// earlier room's chain switches (a 1619 reset or a toggle turned one off) with every other word the same, and each such
+	// regression was a fresh room for head B's novelty, head C's discovery burst and the sources. With the flag a room whose
+	// chain ids ON (its desc's purple list restricted to the chain's ids) are a strict subset of another room's of the same
+	// class (the desc with the chain ids and the time doors taken out: roomOf dom's class) has its novelty group dropped
+	// (domIndex drop): dominated, as a mono subset is, so it keeps the dominated share (--domShare of head B's tournaments)
+	// and loses its discovery burst and source; head A's heaps are untouched. Ordering only: nothing pruned, the -1
+	// untouched. The ids come from the steer file (the late one too: the rooms made before are classified then).
+	if (DOM !== null && a.cdom) {
+		const CD = { ids: null, words: 0, cls: new Map() };
+		const note = (r) => {
+			if (r.grp === null || r.grp === undefined) return;
+			const m = /(?:^|\s)purple=\[([^\]]*)\]/.exec(r.desc);
+			const mask = new Int32Array(CD.words), rest = [];
+			if (m && m[1]) for (const s of m[1].split(',')) { const id = parseInt(s, 10), b = CD.ids.get(id); if (b !== undefined) mask[b >> 5] |= 1 << (b & 31); else rest.push(id); }
+			const ck = r.desc.replace(/(?:^|\s)purple=\[[^\]]*\]/, rest.length ? ` purple=[${rest.join(',')}]` : '').replace(/(?:^|\s)timedoors:(?:open|shut)/, '').trim();
+			cdRooms++;
+			let M = CD.cls.get(ck);
+			if (!M) CD.cls.set(ck, M = []);
+			for (const e of M) if (maskEq(mask, e.mask)) { e.rooms.push(r); return; }
+			for (const e of M) if (maskIn(mask, e.mask)) { if (!r.grp.dom) { DOM.drop(r.grp); cdDrops++; } return; }
+			for (let k = M.length - 1; k >= 0; k--) {
+				if (!maskIn(M[k].mask, mask)) continue;
+				for (const q of M[k].rooms) if (q.grp && !q.grp.dom) { DOM.drop(q.grp); cdDrops++; }
+				M.splice(k, 1);
+			}
+			M.push({ mask, rooms: [r] });
+		};
+		cdNote = (r) => {
+			if (CD.ids === null) {
+				if (ST === null || !ST.chain || !(ST.chain.n > 0)) return;
+				CD.ids = new Map();
+				for (let k = 0; k < ST.chain.n; k++) CD.ids.set(ST.chain.id[k], k);
+				CD.words = (ST.chain.n + 31) >> 5;
+				for (const q of roomList) note(q);
+			}
+			note(r);
+		};
+	}
 	const hsPrio = (c) => c.sc + a.lambda * Math.sqrt(c.picks) + satPen(c) + demo(c);
 	const steerHeap = () => heapOf(hsPrio);
 	let HS = ST ? steerHeap() : null;
@@ -3177,7 +3223,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked, priorRuns, visTiles: nVis, maxCoins },
 	FR !== null ? { frBuilds: FR.builds, frMs: FR.ms, frPicks: FR.picks, frCand: FR.cand, frGoals: FR.goals, frShare: Math.round(fShare * 1000) / 1000, frR: Math.round((FR.r || 0) * 100) / 100 } : {},
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {},
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}, a.cdom ? { cdDrops, cdRooms } : {}) : {},
 	OT !== null ? Object.assign({ optRuns, optCells }, ...OP.NAMES.map((n, i) => ({ ['optE_' + n]: optEnds[i] }))) : {},
 	PAR !== null ? { parP, parFront, parG: parMax[0], parB: parMax[1], parK: parMax[2] } : {},
 	TE !== null ? { teP: TE.picks, teB: TE.builds, teH: TE.hits, teMs: TE.ms, teF: TE.fetched, teF0: TE.fk[0], teF1: TE.fk[1], teF2: TE.fk[2], teF3: TE.fk[3], teF4: TE.fk[4], teF5: TE.fk[5],
@@ -5115,7 +5161,7 @@ async function main() {
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
+		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, a.cdom ? { cdDrops: total('cdDrops'), cdRooms: total('cdRooms') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
 		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), jcellNow(), paretoNow(), tedgeNow(), usefulNow(), frontierNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
@@ -5462,7 +5508,7 @@ async function main() {
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0,
-				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0 } : {});
+				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0, cdDrops: d.cdDrops || 0, cdRooms: d.cdRooms || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +

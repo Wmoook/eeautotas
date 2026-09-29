@@ -302,6 +302,40 @@ function create(o) {
 		R.chG = CH.gen; R.ch = { p, want };
 		return R.ch;
 	};
+	// THE CHAIN'S FRONT (EEAT_BFRONT=<bonus>, OPT-IN with CHAIN AIM; b9cw2-b9, 2026-09-29): the most chain progress counts
+	// the ids of the first unfinished wave, so a lineage that pressed a HARD id of a later wave early (Bad EE Level 9's
+	// world switch 41 by the GPU random runs at 79 / 165 s, in a room with wave 0 unfinished) ranks below the rooms that
+	// pressed the easy minis and the hub switch first, and those then spent 175-177 s on the world switch. With the flag a
+	// room whose chain ids ON are no strict subset of another room's (the set-maximal rooms: an antichain; the switch-off
+	// regressions and the lineages another room holds more of are out) and whose field aims at the chain scores <bonus>
+	// more when it is not at the most progress (those get CHAIN_BONUS). Order only.
+	const FRONT = CH && process.env.EEAT_BFRONT ? +process.env.EEAT_BFRONT || 0 : 0;
+	if (FRONT > 0) st.chainFront = 0;
+	/** base room R's chain ids ON as a bit mask (the waves' ids in order) */
+	const chainMask = (R) => {
+		if (R.cmG === CH.gen) return R.cm;
+		if (CH.bitG !== CH.gen) { CH.bit = new Map(); let k = 0; for (const w of CH.W) for (const id of w) CH.bit.set(id, k++); CH.words = (k + 31) >> 5; CH.bitG = CH.gen; }
+		const mk = new Int32Array(CH.words);
+		const m = /(?:^|\s)purple=\[([^\]]*)\]/.exec(String(R.desc || ''));
+		if (m && m[1]) for (const s of m[1].split(',')) { const b = CH.bit.get(parseInt(s, 10)); if (b !== undefined) mk[b >> 5] |= 1 << (b & 31); }
+		R.cm = mk; R.cmK = mk.join(','); R.cmG = CH.gen;
+		return mk;
+	};
+	/** the chain masks (keys) that are a strict subset of another room's: the rooms off the front */
+	const chainBehind = () => {
+		const uniq = new Map();
+		for (const r0 of rooms.values()) { const mk = chainMask(r0); if (!uniq.has(r0.cmK)) uniq.set(r0.cmK, mk); }
+		const list = [...uniq.entries()], behind = new Set();
+		for (const [ka, ma] of list) {
+			for (const [kb, mb] of list) {
+				if (ka === kb) continue;
+				let sub = true;
+				for (let k = 0; k < ma.length; k++) if ((ma[k] & ~mb[k]) !== 0) { sub = false; break; }
+				if (sub) { behind.add(ka); break; }
+			}
+		}
+		return behind;
+	};
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
 	let smallUntil = 0;
@@ -740,6 +774,8 @@ function create(o) {
 		// (CHAIN AIM: the most chain progress of the rooms known)
 		let maxP = -1;
 		if (CH && CH.W) for (const r0 of rooms.values()) { const c = chainOf(r0); if (c.p > maxP) maxP = c.p; }
+		// (the chain's front: EEAT_BFRONT)
+		const behind = FRONT > 0 && CH && CH.W ? chainBehind() : null;
 		for (const r0 of rooms.values()) {
 			// (--dom=1: a room whose novelty group is dominated (goexplore.js domIndex: a room of its class with more mono
 			// switches on holds everything it can reach) is no burst's room: Good Egg's hour from the level alone gave 277
@@ -754,6 +790,7 @@ function create(o) {
 				// (CHAIN AIM: a room at the most chain progress whose field aims at the chain's next switches, or is not built
 				// yet: CHAIN_BONUS more)
 				if (maxP >= 0 && chainOf(r).p >= maxP && !(r.fc && r.fc.f && !r.fc.f.chain)) raw += CHAIN_BONUS;
+				else if (behind !== null && !behind.has((r.base || r).cmK) && !(r.fc && r.fc.f && !r.fc.f.chain)) raw += FRONT;
 				// (--burstFair: the order by the score per untried target not yet failed)
 				(dm ? dcand : cand).push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
@@ -767,6 +804,7 @@ function create(o) {
 			if (!f) { r.done = true; continue; }
 			bs = raw; best = { r, f };
 			if (maxP >= 0 && chainOf(r).p >= maxP) st.chainFirst++;
+			else if (behind !== null && !behind.has((r.base || r).cmK)) st.chainFront++;
 			// (r.pa inherits its room's grp)
 			if (r.grp && r.grp.dom) { domChosen = true; st.domBursts++; }
 			break;
