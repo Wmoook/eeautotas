@@ -166,6 +166,31 @@ const CHAIN_MAX = 12;
 // (each link starts this far back along the attempt: the nearest attempt is often doomed, like the start cell)
 const CHAIN_BACK = [150, 60, 400, 60];
 const CUT = 0xffff;
+// a start that ends in its dead ticks (liveEnd): on a level where deaths are moves (goexplore.js deathsOf) a run carries
+// its deaths (the death, then the dead ticks up to the respawn), so a start cut back along it (BACK, CHAIN_BACK,
+// TROPHY_BACK, the relay's and the escape's) can end while the ball is dead, and eegpu explore refused it (exit 3: "the
+// prefix dies"): Frolic lost 14 bursts of 300 s so, VVVVVV 11; 16 of sweep6's 58 runs had it. The dead ticks read no
+// input (eesim.js: the ball stands still, then comes back at its respawn target), so the start is played on with idle
+// ticks to the respawn (at most DEAD_PAD_MAX): the state the run itself has there, a start like any other (nothing is
+// pruned: a start that is still dead after them is sent as before). EEAT_DEADPFX=0: as before.
+const DEAD_PFX = process.env.EEAT_DEADPFX !== '0';
+const DEAD_PAD_MAX = 80;
+/** liveEnd(L, inputs ('0'+mask chars), sim?) -> the inputs, or the inputs + idle ticks ('0') up to the respawn when the ball
+ *  is dead after them (unchanged: EEAT_DEADPFX=0, alive, or still dead after DEAD_PAD_MAX ticks) */
+function liveEnd(L, inputs, sim) {
+	if (!DEAD_PFX || typeof inputs !== 'string' || !inputs.length) return inputs;
+	const s = sim || new E.EESim(L), inp = new E.EEInput();
+	s.reset();
+	for (let t = 0; t < inputs.length; t++) {
+		const c = inputs.charCodeAt(t);
+		if (c < 48 || c >= 80) continue;   // (eegpu reads only these: explorehost.h --prefix)
+		E.applyMask(inp, (c - 48) & 31); s.tick(inp);
+	}
+	if (!s.is_dead) return inputs;
+	let n = 0;
+	while (s.is_dead && n < DEAD_PAD_MAX) { E.applyMask(inp, 0); s.tick(inp); n++; }
+	return s.is_dead ? inputs : inputs + '0'.repeat(n);
+}
 
 /** the stall ladder's count for arm `arm` after a burst of `job` with result `res` ({reached, fresh, near}): a burst that
  *  gained nothing (no target, no room, not a tile nearer than it started) counts, a gain starts the count over; at
@@ -270,7 +295,9 @@ function create(o) {
 	const pending = new Map();   // request id -> {replies, want, done}
 	// (small: the bursts' longest launch by the host / GPU clock, eegpu's done lines, for the 50 ms rule on big tables)
 	const st = { bursts: 0, domBursts: 0, sec: 0, reached: 0, newRooms: 0, imports: 0, finishes: 0, trophy: 0, failed: 0, oom: 0, skipped: 0, chained: 0, fine: 0, deadStarts: 0, small: 0, maxLaunchMs: 0, maxKernelMs: 0,
-		servers: 0, served: 0 };
+		servers: 0, served: 0, livePad: 0 };
+	// (liveEnd's sim: the starts played on to their respawn)
+	const deadSim = DEAD_PFX ? new E.EESim(L) : null;
 	// (the big sizing's fallback to SMALL until smallUntil (ms) after an out-of-memory failure; big: the sizing asked is over SMALL)
 	const big = a.burstPar > 1 || a.gpuCells > SMALL.cells || !(a.burstCap > 0 && a.burstCap <= SMALL.cap);
 	let smallUntil = 0;
@@ -816,6 +843,8 @@ function create(o) {
 	const burst = (job) => new Promise((res) => {
 		const pre = path.join(work, `prefix_${job.lane}.eetas`), stop = path.join(work, `stop_${job.lane}`);
 		try { fs.unlinkSync(stop); } catch (e) { /* none */ }
+		// (a start in its dead ticks: played on to the respawn, liveEnd)
+		{ const x = liveEnd(L, job.inputs, deadSim); if (x !== job.inputs) { job.inputs = x; st.livePad++; } }
 		fs.writeFileSync(pre, Buffer.from(job.inputs, 'latin1'));
 		const T = o.bound();
 		const depth = T < a.depth ? Math.max(1, T - 1 - job.inputs.length) : 100000;
@@ -1239,4 +1268,4 @@ function roomAim(L, RM, sim, known, T) {
 	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
 }
 
-module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
+module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL, liveEnd };

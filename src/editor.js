@@ -984,20 +984,22 @@ function relayFrom(n) {
 	const X = S.strategies.find((q) => q.key === 'explore');
 	if (X && !(X.probe === 'slow' || X.refinedOnce || X.state === 'ended' || X.state === 'error' || searchClock(Date.now()) >= RELAY_WAIT_S ||
 		(X.refine && X.refine.at && Date.now() - X.refine.at > RELAY_AFTER_REFINE_MS))) return false;
-	const keep = c.ticks - Math.min(back, c.ticks - 1);
+	// (a start in its dead ticks: played on to the respawn, bursts.js liveEnd)
+	const pstr = BU.liveEnd(cur.level, String(c.inputs).slice(0, c.ticks - Math.min(back, c.ticks - 1)));
+	const keep = pstr.length;
 	// (a start near the level's start is every move's own work: no relay from there)
 	if (keep < RELAY_MIN_KEEP) return next();   // (too near the start: the next step of the plan)
 	// (a route of T ticks known: only a relay that can still end sooner; a source that cannot: the next step)
 	if (S.result && keep >= boundTicks() - 1) return src ? next() : false;
 	const file = path.join(dir(), `relay_${n}.eetas`);
-	try { fs.writeFileSync(file, Buffer.from(String(c.inputs).slice(0, keep), 'latin1')); } catch (e) { return false; }
+	try { fs.writeFileSync(file, Buffer.from(pstr, 'latin1')); } catch (e) { return false; }
 	// the cells by where the relay starts: where no gravity pulls (dots, and the like: both speeds free) 4 px cells, else
 	// 2 px (a run-up in the start's maze of the dot ring needed them); both with 1/4 px/tick speeds
 	// (a new starting point only: a relay that ran out of situations goes on from the same point with finer cells)
 	if (!R.cellsSet || !R.src || c.dist < R.src.dist - 0.5) {
 		const sim = new E.EESim(cur.level), inp = new E.EEInput();
 		sim.reset();
-		const str = String(c.inputs);
+		const str = pstr;
 		for (let t = 0; t < keep; t++) { E.applyMask(inp, (str.charCodeAt(t) - 48) & 31); sim.tick(inp); }
 		R.cells = sim.morx === 0 && sim.mory === 0 ? 0 : 1;
 		R.cellsSet = true;
@@ -1451,6 +1453,8 @@ function breakLaunch(n) {
 	const roundLeft = cur.opts.breakRound - (Date.now() - (R.clock || R.t0)) / 1000, left = S.seconds - searchClock(Date.now());
 	if (!R.chain || S.result || roundLeft < 3 || left < 3) return breakEnd(n);
 	const ch = R.chain, file = path.join(dir(), `break_${n}.eetas`);
+	// (a start in its dead ticks: played on to the respawn, bursts.js liveEnd)
+	ch.inputs = BU.liveEnd(cur.level, ch.inputs);
 	try { fs.writeFileSync(file, Buffer.from(ch.inputs, 'latin1')); } catch (e) { return breakEnd(n); }
 	const cellLog = cur.opts.breakCells || breakCells(toolInfo && toolInfo.memMB);
 	// (a small table: a box of BREAK_REGION tiles around the start, as the analysis's 2^28 runs had)
@@ -1701,6 +1705,8 @@ function escLaunch(n, st) {
 	esc.next = false;
 	esc.runs++;
 	const file = path.join(dir(), `escape_${esc.runs}.eetas`);
+	// (a start in its dead ticks: played on to the respawn, bursts.js liveEnd; else the escape's one search starts dead)
+	st.inputs = BU.liveEnd(cur.level, st.inputs);
 	try { fs.writeFileSync(file, Buffer.from(st.inputs, 'latin1')); } catch (e) { esc.at = Date.now(); return; }
 	// the CPU: ESC_CPU of the one search's workers (it parks as many), at least one each
 	// (W: the one search's workers as goexplore.js runs them: it takes at most 64, so a 192-thread box's W parks some too)
