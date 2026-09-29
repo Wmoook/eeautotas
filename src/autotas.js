@@ -177,10 +177,11 @@ function run(o) {
 		try {
 			const st = ED.state();
 			const r = st.result;
+			let key = '';
 			if (r && r.inputs) {
 				// (a route being cleaned (editor.js cleanLater) waits for its cleanup, at most CLEAN_WAIT_MS: the job's base
 				// is the cleaned route; a route handed on before its cleanup ended goes again once cleaned)
-				const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
+				key = `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
 				if (key !== lastKey) {
 					if (r.clean === 'pending' && waitKey !== key) { waitKey = key; waitAt = Date.now(); }
 					if (r.clean !== 'pending' || Date.now() - waitAt >= CLEAN_WAIT_MS) { lastKey = key; onRoute(r); }
@@ -200,7 +201,12 @@ function run(o) {
 					pending.push({ ms, runTicks: c.runTicks, strategy: `another class, avoiding ${c.avoid}` });
 				}
 			}
-			if (!frDone && !st.running) {
+			// (Find a route can end with its first route still in the cleanup: it stops as soon as a strategy finds a route,
+			// e.g. the relay. The end waits for the cleaned route, and after CLEAN_WAIT_MS the route as found is taken above;
+			// before, the same poll saw the route 'pending' and the search ended, and the AutoTASer ended "without a route
+			// (found)": the defaults A/B's Desolate Caverns, 4 runs)
+			const cleaning = !S.job && !!(r && r.inputs) && r.clean === 'pending' && key !== lastKey;
+			if (!frDone && !st.running && !cleaning) {
 				frDone = true;
 				holdShare(false);
 				emit({ ev: 'handoff', why: `Find a route ended (${st.stage})` });
@@ -240,7 +246,7 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
+module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT, CLEAN_WAIT_MS };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));
