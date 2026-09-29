@@ -209,6 +209,11 @@ inline size_t freeShare(size_t total, double frac) {
 	const size_t head = std::max<size_t>({ (size_t)1536 << 20, (total ? total : tot) / 20, 2 * ctxBytes });
 	return fr > head ? (size_t)((double)(fr - head) * frac) : 0;
 }
+/** EEAT_GPU_FIT=1 (OPT-IN): explore and roll size by freeShare (explorehost.h, rollhost.h). Off by default: its A/B
+ *  (n3-gpu-mem-orphans, box 2 A100, two searches of one arm a GPU) had far fewer burst "out of memory" failures, but every
+ *  move started when half the free memory was 2-5 GB and got a 2^25 table instead of 2^27 (16 M places tried instead of
+ *  66 M): Crypts of Anubis routed 1.3x / 1.7x slower, Soul Quest 0 of 2 vs 1 of 2 */
+inline bool fitOn() { const char* v = getenv("EEAT_GPU_FIT"); return v && v[0] == '1'; }
 /** the free memory now (bytes; 0: unknown) */
 inline size_t freeNow() { size_t fr = 0, tot = 0; return cuMemGetInfo_v2 && !cuMemGetInfo_v2(&fr, &tot) ? fr : 0; }
 

@@ -160,11 +160,11 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 	const size_t SB = sizeof(S);
 	// the visited-cell table: 1 GB (2^27 cells) on GPUs with 6 GB or more, else smaller; stop before it is half full
 	// (probing degrades). The state buffers take at most about a third of the memory.
-	// (sized by this process's share: the GPU's memory (or EEAT_GPU_BUDGET_MB), at most half the free memory less the
-	// headroom (cudadrv.h freeShare), the same share the fit below keeps the table and states to; --reserve: the wall
-	// breaker's own rule, the free memory less the reserve)
+	// (sized by the GPU's memory, or EEAT_GPU_BUDGET_MB when less; with EEAT_GPU_FIT=1 (opt-in, cudadrv.h fitOn) at most
+	// half the free memory less the headroom (cudadrv.h freeShare), the share the fit below keeps the table and states to;
+	// --reserve: the wall breaker's own rule, the free memory less the reserve)
 	const bool reserveGiven = !opt(argc, argv, "reserve", "").empty();
-	const size_t share = reserveGiven ? SIZE_MAX : cu::freeShare(g.d.totalMem, 0.5);
+	const size_t share = reserveGiven || !cu::fitOn() ? SIZE_MAX : cu::freeShare(g.d.totalMem, 0.5);
 	const size_t memB = std::min(g.d.mem ? g.d.mem : (size_t)4 << 30, std::max(share, (size_t)1 << 30));
 	uint32_t cellLog = memB >= ((size_t)11 << 30) ? 27 : memB >= ((size_t)5 << 30) ? 26 : 25;   // (16 bytes per cell)
 	int cap = (int)std::max<size_t>(1024, std::min<size_t>((size_t)capReq, memB / 3 / (2 * sizeof(S) + 18 * 20)));
@@ -191,7 +191,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 			if (cellLog != asked) { printf("{\"warn\":\"2^%u cells do not fit the free memory less the reserve: 2^%u\",\"cellLog\":%u,\"freeMB\":%zu}\n", asked, cellLog, cellLog, fr >> 20); fflush(stdout); }
 		}
 	}
-	// the free-memory fit (without --reserve): the table and the state buffers within this process's share of the free
+	// the free-memory fit (EEAT_GPU_FIT=1, without --reserve): the table and the state buffers within this process's share of the free
 	// memory (freeShare: half of it less the headroom), the table first (down to 2^24 cells), then the layer cap (down to
 	// 2^18 states: the bursts' small sizing), instead of allocating the largest and failing (an "out of memory" burst, or a
 	// context the next process could not create); the halving below stays the last resort
