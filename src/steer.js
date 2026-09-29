@@ -689,14 +689,14 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 	const A = PH.A, M = PH.M;
 	let s = M.layerOf(sim);
 	let f = PH.fields[s];
-	const tiles = [], legs = [];
-	if (!f || !f._m) return { tiles, legs, end: 'no field' };
+	const tiles = [], legs = [], states = [];
+	if (!f || !f._m) return { tiles, legs, states, end: 'no field' };
 	const st = RF.stateOf(f, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery);
 	let cur = null, why = 'no state';
 	if (st) for (const [ty, l] of [...(st.base ? [st.base] : []), ...(st.rise || [])]) { const c = f._m.costOf(st.t, ty, l); if (c !== CUT && (!cur || c < cur.c)) cur = { t: st.t, ty, l, c }; }
 	for (let leg = 0; leg < maxLegs && cur; leg++) {
 		const path = descend(f, cur);
-		for (const p of path) tiles.push(p.t);
+		for (const p of path) { tiles.push(p.t); states.push({ t: p.t, ty: p.ty, l: p.l, s }); }
 		const end = path[path.length - 1];
 		if (A.trophies.includes(end.t)) { why = 'trophy'; break; }
 		const k = A.specialAt[end.t];
@@ -714,7 +714,7 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 		if (f.mode === 'walk' || !f._m) { why = 'walk layer'; break; }
 		cur = { t: end.t, ty: RF.F_, l: 0, c: best.c };
 	}
-	return { tiles, legs, end: why };
+	return { tiles, legs, states, end: why };
 }
 
 // ------------------------------------------------------------------ distinct coins: legs, the DP
@@ -738,6 +738,47 @@ function fullCoinT(A) {
 	let cap = 0;
 	for (let i = 0; i < A.N; i++) if (A.cls[i] === 3 && A.gateFeat[i] === 'coins' && A.gatePol[i] === 1) cap = Math.max(cap, A.gateParam[i]);
 	return Math.min(cap, A.special.filter((x) => x[1] === 'coins').length);
+}
+/** THE GATE AS FLOOR (night 3, n3-gate-as-floor): the gold coin gates (165: solid from their count on) the trophy is
+ *  reached FROM, by the engine: a ball standing on the gate with its count held (the gate solid) reaches a trophy by a
+ *  jump (held jump, with left / right / no direction, up to GF_TICKS ticks), and with one coin less (the gate air) the
+ *  same inputs from the same place do not. The coin plan's count is then at least the gate's (the walk plan counts coin
+ *  DOORS only and is blind to gravity; the physics plan's rises are vx-blind: Nightmare Relics' plan rises 6 tiles
+ *  sideways out of an up boost into the trophy, Rotcil Illusions' leaves a field row sideways into it, while the level's
+ *  own way stands on a 4-coin gate under the trophy). Ordering only: [{t (a gate tile), c, trophy}] (none: []) */
+const GF_TICKS = 70, GF_DX = 8, GF_DY = 7;
+function gateFloors(A, level) {
+	const { W, H, N } = A;
+	const gold = A.special.filter((x) => x[1] === 'coins').length;
+	if (!gold || !A.trophies.length) return [];
+	const cand = [];
+	for (let i = 0; i < N; i++) {
+		if (A.cls[i] !== 3 || A.gateFeat[i] !== 'coins' || A.gatePol[i] !== 0) continue;
+		const c = A.gateParam[i];
+		if (c < 1 || c > gold || i < W || A.cls[i - W] !== 2) continue;
+		const gx = i % W, gy = (i - gx) / W;
+		const tr = A.trophies.find((t) => { const tx = t % W, ty = (t - tx) / W; return Math.abs(tx - gx) <= GF_DX && ty < gy && gy - ty <= GF_DY; });
+		if (tr !== undefined) cand.push({ t: i, c, gx, gy, trophy: tr });
+	}
+	if (!cand.length) return [];
+	const sim = new E.EESim(level), inp = new E.EEInput();
+	sim.reset();
+	const s0 = sim.snapshot();
+	const reaches = (g, k) => {
+		for (const mask of [1, 1 | 2, 1 | 4]) {
+			sim.restore(s0);
+			sim.coins = k; sim._show_coin_gate = k;
+			sim.px = g.gx * 16; sim.py = (g.gy - 1) * 16; sim.speed_x = 0; sim.speed_y = 0;
+			E.applyMask(inp, 0); sim.tick(inp); sim.tick(inp);
+			for (let n = 0; n < GF_TICKS && !sim.has_silver_crown; n++) { E.applyMask(inp, mask); sim.tick(inp); }
+			if (sim.has_silver_crown) return true;
+		}
+		return false;
+	};
+	const out = [];
+	for (const g of cand) if (reaches(g, g.c) && !reaches(g, g.c - 1)) out.push({ t: g.t, c: g.c, trophy: g.trophy });
+	sim.restore(s0);
+	return out;
 }
 /** a coin leg's field (the level lv with the tiles fg: the coin q the goal): with the forced portals, unless they leave the
  *  coin out of reach from the start and from every other coin (a portal chain the model misreads: the plan would have
@@ -1241,6 +1282,11 @@ function buildSteer(level, opts) {
 	const A = analyze(level, opts);
 	const modeled = new Set();
 	const cegar = [];
+	// (the gate as floor: a coin gate the trophy is reached from sets the coin count; the coins modelled from the start,
+	// so the layer at that count holds the gate as the floor it is; EEAT_GATEFLOOR=0 / opts.gateFloor === false: off)
+	const floors = opts.gateFloor === false || process.env.EEAT_GATEFLOOR === '0' || opts.noDP ? [] : gateFloors(A, level);
+	const floorT = floors.reduce((m, g) => Math.max(m, g.c), 0);
+	if (floorT && A.feats.has('coins') && !A.feats.get('coins').static) modeled.add('coins');
 	// (the budget as a layer cap: the effects double the physics layers)
 	const maxBytes = opts.maxBytes || STEER_MAX_BYTES, maxMs = opts.maxMs || STEER_MAX_MS;
 	const bodyBytes = A.N * BODY_BYTES_TILE;
@@ -1286,7 +1332,8 @@ function buildSteer(level, opts) {
 	// the coin DP
 	let dp = null;
 	// (opts.coinT: the plan's count at least that: the plan past its count, editor.js pastPlan)
-	let cp = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
+	const floorLegs = floorT > 0 && floorT > planCoinT(B);
+	let cp = opts.noDP ? null : coinPlan(B, Math.max(opts.coinT || 0, floorT));
 	if (cp && ((bodies.length + cp.coins.length) * bodyBytes > maxBytes || Date.now() - t0 > maxMs)) {
 		over = over || `the coin DP: ${(bodies.length + cp.coins.length) * bodyBytes > maxBytes ? `over ${mb}` : secs}`;
 		cp = null;
@@ -1294,7 +1341,7 @@ function buildSteer(level, opts) {
 	// (more than 18 coins: no DP (coinDP, coinLegsLayered), so no legs either: the same steer, without n physics fields)
 	if (cp && cp.coins.length > 18) cp = null;
 	if (cp) {
-		const CL = opts.coinT ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
+		const CL = opts.coinT || floorLegs ? coinLegsLayered(B, PH, cp, t0 + maxMs, opts) : coinLegsPhys(B, PH, cp, opts);
 		const D = CL && CL.layered ? CL.layered.D : CL ? coinDP(CL) : null;
 		if (D) {
 			const none = new Uint8Array(N);
@@ -1311,6 +1358,9 @@ function buildSteer(level, opts) {
 	});
 	const teamF = M.feats.find((f) => f.key === 'team');
 	const steer = { version: VERSION, W: A.W, H: A.H, N, feats, team: teamF ? teamF.values.slice() : [], S: M.S, layerBody, bodies, goals, dp, prioShift: 0 };
+	// (the gate as floor with a DP over at least its count: the DP's value first below T (st.floorFirst, the file's flags
+	// 4; the native lookup reads flags 1 only): the layer field's own way below the gate's count is the vx-blind false near)
+	if (floorT && dp && dp.T >= floorT) steer.floorFirst = true;
 	steer.prioShift = prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
 	// the coin tour (no DP; the plan's coin door, or the full count where the coins are modelled: the min with the layer
@@ -1352,6 +1402,7 @@ function buildSteer(level, opts) {
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined } : null, fullT: fullCoinT(A), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
 		tour: tourInfo };
+	if (floors.length) steer.info.floor = { T: floorT, gates: floors.length, first: !!steer.floorFirst, at: [floors[0].t % A.W, Math.floor(floors[0].t / A.W)] };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
@@ -1484,7 +1535,7 @@ function steerFifths(st, sim) {
 	if (st.tour) { const t = tourFifths(st, sim); return t < 0 ? v : v < 0 || st.tour.first ? t : Math.min(v, t); }
 	// (st.dpFirst: the coin DP's value wherever it has one, the layer field's only past the coins (goexplore.js --dpFirst):
 	// the layer's own way needs no more coins, and on Forgotten Veil it is a false one (the portal at (77,109)))
-	if (st.dpFirst) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
+	if (st.dpFirst || st.floorFirst) { const d = dpFifths(st, sim, Infinity); return d < 0 ? v : d; }
 	const d = dpFifths(st, sim, v >= 0 ? v : Infinity);
 	return d < 0 ? v : v < 0 ? d : Math.min(v, d);
 }
@@ -1539,7 +1590,7 @@ function steerFileBytes(st, levelFp, withTour) {
 	parts[offIdx] = offB; parts[offIdx + 1] = sizB;
 	const buf = Buffer.alloc(al8(size));
 	buf.write('RCH4', 0, 'latin1');
-	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
+	[VERSION, st.W, st.H, st.feats.length, st.S, st.bodies.length, (dp ? 1 : 0) | (R ? 2 : 0) | (dp && st.floorFirst ? 4 : 0), st.prioShift, st.team.length, dp ? dp.n : 0, dp ? dp.T : 0].forEach((v, k) => buf.writeInt32LE(v, 4 + 4 * k));
 	if (levelFp) { buf.writeUInt32LE(levelFp[0] >>> 0, 48); buf.writeUInt32LE(levelFp[1] >>> 0, 52); }
 	if (R) buf.writeBigUInt64LE(BigInt(offs[tourIdx]), 56);
 	parts.forEach((p, k) => p.copy(buf, offs[k]));
@@ -1608,11 +1659,11 @@ function readSteerFile(buf) {
 		const tail = view(Float32Array, n), C = view(Float32Array, n * n), legs = view(Uint16Array, n * N);
 		tour = { n, T: hd[1], first: hd[2], bit, order, tail, C, legs };
 	}
-	return { version: ver, tour, W, H, N, feats, team, S, layerBody, bodies, goals, dp, prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
+	return { version: ver, tour, W, H, N, feats, team, S, layerBody, bodies, goals, dp, floorFirst: !!(dp && (flags & 4)), prioShift, levelFp: [buf.readUInt32LE(48), buf.readUInt32LE(52)], bodyOff: bOff, bodySize: bSize };
 }
 
 module.exports = { VERSION, STEER_MAX_BYTES, STEER_MAX_MS, buildSteer, steerFifths, steerAt, steerScore, layerIndex, nextGate, nextCoin, steerFileBytes, writeSteerFile, readSteerFile, readReachBytes,
 	// (tests, tools)
-	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
+	analyze, makeModel, walkBuild, buildPhysics, counterexample, layeredPlan, coinPlan, fullCoinT, gateFloors, coinLegsPhys, coinLegsLayered, coinDP, arriveCost,
 	// (the leg workers)
 	_legFieldOf: legFieldOf };
