@@ -224,6 +224,36 @@ check('trace --gpu in segments of 7 ticks: the same hashes', sameSplit, `${summa
 	const key = (r) => r.batches.map((recs) => recs.map((x) => x.slice(1).join(',')).join(';')).join('|');
 	check('roll split into launches of 128 runs / cells: the same records in the same order', b2.code === 0 && key(a) === key(b2) && summary(b2).kernelLaunches > summary(a).kernelLaunches,
 		`${a.batches.map((x) => x.length).join(' + ')} records; ${summary(a).kernelLaunches} launches vs ${summary(b2).kernelLaunches}`);
+	// the roll mix (goexplore.js --rollMix): with --rollMax=120 a batch line may give its own run length and keep ("batch
+	// K maxT seed Lr keep"); every record replayed from its seed with its batch's keep (runs of 120 ticks kept with p 0.95,
+	// of 25 with p 0.6, then the plain line: --roll / --keep); a run length past --rollMax is a bad job
+	{
+		const mix = [[120, 0.95], [25, 0.6], [null, null]], mSeeds = [21, 22, 23];
+		const mJob = Buffer.concat(mix.flatMap(([lr, kp], i) => [Buffer.from(lr ? `batch ${K} 100000 ${mSeeds[i]} ${lr} ${kp}\n` : `batch ${K} 100000 ${mSeeds[i]}\n`), Buffer.alloc(4 * K)])
+			.concat([Buffer.from('stop\n')]));
+		const mr = roll(['--rollMax=120'], null, null, mJob);
+		bound('roll mix (3 batches: 120 ticks / keep 0.95, 25 / 0.6, the plain 40 / 0.85)', mr);
+		const st = mr.lines.find((l) => l.ev === 'start') || {};
+		let mn = 0, mBad = 0, longest = [0, 0, 0];
+		mr.batches.forEach((recs, bi) => {
+			const kp = mix[bi][1] === null ? 0.85 : mix[bi][1];
+			for (const [d, t, fifths, room, pk, rs] of recs) {
+				const ms = new Uint8Array((rs >>> 16) + 1);
+				GX.rollInputs(GX.rollSeed(mSeeds[bi], pk, rs & 0xffff), ms.length, kp, ms, 0);
+				sim.reset();
+				for (const x of ms) { E.applyMask(inp, x); sim.tick(inp); }
+				mn++;
+				if (ms.length > longest[bi]) longest[bi] = ms.length;
+				if (d < 0 || ms.length !== t || RF.fifthsAt(field, sim.px, sim.py, sim.speed_y, sim._q0, sim._q1, sim._slippery) !== fifths || (RM.key(sim) | 0) !== room) mBad++;
+			}
+		});
+		check('roll mix: the start says "mix":1 and the rollMax; every record replayed with its batch\'s run length and keep has the GPU\'s tick, reach cost and room',
+			mr.code === 0 && st.mix === 1 && st.rollMax === 120 && mr.batches.length === 3 && mn > 100 && mBad === 0 && longest[0] > 40 && longest[1] <= 25 && longest[2] <= 40,
+			`start mix ${st.mix} rollMax ${st.rollMax}; ${mr.batches.map((x) => x.length).join(' + ')} records, ${mBad} different; longest runs ${longest.join(' / ')}${mr.code ? `; exit ${mr.code} ${mr.err}` : ''}`);
+		const over = roll(['--rollMax=120'], null, null, Buffer.from(`batch ${K} 100000 5 121 0.9\n`));
+		// (the error line quotes the job line with its newline: not one JSON line, so only the exit code and no batch)
+		check('roll mix: a run length past --rollMax is a bad job (exit 3, no batch)', over.code === 3 && over.batches.length === 0, `exit ${over.code}`);
+	}
 	// the doors' room
 	const dc = [];
 	for (let x = 0; x < W; x++) dc.push([x, 0, 9], [x, H - 1, 9]);

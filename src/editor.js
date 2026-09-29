@@ -181,9 +181,10 @@ function blockInfo(ids) {
 }
 
 // ---------------------------------------------------------------- checks
-/** tiles the goal field of the GPU search walks through (native/beamhost.h `open`): not a static solid block */
-function openTile(L, i) {
-	const f = L.flags[L.fg[i]] || 0;
+/** tiles the goal field of the GPU search walks through (native/beamhost.h `open`): not a static solid block. fl: the
+ *  guidance's flags (reach.js guideFlags: 50, the secret "appear" block, always blocks: a static solid, not a door) */
+function openTile(L, i, fl) {
+	const f = (fl || RF.guideFlags(L))[L.fg[i]] || 0;
 	return (f & F_SOLID) === 0 || (f & (F_DOOR | F_JUMPTHRU | F_HALF | F_ROTHALF)) !== 0;
 }
 /** tiles reachable from (sx, sy): 8-way over open tiles (no corner cutting, like the goal field), and with
@@ -191,7 +192,7 @@ function openTile(L, i) {
  *  anywhere with a timed killer: curse, zombie, poison with a time, lava) takes it to a checkpoint it touched or, with
  *  2+ spawn points, to the next spawn of EE's rotation: every spawn */
 function reachFrom(L, sx, sy, portals) {
-	const W = L.width, H = L.height, N = W * H;
+	const W = L.width, H = L.height, N = W * H, fl = RF.guideFlags(L);
 	const seen = new Uint8Array(N);
 	const q = [sy * W + sx];
 	seen[q[0]] = 1;
@@ -209,7 +210,7 @@ function reachFrom(L, sx, sy, portals) {
 					const nx = x + dx, ny = y + dy;
 					if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
 					const j = ny * W + nx;
-					if (!openTile(L, j) || (dx && dy && (!openTile(L, y * W + nx) || !openTile(L, ny * W + x)))) continue;
+					if (!openTile(L, j, fl) || (dx && dy && (!openTile(L, y * W + nx, fl) || !openTile(L, ny * W + x, fl)))) continue;
 					push(j);
 				}
 			}

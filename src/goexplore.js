@@ -161,8 +161,10 @@
 // the dense ids differ (the GPU's atomics hand them out), and so may the cells kept in the batch that fills the pool.
 // Every route is replayed in the exact JS engine; the reach field's -1 is still the only prune (in the kernel). eegpu
 // roll ending by a failed launch or a crash (exit 6 / 7, above 255, a signal, no done line) is an error line with
-// launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7.
-//   [--gpu=1] [--batch=4096] [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
+// launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7. The roll mix (--rollMix,
+// ROLL_MIX): each batch's run length and keep from a class of long sticky runs or short ones, a node keeps its class.
+//   [--gpu=1] [--batch=4096] [--rollMix=40:0.85,120:0.95,240:0.97 (the default unless --roll / --keep is given; 0 = off)]
+//   [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
 //   default: an eighth of the machine's memory, at most half of the free memory>] [--tool=<eegpu>] [--bin=<level blob>]
 //   [--reach=<RCH3 file>]
 //   [--stopfile= --pausefile= --cachedir= --launch-ms= (passed to eegpu)]
@@ -312,7 +314,7 @@ const WAY_PICK = 40;
 const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0, first: 0, stdin: 0, lambda: 2, roll: 40, rolls: 8, keep: 0.85, rArm: 0.5, rArmPre: process.env.EEAT_RARMPRE !== undefined ? +process.env.EEAT_RARMPRE : 0, classW: 1, classS: 180, classSlack: 2,
 	stall: 200, refine: 6, maxres: MAXRES, mem: 0, memTotal: 0, maxCells: 0, maxSnaps: 0, prune: 1, pA: 0.5, burst: 8, sample: 16, phase: 50,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
-	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
+	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1 };
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
@@ -334,7 +336,31 @@ const SPD_PROGRESS = 1;
 // reads tool, cachedir and pausefile too
 const GPU_STRINGS = ['tool', 'bin', 'reach', 'stopfile', 'pausefile', 'cachedir', 'launch-ms', 'parent'];
 // the text options
-const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', ...GPU_STRINGS]);
+const TEXT_OPTS = new Set(['level', 'out', 'steer', 'work', 'burstSteer', 'prefix', 'pickBox', 'rollMix', ...GPU_STRINGS]);
+// --gpu=1, the roll mix (--rollMix=<roll>:<keep>[:<weight>],...; 0 = off: every batch --roll / --keep as before): the GPU
+// random runs' batches take their run length and keep probability from these classes in turn, each class the same share
+// of the GPU's simulated ticks (times its weight): the next batch goes to the class furthest below its share, from the
+// first batch on. The long sticky runs (120 ticks kept with p 0.95, 240 with 0.97) cross whole corridors and rooms from a
+// pick where the 40-tick runs of p 0.85 stay near it: PORTFOLIO's sweep sw1 (febeeb2, 15 never-routed campaign levels,
+// 180 s; src/out/pf/sweep/sw1) routed 0 with every 40 / 0.85 config and 4 with --roll=120 --keep=0.95 (Relics of Athena,
+// Hold Jump Challenge, Level 1 Overworld, The Mansion; 3 of 4 with the long runs on the GPU random runs alone, 0 of 4 on
+// the CPU runs alone), OCTOS_ROLLERCOASTER only with 240 / 0.97. Each path node keeps its class, so the host rebuilds its
+// inputs (rollInputs) with the keep the GPU drew them with. Default: this mix unless --roll or --keep is given (then that
+// one class, as before); an eegpu roll without the mix (its start event has no "mix") plays the first class throughout.
+const ROLL_MIX = '40:0.85,120:0.95,240:0.97';
+/** the roll mix of --rollMix: [{roll, keep, w}] (null: off) */
+function rollMixOf(s) {
+	if (s === undefined || s === null || s === '' || s === '0' || s === 'off') return null;
+	const out = [];
+	for (const part of String(s).split(',')) {
+		const f = part.split(':');
+		const roll = Math.round(+f[0]), keep = +f[1], w = f.length > 2 ? +f[2] : 1;
+		if (f.length < 2 || f.length > 3 || !(roll >= 1 && roll <= 255) || !(keep >= 0 && keep <= 1) || !(w > 0)) throw new Error(`bad --rollMix part ${part} (roll 1-255 : keep 0-1 [: weight > 0])`);
+		out.push({ roll, keep, w });
+	}
+	if (!out.length || out.length > 16) throw new Error('bad --rollMix (1 to 16 classes)');
+	return out;
+}
 const CHUNK = 16;   // picks between two looks at the clock, the shared bound and the stop flag
 // a parked worker (stdin "workers K": only the first K search) looks at its port, its seeds, the clock and the stop flag
 // every PARK_MS
@@ -407,7 +433,8 @@ const B_SATZ = 48;
 const SEEN_BATCHES = 8, SEEN_CELLS = 131072, ROLL_HOST_SHARE = 1 / 8, ROLL_HOST_MIN = 256;
 
 function parseArgs(argv) {
-	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '' });
+	const a = Object.assign({}, DEFAULTS, { file: '', level: '', out: '', cells: 'auto', steer: '', tool: '', cachedir: '', pausefile: '', work: '', rollMix: '' });
+	const given = new Set();
 	for (const s of argv) {
 		const m = s.match(/^--([^=]+)=(.*)$/);
 		if (!m) {
@@ -415,6 +442,7 @@ function parseArgs(argv) {
 			a.file = s;
 			continue;
 		}
+		given.add(m[1]);
 		if (TEXT_OPTS.has(m[1])) a[m[1]] = m[2];
 		else if (m[1] === 'cells') {
 			if (!['auto', 'fine', 'coarse'].includes(m[2])) throw new Error(`bad --cells=${m[2]} (auto, fine or coarse)`);
@@ -435,6 +463,9 @@ function parseArgs(argv) {
 	a.sample = Math.max(1, Math.round(a.sample));
 	a.phase = Math.max(1, Math.round(a.phase));
 	a.batch = Math.max(1, Math.min(1 << 20, Math.round(a.batch)));
+	// (the roll mix: the default unless --roll / --keep ask for one class; checked here, used by --gpu=1 only)
+	if (!given.has('rollMix')) a.rollMix = given.has('roll') || given.has('keep') ? '0' : ROLL_MIX;
+	rollMixOf(a.rollMix);
 	if (a.gpu && a.cells === 'fine') throw new Error('--gpu=1 runs coarse cells only');
 	return a;
 }
@@ -728,7 +759,7 @@ const KEY_DOOR = new Set([23, 24, 25, 26, 27, 28, 1005, 1006, 1007, 1008, 1009, 
 function counterRelevance(L) {
 	const had = RELV.get(L);
 	if (had) return had;
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags, lk = L.lookup0;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L), lk = L.lookup0;
 	const out = { gold: true, blue: true, cut: { gold: 0, blue: 0 }, why: { gold: 'no reader', blue: 'no reader' }, upTo: { gold: 0, blue: 0 } };
 	let goldR = false, blueR = false, prot = false, crownD = false, teamD = false, keyD = false;
 	for (let i = 0; i < N; i++) {
@@ -1035,14 +1066,17 @@ const maskEq = (a, b) => { for (let k = 0; k < a.length; k++) if (a[k] !== b[k])
  * class the maximal masks (an antichain): a new group whose mask is a strict subset of one of them is dominated at once,
  * and one that is a strict superset of some makes those dominated (for good: a mask once exceeded stays exceeded). The
  * novelty picks (head B), the discovery bursts (head C), the sources and the GPU bursts' rooms leave dominated groups
- * out; head A (the cost heaps) does not look at groups.
+ * out, except for a SHARE (dominance-share, night 3: `--domShare` of head B's tournaments draw from `dlist`, the
+ * dominated groups, and every `--domBurst`-th GPU burst may go to a dominated room): the walk's view (an open door is no
+ * floor) makes "dominated" a heuristic, so it only orders: a floor-door switch turned off again or a backtracking room
+ * still gets novelty picks; head A (the cost heaps) does not look at groups.
  */
 function domIndex() {
-	const groups = new Map(), maxi = new Map(), list = [];
+	const groups = new Map(), maxi = new Map(), list = [], dlist = [];
 	let dominated = 0;
 	const drop = (g) => {
 		if (g.dom) return;
-		g.dom = true; dominated++;
+		g.dom = true; dominated++; dlist.push(g);
 		const i = g.li;
 		if (i >= 0) { const last = list.pop(); if (last !== g) { list[i] = last; last.li = i; } g.li = -1; }
 	};
@@ -1055,13 +1089,37 @@ function domIndex() {
 		groups.set(ks, g);
 		let M = maxi.get(d.cls);
 		if (!M) maxi.set(d.cls, M = []);
-		for (const h of M) if (maskIn(d.mask, h.mask) && !maskEq(d.mask, h.mask)) { g.dom = true; dominated++; return g; }
+		for (const h of M) if (maskIn(d.mask, h.mask) && !maskEq(d.mask, h.mask)) { g.dom = true; dominated++; dlist.push(g); return g; }
 		for (let k = M.length - 1; k >= 0; k--) if (maskIn(M[k].mask, d.mask)) { drop(M[k]); M.splice(k, 1); }
 		M.push(g);
 		g.li = list.length; list.push(g);
 		return g;
 	};
-	return { groupOf, list, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
+	return { groupOf, list, dlist, stats: () => ({ groups: groups.size, dominated, maximal: list.length }) };
+}
+
+/**
+ * domTourney(GL, pickOf, weightOf) -> the group of a tournament of 4 random draws from GL (the best weight among those
+ * with a cell to pick), or null. domPick(DOM, share, rnd, weightOf, cellsOf) -> the group head B draws: with probability
+ * `share` (and only when some group is dominated: no draw of the random numbers otherwise, so a level without one
+ * searches exactly as before) a tournament over the dominated groups, else (or when none of them has a cell) over the
+ * groups not dominated. {g, shared}.
+ */
+function domTourney(GL, rnd, weightOf) {
+	let bg = null, bw = -1;
+	for (let k = 0; k < 4 && GL.length; k++) {
+		const g = GL[(rnd() * GL.length) | 0];
+		const w = weightOf(g);
+		if (w > bw) { bw = w; bg = g; }
+	}
+	return bg;
+}
+function domPick(DOM, share, rnd, weightOf) {
+	if (share > 0 && DOM.dlist.length && rnd() < share) {
+		const g = domTourney(DOM.dlist, rnd, weightOf);
+		if (g !== null) return { g, shared: true };
+	}
+	return { g: domTourney(DOM.list, rnd, weightOf), shared: false };
 }
 
 // USEFUL TERRITORY (roomUseful; the playbook's P1 (c) / (d), 2026-09-28; the user on Forgotten Helix: "it keeps going
@@ -1105,7 +1163,7 @@ const CUL_A = 2000, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
  * restored exactly after the targets' tests.
  */
 function roomUseful(L) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const RM = roomOf(L), TR = require('./bursts.js').triggersOf(L);
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), tro = new Uint8Array(N), dIdx = new Int32Array(N).fill(-1), doors = [];
 	for (let i = 0; i < N; i++) {
@@ -1283,7 +1341,7 @@ const bitAt = (b, t) => b !== null && (b[t >> 3] & (1 << (t & 7))) !== 0;
  */
 function roomFields(L, budget, opts = {}) {
 	const US = opts.useful === false ? null : roomUseful(L);
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), doors = [], trophies = [];
 	for (let i = 0; i < N; i++) {
@@ -1450,7 +1508,7 @@ const KEEP_DOORS = new Set([43, 165, 213, 214, 184, 185, 1079, 1080, 1094, 1095,
 const TRIGGER_IDS = new Set([5, 121, 113, 1619, 467, 1620, 6, 7, 8, 408, 409, 410, 100, 101, 110, 111, 119, 369, 416, 1585, 368, 417, 418, 419, 420, 421, 422, 423, 453, 461, 1517,
 	1584, 1618, ...EL.NPC_IDS]);
 function roomDead(L, budget) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
 	const wall = new Uint8Array(N), deadly = new Uint8Array(N), keep = [], goals = [];
 	for (let i = 0; i < N; i++) {
@@ -1568,7 +1626,7 @@ const pendingTrigger = (sim) => sim._tileQueue.length !== 0 || sim._stateQueue.l
  * touching another checkpoint first and dying then is never less (the bound is a metric: d(x) <= d(x, c) + d(c)).
  */
 function lowerBoundTiles(L) {
-	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = L.flags;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L);
 	if (!fg.includes(121)) return null;   // (no trophy: no bound)
 	const out = new Uint16Array(new SharedArrayBuffer(2 * N)).fill(0xffff);
 	const wall = new Uint8Array(N);
@@ -1765,7 +1823,7 @@ function avoidTilesOf(G, g) {
 /** whether the trophy stays walkable (8-connected over every tile but the permanent walls, every door open, portals) from
  *  the start tile with gate g's tiles blocked: a gate every way needs is not avoided */
 function gateAvoidable(L, G, g, startTile) {
-	const av = avoidTilesOf(G, g), fg = L.fg, fl = L.flags, W = G.W, N = G.N;
+	const av = avoidTilesOf(G, g), fg = L.fg, fl = RF.guideFlags(L), W = G.W, N = G.N;
 	const wall = (i) => { const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0; return (f & 1) !== 0 && (f & 16) === 0 && (f & (2 | 4 | 8)) === 0; };
 	const blocked = (i) => wall(i) || av[i] === 1 || (g.kind !== 'door' && G.TR.comp[i] === g.comp);
 	const seen = new Uint8Array(N), q = new Int32Array(N);
@@ -2028,7 +2086,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// room of it; a dominated group's rooms get no discovery burst, no source, and no death is kept into them; 0: every
 	// room its own, as before)
 	const DOM = coarse && a.dom !== 0 ? domIndex() : null;
-	let dDom = 0;
+	let dDom = 0, domShared = 0;   // (domShared: head B's tournaments over the dominated groups, --domShare)
 	/** the live state's novelty group (made when new; DOM on) */
 	const groupNow = () => DOM.groupOf(RM.dom(sim));
 	/** a new room of the live state; bk: made by a death that throws the ball back (deathPays): a BACK room, kept but
@@ -2454,7 +2512,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	const stat = () => Object.assign({ type: 'stat', seed, ticks, cells: cells.size, picks, deepest, seeded, seedCells, lbCut, avoided, dSeen, dCost, dNew, dDrop, dCells, dBack, dBackKept, dBackR, dBackS, dPromote, dTicks, tDom, tMore, tDoomed, tCells, dCul, culPicks, culCells, boxPicks, boxCells, leadPicks, leadRoutes, leadShare: Math.round(lShare * 1000) / 1000, wayPicks, wayShare: Math.round(wShare * 1000) / 1000, minRc: Number.isFinite(minRc) ? minRc : null, refined, full,
 		snaps: nSnaps, dropped, replays, impr, evicted, sweeps, nodes: nNodes, budgetMB: mem, memMB: Math.round(memBytes() / 1048576),
 		heapMB: Math.round(V8.getHeapStatistics().used_heap_size / 1048576), parked },
-	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
+	coarse ? Object.assign({ rooms: roomList.length, bursts, imports, importAdded, roomDead: RDEAD !== null, deadCut, spdOn, spdFlags, spdPeak, dDom, picksDom, domShared }, fields.stats(), RDEAD !== null ? RDEAD.stats() : {}, DOM !== null ? DOM.stats() : {}) : {});
 	const sendNear = () => {
 		if (!near || near === nearSent) return;
 		nearSent = near;
@@ -2498,20 +2556,18 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// the best of --sample random cells of it by Go-Explore's count weights (cells runs rarely come through first)
 	// (--dom=1: the tournament over the novelty groups not dominated (DOM.list: a group's gain the most of its rooms', its
 	// picks all of theirs, its brake the most of theirs), then a room of the group by its share of the group's cells; a
-	// group of one room draws as that room did)
+	// group of one room draws as that room did; --domShare of the tournaments over the dominated groups: domPick)
+	const groupW = (g) => {
+		let n = 0, ex = 0;
+		for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
+		if (!n) return -1;
+		return (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
+	};
 	const popB = () => {
 		let br = null, bw = -1;
 		if (DOM !== null) {
-			const GL = DOM.list;
-			let bg = null;
-			for (let k = 0; k < 4 && GL.length; k++) {
-				const g = GL[(rnd() * GL.length) | 0];
-				let n = 0, ex = 0;
-				for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
-				if (!n) continue;
-				const w = (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
-				if (w > bw) { bw = w; bg = g; }
-			}
+			const dp = domPick(DOM, a.domShare, rnd, groupW), bg = dp.g;
+			if (dp.shared) domShared++;
 			if (bg !== null) {
 				if (bg.rooms.length === 1) br = bg.rooms[0].bk ? null : bg.rooms[0];
 				else {
@@ -3239,7 +3295,11 @@ async function gpuMain(a, L, m) {
 	process.on('exit', () => registryClaim(0));
 	const claimTimer = setInterval(() => registryClaim(hmem * 1048576), 60000);
 	if (claimTimer.unref) claimTimer.unref();
-	const args = ['roll', bin, `--rolls=${a.rolls}`, `--roll=${Math.min(255, a.roll)}`, `--keep=${a.keep}`, `--phase=${a.phase}`, `--prune=${a.prune ? 1 : 0}`,
+	// (the roll mix: the classes' runs; eegpu roll starts with the first class, its buffers sized for the longest)
+	const mixAsk = rollMixOf(a.rollMix);
+	let classes = mixAsk || [{ roll: Math.min(255, a.roll), keep: a.keep, w: 1 }];
+	const rollMax = Math.max(...classes.map((c) => c.roll));
+	const args = ['roll', bin, `--rolls=${a.rolls}`, `--roll=${classes[0].roll}`, `--keep=${classes[0].keep}`, ...(mixAsk ? [`--rollMax=${rollMax}`] : []), `--phase=${a.phase}`, `--prune=${a.prune ? 1 : 0}`,
 		...(reachFile ? [`--reach=${reachFile}`] : []), ...(a.gmem ? [`--mem=${a.gmem}`] : []), `--hostmem=${hmem}`, `--maxPicks=${Math.max(a.batch, 1)}`, ...(a.deathMoves ? ['--deaths=1'] : []),
 		...['stopfile', 'pausefile', 'cachedir', 'launch-ms'].filter((k) => a[k]).map((k) => `--${k}=${a[k]}`), `--parent=${process.pid}`];
 	const ch = spawn(tool, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true });
@@ -3332,8 +3392,20 @@ async function gpuMain(a, L, m) {
 	}
 	const tReady = Date.now(), tEnd = tReady + a.seconds * 1000;
 	if (a.steer) say({ ev: 'warning', text: '--gpu=1 orders by the reach field alone: the steer field is not used' });
+	// (an eegpu roll without the mix plays its --roll / --keep, the first class, in every batch)
+	const mixOn = !!mixAsk && classes.length > 1 && info.mix === 1;
+	if (mixAsk && classes.length > 1 && !mixOn) { say({ ev: 'warning', text: `eegpu roll has no roll mix (rebuild it: node tools/build-native.js): every batch ${classes[0].roll} ticks, keep ${classes[0].keep}` }); classes = [classes[0]]; }
+	// (per class: its batches, simulated ticks, records (new or sooner cells), new cells, nearer attempts, new rooms,
+	// finishes; the next batch's class = the one furthest below its share of the ticks)
+	const mixSt = classes.map((c) => ({ roll: c.roll, keep: c.keep, w: c.w, batches: 0, ticks: 0, records: 0, fresh: 0, nearer: 0, rooms: 0, fin: 0 }));
+	const pickClass = () => {
+		if (classes.length === 1) return 0;
+		let bj = 0, bv = Infinity;
+		for (let j = 0; j < classes.length; j++) { const v = mixSt[j].ticks / classes[j].w; if (v < bv) { bv = v; bj = j; } }
+		return bj;
+	};
 	say({ ev: 'start', workers: 1, seeds: [a.seed], mode: field.mode, cells: 'coarse', gpu: info.gpu ? info.gpu.name : null, startCost: startCost < 0 ? null : Math.round(startCost * 100) / 100,
-		cap: info.cap, memMB: info.memMB, hostMB: info.hostMB, batch: a.batch, rolls: a.rolls, roll: a.roll });
+		cap: info.cap, memMB: info.memMB, hostMB: info.hostMB, batch: a.batch, rolls: a.rolls, roll: classes[0].roll, mix: mixOn ? classes.map((c) => `${c.roll}:${c.keep}`).join(',') : null });
 	// ---- the archive (by dense id: the GPU's pool index; cell 0 = the start)
 	let capN = 1 << 16;
 	let cT = new Int32Array(capN), cRc = new Float32Array(capN), cPicks = new Int32Array(capN), cRoom = new Int32Array(capN), cNode = new Int32Array(capN),
@@ -3348,26 +3420,27 @@ async function gpuMain(a, L, m) {
 		cVer = g(cVer, Int32Array); cSeen = g(cSeen, Uint32Array);
 		capN = n;
 	};
-	// path nodes: (up, seed, length); -1 = the start
-	let nodeCap = 1 << 16, nUp = new Int32Array(nodeCap), nSeed = new Uint32Array(nodeCap), nLen = new Uint16Array(nodeCap), nNodes = 0;
-	const newNode = (up, seed, len) => {
+	// path nodes: (up, seed, length, roll class: its keep); -1 = the start
+	let nodeCap = 1 << 16, nUp = new Int32Array(nodeCap), nSeed = new Uint32Array(nodeCap), nLen = new Uint16Array(nodeCap), nCls = new Uint8Array(nodeCap), nNodes = 0;
+	const newNode = (up, seed, len, cls) => {
 		if (nNodes >= nodeCap) {
 			nodeCap *= 2;
-			const u = new Int32Array(nodeCap), s = new Uint32Array(nodeCap), l = new Uint16Array(nodeCap);
-			u.set(nUp); s.set(nSeed); l.set(nLen);
-			nUp = u; nSeed = s; nLen = l;
+			const u = new Int32Array(nodeCap), s = new Uint32Array(nodeCap), l = new Uint16Array(nodeCap), c = new Uint8Array(nodeCap);
+			u.set(nUp); s.set(nSeed); l.set(nLen); c.set(nCls);
+			nUp = u; nSeed = s; nLen = l; nCls = c;
 		}
-		nUp[nNodes] = up; nSeed[nNodes] = seed; nLen[nNodes] = len;
+		nUp[nNodes] = up; nSeed[nNodes] = seed; nLen[nNodes] = len; nCls[nNodes] = cls;
 		return nNodes++;
 	};
-	const pathOf = (node, extraSeed, extraLen) => {
+	// (a node's inputs: its run's seed drawn with its class's keep, as the GPU drew them)
+	const pathOf = (node, extraSeed, extraLen, extraCls) => {
 		const segs = [];
 		let len = extraLen || 0;
 		for (let q = node; q >= 0; q = nUp[q]) { segs.push(q); len += nLen[q]; }
 		const out = new Uint8Array(len);
 		let o = 0;
-		for (let k = segs.length - 1; k >= 0; k--) { const q = segs[k]; rollInputs(nSeed[q], nLen[q], a.keep, out, o); o += nLen[q]; }
-		if (extraLen) rollInputs(extraSeed, extraLen, a.keep, out, o);
+		for (let k = segs.length - 1; k >= 0; k--) { const q = segs[k]; rollInputs(nSeed[q], nLen[q], classes[nCls[q]].keep, out, o); o += nLen[q]; }
+		if (extraLen) rollInputs(extraSeed, extraLen, classes[extraCls].keep, out, o);
 		return out;
 	};
 	const costOf = (fifths, node) => {
@@ -3482,19 +3555,19 @@ async function gpuMain(a, L, m) {
 		}
 		return -1;
 	};
+	const groupW = (g) => {
+		let n = 0, ex = 0;
+		for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
+		if (!n) return -1;
+		return (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
+	};
+	let domShared = 0;
 	const popB = () => {
 		let br = null, bw = -1;
 		if (DOMg !== null) {
-			const GL = DOMg.list;
-			let bg = null;
-			for (let k = 0; k < 4 && GL.length; k++) {
-				const g = GL[(rnd() * GL.length) | 0];
-				let n = 0, ex = 0;
-				for (const r of g.rooms) { if (r.bk) continue; n += r.arr.length; if (r.ex > ex) ex = r.ex; }
-				if (!n) continue;
-				const w = (1 + Math.log(1 + g.gain)) * (g.troOk ? 2 : 1) / Math.sqrt(1 + g.picks / 50) / (SAT ? 1 + satOver(ex, a.satN) / SAT_B : 1);
-				if (w > bw) { bw = w; bg = g; }
-			}
+			// (--domShare of the tournaments over the dominated groups, as explore()'s)
+			const dp = domPick(DOMg, a.domShare, rnd, groupW), bg = dp.g;
+			if (dp.shared) domShared++;
 			if (bg !== null) {
 				if (bg.rooms.length === 1) br = bg.rooms[0].bk ? null : bg.rooms[0];
 				else {
@@ -3644,7 +3717,8 @@ async function gpuMain(a, L, m) {
 		}
 		if (!K) { end = 'exhausted'; break; }
 		const bs = fmixU((Math.imul(a.seed, 0x9e3779b1) + batches + 1) | 0);
-		ch.stdin.write(`batch ${K} ${maxT} ${bs}\n`);
+		const bc = pickClass(), bst = mixSt[bc];
+		ch.stdin.write(mixOn ? `batch ${K} ${maxT} ${bs} ${classes[bc].roll} ${classes[bc].keep}\n` : `batch ${K} ${maxT} ${bs}\n`);
 		ch.stdin.write(Buffer.from(pickBytes.subarray(0, 4 * K)));
 		const hw = Date.now();
 		pickMs += hw - h0;
@@ -3656,6 +3730,7 @@ async function gpuMain(a, L, m) {
 		if (m.ev.ev !== 'batch') continue;
 		batches++;
 		ticks += m.ev.ticks;
+		bst.batches++; bst.ticks += m.ev.ticks; bst.records += m.ev.n;
 		gpuMs += m.ev.ms;
 		rollMs += m.ev.rollMs || 0;
 		kernelMs += m.ev.kernelMs || 0;
@@ -3673,8 +3748,9 @@ async function gpuMain(a, L, m) {
 			const d = rec[6 * j], t = rec[6 * j + 1], fifths = rec[6 * j + 2], roomKey = rec[6 * j + 3], pk = rec[6 * j + 4], rs = rec[6 * j + 5];
 			if (d < 0) continue;   // (the pool is full: not kept)
 			const run = rs & 0xffff, step = rs >>> 16;
-			const node = newNode(pickNode[pk], rollSeed(bs, pk, run), step + 1);
+			const node = newNode(pickNode[pk], rollSeed(bs, pk, run), step + 1, bc);
 			const isNew = d >= n0;
+			if (isNew) bst.fresh++;
 			if (isNew) { grow(d + 1); if (d < nCells) reordered++; else nCells = d + 1; cPicks[d] = 0; cVer[d] = 0; cSeen[d] = 0; if (SAT && pk < K) { pickNew[pk]++; newPk.set(d, pk); } }
 			else if (t >= cT[d]) continue;
 			cT[d] = t; cNode[d] = node;
@@ -3684,7 +3760,7 @@ async function gpuMain(a, L, m) {
 			hpush(d);
 			if (t > deepest) deepest = t;
 			if (rc < minRc - 0.05) minRc = rc;
-			if (rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) { if (SAT && rc < near.rc - 0.05 && pk < K) pickFresh[pk] = 1; near = { rc, t, c: d }; }
+			if (rc < near.rc - 1e-3 || (rc <= near.rc + 1e-3 && t < near.t)) { if (SAT && rc < near.rc - 0.05 && pk < K) pickFresh[pk] = 1; if (rc < near.rc - 0.05) bst.nearer++; near = { rc, t, c: d }; }
 			let r = rooms.get(roomKey);
 			if (isNew) {
 				if (r === undefined) { r = { pending: true, key: roomKey, cells: [] }; rooms.set(roomKey, r); }
@@ -3701,6 +3777,7 @@ async function gpuMain(a, L, m) {
 			for (const c of p.cells) if (cT[c] < cT[c0]) c0 = c;
 			rooms.delete(p.key);
 			const r = newRoom(p.key, c0);
+			bst.rooms++;
 			if (SAT && newPk.has(c0)) pickFresh[newPk.get(c0)] = 1;
 			for (const c of p.cells) { cRoom[c] = r.idx; r.arr.push(c); if (r.best < 0 || cRc[c] < cRc[r.best]) r.best = c; }
 			r.isNew = false;
@@ -3728,7 +3805,8 @@ async function gpuMain(a, L, m) {
 			for (let j = 0; j < nf; j++) if (bf < 0 || fin[4 * j + 3] < fin[4 * bf + 3]) bf = j;
 			const pk = fin[4 * bf], run = fin[4 * bf + 1], step = fin[4 * bf + 2], t = fin[4 * bf + 3];
 			if (!route || t < route.ticks) {
-				const masks = pathOf(pickNode[pk], rollSeed(bs, pk, run), step + 1);
+				const masks = pathOf(pickNode[pk], rollSeed(bs, pk, run), step + 1, bc);
+				bst.fin++;
 				const ev = C.evaluate(L, masks);
 				if (!ev || ev.ms.length !== t) say({ ev: 'warning', text: `a GPU route of ${t} ticks does not replay (${ev ? `finishes after ${ev.ms.length}` : 'does not finish'})` });
 				else {
@@ -3757,11 +3835,11 @@ async function gpuMain(a, L, m) {
 	const secs = (Date.now() - tReady) / 1000;
 	say({ ev: 'done', layers: deepest, seconds: Math.round(secs * 100) / 100, ticks, ticksPerSec: Math.round(ticks / Math.max(1e-3, secs)), states: nCells, picks, end,
 		...(end === 'unreachable' ? { levelFile: levelFileOf(a) } : {}), finish: route ? route.ticks : 0, first, cells: 'coarse', gpu: true, batches, rooms: roomList.length, full, gpuMs: Math.round(gpuMs), hostMs: Math.round(hostMs), rollMs: Math.round(rollMs), kernelMs: Math.round(kernelMs), records, touched, colMs: Math.round(colMs), rollWallMs: Math.round(rollWallMs), pickMs: Math.round(pickMs), seenMs: Math.round(seenMs), waitMs: Math.round(waitMs), reordered,
-		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10,
+		roomKeyMismatch: keyMismatch, loadSec: Math.round((tReady - t0) / 100) / 10, mix: mixOn ? mixSt : null,
 		// (eegpu roll's launch figures, as the other GPU tools' done events have them)
 		...Object.fromEntries(['maxLaunchMs', 'maxKernelMs', 'kernelLaunches', 'launchTotalMs', 'kernelTotalMs', 'gapMs', 'hostCpuMs', 'launchTarget'].filter((k) => toolDone && toolDone[k] !== undefined)
 			.map((k) => [k, toolDone[k]])), tool: toolDone || null });
-	console.log(`[goexplore] GPU (${info.gpu ? info.gpu.name : '?'}), batch ${a.batch} x ${a.rolls} x ${a.roll}, ${secs.toFixed(1)} s, ${(ticks / 1e6).toFixed(2)} M ticks, ` +
+	console.log(`[goexplore] GPU (${info.gpu ? info.gpu.name : '?'}), batch ${a.batch} x ${a.rolls} x ${classes.map((c) => c.roll).join('/')}, ${secs.toFixed(1)} s, ${(ticks / 1e6).toFixed(2)} M ticks, ` +
 		`${nCells.toLocaleString('en-US')} cells in ${roomList.length} rooms, ${batches} batches (GPU ${(gpuMs / 1000).toFixed(1)} s, host ${(hostMs / 1000).toFixed(1)} s), end ${end}: ` +
 		(route ? `first route ${first.ticks} ticks after ${first.sec} s (${first.simTicks.toLocaleString('en-US')} ticks); best ${route.ticks} ticks (${C.fmt(route.runTicks)}) after ${route.sec} s`
 			: `no route (closest: reach cost ${near.rc.toFixed(2)} at tick ${near.t})`) + (end === 'unreachable' ? ` (the reach field rules the start out: ${levelFileOf(a) || 'this level'})` : ''));
@@ -3897,7 +3975,7 @@ async function main() {
 		}
 		say(Object.assign({ ev: 'progress', layer: deepest, tick: deepest, states: total('cells'), ticks: tk, ticksPerSec: now > ta ? Math.round((tk - ka) / ((now - ta) / 1000)) : 0,
 			picks: total('picks'), bestCost: minRc === null || minRc >= 1e4 ? null : Math.round(minRc * 100) / 100, found: route ? route.ticks : 0, refined: total('refined') },
-		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
+		a.cells === 'coarse' ? { rooms: nRooms, groups: total('groups'), groupsDom: total('dominated'), picksDom: total('picksDom'), domShared: total('domShared') } : {}, one ? { allRooms: one.rooms.size, shared: one.shared, fed: one.fed } : {}, bursts ? { gpu: bursts.stats() } : {},
 		{ workers: a.workers, memMB: total('memMB'), heapMB: total('heapMB'), evicted: total('evicted'), cpuS: cpuSec() }, deathsNow(), timedNow(), usefulNow(), total('spdFlags') ? { spdOn: total('spdOn'), spdFlags: total('spdFlags') } : {}, route ? { lbCut: total('lbCut'), leadPicks: total('leadPicks'), wayPicks: total('wayPicks'), leadRoutes: nLead, wayRoutes: nWay, leadShare: stats.size ? Math.round(1000 * total('leadShare') / stats.size) / 1000 : 0 } : {}, total('seeded') ? { seeded: total('seeded'), seedCells: total('seedCells') } : {}));
 	};
 	// the workers' sources, each room key once per kind unless it improved (an earlier arrival, a lower cost): every
@@ -4224,7 +4302,7 @@ async function main() {
 				memMB: d.memMB || 0, heapMB: d.heapMB || 0, seeded: d.seeded || 0, seedCells: d.seedCells || 0, picks: d.picks || 0, lbCut: d.lbCut || 0, leadPicks: d.leadPicks || 0,
 				leadRoutes: d.leadRoutes || 0, leadShare: d.leadShare || 0, wayPicks: d.wayPicks || 0, wayShare: d.wayShare || 0 },
 			a.cells === 'coarse' ? { rooms: d.rooms || 0, bursts: d.bursts || 0, walks: d.walks || 0, walkHits: d.hits || 0, walkMs: d.walkMs || 0, imports: d.imports || 0, importAdded: d.importAdded || 0, spdFlags: d.spdFlags || 0, spdPeak: d.spdPeak || 0,
-				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, dDom: d.dDom || 0 } : {});
+				roomDead: !!d.roomDead, deadCut: d.deadCut || 0, groups: d.groups || 0, dominated: d.dominated || 0, maximal: d.maximal || 0, picksDom: d.picksDom || 0, domShared: d.domShared || 0, dDom: d.dDom || 0 } : {});
 		}) });
 	console.log(`[goexplore] ${a.workers} worker${a.workers > 1 ? 's' : ''} (seed ${a.seed}${a.workers > 1 ? `..${a.seed + a.workers - 1}` : ''}), ${a.cells} cells, ${secs.toFixed(1)} s, ` +
 		`${(tk / 1e6).toFixed(2)} M ticks, ${total('cells').toLocaleString('en-US')} cells${a.cells === 'coarse' ? ` in ${Math.max(0, ...[...stats.values()].map((v) => v.rooms || 0))} rooms` : ''}, end ${end}: ` +
@@ -4238,4 +4316,4 @@ if (!isMainThread && workerData && workerData.goexplore) workerMain();
 else if (require.main === module) main().catch((e) => { console.log(JSON.stringify({ error: e.message })); process.exitCode = 1; });
 
 module.exports = { CellMap, mixW, OPTIONS, QP, QV, FINE_MAX_TILES, parseArgs, settle, cellsFor, defaultMem, machineMemory, processMB, memOfTotal, registryOthers, registryClaim, discreteOf,
-	roomOf, counterRelevance, switchReaders, domIndex, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
+	roomOf, counterRelevance, switchReaders, domIndex, domPick, maskIn, roomFields, roomUseful, bitAt, CUL_A, roomDead, liveAt, pendingTrigger, inputsOf, rngOf, rollSeed, rollInputs, rollHostMB, lowerBoundTiles, gateContext, routeGates, gateAvoidable, avoidTilesOf, deathsOf, deathMovesFor, DEATH_TICKS, DEATH_TILES };
