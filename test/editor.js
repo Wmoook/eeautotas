@@ -2202,7 +2202,7 @@ async function escapeSection() {
 		const heavy = (m) => cls(m).filter((c) => +c[2] === 3).map((c) => c[0]).join();
 		const raw = ED.escRotOf(['--roll=240+--keep=0.97+--pA=0.2', '--rollMix=40:0.85:1,240:0.97:5', '--roll=90']);
 		const nx = [ED.rollsNext([], rotD[0]), ED.rollsNext(rl[0], rotD[0]), ED.rollsNext(rl[0], rotD[3]), ED.rollsNext(rl[0], rotD[4]), ED.rollsNext([], rotD[5]), ED.rollsNext(rl[2], rotD[5])];
-		check('the GPU random runs in the rotation: longruns / lr3 / lr2 start them again with main's roll mix weighted 3 to 1 toward 120 / 255 (keep 0.985: the kernel's 255-tick cap) / 240 ticks, never --roll / --keep; reach and plain leave them as they are; base back to the search's own mix; raw flags without --roll / --keep',
+		check('the GPU random runs in the rotation: longruns / lr3 / lr2 start them again with the roll mix of main weighted 3 to 1 toward 120 / 255 (keep 0.985: the kernel 255-tick cap) / 240 ticks, never --roll / --keep; reach and plain leave them as they are; base back to the own mix of the search; raw flags without --roll / --keep',
 			rl.every((f) => !f || f.every((x) => !/^--(roll|keep)=/.test(x))) && parsed &&
 			heavy(mixOf(rl[0])) === '120' && heavy(mixOf(rl[1])) === '255' && heavy(mixOf(rl[2])) === '240' && cls(mixOf(rl[1])).some((c) => c[0] === '255' && c[1] === '0.985') &&
 			cls(mixOf(rl[0])).map((c) => c[0]).join() === '40,120,240' && rl[3] === null && rl[4] === null && rl[5].length === 0 &&
