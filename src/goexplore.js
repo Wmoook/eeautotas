@@ -234,9 +234,9 @@
 //        (EEAT_PICKLOG=1: a 'picklog' event every 30 s, the picks per head, room and zone)
 //        [--useful=1 (coarse cells: the useful territory, see USEFUL TERRITORY: cells in a cul-de-sac of their room
 //        demoted (head A: CUL_A tiles more; head B: only when its sample holds no other cell), a room whose territory gain
-//        is all off the band gets gain 0, a death kept as the earliest arrival not into a cul-de-sac; the progress and
-//        done events carry "useful": {culPicks, culCells, zeroed (rooms), culSets, culDropped, reculs}, "deaths"
-//        "useless"; 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
+//        is all off the band gets gain 0, a death kept only as the earliest arrival into a cul-de-sac gets no discovery
+//        burst and enters the room there (reentry); the progress and done events carry "useful": {culPicks, culCells,
+//        zeroed (rooms), culSets, culDropped, reculs}, "deaths" "useless" (such deaths, kept); 0: as before)] [--pickBox=x0,y0,x1,y1 (observation only,
 //        test/useful.js: the picks and new cells whose tile is in that box, "pickBox" in the done event)]
 //        [--nice=0 (Linux: each worker THREAD lowers its own priority to this nice value; the main thread, the bursts'
 //        eegpu it starts and the editor's GPU tools keep theirs. The editor passes 10 next to GPU strategies; before, it
@@ -961,7 +961,9 @@ function domIndex() {
 // USEFUL GAIN is its territory gain on the band: a room whose useful gain is 0 (the territory it opens is all off the
 // band: a viewing room behind a coin door, a sealed pocket) keeps its raw gain in `graw` and gets gain 0: no novelty
 // weight (head B), no discovery burst (head C), no "room" source at once and no gain for the editor's relay, wall
-// breaker and its stall clock. A death kept only as the earliest arrival (deathPays) must not respawn in a cul-de-sac. A room
+// breaker and its stall clock. A death kept only as the earliest arrival (deathPays) that respawns in a cul-de-sac is kept (no discovery burst)
+// and enters the room there (reentry below), never dropped: the walk is gravity-blind, and a checkpoint pocket left only
+// by a fall is one. A room
 // entered again at one of its cul-de-sac tiles (a run, an import, a seed: the clock's rooms, time doors and keys running
 // out, are entered wherever the ball is) gets its cul-de-sacs again with its entries as terminals (reentry, REENTRY_MAX).
 const CUL_A = 2000, SL_MIN = 6, SL_F = 0.25, REENTRY_MAX = 16;
@@ -2690,10 +2692,15 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			else if (roomFor()) rm = newRoom(roomKey, tR, room.key);
 			else { full = true; needSweep = true; dDrop++; return; }
 		}
-		// (a death that pays only as the earliest arrival must bring the ball back into USEFUL territory: a respawn in a
-		// cul-de-sac of its room leads nowhere a target is (Forgotten Helix: back to the mini's start by the viewing room's
-		// portal); dCul)
-		if (!byCost && useOf(rm, centreTile()) === 2) { dCul++; dDrop++; return; }
+		// (a death that pays only as the earliest arrival and respawns in a cul-de-sac of its room (Forgotten Helix: back
+		// to the mini's start by the viewing room's portal) is kept, never dropped, only without a discovery burst; dCul.
+		// The respawn ENTERS the room there: its cul-de-sacs again with it as a terminal (reentry, at most REENTRY_MAX
+		// entries a room; past them its cell keeps u = 2: demoted). The cul-de-sac walk is gravity-blind and two-way, so a
+		// checkpoint pocket above a pit that the ball leaves only by falling out of it is a 'cul-de-sac' as seen from the
+		// room's first entry, and there the death is the route (the god-int soundness review's pocketpit64: dropping the
+		// death left 0 routes on 3 of 3 seeds, and so did keeping its cell demoted (u = 2: never picked); test/deaths.js))
+		const culDeath = !byCost && useOf(rm, centreTile()) === 2;
+		if (culDeath) { dCul++; reentry(rm); }
 		if (byCost) dCost++; else dNew++;
 		const upD = mkNode(up, blk, o, n);
 		const nc = add(tR, rc, null, upD, DEADBLK, 0, nd, rm);
@@ -2701,7 +2708,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (nc === null) return;
 		dCells++;
 		if (rm !== null && rm.isNew) firstCell(rm, nc, tR);
-		else if (coarse && a.burst > 0 && a.dburst !== 0 && !domDeath) discovery.push([nc, a.burst]);
+		else if (coarse && a.burst > 0 && a.dburst !== 0 && !domDeath && !culDeath) discovery.push([nc, a.burst]);
 	};
 	/** the plan past its count (the editor's `steer <file>`, src/editor.js pastPlan): head A's steer heap from now on by
 	 *  that field with the coin DP's value first (dpFirst: its layer fields count a coin at every touch, so they reach the
