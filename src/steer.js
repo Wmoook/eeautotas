@@ -456,7 +456,7 @@ function walkBuild(level, A, opts) {
 		if (!f) break;
 		if (M.S * f.values.length > (opts.capOf ? opts.capOf(cx.feat) : maxLayers)) { capped = { feat: cx.feat, why: 'layers' }; break; }
 		// (past the physics layers (walk layers): only while the physics build's time, by its time a layer so far, fits)
-		if (opts.physCap && M.S * f.values.length > opts.physCap && Date.now() + M.S * f.values.length * opts.layerMs > opts.endAt) { capped = { feat: cx.feat, why: 'time' }; break; }
+		if (opts.physCap && M.S * f.values.length > opts.physCap && Date.now() + M.S * f.values.length * opts.perLayer() > opts.endAt) { capped = { feat: cx.feat, why: 'time' }; break; }
 		if (opts.deadline && Date.now() > opts.deadline) { capped = { feat: cx.feat, why: 'time' }; break; }
 		modeled.add(cx.feat);
 	}
@@ -1015,13 +1015,18 @@ function buildSteer(level, opts) {
 	let over = null;
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
-	// (the walk layers' time: a physics build's ms a model layer (at first a guess: 0.01 ms a tile, the sweeps of switch
-	// layers included; then the last build's); a model past the physics layers only while its build is predicted to end
-	// within 2 x maxMs of the start: Switcher Puzzle's 896 layers took 92 s and lost the coin DP to the time budget)
-	let layerMs = A.N * 0.01 * (A.feats.has('fx') ? 2 : 1);
+	// (the walk layers' time: a physics build's ms a model layer (at first one physics field of the level timed, x 3 for
+	// the sweeps of switch layers; then the last build's); a model past the physics layers only while its build is
+	// predicted to end within 2 x maxMs of the start: Switcher Puzzle's 896 layers took 92 s and lost the coin DP to the
+	// time budget)
+	let layerMs = null;
 	const endAt = t0 + 2 * maxMs;
+	const perLayer = () => {
+		if (layerMs === null) { const t = Date.now(); RF.reachField(level, { oneWayEntry: true, portalForced: true }); layerMs = 3 * Math.max(1, Date.now() - t); }
+		return layerMs;
+	};
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers: walkCap, capOf, deadline: t0 + maxMs / 2, physCap: maxLayers, layerMs, endAt });
+		B = walkBuild(level, A, { features: [...modeled], maxLayers: walkCap, capOf, deadline: t0 + maxMs / 2, physCap: maxLayers, perLayer, endAt });
 		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${capOf(B.capped.feat)} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
 		const cp0 = opts.noDP ? null : coinPlan(B, opts.coinT || 0);
@@ -1041,7 +1046,7 @@ function buildSteer(level, opts) {
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
 		const S2 = B.M.S * A.feats.get(cx.feat).values.length;
 		if (S2 > capOf(cx.feat)) { over = over || `${cx.feat}: over ${capOf(cx.feat)} layers (${mb})`; break; }
-		if (S2 > maxLayers && Date.now() + S2 * layerMs > endAt) { over = over || `${cx.feat}: ${secs}`; break; }
+		if (S2 > maxLayers && Date.now() + S2 * perLayer() > endAt) { over = over || `${cx.feat}: ${secs}`; break; }
 		// (the next build takes longer than this one)
 		if (Date.now() - t0 > maxMs / 2) { over = over || `${cx.feat}: ${secs}`; break; }
 		modeled.add(cx.feat);
