@@ -156,7 +156,7 @@ static int runExplore(int argc, char** argv, const LevelBlob& B, Gpu* shared = n
 	}
 	cu::CUfunction fexp = g.fn("exploreExpand_" + std::to_string(TW)), fmat = g.fn("exploreMaterialize_" + std::to_string(TW));
 	cu::CUfunction fProp = g.fn("exploreClaimPropose"), fCount = g.fn("exploreClaimCount"), fTake = g.fn("exploreClaimTake");
-	if (!fexp || !fmat || !fProp || !fCount || !fTake) { printf("{\"error\":\"explore kernels missing\"}\n"); return 4; }
+	if (!fexp || !fmat || !fProp || !fCount || !fTake) { printf("{\"error\":%s}\n", jsonStr("explore kernels missing: " + cu::lastError).c_str()); return 4; }
 	const size_t SB = sizeof(S);
 	// the visited-cell table: 1 GB (2^27 cells) on GPUs with 6 GB or more, else smaller; stop before it is half full
 	// (probing degrades). The state buffers take at most about a third of the memory.
