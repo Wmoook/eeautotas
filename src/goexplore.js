@@ -3022,7 +3022,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// head P (--pareto=1, see PARETO HEAD): a cell's order cost as head A orders it (the steer cost where head A has the
 	// steer heap, else the reach cost); the front rebuilt every PAR_EVERY picks; a room of the front but the cheapest by a
 	// tournament of 2 (the least picked), then the best of --sample of its cells by head A's own priority
-	const parCost = (c) => (HS !== null && c.sc !== undefined ? c.sc : c.rc);
+	// (a cell the steer field has no value for (sc STEER_NONE): 6000 + its reach cost, as distOf ranks it, so rooms without a
+	// steer value keep their reach order instead of all tying at STEER_NONE (head P then had no room on those levels))
+	const parCost = (c) => (HS !== null && c.sc !== undefined ? (c.sc < STEER_NONE ? c.sc : 6000 + c.rc) : c.rc);
 	const parLive = (r) => !r.bk && r.arr.length > 0 && r.best !== null, parRoomCost = (r) => parCost(r.best);
 	const popP = () => {
 		if (picks - parAt >= PAR_EVERY) { parAt = picks; const pf = paretoRooms(roomList, parLive, parRoomCost); parFront = pf.front; parList = pf.list; }
