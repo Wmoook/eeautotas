@@ -139,6 +139,13 @@ function sectionCpu() {
 	const a1 = rows[0].on;
 	check('--frontier=1: the same seed and budget give the same search', again.ticks === a1.ticks && again.states === a1.states && again.picks === a1.picks && JSON.stringify(again.frontier && again.frontier.picks) === JSON.stringify(a1.frontier.picks) && JSON.stringify(again.first) === JSON.stringify(a1.first),
 		`${again.ticks} / ${a1.ticks} ticks, ${again.picks} / ${a1.picks} picks`);
+	// the revision's options (the share by head F's yield, its own dead-end brake, the physics field without effects): a
+	// route, replayed, and the same search again
+	const opts2 = [...base, '--seed=1', '--frontier=1', '--fYield=1', '--fBrake=1', '--fPhys=1'];
+	const x1 = gox(file, opts2), x2 = gox(file, opts2);
+	const rx = routesOf(x1), dx1 = doneOf(x1), dx2 = doneOf(x2);
+	check('--fYield=1 --fBrake=1 --fPhys=1: a route (replayed)', rx.length > 0 && !!C.evaluate(L, masksOf(rx[0].inputs)), rx.length ? `${rx[0].ticks} ticks, ${JSON.stringify(dx1.frontier)}` : 'none');
+	check('--fYield=1 --fBrake=1 --fPhys=1: the same seed and budget give the same search', dx1.ticks === dx2.ticks && dx1.picks === dx2.picks && dx1.states === dx2.states, `${dx1.picks} / ${dx2.picks} picks`);
 	const simOf = (r) => (r.length ? r[0].simTicks : Infinity);
 	console.log(`  (the simulated ticks to the first route, off / on: ${rows.map((r) => `seed ${r.seed} ${simOf(r.r0)} / ${simOf(r.r1)}`).join(', ')}; visited tiles ${rows.map((r) => `${r.off.visTiles} / ${r.on.visTiles}`).join(', ')})`);
 }

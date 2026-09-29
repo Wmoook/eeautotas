@@ -314,7 +314,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: 0, dburst: 1, dom: 1, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
-	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0 };
+	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
 // (any room; kept with the flag off too, for the progress events' visTiles). Every --fEvery picks (or sooner, at least
@@ -333,10 +333,17 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 // share: --fLo while the nearest attempt improves (by 1 tile), rising to --fHi over --fStall picks of stall; none once
 // a route is known. The trophy guidance is untouched (heads A / B keep the rest); it only orders (the reach field's -1
 // stays the only prune). Progress / done: visTiles, maxCoins, frontier {builds, ms, picks, cand, goals}.
-const FR_MIN_PICKS = 5000;
+// (and at least FR_TILE_PK picks a tile of the level apart: a build costs about 4 simulated ticks' time a tile, so this keeps
+// the builds near 3% of a worker's time: Barrel Cannon Canyon (300 x 300) spent 9% on them at 5,000 picks)
+const FR_MIN_PICKS = 5000, FR_TILE_PK = 0.4;
 // --fYield=1: head F's share times its yield over the other heads' (FR_ROOM_W tiles a new room; decayed by FR_DECAY a pick;
 // a prior of FR_PRIOR new tiles a pick over FR_PN picks on both sides), within [FR_YMIN, FR_YMAX]
 const FR_ROOM_W = 20, FR_DECAY = 0.9995, FR_PRIOR = 0.05, FR_PN = 200, FR_YMIN = 0.25, FR_YMAX = 2;
+// --fBrake=1: head F's own dead-end brake (the frontier's false nears: a frontier the reach model reaches and the ball does
+// not, e.g. a walk-mode level's gap): per zone of SAT_ZONE x SAT_ZONE tiles its excess, +1 a head-F pick of a cell there,
+// -FR_ZCELL a new visited tile the pick's runs found, 0 at a new room; past FR_ZN a cell there costs FR_ZMU x sqrt(excess -
+// FR_ZN) tiles more in head F's order (its candidates and heap; put back at its pop when that grew by more than a tile)
+const FR_ZCELL = 20, FR_ZN = 100, FR_ZMU = 2;
 // --spd=S (coarse cells; 0 = off): speed in the cell key only where the search is stuck. When this worker's nearest
 // distance (the steer field's, else the reach field's) has not dropped by SPD_PROGRESS tiles for S seconds, the frontier
 // room (the one whose best cell is nearest, not yet flagged) keys its new cells also by the ball's speed in 1 px/tick
@@ -1832,8 +1839,18 @@ function frontierGoals(L, sim, doors, VIS, opts = {}) {
 	}
 	return { fg, goals };
 }
-/** --frontier: the field to the goals (src/reach.js, no death edges; ordering only), null without goals */
-const frontierField = (L, fg, goals) => (goals.length ? RF.reachField(Object.assign({}, L, { fg }), { goals, deaths: false }) : null);
+/** --frontier: the field to the goals (src/reach.js, no death edges; ordering only), null without goals. strip (--fPhys=1, a
+ *  room without an effect on a level of world gravity 1): the effect blocks (reach.js's wild ones and the effect reset) are
+ *  air in it, so a level whose effects make the reach field a walk gets a physics field where the ball has none: a walk is
+ *  blind to gravity, and its frontier is every unvisited tile over the ball's head (ordering only: no proof is claimed) */
+const FR_WILD = new Set([417, 418, 419, 453, 461, 1517, 1618]);
+const frontierField = (L, fg, goals, strip = false) => {
+	if (!goals.length) return null;
+	if (strip) for (let i = 0; i < fg.length; i++) if (FR_WILD.has(fg[i])) fg[i] = 0;
+	return RF.reachField(Object.assign({}, L, { fg }), { goals, deaths: false });
+};
+/** --frontier: a room description with an effect on (roomOf desc): its frontier field stays the level's own mode */
+const FR_FX = /\b(fly|lowgrav|speed|jump|multijump|grav=|gravity)/;
 
 /** a min-heap of (priority, cell, version) entries; prio(cell) at push. pop() returns the cell and sets popVer (the
  *  entry's version: stale when the cell's own has moved on); compact() drops the stale entries */
@@ -2217,8 +2234,9 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 	// (--frontier=1: head F's state: the field's generation, heap, room, field, per-tile costs FT (-2: not looked up yet), the
 	// candidates' cost bound, when and at what VIS count it was built, the nearest attempt's best and when it improved)
 	const FR = coarse && a.frontier > 0 ? { gen: 0, HF: null, room: null, field: null, FT: null, dil: null, thr: Infinity, at: -1e15, visAt: 0, best: Infinity, gainAt: 0,
-		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0 } : null;
+		builds: 0, ms: 0, picks: 0, cand: 0, goals: 0, walk: null, bytes: 0, doors: null, log: process.env.EEAT_FRLOG || '', pk: new Map(), yF: 0, nF: 0, yO: 0, nO: 0, zx: new Map() } : null;
 	/** --frontier: head F's field's cost (tiles) at tile t for a ball at rest there (-1: no way to the frontier), looked up once */
+	const frGap = Math.max(FR_MIN_PICKS, Math.round(N * FR_TILE_PK));
 	const ftAt = (t) => { let v = FR.FT[t]; if (v === -2) { v = RF.costAt(FR.field, (t % W) * 16, ((t / W) | 0) * 16, 0); FR.FT[t] = v; } return v; };
 	// (a cell of head F's current field: back into its heap at every push of its own, a pick or an earlier arrival)
 	const hpush = (c) => { HA.push(c); if (HS !== null && c.sc !== undefined) HS.push(c); if (sched !== null) lpush(c); if (FR !== null && FR.HF !== null && c.fg === FR.gen) FR.HF.push(c); };
@@ -2973,6 +2991,10 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		spdSay({ ev: 'flag', d, d0, room: br.key, desc: br.desc, bd, cells: cells.size, n: spdRooms.length });
 		spdOn = spdRooms.length; if (spdOn > spdPeak) spdPeak = spdOn;
 	};
+	/** --frontier --fBrake: the extra cost (tiles) of cell c's zone in head F's order */
+	const frPen = (c) => { if (!a.fBrake) return 0; const v = FR.zx.get(zoneOf(c.tile)); return v !== undefined && v > FR_ZN ? FR_ZMU * Math.sqrt(v - FR_ZN) : 0; };
+	/** --frontier: head F's priority of cell c (its field cost at its build, the picks, and with --fBrake its zone's brake now) */
+	const frPrio = (c) => c.fc + a.fLambda * Math.sqrt(c.picks) + (a.fBrake ? frPen(c) : 0);
 	/** --frontier: head F's share now: --fLo while the nearest attempt improves (by 1 tile), up to --fHi after --fStall
 	 *  picks of stall; 0 before the first field and once a route is known (the shared bound dropped) */
 	const frShare = (now) => {
@@ -3013,13 +3035,16 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		else { const ms = inputsOf(c0.node); sim.restore(startSnap); for (let s = 0; s < ms.length; s++) { E.applyMask(inp, ms[s]); sim.tick(inp); } ticks += ms.length; }
 		if (FR.doors === null) FR.doors = doorTiles(L);
 		if (FR.dil === null) FR.dil = new Uint8Array(N);
-		const { fg, goals } = frontierGoals(L, sim, FR.doors, VIS, { cul: R.cul, walk: FR.walk === true, dil: a.fDil, D: FR.dil });
+		// (--fPhys=1: a room without an effect gets a physics field on a level whose effects make the reach field a walk)
+		const strip = !!a.fPhys && L.gravityMult === 1 && FR.wild === true && !FR_FX.test(R.desc || '');
+		const { fg, goals } = frontierGoals(L, sim, FR.doors, VIS, { cul: R.cul, walk: FR.walk === true && !strip, dil: a.fDil, D: FR.dil });
 		let f = null;
-		try { f = frontierField(L, fg, goals); } catch (e) { f = null; }
+		try { f = frontierField(L, fg, goals, strip); } catch (e) { f = null; }
+		FR.phys = f !== null && f.mode === 'physics';
 		FR.goals = goals.length;
 		FR.gen++; FR.room = R; FR.field = f; FR.HF = null; FR.cand = 0; FR.thr = Infinity; FR.bytes = N;
 		if (f === null) { FR.FT = null; FR.ms += Date.now() - tb; return; }
-		if (FR.walk === null) FR.walk = f.mode === 'walk';
+		if (FR.walk === null) { FR.walk = f.mode === 'walk'; FR.wild = FR.walk; }
 		FR.FT = FR.FT !== null && FR.FT.length === N ? FR.FT.fill(-2) : new Float32Array(N).fill(-2);
 		for (const k in f) if (ArrayBuffer.isView(f[k])) FR.bytes += f[k].byteLength;
 		FR.bytes += FR.FT.byteLength;
@@ -3031,10 +3056,11 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (v < 0) continue;
 			c.fc = v; cand.push(c);
 		}
-		cand.sort((x, y) => x.fc - y.fc || x.t - y.t);
+		if (a.fBrake) { for (const c of cand) c.fk = c.fc + frPen(c); cand.sort((x, y) => x.fk - y.fk || x.t - y.t); } else cand.sort((x, y) => x.fc - y.fc || x.t - y.t);
 		if (cand.length > a.fK) cand.length = a.fK;
-		FR.thr = cand.length >= a.fK ? cand[cand.length - 1].fc : Infinity;
-		FR.HF = heapOf((c) => c.fc + a.fLambda * Math.sqrt(c.picks));
+		FR.thr = Infinity;
+		if (cand.length >= a.fK) { FR.thr = 0; for (const c of cand) if (c.fc > FR.thr) FR.thr = c.fc; }
+		FR.HF = heapOf(frPrio);
 		for (const c of cand) { c.fg = FR.gen; FR.HF.push(c); }
 		FR.cand = cand.length;
 		// (EEAT_FRLOG=<file>: observation only, a line per build: the room, the goals, the nearest candidates, the last build's head-F picks by tile)
@@ -3063,7 +3089,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 		if (coarse && a.spd > 0) spdClock(now);
 		// (--frontier: a new field every --fEvery picks, or at least FR_MIN_PICKS apart once VIS grew by --fGrow; none once a
 		// route is known)
-		if (FR !== null && maxT >= spdMaxT0 && (picks - FR.at >= a.fEvery || (nVis > FR.visAt * (1 + a.fGrow) + 16 && picks - FR.at >= FR_MIN_PICKS))) frBuild(now);
+		if (FR !== null && maxT >= spdMaxT0 && (picks - FR.at >= Math.max(a.fEvery, frGap) || (nVis > FR.visAt * (1 + a.fGrow) + 16 && picks - FR.at >= frGap))) frBuild(now);
 		if (FR !== null) fShare = frShare(now);
 		for (let k = 0; k < CHUNK && !end; k++) {
 			let e = null;
@@ -3090,7 +3116,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			} else if (fShare > 0 && rnd() < fShare) {
 				// head F (--frontier=1): the cell of its field's room nearest the frontier (none: heads A / B as without it)
 				const HF = FR.HF;
-				while (HF.size() > 0) { const c = HF.pop(); if (HF.popVer !== c.ver || c.t >= maxT || c.fg !== FR.gen) continue; e = c; break; }
+				while (HF.size() > 0) { const c = HF.pop(); if (HF.popVer !== c.ver || c.t >= maxT || c.fg !== FR.gen) continue; if (a.fBrake && frPrio(c) > HF.popVal + 1) { HF.push(c); continue; } e = c; break; }
 				if (e === null) { if (rnd() < a.pA) e = popA(); else { e = popB(); head = 'B'; } }
 				else { FR.picks++; head = 'F'; if (FR.log) { const k = e.tile; FR.pk.set(k, (FR.pk.get(k) || 0) + 1); } }
 			} else if (rnd() < a.pA) e = popA();
@@ -3211,7 +3237,7 @@ function explore(L, field, a, seed, ctrl, post, port, seedPort = null, idx = -1,
 			if (plRow !== null) { plRow[1] += cells.size - cells0; plRow[2] += impr - impr0; }
 			// (--frontier --fYield=1: the yield of head F's picks against the others': new visited tiles + FR_ROOM_W x new rooms a pick,
 			// decayed by FR_DECAY a pick of its kind)
-			if (FR !== null) { const dv = nVis - vis0 + FR_ROOM_W * (roomList.length - rooms0); if (head === 'F') { FR.yF = FR.yF * FR_DECAY + dv; FR.nF = FR.nF * FR_DECAY + 1; } else { FR.yO = FR.yO * FR_DECAY + dv; FR.nO = FR.nO * FR_DECAY + 1; } }
+			if (FR !== null) { const dv = nVis - vis0 + FR_ROOM_W * (roomList.length - rooms0); if (head === 'F') { FR.yF = FR.yF * FR_DECAY + dv; FR.nF = FR.nF * FR_DECAY + 1; if (a.fBrake) { const z = zoneOf(e.tile), v = FR.zx.get(z) || 0; FR.zx.set(z, roomList.length > rooms0 ? 0 : Math.max(0, v + 1 - FR_ZCELL * (nVis - vis0))); } } else { FR.yO = FR.yO * FR_DECAY + dv; FR.nO = FR.nO * FR_DECAY + 1; } }
 			// (the brake: the pick's region and room, by what its runs made)
 			if (SAT && room1 !== null) {
 				const fresh = roomList.length > rooms0 || minRc < minRc0 - 0.05;
