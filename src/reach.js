@@ -927,11 +927,13 @@ const AIR_VRUN = (1 / MULT) * BD / (1 - BD);   // the running limit (6.78 px/tic
 /** the flight envelope of a launch class: D[dy + up] = the columns the centre covers at row dy (-up .. AIR_DOWN) relative
  *  to the launch row (-1: never at that row), from a vertical start v0 (JV: a jump; -16: a field / boost / exit) and a
  *  horizontal start h0 (AIR_VRUN, or 16 x 1.42 for the fast class, decaying under the 16 cap toward the running limit) */
-function airTable(v0, h0) {
-	const ys = [8], xs = [0];   // the centre's offset below the launch row's top edge; the horizontal distance covered
-	let v = v0, y = 8, h = h0, x = 0;
+function airTable(v0, h0, free) {
+	// (the centre from the launch row's top edge (0: generous by up to 8 px); `free` ticks without gravity first: a boost's
+	// or a field's pull still queued (the gravity queue) after the ball leaves it)
+	const ys = [0], xs = [0];   // the centre's offset below the launch row's top edge; the horizontal distance covered
+	let v = v0, y = 0, h = h0, x = 0;
 	for (let t = 1; t < 4000 && y < 16 * (AIR_DOWN + 1); t++) {
-		v = vstep(v, G, BD); y += v;
+		v = t <= free ? v : vstep(v, G, BD); y += v;
 		x += h; h = h0 > AIR_VRUN ? Math.max(AIR_VRUN, Math.min(16, (h + 1 / MULT) * BD)) : h;
 		ys.push(y); xs.push(x);
 	}
@@ -946,7 +948,7 @@ function airTable(v0, h0) {
 	}
 	return { up, D };
 }
-const AIR_TAB = [airTable(JV, AIR_VRUN), airTable(-16, AIR_VRUN * 1.42), airTable(-AIR_VRUN * 1.42, 16 * 1.42)];   // floor, field, fast
+const AIR_TAB = [airTable(JV, AIR_VRUN, 0), airTable(-16, AIR_VRUN * 1.42, 2), airTable(-AIR_VRUN * 1.42, 16 * 1.42, 2)];   // floor, field, fast
 // (the inverse: per class, the least row dy (relative to the launch) at which the reach D(dy) is d columns or more)
 const AIR_DYMIN = AIR_TAB.map(({ up, D }) => { const m = new Int16Array(D[D.length - 1] + 1); let k = 0; for (let d = 0; d < m.length; d++) { while (D[k] < d) k++; m[d] = k - up; } return m; });
 function sideArrowPrices(level, opts, M) {
@@ -1077,7 +1079,7 @@ function sideArrowPrices(level, opts, M) {
 			if (c === WALL) continue;
 			if (exitT[i] || push[i] !== 0 || fg[i] === 114 || fg[i] === 115) lc[i] |= 4;   // (sideways at up to 16 x 1.42)
 			if (exitT[i] || c === UP || c === BUP) lc[i] |= 2;                            // (up at 13.55 / 16 / 16 x 1.42)
-			if (isField(c) || c === BDOWN || (c !== DEADLY && isFloor(i + W))) lc[i] |= 1;   // (dots, climbables, liquids: up at <= 6.78)
+			if (isField(c) || c === BDOWN || isFloor(i + W)) lc[i] |= 1;   // (dots, climbables, liquids: up at <= 6.78; a killing tile too)
 		}
 		for (const r of respawn) lc[r] |= 1;
 		// (the same inputs give the same beyond set: the steer's layers and coin legs share it; a hash of them, the newest
@@ -1096,82 +1098,62 @@ function sideArrowPrices(level, opts, M) {
 		// row's run of non-wall tiles; the target's column run's rows. (b): per class and tile, the topmost launch row of its
 		// column run (the latest point of a flight is the most sideways), its reach D at the tile's row, swept along the row.
 		const envelope = () => {
-		const BIG = 0x7fff;
-		const colTop = new Int32Array(N), colBot = new Int32Array(N);   // the column run of non-wall tiles: its first / last row
-		for (let x = 0; x < W; x++) {
-			let y = 0;
-			while (y < H) {
-				if (cls[y * W + x] === WALL) { y++; continue; }
-				let y1 = y;
-				while (y1 + 1 < H && cls[(y1 + 1) * W + x] !== WALL) y1++;
-				for (let k = y; k <= y1; k++) { colTop[k * W + x] = y; colBot[k * W + x] = y1; }
-				y = y1 + 1;
+		// the flight flood (v3, path-aware): per class a state per tile, the most columns still free (slack) and the fewest
+		// rows below its launch row (f: the table's row; a flight's reach grows fastest near its apex); a live launch seeds
+		// (D(0), 0); a sideways step costs a column, a step down adds D(f + 1) - D(f), a step up (f > -up) D(f - 1) - D(f)
+		// (it only rises within its launch's rise); walls and killers stop it; the union of the states at a tile (the most
+		// slack, the fewest rows) is a superset of every flight's (generous). A launch tile a flood covers is live (a portal
+		// exit once one of its portal tiles is covered): its seeds go in; the rounds of the L-path version are gone.
+		// states: at or above the launch row (f = k - up, k 0 .. up) one slack array per row of the table (exact: a ball
+		// there may still rise or fall back); below it (f >= 1: falling, it never rises again) the most slack and the fewest
+		// rows (the reach grows fastest nearest the apex: the union is generous)
+		const SR = [0, 1, 2].map((c) => Array.from({ length: AIR_TAB[c].up + 1 }, () => new Int16Array(N).fill(-1)));
+		const SB = [0, 1, 2].map(() => new Int16Array(N).fill(-1)), FB = [0, 1, 2].map(() => new Int16Array(N).fill(32767));
+		const covered = new Uint8Array(N);
+		let qa = new Int32Array(1 << 16), qh = 0, qt = 0;
+		const qpush = (v) => { if (qt === qa.length) { if (qh > 0) { qa.copyWithin(0, qh, qt); qt -= qh; qh = 0; } else { const n2 = new Int32Array(qa.length * 2); n2.set(qa); qa = n2; } } qa[qt++] = v; };
+		const flies = (i) => cls[i] !== WALL;   // (a killing tile too: the model's killers are not every tile's (a rotated spike): generous)
+		const cover = (i) => { if (!covered[i]) { covered[i] = 1; live(i); } };
+		const relaxR = (c, k, i, s) => { if (s < 0 || !flies(i) || s <= SR[c][k][i]) return; SR[c][k][i] = s; qpush((i * 32 + k) * 4 + c); cover(i); };
+		const relaxB = (c, i, s, f) => {
+			if (s < 0 || !flies(i)) return;
+			if (s <= SB[c][i] && f >= FB[c][i]) return;
+			if (s > SB[c][i]) SB[c][i] = s;
+			if (f < FB[c][i]) FB[c][i] = f;
+			qpush((i * 32 + 31) * 4 + c); cover(i);
+		};
+		const seeded = new Uint8Array(N);
+		const exitsOfSrc = new Map();
+		for (const [e, ps] of srcOf) for (const q of ps) { let l = exitsOfSrc.get(q); if (!l) exitsOfSrc.set(q, (l = [])); l.push(e); }
+		function live(i) {
+			if (seeded[i]) return;
+			seeded[i] = 1;
+			for (let c = 0; c < 3; c++) if (lc[i] & (1 << c)) { const { up, D } = AIR_TAB[c]; relaxR(c, up, i, D[up]); }
+			const ex = exitsOfSrc.get(i);
+			if (ex) for (const e of ex) { covered[e] = 1; live(e); }
+		}
+		for (const r of respawn) { covered[r] = 1; live(r); }
+		while (qh < qt) {
+			const v = qa[qh++], c = v & 3, k = (v >> 2) & 31, i = v >> 7;
+			const { up, D } = AIR_TAB[c];
+			const x = i % W, y = (i / W) | 0;
+			if (k !== 31) {
+				const s = SR[c][k][i];
+				if (x > 0) relaxR(c, k, i - 1, s - 1);
+				if (x < W - 1) relaxR(c, k, i + 1, s - 1);
+				if (y > 0 && k > 0) relaxR(c, k - 1, i - W, s + D[k - 1] - D[k]);
+				if (y < H - 1) { if (k < up) relaxR(c, k + 1, i + W, s + D[k + 1] - D[k]); else relaxB(c, i + W, s + D[up + 1] - D[up], 1); }
+			} else {
+				const s = SB[c][i], f = FB[c][i], Df = D[f + up];
+				if (x > 0) relaxB(c, i - 1, s - 1, f);
+				if (x < W - 1) relaxB(c, i + 1, s - 1, f);
+				if (y < H - 1) { const f2 = Math.min(f + 1, AIR_DOWN); relaxB(c, i + W, s + D[f2 + up] - Df, f2); }
 			}
 		}
-		const Dat = (c, dy) => { const { up, D } = AIR_TAB[c]; if (dy < -up) return -1; return D[Math.min(dy, AIR_DOWN) + up]; };
-		// the launches the ball can get to: from the spawns and checkpoints, a launch tile is live once a live launch's
-		// envelope covers it (a portal exit once one of its portal tiles is covered), rounds until none is new (a launch
-		// only a glide leads to, e.g. the top of a wall between two rooms, validates no glide)
-		const live = new Uint8Array(N), covered = new Uint8Array(N);
-		for (const r of respawn) live[r] = lc[r];
-		const dc = new Int16Array(N), reach = new Int16Array(N);
-		let rounds = 0, grew = true;
-		while (grew && rounds < AIR_ROUNDS) {
-			rounds++; grew = false;
-			for (let c = 0; c < 3; c++) {
-				const bit = 1 << c, up = AIR_TAB[c].up;
-				dc.fill(BIG);
-				for (let y = 0; y < H; y++) {
-					const o = y * W;
-					let last = -BIG;
-					for (let x = 0; x < W; x++) { if (cls[o + x] === WALL) { last = -BIG; continue; } if (live[o + x] & bit) last = x; if (last > -BIG) dc[o + x] = x - last; }
-					last = BIG;
-					for (let x = W - 1; x >= 0; x--) { if (cls[o + x] === WALL) { last = BIG; continue; } if (live[o + x] & bit) last = x; if (last < BIG && last - x < dc[o + x]) dc[o + x] = last - x; }
-				}
-				// (a): D is monotone in the row, so a launch row yL at distance d covers its column run from yL + dyMin(d) down
-				const dyMin = AIR_DYMIN[c];
-				for (let x = 0; x < W; x++) {
-					let y = 0;
-					while (y < H) {
-						const i0 = y * W + x;
-						if (cls[i0] === WALL) { y++; continue; }
-						const yb = colBot[i0];
-						let from = BIG;
-						for (let yL = y; yL <= yb; yL++) { const d = dc[yL * W + x]; if (d < dyMin.length) { const f = yL + dyMin[d]; if (f < from) from = f; } }
-						for (let k = Math.max(y, from); k <= yb; k++) covered[k * W + x] = 1;
-						y = yb + 1;
-					}
-				}
-				// (b)
-				reach.fill(-1);
-				for (let x = 0; x < W; x++) {
-					let top = -1, runTop = -1;
-					for (let y = 0; y < H; y++) {
-						const i = y * W + x;
-						if (cls[i] === WALL) { top = -1; runTop = -1; continue; }
-						if (colTop[i] !== runTop) {
-							runTop = colTop[i]; top = -1;
-							for (let k = colTop[i]; k <= colBot[i]; k++) if (live[k * W + x] & bit) { top = k; break; }
-						}
-						if (top >= 0) reach[i] = Dat(c, y - top);
-					}
-				}
-				for (let y = 0; y < H; y++) {
-					const o = y * W;
-					let far = -BIG;
-					for (let x = 0; x < W; x++) { const i = o + x; if (cls[i] === WALL) { far = -BIG; continue; } if (reach[i] >= 0 && x + reach[i] > far) far = x + reach[i]; if (far >= x) covered[i] = 1; }
-					far = BIG;
-					for (let x = W - 1; x >= 0; x--) { const i = o + x; if (cls[i] === WALL) { far = BIG; continue; } if (reach[i] >= 0 && x - reach[i] < far) far = x - reach[i]; if (far <= x) covered[i] = 1; }
-				}
-			}
-			for (let i = 0; i < N; i++) if (covered[i] && lc[i] !== live[i]) { live[i] = lc[i]; grew = true; }
-			for (const [e, ps] of srcOf) if (live[e] !== lc[e] && ps.some((q) => covered[q])) { live[e] = lc[e]; covered[e] = 1; grew = true; }
-		}
-		info.air.rounds = rounds;
-		if (grew) { info.air.unsettled = true; covered.fill(1); }   // (not settled within AIR_ROUNDS: no price)
+		info.air.rounds = 0;
 		const beyond = new Uint8Array(N);
 		for (let t2 = 0; t2 < N; t2++) if (!covered[t2] && lc[t2] === 0 && passable(t2) && !trophy(t2)) { beyond[t2] = 1; info.air.beyond++; }
-		AIR_CACHE.set(akey, { beyond, rounds, unsettled: !!info.air.unsettled });
+		AIR_CACHE.set(akey, { beyond, rounds: 0, unsettled: false });
 		if (AIR_CACHE.size > AIR_CACHE_N) AIR_CACHE.delete(AIR_CACHE.keys().next().value);
 		return beyond;
 		};
