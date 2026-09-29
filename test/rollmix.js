@@ -108,5 +108,16 @@ ok(s0.share.every((v) => Math.abs(v - 0.2) < 0.03), `no yield: equal shares of t
 // (equal yields: roughly equal shares, none starved)
 const s4 = sim(() => 10, 3000, 5);
 ok(s4.share.every((v) => v > 0.12 && v < 0.3), `equal yields: no class takes the GPU (${s4.share.map((v) => v.toFixed(3)).join(' / ')})`);
+// (the reward's weights: --mixRoom, --mixNear, --mixFresh)
+ok(Math.abs(GX.mixReward({ roomsG: 2, rooms: 5, nearer: 100, fresh: 50000 }, { room: 0.3, near: 0.01, fresh: 100000 }) - (2 + 0.9 + 1 + 0.5)) < 1e-9, 'the reward with weights: nearer x0.01, new cells / 100000');
+// (a data prior: a class's --rollMix weight multiplies its mean; equal yields then favour the heavier class, the floor holds)
+{
+	const cw2 = GX.rollMixOf('40:0.85:0.9,120:0.95:1.5,240:0.97:0.85,255:0.985:0.7,120:0.95:0.9:b');
+	const st5 = cw2.map(() => ({ batches: 0, ms: 0 })), b5 = GX.mixBanditNew(cw2.length, { half: 20, c: 0.5, floor: 0.5 });
+	for (let t = 0; t < 3000; t++) { const j = GX.mixBanditPick(b5, st5, cw2); const ms = 100; st5[j].batches++; st5[j].ms += ms; GX.mixBanditAdd(b5, j, ms, 0.1 * (0.5 + ((t * 7919) % 100) / 100)); }
+	const tt = st5.reduce((s, q) => s + q.ms, 0), sh = st5.map((q) => q.ms / tt);
+	ok(sh[1] === Math.max(...sh) && sh.every((v) => v >= 0.08), `a prior weight 1.5 on 120:0.95 with equal yields: it leads, the floor holds (${sh.map((v) => v.toFixed(3)).join(' / ')})`);
+}
+ok(GX.parseArgs(['x.eelvl', '--gpu=1', '--mixBandit=1']).mixNear === 1 && GX.parseArgs(['x.eelvl', '--mixNear=0.01']).mixNear === 0.01, 'the reward weights are options');
 console.log(`${n - fails} / ${n} passed`);
 process.exitCode = fails ? 1 : 0;

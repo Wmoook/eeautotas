@@ -164,7 +164,8 @@
 // launchError (the editor then stops its GPU strategies) and this process's exit code 6 / 7. The roll mix (--rollMix,
 // ROLL_MIX): each batch's run length and keep from a class of long sticky runs or short ones, a node keeps its class.
 //   [--gpu=1] [--batch=4096] [--rollMix=40:0.85,120:0.95,240:0.97 (the default unless --roll / --keep is given; 0 = off)]
-//   [--mixBandit=0 (1 / EEAT_MIXBANDIT=1: the roll mix's classes by their own yield, MIX_BANDIT) [--mixHalf=20] [--mixC=0.5] [--mixFloor=0.5]]
+//   [--mixBandit=0 (1 / EEAT_MIXBANDIT=1: the roll mix's classes by their own yield, MIX_BANDIT) [--mixHalf=20] [--mixC=0.5] [--mixFloor=0.5]
+//    [--mixRoom=0.3] [--mixNear=1] [--mixFresh=2000] (a class's --rollMix weight: its mean x that, a data prior)]
 //   [--gmem=<MB for the GPU's cell table>] [--hmem=<MB of host memory for the cells' states;
 //   default: an eighth of the machine's memory, at most half of the free memory>] [--tool=<eegpu>] [--bin=<level blob>]
 //   [--reach=<RCH3 file>]
@@ -333,7 +334,7 @@ const DEFAULTS = { seconds: 60, workers: 1, seed: 1, depth: 100000, maxTicks: 0,
 	steerDist: 1, dpFirst: 0, mix: 0.5, gpu: 0, batch: 4096, gmem: 0, hmem: 0, share: 0, bursts: 0, rooms: 0, burstS: 15, burstPar: 1, gpuCells: 25, burstCap: 262144, burstOomS: 5, burstSmallS: 300, burstFair: 1, burstServe: 1, stallLadder: 0, legs: 0, lb: 1, pL: 0.3, pW: 0.3, wPhase: 0, wYield: 1, wLead: 0, nice: 0,
 	jumpP: 0, jumpNear: 0.75, sat: 1, satN: 20000, satGpu: 0, deaths: -1, dprice: 1, dord: 1, cpkey: process.env.EEAT_CPKEY !== undefined ? +process.env.EEAT_CPKEY : 0, dback: process.env.EEAT_DBACK !== undefined ? +process.env.EEAT_DBACK : 1, dburst: 1, dom: 1, domShare: 0.125, domBurst: 8, dsub: 0, roomDead: 1, spd: 60, spdMax: 3, spdKids: 1, spdMode: 1, spdSlack: 300, spdG: 1, spdR: 0, useful: 1, priorP: 0.5, priorEps: 0.02, priorMode: 0, opts: 0, optP: 0.5, optEv: 1,
 	timed: process.env.EEAT_TIMED !== undefined ? +process.env.EEAT_TIMED : 1,
-	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5,
+	mixBandit: process.env.EEAT_MIXBANDIT !== undefined ? +process.env.EEAT_MIXBANDIT : 0, mixHalf: 20, mixC: 0.5, mixFloor: 0.5, mixRoom: 0.3, mixNear: 1, mixFresh: 2000,
 	frontier: 0, fLo: 0.1, fHi: 0.4, fStall: 75000, fEvery: 25000, fGrow: 0.1, fK: 4096, fLambda: 4, fDil: 1, fYield: 0, fBrake: 0, fPhys: 0 };
 // --frontier=1 (coarse cells, OPT-IN: default 0 = the search exactly as before): THE FRONTIER FIELD, head F (directed
 // exploration; the innovation lab 2026-09-28, src/out/inn/). Each worker keeps VIS, the tiles its archive has had a cell in
@@ -436,12 +437,15 @@ function mixPick(st, classes) {
 // stays the only one). The done event's mix block has each class's share of the GPU ms and its reward; a 'mixBandit'
 // event every MB_EVENT_S s.
 const MIX_BANDIT = '40:0.85,120:0.95,240:0.97,255:0.985,120:0.95:b';
+// (the weights: --mixRoom (MB_ROOM), --mixNear (MB_NEAR), --mixFresh (new cells a unit: 1 / MB_FRESH); a class's weight in
+// --rollMix (w, 1 by default) multiplies its mean in the index: a data prior (tools/mixdata.js))
 const MB_ROOM_G = 1, MB_ROOM = 0.3, MB_NEAR = 1, MB_FRESH = 1 / 2000;
 // (the UCB bonus: --mixC x the best class's mean x sqrt(ln(1 + T / MB_TAU) / (T_j / MB_TAU)), T the classes' discounted
 // kernel seconds; a class's mean over at least MB_TMIN s)
 const MB_TAU = 1, MB_TMIN = 0.05, MB_EVENT_S = 20;
 /** a batch's reward for the yield mix: d = {roomsG (new rooms that open territory), rooms (all new rooms), nearer, fresh} */
-const mixReward = (d) => MB_ROOM_G * d.roomsG + MB_ROOM * Math.max(0, d.rooms - d.roomsG) + MB_NEAR * d.nearer + MB_FRESH * d.fresh;
+const mixReward = (d, o = {}) => MB_ROOM_G * d.roomsG + (o.room != null ? o.room : MB_ROOM) * Math.max(0, d.rooms - d.roomsG) + (o.near != null ? o.near : MB_NEAR) * d.nearer +
+	d.fresh / (o.fresh > 0 ? o.fresh : 1 / MB_FRESH);
 /** the yield mix's state for K classes (half: the half-life in s of GPU time; c: the bonus; floor: the least share x K) */
 const mixBanditNew = (K, o = {}) => ({ half: o.half > 0 ? o.half : 20, c: o.c >= 0 ? o.c : 0.5, floor: Math.max(0, Math.min(1, o.floor >= 0 ? o.floor : 0.5)) / K,
 	T: new Float64Array(K), R: new Float64Array(K) });
@@ -468,7 +472,7 @@ function mixBanditPick(b, st, classes) {
 	}
 	let top = 0;
 	const mu = new Array(K);
-	for (let j = 0; j < K; j++) { mu[j] = b.R[j] / Math.max(b.T[j], MB_TMIN); if (mu[j] > top) top = mu[j]; }
+	for (let j = 0; j < K; j++) { mu[j] = (classes[j].w > 0 ? classes[j].w : 1) * b.R[j] / Math.max(b.T[j], MB_TMIN); if (mu[j] > top) top = mu[j]; }
 	if (!(top > 0)) return mixPick(st, classes);
 	const ln = Math.log(1 + tot / MB_TAU);
 	let bj = 0, bv = -Infinity;
@@ -4174,7 +4178,7 @@ async function gpuMain(a, L, m) {
 		}
 		// (the yield mix: the batch's reward, its class's time)
 		if (band) {
-			const rw = mixReward({ roomsG: bst.roomsG - b0.roomsG, rooms: bst.rooms - b0.rooms, nearer: bst.nearer - b0.nearer, fresh: bst.fresh - b0.fresh });
+			const rw = mixReward({ roomsG: bst.roomsG - b0.roomsG, rooms: bst.rooms - b0.rooms, nearer: bst.nearer - b0.nearer, fresh: bst.fresh - b0.fresh }, { room: a.mixRoom, near: a.mixNear, fresh: a.mixFresh });
 			bst.reward += rw;
 			mixBanditAdd(band, bc, mixCostOf(m.ev), rw);
 			if (Date.now() - bandSaid >= MB_EVENT_S * 1000) { bandSaid = Date.now(); say(Object.assign({ ev: 'mixBandit' }, bandRec())); }
