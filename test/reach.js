@@ -306,7 +306,9 @@ function pump(h, k) {
  * (1) an up boost under open sky: the engine's highest centre over input patterns (walk onto it, up held or not, a jump)
  * is below the field's cap: the trophy 20 rows above the boost finite, 21 rows above cut off; (2) a ball that falls 43 rows
  * into a portal whose exit reverses it (rot 1 -> 3: dir 2) likewise: 20 rows finite, 21 cut off; (3) ice below the boost
- * row (the ice drag's longer rise: the cap is not proven in Q levels): the field keeps "anywhere up", finite at 30 rows
+ * row (the ice drag's longer rise: the cap is not proven in Q levels): the field keeps "anywhere up", finite at 30 rows;
+ * (4) a portal exit on a down boost (a stale portal entry under a 117; the soundness review's counterexample): the ball
+ * teleports up out of the exit tile and rises to a trophy 10 rows above it: no state of the idle run cut
  */
 function riseCaps() {
 	const boostRoom = (k, floor) => box([...Array(40 - k).fill('.....'), '..T..', ...Array(k - 1).fill('.....'), '..B..', 'S....', ...(floor ? [floor] : [])]);
@@ -345,6 +347,37 @@ function riseCaps() {
 		const L = ascii(boostRoom(30, 'IIIII'));
 		const c = R.costAt(R.reachField(L, {}), startSim(L, 0));
 		check('rise cap: ice in the level (the ice drag rises further than Q levels hold): the boost keeps "anywhere up" (the trophy 30 rows above finite)', c >= 0, `30: ${fmt(c)}`);
+	}
+	{
+		// (4) the soundness review's counterexample (bd1767c): a portal exit whose tile holds a DOWN boost (a portal record,
+		// then a 117 record at the same cell: EEO keeps the stale portal entry, eesim.js likewise). The teleport tick moves
+		// the ball up out of the exit tile, so no tick of it starts in the boost and it rises ~18 rows; R has no moves in a
+		// down boost, so the exit there keeps R("anywhere up"). The ball falls 43 rows into P and the exit reverses it: the
+		// idle run finishes at the trophy 10 rows above the exit, and none of its states may be cut (a -1 is a proof)
+		const exitRoom = (exitId) => {
+			const W = 12, H = 46, recs = [], walls = [];
+			const add = (id, pos, args) => recs.push({ id, layer: 0, xs: pos.map((p) => p[0]), ys: pos.map((p) => p[1]), args: args || [] });
+			for (let x = 0; x < W; x++) walls.push([x, 0], [x, H - 1]);
+			for (let y = 1; y < H - 1; y++) walls.push([0, y], [W - 1, y], [2, y], [3, y]);
+			add(9, walls); add(255, [[1, 1]]); add(121, [[10, 34]]);
+			add(242, [[1, 44]], [1, 1, 2]); add(242, [[10, 44]], [3, 2, 1]);
+			if (exitId) add(exitId, [[10, 44]]);
+			return E.prepareLevel(EL.toSimLevel(EL.readEelvl(EL.writeEelvl({ width: W, height: H, name: 't', owner: 't', records: recs }))));
+		};
+		for (const exitId of [117, 0]) {
+			const L = exitRoom(exitId);
+			const f = R.reachField(L, { check: true });
+			const s = new E.EESim(L); s.reset(); const I = new E.EEInput();
+			let fin = -1, cut = 0, n = 0;
+			for (let t = 0; t < 400 && fin < 0; t++) {
+				if (!s.is_dead) { n++; if (R.costAt(f, s) < 0) cut++; }
+				E.applyMask(I, 0); s.tick(I);
+				if (s.has_silver_crown) fin = t + 1;
+			}
+			const ev = fin > 0 ? C.evaluate(L, new Uint8Array(fin)) : null;
+			check(`rise cap: a portal exit on ${exitId ? 'a down boost (a stale portal entry under a 117)' : 'a plain portal'}: the idle run up out of the exit finishes and none of its states is cut`,
+				fin > 0 && !!ev && cut === 0 && L.fg[44 * 12 + 10] === (exitId || 242) && f.mismatches === 0, `finish ${fin}, ${cut} of ${n} states cut, start ${fmt(R.costAt(f, startSim(L, 0)))}`);
+		}
 	}
 }
 function sectionB() {

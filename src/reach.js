@@ -601,8 +601,11 @@ function reachField(level, opts) {
 		if (deaths && dsrcT[t] === 1) for (const r of respawn) { emit(r, F_, 0, DEATH_COST); if (cls[r] === NORM) emit(r, R_, 0, DEATH_COST); }
 		if (cls[t] === DEADLY) return;
 		// (the exit: R(rpT[t]) (the rise cap of t's teleports), F(16), and in a field C(16 px/tick): the rotated speed is clamped
-		// to 16 by the next update, and the teleport tick moves <= 16 px)
-		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
+		// to 16 by the next update, and the teleport tick moves <= 16 px; an exit whose tile is a DOWN boost (a stale portal
+		// entry under a 117) keeps R(INF): R has no moves in a down boost (fwd returns there), but the teleport tick moves
+		// the ball up out of the exit tile, so no tick of it starts in the boost: fwd's INF branch is its rise (the n3
+		// rise-q16 soundness review: R(rpT) there was a false -1))
+		if (ty !== C_ && portalExits.has(t)) for (const e of portalExits.get(t)) { emit(e, R_, cls[e] === BDOWN ? INF : rpT[t], 5); emit(e, F_, KF, 5); if (isField(cls[e])) emit(e, C_, NL - 1, 5); }
 	}
 
 	// ---- storage: R, F and L per tile, C per field tile, XR per xrOK tile
@@ -805,9 +808,9 @@ function labelSearch(S) {
 				}
 			} else if (c2 === BDOWN) { if (ty2 === F_) pushAllLow(t2, cur); }
 			else if (c2 === BUP) { if (ty2 === R_ && l2 <= rcT[t2]) pushAllLow(t2, cur); }
-			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]), F(16), and C(16 px/tick) in a field)
+			// portals: (portal tile p, any but C) -> (exit, R(rpT[p]) (R(INF) on a down boost: crossEdges), F(16), and C(16 px/tick) in a field)
 			if (srcList[t2] !== null && (ty2 === F_ || ty2 === R_ || (ty2 === C_ && c2 >= DOTS && c2 <= UP))) for (const p of srcList[t2]) {
-				if (ty2 === R_ && l2 > rpT[p]) continue;
+				if (ty2 === R_ && c2 !== BDOWN && l2 > rpT[p]) continue;
 				push(p, R_, 0, cur + 5); push(p, F_, 0, cur + 5); push(p, X_, 0, cur + 5); push(p, L_, 0, cur + 5);
 			}
 			// deaths: (a death source, any) -> (respawn tile, F(0) or R(0))
