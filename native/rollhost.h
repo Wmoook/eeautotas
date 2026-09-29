@@ -56,7 +56,7 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	if (!layoutOrError(g, TW)) return 4;
 	const std::string tw = std::to_string(TW);
 	cu::CUfunction fRoll = g.fn("roll_" + tw), fCollect = g.fn("rollCollect_" + tw), fSeen = g.fn("rollSeen");
-	if (!fRoll || !fCollect || !fSeen) { printf("{\"error\":\"roll kernels missing\"}\n"); return 4; }
+	if (!fRoll || !fCollect || !fSeen) { printf("{\"error\":%s}\n", jsonStr("roll kernels missing: " + cu::lastError).c_str()); return 4; }
 	RollParams P;
 	memset(&P, 0, sizeof P);
 	P.L = L;   // (host pointers for now: the start cell's key below; the device copy's before the first launch)
@@ -84,12 +84,16 @@ static int runRoll(int argc, char** argv, const LevelBlob& B) {
 	// 1 GB) and the host's (--hostmem MB)
 	size_t memB = 0;
 	{
+		// (the GPU's memory: EEAT_GPU_BUDGET_MB when less; with EEAT_GPU_FIT=1 (opt-in, cudadrv.h fitOn) the free memory's
+		// share: half of it less the headroom, cudadrv.h freeShare, so the consumers that start after the pool keep room)
 		const size_t total = g.d.mem ? g.d.mem : (size_t)4 << 30;
 		size_t fr = total, tot = 0;
 		if (cu::cuMemGetInfo_v2) cu::cuMemGetInfo_v2(&fr, &tot);
 		const double mb = atof(opt(argc, argv, "mem", "0").c_str());
 		const size_t share = total <= ((size_t)12 << 30) ? total / 8 : total / 4;
-		memB = mb > 0 ? (size_t)(mb * 1048576.0) : std::min(share, fr > ((size_t)1 << 30) + ((size_t)256 << 20) ? fr - ((size_t)1 << 30) : (size_t)256 << 20);
+		const size_t freeCap = cu::fitOn() ? std::max(cu::freeShare(g.d.totalMem, 0.5), (size_t)256 << 20)
+			: fr > ((size_t)1 << 30) + ((size_t)256 << 20) ? fr - ((size_t)1 << 30) : (size_t)256 << 20;
+		memB = mb > 0 ? (size_t)(mb * 1048576.0) : std::min(share, freeCap);
 	}
 	const size_t hostB = (size_t)(std::max(16.0, atof(opt(argc, argv, "hostmem", "1024").c_str())) * 1048576.0);
 	// (the records of one collect launch range come down with their states: ~64 MB)

@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <functional>
 #include <string>
+#include <thread>
 #include "cudadrv.h"
 #ifndef _WIN32
 #include <csignal>
@@ -185,16 +186,6 @@ inline std::string doneFields() {
 #endif
 }
 
-/** --parent=<pid>: watch that process (a handle from now on, so a reused pid cannot stand in for it; none when it cannot
- *  be opened) */
-inline void watchParent(const std::string& pid) {
-	const unsigned long p = strtoul(pid.c_str(), nullptr, 10);
-#ifdef _WIN32
-	if (p) G.parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)p);
-#else
-	if (p && p < 0x7fffffffUL) G.parent.open((int)p);
-#endif
-}
 /** --parent: that process has exited */
 inline bool parentExited() {
 #ifdef _WIN32
@@ -202,6 +193,41 @@ inline bool parentExited() {
 #else
 	return G.parent && G.parent.exited();
 #endif
+}
+/** The parent watchdog (--parent): a thread that looks at the parent every 100 ms and, once it has been gone for
+ *  ORPHAN_GRACE_MS without the command ending by itself (its next launch's stop check), ends the process at the first
+ *  moment no driver work is in flight (cu::busy: no kernel running, no module load writing the kernel cache), so the
+ *  exit cannot reset the GPU. The stop checks between launches see a parent's exit only where the command launches:
+ *  an orphan blocked anywhere else lived on (sweep2: Soul Quest's escape bursts alive 30+ s after their parent;
+ *  cycle 1: paused bursts under pid 1 and processes waiting on the kernel cache's JIT lock (up to 20 minutes) held a
+ *  box for 17 minutes). Every wait loop is covered at once: the pause file's, the JIT lock's, the burst server's idle
+ *  stdin, a context create, host work. (No PR_SET_PDEATHSIG: it fires when the spawning THREAD exits, not the process.) */
+inline constexpr double ORPHAN_GRACE_MS = 1000;
+inline void parentWatchdog() {
+	std::thread([]() {
+		double goneAt = -1;
+		for (;;) {
+#ifdef _WIN32
+			Sleep(goneAt < 0 ? 100 : 20);
+#else
+			{ const timespec d = { 0, (goneAt < 0 ? 100 : 20) * 1000000L }; nanosleep(&d, nullptr); }
+#endif
+			if (goneAt < 0) { if (parentExited()) goneAt = nowMs(); continue; }
+			if (nowMs() - goneAt < ORPHAN_GRACE_MS || cu::busy.load() > 0) continue;
+			std::_Exit(0);   // (no stdio flush: nobody reads the lines any more, and the main thread may hold stdout's lock)
+		}
+	}).detach();
+}
+/** --parent=<pid>: watch that process (a handle from now on, so a reused pid cannot stand in for it; none when it cannot
+ *  be opened), and start the parent watchdog */
+inline void watchParent(const std::string& pid) {
+	const unsigned long p = strtoul(pid.c_str(), nullptr, 10);
+#ifdef _WIN32
+	if (p) G.parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)p);
+#else
+	if (p && p < 0x7fffffffUL) G.parent.open((int)p);
+#endif
+	if (G.parent) parentWatchdog();
 }
 /** --serve: a new job (its own stop file; the stats, the pause's hold and the stop from zero) */
 inline void jobStart(const std::string& stopFile) {
@@ -242,10 +268,11 @@ inline void checkPause() {
 	if (t - G.lastPauseCheck < 5) return;
 	G.lastPauseCheck = t;
 	if (!pauseRequested()) return;
+	// (a stop's own final work is never held by a pause: checkStop does nothing once stopping, so the wait would never end)
 #ifdef _WIN32
-	while (pauseRequested()) { Sleep(5); checkStop(true); }
+	while (!G.stopping && pauseRequested()) { Sleep(5); checkStop(true); }
 #else
-	while (pauseRequested()) { const timespec d = { 0, 5 * 1000000L }; nanosleep(&d, nullptr); checkStop(true); }
+	while (!G.stopping && pauseRequested()) { const timespec d = { 0, 5 * 1000000L }; nanosleep(&d, nullptr); checkStop(true); }
 #endif
 	G.pausedMs += nowMs() - t;
 	G.havePrev = false;   // (the time across a pause is no gap between two commands)
@@ -291,6 +318,7 @@ template <class F>
 inline double timed(const char* what, F issue) {
 	checkStop();
 	checkPause();
+	cu::Busy busy;   // (the parent watchdog never exits mid-kernel)
 	const bool ev = eventsOn();
 	cu::CUevent end = ev ? G.eEnd[G.endIdx] : nullptr;
 	const auto t0 = std::chrono::steady_clock::now();
