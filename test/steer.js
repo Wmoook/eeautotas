@@ -6,7 +6,7 @@
 //              (readSteerFile gives the same numbers); another level's file is refused by the native tool; the build's
 //              byte budget: one body's bytes leave the key out (info.over); the forced portals' lastPortal chains (a
 //              portal next to an exit walked: reach.js unforceChains), with --jobs Good Egg along OC's run; the layer
-//              memo (opt-in EEAT_STEER_MEMO): the same file on 7 toys, identical layers one field, the spares, the knob,
+//              memo (default on; EEAT_STEER_MEMO=0 off): the same file on 7 toys, identical layers one field, the spares, the knob,
 //              the budget clock ('same' cuts what the build without it cuts; 'spend' does not) on a fake clock
 //   B agree    the JS lookup and the native tool's (eegpu steertest: the host, and with --gpu the GPU) along random input
 //              runs in the rooms and, with --jobs=<dir> (default src/jobs), along the big jobs' best runs: the same fifths
@@ -143,7 +143,7 @@ function box(name, extra) {
 	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
 	return levelOf(ED.eelvlOf({ name, width: W, height: H, cells: cells.concat(extra) }));
 }
-/** the layer memo (steer.js buildPhysics, opt-in layerMemo / EEAT_STEER_MEMO=1): a layer's field built once per (level
+/** the layer memo (steer.js buildPhysics, default on; layerMemo false / EEAT_STEER_MEMO=0 off): a layer's field built once per (level
  *  copy, goals), the file the same byte for byte. The coin corridor: 6 coins left of the spawn, a 6-coin door column
  *  before the trophy: the layers coins 0..5 are one copy (the door shut; a coin tile is no goal with staticCoins), so 2
  *  physics fields instead of 7. The effect corridor: 3 coins, a jump effect (wild) and its reset (plain) between the
@@ -178,14 +178,19 @@ function layerMemo() {
 		const held = new Set(PH.fields.filter(Boolean)).size;
 		check('the layer memo: the effect corridor\'s plain / wild pairs of equal copies share their fields (the spares), and after the call the memo holds only the fields its layers hold',
 			f1.hits > 0 && PH.memoHits > 0 && memo.size === held && [...memo.values()].every((e) => PH.fields.includes(e.f)), `hits ${f1.hits} (buildSteer) / ${PH.memoHits} (one call); memo ${memo.size} fields, the layers hold ${held}`);
-		// (EEAT_STEER_MEMO=1: the knob, read at the build; unset: off)
+		// (the knob, read at the build: unset = on ('same', the default since d4-steer-memo-ab), EEAT_STEER_MEMO=1 on,
+		// EEAT_STEER_MEMO=0 off)
 		const prev = process.env.EEAT_STEER_MEMO;
+		delete process.env.EEAT_STEER_MEMO;
+		const kd = build(coinCorr, {});
 		process.env.EEAT_STEER_MEMO = '1';
 		const k1 = build(coinCorr, {});
-		delete process.env.EEAT_STEER_MEMO;
+		process.env.EEAT_STEER_MEMO = '0';
 		const k0 = build(coinCorr, {});
-		if (prev !== undefined) process.env.EEAT_STEER_MEMO = prev;
-		check('EEAT_STEER_MEMO=1: the memo on (the knob); unset: off (no hits, the fields as before)', k1.hits > 0 && k0.hits === 0 && k0.calls === c0.calls && Buffer.compare(k0.bytes, k1.bytes) === 0, `hits ${k1.hits} / ${k0.hits}, fields ${k1.calls} / ${k0.calls}`);
+		if (prev !== undefined) process.env.EEAT_STEER_MEMO = prev; else delete process.env.EEAT_STEER_MEMO;
+		check('the memo's knob: unset on (the default: the hits and fields of layerMemo true), EEAT_STEER_MEMO=1 on, EEAT_STEER_MEMO=0 off (no hits, the fields as before); the same file all three',
+			kd.hits > 0 && kd.hits === c1.hits && kd.calls === c1.calls && k1.hits > 0 && k0.hits === 0 && k0.calls === c0.calls && Buffer.compare(k0.bytes, k1.bytes) === 0 && Buffer.compare(kd.bytes, k1.bytes) === 0,
+			`hits ${kd.hits} / ${k1.hits} / ${k0.hits}, fields ${kd.calls} / ${k1.calls} / ${k0.calls}`);
 	} finally { R.reachField = orig; }
 	// the budget's clock, on a fake clock (every reach field 100 ms, nothing else takes time): the coin corridor's 7 layer
 	// fields take 700 ms without the memo, 200 with it; a 600-ms budget drops the coin DP without the memo ("the coin DP:

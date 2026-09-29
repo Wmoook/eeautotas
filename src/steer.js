@@ -662,9 +662,9 @@ function goalsKey(goals) {
 	}
 	return `${goals.length}:${h1 >>> 0}:${h2 >>> 0}`;
 }
-/** THE LAYER MEMO (n3-steer-no-start-census, 2026-09-29; OPT-IN: `buildSteer(level, {layerMemo: true})` or
- *  `EEAT_STEER_MEMO=1`; off: the build as before). A layer's field is a function of its level copy alone (layerLevel's
- *  fg: the gates shut / open in that layer, the killers by its protection, its goal tiles; the wild flag, which sets the
+/** THE LAYER MEMO (n3-steer-no-start-census, 2026-09-29; DEFAULT ON ('same') since d4-steer-memo-ab: off with
+ *  `buildSteer(level, {layerMemo: false})` or `EEAT_STEER_MEMO=0`: the build as before). A layer's field is a function
+ *  of its level copy alone (layerLevel's fg: the gates shut / open in that layer, the killers by its protection, its goal tiles; the wild flag, which sets the
  *  gravity multiplier and the wild walk) and of its goals (tile, cost): every other input (the level, the reach options,
  *  kappa) is the same for every layer of one buildPhysics call. So two layers with the same copy and the same goals get
  *  the same field (reachField and wildField are deterministic) and the memo builds it once: the coin layers between two
@@ -685,14 +685,16 @@ function goalsKey(goals) {
  *  (wildField: the walk x kappa) also reads the model's killers (makeModel pass: protection modelled or not), so its key
  *  carries the modelled features (`tag`); a physics layer's reachField reads its level copy alone. */
 const MEMO_SPARE_BYTES = 128 << 20;
-/** the memo's mode: false (off), 'same' (opts.layerMemo true / EEAT_STEER_MEMO=1: the build's budget decides on a clock
+/** the memo's mode: false (off), 'same' (the default; opts.layerMemo true / EEAT_STEER_MEMO unset or 1: the build's budget decides on a clock
  *  that counts every repeat as built again, so the same features, coin DP and tour as without the memo, sooner) or
  *  'spend' (opts.layerMemo 'spend' / EEAT_STEER_MEMO=2: the real clock, so the time saved can buy a feature, the DP or
  *  the tour the budget cut before: The 5 Realms Of Afar under load key0 and 62 layers in 16.5 s where the base dropped
  *  key0 at 19.5 s, but YMCK Puzzle Parade 100 s where the base stopped at 33 s: a feature let in at 14 s is not bounded) */
 function layerMemoOn(opts) {
 	const env = process.env.EEAT_STEER_MEMO;
-	const v = opts && opts.layerMemo !== undefined ? opts.layerMemo : env === '1' ? true : env === '2' || env === 'spend' ? 'spend' : false;
+	// (DEFAULT ON since d4-steer-memo-ab, 2026-09-29: 'same' unless EEAT_STEER_MEMO=0 / layerMemo false; the box A/B in
+	// CLAUDE.md's steer row)
+	const v = opts && opts.layerMemo !== undefined ? opts.layerMemo : env === '0' || env === 'off' ? false : env === '2' || env === 'spend' ? 'spend' : true;
 	return v === 'spend' ? 'spend' : v ? 'same' : false;
 }
 /** the memo's key of layer copy c with goals: sha1 of its fg, the wild flag, the tag and the goals' (tile, cost) in
@@ -1381,7 +1383,7 @@ function buildSteer(level, opts) {
 	let over = null;
 	const mb = `${(maxBytes / 1048576).toFixed(maxBytes < 10 << 20 ? 1 : 0)} MB of fields`, secs = `the build's time (${maxMs / 1000} s)`;
 	let B, PH;
-	// (the layer memo, opt-in: one for the whole build, so a CEGAR build reuses the previous one's fields: buildPhysics)
+	// (the layer memo, default on: one for the whole build, so a CEGAR build reuses the previous one's fields: buildPhysics)
 	const memoMode = layerMemoOn(opts), memo = memoMode ? new Map() : null;
 	// (the budget's clock: T0() = t0 less the time the memo saved in 'same' mode (each repeat's first build's ms), so the
 	// budget decides as if every repeat were built again; off or 'spend': t0)
