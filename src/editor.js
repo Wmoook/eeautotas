@@ -237,6 +237,7 @@ function reachFp() {
 		const h = crypto.createHash('sha1');
 		for (const f of ['reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 		h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);   // (the side-arrow prices' knob: a flip never reads the other's file)
+		if (process.env.EEAT_HALFQUAD === '0') h.update('halfquad:0');   // (the half-block quadrants' knob; on: the fingerprint as before)
 		RF_FP = h.digest('hex').slice(0, 10);
 	}
 	return RF_FP;
@@ -2701,6 +2702,8 @@ function steerFp() {
 	const h = crypto.createHash('sha1');
 	for (const f of ['steer.js', 'reach.js', 'eesim.js', 'eelvl.js']) { try { h.update(fs.readFileSync(path.join(__dirname, f))); } catch (e) { h.update(f); } }
 	h.update(`sidearrow:${process.env.EEAT_SIDEARROW || ''}`);
+	if (process.env.EEAT_HALFQUAD === '0') h.update('halfquad:0');
+	if (process.env.EEAT_EXITENTRY === '0') h.update('exitentry:0');   // (the steer's exit from the entry, reach.js opts.exitEntry)
 	// (the floor probe's knob: EEAT_GATEFLOOR=0 / all build other files)
 	h.update(`gatefloor:${process.env.EEAT_GATEFLOOR === '0' ? 0 : process.env.EEAT_GATEFLOOR === 'all' ? 'all' : 1}`);
 	// (the blue DP's knob: a flip builds the field again)
