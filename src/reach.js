@@ -903,7 +903,7 @@ function labelSearch(S) {
  * price past the cap would cut). Returns {pen: Uint8Array over tile x 8 directions (1 = priced) or null, cost, info}.
  */
 const SA_COST = 12500;   // fifths (2,500 tiles): behind a real way (a death is 1,638 tiles) and past the doctors' detours (<= 1,882)
-const SA_KRUN = 4, SA_FEED_X = +(process.env.EEAT_SA_FEED || 80);
+const SA_KRUN = 4, SA_FEED_X = 80;
 function sideArrowPrices(level, opts, M) {
 	const env = process.env.EEAT_SIDEARROW;
 	const mode = opts.sideArrow !== undefined ? (opts.sideArrow === true ? 'arrows' : opts.sideArrow || 'off') : env === '0' ? 'off' : env === 'all' ? 'all' : 'arrows';
