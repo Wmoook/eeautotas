@@ -1437,7 +1437,10 @@ function buildSteer(level, opts) {
 	// the layer bodies); the plain (GPU) file stays as it was (its bodies [0, nPlain), no DP, prioShift without them).
 	// Order only: nothing prunes by it (opts.freeDP === false: none, as before)
 	const nPlain = bodies.length;
-	const freeOn = !dp && !opts.noDP && !opts.coinT && opts.freeDP !== false && !!over && M.names.indexOf('coins') < 0 && M.S > 1;
+	// (only where the budget's cut WAS the coins ("coins: over ..."): the plan's counterexample named them next. Where it
+	// cut another feature first (Fizio1 "team: over 31 layers", its keys kept) the coins are no known next obstacle and
+	// the walk tour, blind to the keys, lost coins there in the product: 48 vs 87 and 32 vs 34 in 2 A/B pairs)
+	const freeOn = !dp && !opts.noDP && !opts.coinT && opts.freeDP !== false && /^coins:/.test(String(over || '')) && M.names.indexOf('coins') < 0 && M.S > 1;
 	if (freeOn) {
 		const T = planCoinT(B);
 		const coinsF = A.special.filter((x) => x[1] === 'coins').map((x) => x[0]).filter((q) => level.coinBit[q] >= 0);
