@@ -1198,8 +1198,8 @@ function domPick(DOM, share, rnd, weightOf) {
 // Coins and blue coins only go up in a run (the engine resets them only at /reset), so a coin GATE of count n at or below
 // the count held is shut for good, and a coin DOOR opens only if the coins held + the coins still reachable reach it.
 // doomOf(L).test(sim, tile): the coin closure from the live state (the walk: 8-way with no corner cut between two
-// tiles it cannot enter then, portal exits as extra steps, every non-coin door and gate open, one-ways and half blocks passable, killing tiles
-// passable, id 50 a wall (RF.guideFlags); coin gates open only above the count held; coin doors open at most the count
+// tiles solid then, portal exits as extra steps, every non-coin door and gate open, one-ways and half blocks passable, killing tiles
+// not entered (passable on a level with a protection effect), id 50 a wall (RF.guideFlags); coin gates open only above the count held; coin doors open at most the count
 // held + the untaken coins the walk reached so far, grown to a fixpoint), seeded at the ball's tile and, where something
 // can kill, the respawn target (the checkpoint, else every spawn). No trophy reached = DOOMED: a relaxation of the
 // engine, so a doomed state cannot finish; it is only DEMOTED (goexplore.js explore(): DOOM_A tiles in head A, last in
@@ -1218,16 +1218,18 @@ const DOOM_SHARE = 0.0625;         // (head B: a doomed room's draw kept this of
 function doomOf(L) {
 	if (DOOMV.has(L)) return DOOMV.get(L);
 	const W = L.width, H = L.height, N = W * H, fg = L.fg, fl = RF.guideFlags(L), lk = L.lookup0;
-	// kind: 0 open, 1 wall, 2 gold door, 3 gold gate, 4 blue door, 5 blue gate
+	// kind: 0 open, 1 wall, 2 gold door, 3 gold gate, 4 blue door, 5 blue gate, 6 a killing tile (not entered: the ball dies
+	// there and respawns at its seed; no wall at a corner; open on a level with a protection effect, 420)
 	const kind = new Uint8Array(N), tro = new Uint8Array(N);
-	let readers = 0, trophies = 0, kills = false;
+	let readers = 0, trophies = 0, kills = false, prot = false;
+	for (let i = 0; i < N; i++) if (fg[i] === 420) { prot = true; break; }
 	for (let i = 0; i < N; i++) {
 		const id = fg[i], f = id >= 0 && id < fl.length ? fl[id] : 0;
 		if (id === 43) { kind[i] = 2; readers++; } else if (id === 165) { kind[i] = 3; readers++; }
 		else if (id === 213) { kind[i] = 4; readers++; } else if (id === 214) { kind[i] = 5; readers++; }
 		else if ((f & 1) !== 0 && (f & 16) === 0 && (f & 14) === 0) kind[i] = 1;
 		if (id === 121) { tro[i] = 1; trophies++; kind[i] = 0; }
-		if (id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0) kills = true;
+		if (id >= 0 && id < L.gFlags.length && (L.gFlags[id] & 4) !== 0) { kills = true; if (!prot && kind[i] === 0 && tro[i] === 0) kind[i] = 6; }
 	}
 	if (process.env.EEAT_DOOM === '0' || !readers || !trophies) { DOOMV.set(L, null); return null; }
 	if (!kills && TMD.timedOf(L) !== null) kills = true;
@@ -1262,7 +1264,7 @@ function doomOf(L) {
 		const pass = (j) => {
 			const k = kind[j];
 			if (k === 0) return true;
-			if (k === 1) return false;
+			if (k === 1 || k === 6) return false;
 			const n = lk[j];
 			return k === 2 ? n <= pg : k === 3 ? n > g : k === 4 ? n <= pb : n > b;
 		};
@@ -1286,8 +1288,8 @@ function doomOf(L) {
 						if (!dx && !dy) continue;
 						const xx = x + dx;
 						if (xx < 0 || xx >= W) continue;
-						// (no corner cut between two tiles the ball cannot enter now: walls, shut gates, coin doors above the potential)
-						if (dx && dy && !pass(y * W + xx) && !pass(yy * W + x)) continue;
+						// (no corner cut between two tiles that are solid now: walls, shut gates, coin doors above the potential)
+						if (dx && dy && kind[y * W + xx] !== 6 && kind[yy * W + x] !== 6 && !pass(y * W + xx) && !pass(yy * W + x)) continue;
 						visit(yy * W + xx);
 					}
 				}
