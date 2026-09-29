@@ -1220,6 +1220,98 @@ function silentPortalRooms() {
 		lb[T] === 0xffff && lb[S] >= 2 && lb[S] > lb[U] && lt[T] === 0xffff && lt[S] >= 2 && lt[S] > lt[U],
 		`goexplore T ${lb[T]} S ${lb[S]} U ${lb[U]}; timed T ${lt[T]} S ${lt[S]} U ${lt[U]}`);
 }
+/** S: the side-arrow and slot prices (ordering only): the engine's crossing numbers the rule stands on, a toy tunnel of 5
+ *  opposing arrows priced (its far side dearer by the price, the start then valued by the detour) and not priced with a
+ *  side boost before it, the -1 set of every mode the plain model's (random rooms and the toys), the slot rule, the knob */
+function sectionS() {
+	section('S: side-arrow and slot prices (ordering only)');
+	// (a) the engine: a runway into k left arrows (a 1-tall tunnel), the ball put 2 tiles before at v, R held
+	const crosses = (k, v) => {
+		const W = 60, H = 8, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9], [x, H - 2, 9]);
+		for (let y = 0; y < H; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let i = 0; i < k; i++) c.push([30 + i, H - 3, 1]);
+		for (let x = 27; x < 33 + k; x++) c.push([x, H - 4, 9]);
+		c.push([2, H - 3, 255], [W - 3, H - 3, 121]);
+		const L = levelOfCells(W, H, c), sim = new E.EESim(L); sim.reset(); const I = new E.EEInput();
+		sim.px = 28 * 16; sim.py = (H - 3) * 16; sim.speed_x = v; sim.speed_y = 0;
+		for (let t = 0; t < 300; t++) { E.applyMask(I, 4); sim.tick(I); if ((Math.trunc(sim.px + 8) >> 4) >= 30 + k) return true; }
+		return false;
+	};
+	check('engine: 4 opposing arrows crossed at 6.7 px/tick (the running speed after ~60 tiles), 5 not', crosses(4, 6.7) && !crosses(5, 6.7));
+	check('engine: 5 need at least 6.75 (the running limit 6.78), 6 more than 6.78', crosses(5, 6.8) && !crosses(5, 6.7) && !crosses(6, 6.78));
+	check('engine: from a side boost (16 px/tick) 12 opposing arrows are crossed', crosses(12, 16));
+	// (b) a toy: the spawn left, a 1-tall tunnel of 5 left arrows to the trophy's room, a long way round over the top
+	const toy = (boost) => {
+		// the spawn (2, 11) in the left room (x 1-28), a 1-tall tunnel of 5 left arrows (30-34, 11) under a roof (row 10) into
+		// the right room (x 36-58) with the trophy (45, 11); the way round: a ladder (28, 2-11) up to row 1, over the dividing
+		// walls (x 29 and 35, rows 2-10), down into the right room
+		const W = 60, H = 14, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9], [x, 12, 9]);
+		for (let y = 0; y < H; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 2; y <= 10; y++) c.push([29, y, 9], [35, y, 9]);
+		for (let x = 30; x <= 34; x++) c.push([x, 10, 9], [x, 11, 1]);
+		for (let y = 2; y <= 11; y++) c.push([28, y, 120]);
+		c.push([2, 11, 255], [45, 11, 121]);
+		if (boost) c.push([20, 11, 115]);
+		return levelOfCells(W, H, c);
+	};
+	for (const boost of [false, true]) {
+		const L = toy(boost), sim = new E.EESim(L); sim.reset();
+		const f0 = R.reachField(L, { sideArrow: 'off' }), f1 = R.reachField(L, { sideArrow: 'arrows' });
+		const W = L.width, last = 34 + 11 * W, past = 35 + 11 * W;   // (the tunnel's last arrow and the tile past it)
+		const s0 = R.costAt(f0, sim), s1 = R.costAt(f1, sim);
+		const cF = (f, t) => f.costF[t * (R.KF + 1)] / 5;
+		let same = true;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f0[k].length; i++) if ((f0[k][i] === R.CUT) !== (f1[k][i] === R.CUT)) same = false;
+		check(`toy ${boost ? 'with a right boost before the tunnel' : 'tunnel'}: the -1 set = the plain model's`, same);
+		if (!boost) {
+			check('toy tunnel: its last arrow valued by the way back and round, not by the 1 tile past it (priced)', f1.sideArrow.arrows > 0 && cF(f1, last) > cF(f0, last) + 20 && cF(f1, past) === cF(f0, past), `${cF(f0, last)} -> ${cF(f1, last)} (past it ${cF(f0, past)} -> ${cF(f1, past)})`);
+			check('toy tunnel: the start valued by the way round (dearer than the plain tunnel way, far below the price)', s1 > s0 + 5 && s1 < s0 + 2500, `${s0.toFixed(1)} -> ${s1.toFixed(1)}`);
+		} else check('toy with a boost: the run is fed (no price), the start value the plain model\'s', f1.sideArrow.arrows === 0 && f1.sideArrow.fed >= 1 && s1 === s0, `${s0.toFixed(1)} / ${s1.toFixed(1)}`);
+	}
+	// (c) the -1 sets of every mode on random rooms (arrows, dots, boosts, portals, spikes, doors): the plain model's
+	let diff = 0, priced = 0, n = 0;
+	for (const { level } of randomLevels()) {
+		const f0 = R.reachField(level, { sideArrow: 'off' });
+		for (const mode of ['arrows', 'all']) {
+			const f1 = R.reachField(level, { sideArrow: mode, check: true });
+			n++;
+			if (f1.mismatches) diff += 1000;
+			priced += (f1.sideArrow.arrows || 0) + (f1.sideArrow.slots || 0);
+			if (f0.mode === 'walk') continue;
+			for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) for (let i = 0; i < f0[k].length; i++) if ((f0[k][i] === R.CUT) !== (f1[k][i] === R.CUT)) diff++;
+		}
+	}
+	check(`random rooms (${n} fields): the -1 sets of both modes = the plain model's, the Bellman self-check holds with the prices`, diff === 0, `${diff} differ, ${priced} priced moves`);
+	// (d) the slot rule ('all'): a slot entered sideways from the air is priced, from a floor at its height not
+	{
+		const W = 30, H = 12, c = [];
+		for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 0; y < H; y++) c.push([0, y, 9], [W - 1, y, 9]);
+		for (let x = 12; x <= 18; x++) c.push([x, 5, 9], [x, 7, 9]);   // the slot: row 6, x 12-18
+		for (let x = 1; x <= 11; x++) c.push([x, 10, 9]);
+		c.push([3, 9, 255], [22, 9, 121]);
+		const L = levelOfCells(W, H, c), f = R.reachField(L, { sideArrow: 'all', debug: true });
+		let fromAir = 0, fromFloor = 0;
+		f._m.edgesOf(6 * W + 11, 1, 0, (t2, ty2, l2, add) => { if (t2 === 6 * W + 12 && add > 100) fromAir++; });
+		const L2 = levelOfCells(W, H, [...c, [11, 7, 9]]), f2 = R.reachField(L2, { sideArrow: 'all', debug: true });
+		f2._m.edgesOf(6 * W + 11, 1, 0, (t2, ty2, l2, add) => { if (t2 === 6 * W + 12 && add > 100) fromFloor++; });
+		check('slots: a sideways entry from the air priced, from a floor at the slot\'s height not', fromAir > 0 && fromFloor === 0, `${fromAir} / ${fromFloor}`);
+	}
+	// (e) the knob: EEAT_SIDEARROW=0 = the plain model (the same tables byte for byte)
+	{
+		const L = toy(false);
+		const prev = process.env.EEAT_SIDEARROW;
+		process.env.EEAT_SIDEARROW = '0';
+		const a = R.reachField(L);
+		if (prev === undefined) delete process.env.EEAT_SIDEARROW; else process.env.EEAT_SIDEARROW = prev;
+		const b = R.reachField(L, { sideArrow: 'off' }), d = R.reachField(L);
+		let same = true;
+		for (const k of ['costR', 'costF', 'costL', 'costC', 'costX']) if (Buffer.compare(Buffer.from(a[k].buffer), Buffer.from(b[k].buffer)) !== 0) same = false;
+		check('knob: EEAT_SIDEARROW=0 = the plain model byte for byte; the default prices (arrows)', same && d.sideArrow.on && d.sideArrow.mode === 'arrows' && d.sideArrow.arrows > 0);
+	}
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -1246,6 +1338,7 @@ function trapLevel() {
 	if (want('H')) { sectionH(); silentPortalRooms(); storedCoinDeadEnds(); deferredTriggerDeadEnds(); roomDeadFuzz(); }
 	if (want('I')) sectionI();
 	if (want('J')) sectionJ();
+	if (want('S')) sectionS();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });
