@@ -9,7 +9,9 @@
 // coin counts up to the highest door, the crown for crown doors, and 'fx' = the static effects plain / wild), chosen by
 // counterexample (CEGAR): start with none modelled (the reach field's optimism), take the plan (the walk plan, then the
 // physics plan), replay it with the full state; the first closed gate it walks through names a feature to model; rebuild
-// until the plans are valid (or 4096 layers). Per reached layer (walk model, from the start): reach.js's field on a copy
+// until the plans are valid (or 4096 layers); then the floor probe (probeFloors): a gate the physics plan, with the gates
+// it cannot stand on made doors, jumps from while it is air in the full state names its feature too (a coin gate's count
+// the coin DP's T). Per reached layer (walk model, from the start): reach.js's field on a copy
 // of the level with that layer's gates shut (solid) or open (air), killers per protection, and every tile that changes
 // the layer turned into a goal seeded with the next layer's cost there (value iteration over the layer graph's strongly
 // connected components, sinks first); a wild layer (an effect on: jump / fly / speed / low gravity / multijump / gravity)
@@ -563,9 +565,10 @@ function forwardLayers(A, M) {
 }
 /** layer s's copy of the level: gates shut -> 9, open -> 0; killers by protection; tiles that change the layer -> the
  *  trophy (goal tiles); opts.staticCoins: coins change no layer here (the coin way is the DP's); opts.probeDoors (the
- *  floor probe, probeFloors): a gate of a feature the model leaves out, and a count gate (a coin / blue coin gate: solid
- *  from its count on) open in this layer, keep their door block: passable AND a floor, as the RCH3 field has every door
- *  (`doors`: how many; 0 = the plain copy) */
+ *  floor probe, probeFloors): a count gate or door (gold / blue coins) the model leaves out, and a count gate (solid from
+ *  its count on) open in this layer, keep their door block: passable AND a floor, as the RCH3 field has every door;
+ *  probeDoors 'all': every gate of a feature the model leaves out too (keys, switches, team, crown) (`doors`: how many;
+ *  0 = the plain copy) */
 function layerLevel(A, M, s, opts) {
 	const L = A.level, N = A.N;
 	const fg = Int32Array.from(L.fg);
@@ -578,7 +581,8 @@ function layerLevel(A, M, s, opts) {
 		const c = A.cls[i], id = fg[i];
 		if (c === 3) {
 			const open = M.gateOpen(i, s);
-			if (opts.probeDoors && (M.unmodelledGate(i) || (open && A.gatePol[i] === 0 && (A.gateFeat[i] === 'coins' || A.gateFeat[i] === 'bcoins')))) doors++;
+			const cnt = A.gateFeat[i] === 'coins' || A.gateFeat[i] === 'bcoins';
+			if (opts.probeDoors && ((M.unmodelledGate(i) && (cnt || opts.probeDoors === 'all')) || (open && A.gatePol[i] === 0 && cnt))) doors++;
 			else fg[i] = open ? 0 : 9;
 		} else if (c === 1 && protOn === true) fg[i] = 0;
 		const k = A.specialAt[i];
@@ -893,13 +897,23 @@ function layeredPlan(PH, sim, maxLegs = 200) {
 // is the coin plan's count at least (floorT: the DP / tour over at least that count, the larger of it and the layer
 // field's below it, the CPU file's alone: floorDP). Ordering only; RCH3 and its -1 untouched. Levels where no probe finds
 // such a jump: the same file as before, byte for byte (the probe's time is off the build's budget clock).
-// EEAT_GATEFLOOR=0 / buildSteer(level, {gateFloor: false}): off (the build before).
+// The COUNT gates only by default (gold / blue coin gates and doors): with every gate of a feature the model leaves out
+// ('all': keys, switches, team, crown) the box A/B's two changed levels that route on main came slower in 2 of 2 seeds
+// each (Don't Stop Jumping psw:0 46.5 / 47.1 vs 34.8 / 28.2 s, Egg Quest II key1 32.7 / 31.6 vs 30.3 / 25.6 s: the probe's
+// relaxed plan took a switch's / key's gate as its floor where the level's own way needs none, and the modelled feature
+// sent the searches for it), the coin floors' levels gained (Aedan Garden, Springopolis).
+// EEAT_GATEFLOOR=0 / buildSteer(level, {gateFloor: false}): off (the build before); EEAT_GATEFLOOR=all / gateFloor 'all':
+// every unmodelled gate a floor candidate.
 const PROBE_LAYERS = 4;
-function gateFloorOn(opts) { return opts && opts.gateFloor !== undefined ? !!opts.gateFloor : process.env.EEAT_GATEFLOOR !== '0'; }
-/** the floor probe of a build whose plans are valid (PH: its physics layers) -> {feat, t, param, pol, count} (the gate
- *  the probe's plan jumped from, air in the full state; count: a coin / blue coin gate that is solid from its count on)
- *  or null. deadline: no new probe field past it */
-function probeFloors(level, A, PH, deadline) {
+/** the probe's mode: false (off), 'count' (the default: gold / blue coin gates) or 'all' */
+function gateFloorOn(opts) {
+	const v = opts && opts.gateFloor !== undefined ? opts.gateFloor : process.env.EEAT_GATEFLOOR === '0' ? false : process.env.EEAT_GATEFLOOR === 'all' ? 'all' : true;
+	return v === 'all' ? 'all' : v ? 'count' : false;
+}
+/** the floor probe of a build whose plans are valid (PH: its physics layers; mode 'count' or 'all': gateFloorOn) ->
+ *  {feat, t, param, pol, count} (the gate the probe's plan jumped from, air in the full state; count: a coin / blue coin
+ *  gate that is solid from its count on) or null. deadline: no new probe field past it */
+function probeFloors(level, A, PH, deadline, mode) {
 	const M = PH.M, N = A.N, W = A.W;
 	const flags = RF.guideFlags(level), nF = flags.length, fg0 = level.fg, lk = level.lookup0;
 	const fl = (id) => (id >= 0 && id < nF ? flags[id] : 0);
@@ -918,7 +932,7 @@ function probeFloors(level, A, PH, deadline) {
 		if ((f & (F_SOLID | F_JUMPTHRU | F_HALF | F_ROTHALF | F_DOOR)) === 0) return false;
 		return !((f & F_JUMPTHRU) && (f & F_ROTHALF) && lk[j] === 3);
 	};
-	const airGate = (j) => j < N && A.cls[j] === 3 && !['open', 'time', 'static'].includes(A.gateFeat[j]) && !floorAt(j);
+	const airGate = (j) => j < N && A.cls[j] === 3 && !['open', 'time', 'static'].includes(A.gateFeat[j]) && (mode === 'all' || A.gateFeat[j] === 'coins' || A.gateFeat[j] === 'bcoins') && !floorAt(j);
 	const half = (i) => i >= 0 && i < N && (fl(fg0[i]) & (F_HALF | F_ROTHALF)) !== 0 && (fl(fg0[i]) & F_JUMPTHRU) === 0;
 	const probe = new Map();
 	let built = 0;
@@ -927,7 +941,7 @@ function probeFloors(level, A, PH, deadline) {
 		let f = null;
 		const base = PH.fields[s];
 		if (base && base.mode !== 'walk' && base._m) {
-			const c = layerLevel(A, M, s, { staticCoins: true, probeDoors: true });
+			const c = layerLevel(A, M, s, { staticCoins: true, probeDoors: mode === 'all' ? 'all' : 'count' });
 			if (!c.doors) f = base;
 			else if (built < PROBE_LAYERS && Date.now() < deadline) {
 				built++;
@@ -1616,7 +1630,7 @@ function buildSteer(level, opts) {
 		let gx = null;
 		if (!cx && floorOn) {
 			const tp = Date.now();
-			gx = probeFloors(level, A, PH, Date.now() + maxMs / 2);
+			gx = probeFloors(level, A, PH, Date.now() + maxMs / 2, floorOn);
 			probeMs += Date.now() - tp;
 			if (gx) {
 				floors.push({ feat: gx.feat, at: [gx.t % A.W, Math.floor(gx.t / A.W)], from: [gx.from % A.W, Math.floor(gx.from / A.W)], param: gx.param, modelled: modeled.has(gx.feat) });

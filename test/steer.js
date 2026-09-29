@@ -14,7 +14,11 @@
 //   C prune    the native explore with a garbage steer field (random costs) still finds the key room's route: the steer
 //              field only orders (only the reach field's -1 rules states out); the CPU search (goexplore.js --steer)
 //              finds it too, and one worker with a tick budget is reproducible
-// usage: node test/steer.js [--only=A,B,C] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
+//   D floors   the floor probe (steer.js probeFloors; EEAT_GATEFLOOR=0 off): a trophy in a pocket reachable only by
+//              standing on a 2-coin gate: without the probe no feature and no start value; with it the coins modelled,
+//              the floor's count the coin DP's T (the CPU file's, the larger of it and the layer field's), the plain file
+//              without the DP; rooms where no floor is needed: the same files byte for byte; the CPU search routes sooner
+// usage: node test/steer.js [--only=A,B,C,D] [--gpu] [--tool=<eegpu>] [--jobs=<dir>] [--exploreSec=60]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
 const os = require('os');
@@ -440,13 +444,14 @@ function sectionC() {
 /** a 40 x 12 room, the spawn at (18, 10), 2 coins far left on the floor; `pocket`: the trophy at (30, 5) in a pocket open
  *  only from below (the jump from the floor peaks a row short; from the 2-coin gates (29-31, 10) under it, solid from 2
  *  coins on, it touches the trophy), else the trophy at (30, row) on the floor's side of the gates */
-function floorRoom(pocket, row) {
+function floorRoom(pocket, row, sw) {
 	const W = 40, H = 12, cells = [];
 	for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
 	for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
 	if (pocket) { for (let x = 28; x <= 32; x++) cells.push([x, row - 1, 9]); cells.push([28, row, 9], [32, row, 9], [30, row, 121]); } else cells.push([34, row, 121]);
-	for (let x = 29; x <= 31; x++) cells.push([x, 10, 165, 2]);
-	cells.push([2, 10, 100], [4, 10, 100], [18, 10, 255]);
+	// (sw: purple switch 1's gates (solid while it is on) and the switch at x 2, no coins)
+	for (let x = 29; x <= 31; x++) cells.push(sw ? [x, 10, 185, 1] : [x, 10, 165, 2]);
+	cells.push(...(sw ? [[2, 10, 113, 1]] : [[2, 10, 100], [4, 10, 100]]), [18, 10, 255]);
 	const buf = ED.eelvlOf({ name: 'gatefloor', width: W, height: H, cells });
 	return { buf, L: levelOf(buf) };
 }
@@ -485,11 +490,22 @@ function sectionD() {
 		const eq = Buffer.compare(SF.steerFileBytes(a, null), SF.steerFileBytes(b, null)) === 0 && Buffer.compare(SF.steerFileBytes(a, null, true), SF.steerFileBytes(b, null, true)) === 0;
 		check(`${name}: no floor step, the same files as without the probe`, eq && !(b.info.floors || []).length, `floors ${JSON.stringify(b.info.floors || [])}, features ${JSON.stringify(b.info.features)}`);
 	}
+	// (the same pocket on purple switch 1's gates: the count gates only by default, so no floor step there (the files as
+	// without the probe); 'all' (EEAT_GATEFLOOR=all): the switch modelled from its gate's floor)
+	{
+		const S = floorRoom(true, 5, true).L;
+		const a = SF.buildSteer(S, { legThreads: 0, gateFloor: false }), b = SF.buildSteer(S, { legThreads: 0 }), c = SF.buildSteer(S, { legThreads: 0, gateFloor: 'all' });
+		const eq = Buffer.compare(SF.steerFileBytes(a, null, true), SF.steerFileBytes(b, null, true)) === 0;
+		check('a switch\'s gate as the floor: by default (the count gates) no floor step, the files as without the probe; \'all\': the switch modelled', eq && !(b.info.floors || []).length && c.info.features.includes('psw:1') && (c.info.floors || []).some((q) => q.feat === 'psw:1'),
+			`default floors ${JSON.stringify(b.info.floors || [])}; all: ${JSON.stringify(c.info.features)} ${JSON.stringify(c.info.floors || [])}`);
+	}
 	const prev = process.env.EEAT_GATEFLOOR;
 	process.env.EEAT_GATEFLOOR = '0';
 	const k0 = SF.buildSteer(L, { legThreads: 0 });
+	process.env.EEAT_GATEFLOOR = 'all';
+	const kA = SF.buildSteer(L, { legThreads: 0 });
 	if (prev !== undefined) process.env.EEAT_GATEFLOOR = prev; else delete process.env.EEAT_GATEFLOOR;
-	check('EEAT_GATEFLOOR=0: the build without the probe, byte for byte', Buffer.compare(SF.steerFileBytes(k0, null, true), SF.steerFileBytes(off, null, true)) === 0);
+	check('EEAT_GATEFLOOR=0: the build without the probe, byte for byte; =all: the coin floor too', Buffer.compare(SF.steerFileBytes(k0, null, true), SF.steerFileBytes(off, null, true)) === 0 && Buffer.compare(SF.steerFileBytes(kA, null, true), SF.steerFileBytes(on, null, true)) === 0);
 	// the CPU search (1 worker, seed 1, a tick budget, coarse cells): with the CPU file a route in fewer simulated ticks
 	// than with the file without the probe
 	const lf = path.join(tmp, 'gatefloor.eelvl'), fa = path.join(tmp, 'gf_cpu.steer'), fb = path.join(tmp, 'gf_off.steer');
