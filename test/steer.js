@@ -40,8 +40,10 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'eeat-steer-'));
 process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* gone */ } });
 
 // ASCII rooms: # wall, . air, S spawn, T trophy, k red key, d red door, $ coin, c coin door (2 coins), s purple switch 1,
-// g purple switch door 1, b blue coin, B blue coin door (3 blue coins)
-const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1], b: [101], B: [213, 3] };
+// g purple switch door 1, b blue coin, B blue coin door (3 blue coins), D blue coin door (2), 1 / 2 team effects 1 / 2,
+// P / Q team doors 1 / 2
+const ID = { '#': [9], S: [255], T: [121], k: [6], d: [23], $: [100], c: [43, 2], s: [113, 1], g: [184, 1], b: [101], B: [213, 3], D: [213, 2],
+	'1': [423, 1], '2': [423, 2], P: [1027, 1], Q: [1027, 2] };
 function ascii(rows) {
 	const H = rows.length, W = rows[0].length, cells = [];
 	rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') return; const v = ID[ch]; if (!v) throw new Error(`legend ${ch}`); cells.push([x, y, ...v]); }));
@@ -180,6 +182,26 @@ function blueCoins() {
 	const g = SF.nextGate(rd, sim);
 	const tile = g ? [...L.coinBit].indexOf(g.bit) : -1;
 	check(`blue coins: the next gate from the start is a blue coin (tile ${tile % L.width},${Math.floor(tile / L.width)})`, tile >= 0 && L.fg[tile] === 101);
+	// the carried legs (opt-in, blueCarry): a blue coin behind a team-1 door on the left, one behind a team-2 door on the
+	// right before the 2-blue-coin door; the plain legs are all in the team of the plan's first coin, so the other coin has
+	// no leg (a team tile is a sink in a leg's copy): no DP by default, main's file byte for byte; with blueCarry the legs
+	// carried over the team sub-layers, a DP taken only with a start value (here none: the walk plan touches the right coin
+	// twice, so the legs are carried in team 2 and the left coin's pocket, behind the team-1 door, is shut in team 2: a
+	// leg's cost from a coin is read in one sub-layer, not the one the ball holds there)
+	{
+		const w = 40, mid = '.'.repeat(w - 2);
+		const floor = [...mid];
+		floor[0] = 'b'; floor[2] = 'P'; floor[4] = '1'; floor[6] = '2'; floor[17] = 'S'; floor[27] = 'Q'; floor[29] = 'b'; floor[31] = 'D'; floor[35] = 'T';
+		const top = [...mid]; top[2] = 'P'; top[27] = 'Q'; top[31] = 'D';
+		const t = top.join('');
+		const LT = levelOf(ascii([wall(w), row(t), row(t), row(t), row(t), row(floor.join('')), wall(w)]).buf);
+		const a = SF.buildSteer(LT), b = SF.buildSteer(LT, { blueCarry: true }), c = SF.buildSteer(LT, { blueDP: false });
+		const s2 = new E.EESim(LT); s2.reset();
+		const bFile = Buffer.compare(SF.steerFileBytes(b, null), SF.steerFileBytes(c, null)) === 0;
+		check(`blue coins behind team doors: no DP by default (main's file); with blueCarry the legs carried (features ${b.info.features.join(', ')}; ${b.info.blue ? JSON.stringify(b.info.blue.carry) : 'no blue build'}), a DP only with a start value (dp ${!!b.dp}, start ${SF.steerAt(b, s2)})`,
+			!a.dp && Buffer.compare(SF.steerFileBytes(a, null), SF.steerFileBytes(c, null)) === 0 && !!b.info.blue && !!b.info.blue.carry && b.info.blue.carry.carried > 0 && (b.dp ? b.dp.blue && SF.steerAt(b, s2) > 0 : bFile),
+			`default dp ${!!a.dp}, carried dp ${!!b.dp}`);
+	}
 	// the gold rooms: the same build with the knob either way (no blue coin there)
 	for (const name of ['coins', 'key']) {
 		const Lg = levelOf(ROOMS[name].buf);
