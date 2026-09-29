@@ -246,7 +246,9 @@ function portalsOf(L) {
  * field (the reach field), RM (roomOf(L)), ports (the workers' MessagePorts), say (an event line), bound() (the longest
  * route that still counts, ticks), minLen (goexplore.js --prefix: no burst starts before that tick), register(info) (a room the bursts found: into the main thread's registry, true when
  * new), broadcast(inputs) (an attempt into every worker's archive), finish(masks, how) (a route: replayed already),
- * nearest() ({inputs, rc} the attempt nearest the trophy by the reach field, or null), sec() (seconds since the start)}
+ * nearest() ({inputs, rc} the attempt nearest the trophy by the reach field, or null), sec() (seconds since the start),
+ * doom(sim, tile) (goexplore.js doomOf: the live state is doomed by its counts; a room every report of which is doomed is
+ * a burst's room only on the dominated rooms' turn or when no other has a field; null: none)}
  */
 function create(o) {
 	const L = o.L, a = o.a, W = L.width, H = L.height, N = W * H;
@@ -373,7 +375,7 @@ function create(o) {
 		let r = rooms.get(m.room);
 		if (!r) {
 			r = { key: m.room, desc: m.desc, seq: ++seq, tile: m.tile, t: m.t, inputs: m.inputs, n: 0, y: 0, sec: 0, tried: new Set(), info: null, best: Infinity, k: 0, entries: new Set(), dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null,
-				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1, grp: m.grp || null };
+				trig: m.t > 0 && m.trig !== false, fl: 0, nt: 1, ntI: null, ntK: -1, grp: m.grp || null, doom: m.doom === true };
 			// (its portal arm: the room's targets its walk reaches only through a portal, an arm of their own (fieldOf0);
 			// the room's own fields (key, tried, info, entries, inputs) through the prototype, its bandit numbers its own)
 			r.pa = Object.assign(Object.create(r), { base: r, portal: true, n: 0, y: 0, sec: 0, best: Infinity, k: 0, busy: false, done: false, fc: null, confs: null, dead: new Set(), zero: 0, stall: 0, ladders: null, legStarts: null, fl: 0, nt: 1, ntI: null, ntK: -1 });
@@ -381,9 +383,12 @@ function create(o) {
 			for (const tl of pendingEntries.get(m.room) || []) entry(r, tl);
 			pendingEntries.delete(m.room);
 		} else if (m.t < r.t) { r.t = m.t; r.inputs = m.inputs; r.tile = m.tile; r.trig = m.t > 0 && m.trig !== false; }
+		if (m.doom !== true) r.doom = false;
 		entry(r, m.tile);
 		return r;
 	};
+	/** (DOOMED COUNTS, goexplore.js doomOf) a room with a state that is not doomed: a burst's room like any other */
+	const undoom = (key) => { const r = rooms.get(key); if (r) r.doom = false; };
 	const pendingEntries = new Map();   // (entries of rooms not known yet)
 	/** the trigger component at a tile, else one next to it (a trigger acts on the ball's box, not only its centre) */
 	const compNear = (tile) => {
@@ -632,7 +637,7 @@ function create(o) {
 				const cz2 = o.RM.cause(sim), trig = o.RM.byTrigger(cz, cz2);
 				edge(key, tile, k2, trig);
 				const d2 = o.RM.dom ? o.RM.dom(sim) : null;
-				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys,
+				if (o.register({ room: k2, desc: o.RM.desc(sim), tile, t: k + 1, inputs: inputs.slice(0, k + 1), parent: key, trig, sub: cz2.sub, keys: cz2.keys, doom: o.doom ? o.doom(sim, tile) : false,
 					...(d2 ? { dcls: d2.cls, dmask: Array.from(d2.mask) } : {}) })) fresh++;
 				cz = cz2;
 			}
@@ -692,7 +697,7 @@ function create(o) {
 		const total = st.bursts;
 		// (the rooms by score; a room's field (a replay and two walks) only for the best ones until one has a target: a
 		// level of many switches has thousands of rooms)
-		const cand = [], dcand = [];
+		const cand = [], dcand = [], xcand = [];
 		// (a dominated room's turn: --domBurst)
 		const domTurn = domBurst > 0 && ++domTick % domBurst === 0;
 		for (const r0 of rooms.values()) {
@@ -703,17 +708,22 @@ function create(o) {
 			// --domBurst-th turn: dominance only orders)
 			const dm = !!(r0.grp && r0.grp.dom);
 			if (dm && !domTurn) continue;
+			// (DOOMED COUNTS: a room every report of which says doomed (goexplore.js doomOf) goes with the dominated ones on their
+			// turn, else only when no other room has a field: xcand)
+			const dd = r0.doom === true;
 			for (const r of [r0, r0.pa]) {
 				if (r.done || r.busy) continue;
 				const raw = r.n === 0 ? UNTRIED + r.seq * 1e-6 : r.y / r.n + UCB_C * Math.sqrt(Math.log(1 + total) / r.n);
 				// (--burstFair: the order by the score per untried target not yet failed)
-				(dm ? dcand : cand).push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
+				(dm || (dd && domTurn) ? dcand : dd ? xcand : cand).push([fair && r.n > 0 ? fairScore(raw, r.fl, targetsOf(r)) : raw, r, raw]);
 			}
 		}
 		cand.sort((x, y) => y[0] - x[0]);
 		dcand.sort((x, y) => y[0] - x[0]);
+		xcand.sort((x, y) => y[0] - x[0]);
 		let domChosen = false;
-		for (const [, r, raw] of dcand.length ? dcand.concat(cand) : cand) {
+		const order = dcand.length ? dcand.concat(cand) : cand;
+		for (const [, r, raw] of xcand.length ? order.concat(xcand) : order) {
 			let f;
 			try { f = fieldOf(r); } catch (e) { r.done = true; continue; }
 			if (!f) { r.done = true; continue; }
@@ -1115,7 +1125,9 @@ function create(o) {
 		} catch (e) { /* a record only */ }
 	};
 	return {
-		room, edge, triggers: TR.n,
+		room, edge, undoom, triggers: TR.n,
+		/** (tests) room `key` is doomed for the bursts (DOOMED COUNTS) */
+		doomed: (key) => { const r = rooms.get(key); return r ? r.doom === true : null; },
 		/** (tests) room `key`'s walk: its targets (comps: component -> tiles), the ways through (the timed killer's
 		 *  removers), the trophies; null for a room not known */
 		info: (key) => { const r = rooms.get(key); return r ? infoOf(r) : null; },
