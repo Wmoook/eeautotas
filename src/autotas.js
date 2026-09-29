@@ -44,6 +44,9 @@ const HANDOFF_WIN_MAX_S = 120;
 const HANDOFF_MIN_GAIN = 0.01;
 /** a route of Find a route waits at most this long for its cleanup (editor.js cleanLater) before it goes to the job */
 const CLEAN_WAIT_MS = 15000;
+/** the first route (the job's base) waits at most this long from the first route seen, however many faster ones replace
+ *  it meanwhile (its cleaned version goes to the job as soon as it is done) */
+const FIRST_CLEAN_WAIT_MS = +(process.env.EEAT_FIRST_CLEAN_WAIT_MS || 1000);
 /** a job history entry that Find a route's route made (its inbox run, that run's splice with the best, or a direct try
  *  while the job's grind was not running) */
 const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
@@ -56,6 +59,24 @@ const FR_WHAT = /^(inbox \(|try: )Find a route\b/;
  * anything for a window, when in the last window the optimizer's own stages gained more than the routes, or when the
  * routes gained it less than HANDOFF_MIN_GAIN of its best.
  */
+/**
+ * Whether Find a route's current best route `r` ({runTicks, ticks, inputs, clean}) goes to the job now (the gate's state
+ * `g` {lastKey, waitKey, waitAt} is updated). A route being cleaned (editor.js cleanLater, clean 'pending') waits for its
+ * cleanup, at most CLEAN_WAIT_MS per route; a route handed on before its cleanup ended goes again once cleaned. THE FIRST
+ * ROUTE (the job's base): the clock starts at the first route seen pending and does not restart when a faster route
+ * replaces it, and it waits at most FIRST_CLEAN_WAIT_MS (n3-slow-first-route-hunt, 2026-09-29: every faster route is a
+ * new pending key, and while Find a route kept finding faster ones each one restarted the clock; on long first routes,
+ * whose cleanup takes 3-6 s, the job waited 5-19 s after the first route was found: EXCrew Trolled Minis 5.3-19.1 s,
+ * Weird Perfection 5.1-6.9 s, The 7 Depths of Hell 2.5-14.6 s, Gingerbread House 2.6-7.9 s vs 0.4-2.9 s on the others)
+ */
+function routeGate(g, r, now) {
+	const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
+	if (key === g.lastKey) return false;
+	const first = !g.lastKey;
+	if (r.clean === 'pending' && g.waitKey !== key && !(first && g.waitAt !== null)) { g.waitKey = key; g.waitAt = now; }
+	if (r.clean !== 'pending' || now - g.waitAt >= (first ? FIRST_CLEAN_WAIT_MS : CLEAN_WAIT_MS)) { g.lastKey = key; g.waitAt = null; return true; }
+	return false;
+}
 function handoffWhy(o) {
 	if (!o.jobAt) return '';
 	const win = 1000 * Math.max(o.handoffMin || HANDOFF_MIN_S, Math.min(HANDOFF_WIN_MAX_S, (o.jobAt - o.t0) / 1000));
@@ -102,7 +123,8 @@ function run(o) {
 		lc ? { md5: lc.md5, ...(lc.warnings.length ? { warnings: lc.warnings } : {}), ...(lc.notes.length ? { notes: lc.notes } : {}) } : {}));
 	// o.seed: Find a route's seed (editor.js start(): 1 when none), so two runs of one level can differ (problem 10)
 	ED.start({ eelvlB64: o.eelvl.toString('base64'), seconds: Math.ceil(budgetMs / 1000), width: 65536, workers: W, seed: o.seed, source: o.source }, o.gpu || { available: gpuOk });
-	let lastKey = '', waitKey = '', waitAt = 0, frDone = false, hist = 0, ended = false, busy = false;
+	const gate = { lastKey: '', waitKey: '', waitAt: null };
+	let frDone = false, hist = 0, ended = false, busy = false;
 	// the handoff's measures: when the job started, when a route of Find a route last gained it something, and every gain
 	// of the job's best ({at: ms, saved, fr: made by a route})
 	let jobAt = 0, frAt = 0;
@@ -180,11 +202,7 @@ function run(o) {
 			if (r && r.inputs) {
 				// (a route being cleaned (editor.js cleanLater) waits for its cleanup, at most CLEAN_WAIT_MS: the job's base
 				// is the cleaned route; a route handed on before its cleanup ended goes again once cleaned)
-				const key = `${r.runTicks}:${r.ticks}:${r.inputs.length}:${r.clean === 'pending' ? 'p' : 'c'}`;
-				if (key !== lastKey) {
-					if (r.clean === 'pending' && waitKey !== key) { waitKey = key; waitAt = Date.now(); }
-					if (r.clean !== 'pending' || Date.now() - waitAt >= CLEAN_WAIT_MS) { lastKey = key; onRoute(r); }
-				}
+				if (routeGate(gate, r, Date.now())) onRoute(r);
 			}
 			// routes of another class (editor.js classRoutes: other doors / triggers than the best's, even slower ones): saved
 			// next to the timeline and handed to the job (its pieces: a class the optimizer can splice from; a second optimizer
@@ -240,7 +258,7 @@ function run(o) {
 	return { stop: () => finish('stopped'), state: () => S };
 }
 
-module.exports = { run, handoffWhy, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
+module.exports = { run, handoffWhy, routeGate, CLEAN_WAIT_MS, FIRST_CLEAN_WAIT_MS, HANDOFF_MIN_S, HANDOFF_WIN_MAX_S, HANDOFF_MIN_GAIN, FR_WHAT };
 
 if (require.main === module) {
 	const args = C.parseArgs(process.argv.slice(2));

@@ -46,5 +46,26 @@ check('FR_WHAT: a route\'s inbox run and its splice', AT.FR_WHAT.test('inbox (Fi
 	AT.FR_WHAT.test('inbox (Find a route (route)) + best (splice, 2 switches)') && AT.FR_WHAT.test('try: Find a route (route)') &&
 	!AT.FR_WHAT.test('inbox (gpu m1 3)') && !AT.FR_WHAT.test('sweep1_2') && !AT.FR_WHAT.test('try: focus 0:01.00-0:02.00'));
 
+console.log('routeGate (the route to the job; its cleanup wait)');
+{
+	const R = (runTicks, clean) => ({ runTicks, ticks: runTicks + 5, inputs: 'x'.repeat(runTicks + 5), clean });
+	// a first route whose cleanup is done at once: handed on at once
+	let g = { lastKey: '', waitKey: '', waitAt: null };
+	check('a cleaned first route: at once', AT.routeGate(g, R(900, 'done'), 0) === true);
+	check('the same route again: not twice', AT.routeGate(g, R(900, 'done'), 100) === false);
+	// the first route pending, a faster pending route every second (EXCrew: the cleanup of a 20 k-tick route takes 3-6 s)
+	g = { lastKey: '', waitKey: '', waitAt: null };
+	let at = -1;
+	for (let t = 0; t <= 20; t++) if (at < 0 && AT.routeGate(g, R(20000 - 100 * t, 'pending'), t * s)) at = t;
+	check('the first route: the clock not restarted by faster pending routes, handed on after FIRST_CLEAN_WAIT_MS', at * s === AT.FIRST_CLEAN_WAIT_MS, `at ${at} s`);
+	check('its cleaned version goes again', AT.routeGate(g, R(20000 - 100 * at, 'done'), (at + 3) * s) === true);
+	// later routes: the wait per route as before (CLEAN_WAIT_MS, restarted by a newer one)
+	let later = -1;
+	for (let t = 30; t <= 60; t++) if (later < 0 && AT.routeGate(g, R(15000 - (t < 40 ? 10 * t : 400), 'pending'), t * s)) later = t;
+	check('a later route: CLEAN_WAIT_MS from the newest pending route, as before', later * s === 40 * s + AT.CLEAN_WAIT_MS, `at ${later} s`);
+	g = { lastKey: '', waitKey: '', waitAt: null };
+	check('a first route cleaned before the cap: at once', AT.routeGate(g, R(5000, 'pending'), 0) === false && AT.routeGate(g, R(4900, 'done'), 2 * s) === true);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
