@@ -93,9 +93,11 @@ function teamDoors() {
 	const old = SF.buildSteer(L, { maxBytes: N * 120, walkOver: false });
 	check('two team doors, walkOver false: the team left out (info.over)', !old.info.features.includes('team') && /team: over/.test(old.info.over || ''), `${old.info.features} ${old.info.over}`);
 }
-/** a plan standing on an open gate (steer-budget-walk): the spawn at the bottom of a shaft, above it a purple gate 1 (air
- *  while switch 1 is off), the switch right on top of it and the trophy 2 tiles higher: the physics plan rises through the
- *  gate onto the switch and on up (the next step does not fall), so the gate below that step names psw:1 */
+/** the floor-gate rule (steer-budget-walk, OPT-IN buildSteer {floors: true}): the spawn at the bottom of a shaft, above it
+ *  a purple gate 1 (air while switch 1 is off), the switch right on top of it and the trophy 2 tiles higher: the physics
+ *  plan rises through the gate onto the switch and on up (the next step does not fall), so with the rule the gate below
+ *  that step names psw:1; off by default (a feature not modelled is air in the model too, so the plan never stands on
+ *  it: the campaign's 7 flagged steps were all rises through the gate or passes over it, as here) */
 function floorGate() {
 	const cells = [];
 	const w = 7, h = 8;
@@ -103,11 +105,11 @@ function floorGate() {
 	for (let y = 1; y < h - 1; y++) { cells.push([0, y, 9]); cells.push([w - 1, y, 9]); cells.push([1, y, 9]); cells.push([w - 2, y, 9]); }
 	cells.push([3, 6, 255], [3, 5, 185, 1], [3, 4, 113, 1], [3, 2, 121]);
 	const L = levelOf(ED.eelvlOf({ name: 'floorgate', width: w, height: h, cells }));
-	const st = SF.buildSteer(L);
+	const st = SF.buildSteer(L, { floors: true });
 	const cx = st.info.cegar.find((c) => c.floor);
-	check(`a plan standing on an open gate names its feature (${st.info.features.join(', ')}; cegar ${JSON.stringify(st.info.cegar.map((c) => [c.cx, c.floor]))})`, st.info.features.includes('psw:1') && !!cx && cx.cx === 'psw:1' && cx.floor[0] === 3 && cx.floor[1] === 5);
-	const off = SF.buildSteer(L, { floors: false });
-	check('the same level with floors false: psw:1 not modelled', !off.info.features.includes('psw:1'), `${off.info.features}`);
+	check(`the floor-gate rule (floors true): a plan over an open gate names its feature (${st.info.features.join(', ')}; cegar ${JSON.stringify(st.info.cegar.map((c) => [c.cx, c.floor]))})`, st.info.features.includes('psw:1') && !!cx && cx.cx === 'psw:1' && cx.floor[0] === 3 && cx.floor[1] === 5);
+	const off = SF.buildSteer(L);
+	check('the same level by default (no floor rule): psw:1 not modelled', !off.info.features.includes('psw:1'), `${off.info.features}`);
 }
 
 function sectionA() {

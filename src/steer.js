@@ -404,11 +404,13 @@ function applyFull(A, st, t) {
 	else if (kind === 'reset') { if (st.prot !== undefined) st.prot = 0; }
 }
 /** the first feature that makes a plan invalid under the full state (a closed gate / a killer it walks through), or null.
- *  opts.floors (the physics plan only: a walk plan is blind to gravity) with opts.modeled (the modelled features): also a
- *  step that stands on a gate of a feature not modelled that is open (air) in the full state: the tile below the step
- *  (world gravity: down) is that gate and the next step does not fall (it goes up or sideways), so the plan needs the
- *  tile solid where the full state has air; that gate's feature is named (steer-budget-walk: MoonBase's plan rises onto
- *  the purple switch 0 above its own gate, Springopolis's, The Glitch's, Hunt's) */
+ *  opts.floors (OPT-IN, buildSteer {floors: true}; the physics plan only: a walk plan is blind to gravity) with
+ *  opts.modeled (the modelled features): also a step over a gate of a feature not modelled that is open (air) in the full
+ *  state: the tile below the step (world gravity: down) is that gate and the next step does not fall (it goes up or
+ *  sideways); that gate's feature is named. Off by default (steer-budget-walk, 2026-09-28): a feature not modelled is air
+ *  in the model too, so the plan never stands on it; the 7 campaign levels it flagged (MoonBase, Springopolis, Hunt,
+ *  Egg Quest II, The Glitch, Switch Labyrinth, First Person Maze) all rise through the gate or pass over it, and it cost
+ *  builds (First Person Maze 49 -> 121 s) for no gain (MoonBase: the same 31.6-tile stall either way) */
 function counterexample(A, plan, opts) {
 	const st = fullState(A);
 	const floors = !!(opts && opts.floors), modeled = (opts && opts.modeled) || null, W = A.W;
@@ -1041,7 +1043,7 @@ function buildSteer(level, opts) {
 			const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
 			path.push({ t, via: tele ? 'portal' : 'move' });
 		}
-		const cx = path.length > 1 ? counterexample(A, { path }, { floors: opts.floors !== false, modeled }) : null;
+		const cx = path.length > 1 ? counterexample(A, { path }, { floors: opts.floors === true, modeled }) : null;
 		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, walk: PH.walkOver || undefined, cx: cx && cx.feat, floor: cx && cx.floor ? [cx.t % A.W, Math.floor(cx.t / A.W)] : undefined });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
 		const S2 = B.M.S * A.feats.get(cx.feat).values.length;
