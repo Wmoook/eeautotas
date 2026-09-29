@@ -335,8 +335,9 @@ function reachField(level, opts) {
 	// top edge <= 16 + riseQ(-16, m1, m2) with the gravity queue of the next two ticks: m1 = the current tile of the tick
 	// before (a neighbour of t, or t itself; after a teleport, a respawn or at the start: a portal / air: G), m2 = t's own.
 	// Portal p (the teleport tick starts in p: the exit gets the rotated speed x 1.42 (<= 22.72, unclamped until the next
-	// update), the ball is put at the exit's tile corner and moves <= 16 px this tick): the rise from the exit tile's top
-	// edge <= 8 + riseQ(-16 x 1.42, m1, m2), m1 the tick before's current tile (a neighbour of p), m2 = p's own. Where that
+	// update), the ball is put at the exit's tile corner and moves <= 16 px this tick, + < 1 px from the rotated sub-pixel
+	// remainders (_portalTeleport: _rem_y = -_rem_x ...)): the rise from the exit tile's top edge <= 9 + riseQ(-16 x 1.42,
+	// m1, m2), m1 the tick before's current tile (a neighbour of p), m2 = p's own. Where that
 	// q exceeds Q (ice: the ice drag's longer rise; a strong pull by it) the cap is not proven in Q levels: R(INF) stays.
 	// Sound (both are the engine's own arithmetic with the most upward modifiers and the ice drag's ticks), so it is in
 	// the proof field too. rcT: per up boost tile, its R level (INF: no cap); rpT: per portal tile, its exits' R level.
@@ -355,7 +356,7 @@ function reachField(level, opts) {
 	const capOf = (e) => { const q = Math.ceil((e + TOL) / 8); return q <= Q ? Math.max(-1, q) : INF; };
 	const rcT = new Int8Array(N), rpT = new Int8Array(N).fill(INF);
 	for (let i = 0; i < N; i++) if (cls[i] === BUP) rcT[i] = opts.riseInf ? INF : capOf(16 + riseQ(-16, pull3(i), modCurR(i), nIceR));
-	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(8 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
+	for (const p of portalExits.keys()) rpT[p] = opts.riseInf ? INF : capOf(9 + riseQ(-16 * 1.42, pull3(p), modCurR(p), nIceR));
 	let mode = wild ? 'walk' : 'physics';
 	if (mode === 'physics' && N * (Q + 20) * 2 > 128 * 1048576) mode = 'walk';
 	const trophy = (i) => fg[i] === TROPHY && passable(i);
