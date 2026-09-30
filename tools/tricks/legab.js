@@ -19,7 +19,8 @@ const [SH, NSH] = (argv.shard || '0/1').split('/').map(Number);
 const SLACK = +(argv.slack || 10);
 const TAGS = (argv.tags || 'airjump').split(',');
 const LABELS = argv.labels ? new Set(argv.labels.split(',')) : null;
-const TRICKS = argv.tricks || TAGS.join(',');
+const TRICKS = argv.tricks || TAGS.filter((k) => k !== 'all').join(',');
+const EVERY = +(argv.every || 1);
 
 function loadMoves(dir) {
 	const byR = new Map();
@@ -39,7 +40,7 @@ function loadMoves(dir) {
 function main() {
 	const mine = JSON.parse(fs.readFileSync(argv.mine, 'utf8'));
 	const want = new Map();
-	for (const m of mine.moves) if (TAGS.some((k) => m.tags[k]) && (!LABELS || LABELS.has(m.label))) { if (!want.has(m.r)) want.set(m.r, new Set()); want.get(m.r).add(m.m); }
+	for (const m of mine.moves) if ((TAGS.includes('all') || TAGS.some((k) => m.tags[k])) && (!LABELS || LABELS.has(m.label))) { if (!want.has(m.r)) want.set(m.r, new Set()); want.get(m.r).add(m.m); }
 	const byR = loadMoves(argv.moves || path.join(process.env.EEAT_TRUTH_ROOT || '.', 'src/out/n4plan/understand/moves/exact_jsonl'));
 	const all = TS.knownRoutes({});
 	const outF = fs.openSync(argv.out || 'src/out/tricks/legab.jsonl', 'w');
@@ -63,6 +64,7 @@ function main() {
 		const flags = chk._flags;
 		for (const mi of Array.from(set).sort((a, b) => a - b)) {
 			if (argv.limit && n >= +argv.limit) break;
+			if (mi % EVERY !== 0) continue;
 			const mv = moves[mi];
 			if (mv.c0 === 'D' || mv.c1 === 'D' || mv.label === 'respawn' || mv.len > 400) continue;
 			const tele = mv.endKind === 'portal';
