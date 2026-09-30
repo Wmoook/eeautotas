@@ -37,7 +37,10 @@ const ARROWS = new Set([1, 2, 3, 1518, 411, 412, 413, 1519]);
 const CORR_OPTS = { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false };
 const RESUMABLE = { chain: true, corr: true, prof: false, bw: false, leg: false };
 const SESS_KEEP = 8;
-const GROW = 4;                             // (a one-piece arm's second run: at least this many times its first piece)
+// the default plan (EEAT_PF_PLAN 'arm:share,...': measurements)
+const PLAN_DEF = (process.env.EEAT_PF_PLAN || 'bw:0.4,prof:0.2,leg:0.1,corr:0.25,chain:0.05').split(',').map((x) => { const [a, f] = x.split(':'); return [a, +f]; });
+const GROW = 4;
+const BW_QUICK_MS = +process.env.EEAT_PF_BWQUICK > 0 ? +process.env.EEAT_PF_BWQUICK : 4000;                             // (a one-piece arm's second run: at least this many times its first piece)
 const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 
 function createPortfolio(L, opts = {}) {
@@ -123,7 +126,7 @@ function createPortfolio(L, opts = {}) {
 	 *  3 s; resumable), msolve.chain last (resumable, it takes the rest); a teleport target: no profile / leg arm */
 	function planOf(shape, arms) {
 		const has = (a) => arms.includes(a) && !((a === 'prof' || a === 'leg') && shape.tele);
-		const plan = [['bw', 0.3], ['prof', 0.25], ['leg', 0.15], ['corr', 0.3], ['chain', 0.1]];
+		const plan = PLAN_DEF;
 		return plan.filter(([a]) => has(a));
 	}
 	function parsePlan(s) { return String(s).split(',').filter(Boolean).map((x) => { const [a, f] = x.split(':'); return [a, +f || 0.25]; }); }
@@ -148,7 +151,9 @@ function createPortfolio(L, opts = {}) {
 				if (res && res.ok) res.T = res.tick;
 				r.done = !(res && /time|stopped/.test(res.why || ''));
 			} else if (arm === 'bw') {
-				res = backward().solve(snap, target, { ms });
+				// (its quick meet (the fallback order alone, P.quick nodes) gets at least min(0.8 x the piece, BW_QUICK_MS): with
+				// the lab's 0.3 of a 5-s piece it stopped at 1.6 s where the same meet on a 20-s clock found the leg at 1.7 s)
+				res = backward().solve(snap, target, { ms, quickF: Math.min(0.8, Math.max(0.3, BW_QUICK_MS / Math.max(1, ms))) });
 				r.done = !(res && res.why === 'budget');
 			} else if (arm === 'leg') {
 				// (the executor's tier 3 finder on the stretch: the goal field of the level as it stands at the start, a region
