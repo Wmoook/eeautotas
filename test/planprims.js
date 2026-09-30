@@ -186,7 +186,7 @@ async function unit() {
 		const t0 = Date.now();
 		const r = pr.route([a0], goal, { ms: 2000 }, { w: 1 });
 		const s1 = pr.stats(), sec = (Date.now() - t0) / 1000;
-		console.log(`  SPEED: ${((s1.expands - s0.expands) / sec).toFixed(0)} expansions/s, ${((s1.sims - s0.sims) / sec / 1e6).toFixed(2)} M sims/s (one thread), route latency ${Object.values(S).map((s) => s.ms).join(' / ')} ms (toys, 3 s budget, anytime)`);
+		console.log(`  SPEED: ${((s1.expands - s0.expands) / sec).toFixed(0)} expansions/s, ${((s1.ticks - s0.ticks) / sec / 1e6).toFixed(2)} M engine ticks/s (one thread; the kept edges' ${((s1.sims - s0.sims) / sec / 1e6).toFixed(2)} M), route latency ${Object.values(S).map((s) => s.ms).join(' / ')} ms (toys, 3 s budget, anytime)`);
 		check('SPEED: printed', r.expanded > 0);
 	}
 }

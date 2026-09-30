@@ -105,7 +105,7 @@ async function createPrims(L, o = {}) {
 	let tables = null;
 	if (o.tables !== false) { try { tables = require('./tables.js'); } catch (e) { tables = null; } }
 	const learned = new Map();     // support key -> [{masks: Uint8Array, ticks}]
-	const st = { expands: 0, edges: 0, sims: 0, routes: 0, found: 0, proven: 0, learnHits: 0, learnTries: 0, macroUse: {}, ms: 0 };
+	const st = { expands: 0, edges: 0, sims: 0, ticks: 0, routes: 0, found: 0, proven: 0, learnHits: 0, learnTries: 0, macroUse: {}, ms: 0 };
 	let pool = null;
 
 	/** the support class key of a state, or null (a state in the air with |v| >= 0.5 outside fields, dead) */
@@ -150,6 +150,7 @@ async function createPrims(L, o = {}) {
 			if (!onG && s.on_ground && (macro.land || k > 0)) { event = 'land'; break; }
 			onG = !!s.on_ground; px = s.px; py = s.py;
 		}
+		st.ticks += n;
 		if (n === 0) return null;
 		const hash = s.stateHash();
 		if (hash === h0) return null;
@@ -182,6 +183,7 @@ async function createPrims(L, o = {}) {
 			E.applyMask(inp, m);
 			s.tick(inp);
 			buf[n++] = m;
+			st.ticks++;
 			if (s.is_dead) { emit(n, 'dead', false); return; }
 			if (ctx.goal && ctx.goal.test(s)) { emit(n, 'goal', true); return; }
 			if (Math.abs(s.px - px) > TELEPORT_PX || Math.abs(s.py - py) > TELEPORT_PX) { emit(n, 'portal', false); return; }
