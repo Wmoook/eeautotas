@@ -8,6 +8,9 @@
 //           Edge[], route(starts, goal, budget, o) -> NavResult, routeAsync(...) -> Promise<NavResult> (a worker pool:
 //           src/plan/primworker.js), learn(fromArrival, masks, toArrival), stats(), close()}
 //   Edge {macro, masks (the edge's own inputs), ticks, to: Arrival (masks from the level start), event}
+//   route o: {classDedup (default true; false: exact stateHash dedup only), step (the STEP family; default: with
+//           classDedup false), family ('all' | 'step'), w (one weighted pass), quick (the greedy pass alone: the first
+//           route found), bound (ticks: only routes faster), beforeTick, allowDeath, guide (false: no reach-field order)}
 //   NavResult {ok, arrivals (T.pickDiverse of the goal nodes, each replayed from the level start by T.playTo), best
 //           {masks, ticks} | null, lb (the bound at the best start), proven, expanded, sims, why ('found' | 'budget' |
 //           'exhausted' | 'stopped'), closest {masks, tile, dist (the bound's ticks there), vx, vy}}
@@ -298,7 +301,7 @@ async function createPrims(L, o = {}) {
 		const fo = { family: ro.family || 'all', step: ro.step !== undefined ? !!ro.step : (ro.family === 'step' || ro.classDedup === false) };
 		// anytime: weighted A* first (a route soon), then w = 1 bounded by the best so far (every prune by the admissible
 		// bound: a node whose tick + h reaches the best cannot beat it)
-		const ws = ro.w > 0 ? [ro.w] : (classDedup ? [3, 1.5, 1] : [1]);
+		const ws = ro.w > 0 ? [ro.w] : ro.quick ? [3] : (classDedup ? [3, 1.5, 1] : [1]);
 		const tEnd = Math.min(budget.deadline || Infinity, t0 + (budget.ms > 0 ? budget.ms : 1000));
 		const goalsAll = [];
 		let R = null, incumbent = ro.bound !== undefined ? ro.bound : Infinity, expanded = 0, sims = 0, nodes = 0, closestN = null, lbStart = Infinity, proven = false, whyLast = 'exhausted';

@@ -24,6 +24,15 @@
 //                  rotated portals; else the engine's run 6.7766 px/tick, fall 13.553, jump 6.708 x the jump effect):
 //                  T >= right / xp + left / xn and T >= down / yp + up / yn along any path; the graph minimum of each is a
 //                  Dijkstra over the same nodes with the other axis free. Sound whatever the path's shape.
+//   tier 1 'plain': a ball in plain mode (no jump / speed / fly / gravity effect, not slippery, the plain speeds, no
+//                  mechanism in its gravity queue) keeps the plain sups until its centre is in a MECHANISM tile (a boost,
+//                  an effect that breaks them, side or up gravity, the tile above ice, a rotated portal's trigger, with
+//                  their half-block touchers): the per-axis Dijkstra at the plain speeds with the mechanism tiles as
+//                  sources at the capped layer's value there (less 8 px + SLACK on each side of the tile at each layer's
+//                  slowest speed); its own teleport fixpoint over the non-rotated portals. at() uses it for plain states.
+//   'endgame':     endgame.js lowerBound (the kinematic envelope: acceleration from the state's own speed, one jump per
+//                  landing, portals through its portal field; walls ignored), min'd with DEATH_MIN + the field at the
+//                  respawns (a way through a death): at() takes the max with it near the goal (field value < 128).
 //   teleports: a portal (not silent: reach.js silentPortals) teleports the ball in the tick after its centre is in the
 //                  entry tile (or a half block whose touch goes to it); that tick leaves the centre within one tile of an
 //                  exit: Q(p) = 1 + min over the 3 x 3 around its exits of the bound there. A death (a killing tile, or
