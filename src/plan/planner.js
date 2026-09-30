@@ -132,7 +132,7 @@ function createPlanner(model, facts, o = {}) {
 	let lastPlans = [], lastWhy = '';
 	// (EEAT_TRICKS exh: the (edge, node class) pairs whose leg the exact search exhausted: learn())
 	const exhausted = new Set();
-	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy' && !X.crumb);
+	const relevant = model.triggers.filter((X) => X.relevant && X.kind !== 'trophy' && !X.crumb).concat(model.chains || []);   // (+ the FORCED CHAINS, model.js, EEAT_TRICKS chain)
 	// (the crumbs: coins no gate reads, relevant only with EEAT_CRUMBS=1 (model.js); left out of the plan search, offered
 	// one at a time by crumbPlan)
 	const crumbs = model.triggers.filter((X) => X.relevant && X.crumb);
@@ -751,7 +751,7 @@ function createPlanner(model, facts, o = {}) {
 		};
 		const groups = ANY ? new Map() : null;
 		for (const X of (only || relevant)) {
-			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
+			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw' || X.kind === 'chain')) continue;
 			const live = model.liveTiles(S, X);
 			if (!live.length) continue;
 			// (reachable first: the touch builds a state)

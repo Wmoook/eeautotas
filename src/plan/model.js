@@ -362,6 +362,67 @@ function compileModel(L, o = {}) {
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
 	initV = feats.map((f) => init[f]);
 	const S0 = stateOf(sim0);
+	// ---------------------------------------------------------------- FORCED CHAINS (a state trick, n5-tricks 3)
+	// A boost (114-117) sets the speed to 16 px/tick along its direction; a straight lane of trigger tiles right after it,
+	// walled so the ball cannot leave it sideways, is passed tile by tile (the centre moves < 16 px a tick: no tile
+	// skipped, a touch on every cell change), so its triggers are touched ALL, IN ORDER, with no choice between them (First
+	// Person Maze: 79 such lanes of purple switches, the known route falls one twice; Fizio1 21, Daybreak 5, The Glitch 2,
+	// DEEPER 1, Switch Labyrinth 2: 12 of 228 levels). The planner's one-trigger edges cannot say that: a leg to one switch
+	// in the lane from the ball mid-lane EXHAUSTS (the compile's 'purple switch 27 exhausted 2 tiles'). A chain is one
+	// planner trigger (kind 'chain', model.chains, not in triggers / trigOf): its touch = its members' touches in order,
+	// its waypoint the lane's last relevant tile with that feature's value after the whole chain. Every chain is checked
+	// by the ENGINE: the ball put on the boost at 16 px/tick with no input must visit exactly the lane's tiles in order and
+	// end in the abstract state the members' touches give from S0 (stateOf); else it is no chain. Lanes of coins / crowns
+	// / trophies are cut there (a coin component's touch takes all its coins). OPT-IN EEAT_TRICKS chain / 1 / all.
+	const chains = [];
+	{
+		const tk = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((s) => s.trim()));
+		if (tk.has('1') || tk.has('all') || tk.has('chain')) {
+			const BD = { 114: [-1, 0], 115: [1, 0], 116: [0, -1], 117: [0, 1] };
+			const PER_TILE = new Set(['psw', 'osw', 'pswR', 'oswR', 'key', 'team', 'prot', 'reset', 'fx', 'cp']);
+			const inW = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+			for (let i = 0; i < N && chains.length < 4096; i++) {
+				const d = BD[fg[i]];
+				if (!d) continue;
+				let x = (i % W) + d[0], y = ((i / W) | 0) + d[1];
+				const lane = [];
+				while (inW(x, y)) {
+					const j = y * W + x, id = trigOf[j];
+					if (id < 0 || !PER_TILE.has(triggers[id].kind)) break;
+					lane.push(j); x += d[0]; y += d[1];
+				}
+				const rel = lane.filter((j) => triggers[trigOf[j]].relevant);
+				if (lane.length < 3 || rel.length < 2) continue;
+				// the engine check
+				let ok = false;
+				try {
+					const sim = new E.EESim(L), inp = new E.EEInput();
+					sim.reset(); E.applyMask(inp, 0);
+					const Sb = stateOf(sim);
+					sim.px = (i % W) * 16; sim.py = ((i / W) | 0) * 16; sim.prev_px = sim.px; sim.prev_py = sim.py;
+					sim.speed_x = d[0] * 16; sim.speed_y = d[1] * 16;
+					const seen = [];
+					let last = i;
+					for (let k = 0; k < lane.length * 3 + 12; k++) {
+						sim.tick(inp);
+						if (sim.is_dead) break;
+						const t = T.tileOf(sim, W, H);
+						if (t === last) continue;
+						last = t;
+						if (lane.includes(t)) seen.push(t); else break;
+					}
+					let Sx = Sb;
+					for (const j of lane) { const r = touch0(Sx, triggers[trigOf[j]]); if (r.changed) Sx = r.S2; }
+					const Sa = stateOf(sim);
+					ok = seen.length === lane.length && seen.every((t, k) => t === lane[k]) && Sa.key === Sx.key && Sx.key !== Sb.key;
+				} catch (e) { ok = false; }
+				if (!ok) continue;
+				const last = rel[rel.length - 1], lx = last % W, ly = (last / W) | 0;
+				chains.push({ id: 1000000 + chains.length, kind: 'chain', tiles: [last], members: lane.map((j) => trigOf[j]), lastTrig: trigOf[last], feat: triggers[trigOf[last]].feat, param: 0,
+					relevant: true, coins: null, boost: i, label: `forced chain of ${lane.length} (${(i % W) + d[0]},${((i / W) | 0) + d[1]})-(${lx},${ly})` });
+			}
+		}
+	}
 	// ---------------------------------------------------------------- the abstract touch
 	/**
 	 * touch(S, X) -> {S2, changed, expect}: the state after touching trigger X (S2 === S when nothing relevant changes).
@@ -385,6 +446,15 @@ function compileModel(L, o = {}) {
 		return r;
 	}
 	function touch0(S, X) {
+		if (X.kind === 'chain') {
+			// (a FORCED CHAIN, EEAT_TRICKS chain: its members touched in the lane's order; the expect: the last relevant
+			// member's feature as the whole chain leaves it)
+			let S2 = S;
+			for (const id of X.members) { const r = touch0(S2, triggers[id]); if (r.changed) S2 = r.S2; }
+			if (S2 === S) return { S2: S, changed: false, expect: null };
+			const f = triggers[X.lastTrig].feat, n = fIdx.get(f);
+			return { S2, changed: true, expect: n === undefined ? null : { feat: f, value: S2.vals[n] } };
+		}
 		if (X.kind === 'cp') return cpTracked && S.cp !== X.id ? { S2: mkState(S.vals, S.taken, S.btaken, X.id), changed: true, expect: null } : { S2: S, changed: false, expect: null };
 		if (!X.relevant || X.kind === 'trophy' || X.kind === 'fx') return { S2: S, changed: false, expect: null };
 		const vals = S.vals.slice();
@@ -810,7 +880,7 @@ function compileModel(L, o = {}) {
 	const model = {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, keyOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
-		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, dieSrc, deathT, timed, coinTiles, bcoinTiles,
+		file: o.file || null, S0, startTile, chains, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, dieSrc, deathT, timed, coinTiles, bcoinTiles,
 		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, hopClosure, revDist, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),
