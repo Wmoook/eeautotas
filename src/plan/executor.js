@@ -1601,6 +1601,19 @@ async function createExecutor(L, opts) {
 	// is still the engine's replay, verified as before); no claim reads it. EEAT_DEADEND=0 off.
 	const DEAD_ON = process.env.EEAT_DEADEND !== '0';
 	const DEAD_K = 16, DEAD_BACK = 6, DEAD_REST = 0.3;
+	// ---- THE STEP HOLDS AFTER A FAILURE (lane 1, block 4): a sub-leg found in under a third of its share doubles the step
+	// (fast motion); after a failed sub-leg the next success doubled it too, and that success was often trivial: new
+	// counterexample walls re-measure the level where the skeleton stands (its cost rises), the next sub-level set is
+	// found in 2 ms by the exact tier (the arrivals already in it), the step doubles to 24 and that sub-leg fails again
+	// with up to half of what is left of the call (The Blank Page's rung 3, 39 s: 24 fail 5.8 s, 37 ok 2 ms, 13 fail
+	// 5.0 s, 38 ok 2 ms, 14 fail 4.3 s, ... six times). The 54 L1 levels (60 s, box 3): 431 such failures on 42 levels,
+	// 364 s of sub-leg time. Now the step doubles only on the second success in a row after a failure (before any
+	// failure of the call: as before), and new walls after a failed sub-leg keep the retry's halved step and its count
+	// (the level's second failure ends the call's descent there: the dead-end rule, or the rest's direct leg) instead of
+	// a fresh start on the new field (every failed sub-leg learns walls, so the fresh start never let the call end stuck:
+	// The Blank Page's same rung with only the doubling held: 23 fail 2.5 s, 23 fail 2.1 s, 23 fail 1.8 s, 23 fail 1.5 s).
+	// Ordering / time use only. EEAT_SKEL_HOLD=0: as before.
+	const STEP_HOLD = process.env.EEAT_SKEL_HOLD !== '0';
 	const deadEnds = new Set();   // stateHash of skeleton arrivals the finders could not go on from
 	const hashOf = (str) => { try { return core.startOf(String(str)).hash; } catch (e) { return null; } };
 	// THE DEATH LEG (EEAT_DEATH_LEG=0: off): a waypoint whose finders closed every way from the starts without a death
@@ -1680,14 +1693,19 @@ async function createExecutor(L, opts) {
 		const levels = [];
 		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
 		// fields to build), a failed one halves it for its retry)
-		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP, firstExh = false, backs = 0;
+		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP, firstExh = false, backs = 0, okRun = 2;
 		while (Date.now() < deadline - 100) {
 			// (new counterexample walls from the last sub-leg: the level where the skeleton stands, on the new field)
 			if (wRefresh()) {
 				let fw;
 				try { fw = fieldAt(cur[0], goal, wp.allowDeath, wArr); } catch (e) { fw = { f: null }; }
 				if (!fw.f || !(fw.c >= 0)) break;
-				cCur = fw.c; step = SKEL_STEP; retried = false; key = skelKey(goal, wp, startStrs, wN);
+				// (the step holds: new walls after a failed sub-leg re-measure the level, and the retry is the halved step on
+				// the new field, not a fresh start: every failed sub-leg learns walls, so the fresh start never let the call
+				// end stuck and it spent the rest of its time on the same failing target, 1.5-3 s a try)
+				cCur = fw.c; key = skelKey(goal, wp, startStrs, wN);
+				if (STEP_HOLD && retried) step = Math.max(SKEL_STEP / 2, Math.min(step, SKEL_STEP));
+				else { step = SKEL_STEP; retried = false; }
 			}
 			const left = deadline - Date.now();
 			if (cCur <= SKEL_STEP * 1.5) break;
@@ -1722,6 +1740,7 @@ async function createExecutor(L, opts) {
 			levels.push({ c: Math.round(c), ok: !!r.ok, ms: r.ms, tool: r.tool });
 			if (!r.ok) {
 				lastFail = r;
+				okRun = 0;
 				if (r.fail && r.fail.why === 'stopped') break;
 				const exh = !!(r.fail && r.fail.why === 'exhausted');
 				if (!retried) { retried = true; firstExh = exh; step = Math.max(SKEL_STEP / 2, step / 2); continue; }
@@ -1743,7 +1762,8 @@ async function createExecutor(L, opts) {
 				break;
 			}
 			retried = false;
-			if (r.ms < share / 3) step = Math.min(SKEL_STEP * 4, step * 2);
+			okRun++;
+			if (r.ms < share / 3 && (!STEP_HOLD || okRun >= 2)) step = Math.min(SKEL_STEP * 4, step * 2);
 			cur = r.arrivals.map((a) => T.strOf(a.masks));
 			cCur = c;
 			if (!skelMemo.has(key)) skelMemo.set(key, []);
