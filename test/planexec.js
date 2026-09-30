@@ -1,17 +1,20 @@
 'use strict';
 // test/planexec.js: the executor (src/plan/executor.js, exact.js, legs.js, polish.js, execworker.js), the compiler's
 // MOVES stage. Prints 'name: ok|FAIL', ends 'N/M' (passed / checks), exit 1 on a failure.
-// usage: node test/planexec.js [--only=unit,exact,fail] [--truth] [--limit=N] [--par=K] [--budget=3000] [--json]
+// usage: node test/planexec.js [--only=unit,exact,fail,legs,polish,chain] [--truth] [--limit=N] [--par=K] [--budget=3000] [--json]
 //   unit   E-UNIT on a key-door level: the key, the sealed coin (a proof), a region with beforeTick met / missed, the key
-//          door named in blockedBy, the trophy, workers 0 = workers 2
-//   exact  T-EXEC-EXACT on 6 tiny rooms: exactLeg's depth = an unbounded BFS's minimum, the bound only removes states;
-//          with --truth also 20 known routes: exactLeg from F - 16 to the trophy = endgame.js search()
+//          door named in blockedBy, the trophy, workers 0 = workers 2, a death step (allowDeath) and the same without
+//   exact  T-EXEC-EXACT on 6 tiny rooms: exactLeg's depth = an unbounded BFS's minimum, the bound only removes states, the
+//          jump skip changes no state; with --truth also 20 known routes: exactLeg from F - 16 to the trophy = endgame.js
+//          search()
 //   fail   T-EXEC-FAIL: 20 unreachable waypoints: within budget + 200 ms, a FailReport with a closest, blockedBy the key door
 //   --truth (EEAT_TRUTH_ROOT: the main checkout or a copy on a box) adds:
 //   legs   T-EXEC-LEGS: the known routes cut at their trigger events, reach() from the route's exact state at event k to
 //          event k + 1's trigger (budget --budget ms): success % of the legs of <= 300 route ticks, the ticks ratio to the
 //          route's own leg, proven %, the tiers, the worst cases (--limit routes; --par processes)
 //   polish T-POLISH: 10 AutoTAS routes (god runs' best.eetas): never slower, every output finishes, the ticks saved
+//   chain  T-EXEC-CHAIN (informational, only with --only=chain): the executor alone compiling known routes from their
+//          waypoints, each leg from the leg before's arrivals, then the polish (--chainN routes, --polishMs, --out rows)
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -379,6 +382,113 @@ async function legsTruth() {
 	if (args.out) fs.writeFileSync(String(args.out), JSON.stringify(rows));
 }
 
+// ---------------------------------------------------------------- T-EXEC-CHAIN (informational)
+/** the executor alone compiling a known route from its waypoints: every leg from the ARRIVALS of the leg before (as the
+ *  planner will call it), the route's trigger events in order as the waypoints (a key running out skipped, a waypoint
+ *  the route's own leg does not meet skipped), budget x (the route's leg ticks / 150) a leg (3 s .. 15 s); then the
+ *  fastest finished arrival polished (--polishMs). Rows: legs done, the compiled run ticks vs the route's, polished. */
+async function chainOfRoute(e, budget, polishMs) {
+	const S = require('../src/plan/truthset.js');
+	const C = require('../src/common.js');
+	let tr = null;
+	try { tr = S.loadTruth(e); } catch (err) { return { name: e.name, error: String(err && err.message || err) }; }
+	if (!tr) return { name: e.name, error: 'stale' };
+	const L = tr.L;
+	const ord0 = S.orderOf(S.routeEvents(L, tr.masks).events).filter((o) => o.feat !== 'prot' && !(/^key\d$/.test(o.feat) && !o.value));
+	// (--chainStep=N: a region waypoint every N route ticks between two events (the route's centre tile there and its 8
+	// neighbours, no Expect): the path skeleton a planner gives for a long leg)
+	const step = +args.chainStep || 0;
+	const ord = [];
+	{
+		let prev = 0;
+		const sim = new E.EESim(L), inp = new E.EEInput();
+		sim.reset();
+		let t = 0;
+		for (const o of ord0) {
+			if (step > 0) for (let u = prev + step; u < o.tick - step / 2; u += step) {
+				for (; t < u; t++) { E.applyMask(inp, tr.masks[t]); sim.tick(inp); }
+				const tl = T.tileOf(sim, L.width, L.height), x = tl % L.width, y = (tl / L.width) | 0, tiles = [];
+				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (x + dx >= 0 && y + dy >= 0 && x + dx < L.width && y + dy < L.height) tiles.push((y + dy) * L.width + x + dx);
+				ord.push({ tick: u, feat: 'region', tiles });
+			}
+			ord.push(o);
+			prev = o.tick;
+		}
+	}
+	const ex = await EX.createExecutor(L, { workers: 0 });
+	let starts = [{ masks: new Uint8Array(0) }];
+	let prevTick = 0, done = 0, failAt = -1, why = null, ms = 0;
+	const delays = [];
+	const t0 = Date.now();
+	for (let k = 0; k < ord.length; k++) {
+		const o = ord[k];
+		const legTicks = o.tick - prevTick;
+		const wp = o.feat === 'silver' ? { kind: 'trophy', label: 'trophy' } : o.feat === 'region' ? { kind: 'region', tiles: o.tiles, expect: null, label: `region @${o.tick}` }
+			: { kind: 'trigger', tiles: triggerTiles(L, o.tile, o.feat), expect: { feat: o.feat, value: o.value }, label: `${o.feat}=${o.value}` };
+		const g = T.goalOf(L, wp);
+		if (o.feat !== 'region') {
+			const own = T.playTo(L, tr.masks.subarray(0, o.tick), { goal: g, allowDeath: true });
+			if (own.goalAt !== o.tick) continue;
+		}
+		prevTick = o.tick;
+		const b = Math.max(budget, Math.min(15000, Math.round(budget * legTicks / 150)));
+		const r = await ex.reach(starts, wp, { ms: b, level: 1 });
+		if (!r.ok) { failAt = k; why = r.fail ? r.fail.why : '?'; break; }
+		starts = r.arrivals;
+		delays.push(Math.min(...starts.map((a) => a.masks.length)) - o.tick);
+		if (args.delays) console.error(`  leg ${k} ${wp.label}: route ${legTicks} ticks, from ${Math.min(...r.legs.map((l) => l.ticks))} (${r.tool}, lb ${r.lb}), delay ${delays[delays.length - 1]}, ${r.ms} ms`);
+		done++;
+		if (wp.kind === 'trophy') break;
+	}
+	ms = Date.now() - t0;
+	let compiled = -1, polished = -1, pms = 0;
+	if (failAt < 0) {
+		const fin = starts.filter((a) => a.finished).sort((a, b) => a.masks.length - b.masks.length);
+		const ev = fin.length ? C.evaluate(L, fin[0].masks, false) : null;
+		if (ev) {
+			compiled = ev.runTicks;
+			const t1 = Date.now();
+			const p = await ex.polish(ev.ms, { ms: polishMs });
+			pms = Date.now() - t1;
+			const ev2 = C.evaluate(L, p.masks, false);
+			polished = ev2 ? ev2.runTicks : -1;
+		}
+	}
+	await ex.close();
+	return { name: e.name, legs: ord.length, done, failAt, why, known: tr.runTicks, compiled, polished, ms, pms, delays };
+}
+async function chainTruth() {
+	const S = require('../src/plan/truthset.js');
+	const budget = +args.budget || 3000, polishMs = +args.polishMs || 30000, limit = +args.chainN || 12;
+	const god = S.knownRoutes({ jobs: false });
+	const seen = new Set(), list = [];
+	for (const e of god) { if (seen.has(e.name)) continue; seen.add(e.name); list.push(e); }
+	const shard = args.shard ? String(args.shard).split('/').map(Number) : null;
+	const mine = list.slice(0, limit).filter((e, i) => !shard || i % shard[1] === shard[0]);
+	const par = +args.par || 1;
+	let rows = [];
+	if (par > 1 && !shard) {
+		const { spawn } = require('child_process');
+		const runs = [];
+		for (let i = 0; i < par; i++) {
+			runs.push(new Promise((resolve) => {
+				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
+				let s = '';
+				p.stdout.on('data', (d) => { s += d; });
+				p.on('close', () => { try { resolve(JSON.parse(s.trim().split('\n').pop()).rows || []); } catch (e) { resolve([]); } });
+			}));
+		}
+		for (const r of await Promise.all(runs)) rows = rows.concat(r);
+	} else for (const e of mine) rows.push(await chainOfRoute(e, budget, polishMs));
+	if (shard) { console.log(JSON.stringify({ rows })); return; }
+	if (args.out) fs.writeFileSync(String(args.out), JSON.stringify(rows));
+	for (const r of rows) console.log(`  ${r.name}: ${r.error ? 'error ' + r.error : `${r.done}/${r.legs} legs${r.failAt >= 0 ? ` (failed at ${r.failAt}: ${r.why})` : ''}, known ${r.known}, compiled ${r.compiled}, polished ${r.polished} (${(r.ms / 1000).toFixed(1)} s + ${(r.pms / 1000).toFixed(1)} s)${args.delays ? ' delays ' + (r.delays || []).join(',') : ''}`}`);
+	const full = rows.filter((r) => r.compiled > 0);
+	const ratio = (a) => a.map((r) => r.x).sort((p, q) => p - q);
+	const rc = ratio(full.map((r) => ({ x: r.compiled / r.known }))), rp = ratio(full.filter((r) => r.polished > 0).map((r) => ({ x: r.polished / r.known })));
+	console.log(`T-EXEC-CHAIN ${rows.length} routes, compiled end to end ${full.length}; run ticks / the known route's median compiled ${rc.length ? rc[rc.length >> 1].toFixed(3) : '-'}, polished ${rp.length ? rp[rp.length >> 1].toFixed(3) : '-'}`);
+}
+
 // ---------------------------------------------------------------- T-POLISH
 async function polishTruth() {
 	const S = require('../src/plan/truthset.js');
@@ -416,6 +526,7 @@ if (require.main === module) (async () => {
 		if (only.has('fail')) await failCases();
 		if (only.has('legs') && truth) await legsTruth();
 		if (only.has('polish') && truth) await polishTruth();
+		if (only.has('chain') && truth) await chainTruth();
 	} catch (e) { fail++; console.log(`error: FAIL (${e && e.stack || e})`); }
 	if (!args.shard) console.log(`planexec: ${pass}/${pass + fail} (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
 	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }

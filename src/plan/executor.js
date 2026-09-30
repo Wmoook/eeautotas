@@ -268,12 +268,25 @@ function makeCore(L, co) {
 			// the route's (median), shorter in 91 of the 202 both found, longer in none; EEAT_TIGHTEN=0 off; its weight 3
 			// (EEAT_TIGHT_W): 77.4% either way, the legs 1.000 vs 1.007 (median), 1.303 vs 1.438 (p90), shorter in 66 of 204)
 			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
-				const t8 = Date.now();
-				const ub = Math.min(...found.cands.map((c) => c.depth));
-				const r3 = LG.legBest(L, snaps, goal, { sim, deadline: t8 + 0.5 * (wEnd - t8), stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_TIGHT_W || 3, cell: cell0, kbOn: true, noFinish: true });
-				sims += r3.sims;
-				tiers.push({ tier: 'best-tighten', ms: Date.now() - t8, status: r3.status, depth: r3.depth });
-				if (r3.status === 'found' && r3.depth < ub) found.cands = r3.goals.concat(found.cands);
+				const tm = String(process.env.EEAT_TIGHTEN_MODE || 'best');
+				// (EEAT_TIGHTEN_MODE: 'best' (the default), 'beam' (legBFS bounded by the leg: layered by tick, it keeps the
+				// fastest state per cell), 'both' (the beam, then best-first on what is left of the share))
+				const t8 = Date.now(), tEnd = t8 + (+process.env.EEAT_TIGHT_SHARE || 0.5) * (wEnd - t8);
+				if (tm === 'beam' || tm === 'both') {
+					const ub = Math.min(...found.cands.map((c) => c.depth));
+					const rb = runBeam(tm === 'both' ? t8 + 0.6 * (tEnd - t8) : tEnd, ub - 1);
+					sims += rb.sims;
+					tiers.push({ tier: 'beam-tighten', ms: Date.now() - t8, status: rb.status, depth: rb.depth });
+					if (rb.status === 'found' && rb.depth < ub) found.cands = rb.goals.concat(found.cands);
+				}
+				if (tm !== 'beam' && Date.now() < tEnd - 20) {
+					const t9 = Date.now();
+					const ub = Math.min(...found.cands.map((c) => c.depth));
+					const r3 = LG.legBest(L, snaps, goal, { sim, deadline: tEnd, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_TIGHT_W || 3, cell: cell0, kbOn: true, noFinish: true });
+					sims += r3.sims;
+					tiers.push({ tier: 'best-tighten', ms: Date.now() - t9, status: r3.status, depth: r3.depth });
+					if (r3.status === 'found' && r3.depth < ub) found.cands = r3.goals.concat(found.cands);
+				}
 			}
 			else {
 				if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
