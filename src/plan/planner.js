@@ -83,6 +83,27 @@ function createPlanner(model, facts, o = {}) {
 	// (the crumbs: coins no gate reads, relevant only with EEAT_CRUMBS=1 (model.js); left out of the plan search, offered
 	// one at a time by crumbPlan)
 	const crumbs = model.triggers.filter((X) => X.relevant && X.crumb);
+	// ANY MEMBER (doctor 3, COMPILER-PUSH-2): the triggers whose touch makes the SAME abstract state from S (every tile
+	// group of one key colour, of one switch id, one team, the crown: model.touch gives one S2) are ONE move. Before, each
+	// tile group was an edge of its own and a waypoint of its own tiles: NC Naos Antediluvian (145 triggers, ~100 red-key
+	// groups, most of them single tiles) planned 'red key (95,148) x29' / 'red key (75,163) x20' (the est walk's nearest
+	// groups), the executor ended 6-13 tiles short of them from the spawn at every rung, the next plans took the next
+	// group, and the compile ended with gain 0-1 in 60 and 180 s, where the known route takes the red key at (86,170) (a
+	// single-tile group ~15 tiles from the spawn) at tick 374. Now one edge per (kind, S2): its tiles the UNION of the
+	// members' live tiles (the goal field seeded at all of them: the finder takes whichever member the physics reaches),
+	// its lb / est the least over them (admissible: a min of admissible bounds), its edge id the least member id (stable
+	// for the facts whatever member is nearest), its pos2 the nearest member's (the plan's est goes on from there; the
+	// next anchor is the real arrival, anchorOf). Coins never merge (their taken bits make S2 differ). o.anyMember /
+	// EEAT_PLAN_ANY=1: on; off (the default until measured) = the planner as before, byte for byte.
+	const ANY = o.anyMember !== undefined ? !!o.anyMember : process.env.EEAT_PLAN_ANY === '1';
+	// (the SET kinds only: a touch sets the feature whatever it was; the toggles (psw / osw: a member the ball just
+	// pressed is in the union at cost 0 where it stands) and the coins (their own taken bits) stay one edge a trigger)
+	const ANY_KINDS = new Set(['key', 'team', 'prot', 'reset', 'fx', 'crown', 'pswR', 'oswR']);
+	// BREADCRUMBS (crumbStep below; o.crumbs / EEAT_PLAN_CRUMBS=1: on; off (the default until measured) = the planner as before)
+	const CRUMBS = o.crumbs !== undefined ? !!o.crumbs : process.env.EEAT_PLAN_CRUMBS === '1';
+	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 60, CRUMB_REACH = +process.env.EEAT_CRUMB_REACH || 40, CRUMB_NEAR = 6;
+	const CRUMB_SLACK = 3, CRUMB_SLACK_F = 0.03;
+	const crumbCands = CRUMBS ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -493,7 +514,7 @@ function createPlanner(model, facts, o = {}) {
 			// it), 'rch' (RCH3 -1 at rest / rising), 'floor' / 'zone' (a count floor not reached))
 			return { lb, est, steps, viaDeath, relaxOnly, pen: relaxOnly ? 'relax' : '' };
 		};
-		const finish = (X, tiles, edge, tr) => {
+		const finish = (X, tiles, edge, tr, anyOf) => {
 			const g = leg(tiles);
 			if (!g) return;
 			if (wantEst) {
@@ -509,8 +530,11 @@ function createPlanner(model, facts, o = {}) {
 				if (bad === 'proof' && root) return;
 				if (bad) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'rch'; }
 			}
-			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles });
+			const e = { X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles };
+			if (anyOf > 1) e.anyOf = anyOf;
+			out.push(e);
 		};
+		const groups = ANY ? new Map() : null;
 		for (const X of (only || relevant)) {
 			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
 			const live = model.liveTiles(S, X);
@@ -521,7 +545,29 @@ function createPlanner(model, facts, o = {}) {
 			if (sL >= INF && !dvL) continue;
 			const tr = model.touch(S, X);
 			if (!tr.changed) continue;
+			if (groups && ANY_KINDS.has(X.kind) && tr.S2 && tr.S2.key !== undefined) {
+				const gk = X.kind + '|' + tr.S2.key;
+				const g = groups.get(gk);
+				if (g) g.push({ X, live, tr }); else groups.set(gk, [{ X, live, tr }]);
+				continue;
+			}
 			finish(X, live, 'trig:' + X.id, tr);
+		}
+		if (groups) {
+			for (const g of groups.values()) {
+				if (g.length === 1) { finish(g[0].X, g[0].live, 'trig:' + g[0].X.id, g[0].tr); continue; }
+				// (the representative: the member nearest by the est walk (else the lb walk); the edge id: the least id)
+				const dd = dE || dL;
+				let rep = g[0], repD = INF, minId = g[0].X.id;
+				const seen = new Set(), all = [];
+				for (const m of g) {
+					if (m.X.id < minId) minId = m.X.id;
+					let d = INF;
+					for (const t of m.live) { if (dd[t] < d) d = dd[t]; if (!seen.has(t)) { seen.add(t); all.push(t); } }
+					if (d < repD) { repD = d; rep = m; }
+				}
+				finish(rep.X, all, 'trig:' + minId, rep.tr, g.length);
+			}
 		}
 		if (only) return out;
 		finish(null, trophyTiles, 'trophy', null);
@@ -742,6 +788,49 @@ function createPlanner(model, facts, o = {}) {
 		return wp;
 	}
 	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
+	/** BREADCRUMBS (doctor 3, EEAT_PLAN_CRUMBS=1, default off): the root edge's leg is long (its est walk CRUMB_MIN steps
+	 *  or more) -> the one crumb step to take first: a trigger that changes no model state (a coin, blue coin or checkpoint
+	 *  no gate reads: `relevant` false) whose est-walk detour d(pos -> c) + d(c -> target) - d(pos -> target) is at most
+	 *  max(CRUMB_SLACK, CRUMB_SLACK_F x D), the farthest such within CRUMB_REACH steps (else the nearest beyond it), not
+	 *  nearer than CRUMB_NEAR, not one that failed twice from this node class. Why: a level whose triggers gate nothing
+	 *  is ONE leg for the planner (EX Crew Ice: the plan 'trophy', a 5,145-tick known route, the compile 688 tiles short
+	 *  in 60 and 180 s), where the level's designer put its coins along the way: 13 of the known route's 15 coins lie on a
+	 *  shortest est walk from the start to the trophy (detour 0-3 steps), and from its own arrivals the executor chains
+	 *  those coins leg by leg (src/out/doc3/chain.js). The crumb's edge is 'trig:<id>', so its arrival is an anchor of
+	 *  its own (strategy addArrival's re-entry rule: the same model state, another trigger) that the next plan starts
+	 *  from (receding horizon: one crumb a plan). Ordering only: the crumb is a waypoint, never a gate. */
+	function crumbStep(a, e, cls) {
+		if (!CRUMBS || e.viaDeath) return null;
+		// (the geometry by the 'now' walk: est's walls (killers unless protected) WITHOUT the CEGAR's cuts: a failed long
+		// leg's cuts made its est walk relaxation-only (EX Crew Ice with the first version: 4 crumbs, then the trophy edge
+		// at the 1e6 penalty and no crumb from there))
+		const S = a.S, tgt = e.live || trophyTiles;
+		const dA = model.dist(S, a.pos, 'now', a.base);
+		let D = INF;
+		for (const t of tgt) if (dA[t] < D) D = dA[t];
+		if (!(D >= CRUMB_MIN) || D >= INF) return null;
+		const slack = Math.max(CRUMB_SLACK, CRUMB_SLACK_F * D);
+		let near = null, far = null;
+		for (const X of crumbCands) {
+			const edge = 'trig:' + X.id;
+			if (facts && facts.rungOf(edge, cls) >= 2) continue;
+			const live = model.liveTiles(S, X);
+			if (!live.length) continue;
+			let d1 = INF;
+			for (const t of live) if (dA[t] < d1) d1 = dA[t];
+			if (!(d1 >= CRUMB_NEAR) || d1 >= D) continue;
+			const dX = model.dist(S, { id: 'crumb' + X.id, tiles: live.slice(), extra: 0 }, 'now', a.base);
+			let d2 = INF;
+			for (const t of tgt) if (dX[t] < d2) d2 = dX[t];
+			if (d2 >= INF || d1 + d2 - D > slack) continue;
+			const c = { X, live, d1, edge };
+			if (d1 <= CRUMB_REACH) { if (!far || d1 > far.d1) far = c; } else if (!near || d1 < near.d1) near = c;
+		}
+		const c = far || near;
+		if (!c) return null;
+		return { edge: c.edge, nodeClass: cls, rung: facts ? facts.rungOf(c.edge, cls) : 0, estTicks: Math.round(c.d1 * pace()), lb: 0, crumb: true,
+			waypoint: { kind: 'trigger', tiles: c.live.slice(), trig: c.X.id, expect: null, label: `crumb ${c.X.label}` } };
+	}
 	function stepsOf(a, node) {
 		const path = [];
 		for (let n = node; n && n.e; n = n.parent) path.push({ e: n.e, from: n.parent });
@@ -753,6 +842,8 @@ function createPlanner(model, facts, o = {}) {
 			const { e, from } = path[i];
 			const isRoot = i === 0;
 			const cls = isRoot ? a.S.key + '|' + a.cls : from.S.key + '|*';
+			// (breadcrumbs: a long root leg goes by a crumb first)
+			if (isRoot && CRUMBS && !(e.X && e.X.kind === 'die')) { const cs = crumbStep(a, e, cls); if (cs) push(cs); }
 			// a death first where only a death reaches the target
 			if (e.viaDeath) {
 				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
@@ -781,7 +872,7 @@ function createPlanner(model, facts, o = {}) {
 					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
 				continue;
 			}
-			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
+			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
 			// a key followed by its door: the passage while the key is on
 			if (X && X.kind === 'key' && i + 1 < path.length) {
@@ -972,7 +1063,7 @@ function createPlanner(model, facts, o = {}) {
 	}
 	/**
 	 * THE CRUMB PLANS (doctor 9, n5; EEAT_CRUMBS=1, model.js): the CRUMB_K nearest crumbs (coins no gate reads) by the
-	 * admissible bound, as one-step plans in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_MIN ticks)
+	 * admissible bound, as one-step plans in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_LEGMIN ticks)
 	 * and the crumb is nearer than that leg's target (lb below CRUMB_F x its lb); the least lb x (1 + its rung) first (a
 	 * crumb that failed its rung gives way to the next nearest, a far one waits). An arrival at a crumb is a new anchor with one gain more: the
 	 * strategy goes on from it, so the compile follows the level's breadcrumb trail one leg at a time, and every plan from
@@ -981,7 +1072,7 @@ function createPlanner(model, facts, o = {}) {
 	// (CRUMB_K crumb plans, the nearest first: a compile's workers run the first plans' legs side by side, so with one the
 	// other worker spent every rung on the long leg itself; box 5, On And On, 60 s, 2 workers: the nearest crumb (a blue
 	// coin off the route, closest 1 tile) took rungs 0-3 while the route's coin waited at rung 2)
-	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
+	const CRUMB_LEGMIN = +process.env.EEAT_CRUMB_LEGMIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
 	const CRUMB_K = process.env.EEAT_CRUMB_K !== undefined ? Math.max(1, +process.env.EEAT_CRUMB_K | 0) : 2;
 	const CRUMB_AFTER = process.env.EEAT_CRUMB_AFTER !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_AFTER | 0) : 1;
 	function crumbPlan(a, plans) {
@@ -989,7 +1080,7 @@ function createPlanner(model, facts, o = {}) {
 		if (!p0 || !p0.steps || !p0.steps.length) return [];
 		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
-		if (!(lb0 >= CRUMB_MIN)) return [];
+		if (!(lb0 >= CRUMB_LEGMIN)) return [];
 		const cls = a.S.key + '|' + a.cls;
 		// (only once that leg has failed CRUMB_AFTER rungs from this anchor's class: a first leg the executor finds at its
 		// first rung (the compiled levels' direct legs) keeps both workers; EEAT_CRUMB_AFTER=0: at once)
