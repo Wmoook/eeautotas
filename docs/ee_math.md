@@ -1668,3 +1668,11 @@ The shared gate (block-4 list vs b3_w3.json, box 3, 60 s, W3, on the fields lane
 988 direct calls, 168 with a leg (17.0%; the wire's gate 14.9%), 472 chains, 53 with a leg (11.2%; 7.7%), 496 math legs
 (315), 106 proven (events 58, exact 44, plain 4; 79). (On 2cb8357 the same change failed the gate once on Tree
 Decorating and Starlight; both reran fine, 1,792 / 1,426 ticks and 27 / 24 triggers: the spread.)
+The chain harness again, four arms side by side on the pushed tree (box 3 at load ~80, legs done of the 18 routes /
+compiled end to end / compiled ticks over the known route, median): 2cb8357 36 / 3 / 1.179 (MIHB's Dream 1 / 46);
+this with `EEAT_MATH=0` 85 / 4 / 1.267; this with `EEAT_MATH_ALTS=0` 86 / 4 / 1.292; this 83 / 4 / 1.271 (MIHB's Dream
+10,132 vs 10,233 off vs 10,298 no alts; Bygone Tutorial 2,159 vs 2,129 vs 2,208; Desolate Caverns 2,039 vs 1,834 vs
+1,977): the clock gives the math tier the search tiers' success back; the arrivals make its routes a little shorter than
+the cheapest leg's alone; the ticks against the math-off arm are a draw (Desolate Caverns: the class left, below).
+Left: the diverse arrivals come from the plain tier only (the field / coupled / chain answers are one end state); 7 of
+the 18 routes fail their first leg in every arm (179-1,845 route ticks: the skeleton's, not a direct leg's).
