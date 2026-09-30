@@ -64,13 +64,13 @@ function createPlanner(model, facts, o = {}) {
 	 * overlapping): every place the event can happen, so the next leg's bound stays sound
 	 */
 	const graceMemo = new Map();
-	const posOf = (X, S1, S2) => {
+	/** deferral(tiles, S1, S2) -> {grace, lbTiles, nShut} | null: the grace gates next to the tiles and the deferral region
+	 *  of the change S1 -> S2 made there (null: it shuts no gate) */
+	function deferral(tiles, S1, S2) {
+		const X = { tiles };
 		let rec = null;
-		if (S1 && S2 && S1.dkey !== S2.dkey) {
-			const gk = X.id + '|' + S1.dkey + '|' + S2.dkey;
-			rec = graceMemo.get(gk);
-			if (rec === undefined) {
-				rec = null;
+		{
+			{
 				const N = model.N;
 				// the gate tiles the touch shuts (anywhere) and the tiles within one of them
 				let near = null, nShut = 0;
@@ -135,6 +135,17 @@ function createPlanner(model, facts, o = {}) {
 					for (let i = 0; i < N; i++) if (out[i]) lbTiles.push(i);
 					rec = { grace, lbTiles: lbTiles.length > X.tiles.length ? lbTiles : null, nShut };
 				}
+			}
+		}
+		return rec;
+	}
+	const posOf = (X, S1, S2) => {
+		let rec = null;
+		if (S1 && S2 && S1.dkey !== S2.dkey) {
+			const gk = X.id + '|' + S1.dkey + '|' + S2.dkey;
+			rec = graceMemo.get(gk);
+			if (rec === undefined) {
+				rec = deferral(X.tiles, S1, S2);
 				if (graceMemo.size > 100000) graceMemo.clear();
 				graceMemo.set(gk, rec);
 			}
@@ -222,17 +233,27 @@ function createPlanner(model, facts, o = {}) {
 	function anchorOf(anchor) {
 		anchor = anchor || {};
 		const arr = anchor.arrival || null;
-		let S = anchor.S || null, sim = null;
-		if (!S || (arr && arr.masks && !anchor._sim)) {
-			if (arr && arr.masks) { sim = T.playTo(L, arr.masks, { allowDeath: true }).sim; S = S || model.stateOf(sim); }
-			else S = S || model.S0;
-		}
-		if (!sim) { sim = new E.EESim(L); sim.reset(); if (arr && arr.masks) sim = T.playTo(L, arr.masks, { allowDeath: true }).sim; }
+		// (the anchor's real state: its snapshot when it restores to the arrival's own state hash (the same level object),
+		// else a replay of its masks)
+		let sim = null;
+		if (arr && arr.masks && arr.masks.length) {
+			if (arr.snap) { try { const s1 = new E.EESim(L); s1.reset(); s1.restore(arr.snap); if (arr.hash === undefined || s1.stateHash() === arr.hash) sim = s1; } catch (e) { sim = null; } }
+			if (!sim) sim = T.playTo(L, arr.masks, { allowDeath: true }).sim;
+		} else { sim = new E.EESim(L); sim.reset(); }
+		let S = anchor.S || model.stateOf(sim);
 		const masks = arr && arr.masks ? arr.masks : new Uint8Array(0);
 		let idle = true;
 		for (let i = 0; i < masks.length; i++) if (masks[i] & 31) { idle = false; break; }
 		const tile = arr && arr.tile !== undefined ? arr.tile : model.startTile;
-		const pos = idle ? idlePos : { id: 'a' + tile, tiles: [tile], extra: 0 };
+		let pos = idle ? idlePos : { id: 'a' + tile, tiles: [tile], extra: 0 };
+		// (a change the engine still holds in a queue: the state it will be, the gates it shuts passable until then and
+		// the deferral region as the lb's sources: the anchor's lb stays sound right after a deferred press)
+		const Sp = sim ? model.pendingOf(sim, S) : null;
+		if (Sp && Sp.key !== S.key) {
+			const rec = deferral(pos.tiles, S, Sp);
+			pos = { id: pos.id + 'p' + Sp.dkey.length + ':' + (rec && rec.lbTiles ? rec.lbTiles.length : 0), tiles: pos.tiles, extra: 0, grace: rec ? rec.grace : null, lbTiles: rec ? rec.lbTiles : null };
+			S = Sp;
+		}
 		const cls = arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1';
 		const base = { coins: S.feats.coins !== undefined ? S.feats.coins : 0, bcoins: S.feats.bcoins !== undefined ? S.feats.bcoins : 0 };
 		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr };

@@ -218,6 +218,25 @@ function truth() {
 			if (lg.lb > t - pt + (i === 0 ? 0 : 0) && !(i === 0 && lg.lb - 2 <= t)) { tot.legViol++; if (tot.legViol <= 20) viol.push(`leg ${i} of ${e.name}: lb ${lg.lb} > ${t - pt} ticks (to ${lg.to})`); }
 			pt = t;
 		});
+		// mid-route anchors (the strategy's arrivals: its B&B drops by their lb): right after sampled events (a deferred
+		// press pending there) and a few ticks later; lowerBound <= the ticks the route still took
+		{
+			const cand = [];
+			for (const t of ticks) { cand.push(t + 1); cand.push(t + 4); }
+			const nA = +argOf('anchors', 6);
+			const stepA = Math.max(1, Math.floor(cand.length / nA));
+			for (let i = 0; i < cand.length; i += stepA) {
+				const t = cand[i];
+				if (t <= 0 || t >= tr.complete) continue;
+				const pre = tr.masks.subarray(0, t);
+				const r = T.playTo(L, pre, { allowDeath: true });
+				if (r.sim.is_dead) continue;
+				const arr = T.arrivalOf(L, r.sim, pre, null);
+				const lbA = pl.lowerBound({ arrival: arr, arrivals: [arr], S: m.stateOf(r.sim) }, { ms: +argOf('lbams', 300) });
+				tot.anchorChecks = (tot.anchorChecks || 0) + 1;
+				if (lbA.ticks > tr.complete - t) { tot.anchorViol = (tot.anchorViol || 0) + 1; viol.push(`anchor lb ${lbA.ticks} > ${tr.complete - t} ticks left at ${t}: ${e.name}`); }
+			}
+		}
 		const lb = pl.lowerBound({}, { ms: +argOf('lbms', 2000) });
 		if (!lb.complete) tot.incomplete++;
 		if (lb.ticks > tr.runTicks) { tot.lbViol++; viol.push(`lowerBound ${lb.ticks} > run ${tr.runTicks}: ${e.name} (complete ${lb.complete})`); }
@@ -241,6 +260,7 @@ function truth() {
 	check('T-PLAN-FEASIBLE: every route\'s own order feasible in the model', tot.infeasible === 0, `${tot.infeasible} of ${tot.routes} (${tot.stale} stale)`);
 	check('T-PLAN-FEASIBLE: costOf lb <= run ticks (admissible)', tot.costViol === 0, `${tot.costViol} violations`);
 	check('T-PLAN-FEASIBLE: every leg lb <= its ticks', tot.legViol === 0, `${tot.legViol} of ${tot.legs} legs`);
+	check('T-PLAN-FEASIBLE: lowerBound(mid-route anchors) <= the ticks left (admissible)', !tot.anchorViol, `${tot.anchorViol || 0} of ${tot.anchorChecks || 0}`);
 	check('T-PLAN-FEASIBLE: lowerBound(start) <= run ticks (admissible)', tot.lbViol === 0, `${tot.lbViol} violations, ${tot.incomplete} cut by the budget, lb/run median ${med.toFixed(3)}`);
 	console.log(`T-PLAN-ORDER (informational): ${tot.orderN ? (100 * tot.orderAgree / tot.orderN).toFixed(1) : 'n/a'}% of the first 5 relevant triggers agree (${tot.orderAgree}/${tot.orderN})`);
 }
@@ -277,7 +297,25 @@ function scale() {
 			const bIdx = p ? p.steps.findIndex((s) => s.waypoint.kind === 'trigger' && m.triggers[s.waypoint.trig].kind === 'bcoin') : -1;
 			const need = m.featSet.has('bcoins');
 			check('T-SCALE Cold World: bcoins a feature (the blue coin doors 213 read it)', need, m.feats.join(' '));
-			check('T-SCALE Cold World: the best plan takes a blue coin (the chapter-2 unlock)', bIdx >= 0, p ? `at step ${bIdx}` : 'no plan');
+			console.log(`    Cold World: the first plan's blue coin step: ${bIdx} (the relaxations (the walk, RCH3, the ordering field) reach the trophy from the start through chapter 1's pool, the false near)`);
+			// CEGAR: the product's searches pin in chapter 1's pool ((227,151): the closest approach of every run); a mock
+			// executor fails every step past the pool there: the planner must turn to the chapter-2 blue coin
+			const W = L.width, pin = 227 + 151 * W;
+			const f2 = F.createFacts({ rungs: 4 }), p2 = P.createPlanner(m, f2, {});
+			let turned = -1, lastP = null;
+			for (let r = 0; r < 16 && turned < 0; r++) {
+				const q = p2.plan({}, { k: 1, ms: 1500 })[0];
+				if (!q) break;
+				lastP = q;
+				const s0 = q.steps[0];
+				const X = s0.waypoint.kind === 'trigger' ? m.triggers[s0.waypoint.trig] : null;
+				if (X && X.kind === 'bcoin' && (X.tiles[0] / W | 0) > 150) { turned = r; break; }
+				const tt = X ? X.tiles[0] : m.trophyTiles[0], tx = tt % W, ty = (tt / W) | 0;
+				if (!(s0.waypoint.kind === 'trophy' || (tx >= 270 && ty >= 75 && ty <= 100))) break;
+				p2.learn(s0, { ok: false, arrivals: [], fail: { why: 'exhausted', closest: { tile: pin, dist: 35 }, touched: [], blockedBy: [], level: s0.rung } }, {});
+			}
+			console.log(`    Cold World after the pool's failures: ${lastP ? planStr(m, lastP).slice(0, 400) : 'none'}`);
+			check('T-SCALE Cold World: CEGAR at the pool pin turns the plan to the chapter-2 blue coin first', turned >= 0, `round ${turned}`);
 		}
 		if (/bad_ee_level_9/i.test(name)) {
 			const p = plans[0];

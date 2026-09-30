@@ -228,17 +228,18 @@ function compileModel(L, o = {}) {
 		}
 	}
 	// ---------------------------------------------------------------- states
-	const featIsCount = (f) => f === 'coins' || f === 'bcoins' || f === 'deaths';
+	// (the feature values as an object of one fixed shape: a constructor made for this level's features)
+	// eslint-disable-next-line no-new-func
+	const FeatObj = new Function('v', feats.map((f, n) => `this[${JSON.stringify(f)}] = v[${n}];`).join('\n'));
+	let initV = null;
 	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');
 		const key = dkey + (taken ? '|' + hashBytes(taken) : '') + (btaken ? '|' + hashBytes(btaken) : '') + (canDie ? '|c' + cp : '');
 		let gain = 0;
-		for (let n = 0; n < feats.length; n++) if (vals[n] !== init[feats[n]]) gain++;
+		if (initV) for (let n = 0; n < vals.length; n++) if (vals[n] !== initV[n]) gain++;
 		if (taken) for (let k = 0; k < taken.length; k++) gain += taken[k];
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
-		const fv = {};
-		feats.forEach((f, n) => { fv[f] = vals[n]; });
-		return { key, dkey, feats: fv, vals, taken, btaken, gain, cp };
+		return { key, dkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
 	}
 	function stateOf(sim) {
 		const vals = feats.map((f) => {
@@ -254,6 +255,7 @@ function compileModel(L, o = {}) {
 	}
 	const init = {};
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
+	initV = feats.map((f) => init[f]);
 	const S0 = stateOf(sim0);
 	// ---------------------------------------------------------------- the abstract touch
 	/**
@@ -549,11 +551,33 @@ function compileModel(L, o = {}) {
 		}
 		return { cost, proof: cost === -1 };
 	}
+	/** pendingOf(sim, S) -> the state after the changes the engine still holds in its queues (a purple press waiting
+	 *  while the ball overlaps the door it shuts, an orange press / crown / key in the frame queues, a team change
+	 *  retried), null when none */
+	function pendingOf(sim, S) {
+		const tq = sim._tileQueue || [], sq = sim._stateQueue || [], kq = sim._keysQueue || [];
+		const teamP = sim._team_tx !== undefined && sim._team_tx !== -1;
+		if (!tq.length && !sq.length && !kq.length && !teamP) return null;
+		const vals = S.vals.slice();
+		const setF = (fk, v) => { const n = fIdx.get(fk); if (n !== undefined) vals[n] = v; };
+		for (let i = 0; i + 1 < tq.length; i += 2) {
+			const sid = tq[i], en = tq[i + 1] ? 1 : 0;
+			if (sid === 1000) { for (const fk of feats) if (fk.startsWith('psw:')) setF(fk, en); } else setF('psw:' + sid, en);
+		}
+		for (let i = 0; i + 2 < sq.length; i += 3) {
+			const kind = sq[i], a = sq[i + 1], b = sq[i + 2];
+			if (kind === 0) setF('crown', a ? 1 : 0);
+			else if (kind === 2) { if (a === 1000) { for (const fk of feats) if (fk.startsWith('osw:')) setF(fk, b ? 1 : 0); } else setF('osw:' + a, b ? 1 : 0); }
+		}
+		for (let i = 0; i + 1 < kq.length; i += 2) setF('key' + kq[i], kq[i + 1] ? 1 : 0);
+		if (teamP && typeof sim._lookupAt === 'function') setF('team', sim._lookupAt(sim._team_tx, sim._team_ty));
+		return mkState(vals, S.taken, S.btaken, S.cp);
+	}
 	const model = {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
 		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, deathT, timed, coinTiles, bcoinTiles,
-		setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
+		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),
 	};
