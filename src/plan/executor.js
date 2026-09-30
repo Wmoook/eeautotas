@@ -153,6 +153,15 @@ const WALLS_MAX = 60000;
 const WALL_POPS = +process.env.EEAT_WALL_POPS > 0 ? +process.env.EEAT_WALL_POPS : 100000;
 const WALL_PLATEAU = +process.env.EEAT_WALL_PLATEAU > 0 ? +process.env.EEAT_WALL_PLATEAU : 0.5;
 const WALL_NEAR = 3;
+// (n5 lane 4, NEAR: the plateau at the goal's door walls too. The plateau rule left out a nearest within WALL_NEAR tiles,
+// the last mile being the exact landing's, but that tier is opt-in (EEAT_NEAR) and its own measure found those near
+// misses FALSE nears of the relaxation (lane 4 block 2): a trophy of several behind a one-way platform the field passes
+// (Ice Cream Expedition: every trophy call of 300 s, 26 of them from 8 anchors, ended at (5,175) '2 tiles' from the
+// sealed trophy (5,177) under the platform (5,176), the level's other trophies never ordered), a coin under a boost. With
+// NEAR_WALLS the plateau there is a counterexample like any other: the tiles its field ranks below the nearest reached
+// one, next to it, never entered (the platform) are walled for the ordering fields, and the field orders the other
+// goal tiles / ways; walls that cut every start off are dropped as before. Ordering only. EEAT_NEAR_WALLS=0: off.
+const NEAR_WALLS = process.env.EEAT_NEAR_WALLS !== '0';
 const PORTAL_IDS = new Set([242, 381, 374]);
 
 // ---- THE MATH TIER (the MATH program's Wire stage, 2026-09-30): the leg EVALUATED by the mathematics of docs/ee_math.md
@@ -904,11 +913,12 @@ function makeCore(L, co) {
 				}
 			}
 			// (stuck: the region exhausted, or a plateau: no state nearer by the field in the last WALL_PLATEAU of its pops,
-			// at least WALL_POPS of them, the nearest past WALL_NEAR tiles (the last mile is the exact landing's))
+			// at least WALL_POPS of them, the nearest past WALL_NEAR tiles (the last mile is the exact landing's); with
+			// NEAR_WALLS a plateau at the goal's door too: see its constant)
 			{
 				const pops = r.passes && r.passes[0] ? r.passes[0].pops : 0;
 				const cp = r.closest && r.closest.pop >= 0 ? r.closest.pop : -1;
-				const plateau = r.status === 'time' && cp >= 0 && pops >= WALL_POPS && cp < (1 - WALL_PLATEAU) * pops && r.closest.dist > WALL_NEAR;
+				const plateau = r.status === 'time' && cp >= 0 && pops >= WALL_POPS && cp < (1 - WALL_PLATEAU) * pops && (NEAR_WALLS || r.closest.dist > WALL_NEAR);
 				bestExhausted = mode === 'best' && (r.status === 'exhausted' || plateau);
 				if (mode === 'best' && r.status === 'exhausted') closedAll = true;
 			}
