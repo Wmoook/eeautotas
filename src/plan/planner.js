@@ -1091,7 +1091,8 @@ function createPlanner(model, facts, o = {}) {
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
 		let cut = null;
-		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		// (EEAT_FIELD_MEMO=1 (executor.js): a closest of unknown distance (the call had no goal field) cuts nothing)
+		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
