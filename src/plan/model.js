@@ -18,9 +18,14 @@
 //     piece of Chebyshev length <= 16 changes the 8-way tile distance by at most 1; a portal hop's entry step is free);
 //   pairLb(S, pos, tiles, mode) / pairSteps(...): the admissible ticks and the walk steps from a position to a tile set,
 //     with the death shortcut (a killer, 54 dead ticks, any respawn tile) where the level can kill.
-// modes: 'lb' (the lower bound's relaxation: coin gates shut only where the anchor's REAL count already shuts them, keys
-// sticky) and 'est' (the model's own counts). The bound is sound between two consecutive relevant events of any real
-// route: the relevant features do not change there, so every gate the model shuts is shut for the real ball.
+// modes: 'lb' (the lower bound's relaxation: killers passable, coin gates shut only where the anchor's REAL count already
+// shuts them, keys sticky), 'est' (the model's own counts, killers walls unless protected, the planner's CEGAR walls:
+// setEstWalls) and 'walk' (the contract's regions: the gates exact, killers passable). The bound is sound between two
+// consecutive relevant events of any real route: the relevant features do not change there, so every gate the model
+// shuts is shut for the real ball (a change the engine defers while the ball overlaps the gate it shuts: the planner's
+// deferral regions). Also: pendingOf(sim, S) (the state after the changes still in the engine's queues), respawnOf(S,
+// mode) (the checkpoint the state holds, else the spawns; lb without tracked checkpoints: every respawn tile), the
+// checkpoint in S wherever a death can move the ball (tracked, i.e. its touches are edges, up to 255 checkpoints).
 const E = require('../eesim.js');
 const RF = require('../reach.js');
 const ST = require('../steer.js');
@@ -228,17 +233,28 @@ function compileModel(L, o = {}) {
 		}
 	}
 	// ---------------------------------------------------------------- states
-	const featIsCount = (f) => f === 'coins' || f === 'bcoins' || f === 'deaths';
+	// (the feature values as an object of one fixed shape: a constructor made for this level's features)
+	// eslint-disable-next-line no-new-func
+	const FeatObj = new Function('v', feats.map((f, n) => `this[${JSON.stringify(f)}] = v[${n}];`).join('\n'));
+	let initV = null;
+	// (the pass key: the feature values with each count as the number of its gates' thresholds it meets: every gate's
+	// state, so the geometry's memo (the pass masks, the walks, the level copies) is shared between counts of one class)
+	const countTh = feats.map((fk) => {
+		if (fk !== 'coins' && fk !== 'bcoins' && fk !== 'deaths') return null;
+		const set = new Set();
+		for (const g of gates) if (g.feat === fk) set.add(g.param);
+		return [...set].sort((x, y) => x - y);
+	});
 	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');
+		let pkey = dkey;
+		for (let n = 0; n < countTh.length; n++) if (countTh[n]) { pkey = vals.map((v, i) => { const th = countTh[i]; if (!th) return v; let c = 0; for (const t of th) if (v >= t) c++; return 'c' + c; }).join(','); break; }
 		const key = dkey + (taken ? '|' + hashBytes(taken) : '') + (btaken ? '|' + hashBytes(btaken) : '') + (canDie ? '|c' + cp : '');
 		let gain = 0;
-		for (let n = 0; n < feats.length; n++) if (vals[n] !== init[feats[n]]) gain++;
+		if (initV) for (let n = 0; n < vals.length; n++) if (vals[n] !== initV[n]) gain++;
 		if (taken) for (let k = 0; k < taken.length; k++) gain += taken[k];
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
-		const fv = {};
-		feats.forEach((f, n) => { fv[f] = vals[n]; });
-		return { key, dkey, feats: fv, vals, taken, btaken, gain, cp };
+		return { key, dkey, pkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
 	}
 	function stateOf(sim) {
 		const vals = feats.map((f) => {
@@ -254,6 +270,7 @@ function compileModel(L, o = {}) {
 	}
 	const init = {};
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
+	initV = feats.map((f) => init[f]);
 	const S0 = stateOf(sim0);
 	// ---------------------------------------------------------------- the abstract touch
 	/**
@@ -329,11 +346,11 @@ function compileModel(L, o = {}) {
 	function setEstWalls(mask) { estWalls = mask; estWallVer++; }
 	/** the key of the gate pattern under S (the memo key of the geometry) */
 	function doorKey(S, mode, base) {
-		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.dkey;
-		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.dkey;
-		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins) return 'e:' + S.dkey;
+		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.pkey;
+		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey;
+		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins) return 'e:' + S.pkey;
 		// (lb: killers passable; the coin gates' part is the base's: the model count opens doors only)
-		return 'l:' + S.dkey + '|' + (base ? `${base.coins},${base.bcoins}` : '');
+		return 'l:' + S.pkey + '|' + (base ? `${base.coins},${base.bcoins}` : '');
 	}
 	/** a Uint8Array(N) passable mask under S */
 	const passMemo = new Map();
@@ -358,7 +375,7 @@ function compileModel(L, o = {}) {
 	 *  death / zombie doors and the doors / gates of an active (sticky) key keep their blocks (open in RCH3) */
 	const levelMemo = new Map();
 	function levelOf(S) {
-		const key = S.dkey;
+		const key = S.pkey;
 		const had = levelMemo.get(key);
 		if (had) return had;
 		const nfg = Int32Array.from(fg);
@@ -425,6 +442,7 @@ function compileModel(L, o = {}) {
 		return dist;
 	}
 	const distMemo = new Map();
+	const DIST_CAP = Math.max(96, Math.floor(64e6 / (4 * N)));   // (the walks kept: ~64 MB of fields)
 	let distBuilds = 0, distMs = 0;
 	/** dist(S, pos, mode, base) -> the walk steps from pos.tiles under S (memo: 96 fields, LRU) */
 	function dist(S, pos, mode = 'est', base = null) {
@@ -432,10 +450,14 @@ function compileModel(L, o = {}) {
 		const had = distMemo.get(key);
 		if (had) { distMemo.delete(key); distMemo.set(key, had); return had; }
 		const t1 = Date.now();
-		const d = bfs(passMask(S, mode, base), pos.tiles);
+		let msk = passMask(S, mode, base);
+		// (a position's grace gates: shut by the touch that made it, still passable for the ball that overlaps them)
+		if (pos.grace && pos.grace.length) { msk = Uint8Array.from(msk); for (const t of pos.grace) msk[t] = 1; }
+		// (the lb's sources: a position's deferral region, where a deferred change's event can happen)
+		const d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles);
 		distBuilds++; distMs += Date.now() - t1;
 		distMemo.set(key, d);
-		if (distMemo.size > 96) distMemo.delete(distMemo.keys().next().value);
+		if (distMemo.size > DIST_CAP) distMemo.delete(distMemo.keys().next().value);
 		return d;
 	}
 	const respawnPos = { id: 'respawn', tiles: respawn, extra: DEAD_TICKS };
@@ -502,7 +524,7 @@ function compileModel(L, o = {}) {
 	// ---------------------------------------------------------------- regions (the contract's regionOf)
 	const regionMemo = new Map();
 	function regionLabels(S) {
-		const key = S.dkey;
+		const key = S.pkey;
 		const had = regionMemo.get(key);
 		if (had) return had;
 		const m = passMask(S, 'walk', null);
@@ -545,11 +567,33 @@ function compileModel(L, o = {}) {
 		}
 		return { cost, proof: cost === -1 };
 	}
+	/** pendingOf(sim, S) -> the state after the changes the engine still holds in its queues (a purple press waiting
+	 *  while the ball overlaps the door it shuts, an orange press / crown / key in the frame queues, a team change
+	 *  retried), null when none */
+	function pendingOf(sim, S) {
+		const tq = sim._tileQueue || [], sq = sim._stateQueue || [], kq = sim._keysQueue || [];
+		const teamP = sim._team_tx !== undefined && sim._team_tx !== -1;
+		if (!tq.length && !sq.length && !kq.length && !teamP) return null;
+		const vals = S.vals.slice();
+		const setF = (fk, v) => { const n = fIdx.get(fk); if (n !== undefined) vals[n] = v; };
+		for (let i = 0; i + 1 < tq.length; i += 2) {
+			const sid = tq[i], en = tq[i + 1] ? 1 : 0;
+			if (sid === 1000) { for (const fk of feats) if (fk.startsWith('psw:')) setF(fk, en); } else setF('psw:' + sid, en);
+		}
+		for (let i = 0; i + 2 < sq.length; i += 3) {
+			const kind = sq[i], a = sq[i + 1], b = sq[i + 2];
+			if (kind === 0) setF('crown', a ? 1 : 0);
+			else if (kind === 2) { if (a === 1000) { for (const fk of feats) if (fk.startsWith('osw:')) setF(fk, b ? 1 : 0); } else setF('osw:' + a, b ? 1 : 0); }
+		}
+		for (let i = 0; i + 1 < kq.length; i += 2) setF('key' + kq[i], kq[i + 1] ? 1 : 0);
+		if (teamP && typeof sim._lookupAt === 'function') setF('team', sim._lookupAt(sim._team_tx, sim._team_ty));
+		return mkState(vals, S.taken, S.btaken, S.cp);
+	}
 	const model = {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
 		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, deathT, timed, coinTiles, bcoinTiles,
-		setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
+		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),
 	};

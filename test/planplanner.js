@@ -120,6 +120,21 @@ function cegar() {
 	check('T-CEGAR-PROGRESS: every failed learn adds facts and bumps the version', bumps === rounds - (gone >= 0 ? 1 : 0), `${bumps} bumps in ${rounds} rounds`);
 	check('T-CEGAR-PROGRESS: no (edge, nodeClass, rung) triple twice', dup === 0, `${seen.size} triples`);
 	check('T-CEGAR-PROGRESS: the failing edge is gone after at most 4 failures', gone >= 0 && gone <= 4, `gone at round ${gone}, next: ${lastWhy}`);
+	// the strategy's 4 budget rungs (createFacts({rungs: 4})): out after at most 4 failures, no triple twice
+	{
+		const f5 = F.createFacts({ rungs: 4 }), p5 = P.createPlanner(m, f5, {});
+		const seen5 = new Set();
+		let gone5 = -1, dup5 = 0;
+		for (let r = 0; r < 8; r++) {
+			const s = (p5.plan({}, { k: 1 })[0] || { steps: [] }).steps[0];
+			if (!s || s.edge !== 'trig:0') { gone5 = r; break; }
+			const trip = `${s.edge}|${s.nodeClass}|${s.rung}`;
+			if (seen5.has(trip)) dup5++;
+			seen5.add(trip);
+			p5.learn(s, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: s.rung } }, {});
+		}
+		check('T-CEGAR-PROGRESS: with 4 rungs (the strategy\'s) the edge is out after 4 failures, rungs 0-3, no triple twice', gone5 === 4 && dup5 === 0, `gone at ${gone5}`);
+	}
 	// blockedBy: the trophy edge fails next to the key door -> the key first
 	{
 		const L2 = LEVELS.keySwitch(), m2 = M.compileModel(L2), f2 = F.createFacts(), p2 = P.createPlanner(m2, f2, {});
@@ -168,18 +183,28 @@ function truth() {
 		const pl = P.createPlanner(m, null, {});
 		const ev = S.routeEvents(L, tr.masks);
 		// the route's relevant order as trigger ids (the event tile's trigger of that feature, or next to it)
+		// (the ball's tile at every tick: a press queued while the ball overlapped a door it closes, a team change
+		// retried, a key queued fire a tick or more after the touch: the trigger is where the ball was up to 8 ticks before)
+		const tileAt = new Int32Array(tr.masks.length + 2);
+		{ const E = require('../src/eesim.js'), sim = new E.EESim(L), inp = new E.EEInput(); sim.reset(); tileAt[0] = T.tileOf(sim, W, L.height); for (let t = 0; t < tr.masks.length; t++) { E.applyMask(inp, tr.masks[t] & 31); sim.tick(inp); tileAt[t + 1] = T.tileOf(sim, W, L.height); } }
 		const order = [], ticks = [];
 		for (const x of S.orderOf(ev.events, { all: true })) {
 			if (!(m.featSet.has(x.feat) || (x.feat === 'cp' && m.cpTracked)) || (x.feat.startsWith('key') && x.value === 0) || x.feat === 'deaths') continue;
-			let id = -1;
-			const x0 = x.tile % W, y0 = (x.tile / W) | 0;
-			for (let r = 0; r <= 1 && id < 0; r++) for (let dy = -r; dy <= r && id < 0; dy++) for (let dx = -r; dx <= r && id < 0; dx++) {
-				const nx = x0 + dx, ny = y0 + dy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= L.height) continue;
-				const k = m.trigOf[ny * W + nx];
-				if (k >= 0 && m.triggers[k].relevant && (m.triggers[k].feat === x.feat || (m.triggers[k].feat || '').endsWith(':*') || (m.triggers[k].kind === 'reset' && x.feat === 'prot'))) id = k;
+			let id = -1, at = x.tick;
+			for (let back = 0; back <= 8 && id < 0; back++) {
+				const tb = back === 0 ? x.tile : tileAt[Math.max(0, x.tick - back)];
+				const x0 = tb % W, y0 = (tb / W) | 0;
+				for (let r = 0; r <= 1 && id < 0; r++) for (let dy = -r; dy <= r && id < 0; dy++) for (let dx = -r; dx <= r && id < 0; dx++) {
+					const nx = x0 + dx, ny = y0 + dy;
+					if (nx < 0 || ny < 0 || nx >= W || ny >= L.height) continue;
+					const k = m.trigOf[ny * W + nx];
+					// (a reset switch only turns an id off: a press that turned it on is no reset's)
+					const K = k >= 0 ? m.triggers[k] : null;
+					const dirOK = !K || !((K.kind === 'pswR' || K.kind === 'oswR') && x.value === 1);
+					if (K && K.relevant && dirOK && (K.feat === x.feat || (K.feat || '').endsWith(':*') || (K.kind === 'reset' && x.feat === 'prot'))) { id = k; at = Math.max(0, x.tick - back); }
+				}
 			}
-			if (id >= 0) { order.push(id); ticks.push(x.tick); }
+			if (id >= 0) { order.push(id); ticks.push(at); }
 		}
 		tot.routes++;
 		const c = pl.costOf(order, {});
@@ -193,6 +218,25 @@ function truth() {
 			if (lg.lb > t - pt + (i === 0 ? 0 : 0) && !(i === 0 && lg.lb - 2 <= t)) { tot.legViol++; if (tot.legViol <= 20) viol.push(`leg ${i} of ${e.name}: lb ${lg.lb} > ${t - pt} ticks (to ${lg.to})`); }
 			pt = t;
 		});
+		// mid-route anchors (the strategy's arrivals: its B&B drops by their lb): right after sampled events (a deferred
+		// press pending there) and a few ticks later; lowerBound <= the ticks the route still took
+		{
+			const cand = [];
+			for (const t of ticks) { cand.push(t + 1); cand.push(t + 4); }
+			const nA = +argOf('anchors', 6);
+			const stepA = Math.max(1, Math.floor(cand.length / nA));
+			for (let i = 0; i < cand.length; i += stepA) {
+				const t = cand[i];
+				if (t <= 0 || t >= tr.complete) continue;
+				const pre = tr.masks.subarray(0, t);
+				const r = T.playTo(L, pre, { allowDeath: true });
+				if (r.sim.is_dead) continue;
+				const arr = T.arrivalOf(L, r.sim, pre, null);
+				const lbA = pl.lowerBound({ arrival: arr, arrivals: [arr], S: m.stateOf(r.sim) }, { ms: +argOf('lbams', 300) });
+				tot.anchorChecks = (tot.anchorChecks || 0) + 1;
+				if (lbA.ticks > tr.complete - t) { tot.anchorViol = (tot.anchorViol || 0) + 1; viol.push(`anchor lb ${lbA.ticks} > ${tr.complete - t} ticks left at ${t}: ${e.name}`); }
+			}
+		}
 		const lb = pl.lowerBound({}, { ms: +argOf('lbms', 2000) });
 		if (!lb.complete) tot.incomplete++;
 		if (lb.ticks > tr.runTicks) { tot.lbViol++; viol.push(`lowerBound ${lb.ticks} > run ${tr.runTicks}: ${e.name} (complete ${lb.complete})`); }
@@ -212,10 +256,13 @@ function truth() {
 	for (const v of viol.slice(0, 60)) console.log('  ' + v);
 	ratios.sort((a, b) => a - b);
 	const med = ratios.length ? ratios[ratios.length >> 1] : NaN;
+	// (for the shards' sum: the ratios and the counts as one JSON line)
+	console.log(`  JSON ${JSON.stringify({ ratios, tot })}`);
 	console.log(`  totals ${JSON.stringify(tot)} lb/run median ${med.toFixed(3)} (p10 ${(ratios[Math.floor(ratios.length * 0.1)] || 0).toFixed(3)}, p90 ${(ratios[Math.floor(ratios.length * 0.9)] || 0).toFixed(3)})`);
 	check('T-PLAN-FEASIBLE: every route\'s own order feasible in the model', tot.infeasible === 0, `${tot.infeasible} of ${tot.routes} (${tot.stale} stale)`);
 	check('T-PLAN-FEASIBLE: costOf lb <= run ticks (admissible)', tot.costViol === 0, `${tot.costViol} violations`);
 	check('T-PLAN-FEASIBLE: every leg lb <= its ticks', tot.legViol === 0, `${tot.legViol} of ${tot.legs} legs`);
+	check('T-PLAN-FEASIBLE: lowerBound(mid-route anchors) <= the ticks left (admissible)', !tot.anchorViol, `${tot.anchorViol || 0} of ${tot.anchorChecks || 0}`);
 	check('T-PLAN-FEASIBLE: lowerBound(start) <= run ticks (admissible)', tot.lbViol === 0, `${tot.lbViol} violations, ${tot.incomplete} cut by the budget, lb/run median ${med.toFixed(3)}`);
 	console.log(`T-PLAN-ORDER (informational): ${tot.orderN ? (100 * tot.orderAgree / tot.orderN).toFixed(1) : 'n/a'}% of the first 5 relevant triggers agree (${tot.orderAgree}/${tot.orderN})`);
 }
@@ -252,7 +299,25 @@ function scale() {
 			const bIdx = p ? p.steps.findIndex((s) => s.waypoint.kind === 'trigger' && m.triggers[s.waypoint.trig].kind === 'bcoin') : -1;
 			const need = m.featSet.has('bcoins');
 			check('T-SCALE Cold World: bcoins a feature (the blue coin doors 213 read it)', need, m.feats.join(' '));
-			check('T-SCALE Cold World: the best plan takes a blue coin (the chapter-2 unlock)', bIdx >= 0, p ? `at step ${bIdx}` : 'no plan');
+			console.log(`    Cold World: the first plan's blue coin step: ${bIdx} (the relaxations (the walk, RCH3, the ordering field) reach the trophy from the start through chapter 1's pool, the false near)`);
+			// CEGAR: the product's searches pin in chapter 1's pool ((227,151): the closest approach of every run); a mock
+			// executor fails every step past the pool there: the planner must turn to the chapter-2 blue coin
+			const W = L.width, pin = 227 + 151 * W;
+			const f2 = F.createFacts({ rungs: 4 }), p2 = P.createPlanner(m, f2, {});
+			let turned = -1, lastP = null;
+			for (let r = 0; r < 16 && turned < 0; r++) {
+				const q = p2.plan({}, { k: 1, ms: 1500 })[0];
+				if (!q) break;
+				lastP = q;
+				const s0 = q.steps[0];
+				const X = s0.waypoint.kind === 'trigger' ? m.triggers[s0.waypoint.trig] : null;
+				if (X && X.kind === 'bcoin' && (X.tiles[0] / W | 0) > 150) { turned = r; break; }
+				const tt = X ? X.tiles[0] : m.trophyTiles[0], tx = tt % W, ty = (tt / W) | 0;
+				if (!(s0.waypoint.kind === 'trophy' || (tx >= 270 && ty >= 75 && ty <= 100))) break;
+				p2.learn(s0, { ok: false, arrivals: [], fail: { why: 'exhausted', closest: { tile: pin, dist: 35 }, touched: [], blockedBy: [], level: s0.rung } }, {});
+			}
+			console.log(`    Cold World after the pool's failures: ${lastP ? planStr(m, lastP).slice(0, 400) : 'none'}`);
+			check('T-SCALE Cold World: CEGAR at the pool pin turns the plan to the chapter-2 blue coin first', turned >= 0, `round ${turned}`);
 		}
 		if (/bad_ee_level_9/i.test(name)) {
 			const p = plans[0];
