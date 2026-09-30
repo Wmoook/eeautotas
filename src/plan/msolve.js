@@ -696,6 +696,8 @@ function createSolver(L, opts = {}) {
 		const budget = o.coupledTicks || 2e6;
 		const phases = ordered && o.coupledJump !== false ? [0, 1] : [0];
 		for (const ph of phases) {
+			// (phase 1 only for a leg phase 0 left unsolved: its extra holds are the time a solved leg does not need)
+			if (ph === 1 && best) break;
 			for (const [p0, m0] of pre) {
 				if (stats.ticks > budget) break;
 				const lim = best ? best.T - 1 : Tmax - 1;
