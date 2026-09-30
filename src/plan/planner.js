@@ -420,13 +420,14 @@ function createPlanner(model, facts, o = {}) {
 		let bestPartial = root;
 		// (the partial plan's end: the fewest landmarks left, then the most gain, then the least f)
 		const better = (x, y) => { const hx = hLM(x.S), hy = hLM(y.S); return hx < hy || (hx === hy && (x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f))); };
-		let rootEdges = 0;
+		let rootEdges = 0, bestRootChild = null;
 		while (open.size) {
 			const n = open.pop();
 			if (n.goal) { found = n; break; }
 			const k = n.S.key + '#' + n.pos.id;
 			if (best.get(k) < n.g) continue;
-			if (expanded >= maxExpand || Date.now() - t0 > ms) break;
+			// (the root is always expanded: a plan of one step at least, whatever the budget)
+			if (expanded > 0 && (expanded >= maxExpand || Date.now() - t0 > ms)) break;
 			expanded++;
 			if (better(n, bestPartial)) bestPartial = n;
 			const isRoot = n === root;
@@ -446,10 +447,14 @@ function createPlanner(model, facts, o = {}) {
 				const had = best.get(k2);
 				if (had !== undefined && had <= g2) continue;
 				best.set(k2, g2);
-				open.push({ S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false });
+				const child = { S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false };
+				open.push(child);
+				if (isRoot && (!bestRootChild || child.f < bestRootChild.f)) bestRootChild = child;
 			}
 		}
 		ST.expands += expanded;
+		// (the budget out before any child was expanded: the root's best child, a one-step partial plan)
+		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
 		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };
 	}
 	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
@@ -553,6 +558,7 @@ function createPlanner(model, facts, o = {}) {
 	 * plan(anchor, {k, depth, epoch, ms, maxExpand}) -> Plan[] (with .why when empty: 'exhausted' | 'proof')
 	 */
 	function plan(anchor, po = {}) {
+		landmarks();   // (once, outside the budget)
 		const t0 = Date.now();
 		ST.plans++;
 		syncWalls();
@@ -565,8 +571,8 @@ function createPlanner(model, facts, o = {}) {
 		const deadline = t0 + so.ms;
 		for (let r = 0; r < k; r++) {
 			let res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
-			for (let v = 0; v < 6 && res.found && Date.now() < deadline + so.ms; v++) {
-				if (!verifyPath(a, res.found, deadline + so.ms)) break;
+			for (let v = 0; v < 6 && res.found && Date.now() < deadline + so.ms / 2; v++) {
+				if (!verifyPath(a, res.found, deadline + so.ms / 2)) break;
 				res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
 			}
 			if (rootEdges < 0) rootEdges = res.rootEdges;
