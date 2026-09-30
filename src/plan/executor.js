@@ -94,7 +94,7 @@ function makeCore(L, co) {
 	function fieldNow(goal, allowDeath) {
 		const Lc = T.levelNow(L, sim);
 		const t0 = Date.now();
-		const f = T.goalField(Lc, goal.tiles, { deaths: allowDeath });
+		const f = T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath });
 		const dt = Date.now() - t0;
 		if (dt > 2) { fieldMs.n++; fieldMs.perTile = Math.max(fieldMs.perTile, dt / N); }
 		return f;
@@ -219,7 +219,7 @@ function makeCore(L, co) {
 			tiers.push({ tier: 'exact', ms: Date.now() - t2, status: r.status, lb: r.lb, runs: r.runs });
 			if (r.status === 'found') found = { cands: r.goals, tool: 'exact', proven: true, lbAbs: r.depth };
 			else {
-				if (r.exhausted) exactProof = true;
+				if (r.exhausted && !goal.fieldTiles) exactProof = true;   // (a skeleton sub-leg's bound is its waypoint's: no proof)
 				if (track.layer >= 0 && r.layers) { const p = X.pathOfKept(r.layers, track.layer, track.idx, snaps, r.t0); if (p) noteClosest(track.dist, p.start, p.tail); }
 				if (r.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
 			}
@@ -446,10 +446,10 @@ function makeCore(L, co) {
 	/** the all-open goal field (the level itself: every door a door, open), when it is built already or fits the time */
 	const plainBuilt = new Set();
 	function plainField(goal, allowDeath, dl) {
-		const key = `${Array.from(goal.tiles).join(',')}|${allowDeath ? 1 : 0}`;
+		const key = `${Array.from(T.fieldTilesOf(goal)).join(',')}|${allowDeath ? 1 : 0}`;
 		if (!plainBuilt.has(key) && !fieldFits(dl - Date.now())) return null;
 		const t0 = Date.now();
-		const f = T.goalField(L, goal.tiles, { deaths: !!allowDeath });
+		const f = T.goalField(L, T.fieldTilesOf(goal), { deaths: !!allowDeath });
 		const dt = Date.now() - t0;
 		if (dt > 2) { fieldMs.n++; fieldMs.perTile = Math.max(fieldMs.perTile, dt / N); }
 		plainBuilt.add(key);
@@ -604,7 +604,8 @@ function fingerprint(L) {
 // ================================================================ the main thread's executor
 /** the Waypoint as plain data (it crosses threads) */
 const wpData = (wp) => ({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
-	label: wp.label || '', allowDeath: !!wp.allowDeath, beforeTick: wp.beforeTick >= 0 ? wp.beforeTick : -1 });
+	label: wp.label || '', allowDeath: !!wp.allowDeath, beforeTick: wp.beforeTick >= 0 ? wp.beforeTick : -1,
+	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch });
 
 async function createExecutor(L, opts) {
 	opts = opts || {};
@@ -688,7 +689,134 @@ async function createExecutor(L, opts) {
 		return new Promise((resolve) => { queue.push({ msg, deadline, stopFlag, resolve }); pump(); });
 	}
 
+	// ---- THE SKELETON (lane 3, COMPILE-ALL block 1): a far waypoint (the goal field's cost at the starts past SKEL_MIN
+	// tiles) is reached through region sub-waypoints, the goal field's sub-level sets {t : the least cost of any state
+	// centred on t <= c} for c = c0 - SKEL_STEP, c0 - 2 SKEL_STEP, ...: every way from the starts to the goal enters each
+	// of them (the field's per-tile least cost changes by at most a step's move between neighbours: a sub-level set is a
+	// cut of the level for the physics the field models), so a leg of ~SKEL_STEP tiles at a time, each started from the
+	// last one's real (replayed) arrivals, k diverse; the arrivals of the deepest level reached are kept per (start,
+	// waypoint) and the next call for the same step (the next rung) goes on from there instead of from scratch. Ordering
+	// of the search only: every arrival is the engine's own replay, the final ones at the waypoint verified as before.
+	// EEAT_SKEL=0: off (the direct leg as before); EEAT_SKEL_STEP / EEAT_SKEL_MIN (tiles).
+	const SKEL_ON = process.env.EEAT_SKEL !== '0';
+	const SKEL_STEP = +process.env.EEAT_SKEL_STEP > 0 ? +process.env.EEAT_SKEL_STEP : 12;
+	const SKEL_MIN = +process.env.EEAT_SKEL_MIN > 0 ? +process.env.EEAT_SKEL_MIN : 30;
+	const skelMemo = new Map();   // key (goal, first start) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
+	const tileMinMemo = new WeakMap();
+	/** per tile the least cost (fifths) of any ball state centred on it by the goal field f (walk mode: its walk); CUT none */
+	function tileMin(f) {
+		let m = tileMinMemo.get(f);
+		if (m) return m;
+		const N = f.W * f.H, CUT = RF.CUT;
+		m = new Uint32Array(N).fill(CUT);
+		if (f.mode === 'walk' || !f.costR) { for (let t = 0; t < N; t++) m[t] = f.walk ? f.walk[t] : CUT; }
+		else {
+			const QR = f.Q + 3, KF1 = RF.KF + 1, NL = RF.NL;
+			for (let t = 0; t < N; t++) {
+				let v = CUT;
+				for (let i = t * QR, e = i + QR; i < e; i++) if (f.costR[i] < v) v = f.costR[i];
+				for (let i = t * KF1, e = i + KF1; i < e; i++) { if (f.costF[i] < v) v = f.costF[i]; if (f.costL[i] < v) v = f.costL[i]; }
+				const rc = f.rowC[t], rx = f.rowX[t];
+				if (rc >= 0) for (let i = rc * NL, e = i + NL; i < e; i++) if (f.costC[i] < v) v = f.costC[i];
+				if (rx >= 0) for (let i = rx * NL, e = i + NL; i < e; i++) if (f.costX[i] < v) v = f.costX[i];
+				m[t] = v;
+			}
+		}
+		tileMinMemo.set(f, m);
+		return m;
+	}
+	/** the goal field at a replayed start (the doors as they stand there) and the start's cost on it (tiles; -1 cut, NaN
+	 *  none) */
+	function fieldAt(str, goal, allowDeath) {
+		const e = core.startOf(String(str));
+		vsim.restore(e.snap);
+		if (e.dead) return { f: null, c: NaN };
+		const f = T.goalField(T.levelNow(L, vsim), goal.tiles, { deaths: !!allowDeath });
+		return { f, c: RF.costAt(f, vsim) };
+	}
 	async function reach(starts, wp, budget) {
+		budget = budget || {};
+		if (!SKEL_ON || wp.beforeTick >= 0 || wp.beforeRel !== undefined || !starts.length) return reachLeg(starts, wp, budget);
+		const tIn = Date.now();
+		const ms = budget.ms > 0 ? budget.ms : 3000;
+		const deadline = Math.min(budget.deadline > 0 ? budget.deadline : Infinity, tIn + ms);
+		const startStrs = starts.map((a) => (typeof a === 'string' ? a : T.strOf(a.masks)));
+		const goal = T.goalOf(L, wp);
+		let c0 = Infinity, f0 = null;
+		try {
+			for (const s of startStrs) { const r = fieldAt(s, goal, wp.allowDeath); if (r.f && r.c >= 0 && r.c < c0) { c0 = r.c; f0 = r.f; } }
+		} catch (e) { f0 = null; }
+		if (!f0 || !(c0 >= SKEL_MIN) || !Number.isFinite(c0)) return reachLeg(starts, wp, budget);
+		// (resume from the deepest level an earlier call for this step reached)
+		const key = `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}`;
+		const memo = skelMemo.get(key);
+		const top = memo && memo.length ? memo[memo.length - 1] : null;
+		let cur = top ? top.cur.slice() : startStrs, cCur = top ? top.c : c0;
+		const levels = [];
+		// (the step adapts: a sub-leg found in under a third of its share doubles it (fast motion: fewer legs, fewer goal
+		// fields to build), a failed one halves it for its retry)
+		let lastFail = null, sims = 0, retried = false, stuck = false, step = SKEL_STEP;
+		while (Date.now() < deadline - 100) {
+			const left = deadline - Date.now();
+			if (cCur <= SKEL_STEP * 1.5) break;
+			const c = Math.max(SKEL_STEP / 2, cCur - step);
+			// (the sub-level set on the field of the current arrivals' doors)
+			let fr;
+			try { fr = fieldAt(cur[0], goal, wp.allowDeath); } catch (e) { fr = { f: null }; }
+			if (!fr.f) break;
+			const m = tileMin(fr.f), lim = Math.round(c * 5), tiles = [];
+			for (let t = 0; t < m.length; t++) if (m[t] <= lim) tiles.push(t);
+			if (!tiles.length) break;
+			// (a sub-leg's share: its part of the way (3 steps' worth), at least 300 ms; a failed one once more with half of
+			// what is left)
+			const share = retried ? Math.max(300, 0.5 * left) : Math.min(left - 50, Math.max(300, left * Math.min(0.5, (3 * step) / cCur)));
+			const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, fieldTiles: Array.from(goal.tiles), fieldTouch: goal.kind === 'trophy', label: `${wp.label || wp.kind} (skeleton ${Math.round(c)} tiles)` };
+			const r = await reachLeg(cur, sub, { ms: share, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + share), stop: budget.stop }, true);
+			sims += r.sims || 0;
+			levels.push({ c: Math.round(c), ok: !!r.ok, ms: r.ms, tool: r.tool });
+			if (!r.ok) {
+				lastFail = r;
+				if (r.fail && r.fail.why === 'stopped') break;
+				if (!retried) { retried = true; step = Math.max(SKEL_STEP / 2, step / 2); continue; }
+				// (a resumed level whose next sub-leg fails twice: a dead end, one level back next time)
+				if (top && levels.length === 2) memo.pop();
+				stuck = true;
+				break;
+			}
+			retried = false;
+			if (r.ms < share / 3) step = Math.min(SKEL_STEP * 4, step * 2);
+			cur = r.arrivals.map((a) => T.strOf(a.masks));
+			cCur = c;
+			if (!skelMemo.has(key)) skelMemo.set(key, []);
+			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+		}
+		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels });
+		if (Date.now() >= deadline - 100 || (stuck && cur !== startStrs)) {
+			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
+			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget' }) };
+		}
+		// (the last leg to the waypoint itself, from the deepest arrivals reached)
+		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, k: budget.k, deadline, stop: budget.stop });
+		// (a failure after sub-legs is no proof: the time was split)
+		if (cur === startStrs) { if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }); return r; }
+		// (the arrivals' legs are the whole way from the step's own starts: the start that prefixes each)
+		if (r.ok) {
+			r.legs = r.arrivals.map((a) => {
+				let si = -1;
+				for (let i = 0; i < startStrs.length; i++) if (a.masks.length >= startStrs[i].length && T.strOf(a.masks.subarray(0, startStrs[i].length)) === startStrs[i] && (si < 0 || startStrs[i].length > startStrs[si].length)) si = i;
+				const t0 = si >= 0 ? startStrs[si].length : 0;
+				if (a.leg) { a.leg.start = si; a.leg.ticks = a.masks.length - t0; a.leg.tool = 'skel+' + (a.leg.tool || r.tool); }
+				return { start: si, ticks: a.masks.length - t0, lb: 0, proven: false, tool: 'skel+' + (r.tool || '') };
+			});
+			r.lb = 0;
+			r.tool = 'skel+' + (r.tool || '');
+		} else {
+			if (r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' });
+		}
+		r.ms = Date.now() - tIn;
+		return r;
+	}
+	async function reachLeg(starts, wp, budget, inner) {
 		const tIn = Date.now();
 		budget = budget || {};
 		const ms = budget.ms > 0 ? budget.ms : 3000;

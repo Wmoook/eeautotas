@@ -308,7 +308,7 @@ async function createPrims(L, o = {}) {
 	function route(starts, goal, budget = {}, ro = {}) {
 		const t0 = Date.now();
 		st.routes++;
-		const fieldR = bounds.field(goal.tiles, null, { touch: goal.kind === 'trophy' });
+		const fieldR = bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) });
 		const trophy = goal.kind === 'trophy';
 		const h = (s) => { const v = bounds.at(fieldR, s); return v === Infinity ? Infinity : (trophy ? v + 1 : v); };
 		const sts = [];
@@ -324,7 +324,7 @@ async function createPrims(L, o = {}) {
 		let guide = null;
 		if (ro.guide !== false && classDedup) {
 			try {
-				const gf = T.goalField(L, goal.tiles, { deaths: false });
+				const gf = T.goalField(L, T.fieldTilesOf(goal), { deaths: false });
 				guide = (s) => { const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
 			} catch (e) { guide = null; }
 		}

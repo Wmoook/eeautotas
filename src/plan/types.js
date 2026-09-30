@@ -182,7 +182,10 @@ function goalOf(L, wp) {
 	// the touch, and "on the tile with the feature changed" never holds (the leg searches' "closest 0 tiles" failures)
 	const test = ex ? (sim) => { if (sim.is_dead || featValue(sim, ex.feat) !== ex.value) return false; if (mask[tileOf(sim, W, H)] === 1) return true; const tt = touchedTile(sim, W, H); return tt >= 0 && mask[tt] === 1; }
 		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
-	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath };
+	// (fieldTiles: the tiles the ordering fields and bounds are built to, when not the goal's own (the executor's skeleton:
+	// a sub-level set of the waypoint's field, ordered by the waypoint's own fields, memoized across its sub-legs))
+	return { kind: wp.kind, tiles: Int32Array.from(wp.tiles), mask, test, allowDeath: !!wp.allowDeath,
+		fieldTiles: wp.fieldTiles && wp.fieldTiles.length ? Int32Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch };
 }
 
 // ---------------------------------------------------------------- arrivals
@@ -255,4 +258,7 @@ function goalField(Lc, tiles, o = {}) {
 /** emitter(stream) -> (ev) => void: one JSON object per line */
 const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.stringify(ev) + '\n'); } catch (e) { /* closed */ } };
 
-module.exports = { VERSION, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
+/** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
+const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
+const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };

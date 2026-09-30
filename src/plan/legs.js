@@ -30,6 +30,7 @@ const E = require('../eesim.js');
 const EG = require('../endgame.js');
 const RF = require('../reach.js');
 const X = require('./exact.js');
+const T = require('./types.js');
 
 /** the fine cell of the state in sim (a number: FNV over the cell's parts) */
 function cellOf(sim, disc) {
@@ -591,7 +592,7 @@ function legBest(L, starts, goal, o) {
  *  no bounds, an error): the finders' time estimate when given (wall-aware, the level's top speeds per axis) */
 function boundsFieldOf(bounds, goal) {
 	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function' || process.env.EEAT_LEG_BF === '0') return null;
-	try { return bounds.field(goal.tiles, null, { touch: goal.kind === 'trophy' }); } catch (e) { return null; }
+	try { return bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) }); } catch (e) { return null; }
 }
 function bfTime(f, bounds, sim) {
 	const v = bounds.at(f, sim, { endgame: false });

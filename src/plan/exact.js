@@ -45,10 +45,11 @@ const BMEMO = new WeakMap();
 function boundFor(L, goal) {
 	let m = BMEMO.get(L);
 	if (!m) { m = new Map(); BMEMO.set(L, m); }
-	const key = goal.kind === 'trophy' ? 'trophy' : Array.from(goal.tiles).sort((a, b) => a - b).join(',');
+	const gt = goal.fieldTiles ? goal.fieldTiles : goal.tiles;
+	const key = goal.kind === 'trophy' || (goal.fieldTiles && goal.fieldTouch) ? 'trophy' : Array.from(gt).sort((a, b) => a - b).join(',');
 	let B = m.get(key);
 	if (B) { m.delete(key); m.set(key, B); return B; }
-	B = goal.kind === 'trophy' ? EG.boundContext(L) : EG.boundContext(L, { goals: Array.from(goal.tiles) });
+	B = key === 'trophy' ? EG.boundContext(L) : EG.boundContext(L, { goals: Array.from(gt) });
 	m.set(key, B);
 	if (m.size > 16) m.delete(m.keys().next().value);
 	return B;
@@ -85,15 +86,16 @@ function discKey(sim) {
 const BFIELDS = new WeakMap();
 function boundFields(L, bounds, goal, starts, simIn, disc0, sameDisc) {
 	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function') return null;
-	const touch = goal.kind === 'trophy';
+	const TY = require('./types.js');
+	const touch = TY.fieldTouchOf(goal), ft = TY.fieldTilesOf(goal);
 	let rel;
-	try { rel = bounds.field(goal.tiles, null, { touch }); } catch (e) { return null; }
+	try { rel = bounds.field(ft, null, { touch }); } catch (e) { return null; }
 	let now = null;
 	if (sameDisc && disc0 !== undefined && starts.length) {
 		try {
 			const sim = simIn || new E.EESim(L);
 			sim.restore(starts[0].snap);
-			now = bounds.field(goal.tiles, require('./types.js').levelNow(L, sim), { touch });
+			now = bounds.field(ft, TY.levelNow(L, sim), { touch });
 		} catch (e) { now = null; }
 	}
 	void BFIELDS;
