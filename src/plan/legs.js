@@ -31,6 +31,8 @@ const EG = require('../endgame.js');
 const RF = require('../reach.js');
 const X = require('./exact.js');
 const T = require('./types.js');
+// the zero-speed bucket of legBest's cells (doctor 8, n5-doc-8; OPT-IN EEAT_CELL_ZERO=1, off = the cells as before): legBest's cellKey
+const ZERO_CELL = process.env.EEAT_CELL_ZERO === '1';
 
 /** the fine cell of the state in sim (a number: FNV over the cell's parts) */
 function cellOf(sim, disc) {
@@ -481,10 +483,23 @@ function legBest(L, starts, goal, o) {
 	// (the cell: ka the physical part's hash, kb the door-reading state's)
 	let ka = 0, kb = 0;
 	const q0 = CQ[0], q1 = CQ[1], q2 = CQ[2], q3 = CQ[3];
+	const ZC = o.zeroCell !== undefined ? !!o.zeroCell : ZERO_CELL;
 	const cellKey = () => {
 		let h = 0x811c9dc5 | 0;
 		const mix = (v) => { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= (v >>> 16) & 0xffff; h = Math.imul(h, 0x01000193); };
-		mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0);
+		if (ZC) {
+			// (THE ZERO-SPEED BUCKET: a speed of exactly 0 is a cell of its own, not the [0, 1/q) bucket it shares with a
+			// slow drift: a ball falling straight down a 1-wide column (vx 0, px on the tile grid) and the same ball with an
+			// input held into the column's wall (vx +0.1: the wall stops the move, not the speed) share every cell of the
+			// fall, the first one popped closes them, and when that is the drifting one it slides onto the ledge beside the
+			// next 1-wide opening (UT Eternal Galaxy: 3 up-arrow rows under a dot row, from the known route's own state at the
+			// column's top legBest never entered the arrows in 300 ms; the zero-input fall reaches the coin in 56 ticks)
+			// (and a position exactly on the tile grid likewise: the 16 px box enters a 1-wide opening only there, and the
+			// 2 px bucket merges it with a ball half a pixel off, which lands on the opening's edge)
+			const vx = sim.speed_x, vy = sim.speed_y, px = sim.px, py = sim.py;
+			mix(px % 16 === 0 ? 0x7ffe : Math.floor(px * q0) | 0); mix(py % 16 === 0 ? 0x7ffe : Math.floor(py * q1) | 0);
+			mix(vx === 0 ? 0x7fff : Math.floor(vx * q2) | 0); mix(vy === 0 ? 0x7fff : Math.floor(vy * q3) | 0);
+		} else { mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0); }
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
 		ka = h; kb = dkOf(sim) | 0;
 	};

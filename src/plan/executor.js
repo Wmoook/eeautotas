@@ -1637,6 +1637,118 @@ async function createExecutor(L, opts) {
 		rD.deathLeg = true;
 		return rD;
 	}
+	// ---- THE GOAL BASIN (doctor 8, n5-doc-8; OPT-IN EEAT_BASIN=1, off = the executor byte for byte as before): the last
+	// approach VERIFIED BACKWARD. The finders and the skeleton go FORWARD, ordered by the goal field, a relaxation: where
+	// the goal's last approach needs momentum the field does not model, its sub-level sets are false nears (UT Eternal
+	// Galaxy's first coin: a 1-wide column falls through a dot row into 3 up-arrow rows; the dot row, entered from the
+	// side, is 5-6 tiles from the coin by the field and a dead end by the physics: legBest from the spawn sat there for
+	// 15 s, while from the known route's state after its speed boost, 120 ticks out, the leg is found in 0.2 s; the known-
+	// route test of the batch: legs found from 60-200 route ticks out and not from the previous trigger). The basin: the
+	// tiles near the goal (the goal field's cost within BASIN_R tiles, standing tiles and field tiles, nearest first) from
+	// which a ball AT REST, with the start's own discrete state (its snapshot, the ball moved there, two idle ticks), reaches
+	// the goal by a short leg (legBest, BASIN_LEG_MS, BASIN_DEPTH ticks): a funnel verified by the engine, grown call after
+	// call (memo per waypoint and discrete state). A far waypoint whose direct leg failed then goes START -> BASIN (a region
+	// waypoint ordered by the basin's own field: the verified tiles, not the relaxation's false near) -> GOAL from the
+	// basin's real arrivals. Ordering and waypoints only: the synthetic states only choose tiles, every leg returned is
+	// found from real arrivals and replayed from the level start (finalize), no claim, no proof.
+	const BASIN_ON = process.env.EEAT_BASIN === '1';
+	const BASIN_R = +process.env.EEAT_BASIN_R > 0 ? +process.env.EEAT_BASIN_R : 30;          // tiles of the goal field
+	const BASIN_MIN = +process.env.EEAT_BASIN_MIN > 0 ? +process.env.EEAT_BASIN_MIN : 8;      // a start nearer: no basin
+	const BASIN_SHARE = +process.env.EEAT_BASIN_SHARE > 0 ? Math.min(0.9, +process.env.EEAT_BASIN_SHARE) : 0.5;   // of the call left after the direct leg
+	const BASIN_BUILD = +process.env.EEAT_BASIN_BUILD > 0 ? Math.min(0.8, +process.env.EEAT_BASIN_BUILD) : 0.3;    // of the basin's share: its growth
+	const BASIN_LEG_MS = +process.env.EEAT_BASIN_LEG_MS > 0 ? +process.env.EEAT_BASIN_LEG_MS : 10;
+	const BASIN_RIM = process.env.EEAT_BASIN_RIM !== undefined ? Math.max(0, Math.min(1, +process.env.EEAT_BASIN_RIM)) : 0.5;
+	const BASIN_DEPTH = +process.env.EEAT_BASIN_DEPTH > 0 ? +process.env.EEAT_BASIN_DEPTH : 200;
+	const basinMemo = new Map();   // key (the waypoint's field tiles and walls, the start's discrete state) -> basin
+	let bsim = null, binp = null;
+	/** the basin of goal for the discrete state of the start str, grown until `until`: {tiles: Set, cand, next, tried} */
+	function basinGrow(str, goal, wp, until) {
+		const e = core.startOf(String(str));
+		if (!e || e.dead) return null;
+		vsim.restore(e.snap);
+		const key = `${wallKeyOf(wp)}|${X.discKey(vsim)}`;
+		let B = basinMemo.get(key);
+		if (!B) {
+			const f = T.goalField(T.levelNow(L, vsim), T.fieldTilesOf(goal), { deaths: !!wp.allowDeath });
+			const m = tileMin(f), lim = BASIN_R * 5, fl = L.flags, fg = L.fg, cand = [];
+			const Wl = L.width, Hl = L.height;
+			const gset = new Set(Array.from(goal.tiles));
+			for (let t = 0; t < m.length; t++) {
+				if (!(m[t] <= lim) || gset.has(t)) continue;
+				const x = t % Wl, y = (t / Wl) | 0;
+				// (a standing tile (a solid or a one-way under it) or a field tile (not plain air: arrows, dots, liquids,
+				// climbables, boosts), where a ball at rest is a state the searches meet)
+				// (eesim.js flags: 1 solid, 2 one-way, 4 rotated half, 8 half, 16 door)
+				const below = y + 1 < Hl ? fl[fg[t + Wl]] | 0 : 1;
+				const stand = (below & (1 | 2 | 4 | 8)) !== 0 || y + 1 >= Hl;
+				const idh = fg[t];
+				const fieldTile = idh !== 0 && ((fl[idh] | 0) & (1 | 16)) === 0;
+				// (against a wall: a side hit leaves vx 0 there, the top of a 1-wide shaft the ball falls down from)
+				const wallL = x > 0 && (fl[fg[t - 1]] & 1) !== 0, wallR = x + 1 < Wl && (fl[fg[t + 1]] & 1) !== 0;
+				if (stand || fieldTile || wallL || wallR) cand.push(t);
+			}
+			cand.sort((a, b) => m[a] - m[b] || a - b);
+			B = { f, m, cand, next: 0, tiles: new Set(), tried: 0, ms: 0 };
+			basinMemo.set(key, B);
+		}
+		if (!bsim) { bsim = new E.EESim(L); binp = new E.EEInput(); }
+		const t0 = Date.now(), Wl = L.width, Hl = L.height;
+		while (B.next < B.cand.length && Date.now() < until - 5) {
+			const t = B.cand[B.next++];
+			bsim.restore(e.snap);
+			bsim.px = (t % Wl) * 16; bsim.py = ((t / Wl) | 0) * 16; bsim.speed_x = 0; bsim.speed_y = 0;
+			// (two idle ticks: the gravity queue and the touch read the new place)
+			E.applyMask(binp, 0); bsim.tick(binp); bsim.tick(binp);
+			if (bsim.is_dead) continue;
+			B.tried++;
+			if (X.goalAt(goal, bsim, e.tick + 2, -1)) { B.tiles.add(t); continue; }
+			const r = LG.legBest(L, [{ snap: bsim.snapshot(), tick: e.tick + 2 }], goal, { sim: bsim, deadline: Math.min(until, Date.now() + BASIN_LEG_MS), field: B.f, region: null, depthMax: BASIN_DEPTH, noFinish: true });
+			if (r.status === 'found') B.tiles.add(t);
+		}
+		B.ms += Date.now() - t0;
+		S.basinTried = (S.basinTried || 0) + (B.tried - (B.tried0 || 0)); B.tried0 = B.tried;
+		return B;
+	}
+	/** START -> BASIN -> GOAL (null: no basin; else the StepResult, ok or not) */
+	async function basinRoute(starts, startStrs, wp, goal, budget, deadline) {
+		const tIn = Date.now();
+		if (deadline - tIn < 400) return null;
+		const B = basinGrow(startStrs[0], goal, wp, tIn + BASIN_BUILD * (deadline - tIn));
+		if (!B || !B.tiles.size) { if (emit) emit({ ev: 'exec.basin', label: wp.label || '', tiles: 0, tried: B ? B.tried : 0, cand: B ? B.cand.length : 0 }); return null; }
+		// (the target is the basin's RIM: its tiles at BASIN_RIM of its farthest one's cost or more. The whole basin would bring
+		// the relaxation's false near back into the sub-leg's ordering field: its inner tiles sit right behind the momentum
+		// barrier the false near faces (Eternal Galaxy: the tiles under the up arrows, 2 tiles past the dot row), while the rim
+		// (the column's top, the arrow row that feeds it) is far from the false near by the same field. The starts' own
+		// tiles are no target: a start in the basin already failed the direct leg)
+		const own = new Set();
+		for (const s of startStrs) { try { const e = core.startOf(String(s)); vsim.restore(e.snap); own.add(T.tileOf(vsim, L.width, L.height)); } catch (x) { /* ignore */ } }
+		let cMax = 0;
+		for (const t of B.tiles) if (B.m[t] > cMax) cMax = B.m[t];
+		const tiles = Array.from(B.tiles).filter((t) => !own.has(t) && B.m[t] >= BASIN_RIM * cMax);
+		if (!tiles.length) return null;
+		S.basin = (S.basin || 0) + 1;
+		const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, label: `${wp.label || wp.kind} (basin ${B.tiles.size})` };
+		const share1 = 0.7 * (deadline - Date.now());
+		const r1 = await reachWp(starts, sub, { ms: share1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + share1), stop: budget.stop });
+		if (emit) emit({ ev: 'exec.basin', label: wp.label || '', tiles: B.tiles.size, tried: B.tried, cand: B.cand.length, rim: tiles.slice(0, 12).map((t) => [t % L.width, (t / L.width) | 0]), ok1: !!r1.ok, ms: Date.now() - tIn });
+		if (!r1.ok) return r1;
+		// (an arrival on the goal itself: the waypoint reached)
+		const cur = r1.arrivals.map((a) => T.strOf(a.masks));
+		const r2 = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline, stop: budget.stop, next: budget.next || null });
+		if (!r2.ok) { if (r2.fail && r2.fail.why !== 'stopped') r2.fail = Object.assign({}, r2.fail, { why: 'budget' }); return r2; }
+		S.basinOk = (S.basinOk || 0) + 1;
+		r2.legs = r2.arrivals.map((a) => {
+			let si = -1;
+			for (let i = 0; i < startStrs.length; i++) if (a.masks.length >= startStrs[i].length && T.strOf(a.masks.subarray(0, startStrs[i].length)) === startStrs[i] && (si < 0 || startStrs[i].length > startStrs[si].length)) si = i;
+			const t0 = si >= 0 ? startStrs[si].length : 0;
+			if (a.leg) { a.leg.start = si; a.leg.ticks = a.masks.length - t0; a.leg.tool = 'basin+' + (a.leg.tool || r2.tool); }
+			return { start: si, ticks: a.masks.length - t0, lb: 0, proven: false, tool: 'basin+' + (r2.tool || '') };
+		});
+		r2.lb = 0;
+		r2.tool = 'basin+' + (r2.tool || '');
+		r2.ms = Date.now() - tIn;
+		return r2;
+	}
 	async function reach(starts, wp, budget) {
 		const r = await reachWp(starts, wp, budget);
 		stuckNote(wp, r);
@@ -1666,7 +1778,18 @@ async function createExecutor(L, opts) {
 			if (wArr && !f0) { wallDropLast(wk, wp.label); wN = -1; wRefresh(); measure(); }
 		};
 		measure();
+		// (the goal basin, OPT-IN: a trigger / trophy waypoint at least BASIN_MIN tiles out by its field)
+		const basinOn = BASIN_ON && !wp.allowDeath && !wp.dieField && goal.kind !== 'region' && !!f0 && Number.isFinite(c0) && c0 >= BASIN_MIN;
 		if (!f0 || !(c0 >= SKEL_MIN) || !Number.isFinite(c0)) {
+			if (basinOn) {
+				// (the direct leg with 1 - BASIN_SHARE of the call, then start -> basin -> goal with the rest)
+				const dMs = (1 - BASIN_SHARE) * (deadline - Date.now());
+				const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null });
+				if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
+				const rB = await basinRoute(starts, startStrs, wp, goal, budget, deadline);
+				if (rB && rB.ok) return rB;
+				return (await deathLeg(starts, wp, budget, r0, deadline)) || r0;
+			}
 			const rS = await reachLeg(starts, wp, budget);
 			return (await deathLeg(starts, wp, budget, rS, deadline)) || rS;
 		}
@@ -1680,6 +1803,11 @@ async function createExecutor(L, opts) {
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
 			if (rD) return rD;
 			if (wRefresh()) { measure(); if (!f0 || !Number.isFinite(c0)) return r0; }
+		}
+		// (the goal basin, OPT-IN: BASIN_SHARE of what is left, before the skeleton; its basin grows call after call)
+		if (basinOn) {
+			const rB = await basinRoute(starts, startStrs, wp, goal, budget, Date.now() + BASIN_SHARE * (deadline - Date.now()));
+			if (rB && rB.ok) return rB;
 		}
 		// (resume from the deepest level an earlier call for this step reached)
 		let key = skelKey(goal, wp, startStrs, wN);
