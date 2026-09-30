@@ -809,6 +809,13 @@ function createSolver(L, opts = {}) {
 			const r = solveCoupled(snap, sim, tg, goal, oo, stats);
 			if (r.ok) res = r; else if (!ctx) res.why = 'not plain; ' + r.why;
 		}
+		if (!res.ok && oo.chain !== false && ctx && !target.tele && oo.Tmax >= (oo.chainMin || 40)) {
+			// THE CHAIN TIER: a long leg as a chain of shorter ones through supports (A* over support states, 4.6),
+			// within this leg's horizon and a small clock
+			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax) });
+			stats.chain = r;
+			if (r.ok) res = { ok: true, tool: 'chain', T: r.T, masks: r.masks, member: `chain ${r.expanded}` };
+		}
 		if (res.ok) {
 			// the landing hop: the same masks with the jump bit on the last tick (a different end state, the same support)
 			const hm = Uint8Array.from(res.masks);
@@ -930,11 +937,12 @@ function createSolver(L, opts = {}) {
 			if (best && n.f >= best.T) { push(n); break; }
 			expanded++;
 			if (o.trace) o.trace(n);
-			const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
+			const horizon = o.Tmax ? o.Tmax - n.g : Infinity;
+			const lim = Math.min(best ? Math.min(legT, best.T - n.g - 1) : legT, horizon);
 			if (lim <= 0) continue;
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
-			const r = leg(n.snap, target, { Tmax: lim, K: o.K, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
+			const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
 			legs++;
 			if (r.ok && (!best || n.g + r.T < best.T)) best = { T: n.g + r.T, masks: cat(n.masks, r.masks) };
 			sim.restore(n.snap);
@@ -948,6 +956,7 @@ function createSolver(L, opts = {}) {
 					if (!ms) continue;
 					const g = n.g + ms.length;
 					if (best && g >= best.T) continue;
+					if (o.Tmax && g >= o.Tmax) continue;
 					sim.restore(n.snap);
 					let dead = false;
 					for (let t = 0; t < ms.length; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); if (sim.is_dead) { dead = true; break; } }

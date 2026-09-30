@@ -139,16 +139,16 @@ function aggregate(dir) {
 	const pct = (a, b) => (b ? (100 * a / b).toFixed(1) : '-');
 	const med = (a) => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
 	const p90 = (a) => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length * 0.9)]; };
-	const lines = ['| class | legs | solved | <= route | < route | exact end | proven optimal | plain / field / coupled | us median / p90 / mean |', '|---|---:|---:|---:|---:|---:|---:|---|---|'];
+	const lines = ['| class | legs | solved | <= route | < route | exact end | proven optimal | plain / field / coupled / chain | us median / p90 / mean |', '|---|---:|---:|---:|---:|---:|---:|---|---|'];
 	const order = ['ALL', 'hop', 'jump', 'fall', 'walk', 'hopjump', 'airjump', 'arrow', 'dot', 'boost', 'portal', 'climb', 'swim'];
 	for (const k of order.concat(Array.from(groups.keys()).filter((x) => !order.includes(x)))) {
 		const g = groups.get(k);
 		if (!g) continue;
 		const ok = g.filter((r) => r.ok && r.verified);
 		const le = ok.filter((r) => r.T <= r.len), lt = ok.filter((r) => r.T < r.len), ex = ok.filter((r) => r.exact), pr = ok.filter((r) => r.proven);
-		const pl = ok.filter((r) => r.tool === 'plain').length, fd = ok.filter((r) => r.tool === 'field').length, cp = ok.filter((r) => r.tool === 'coupled').length;
+		const pl = ok.filter((r) => r.tool === 'plain').length, fd = ok.filter((r) => r.tool === 'field').length, cp = ok.filter((r) => r.tool === 'coupled').length, chn = ok.filter((r) => r.tool === 'chain').length;
 		const us = g.map((r) => r.us), mean = us.reduce((a, b) => a + b, 0) / Math.max(1, us.length);
-		lines.push(`| ${k} | ${g.length} | ${pct(ok.length, g.length)}% | ${pct(le.length, g.length)}% | ${pct(lt.length, g.length)}% | ${pct(ex.length, g.length)}% | ${pct(pr.length, g.length)}% | ${pct(pl, g.length)} / ${pct(fd, g.length)} / ${pct(cp, g.length)} | ${med(us)} / ${p90(us)} / ${mean.toFixed(0)} |`);
+		lines.push(`| ${k} | ${g.length} | ${pct(ok.length, g.length)}% | ${pct(le.length, g.length)}% | ${pct(lt.length, g.length)}% | ${pct(ex.length, g.length)}% | ${pct(pr.length, g.length)}% | ${pct(pl, g.length)} / ${pct(fd, g.length)} / ${pct(cp, g.length)} / ${pct(chn, g.length)} | ${med(us)} / ${p90(us)} / ${mean.toFixed(0)} |`);
 	}
 	const bad = recs.filter((r) => r.ok && !r.verified).length;
 	lines.push('', `legs ${recs.length}; answers the independent replay rejected: ${bad}`);
