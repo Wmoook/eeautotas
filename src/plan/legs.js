@@ -263,7 +263,7 @@ function legBest(L, starts, goal, o) {
 	// 1/16, 1/8 (legBFS's) 46%, 4 px, 4 px, 1/4, 1/2 40%)
 	const CQ = o.cell || [0.5, 0.25, 8, 4];
 	const collect = o.collect > 0 ? o.collect : 64;
-	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
+	const B = allowDeath || o.noBound || process.env.EEAT_LEG_KB === '0' ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64, FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;
 	const BF = boundsFieldOf(o.bounds, goal);
 	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
@@ -273,7 +273,7 @@ function legBest(L, starts, goal, o) {
 	const tStart = Date.now();
 	// the nodes: parent, mask, tick (absolute layer), the snapshot while open
 	const par = [], msk = [], rp = [], gg = [], sn = [], dst = [];
-	const HOLD = o.hold > 0 ? o.hold : 8;
+	const HOLD = o.hold > 0 ? o.hold : (+process.env.EEAT_BEST_HOLD || 8);
 	const pool = [];
 	// the open heap of node indices by f
 	const heap = [], hf = [];
