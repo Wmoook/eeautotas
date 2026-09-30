@@ -1192,6 +1192,13 @@ failures that spend the whole 150 k ticks: 1,318 -> 547 of the failing legs (<= 
 family is now exhausted there, the budget left over). The wall time: the solved sample's median 28 vs 38 ms (found
 sooner); a failing leg's 156 vs 109 ms (the hashes; its budget is ticks).
 
+**In the compiler** (box 3, n4-plan 87e1ff0 + this, the shared gate: the block-4 list src/out/n4plan/gate20.txt vs
+b3_w3.json, 60 s, --workers=3, par 6): **exit 0**, compiled 14 vs the baseline's 12 of 20 (Tutorial 1 and The Blank Page
+compile now), better 8, worse 0 (progress: MIHB's Dream 27 vs 23, Level 1 Overworld 40 vs 34, Booty Return 36 vs 13,
+Starlight 22 vs 19; faster: Accident Prone 3,077 vs 3,422, My level fef0 64 vs 65; slower routes on Ruins 1,540 vs
+1,444, Desolate Caverns 1,640 vs 1,611, Tree Decorating 1,673 vs 1,568, Fish Gods 3,887 vs 3,801, Rosa dei Venti 4,061
+vs 3,815: a compile's ticks vary run to run), 14 / 14 .eetas replayed (tools/cmp/verify.js). test/msolve.js 50/0.
+
 **THEOREM V (the axis speed bounds) and its engine check.** Away from the tiles that can push an axis past its bound
 (x: a pull on x = the left / right arrows, an x boost; y: a y boost, ice (its glide keeps more speed on y), levitation;
 both: a portal, a gravity effect) and with the pulls not rotated onto x (flip not 1 / 3): a tick keeps
