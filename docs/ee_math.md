@@ -858,7 +858,7 @@ Each emitted pattern with its member is one input string; it is replayed ONCE by
 pattern. The first replay that meets the goal is the answer (its first goal tick), so every answer is exact by
 construction.
 
-### 4.4 Three tiers: plain, field, coupled
+### 4.4 Four tiers: plain, field, coupled, chain
 
 1. plain: 4.2-4.3.
 2. field (not plain, or no plain answer; not for a teleport target): section 6's `solveLeg` (the start field's axis
@@ -867,6 +867,10 @@ construction.
 3. coupled: the per-tick one-change family over the 9 direction masks, with and without a press at the first tick, the
    prefix played once and snapshotted every tick (the moves study's F1): only where neither tier found an answer, or
    BELOW the field answer's T (the cheapest T across the tiers).
+4. chain (a leg of 40+ ticks none of the three solved; not for a teleport target): the leg as a chain of shorter ones
+   through supports (4.6) within the leg's horizon and a 400 ms clock, from a plain start and from a non-plain one (its
+   successors by the event fan-out: a leg across fields = the pieces between its field events); the root's direct leg
+   is skipped (it is the leg that failed).
 
 ### 4.5 THE PLAIN BOUND and its certificate
 
@@ -887,17 +891,22 @@ free bound); the y speed has no input but the jump, which only lowers it, and a 
 align moves a coordinate by < 2 px (1.7); the centre range covers every floor height (half blocks, one-ways: the
 first version tested the floor line and was beaten by a real landing on a half block). Qed for the plain regime.
 
-**The certificate** (`certify`): the bound is claimed for EVERY input sequence only when no non-plain, non-solid tile
-lies in the rectangle the plain extremes can reach in lb ticks (x: hold L / R from the clamped speeds, y: lb x |J| of
-rise to the fall): leaving the plain regime first needs the centre on such a tile. **A leg found at a certified lb is
-PROVEN OPTIMAL.**
+**The certificate** (`certify`): the bound is claimed for EVERY input sequence only when the ball cannot leave the
+plain regime before tick lb. Leaving it needs the centre on a non-plain, non-solid tile u; the first such tile a path
+enters before tick lb lies in the rectangle the plain extremes reach in lb ticks (x: hold L / R from the clamped
+speeds, y: lb x |J| of rise to the fall), and until it enters u the path is plain, so the first tick it can be in u is at least
+max(tx(u's column), ty(u's row)) (THEOREM B's two parts for the tile, no landing tick): **THE TILE TEST** certifies lb
+when every non-plain tile of the rectangle has max(tx, ty) >= lb (per column / row cached; the first version asked for
+no such tile at all). **A leg found at a certified lb is PROVEN OPTIMAL.**
 
 *Engine checks.* (a) The 49,846 real moves (4.7): on every leg with a certified bound, lb <= the route's own ticks
-(the route is a real input sequence): **0 violations** in the final run (16,297 certified legs; the first run
-had 12 violations, which found the two errors above: the low-gravity align and the landing height); (b) test/msolve.js:
-random input words (sticky, jump presses anywhere) from 3 starts on a room with a gap, a step and a ceiling: no word
-ever stands on a tile sooner than its certified bound or its proven leg (88 pairs, 24 proven: 0 violations); (c) the
-bound's parts are section 3's checked THEOREM M / minT and the recurrence.
+(the route is a real input sequence): **0 violations** in the final runs (19,791 certified legs with the tile test,
+16,297 with the rectangle alone; the first run had 12 violations, which found the two errors above: the low-gravity
+align and the landing height); (b) test/msolve.js: random input words (sticky, jump presses anywhere) from 3 starts on
+a room with a gap, a step and a ceiling, and on the same room with three boosts (16 px/tick: faster than any plain
+move) and a dot field: no word ever stands on a tile sooner than its certified bound or its proven leg (88 pairs, 26
+proven; with the boosts 46 pairs, the tile test 37 certified / 7 proven, the rectangle alone 35 / 6: 0 violations); (c)
+the bound's parts are section 3's checked THEOREM M / minT and the recurrence.
 
 ### 4.6 Chains: A* over support states
 
@@ -911,9 +920,12 @@ held masks played to its first support event: a landing, a field entered or left
 field node). Two numbers per node: the CLAIM fa = g + the certified plain bound (0 where none applies: admissible),
 and the ORDER f = g + w x max(that bound, kappa x the reach field's cost to the target's tiles) (src/reach.js to the
 target's tiles, deaths off, built once per target; kappa = 16 / 6.7766 ticks a tile, the top running speed: an order,
-not a bound); the reach field's -1 in physics mode drops the node (a proof: no death-free way to the tiles). Lazy
-verification: an edge is a replayed answer, made when its node is expanded. **Closed** = no open node's fa is below the
-best chain's T and every bound used was certified: no chain of these legs is shorter.
+not a bound); the reach field's -1 in physics mode drops the node (a proof: no death-free way to the tiles); among equal
+f the deepest node first. TWO PHASES (anytime): w = 2 (greedy toward the target) until the first chain or half the
+clock, then the heap re-keyed with w = 1 (A*: every node whose fa reaches the best chain's T dropped), so the clock's
+rest improves the chain and can close it. Lazy verification: an edge is a replayed answer, made when its node is
+expanded. **Closed** = no open node's fa is below the best chain's T and every bound used was certified: no chain of
+these legs is shorter (the order's weight does not enter the claim).
 
 ### 4.7 The numbers
 
@@ -921,19 +933,19 @@ best chain's T and every bound used was certified: no chain of these legs is sho
 every move but deaths / respawns and moves over 400 ticks = 49,371 legs; the start = the route's exact state at the
 move's start, the target = the route's next support (its centre tile and class letter; a teleport onto it for a
 portal move), Tmax = the route's ticks + 10; every answer replayed AGAIN by a separate EESim with the moves study's own
-test: **0 answers rejected**):
+test: **0 answers rejected**; the final code, run r8):
 
 | class | legs | solved | <= route | < route | exact end | proven optimal | plain / field / coupled / chain (% of the class) |
 |---|---:|---:|---:|---:|---:|---:|---|
-| **all** | 49,371 | **92.0%** | **88.6%** | 23.2% | 20.8% | 3.3% | 55.0 / 15.5 / 21.4 / 0.0 |
-| hop | 17,073 | 99.2% | 98.3% | 0.9% | 21.4% | 2.0% | 92.8 / 4.8 / 1.6 / 0 |
-| jump | 7,623 | 97.4% | 93.5% | 57.7% | 17.5% | 15.4% | 91.3 / 5.1 / 0.8 / 0.2 |
-| fall | 4,572 | 94.2% | 91.7% | 15.2% | 27.1% | 1.8% | 69.8 / 17.0 / 7.3 / 0 |
-| walk | 42 | 100% | 100% | 90.5% | 2.4% | 19.0% | 78.6 / 21.4 / 0 / 0 |
-| airjump | 162 | 16.7% | 12.3% | 11.7% | 0.6% | 0 | 8.6 / 0.6 / 5.6 / 1.9 |
-| arrow | 9,879 | 76.7% | 70.1% | 29.8% | 17.3% | 0.2% | 6.4 / 22.1 / 48.1 / 0 |
-| dot | 5,317 | 89.3% | 83.1% | 41.0% | 13.4% | 0 | 0 / 43.3 / 46.0 / 0 |
-| boost | 2,297 | 91.2% | 87.7% | 16.1% | 35.7% | 0 | 3.7 / 42.9 / 44.5 / 0 |
+| **all** | 49,371 | **92.3%** | **88.8%** | 23.4% | 20.8% | **3.9%** | 55.0 / 15.5 / 21.4 / 0.4 |
+| hop | 17,073 | 99.2% | 98.3% | 0.9% | 21.4% | 2.2% | 92.8 / 4.8 / 1.6 / 0 |
+| jump | 7,623 | 97.8% | 93.7% | 57.9% | 17.6% | 18.1% | 91.3 / 5.1 / 0.8 / 0.7 |
+| fall | 4,572 | 94.3% | 91.8% | 15.2% | 27.1% | 2.1% | 69.8 / 17.0 / 7.3 / 0.1 |
+| walk | 42 | 100% | 100% | 90.5% | 2.4% | 26.2% | 78.6 / 21.4 / 0 / 0 |
+| airjump | 162 | 18.5% | 14.2% | 13.6% | 0.6% | 0 | 8.6 / 0.6 / 5.6 / 3.7 |
+| arrow | 9,879 | 77.8% | 70.9% | 30.4% | 17.3% | 0.6% | 6.4 / 22.1 / 48.2 / 1.1 |
+| dot | 5,317 | 89.3% | 83.1% | 41.1% | 13.4% | 0 | 0 / 43.3 / 46.0 / 0.1 |
+| boost | 2,297 | 91.5% | 87.7% | 16.1% | 35.7% | 0 | 3.7 / 42.9 / 44.5 / 0.3 |
 | portal | 1,723 | 94.4% | 93.2% | 15.2% | 40.9% | 0 | 23.9 / 0 / 70.5 / 0 |
 | climb | 390 | 92.6% | 89.5% | 55.9% | 13.6% | 0 | 0 / 34.9 / 57.7 / 0 |
 | swim | 293 | 90.4% | 87.7% | 61.4% | 12.6% | 0 | 0 / 19.5 / 71.0 / 0 |
@@ -943,19 +955,26 @@ test: **0 answers rejected**):
   its exact state with those ticks); **exact end** = the answer's end state (or its hop's) = the route's end state
   (stateHash) at the same tick; **proven optimal** = T equals a certified plain bound (4.5): no input sequence reaches
   the target sooner.
-- The tiers: plain 27,171 legs (the mathematics of 4.2-4.3: one engine replay per leg at the median), field 7,673
-  (section 6), coupled 10,544, chain 22 (a long plain leg as a chain, 4.6, within a 400 ms clock).
-- **Microseconds per leg** (the laptop, one thread, 1,053 legs of 3 routes, unloaded): the plain tier's legs median
-  **80 us**, p90 1.0 ms (1 engine verify at the median, 2 at p90); the field tier median 9.2 ms, the coupled piece 28 ms.
-  On box 3 under the compiler program's load (load 130 on 192 threads): plain median 372 us, field 9.7 ms, coupled 48
-  ms.
-- **The bound**: a plain bound on 33,432 legs, certified on 16,297; on every certified leg lb <= the route's own
-  ticks (**0 violations**); lb / route median 0.559 (the admissible bounds of the n4 study: median 0.145); on 536 legs
-  the ROUTE'S OWN MOVE is proven optimal (its ticks = a certified bound). **1,624 legs PROVEN OPTIMAL** (jump 1,173, hop
-  343, fall 81, arrow 19, walk 8), 1,092 of them strictly faster than the route (at the support class).
-- The route beaten: 11,459 legs in fewer ticks than the route's own, 104,327 ticks in all.
-- Where it fails: arrow legs across fields (the ball enters and leaves arrow tiles inside the move: 23% unsolved),
-  long plain legs (> 60 ticks: the most of the plain classes' failures), multi-jump (airjump 16.7% solved).
+- The tiers: plain 27,171 legs (the mathematics of 4.2-4.3: one engine replay per leg at the median), field 7,666
+  (section 6), coupled 10,548, chain 186 (a leg of 40+ ticks the three tiers did not solve, as a chain, 4.6, within a 400 ms clock; 22 before the chain tier ran from non-plain starts and the two phases).
+- Against the first full run (r5: the chain tier from plain starts only, one phase, the rectangle certificate): 162 legs
+  solved more (113 of them arrow legs), 1 fewer (a field leg: the field tier's 250 ms clock under the box's load),
+  certificates 16,297 -> 19,791 (none lost), proven optimal 1,624 -> 1,914.
+- **Microseconds per leg**: the laptop, one thread, unloaded, the first code (1,053 legs of 3 routes): the plain tier's
+  legs median **80 us**, p90 1.0 ms (1 engine verify at the median, 2 at p90), the field tier 9.2 ms, the coupled piece
+  28 ms; the final code (245 legs of 2 routes, every 3rd move): plain median 116 us, p90 1.5 ms, field 20 ms, coupled
+  28 ms. On box 3 under the compiler program's load (load ~130 on 192 threads), the final run: plain median 425 us
+  (p90 23 ms), field 11 ms, coupled 55 ms, chain 0.69 s; a failed leg median 0.65 s (the chain tier's clock).
+- **The bound**: a plain bound on 33,432 legs, certified on 19,791 (the tile test; 16,297 with the rectangle
+  alone); on every certified leg lb <= the route's own ticks (**0 violations**); lb / route median 0.559 (the admissible
+  bounds of the n4 study: median 0.145); on 593 legs the ROUTE'S OWN MOVE is proven optimal (its ticks = a certified
+  bound). **1,914 legs PROVEN OPTIMAL** (jump 1,378, hop 371, fall 94, arrow 60, walk 11), 1,325 of them strictly
+  faster than the route (at the support class). A further 832 legs end at their uncertified bound (T = lb, a
+  non-plain tile the ball could reach first).
+- The route beaten: 11,535 legs in fewer ticks than the route's own, 105,555 ticks in all.
+- Where it fails: arrow legs across fields (the ball enters and leaves arrow tiles inside the move: 22% unsolved),
+  long plain legs (> 60 ticks: the most of the plain classes' failures), multi-jump (airjump 18.5% solved); the
+  failures' reasons: not plain and no coupled candidate 1,685, no plain candidate 1,625, the budget 426.
 
 **Chains** (`tools/math/msolve_chain.js`, box 3: from the route's state at every 48th move's start to the support 4
 moves ahead, 5 s a chain, the route's own ticks over those 4 moves as the yardstick):
@@ -967,24 +986,26 @@ moves ahead, 5 s a chain, the route's own ticks over those 4 moves as the yardst
 | the first fan-out (80 tiles, 60 k nodes), w = 1 | 41.1% | 31.9% | 25.0% | 14.8% | 37 |
 | the cheap fan-out (30 tiles, 20 k nodes), w = 1 | 44.2% | 32.8% | 25.9% | 14.8% | 40 |
 | the cheap fan-out, w = 2 (weighted A*) | 48.8% | 31.7% | 25.1% | 0 | 24 |
-| **+ the reach field's order (the default), w = 1** | **45.8%** | **33.9%** | **26.8%** | **14.9%** | 54 |
+| + the reach field's order, w = 1 | 45.8% | 33.9% | 26.8% | 14.9% | 54 |
+| **+ two phases (w = 2 until the first chain or half the clock, then w = 1): the default** | **52.4%** | **35.8%** | **28.3%** | **15.2%** | 57 |
 
-- Chain by chain against the run before it: 21 chains found only with the reach field's order, 3 only without; of the
-  493 both found, 8 shorter with it and 1 longer. The three w = 1 / w = 2 runs together find 50.5%.
-- The chains of plain moves only (hop, jump, fall, walk: 410) 70.2% found, 53.9% <= the route; the chains through fields,
-  boosts or portals (713) 31.7% / 22.4%. The found ones take median 0.94 of the route's ticks.
-- Closed (optimal within the graph of its legs): 167 chains (14.9%); 3 of them are longer than the route (the route
+- Chain by chain: the reach field's order against the run before it 21 chains found only with it, 3 only without (of
+  the 493 both found, 8 shorter with it, 1 longer); the two phases against the reach order alone 74 found only with
+  them, 0 only without (of the 514 both found, 2 shorter, 5 longer); the first chain after median 374 ms.
+- The chains of plain moves only (hop, jump, fall, walk: 410) 80.2% found, 55.6% <= the route; the chains through
+  fields, boosts or portals (713) 36.3% / 24.4%. The found ones take median 0.98 of the route's ticks.
+- Closed (optimal within the graph of its legs): 171 chains (15.2%); 6 of them are longer than the route (the route
   takes a leg the graph does not hold: the closed claim is about these legs, not about every input).
-- Where they fail: the 5 s clock (the median chain spends it all: ~54 nodes, each a direct leg of up to 80 ticks and
-  its fan-outs), four-move stretches of 130-170 ticks through fields.
+- Where they fail: the 5 s clock (the median chain spends it all: ~57 nodes, each a direct leg of up to 80 ticks and
+  its fan-outs; the fan-out is ~3/4 of a chain's time), four-move stretches through fields.
 
 ### 4.8 What the solver does not cover yet
 
-- Multi-jump in the plain regime (the air-jump tick is a second member parameter: not listed; airjump legs 16.7% solved).
+- Multi-jump in the plain regime (the air-jump tick is a second member parameter: not listed; airjump legs 18.5% solved).
 - Long plain legs (> 60 ticks: the most failures of the plain classes): the K = 2 tree grows as T^2 per item and the
   budget runs out; the chain (4.6) is the way for them (supports in between).
 - Arrow legs by THEOREM F2's frame map (the level, the state and the inputs rotated into the plain frame, solved by
-  the plain tier, rotated back, replayed): not built; the arrow class is the solver's weakest (76.7%), and the
+  the plain tier, rotated back, replayed): not built; the arrow class is the solver's weakest (77.8%), and the
   arrow-class moves are mostly arrow tiles (9,377 in the census) rather than a flipped world gravity (162).
 - The bound across fields (the field tier's own bound is section 6's `lb`, reported there, not certified here), so no
   field leg is claimed proven optimal.
@@ -997,15 +1018,17 @@ moves ahead, 5 s a chain, the route's own ticks over those 4 moves as the yardst
 
 `createSolver(L, {K, Tmax})` -> `S`: `S.leg(start, target, o)` -> `{ok, masks, T, hop, lb, cert, proven, tool,
 member, k, cands, verifies, us, why}` (o: `Tmax`, `K`, `plain` / `fields` / `coupled` (each on by default), `nodes`,
-`itemNodes`, `fieldMs`, `coupledTicks`, `debug(item)`); `S.chain(start, target, o)` -> `{ok, masks, T, closed,
-expanded, legs, nodes, cut, reach, ms}` (o: `ms`, `legT`, `w`, `fanT`, `fanMax`, `fanNodes`, `events`, `reach`,
-`kappa`, `Tmax`, `coupledDirect`); `S.landings(start, o)` -> `[{tile, T, masks, hop}]`; `S.lowerBound(start, target)`;
+`itemNodes`, `fieldMs`, `coupledTicks`, `chain` / `chainAny` / `chainMs` (the chain tier), `debug(item)`);
+`createSolver(L, {certTiles: false})`: the certificate's rectangle alone; `S.chain(start, target, o)` -> `{ok, masks,
+T, closed, expanded, legs, nodes, cut, reach, firstMs, ms}` (o: `ms`, `legT`, `w` (the final weight, 1), `w1` (the
+first phase's, 2), `phase1` (0.5 of the clock), `fanT`, `fanMax`, `fanNodes`, `events`, `reach`, `kappa`, `Tmax`,
+`coupledDirect`, `rootLeg`); `S.landings(start, o)` -> `[{tile, T, masks, hop}]`; `S.lowerBound(start, target)`;
 `S.goal(target)`; `S.replay(start, masks, target)`; `clsOf(sim, flags)`; `holdTables(ctx)`, `holdRange(H, x, v, n,
 slack)`. A target: `{tiles: [tile index], cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A' | 'any', tele, via}`. A start: an
 `EESnapshot` or an `EESim`. `node test/msolve.js [--quick] [--samples=N]`;
 `EEAT_TRUTH_ROOT=<root> node tools/math/msolve_bench.js --moves=<exact_jsonl> --out=<dir> --shard=i/n` then `--agg=<dir>`;
-`tools/math/msolve_chain.js` likewise (`--chain=4 --every=48 --ms=5000 --w=1 --fanMax=30 --fanNodes=20000
---reach=1`).
+`tools/math/msolve_chain.js` likewise (`--chain=4 --every=48 --ms=5000`; `--w`, `--w1`, `--phase1`, `--fanMax`,
+`--fanNodes`, `--events=0`, `--reach=0`, `--kappa`).
 
 ## 6 Field kinematics: every field as one recurrence with its own coefficients
 
