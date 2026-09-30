@@ -357,6 +357,37 @@ function makeCore(L, co) {
 		if (ordMemo.size > 8) ordMemo.delete(ordMemo.keys().next().value);
 		return f;
 	}
+	/** THE PHYSICS ORDERING FIELD ON AN EFFECT LEVEL (doctor 8, n5-doc-8; OPT-IN EEAT_PHYS_STRIP=1): a level with jump / fly /
+	 *  speed / low-gravity / multijump / gravity effect blocks makes the reach field a WALK (reach.js: gravity- and speed-
+	 *  blind), and the finders order by it: 9 of the batch's 19 levels (Eurus, Fizio1, Polar Eclipse, Beat the Spikes 2,
+	 *  Dreamland, Chain Link Clamber, NSFW Spring Relics, Gifts of Gaia, Forgotten Helix). Eurus's blue coin (61, 7): the
+	 *  walk is lowest along rows 10-11 under the coin (a dead end from below), the known route builds -6.3 px/tick flying
+	 *  up-left through a staircase of left arrows (rows 5-9) that legBest never visits (from 120 route ticks out, 5 s: rows
+	 *  0-7 unvisited). While the ball has none of those effects (and the world gravity is 1) the field of the level with the
+	 *  effect blocks as AIR (goexplore.js --fPhys's strip) is the physics the ball is in until it touches one: the finders'
+	 *  ORDER only (their distances, the closest, the cuts stay the walk field's) */
+	const STRIP_ON = process.env.EEAT_PHYS_STRIP === '1';
+	const STRIP_WILD = new Set([417, 418, 419, 453, 461, 1517, 1618]);
+	const stripMemo = new WeakMap();
+	function stripFieldNow(goal, allowDeath, f0) {
+		if (!STRIP_ON || !f0 || f0.mode !== 'walk' || L.gravityMult !== 1) return null;
+		if (sim.has_levitation || sim.low_gravity || sim.speed_boost || sim.jump_boost || sim.max_jumps !== 1 || sim.flip_gravity) return null;
+		if (sim.gravity_dir && (sim.gravity_dir.x !== 0 || sim.gravity_dir.y !== 1)) return null;
+		let Ls = stripMemo.get(L);
+		if (Ls === undefined) {
+			let any = false;
+			for (let i = 0; i < N; i++) if (STRIP_WILD.has(L.fg[i])) { any = true; break; }
+			Ls = any ? L : null;
+			stripMemo.set(L, Ls);
+		}
+		if (Ls === null) return null;
+		const Lc0 = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
+		const fg = Int32Array.from(Lc0.fg);
+		for (let i = 0; i < N; i++) if (STRIP_WILD.has(fg[i])) fg[i] = 0;
+		let f = null;
+		try { f = T.goalField(Object.assign({}, Lc0, { fg }), T.fieldTilesOf(goal), { deaths: allowDeath }); } catch (e) { f = null; }
+		return f && f.mode !== 'walk' ? f : null;
+	}
 	/** the goal field of the level as the doors stand in the state now in sim (memoized in types.js) */
 	function fieldNow(goal, allowDeath) {
 		const Lc = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
@@ -788,7 +819,20 @@ function makeCore(L, co) {
 			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null,
 				width0: 300, widthMax: 80000, depthMax: dmax, stall: 150 + 100 * rung });
 			const cell0 = process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(',').map(Number) : null;
-			const runBest = (end, cell) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: fOrd || field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: cell || cell0, visited: visW, dieStep: !!wp.dieField });
+			// (EEAT_PHYS_STRIP=1: on an effect level whose field is a walk, the physics field with the effect blocks as air orders
+			// the best-first search while the ball has no such effect; its closest is re-measured on the walk field (one unit))
+			let fStrip = null;
+			if (!fOrd && field0 && field0.mode === 'walk' && STRIP_ON) { sim.restore(starts[0].snap); fStrip = stripFieldNow(goal, allowDeath, field0); if (fStrip) st.stripUsed = (st.stripUsed || 0) + 1; }
+			const runBest = (end, cell) => {
+				const rb = LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: fOrd || fStrip || field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: cell || cell0, visited: visW, dieStep: !!wp.dieField });
+				if (fStrip && rb && rb.closest && rb.closest.tail && rb.closest.start >= 0) {
+					sim.restore(snaps[rb.closest.start].snap);
+					for (let k = 0; k < rb.closest.tail.length; k++) { E.applyMask(inp, rb.closest.tail[k] & 31); sim.tick(inp); }
+					const c = RF.costAt(field0, sim);
+					rb.closest.dist = c < 0 ? 1e9 : c;
+				}
+				return rb;
+			};
 			const mode = LEG_MODE();
 			if (WALLS_ON && (WALLS_ALL || T.fieldTouchOf(goal) || wp.wallsOn) && mode === 'best' && field0 && field0.mode !== 'walk') visW = new Uint8Array(N);
 			const t3 = Date.now();
