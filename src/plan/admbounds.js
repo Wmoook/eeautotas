@@ -208,14 +208,22 @@ function staticOf(L) {
 	// SOURCES: a tile whose id's PHYSICS is not an empty tile's (arrows, boosts, dots, liquids, climbables, effects;
 	// the kill flag alone is no physics: a spike is tame) dilated by DILATE (the gravity queue's 2 ticks back + the
 	// walk node's one tile), and the tiles that TELEPORT (portals; killers: a death respawns) dilated by 1 (the node)
-	const src0 = new Uint8Array(N), src1 = new Uint8Array(N);
+	const src0 = new Uint8Array(N), src1 = new Uint8Array(N), srcX0 = new Uint8Array(N), killM = new Uint8Array(N);
 	let nSrc = 0;
 	const tameIdPhys = (b) => tameLevel && b >= 0 && b < nF && L.gMox[b] === g0x && L.gMoy[b] === g0y && L.gMorx[b] === r0x && L.gMory[b] === r0y &&
 		(L.flags[b] & (F_CLIMB | F_LIQUID | F_BOOST)) === 0 && !UNTAME.has(b);
+	// the X physics alone: only a sideways pull (side arrows: mox / morx), a side boost (114 / 115) or an effect changes
+	// the x update u' = (u + a) * drag with drag <= BASE_DRAG (dots, climbables, liquids, up / down arrows, vertical
+	// boosts push x by the input alone, a = 1 / MULT, with base drag or a stronger one: not x sources)
+	const X_SAFE_UNTAME = new Set([119, 369, 416, 1585, 77, 83]);   // liquids (stronger drags), music (a tick cut short)
+	const tameIdX = (b) => tameLevel && b >= 0 && b < nF && L.gMox[b] === 0 && L.gMorx[b] === 0 && b !== 114 && b !== 115 &&
+		(!UNTAME.has(b) || X_SAFE_UNTAME.has(b));
 	for (let i = 0; i < N; i++) {
 		if (isWallId(fg[i])) continue;
 		if (!tameIdPhys(fg[i])) { src0[i] = 1; nSrc++; }
-		if (portalCell[i] || kills(i) || kills(curOf(i))) { src1[i] = 1; nSrc++; }
+		if (!tameIdX(fg[i])) srcX0[i] = 1;
+		if (portalCell[i]) { src1[i] = 1; nSrc++; }
+		if (kills(i) || kills(curOf(i))) killM[i] = 1;
 	}
 	const dilate = (a, r) => {
 		const tmp = new Uint8Array(N), out = new Uint8Array(N);
@@ -231,10 +239,13 @@ function staticOf(L) {
 		}
 		return out;
 	};
-	let src = new Uint8Array(N);
-	if (!tameLevel) src.fill(1);
-	else if (nSrc) { const a = dilate(src0, DILATE), b = dilate(src1, 1); for (let i = 0; i < N; i++) src[i] = a[i] | b[i]; }
-	const tameQ = (id) => tameIdPhys(id);
+	let src = new Uint8Array(N), srcX = new Uint8Array(N), killD = new Uint8Array(N);
+	if (!tameLevel) { src.fill(1); srcX.fill(1); } else {
+		const b = dilate(src1, 1), a = dilate(src0, DILATE), ax = dilate(srcX0, DILATE);
+		killD = dilate(killM, 1);
+		for (let i = 0; i < N; i++) { src[i] = a[i] | b[i]; srcX[i] = ax[i] | b[i]; }
+	}
+	const tameQ = (id) => tameIdPhys(id), tameQX = (id) => tameIdX(id);
 	// the level's sups for the fallback (bounds.js vmaxOf's rules, re-derived)
 	const cap = { xp: false, xn: false, yp: false, yn: false };
 	let gmx = 0, gmUp = 0, gmDown = 0, zeroG = false, liquid = false;
@@ -282,7 +293,7 @@ function staticOf(L) {
 	const rise = riseOf(jv, gTame);
 	const upOk = tameLevel && Math.abs(gTame) >= 0.11 && gTame > 0;   // (no y auto-align: |modifier_y| >= 0.1)
 	S = { W, H, N, g, nF, isWallId, never, touchers, portals, dsrc: Int32Array.from(dsrc), respawn: Int32Array.from(respawn), deaths, timed,
-		src, nSrc, tameLevel, tameQ, vmax, cx, rise, upOk, gTame, ice, ids };
+		src, srcX, killD, nSrc, tameLevel, tameQ, tameQX, vmax, cx, rise, upOk, gTame, ice, ids };
 	STATIC.set(L, S);
 	return S;
 }
@@ -398,27 +409,36 @@ function createAdmBounds(L, o = {}) {
 		const tame = S.tameLevel && (tiers.accX || tiers.up);
 		let xd = null, xv = null, ud = null, uv = null;
 		if (tame) {
-			const block = new Uint8Array(N);
-			for (let i = 0; i < N; i++) block[i] = wall[i] | S.src[i];
-			const gT = [], gI = [];
-			for (const t of goalArr) if (!block[t]) { gT.push(t); gI.push(0); }
-			const vT = [], vI = [];
-			for (let i = 0; i < N; i++) {
-				if (!S.src[i] || wall[i]) continue;
-				// the walk's node first in a source tile: the centre is within one tile of it
-				const x = i % W, y = (i - x) / W;
-				let m = Infinity;
-				for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) { const c = yy * W + xx; if (!wall[c] && fb[c] < m) m = fb[c]; }
-				if (m !== Infinity) { vT.push(i); vI.push(m); }
-			}
+			// per tier its own source set (x: S.srcX, up: S.src); the walk's node first in a source tile has its centre within
+			// one tile of it: the source's value = the least fallback of its 3 x 3
+			const prep = (srcArr) => {
+				const block = new Uint8Array(N);
+				for (let i = 0; i < N; i++) block[i] = wall[i] | srcArr[i];
+				const gT = [], gI = [];
+				for (const t of goalArr) if (!block[t]) { gT.push(t); gI.push(0); }
+				const vT = [], vI = [];
+				for (let i = 0; i < N; i++) {
+					if (!srcArr[i] || wall[i]) continue;
+					const x = i % W, y = (i - x) / W;
+					let m = Infinity;
+					for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) { const c = yy * W + xx; if (!wall[c] && fb[c] < m) m = fb[c]; }
+					if (m !== Infinity) { vT.push(i); vI.push(m); }
+				}
+				// a death (the node within one tile of a killer): >= DEATH_MIN ticks dead + the fallback from a respawn; the
+				// killers stay walkable (a walk past or through them that does not die is tame)
+				if (S.deaths) for (let i = 0; i < N; i++) if (S.killD[i] && !wall[i] && !srcArr[i]) { vT.push(i); vI.push(DEATH_MIN + R); }
+				return { block, gT, gI, vT, vI, srcArr };
+			};
 			if (tiers.accX) {
-				xd = dijkstra(W, H, block, gT, gI, (dx) => (dx !== 0 ? 16 : 0));
-				// via: paths into the sources (the entry step into a source tile is free: bounded as the linear v* run)
-				xv = viaField(wall, block, vT, vI, (dx) => (dx !== 0 ? 16 / S.cx.vs : 0));
+				const P = prep(S.srcX);
+				xd = dijkstra(W, H, P.block, P.gT, P.gI, (dx) => (dx !== 0 ? 16 : 0));
+				// via: paths into the sources (priced as the linear v* run; the state's bonus over v* subtracted in at())
+				xv = viaField(wall, P.srcArr, P.vT, P.vI, (dx) => (dx !== 0 ? 16 / S.cx.vs : 0));
 			}
 			if (tiers.up && S.upOk) {
-				ud = dijkstra(W, H, block, gT, gI, (dx, dy) => (dy < 0 ? 16 : 0));
-				uv = viaField(wall, block, vT, vI, (dx, dy) => (dy < 0 ? 16 / S.rise.rate : 0));
+				const P = prep(S.src);
+				ud = dijkstra(W, H, P.block, P.gT, P.gI, (dx, dy) => (dy < 0 ? 16 : 0));
+				uv = viaField(wall, P.srcArr, P.vT, P.vI, (dx, dy) => (dy < 0 ? 16 / S.rise.rate : 0));
 			}
 		}
 		const bound = new Float32Array(N);
@@ -441,7 +461,7 @@ function createAdmBounds(L, o = {}) {
 	}
 	/** the via-source field: from the source tiles (init fb there) over non-source, non-wall tiles; a source tile is its
 	 *  own init (the step INTO a source is priced like any step: entering it takes the same travel) */
-	function viaField(wall, block, vT, vI, cost) {
+	function viaField(wall, srcArr, vT, vI, cost) {
 		// sources are entered, not crossed: run the Dijkstra on 'wall' with the sources as the only way to have a value,
 		// while blocking the relaxation OUT of a source tile into ... (a path may leave and re-enter: any path is priced by
 		// its first source, the fb there covers the rest): relax only from sources and non-source tiles into non-source
@@ -459,7 +479,7 @@ function createAdmBounds(L, o = {}) {
 				const xx = x + DX8[d], yy = y + DY8[d];
 				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
 				const n = yy * W + xx;
-				if (wall[n] || S.src[n]) continue;
+				if (wall[n] || srcArr[n]) continue;
 				if (d >= 4 && (wall[y * W + xx] || wall[yy * W + x] || wall[t])) continue;
 				const nd = key + cst[d];
 				if (nd < dist[n]) { dist[n] = nd; heap.push(nd, n); }
@@ -489,9 +509,11 @@ function createAdmBounds(L, o = {}) {
 			out.fb = Math.max(v, b, bx, by);
 		}
 		// the ball's own physics plain: no effect, and the gravity queue's tiles (the next 2 ticks' delayed) tame
-		const plain = !sim.has_levitation && sim.speed_boost === 0 && !sim.is_zombie && sim.flip_gravity === 0 && !sim.in_god_mode &&
-			S.tameQ(sim._q0) && S.tameQ(sim._q1) && S.tameQ(sim.current_tile === undefined ? 0 : sim.current_tile);
-		if (m.xd && plain) {
+		const fx0 = !sim.has_levitation && sim.speed_boost === 0 && !sim.is_zombie && sim.flip_gravity === 0 && !sim.in_god_mode;
+		const cur = sim.current_tile === undefined ? 0 : sim.current_tile;
+		const plain = fx0 && S.tameQ(sim._q0) && S.tameQ(sim._q1) && S.tameQ(cur);
+		const plainX = fx0 && S.tameQX(sim._q0) && S.tameQX(sim._q1) && S.tameQX(cur);
+		if (m.xd && plainX) {
 			const u0 = Math.abs(sim.speed_x);
 			const need = m.xd[t] - adx - 8 - SLACK;
 			const dir = m.xd[t] === Infinity ? Infinity : ticksFor(S.cx, u0, need);

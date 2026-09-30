@@ -34,6 +34,15 @@ for (const r of ok) for (const l of r.legs) {
 }
 out.legs = {};
 for (const k of Object.keys(legR)) out.legs[k] = { n: legR[k].length, p10: q(legR[k], 0.1), median: q(legR[k], 0.5), p90: q(legR[k], 0.9), mean: legR[k].reduce((s, x) => s + x, 0) / Math.max(1, legR[k].length) };
+// legs by the route's source (the user's jobs: optimized TASes; god: the benchmark's AutoTAS runs)
+out.legSource = {};
+for (const src of ['job', 'god']) {
+	const sel = [];
+	for (const r of ok) if (r.source === src) for (const l of r.legs) if (l[0] >= 10) sel.push(l);
+	out.legSource[src] = { n: sel.length, adm: q(sel.map((l) => l[1] / l[0]), 0.5), prim: q(sel.map((l) => (l[2] || 0) / l[0]), 0.5), maxAll: q(sel.map((l) => Math.max(l[1], l[2] || 0, l[3] || 0) / l[0]), 0.5) };
+}
+// the share of routes whose level caps a sup at 16.25 (a boost, arrows, effects, rotated portals: the fallback's weak spot)
+out.capped = { x: ok.filter((r) => r.vmax.xp >= 16.25 || r.vmax.xn >= 16.25).length, up: ok.filter((r) => r.vmax.yn >= 16.25).length, of: ok.length };
 // legs by length band
 const bands = [[10, 50], [50, 200], [200, 1000], [1000, 1e9]];
 out.legBands = bands.map(([lo, hi]) => {
@@ -67,6 +76,8 @@ console.log('leg bound / actual (legs >= 10 ticks, at the segment start):');
 for (const k of Object.keys(out.legs)) { const o = out.legs[k]; console.log(`  ${k.padEnd(7)} n ${String(o.n).padStart(6)}  p10 ${f2(o.p10)}  median ${f2(o.median)}  p90 ${f2(o.p90)}  mean ${f2(o.mean)}`); }
 console.log('  by leg length (median adm / prim / max):');
 for (const b of out.legBands) console.log(`    [${b.lo}, ${b.hi === 1e9 ? 'inf' : b.hi}) n ${b.n}: ${f2(b.adm)} / ${f2(b.prim)} / ${f2(b.maxAP)}`);
+for (const s of Object.keys(out.legSource)) { const o = out.legSource[s]; console.log(`  source ${s}: n ${o.n}, median adm ${f2(o.adm)} prim ${f2(o.prim)} max ${f2(o.maxAll)}`); }
+console.log(`  routes whose level caps x at 16.25: ${out.capped.x} / ${out.capped.of}, up: ${out.capped.up} / ${out.capped.of}`);
 console.log('every tick of every segment (bound / ticks left, left >= 10; bucket medians):');
 for (const b of NAMES) { const o = out.tick[b]; console.log(`  ${b.padEnd(5)} n ${String(o.n).padStart(9)}  p10 ${f2(o.p10)}  median ${f2(o.median)}  p90 ${f2(o.p90)}  mean ${f2(o.mean)}`); }
 console.log(`global relaxed start -> finish: adm median ${f2(out.global.adm.median)} (p10 ${f2(out.global.adm.p10)}), prim median ${f2(out.global.prim.median)} (p10 ${f2(out.global.prim.p10)})`);
