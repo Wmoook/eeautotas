@@ -268,10 +268,19 @@ function makeCore(L, co) {
 			// the route's (median), shorter in 91 of the 202 both found, longer in none; EEAT_TIGHTEN=0 off; its weight 3
 			// (EEAT_TIGHT_W): 77.4% either way, the legs 1.000 vs 1.007 (median), 1.303 vs 1.438 (p90), shorter in 66 of 204)
 			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
-				const tm = String(process.env.EEAT_TIGHTEN_MODE || 'best');
+				let tm = String(process.env.EEAT_TIGHTEN_MODE || 'best');
+				if (tm === 'smart') {
+					// (the beam too only for a leg much longer than the field says (its time at the running pace, or the exact
+					// tier's lower bound): Tutorial 1's leg 1, 343 ticks where the field says ~98, the beam 164)
+					let fe = Infinity;
+					starts.forEach((s, i) => { const c = startCost[i]; if (c >= 0) fe = Math.min(fe, c * 16 / 6.78 + (s.tick - t0)); });
+					const est = Math.max(Number.isFinite(fe) ? fe : 0, lbAbs);
+					const ub0 = Math.min(...found.cands.map((c) => c.depth));
+					tm = est > 0 && ub0 > 2 * est ? 'beam' : 'best';
+				}
 				// (EEAT_TIGHTEN_MODE: 'best' (the default), 'beam' (legBFS bounded by the leg: layered by tick, it keeps the
 				// fastest state per cell), 'both' (the beam, then best-first on what is left of the share))
-				const t8 = Date.now(), tEnd = t8 + (+process.env.EEAT_TIGHT_SHARE || 0.5) * (wEnd - t8);
+				const t8 = Date.now(), tEnd = t8 + (+process.env.EEAT_TIGHT_SHARE || (process.env.EEAT_TIGHTEN_MODE === 'smart' && tm === 'beam' ? 0.8 : 0.5)) * (wEnd - t8);
 				if (tm === 'beam' || tm === 'both') {
 					const ub = Math.min(...found.cands.map((c) => c.depth));
 					const rb = runBeam(tm === 'both' ? t8 + 0.6 * (tEnd - t8) : tEnd, ub - 1);
