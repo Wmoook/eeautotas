@@ -14,6 +14,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+// (the doctors' defaults, as src/compile.js; before types.js loads: its FX_FIELD / FX_STATE are read then)
+if (require.main === module) require('./plan/defaults.js').apply();
 const T = require('./plan/types.js');
 
 function parse(argv) {
