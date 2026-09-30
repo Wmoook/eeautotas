@@ -501,3 +501,27 @@ ways in.
   `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
   (classes), `tools/cmp/verify.js` (every .eetas replayed from the level file) and `tools/cmp/gate.js` (no level worse than a
   baseline on a gate list). Levels and routes of third parties never go into git.
+- **PERFECT: order and polish** (n5-perfect, 2026-09-30; `src/plan/perfect.js`, OPT-IN `EEAT_PERFECT=1`, off = the compile byte
+  for byte as before): `perfectRoute(ctx, masks, o)` = (1) THE ORDER B&B: the route the incumbent, its own states at every
+  model-state change the seeds, a node = verified arrivals of one model state, f = tick + the planner's admissible
+  lowerBound (a node at or past the incumbent's finish dropped: a proof), expanded depth first from the route's end, each of
+  the planner's plans' first step run by `exec.reach` (arrivals replayed from the level start), a finish sooner the new
+  incumbent (C.evaluate + the acceptance rule); (2) the polish with the route's JOINS as its window marks (`joinTicks`;
+  the compile passed its leg objects, which polish.js reads as tick marks: none). In the compile (strategy.js): once a route
+  is known min(20 s, 0.25 x the budget) is kept for it (half order, half polish), a route over `EEAT_PROVE_MAX` (300) run
+  ticks skips the prove stage (its exact search from the start proved none of the 24 compiled routes and took 10-30 s of the
+  polish's time) and the polish takes what is left. THE MEASURE (box 5, the pass offline on the final compile's 24 routes,
+  45 s each, `--workers=2`, `tools/perf/perfect.js`; every result replayed): 17 of 24 faster, 64,381 -> 61,931 run ticks,
+  median ticks / best known 1.215 -> 1.197, at or under the best known 3 -> 4 (Ruins 1,543 -> 1,478 vs the known 1,522);
+  The Blank Page 3,190 -> 2,466, Trick Or Treat 5,035 -> 4,424, Frostbitten 9,068 -> 8,840, MIHB's Dream 10,033 -> 9,821;
+  of the 2,450 ticks 2,255 came from the polish (the final compile's polish had 0.2-2.3 s on the long late routes), 195 from
+  the order pass (Tutorial 3 78, Gingerbread House 72, MIHB 34, Tutorial 2 11: re-derived last legs). The gap to the best
+  known, per level (`tools/perf/cmpknown.js --sum`: both routes replayed, the trigger orders side by side): the SAME trigger
+  order with slower legs on most (Fish Gods: the same 16 switch toggles, 303 of its 607-tick gap on the first; Bygone
+  Tutorial, Tutorial 2, the one-leg levels: NC Naos 319 vs 111, Rosa, Accident Prone, The Blank Page); triggers the known
+  route does not take on Trick Or Treat (6 coins vs 1), Tutorial 1 (two keys), Endless Space (2 coins): the planner's first
+  plan from there IS the trophy (Trick Or Treat est 1,580 from the start; Tutorial 1 est 712 from its 3rd coin), but the
+  executor's long trophy leg fails at 1.5-6 s, and the coins / keys were its stepping stones; another coin ORDER on
+  Gingerbread House (9 of 14 in order), Frostbitten (11 of 16) and MIHB's Dream's coin clusters. Tools: `tools/perf/plans.js`
+  (the planner's plans from a route's state), `stages.js` (a reports dir's stage times), `ladder.js` (the trophy leg from the
+  start under tight deadlines), `table.js` (the before / after table).
