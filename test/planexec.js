@@ -419,7 +419,7 @@ async function chainOfRoute(e, budget, polishMs) {
 	}
 	const ex = await EX.createExecutor(L, { workers: 0 });
 	let starts = [{ masks: new Uint8Array(0) }];
-	let prevTick = 0, done = 0, failAt = -1, why = null, ms = 0;
+	let prevTick = 0, done = 0, failAt = -1, why = null, ms = 0, retry = null;
 	const delays = [];
 	const t0 = Date.now();
 	for (let k = 0; k < ord.length; k++) {
@@ -432,11 +432,20 @@ async function chainOfRoute(e, budget, polishMs) {
 			const own = T.playTo(L, tr.masks.subarray(0, o.tick), { goal: g, allowDeath: true });
 			if (own.goalAt !== o.tick) continue;
 		}
+		const legStart = prevTick;
 		prevTick = o.tick;
 		const b = Math.max(budget, Math.min(15000, Math.round(budget * legTicks / 150)));
 		const r = await ex.reach(starts, wp, { ms: b, level: 1 });
 		if (!r.ok) {
 			failAt = k; why = r.fail ? r.fail.why : '?';
+			// (--chainRetry: the failed leg once more from the ROUTE's own state at the leg's start, the same budget: ok there
+			// = the chain's arrivals are the problem (which state the legs before kept), not the leg; the states side by side)
+			if (args.chainRetry) {
+				const stOf = (m) => { const q = T.playTo(L, m); const s = q.sim; return s ? { t: m.length, x: +s.x.toFixed(2), y: +s.y.toFixed(2), vx: +s.speed_x.toFixed(2), vy: +s.speed_y.toFixed(2) } : null; };
+				const rr = await ex.reach([{ masks: tr.masks.subarray(0, legStart) }], wp, { ms: b, level: 1 });
+				retry = { ok: rr.ok, tool: rr.tool, ticks: rr.ok ? Math.min(...rr.arrivals.map((a) => a.masks.length)) - legStart : -1, legTicks, route: stOf(tr.masks.subarray(0, legStart)),
+					starts: starts.slice(0, 6).map((a) => stOf(typeof a.masks === 'string' ? T.masksOf(a.masks) : a.masks)), nStarts: starts.length, feat: o.feat };
+			}
 			if (args.delays) console.error(`  leg ${k} ${wp.label}: FAILED (${why}) route ${legTicks} ticks from ${starts.length} starts, ${r.ms} ms` + (args.tiers ? ` tiers ${(r.tiers || []).map((t) => `${t.tier}:${t.ok === undefined ? t.status || '' : t.ok ? 'ok' : 'no'}${t.ms !== undefined ? '/' + t.ms : ''}${t.prof && t.ms > 700 ? JSON.stringify(t.prof) : ''}`).join(' ')}` : ''));
 			break;
 		}
@@ -464,7 +473,7 @@ async function chainOfRoute(e, budget, polishMs) {
 		}
 	}
 	await ex.close();
-	return { name: e.name, legs: ord.length, done, failAt, why, known: tr.runTicks, compiled, polished, ms, pms, delays };
+	return { name: e.name, legs: ord.length, done, failAt, why, known: tr.runTicks, compiled, polished, ms, pms, delays, retry };
 }
 async function chainTruth() {
 	const S = require('../src/plan/truthset.js');
@@ -483,7 +492,7 @@ async function chainTruth() {
 		const runs = [];
 		for (let i = 0; i < par; i++) {
 			runs.push(new Promise((resolve) => {
-				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, ...(args.chainOnly ? [`--chainOnly=${args.chainOnly}`] : []), `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
+				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, ...(args.chainOnly ? [`--chainOnly=${args.chainOnly}`] : []), `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, ...(args.chainRetry ? ['--chainRetry'] : []), `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
 				let s = '';
 				p.stdout.on('data', (d) => { s += d; });
 				p.on('close', () => { try { resolve(JSON.parse(s.trim().split('\n').pop()).rows || []); } catch (e) { resolve([]); } });
@@ -493,7 +502,7 @@ async function chainTruth() {
 	} else for (const e of mine) rows.push(await chainOfRoute(e, budget, polishMs));
 	if (shard) { console.log(JSON.stringify({ rows })); return; }
 	if (args.out) fs.writeFileSync(String(args.out), JSON.stringify(rows));
-	for (const r of rows) console.log(`  ${r.name}: ${r.error ? 'error ' + r.error : `${r.done}/${r.legs} legs${r.failAt >= 0 ? ` (failed at ${r.failAt}: ${r.why})` : ''}, known ${r.known}, compiled ${r.compiled}, polished ${r.polished} (${(r.ms / 1000).toFixed(1)} s + ${(r.pms / 1000).toFixed(1)} s)${args.delays ? ' delays ' + (r.delays || []).join(',') : ''}`}`);
+	for (const r of rows) console.log(`  ${r.name}: ${r.error ? 'error ' + r.error : `${r.done}/${r.legs} legs${r.failAt >= 0 ? ` (failed at ${r.failAt}: ${r.why})` : ''}, known ${r.known}, compiled ${r.compiled}, polished ${r.polished} (${(r.ms / 1000).toFixed(1)} s + ${(r.pms / 1000).toFixed(1)} s)${args.delays ? ' delays ' + (r.delays || []).join(',') : ''}${r.retry ? ` | from the route's state: ${r.retry.ok ? `ok ${r.retry.ticks} (${r.retry.tool})` : 'fails'} (${r.retry.feat}, route ${r.retry.legTicks}) route ${JSON.stringify(r.retry.route)} starts ${r.retry.nStarts} ${JSON.stringify(r.retry.starts.slice(0, 2))}` : ''}`}`);
 	const full = rows.filter((r) => r.compiled > 0);
 	const ratio = (a) => a.map((r) => r.x).sort((p, q) => p - q);
 	const rc = ratio(full.map((r) => ({ x: r.compiled / r.known }))), rp = ratio(full.filter((r) => r.polished > 0).map((r) => ({ x: r.polished / r.known })));
