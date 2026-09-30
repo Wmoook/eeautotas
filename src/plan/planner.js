@@ -978,7 +978,7 @@ function createPlanner(model, facts, o = {}) {
 	}
 	/**
 	 * THE CRUMB PLANS (doctor 9, n5; EEAT_CRUMBS=1, model.js): the CRUMB_K nearest crumbs (coins no gate reads) by the
-	 * admissible bound, as one-step plans in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_MIN ticks)
+	 * admissible bound, as one-step plans in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_LEGMIN ticks)
 	 * and the crumb is nearer than that leg's target (lb below CRUMB_F x its lb); the least lb x (1 + its rung) first (a
 	 * crumb that failed its rung gives way to the next nearest, a far one waits). An arrival at a crumb is a new anchor with one gain more: the
 	 * strategy goes on from it, so the compile follows the level's breadcrumb trail one leg at a time, and every plan from
@@ -987,7 +987,7 @@ function createPlanner(model, facts, o = {}) {
 	// (CRUMB_K crumb plans, the nearest first: a compile's workers run the first plans' legs side by side, so with one the
 	// other worker spent every rung on the long leg itself; box 5, On And On, 60 s, 2 workers: the nearest crumb (a blue
 	// coin off the route, closest 1 tile) took rungs 0-3 while the route's coin waited at rung 2)
-	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
+	const CRUMB_LEGMIN = +process.env.EEAT_CRUMB_LEGMIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
 	const CRUMB_K = process.env.EEAT_CRUMB_K !== undefined ? Math.max(1, +process.env.EEAT_CRUMB_K | 0) : 2;
 	const CRUMB_AFTER = process.env.EEAT_CRUMB_AFTER !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_AFTER | 0) : 1;
 	function crumbPlan(a, plans) {
@@ -995,7 +995,7 @@ function createPlanner(model, facts, o = {}) {
 		if (!p0 || !p0.steps || !p0.steps.length) return [];
 		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
-		if (!(lb0 >= CRUMB_MIN)) return [];
+		if (!(lb0 >= CRUMB_LEGMIN)) return [];
 		const cls = a.S.key + '|' + a.cls;
 		// (only once that leg has failed CRUMB_AFTER rungs from this anchor's class: a first leg the executor finds at its
 		// first rung (the compiled levels' direct legs) keeps both workers; EEAT_CRUMB_AFTER=0: at once)
