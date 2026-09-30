@@ -395,6 +395,13 @@ function createPlanner(model, facts, o = {}) {
 	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
 	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
 	const rchBad = new Map();
+	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
+	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
+	// pocket), so it blocks the edge from that (state, position) only, not from every node of the state: the re-entry
+	// anchors (a class re-entered by another trigger) and the child nodes at other positions keep the edge.
+	// EEAT_PROOF_POS=0: keyed by the state alone, as before)
+	const PROOF_POS = process.env.EEAT_PROOF_POS !== '0';
+	const proofKey = (S, pos) => (PROOF_POS && pos && pos.id !== undefined ? S.key + '@' + pos.id : S.key);
 	const rchKey = (S, pos, edge) => S.pkey + '|' + pos.id + '|' + edge;
 	/**
 	 * the edges of node (S, pos): [{X (null: the trophy), S2, pos2, expect, lb, est, steps, viaDeath, edge, live}]. The
@@ -442,7 +449,7 @@ function createPlanner(model, facts, o = {}) {
 			if (!g) return;
 			if (wantEst) {
 				if (facts) {
-					if (facts.blocked(edge, cls, S.key)) return;
+					if (facts.blocked(edge, cls, proofKey(S, pos))) return;
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) g.est = Math.max(g.lb, ok);
@@ -478,7 +485,7 @@ function createPlanner(model, facts, o = {}) {
 			const S2 = model.mkState(vals, S.taken, S.btaken, S.cp);
 			const rp = model.respawnOf(S2, 'est');
 			const edge = 'die:' + vals[dieIdx];
-			if (rp && !(facts && facts.blocked(edge, cls, S.key))) {
+			if (rp && !(facts && facts.blocked(edge, cls, proofKey(S, pos)))) {
 				const ok = facts ? facts.okTicks(edge, cls) : undefined;
 				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
 				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
@@ -975,7 +982,7 @@ function createPlanner(model, facts, o = {}) {
 			return out;
 		}
 		const fail = (result && result.fail) || { why: 'budget' };
-		const sKey = a ? a.S.key : (cls || '').split('|')[0];
+		const sKey = a ? proofKey(a.S, a.pos) : (cls || '').split('|')[0];
 		if (fail.why === 'proof') out.push(facts.add({ kind: 'proof', edge, sKey }));
 		for (const b of fail.blockedBy || []) {
 			if (!a || b.tile === undefined) continue;
