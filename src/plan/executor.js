@@ -1564,6 +1564,26 @@ async function createExecutor(L, opts) {
 	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT !== '0';   // (DEFAULT ON since n5 lane 6 block 1; =0: off)
 	const REDIRECT_F = +process.env.EEAT_SKEL_REDIRECT_F > 1 ? +process.env.EEAT_SKEL_REDIRECT_F : 2;
 	const skelDirectMs = new Map();   // skelKey -> the largest direct-leg share tried (EEAT_SKEL_REDIRECT)
+	// ---- THE SKELETON ACROSS WALLS (n5 lane 4, RATE): the memo's key holds the waypoint field's wall count, and every
+	// failed direct leg / sub-leg learns counterexample walls, so the next call for the same step (the next rung, the next
+	// deepening) found no memo and started over at the step's starts: Sentinel Ravines' one trophy leg restarted 7 of its 8
+	// fresh calls after new walls (c 896 reached at 63 s, c0 910 again at 64 s, 918 at 241 s, 953 at 299 s: 300 s of
+	// sub-legs spent on the same first 40 tiles). Now the levels reached are kept per (goal, first start) whatever the walls
+	// (SKEL_BASE_K, the latest), and a call with no memo for its walls re-measures them on its walled field (the doors of
+	// each level's own arrivals) and resumes from the deepest one below its starts' cost (dead ends skipped). Ordering of
+	// the search only: every arrival was the engine's replay, the final ones verified as before. EEAT_SKEL_REUSE=0: off.
+	const SKEL_REUSE = process.env.EEAT_SKEL_REUSE !== '0';
+	const SKEL_BASE_K = 12;
+	const skelBase = new Map();   // key without the walls -> [{cur: [mask strings]}] (the latest SKEL_BASE_K levels)
+	const baseKeyOf = (key) => key.replace(/\|w-?\d+$/, '');
+	const skelBasePush = (key, cur) => {
+		if (!SKEL_REUSE) return;
+		const bk = baseKeyOf(key);
+		let a = skelBase.get(bk);
+		if (!a) { a = []; skelBase.set(bk, a); }
+		a.push({ cur: cur.slice() });
+		if (a.length > SKEL_BASE_K) a.shift();
+	};
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
 	// skeleton's sub-legs order by their waypoint's field, so they share its walls)
 	const wallMemo = new Map(), wallBatches = new Map(), wallTabu = new Map();
@@ -1926,6 +1946,19 @@ async function createExecutor(L, opts) {
 		}
 		// (resume from the deepest level an earlier call for this step reached)
 		let key = skelKey(goal, wp, startStrs, wN);
+		// (no memo for these walls: the levels an earlier call reached on other walls, re-measured on this walled field)
+		if (SKEL_REUSE && !skelMemo.has(key) && skelBase.has(baseKeyOf(key))) {
+			let bestL = null;
+			for (const lv of skelBase.get(baseKeyOf(key))) {
+				if (DEAD_ON && deadEnds.size && lv.cur.every((s) => deadEnds.has(hashOf(s)))) continue;
+				let fw;
+				try { fw = fieldAt(lv.cur[0], goal, wp.allowDeath, wArr); } catch (e) { continue; }
+				if (!fw.f || !(fw.c >= 0) || !Number.isFinite(fw.c)) continue;
+				if (!(fw.c < c0 - 0.5) || (bestL && fw.c >= bestL.c)) continue;
+				bestL = { c: fw.c, cur: lv.cur.slice() };
+			}
+			if (bestL) { skelMemo.set(key, [bestL]); S.skelReuse = (S.skelReuse || 0) + 1; }
+		}
 		const memo = skelMemo.get(key);
 		// (a memo level no deeper than the starts' own cost is not resumed: a relay start (the strategy's nearest state of the
 		// last rung) can stand deeper than the skeleton's deepest level, and resuming went back up to it; EEAT_DEADEND=0: as
@@ -2000,7 +2033,12 @@ async function createExecutor(L, opts) {
 					continue;
 				}
 				// (a resumed level whose next sub-leg fails twice: a dead end, one level back next time)
-				if (top && levels.length === 2) memo.pop();
+				if (top && levels.length === 2) {
+					memo.pop();
+					// (and not seeded again from the wall-free memo on the next walls)
+					const ba = SKEL_REUSE ? skelBase.get(baseKeyOf(key)) : null;
+					if (ba) { const i = ba.findIndex((lv) => lv.cur[0] === top.cur[0]); if (i >= 0) ba.splice(i, 1); }
+				}
 				stuck = true;
 				break;
 			}
@@ -2011,6 +2049,7 @@ async function createExecutor(L, opts) {
 			cCur = c;
 			if (!skelMemo.has(key)) skelMemo.set(key, []);
 			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+			skelBasePush(key, cur);
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
 		// (stuck with DEAD_REST of the call or more left: the direct leg from the deepest level AND the starts with the rest
