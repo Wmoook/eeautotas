@@ -455,15 +455,25 @@ function createCorridor(L, opts = {}) {
 		const dqPush = (x) => { dq.push(x); let i = dq.length - 1; while (i > 0) { const q = (i - 1) >> 1; if (!dlt(dq[i], dq[q])) break; [dq[q], dq[i]] = [dq[i], dq[q]]; i = q; } };
 		const dqPop = () => { const top = dq[0], last = dq.pop(); if (dq.length) { dq[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < dq.length && dlt(dq[l], dq[m])) m = l; if (r < dq.length && dlt(dq[r], dq[m])) m = r; if (m === i) break; [dq[m], dq[i]] = [dq[i], dq[m]]; i = m; } } return top; };
 		const dRoom = () => !directShare || prof.direct <= directShare * (Date.now() - t0) + 20;
-		while (Date.now() < deadline) {
+		// (o.more: with o.first, a found chain does not end the search at once: it goes on, the order's weight the
+		// refinement's (w), for o.more x the time the first chain took (within the call's clock), a shorter chain replacing
+		// it: the greedy first chain was the executor's leg as found, 5% slower than the route in the median)
+		let stopAt = deadline, moreSet = false;
+		const firstStop = () => {
+			if (!o.first) return false;
+			if (!(o.more > 0)) return true;
+			if (!moreSet) { moreSet = true; stopAt = Math.min(deadline, Date.now() + o.more * (Date.now() - t0)); out.moreFrom = best ? best.T : 0; }
+			return Date.now() >= stopAt;
+		};
+		while (Date.now() < stopAt) {
 			if (hot.length) {
 				const m = hot.pop();
 				if (!m.dead && !(best && m.g + 1 >= best.T) && !(directOnce && dTried.has(m.key))) {
 					if (directOnce) dTried.add(m.key);
 					sim.restore(m.snap);
 					out.hotRuns = (out.hotRuns || 0) + 1;
-					if (directLeg(m, !!S.plainStart(sim)) && o.first) break;
-					if (o.bfs && !best && bfsFrom(m, o.bfsD || 24, o.bfsCap || 2000, Math.min(deadline, Date.now() + (o.bfsMs || 400))) && o.first) break;
+					if (directLeg(m, !!S.plainStart(sim)) && firstStop()) break;
+					if (o.bfs && !best && bfsFrom(m, o.bfsD || 24, o.bfsCap || 2000, Math.min(deadline, Date.now() + (o.bfsMs || 400))) && firstStop()) break;
 				}
 				continue;
 			}
@@ -472,7 +482,7 @@ function createCorridor(L, opts = {}) {
 				if (!m.dead && !(best && m.g + 1 >= best.T)) {
 					sim.restore(m.snap);
 					out.dqRuns = (out.dqRuns || 0) + 1;
-					if (directLeg(m, !!S.plainStart(sim)) && o.first) break;
+					if (directLeg(m, !!S.plainStart(sim)) && firstStop()) break;
 				}
 				continue;
 			}
@@ -492,7 +502,7 @@ function createCorridor(L, opts = {}) {
 			if (pass === 'all' && n.c <= D && !(directOnce && dTried.has(n.key))) {
 				if (directOnce) dTried.add(n.key);
 				if (directShare && !dRoom()) dqPush(n);
-				else if (directLeg(n, plainNode)) { if (o.first) break; continue; }
+				else if (directLeg(n, plainNode)) { if (firstStop()) break; continue; }
 			}
 			sim.restore(n.snap);
 			// (a grounded plain node: M spans; an airborne or field node (a launch, a field's inside): the best one, its
@@ -591,7 +601,7 @@ function createCorridor(L, opts = {}) {
 				if (fanOn && Date.now() < deadline) doFans();
 			}
 			if (o.probe) break;
-			if (o.first && best && goalFan) break;
+			if (best && goalFan && firstStop()) break;
 		}
 		out.prof = prof; out.rej = rej;
 		out.ms = Date.now() - t0;

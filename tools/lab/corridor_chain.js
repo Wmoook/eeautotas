@@ -46,7 +46,7 @@ if (argv.goalFan === '1') copt.goalFan = true;
 if (argv.restKey === '1') copt.restKey = true;
 if (argv.refine === '1') copt.refine = true;
 if (argv.bfs === '1') copt.bfs = true;
-for (const k of ['directShare', 'fieldPx', 'fieldV', 'Kf']) if (argv[k] !== undefined) copt[k] = +argv[k];
+for (const k of ['directShare', 'fieldPx', 'fieldV', 'Kf', 'more']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.fieldKey) copt.fieldKey = argv.fieldKey;
 const FIELD_LABELS = new Set(['arrow', 'dot', 'boost', 'climb', 'swim']);
 

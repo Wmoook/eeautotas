@@ -68,7 +68,7 @@ async function main() {
 						S = S || MS.createSolver(L, {});
 						X = X || require(path.join(root, 'src/plan/lab/corridor.js')).createCorridor(L, { solver: S });
 						// (corrf, or corr with EEAT_CORR_FIELDS=1 as the executor reads it: the corridor's fields pass, n5-s99-fields)
-						const fp = arm === 'corrf' || process.env.EEAT_CORR_FIELDS === '1' ? { goalFan: true, directShare: 0.15, restKey: true, refine: true } : null;
+						const fp = arm === 'corrf' || process.env.EEAT_CORR_FIELDS === '1' ? { goalFan: true, directShare: 0.15, restKey: true, refine: true, more: 1 } : null;
 						const q = X.solve(snap, { tiles, cls: 'any' }, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false,
 							ms: MSC, deadline: Date.now() + MSC, Tmax: Math.min(4000, Math.max(2, routeLeg * 4)), first: true }, fp));
 						r = { ok: q.ok, masks: q.masks, why: q.why };
