@@ -37,6 +37,8 @@
 //         corrF, corrAdd, vxq, vyq, airStep, maxT, meetNodes}
 const E = require('../../eesim.js');
 const KN = require('../kin.js');
+const RF = require('../../reach.js');
+const TY = require('../types.js');
 
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16, F_CLIMB = 32, F_LIQUID = 64, F_BOOST = 128;
 const DOTS = new Set([4, 414]);
@@ -49,7 +51,7 @@ const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 200000), keep: ENV('EEAT_BW_KEEP', 2),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 200000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 3000), quickF: ENV('EEAT_BW_QUICKF', 0.05), reach: ENV('EEAT_BW_REACH', 1), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -133,6 +135,18 @@ function createBackward(L, opts = {}) {
 		return d;
 	}
 
+	// the reach field to a target's tiles (deaths off: the meet never dies), the newest 6
+	const rfCache = new Map();
+	function rfOf(tiles, s) {
+		const Lc = TY.levelNow(L, s);                  // the doors as they stand in the start state
+		const key = TY.fgHash(Lc.fg) + '|' + Array.from(tiles).sort((a, b) => a - b).join(',');
+		if (rfCache.has(key)) return rfCache.get(key);
+		const f = RF.reachField(Lc, { goals: Array.from(tiles).map((t) => ({ tile: t, cost: 0 })), deaths: false });
+		if (rfCache.size >= 6) rfCache.delete(rfCache.keys().next().value);
+		rfCache.set(key, f);
+		return f;
+	}
+
 	// ---------------------------------------------------------------- one solve
 	function solve(start, target, o = {}) {
 		const P = Object.assign({}, DEF, opts, o);
@@ -165,7 +179,8 @@ function createBackward(L, opts = {}) {
 					if (s < 0 || L.pTarget[s] === L.pId[s]) continue;
 					const ex = L.portalsById.get(L.pTarget[s]);
 					if (!ex) continue;
-					for (let k = 0; k < ex.n; k++) { const e = ex.ys[k] * W + ex.xs[k]; if (e >= 0 && e < N) { link(i, e); link(e, i); } }
+					// (the exits' positions are in px: the exit cell's corner)
+					for (let k = 0; k < ex.n; k++) { const e = (ex.ys[k] >> 4) * W + (ex.xs[k] >> 4); if (e >= 0 && e < N) { link(i, e); link(e, i); } }
 				}
 			}
 			const q = new Int32Array(N);
@@ -202,13 +217,25 @@ function createBackward(L, opts = {}) {
 			return tx < 0 || ty < 0 || tx >= W || ty >= H ? -1 : ty * W + tx;
 		};
 		const hWalk = (t) => (t >= 0 && wd[t] >= 0 ? wd[t] * KAPPA : Infinity);
+		// THE FALLBACK ORDER of a state no value covers: the reach field to the target (src/reach.js, deaths off: physics-aware,
+		// a relaxation, in tiles) at the top running speed (P.reach; else the gravity-blind walk), x P.fw + P.fadd (a cell
+		// with a value is preferred: the meet heads for the backward region)
+		let rfield = null;
+		if (P.reach) { try { rfield = rfOf(target.tiles, sim); } catch (e) { rfield = null; } }
+		stats.reach = rfield ? rfield.mode : null;
+		const hFall = (s, t) => {
+			if (rfield) { const c = RF.costAt(rfield, s); if (c >= 0) return c * KAPPA * P.fw + P.fadd; if (rfield.mode === 'physics') return hWalk(t) * P.fw + P.fadd + 1000; }   // (-1: behind the doors as they stood at the start: an order, no prune)
+			return hWalk(t) * P.fw + P.fadd;
+		};
 
 		// ------------------------------------------------------------ cells
 		const VXQ = P.vxq, VYQ = P.vyq, AIR = P.airStep, MAXT = P.maxT;
 		const keyOf = (s) => {
 			const d = discOf(s);
 			const x8 = Math.floor((s.px + 8) / 8), y8 = Math.floor((s.py + 8) / 8);
-			return `${d}|${s.on_ground ? 1 : 0}|${x8}|${y8}|${Math.round(s.speed_x * VXQ)}|${Math.round(s.speed_y * VYQ)}`;
+			// (the gravity queue's classes too: a field entered acts 2 ticks later, and a cell without them merged a ball that
+			// just entered an arrow with its own parent, which the dedup then dropped: a 1-wide arrow shaft ended every search)
+			return `${d}|${s.on_ground ? 1 : 0}|${x8}|${y8}|${Math.round(s.speed_x * VXQ)}|${Math.round(s.speed_y * VYQ)}|${clsId[idOf(s._q0)]}.${clsId[idOf(s._q1)]}`;
 		};
 		// the place key (no speeds): the fallback's index
 		const placeOf = (key) => { const p = key.split('|'); return `${p[0]}|${p[1]}|${p[2]}|${p[3]}`; };
@@ -217,7 +244,13 @@ function createBackward(L, opts = {}) {
 		const revFrom = [], revTicks = [];       // reversed edges per child id: parents and ticks (flat arrays per cell)
 		const toTarget = new Map();              // parent id -> least ticks to the target
 		const byPlace = new Map();               // place -> [ids]
-		let queue = [], qHead = 0;
+		// THE CLOSURE'S ORDER: nearest the target first (the walk distance of the cell's tile: a bucket queue), so the values
+		// grow backward from the target and a closure cut by its clock has the target's side, not a start-side generation
+		const buckets = [];
+		let bCur = 0, bLeft = 0;
+		const qPush = (id, tile) => { const w = tile >= 0 && wd[tile] >= 0 ? wd[tile] : lim; let b = buckets[w]; if (!b) b = buckets[w] = []; b.push(id); bLeft++; if (w < bCur) bCur = w; };
+		const bHead = [];
+		const qPop = () => { while (bCur < buckets.length && (!buckets[bCur] || (bHead[bCur] | 0) >= buckets[bCur].length)) bCur++; if (bCur >= buckets.length) return -1; bLeft--; const h = bHead[bCur] | 0; bHead[bCur] = h + 1; return buckets[bCur][h]; };
 		const addCell = (key, s, tile) => {
 			let id = cellId.get(key);
 			if (id !== undefined) return id;
@@ -227,7 +260,7 @@ function createBackward(L, opts = {}) {
 			revFrom.push(null); revTicks.push(null);
 			const pl = placeOf(key);
 			let a = byPlace.get(pl); if (!a) { a = []; byPlace.set(pl, a); } a.push(id);
-			queue.push(id);
+			qPush(id, tile);
 			return id;
 		};
 		const addEdge = (from, to, ticks) => {
@@ -304,7 +337,8 @@ function createBackward(L, opts = {}) {
 		const tC0 = Date.now();
 		const startKey = keyOf(sim);
 		const startCell = addCell(startKey, sim, tileOfS(sim));
-		if (P.seeds !== false) {
+		const seedAll = () => {
+			if (P.seeds === false) return;
 			// the start's discrete state at rest on every standable half tile of the corridor, nearest the target first
 			const order = [];
 			for (let t = 0; t < N; t++) if (inCorr[t]) order.push(t);
@@ -335,10 +369,11 @@ function createBackward(L, opts = {}) {
 					if (id >= 0) stats.seeds++;
 				}
 			}
-		}
+		};
 		// the closure: every cell once (BFS order: the start and the seeds first)
 		const expand = (id) => {
 			const snap = cellSnap[id];
+			cellSnap[id] = null;                   // (expanded once: its state is no longer needed)
 			sim.restore(snap);
 			const ms = macrosOf();
 			for (const [m, p] of ms) {
@@ -357,20 +392,25 @@ function createBackward(L, opts = {}) {
 				});
 			}
 		};
-		while (qHead < queue.length && Date.now() < closeEnd) {
-			const id = queue[qHead++];
-			expand(id);
-			stats.expanded++;
-		}
-		stats.closed = qHead >= queue.length;
-		stats.cells = cellKey.length;
-		stats.closeMs = Date.now() - tC0;
+		const closure = (until) => {
+			const tc = Date.now();
+			while (bLeft > 0 && Date.now() < until) {
+				const id = qPop();
+				if (id < 0) break;
+				expand(id);
+				stats.expanded++;
+			}
+			stats.closed = bLeft === 0;
+			stats.cells = cellKey.length;
+			stats.closeMs += Date.now() - tc;
+		};
 
-		// ------------------------------------------------------------ BACKWARD: Dijkstra from the target
-		const tD0 = Date.now();
-		const n = cellKey.length;
-		const D = new Float64Array(n).fill(Infinity);
-		{
+		// ------------------------------------------------------------ BACKWARD: Dijkstra from the target on the reversed edges
+		let D = new Float64Array(0);
+		const dijkstra = () => {
+			const tD0 = Date.now();
+			const n = cellKey.length;
+			D = new Float64Array(n).fill(Infinity);
 			const h = makeHeap();
 			for (const [id, tk] of toTarget) { if (tk < D[id]) { D[id] = tk; h.push(tk, id); } }
 			while (h.size) {
@@ -384,15 +424,15 @@ function createBackward(L, opts = {}) {
 					if (nd < D[p]) { D[p] = nd; h.push(nd, p); }
 				}
 			}
-		}
-		let finite = 0;
-		for (let i = 0; i < n; i++) if (D[i] < Infinity) finite++;
-		stats.finite = finite;
-		stats.dStart = D[startCell] < Infinity ? D[startCell] : null;
-		stats.dijMs = Date.now() - tD0;
+			let finite = 0;
+			for (let i = 0; i < n; i++) if (D[i] < Infinity) finite++;
+			stats.finite = finite;
+			stats.dStart = D[startCell] < Infinity ? D[startCell] : null;
+			stats.dijMs += Date.now() - tD0;
+		};
 
 		// the value of a state's cell: its own, else the nearest speed class of its place, else the walk
-		const hOf = (key, tile) => {
+		const hOf = (key, tile, hf) => {
 			const id = cellId.get(key);
 			if (id !== undefined && D[id] < Infinity) return D[id];
 			const a = byPlace.get(placeOf(key));
@@ -406,50 +446,87 @@ function createBackward(L, opts = {}) {
 				}
 				if (best < Infinity) return best + bd * 4;
 			}
-			return hWalk(tile) * 3 + 200;
+			return hf;
 		};
 
 		// ------------------------------------------------------------ MEET: A* over exact states from the real start
 		const tM0 = Date.now();
-		const heap = makeHeap();
-		const nodes = [];                          // {snap, par, masks (Uint8Array of the move), g}
-		const seenG = new Map();                   // cell key -> [g, ...] (the P.keep least)
-		const push = (snap, par, masks, g, key, tile) => {
-			const a = seenG.get(key);
-			if (a && a.length >= P.keep && a[a.length - 1] <= g) return;
-			if (!a) seenG.set(key, [g]);
-			else { let i = a.length; while (i > 0 && a[i - 1] > g) i--; a.splice(i, 0, g); if (a.length > P.keep) a.pop(); }
-			const hv = hOf(key, tile);
-			const id = nodes.length;
-			nodes.push({ snap, par, masks, g });
-			heap.push(g + P.w * hv, id);
-		};
-		sim.restore(snap0);
-		push(snap0, -1, null, 0, startKey, tileOfS(sim));
-		let found = null;
-		while (heap.size && !found && Date.now() < tEnd && stats.meetExpanded < P.meetNodes) {
-			const id = heap.pop();
-			const nd = nodes[id];
-			stats.meetExpanded++;
-			sim.restore(nd.snap);
-			const ms = macrosOf();
-			for (const [m, p] of ms) {
-				play(nd.snap, m, p, (kind, ticks, masks) => {
-					if (found && kind === 0) return;
-					const mm = Uint8Array.from(masks.subarray(0, ticks));
-					if (kind === 1) {
-						const g = nd.g + ticks;
-						if (!found || g < found.g) found = { par: id, masks: mm, g };
-						return;
-					}
-					const tl = tileOfS(sim);
-					push(sim.snapshot(), id, mm, nd.g + ticks, keyOf(sim), tl);
-				});
+		let nodes = [];
+		const meet = (cap, until) => {
+			const heap = makeHeap();
+			nodes = [];                              // {snap, par, masks (Uint8Array of the move), g}
+			const seenG = new Map();                   // cell key -> [g, ...] (the P.keep least)
+			const seenH = new Set();                  // the exact states pushed (a state twice is one node)
+			const push = (snap, par, masks, g, key, tile, hsh, hf) => {
+				const a = seenG.get(key);
+				if (a && a.length >= P.keep && a[a.length - 1] <= g) return;
+				if (hsh !== undefined) { if (seenH.has(hsh)) return; seenH.add(hsh); }
+				if (!a) seenG.set(key, [g]);
+				else { let i = a.length; while (i > 0 && a[i - 1] > g) i--; a.splice(i, 0, g); if (a.length > P.keep) a.pop(); }
+				const hv = hOf(key, tile, hf);
+				if (!(hv < Infinity)) return;
+				const id = nodes.length;
+				nodes.push({ snap, par, masks, g });
+				heap.push(g + P.w * hv, id);
+			};
+			sim.restore(snap0);
+			push(snap0, -1, null, 0, startKey, tileOfS(sim), undefined, hFall(sim, tileOfS(sim)));
+			let found = null, ex = 0;
+			while (heap.size && !found && Date.now() < until && ex < cap) {
+				const id = heap.pop();
+				const nd = nodes[id];
+				ex++; stats.meetExpanded++;
+				if (o.trace) { sim.restore(nd.snap); o.trace('pop', nd.g, keyOf(sim), sim); }
+				const snapE = nd.snap;
+				nd.snap = null;
+				sim.restore(snapE);
+				const ms = macrosOf();
+				for (const [m, p] of ms) {
+					play(snapE, m, p, (kind, ticks, masks) => {
+						if (found && kind === 0) return;
+						const mm = Uint8Array.from(masks.subarray(0, ticks));
+						if (kind === 1) {
+							const g = nd.g + ticks;
+							if (!found || g < found.g) found = { par: id, masks: mm, g };
+							return;
+						}
+						const tl = tileOfS(sim);
+						if (o.trace) o.trace('child', nd.g + ticks, keyOf(sim), sim, m, p, ticks);
+						push(sim.snapshot(), id, mm, nd.g + ticks, keyOf(sim), tl, sim.stateHash(), hFall(sim, tl));
+					});
+				}
 			}
+			stats.exhausted = !found && heap.size === 0;
+			return found;
+		};
+		// 1. THE QUICK MEET: the walk's order alone (a short leg needs no closure)
+		let found = meet(P.quick, t0 + clock * P.quickF);
+		stats.quick = !!found;
+		if (!found && P.closeF > 0) {
+			// 2. the closure, target first (the seeds made now); 3. the values; 4. the meet with them
+			seedAll();
+			closure(closeEnd);
+			dijkstra();
+			found = meet(P.meetNodes, tEnd);
 		}
 		stats.meetMs = Date.now() - tM0;
+		if (o.probe) {
+			// (a diagnostic: the values along a known leg's own states, every o.probeEvery ticks: [tick, D of its cell or
+			// null, the fallback's h, the leg's ticks left])
+			if (D.length === 0) dijkstra();
+			const pm = o.probe, out = [];
+			sim.restore(snap0);
+			for (let t = 0; t <= pm.length; t++) {
+				if (t % (o.probeEvery || 10) === 0 || t === pm.length) {
+					const key = keyOf(sim), id = cellId.get(key);
+					out.push([t, id !== undefined && D[id] < Infinity ? D[id] : null, Math.round(hOf(key, tileOfS(sim), hFall(sim, tileOfS(sim)))), pm.length - t, id !== undefined ? 1 : 0]);
+				}
+				if (t < pm.length) { E.applyMask(inp, pm[t]); sim.tick(inp); }
+			}
+			stats.probe = out;
+		}
 		stats.nodes = nodes.length;
-		if (!found) return { ok: false, why: Date.now() >= tEnd ? 'budget' : 'exhausted', stats };
+		if (!found) return { ok: false, why: stats.exhausted ? 'exhausted' : 'budget', stats };
 		// the masks: the chain of moves, replayed from the start (the engine's own goal)
 		const parts = [found.masks];
 		for (let q = found.par; q >= 0 && nodes[q].masks; q = nodes[q].par) parts.push(nodes[q].masks);

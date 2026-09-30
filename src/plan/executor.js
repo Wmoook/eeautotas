@@ -238,6 +238,15 @@ const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound 
 // the next leg starts from them. The plain solver lists up to MATH_ALTS more verified legs with DISTINCT END STATES (vx,
 // vy rounded, grounded) within MATH_ALT_SLACK ticks of its cheapest (the cheapest per class; the answer and its proof
 // unchanged), each an arrival candidate here (EEAT_MATH_ALTS=0: the cheapest leg and its hop alone, as before)
+// THE BACKWARD TIER (n5-lab-backward, OPT-IN EEAT_BACKWARD=1; off = the executor as before, byte for byte): a waypoint's
+// leg by src/plan/lab/backward.js (the Bellman time to go of a macro-move closure of the leg's corridor, seeded around
+// the target independently of the start, then A* over exact engine states from the real start with it: the meet), after
+// the direct math legs and before the goal fields; BW_SHARE of the window (at most BW_MS), from the first BW_STARTS live
+// starts; its legs go through the math tier's candidates (the engine's replay to the executor's goal, finishMath)
+const BW_ON = () => process.env.EEAT_BACKWARD === '1';
+const BW_SHARE = +process.env.EEAT_BW_SHARE > 0 ? +process.env.EEAT_BW_SHARE : 0.5;
+const BW_MS = +process.env.EEAT_BW_TIERMS > 0 ? +process.env.EEAT_BW_TIERMS : 30000;
+const BW_STARTS = +process.env.EEAT_BW_STARTS > 0 ? +process.env.EEAT_BW_STARTS : 2;
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
 // THE NEXT WAYPOINT (iterate 2 lane 'chains'): a chain's leg failed from the arrivals the leg before kept, not for the leg
@@ -352,6 +361,8 @@ function makeCore(L, co) {
 	let MS_ = null, MLB_ = null;
 	const mathSolver = () => MS_ || (MS_ = require('./msolve.js').createSolver(L, { prove: true }));
 	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
+	let BW_ = null;
+	const bwSolver = () => BW_ || (BW_ = require('./lab/backward.js').createBackward(L));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
 	let analysis = null;
@@ -559,6 +570,34 @@ function makeCore(L, co) {
 					}
 				}
 				const r = finishMath(cands);
+				if (r) return out(r);
+			}
+		}
+		// -------- tier B: THE BACKWARD TIER (OPT-IN EEAT_BACKWARD=1; the header's BW_*)
+		if (BW_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0 && Date.now() < wEnd - 50) {
+			const tB = Date.now(), bEnd = tB + Math.min(BW_MS, BW_SHARE * (wEnd - tB));
+			const cands = [];
+			const bst = { tier: 'backward', tries: 0, ok: false, T: null, why: null, stats: null };
+			try {
+				const B = bwSolver();
+				const bStarts = live.slice(0, BW_STARTS);
+				for (let bi = 0; bi < bStarts.length && cands.length === 0; bi++) {
+					const left = bEnd - Date.now();
+					if (left < 30) break;
+					const s = bStarts[bi], si = starts.indexOf(s);
+					const r = B.solve(s.snap, { tiles: Array.from(goal.tiles) }, { ms: bi === bStarts.length - 1 ? left : left / (bStarts.length - bi) });
+					bst.tries++;
+					bst.stats = r.stats ? { cells: r.stats.cells, finite: r.stats.finite, meet: r.stats.meetExpanded, quick: !!r.stats.quick } : null;
+					if (!r.ok) { bst.why = r.why; continue; }
+					sims += r.T;
+					mathCands(si, r.masks, { T: r.T, proven: false, lb: 0, cert: false, lbMath: null }, cands, 'backward');
+				}
+			} catch (e) { bst.why = 'error: ' + (e && e.message || e); }
+			bst.ms = Date.now() - tB; bst.ok = cands.length > 0;
+			if (cands.length) bst.T = Math.min(...cands.map((c) => c.leg.ticks));
+			tiers.push(bst);
+			if (cands.length) {
+				const r = finishMath(cands, 'backward');
 				if (r) return out(r);
 			}
 		}
@@ -1058,14 +1097,14 @@ function makeCore(L, co) {
 		}
 		/** the math tier's result: the candidates verified and picked as every tier's (finishFound), each arrival's leg its
 		 *  own (the proof per start) */
-		function finishMath(cands) {
+		function finishMath(cands, toolName) {
 			let lbA = Infinity;
 			for (let i = 0; i < starts.length; i++) {
 				if (starts[i].dead) continue;
 				const b = cands.some((c) => c.start === i && c.leg.proven) ? Math.min(...cands.filter((c) => c.start === i).map((c) => c.leg.ticks)) : mathLbE.get(i);
 				lbA = Math.min(lbA, b === undefined ? 0 : starts[i].tick - t0 + b);
 			}
-			const r = finishFound(cands, 'math', (a) => Object.assign({ start: a._c.start }, a._c.leg), Number.isFinite(lbA) ? lbA : 0, false);
+			const r = finishFound(cands, toolName || 'math', (a) => Object.assign({ start: a._c.start }, a._c.leg), Number.isFinite(lbA) ? lbA : 0, false);
 			if (r) delete r.arrivalsRaw;
 			return r;
 		}
