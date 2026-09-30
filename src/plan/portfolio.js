@@ -57,6 +57,7 @@ function createPortfolio(L, opts = {}) {
 	}
 	const geoMemo = new Map();
 	const sessions = new Map();
+	let onceSeq = 0;
 	const stats = { solves: 0, ok: 0, byArm: {} };
 
 	const snapOf = (start) => (start instanceof E.EESim ? start.snapshot() : start);
@@ -134,10 +135,10 @@ function createPortfolio(L, opts = {}) {
 		let res = null;
 		try {
 			if (arm === 'chain') {
-				res = S.chain(snap, target, { ms, resume: sess ? sess.key + '|chain' : undefined });
+				res = S.chain(snap, target, { ms, resume: sess.key + '|chain' });
 				if (!res.ok && res.closed) r.done = true;
 			} else if (arm === 'corr') {
-				res = corridor().solve(snap, target, Object.assign({}, CORR_OPTS, o.corrOpts || {}, { ms, deadline, Tmax, first: true, resume: sess ? sess.key + '|corr' : undefined }));
+				res = corridor().solve(snap, target, Object.assign({}, CORR_OPTS, o.corrOpts || {}, { ms, deadline, Tmax, first: true, resume: sess.key + '|corr' }));
 				if (!res.ok && (res.why === 'exhausted' || res.why === 'cut')) r.done = true;
 			} else if (arm === 'prof') {
 				const gtest = S.goal(target);
@@ -182,56 +183,63 @@ function createPortfolio(L, opts = {}) {
 		const snap = snapOf(start);
 		const arms = String(o.arms || ENV('EEAT_PORT_ARMS', 'chain,corr,prof,bw,leg')).split(',');
 		const shape = shapeOf(snap, target);
-		// the session (one continuous budget per stretch)
-		let sess = null;
-		if (o.resume !== false) {
-			let key = typeof o.resume === 'string' ? o.resume : null;
-			if (!key) {
-				sim.restore(snap);
-				let th = 0x811c9dc5;
-				for (const t of target.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
-				key = `${sim.stateHash()}|${target.cls || 'any'}|${target.tele ? 1 : 0}|${th >>> 0}|${o.Tmax || 3000}`;
-			}
-			sess = sessions.get(key);
-			if (sess) { sessions.delete(key); sessions.set(key, sess); }
-			else { sess = { key, spent: {}, done: {}, total: 0, calls: 0 }; sessions.set(key, sess); while (sessions.size > SESS_KEEP) sessions.delete(sessions.keys().next().value); }
-			sess.calls++;
+		// the session (one continuous budget per stretch; o.resume false: a session of this call alone)
+		let key = typeof o.resume === 'string' ? o.resume : null;
+		if (!key) {
+			sim.restore(snap);
+			let th = 0x811c9dc5;
+			for (const t of target.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
+			key = `${sim.stateHash()}|${target.cls || 'any'}|${target.tele ? 1 : 0}|${th >>> 0}|${o.Tmax || 3000}`;
 		}
-		const resumed = !!(sess && sess.calls > 1);
+		if (o.resume === false) key += '|once' + (++onceSeq);
+		let sess = o.resume === false ? null : sessions.get(key);
+		if (sess) { sessions.delete(key); sessions.set(key, sess); }
+		else {
+			sess = { key, spent: {}, done: {}, calls: 0 };
+			if (o.resume !== false) { sessions.set(key, sess); while (sessions.size > SESS_KEEP) sessions.delete(sessions.keys().next().value); }
+		}
+		sess.calls++;
+		const resumed = sess.calls > 1;
 		const plan = o.plan ? parsePlan(o.plan).filter(([a]) => RESUMABLE[a] !== undefined && !((a === 'prof' || a === 'leg') && shape.tele)) : planOf(shape, arms);
-		const out = { ok: false, masks: null, T: 0, arm: null, why: '', ms: 0, shape, arms: {}, order: plan.map(([a]) => a), resumed };
+		const out = { ok: false, masks: null, T: 0, arm: null, why: '', ms: 0, shape, arms: {}, order: plan.map(([a]) => a), resumed, deferred: [] };
 		const note = (arm, r) => {
 			const a = out.arms[arm] || (out.arms[arm] = { ms: 0, ok: false, T: 0, why: '', runs: 0 });
 			a.ms += r.ms; a.runs++; a.why = r.why; if (r.ok) { a.ok = true; a.T = r.T; }
-			if (sess) { sess.spent[arm] = (sess.spent[arm] || 0) + r.ms; if (r.done) sess.done[arm] = true; }
+			sess.spent[arm] = (sess.spent[arm] || 0) + r.ms; if (r.done) sess.done[arm] = true;
 			const s = stats.byArm[arm] || (stats.byArm[arm] = { runs: 0, ok: 0, ms: 0 });
 			s.runs++; s.ms += r.ms; if (r.ok) s.ok++;
 		};
-		// the session's projected total: what it spent + this call's budget; an arm's target = its share of that
-		const spent0 = sess ? Object.values(sess.spent).reduce((x, y) => x + y, 0) : 0;
-		const total = spent0 + (deadline - t0);
-		// (a one-piece arm's least slice: its own minimum, at most a fifth of the session's budget)
-		const minOf = (a) => Math.min(a === 'prof' ? (o.minProf || 800) : a === 'bw' ? (o.minBw || 1500) : 30, 0.2 * total);
-		let shareLeft = plan.reduce((x, [, f]) => x + f, 0);
+		// THE SESSION'S BUDGET: what it spent + this call's window, or the caller's projection of the stretch's whole budget
+		// (o.total: the executor's rungs to come) when larger; a one-piece arm's piece = its share of that, run only when this
+		// call holds it whole (else deferred to a later call of the session: never cut, never restarted); a resumable arm
+		// takes its share of this call and goes on in the next
+		const spent0 = Object.values(sess.spent).reduce((x, y) => x + y, 0);
+		const win = deadline - t0;
+		const proj = Math.max(spent0 + win, o.total > 0 ? o.total : 0);
+		const later = proj > spent0 + win + 1;   // (the session expects more calls)
+		let shareLeft = plan.reduce((x, [a, f]) => x + (sess.done[a] ? 0 : f), 0);
 		for (let i = 0; i < plan.length && !out.ok; i++) {
 			const [arm, f] = plan[i];
 			const left = deadline - Date.now();
 			if (left < 20) break;
-			if (sess && sess.done[arm]) { shareLeft -= f; continue; }
-			// the slice: its share of what is left (the earlier arms' unused time flows forward), less what it spent before
-			let slice = sess && resumed ? f * total - (sess.spent[arm] || 0) : left * f / Math.max(1e-9, shareLeft);
+			if (sess.done[arm]) continue;
+			const fair = left * f / Math.max(1e-9, shareLeft);   // (its share of what is left: the earlier arms' unused time flows forward)
 			shareLeft -= f;
-			if (i === plan.length - 1) slice = left;
-			slice = Math.min(slice, left);
-			if (!RESUMABLE[arm] && slice < minOf(arm)) continue;      // (a one-piece arm runs only with its whole slice)
+			let slice;
+			if (RESUMABLE[arm]) slice = i === plan.length - 1 ? left : fair;
+			else {
+				const piece = Math.max(f * proj, fair);
+				if (piece > left + 1 && later) { out.deferred.push(arm); continue; }
+				slice = i === plan.length - 1 ? left : Math.min(piece, left);
+			}
 			if (slice < 20) continue;
 			const r = runArm(arm, snap, target, Math.round(slice), Date.now() + slice, o, sess);
 			note(arm, r);
 			if (r.ok) { Object.assign(out, { ok: true, masks: r.masks, T: r.T, arm }); break; }
 		}
-		// what is left: back to the resumable arms of the plan (their searches go on)
+		// what is left: back to the resumable arms of the plan (their searches go on where they stopped)
 		for (let pass = 0; pass < 3 && !out.ok; pass++) {
-			const rs = plan.map(([a]) => a).filter((a) => RESUMABLE[a] && !(sess && sess.done[a]) && !(out.arms[a] && out.arms[a].done));
+			const rs = plan.map(([a]) => a).filter((a) => RESUMABLE[a] && !sess.done[a]);
 			if (!rs.length) break;
 			let any = false;
 			for (let j = 0; j < rs.length && !out.ok; j++) {
@@ -241,14 +249,13 @@ function createPortfolio(L, opts = {}) {
 				const r = runArm(rs[j], snap, target, Math.round(slice), Date.now() + slice, o, sess);
 				note(rs[j], r);
 				any = true;
-				if (r.done && out.arms[rs[j]]) out.arms[rs[j]].done = true;
 				if (r.ok) Object.assign(out, { ok: true, masks: r.masks, T: r.T, arm: rs[j] });
 			}
 			if (!any) break;
 		}
 		out.ms = Date.now() - t0;
 		if (!out.ok) out.why = Object.entries(out.arms).map(([a, x]) => `${a}:${x.why || '-'}`).join(' ');
-		if (out.ok) { stats.ok++; if (sess) sessions.delete(sess.key); }
+		if (out.ok) { stats.ok++; sessions.delete(sess.key); }
 		return out;
 	}
 

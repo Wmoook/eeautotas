@@ -337,6 +337,20 @@ const BW_SHARE = +process.env.EEAT_BW_SHARE > 0 ? +process.env.EEAT_BW_SHARE : 0
 const BW_MS = +process.env.EEAT_BW_TIERMS > 0 ? +process.env.EEAT_BW_TIERMS : 30000;
 const BW_STARTS = +process.env.EEAT_BW_STARTS > 0 ? +process.env.EEAT_BW_STARTS : 2;
 const BW_RUNGS = process.env.EEAT_BW_RUNGS !== '0';
+// THE PORTFOLIO TIER (n5-s99-portfolio, OPT-IN EEAT_PORTFOLIO=1; off = the executor as before, byte for byte: portfolio.js
+// is not even loaded): ONE call per stretch (src/plan/portfolio.js) runs the chains lab's solvers (the backward meet, the
+// speed profile, the executor's own best-first leg finder, the corridor, msolve.chain) in one budget, in place of tiers
+// M2 (msolve.chain), MC (the corridor), P (the profile) and B (the backward), which it contains; its share of the window by
+// the rung (EEAT_PF_SHARES, default 0.3 / 0.4 / 0.5 / 0.6), at most EEAT_PF_MS (40 s) a call; A SESSION PER STRETCH (the
+// start's state + the target): the rungs' calls are one continuous budget, projected as its share of the rungs to come
+// (RUNG_PROJ), so a one-piece arm (the backward meet, the profile, the leg finder) runs once, whole, in the first call
+// that holds its piece, and the resumable ones (the corridor, msolve.chain) go on where they stopped; its answer replayed
+// by the executor's goal test like every math leg (mathCands / finishMath)
+const PF_ON = () => process.env.EEAT_PORTFOLIO === '1';
+const PF_SHARES = (process.env.EEAT_PF_SHARES || '0.3,0.4,0.5,0.6').split(',').map(Number);
+const PF_MS = +process.env.EEAT_PF_MS > 0 ? +process.env.EEAT_PF_MS : 40000;
+const PF_STARTS = +process.env.EEAT_PF_STARTS > 0 ? +process.env.EEAT_PF_STARTS : 1;
+const RUNG_PROJ = [1500, 5000, 15000, 45000];
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
 // THE NEXT WAYPOINT (iterate 2 lane 'chains'): a chain's leg failed from the arrivals the leg before kept, not for the leg
@@ -462,6 +476,8 @@ function makeCore(L, co) {
 	const cY = { tries: 0, ok: 0 };   // (the corridor tier's yield on this level)
 	let BW_ = null;
 	const bwSolver = () => BW_ || (BW_ = require('./lab/backward.js').createBackward(L));
+	let PF_ = null;
+	const portfolio = () => PF_ || (PF_ = require('./portfolio.js').createPortfolio(L, { solver: mathSolver() }));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const pY = { t: 0, ok: 0 };   // (the profile tier's yield on this level, EEAT_PROFILE=1: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
@@ -719,8 +735,45 @@ function makeCore(L, co) {
 				if (r) { delete r.arrivalsRaw; return out(r); }
 			}
 		}
+		// -------- tier PF: THE PORTFOLIO (OPT-IN EEAT_PORTFOLIO=1; the header's PF_*)
+		const pfOn = PF_ON() && mathOn && !walled;
+		if (pfOn && Date.now() < wEnd - 50) {
+			const pr = Math.min(rung, 3);
+			const share = PF_SHARES[Math.min(pr, PF_SHARES.length - 1)];
+			const tP = Date.now(), pEndPF = tP + Math.min(PF_MS, share * (wEnd - tP));
+			const cands = [];
+			const pst = { tier: 'portfolio', tries: 0, ok: false, T: null, arm: null, arms: null, deferred: null, resumed: false };
+			try {
+				const P = portfolio();
+				const pStarts = live.slice(0, PF_STARTS);
+				for (let pi = 0; pi < pStarts.length && cands.length === 0; pi++) {
+					const left = pEndPF - Date.now();
+					if (left < 50) break;
+					const s = pStarts[pi], si = starts.indexOf(s);
+					const Tmax = Math.min(6000, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
+					if (!(Tmax >= 2)) continue;
+					// (the session's projection: this call's piece and the shares of the rungs to come)
+					let proj = 0;
+					for (let q = pr + 1; q < RUNG_PROJ.length; q++) proj += PF_SHARES[Math.min(q, PF_SHARES.length - 1)] * RUNG_PROJ[q];
+					const ms = pi === pStarts.length - 1 ? left : left / (pStarts.length - pi);
+					const r = P.solve(s.snap, mTarget, { ms, deadline: Date.now() + ms, Tmax, total: Math.min(PF_MS * 2, ms + proj) });
+					pst.tries++; pst.arms = r.arms; pst.deferred = r.deferred; pst.resumed = r.resumed;
+					if (!r.ok) { pst.why = r.why; continue; }
+					sims += r.T;
+					pst.arm = r.arm;
+					mathCands(si, r.masks, { T: r.T, proven: false, lb: 0, cert: false, lbMath: null }, cands, 'portfolio:' + r.arm);
+				}
+			} catch (e) { pst.why = 'error: ' + (e && e.message || e); }
+			pst.ms = Date.now() - tP; pst.ok = cands.length > 0;
+			if (cands.length) pst.T = Math.min(...cands.map((c) => c.leg.ticks));
+			tiers.push(pst);
+			if (cands.length) {
+				const r = finishMath(cands, 'portfolio');
+				if (r) return out(r);
+			}
+		}
 		// -------- tier B: THE BACKWARD TIER (OPT-IN EEAT_BACKWARD=1; the header's BW_*)
-		if (BW_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0 && Date.now() < wEnd - 50) {
+		if (!pfOn && BW_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0 && Date.now() < wEnd - 50) {
 			// (BW_RUNGS: the tier by the rung: rung 0 the meet alone at 0.2 of the window, rungs 1-2 the closure too at 0.3,
 			// from rung 3 at 0.6: the other tiers keep most of a short window (with 0.5 at rung 1 Endless Pain's known-route
 			// leg, found by the leg tier alone in 1.8 s, failed its rung 1; with 0.6 at rung 2 Egg Quest II's and Frostbitten's,
@@ -829,7 +882,7 @@ function makeCore(L, co) {
 				return cands.length ? cands : null;
 			} catch (e) { pst.error = String(e && e.message || e); pst.ms = Date.now() - tP; tiers.push(pst); return null; }
 		};
-		const profileOn = PROFILE_ON() && rung >= PROFILE_RUNG && !allowDeath && !wp.dieField;
+		const profileOn = !pfOn && PROFILE_ON() && rung >= PROFILE_RUNG && !allowDeath && !wp.dieField;
 		// (its share can follow its yield on the level, as the math's (mathShare): EEAT_PROFILE_YIELD=4 from its 4th call (0, the
 		// default: the fixed share); measured (box 5, 60 s, W3): fail20 progress 45 vs 38, comp29 15 vs 13 compiled: no gain)
 		const profileShare = () => {
@@ -993,7 +1046,7 @@ function makeCore(L, co) {
 		// plain bound; ordered by the goal field this call built anyway (its -1 a proof in physics mode): from the start the
 		// goal field puts nearest
 		const nearMin = Math.min(...startCost.map((c, i) => (c >= 0 && !starts[i].dead ? c : Infinity)));
-		if (mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && !(CORR_ON() && CORR_REPLACE) && Date.now() < wEnd - 50) {
+		if (!pfOn && mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && !(CORR_ON() && CORR_REPLACE) && Date.now() < wEnd - 50) {
 			const tC = Date.now(), cEnd = tC + Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC));
 			let bi = -1;
 			starts.forEach((s, i) => {
@@ -1029,7 +1082,7 @@ function makeCore(L, co) {
 		}
 		// -------- tier MC: THE CORRIDOR (opt-in, EEAT_CORRIDOR=1): a far waypoint's leg as a chain of short solver legs
 		// between footholds, resumed across calls from the same start state
-		if (CORR_ON() && mathOn && !walled && nearMin > CORR_MIN && Date.now() < wEnd - 100) {
+		if (!pfOn && CORR_ON() && mathOn && !walled && nearMin > CORR_MIN && Date.now() < wEnd - 100) {
 			// (a near start in place of tier M2 (EEAT_CORR_REPLACE): M2's own share and cap, like for like)
 			const nearC = CORR_REPLACE && nearMin <= MATH_CHAIN_TILES;
 			const tC = Date.now(), cEnd = tC + (nearC ? Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC)) : Math.min(CORR_MS, mathShare(CORR_SHARE, cY.tries, cY.ok, 6) * (wEnd - tC)));
