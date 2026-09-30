@@ -180,7 +180,10 @@ const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EE
 // leg a trigger, the end states carried exactly: bwchain.js); every chain node goes to the loop as an import (an anchor the
 // executor goes on from); at most BWC_F of the budget and BWC_MAX_S (the child is one thread next to the workers)
 const BW_CHAIN = process.env.EEAT_BW_CHAIN === '1', BWC_F = +process.env.EEAT_BWC_F || 0.98, BWC_MAX_S = +process.env.EEAT_BWC_MAX_S || 900;
-const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
+const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
+// (THE GATE, as the one shot's: the chain's anchors are held until the executor needs them: a stall of the watchdog or the
+// loop's end with no route; EEAT_BWC_GATE=0: at once)
+const BWC_GATE = process.env.EEAT_BWC_GATE !== '0';   // (the child reads it too: 1 the chain's frontier only (the default), 2 every node)
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -633,6 +636,19 @@ async function compile(L, opts = {}, emit = () => {}) {
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
 	let bwlChild = null, bwlDone = null;
+	let bwcOpen = !BWC_GATE, bwcReleased = 0;
+	const bwcHeld = [];
+	/** the chain's gate opens: its held anchors go to the loop (import) -> true when an anchor is new */
+	const bwcRelease = (why) => {
+		if (!BW_CHAIN || bwcOpen) return false;
+		bwcOpen = true;
+		const n0 = anchors.size;
+		for (const m of bwcHeld) onLine('import ' + m);
+		bwcReleased = bwcHeld.length;
+		bwcHeld.length = 0;
+		say({ ev: 'bwchain', what: 'gate', why, held: bwcReleased, anchors: anchors.size - n0 });
+		return anchors.size !== n0;
+	};
 	const wholeLevel = () => {
 		if (!(BW_LEVEL || BW_CHAIN) || !opts.file || bwlDone) return;
 		const secs = BW_CHAIN ? Math.floor(Math.min(BWC_MAX_S, (+seconds || 60) * BWC_F, (left() - 3000) / 1000))   // (the chain: to the budget's end; with no route the loop waits for it there)
@@ -665,7 +681,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 					} else if (ev.ev === 'anchor' && BWC_IMPORT && typeof ev.inputs === 'string' && !best && !stopped) {
 						// (a chain node: the loop's import (replayed; a model state not seen yet is an anchor))
 						imported++;
-						onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
+						if (bwcOpen) onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
+						else bwcHeld.push(ev.inputs.replace(/[^0-O]/g, ''));
 					} else if (ev.ev === 'chain') say({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 });
 					else if (ev.ev === 'done') done = ev.end;
 				}
@@ -1206,7 +1223,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (stalls === 1) deepen('stall');
 			else { const j = exploreJob(); if (j) exploreQ.push(j); }
 			lastProgress = now;
-			if (osw && !best && !osWantOpen) osWantOpen = 'stall';   // (the one shot's gate: opened at the loop's next turn)
+			if (osw && !best && !osWantOpen) osWantOpen = 'stall';
+			if (!best) bwcRelease('stall');   // (the chain's gate: EEAT_BW_CHAIN)   // (the one shot's gate: opened at the loop's next turn)
 		}
 	};
 	const timers = [setInterval(progress, progressMs), setInterval(watchdog, watchMs), setInterval(saveFiles, SAVE_MS)];
@@ -1369,12 +1387,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
 				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; end = 'exhausted'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) { nothingSince = -1; continue; } end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
 				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } if (osw && await osHold()) continue; if (!best && bwcRelease('the executor has nothing left')) continue; end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
 			if (osw) { /* (the thread runs on its own) */ } else if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
