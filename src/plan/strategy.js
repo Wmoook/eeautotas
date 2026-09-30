@@ -153,6 +153,15 @@ const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by anot
 // (128,114)' (closest 429-561 tiles). The planner's near plans (nearPlans) fire only once EVERY plan's first leg has
 // failed a rung, which the untried third plan blocked. Ordering only: the same plans, the same rungs and budgets.
 const RUNG_BREADTH = () => process.env.EEAT_RUNG_BREADTH === '1';
+// THE NO-PROGRESS HOLD (C6 lane 1, the executor's RATE: triggers per second in the moves stage; EEAT_HOLD=1): a step at
+// rung r >= HOLD_RMIN of (anchor, edge) whose rung r - 1 attempt got no nearer than its rung r - 2 one (the executor's
+// closest distance at least HOLD_F of it) and is still far (over HOLD_NEAR tiles) is HELD: the job pick passes it by while
+// any other job is there, and runs it when none is (ordering only: nothing blocked, the same rungs and budgets). The f300
+// full compile's step events (src/out/l1/rulesim.js, box 5's 122 levels): such escalations were 1,048 steps of 28,013
+// worker-s with 59 successes (one a 475 s), the other steps one a 35 s; on the lane's 10 RATE levels 88 held fails of
+// 2,042 s against 13 successes. The closest distances: the step records' (fail.closest.dist, the goal field's tiles).
+const HOLD = () => process.env.EEAT_HOLD === '1';
+const HOLD_F = +process.env.EEAT_HOLD_F || 0.9, HOLD_NEAR = +process.env.EEAT_HOLD_NEAR || 30, HOLD_RMIN = +process.env.EEAT_HOLD_RMIN || 2;
 /** the plans in their first step's rung order (stable: the planner's order among equal rungs) */
 function breadthOrder(plans) {
 	if (!RUNG_BREADTH() || plans.length < 2) return plans;
@@ -496,6 +505,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const RELAY = process.env.EEAT_RELAY !== '0', RELAY_GAIN = 1;
 	const relays = new Map(), relayFloor = new Map();
 	let relayRuns = 0, relaySet = 0, relayDrop = 0;
+	// (THE NO-PROGRESS HOLD: per (anchor, edge, epoch) the least closest distance of its failed steps by rung)
+	const closeHist = new Map();
+	let holdSkips = 0, holdRuns = 0;
 	const runMinOf = (A) => A.arrivals.reduce((m, a) => Math.min(m, a.run > 0 ? a.run : 0), Infinity);
 	const startedOf = (A) => A.arrivals.every((a) => a.run > 0);
 	const gainOf = (S, parent) => {
@@ -791,8 +803,18 @@ async function compile(L, opts = {}, emit = () => {}) {
 		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
 		// (the most progress first, then the lowest plan cost + the arrival tick)
 		const list = live.filter((A) => !A.exhausted).sort((a, b) => (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
+		const hold = HOLD();
+		let held = null;
+		const heldOf = (A, ek, step) => {
+			const r = step.rung | 0;
+			if (r < HOLD_RMIN) return false;
+			const h = closeHist.get(`${A.key}|${ek}|${epoch}`);
+			if (!h) return false;
+			const a = h.get(r - 1), b = h.get(r - 2);
+			return Number.isFinite(a) && Number.isFinite(b) && a > HOLD_NEAR && a >= HOLD_F * b;
+		};
 		for (const A of list) {
-			if (left() < 200 || stopped) return null;
+			if (left() < 200 || stopped) return held ? (holdRuns++, held) : null;
 			const { plans, why } = planOfAnchor(A);
 			if (!plans.length) { if (!budgetCut(A, why)) { A.exhausted = true; A.why = why || 'exhausted'; } continue; }
 			for (const plan of breadthOrder(plans)) {
@@ -807,10 +829,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 					if (!tried.get(tk).ok) bug('repeat', { edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, anchor: A.id, label: labelOf(step) });
 					continue;
 				}
+				if (hold && heldOf(A, ek, step)) { holdSkips++; if (!held) held = { anchor: A, plan, step, plans, held: true }; continue; }
 				return { anchor: A, plan, step, plans };
 			}
 		}
-		return null;
+		if (held) holdRuns++;
+		return held;
 	};
 	/** a step's budget: its rung's x 2^deepenings, capped by the time left (the polish's reserve kept once a route is known) */
 	const budgetOf = (rung) => {
@@ -1036,6 +1060,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
+		if (fail && fail.closest && Number.isFinite(+fail.closest.dist) && !step.synthetic) {
+			const hk = `${A.key}|${edgeKey(step)}|${epoch}`;
+			let h = closeHist.get(hk);
+			if (!h) closeHist.set(hk, h = new Map());
+			const r = step.rung | 0, d = +fail.closest.dist;
+			if (!(h.get(r) <= d)) h.set(r, d);
+		}
+		if (job.held) rec.held = true;
 		// (the executor's exact end search from a near start, when it ran: tier 0b)
 		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
 		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
@@ -1703,7 +1735,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats, perfect: perfectInfo, joins: joinsInfo,
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, hold: { skips: holdSkips, runs: holdRuns }, exec: execStats, perfect: perfectInfo, joins: joinsInfo,
 		...(OS_ON ? { oneshot: os || osw ? Object.assign(os ? os.stats() : Object.assign({}, osStats || {}), { thread: !!osw, readyMs: osReady ? osReady.ms : null, error: osErr || null, gate: osw && OS_GATE ? (osOpen ? 'open' : 'shut') : null, released: osReleased, held: osPending.size, anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
