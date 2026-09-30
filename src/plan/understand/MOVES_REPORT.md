@@ -229,21 +229,71 @@ walk-offs, which need F2 (93.8%; jump and hop are at 99.2% and 99.7% with F2). T
 tile matches the route's but whose state differs is still a correct edge, and the next F1 edge from it recovers the
 position. That is where A* over exact states earns the optimum.
 
+## 6b. Is the hop needed? And a prototype of the fixes
+
+**Hop need (`moves.js --hopneed`).** Take a plain hop move, replay its landing tick WITHOUT the jump bit, and press on
+the next tick instead. Then try every per-tick one-change shape toward the move's next support by the route's own tick.
+There are 16,714 plain hop moves. With the hop, F1 reaches the next support by the route's tick in 16,416 of them.
+Without the hop, **only 37.7% (6,188) still reach it by the route's tick**:
+
+| without the hop | moves | share |
+|---|---:|---:|
+| still in time | 6,188 | 37.7% |
+| exactly 1 tick late | 8,726 | 53.2% |
+| 2-3 ticks late | 137 | 0.8% |
+| not reached even with 3 extra ticks (the delayed arc misses) | 1,365 | 8.3% |
+
+So the hop is needed in 62% of hop moves. A compiler without it is at least 1 tick late on each of those bounces, and
+on 8% of them the jump does not work at all.
+
+**Prototype (`prims_patch.js`)** on a copy of the builder's f6911f4 prims.js:
+
+- `hop`: every landing edge or chain also emits the landing-tick jump child.
+- `pt1`: 264 per-tick one-change JUMPC arcs are added to every plain ground node.
+
+The test was chained T-MOVES (`movecheck.js --chain=4`: the goal is the support 4 moves ahead, 2.5 s each, every 24th
+start, 5 shards per variant):
+
+| variant | chains | covered (the support 4 moves ahead in <= route ticks) | found at all | median expanded |
+|---|---:|---:|---:|---:|
+| base (f6911f4) | 803 | 34.2% | 49.7% | 2,680 |
+| + hop | 803 | 34.6% | 48.8% | 2,496 |
+| + hop + pt1 (264 blind JUMPC macros per ground node) | 798 | **29.1%** | 41.2% | **829** |
+
+Paired over the same chains, hop against base: covered 34.6% against 34.2% (18 chains only hop covers, 15 only base
+covers). Of the 381 chains both found, hop was faster in 57 and base in 30. The mean was +0.56 ticks for hop, because
+the anytime A* stops at its first route within budget.
+
+**Reading.** The chained search is limited by its budget: half of the 4-move chains are not found at all in 2.5 s.
+
+- The hop child costs nothing measurable and wins more head-to-head chains. Its value, though, is at the optimum:
+  62% of hop moves need it, at least 1 tick each. It pays when the leg search converges (the w = 1 pass, a proven leg),
+  not in a greedy first find.
+- Adding every per-tick arc as a plain macro is harmful. The branching of a ground node goes from about 30 to about
+  290, A* expansions drop 3.2x and chained coverage falls from 34.2% to 29.1%.
+- **Per-tick arcs must be generated lazily**: the RUN / IDLE / JUMP grid first, then the per-tick refinements of the
+  best-bounded arcs only (ordered by bounds.js / the tables' predicted landing, or on demand when a leg is proven
+  unreachable within the grid), with prefix sharing.
+
 ## 7. Five instructions for the integrator and the iterate lanes
 
 1. **Add the HOP to every arc edge.** When an edge ends on a landing, also emit the child that restores the
    pre-landing snapshot and plays the landing tick with `mask | 1`. A node launched by a hop starts its arc with the
-   macro's tail (no press). 53.5% of real landings are hops and 189 of 218 routes use them. Without this, every bounce
-   is at least 1 tick late (at least 0.7% of the run at the median, 3-4% on Forgotten Veil) and the exact coverage of
-   hop moves is 0%. It is general, exact and costs 1 tick per edge.
-2. **Use per-tick arc timings, including the late hold.** Replace REL {2..24} and TURN {4, 8, 16} with one-change arcs
-   played as prefix chains: d0 ∈ {-, L, R} from the press, d1 from any tick c <= A (43 at p90), stopping at the event.
-   Add F2 for walk-offs.
+   macro's tail (no press). The ready-made patch is `prims_patch.js hop`.
+   - 53.5% of real landings are hops and 189 of 218 routes use them.
+   - Without the hop, 62% of hop moves are late: 53% by exactly 1 tick, 8% miss entirely. That is at least 0.7% of the
+     run at the median and 3-4% on Forgotten Veil. The exact coverage of hop moves by one macro is 0%.
+   - In the prototype it is neutral to positive when chained (34.6% against 34.2% covered, 57 against 30 chains faster).
+   - It is general, exact and costs 1 tick per landing edge.
+2. **Add per-tick arc timings, including the late hold, but LAZILY.** Keep the grid macros as the first children. Add
+   the one-change refinements (d0 ∈ {-, L, R} from the press, d1 from any tick c <= A = 43, played as prefix chains)
+   only for the best-bounded arcs, or on demand when a leg is not found or not proven within the grid. Add F2 for
+   walk-offs.
    - 90.8% of the routes' change points are exact only at their own tick.
    - Half of the one-change timings are at c = 1, and the most common shape (press with no direction, the direction
-     from the next tick) is missing from the builder.
+     from the next tick) is in no builder macro.
    - Class-level coverage: F1 96-97% (jump, hop), F2 99%; fall 87.3% with F1, 93.8% with F2.
-   - Cost: about 5,700 ticks per node (1-2 ms).
+   - Measured: all 264 arcs at every ground node cut A* expansions 3.2x and chained coverage from 34.2% to 29.1%.
 3. **Keep exact states and no exact tables.**
    - A node is its full stateHash. Never quantise positions or speeds: px is an integer in only 9.7% of ground starts,
      and a 1e-9 px difference survives to the next support in 72% of moves.
