@@ -26,8 +26,8 @@
 //
 //   joinRoute(L, masks, o) -> {masks, runTicks, before, saved, waypoints, legs [{from, to, ticks, lb, proven, provenBy,
 //       tool, skip}], proven, stats, ms}
-//   o: {ms (default 60000), F (frontier classes a waypoint, 6), M (the most supports a leg spans, 4), A (alts, 3),
-//       span (the most route ticks a leg spans, 120), legMs (a leg's clock, 60), prove (true), proveMs (40), stop, log}
+//   o: {ms (default 60000), F (frontier classes a waypoint, 10), M (the most supports a leg spans, 6), A (alts, 3),
+//       span (the most route ticks a leg spans, 200), legMs (a leg's clock, 60), prove (true), proveMs (40), stop, log}
 //   waypointsOf(L, masks) -> {wps [{t, tile, cls, tele, fixed, prog}], finish, n}
 //   progKey(sim) -> a number (the trigger state: what a later door, gate or respawn reads)
 const C = require('../common.js');
@@ -42,7 +42,7 @@ const TRIG = process.env.EEAT_JOINS_TRIG === '1';   // OPT-IN: more waypoints, l
 // kept state injected at its own absolute tick), exact.js exactLeg to the next waypoints (tile + class + trigger state,
 // alive): its first goal layer is the minimum over EVERY input sequence from EVERY kept state (up to 53-bit hash
 // collisions), and every goal state of that layer (the speed classes at the minimum) goes into the DP.
-// EEAT_JOINS_EXACT=0: off (the DP of before byte for byte).
+// OPT-IN EEAT_JOINS_EXACT=1 (box 6, 24 stacked routes, 90 s, arms side by side: 58,791 vs 58,638 without: better 5, worse 8; the exact edges take 40% of each waypoint's clock); off = the DP of before byte for byte.
 const EXACT = process.env.EEAT_JOINS_EXACT === '1';
 // EXACT PROOFS: a leg no certified bound reaches is searched exhaustively from its exact start state to depth ticks - 1:
 // the search running out of states = no input sequence reaches the support sooner (PROVEN OPTIMAL, provenBy 'exact'); a
@@ -51,6 +51,11 @@ const XPROVE = process.env.EEAT_JOINS_XPROVE !== '0';
 // LONG SKIPS (OPT-IN EEAT_JOINS_LONG=1): every third pass is the sparse pass (every 4th support a waypoint, legs by msolve's
 // chain tier: a new path over several supports, the speed carried as ever)
 const LONGJ = process.env.EEAT_JOINS_LONG === '1';
+// THE WIDE DP (the default since round 3 of the stack: box 6, the 24 stacked routes, 150 s a level, arms side by side:
+// 57,897 vs 58,095 run ticks, better 6 / worse 1: Frostbitten 8,640 vs 8,749, Fish Gods 3,933 vs 4,010): 10 classes a
+// waypoint, legs over up to 6 supports and 200 route ticks, 8 ticks of diversity slack; EEAT_JOINS_NARROW=1: the first
+// version's 6 / 4 / 120 / 6
+const DEF = process.env.EEAT_JOINS_NARROW === '1' ? { F: 6, M: 4, span: 120, div: 6 } : { F: 10, M: 6, span: 200, div: 8 };
 // SHIFTED FOLLOWS: a kept state that is not the route's replays the route's segment inputs from s = 1 .. SHIFT0 ticks in
 // too (EEAT_JOINS_SHIFT=<n>, 0: off)
 const SHIFT0 = process.env.EEAT_JOINS_SHIFT !== undefined ? Math.max(0, +process.env.EEAT_JOINS_SHIFT | 0) : 0;
@@ -221,8 +226,8 @@ function classKey(s) {
 /** one DP pass over the route's waypoints (the chain re-derived with the speed carried), until `deadline` */
 function joinOnce(L, ev0, o, deadline, S) {
 	const t0 = Date.now();
-	const F = o.F > 0 ? o.F : 6, M = o.M > 0 ? o.M : 4, A = o.A >= 0 ? o.A : 3, SPAN = o.span > 0 ? o.span : 120;
-	const LEG_MS = o.legMs > 0 ? o.legMs : 60, DIV = o.div >= 0 ? o.div : 6;
+	const F = o.F > 0 ? o.F : DEF.F, M = o.M > 0 ? o.M : DEF.M, A = o.A >= 0 ? o.A : 3, SPAN = o.span > 0 ? o.span : DEF.span;
+	const LEG_MS = o.legMs > 0 ? o.legMs : 60, DIV = o.div >= 0 ? o.div : DEF.div;
 	const CHAIN = !!o.chain;
 	const SHIFT = o.shift >= 0 ? o.shift : SHIFT0;
 	const stop = typeof o.stop === 'function' ? o.stop : null;

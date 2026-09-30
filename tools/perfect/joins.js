@@ -17,7 +17,7 @@ const ARGS = WT.isMainThread ? process.argv.slice(2) : WT.workerData.args;
 const argv = Object.fromEntries(ARGS.filter((a) => a.startsWith('--')).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return [m[1], m[2] === undefined ? '1' : m[2]]; }));
 const pos = ARGS.filter((a) => !a.startsWith('--'));
 const num = (v, d) => (v === undefined ? d : +v);
-const opts = () => ({ ms: num(argv.ms, 60000), F: num(argv.F, 6), M: num(argv.M, 4), A: num(argv.A, 3), span: num(argv.span, 120), legMs: num(argv.legMs, 60), div: num(argv.div, 6),
+const opts = () => ({ ms: num(argv.ms, 60000), F: num(argv.F, 0), M: num(argv.M, 0), A: num(argv.A, 3), span: num(argv.span, 0), legMs: num(argv.legMs, 60), div: num(argv.div, -1),
 	exact: argv.exact === undefined ? undefined : argv.exact !== '0', exShare: num(argv.exShare, -1), exM: num(argv.exM, 0), exSpan: num(argv.exSpan, 0), exCap: num(argv.exCap, 0), exMs: num(argv.exMs, 0),
 	xprove: argv.xprove === undefined ? undefined : argv.xprove !== '0', xSpan: num(argv.xSpan, 0), xCap: num(argv.xCap, 0), xMs: num(argv.xMs, 0), proveMs: num(argv.proveMs, 0),
 	log: argv.verbose ? (s) => console.error(s) : null });
