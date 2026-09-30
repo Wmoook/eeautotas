@@ -45,6 +45,20 @@ const KILL_SQUEEZE = process.env.EEAT_KILL_SQUEEZE === '1';
 const KEY_BITS = new Map([[23, 0], [24, 1], [25, 2], [26, 0], [27, 1], [28, 2], [1005, 3], [1006, 4], [1007, 5], [1008, 3], [1009, 4], [1010, 5]]);
 const DEATH_DOORS = new Set([1011, 1012]);
 const KIND_OF = { key: 'key', psw: 'psw', pswR: 'pswR', osw: 'osw', oswR: 'oswR', team: 'team', prot: 'prot', reset: 'reset', fx: 'fx', coins: 'coin', bcoins: 'bcoin', crown: 'crown' };
+// THE EFFECTS IN THE STATE (n5 lane 3, EEAT_FXSTATE=1: OPT-IN, off = the model before byte for byte): the static physics
+// effects (jump 417, fly 418, speed 419, low gravity 453, multijump 461, gravity 1517) were no feature (no gate reads them),
+// so an effect trigger changed no model state and no plan ever took one; an effect reset on the way (1618) left the ball
+// without the effect a later leg needs, and the planner never sent it back for it (Tutorial 4: the multijump effect at the
+// spawn, the reset at (71,34), the known route's second pickup at (23,45); from the route's state at tick 395 the executor
+// fails at (71,29) in 8 s / 4.85 M sims, from its state at tick 1061 (the effect again) it gets 40 tiles on). With the
+// option each effect id on the level is a feature 'fx:<id>' of the engine's own value (jump_boost, has_levitation,
+// speed_boost, low_gravity, max_jumps, flip_gravity: types.js featValue), an effect trigger (a component of one id and one
+// number) sets it to the engine's value and a reset (1618) back to the default: exact (the engine's touch, eesim.js
+// 1901-2014); the planner's CEGAR asks for an effect before a failing leg ('needs', planner.js fxNeeds)
+const FXSTATE = () => process.env.EEAT_FXSTATE === '1';
+const FX_IDS = new Set([417, 418, 419, 453, 461, 1517]);
+const FX_DEF = { 417: 0, 418: 0, 419: 0, 453: 0, 461: 1, 1517: 0 };
+const fxValue = (id, v) => (id === 418 || id === 453 ? (v !== 0 ? 1 : 0) : v);
 const KEY_NAMES = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
 /** admissible ticks for D walk steps (8-way, a portal hop's entry step free) */
@@ -64,6 +78,10 @@ function compileModel(L, o = {}) {
 	// ---------------------------------------------------------------- features some gate reads
 	const featSet = new Set();
 	for (const [k, f] of A.feats) if (f.gates > 0 && k !== 'fx') featSet.add(k);
+	// (the effects in the state: one feature per effect id on the level, EEAT_FXSTATE=1)
+	const fxOn = FXSTATE(), fxFeat = new Map();
+	if (fxOn) for (const [t, kind] of A.special) if (kind === 'fx' && FX_IDS.has(fg[t])) fxFeat.set(fg[t], 'fx:' + fg[t]);
+	for (const f of fxFeat.values()) featSet.add(f);
 	let deathT = 0;
 	for (let i = 0; i < N; i++) if (DEATH_DOORS.has(fg[i])) deathT = Math.max(deathT, lk[i]);
 	if (deathT > 0) featSet.add('deaths');
@@ -77,7 +95,8 @@ function compileModel(L, o = {}) {
 	}
 	// ---------------------------------------------------------------- triggers (components)
 	const specAt = new Map();   // tile -> [kind, param]
-	for (const [t, kind, param] of A.special) specAt.set(t, [KIND_OF[kind] || kind, param]);
+	// (with the effects in the state an effect trigger's param is '<id>:<number>': a component is one id and one number)
+	for (const [t, kind, param] of A.special) specAt.set(t, [KIND_OF[kind] || kind, kind === 'fx' && fxFeat.has(fg[t]) ? `${fg[t]}:${lk[t]}` : param]);
 	for (let i = 0; i < N; i++) {
 		if (fg[i] === CHECKPOINT && !specAt.has(i)) specAt.set(i, ['cp', 0]);
 		else if (fg[i] === TROPHY && !specAt.has(i)) specAt.set(i, ['trophy', 0]);
@@ -94,7 +113,7 @@ function compileModel(L, o = {}) {
 			case 'team': return 'team';
 			case 'prot': return 'prot';
 			case 'reset': return featSet.has('prot') ? 'prot' : 'fx';
-			case 'fx': return 'fx';
+			case 'fx': return typeof param === 'string' ? 'fx:' + param.split(':')[0] : 'fx';
 			case 'coin': return 'coins';
 			case 'bcoin': return 'bcoins';
 			case 'crown': return 'crown';
@@ -114,7 +133,7 @@ function compileModel(L, o = {}) {
 			case 'team': return `team ${param} ${at}`;
 			case 'prot': return `protection ${param ? 'on' : 'off'} ${at}`;
 			case 'reset': return `effect reset ${at}`;
-			case 'fx': return `effect ${fg[y * W + x]}=${param} ${at}`;
+			case 'fx': return typeof param === 'string' ? `effect ${param.replace(':', '=')} ${at}` : `effect ${fg[y * W + x]}=${param} ${at}`;
 			case 'coin': return `coin ${at}`;
 			case 'bcoin': return `blue coin ${at}`;
 			case 'crown': return `crown ${at}`;
@@ -147,6 +166,7 @@ function compileModel(L, o = {}) {
 		else if (feat === 'psw:*') relevant = feats.some((f) => f.startsWith('psw:'));
 		else if (feat === 'osw:*') relevant = feats.some((f) => f.startsWith('osw:'));
 		else if (feat) relevant = featSet.has(feat);
+		if (kind === 'reset' && fxFeat.size) relevant = true;
 		triggers.push({ id, kind, tiles, feat, param, label: labelOf(kind, param, x0, y0) + (tiles.length > 1 ? ` x${tiles.length}` : ''), relevant, coins: null });
 	}
 	// coin tiles (only where the count is read): index per tile, per component its indices
@@ -340,7 +360,7 @@ function compileModel(L, o = {}) {
 	}
 	function touch0(S, X) {
 		if (X.kind === 'cp') return cpTracked && S.cp !== X.id ? { S2: mkState(S.vals, S.taken, S.btaken, X.id), changed: true, expect: null } : { S2: S, changed: false, expect: null };
-		if (!X.relevant || X.kind === 'trophy' || X.kind === 'fx') return { S2: S, changed: false, expect: null };
+		if (!X.relevant || X.kind === 'trophy' || (X.kind === 'fx' && typeof X.param !== 'string')) return { S2: S, changed: false, expect: null };
 		const vals = S.vals.slice();
 		let taken = S.taken, btaken = S.btaken, expect = null;
 		const setF = (f, v) => { const n = fIdx.get(f); if (n === undefined) return; vals[n] = v; };
@@ -355,7 +375,16 @@ function compileModel(L, o = {}) {
 			}
 			case 'team': if (getF('team') !== X.param) { setF('team', X.param); expect = { feat: 'team', value: X.param }; } break;
 			case 'prot': if (getF('prot') !== X.param) { setF('prot', X.param); expect = { feat: 'prot', value: X.param }; } break;
-			case 'reset': if (getF('prot') === 1) { setF('prot', 0); expect = { feat: 'prot', value: 0 }; } break;
+			case 'reset': {
+				if (getF('prot') === 1) { setF('prot', 0); expect = { feat: 'prot', value: 0 }; }
+				for (const [id, f] of fxFeat) { const d = FX_DEF[id]; if (getF(f) !== d) { setF(f, d); if (!expect) expect = { feat: f, value: d }; } }
+				break;
+			}
+			case 'fx': {
+				const p = String(X.param).split(':'), id = +p[0], f = X.feat, v = fxValue(id, +p[1]);
+				if (getF(f) !== undefined && getF(f) !== v) { setF(f, v); expect = { feat: f, value: v }; }
+				break;
+			}
 			case 'crown': if (getF('crown') !== 1) { setF('crown', 1); expect = { feat: 'crown', value: 1 }; } break;
 			case 'coin': case 'bcoin': {
 				const isB = X.kind === 'bcoin', f = isB ? 'bcoins' : 'coins';

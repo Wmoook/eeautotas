@@ -141,12 +141,25 @@ function playTo(L, masks, o = {}) {
 }
 
 // ---------------------------------------------------------------- features and the waypoint's goal test
+/** 'fx:<id>' (model.js, the effects in the state): the engine's value of that static effect (eesim.js 1901-2014) */
+function fxGet(id) {
+	switch (id) {
+		case 417: return (sim) => sim.jump_boost;
+		case 418: return (sim) => (sim.has_levitation ? 1 : 0);
+		case 419: return (sim) => sim.speed_boost;
+		case 453: return (sim) => (sim.low_gravity ? 1 : 0);
+		case 461: return (sim) => sim.max_jumps;
+		case 1517: return (sim) => sim.flip_gravity;
+		default: return () => NaN;
+	}
+}
 /** a feature's value in a real state (the Expect keys above; NaN for an unknown key) */
 function featValue(sim, feat) {
 	if (feat.startsWith('key')) return (sim._keysMask >> +feat.slice(3)) & 1;
 	if (feat.startsWith('psw:')) return sim._switches.get(+feat.slice(4)) === true ? 1 : 0;
 	if (feat.startsWith('osw:')) return sim._oswitches.get(+feat.slice(4)) === true ? 1 : 0;
 	if (feat.startsWith('coin@')) { const t = +feat.slice(5), W = sim.width; return sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }
+	if (feat.startsWith('fx:')) return fxGet(+feat.slice(3))(sim);
 	switch (feat) {
 		case 'team': return sim.team;
 		case 'prot': return sim.is_invulnerable ? 1 : 0;
@@ -169,6 +182,7 @@ function featGetter(feat) {
 	if (feat.startsWith('psw:')) { const id = +feat.slice(4); return (sim) => (sim._switches.get(id) === true ? 1 : 0); }
 	if (feat.startsWith('osw:')) { const id = +feat.slice(4); return (sim) => (sim._oswitches.get(id) === true ? 1 : 0); }
 	if (feat.startsWith('coin@')) { const t = +feat.slice(5); return (sim) => { const W = sim.width; return sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }; }
+	if (feat.startsWith('fx:')) return fxGet(+feat.slice(3));
 	switch (feat) {
 		case 'team': return (sim) => sim.team;
 		case 'prot': return (sim) => (sim.is_invulnerable ? 1 : 0);

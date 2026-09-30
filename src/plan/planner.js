@@ -1006,6 +1006,39 @@ function createPlanner(model, facts, o = {}) {
 		for (let i = bi + 1; i < path.length - 1 && cut.length < 4; i++) if (model.trigOf[path[i]] < 0) cut.push(path[i]);
 		return cut.length ? cut : null;
 	}
+	// ---------------------------------------------------------------- the effects a failed leg asks for (EEAT_FXSTATE)
+	const FX_FEATS = (model.feats || []).filter((f) => f.startsWith('fx:'));
+	const FX_RUNG = +process.env.EEAT_FX_RUNG > 0 ? +process.env.EEAT_FX_RUNG : 2;
+	const FX_DEF = { 417: 0, 418: 0, 419: 0, 453: 0, 461: 1, 1517: 0 };
+	const fxSetters = FX_FEATS.length ? model.triggers.filter((X) => X.kind === 'fx' && typeof X.param === 'string') : [];
+	/** fxNeed(anchor, a, fail) -> {feat, value} | null: (1) the effect value the anchor's run held last before losing it
+	 *  (its feature back at the default now), else (2) the non-default value of the effect trigger nearest the closest
+	 *  approach (or the anchor) among the features the anchor holds at their default */
+	function fxNeed(anchor, a, fail) {
+		const arr = anchor.arrival;
+		const isDef = (f, v) => v === FX_DEF[+f.slice(3)];
+		// (a value STRONGER than the default: more jumps, a higher jump / speed boost, fly, low gravity; any gravity
+		// direction but down. A multijump 0 (no jump at all) is no effect a leg asks for)
+		const strong = (f, v) => { const id = +f.slice(3); return id === 1517 ? v !== 0 : v > FX_DEF[id]; };
+		if (arr && arr.masks && arr.masks.length) {
+			const sim = new E.EESim(L), inp = new E.EEInput(); sim.reset();
+			const gets = FX_FEATS.map((f) => T.featGetter(f)), last = FX_FEATS.map(() => null);
+			for (let i = 0; i < arr.masks.length; i++) {
+				E.applyMask(inp, arr.masks[i]); sim.tick(inp);
+				for (let k = 0; k < gets.length; k++) { const v = gets[k](sim); if (strong(FX_FEATS[k], v)) last[k] = v; }
+			}
+			for (let k = 0; k < FX_FEATS.length; k++) if (last[k] !== null && isDef(FX_FEATS[k], a.S.feats[FX_FEATS[k]])) return { feat: FX_FEATS[k], value: last[k] };
+		}
+		const ref = fail && fail.closest && fail.closest.tile >= 0 ? fail.closest.tile : (arr && arr.tile >= 0 ? arr.tile : model.startTile);
+		const rx = ref % W, ry = (ref / W) | 0;
+		let best = null, bd = Infinity;
+		for (const X of fxSetters) {
+			const p = X.param.split(':'), id = +p[0], v = id === 418 || id === 453 ? (+p[1] !== 0 ? 1 : 0) : +p[1];
+			if (!strong(X.feat, v) || !isDef(X.feat, a.S.feats[X.feat]) && !(id !== 1517 && v > a.S.feats[X.feat])) continue;
+			for (const t of X.tiles) { const d = Math.max(Math.abs(t % W - rx), Math.abs(((t / W) | 0) - ry)); if (d < bd) { bd = d; best = { feat: X.feat, value: v }; } }
+		}
+		return best;
+	}
 	/**
 	 * learn(step, result, anchor) -> Fact[]: at least one whenever !result.ok (the facts' version bumps with each).
 	 */
@@ -1036,6 +1069,14 @@ function createPlanner(model, facts, o = {}) {
 			out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: f, value: v }));
 		}
 		const rung = facts.rungOf(edge, cls);
+		// (the effects in the state, model.js EEAT_FXSTATE: a leg that failed twice from a state without an effect the level
+		// gives asks for it first: the effect the anchor's own run had and lost (a reset on its way), else the effect whose
+		// trigger is nearest the closest approach. A 'needs' fact: the planner goes for that effect, then the leg)
+		if (FX_FEATS.length && a && anchor && fail.why !== 'proof' && rung + 1 >= FX_RUNG) {
+			let nd = null;
+			try { nd = fxNeed(anchor, a, fail); } catch (e) { nd = null; }
+			if (nd && a.S.feats[nd.feat] !== nd.value) out.push(facts.add({ kind: 'needs', edge, nodeClass: cls, feat: nd.feat, value: nd.value }));
+		}
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
 		let cut = null;
