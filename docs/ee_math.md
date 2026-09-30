@@ -1632,3 +1632,39 @@ route (lbProof).
   leg, 401 chains, 31 with a leg, 315 math legs, 79 proven (event graph 48, exact 24, plain 7). test/planexec.js 32/32,
   test/planstrategy.js 24/0, test/msolve.js 50/0 (plancompile's hard-watchdog check fails under the box's load with and
   without this change).
+
+### 7.7 The tier's clock and its arrivals (the MATH program's iterate lane 'chains', 2026-09-30 05:00-06:00)
+
+**The clock.** A leg the mathematics does not evaluate must cost the executor nothing but its share. The wire's tier
+gave `msolve.leg` a share of the window but the solver had no clock: on the chain harness (test/planexec.js
+`--only=chain`: the executor alone compiles a known route from its waypoints, each leg from the leg before's
+arrivals, 2 s x legTicks / 150 a leg) MIHB's Dream's direct legs with no plain candidate ran the plain branch and bound
+for 1.8-2.7 s (400 k nodes over 386 (T, member) items, 0 verifies), and with that cut, `fieldsolve.solveLeg` for
+1.3-2.1 s past its `maxMs` of 120 ms (checked per gravity option, while one option's axis solves ran at every tick of
+a long floor window): every such leg failed 'budget' with the math tier at 2-5 s of a 2-s window. Now `o.deadline`
+(a `Date.now()` clock) reaches the plain tier (per item and every 1,024 nodes; on n4-math it is the smaller of it and
+the coverage lane's `o.plainMs`), the coupled piece (per prefix), a chain's own legs and fan-out landings (the chain's
+end), and fieldsolve checks its clock every 8 ticks of an option and between `iterate()`'s schedules (a generation the
+clock cut still proves no bound). The executor gives each start 1.5 x an even split of the tier's time (the last all
+of it).
+
+**The arrivals.** The next leg starts where this one arrives, and the cheapest leg's end is ONE state (mostly full
+speed, or launched), where the search tiers leave up to k diverse ones (T.pickDiverse over every goal state at the
+least depth). The plain solver now lists up to `o.alts` more verified legs with DISTINCT END STATES (the arrival's
+class: vx and vy rounded, grounded) within `o.altSlack` ticks of its cheapest (the cheapest per class; the answer and
+its proof unchanged: the first found is still the answer, the proof holds only at its T); the executor makes each an
+arrival candidate (`EEAT_MATH_ALTS` 6, `EEAT_MATH_ALT_SLACK` 3; 0 = the cheapest leg and its hop alone).
+
+**Measured** (box 3; the 18 known routes of the chain harness, legs done / compiled end to end): 2cb8357 29 legs, 2
+routes (Ruins, Bygone Tutorial); `EEAT_MATH=0` 70 legs, 2 (MIHB's Dream, Bygone); the clock + the arrivals **69 legs, 2
+(MIHB's Dream 46 / 46, Bygone)**, A Dreary Day 5 / 12 vs 2 / 12 either way. Route quality where both compile (the
+compiled run ticks): MIHB's Dream 10,103 / 10,366 (two runs) vs 10,689 without the math; Bygone Tutorial 2,160 / 2,272
+(alts) vs 2,265 (no alts) vs 2,349 (2cb8357) vs 2,209 (off); Ruins 1,535 (alts) vs 1,625 (no alts) vs 1,566
+(2cb8357). The legs' math profile is in the tier record (`tiers[].prof`: the goal bound's build ms, per start the
+leg's us, tool, T, items, verifies and its phase split pre / plain / field / coupled).
+The shared gate (block-4 list vs b3_w3.json, box 3, 60 s, W3, on the fields lane's 2371e55 + this): **exit 0, compiled
+13 vs the baseline's 12** (Tutorial 1 compiles), better 10 (Ruins 1,282 vs 1,444, NC Naos 319 vs 358, Rosa dei Venti
+3,741 vs 3,815, MIHB's Dream progress 36 vs 23, Booty Return 27 vs 13), worse 0, 13 / 13 .eetas replayed; its math
+988 direct calls, 168 with a leg (17.0%; the wire's gate 14.9%), 472 chains, 53 with a leg (11.2%; 7.7%), 496 math legs
+(315), 106 proven (events 58, exact 44, plain 4; 79). (On 2cb8357 the same change failed the gate once on Tree
+Decorating and Starlight; both reran fine, 1,792 / 1,426 ticks and 27 / 24 triggers: the spread.)
