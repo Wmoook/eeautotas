@@ -4394,7 +4394,7 @@ function compileStart(b) {
 				me.job = meta.id;
 				me.loadtas = `/loadtas ${path.resolve(C.JOBS, meta.id, 'best.eetas')}`;
 				me.result = { runTicks: ev.runTicks, time: C.fmt(ev.runTicks), ticks: ev.complete, deaths: ev.deaths, chance: ev.chance, lb: r.lb, lbTime: Number.isFinite(r.lb) ? C.fmt(r.lb) : null,
-					gap: r.gap, gapPct: r.gapPct, legs: r.legs || [], provenLegs: r.provenLegs || 0, known: r.known || null, ratio: r.ratio };
+					gap: r.gap, gapPct: r.gapPct, legs: r.legs || [], provenLegs: r.provenLegs || 0, known: r.known || null, ratio: r.ratio, lbProof: r.lbProof || '' };
 				me.stage = 'done';
 				me.message = `Compiled: ${C.fmt(ev.runTicks)} (${ev.runTicks} run ticks; lower bound ${Number.isFinite(r.lb) ? C.fmt(r.lb) : '-'}, gap ${r.gapPct}%)`;
 			} catch (e) { me.stage = 'error'; me.message = `the compiled route could not become a run: ${e.message}`; }

@@ -3018,7 +3018,7 @@ async function pollCompile() {
 }
 async function copyLoadtas(s) {
 	const r = s.result || {};
-	const what = `Compiled: <b>${esc(r.time || '')}</b>${r.lbTime ? ` (lower bound ${esc(r.lbTime)})` : ''}`;
+	const what = `Compiled: <b>${esc(r.time || '')}</b>${r.lbProof ? ' (PROVEN OPTIMAL)' : r.lbTime ? ` (lower bound ${esc(r.lbTime)})` : ''}`;
 	try {
 		await navigator.clipboard.writeText(s.loadtas);
 		toast(`${what}, /loadtas line copied. In eeo-tas: paste it, then /reset and /playtas.`);
@@ -3036,7 +3036,7 @@ function renderCompile() {
 	if (s.running) rows.push(`<span class="dim">${esc(s.detail || `${s.stage}…`)} (${esc(String(s.elapsed))} s of ${esc(String(s.seconds))})</span>`);
 	const r = s.result;
 	if (r) rows.push(`${esc('result'.padEnd(8))}          ${esc(`${r.runTicks.toLocaleString('en-US')} run ticks (${r.time}); lower bound ${Number.isFinite(r.lb) ? r.lb.toLocaleString('en-US') : '-'}` +
-		`${Number.isFinite(r.gapPct) ? ` (gap ${r.gapPct}%)` : ''}; proven legs ${r.provenLegs || 0} of ${(r.legs || []).length}${r.known ? `; best known ${fmt(r.known.runTicks)} (${r.known.source})` : ''}`)}`);
+		`${Number.isFinite(r.gapPct) ? ` (gap ${r.gapPct}%)` : ''}${r.lbProof ? ': PROVEN OPTIMAL' : ''}; proven legs ${r.provenLegs || 0} of ${(r.legs || []).length}${r.known ? `; best known ${fmt(r.known.runTicks)} (${r.known.source})` : ''}`)}`);
 	let html = `<div class="cmpOut">${rows.join('\n')}</div>`;
 	if (s.running) html += `<div class="row" style="margin-top:6px"><button class="small" id="bCmpStop">Stop compiling</button></div>`;
 	else if (s.loadtas) {

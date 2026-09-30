@@ -275,8 +275,8 @@ function sectionApi(TMP) {
 	check('GET before any compile: {running: false, stage: none}', !!x.idle && x.idle.running === false && x.idle.stage === 'none', JSON.stringify(x.idle));
 	const d = x.done || {};
 	const names = (d.stages || []).map((s) => s.name);
-	check('POST: 200 running; then the stage lines parse, model, bounds, plan, moves, verify, polish (each {name, ms, text}), stage "done", a result {runTicks, time, lb, gap, legs}',
-		!!x.post && x.post.status === 200 && x.post.running === true && JSON.stringify(names) === JSON.stringify(['parse', 'model', 'bounds', 'plan', 'moves', 'verify', 'polish']) && d.stage === 'done' &&
+	check('POST: 200 running; then the stage lines parse, model, bounds, plan, moves, verify, polish, prove (each {name, ms, text}), stage "done", a result {runTicks, time, lb, gap, legs}',
+		!!x.post && x.post.status === 200 && x.post.running === true && JSON.stringify(names) === JSON.stringify(['parse', 'model', 'bounds', 'plan', 'moves', 'verify', 'polish', 'prove']) && d.stage === 'done' &&
 		!!d.result && d.result.runTicks > 0 && /^\d+:\d\d\.\d\d$/.test(d.result.time) && d.result.lb > 0 && d.result.gap === d.result.runTicks - d.result.lb && Array.isArray(d.result.legs),
 		JSON.stringify({ post: x.post, stage: d.stage, names, result: d.result, message: d.message }).slice(0, 600));
 	check('a job made from the route; loadtas = "/loadtas <the job\'s best.eetas>": the file exists under the jobs folder and finishes with the result\'s run ticks',
