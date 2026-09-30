@@ -4,14 +4,17 @@
 //   node tools/perfect/joins.js --final=<n4plan dir> --levels=<levels dir> --out=<dir> [--only=substr,...] [--ms=] [--shard=i/n]
 //     every compiled route of the chief's FINAL (final/cmp_chief_fin_A + _C: .eetas + .json), its best known from FINAL.jsonl;
 //     one JSON line a level to <out>/joins_<shard>.jsonl and the improved .eetas to <out>/<id>.eetas
+//     --threads=N: N worker threads in this one process (shard i/N each)
 //   node tools/perfect/joins.js --agg=<dir> [--final=<n4plan dir>]   the table
 const fs = require('fs'), path = require('path');
 const C = require('../../src/common.js');
 const T = require('../../src/plan/types.js');
 const J = require('../../src/plan/joins.js');
 
-const argv = Object.fromEntries(process.argv.slice(2).filter((a) => a.startsWith('--')).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return [m[1], m[2] === undefined ? '1' : m[2]]; }));
-const pos = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const WT = require('worker_threads');
+const ARGS = WT.isMainThread ? process.argv.slice(2) : WT.workerData.args;
+const argv = Object.fromEntries(ARGS.filter((a) => a.startsWith('--')).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return [m[1], m[2] === undefined ? '1' : m[2]]; }));
+const pos = ARGS.filter((a) => !a.startsWith('--'));
 const num = (v, d) => (v === undefined ? d : +v);
 const opts = () => ({ ms: num(argv.ms, 60000), F: num(argv.F, 6), M: num(argv.M, 4), A: num(argv.A, 3), span: num(argv.span, 120), legMs: num(argv.legMs, 60), div: num(argv.div, 6),
 	log: argv.verbose ? (s) => console.error(s) : null });
@@ -96,7 +99,14 @@ function agg() {
 }
 
 if (argv.agg) agg();
-else if (argv.final) batch();
+else if (argv.final && WT.isMainThread && +argv.threads > 1) {
+	const N = +argv.threads;
+	for (let i = 0; i < N; i++) {
+		const args = ARGS.filter((a) => !a.startsWith('--threads=') && !a.startsWith('--shard=')).concat([`--shard=${i}/${N}`]);
+		const w = new WT.Worker(__filename, { workerData: { args } });
+		w.on('error', (e) => console.error(`worker ${i}: ${e.stack || e}`));
+	}
+} else if (argv.final) batch();
 else {
 	const r = one(pos[0], pos[1]);
 	if (argv.json) console.log(JSON.stringify(r));
