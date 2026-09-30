@@ -1156,6 +1156,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const Cost = A - kStar;
 				if (A < 1 || Cost < 1) { notes.push('the route does not reach the trophy on its replay (a bug)'); break; }
 				let proved = 0, faster = null, fail = '', lbMin = Infinity;
+				const provedBefore = [...provenAt.values()].filter((c) => c >= Cost).length;
 				// (lane 5: a long route's proof gets PROVE_LONG_MS, THE LAST the rest: the proofs and the faster routes the
 				// proof found in the 300-s baseline were all on routes of 27-98 run ticks (Switch Labyrinth, My level 730c /
 				// fef0); on 1,500-3,000-tick routes its exact bound reached 9-146 ticks in 12-15 s)
@@ -1164,7 +1165,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const room = Math.min(left() - 250, capEnd - Date.now());
 					if (PROVE_KEEP && provenAt.get(k) >= Cost) { proved++; lbMin = Math.min(lbMin, Cost); continue; }
 					if (room < 100) { fail = fail || 'no time left'; lbMin = 0; break; }
-					const ms = Math.max(100, Math.floor(room / (restIdle + 1 - k)));
+					let todo = 0;
+					for (let j = k; j <= restIdle; j++) if (!(PROVE_KEEP && provenAt.get(j) >= Cost)) todo++;
+					const ms = Math.max(100, Math.floor(room / Math.max(1, todo)));
 					const deadline = Date.now() + ms;
 					const idle = new Uint8Array(k);
 					const Sk = k === 0 ? a0 : T.arrivalOf(L, T.playTo(L, idle).sim, idle, RM);
@@ -1206,6 +1209,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const part = Number.isFinite(lbMin) && lbMin > 0 ? lbMin - (Cost - best.runTicks) : 0;
 				let raised = '';
 				if (part > LB && part <= best.runTicks) { raised = `; the lower bound raised ${num(LB)} -> ${num(part)} run ticks by the exact searches`; LB = part; }
+				// (lane 5: time left and this pass proved starts: another pass over the unproven ones with all of it (their share
+				// grows); Switch Labyrinth's 300-s proof ended at 27 of 39 starts, the 28th at the bound 27 of the 28 needed, with
+				// ~70 s of the compile left unused)
+				if (PROVE_KEEP && proved > provedBefore && left() - 250 > 2000 && !stopped) { notes.push(`pass: ${proved} of ${restIdle + 1} starts proven`); continue; }
 				notes.push(`no proof in ${((Date.now() - tm) / 1000).toFixed(1)} s (${proved} of ${restIdle + 1} starts; ${fail})${raised}`);
 				break;
 			}
