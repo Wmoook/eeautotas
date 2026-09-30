@@ -8,7 +8,8 @@
 //   solved   the solver returned masks and they reach the target (engine replay)
 //   le       ... in no more ticks than the route (T <= t1 - t0);  lt: strictly fewer
 //   exact    the answer's end state (or its landing hop's) = the route's end state (stateHash)
-//   proven   T = the admissible lower bound with its certificate (no input sequence reaches the target sooner)
+//   proven   T = the admissible lower bound with its certificate (no input sequence reaches the target sooner): the plain
+//            bound (4.5) or the event-graph bound of src/math/lb.js (--prove=0: the plain one alone)
 //   us       the solver's wall time for the leg (microseconds, one thread)
 // Usage: EEAT_TRUTH_ROOT=<root> node tools/math/msolve_bench.js --moves=<exact_jsonl dir> --out=<dir> [--shard=i/n]
 //          [--limit=N routes] [--every=N moves] [--slack=10] [--K=2] [--coupled=0|1] [--labels=hop,jump]
@@ -97,10 +98,11 @@ function main() {
 			const target = { tiles: [mv.tile1], cls: mv.c1, tele };
 			if (tele) target.via = portalVia(L, mv.tile1);
 			const snap = snaps.get(mv.t0);
-			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0', fields: argv.fields !== '0' });
+			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0', fields: argv.fields !== '0', prove: argv.prove !== '0' });
 			const rec = { r: entry._idx, m: mi, label: mv.label, len: mv.len, c0: mv.c0, c1: mv.c1, ok: !!res.ok, tool: res.tool || null, T: res.T || 0,
 				lb: res.lb, cert: !!res.cert, proven: !!res.proven, us: Math.round(res.us), cands: res.cands, ver: res.verifies, items: res.items, ticks: res.ticks,
-				k: res.k, member: res.member, why: res.ok ? undefined : res.why };
+				k: res.k, member: res.member, why: res.ok ? undefined : res.why,
+				provenBy: res.provenBy, lbMath: res.lbMath, lbMathAbove: res.lbMathAbove ? true : undefined, proveUs: res.proveUs !== undefined ? Math.round(res.proveUs) : undefined };
 			if (res.ok) {
 				// the independent replay: the moves study's test at the answer's last tick
 				const check = (ms) => {
@@ -156,6 +158,8 @@ function aggregate(dir) {
 	const wb = recs.filter((r) => r.lb > 0);
 	const ratio = wb.map((r) => r.lb / r.len);
 	lines.push(`legs with a plain bound: ${wb.length} (${pct(wb.length, recs.length)}%), certified ${recs.filter((r) => r.cert).length}; lb / route ticks median ${med(ratio).toFixed(3)} p10 ${(() => { const s = ratio.slice().sort((a, b) => a - b); return (s[Math.floor(s.length * 0.1)] || 0).toFixed(3); })()}; route ticks = lb (the route itself optimal) ${wb.filter((r) => r.lb === r.len && r.cert).length}; lb > route ticks (UNSOUND) ${wb.filter((r) => r.lb > r.len && r.cert).length} (uncertified ${wb.filter((r) => r.lb > r.len && !r.cert).length})`);
+	const okv = recs.filter((r) => r.ok && r.verified), pu = recs.filter((r) => r.proveUs !== undefined).map((r) => r.proveUs);
+	lines.push(`proven optimal: by the plain certificate ${okv.filter((r) => r.proven && r.provenBy !== 'events').length}, by the event-graph bound (src/math/lb.js) ${okv.filter((r) => r.provenBy === 'events').length}; the event-graph bound above a replayed leg's ticks (a counterexample) ${okv.filter((r) => r.lbMathAbove).length}; its time median ${med(pu)} us, p90 ${p90(pu)} us over ${pu.length} legs`);
 	const whys = new Map(); for (const r of recs) if (!r.ok) whys.set(r.why, (whys.get(r.why) || 0) + 1);
 	lines.push('failures: ' + Array.from(whys.entries()).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}: ${v}`).join('; '));
 	const txt = lines.join('\n');

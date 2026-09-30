@@ -918,11 +918,31 @@ function createSolver(L, opts = {}) {
 			res.lb = lb;
 			res.cert = cert;
 			res.proven = cert && res.T === lb;
+			if (res.proven) res.provenBy = 'plain';
 		} else { res.lb = lb; res.cert = cert; res.proven = false; }
 		res.cands = stats.cands; res.verifies = stats.verifies; res.items = stats.items; res.ticks = stats.ticks;
 		res.us = Number(process.hrtime.bigint() - t0) / 1e3;
+		if (res.ok && !res.proven && (oo.prove !== undefined ? oo.prove : opts.prove) && !target.tele) {
+			// THE EVENT-GRAPH BOUND (src/math/lb.js, docs/ee_math.md section 5: the admissible bound over the level's
+			// collision events, the build / bounds derivation): a leg found in exactly its bound's ticks is PROVEN OPTIMAL
+			// from this state. The target's mode: 'land' for a landing class G (grounded with the centre there: the goal's
+			// states are among them), 'touch' for the others (the centre in the tiles). Its time apart (res.proveUs)
+			const p0 = process.hrtime.bigint();
+			try {
+				sim.restore(snap);
+				const r = MLB().certify(sim, { tiles: tg.tiles, mode: tg.cls === 'G' ? 'land' : 'touch' }, res.T, { cap: oo.proveCap || 4000, ms: oo.proveMs || 50 });
+				res.lbMath = r.lb;
+				if (r.proven && r.lb === res.T) { res.proven = true; res.provenBy = 'events'; }
+				// a bound above a replayed leg's ticks would be a counterexample to the bound: reported, never a proof
+				if (r.lb !== null && r.lb > res.T) res.lbMathAbove = true;
+			} catch (e) { res.lbMath = null; }
+			res.proveUs = Number(process.hrtime.bigint() - p0) / 1e3;
+		}
 		return res;
 	}
+	let MLB_ = null;
+	/** the event-graph bound (src/math/lb.js) of this level, made on first use */
+	function MLB() { return MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L)); }
 
 	// ---------------------------------------------------------------- CHAINS: A* over support states
 	/**

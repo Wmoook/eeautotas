@@ -4,7 +4,8 @@
 //     hop replayed by a fresh EESim onto the target tile with the class asked;
 //   2 THE BOUND'S ENGINE CHECK: random input sequences (sticky, with jump presses anywhere: each one a real input word)
 //     record the least tick the ball stands on each tile; the certified lower bound must never exceed it (one sample
-//     below the bound would be a counterexample) and a PROVEN leg must never be beaten by any sample;
+//     below the bound would be a counterexample) and a PROVEN leg (the plain certificate or the event-graph bound of
+//     src/math/lb.js) must never be beaten by any sample;
 //   3 the forward fan-out (every landing replayed) and a chain (A* over support states) across the gap and the step.
 // Usage: node test/msolve.js [--samples=40000] [--quick]
 const E = require('../src/eesim.js');
@@ -94,7 +95,7 @@ function boundCheck(Lx, Sx, startsX, name) {
 	let checked = 0, bad = 0, provenN = 0, certN = 0;
 	for (let si = 0; si < startsX.length; si++) {
 		for (const [tile, tmin] of first[si]) {
-			const r = Sx.leg(startsX[si][1], { tiles: [tile], cls: 'G' }, { Tmax: T, coupled: false, fields: false });
+			const r = Sx.leg(startsX[si][1], { tiles: [tile], cls: 'G' }, { Tmax: T, coupled: false, fields: false, prove: true });
 			checked++;
 			if (r.cert) { certN++; if (r.lb > tmin) { bad++; console.log(`  BOUND ${r.lb} > a sample's ${tmin} (start ${si}, tile ${tile % W},${(tile / W) | 0})`); } }
 			if (r.proven) { provenN++; if (r.T > tmin) { bad++; console.log(`  PROVEN ${r.T} beaten by a sample's ${tmin} (start ${si}, tile ${tile % W},${(tile / W) | 0})`); } }
