@@ -410,6 +410,7 @@ function pathEval(L, s, masks, o = {}) {
 	const n = masks.length, W = L.width, H = L.height, fg = L.fg, lk = L.lookup0, flags = L.flags;
 	const xs = new Float64Array(n + 1), ys = new Float64Array(n + 1), vxs = new Float64Array(n + 1), vys = new Float64Array(n + 1);
 	const curs = new Int32Array(n + 1);
+	const ctxX = o.ctxs ? new Array(n + 1).fill(null) : null, ctxY = o.ctxs ? new Array(n + 1).fill(null) : null;
 	let px = s.px, py = s.py, vx = s.vx, vy = s.vy, q0 = s.q0, q1 = s.q1, slip = s.slip || 0, jc = s.jc === undefined ? 1 : s.jc;
 	const maxJ = s.maxJ || 1;
 	xs[0] = px; ys[0] = py; vxs[0] = vx; vys[0] = vy;
@@ -472,10 +473,11 @@ function pathEval(L, s, masks, o = {}) {
 		ny = K.align(ny, fvy, ctx.y.mods[iy], ctx.y.liquid);
 		px = nx; py = ny; vx = fvx; vy = fvy;
 		xs[t] = px; ys[t] = py; vxs[t] = vx; vys[t] = vy; curs[t] = cur;
+		if (ctxX) { ctxX[t] = ctx.x; ctxY[t] = ctx.y; }
 		if (o.stop && o.stop(t, px, py, vx, vy)) { why = 'stop'; break; }
 	}
 	const nEval = why === 'end' ? n : (why === 'stop' ? t : (why === 'unsupported' ? 0 : t - 1));
-	return { n: nEval, why, xs, ys, vxs, vys, cur: curs, q0, q1, slip, jc };
+	return { n: nEval, why, xs, ys, vxs, vys, cur: curs, q0, q1, slip, jc, ctxX, ctxY };
 }
 
 /** THEOREM F2's map on one axis context: negate the pulls and the inputs' signs (the mirror field) */

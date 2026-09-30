@@ -86,6 +86,7 @@ function scheduleOf(sim, T) {
 function solveLeg(L, sim, goal, o = {}) {
 	const t0 = Date.now();
 	const kMax = o.k === undefined ? 2 : o.k, jmax = o.jmax === undefined ? 40 : o.jmax, limit = o.limit || 6;
+	const deadline = t0 + (o.maxMs || 250);   // the candidate generation's clock (the engine verifies stay exact)
 	const maxT = Math.min(goal.maxT || 120, 127);
 	const W = L.width;
 	const goalSet = new Set(goal.tiles);
@@ -117,19 +118,102 @@ function solveLeg(L, sim, goal, o = {}) {
 		seen.add(key);
 		cands.push({ T, masks });
 	};
-	const tryCands = () => {
+	const failed = [];   // the candidates the engine refused (their real field schedules drive the iteration below)
+	const tryCands = (tool = 'math') => {
 		cands.sort((a, b) => a.T - b.T);
 		for (const c of cands) {
 			res.tried++;
 			const at = verify(vsim, snap, c.masks, goalSet, cls, maxT, inp);
 			if (at > 0) {
-				res.ok = true; res.masks = c.masks.slice(0, at); res.ticks = at; res.T = c.T; res.tool = 'math';
+				res.ok = true; res.masks = c.masks.slice(0, at); res.ticks = at; res.T = c.T; res.tool = tool;
 				return true;
 			}
+			if (failed.length < 64) failed.push(c);
 		}
 		cands.length = 0;
 		return false;
 	};
+	/**
+	 * both axes solved on a (time-varying) schedule and paired: an axis whose inputs do nothing at some ticks (a gravity
+	 * axis in the air) simply has one trajectory there; a support G's gravity coordinate is asked in [plane - 8,
+	 * plane + 16] at T (the landing tick's free step), the engine decides
+	 */
+	const solveBoth = (Sx, Sy, Tfrom) => {
+		for (let T = Math.max(1, Tfrom); T <= maxT && cands.length < 400 && Date.now() < deadline; T++) {
+			for (const [gx, gy] of tiles) {
+				let [xl, xh] = win(gx), [yl, yh] = win(gy);
+				const Ax = At(Sx, T), Ay = At(Sy, T);
+				if (cls === 'G') {
+					if (Ay.mo > 0 && Ay.ms[1] === 0 && Ay.ms[2] === 0) { yl = 16 * gy - 8; yh = 16 * gy + 16; }
+					else if (Ay.mo < 0 && Ay.ms[1] === 0 && Ay.ms[2] === 0) { yl = 16 * gy - 16; yh = 16 * gy + 8; }
+					if (Ax.mo > 0 && Ax.ms[1] === 0 && Ax.ms[2] === 0) { xl = 16 * gx - 8; xh = 16 * gx + 16; }
+					else if (Ax.mo < 0 && Ax.ms[1] === 0 && Ax.ms[2] === 0) { xl = 16 * gx - 16; xh = 16 * gx + 8; }
+				}
+				const ex = F.envelope(p0.x, v0.x, T, Sx), ey = F.envelope(p0.y, v0.y, T, Sy);
+				const sx = ex.armable[T] ? F.ALIGN_SLACK : 0, sy = ey.armable[T] ? F.ALIGN_SLACK : 0;
+				if (ex.phi[T] + sx < xl || ex.plo[T] - sx > xh || ey.phi[T] + sy < yl || ey.plo[T] - sy > yh) continue;
+				const xs = F.solveAxis(p0.x, v0.x, T, xl, xh, Sx, { k: kMax, limit: 4, maxNodes: 20000 });
+				res.solves++;
+				if (!xs.length) continue;
+				const ys = F.solveAxis(p0.y, v0.y, T, yl, yh, Sy, { k: kMax, limit: 4, maxNodes: 20000 });
+				res.solves++;
+				for (const a of xs) for (const b of ys) {
+					const masks = new Uint8Array(Math.min(maxT, T + 3));
+					for (let t = 1; t <= masks.length; t++) {
+						const tt = Math.min(t, T);
+						masks[t - 1] = HB[K1.inputAt(a.code, tt)] | VB[K1.inputAt(b.code, tt)];
+					}
+					push(T, masks);
+				}
+			}
+		}
+	};
+	/**
+	 * THE SCHEDULE ITERATION (a leg across field boundaries): a refused candidate's real path (pathEval: the centre's tiles,
+	 * the gravity queue, exact) gives the field schedule a path of that shape meets; both axes are solved again on it
+	 * (time-varying contexts), up to `rounds` times, each schedule once
+	 */
+	const ctxCache = new Map();
+	/** the contexts the ENGINE used on a candidate's replay (the centre tile, the queue's delayed tile, the ice timer, the effects), per tick */
+	const engineSchedule = (masks) => {
+		vsim.restore(snap);
+		const Sx = [null], Sy = [null], keys = [];
+		for (let t = 0; t < masks.length; t++) {
+			const q0 = vsim._q0, q1 = vsim._q1;
+			E.applyMask(inp, masks[t]);
+			vsim.tick(inp);
+			const cur = vsim.current_tile, del = K.isImmediate(cur) ? q1 : q0;
+			const o = { cur, del, flip: vsim.flip_gravity, sb: vsim.speed_boost, zombie: vsim.is_zombie, lowGravity: vsim.low_gravity,
+				worldGravity: vsim.world_gravity_multiplier, jb: vsim.jump_boost, slip: vsim._slippery };
+			const key = `${cur},${del},${o.flip},${o.sb},${o.zombie ? 1 : 0},${o.lowGravity ? 1 : 0},${o.jb},${o.slip}`;
+			let c = ctxCache.get(key);
+			if (!c) { c = F.fieldCtx(o); ctxCache.set(key, c); }
+			Sx.push(c.x); Sy.push(c.y); keys.push(key);
+			if (vsim.is_dead) break;
+		}
+		while (Sx.length <= maxT + 1) { Sx.push(Sx[Sx.length - 1]); Sy.push(Sy[Sy.length - 1]); }
+		return { x: Sx, y: Sy, key: keys.join('|') };
+	};
+	const iterate = (rounds) => {
+		const doneSch = new Set();
+		for (let r = 0; r < rounds && !res.ok; r++) {
+			const pool = failed.splice(0, failed.length).slice(0, 12);
+			if (!pool.length) break;
+			for (const c of pool) {
+				const S2 = engineSchedule(c.masks);
+				if (doneSch.has(S2.key)) continue;
+				doneSch.add(S2.key);
+				const k3 = Math.min(3, S2.x.length - 1);
+				const cx = { x: S2.x[k3], y: S2.y[k3] };
+				const g2 = cx.y.J !== 0 || (cx.y.ms[1] === 0 && cx.y.ms[2] === 0 && cx.y.mo !== 0) ? 'y'
+					: (cx.x.J !== 0 || (cx.x.ms[1] === 0 && cx.x.ms[2] === 0 && cx.x.mo !== 0) ? 'x' : null);
+				generate(S2, cx, g2, false);
+				if (tryCands('iter')) return true;
+			}
+		}
+		return false;
+	};
+	const generate = (S, c1, gAxis, first) => {
 	if (gAxis !== null) {
 		// ---- a gravity field: the gravity axis' trajectories (one per jump tick), the input axis solved in the window
 		const iAxis = gAxis === 'y' ? 'x' : 'y';
@@ -187,7 +271,9 @@ function solveLeg(L, sim, goal, o = {}) {
 		const nOpts = opts.length;
 		// per goal tile: the earliest tick any gravity option lands on its plane (G) / enters its window
 		const gFirst = tiles.map(() => Infinity), gWin = tiles.map(() => Infinity);
+		let cutG = false;
 		for (let oi = 0; oi < opts.length; oi++) {
+			if (Date.now() >= deadline) { cutG = true; break; }
 			const op = opts[oi];
 			const gp = new Float64Array(maxT + 1), gv = new Float64Array(maxT + 1);
 			gp[0] = p0[gAxis]; gv[0] = v0[gAxis];
@@ -238,7 +324,7 @@ function solveLeg(L, sim, goal, o = {}) {
 		}
 		// the leg's field bound: per goal tile the later of the input axis' envelope time (THEOREM F3) and the earliest
 		// gravity option's window tick (every jump tick, walk-off and ceiling reading: the gravity axis has no other input)
-		lb = Infinity;
+		let lbG = Infinity;
 		for (let ti = 0; ti < tiles.length; ti++) {
 			const ic = gAxis === 'y' ? tiles[ti][0] : tiles[ti][1];
 			const [il, ih] = win(ic);
@@ -247,29 +333,18 @@ function solveLeg(L, sim, goal, o = {}) {
 			// a support G is grounded: on a full-tile floor the box rests on the goal row's plane, reached no sooner than
 			// the first landing tick (a half-block floor rests elsewhere: the window tick then, the weaker bound)
 			const g = cls === 'G' ? (gFirst[ti] < Infinity ? gFirst[ti] : gWin[ti]) : gWin[ti];
-			lb = Math.min(lb, Math.max(tI, g));
+			lbG = Math.min(lbG, Math.max(tI, g));
 		}
-		res.lb = lb;
+		if (first) res.lb = cutG ? null : lbG;   // a generation the clock cut proves no bound
 	} else {
 		// ---- no gravity (dots, climbables, liquids, boosts' cross axis, flip 4): both axes solved, every pair composes
-		for (let T = Math.max(1, lb === Infinity ? 1 : lb); T <= maxT && cands.length < 400; T++) {
-			for (const [gx, gy] of tiles) {
-				const [xl, xh] = win(gx), [yl, yh] = win(gy);
-				const ex = F.envelope(p0.x, v0.x, T, S.x), ey = F.envelope(p0.y, v0.y, T, S.y);
-				const sx = ex.armable[T] ? F.ALIGN_SLACK : 0, sy = ey.armable[T] ? F.ALIGN_SLACK : 0;
-				if (ex.phi[T] + sx < xl || ex.plo[T] - sx > xh || ey.phi[T] + sy < yl || ey.plo[T] - sy > yh) continue;
-				const xs = F.solveAxis(p0.x, v0.x, T, xl, xh, S.x, { k: kMax, limit: 4, maxNodes: 20000 });
-				if (!xs.length) continue;
-				const ys = F.solveAxis(p0.y, v0.y, T, yl, yh, S.y, { k: kMax, limit: 4, maxNodes: 20000 });
-				for (const a of xs) for (const b of ys) {
-					const masks = new Uint8Array(T);
-					for (let t = 1; t <= T; t++) masks[t - 1] = HB[K1.inputAt(a.code, t)] | VB[K1.inputAt(b.code, t)];
-					push(T, masks);
-				}
-			}
-		}
+		solveBoth(S.x, S.y, first && lb !== Infinity ? lb : 1);
 	}
+	};
+	generate(S, c1, gAxis, true);
 	if (tryCands()) { res.ms = Date.now() - t0; return res; }
+	// ---- across field boundaries: the refused candidates' real schedules, both axes solved again on them
+	if (o.iterate !== false && iterate(o.rounds || 2)) { res.ms = Date.now() - t0; return res; }
 	// ---- the fallback family (o.family): per-tick one-change patterns over the 9 direction masks, jump press or not
 	if (o.family) {
 		const horizon = Math.min(maxT, o.famMax || maxT);
