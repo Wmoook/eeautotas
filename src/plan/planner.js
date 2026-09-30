@@ -466,13 +466,13 @@ function createPlanner(model, facts, o = {}) {
 	// EEAT_PLAN_STONE_MAX (120: more irrelevant coins than this, no stones).
 	const STONES = o.stones !== undefined ? !!o.stones : process.env.EEAT_PLAN_STONES === '1';
 	const STONE_LONG = +process.env.EEAT_PLAN_STONE_LONG || 1000, STONE_MAX = +process.env.EEAT_PLAN_STONE_MAX || 120;
-	// (THE STONES' WAY, EEAT_PLAN_STONE_WAY=1 (o.stoneWay): a stone is a plan edge only where it lies on the way to the
+	// (THE STONES' WAY, on with the stones (EEAT_PLAN_STONE_WAY=0 / o.stoneWay false: every stone an edge): a stone is a plan edge only where it lies on the way to the
 	// trophy (the est walk to it + the open level's walk from it to the trophy within max(STONE_SLACK, STONE_SLACK_F x the
 	// node's own) of the node's walk to the trophy) and only the STONE_NEAR nearest of those: every stone of a level of many
 	// was an edge of every node, and each new position is one more walk to build, so the plan search ran out of its budget
 	// on one stone (Treasure Trove Cove's first plan 'blue coin (49,173)', PARTIAL, 2.3 s; Perilous Endeavor's 'coin
 	// (158,37)', 3.1 s; Endeavor's switch plan cut after 3 steps))
-	const STONE_WAY = o.stoneWay !== undefined ? !!o.stoneWay : process.env.EEAT_PLAN_STONE_WAY === '1';
+	const STONE_WAY = o.stoneWay !== undefined ? !!o.stoneWay : process.env.EEAT_PLAN_STONE_WAY !== '0';
 	const STONE_NEAR = process.env.EEAT_PLAN_STONE_NEAR !== undefined ? +process.env.EEAT_PLAN_STONE_NEAR : 4;
 	const STONE_SLACK = process.env.EEAT_PLAN_STONE_SLACK !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK : 8;
 	const STONE_SLACK_F = process.env.EEAT_PLAN_STONE_SLACK_F !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK_F : 0.15;
