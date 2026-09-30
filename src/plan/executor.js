@@ -160,8 +160,12 @@ const WALL_NEAR = 3;
 // sealed trophy (5,177) under the platform (5,176), the level's other trophies never ordered), a coin under a boost. With
 // NEAR_WALLS the plateau there is a counterexample like any other: the tiles its field ranks below the nearest reached
 // one, next to it, never entered (the platform) are walled for the ordering fields, and the field orders the other
-// goal tiles / ways; walls that cut every start off are dropped as before. Ordering only. EEAT_NEAR_WALLS=0: off.
-const NEAR_WALLS = process.env.EEAT_NEAR_WALLS !== '0';
+// goal tiles / ways; walls that cut every start off are dropped as before. Ordering only. OPT-IN (EEAT_NEAR_WALLS=1;
+// off = the rule before, byte for byte): box 5, the lane's 11 levels, 300 s, one run each (n5 lane 4 block 1): the eight
+// levels 143 triggers on the 10 that fail vs 162 without it (the same code's runs differ by up to 10: Pancake Quest 33 /
+// 42), Frostbitten compiled in both; Ice Cream Expedition 5 vs 9 (no wall was added to its trophy field: the cause not
+// found yet); not shown to pay.
+const NEAR_WALLS = process.env.EEAT_NEAR_WALLS === '1';
 const PORTAL_IDS = new Set([242, 381, 374]);
 
 // ---- THE MATH TIER (the MATH program's Wire stage, 2026-09-30): the leg EVALUATED by the mathematics of docs/ee_math.md
