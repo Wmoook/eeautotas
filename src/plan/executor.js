@@ -201,6 +201,7 @@ const CORR_MS = +process.env.EEAT_CORR_MS > 0 ? +process.env.EEAT_CORR_MS : 6000
 const CORR_TMAX = +process.env.EEAT_CORR_TMAX > 0 ? +process.env.EEAT_CORR_TMAX : 3000;
 // EEAT_CORR_REPLACE=1 (with EEAT_CORR_MIN=0): the corridor also takes tier M2's near chains (msolve.chain off)
 const CORR_REPLACE = process.env.EEAT_CORR_REPLACE === '1';
+const CORR_CLOSEST = process.env.EEAT_CORR_CLOSEST !== '0';
 const CORR_OPTS = (() => { try { return process.env.EEAT_CORR_OPTS ? JSON.parse(process.env.EEAT_CORR_OPTS) : {}; } catch (e) { return {}; } })();
 // NO RESTART PER RUNG (n5 lane 2): tier M2's chain search is RESUMED by a later call from the same start state to the same
 // target tiles and horizon (msolve.js chain o.resume: its open list, seen states and best chain kept per worker, the newest
@@ -807,7 +808,7 @@ function makeCore(L, co) {
 				if (bi < 0 || (c >= 0 && (startCost[bi] < 0 || c < startCost[bi] || (c === startCost[bi] && s.tick < starts[bi].tick)))) bi = i;
 			});
 			const cands = [];
-			let rc = null;
+			let rc = null, corrCl = false;
 			if (bi >= 0) {
 				const s = starts[bi];
 				const Tmax = Math.min(CORR_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
@@ -820,10 +821,17 @@ function makeCore(L, co) {
 					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, legs: false, plainStops: [8, 20], dom: 'dir' }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
 					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
 					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:corridor');
+					// (no chain: the corridor's most advanced state is the call's closest when it is nearer by the call's own goal
+					// field: the strategy relays the next rung from it, so the corridor's progress carries; EEAT_CORR_CLOSEST=0 off)
+					else if (rc && rc.bestMasks && rc.bestMasks.length && CORR_CLOSEST) {
+						const full = T.concat(s.masks, rc.bestMasks);
+						const d = field0 ? fieldDistOf(full, starts, field0) : rc.bestC;
+						if (d >= 0 && (closest.dist < 0 || d < closest.dist)) { closest = { dist: d, masks: full }; corrCl = true; }
+					}
 				}
 			}
 			if (rc) { cY.tries++; if (cands.length) cY.ok++; }
-			tiers.push({ tier: 'corridor', ms: Date.now() - tC, ok: cands.length > 0, T: rc && rc.ok ? rc.T : null, expanded: rc ? rc.expanded : 0, nodes: rc ? rc.nodes : 0, resumed: !!(rc && rc.resumed), c0: rc ? rc.c0 : null, bestC: rc ? rc.bestC : null, error: rc && rc.error ? rc.error : undefined });
+			tiers.push({ tier: 'corridor', ms: Date.now() - tC, ok: cands.length > 0, T: rc && rc.ok ? rc.T : null, expanded: rc ? rc.expanded : 0, nodes: rc ? rc.nodes : 0, resumed: !!(rc && rc.resumed), closest: corrCl, c0: rc ? rc.c0 : null, bestC: rc ? rc.bestC : null, error: rc && rc.error ? rc.error : undefined });
 			if (cands.length) { const r = finishMath(cands); if (r) return out(r); }
 		}
 		// -------- tier 1: the primitives
@@ -2228,7 +2236,7 @@ async function createExecutor(L, opts) {
 				if (!t) continue;
 				if (t.tier === 'math') { S.math.direct++; S.math.directMs += t.ms || 0; if (t.ok) S.math.directOk++; }
 				else if (t.tier === 'math-chain') { S.math.chain++; S.math.chainMs += t.ms || 0; if (t.ok) S.math.chainOk++; }
-				else if (t.tier === 'corridor') { S.math.corr = (S.math.corr || 0) + 1; S.math.corrMs = (S.math.corrMs || 0) + (t.ms || 0); if (t.ok) S.math.corrOk = (S.math.corrOk || 0) + 1; S.math.corrExp = (S.math.corrExp || 0) + (t.expanded || 0); if (t.resumed) S.math.corrResumed = (S.math.corrResumed || 0) + 1; if (t.error) S.math.corrErr = t.error; }
+				else if (t.tier === 'corridor') { S.math.corr = (S.math.corr || 0) + 1; S.math.corrMs = (S.math.corrMs || 0) + (t.ms || 0); if (t.ok) S.math.corrOk = (S.math.corrOk || 0) + 1; S.math.corrExp = (S.math.corrExp || 0) + (t.expanded || 0); if (t.resumed) S.math.corrResumed = (S.math.corrResumed || 0) + 1; if (t.closest) S.math.corrClosest = (S.math.corrClosest || 0) + 1; if (t.error) S.math.corrErr = t.error; }
 			}
 		}
 		const legsIn = Array.isArray(res.legs) ? res.legs : [];

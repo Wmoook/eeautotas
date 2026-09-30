@@ -102,7 +102,7 @@ function main() {
 					else throw new Error('arm ' + arm);
 				} catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
 				const ar = { ok: !!res.ok, T: res.T || 0, exp: res.expanded || 0, ms: Date.now() - t0, firstMs: res.firstMs || 0, error: res.error };
-				if (arm === 'corr') { ar.c0 = res.c0; ar.bestC = res.bestC; }
+				if (arm === 'corr') { ar.c0 = res.c0; ar.bestC = res.bestC; ar.why = res.why; }
 				if (res.ok) {
 					chk.restore(snaps.get(a.t0));
 					let px = chk.px, py = chk.py, tel = false, dead = false;

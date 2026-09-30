@@ -239,7 +239,7 @@ function createCorridor(L, opts = {}) {
 		// the same key goes on where the last one stopped (the compile retries a stuck waypoint from the same arrival at every
 		// rung: the calls add up instead of starting over)
 		const R0 = o.resume ? keep.get(o.resume) : null;
-		if (R0) { keep.delete(o.resume); keep.set(o.resume, R0); out.resumed = true; out.bestC = R0.bestC; out.bestCg = R0.bestCg; }
+		if (R0) { keep.delete(o.resume); keep.set(o.resume, R0); out.resumed = true; out.bestC = R0.bestC; out.bestCg = R0.bestCg; out.bestMasks = R0.bestMasks || null; }
 		const nodes = R0 ? R0.nodes : new Map(), seen = R0 ? R0.seen : new Map();
 		const heap = R0 ? R0.heap : [];
 		const spansHit = R0 && R0.spansHit ? R0.spansHit : new Set();
@@ -280,7 +280,7 @@ function createCorridor(L, opts = {}) {
 			seen.set(h, g);
 			const c = RF.costAt(G.f, sim);
 			if (!(c >= 0)) return false;
-			if (c < out.bestC) { out.bestC = c; out.bestCg = g; }
+			if (c < out.bestC) { out.bestC = c; out.bestCg = g; out.bestMasks = masks; }
 			const key = keyOf(), v = toward();
 			let a = nodes.get(key);
 			if (!a) { a = []; nodes.set(key, a); }
@@ -466,7 +466,7 @@ function createCorridor(L, opts = {}) {
 		if (o.resume) {
 			// (kept while it can still give something: an open node)
 			if ((heap.length || lazy.length) && !best) {
-				keep.set(o.resume, { nodes, seen, heap, lazy, spansHit, best, w, bestC: out.bestC, bestCg: out.bestCg });
+				keep.set(o.resume, { nodes, seen, heap, lazy, spansHit, best, w, bestC: out.bestC, bestCg: out.bestCg, bestMasks: out.bestMasks || null });
 				while (keep.size > KEEP) keep.delete(keep.keys().next().value);
 			} else keep.delete(o.resume);
 		}
