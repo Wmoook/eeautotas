@@ -134,6 +134,11 @@ async function exactRooms() {
 		if (b.status === 'found') {
 			const p = T.playTo(L, b.tail, { goal });
 			check(`T-EXEC-EXACT room ${room.name}: the tail replays (goal first at its end)`, p.goalAt === b.tail.length, `${p.goalAt} / ${b.tail.length}`);
+			// the jump that cannot jump, not simulated: the same distinct states, the same depth as with every mask
+			const all = X.exactLeg(L, starts, goal, { sim, maxDepth: b.depth, deadline: Date.now() + 20000, cap: 1500000, noJskip: true });
+			const sk = X.exactLeg(L, starts, goal, { sim, maxDepth: b.depth, deadline: Date.now() + 20000, cap: 1500000 });
+			check(`T-EXEC-EXACT room ${room.name}: the jump skip changes no state (states, depth)`, all.status === sk.status && all.depth === sk.depth && all.stats.states === sk.stats.states,
+				`states ${sk.stats.states} vs ${all.stats.states}, ticks ${sk.stats.ticks} vs ${all.stats.ticks}, skipped ${sk.stats.skipJ}`);
 		}
 	}
 }

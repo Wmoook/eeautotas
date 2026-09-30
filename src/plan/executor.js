@@ -266,7 +266,7 @@ function makeCore(L, co) {
 			if (found && process.env.EEAT_TIGHTEN !== '0' && Date.now() < wEnd - 50) {
 				const t8 = Date.now();
 				const ub = Math.min(...found.cands.map((c) => c.depth));
-				const r3 = LG.legBest(L, snaps, goal, { sim, deadline: t8 + 0.5 * (wEnd - t8), stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_BEST_W || 0, cell: cell0, kbOn: true, noFinish: true });
+				const r3 = LG.legBest(L, snaps, goal, { sim, deadline: t8 + 0.5 * (wEnd - t8), stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_TIGHT_W || +process.env.EEAT_BEST_W || 0, cell: cell0, kbOn: true, noFinish: true });
 				sims += r3.sims;
 				tiers.push({ tier: 'best-tighten', ms: Date.now() - t8, status: r3.status, depth: r3.depth });
 				if (r3.status === 'found' && r3.depth < ub) found.cands = r3.goals.concat(found.cands);

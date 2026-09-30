@@ -36,6 +36,7 @@ const RF = require('../reach.js');
 
 const MAX_SEEN = 1 << 24;   // distinct states per search (the table's size then: 256 MB)
 const DEF_CAP = 300000;
+const JSKIP = process.env.EEAT_JSKIP !== '0';   // (the jump that cannot jump not simulated; EEAT_JSKIP=0: every mask, for the checks)
 const DEF_COLLECT = 4000;
 
 // ---------------------------------------------------------------- per level memo: the bound contexts per goal
@@ -135,8 +136,9 @@ function exactLeg(L, starts, goal, o) {
 	const t0 = starts[order[0]].tick;
 	let maxDepth = o.maxDepth >= 0 ? o.maxDepth : 64;
 	if (beforeTick >= 0) maxDepth = Math.min(maxDepth, beforeTick - t0);
-	const st = { ticks: 0, states: 0, merged: 0, cut: 0, cutField: 0, dead: 0, over: 0, goals: 0, maxOpen: 0, depth: 0, seconds: 0, maxDepth };
+	const st = { ticks: 0, states: 0, merged: 0, cut: 0, cutField: 0, dead: 0, over: 0, skipJ: 0, goals: 0, maxOpen: 0, depth: 0, seconds: 0, maxDepth };
 	const over = typeof goal.over === 'function' ? goal.over : null;
+	const jskip = JSKIP && !o.noJskip;
 	const tStart = Date.now();
 	const track = o.track || null;
 	const distField = o.distField || field;
@@ -210,9 +212,16 @@ function exactLeg(L, starts, goal, o) {
 			}
 			const masks = EG.probeMasks(sim, inp, cur[i]);
 			st.ticks++;
+			// (a jump that cannot jump: the input without the jump bit left the ball with no jump (the run timer on, no
+			// levitation, jump_count >= max_jumps after the tick): the same input with it gives the very same state, which
+			// the hash would merge (skipfind.js's rule; src/out/n4x/jskip.js: 58 k checks on 4 levels, 0 different), so it
+			// is not simulated (EG.MASK_SETS lists every input without the jump bit before its jump twin))
+			let noJump = 0;
 			for (let k = 0; k < masks.length; k++) {
 				const m = masks[k];
+				if ((m & 1) && jskip && (noJump & (1 << (m & 30))) !== 0) { st.skipJ++; continue; }
 				if (k > 0) { sim.restore(cur[i]); E.applyMask(inp, m); sim.tick(inp); st.ticks++; }
+				if (!(m & 1) && sim.run_ticks !== 0 && !sim.has_levitation && sim.jump_count >= sim.max_jumps) noJump |= 1 << (m & 30);
 				if (sim.is_dead && !allowDeath) { st.dead++; continue; }
 				if (over !== null && over(sim)) { st.over++; continue; }
 				if (!sim.is_dead && goalAt(goal, sim, t0 + c, beforeTick)) {
