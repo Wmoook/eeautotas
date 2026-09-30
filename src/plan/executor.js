@@ -68,6 +68,17 @@ const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
 // the best-first search's cells after one that ran out of open states: finer vy, then everything 2x, then 4x
 const LADDER = [[0.5, 0.25, 8, 2], [1, 0.5, 16, 8], [2, 1, 32, 16]];
+// the COARSE GRAIN first from rung COARSE_RUNG on: a leg the default cells did not find at rung 0 gets the best-first
+// search on cells of coarse speed (1/2 px/tick vx, 1 px/tick vy; the position as the default's) for COARSE_SHARE of
+// the finders' window, then the default cells (and their ladder) the rest; a leg it finds is tightened on the default
+// cells as before. The default's fine speeds make a long leg's arrivals near-copies of one trajectory (a 400-600-tick
+// leg: millions of pops within 10 tiles); the coarse ones spread the pops over the positions. In-process, box 3, 10 s,
+// rung 1, the first two root edges of the 16 L3 FIRST-LEG levels (32 legs): coarse cells alone 6 found vs the default's 3
+// (MMBA Skull Citadel's blue key 510 ticks, Polar Eclipse's team 582 / coin 438), every leg the default found too; the
+// speed coarse inside fields alone (legs.js fieldCell) 3. EEAT_COARSE_SHARE (0 off), EEAT_COARSE_RUNG.
+const COARSE_CELL = [0.5, 0.25, 2, 1];
+const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
+const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EEAT_COARSE_RUNG : 1;
 const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'best'); return m === 'beam' || m === 'mix' ? m : 'best'; };
 const BASE_FEATS = ['key0', 'key1', 'key2', 'key3', 'key4', 'key5', 'team', 'coins', 'bcoins', 'crown', 'silver', 'deaths', 'cp', 'fx', 'prot'];
 
@@ -457,9 +468,21 @@ function makeCore(L, co) {
 			const port = +process.env.EEAT_BEST_PORT || 0;
 			// (the finders end NEAR_RES of the window early: the exact end search from their nearest state gets it, below)
 			const bEnd = nearOn ? wEnd - 3 - NEAR_RES * (wEnd - t3) : wEnd - 3;
-			let r = mode === 'beam' ? runBeam(bEnd, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEnd) : t3 + 0.7 * (wEnd - t3));
-			sims += r.sims;
-			tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3, status: r.status, passes: r.passes });
+			// (the coarse grain first from rung COARSE_RUNG on: COARSE_CELL above)
+			let rC = null;
+			if (mode === 'best' && !cell0 && !port && COARSE_SHARE > 0 && rung >= COARSE_RUNG) {
+				rC = runBest(t3 + COARSE_SHARE * (bEnd - t3), COARSE_CELL);
+				sims += rC.sims;
+				tiers.push({ tier: 'best', ms: Date.now() - t3, status: rC.status, passes: rC.passes, cell: COARSE_CELL });
+				if (rC.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
+				if (rC.status !== 'found' && rC.closest && rC.closest.tail) noteClosest(rC.closest.dist, rC.closest.start, rC.closest.tail);
+			}
+			const t3b = Date.now();
+			let r = rC !== null && rC.status === 'found' ? rC : mode === 'beam' ? runBeam(bEnd, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEnd) : t3 + 0.7 * (wEnd - t3));
+			if (r !== rC) {
+				sims += r.sims;
+				tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3b, status: r.status, passes: r.passes });
+			}
 			// (the refinement ladder: a best-first search that ran out of open states (its cells closed every way: the first
 			// arrival's rule on coarse cells) goes again on finer cells while time is left; EEAT_BEST_LADDER=0 off)
 			if (mode === 'best' && process.env.EEAT_BEST_LADDER !== '0') {
