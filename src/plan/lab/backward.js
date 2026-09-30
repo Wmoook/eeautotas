@@ -21,9 +21,18 @@
 //      cell of the corridor, SPEED INCLUDED (a cell at a run-up's speed has a small D where the same place at rest has a
 //      large or no D: the arrival a long leg needs is part of the value, not a search's luck).
 //   3. MEET. From the REAL start: A* over exact engine states with the same macro moves (every child replayed by the
-//      engine from its parent's exact state), h = D(the child's cell) (a cell the closure did not make: the nearest speed
-//      class of its place, else the walk distance at the top running speed): the forward exact states meet the backward
-//      values. The first child that touches the target ends it; its masks are replayed from the start once more.
+//      engine from its parent's exact state; a cell keeps its P.keep earliest exact states, a state twice is one node),
+//      h = D(the child's cell) (a cell the closure did not make: the nearest speed class of its place, else THE FALLBACK:
+//      the reach field of the doors as they stand (src/reach.js, deaths off) at the top running speed x P.fw + P.fadd):
+//      the forward exact states meet the backward values. The first child that touches the target ends it; its masks
+//      are replayed from the start once more (a dead start plays its dead ticks first).
+//   4. THE EXACT BASIN: a node whose time to go is at most P.finishH ticks asks the move solver's direct leg
+//      (src/plan/msolve.js: the plain regime's per-axis closed forms and the field tier, i.e. the target's per-axis
+//      backward sets evaluated) within P.finishShare of the meet's time: the macro cells too coarse for a last move.
+//   The order of a call: THE QUICK MEET (the fallback order alone, P.quickF of the clock: most short legs need no
+//   closure), the closure to P.closeF of the clock (target first: a bucket queue by the walk distance; P.perim: only
+//   within that distance), the values, the meet with them, then THE REFINEMENT LADDER (an exhausted meet again with
+//   the dedup cells halved and one state more a cell, P.ladder steps).
 //
 // The model is a relaxation of nothing and a restriction of everything (a cell merges states, the macro set is finite):
 // D is an ORDER, not a bound; every leg returned is the engine's own replay. Opt-in lab code: nothing requires it.
@@ -33,8 +42,8 @@
 //   B.solve(start, target, o) -> {ok, masks, T, why, stats: {cells, seeds, edges, closeMs, dijMs, meetMs, dStart,
 //                                  expanded, ...}}
 //     start: an EESnapshot of L (or an EESim: its state is read); target: {tiles: number[] (centre tiles)}
-//     o: {ms (the whole call's clock), closeMs (the closure's share), maxCells, w (the A*'s weight on D), seeds (true),
-//         corrF, corrAdd, vxq, vyq, airStep, maxT, meetNodes}
+//     o: DEF's keys (env EEAT_BW_*), ms (the whole call's clock), probe (masks of a known leg: the values along it),
+//        trace, debugWalk, debugReplay (diagnostics)
 const E = require('../../eesim.js');
 const KN = require('../kin.js');
 const RF = require('../../reach.js');
@@ -53,7 +62,7 @@ const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 200000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 3000), quickF: ENV('EEAT_BW_QUICKF', 0.05), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -129,15 +138,25 @@ function createBackward(L, opts = {}) {
 		if (!owned) swKeys.set(m, k);
 		return k;
 	};
+	// (a memo of the last state's fields: the discrete state rarely changes along a leg, and the key's string was a fifth of a
+	// meet's time)
+	const DM = { ok: false, tb: 0, c: 0, b: 0, k: 0, sw: null, osw: null, t: 0, j: 0, mj: 0, jb: 0, sb: 0, fl: 0, fg: 0, d: 0 };
 	function discOf(s) {
+		const tb = L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : 0;
+		const fl = (s.low_gravity ? 1 : 0) | (s.is_invulnerable ? 2 : 0) | (s.has_levitation ? 4 : 0) | (s.is_cursed ? 8 : 0) | (s.is_zombie ? 16 : 0) | (s.is_poisoned ? 32 : 0) | (s.is_on_fire ? 64 : 0) | (s.has_crown ? 128 : 0);
+		const j = s.max_jumps > 1 ? s.jump_count : 0;
+		if (DM.ok && !s._swOwned && !s._oswOwned && DM.tb === tb && DM.c === s.coins && DM.b === s.blue_coins && DM.k === s._keysMask && DM.sw === s._switches && DM.osw === s._oswitches && DM.t === s.team && DM.j === j && DM.mj === s.max_jumps && DM.jb === s.jump_boost && DM.sb === s.speed_boost && DM.fl === fl && DM.fg === s.flip_gravity) return DM.d;
 		const sw = swKey(s._switches, s._swOwned), osw = swKey(s._oswitches, s._oswOwned);
 		// (a level with time doors: the clock's phase in TD_BUCKET-tick buckets, so a ball that waits for a door is not its own earlier cell)
 		const k = `${L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : ''},${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}`;
 		let d = discIds.get(k);
 		if (d === undefined) { d = discIds.size; discIds.set(k, d); }
+		if (!s._swOwned && !s._oswOwned) { DM.ok = true; DM.tb = tb; DM.c = s.coins; DM.b = s.blue_coins; DM.k = s._keysMask; DM.sw = s._switches; DM.osw = s._oswitches; DM.t = s.team; DM.j = j; DM.mj = s.max_jumps; DM.jb = s.jump_boost; DM.sb = s.speed_boost; DM.fl = fl; DM.fg = s.flip_gravity; DM.d = d; }
 		return d;
 	}
 
+	let MS_ = null;
+	const msol = () => MS_ || (MS_ = require('../msolve.js').createSolver(L, {}));
 	// the reach field to a target's tiles (deaths off: the meet never dies), the newest 6
 	const rfCache = new Map();
 	function rfOf(tiles, s) {
@@ -157,7 +176,7 @@ function createBackward(L, opts = {}) {
 		const clock = P.ms || 10000;
 		const closeEnd = t0 + clock * P.closeF;
 		const tEnd = t0 + clock;
-		const stats = { cells: 0, seeds: 0, edges: 0, targetEdges: 0, expanded: 0, closeMs: 0, dijMs: 0, meetMs: 0, dStart: null, meetExpanded: 0, capped: false };
+		const stats = { finishCalls: 0, finishMs: 0, finishOk: 0, cells: 0, seeds: 0, edges: 0, targetEdges: 0, expanded: 0, closeMs: 0, dijMs: 0, meetMs: 0, dStart: null, meetExpanded: 0, capped: false };
 		const snap0 = start instanceof E.EESnapshot ? start : start.snapshot();
 		sim.restore(snap0);
 		const tgt = new Uint8Array(N);
@@ -466,6 +485,7 @@ function createBackward(L, opts = {}) {
 
 		// the value of a state's cell: its own, else the nearest speed class of its place, else the walk
 		const hOf = (key, tile, hf) => {
+			if (D.length === 0) return hf;               // (no values yet: the quick meet)
 			const id = cellId.get(key);
 			if (id !== undefined && D[id] < Infinity) return D[id];
 			const a = byPlace.get(placeOf(key));
@@ -485,35 +505,57 @@ function createBackward(L, opts = {}) {
 		// ------------------------------------------------------------ MEET: A* over exact states from the real start
 		const tM0 = Date.now();
 		let nodes = [];
-		const meet = (cap, until) => {
+		// the meet's own dedup key at resolution res (0: the value's cell; each step halves the position and speed classes and
+		// keeps one state more a cell: THE REFINEMENT LADDER after an exhausted meet, for legs whose cells are too coarse)
+		const mkeyOf = (s, res) => {
+			if (res === 0) return keyOf(s);
+			const q = 8 >> res, d = discOf(s);
+			return `${d}|${s.on_ground ? 1 : 0}|${Math.floor((s.px + 8) / q)}|${Math.floor((s.py + 8) / q)}|${Math.round(s.speed_x * VXQ * (1 << res))}|${Math.round(s.speed_y * VYQ * (1 << res))}|${clsId[idOf(s._q0)]}.${clsId[idOf(s._q1)]}|r${res}`;
+		};
+		const meet = (cap, until, res = 0) => {
+			const keep = P.keep + res;
 			const heap = makeHeap();
 			nodes = [];                              // {snap, par, masks (Uint8Array of the move), g}
 			const seenG = new Map();                   // cell key -> [g, ...] (the P.keep least)
 			const seenH = new Set();                  // the exact states pushed (a state twice is one node)
-			const push = (snap, par, masks, g, key, tile, hsh, hf) => {
-				const a = seenG.get(key);
-				if (a && a.length >= P.keep && a[a.length - 1] <= g) return;
+			const push = (snap, par, masks, g, key, tile, hsh, hf, mkey) => {
+				const a = seenG.get(mkey);
+				if (a && a.length >= keep && a[a.length - 1] <= g) return;
 				if (hsh !== undefined) { if (seenH.has(hsh)) return; seenH.add(hsh); }
-				if (!a) seenG.set(key, [g]);
-				else { let i = a.length; while (i > 0 && a[i - 1] > g) i--; a.splice(i, 0, g); if (a.length > P.keep) a.pop(); }
+				if (!a) seenG.set(mkey, [g]);
+				else { let i = a.length; while (i > 0 && a[i - 1] > g) i--; a.splice(i, 0, g); if (a.length > keep) a.pop(); }
 				const hv = hOf(key, tile, hf);
 				if (!(hv < Infinity)) return;
 				const id = nodes.length;
-				nodes.push({ snap, par, masks, g, hsh });
+				// (hr: the node's time to go in ticks: its value, else the fallback's own ticks without its weight)
+				nodes.push({ snap, par, masks, g, hsh, h: hv === hf ? (hf - P.fadd) / P.fw : hv });
 				heap.push(g + P.w * hv, id);
 			};
 			sim.restore(snap0);
-			push(snap0, -1, null, 0, startKey, tileOfS(sim), undefined, hFall(sim, tileOfS(sim)));
-			let found = null, ex = 0;
-			while (heap.size && !found && Date.now() < until && ex < cap) {
+			push(snap0, -1, null, 0, startKey, tileOfS(sim), undefined, hFall(sim, tileOfS(sim)), mkeyOf(sim, res));
+			let found = null, ex = 0, lastFinish = -Infinity;
+			const tMeet0 = Date.now() - 50;
+			while (heap.size && !found && Date.now() < until && ex < cap && nodes.length < P.maxNodes) {
 				const id = heap.pop();
 				const nd = nodes[id];
 				ex++; stats.meetExpanded++;
 				if (o.trace) { sim.restore(nd.snap); o.trace('pop', nd.g, keyOf(sim), sim); }
 				const snapE = nd.snap;
 				nd.snap = null;
+				// THE EXACT BASIN (P.finish): a node near the target by its value is asked for the move solver's direct leg
+				// (src/plan/msolve.js: the plain regime's closed forms per axis, the field tier; the per-axis backward sets of the
+				// target, evaluated) at most once per P.finishEvery expansions, P.finishMs each: a macro search whose cells are
+				// too coarse for the last move meets the exact mathematics there
+				if (P.finish && nd.h <= P.finishH && ex - lastFinish >= P.finishEvery && stats.finishMs <= P.finishShare * (Date.now() - tMeet0)) {
+					lastFinish = ex;
+					const tf = Date.now();
+					let r = null;
+					try { r = msol().leg(snapE, { tiles: Array.from(target.tiles), cls: 'any' }, { Tmax: P.finishT, chain: false, prove: false, coupled: nd.h <= 40, fields: true, nodes: 40000, fieldMs: P.finishMs, coupledTicks: 30000, deadline: tf + P.finishMs, alts: 0 }); } catch (e) { r = null; }
+					stats.finishCalls++; stats.finishMs += Date.now() - tf;
+					if (r && r.ok && r.masks && r.masks.length) { found = { par: id, masks: Uint8Array.from(r.masks), g: nd.g + r.T }; stats.finishOk++; }
+				}
 				sim.restore(snapE);
-				const ms = macrosOf();
+				const ms = found ? [] : macrosOf();
 				for (const [m, p] of ms) {
 					play(snapE, m, p, (kind, ticks, masks) => {
 						if (found && kind === 0) return;
@@ -525,14 +567,15 @@ function createBackward(L, opts = {}) {
 						}
 						const tl = tileOfS(sim);
 						if (o.trace) o.trace('child', nd.g + ticks, keyOf(sim), sim, m, p, ticks);
-						push(sim.snapshot(), id, mm, nd.g + ticks, keyOf(sim), tl, sim.stateHash(), hFall(sim, tl));
+						const vk = keyOf(sim);
+						push(sim.snapshot(), id, mm, nd.g + ticks, vk, tl, sim.stateHash(), hFall(sim, tl), res === 0 ? vk : mkeyOf(sim, res));
 					});
 				}
 			}
 			stats.exhausted = !found && heap.size === 0;
 			return found;
 		};
-		// 1. THE QUICK MEET: the walk's order alone (a short leg needs no closure)
+		// 1. THE QUICK MEET: the fallback order alone (a short leg needs no closure)
 		let found = meet(P.quick, t0 + clock * P.quickF);
 		stats.quick = !!found;
 		if (!found && P.closeF > 0) {
@@ -542,6 +585,8 @@ function createBackward(L, opts = {}) {
 			dijkstra();
 			found = meet(P.meetNodes, tEnd);
 		}
+		// 5. THE REFINEMENT LADDER: an exhausted meet again with finer cells while the clock lasts
+		for (let res = 1; !found && stats.exhausted && res <= P.ladder && Date.now() < tEnd - 20; res++) { stats.ladder = res; found = meet(P.meetNodes, tEnd, res); }
 		stats.meetMs = Date.now() - tM0;
 		if (o.probe) {
 			// (a diagnostic: the values along a known leg's own states, every o.probeEvery ticks: [tick, D of its cell or
