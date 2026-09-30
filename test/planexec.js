@@ -46,6 +46,44 @@ function levelOf(rows, ID, name) {
 	return { L, file, at: (x, y) => y * L.width + x };
 }
 
+/** E-SETTLE (the settle templates, executor.js tier S, EEAT_SETTLE=1): a coin at the top of a 1-tile-wide shaft; the
+ *  16-px box enters a 16-px gap only at px exactly on the grid (here also a wall stop gives it: the finders find this toy
+ *  too). The math tier off (EEAT_MATH=0) in both calls: with the knob the settle tier answers first (its arrival replayed
+ *  to the goal); off, the executor as before (no 'settle' tier ran). Stupid Fox's real shaft: src/out/n5/doctor/batch5.md */
+async function settleShaft() {
+	const rows = [
+		'##############',
+		'######c#######',
+		'######.#######',
+		'######.#######',
+		'#S...........#',
+		'##############',
+	];
+	const { L, file, at } = levelOf(rows, { '#': [9], S: [255], c: [100] }, 'settleshaft');
+	const wp = { kind: 'trigger', tiles: [at(6, 1)], trig: 0, expect: { feat: 'coins', value: 1 }, label: 'coin (6,1)' };
+	const math0 = process.env.EEAT_MATH, set0 = process.env.EEAT_SETTLE;
+	process.env.EEAT_MATH = '0';
+	const run = async (on) => {
+		if (on) process.env.EEAT_SETTLE = '1'; else delete process.env.EEAT_SETTLE;
+		const ex = await EX.createExecutor(L, { file, workers: 0 });
+		const r = await ex.reach([{ masks: new Uint8Array(0) }], wp, { ms: 3000, level: 0 });
+		await ex.close();
+		return r;
+	};
+	const off = await run(false), on = await run(true);
+	if (math0 === undefined) delete process.env.EEAT_MATH; else process.env.EEAT_MATH = math0;
+	if (set0 === undefined) delete process.env.EEAT_SETTLE; else process.env.EEAT_SETTLE = set0;
+	const g = T.goalOf(L, wp);
+	const a = on.ok ? on.arrivals[0] : null;
+	const am = a ? (typeof a.masks === 'string' ? T.masksOf(a.masks) : a.masks) : null;
+	const rep = a ? T.playTo(L, am, { goal: g }) : null;
+	let px = NaN;
+	if (am) { const sm = new E.EESim(L), ip = new E.EEInput(); sm.reset(); for (let t = 0; t < am.length; t++) { if ((am[t] & 1) && Number.isNaN(px)) px = sm.px; E.applyMask(ip, am[t] & 31); sm.tick(ip); } }
+	check('E-SETTLE on: the settle tier reaches the coin atop the 1-wide shaft, the arrival replays (goalAt = its end)', on.ok && on.tool === 'settle' && !!rep && rep.goalAt === am.length,
+		on.ok ? `${on.tool}, ${am.length} ticks (goalAt ${rep && rep.goalAt}), px at the jump ${px}, tiers ${(on.tiers || []).map((x) => x.tier + (x.ok ? '+' : '')).join(' ')}` : JSON.stringify(on.fail && on.fail.why));
+	check('E-SETTLE off: no settle tier runs (the executor as before)', !(off.tiers || []).some((x) => x.tier === 'settle'), `${off.ok ? off.tool : 'no leg (' + (off.fail && off.fail.why) + ')'}; tiers ${(off.tiers || []).map((x) => x.tier).join(' ')}`);
+}
+
 async function unit() {
 	// # wall, S spawn, k red key, d red key door (a column: nothing passes it without the key), c a sealed coin, T trophy
 	const rows = [
@@ -546,6 +584,7 @@ if (require.main === module) (async () => {
 	const t0 = Date.now();
 	try {
 		if (only.has('unit')) await unit();
+		if (only.has('settle')) await settleShaft();
 		if (only.has('exact')) { await exactRooms(); if (truth) await exactTruth(); }
 		if (only.has('fail')) await failCases();
 		if (only.has('legs') && truth) await legsTruth();

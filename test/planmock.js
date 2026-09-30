@@ -40,7 +40,13 @@ function createPlanner(model, F) {
 			if (stuck) { n++; return [{ id: `s${n}`, steps: [step(`e${n}`, cls, wpCoin, 10)], cost: 10, lb, partial: true, why: 'stuck mock' }]; }
 			const ok = (e) => !F.blocked.has(`${e}|${cls}`) && !F.done.has(`${e}|${cls}`);
 			const plans = [];
-			if (cls === 'k0') { if (ok('key')) plans.push({ id: 'a', steps: [step('key', cls, wpKey, 50, lb), step('trophy', 'k1', wpTrophy, 100, lb)], cost: 150, lb }); }
+			// ('ladder': two cheaper plans whose first legs no executor reaches (the sealed coin under two edge names) before
+			// the key's plan: the rung breadth's test, strategy.js EEAT_RUNG_BREADTH)
+			if (cls === 'k0' && mode() === 'ladder') {
+				if (ok('coin')) plans.push({ id: 'b', steps: [step('coin', cls, wpCoin, 10, lb), step('trophy', 'k1', wpTrophy, 100, lb)], cost: 110, lb });
+				if (ok('coin2')) plans.push({ id: 'b2', steps: [step('coin2', cls, wpCoin, 12, lb), step('trophy', 'k1', wpTrophy, 100, lb)], cost: 112, lb });
+				if (ok('key')) plans.push({ id: 'a', steps: [step('key', cls, wpKey, 50, lb), step('trophy', 'k1', wpTrophy, 100, lb)], cost: 150, lb });
+			} else if (cls === 'k0') { if (ok('key')) plans.push({ id: 'a', steps: [step('key', cls, wpKey, 50, lb), step('trophy', 'k1', wpTrophy, 100, lb)], cost: 150, lb }); }
 			else if (bnb) {
 				if (ok('trophy')) plans.push({ id: 'c', steps: [step('trophy', cls, wpTrophy, 100, lb)], cost: 100, lb });
 				if (ok('detour')) plans.push({ id: 'd', steps: [step('detour', cls, wpDetour, 5, 1e6), step('trophy', cls, wpTrophy, 100, lb)], cost: 200, lb: 1e6 });
