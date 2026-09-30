@@ -349,7 +349,7 @@ function makeCore(L, co) {
 		sim.restore(s.snap);
 		const Lc = T.levelNow(L, sim);
 		const tiles = T.fieldTilesOf(goal);
-		const pfx = T.plainOf(sim);
+		const pfx = T.plainOf(sim) && T.wildOf(Lc.fg);
 		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${pfx ? '|p' : ''}`;
 		let f = ordMemo.get(key);
 		if (f) return f;

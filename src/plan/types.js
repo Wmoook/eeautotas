@@ -294,6 +294,10 @@ const FIELDS = new Map(), FIELDS_MIN = 8, FIELDS_CAP = 64;
 // cost (reach.js opts.plainFx): a lower bound still (its -1 a proof for the plain ball), the physics ordering elsewhere.
 // EEAT_FX_FIELD=1: on; unset / 0: off (the walk as before, byte for byte).
 const FX_FIELD = process.env.EEAT_FX_FIELD === '1';
+// (a level copy with no effect tile: the field is the physics one anyway, so plainFx is ignored there: the same memo key
+// and field as before, byte for byte)
+const WILD_IDS = new Set([417, 418, 419, 453, 461, 1517]), WILDM = new WeakMap();
+const wildOf = (fg) => { let w = WILDM.get(fg); if (w === undefined) { w = false; for (let i = 0; i < fg.length; i++) if (WILD_IDS.has(fg[i])) { w = true; break; } WILDM.set(fg, w); } return w; };
 /** the state in sim has no effect on (featValue 'fx' 0) and the plain-ball field is on */
 const plainOf = (sim) => FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity;
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
@@ -307,7 +311,7 @@ const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (
  * o.deaths: reachField's deaths option (false: no death edges, the executor's searches drop dead balls: the default).
  */
 function goalField(Lc, tiles, o = {}) {
-	const pfx = o.plainFx === true && FX_FIELD;
+	const pfx = o.plainFx === true && FX_FIELD && wildOf(Lc.fg);
 	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
@@ -325,4 +329,4 @@ const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.s
 /** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
 const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
 const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, wildOf, fgHash, emitter, CLOCK_DOORS };
