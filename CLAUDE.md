@@ -553,3 +553,24 @@ ways in.
   and the next leg), the one-leg levels (NC Naos, the precision puzzle: 3 supports). `--routes=<dir>` stacks it on another
   pass's routes. `tools/perfect/proveroute.js <level> <route> [--seconds=] [--cap=]`: the compile's route proof (every idle
   start 0..R, one exhaustive exact search each to the trophy within the route's cost) with a longer clock.
+- **VERSUS THE BEST KNOWN: braked rests, the loop pass, the LOOPS stage** (n5-perfect, 2026-09-30; default on, never
+  without the old result; `EEAT_PERFECT=0` all off). `tools/cmp/versus.js <level> <ours.eetas> <known.eetas> [--lead=N]
+  [--trace=a-b]`: both routes replayed (the triggers in order with their ticks, a per-segment input census; `--lead`: every
+  N known ticks the first tick of ours within 24 px of the known ball, the ticks lost per stretch). What it found on the 4
+  slowest compiled levels: NC Naos d3c6 / the precision puzzle (319 vs 111) COAST to rest (264 idle ticks of 337) where
+  the known route BRAKES and lands x = 5720.0 exactly while moving; Trick Or Treat (5,035 vs 2,235) takes 6 coins (5
+  optional waypoints: the known takes 1) and dithers at (37, 98); The Blank Page (3,190 vs 1,915) has LOOPS (the portal pit
+  (46, 81) and back up, a climb done twice) and 153 jump presses vs 33; Tutorial 1 (2,441 vs 1,655) a back-and-forth
+  run-up on the lower floor and stop-and-go joins. (1) `src/precision.js --fast=1` (the compiler passes it; `EEAT_PREC_FAST=0`
+  off): after the coasted rests (the first route, `FAST_OLD` 0.4 of the time) the rests BRAKED from the attempts' moving
+  states (every lateral pattern of up to 22 ticks in the model, brake first, then at most 30 idle ticks, cut by a
+  least-stopping-distance table), capped piece coasts, every hit replayed in order of its ticks: both precision levels
+  compile 319 -> 153 (box 5 / box 6, 60 s). (2) `polish.js` THE LOOP PASS (a1, `EEAT_POLISH_LOOPS=0` off): a loop cut =
+  the route's inputs from a later tick b played from S(t), b a revisit within 12 px at a like speed (|dvx| + |dvy| <=
+  1.5), kept by the exact rejoin rule or a COIN-BLIND one (`EEAT_POLISH_COINLOOPS=0` off; only where no coin sits on a
+  portal entry; every combination replayed and judged), passes of those moves alone first (25% of the polish), the
+  mutation passes as before: 15-s polishes of the final's routes Trick Or Treat 4,437 -> 3,759 (its optional coins
+  (146, 100), (132, 92) dropped), Tutorial 1 2,414 -> 2,128, The Blank Page 2,607 -> 2,527, 12 others equal (+-6: the
+  budget's noise). (3) THE LOOPS stage (strategy.js, before the joins, its own clock after the budget: `--loops=<s>` /
+  `EEAT_LOOPS_S`, default budget / 6, at most 10 s): the loop pass alone on the finished route (a late route gets no
+  polish: The Blank Page's at 56 s of 60), kept only when faster with no more deaths and no lower chance.
