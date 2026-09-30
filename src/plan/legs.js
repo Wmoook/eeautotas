@@ -3,14 +3,17 @@
 // executor. Both search from real states (each start injected at its own ABSOLUTE tick), the masks of each state from
 // endgame.probeMasks (the same states, fewer simulations), over cells of position and speed (with on the ground, the jump
 // count, the ball's door-reading state: exact.js discKey), inside a region (the tiles the goal field's walk reaches,
-// dilated by a tile, in a box around the starts and the goal), ranked by a TIME estimate (ticks): the admissible
-// kinematic bound (endgame.lowerBound) within 64 ticks of the goal, else the goal field's distance at the running pace (or
-// the primitives' tick field when bounds are given). The distance alone is blind to speed: a beam by it kept the slow
-// states at a wall's face and lost the run-ups (the key door leg of test/planexec.js: 184 ticks vs 38).
+// dilated by a tile, in a box around the starts and the goal, and every tile the walk puts within the margin of the
+// farthest start: a portal's exits), ranked by a TIME estimate (ticks): the goal field's distance at the running pace (or
+// the primitives' tick field when bounds are given); with o.kbOn the larger of it and the admissible kinematic bound
+// (endgame.lowerBound) near the goal. The distance alone is blind to speed: a beam by it kept the slow states at a
+// wall's face and lost the run-ups (the key door leg of test/planexec.js: 184 ticks vs 38).
 //   legBest (the executor's default): best-first, f = the tick + w x the estimate (w 5), the first arrival closes its
-//     cell (2 px x, 4 px y, 1/8 px/tick vx, 1/4 vy); it dives toward the goal and falls back to the next best open state
-//     where it is stuck (T-EXEC-LEGS, box 3, 3 s: 56% of the legs vs the beam's 30%; p90 of the ticks over the route's
-//     own 1.44x vs 2.1x).
+//     cell (2 px x, 4 px y, 1/8 px/tick vx, 1/4 vy); a child holds its input until the ball leaves its parent's cell (at
+//     most 8 ticks; a ball at rest on a clock level until the clock changes its cell, a dead ball until it respawns); a
+//     held jump that cannot jump is not simulated (the same trajectory); it dives toward the goal and falls back to the
+//     next best open state where it is stuck (T-EXEC-LEGS, box 3, 3 s, with the executor's tightening and leg polish:
+//     81% of the legs, the legs found 1.000 of the route's own (median), 1.28x (p90); the first version 56%, the beam 30%).
 //   legBFS: src/legsearch.js's algorithm (copied, not edited): breadth-first by tick keeping the FASTEST state of each
 //     FINE cell (1 px x, 2 px y, 1/16, 1/8 px/tick), a layer over its width kept by the estimate with at most 8 states a
 //     tile (flybeam.js's rule), the rest by
@@ -243,11 +246,13 @@ function dirsOf(field) {
 }
 /**
  * legBest(L, starts, goal, o) -> the same result shape as legBFS: a BEST-FIRST search (weighted A*: f = g + w x the
- * ranking below, g = the absolute tick) over COARSE cells (4 px x, 4 px y, 1/2 px/tick vx, 1 px/tick vy, on the ground,
- * the jumps, the door-reading state), the first arrival of each cell kept (closed): it dives toward the goal and falls back
- * to the next best state when it is stuck (a layered beam of the same width keeps no memory of the states it dropped).
- * Not a proof, not optimal: a finder for long legs; the executor improves what it finds (the exact search bounded by it).
- * o: legBFS's + {w (default 2.5), heapMax (default 300000 open states: past it the worst half goes)}.
+ * ranking, g = the absolute tick) over cells (o.cell: px, py, vx, vy multipliers, default 2 px, 4 px, 1/8, 1/4 px/tick;
+ * on the ground, the jumps, the door-reading state; the time doors' phase on a clock level), the first arrival of each
+ * cell kept (closed): it dives toward the goal and falls back to the next best state when it is stuck (a layered beam of
+ * the same width keeps no memory of the states it dropped). Not a proof, not optimal: a finder for long legs; the
+ * executor improves what it finds (the tightening, polish.js polishLeg, the exact search bounded by it).
+ * o: legBFS's + {w (default 5), cell, hold (8), heapMax (default 300000 open states: past it the worst half goes), kbOn
+ *    (the kinematic bound in the ranking), noFinish, noJskip}; goal.over (exact.js overOf: the monotone counter cut).
  */
 /** a set of (uint32, uint32) pairs: open addressing on typed arrays (a Set of the doubles a * 2^20 + b made a heap
  *  number per key) */
