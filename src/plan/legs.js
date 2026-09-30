@@ -274,6 +274,10 @@ function legBest(L, starts, goal, o) {
 	// the nodes: parent, mask, tick (absolute layer), the snapshot while open
 	const par = [], msk = [], rp = [], gg = [], sn = [], dst = [];
 	const HOLD = o.hold > 0 ? o.hold : (+process.env.EEAT_BEST_HOLD || 8);
+	// (the wait: on a level whose clock matters (keys run out, time doors) a ball at rest that stays in its cell holds on
+	// until the clock changes its cell (a key out, the time doors' phase: in the cell key there), at most WAIT ticks)
+	const CLOCK = !!L.clockSensitive && process.env.EEAT_BEST_WAIT !== '0';
+	const WAIT = CLOCK ? 600 : 0;
 	const pool = [];
 	// the open heap of node indices by f
 	const heap = [], hf = [];
@@ -311,7 +315,7 @@ function legBest(L, starts, goal, o) {
 		let h = 0x811c9dc5 | 0;
 		const mix = (v) => { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= (v >>> 16) & 0xffff; h = Math.imul(h, 0x01000193); };
 		mix(Math.floor(sim.px * CQ[0]) | 0); mix(Math.floor(sim.py * CQ[1]) | 0); mix(Math.floor(sim.speed_x * CQ[2]) | 0); mix(Math.floor(sim.speed_y * CQ[3]) | 0);
-		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0));
+		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
 		const d = X.discKey(sim);
 		return (h >>> 0) * 1048576 + (d & 0xfffff);
 	};
@@ -376,7 +380,8 @@ function legBest(L, starts, goal, o) {
 					break;
 				}
 				key = cellKey();
-				if (key !== pkey || reps >= HOLD || g + reps >= depthMax) break;
+				if (key !== pkey || g + reps >= depthMax) break;
+				if (reps >= HOLD && !(reps < WAIT && sim.speed_x === 0 && sim.speed_y === 0)) break;
 				E.applyMask(inp, m); sim.tick(inp); sims++; reps++;
 			}
 			if (bad) continue;

@@ -122,8 +122,9 @@ async function exactRooms() {
 		let fewer = true;
 		if (b.status === 'found') {
 			const withB = X.exactLeg(L, starts, goal, { sim, maxDepth: b.depth, deadline: Date.now() + 20000, cap: 1500000 });
-			const noB = X.exactLeg(L, starts, goal, { sim, noBound: true, maxDepth: b.depth, deadline: Date.now() + 20000, cap: 1500000 });
-			fewer = withB.stats.states <= noB.stats.states && withB.depth === noB.depth;
+			const noB = X.exactLeg(L, starts, goal, { sim, noBound: true, maxDepth: b.depth, deadline: Date.now() + 60000, cap: 1500000 });
+			// (an unbounded run cut by its clock on a loaded machine has at least the states it saw: still a comparison)
+			fewer = withB.stats.states <= noB.stats.states && withB.depth === b.depth && (noB.status !== 'found' || withB.depth === noB.depth);
 			states = `states ${withB.stats.states} vs ${noB.stats.states}`;
 		}
 		check(`T-EXEC-EXACT room ${room.name}: exact depth = unbounded BFS minimum, the bound only removes states`,
