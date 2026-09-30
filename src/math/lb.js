@@ -96,6 +96,9 @@ function staticOf(L) {
 			for (const b of bots) { const li = lineIdx(b); if (li >= 0 && li < NL) ceil[li].add(kc); }
 		}
 	}
+	// the world's edges block like solids (a box out of the world overlaps): the top edge a ceiling (the ball's top at
+	// y = 0), the bottom edge a floor (standing at y = 16 H - 16)
+	for (let kc = 0; kc < W; kc++) { ceil[lineIdx(0)].add(kc); stand[lineIdx(16 * H - 16)].add(kc); }
 	const toArr = (a) => a.map((s) => Int32Array.from([...s].sort((p, q) => p - q)));
 	// SOURCES by the centre cell (the engine's `current`: the tile under the centre, a half block's cell shifted to the
 	// cell above (rot 1, presents) or to the left (rot 0), eesim.js _playerTick): phys = its physics is not plain air
@@ -262,7 +265,7 @@ function createMathLB(L, o = {}) {
 			if (timedV < v) v = timedV;
 			return v;
 		};
-		R = { F, deathRest };
+		R = { F, deathRest, hMemo: new Float32Array(W * H).fill(-1) };
 		restCache.set(key, R);
 		if (restCache.size > 8) restCache.delete(restCache.keys().next().value);
 		return R;
@@ -280,12 +283,23 @@ function createMathLB(L, o = {}) {
 		const cap = lo.cap || o.cap || 4000;
 		const HOR = lo.horizon || o.horizon || 3000;
 		const ice = S.ice || sim._slippery > 0;
+		const freeNear = (row, kc) => {
+			if (row < 0 || row >= H) return true;
+			for (let c = Math.max(0, kc - 3); c <= Math.min(W - 1, kc + 3); c++) if (S.blk[row * W + c] !== 1) return true;
+			return kc - 3 < 0 || kc + 3 >= W;
+		};
+		const qUp = (q) => (q <= 0 ? 0 : q <= 4 ? 4 : q <= 8 ? 8 : 16);
 		const XS = xSteps(ctx, ice);
 		const G = K.ga(ctx);
 		const Js = [G.J];
 		if (ice) { const jm = ctx.jm * 0.88; Js.push(((0 - 2) * 26 * jm) / C.MULT); }
 		const yArm = G.a < 0.1 && G.a > -0.1;   // the y align can fire (low gravity)
-		const stepY = (v) => K.axisStep(v, 0, G.mo, 0, 0, false);
+		// the gravity axis: v' = (v + G) B, or on ice (the slippery timer: 11 ticks after the ice) (v + G) Ino: the band's
+		// speeds are the least and the most of the two (the step is monotone in v for either drag)
+		const stepY0 = (v) => K.axisStep(v, 0, G.mo, 0, 0, false);
+		const stepYice = (v) => K.axisStep(v, 0, G.mo, 0, 0, true);
+		const stepYlo = ice ? (v) => Math.min(stepY0(v), stepYice(v)) : stepY0;
+		const stepYhi = ice ? (v) => Math.max(stepY0(v), stepYice(v)) : stepY0;
 		const x0 = sim.px, vx0 = sim.speed_x, y0 = sim.py, vy0 = sim.speed_y;
 		const vstar = A.terminal(ctx.sm / C.MULT, C.BASE_DRAG);
 		const U = Math.max(Math.abs(vx0), vstar);
@@ -329,17 +343,17 @@ function createMathLB(L, o = {}) {
 		const heap = new Heap();
 		// node store
 		const nk = [], nkc = [], nline = [], nhi = [], nt = [];
-		const landT = new Map(), bonkT = new Map();
+		const landT = new Map(), bonkT = new Map(), doneL = new Map(), doneB = new Map();
 		const pushNode = (kind, kc, li, hiQ, t) => {
 			if (t >= best) return;
-			const key = (kc * NL + li) * 32 + hiQ;
+			const key = (kc * NL + li) * 512 + hiQ;
 			const M = kind === 0 ? landT : bonkT;
 			const had = M.get(key);
 			if (had !== undefined && had <= t) return;
 			M.set(key, t);
 			nk.push(kind); nkc.push(kc); nline.push(li); nhi.push(hiQ); nt.push(t);
 			if (DBG) { npar.push(curOrigin); nhow.push(curHow); }
-			heap.push(t, nk.length - 1);
+			heap.push(t + hNode(kind, kc, li, hiQ), nk.length - 1);
 		};
 		const DBG = !!lo.debug;
 		let curOrigin = -1, curHow = '', bestTrace = null;
@@ -350,6 +364,21 @@ function createMathLB(L, o = {}) {
 		// value (or 0)
 		const inv = !!sim.is_invulnerable;
 		const RS = restOf(tiles);
+		// A*'s h: from any state centred in a tile the rest field F (the speed cap + the teleports) and the given field
+		// bound every continuation, plain or through a source: admissible for the graph's paths (the frontier's least
+		// t + h is then a lower bound of every unexplored path)
+		const hTile = (i) => { let h = RS.hMemo[i]; if (h < 0) { h = RS.F(i); RS.hMemo[i] = h; } if (field && field[i] > h && field[i] !== Infinity) h = field[i]; return h; };
+		const hNode = (kind, kc, li, q) => {
+			const line = (li - LINE0) * 8;
+			let ya, yb;
+			if (kind === 0) { ya = line - 1; yb = line + q; } else { ya = line - ((q / 17) | 0); yb = line + (q % 17); }
+			let r0 = Math.floor((ya + 8) / 16), r1 = Math.floor((yb + 8) / 16);
+			if (r0 < 0) r0 = 0; if (r1 > H - 1) r1 = H - 1;
+			if (kc < 0 || kc >= W || r0 > r1) return 0;
+			let h = Infinity;
+			for (let r = r0; r <= r1; r++) { const v = hTile(r * W + kc); if (v < h) h = v; }
+			return h === Infinity ? 0 : h;
+		};
 		const srcRest = (kx0, kx1, ry0, ry1) => {
 			let m = Infinity;
 			for (let yy = Math.max(0, ry0); yy <= Math.min(H - 1, ry1); yy++) for (let xx = Math.max(0, kx0); xx <= Math.min(W - 1, kx1); xx++) {
@@ -367,14 +396,14 @@ function createMathLB(L, o = {}) {
 		 * envelope (xw null: the start) or the node window [xa, xb) grown by the node speed sequence
 		 */
 		function flight(tA, ylo, yhi, v, xa, xb, isStart) {
-			let pl = ylo, ph = yhi, vv = v;
+			let pl = ylo, ph = yhi, vl = v, vh = v;
 			let ea = xa, eb = xb;   // the window's absolute edges (left: min, right: max)
-			const exact = ylo === yhi;
+			const exact = ylo === yhi && !ice;
 			for (let n = 1; ; n++) {
 				const tn = tA + n;
 				if (tn >= best || n > HOR) return;
-				vv = stepY(vv);
-				let nl = pl + vv, nh = ph + vv;
+				vl = stepYlo(vl); vh = stepYhi(vh);
+				let nl = pl + vl, nh = ph + vh;
 				if (yArm) { nl = alignDn(nl); nh = alignUp(nh); }
 				let wa, wb;
 				if (isStart) { const q = Math.min(tn, XH); wa = XE.min[q]; wb = XE.max[q]; }
@@ -388,8 +417,10 @@ function createMathLB(L, o = {}) {
 				}
 				// sources
 				if (srcCount(S, k0, k1, r0, r1) > 0) { const rr = srcRest(k0, k1, r0, r1); if (tn + rr < best) { best = tn + rr; why = 'source'; srcHit = true; } }
-				// events
-				if (vv > 0) {
+				// events. A blocked step zeroes the axis' speed; the engine RETRIES the blocked axis' step in the loop's later
+				// iterations while the other axis moves (eesim.js: `csy = osy`), so a landing / bonk leaves the ball anywhere
+				// from the line to its free position of the tick, with speed 0 (grounded for a landing)
+				if (vh > 0) {
 					// landings: standing lines s with pl <= s < nh (the band was at or above s, would pass it)
 					const la = S.lineIdx(Math.ceil(pl)), lb_ = S.lineIdx(Math.floor(nh));
 					for (let li = Math.max(0, la - 1); li <= Math.min(NL - 1, lb_ + 1); li++) {
@@ -397,17 +428,22 @@ function createMathLB(L, o = {}) {
 						if (!(pl <= s && s < nh)) continue;
 						const cols = S.stand[li];
 						if (!cols.length) continue;
+						let hiQ0 = Math.ceil(nh - s); if (hiQ0 < 0) hiQ0 = 0; if (hiQ0 > 16) hiQ0 = 16;
+						hiQ0 = qUp(hiQ0);
+						const frow = Math.floor((s + 17) / 16);   // the row past the standing line (the floor's)
 						let i = lowerBound(cols, k0);
 						for (; i < cols.length && cols[i] <= k1; i++) {
 							const kc = cols[i];
+							const hiQ = hiQ0 && freeNear(frow, kc) ? hiQ0 : 0;
 							const tt = Math.max(tn, creach(kc));
 							if (land) for (const g of tgt) {
-								if (g.tx === kc && rowsHit(s - 1, s, g.ty)) { cand(tt, isStart ? 'arc' : 'target'); if (isStart && tt < arc) arc = tt; }
+								if (g.tx === kc && rowsHit(s - 1, s + hiQ, g.ty)) { cand(tt, isStart ? 'arc' : 'target'); if (isStart && tt < arc) arc = tt; }
 							}
-							pushNode(0, kc, li, 0, tt);
+							pushNode(0, kc, li, hiQ, tt);
 						}
 					}
-				} else if (vv < 0) {
+				}
+				if (vl < 0) {
 					// bonks: ceiling lines c with nl < c <= ph (the band was at or below c, would pass above it)
 					const la = S.lineIdx(Math.floor(nl)), lb_ = S.lineIdx(Math.ceil(ph));
 					for (let li = Math.max(0, la - 1); li <= Math.min(NL - 1, lb_ + 1); li++) {
@@ -415,13 +451,18 @@ function createMathLB(L, o = {}) {
 						if (!(nl < c && c <= ph)) continue;
 						const cols = S.ceil[li];
 						if (!cols.length) continue;
-						// the bonk's y: [c, c + 1) from a fractional pre-position, the pre-position itself from an integer one
+						// the bonk's y: [c, c + 1) from a fractional pre-position, the pre-position itself from an integer one,
+						// the free position (above c) by the retry
 						let hi = c + 1;
 						if (exact) { if (Number.isInteger(ph)) hi = ph; else if (Math.floor(ph) < c) hi = ph; else hi = c; }
 						else { const m = Math.floor(ph); if (m >= pl && m > hi) hi = m; }
 						let hiQ = Math.ceil(hi - c); if (hiQ < 1) hiQ = 1; if (hiQ > 16) hiQ = 16;
+						hiQ = qUp(hiQ);
+						let loQ0 = Math.ceil(c - nl); if (loQ0 < 0) loQ0 = 0; if (loQ0 > 16) loQ0 = 16;
+						loQ0 = qUp(loQ0);
+						const crow = Math.floor((c - 1) / 16);   // the row past the ceiling line (the ceiling's)
 						let i = lowerBound(cols, k0);
-						for (; i < cols.length && cols[i] <= k1; i++) { const kc = cols[i]; pushNode(1, kc, li, hiQ, Math.max(tn, creach(kc))); }
+						for (; i < cols.length && cols[i] <= k1; i++) { const kc = cols[i]; const loQ = loQ0 && freeNear(crow, kc) ? loQ0 : 0; pushNode(1, kc, li, loQ * 17 + hiQ, Math.max(tn, creach(kc))); }
 					}
 				}
 				pl = nl; ph = nh;
@@ -438,19 +479,30 @@ function createMathLB(L, o = {}) {
 		flight(0, y0, y0, vy0, x0, x0, true);
 		let expanded = 0, capped = false, frontier = Infinity;
 		while (heap.n > 0) {
-			const t = heap.k[0];
-			if (t >= best) break;
-			if (expanded >= cap) { capped = true; frontier = t; break; }
+			const f = heap.k[0];
+			if (f >= best) break;
+			if (f >= HOR) { frontier = f; break; }
+			if (expanded >= cap) { capped = true; frontier = f; break; }
 			const id = heap.pop();
-			const kind = nk[id], kc = nkc[id], li = nline[id], hiQ = nhi[id];
-			const key = (kc * NL + li) * 32 + hiQ;
+			const kind = nk[id], kc = nkc[id], li = nline[id], hiQ = nhi[id], t = nt[id];
+			const key = (kc * NL + li) * 512 + hiQ;
 			if ((kind === 0 ? landT : bonkT).get(key) !== t) continue;
+			// dominance: a node of the same place expanded no later with a band that holds this one's gives every
+			// continuation this one gives, no later
+			{
+				const pk = kc * NL + li, lst = (kind === 0 ? doneL : doneB).get(pk);
+				const lq = kind === 0 ? 0 : (hiQ / 17) | 0, hq = kind === 0 ? hiQ : hiQ % 17;
+				let dom = false;
+				if (lst) for (let q = 0; q < lst.length; q += 3) if (lst[q] >= lq && lst[q + 1] >= hq && lst[q + 2] <= t) { dom = true; break; }
+				if (dom) continue;
+				if (lst) lst.push(lq, hq, t); else (kind === 0 ? doneL : doneB).set(pk, [lq, hq, t]);
+			}
 			expanded++;
 			const line = (li - LINE0) * 8;
 			const xa = 16 * kc - 8, xb = 16 * kc + 8;
 			if (kind === 0) {
-				const s = line;
-				const r0 = Math.floor((s - 1 + 8) / 16), r1 = Math.floor((s + 8) / 16);
+				const s = line, sh = s + hiQ;   // the ball: y in [s - 1, s + hiQ] (hiQ: the retry past the line)
+				const r0 = Math.floor((s - 1 + 8) / 16), r1 = Math.floor((sh + 8) / 16);
 				// the target (touch: the node's position; land: grounded here)
 				curOrigin = id; curHow = 'at';
 				for (const g of tgt) if (g.tx === kc && g.ty >= r0 && g.ty <= r1) cand(Math.max(t, g.xr), 'target');
@@ -462,26 +514,35 @@ function createMathLB(L, o = {}) {
 					if (k2 < 0 || k2 >= W) continue;
 					const cols = S.stand[li];
 					const j = lowerBound(cols, k2);
-					if (j < cols.length && cols[j] === k2) pushNode(0, k2, li, 0, Math.max(t + 1, creach(k2)));
+					if (j < cols.length && cols[j] === k2) pushNode(0, k2, li, hiQ, Math.max(t + 1, creach(k2)));
 				}
 				// the jump (at this very tick: the hop) and the walk-off fall
 				curOrigin = id; curHow = 'walk';
-				for (const J of Js) { curHow = 'jump'; flight(t, s - 1, s, J, xa, xb, false); }
+				for (const J of Js) { curHow = 'jump'; flight(t, s - 1, sh, J, xa, xb, false); }
 				curHow = 'walkoff';
-				flight(t, s - 1, s, 0, xa, xb, false);
+				flight(t, s - 1, sh, 0, xa, xb, false);
 			} else {
-				const c = line;
-				const r0 = Math.floor((c + 8) / 16), r1 = Math.floor((c + hiQ + 8) / 16);
+				const c = line, loQ = (hiQ / 17) | 0, hQ = hiQ % 17;   // the ball: y in [c - loQ, c + hQ]
+				const r0 = Math.floor((c - loQ + 8) / 16), r1 = Math.floor((c + hQ + 8) / 16);
+				curOrigin = id; curHow = 'at';
 				for (const g of tgt) if (!land && g.tx === kc && g.ty >= r0 && g.ty <= r1) cand(Math.max(t, g.xr), 'target');
 				if (srcCount(S, kc, kc, r0, r1) > 0) { const rr = srcRest(kc, kc, r0, r1); if (t + rr < best) { best = t + rr; why = 'source'; srcHit = true; } }
 				curOrigin = id; curHow = 'bonkfall';
-				flight(t, c, c + hiQ, 0, xa, xb, false);
+				flight(t, c - loQ, c + hQ, 0, xa, xb, false);
 			}
 		}
 		st.nodes += expanded;
 		if (capped) st.capped++;
 		let lb = best;
 		if (frontier < lb) { lb = frontier; why = 'frontier'; }
+		if (lb === Infinity) {
+			// the relaxed graph exhausted without the target: in the model the target is out of reach. The model is a
+			// relaxation, so that is a proof in the model's physics; a gap in the model (a blocking shape it does not know)
+			// must not turn it into a huge bound, so the answer falls back to the teleport-aware speed-cap bound
+			const cx = Math.trunc(x0 + 8) >> 4, cy = Math.trunc(y0 + 8) >> 4;
+			lb = cx >= 0 && cy >= 0 && cx < W && cy < H ? RS.F(cy * W + cx) : 0;
+			why = 'exhausted';
+		}
 		if (lb > HOR) { lb = HOR; why = 'horizon'; }
 		let chain = null;
 		if (DBG && bestTrace) {

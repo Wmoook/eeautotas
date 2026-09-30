@@ -12,7 +12,9 @@
 //                <= complete.
 // A violation is a bound above the ticks the route took: the physics the bound missed. Tightness = bound / actual.
 // Bounds: adm (src/plan/admbounds.js), prim (the primitives' src/plan/bounds.js, when present or --prim=<file>), eg
-// (endgame.js lowerBound, legs <= --egmax ticks without a death in them), and max (the max of all three).
+// (endgame.js lowerBound, legs <= --egmax ticks without a death in them), max (the max of all three), math (n4-math:
+// src/math/lb.js, the event-graph bound of the exact per-axis recurrences from the exact state, adm's field as the rest
+// after a source; --math=0 off) and best (the max of all four).
 // usage: node test/admbounds_truth.js [--root=<truth root>] [--shard=i/n] [--only=<name part>] [--out=<file.jsonl>]
 //        [--prim=<bounds.js>] [--egmax=128] [--pairs=1] [--limit=N] [--quick] (--quick: the first 3 routes)
 const fs = require('fs');
@@ -22,6 +24,7 @@ const S = require('../src/plan/truthset.js');
 const T = require('../src/plan/types.js');
 const A = require('../src/plan/admbounds.js');
 const EG = require('../src/endgame.js');
+const MLB = require('../src/math/lb.js');
 
 const arg = (k, d) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : d; };
 const flag = (k) => process.argv.includes(`--${k}`);
@@ -41,7 +44,8 @@ if (arg('shard', null)) { const [i, n] = arg('shard').split('/').map(Number); li
 if (flag('quick')) list = list.slice(0, 3);
 if (arg('limit', null)) list = list.slice(0, +arg('limit'));
 
-const NAMES = ['adm', 'fb', 'prim', 'eg', 'max', 'whatif'];
+const NAMES = ['adm', 'fb', 'prim', 'eg', 'max', 'whatif', 'math', 'best'];
+const MATH = arg('math', '1') !== '0';
 const WHATIF = arg('whatif', '0') === '1';   // a what-if: the fallback with the PLAIN sups on every level (not admissible: how much the sups cost)
 function newAgg() { const a = {}; for (const b of NAMES) a[b] = { n: 0, viol: 0, sumR: 0, hist: new Array(21).fill(0), worst: [] }; return a; }
 function note(agg, b, bound, actual, ctx) {
@@ -83,6 +87,9 @@ function runRoute(entry) {
 	for (let t = 0; t <= complete; t++) deathPS[t + 1] = deathPS[t] + deadAt[t];
 	const diedIn = (a, b) => deathPS[b + 1] - deathPS[a] > 0;   // a dead tick in [a, b]
 	const adm = A.createAdmBounds(L, { memo: 4 });
+	const mlb = MATH ? MLB.createMathLB(L, {}) : null;
+	let mathMs = 0;
+	const mathAt = (s, goalTiles, f, hor) => { if (!mlb) return null; const tm = Date.now(); const r = mlb.leg(s, { tiles: goalTiles, mode: 'touch' }, { field: f, horizon: hor }); mathMs += Date.now() - tm; return r.lb; };
 	const prim = P ? P.createBounds(L, {}) : null;
 	const whatif = WHATIF ? A.createAdmBounds(L, { memo: 4, accX: false, up: false, vmax: { xp: A.terminal(1 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, xn: A.terminal(1 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, yp: A.terminal(2 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, yn: (2 * 26) / E.constants.MULT + 0.02 } }) : null;
 	const trophies = [];
@@ -128,6 +135,10 @@ function runRoute(entry) {
 			let bE = null;
 			if (actual <= egMax && !diedIn(t, k) && !sim.is_dead) { const B = egOf(goal); bE = EG.lowerBound(B, sim, actual + 1); if (bE > actual + 1) bE = actual + 1; }
 			const bM = Math.max(bA, bP === null ? 0 : bP, bE === null ? 0 : bE);
+			const bMath = mathAt(sim, goal, fA, actual + 1);
+			if (bMath !== null) note(aggTick, 'math', bMath, actual, ctx);
+			const bBest = Math.max(bM, bMath === null ? 0 : bMath);
+			note(aggTick, 'best', bBest, actual, ctx);
 			note(aggTick, 'fb', pa.fb, actual, ctx);
 			if (pa.accX !== null && pa.accX !== Infinity && pa.accX > actual) note(aggTick, 'adm', pa.accX, actual, Object.assign({ tier: 'accX' }, ctx));
 			if (pa.up !== null && pa.up !== Infinity && pa.up > actual) note(aggTick, 'adm', pa.up, actual, Object.assign({ tier: 'up' }, ctx));
@@ -138,7 +149,9 @@ function runRoute(entry) {
 			const bW = fW ? whatif.at(fW, sim) : null;
 			if (bW !== null) note(aggTick, 'whatif', bW, actual, ctx);
 			if (t === s0) {
-				legs.push([actual, bA, bP, bE, j, bW]);
+				legs.push([actual, bA, bP, bE, j, bW, bMath, bBest]);
+				if (bMath !== null) note(aggLeg, 'math', bMath, actual, ctx);
+				note(aggLeg, 'best', bBest, actual, ctx);
 				note(aggLeg, 'adm', bA, actual, ctx);
 				if (bP !== null) note(aggLeg, 'prim', bP, actual, ctx);
 				if (bE !== null) note(aggLeg, 'eg', bE, actual, ctx);
@@ -149,6 +162,7 @@ function runRoute(entry) {
 				const bT = adm.leg(sim, { kind: 'trophy' }, { relaxed: false });
 				note(aggTick, 'adm', bT, actT, Object.assign({ trophy: 1 }, ctx));
 				if (prim) note(aggTick, 'prim', prim.leg(sim, { kind: 'trophy', tiles: trophies }), actT, Object.assign({ trophy: 1 }, ctx));
+				if (mlb) { const bt = mathAt(sim, trophies, fAT, actT); if (bt !== null) note(aggTick, 'math', bt === Infinity ? bt : bt + 1, actT, Object.assign({ trophy: 1 }, ctx)); }
 				void fAT;
 			}
 			if (t >= k) break;
@@ -172,6 +186,8 @@ function runRoute(entry) {
 				note(aggPair, 'adm', bA, actual, ctx);
 				if (bP !== null) note(aggPair, 'prim', bP, actual, ctx);
 				note(aggPair, 'max', Math.max(bA, bP === null ? 0 : bP), actual, ctx);
+				const bMp = mathAt(sim2, goal, fR, actual + 1);
+				if (bMp !== null) note(aggPair, 'math', bMp, actual, ctx);
 			}
 		}
 	}
@@ -187,12 +203,12 @@ function runRoute(entry) {
 		events: evTicks.length, tame: St.tameLevel, upOk: St.upOk, srcFrac: +(St.src.reduce((a, b) => a + b, 0) / N).toFixed(3),
 		vmax: St.vmax, primVmax: prim ? { xp: prim.vmax.xp, xn: prim.vmax.xn, yp: prim.vmax.yp, yn: prim.vmax.yn } : null,
 		legs, globalB, sumLegs: { actual: legs.reduce((a, l) => a + l[0], 0), adm: legs.reduce((a, l) => a + l[1], 0), prim: prim ? legs.reduce((a, l) => a + (l[2] || 0), 0) : null },
-		leg: aggLeg, pair: aggPair, tick: aggTick, admMs, primMs, ms: Date.now() - t0,
+		leg: aggLeg, pair: aggPair, tick: aggTick, admMs, primMs, mathMs, ms: Date.now() - t0,
 	};
 }
 
 let tot = { routes: 0, stale: 0 };
-const totV = { adm: 0, prim: 0, eg: 0, max: 0 };
+const totV = { adm: 0, prim: 0, eg: 0, max: 0, math: 0, best: 0 };
 for (const e of list) {
 	let r;
 	try { r = runRoute(e); } catch (err) { r = { name: e.name, route: e.route, error: String(err && err.stack || err) }; }
@@ -204,7 +220,7 @@ for (const e of list) {
 	const v = (b) => r.tick[b].viol + r.pair[b].viol;
 	for (const b of NAMES) totV[b] += v(b);
 	const med = (i) => { const a = r.legs.filter((l) => l[0] >= 10 && l[i] !== null).map((l) => l[i] / l[0]).sort((x, y) => x - y); return a.length ? a[a.length >> 1].toFixed(2) : '-'; };
-	console.log(`${r.name.slice(0, 28).padEnd(28)} ${String(r.complete).padStart(6)}t ev ${String(r.events).padStart(4)} viol adm ${v('adm')} prim ${v('prim')} eg ${v('eg')} | leg med adm ${med(1)} prim ${med(2)} | global adm ${r.globalB.adm} prim ${r.globalB.prim} / ${r.complete} | ${(r.ms / 1000).toFixed(1)}s`);
+	console.log(`${r.name.slice(0, 28).padEnd(28)} ${String(r.complete).padStart(6)}t ev ${String(r.events).padStart(4)} viol adm ${v('adm')} prim ${v('prim')} eg ${v('eg')} math ${v('math')} | leg med adm ${med(1)} prim ${med(2)} math ${med(6)} best ${med(7)} | global adm ${r.globalB.adm} prim ${r.globalB.prim} / ${r.complete} | ${(r.ms / 1000).toFixed(1)}s`);
 }
-console.log(`admbounds_truth: routes ${tot.routes} stale ${tot.stale} violations adm ${totV.adm} prim ${totV.prim} eg ${totV.eg}`);
-process.exitCode = totV.adm ? 1 : 0;
+console.log(`admbounds_truth: routes ${tot.routes} stale ${tot.stale} violations adm ${totV.adm} prim ${totV.prim} eg ${totV.eg} math ${totV.math} best ${totV.best}`);
+process.exitCode = totV.adm || totV.math ? 1 : 0;

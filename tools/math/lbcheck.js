@@ -22,6 +22,9 @@ fs.mkdirSync(OUT, { recursive: true });
 const EVERY = argv.every !== '0';
 const CAP = +(argv.cap || 4000);
 const USE_ADM = argv.adm === '1';
+const SOLVE = argv.solve === '1';
+const SOLVE_MS = +(argv.solveMs || 400);
+const LS = require('../../src/math/legsolve.js');
 
 function loadMoves(dir) {
 	const byR = new Map(), names = new Map();
@@ -87,7 +90,7 @@ function runRoute(entry, moves) {
 		}
 		if (cur && t < cur.t1 && (EVERY || t === cur.t0)) {
 			const actual = cur.t1 - t;
-			const b = M.leg(sim, tgt, { field });
+			const b = M.leg(sim, tgt, { field, horizon: actual + 1 });
 			checks++;
 			if (b.lb === null) nulls++;
 			else {
@@ -97,7 +100,14 @@ function runRoute(entry, moves) {
 			if (t === cur.t0) {
 				const lbv = b.lb;
 				if (lbv !== null && lbv === actual) proven++;
-				legs.push([cur.t0, actual, lbv, cur.label, tgt.mode === 'land' ? 1 : 0, b.why || '', b.arc === undefined ? null : b.arc, b.tx === undefined ? null : b.tx, b.nodes || 0]);
+				let tsol = null, sms = 0;
+				if (SOLVE && lbv !== null && lbv < actual) {
+					const snap = sim.snapshot();
+					const r = LS.solveLeg(L, sim, tgt, { lb: lbv, tmax: actual - 1, ms: SOLVE_MS });
+					sim.restore(snap);
+					if (r) { tsol = r.T; sms = r.ms; if (r.T < lbv) { viol++; if (worst.length < 12) worst.push({ t, kind: 'solver below lb', lb: lbv, T: r.T }); } }
+				}
+				legs.push([cur.t0, actual, lbv, cur.label, tgt.mode === 'land' ? 1 : 0, b.why || '', b.arc === undefined ? null : b.arc, b.tx === undefined ? null : b.tx, b.nodes || 0, tsol, sms]);
 			}
 		}
 		if (t === complete) break;
@@ -115,7 +125,7 @@ function aggregate(dir) {
 	const worst = [];
 	const byLabel = new Map();
 	const add = (k, r) => { if (!byLabel.has(k)) byLabel.set(k, []); byLabel.get(k).push(r); };
-	let proven = 0, legsN = 0, provenPlain = 0, plainN = 0;
+	let proven = 0, legsN = 0, provenPlain = 0, plainN = 0, provenS = 0, provenSFree = 0;
 	const FREE = new Set(['hop', 'jump', 'fall', 'walk']);
 	for (const r of rows) {
 		if (r.error) { errors++; console.log(`ERR ${r.name}: ${r.error.split('\n')[0]}`); continue; }
@@ -128,6 +138,11 @@ function aggregate(dir) {
 			if (lbv !== null && lbv === actual) proven++;
 			if (FREE.has(label)) { plainN++; if (lbv !== null && lbv === actual) provenPlain++; }
 			if (lbv === null) { add(label + ':null', 0); continue; }
+			const tsol = l[9];
+			const best = tsol !== null && tsol !== undefined ? Math.min(tsol, actual) : actual;
+			const q2 = best === 0 ? 1 : lbv / best;
+			add('S:ALL', q2); if (FREE.has(label)) add('S:FREE', q2);
+			if (lbv === best) { provenS++; if (FREE.has(label)) provenSFree++; }
 			const q = lbv / actual;
 			add('ALL', q); add(label, q);
 			if (FREE.has(label)) add('FREE', q);
@@ -139,12 +154,13 @@ function aggregate(dir) {
 	const mean = (a) => a.reduce((x, y) => x + y, 0) / (a.length || 1);
 	console.log(`routes ${routes} errors ${errors} checks ${checks} VIOLATIONS ${viol} nulls ${nulls} (${(100 * nulls / checks).toFixed(1)}%) capped ${capped}`);
 	console.log(`legs ${legsN}: proven optimal (route ticks = bound) ${proven} (${(100 * proven / legsN).toFixed(1)}%); free-air legs ${plainN}: proven ${provenPlain} (${(100 * provenPlain / plainN).toFixed(1)}%)`);
-	console.log('bound / actual at the leg start:');
+	console.log(`with the leg solver (T = lb first): proven optimal ${provenS} legs (${(100 * provenS / legsN).toFixed(1)}%), free-air ${provenSFree} (${(100 * provenSFree / plainN).toFixed(1)}%)`);
+	console.log('bound / actual at the leg start (S: = bound / min(solver T, actual)):');
 	for (const [k, a] of [...byLabel.entries()].sort()) {
 		if (k.endsWith(':null')) { console.log(`  ${k.padEnd(14)} n ${a.length}`); continue; }
 		console.log(`  ${k.padEnd(14)} n ${String(a.length).padStart(6)}  p10 ${pct(a, 0.1).toFixed(3)}  median ${med(a).toFixed(3)}  p90 ${pct(a, 0.9).toFixed(3)}  mean ${mean(a).toFixed(3)}  =1 ${(100 * a.filter((q) => q === 1).length / a.length).toFixed(1)}%`);
 	}
 	if (worst.length) { console.log('violations:'); for (const w of worst) console.log('  ' + JSON.stringify(w)); }
-	fs.writeFileSync(path.join(dir, 'summary.json'), JSON.stringify({ routes, errors, checks, viol, nulls, capped, proven, legsN, provenPlain, plainN, worst,
+	fs.writeFileSync(path.join(dir, 'summary.json'), JSON.stringify({ routes, errors, checks, viol, nulls, capped, proven, legsN, provenPlain, plainN, provenS, provenSFree, worst,
 		ratios: Object.fromEntries([...byLabel.entries()].filter(([k]) => !k.endsWith(':null')).map(([k, a]) => [k, { n: a.length, p10: pct(a, 0.1), median: med(a), p90: pct(a, 0.9), mean: mean(a), eq1: a.filter((q) => q === 1).length }])) }, null, 1));
 }
