@@ -345,6 +345,50 @@ function pathRegimes(L, masks, o = {}) {
 }
 
 /**
+ * drivers(level, env) -> {xH, xJ, yV, yJ}: which input acts on which axis in the tick's environment (eesim.js 1135-1139:
+ * the input axes, selected by the DELAYED tile; the jump bit, its jumpCount and the levitation thrust act on the axis
+ * whose CURRENT-tile gravity mor is non-zero; the jump itself also needs the delayed pull mo on that axis).
+ */
+function drivers(L, env) {
+	const liquidD = (L.flags[env.delayed] & A.F_LIQUID) !== 0;
+	return {
+		xH: liquidD || env.moy !== 0.0 || env.mox === 0.0, xJ: env.morx !== 0,
+		yV: liquidD || env.moy === 0.0, yJ: env.mory !== 0,
+		jumpX: env.morx !== 0 && env.mox !== 0.0, jumpY: env.mory !== 0 && env.moy !== 0.0,
+	};
+}
+
+/**
+ * envSchedule(level, xs, ys, q0, q1) -> {curId, delId, cur, del, below, cx, cy} (Int32 / Uint8 arrays, index t = 1..n
+ * for the tick that starts at (xs[t-1], ys[t-1])): the environment a HYPOTHETICAL path meets, from its positions alone
+ * (the centre tile with the half-block rule, the gravity queue started from the state's q0, q1 = sim._q0, sim._q1,
+ * the tile below for flipGravity 0). The mode schedule of a candidate leg: where it switches tables.
+ */
+function envSchedule(L, xs, ys, q0, q1) {
+	const n = xs.length - 1, W = L.width, H = L.height, fg = L.fg;
+	const curId = new Int32Array(n + 1), delId = new Int32Array(n + 1), below = new Int32Array(n + 1);
+	const cur = new Uint8Array(n + 1), del = new Uint8Array(n + 1), cxs = new Int32Array(n + 1), cys = new Int32Array(n + 1);
+	const at = (x, y) => (x < 0 || y < 0 || x >= W || y >= H) ? 0 : fg[y * W + x];
+	for (let t = 1; t <= n; t++) {
+		let cx = Math.trunc(xs[t - 1] + 8.0) >> 4, cy = Math.trunc(ys[t - 1] + 8.0) >> 4;
+		let c = at(cx, cy);
+		if ((L.flags[c] & A.F_HALF) !== 0) {
+			let rot = (cx >= 0 && cy >= 0 && cx < W && cy < H) ? L.lookup0[cy * W + cx] : 0;
+			if ((L.xflags[c] & 4) !== 0) rot = 1;
+			if (rot === 1) cy -= 1;
+			if (rot === 0) cx -= 1;
+			c = at(cx, cy);
+		}
+		let d = q0;
+		q0 = q1; q1 = c;
+		if (c === 4 || c === 414 || (L.flags[c] & A.F_CLIMB) !== 0) { d = q0; q0 = q1; q1 = c; }
+		curId[t] = c; delId[t] = d; cur[t] = physClass(L, c); del[t] = physClass(L, d);
+		below[t] = at(cx, cy + 1); cxs[t] = cx; cys[t] = cy;
+	}
+	return { curId, delId, cur, del, below, cx: cxs, cy: cys };
+}
+
+/**
  * certifyFree(level, xs, ys, o) -> -1 when the hypothetical path (xs[t], ys[t] = the box after tick t, t = 0 the start)
  * stays in the free product regime at every tick, else the first tick t (1-based) where it may not: the swept box of the
  * tick (the rectangle between the two positions) must lie in the world on plain-air tiles (no probe can block, so no
@@ -393,4 +437,5 @@ module.exports = {
 	C_CORNER, C_ONEWAY, C_PORTAL, C_STUCK, C_DOORQ, C_DEAD, C_EFFECT, C_GOD, C_TRIXY, C_TRIYX, C_COUPLED,
 	C_XHITP, C_XHITN, C_YHITP, C_YHITN, C_ALIGNX, C_ALIGNY, C_HALFCUR, C_ICEMEM, C_ENVCHG, C_GROUND, C_JUMP, C_MISS, C_NEAR,
 	PC, PC_NAMES, physClass, blockedAt, shadowMove, cornerOf, classifyTick, modelMatches, envKey, pathRegimes, certifyFree, paramsOf,
+	drivers, envSchedule,
 };

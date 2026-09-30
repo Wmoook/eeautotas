@@ -503,6 +503,10 @@ depends (the triangular case).
   path (an x table row next to a y table row placed at a start), every tick's swept box on plain-air tiles in the world
   and the centre tile of the class `cls` (default air; not over ice). -1 = Theorem 3 applies: the engine will play
   exactly (xs, ys); the move solver then replays it once (the check the task asks for).
+- `envSchedule(level, xs, ys, q0, q1)` -> per tick of a HYPOTHETICAL path the current / delayed tile ids and physics
+  classes, the tile below, the centre tile (the half-block rule, the gravity queue from the start's `sim._q0, _q1`): the
+  mode schedule a candidate leg meets, from its positions alone (= the engine's on every tick of test/mathsep.js's run).
+- `drivers(level, env)` -> `{xH, xJ, yV, yJ, jumpX, jumpY}`: which input acts on which axis in that environment.
 - `blockedAt(sim, x, y)`: overlaps() != 0 without side effects (2: only a one-way rule decides); `physClass(level, id)`;
   `envKey`.
 
@@ -518,6 +522,12 @@ depends (the triangular case).
 - Contacts are products too: on a floor x is the air recurrence and y the contact map (13.2% of route ticks: y blocked,
   x free; 5.8%: x blocked, y free); the walk-off tick is triangular (compute x first, y from x's schedule); only 0.10%
   of ticks are mutual corners.
+- Legs (support to support, cut at the grounded ticks; 39,998 legs on the routes, mean 44.3 ticks): the INTERIOR of 53.4%
+  of the legs is a single-environment product (the library applies as is), 16.7% more are products with environment
+  switches (piecewise lookups, the switches at tile edges), 20.1% hold a triangular tick (x first, y from x's
+  sub-steps, or the reverse) and 9.8% a hard coupling (a mutual corner, a one-way, a portal, a death, an effect). The
+  take-off tick is a product in 93.6% of the legs, the landing tick in 86.0% (triangular 9.5%: a landing on a ledge's
+  edge).
 - Mode switches (6.27% of ticks) happen at tile edges: the regime schedule of a candidate path is known from its
   positions alone (the centre tile each tick, 2 ticks of queue lag), so a path can be split at them and each piece looked
   up in its field's tables.
@@ -557,6 +567,11 @@ killers 5,666 (41.44 / 29.12), down arrows 2,345, mud 1,544 (100.00), boosts 2,7
 18-mask check: 392,279 states, 7,047,012 separable (state, mask) ticks, 1,131,397 x groups / 882,037 y groups, 0
 violations.
 
+Legs (`legStats`: support to support at the grounded ticks): 39,998 legs, 1,773,647 ticks, 27,448 of 10+ ticks and 18,848
+of 30+. Interior: pure 21,366 legs (53.42%; 20.80% of the leg ticks), switch 6,681 (16.70%; 24.77%), triangular 8,052
+(20.13%; 27.93%), coupled 3,899 (9.75%; 26.50%). Take-off ticks product / triangular / coupled 37,425 / 1,389 / 1,184;
+landing ticks 34,400 / 3,796 / 1,802.
+
 **Cross products in uniform environments** (`sepcheck.js free --T=30 --k=2 --per=3`, 590 s on 28 threads): 26
 environments x 3 starts, every x sequence x every y sequence with <= 2 changes over 30 ticks: 976,102,974 engine runs,
 29,283,089,220 ticks: **0 x differences, 0 y differences**, no run near the world's edge.
@@ -589,6 +604,6 @@ pairs each (4,402,728 runs, 132 M ticks per start): 0 x and 0 y differences. The
 px before it: y differs from y(jump) in 18,976 / 310,596 / 333,802 / 1,102,014 runs (the walk-off), x from x(h) in 0 /
 495,444 / 526,554 / 976,687 (the pit's walls, reached only by the runs that fell in).
 
-**Test** `node test/mathsep.js` (36 checks, ~2 s): the cross products of every environment at T = 7, the model exact on all
+**Test** `node test/mathsep.js` (37 checks, ~2 s): the cross products of every environment at T = 7, the model exact on all
 17,837 product ticks of 18,000 random-walk ticks in 30 random rooms of every block kind, each coupling class where it must appear, certifyFree, the
-translation rule.
+translation rule, envSchedule = the engine along a run.

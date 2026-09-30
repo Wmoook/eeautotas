@@ -111,6 +111,31 @@ function one(tiles, set, masks, W = 30, H = 20) {
 	ok(c2 > 0 && c2 <= 21, `certifyFree refuses the path into an arrow field at ${c2}`);
 }
 
+// 4b. envSchedule = the engine's current / delayed tiles along a run, from the positions alone
+{
+	const r = rng(4242);
+	const tiles = [];
+	for (let i = 0; i < 300; i++) tiles.push([1 + Math.floor(r() * 38), 1 + Math.floor(r() * 28), [1, 2, 3, 4, 118, 119, 1518, 114, 1041, 1042, 0][Math.floor(r() * 11)]]);
+	const L = SC.mkLevel(40, 30, 0, tiles.filter(([x, y]) => !(x >= 18 && x <= 21 && y >= 13 && y <= 16)));
+	const sim = new E.EESim(L); sim.reset(); sim.px = 320; sim.py = 240; sim._q0 = 0; sim._q1 = 0;
+	const q0 = sim._q0, q1 = sim._q1;
+	const inp = new E.EEInput();
+	const xs = [sim.px], ys = [sim.py], cur = [0], del = [0];
+	let m = 0, dead = false;
+	for (let t = 0; t < 500 && !dead; t++) {
+		if (r() < 0.15) m = Math.floor(r() * 32);
+		const env = A.envOf(sim, m);
+		cur.push(env.current); del.push(env.delayed);
+		E.applyMask(inp, m); sim.tick(inp);
+		if (sim.teleported || sim.is_dead) dead = true;
+		xs.push(sim.px); ys.push(sim.py);
+	}
+	const s = R.envSchedule(L, xs, ys, q0, q1);
+	let diff = 0;
+	for (let t = 1; t < cur.length; t++) if (s.curId[t] !== cur[t] || s.delId[t] !== del[t]) diff++;
+	ok(diff === 0 && cur.length > 50, `envSchedule = the engine's current / delayed tiles on ${cur.length - 1} ticks (${diff} differ)`);
+}
+
 // 5. translation
 {
 	const t = SC.transTask({ axis: 'x', base: 700, shifts: [16, 1], T: 12, seed: 5 });

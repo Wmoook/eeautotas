@@ -267,7 +267,46 @@ function routeTask(task) {
 	let m18 = null;
 	if (task.m18 > 0) m18 = masks18(tr.L, tr.masks, res.codes, task.m18);
 	return { name: e.name, source: e.source, route: e.route, ticks: n, sep: st.sep, sepExact: st.sepExact, sepMiss: st.sepMiss, allExact: st.allExact,
-		envChanges: st.envChanges, tri: st.tri, triExact: st.triExact, triMiss: st.triMiss, bits, bitExact: st.bitExact, byCur, modes, freeRuns: hist(st.freeRuns), sepRuns: hist(st.sepRuns), miss: st.miss.slice(0, 5), m18 };
+		envChanges: st.envChanges, tri: st.tri, triExact: st.triExact, triMiss: st.triMiss, bits, bitExact: st.bitExact, byCur, modes, freeRuns: hist(st.freeRuns), sepRuns: hist(st.sepRuns), miss: st.miss.slice(0, 5), m18,
+		legs: legStats(res.codes) };
+}
+
+/**
+ * The route cut into LEGS at its support contacts: a leg = the ticks from the first tick after a grounded tick to the
+ * next grounded tick (the landing, inclusive). Each leg's class: 'pure' (every tick a product, one environment),
+ * 'switch' (products, the environment changes on the way: a field edge), 'tri' (+ triangular ticks, no other coupling),
+ * 'coupled' (a mutual corner, a one-way, a portal, a door, an effect or a death on the way). Where the triangular ticks
+ * sit: the leg's first tick (the take-off / walk-off), its last (the landing), or inside.
+ */
+function legStats(codes) {
+	// interior = the ticks strictly between the take-off tick a and the landing tick b; the ends classified apart
+	const out = { pure: { n: 0, ticks: 0 }, switch: { n: 0, ticks: 0 }, tri: { n: 0, ticks: 0 }, coupled: { n: 0, ticks: 0 },
+		takeoff: { product: 0, tri: 0, coupled: 0 }, landing: { product: 0, tri: 0, coupled: 0 }, len: [] };
+	const TRI = R.C_TRIXY | R.C_TRIYX, HARD = R.C_COUPLED & ~TRI;
+	const endCls = (c) => ((c & HARD) !== 0 ? 'coupled' : (c & TRI) !== 0 ? 'tri' : 'product');
+	let t = 0;
+	const n = codes.length;
+	while (t < n && (codes[t] & R.C_GROUND) === 0) t++;          // the first support
+	while (t < n) {
+		while (t < n && (codes[t] & R.C_GROUND) !== 0) t++;     // standing / running
+		const a = t;
+		while (t < n && (codes[t] & R.C_GROUND) === 0) t++;
+		if (t >= n) break;                                       // no landing: the route's end
+		const b = t;                                             // the landing tick (grounded)
+		let hard = false, tri = false, sw = false;
+		for (let k = a + 1; k < b; k++) {
+			const c = codes[k];
+			if ((c & HARD) !== 0) hard = true;
+			if ((c & TRI) !== 0) tri = true;
+			if ((c & R.C_ENVCHG) !== 0) sw = true;
+		}
+		const cls = hard ? 'coupled' : tri ? 'tri' : sw ? 'switch' : 'pure';
+		out[cls].n++; out[cls].ticks += b - a + 1;
+		out.takeoff[endCls(codes[a])]++; out.landing[endCls(codes[b])]++;
+		out.len.push(b - a + 1);
+	}
+	out.len = hist(out.len);
+	return out;
 }
 function hist(runs) {
 	const s = runs.slice().sort((a, b) => a - b);
