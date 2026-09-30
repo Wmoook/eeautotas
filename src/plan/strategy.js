@@ -68,6 +68,12 @@ const PROVE_MS = 30000, PROVE_F = 0.2;
 // the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
 // PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
 const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
+// (lane 5, TAS-perfect) the child's landings: the FASTEST of them, not the first (precision.js without --first: after its
+// first route its lookups go on PREC_AFTER_S s for faster ones and it ends when its tables are searched). Measured (box 5,
+// precision.js alone from the compiled route's approach): NC Naos d3c6 routes 358, 319, ... in 9 s (the first 358, the
+// fastest 319), the precision puzzle 358, 335, 333 (the first 358): the compiles took 319 or 358 by which hit came first.
+// EEAT_PREC_FIRST=1: the first, as before.
+const PREC_FIRST = process.env.EEAT_PREC_FIRST === '1', PREC_AFTER_S = 10;
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
 const PROVE_IDLE_MAX = 64;
@@ -465,13 +471,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const att = [...precAtt].sort((a, b) => a[1] - b[1]).slice(0, PREC_ATTEMPTS).map((e) => e[0]);
 		const file = path.join(os.tmpdir(), `eeat_prec_${process.pid}_${precRuns}.txt`);
 		const t1 = Date.now();
-		let found = null, done = null;
+		let found = null, done = null, foundRun = Infinity;
 		try {
 			fs.writeFileSync(file, att.join('\n') + '\n');
 			say({ ev: 'precision', run: precRuns, attempts: att.length, nearest: Math.round(+precAtt.get(att[0]) * 10) / 10, seconds: secs });
 			await new Promise((resolve) => {
 				const pw = Math.max(1, Math.min(workers, 4));
-				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, '--first=1'], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const ch = cp.spawn(process.execPath, [path.join(__dirname, '..', 'precision.js'), String(opts.file), `--attempts=${file}`, `--workers=${pw}`, `--seconds=${secs}`, ...(PREC_FIRST ? ['--first=1'] : [`--after=${PREC_AFTER_S}`])], { stdio: ['ignore', 'pipe', 'ignore'] });
 				precChild = ch;
 				const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 				process.once('exit', onExit);
@@ -486,7 +492,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 						const line = buf.slice(0, k); buf = buf.slice(k + 1);
 						let ev = null;
 						try { ev = JSON.parse(line); } catch (e) { continue; }
-						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && !found) found = ev.inputs;
+						if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string' && (!found || (Number.isFinite(+ev.runTicks) && +ev.runTicks < foundRun))) { found = ev.inputs; foundRun = Number.isFinite(+ev.runTicks) ? +ev.runTicks : Infinity; }
 						else if (ev.ev === 'done') done = ev.end;
 					}
 				});
@@ -1187,6 +1193,25 @@ async function compile(L, opts = {}, emit = () => {}) {
 		} catch (e) { bug('prove', { error: e.message }); text = `no proof: ${e.message}`; }
 		stage('prove', Date.now() - tm, text);
 	} else if (best) stage('prove', 0, !proveOn ? 'off' : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
+
+	// ---- THE LAST (lane 5, TAS-perfect): the time the proof leaves (it ends early where its exact search's bound is far
+	// below the route: no proof possible) goes to the polish again, rounds while they gain, to the budget's end. Before, the
+	// compile ended there: the 300-s runs of THE REST ended at 284.5 s on Tutorial 1 (its repolish round had just saved 134
+	// ticks in 16 s, the proof took 0.5 s) and at 282-300 s elsewhere. Not after a proof (the route is optimal).
+	// EEAT_POLISH_LAST=0: off.
+	if (best && polishOn && POLISH_REST && process.env.EEAT_POLISH_LAST !== '0' && !proveProof && !stopped && left() - 300 > REST_MIN_MS) {
+		tm = Date.now();
+		const notes = [];
+		let saved = 0;
+		for (let round = 0; round < REST_ROUNDS && !stopped && left() - 300 > REST_MIN_MS; round++) {
+			const r = await polishBest(left() - 300);
+			if (!(r.saved > 0)) { if (!round) notes.push(r.text); break; }
+			saved += r.saved;
+			notes.push(r.text);
+		}
+		if (saved > 0) stage('lastpolish', Date.now() - tm, `-${num(saved)} ticks in ${notes.length} round${notes.length === 1 ? '' : 's'} (${notes.join('; ')})`);
+		else say({ ev: 'lastpolish', ms: Date.now() - tm, text: notes.join('; ') || 'no gain' });
+	}
 
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
