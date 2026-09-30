@@ -65,6 +65,8 @@ const TR_ALL = TRICKS.has('1') || TRICKS.has('all');
 const TR_WARP = TR_ALL || TRICKS.has('warp');
 const TR_EXH = TR_ALL || TRICKS.has('exh');
 const TR_DBG = process.env.EEAT_TRICKS_DEBUG === '1';
+// (a forced chain's plan: its boost tile first as a region step, EEAT_CHAIN_HEAD=0: the chain's step alone)
+const CHAIN_HEAD = process.env.EEAT_CHAIN_HEAD !== '0';
 const WARP_MIN = +process.env.EEAT_WARP_MIN || 30;       // est ticks a warp must save at least
 const WARP_F = +process.env.EEAT_WARP_F || 0.8;          // and the death's est at most this share of the walk's
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
@@ -1141,6 +1143,14 @@ function createPlanner(model, facts, o = {}) {
 				push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, estTicks: Math.round(e.est), lb: e.lb,
 					waypoint: dieField({ kind: 'region', tiles: DIE_ANY && model.respawn && model.respawn.length ? model.respawn.slice() : e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
 				continue;
+			}
+			// (a FORCED CHAIN, EEAT_TRICKS chain: first the lane's boost tile (a region step: the way there, the doors as they
+			// are), then the chain's own step from there (the lane itself is forced: no input needed))
+			// (once: after its first failure from a class the chain's step goes alone, no stall on the head)
+			if (X && X.kind === 'chain' && X.boost !== undefined && CHAIN_HEAD && !(facts && facts.rungOf(e.edge + '^', cls) > 0)) {
+				const eh = e.edge + '^';
+				push({ edge: eh, nodeClass: cls, rung: 0, estTicks: Math.max(0, Math.round(e.est) - 8), lb: 0,
+					waypoint: { kind: 'region', tiles: [X.boost], expect: null, label: `${X.label}: its boost` } });
 			}
 			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb, pen: e.pen || '' });
