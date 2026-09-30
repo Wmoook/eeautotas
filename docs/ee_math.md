@@ -2072,3 +2072,23 @@ trigger, 300 and 120 ticks before the route first enters the stuck waypoint; eve
   (hit-120); only by the executor 1 / 2 / 1. At or under the route's own ticks: 18 / 12 / 13.
 - The Bellman value at the start cell where the closure reached it vs the leg found: 455 / 455, 269 / 279, 479 / 490,
   344 / 346, 474 / 514 (the model's optimal chain from its representatives; the meet's exact leg).
+- LONG legs at a 90-s clock (the 24 LONG / FINDER levels; the relay on): from the previous trigger 12 / 24 (the
+  executor's rungs 1-2: 0 of them): Gravity's Rainbow's trophy from the spawn (the whole level: 2,197 route ticks) in
+  2,319 t (41 s), Christmas Town 1,363 -> 1,470, Endless Space (a spike maze) 1,417 -> 1,475, Don't Stop Jumping 1,406
+  -> 1,906, NC Naos de5f 882 -> 1,042; hit-300 18 / 21, hit-120 21 / 24.
+- Found legs take median 1.2 s (prev), 1.5 s (hit-300), 0.2 s (hit-120), p90 22-25 s; 81 of r6's 104 legs by the quick
+  meet alone.
+
+### 8.5 What breaks
+- A leg that needs a DELIBERATE DEATH (death doors: Tutorial 2's switch leg; the meet drops dead children, only a dead
+  start plays its dead ticks).
+- Sparse arrow staircases on effect levels (Eurus: a walk-mode reach field; the meet ends 15 ticks from the coin, the
+  basin's msolve finds no leg) and pixel puzzles (My level de42: dots over spikes): the half-tile cells and the
+  6-tick air control are too coarse, the ladder too slow for them.
+- Legs of 1,500-3,000 route ticks through corridors of 10-35 k tiles (INFINITE, Aperture, 7 Depths, Egg Quest II's base
+  route): the closure caps at 400 k cells (the target's side only), the meet at 400 k expansions / 900 k nodes (~1.5 KB
+  a node), and the relay's commitment is greedy.
+- THE VALUES are the representatives' futures: along a precise trajectory most route states have no cell with a value
+  (Sandcastle Safari: none along the route but its last 50 ticks; Endless Space: 7.9 k of 229 k cells with a value);
+  the meet (the reach field's order + the exact basin) finds most legs, the closure adds ~3 legs a start kind at
+  ~5-10x the time.
