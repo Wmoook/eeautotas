@@ -480,6 +480,9 @@ function createPlanner(model, facts, o = {}) {
 	const STONE_NEAR = process.env.EEAT_PLAN_STONE_NEAR !== undefined ? +process.env.EEAT_PLAN_STONE_NEAR : 4;
 	const STONE_SLACK = process.env.EEAT_PLAN_STONE_SLACK !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK : 8;
 	const STONE_SLACK_F = process.env.EEAT_PLAN_STONE_SLACK_F !== undefined ? +process.env.EEAT_PLAN_STONE_SLACK_F : 0.15;
+	// (the rungs a failed stone gets before it is blocked: 2 = rungs 0 and 1 (1.5 + 5 s); 3 also rung 2 (15 s), where the
+	// known routes' 400-800-tick legs are found (krt: Stone Ruin's stone legs 415-629 route ticks); EEAT_PLAN_STONE_RUNGS)
+	const STONE_RUNGS = Math.max(1, +process.env.EEAT_PLAN_STONE_RUNGS || 2);
 	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
 	if (stones.length > STONE_MAX) stones = [];
 	const stoneIds = new Set(stones.map((X) => X.id));
@@ -1210,7 +1213,7 @@ function createPlanner(model, facts, o = {}) {
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
 		// (a STONE is optional: its failure is no counterexample to the corridor (a cut there walled the est walk's way to
 		// every later target: Machu Picchu's stones plan fell back to the penalised trophy leg after two stone failures);
-		// the stone is blocked from its second rung on instead. EEAT_PLAN_STONE_CUT=1: the cut as for any trigger)
+		// the stone is blocked from its second rung on instead (EEAT_PLAN_STONE_RUNGS, 2: the rungs a stone gets). EEAT_PLAN_STONE_CUT=1: the cut as for any trigger)
 		const isStone = STONES && stones.length && step.waypoint && step.waypoint.trig !== undefined && stoneIds.has(step.waypoint.trig) && process.env.EEAT_PLAN_STONE_CUT !== '1';
 		let cut = null;
 		// (EEAT_FIELD_MEMO=1 (executor.js): a closest of unknown distance (the call had no goal field) cuts nothing)
@@ -1219,7 +1222,7 @@ function createPlanner(model, facts, o = {}) {
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
 		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
-		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= 2)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
+		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= STONE_RUNGS)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
 	// ---------------------------------------------------------------- the truth checker's price of an order
