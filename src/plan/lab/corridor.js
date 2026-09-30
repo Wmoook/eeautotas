@@ -219,6 +219,7 @@ function createCorridor(L, opts = {}) {
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
+		const wideLand = Math.max(12, 2 * landMax);   // (the widened fan's landings: at least 12, also with landMax 0)
 		// (the spans a grounded node stands on: legNew's filter)
 		// the event fan's timed stops (ticks): inside a field always (8, 20, 40), on plain physics o.plainStops (none by
 		// default: the held mask to its first event only); a stop is an airborne or mid-run node the next fans turn from
@@ -418,9 +419,9 @@ function createCorridor(L, opts = {}) {
 				const stops = wide ? wideStops : plainNode ? plainStops : fieldStops, fT = wide ? 2 * fanT : fanT;
 				const kids = [];
 				tp = Date.now();
-				if (plainNode && landMax > 0) {
+				if (plainNode && (wide ? wideLand : landMax) > 0) {
 					const aim = cor.spans.length ? [].concat(...cor.spans.map((s) => s.tiles)) : tgt.tiles;
-					const lands = S.landings(n.snap, { Tmax: wide ? 2 * landT : landT, K: 1, max: wide ? 2 * landMax : landMax, toward: { tiles: aim }, nodes: wide ? 4 * landNodes : landNodes, deadline });
+					const lands = S.landings(n.snap, { Tmax: wide ? 2 * landT : landT, K: 1, max: wide ? wideLand : landMax, toward: { tiles: aim }, nodes: wide ? 4 * landNodes : landNodes, deadline });
 					for (const e of lands) { kids.push(e.masks); if (e.hop) kids.push(e.hop); }
 				}
 				prof.land += Date.now() - tp;
