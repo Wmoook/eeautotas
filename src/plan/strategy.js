@@ -635,7 +635,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (an anchor never planned (the start, an import, a new state): planned once for its cost)
 		// (an empty plan list cut by the planner's budget is no proof: the anchor stays open and replans with twice the budget)
 		const budgetCut = (A, why) => { if (why !== 'budget' || (A.budgetCuts || 0) >= 4) return false; A.budgetCuts = (A.budgetCuts || 0) + 1; A.planVer = -1; return true; };
-		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
+		// (the last leg first: a new anchor inherits its parent's next cost and was planned only when the order reached it, so
+		// its lastLeg was never known and a gain-4 anchor stayed behind gain-35 ones: every never-planned anchor is planned
+		// once, for its lastLeg; First Person Maze's pre-trophy anchor at tick 676 had its trophy plan (est 596) at the root)
+		for (const A of live) if ((A.costVer < 0 && !Number.isFinite(A.costEst)) || (LASTLEG && !A.planned && left() > 1000)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
 		// (the most progress first, then the lowest plan cost + the arrival tick)
 		const list = live.filter((A) => !A.exhausted).sort((a, b) => ((b.lastLeg ? 1 : 0) - (a.lastLeg ? 1 : 0)) || (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
