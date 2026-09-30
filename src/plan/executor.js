@@ -1659,6 +1659,8 @@ async function createExecutor(L, opts) {
 	const BASIN_LEG_MS = +process.env.EEAT_BASIN_LEG_MS > 0 ? +process.env.EEAT_BASIN_LEG_MS : 10;
 	const BASIN_RIM = process.env.EEAT_BASIN_RIM !== undefined ? Math.max(0, Math.min(1, +process.env.EEAT_BASIN_RIM)) : 0.5;
 	const BASIN_DEPTH = +process.env.EEAT_BASIN_DEPTH > 0 ? +process.env.EEAT_BASIN_DEPTH : 200;
+	const BASIN_PROBES = [0, 4, 2, 1, 5, 3];   // masks held (eesim bits: 1 jump, 2 left, 4 right)
+	const BASIN_WALLS = process.env.EEAT_BASIN_WALLS !== '0';
 	const basinMemo = new Map();   // key (the waypoint's field tiles and walls, the start's discrete state) -> basin
 	let bsim = null, binp = null;
 	/** the basin of goal for the discrete state of the start str, grown until `until`: {tiles: Set, cand, next, tried} */
@@ -1688,7 +1690,7 @@ async function createExecutor(L, opts) {
 				if (stand || fieldTile || wallL || wallR) cand.push(t);
 			}
 			cand.sort((a, b) => m[a] - m[b] || a - b);
-			B = { f, m, cand, next: 0, tiles: new Set(), tried: 0, ms: 0 };
+			B = { f, m, cand, next: 0, tiles: new Set(), fail: new Set(), tried: 0, ms: 0 };
 			basinMemo.set(key, B);
 		}
 		if (!bsim) { bsim = new E.EESim(L); binp = new E.EEInput(); }
@@ -1702,8 +1704,19 @@ async function createExecutor(L, opts) {
 			if (bsim.is_dead) continue;
 			B.tried++;
 			if (X.goalAt(goal, bsim, e.tick + 2, -1)) { B.tiles.add(t); continue; }
-			const r = LG.legBest(L, [{ snap: bsim.snapshot(), tick: e.tick + 2 }], goal, { sim: bsim, deadline: Math.min(until, Date.now() + BASIN_LEG_MS), field: B.f, region: null, depthMax: BASIN_DEPTH, noFinish: true });
-			if (r.status === 'found') B.tiles.add(t);
+			const snapT = bsim.snapshot();
+			// (the held probes first: idle, right, left, jump, right + jump, left + jump, each held until the goal, a death or
+			// BASIN_DEPTH ticks: where gravity, a shaft, a conveyor of arrows does the work, ~0.1 ms instead of a search)
+			let hit = false;
+			for (const pm of BASIN_PROBES) {
+				bsim.restore(snapT);
+				E.applyMask(binp, pm);
+				for (let k = 0; k < BASIN_DEPTH && !bsim.is_dead; k++) { bsim.tick(binp); if (X.goalAt(goal, bsim, e.tick + 3 + k, -1)) { hit = true; break; } }
+				if (hit) break;
+			}
+			if (hit) { B.tiles.add(t); B.probed = (B.probed || 0) + 1; continue; }
+			const r = LG.legBest(L, [{ snap: snapT, tick: e.tick + 2 }], goal, { sim: bsim, deadline: Math.min(until, Date.now() + BASIN_LEG_MS), field: B.f, region: null, depthMax: BASIN_DEPTH, noFinish: true });
+			if (r.status === 'found') B.tiles.add(t); else B.fail.add(t);
 		}
 		B.ms += Date.now() - t0;
 		S.basinTried = (S.basinTried || 0) + (B.tried - (B.tried0 || 0)); B.tried0 = B.tried;
@@ -1728,6 +1741,15 @@ async function createExecutor(L, opts) {
 		if (!tiles.length) return null;
 		S.basin = (S.basin || 0) + 1;
 		const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, label: `${wp.label || wp.kind} (basin ${B.tiles.size})` };
+		// (the inner tiles the build tried and refuted (a ball at rest there reaches no goal: the dot row beside the shaft,
+		// the arrows under it) are the relaxation's false nears on the way to the rim: walls of the sub-leg's ORDERING field
+		// (the executor's counterexample walls, never a cut), so it routes to the rim the way the physics can)
+		if (WALLS_ON && BASIN_WALLS) {
+			const thr = BASIN_RIM * cMax, dead = [];
+			for (const t of B.fail) if (B.m[t] < thr && !own.has(t)) dead.push(t);
+			const wk = wallKeyOf(sub);
+			if (dead.length && !wallMemo.has(wk)) { wallMemo.set(wk, new Set(dead)); wallBatches.set(wk, [dead]); }
+		}
 		const share1 = 0.7 * (deadline - Date.now());
 		const r1 = await reachWp(starts, sub, { ms: share1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + share1), stop: budget.stop });
 		if (emit) emit({ ev: 'exec.basin', label: wp.label || '', tiles: B.tiles.size, tried: B.tried, cand: B.cand.length, rim: tiles.slice(0, 12).map((t) => [t % L.width, (t / L.width) | 0]), ok1: !!r1.ok, ms: Date.now() - tIn });

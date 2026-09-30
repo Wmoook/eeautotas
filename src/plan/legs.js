@@ -494,11 +494,12 @@ function legBest(L, starts, goal, o) {
 			// fall, the first one popped closes them, and when that is the drifting one it slides onto the ledge beside the
 			// next 1-wide opening (UT Eternal Galaxy: 3 up-arrow rows under a dot row, from the known route's own state at the
 			// column's top legBest never entered the arrows in 300 ms; the zero-input fall reaches the coin in 56 ticks)
-			// (and a position exactly on the tile grid likewise: the 16 px box enters a 1-wide opening only there, and the
-			// 2 px bucket merges it with a ball half a pixel off, which lands on the opening's edge)
-			const vx = sim.speed_x, vy = sim.speed_y, px = sim.px, py = sim.py;
-			mix(px % 16 === 0 ? 0x7ffe : Math.floor(px * q0) | 0); mix(py % 16 === 0 ? 0x7ffe : Math.floor(py * q1) | 0);
-			mix(vx === 0 ? 0x7fff : Math.floor(vx * q2) | 0); mix(vy === 0 ? 0x7fff : Math.floor(vy * q3) | 0);
+			// (per axis only the state AT REST ON THE GRID (speed exactly 0 and the position exactly on the tile grid: the 16 px
+			// box enters a 1-wide opening only there) gets the extra bucket: every other state keeps its cell, so the cells grow
+			// by at most one per cell where such a state arrives)
+			const ax = sim.speed_x === 0 && sim.px % 16 === 0, ay = sim.speed_y === 0 && sim.py % 16 === 0;
+			mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0);
+			if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0));
 		} else { mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0); }
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
 		ka = h; kb = dkOf(sim) | 0;
