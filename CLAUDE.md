@@ -629,4 +629,40 @@ ways in.
   the budget: `--loops=<s>` / `EEAT_LOOPS_S`, default budget / 6, at most 10 s): the loop pass alone on the finished route
   (the polish inside the budget is as before: box 6's Tutorial 1 pair with the pass inside it 2,027 vs 2,025, its route
   without a loop), kept only when faster with no more deaths and no lower chance: box 6, 60 s, The Blank Page 3,190 (its
-  route at 56 s, polish 0.3 s) -> loops -635 (the portal pit) -> joins 2,266 (known 1,915).
+  route at 56 s, polish 0.3 s) -> loops -635 (the portal pit) -> joins 2,266 (known 1,915). (4) WHERE THE GAINS DIE
+  (`joins.js`, default on in the compile's joins stage): on Fish Gods the DP had the known route's pace at the first
+  switch (its first leg a 1-tile-tall corridor our route jitters through: 165 jump presses into the ceiling, 3-3.9 px/tick
+  where the known holds right to 6.2; msolve alone: the start -> the switch in 576 ticks vs the route's 877, the known's
+  574), 328 ticks ahead, and the gain DIED at the next waypoint (the switch is toggled on and off by stepping back onto
+  it, then a ladder: no follow and no 60-ms leg carried it). THE BRIDGE (`EEAT_JOINS_BRIDGE=0` off): a gain in hand at a
+  waypoint (the route's tick less the earliest arrival) that reaches the next M waypoints less by more than 2 ticks gets
+  `bridgeTo` from its 2 earliest carriers: the route's own inputs SHIFTED (from the route's tick + d, d = +-1..+-16),
+  msolve's legs to k + 1..k + 3 on a longer clock, the exact search on spans <= 16 route ticks; 300 ms a carrier (at most
+  300 ms past the pass's clock). THE BLIND KEY (`blindOf`, `EEAT_JOINS_BLIND=0` off): the trigger state leaves out a coin
+  colour no door / gate of the level reads or whose lowest door / gate number the route never reaches, and the checkpoint
+  on a route with no death (the proofs keep the full key; every chain replayed and judged). Measured (box 6, the joins
+  pass offline on the best route per level so far, 90 s, one process a level, base = both off, the same tree, 2 pairs):
+  better 5 of 15 (Tutorial 3 3,534 -> 3,311 vs 3,534, Tutorial 1 1,849 -> 1,796 vs 1,816, Frostbitten 8,658 -> 8,610 vs
+  8,618, Rosa dei Venti 3,411 -> 3,390 vs 3,403, The Blank Page 2,051 -> 2,044 vs 2,050), worse 1 (Bygone Tutorial 2,020 vs
+  2,016), the same 9; the ablation: the bridge alone gives it all (Tutorial 3 -223, Tutorial 1 -54, Rosa -19), the blind
+  key alone nothing measured (Trick Or Treat's and Endless Space's coin detours are 300-1,000 route ticks, past every
+  leg's span, also with `EEAT_JOINS_LONG=1`). The exact edges (`EEAT_JOINS_EXACT=1`, opt-in) WITH the bridge: on the
+  narrow DP better 5 / worse 4 of 13 (Fish Gods 4,015 -> 3,898, MIHB -86, Gingerbread House -52, Accident Prone -47; the
+  losses 1-8 ticks), on HEAD (the wide DP, 16 levels from the best routes) better 5 / worse 5 (Fish Gods 3,898 -> 3,753 vs
+  3,898, Gingerbread House 4,815 vs 4,835; Tutorial 3 3,203 vs 3,174, Tree Decorating 1,162 vs 1,142): not a default.
+  `tools/cmp/bestof.js <best_known.json> <levels dir> <first dir> <dir>... [--copy=<dir>]`: the best route per level over
+  several passes' outputs, every .eetas replayed from the level file (no more deaths, no lower chance), its ratio to the
+  best known. THE TABLE (the 24 compiled levels, the union of every pass of the VERSUS and JOINS lanes, every route
+  replayed): 64,381 -> **56,635** run ticks, median ticks / best known 1.215 -> **1.061**, at or under the best known 4
+  (Ruins 1,200 = 0.79, Desolate Caverns 1,376 = 0.81, My level 730c 0.97, Switch Labyrinth 1.00); Frostbitten 8,500
+  (1.01), Tutorial 2 1.02, Tree Decorating 1,142 (1.03), celeste x2 1.04, Rosa 3,369 (1.04), The Blank Page 2,022 (1.06),
+  Fish Gods 3,753 (1.07), Tutorial 1 1,774 (1.07). STILL SLOWER, and where (versus.js): Trick Or Treat 3,681 vs 2,235
+  (1.65: 3 optional coins, 300-1,000-tick detours the known never makes; its 14-coin doors never open), NC Naos / the
+  precision puzzle 153 vs 111 (1.38: our landing waits for an exact rest and coasts 30 ticks onto x = 5720.0; the known
+  JUMPS and drifts left in the air, and as it falls into the pocket the first 1-px sub-step of its leftward move snaps it
+  to the whole pixel 5720.0: a wide window (x in (5720, 5720 + |vx|], moving left, falling) that precision.js's point
+  targets at rest never try; an exact search from our own states at ticks 60-80 fills its 400 k-state layers in 16-26 s),
+  Accident Prone 3,192 vs 2,410 (1.32: another way, the protection (10, 45) and 2 checkpoints vs the known's 4), Endless
+  Space 2,313 vs 1,789 (1.29: 2 gold coin detours, another checkpoint), MIHB's Dream 9,651 vs 7,973 and Gingerbread House
+  4,815 vs 4,032 (1.21 / 1.19: another coin ORDER), Bygone Tutorial 2,016 vs 1,680 (1.20: the key doors in another
+  order), My level fef0 65 vs 59.
