@@ -112,6 +112,7 @@ function makeCore(L, co) {
 		const k = budget.k > 0 ? budget.k : K_DEFAULT;
 		const rung = budget.level | 0;
 		const goal = T.goalOf(L, wp);
+		goal.over = X.overOf(wp);
 		const allowDeath = !!wp.allowDeath;
 		const beforeTick = wp.beforeTick >= 0 ? wp.beforeTick : -1;
 		st.calls++;

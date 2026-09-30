@@ -99,6 +99,19 @@ function boundFields(L, bounds, goal, starts, simIn, disc0, sameDisc) {
 	return { rel, now };
 }
 
+/** the monotone counter cut of a waypoint (a proof): its Expect names coins, blue coins or deaths, which only rise during
+ *  a run (eesim.js sets them to 0 only at reset / load), so a state whose count is above the expected value never meets
+ *  it: (sim) -> true for such a state; null for any other waypoint */
+function overOf(wp) {
+	const ex = wp && wp.kind !== 'trophy' ? wp.expect : null;
+	if (!ex || !(typeof ex.value === 'number')) return null;
+	const v = ex.value;
+	if (ex.feat === 'coins') return (sim) => sim.coins > v;
+	if (ex.feat === 'bcoins') return (sim) => sim.blue_coins > v;
+	if (ex.feat === 'deaths') return (sim) => sim.deaths > v;
+	return null;
+}
+
 /** the goal test at absolute tick t (types.js goalOf's test + beforeTick) */
 const goalAt = (goal, sim, t, beforeTick) => (beforeTick < 0 || t <= beforeTick) && goal.test(sim);
 
@@ -122,7 +135,8 @@ function exactLeg(L, starts, goal, o) {
 	const t0 = starts[order[0]].tick;
 	let maxDepth = o.maxDepth >= 0 ? o.maxDepth : 64;
 	if (beforeTick >= 0) maxDepth = Math.min(maxDepth, beforeTick - t0);
-	const st = { ticks: 0, states: 0, merged: 0, cut: 0, cutField: 0, dead: 0, goals: 0, maxOpen: 0, depth: 0, seconds: 0, maxDepth };
+	const st = { ticks: 0, states: 0, merged: 0, cut: 0, cutField: 0, dead: 0, over: 0, goals: 0, maxOpen: 0, depth: 0, seconds: 0, maxDepth };
+	const over = typeof goal.over === 'function' ? goal.over : null;
 	const tStart = Date.now();
 	const track = o.track || null;
 	const distField = o.distField || field;
@@ -158,6 +172,7 @@ function exactLeg(L, starts, goal, o) {
 			const h = sim.stateHash();
 			if (!seen.add(h)) { st.merged++; continue; }
 			if (sim.is_dead && !allowDeath) { st.dead++; continue; }
+			if (over !== null && over(sim)) { st.over++; continue; }
 			if (goalAt(goal, sim, t0 + d, beforeTick)) {
 				st.goals++;
 				if (found < 0) found = d;
@@ -199,6 +214,7 @@ function exactLeg(L, starts, goal, o) {
 				const m = masks[k];
 				if (k > 0) { sim.restore(cur[i]); E.applyMask(inp, m); sim.tick(inp); st.ticks++; }
 				if (sim.is_dead && !allowDeath) { st.dead++; continue; }
+				if (over !== null && over(sim)) { st.over++; continue; }
 				if (!sim.is_dead && goalAt(goal, sim, t0 + c, beforeTick)) {
 					st.goals++;
 					if (found < 0) found = c;
@@ -330,4 +346,4 @@ function solveExact(L, starts, goal, o) {
 	}
 }
 
-module.exports = { exactLeg, solveExact, boundFor, discKey, pathOf, pathOfKept, goalAt, DEF_CAP, MAX_SEEN };
+module.exports = { overOf, exactLeg, solveExact, boundFor, discKey, pathOf, pathOfKept, goalAt, DEF_CAP, MAX_SEEN };

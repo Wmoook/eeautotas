@@ -404,7 +404,8 @@ function legBest(L, starts, goal, o) {
 	}
 	let why = 'exhausted';
 	let popsAtFound = -1;
-	const drop = { dead: 0, oob: 0, region: 0, closed: 0 };
+	const drop = { dead: 0, over: 0, oob: 0, region: 0, closed: 0 };
+	const over = typeof goal.over === 'function' ? goal.over : null;
 	while (heap.length && goals.length < collect && (popsAtFound < 0 || pops - popsAtFound < 3000)) {
 		if ((pops & 63) === 0) {
 			const now = Date.now();
@@ -434,6 +435,7 @@ function legBest(L, starts, goal, o) {
 			let reps = 1, same = true, bad = false;
 			for (;;) {
 				if (sim.is_dead && !allowDeath) { drop.dead++; bad = true; break; }
+				if (over !== null && over(sim)) { drop.over++; bad = true; break; }
 				if (!sim.is_dead && X.goalAt(goal, sim, t0 + g + reps, beforeTick)) {
 					if (found < 0 || g + reps < found) found = g + reps;
 					if (popsAtFound < 0) popsAtFound = pops;
