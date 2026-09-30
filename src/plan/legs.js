@@ -318,6 +318,8 @@ function legBest(L, starts, goal, o) {
 	const collect = o.collect > 0 ? o.collect : 64;
 	const B = allowDeath || o.noBound || process.env.EEAT_LEG_KB === '0' ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64, FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;
+	// (the kinematic bound only for states the field puts within KBT ticks (EEAT_LEG_KBT: measurements))
+	const KBT = +process.env.EEAT_LEG_KBT || HLIM + 16;
 	const BF = boundsFieldOf(o.bounds, goal);
 	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
 	const t0 = starts[order[0]].tick;
@@ -361,7 +363,7 @@ function legBest(L, starts, goal, o) {
 	const scoreOf = (dist) => {
 		if (dist >= 1e9) return 1e9;
 		const ft = BF !== null ? bfTime(BF, o.bounds, sim) : dist * FT;
-		if (B === null || sim.is_dead || ft > HLIM + 16) return ft;
+		if (B === null || sim.is_dead || ft > KBT) return ft;
 		const h = EG.lowerBound(B, sim, HLIM);
 		return h > ft ? h : ft;
 	};
