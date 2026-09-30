@@ -78,8 +78,9 @@ function main() {
 			const target = { tiles: [b.tile1], cls: b.c1, tele };
 			if (tele) target.via = portalVia(L, b.tile1);
 			const routeT = b.t1 - a.t0;
-			const res = S.chain(snaps.get(a.t0), target, { ms: +(argv.ms || 2000), fan: +(argv.fan || 8), legT: +(argv.legT || 80), w: +(argv.w || 1), coupledDirect: argv.coupledDirect !== '0', fanMax: argv.fanMax ? +argv.fanMax : undefined, fanNodes: argv.fanNodes ? +argv.fanNodes : undefined, events: argv.events !== '0', reach: argv.reach !== '0', kappa: argv.kappa ? +argv.kappa : undefined, w1: argv.w1 !== undefined ? +argv.w1 : undefined, phase1: argv.phase1 !== undefined ? +argv.phase1 : undefined });
-			const rec = { r: entry._idx, m: i, k: KCH, routeT, labels: moves.slice(i, i + KCH).map((m) => m.label).join(','), ok: res.ok, T: res.T, closed: res.closed, exp: res.expanded, legs: res.legs, nodes: res.nodes, cut: res.cut, firstMs: res.firstMs, ms: res.ms };
+			const prof = argv.prof ? {} : undefined;
+			const res = S.chain(snaps.get(a.t0), target, { prof, dGate: argv.dGate !== undefined ? +argv.dGate : undefined, dom: argv.dom !== undefined ? +argv.dom : undefined, fanT: argv.fanT ? +argv.fanT : undefined, legNodes: argv.legNodes ? +argv.legNodes : undefined, coupledTicks: argv.coupledTicks ? +argv.coupledTicks : undefined, fieldMs: argv.fieldMs ? +argv.fieldMs : undefined, ms: +(argv.ms || 2000), fan: +(argv.fan || 8), legT: +(argv.legT || 80), w: +(argv.w || 1), coupledDirect: argv.coupledDirect !== '0', fanMax: argv.fanMax ? +argv.fanMax : undefined, fanNodes: argv.fanNodes ? +argv.fanNodes : undefined, events: argv.events !== '0', reach: argv.reach !== '0', kappa: argv.kappa ? +argv.kappa : undefined, w1: argv.w1 !== undefined ? +argv.w1 : undefined, phase1: argv.phase1 !== undefined ? +argv.phase1 : undefined });
+			const rec = { r: entry._idx, m: i, k: KCH, routeT, labels: moves.slice(i, i + KCH).map((m) => m.label).join(','), ok: res.ok, T: res.T, closed: res.closed, exp: res.expanded, legs: res.legs, nodes: res.nodes, cut: res.cut, domCut: res.domCut, prof, firstMs: res.firstMs, ms: res.ms };
 			if (res.ok) {
 				chk.restore(snaps.get(a.t0));
 				let px = chk.px, py = chk.py, tel = false, dead = false;

@@ -78,6 +78,19 @@ const K1 = require('./kin1d.js');
 const KN = require('./kin.js');
 
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16, F_CLIMB = 32, F_LIQUID = 64, F_BOOST = 128;
+// the chains' support classes (chain: the states a class keeps; 0: the exact state merge alone, as before) and the
+// resumed searches kept (n5 lane 2; env: measurements)
+const CHAIN_DOM = process.env.EEAT_CHAIN_DOM !== undefined ? +process.env.EEAT_CHAIN_DOM : 0;
+const CHAIN_KEEP = +process.env.EEAT_CHAIN_KEEP > 0 ? +process.env.EEAT_CHAIN_KEEP : 6;
+const CHAIN_DGATE = process.env.EEAT_CHAIN_DGATE !== undefined ? +process.env.EEAT_CHAIN_DGATE : 0;
+// THE CHAIN'S DIRECT LEG IS A PROBE (n5 lane 2): a node's direct leg to the target with the field tier's clock CHAIN_FMS ms
+// and the coupled piece's CHAIN_CT simulated ticks (the single leg's own defaults, 250 ms and 300 k, made a field node's
+// failing probe ~450 ms: a compile chain's 800 ms was two expansions; Eurus' arrow climb from the known route's state 220
+// ticks before the coin: 11 expansions and no chain in 5 s, with the probe 62 and a 138-tick chain after 1.1 s; the chain
+// harness, every 96th move of an eighth of the routes, 800 ms a chain: 28 vs 24 of 84 found, 5 only with it, 1 only
+// without; env EEAT_CHAIN_CT / EEAT_CHAIN_FMS, 300000 / 250 = as before)
+const CHAIN_CT = +process.env.EEAT_CHAIN_CT > 0 ? +process.env.EEAT_CHAIN_CT : 30000;
+const CHAIN_FMS = +process.env.EEAT_CHAIN_FMS > 0 ? +process.env.EEAT_CHAIN_FMS : 60;
 const DOTS = new Set([4, 414]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const PORTALS = new Set([242, 381]);
@@ -1236,6 +1249,8 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 	}
 	// the reach field to a set of tiles (the chains' order), one per tile set, the newest 8 kept
 	const rfCache = new Map();
+	// the resumed chains (chain's o.resume: the newest CHAIN_KEEP searches)
+	const chainKeep = new Map();
 	function reachFieldOf(tiles) {
 		const key = Array.from(tiles).sort((a, b) => a - b).join(',');
 		if (rfCache.has(key)) return rfCache.get(key);
@@ -1455,7 +1470,13 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 		const t0 = Date.now(), budgetMs = o.ms || 2000, fan = o.fan === undefined ? 8 : o.fan, legT = o.legT || 80;
 		const snap0 = snapOf(start);
 		const tg = targetOf(target);
-		const heap = [];
+		// THE RESUMED SEARCH (o.resume: a key the caller builds from the start's state, the target and the horizon): the
+		// search's open list, its seen states, its classes and its best chain are kept (the newest CHAIN_KEEP keys) and a
+		// call with the same key continues it with its own clock instead of starting again (the compiler retries a stuck
+		// waypoint from the same start at every rung: each call re-expanded the same first nodes of the same graph)
+		const R0 = o.resume ? chainKeep.get(o.resume) : null;
+		if (R0) { chainKeep.delete(o.resume); chainKeep.set(o.resume, R0); }
+		const heap = R0 ? R0.heap : [];
 		// the least f first, among equal f the deepest (the larger g: the same guarantees, the goal sooner)
 		const lt = (a, b) => a.f < b.f || (a.f === b.f && a.g > b.g);
 		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (!lt(heap[i], heap[p])) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
@@ -1469,9 +1490,9 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 		// to the tiles), so such a node is dropped
 		// TWO PHASES (anytime): the order's weight w1 (o.w1, default 2: greedy toward the target) until the first chain
 		// or half the clock, then w (o.w, default 1: A*, the best chain pruned by fa); the heap re-keyed at the switch
-		let uncert = false, cut = 0;
+		let uncert = R0 ? R0.uncert : false, cut = R0 ? R0.cut : 0;
 		const wEnd = o.w || 1, w1 = o.w1 === undefined ? Math.max(2, wEnd) : o.w1, switchMs = budgetMs * (o.phase1 === undefined ? 0.5 : o.phase1);
-		let W8 = w1, phase = w1 === wEnd ? 2 : 1;
+		let W8 = R0 ? R0.W8 : w1, phase = R0 ? R0.phase : w1 === wEnd ? 2 : 1;
 		const rekey = () => {
 			W8 = wEnd; phase = 2;
 			for (const x of heap) x.f = x.g + W8 * x.h;
@@ -1494,14 +1515,41 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 			return { adm: b, ord };
 		};
 		const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
-		const seen = new Map();
-		sim.restore(snap0);
-		seen.set(sim.stateHash(), 0);
-		const h0 = hOf();
-		if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), h: h0.ord, f: W8 * h0.ord, fa: h0.adm });
-		let best = null, expanded = 0, legs = 0, nodes = 1, firstAt = 0;
+		const seen = R0 ? R0.seen : new Map();
+		// THE SUPPORT CLASSES (speed as state, CHAIN_DOM): a node's class = its centre tile, grounded, the jumps used, vx in
+		// 1/4 px/tick, vy in 1/2 px/tick and the door-reading values (keys, coins, switches); a class keeps the DOM_P
+		// earliest states (g), a later state of a full class is dropped: the fan-outs of two parents land on the same support
+		// at nearly the same speed with sub-pixel differences, near-copies the order expanded one after another (a 800-ms
+		// compile chain is ~10 expansions). Not a proof: a chain that dropped a state by its class never claims 'closed'
+		const domP = o.dom === undefined ? CHAIN_DOM : o.dom;
+		const dom = R0 ? R0.dom : new Map();
+		let domCut = R0 ? R0.domCut : 0, gatedN = 0;
+		const domKeep = (g) => {
+			if (!(domP > 0)) return true;
+			const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4;
+			let sw = 0;
+			for (const [k, v] of sim._switches) if (v === true) sw = (sw + Math.imul((k | 0) + 1, 0x9e3779b1)) | 0;
+			const key = `${cy * W + cx},${sim.on_ground ? 1 : 0},${sim.jump_count | 0},${Math.round(sim.speed_x * 4)},${Math.round(sim.speed_y * 2)},${sim._keysMask | 0},${sim.coins | 0},${sim.blue_coins | 0},${sw}`;
+			const a = dom.get(key);
+			if (!a) { dom.set(key, [g]); return true; }
+			if (a.length >= domP && a[a.length - 1] <= g) { domCut++; return false; }
+			let i = a.length; while (i > 0 && a[i - 1] > g) i--;
+			a.splice(i, 0, g);
+			if (a.length > domP) a.pop();
+			return true;
+		};
+		const prof = o.prof || null;
+		let best = R0 ? R0.best : null, expanded = R0 ? R0.expanded : 0, legs = R0 ? R0.legs : 0, nodes = R0 ? R0.nodes : 1, firstAt = R0 ? R0.firstAt : 0;
+		const spent0 = R0 ? R0.spent : 0;
+		if (!R0) {
+			sim.restore(snap0);
+			seen.set(sim.stateHash(), 0);
+			domKeep(0);
+			const h0 = hOf();
+			if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), h: h0.ord, f: W8 * h0.ord, fa: h0.adm });
+		}
 		while (heap.length && Date.now() - t0 < budgetMs) {
-			if (phase === 1 && (best || Date.now() - t0 >= switchMs)) rekey();
+			if (phase === 1 && (best || spent0 + Date.now() - t0 >= switchMs)) rekey();
 			const n = pop();
 			if (best && n.fa >= best.T) continue;
 			expanded++;
@@ -1511,16 +1559,30 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 			if (lim <= 0) continue;
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
-			if (n.g > 0 || o.rootLeg !== false) {
-				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000, fieldMs: o.fieldMs, deadline: t0 + budgetMs });
+			// THE DIRECT LEG'S GATE (dGate > 0): the direct leg (half a chain's clock: ~100-150 ms a failing plain leg, more
+			// through fields) only from a node whose plain bound fits the horizon (a plain node's leg is the plain solver's
+			// alone: its answers take at least that bound, so a bound past lim is a certain failure) and whose order (the
+			// reach field's way at the top running speed) is within dGate x lim; the other nodes are expanded by their
+			// fan-outs alone (an ordering choice: every chain is still the solver's replayed answer)
+			const dGate = o.dGate === undefined ? CHAIN_DGATE : o.dGate;
+			const gated = dGate > 0 && n.g > 0 && ((plainNode && n.fa - n.g > lim) || n.h > dGate * lim);
+			if (gated) gatedN++;
+			if ((n.g > 0 || o.rootLeg !== false) && !gated) {
+				const tL = prof ? Date.now() : 0;
+				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || CHAIN_CT, fieldMs: o.fieldMs || CHAIN_FMS, deadline: t0 + budgetMs });
+				if (prof) { prof.leg = (prof.leg || 0) + Date.now() - tL; if (!plainNode) prof.legField = (prof.legField || 0) + Date.now() - tL; }
 				legs++;
-				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
+				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = spent0 + Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
 			}
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
 			if (fan <= 0) continue;
+			const tF = prof ? Date.now() : 0;
 			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs }) : [];
+			const tE = prof ? Date.now() : 0;
 			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60))) lands.push(e);
+			if (prof) { prof.land = (prof.land || 0) + tE - tF; prof.event = (prof.event || 0) + Date.now() - tE; }
+			const tP = prof ? Date.now() : 0;
 			legs += lands.length;
 			for (const rr of lands) {
 				if (Date.now() - t0 >= budgetMs) break;
@@ -1536,6 +1598,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 					const hsh = sim.stateHash();
 					if (seen.has(hsh) && seen.get(hsh) <= g) continue;
 					seen.set(hsh, g);
+					if (!domKeep(g)) continue;
 					const h = hOf();
 					if (!h) continue;
 					if (best && g + h.adm >= best.T) continue;
@@ -1543,11 +1606,19 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 					nodes++;
 				}
 			}
+			if (prof) prof.push = (prof.push || 0) + Date.now() - tP;
 		}
 		let open = 0;
 		for (const x of heap) if (!best || x.fa < best.T) open++;
-		const closed = !!best && !uncert && open === 0;
-		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, reach: rf ? rf.mode : null, firstMs: firstAt, ms: Date.now() - t0 };
+		const closed = !!best && !uncert && domCut === 0 && open === 0;
+		if (o.resume) {
+			// (kept while it can still give something: an open node below the best chain's claim)
+			if (open > 0) {
+				chainKeep.set(o.resume, { heap, seen, dom, domCut, best, expanded, legs, nodes, firstAt, uncert, cut, W8, phase, spent: spent0 + Date.now() - t0 });
+				while (chainKeep.size > CHAIN_KEEP) chainKeep.delete(chainKeep.keys().next().value);
+			} else chainKeep.delete(o.resume);
+		}
+		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, domCut, gated: gatedN, resumed: !!R0, reach: rf ? rf.mode : null, firstMs: firstAt, ms: Date.now() - t0 };
 	}
 
 	return {
