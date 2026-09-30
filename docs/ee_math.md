@@ -2092,13 +2092,48 @@ trigger, 300 and 120 ticks before the route first enters the stuck waypoint; eve
   (Sandcastle Safari: none along the route but its last 50 ticks; Endless Space: 7.9 k of 229 k cells with a value);
   the meet (the reach field's order + the exact basin) finds most legs, the closure adds ~3 legs a start kind at
   ~5-10x the time.
+- THE CLOCK IS PART OF THE ANSWER: every share is a fraction of the leg's clock and the relay commits greedily, so the
+  same leg solves at one clock and not at a longer one (Stone Ruin 37 s at 90 s, 'budget' at 120 / 150 s; On And On And
+  On 1 of 2 at 150 s); restarts on several clocks (8.7) are the cheap cure, a clock-free schedule the real one.
 
 ### 8.6 In the compiler (the tier EEAT_BACKWARD=1)
-- The executor's own known-route test (tools/cmp/krt.js, rungs 1-2: 5 + 15 s; one tree, the knob off vs on; the tier at
-  0.2 / 0.3 / 0.6 of the window by rung): from the previous trigger 30 vs 29 (+ Treasure Trove Cove, Snow Jumping;
-  - Egg Quest II, Frostbitten, Endless Pain: the skeleton's rung-2 finds lost the window's time to the tier, whose share
-  at rung 2 is 0.3 since), hit-300 23 vs 25, hit-120 35 vs 37; the tier's own finds 9 / 10 / 28.
+- The executor's own known-route test (tools/cmp/krt.js, rungs 1-2: 5 + 15 s; one tree cd032db, the knob off vs on; the
+  tier at 0.2 / 0.3 / 0.3 / 0.6 of the window by rung): **from the previous trigger 30 -> 33 / 54, hit-300 23 -> 25 / 31,
+  hit-120 35 -> 38 / 41, none lost in any start kind**; the tier's own legs 9 / 10 / 26, ticks / route median 1.000 /
+  1.160 / 1.033. (A first run with 0.5-0.6 at rung 2 lost Egg Quest II, Frostbitten and Endless Pain: the skeleton's
+  rung-2 finds lost the window's time to the tier.)
+- The full compile, 12 failing levels, 300 s, W3, the final shares (A/B 2): compiled 0 vs 0, progress better 1 / worse 3
+  (Late christmas 4 vs 13 triggers, YMCK 14 vs 20, Snow Jumping 3 vs 4) / same 8: inside the executor's windows the tier
+  does not turn a failing level into a compiled one (Stone Ruin not either: its whole-level solve needs its clock in one
+  piece, and each rung's window starts it over).
 - The full compile, 36 levels (20 failing ONE-LEG / STUCK-* / RATE + 16 compiled), 180 s, W3, the tier at 0.5 of every
   window (the r3 solver): compiled 14 vs 15 (Fish Gods, a flicker of earlier gates), both-compiled run ticks x0.974,
   failing progress better 2 / worse 1 / same 18: the failing levels' stuck legs are their first far legs from the
   spawn (hundreds of tiles; the compile's first plans) and the planner's order, not legs the tier's window finds.
+
+### 8.7 The whole level as one leg (EEAT_BW_LEVEL=1)
+- `tools/cmp/bwlevel.js`: the solver from the level's start state to the trophy's tiles, the run then evaluated from the
+  level file (a trophy touched a tick after the centre is in its tile: the last direction held, then released). THE SWEEP
+  (box 5, the 206 levels the 300-s full compile f300 did not route, 120 s each): **4 levels finished from the level
+  alone**, every run replayed from the level file (0 deaths, chance 1): On And On And On 2,489 run ticks (best known
+  2,381), The Blank Page 2,081 (1,915), **Gravity's Rainbow 2,090 (2,197: under the best known)**, INVASION 4,127 (4,054);
+  77 levels 'the start is not in the target's walk' (the trophy behind a gate: one leg cannot be the level), 84 'budget',
+  41 'exhausted'; the near misses (the best node's value 2-9 ticks: SPOT THE DIDFERNECE, Katwalk, Nightmare Relics, Ice
+  Cream Expedition, NSFW Spring Relics (also 300 s: 7), DEEPER, Tropical Trials) end at the false nears the steer rows
+  name (a live portal by the trophy, a coin gate as the floor). Stone Ruin: solved at a 90-s clock in 37 s, not at 120 /
+  150 s.
+- IN THE COMPILER (strategy.js `wholeLevel`, src/plan/lab/bwlevel_child.js, opt-in): a child process started with the
+  moves loop (at most 0.5 of the budget, 150 s; it never blocks the compiler's thread), its route a route like the moves'
+  (routeOf: then verify, polish, prove), the moves go on; with no route when the moves end, the child keeps the time
+  left. THE A/B (A/B 3: box 5, 300 s, W3, one tree cfe4ebe, the knob on vs off on the 5 levels, on alone on 4 compiled
+  controls; every .eetas replayed from the level file): **compiled 3 vs 0**: The Blank Page 2,022 (the child's 2,087 at
+  32 s, polished), **Gravity's Rainbow 2,022 (best known 2,197)**, INVASION 4,095 (4,054); On And On And On and Stone Ruin
+  not (the child's 'budget'); the controls all compiled, each no slower than the f300 compile: Desolate Caverns 1,458 vs
+  1,562, Tree Decorating 1,232 vs 1,407 (the child's route at 38 s), Accident Prone 3,175 vs 3,206 (the child's at
+  19 s: the first route), NC Naos d3c6 319 = 319. (The newest n5-plan full compile, with the perfect pass, routes
+  Gravity's Rainbow and On And On And On in its own 300-s run, not The Blank Page or INVASION.)
+- RESTARTS ON TWO CLOCKS (1285dc8, the child's default; --sched): the solve's shares are fractions of its clock (the quick
+  meet 0.3, the closure, the relay's steps), so a longer clock is not a superset of a shorter one: on the 5 levels,
+  standalone, 150 s: 0.4 of the clock then the rest finished 4 of 5 (On And On And On and Gravity's Rainbow on the second
+  clock), one 150-s clock lost On And On in 1 of 2 runs; inside the compile (W3 next to it, the box loaded ~100) On And
+  On and Stone Ruin still 'budget' (A/B 4, 2 levels).
