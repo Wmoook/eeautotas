@@ -52,6 +52,7 @@ function legBFS(L, starts, goal, o) {
 	// (the ranking's time bound: endgame.js's admissible kinematic envelope, capped; none with deaths allowed)
 	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64;
+	const BF = boundsFieldOf(o.bounds, goal);
 	const FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;   // (ticks a tile at the running speed)
 	let hLim = HLIM;
 	const dirs = field ? dirsOf(field) : null;
@@ -64,7 +65,7 @@ function legBFS(L, starts, goal, o) {
 	 */
 	const scoreOf = (dist) => {
 		if (dist >= 1e9) return 1e9;
-		const ft = dist * FT;
+		const ft = BF !== null ? bfTime(BF, o.bounds, sim) : dist * FT;
 		if (B === null || sim.is_dead || ft > hLim + 16) return ft;
 		const h = EG.lowerBound(B, sim, hLim);
 		return h > ft ? h : ft;
@@ -258,6 +259,7 @@ function legBest(L, starts, goal, o) {
 	const collect = o.collect > 0 ? o.collect : 64;
 	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64, FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;
+	const BF = boundsFieldOf(o.bounds, goal);
 	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
 	const t0 = starts[order[0]].tick;
 	let depthMax = o.depthMax > 0 ? o.depthMax : 4000;
@@ -293,7 +295,7 @@ function legBest(L, starts, goal, o) {
 	const closed = new Set();
 	const scoreOf = (dist) => {
 		if (dist >= 1e9) return 1e9;
-		const ft = dist * FT;
+		const ft = BF !== null ? bfTime(BF, o.bounds, sim) : dist * FT;
 		if (B === null || sim.is_dead || ft > HLIM + 16) return ft;
 		const h = EG.lowerBound(B, sim, HLIM);
 		return h > ft ? h : ft;
@@ -390,6 +392,17 @@ function legBest(L, starts, goal, o) {
 		return res('found', { tick: t0 + out[0].depth, depth: out[0].depth, start: out[0].start, tail: out[0].tail, goals: out });
 	}
 	return res(why);
+}
+
+/** the primitives' relaxed tick field for this goal (bounds.js field(tiles, null, {touch})), or null (o.fieldTime false,
+ *  no bounds, an error): the finders' time estimate when given (wall-aware, the level's top speeds per axis) */
+function boundsFieldOf(bounds, goal) {
+	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function' || process.env.EEAT_LEG_BF === '0') return null;
+	try { return bounds.field(goal.tiles, null, { touch: goal.kind === 'trophy' }); } catch (e) { return null; }
+}
+function bfTime(f, bounds, sim) {
+	const v = bounds.at(f, sim, { endgame: false });
+	return v === Infinity || !(v >= 0) ? 1e9 : v;
 }
 
 /** ticks to cover D px from speed v along the way: the running acceleration (1 / 7.752 px/tick a tick) up to the

@@ -154,4 +154,87 @@ function rejoinPath(r, starts) {
 	return X.pathOf(L, e, rj.par, rj.msk, starts, r.t0);
 }
 
-module.exports = { polishRoute, traceRoute };
+/**
+ * polishLeg(L, start {snap, tick}, tail, goal, o) -> {tail, saved, windows, ms}: a leg a finder found (the inputs `tail`
+ * from the start state, the goal (types.js goalOf) first reached at its end) made shorter by the same exact windows as
+ * polishRoute, from the end back: the last window's goal is the waypoint itself, the others the leg's own state region
+ * at the window's end (tile + door-reading state) or an exact rejoin with a later state of the leg; every change is
+ * replayed from the start (the goal first at the new end, no death unless o.allowDeath, o.beforeTick) and kept only
+ * when shorter. o: {deadline, win (default 24), cap (40000), stop, allowDeath, beforeTick}.
+ */
+function polishLeg(L, start, tail0, goal, o) {
+	o = o || {};
+	const t0 = Date.now();
+	const deadline = o.deadline || t0 + 1000;
+	const win = o.win > 0 ? o.win : 24, cap = o.cap > 0 ? o.cap : 40000;
+	const allowDeath = !!o.allowDeath, beforeTick = o.beforeTick >= 0 ? o.beforeTick : -1;
+	const sim = o.sim || new E.EESim(L), inp = new E.EEInput();
+	let tail = Uint8Array.from(tail0);
+	const T0 = start.tick;
+	/** the leg's replay: per step its state hash (the latest step of each hash), snapshots every SNAP steps */
+	const trace = (tl) => {
+		sim.restore(start.snap);
+		const n = tl.length, snaps = [sim.snapshot()], last = new Map();
+		last.set(sim.stateHash(), T0);
+		for (let t = 0; t < n; t++) { E.applyMask(inp, tl[t]); sim.tick(inp); last.set(sim.stateHash(), T0 + t + 1); if ((t + 1) % SNAP === 0) snaps[(t + 1) / SNAP] = sim.snapshot(); }
+		return { snaps, last, n };
+	};
+	const at = (R, tl, t) => {
+		const s = Math.floor(t / SNAP) * SNAP;
+		sim.restore(R.snaps[s / SNAP]);
+		for (let u = s; u < t; u++) { E.applyMask(inp, tl[u]); sim.tick(inp); }
+		return sim;
+	};
+	/** a candidate leg: the goal first at its end, alive, in time */
+	const good = (tl) => {
+		sim.restore(start.snap);
+		for (let t = 0; t < tl.length; t++) {
+			E.applyMask(inp, tl[t]); sim.tick(inp);
+			if (sim.is_dead && !allowDeath) return false;
+			if (t + 1 < tl.length && !sim.is_dead && (beforeTick < 0 || T0 + t + 1 <= beforeTick) && goal.test(sim)) return false;
+		}
+		return !sim.is_dead && goal.test(sim) && (beforeTick < 0 || T0 + tl.length <= beforeTick);
+	};
+	let R = trace(tail);
+	let windows = 0;
+	for (let b = tail.length; b > 0 && Date.now() < deadline && !(o.stop && o.stop()); ) {
+		const a = Math.max(0, b - win);
+		windows++;
+		const last = b === tail.length;
+		const sB = at(R, tail, b);
+		const g = last ? goal : (() => {
+			const W = L.width, H = L.height, tile = T.tileOf(sB, W, H), dk = X.discKey(sB);
+			return { kind: 'region', tiles: Int32Array.of(tile), mask: null, allowDeath: false, test: (s) => !s.is_dead && T.tileOf(s, W, H) === tile && X.discKey(s) === dk };
+		})();
+		const sA = at(R, tail, a);
+		const st0 = [{ snap: sA.snapshot(), tick: T0 + a }];
+		const left = Math.max(10, (deadline - Date.now()) / Math.max(1, Math.ceil(a / win) + 1));
+		const r = X.exactLeg(L, st0, g, { sim, maxDepth: (b - a) - 1, cap, deadline: Math.min(deadline, Date.now() + left), allowDeath: false,
+			beforeTick: last ? beforeTick : -1, rejoin: R.last, rejoinMin: 1, collect: 1 });
+		let cand = null;
+		// (c) an exact rejoin with a later state of the leg (proven: the same state, sooner)
+		if (r.rejoin && r.layers && r.layers[r.rejoin.depth - 1]) {
+			const p = X.pathOf(r.layers, r.rejoin.depth, r.rejoin.par, r.rejoin.msk, st0, r.t0);
+			const j = r.rejoin.tick - T0;
+			if (p && j <= tail.length) {
+				const c = new Uint8Array(a + p.tail.length + (tail.length - j));
+				c.set(tail.subarray(0, a), 0); c.set(p.tail, a); c.set(tail.subarray(j), a + p.tail.length);
+				if (c.length < tail.length && good(c)) cand = c;
+			}
+		}
+		// (b) the window's region sooner (the leg's own inputs from its end: replayed to check)
+		if (!cand && r.status === 'found') {
+			const c = new Uint8Array(a + r.tail.length + (tail.length - b));
+			c.set(tail.subarray(0, a), 0); c.set(r.tail, a); c.set(tail.subarray(b), a + r.tail.length);
+			if (c.length < tail.length && good(c)) cand = c;
+		}
+		if (cand) {
+			tail = cand; R = trace(tail);
+			// (the windows before a keep their ticks: go on from a)
+		}
+		b = a;
+	}
+	return { tail, saved: tail0.length - tail.length, windows, ms: Date.now() - t0 };
+}
+
+module.exports = { polishRoute, polishLeg, traceRoute };

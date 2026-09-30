@@ -287,7 +287,9 @@ async function legsOfRoute(e, budget, maxLegs) {
 		const r = await ex.reach([{ masks: startMasks }], wp, { ms: budget, level: 1 });
 		const ms = Date.now() - t0;
 		out.push({ name: e.name, k, tick: o.tick, legTicks, ok: r.ok, ticks: r.ok ? Math.min(...r.arrivals.map((a) => a.masks.length - startMasks.length)) : -1,
-			proven: r.ok && r.legs.some((l) => l.proven), tool: r.tool, why: r.ok ? null : r.fail.why, ms, feat: o.feat, lb: r.lb });
+			proven: r.ok && r.legs.some((l) => l.proven), tool: r.tool, why: r.ok ? null : r.fail.why, ms, feat: o.feat, lb: r.lb,
+			exact: (() => { const x = (r.tiers || []).find((t) => t.tier === 'exact'); return x ? { status: x.status, lb: x.lb, ms: x.ms, maxDepth: x.runs && x.runs.length ? x.runs[x.runs.length - 1].maxDepth : -1 } : null; })(),
+			dist: r.ok ? 0 : r.fail && r.fail.closest ? r.fail.closest.dist : -1 });
 	}
 	await ex.close();
 	return { legs: out };

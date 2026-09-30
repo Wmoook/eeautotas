@@ -17,8 +17,11 @@
 //   1. the primitives (opts.prims: prims.route) when given;
 //   2. EXACT (exact.js solveExact): the breadth-first branch and bound over absolute ticks from every start (exact dedup,
 //      the admissible bound, deaths dropped unless wp.allowDeath, the -1 cut): the first goal = the proven minimum;
-//   3. LEG (legs.js legBFS): the fine-cell search that keeps the fastest state per cell, a widening goal-led beam: not a
-//      proof, a finder (legs whose speed is built far away);
+//   3. LEG (legs.js): the finders, not proofs: legBest (the default) a best-first search (f = tick + 2.5 x the time
+//      estimate: the admissible kinematic bound near the goal, else the goal field's distance at the running pace, or the
+//      primitives' tick field when opts.bounds is given) over fine cells (1 px, 2 px, 1/16, 1/8, the door-reading state:
+//      the first arrival closes a cell); legBFS (EEAT_EXEC_LEG=beam; 'mix': best-first then the beam bounded by it) a
+//      time-layered widening beam that keeps the fastest state per cell, ranked the same way, at most 8 states a tile;
 //   2b. EXACT again with the leg's ticks as the budget (maxDepth = its absolute tick - 1): a shorter leg (proven the
 //      minimum) or a proof that the leg is optimal;
 //   the goal states of the successful tier (up to 4 k) -> T.pickDiverse (the earliest, the fastest, one per class).
@@ -41,7 +44,7 @@ const VERIFY_MARGIN_MS = 60;    // the worker's clock ends this much before the 
 const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worker call is answered 'budget'
 const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
-const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'mix'); return m === 'beam' || m === 'best' ? m : 'mix'; };
+const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'best'); return m === 'beam' || m === 'mix' ? m : 'best'; };
 const BASE_FEATS = ['key0', 'key1', 'key2', 'key3', 'key4', 'key5', 'team', 'coins', 'bcoins', 'crown', 'silver', 'deaths', 'cp', 'fx', 'prot'];
 
 // ================================================================ the core (one thread: a worker, or in-process)
@@ -125,7 +128,7 @@ function makeCore(L, co) {
 		starts.forEach((s, i) => { sim.restore(s.snap); if (!s.dead && X.goalAt(goal, sim, s.tick, beforeTick)) here.push(i); });
 		if (here.length) {
 			const cands = here.map((i) => ({ start: i, tail: new Uint8Array(0), depth: starts[i].tick - t0 }));
-			const r = finishFound(cands, 'here', here.map((i) => ({ start: i, ticks: 0, lb: 0, proven: true, tool: 'here' })), 0);
+			const r = finishFound(cands, 'exact', here.map((i) => ({ start: i, ticks: 0, lb: 0, proven: true, tool: 'exact' })), 0);   // (0 ticks: the exact search's depth 0)
 			if (r) return out(r);
 		}
 		const live = starts.filter((s) => allowDeath || !s.dead);
@@ -212,9 +215,9 @@ function makeCore(L, co) {
 			// (a faster leg of the same kind); LEG_MODE 'beam' / 'best' (env EEAT_EXEC_LEG) for measurements)
 			const region = regionOf(field0, starts, goal);
 			const depthMax = beforeTick >= 0 ? beforeTick - t0 : 4000;
-			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region,
+			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null,
 				width0: 300, widthMax: 80000, depthMax: dmax, stall: 150 + 100 * rung });
-			const runBest = (end) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(",").map(Number) : null });
+			const runBest = (end) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(",").map(Number) : null });
 			const mode = LEG_MODE();
 			const t3 = Date.now();
 			let r = mode === 'beam' ? runBeam(wEnd - 3, depthMax) : runBest(mode === 'best' ? wEnd - 3 : t3 + 0.7 * (wEnd - t3));
@@ -236,6 +239,16 @@ function makeCore(L, co) {
 				if (r.status === 'time' || r.status === 'depth') legTime = true;
 				if (r.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
 			}
+		}
+		// -------- the leg found made shorter: polish.js polishLeg (exact windows from its end back: the waypoint sooner, the
+		// leg's own state region sooner, exact rejoins; every change replayed from the start)
+		if (found && found.tool === 'leg' && Date.now() < wEnd - 20 && process.env.EEAT_LEG_POLISH !== '0') {
+			const t6 = Date.now();
+			const c0 = found.cands.reduce((m, c) => (c.depth < m.depth ? c : m), found.cands[0]);
+			const PO = require('./polish.js');
+			const pl = PO.polishLeg(L, snaps[c0.start], c0.tail, goal, { sim, deadline: t6 + 0.6 * (wEnd - t6), allowDeath, beforeTick, stop: stopFn });
+			tiers.push({ tier: 'leg-polish', ms: Date.now() - t6, saved: pl.saved, windows: pl.windows });
+			if (pl.saved > 0) found.cands.unshift({ start: c0.start, tail: pl.tail, depth: c0.depth - pl.saved });
 		}
 		// -------- tier 2b: the exact search bounded by the leg found (a shorter leg, or a proof that it is optimal)
 		if (found && found.tool === 'leg' && Date.now() < wEnd - 5) {
@@ -315,7 +328,7 @@ function makeCore(L, co) {
 		const add = (t) => { const x = t % W, y = (t / W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; };
 		for (const s of starts) { sim.restore(s.snap); add(T.tileOf(sim, W, H)); }
 		for (const t of goal.tiles) add(t);
-		const M = 24;
+		const M = +process.env.EEAT_REGION_M || 24;   // (tiles around the starts and the goal; env: measurements)
 		x0 = Math.max(0, x0 - M); y0 = Math.max(0, y0 - M); x1 = Math.min(W - 1, x1 + M); y1 = Math.min(H - 1, y1 + M);
 		const reg = new Uint8Array(N);
 		const walk = field && field.walk ? field.walk : null;
