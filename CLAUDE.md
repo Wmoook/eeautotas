@@ -546,6 +546,20 @@ ways in.
   Christmas Eve 4 vs 5, Helix Reborn 3 vs 5; DEEPER 11 vs 8; Into Magma Panic 0, Tower Domination 2, Forgotten Helix 4 the
   same), all within the C5 / c6 runs' own range (SMB3 6-13,
   Evolution 0-9, Christmas Eve 2-5, Helix Reborn 0-5): the late rule may demote cursed anchors the base went on from.
+- **Fields in chains** (C6 push 3 lane 2, STUCK-FIELD; `src/out/n5/lanes/c6_lane2_b1.md`): THE KNOWN-ROUTE TEST of 16
+  STUCK-FIELD levels' stuck waypoints (tools/cmp/krt.js, box 5): 5 of 13 are not on the known route at all (the plan's
+  off-route targets), 4 of the 8 on it are found from the route's previous-trigger state (the compile's anchor there holds
+  another trigger set: ORDER, not a sub-pixel offset), 4 are LONG legs (330-1,801 route ticks: found only from 120 ticks
+  before): the arrivals' sub-pixel / speed state is not the observed break on these levels. `tools/cmp/msprobe.js`
+  (msolve leg() / chain() from a known route's own states): UT Eternal Galaxy's coin (116,107) is a corner landing inside
+  a dot row (vy 0 in the field) then a ledge-edge jump at the last tick of a 0.51-px overlap; the direct leg finds it from
+  <= 40 ticks before, the chain from none (its plain nodes' direct legs are the plain solver's alone). `EEAT_CHAIN_PFIELD=1`
+  (msolve.js chain, OPT-IN, off = byte for byte: a plain node whose plain bound is not certified also gets the field tier
+  and the coupled family on its direct leg): the lab judge's 129 stuck-leg starts (chain arm, 10 s) 30 vs 29 found (+
+  Inferno coin (33,93) x2, - Terminal's green key), the 16 levels at 300 s side by side 1 vs 0 compiled (A Dreary Day: the
+  base run routed it too), progress better 4 / worse 5: no gain shown, stays opt-in. The box's load: the known-route
+  test's rung 2 finds on the unloaded laptop what it misses on box 5 at load ~180 (UT Eternal Galaxy from its previous
+  trigger: 352 ticks vs nothing).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
