@@ -3,7 +3,8 @@
 // per level the time to the first verified route, the best route at 60 / 180 s and at the end, the progress (triggers
 // reached) over time from the progress events, the peak RSS, and ONE class a failing level:
 //   CLAIM-DEATH  its last failure is a claim ('exhausted' / 'proof') or a death step
-//   NEAR         its last failure's closest approach within 3 tiles
+//   NEAR         its last failure's closest approach within 3 tiles (by the report's field and, where the report names the
+//                tile, in a straight line: 'zeroFar' = a field 0 away from its target, no near miss)
 //   ONE-LEG      no trigger reached, the plan one step (the whole route one leg to its target)
 //   RATE         still progressing at the budget's end (the triggers at the end >= those at 180 s + max(2, 20%))
 //   STUCK-FIELD  otherwise, a field block (arrow, dot, boost, climbable, liquid, portal) within 4 tiles of the failing
@@ -53,13 +54,19 @@ for (const l of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n
 	if (r.ok) { r.cls = 'COMPILED'; r.gap = r.best ? Math.round((r.runTicks / r.best) * 1000) / 1000 : null; r.overLb = r.lb ? Math.round((r.runTicks / r.lb) * 100) / 100 : null; }
 	else {
 		const why = String(rep ? rep.why : '');
-		const lf = why.match(/last failures: '([^']*)' rung (\d): ([\w-]+)(?: \(closest ([\d.]+) tiles)?/);
+		const lf = why.match(/last failures: '([^']*)' rung (\d): ([\w-]+)(?: \(closest ([\d.]+) tiles(?: at tile (\d+))?)?/);
 		r.failLabel = lf ? lf[1] : ''; r.failWhy = lf ? lf[3] : (rep ? '' : 'no report'); r.closest = lf && lf[4] ? +lf[4] : null;
+		r.closeTile = lf && lf[5] ? +lf[5] : null;
 		r.why = why.slice(0, 240);
 		// the failing target's tile and its closest approach's tile (the last failing step of that label)
 		const m = r.failLabel.match(/\((\d+),(\d+)\)/);
 		const tiles = [];
 		if (m) tiles.push([+m[1], +m[2]]);
+		// the straight-line distance (tiles) from the closest approach to the failing target: the report's 'closest' is a field
+		// value, and a field that is 0 away from its target (seen: 'closest 0 tiles' 60+ tiles off) is no near miss
+		r.euclid = m && r.closeTile !== null ? Math.round(Math.hypot(r.closeTile % W - +m[1], Math.floor(r.closeTile / W) - +m[2]) * 10) / 10 : null;
+		r.zeroFar = r.closest !== null && r.closest <= 3 && r.euclid !== null && r.euclid > 3;
+		if (r.closeTile !== null) tiles.push([r.closeTile % W, Math.floor(r.closeTile / W)]);
 		const st = ev.steps.filter((s) => s.label === r.failLabel && s.closest && s.closest.tile >= 0).pop();
 		if (st) tiles.push([st.closest.tile % W, Math.floor(st.closest.tile / W)]);
 		let field = false;
@@ -73,7 +80,7 @@ for (const l of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n
 		const claim = /exhausted|proof/.test(r.failWhy) || /^die/.test(r.failLabel);
 		if (!rep) r.cls = 'CRASH';
 		else if (claim) r.cls = 'CLAIM-DEATH';
-		else if (r.closest !== null && r.closest <= 3) r.cls = 'NEAR';
+		else if (r.closest !== null && r.closest <= 3 && !r.zeroFar) r.cls = 'NEAR';
 		else if (r.gEnd === 0 && r.planSteps <= 1) r.cls = 'ONE-LEG';
 		else if (r.gEnd >= r.g180 + Math.max(2, Math.ceil(0.2 * r.g180))) r.cls = 'RATE';
 		else r.cls = field ? 'STUCK-FIELD' : 'STUCK-PLAIN';
