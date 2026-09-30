@@ -7,6 +7,9 @@
 //     B  THE SPEED RECURRENCES one tick at a time: every context (current, delayed and below tile kind, flip 0..4, speed
 //        and jump effects, low gravity, zombie, world gravity, ice timer, protection, dead) x every input (32 masks) x
 //        every reachable speed (the 1-D closure from rest, to --depth) and edge / random doubles, in an open region
+//     B2 the same in contact: on a floor, at a wall (left / right), under a ceiling, in a corner, of every contact kind
+//        (brick, ice, one-ways, half blocks of each rotation, a present, time doors, the secret block 50), touching or
+//        a fraction away, in air / dots / water / arrows / climbables / boosts
 //     C  FREE RUNS: random levels of every block kind kin models (walls, floors, half blocks, one-ways, liquids, ice,
 //        climbables, dots, arrows, boosts, killers, effects, time doors, portals, checkpoints, spawns), random starts,
 //        sticky random inputs, kin running on its OWN state next to the engine for --ticks ticks: every field every tick
@@ -25,7 +28,7 @@ const K = require('../src/plan/kin.js');
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const a = argv.find((x) => x.startsWith('--' + k + '=')); return a ? a.slice(k.length + 3) : d; };
 const QUICK = argv.includes('--quick');
-const ONLY = arg('only', 'A,B,C,D,E,F').split(',');
+const ONLY = arg('only', 'A,B,B2,C,D,E,F').split(',');
 const SEED = +arg('seed', 1);
 const [SHARD, NSHARD] = arg('shard', '0/1').split('/').map(Number);
 const RUNS = +arg('runs', QUICK ? 60 : 400);
@@ -242,34 +245,55 @@ function closure(ctxOf, inputs, depth, cap) {
 	}
 	return [...seen];
 }
-function testB() {
-	section(`B the speed recurrences: one tick, every context x 32 inputs x reachable speeds (depth ${DEPTH})`);
-	const rng = mulberry(SEED * 7919 + 13);
-	// an open level: a 40 x 40 region of one kind in the middle of air (the ball in its middle: no step collides)
-	const kindsCur = [0, 119, 369, 416, 1585, 120, 98, 459, 4, 414, 1, 2, 3, 1518, 411, 412, 413, 1519, 114, 115, 116, 117, 368, 361];
+/** the reachable speed sets of B (Map name -> speeds) */
+function speedSets(rng) {
 	const S = {};
 	// reachable speeds: X in air with gravity down (h in -1, 0, 1), Y in air (no input), X and Y in water / mud / dots
 	const sets = new Map();
 	const addSet = (name, arr) => sets.set(name, arr);
 	const cxAir = (v, h) => { K.surface({ cur: 0, del: 0, below: 0 }, S); return K.stepX(v, h, S); };
 	const cyAir = (v) => { K.surface({ cur: 0, del: 0, below: 0 }, S); return K.stepY(v, 0, S); };
-	addSet('x air', closure(cxAir, [-1, 0, 1], DEPTH, 2e6));
+	addSet('x air', closure(cxAir, [-1, 0, 1], DEPTH, +arg('cap', 2e6)));
 	const yAir = new Set([0]);
 	for (const v0 of [0, K.jumpSpeed(2, 1), K.jumpSpeed(2, 1.3), K.jumpSpeed(2, 0.75), K.jumpSpeed(2, 0.88), K.jumpSpeed(2, 1.3 * 0.88), -16, 16]) {
 		let v = v0; for (let k = 0; k < 400; k++) { yAir.add(v); v = cyAir(v); }
 	}
 	addSet('y air (falls from rest and every jump)', [...yAir]);
 	for (const [nm, id] of [['water', 119], ['mud', 369], ['dot', 4], ['climb', 120], ['lava', 416]]) {
-		addSet(`x ${nm}`, closure((v, h) => { K.surface({ cur: id, del: id, below: id }, S); return K.stepX(v, h, S); }, [-1, 0, 1], Math.min(DEPTH, 9), 3e5));
-		addSet(`y ${nm}`, closure((v, h) => { K.surface({ cur: id, del: id, below: id }, S); return K.stepY(v, h, S); }, [-1, 0, 1], Math.min(DEPTH, 9), 3e5));
+		addSet(`x ${nm}`, closure((v, h) => { K.surface({ cur: id, del: id, below: id }, S); return K.stepX(v, h, S); }, [-1, 0, 1], Math.min(DEPTH, +arg('sdepth', 9)), +arg('scap', 3e5)));
+		addSet(`y ${nm}`, closure((v, h) => { K.surface({ cur: id, del: id, below: id }, S); return K.stepY(v, h, S); }, [-1, 0, 1], Math.min(DEPTH, +arg('sdepth', 9)), +arg('scap', 3e5)));
 	}
 	// ice: x under a held key, released, reversed
-	addSet('x ice', closure((v, h) => { K.surface({ cur: 0, del: 0, below: 1064, slip: 2 }, S); return K.stepX(v, h, S); }, [-1, 0, 1], Math.min(DEPTH, 10), 3e5));
+	addSet('x ice', closure((v, h) => { K.surface({ cur: 0, del: 0, below: 1064, slip: 2 }, S); return K.stepX(v, h, S); }, [-1, 0, 1], Math.min(DEPTH, +arg('sdepth', 9) + 1), +arg('scap', 3e5)));
 	// edge and random doubles
 	const edges = [0, -0, 1e-4, -1e-4, 0.0001000000000000001, 16, -16, 15.999999999999998, 1, -1, 0.9999999999999999, 5e-324, 1e-300, 22.72, -22.72, 0.1, 0.2, 13.55];
 	for (const e of [...edges]) { edges.push(e * (1 + 2 ** -52)); edges.push(e * (1 - 2 ** -53)); }
 	const rnd = []; for (let k = 0; k < (QUICK ? 2000 : 20000); k++) rnd.push((rng() * 2 - 1) * (rng() < 0.2 ? 0.001 : 17));
 	addSet('edges', edges); addSet('random', rnd);
+	return sets;
+}
+const EFFECTS = [
+	{}, { sb: 1 }, { sb: 2 }, { zombie: true }, { lowg: true }, { jb: 1 }, { jb: 2 }, { flip: 1 }, { flip: 2 }, { flip: 3 }, { flip: 4 },
+	{ inv: true }, { slip: 2 }, { slip: 0.2000000000000003 }, { lev: true, thr: 0.2 }, { maxJ: 3, jc: 1 }, { dead: true },
+];
+function applyFx(sim, fx) {
+	if (fx.sb !== undefined) sim.speed_boost = fx.sb;
+	if (fx.jb !== undefined) sim.jump_boost = fx.jb;
+	if (fx.zombie) sim.is_zombie = true;
+	if (fx.lowg) sim.low_gravity = true;
+	if (fx.flip !== undefined) sim.flip_gravity = fx.flip;
+	if (fx.inv) sim.is_invulnerable = true;
+	if (fx.slip !== undefined) sim._slippery = fx.slip;
+	if (fx.lev) { sim.has_levitation = true; sim._current_thrust = fx.thr; }
+	if (fx.maxJ !== undefined) { sim.max_jumps = fx.maxJ; sim.jump_count = fx.jc; }
+	if (fx.dead) { sim.is_dead = true; sim._dead_offset = 3.0; }
+}
+function testB() {
+	section(`B the speed recurrences: one tick, every context x 32 inputs x reachable speeds (depth ${DEPTH})`);
+	const rng = mulberry(SEED * 7919 + 13);
+	// an open level: a 40 x 40 region of one kind in the middle of air (the ball in its middle: no step collides)
+	const kindsCur = [0, 119, 369, 416, 1585, 120, 98, 459, 4, 414, 1, 2, 3, 1518, 411, 412, 413, 1519, 114, 115, 116, 117, 368, 361];
+	const sets = speedSets(rng);
 	let total = 0;
 	for (const [nm, a] of sets) { console.log(`   speed set ${nm}: ${a.length}`); total += a.length; }
 	report.B = { sets: Object.fromEntries([...sets].map(([k, v]) => [k, v.length])) };
@@ -351,6 +375,80 @@ function testB() {
 	check(`${n.toLocaleString()} one-tick checks (${speeds.length.toLocaleString()} speeds, ${nCtx} contexts, 32 masks)`, bad === 0, first ? JSON.stringify(first) : `${Date.now() - t0} ms`);
 }
 
+// ================================================================ B2 one tick in contact: on a floor, at a wall, under a ceiling
+function testB2() {
+	section('B2 the recurrences in contact: every floor / wall / ceiling kind x 32 inputs x reachable speeds');
+	const rng = mulberry(SEED * 6700417 + 5);
+	const sets = speedSets(rng);
+	const speeds = [];
+	for (const [, a] of sets) for (const v of a) speeds.push(v);
+	// the contact kinds: brick, ice, a plain one-way, rotated one-ways, half blocks of each rotation, a present, a time door
+	const contacts = [[9], [1064], [61], [1001, 1], [1001, 3], [1116, 1], [1116, 3], [1116, 0], [1116, 2], [1101, 0], [156], [157], [50]];
+	const curs = [0, 4, 119, 1, 3, 2, 120, 114];
+	const levels = new Map();
+	// the ball in a 3-tile gap: floor row 30 (y 480), a wall column 20 (x 320), a ceiling row 26 (y 416)
+	const levelFor = (cur, c, where) => {
+		const key = cur + '/' + c.join(',') + '/' + where;
+		if (levels.has(key)) return levels.get(key);
+		const W = 40, H = 40, fg = new Int32Array(W * H), args = new Map();
+		for (let x = 0; x < W; x++) { fg[x] = 9; fg[(H - 1) * W + x] = 9; }
+		for (let y = 0; y < H; y++) { fg[y * W] = 9; fg[y * W + W - 1] = 9; }
+		for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) fg[y * W + x] = cur;
+		const put = (x, y) => { fg[y * W + x] = c[0]; if (c.length > 1) args.set(y * W + x, c[1]); };
+		if (where === 'floor') for (let x = 2; x < W - 2; x++) put(x, 30);
+		if (where === 'wallR') for (let y = 2; y < H - 2; y++) put(21, y);
+		if (where === 'wallL') for (let y = 2; y < H - 2; y++) put(18, y);
+		if (where === 'ceil') for (let x = 2; x < W - 2; x++) put(x, 26);
+		if (where === 'corner') { for (let x = 2; x < W - 2; x++) put(x, 30); for (let y = 2; y < H - 2; y++) put(21, y); }
+		const L = mkLevel({ W, H, fg, args, spawns: [[19, 28]] });
+		const o = { L, W: worldFor(L), sim: new E.EESim(L) };
+		o.snap0 = o.sim.snapshot();
+		levels.set(key, o);
+		return o;
+	};
+	const wheres = ['floor', 'wallR', 'wallL', 'ceil', 'corner'];
+	const inp = new E.EEInput();
+	let n = 0, bad = 0, first = null, grounded = 0, collided = 0, jumps = 0;
+	const t0 = Date.now();
+	const small = [0, 0.2532, K.G * K.BASE_DRAG, 1, 3.5, 6.7, 13.5, -0.5, -3, -6.707946336429309];
+	for (let si = SHARD; si < speeds.length; si += NSHARD) {
+		const v = speeds[si];
+		const cur = curs[Math.floor(rng() * curs.length)], c = contacts[Math.floor(rng() * contacts.length)];
+		const where = wheres[Math.floor(rng() * wheres.length)];
+		const lv = levelFor(cur, c, where);
+		const fx = rng() < 0.7 ? {} : EFFECTS[Math.floor(rng() * EFFECTS.length)];
+		// standing / touching exactly, or a fraction away (the landing / the hit comes this tick)
+		const gap = rng() < 0.5 ? 0 : rng() * 3;
+		let px = 19 * 16 + Math.floor(rng() * 8) + (rng() < 0.5 ? 0 : rng()), py = 28 * 16 - (where === 'ceil' ? -0 : 0) + (rng() < 0.5 ? 0 : rng());
+		let vx = v, vy = small[Math.floor(rng() * small.length)];
+		if (where === 'floor' || where === 'corner') { py = 30 * 16 - 16 - gap; vy = rng() < 0.5 ? vy : Math.abs(v); vx = rng() < 0.5 ? v : speeds[Math.floor(rng() * speeds.length)]; }
+		if (where === 'wallR' || where === 'corner') px = 21 * 16 - 16 - gap;
+		if (where === 'wallL') { px = 19 * 16 + gap; vx = -Math.abs(v); }
+		if (where === 'ceil') { py = 27 * 16 + gap; vy = -Math.abs(v); }
+		for (let m = 0; m < 32; m++) {
+			const sim = lv.sim;
+			sim.restore(lv.snap0);
+			sim.px = px; sim.py = py; sim.speed_x = vx; sim.speed_y = vy;
+			sim._q0 = cur; sim._q1 = cur; sim._pastx = 19; sim._pasty = 28; sim._last_portal_set = false;
+			sim.jump_count = rng() < 0.5 ? 0 : 1;
+			applyFx(sim, fx);
+			const st = K.fromSim(sim);
+			E.applyMask(inp, m);
+			sim.tick(inp);
+			K.tick(st, m, lv.W);
+			n++;
+			if (sim._grounded) grounded++;
+			if (sim._loopCollided) collided++;
+			if (sim.speed_y < -5 && vy > -5) jumps++;
+			const d = diffOf(st, sim);
+			if (d) { bad++; if (!first) first = { cur, c, where, fx, px, py, vx, vy, m, d }; if (bad >= 5) break; }
+		}
+		if (bad >= 5) break;
+	}
+	report.B2 = { ticks: n, bad, levels: levels.size, grounded, collided, jumps, ms: Date.now() - t0 };
+	check(`${n.toLocaleString()} contact ticks (${levels.size} floor / wall / ceiling levels, 32 masks; ${collided.toLocaleString()} with a blocked step, ${grounded.toLocaleString()} grounded, ${jumps.toLocaleString()} jumps)`, bad === 0, first ? JSON.stringify(first) : `${Date.now() - t0} ms`);
+}
+
 // ================================================================ C free runs on random levels
 function testC() {
 	section(`C free runs: ${RUNS} random levels x starts, ${TICKS} ticks each, kin on its own state`);
@@ -388,7 +486,7 @@ function testD() {
 	let nodes = 0, bad = 0, first = null;
 	const t0 = Date.now();
 	const inp = new E.EEInput();
-	const nStarts = QUICK ? 4 : 24;
+	const nStarts = +arg('starts', QUICK ? 4 : 24);
 	for (let s = 0; s < nStarts; s++) {
 		const L = randomLevel(rng, { W: 24, H: 18, rects: 14 });
 		const W = worldFor(L);
@@ -423,6 +521,7 @@ module.exports = { mkLevel, randomLevel, worldFor, diffOf, MAP, KEYS, stickyMask
 if (require.main === module) {
 	if (ONLY.includes('A')) testA();
 	if (ONLY.includes('B')) testB();
+	if (ONLY.includes('B2')) testB2();
 	if (ONLY.includes('C')) testC();
 	if (ONLY.includes('D')) testD();
 	if (ONLY.includes('E')) require('./kin_routes.js').testE({ check, section, report, arg, QUICK, SHARD, NSHARD });

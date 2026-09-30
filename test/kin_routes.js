@@ -65,9 +65,9 @@ function checkRoute(L, masks, o = {}) {
 		},
 	});
 	const bad = [];
-	let n = 0;
+	let n = 0, st = K.fromSim(sim);
 	for (let t = 0; t < masks.length; t++) {
-		const st = K.fromSim(sim);
+		if (!o.free) st = K.fromSim(sim);
 		snap = sim.snapshot();
 		const pre = { team: sim._team_tx !== -1, tq: sim._tileQueue.length !== 0, keys: sim._keysMask, sq: sim._stateQueue.length + sim._keysQueue.length };
 		cap = null; undo = new Map(); aborted = false;
@@ -98,6 +98,7 @@ function checkRoute(L, masks, o = {}) {
 			if (ow) cls.push('one-way near');
 			if (door) cls.push('door near');
 			bad.push(Object.assign(d, { t: t + 1, cls: cls.join('+') || 'UNCLASSIFIED' }));
+			if (o.free) st = K.fromSim(sim);
 			if (bad.length >= (o.maxBad || 20)) break;
 		}
 	}
@@ -107,7 +108,8 @@ function checkRoute(L, masks, o = {}) {
 function testE(h) {
 	const { check, section, report, arg, QUICK, SHARD, NSHARD } = h;
 	const root = arg('root', process.env.EEAT_TRUTH_ROOT || '');
-	section(`E the real routes, one step every tick (truth root ${root || '(none)'})`);
+	const FREE = arg('free', '0') === '1';
+	section(`E the real routes, ${FREE ? 'kin FREE-RUNNING on its own state along each whole route' : 'one step every tick'} (truth root ${root || '(none)'})`);
 	if (!root) { check('a truth root (--root= or EEAT_TRUTH_ROOT)', false, 'none given: nothing checked'); return; }
 	const entries = TS.knownRoutes({ root });
 	let routes = 0, ticks = 0, stale = 0, badRoutes = 0, teleports = 0;
@@ -119,7 +121,7 @@ function testE(h) {
 		let tr = null;
 		try { tr = TS.loadTruth(e); } catch (err) { tr = null; }
 		if (!tr) { stale++; continue; }
-		const r = checkRoute(tr.L, tr.masks);
+		const r = checkRoute(tr.L, tr.masks, { free: FREE });
 		routes++; ticks += r.ticks; teleports += r.teleports;
 		if (r.bad.length) {
 			badRoutes++;
@@ -135,7 +137,7 @@ function testE(h) {
 	for (const [c, k] of classes) console.log(`   mismatch class ${c}: ${k}`);
 	for (const x of examples.slice(0, 8)) console.log('   e.g.', JSON.stringify(x));
 	const unclassified = classes.get('UNCLASSIFIED') || 0;
-	check(`${ticks.toLocaleString()} real ticks: every tick kin = the engine`, badRoutes === 0, `${badRoutes} routes with a mismatch, ${unclassified} unclassified`);
+	check(`${ticks.toLocaleString()} real ticks: every tick kin = the engine${FREE ? ' (kin on its own state)' : ''}`, badRoutes === 0, `${badRoutes} routes with a mismatch, ${unclassified} unclassified`);
 }
 
 module.exports = { testE, checkRoute };

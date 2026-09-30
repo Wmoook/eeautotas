@@ -62,6 +62,19 @@ function testF(h) {
 	check('the held run converges to a fixed point (no cycle)', N.runRight.cycle === 1, `v* = ${N.runRight.fix} after ${N.runRight.ticks} ticks`);
 	check('the free fall converges to a fixed point', N.fall.cycle === 1, `v* = ${N.fall.fix} after ${N.fall.ticks} ticks`);
 	check('a released run stops at exactly +0 (the snap)', Object.is(N.releaseFromTop.fix, 0) && N.releaseFromTop.cycle === 1, `after ${N.releaseFromTop.ticks} ticks`);
+	// the doubling lemma: gravity is exactly 2 keys (G = 2 A: 2 / 7.752 = 2 x (1 / 7.752) in doubles) and both use the base
+	// drag only, so the fall from rest is exactly twice the held run from rest, tick by tick (scaling by 2 commutes with
+	// rounding); the up arrow's pull is its negation, and a jump's fall is the same map from J
+	let dbl = 0;
+	{
+		let x = 0, y = 0;
+		for (let t = 0; t < 3000; t++) {
+			if (!Object.is(y, 2 * x)) dbl++;
+			ctx(0, 0, 0); x = K.stepX(x, 1, S);
+			ctx(0, 0, 0); y = K.stepY(y, 0, S);
+		}
+	}
+	check('the fall from rest = 2 x the held run from rest, every tick (3000 ticks)', dbl === 0 && K.G === 2 * K.A, `${dbl} differ`);
 	// F1 free-air separability of kin.tick: in a world of air (a big empty level), the x outputs depend on (x, vx, h) only
 	// and the y outputs on (y, vy, jump) only (the jump never fires in the air with maxJumps 1, and v never acts under a
 	// vertical pull)
@@ -82,6 +95,31 @@ function testF(h) {
 		if (!Object.is(a.px, b.px) || !Object.is(a.vx, b.vx)) { sepBad++; if (sepBad < 3) console.log('   sep', x, vx, hm, a.px, b.px); }
 	}
 	check(`F1 free air: x' and vx' depend on (x, vx, left/right) only (${sepN.toLocaleString()} pairs)`, sepBad === 0);
+	// F0 THE ONE-ADD THEOREM: for p >= 16 and |v| <= 16 the sub-stepped free move is ONE rounded add: moveFree(p, v, boost)
+	// = fl(p + v) (every sub-step is exact: 1 - rem, v - (1 - rem), v + rem, the integer steps; only the last add rounds);
+	// p in [0, 16) (the leftmost / top tile) can differ (counted)
+	let addBad = 0, addN = 0, lowDiff = 0, lowN = 0;
+	const addSpeeds = [0, 16, -16, 1, -1, 0.5, -0.5, 1e-4, -1e-4, 5e-324, -5e-324, 15.999999999999998, -15.999999999999998];
+	for (const v of reach) { addSpeeds.push(v); addSpeeds.push(-v); addSpeeds.push(2 * v); addSpeeds.push(-2 * v); }
+	for (let k = 0; k < 2000; k++) addSpeeds.push((rng() * 2 - 1) * 16);
+	for (let k = 0; k < 500; k++) addSpeeds.push((rng() * 2 - 1) * 2 ** -Math.floor(rng() * 60));
+	const nAdd = QUICK ? 300000 : 3000000;
+	for (let k = 0; k < nAdd; k++) {
+		const e = 4 + Math.floor(rng() * 13);   // p in [16, 131072)
+		const q = 2 ** (e - 52);
+		const r = rng();
+		let p = 2 ** e + (r < 0.25 ? Math.floor(rng() * 2 ** e) : (r < 0.35 ? Math.floor(rng() * 2 ** e) + 0.5 : Math.floor(rng() * 2 ** e / q) * q));
+		if (p >= 2 ** (e + 1)) p = 2 ** e;
+		const v = addSpeeds[Math.floor(rng() * addSpeeds.length)];
+		const boost = rng() < 0.1;
+		addN++;
+		if (!Object.is(K.moveFree(p, v, boost), p + v)) { addBad++; if (addBad < 3) console.log('   add', p, v, boost, K.moveFree(p, v, boost), p + v); }
+		const pl = rng() * 16;
+		lowN++;
+		if (!Object.is(K.moveFree(pl, v, boost), pl + v)) lowDiff++;
+	}
+	check(`F0 the free move is one rounded add: moveFree(p, v) = fl(p + v) for p >= 16, |v| <= 16 (${addN.toLocaleString()} cases, 13 binades)`, addBad === 0, `p in [0, 16): ${lowDiff} of ${lowN} differ`);
+	report.F.oneAdd = { n: addN, bad: addBad, lowN, lowDiff };
 	// F2 the binade lemma of the position update: for an integer n and n' = n + 2^e j within the binade [2^e, 2^(e+1))
 	// whose whole move stays in it, moveFree(n' + f, v) - n' = moveFree(n + f, v) - n (the offsets are equal doubles);
 	// and across binades they can differ (counted)
@@ -133,6 +171,56 @@ function testF(h) {
 		if (w > 16 || w < -16 || (w !== 0 && Math.abs(w) < 1e-4)) limBad++;
 	}
 	check('F4 stepV lands in [-16, 16] and never in (0, 1e-4)', limBad === 0);
+	// F5 MONOTONICITY: in every context the speed update of an axis is nondecreasing in the speed (for each input) and
+	// ordered in the axis's key (-1 <= 0 <= +1 where the key acts): so the speeds reachable in t ticks under ANY inputs lie
+	// between the all-negative and the all-positive orbits (an interval method for sound bounds)
+	const ctxs = [];
+	for (const cur of [0, 119, 369, 416, 1585, 120, 4, 1, 2, 3, 1518, 114, 115, 116, 117]) {
+		for (const fx of [{}, { sb: 1 }, { sb: 2 }, { zombie: true }, { lowGravity: true }, { flip: 1 }, { flip: 2 }, { flip: 3 }, { flip: 4 }, { slip: 2, below: 1064 }, { slip: 0.2000000000000003 }]) {
+			ctxs.push(Object.assign({ cur, del: cur, below: 0 }, fx));
+		}
+	}
+	const vs = [];
+	for (let k = 0; k < (QUICK ? 3000 : 30000); k++) vs.push((rng() * 2 - 1) * (rng() < 0.3 ? 0.01 : (rng() < 0.5 ? 2 : 17)));
+	for (const v of reach) { vs.push(v); vs.push(-v); }
+	vs.push(0, -0, 1e-4, -1e-4, 16, -16, 5e-324, -5e-324);
+	vs.sort((a, b) => a - b);
+	let monoBad = 0, ordBad = 0, monoN = 0, ordExc = 0, iceLow = 0;
+	const iceT = (sm) => (sm / K.MULT) * K.BASE_DRAG / (K.ICE_NO_MOD_DRAG - K.BASE_DRAG);
+	for (const c of ctxs) {
+		for (const axis of ['x', 'y']) {
+			const f = (v, u) => { const S2 = K.surface(c, {}); return axis === 'x' ? K.stepX(v, u, S2) : K.stepY(v, u, S2); };
+			for (const u of [-1, 0, 1]) {
+				let prev = -Infinity;
+				for (const v of vs) { const w = f(v, u); monoN++; if (w < prev) { monoBad++; if (monoBad < 3) console.log('   mono', JSON.stringify(c), axis, u, v, w, prev); } prev = w; }
+			}
+			for (const v of vs) {
+				const a = f(v, -1), b = f(v, 0), d = f(v, 1);
+				if (!(a <= b && b <= d)) {
+					// the exceptions: mud and lava (holding a key along drags x 0.762 / 0.802, releasing x 0.888), and the ice
+					// timer (holding along drags x 0.981, releasing x 0.993) above |v| = A sm B / (Ino - B)
+					const sm = K.speedMult(c.sb | 0, !!c.zombie, false);
+					if (c.cur === 369 || c.cur === 416) { ordExc++; continue; }
+					if ((c.slip || 0) > 0 && !K.isClimb(c.cur) && !K.isLiquid(c.cur)) { ordExc++; if (Math.abs(v) < iceT(sm) * (1 - 1e-9)) iceLow++; continue; }
+					ordBad++; if (ordBad < 3) console.log('   ord', JSON.stringify(c), axis, v, a, b, d);
+				}
+			}
+		}
+	}
+	check(`F5 the speed updates are monotone in v (${monoN.toLocaleString()} steps, ${ctxs.length} contexts x 2 axes x 3 keys)`, monoBad === 0, `${monoBad} decreasing steps`);
+	check('F5 ... and ordered in the key, V(v, -1) <= V(v, 0) <= V(v, +1), except in mud / lava and on ice above |v| = A sm B / (Ino - B) (10.67 at sm 1)', ordBad === 0 && iceLow === 0, `${ordBad} out of order elsewhere, ${ordExc} in the exceptions, ${iceLow} on ice below the threshold`);
+	report.F.mono = { n: monoN, bad: monoBad, ordBad, ordExc, iceLow, iceT1: iceT(1), contexts: ctxs.length };
+	// F6 the auto-align moves a position by less than 0.2 px, and is monotone in p
+	let alMax = 0, alMono = 0;
+	let prevIn = -1, prevOut = -Infinity;
+	for (let k = 0; k < (QUICK ? 200000 : 2000000); k++) {
+		const p = 64 + (k / (QUICK ? 200000 : 2000000)) * 64 + rng() * 1e-6;
+		const a = K.align(p, 0.5, 0, false);
+		alMax = Math.max(alMax, Math.abs(a - p));
+		if (p >= prevIn && a < prevOut) alMono++;
+		prevIn = p; prevOut = a;
+	}
+	check('F6 |align(p) - p| < 0.2 and align is monotone in p', alMax < 0.2 && alMono === 0, `max move ${alMax}, ${alMono} decreasing`);
 }
 
 if (require.main === module) {
