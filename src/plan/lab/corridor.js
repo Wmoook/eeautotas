@@ -220,7 +220,6 @@ function createCorridor(L, opts = {}) {
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
 		const wideLand = Math.max(12, 2 * landMax);   // (the widened fan's landings: at least 12, also with landMax 0)
-		// (the spans a grounded node stands on: legNew's filter)
 		// the event fan's timed stops (ticks): inside a field always (8, 20, 40), on plain physics o.plainStops (none by
 		// default: the held mask to its first event only); a stop is an airborne or mid-run node the next fans turn from
 		const stopsOf = (v, d) => new Set((v === undefined ? d : Array.isArray(v) ? v : String(v).split(',').filter(Boolean)).map(Number));
@@ -246,6 +245,7 @@ function createCorridor(L, opts = {}) {
 		if (R0) { keep.delete(o.resume); keep.set(o.resume, R0); out.resumed = true; out.bestC = R0.bestC; out.bestCg = R0.bestCg; out.bestMasks = R0.bestMasks || null; }
 		const nodes = R0 ? R0.nodes : new Map(), seen = R0 ? R0.seen : new Map();
 		const heap = R0 ? R0.heap : [];
+		// (the spans a grounded node stands on: legNew's filter)
 		const spansHit = R0 && R0.spansHit ? R0.spansHit : new Set();
 		const spanSeen = (spId) => spansHit.has(spId);
 		// (legMode 'lazy': the nodes the fans expanded whose legs have not run, by their cost: the legs go to the most advanced
