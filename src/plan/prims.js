@@ -13,7 +13,8 @@
 //           route found), bound (ticks: only routes faster), beforeTick, allowDeath, guide (false: no reach-field order)}
 //   NavResult {ok, arrivals (T.pickDiverse of the goal nodes, each replayed from the level start by T.playTo), best
 //           {masks, ticks} | null, lb (the bound at the best start), proven, expanded, sims, why ('found' | 'budget' |
-//           'exhausted' | 'stopped'), closest {masks, tile, dist (the bound's ticks there), vx, vy}}
+//           'exhausted' | 'stopped'), closest {masks, tile, dist (the reach field's tiles there; GUIDE_FAR + the bound's
+//           ticks where the field has no way), vx, vy}}
 //
 // THE MACRO FAMILY (<= 160 ticks, each stopping at its first EVENT: a landing, a change of a relevant feature, a
 // teleport (|dpos| > 20 px in a tick), a death (dropped unless allowDeath), the goal test, the macro's end):
@@ -41,6 +42,11 @@ const TELEPORT_PX = 20;
 const DEATH_WAIT = 80;
 const GUIDE_K = 2;          // ticks per reach-field tile in the greedy passes' order
 const GUIDE_FAR = 1e5;
+// the closest approach by an unweighted nearness (the reach field's tiles) instead of the pass's weighted h (1, the
+// default; EEAT_CLOSEST_NEAR=0: the weighted h as before, whose start always won a greedy pass: navgraph.js astar)
+const CLOSEST_NEAR = process.env.EEAT_CLOSEST_NEAR !== '0';
+const GREEDY_W = +process.env.EEAT_PRIMS_GREEDY_W || 0;   // OPT-IN (0 = off): a far leg's first pass's weight (100: the reach field's order almost alone)
+const GREEDY_TILES = +process.env.EEAT_PRIMS_GREEDY_TILES || 24;   // a leg is far from this many reach-field tiles at every start
 
 // ---------------------------------------------------------------- the macros: mask(k, sim) -> mask | -1 (end)
 function mkMacros() {
@@ -328,10 +334,23 @@ async function createPrims(L, o = {}) {
 				guide = (s) => { const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
 			} catch (e) { guide = null; }
 		}
+		// (the closest approach's measure, the same in every pass: the reach field's tiles where it has the state (guide / GUIDE_K),
+		// else the admissible bound's ticks + GUIDE_FAR: a state the field reaches is nearer than one it does not)
+		const nearOf = (x, h0) => { if (guide) { const g = guide(x); if (g < GUIDE_FAR) return g / GUIDE_K; } return GUIDE_FAR + (h0 === Infinity ? GUIDE_FAR : h0); };
 		const fo = { family: ro.family || 'all', step: ro.step !== undefined ? !!ro.step : (ro.family === 'step' || ro.classDedup === false) };
 		// anytime: weighted A* first (a route soon), then w = 1 bounded by the best so far (every prune by the admissible
-		// bound: a node whose tick + h reaches the best cannot beat it)
-		const ws = ro.w > 0 ? [ro.w] : ro.quick ? [3] : (classDedup ? [3, 1.5, 1] : [1]);
+		// bound: a node whose tick + h reaches the best cannot beat it). OPT-IN (EEAT_PRIMS_GREEDY_W=100): a FAR leg (the
+		// reach field GREEDY_TILES or more from every start) takes a GREEDY pass first (w = GREEDY_W: the reach field's
+		// order, a route soon), then w = 3 and 1. (lane 2, box 3, 10 s a leg, prims alone, the first legs of 8 failing
+		// levels, all far: w 3 found 0, w 10 2, w 30 3, w 100 4 (Tutorial 2's checkpoint 234 tiles away, Bygone Tutorial, A
+		// Dreary Day, Golden Nightingale); in the 60-s compile its first legs came but no level compiled, and I Wanna be the
+		// Guy lost its progress (gain 15 -> 1 / 9 / 1, 3 runs; with it off 15 / 15): off by default)
+		let far = false;
+		if (guide && GREEDY_W > 0) {
+			far = sts.length > 0;
+			for (const x of sts) { sim.restore(x.snap); if (guide(sim) / GUIDE_K < GREEDY_TILES) { far = false; break; } }
+		}
+		const ws = ro.w > 0 ? [ro.w] : ro.quick ? [3] : (classDedup ? (far ? [GREEDY_W, 3, 1] : [3, 1.5, 1]) : [1]);
 		const tEnd = Math.min(budget.deadline || Infinity, t0 + (budget.ms > 0 ? budget.ms : 1000));
 		const goalsAll = [];
 		let R = null, incumbent = ro.bound !== undefined ? ro.bound : Infinity, expanded = 0, sims = 0, nodes = 0, closestN = null, lbStart = Infinity, proven = false, whyLast = 'exhausted';
@@ -344,7 +363,7 @@ async function createPrims(L, o = {}) {
 			R = NG.astar({
 				sim, starts: sts, h, isGoal: (s) => goal.test(s), budget: { ms: share, deadline: tEnd, stop: budget.stop, k: budget.k || 1 }, classDedup,
 				allowDeath: !!goal.allowDeath || !!ro.allowDeath, beforeTick: ro.beforeTick !== undefined ? ro.beforeTick : goal.beforeTick,
-				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent, greedy: w > 1,
+				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent, greedy: w > 1, near: CLOSEST_NEAR ? (x) => nearOf(x, h(x)) : null,
 				expand: (n, s, best, cls) => {
 					ctx.onChild = (x, c) => {
 						st.macroUse[c.fam] = (st.macroUse[c.fam] || 0) + 1;
@@ -354,6 +373,7 @@ async function createPrims(L, o = {}) {
 						c.key = classDedup && !c.goal ? (support(x) || airKey(x)) : null;
 						if (cls && c.key !== null) { const ck = cls.get(c.key); if (ck !== undefined && ck <= tick) return false; }
 						c.h0 = c.goal ? 0 : h(x);
+						if (CLOSEST_NEAR) c.near = c.goal ? 0 : nearOf(x, c.h0);
 						c.h = c.goal ? 0 : (w > 1 && guide ? Math.max(c.h0, guide(x)) : c.h0) * w;
 						return true;
 					};
@@ -364,7 +384,7 @@ async function createPrims(L, o = {}) {
 			});
 			expanded += R.expanded; sims += R.sims; nodes += R.nodes;
 			if (R.lbStart < lbStart) lbStart = R.lbStart;
-			if (R.closest && (!closestN || R.closest.h < closestN.h)) closestN = R.closest;
+			if (R.closest && (!closestN || R.closest.near < closestN.near)) closestN = R.closest;
 			for (const g of R.goals) { goalsAll.push(g); if (g.tick < incumbent) incumbent = g.tick; }
 			whyLast = R.why;
 			if (w === 1 && R.proven) proven = true;
@@ -385,7 +405,7 @@ async function createPrims(L, o = {}) {
 		let closest = null;
 		if (R.closest) {
 			const cm = NG.masksOf(R.closest);
-			closest = { masks: cm, tile: R.closest.tile, dist: R.closest.h, vx: R.closest.vx, vy: R.closest.vy, tick: R.closest.tick };
+			closest = { masks: cm, tile: R.closest.tile, dist: R.closest.near, vx: R.closest.vx, vy: R.closest.vy, tick: R.closest.tick };
 		}
 		const ms = Date.now() - t0;
 		st.ms += ms;

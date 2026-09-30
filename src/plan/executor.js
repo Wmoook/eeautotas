@@ -194,8 +194,11 @@ function makeCore(L, co) {
 					if (r) return out(r);
 				}
 				if (nr && nr.closest && nr.closest.masks) {
+					// (measured again in the finders' unit, field0's tiles: the primitives' own number is another field's (or
+					// the bound's ticks), and the smaller number of two units made the closest the start in every compile)
 					const m = nr.closest.masks instanceof Uint8Array ? nr.closest.masks : T.masksOf(nr.closest.masks);
-					if (closest.dist < 0 || (nr.closest.dist >= 0 && nr.closest.dist < closest.dist)) closest = { dist: nr.closest.dist >= 0 ? nr.closest.dist : 1e9, masks: m };
+					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
+					if (d >= 0 && (closest.dist < 0 || d < closest.dist)) closest = { dist: d, masks: m };
 				}
 			} catch (e) { tiers.push({ tier: 'prims', error: String(e && e.message || e) }); }
 		}
@@ -454,6 +457,17 @@ function makeCore(L, co) {
 		if (dt > 2) { fieldMs.n++; fieldMs.perTile = Math.max(fieldMs.perTile, dt / N); }
 		plainBuilt.add(key);
 		return f;
+	}
+	/** a field's tiles at the end of masks that extend one of the starts (the longest start prefix; -1: no start, or the
+	 *  field has no way there) */
+	function fieldDistOf(masks, starts, field) {
+		let s = null;
+		for (const x of starts) if (masks.length >= x.tick && (!s || x.tick > s.tick) && T.strOf(masks.subarray(0, x.tick)) === x.str) s = x;
+		if (!s) return -1;
+		sim.restore(s.snap);
+		for (let t = s.tick; t < masks.length; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); }
+		const c = RF.costAt(field, sim);
+		return c < 0 ? -1 : c;
 	}
 	/** the closest state's report: replay its masks (the touched triggers since the leg's start), its tile, speed,
 	 *  distance, and the gates blocking it */
