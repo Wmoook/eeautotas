@@ -244,6 +244,22 @@ const PORTAL_IDS = new Set([242, 381, 374]);
 // skeleton's sub-legs (a sub-level set of the waypoint's field: the search tiers), on death steps or allowDeath legs.
 // (lane 2's opt-in move-solver tier, EEAT_MSOLVE=1, takes its place: one math tier at a time)
 const MATH_ON = () => process.env.EEAT_MATH !== '0' && process.env.EEAT_MSOLVE !== '1';
+// THE CORRIDOR TIER (n5 chains lab, approach C; OPT-IN EEAT_CORRIDOR=1, off = the executor as before byte for byte:
+// src/plan/lab/corridor.js is not even loaded): a FAR waypoint (every live start more than CORR_MIN tiles out by the goal
+// field, where tier M2's chain does not run) gets a best-first search over the level's footholds (the goal field's
+// sub-level sets of support spans), each expansion the move solver's short legs aimed at the next spans plus its cheap
+// fans, K arrival states a foothold (the speed carries); CORR_SHARE of the window (at most CORR_MS), RESUMED by a later
+// call from the same start state to the same tiles (the rungs add up); its chain is masks the engine replayed, checked
+// here by the executor's goal test like every math leg (mathCands / finishMath)
+const CORR_ON = () => process.env.EEAT_CORRIDOR === '1';
+const CORR_MIN = +process.env.EEAT_CORR_MIN >= 0 && process.env.EEAT_CORR_MIN !== undefined && process.env.EEAT_CORR_MIN !== '' ? +process.env.EEAT_CORR_MIN : 30;
+const CORR_SHARE = +process.env.EEAT_CORR_SHARE > 0 ? +process.env.EEAT_CORR_SHARE : 0.4;
+const CORR_MS = +process.env.EEAT_CORR_MS > 0 ? +process.env.EEAT_CORR_MS : 6000;
+const CORR_TMAX = +process.env.EEAT_CORR_TMAX > 0 ? +process.env.EEAT_CORR_TMAX : 3000;
+// EEAT_CORR_REPLACE=1 (with EEAT_CORR_MIN=0): the corridor also takes tier M2's near chains (msolve.chain off)
+const CORR_REPLACE = process.env.EEAT_CORR_REPLACE === '1';
+const CORR_CLOSEST = process.env.EEAT_CORR_CLOSEST !== '0';
+const CORR_OPTS = (() => { try { return process.env.EEAT_CORR_OPTS ? JSON.parse(process.env.EEAT_CORR_OPTS) : {}; } catch (e) { return {}; } })();
 // NO RESTART PER RUNG (n5 lane 2): tier M2's chain search is RESUMED by a later call from the same start state to the same
 // target tiles and horizon (msolve.js chain o.resume: its open list, seen states and best chain kept per worker, the newest
 // 6): a stuck waypoint is retried from the same anchor's arrival at every rung and relay, and each 800-ms call re-expanded
@@ -415,6 +431,9 @@ function makeCore(L, co) {
 	let MS_ = null, MLB_ = null;
 	const mathSolver = () => MS_ || (MS_ = require('./msolve.js').createSolver(L, { prove: true }));
 	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
+	let CR_ = null;
+	const corridor = () => CR_ || (CR_ = require('./lab/corridor.js').createCorridor(L, { solver: mathSolver() }));
+	const cY = { tries: 0, ok: 0 };   // (the corridor tier's yield on this level)
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
 	let noFieldLegs = 0, noFieldMemo = 0, noFieldBuilt = 0;   // (FIELD_MEMO diagnostics: calls without a field, memo hits, sub-leg builds past the window)
@@ -865,7 +884,7 @@ function makeCore(L, co) {
 		// plain bound; ordered by the goal field this call built anyway (its -1 a proof in physics mode): from the start the
 		// goal field puts nearest
 		const nearMin = Math.min(...startCost.map((c, i) => (c >= 0 && !starts[i].dead ? c : Infinity)));
-		if (mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && Date.now() < wEnd - 50) {
+		if (mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && !(CORR_ON() && CORR_REPLACE) && Date.now() < wEnd - 50) {
 			const tC = Date.now(), cEnd = tC + Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC));
 			let bi = -1;
 			starts.forEach((s, i) => {
@@ -897,6 +916,45 @@ function makeCore(L, co) {
 			}
 			if (rc) { mY.cTry++; if (cands.length) mY.cOk++; }
 			tiers.push({ tier: 'math-chain', ms: Date.now() - tC, ok: cands.length > 0, T: rc && rc.ok ? rc.T : null, closed: !!(rc && rc.closed), expanded: rc ? rc.expanded : 0, nodes: rc ? rc.nodes : 0, error: rc && rc.error ? rc.error : undefined });
+			if (cands.length) { const r = finishMath(cands); if (r) return out(r); }
+		}
+		// -------- tier MC: THE CORRIDOR (opt-in, EEAT_CORRIDOR=1): a far waypoint's leg as a chain of short solver legs
+		// between footholds, resumed across calls from the same start state
+		if (CORR_ON() && mathOn && !walled && nearMin > CORR_MIN && Date.now() < wEnd - 100) {
+			// (a near start in place of tier M2 (EEAT_CORR_REPLACE): M2's own share and cap, like for like)
+			const nearC = CORR_REPLACE && nearMin <= MATH_CHAIN_TILES;
+			const tC = Date.now(), cEnd = tC + (nearC ? Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC)) : Math.min(CORR_MS, mathShare(CORR_SHARE, cY.tries, cY.ok, 6) * (wEnd - tC)));
+			let bi = -1;
+			starts.forEach((s, i) => {
+				if (s.dead) return;
+				const c = startCost[i];
+				if (bi < 0 || (c >= 0 && (startCost[bi] < 0 || c < startCost[bi] || (c === startCost[bi] && s.tick < starts[bi].tick)))) bi = i;
+			});
+			const cands = [];
+			let rc = null, corrCl = false;
+			if (bi >= 0) {
+				const s = starts[bi];
+				const Tmax = Math.min(CORR_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
+				if (Tmax >= 2) {
+					const MSv = mathSolver();
+					MSv.sim.restore(s.snap);
+					let th = 0x811c9dc5;
+					for (const t of mTarget.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
+					const resume = `${MSv.sim.stateHash()}|${Tmax}|${mTarget.tiles.length}|${th >>> 0}`;
+					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
+					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
+					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:corridor');
+					// (no chain: the corridor's most advanced state is the call's closest when it is nearer by the call's own goal
+					// field: the strategy relays the next rung from it, so the corridor's progress carries; EEAT_CORR_CLOSEST=0 off)
+					else if (rc && rc.bestMasks && rc.bestMasks.length && CORR_CLOSEST) {
+						const full = T.concat(s.masks, rc.bestMasks);
+						const d = field0 ? fieldDistOf(full, starts, field0) : rc.bestC;
+						if (d >= 0 && (closest.dist < 0 || d < closest.dist)) { closest = { dist: d, masks: full }; corrCl = true; }
+					}
+				}
+			}
+			if (rc) { if (nearC) { mY.cTry++; if (cands.length) mY.cOk++; } else { cY.tries++; if (cands.length) cY.ok++; } }
+			tiers.push({ tier: 'corridor', ms: Date.now() - tC, ok: cands.length > 0, T: rc && rc.ok ? rc.T : null, expanded: rc ? rc.expanded : 0, nodes: rc ? rc.nodes : 0, resumed: !!(rc && rc.resumed), closest: corrCl, c0: rc ? rc.c0 : null, bestC: rc ? rc.bestC : null, error: rc && rc.error ? rc.error : undefined });
 			if (cands.length) { const r = finishMath(cands); if (r) return out(r); }
 		}
 		// -------- tier 1: the primitives
@@ -2410,6 +2468,7 @@ async function createExecutor(L, opts) {
 				if (!t) continue;
 				if (t.tier === 'math') { S.math.direct++; S.math.directMs += t.ms || 0; if (t.ok) S.math.directOk++; }
 				else if (t.tier === 'math-chain') { S.math.chain++; S.math.chainMs += t.ms || 0; if (t.ok) S.math.chainOk++; }
+				else if (t.tier === 'corridor') { S.math.corr = (S.math.corr || 0) + 1; S.math.corrMs = (S.math.corrMs || 0) + (t.ms || 0); if (t.ok) S.math.corrOk = (S.math.corrOk || 0) + 1; S.math.corrExp = (S.math.corrExp || 0) + (t.expanded || 0); if (t.resumed) S.math.corrResumed = (S.math.corrResumed || 0) + 1; if (t.closest) S.math.corrClosest = (S.math.corrClosest || 0) + 1; if (t.error) S.math.corrErr = t.error; }
 			}
 		}
 		const legsIn = Array.isArray(res.legs) ? res.legs : [];
