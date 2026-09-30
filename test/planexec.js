@@ -435,7 +435,11 @@ async function chainOfRoute(e, budget, polishMs) {
 		const legStart = prevTick;
 		prevTick = o.tick;
 		const b = Math.max(budget, Math.min(15000, Math.round(budget * legTicks / 150)));
-		const r = await ex.reach(starts, wp, { ms: b, level: 1 });
+		// (the next waypoint: the executor ranks this leg's arrivals by the next leg's cost from them, EEAT_NEXT=0 off)
+		const on = ord[k + 1];
+		const next = !on ? null : on.feat === 'silver' ? { kind: 'trophy', label: 'trophy' } : on.feat === 'region' ? { kind: 'region', tiles: on.tiles, expect: null, label: `region @${on.tick}` }
+			: { kind: 'trigger', tiles: triggerTiles(L, on.tile, on.feat), expect: { feat: on.feat, value: on.value }, label: `${on.feat}=${on.value}` };
+		const r = await ex.reach(starts, wp, { ms: b, level: 1, next });
 		if (!r.ok) {
 			failAt = k; why = r.fail ? r.fail.why : '?';
 			// (--chainRetry: the failed leg once more from the ROUTE's own state at the leg's start, the same budget: ok there

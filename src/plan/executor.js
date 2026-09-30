@@ -203,6 +203,18 @@ const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound 
 // unchanged), each an arrival candidate here (EEAT_MATH_ALTS=0: the cheapest leg and its hop alone, as before)
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
+// THE NEXT WAYPOINT (iterate 2 lane 'chains'): a chain's leg failed from the arrivals the leg before kept, not for the leg
+// itself (test/planexec.js T-EXEC-CHAIN --chainStep=60 --chainRetry, box 3, 40 known routes: 26 of 29 first failures
+// solve from the ROUTE's own state at the leg's start with the same budget, 17 of them by the math tier; the chain's
+// arrival: the goal's first entry at its edge with the speed the cheapest leg left). budget.next (the plan's next
+// waypoint) ranks the goal states by the arrival's tick + the NEXT leg's cost from it: the move solver's direct leg to the
+// next waypoint (NEXT_TRY arrivals, NEXT_MS each, where it solves), else the endgame's sound bound; the best one is kept
+// FIRST (one arrival more than k at most), and the math tier's own leg asks for NEXT_ALTS end states within NEXT_SLACK
+// ticks. Ordering only: every arrival is still a verified first entry of this waypoint. EEAT_NEXT=0: off (as before).
+const NEXT_ON = () => process.env.EEAT_NEXT !== '0';
+const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.EEAT_NEXT_TRY : 6, NEXT_MS = +process.env.EEAT_NEXT_MS > 0 ? +process.env.EEAT_NEXT_MS : 25;
+const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 12;
+const NEXT_SLACK = +process.env.EEAT_NEXT_SLACK >= 0 && process.env.EEAT_NEXT_SLACK !== undefined ? +process.env.EEAT_NEXT_SLACK : 6;
 const PATTERNS_MAX = 400;
 /** a leg's inputs as runs: 'mask x count' joined by spaces (the pattern's code) */
 function runsOf(tail) {
@@ -381,6 +393,9 @@ function makeCore(L, co) {
 		st.calls++;
 		let sims = 0;
 		const tiers = [];
+		// (the plan's next waypoint: the arrivals ranked by the next leg's cost from them, NEXT_ON above)
+		let nextGoal = null;
+		if (NEXT_ON() && budget.next && !allowDeath) { try { nextGoal = T.goalOf(L, budget.next); if (!nextGoal || !nextGoal.tiles || !nextGoal.tiles.length || nextGoal.fieldTiles) nextGoal = null; } catch (e) { nextGoal = null; } }
 		const out = (r) => {
 			r.ms = Date.now() - tIn; r.sims = sims; r.tiers = tiers;
 			st.ms += r.ms; st.sims += sims;
@@ -432,7 +447,7 @@ function makeCore(L, co) {
 				try {
 					r = MS.leg(s.snap, mTarget, { Tmax, chain: false, prove: true, proveMs: Math.max(2, Math.min(50, left / 4)), fieldMs: Math.max(5, Math.min(120, left / 2)),
 						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000,
-						alts: MATH_ALTS > 0 ? MATH_ALTS : 0, altSlack: MATH_ALT_SLACK, deadline: dlS });
+						alts: nextGoal ? Math.max(MATH_ALTS, NEXT_ALTS) : MATH_ALTS > 0 ? MATH_ALTS : 0, altSlack: nextGoal ? Math.max(MATH_ALT_SLACK, NEXT_SLACK) : MATH_ALT_SLACK, deadline: dlS });
 				} catch (e) { why = `error: ${e && e.message || e}`; continue; }
 				tries++;
 				prof.legs.push({ us: Math.round(r.us || 0), ok: !!r.ok, tool: r.tool || null, T: r.T || 0, pUs: Math.round(r.proveUs || 0), it: r.items || 0, v: r.verifies || 0, tk: r.ticks || 0, why: r.ok ? undefined : r.why, sp: r.split, su: r.plainSetup });
@@ -983,6 +998,37 @@ function makeCore(L, co) {
 			}
 			return r;
 		}
+		/** the goal state (of arr: T.arrivalOf's) the NEXT waypoint's leg costs least from: the earliest NEXT_EVAL and the
+		 *  picked ones ranked by tick + the endgame's sound bound to the next goal; the first NEXT_TRY of them get the move
+		 *  solver's direct leg (NEXT_MS each, within the deadline); the least tick + T among those it solves, else the least
+		 *  tick + bound. Ordering only (no claim). null: nothing to rank */
+		function nextBest(arr, picked) {
+			const tN = Date.now();
+			const EGm = require('../endgame.js');
+			let Bn = null;
+			try { Bn = X.boundFor(L, nextGoal); } catch (e) { Bn = null; }
+			const byT = arr.slice().sort((a, b) => a.tick - b.tick).slice(0, NEXT_EVAL);
+			for (const a of picked) if (!byT.includes(a)) byT.push(a);
+			for (const a of byT) {
+				let h = 0;
+				if (Bn) { try { sim.restore(a.snap); h = EGm.lowerBound(Bn, sim, 240); } catch (e) { h = 0; } }
+				a._nh = h;
+			}
+			byT.sort((a, b) => (a.tick + a._nh) - (b.tick + b._nh) || a.tick - b.tick);
+			let best = null, bestS = Infinity;
+			const MS = mathSolver(), nT = { tiles: Array.from(nextGoal.tiles), cls: 'any' };
+			for (let i = 0; i < byT.length && i < NEXT_TRY; i++) {
+				const now = Date.now();
+				if (now > deadline - 60) break;
+				const a = byT[i];
+				let r = null;
+				try { r = MS.leg(a.snap, nT, { Tmax: MATH_TMAX, chain: false, prove: false, fieldMs: Math.min(NEXT_MS, 20), coupled: false, nodes: 60000, deadline: Math.min(deadline - 50, now + NEXT_MS) }); } catch (e) { r = null; }
+				sims += r && r.ticks || 0;
+				if (r && r.ok && a.tick + r.T < bestS) { bestS = a.tick + r.T; best = a; }
+			}
+			tiers.push({ tier: 'next', ms: Date.now() - tN, n: byT.length, ok: !!best, T: best ? bestS - best.tick : null });
+			return best || byT[0] || null;
+		}
 		/** a result from goal candidates {start, tail, depth}: arrivals built, verified from the level start, picked */
 		function finishFound(cands, tool, legsIn, lbA, proven, minDepth) {
 			const arr = [];
@@ -1008,6 +1054,16 @@ function makeCore(L, co) {
 				let best = null;
 				for (const a of arr) if (calm(a) && (!best || a.tick < best.tick || (a.tick === best.tick && Math.abs(a.vx) > Math.abs(best.vx)))) best = a;
 				if (best) { if (picked.length >= k) picked[picked.length - 1] = best; else picked.push(best); }
+			}
+			// (the plan's next waypoint: the goal state the next leg costs least from, FIRST)
+			if (nextGoal && arr.length > 1 && Date.now() < deadline - 60) {
+				const nb = nextBest(arr, picked);
+				if (nb) {
+					const i = picked.indexOf(nb);
+					if (i > 0) picked.splice(i, 1);
+					if (i !== 0) picked.unshift(nb);
+					if (picked.length > k + 1) picked.pop();
+				}
 			}
 			const good = [];
 			for (const a of picked) {
@@ -1578,7 +1634,7 @@ async function createExecutor(L, opts) {
 		// (the exact tier's exhaustion: no time in it), is the answer; else the skeleton with the rest)
 		if (SKEL_DIRECT > 0 && !skelMemo.has(skelKey(goal, wp, startStrs, wN))) {
 			const dMs = SKEL_DIRECT * (deadline - Date.now());
-			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop });
+			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
 			if (rD) return rD;
@@ -1678,7 +1734,7 @@ async function createExecutor(L, opts) {
 			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget', closest: cl }) };
 		}
 		// (the last leg to the waypoint itself, from the deepest arrivals reached)
-		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline, stop: budget.stop });
+		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline, stop: budget.stop, next: budget.next || null });
 		// (a failure after sub-legs is no proof: the time was split)
 		if (cur === startStrs) { if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }); return r; }
 		// (the arrivals' legs are the whole way from the step's own starts: the start that prefixes each)
@@ -1750,13 +1806,13 @@ async function createExecutor(L, opts) {
 	async function dispatchLeg(startStrs, w, budget, ms, k, deadline) {
 		let res;
 		if (nW === 0) {
-			try { res = await core.reach(startStrs, w, { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, stop: budget.stop }); }
+			try { res = await core.reach(startStrs, w, { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, stop: budget.stop, next: budget.next || null }); }
 			catch (e) { res = { ok: false, arrivals: [], tool: null, legs: [], lb: 0, fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: `error: ${e && e.message || e}` } }; }
 		} else {
 			const sab = new SharedArrayBuffer(4), flag = new Int32Array(sab);
 			let poll = null;
 			if (typeof budget.stop === 'function') poll = setInterval(() => { try { if (budget.stop()) Atomics.store(flag, 0, 1); } catch (e) { /* ignore */ } }, 20);
-			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
+			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, fast: !!budget.fast, k, deadline, next: budget.next || null }, tDisp: PROF ? Date.now() : 0 }, deadline, sab);
 			// (while the worker searches: the starts replayed from the level start in this thread too, for finalize's checks)
 			for (const s of startStrs) { try { core.startOf(String(s)); } catch (e) { /* finalize replays it again */ } }
 			const msg = await pending;
