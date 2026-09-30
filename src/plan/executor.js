@@ -277,8 +277,9 @@ const CORR_REPLACE = process.env.EEAT_CORR_REPLACE === '1';
 const CORR_CLOSEST = process.env.EEAT_CORR_CLOSEST !== '0';
 const CORR_OPTS = (() => { try { return process.env.EEAT_CORR_OPTS ? JSON.parse(process.env.EEAT_CORR_OPTS) : {}; } catch (e) { return {}; } })();
 // EEAT_CORR_FIELDS=1 (n5-s99-fields; off = the corridor tier as before): the corridor's fields pass (lab/corridor.js o.goalFan,
-// o.directShare, o.fieldKey, o.restKey): the 681 field chains of the moves study 61.1% -> 81.8%+ (tools/lab/corridor_chain.js)
-const CORR_FIELDS = process.env.EEAT_CORR_FIELDS === '1' ? { goalFan: true, directShare: 0.15, fieldKey: 'sub', restKey: true } : null;
+// o.directShare, o.restKey, o.refine: the finer field cells only where a search ran out): the 681 field chains of the moves
+// study 59.8-61.1% -> 80.3%+ side by side (tools/lab/corridor_chain.js)
+const CORR_FIELDS = process.env.EEAT_CORR_FIELDS === '1' ? { goalFan: true, directShare: 0.15, restKey: true, refine: true } : null;
 // NO RESTART PER RUNG (n5 lane 2): tier M2's chain search is RESUMED by a later call from the same start state to the same
 // target tiles and horizon (msolve.js chain o.resume: its open list, seen states and best chain kept per worker, the newest
 // 6): a stuck waypoint is retried from the same anchor's arrival at every rung and relay, and each 800-ms call re-expanded

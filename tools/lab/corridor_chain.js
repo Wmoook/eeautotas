@@ -44,6 +44,8 @@ if (argv.fan === '0') copt.fan = false;
 if (argv.exec === '1') Object.assign(copt, { plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false });
 if (argv.goalFan === '1') copt.goalFan = true;
 if (argv.restKey === '1') copt.restKey = true;
+if (argv.refine === '1') copt.refine = true;
+if (argv.bfs === '1') copt.bfs = true;
 for (const k of ['directShare', 'fieldPx', 'fieldV', 'Kf']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.fieldKey) copt.fieldKey = argv.fieldKey;
 const FIELD_LABELS = new Set(['arrow', 'dot', 'boost', 'climb', 'swim']);

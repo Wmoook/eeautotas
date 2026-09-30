@@ -58,6 +58,9 @@ const ARROWS = new Set([1, 2, 3, 1518, 411, 412, 413, 1519]);
 const KAPPA = 16 / 6.776552880470027;       // ticks a tile at the held run's top speed
 const VRUN = 6.776552880470027;
 const KEEP = 4;                             // resumed searches kept (the newest)
+const BFS_MASKS = [];                         // (o.bfs: the 18 masks a tick)
+for (const p0 of [0, 1]) for (const m of MS.DIR9) BFS_MASKS.push(m | p0);
+const REFINE = [{ fieldKey: 'sub', fieldPx: 8, fieldV: 2 }, { fieldKey: 'sub', fieldPx: 4, fieldV: 1 }];   // (o.refine's ladder)
 
 function createCorridor(L, opts = {}) {
 	const S = opts.solver || MS.createSolver(L, {});
@@ -385,6 +388,49 @@ function createCorridor(L, opts = {}) {
 			if (trace) trace({ ev: 'best', T: T1 });
 			if (w !== w2) { w = w2; for (const x of heap) x.f = fOf(x); for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i); }
 		};
+		// THE EXACT SHORT SEARCH (o.bfs): every input sequence (the 18 masks a tick) from a node, states merged by stateHash,
+		// o.bfsCap states a layer, to o.bfsD ticks, the target tested every tick: the moves the held-mask fans and the direct
+		// legs do not make (The Memory Game's 20-tick boost chain exhausted the corridor at 227 expansions; this search finds
+		// it at depth 20 in 0.75 s); run on a new nearest state within dNear (the hot list, o.bfsMs of clock) and on the
+		// most advanced states of an exhausted search. Exact: the engine's own ticks, the first hit the fewest ticks from
+		// that node within the cap
+		const gB = o.bfs ? (gtest || S.goal(tgt)) : null;
+		const bfsFrom = (nn, depth, cap, until) => {
+			out.bfsRuns = (out.bfsRuns || 0) + 1;
+			const tp = Date.now();
+			let layer = [{ snap: nn.snap, m: -1, par: null }];
+			const seenB = new Set();
+			let found = null;
+			for (let d = 1; d <= depth && layer.length && !found; d++) {
+				if (best && nn.g + d >= best.T) break;
+				const nx = [];
+				for (const e of layer) {
+					if (Date.now() > until) { nx.length = 0; break; }
+					for (const m of BFS_MASKS) {
+						sim.restore(e.snap);
+						const px = sim.px, py = sim.py;
+						E.applyMask(inp, m); sim.tick(inp);
+						if (sim.is_dead) continue;
+						if (gB(sim, px, py)) { found = { m, par: e }; break; }
+						const h = sim.stateHash();
+						if (seenB.has(h)) continue;
+						seenB.add(h);
+						if (nx.length < cap) nx.push({ snap: sim.snapshot(), m, par: e });
+					}
+					e.snap = null;
+					if (found) break;
+				}
+				layer = nx;
+			}
+			prof.bfs = (prof.bfs || 0) + Date.now() - tp;
+			if (!found) return false;
+			const ms = [];
+			for (let e = found; e && e.m >= 0; e = e.par) ms.push(e.m);
+			ms.reverse();
+			out.bfsOk = (out.bfsOk || 0) + 1;
+			setBest(nn.g + ms.length, cat(nn.masks, Uint8Array.from(ms)));
+			return true;
+		};
 		if (!R0) { sim.restore(snap0); admit(new Uint8Array(0), 0, 'start'); }
 		let lastC = out.bestC, stall = 0;
 		/** the direct leg from node nn to the target (o.first: true when it ended the search) */
@@ -402,7 +448,8 @@ function createCorridor(L, opts = {}) {
 			return true;
 		};
 		// THE DEFERRED DIRECT LEGS (o.directShare): a node whose direct leg the share put off waits here by its cost (the
-		// nearest first); the share's room goes to them before any new node's; a node within o.directNear (2) tiles never waits
+		// nearest first); the share's room goes to them before any new node's (only a NEW nearest state within o.directNear
+		// tiles skips the share, the hot list: every node near the target skipping it starved the fans there again)
 		const dq = [];
 		const dlt = (a, b) => a.c < b.c || (a.c === b.c && a.g < b.g);
 		const dqPush = (x) => { dq.push(x); let i = dq.length - 1; while (i > 0) { const q = (i - 1) >> 1; if (!dlt(dq[i], dq[q])) break; [dq[q], dq[i]] = [dq[i], dq[q]]; i = q; } };
@@ -416,6 +463,7 @@ function createCorridor(L, opts = {}) {
 					sim.restore(m.snap);
 					out.hotRuns = (out.hotRuns || 0) + 1;
 					if (directLeg(m, !!S.plainStart(sim)) && o.first) break;
+					if (o.bfs && !best && bfsFrom(m, o.bfsD || 24, o.bfsCap || 2000, Math.min(deadline, Date.now() + (o.bfsMs || 400))) && o.first) break;
 				}
 				continue;
 			}
@@ -443,7 +491,7 @@ function createCorridor(L, opts = {}) {
 			// (o.directOnce: one direct leg a node key (the tile cell), from its first expanded state)
 			if (pass === 'all' && n.c <= D && !(directOnce && dTried.has(n.key))) {
 				if (directOnce) dTried.add(n.key);
-				if (directShare && n.c > dNear && !dRoom()) dqPush(n);
+				if (directShare && !dRoom()) dqPush(n);
 				else if (directLeg(n, plainNode)) { if (o.first) break; continue; }
 			}
 			sim.restore(n.snap);
@@ -555,6 +603,37 @@ function createCorridor(L, opts = {}) {
 				keep.set(o.resume, { nodes, seen, heap, lazy, spansHit, best, w, bestC: out.bestC, bestCg: out.bestCg, bestMasks: out.bestMasks || null });
 				while (keep.size > KEEP) keep.delete(keep.keys().next().value);
 			} else keep.delete(o.resume);
+		}
+		// (o.bfs: an exhausted search's most advanced states, the least cost first, get the exact short search with the
+		// time left, before the refinement ladder)
+		if (!best && o.bfs && out.why === 'exhausted' && Date.now() < deadline - 20) {
+			const all = [];
+			for (const a of nodes.values()) for (const q of a) all.push(q);
+			all.sort((p, q) => p.c - q.c || p.g - q.g);
+			for (const q of all.slice(0, o.bfsK || 4)) {
+				if (Date.now() >= deadline - 20) break;
+				if (bfsFrom(q, o.bfsD2 || 40, o.bfsCap2 || 4000, deadline)) { out.ok = true; out.masks = best.masks; out.T = best.T; out.why = ''; break; }
+			}
+			out.ms = Date.now() - t0;
+			if (best) return out;
+		}
+		// THE REFINEMENT LADDER (o.refine: true = REFINE, or the levels left): a search that ran out of nodes (exhausted) with
+		// time left goes again, fresh, with finer field cells (the sub-tile offset and the speeds in the key: fieldKey), then
+		// finer still: arrivals the coarse store merged (a dot field's cell kept 2 states by the x speed alone) are the way
+		// on; as a default key the fine cells dilute the search (the field chains 80.3% plain vs 78.4% / 75.0% with the
+		// coarse / fine cells as the key from the start), as the next step of an exhausted one they only add
+		if (!best && o.refine && out.why === 'exhausted' && Date.now() < deadline - 20) {
+			const lv = Array.isArray(o.refine) ? o.refine : REFINE;
+			if (lv.length) {
+				const tR = Date.now() - t0;
+				const r2 = solve(snap0, target, Object.assign({}, o, lv[0], { refine: lv.slice(1), resume: undefined, deadline, ms: Math.max(1, deadline - Date.now()) }));
+				r2.refined = (r2.refined || 0) + 1;
+				r2.expanded += out.expanded; r2.nodes += out.nodes;
+				r2.c0 = out.c0; if (out.bestC < r2.bestC) { r2.bestC = out.bestC; r2.bestCg = out.bestCg; r2.bestMasks = out.bestMasks; }
+				if (r2.firstMs) r2.firstMs += tR;
+				r2.ms = Date.now() - t0;
+				return r2;
+			}
 		}
 		return out;
 	}
