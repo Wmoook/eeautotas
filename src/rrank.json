@@ -1,0 +1,40 @@
+{
+ "tool": "tools/rrank.js",
+ "date": "2026-09-29T20:05:38.207Z",
+ "feats": [
+  "gold",
+  "blue",
+  "goldAll",
+  "blueAll",
+  "keys",
+  "swCnt",
+  "swFrac",
+  "effGood",
+  "effKill",
+  "team",
+  "crown",
+  "lm",
+  "gain"
+ ],
+ "w": [
+  1.8379,
+  -0.32,
+  2.2169,
+  -0.438,
+  -0.2355,
+  0.7443,
+  0.8636,
+  0.6033,
+  -0.181,
+  0.6912,
+  0,
+  0.8457,
+  0
+ ],
+ "step": 0.5,
+ "levels": 143,
+ "pairs": 158634,
+ "l2": 0.01,
+ "kinds": "d",
+ "gain": false
+}

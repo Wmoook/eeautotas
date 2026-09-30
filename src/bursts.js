@@ -222,6 +222,22 @@ function triggersOf(L) {
 
 /** level L's portals as walk edges (goexplore.js roomFields' map): exits (portal tile -> its exits' tiles) and srcOf
  *  (exit tile -> the portal tiles that lead there: the aim field's walk runs backwards from the goals) */
+/** (EEAT_BURSTLIVE, bursts' liveCut) a prefix `cut` of the run `full` (input strings, from the level start): when its
+ *  replay ends in a death's dead ticks, the prefix of `full` up to its first live tick after that (the respawn), else
+ *  `cut` itself (alive, or `full` never lives again). Exact: the returned inputs are `full`'s own. */
+function liveCutOf(L, full, cut) {
+	if (!full || cut.length >= full.length) return cut;
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	for (let k = 0; k < cut.length; k++) { E.applyMask(inp, (cut.charCodeAt(k) - 48) & 31); sim.tick(inp); }
+	if (!sim.is_dead) return cut;
+	for (let k = cut.length; k < full.length; k++) {
+		E.applyMask(inp, (full.charCodeAt(k) - 48) & 31);
+		sim.tick(inp);
+		if (!sim.is_dead) return full.slice(0, k + 1);
+	}
+	return cut;
+}
 function portalsOf(L) {
 	const W = L.width, N = W * L.height, fg = L.fg;
 	const exits = new Map(), srcOf = new Map();
@@ -641,6 +657,19 @@ function create(o) {
 		const tile = Math.min(N - 1, Math.max(0, (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)));
 		return { key, tile, fresh, parentKey };
 	};
+	/** (EEAT_BURSTLIVE=1, OPT-IN, deaths as moves only; off = the cut as before) a start cut back along its run (BACK /
+	 *  TROPHY_BACK / CHAIN_BACK) that lands in a death's dead ticks: the tool refuses it ("the prefix dies": 35-45% of the
+	 *  one search's bursts on Cold World, whose cells are respawn lineages); the start goes on along the SAME run to its
+	 *  first live tick (the respawn), so it is that run's own state (exact: the run's inputs, nothing guessed); a run that
+	 *  never lives again keeps the cut (the tool's failure as before) */
+	const burstLive = process.env.EEAT_BURSTLIVE === '1';
+	if (burstLive) st.liveCuts = 0;
+	const liveCut = (full, cut) => {
+		if (!burstLive || !a.deathMoves || !full || cut.length >= full.length) return cut;
+		const r = liveCutOf(L, full, cut);
+		if (r !== cut) st.liveCuts++;
+		return r;
+	};
 	/** an attempt that reached a target tile: the room changes when the trigger acts (a tick or two later for some): up to
 	 *  3 more ticks of its last input, else each of the 18 inputs for one tick; the attempt with them when the room
 	 *  changed alive, else null */
@@ -954,7 +983,7 @@ function create(o) {
 				const k = r.k++;
 				let inputs = cell ? cell.inputs : r.inputs, v = cell ? cell.v : p.f.walk[r.tile];
 				const back = BACK[k % BACK.length];
-				if (inputs.length > back + 50) inputs = inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back));
+				if (inputs.length > back + 50) inputs = liveCut(inputs, inputs.slice(0, Math.max(o.minLen || 0, inputs.length - back)));
 				if (!(v >= 0 && v < CUT)) v = p.f.mx;
 				const ci = pickConf(r);
 				job = { lane, r, inputs, tile: cell && cell.tile >= 0 ? cell.tile : r.tile, conf: ci, cells: CF[ci], reach: steerFile(p.f.walk, p.f.mx, lane), slack: Math.round(SLACK + SLACK_F * v / 5), seconds: Math.max(2, Math.min(a.burstS, Math.floor(left - 1))),
@@ -963,7 +992,7 @@ function create(o) {
 				// the trophy arm: the relay (the reach field's nearest attempt, 60 / 150 / 400 ticks back)
 				const nr = p.nr;
 				const back = TROPHY_BACK[trophyArm.back++ % TROPHY_BACK.length];
-				const inputs = nr.inputs.slice(0, Math.max(50, o.minLen || 0, nr.inputs.length - back));
+				const inputs = liveCut(nr.inputs, nr.inputs.slice(0, Math.max(50, o.minLen || 0, nr.inputs.length - back)));
 				trophyArm.busy = true;
 				if (!trophyRf) { trophyRf = path.join(work, 'trophy.reach'); RF.writeReachFile(o.field, trophyRf, fp); }
 				const rf = trophyRf;
@@ -1039,7 +1068,7 @@ function create(o) {
 			// the chain: nearer without reaching a target: on from its nearest attempt, the same targets (the same steer file)
 			if (!r.reached && r.best && Number.isFinite(r.near) && r.near < job.startDist - 1 && job.chain < CHAIN_MAX) {
 				const c = job.chain + 1, back = CHAIN_BACK[c % CHAIN_BACK.length];
-				const inputs = back && r.best.length > back + 50 ? r.best.slice(0, Math.max(o.minLen || 0, r.best.length - back)) : r.best;
+				const inputs = back && r.best.length > back + 50 ? liveCut(r.best, r.best.slice(0, Math.max(o.minLen || 0, r.best.length - back))) : r.best;
 				// (a table that filled before a target: the next link greedier, a smaller layer (CONFS' caps 1 M -> 64 K -> 16 K);
 				// Infinity Pain's wall: 4 px / 1/16 px/tick with 1 M states a layer filled its table 33 tiles short three times
 				// in a row, where 64 K and 16 K passed from the route's own states 150 and 400 ticks back)
@@ -1239,4 +1268,4 @@ function roomAim(L, RM, sim, known, T) {
 	return { walk, mx, goals, x: first % W, y: (first / W) | 0, n: comps.size, start: walk[s0] };
 }
 
-module.exports = { create, triggersOf, portalsOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
+module.exports = { create, triggersOf, portalsOf, liveCutOf, roomAim, CONFS, FINE_Y, slowYOf, fairScore, REST_AFTER, stallStep, STALL_N, STALL_WALL };
