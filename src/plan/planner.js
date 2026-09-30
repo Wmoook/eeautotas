@@ -39,6 +39,9 @@ const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no 
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
+// the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
+// failed its rung; OPT-IN: EEAT_PLAN_NEAR=K (K near plans; unset / 0: off, the planner as before)
+const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 0;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -795,6 +798,9 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
+		if (plans.length && NEAR_K > 0 && facts) {
+			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
+		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
 			// (no edge at the root because the facts took them all: exhausted; none at all without facts: a walk proof)
@@ -808,6 +814,50 @@ function createPlanner(model, facts, o = {}) {
 		const out = plans;
 		out.why = why;
 		out.plans = plans;
+		return out;
+	}
+	/**
+	 * THE DIVERSIFICATION RULE (lane 3, COMPILE-ALL block 2; OPT-IN EEAT_PLAN_NEAR=1): the plan search keeps the cheapest whole plan, so a first leg
+	 * the executor cannot do in its rung comes back at the next rung, again and again, while nearer triggers that change
+	 * the state are never tried (the FIRST-LEG class of the full compile b1: 45 levels, a first target 100-600 tiles away;
+	 * the closest-0 false report had diversified by accident: its walls near the goal pushed the est walk to other
+	 * triggers). Here: when EVERY plan's first leg has FAILED from this node class (its rung >= 1: the plan search's own
+	 * diversity spent), the root's triggers that are nearer by the admissible bound (the edge's lb), not tried from this class yet (rung 0), not only a
+	 * relaxation's or a death's way, go first as one-step plans, the nearest first, at most NEAR_K (EEAT_PLAN_NEAR): a leg the executor does in its first rung is a new anchor with more gain (the strategy's most-progress order
+	 * goes on from it), one it fails moves to rung 1 and the next nearer trigger is offered at the next plan. Ordering
+	 * only: every plan the search found is still there (after them), no edge is dropped, the lb and the proofs untouched.
+	 * Measured (box 3, 60 s, --workers=3): a first version (fire when the BEST plan's first leg failed, 2 near plans
+	 * first) The Glitch 0 -> 8, MIHB's Dream 6 -> 10, but I Wanna be the Guy 15 -> 3 (its 2nd / 3rd plans, a checkpoint
+	 * and a switch, lead to its 15 triggers; the nearest-by-lb 40-coin group and checkpoints took their slots); this one
+	 * (all failed, 1 near plan) on lane 3's 45 FIRST-LEG levels 4 triggers vs 2 (noise level), gate20 7 compiled vs 9 of
+	 * the same code without it (Tutorial 1 / Bygone Tutorial: they compile in about half the runs), IWBTG 15 / 11 in two
+	 * runs: no gain shown, so OPT-IN; with EEAT_SKEL_CLOSEST=1 IWBTG 11 (15 -> 1 without the rule), MIHB 5, The Glitch 0.
+	 */
+	function nearPlans(a, plans) {
+		const p0 = plans[0];
+		if (!p0 || !p0.steps || !p0.steps.length) return [];
+		const cls = a.S.key + '|' + a.cls;
+		// (the first real edge of the best plan: a death or a key passage may be inserted before it)
+		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
+		if (facts.rungOf(s0.edge, cls) < 1) return [];
+		// (only once the plan search's own diversity is spent: every plan's first leg has failed from this class; a plan
+		// whose first leg is untried still gets its rung-0 try (I Wanna be the Guy: its 2nd / 3rd plans' first legs, a
+		// checkpoint and a switch, lead to 15 triggers; the nearest-by-lb coins / checkpoints ahead of them took their slots:
+		// 15 -> 3)
+		for (const p of plans) { const f = p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0]; if (facts.rungOf(f.edge, cls) < 1) return []; }
+		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
+		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls);
+		const used = new Set(plans.map((p) => p.steps[0] && p.steps[0].edge));
+		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) === 0)
+			.sort((x, y) => x.lb - y.lb || x.est - y.est);
+		const out = [];
+		const root = { S: a.S, pos: a.pos, e: null, parent: null };
+		for (const e of cands.slice(0, NEAR_K)) {
+			const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
+			if (!steps.length) continue;
+			out.push({ id: `p${ST.plans}.n${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `near: '${s0.waypoint && s0.waypoint.label}' failed its rung ${facts.rungOf(s0.edge, cls) - 1}; the nearest untried trigger first`, near: true });
+		}
+		ST.nearPlans = (ST.nearPlans || 0) + out.length;
 		return out;
 	}
 	// ---------------------------------------------------------------- CEGAR
