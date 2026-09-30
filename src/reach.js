@@ -605,6 +605,12 @@ function reachField(level, opts) {
 	}
 	const xrOK = (i) => cls[i] === NORM && segOf[i] !== 0;
 	const nIce = ice ? 10 : 0;
+	// (OPT-IN opts.iceLocal / EEAT_ICE_LOCAL=1: the jump's ice rise only where a slippery ball can be: iceNear, else the
+	// plain rise. Off = every jump of a level with one ice block anywhere rises as from ice (72.56 px, not 63.42: +9 px, a
+	// row more at the apex), a false near under every ledge 5 rows below a goal: Cold World's chapter-2 blue coin
+	// (98,207), 5 rows over the floor under its 1-wide shaft and 60+ tiles from the level's ice, read 5 tiles from there
+	// (the true way is from above, through its gate); the engine's best from there reaches row 208)
+	const iceNear = ice && (opts.iceLocal !== undefined ? !!opts.iceLocal : ICE_LOCAL) ? iceNearOf(level, W, H, N) : null;
 	const mm0 = modMinOf(level), mm = (id) => (id >= 0 && id < mm0.length ? mm0[id] : G);
 	const T = TABLES[ice ? 1 : 0];
 	const KSTEP = ice ? 2 : 1;   // rows of fall potential per row fallen (ice: the ball may still fall with less drag)
@@ -629,7 +635,7 @@ function reachField(level, opts) {
 		}
 		// (opts.fxState: the jump effect's speed; mj jumps: + mj - 1 air jumps from the apex, in plain air; none at mj 0)
 		if (JVX === 0) continue;
-		const rj = riseQ(JVX, m, G, nIce) + (MJX > 1 ? (MJX - 1) * rjAir : 0);
+		const rj = riseQ(JVX, m, G, iceNear !== null && !iceNear[i] ? 0 : nIce) + (MJX > 1 ? (MJX - 1) * rjAir : 0);
 		let e = -1e9;
 		if (isFloor(i + W) && !(i + W < N && sp[i + W] === LOWER)) e = Math.max(e, rj - 8);
 		if (sp[i] === LOWER) e = Math.max(e, rj);
@@ -1284,6 +1290,47 @@ const qOf = (e, Q) => Math.max(-1, Math.min(Q, Math.ceil((e + TOL) / 8)));
 const bitLen = (v) => { let n = 0; while (v > 0) { n++; v = Math.floor(v / 2); } return n; };
 function prioShiftOf(a) { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] < DEATH_COST && a[i] > m) m = a[i]; return Math.max(0, bitLen(m) - 12); }
 /** per block id: its most upward modifier_y as the delayed tile (input held where the engine lets it act) */
+// ---- the ice's reach (opts.iceLocal): eesim.js sets _slippery = 2.0 on a tick whose current-below tile is ice, 0 on any
+// other solid below, and -0.2 a tick otherwise (the double reaches 2.8e-16 after 10 steps: 11 slippery ticks after the
+// last ice contact, docs/ee_math.md 1.5). So a ball can be slippery only within 11 ticks of an ice contact; a tick moves
+// the centre at most 16.25 px an axis (endgame.js D_TICK), a portal hop moves it for free. ICE_REACH_TILES Chebyshev
+// tiles (12 ticks x 16.25 px = 12.2 tiles, 2 tiles for the centre over the ice tile and the rounding) from every ice
+// tile, walls ignored (they only shorten the way), portal hops chained: every tile a slippery ball's centre can be in
+const ICE_LOCAL = process.env.EEAT_ICE_LOCAL === '1';
+const ICE_REACH_TILES = 16;
+function iceNearOf(level, W, H, N) {
+	const fg = level.fg;
+	const dist = new Int16Array(N).fill(-1);
+	let cur = [];
+	for (let i = 0; i < N; i++) if (fg[i] === ICE) { dist[i] = 0; cur.push(i); }
+	const silent = level.portalsById && level.portalSlot ? silentPortals(level) : null;
+	const exitsOf = (i) => {
+		if (!silent || (fg[i] !== 242 && fg[i] !== 381)) return null;
+		const s = level.portalSlot[i];
+		if (s < 0 || silent[i]) return null;
+		return level.portalsById.get(level.pTarget[s]) || null;
+	};
+	for (let d = 0; d <= ICE_REACH_TILES && cur.length; d++) {
+		const nxt = [];
+		for (let k = 0; k < cur.length; k++) {
+			const t = cur[k];
+			const ex = exitsOf(t);   // (a hop: its exits at the same distance)
+			if (ex) for (let q = 0; q < ex.n; q++) { const j = (ex.ys[q] >> 4) * W + (ex.xs[q] >> 4); if (j >= 0 && j < N && dist[j] < 0) { dist[j] = d; cur.push(j); } }
+			if (d === ICE_REACH_TILES) continue;
+			const x = t % W, y = (t / W) | 0;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				const j = ny * W + nx;
+				if (dist[j] < 0) { dist[j] = d + 1; nxt.push(j); }
+			}
+		}
+		cur = nxt;
+	}
+	const near = new Uint8Array(N);
+	for (let i = 0; i < N; i++) if (dist[i] >= 0) near[i] = 1;
+	return near;
+}
 function modMinOf(level) {
 	const n = level.flags.length, a = new Float64Array(n);
 	for (let id = 0; id < n; id++) {
