@@ -94,7 +94,7 @@ function masksOf(rle) {
 	for (const [m, c] of rle) { out.fill(m, k, k + c); k += c; }
 	return out;
 }
-const SUP_CLS = new Set(['G', 'W', 'C', 'Z', 'B']);
+const SUP_CLS = new Set(['G', 'W', 'C', 'Z', 'B', 'P']);          // P: a portal exit (the tick's teleport put the ball there, in the air)
 
 // ------------------------------------------------------------------ the level context (per thread)
 function levelOf(src) {
@@ -205,6 +205,33 @@ function staticSupports(ctx) {
 			break;
 		}
 	}
+	// part 1's surface supports (supports.js S.surf: the exact rest lines and free-axis intervals, half blocks, one-ways,
+	// walls under side pulls): a placement at each interval's middle on its rest line, kept where no support of that
+	// (tile, class, speed class) exists yet and the engine keeps it there
+	const P = ctx.P1;
+	if (P && P.surf) {
+		const sf = P.surf;
+		sim.restore(ctx.start);
+		const flip0 = sim.flip_gravity | 0;
+		for (let r = 0; r < sf.n; r++) {
+			if (sf.flip[r] !== flip0) continue;
+			const vert = sf.dir[r] <= 1;
+			let lo = sf.lo[r], hi = sf.hi[r];
+			if (!(sf.closed[r] & 1)) lo += 1;
+			if (!(sf.closed[r] & 2)) hi -= 1;
+			if (hi < lo) continue;
+			const q = Math.round((lo + hi) / 2);
+			const px = vert ? q : sf.rest[r], py = vert ? sf.rest[r] : q;
+			if (!place(ctx, px, py)) continue;
+			const c = clsOf(sim, flags);
+			if (!SUP_CLS.has(c)) continue;
+			const t = tileOf(sim, W, H);
+			const key = `${t},${c},${vcOf(sim.speed_x, sim.speed_y)}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push({ i: out.length, tile: t, cls: c, vc: vcOf(sim.speed_x, sim.speed_y), kind: 'rest', px, py, p1: p1Of(ctx, sim, false, -1), s1: r });
+		}
+	}
 	return out;
 }
 const PLACE_OFFS = [[0, 0], [-8, 0], [7, 0], [0, -8], [0, 7]];
@@ -257,7 +284,7 @@ function factsOf(ctx, snap, masks) {
 		}
 	}
 	const pt = sim._pastx >= 0 && sim._pasty >= 0 && sim._pastx < W && sim._pasty < H ? sim._pasty * W + sim._pastx : -1;
-	return { tile: tileOf(sim, W, H), cls: clsOf(sim, ctx.flags), end: [sim.px, sim.py, sim.speed_x, sim.speed_y], tr, g, d: died, hash: sim.stateHash(), p1: p1Of(ctx, sim, tele, pt) };
+	return { tile: tileOf(sim, W, H), cls: (() => { const c = clsOf(sim, ctx.flags); return tele && c === 'A' ? 'P' : c; })(), end: [sim.px, sim.py, sim.speed_x, sim.speed_y], tr, g, d: died, hash: sim.stateHash(), p1: p1Of(ctx, sim, tele, pt) };
 }
 
 // ------------------------------------------------------------------ the families
@@ -643,6 +670,29 @@ async function buildGraph(src, o = {}) {
 }
 
 // ------------------------------------------------------------------ the graph's use (the one-shot search, part 3)
+/**
+ * indexGraph(g) -> {out, supAt, byP1, respawnEdges, touchEdges}: the adjacency the search walks. out[i] = the edge
+ * indices from support i, cheapest first; supAt: tile -> support indices; byP1: part 1's class -> support indices (the
+ * representatives of that class); respawnEdges: the death edges (to = -1: the respawn the trigger state names);
+ * touchEdges: trigger id -> edge indices (to = -2 - trigger id: the touch's end state is a support's again once it
+ * lands, part 3 continues it from the real state)
+ */
+function indexGraph(g) {
+	const out = g.sups.map(() => []);
+	const supAt = new Map(), byP1 = new Map(), touchEdges = new Map(), respawnEdges = [];
+	g.edges.forEach((e, n) => {
+		if (out[e.f]) out[e.f].push(n);
+		if (e.to === -1) respawnEdges.push(n);
+		if (e.k === 'touch') { if (!touchEdges.has(e.trig)) touchEdges.set(e.trig, []); touchEdges.get(e.trig).push(n); }
+	});
+	for (const l of out) l.sort((a, b) => g.edges[a].T - g.edges[b].T);
+	for (const u of g.sups) {
+		if (!supAt.has(u.tile)) supAt.set(u.tile, []);
+		supAt.get(u.tile).push(u.i);
+		if (u.p1) { if (!byP1.has(u.p1)) byP1.set(u.p1, []); byP1.get(u.p1).push(u.i); }
+	}
+	return { out, supAt, byP1, respawnEdges, touchEdges };
+}
 /** play an edge's input from sim's current state: the first tick (1-based) its end (tile, class) holds, 0 a miss */
 function applyEdge(sim, e, W, H) {
 	const inp = new E.EEInput(), ms = masksOf(e.m), flags = sim._flags;
@@ -650,14 +700,14 @@ function applyEdge(sim, e, W, H) {
 		E.applyMask(inp, ms[t]); sim.tick(inp);
 		if (e.cls === 'R') { if (t > 0 && !sim.is_dead && sim.deaths > 0 && t + 1 === ms.length) return t + 1; continue; }
 		if (sim.is_dead) return 0;
-		if (tileOf(sim, W, H) === e.tile && (e.cls === 'any' || e.k === 'touch' || clsOf(sim, flags) === e.cls)) return t + 1;
+		if (tileOf(sim, W, H) === e.tile && (e.cls === 'any' || e.k === 'touch' || e.cls === 'P' || clsOf(sim, flags) === e.cls)) return t + 1;
 	}
 	return 0;
 }
 /** the lazy verification's fallback: the move solver from snap to the edge's end (touch: the trigger's tiles) */
 function resolveEdge(S, snap, e, o = {}, triggers = null) {
 	const tiles = e.k === 'touch' && triggers ? triggers[e.trig].tiles : [e.tile];
-	const cls = e.k === 'touch' ? 'any' : e.cls;
+	const cls = e.k === 'touch' || e.cls === 'P' ? 'any' : e.cls;
 	return S.leg(snap, { tiles, cls }, Object.assign({ Tmax: Math.max(e.T + 20, 60), chain: false }, o));
 }
 
@@ -677,7 +727,7 @@ if (WT && !WT.isMainThread && WT.workerData && WT.workerData.oneshotEdges && WT.
 	});
 }
 
-module.exports = { buildGraph, buildLocal, ctxOf, staticSupports, supportState, edgesFrom, reachFamily, landFamily, eventFamily, oneFamily, touchFamily, factsOf, applyEdge, resolveEdge, rleOf, masksOf, clsOf, tileOf, loadGraph, saveGraph, cacheFile, md5OfLevel, DEF };
+module.exports = { buildGraph, buildLocal, indexGraph, ctxOf, staticSupports, supportState, edgesFrom, reachFamily, landFamily, eventFamily, oneFamily, touchFamily, factsOf, applyEdge, resolveEdge, rleOf, masksOf, clsOf, tileOf, loadGraph, saveGraph, cacheFile, md5OfLevel, DEF };
 
 // ------------------------------------------------------------------ CLI
 if (require.main === module && (!WT || WT.isMainThread)) {
