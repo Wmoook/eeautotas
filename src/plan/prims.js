@@ -372,7 +372,7 @@ async function createPrims(L, o = {}) {
 		let guide = null;
 		if (ro.guide !== false && classDedup) {
 			try {
-				const gf = T.goalField(L, T.fieldTilesOf(goal), { deaths: false });
+				const gf = T.goalField(goal.wallLc || L, T.fieldTilesOf(goal), { deaths: false });   // (the executor's counterexample walls: goal.wallLc)
 				guide = (s) => { if (deadOK && s.is_dead) return 0; const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
 			} catch (e) { guide = null; }
 		}

@@ -356,6 +356,9 @@ function legBest(L, starts, goal, o) {
 	const deadline = o.deadline || Infinity, stop = o.stop || null;
 	const beforeTick = o.beforeTick >= 0 ? o.beforeTick : -1;
 	const field = o.field || null, region = o.region || null;
+	// (o.visited: a Uint8Array(W x H) the search marks with the centre tile of every state it reached in its region (the
+	// executor's counterexample walls: the tiles its field ranks below every tile reached, next to them, never entered))
+	const vis = o.visited instanceof Uint8Array && o.visited.length === L.width * L.height ? o.visited : null;
 	const w = o.w > 0 ? o.w : 5;   // (T-EXEC-LEGS, box 3, 3 s: 2.5 46% / 5 56% / 8 56% / 12 55% with the cells below)
 	const heapMax = o.heapMax > 0 ? o.heapMax : 300000;
 	// (the cell: px, py, vx, vy multipliers; default 2 px, 4 px, 1/8, 1/4 px/tick: T-EXEC-LEGS 3 s at w 5: 56% vs 1 px, 2 px,
@@ -451,7 +454,7 @@ function legBest(L, starts, goal, o) {
 		ka = h; kb = dkOf(sim) | 0;
 	};
 	const goals = [];
-	const closest = { dist: -1, start: -1, tail: null, node: -1 };
+	const closest = { dist: -1, start: -1, tail: null, node: -1, pop: -1 };
 	let sims = 0, pops = 0, lastPoll = 0, found = -1;
 	const pathOfNode = (i, extraMask, extraReps) => {
 		const rev = [];
@@ -541,13 +544,14 @@ function legBest(L, starts, goal, o) {
 			const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
 			if (cx < 0 || cy < 0 || cx >= W || cy >= H) { drop.oob++; continue; }
 			if (region !== null && !region[cy * W + cx]) { drop.region++; continue; }
+			if (vis !== null) vis[cy * W + cx] = 1;
 			if (!closed.add(ka, kb)) { drop.closed++; continue; }
 			const d = distD(field, sim, allowDeath);
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
 			hpush(j, g + reps + w * scoreOf(d));
-			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; }
+			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; closest.pop = pops; }
 			if (FIN && d <= FIN_D && finR === null) keepNear(j, d, cy * W + cx);
 		}
 		pool.push(snap);
@@ -597,7 +601,7 @@ function legBest(L, starts, goal, o) {
  *  Delusion Valley 2 vs 0, LoZ Skyward Sword 3 vs 2; Booty Return 11 vs 10-13, Pancake Quest 4 vs 5-6) */
 function boundsFieldOf(bounds, goal) {
 	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function' || process.env.EEAT_LEG_BF !== '1') return null;
-	try { return bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) }); } catch (e) { return null; }
+	try { return bounds.field(T.fieldTilesOf(goal), goal.wallLc || null, { touch: T.fieldTouchOf(goal) }); } catch (e) { return null; }
 }
 function bfTime(f, bounds, sim) {
 	const v = bounds.at(f, sim, { endgame: false });

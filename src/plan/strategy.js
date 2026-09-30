@@ -729,13 +729,18 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const fail = res.ok ? null : res.fail || null;
 		// (a relay that got its rung no nearer by RELAY_GAIN tiles is dropped (a false near: the next rung from the anchor
 		// alone), and a new one must beat it by as much)
+		// (the executor's closest is in the unit of the goal field with the counterexample walls it had (fail.wallsN): a relay
+		// and a floor of another unit are no measure of this one: replaced, not compared)
+		const unitN = fail && fail.wallsN > 0 ? fail.wallsN | 0 : 0;
 		if (RELAY && rlUsed && !res.ok) {
 			const nd = fail && fail.closest && fail.closest.dist >= 0 ? fail.closest.dist : Infinity;
-			if (!(nd < rl.dist - RELAY_GAIN)) { relays.delete(rk); relayFloor.set(rk, rl.dist - RELAY_GAIN); relayDrop++; }
+			if ((rl.wallsN | 0) === unitN && !(nd < rl.dist - RELAY_GAIN)) { relays.delete(rk); relayFloor.set(rk, { d: rl.dist - RELAY_GAIN, n: unitN }); relayDrop++; }
 		}
 		if (RELAY && fail && fail.closest && fail.closest.masks && !fail.closest.dead && fail.closest.dist >= 0 && !Number.isFinite(runBound())) {
-			const prev = relays.get(rk);
-			const floor = relayFloor.has(rk) ? relayFloor.get(rk) : Infinity;
+			const prev0 = relays.get(rk);
+			const prev = prev0 && (prev0.wallsN | 0) === unitN ? prev0 : null;
+			const fl = relayFloor.get(rk);
+			const floor = fl && fl.n === unitN ? fl.d : Infinity;
 			if ((!prev || fail.closest.dist < prev.dist) && fail.closest.dist < floor) {
 				const m = fail.closest.masks instanceof Uint8Array ? fail.closest.masks : T.masksOf(fail.closest.masks);
 				const r = replay(m, null, false);
@@ -743,7 +748,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				if (r.dead < 0 && r.finished < 0 && !starts.some((s) => s.hash === h)) {
 					const { s } = startOf(starts, m, -1, {});
 					const leg = addLeg({ label: `relay ${labelOf(step)}`, fromTick: s ? s.tick : 0, ticks: m.length - (s ? s.tick : 0), lb: null, proven: false, tool: 'relay', prev: s && s.leg ? s.leg : null });
-					relays.set(rk, { arrival: Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, relay: true }), dist: fail.closest.dist });
+					relays.set(rk, { arrival: Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, relay: true }), dist: fail.closest.dist, wallsN: unitN });
 					relaySet++;
 				}
 			}
