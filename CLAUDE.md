@@ -520,6 +520,34 @@ ways in.
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
   executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing).
+- **THE PORTFOLIO CHAIN SOLVER** (n5-s99-portfolio, 2026-09-30; `src/plan/portfolio.js`, the executor's tier PF, OPT-IN
+  `EEAT_PORTFOLIO=1`, off = the executor byte for byte: portfolio.js not even loaded): ONE call per stretch (a real engine
+  state -> a target's tiles, its class, a teleport) runs the chains lab's solvers in ONE budget and returns the first leg any
+  finds, replayed by the engine: the backward meet (`src/plan/lab/backward.js`, n5-lab-backward; a target with a class / a
+  teleport ends on msolve's exact goal test), the speed profile (`lab/profile.js`), the executor's own best-first leg finder
+  (`legs.js` legBest), the corridor (`lab/corridor.js`, resumable) and msolve.chain (resumable); the plan by the stretch's
+  reach (the Chebyshev tiles to the nearest target tile): under 8 tiles bw 0.3 / prof 0.25 / leg 0.15 / corr 0.25 /
+  chain 0.05, from 8 tiles the backward's long piece bw 0.55 / prof 0.15 / leg 0.1 / corr 0.2 (`EEAT_PF_NEAR`,
+  `EEAT_PF_FARPLAN`, `EEAT_PF_FAR`, `EEAT_PF_PLAN`); an arm's slice its share of what is left, the rest back to the resumable
+  arms. ONE CONTINUOUS BUDGET: every call for the same stretch (the start's state hash + the target) continues its SESSION:
+  the resumable arms resume, a one-piece arm runs its share of the first call and, when the CLOCK ended it (not its search),
+  once more as the long piece (its share of the caller's projection `o.total`, at least 4 x the first) in the first call
+  that holds 4 x the first piece: never cut, never a third time. The backward's quick meet gets at least min(0.8 x its
+  piece, 4 s) (`EEAT_PF_BWQUICK`: on a short piece the lab's 0.3 ended it before the find). In the executor (tier PF, before
+  tier B): in place of tiers M2 / MC / P / B, the arms bw / prof / corr / chain (`EEAT_PF_ARMS`; the leg finder is its own
+  tier 3), 0.3 / 0.4 / 0.5 / 0.6 of the window by the rung (`EEAT_PF_SHARES`, at most `EEAT_PF_MS` 40 s), the session
+  projected over the rungs to come; report.math.exec `pf`, `pfOk`, `pfBy_<arm>`, `pfResumed`, `pfDeferred`. MEASURED (box 5
+  + 6, every answer replayed again by the harness; `tools/lab/portfolio_chain.js`, `tools/lab/portfolio_krt.js`, `--vars`
+  for paired plans): (a) the moves study's 1,123 4-move chains, each arm ALONE 5 s: msolve.chain 47.2%, corridor 74.2%,
+  profile 79.6%, backward 85.9% (union 93.0%), the portfolio in ONE 5-s budget 88.4%; ALONE 20 s: corridor 81.3%, profile
+  83.1%, leg finder 85.1%, backward 89.8% (union 96.2%), the portfolio in ONE 20-s budget 93.1%; **ONE 40-s budget 95.4%
+  (1,071), found in 343 ms median (p90 2.5 s)**, 99.7 / 100 / 95.2 / 86.6 / 76.8% by route ticks 0-60 / 60-120 / 120-240 /
+  240-480 / 480+, FIELD chains 93.2%; the plan's shares move the 20-s rate by +-1 chain (paired); (b) the chains lab's 55
+  known-route legs from the previous trigger, 30 s each: msolve.chain 13, corridor 22, profile 27, leg finder 31, backward
+  39 (union 42), the portfolio 36-38; through THE EXECUTOR (`tools/cmp/krt.js` rungs 1-2, the tier on vs off, one tree):
+  prev 32 -> 33, hit-300 23 -> 25, hit-120 36 -> 39 (91 -> 97 legs, 1 lost: Forgotten Helix hit-300); whole levels: the
+  shared gate (60 s, W3) 14 / 20 = 14 / 20, the same levels, run ticks 22,706 vs 22,941. `node test/portfolio.js` (20: the
+  run-up room, each arm replayed, the session's long piece, class targets, the executor's tier).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
