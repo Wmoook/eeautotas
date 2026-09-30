@@ -80,9 +80,11 @@ const PRIMS_SHARE_HI = process.env.EEAT_PRIMS_SHARE_HI !== undefined ? +process.
 // (env: measurements); off = the executor byte for byte as before.
 const MSOLVE_ON = () => process.env.EEAT_MSOLVE === '1';
 // THE PROFILE TIER (n5-lab-profile, approach B, src/plan/lab/profile.js): OPT-IN EEAT_PROFILE=1 (off: nothing of it runs,
-// the executor as before byte for byte); its share of the window EEAT_PROFILE_SHARE (0.4)
+// the executor as before byte for byte); its share of the window EEAT_PROFILE_SHARE (0.4), EEAT_PROFILE_SHARE0 at rung 0 (the same;
+// the 4-move chains through the executor at 1.5 s: 214 vs 213 of 311 found at 0.4, the legs 2.5x sooner)
 const PROFILE_ON = () => process.env.EEAT_PROFILE === '1';
 const PROFILE_SHARE = process.env.EEAT_PROFILE_SHARE !== undefined ? +process.env.EEAT_PROFILE_SHARE : 0.4;
+const PROFILE_SHARE0 = process.env.EEAT_PROFILE_SHARE0 !== undefined ? +process.env.EEAT_PROFILE_SHARE0 : PROFILE_SHARE;
 const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
 const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
 const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
@@ -605,7 +607,7 @@ function makeCore(L, co) {
 		// front cut by this call's goal field's time to go, msolve.leg finishing from the front's best states); PROFILE_SHARE of
 		// the window; its arrivals replayed by the executor's own goal test (finishFound's verifyTail)
 		if (PROFILE_ON() && !allowDeath && !wp.dieField && Date.now() < wEnd - 50) {
-			const tP = Date.now(), pEnd = tP + PROFILE_SHARE * (wEnd - tP);
+			const tP = Date.now(), pEnd = tP + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - tP);
 			const pst = { tier: 'profile', ok: false };
 			try {
 				const PFm = require('./lab/profile.js');

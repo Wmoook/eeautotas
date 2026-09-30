@@ -37,6 +37,7 @@ const DIRS3 = [0, 2, 4];                              // - L R
 const DIRS9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];       // - L R U D LU RU LD RD
 const NOV_SHARE = process.env.EEAT_PROFILE_NOV !== undefined ? +process.env.EEAT_PROFILE_NOV : 0.3;
 const CELL_DOM = process.env.EEAT_PROFILE_CELL !== '0';
+const GRAD = process.env.EEAT_PROFILE_GRAD === '1';   // the speed credit along the physics field's own descent (experiment)
 // the finish (the move solver from the front's best states): on (EEAT_PROFILE_FIN=0 off), every FIN_EVERY layers the FIN_K
 // best states within FIN_EST ticks of the goal by the time to go, a leg of at most FIN_TMAX ticks, FIN_MS of clock, the
 // coupled family's FIN_CT ticks, the field tier's FIN_FMS
@@ -213,7 +214,17 @@ function profilePass(L, starts, goal, o = {}) {
 		if (sim.is_dead) return allowDeath ? 0 : 1e9;
 		const c = RF.costAt(field, sim);
 		if (c < 0) return 1e9;
-		const v = dirs ? sim.speed_x * dirs[2 * t] + sim.speed_y * dirs[2 * t + 1] : 0;
+		let v = dirs ? sim.speed_x * dirs[2 * t] + sim.speed_y * dirs[2 * t + 1] : 0;
+		if (GRAD && field.mode !== 'walk') {
+			// the direction of the PHYSICS field's descent at the ball (its cost 8 px either way on each axis, the ball's own
+			// vertical speed; a side a cut-off or unknown: that axis's walk component), not the gravity-blind walk's
+			const px = sim.px, py = sim.py, vy = sim.speed_y, gr = !!sim.on_ground;
+			const cl = RF.costAt(field, px - 8, py, vy, gr), cr = RF.costAt(field, px + 8, py, vy, gr);
+			const cu = RF.costAt(field, px, py - 8, vy, gr), cd = RF.costAt(field, px, py + 8, vy, gr);
+			let gx = cl >= 0 && cr >= 0 ? (cl - cr) : dirs[2 * t], gy = cu >= 0 && cd >= 0 ? (cu - cd) : dirs[2 * t + 1];
+			const n = Math.hypot(gx, gy);
+			if (n > 1e-9) v = (sim.speed_x * gx + sim.speed_y * gy) / n;
+		}
 		let e = eta(c * 16, v);
 		for (let q = 0; q < reqs.length; q++) {
 			const r = reqs[q];
