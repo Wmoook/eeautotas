@@ -311,7 +311,9 @@ const wildOf = (fg) => { let w = WILDM.get(fg); if (w === undefined) { w = false
 const FX_STATE = process.env.EEAT_FX_STATE === '1';
 /** the state in sim has no effect on (featValue 'fx' 0) and the plain-ball field is on; with EEAT_FX_STATE the ball's effect
  *  state {mj, jb} (an object) or null */
-const plainOf = (sim) => (FX_STATE ? RF.fxStateOf(sim) : FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity);
+// (FX_STATE: the state after the effect tile under the ball acts, reach.js fxStateNext: Need for Steed's spawn stands on its
+// multijump, so every leg from the spawn is a max_jumps 2 leg one tick later)
+const plainOf = (sim) => (FX_STATE ? RF.fxStateNext(sim) : FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity);
 /** the memo key suffix of a field for plainOf's value p (the plain-ball field '|p', an effect state '|f<mj>.<jb>') */
 const fxSuffix = (p) => (!p ? '' : typeof p === 'object' ? `|f${p.mj}.${p.jb}` : '|p');
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
@@ -333,6 +335,8 @@ function goalField(Lc, tiles, o = {}) {
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
 	if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
 	const f = RF.reachField(Lc, fs ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, fxState: fs } : pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	// (FX_STATE: a ball the lookup meets in another modelled state is priced by that state's field, made here on first use)
+	if (fs) Object.defineProperty(f, 'fxOf', { value: (s2) => goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2 }), enumerable: false });
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
 	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);

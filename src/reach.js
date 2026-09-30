@@ -102,6 +102,21 @@ function fxChanges(id, v, s) {
 		default: return v !== 0;                        // fly, low gravity, gravity: on unless 0
 	}
 }
+/** the effect state the ball will have after the effect tile under its centre acts (a ball standing on its spawn's multijump
+ *  tile: the state of the rest of the leg); fxStateOf where the tile changes nothing (or a0 is no engine) */
+function fxStateNext(a) {
+	const s = fxStateOf(a);
+	if (s === null || typeof a._getTile !== 'function') return s;
+	const tx = Math.trunc(a.px + 8) >> 4, ty = Math.trunc(a.py + 8) >> 4;
+	const id = a._getTile(tx, ty);
+	if (!(WILD.has(id) || id === FX_RESET)) return s;
+	const v = a._lookupAt(tx, ty);
+	if (!fxChanges(id, v, s)) return s;
+	if (id === 461) return v < 1000 ? { mj: v, jb: s.jb } : null;
+	if (id === 417) return { mj: s.mj, jb: jbOf(v) };
+	if (id === FX_RESET) return { mj: 1, jb: 0 };
+	return null;
+}
 // (a state the physics part of an effect-state field has no way from: its walk + this, behind every way it has)
 const FX_FAR = 4000;
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
@@ -1603,7 +1618,15 @@ function costAt(f, a, py, vy) {
 		const w = f.walk[ty * f.W + tx];
 		if (w === CUT) return -1;
 		const s = fxStateOf(a);
-		if (s === null || s.mj !== f.fx.mj || s.jb !== f.fx.jb) return w / 5;
+		if (s === null || s.mj !== f.fx.mj || s.jb !== f.fx.jb) {
+			// (another state the field models: that state's field, made on first use by the builder the caller left on f,
+			// f.fxOf (types.js goalField, the executor's ordering fields); else the walk)
+			if (s !== null && typeof f.fxOf === 'function') {
+				const g = f.fxOf(s);
+				if (g && g.fx && g.fx.mj === s.mj && g.fx.jb === s.jb) return costAt(g, a);
+			}
+			return w / 5;
+		}
 		let vy = a.speed_y;
 		const left = s.mj >= 2 && a.jump_count > 0 ? s.mj - a.jump_count : 0;
 		if (left > 0) {
@@ -1680,7 +1703,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, fxStateOf, fxChanges, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, fxStateOf, fxStateNext, fxChanges, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
