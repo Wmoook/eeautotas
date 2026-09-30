@@ -145,13 +145,17 @@ function p1Of(ctx, sim, teleported, touched) {
 }
 
 // ------------------------------------------------------------------ the placement (the respawn's rule)
-/** a ball placed at rest at (px, py) from the start state, SETTLE ticks without input; the sim holds the result */
-function place(ctx, px, py) {
+/** a ball placed at rest at (px, py) from the start state, SETTLE ticks without input; the sim holds the result. q: the
+ *  gravity queue's tile (a ball resting there: its current tile, so a side / up arrow pulls from the first tick; part 1's
+ *  records, supports.js edgeSupports), flip: the gravity effect's flip (part 1's supports of flips 1-4); absent: as before */
+function place(ctx, px, py, q, flip) {
 	const sim = ctx.sim, inp = ctx.inp;
 	sim.restore(ctx.start);
 	sim.modifier_x = 0; sim.modifier_y = 0;
 	sim.speed_x = 0; sim.speed_y = 0;
 	sim._tileQueue.length = 0;
+	if (q !== undefined) { sim._q0 = q; sim._q1 = q; }
+	if (flip !== undefined) sim.flip_gravity = flip;
 	sim.px = px; sim.py = py;
 	sim.teleported = true;
 	E.applyMask(inp, 0);
@@ -211,7 +215,7 @@ function supportState(ctx, i) {
 	if (s) return s;
 	const u = ctx.sups[i], sim = ctx.sim;
 	if (u.kind === 'start') { s = ctx.start; }
-	else if (u.kind === 'rest') { if (!place(ctx, u.px, u.py)) return null; s = sim.snapshot(); }
+	else if (u.kind === 'rest') { if (!place(ctx, u.px, u.py, u.q, u.flip)) return null; s = sim.snapshot(); }
 	else if (u.kind === 'arrive') {
 		const from = supportState(ctx, u.org.f);
 		if (!from) return null;
