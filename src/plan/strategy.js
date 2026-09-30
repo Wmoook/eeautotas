@@ -65,6 +65,14 @@ const PROVE_MS = 30000, PROVE_F = 0.2;
 // joins (its model-state changes and its legs' starts) as its window marks
 const PERFECT = process.env.EEAT_PERFECT === '1';
 const PERFECT_MS = +process.env.EEAT_PERFECT_MS || 20000, PERFECT_F = 0.25;
+// (with it, the PROVE stage only for a route the exact search from the start can bound: at most PROVE_MAX_TICKS run
+// ticks (its reach in the final compile: ~70 layers in 10 s on NC Naos; no route of the 24 compiled was proven by it, and
+// it took 10-30 s from the polish on Tree Decorating (polish 0.25 s, prove 10.5 s), Gingerbread House (27.7 s), Endless
+// Space (30 s)); a longer route's prove reserve goes to the polish, whose time is the route's best return once it exists
+// (the pass offline, 16 s of polish at the joins on the final compile's routes: The Blank Page 3,190 -> 2,466, Trick Or
+// Treat 5,035 -> 4,424, whose compiles had 0.2 / 5.7 s of polish); the perfect stage's own share of its reserve for the
+// polish: PERFECT_POLISH)
+const PROVE_MAX_TICKS = +process.env.EEAT_PROVE_MAX || 300, PERFECT_POLISH = 0.5;
 // the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
 // PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
 const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
@@ -998,6 +1006,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (left() <= 0) { end = 'time'; break; }
 			if (best && opts.first) { end = 'finish'; break; }
 			// (a route known: the moves stop where the polish's reserve begins)
+			// (EEAT_PERFECT: a route too long for the prove stage gives its reserve to the moves / perfect / polish)
+			if (perfectOn && best && best.runTicks > PROVE_MAX_TICKS && proveReserve > 0) { proveReserve = 0; endReserve = polishReserve + perfectReserve; }
 			if (best && left() <= endReserve && !inflight.size) { end = 'time'; break; }
 			if (anchors.size !== anchorsSeen || best !== bestSeen) { anchorsSeen = anchors.size; bestSeen = best; progressAt = Date.now(); }
 			if (stallEnd && Date.now() - progressAt > stallEnd) { end = 'stalled'; break; }
@@ -1061,7 +1071,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let text = 'no gain';
 		try {
 			const PF = require('./perfect.js');
-			const r = await PF.perfectRoute({ L, model, planner, exec, RM, emit: say }, best.masks, { ms, polish: false });
+			const r = await PF.perfectRoute({ L, model, planner, exec, RM, emit: say }, best.masks, { ms, polishShare: PERFECT_POLISH });
 			perfectInfo = { saved: r.saved, expanded: r.expanded, legs: r.legs, legsOk: r.legsOk, pruned: r.pruned, seeds: r.seeds, exhausted: !!r.exhausted, found: r.found };
 			const ev = r && r.saved > 0 ? C.evaluate(L, r.masks) : null;
 			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
@@ -1077,7 +1087,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	}
 	if (best && polishOn && !stopped) {
 		tm = Date.now();
-		const ms = Math.max(200, Math.min(polishReserve, left() - 200 - (best ? proveReserve : 0)));
+		// (EEAT_PERFECT: the polish takes whatever the prove stage does not keep, not only its own reserve)
+		const ms = Math.max(200, Math.min(perfectOn ? Infinity : polishReserve, left() - 200 - (best ? proveReserve : 0)));
 		let how = '', pr = null;
 		try {
 			// (the window marks: polish.js reads o.legs as TICKS; the legs are objects, so with EEAT_PERFECT the joins' ticks: the
@@ -1118,7 +1129,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// leg() (admissible: the primitives' T-LB-ADMISSIBLE check) and the -1 field while the doors stand as at the start.
 	const noDeath = (() => { try { return require('../goexplore.js').deathsOf(L) === null; } catch (e) { return false; } })();
 	let proveProof = '';
-	if (best && proveOn && restIdle >= 0 && exec && typeof exec.reach === 'function' && !stopped && left() > 300) {
+	const proveLong = perfectOn && best && best.runTicks > PROVE_MAX_TICKS;
+	if (best && proveOn && restIdle >= 0 && !proveLong && exec && typeof exec.reach === 'function' && !stopped && left() > 300) {
 		tm = Date.now();
 		let text = '';
 		try {
@@ -1187,7 +1199,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			text = notes.join('; ') || 'no round ran';
 		} catch (e) { bug('prove', { error: e.message }); text = `no proof: ${e.message}`; }
 		stage('prove', Date.now() - tm, text);
-	} else if (best) stage('prove', 0, !proveOn ? 'off' : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
+	} else if (best) stage('prove', 0, !proveOn ? 'off' : proveLong ? `skipped: a route of ${num(best.runTicks)} run ticks (EEAT_PERFECT: over ${PROVE_MAX_TICKS}, past the exact search's reach)` : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
 
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
