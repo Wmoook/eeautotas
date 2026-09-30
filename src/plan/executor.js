@@ -108,9 +108,12 @@ const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EE
 // polish stage polishes the route. Measured (box 3, 60 s, --workers=3, the lane's 12 RATE levels, side by side with the
 // base): triggers 195 vs 173 on the 11 levels neither compiled (Tutorial 3 6 vs 1, Level 1 Overworld 48 vs 38, Pancake
 // 16 vs 12), a second run 189; the cost: a first route built of untightened legs is slower (the shared gate: Accident
-// Prone 4,243 vs 3,422 / 3,311 with EEAT_RATE=0, Rosa dei Venti 4,184 vs 3,815). EEAT_RATE=0: off (the executor byte for
-// byte as before); EEAT_RATE_F, EEAT_RATE_MIN_MS.
-const RATE_ON = process.env.EEAT_RATE !== '0';
+// Prone 4,243 vs 3,422 / 3,311 with EEAT_RATE=0, Rosa dei Venti 4,184 vs 3,815). OPT-IN since the check on the newer
+// base (origin f18d62d, the box loaded ~120-145 of 192, side by side): the same 11 levels 137 vs 153 (The Glitch 5 vs 19,
+// MIHB's Dream 16 vs 21; Level 1 Overworld 43 vs 37): the gain did not repeat, the route cost did; RATE_F 1.0 vs 0.5
+// the same within the noise. EEAT_RATE=1: on; unset / 0: off, the executor byte for byte as before; EEAT_RATE_F,
+// EEAT_RATE_MIN_MS.
+const RATE_ON = process.env.EEAT_RATE === '1';
 const RATE_F = process.env.EEAT_RATE_F !== undefined ? +process.env.EEAT_RATE_F : 0.5;
 const RATE_MIN_MS = process.env.EEAT_RATE_MIN_MS !== undefined ? +process.env.EEAT_RATE_MIN_MS : 100;
 const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'best'); return m === 'beam' || m === 'mix' ? m : 'best'; };
