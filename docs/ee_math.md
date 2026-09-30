@@ -1216,6 +1216,10 @@ as before. Measured (the same bench, both arms of one tree side by side, `EEAT_M
 
 0 lost, 0 rejected. From the first version's 340 the class's solved legs are 670 (the twin cut + F2; the tree's other changes 415 -> 420). The failures
 spend the whole 150 k ticks again (the family is larger than the budget): more speed is more legs.
+The shared gate with F2 (box 3, n4-plan dc075b4 + F2, the block-4 list vs b3_w3.json, 60 s, W3, par 6): **exit 0**,
+compiled 14 vs 12, better 9, worse 0 (progress MIHB's Dream 32 vs 23, Level 1 Overworld 41 vs 34, Booty Return 36 vs 13,
+Starlight 29 vs 19; Ruins 1,387 vs 1,444, Accident Prone 3,129 vs 3,422), 14 / 14 replayed; test/msolve.js 50/0 on
+both branches.
 
 **THEOREM V (the axis speed bounds) and its engine check.** Away from the tiles that can push an axis past its bound
 (x: a pull on x = the left / right arrows, an x boost; y: a y boost, ice (its glide keeps more speed on y), levitation;
