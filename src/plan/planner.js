@@ -472,6 +472,7 @@ function createPlanner(model, facts, o = {}) {
 	const STONE_LONG = +process.env.EEAT_PLAN_STONE_LONG || 1000, STONE_MAX = +process.env.EEAT_PLAN_STONE_MAX || 120;
 	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
 	if (stones.length > STONE_MAX) stones = [];
+	const stoneIds = new Set(stones.map((X) => X.id));
 	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
 	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
 	// pocket), so it blocks the edge from that (state, position) only, not from every node of the state: the re-entry
@@ -1151,14 +1152,18 @@ function createPlanner(model, facts, o = {}) {
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
+		// (a STONE is optional: its failure is no counterexample to the corridor (a cut there walled the est walk's way to
+		// every later target: Machu Picchu's stones plan fell back to the penalised trophy leg after two stone failures);
+		// the stone is blocked from its second rung on instead. EEAT_PLAN_STONE_CUT=1: the cut as for any trigger)
+		const isStone = STONES && stones.length && step.waypoint && step.waypoint.trig !== undefined && stoneIds.has(step.waypoint.trig) && process.env.EEAT_PLAN_STONE_CUT !== '1';
 		let cut = null;
 		// (EEAT_FIELD_MEMO=1 (executor.js): a closest of unknown distance (the call had no goal field) cuts nothing)
-		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		if (!isStone && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && !(process.env.EEAT_FIELD_MEMO === '1' && !(fail.closest.dist >= 0)) && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
 		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
-		if (rung + 1 >= facts.RUNG_MAX) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
+		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= 2)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
 	// ---------------------------------------------------------------- the truth checker's price of an order
