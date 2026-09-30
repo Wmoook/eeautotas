@@ -214,7 +214,7 @@ function makeCore(L, co) {
 			const depthMax = beforeTick >= 0 ? beforeTick - t0 : 4000;
 			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region,
 				width0: 300, widthMax: 80000, depthMax: dmax, stall: 150 + 100 * rung });
-			const runBest = (end) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, depthMax });
+			const runBest = (end) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(",").map(Number) : null });
 			const mode = LEG_MODE();
 			const t3 = Date.now();
 			let r = mode === 'beam' ? runBeam(wEnd - 3, depthMax) : runBest(mode === 'best' ? wEnd - 3 : t3 + 0.7 * (wEnd - t3));

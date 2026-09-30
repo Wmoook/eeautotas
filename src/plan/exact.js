@@ -75,6 +75,30 @@ function discKey(sim) {
 	return h >>> 0;
 }
 
+/**
+ * The primitives' admissible tick fields for this goal (bounds.js createBounds: field(goalTiles, Lc, {touch}) and at(f,
+ * sim)), built once per search, never per state (their leg() builds levelNow per call): `rel` on the level itself (every
+ * door open: admissible whatever the ball touches), `now` on the level as the doors stood at the starts (only when every
+ * start has the same door-reading state; used only for states that still have it). null without a usable bounds object.
+ */
+const BFIELDS = new WeakMap();
+function boundFields(L, bounds, goal, starts, simIn, disc0, sameDisc) {
+	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function') return null;
+	const touch = goal.kind === 'trophy';
+	let rel;
+	try { rel = bounds.field(goal.tiles, null, { touch }); } catch (e) { return null; }
+	let now = null;
+	if (sameDisc && disc0 !== undefined && starts.length) {
+		try {
+			const sim = simIn || new E.EESim(L);
+			sim.restore(starts[0].snap);
+			now = bounds.field(goal.tiles, require('./types.js').levelNow(L, sim), { touch });
+		} catch (e) { now = null; }
+	}
+	void BFIELDS;
+	return { rel, now };
+}
+
 /** the goal test at absolute tick t (types.js goalOf's test + beforeTick) */
 const goalAt = (goal, sim, t, beforeTick) => (beforeTick < 0 || t <= beforeTick) && goal.test(sim);
 
@@ -87,10 +111,11 @@ function exactLeg(L, starts, goal, o) {
 	const tr = trophy ? 1 : 0;
 	const useBound = !o.noBound && !allowDeath;
 	const B = useBound ? (o.B || boundFor(L, goal)) : null;
-	const legB = useBound && o.bounds && typeof o.bounds.leg === 'function' ? o.bounds : null;
 	const field = o.field && o.field.mode !== 'walk' ? o.field : null;
 	const dk = o.discKey || discKey;
 	const disc0 = o.disc0;
+	const bf = useBound ? boundFields(L, o.bounds, goal, starts, o.sim || null, disc0, o.sameDisc) : null;
+	const legB = bf ? o.bounds : null;
 	const deadline = o.deadline || Infinity, stop = o.stop || null;
 	const beforeTick = o.beforeTick >= 0 ? o.beforeTick : -1;
 	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
@@ -108,7 +133,13 @@ function exactLeg(L, starts, goal, o) {
 	const bound = (lim) => {
 		if (!useBound) return 0;
 		let h = EG.lowerBound(B, sim, lim);
-		if (legB !== null && h <= lim) { const h2 = legB.leg(sim, goal); if (h2 > h) h = h2; }
+		if (legB !== null && h <= lim) {
+			// (the primitives' tick field: the doors as they stood at the start while the ball's door-reading state is the
+			// start's, else the relaxed one (every door open); their at() without its own endgame part: h has it)
+			const f = bf.now !== null && dk(sim) === disc0 ? bf.now : bf.rel;
+			const h2 = legB.at(f, sim, { endgame: false });
+			if (h2 > h) h = h2;
+		}
 		return h;
 	};
 	const seen = new HashSetLocal();

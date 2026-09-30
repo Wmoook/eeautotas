@@ -263,7 +263,13 @@ async function legsOfRoute(e, budget, maxLegs) {
 	const L = tr.L;
 	const ev = S.routeEvents(L, tr.masks);
 	const ord = S.orderOf(ev.events).filter((o) => o.feat !== 'prot');
-	const ex = await EX.createExecutor(L, { workers: 0 });
+	// (--parts=<dir>: the other parts' bounds.js / prims.js from that folder, for an integrated measurement; --noPrims)
+	let bounds = null, prims = null;
+	if (args.parts) {
+		try { bounds = require(path.resolve(String(args.parts), 'bounds.js')).createBounds(L, {}); } catch (err) { bounds = null; }
+		if (!args.noPrims) { try { prims = await require(path.resolve(String(args.parts), 'prims.js')).createPrims(L, { bounds, workers: 0 }); } catch (err) { prims = null; } }
+	}
+	const ex = await EX.createExecutor(L, { workers: 0, bounds, prims });
 	const out = [];
 	let prevTick = 0;
 	for (let k = 0; k < ord.length && out.length < maxLegs; k++) {
@@ -303,7 +309,8 @@ async function legsTruth() {
 		const runs = [];
 		for (let i = 0; i < par; i++) {
 			runs.push(new Promise((resolve) => {
-				const p = spawn(process.execPath, [__filename, '--only=legs', '--truth', `--limit=${limit}`, `--budget=${budget}`, `--shard=${i}/${par}`, '--json', `--maxLegs=${args.maxLegs || 40}`], { stdio: ['ignore', 'pipe', 'inherit'] });
+				const p = spawn(process.execPath, [__filename, '--only=legs', '--truth', `--limit=${limit}`, `--budget=${budget}`, `--shard=${i}/${par}`, '--json', `--maxLegs=${args.maxLegs || 40}`,
+					...(args.parts ? [`--parts=${args.parts}`] : []), ...(args.noPrims ? ['--noPrims'] : [])], { stdio: ['ignore', 'pipe', 'inherit'] });
 				let s = '';
 				p.stdout.on('data', (d) => { s += d; });
 				p.on('close', () => { try { resolve(JSON.parse(s.trim().split('\n').pop()).rows || []); } catch (e) { resolve([]); } });
@@ -368,7 +375,7 @@ async function polishTruth() {
 	check('T-POLISH every output finishes', fin === n && n > 0, `${fin}/${n}`);
 }
 
-(async () => {
+if (require.main === module) (async () => {
 	const t0 = Date.now();
 	try {
 		if (only.has('unit')) await unit();
@@ -381,3 +388,4 @@ async function polishTruth() {
 	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 	process.exit(fail ? 1 : 0);
 })();
+module.exports = { triggerTiles, featBlocks, legsOfRoute, levelOf };
