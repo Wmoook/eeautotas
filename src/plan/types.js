@@ -298,8 +298,22 @@ const FX_FIELD = process.env.EEAT_FX_FIELD === '1';
 // and field as before, byte for byte)
 const WILD_IDS = new Set([417, 418, 419, 453, 461, 1517]), WILDM = new WeakMap();
 const wildOf = (fg) => { let w = WILDM.get(fg); if (w === undefined) { w = false; for (let i = 0; i < fg.length; i++) if (WILD_IDS.has(fg[i])) { w = true; break; } WILDM.set(fg, w); } return w; };
-/** the state in sim has no effect on (featValue 'fx' 0) and the plain-ball field is on */
-const plainOf = (sim) => FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity;
+// THE EFFECT-STATE FIELD (COMPILER DOCTOR 10, n5; EEAT_FX_STATE=1, OPT-IN, off = the above byte for byte): the plain-ball
+// field reads the walk for every ball with an effect on, and on the effect levels of the known routes the ball CARRIES one
+// for most of the way (Need for Steed takes max_jumps 2 on its spawn tile and keeps it for 3,720 of its 3,728 ticks; over
+// the truth set's 24 effect levels the effect is on for >= 50% of the route on 7): the executor's walk there has false nears
+// at every ceiling (from Need for Steed's route state at tick 950 its skeleton stalls at c 425 on the top row, (453, 2),
+// where the route drops to row 45 and climbs back). With the knob plainOf(sim) is the ball's effect state {mj, jb} (reach.js
+// fxStateOf: max_jumps < 1000 and the jump boost; the speed boost ignored; null: fly, low gravity, a gravity rotation,
+// infinite jumps: the walk as before) and goalField builds the physics field OF THAT STATE (reach.js opts.fxState: the jump
+// rises its mj jumps' height, the effect tiles that change the state are its exits): ordering only (its physics -1 is no
+// proof: costAt reads the walk there, reach.js FX_FAR).
+const FX_STATE = process.env.EEAT_FX_STATE === '1';
+/** the state in sim has no effect on (featValue 'fx' 0) and the plain-ball field is on; with EEAT_FX_STATE the ball's effect
+ *  state {mj, jb} (an object) or null */
+const plainOf = (sim) => (FX_STATE ? RF.fxStateOf(sim) : FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity);
+/** the memo key suffix of a field for plainOf's value p (the plain-ball field '|p', an effect state '|f<mj>.<jb>') */
+const fxSuffix = (p) => (!p ? '' : typeof p === 'object' ? `|f${p.mj}.${p.jb}` : '|p');
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
 let FIELDS_MAX = FIELDS_MIN;
 const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (ArrayBuffer.isView(a)) b += a.byteLength; } return b; };
@@ -311,12 +325,14 @@ const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (
  * o.deaths: reachField's deaths option (false: no death edges, the executor's searches drop dead balls: the default).
  */
 function goalField(Lc, tiles, o = {}) {
-	const pfx = o.plainFx === true && FX_FIELD && wildOf(Lc.fg);
-	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${pfx ? '|p' : ''}`;
+	// (EEAT_FX_STATE: o.plainFx is the ball's effect state, an object: the effect-state field)
+	const fs = o.plainFx && typeof o.plainFx === 'object' && FX_STATE && wildOf(Lc.fg) ? o.plainFx : null;
+	const pfx = fs === null && o.plainFx === true && FX_FIELD && wildOf(Lc.fg);
+	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${fs ? fxSuffix(fs) : pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
 	if (o.cachedOnly === true) return null;   // (the memo only: executor.js FIELD_MEMO)
-	const f = RF.reachField(Lc, pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	const f = RF.reachField(Lc, fs ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, fxState: fs } : pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));
 	FIELDS.set(key, f);
 	while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
@@ -330,4 +346,4 @@ const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.s
 /** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
 const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
 const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, wildOf, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, plainOf, fxSuffix, wildOf, fgHash, emitter, CLOCK_DOORS };

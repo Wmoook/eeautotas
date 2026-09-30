@@ -83,6 +83,27 @@ const WILD = new Set([417, 418, 419, 453, 461, 1517]);
 // the walk as before, byte for byte. (9 of the 230 levels: Springopolis, On And On And On, Just One More Time,
 // Sandcastle Safari, First Person Maze, Frolic, Floating Temples, Golden Nightingale, Be gone.)
 const AIRJ_ENV = () => process.env.EEAT_AIRJUMP === '1';
+// the effect-state field (opts.fxState, COMPILER DOCTOR 10): the effect reset (1618) turns every static effect off
+const FX_RESET = 1618;
+const jbOf = (v) => (v === 1 || v === 2 ? v : 0);   // eesim.js _jumpMultiplier: 1 x1.3, 2 x0.75, any other number x1
+/** the effect state {mj, jb} of a ball the effect-state field models, or null (fly, low gravity, a gravity rotation,
+ *  infinite jumps; the speed boost changes no vertical physics and is not in it) */
+function fxStateOf(a) {
+	if (a.has_levitation || a.flip_gravity !== 0 || a.low_gravity || !(a.max_jumps < 1000)) return null;
+	return { mj: a.max_jumps, jb: jbOf(a.jump_boost) };
+}
+/** does effect tile id with number v change a ball of effect state s (the engine's touch: eesim.js _touchBlock) */
+function fxChanges(id, v, s) {
+	switch (id) {
+		case 461: return v !== s.mj;                    // multijump: max_jumps = its number
+		case 417: return jbOf(v) !== s.jb;              // jump: jump_boost = its number
+		case 419: return false;                         // speed: no vertical physics
+		case FX_RESET: return s.mj !== 1 || s.jb !== 0; // the reset: max_jumps 1, no boost
+		default: return v !== 0;                        // fly, low gravity, gravity: on unless 0
+	}
+}
+// (a state the physics part of an effect-state field has no way from: its walk + this, behind every way it has)
+const FX_FAR = 4000;
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
 
 /**
@@ -249,15 +270,25 @@ function reachField(level, opts) {
 	// bound and its -1 a proof for the plain ball); an effect tile that leaves a plain ball plain (a fly / jump / speed /
 	// low-gravity / gravity effect of number 0, a multijump of 1) is air. Without it: one effect tile anywhere made the
 	// whole level's field the gravity-blind walk.
+	// opts.fxState {mj, jb} (with opts.goals; COMPILER DOCTOR 10, types.js EEAT_FX_STATE): the same field for a ball that
+	// CARRIES an effect the physics model can take (fxStateOf: max_jumps mj < 1000, jump_boost jb; the speed boost changes
+	// no vertical physics and is ignored; fly, low gravity, a gravity rotation and infinite jumps are not modelled: none):
+	// its jump rises the combined height of its mj jumps (the ground jump + mj - 1 air jumps at the apex: a ball that walks
+	// off a ledge keeps mj - 1 air jumps, eesim.js jump_count, and the R states' free sideways moves let the ledge jump
+	// stand for that way) with the jump effect's speed, none at mj 0; the effect tiles that change THIS state are its exits
+	// (fxChanges: goals at their walk cost), the others air. ORDERING ONLY: a ball the engine takes off the ground some
+	// other way (a portal exit, a boost) keeps air jumps the model does not give it, so the physics part is no lower bound:
+	// costAt never reads its -1 (the walk's cost + FX_FAR there), and the walk's -1 stays the only cut, as on the walk field.
 	let mjTiles = 0, wildOther = false;   // (the air jumps: multijump tiles, any other effect tile)
-	const plainFx = !!opts.plainFx && !!opts.goals;
+	const fxS = opts.fxState && opts.goals ? opts.fxState : null;
+	const plainFx = (!!opts.plainFx && !!opts.goals) || fxS !== null;
 	const fxExit = plainFx ? [] : null;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
-		if (WILD.has(id)) {
-			if (id === 461) mjTiles++; else wildOther = true;
+		if (WILD.has(id) || (fxS !== null && id === FX_RESET)) {
+			if (WILD.has(id)) { if (id === 461) mjTiles++; else wildOther = true; }
 			if (!plainFx) wild = true;
-			else if (id === 461 ? lk[i] !== 1 : lk[i] !== 0) fxExit.push(i);
+			else if (fxS !== null ? fxChanges(id, lk[i], fxS) : (id === 461 ? lk[i] !== 1 : lk[i] !== 0)) fxExit.push(i);
 		}
 		if (id === PROTECTION && lk[i] !== 0) { protect = true; protOn.push(i); }
 		if (id === ICE) ice = true;
@@ -391,7 +422,8 @@ function reachField(level, opts) {
 		for (const i of portalExits.keys()) { const s = level.portalSlot[i]; if (!srcOf.has(i) && level.pTarget[s] !== level.pId[s]) forcedP[i] = 1; }
 		unforceChains(W, H, forcedP, portalExits, srcOf);
 	}
-	const Q = anyField || anyPortal ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
+	// (opts.fxState: a multi-jump or a boosted jump rises past QMIN's 9 half rows)
+	const Q = anyField || anyPortal || (fxS !== null && (fxS.mj >= 2 || fxS.jb === 1)) ? QMAX : QMIN, INF = Q + 1, NR = Q + 3;
 	// ---- the rise caps (the n3 rise-q16 fix): every speed is capped at 16 px/tick by the engine's speed update (Player.tick:
 	// (v + modifier) x drag, then the clamp), so an up boost's and a portal exit's rise is finite: R(q), not R(INF) (which
 	// sent the fields up 100+ tiles of open sky from any boost or portal exit: Imps Paradise, Barrel Cannon Canyon, ...).
@@ -496,7 +528,7 @@ function reachField(level, opts) {
 			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
 		}
 	}
-	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ, fxSeeds, plainFx: plainFx && mode === 'physics',
+	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ, fxSeeds, plainFx: plainFx && fxS === null && mode === 'physics', fx: fxS !== null && mode === 'physics' ? { mj: fxS.mj, jb: fxS.jb } : null,
 		halfQuad: blk ? blk.reduce((a, x) => a + x, 0) : 0,
 		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
@@ -547,6 +579,10 @@ function reachField(level, opts) {
 	// the lookup's own table (modMin) of that tile's id
 	const J = new Int8Array(N).fill(-128);
 	const modCur = (n) => { const j = curOf[n]; return j < 0 ? G : mm(fg[j]); };
+	// (opts.fxState: the ball's jump speed and jumps; eesim.js _jumpMultiplier: jump_boost 1 x1.3, 2 x0.75)
+	const MJX = fxS !== null ? fxS.mj : 1;
+	const JVX = MJX === 0 ? 0 : fxS !== null ? JV * (fxS.jb === 1 ? 1.3 : fxS.jb === 2 ? 0.75 : 1) : JV;
+	const rjAir = MJX > 1 ? riseQ(JVX, G, G, nIce) : 0;
 	for (let i = 0; i < N; i++) {
 		if (cls[i] !== NORM) continue;
 		if (i < W || cls[i - W] === WALL) continue;   // a ceiling right above: the jump bonks at once
@@ -556,7 +592,9 @@ function reachField(level, opts) {
 			const nx = x + dx, ny = y + dy;
 			if (nx >= 0 && ny >= 0 && nx < W && ny < H) m = Math.min(m, modCur(ny * W + nx));
 		}
-		const rj = riseQ(JV, m, G, nIce);
+		// (opts.fxState: the jump effect's speed; mj jumps: + mj - 1 air jumps from the apex, in plain air; none at mj 0)
+		if (JVX === 0) continue;
+		const rj = riseQ(JVX, m, G, nIce) + (MJX > 1 ? (MJX - 1) * rjAir : 0);
 		let e = -1e9;
 		if (isFloor(i + W) && !(i + W < N && sp[i + W] === LOWER)) e = Math.max(e, rj - 8);
 		if (sp[i] === LOWER) e = Math.max(e, rj);
@@ -568,7 +606,7 @@ function reachField(level, opts) {
 			if (isFloor(n + W) && !(n + W < N && sp[n + W] === LOWER)) e = Math.max(e, rj - 8);
 			if (sp[n] === LOWER) e = Math.max(e, rj);
 		}
-		if (e > -1e9) J[i] = qOf(e, Q);
+		if (e > -1e9) J[i] = fxS !== null && e + TOL > 8 * Q ? INF : qOf(e, Q);   // (opts.fxState: past Q's rows, anywhere up)
 	}
 	// (the air jumps: the rise of a jump anywhere in a normal tile, the centre up to the tile's top edge: the stand jump's
 	// rise from a floor + 8, and 8 px of margin; the gravity queue as the stand jump's)
@@ -593,7 +631,7 @@ function reachField(level, opts) {
 	// up arrows under a ceiling (anything that stops a rise): the jump down from it
 	const ceilJ = new Uint8Array(N);
 	for (let i = 0; i < N; i++) if (cls[i] === UP && (i < W || cls[i - W] === WALL || (fl(fg[i - W]) & (F_SOLID | F_JUMPTHRU | F_HALF | F_ROTHALF | F_DOOR)) !== 0)) ceilJ[i] = 1;
-	const KJD = Math.min(KF, kOfX(fallD(-JV) + 16) + (ice ? 1 : 0));
+	const KJD = Math.min(KF, kOfX(fallD(Math.max(-JV, -JVX)) + 16) + (ice ? 1 : 0));   // (opts.fxState: the stronger jump)
 
 	// ---- per-tile profiles (what fwd reads), the model
 	// (opts.oneWayEntry, src/steer.js only: a one-way platform's centre entry against its pass direction is blocked (a plain
@@ -641,7 +679,8 @@ function reachField(level, opts) {
 		else if (c === BDOWN) emit(F_, KF);
 		else emit(F_, Math.min(KF, k + KSTEP));
 	};
-	const ljump = (P, P2, k, emit) => { if (P.cls === NORM && P2.lj && k >= KLJ) { const cl = cOfV(vfieldP(P2, -JV, 1)); emit(C_, XA !== null ? Math.min(cl, xIn(P2, -JV)) : cl); } };
+	// (opts.fxState: the ball's jump speed; none at mj 0)
+	const ljump = (P, P2, k, emit) => { if (JVX !== 0 && P.cls === NORM && P2.lj && k >= KLJ) { const cl = cOfV(vfieldP(P2, -JVX, 1)); emit(C_, XA !== null ? Math.min(cl, xIn(P2, -JVX)) : cl); } };
 	/** the forward model: a move from a tile of profile P to a neighbour of profile P2 by (dx, dy) of a state (ty, l) */
 	function fwd(P, P2, dx, dy, ty, l, emit) {
 		if ((P2.sp === LOWER && dy < 0) || (P.sp === LOWER && dy > 0) || (P2.sp === RIGHT && dx < 0) || (P.sp === RIGHT && dx > 0)) return;
@@ -1554,6 +1593,26 @@ function scoreAt(f, px, py, vy, q0, q1, slip) {
 /** the cost to the trophy in tiles (-1 = cut off): costAt(field, sim), or costAt(field, px, py, vy, onGround) with the
  *  gravity queue unknown (taken as the strongest pull) */
 function costAt(f, a, py, vy) {
+	// (an effect-state field, opts.fxState: a ball in another state is priced by the field's walk; in its own state by the
+	// physics part, an airborne ball's air jumps left (mj - jump_count: the engine counts the ground jump as spent once the
+	// ball is off the ground) looked up as that much more rise; where the physics part has no way, the walk + FX_FAR: its -1
+	// is no proof (ordering only), the walk's is)
+	if (f.fx && typeof a === 'object' && a !== null) {
+		const tx = Math.trunc(a.px + 8) >> 4, ty = Math.trunc(a.py + 8) >> 4;
+		if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
+		const w = f.walk[ty * f.W + tx];
+		if (w === CUT) return -1;
+		const s = fxStateOf(a);
+		if (s === null || s.mj !== f.fx.mj || s.jb !== f.fx.jb) return w / 5;
+		let vy = a.speed_y;
+		const left = s.mj >= 2 && a.jump_count > 0 ? s.mj - a.jump_count : 0;
+		if (left > 0) {
+			const jv = JV * (s.jb === 1 ? 1.3 : s.jb === 2 ? 0.75 : 1);
+			vy = -RaInv(riseQ(vy, G, G, 0) + left * riseQ(jv, G, G, 0));
+		}
+		const v = fifthsAt(f, a.px, a.py, vy, a._q0, a._q1, a._slippery);
+		return v < 0 ? Math.min(FAR, w + FX_FAR * 5) / 5 : v / 5;
+	}
 	// (a plain-ball field, opts.plainFx: a ball with an effect on is priced by the field's walk, the walk mode's lookup: the
 	// physics part holds for a plain ball only)
 	if (f.plainFx === true && typeof a === 'object' && a !== null && !(a.has_levitation === false && a.flip_gravity === 0 && a.max_jumps === 1 && a.jump_boost === 0 && a.speed_boost === 0 && !a.low_gravity)) {
@@ -1621,7 +1680,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, fxStateOf, fxChanges, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
