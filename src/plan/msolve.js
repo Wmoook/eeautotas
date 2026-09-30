@@ -930,6 +930,265 @@ function createSolver(L, opts = {}) {
 		return res;
 	}
 
+	// ---------------------------------------------------------------- THE FRAME TIER (trick mining 2, EEAT_TRICKS frame)
+	// THEOREM F2 (docs/ee_math.md 6.3): an arrow field IS the plain field rotated / reflected, bit for bit in the speeds: its
+	// own axis g (x under a side pull, y under an up pull) is air.y or air.y's MIRROR (the pull sg = +-1), its cross axis IS the
+	// plain input axis (the same recurrence: the same hold tables). So a leg inside one arrow field (the centre and the gravity
+	// queue's two tiles all of the field's ids) is the plain tier's leg in the field's frame: the gravity members (standing on
+	// the field's floor, i.e. against a wall under a side pull or under a ceiling under an up pull: the jump at j (the WALL
+	// JUMP: along -sg), the walk off at o, the walk along it; launched: the one trajectory; the air jumps with airjump), each
+	// crossing the support lines of the target cells (the box at 16 c on g) at one tick, the cross axis at that T by the plain
+	// branch and bound. Every position is evaluated in REAL coordinates with the real signs (gravTrace with the mirrored
+	// constants: T-ADD and the auto-align are the engine's own on the real coordinate; a reflected coordinate would change the
+	// align (its two edges pull by tx / 15 and (tx - 14) / 15) and the roundings), the tube on the real box, the input masks
+	// the cross axis's keys (up / down under a side pull, left / right under an up pull), each candidate replayed ONCE by the
+	// engine. The sub-step order is the engine's x then y whatever the pull: under a side pull the support is probed at the
+	// tick's start on the cross axis, under an up pull after the first cross sub-step (the tube accepts either; the replay
+	// decides). One-ways are no support in the frame (their rules read both speeds): the replay decides there too.
+	const FRAME_DIRS = { L: { g: 'x', sg: -1, mor: [-2, 0] }, R: { g: 'x', sg: 1, mor: [2, 0] }, U: { g: 'y', sg: -1, mor: [0, -2] } };
+	const frameIdMap = new Map();
+	/** the ids whose centre physics is the arrow field dir's (its gravity tables, no field / effect / portal / kill) */
+	function frameIdsOf(dir) {
+		if (frameIdMap.has(dir)) return frameIdMap.get(dir);
+		const n = L.flags.length, out = new Uint8Array(n), d = FRAME_DIRS[dir];
+		KN.flagsOf(n - 1);
+		const g = KN.gravTables();
+		for (let id = 0; id < n; id++) {
+			const f = L.flags[id] | 0;
+			if (f & (F_LIQUID | F_CLIMB | F_BOOST)) continue;
+			if (DOTS.has(id) || PORTALS.has(id) || EFFECT_IDS.has(id)) continue;
+			if (g.morx[id] !== d.mor[0] || g.mory[id] !== d.mor[1] || g.mox[id] !== d.mor[0] || g.moy[id] !== d.mor[1] || (g.flags[id] & 4) !== 0) continue;
+			if (L.gFlags && (L.gFlags[id] & 4) !== 0) continue;
+			out[id] = 1;
+		}
+		frameIdMap.set(dir, out);
+		return out;
+	}
+	/** the frame of a state inside one arrow field (its centre and both queued tiles), or null */
+	function frameStart(s) {
+		if (s.is_dead || s.in_god_mode || s.flip_gravity !== 0 || s.has_levitation || s._slippery > 0) return null;
+		const c = K1.ctxOf(s);
+		if (!(c.gm > 0)) return null;
+		for (const dir of ['L', 'R', 'U']) {
+			const ids = frameIdsOf(dir);
+			let ok = true;
+			for (const id of [s._current, s._q0, s._q1]) if (!(id < ids.length && ids[id] === 1)) { ok = false; break; }
+			if (!ok) continue;
+			const cx = Math.trunc(s.px + 8) >> 4, cy = Math.trunc(s.py + 8) >> 4;
+			if (cx < 0 || cy < 0 || cx >= W || cy >= Hh) return null;
+			const id = s.tiles[cy * W + cx];
+			if (!(id < ids.length && ids[id] === 1)) return null;
+			const d = FRAME_DIRS[dir];
+			return { dir, g: d.g, sg: d.sg, ids, ctx: c };
+		}
+		return null;
+	}
+	function solveFrame(snap, s, fr, tg, goal, o, stats) {
+		const Tmax = o.Tmax, ctx = fr.ctx, ids = fr.ids, sg = fr.sg, gx = fr.g === 'x';
+		const I = K1.ia(ctx), G0 = K1.ga(ctx), Hd = holdTables(ctx);
+		// the pull's own axis: air.y's constants, mirrored for a pull toward -: the jump along -sg
+		const Gf = sg > 0 ? G0 : { gm: G0.gm, jm: G0.jm, mo: -G0.mo, a: -G0.a, J: -G0.J };
+		const sol = solidOf(s), tiles = s.tiles;
+		const P0 = gx ? s.px : s.py, vP0 = gx ? s.speed_x : s.speed_y, Q0 = gx ? s.py : s.px, vQ0 = gx ? s.speed_y : s.speed_x;
+		const NG = gx ? W : Hh, NQ = gx ? Hh : W;
+		const standing = s.on_ground && vP0 === 0;
+		const kMax = o.K === undefined ? KMAX : o.K;
+		const MQ = gx ? [0, 8, 16] : [0, 2, 4];               // the cross axis's keys: index 1 its -, 2 its +
+		if (standing && P0 !== 16 * Math.round(P0 / 16)) return { ok: false, why: 'frame: standing off the grid', tool: 'frame' };
+		const freeAt = (P, Q) => (gx ? boxFree(sol, P, Q) : boxFree(sol, Q, P));
+		const inIds = (P, Q) => {
+			const x = gx ? P : Q, y = gx ? Q : P;
+			const cx = Math.trunc(x + 8) >> 4, cy = Math.trunc(y + 8) >> 4;
+			if (cx < 0 || cy < 0 || cx >= W || cy >= Hh) return false;
+			const id = tiles[cy * W + cx];
+			return id < ids.length && ids[id] === 1;
+		};
+		// a support (a wall / ceiling: solid, half block) in cell k along g over the box's cross extent at Q; the world's edge
+		const supportAt = (Q, k) => {
+			if (k < 0 || k >= NG) return true;
+			const lo = (Q | 0) >> 4, hi = lo + ((Q + 16) > lo * 16 + 16 ? 2 : 1);
+			for (let c = lo; c < hi; c++) {
+				if (c < 0 || c >= NQ) continue;
+				const q = gx ? sol[c * W + k] : sol[k * W + c];
+				if (q === 1 || q === 4) return true;
+			}
+			return false;
+		};
+		// the support cell of a box resting at P on the pull's side
+		const supK = (P) => (sg > 0 ? ((P + 16) >> 4) : (P >> 4) - 1);
+		const k0 = standing ? supK(P0) : -99;
+		// the targets as (cg, cq) cells, by cg
+		const byG = new Map();
+		for (const t of tg.tiles) {
+			const c = t % W, r = (t / W) | 0, cg = gx ? c : r, cq = gx ? r : c;
+			if (!byG.has(cg)) byG.set(cg, []);
+			byG.get(cg).push(cq);
+		}
+		// the cross windows of a landing on the support line of cells cg (the box at 16 cg on g, the support at cg + sg)
+		const landWinsF = (cg) => {
+			const out = [], k = cg + sg, sl = K1.ALIGN_SLACK;
+			const f = (c) => { if (k < 0 || k >= NG) return true; if (c < 0 || c >= NQ) return false; const q = gx ? sol[c * W + k] : sol[k * W + c]; return q === 1 || q === 4; };
+			for (const cq of byG.get(cg) || []) {
+				const lo = 16 * cq - 8, hi = 16 * cq + 8;
+				if (f(cq)) { out.push([lo, hi]); continue; }
+				if (f(cq - 1)) out.push([lo, Math.min(hi, 16 * cq + sl)]);
+				if (f(cq + 1)) out.push([Math.max(lo, 16 * cq - sl), hi]);
+			}
+			return mergeWins(out);
+		};
+		const enterWinsF = (cg) => mergeWins((byG.get(cg) || []).map((cq) => [16 * cq - 8, 16 * cq + 8]));
+		// the gravity members (the plain tier's, on the pull's own axis)
+		const members = [];
+		const fall = gravTrace(P0, 0, Tmax, Gf), air = gravTrace(P0, vP0, Tmax, Gf), jmp = gravTrace(P0, Gf.J, Tmax, Gf);
+		if (standing) {
+			if (s.max_jumps >= 1) for (let j = 1; j < Tmax; j++) members.push({ kind: 'jump', j, g: j, off: 0, air0: j, y: (t) => (t <= j ? P0 : jmp.Y[t - j]), r: (t) => (t <= j ? P0 : jmp.R[t - j]), v: (t) => (t <= j ? 0 : jmp.V[t - j]) });
+			for (let off = 1; off < Tmax; off++) members.push({ kind: 'off', j: 0, g: off - 1, off, air0: off - 1, y: (t) => (t < off ? P0 : fall.Y[t - off + 1]), r: (t) => (t < off ? P0 : fall.R[t - off + 1]), v: (t) => (t < off ? 0 : fall.V[t - off + 1]) });
+			members.push({ kind: 'walk', j: 0, g: Tmax, off: 0, air0: Tmax, y: () => P0, r: () => P0, v: () => 0 });
+		} else {
+			members.push({ kind: 'air', j: 0, g: 0, off: 0, air0: 0, y: (t) => air.Y[t], r: (t) => air.R[t], v: (t) => air.V[t] });
+		}
+		// THE BONKS (the plain members' rule in the frame: a rise against the pull stopped by the far side's line, the box
+		// blocked there (or at a whole start: one add, it stays), the speed 0, then the fall from there): under a side pull the
+		// opposite wall, under an up pull the floor
+		const falls = new Map();
+		const fallFrom = (p) => { if (!falls.has(p)) falls.set(p, gravTrace(p, 0, Tmax, Gf)); return falls.get(p); };
+		for (const m of members.slice()) {
+			if (m.kind !== 'jump' && m.kind !== 'air') continue;
+			let prev = P0;
+			for (let t = m.air0 + 1; t <= Tmax; t++) {
+				const pt = m.y(t);
+				if (!(m.v(t) * sg < 0)) break;
+				const lines = [];
+				if (sg > 0) { for (let line = Math.floor(prev / 16) * 16; line > pt; line -= 16) lines.push(line); }
+				else { for (let line = Math.ceil(prev / 16) * 16; line < pt; line += 16) lines.push(line); }
+				for (const line of lines) {
+					const pb = Number.isInteger(prev) ? prev : line, b = t, cr = sg > 0 ? line / 16 - 1 : line / 16 + 1, fl = fallFrom(pb);
+					members.push({ kind: m.kind, j: m.j, g: m.g, off: 0, air0: m.air0, bonk: { b, cr, line: pb },
+						y: (q) => (q < b ? m.y(q) : q === b ? pb : fl.Y[q - b]), r: (q) => (q < b ? m.r(q) : q === b ? pb : fl.R[q - b]), v: (q) => (q < b ? m.v(q) : q === b ? 0 : fl.V[q - b]) });
+				}
+				prev = pt;
+			}
+		}
+		const tricks = tricksOf(o);
+		if (tricks.has('airjump') && s.max_jumps > 1 && Tmax > 4) {
+			const left0 = s.max_jumps >= 1000 ? Infinity : standing ? s.max_jumps - 1 : s.max_jumps - Math.max(1, s.jump_count);
+			if (left0 >= 1) for (const b of members.slice()) {
+				if (b.kind === 'walk' || b.bonk) continue;
+				for (let a = Math.max(1, b.air0 + 1); a < Tmax; a++) {
+					const ya = b.r(a), tr = gravTrace(ya, Gf.J, Tmax - a, Gf), by = b.y, br = b.r, bv = b.v;
+					members.push({ kind: 'ajump', base: b, a, j: b.j, g: b.g, off: b.off, air0: a, jumps: (b.kind === 'jump' ? [b.j] : []).concat([a]), sk: 2e5 + a,
+						y: (q) => (q < a ? by(q) : q === a ? ya : tr.Y[q - a]), r: (q) => (q < a ? br(q) : q === a ? ya : tr.R[q - a]), v: (q) => (q < a ? bv(q) : q === a ? Gf.J : tr.V[q - a]) });
+				}
+			}
+		}
+		// the items
+		const items = [];
+		const isG = tg.cls === 'G' || tg.cls === 'any';
+		for (const m of members) {
+			if (m.kind === 'walk') {
+				if (!isG) continue;
+				for (const cg of byG.keys()) {
+					if (16 * cg !== P0) continue;
+					const wins = landWinsF(cg);
+					if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: cg });
+				}
+				continue;
+			}
+			for (const cg of byG.keys()) {
+				const line = 16 * cg;
+				if (isG) {
+					for (let t = Math.max(1, m.air0 + 1); t <= Tmax; t++) {
+						const pp = t === 1 ? P0 : m.y(t - 1), rt = m.r(t), vt = m.v(t);
+						if (sg > 0 ? (pp <= line && rt > line && vt > 0) : (pp >= line && rt < line && vt < 0)) {
+							const wins = landWinsF(cg);
+							if (wins.length) items.push({ T: t, m, wins, land: cg });
+							break;
+						}
+					}
+				}
+				if (tg.cls !== 'G') {
+					const lo = 16 * cg - 8, hi = 16 * cg + 8;
+					for (let t = Math.max(1, m.air0 + 1); t <= Tmax; t++) { const yt = m.y(t); if (yt >= lo && yt < hi) items.push({ T: t, m, wins: enterWinsF(cg), land: null }); }
+				}
+			}
+		}
+		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
+		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
+		const tEnd0 = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
+		const tEnd = o.deadline > 0 ? (tEnd0 ? Math.min(tEnd0, o.deadline) : o.deadline) : tEnd0;
+		const budget = { n: o.nodes || 400000, out: false };
+		let best = null;
+		stats.frameItems = items.length;
+		for (const it of items) {
+			if (best && it.T > best.T) break;
+			if (budget.out || (tEnd && Date.now() > tEnd)) { budget.out = true; break; }
+			const r0 = holdRange(Hd, Q0, vQ0, it.T, K1.ALIGN_SLACK + 1e-6);
+			let any = false; for (const w of it.wins) if (r0[1] >= w[0] && r0[0] < w[1]) any = true;
+			if (!any) continue;
+			stats.items++;
+			const m = it.m, T = it.T, land = it.land !== null && it.land !== undefined;
+			const Ps = new Float64Array(T + 1);
+			Ps[0] = P0;
+			for (let t = 1; t <= T; t++) Ps[t] = m.y(t);
+			const line = land ? 16 * it.land : 0, kL = land ? it.land + sg : 0;
+			if (land) Ps[T] = line;
+			// the cross axis's walls: the box probed at the member's P before and after the tick
+			const wall = (j, q, qn) => {
+				const pa = Ps[j], pb = Ps[j - 1];
+				const blk = (p) => !(freeAt(pa, p) && freeAt(pb, p));
+				if (!blk(qn)) return qn;
+				let p = q;
+				if (qn > q) {
+					if (Number.isInteger(q) && qn - q < 1) return q;
+					for (let z = Number.isInteger(q) ? q + 1 : Math.ceil(q); z <= qn; z += 1) { if (blk(z)) return p; p = z; }
+					return p;
+				}
+				if (Number.isInteger(q)) return q;
+				for (let z = Math.floor(q); z >= qn; z -= 1) { if (blk(z)) return p; p = z; }
+				return p;
+			};
+			const tube = (j, qp, q, raw) => {
+				if (raw === undefined) raw = q;
+				let qs = raw;
+				const fq = Math.floor(qp);
+				if (raw > qp) { if (raw >= fq + 1) qs = fq + 1; } else if (raw < qp) { if (qp !== fq && raw < fq) qs = fq; }
+				if (j <= m.g && !(land && j === T && m.kind !== 'walk')) {
+					return (supportAt(qs, k0) || supportAt(qp, k0) || supportAt(q, k0)) && freeAt(P0, q) && inIds(P0, q);
+				}
+				if (m.off && j === m.off && supportAt(gx ? qp : qs, k0)) return false;
+				if (m.bonk && j === m.bonk.b) {
+					// the far side's cells over the box (at the start, the sub-step, raw or aligned) and the box free at the line
+					if (!(supportAt(qp, m.bonk.cr) || supportAt(qs, m.bonk.cr) || supportAt(raw, m.bonk.cr) || supportAt(q, m.bonk.cr))) return false;
+					if (j < T) return freeAt(m.bonk.line, q) && inIds(m.bonk.line, q);
+				}
+				if (j === T && land) return freeAt(line, q) && (supportAt(raw, kL) || supportAt(qs, kL) || supportAt(q, kL) || supportAt(qp, kL));
+				if (j === T) return true;
+				return freeAt(Ps[j], q) && inIds(Ps[j], q);
+			};
+			const emit = (code, qT, vT, k) => {
+				stats.cands++;
+				const extra = !land && tg.cls !== 'any' ? 1 : 0;
+				const masks = new Uint8Array(T + extra);
+				for (let t = 1; t <= T + extra; t++) {
+					let mk = MQ[K1.inputAt(code, Math.min(t, T))];
+					if (m.jumps) { for (let q = 0; q < m.jumps.length; q++) if (t === m.jumps[q]) mk |= 1; } else if (m.kind === 'jump' && t === m.j) mk |= 1;
+					masks[t - 1] = mk;
+				}
+				stats.verifies++;
+				const hit = replay(snap, masks, goal, T + extra);
+				if (hit > 0 && (!best || hit < best.T)) { best = { T: hit, masks: Uint8Array.from(masks.subarray(0, hit)), k, member: 'frame ' + fr.dir + ' ' + memberName(m) }; return true; }
+				return false;
+			};
+			const cap = Math.floor((o.itemNodes || 40000) / (m.kind === 'ajump' ? 4 : 1)), before = budget.n;
+			const ib = { n: Math.min(budget.n, cap), out: false, tEnd };
+			if (ib.n > 0) solveX(Q0, vQ0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
+			budget.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
+			if (budget.n <= 0) budget.out = true;
+		}
+		if (!best) return { ok: false, why: budget.out ? 'frame: budget' : 'frame: no candidate', tool: 'frame' };
+		return Object.assign({ ok: true, tool: 'frame' }, best);
+	}
+
 	// ---------------------------------------------------------------- the coupled piece (per-tick one change, engine)
 	// THE SPEED-LIMIT CUT of the coupled piece (sound): without a teleport the centre moves at most SPEED_PX a tick an axis
 	// (a death ends the hold), so a state whose box position is g px (Chebyshev) from the target tiles' box range needs
@@ -1329,6 +1588,15 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 					if (h) res = { ok: true, tool: 'plain', T: h, masks: ms.slice(0, h), k: r.k, member: r.member };
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
+		}
+		// THE FRAME TIER (EEAT_TRICKS frame): a start inside one arrow field, solved as the plain tier in the field's frame
+		if (!ctx && !res.ok && oo.plain !== false && !target.tele && tricksOf(oo).has('frame')) {
+			const fr = frameStart(sim);
+			if (fr) {
+				const r = solveFrame(snap, sim, fr, tg, goal, oo, stats);
+				stats.frame = r.ok ? 'ok' : r.why;
+				if (r.ok) res = r; else res.why = 'not plain; ' + r.why;
+			}
 		}
 		split.plain = hr();
 		// a plain answer through a landing (4.11) is the plain regime's cheapest, not the cheapest of every tier: a way

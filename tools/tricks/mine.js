@@ -30,7 +30,7 @@ const TS = require('../../src/plan/truthset.js');
 
 const argv = Object.fromEntries(process.argv.slice(2).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return m ? [m[1], m[2] === undefined ? '1' : m[2]] : [a, '1']; }));
 const F_SOLID = 1, F_JUMPTHRU = 2, F_ROTHALF = 4, F_HALF = 8, F_DOOR = 16;
-const TRICKS = ['hop', 'gjump', 'airjump', 'latehold', 'airrev', 'airrel', 'airpress', 'bonk', 'wall', 'wallslide', 'snag', 'clip', 'half', 'halfceil', 'halfwall', 'oneway', 'owthru', 'rotow', 'heldjump', 'multi'];
+const TRICKS = ['hop', 'gjump', 'airjump', 'latehold', 'airrev', 'airrel', 'airpress', 'bonk', 'wall', 'wallslide', 'snag', 'clip', 'half', 'halfceil', 'halfwall', 'oneway', 'owthru', 'rotow', 'rotow_up', 'rotow_side', 'rotow_down', 'halfnear', 'heldjump', 'multi'];
 
 function loadMoves(dir) {
 	const byR = new Map();
@@ -124,7 +124,22 @@ function tagRoute(L, masks) {
 			const cx0 = Math.floor(sim.px / 16), cx1 = Math.floor((sim.px + 15.999) / 16), cy0 = Math.floor(sim.py / 16), cy1 = Math.floor((sim.py + 15.999) / 16);
 			outer: for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) { const f = fAt(cx, cy); if ((f & F_SOLID) && (f & F_JUMPTHRU) && !(f & F_ROTHALF)) { tg.add('owthru'); break outer; } }
 		}
-		if (nearFlag(sim.px, sim.py, F_ROTHALF | F_JUMPTHRU, 1)) tg.add('rotow');
+		{
+			// the rotated one-ways within 1 px, by rotation (1 up = a plain one-way's floor from above; 0 / 2 side walls; 3 a
+			// ceiling passable downward): msolve's solid map takes every one-way for a floor from above
+			const cx0 = Math.floor((sim.px - 1) / 16), cx1 = Math.floor((sim.px + 16) / 16), cy0 = Math.floor((sim.py - 1) / 16), cy1 = Math.floor((sim.py + 16) / 16);
+			for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+				const fl = fAt(cx, cy);
+				if (!((fl & F_SOLID) && (fl & F_ROTHALF) && (fl & F_JUMPTHRU))) continue;
+				tg.add('rotow');
+				const rot = sim._lookup[cy * W + cx];
+				tg.add(rot === 1 ? 'rotow_up' : rot === 3 ? 'rotow_down' : 'rotow_side');
+			}
+			for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+				const fl = fAt(cx, cy);
+				if ((fl & F_SOLID) && (fl & F_HALF) && !(fl & F_ROTHALF)) { tg.add('halfnear'); break; }
+			}
+		}
 		tags.push(tg);
 		prevX = xin; prevAir = airNow;
 	}
@@ -190,7 +205,7 @@ function agg() {
 	L.push('', 'late hold: ticks from the press to the first x input: ' + Object.entries(lh).sort((a, b) => a[0] - b[0]).map(([c, n]) => `${c}:${n}`).join(' '));
 	// the unsolved bench legs by their trick tags (exclusive, first match in a fixed order)
 	if (bench.size) {
-		const order = ['airjump', 'half', 'halfceil', 'halfwall', 'oneway', 'owthru', 'rotow', 'clip', 'snag', 'wallslide', 'wall', 'bonk', 'airrev', 'latehold', 'hop'];
+		const order = ['airjump', 'half', 'halfceil', 'halfwall', 'halfnear', 'rotow_side', 'rotow_down', 'oneway', 'owthru', 'rotow', 'clip', 'snag', 'wallslide', 'wall', 'bonk', 'airrev', 'latehold', 'hop'];
 		const ex = new Map(); let n = 0;
 		for (const m of moves) {
 			const q = bench.get(m.r + ':' + m.m);
