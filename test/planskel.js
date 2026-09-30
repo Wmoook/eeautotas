@@ -61,6 +61,41 @@ async function run(keep) {
 	return { r1, s1, ok1, n, r2, s2, ok2 };
 }
 
+/** T-SKEL-WALLCUT: walls that cut the level where the skeleton stands off the trophy arrive during a call (injected
+ *  when the call's first skeleton sub-leg reports: as a failed sub-leg's counterexample batch would): knob off, the
+ *  descent ends there (the rest of the call the direct leg to the trophy); EEAT_SKEL_WALLCUT=1: the batch dropped, the
+ *  descent goes on */
+async function runCut(wallcut) {
+	process.env.EEAT_SKEL_DIRECT = '0';
+	delete process.env.EEAT_SKEL_KEEP;
+	if (wallcut) process.env.EEAT_SKEL_WALLCUT = '1'; else delete process.env.EEAT_SKEL_WALLCUT;
+	for (const k of Object.keys(require.cache)) if (k.includes(`${path.sep}plan${path.sep}`)) delete require.cache[k];
+	const EX = require('../src/plan/executor.js');
+	const rows = [
+		'################################################################',
+		'#..............................................................#',
+		'#..............................................................#',
+		'#..............................................................#',
+		'#S.........#...........#...........#...........#.............T.#',
+		'################################################################',
+	];
+	const { L, file, at } = levelOf(rows, { '#': [9], S: [255], T: [121] }, wallcut ? 'skelcut1' : 'skelcut0');
+	const wp = { kind: 'trophy', label: 'trophy' };
+	const skels = [];
+	let ex = null, injected = 0, sawSub = false;
+	ex = await EX.createExecutor(L, { file, workers: 0, emit: (ev) => {
+		if (ev.ev === 'exec.skel') skels.push(ev);
+		// (after the first skeleton sub-leg: a wall across the corridor ahead of it, x 30, every air row)
+		if (ev.ev === 'exec.reach' && /\(skeleton /.test(ev.label || '') && ev.ok && !sawSub) { sawSub = true; injected = ex._addWalls(wp, [at(30, 1), at(30, 2), at(30, 3), at(30, 4)]); }
+	} });
+	const r = await ex.reach([{ masks: new Uint8Array(0) }], wp, { ms: 8000, level: 1 });
+	const s = skels.length ? skels[skels.length - 1] : null;
+	const ok = r.ok && r.arrivals.every((a) => T.playTo(L, a.masks).finished === a.masks.length);
+	await ex.close();
+	delete process.env.EEAT_SKEL_WALLCUT;
+	return { r, s, ok, injected };
+}
+
 (async () => {
 	const base = await run(false);
 	check('T-SKEL-KEEP base: the first call descends the skeleton and finishes (replayed)', base.ok1 && base.s1 && base.s1.levels.length > 0,
@@ -76,6 +111,12 @@ async function run(keep) {
 		keep.s2 ? `resumed ${keep.s2.resumed}, ${keep.s2.levels.length} vs ${base.s2 ? base.s2.levels.length : '?'} levels, walls ${keep.s2.walls}` : 'no skeleton');
 	check('T-SKEL-KEEP keep: the resumed call is no slower in route ticks than the base\'s restart', keep.ok2 && base.ok2 && keep.r2.arrivals[0].masks.length <= base.r2.arrivals[0].masks.length + 8,
 		`${keep.r2.ok ? keep.r2.arrivals[0].masks.length : '-'} vs ${base.r2.ok ? base.r2.arrivals[0].masks.length : '-'}`);
+	const c0 = await runCut(false), c1 = await runCut(true);
+	const lv = (x) => (x.s ? x.s.levels.filter((l) => l.ok).length : 0);
+	check('T-SKEL-WALLCUT base (knob off): walls cutting the level off end the descent after its first sub-leg (the far direct leg finishes)',
+		c0.injected === 4 && c0.ok && lv(c0) === 1, `injected ${c0.injected}, ${lv(c0)} levels found, c ${c0.s ? c0.s.c : '-'}`);
+	check('T-SKEL-WALLCUT (EEAT_SKEL_WALLCUT=1): the batch dropped, the descent goes on past it and finishes (replayed)',
+		c1.injected === 4 && c1.ok && lv(c1) > lv(c0), `${lv(c1)} vs ${lv(c0)} levels found, c ${c1.s ? c1.s.c : '-'} vs ${c0.s ? c0.s.c : '-'}`);
 	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 	console.log(`${pass} pass, ${fail} fail`);
 	process.exit(fail ? 1 : 0);
