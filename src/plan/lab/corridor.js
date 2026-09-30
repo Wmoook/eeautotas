@@ -55,6 +55,7 @@ const DOTS = new Set([4, 414]);
 const ARROWS = new Set([1, 2, 3, 1518, 411, 412, 413, 1519]);
 const KAPPA = 16 / 6.776552880470027;       // ticks a tile at the held run's top speed
 const VRUN = 6.776552880470027;
+const KEEP = 4;                             // resumed searches kept (the newest)
 
 function createCorridor(L, opts = {}) {
 	const S = opts.solver || MS.createSolver(L, {});
@@ -107,8 +108,16 @@ function createCorridor(L, opts = {}) {
 			for (let x = 0; x < W; x++) {
 				const t = y * W + x;
 				const id = Lc.fg[t];
-				const ok = sol[t] === 0 && sol[t + W] !== 0 && !isField(id) && S.boxFree(sol, 16 * x, 16 * y);
-				const c = ok ? RF.costAt(f, 16 * x, 16 * y, 0) : -1;
+				// a ball centred in column x stands there when its box (px in [16x - 8, 16x + 8)) is free over a landable tile
+				// under one of its columns: the tile below, or an edge over the next column's floor (the box straddles it)
+				let c = -1;
+				if (sol[t] === 0 && !isField(id)) {
+					for (const px of [16 * x, 16 * x - 8, 16 * x + 7]) {
+						if (!S.boxFree(sol, px, 16 * y) || !S.floorAt(sol, px, y + 1)) continue;
+						const v = RF.costAt(f, px, 16 * y, 0);
+						if (v >= 0 && (c < 0 || v < c)) c = v;
+					}
+				}
 				if (!(c >= 0)) { cur = null; continue; }
 				cs[t] = c;
 				if (!cur) { cur = { id: spans.length, row: y, x0: x, x1: x, c }; spans.push(cur); }
@@ -117,12 +126,23 @@ function createCorridor(L, opts = {}) {
 				span[t] = cur.id;
 			}
 		}
-		const fld = [];
-		for (let t = 0; t < N; t++) if (isField(Lc.fg[t]) && tm[t] >= 0) fld.push(t);
+		const fld = [], fex = [];
+		for (let t = 0; t < N; t++) {
+			if (!isField(Lc.fg[t]) || !(tm[t] >= 0)) continue;
+			fld.push(t);
+			// a field EXIT: a field tile next to (4-way) a free tile of plain physics (the field's edge the ball leaves by)
+			const x = t % W, y = (t / W) | 0;
+			for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+				const xx = x + dx, yy = y + dy;
+				if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+				const u = yy * W + xx;
+				if (sol[u] === 0 && !isField(Lc.fg[u])) { fex.push(t); break; }
+			}
+		}
 		// the spans by row, for the reach box's scan
 		const byRow = Array.from({ length: H }, () => []);
 		for (const sp of spans) byRow[sp.row].push(sp);
-		G = { f, cs, span, tm, spans, byRow, fld: Int32Array.from(fld), sol };
+		G = { f, cs, span, tm, spans, byRow, fld: Int32Array.from(fld), fex: Int32Array.from(fex), sol };
 		geoMemo.set(key, G);
 		if (geoMemo.size > 8) geoMemo.delete(geoMemo.keys().next().value);
 		return G;
@@ -145,11 +165,12 @@ function createCorridor(L, opts = {}) {
 	 * box), ranked by the estimated f after the move; when none: the spans nearest the ball of any cost (the repair); and
 	 * the field tiles of least cost <= thr in the box (their entries), at most 48 of the least cost
 	 */
-	function corridorOf(G, s, thr, w, M, RX, RU, RD) {
+	function corridorOf(G, s, thr, w, M, RX, RU, RD, Mu, exits) {
 		const cx = Math.trunc(s.px + 8) >> 4, cy = Math.trunc(s.py + 8) >> 4;
 		const here = T.tileOf(s, W, H);
 		const hereSpan = s.on_ground ? G.span[here] : -1;
 		const cands = [], any = [];
+		if (Mu === undefined) Mu = 0;
 		for (let y = Math.max(0, cy - RU); y <= Math.min(H - 1, cy + RD); y++) {
 			for (const sp of G.byRow[y]) {
 				if (sp.x1 < cx - RX || sp.x0 > cx + RX || sp.id === hereSpan) continue;
@@ -166,14 +187,17 @@ function createCorridor(L, opts = {}) {
 		cands.sort((a, b) => a.f - b.f);
 		any.sort((a, b) => a.d - b.d || a.f - b.f);
 		const fl = [];
-		for (const t of G.fld) {
-			if (!(G.tm[t] <= thr)) continue;
+		// (outside a field its entries: every field tile; inside one its exits)
+		for (const t of exits ? G.fex : G.fld) {
+			if (!(G.tm[t] <= thr) || t === here) continue;
 			const x = t % W, y = (t / W) | 0;
 			if (x < cx - RX || x > cx + RX || y < cy - RU - 16 || y > cy + RD) continue;
 			fl.push(t);
 		}
 		fl.sort((a, b) => G.tm[a] - G.tm[b]);
-		return { spans: cands.slice(0, M), repair: cands.length ? [] : any.slice(0, Math.max(2, M >> 1)), fld: fl.slice(0, 48), nCands: cands.length };
+		// (the uphill / level spans nearest the ball: Mu of them always, the relaxation's false nears need a way round;
+		// with no corridor span at all, at least 2)
+		return { spans: cands.slice(0, M), repair: any.slice(0, cands.length ? Mu : Math.max(2, Mu)), fld: fl.slice(0, 48), nCands: cands.length };
 	}
 
 	function solve(start, target, o = {}) {
@@ -181,14 +205,15 @@ function createCorridor(L, opts = {}) {
 		stats.solves++;
 		const budgetMs = o.ms || 3000;
 		const deadline = o.deadline ? Math.min(o.deadline, t0 + budgetMs) : t0 + budgetMs;
-		const K = o.K || 3, Ka = o.Ka || 2, legT = o.legT || 90, alts = o.alts === undefined ? 1 : o.alts;
-		const delta = o.delta === undefined ? 3 : o.delta, D = o.D === undefined ? 30 : o.D, M = o.M || 3;
+		const K = o.K || 3, Ka = o.Ka || 2, legT = o.legT || 120, alts = o.alts === undefined ? 1 : o.alts;
+		const delta = o.delta === undefined ? 0.5 : o.delta, D = o.D === undefined ? 30 : o.D;
+		const M = o.M || 6, Mu = o.Mu === undefined ? 2 : o.Mu, Ma = o.Ma || 1, subStop = o.subStop || 3;
 		// the order's weight: w1 (greedy toward the target) until the first chain, then w (the anytime refinement)
 		const w2 = o.w === undefined ? 1.2 : o.w, w1 = o.w1 === undefined ? 3 : o.w1;
 		let w = w1;
 		const BETA = o.beta === undefined ? 4 : o.beta, TMAX = o.Tmax || 6000;
 		const fanOn = o.fan !== false;
-		const RX = o.RX || 18, RU = o.RU || 5, RD = o.RD || 24;
+		const RX = o.RX || 24, RU = o.RU || 5, RD = o.RD || 60, fanT = o.fanT || 120;
 		const snap0 = start instanceof E.EESim ? start.snapshot() : start;
 		const tgt = { tiles: Array.from(target.tiles), cls: target.cls || 'any' };
 		sim.restore(snap0);
@@ -200,15 +225,22 @@ function createCorridor(L, opts = {}) {
 		// the target's side (for the speed credit)
 		let tcx = 0; for (const t of tgt.tiles) tcx += t % W; tcx /= Math.max(1, tgt.tiles.length);
 		// ---- the node store: key -> [states]; a state {snap, g, masks, c, v, key, f, dead}
-		const nodes = new Map(), seen = new Map();
-		const heap = [];
+		// THE RESUMED SEARCH (o.resume: a key the caller builds from the start state and the target): the node store, the
+		// seen states, the open list, the order's weight and the best chain are kept (the newest KEEP keys) and a call with
+		// the same key goes on where the last one stopped (the compile retries a stuck waypoint from the same arrival at every
+		// rung: the calls add up instead of starting over)
+		const R0 = o.resume ? keep.get(o.resume) : null;
+		if (R0) { keep.delete(o.resume); keep.set(o.resume, R0); out.resumed = true; out.bestC = R0.bestC; out.bestCg = R0.bestCg; }
+		const nodes = R0 ? R0.nodes : new Map(), seen = R0 ? R0.seen : new Map();
+		const heap = R0 ? R0.heap : [];
+		if (R0) w = R0.w;
 		const lt = (a, b) => a.f < b.f || (a.f === b.f && a.g > b.g);
 		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (!lt(heap[i], heap[p])) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
 		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && lt(heap[l], heap[m])) m = l; if (r < heap.length && lt(heap[r], heap[m])) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
 		const push = (n) => { heap.push(n); up(heap.length - 1); };
 		const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; down(0); } return top; };
 		const fOf = (x) => x.g + w * KAPPA * x.c - BETA * Math.max(0, x.v);
-		let best = null;
+		let best = R0 ? R0.best : null;
 		const trace = o.trace || null;
 		/** the node key of the live sim: its support tile when grounded on one, else its (tile, class, rising) cell */
 		const keyOf = () => {
@@ -246,6 +278,7 @@ function createCorridor(L, opts = {}) {
 			a.push(n);
 			push(n);
 			out.nodes++;
+			if (o.probe) (out.kids || (out.kids = [])).push({ tile: T.tileOf(sim, W, H), g, ground: !!sim.on_ground, from, c });
 			return true;
 		}
 		/** play masks from snapshot sn; the live sim ends there; false on a death */
@@ -254,7 +287,7 @@ function createCorridor(L, opts = {}) {
 			for (let t = 0; t < ms.length; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); if (sim.is_dead) return false; }
 			return true;
 		}
-		const legOpts = (Tmax, plainNode) => ({ Tmax, chain: false, fields: !plainNode, coupled: !plainNode, nodes: o.legNodes || 40000, itemNodes: o.itemNodes || 10000, coupledTicks: o.coupledTicks || 20000, fieldMs: o.fieldMs || 40, alts, altSlack: 12, deadline });
+		const legOpts = (Tmax, plainNode) => ({ Tmax, chain: false, fields: !plainNode, coupled: !plainNode, nodes: o.legNodes || 40000, itemNodes: o.itemNodes || 10000, plainMs: o.plainMs || 25, coupledTicks: o.coupledTicks || 20000, fieldMs: o.fieldMs || 40, alts, altSlack: 12, deadline });
 		/** a leg's arrivals (the answer, its hop, the alternatives) admitted from node n */
 		function takeLeg(n, r, tag) {
 			let k = 0;
@@ -275,8 +308,7 @@ function createCorridor(L, opts = {}) {
 			if (trace) trace({ ev: 'best', T: T1 });
 			if (w !== w2) { w = w2; for (const x of heap) x.f = fOf(x); for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i); }
 		};
-		sim.restore(snap0);
-		admit(new Uint8Array(0), 0, 'start');
+		if (!R0) { sim.restore(snap0); admit(new Uint8Array(0), 0, 'start'); }
 		while (heap.length && Date.now() < deadline) {
 			const n = pop();
 			if (n.dead) continue;
@@ -306,24 +338,27 @@ function createCorridor(L, opts = {}) {
 			// fans do the rest)
 			const grounded = plainNode && sim.on_ground;
 			const inField = !plainNode && clsOf(sim) !== 'A' && clsOf(sim) !== 'G';
-			const cor = corridorOf(G, sim, n.c - delta, w, grounded ? M : 1, RX, RU, RD);
-			// THE SUB-LEGS: msolve.leg to each of the best corridor spans (to the nearest spans when the corridor is empty)
+			const cor = corridorOf(G, sim, n.c - delta, w, grounded ? M : Ma, RX, RU, RD, grounded ? Mu : 0, inField);
+			// THE SUB-LEGS: msolve.leg to each of the best corridor spans, then the nearest uphill / level spans (the repair)
 			let tp = Date.now(), got = 0;
-			const list = cor.spans.length ? cor.spans : cor.repair;
 			if (!cor.spans.length) { out.repairs++; stats.repairs++; }
-			for (const sp of list) {
-				if (Date.now() >= deadline) break;
-				out.legs++; stats.legs++;
+			let nOk = 0;
+			for (const [list, tag] of [[cor.spans, 'sub'], [cor.repair, 'rep']]) for (const sp of list) {
+				if (Date.now() >= deadline || nOk >= subStop) break;
 				const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
 				if (lim <= 0) break;
+				// (the plain regime's admissible bound past the horizon: no leg, skipped)
+				if (plainNode && S.lowerBound(n.snap, { tiles: sp.tiles, cls: 'G' }) > lim) { out.lbSkips = (out.lbSkips || 0) + 1; continue; }
+				out.legs++; stats.legs++;
 				const r = S.leg(n.snap, { tiles: sp.tiles, cls: 'G' }, legOpts(lim, plainNode));
-				if (r.ok) { got += takeLeg(n, r, cor.spans.length ? 'sub' : 'rep'); out.subOk++; stats.subOk++; }
-				if (trace) trace({ ev: 'sub', n: sp.tiles.length, c: sp.c, est: Math.round(sp.est), ok: r.ok, T: r.T, why: r.why, tool: r.tool });
+				if (r.ok) nOk++;
+				if (r.ok) { got += takeLeg(n, r, tag); out.subOk++; stats.subOk++; }
+				if (trace) trace({ ev: tag, n: sp.tiles.length, c: sp.c, est: Math.round(sp.est), ok: r.ok, T: r.T, why: r.why, tool: r.tool });
 			}
 			prof.sub += Date.now() - tp;
-			// the field entries of the corridor (class any: the centre in a field tile)
+			// the field entries of the corridor (class any: the centre in a field tile; inside a field: its exits)
 			tp = Date.now();
-			if (cor.fld.length && !inField && Date.now() < deadline) {
+			if (cor.fld.length && (!got || !grounded) && Date.now() < deadline) {
 				out.legs++; stats.legs++;
 				const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
 				if (lim > 0) {
@@ -350,7 +385,7 @@ function createCorridor(L, opts = {}) {
 				const c00 = clsOf(sim);
 				let air = !sim.on_ground || sim.speed_y !== 0;
 				const ms = [];
-				for (let t = 0; t < 60; t++) {
+				for (let t = 0; t < fanT; t++) {
 					const px = sim.px, py = sim.py;
 					const mk = t === 0 ? (m0 | p0) : m0;
 					E.applyMask(inp, mk); sim.tick(inp); ms.push(mk);
@@ -371,14 +406,23 @@ function createCorridor(L, opts = {}) {
 			}
 			prof.admit += Date.now() - tp;
 			if (trace) trace({ ev: 'kids', kids: kids.length, admitted: k, got });
+			if (o.probe) break;
 		}
 		out.prof = prof;
 		out.ms = Date.now() - t0;
 		if (best) { out.ok = true; out.masks = best.masks; out.T = best.T; }
 		else out.why = heap.length ? 'budget' : 'exhausted';
+		if (o.resume) {
+			// (kept while it can still give something: an open node)
+			if (heap.length && !best) {
+				keep.set(o.resume, { nodes, seen, heap, best, w, bestC: out.bestC, bestCg: out.bestCg });
+				while (keep.size > KEEP) keep.delete(keep.keys().next().value);
+			} else keep.delete(o.resume);
+		}
 		return out;
 	}
-	return { solve, geometry, stats: () => Object.assign({}, stats), solver: S };
+	const keep = new Map();
+	return { solve, geometry, corridorOfForTest: corridorOf, stats: () => Object.assign({}, stats), solver: S };
 }
 
 module.exports = { createCorridor, KAPPA };
