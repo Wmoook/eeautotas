@@ -2079,13 +2079,23 @@ class EESim {
     }
   }
 
+  // A switch set to off that has no entry keeps having none. AS3 stores `switches[id] = false` (Player.as:1576,
+  // PlayState.as:232), but every reader tests truthiness (World.as:709-713 doors / gates, Me.as:164-181 the presses and
+  // resets: `!this.switches[sid]`), where false and a missing key are the same; here every reader tests `=== true` (the
+  // doors, the presses, stateKey's on-sets, the events' diff). So the on-set, the physics, stateKey / stateHash and the
+  // events are unchanged. Before, a reset switch numbered 1000 (Me.as:175-176: pressPurpleSwitch(1000, false) sets
+  // 0..999 off) left 1001 `false` entries in the map of every later state, and every tool that iterates it per tick
+  // (goexplore.js roomOf's switch sum, the optimizer tools' context keys) got ~15x slower there (CTM 2's reset 1000 is
+  // 7 tiles from the spawn; Evolution Revolution's is on the way).
   _swSet(id, v) {
+    if (v !== true && !this._switches.has(id)) return;
     if (!this._swOwned) { this._switches = new Map(this._switches); this._swOwned = true; }
     this._switches.set(id, v);
     this._switches._key = undefined;
   }
 
   _oswSet(id, v) {
+    if (v !== true && !this._oswitches.has(id)) return;
     if (!this._oswOwned) { this._oswitches = new Map(this._oswitches); this._oswOwned = true; }
     this._oswitches.set(id, v);
     this._oswitches._key = undefined;
