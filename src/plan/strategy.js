@@ -60,7 +60,9 @@ const POLISH_MS = 15000, POLISH_F = 0.25;
 const PROVE_MS = 30000, PROVE_F = 0.2;
 // the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
 // at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
-const PROVE_IDLE_MAX = 16;
+const PROVE_IDLE_MAX = 64;
+// the proof's rounds: a faster route found by its searches becomes the best and the proof starts over with its cost
+const PROVE_ROUNDS = 12;
 // exploration steps (the second stall on): frontier tiles within FRONTIER_STEPS walk steps of an anchor, at most FRONTIER_MAX
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
@@ -900,21 +902,23 @@ async function compile(L, opts = {}, emit = () => {}) {
 		tm = Date.now();
 		let text = '';
 		try {
-			let kStar = 0;
-			while (kStar < best.masks.length && best.masks[kStar] === 0) kStar++;
-			const sim = new E.EESim(L), inp = new E.EEInput();
-			sim.reset();
-			let A = -1;
-			for (let n = 0; n < best.masks.length; n++) { E.applyMask(inp, best.masks[n]); sim.tick(inp); if (!sim.is_dead && sim.has_silver_crown) { A = n + 1; break; } }
-			const Cost = A - kStar;
-			if (A < 1 || Cost < 1) text = 'skipped: the route does not reach the trophy on its replay (a bug)';
-			else {
-				const trophy = T.goalOf(L, { kind: 'trophy' });
-				const how = noDeath ? 'nothing kills' : 'deaths as moves';
-				let proved = 0, faster = null, fail = '';
-				for (let k = 0; k <= restIdle && !faster && !fail; k++) {
+			// (rounds: a faster route a search finds becomes the best, and the proof starts over with its cost: prove or improve)
+			const trophy = T.goalOf(L, { kind: 'trophy' });
+			const how = noDeath ? 'nothing kills' : 'deaths as moves';
+			const notes = [];
+			for (let round = 0; round < PROVE_ROUNDS; round++) {
+				let kStar = 0;
+				while (kStar < best.masks.length && best.masks[kStar] === 0) kStar++;
+				const sim = new E.EESim(L), inp = new E.EEInput();
+				sim.reset();
+				let A = -1;
+				for (let n = 0; n < best.masks.length; n++) { E.applyMask(inp, best.masks[n]); sim.tick(inp); if (!sim.is_dead && sim.has_silver_crown) { A = n + 1; break; } }
+				const Cost = A - kStar;
+				if (A < 1 || Cost < 1) { notes.push('the route does not reach the trophy on its replay (a bug)'); break; }
+				let proved = 0, faster = null, fail = '', lbMin = Infinity;
+				for (let k = 0; k <= restIdle && !faster; k++) {
 					const room = left() - 250;
-					if (room < 100) { fail = 'no time left'; break; }
+					if (room < 100) { fail = fail || 'no time left'; lbMin = 0; break; }
 					const ms = Math.max(100, Math.floor(room / (restIdle + 1 - k)));
 					const deadline = Date.now() + ms;
 					const idle = new Uint8Array(k);
@@ -923,10 +927,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 					const r = await exec.reach([Sk], wp, { ms, level: rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
 					if (r && r.ok) {
 						const arr = (r.arrivals || []).filter((a) => a && a.masks && a.tick <= k + Cost - 1).sort((a, b) => a.tick - b.tick);
-						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; break; }
+						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; lbMin = 0; break; }
 						faster = { a: arr[0], r, k };
 					} else if (r && Number(r.lb) >= Cost) proved++;
-					else fail = `start +${k} idle: ${r && r.fail ? r.fail.why : '?'}, the exact search's bound ${r ? num(r.lb || 0) : '?'} of the ${num(Cost)} needed`;
+					else if (!fail) fail = `start +${k} idle: ${r && r.fail ? r.fail.why : '?'}, the exact search's bound ${r ? num(r.lb || 0) : '?'} of the ${num(Cost)} needed`;
+					// (each search's lb: no arrival within lb - 1 layers of its start; the least over the starts bounds every route)
+					if (!(r && r.ok)) lbMin = Math.min(lbMin, r && Number(r.lb) > 0 ? Math.min(Number(r.lb), Cost) : 0);
 				}
 				if (faster) {
 					const m = faster.a.masks instanceof Uint8Array ? faster.a.masks : T.masksOf(faster.a.masks);
@@ -939,13 +945,26 @@ async function compile(L, opts = {}, emit = () => {}) {
 							legs: [{ label: 'trophy', fromTick: faster.k, ticks: ev.complete - faster.k, lb: proven ? ev.complete - faster.k : null, proven, tool: lg0.tool || faster.r.tool || null }], how: 'the proof search' };
 						say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
 						if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
-						text = `-${num(saved)} ticks: a faster route from the start after ${faster.k} idle tick${faster.k === 1 ? '' : 's'} (${lg0.tool || faster.r.tool || '?'}${proven ? ', the fewest ticks from there' : ''}); no proof this compile`;
-					} else text = `no proof: its arrival did not replay faster (${ev ? fmt(ev.runTicks) : 'no finish'})`;
-				} else if (proved === restIdle + 1) {
+						notes.push(`-${num(saved)} (${lg0.tool || faster.r.tool || '?'}, +${faster.k} idle)`);
+						continue;
+					}
+					notes.push(`its arrival did not replay faster (${ev ? fmt(ev.runTicks) : 'no finish'})`);
+					break;
+				}
+				if (proved === restIdle + 1) {
 					proveProof = `${restIdle + 1} exhaustive exact search${restIdle ? 'es' : ''} from the level start (after 0..${restIdle} idle ticks; ${how}): no route reaches the trophy in fewer than ${num(Cost)} ticks after its first input`;
-					text = `PROVEN: no route reaches the trophy in fewer than ${num(Cost)} ticks after its first input (${restIdle + 1} exact search${restIdle ? 'es' : ''}, ${how})`;
-				} else text = `no proof in ${((Date.now() - tm) / 1000).toFixed(1)} s (${proved} of ${restIdle + 1} starts; ${fail})`;
+					notes.push(`PROVEN: no route reaches the trophy in fewer than ${num(Cost)} ticks after its first input (${restIdle + 1} exact search${restIdle ? 'es' : ''}, ${how})`);
+					break;
+				}
+				// (no proof, but every start's search ran: the least of their bounds is a bound on every route (the same offset
+				// between ticks after the first input and run ticks as the route's own))
+				const part = Number.isFinite(lbMin) && lbMin > 0 ? lbMin - (Cost - best.runTicks) : 0;
+				let raised = '';
+				if (part > LB && part <= best.runTicks) { raised = `; the lower bound raised ${num(LB)} -> ${num(part)} run ticks by the exact searches`; LB = part; }
+				notes.push(`no proof in ${((Date.now() - tm) / 1000).toFixed(1)} s (${proved} of ${restIdle + 1} starts; ${fail})${raised}`);
+				break;
 			}
+			text = notes.join('; ') || 'no round ran';
 		} catch (e) { bug('prove', { error: e.message }); text = `no proof: ${e.message}`; }
 		stage('prove', Date.now() - tm, text);
 	} else if (best) stage('prove', 0, !proveOn ? 'off' : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
