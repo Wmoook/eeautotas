@@ -90,6 +90,10 @@ const PROFILE_SHARE0 = process.env.EEAT_PROFILE_SHARE0 !== undefined ? +process.
 // finders' tightened, polished legs (The Ten Commandments 669 -> 1,531 ticks), and it took 40% of every call)
 const PROFILE_RUNG = process.env.EEAT_PROFILE_RUNG !== undefined ? +process.env.EEAT_PROFILE_RUNG : 2;
 const PROFILE_AT = process.env.EEAT_PROFILE_AT === 'early' ? 'early' : 'leg';
+// (the 'leg' placement: a leg the tier finds is a BOUND for the finders, not their end: the best-first finder searches for a
+// shorter one in EEAT_PROFILE_TIGHT (0.7) of what is left of the window (0: none, the tier's leg as it is). My level 730c:
+// the tier's 144-tick leg at rung 2 kept the finder from its 105-tick leg (141 vs 104 compiled, 3 of 3 A/Bs))
+const PROFILE_TIGHT = process.env.EEAT_PROFILE_TIGHT !== undefined ? +process.env.EEAT_PROFILE_TIGHT : 0.7;
 const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
 const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
 const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
@@ -902,7 +906,18 @@ function makeCore(L, co) {
 		// -------- tier P in the finders' place (EEAT_PROFILE_AT=leg, the default; see tier P above)
 		if (profileOn && PROFILE_AT === 'leg' && !found && !exactProof && Date.now() < wEnd - 50) {
 			const cands = profileTier(Date.now() + (rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE) * (wEnd - Date.now()));
-			if (cands) found = { cands, tool: 'profile', proven: false, lbAbs };
+			if (cands) {
+				found = { cands, tool: 'profile', proven: false, lbAbs };
+				// (the finders bounded by it: the best-first search for a leg shorter than the tier's, its own first leg)
+				if (PROFILE_TIGHT > 0 && Math.min(...cands.map((c) => c.depth)) > 1 && Date.now() < pEnd - 50) {
+					const tq = Date.now();
+					const ub = Math.min(...cands.map((c) => c.depth));
+					const rq = LG.legBest(L, snaps, goal, { sim, deadline: tq + PROFILE_TIGHT * (pEnd - tq), stop: stopFn, allowDeath, beforeTick, field: field0, region: regionOf(field0, starts, goal), bounds: co.bounds || null, depthMax: ub - 1, w: +process.env.EEAT_BEST_W || 0, dieStep: !!wp.dieField });
+					sims += rq.sims;
+					tiers.push({ tier: 'profile-finders', ms: Date.now() - tq, status: rq.status, depth: rq.depth, ub });
+					if (rq.status === 'found') found = { cands: rq.goals.concat(cands), tool: 'leg', proven: false, lbAbs };
+				}
+			}
 		}
 		// -------- tier 3: the fine-cell leg search
 		if (!found && !exactProof && Date.now() < wEnd - 5) {
