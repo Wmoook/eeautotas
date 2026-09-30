@@ -1553,6 +1553,88 @@ function sectionX() {
 		check('steer fallback: a start with a value with the tables (chain top, the trophy 1 row over it) keeps the tables\' steer', b1.v >= 0 && !b1.st.info.exitApex, `tables ${fmt(b1.v)}`);
 	}
 }
+// ---------------------------------------------------------------- M the air jumps (opts.airJumps, EEAT_AIRJUMP=1)
+function sectionM() {
+	section('M the air jumps: a level whose only effect tiles are multijumps, the physics field with an air jump anywhere (opts.airJumps)');
+	// (m: multijump 2, n: 1000 (unlimited), j: 0 (no jump))
+	Object.assign(ID, { m: [461, 2], n: [461, 1000], j: [461, 0] });
+	const MJ = [
+		// (the spawn right over the effect tile: the ball falls into it at once, so the small engine search, whose state key
+		// has no max_jumps, never merges a ball with the effect into one without it)
+		['mj-ledge5 (a double jump onto a 5-row ledge)', 'yes', ['..............', '..............', '..............', '.........T....', '........######', '........######', '........######', '..S.....######', '..m.....######']],
+		['mj-ledge7 (1000 jumps, a 7-row ledge)', 'yes', ['..............', '..............', '.........T....', '........######', '........######', '........######', '........######', '........######', '..S.....######', '..n.....######']],
+		['mj-zero (no jump at all, the ledge3 room: the field stays optimistic)', 'finite', ['..............', '..............', '..............', '..............', '.........T....', '........######', '..S.....######', '..j.....######']],
+	];
+	for (const [name, want, rows] of MJ) {
+		const L = ascii(box(rows));
+		const off = R.reachField(L), f = R.reachField(L, { airJumps: true, check: true });
+		const s = startSim(L, 30), c = R.costAt(f, s);
+		let ok = f.mode === 'physics' && f.airJumps === true && off.mode === 'walk' && f.mismatches === 0 && c >= 0;
+		let detail = `off: ${off.mode}; on: ${f.mode}, start ${fmt(c)}, ${f.mismatches} mismatches`;
+		if (want === 'yes') {
+			// (the double / multi jumps as scripted runs: settle, run right a ticks, jump, b ticks, jump (and again every b
+			// ticks with 1000 jumps), right on: every run that finishes, every state of it finite; the small engine search
+			// keeps 1,500 states a layer in its masks' order and loses the timed second press)
+			let runs = 0, states = 0, cut = 0, first = null;
+			for (let a = 0; a <= 60; a += 6) for (let b = 4; b <= 30; b += 2) {
+				const ms = [];
+				for (let t = 0; t < 20; t++) ms.push(0);
+				for (let t = 0; t < a; t++) ms.push(4);
+				for (let k = 0; k < 6; k++) { ms.push(5); for (let t = 0; t < b; t++) ms.push(4); }
+				for (let t = 0; t < 120; t++) ms.push(4);
+				const w = walk(L, f, ms);
+				if (!w.finished) continue;
+				runs++; states += w.n; cut += w.cut; if (w.first && !first) first = w.first;
+			}
+			ok = ok && runs > 0 && cut === 0;
+			detail += `; ${runs} scripted runs finish, ${states} states, ${cut} cut off${first ? ` (first ${JSON.stringify(first)})` : ''}`;
+		}
+		check(`${name}: off the walk, on the physics with air jumps, finite${want === 'yes' ? ', every state of the scripted multijump runs that finish finite' : ''}`, ok, detail);
+	}
+	{
+		// (the same 5-row ledge without the multijump tile: a plain level, the physics field proves it cut off, so the air
+		// jumps are what the field above gives)
+		const L = ascii(box(MJ[0][2].map((r) => r.replace('m', '.'))));
+		const f = R.reachField(L, { airJumps: true }), c = R.costAt(f, startSim(L, 30));
+		check('mj-ledge5 without the multijump tile: cut off (no air jumps on a plain level)', f.mode === 'physics' && !f.airJumps && c < 0, `${f.mode}, ${fmt(c)}`);
+	}
+	{
+		// (another effect with the multijumps (a low gravity tile): the walk as before)
+		const L = ascii(box(MJ[0][2].map((r, y) => (y === 0 ? r.slice(0, 13) + 'g' : r))));
+		const f = R.reachField(L, { airJumps: true });
+		check('a multijump level with another effect tile (low gravity): the walk as before', f.mode === 'walk' && !f.airJumps, f.mode);
+	}
+	// random rooms of every block kind with multijump tiles (0, 1, 2, 3, 1000 jumps): the self-check, and every state of the
+	// small engine search that reached the trophy finite
+	let seed = 29;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+	const ids = [9, 9, 9, 9, 4, 1, 2, 3, 361, 1052, 1041, 119, 369, 416, 120, 116, 117, 114, 1518];
+	let bad = 0, n = 0, routed = 0, states = 0, cut = 0, first = null;
+	for (let k = 0; k < (QUICK ? 6 : 16); k++) {
+		const W = 12 + (k % 3) * 4, H = 9 + (k % 2) * 3, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+			if ((x === 2 || x === 3) && y === H - 2) continue;
+			const r = rnd();
+			if (r < 0.06) cells.push([x, y, 461, [0, 1, 2, 3, 1000][Math.floor(rnd() * 5)]]);
+			else if (r < 0.24) { const id = ids[Math.floor(rnd() * ids.length)]; cells.push(id === 1052 || id === 1041 ? [x, y, id, Math.floor(rnd() * 4)] : [x, y, id]); }
+		}
+		cells.push([3, H - 2, 461, 2], [Math.floor(W / 2) + (k % 3), 1 + (k % 3), 121], [2, H - 2, 255]);
+		const L = levelOfCells(W, H, cells);
+		const f = R.reachField(L, { airJumps: true, check: true });
+		n++;
+		if (f.mismatches || f.mode !== 'physics') { bad++; continue; }
+		if (QUICK) continue;
+		const tr = engineRoute(L, 400, 1200, true, 20);
+		if (!tr.route) continue;
+		routed++;
+		const a = aheadCut(L, f, tr.ahead);
+		states += a.n; cut += a.cut; if (a.first && !first) first = a.first;
+	}
+	check(`${n} random multijump rooms: physics with air jumps, 0 mismatches${QUICK ? '' : '; every state of the engine searches that reached the trophy finite'}`, bad === 0 && cut === 0,
+		`${bad} rooms wrong; ${routed} routed, ${states} states, ${cut} cut off${first ? ` (first ${JSON.stringify(first)})` : ''}`);
+}
 function trapLevel() {
 	const W = 80, H = 40, c = [];
 	for (let x = 0; x < W; x++) c.push([x, 0, 9], [x, H - 1, 9]);
@@ -1582,6 +1664,7 @@ function trapLevel() {
 	if (want('S')) sectionS();
 	if (want('Q')) sectionQ();
 	if (want('X')) sectionX();
+	if (want('M')) sectionM();
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('TEST ERROR', e); process.exit(1); });
