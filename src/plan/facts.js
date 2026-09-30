@@ -14,17 +14,37 @@
 // o.rungMax (or o.rungs, the strategy's budget rungs; default 3). The version counts every add (and every reset).
 const RUNG_MAX = 3;
 const KINDS = new Set(['ok', 'fail', 'needs', 'proof', 'block']);
+// THE RUNG'S PROGRESS (n5 lane 6, OPT-IN EEAT_RUNG_PROG=1; off = the rungs as before): a failure at rung r >= 1 whose
+// closest approach is no nearer (by RUNG_PROG_TILES) than the best of the earlier rungs of the same (edge, node class)
+// ends that edge's climb for the class (as a failure at the last rung does): a bigger window that bought no progress.
+// Bridge Builder (box 5, 300 s): the same (anchor, psw 996) failed at rung 2 after 14.9 s and at rung 3 after 44.9 s,
+// both at the same closest 3.4 tiles; Two's coin (125,190) at 7.4 tiles on every rung, 21-23 tries (237-327 s of 300).
+// Ordering / time only: no plan edge dropped outside that class, the strategy's deepening (reset) forgets it like a rung
+const RUNG_PROG = process.env.EEAT_RUNG_PROG === '1';
+const RUNG_PROG_TILES = 0.5;
 
 function createFacts(o = {}) {
 	// (o.rungs: the strategy's number of budget rungs, e.g. 4 = 1.5 / 5 / 15 / 45 s: the block after that many failures)
 	const rungMax = o.rungMax || o.rungs || RUNG_MAX;
 	let ver = 0, facts = [];
-	let fails = new Map(), blocks = new Set(), proofs = new Set(), needs = new Map(), oks = new Map();
+	let fails = new Map(), blocks = new Set(), proofs = new Set(), needs = new Map(), oks = new Map(), nearest = new Map();
+	const rungProg = o.rungProg !== undefined ? !!o.rungProg : RUNG_PROG;
 	const ek = (edge, cls) => `${edge}\u0001${cls}`;
 	function index(f) {
 		switch (f.kind) {
 			case 'ok': { const k = ek(f.edge, f.nodeClass), had = oks.get(k); oks.set(k, had === undefined ? f.ticks : Math.min(had, f.ticks)); break; }
-			case 'fail': { const k = ek(f.edge, f.nodeClass); fails.set(k, Math.max(fails.get(k) || 0, (f.rung | 0) + 1)); break; }
+			case 'fail': {
+				const k = ek(f.edge, f.nodeClass);
+				fails.set(k, Math.max(fails.get(k) || 0, (f.rung | 0) + 1));
+				// (the rung's progress: no nearer than the earlier rungs' best -> the climb ends for this class)
+				const d = f.closest && Number.isFinite(+f.closest.dist) && +f.closest.dist >= 0 ? +f.closest.dist : null;
+				if (rungProg && d !== null) {
+					const had = nearest.get(k);
+					if ((f.rung | 0) >= 1 && had !== undefined && d > had - RUNG_PROG_TILES) fails.set(k, rungMax);
+					nearest.set(k, had === undefined ? d : Math.min(had, d));
+				}
+				break;
+			}
 			case 'needs': { const k = ek(f.edge, f.nodeClass); if (!needs.has(k)) needs.set(k, []); const l = needs.get(k); if (!l.some((x) => x.feat === f.feat && x.value === f.value)) l.push({ feat: f.feat, value: f.value }); break; }
 			case 'proof': proofs.add(ek(f.edge, f.sKey)); break;
 			case 'block': blocks.add(ek(f.edge, f.nodeClass)); break;
@@ -59,7 +79,7 @@ function createFacts(o = {}) {
 		 *  request; the version still bumps */
 		reset(ro = {}) {
 			const keep = ro.keepProofs ? facts.filter((f) => f.kind === 'proof') : [];
-			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map();
+			facts = []; fails = new Map(); blocks = new Set(); proofs = new Set(); needs = new Map(); oks = new Map(); nearest = new Map();
 			for (const f of keep) { facts.push(f); index(f); }
 			ver++;
 		},
