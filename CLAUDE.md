@@ -520,6 +520,28 @@ ways in.
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
   executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing).
+- **The timer** (C6 push 3 lane 3, `src/plan/planner.js` `timerOf` / `timerPlan` / `removerInTime`, strategy.js
+  `TIMER_PICK`; OPT-IN `EEAT_PLAN_TIMER=1`, off = the compiler before byte for byte): a ball with a running timed killer
+  (curse 421, zombie 422, poison 1584, fire: it dies at start + duration) gets, at every plan of its anchor, a DEADLINE plan
+  search first (half the plan call's clock; the fewest landmarks left first, then A* on the est with no gain bonus; a node
+  whose est arrival + the open level's walk to the trophy passes the ticks left is not generated): a whole plan to the
+  trophy in time goes first (`why` "trophy in the timer"); none, and no remover of that killer (its block numbered 0) within
+  the ticks left by the est walk = a LATE anchor, which the strategy's pick puts after the anchors in time (then gain, then
+  cost as before). Ordering only (no claim, the lb untouched). One Minute Descent (a 60-s zombie on the only way down,
+  the trophy sealed by team-6 doors, team 6 at the bottom, 15 blue coins that open only the crown): the planner's
+  most-gain plans took the coins first and reached team 6 with ~1,100 ticks left for the 2,100-tick levitation climb, so
+  every n5-plan / main route went through a death (11,203-12,352 run ticks, 4 of 13 configurations routed at 188-273 s;
+  not a knob or the perfect merge: the "loss" was this spread); with the knob the plan is team 6 -> the trophy from the
+  first anchor (the zombie picked at tick 54; from the known route's state at tick 200: team 6 -> the trophy, est 2,712
+  of 5,894 ticks left, where the plan search's own plans are 8-10 blue coins). Measured (box 5, 300 s, W3, side by side,
+  one run an arm): One Minute Descent routed 3 of 4 with the knob, 0 deaths (finals 4,140 / 5,030; first routes at
+  52.8 / 65.1 s) vs 0 of 1 off in the same batch; a second version (the landmark-first deadline search and a projected-
+  finish anchor order, the order not kept) 2 of 3 (first routes 5,229 / 6,078 at ~107 s); knob-on runs of the other
+  timed levels (Tutorial 3, Accident Prone, Animaly, Evolution Revolution, SMB3, Christmas Eve, Helix Reborn, ...) made
+  no plan in time (their timers are short, 3-20 s, with removers): their compiles within the spread (Tutorial 3 first
+  route 3,525; Accident Prone 3,521 / gate20 3,556 vs 3,318), a level without a timed killer runs the base's code path
+  byte for byte (timerOf = Infinity). NOT a default yet: the gains are one level's; the late rule is unmeasured where
+  a remover is off the est walk.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
