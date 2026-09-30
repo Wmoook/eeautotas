@@ -37,6 +37,7 @@ const X = require('./exact.js');
 
 const TELEPORT_PX = 20;
 const SUPPORT = new Set(['G', 'W', 'C', 'Z', 'B', 'D']);
+const TRIG = process.env.EEAT_JOINS_TRIG === '1';   // OPT-IN: more waypoints, less clock each (Gingerbread House 60 s: 5,173 with vs 5,131 without; Tutorial 1 2,423 vs 2,399)
 
 /** the trigger state a later door, gate, respawn or effect reads: discKey + which coins + switches + checkpoint + effects */
 function progKey(sim) {
@@ -87,7 +88,11 @@ function waypointsOf(L, masks, o) {
 	const bnd = [];
 	for (let t = 1; t < finish; t++) {
 		const a = cls[t - 1], b = cls[t];
-		if (tp[t] || (a === 'D' && b !== 'D') || (b !== a && SUPPORT.has(b))) bnd.push(t);
+		// (a TRIGGER is a boundary too (OPT-IN EEAT_JOINS_TRIG=1; o.triggers false: never): the first tick of a new trigger state (a coin, a key,
+		// a switch taken in the air): a leg that reaches the next support sooner but misses it arrives in another trigger state
+		// and is refused; with the trigger its own waypoint the chain goes to it first)
+		const trig = TRIG && !(o && o.triggers === false) && prog[t] !== prog[t - 1] && b !== 'D' && a !== 'D';
+		if (tp[t] || (a === 'D' && b !== 'D') || (b !== a && SUPPORT.has(b)) || trig) bnd.push(t);
 	}
 	const wps = [{ t: 0, tile: tile[0], cls: cls[0], tele: false, fixed: false, prog: prog[0] }];
 	const clsT = (c) => (c === 'A' ? 'any' : c);
