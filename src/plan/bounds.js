@@ -31,8 +31,8 @@
 //                  ticks after its centre was in the killing tile. Both are sources of the fields at those values, a
 //                  fixpoint iterated FROM BELOW (every iterate is a lower bound: the operator is monotone).
 //   at(field, sim): the tile's value with the ball's own offset from its node (not the worst 8 px): sound sub-tile
-//                  correction; optionally max with endgame.js lowerBound (walls ignored, no deaths: only on levels where
-//                  no death can happen, or o.noDeath).
+//                  correction; max with endgame.js lowerBound (walls ignored; a way through a death: DEATH_MIN + the field
+//                  at the respawns, the min of both).
 // The goal set of a trophy field (every goal tile a trophy) takes the half blocks whose touch goes to a trophy too (the
 // complete fires by the touched tile); leg() adds the complete's tick (+1) for a trophy goal.
 //
@@ -123,7 +123,34 @@ function staticOf(L) {
 		for (let i = 0; i < N; i++) if (fg[i] === CHECKPOINT) add(i);
 	}
 	const deaths = dsrc.length > 0 && respawn.length > 0;
-	S = { W, H, N, g, nF, isWallId, never, touchers, portals, dsrc: Int32Array.from(dsrc), respawn: Int32Array.from(respawn), deaths, ids, vmax: vmaxOf(L, ids, g, nF) };
+	// the mechanisms: the tiles whose touch can take the ball past the plain speeds (boosts, the jump / fly / speed /
+	// gravity effects, side and up gravity, the tile above ice (slippery), a rotated portal's triggers), with their half
+	// block touchers; a ball in plain mode keeps the plain speeds until its centre is in one (the plain layer)
+	const mechId = new Uint8Array(nF + 1);
+	for (let id = 0; id < nF; id++) {
+		if (id === 114 || id === 115 || id === 116 || id === 117 || id === JUMP_FX || id === SPEED_FX || EFFECT_ALL.has(id)) mechId[id] = 1;
+		else if (L.gMox[id] !== 0 || L.gMorx[id] !== 0 || L.gMoy[id] < 0) mechId[id] = 1;
+	}
+	const mechT = new Uint8Array(N);
+	const markMech = (i) => { if (i >= 0 && i < N) for (const c of touchers(i)) mechT[c] = 1; };
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		if (id >= 0 && id < nF && mechId[id]) markMech(i);
+		if (id === ICE && i >= W) markMech(i - W);
+	}
+	for (const p of portals) {
+		const s0 = L.portalSlot[p.entry], ex = L.portalsById.get(L.pTarget[s0]);
+		let rot = false;
+		for (let k = 0; k < ex.n && !rot; k++) { const ns = L.portalSlot[(ex.ys[k] >> 4) * W + (ex.xs[k] >> 4)]; if ((ns >= 0 ? L.pRot[ns] : 0) !== L.pRot[s0]) rot = true; }
+		p.rotated = rot;
+		if (rot) for (const c of p.trig) mechT[c] = 1;
+	}
+	const mechTiles = [];
+	for (let i = 0; i < N; i++) if (mechT[i] && !isWallId(fg[i])) mechTiles.push(i);
+	const vmax = vmaxOf(L, ids, g, nF);
+	const vplain = vmaxPlainOf(L, ids, g, nF);
+	S = { W, H, N, g, nF, isWallId, never, touchers, portals, dsrc: Int32Array.from(dsrc), respawn: Int32Array.from(respawn), deaths, ids, vmax, vplain,
+		mechId, mechT, mechTiles: Int32Array.from(mechTiles) };
 	STATIC.set(L, S);
 	return S;
 }
@@ -180,6 +207,23 @@ function vmaxOf(L, ids, g, nF) {
 	if (v.xn < V_CAP) v.xn = Math.max(V_RUN, run) + V_MARGIN;
 	if (v.yp < V_CAP) v.yp = Math.max(terminal((Math.max(gmDown, 2) * Math.max(wgm, 1)) / MULT), (zeroG || liquid) ? run : 0) + V_MARGIN;
 	if (v.yn < V_CAP) v.yn = Math.max(V_JUMP * jm, (zeroG || liquid) ? run : 0) + V_MARGIN;
+	for (const k of ['xp', 'xn', 'yp', 'yn']) if (v[k] > V_CAP) v[k] = V_CAP;
+	return v;
+}
+
+/** the plain speeds: every mechanism left out (vmaxOf without the rules a mechanism tile triggers) */
+function vmaxPlainOf(L, ids, g, nF) {
+	let gmDown = 0, zeroG = false, liquid = false;
+	for (const id of ids) {
+		if (id < 0 || id >= nF) continue;
+		if (L.gMoy[id] > 0) gmDown = Math.max(gmDown, L.gMoy[id]);
+		if (L.gMox[id] === 0 && L.gMoy[id] === 0) zeroG = true;
+		if ((g[id] & (F_LIQUID | F_CLIMB)) !== 0) liquid = true;
+	}
+	const wgm = L.gravityMult;
+	if (!(Number.isFinite(wgm) && wgm > 0)) return null;
+	const v = { xp: V_RUN + V_MARGIN, xn: V_RUN + V_MARGIN, yp: Math.max(terminal((Math.max(gmDown, 2) * Math.max(wgm, 1)) / MULT), (zeroG || liquid) ? V_RUN : 0) + V_MARGIN,
+		yn: Math.max(V_JUMP, (zeroG || liquid) ? V_RUN : 0) + V_MARGIN };
 	for (const k of ['xp', 'xn', 'yp', 'yn']) if (v[k] > V_CAP) v[k] = V_CAP;
 	return v;
 }
@@ -254,7 +298,7 @@ function createBounds(L, o = {}) {
 	const model = o.model || null;
 	const vmax = S.vmax;
 	const useAxis = vmax.xp < V_CAP || vmax.xn < V_CAP || vmax.yp < V_CAP || vmax.yn < V_CAP;
-	const tiersOn = { iso: o.iso !== false, axis: o.axis !== false && useAxis, endgame: o.endgame === true || (o.endgame !== false && !S.deaths) };
+	const tiersOn = { iso: o.iso !== false, axis: o.axis !== false && useAxis, endgame: o.endgame !== false };
 	const memo = new Map();
 	const META = new WeakMap();
 	const st = { fields: 0, hits: 0, ms: 0, rounds: 0, at: 0 };
@@ -269,7 +313,22 @@ function createBounds(L, o = {}) {
 	const costX = (dx) => (dx > 0 ? 16 / vmax.xp : dx < 0 ? 16 / vmax.xn : 0);
 	const costY = (dy) => (dy > 0 ? 16 / vmax.yp : dy < 0 ? 16 / vmax.yn : 0);
 	const offX = (16 + SLACK) / Math.min(vmax.xp, vmax.xn), offY = (16 + SLACK) / Math.min(vmax.yp, vmax.yn);
+	// the plain layer: a ball in plain mode (no effect, plain speeds, no pending mechanism) keeps the plain speeds until
+	// its centre is in a mechanism tile; from there the capped layer's values (less both sides' offsets at that tile)
+	const vp = S.vplain;
+	const usePlain = o.plain !== false && !!vp && (vp.xp < vmax.xp || vp.xn < vmax.xn || vp.yp < vmax.yp || vp.yn < vmax.yn);
+	const costXp = (dx) => (dx > 0 ? 16 / vp.xp : dx < 0 ? 16 / vp.xn : 0);
+	const costYp = (dy) => (dy > 0 ? 16 / vp.yp : dy < 0 ? 16 / vp.yn : 0);
+	const offXp = usePlain ? (16 + SLACK) / Math.min(vp.xp, vp.xn) : 0, offYp = usePlain ? (16 + SLACK) / Math.min(vp.yp, vp.yn) : 0;
+	const capX = (dx) => (dx > 0 ? 16 / Math.max(vmax.xp, 1) : dx < 0 ? 16 / Math.max(vmax.xn, 1) : 0);
+	const capY = (dy) => (dy > 0 ? 16 / Math.max(vmax.yp, 1) : dy < 0 ? 16 / Math.max(vmax.yn, 1) : 0);
+	/** a state in plain mode: the plain layer's values hold for it */
+	const isPlain = (sim) => usePlain && !sim.is_dead && sim.speed_boost !== 1 && sim.jump_boost !== 1 && sim.flip_gravity === 0 && !sim.has_levitation &&
+		!(sim._slippery > 0) && Math.abs(sim.speed_x) <= vp.xp && sim.speed_y <= vp.yp && -sim.speed_y <= vp.yn &&
+		!(sim._q0 >= 0 && sim._q0 < S.nF && S.mechId[sim._q0]) && !(sim._q1 >= 0 && sim._q1 < S.nF && S.mechId[sim._q1]) && !S.mechT[T.tileOf(sim, W, H)];
 
+	const srcTarr = (goalArr, Q, R) => { const t = Array.from(goalArr); S.portals.forEach((p) => { for (const c of p.trig) t.push(c); }); if (S.deaths) for (const d of S.dsrc) t.push(d); return t; };
+	const srcIarr = (goalArr, Q, R) => { const t = Array.from(goalArr, () => 0); S.portals.forEach((p, k) => { for (let j = 0; j < p.trig.length; j++) t.push(Q[k]); }); if (S.deaths) for (let j = 0; j < S.dsrc.length; j++) t.push(DEATH_MIN + R); return t; };
 	/**
 	 * field(goalTiles, Lc?, o?) -> Float32Array(N) of admissible ticks (Infinity: no way; 0 on goal tiles).
 	 * o.touch: add the half blocks whose touch goes to a goal (default: when every goal tile is a trophy).
@@ -329,9 +388,43 @@ function createBounds(L, o = {}) {
 			}
 			if (!changed || rounds >= MAX_ROUNDS) break;
 		}
+		// the plain layer: sources the goals, the non-rotated portals (Qp, its own fixpoint from below), the deaths (the
+		// capped respawn values: a respawn is plain, and the capped values hold anyway), the mechanism tiles (the capped
+		// per-axis values there less 8 px on each side of the tile at each layer's slowest speed)
+		let axp = null, ayp = null, plainB = null;
+		if (usePlain && S.mechTiles.length) {
+			const cx = ax || dijkstra(S, wall, srcTarr(goalArr, Q, R, wall), srcIarr(goalArr, Q, R, wall), (dx) => capX(dx), null);
+			const cy = ay || dijkstra(S, wall, srcTarr(goalArr, Q, R, wall), srcIarr(goalArr, Q, R, wall), (dx, dy) => capY(dy), null);
+			const mOffX = (8 + SLACK) / Math.min(vp.xp, vp.xn) + (8 + SLACK) / Math.min(vmax.xp, vmax.xn), mOffY = (8 + SLACK) / Math.min(vp.yp, vp.yn) + (8 + SLACK) / Math.min(vmax.yp, vmax.yn);
+			const Qp = new Float64Array(S.portals.length).fill(1);
+			axp = new Float64Array(N); ayp = new Float64Array(N); plainB = new Float32Array(N);
+			for (let r = 0; r < MAX_ROUNDS; r++) {
+				rounds++;
+				const sT = [], sX = [], sY = [];
+				for (const t of goalArr) { sT.push(t); sX.push(0); sY.push(0); }
+				S.portals.forEach((p, k) => { if (!p.rotated) for (const c of p.trig) { sT.push(c); sX.push(Qp[k]); sY.push(Qp[k]); } });
+				if (S.deaths) for (const d of S.dsrc) { sT.push(d); sX.push(DEATH_MIN + R); sY.push(DEATH_MIN + R); }
+				for (const m of S.mechTiles) if (!isGoal[m]) { sT.push(m); sX.push(Math.max(0, cx[m] - mOffX)); sY.push(Math.max(0, cy[m] - mOffY)); }
+				dijkstra(S, wall, sT, sX, (dx) => costXp(dx), axp);
+				dijkstra(S, wall, sT, sY, (dx, dy) => costYp(dy), ayp);
+				for (let i = 0; i < N; i++) {
+					if (isGoal[i] || bound[i] === Infinity) { plainB[i] = bound[i]; continue; }
+					plainB[i] = Math.max(bound[i], Math.ceil(axp[i] - offXp - EPS), Math.ceil(ayp[i] - offYp - EPS));
+				}
+				let changed = false;
+				S.portals.forEach((p, k) => {
+					if (p.rotated) return;
+					let m = Infinity;
+					for (const c of p.near) if (!wall[c] && plainB[c] < m) m = plainB[c];
+					if (1 + m > Qp[k] + 1e-9) { Qp[k] = 1 + m; changed = true; }
+				});
+				if (!changed) break;
+			}
+		}
 		const ms = Date.now() - t0;
 		st.fields++; st.ms += ms; st.rounds += rounds;
-		META.set(bound, { goals: goalArr, isGoal, iso: iso ? Float32Array.from(iso) : null, ax: ax ? Float32Array.from(ax) : null, ay: ay ? Float32Array.from(ay) : null, touch, ms, rounds, lc: !!Lc });
+		META.set(bound, { goals: goalArr, isGoal, iso: iso ? Float32Array.from(iso) : null, ax: ax ? Float32Array.from(ax) : null, ay: ay ? Float32Array.from(ay) : null,
+			axp: axp ? Float32Array.from(axp) : null, ayp: ayp ? Float32Array.from(ayp) : null, plainB, touch, ms, rounds, lc: !!Lc });
 		memo.set(key, bound);
 		if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value);
 		return bound;
@@ -363,8 +456,17 @@ function createBounds(L, o = {}) {
 			if (bx > v) v = bx;
 			if (by > v) v = by;
 		}
+		if (m.axp && isPlain(sim)) {
+			const bx = Math.ceil(m.axp[t] - (dx > 0 ? dx / vp.xp : -dx / vp.xn) - (8 + SLACK) / Math.min(vp.xp, vp.xn) - EPS);
+			const by = Math.ceil(m.ayp[t] - (dy > 0 ? dy / vp.yp : -dy / vp.yn) - (8 + SLACK) / Math.min(vp.yp, vp.yn) - EPS);
+			if (bx > v) v = bx;
+			if (by > v) v = by;
+		}
 		if (tiersOn.endgame && (ao.endgame !== false) && v < 128) {
-			const e = endgameAt(m, sim, Math.max(v, 1) + 64);
+			// endgame.js's kinematic bound holds for the ways without a death (portals it models); a way through a death
+			// takes >= DEATH_MIN ticks to the respawn and the field's value there
+			let e = endgameAt(m, sim, Math.max(v, 1) + 64);
+			if (S.deaths) { let r = Infinity; for (const x of S.respawn) if (f[x] < r) r = f[x]; if (DEATH_MIN + r < e) e = DEATH_MIN + r; }
 			if (e > v) v = e;
 		}
 		return v;
@@ -394,7 +496,7 @@ function createBounds(L, o = {}) {
 	/** per tier the values at a state (the report's tightness) */
 	function tiers(f, sim) {
 		const m = META.get(f);
-		const out = { field: null, iso: null, axis: null, endgame: null };
+		const out = { field: null, iso: null, axis: null, plain: null, endgame: null };
 		if (!m) return out;
 		const t = T.tileOf(sim, W, H);
 		out.field = f[t];
@@ -403,10 +505,13 @@ function createBounds(L, o = {}) {
 		if (m.iso) out.iso = Math.max(1, Math.ceil((16 * m.iso[t] - Math.max(Math.abs(dx), Math.abs(dy)) - 8 - SLACK) / D_TICK - EPS));
 		if (m.ax) out.axis = Math.max(1, Math.ceil(m.ax[t] - (dx > 0 ? dx / vmax.xp : -dx / vmax.xn) - (8 + SLACK) / Math.min(vmax.xp, vmax.xn) - EPS),
 			Math.ceil(m.ay[t] - (dy > 0 ? dy / vmax.yp : -dy / vmax.yn) - (8 + SLACK) / Math.min(vmax.yp, vmax.yn) - EPS));
+		if (m.axp && isPlain(sim)) out.plain = Math.max(1, Math.ceil(m.axp[t] - (dx > 0 ? dx / vp.xp : -dx / vp.xn) - (8 + SLACK) / Math.min(vp.xp, vp.xn) - EPS),
+			Math.ceil(m.ayp[t] - (dy > 0 ? dy / vp.yp : -dy / vp.yn) - (8 + SLACK) / Math.min(vp.yp, vp.yn) - EPS));
 		out.endgame = endgameAt(m, sim, 512);
+		if (S.deaths) { let r = Infinity; for (const x of S.respawn) if (f[x] < r) r = f[x]; if (DEATH_MIN + r < out.endgame) out.endgame = DEATH_MIN + r; }
 		return out;
 	}
-	return { vmax, tiersOn, field, at, pair, leg, tiers, meta: (f) => META.get(f), stats: () => Object.assign({}, st, { memo: memo.size }), static: S };
+	return { vmax, vplain: usePlain ? vp : null, isPlain, tiersOn, field, at, pair, leg, tiers, meta: (f) => META.get(f), stats: () => Object.assign({}, st, { memo: memo.size }), static: S };
 }
 
 module.exports = { createBounds, vmaxOf, terminal, staticOf, dijkstra, D_TICK, DEATH_MIN, V_RUN, V_FALL, V_JUMP, V_CAP, SLACK };

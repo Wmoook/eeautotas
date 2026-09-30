@@ -159,6 +159,20 @@ function unit() {
 	const B7 = BO.createBounds(boost);
 	check('B-UNIT boost: xp at the cap', B7.vmax.xp >= 16 && B7.vmax.xn < 7, JSON.stringify(B7.vmax));
 	roomCheck('boost exhaustive', boost, [], 25, 60000, B7);
+	// the plain layer: a boost far behind the start; the start is in plain mode (the plain run's speed until the boost)
+	const far = levelOf([
+		'##################################',
+		'#................................#',
+		'#B...........S..................G#',
+		'##################################',
+	], BASE);
+	const B9 = BO.createBounds(far);
+	const s9 = T.playTo(far, new Uint8Array(0)).sim;
+	const f9 = B9.field([2 * far.width + 32]);
+	const t9 = B9.tiers(f9, s9);
+	check('B-UNIT plain layer: a boost far behind the start, the start plain, its bound above the capped one', B9.isPlain(s9) && t9.plain > (t9.axis || 0) && B9.at(f9, s9) >= t9.plain, JSON.stringify(t9));
+	roomCheck('plain layer exhaustive (boost behind)', far, [], 45, 60000, B9);
+	roomCheck('plain layer from a boosted state', far, [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4], 30, 60000, B9);
 	// a mid state (not a node-aligned start): after 7 ticks holding right
 	roomCheck('corridor from a moving state', corr, [4, 4, 4, 4, 4, 4, 5], 30, 60000, B1);
 	// speed: a 400 x 200 open level with walls
@@ -186,7 +200,7 @@ function truth() {
 	const lim = +args.limit > 0 ? +args.limit : routes.length;
 	const npairs = +args.pairs > 0 ? +args.pairs : 200;
 	let nR = 0, nP = 0, viol = 0, startViol = 0, skipped = 0;
-	const tight = { field: [], iso: [], axis: [], endgame: [] }, tv = { iso: 0, axis: 0, endgame: 0 };
+	const tight = { field: [], short: [], iso: [], axis: [], plain: [], endgame: [] }, tv = { iso: 0, axis: 0, plain: 0, endgame: 0 };
 	const vlist = [];
 	let rng = 12345;
 	const rnd = () => { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff; };
@@ -200,7 +214,7 @@ function truth() {
 		if (!tr) { skipped++; continue; }
 		nR++;
 		const L = tr.L, W = L.width, H = L.height, n = tr.masks.length;
-		const B = BO.createBounds(L, { endgame: false });
+		const B = BO.createBounds(L, {});
 		// the route's states: tiles per tick, snapshots every 64 ticks
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset();
@@ -233,7 +247,8 @@ function truth() {
 			if (j - i > 0) {
 				const tr2 = B.tiers(f, s);
 				tight.field.push(b / (j - i));
-				for (const k of ['iso', 'axis', 'endgame']) if (tr2[k] !== null && tr2[k] !== undefined) { tight[k].push(Math.min(tr2[k], 1e9) / (j - i)); if (tr2[k] > j - i && !(k === 'endgame' && B.static.deaths)) tv[k]++; }
+				if (j - i <= 200) tight.short.push(b / (j - i));
+				for (const k of ['iso', 'axis', 'plain', 'endgame']) if (tr2[k] !== null && tr2[k] !== undefined) { tight[k].push(Math.min(tr2[k], 1e9) / (j - i)); if (tr2[k] > j - i) tv[k]++; }
 			}
 		}
 		// the start: the trophies' field from the start state vs the run's ticks
@@ -251,7 +266,7 @@ function truth() {
 	const med = (a) => { if (!a.length) return NaN; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
 	for (const v of vlist) console.log(`  VIOLATION ${v}`);
 	console.log(`  routes ${nR} (skipped ${skipped}), pairs ${nP}, violations ${viol}, start violations ${startViol}`);
-	console.log(`  tightness (median bound / true): kept ${med(tight.field).toFixed(3)}, iso ${med(tight.iso).toFixed(3)}, axis ${med(tight.axis).toFixed(3)} (violations per tier: iso ${tv.iso}, axis ${tv.axis}), endgame ${med(tight.endgame).toFixed(3)} (violations on death-free levels ${tv.endgame})`);
+	console.log(`  tightness (median bound / true): kept ${med(tight.field).toFixed(3)} (pairs <= 200 ticks apart: ${med(tight.short).toFixed(3)} of ${tight.short.length}), iso ${med(tight.iso).toFixed(3)}, axis ${med(tight.axis).toFixed(3)}, plain ${med(tight.plain).toFixed(3)}, endgame ${med(tight.endgame).toFixed(3)} (violations per tier: iso ${tv.iso}, axis ${tv.axis}, plain ${tv.plain}, endgame ${tv.endgame})`);
 	check('T-LB-ADMISSIBLE', nR > 0 && viol === 0 && startViol === 0, `${nR} routes, ${nP} pairs, ${viol} + ${startViol} violations`);
 }
 
