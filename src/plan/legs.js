@@ -178,10 +178,10 @@ function legBFS(L, starts, goal, o) {
 					const v = Math.abs(sim.speed_x) + Math.abs(sim.speed_y);
 					const e = nx.get(key);
 					if (e !== undefined) {
-						if (v > e.v) { e.sn = sim.snapshot(e.sn); e.v = v; e.par = i; e.msk = m; e.dist = distOf(field, sim); e.sc = LAZY ? ftOf(e.dist) : scoreOf(e.dist); }
+						if (v > e.v) { e.sn = sim.snapshot(e.sn); e.v = v; e.par = i; e.msk = m; e.dist = distD(field, sim, allowDeath); e.sc = LAZY ? ftOf(e.dist) : scoreOf(e.dist); }
 						continue;
 					}
-					const dist = distOf(field, sim);
+					const dist = distD(field, sim, allowDeath);
 					nx.set(key, { sn: sim.snapshot(), v, t, dist, sc: LAZY ? ftOf(dist) : scoreOf(dist), par: i, msk: m, key });
 				}
 			}
@@ -542,7 +542,7 @@ function legBest(L, starts, goal, o) {
 			if (cx < 0 || cy < 0 || cx >= W || cy >= H) { drop.oob++; continue; }
 			if (region !== null && !region[cy * W + cx]) { drop.region++; continue; }
 			if (!closed.add(ka, kb)) { drop.closed++; continue; }
-			const d = distOf(field, sim);
+			const d = distD(field, sim, allowDeath);
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
@@ -610,6 +610,9 @@ function eta(D, v) {
 	if (D <= dv) return (-v + Math.sqrt(v * v + 2 * A_RUN * D)) / A_RUN;
 	return tv + (D - dv) / V_RUN;
 }
+/** the ordering distance, a DEAD ball of a death step (allowDeath) 0: it comes back at its respawn by itself, and its
+ *  tile (the killer's) has no value on the field (1e9: the dead states went last and the heap's cut dropped them) */
+const distD = (field, sim, allowDeath) => (allowDeath && sim.is_dead ? 0 : distOf(field, sim));
 const distOf = (field, sim) => {
 	if (!field) return 0;
 	const c = RF.costAt(field, sim);

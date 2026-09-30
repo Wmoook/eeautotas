@@ -402,9 +402,42 @@ function createPlanner(model, facts, o = {}) {
 			if (!tr.changed) continue;
 			finish(X, live, 'trig:' + X.id, tr);
 		}
+		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
+		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
+		// death more), so the door that needs N deaths opens in the plan: Tutorial 2's est walk passed its death door only in
+		// the relaxation, every plan carried the 1e6 penalty and no death step. The lb needs none (it keeps 1011 open).
+		// EEAT_PLAN_DIE=0: none
+		if (wantEst && DIE_EDGE && dieIdx !== undefined && dvE && S.vals[dieIdx] < model.deathT && dieNear(S.vals[dieIdx])) {
+			const vals = S.vals.slice();
+			vals[dieIdx] = S.vals[dieIdx] + 1;
+			const S2 = model.mkState(vals, S.taken, S.btaken, S.cp);
+			const rp = model.respawnOf(S2, 'est');
+			const edge = 'die:' + vals[dieIdx];
+			if (rp && !(facts && facts.blocked(edge, cls, S.key))) {
+				const ok = facts ? facts.okTicks(edge, cls) : undefined;
+				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
+				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
+				const X = { id: -1 - vals[dieIdx], kind: 'die', tiles: rp.tiles, label: `die, back at a respawn (deaths ${vals[dieIdx]})` };
+				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
+			}
+		}
 		finish(null, trophyTiles, 'trophy', null);
 		return out;
 	}
+	const DIE_EDGE = process.env.EEAT_PLAN_DIE !== '0';
+	// (a death is a move only toward a death door / gate threshold at most DIE_GAP deaths on: First Person Maze's 999-death
+	// door made "die" its first plan step (est 138), a way no route takes; each death costs 54 dead ticks at least)
+	const DIE_GAP = +process.env.EEAT_PLAN_DIE_GAP || 3;
+	const deathThs = (() => {
+		const set = new Set(), fg = model.L && model.L.fg, lk = model.L && model.L.lookup0;
+		if (fg && lk) for (let i = 0; i < fg.length; i++) if ((fg[i] === 1011 || fg[i] === 1012) && lk[i] > 0) set.add(lk[i]);
+		return [...set].sort((x, y) => x - y);
+	})();
+	const dieNear = (cur) => deathThs.some((t) => t > cur && t <= cur + DIE_GAP);
+	const dieIdx = model.featSet && model.featSet.has('deaths') && model.canDie && model.deathT > 0 ? model.fIdx.get('deaths') : undefined;
+	const diePosOf = new Map();
+	/** the position after a death: the respawn's tiles, no extra ticks (the die edge priced them) */
+	const diePos = (rp) => { let p = diePosOf.get(rp.id); if (!p) { p = { id: 'die@' + rp.id, tiles: rp.tiles, extra: 0 }; diePosOf.set(rp.id, p); } return p; };
 	/** the lb of a leg (costOf): the tier-0 bound under the lb relaxation, the primitives' where sound too, the larger */
 	function legLb(S, pos, tiles, base) {
 		let lb = model.pairLb(S, pos, tiles, 'lb', base);
@@ -420,6 +453,7 @@ function createPlanner(model, facts, o = {}) {
 		for (const n of path) {
 			if (Date.now() > deadline) break;
 			const from = n.parent, e = n.e;
+			if (e.X && e.X.kind === 'die') continue;   // (a death's goal is the respawn: no walk leg to check)
 			const k = rchKey(from.S, from.pos, e.edge);
 			if (rchBad.has(k)) continue;
 			ST.rchChecks++;
@@ -553,6 +587,16 @@ function createPlanner(model, facts, o = {}) {
 		if (bestPartial === root && bestRootChild) bestPartial = bestRootChild;
 		return { found, bestPartial: bestPartial === root ? null : bestPartial, expanded, ms: Date.now() - t0, pruned, rootEdges, exhausted: !open.size && !found };
 	}
+	/** a death step's ORDERING field: the tiles a death starts from (model.dieSrc), not its goal tiles (the respawn, where
+	 *  the leg's start usually stands: every finder's field read 0 there and no search went to a killer; the executor's
+	 *  closest read 0, rung after rung). The goal test is the waypoint's own (alive back at the respawn, deaths + 1);
+	 *  EEAT_DIE_FIELD=0: the respawn's field as before */
+	const DIE_FIELD = process.env.EEAT_DIE_FIELD !== '0';
+	const dieSrcArr = model.dieSrc && model.dieSrc.length ? model.dieSrc : null;
+	function dieField(wp) {
+		if (DIE_FIELD && dieSrcArr) { wp.fieldTiles = dieSrcArr; wp.fieldTouch = false; wp.dieField = true; }
+		return wp;
+	}
 	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
 	function stepsOf(a, node) {
 		const path = [];
@@ -569,8 +613,9 @@ function createPlanner(model, facts, o = {}) {
 			if (e.viaDeath) {
 				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
 				const edge = `death:${deathsNow}`;
-				push({ edge, nodeClass: cls, rung: facts ? facts.rungOf(edge, cls) : 0, estTicks: DEAD_TICKS, lb: DEAD_TICKS,
-					waypoint: { kind: 'region', tiles: model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` } });
+				const wpD = { kind: 'region', tiles: model.respawnOf(from.S).tiles.slice(), expect: { feat: 'deaths', value: deathsNow + 1 }, allowDeath: true, label: `die, back at a respawn (deaths ${deathsNow + 1})` };
+				dieField(wpD);
+				push({ edge, nodeClass: cls, rung: facts ? facts.rungOf(edge, cls) : 0, estTicks: DEAD_TICKS, lb: DEAD_TICKS, waypoint: wpD });
 				deathsNow++;
 			}
 			// the anchor's own active key: its door first, before the key runs out
@@ -585,6 +630,13 @@ function createPlanner(model, facts, o = {}) {
 				}
 			}
 			const X = e.X;
+			if (X && X.kind === 'die') {
+				// (a death as a move: the respawn with one death more; a death shortcut after it counts from there)
+				deathsNow = e.expect.value;
+				push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, estTicks: Math.round(e.est), lb: e.lb,
+					waypoint: dieField({ kind: 'region', tiles: e.live.slice(), expect: e.expect, allowDeath: true, label: X.label }) });
+				continue;
+			}
 			const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: X.label } : { kind: 'trophy', label: 'trophy' };
 			push({ edge: e.edge, nodeClass: cls, rung: facts ? facts.rungOf(e.edge, cls) : 0, waypoint: wp, estTicks: Math.round(e.est), lb: e.lb });
 			// a key followed by its door: the passage while the key is on

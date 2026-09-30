@@ -40,6 +40,7 @@ const JUMP2 = [4, 8, 12, 16];
 const HOLD_N = [2, 6, 16];
 const TELEPORT_PX = 20;
 const DEATH_WAIT = 80;
+const DEAD_WAIT_ALL = process.env.EEAT_PRIMS_DEADWAIT !== '0';   // (the WAIT edge through every dead tick; 0: a tick an edge, as before)
 const GUIDE_K = 2;          // ticks per reach-field tile in the greedy passes' order
 const GUIDE_FAR = 1e5;
 // the closest approach by an unweighted nearness (the reach field's tiles) instead of the pass's weighted h (1, the
@@ -175,7 +176,9 @@ async function createPrims(L, o = {}) {
 			E.applyMask(inp, m);
 			s.tick(inp);
 			buf[n++] = m;
-			if (s.is_dead) { event = 'dead'; break; }
+			// (the dead ball's WAIT plays on through its dead ticks to the respawn in ONE edge: before, every dead tick was a
+			// node of its own (54 expansions a death), and a death step's search spent its budget there)
+			if (s.is_dead && !macro.dead) { event = 'dead'; break; }
 			if (ctx.goal && ctx.goal.test(s)) { event = 'goal'; goal = true; break; }
 			if (macro.whole) continue;   // a learned leg plays whole (only a death or the goal ends it early)
 			if (Math.abs(s.px - px) > TELEPORT_PX || Math.abs(s.py - py) > TELEPORT_PX) { event = 'portal'; break; }
@@ -238,7 +241,7 @@ async function createPrims(L, o = {}) {
 	/** the macros for the state in `s` (restored from snap): the family by its support, STEP last */
 	function familyOf(s, snap, fo) {
 		const list = [];
-		if (s.is_dead) { list.push({ name: 'WAIT', fam: 'WAIT', max: DEATH_WAIT, mask: (k, x) => (x.is_dead ? 0 : -1) }); return { list, steps: null }; }
+		if (s.is_dead) { list.push({ name: 'WAIT', fam: 'WAIT', max: DEATH_WAIT, dead: DEAD_WAIT_ALL, mask: (k, x) => (x.is_dead ? 0 : -1) }); return { list, steps: null }; }
 		const ground = !!s.on_ground && s.flip_gravity === 0 && s.moy > 0 && s.mox === 0;
 		const chains = [];
 		if (ground && plainFx(s) && fo.family !== 'step') {
@@ -319,7 +322,10 @@ async function createPrims(L, o = {}) {
 		st.routes++;
 		const fieldR = bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) });
 		const trophy = goal.kind === 'trophy';
-		const h = (s) => { const v = bounds.at(fieldR, s); return v === Infinity ? Infinity : (trophy ? v + 1 : v); };
+		// (a dead ball of a death step 0: it respawns by itself; the killer's tile has no value on the field, and h
+		// Infinity dropped every dying child: a death step was never found by the primitives)
+		const deadOK = !!goal.allowDeath || !!ro.allowDeath;
+		const h = (s) => { if (deadOK && s.is_dead) return 0; const v = bounds.at(fieldR, s); return v === Infinity ? Infinity : (trophy ? v + 1 : v); };
 		const sts = [];
 		for (const a of starts) {
 			const snap = snapOf(a);
@@ -334,7 +340,7 @@ async function createPrims(L, o = {}) {
 		if (ro.guide !== false && classDedup) {
 			try {
 				const gf = T.goalField(L, T.fieldTilesOf(goal), { deaths: false });
-				guide = (s) => { const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
+				guide = (s) => { if (deadOK && s.is_dead) return 0; const c = RF.costAt(gf, s); return c < 0 ? GUIDE_FAR : c * GUIDE_K; };
 			} catch (e) { guide = null; }
 		}
 		// (the closest approach's measure, the same in every pass: the reach field's tiles where it has the state (guide / GUIDE_K),

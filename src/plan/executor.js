@@ -164,7 +164,8 @@ function makeCore(L, co) {
 			if (!(c < 0 && f.mode !== 'walk')) proofAll = false;
 		}
 		tiers.push({ tier: 'proof', ms: Date.now() - tIn, proof: anyField && proofAll });
-		if (anyField && proofAll) return out(proofFail(starts[0], goal, wp, rung, 'the goal field of the level as the doors stand is -1 at every start', deadline));
+		// (a death step's field is an ORDERING field (the tiles a death starts from, planner.js dieField), no proof)
+		if (anyField && proofAll && !wp.dieField) return out(proofFail(starts[0], goal, wp, rung, 'the goal field of the level as the doors stand is -1 at every start', deadline));
 		const disc0 = starts[0].disc;
 		const sameDisc = starts.every((s) => s.disc === disc0);
 		const cutField = sameDisc && field0 && field0.mode !== 'walk' ? field0 : null;
@@ -768,7 +769,9 @@ async function createExecutor(L, opts) {
 		const e = core.startOf(String(str));
 		vsim.restore(e.snap);
 		if (e.dead) return { f: null, c: NaN };
-		const f = T.goalField(T.levelNow(L, vsim), goal.tiles, { deaths: !!allowDeath });
+		// (the waypoint's own ordering tiles: a death step's are the tiles a death starts from, planner.js dieField; its
+		// goal tiles, the respawn, are where its start stands: c0 0, no skeleton, Tutorial 2's killers 235+ tiles away)
+		const f = T.goalField(T.levelNow(L, vsim), T.fieldTilesOf(goal), { deaths: !!allowDeath });
 		return { f, c: RF.costAt(f, vsim) };
 	}
 	/** the skeleton's closest in the WAYPOINT's unit (f0: its goal field at the step's starts, the unit of the direct
@@ -842,7 +845,7 @@ async function createExecutor(L, opts) {
 			// (a sub-leg's share: its part of the way (3 steps' worth), at least 300 ms; a failed one once more with half of
 			// what is left)
 			const share = retried ? Math.max(300, 0.5 * left) : Math.min(left - 50, Math.max(300, left * Math.min(0.5, (3 * step) / cCur)));
-			const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, fieldTiles: Array.from(goal.tiles), fieldTouch: goal.kind === 'trophy', label: `${wp.label || wp.kind} (skeleton ${Math.round(c)} tiles)` };
+			const sub = { kind: 'region', tiles, expect: null, allowDeath: !!wp.allowDeath, fieldTiles: Array.from(T.fieldTilesOf(goal)), fieldTouch: T.fieldTouchOf(goal), label: `${wp.label || wp.kind} (skeleton ${Math.round(c)} tiles)` };
 			const r = await reachLeg(cur, sub, { ms: share, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + share), stop: budget.stop }, true);
 			sims += r.sims || 0;
 			levels.push({ c: Math.round(c), ok: !!r.ok, ms: r.ms, tool: r.tool });

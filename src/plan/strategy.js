@@ -938,7 +938,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 				if (left() < 250 || (best && left() <= endReserve)) { end = 'time'; break; }
 				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				nothingSince = steps;
-				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
+				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
+				// end is the time's, not a claim that no plan is left (The Flighty Slighty, The Tunnels, Fish Gods, OCTOS:
+				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
 			}
 			const tick = new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });

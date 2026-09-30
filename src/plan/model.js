@@ -214,6 +214,24 @@ function compileModel(L, o = {}) {
 			for (let d = 0; d < 8 && !dieTile[i]; d++) { const nx = x + DX8[d], ny = y + DY8[d]; if (nx >= 0 && ny >= 0 && nx < W && ny < H && A.cls[ny * W + nx] === 1) dieTile[i] = 1; }
 		}
 	}
+	// the tiles a death STARTS from (a death step's ordering field, the executor's: planner.js stepsOf): a killer, a tile
+	// next to one (the half block's current-tile redirect), lava, a timed killer's effect tile (its pickup). dieTile marks
+	// EVERY tile on a level with a timed killer (a death can come anywhere there, the lb's sound source), so as an ORDERING
+	// field it orders nothing: the executor's die legs sat at the respawn = the leg's start, closest 0, rung after rung
+	// (Helix Reborn, Evolution Revolution, Tutorial 2); the sources here are where the ball goes to die
+	const dieSrc = [];
+	if (canDie) {
+		for (let i = 0; i < N; i++) {
+			if (A.cls[i] === 0) continue;
+			const id = fg[i];
+			let src = A.cls[i] === 1 || id === LAVA || ((id === CURSE || id === ZOMBIE || id === POISON) && lk[i] > 0);
+			if (!src) {
+				const x = i % W, y = (i / W) | 0;
+				for (let d = 0; d < 8 && !src; d++) { const nx = x + DX8[d], ny = y + DY8[d]; if (nx >= 0 && ny >= 0 && nx < W && ny < H && A.cls[ny * W + nx] === 1) src = true; }
+			}
+			if (src) dieSrc.push(i);
+		}
+	}
 	const sim0 = new E.EESim(L); sim0.reset();
 	const startTile = T.tileOf(sim0, W, H);
 	// the idle trajectory (no input): free before the run timer starts; its tiles are the start's free sources
@@ -646,7 +664,7 @@ function compileModel(L, o = {}) {
 	const model = {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, keyOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
-		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, deathT, timed, coinTiles, bcoinTiles,
+		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, dieSrc, deathT, timed, coinTiles, bcoinTiles,
 		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),
