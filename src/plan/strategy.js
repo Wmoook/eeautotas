@@ -813,7 +813,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	{
 		const lg = best ? best.legs : [];
 		const c = legTools(lg), proven = lg.filter((g) => g.proven).length;
-		const tools = Object.entries(c).map(([k, v]) => `${k} ${v}${k === 'exact' && proven ? ` (${proven} proven)` : ''}`).join(', ');
+		const tools = Object.entries(c).map(([k, v]) => `${k} ${v}`).join(', ') + (proven ? `; ${proven} proven` : '');
 		stage('moves', Date.now() - tMoves, best ? `${lg.length} leg${lg.length === 1 ? '' : 's'}${tools ? ` (${tools})` : ''}, ${failSteps} re-plan${failSteps === 1 ? '' : 's'}, ${steps} steps, ${anchors.size} anchors (end ${end})`
 			: `no route: ${steps} steps, ${failSteps} failed, ${anchors.size} anchors, ${deepenings} deepening${deepenings === 1 ? '' : 's'}, ${stalls} stall${stalls === 1 ? '' : 's'} (end ${end})`);
 	}
