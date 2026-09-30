@@ -129,6 +129,7 @@ const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 // the anchors in time. Ordering only (the est walk is no bound): no edge dropped from the plan search itself, the lb
 // untouched, no claim.
 const TIMER = process.env.EEAT_PLAN_TIMER === '1';
+const TIMER_START = TIMER && process.env.EEAT_PLAN_TIMER_START !== '0';
 /** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
  *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
  *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
@@ -1276,6 +1277,61 @@ function createPlanner(model, facts, o = {}) {
 		for (const t of tiles) if (d[t] < b) b = d[t];
 		return b < INF && b * pace() <= tm.left;
 	}
+	/** THE TIMER AT THE START (EEAT_PLAN_TIMER_START, on inside EEAT_PLAN_TIMER=1; =0 off): an anchor with no timer running
+	 *  whose est walk reaches NOTHING the plan wants (the trophy, a relevant trigger) without a timed killer's starter tile
+	 *  (421 / 422 / 1584 with a time) will carry that killer: One Minute Descent's start falls through its zombie at tick
+	 *  54, so the start's plans took 1-3 blue coins before the first timed anchor sent the plan to team 6. Returns the
+	 *  {left, id} the anchor will have (the doorway starter's est arrival + its duration, eesim.js effectDuration: (v +
+	 *  2 PING) * 100 ticks; the latest among the doorways) or null (not forced). The walk without the CEGAR walls. */
+	let starterTiles = null;
+	const forcedMemo = new Map();
+	function forcedTimer(a) {
+		if (!starterTiles) {
+			starterTiles = [];
+			const fg = L.fg, lk = L.lookup0;
+			if (lk) for (let i = 0; i < fg.length; i++) { const id = fg[i]; if ((id === 421 || id === 422 || id === 1584) && lk[i] > 0) starterTiles.push(i); }
+		}
+		if (!starterTiles.length || !a.pos || !a.pos.tiles) return null;
+		const key = a.S.pkey + showKeyOf(a) + '#' + a.pos.id;
+		if (forcedMemo.has(key)) return forcedMemo.get(key);
+		let out = null;
+		try {
+			const god = !!(a.sim && a.sim.in_god_mode);
+			const st = god ? starterTiles.filter((t) => L.fg[t] === 421) : starterTiles;
+			if (st.length) {
+				const d = model.dist(a.S, a.pos, 'estNW', a.base);
+				const m = Uint8Array.from(model.passMask(a.S, 'estNW', a.base));
+				for (const t of st) m[t] = 0;
+				const d0 = model.bfs(m, a.pos.tiles);
+				let free = false, reach = false;
+				const see = (t) => { if (d0[t] < INF) free = true; else if (d[t] < INF) reach = true; };
+				for (const t of trophyTiles) see(t);
+				for (const X of relevant) { if (free) break; if (X.tiles) for (const t of X.tiles) see(t); }
+				if (!free && reach) {
+					const P = pace();
+					let best = -1, bid = -1;
+					for (const t of st) {
+						if (!(d[t] < INF)) continue;
+						const x = t % W, y = (t / W) | 0;
+						let door = false;
+						for (let dy = -1; dy <= 1 && !door; dy++) for (let dx = -1; dx <= 1; dx++) {
+							const nx = x + dx, ny = y + dy;
+							if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+							if (d0[ny * W + nx] < INF) { door = true; break; }
+						}
+						if (!door) continue;
+						const left = Math.floor(d[t] * P + (L.lookup0[t] + 0.4) * 100);
+						if (left > best) { best = left; bid = L.fg[t]; }
+					}
+					if (best > 0) out = { left: best, id: bid, forced: true };
+				}
+			}
+		} catch (e) { out = null; }
+		forcedMemo.set(key, out);
+		if (forcedMemo.size > 256) forcedMemo.delete(forcedMemo.keys().next().value);
+		return out;
+	}
+	const showKeyOf = (a) => (a.S.show ? '|' + a.S.show.coins + ',' + a.S.show.bcoins + ',' + a.S.show.deaths : '');
 	/** THE TIMER's plan: the plan search with the anchor's timed killer as a deadline (po.tLeft: a node whose est arrival
 	 *  + the open level's walk to the trophy passes it is not generated), a whole plan to the trophy or null; its own
 	 *  clock: half of the plan call's (at least 50 ms) */
@@ -1334,8 +1390,16 @@ function createPlanner(model, facts, o = {}) {
 		// it after the anchors in time)
 		let late = false, timerCost;
 		if (TIMER) {
-			const tm = timerOf(a.sim), tl = tm.left;
-			if (tl < Infinity) {
+			let tm = timerOf(a.sim);
+			// (THE TIMER AT THE START: a killer every way passes counts as running: the deadline plan only, never late)
+			let forced = false;
+			if (!(tm.left < Infinity) && TIMER_START && a.sim && !a.sim.is_dead) { const f = forcedTimer(a); if (f) { tm = f; forced = true; ST.timerForced = (ST.timerForced || 0) + 1; } }
+			const tl = tm.left;
+			if (forced) {
+				let tp = null;
+				try { tp = timerPlan(a, so, deadline, tl); } catch (e) { tp = null; }
+				if (tp) { tp.why = `trophy in the coming timer (${tl} ticks)`; plans.unshift(tp); timerCost = tp.cost; ST.timerPlans = (ST.timerPlans || 0) + 1; }
+			} else if (tl < Infinity) {
 				let tp = null;
 				try { tp = timerPlan(a, so, deadline, tl); } catch (e) { tp = null; }
 				if (tp) { plans.unshift(tp); timerCost = tp.cost; ST.timerPlans = (ST.timerPlans || 0) + 1; }
