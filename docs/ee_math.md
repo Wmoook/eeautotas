@@ -1964,3 +1964,30 @@ pass-through arrival, or the region and the next waypoint as one leg), which the
 compiler's own skeleton chains sub-level sets the same way (7.7: 7 of 18 harness routes fail their first leg in every
 arm). On the waypoints alone the class is LEG (28 of 32: legs of 186-10,587 route ticks, none found from the route's own
 state in the budget either): the leg lanes' class.
+
+### 7.10 The bonk after the act in the compiler (the MATH program's iterate 2 lane 'coverage', 2026-09-30 05:40-06:40)
+
+The executor's direct legs get msolve's post-landing bonk variants (4.13) by default (`EEAT_MSOLVE_LANDBONK=0` off).
+The first version gave them a node pool of their own but ran their items interleaved with the members' by T: the
+shared gate (box 3, 60 s, W3, gate20 vs b3_w3.json, on 87e1ff0) **exit 1** (compiled 10 vs 12; MIHB's Dream 16,
+Level 1 Overworld 32, Fish Gods and NC Naos d3c6 lost), and the four rerun side by side with `EEAT_MSOLVE_LANDBONK=0`
+on one tree: NC Naos 358 / 358 ticks and Fish Gods lost / lost (the spread), Level 1 Overworld 34 / 35, MIHB's Dream
+**20 vs 27** triggers; the tier's plain legs on those four **34 vs 66** (direct calls 205 vs 230, 31 vs 42 with a leg,
+43.8 vs 35.8 s): the variants' items below the members' answers ate the math tier's clock. THE SECOND PASS (the
+variants only for a leg the members left unsolved) keeps a solved leg's cost exactly as before:
+
+- **The shared gate** on 87e1ff0 + the second pass: **exit 0**, compiled 15 vs 12 (Tutorial 1, The Blank Page,
+  INVASION), better 13, worse 0, 15 / 15 replayed; the tier 986 direct calls, 164 with a leg (16.6%), plain legs 138.
+  On the rebased tree (d72ff7f + this, pushed as 6824220 after a rebase onto d54e166): **exit 0**, compiled 13 vs 12,
+  better 9, worse 0, 13 / 13 replayed (MIHB's Dream 32, Booty Return 33, NC Naos 319, Rosa dei Venti 3,757); the tier
+  914 direct calls, 175 with a leg (19.1%), plain legs 152, 129 legs proven.
+- **The airborne class** (4.11's 16 failing levels with the most short airborne search-tier trigger legs; on vs
+  `EEAT_MSOLVE_LANDBONK=0` side by side on the rebased tree, par 3 each): compiled 1 vs 1 (Bygone Tutorial 2,073 vs
+  2,004 run ticks), progress 73 vs 69 triggers on the other 15 (Super Mario Bros 3 17 vs 9, Trail Blazer 6 vs 3,
+  Gingerbread House 11 vs 14, VVVVVV 8 vs 10, Imps Paradise 10 vs 11, Endeavor 1 vs 2, the rest equal: one run each,
+  within the spread); the tier 701 vs 656 direct calls, **43 vs 44 with a leg** (plain 37 vs 38): the compiler's direct
+  legs from airborne starts are the long, field-crossing ones of 7.8, which the plain tier's closed forms do not reach
+  either way.
+- **So:** the variants raise the plain tier's share of the airborne route legs (4.13: 58.0% -> 66.6%, 0 lost) at no
+  cost to a leg it solved before; the compiler's own direct legs do not show it yet (the same ~6% with a leg on the
+  class). What the compiler's missed legs need is 7.8's: legs past the 120-tick horizon and across fields.
