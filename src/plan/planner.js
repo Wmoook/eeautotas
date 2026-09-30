@@ -36,6 +36,14 @@ const { lbOfSteps, INF, DEAD_TICKS } = require('./model.js');
 const PACE0 = 4;              // est ticks per walk step before any learned leg
 const EST_W = 1.5;            // the plan search's heuristic weight (est only; the lb search is plain A*)
 const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible
+// THE LONG LEG'S CONVEX PRICE (n5 doctor 2, OPT-IN EEAT_PLAN_LEGT=<ticks>, default 0 = off; EEAT_PLAN_LEGK, default 1): 11 of
+// batch 2's 21 failing levels (12 of FINAL's first 51) plan the level as the trophy alone or 1-2 legs of lb 150-3,000 ticks (the
+// gravity-blind est walk finds the trophy open, so nothing between is relevant), and every such compile ends at gain 0-2, while
+// the known-route test finds the same level's 400-600-tick checkpoint legs at rung 1 (EE mountain world: from the spawn 661 ticks,
+// from hit-600 / 400 630 / 400): a leg's est past LEG_T costs LEG_K more a tick, so the plan search prefers a chain through the
+// relevant triggers on the way (checkpoints where a death can move the ball, coins) to one long leg. Ordering only (the lb and the
+// B&B untouched)
+const LEG_T = Math.max(0, +process.env.EEAT_PLAN_LEGT || 0), LEG_K = +process.env.EEAT_PLAN_LEGK > 0 ? +process.env.EEAT_PLAN_LEGK : 1;
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
@@ -501,7 +509,7 @@ function createPlanner(model, facts, o = {}) {
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
-				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
+				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
 					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
 					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
@@ -509,6 +517,9 @@ function createPlanner(model, facts, o = {}) {
 					est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
 				}
 				est = Math.max(lb, est);
+				// (THE LONG LEG'S CONVEX PRICE, OPT-IN: a leg's est past LEG_T ticks costs LEG_K more a tick, so a chain of
+				// shorter legs through the triggers on the way (checkpoints, coins) beats one long leg of the same walk)
+				if (LEG_T > 0 && !relaxOnly && est > LEG_T) est += LEG_K * (est - LEG_T);
 			}
 			// (pen: which penalty priced the edge, a diagnostic for the plan's steps: 'relax' (only the relaxation reaches
 			// it), 'rch' (RCH3 -1 at rest / rising), 'floor' / 'zone' (a count floor not reached))
@@ -585,7 +596,7 @@ function createPlanner(model, facts, o = {}) {
 			if (rp && !(facts && facts.blocked(edge, cls, proofKey(S, pos)))) {
 				const ok = facts ? facts.okTicks(edge, cls) : undefined;
 				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
-				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
+				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + (dvE.dt || 0) + DEAD_TICKS + extra);
 				const X = { id: -1 - vals[dieIdx], kind: 'die', tiles: rp.tiles, label: `die, back at a respawn (deaths ${vals[dieIdx]})` };
 				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
 			}

@@ -42,6 +42,26 @@ const DX8 = [-1, 0, 1, -1, 1, -1, 0, 1], DY8 = [-1, -1, -1, 0, 0, 1, 1, 1];
 // 2,494), but no compile gain at 60 s and I Wanna be the Guy 11 / 1 / 1 / 11 triggers -> 1 in 6 of 6 runs (its spike
 // checkerboards: chains of squeezes the est walk passes and a ball does not), OCTO'S FUN CASTLE 2 -> 0 in 2 of 2)
 const KILL_SQUEEZE = process.env.EEAT_KILL_SQUEEZE === '1';
+// A PROTECTED BALL CANNOT DIE (n5 doctor 2): the engine kills on a killer tile only `!is_invulnerable` (eesim.js
+// gFlags & 4), lava and the curse / zombie / poison effects set nothing on an invulnerable ball, and turning protection on
+// clears the running ones (Me.as:300-315), so under S.feats.prot === 1 no death exists until a protection-off effect or an
+// effect reset (the model's 'prot' / 'reset' touches) turns it off. The death shortcut (deathVia) ignored it: Animaly's plan
+// "protection on (36,42) -> ... -> team 3 -> die, back at a respawn (deaths 3)" spent every rung of the final compiles on a
+// death the engine never gives (closest 0-3 tiles at the killers, 'budget' rung after rung, 25 anchors at 180 s). With it,
+// a death step / a death as a teleport is offered only in a state that can die (lb: still admissible: only an impossible
+// way is dropped). EEAT_PROT_NODIE=0: as before.
+const PROT_NODIE = process.env.EEAT_PROT_NODIE !== '0';
+// THE EST DEATH ON A TIMED-KILLER LEVEL (n5 doctor 2): dieTile marks EVERY tile of a level with a curse / zombie / poison /
+// lava (a running timer kills anywhere: the lb's sound source), so the est death shortcut cost 0 walk steps from anywhere
+// and a death was a 54-tick teleport to the respawn in the plans' est: Animaly's plans were full of "die, back at a
+// respawn" steps (its known route has none: the team rooms' portals), every one a leg the executor could not do cheaply
+// (a death needs a killer or a pickup and its timer: closest 0-12 tiles, 'budget' rung after rung). In the est and walk
+// modes the shortcut now goes to a real death source (model dieSrc: a killer, a tile next to one, lava, a timed killer's
+// pickup) plus that source's delay (deathVia's dt, ticks: the planner adds it to the death's est); the lb (the proofs)
+// unchanged. Only levels with a timed killer change (elsewhere dieTile is the killers and their neighbours = dieSrc).
+// EEAT_DIE_EST=0: as before.
+const DIE_EST = process.env.EEAT_DIE_EST !== '0';
+const PACE_EST = 4;   // ticks a walk step, the planner's first pace (PACE0): the source's rank = its steps x this + its delay
 const KEY_BITS = new Map([[23, 0], [24, 1], [25, 2], [26, 0], [27, 1], [28, 2], [1005, 3], [1006, 4], [1007, 5], [1008, 3], [1009, 4], [1010, 5]]);
 const DEATH_DOORS = new Set([1011, 1012]);
 const KIND_OF = { key: 'key', psw: 'psw', pswR: 'pswR', osw: 'osw', oswR: 'oswR', team: 'team', prot: 'prot', reset: 'reset', fx: 'fx', coins: 'coin', bcoins: 'bcoin', crown: 'crown' };
@@ -255,6 +275,13 @@ function compileModel(L, o = {}) {
 			}
 			if (src) dieSrc.push(i);
 		}
+	}
+	// (each death source's delay, ticks from its touch to the death: 0 at a killer, lava's fire (effectDuration(2) + 1),
+	// a curse / zombie / poison's own timer ((v + 2 x ping) x 100 + 1): the est death shortcut's cost, deathVia)
+	const dieDelay = new Int32Array(dieSrc.length);
+	for (let k = 0; k < dieSrc.length; k++) {
+		const i = dieSrc[k], id = fg[i];
+		dieDelay[k] = A.cls[i] === 1 ? 0 : id === LAVA ? 241 : ((id === CURSE || id === ZOMBIE || id === POISON) && lk[i] > 0) ? Math.floor((lk[i] + 0.4) * 100) + 1 : 0;
 	}
 	const sim0 = new E.EESim(L); sim0.reset();
 	const startTile = T.tileOf(sim0, W, H);
@@ -654,17 +681,30 @@ function compileModel(L, o = {}) {
 	const deathMemo = new Map();
 	function deathVia(S, pos, mode, base) {
 		if (!canDie) return null;
-		const key = doorKey(S, mode, base) + '#' + pos.id;
-		let dk = deathMemo.get(key);
-		if (dk === undefined) {
+		if (PROT_NODIE && S.feats && S.feats.prot === 1) return null;
+		const est = DIE_EST && timed && mode !== 'lb' && dieSrc.length > 0;
+		const key = (est ? 's' : '') + doorKey(S, mode, base) + '#' + pos.id;
+		let m = deathMemo.get(key);
+		if (m === undefined) {
 			const d = dist(S, pos, mode, base);
-			dk = INF;
-			for (let i = 0; i < N; i++) if (dieTile[i] && d[i] < dk) { dk = d[i]; if (dk === 0) break; }
-			deathMemo.set(key, dk);
+			let dk = INF, dt = 0;
+			if (est) {
+				// (the est / walk modes on a level with a timed killer: the walk to a real death source and its delay, the
+				// source by walk steps x PACE_EST + delay; dieTile is every tile there, the lb's sound source)
+				let best = Infinity;
+				for (let k = 0; k < dieSrc.length; k++) {
+					const di = d[dieSrc[k]];
+					if (di >= INF) continue;
+					const c = di * PACE_EST + dieDelay[k];
+					if (c < best) { best = c; dk = di; dt = dieDelay[k]; }
+				}
+			} else for (let i = 0; i < N; i++) if (dieTile[i] && d[i] < dk) { dk = d[i]; if (dk === 0) break; }
+			m = { dk, dt };
+			deathMemo.set(key, m);
 			if (deathMemo.size > 4096) deathMemo.delete(deathMemo.keys().next().value);
 		}
-		if (dk >= INF) return null;
-		return { dk, dr: dist(S, respawnOf(S, mode), mode, base) };
+		if (m.dk >= INF) return null;
+		return { dk: m.dk, dt: m.dt, dr: dist(S, respawnOf(S, mode), mode, base) };
 	}
 	/** pairSteps(S, pos, tiles) -> the walk steps (INF: none; the death shortcut not counted) */
 	function pairSteps(S, pos, tiles, mode = 'est', base = null) { return minOver(dist(S, pos, mode, base), tiles); }
