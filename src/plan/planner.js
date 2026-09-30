@@ -884,7 +884,7 @@ function createPlanner(model, facts, o = {}) {
 			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
 		}
 		if (plans.length && crumbs.length) {
-			try { const cp = crumbPlan(a, plans); if (cp) plans.unshift(cp); } catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
+			try { const cp = crumbPlan(a, plans); if (cp.length) plans.unshift(...cp); } catch (e) { if (process.env.EEAT_CRUMB_DBG === '1') console.error('crumbPlan', e.stack); }
 		}
 		if (!plans.length) {
 			why = rootEdges < 0 ? 'budget' : rootEdges === 0 && !(facts && facts.list().length) ? 'proof' : 'exhausted';
@@ -963,20 +963,24 @@ function createPlanner(model, facts, o = {}) {
 		return out;
 	}
 	/**
-	 * THE CRUMB PLAN (doctor 9, n5; EEAT_CRUMBS=1, model.js): the nearest crumb (a coin no gate reads) by the admissible
-	 * bound, as a one-step plan in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_MIN ticks)
+	 * THE CRUMB PLANS (doctor 9, n5; EEAT_CRUMBS=1, model.js): the CRUMB_K nearest crumbs (coins no gate reads) by the
+	 * admissible bound, as one-step plans in front of the plans, when the best plan's first leg is long (its lb >= CRUMB_MIN ticks)
 	 * and the crumb is nearer than that leg's target (lb below CRUMB_F x its lb); the least lb x (1 + its rung) first (a
 	 * crumb that failed its rung gives way to the next nearest, a far one waits). An arrival at a crumb is a new anchor with one gain more: the
 	 * strategy goes on from it, so the compile follows the level's breadcrumb trail one leg at a time, and every plan from
 	 * each crumb is the plan search's own (the trophy's direct leg first). Ordering only: no edge dropped, the lb untouched.
 	 */
+	// (CRUMB_K crumb plans, the nearest first: a compile's workers run the first plans' legs side by side, so with one the
+	// other worker spent every rung on the long leg itself; box 5, On And On, 60 s, 2 workers: the nearest crumb (a blue
+	// coin off the route, closest 1 tile) took rungs 0-3 while the route's coin waited at rung 2)
 	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
+	const CRUMB_K = process.env.EEAT_CRUMB_K !== undefined ? Math.max(1, +process.env.EEAT_CRUMB_K | 0) : 2;
 	function crumbPlan(a, plans) {
 		const p0 = plans.find((p) => !p.near) || plans[0];
-		if (!p0 || !p0.steps || !p0.steps.length) return null;
+		if (!p0 || !p0.steps || !p0.steps.length) return [];
 		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
-		if (!(lb0 >= CRUMB_MIN)) return null;
+		if (!(lb0 >= CRUMB_MIN)) return [];
 		const cls = a.S.key + '|' + a.cls;
 		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, crumbs);
 		// (a crumb past the est walk's CEGAR cuts is kept: the cuts come from the long leg's failures, and a way around its
@@ -984,13 +988,16 @@ function createPlanner(model, facts, o = {}) {
 		const cands = es.filter((e) => e.X && e.X.crumb && !e.viaDeath && e.lb < CRUMB_F * lb0)
 			.sort((x, y) => (facts ? x.lb * (1 + facts.rungOf(x.edge, cls)) - y.lb * (1 + facts.rungOf(y.edge, cls)) : 0) || x.lb - y.lb || x.est - y.est);
 		if (process.env.EEAT_CRUMB_DBG === '1') console.error(`crumbPlan: lb0 ${lb0} crumb edges ${es.length} cands ${cands.length}: ${es.slice(0, 6).map((e) => `${e.X && e.X.label} lb ${e.lb} pen '${e.pen}' relax ${e.relaxOnly} r ${facts ? facts.rungOf(e.edge, cls) : '-'}`).join('; ')}`);
-		if (!cands.length) return null;
-		const e = cands[0];
+		const out = [];
 		const root = { S: a.S, pos: a.pos, e: null, parent: null };
-		const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
-		if (!steps.length) return null;
-		ST.crumbPlans = (ST.crumbPlans || 0) + 1;
-		return { id: `p${ST.plans}.c`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `crumb: the nearest breadcrumb before '${s0.waypoint && s0.waypoint.label}' (lb ${lb0})`, near: true, crumb: true };
+		for (const e of cands) {
+			if (out.length >= CRUMB_K) break;
+			const steps = stepsOf(a, { S: e.S2, pos: e.pos2, e, parent: root });
+			if (!steps.length) continue;
+			out.push({ id: `p${ST.plans}.c${out.length}`, steps, cost: p0.cost, lb: e.lb + hLb(e.pos2), partial: true, why: `crumb: a nearest breadcrumb before '${s0.waypoint && s0.waypoint.label}' (lb ${lb0})`, near: true, crumb: true });
+		}
+		ST.crumbPlans = (ST.crumbPlans || 0) + out.length;
+		return out;
 	}
 	// ---------------------------------------------------------------- CEGAR
 	/** the value of the feature gate tile i reads that opens it */
