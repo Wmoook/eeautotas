@@ -36,6 +36,14 @@ const { lbOfSteps, INF, DEAD_TICKS } = require('./model.js');
 const PACE0 = 4;              // est ticks per walk step before any learned leg
 const EST_W = 1.5;            // the plan search's heuristic weight (est only; the lb search is plain A*)
 const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible
+// THE LONG LEG'S CONVEX PRICE (n5 doctor 2, OPT-IN EEAT_PLAN_LEGT=<ticks>, default 0 = off; EEAT_PLAN_LEGK, default 1): 11 of
+// batch 2's 21 failing levels (12 of FINAL's first 51) plan the level as the trophy alone or 1-2 legs of lb 150-3,000 ticks (the
+// gravity-blind est walk finds the trophy open, so nothing between is relevant), and every such compile ends at gain 0-2, while
+// the known-route test finds the same level's 400-600-tick checkpoint legs at rung 1 (EE mountain world: from the spawn 661 ticks,
+// from hit-600 / 400 630 / 400): a leg's est past LEG_T costs LEG_K more a tick, so the plan search prefers a chain through the
+// relevant triggers on the way (checkpoints where a death can move the ball, coins) to one long leg. Ordering only (the lb and the
+// B&B untouched)
+const LEG_T = Math.max(0, +process.env.EEAT_PLAN_LEGT || 0), LEG_K = +process.env.EEAT_PLAN_LEGK > 0 ? +process.env.EEAT_PLAN_LEGK : 1;
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const INC_ON = process.env.EEAT_PLAN_INC !== '0';   // the plan search's incumbent (search(): a generated goal at the budget's end)
@@ -664,6 +672,9 @@ function createPlanner(model, facts, o = {}) {
 					}
 				}
 				est = Math.max(lb, est);
+				// (THE LONG LEG'S CONVEX PRICE, OPT-IN: a leg's est past LEG_T ticks costs LEG_K more a tick, so a chain of
+				// shorter legs through the triggers on the way (checkpoints, coins) beats one long leg of the same walk)
+				if (LEG_T > 0 && !relaxOnly && est > LEG_T) est += LEG_K * (est - LEG_T);
 				// (the stones' price of a long leg: the finders' cost grows much faster than its ticks)
 				if (STONES && stones.length && !relaxOnly && est > 0) est += est * est / STONE_LONG;
 			}

@@ -33,6 +33,19 @@ function anchorAfter(L, m, masks) {
 }
 
 function units() {
+	// ---- the long leg's convex price (EEAT_PLAN_LEGT, opt-in): a 57-step corridor, a checkpoint on the way (relevant: a spike
+	// makes deaths move the ball), the trophy at its end: off, the trophy alone; with LEGT 100 the checkpoint first
+	{
+		const cp = require('child_process');
+		const src = `const {LEVELS: _L} = require(${JSON.stringify(require.resolve('./planmodel.js'))});` +
+			`const M = require(${JSON.stringify(require.resolve('../src/plan/model.js'))}), F = require(${JSON.stringify(require.resolve('../src/plan/facts.js'))}), P = require(${JSON.stringify(require.resolve('../src/plan/planner.js'))});` +
+			`const L = require(${JSON.stringify(require.resolve('./planmodel.js'))}).level(['############################################################', '#..........................................................#', '#S.........................c.............................T.#', '##########################x#################################'], {c: [360], x: [361, 1]});` +
+			`const m = M.compileModel(L), p = P.createPlanner(m, F.createFacts(), {}).plan({}, {k: 1})[0];` +
+			`console.log(JSON.stringify(p.steps.map((s) => s.waypoint.label || s.waypoint.kind)));`;
+		const run = (env) => { try { return JSON.parse(cp.execFileSync(process.execPath, ['-e', src], { env: Object.assign({}, process.env, env), encoding: 'utf8' }).trim().split('\n').pop()); } catch (e) { return ['error ' + e.message.slice(0, 120)]; } };
+		const off = run({ EEAT_PLAN_LEGT: '0' }), on = run({ EEAT_PLAN_LEGT: '100' });
+		check('P-UNIT long leg: off the trophy alone, LEGT 100 the checkpoint on the way first', off.length === 1 && off[0] === 'trophy' && on.length === 2 && /^checkpoint/.test(on[0]) && on[1] === 'trophy', `off ${off.join(' -> ')} | on ${on.join(' -> ')}`);
+	}
 	// ---- the key door: the key, the passage past its door, the trophy
 	{
 		const L = LEVELS.keyDoor(), m = M.compileModel(L), pl = P.createPlanner(m, F.createFacts(), {});
