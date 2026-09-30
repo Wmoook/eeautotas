@@ -107,6 +107,9 @@ const COVER_ON = () => process.env.EEAT_COVER === '1';
 const COVER_SHARE = process.env.EEAT_COVER_SHARE !== undefined ? Math.max(0.05, Math.min(0.95, +process.env.EEAT_COVER_SHARE || 0.4)) : 0.4;
 const COVER_RUNG = process.env.EEAT_COVER_RUNG !== undefined ? +process.env.EEAT_COVER_RUNG : 1;
 // (the skeleton wrapper's cover slot: that share of a far waypoint's budget, the coverage finder alone on the whole leg)
+// (the coverage finder's region: the tiles the goal field's walk reaches within COVER_M tiles of the starts and the goal (the other
+// finders' 24: a run-up can go 50 tiles away from both, K Underground's checkpoint (87,44) turns at (18,46)); 0 = no region)
+const COVER_M = process.env.EEAT_COVER_M !== undefined ? Math.max(0, +process.env.EEAT_COVER_M || 0) : 64;
 const COVER_SLOT = process.env.EEAT_COVER_SLOT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_COVER_SLOT || 0)) : 0.4;
 const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
 const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EEAT_COARSE_RUNG : 1;
@@ -816,7 +819,7 @@ function makeCore(L, co) {
 			let rV = null, rVf = null;
 			if (COVER_ON() && (coverOnly || (rung >= COVER_RUNG && !goal.fieldTiles && budget.cover !== 2)) && Date.now() < bEnd - 50) {
 				const tv = Date.now();
-				rV = LG.legCover(L, snaps, goal, { sim, deadline: tv + (coverOnly ? 0.97 : COVER_SHARE) * (bEnd - tv), stop: stopFn, allowDeath, beforeTick, field: field0, region, depthMax, seed: (t0 * 2654435761 + rung * 97 + goal.tiles.length) >>> 0 });
+				rV = LG.legCover(L, snaps, goal, { sim, deadline: tv + (coverOnly ? 0.97 : COVER_SHARE) * (bEnd - tv), stop: stopFn, allowDeath, beforeTick, field: field0, region: COVER_M > 0 ? regionOf(field0, starts, goal, COVER_M) : null, depthMax, seed: (t0 * 2654435761 + rung * 97 + goal.tiles.length) >>> 0 });
 				sims += rV.sims;
 				tiers.push({ tier: 'cover', ms: Date.now() - tv, status: rV.status, passes: rV.passes });
 				if (process.env.EEAT_COVER_DBG === '1') console.error(`cover: rung ${rung} ${Date.now() - tv} ms of ${Math.round(COVER_SHARE * (bEnd - tv))} ${rV.status} cells ${rV.passes[0].cells} picks ${rV.passes[0].pops} sims ${rV.sims} closest ${rV.closest.dist} region ${region ? region.reduce((a, b) => a + b, 0) : 'none'}`);
@@ -1127,12 +1130,12 @@ function makeCore(L, co) {
 
 	/** the region of the leg search: tiles the goal field's walk reaches (dilated by a tile) in a box around the starts
 	 *  and the goal */
-	function regionOf(field, starts, goal) {
+	function regionOf(field, starts, goal, margin) {
 		let x0 = W, y0 = H, x1 = -1, y1 = -1;
 		const add = (t) => { const x = t % W, y = (t / W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; };
 		for (const s of starts) { sim.restore(s.snap); add(T.tileOf(sim, W, H)); }
 		for (const t of goal.tiles) add(t);
-		const M = +process.env.EEAT_REGION_M || 24;   // (tiles around the starts and the goal; env: measurements)
+		const M = margin > 0 ? margin : (+process.env.EEAT_REGION_M || 24);   // (tiles around the starts and the goal; env: measurements)
 		x0 = Math.max(0, x0 - M); y0 = Math.max(0, y0 - M); x1 = Math.min(W - 1, x1 + M); y1 = Math.min(H - 1, y1 + M);
 		const reg = new Uint8Array(N);
 		const walk = field && field.walk ? field.walk : null;
