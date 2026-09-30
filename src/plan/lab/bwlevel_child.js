@@ -20,7 +20,7 @@ const opt = (k, d) => { const a = argv.find((s) => s.startsWith('--' + k + '='))
 const file = argv.find((s) => !s.startsWith('--'));
 const ms = +opt('ms', 120000);
 const t0 = Date.now();
-const LEG_WALK = +opt('legwalk', 60), CUTS_F = +opt('cutsf', 0.6);
+const LEG_WALK = +opt('legwalk', 60), CUTS_F = +opt('cutsf', 0.6), LEGS_F = +opt('legsf', 0.7);
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 let end = 'none';
 try {
@@ -40,6 +40,7 @@ try {
 	const sched = opt('sched', '') === '0' ? [] : opt('sched', '') ? String(opt('sched', '')).split(',').map(Number).filter((x) => x > 0) : [Math.round(ms * 0.4), ms];
 	// (--cuts=1: after the first clock, the cut chain below on CUTS_F of what is left, then the whole leg again on the rest)
 	const cutsOn = opt('cuts', '0') === '1';
+	const wpf = opt('wps', '');
 	const tries = sched.length ? sched.map((c) => ({ clock: c })) : [{}, { relay: 16, relayMin: 10 }, { relay: 16, relayMin: 10, vxq: 4, ladder: 1 }];
 	let r = null;
 	const tryAll = (from) => {
@@ -49,7 +50,7 @@ try {
 			const tr = Object.assign({}, tries[i]), clock = tr.clock; delete tr.clock;
 			r = B.solve(snap, tgt, Object.assign({ ms: clock && i < tries.length - 1 ? Math.min(clock, rest) : rest }, tr));
 			out({ ev: 'try', n: i + 1, ok: !!r.ok, why: r.why || null, ms: Date.now() - t0 });
-			if (cutsOn && i === 0 && tries.length > 1) break;
+			if ((cutsOn || wpf) && i === 0 && tries.length > 1) break;
 		}
 	};
 	tryAll(0);
@@ -160,39 +161,35 @@ try {
 		}
 		return { ok: false, why: 'cuts: none' };
 	};
-	if (!r.ok && cutsOn && !/walk|bug|target/.test(r.why || '') && ms - (Date.now() - t0) > 15000) {
-		const cr = cutChain(CUTS_F * (ms - (Date.now() - t0)));
-		out({ ev: 'try', n: 'cuts', ok: !!cr.ok, why: cr.why || null, ms: Date.now() - t0 });
-		if (cr.ok) r = cr;
-		else tryAll(1);
-	}
-	if (r.ok) end = finishOf(r.masks) ? 'finish' : 'no finish';
-	else end = r.why || 'none';
-	// THE WHOLE LEVEL AS LEGS (--wps=<file.json>: the compile's first plan's waypoints, in order; strategy.js EEAT_BW_LEGS,
-	// on with EEAT_BW_LEVEL): a trophy behind a gate ('the start is not in the target's walk': Tutorial 4's blue coin door,
-	// Endless Pain's team door) is no one leg, but the plan's triggers are: each waypoint's tiles solved by the same backward
-	// solver from the exact state the legs before left (the prefix replayed from the level start), each new model state printed
-	// as an arrival (the compiler imports it as an anchor: its moves stage goes on from there), then the trophy from the last
-	// one. A leg that fails ends the chain (its later waypoints were planned from the states it did not reach).
-	const wpf = opt('wps', '');
-	if (!r.ok && wpf && /walk/.test(r.why || '') && ms - (Date.now() - t0) > 10000) {
-		let wps = [];
-		try { wps = JSON.parse(require('fs').readFileSync(wpf, 'utf8')); } catch (e) { wps = []; }
-		wps = wps.filter((w) => w && w.kind !== 'trophy' && Array.isArray(w.tiles) && w.tiles.length);
+	// THE WHOLE LEVEL AS LEGS (--wps=<file.json>: the compile's plan's waypoints from the start, in order; strategy.js
+	// EEAT_BW_LEGS, on with EEAT_BW_LEVEL; the compiler rewrites the file when a later plan of the start anchor names other
+	// triggers): after the first clock, a trophy behind a gate ('the start is not in the target's walk': Tutorial 1's coins)
+	// or a trophy leg the first clock did not solve (a ONE-LEG level: its first plan the trophy alone, its later plans the
+	// triggers the failed trophy legs taught the planner) goes along the plan's triggers: each waypoint's tiles solved by the
+	// same backward solver from the exact state the legs before left (the prefix replayed from the level start), each new
+	// model state printed as an arrival (the compiler imports it as an anchor: its moves stage goes on from there), then the
+	// trophy from the last one. A leg that fails ends the chain (its later waypoints were planned from states it did not reach).
+	const readWps = () => {
+		let w = [];
+		try { w = JSON.parse(require('fs').readFileSync(wpf, 'utf8')); } catch (e) { w = []; }
+		return Array.isArray(w) ? w.filter((x) => x && x.kind !== 'trophy' && Array.isArray(x.tiles) && x.tiles.length) : [];
+	};
+	const legsChain = (wps, clockMs) => {
+		const tEnd = Date.now() + clockMs;
 		let prefix = new Uint8Array(0), lsim = new E.EESim(L); lsim.reset();
-		let key = String(M.stateOf(lsim).key), legs = 0;
+		let key = String(M.stateOf(lsim).key);
 		const legsOf = [...wps, { kind: 'trophy', label: 'trophy', tiles: M.trophyTiles.slice() }];
 		for (let k = 0; k < legsOf.length; k++) {
-			const wp = legsOf[k], rest = ms - (Date.now() - t0);
-			if (rest < 3000) { end = 'legs: time'; break; }
+			const wp = legsOf[k], rest = tEnd - Date.now();
+			if (rest < 3000) return { ok: false, why: 'legs: time at ' + (wp.label || wp.kind) };
 			// (the clock: the time left over the legs left, the first ones 1.5x: the long first leg is the class's wall)
 			const clock = Math.min(rest, Math.max(5000, 1.5 * rest / (legsOf.length - k)));
 			const lr = B.solve(lsim.snapshot(), { tiles: wp.tiles }, { ms: clock });
 			out({ ev: 'leg', n: k + 1, of: legsOf.length, label: wp.label || wp.kind, ok: !!lr.ok, T: lr.ok ? lr.T : null, why: lr.why || null, ms: Date.now() - t0 });
-			if (!lr.ok) { end = 'legs: ' + (wp.label || wp.kind) + ': ' + (lr.why || 'none'); break; }
+			if (!lr.ok) return { ok: false, why: 'legs: ' + (wp.label || wp.kind) + ': ' + (lr.why || 'none') };
 			const masks = Uint8Array.from([...prefix, ...lr.masks]);
-			if (wp.kind === 'trophy') { end = finishOf(masks) ? 'finish (legs)' : 'legs: no finish'; break; }
-			// (a trigger is touched a tick after the centre is in its tile: the state a model state key later, else the leg as it is)
+			if (wp.kind === 'trophy') return { ok: true, masks };
+			// (a trigger is touched a tick after the centre is in its tile: the state a model state key later)
 			const last = lr.masks.length ? lr.masks[lr.masks.length - 1] & 30 : 0;
 			let took = null;
 			for (const tail of [[], [last], [last, last], [0]]) {
@@ -204,10 +201,28 @@ try {
 				const k2 = String(M.stateOf(s2).key);
 				if (k2 !== key) { took = { m2, s2, k2 }; break; }
 			}
-			if (!took) { end = 'legs: ' + (wp.label || wp.kind) + ': no state change'; break; }
-			prefix = took.m2; lsim = took.s2; key = took.k2; legs++;
+			if (!took) return { ok: false, why: 'legs: ' + (wp.label || wp.kind) + ': no state change' };
+			prefix = took.m2; lsim = took.s2; key = took.k2;
 			out({ ev: 'arrival', inputs: T.strOf(prefix), label: wp.label || wp.kind, ticks: prefix.length, ms: Date.now() - t0 });
 		}
+		return { ok: false, why: 'legs: none' };
+	};
+	if (!r.ok && wpf && !/bug|target/.test(r.why || '') && ms - (Date.now() - t0) > 10000) {
+		const wps = readWps();
+		if (wps.length) {
+			const gated = /walk/.test(r.why || '');
+			const lr = legsChain(wps, (gated ? 1 : LEGS_F) * (ms - (Date.now() - t0)));
+			out({ ev: 'try', n: 'legs', ok: !!lr.ok, why: lr.why || null, ms: Date.now() - t0 });
+			if (lr.ok || gated) r = lr;
+		}
 	}
+	if (!r.ok && cutsOn && !/walk|bug|target|legs/.test(r.why || '') && ms - (Date.now() - t0) > 15000) {
+		const cr = cutChain(CUTS_F * (ms - (Date.now() - t0)));
+		out({ ev: 'try', n: 'cuts', ok: !!cr.ok, why: cr.why || null, ms: Date.now() - t0 });
+		if (cr.ok) r = cr;
+	}
+	if (!r.ok && (cutsOn || wpf) && !/walk|bug|target|legs/.test(r.why || '')) tryAll(1);
+	if (r.ok) end = finishOf(r.masks) ? 'finish' : 'no finish';
+	else end = r.why || 'none';
 } catch (e) { end = 'error: ' + String(e && e.message || e).slice(0, 200); }
 out({ ev: 'done', end, ms: Date.now() - t0 });

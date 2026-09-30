@@ -631,7 +631,37 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
-	let bwlChild = null, bwlDone = null;
+	let bwlChild = null, bwlDone = null, bwlWpFile = null, bwlWpKey = '';
+	// (a plan's waypoints from the start anchor, in order, up to the trophy: the child's legs; null without a trigger step)
+	const bwlWpsOf = (pl, A) => {
+		const wps = [];
+		if (pl) for (const st of pl.steps) {
+			if (st.synthetic) break;
+			const wp = waypointOf(st, A);
+			if (!wp || wp.allowDeath || wp.dieField) break;
+			if (wp.kind === 'trophy') { wps.push({ kind: 'trophy', label: 'trophy' }); break; }
+			const tiles = wp.tiles ? Array.from(wp.tiles) : [];
+			if (!tiles.length) break;
+			wps.push({ kind: wp.kind, label: wp.label || wp.kind, tiles });
+		}
+		return wps.some((w) => w.kind !== 'trophy') ? wps : null;
+	};
+	// (BW_LEGS: a later plan of the start anchor with a trigger step rewrites the file; the child reads it after its first
+	// clock: a ONE-LEG level's first plan is the trophy alone, and its later plans (the facts of the failed trophy legs)
+	// name the triggers)
+	const bwlPlan = (A, pl) => {
+		if (!bwlWpFile || !bwlChild || best || !A || String(A.key) !== String(S0.key)) return;
+		try {
+			const wps = bwlWpsOf(pl, A);
+			if (!wps) return;
+			const k = wps.map((w) => w.label).join('>');
+			if (k === bwlWpKey) return;
+			bwlWpKey = k;
+			require('fs').writeFileSync(bwlWpFile + '.tmp', JSON.stringify(wps));
+			require('fs').renameSync(bwlWpFile + '.tmp', bwlWpFile);
+			say({ ev: 'bwlevel', waypoints: wps.length, plan: k.slice(0, 200) });
+		} catch (e) { /* the file: next time */ }
+	};
 	const wholeLevel = () => {
 		if (!BW_LEVEL || !opts.file || bwlDone) return;
 		const secs = Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
@@ -641,24 +671,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let wpFile = null, nWp = 0;
 		if (BW_LEGS) {
 			try {
+				wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
 				const A = anchors.get(String(S0.key));
 				const p = A ? planOfAnchor(A) : null;
-				const pl = p && p.plans[0];
-				const wps = [];
-				if (pl) for (const st of pl.steps) {
-					if (st.synthetic) break;
-					const wp = waypointOf(st, A);
-					if (!wp || wp.allowDeath || wp.dieField) break;
-					if (wp.kind === 'trophy') { wps.push({ kind: 'trophy', label: 'trophy' }); break; }
-					const tiles = wp.tiles ? Array.from(wp.tiles) : [];
-					if (!tiles.length) break;
-					wps.push({ kind: wp.kind, label: wp.label || wp.kind, tiles });
-				}
-				if (wps.some((w) => w.kind !== 'trophy')) {
-					wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
-					require('fs').writeFileSync(wpFile, JSON.stringify(wps));
-					nWp = wps.length;
-				}
+				const wps = bwlWpsOf(p && p.plans[0], A);
+				require('fs').writeFileSync(wpFile, JSON.stringify(wps || []));
+				if (wps) { nWp = wps.length; bwlWpKey = wps.map((w) => w.label).join('>'); }
+				bwlWpFile = wpFile;
 			} catch (e) { wpFile = null; say({ ev: 'warning', text: `bwlevel legs: ${e.message}` }); }
 		}
 		say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
@@ -692,7 +711,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				}
 			});
 			let finished = false;
-			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (wpFile) { try { require('fs').unlinkSync(wpFile); } catch (e) { /* gone */ } } if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
+			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (wpFile) { bwlWpFile = null; try { require('fs').unlinkSync(wpFile); } catch (e) { /* gone */ } } if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
 			ch.on('error', fin);
 			ch.on('close', fin);
 		});
@@ -1380,6 +1399,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const ek = edgeKey(job.step);
 				if (inflight.has(ek)) continue;
 				cur = { plan: job.plan, step: job.step, anchor: job.anchor.id, ok: null, depth: job.anchor.depth };
+				if (bwlWpFile) bwlPlan(job.anchor, job.plan);
 				say({ ev: 'plan', anchor: job.anchor.id, steps: job.plan.steps.map(labelOf), cost: job.plan.cost, lb: job.plan.lb, partial: !!job.plan.partial, why: job.plan.why || '', rung: job.step.rung });
 				const f = { job, started: Date.now(), budgetMs: budgetOf(job.step.rung).ms };
 				f.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((r) => { inflight.delete(ek); return r; });
