@@ -327,6 +327,16 @@ const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound 
 // the next leg starts from them. The plain solver lists up to MATH_ALTS more verified legs with DISTINCT END STATES (vx,
 // vy rounded, grounded) within MATH_ALT_SLACK ticks of its cheapest (the cheapest per class; the answer and its proof
 // unchanged), each an arrival candidate here (EEAT_MATH_ALTS=0: the cheapest leg and its hop alone, as before)
+// THE BACKWARD TIER (n5-lab-backward, OPT-IN EEAT_BACKWARD=1; off = the executor as before, byte for byte): a waypoint's
+// leg by src/plan/lab/backward.js (the Bellman time to go of a macro-move closure of the leg's corridor, seeded around
+// the target independently of the start, then A* over exact engine states from the real start with it: the meet), after
+// the direct math legs and before the goal fields; BW_SHARE of the window (at most BW_MS), from the first BW_STARTS live
+// starts; its legs go through the math tier's candidates (the engine's replay to the executor's goal, finishMath)
+const BW_ON = () => process.env.EEAT_BACKWARD === '1';
+const BW_SHARE = +process.env.EEAT_BW_SHARE > 0 ? +process.env.EEAT_BW_SHARE : 0.5;
+const BW_MS = +process.env.EEAT_BW_TIERMS > 0 ? +process.env.EEAT_BW_TIERMS : 30000;
+const BW_STARTS = +process.env.EEAT_BW_STARTS > 0 ? +process.env.EEAT_BW_STARTS : 2;
+const BW_RUNGS = process.env.EEAT_BW_RUNGS !== '0';
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
 // THE NEXT WAYPOINT (iterate 2 lane 'chains'): a chain's leg failed from the arrivals the leg before kept, not for the leg
@@ -450,6 +460,8 @@ function makeCore(L, co) {
 	let CR_ = null;
 	const corridor = () => CR_ || (CR_ = require('./lab/corridor.js').createCorridor(L, { solver: mathSolver() }));
 	const cY = { tries: 0, ok: 0 };   // (the corridor tier's yield on this level)
+	let BW_ = null;
+	const bwSolver = () => BW_ || (BW_ = require('./lab/backward.js').createBackward(L));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const pY = { t: 0, ok: 0 };   // (the profile tier's yield on this level, EEAT_PROFILE=1: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
@@ -705,6 +717,41 @@ function makeCore(L, co) {
 				cands.sort((a, b) => a.depth - b.depth);
 				const r = finishFound(cands.slice(0, 64), 'settle', null, 0, false);
 				if (r) { delete r.arrivalsRaw; return out(r); }
+			}
+		}
+		// -------- tier B: THE BACKWARD TIER (OPT-IN EEAT_BACKWARD=1; the header's BW_*)
+		if (BW_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0 && Date.now() < wEnd - 50) {
+			// (BW_RUNGS: the tier by the rung: rung 0 the meet alone at 0.2 of the window, rungs 1-2 the closure too at 0.3,
+			// from rung 3 at 0.6: the other tiers keep most of a short window (with 0.5 at rung 1 Endless Pain's known-route
+			// leg, found by the leg tier alone in 1.8 s, failed its rung 1; with 0.6 at rung 2 Egg Quest II's and Frostbitten's,
+			// found by the skeleton in its whole 15 s, failed); EEAT_BW_RUNGS=0: every rung at BW_SHARE)
+			const bwR = BW_RUNGS ? Math.min(rung, 3) : 1;
+			const bwShare = BW_RUNGS ? [0.2, 0.3, 0.3, 0.6][bwR] : BW_SHARE;
+			const bwO = BW_RUNGS ? [{ closeF: 0, quickF: 1, quick: 400000 }, {}, {}, {}][bwR] : {};
+			const tB = Date.now(), bEnd = tB + Math.min(BW_MS, bwShare * (wEnd - tB));
+			const cands = [];
+			const bst = { tier: 'backward', tries: 0, ok: false, T: null, why: null, stats: null };
+			try {
+				const B = bwSolver();
+				const bStarts = live.slice(0, BW_STARTS);
+				for (let bi = 0; bi < bStarts.length && cands.length === 0; bi++) {
+					const left = bEnd - Date.now();
+					if (left < 30) break;
+					const s = bStarts[bi], si = starts.indexOf(s);
+					const r = B.solve(s.snap, { tiles: Array.from(goal.tiles) }, Object.assign({ ms: bi === bStarts.length - 1 ? left : left / (bStarts.length - bi) }, bwO));
+					bst.tries++;
+					bst.stats = r.stats ? { cells: r.stats.cells, finite: r.stats.finite, meet: r.stats.meetExpanded, quick: !!r.stats.quick } : null;
+					if (!r.ok) { bst.why = r.why; continue; }
+					sims += r.T;
+					mathCands(si, r.masks, { T: r.T, proven: false, lb: 0, cert: false, lbMath: null }, cands, 'backward');
+				}
+			} catch (e) { bst.why = 'error: ' + (e && e.message || e); }
+			bst.ms = Date.now() - tB; bst.ok = cands.length > 0;
+			if (cands.length) bst.T = Math.min(...cands.map((c) => c.leg.ticks));
+			tiers.push(bst);
+			if (cands.length) {
+				const r = finishMath(cands, 'backward');
+				if (r) return out(r);
 			}
 		}
 		// -------- tier 0: the proof pre-check (and the goal fields for the cuts and the distances)
@@ -1393,14 +1440,14 @@ function makeCore(L, co) {
 		}
 		/** the math tier's result: the candidates verified and picked as every tier's (finishFound), each arrival's leg its
 		 *  own (the proof per start) */
-		function finishMath(cands) {
+		function finishMath(cands, toolName) {
 			let lbA = Infinity;
 			for (let i = 0; i < starts.length; i++) {
 				if (starts[i].dead) continue;
 				const b = cands.some((c) => c.start === i && c.leg.proven) ? Math.min(...cands.filter((c) => c.start === i).map((c) => c.leg.ticks)) : mathLbE.get(i);
 				lbA = Math.min(lbA, b === undefined ? 0 : starts[i].tick - t0 + b);
 			}
-			const r = finishFound(cands, 'math', (a) => Object.assign({ start: a._c.start }, a._c.leg), Number.isFinite(lbA) ? lbA : 0, false);
+			const r = finishFound(cands, toolName || 'math', (a) => Object.assign({ start: a._c.start }, a._c.leg), Number.isFinite(lbA) ? lbA : 0, false);
 			if (r) delete r.arrivalsRaw;
 			return r;
 		}
