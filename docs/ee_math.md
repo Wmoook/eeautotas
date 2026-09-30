@@ -1815,3 +1815,57 @@ the time left as its clock), par 3 each:
   but the compiler's direct legs stay at ~7% with a leg: its airborne legs are long (median 176 ticks, past the
   120-tick horizon) and cross fields; the gain shows as plain legs in place of coupled ones and as shorter routes on
   3 gate levels, not as compiled levels.
+
+### 7.9 Which arrival to keep (the MATH program's iterate 2 lane 'chains', 2026-09-30 05:40-06:40)
+
+**The diagnostic.** test/planexec.js T-EXEC-CHAIN `--chainRetry`: a chain's failed leg is tried once more from the
+ROUTE's own state at the leg's start (the known route's inputs up to its previous waypoint), with the same budget; ok
+there = the leg exists within the executor's reach and the chain failed on the state its legs before left (ARRIVAL),
+else the leg itself (LEG). Box 3, the 40 known routes of the chain harness (`EEAT_TRUTH_ROOT` = the reach1d truth
+root), 2 s x route ticks / 150 a leg:
+
+- the waypoints alone (the route's trigger events, legs of 186-10,587 route ticks): 7 of 40 routes compiled end to
+  end; of the 32 first failures 28 LEG (long legs: also from the route's own state nothing in the budget), 4 ARRIVAL
+  (Buuwuu's Stronghold, Bayou Boogie: another state; One Minute Descent and Perilous Endeavor from the same start: the
+  spread);
+- with a region waypoint every 60 route ticks (`--chainStep=60`: the path skeleton a planner gives, the executor's own
+  skeleton's shape): 10 of 40 compiled, 1,158 of 3,763 legs; of the 29 first failures **26 ARRIVAL** (17 of them solved
+  from the route's state by the math tier, 9 by the search tiers) and 3 LEG. The chain's arrival is the region's FIRST
+  ENTRY, at its edge, with the speed the cheapest leg left (e.g. Unforgiving Climb: route v (-4.39, -4.54) in the
+  middle, the chain v (-4.63, +2.78) 22 px off it), where the route passes the region's middle on its way on; 17 of the
+  26 levels have no time door and no key (the clock is not the cause), the chain's delay behind the route median ~100
+  ticks.
+
+**The next waypoint's rule** (executor.js `NEXT_ON`, `nextBest`; `budget.next` = the plan's next waypoint: strategy.js
+passes plan.steps[1]'s, T-EXEC-CHAIN the next event / region): the goal states (every tier's, T.arrivalOf's) ranked by
+the arrival's tick + the NEXT leg's cost from it: msolve.leg to the next waypoint's tiles for the NEXT_TRY 6 best by
+tick + the endgame's sound bound (`endgame.lowerBound` on `X.boundFor(L, next)`, 240 ticks), NEXT_MS 25 ms each, at
+most a fifth of the call's window; the least tick + T among those it solves, else the least tick + bound; that arrival
+kept FIRST (the math tier's first start the next call) or, `EEAT_NEXT_FIRST=0`, among the picked (the order of before);
+the math tier's own leg asks msolve for NEXT_ALTS end states within NEXT_SLACK ticks when a next waypoint is given
+(`EEAT_NEXT_ALTS` / `EEAT_NEXT_SLACK`). Ordering only: every arrival is still a verified first entry of this waypoint.
+
+**Measured** (the same harness, `--chainStep=60`, 40 routes, 3,763 legs, 15 processes an arm, arms side by side on
+box 3 at load 120-160; legs done / routes compiled end to end):
+
+| arm | legs done | compiled | vs the rule off, route by route (better / worse / same) |
+|---|---:|---:|---|
+| the rule off (`EEAT_NEXT=0`; and the diagnostic run of the same code) | 1,163 / 1,158 | 10 / 10 | - |
+| first, 12 alts in 6 ticks (the first version) | 1,125 | 8 | 6 / 9 / 24 |
+| first, the math tier's own 6 alts in 3 ticks | 987 of 37 routes (off 986) | 9 (off 8) | 9 / 9 / 19 |
+| among the picked, 6 alts in 3 ticks | 1,162 | 11 | 8 / 14 / 17 |
+
+(One shard of the third arm lost its two routes' rows, MIHB's Dream and Accident Prone: compared on the other 37.)
+The larger alts cost the math tier's clock (its items past the cheapest T + 3): Unforgiving Climb 47 vs 59, Tree
+Decorating 11 vs 18 (MIHB's Dream 114 vs 137 and Need for Steed 7 vs 27 are the harness's spread: the rule-off code's
+second run had 114 and 7 too); with the tier's own alts the rule is a TIE: the chain's candidates are all first entries of the same region, and the next leg's cost from the best of them is
+no better than from the earliest (the route's own state is a state the region's first entries do not contain: the
+middle of the region, on its way on). **So the rule stays OPT-IN** (`EEAT_NEXT=1`; off = the executor as before byte
+for byte; strategy.js passes `budget.next` either way, test/planexec.js T-EXEC-CHAIN too).
+
+**Left (the class):** ARRIVAL on region waypoints = the first-entry contract (an arrival is where the goal FIRST holds,
+finalize's `verifyTail`), not the ranking among first entries: the way on needs a state deeper in the region (a
+pass-through arrival, or the region and the next waypoint as one leg), which the executor's contract excludes; the
+compiler's own skeleton chains sub-level sets the same way (7.7: 7 of 18 harness routes fail their first leg in every
+arm). On the waypoints alone the class is LEG (28 of 32: legs of 186-10,587 route ticks, none found from the route's own
+state in the budget either): the leg lanes' class.
