@@ -185,14 +185,20 @@ function evalIA(x0, v0, code, t, ctx, trace) {
 	}
 	return { x, v, armed: arm };
 }
-/** the gravity axis from (y0, vy0): t ticks, a jump at the end of every tick listed in jumps (1-based, sorted) */
+/**
+ * the gravity axis from (y0, vy0): t ticks, a jump at the end of every tick listed in jumps (1-based, sorted; an entry
+ * [tick, J] carries its own jump speed: a jump effect or ice between two air jumps changes J)
+ */
 function evalGA(y0, vy0, t, ctx, jumps, trace) {
 	const G = ctx && ctx.J !== undefined ? ctx : ga(ctx);
 	let y = y0, v = vy0, ji = 0;
 	for (let j = 1; j <= t; j++) {
 		v = axisStep(v, 0, G.mo, 0, 0, false);
 		y += v;
-		if (jumps && ji < jumps.length && jumps[ji] === j) { v = G.J; ji++; }
+		if (jumps && ji < jumps.length) {
+			const e = jumps[ji], at = Array.isArray(e) ? e[0] : e;
+			if (at === j) { v = Array.isArray(e) ? e[1] : G.J; ji++; }
+		}
 		if (armed(v, G.a, false)) y = align(y);
 		if (trace) { trace.y[j - 1] = y; trace.v[j - 1] = v; }
 	}
@@ -399,14 +405,24 @@ function lookup(tab, t, lo, hi, o = {}) {
 	}
 	return out;
 }
-/** the table's summary per tick: [dxmin, dxmax, the largest gap between consecutive offsets, rows] (the resolution) */
-function summary(tab) {
+/**
+ * the table's summary per tick: [t, dxmin, dxmax, the largest gap between consecutive offsets, rows, the largest gap
+ * inside [dxmin + edge, dxmax - edge] (edge default 8 px: the extremes are single patterns, hold R and its last-tick
+ * variants, whose gaps no change can fill), the median gap there] (the resolution of the reachable offsets)
+ */
+function summary(tab, edge = 8) {
 	const out = [];
 	for (let t = 1; t <= tab.T; t++) {
 		const d = tab.ticks[t].dx;
-		let gap = 0;
-		for (let i = 1; i < d.length; i++) if (d[i] - d[i - 1] > gap) gap = d[i] - d[i - 1];
-		out.push([t, d[0], d[d.length - 1], gap, d.length]);
+		let gap = 0, gin = 0;
+		const lo = d[0] + edge, hi = d[d.length - 1] - edge, gaps = [];
+		for (let i = 1; i < d.length; i++) {
+			const g = d[i] - d[i - 1];
+			if (g > gap) gap = g;
+			if (d[i - 1] >= lo && d[i] <= hi) { if (g > gin) gin = g; if (gaps.length < 200000) gaps.push(g); }
+		}
+		gaps.sort((a, b) => a - b);
+		out.push([t, d[0], d[d.length - 1], gap, d.length, lo < hi ? gin : NaN, gaps.length ? gaps[gaps.length >> 1] : NaN]);
 	}
 	return out;
 }
@@ -453,13 +469,15 @@ function readTable(file) {
 const TOP = hexf64('f7eea4ad301b1b40');   // 6.776552880470027: hold R from rest reaches it exactly at tick 1760 and stays
 const CLASSES = { rest: 0, top: TOP, topL: -TOP };
 let EKEY = null;
-/** the tables' key: the engine and this file (a changed recurrence never reads an old table) */
+/** bump when the table format or the recurrence changes (the tables' key: the engine + this version) */
+const TABLE_VERSION = 1;
+/** the tables' key: the engine and TABLE_VERSION (a changed engine never reads an old table) */
 function engineKey() {
 	if (EKEY) return EKEY;
 	const fs = require('fs'), path = require('path'), crypto = require('crypto');
 	const h = crypto.createHash('sha1');
 	h.update(fs.readFileSync(path.join(__dirname, '..', 'eesim.js')));
-	h.update(fs.readFileSync(__filename));
+	h.update('kin1d-tables-' + TABLE_VERSION);
 	EKEY = h.digest('hex').slice(0, 16);
 	return EKEY;
 }

@@ -110,13 +110,15 @@ function main() {
 		const PX = new Float64Array(n + 1), PY = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1);
 		const exX = new Uint8Array(n + 1), exY = new Uint8Array(n + 1), plain = new Uint8Array(n + 1), air = new Uint8Array(n + 1);
 		const H = new Int8Array(n + 1), SMs = new Float64Array(n + 1), GMs = new Float64Array(n + 1), JMP = new Uint8Array(n + 1);
-		const JV = new Float64Array(n + 1);
+		const JV = new Float64Array(n + 1), SMP = new Float64Array(n + 1), GMP = new Float64Array(n + 1);
 		PX[0] = sim.px; PY[0] = sim.py; VX[0] = sim.speed_x; VY[0] = sim.speed_y;
 		for (let t = 1; t <= n; t++) {
 			const m = masks[t - 1] & 31;
 			const h = ((m & 2) ? -1 : 0) + ((m & 4) ? 1 : 0);
 			jumped = false;
 			const x0 = sim.px, y0 = sim.py, vx0 = sim.speed_x, vy0 = sim.speed_y, dead0 = sim.is_dead;
+			// the multipliers this tick uses: the effects as they are before it (touchBlock changes them at its end)
+			const pre = K.ctxOf(sim), jb = sim.jump_boost, zb = sim.is_zombie && !sim.in_god_mode;
 			E.applyMask(inp, m);
 			sim.tick(inp);
 			PX[t] = sim.px; PY[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y;
@@ -131,7 +133,7 @@ function main() {
 			const skip = dead0 || sim.is_dead || sim.teleported || boost || sim.has_levitation || sim.in_god_mode;
 			const collided = sim._loopCollided;
 			// the model per axis
-			const jm = sim._jumpMultiplier();
+			let jm = 1.0; if (jb === 1) jm *= 1.3; if (jb === 2) jm *= 0.75; if (zb) jm *= 0.75; if (sim._slippery > 0) jm *= 0.88;
 			let cls;
 			if (skip) cls = sim.teleported ? 'tele' : (dead0 || sim.is_dead) ? 'dead' : boost ? 'boost' : 'lev';
 			const ctxName = sim.flip_gravity !== 0 || mox !== 0 || moy <= 0 ? 'grav' : liquid ? 'liquid' : climb ? 'climb' : (cur === 4 || cur === 414) ? 'dot' : slip ? 'ice' : 'plain';
@@ -153,12 +155,13 @@ function main() {
 				}
 			}
 			// the plain free-air context of the tables: default gravity (mox 0, moy > 0), plain current, no slip
-			// (the delayed tile's gravity is the default one: moy = 2 x the gravity multiplier, no vertical input)
-			plain[t] = !skip && ctxName === 'plain' && sim.flip_gravity === 0 && my === 0 && moy === 2 * K.ctxOf(sim).gm ? 1 : 0;
+			// (the delayed tile's gravity is the default one: moy = 2 x the gravity multiplier, no vertical input; the current
+			// tile's too: morx 0, mory 2, the jump's direction and what counts as floor: an arrow there jumps the other way)
+			plain[t] = !skip && ctxName === 'plain' && sim.flip_gravity === 0 && my === 0 && moy === 2 * K.ctxOf(sim).gm && sim.morx === 0 && sim.mory === 2 ? 1 : 0;
 			air[t] = sim.on_ground ? 0 : 1;
 			SMs[t] = h !== 0 ? mx / h : NaN;
 			GMs[t] = moy / 2;
-			JV[t] = jm;
+			JV[t] = jm; SMP[t] = pre.sm; GMP[t] = pre.gm;
 		}
 		tot.routes++; tot.ticks += n;
 		// the rest history: per tick the ticks since vx was last 0 with every tick X-plain-exact, and its input changes
@@ -179,6 +182,8 @@ function main() {
 			let best = null, s = -1;
 			for (let t = a; t <= b + 1; t++) {
 				const ok = t <= b && plain[t] && exX[t] && exY[t] && air[t];
+				// one context along the segment: the speed and gravity multipliers do not change inside it
+				if (s >= 0 && ok && !(SMP[t] === SMP[s] && GMP[t] === GMP[s])) { if (!best || t - s > best[1] - best[0] + 1) best = [s, t - 1]; s = t; continue; }
 				if (ok && s < 0) s = t;
 				if (!ok && s >= 0) { if (!best || t - s > best[1] - best[0] + 1) best = [s, t - 1]; s = -1; }
 			}
@@ -190,8 +195,7 @@ function main() {
 			const runs = [];
 			for (let t = s0; t <= e0; t++) { const mi2 = H[t] < 0 ? 1 : H[t] > 0 ? 2 : 0; if (runs.length && runs[runs.length - 1][0] === mi2) runs[runs.length - 1][1]++; else runs.push([mi2, 1]); }
 			const k = runs.length - 1;
-			const sm = (() => { for (let t = s0; t <= e0; t++) if (!isNaN(SMs[t])) return SMs[t]; return 1; })();
-			const gm = GMs[s0];
+			const sm = SMP[s0], gm = GMP[s0];
 			const ctx = { sm, gm, jm: JV[s0] };
 			rec.seg = Lseg; rec.k = k; rec.sm = sm; rec.gm = gm;
 			// X: the pattern through the table's evaluation (runs past 3 changes: the generic replay of the same recurrence)
@@ -206,7 +210,7 @@ function main() {
 			}
 			// Y: the gravity axis from (y0, vy0), air jumps where the engine jumped
 			{
-				const jumps = []; for (let t = s0; t <= e0; t++) if (JMP[t]) jumps.push(t - s0 + 1);
+				const jumps = []; for (let t = s0; t <= e0; t++) if (JMP[t]) jumps.push([t - s0 + 1, K.ga({ gm, jm: JV[t] }).J]);
 				const tr2 = { y: [], v: [] };
 				K.evalGA(y0, vy0, Lseg, ctx, jumps, tr2);
 				let all = true;
@@ -214,7 +218,7 @@ function main() {
 				rec.exactY = all ? 1 : 0;
 				rec.airJumps = jumps.length;
 			}
-			const J = K.ga(ctx).J;
+			const J = K.ga({ gm, jm: JV[s0 - 1] || 1 }).J;
 			rec.vyClass = vy0 === 0 ? '0' : vy0 === J ? 'J' : 'other';
 			rec.rest = REST.has(vx0) && sm === 1 ? 1 : 0;
 			rec.v0zero = vx0 === 0 ? 1 : 0;
@@ -224,6 +228,9 @@ function main() {
 				const res = K.solveIA(x0, vx0, Lseg, PX[e0], PX[e0], { k: 3, vlo: VX[e0], vhi: VX[e0], limit: 1, maxNodes: SOLVE_NODES, ctx });
 				rec.solveK = res.length ? res[0].k : (res.stats.budget ? -2 : -1);
 				rec.solveNodes = res.stats.nodes;
+				// the class-level question: the fewest changes that end within half a pixel of the route's x (any speed)
+				const w = K.solveIA(x0, vx0, Lseg, PX[e0] - 0.5, PX[e0] + 0.5, { k: 3, limit: 1, maxNodes: SOLVE_NODES, ctx });
+				rec.winK = w.length ? w[0].k : (w.stats.budget ? -2 : -1);
 				if (res.length) {
 					const e = K.evalIA(x0, vx0, res[0].code, Lseg, ctx);
 					if (e.x !== PX[e0] || e.v !== VX[e0]) rec.solveBad = 1;
@@ -283,6 +290,10 @@ function aggregate(dir) {
 	let cum = 0; const cumk = [];
 	for (const k of [0, 1, 2, 3]) { cum += sk[k] || 0; cumk.push(`<=${k}: ${pct(cum, withSeg.length)}`); }
 	out.push(`  cumulative: ${cumk.join(', ')}; solver results that do not replay: ${withSeg.filter((s) => s.solveBad).length}`);
+	const wk = {}; for (const s of withSeg) { if (s.winK === undefined) continue; wk[s.winK] = (wk[s.winK] || 0) + 1; }
+	let cw = 0; const cumw = [];
+	for (const k of [0, 1, 2, 3]) { cw += wk[k] || 0; cumw.push(`<=${k}: ${pct(cw, withSeg.length)}`); }
+	out.push(`the end x within +-0.5 px (any speed), fewest changes: ${cumw.join(', ')}; none ${wk[-1] || 0}, budget ${wk[-2] || 0}`);
 	out.push(`start speed vx0 in the rest tree (a tabulated class): ${withSeg.filter((s) => s.rest).length} (${pct(withSeg.filter((s) => s.rest).length, withSeg.length)}), vx0 = 0: ${withSeg.filter((s) => s.v0zero).length}`);
 	const vy = {}; for (const s of withSeg) vy[s.vyClass] = (vy[s.vyClass] || 0) + 1;
 	out.push(`start vy: ` + Object.entries(vy).map(([k, v]) => `${k} ${v} (${pct(v, withSeg.length)})`).join(', '));

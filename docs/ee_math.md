@@ -613,3 +613,168 @@ px before it: y differs from y(jump) in 18,976 / 310,596 / 333,802 / 1,102,014 r
 **Test** `node test/mathsep.js` (37 checks, ~2 s): the cross products of every environment at T = 7, the model exact on all
 17,837 product ticks of 18,000 random-walk ticks in 30 random rooms of every block kind, each coupling class where it must appear, certifyFree, the
 translation rule, envSchedule = the engine along a run.
+
+## 3 Reach1d: 1D reachability, the exact solver and the 1D minimum time
+
+(derive / reach1d.) Code: `src/plan/kin1d.js` (the model, the tables, the queries), `src/plan/kin_tables/` (the table
+builder; the small tables in git), `test/kin1d_theorems.js` (the engine checks), `tools/math/reach1d_cover.js` (the real
+routes). The per-tick recurrence is section 1 (1.4 the speed, 1.5 T-ADD the move, 1.7 the align); the separation of the
+axes section 2. This section is the input axis of free air as a 1D system: what it reaches, how to find a pattern that
+reaches a target without search, and its minimum time.
+
+### 3.1 The two axes of free air
+
+`kin1d.axisStep(v, m, mo, mO, drag, slip)` = `kin.stepV` with the drag given by its kind (checked equal, 3.4): `mod = (mo
++ m) / 7.752`; `v' = D(v + mod)` (unless v = mod = 0), D = base x no_mod when (m = 0 and mO != 0) or m opposes v + mod,
+base x water / mud / lava / toxic in a liquid, the ice rule while slippery > 0, base otherwise; cap +-16; snap |v'| <
+1e-4 to 0. Then `x' = x ⊕ v'` (T-ADD, x >= 16), a jump sets `v' = J = (0 - mor) 26 jm / 7.752`, and `x' = align(x')`
+when ARMED: |v'| < 1, |mod| < 0.1, no liquid at the centre.
+
+The tables' context (PLAIN free air): gravity down, the current and the delayed tile default (morx 0, mory 2, mox 0,
+moy 2 gm), no liquid / climbable / dot / boost, slippery <= 0, no levitation. There x is the INPUT AXIS (m = h sm, mo =
+0, mO = 2 gm: the release drag applies with no key held) and y the GRAVITY AXIS (m = 0, mo = 2 gm, mO = 0: base drag
+only). With sm = gm = jm = 1: a key adds 1/7.752 = 0.12899896800825594, gravity 0.2579979360165119, J =
+-6.707946336429309.
+
+- **Speeds are position-free** (section 2): the x speeds of a free-air stretch are a function of (vx0, the horizontal
+  inputs) alone, the y speeds of (vy0, the jump ticks). With max_jumps 1 the gravity axis has NO input in the air: one
+  trajectory per start (vy0 = J after a jump or a hop, 0 after a walk-off or a bonk); multi-jump adds the air-jump ticks.
+- **Positions**: `x_t = align(... ⊕ v_t)` from the REAL x0 (T-ADD): the offset x_t - x0 depends on x0 only through
+  the roundings (at most t ulp(x)/2: 5e-11 px for x < 8192, t = 120; T-BIN) and the align (x mod 16, armed ticks only).
+  So a table stores speeds exactly and the offsets nominally (from 0, align off), and `evalIA(x0, v0, code, t)` gives
+  the engine's exact doubles in t additions.
+- **The finite speed set** (1.4 fixed points): hold R from rest reaches V = 6.776552880470027 (hex f7eea4ad301b1b40)
+  exactly at tick 1760 and stays; release from V reaches 0 in 94 ticks. Every x speed of the plain context is therefore
+  a word from rest (the REST TREE: table class `rest`); the other fixed starts are +-V (`top`, `topL`).
+
+### 3.2 THEOREM M (the extremes) and the 1D minimum time
+
+**THEOREM M.** For every input word p of the input axis and tick t: `v_t(hold L) <= v_t(p) <= v_t(hold R)`, and with no
+armed tick in p also `x_t(hold L) <= x_t(p) <= x_t(hold R)`. Proof: the speed map is non-decreasing in v for each input
+(fl is monotone; the drag factor is positive and both branches give 0 at s = 0; cap and snap are monotone) and in the
+input for each v (L <= none <= R: the gaps are at least a key's 0.11 px/tick after the drag, far above one rounding);
+`x ⊕ v` is monotone in both; induction. The align pulls a position toward the nearest grid line (16k) and never across
+it: every word ends in `[x_t(hold L) - 2, x_t(hold R) + 2]` (`ALIGN_SLACK`; measured overshoot at most 0.078 px, 3.4).
+
+**LEMMA L (the last change is monotone).** For a fixed prefix and a final pair of runs (mi for j ticks, then mf to T),
+x_T and v_T are monotone in the change tick j (one tick of mf becomes mi), exactly, when neither run can be armed (both
+held keys at sm = 1). The solver binary-searches j there.
+
+**The 1D minimum time** (a lower bound for EVERY input sequence of free air): `kin1d.minT(x0, v0, X)` = the least t with
+`x_t(hold toward X) >= X`; it is attained (hold toward is a pattern), so it is exact for the axis; `minTSafe` subtracts
+the 2 px align slack (admissible for every word). From rest: 6.59 / 23.69 / 49.49 / 101.33 / 165.44 / 319.12 / 494.24 px
+in 10 / 20 / 30 / 45 / 60 / 90 / 120 ticks (`summary.json` holdR: every tick to 240, every start class). With the
+gravity axis a single trajectory, a free-air leg's minimum time is max(minT on x, the first tick the y trajectory reaches
+the target row); a leg whose found T equals it is proven optimal from that start state.
+
+### 3.3 Patterns, tables, the solver
+
+**Patterns.** Runs of a constant input (L, none, R); k = runs - 1 changes; a 29-bit code (`encode` / `decode` / `str`:
+m0..m3 2 bits each, the change ticks c1..c3 7 bits each, <= 127). `evalIA(x0, v0, code, t[, ctx, trace])`: the exact
+end state (and every tick); `evalGA(y0, vy0, t, ctx, jumps)`: the gravity axis with air jumps (`[tick, J]` entries when
+J changes between them).
+
+**The tables** (`buildTable`; `src/plan/kin_tables/build.js`; cache `kin1d.cacheDir()` = `<tmp>/eeat_kin1d/<engineKey>`
+or `EEAT_KIN1D_DIR`; box 3: `/root/math_reach1d_tables/c3d70bab001b74e4/`): every pattern with <= K changes and length
+<= T from a start class, per tick the rows (nominal dx, v exact, code; bit 31 = the pattern had an armed tick: its real
+dx can differ by up to 2 px) sorted by dx; `lookup(tab, t, lo, hi, {x0})` binary-searches a window and evaluates each
+row from the real x0. Built on box 3 in 2-4 s each:
+
+| class | K 2, T 120 | K 3, T 48 |
+|---|---|---|
+| rest (v0 = 0), top (+V), topL (-V) | 3,413,280 rows, 68 MB each | 4,884,384 rows, 98 MB each |
+
+The DP over (t, speed) does not compress: two words almost never reach the same double speed (only the snap to 0
+merges), so K 3 to T 120 would be ~2e8 rows a class. The solver replaces the big tables; the tables give the classes and
+the RESOLUTION (`summary.json`: per class, K and t the range, the largest gap between consecutive reachable offsets, and
+the largest / median gap inside the range less 8 px at each end, where only hold R / L and their last-tick variants
+live). From rest, inside the range:
+
+| t | 20 | 40 | 48 | 60 | 120 |
+|---|---|---|---|---|---|
+| K 1: largest gap (px) | 0.95 | 2.31 | 3.12 | 3.53 | 5.05 |
+| K 2: largest / median gap | 0.138 / 0.0127 | 0.215 / 0.0105 | 0.228 / 0.0102 | 0.286 / 0.0092 | 0.309 / 0.0067 |
+| K 3: largest / median gap | 0.0187 / 0.00088 | 0.0259 / 0.00033 | 0.0361 / 0.00028 | | |
+
+So from rest every window of width >= 0.31 px inside the reachable range (less 8 px at each end) holds an exact offset
+with <= 2 changes at every t <= 120, and every window >= 0.036 px one with <= 3 changes (t <= 48); from +V the K 2 / K 3
+largest interior gaps are 0.53-0.64 / 0.22 px.
+
+**THE SOLVER** `solveIA(x0, v0, T, lo, hi, {k, vlo, vhi, tube, limit, maxNodes, ctx})`: every pattern with <= k changes
+whose EXACT x_T is in [lo, hi] (and v_T in [vlo, vhi]; `tube(j, xPrev, x)` a per-tick corridor: the level's free columns
+at the row the separated gravity axis is in at tick j), fewest changes first: a walk over the runs, a node cut when THEOREM
+M's interval from its state (hold L / hold R, +-2 px if an armed tick is possible) misses the window, the last change by
+LEMMA L's binary search. Sound (every answer is an exact evaluation) and complete on its family (the cuts are proofs;
+3.4 SOLVE). A 1 px window: microseconds to a millisecond; an exact point (x, v) target with k 3 and T ~ 100: 0.2-1.5 M
+nodes (0.1-1 s).
+
+### 3.4 The engine checks (`node test/kin1d_theorems.js [--quick] [--shard=i/n] [--T2= --T3= --depth= --D2=]`)
+
+Box 3, 12 shards, `--T2=64 --T3=32 --depth=10 --D2=14` (seeds 31-42): **643,170,947 engine checks, 0 mismatches** (the
+first run had 1: a SOLVE test start 221 px from the room's border wall whose 75-tick hold L ran into it, not free air;
+the test's starts moved to x0 >= 900 and that shard rerun clean). Over 396 starts (12 x0, some within 0.2 px of a grid
+line; 33 v0: rest, the align edge 0.99 / 1, run speeds, the cap, random):
+- S1: every word over all 32 masks of length <= 3 and over {-, L, R} of length <= 10: px, speed_x, py, speed_y after
+  every tick = the model's (the jump and up / down bits do nothing in free air under gravity down: the axes separate).
+- S2: every pattern with <= 2 changes up to 64 ticks and with <= 3 changes up to 32 ticks, every tick (569 M checks).
+- M: in S2 x beyond hold L / hold R without an armed tick 0 times, v beyond 0; the largest align overshoot 0.018 px; M2
+  (the model: every word over {-, L, R} up to 14 ticks from 1,248 starts within 3 px of a grid line): +0.078 px.
+- S2r / SEP: random patterns (<= 3 changes, and any), 120 ticks, jump and up / down bits mixed in; x the same from two y
+  states (one falling fast), y the same whatever the horizontal inputs.
+- P: 1 M single ticks from random doubles (x0 in [48, 6600), v0, y0, vy0).
+- G: the gravity axis from 0 and every jump class J(jm), jm in {1, 1.3, 0.75, 0.5625, 1.144, 0.88}, 4 y0, 120 ticks;
+  multi-jump (max_jumps 2, 3, 1000), air jumps at every tick 1..40 (+ a second one).
+- CTX: the generic axisStep with the engine's own context: speed x1.5, x0.6, zombie x0.6 (the held key then aligns), low
+  gravity (y aligns near the apex), a level gravity 0.5 (float32), flip gravity 1 / 2 / 3.
+- TAB: table rows (K 2, T 40, 4 classes) replayed from 3 real x0: v exact, evalIA exact, the nominal dx within 3e-12 px.
+- KIN: axisStep = `kin.stepV` (3 M random contexts, every drag kind, ice), `x + v = kin.moveFree` (3 M pairs), align =
+  `kin.align`.
+- SOLVE: 600 random patterns with <= 3 changes (T <= 100) as exact point targets: all found; every answer and every
+  answer of a 10 px window query (9,600) replayed by the engine where the solver says.
+
+### 3.5 The real routes (`tools/math/reach1d_cover.js`; box 3, 28 shards, ~2 min; `--agg` prints the summary)
+
+The truthset: 218 routes of 106 levels, 2,013,028 ticks; the moves study's 49,846 moves.
+
+**Per tick and axis** (axisStep + the move + the jump + the align from the engine's previous state and this tick's
+context): the model = the engine on EVERY tick without a collision, in every context: x plain 1,220,818 ticks (94.7%
+exact, the rest collisions), arrows / flipped gravity 532,128 (88.1%), dots 3,997, climbables 383, liquids 2,327, ice
+1,343; y likewise (plain 80.3%: landings and bonks collide); **0 unexplained ticks on either axis**. Not modelled here:
+levitation (244,166 ticks, 12.1%: its thrust is kin.js `thrustStep`), boosts (2,757), teleports (1,815), dead (3,294).
+
+**Free-air segments** (per move, the longest run of plain ticks with no collision on either axis, in the air, one speed /
+gravity multiplier, the current tile's gravity default: an arrow there reverses the jump): 31,438 of the 49,846 moves
+have one (63.1%; the rest are micro-hops that collide at once or field moves), 747,887 ticks (37.2% of all route ticks);
+96.3% in the canonical context (x1, x1).
+- The route's own pattern is in the family (<= 3 changes, <= 127 ticks) in 26,128 segments (83.1%, 67.7% of the ticks):
+  **the table's evaluation reproduces all 26,128 exactly** (x and vx every tick, bit for bit).
+- The gravity axis reproduces **all 31,438 segments exactly** (281 with air jumps).
+- Own changes: k 0 49.0%, 1 13.1%, 2 13.8%, 3 7.2%, 4 4.8%, 5 3.2%, 6+ 8.9%.
+- The EXACT end state (x, vx) by ANY pattern with <= k changes (the solver's point target): <= 0 49.0%, <= 1 62.1%,
+  <= 2 75.9%, <= 3 83.1% (= the own-pattern share: an exact double end state fingerprints its pattern; 0.6% at the node
+  budget).
+- **The landing position** (the end x within +-0.5 px, any speed; the solver's window query): of the 31,222 segments of
+  <= 127 ticks, 16,260 with 0 changes, 12,288 with 1, 2,674 with 2: **every one within 2 changes** (none needs 3, none
+  unsolved). The routes' extra changes buy the exact speed and sub-pixel state for the next leg.
+- The start speed vx0 is in the rest tree (<= 2 changes / 120 ticks or <= 3 / 48): 35.5% (vx0 = 0: 15.3%); 46.2% have a
+  plain history since vx was last 0, 68% of those within 3 changes: take-off speeds carry long histories, so the solver
+  takes the REAL v0 (any double) and the tables serve the canonical starts and the resolution.
+- Start vy: J (a jump or a hop) 38.2%, 0 (a walk-off or a bonk) 25.4%, other (a field exit, a portal) 36.4%.
+
+### 3.6 Exceptions and limits
+
+- Collisions end a segment (per axis; the solver's `tube` keeps a pattern off the walls; the landing is the collision
+  that ends the leg). Portals, boosts (the speed override and the zero step) and deaths are not in these tables.
+- Levitation's thrust is not in `axisStep` (kin.js `thrustStep`). Ice and liquids are (drag kinds; checked on the real
+  routes) but not in the tables.
+- sm = 0.6 (speed effect 2, zombie): the held key is armed (|mod| < 0.1), so LEMMA L's binary search is off (the solver
+  scans); the tables are sm = gm = 1 (other contexts: pass `ctx` to evalIA / solveIA).
+- A jump's J reads the multipliers of its tick (a jump effect or ice between two air jumps): evalGA takes `[tick, J]`.
+
+### 3.7 API (`src/plan/kin1d.js`)
+
+`axisStep, align, armed, ia(ctx), ga(ctx), ctxOf(sim), stepIA, stepGA, encode, decode, str, changes, inputAt, evalIA,
+evalGA, holdX, rangeIA, minT, minTSafe, solveIA, buildTable, lookup, summary, writeTable, readTable, loadTable(name,
+{K, T}), cacheDir, engineKey, CLASSES {rest, top, topL}, TOP, ALIGN_SLACK`; `src/plan/kin_tables/summary.json` (per class
+the resolution table and the hold R / hold L / release offsets and speeds to 240 ticks as hex doubles), `ga.json` (the
+gravity axis per (gm, jm) and start class 0 / J, 240 ticks, hex doubles).

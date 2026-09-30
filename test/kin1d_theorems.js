@@ -25,7 +25,7 @@ const K = require('../src/plan/kin1d.js');
 
 const argv = Object.fromEntries(process.argv.slice(2).map((a) => { const m = /^--([^=]+)(?:=(.*))?$/.exec(a); return m ? [m[1], m[2] === undefined ? '1' : m[2]] : [a, '1']; }));
 const QUICK = !!argv.quick;
-const T2 = +(argv.T2 || (QUICK ? 24 : 48));
+const T2 = +(argv.T2 || (QUICK ? 24 : 48)), T3 = +(argv.T3 || (QUICK ? 12 : 24)), DEPTH = +(argv.depth || (QUICK ? 7 : 9));
 const [SH, NSH] = (argv.shard || '0/1').split('/').map(Number);
 let seed = +(argv.seed || 1) >>> 0;
 const rnd = () => { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
@@ -106,7 +106,7 @@ function s1() {
 		const MASK = [0, 2, 4];
 		const snaps = [];
 		const dfs3 = (depth, x, v, y, vy) => {
-			if (depth === (QUICK ? 7 : 9)) return;
+			if (depth === DEPTH) return;
 			snaps[depth] = sim.snapshot(snaps[depth]);
 			for (let mi = 0; mi < 3; mi++) {
 				sim.restore(snaps[depth]);
@@ -119,19 +119,19 @@ function s1() {
 		};
 		dfs3(0, x0, v0, Y0[0], 0);
 	}
-	console.log(`S1  exhaustive words (32 masks^3, {-,L,R}^${QUICK ? 7 : 9}): ${checks - n0} tick checks, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+	console.log(`S1  exhaustive words (32 masks^3, {-,L,R}^${DEPTH}): ${checks - n0} tick checks, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 }
 
 // ---------------------------------------------------------------- S2 + M: the families
 const mStats = { maxOverAlign: 0, maxUnderAlign: 0, violNoArm: 0, vViol: 0, rows: 0 };
-function s2() {
+function s2(TT = T2, KK = 2) {
 	const t0 = Date.now(); const n0 = checks;
 	const MASK = [0, 2, 4];
 	for (const [x0, v0] of myStarts) {
 		place(sim, x0, v0, Y0[1], 0);
 		// the extremes (hold L / hold R) per tick, for THEOREM M
 		const hx = [[], [], []], hv = [[], [], []];
-		for (const mi of [1, 2]) { let x = x0, v = v0; for (let t = 1; t <= T2; t++) { [x, v] = K.stepIA(x, v, mi, I1); hx[mi][t] = x; hv[mi][t] = v; } }
+		for (const mi of [1, 2]) { let x = x0, v = v0; for (let t = 1; t <= TT; t++) { [x, v] = K.stepIA(x, v, mi, I1); hx[mi][t] = x; hv[mi][t] = v; } }
 		const snaps = [];
 		// DFS over patterns with <= 2 changes; the engine and the model side by side, the y axis too
 		const rec = (t, x, v, y, vy, miPrev, k, arm) => {
@@ -140,7 +140,7 @@ function s2() {
 				if (k > 0 && mi === miPrev) continue;
 				sim.restore(snaps[t]);
 				let xx = x, vv = v, yy = y, vvy = vy, a = arm;
-				for (let j = t + 1; j <= T2; j++) {
+				for (let j = t + 1; j <= TT; j++) {
 					tick(sim, MASK[mi]);
 					[xx, vv] = K.stepIA(xx, vv, mi, I1);
 					if (mi === 0 && !(vv >= 1 || vv <= -1)) a = true;
@@ -153,7 +153,7 @@ function s2() {
 					if (over > mStats.maxOverAlign) mStats.maxOverAlign = over;
 					if (under > mStats.maxUnderAlign) mStats.maxUnderAlign = under;
 					if (vv > hv[2][j] || vv < hv[1][j]) mStats.vViol++;
-					if (k < 2 && j < T2) {
+					if (k < KK && j < TT) {
 						const snapJ = sim.snapshot();
 						rec(j, xx, vv, yy, vvy, mi, k + 1, a);
 						sim.restore(snapJ);
@@ -163,7 +163,7 @@ function s2() {
 		};
 		rec(0, x0, v0, Y0[1], 0, -1, 0, false);
 	}
-	console.log(`S2  every pattern with <= 2 changes up to ${T2} ticks: ${checks - n0} tick checks, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+	console.log(`S2  every pattern with <= ${KK} changes up to ${TT} ticks: ${checks - n0} tick checks, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 	console.log(`M   ${mStats.rows} pattern ticks: x beyond hold L / hold R without an armed tick: ${mStats.violNoArm}; v beyond: ${mStats.vViol}; ` +
 		`largest overshoot with the align: +${mStats.maxOverAlign.toFixed(6)} / -${mStats.maxUnderAlign.toFixed(6)} px (slack ${K.ALIGN_SLACK})`);
 	if (mStats.violNoArm || mStats.vViol || mStats.maxOverAlign > K.ALIGN_SLACK || mStats.maxUnderAlign > K.ALIGN_SLACK) fail('THEOREM M violated');
@@ -403,7 +403,7 @@ function solveChecks() {
 	let found = 0, missed = 0, window = 0, nodes = 0;
 	for (let r = 0; r < reps; r++) {
 		if (r % NSH !== SH) continue;
-		const x0 = 200 + rnd() * 5000, v0 = rnd() < 0.3 ? 0 : (rnd() * 2 - 1) * 6.7;
+		const x0 = 900 + rnd() * 4300, v0 = rnd() < 0.3 ? 0 : (rnd() * 2 - 1) * 6.7;
 		const T = 5 + Math.floor(rnd() * 95), kk = Math.floor(rnd() * 4);
 		const cuts = new Set(); while (cuts.size < Math.min(kk, T - 1)) cuts.add(1 + Math.floor(rnd() * (T - 1)));
 		const cs = [...cuts].sort((a, b) => a - b);
@@ -435,8 +435,40 @@ function solveChecks() {
 	console.log(`SOLVE point targets found ${found}, missed ${missed} (mean ${(nodes / Math.max(1, found + missed)).toFixed(0)} nodes); ${window} window answers replayed; ${checks - n0} checks, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 }
 
+// ---------------------------------------------------------------- M2: the align's overshoot over EVERY input word
+// (model only: S1 / S2 tie the model to the engine) from starts on a fine grid within 3 px of a grid line, every word over
+// {-, L, R} of length <= D2: the largest x_t - holdR_t and holdL_t - x_t (THEOREM M's slack, measured over all words)
+function m2() {
+	const t0 = Date.now();
+	const D2 = +(argv.D2 || (QUICK ? 10 : 13));
+	let over = 0, under = 0, words = 0, at = null;
+	const starts = [];
+	for (let k = 0; k < (QUICK ? 24 : 96); k++) starts.push(1600 - 3 + 6 * k / (QUICK ? 24 : 96) + 1e-7 * k);
+	const vs = [0, 0.05, -0.05, 0.3, -0.3, 0.7, -0.7, 0.99, -0.99, 1.2, -1.2, 2.5, -2.5];
+	let idx = 0;
+	for (const x0 of starts) for (const v0 of vs) {
+		if ((idx++) % NSH !== SH) continue;
+		const hR = [], hL = [];
+		{ let x = x0, v = v0; for (let t = 1; t <= D2; t++) { [x, v] = K.stepIA(x, v, 2, I1); hR[t] = x; } }
+		{ let x = x0, v = v0; for (let t = 1; t <= D2; t++) { [x, v] = K.stepIA(x, v, 1, I1); hL[t] = x; } }
+		const rec = (t, x, v) => {
+			for (let mi = 0; mi < 3; mi++) {
+				const [xx, vv] = K.stepIA(x, v, mi, I1);
+				words++;
+				const o = xx - hR[t + 1], u = hL[t + 1] - xx;
+				if (o > over) { over = o; at = { x0, v0, t: t + 1 }; }
+				if (u > under) under = u;
+				if (t + 1 < D2) rec(t + 1, xx, vv);
+			}
+		};
+		rec(0, x0, v0);
+	}
+	console.log(`M2  every word over {-,L,R} up to ${D2} ticks from ${starts.length} x ${vs.length} starts by grid lines (model): ${words} word ticks, overshoot +${over.toFixed(6)} / -${under.toFixed(6)} px ${at ? JSON.stringify(at) : ''}, ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+	if (over > K.ALIGN_SLACK || under > K.ALIGN_SLACK) fail('THEOREM M slack exceeded over all words');
+}
+
 const T0 = Date.now();
-s1(); s2(); s2r(); sep(); pRandom(); gAxis(); ctxChecks(); tabChecks(); kinChecks(); solveChecks();
+m2(); s1(); s2(); s2(T3, 3); s2r(); sep(); pRandom(); gAxis(); ctxChecks(); tabChecks(); kinChecks(); solveChecks();
 console.log(`\nkin1d theorems: ${checks} engine checks, ${fails} mismatches (${((Date.now() - T0) / 1000).toFixed(1)} s, shard ${SH}/${NSH})`);
 for (const f of failLog) console.log('  FAIL ' + f);
 process.exit(fails ? 1 : 0);

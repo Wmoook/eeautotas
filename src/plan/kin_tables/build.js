@@ -34,7 +34,7 @@ function main() {
 			K.writeTable(file, tab);
 			let rows = 0; for (let t = 1; t <= TT; t++) rows += tab.ticks[t].dx.length;
 			const sum = K.summary(tab);
-			cs.tables[`k${KK}`] = { T: TT, rows, bytes: fs.statSync(file).size, ms: Date.now() - t0, perTick: sum.map((r) => [r[0], +r[1].toFixed(6), +r[2].toFixed(6), +r[3].toFixed(6), r[4]]) };
+			cs.tables[`k${KK}`] = { T: TT, rows, bytes: fs.statSync(file).size, ms: Date.now() - t0, perTick: sum.map((r) => [r[0], +r[1].toFixed(6), +r[2].toFixed(6), +r[3].toFixed(6), r[4], isNaN(r[5]) ? null : +r[5].toExponential(3), isNaN(r[6]) ? null : +r[6].toExponential(3)]) };
 			process.stdout.write(`${name} K${KK} T${TT}: ${rows} rows, ${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${Date.now() - t0} ms -> ${file}\n`);
 		}
 		// the extreme rows (THEOREM M): hold R / hold L offsets from 0 and speeds, t = 1..240
