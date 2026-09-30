@@ -59,6 +59,12 @@ const POLISH_MS = 15000, POLISH_F = 0.25;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
+// THE PERFECT PASS (n5-perfect, src/plan/perfect.js; OPT-IN EEAT_PERFECT=1, off = the compile as before): once a route is
+// known, min(PERFECT_MS, PERFECT_F x the budget) is kept for it (like the polish's reserve): branch and bound over the
+// planner's trigger orders from the route's own states with the route as the incumbent, then the polish with the route's
+// joins (its model-state changes and its legs' starts) as its window marks
+const PERFECT = process.env.EEAT_PERFECT === '1';
+const PERFECT_MS = +process.env.EEAT_PERFECT_MS || 20000, PERFECT_F = 0.25;
 // the exact landing (precision.js): a trophy leg's nearest state within PREC_NEAR tiles (the goal field's), at most
 // PREC_RUNS runs a compile of at most PREC_S s (at least PREC_MIN_S left), its PREC_ATTEMPTS nearest attempts
 const PREC_NEAR = 8, PREC_RUNS = 3, PREC_S = 40, PREC_MIN_S = 6, PREC_ATTEMPTS = 8;
@@ -236,9 +242,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const maxDeepen = Number.isFinite(+opts.maxDeepen) ? +opts.maxDeepen : MAX_DEEPEN;
 	const polishOn = opts.polish !== false;
 	const polishReserve = polishOn ? Math.min(POLISH_MS, POLISH_F * total) : 0;
+	const perfectOn = PERFECT && opts.perfect !== false;
+	const perfectReserve = perfectOn ? Math.min(PERFECT_MS, PERFECT_F * total) : 0;
 	const proveOn = opts.prove !== false;
 	// (the reserve kept once a route is known: the polish's, and the proof's where the start is static (set below))
-	let proveReserve = 0, endReserve = polishReserve;
+	let proveReserve = 0, endReserve = polishReserve + perfectReserve;
 	const C = require('../common.js');
 	// ---- the event log (out/events.jsonl) next to emit
 	const out = opts.out ? String(opts.out) : '';
@@ -252,7 +260,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	const secNow = () => (Date.now() - t0) / 1000;
 	const left = () => total - (Date.now() - t0);
-	const stages = { parse: Math.round(+opts.parseMs || 0), model: 0, bounds: 0, plan: 0, moves: 0, verify: 0, polish: 0, prove: 0 };
+	const stages = { parse: Math.round(+opts.parseMs || 0), model: 0, bounds: 0, plan: 0, moves: 0, verify: 0, perfect: 0, polish: 0, prove: 0 };
 	const stage = (name, ms, text) => { stages[name] = Math.round(ms); say({ ev: 'stage', name, ms: Math.round(ms), text }); };
 
 	// ---- the parts
@@ -326,7 +334,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		} catch (e) { /* none */ }
 		return -1;
 	})();
-	if (proveOn && restIdle >= 0) { proveReserve = Math.min(PROVE_MS, PROVE_F * total); endReserve = polishReserve + proveReserve; }
+	if (proveOn && restIdle >= 0) { proveReserve = Math.min(PROVE_MS, PROVE_F * total); endReserve = polishReserve + perfectReserve + proveReserve; }
 	let lbPlanner = 0, lbBounds = 0, lbComplete = false, lbInf = false;
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
@@ -1045,12 +1053,37 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (!ev) { bug('verify', { why: 'the best route does not finish on its replay' }); best = null; }
 		stage('verify', Date.now() - tm, ev ? `finishes: ${fmt(ev.runTicks)} (${num(ev.runTicks)} run ticks), ${ev.deaths} death${ev.deaths === 1 ? '' : 's'}${ev.chance < 1 ? `, ${Math.round(ev.chance * 1000) / 10}% of EEO plays (random portals)` : ''}` : 'the route does not finish: dropped (a bug)');
 	}
+	// ---- PERFECT (EEAT_PERFECT=1): the order B&B from the route's own states, the route the incumbent (src/plan/perfect.js)
+	let perfectInfo = null;
+	if (best && perfectOn && exec && typeof exec.reach === 'function' && !stopped) {
+		tm = Date.now();
+		const ms = Math.max(200, Math.min(perfectReserve, left() - 200 - polishReserve - proveReserve));
+		let text = 'no gain';
+		try {
+			const PF = require('./perfect.js');
+			const r = await PF.perfectRoute({ L, model, planner, exec, RM, emit: say }, best.masks, { ms, polish: false });
+			perfectInfo = { saved: r.saved, expanded: r.expanded, legs: r.legs, legsOk: r.legsOk, pruned: r.pruned, seeds: r.seeds, exhausted: !!r.exhausted, found: r.found };
+			const ev = r && r.saved > 0 ? C.evaluate(L, r.masks) : null;
+			if (ev && ev.deaths <= best.deaths && ev.chance >= best.chance - 1e-9 && ev.runTicks < best.runTicks) {
+				const saved = best.runTicks - ev.runTicks;
+				best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, legs: best.legs, how: `${best.how} + perfect` };
+				say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, perfect: saved, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+				if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+				text = `-${num(saved)} ticks (${r.found.map((f) => f.how).join(', ')})`;
+			}
+			text += `; ${r.expanded} nodes, ${r.legsOk} / ${r.legs} legs, ${r.pruned} pruned by the bound${r.exhausted ? ', the queue exhausted' : ''}`;
+		} catch (e) { say({ ev: 'warning', text: `the perfect pass: ${e.message}` }); text = `error: ${e.message}`; }
+		stage('perfect', Date.now() - tm, text);
+	}
 	if (best && polishOn && !stopped) {
 		tm = Date.now();
 		const ms = Math.max(200, Math.min(polishReserve, left() - 200 - (best ? proveReserve : 0)));
 		let how = '', pr = null;
 		try {
-			if (exec && typeof exec.polish === 'function') { pr = await exec.polish(best.masks, { ms, legs: best.legs, bound: LB }); how = 'the executor'; }
+			// (the window marks: polish.js reads o.legs as TICKS; the legs are objects, so with EEAT_PERFECT the joins' ticks: the
+			// route's model-state changes and its legs' starts)
+			const marks = perfectOn ? (() => { try { const J = require('./perfect.js').joinTicks(L, model, best.masks); for (const g of best.legs || []) if (g && g.fromTick > 0) J.push(g.fromTick); return [...new Set(J)]; } catch (e) { return best.legs; } })() : best.legs;
+			if (exec && typeof exec.polish === 'function') { pr = await exec.polish(best.masks, { ms, legs: marks, bound: LB }); how = 'the executor'; }
 			else {
 				const CR = require('../cleanroute.js');
 				const r = CR.cleanRoute(L, best.masks, { ms });
@@ -1188,7 +1221,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats };
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats, perfect: perfectInfo };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'
