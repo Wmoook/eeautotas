@@ -97,7 +97,7 @@ function main() {
 			const target = { tiles: [mv.tile1], cls: mv.c1, tele };
 			if (tele) target.via = portalVia(L, mv.tile1);
 			const snap = snaps.get(mv.t0);
-			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0' });
+			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0', fields: argv.fields !== '0' });
 			const rec = { r: entry._idx, m: mi, label: mv.label, len: mv.len, c0: mv.c0, c1: mv.c1, ok: !!res.ok, tool: res.tool || null, T: res.T || 0,
 				lb: res.lb, cert: !!res.cert, proven: !!res.proven, us: Math.round(res.us), cands: res.cands, ver: res.verifies, items: res.items, ticks: res.ticks,
 				k: res.k, member: res.member, why: res.ok ? undefined : res.why };
@@ -139,16 +139,16 @@ function aggregate(dir) {
 	const pct = (a, b) => (b ? (100 * a / b).toFixed(1) : '-');
 	const med = (a) => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
 	const p90 = (a) => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length * 0.9)]; };
-	const lines = ['| class | legs | solved | <= route | < route | exact end | proven optimal | plain / coupled | us median / p90 / mean |', '|---|---:|---:|---:|---:|---:|---:|---|---|'];
+	const lines = ['| class | legs | solved | <= route | < route | exact end | proven optimal | plain / field / coupled | us median / p90 / mean |', '|---|---:|---:|---:|---:|---:|---:|---|---|'];
 	const order = ['ALL', 'hop', 'jump', 'fall', 'walk', 'hopjump', 'airjump', 'arrow', 'dot', 'boost', 'portal', 'climb', 'swim'];
 	for (const k of order.concat(Array.from(groups.keys()).filter((x) => !order.includes(x)))) {
 		const g = groups.get(k);
 		if (!g) continue;
 		const ok = g.filter((r) => r.ok && r.verified);
 		const le = ok.filter((r) => r.T <= r.len), lt = ok.filter((r) => r.T < r.len), ex = ok.filter((r) => r.exact), pr = ok.filter((r) => r.proven);
-		const pl = ok.filter((r) => r.tool === 'plain').length, cp = ok.filter((r) => r.tool === 'coupled').length;
+		const pl = ok.filter((r) => r.tool === 'plain').length, fd = ok.filter((r) => r.tool === 'field').length, cp = ok.filter((r) => r.tool === 'coupled').length;
 		const us = g.map((r) => r.us), mean = us.reduce((a, b) => a + b, 0) / Math.max(1, us.length);
-		lines.push(`| ${k} | ${g.length} | ${pct(ok.length, g.length)}% | ${pct(le.length, g.length)}% | ${pct(lt.length, g.length)}% | ${pct(ex.length, g.length)}% | ${pct(pr.length, g.length)}% | ${pct(pl, g.length)} / ${pct(cp, g.length)} | ${med(us)} / ${p90(us)} / ${mean.toFixed(0)} |`);
+		lines.push(`| ${k} | ${g.length} | ${pct(ok.length, g.length)}% | ${pct(le.length, g.length)}% | ${pct(lt.length, g.length)}% | ${pct(ex.length, g.length)}% | ${pct(pr.length, g.length)}% | ${pct(pl, g.length)} / ${pct(fd, g.length)} / ${pct(cp, g.length)} | ${med(us)} / ${p90(us)} / ${mean.toFixed(0)} |`);
 	}
 	const bad = recs.filter((r) => r.ok && !r.verified).length;
 	lines.push('', `legs ${recs.length}; answers the independent replay rejected: ${bad}`);

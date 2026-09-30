@@ -55,6 +55,9 @@ const DOTS = new Set([4, 414]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const PORTALS = new Set([242, 381]);
 const TELEPORT_PX = 20;
+let FS_ = null;
+/** the field leg solver (src/math/fieldsolve.js), loaded on first use */
+const FSOLVE = () => FS_ || (FS_ = require('../math/fieldsolve.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
 
@@ -754,6 +757,24 @@ function createSolver(L, opts = {}) {
 					if (h) res = { ok: true, tool: 'plain', T: h, masks: ms.slice(0, h), k: r.k, member: r.member };
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
+		}
+		if (!res.ok && oo.fields !== false && !target.tele) {
+			// THE FIELD TIER (src/math/fieldsolve.js, the fields derivation): the start field's axis roles, the gravity
+			// axis' option trajectories, the input axes solved by fields.solveAxis in the goal's windows, the schedule
+			// iteration across field boundaries; its candidates replayed by the engine there
+			sim.restore(snap);
+			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
+			stats.fields = (stats.fields || 0) + 1;
+			if (r.ok) {
+				// the goal replayed here by this solver's own test (the same letters; a teleport goal never reaches here)
+				const hit = replay(snap, r.masks, goal);
+				if (hit > 0) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
+			}
+		}
+		if (res.ok && res.tool === 'field' && oo.coupled !== false && res.T > 1) {
+			// cheapest T across the tiers: the coupled piece below the field answer's T
+			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1 }), stats);
+			if (r.ok && r.T < res.T) res = r;
 		}
 		if (!res.ok && oo.coupled !== false) {
 			const r = solveCoupled(snap, sim, tg, goal, oo, stats);
