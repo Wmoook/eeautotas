@@ -53,6 +53,19 @@ function tileOfSim(s) {
 }
 const HB = [0, 2, 4], VB = [0, 8, 16];      // input index -> mask bits (x: -, L, R; y: -, U, D)
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
+// THE TRICKS (n5-tricks): EEAT_TRICKS=1 (or all) every trick, else a comma list of names (fseed, ...); o.tricks overrides
+// per leg; off = the solver before, byte for byte
+function parseTricks(v) {
+	if (v === undefined || v === null || v === false || v === '' || v === '0') return null;
+	if (v === true || v === '1' || v === 'all') return 'all';
+	return new Set((Array.isArray(v) ? v : String(v).split(',')).map((q) => String(q).trim()).filter(Boolean));
+}
+const TRICKS_ENV = parseTricks(process.env.EEAT_TRICKS);
+const SEED_SHARE = 0.5;
+function tricksHas(o, name) {
+	const t = o && o.tricks !== undefined ? parseTricks(o.tricks) : TRICKS_ENV;
+	return t === 'all' || (t !== null && t.has(name));
+}
 
 /**
  * the engine check of a candidate: play masks from the start snapshot; return the first tick (1-based) where the state
@@ -86,7 +99,10 @@ function scheduleOf(sim, T) {
 function solveLeg(L, sim, goal, o = {}) {
 	const t0 = Date.now();
 	const kMax = o.k === undefined ? 2 : o.k, jmax = o.jmax === undefined ? 40 : o.jmax, limit = o.limit || 6;
-	const deadline = t0 + (o.maxMs || 250);   // the candidate generation's clock (the engine verifies stay exact)
+	const deadlineAll = t0 + (o.maxMs || 250);   // the candidate generation's clock (the engine verifies stay exact)
+	// (EEAT_TRICKS fseed: the start's schedule and its iteration get SEED_SHARE of the clock, the seeds the rest: a grounded
+	// start's option sweep can spend the whole clock on solves that give no candidate)
+	let deadline = tricksHas(o, 'fseed') ? t0 + SEED_SHARE * (o.maxMs || 250) : deadlineAll;
 	const maxT = Math.min(goal.maxT || 120, 127);
 	const W = L.width;
 	const goalSet = new Set(goal.tiles);
@@ -178,6 +194,8 @@ function solveLeg(L, sim, goal, o = {}) {
 	const engineSchedule = (masks) => {
 		vsim.restore(snap);
 		const Sx = [null], Sy = [null], keys = [];
+		// (the path's positions too: index t = after tick t; the seeded schedules' obstacles read the cross coordinate there)
+		const Px = [vsim.px], Py = [vsim.py];
 		for (let t = 0; t < masks.length; t++) {
 			const q0 = vsim._q0, q1 = vsim._q1;
 			E.applyMask(inp, masks[t]);
@@ -189,13 +207,15 @@ function solveLeg(L, sim, goal, o = {}) {
 			let c = ctxCache.get(key);
 			if (!c) { c = F.fieldCtx(o); ctxCache.set(key, c); }
 			Sx.push(c.x); Sy.push(c.y); keys.push(key);
+			Px.push(vsim.px); Py.push(vsim.py);
 			if (vsim.is_dead) break;
 		}
 		while (Sx.length <= maxT + 1) { Sx.push(Sx[Sx.length - 1]); Sy.push(Sy[Sy.length - 1]); }
-		return { x: Sx, y: Sy, key: keys.join('|') };
+		return { x: Sx, y: Sy, key: keys.join('|'), pos: { x: Px, y: Py } };
 	};
+	const doneSch = new Set();
+	const reread = [];
 	const iterate = (rounds) => {
-		const doneSch = new Set();
 		for (let r = 0; r < rounds && !res.ok; r++) {
 			const pool = failed.splice(0, failed.length).slice(0, 12);
 			if (!pool.length) break;
@@ -210,7 +230,45 @@ function solveLeg(L, sim, goal, o = {}) {
 					: (cx.x.J !== 0 || (cx.x.ms[1] === 0 && cx.x.ms[2] === 0 && cx.x.mo !== 0) ? 'x' : null);
 				generate(S2, cx, g2, false);
 				if (tryCands('iter')) return true;
+				// (EEAT_TRICKS fseed: the schedule read again with its path's obstacles, after the seeds: seedIter)
+				if (tricksHas(o, 'fseed')) reread.push([S2, cx, g2]);
 			}
+		}
+		return false;
+	};
+	/** the seeded schedules (EEAT_TRICKS fseed): the held masks' engine schedules, the goal's side first */
+	const seedIter = () => {
+		let gx = 0, gy = 0, bd = Infinity;
+		for (const [tx, ty] of tiles) {
+			const dx = 16 * tx - 8 - p0.x, dy = 16 * ty - 8 - p0.y, d = Math.abs(dx) + Math.abs(dy);
+			if (d < bd) { bd = d; gx = Math.sign(dx); gy = Math.sign(dy); }
+		}
+		const toward = (m) => (((m & 4) ? 1 : 0) - ((m & 2) ? 1 : 0)) * gx + (((m & 16) ? 1 : 0) - ((m & 8) ? 1 : 0)) * gy;
+		const order = DIR9.slice().sort((a, b) => toward(b) - toward(a) || a - b);
+		const press = sim.on_ground ? [0, 1] : [0];
+		const n = Math.min(maxT, 127);
+		for (const m of order) for (const p of press) {
+			if (Date.now() >= deadline || res.ok) return res.ok;
+			const masks = new Uint8Array(n).fill(m);
+			masks[0] = m | p;
+			const S2 = engineSchedule(masks);
+			S2.seed = true;
+			// (its own reading of a schedule the iteration may have met: the path's obstacles)
+			if (doneSch.has('seed:' + S2.key)) continue;
+			doneSch.add('seed:' + S2.key);
+			const k3 = Math.min(3, S2.x.length - 1);
+			const cx = { x: S2.x[k3], y: S2.y[k3] };
+			const g2 = cx.y.J !== 0 || (cx.y.ms[1] === 0 && cx.y.ms[2] === 0 && cx.y.mo !== 0) ? 'y'
+				: (cx.x.J !== 0 || (cx.x.ms[1] === 0 && cx.x.ms[2] === 0 && cx.x.mo !== 0) ? 'x' : null);
+			generate(S2, cx, g2, false);
+			if (tryCands('seed')) return true;
+		}
+		// the iteration's schedules read again with their paths' obstacles
+		for (const [S2, cx, g2] of reread) {
+			if (Date.now() >= deadline) return false;
+			S2.seed = true;
+			generate(S2, cx, g2, false);
+			if (tryCands('iter')) return true;
 		}
 		return false;
 	};
@@ -241,11 +299,16 @@ function solveLeg(L, sim, goal, o = {}) {
 			}
 		}
 		const onFloor = (q) => span === null || (q > span[0] && q < span[1]);
+		// THE PULL'S SIDE (trick mining 1, EEAT_TRICKS fpull): the engine's `grounded` is the last tick's contact toward the
+		// OLD pull; a ball standing on a floor as it enters an up arrow, or walking into a side arrow's row, has no solid on
+		// the new pull's side (no span), so the field carries it away from rest: it flies (the 'fly' option), where the
+		// options before pinned it (walk / jump / walk-off: the ride up a column, along a row, never modelled)
+		const flyPull = grounded && span === null && tricksHas(o, 'fpull');
 		// the gravity axis' options: fly on (an airborne start), walk (pinned), jump at tick j (pinned until the press),
 		// walk off an edge at T0 (pinned until T0 - 1, then free from rest); each with the input axis' tube (the box on the
 		// floor while pinned, off its edge at T0)
 		const opts = [];
-		if (!grounded) opts.push({ kind: 'fly', pinned: 0, jump: 0, tube: null });
+		if (!grounded || flyPull) opts.push({ kind: 'fly', pinned: 0, jump: 0, tube: null });
 		else {
 			opts.push({ kind: 'walk', pinned: maxT, jump: 0, tube: (t, q) => onFloor(q) });
 			if (c1[gAxis].J !== 0) for (let j = 1; j <= Math.min(jmax, maxT - 1); j++) opts.push({ kind: 'jump', pinned: j, jump: j, tube: (t, q) => t > j || onFloor(q) });
@@ -270,6 +333,26 @@ function solveLeg(L, sim, goal, o = {}) {
 			return false;
 		};
 		const nOpts = opts.length;
+		// THE PATH'S OBSTACLES (EEAT_TRICKS fseed, a seed's schedule: the path of a held mask): the gravity axis
+		// blocked both ways by the solids over the box's cross columns where that path had them at tick t (the cross
+		// coordinate before and after the tick): a bonk into a ceiling in an up arrow's pull, the fall back into the field
+		// after it, a landing; one-ways block only a move with the pull (a landing on them)
+		const pathPos = S.seed && S.pos ? S.pos[iAxis] : null;
+		const pathBlocked = pathPos ? (t, v, mo) => {
+			const qa = pathPos[Math.min(t - 1, pathPos.length - 1)], qb = pathPos[Math.min(t, pathPos.length - 1)];
+			const c0 = Math.trunc(Math.min(qa, qb)) >> 4, c1 = Math.trunc(Math.max(qa, qb) + 15.999) >> 4;
+			const withPull = mo !== 0 && Math.sign(v) === Math.sign(mo);
+			return (p) => {
+				const a = Math.trunc(p) >> 4, b = (Math.trunc(p + 16.0) - (Number.isInteger(p + 16.0) ? 1 : 0)) >> 4;
+				for (let g = a; g <= b; g++) for (let c = c0; c <= c1; c++) {
+					const x = gAxis === 'y' ? c : g, y = gAxis === 'y' ? g : c;
+					if (x < 0 || y < 0 || x >= Wd || y >= Ht) return true;
+					const f = flg[sim.tiles[y * Wd + x]];
+					if ((f & 1) !== 0 && ((f & 2) === 0 || withPull)) return true;
+				}
+				return false;
+			};
+		} : null;
 		// per goal tile: the earliest tick any gravity option lands on its plane (G) / enters its window
 		const gFirst = tiles.map(() => Infinity), gWin = tiles.map(() => Infinity);
 		let cutG = false;
@@ -282,7 +365,14 @@ function solveLeg(L, sim, goal, o = {}) {
 			for (let t = 1; t <= maxT; t++) {
 				const A = At(G, t);
 				if (t <= op.pinned) { v = (t === op.jump) ? A.J : 0; }
-				else {
+				else if (pathBlocked) {
+					v = F.vStep(v, 0, A);
+					if (v !== 0) {
+						const mv = AX.moveAxis(p, v, A.boost !== 0, pathBlocked(t, v, A.mo));
+						p = mv.p; if (mv.hit) v = 0;
+					}
+					p = K.align(p, v, A.mods[0], A.liquid);
+				} else {
 					v = F.vStep(v, 0, A);
 					if (!op.noCeil && v !== 0 && Math.sign(v) === -gSign) {
 						const mv = AX.moveAxis(p, v, A.boost !== 0, blockedAgainst);
@@ -349,6 +439,14 @@ function solveLeg(L, sim, goal, o = {}) {
 	if (tryCands()) { res.ms = Date.now() - t0; return res; }
 	// ---- across field boundaries: the refused candidates' real schedules, both axes solved again on them
 	if (o.iterate !== false && iterate(o.rounds || 2)) { res.ms = Date.now() - t0; return res; }
+	// ---- THE SEEDED SCHEDULES (trick mining 1, EEAT_TRICKS fseed): a leg whose path leaves the start's field (a bounce off
+	// a ceiling back into an arrow row, a fall through a field into air) gets no candidate from the start's schedule, so
+	// the iteration above has nothing to refine; the 18 held masks (9 directions, the press on the first tick or not)
+	// played by the engine give the field schedules such paths meet (the centre's tiles, the queue, the ice timer, tick by
+	// tick), and both axes are solved on each (every pattern with <= k changes: the setups on that schedule), toward the
+	// goal first; candidates replayed as always
+	deadline = deadlineAll;
+	if (tricksHas(o, 'fseed') && seedIter()) { res.ms = Date.now() - t0; return res; }
 	// ---- the fallback family (o.family): per-tick one-change patterns over the 9 direction masks, jump press or not
 	if (o.family) {
 		const horizon = Math.min(maxT, o.famMax || maxT);
