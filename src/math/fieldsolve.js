@@ -99,10 +99,12 @@ function scheduleOf(sim, T) {
 function solveLeg(L, sim, goal, o = {}) {
 	const t0 = Date.now();
 	const kMax = o.k === undefined ? 2 : o.k, jmax = o.jmax === undefined ? 40 : o.jmax, limit = o.limit || 6;
-	const deadlineAll = t0 + (o.maxMs || 250);   // the candidate generation's clock (the engine verifies stay exact)
-	// (EEAT_TRICKS fseed: the start's schedule and its iteration get SEED_SHARE of the clock, the seeds the rest: a grounded
-	// start's option sweep can spend the whole clock on solves that give no candidate)
-	let deadline = tricksHas(o, 'fseed') ? t0 + SEED_SHARE * (o.maxMs || 250) : deadlineAll;
+	// the candidate generation's clock (the engine verifies stay exact); the tricks (fpull / fseed) run AFTER the solver
+	// before them has spent its clock and failed, on a clock of their own (SEED_SHARE of maxMs more): a leg the solver
+	// solves without them is solved the same way with them (monotone), and costs no more
+	let deadline = t0 + (o.maxMs || 250);
+	// (the fpull pass: generate() makes only the 'fly' option of a grounded start with no floor on the pull's side)
+	let pullPass = false;
 	const maxT = Math.min(goal.maxT || 120, 127);
 	const W = L.width;
 	const goalSet = new Set(goal.tiles);
@@ -273,6 +275,7 @@ function solveLeg(L, sim, goal, o = {}) {
 		return false;
 	};
 	const generate = (S, c1, gAxis, first) => {
+	if (pullPass && gAxis === null) return;
 	if (gAxis !== null) {
 		// ---- a gravity field: the gravity axis' trajectories (one per jump tick), the input axis solved in the window
 		const iAxis = gAxis === 'y' ? 'x' : 'y';
@@ -303,7 +306,8 @@ function solveLeg(L, sim, goal, o = {}) {
 		// OLD pull; a ball standing on a floor as it enters an up arrow, or walking into a side arrow's row, has no solid on
 		// the new pull's side (no span), so the field carries it away from rest: it flies (the 'fly' option), where the
 		// options before pinned it (walk / jump / walk-off: the ride up a column, along a row, never modelled)
-		const flyPull = grounded && span === null && tricksHas(o, 'fpull');
+		const flyPull = pullPass && grounded && span === null;
+		if (pullPass && !flyPull) return;
 		// the gravity axis' options: fly on (an airborne start), walk (pinned), jump at tick j (pinned until the press),
 		// walk off an edge at T0 (pinned until T0 - 1, then free from rest); each with the input axis' tube (the box on the
 		// floor while pinned, off its edge at T0)
@@ -445,8 +449,17 @@ function solveLeg(L, sim, goal, o = {}) {
 	// played by the engine give the field schedules such paths meet (the centre's tiles, the queue, the ice timer, tick by
 	// tick), and both axes are solved on each (every pattern with <= k changes: the setups on that schedule), toward the
 	// goal first; candidates replayed as always
-	deadline = deadlineAll;
-	if (tricksHas(o, 'fseed') && seedIter()) { res.ms = Date.now() - t0; return res; }
+	// ---- THE PULL'S SIDE (EEAT_TRICKS fpull): the start's schedule again with the 'fly' option alone where the base pinned
+	// a grounded ball that has no floor on the new pull's side
+	const trickPull = tricksHas(o, 'fpull'), trickSeed = tricksHas(o, 'fseed');
+	if (trickPull || trickSeed) deadline = Date.now() + SEED_SHARE * (o.maxMs || 250);
+	if (trickPull) {
+		pullPass = true;
+		generate(S, c1, gAxis, false);
+		pullPass = false;
+		if (tryCands('pull')) { res.trick = 'fpull'; res.ms = Date.now() - t0; return res; }
+	}
+	if (trickSeed && seedIter()) { res.trick = 'fseed'; res.ms = Date.now() - t0; return res; }
 	// ---- the fallback family (o.family): per-tick one-change patterns over the 9 direction masks, jump press or not
 	if (o.family) {
 		const horizon = Math.min(maxT, o.famMax || maxT);

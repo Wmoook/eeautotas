@@ -185,10 +185,6 @@ function tricksOf(o) {
 	const t = o && o.tricks !== undefined ? parseTricks(o.tricks) : TRICKS_ENV;
 	return { has: (name) => t === 'all' || (t !== null && t.has(name)), any: t !== null };
 }
-// below a frame answer (o.frameBelow, EEAT_FRAME_BELOW): 'field' the field tier below its T (the default), 'all' the field
-// tier and the coupled piece (on o.frameCoupledTicks), 'none' the frame answer final (o.frameFinal: true too)
-const FRAME_BELOW = process.env.EEAT_FRAME_BELOW || 'field';
-const frameBelowOf = (o) => (o.frameFinal === true ? 'none' : o.frameBelow || FRAME_BELOW);
 // the air-jump members' default node pool and the air jumps one member takes at most (o.ajNodes, o.ajMax)
 const AJ_NODES = 150000, AJ_MAX = 1;
 
@@ -937,6 +933,8 @@ function createSolver(L, opts = {}) {
 		}
 		// THE THIRD PASS (the air-jump members): only their items below the best answer's T (a leg the others solved costs
 		// only this), on their own node pool and the tier's clock
+		// (the answer before the pass: a leg's tiers after the plain one run as they would without the air jumps, msolve leg)
+		const base0 = best ? { T: best.T, member: best.member } : null;
 		if (ajMembers.length && !o.each && !(tEnd && Date.now() > tEnd)) {
 			const items3 = [];
 			buildItems(ajMembers, items3);
@@ -949,6 +947,7 @@ function createSolver(L, opts = {}) {
 		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
 		const res = Object.assign({ ok: true, tool: 'plain' }, best);
+		if (base0 && base0.T !== best.T) res.base0 = base0;
 		if (alts) res.alts = Array.from(alts.values()).filter((a) => a.T !== best.T || a.masks.length !== best.masks.length || a.masks.some((v, i) => v !== best.masks[i])).sort((a, b) => a.T - b.T);
 		return res;
 	}
@@ -1849,25 +1848,41 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			}
 		}
 		split.plain = hr();
+		// THE TRICKS TAKE NOTHING AWAY (EEAT_TRICKS; with none on bres IS res throughout: the tiers as before, byte for byte):
+		// bres = the answer the tiers without the tricks have so far, res = the best of all; every tier after the plain one
+		// runs as it would without the tricks (on bres: the field tier, the coupled piece in full, the chain tier where the
+		// tiers before had no answer), below res's T when a trick has one; a trick's answer replaces only a strictly cheaper
+		// one. The routes' own moves (tools/tricks/legab.js) had legs slower with the tricks, and legs lost, where a trick's
+		// answer had skipped the full coupled piece or the chain tier that found a cheaper one without them
+		let bres = res;
+		if (res.ok && res.tool === 'plain' && typeof res.member === 'string' && res.member.includes('>air@')) {
+			// (an air-jump answer: the plain tier's answer before the air-jump pass, if any, is the base's)
+			bres = res.base0 ? { ok: true, tool: 'plain', T: res.base0.T, member: res.base0.member } : { ok: false, why: 'no plain candidate', tool: 'plain' };
+		}
+		const isLand = (r) => r.ok && r.tool === 'plain' && typeof r.member === 'string' && r.member.includes('>land');
 		// a plain answer through a landing (4.11) is the plain regime's cheapest, not the cheapest of every tier: a way
 		// through a field or the coupled one-change family can be shorter (the single moves' hops: 30 of 11,747 legs
 		// longer than the field / coupled tiers' answers), so the other tiers are asked below its T too
-		// (an air-jump answer likewise: the air-jump members are the third pass of the plain tier, not its whole family: the
-		// multi-jump moves' A/B had 2 legs slower than the field / coupled tiers' answers with it final)
-		// (a frame answer likewise, unless o.frameFinal: it stays inside its arrow field, and a way out of it through another
-		// field can be shorter: the arrow moves' A/B had 11 of 3,364 legs slower than the field / coupled tiers with it final)
-		const landAns = res.ok && ((res.tool === 'plain' && typeof res.member === 'string' && (res.member.includes('>land') || res.member.includes('>air@'))) || (res.tool === 'frame' && frameBelowOf(oo) !== 'none'));
-		if ((!res.ok || landAns) && oo.fields !== false && !target.tele && (!landAns || res.T > 1)) {
+		// (an air-jump answer and a frame answer likewise: the air-jump members are the third pass of the plain tier, the
+		// frame tier stays inside its arrow field, and a way through another field can be shorter)
+		const landAns = res.ok && (isLand(res) || (res.tool === 'plain' && res.member.includes('>air@')) || res.tool === 'frame');
+		const bLand = isLand(bres);
+		if ((!res.ok || landAns || !bres.ok || bLand) && oo.fields !== false && !target.tele && (!res.ok || res.T > 1)) {
 			// THE FIELD TIER (src/math/fieldsolve.js, the fields derivation): the start field's axis roles, the gravity
 			// axis' option trajectories, the input axes solved by fields.solveAxis in the goal's windows, the schedule
 			// iteration across field boundaries; its candidates replayed by the engine there
 			sim.restore(snap);
-			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: landAns ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250, tricks: oo.tricks });
+			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: res.ok ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250, tricks: oo.tricks });
 			stats.fields = (stats.fields || 0) + 1;
 			if (r.ok) {
 				// the goal replayed here by this solver's own test (the same letters; a teleport goal never reaches here)
 				const hit = replay(snap, r.masks, goal);
-				if (hit > 0 && (!res.ok || hit < res.T)) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
+				if (hit > 0 && (!res.ok || hit < res.T)) {
+					const fres = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
+					if (r.trick) fres.trick = r.trick;
+					res = fres;
+					if (!r.trick && (!bres.ok || hit < bres.T)) bres = fres;
+				}
 			}
 		}
 		split.field = hr();
@@ -1876,30 +1891,35 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 		// state: the tick, the position, the speeds) + the field tier from that arrival (the field's own schedule from the
 		// entry's gravity queue), the cheapest sum; the arrival that exits soonest is the SETUP the known routes' passages
 		// use (an entry deeper and faster along the exit face), found by the composition, not by a rule
-		if (tricks.has('fentry') && !oo.noEntry && ctx && !target.tele && oo.fields !== false && (!res.ok || res.tool === 'field' || landAns)) {
+		if (tricks.has('fentry') && !oo.noEntry && ctx && !target.tele && oo.fields !== false && (!res.ok || res.tool === 'field' || landAns || !bres.ok || bLand)) {
 			const r = solveEntry(snap, sim, ctx, tg, goal, oo, stats, res.ok ? res.T : Infinity);
 			if (r.ok && (!res.ok || r.T < res.T)) res = r;
 			split.entry = hr();
 		}
-		if (res.ok && (res.tool === 'field' || res.tool === 'fentry' || landAns) && oo.coupled !== false && res.T > 1 && !(res.tool === 'frame' && frameBelowOf(oo) === 'field')) {
-			// cheapest T across the tiers: the coupled piece below the field answer's T
-			// (below a frame answer on a budget of its own, o.frameCoupledTicks (200 k): a search below an answer the frame found
-			// fails more often than not, and a failing coupled search spends its whole budget)
-			const fb = res.tool === 'frame' ? { coupledTicks: Math.min(oo.coupledTicks || 2e6, oo.frameCoupledTicks || 200000) } : {};
-			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1, coupledTwo: false }, fb), stats);
-			if (r.ok && r.T < res.T) res = r;
+		if (oo.coupled !== false) {
+			if (!bres.ok) {
+				// no answer without the tricks: the coupled piece in full (as without them), below a trick's answer
+				if (!res.ok) {
+					const r = solveCoupled(snap, sim, tg, goal, oo, stats);
+					if (r.ok) { res = r; bres = r; } else if (!ctx) res.why = 'not plain; ' + r.why;
+				} else if (res.T > 1) {
+					const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: Math.min(oo.Tmax, res.T - 1) }), stats);
+					if (r.ok && r.T < res.T) { res = r; bres = r; }
+				}
+			} else if ((res.tool === 'field' || res.tool === 'fentry' || landAns || bres.tool === 'field' || bLand) && res.T > 1) {
+				// cheapest T across the tiers: the coupled piece below the field answer's T
+				const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1, coupledTwo: false }), stats);
+				if (r.ok && r.T < res.T) res = r;
+			}
 		}
-		if (!res.ok && oo.coupled !== false) {
-			const r = solveCoupled(snap, sim, tg, goal, oo, stats);
-			if (r.ok) res = r; else if (!ctx) res.why = 'not plain; ' + r.why;
-		}
-		if (!res.ok && oo.chain !== false && (ctx || oo.chainAny !== false) && !target.tele && oo.Tmax >= (oo.chainMin || 40)) {
+		if (!bres.ok && oo.chain !== false && (ctx || oo.chainAny !== false) && !target.tele && oo.Tmax >= (oo.chainMin || 40) && (!res.ok || res.T > 1)) {
 			// THE CHAIN TIER: a long leg as a chain of shorter ones through supports (A* over support states, 4.6),
 			// within this leg's horizon and a small clock; from a non-plain start too (its successors by the event fan-out:
 			// a leg across fields = the pieces between its field events); the root's direct leg is this failed one
-			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax), reach: oo.chainReach === true, rootLeg: false, tricks: oo.tricks });
+			// (below a trick's answer where the tiers without the tricks had none)
+			const r = chain(snap, target, { Tmax: res.ok ? Math.min(oo.Tmax, res.T - 1) : oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax), reach: oo.chainReach === true, rootLeg: false, tricks: oo.tricks });
 			stats.chain = r;
-			if (r.ok) res = { ok: true, tool: 'chain', T: r.T, masks: r.masks, member: `chain ${r.expanded}` };
+			if (r.ok && (!res.ok || r.T < res.T)) res = { ok: true, tool: 'chain', T: r.T, masks: r.masks, member: `chain ${r.expanded}` };
 		}
 		if (res.ok) {
 			// the landing hop: the same masks with the jump bit on the last tick (a different end state, the same support)
