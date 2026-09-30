@@ -34,6 +34,7 @@ const X = require('./exact.js');
 const SNAP = 32;
 // the loop cuts of the mutation pass (mutatePass, LOOP CUTS)
 const LOOPS_ON = process.env.EEAT_POLISH_LOOPS !== '0' && process.env.EEAT_PERFECT !== '0';
+const COIN_LOOPS = process.env.EEAT_POLISH_COINLOOPS !== '0';
 const LOOP_MIN = 24, LOOP_R = 12, LOOP_V = 1.5, LOOP_K = 3, LOOP_GAP = 8, LOOP_D = [-1, 0, 1], LOOP_SHARE = 0.25;
 
 /** the route's replay: per tick its state hash, snapshots every SNAP ticks, the latest tick of each hash */
@@ -72,7 +73,10 @@ function mutatePass(L, masks, o) {
 	const H = new Float64Array(n + 1), PX = new Float64Array(n + 1), PY = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1), G = new Int8Array(n + 1);
 	const last = new Map();
 	const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
-	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; G[t] = grav(sim); last.set(h, t); };
+	// (o.coinBlind, the loop pass only: the latest tick of each coin-blind hash too, for the loop cuts that skip a coin
+	// detour: such a cut is a proposal the caller's full replay decides (a coin door later on refuses it), see polishRoute)
+	const lastCB = o.coinBlind ? new Map() : null;
+	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; G[t] = grav(sim); last.set(h, t); if (lastCB !== null) lastCB.set(sim.stateHash(false, true), t); };
 	// (re-anchoring, src/mutate.js --anchor: at a landing or a wall / ceiling stop of >= 1 px/tick a path ALSO goes on (a
 	// branch) with the inputs of the route tick in [r - 8, r + AHEAD] of the same gravity whose state is nearest
 	// (|dx| + |dy| + 3 (|dvx| + |dvy|) < ATHR), at most ANCH times a path: a move that lands sooner plays the inputs timed
@@ -149,7 +153,8 @@ function mutatePass(L, masks, o) {
 					let pg = ws.on_ground, pvx = ws.speed_x, pvy = ws.speed_y;
 					for (;;) {
 						if (ws.is_dead) break;
-						const j = last.get(h);
+						let j = last.get(h);
+						if (j === undefined && isLoop && lastCB !== null) j = lastCB.get(ws.stateHash(false, true));
 						if (j !== undefined) {
 							if (j > t + q) {
 								const ins = new Uint8Array(q);
@@ -280,7 +285,8 @@ function polishRoute(L, masks0, o) {
 		const lEnd = Math.min(deadline, Date.now() + LOOP_SHARE * (deadline - Date.now()));
 		for (let pass = 0; pass < 8 && Date.now() < lEnd; pass++) {
 			const cur = best.ms;
-			const mp = mutatePass(L, cur, { deadline: lEnd, stop, onlyLoops: true, loops: true, horizon: o.horizon, drift: o.drift });
+			// (coin-blind rejoins where no coin sits on a portal entry: C.coinFreeOk; every combination is replayed by accept)
+			const mp = mutatePass(L, cur, { deadline: lEnd, stop, onlyLoops: true, loops: true, horizon: o.horizon, drift: o.drift, coinBlind: COIN_LOOPS && C.coinFreeOk(L) });
 			if (!mp.shortcuts.length) break;
 			const set = bestShortcutSet(cur.length, mp.shortcuts);
 			const saved = set.reduce((a, c) => a + c.saved, 0);
