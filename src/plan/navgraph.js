@@ -115,7 +115,7 @@ function astar(ctx) {
 		n.expanded = true;
 		expanded++;
 		sim.restore(n.snap);
-		const kids = ctx.expand(n, sim);
+		const kids = ctx.expand(n, sim, best, cls);
 		n.snap = null;
 		for (const c of kids) {
 			sims += c.ticks;

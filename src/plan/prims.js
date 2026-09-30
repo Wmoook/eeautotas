@@ -63,7 +63,16 @@ function mkMacros() {
 		for (const n of HOLD_N) hold.push({ name: `HOLD(${m},${n})`, fam: 'HOLD', m, max: n, mask: (k) => (k < n ? m : -1) });
 		hold.push({ name: `HOLD(${m},land)`, fam: 'HOLD', m, max: MAXT, land: true, mask: () => m });
 	}
-	return { plain, multi, hold };
+	// chains: the macros that are prefixes of one another played once, an edge at every stop (RUN(d, n), IDLE(n),
+	// HOLD(m, n) / until the landing): the same masks and events as the single macros, a third of the ticks
+	const chains = { run: [], idle: null, hold: [] };
+	for (const d of [2, 4]) chains.run.push({ name: `RUN(${d === 2 ? 'L' : 'R'}`, fam: 'RUN', max: RUN_N[RUN_N.length - 1], stops: new Set(RUN_N), mask: () => d });
+	chains.idle = { name: 'IDLE(', fam: 'IDLE', max: IDLE_N[IDLE_N.length - 1], stops: new Set(IDLE_N), mask: () => 0 };
+	for (let m = 0; m < 32; m++) {
+		if ((m & 6) === 6 || (m & 24) === 24) continue;
+		chains.hold.push({ name: `HOLD(${m}`, fam: 'HOLD', m, max: MAXT, land: true, stops: new Set(HOLD_N), mask: () => m });
+	}
+	return { plain, multi, hold, chains };
 }
 const MACROS = mkMacros();
 
@@ -144,8 +153,44 @@ async function createPrims(L, o = {}) {
 		if (n === 0) return null;
 		const hash = s.stateHash();
 		if (hash === h0) return null;
-		return { macro: macro.name, fam: macro.fam, edge: buf.slice(0, n), ticks: n, event, goal, dead: !!s.is_dead, hash, snap: s.snapshot(), tile: T.tileOf(s, W, H),
+		const e = { macro: macro.name, fam: macro.fam, edge: null, ticks: n, event, goal, dead: !!s.is_dead, hash, snap: null, tile: T.tileOf(s, W, H),
 			px: s.px, py: s.py, vx: s.speed_x, vy: s.speed_y, onGround: !!s.on_ground, jumps: s.jump_count, finished: !!s.has_silver_crown };
+		// the caller's look at the child while the sim holds it (its bound, its class; false: a duplicate, no snapshot)
+		if (ctx.onChild && !ctx.onChild(s, e)) return null;
+		e.edge = buf.slice(0, n);
+		e.snap = s.snapshot();
+		return e;
+	}
+
+	/** a chain: its mask held from the state in snap, an edge at each stop and at the first event (which ends it) */
+	function simChain(s, snap, chain, ctx, buf, push) {
+		s.restore(snap);
+		const h0 = ctx.parentHash;
+		let onG = !!s.on_ground, sig = ctx.parentSig, px = s.px, py = s.py;
+		const emit = (n, event, goal) => {
+			const hash = s.stateHash();
+			if (hash === h0) return;
+			const e = { macro: `${chain.name},${event === 'end' ? n : event})`, fam: chain.fam, edge: null, ticks: n, event, goal, dead: !!s.is_dead, hash, snap: null,
+				tile: T.tileOf(s, W, H), px: s.px, py: s.py, vx: s.speed_x, vy: s.speed_y, onGround: !!s.on_ground, jumps: s.jump_count, finished: !!s.has_silver_crown };
+			if (ctx.onChild && !ctx.onChild(s, e)) return;
+			e.edge = buf.slice(0, n);
+			e.snap = s.snapshot();
+			push(e);
+		};
+		for (let k = 0, n = 0; k < chain.max; k++) {
+			const m = chain.mask(k, s);
+			E.applyMask(inp, m);
+			s.tick(inp);
+			buf[n++] = m;
+			if (s.is_dead) { emit(n, 'dead', false); return; }
+			if (ctx.goal && ctx.goal.test(s)) { emit(n, 'goal', true); return; }
+			if (Math.abs(s.px - px) > TELEPORT_PX || Math.abs(s.py - py) > TELEPORT_PX) { emit(n, 'portal', false); return; }
+			const g = fsig(s);
+			if (g !== sig) { emit(n, 'trigger', false); return; }
+			if (!onG && s.on_ground) { emit(n, 'land', false); return; }
+			if (chain.stops.has(n) || n === chain.max) emit(n, 'end', false);
+			onG = !!s.on_ground; px = s.px; py = s.py;
+		}
 	}
 
 	/** the macros for the state in `s` (restored from snap): the family by its support, STEP last */
@@ -153,17 +198,20 @@ async function createPrims(L, o = {}) {
 		const list = [];
 		if (s.is_dead) { list.push({ name: 'WAIT', fam: 'WAIT', max: DEATH_WAIT, mask: (k, x) => (x.is_dead ? 0 : -1) }); return { list, steps: null }; }
 		const ground = !!s.on_ground && s.flip_gravity === 0 && s.moy > 0 && s.mox === 0;
+		const chains = [];
 		if (ground && plainFx(s) && fo.family !== 'step') {
-			for (const m of MACROS.plain) list.push(m);
+			for (const m of MACROS.plain) if (m.fam !== 'RUN' && m.fam !== 'IDLE') list.push(m);
 			if (s.max_jumps > 1) for (const m of MACROS.multi) list.push(m);
+			for (const c of MACROS.chains.run) chains.push(c);
+			chains.push(MACROS.chains.idle);
 		} else if (fo.family !== 'step') {
 			const ms = EG.probeMasks(s, inp, snap);
 			const allow = new Set(ms);
-			for (const m of MACROS.hold) if (allow.has(m.m)) list.push(m);
+			for (const c of MACROS.chains.hold) if (allow.has(c.m)) chains.push(c);
 		}
 		// STEP: every probe-reduced mask for one tick (completeness)
 		const steps = fo.step === false ? null : EG.probeMasks(s, inp, snap);
-		return { list, steps };
+		return { list, steps, chains };
 	}
 
 	/** the children of a node (the navgraph's expand): learned edges first, the family, STEP */
@@ -192,6 +240,7 @@ async function createPrims(L, o = {}) {
 		s.restore(snap);
 		const fam = familyOf(s, snap, fo);
 		for (const m of fam.list) push(simEdge(s, snap, m, ctx, buf));
+		if (fam.chains) for (const c of fam.chains) simChain(s, snap, c, ctx, buf, push);
 		if (fam.steps) for (const m of fam.steps) push(simEdge(s, snap, { name: `STEP(${m})`, fam: 'STEP', max: 1, mask: (k) => (k === 0 ? m : -1) }, ctx, buf));
 		st.edges += out.length;
 		for (const e of out) st.sims += e.ticks;
@@ -261,15 +310,20 @@ async function createPrims(L, o = {}) {
 				sim, starts: sts, h, isGoal: (s) => goal.test(s), budget: { ms: share, deadline: tEnd, stop: budget.stop, k: budget.k || 1 }, classDedup,
 				allowDeath: !!goal.allowDeath || !!ro.allowDeath, beforeTick: ro.beforeTick !== undefined ? ro.beforeTick : goal.beforeTick,
 				k: budget.k || 1, slack: ro.slack || 0, stepAll: fo.step && w === 1, bound: incumbent === Infinity ? undefined : incumbent, greedy: w > 1,
-				expand: (n, s) => {
-					const kids = expandNode(n, s, ctx, fo);
-					for (const c of kids) {
-						s.restore(c.snap);
-						c.h0 = c.goal ? 0 : h(s);
-						c.h = c.goal ? 0 : (w > 1 && guide ? Math.max(c.h0, guide(s)) : c.h0) * w;
-						c.key = classDedup && !c.goal ? (support(s) || airKey(s)) : null;
+				expand: (n, s, best, cls) => {
+					ctx.onChild = (x, c) => {
 						st.macroUse[c.fam] = (st.macroUse[c.fam] || 0) + 1;
-					}
+						const tick = n.tick + c.ticks;
+						const had = best.get(c.hash);
+						if (had !== undefined && had <= tick) return false;
+						c.key = classDedup && !c.goal ? (support(x) || airKey(x)) : null;
+						if (cls && c.key !== null) { const ck = cls.get(c.key); if (ck !== undefined && ck <= tick) return false; }
+						c.h0 = c.goal ? 0 : h(x);
+						c.h = c.goal ? 0 : (w > 1 && guide ? Math.max(c.h0, guide(x)) : c.h0) * w;
+						return true;
+					};
+					const kids = expandNode(n, s, ctx, fo);
+					ctx.onChild = null;
 					return kids;
 				},
 			});
