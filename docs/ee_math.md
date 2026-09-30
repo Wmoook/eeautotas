@@ -1097,6 +1097,15 @@ On the legs both solve the new T is lower on 19, higher on 5 (the budget's order
 order within 150 k ticks). Of the 339 legs it adds 306 hold one direction and press the jump inside the leg (family 1),
 33 press it at a change of direction (family 2).
 
+**In the compiler** (box 3, 60 s, --workers=3; n4-plan 2cb8357 + this): the shared gate **exit 0** (compiled 11 vs the
+baseline's 9, better 7, worse 2: First Person Maze 33 -> 0 and Starlight 18 -> 15, each rerun twice side by side on
+one tree: this 33 / 33 and 16 / 18, `EEAT_MATH_CORDER=0` 0 / 0 and 18 / 18: the levels' spread); the field class
+(lane 3's 18 levels + Accident Prone and The Blank Page, which the math tier had lost; both arms side by side,
+`EEAT_MATH_CORDER=0` the other): compiled 1 vs 1 (Accident Prone 3,452 vs 3,444 run ticks), progress 134 vs 129
+(Starlight 23 vs 20, EXCrew Trolled Minis 12 vs 10, KOcrew 9 vs 8, Level 1 Overworld 36 vs 37, the rest equal; one run
+each: within the spread), the tier's coupled legs 74 vs 57 (field 3 vs 17: the coupled piece below the field
+answer's T takes them), its direct time 62 vs 68 s in all. test/msolve.js 50/0, test/planexec.js 32/32.
+
 ### 4.11 The land-and-act members (the coverage iteration)
 
 The compiler's missed legs (section 7.6) start in the AIR (79% of the trigger / trophy legs the search tiers found: an
