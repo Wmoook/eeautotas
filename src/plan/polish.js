@@ -290,7 +290,7 @@ function idleShift(L, masks0, o = {}) {
 	const evA = C.evaluate(L, masks0, true), evB = C.evaluate(L, cur, true);
 	return { masks: cur, saved: evA && evB ? evA.runTicks - evB.runTicks : 0, tries, rests: rests0, steps, ms: Date.now() - t0 };
 }
-const TRICKS_IDLE = (() => { const s = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((x) => x.trim())); return s.has('1') || s.has('all') || s.has('idle'); })();
+const TRICKS_IDLE = require('./tricks.js').has('idle');
 
 function polishRoute(L, masks0, o) {
 	o = o || {};

@@ -171,18 +171,13 @@ const LAND_DEF = process.env.EEAT_MSOLVE_LAND !== '0';
 // the land-and-act jump's bonk variants (coverage iteration 2; EEAT_MSOLVE_LANDBONK=0: off, o.landBonk)
 const LAND_BONK_DEF = process.env.EEAT_MSOLVE_LANDBONK !== '0';
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
-// THE MOVEMENT TRICKS (n5-tricks, trick mining 2: tools/tricks/mine.js over the known routes): EEAT_TRICKS=1 (or all) every
-// trick below, a comma list their names (airjump, ...); o.tricks (true / false / a list / a comma string) overrides per leg;
-// off = the solver before, byte for byte
-function parseTricks(v) {
-	if (v === undefined || v === null || v === false || v === '' || v === '0') return null;
-	if (v === true || v === '1' || v === 'all') return 'all';
-	return new Set((Array.isArray(v) ? v : String(v).split(',')).map((q) => String(q).trim()).filter(Boolean));
-}
-const TRICKS_ENV = parseTricks(process.env.EEAT_TRICKS);
+// THE MOVEMENT TRICKS (n5-tricks, trick mining 2: tools/tricks/mine.js over the known routes; the knob src/plan/tricks.js,
+// EEAT_TRICKS): airjump, frame, fentry here, fseed / fpull in the field tier; o.tricks (true / false / a list / a comma
+// string) overrides per leg; off = the solver before, byte for byte
+const TRK = require('./tricks.js');
 /** the tricks on for a leg: a has(name) test */
 function tricksOf(o) {
-	const t = o && o.tricks !== undefined ? parseTricks(o.tricks) : TRICKS_ENV;
+	const t = TRK.parse(o ? o.tricks : undefined);
 	return { has: (name) => t === 'all' || (t !== null && t.has(name)), any: t !== null };
 }
 // the air-jump members' default node pool and the air jumps one member takes at most (o.ajNodes, o.ajMax)

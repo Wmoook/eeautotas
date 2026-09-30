@@ -53,18 +53,12 @@ function tileOfSim(s) {
 }
 const HB = [0, 2, 4], VB = [0, 8, 16];      // input index -> mask bits (x: -, L, R; y: -, U, D)
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
-// THE TRICKS (n5-tricks): EEAT_TRICKS=1 (or all) every trick, else a comma list of names (fseed, ...); o.tricks overrides
-// per leg; off = the solver before, byte for byte
-function parseTricks(v) {
-	if (v === undefined || v === null || v === false || v === '' || v === '0') return null;
-	if (v === true || v === '1' || v === 'all') return 'all';
-	return new Set((Array.isArray(v) ? v : String(v).split(',')).map((q) => String(q).trim()).filter(Boolean));
-}
-const TRICKS_ENV = parseTricks(process.env.EEAT_TRICKS);
+// THE TRICKS (n5-tricks; the knob src/plan/tricks.js, EEAT_TRICKS): fseed, fpull; o.tricks overrides per leg; off = the
+// solver before, byte for byte
+const TRK = require('../plan/tricks.js');
 const SEED_SHARE = 0.5;
 function tricksHas(o, name) {
-	const t = o && o.tricks !== undefined ? parseTricks(o.tricks) : TRICKS_ENV;
-	return t === 'all' || (t !== null && t.has(name));
+	return TRK.has(name, o ? o.tricks : undefined);
 }
 
 /**

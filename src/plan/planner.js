@@ -60,10 +60,9 @@ const KEY_TICKS = 500;
 //         without a death: a fall that cannot be climbed back, a one-way drop, a door shut behind) is offered from that
 //         class only as its death variant (edge + '~w': a death back at a respawn, then the trigger; its own rungs), where
 //         the level can kill and respawn; the claim was a claim about deathless ways only (goalOf: allowDeath false)
-const TRICKS = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((s) => s.trim()).filter(Boolean));
-const TR_ALL = TRICKS.has('1') || TRICKS.has('all');
-const TR_WARP = TR_ALL || TRICKS.has('warp');
-const TR_EXH = TR_ALL || TRICKS.has('exh');
+const TRK = require('./tricks.js');
+const TR_WARP = TRK.has('warp');
+const TR_EXH = TRK.has('exh');
 const TR_DBG = process.env.EEAT_TRICKS_DEBUG === '1';
 // (a forced chain's plan: its boost tile first as a region step, EEAT_CHAIN_HEAD=0: the chain's step alone)
 const CHAIN_HEAD = process.env.EEAT_CHAIN_HEAD !== '0';

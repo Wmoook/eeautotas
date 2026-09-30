@@ -376,8 +376,7 @@ function compileModel(L, o = {}) {
 	// / trophies are cut there (a coin component's touch takes all its coins). OPT-IN EEAT_TRICKS chain / 1 / all.
 	const chains = [];
 	{
-		const tk = new Set(String(process.env.EEAT_TRICKS || '').split(',').map((s) => s.trim()));
-		if (tk.has('1') || tk.has('all') || tk.has('chain')) {
+		if (require('./tricks.js').has('chain')) {
 			const BD = { 114: [-1, 0], 115: [1, 0], 116: [0, -1], 117: [0, 1] };
 			const PER_TILE = new Set(['psw', 'osw', 'pswR', 'oswR', 'key', 'team', 'prot', 'reset', 'fx', 'cp']);
 			const inW = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
