@@ -62,7 +62,7 @@ const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -176,7 +176,7 @@ function createBackward(L, opts = {}) {
 		const clock = P.ms || 10000;
 		const closeEnd = t0 + clock * P.closeF;
 		const tEnd = t0 + clock;
-		const stats = { finishCalls: 0, finishMs: 0, finishOk: 0, cells: 0, seeds: 0, edges: 0, targetEdges: 0, expanded: 0, closeMs: 0, dijMs: 0, meetMs: 0, dStart: null, meetExpanded: 0, capped: false };
+		const stats = { minH: Infinity, minHg: 0, finishCalls: 0, finishMs: 0, finishOk: 0, cells: 0, seeds: 0, edges: 0, targetEdges: 0, expanded: 0, closeMs: 0, dijMs: 0, meetMs: 0, dStart: null, meetExpanded: 0, capped: false };
 		const snap0 = start instanceof E.EESnapshot ? start : start.snapshot();
 		sim.restore(snap0);
 		const tgt = new Uint8Array(N);
@@ -243,13 +243,28 @@ function createBackward(L, opts = {}) {
 			}
 			return { ok: false, why: 'the start is not in the target\'s walk', stats };
 		}
+		let rfield = null;
+		if (P.reach) { try { rfield = rfOf(target.tiles, sim); } catch (e) { rfield = null; } }
+		stats.reach = rfield ? rfield.mode : null;
 		const lim = Math.ceil(dS * P.corrF + P.corrAdd);
 		const inCorr = new Uint8Array(N);
 		let corrTiles = 0;
 		// THE PERIMETER (P.perim > 0): the closure only within that walk distance of the target (a backward region the closure
 		// completes; the meet runs on the fallback order outside it and meets the values inside)
 		const limC = P.perim > 0 ? Math.min(lim, P.perim) : lim;
-		for (let t = 0; t < N; t++) if (wd[t] >= 0 && wd[t] <= limC) { inCorr[t] = 1; corrTiles++; }
+		// THE PHYSICS CORRIDOR (P.corrReach, a physics-mode reach field): also within the reach field's band, the tile's cost
+		// (at rest, falling) at most the start's x corrF + corrAdd: a maze of killers is a walk corridor of its whole area
+		const cS = rfield ? RF.costAt(rfield, sim) : -1;   // (walk mode too: its walk closes the killers)
+		const rLim = cS >= 0 ? cS * P.corrF + P.corrAdd : Infinity;
+		const rOK = (t) => {
+			if (!(P.corrReach && rLim < Infinity)) return true;
+			const x = 16 * (t % W), y = 16 * ((t / W) | 0);
+			let c = -1;
+			for (const vy of [0, 4, -4]) { const q = RF.costAt(rfield, x, y, vy); if (q >= 0 && (c < 0 || q < c)) c = q; }
+			return c >= 0 && c <= rLim;
+		};
+		for (let t = 0; t < N; t++) if (wd[t] >= 0 && wd[t] <= limC && rOK(t)) { inCorr[t] = 1; corrTiles++; }
+		if (sTile >= 0 && sTile < N) inCorr[sTile] = 1;
 		stats.corrTiles = corrTiles; stats.dStartTiles = dS;
 		const tileOfS = (s) => {
 			const tx = Math.trunc(s.px + 8) >> 4, ty = Math.trunc(s.py + 8) >> 4;
@@ -259,9 +274,6 @@ function createBackward(L, opts = {}) {
 		// THE FALLBACK ORDER of a state no value covers: the reach field to the target (src/reach.js, deaths off: physics-aware,
 		// a relaxation, in tiles) at the top running speed (P.reach; else the gravity-blind walk), x P.fw + P.fadd (a cell
 		// with a value is preferred: the meet heads for the backward region)
-		let rfield = null;
-		if (P.reach) { try { rfield = rfOf(target.tiles, sim); } catch (e) { rfield = null; } }
-		stats.reach = rfield ? rfield.mode : null;
 		const hFall = (s, t) => {
 			if (rfield) { const c = RF.costAt(rfield, s); if (c >= 0) return c * KAPPA * P.fw + P.fadd; if (rfield.mode === 'physics') return hWalk(t) * P.fw + P.fadd + 1000; }   // (-1: behind the doors as they stood at the start: an order, no prune)
 			return hWalk(t) * P.fw + P.fadd;
@@ -512,8 +524,13 @@ function createBackward(L, opts = {}) {
 			const q = 8 >> res, d = discOf(s);
 			return `${d}|${s.on_ground ? 1 : 0}|${Math.floor((s.px + 8) / q)}|${Math.floor((s.py + 8) / q)}|${Math.round(s.speed_x * VXQ * (1 << res))}|${Math.round(s.speed_y * VYQ * (1 << res))}|${clsId[idOf(s._q0)]}.${clsId[idOf(s._q1)]}|r${res}`;
 		};
-		const meet = (cap, until, res = 0) => {
+		// (THE RELAY: a meet from a committed root: its snapshot and the masks from the start to it; lastBest: the expanded node
+		// with the least time to go of the last meet, with its snapshot, the relay's next root)
+		let lastBest = null;
+		const root0 = { snap: snap0, prefix: new Uint8Array(0), key: startKey };
+		const meet = (cap, until, res = 0, root = root0) => {
 			const keep = P.keep + res;
+			lastBest = null;
 			const heap = makeHeap();
 			nodes = [];                              // {snap, par, masks (Uint8Array of the move), g}
 			const seenG = new Map();                   // cell key -> [g, ...] (the P.keep least)
@@ -531,14 +548,16 @@ function createBackward(L, opts = {}) {
 				nodes.push({ snap, par, masks, g, hsh, h: hv === hf ? (hf - P.fadd) / P.fw : hv });
 				heap.push(g + P.w * hv, id);
 			};
-			sim.restore(snap0);
-			push(snap0, -1, null, 0, startKey, tileOfS(sim), undefined, hFall(sim, tileOfS(sim)), mkeyOf(sim, res));
+			sim.restore(root.snap);
+			push(root.snap, -1, null, 0, root === root0 ? startKey : keyOf(sim), tileOfS(sim), undefined, hFall(sim, tileOfS(sim)), mkeyOf(sim, res));
 			let found = null, ex = 0, lastFinish = -Infinity;
 			const tMeet0 = Date.now() - 50;
 			while (heap.size && !found && Date.now() < until && ex < cap && nodes.length < P.maxNodes) {
 				const id = heap.pop();
 				const nd = nodes[id];
 				ex++; stats.meetExpanded++;
+				if (nd.h < stats.minH) { stats.minH = Math.round(nd.h); stats.minHg = nd.g; }
+				if (id > 0 && (!lastBest || nd.h < lastBest.h)) lastBest = { id, h: nd.h, g: nd.g, snap: nd.snap };
 				if (o.trace) { sim.restore(nd.snap); o.trace('pop', nd.g, keyOf(sim), sim); }
 				const snapE = nd.snap;
 				nd.snap = null;
@@ -562,7 +581,7 @@ function createBackward(L, opts = {}) {
 						const mm = Uint8Array.from(masks.subarray(0, ticks));
 						if (kind === 1) {
 							const g = nd.g + ticks;
-							if (!found || g < found.g) found = { par: id, masks: mm, g };
+							if (!found || g < found.g) found = { par: id, masks: mm, g, prefix: root.prefix };
 							return;
 						}
 						const tl = tileOfS(sim);
@@ -573,6 +592,7 @@ function createBackward(L, opts = {}) {
 				}
 			}
 			stats.exhausted = !found && heap.size === 0;
+			stats.meetCapped = !found && heap.size > 0 && (ex >= cap || nodes.length >= P.maxNodes);   // (stopped by its node caps, not its clock)
 			return found;
 		};
 		// 1. THE QUICK MEET: the fallback order alone (a short leg needs no closure)
@@ -583,10 +603,25 @@ function createBackward(L, opts = {}) {
 			seedAll();
 			closure(closeEnd);
 			dijkstra();
-			found = meet(P.meetNodes, tEnd);
+			found = meet(P.meetNodes, t0 + clock * P.meetF);
 		}
 		// 5. THE REFINEMENT LADDER: an exhausted meet again with finer cells while the clock lasts
 		for (let res = 1; !found && stats.exhausted && res <= P.ladder && Date.now() < tEnd - 20; res++) { stats.ladder = res; found = meet(P.meetNodes, tEnd, res); }
+		// 6. THE RELAY (P.relay steps, only after a meet its node caps stopped: its clock is the leg's): no leg yet, commit to the last meet's node of the least time to go (its path from
+		// the start kept) and meet again from it, while each step lowers the time to go by P.relayMin: a long leg as a chain
+		// of meets (greedy: a committed root in a dead end ends it)
+		const pathOf = (id) => { const parts = []; for (let q = id; q >= 0 && nodes[q].masks; q = nodes[q].par) parts.push(nodes[q].masks); parts.reverse(); let n = 0; for (const a of parts) n += a.length; const m = new Uint8Array(n); let off = 0; for (const a of parts) { m.set(a, off); off += a.length; } return m; };
+		let root = root0, rootH = Infinity;
+		for (let k = 0; !found && k < P.relay && stats.meetCapped && lastBest && lastBest.snap && Date.now() < tEnd - 50; k++) {
+			if (!(lastBest.h < rootH - P.relayMin)) break;
+			const pm = pathOf(lastBest.id), pre = new Uint8Array(root.prefix.length + pm.length);
+			pre.set(root.prefix); pre.set(pm, root.prefix.length);
+			rootH = lastBest.h;
+			root = { snap: lastBest.snap, prefix: pre };
+			stats.relay = k + 1; stats.relayH = Math.round(rootH); stats.relayG = pre.length;
+			const share = Math.max(200, (tEnd - Date.now()) / Math.max(1, Math.min(4, P.relay - k)));
+			found = meet(P.meetNodes, Math.min(tEnd, Date.now() + share), 0, root);
+		}
 		stats.meetMs = Date.now() - tM0;
 		if (o.probe) {
 			// (a diagnostic: the values along a known leg's own states, every o.probeEvery ticks: [tick, D of its cell or
@@ -608,6 +643,7 @@ function createBackward(L, opts = {}) {
 		// the masks: the chain of moves, replayed from the start (the engine's own goal)
 		const parts = [found.masks];
 		for (let q = found.par; q >= 0 && nodes[q].masks; q = nodes[q].par) parts.push(nodes[q].masks);
+		if (found.prefix && found.prefix.length) parts.push(found.prefix);
 		parts.reverse();
 		let T = 0; for (const a of parts) T += a.length;
 		const masks = new Uint8Array(T);

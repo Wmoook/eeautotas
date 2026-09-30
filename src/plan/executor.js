@@ -247,6 +247,7 @@ const BW_ON = () => process.env.EEAT_BACKWARD === '1';
 const BW_SHARE = +process.env.EEAT_BW_SHARE > 0 ? +process.env.EEAT_BW_SHARE : 0.5;
 const BW_MS = +process.env.EEAT_BW_TIERMS > 0 ? +process.env.EEAT_BW_TIERMS : 30000;
 const BW_STARTS = +process.env.EEAT_BW_STARTS > 0 ? +process.env.EEAT_BW_STARTS : 2;
+const BW_RUNGS = process.env.EEAT_BW_RUNGS !== '0';
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
 // THE NEXT WAYPOINT (iterate 2 lane 'chains'): a chain's leg failed from the arrivals the leg before kept, not for the leg
@@ -575,7 +576,12 @@ function makeCore(L, co) {
 		}
 		// -------- tier B: THE BACKWARD TIER (OPT-IN EEAT_BACKWARD=1; the header's BW_*)
 		if (BW_ON() && !allowDeath && !wp.dieField && !goal.fieldTiles && goal.tiles.length > 0 && Date.now() < wEnd - 50) {
-			const tB = Date.now(), bEnd = tB + Math.min(BW_MS, BW_SHARE * (wEnd - tB));
+			// (BW_RUNGS: the tier by the rung: rung 0 the meet alone (a short leg, a small share), rung 1 the closure too,
+			// from rung 2 a larger share; EEAT_BW_RUNGS=0: every rung as rung 1)
+			const bwR = BW_RUNGS ? Math.min(rung, 2) : 1;
+			const bwShare = BW_RUNGS ? [0.3, BW_SHARE, 0.7][bwR] : BW_SHARE;
+			const bwO = BW_RUNGS ? [{ closeF: 0, quickF: 1, quick: 400000 }, {}, {}][bwR] : {};
+			const tB = Date.now(), bEnd = tB + Math.min(BW_MS, bwShare * (wEnd - tB));
 			const cands = [];
 			const bst = { tier: 'backward', tries: 0, ok: false, T: null, why: null, stats: null };
 			try {
@@ -585,7 +591,7 @@ function makeCore(L, co) {
 					const left = bEnd - Date.now();
 					if (left < 30) break;
 					const s = bStarts[bi], si = starts.indexOf(s);
-					const r = B.solve(s.snap, { tiles: Array.from(goal.tiles) }, { ms: bi === bStarts.length - 1 ? left : left / (bStarts.length - bi) });
+					const r = B.solve(s.snap, { tiles: Array.from(goal.tiles) }, Object.assign({ ms: bi === bStarts.length - 1 ? left : left / (bStarts.length - bi) }, bwO));
 					bst.tries++;
 					bst.stats = r.stats ? { cells: r.stats.cells, finite: r.stats.finite, meet: r.stats.meetExpanded, quick: !!r.stats.quick } : null;
 					if (!r.ok) { bst.why = r.why; continue; }
