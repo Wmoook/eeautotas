@@ -43,6 +43,7 @@ const KEY_TICKS = 500;
 // failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
 // EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
 const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
+const NEAR_RUNG = process.env.EEAT_NEAR_RUNG !== '0';   // (the rung balance of the near plans: nearPlans; EEAT_NEAR_RUNG=0 off)
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -867,12 +868,23 @@ function createPlanner(model, facts, o = {}) {
 		// whose first leg is untried still gets its rung-0 try (I Wanna be the Guy: its 2nd / 3rd plans' first legs, a
 		// checkpoint and a switch, lead to 15 triggers; the nearest-by-lb coins / checkpoints ahead of them took their slots:
 		// 15 -> 3)
-		for (const p of plans) { const f = p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0]; if (facts.rungOf(f.edge, cls) < 1) return []; }
+		let rMin = Infinity;
+		for (const p of plans) { const f = p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0]; const r = facts.rungOf(f.edge, cls); if (r < 1) return []; if (r < rMin) rMin = r; }
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
 		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls);
 		const used = new Set(plans.map((p) => p.steps[0] && p.steps[0].edge));
-		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) === 0)
-			.sort((x, y) => x.lb - y.lb || x.est - y.est);
+		// (THE RUNG BALANCE, lane 6 block 4, NEAR_RUNG: a near trigger is offered while its rung is below every plan's first
+		// leg's, not only while untried: the plans' first legs climbed rung after rung (5 -> 15 -> 45 s windows, three
+		// workers on the same failing edges for the second half of a 60-s compile) while a near trigger that failed its
+		// rung 0 never got its rung 1 (Bygone Tutorial: the red key (169, 33) found at rung 1 in 1.9 s once the planner
+		// offered it, after the coin and the two keys had spent their rungs 2 and 3); the lowest rung first, then the lb.
+		// Measured (box 3, 60 s, --workers=3, with the executor's rate rule): Bygone Tutorial COMPILED in 2 of 2 runs (2,123 /
+		// 2,129 run ticks at 48 s; 0 of 6 runs at 60 s without it), the lane's other 10 levels 183 vs 186 triggers (noise);
+		// T-PLAN-ORACLE unchanged by construction (it fires only after a failed rung): 619 plans, 0 / 0.
+		// EEAT_NEAR_RUNG=0: only untried triggers, as before)
+		const rCap = NEAR_RUNG ? rMin : 1;
+		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) < rCap)
+			.sort((x, y) => (NEAR_RUNG ? facts.rungOf(x.edge, cls) - facts.rungOf(y.edge, cls) : 0) || x.lb - y.lb || x.est - y.est);
 		const out = [];
 		const root = { S: a.S, pos: a.pos, e: null, parent: null };
 		for (const e of cands.slice(0, NEAR_K)) {
