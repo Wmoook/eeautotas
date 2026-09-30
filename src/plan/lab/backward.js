@@ -157,7 +157,7 @@ function createBackward(L, opts = {}) {
 
 	const valMemo = new Map();             // the values of closed closures (P.memo newest), by target and discrete state
 	let MS_ = null;
-	const msol = () => MS_ || (MS_ = require('../msolve.js').createSolver(L, {}));
+	const msol = () => MS_ || (MS_ = opts.solver || require('../msolve.js').createSolver(L, {}));   // (opts.solver: a msolve solver of L to share)
 	// the reach field to a target's tiles (deaths off: the meet never dies), the newest 6
 	const rfCache = new Map();
 	function rfOf(tiles, s) {
@@ -182,10 +182,13 @@ function createBackward(L, opts = {}) {
 		sim.restore(snap0);
 		const tgt = new Uint8Array(N);
 		for (const t of target.tiles) if (t >= 0 && t < N) tgt[t] = 1;
-		const inTgt = (s) => {
+		// (a target with a class or a teleport (target.cls other than 'any', target.tele: the moves study's support targets,
+		// src/plan/portfolio.js): its end is msolve's exact goal test too; px / py the position before the tick (a teleport))
+		const gx = (target.cls && target.cls !== 'any') || target.tele ? msol().goal(target) : null;
+		const inTgt = (s, px, py) => {
 			let tx = Math.trunc(s.px + 8) >> 4, ty = Math.trunc(s.py + 8) >> 4;
 			if (tx < 0 || ty < 0 || tx >= W || ty >= H) return false;
-			return tgt[ty * W + tx] === 1 && !s.is_dead;
+			return tgt[ty * W + tx] === 1 && !s.is_dead && (gx === null || gx(s, px === undefined ? s.px : px, py === undefined ? s.py : py));
 		};
 		if (inTgt(sim)) return { ok: true, masks: new Uint8Array(0), T: 0, why: 'at the target', stats };
 		const sol = solidOf(sim);
@@ -356,7 +359,7 @@ function createBackward(L, opts = {}) {
 				buf[t] = mk;
 				E.applyMask(inp, mk); sim.tick(inp);
 				if (sim.is_dead) return;
-				if (inTgt(sim)) { out(1, t + 1, buf); return; }
+				if (inTgt(sim, px, py)) { out(1, t + 1, buf); return; }
 				const tele = Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX;
 				const g = sim.on_ground ? 1 : 0;
 				const c = clsId[idOf(sim.current_tile)];
@@ -374,10 +377,11 @@ function createBackward(L, opts = {}) {
 						// THE HOP: the same masks with the jump on the landing tick
 						const s1 = sim.snapshot();
 						sim.restore(snap);
-						for (let q = 0; q <= t; q++) { const mm = q === t ? (buf[q] | 1) : buf[q]; E.applyMask(inp, mm); sim.tick(inp); if (sim.is_dead) break; }
+						let hpx = sim.px, hpy = sim.py;
+						for (let q = 0; q <= t; q++) { const mm = q === t ? (buf[q] | 1) : buf[q]; hpx = sim.px; hpy = sim.py; E.applyMask(inp, mm); sim.tick(inp); if (sim.is_dead) break; }
 						if (!sim.is_dead) {
 							buf[t] |= 1;
-							if (inTgt(sim)) out(1, t + 1, buf); else out(0, t + 1, buf);
+							if (inTgt(sim, hpx, hpy)) out(1, t + 1, buf); else out(0, t + 1, buf);
 							buf[t] &= ~1;
 						}
 						sim.restore(s1);
@@ -587,7 +591,7 @@ function createBackward(L, opts = {}) {
 					lastFinish = ex;
 					const tf = Date.now();
 					let r = null;
-					try { r = msol().leg(snapE, { tiles: Array.from(target.tiles), cls: 'any' }, { Tmax: P.finishT, chain: false, prove: false, coupled: nd.h <= 40, fields: true, nodes: 40000, fieldMs: P.finishMs, coupledTicks: 30000, deadline: tf + P.finishMs, alts: 0 }); } catch (e) { r = null; }
+					try { r = msol().leg(snapE, gx ? { tiles: Array.from(target.tiles), cls: target.cls || 'any', tele: !!target.tele, via: target.via } : { tiles: Array.from(target.tiles), cls: 'any' }, { Tmax: P.finishT, chain: false, prove: false, coupled: nd.h <= 40, fields: true, nodes: 40000, fieldMs: P.finishMs, coupledTicks: 30000, deadline: tf + P.finishMs, alts: 0 }); } catch (e) { r = null; }
 					stats.finishCalls++; stats.finishMs += Date.now() - tf;
 					if (r && r.ok && r.masks && r.masks.length) { found = { par: id, masks: Uint8Array.from(r.masks), g: nd.g + r.T, prefix: root.prefix }; stats.finishOk++; }
 				}
@@ -685,7 +689,7 @@ function createBackward(L, opts = {}) {
 		sim.restore(snap0);
 		let hit = 0;
 		let alive = !sim.is_dead;   // (a dead start plays its dead ticks first)
-		for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); if (sim.is_dead) { if (alive) break; continue; } alive = true; if (inTgt(sim)) { hit = t + 1; break; } }
+		for (let t = 0; t < masks.length; t++) { const px = sim.px, py = sim.py; E.applyMask(inp, masks[t]); sim.tick(inp); if (sim.is_dead) { if (alive) break; continue; } alive = true; if (inTgt(sim, px, py)) { hit = t + 1; break; } }
 		if (!hit) {
 			if (o.debugReplay) {
 				// the first move whose replay leaves the chain's own states

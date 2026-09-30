@@ -1,0 +1,220 @@
+'use strict';
+// src/plan/portfolio.js - THE PORTFOLIO CHAIN SOLVER (n5-s99-portfolio, 2026-09-30): ONE call per stretch (a real engine
+// state -> a target's tiles, the moves study's support target: the tile, its class letter, a teleport) that runs the four
+// chain solvers of the n5 chains lab in one budget and returns the first leg any of them finds (their UNION):
+//   'chain' msolve.chain (src/plan/msolve.js: A* over support states, solved legs as edges; RESUMABLE, o.resume),
+//   'corr'  the corridor (src/plan/lab/corridor.js: footholds, the event fan, the lazy widened fan; RESUMABLE),
+//   'prof'  the speed profile (src/plan/lab/profile.js: the bang-bang family's reachable sets; one piece),
+//   'bw'    the backward meet (src/plan/lab/backward.js: the macro closure's values, A* over exact states; one piece; its
+//           closed values are memoised by target and discrete state).
+// THE ALLOCATOR: the stretch's SHAPE from the start (the goal field's cost c0 in tiles, the estimated ticks KAPPA x c0, the
+// field tiles on the way, a teleport target) picks the arms' ORDER and SHARES (cheap first: the arms that fit the shape);
+// each arm's slice is its share of what is left (an arm that ends early, 'exhausted' / 'cut', gives its time to the next
+// ones); what is left after the last arm goes back to the resumable arms. ONE CONTINUOUS BUDGET: a later call for the same
+// stretch (o.resume, default: the start's state hash + the target) continues its SESSION: the resumable arms go on where
+// they stopped, a one-piece arm runs once a session, and only when the call can give it its whole share (no restarts).
+// Every answer is the arm's masks replayed here by the engine from the start (msolve's goal test): exact by construction.
+//
+//   const P = createPortfolio(L, {solver})           (solver: a msolve createSolver(L) to share)
+//   P.solve(start, target, o) -> {ok, masks, T, arm, why, ms, shape, arms: {arm: {ms, ok, T, why, runs}}, order, resumed}
+//     start: an EESnapshot of L (or an EESim); target: {tiles, cls ('any'), tele, via}
+//     o: {ms (5000), deadline, Tmax (3000), resume (a key; true / undefined: the automatic key; false: no session),
+//         arms ('chain,corr,prof,bw'), plan (an order and shares 'corr:0.3,prof:0.3,...' in place of the shape's),
+//         minProf (800 ms), minBw (1500 ms): a one-piece arm's least slice}
+//   P.shapeOf(start, target) -> {c0, est, field, ffrac, tele, dist}
+const E = require('../eesim.js');
+const T = require('./types.js');
+const RF = require('../reach.js');
+const MS = require('./msolve.js');
+
+const KAPPA = 16 / 6.776552880470027;
+const F_SOLID = 1, F_CLIMB = 32, F_LIQUID = 64, F_BOOST = 128;
+const DOTS = new Set([4, 414]);
+const ARROWS = new Set([1, 2, 3, 1518, 411, 412, 413, 1519]);
+// the corridor's executor config (n5-lab-corridor a149379: the event fan + plain stops + the x-direction store + the lazy widened fan)
+const CORR_OPTS = { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false };
+const RESUMABLE = { chain: true, corr: true, prof: false, bw: false };
+const SESS_KEEP = 8;
+const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
+
+function createPortfolio(L, opts = {}) {
+	const S = opts.solver || MS.createSolver(L, {});
+	const W = L.width, H = L.height, N = W * H;
+	const flags = L.flags;
+	const sim = new E.EESim(L);
+	sim.reset();
+	let CR = null, BW = null, PF = null;
+	const corridor = () => CR || (CR = require('./lab/corridor.js').createCorridor(L, { solver: S }));
+	const backward = () => BW || (BW = require('./lab/backward.js').createBackward(L, { solver: S }));
+	const profile = () => PF || (PF = require('./lab/profile.js'));
+	const fieldId = new Uint8Array(flags.length);
+	for (let id = 0; id < flags.length; id++) {
+		const f = flags[id] | 0;
+		fieldId[id] = (f & F_SOLID) === 0 && ((f & (F_LIQUID | F_CLIMB | F_BOOST)) || DOTS.has(id) || ARROWS.has(id)) ? 1 : 0;
+	}
+	const geoMemo = new Map();
+	const sessions = new Map();
+	const stats = { solves: 0, ok: 0, byArm: {} };
+
+	const snapOf = (start) => (start instanceof E.EESim ? start.snapshot() : start);
+	const tileAt = (s) => { const tx = Math.trunc(s.px + 8) >> 4, ty = Math.trunc(s.py + 8) >> 4; return tx < 0 || ty < 0 || tx >= W || ty >= H ? -1 : ty * W + tx; };
+
+	/** THE SHAPE of a stretch from its start: c0 the goal field's cost (tiles; -1 cut), est = KAPPA x c0 (ticks at the
+	 *  held run's top speed), ffrac the field tiles' share of the box around the start and the target (2 tiles out), field
+	 *  (the start or the target in a field, or ffrac >= 0.15), tele, dist (the Chebyshev tile distance) */
+	function shapeOf(start, target) {
+		const snap = snapOf(start);
+		sim.restore(snap);
+		const tiles = Array.from(target.tiles);
+		let c0 = -1;
+		try {
+			const Lc = T.levelNow(L, sim);
+			const key = T.fgHash(Lc.fg) + '|' + tiles.slice().sort((a, b) => a - b).join(',');
+			let f = geoMemo.get(key);
+			if (!f) { f = T.goalField(Lc, tiles, { deaths: false }); geoMemo.set(key, f); if (geoMemo.size > 16) geoMemo.delete(geoMemo.keys().next().value); }
+			c0 = RF.costAt(f, sim);
+		} catch (e) { c0 = -1; }
+		const t0 = tileAt(sim);
+		const sx = t0 % W, sy = (t0 / W) | 0;
+		let x0 = sx, x1 = sx, y0 = sy, y1 = sy, dist = 0;
+		for (const t of tiles) { const x = t % W, y = (t / W) | 0; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); dist = Math.max(dist, Math.abs(x - sx), Math.abs(y - sy)); }
+		x0 = Math.max(0, x0 - 2); x1 = Math.min(W - 1, x1 + 2); y0 = Math.max(0, y0 - 2); y1 = Math.min(H - 1, y1 + 2);
+		let nf = 0, nt = 0;
+		const fg = sim.tiles;
+		for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const id = fg[y * W + x]; if (id >= 0 && id < fieldId.length && (flags[id] & F_SOLID) === 0) { nt++; if (fieldId[id]) nf++; } }
+		const ffrac = nt ? nf / nt : 0;
+		const inField = (t) => t >= 0 && t < N && fg[t] >= 0 && fg[t] < fieldId.length && fieldId[fg[t]] === 1;
+		const tf = tiles.some(inField) || (target.cls && 'WCZB'.includes(target.cls));
+		const field = inField(t0) || !!tf || ffrac >= 0.15;
+		return { c0, est: c0 >= 0 ? Math.round(KAPPA * c0) : -1, field, ffrac: Math.round(100 * ffrac) / 100, tele: !!target.tele, dist };
+	}
+
+	/** THE PLAN: [[arm, share]] in order (cheap first, the arms that fit the shape) */
+	function planOf(shape, arms) {
+		const has = (a) => arms.includes(a) && !(a === 'prof' && shape.tele);
+		let plan;
+		const est = shape.est;
+		if (shape.field) plan = est >= 0 && est <= 100 ? [['chain', 0.08], ['prof', 0.35], ['corr', 0.27], ['bw', 0.3]] : [['prof', 0.35], ['corr', 0.3], ['bw', 0.35]];
+		else if (est >= 0 && est <= 100) plan = [['chain', 0.1], ['corr', 0.3], ['prof', 0.3], ['bw', 0.3]];
+		else if (est >= 0 && est <= 250) plan = [['corr', 0.3], ['prof', 0.35], ['bw', 0.35]];
+		else plan = [['corr', 0.25], ['bw', 0.45], ['prof', 0.3]];
+		return plan.filter(([a]) => has(a));
+	}
+	function parsePlan(s) { return String(s).split(',').filter(Boolean).map((x) => { const [a, f] = x.split(':'); return [a, +f || 0.25]; }); }
+
+	/** one arm's slice: {ok, masks (replayed, cut at the goal), T, why, ms, done (a one-piece arm ran / an arm closed)} */
+	function runArm(arm, snap, target, ms, deadline, o, sess) {
+		const t0 = Date.now();
+		const r = { ok: false, masks: null, T: 0, why: '', ms: 0, done: false };
+		const Tmax = o.Tmax || 3000;
+		let res = null;
+		try {
+			if (arm === 'chain') {
+				res = S.chain(snap, target, { ms, resume: sess ? sess.key + '|chain' : undefined });
+				if (!res.ok && res.closed) r.done = true;
+			} else if (arm === 'corr') {
+				res = corridor().solve(snap, target, Object.assign({}, CORR_OPTS, o.corrOpts || {}, { ms, deadline, Tmax, first: true, resume: sess ? sess.key + '|corr' : undefined }));
+				if (!res.ok && (res.why === 'exhausted' || res.why === 'cut')) r.done = true;
+			} else if (arm === 'prof') {
+				const gtest = S.goal(target);
+				const goal = { tiles: Int32Array.from(target.tiles), cls: target.cls || 'any', fieldTiles: null, allowDeath: false, test: (s) => gtest(s, s.px, s.py) };
+				res = profile().profileLeg(L, [{ snap, tick: 0 }], goal, { ms, deadline, depth: Tmax });
+				if (res && res.ok) res.T = res.tick;
+				r.done = true;
+			} else if (arm === 'bw') {
+				res = backward().solve(snap, target, { ms });
+				r.done = true;
+			} else throw new Error('arm ' + arm);
+		} catch (e) { res = { ok: false, why: 'error: ' + (e && e.message || e) }; }
+		r.ms = Date.now() - t0;
+		r.why = res ? res.why || '' : '';
+		if (res && res.ok && res.masks && res.masks.length) {
+			const hit = S.replay(snap, Uint8Array.from(res.masks), target);
+			if (hit > 0) { r.ok = true; r.masks = Uint8Array.from(res.masks).subarray(0, hit); r.T = hit; }
+			else r.why = 'the replay missed';
+		}
+		return r;
+	}
+
+	function solve(start, target, o = {}) {
+		const t0 = Date.now();
+		stats.solves++;
+		const B = o.ms || 5000;
+		const deadline = o.deadline ? Math.min(o.deadline, t0 + B) : t0 + B;
+		const snap = snapOf(start);
+		const arms = String(o.arms || ENV('EEAT_PORT_ARMS', 'chain,corr,prof,bw')).split(',');
+		const shape = shapeOf(snap, target);
+		// the session (one continuous budget per stretch)
+		let sess = null;
+		if (o.resume !== false) {
+			let key = typeof o.resume === 'string' ? o.resume : null;
+			if (!key) {
+				sim.restore(snap);
+				let th = 0x811c9dc5;
+				for (const t of target.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
+				key = `${sim.stateHash()}|${target.cls || 'any'}|${target.tele ? 1 : 0}|${th >>> 0}|${o.Tmax || 3000}`;
+			}
+			sess = sessions.get(key);
+			if (sess) { sessions.delete(key); sessions.set(key, sess); }
+			else { sess = { key, spent: {}, done: {}, total: 0, calls: 0 }; sessions.set(key, sess); while (sessions.size > SESS_KEEP) sessions.delete(sessions.keys().next().value); }
+			sess.calls++;
+		}
+		const resumed = !!(sess && sess.calls > 1);
+		const plan = o.plan ? parsePlan(o.plan).filter(([a]) => arms.includes(a)) : planOf(shape, arms);
+		const out = { ok: false, masks: null, T: 0, arm: null, why: '', ms: 0, shape, arms: {}, order: plan.map(([a]) => a), resumed };
+		const note = (arm, r) => {
+			const a = out.arms[arm] || (out.arms[arm] = { ms: 0, ok: false, T: 0, why: '', runs: 0 });
+			a.ms += r.ms; a.runs++; a.why = r.why; if (r.ok) { a.ok = true; a.T = r.T; }
+			if (sess) { sess.spent[arm] = (sess.spent[arm] || 0) + r.ms; if (r.done) sess.done[arm] = true; }
+			const s = stats.byArm[arm] || (stats.byArm[arm] = { runs: 0, ok: 0, ms: 0 });
+			s.runs++; s.ms += r.ms; if (r.ok) s.ok++;
+		};
+		// the session's projected total: what it spent + this call's budget; an arm's target = its share of that
+		const spent0 = sess ? Object.values(sess.spent).reduce((x, y) => x + y, 0) : 0;
+		const total = spent0 + (deadline - t0);
+		// (a one-piece arm's least slice: its own minimum, at most a fifth of the session's budget)
+		const minOf = (a) => Math.min(a === 'prof' ? (o.minProf || 800) : a === 'bw' ? (o.minBw || 1500) : 30, 0.2 * total);
+		let shareLeft = plan.reduce((x, [, f]) => x + f, 0);
+		for (let i = 0; i < plan.length && !out.ok; i++) {
+			const [arm, f] = plan[i];
+			const left = deadline - Date.now();
+			if (left < 20) break;
+			if (sess && sess.done[arm]) { shareLeft -= f; continue; }
+			// the slice: its share of what is left (the earlier arms' unused time flows forward), less what it spent before
+			let slice = sess && resumed ? f * total - (sess.spent[arm] || 0) : left * f / Math.max(1e-9, shareLeft);
+			shareLeft -= f;
+			if (i === plan.length - 1) slice = left;
+			slice = Math.min(slice, left);
+			if (!RESUMABLE[arm] && slice < minOf(arm)) continue;      // (a one-piece arm runs only with its whole slice)
+			if (slice < 20) continue;
+			const r = runArm(arm, snap, target, Math.round(slice), Date.now() + slice, o, sess);
+			note(arm, r);
+			if (r.ok) { Object.assign(out, { ok: true, masks: r.masks, T: r.T, arm }); break; }
+		}
+		// what is left: back to the resumable arms of the plan (their searches go on)
+		for (let pass = 0; pass < 3 && !out.ok; pass++) {
+			const rs = plan.map(([a]) => a).filter((a) => RESUMABLE[a] && !(sess && sess.done[a]) && !(out.arms[a] && out.arms[a].done));
+			if (!rs.length) break;
+			let any = false;
+			for (let j = 0; j < rs.length && !out.ok; j++) {
+				const left = deadline - Date.now();
+				if (left < 30) break;
+				const slice = left / (rs.length - j);
+				const r = runArm(rs[j], snap, target, Math.round(slice), Date.now() + slice, o, sess);
+				note(rs[j], r);
+				any = true;
+				if (r.done && out.arms[rs[j]]) out.arms[rs[j]].done = true;
+				if (r.ok) Object.assign(out, { ok: true, masks: r.masks, T: r.T, arm: rs[j] });
+			}
+			if (!any) break;
+		}
+		out.ms = Date.now() - t0;
+		if (!out.ok) out.why = Object.entries(out.arms).map(([a, x]) => `${a}:${x.why || '-'}`).join(' ');
+		if (out.ok) { stats.ok++; if (sess) sessions.delete(sess.key); }
+		return out;
+	}
+
+	return { solve, shapeOf, planOf, stats, solver: S };
+}
+
+module.exports = { createPortfolio, CORR_OPTS, KAPPA };
