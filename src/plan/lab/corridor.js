@@ -15,8 +15,11 @@
 //     plain nodes too (8, 20 ticks: mid-run and mid-air nodes the next fans turn from, so 2+-change moves compose) and
 //     the Pareto store by x direction (dom 'dir': a run-up away from the target is kept) open it: 3 / 24 legs at 30 s,
 //     progress (c0 - bestC) / c0 0.48 (the legs always: 1 / 17, 0.33).
-//   * THE MOVES STUDY'S 4-MOVE CHAINS (tools/lab/corridor_chain.js, 5 s each, paired with msolve.chain): see the LAB
-//     lines (74.8% vs 51.2% on the first 535; 240+ route ticks 40.5% vs 4.1%).
+//   * THE MOVES STUDY'S 4-MOVE CHAINS (tools/lab/corridor_chain.js: every 48th move of the known routes, the route's
+//     exact state -> the support 4 moves ahead, 5 s each, paired with msolve.chain): 1,123 chains, the default below
+//     75.1% vs msolve.chain 44.3% (route 60-120 ticks 87.4%, 120-240 64.6%, 240+ 49.5% vs 4.1%), found in 485 ms
+//     median, every answer replayed. THE 55 KNOWN-ROUTE LEGS the compile fails (tools/lab/corridor_krt.js, the route's
+//     own state at the previous trigger, 30 s): 26 / 55 vs msolve.chain 13 / 55 (the long ones 5 / 20 vs 0 / 20).
 // So the default in the executor (tier MC, EEAT_CORRIDOR=1) is the event fan + the plain stops + the x-direction store
 // (no landings fan: landMax 0, as good on the chains, found in 510 vs 730 ms median) and, where that store runs empty or
 // stalls, the lazy pass's WIDENED fan (o.lazyWide: more stops, a longer hold, the landings) on the most advanced nodes;
