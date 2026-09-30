@@ -349,6 +349,11 @@ function solveExact(L, starts, goal, o) {
 		if (r.status !== 'proof') return Object.assign(r, { lb, proven: false, runs });
 		lb = Math.max(lb, D + 1);
 		// (no state cut by the bound and the open layer ran empty before D: no deeper search finds more)
+		// (lane 5: the open layer ran empty before D with nothing cut by the bound: every state reachable from the starts was
+		// expanded and none arrived, so none arrives within the window at all: the bound is past it (top + 1). Before, lb stayed
+		// D + 1, and the compiler's proof stage read an exhausted start as 'the bound 27 of the 28 needed' (Switch Labyrinth's
+		// start +27 idle). EEAT_EXACT_EMPTY=0: as before)
+		if (r.stats.cut === 0 && r.stats.depth < D && D < top && process.env.EEAT_EXACT_EMPTY !== '0') return Object.assign(r, { lb: Math.max(lb, top + 1), proven: false, runs, exhausted: true });
 		if (D >= top || (r.stats.cut === 0 && r.stats.depth < D)) return Object.assign(r, { lb, proven: false, runs, exhausted: true });
 		if (Date.now() > (o.deadline || Infinity)) return Object.assign(r, { status: 'time', lb, proven: false, runs });
 		// (one tick of slack more multiplies the open states ~4-7x on open ground (the key leg of test/planexec.js: 12 k,
