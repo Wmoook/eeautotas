@@ -13,8 +13,10 @@
 //   warp     planner.js: the death warp (an edge planned as a death when the respawn is clearly nearer)
 //   exh      planner.js: exhausted -> death (an edge the exact search exhausted is offered as its death variant)
 //   chain    model.js + planner.js: forced chains (a boost lane of trigger tiles as one planner trigger)
+//   chaintricks  msolve.js chain(): its direct legs with the tricks above and the frame tier's fan-out (else the chain
+//            tier is the one before the tricks)
 // o.tricks (true / false / a list / a comma string) overrides the environment per call where a part takes options.
-const NAMES = ['airjump', 'frame', 'fentry', 'fseed', 'fpull', 'idle', 'warp', 'exh', 'chain'];
+const NAMES = ['airjump', 'frame', 'fentry', 'fseed', 'fpull', 'idle', 'warp', 'exh', 'chain', 'chaintricks'];
 const DEFAULT = '';
 
 function parseList(v) {

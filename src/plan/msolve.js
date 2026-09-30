@@ -2062,6 +2062,10 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 	 * coupledDirect}. Returns {ok, masks, T, closed, expanded, legs, nodes, cut, reach, ms}.
 	 */
 	function chain(start, target, o = {}) {
+		// THE TRICKS IN A CHAIN (EEAT_TRICKS chaintricks, opt-in): its direct legs with the tricks and the frame tier's fan-out
+		// from a node inside an arrow field; without it the chain is the one before the tricks (the routes' own moves: its
+		// legs with the tricks cost more of the chain's clock, 4 legs its chain found without them lost, 1 slower, 7 gained)
+		const chainTricks = tricksOf(o).has('chaintricks') ? o.tricks : false;
 		const t0 = Date.now(), budgetMs = o.ms || 2000, fan = o.fan === undefined ? 8 : o.fan, legT = o.legT || 80;
 		const snap0 = snapOf(start);
 		const tg = targetOf(target);
@@ -2164,7 +2168,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			if (gated) gatedN++;
 			if ((n.g > 0 || o.rootLeg !== false) && !gated) {
 				const tL = prof ? Date.now() : 0;
-				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || CHAIN_CT, fieldMs: o.fieldMs || CHAIN_FMS, deadline: t0 + budgetMs, tricks: o.tricks });
+				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || CHAIN_CT, fieldMs: o.fieldMs || CHAIN_FMS, deadline: t0 + budgetMs, tricks: chainTricks });
 				if (prof) { prof.leg = (prof.leg || 0) + Date.now() - tL; if (!plainNode) prof.legField = (prof.legField || 0) + Date.now() - tL; }
 				legs++;
 				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = spent0 + Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
@@ -2175,7 +2179,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			const tF = prof ? Date.now() : 0;
 			// (EEAT_TRICKS frame: a node inside one arrow field fans out by the frame tier's landings on the field's floors)
 			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs })
-				: tricksOf(o).has('frame') ? frameLandings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs, tricks: o.tricks }) : [];
+				: chainTricks !== false && tricksOf(o).has('frame') ? frameLandings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs, tricks: o.tricks }) : [];
 			const tE = prof ? Date.now() : 0;
 			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60), !ctx && CHAIN_TIMED.length > 0)) lands.push(e);
 			if (prof) { prof.land = (prof.land || 0) + tE - tF; prof.event = (prof.event || 0) + Date.now() - tE; }
