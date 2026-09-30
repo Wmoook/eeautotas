@@ -195,6 +195,7 @@ const ST_MIN_MS = 3000, ST_TRIES = 2;
 const ST_RELAY = process.env.EEAT_ST_RELAY !== '0', ST_CHAIN = process.env.EEAT_ST_CHAIN !== '0', ST_STALE_MS = 5000;
 // (EEAT_ST_N: the children a compile, each with a request of its own (default 1, at most 4))
 const ST_N = Math.max(1, Math.min(4, +process.env.EEAT_ST_N || 1));
+const ST_NICE = process.env.EEAT_ST_NICE !== undefined && process.env.EEAT_ST_NICE !== '' ? +process.env.EEAT_ST_NICE : 10;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -708,6 +709,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		let ch;
 		try { ch = cp.spawn(process.execPath, ['--max-old-space-size=3000', path.join(__dirname, 'lab', 'stretch_child.js'), String(opts.file)], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { say({ ev: 'warning', text: `the stretch solver: ${e.message}` }); return; }
 		slot.ch = ch; stStats.children++;
+		// (below the compile's own priority: on a busy machine the executor's workers keep their CPU, the child takes what is
+		// idle; EEAT_ST_NICE=0: the same priority)
+		if (ST_NICE > 0) { try { require('os').setPriority(ch.pid, Math.min(19, (require('os').getPriority(process.pid) | 0) + ST_NICE)); } catch (e) { /* not allowed */ } }
 		const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 		process.once('exit', onExit);
 		let buf = '';
