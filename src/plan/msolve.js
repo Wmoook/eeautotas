@@ -479,11 +479,12 @@ function createSolver(L, opts = {}) {
 		items.sort((a, b) => a.T - b.T || (a.m.kind === 'jump' ? a.m.j : 1e3 + a.m.off) - (b.m.kind === 'jump' ? b.m.j : 1e3 + b.m.off));
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
-		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null;
+		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
 		for (const it of items) {
 			if (!o.each && best && it.T > best.T) break;
 			if (budget.out) break;
 			if (o.each && solved.has(it.tile)) continue;
+			if (o.each && o.perTile) { const n = (tries.get(it.tile) || 0) + 1; tries.set(it.tile, n); if (n > o.perTile) continue; }
 			// the root cut: THEOREM M from the start
 			const r0 = holdRange(Hd, x0, vx0, it.T, K1.ALIGN_SLACK + 1e-6);
 			let any = false; for (const w of it.wins) if (r0[1] >= w[0] && r0[0] < w[1]) any = true;
@@ -810,7 +811,8 @@ function createSolver(L, opts = {}) {
 		const ylo = s.py - 80, yhi = s.py + ticks * 13.6;
 		const c0 = Math.max(0, Math.floor(xlo / 16)), c1 = Math.min(W - 1, Math.floor((xhi + 16) / 16));
 		const r0 = Math.max(0, Math.floor(ylo / 16)), r1 = Math.min(Hh - 2, Math.floor((yhi + 16) / 16));
-		const here = (Math.trunc(s.py + 8) >> 4) * W + (Math.trunc(s.px + 8) >> 4);
+		// the current tile is no successor of a standing ball (a walk in place); a launched one (a hop) lands on it
+		const here = s.on_ground && s.speed_y === 0 ? (Math.trunc(s.py + 8) >> 4) * W + (Math.trunc(s.px + 8) >> 4) : -1;
 		const tt = tg.tiles.map((t) => [t % W, (t / W) | 0]);
 		const out = [];
 		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
@@ -836,11 +838,19 @@ function createSolver(L, opts = {}) {
 		const ctx = plainStart(sim);
 		if (!ctx) return [];
 		const Tmax = o.Tmax || 60;
-		const tiles = supportsNear(sim, Tmax, ctx, { tiles: [] }, o.max || 400);
+		// the fan-out's tiles: the nearest to the target and the nearest to the ball (half each: the target's side and the way out)
+		const mx = o.max || 400;
+		let tiles = supportsNear(sim, Tmax, ctx, o.toward || { tiles: [] }, mx);
+		if (o.toward) {
+			const near = supportsNear(sim, Tmax, ctx, { tiles: [(Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4)] }, mx);
+			const set = new Set(tiles.slice(0, mx >> 1));
+			for (const t of near) { if (set.size >= mx) break; set.add(t); }
+			tiles = Array.from(set);
+		}
 		if (!tiles.length) return [];
 		const tg = targetOf({ tiles, cls: 'G' });
 		const stats = { items: 0, cands: 0, verifies: 0, ticks: 0 };
-		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000 }, stats);
+		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000, perTile: o.perTile || 0 }, stats);
 		const out = r.each || [];
 		for (const e of out) {
 			const hm = Uint8Array.from(e.masks); hm[hm.length - 1] |= 1;
@@ -896,13 +906,13 @@ function createSolver(L, opts = {}) {
 			if (lim <= 0) continue;
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
-			const r = leg(n.snap, target, { Tmax: lim, K: o.K, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
+			const r = leg(n.snap, target, { Tmax: lim, K: o.K, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
 			legs++;
 			if (r.ok && (!best || n.g + r.T < best.T)) best = { T: n.g + r.T, masks: cat(n.masks, r.masks) };
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
 			if (!ctx || fan <= 0) continue;
-			const lands = landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax });
+			const lands = landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 80, toward: tg, nodes: o.fanNodes || 60000, perTile: o.perTile || 0 });
 			legs += lands.length;
 			for (const rr of lands) {
 				if (Date.now() - t0 >= budgetMs) break;
