@@ -209,13 +209,16 @@ const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.
 // arrival: the goal's first entry at its edge with the speed the cheapest leg left). budget.next (the plan's next
 // waypoint) ranks the goal states by the arrival's tick + the NEXT leg's cost from it: the move solver's direct leg to the
 // next waypoint (NEXT_TRY arrivals, NEXT_MS each, where it solves), else the endgame's sound bound; the best one is kept
-// FIRST (one arrival more than k at most), and the math tier's own leg asks for NEXT_ALTS end states within NEXT_SLACK
-// ticks. Ordering only: every arrival is still a verified first entry of this waypoint. EEAT_NEXT=0: off (as before).
-const NEXT_ON = () => process.env.EEAT_NEXT !== '0';
-const NEXT_FIRST = process.env.EEAT_NEXT_FIRST !== '0';   // (0: the next-best arrival kept among the picked, not first)
+// among the picked (EEAT_NEXT_FIRST=1: FIRST; one arrival more than k at most), and the math tier's own leg asks for NEXT_ALTS end states within NEXT_SLACK
+// ticks. Ordering only: every arrival is still a verified first entry of this waypoint. OPT-IN (EEAT_NEXT=1; off = as
+// before): on the chain harness (docs/ee_math.md 7.9) the rule with 12 alts in 6 ticks lost legs (1,125 vs 1,158 / 1,163 of
+// 3,763), with the math tier's own 6 in 3 (the defaults here) a tie (1,162; kept among the picked, EEAT_NEXT_FIRST=0 the
+// default: EEAT_NEXT_FIRST=1 puts it first, 987 vs 986 on 37 routes).
+const NEXT_ON = () => process.env.EEAT_NEXT === '1';   // OPT-IN (7.9: a tie on the chain harness)
+const NEXT_FIRST = process.env.EEAT_NEXT_FIRST === '1';   // (1: the next-best arrival first; else among the picked)
 const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.EEAT_NEXT_TRY : 6, NEXT_MS = +process.env.EEAT_NEXT_MS > 0 ? +process.env.EEAT_NEXT_MS : 25;
-const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 12;
-const NEXT_SLACK = +process.env.EEAT_NEXT_SLACK >= 0 && process.env.EEAT_NEXT_SLACK !== undefined ? +process.env.EEAT_NEXT_SLACK : 6;
+const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 6;
+const NEXT_SLACK = +process.env.EEAT_NEXT_SLACK >= 0 && process.env.EEAT_NEXT_SLACK !== undefined ? +process.env.EEAT_NEXT_SLACK : 3;
 const PATTERNS_MAX = 400;
 /** a leg's inputs as runs: 'mask x count' joined by spaces (the pattern's code) */
 function runsOf(tail) {
