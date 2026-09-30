@@ -169,15 +169,15 @@ function truth() {
 		const ev = S.routeEvents(L, tr.masks);
 		// the route's relevant order as trigger ids (the event tile's trigger of that feature, or next to it)
 		const order = [], ticks = [];
-		for (const x of S.orderOf(ev.events)) {
-			if (!m.featSet.has(x.feat) || (x.feat.startsWith('key') && x.value === 0)) continue;
+		for (const x of S.orderOf(ev.events, { all: true })) {
+			if (!(m.featSet.has(x.feat) || (x.feat === 'cp' && m.cpTracked)) || (x.feat.startsWith('key') && x.value === 0) || x.feat === 'deaths') continue;
 			let id = -1;
 			const x0 = x.tile % W, y0 = (x.tile / W) | 0;
 			for (let r = 0; r <= 1 && id < 0; r++) for (let dy = -r; dy <= r && id < 0; dy++) for (let dx = -r; dx <= r && id < 0; dx++) {
 				const nx = x0 + dx, ny = y0 + dy;
 				if (nx < 0 || ny < 0 || nx >= W || ny >= L.height) continue;
 				const k = m.trigOf[ny * W + nx];
-				if (k >= 0 && m.triggers[k].relevant && (m.triggers[k].feat === x.feat || m.triggers[k].feat.endsWith(':*') || (m.triggers[k].kind === 'reset' && x.feat === 'prot'))) id = k;
+				if (k >= 0 && m.triggers[k].relevant && (m.triggers[k].feat === x.feat || (m.triggers[k].feat || '').endsWith(':*') || (m.triggers[k].kind === 'reset' && x.feat === 'prot'))) id = k;
 			}
 			if (id >= 0) { order.push(id); ticks.push(x.tick); }
 		}

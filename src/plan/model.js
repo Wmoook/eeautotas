@@ -185,6 +185,18 @@ function compileModel(L, o = {}) {
 		if (A.cls[i] === 1) killers++;
 	}
 	const canDie = (killers > 0 || timed) && respawn.length > 0;
+	// the checkpoints in the state where a death can move the ball: the respawn is the checkpoint touched last, else a
+	// spawn (the death shortcut then goes only there: a checkpoint not touched yet is no respawn)
+	const cpTrigs = triggers.filter((X) => X.kind === 'cp');
+	const cpTracked = canDie && cpTrigs.length > 0 && cpTrigs.length <= 255;
+	if (cpTracked) for (const X of cpTrigs) X.relevant = true;
+	const spawnTiles = [];
+	{
+		const sx = L.spawnsX || [], sy = L.spawnsY || [];
+		for (let k = 0; k < sx.length; k++) if (sx[k] >= 0 && sy[k] >= 0 && sx[k] < W && sy[k] < H && A.cls[sy[k] * W + sx[k]] !== 0) spawnTiles.push(sy[k] * W + sx[k]);
+		if (!spawnTiles.length) for (let i = 0; i < N; i++) if (fg[i] === SPAWN) spawnTiles.push(i);
+		if (!spawnTiles.length && W > 1 && H > 1) spawnTiles.push(W + 1);
+	}
 	// the tiles the ball can die in (a killer, the tiles next to one: a half block's current tile redirect; anywhere with a
 	// timed killer): the death shortcut's sources
 	const dieTile = new Uint8Array(N);
@@ -217,16 +229,16 @@ function compileModel(L, o = {}) {
 	}
 	// ---------------------------------------------------------------- states
 	const featIsCount = (f) => f === 'coins' || f === 'bcoins' || f === 'deaths';
-	function mkState(vals, taken, btaken) {
+	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');
-		const key = dkey + (taken ? '|' + hashBytes(taken) : '') + (btaken ? '|' + hashBytes(btaken) : '');
+		const key = dkey + (taken ? '|' + hashBytes(taken) : '') + (btaken ? '|' + hashBytes(btaken) : '') + (canDie ? '|c' + cp : '');
 		let gain = 0;
 		for (let n = 0; n < feats.length; n++) if (vals[n] !== init[feats[n]]) gain++;
 		if (taken) for (let k = 0; k < taken.length; k++) gain += taken[k];
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
 		const fv = {};
 		feats.forEach((f, n) => { fv[f] = vals[n]; });
-		return { key, dkey, feats: fv, vals, taken, btaken, gain };
+		return { key, dkey, feats: fv, vals, taken, btaken, gain, cp };
 	}
 	function stateOf(sim) {
 		const vals = feats.map((f) => {
@@ -237,7 +249,8 @@ function compileModel(L, o = {}) {
 		let taken = null, btaken = null;
 		if (coinTiles.length) { taken = new Uint8Array(coinTiles.length); coinTiles.forEach((t, k) => { taken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }); }
 		if (bcoinTiles.length) { btaken = new Uint8Array(bcoinTiles.length); bcoinTiles.forEach((t, k) => { btaken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }); }
-		return mkState(vals, taken, btaken);
+		const cp = canDie && sim.checkpoint.x >= 0 ? trigOf[sim.checkpoint.y * W + sim.checkpoint.x] : -1;
+		return mkState(vals, taken, btaken, cp);
 	}
 	const init = {};
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
@@ -248,7 +261,8 @@ function compileModel(L, o = {}) {
 	 * expect: the waypoint's Expect (the feature and its value right after the first effect of the touch; coins: +1).
 	 */
 	function touch(S, X) {
-		if (!X.relevant || X.kind === 'trophy' || X.kind === 'cp' || X.kind === 'fx') return { S2: S, changed: false, expect: null };
+		if (X.kind === 'cp') return cpTracked && S.cp !== X.id ? { S2: mkState(S.vals, S.taken, S.btaken, X.id), changed: true, expect: null } : { S2: S, changed: false, expect: null };
+		if (!X.relevant || X.kind === 'trophy' || X.kind === 'fx') return { S2: S, changed: false, expect: null };
 		const vals = S.vals.slice();
 		let taken = S.taken, btaken = S.btaken, expect = null;
 		const setF = (f, v) => { const n = fIdx.get(f); if (n === undefined) return; vals[n] = v; };
@@ -282,7 +296,7 @@ function compileModel(L, o = {}) {
 			default: break;
 		}
 		if (!expect) return { S2: S, changed: false, expect: null };
-		return { S2: mkState(vals, taken, btaken), changed: true, expect };
+		return { S2: mkState(vals, taken, btaken, S.cp), changed: true, expect };
 	}
 	/** the untaken tiles of a coin trigger in S (all tiles for another kind) */
 	function liveTiles(S, X) {
@@ -309,10 +323,16 @@ function compileModel(L, o = {}) {
 		}
 		return testGate(k, A.gatePol[i], A.gateParam[i], v);
 	}
+	/** the est walk's learned walls (the planner's CEGAR: tiles past which a failed step's closest approach did not get;
+	 *  est only: the lb and the proofs never read them) */
+	let estWalls = null, estWallVer = 0;
+	function setEstWalls(mask) { estWalls = mask; estWallVer++; }
 	/** the key of the gate pattern under S (the memo key of the geometry) */
 	function doorKey(S, mode, base) {
-		if (mode !== 'lb' || (!hasCoinGate.coins && !hasCoinGate.bcoins)) return mode === 'lb' ? 'e:' + S.dkey : 'e:' + S.dkey;
-		// (lb: the coin counts' gate part is the base's: the model count opens doors only)
+		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.dkey;
+		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.dkey;
+		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins) return 'e:' + S.dkey;
+		// (lb: killers passable; the coin gates' part is the base's: the model count opens doors only)
 		return 'l:' + S.dkey + '|' + (base ? `${base.coins},${base.bcoins}` : '');
 	}
 	/** a Uint8Array(N) passable mask under S */
@@ -322,10 +342,14 @@ function compileModel(L, o = {}) {
 		const had = passMemo.get(key);
 		if (had) { passMemo.delete(key); passMemo.set(key, had); return had; }
 		const m = new Uint8Array(N);
+		// (est: a killer is a wall unless the ball is protected; lb: passable, the relaxation)
+		const kill = mode === 'lb' || mode === 'walk' || (S.feats && S.feats.prot === 1) ? 1 : 0;
+		const gm = mode === 'walk' ? 'est' : mode;
 		for (let i = 0; i < N; i++) {
 			const c = A.cls[i];
-			m[i] = c === 0 ? 0 : c === 3 ? (gateOpen(i, S, mode, base) ? 1 : 0) : 1;
+			m[i] = c === 0 ? 0 : c === 3 ? (gateOpen(i, S, gm, base) ? 1 : 0) : c === 1 ? kill : 1;
 		}
+		if (mode === 'est' && estWalls) for (let i = 0; i < N; i++) if (estWalls[i]) m[i] = 0;
 		passMemo.set(key, m);
 		if (passMemo.size > 64) passMemo.delete(passMemo.keys().next().value);
 		return m;
@@ -415,6 +439,17 @@ function compileModel(L, o = {}) {
 		return d;
 	}
 	const respawnPos = { id: 'respawn', tiles: respawn, extra: DEAD_TICKS };
+	const spawnPos = { id: 'spawns', tiles: spawnTiles, extra: DEAD_TICKS };
+	const cpPos = new Map();
+	/** the respawn position under S (the checkpoint touched last, else the spawns; lb without tracked checkpoints: every
+	 *  respawn tile, since a real route may have touched any) */
+	function respawnOf(S, mode) {
+		if (!cpTracked && mode === 'lb') return respawnPos;
+		if (S.cp === undefined || S.cp < 0) return spawnPos;
+		let p = cpPos.get(S.cp);
+		if (!p) { p = { id: 'cp' + S.cp, tiles: triggers[S.cp].tiles, extra: DEAD_TICKS }; cpPos.set(S.cp, p); }
+		return p;
+	}
 	/** min over tiles of a dist field */
 	const minOver = (d, tiles) => { let b = INF; for (const t of tiles) if (d[t] < b) b = d[t]; return b; };
 	/** the death shortcut from pos under S: {dieSteps, fromRespawn(dist)} or null */
@@ -431,7 +466,7 @@ function compileModel(L, o = {}) {
 			if (deathMemo.size > 4096) deathMemo.delete(deathMemo.keys().next().value);
 		}
 		if (dk >= INF) return null;
-		return { dk, dr: dist(S, respawnPos, mode, base) };
+		return { dk, dr: dist(S, respawnOf(S, mode), mode, base) };
 	}
 	/** pairSteps(S, pos, tiles) -> the walk steps (INF: none; the death shortcut not counted) */
 	function pairSteps(S, pos, tiles, mode = 'est', base = null) { return minOver(dist(S, pos, mode, base), tiles); }
@@ -470,7 +505,7 @@ function compileModel(L, o = {}) {
 		const key = S.dkey;
 		const had = regionMemo.get(key);
 		if (had) return had;
-		const m = passMask(S, 'est', null);
+		const m = passMask(S, 'walk', null);
 		const par = new Int32Array(N);
 		for (let i = 0; i < N; i++) par[i] = i;
 		const find = (a) => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
@@ -493,16 +528,19 @@ function compileModel(L, o = {}) {
 	for (let i = 0; i < N && !hasCp; i++) if (fg[i] === CHECKPOINT) hasCp = true;
 	const deathsField = canDie && (respawn.length > 1 || hasCp);
 	/** reachable(S, fromTile | sim | tiles[], tiles) -> {cost (tiles, -1: a proof), proof} */
-	function reachable(S, from, tiles) {
+	function reachable(S, from, tiles, ro = {}) {
 		const f = T.goalField(levelOf(S), tiles, { deaths: deathsField });
 		let cost;
 		if (from && typeof from === 'object' && !Array.isArray(from) && from.px !== undefined) cost = RF.costAt(f, from);
 		else {
 			const list = Array.isArray(from) ? from : [from];
 			cost = -1;
+			// (at rest; ro.rising: rising at the most too, the most any state in the tile reaches upward)
 			for (const t of list) {
-				const c = RF.costAt(f, (t % W) * 16, ((t / W) | 0) * 16, 0);
-				if (c >= 0 && (cost < 0 || c < cost)) cost = c;
+				for (const vy of ro.rising ? [0, -16] : [0]) {
+					const c = RF.costAt(f, (t % W) * 16, ((t / W) | 0) * 16, vy);
+					if (c >= 0 && (cost < 0 || c < cost)) cost = c;
+				}
 			}
 		}
 		return { cost, proof: cost === -1 };
@@ -510,8 +548,8 @@ function compileModel(L, o = {}) {
 	const model = {
 		L, W, H, N, A, feats, init, triggers, gates, stateOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
-		file: o.file || null, S0, startTile, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, deathT, timed, coinTiles, bcoinTiles,
-		trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
+		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, deathT, timed, coinTiles, bcoinTiles,
+		setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,
 		mkState, INF, DEAD_TICKS,
 		stats: () => ({ ms: compileMs, distBuilds, distMs, triggers: triggers.length, relevant: triggers.filter((X) => X.relevant).length, gates: gates.length, feats: feats.length, coins: coinTiles.length, bcoins: bcoinTiles.length }),
 	};

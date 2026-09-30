@@ -204,7 +204,7 @@ function truth() {
 		const L = tr.L, W = L.width, H = L.height;
 		const m = M.compileModel(L, { file: e.levelFile });
 		const ev = S.routeEvents(L, tr.masks);
-		const relF = (f) => m.featSet.has(f);
+		const relF = (f) => m.featSet.has(f) || (f === 'cp' && m.canDie);
 		const rel = ev.events.filter((x) => relF(x.feat));
 		const byTick = new Map();
 		for (const x of rel) { if (!byTick.has(x.tick)) byTick.set(x.tick, []); byTick.get(x.tick).push(x); }
@@ -212,17 +212,20 @@ function truth() {
 		// replay: states per tick, snapshots at the relevant events and their ticks - 1
 		const want = new Set();
 		for (const x of rel) { want.add(x.tick - 1); want.add(x.tick); }
-		const states = new Map(), snaps = new Map(), dead = new Uint8Array(tr.masks.length + 2);
+		const states = new Map(), snaps = new Map(), dead = new Uint8Array(tr.masks.length + 2), tileAt = new Int32Array(tr.masks.length + 2);
 		let prevKey = null, aBad = 0;
 		const sim = play(L, tr.masks, (sm, t) => {
 			const St = m.stateOf(sm);
 			if (sm.is_dead) dead[t] = 1;
+			tileAt[t] = T.tileOf(sm, W, H);
 			if (want.has(t)) { states.set(t, St); snaps.set(t, { px: sm.px, py: sm.py, speed_y: sm.speed_y, _q0: sm._q0, _q1: sm._q1, _slippery: sm._slippery, tile: T.tileOf(sm, W, H) }); }
 			if (prevKey !== null) {
 				const changed = St.key !== prevKey;
 				const evs = byTick.get(t) || [];
 				// (a death past the model's cap and a key running out keep their event but a capped count need not change)
-				const need = evs.some((x) => !(x.feat === 'deaths' && x.from >= m.deathT));
+				// (a checkpoint of the same component as the one before: the same model state)
+				const cpId = (v) => (v < 0 ? -1 : m.trigOf[v]);
+				const need = evs.some((x) => !(x.feat === 'deaths' && x.from >= m.deathT) && !(x.feat === 'cp' && cpId(x.from) === cpId(x.to)));
 				if (changed !== need && aBad < 3) viol.push(`(a) ${e.name} tick ${t}: state ${changed ? 'changed' : 'same'}, events ${evs.map((x) => x.feat).join(',') || 'none'}`);
 				if (changed !== need) { aBad++; tot.a++; }
 			}
@@ -243,8 +246,13 @@ function truth() {
 			const matchT = (t) => { const id = m.trigOf[t]; if (id < 0) return null; const X = m.triggers[id]; if (X.feat === x.feat || (X.feat && X.feat.endsWith(':*') && x.feat.startsWith(X.feat.slice(0, 4))) || (X.kind === 'reset' && x.feat === 'prot')) return X; return null; };
 			let X = matchT(tt), near = false;
 			if (!X) {
-				const x0 = tt % W, y0 = (tt / W) | 0;
-				for (let dy = -1; dy <= 1 && !X; dy++) for (let dx = -1; dx <= 1 && !X; dx++) { const nx = x0 + dx, ny = y0 + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H) X = matchT(ny * W + nx); }
+				// (next to it, or where the ball was in the 8 ticks before: a press queued while the ball overlapped a
+				// door it closes, a team change retried, a key queued: the engine applies them a tick or more later)
+				for (let back = 0; back <= 8 && !X; back++) {
+					const tb = back === 0 ? tt : tileAt[Math.max(0, x.tick - back)];
+					const x0 = tb % W, y0 = (tb / W) | 0;
+					for (let dy = -1; dy <= 1 && !X; dy++) for (let dx = -1; dx <= 1 && !X; dx++) { const nx = x0 + dx, ny = y0 + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H) X = matchT(ny * W + nx); }
+				}
 				near = !!X;
 			}
 			if (X && !near) tot.bCov++; else if (X) tot.bNear++; else { tot.bMiss++; if (tot.bMiss <= 20) viol.push(`(b) ${e.name} tick ${x.tick}: ${x.feat} ${x.from}->${x.to} at (${tt % W},${(tt / W) | 0}) is no trigger of it`); }
