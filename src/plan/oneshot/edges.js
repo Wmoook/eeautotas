@@ -60,7 +60,7 @@ const DOTS = new Set([4, 414]);
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const TELEPORT_PX = 20;
 const DEAD_MAX = 80;                      // the dead ticks played on to the respawn (the engine: 54)
-const DEF = { p1: 1, rounds: 1, landT: 60, landK: 1, landMax: 400, landNodes: 60000, reach: 0, reachMax: 200, reachK: 2, reachNodes: 400000, eventT: 60, oneT: 40, touchT: 90, touchNodes: 20000, settle: 2, arriveMax: 4, maxNew: 20000 };
+const DEF = { p1: 1, rounds: 1, landT: 60, landK: 1, landMax: 400, landNodes: 60000, land2Max: 24, land2Nodes: 60000, reach: 0, reachMax: 200, reachK: 2, reachNodes: 400000, eventT: 60, oneT: 40, touchT: 90, touchNodes: 20000, settle: 2, arriveMax: 4, maxNew: 20000 };
 const VERSION = 1;
 
 // ------------------------------------------------------------------ small helpers
@@ -346,6 +346,16 @@ function landFamily(ctx, snap, out) {
 	let r = [];
 	try { r = ctx.S.landings(snap, { Tmax: o.landT, K: o.landK, max: o.landMax, nodes: o.landNodes, overhang: true }); } catch (e) { r = []; }
 	for (const e of r) out.push({ k: 'land', masks: e.masks, T: e.masks.length, hop: e.hop ? 1 : 0 });
+	// the precise near landings: two x changes (run, brake, stop: a landing window a few px wide, a spike staircase's
+	// overhangs) to the land2Max standable tiles nearest the ball, a budget of their own
+	if (o.land2Max > 0) {
+		const sim = ctx.S.sim;
+		sim.restore(snap);
+		const here = (Math.trunc(sim.py + 8) >> 4) * ctx.W + (Math.trunc(sim.px + 8) >> 4);
+		let r2 = [];
+		try { r2 = ctx.S.landings(snap, { Tmax: o.landT, K: 2, max: o.land2Max, nodes: o.land2Nodes, overhang: true, toward: { tiles: [here] } }); } catch (e) { r2 = []; }
+		for (const e of r2) out.push({ k: 'land2', masks: e.masks, T: e.masks.length, hop: e.hop ? 1 : 0 });
+	}
 }
 /**
  * 'reach': the directed plain legs to the G support tiles no family edge of this support landed on (msolve's fan-out
