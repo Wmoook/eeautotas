@@ -166,6 +166,19 @@ function units() {
 		const d = m.pairSteps(m.S0, { id: 's', tiles: [at(2, 2)] }, [at(21, 2)]);
 		check('P-UNIT portal: the walk steps take the hop (shorter than no way)', d < M.INF && d < 20, `${d} steps`);
 	}
+	// ---- the est walk's diagonal between two killers (model moveOK): spike B (10,2) and spike C (9,3) around the corner
+	// the trophy's way passes; the engine's route crosses it ((9,2) -> (10,3) in one tick, 64 ticks to the trophy by a
+	// 1-px BFS); with a wall for C the box's sub-steps collide: shut. OPT-IN (EEAT_KILL_SQUEEZE=1): off, both shut
+	{
+		const on = process.env.EEAT_KILL_SQUEEZE === '1';
+		const rows = (c) => ['##############', '#S...........#', '#.........x###', `#########${c}.###`, '##########.###', '##########T###', '##############'];
+		for (const [c, open] of [['x', on], ['#', false]]) {
+			const L = level(rows(c), { x: [361, 1] }), W = L.width, at = (x, y) => y * W + x;
+			const m = M.compileModel(L);
+			const d = m.pairSteps(m.S0, { id: 's', tiles: [at(1, 1)] }, [at(10, 5)], 'est');
+			check(`P-UNIT killer squeeze (C ${c === 'x' ? 'a spike' : 'a wall'}): the est walk ${open ? 'reaches' : 'does not reach'} the trophy`, open ? d < M.INF : d >= M.INF, `${d >= M.INF ? 'INF' : d} steps`);
+		}
+	}
 	// ---- facts
 	{
 		const f = F.createFacts();

@@ -37,6 +37,11 @@ const DEAD_TICKS = 54;          // the dead ticks before the respawn (a death co
 const V_TICK = 16.25;           // px an axis a tick, the centre's most (endgame.js D_TICK)
 const INF = 0x3fffffff;
 const DX8 = [-1, 0, 1, -1, 1, -1, 0, 1], DY8 = [-1, -1, -1, 0, 0, 1, 1, 1];
+// (the est walk's diagonal between two killers: moveOK; OPT-IN EEAT_KILL_SQUEEZE=1: the penalty first plans of OCTOS
+// ROLLERCOASTER / TTL Spike Edition / Desolate Helix go (est 1,006,600 -> 2,324, 1,017,292 -> 17,172, 1,003,068 ->
+// 2,494), but no compile gain at 60 s and I Wanna be the Guy 11 / 1 / 1 / 11 triggers -> 1 in 6 of 6 runs (its spike
+// checkerboards: chains of squeezes the est walk passes and a ball does not), OCTO'S FUN CASTLE 2 -> 0 in 2 of 2)
+const KILL_SQUEEZE = process.env.EEAT_KILL_SQUEEZE === '1';
 const KEY_BITS = new Map([[23, 0], [24, 1], [25, 2], [26, 0], [27, 1], [28, 2], [1005, 3], [1006, 4], [1007, 5], [1008, 3], [1009, 4], [1010, 5]]);
 const DEATH_DOORS = new Set([1011, 1012]);
 const KIND_OF = { key: 'key', psw: 'psw', pswR: 'pswR', osw: 'osw', oswR: 'oswR', team: 'team', prot: 'prot', reset: 'reset', fx: 'fx', coins: 'coin', bcoins: 'bcoin', crown: 'crown' };
@@ -501,7 +506,13 @@ function compileModel(L, o = {}) {
 			if (q === 2 && !ST.qMoveOK(A, t, d, (i) => !m[i], (i) => m[i] === 1)) return -1;
 		}
 		if (DX8[d] !== 0 && DY8[d] !== 0) {
-			if (!m[y * W + nx] && !m[ny * W + x]) return -1;
+			// (KILL_SQUEEZE: a diagonal between two KILLERS is open: a killer is no solid, the 16 x 16 box passes it and
+			// only the centre's cell at a tick's start kills (eesim tick: current = the centre cell), so a centre that crosses
+			// the corner within one tick never reads either killer (test/planmodel.js: an engine route does it): OCTOS
+			// ROLLERCOASTER's way out of its start region, spikes (46,25) and (45,26), where the est walk read a wall and every
+			// plan carried the 1e6 penalty. A solid on one side stays shut: the box's sub-steps collide with it)
+			const a = y * W + nx, b = ny * W + x;
+			if (!m[a] && !m[b] && !(KILL_SQUEEZE && A.cls[a] === 1 && A.cls[b] === 1 && !(estWalls && (estWalls[a] || estWalls[b])))) return -1;
 		}
 		return j;
 	}
