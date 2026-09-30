@@ -438,7 +438,7 @@ function makeCore(L, co) {
 	/** the goal field if this thread built it already (types.js memo), else null: no build */
 	function fieldNowCached(goal, allowDeath) {
 		const Lc = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
-		return T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath, cachedOnly: true });
+		return T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath, plainFx: T.plainOf(sim), cachedOnly: true });
 	}
 	/** the move solver of this thread (n4-math msolve.js), made on first use */
 	let msol = null;
