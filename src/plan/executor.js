@@ -174,6 +174,12 @@ const PORTAL_IDS = new Set([242, 381, 374]);
 // skeleton's sub-legs (a sub-level set of the waypoint's field: the search tiers), on death steps or allowDeath legs.
 // (lane 2's opt-in move-solver tier, EEAT_MSOLVE=1, takes its place: one math tier at a time)
 const MATH_ON = () => process.env.EEAT_MATH !== '0' && process.env.EEAT_MSOLVE !== '1';
+// NO RESTART PER RUNG (n5 lane 2): tier M2's chain search is RESUMED by a later call from the same start state to the same
+// target tiles and horizon (msolve.js chain o.resume: its open list, seen states and best chain kept per worker, the newest
+// 6): a stuck waypoint is retried from the same anchor's arrival at every rung and relay, and each 800-ms call re-expanded
+// the same first nodes (a compile chain is ~4-10 expansions); now the calls add up. Ordering / time only: every chain is
+// still the solver's replayed answer, checked here by the executor's goal test. EEAT_CHAIN_RESUME=0: a fresh search a call
+const CHAIN_RESUME = process.env.EEAT_CHAIN_RESUME !== '0';
 const MATH_DIRECT = +process.env.EEAT_MATH_DIRECT > 0 ? +process.env.EEAT_MATH_DIRECT : 0.15;   // the direct legs' share of the window
 const MATH_CHAIN_SHARE = process.env.EEAT_MATH_CHAIN !== undefined ? +process.env.EEAT_MATH_CHAIN : 0.2;   // the chains' share (0: no chain)
 const MATH_TMAX = +process.env.EEAT_MATH_TMAX > 0 ? +process.env.EEAT_MATH_TMAX : 120;   // a direct leg's horizon (the hold tables' 160 at most)
@@ -693,7 +699,17 @@ function makeCore(L, co) {
 				const Tmax = Math.min(MATH_CHAIN_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
 				const f = !walled ? fields.get(s.disc) || null : null;
 				if (Tmax >= 2) {
-					try { rc = mathSolver().chain(s.snap, mTarget, { ms: Math.max(10, cEnd - Date.now()), Tmax, field: f || null, rootLeg: false }); }
+					// (CHAIN_RESUME: the same start state, target and horizon continue this worker's chain search where the last
+					// call left it, instead of expanding the same first nodes again at every rung and relay)
+					let resume;
+					if (CHAIN_RESUME) {
+						const MSv = mathSolver();
+						MSv.sim.restore(s.snap);
+						let th = 0x811c9dc5;
+						for (const t of mTarget.tiles) { th ^= t; th = Math.imul(th, 0x01000193); }
+						resume = `${MSv.sim.stateHash()}|${Tmax}|${mTarget.cls}|${mTarget.tiles.length}|${th >>> 0}`;
+					}
+					try { rc = mathSolver().chain(s.snap, mTarget, { ms: Math.max(10, cEnd - Date.now()), Tmax, field: f || null, rootLeg: false, resume }); }
 					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
 					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:chain');
 				}
