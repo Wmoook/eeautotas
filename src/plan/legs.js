@@ -434,7 +434,9 @@ function legBest(L, starts, goal, o) {
 			if (stop !== null && now - lastPoll >= 20) { lastPoll = now; if (stop()) { why = 'stopped'; break; } }
 			if (now > finAt && found < 0 && near.length && finR === null) {
 				const fst = near.map((e) => ({ snap: e.snap, tick: t0 + gg[e.node] }));
-				finR = X.solveExact(L, fst, goal, { sim, deadline, stop, allowDeath, beforeTick, collect: 64 });
+				let gMin = Infinity;
+				for (const e of near) if (gg[e.node] < gMin) gMin = gg[e.node];
+				finR = X.solveExact(L, fst, goal, { sim, deadline, stop, allowDeath, beforeTick, collect: 64, maxDepthCap: Math.max(1, depthMax - gMin) });
 				for (const r of finR.runs || []) sims += r.ticks;
 				if (finR.status === 'found') { why = 'found'; break; }
 				if (finR.status === 'stopped') { why = 'stopped'; break; }
