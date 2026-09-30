@@ -826,10 +826,11 @@ function createSolver(L, opts = {}) {
 			const r = solveCoupled(snap, sim, tg, goal, oo, stats);
 			if (r.ok) res = r; else if (!ctx) res.why = 'not plain; ' + r.why;
 		}
-		if (!res.ok && oo.chain !== false && ctx && !target.tele && oo.Tmax >= (oo.chainMin || 40)) {
+		if (!res.ok && oo.chain !== false && (ctx || oo.chainAny !== false) && !target.tele && oo.Tmax >= (oo.chainMin || 40)) {
 			// THE CHAIN TIER: a long leg as a chain of shorter ones through supports (A* over support states, 4.6),
-			// within this leg's horizon and a small clock
-			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax), reach: oo.chainReach === true });
+			// within this leg's horizon and a small clock; from a non-plain start too (its successors by the event fan-out:
+			// a leg across fields = the pieces between its field events); the root's direct leg is this failed one
+			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax), reach: oo.chainReach === true, rootLeg: false });
 			stats.chain = r;
 			if (r.ok) res = { ok: true, tool: 'chain', T: r.T, masks: r.masks, member: `chain ${r.expanded}` };
 		}
@@ -1011,9 +1012,11 @@ function createSolver(L, opts = {}) {
 			if (lim <= 0) continue;
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
-			const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
-			legs++;
-			if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
+			if (n.g > 0 || o.rootLeg !== false) {
+				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
+				legs++;
+				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
+			}
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
 			if (fan <= 0) continue;
