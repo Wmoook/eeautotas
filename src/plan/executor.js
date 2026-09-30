@@ -205,6 +205,20 @@ const MATH_UB_MS = +process.env.EEAT_MATH_UB_MS > 0 ? +process.env.EEAT_MATH_UB_
 // only where the endgame's sound bound puts the goal this near (ticks), at most MATH_COUPLED_TICKS simulated ticks
 const MATH_COUPLED_NEAR = +process.env.EEAT_MATH_COUPLED_NEAR > 0 ? +process.env.EEAT_MATH_COUPLED_NEAR : 40;
 const MATH_COUPLED_TICKS = +process.env.EEAT_MATH_COUPLED_TICKS > 0 ? +process.env.EEAT_MATH_COUPLED_TICKS : 150000;
+// THE RUN-UP HORIZON (n5 lane 1): a leg whose only way first runs AWAY from the goal to build speed (a coin behind an
+// opposing side-arrow band, a gap wider than a standing jump) is longer than MATH_TMAX and its one-change coupled member
+// costs more than MATH_COUPLED_TICKS: Snow Jumping's coin (2,30) behind 4 right arrows from a standstill on its floor 5-11
+// tiles out: hold left never gets there (stops 2-5 tiles short), the solver's coupled member "right 64-85 ticks, then left"
+// is 156-192 ticks and 0.47-1.0 M simulated ticks (msolve.leg, Tmax 200 / 400); at Tmax 120 or 150 k ticks: 'budget'. So
+// from rung MATH_RUNUP_RUNG on (the waypoint failed its short windows) the direct legs get the horizon MATH_RUNUP_TMAX,
+// the coupled piece MATH_RUNUP_TICKS, the tier MATH_RUNUP_MS (x2 from the next rung) and at least MATH_RUNUP_SHARE of the
+// window whatever the yield. EEAT_MATH_RUNUP=0: off, the tier as before byte for byte.
+const MATH_RUNUP = process.env.EEAT_MATH_RUNUP !== '0';
+const MATH_RUNUP_RUNG = +process.env.EEAT_MATH_RUNUP_RUNG > 0 ? +process.env.EEAT_MATH_RUNUP_RUNG : 2;
+const MATH_RUNUP_TMAX = +process.env.EEAT_MATH_RUNUP_TMAX > 0 ? +process.env.EEAT_MATH_RUNUP_TMAX : 240;
+const MATH_RUNUP_TICKS = +process.env.EEAT_MATH_RUNUP_TICKS > 0 ? +process.env.EEAT_MATH_RUNUP_TICKS : 1500000;
+const MATH_RUNUP_MS = +process.env.EEAT_MATH_RUNUP_MS > 0 ? +process.env.EEAT_MATH_RUNUP_MS : 2500;
+const MATH_RUNUP_SHARE = +process.env.EEAT_MATH_RUNUP_SHARE > 0 ? +process.env.EEAT_MATH_RUNUP_SHARE : 0.25;
 const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound on the search tiers' legs
 // THE ARRIVALS a math leg leaves (iterate lane 'chains'): the direct leg's cheapest T is ONE end state (mostly full speed or
 // launched), where the search tiers leave up to k diverse ones (T.pickDiverse over every goal state at the least depth);
@@ -435,7 +449,9 @@ function makeCore(L, co) {
 		const mTarget = mathOn ? { tiles: Array.from(goal.tiles), cls: 'any' } : null;
 		const mathLbE = new Map();   // start index -> the math's lower bound on its leg (the executor's ticks)
 		if (mathOn && Date.now() < wEnd - 20) {
-			const tM = Date.now(), mEnd = tM + Math.min(MATH_DIRECT_MS, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8) * (wEnd - tM));
+			const rUp = MATH_RUNUP && rung >= MATH_RUNUP_RUNG;
+			const tM = Date.now(), mEnd = tM + (rUp ? Math.min(MATH_RUNUP_MS * (rung > MATH_RUNUP_RUNG ? 2 : 1), Math.max(MATH_RUNUP_SHARE, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8)) * (wEnd - tM))
+				: Math.min(MATH_DIRECT_MS, mathShare(MATH_DIRECT, mY.dTry, mY.dOk, 8) * (wEnd - tM)));
 			const cands = [];
 			let tries = 0, why = '', best = null, far = 0;
 			const MS = mathSolver();
@@ -451,7 +467,7 @@ function makeCore(L, co) {
 				const nLeft = mStarts.length - mi, dlS = Date.now() + (nLeft > 1 ? Math.min(left, 1.5 * left / nLeft) : left);
 				if (left < 5) { why = why || 'time'; break; }
 				const si = starts.indexOf(s);
-				const Tmax = Math.min(MATH_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
+				const Tmax = Math.min(rUp ? MATH_RUNUP_TMAX : MATH_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
 				if (!(Tmax >= 1)) continue;
 				// (a start the endgame's sound bound puts past the horizon: no direct leg exists there)
 				let hb = 0;
@@ -460,7 +476,7 @@ function makeCore(L, co) {
 				let r;
 				try {
 					r = MS.leg(s.snap, mTarget, { Tmax, chain: false, prove: true, proveMs: Math.max(2, Math.min(50, left / 4)), fieldMs: Math.max(5, Math.min(120, left / 2)),
-						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000,
+						coupled: near, coupledTicks: Math.max(5000, Math.min(rUp ? MATH_RUNUP_TICKS : MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000,
 						alts: nextGoal ? Math.max(MATH_ALTS, NEXT_ALTS) : MATH_ALTS > 0 ? MATH_ALTS : 0, altSlack: nextGoal ? Math.max(MATH_ALT_SLACK, NEXT_SLACK) : MATH_ALT_SLACK, deadline: dlS });
 				} catch (e) { why = `error: ${e && e.message || e}`; continue; }
 				tries++;
