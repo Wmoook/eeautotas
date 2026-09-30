@@ -71,6 +71,7 @@ const PROVE_ROUNDS = 12;
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
 const FALLBACK_MAX = 6;
+const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by another trigger: an anchor of its own, addArrival)
 // the arrivals' own bounds for the branch and bound (the planner's lowerBound from one arrival: a short search); the start's
 // bound gets LB_MS; a lowerBound call that took LB_SLOW_MS or more is not made again that compile (a synchronous part that
 // overruns its budget cannot be cut: Moving Ice Puzzle's took 90 s with 1.5 s asked)
@@ -370,13 +371,27 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (S && S.triggers && (Array.isArray(S.triggers) || S.triggers instanceof Set)) return Array.isArray(S.triggers) ? S.triggers.length : S.triggers.size;
 		return parent ? parent.gain + 1 : 0;
 	};
-	/** a verified arrival a (its model state S): a new anchor, or one more diverse arrival of a known one -> {anchor, isNew, changed} */
-	const addArrival = (a, S, parent, why) => {
-		const key = String(S.key);
+	/** a verified arrival a (its model state S): a new anchor, or one more diverse arrival of a known one -> {anchor, isNew, changed}.
+	 *  RE-ENTRY BY ANOTHER TRIGGER (EEAT_ANCHOR_QUAL=0: off): an arrival whose state class is known already but that came
+	 *  by touching ANOTHER trigger than the one that made that class's anchor (a switch toggled back from another switch
+	 *  tile, the same switch id at another place) is an anchor of its own, keyed by the class and that edge: the planner
+	 *  plans from an anchor's first arrival (its tile), so such an arrival, merged into the old anchor, was never planned
+	 *  from, and a plan through it ("purple switch 0 (197,15) -> purple switch 0 (239,15) -> trophy") came back to its
+	 *  first step from the old anchor's place forever: Fish Gods' 25 steps toggled psw 0 between two anchors, then 'end
+	 *  exhausted' with 5 s of its 60 left. The facts' node class carries the edge too (planner anchorOf `qual`) */
+	const addArrival = (a, S, parent, why, step) => {
+		let key = String(S.key);
 		let A = anchors.get(key);
+		let qual = null;
+		if (A && ANCHOR_QUAL && step && !step.synthetic && /^trig:/.test(String(step.edge)) && A.edgeVia !== step.edge) {
+			qual = String(step.edge);
+			key = `${key}@${qual}`;
+			A = anchors.get(key);
+		}
 		if (!A) {
 			A = { id: ++anchorSeq, key, S, arrivals: [a], firstTick: a.tick, picks: 0, fails: 0, exhausted: false, why: '', gain: gainOf(S, parent), parent: parent ? parent.key : null,
-				depth: parent ? parent.depth + 1 : 0, costEst: parent && Number.isFinite(parent.nextCost) ? parent.nextCost : Infinity, costVer: -1, plans: null, via: why };
+				depth: parent ? parent.depth + 1 : 0, costEst: parent && Number.isFinite(parent.nextCost) ? parent.nextCost : Infinity, costVer: -1, plans: null, via: why,
+				edgeVia: step && !step.synthetic ? String(step.edge) : null, qual };
 			anchors.set(key, A);
 			lastProgress = Date.now();
 			return { anchor: A, isNew: true };
@@ -508,7 +523,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
 	let cur = null;   // the last plan (the page's line)
 	const bug = (what, o) => { bugs++; say(Object.assign({ ev: 'bug', what }, o || {})); };
-	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A) });
+	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A), qual: A.qual || null });
 	/** an anchor that cannot lead to a route that beats the bounds: every arrival's run ticks already at the B&B bound, or
 	 *  its ticks at the depth bound (proofs: a route through it is at least that long) */
 	const uselessA = (A) => {
@@ -723,7 +738,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				let S2;
 				try { S2 = model.stateOf(sim); } catch (e) { bug('stateOf', { error: e.message }); continue; }
 				A.nextCost = Number.isFinite(+plan.cost) && Number.isFinite(+step.estTicks) ? Math.max(0, plan.cost - step.estTicks) : undefined;
-				const { anchor: B, isNew, changed } = addArrival(a, S2, A, labelOf(step));
+				const { anchor: B, isNew, changed } = addArrival(a, S2, A, labelOf(step), step);
 				if (isNew) {
 					news++;
 					const d = distOf(sim);

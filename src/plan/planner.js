@@ -372,7 +372,8 @@ function createPlanner(model, facts, o = {}) {
 			pos = { id: pos.id + 'p' + Sp.dkey.length + ':' + (rec && rec.lbTiles ? rec.lbTiles.length : 0), tiles: pos.tiles, extra: 0, grace: rec ? rec.grace : null, lbTiles: rec ? rec.lbTiles : null };
 			S = Sp;
 		}
-		const cls = arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1';
+		// (an anchor the strategy keeps apart by the trigger edge it was re-entered by (strategy addArrival): its facts too)
+		const cls = (arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1') + (anchor.qual ? `@${anchor.qual}` : '');
 		// (the lb's base: the counts the coin / blue coin / death GATES read: the engine's _show_* copies, which lag the
 		// live counts by >= 1 tick and freeze while the ball overlaps a gate; the least of the copy and the count)
 		const live = (k) => (S.feats[k] !== undefined ? S.feats[k] : 0);
