@@ -103,7 +103,16 @@ const COARSE_CELL = [0.5, 0.25, 2, 1];
 // does not follow the goal field, so a leg whose way first goes away from the goal, a run-up or a detour the relaxation
 // crosses, is not ranked behind the false near's whole region); a leg it finds goes on to the tightening (legBest bounded
 // by it) like any finder's; off = the executor byte for byte as before
-const COVER_ON = () => process.env.EEAT_COVER === '1';
+const COVER_ON = () => process.env.EEAT_COVER === '1' || process.env.EEAT_COVER === '2';
+// COVER V2 (EEAT_COVER=2, doctor 7 after the box-6 A/B): the coverage finder is the FALLBACK, only BEFORE the compile's first
+// route (budget.fast): the field-following finders first (the core's best-first search with 1 - COVER_SHARE of its window,
+// then the cover with the rest if it found nothing; the skeleton wrapper's direct leg, then the cover slot on the whole leg
+// with COVER_SLOT of what is left, then the skeleton). V1 (EEAT_COVER=1) ran the cover FIRST on every call from rung 1 on:
+// its legs (random rollouts, 1.0-2.3x the route's own before the tightening) took the legs the best-first search finds
+// whole, and the controls' routes came 8-20% slower (box 6, 60 s: Ruins 1,614 vs 1,339, Desolate Caverns 1,923 vs 1,638,
+// Bygone Tutorial 2,397 vs 1,990; the first routes 2,851 vs 1,819 on Desolate Caverns); after the first route the calls look
+// for shorter legs, which random rollouts do not give
+const COVER_V2 = () => process.env.EEAT_COVER === '2';
 const COVER_SHARE = process.env.EEAT_COVER_SHARE !== undefined ? Math.max(0.05, Math.min(0.95, +process.env.EEAT_COVER_SHARE || 0.4)) : 0.4;
 const COVER_RUNG = process.env.EEAT_COVER_RUNG !== undefined ? +process.env.EEAT_COVER_RUNG : 1;
 // (the skeleton wrapper's cover slot: that share of a far waypoint's budget, the coverage finder alone on the whole leg)
@@ -923,7 +932,10 @@ function makeCore(L, co) {
 			// (in the cover slot (coverOnly) the whole window and nothing after it; else not on a skeleton sub-leg (a sub-level
 			// set: the field-following finders' job) nor on a call whose wrapper gave the cover its slot (budget.cover 2))
 			let rV = null, rVf = null;
-			if (COVER_ON() && (coverOnly || (rung >= COVER_RUNG && !goal.fieldTiles && budget.cover !== 2)) && Date.now() < bEnd - 50) {
+			// (V2: not first; the fallback below, before the compile's first route only)
+			const coverV2 = COVER_V2() && !coverOnly && rung >= COVER_RUNG && !goal.fieldTiles && budget.cover !== 2 && !!budget.fast;
+			const bEndB = coverV2 ? t3 + (1 - COVER_SHARE) * (bEnd - t3) : bEnd;
+			if (COVER_ON() && (coverOnly || (!COVER_V2() && rung >= COVER_RUNG && !goal.fieldTiles && budget.cover !== 2)) && Date.now() < bEnd - 50) {
 				const tv = Date.now();
 				rV = LG.legCover(L, snaps, goal, { sim, deadline: tv + (coverOnly ? 0.97 : COVER_SHARE) * (bEnd - tv), stop: stopFn, allowDeath, beforeTick, field: field0, region: COVER_M > 0 ? regionOf(field0, starts, goal, COVER_M) : null, depthMax, seed: (t0 * 2654435761 + rung * 97 + goal.tiles.length) >>> 0 });
 				sims += rV.sims;
@@ -944,7 +956,7 @@ function makeCore(L, co) {
 				if (rC.status !== 'found' && rC.closest && rC.closest.tail) noteClosest(rC.closest.dist, rC.closest.start, rC.closest.tail);
 			}
 			const t3b = Date.now();
-			let r = rV !== null ? rV : rC !== null && rC.status === 'found' ? rC : mode === 'beam' ? runBeam(bEnd, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEnd) : t3 + 0.7 * (wEnd - t3));
+			let r = rV !== null ? rV : rC !== null && rC.status === 'found' ? rC : mode === 'beam' ? runBeam(bEndB, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEndB) : t3 + 0.7 * (wEnd - t3));
 			// (the default grain closed every way without a death (the ladder's finer grains may still run out of time): the
 			// death leg's trigger, reachWp; an order, no claim)
 			if (mode === 'best' && r.status === 'exhausted' && r !== rV) closedAll = true;
@@ -959,7 +971,7 @@ function makeCore(L, co) {
 					if (!(r.status === 'exhausted' || (port > 0 && r.status === 'time')) || Date.now() >= wEnd - 20) break;
 					if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
 					const t7 = Date.now();
-					r = runBest(bEnd, cell);
+					r = runBest(bEndB, cell);
 					sims += r.sims;
 					tiers.push({ tier: 'best', ms: Date.now() - t7, status: r.status, passes: r.passes, cell });
 				}
@@ -973,6 +985,16 @@ function makeCore(L, co) {
 				const plateau = r.status === 'time' && cp >= 0 && pops >= WALL_POPS && cp < (1 - WALL_PLATEAU) * pops && (NEAR_WALLS || r.closest.dist > WALL_NEAR);
 				bestExhausted = mode === 'best' && r !== rV && (r.status === 'exhausted' || plateau);
 				if (mode === 'best' && r !== rV && r.status === 'exhausted') closedAll = true;
+			}
+			// (COVER V2: the coverage finder with the rest of the window when the field-following finders found nothing)
+			if (coverV2 && r.status !== 'found' && r.status !== 'stopped' && Date.now() < bEnd - 50) {
+				const tv = Date.now();
+				const rv2 = LG.legCover(L, snaps, goal, { sim, deadline: bEnd, stop: stopFn, allowDeath, beforeTick, field: field0, region: COVER_M > 0 ? regionOf(field0, starts, goal, COVER_M) : null, depthMax, seed: (t0 * 2654435761 + rung * 97 + goal.tiles.length) >>> 0 });
+				sims += rv2.sims;
+				tiers.push({ tier: 'cover', ms: Date.now() - tv, status: rv2.status, passes: rv2.passes });
+				if (rv2.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
+				if (rv2.status === 'found') { if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail); r = rv2; rV = rv2; }
+				else if (rv2.closest && rv2.closest.tail) noteClosest(rv2.closest.dist, rv2.closest.start, rv2.closest.tail);
 			}
 			if (mode === 'mix' && r !== rV && r.status !== 'stopped' && Date.now() < wEnd - 5) {
 				const ub = r.status === 'found' ? Math.min(...r.goals.map((c) => c.depth)) : depthMax + 1;
@@ -1995,7 +2017,8 @@ async function createExecutor(L, opts) {
 		// that cannot go on (K Underground's checkpoint (64,84) from the known route's own state: the skeleton's sub-legs from
 		// the arrow field's edge, 10-52 cells each; the coverage finder alone on the whole leg found it in 0.5-1.3 s))
 		let coverSlot = false;
-		if (COVER_ON() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0) {
+		const slotV2 = COVER_V2() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0 && !!budget.fast;
+		if (COVER_ON() && !COVER_V2() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0) {
 			const vMs = COVER_SLOT * (deadline - Date.now());
 			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
 			coverSlot = true;
@@ -2007,11 +2030,18 @@ async function createExecutor(L, opts) {
 		if (SKEL_DIRECT > 0 && (!skelMemo.has(sk0) || redirect)) {
 			const dMs = dMs0;
 			if (SKEL_REDIRECT) { skelDirectMs.set(sk0, Math.max(skelDirectMs.get(sk0) || 0, dMs)); if (redirect) S.redirects = (S.redirects || 0) + 1; }
-			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null, cover: coverSlot ? 2 : 0 });
+			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null, cover: coverSlot || slotV2 ? 2 : 0 });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
 			if (rD) return rD;
 			if (wRefresh()) { measure(); if (!f0 || !Number.isFinite(c0)) return r0; }
+		}
+		// (COVER V2: the cover slot after the direct leg found nothing, before the skeleton)
+		if (slotV2 && Date.now() < deadline - 200) {
+			const vMs = COVER_SLOT * (deadline - Date.now());
+			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
+			coverSlot = true;
+			if (rv.ok || (rv.fail && (rv.fail.why === 'proof' || rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) return rv;
 		}
 		// (the goal basin, OPT-IN: BASIN_SHARE of what is left, before the skeleton; its basin grows call after call)
 		if (basinOn) {
