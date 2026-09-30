@@ -46,6 +46,16 @@ const T = require('./types.js');
 const E = require('../eesim.js');
 
 const RUNG_MS = [1500, 5000, 15000, 45000];
+// THE ONE SHOT (n5-oneshot part 3, OPT-IN EEAT_ONESHOT=1; off = the loop below byte for byte): the MOVES stage's first
+// tier: src/plan/oneshot/solve.js, ONE A* over (the move graph x the trigger state) from the level start with the
+// planner's plans and the bounds as its heuristic, for OS_SHARE of the time left before the loop; then in the loop's
+// idle moments OS_SLICE ms at a time while it has open nodes. Its route (the trophy) is a route like any other
+// (C.evaluate'd, routeOf); every abstract state it reaches first is an anchor (the executor plans from it); every new
+// anchor of the executor's legs goes INTO its graph (inject: the exact fallback's edges). With EEAT_OS_GRAPH=1 and
+// src/plan/oneshot/edges.js present, part 2's whole-level graph (buildGraph) adds its edges.
+const OS_ON = process.env.EEAT_ONESHOT === '1';
+const OS_SHARE = process.env.EEAT_OS_SHARE !== undefined ? +process.env.EEAT_OS_SHARE : 0.3;
+const OS_SLICE = process.env.EEAT_OS_SLICE !== undefined ? +process.env.EEAT_OS_SLICE : 100;
 const REPLAN_FIRST = process.env.EEAT_REPLAN_FIRST === '1';
 const PROGRESS_MS = 2000, WATCH_MS = 2000, SAVE_MS = 60000;
 // the watchdog's window: STALL_F of the budget, at least STALL_MIN_S, at most STALL_S
@@ -868,6 +878,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const { anchor: B, isNew, changed } = addArrival(a, S2, A, labelOf(step), step);
 				if (isNew) {
 					news++;
+					// (the one shot: the exact fallback's leg into its graph)
+					if (os) { try { if (os.inject(a.masks, 'exec')) osInjected++; } catch (e) { /* the one shot's own */ } }
 					const d = distOf(sim);
 					say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: B.key, gain: 1, tick: a.tick, ...(d !== undefined ? { dist: Math.round(d * 10) / 10 } : {}), inputs: T.strOf(a.masks), anchor: B.id, label: labelOf(step) });
 					if (steer) say({ ev: 'closest', dist: Math.round(distOf(sim) * 10) / 10, tick: a.tick, inputs: T.strOf(a.masks), anchor: B.id });
@@ -1080,6 +1092,32 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (pl) say({ ev: 'plan', anchor: A.id, steps: pl.steps.map(labelOf), cost: pl.cost, lb: pl.lb, partial: !!pl.partial, why: pl.why || '', rung: pl.steps[0].rung, first: true });
 	}
 
+	// ---- the one shot's harvest (OS_ON): its route, and the first node of every abstract state it reached as an anchor
+	let os = null, osDone = false, osBestT = Infinity, osAnchors = 0, osInjected = 0;
+	const osSeen = new Set();
+	const osHarvest = () => {
+		if (!os) return;
+		const b = os.best();
+		if (b && b.masks && b.ticks < osBestT) {
+			osBestT = b.ticks;
+			const lid = addLeg({ label: 'the one shot', fromTick: 0, ticks: b.masks.length, lb: null, proven: false, tool: 'oneshot', prev: null });
+			routeOf(b.masks, 'the one shot', lid);
+		}
+		const A0 = anchors.get(String(S0.key));
+		for (const x of os.arrivals()) {
+			if (osSeen.has(x.key)) continue;
+			osSeen.add(x.key);
+			if (!x.masks.length) continue;
+			const r = replay(x.masks, null, false);
+			if (r.dead >= 0 || r.finished >= 0) continue;
+			const a = Object.assign(T.arrivalOf(L, r.sim, x.masks, RM), { run: r.run, leg: addLeg({ label: 'the one shot', fromTick: 0, ticks: x.masks.length, lb: null, proven: false, tool: 'oneshot', prev: null }) });
+			let S2;
+			try { S2 = model.stateOf(r.sim); } catch (e) { continue; }
+			const res = addArrival(a, S2, A0, 'the one shot');
+			if (res.isNew) { osAnchors++; say({ ev: 'source', kind: 'room', room: a.room, desc: a.desc, key: res.anchor.key, gain: 1, tick: a.tick, inputs: T.strOf(a.masks), anchor: res.anchor.id, label: 'the one shot' }); }
+		}
+	};
+
 	// ---- MOVES: the parts that move (the primitives, the executor), then the loop
 	const tMoves = Date.now();
 	try {
@@ -1093,6 +1131,28 @@ async function compile(L, opts = {}, emit = () => {}) {
 		throw e;
 	}
 	say({ ev: 'start', triggers: nTrig, feats: nFeat, workers, inflight: P, prims: !!prims, bounds: !!bounds, lb: LB, seconds, partsMs: Date.now() - tMoves });
+	// ---- THE ONE SHOT (EEAT_ONESHOT=1): the moves' first tier (OS_ON above)
+	if (OS_ON) {
+		const tO = Date.now();
+		try {
+			const OSM = require('./oneshot/solve.js');
+			let graph = null;
+			if (process.env.EEAT_OS_GRAPH === '1') {
+				try {
+					const EG = require('./oneshot/edges.js');
+					const g = await EG.buildGraph(opts.file || L, { threads: Math.max(1, workers), cache: process.env.EEAT_OS_CACHE || null });
+					graph = OSM.graphOf(g, L);
+					say({ ev: 'oneshot', what: 'graph', ms: Date.now() - tO, ...(graph ? graph.stats() : {}) });
+				} catch (e) { say({ ev: 'warning', text: `the one shot's graph (src/plan/oneshot/edges.js): ${e.message}` }); }
+			}
+			os = OSM.createOneShot(L, { model, planner, bounds, graph, emit: say });
+			const r = os.run(Math.max(0, OS_SHARE * (left() - endReserve)), { stop: () => stopped });
+			osDone = r.done;
+			osHarvest();
+			const s = r.stats;
+			stage('oneshot', Date.now() - tO, `${best ? `route ${num(best.runTicks)} run ticks` : 'no route'}${r.closed ? ' (closed: optimal within the graph)' : ''}, ${num(s.expanded)} expanded, ${num(s.nodes)} nodes, ${s.states} states, ${osSeen.size} anchors given`);
+		} catch (e) { os = null; say({ ev: 'warning', text: `the one shot: ${e.message}` }); }
+	}
 	lastProgress = progressAt = Date.now();   // (the stall clocks from the loop's start)
 	progress();
 	try {
@@ -1127,6 +1187,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// "end exhausted" 1-5 s before the 60-s budget; every level is possible))
 				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = deepenings < maxDeepen ? 'time' : 'exhausted'; break; }
 				continue;
+			}
+			if (os && !osDone && !stopped && !(best && left() <= endReserve)) {
+				// (the one shot's slice while the workers run the steps in flight)
+				try { const r = os.run(Math.min(OS_SLICE, Math.max(0, left() - endReserve - 50)), { stop: () => stopped }); osDone = r.done; osHarvest(); } catch (e) { bug('oneshot', { error: e.message }); os = null; }
 			}
 			const tick = new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });
 			await Promise.race([...[...inflight.values()].map((f) => f.promise), tick]);
@@ -1360,7 +1424,8 @@ async function compile(L, opts = {}, emit = () => {}) {
 		bugs, deepenings, stalls, bnbPlans, bnbArrivals, layers: Math.max(0, ...[...anchors.values()].map((A) => A.firstTick)), ...(why ? { why } : {}) });
 	saveFiles();
 	return { ok: !!best, masks: best ? best.masks : null, route: best ? best.masks : null, runTicks: best ? best.runTicks : null, ticks: best ? best.ticks : null, deaths: best ? best.deaths : null, chance: best ? best.chance : null,
-		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats };
+		lb: LB, lbComplete, lbProof, gap: best ? gapOf(best.runTicks) : null, legs: best ? best.legs : [], stages, known, why, end, anchors: anchors.size, steps, okSteps, bugs, deepenings, stalls, bnbPlans, bnbArrivals, relayRuns, relaySet, relayDrop, exec: execStats,
+		...(OS_ON ? { oneshot: os ? Object.assign(os.stats(), { anchorsGiven: osAnchors, injected: osInjected, routeTicks: Number.isFinite(osBestT) ? osBestT : null, how: best ? best.how : null }) : null } : {}) };
 }
 
 /** run(L, opts, emit): the compile loop as a Find a route strategy (src/plan.js): 300 s by default, the source events'
