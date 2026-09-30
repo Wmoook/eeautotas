@@ -334,6 +334,39 @@ function polishRoute(L, masks0, o) {
 			}
 		}
 	}
+	// (a28) THE TROPHY TAILS (lane 5, TAS-perfect): the route's last W ticks (W = TAIL_WINS 200, 400, 800, 1600, ... up to
+	// the route) searched again from the route's state at F - W with the TROPHY as the goal (not the route's state region:
+	// that holds the route's door-reading state, keys and coins taken included, so a segment keeps every detour the route
+	// made for an optional trigger), best-first (legs.js legBest, the kinematic bound in its ranking), depth W - 1: any
+	// finish it finds is faster; judged. Tutorial 1's route takes 2 keys after its 3rd coin (key doors on the executor's
+	// way: 965 ticks to the trophy, the best known 790 without keys). OPT-IN (o.tails or EEAT_POLISH_TAILS=1; o.tailShare):
+	// NEGATIVE as measured (tools/cmp/polcurve.js, box 5, 60 s on the 300-s baseline's routes of 6 levels): one tail found
+	// (TPs The Horror -2), and the time it took from the segments lost Accident Prone's -88 (3,206 vs 3,118) and One Minute
+	// Descent's -18: best-first over 200-1,600 ticks in 1.5-30 s does not find the other ways.
+	if ((o.tails || process.env.EEAT_POLISH_TAILS === '1') && Date.now() < deadline) {
+		const LG = require('./legs.js');
+		const tEnd = Math.min(deadline, Date.now() + (o.tailShare > 0 ? o.tailShare : 0.2) * ms);
+		const TAIL_MS = 1500;
+		const tsim = new E.EESim(L);
+		let bt = null;
+		try { bt = X.boundFor(L, { kind: 'trophy', tiles: [] }); } catch (e) { bt = null; }
+		const cells = bt && bt.cells ? Int32Array.from(bt.cells) : null;
+		for (let W = 200; cells && cells.length && Date.now() < tEnd && !(stop && stop()); W *= 2) {
+			const cur = best.ms;
+			const F = cur.length;
+			const a = Math.max(0, F - W);
+			const R5 = traceRoute(L, cur);
+			const sA = stateAt(R5, cur, a);
+			if (sA.is_dead) { if (a === 0) break; continue; }
+			const snapA = sA.snapshot();
+			const goal = { kind: 'trophy', tiles: cells, mask: null, allowDeath: false, test: (x) => !!x.has_silver_crown };
+			const field = T.goalField(T.levelNow(L, sA), goal.tiles);
+			const share = Math.max(TAIL_MS, (tEnd - Date.now()) / 2);
+			const r = LG.legBest(L, [{ snap: snapA, tick: a }], goal, { sim: tsim, field, deadline: Math.min(tEnd, Date.now() + share), stop, depthMax: F - a - 1, kbOn: true, w: 3, noFinish: true });
+			if (r.status === 'found' && r.depth < F - a) accept(T.concat(cur.subarray(0, a), r.tail), `tail ${a}->${F} to the trophy in ${r.tail.length}`);
+			if (a === 0) break;
+		}
+	}
 	// (a3) the segments: from the route's state at a, best-first (legs.js legBest: the kinematic bound in its ranking,
 	// w 3) to the route's state region at b = a + SEG (the tile, the door-reading state) sooner, windows from the end back
 	// every SEG_STEP ticks, SEG_MS each at most; spliced with the route's inputs from b, else re-anchored at the nearest
