@@ -295,7 +295,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	let lbPlanner = 0, lbBounds = 0, lbComplete = false, lbInf = false;
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
-	let lbSlow = false;
+	let lbSlow = false, planSlowSaid = false;
 	try { const tq = Date.now(); const r = planner.lowerBound ? planner.lowerBound(startAnchorArg, { ms: LB_MS }) : null; lbPlanner = lbTicks(r); lbComplete = !!(r && r.complete); if (Date.now() - tq >= LB_SLOW_MS) { lbSlow = true; say({ ev: 'warning', text: `the planner's lowerBound took ${((Date.now() - tq) / 1000).toFixed(1)} s (asked ${LB_MS / 1000} s): not called again this compile` }); } } catch (e) { say({ ev: 'bug', what: 'lowerBound', error: e.message }); }
 	if (lbPlanner === Infinity) { lbInf = true; lbPlanner = 0; say({ ev: 'warning', text: 'the planner\'s lower bound from the start is infinite: no way to the trophy in its relaxation (a proof there, if the model is sound); the moves try anyway' }); }
 	if (bounds && typeof bounds.leg === 'function') {
@@ -466,7 +466,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 		if (!A.arrivals.length) { const p0 = { plans: [], why: `bound: no arrival can beat ${num(rb)} run ticks` }; A.plans = p0; A.planVer = v; A.planEpoch = epoch; A.planBound = rb; A.costEst = Infinity; A.costVer = v; return p0; }
 		const runMin = runMinOf(A);
 		let r;
-		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
+		// (the plan's own budget: the planner's default (2 s first, 0.3 s after) within a quarter of the time left; a call that
+		// overran it by far is said once (a synchronous call cannot be cut here: the CLI's watchdog is the backstop))
+		const planMs = Math.max(100, Math.min(!A.plans && anchors.size <= 1 ? 2000 : 300, (left() - (best ? endReserve : 0)) / 4));
+		const tp = Date.now();
+		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch, ms: planMs }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
+		const tpMs = Date.now() - tp;
+		if (tpMs > 3 * planMs + 1000 && !planSlowSaid) { planSlowSaid = true; say({ ev: 'warning', text: `the planner's plan() took ${(tpMs / 1000).toFixed(1)} s (asked ${(planMs / 1000).toFixed(1)} s): a synchronous overrun the loop cannot cut` }); }
 		const p = plansOf(r);
 		// (branch and bound: a plan whose admissible lb from this anchor cannot beat the bound is not run: a proof. Only
 		// where every arrival's run timer runs (before the first input idle ticks are free) and every arrival is on the
