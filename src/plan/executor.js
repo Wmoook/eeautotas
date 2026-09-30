@@ -349,12 +349,14 @@ function makeCore(L, co) {
 		sim.restore(s.snap);
 		const Lc = T.levelNow(L, sim);
 		const tiles = T.fieldTilesOf(goal);
-		const pfx = T.plainOf(sim) && T.wildOf(Lc.fg);
-		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${pfx ? '|p' : ''}`;
+		// (types.js plainOf: true = the plain-ball field (EEAT_FX_FIELD); an object = the ball's effect state (EEAT_FX_STATE))
+		const pfx = T.wildOf(Lc.fg) ? T.plainOf(sim) : false;
+		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${T.fxSuffix(pfx)}`;
 		let f = ordMemo.get(key);
 		if (f) return f;
 		const oo = { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true };
-		if (pfx) oo.plainFx = true;
+		if (pfx && typeof pfx === 'object') oo.fxState = pfx;
+		else if (pfx) oo.plainFx = true;
 		f = RF.reachField(Lc, oo);
 		ordMemo.set(key, f);
 		if (ordMemo.size > 8) ordMemo.delete(ordMemo.keys().next().value);

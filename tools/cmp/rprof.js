@@ -45,7 +45,9 @@ const t0 = opt('from', null) !== null ? +opt('from', 0) : (prevEv ? prevEv.tick 
 sim.reset();
 for (let t = 0; t < t0; t++) { E.applyMask(inp, masks[t] & 31); sim.tick(inp); }
 const tb = Date.now();
-const f = T.goalField(T.levelNow(L, sim), tiles, {});
+// (--fx=1: the executor's field for the ball's own start state, types.js plainOf: EEAT_FX_FIELD's plain-ball field or
+// EEAT_FX_STATE's effect-state field; the default: the field without either)
+const f = T.goalField(T.levelNow(L, sim), tiles, opt('fx', '0') === '1' ? { plainFx: T.plainOf(sim) } : {});
 const fms = Date.now() - tb;
 const prof = [];
 let cmin = Infinity, rise = 0, riseAt = -1, riseFrom = -1, cminAt = t0;
