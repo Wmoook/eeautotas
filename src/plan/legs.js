@@ -82,6 +82,17 @@ function legBFS(L, starts, goal, o) {
 		return h > ft ? h : ft;
 	};
 	void dirs;
+	// (the lazy ranking: a state enters with its field time alone (a lower bound of scoreOf's max), the bound is evaluated
+	// only when the selection reaches it (from its snapshot))
+	const ftOf = (dist) => (dist >= 1e9 ? 1e9 : BF !== null ? bfTime(BF, o.bounds, sim) : dist * FT);
+	const kbOf = (x) => {
+		if (B === null || x.sc >= 1e9 || x.sc > hLim + 16) return x.sc;
+		sim.restore(x.sn);
+		if (sim.is_dead) return x.sc;
+		const h = EG.lowerBound(B, sim, hLim);
+		return h > x.sc ? h : x.sc;
+	};
+	const LAZY = process.env.EEAT_BEAM_LAZY !== '0';
 	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
 	const t0 = starts[order[0]].tick;
 	let depthMax = o.depthMax > 0 ? o.depthMax : 2000;
@@ -166,11 +177,11 @@ function legBFS(L, starts, goal, o) {
 					const v = Math.abs(sim.speed_x) + Math.abs(sim.speed_y);
 					const e = nx.get(key);
 					if (e !== undefined) {
-						if (v > e.v) { e.sn = sim.snapshot(e.sn); e.v = v; e.par = i; e.msk = m; e.dist = distOf(field, sim); e.sc = scoreOf(e.dist); }
+						if (v > e.v) { e.sn = sim.snapshot(e.sn); e.v = v; e.par = i; e.msk = m; e.dist = distOf(field, sim); e.sc = LAZY ? ftOf(e.dist) : scoreOf(e.dist); }
 						continue;
 					}
 					const dist = distOf(field, sim);
-					nx.set(key, { sn: sim.snapshot(), v, t, dist, sc: scoreOf(dist), par: i, msk: m, key });
+					nx.set(key, { sn: sim.snapshot(), v, t, dist, sc: LAZY ? ftOf(dist) : scoreOf(dist), par: i, msk: m, key });
 				}
 			}
 			// the next layer: 3/4 by the goal field's distance with at most `perTile` states a tile (flybeam.js's rule: a
@@ -184,10 +195,31 @@ function legBFS(L, starts, goal, o) {
 				const perTile = o.perTile > 0 ? o.perTile : 8;
 				const byDist = arr.slice().sort((a, b) => a.sc - b.sc || a.dist - b.dist || b.v - a.v);
 				const keep = new Set(), perT = new Map();
-				for (let k = 0; k < byDist.length && keep.size < nDist; k++) {
-					const x = byDist[k], c = perT.get(x.t) || 0;
-					if (c >= perTile) continue;
-					perT.set(x.t, c + 1); keep.add(x);
+				if (!LAZY) {
+					for (let k = 0; k < byDist.length && keep.size < nDist; k++) {
+						const x = byDist[k], c = perT.get(x.t) || 0;
+						if (c >= perTile) continue;
+						perT.set(x.t, c + 1); keep.add(x);
+					}
+				} else {
+					// (in field-time order; each state's full score evaluated as it comes; a state is taken once its score is at
+					// most the next unevaluated field time: the order by the full score, as the eager ranking's)
+					const hp = [];
+					const less = (a, b) => a.sc < b.sc || (a.sc === b.sc && (a.dist < b.dist || (a.dist === b.dist && a.v > b.v)));
+					const push = (x) => { let k = hp.length; hp.push(x); while (k > 0) { const p = (k - 1) >> 1; if (!less(x, hp[p])) break; hp[k] = hp[p]; k = p; } hp[k] = x; };
+					const pop = () => { const top = hp[0], x = hp.pop(); if (hp.length) { let k = 0; for (;;) { let c = 2 * k + 1; if (c >= hp.length) break; if (c + 1 < hp.length && less(hp[c + 1], hp[c])) c++; if (!less(hp[c], x)) break; hp[k] = hp[c]; k = c; } hp[k] = x; } return top; };
+					let idx = 0;
+					while (keep.size < nDist) {
+						if (hp.length && (idx >= byDist.length || hp[0].sc <= byDist[idx].sc)) {
+							const x = pop(), c = perT.get(x.t) || 0;
+							if (c >= perTile) continue;
+							perT.set(x.t, c + 1); keep.add(x);
+						} else if (idx < byDist.length) {
+							const y = byDist[idx++];
+							y.sc = kbOf(y);
+							push(y);
+						} else break;
+					}
 				}
 				const rest = arr.filter((x) => !keep.has(x));
 				rest.sort((a, b) => (tileSeen.get(a.t) || 0) - (tileSeen.get(b.t) || 0) || a.sc - b.sc || b.v - a.v);
