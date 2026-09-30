@@ -1030,6 +1030,239 @@ slack)`. A target: `{tiles: [tile index], cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A'
 `tools/math/msolve_chain.js` likewise (`--chain=4 --every=48 --ms=5000`; `--w`, `--w1`, `--phase1`, `--fanMax`,
 `--fanNodes`, `--events=0`, `--reach=0`, `--kappa`).
 
+## 5 Admissible leg bounds: the event graph
+
+(build / bounds.) Code: `src/math/lb.js` (the bound), `src/math/legsolve.js` (the free-air leg solver of its proofs),
+`tools/math/lbcheck.js` (every tick of every leg of the known routes), `test/admbounds_truth.js` (the `math` and `best`
+columns next to the n4 study's bounds). A lower bound on the ticks EVERY input sequence needs from an exact engine state
+to a target, built from the recurrences of sections 1-3 (the engine's own doubles; no rounded state, no slack constant
+on the free axes) and the level's tiles; section 4's THEOREM B is the plain regime's bound with a certificate, this one
+covers the whole level: the gravity axis' collisions as EVENTS, the fields as BOUNDED SPEED-UPS, portals and deaths as
+teleports.
+
+### 5.1 The question
+
+A state sigma (an `EESnapshot`: the exact position, speeds, jump count, effects, doors) and a TARGET: a set of centre
+tiles and a mode, `touch` (the centre in a target tile at a tick's end), `land` (grounded with the centre there; a ball
+already so counts: tick 0) or `landing` (a NEW landing there: the ball airborne at some tick before; the moves study's
+next support, a hop in place included). **LB(sigma, target) <= the least T of any input sequence** whose replay from
+sigma meets the target at tick T. The model's start must be PLAIN (`plainCtx`: gravity down, the current tile and both
+queued tiles plain air, no effect but the speed / jump / gravity multipliers, max_jumps 1, alive, no levitation, no god
+mode); else lb = null and the other bounds answer (section 4's, section 6's, the n4 study's).
+
+### 5.2 THEOREM X: the input axis' envelope (walls zero a speed, they never add one)
+
+Let `U_t = max(max_m step_m(U_(t-1)), 0)` from U_0 = vx0 (m over the inputs L, none, R: kin1d `axisStep`, and on a level
+with ice also the slippery rule), `Xmax_t = A+(fl(Xmax_(t-1) + U_t))` with `A+(X) = max(X, align(X))`, and the mirror
+L_t, Xmin_t. **THEOREM X.** For every input sequence, every level and every t: `L_t <= vx_t <= U_t` and
+`Xmin_t <= x_t <= Xmax_t`, in the engine's doubles. *Proof.* Induction. A tick's x speed is step_m(vx) or 0 (a wall
+zeroes it: kin.js `stepX`, section 1.5); step_m is non-decreasing in v (1.4) and the max over m of non-decreasing maps is
+non-decreasing, so vx' <= max_m step_m(U) = U' and 0 <= max(U', 0). The move is the one rounded add x ⊕ v' (T-ADD) or,
+blocked, a point between x and it; fl(+) is monotone in both arguments. The align moves toward the nearest grid line
+and is non-decreasing (its pieces are increasing and its jumps are upward: 1.7), so A+ is non-decreasing and bounds the
+aligned and the unaligned value. Qed. The envelope is the exact 1D minimum time of section 3.2 extended to walls, ice
+and the align, with no slack: `xreach(a, b)` = the first t at which [Xmin_t, Xmax_t] meets a centre window [a, b)
+(binary search: the envelope is monotone in t).
+
+From an event node (5.3) the envelope restarts from the node's column window [16 kc - 8, 16 kc + 8) with the speed
+bound `U = max(|vx0|, v*)` (v* = the held run's fixed point at the start's speed multiplier, 6.7766 px/tick at 1x):
+**U is invariant**: for |v| <= U, |step_m(v)| <= U, because above v* the held step (v + a) B and the ice glide v Ino both
+decrease (1.4, 3.1). The window grows by the exact sequence U, step(U), ... (`Useq`).
+
+### 5.3 The gravity axis as collision events
+
+In plain air y has no input (3.1, section 4's THEOREM S1): `vy' = (vy + G) B`, the move one add. The only other things
+that change it are COLLISIONS, and they happen on LINES:
+
+- a LANDING on a standing line s = t - 16 (t the top of a tile that can block: 16 r for a solid; 16 r and 16 r + 8 for a
+  half block, a one-way, a door or gate, the secret block: every shape it can take), when the band descends past s:
+  `vh > 0` and `pl <= s < nh` (pl, nh: the band's low end before, high end after the tick). The ball is then grounded
+  with vy = 0; the jump may set vy = J at that very tick (the hop) or at any later tick on the line (J, and 0.88 J on a
+  level with ice: the slippery jump);
+- a BONK under a ceiling line c (a tile bottom: 16 r + 16, or 16 r + 8 for the shapes above) when the band rises past c:
+  `vl < 0` and `nl < c <= ph`. vy = 0; the ball at [c, c + 1) from a fractional pre-position, or at the pre-position
+  itself from a whole one (the move is one add there, blocked: it stays; section 4.2);
+- the world's edges block as solids: y = 0 is a ceiling, 16 H - 16 a standing line in every column.
+
+A line is in a centre column kc when a tile of it lies in columns kc - 1 .. kc + 1 (the 16 px box overlaps them).
+**The engine retries a blocked step** in the move loop's later iterations while the other axis still moves (eesim.js
+`csy = osy`): after a landing or a bonk the ball ends anywhere from the line to its free position of that tick, with
+vy = 0 (grounded for a landing). So an event's y is a BAND: [s - 1, s + h] for a landing, [c - l, c + h] for a bonk (h,
+l the free position's reach past the line, at most 16 px), and only next to a gap (a free cell within 3 columns in the
+row past the line: `freeNear`; elsewhere the retried step is blocked again and the band is the line). On a level with
+ice the y drag of an airborne tick can be Ino (the slippery timer runs 11 ticks past the ice): the band's ends take the
+least and the most of both drags (each step is monotone in v). With low gravity (|a| < 0.1) the y align can fire: the
+band's ends are aligned down / up.
+
+**THE EVENT GRAPH.** Nodes LAND(kc, s, band) and BONK(kc, c, band) with a time. Edges: FLIGHTS from a node's band at
+its speed (LAND: the jump J (and 0.88 J on ice) and the walk-off 0; BONK: 0), stepped tick by tick as an interval of
+exact doubles, the x window per tick grown from the node's column by `Useq` (from the start: THEOREM X's envelope); at
+flight tick n a line crossed as above in a column [k0, k1] of that tick's window makes a node at time
+`max(t + n, xreach(column))`. WALK: LAND(kc, s) -> LAND(kc +- 1, s) at t + 1 (the centre column changes; only from a
+band that is the line itself). The start is the flight from (y0, vy0) with the start's own envelope.
+
+**THEOREM G (the relaxation is admissible).** Every engine path from sigma that stays in the plain regime maps to a
+path of the event graph whose node times are <= the path's own ticks; the target test of the graph (a flight tick's
+band and window meet a target tile: `touch`; a landing node in a target column and row: `land`, one after an airborne
+tick: `landing`) holds no later than the path meets the target. *Proof.* Induction over the path's y collisions.
+Between two collisions the path's y is the free recurrence from the event's state, which lies in the node's band with
+the node's speed (0 or J); the band's ends evolve by the same monotone recurrence, so the path's y stays in the band at
+every tick (interval arithmetic in exact doubles, the align and the ice drag bracketed). A collision of the path is on
+a line of a tile that blocks it, which is one of the graph's lines in the path's centre column (every blocking shape
+contributes every line it can have), at a tick at which the path's x is in THEOREM X's window: the graph has the node,
+at a time <= the tick. A grounded tick of the path (walking, standing) is the walk-off flight's first tick: from the
+band [s - 1, s + h] at speed 0 the band descends past s at once (vy = G B > 0), so the graph re-lands on the line at
+t + 1 in every column of that tick's window that has the line, which holds the path's column (the floor under the
+path's box is a tile of that line). The x axis is only relaxed: walls never stop the window, and a node allows every
+speed up to U. Qed.
+
+### 5.4 Sources: where the plain model ends
+
+A SOURCE is a centre cell whose physics is not plain air (arrows, dots, boosts, climbables, liquids, effects, music, a
+portal that teleports: not a silent one, reach.js `silentPortals`) or that kills (spikes, fire, toxic). The cell is the
+engine's `current` (eesim.js `_playerTick`: the tile under the centre at the tick's start, a half block's cell shifted
+to the cell above / to the left by its rotation): every rule that ends the plain model reads it (the gravity queue,
+touchBlock, processPortals), so there is no dilation. A flight tick (or a node) whose window and band meet a source cell
+at time t closes that branch with `t + REST(cell)`: sound, because the path is plain until the centre is in that cell
+at a tick's start, and REST bounds everything after it (5.5). The start's own centre cell is checked first.
+
+### 5.5 THEOREM R: the rest after a source (the bounded speed-ups)
+
+**The level's speed sups** (`levelSups`): from the classes of the level's own tiles, per axis the most speed any tick can
+have, the fields' fixed points (1.4, section 6): x = the held run's v* (at the speed effect's x1.5 where one is in the
+level), the fall's terminal where x can be a gravity axis (side arrows, gravity effects), 16 where a side boost, a
+portal (the rotation's x1.42 then the cap) or levitation is; y down = the fall's terminal (the level's gravity
+multiplier, at least 1) or 16 (down boosts, portals, levitation); y up = |J| (x1.3 with the jump effect), the fall's
+terminal under up arrows / gravity effects, the climb's 1.1 and the liquids' drift 4, or 16 (up boosts, portals,
+levitation); a tile of physics this table does not know (the n4 study's untamed effects 453, 1520, 1573): 16 on every
+axis. The start's own speeds raise them where they are higher. **REST(i)** = the least over the target tiles of
+`max over axes ceil((16 (d - 1) - 7) / (sup + 0.25))` (d the tile distance on that axis; 0.25 px a tick for the align,
+7 px once for a portal's x1.42 tick), through the TELEPORTS: a portal group (the portal cells with one exit set: 1 tick
++ the least REST at its exits, the Chebyshev distance to the group's nearest cell at the 16.25 px/tick cap), a death
+(a kill cell: DEATH_MIN = 54 dead ticks + the least REST at a respawn tile; with a timed killer anywhere), the exits'
+values by a fixpoint; and the given field (the n4 study's `admbounds` field) where it is higher.
+
+**THEOREM R.** From any state centred in cell i, every input sequence needs at least REST(i) ticks to the target.
+*Proof.* Per axis the centre's displacement over n ticks is at most n (sup + 0.25) (+ 7 px once when a portal's
+rotation fires): every tick's speed is within the sups (they are the fixed points of every field the level holds, a
+cap where a boost / portal / levitation can set 16) and the align adds at most 0.25 px a tick; a teleport moves the
+centre to an exit at >= 1 tick (a death at >= DEATH_MIN); from a point of tile i to a point of a tile d tiles away is
+at least 16 (d - 1) px. The fixpoint's values are the least over the ways through the teleports. Qed.
+
+So a source is a BOUNDED SPEED-UP, not a wall of ignorance: the bound goes on through it at the most speed the level
+can give. The first version gave a source rest 0 (sound, and the bound on every leg near an arrow collapsed to the
+flight time to the arrow); then the isotropic 16.25 px/tick cap (1.3 ticks a tile); the per-axis sups make a free-air
+level's rest the run and the fall (a tile in 2.4 ticks of run at v*).
+
+### 5.6 The search: A* over the event graph, and the certificate
+
+h(node) = the least REST (and field) over the node's cells: admissible by THEOREM R, so A* by t + h expands the nodes
+in order of a lower bound of every path through them. Nodes are deduplicated by (column, line, band) keeping the
+earliest; a node is DOMINATED by an expanded node of the same (column, line) whose band holds its band, no later (every
+continuation of the dominated one is one of the other's). The target and the sources are tested on each node's exact
+band when it is made, before the dedup.
+
+- lb = the least target time found, or the least open f when the search stops first: the node cap (`cap`, 4,000), the
+  time budget (`ms`), the HORIZON (an f >= horizon: the bound is then the horizon; `certify(sim, target, T)` passes
+  T + 1). Each is sound: every unexplored path's time is >= its node's f (h admissible).
+- The graph exhausted without reaching the target: the model says the target is out of the plain reach; the model is a
+  relaxation, so that is a proof in its physics, but a gap in the model must not turn into a huge bound: the answer is
+  the start cell's REST (5.5), admissible on its own.
+
+**PROVEN OPTIMAL.** A leg found in T ticks from sigma with LB(sigma, target) = T is optimal from sigma: no input
+sequence of any kind (inside the model or through a source) meets the target sooner. `certify(sim, target, T)` ->
+`{lb, proven}`; `proof(lb, T)` -> 'optimal' | 'gap'. The compiler's report states it per leg (the Wire stage: call
+`certify` at each solved leg's start state).
+
+**The free-air leg solver** (`legsolve.solveLeg(L, sim, target, {lb, tmax})`): for T from lb upward, the x patterns of
+<= 2 changes whose exact x_T lies in the target's centre window (kin1d `solveIA`: THEOREM M's branch and bound, 3.3),
+each replayed once with no jump, then with ONE jump on each tick the no-jump replay was grounded (the hop included); the
+goal is the engine's (the centre in the target, alive, grounded for `land`, airborne first for `landing`). A find at
+T = lb is a proof.
+
+### 5.7 The engine checks and the numbers
+
+Every bound is checked against real input sequences replayed by the engine: a violation is a bound above what a real
+sequence did (the routes' own ticks, or an engine-replayed solver answer). Box 3 (loaded 130-140 of 192 threads).
+
+**Every tick of every leg** (`tools/math/lbcheck.js`, `--solve=1`: the truthset's 218 routes cut into the moves study's
+49,846 legs, support to support; at EVERY tick t of a leg the bound from the route's exact state at t to the leg's end,
+`landing` when it ends on a new landing, `land` for the final move onto the trophy's support, `touch` otherwise, against
+t1 - t): **2,013,028 checks, 0 violations**; 42.4% of the ticks are outside the plain start (lb null). A query costs
+9.6 ms mean on the loaded box (75 nodes expanded; 0.2% of the plain queries stopped by the node cap).
+
+At the legs' starts (the plain ones: 35,712 of 49,846), bound / the route's own ticks:
+
+| class | legs | median | mean | p10 | = 1 (the route's move proven optimal) |
+|---|---:|---:|---:|---:|---:|
+| **free air** (hop, jump, fall, walk) | 28,528 | **0.900** | 0.758 | 0.308 | 42.5% |
+| free air, >= 10 ticks | 17,898 | 0.708 | 0.670 | 0.255 | 22.6% |
+| hop | 16,984 | 1.000 | 0.877 | 0.500 | 63.5% |
+| jump | 7,461 | 0.568 | 0.566 | 0.222 | 8.9% |
+| fall | 4,042 | 0.611 | 0.613 | 0.207 | 16.7% |
+| walk | 41 | 0.750 | 0.642 | 0.296 | 0 |
+| portal | 931 | 0.442 | 0.515 | 0.048 | 26.3% |
+| boost | 545 | 0.467 | 0.428 | 0 | 0 |
+| arrow | 5,524 | 0.250 | 0.292 | 0.101 | 0 |
+| all | 35,712 | 0.739 | 0.671 | 0.196 | 34.6% |
+
+The route's own ticks overstate the true minimum (a TAS buys the next move's state with them). Against the best known
+T (the route's or a solver's answer, whichever is less: an upper bound of the true minimum, so these ratios are lower
+bounds of the true tightness): free air **median 0.963 / mean 0.785** with `legsolve`, **median 1.000 / mean 0.829**
+with section 4's `msolve` (49.5% at 1). **PROVEN OPTIMAL legs**: the route's own move 12,367 (24.8% of the legs; 41.3%
+of the free-air legs), with `legsolve`'s answers 14,327 (free air 47.2%), with `msolve`'s 14,490 (free air 48.2%). For
+comparison section 4's plain bound (`msolve.lowerBound`, uncertified) on the same legs: free air median 0.515, at 1 on
+3.5%.
+
+The solver side: no `legsolve` answer below the bound (0 of 49,846); `msolve` answered 825 `landing` legs below it, all
+of them its own goal ("grounded there") met without an airborne tick (656 starts already standing on the tile, 169
+walks onto the next one: `src/out/mathlb/msviol.js`), not a new landing; `lbcheck` now compares only msolve answers
+that are one.
+
+**The event segments of `test/admbounds_truth.js`** (the n4 study's harness: the route's trigger events, every tick of
+every segment plus every earlier segment start to every target, the `math` column next to adm / prim / eg; 30 ms a
+query; the 14 routes of the 7 ice levels run again after the jump fix below, every other route's bound unchanged by it):
+207 of the 218 routes so far (the last 11, Egg Quest II and Wine Quest I, running): **math 0 violations in 1,140,970
+checks** (adm / prim / eg / max 0 as well). The segments are long (4,461 of them, 404 ticks on average: a trigger to the
+next), and there the bound adds little: math median 0.151 (>= 10 ticks 0.141) where it is defined (2,543 segment
+starts: plain), prim (bounds.js) 0.160 / 0.148, the max of adm / prim / eg 0.164 / 0.150; the max with math (`best`)
+0.167 / 0.150, mean 0.263 vs 0.253; math above every other bound on 620 segments. The event graph's strength is the
+free-air leg; a segment of hundreds of ticks through fields, walls and detours is the other bounds' ground (5.8).
+
+**What the checks found** (each an error of an earlier version, fixed and checked again): the world's edges block (a
+ball at the top edge: Infinity Pain); the engine RETRIES a blocked step (Ice Slide Ride: a landing 0.256 px past the
+line); the y drag on ice (Ino while slippery); a hop in place (the `landing` mode); the jump multiplier at the JUMP's tick
+(`admbounds_truth`, The way of the north: a slippery start (x0.88) hops at x1 once the timer ran out; the bound was 1
+tick too high on 3 ticks of one segment: the leg's jump speeds are now the effect's J and its x0.88 on ice levels,
+whatever the start's timer; `lbcheck` never saw it: its legs end at the landing).
+
+### 5.8 What the bound does not cover yet
+
+- Starts outside the plain model (lb null): a start in or next to a field (arrows, dots, boosts, climbables, liquids:
+  their queued tiles), levitation, flipped gravity, multi-jump (the air jumps are more members of the gravity axis:
+  section 4.8), zombie / curse / fire / poison, god mode. The other bounds answer there (section 4.5 plain, section 6's
+  field envelope, the n4 study's `admbounds`); the next step is the event graph in the field's frame (THEOREM F2: an
+  arrow field is the plain axes rotated) and the air jump as a flight from any tick of a flight.
+- Legs that pass a source: bounded at the level's speed sups (5.5), sound and loose (arrow legs median 0.25 of the
+  route): the field envelopes of section 6 as the rest inside a field region would be the tight form.
+- The x axis knows no walls: a leg that must go round a wall is bounded by the straight envelope (only y collisions are
+  events). Walls as x events (the same construction on the other axis) would bound the detours.
+- Long legs: the node cap / time budget stops the A* early and the answer is its frontier (sound, lower): ALL >= 10
+  ticks median 0.55; the event segments of `admbounds_truth` (hundreds of ticks between triggers) gain little.
+- Not wired: the compiler's report (the Wire stage: `certify` at each solved leg's start, `proof` in its report line).
+
+### 5.9 API (`src/math/lb.js`, `src/math/legsolve.js`)
+
+`createMathLB(L, {cap, ms, horizon})` -> `M`: `M.leg(sim, target, lo)` -> `{lb, why, tx, arc, nodes, capped, src}`
+(`target` {tiles, mode: 'touch' | 'land' | 'landing'}; `lo` {field: a rest per tile (optional), cap, ms, horizon,
+debug}; `why` 'start' / 'arc' (on the start's own flight) / 'target' / 'source' / 'frontier' / 'exhausted' /
+'horizon'; lb null outside the plain start); `M.certify(sim, target, T, lo)` -> `{lb, why, proven}`; `M.stats()`;
+`proof(lb, ticks)`; `staticOf(L)` (the lines, the sources, the teleport groups, the sups); `plainCtx(sim, S)`;
+`xSteps(ctx, ice)`, `alignUp`, `alignDn`. `solveLeg(L, sim, target, {lb, tmax, k, limit, ms})` -> `{T, masks, proven,
+tried, ms}` | null. `EEAT_TRUTH_ROOT=<root> node tools/math/lbcheck.js --moves=<exact_jsonl> --out=<dir>
+[--shard=i/n] [--every=0] [--solve=1] [--solver=msolve] [--msb=1] [--adm=1]`, then `--agg=<dir>`;
+`node test/admbounds_truth.js --math=1 --mathMs=30 [--shard=i/n] [--out=<file>]`.
+
 ## 6 Field kinematics: every field as one recurrence with its own coefficients
 
 (build / fields.) Code: `src/math/fields.js` (the axis contexts, the recurrences, the envelope, the axis solver, the

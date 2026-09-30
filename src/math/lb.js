@@ -1,38 +1,47 @@
 'use strict';
 // THE ADMISSIBLE LEG BOUND FROM THE EXACT MATHEMATICS (n4-math, Build / bounds, 2026-09-30). A lower bound on the ticks
-// any input sequence needs to bring the ball from an EXACT engine state to a target (the centre tile in a tile set:
-// 'touch'; or grounded with the centre there: 'land'), built from the per-axis recurrences of src/plan/kin1d.js (the
-// engine's own doubles, never a rounded state) and the level's tiles. docs/ee_math.md section 4 has the theorems; every
-// one is checked against the engine by tools/math/lbcheck.js and test/admbounds_truth.js (the 'math' column).
+// ANY input sequence needs to bring the ball from an EXACT engine state to a target (the centre tile in a tile set:
+// 'touch'; grounded with the centre there: 'land'; a NEW landing there, airborne first: 'landing'), built from the
+// per-axis recurrences of src/plan/kin1d.js (the engine's own doubles, never a rounded state) and the level's tiles.
+// docs/ee_math.md section 5 has the theorems; every one is checked against the engine by tools/math/lbcheck.js (every
+// tick of every leg of the known routes) and test/admbounds_truth.js (the 'math' column).
 //
-// THE MODEL (plain physics: gravity down, the current and the delayed tile plain air, no effect but the speed / jump /
-// gravity multipliers, max_jumps 1; the level's other tiles SOURCES: see below)
+// THE MODEL (the start plain: gravity down, the current and both queued tiles plain air, no effect but the speed / jump /
+// gravity multipliers, max_jumps 1; else lb === null)
 //  X  the input axis. The x speed after a tick is v' = step_m(v) (m the key; with ice anywhere also the ice rules) or 0
 //     (a wall), the position fl(x + v') or a point between x and it (a blocked step), then maybe the auto-align. Every
 //     step is non-decreasing in v and fl(+) and align are non-decreasing, so (THEOREM X) every path lies in
 //     [Xmin_t, Xmax_t] with   U_t = max(max_m step_m(U_(t-1)), 0),  Xmax_t = A+(fl(Xmax_(t-1) + U_t)),
 //     A+(X) = max(X, align(X)), and the mirror for Xmin: the 1D envelope, exact doubles, no slack constant.
-//  Y  the gravity axis. In the air v' = (v + G) B whatever the input (THEOREM S of kin1d); the only other changes are
-//     COLLISION EVENTS: a blocked rising step (a BONK: v = 0 under a ceiling line c; y in [c, c + 1) or its integer
-//     pre-position) and a blocked falling step (a LANDING: grounded on a standing line s = top - 16; y = s), after which
-//     the jump may set v = J (the landing tick itself: the hop). So a y path is a chain of FLIGHTS between events whose
-//     lines are the level's tile tops and bottoms. THE EVENT GRAPH: nodes LAND(column, s) and BONK(column, c, band),
-//     edges the flights (exact double trajectories from the node's y band), an event possible at flight tick n only if
-//     the flight crosses the line then (descending past s: a landing; rising past c: a bonk) in a column the x window
-//     reaches at that tick. Walking: LAND(k, s) -> LAND(k +- 1, s) in >= 1 tick (the centre column changes).
-//     Every real path maps to a path of this graph whose times are <= the real ones (relaxations only: every tile that
-//     can block is a floor and a ceiling everywhere it could be, walls never stop x, the x speed at a node is anything
-//     up to U = max(|vx0|, v*)), so the graph's shortest time to the target is ADMISSIBLE (THEOREM G).
-//  SOURCES  tiles whose physics is not plain air (arrows, dots, boosts, climbables, liquids, effects, portals, killers,
-//     music; dilated by one tile for the half block's centre shift): the model holds until the centre first enters one.
-//     A flight tick whose (x window, y band) meets a source at time t closes that branch with t + rest(source) (rest =
-//     a field's value there, e.g. src/plan/admbounds.js, else 0): sound because the path is plain until then.
-// Result: lb = min(best target time, the frontier when the node cap stops the graph, a source branch).
+//  Y  the gravity axis. In the air v' = (v + G) B whatever the input (THEOREM S of kin1d; on ice the drag Ino too); the
+//     only other changes are COLLISION EVENTS: a blocked rising step (a BONK under a ceiling line c) and a blocked
+//     falling step (a LANDING on a standing line s = top - 16), after which the jump may set v = J (the landing tick
+//     itself: the hop). The engine retries a blocked step while the other axis moves, so an event leaves the ball in a
+//     BAND (the line to its free position; only next to a gap). So a y path is a chain of FLIGHTS between events whose
+//     lines are the level's tile tops and bottoms (and the world's edges). THE EVENT GRAPH: nodes LAND(column, s, band)
+//     and BONK(column, c, band), edges the flights (exact double trajectories from the node's band), an event possible
+//     at flight tick n only if the flight crosses the line then in a column the x window reaches at that tick. Walking:
+//     LAND(k, s) -> LAND(k +- 1, s) in >= 1 tick. Every real path maps to a path of this graph whose times are <= the
+//     real ones (relaxations only: every tile that can block is a floor and a ceiling everywhere it could be, walls
+//     never stop x, the x speed at a node is anything up to U = max(|vx0|, v*)), so the graph's shortest time to the
+//     target is ADMISSIBLE (THEOREM G).
+//  SOURCES  centre cells whose physics is not plain air (arrows, dots, boosts, climbables, liquids, effects, music, a
+//     portal that teleports; a killer): the model holds until the centre first enters one (the engine reads the
+//     tick-start centre cell: `current`, touchBlock, processPortals). A flight tick whose (x window, y band) meets a
+//     source at time t closes that branch with t + REST(cell) (THEOREM R): the least ticks from any state centred there
+//     at the level's BOUNDED SPEED-UPS (per axis the most speed any tile class of the level can give), through the
+//     level's teleports (a portal group: 1 tick + the least rest at its exits; a death: DEATH_MIN + a respawn's), and
+//     the given field (e.g. src/plan/admbounds.js) where it is higher.
+// THE SEARCH: A* over the event graph with h = REST (admissible), nodes deduplicated by (column, line, band) and dominated
+// by an expanded node of the same place with a band that holds theirs, no later. lb = min(best target time, the least
+// open f when the node cap / time budget / horizon stops it); the graph exhausted without the target: the start's REST.
 //
 // API
-//   createMathLB(L, o) -> {leg(sim, target, lo) -> {lb, why, tx, arc, nodes, capped, src}, static}
-//     target {tiles: int[] | Int32Array, mode: 'touch' | 'land'}; lo {field: Float32Array (rest per tile, optional),
-//     cap: node cap (default 4000), horizon (default 3000)}
+//   createMathLB(L, o) -> {leg(sim, target, lo) -> {lb, why, tx, arc, nodes, capped, src}, certify(sim, target, T, lo)
+//     -> {lb, why, proven}, static, stats()}
+//     target {tiles: int[] | Int32Array, mode: 'touch' | 'land' | 'landing'}; lo {field: Float32Array (a rest per tile,
+//     optional), cap: node cap (default 4000), ms: a time budget, horizon (default 3000): the bound is at most it (pass
+//     T + 1 to certify a leg of T ticks)}
 //   lb === null: the state is outside the plain model (an effect, a field tile under the ball, levitation, flipped
 //   gravity, god mode, dead, multi-jump): use the other bounds.
 //   proof(lb, ticks) -> 'optimal' | 'gap' (a leg found in exactly lb ticks is PROVEN OPTIMAL from that state)
@@ -347,8 +356,14 @@ function createMathLB(L, o = {}) {
 		const qUp = (q) => q;
 		const XS = xSteps(ctx, ice);
 		const G = K.ga(ctx);
-		const Js = [G.J];
-		if (ice) { const jm = ctx.jm * 0.88; Js.push(((0 - 2) * 26 * jm) / C.MULT); }
+		// the jump speeds of the leg: the engine's multiplier (_jumpMultiplier: the jump effect x1.3 / x0.75, then x0.88
+		// while slippery) at the JUMP's tick, not the start's: a slippery start (x0.88 now) can jump at x1 once the timer
+		// has run out (admbounds_truth found it: The way of the north, a fall off ice, the hop at x1, the bound 1 too high)
+		let jmBase = 1.0;
+		if (sim.jump_boost === 1) jmBase *= 1.3;
+		if (sim.jump_boost === 2) jmBase *= 0.75;
+		const Js = [((0 - 2) * 26 * jmBase) / C.MULT];
+		if (ice) { const jm = jmBase * 0.88; Js.push(((0 - 2) * 26 * jm) / C.MULT); }
 		const yArm = G.a < 0.1 && G.a > -0.1;   // the y align can fire (low gravity)
 		// the gravity axis: v' = (v + G) B, or on ice (the slippery timer: 11 ticks after the ice) (v + G) Ino: the band's
 		// speeds are the least and the most of the two (the step is monotone in v for either drag)
@@ -610,7 +625,12 @@ function createMathLB(L, o = {}) {
 		return done(lb, why, { nodes: expanded, capped, src: srcHit, arc: arc === Infinity ? null : arc, tx: Math.min(...tgt.map((g) => g.xr)), chain });
 		function done(lbv, w, extra) { st.ms += Date.now() - t0; return Object.assign({ lb: lbv, why: w }, extra || {}); }
 	}
-	return { leg, static: S, stats: () => Object.assign({}, st) };
+	/** a leg of T ticks found from this state: PROVEN OPTIMAL when the bound (horizon T + 1) reaches T */
+	function certify(sim, target, T, lo = {}) {
+		const r = leg(sim, target, Object.assign({}, lo, { horizon: T + 1 }));
+		return { lb: r.lb, why: r.why, proven: r.lb !== null && r.lb >= T };
+	}
+	return { leg, certify, static: S, stats: () => Object.assign({}, st) };
 }
 function lowerBound(a, x) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; }
 /** a leg found in `ticks` from the state the bound was computed at: 'optimal' when ticks === lb (the bound is a proof) */
