@@ -295,6 +295,8 @@ function pathRegimes(L, masks, o = {}) {
 	const inp = new E.EEInput();
 	const n = o.until ? Math.min(o.until, masks.length) : masks.length;
 	const codes = new Uint32Array(n), cur = new Uint8Array(n), del = new Uint8Array(n);
+	const xs = new Float64Array(n + 1), ys = new Float64Array(n + 1);   // the box after tick t (xs[0]: the start)
+	xs[0] = sim.px; ys[0] = sim.py;
 	const st = { ticks: n, sep: 0, coupled: {}, bitExact: {}, sepExact: 0, sepMiss: 0, allExact: 0, envChanges: 0, freeRuns: [], sepRuns: [], miss: [],
 		tri: 0, triExact: 0, triMiss: 0 };
 	let prevKey = -1, freeRun = 0, sepRun = 0;
@@ -332,6 +334,7 @@ function pathRegimes(L, masks, o = {}) {
 			}
 		}
 		codes[t] = code;
+		xs[t + 1] = sim.px; ys[t + 1] = sim.py;
 		if (sep) st.sep++;
 		if (triOnly) st.tri++;
 		for (const b of CB) if ((code >> b) & 1) st.coupled[b] = (st.coupled[b] || 0) + 1;
@@ -341,7 +344,7 @@ function pathRegimes(L, masks, o = {}) {
 	}
 	if (freeRun > 0) st.freeRuns.push(freeRun);
 	if (sepRun > 0) st.sepRuns.push(sepRun);
-	return { codes, cur, del, stats: st, sim };
+	return { codes, cur, del, xs, ys, stats: st, sim };
 }
 
 /**
@@ -400,6 +403,8 @@ function envSchedule(L, xs, ys, q0, q1) {
  */
 function certifyFree(L, xs, ys, o = {}) {
 	const cls = PC[o.cls || 'air'];
+	// only a field class has one per-axis map: a portal teleports, an effect / killer / trigger tile changes the state
+	if (cls === undefined || cls === PC.portal || cls === PC.effect || cls === PC.kill || cls === PC.solid) return xs.length > 1 ? 1 : -1;
 	const W = L.width, H = L.height, maxX = W * 16 - 16, maxY = H * 16 - 16;
 	const ovl = L.ovl, fg = L.fg;
 	const tileClass = (x, y) => {

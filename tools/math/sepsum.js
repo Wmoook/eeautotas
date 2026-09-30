@@ -12,6 +12,7 @@ function routes(d) {
 	const tot = { ticks: 0, sep: 0, sepExact: 0, sepMiss: 0, allExact: 0, envChanges: 0, tri: 0, triExact: 0, triMiss: 0 };
 	const bits = {}, bitExact = {}, byCur = {}, modes = {}, m18 = { tested: 0, sepMasks: 0, violX: 0, violY: 0, groupsX: 0, groupsY: 0 };
 	const free = { n: 0, sum: 0, ge10: 0, ge30: 0 }, sepr = { n: 0, sum: 0, ge10: 0, ge30: 0 };
+	const cert = {};
 	const legs = { pure: { n: 0, ticks: 0 }, switch: { n: 0, ticks: 0 }, tri: { n: 0, ticks: 0 }, coupled: { n: 0, ticks: 0 },
 		takeoff: { product: 0, tri: 0, coupled: 0 }, landing: { product: 0, tri: 0, coupled: 0 }, n: 0, sum: 0, ge10: 0, ge30: 0 };
 	const perRoute = [];
@@ -23,6 +24,7 @@ function routes(d) {
 		for (const [m, n] of Object.entries(x.modes)) modes[m] = (modes[m] || 0) + n;
 		if (x.m18) for (const k of Object.keys(m18)) m18[k] += x.m18[k] || 0;
 		for (const k of ['n', 'sum', 'ge10', 'ge30']) { free[k] += x.freeRuns[k]; sepr[k] += x.sepRuns[k]; }
+		if (x.cert) for (const [c, g] of Object.entries(x.cert)) { const a = cert[c] || (cert[c] = { ticks: 0, ok: 0 }); a.ticks += g.ticks; a.ok += g.ok; }
 		if (x.legs) {
 			for (const c of ['pure', 'switch', 'tri', 'coupled']) { legs[c].n += x.legs[c].n; legs[c].ticks += x.legs[c].ticks; }
 			for (const e of ['takeoff', 'landing']) for (const w of ['product', 'tri', 'coupled']) legs[e][w] += x.legs[e][w];
@@ -45,7 +47,11 @@ function routes(d) {
 			['pure', 'switch', 'tri', 'coupled'].map((c) => `${c} ${legs[c].n} (${pct(legs[c].n, legs.n)} of legs, ${pct(legs[c].ticks, legs.sum)} of leg ticks)`).join(', '));
 		console.log(`  take-off ticks: ${JSON.stringify(legs.takeoff)}; landing ticks: ${JSON.stringify(legs.landing)}`);
 	}
-	console.log(`  18 masks:${m18.tested} states, ${m18.sepMasks} separable (state, mask) ticks, ${m18.groupsX} x groups, ${m18.groupsY} y groups, violations x ${m18.violX} y ${m18.violY}`);
+	if (Object.keys(cert).length) {
+		let T = 0, O = 0; for (const g of Object.values(cert)) { T += g.ticks; O += g.ok; }
+		console.log(`  certifyFree on the free product ticks of one class: ${O} of ${T} (${pct(O, T)}) accepted; ` + Object.entries(cert).sort((a, b) => b[1].ticks - a[1].ticks).map(([c, g]) => `${c} ${g.ok}/${g.ticks} (${pct(g.ok, g.ticks)})`).join(', '));
+	}
+	console.log(`  18 masks: ${m18.tested} states, ${m18.sepMasks} separable (state, mask) ticks, ${m18.groupsX} x groups, ${m18.groupsY} y groups, violations x ${m18.violX} y ${m18.violY}`);
 	const misses = r.filter((x) => x.sepMiss > 0);
 	for (const x of misses.slice(0, 10)) console.log('  MISS', x.name, x.sepMiss, JSON.stringify(x.miss[0]));
 	if (err.length) console.log('  error:', err[0].error.slice(0, 400));

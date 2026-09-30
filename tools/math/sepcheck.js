@@ -266,9 +266,22 @@ function routeTask(task) {
 	// the 18-mask check at every m18-th separable tick
 	let m18 = null;
 	if (task.m18 > 0) m18 = masks18(tr.L, tr.masks, res.codes, task.m18);
+	// certifyFree on single ticks: the free product ticks of one class (current = delayed, no switch, nothing hit): how
+	// many the geometric certificate accepts (it asks the whole swept rectangle to be plain air: conservative)
+	const cert = {};
+	for (let t = 0; t < n; t++) {
+		const c = res.codes[t];
+		if ((c & R.C_COUPLED) !== 0 || (c & (R.C_XHITP | R.C_XHITN | R.C_YHITP | R.C_YHITN | R.C_ENVCHG)) !== 0) continue;
+		if (res.cur[t] !== res.del[t]) continue;
+		if (res.cur[t] === R.PC.portal || res.cur[t] === R.PC.effect || res.cur[t] === R.PC.kill || res.cur[t] === R.PC.solid) continue;
+		const nm = R.PC_NAMES[res.cur[t]];
+		const g = cert[nm] || (cert[nm] = { ticks: 0, ok: 0 });
+		g.ticks++;
+		if (R.certifyFree(tr.L, [res.xs[t], res.xs[t + 1]], [res.ys[t], res.ys[t + 1]], { cls: nm }) === -1) g.ok++;
+	}
 	return { name: e.name, source: e.source, route: e.route, ticks: n, sep: st.sep, sepExact: st.sepExact, sepMiss: st.sepMiss, allExact: st.allExact,
 		envChanges: st.envChanges, tri: st.tri, triExact: st.triExact, triMiss: st.triMiss, bits, bitExact: st.bitExact, byCur, modes, freeRuns: hist(st.freeRuns), sepRuns: hist(st.sepRuns), miss: st.miss.slice(0, 5), m18,
-		legs: legStats(res.codes) };
+		legs: legStats(res.codes), cert };
 }
 
 /**

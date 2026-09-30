@@ -567,6 +567,12 @@ killers 5,666 (41.44 / 29.12), down arrows 2,345, mud 1,544 (100.00), boosts 2,7
 18-mask check: 392,279 states, 7,047,012 separable (state, mask) ticks, 1,131,397 x groups / 882,037 y groups, 0
 violations.
 
+certifyFree on single ticks of the routes that are free products in one field class (current = delayed, nothing hit, no
+switch): it accepts 1,415,138 of 1,424,452 (99.35%): air 1,025,791 / 1,033,366, up arrows 108,396 / 108,727, right
+arrows 86,937 / 87,094, dots 85,585 / 85,764, left arrows 81,144 / 81,998, water 13,622 / 13,759, climbables 10,115 /
+10,196, down arrows, mud, lava, boosts all (the refusals: a non-air tile in the swept rectangle that the staircase went
+around). Portal, effect, killer and trigger tiles are never certified (they change the state).
+
 Legs (`legStats`: support to support at the grounded ticks): 39,998 legs, 1,773,647 ticks, 27,448 of 10+ ticks and 18,848
 of 30+. Interior: pure 21,366 legs (53.42%; 20.80% of the leg ticks), switch 6,681 (16.70%; 24.77%), triangular 8,052
 (20.13%; 27.93%), coupled 3,899 (9.75%; 26.50%). Take-off ticks product / triangular / coupled 37,425 / 1,389 / 1,184;
