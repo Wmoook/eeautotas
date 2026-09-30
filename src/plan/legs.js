@@ -388,8 +388,9 @@ function legBest(L, starts, goal, o) {
 	// (a dead ball (a death step's allowDeath) holds on through its dead ticks until it respawns: its cell does not change
 	// meanwhile, and the first arrival's rule dropped it: a death step was never found)
 	const DEAD_HOLD = 80;
-	// (a death step: the dead ball and the ball at a kill cell's door first: diePri, below)
-	const KC = allowDeath && DIE_PRI > 0 ? killCellsOf(L) : null;
+	// (a DEATH STEP (o.dieStep: the waypoint's die field, planner.js dieField): the dead ball and the ball at a kill cell's
+	// door first: diePri, below; not a leg that only MAY die (the executor's death leg: its goal is a trigger)
+	const KC = allowDeath && o.dieStep && DIE_PRI > 0 ? killCellsOf(L) : null;
 	const pool = [];
 	// (the finisher: the NK states nearest the goal by the field (at most 2 a tile, within FIN_D tiles) kept with their
 	// snapshots; at FIN_F of the time with no leg found, the exact search from them (solveExact over absolute ticks: the
