@@ -41,6 +41,7 @@ const VERIFY_MARGIN_MS = 60;    // the worker's clock ends this much before the 
 const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worker call is answered 'budget'
 const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
+const LEG_MODE = () => { const m = String(process.env.EEAT_EXEC_LEG || 'mix'); return m === 'beam' || m === 'best' ? m : 'mix'; };
 const BASE_FEATS = ['key0', 'key1', 'key2', 'key3', 'key4', 'key5', 'team', 'coins', 'bcoins', 'crown', 'silver', 'deaths', 'cp', 'fx', 'prot'];
 
 // ================================================================ the core (one thread: a worker, or in-process)
@@ -207,17 +208,32 @@ function makeCore(L, co) {
 		}
 		// -------- tier 3: the fine-cell leg search
 		if (!found && !exactProof && Date.now() < wEnd - 5) {
-			const t3 = Date.now();
-			const lEnd = wEnd - 3;
+			// (the finders: the best-first search dives (the first leg, soonest), then the time-layered beam bounded by it
+			// (a faster leg of the same kind); LEG_MODE 'beam' / 'best' (env EEAT_EXEC_LEG) for measurements)
 			const region = regionOf(field0, starts, goal);
-			const r = LG.legBFS(L, snaps, goal, { sim, deadline: lEnd, stop: stopFn, allowDeath, beforeTick, field: field0, region,
-				width0: 300, widthMax: 80000, depthMax: beforeTick >= 0 ? beforeTick - t0 : 4000, stall: 150 + 100 * rung });
+			const depthMax = beforeTick >= 0 ? beforeTick - t0 : 4000;
+			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region,
+				width0: 300, widthMax: 80000, depthMax: dmax, stall: 150 + 100 * rung });
+			const runBest = (end) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, depthMax });
+			const mode = LEG_MODE();
+			const t3 = Date.now();
+			let r = mode === 'beam' ? runBeam(wEnd - 3, depthMax) : runBest(mode === 'best' ? wEnd - 3 : t3 + 0.7 * (wEnd - t3));
 			sims += r.sims;
-			tiers.push({ tier: 'leg', ms: Date.now() - t3, status: r.status, passes: r.passes });
+			tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3, status: r.status, passes: r.passes });
+			if (mode === 'mix' && r.status !== 'stopped' && Date.now() < wEnd - 5) {
+				const ub = r.status === 'found' ? Math.min(...r.goals.map((c) => c.depth)) : depthMax + 1;
+				if (ub > 1) {
+					const t5 = Date.now();
+					const r2 = runBeam(r.status === 'found' ? t5 + 0.5 * (wEnd - t5) : wEnd - 3, ub - 1);
+					sims += r2.sims;
+					tiers.push({ tier: 'leg', ms: Date.now() - t5, status: r2.status, passes: r2.passes });
+					if (r2.status === 'found' || r.status !== 'found') { if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail); r = r2; }
+				}
+			}
 			if (r.status === 'found') found = { cands: r.goals, tool: 'leg', proven: false, lbAbs };
 			else {
 				if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
-				if (r.status === 'time') legTime = true;
+				if (r.status === 'time' || r.status === 'depth') legTime = true;
 				if (r.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
 			}
 		}
