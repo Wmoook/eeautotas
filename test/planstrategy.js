@@ -44,7 +44,7 @@ const tests = { rungMs: [400, 800, 1600, 3200], progressMs: 100, watchMs: 200 };
 
 async function runMock(o, lines) {
 	const evs = [];
-	const r = await S.run(L, Object.assign({ file: FILE, seconds: 20, workers: 2, parts: MOCK }, tests, o), (ev) => evs.push(ev));
+	const r = await S.run(L, Object.assign({ file: FILE, seconds: 20, workers: 2, inflight: 1, parts: MOCK }, tests, o), (ev) => evs.push(ev));
 	return { r, evs, of: (k) => evs.filter((e) => e.ev === k) };
 }
 async function sectionA() {
@@ -52,10 +52,11 @@ async function sectionA() {
 	process.env.PLANMOCK_MODE = 'normal';
 	// (a1) to the first route
 	let x = await runMock({ first: true, out: path.join(TMP, 'a1') });
-	const res = x.of('result')[0];
+	const rs = x.of('result'), res = rs[rs.length - 1];
 	const ev = res ? C.evaluate(L, T.masksOf(res.inputs)) : null;
-	check('a route: the key, then (the sealed coin failed and blocked) the trophy; the result event C.evaluate\'d, the end "finish"',
-		x.r.end === 'finish' && !!res && !!ev && ev.runTicks === res.runTicks && ev.complete === res.ticks && x.r.route && T.strOf(x.r.route) === res.inputs, `${x.r.end} ${res ? res.ticks : '-'} ticks`);
+	check('a route: the key, then (the sealed coin failed and blocked) the trophy; the result event C.evaluate\'d (the last: after the polish), the end "finish", the result\'s route',
+		x.r.end === 'finish' && x.r.ok && !!res && !!ev && ev.runTicks === res.runTicks && ev.complete === res.ticks && x.r.route && T.strOf(x.r.route) === res.inputs && x.r.runTicks === res.runTicks,
+		`${x.r.end} ${res ? res.ticks : '-'} ticks, ${rs.length} result event(s)`);
 	const st = x.of('step');
 	const coin = st.filter((s) => s.edge === 'coin');
 	check('the sealed coin: failed at rungs 0, 1, 2, 3 then blocked (4 steps, rising rungs), never run twice at one rung',
@@ -67,8 +68,9 @@ async function sectionA() {
 		src.length === 1 && Number.isFinite(src[0].room) && src[0].gain === 1 && src[0].dist >= 6000 && src[0].dist < 9990 && /^[0-O]+$/.test(src[0].inputs) && x.of('closest').length === 0,
 		JSON.stringify(src.map((s) => ({ room: s.room, dist: s.dist, tick: s.tick }))));
 	const pg = x.of('progress');
-	check('progress events with the page\'s status line (detail "plan N steps: ... · k states · f facts") and the editor\'s fields (states, rooms, layer, workers)',
-		pg.length >= 2 && pg.every((p) => /^plan \d+ steps: /.test(p.detail) && Number.isFinite(p.states) && Number.isFinite(p.layer) && p.workers === 2), pg.length ? pg[pg.length - 1].detail : '-');
+	check('progress events with the page\'s status line (detail "plan: step i/n \'label\' rung r · k anchors · route R (lb B, gap G%)") and the editor\'s fields (states, rooms, layer, workers)',
+		pg.length >= 2 && pg.every((p) => /^plan: (step \d+\/\d+ '[^']+' rung \d|planning)/.test(p.detail) && / · \d+ anchors?/.test(p.detail) && Number.isFinite(p.states) && Number.isFinite(p.layer) && p.workers === 2) &&
+		/route [\d,]+ \(lb [\d,]+, gap [\d.]+%\)/.test(pg[pg.length - 1].detail), pg.length ? pg[pg.length - 1].detail : '-');
 	const fct = x.of('fact');
 	check('fact events for every learnt fact (kind, edge, rung)', fct.length >= 6 && fct.every((f) => f.kind && f.edge !== undefined), fct.map((f) => `${f.kind}:${f.edge}`).join(' '));
 	check('start / model / done events; out/facts.json, anchors.json, events.jsonl, route.eetas written',
@@ -76,7 +78,7 @@ async function sectionA() {
 		fs.readdirSync(path.join(TMP, 'a1')).join(','));
 	check('no bug events on a sound planner', x.of('bug').length === 0, JSON.stringify(x.of('bug')));
 	// (a2) without --first: after the route every edge done or blocked: a deepening, then the end "exhausted"
-	x = await runMock({ first: false, maxDeepen: 1 });
+	x = await runMock({ first: false, maxDeepen: 1, polish: false });
 	check('without --first: the route, then every anchor exhausted: one deepening (rungs reset, budgets x2), then the end "exhausted"',
 		x.r.end === 'exhausted' && x.of('result').length === 1 && x.of('deepen').length === 1 && x.of('deepen')[0].mult === 2, `${x.r.end}, deepen ${x.of('deepen').length}`);
 	const trip2 = x.of('step').map((s) => `${s.edge}|${s.nodeClass}|${s.rung}|${s.epoch}`);
@@ -121,6 +123,43 @@ async function sectionA() {
 	const after = evs.slice(idx).filter((e) => e.ev === 'step');
 	check('stdin "depth 5": no anchor past tick 5 picked after it (a route through it is longer: a proof)', after.length >= 3 && after.every((e) => e.anchor === 1), `${after.length} steps, anchors ${[...new Set(after.map((e) => e.anchor))].join(',')}`);
 	check('stdin "stop": the end "stopped"', r4.end === 'stopped', r4.end);
+	// (a5) T-STALL: an executor that never reaches anything: every step changes a fact, no triple twice in an epoch, the
+	// end 'exhausted' well within the budget
+	process.env.PLANMOCK_MODE = 'fail';
+	const t5 = Date.now();
+	x = await runMock({ first: false, seconds: 30, maxDeepen: 2 });
+	const st5 = x.of('step'), fc5 = x.of('fact');
+	const trip5 = st5.map((s) => `${s.edge}|${s.nodeClass}|${s.rung}|${s.epoch}`);
+	check('T-STALL a failing executor: a fact after every step (facts change every step), no bug, no triple twice in an epoch',
+		st5.length >= 8 && fc5.length === st5.length && x.of('bug').length === 0 && new Set(trip5).size === trip5.length, `${st5.length} steps, ${fc5.length} facts: ${trip5.join(' ')}`);
+	check('T-STALL a failing executor: the key blocked after its 4 rungs in each epoch, 2 deepenings, the end "exhausted" within the budget (no route, the report says why)',
+		x.r.end === 'exhausted' && !x.r.ok && x.of('deepen').length === 2 && (Date.now() - t5) / 1000 < 30 && /no route \(end exhausted\)/.test(x.r.why || '') && x.of('done')[0].why,
+		`${x.r.end} after ${((Date.now() - t5) / 1000).toFixed(1)} s, deepen ${x.of('deepen').length}: ${x.r.why}`);
+	// (a6) T-STALL branch and bound: after the route, the key's anchor offers a 'detour' whose lb (1e6) cannot beat it:
+	// never run; the anchor exhausted by the bound
+	process.env.PLANMOCK_MODE = 'bnb';
+	x = await runMock({ first: false, maxDeepen: 0, polish: false });
+	const det = x.of('step').filter((s) => s.edge === 'detour');
+	const dn = x.of('done')[0];
+	check('T-STALL B&B: after the route, a plan whose lb cannot beat it (anchor run ticks + lb >= the route\'s) is not run; counted in the done event',
+		x.r.ok && det.length === 0 && dn && dn.bnbPlans >= 1 && x.r.end === 'exhausted', `${det.length} detour steps, bnbPlans ${dn && dn.bnbPlans}, end ${x.r.end}`);
+	check('T-STALL B&B: the report: lb from the planner\'s admissible lowerBound, gap = run ticks - lb', x.r.lb > 0 && x.r.gap === x.r.runTicks - x.r.lb && dn.lb === x.r.lb && dn.gap === x.r.gap,
+		`lb ${x.r.lb}, run ${x.r.runTicks}, gap ${x.r.gap}`);
+	// (a7) T-STALL the stuck planner: the stall event prints WHY (the last steps, the most progress, the planner's explain)
+	process.env.PLANMOCK_MODE = 'stuck';
+	x = await runMock({ first: false, stallWindowS: 1, stallS: 3, seconds: 20 });
+	const s7 = x.of('stall')[0];
+	check('T-STALL the watchdog\'s stall prints its cause: the window, the anchors, the most progress, the last steps, the planner\'s explain()',
+		!!s7 && /no new state and no fact changed for \d+ s: \d+ anchors, the most progress: anchor \d+/.test(s7.why) && Array.isArray(s7.lastSteps) && s7.lastSteps.length > 0 && /mock planner/.test(s7.why) && typeof s7.explain === 'string',
+		s7 ? s7.why.slice(0, 200) : 'none');
+	// (a8) steps in flight: with inflight 2 the sealed coin and the trophy run side by side (different edges)
+	process.env.PLANMOCK_MODE = 'normal';
+	process.env.PLANMOCK_DELAY = '150';
+	x = await runMock({ first: true, inflight: 2 });
+	delete process.env.PLANMOCK_DELAY;
+	const st8 = x.of('step'), pl8 = x.of('plan');
+	check('steps in flight: with inflight 2 two steps of different edges run at once (the coin and the trophy from the key\'s anchor), the route found before the coin is blocked',
+		x.r.ok && st8.some((s) => s.edge === 'trophy' && s.ok) && st8.filter((s) => s.edge === 'coin').length < 4, `${st8.map((s) => `${s.edge}${s.ok ? '+' : '-'}`).join(' ')}; plans ${pl8.length}`);
 }
 function sectionB() {
 	console.log('(b) src/plan.js end to end (mock parts through --parts)');
