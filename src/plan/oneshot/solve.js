@@ -582,7 +582,15 @@ function graphOf(g, L) {
 		edgesOf(sim) {
 			const k = T.tileOf(sim, W, H) * 8 + 'GWCZBAD'.indexOf(clsOf(sim, L.flags));
 			const a = byKey.get(k);
-			return a ? a.map((e) => ({ masks: dec(e) })) : [];
+			if (!a) return [];
+			const out = [];
+			for (const e of a) {
+				const m = dec(e);
+				out.push({ masks: m });
+				// (the landing hop part 2 verified from the representative: the jump bit on the edge's last tick)
+				if (e.hop) { if (!e.hopMasks) { e.hopMasks = Uint8Array.from(m); e.hopMasks[m.length - 1] |= 1; } out.push({ masks: e.hopMasks }); }
+			}
+			return out;
 		},
 		stats: () => ({ sups: g.sups.length, edges: g.edges.length, keyed: byKey.size }),
 	};

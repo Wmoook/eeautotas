@@ -30,7 +30,18 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 	out.setupMs = Date.now() - t0;
 	const OS = require(path.join(root, 'src/plan/oneshot/solve.js'));
 	const trace = opt('trace', '0') !== '0';
-	const os = OS.createOneShot(L, { model, planner, bounds, emit: trace ? (ev) => console.error(JSON.stringify(ev)) : null });
+	// (--graph=1: part 2's whole-level move graph (src/plan/oneshot/edges.js buildGraph) as the solver's graph edges, its
+	// build within the seconds; --graphThreads, --cache=<dir>)
+	let graph = null;
+	if (opt('graph', '0') !== '0') {
+		const tg = Date.now();
+		try {
+			const g = await require(path.join(root, 'src/plan/oneshot/edges.js')).buildGraph(String(file), { threads: +opt('graphThreads', 4) || 4, cache: opt('cache', '') || null });
+			graph = OS.graphOf(g, L);
+			out.graph = Object.assign({ ms: Date.now() - tg, cached: !!(g.stats && g.stats.cached) }, graph ? graph.stats() : {});
+		} catch (e) { out.graphErr = e.message; }
+	}
+	const os = OS.createOneShot(L, { model, planner, bounds, graph, emit: trace ? (ev) => console.error(JSON.stringify(ev)) : null });
 	const left = seconds * 1000 - (Date.now() - t0);
 	let r = null;
 	const slice = +opt('slice', 0) || 0;
