@@ -454,7 +454,7 @@ const decode = (code, len) => { const a = new Array(len); for (let k = len - 1; 
 // are capped too (the library's and the arrivals' coasts at FAST_LIB_COAST / FAST_AT), so every exact landing found is
 // a short one; the hits are then replayed in order of their ticks (the first that finishes is the fastest found).
 const FAST_K = 22, FAST_COAST = 30, FAST_NODES = 2e8, FAST_NODES_MIN = 2e7, FAST_NS = 2.5e6, FAST_LIB_COAST = 40, FAST_AT = 48, FAST_ANCHORS = 48;
-const BRAKE_L = [2, 1, 0], BRAKE_R = [0, 1, 2], FAST_SLACK = 12, FAST_OVER_MS = 8000, FAST_STEPS = [0, 2];
+const BRAKE_L = [2, 1, 0], BRAKE_R = [0, 1, 2], FAST_SLACK = 12, FAST_OVER_MS = 8000, FAST_STEPS = [0, 2], FAST_OLD = 0.4;
 /** the least distance a ball at lateral speed v (|v| in 1/1024 px/tick steps, rounded down) travels before its speed
  *  is exactly 0, braking with the opposite input every tick (a lower bound for every input word: the model) */
 let STOP_TABLE = null;
@@ -721,8 +721,17 @@ async function realizeOn(ctx, t, st, F0, side, o, res, emit) {
 	// (the pieces add up within one binade of doubles: the stretch cut to it)
 	const fl = { py: floor.py, lo: Math.max(floor.lo, g.base), loOpen: floor.lo >= g.base ? floor.loOpen : false, hi: Math.min(floor.hi, g.top - 1), hiOpen: floor.hi <= g.top - 1 ? floor.hiOpen : false };
 	const restsBy = new Map();
-	// (fast: the rests braked from the attempts' moving states, once: FAST RESTS above)
+	// (fast: FIRST the coasted rests as before with FAST_OLD of the time left (the route to fall back on: the fast pass
+	// alone found none on one compile's attempt of the precision puzzle, where the coasted rests did), then the rests
+	// braked from the attempts' moving states (FAST RESTS above) with the rest, for a faster one; then the coasted rests
+	// again with what is left when neither found one)
 	let FF = null;
+	if (o.fast) {
+		const d0 = o.deadline, oOld = Object.assign({}, o, { fast: false, deadline: Math.min(d0, Date.now() + (d0 - Date.now()) * FAST_OLD) });
+		await realizeOn(ctx, t, st, F0, side, oOld, res, emit);
+		if (Date.now() > d0 || (o.stopped && o.stopped())) return;
+		o = Object.assign({}, o, { firstOnly: false });
+	}
 	if (o.fast) {
 		const fa = movingAnchorsOf(ctx, st.states, F0.floor).filter((A) => (side === 'right' ? A.px > t.x : A.px < t.x));
 		// (the braking search's share: FAST_NS model ticks a second of the stage's budget, within FAST_NODES_MIN..MAX)
@@ -737,6 +746,7 @@ async function realizeOn(ctx, t, st, F0, side, o, res, emit) {
 			const why = await realizeStep(ctx, t, st, FF, side, o, res, emit, g, fl, FF.rests, GROW[step], step);
 			if (res.routes.length || why !== 'exhausted' || Date.now() > o.deadline || (o.stopped && o.stopped())) return;
 		}
+		if (res.routes.length) return;
 		o = Object.assign({}, o, { fast: false });
 	}
 	for (let step = 0; step < GROW.length; step++) {

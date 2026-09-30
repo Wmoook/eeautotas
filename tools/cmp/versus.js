@@ -78,6 +78,24 @@ function main() {
 		};
 		seg(sa, oa, 'ours ');
 		seg(sb, ob, 'known');
+		if (opt.lead !== undefined) {
+			// THE LEAD CURVE: every `lead` ticks of the known route (default 50) the first tick of ours (after the previous
+			// match: monotone) whose ball is within R px (--r, 24) of the known ball there; the lost ticks per stretch
+			const step = +opt.lead > 0 ? +opt.lead : 50, R = +opt.r > 0 ? +opt.r : 24;
+			let j = 0, prevK = 0, prevJ = 0;
+			const rows = [];
+			for (let k = step; k < sb.length; k += step) {
+				const b = sb[k];
+				let m = -1;
+				for (let q = j; q < sa.length; q++) { const a = sa[q]; if (Math.abs(a.x - b.x) <= R && Math.abs(a.y - b.y) <= R) { m = q; break; } }
+				if (m < 0) { rows.push(`  known ${String(k).padStart(5)} (${((b.x + 8) >> 4)},${((b.y + 8) >> 4)}) ours: never after ${j}`); continue; }
+				const lost = (m - prevJ) - (k - prevK);
+				rows.push(`  known ${String(k).padStart(5)} (${String((b.x + 8) >> 4).padStart(3)},${String((b.y + 8) >> 4).padStart(3)}) ours ${String(m).padStart(5)} behind ${String(m - k).padStart(5)} this stretch ${lost >= 0 ? '+' : ''}${lost}  ours ${census(sa, prevJ, m).idle}i/${census(sa, prevJ, m).jumpPress}j known ${census(sb, prevK, k).idle}i/${census(sb, prevK, k).jumpPress}j`);
+				prevK = k; prevJ = m; j = m;
+			}
+			console.log(`lead curve (every ${step} known ticks, within ${R} px):`);
+			console.log(rows.join('\n'));
+		}
 		if (opt.trace) {
 			const [a, b] = String(opt.trace).split('-').map(Number);
 			for (let t = a; t <= b; t++) {

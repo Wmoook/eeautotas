@@ -32,6 +32,9 @@ const T = require('./types.js');
 const X = require('./exact.js');
 
 const SNAP = 32;
+// the loop cuts of the mutation pass (mutatePass, LOOP CUTS)
+const LOOPS_ON = process.env.EEAT_POLISH_LOOPS !== '0' && process.env.EEAT_PERFECT !== '0';
+const LOOP_MIN = 24, LOOP_R = 12, LOOP_V = 1.5, LOOP_K = 3, LOOP_GAP = 8, LOOP_D = [-1, 0, 1];
 
 /** the route's replay: per tick its state hash, snapshots every SNAP ticks, the latest tick of each hash */
 function traceRoute(L, masks) {
@@ -81,6 +84,25 @@ function mutatePass(L, masks, o) {
 	const shortcuts = [];
 	let ticks = 0;
 	const from = Math.max(0, o.from | 0);
+	// LOOP CUTS (n5-perfect, versus the best known: the compiled routes' LOOPS, e.g. The Blank Page's (53, 56) at t900 and
+	// again at t1360, a fall into the portal pit at (46, 81) back up between: 440 ticks the known route never spends): a
+	// later route tick b where the ball is back within LOOP_R px of S(t) at a like speed (|dvx| + |dvy| <= LOOP_V, the
+	// same gravity), b - t >= LOOP_MIN: the route's inputs from b + d (d in LOOP_D) played from S(t), with the same exact
+	// rejoin rule (a state equal to a LATER route state: a proven shortcut) and re-anchoring as every move; the latest
+	// LOOP_K partners of t (the longest cuts first). o.loops false / EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: none.
+	const loopsOn = o.loops !== undefined ? !!o.loops : LOOPS_ON;
+	const loopPartners = (t) => {
+		const out = [];
+		if (!loopsOn) return out;
+		for (let b = n - 1; b >= t + LOOP_MIN && out.length < LOOP_K; b--) {
+			if (G[b] !== G[t] || Math.abs(PX[b] - PX[t]) + Math.abs(PY[b] - PY[t]) > LOOP_R) continue;
+			if (Math.abs(VX[b] - VX[t]) + Math.abs(VY[b] - VY[t]) > LOOP_V) continue;
+			// (one partner per LOOP_GAP ticks: the next is another pass, not the same one a tick apart)
+			if (out.length && out[out.length - 1] - b < LOOP_GAP) continue;
+			out.push(b);
+		}
+		return out;
+	};
 	// (o.ranges: [a, b) spans of start ticks to search, in order; else every tick from o.from)
 	const ranges = Array.isArray(o.ranges) && o.ranges.length ? o.ranges : [[from, n - 1]];
 	const seen = new Set(), seenB = new Set();
@@ -104,14 +126,16 @@ function mutatePass(L, masks, o) {
 				if (t + 2 <= n) moves.push([a, t + 2]);
 			}
 			if (t + 3 <= n) moves.push([masks[t + 2], t + 3]);
+			for (const b of loopPartners(t)) for (const d of LOOP_D) { const k = b + d; if (k > t + 2 && k < n) moves.push([masks[k], k + 1, 1]); }
 			seenB.clear();
-			for (const [a, r0] of moves) {
+			for (const [a, r0, isLoop] of moves) {
 				ws.restore(sT);
 				E.applyMask(inp, a); ws.tick(inp); ticks++;
-				// (the first state after the change: once per state and t)
+				// (the first state after the change: once per state and t; a loop cut once per state and continuation)
 				const h1 = ws.stateHash();
-				if (seen.has(h1)) continue;
-				seen.add(h1);
+				const sk = isLoop ? h1 + ':' + r0 : h1;
+				if (seen.has(sk)) continue;
+				seen.add(sk);
 				stack.length = 0;
 				stack.push({ snap: null, q: 1, r: r0, segs: [], anchors: ANCH });
 				while (stack.length) {
