@@ -561,8 +561,8 @@ ways in.
   found in 2.7 s vs 7.1 s median. THE WIDE CONFIG IN THE COMPILE (`EEAT_CORRIDOR=1 EEAT_CORR_FIELDS=1 EEAT_CORR_MIN=0
   EEAT_CORR_REPLACE=1 EEAT_CORR_SHARE=0.7 EEAT_CORR_MS=15000` vs `EEAT_CORRIDOR=1`, the same 25 levels, 120 s, W3, box 6,
   one run an arm, side by side): compiled **13 vs 15** (+ Tutorial 3 2,327, + Christmas Town 4,185 (STUCK-FIELD); none
-  lost), the 13 both 53,787 vs 53,837 run ticks (faster 6: Tutorial 1 1,867 vs 2,254, INFINITE 2,842 vs 3,216, Frostbitten
-  7,973 vs 8,753, Fish Gods 3,660 vs 4,083; slower 5: Crypts of Anubis 4,091 vs 3,309, Trick Or Treat 5,229 vs 4,339, K
+  lost), the 13 both 53,787 vs 53,837 run ticks (faster 7: Tutorial 1 1,867 vs 2,254, INFINITE 2,842 vs 3,216, Frostbitten
+  7,973 vs 8,753, Fish Gods 3,660 vs 4,083; slower 6: Crypts of Anubis 4,091 vs 3,309, Trick Or Treat 5,229 vs 4,339, K
   Underground 2,725 vs 2,343). Not yet: its replicate, a full compile, 300 s.
   Still failing (the chain set): long routes (480+ ticks 60.9%: the clock), precision staircases (celeste's half-block
   steps: 52-tick chains, every copy), boost / portal chains the held-mask fans do not make.
