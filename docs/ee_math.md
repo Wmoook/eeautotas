@@ -1270,34 +1270,38 @@ start y where the move is ONE add and stays; vy = 0), a member: the base member 
 trace to b, the blocked y at b, the fall from it (gravTrace(y_b, 0)): still a closed form of the tables. The tube
 checks the ceiling over the box at b (at the first sub-step, the raw or the aligned x) and the box free under it
 (`lnd.bonk`). Only lines where a ceiling can be: a blocking tile (solid, half) in row cr over the columns the hold
-tables reach at b, with the row under it free there (a thick ceiling's inner rows are no bonk line). The cost rule:
-the variants' items come after every member without a bonk at the same T (sk + 1e5), take a quarter of an item's node
-share, and spend a node pool of their own (`o.bonkNodes` 100 k): the other members keep the whole budget they had, so
-no leg the members solved is lost to the variants (a first version sharing the pool lost 129 legs for 316 won on a
-partial run). Every candidate is replayed by the engine as before. `o.landBonk` (default on,
-`EEAT_MSOLVE_LANDBONK=0` off); `member` names them `...>jump@j2>bonk<cr>@<b>`.
+tables reach at b, with the row under it free there (a thick ceiling's inner rows are no bonk line). THE COST RULE:
+a SECOND PASS. The variants' items run only for a leg the members left unsolved, after them, on a node pool of their
+own (`o.bonkNodes` 100 k; a quarter of an item's node share each) and the tier's clock: a leg the members solve costs
+exactly what it did without the variants. Two versions before it lost on the way: interleaved by T with the members'
+items and sharing their pool, 129 legs lost for 316 won (a partial run); on a pool of their own but still interleaved
+(0 lost, 72 answers shorter through a bonk) the compiler's math tier spent its clock on the variants' items below the
+members' answers (the shared gate's MIHB's Dream side by side 20 vs 27 triggers; on the 4 rerun levels the tier's plain
+legs 34 vs 66): the shorter answers are given up for the time. Every candidate is replayed by the engine as before.
+`o.landBonk` (default on, `EEAT_MSOLVE_LANDBONK=0` off); `member` names them `...>jump@j2>bonk<cr>@<b>`.
 
 **Measured** (box 3, `tools/math/msolve_air.js --arms=bonk --every=3`: the legs of 4.11, every 3rd flight move, the
-plain tier alone, the variants on vs off in one process, every answer replayed again by a separate EESim):
+plain tier alone, the variants on vs off in one process, every answer replayed again by a separate EESim; the final
+code):
 
 | airborne start -> the support 2 moves on | legs | solved on / off | <= route on / off | < route (on) |
 |---|---:|---|---|---:|
-| **all** | 5,170 | **66.6% / 58.0%** | **61.6% / 53.0%** | 19.5% |
-| hop > hop | 1,768 | 86.3% / 75.4% | 80.9% / 69.6% | 9.3% |
-| hop > jump | 506 | 82.2% / 66.4% | 76.1% / 60.3% | 56.1% |
-| jump > hop | 465 | 83.9% / 68.4% | 79.8% / 64.7% | 14.6% |
-| jump > jump | 311 | 76.8% / 65.3% | 71.4% / 60.8% | 59.2% |
-| fall > jump | 203 | 78.3% / 66.0% | 66.0% / 53.2% | 43.8% |
-| fall > hop | 200 | 73.0% / 61.0% | 66.5% / 54.0% | 12.5% |
-| fall > fall | 309 | 70.2% / 69.6% | 63.1% / 62.8% | 12.9% |
+| **all** | 5,170 | **66.6% / 58.0%** | **60.9% / 53.0%** | 18.9% |
+| hop > hop | 1,768 | 86.3% / 75.4% | 80.4% / 69.6% | 8.7% |
+| hop > jump | 506 | 82.2% / 66.4% | 74.9% / 60.3% | 55.3% |
+| jump > hop | 465 | 83.9% / 68.4% | 79.1% / 64.7% | 13.5% |
+| jump > jump | 311 | 76.8% / 65.3% | 70.7% / 60.8% | 58.5% |
+| fall > jump | 203 | 78.3% / 66.0% | 62.1% / 53.2% | 40.9% |
+| fall > hop | 200 | 73.0% / 61.0% | 65.0% / 54.0% | 12.5% |
+| fall > fall | 309 | 70.2% / 69.6% | 63.1% / 62.8% | 12.6% |
 | hop > fall | 213 | 66.2% / 64.8% | 59.2% / 58.2% | 21.1% |
 | hop > arrow / dot, jump > arrow | 696 | 6.6-12.6% / 6.6-12.6% | | |
 
-**0 answers rejected** by the independent replay; 441 legs solved only with the variants, **0 only without**; of the
-3,001 both solved, 72 shorter with them, 0 longer. The time a leg (the loaded box, load 130-160 of 192): median 29 ms vs
-6.2 ms, p90 514 ms vs 382 ms (the variants' items below the answer's T; a failing leg spends the variants' own pool
-too). Left (the on arm's failures: no plain candidate 1,423, the node budget 247, not plain 58): the field crossings
-(> arrow, > dot: the field / coupled tiers'), 3+ input changes (K = 2), a second landing and act, walls.
+**0 answers rejected** by the independent replay; 441 legs solved only with the variants, **0 only without**; the 3,001
+both solved the same T in every one (the second pass). The time a leg (box 3 under the other lanes' load): median 6.5 ms
+vs 3.6 ms, p90 348 ms vs 280 ms (a failing leg also spends the variants' pool). Left (the on arm's failures: no plain
+candidate 1,423, the node budget 247, not plain 58): the field crossings (> arrow, > dot: the field / coupled tiers'),
+3+ input changes (K = 2), a second landing and act, walls.
 
 ## 5 Admissible leg bounds: the event graph
 
