@@ -67,6 +67,25 @@ function compileModel(L, o = {}) {
 	let deathT = 0;
 	for (let i = 0; i < N; i++) if (DEATH_DOORS.has(fg[i])) deathT = Math.max(deathT, lk[i]);
 	if (deathT > 0) featSet.add('deaths');
+	// THE CRUMBS (doctor 9, n5): coins no gate reads are the designer's breadcrumbs: every known route of a level whose
+	// only relevant trigger is the trophy (or a far key) passes them (On And On And On: 5 coins, legs 383-693 ticks; EX
+	// Crew Fall of Zeal: 28 coins, legs 54-924), while the whole-level leg they cut is out of the finders' reach (Fall of
+	// Zeal's trophy field climbs 212 tiles along its route, 6,174 of its 8,089 ticks above the running min: the skeleton's
+	// level-set descent cannot follow it; from the route's own states 4 of 5 of its coin legs and 5 of 5 of On And On's
+	// are found at rung 1-2). With the knob the coins are a feature of the state (their count and the tiles taken), so each
+	// is a trigger the planner's plans and near plans reach and an arrival at one is progress (gain) the strategy goes on
+	// from; no gate reads them, so the lb and the proofs are unchanged. At most CRUMB_MAX coin tiles (a larger taken map
+	// costs the plan search more than the relays give). OPT-IN EEAT_CRUMBS=1 (off: the model as before).
+	// The crumbs are relevant (a touch changes the state) but marked X.crumb: the planner's plan search leaves them out
+	// (its plans are the ones without the knob) and offers the NEAREST crumb as a plan of its own (planner.js crumbPlan).
+	const crumbFeats = new Set();
+	if (process.env.EEAT_CRUMBS === '1') {
+		const CRUMB_MAX = +process.env.EEAT_CRUMB_MAX || 64;
+		let nc = 0, nb = 0;
+		for (const [, kind] of A.special) { const k = KIND_OF[kind] || kind; if (k === 'coin') nc++; else if (k === 'bcoin') nb++; }
+		if (nc > 0 && nc <= CRUMB_MAX && !featSet.has('coins')) { featSet.add('coins'); crumbFeats.add('coins'); }
+		if (nb > 0 && nb <= CRUMB_MAX && !featSet.has('bcoins')) { featSet.add('bcoins'); crumbFeats.add('bcoins'); }
+	}
 	const feats = [...featSet].sort();
 	const fIdx = new Map(feats.map((f, n) => [f, n]));
 	const hasCoinGate = { coins: false, bcoins: false };
@@ -147,7 +166,7 @@ function compileModel(L, o = {}) {
 		else if (feat === 'psw:*') relevant = feats.some((f) => f.startsWith('psw:'));
 		else if (feat === 'osw:*') relevant = feats.some((f) => f.startsWith('osw:'));
 		else if (feat) relevant = featSet.has(feat);
-		triggers.push({ id, kind, tiles, feat, param, label: labelOf(kind, param, x0, y0) + (tiles.length > 1 ? ` x${tiles.length}` : ''), relevant, coins: null });
+		triggers.push({ id, kind, tiles, feat, param, label: labelOf(kind, param, x0, y0) + (tiles.length > 1 ? ` x${tiles.length}` : ''), relevant, coins: null, crumb: !!(feat && crumbFeats.has(feat)) });
 	}
 	// coin tiles (only where the count is read): index per tile, per component its indices
 	const coinIdx = new Int32Array(N).fill(-1), bcoinIdx = new Int32Array(N).fill(-1);
