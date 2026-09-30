@@ -111,6 +111,20 @@ const COVER_RUNG = process.env.EEAT_COVER_RUNG !== undefined ? +process.env.EEAT
 // finders' 24: a run-up can go 50 tiles away from both, K Underground's checkpoint (87,44) turns at (18,46)); 0 = no region)
 const COVER_M = process.env.EEAT_COVER_M !== undefined ? Math.max(0, +process.env.EEAT_COVER_M || 0) : 64;
 const COVER_SLOT = process.env.EEAT_COVER_SLOT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_COVER_SLOT || 0)) : 0.4;
+// THE CLOSEST IN THE WAYPOINT'S UNIT (doctor 7, n5-doc-7): OPT-IN EEAT_CLOSEST_UNIT=1. A call with no goal field (none fit
+// its time: fieldFits, the field's measured build time x N over 0.4 of what is left) ran its finders on field null, and a
+// finder's distance with no field is 0 for every state (legs.js distOf(null) = 0: the ranking by the tick alone), so the
+// call's closest was its first child, ONE tick past the start, "closest 0 tiles". The skeleton's last leg to the waypoint
+// from the starts (both sub-legs failed at the first level: stuck at the starts) gets what is left of the call (53 ms on
+// EXPro Forgotten Veil's coin (13,110) at rung 0: a 400x200 level whose field needs more), and its report was returned
+// as the call's: 15 of 226 failing steps of doctor 7's 19 levels (60 s) read "closest 0" at the anchor's own tile. The
+// strategy read it as a near miss: the relay set at a state 1 tick from the anchor with dist 0 (then dropped with the
+// floor below 0: no relay ever again for that (anchor, edge)), the trophy's precision landing (The Burj: 2 runs of 1.7-3.3
+// s from a state 150+ tiles from the trophy, "no target"), the planner's est walls and cuts at the anchor's own tile.
+// On: (1) the finders' closest is noted only when the call has a goal field (else the start, by the all-open field, as
+// for a call that got nowhere); (2) the skeleton's last leg from the starts reports its closest re-measured on the
+// waypoint's field f0 (skelClosest), like the skeleton's other failures. Off = the executor byte for byte as before.
+const CLOSEST_UNIT = () => process.env.EEAT_CLOSEST_UNIT === '1';
 const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
 const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EEAT_COARSE_RUNG : 1;
 // THE RATE RULE (COMPILE-ALL lane 6, block 4): before the compile's first route the strategy marks its steps' budgets fast;
@@ -609,6 +623,8 @@ function makeCore(L, co) {
 		let closest = { dist: -1, masks: null };
 		const noteClosest = (dist, sIdx, tail) => {
 			if (!(dist >= 0) || tail === null || sIdx < 0) return;
+			// (no goal field in this call: every finder's distance was 0, no measure: CLOSEST_UNIT above)
+			if (field0 === null && CLOSEST_UNIT()) return;
 			if (closest.dist < 0 || dist < closest.dist) closest = { dist, masks: T.concat(starts[sIdx].masks, tail) };
 		};
 		// -------- tier 0b: THE EXACT END SEARCH from a NEAR state (within NEAR_T tiles of the goal by the goal field): a later
@@ -824,7 +840,8 @@ function makeCore(L, co) {
 					// (measured again in the finders' unit, field0's tiles: the primitives' own number is another field's (or
 					// the bound's ticks), and the smaller number of two units made the closest the start in every compile)
 					const m = nr.closest.masks instanceof Uint8Array ? nr.closest.masks : T.masksOf(nr.closest.masks);
-					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
+					// (no goal field in this call: the primitives' number is their own unit's, no measure: CLOSEST_UNIT)
+					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : field0 === null && CLOSEST_UNIT() ? -1 : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
 					if (d >= 0 && (closest.dist < 0 || d < closest.dist)) closest = { dist: d, masks: m };
 				}
 			} catch (e) { tiers.push({ tier: 'prims', error: String(e && e.message || e) }); }
@@ -2123,7 +2140,10 @@ async function createExecutor(L, opts) {
 		// (the last leg to the waypoint itself, from the deepest arrivals reached)
 		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline, stop: budget.stop, next: budget.next || null });
 		// (a failure after sub-legs is no proof: the time was split)
-		if (cur === startStrs) { if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }); return r; }
+		if (cur === startStrs) {
+			if (!r.ok && levels.length && r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' }, CLOSEST_UNIT() ? { closest: skelClosest(r.fail.closest, startStrs, f0) } : {});
+			return r;
+		}
 		// (the arrivals' legs are the whole way from the step's own starts: the start that prefixes each)
 		if (r.ok) {
 			r.legs = r.arrivals.map((a) => {
