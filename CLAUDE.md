@@ -487,6 +487,15 @@ ways in.
   (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
   Find a route's OPT-IN strategy `plan` ("the planner (compile)", `EEAT_PLAN=1` or the solve body's `plan: true`; off = main's
   strategies, arguments and events byte for byte).
+- **The tricks** (`src/plan/tricks.js`, `EEAT_TRICKS`: unset = its DEFAULT, `0` none, `1` all, a comma list, `+name` /
+  `-name` on top of the default): the known routes' own tricks as general derivations. **On by default: `idle`** (polish.js
+  idleShift: a rest of the route cut, the clock kept by idle ticks before the first input: time-door levels; INFINITE
+  3,790 -> 3,377 in the compile A/B). Opt-in: `airjump` / `frame` / `fentry` (msolve.js: air jumps, the arrow-field frame
+  tier, the field-entry composition), `fseed` / `fpull` (fieldsolve.js), `chaintricks` (the chain tier with them),
+  `warp` / `exh` / `chain` (planner.js / model.js: the death warp, exhausted -> death, forced boost lanes). The move tricks
+  never take a leg's answer away (leg() runs every tier as without them, below a trick's answer: `bres`); they solve
+  more of the routes' own moves (tools/tricks/legab.js, fieldlegs.js) but not more compiles (25 vs 25 of 48 at 300 s).
+  Mining tools: `tools/tricks/` (mine.js, fieldmine.js, legab.js, fieldlegs.js), `tools/cmp/tricks3.js`, `idleshift.js`.
 - **Where it stands** (the final compile, 2026-09-30, box 3, 60 s, `--workers=3`): **16 / 230 compile at 60 s** (campaign 9 / 203,
   hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2), **24 / 230 at <= 180 s**; the same code's 60-s runs 13-17 (the run-to-run
   spread); every .eetas replayed from the level alone; median ticks / best known 1.26, a few at or under the best known
