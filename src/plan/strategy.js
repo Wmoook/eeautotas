@@ -550,7 +550,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
 	let cur = null;   // the last plan (the page's line)
 	const bug = (what, o) => { bugs++; say(Object.assign({ ev: 'bug', what }, o || {})); };
-	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A), qual: A.qual || null });
+	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A), qual: A.qual || null, via: A.edgeVia || null });
 	/** an anchor that cannot lead to a route that beats the bounds: every arrival's run ticks already at the B&B bound, or
 	 *  its ticks at the depth bound (proofs: a route through it is at least that long) */
 	const uselessA = (A) => {
@@ -731,6 +731,74 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return fs2;
 	};
 	const failOf = (res, budget) => (res && res.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level };
+	// ---- THE LEG TRANSPLANT (n5 doctor b9; OPT-IN EEAT_PLAN_TRANSPLANT=1, else as before): the anchors of a level of
+	// independent sub-goals diverge into lineages (Bad EE Level 9, 600 s: {1,2,4}+5 and {1,2,3,4}+5), and every lineage
+	// searches the same mini again from scratch (switch 5's ladder mini found 4 times, 121 of its 271 worker-s, each at
+	// rung 2-3). Every verified leg of a trigger step (its arrival's inputs past its start) is kept per edge (the newest
+	// TP_LEGS); a later step of that edge first REPLAYS the kept legs from each of its starts (the engine, the waypoint's own
+	// goal test each tick): a leg that meets the goal is the step's arrival (verified again like any executor arrival, from
+	// the level start), and the executor is not called. Offline on that 600-s run: 5 of 21 (anchor, leg) pairs met the goal
+	// as they stand (switch 5's leg from 3 other anchors, switch 6's from 2). Exact (every arrival the engine's replay);
+	// ~a few thousand ticks a step
+	const TRANSPLANT = process.env.EEAT_PLAN_TRANSPLANT === '1';
+	const TP_LEGS = 6, TP_MAX = 4000;
+	const legLib = new Map();   // step.edge -> [leg mask strings], newest first
+	let tpHits = 0, tpTries = 0;
+	const tpSim = new E.EESim(L), tpInp = new E.EEInput();
+	const tpOk = (wp) => wp && wp.kind === 'trigger' && !wp.allowDeath && !(Number.isFinite(+wp.beforeTick)) && wp.beforeRel === undefined;
+	const libAdd = (step, wp, arr, starts, res) => {
+		if (!tpOk(wp) || step.synthetic) return;
+		arr.forEach((a, i) => {
+			const masks = a.masks instanceof Uint8Array ? a.masks : T.masksOf(a.masks);
+			const { s } = startOf(starts, masks, i, res);
+			if (!s || masks.length <= s.masks.length || masks.length - s.masks.length > TP_MAX) return;
+			const leg = T.strOf(masks.subarray(s.masks.length));
+			const list = legLib.get(step.edge) || [];
+			if (list.includes(leg)) return;
+			list.unshift(leg);
+			if (list.length > TP_LEGS) list.length = TP_LEGS;
+			legLib.set(step.edge, list);
+		});
+	};
+	/** the kept legs of step's edge replayed from each start: a StepResult (ok, the arrivals) or null */
+	const transplant = (step, wp, starts) => {
+		if (!tpOk(wp) || step.synthetic) return null;
+		const list = legLib.get(step.edge);
+		if (!list || !list.length) return null;
+		const t0 = Date.now();
+		const goal = T.goalOf(L, wp);
+		const out = [], legs = [];
+		for (let si = 0; si < starts.length && out.length < ARRIVALS_K; si++) {
+			const s = starts[si];
+			for (const str of list) {
+				if (out.length >= ARRIVALS_K) break;
+				tpTries++;
+				let ok = false;
+				try { tpSim.reset(); tpSim.restore(s.snap); ok = !s.hash || tpSim.stateHash() === s.hash; } catch (e) { ok = false; }
+				if (!ok) { const r = T.playTo(L, s.masks, { allowDeath: true }); tpSim.reset(); tpSim.restore(r.sim.snapshot()); }
+				if (tpSim.is_dead) continue;
+				const leg = T.masksOf(str);
+				let hit = -1;
+				for (let t = 0; t < leg.length; t++) {
+					E.applyMask(tpInp, leg[t] & 31);
+					tpSim.tick(tpInp);
+					if (tpSim.is_dead && !goal.allowDeath) break;
+					if (goal.test(tpSim)) { hit = t + 1; break; }
+				}
+				if (hit < 0) continue;
+				const sm = s.masks instanceof Uint8Array ? s.masks : T.masksOf(String(s.masks));
+				const masks = new Uint8Array(sm.length + hit);
+				masks.set(sm, 0); masks.set(leg.subarray(0, hit), sm.length);
+				if (out.some((x) => x.masks.length === masks.length && T.strOf(x.masks) === T.strOf(masks))) continue;
+				out.push({ masks });
+				legs.push({ start: si, ticks: hit, lb: null, proven: false, tool: 'transplant' });
+			}
+		}
+		if (!out.length) return null;
+		tpHits++;
+		say({ ev: 'transplant', label: labelOf(step), edge: step.edge, arrivals: out.length, ms: Date.now() - t0, hits: tpHits, tries: tpTries });
+		return { ok: true, arrivals: out, tool: 'transplant', ms: Date.now() - t0, legs, lb: null };
+	};
 	/** one job run: exec.reach, verify, learn, anchors; resolves when done */
 	const runJob = async (job) => {
 		const { anchor: A, step, plan } = job;
@@ -754,8 +822,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const t1 = Date.now();
 		steps++;
 		const verBefore = factsVer(facts), anchorsBefore = anchors.size;
-		let res;
-		try { res = await exec.reach(starts, wp, budget); } catch (e) { res = { ok: false, arrivals: [], tool: null, ms: Date.now() - t1, fail: Object.assign(failOf(null, budget), { error: e.message }) }; bug('reach', { error: e.message, label: labelOf(step) }); }
+		let res = TRANSPLANT ? transplant(step, wp, starts) : null;
+		if (!res) {
+			try { res = await exec.reach(starts, wp, budget); } catch (e) { res = { ok: false, arrivals: [], tool: null, ms: Date.now() - t1, fail: Object.assign(failOf(null, budget), { error: e.message }) }; bug('reach', { error: e.message, label: labelOf(step) }); }
+		}
 		if (!res) res = { ok: false, arrivals: [], tool: null, ms: Date.now() - t1, fail: failOf(null, budget) };
 		const { arr, routes } = verified(step, wp, res, starts);
 		const hadArrivals = res.ok && Array.isArray(res.arrivals) && res.arrivals.length > 0;
@@ -766,6 +836,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		for (const r of routes) { const x = routeOf(r.masks, labelOf(step), r.leg); if (x && x.better) route = x.ev; }
 		if (res.ok) {
 			okSteps++;
+			if (TRANSPLANT) libAdd(step, wp, arr, starts, res);
 			for (const a of arr) {
 				const sim = simOf(a);
 				let S2;
