@@ -642,7 +642,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (wp.kind === 'trophy') { wps.push({ kind: 'trophy', label: 'trophy' }); break; }
 			const tiles = wp.tiles ? Array.from(wp.tiles) : [];
 			if (!tiles.length) break;
-			wps.push({ kind: wp.kind, label: wp.label || wp.kind, tiles });
+			wps.push({ kind: wp.kind, label: wp.label || wp.kind, tiles, expect: !!wp.expect });
 		}
 		return wps.some((w) => w.kind !== 'trophy') ? wps : null;
 	};

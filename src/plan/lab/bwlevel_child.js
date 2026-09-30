@@ -201,13 +201,20 @@ try {
 				const k2 = String(M.stateOf(s2).key);
 				if (k2 !== key) { took = { m2, s2, k2 }; break; }
 			}
+			// (a waypoint without an Expect (a region: 'past the yellow key door') changes no model state: its arrival is the leg's end)
+			if (!took && wp.expect === false) {
+				const s2 = new E.EESim(L); s2.reset();
+				const inp = new E.EEInput();
+				for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t] & 31); s2.tick(inp); }
+				if (!s2.is_dead) took = { m2: masks, s2, k2: String(M.stateOf(s2).key) };
+			}
 			if (!took) return { ok: false, why: 'legs: ' + (wp.label || wp.kind) + ': no state change' };
 			prefix = took.m2; lsim = took.s2; key = took.k2;
 			out({ ev: 'arrival', inputs: T.strOf(prefix), label: wp.label || wp.kind, ticks: prefix.length, ms: Date.now() - t0 });
 		}
 		return { ok: false, why: 'legs: none' };
 	};
-	if (!r.ok && wpf && !/bug|target/.test(r.why || '') && ms - (Date.now() - t0) > 10000) {
+	if (!r.ok && wpf && !/bug/.test(r.why || '') && ms - (Date.now() - t0) > 10000) {
 		const wps = readWps();
 		if (wps.length) {
 			const gated = /walk/.test(r.why || '');
