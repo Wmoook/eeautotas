@@ -185,7 +185,8 @@ function solveLeg(L, sim, goal, o = {}) {
 			return false;
 		};
 		const nOpts = opts.length;
-		const gFirst = tiles.map(() => Infinity);   // per goal tile: the earliest tick any gravity option suits it
+		// per goal tile: the earliest tick any gravity option lands on its plane (G) / enters its window
+		const gFirst = tiles.map(() => Infinity), gWin = tiles.map(() => Infinity);
 		for (let oi = 0; oi < opts.length; oi++) {
 			const op = opts[oi];
 			const gp = new Float64Array(maxT + 1), gv = new Float64Array(maxT + 1);
@@ -213,12 +214,15 @@ function solveLeg(L, sim, goal, o = {}) {
 				const [gl, gh] = win(gc), [il, ih] = win(ic);
 				const plane = 16 * gc;
 				for (let T = 1; T <= maxT; T++) {
-					let ok = gp[T] >= gl && gp[T] <= gh;
-					// a landing: the free step of tick T passes the plane toward the pull (the engine stops the box on it)
-					if (!ok && cls === 'G' && T > op.pinned) ok = gSign > 0 ? (gp[T - 1] <= plane && gp[T] > plane) : (gp[T - 1] >= plane && gp[T] < plane);
-					if (!ok) continue;
-					if (T < gFirst[ti]) gFirst[ti] = T;
-					if (op.kind === 'walk' && cls === 'G' && gp[T] !== plane) continue;
+					// in the goal tile's window, or (a support G) a landing on its floor plane: the free step of tick T passes
+					// the plane toward the pull (the engine stops the box on it), or the walk on that floor
+					const inWin = gp[T] >= gl && gp[T] <= gh;
+					let land = false;
+					if (cls === 'G') land = op.kind === 'walk' ? gp[T] === plane : (T > op.pinned && (gSign > 0 ? (gp[T - 1] <= plane && gp[T] > plane) : (gp[T - 1] >= plane && gp[T] < plane)));
+					if (!inWin && !land) continue;
+					if (land && T < gFirst[ti]) gFirst[ti] = T;
+					if (inWin && T < gWin[ti]) gWin[ti] = T;
+					if (op.kind === 'walk' && cls === 'G' && !land) continue;
 					const sols = F.solveAxis(p0[iAxis], v0[iAxis], T, il, ih, I, { k: kMax, limit, maxNodes: 20000, tube: op.tube });
 					res.solves++;
 					for (const s of sols) {
@@ -240,7 +244,10 @@ function solveLeg(L, sim, goal, o = {}) {
 			const [il, ih] = win(ic);
 			const q = p0[iAxis], w = v0[iAxis];
 			const tI = q < il ? F.minTAxis(q, w, il, I, maxT) : (q > ih ? F.minTAxis(q, w, ih, I, maxT) : 0);
-			lb = Math.min(lb, Math.max(tI, gFirst[ti]));
+			// a support G is grounded: on a full-tile floor the box rests on the goal row's plane, reached no sooner than
+			// the first landing tick (a half-block floor rests elsewhere: the window tick then, the weaker bound)
+			const g = cls === 'G' ? (gFirst[ti] < Infinity ? gFirst[ti] : gWin[ti]) : gWin[ti];
+			lb = Math.min(lb, Math.max(tI, g));
 		}
 		res.lb = lb;
 	} else {
