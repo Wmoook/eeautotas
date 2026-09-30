@@ -1006,7 +1006,8 @@ function makeCore(L, co) {
 			const tN = Date.now();
 			const EGm = require('../endgame.js');
 			let Bn = null;
-			try { Bn = X.boundFor(L, nextGoal); } catch (e) { Bn = null; }
+			// (the bound context of the next goal: memoized per goal (exact.js boundFor); not built in the last 200 ms)
+			if (deadline - tN > 200) { try { Bn = X.boundFor(L, nextGoal); } catch (e) { Bn = null; } }
 			const byT = arr.slice().sort((a, b) => a.tick - b.tick).slice(0, NEXT_EVAL);
 			for (const a of picked) if (!byT.includes(a)) byT.push(a);
 			for (const a of byT) {
@@ -1017,12 +1018,14 @@ function makeCore(L, co) {
 			byT.sort((a, b) => (a.tick + a._nh) - (b.tick + b._nh) || a.tick - b.tick);
 			let best = null, bestS = Infinity;
 			const MS = mathSolver(), nT = { tiles: Array.from(nextGoal.tiles), cls: 'any' };
+			// (its own clock: at most a fifth of the call's window, NEXT_MS a leg)
+			const nEnd = tN + Math.max(30, Math.min(NEXT_MS * NEXT_TRY, 0.2 * (deadline - tIn)));
 			for (let i = 0; i < byT.length && i < NEXT_TRY; i++) {
 				const now = Date.now();
-				if (now > deadline - 60) break;
+				if (now > deadline - 60 || now > nEnd) break;
 				const a = byT[i];
 				let r = null;
-				try { r = MS.leg(a.snap, nT, { Tmax: MATH_TMAX, chain: false, prove: false, fieldMs: Math.min(NEXT_MS, 20), coupled: false, nodes: 60000, deadline: Math.min(deadline - 50, now + NEXT_MS) }); } catch (e) { r = null; }
+				try { r = MS.leg(a.snap, nT, { Tmax: MATH_TMAX, chain: false, prove: false, fieldMs: Math.min(NEXT_MS, 20), coupled: false, nodes: 60000, deadline: Math.min(deadline - 50, nEnd, now + NEXT_MS) }); } catch (e) { r = null; }
 				sims += r && r.ticks || 0;
 				if (r && r.ok && a.tick + r.T < bestS) { bestS = a.tick + r.T; best = a; }
 			}
