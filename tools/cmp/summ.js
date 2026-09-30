@@ -25,11 +25,19 @@ const kindOf = (label) => {
 	if (/explore/.test(s)) return 'explore';
 	return 'other';
 };
+// a --json log (fullc.js --json=1: one event a line) read as the text log's stage rows ('<stage> <text>'); other lines kept
+const logText = (s) => {
+	if (!/^\s*\{/.test(s)) return s;
+	return s.split('\n').map((l) => {
+		if (!l.startsWith('{')) return l;
+		try { const e = JSON.parse(l); return e.ev === 'stage' ? `${e.name} ${e.text || ''}` : e.ev === 'warning' ? `note ${e.text || ''}` : ''; } catch (err) { return l; }
+	}).filter(Boolean).join('\n');
+};
 const rows = [];
 for (const [id, ix] of idx) {
 	let r = null;
 	try { r = JSON.parse(fs.readFileSync(path.join(dir, id + '.json'), 'utf8')); } catch (e) { r = null; }
-	const log = fs.existsSync(path.join(dir, id + '.log')) ? fs.readFileSync(path.join(dir, id + '.log'), 'utf8') : '';
+	const log = logText(fs.existsSync(path.join(dir, id + '.log')) ? fs.readFileSync(path.join(dir, id + '.log'), 'utf8') : '');
 	const planLine = (log.match(/^plan\s+.*$/m) || [''])[0];
 	const nSteps = +((planLine.match(/(\d+) steps?:/) || [])[1] || 0);
 	const est = +(((planLine.match(/est ([\d,]+) ticks/) || [])[1] || '0').replace(/,/g, ''));
