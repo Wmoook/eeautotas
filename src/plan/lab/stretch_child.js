@@ -19,6 +19,7 @@ const T = require(path.join(root, 'src/plan/types.js'));
 const E = require(path.join(root, 'src/eesim.js'));
 const BW = require(path.join(root, 'src/plan/lab/backward.js'));
 const file = process.argv[2];
+const VARIANTS = process.env.EEAT_ST_VARIANTS !== '0', VAR_MIN_MS = 10000;
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 let L, B, sim, inp;
 try {
@@ -69,12 +70,18 @@ function run(req) {
 		if (sim.is_dead) { why = 'a dead start'; break; }
 		// (the whole-level child's two clocks: 0.4 of the share, then what is left of it (a longer clock is not a superset of a
 		// shorter one: the solve's shares are fractions of its clock))
+		// (THE REST OF THE CLOCK: a solve ends before its clock when its node caps and its relay have nothing left (the ONE-LEG
+		// sweep: 'budget' after 78-228 s of a 270-s share); the time left then goes to the whole-level child's variants in turn:
+		// a longer relay, then finer x speeds with one ladder step, each on what is left, at least VAR_MIN_MS; EEAT_ST_VARIANTS=0:
+		// the two clocks alone)
 		const tL = Date.now();
 		let r = null, closest = null;
-		for (const f of [0.4, 1]) {
+		const tries = [{ f: 0.4 }, { f: 1 }].concat(VARIANTS ? [{ f: 1, o: { relay: 16, relayMin: 10 } }, { f: 1, o: { relay: 16, relayMin: 10, vxq: 4, ladder: 1 } }] : []);
+		for (let ti = 0; ti < tries.length; ti++) {
+			const tr = tries[ti];
 			const left = share - (Date.now() - tL);
-			if (left < 300 || (r && (r.ok || /walk|bug|target/.test(r.why || '')))) break;
-			try { r = B.solve(snap, tgt, { ms: f < 1 ? Math.round(share * f) : left, closest: !!req.closest }); } catch (e) { r = { ok: false, why: 'error: ' + String(e && e.message || e).slice(0, 120) }; }
+			if (left < (ti >= 2 ? VAR_MIN_MS : 300) || (r && (r.ok || /walk|bug|target/.test(r.why || '')))) break;
+			try { r = B.solve(snap, tgt, Object.assign({ ms: tr.f < 1 ? Math.round(share * tr.f) : left, closest: !!req.closest }, tr.o || {})); } catch (e) { r = { ok: false, why: 'error: ' + String(e && e.message || e).slice(0, 120) }; }
 			if (r && r.closest && r.closest.masks && r.closest.masks.length && (!closest || r.closest.h < closest.h)) closest = r.closest;
 		}
 		if (!r || !r.ok) {
