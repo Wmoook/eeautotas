@@ -79,6 +79,9 @@ const PREC_FIRST = process.env.EEAT_PREC_FIRST === '1', PREC_AFTER_S = 10;
 const PROVE_IDLE_MAX = 64;
 // the proof's rounds: a faster route found by its searches becomes the best and the proof starts over with its cost
 const PROVE_ROUNDS = 12;
+// (lane 5, TAS-perfect) a route of more than PROVE_SHORT ticks after its first input: the proof at most PROVE_LONG_MS (then
+// THE LAST polishes); EEAT_POLISH_LAST=0: the proof takes all the time left, as before
+const PROVE_SHORT = 600, PROVE_LONG_MS = 3000;
 // exploration steps (the second stall on): frontier tiles within FRONTIER_STEPS walk steps of an anchor, at most FRONTIER_MAX
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
@@ -1141,8 +1144,12 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const Cost = A - kStar;
 				if (A < 1 || Cost < 1) { notes.push('the route does not reach the trophy on its replay (a bug)'); break; }
 				let proved = 0, faster = null, fail = '', lbMin = Infinity;
+				// (lane 5: a long route's proof gets PROVE_LONG_MS, THE LAST the rest: the proofs and the faster routes the
+				// proof found in the 300-s baseline were all on routes of 27-98 run ticks (Switch Labyrinth, My level 730c /
+				// fef0); on 1,500-3,000-tick routes its exact bound reached 9-146 ticks in 12-15 s)
+				const capEnd = POLISH_REST && process.env.EEAT_POLISH_LAST !== '0' && Cost > PROVE_SHORT ? tm + PROVE_LONG_MS : Infinity;
 				for (let k = 0; k <= restIdle && !faster; k++) {
-					const room = left() - 250;
+					const room = Math.min(left() - 250, capEnd - Date.now());
 					if (room < 100) { fail = fail || 'no time left'; lbMin = 0; break; }
 					const ms = Math.max(100, Math.floor(room / (restIdle + 1 - k)));
 					const deadline = Date.now() + ms;
