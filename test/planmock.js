@@ -89,7 +89,7 @@ function createExecutor(L, o) {
 				const all = T.concat(a.masks, hold);
 				const r = T.playTo(L, all, { goal, from: a.snap ? { snap: a.snap, tick: a.tick } : undefined });
 				const at = wp.kind === 'trophy' ? r.finished : r.goalAt;
-				if (at > 0) {
+				if (at > 0 && !(wp.beforeTick >= 0 && at > wp.beforeTick)) {
 					const masks = all.subarray(0, at);
 					const r2 = T.playTo(L, masks);
 					out.push(T.arrivalOf(L, r2.sim, masks, RM));

@@ -143,10 +143,10 @@ function sectionUnit(TMP) {
 	let r = cli([toy, `--parts=${path.join(__dirname, 'planmock.js')}`, '--seconds=10', '--workers=1', `--out=${outF}`, `--report=${rep}`]);
 	const lines = String(r.stdout || '').split('\n').filter(Boolean);
 	const names = lines.map((l) => l.split(/\s+/)[0]);
-	const order = ['parse', 'model', 'bounds', 'plan', 'moves', 'verify', 'polish', 'result', 'wrote'];
-	check('the stage lines, like a compiler: parse, model, bounds, plan, moves, verify, polish (each with its time), result, wrote; exit 0',
+	const order = ['parse', 'model', 'bounds', 'plan', 'moves', 'verify', 'polish', 'prove', 'result', 'wrote'];
+	check('the stage lines, like a compiler: parse, model, bounds, plan, moves, verify, polish, prove (each with its time), result, wrote; exit 0',
 		r.status === 0 && order.every((n) => names.includes(n)) && order.every((n, i) => i === 0 || names.indexOf(n) > names.indexOf(order[i - 1])) &&
-		lines.filter((l) => /^(parse|model|bounds|plan|moves|verify|polish)\s+\d+\.\d\d s  /.test(l)).length === 7, `exit ${r.status}\n${lines.join('\n')}\n${String(r.stderr || '').slice(-400)}`);
+		lines.filter((l) => /^(parse|model|bounds|plan|moves|verify|polish|prove)\s+\d+\.\d\d s  /.test(l)).length === 8, `exit ${r.status}\n${lines.join('\n')}\n${String(r.stderr || '').slice(-400)}`);
 	const ev = fs.existsSync(outF) ? C.evaluate(L, C.readEetas(outF)) : null;
 	const rj = fs.existsSync(rep) ? JSON.parse(fs.readFileSync(rep, 'utf8')) : null;
 	check('the .eetas written: it finishes (C.evaluate), cut at the finish, the run ticks the result line\'s and the report\'s',
@@ -179,8 +179,8 @@ function sectionUnit(TMP) {
 	try { evs = jl.map((l) => JSON.parse(l)); } catch (e) { evs = null; }
 	const kinds = evs ? new Set(evs.map((e) => e.ev)) : new Set();
 	const rep2 = evs ? evs.find((e) => e.ev === 'report') : null;
-	check('--json: every line a JSON event (stage x7, result, progress, done, report last), exit 0; the report\'s inputs finish',
-		r.status === 0 && !!evs && evs.filter((e) => e.ev === 'stage').length === 7 && ['result', 'progress', 'done', 'report'].every((k) => kinds.has(k)) && evs[evs.length - 1].ev === 'report' && !!rep2 &&
+	check('--json: every line a JSON event (stage x8, result, progress, done, report last), exit 0; the report\'s inputs finish',
+		r.status === 0 && !!evs && evs.filter((e) => e.ev === 'stage').length === 8 && ['result', 'progress', 'done', 'report'].every((k) => kinds.has(k)) && evs[evs.length - 1].ev === 'report' && !!rep2 &&
 		!!C.evaluate(L, T.masksOf(rep2.inputs)), `exit ${r.status}, ${jl.length} lines, ${[...kinds].join(',')}`);
 }
 
@@ -199,6 +199,12 @@ function sectionReal(TMP) {
 	const lines = String(r.stdout || '').split('\n').filter(Boolean);
 	const ev = fs.existsSync(outF) ? C.evaluate(L, C.readEetas(outF)) : null;
 	check('the real parts compile the toy: exit 0, the stage lines, the .eetas finishes', r.status === 0 && !!ev && lines.some((l) => l.startsWith('result')), `exit ${r.status}\n${lines.join('\n')}\n${String(r.stderr || '').slice(-600)}`);
+	// (the PROVE stage: the executor's exact tier from the start after 0..R idle ticks, bounded by the route's own cost,
+	// exhausted: PROVEN OPTIMAL, lb = the route's run ticks)
+	const rj = fs.existsSync(`${outF}.json`) ? JSON.parse(fs.readFileSync(`${outF}.json`, 'utf8')) : null;
+	check('the real parts PROVE the toy\'s route optimal: the prove line "PROVEN", the report\'s lb = its run ticks, lbProof, gap 0',
+		!!rj && lines.some((l) => /^prove\s.*PROVEN/.test(l)) && rj.lb === rj.runTicks && !!rj.lbProof && rj.gap === 0 && ev && ev.runTicks === rj.runTicks,
+		rj ? `lb ${rj.lb}, run ticks ${rj.runTicks}, gap ${rj.gap}: ${rj.lbProof || lines.find((l) => l.startsWith('prove')) || ''}` : 'no report');
 }
 
 // ---------------------------------------------------------------- off: T-OFF

@@ -55,6 +55,12 @@ const FAIL_TICKS = 200, UCB_C = 100;
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
+// the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
+// PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
+const PROVE_MS = 30000, PROVE_F = 0.2;
+// the proof's starts: the level start after k = 0..R idle ticks, R = the idle ticks until the state rests (the timer starts
+// at the first input: waiting is free); at most PROVE_IDLE_MAX (one exact search each)
+const PROVE_IDLE_MAX = 16;
 // exploration steps (the second stall on): frontier tiles within FRONTIER_STEPS walk steps of an anchor, at most FRONTIER_MAX
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
@@ -201,6 +207,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const maxDeepen = Number.isFinite(+opts.maxDeepen) ? +opts.maxDeepen : MAX_DEEPEN;
 	const polishOn = opts.polish !== false;
 	const polishReserve = polishOn ? Math.min(POLISH_MS, POLISH_F * total) : 0;
+	const proveOn = opts.prove !== false;
+	// (the reserve kept once a route is known: the polish's, and the proof's where the start is static (set below))
+	let proveReserve = 0, endReserve = polishReserve;
 	const C = require('../common.js');
 	// ---- the event log (out/events.jsonl) next to emit
 	const out = opts.out ? String(opts.out) : '';
@@ -214,7 +223,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	const secNow = () => (Date.now() - t0) / 1000;
 	const left = () => total - (Date.now() - t0);
-	const stages = { parse: Math.round(+opts.parseMs || 0), model: 0, bounds: 0, plan: 0, moves: 0, verify: 0, polish: 0 };
+	const stages = { parse: Math.round(+opts.parseMs || 0), model: 0, bounds: 0, plan: 0, moves: 0, verify: 0, polish: 0, prove: 0 };
 	const stage = (name, ms, text) => { stages[name] = Math.round(ms); say({ ev: 'stage', name, ms: Math.round(ms), text }); };
 
 	// ---- the parts
@@ -270,6 +279,17 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// the first input then changes nothing, so the fewest ticks from the start is the fewest run ticks + 1)
 	const startStatic = (() => { try { const r1 = T.playTo(L, new Uint8Array(1)); return !r1.sim.is_dead && r1.sim.stateHash() === r0.sim.stateHash(); } catch (e) { return false; } })();
 	const startAnchorArg = { arrival: a0, arrivals: [a0], S: S0, key: String(S0.key), tick: 0, run: 0 };
+	// (the idle ticks until the start rests: its state hash repeats; -1 = not within PROVE_IDLE_MAX, or the ball dies idling)
+	const restIdle = (() => {
+		try {
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			let h = sim.stateHash();
+			for (let k = 0; k <= PROVE_IDLE_MAX; k++) { E.applyMask(inp, 0); sim.tick(inp); if (sim.is_dead) return -1; const h2 = sim.stateHash(); if (h2 === h) return k; h = h2; }
+		} catch (e) { /* none */ }
+		return -1;
+	})();
+	if (proveOn && restIdle >= 0) { proveReserve = Math.min(PROVE_MS, PROVE_F * total); endReserve = polishReserve + proveReserve; }
 	let lbPlanner = 0, lbBounds = 0, lbComplete = false, lbInf = false;
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
@@ -493,7 +513,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	/** a step's budget: its rung's x 2^deepenings, capped by the time left (the polish's reserve kept once a route is known) */
 	const budgetOf = (rung) => {
 		const r = Math.max(0, Math.min(rungMs.length - 1, rung | 0));
-		const room = left() - (best ? polishReserve : 0) - 100;
+		const room = left() - (best ? endReserve : 0) - 100;
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
 		return { ms, level: r, k: ARRIVALS_K, deadline, stop: () => stopped || left() <= 0 || Date.now() > deadline + 2000 };
@@ -681,7 +701,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return j;
 	};
 	const deepen = (why) => {
-		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? polishReserve : 0)) return false;
+		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endReserve : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
@@ -784,10 +804,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (left() <= 0) { end = 'time'; break; }
 			if (best && opts.first) { end = 'finish'; break; }
 			// (a route known: the moves stop where the polish's reserve begins)
-			if (best && left() <= polishReserve && !inflight.size) { end = 'time'; break; }
+			if (best && left() <= endReserve && !inflight.size) { end = 'time'; break; }
 			if (anchors.size !== anchorsSeen || best !== bestSeen) { anchorsSeen = anchors.size; bestSeen = best; progressAt = Date.now(); }
 			if (stallEnd && Date.now() - progressAt > stallEnd) { end = 'stalled'; break; }
-			while (inflight.size < P && !(best && left() <= polishReserve)) {
+			while (inflight.size < P && !(best && left() <= endReserve)) {
 				const job = exploreQ.length ? exploreQ.shift() : nextJob();
 				if (!job) break;
 				const ek = edgeKey(job.step);
@@ -802,7 +822,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// (every anchor exhausted: a global deepening; nothing new since the last one, or no deepening left: the
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
-				if (left() < 250 || (best && left() <= polishReserve)) { end = 'time'; break; }
+				if (left() < 250 || (best && left() <= endReserve)) { end = 'time'; break; }
 				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				nothingSince = steps;
 				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
@@ -838,7 +858,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	}
 	if (best && polishOn && !stopped) {
 		tm = Date.now();
-		const ms = Math.max(200, Math.min(polishReserve, left() - 200));
+		const ms = Math.max(200, Math.min(polishReserve, left() - 200 - (best ? proveReserve : 0)));
 		let how = '', pr = null;
 		try {
 			if (exec && typeof exec.polish === 'function') { pr = await exec.polish(best.masks, { ms, legs: best.legs, bound: LB }); how = 'the executor'; }
@@ -865,14 +885,79 @@ async function compile(L, opts = {}, emit = () => {}) {
 		stage('polish', Date.now() - tm, text);
 	} else stage('polish', 0, best ? 'off' : 'no route');
 
+	// ---- PROVE: the route optimal where the exact search can say so. The run timer starts at the first input, so waiting is
+	// free; the start rests after R idle ticks (restIdle). The route costs C = its arrival tick - its idle ticks. From each
+	// S_k (the start after k = 0..R idle ticks) one exact search to the trophy bounded by beforeTick = k + C - 1: every route
+	// whose first input is at tick k' <= R is in S_k' 's search, and one that waits longer is one that waits R, shifted.
+	// Every search exhausted (the executor's EXACT tier: its lb, in layers from its start, reaches C) = no route costs less
+	// than C run ticks: the lower bound is the route's (PROVEN OPTIMAL). Deaths are moves where something kills (the search
+	// then keeps dying runs: allowDeath). An arrival a search finds is a faster route (from the exact tier, the minimum
+	// from its start). The proof rests on the exact tier's cuts: the endgame bound (sound by construction), the bounds'
+	// leg() (admissible: the primitives' T-LB-ADMISSIBLE check) and the -1 field while the doors stand as at the start.
+	const noDeath = (() => { try { return require('../goexplore.js').deathsOf(L) === null; } catch (e) { return false; } })();
+	let proveProof = '';
+	if (best && proveOn && restIdle >= 0 && exec && typeof exec.reach === 'function' && !stopped && left() > 300) {
+		tm = Date.now();
+		let text = '';
+		try {
+			let kStar = 0;
+			while (kStar < best.masks.length && best.masks[kStar] === 0) kStar++;
+			const sim = new E.EESim(L), inp = new E.EEInput();
+			sim.reset();
+			let A = -1;
+			for (let n = 0; n < best.masks.length; n++) { E.applyMask(inp, best.masks[n]); sim.tick(inp); if (!sim.is_dead && sim.has_silver_crown) { A = n + 1; break; } }
+			const Cost = A - kStar;
+			if (A < 1 || Cost < 1) text = 'skipped: the route does not reach the trophy on its replay (a bug)';
+			else {
+				const trophy = T.goalOf(L, { kind: 'trophy' });
+				const how = noDeath ? 'nothing kills' : 'deaths as moves';
+				let proved = 0, faster = null, fail = '';
+				for (let k = 0; k <= restIdle && !faster && !fail; k++) {
+					const room = left() - 250;
+					if (room < 100) { fail = 'no time left'; break; }
+					const ms = Math.max(100, Math.floor(room / (restIdle + 1 - k)));
+					const deadline = Date.now() + ms;
+					const idle = new Uint8Array(k);
+					const Sk = k === 0 ? a0 : T.arrivalOf(L, T.playTo(L, idle).sim, idle, RM);
+					const wp = { kind: 'trophy', tiles: Array.from(trophy.tiles), expect: null, label: 'trophy (the proof)', beforeTick: k + Cost - 1, allowDeath: !noDeath };
+					const r = await exec.reach([Sk], wp, { ms, level: rungMs.length - 1, k: ARRIVALS_K, deadline, stop: () => stopped || Date.now() > deadline + 2000 });
+					if (r && r.ok) {
+						const arr = (r.arrivals || []).filter((a) => a && a.masks && a.tick <= k + Cost - 1).sort((a, b) => a.tick - b.tick);
+						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; break; }
+						faster = { a: arr[0], r, k };
+					} else if (r && Number(r.lb) >= Cost) proved++;
+					else fail = `start +${k} idle: ${r && r.fail ? r.fail.why : '?'}, the exact search's bound ${r ? num(r.lb || 0) : '?'} of the ${num(Cost)} needed`;
+				}
+				if (faster) {
+					const m = faster.a.masks instanceof Uint8Array ? faster.a.masks : T.masksOf(faster.a.masks);
+					const ev = C.evaluate(L, m);
+					const lg0 = (faster.r.legs || [])[0] || {};
+					if (ev && ev.runTicks < best.runTicks && (!noDeath || ev.deaths === 0) && ev.chance >= best.chance - 1e-9) {
+						const saved = best.runTicks - ev.runTicks;
+						const proven = !!lg0.proven && lg0.tool === 'exact';
+						best = { masks: ev.ms, ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance,
+							legs: [{ label: 'trophy', fromTick: faster.k, ticks: ev.complete - faster.k, lb: proven ? ev.complete - faster.k : null, proven, tool: lg0.tool || faster.r.tool || null }], how: 'the proof search' };
+						say({ ev: 'result', kind: 'finish', ticks: ev.complete, runTicks: ev.runTicks, deaths: ev.deaths, chance: ev.chance, how: best.how, lb: LB, gap: gapOf(ev.runTicks), inputs: T.strOf(ev.ms) });
+						if (out) { try { C.writeEetas(path.join(out, 'route.eetas'), ev.ms); } catch (e) { /* read-only */ } }
+						text = `-${num(saved)} ticks: a faster route from the start after ${faster.k} idle tick${faster.k === 1 ? '' : 's'} (${lg0.tool || faster.r.tool || '?'}${proven ? ', the fewest ticks from there' : ''}); no proof this compile`;
+					} else text = `no proof: its arrival did not replay faster (${ev ? fmt(ev.runTicks) : 'no finish'})`;
+				} else if (proved === restIdle + 1) {
+					proveProof = `${restIdle + 1} exhaustive exact search${restIdle ? 'es' : ''} from the level start (after 0..${restIdle} idle ticks; ${how}): no route reaches the trophy in fewer than ${num(Cost)} ticks after its first input`;
+					text = `PROVEN: no route reaches the trophy in fewer than ${num(Cost)} ticks after its first input (${restIdle + 1} exact search${restIdle ? 'es' : ''}, ${how})`;
+				} else text = `no proof in ${((Date.now() - tm) / 1000).toFixed(1)} s (${proved} of ${restIdle + 1} starts; ${fail})`;
+			}
+		} catch (e) { bug('prove', { error: e.message }); text = `no proof: ${e.message}`; }
+		stage('prove', Date.now() - tm, text);
+	} else if (best) stage('prove', 0, !proveOn ? 'off' : restIdle < 0 ? `skipped: the start does not rest within ${PROVE_IDLE_MAX} idle ticks` : stopped ? 'skipped: stopped' : 'skipped: no time left');
+
 	// ---- the bound again (the planner's facts may have raised it), the report
 	// (a proof of optimality: the route is one exact leg from the level start, proven the fewest ticks, and the start is
 	// static: no route has fewer run ticks)
-	let lbProof = '';
-	// (the exact search drops dying runs: only where no death can move the ball (goexplore.js deathMovesFor) is its
-	// minimum every route's)
-	const deathsMove = (() => { try { return !!require('../goexplore.js').deathMovesFor(L); } catch (e) { return true; } })();
-	if (best && startStatic && !deathsMove && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && best.legs[0].tool === 'exact' && !String(best.how || '').includes('polish')) {
+	let lbProof = proveProof;
+	if (proveProof && best && best.runTicks > LB) { LB = best.runTicks; lbComplete = true; }
+	// (the exact search drops dying runs: only where nothing kills (goexplore.js deathsOf: no killing tile, no timed killer)
+	// is its minimum every route's; a death back to the one spawn keeps the keys and coins taken: a move)
+	if (!lbProof && best && startStatic && noDeath && best.legs.length === 1 && best.legs[0].fromTick === 0 && best.legs[0].proven && best.legs[0].tool === 'exact' && !String(best.how || '').includes('polish')) {
 		if (best.runTicks > LB) { LB = best.runTicks; lbComplete = true; lbProof = 'one exact leg from the static level start, proven the fewest ticks'; }
 	}
 	if (!lbSlow && !lbProof && planner.lowerBound) {
