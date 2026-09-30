@@ -264,7 +264,31 @@ function levelNow(L, sim) {
 		if (id === 50) continue;   // (the secret "appear" block: reach.js guideFlags walls it)
 		fg[i] = sim.is_tile_solid_now(i % W, (i / W) | 0) ? 9 : 0;
 	}
-	return Object.assign({}, L, { fg });
+	// (PROT_LAYER: the copy of an UNPROTECTED ball's level says so: goalField builds its protection layer for it)
+	return PROT_LAYER && !sim.is_invulnerable ? Object.assign({}, L, { fg, _unprot: true }) : Object.assign({}, L, { fg });
+}
+// THE PROTECTION LAYER (OPT-IN EEAT_PROT_LAYER=1; n5 doctor 'cold'): reach.js opens every killer a protected ball can be
+// at (protP: the 8-way walk from the protection-on tiles, portals forward) for EVERY ball, protected or not, and through
+// portals that walk is usually the whole level: Cold World's one protection tile (211,138) made every spike of chapter 2
+// air for the unprotected ball at the chapter-2 blue coin, whose field then read 16.4 tiles at (85,211) (a jump across
+// the spike columns (90 / 93, 211-214) and up the 1-wide shaft) where the executor stalled 6 rungs. For a level copy of an
+// unprotected ball (levelNow `_unprot`) goalField composes two fields, SOUND: the protected field fP (as before) and the
+// field of the level without its protection tiles (every killer deadly) whose goals are the waypoint's tiles at 0 AND
+// every protection-on tile p at fP's least cost over the states at p (a real way either never touches a protection-on
+// tile, and is then a way of the unprotected physics, or touches one first at some p, and costs at least fP's least there
+// from then on); its -1 is a proof for an unprotected ball. Off = the fields as before byte for byte.
+const PROT_LAYER = process.env.EEAT_PROT_LAYER === '1';
+/** the least cost (fifths) over the ball states centred on tile t by the reach field f (walk mode: its walk), or -1 */
+function tileMinFifths(f, t) {
+	const CUT = 0xffff;
+	if (f.mode === 'walk') { const w = f.walk[t]; return w === CUT ? -1 : w; }
+	let b = CUT;
+	const Q = f.Q, KF = 16, NL = 128;
+	for (let l = 0; l < Q + 3; l++) { const v = f.costR[t * (Q + 3) + l]; if (v < b) b = v; }
+	for (let k = 0; k <= KF; k++) { const v = f.costF[t * (KF + 1) + k]; if (v < b) b = v; const w = f.costL[t * (KF + 1) + k]; if (w < b) b = w; }
+	if (f.rowC[t] >= 0) for (let c = 0; c < NL; c++) { const v = f.costC[f.rowC[t] * NL + c]; if (v < b) b = v; }
+	if (f.rowX[t] >= 0) for (let c = 0; c < NL; c++) { const v = f.costX[f.rowX[t] * NL + c]; if (v < b) b = v; }
+	return b >= 0xfffe ? -1 : b;
 }
 /** a small hash of a level copy's foreground (the goal fields' memo key) */
 function fgHash0(fg) { let h = 0x811c9dc5; for (let i = 0; i < fg.length; i++) { h ^= fg[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + fg.length; }
@@ -297,6 +321,26 @@ const fieldBytes = (f) => { let b = 0; for (const k in f) { const a = f[k]; if (
  * o.deaths: reachField's deaths option (false: no death edges, the executor's searches drop dead balls: the default).
  */
 function goalField(Lc, tiles, o = {}) {
+	if (Lc._unprot) {
+		// (the protection layer: PROT_LAYER above; a level without a protection-on tile: the plain field)
+		const lk = Lc.lookup0, on = [];
+		for (let i = 0; i < Lc.fg.length; i++) if (Lc.fg[i] === 420 && lk && lk[i] !== 0) on.push(i);
+		const plain = Object.assign({}, Lc); delete plain._unprot;
+		if (!on.length) return goalField(plain, tiles, o);
+		const keyU = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}|u`;
+		const hadU = FIELDS.get(keyU);
+		if (hadU) { FIELDS.delete(keyU); FIELDS.set(keyU, hadU); return hadU; }
+		const fP = goalField(plain, tiles, o);
+		const fgU = Int32Array.from(Lc.fg);
+		for (const p of on) fgU[p] = 0;
+		for (let i = 0; i < fgU.length; i++) if (fgU[i] === 420) fgU[i] = 0;   // (the off tiles too: no protection anywhere)
+		const goals = Array.from(tiles, (t) => ({ tile: t, cost: 0 }));
+		for (const p of on) { const c = tileMinFifths(fP, p); if (c >= 0) goals.push({ tile: p, cost: c / 5 }); }
+		const fU = RF.reachField(Object.assign({}, plain, { fg: fgU }), { goals, deaths: o.deaths === true });
+		FIELDS.set(keyU, fU);
+		while (FIELDS.size > FIELDS_MAX) FIELDS.delete(FIELDS.keys().next().value);
+		return fU;
+	}
 	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
