@@ -61,8 +61,8 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 			// the whole run: the route's prefix + the leg, from the level's start
 			sim.reset();
 			for (let t = 0; t < tk; t++) { E.applyMask(inp, masks[t] & 31); sim.tick(inp); }
-			let h = 0;
-			for (let t = 0; t < r.masks.length; t++) { E.applyMask(inp, r.masks[t]); sim.tick(inp); if (sim.is_dead) break; if (inTarget(sim)) { h = t + 1; break; } }
+			let h = 0, alive = !sim.is_dead;   // (a dead start plays its dead ticks first)
+			for (let t = 0; t < r.masks.length; t++) { E.applyMask(inp, r.masks[t]); sim.tick(inp); if (sim.is_dead) { if (alive) break; continue; } alive = true; if (inTarget(sim)) { h = t + 1; break; } }
 			row.verified = h === r.T;
 			if (opt('out', '') && row.verified) C.writeEetas(opt('out') + '.' + name.replace(/\W+/g, '_') + '.eetas', Uint8Array.from([...masks.subarray(0, tk), ...r.masks]));
 		}

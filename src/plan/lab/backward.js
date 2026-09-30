@@ -45,13 +45,15 @@ const DOTS = new Set([4, 414]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const PORTALS = new Set([242, 381]);
 const TELEPORT_PX = 20;
+const TD_BUCKET = 50;
+const DEAD_T = 70;                             // a dead state's ticks to its respawn (the engine's 54 + a margin)
 const KAPPA = 16 / 6.776552880470027;          // ticks a tile at the top running speed
 const DIRS_V = [0, 2, 4], DIRS_H = [0, 8, 16], DIRS_ALL = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +process.env[k] : d);
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 200000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 3000), quickF: ENV('EEAT_BW_QUICKF', 0.05), reach: ENV('EEAT_BW_REACH', 1), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 200000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 3000), quickF: ENV('EEAT_BW_QUICKF', 0.05), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -95,14 +97,14 @@ function createBackward(L, opts = {}) {
 	const idOf = (i) => (i >= 0 && i < nId ? i : 0);
 
 	// the static solid map (doors as they stand in the state given: solidOf)
-	function solidOf(s) {
+	function solidOf(s, clockOpen) {
 		const sol = new Uint8Array(N);
 		for (let i = 0; i < N; i++) {
 			const id = s.tiles[i], f = flags[id] | 0;
 			if ((f & F_SOLID) === 0) continue;
 			if (f & F_JUMPTHRU) sol[i] = 3;
 			else if (f & (F_HALF | F_ROTHALF)) sol[i] = 4;
-			else if (f & F_DOOR) sol[i] = s.is_tile_solid_now(i % W, (i / W) | 0) ? 1 : 0;
+			else if (f & F_DOOR) sol[i] = clockOpen && (id === 156 || id === 157) ? 0 : s.is_tile_solid_now(i % W, (i / W) | 0) ? 1 : 0;   // (clockOpen: time doors open: they open every 1000 ticks)
 			else sol[i] = 1;
 		}
 		return sol;
@@ -129,7 +131,8 @@ function createBackward(L, opts = {}) {
 	};
 	function discOf(s) {
 		const sw = swKey(s._switches, s._swOwned), osw = swKey(s._oswitches, s._oswOwned);
-		const k = `${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}`;
+		// (a level with time doors: the clock's phase in TD_BUCKET-tick buckets, so a ball that waits for a door is not its own earlier cell)
+		const k = `${L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : ''},${s.coins},${s.blue_coins},${s._keysMask},${sw},${osw},${s.team},${s.max_jumps > 1 ? s.jump_count : 0},${s.max_jumps},${s.jump_boost},${s.speed_boost},${s.low_gravity ? 1 : 0},${s.is_invulnerable ? 1 : 0},${s.has_levitation ? 1 : 0},${s.flip_gravity},${s.is_cursed ? 1 : 0},${s.is_zombie ? 1 : 0},${s.is_poisoned ? 1 : 0},${s.is_on_fire ? 1 : 0},${s.has_crown ? 1 : 0}`;
 		let d = discIds.get(k);
 		if (d === undefined) { d = discIds.size; discIds.set(k, d); }
 		return d;
@@ -166,6 +169,7 @@ function createBackward(L, opts = {}) {
 		};
 		if (inTgt(sim)) return { ok: true, masks: new Uint8Array(0), T: 0, why: 'at the target', stats };
 		const sol = solidOf(sim);
+		const solC = L.hasTimeDoors ? solidOf(sim, true) : sol;     // (the corridor's: time doors open)
 
 		// ------------------------------------------------------------ THE CORRIDOR: the gravity-blind walk from the target
 		const wd = new Int32Array(N).fill(-1);
@@ -194,10 +198,10 @@ function createBackward(L, opts = {}) {
 					if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
 					const u = ny * W + nx;
 					if (wd[u] >= 0) continue;
-					const qq = sol[u];
+					const qq = solC[u];
 					if (qq === 1 || qq === 4) continue;
 					// no corner cut between two walls
-					if (dx && dy) { const a = sol[y * W + nx], b = sol[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
+					if (dx && dy) { const a = solC[y * W + nx], b = solC[ny * W + x]; if ((a === 1 || a === 4) && (b === 1 || b === 4)) continue; }
 					wd[u] = wd[t] + 1; q[qt++] = u;
 				}
 				const pa = padj.get(t);
@@ -206,11 +210,27 @@ function createBackward(L, opts = {}) {
 		}
 		const sTile = (Math.trunc(sim.py + 8) >> 4) * W + (Math.trunc(sim.px + 8) >> 4);
 		const dS = sTile >= 0 && sTile < N ? wd[sTile] : -1;
-		if (dS < 0) return { ok: false, why: 'the start is not in the target\'s walk', stats };
+		if (dS < 0) {
+			if (o.debugWalk) {
+				let n = 0; for (let t = 0; t < N; t++) if (wd[t] >= 0) n++;
+				stats.walkTiles = n; stats.sTile = [sTile % W, (sTile / W) | 0]; stats.solS = sol[sTile];
+				const sx = sTile % W, sy = (sTile / W) | 0, rows = [];
+				for (let y = Math.max(0, sy - 10); y <= Math.min(H - 1, sy + 3); y++) {
+					let r = '';
+					for (let x = Math.max(0, sx - 6); x <= Math.min(W - 1, sx + 30); x++) { const t = y * W + x; r += t === sTile ? '@' : wd[t] >= 0 ? 'o' : sol[t] === 1 ? '#' : sol[t] === 3 ? '-' : sol[t] === 4 ? 'h' : '.'; }
+					rows.push(r);
+				}
+				stats.map = rows;
+			}
+			return { ok: false, why: 'the start is not in the target\'s walk', stats };
+		}
 		const lim = Math.ceil(dS * P.corrF + P.corrAdd);
 		const inCorr = new Uint8Array(N);
 		let corrTiles = 0;
-		for (let t = 0; t < N; t++) if (wd[t] >= 0 && wd[t] <= lim) { inCorr[t] = 1; corrTiles++; }
+		// THE PERIMETER (P.perim > 0): the closure only within that walk distance of the target (a backward region the closure
+		// completes; the meet runs on the fallback order outside it and meets the values inside)
+		const limC = P.perim > 0 ? Math.min(lim, P.perim) : lim;
+		for (let t = 0; t < N; t++) if (wd[t] >= 0 && wd[t] <= limC) { inCorr[t] = 1; corrTiles++; }
 		stats.corrTiles = corrTiles; stats.dStartTiles = dS;
 		const tileOfS = (s) => {
 			const tx = Math.trunc(s.px + 8) >> 4, ty = Math.trunc(s.py + 8) >> 4;
@@ -282,9 +302,18 @@ function createBackward(L, opts = {}) {
 		 * with sim at the event's state: kind 0 a child, 1 the target; the landing's hop too (kind 0, its own masks).
 		 * masks: a shared buffer (valid until the next call); ticks = its length.
 		 */
-		const buf = new Uint8Array(MAXT + 2);
+		const buf = new Uint8Array(Math.max(MAXT, DEAD_T) + 2);
 		function play(snap, m, p, out) {
 			sim.restore(snap);
+			if (sim.is_dead) {
+				// a DEAD state (a death on the route before this leg: its dead ticks): one move, no input to the respawn
+				if (m !== 0 || p) return;
+				for (let t = 0; t < DEAD_T; t++) {
+					buf[t] = 0; E.applyMask(inp, 0); sim.tick(inp);
+					if (!sim.is_dead) { if (inTgt(sim)) out(1, t + 1, buf); else out(0, t + 1, buf); return; }
+				}
+				return;
+			}
 			const c0 = clsId[idOf(sim.current_tile)];
 			let g0 = sim.on_ground && sim.speed_y === 0 ? 1 : (sim.on_ground ? 1 : 0);
 			const x80 = Math.floor((sim.px + 8) / 8), y80 = Math.floor((sim.py + 8) / 8);
@@ -339,6 +368,10 @@ function createBackward(L, opts = {}) {
 		const startCell = addCell(startKey, sim, tileOfS(sim));
 		const seedAll = () => {
 			if (P.seeds === false) return;
+			// (the seeds' base: the start, or a dead start's respawn: its discrete state after the death)
+			let base = snap0;
+			sim.restore(snap0);
+			if (sim.is_dead) { for (let k = 0; k < DEAD_T && sim.is_dead; k++) { E.applyMask(inp, 0); sim.tick(inp); } base = sim.snapshot(); }
 			// the start's discrete state at rest on every standable half tile of the corridor, nearest the target first
 			const order = [];
 			for (let t = 0; t < N; t++) if (inCorr[t]) order.push(t);
@@ -352,7 +385,7 @@ function createBackward(L, opts = {}) {
 				for (const px of [16 * cx - 4, 16 * cx + 4]) {
 					const py = 16 * cy;
 					if (!boxFree(sol, px, py)) continue;
-					sim.restore(snap0);
+					sim.restore(base);
 					sim.px = px; sim.py = py; sim.prev_px = px; sim.prev_py = py;
 					sim.speed_x = 0; sim.speed_y = 0; sim.modifier_x = 0; sim.modifier_y = 0;
 					sim.on_ground = false; sim.jump_count = 0; sim.teleported = false;
@@ -466,7 +499,7 @@ function createBackward(L, opts = {}) {
 				const hv = hOf(key, tile, hf);
 				if (!(hv < Infinity)) return;
 				const id = nodes.length;
-				nodes.push({ snap, par, masks, g });
+				nodes.push({ snap, par, masks, g, hsh });
 				heap.push(g + P.w * hv, id);
 			};
 			sim.restore(snap0);
@@ -536,8 +569,18 @@ function createBackward(L, opts = {}) {
 		let off = 0; for (const a of parts) { masks.set(a, off); off += a.length; }
 		sim.restore(snap0);
 		let hit = 0;
-		for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); if (sim.is_dead) break; if (inTgt(sim)) { hit = t + 1; break; } }
-		if (!hit) return { ok: false, why: 'the replay missed (a bug)', stats };
+		let alive = !sim.is_dead;   // (a dead start plays its dead ticks first)
+		for (let t = 0; t < masks.length; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); if (sim.is_dead) { if (alive) break; continue; } alive = true; if (inTgt(sim)) { hit = t + 1; break; } }
+		if (!hit) {
+			if (o.debugReplay) {
+				// the first move whose replay leaves the chain's own states
+				const chain = []; for (let q = found.par; q >= 0; q = nodes[q].par) chain.push(q); chain.reverse();
+				sim.restore(snap0); let tt = 0; const rep = [];
+				for (const q of chain) { const nd = nodes[q]; if (nd.masks) { for (const mk of nd.masks) { E.applyMask(inp, mk); sim.tick(inp); tt++; } } rep.push([q, tt, nd.g, nd.hsh === undefined ? 'root' : nd.hsh === sim.stateHash() ? 'same' : 'DIFF', sim.is_dead ? 'dead' : '']); }
+				stats.replay = rep;
+			}
+			return { ok: false, why: 'the replay missed (a bug)', stats };
+		}
 		return { ok: true, masks: masks.subarray(0, hit), T: hit, why: '', stats };
 	}
 
