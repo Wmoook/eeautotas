@@ -523,16 +523,79 @@ function createPlanner(model, facts, o = {}) {
 	const PROOF_POS = process.env.EEAT_PROOF_POS !== '0';
 	const proofKey = (S, pos) => (PROOF_POS && pos && pos.id !== undefined ? S.key + '@' + pos.id : S.key);
 	const rchKey = (S, pos, edge) => S.pkey + '|' + pos.id + '|' + edge;
+	// THE PHYSICS ESTIMATE of a root edge (OPT-IN EEAT_PHYS_EST=1; n5 doctor 'cold'): the est walk has no gravity, so a
+	// target over a rise the ball cannot make reads as near as any walk (Cold World: the trophy est 124 ticks from the
+	// spawn by the chapter-1 pool, whose rise needs the 33333 portal at speed; its trophy-room crown / blue coin, the
+	// pool's coin / crown / protection: 150 of 180 s of rungs spent there, while the chapter-2 blue coin that opens the
+	// level ran at rungs 0-1 only). Per anchor ONE forward pass of RCH3's own forward model (reach.js fwd / same-tile /
+	// portal edges, field._m.edgesOf, the level as S holds it, with the ice's reach (iceLocal, sound) and the fields'
+	// engine-measured transit tables (exitApex: ordering only)) from the anchor's REAL state: per tile the fewest tile
+	// moves (0-1 BFS over the abstract states, a level dominated at a (tile, type) pruned); a root edge's est = max(est,
+	// those moves x the pace), a target the pass never reaches PHYS_CUT_TILES x the pace: a price only, never a drop (the
+	// transit tables are no proof). Off = the planner byte for byte as before.
+	const PHYS_EST = process.env.EEAT_PHYS_EST === '1';
+	// THE PROGRESS RULE FOR THE CEGAR WALLS (OPT-IN EEAT_CUT_PROG=1; n5 doctor 'cold'): learn() walls a failed step's closest
+	// approach (its 3 x 3 in the est walk, and a cut of the est path just past it) at its second rung, as a counterexample
+	// to the relaxation's way. A BUDGET failure of a long leg is often no counterexample: the leg ran out of time early on
+	// its true way, and the wall then cuts that way. Cold World: the chapter-2 blue coin's rung-1 leg (5 s) ended at the
+	// chapter-2 portal exit (158,229), 13 est steps of the 78 from the spawn; the wall there cut chapter 2 off the est walk
+	// and the planner turned to the pool / trophy-room targets for the rest of the compile. With the rule a budget failure
+	// walls nothing unless its closest approach is at least CUT_PROG_F of the est walk's way from the anchor to the
+	// waypoint (the leg went most of the way and stalled: the false-near shape the walls are for); 'exhausted' as before.
+	// Off = the planner byte for byte as before.
+	const CUT_PROG = process.env.EEAT_CUT_PROG === '1';
+	const CUT_PROG_F = +process.env.EEAT_CUT_PROG_F > 0 ? +process.env.EEAT_CUT_PROG_F : 0.5;
+	const PHYS_CUT_TILES = 2000, PHYS_MAX_STATES = 4e6, PHYS_MEMO = 16;
+	const physMemo = new Map();
+	let RFm = null;
+	function physFwdOf(a) {
+		if (!a || !a.sim) return null;
+		const key = a.S.pkey + '|' + a.sim.stateHash();
+		let d = physMemo.get(key);
+		if (d !== undefined) return d;
+		d = null;
+		const t0 = Date.now();
+		try {
+			if (!RFm) RFm = require('../reach.js');
+			const goal = trophyTiles.length ? trophyTiles : [model.startTile];
+			const f = RFm.reachField(model.levelOf(a.S), { goals: Array.from(goal, (t) => ({ tile: t, cost: 0 })), deaths: false, debug: true, iceLocal: true, exitApex: true });
+			if (f && f.mode === 'physics' && f._m && typeof f._m.edgesOf === 'function') {
+				const s = a.sim, st = RFm.stateOf(f, s.px, s.py, s.speed_y, s._q0, s._q1, s._slippery);
+				const starts = st ? [...(st.base ? [st.base] : []), ...(st.rise || [])] : [];
+				const NT = 5, N = model.N;
+				const seen = new Int16Array(N * NT).fill(-32768);
+				d = new Int32Array(N).fill(INF);
+				let cur = [], nxt = [], depth = 0, n = 0;
+				const add = (t, ty, l, list) => { const k = t * NT + ty; if (seen[k] >= l) return false; seen[k] = l; list.push(t, ty, l); return true; };
+				for (const [ty, l] of starts) add(st.t, ty, l, cur);
+				while (cur.length && n < PHYS_MAX_STATES) {
+					for (let i = 0; i < cur.length && n < PHYS_MAX_STATES; i += 3) {
+						const t = cur[i], ty = cur[i + 1], l = cur[i + 2];
+						n++;
+						if (d[t] > depth) d[t] = depth;
+						f._m.edgesOf(t, ty, l, (t2, ty2, l2) => { add(t2, ty2, l2, t2 === t ? cur : nxt); });
+					}
+					cur = nxt; nxt = []; depth++;
+				}
+				ST.physStates = (ST.physStates || 0) + n;
+			}
+		} catch (e) { d = null; }
+		ST.physMs = (ST.physMs || 0) + (Date.now() - t0);
+		physMemo.set(key, d);
+		if (physMemo.size > PHYS_MEMO) physMemo.delete(physMemo.keys().next().value);
+		return d;
+	}
 	/**
 	 * the edges of node (S, pos): [{X (null: the trophy), S2, pos2, expect, lb, est, steps, viaDeath, edge, live}]. The
 	 * lb reachability (the walk relaxation: killers passable, keys sticky, the death shortcut) keeps an edge; mode 'plan'
 	 * prices it by the est walk (killers walls unless protected; a death step where only a death reaches it; a heavy
 	 * penalty where only the relaxation reaches it) and applies the facts (blocks, proofs, needs, learned ticks)
 	 */
-	function edgesOf(S, pos, base, mode, root, rootCls, only) {
+	function edgesOf(S, pos, base, mode, root, rootCls, anc, only) {
 		const out = [];
 		const P = pace();
 		const extra = pos.extra || 0;
+		const physD = PHYS_EST && root && mode === 'plan' && anc ? physFwdOf(anc) : null;   // (the physics estimate: PHYS_EST)
 		const dL = model.dist(S, pos, 'lb', base), dvL = model.deathVia(S, pos, 'lb', base);
 		const wantEst = mode === 'plan';
 		const dE = wantEst ? model.dist(S, pos, 'est', base) : null, dvE = wantEst ? model.deathVia(S, pos, 'est', base) : null;
@@ -595,6 +658,7 @@ function createPlanner(model, facts, o = {}) {
 				const bad = rchBad.get(rchKey(S, pos, edge));
 				if (bad === 'proof' && root) return;
 				if (bad) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'rch'; }
+				if (physD) { let dm = INF; for (const t of tiles) if (physD[t] < dm) dm = physD[t]; g.est = Math.max(g.est, (dm < INF ? dm : PHYS_CUT_TILES) * P + extra); }
 			}
 			const e = { X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, pen: g.pen || '', edge, live: tiles };
 			if (anyOf > 1) e.anyOf = anyOf;
@@ -825,7 +889,7 @@ function createPlanner(model, facts, o = {}) {
 			expanded++;
 			if (better(n, bestPartial)) bestPartial = n;
 			const isRoot = n === root;
-			const es = edgesOf(n.S, n.pos, a.base, 'plan', isRoot, a.S.key + '|' + a.cls);
+			const es = edgesOf(n.S, n.pos, a.base, 'plan', isRoot, a.S.key + '|' + a.cls, isRoot ? a : null);
 			if (isRoot) rootEdges = es.length;
 			// (the landmarks this node reaches only through killers (the est walk walls them unprotected): protection on
 			// counts as one more landmark here, so the search takes it first; Bad EE Level 9's switch 7 past the spikes)
@@ -1008,6 +1072,7 @@ function createPlanner(model, facts, o = {}) {
 		for (const fct of facts.list()) {
 			if (fct.kind === 'fail' && fct.cut) for (const j of fct.cut) { if (!mask) mask = new Uint8Array(model.N); if (!mask[j]) { mask[j] = 1; n++; } }
 			if (fct.kind !== 'fail' || !fct.closest || fct.closest.tile === undefined || fct.closest.tile === null) continue;
+			if (fct.noWall) continue;   // (CUT_PROG: a budget failure that made too little progress walls nothing)
 			if (!((fct.rung | 0) >= 1 || fct.why === 'exhausted')) continue;
 			const t = fct.closest.tile, x = t % W, y = (t / W) | 0;
 			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -1124,7 +1189,7 @@ function createPlanner(model, facts, o = {}) {
 		let rMin = Infinity;
 		for (const p of plans) { const f = p.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p.steps[0]; const r = facts.rungOf(f.edge, cls); if (r < 1) return []; if (r < rMin) rMin = r; }
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
-		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls);
+		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a);
 		const used = new Set(plans.map((p) => p.steps[0] && p.steps[0].edge));
 		// (THE RUNG BALANCE, lane 6 block 4, NEAR_RUNG: a near trigger is offered while its rung is below every plan's first
 		// leg's, not only while untried: the plans' first legs climbed rung after rung (5 -> 15 -> 45 s windows, three
@@ -1177,7 +1242,7 @@ function createPlanner(model, facts, o = {}) {
 		// (only once that leg has failed CRUMB_AFTER rungs from this anchor's class: a first leg the executor finds at its
 		// first rung (the compiled levels' direct legs) keeps both workers; EEAT_CRUMB_AFTER=0: at once)
 		if (CRUMB_AFTER > 0 && facts && facts.rungOf(s0.edge, cls) < CRUMB_AFTER) return [];
-		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, crumbs);
+		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a, crumbs);
 		// (a crumb past the est walk's CEGAR cuts is kept: the cuts come from the long leg's failures, and a way around its
 		// deceptive field is what a crumb is for; its lb is the relaxation's, still admissible)
 		const cands = es.filter((e) => e.X && e.X.crumb && !e.viaDeath && e.lb < CRUMB_F * lb0)
@@ -1280,15 +1345,21 @@ function createPlanner(model, facts, o = {}) {
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
 		// (a STONE is optional: its failure is no counterexample to the corridor (a cut there walled the est walk's way to
-		// every later target: Machu Picchu's stones plan fell back to the penalised trophy leg after two stone failures);
-		// the stone is blocked from its second rung on instead. EEAT_PLAN_STONE_CUT=1: the cut as for any trigger)
+		// cut there walled the est walk's way to the target: doctor 4))
 		const isStone = STONES && stones.length && step.waypoint && step.waypoint.trig !== undefined && stoneIds.has(step.waypoint.trig) && process.env.EEAT_PLAN_STONE_CUT !== '1';
-		let cut = null;
-		if (!isStone && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		let cut = null, noWall = false;
+		if (CUT_PROG && a && fail.why !== 'exhausted' && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null) {
+			// (THE PROGRESS RULE: a budget failure whose closest approach is less than CUT_PROG_F of the est walk's way from
+			// the anchor to the waypoint is no counterexample: see CUT_PROG)
+			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const dC = model.pairSteps(a.S, a.pos, [fail.closest.tile], 'est', a.base), dT = model.pairSteps(a.S, a.pos, tiles, 'est', a.base);
+			if (dT > 0 && dT < INF && !(dC >= CUT_PROG_F * dT)) { noWall = true; ST.cutSkipped = (ST.cutSkipped || 0) + 1; }
+		}
+		if (!isStone && !noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
-		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
+		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {})));
 		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= 2)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
