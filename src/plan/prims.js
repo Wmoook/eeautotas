@@ -121,18 +121,22 @@ async function createPrims(L, o = {}) {
 	let kc = null;   // {vals, coins, bcoins, cpx, cpy, key} of the parent being expanded, or null
 	const KEYCHECK = process.env.EEAT_PRIMS_KEYCHECK === '1';   // (tests: every cached key checked against keyOf)
 	let kcChecks = 0;
-	const kcOf = (s) => ({ vals: fget.map((g) => g(s)), coins: s.coins, bcoins: s.blue_coins, cpx: s.checkpoint.x, cpy: s.checkpoint.y, key: featKey0(s) });
-	const featKey = !KEYCACHE ? featKey0 : (s) => {
+	// (every key string interned to a small number: the class keys carry the number, a bijection with the string, so the
+	// same equalities; a class key's Map lookup hashes a short string instead of the feature values and coin hashes)
+	const internMap = new Map();
+	const intern = (k) => { let v = internMap.get(k); if (v === undefined) { v = internMap.size; internMap.set(k, v); } return v; };
+	const kcOf = (s) => { const key = featKey0(s); return { vals: fget.map((g) => g(s)), coins: s.coins, bcoins: s.blue_coins, cpx: s.checkpoint.x, cpy: s.checkpoint.y, key, id: intern(key) }; };
+	const featKey = !KEYCACHE ? (s) => intern(featKey0(s)) : (s) => {
 		const c = kc;
 		if (c !== null && c.coins === s.coins && c.bcoins === s.blue_coins && c.cpx === s.checkpoint.x && c.cpy === s.checkpoint.y) {
 			let same = true;
 			for (let i = 0; i < fget.length; i++) if (fget[i](s) !== c.vals[i]) { same = false; break; }
 			if (same) {
 				if (KEYCHECK) { const k0 = featKey0(s); if (k0 !== c.key) throw new Error(`prims key cache: ${c.key} vs ${k0}`); kcChecks++; }
-				return c.key;
+				return c.id;
 			}
 		}
-		return featKey0(s);
+		return intern(featKey0(s));
 	};
 	let bounds = o.bounds || null;
 	if (!bounds) { const BO = require('./bounds.js'); bounds = BO.createBounds(L, { model }); }
