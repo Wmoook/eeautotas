@@ -435,10 +435,15 @@ async function chainOfRoute(e, budget, polishMs) {
 		prevTick = o.tick;
 		const b = Math.max(budget, Math.min(15000, Math.round(budget * legTicks / 150)));
 		const r = await ex.reach(starts, wp, { ms: b, level: 1 });
-		if (!r.ok) { failAt = k; why = r.fail ? r.fail.why : '?'; break; }
+		if (!r.ok) {
+			failAt = k; why = r.fail ? r.fail.why : '?';
+			if (args.delays) console.error(`  leg ${k} ${wp.label}: FAILED (${why}) route ${legTicks} ticks from ${starts.length} starts, ${r.ms} ms` + (args.tiers ? ` tiers ${(r.tiers || []).map((t) => `${t.tier}:${t.ok === undefined ? t.status || '' : t.ok ? 'ok' : 'no'}${t.ms !== undefined ? '/' + t.ms : ''}${t.prof && t.ms > 700 ? JSON.stringify(t.prof) : ''}`).join(' ')}` : ''));
+			break;
+		}
 		starts = r.arrivals;
 		delays.push(Math.min(...starts.map((a) => a.masks.length)) - o.tick);
-		if (args.delays) console.error(`  leg ${k} ${wp.label}: route ${legTicks} ticks, from ${Math.min(...r.legs.map((l) => l.ticks))} (${r.tool}, lb ${r.lb}), delay ${delays[delays.length - 1]}, ${r.ms} ms`);
+		if (args.delays) console.error(`  leg ${k} ${wp.label}: route ${legTicks} ticks, from ${Math.min(...r.legs.map((l) => l.ticks))} (${r.tool}, lb ${r.lb}), delay ${delays[delays.length - 1]}, ${r.ms} ms, ${starts.length} arrivals` +
+			(args.tiers ? ` tiers ${(r.tiers || []).map((t) => `${t.tier}:${t.ok === undefined ? t.status || '' : t.ok ? 'ok' : 'no'}${t.ms !== undefined ? '/' + t.ms : ''}${t.prof && t.ms > 700 ? JSON.stringify(t.prof) : ''}`).join(' ')}` : ''));
 		done++;
 		if (wp.kind === 'trophy') break;
 	}
@@ -466,7 +471,9 @@ async function chainTruth() {
 	const budget = +args.budget || 3000, polishMs = +args.polishMs || 30000, limit = +args.chainN || 12;
 	const god = S.knownRoutes({ jobs: false });
 	const seen = new Set(), list = [];
-	for (const e of god) { if (seen.has(e.name)) continue; seen.add(e.name); list.push(e); }
+	// (--chainOnly=<regex>: only the routes whose level name matches)
+	const only = args.chainOnly ? new RegExp(String(args.chainOnly), 'i') : null;
+	for (const e of god) { if (seen.has(e.name) || (only && !only.test(e.name))) continue; seen.add(e.name); list.push(e); }
 	const shard = args.shard ? String(args.shard).split('/').map(Number) : null;
 	const mine = list.slice(0, limit).filter((e, i) => !shard || i % shard[1] === shard[0]);
 	const par = +args.par || 1;
@@ -476,7 +483,7 @@ async function chainTruth() {
 		const runs = [];
 		for (let i = 0; i < par; i++) {
 			runs.push(new Promise((resolve) => {
-				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
+				const p = spawn(process.execPath, [__filename, '--only=chain', '--truth', `--chainN=${limit}`, ...(args.chainOnly ? [`--chainOnly=${args.chainOnly}`] : []), `--budget=${budget}`, `--polishMs=${polishMs}`, `--chainStep=${+args.chainStep || 0}`, `--shard=${i}/${par}`, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
 				let s = '';
 				p.stdout.on('data', (d) => { s += d; });
 				p.on('close', () => { try { resolve(JSON.parse(s.trim().split('\n').pop()).rows || []); } catch (e) { resolve([]); } });
