@@ -247,11 +247,17 @@ function createSolver(L, opts = {}) {
 
 	/** the free gravity axis from (y0, vy0): Y[0..n], V[0..n] (evalGA's recurrence, exact) */
 	function gravTrace(y0, vy0, n, G) {
-		const Y = new Float64Array(n + 1), V = new Float64Array(n + 1);
-		Y[0] = y0; V[0] = vy0;
+		// Y the positions, R the raw positions before the align (the landing probe sees them), V the speeds
+		const Y = new Float64Array(n + 1), V = new Float64Array(n + 1), R = new Float64Array(n + 1);
+		Y[0] = y0; V[0] = vy0; R[0] = y0;
 		let y = y0, v = vy0;
-		for (let j = 1; j <= n; j++) { const r = K1.stepGA(y, v, G); y = r[0]; v = r[1]; Y[j] = y; V[j] = v; }
-		return { Y, V };
+		for (let j = 1; j <= n; j++) {
+			v = K1.axisStep(v, 0, G.mo, 0, 0, false);
+			y += v; R[j] = y;
+			if (K1.armed(v, G.a, false)) y = K1.align(y);
+			Y[j] = y; V[j] = v;
+		}
+		return { Y, V, R };
 	}
 
 	/**
@@ -366,10 +372,13 @@ function createSolver(L, opts = {}) {
 		for (const c of tg.colsByRow.get(fr - 1) || []) {
 			// x in [16c - 8, 16c + 8) with a landable tile under [x, x + 16): the floor columns c - 1, c, c + 1
 			const lo = 16 * c - 8, hi = 16 * c + 8;
+			// (the landing probe sees the x before the align and after the first sub-step: 2 px of slack; the tube's
+			// landing tick tests the floor exactly on those x)
 			const f = (k) => k >= 0 && k < W && (fr >= Hh || sol[fr * W + k] !== 0);
+			const sl = K1.ALIGN_SLACK;
 			if (f(c)) { out.push([lo, hi]); continue; }
-			if (f(c - 1)) out.push([lo, 16 * c]);        // the box reaches back over col c - 1 while x < 16c
-			if (f(c + 1)) out.push([16 * c + 0.0000001, hi]);   // x > 16c: the box reaches col c + 1
+			if (f(c - 1)) out.push([lo, Math.min(hi, 16 * c + sl)]);
+			if (f(c + 1)) out.push([Math.max(lo, 16 * c - sl), hi]);
 		}
 		return mergeWins(out);
 	}
@@ -397,11 +406,11 @@ function createSolver(L, opts = {}) {
 		const members = [];
 		const fall = gravTrace(y0, 0, Tmax, G), air = gravTrace(y0, vy0, Tmax, G), jmp = gravTrace(y0, G.J, Tmax, G);
 		if (standing) {
-			if (canJump) for (let j = 1; j < Tmax; j++) members.push({ kind: 'jump', j, g: j, off: 0, y: (t) => (t <= j ? y0 : jmp.Y[t - j]), v: (t) => (t <= j ? 0 : jmp.V[t - j]), air0: j });
-			for (let off = 1; off < Tmax; off++) members.push({ kind: 'off', j: 0, g: off - 1, off, y: (t) => (t < off ? y0 : fall.Y[t - off + 1]), v: (t) => (t < off ? 0 : fall.V[t - off + 1]), air0: off - 1 });
-			members.push({ kind: 'walk', j: 0, g: Tmax, off: 0, y: () => y0, v: () => 0, air0: Tmax });
+			if (canJump) for (let j = 1; j < Tmax; j++) members.push({ kind: 'jump', j, g: j, off: 0, y: (t) => (t <= j ? y0 : jmp.Y[t - j]), r: (t) => (t <= j ? y0 : jmp.R[t - j]), v: (t) => (t <= j ? 0 : jmp.V[t - j]), air0: j });
+			for (let off = 1; off < Tmax; off++) members.push({ kind: 'off', j: 0, g: off - 1, off, y: (t) => (t < off ? y0 : fall.Y[t - off + 1]), r: (t) => (t < off ? y0 : fall.R[t - off + 1]), v: (t) => (t < off ? 0 : fall.V[t - off + 1]), air0: off - 1 });
+			members.push({ kind: 'walk', j: 0, g: Tmax, off: 0, y: () => y0, r: () => y0, v: () => 0, air0: Tmax });
 		} else {
-			members.push({ kind: 'air', j: 0, g: 0, off: 0, y: (t) => air.Y[t], v: (t) => air.V[t], air0: 0 });
+			members.push({ kind: 'air', j: 0, g: 0, off: 0, y: (t) => air.Y[t], r: (t) => air.R[t], v: (t) => air.V[t], air0: 0 });
 		}
 		// THE BONK MEMBERS: a rise stopped by a ceiling row cr (its line 16 cr + 16: y blocked there, vy = 0), then the
 		// fall from (line, 0): one member per (rising member, ceiling line between its apex and its start)
@@ -420,7 +429,7 @@ function createSolver(L, opts = {}) {
 					const yb = Number.isInteger(prev) ? prev : line;
 					const b = t, cr = line / 16 - 1, fl = fallFrom(yb);
 					members.push({ kind: m.kind, j: m.j, g: m.g, off: 0, air0: m.air0, bonk: { b, cr, line: yb },
-						y: (q) => (q < b ? m.y(q) : q === b ? yb : fl.Y[q - b]), v: (q) => (q < b ? m.v(q) : q === b ? 0 : fl.V[q - b]) });
+						y: (q) => (q < b ? m.y(q) : q === b ? yb : fl.Y[q - b]), r: (q) => (q < b ? m.r(q) : q === b ? yb : fl.R[q - b]), v: (q) => (q < b ? m.v(q) : q === b ? 0 : fl.V[q - b]) });
 				}
 				prev = yt;
 			}
@@ -442,7 +451,7 @@ function createSolver(L, opts = {}) {
 				// the descending crossing of the floor line after the member's air start
 				for (let t = Math.max(1, m.air0 + 1); t <= Tmax; t++) {
 					const yp = t === 1 ? y0 : m.y(t - 1), yt = m.y(t);
-					if (yp <= line && yt > line && m.v(t) > 0) { const wins = landWins(tg, sol, fr); if (wins.length) items.push({ T: t, m, wins, land: fr }); break; }
+					if (yp <= line && m.r(t) > line && m.v(t) > 0) { const wins = landWins(tg, sol, fr); if (wins.length) items.push({ T: t, m, wins, land: fr }); break; }
 				}
 			}
 			if (tg.cls !== 'G') {
@@ -501,7 +510,7 @@ function createSolver(L, opts = {}) {
 					if (j < T) return boxFree(sol, x, m.bonk.line) && plainAt(tiles, x, m.bonk.line);
 				}
 				if (j === T) {
-					if (it.land >= 0) return boxFree(sol, x, 16 * it.land - 16);
+					if (it.land >= 0) return boxFree(sol, x, 16 * it.land - 16) && (floorAt(sol, raw, it.land) || floorAt(sol, xs, it.land) || floorAt(sol, x, it.land));
 					return true;
 				}
 				return boxFree(sol, x, Ys[j]) && plainAt(tiles, x, Ys[j]);
@@ -526,7 +535,9 @@ function createSolver(L, opts = {}) {
 				}
 				return false;
 			};
+			const c0 = stats.cands;
 			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, budget, wall);
+			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk, land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
 		}
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
 		return Object.assign({ ok: true, tool: 'plain' }, best);
@@ -610,27 +621,31 @@ function createSolver(L, opts = {}) {
 		// y: a landing on floor row fr (line 16 fr - 16) needs the ball to cross the line descending: below the start, the
 		// fall from max(vy0, 0) is the fastest (no input adds downward speed in the plain regime); above, the jump from the
 		// first tick (or the current rise) reaches the line first, then one more tick to land
+		// y: the centre in target row r at tick T means y_T in [16 r - 8, 16 r + 8) (whatever the floor's height: half
+		// blocks, one-ways); the align moves y by < 2 px (low gravity arms it): the slack. Below the start the fall from
+		// max(vy0, 0) is the fastest (no input adds downward speed in the plain regime; a floor or a bonk only stops);
+		// above it the rise of a jump pressed at tick 1 (y moves from tick 2) or the current rise, and a landing there
+		// needs one tick more (the rise ends first)
 		let ty = Infinity;
 		const standing = s.on_ground && vy0 === 0;
-		if (tg.cls === 'G' && s.max_jumps === 1) {
-			for (const fr of tg.landRows) {
-				const line = 16 * fr - 16;
+		const SL = K1.ALIGN_SLACK;
+		if (s.max_jumps === 1) {
+			for (const r of tg.rows) {
+				const ylo = 16 * r - 8 - SL, yhi = 16 * r + 8 + SL;
 				let t = Infinity;
-				if (line >= y0) {
-					// below (or level): the fall from max(vy0, 0) crosses the line first (a jump only slows the descent)
+				if (y0 >= ylo && y0 < yhi) t = 0;
+				else if (y0 < ylo) {
 					let y = y0, v = Math.max(vy0, 0);
-					for (let j = 1; j <= 2000; j++) { const r = K1.stepGA(y, v, G); y = r[0]; v = r[1]; if (y > line) { t = j; break; } }
-					if (line === y0 && standing) t = 1;
+					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y >= ylo) { t = j; break; } }
 				} else {
-					// above: the rise of a jump pressed at tick 1 (y moves from tick 2) or the current rise reaches the line
-					// first (a bonk only ends a rise); the landing is at least one tick later
 					const jumpNow = standing && s.jump_count < s.max_jumps;
-					let y = y0, v = jumpNow ? G.J : vy0;
-					for (let j = 1; j <= 2000; j++) { const r = K1.stepGA(y, v, G); y = r[0]; v = r[1]; if (y <= line) { t = j + (jumpNow ? 2 : 1); break; } if (v > 0) break; }
+					let y = y0, v = jumpNow ? G.J : Math.min(vy0, 0);
+					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y < yhi) { t = j + (jumpNow ? 1 : 0) + (tg.cls === 'G' ? 1 : 0); break; } if (v > 0) break; }
 				}
 				if (t < ty) ty = t;
 			}
 		} else ty = 0;
+		if (tg.cls === 'G' && ty < 1) ty = 1;
 		const b = Math.max(tx, ty);
 		return Number.isFinite(b) ? b : 0;
 	}
@@ -642,13 +657,16 @@ function createSolver(L, opts = {}) {
 	function certify(s, b, ctx) {
 		if (b <= 0 || b > HOLD_T) return false;
 		const G = K1.ga(ctx), Hd = holdTables(ctx);
-		const r = holdRange(Hd, s.px, s.speed_x, 0, 0);
-		let xlo = r[0], xhi = r[1];
-		for (let n = 1; n <= b; n++) { const q = holdRange(Hd, s.px, s.speed_x, n, K1.ALIGN_SLACK); if (q[0] < xlo) xlo = q[0]; if (q[1] > xhi) xhi = q[1]; }
-		let ylo = s.py, yhi = s.py;
-		for (const v0 of [Math.min(s.speed_y, G.J), Math.max(s.speed_y, 0)]) {
-			let y = s.py, v = v0;
-			for (let n = 1; n <= b; n++) { const q = K1.stepGA(y, v, G); y = q[0]; v = q[1]; if (y < ylo) ylo = y; if (y > yhi) yhi = y; }
+		let xlo = s.px, xhi = s.px;
+		for (let n = 1; n <= b; n++) {
+			const qR = holdRange(Hd, s.px, Math.max(s.speed_x, 0), n, K1.ALIGN_SLACK), qL = holdRange(Hd, s.px, Math.min(s.speed_x, 0), n, K1.ALIGN_SLACK);
+			if (qL[0] < xlo) xlo = qL[0]; if (qR[1] > xhi) xhi = qR[1];
+		}
+		let ylo = s.py - b * Math.max(Math.abs(G.J), -Math.min(s.speed_y, 0)) - K1.ALIGN_SLACK, yhi = s.py;
+		{
+			let y = s.py, v = Math.max(s.speed_y, 0);
+			for (let n = 1; n <= b; n++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y > yhi) yhi = y; }
+			yhi += K1.ALIGN_SLACK;
 		}
 		if (s.max_jumps !== 1) return false;
 		const c0 = Math.max(0, (Math.floor(xlo) >> 4)), c1 = Math.min(W - 1, (Math.floor(xhi + 16) >> 4));
