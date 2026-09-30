@@ -352,13 +352,22 @@ function makeCore(L, co) {
 		// (types.js plainOf: true = the plain-ball field (EEAT_FX_FIELD); an object = the ball's effect state (EEAT_FX_STATE))
 		return ordFieldFx(Lc, tiles, allowDeath, T.wildOf(Lc.fg) ? T.plainOf(sim) : false);
 	}
-	function ordFieldFx(Lc, tiles, allowDeath, pfx) {
-		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${T.fxSuffix(pfx)}`;
+	function ordFieldFx(Lc, tiles, allowDeath, pfx, depth) {
+		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${T.fxSuffix(pfx)}${depth ? '|d1' : ''}`;
 		let f = ordMemo.get(key);
 		if (f) return f;
 		const oo = { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true };
-		if (pfx && typeof pfx === 'object') oo.fxState = pfx;
-		else if (pfx) oo.plainFx = true;
+		if (pfx && typeof pfx === 'object') {
+			oo.fxState = pfx;
+			// (an exit seeded at the next state's ordering field there, one layer deep: types.js goalField's rule)
+			if (!depth) oo.fxSeedCost = (i, s2) => {
+				if (!s2) return -1;
+				const g = ordFieldFx(Lc, tiles, allowDeath, s2, 1);
+				if (!g || !g.fx) return -1;
+				const c = RF.costAt(g, (i % Lc.width) * 16, ((i / Lc.width) | 0) * 16, 0);
+				return c < 0 ? -1 : Math.round(c * 5);
+			};
+		} else if (pfx) oo.plainFx = true;
 		f = RF.reachField(Lc, oo);
 		// (EEAT_FX_STATE: a ball met in another modelled state: that state's ordering field, made on first use)
 		if (pfx && typeof pfx === 'object') Object.defineProperty(f, 'fxOf', { value: (s2) => ordFieldFx(Lc, tiles, allowDeath, s2), enumerable: false });

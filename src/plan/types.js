@@ -330,10 +330,19 @@ function goalField(Lc, tiles, o = {}) {
 	// (EEAT_FX_STATE: o.plainFx is the ball's effect state, an object: the effect-state field)
 	const fs = o.plainFx && typeof o.plainFx === 'object' && FX_STATE && wildOf(Lc.fg) ? o.plainFx : null;
 	const pfx = fs === null && o.plainFx === true && FX_FIELD && wildOf(Lc.fg);
-	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${fs ? fxSuffix(fs) : pfx ? '|p' : ''}`;
+	const key = `${fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${o.deaths === true ? 1 : 0}${fs ? fxSuffix(fs) + (o.fxDepth ? '|d1' : '') : pfx ? '|p' : ''}`;
 	const had = FIELDS.get(key);
 	if (had) { FIELDS.delete(key); FIELDS.set(key, had); return had; }
-	const f = RF.reachField(Lc, fs ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, fxState: fs } : pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
+	// (FX_STATE: an exit tile seeded at the NEXT state's field there, one unit along the state change (reach.js
+	// opts.fxSeedCost); that field's own exits at their walk cost: one layer deep)
+	const seedCost = fs && !o.fxDepth ? (i, s2) => {
+		if (!s2) return -1;
+		const g = goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2, fxDepth: 1 });
+		if (!g || !g.fx) return -1;
+		const c = RF.costAt(g, (i % Lc.width) * 16, ((i / Lc.width) | 0) * 16, 0);
+		return c < 0 ? -1 : Math.round(c * 5);
+	} : null;
+	const f = RF.reachField(Lc, fs ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, fxState: fs, fxSeedCost: seedCost } : pfx ? { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true, plainFx: true } : { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: o.deaths === true });
 	// (FX_STATE: a ball the lookup meets in another modelled state is priced by that state's field, made here on first use)
 	if (fs) Object.defineProperty(f, 'fxOf', { value: (s2) => goalField(Lc, tiles, { deaths: o.deaths === true, plainFx: s2 }), enumerable: false });
 	if (FIELDS.size === 0 && FIELDS_MB > 0) FIELDS_MAX = Math.max(FIELDS_MIN, Math.min(FIELDS_CAP, Math.floor(FIELDS_MB * 1048576 / Math.max(1, fieldBytes(f)))));

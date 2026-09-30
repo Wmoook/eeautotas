@@ -92,21 +92,37 @@ function fxChanges(id, v, s) {
 		default: return v !== 0;                        // fly, low gravity, gravity: on unless 0
 	}
 }
-/** the effect state the ball will have after the effect tile under its centre acts (a ball standing on its spawn's multijump
- *  tile: the state of the rest of the leg); fxStateOf where the tile changes nothing (or a0 is no engine) */
-function fxStateNext(a) {
-	const s = fxStateOf(a);
-	if (s === null || typeof a._getTile !== 'function') return s;
-	const tx = Math.trunc(a.px + 8) >> 4, ty = Math.trunc(a.py + 8) >> 4;
-	const id = a._getTile(tx, ty);
-	if (!(WILD.has(id) || id === FX_RESET)) return s;
-	const v = a._lookupAt(tx, ty);
+/** the effect state after effect tile id with number v acts on a ball of state s (null: a state not modelled) */
+function fxAfter(id, v, s) {
 	if (!fxChanges(id, v, s)) return s;
 	if (id === 461) return v < 1000 ? { mj: v, jb: s.jb } : null;
 	if (id === 417) return { mj: s.mj, jb: jbOf(v) };
 	if (id === FX_RESET) return { mj: 1, jb: 0 };
 	return null;
 }
+/** the effect state the ball will have for its leg: the state after its idle ticks from here meet an effect tile (a ball
+ *  standing on or falling onto its spawn's multijump tile: the state of the rest of the leg); fxStateOf otherwise */
+function fxStateNext(a) {
+	const s = fxStateOf(a);
+	if (s === null || typeof a.snapshot !== 'function' || typeof a.tick !== 'function') return s;
+	// (the engine itself: the ball's idle ticks from here, at most FX_IDLE, until its state changes, it dies or it rests: a
+	// spawn over an effect tile (Need for Steed: the spawn (632, 14) over its multijump (632, 15), max_jumps 2 at tick 9) is a
+	// leg of the state it falls into; the sim restored exactly, its event hook off meanwhile)
+	const snap = a.snapshot(), hook = a.onEvent;
+	let out = s;
+	try {
+		a.onEvent = null;
+		for (let k = 0; k < FX_IDLE; k++) {
+			a.tick(FX_IDLE_IN);
+			if (a.is_dead) break;
+			const s2 = fxStateOf(a);
+			if (s2 === null || s2.mj !== s.mj || s2.jb !== s.jb) { out = s2; break; }
+			if (k > 0 && a.speed_x === 0 && a.speed_y === 0) break;
+		}
+	} finally { a.restore(snap); a.onEvent = hook; }
+	return out;
+}
+const FX_IDLE = 40, FX_IDLE_IN = new E.EEInput();
 // (a state the physics part of an effect-state field has no way from: its walk + this, behind every way it has)
 const FX_FAR = 4000;
 const COINDOOR = 43, BLUECOINDOOR = 213, COIN_GOLD = 100;
@@ -504,7 +520,11 @@ function reachField(level, opts) {
 	if (fxExit !== null && fxExit.length && mode === 'physics') {
 		for (const i of fxExit) {
 			if (!passable(i) || walk[i] === CUT) continue;
-			if (!(goalF.get(i) <= walk[i])) { if (!goalF.has(i)) goals++; goalF.set(i, walk[i]); fxSeeds++; }
+			// (opts.fxState + opts.fxSeedCost(tile, the state after it): the exit seeded at the next state's own cost there,
+			// fifths (the next state's field: one unit along a state change), at least the walk's (a lower bound); -1: the walk)
+			let c = walk[i];
+			if (fxS !== null && typeof opts.fxSeedCost === 'function') { const n = opts.fxSeedCost(i, fxAfter(fg[i], lk[i], fxS)); if (n >= 0) c = Math.min(FAR, Math.max(c, n)); }
+			if (!(goalF.get(i) <= c)) { if (!goalF.has(i)) goals++; goalF.set(i, c); fxSeeds++; }
 		}
 	}
 	// walk mode with protection: that walk (killing tiles open where a protected ball can be) is a protected ball's way. An
@@ -1669,7 +1689,7 @@ function shareField(f) {
 }
 
 module.exports = {
-	VERSION: 3, reachField, fxStateOf, fxStateNext, fxChanges, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
+	VERSION: 3, reachField, fxStateOf, fxStateNext, fxChanges, fxAfter, FX_FAR, neverOpenDoors, guideFlags, classOfId, exitApexOn, ALWAYS_SHUT, unforceChains, silentPortals, halfQuadOn, quadOf, moveOK, moveBlocks, QDX, QDY, fifthsAt, fifthsAtRef, scoreAt, costAt, stateAt, stateOf, writeReachFile, reachFileBytes, shareField, DEATH_COST, DEATH_TILES: DEATH_COST / 5, PROT_COST,
 	// the tables and the lookup's pieces (tests)
 	riseQ, airRise, fallD, fallV, kOfX, cOfV, qOf, interp, RaInv, TABLES, VF, VFC, KLJ, NFV, NTH, FVa, FSa,
 	G, BD, JV, K_T, TOL, QMAX, KF, NL, CUT, FAR, R_, F_, X_, C_,
