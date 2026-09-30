@@ -476,7 +476,7 @@ function createPlanner(model, facts, o = {}) {
 			let est = lb, steps = sL, viaDeath = false, relaxOnly = false;
 			if (wantEst) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
-				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
+				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
 					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
 					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
@@ -532,7 +532,7 @@ function createPlanner(model, facts, o = {}) {
 			if (rp && !(facts && facts.blocked(edge, cls, proofKey(S, pos)))) {
 				const ok = facts ? facts.okTicks(edge, cls) : undefined;
 				const lbD = (dvL ? lbOfSteps(dvL.dk) : 0) + DEAD_TICKS + extra;
-				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + DEAD_TICKS + extra);
+				const est = Math.max(lbD, ok !== undefined ? ok : dvE.dk * P + (dvE.dt || 0) + DEAD_TICKS + extra);
 				const X = { id: -1 - vals[dieIdx], kind: 'die', tiles: rp.tiles, label: `die, back at a respawn (deaths ${vals[dieIdx]})` };
 				out.push({ X, S2, pos2: diePos(rp), expect: { feat: 'deaths', value: vals[dieIdx] }, lb: lbD, est, steps: dvE.dk, viaDeath: false, relaxOnly: false, edge, live: rp.tiles });
 			}
