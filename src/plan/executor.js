@@ -212,6 +212,7 @@ const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.
 // FIRST (one arrival more than k at most), and the math tier's own leg asks for NEXT_ALTS end states within NEXT_SLACK
 // ticks. Ordering only: every arrival is still a verified first entry of this waypoint. EEAT_NEXT=0: off (as before).
 const NEXT_ON = () => process.env.EEAT_NEXT !== '0';
+const NEXT_FIRST = process.env.EEAT_NEXT_FIRST !== '0';   // (0: the next-best arrival kept among the picked, not first)
 const NEXT_EVAL = 64, NEXT_TRY = +process.env.EEAT_NEXT_TRY > 0 ? +process.env.EEAT_NEXT_TRY : 6, NEXT_MS = +process.env.EEAT_NEXT_MS > 0 ? +process.env.EEAT_NEXT_MS : 25;
 const NEXT_ALTS = +process.env.EEAT_NEXT_ALTS >= 0 && process.env.EEAT_NEXT_ALTS !== undefined ? +process.env.EEAT_NEXT_ALTS : 12;
 const NEXT_SLACK = +process.env.EEAT_NEXT_SLACK >= 0 && process.env.EEAT_NEXT_SLACK !== undefined ? +process.env.EEAT_NEXT_SLACK : 6;
@@ -1061,11 +1062,14 @@ function makeCore(L, co) {
 			// (the plan's next waypoint: the goal state the next leg costs least from, FIRST)
 			if (nextGoal && arr.length > 1 && Date.now() < deadline - 60) {
 				const nb = nextBest(arr, picked);
-				if (nb) {
+				if (nb && NEXT_FIRST) {
 					const i = picked.indexOf(nb);
 					if (i > 0) picked.splice(i, 1);
 					if (i !== 0) picked.unshift(nb);
 					if (picked.length > k + 1) picked.pop();
+				} else if (nb && !picked.includes(nb)) {
+					// (EEAT_NEXT_FIRST=0: kept among the picked, the order of before; one more than k at most)
+					if (picked.length > k) picked[picked.length - 1] = nb; else picked.push(nb);
 				}
 			}
 			const good = [];
