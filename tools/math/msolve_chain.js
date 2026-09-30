@@ -6,7 +6,7 @@
 // <= / < the route's ticks over the same K moves, closed (the A* proved no chain of its legs is shorter), expanded
 // nodes, legs solved, ms.
 // Usage: EEAT_TRUTH_ROOT=<root> node tools/math/msolve_chain.js --moves=<exact_jsonl dir> --out=<dir> [--shard=i/n]
-//          [--chain=4] [--every=24] [--ms=2000] [--fan=8] [--legT=80] [--limit=N routes] [--w=1] [--reach=0] [--kappa=2.36]
+//          [--chain=4] [--every=24] [--ms=2000] [--fan=8] [--legT=80] [--limit=N routes] [--w=1] [--w1=2] [--phase1=0.5] [--reach=0] [--kappa=2.36]
 //        node tools/math/msolve_chain.js --agg=<dir>
 const fs = require('fs');
 const path = require('path');
@@ -78,8 +78,8 @@ function main() {
 			const target = { tiles: [b.tile1], cls: b.c1, tele };
 			if (tele) target.via = portalVia(L, b.tile1);
 			const routeT = b.t1 - a.t0;
-			const res = S.chain(snaps.get(a.t0), target, { ms: +(argv.ms || 2000), fan: +(argv.fan || 8), legT: +(argv.legT || 80), w: +(argv.w || 1), coupledDirect: argv.coupledDirect !== '0', fanMax: argv.fanMax ? +argv.fanMax : undefined, fanNodes: argv.fanNodes ? +argv.fanNodes : undefined, events: argv.events !== '0', reach: argv.reach !== '0', kappa: argv.kappa ? +argv.kappa : undefined });
-			const rec = { r: entry._idx, m: i, k: KCH, routeT, labels: moves.slice(i, i + KCH).map((m) => m.label).join(','), ok: res.ok, T: res.T, closed: res.closed, exp: res.expanded, legs: res.legs, nodes: res.nodes, cut: res.cut, ms: res.ms };
+			const res = S.chain(snaps.get(a.t0), target, { ms: +(argv.ms || 2000), fan: +(argv.fan || 8), legT: +(argv.legT || 80), w: +(argv.w || 1), coupledDirect: argv.coupledDirect !== '0', fanMax: argv.fanMax ? +argv.fanMax : undefined, fanNodes: argv.fanNodes ? +argv.fanNodes : undefined, events: argv.events !== '0', reach: argv.reach !== '0', kappa: argv.kappa ? +argv.kappa : undefined, w1: argv.w1 !== undefined ? +argv.w1 : undefined, phase1: argv.phase1 !== undefined ? +argv.phase1 : undefined });
+			const rec = { r: entry._idx, m: i, k: KCH, routeT, labels: moves.slice(i, i + KCH).map((m) => m.label).join(','), ok: res.ok, T: res.T, closed: res.closed, exp: res.expanded, legs: res.legs, nodes: res.nodes, cut: res.cut, firstMs: res.firstMs, ms: res.ms };
 			if (res.ok) {
 				chk.restore(snaps.get(a.t0));
 				let px = chk.px, py = chk.py, tel = false, dead = false;

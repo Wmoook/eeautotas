@@ -956,8 +956,10 @@ function createSolver(L, opts = {}) {
 		const snap0 = snapOf(start);
 		const tg = targetOf(target);
 		const heap = [];
-		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (heap[p].f <= heap[i].f) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
-		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l].f < heap[m].f) m = l; if (r < heap.length && heap[r].f < heap[m].f) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
+		// the least f first, among equal f the deepest (the larger g: the same guarantees, the goal sooner)
+		const lt = (a, b) => a.f < b.f || (a.f === b.f && a.g > b.g);
+		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (!lt(heap[i], heap[p])) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && lt(heap[l], heap[m])) m = l; if (r < heap.length && lt(heap[r], heap[m])) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
 		const push = (n) => { heap.push(n); up(heap.length - 1); };
 		const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; down(0); } return top; };
 		// h: two numbers. THE CLAIM (fa = g + adm): the plain bound, admissible; a bound without its certificate (a field
@@ -965,8 +967,16 @@ function createSolver(L, opts = {}) {
 		// and the reach field to the target's tiles (src/reach.js, deaths off: the chain never dies) in ticks at the top
 		// running speed (not admissible: an order only); the reach field's -1 in physics mode is a proof (no death-free way
 		// to the tiles), so such a node is dropped
+		// TWO PHASES (anytime): the order's weight w1 (o.w1, default 2: greedy toward the target) until the first chain
+		// or half the clock, then w (o.w, default 1: A*, the best chain pruned by fa); the heap re-keyed at the switch
 		let uncert = false, cut = 0;
-		const W8 = o.w || 1;
+		const wEnd = o.w || 1, w1 = o.w1 === undefined ? Math.max(2, wEnd) : o.w1, switchMs = budgetMs * (o.phase1 === undefined ? 0.5 : o.phase1);
+		let W8 = w1, phase = w1 === wEnd ? 2 : 1;
+		const rekey = () => {
+			W8 = wEnd; phase = 2;
+			for (const x of heap) x.f = x.g + W8 * x.h;
+			for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i);
+		};
 		const rf = o.reach === false ? null : reachFieldOf(tg.tiles);
 		const KAPPA = o.kappa || 16 / 6.776552880470027;
 		const hOf = () => {
@@ -981,16 +991,17 @@ function createSolver(L, opts = {}) {
 				const rc = RF().costAt(rf, sim);
 				if (rc < 0) { if (rf.mode === 'physics') { cut++; return null; } } else ord = Math.max(ord, rc * KAPPA);
 			}
-			return { adm: b, ord: ord * W8 };
+			return { adm: b, ord };
 		};
 		const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
 		const seen = new Map();
 		sim.restore(snap0);
 		seen.set(sim.stateHash(), 0);
 		const h0 = hOf();
-		if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), f: h0.ord, fa: h0.adm });
-		let best = null, expanded = 0, legs = 0, nodes = 1;
+		if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), h: h0.ord, f: W8 * h0.ord, fa: h0.adm });
+		let best = null, expanded = 0, legs = 0, nodes = 1, firstAt = 0;
 		while (heap.length && Date.now() - t0 < budgetMs) {
+			if (phase === 1 && (best || Date.now() - t0 >= switchMs)) rekey();
 			const n = pop();
 			if (best && n.fa >= best.T) continue;
 			expanded++;
@@ -1002,7 +1013,7 @@ function createSolver(L, opts = {}) {
 			const plainNode = !!plainStart(sim);
 			const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
 			legs++;
-			if (r.ok && (!best || n.g + r.T < best.T)) best = { T: n.g + r.T, masks: cat(n.masks, r.masks) };
+			if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
 			if (fan <= 0) continue;
@@ -1026,7 +1037,7 @@ function createSolver(L, opts = {}) {
 					const h = hOf();
 					if (!h) continue;
 					if (best && g + h.adm >= best.T) continue;
-					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), f: g + h.ord, fa: g + h.adm });
+					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), h: h.ord, f: g + W8 * h.ord, fa: g + h.adm });
 					nodes++;
 				}
 			}
@@ -1034,7 +1045,7 @@ function createSolver(L, opts = {}) {
 		let open = 0;
 		for (const x of heap) if (!best || x.fa < best.T) open++;
 		const closed = !!best && !uncert && open === 0;
-		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, reach: rf ? rf.mode : null, ms: Date.now() - t0 };
+		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, reach: rf ? rf.mode : null, firstMs: firstAt, ms: Date.now() - t0 };
 	}
 
 	return {
