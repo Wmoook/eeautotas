@@ -715,6 +715,8 @@ async function createExecutor(L, opts) {
 	const SKEL_ON = process.env.EEAT_SKEL !== '0';
 	const SKEL_STEP = +process.env.EEAT_SKEL_STEP > 0 ? +process.env.EEAT_SKEL_STEP : 12;
 	const SKEL_MIN = +process.env.EEAT_SKEL_MIN > 0 ? +process.env.EEAT_SKEL_MIN : 30;
+	const SKEL_DIRECT = process.env.EEAT_SKEL_DIRECT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_SKEL_DIRECT || 0)) : 0.35;
+	const skelKey = (goal, wp, startStrs) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}`;
 	const skelMemo = new Map();   // key (goal, first start) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
 	const tileMinMemo = new WeakMap();
 	/** per tile the least cost (fifths) of any ball state centred on it by the goal field f (walk mode: its walk); CUT none */
@@ -761,8 +763,16 @@ async function createExecutor(L, opts) {
 			for (const s of startStrs) { const r = fieldAt(s, goal, wp.allowDeath); if (r.f && r.c >= 0 && r.c < c0) { c0 = r.c; f0 = r.f; } }
 		} catch (e) { f0 = null; }
 		if (!f0 || !(c0 >= SKEL_MIN) || !Number.isFinite(c0)) return reachLeg(starts, wp, budget);
+		// (the direct leg first with SKEL_DIRECT of the budget (a leg the finders reach whole keeps its way: the skeleton's
+		// split cost PARTIAL levels their progress, SMB3 3 -> 0, Booty Return 14 -> 6); its found leg, or its proof
+		// (the exact tier's exhaustion: no time in it), is the answer; else the skeleton with the rest)
+		if (SKEL_DIRECT > 0 && !skelMemo.has(skelKey(goal, wp, startStrs))) {
+			const dMs = SKEL_DIRECT * (deadline - Date.now());
+			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop });
+			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
+		}
 		// (resume from the deepest level an earlier call for this step reached)
-		const key = `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}`;
+		const key = skelKey(goal, wp, startStrs);
 		const memo = skelMemo.get(key);
 		const top = memo && memo.length ? memo[memo.length - 1] : null;
 		let cur = top ? top.cur.slice() : startStrs, cCur = top ? top.c : c0;
