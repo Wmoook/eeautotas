@@ -40,7 +40,9 @@
 //      equals a certified bound is PROVEN OPTIMAL (res.proven): no input sequence reaches the target sooner.
 //   7. CHAINS (chain): A* over SUPPORT STATES with solved legs as edges: the direct leg to the target at every node,
 //      the forward fan-out (landings: the earliest verified landing, and its hop, on the standable tiles the plain
-//      extremes reach), nodes merged by stateHash, h = the plain bound; closed = optimal within the legs' graph.
+//      extremes reach) and the event fan-out (the 18 held masks to their first support event), nodes merged by
+//      stateHash; the claim fa = g + the certified plain bound, the order f = g + w x max(that bound, kappa x the reach
+//      field's cost to the target's tiles), the reach field's -1 a proof; closed = optimal within the legs' graph.
 // The gravity members also cover BONKS (a rise stopped by a ceiling line: y blocked there, vy = 0, then the fall) and
 // the x map carries the member's WALLS (a blocked x stops at its last free sub-step, vx = 0); the landing reads the raw
 // x and y before the align (the collision probe sees them).
@@ -54,7 +56,8 @@
 //       must teleport), via: number[] (portal tiles to enter for a teleport target)}
 //     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
 //       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), debug(item)}
-//   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, ms}   o: {ms, legT, w, fanT, fanMax}
+//   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, cut, reach, ms}
+//                                o: {ms, legT, w, fanT, fanMax, fanNodes, events, reach (the reach field's order), kappa}
 //   S.landings(start, o) -> [{tile, T, masks, hop}]   the forward fan-out from a plain state
 //   S.lowerBound(start, target) -> ticks (the plain regime's bound; 0 when none applies)
 //   S.goal(target) -> (sim, prevX, prevY) -> bool: the target's exact test on a real state
@@ -73,6 +76,9 @@ const TELEPORT_PX = 20;
 let FS_ = null;
 /** the field leg solver (src/math/fieldsolve.js), loaded on first use */
 const FSOLVE = () => FS_ || (FS_ = require('../math/fieldsolve.js'));
+let RF_ = null;
+/** the reach field (src/reach.js), the chains' order, loaded on first use */
+const RF = () => RF_ || (RF_ = require('../reach.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
 
@@ -760,6 +766,17 @@ function createSolver(L, opts = {}) {
 		if (start instanceof E.EESim) return start.snapshot();
 		return start;
 	}
+	// the reach field to a set of tiles (the chains' order), one per tile set, the newest 8 kept
+	const rfCache = new Map();
+	function reachFieldOf(tiles) {
+		const key = Array.from(tiles).sort((a, b) => a - b).join(',');
+		if (rfCache.has(key)) return rfCache.get(key);
+		let f = null;
+		try { f = RF().reachField(L, { goals: Array.from(tiles).map((t) => ({ tile: t, cost: 0 })), deaths: false }); } catch (e) { f = null; }
+		if (rfCache.size >= 8) rfCache.delete(rfCache.keys().next().value);
+		rfCache.set(key, f);
+		return f;
+	}
 	function leg(start, target, o = {}) {
 		const t0 = process.hrtime.bigint();
 		const snap = snapOf(start);
@@ -812,7 +829,7 @@ function createSolver(L, opts = {}) {
 		if (!res.ok && oo.chain !== false && ctx && !target.tele && oo.Tmax >= (oo.chainMin || 40)) {
 			// THE CHAIN TIER: a long leg as a chain of shorter ones through supports (A* over support states, 4.6),
 			// within this leg's horizon and a small clock
-			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax) });
+			const r = chain(snap, target, { Tmax: oo.Tmax, ms: oo.chainMs || 400, legT: Math.min(60, oo.Tmax), reach: oo.chainReach === true });
 			stats.chain = r;
 			if (r.ok) res = { ok: true, tool: 'chain', T: r.T, masks: r.masks, member: `chain ${r.expanded}` };
 		}
@@ -926,11 +943,13 @@ function createSolver(L, opts = {}) {
 	 * snapshot, the masks from the chain's start, g = ticks); its edges = the direct leg to the target and legs to the
 	 * o.fan (8) standable tiles nearest the target (supportsNear), each landing also as its hop (the jump on the
 	 * landing tick: another state, the same support); nodes merged by stateHash (a state reached again no sooner is
-	 * dropped); h = the plain regime's certified lower bound to the target (0 where none applies), so a search whose
-	 * open list's least f reaches the best found has CLOSED: that chain is optimal within the graph of these legs.
-	 * Lazy verification: every edge is the solver's replayed answer, made when its node is expanded, not before.
-	 * o: {ms (2000), fan (8), legT (80: a leg's Tmax), K, coupled (false: the fan-out legs plain only; the direct leg
-	 * takes o.coupledDirect)}. Returns {ok, masks, T, closed, expanded, legs, nodes, ms}.
+	 * dropped); the order f = g + w x max(the plain bound, the reach field's cost to the target's tiles x kappa ticks a
+	 * tile), the claim fa = g + the plain regime's certified lower bound (0 where none applies), so a search none of
+	 * whose open nodes has fa below the best found has CLOSED: that chain is optimal within the graph of these legs (the
+	 * reach field's -1 in physics mode drops a node: a proof). Lazy verification: every edge is the solver's replayed
+	 * answer, made when its node is expanded, not before.
+	 * o: {ms (2000), fan (8), legT (80: a leg's Tmax), K, w (1), reach (true: the reach field's order), kappa,
+	 * coupledDirect}. Returns {ok, masks, T, closed, expanded, legs, nodes, cut, reach, ms}.
 	 */
 	function chain(start, target, o = {}) {
 		const t0 = Date.now(), budgetMs = o.ms || 2000, fan = o.fan === undefined ? 8 : o.fan, legT = o.legT || 80;
@@ -941,26 +960,39 @@ function createSolver(L, opts = {}) {
 		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l].f < heap[m].f) m = l; if (r < heap.length && heap[r].f < heap[m].f) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
 		const push = (n) => { heap.push(n); up(heap.length - 1); };
 		const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; down(0); } return top; };
-		// h: the plain bound (the order); a bound without its certificate (a field or a portal within reach) orders but
-		// voids the closed claim (uncert)
-		let uncert = false;
+		// h: two numbers. THE CLAIM (fa = g + adm): the plain bound, admissible; a bound without its certificate (a field
+		// or a portal within reach) voids the closed claim (uncert). THE ORDER (f = g + w x ord): the larger of that bound
+		// and the reach field to the target's tiles (src/reach.js, deaths off: the chain never dies) in ticks at the top
+		// running speed (not admissible: an order only); the reach field's -1 in physics mode is a proof (no death-free way
+		// to the tiles), so such a node is dropped
+		let uncert = false, cut = 0;
 		const W8 = o.w || 1;
+		const rf = o.reach === false ? null : reachFieldOf(tg.tiles);
+		const KAPPA = o.kappa || 16 / 6.776552880470027;
 		const hOf = () => {
+			let b = 0;
 			const c = plainStart(sim);
-			if (!c || tg.tele) return 0;
-			const b = lowerBoundOf(sim, tg, c);
-			if (b > 0 && !certify(sim, b, c)) uncert = true;
-			return b * W8;
+			if (c && !tg.tele) {
+				b = lowerBoundOf(sim, tg, c);
+				if (b > 0 && !certify(sim, b, c)) uncert = true;
+			}
+			let ord = b;
+			if (rf) {
+				const rc = RF().costAt(rf, sim);
+				if (rc < 0) { if (rf.mode === 'physics') { cut++; return null; } } else ord = Math.max(ord, rc * KAPPA);
+			}
+			return { adm: b, ord: ord * W8 };
 		};
 		const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
 		const seen = new Map();
 		sim.restore(snap0);
 		seen.set(sim.stateHash(), 0);
-		push({ snap: snap0, g: 0, masks: new Uint8Array(0), f: hOf() });
+		const h0 = hOf();
+		if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), f: h0.ord, fa: h0.adm });
 		let best = null, expanded = 0, legs = 0, nodes = 1;
 		while (heap.length && Date.now() - t0 < budgetMs) {
 			const n = pop();
-			if (best && n.f >= best.T) { push(n); break; }
+			if (best && n.fa >= best.T) continue;
 			expanded++;
 			if (o.trace) o.trace(n);
 			const horizon = o.Tmax ? o.Tmax - n.g : Infinity;
@@ -992,14 +1024,17 @@ function createSolver(L, opts = {}) {
 					if (seen.has(hsh) && seen.get(hsh) <= g) continue;
 					seen.set(hsh, g);
 					const h = hOf();
-					if (best && g + h >= best.T) continue;
-					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), f: g + h });
+					if (!h) continue;
+					if (best && g + h.adm >= best.T) continue;
+					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), f: g + h.ord, fa: g + h.adm });
 					nodes++;
 				}
 			}
 		}
-		const closed = !!best && !uncert && W8 === 1 && (heap.length === 0 || heap[0].f >= best.T);
-		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, ms: Date.now() - t0 };
+		let open = 0;
+		for (const x of heap) if (!best || x.fa < best.T) open++;
+		const closed = !!best && !uncert && open === 0;
+		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, reach: rf ? rf.mode : null, ms: Date.now() - t0 };
 	}
 
 	return {
