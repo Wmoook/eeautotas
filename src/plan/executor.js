@@ -188,7 +188,7 @@ function makeCore(L, co) {
 		// -------- tier 2: the exact search, short (iterative deepening)
 		const cap = rung <= 0 ? 150000 : rung === 1 ? 250000 : 300000;
 		const baseX = { sim, allowDeath, beforeTick, bounds: co.bounds || null, field: cutField, discKey: X.discKey, disc0, stop: stopFn, cap };
-		let lbAbs = 0, exactProof = false;
+		let lbAbs = 0, exactProof = false, legTime = false;
 		let found = null;   // {cands, tool, proven, lbAbs}
 		{
 			const t2 = Date.now();
@@ -208,15 +208,16 @@ function makeCore(L, co) {
 		// -------- tier 3: the fine-cell leg search
 		if (!found && !exactProof && Date.now() < wEnd - 5) {
 			const t3 = Date.now();
-			const lEnd = t3 + 0.75 * (wEnd - t3);
+			const lEnd = wEnd - 3;
 			const region = regionOf(field0, starts, goal);
 			const r = LG.legBFS(L, snaps, goal, { sim, deadline: lEnd, stop: stopFn, allowDeath, beforeTick, field: field0, region,
-				width0: rung <= 0 ? 600 : 1500, widthMax: 80000, depthMax: beforeTick >= 0 ? beforeTick - t0 : 4000, stall: 150 + 100 * rung });
+				width0: 300, widthMax: 80000, depthMax: beforeTick >= 0 ? beforeTick - t0 : 4000, stall: 150 + 100 * rung });
 			sims += r.sims;
 			tiers.push({ tier: 'leg', ms: Date.now() - t3, status: r.status, passes: r.passes });
 			if (r.status === 'found') found = { cands: r.goals, tool: 'leg', proven: false, lbAbs };
 			else {
 				if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
+				if (r.status === 'time') legTime = true;
 				if (r.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
 			}
 		}
@@ -244,7 +245,7 @@ function makeCore(L, co) {
 			}
 			void legs;
 		}
-		const why = exactProof ? 'exhausted' : (Date.now() >= wEnd - 5 ? 'budget' : 'exhausted');
+		const why = exactProof ? 'exhausted' : (legTime || Date.now() >= wEnd - 5 ? 'budget' : 'exhausted');
 		return out(failResult(why, closest, null, rung, starts, goal, { lbAbs, startCost, deadline }));
 
 		// ---------------------------------------------------------------- the pieces
@@ -265,6 +266,15 @@ function makeCore(L, co) {
 				if (Date.now() > deadline - 20 && arr.length >= 1) break;
 			}
 			const picked = T.pickDiverse(arr, k);
+			// (a CALM arrival too: pickDiverse ranks equal ticks by |vx| + |vy|, so a jump pressed on the goal tick is its
+			// "earliest" and "fastest"; the next leg from a ball launched upward can be much longer (test/planexec.js's key
+			// door level: 38 ticks from the calm state, none found in 3 s from the four launched ones))
+			const calm = (a) => a.vy >= -0.5;
+			if (picked.length && !picked.some(calm)) {
+				let best = null;
+				for (const a of arr) if (calm(a) && (!best || a.tick < best.tick || (a.tick === best.tick && Math.abs(a.vx) > Math.abs(best.vx)))) best = a;
+				if (best) { if (picked.length >= k) picked[picked.length - 1] = best; else picked.push(best); }
+			}
 			const good = [];
 			for (const a of picked) {
 				const c = a._c;

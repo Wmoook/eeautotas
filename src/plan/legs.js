@@ -48,6 +48,28 @@ function legBFS(L, starts, goal, o) {
 	const collect = o.collect > 0 ? o.collect : 4000;
 	const extra = o.extra >= 0 ? o.extra : 3;
 	const stallMax = o.stall > 0 ? o.stall : 200;
+	const noSeen = !!o.noSeen;
+	// (the ranking's time bound: endgame.js's admissible kinematic envelope, capped; none with deaths allowed)
+	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
+	const HLIM = o.hLim > 0 ? o.hLim : 64;
+	const FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;   // (ticks a tile at the running speed)
+	let hLim = HLIM;
+	const dirs = field ? dirsOf(field) : null;
+	/**
+	 * The ranking of the state now in sim (ticks, smaller first): the time to run the goal field's distance along the
+	 * walk's descent at its tile from its speed along it (eta: the running acceleration up to the running speed), and near
+	 * the goal (within hLim ticks) the admissible kinematic bound when larger. The field alone is blind to speed: a beam by
+	 * distance kept the slow states at a wall's face and lost the run-ups (test/planexec.js's key door leg: 184 ticks at
+	 * width 300 by the distance, the optimal 38 by this).
+	 */
+	const scoreOf = (dist) => {
+		if (dist >= 1e9) return 1e9;
+		const ft = dist * FT;
+		if (B === null || sim.is_dead || ft > hLim + 16) return ft;
+		const h = EG.lowerBound(B, sim, hLim);
+		return h > ft ? h : ft;
+	};
+	void dirs;
 	const order = starts.map((s, i) => i).sort((a, b) => starts[a].tick - starts[b].tick || a - b);
 	const t0 = starts[order[0]].tick;
 	let depthMax = o.depthMax > 0 ? o.depthMax : 2000;
@@ -124,29 +146,39 @@ function legBFS(L, starts, goal, o) {
 					if (region !== null && !region[t]) continue;
 					const disc = X.discKey(sim);
 					const key = cellOf(sim, disc);
-					if (seen.has(key)) continue;
+					if (!noSeen && seen.has(key)) continue;
 					const v = Math.abs(sim.speed_x) + Math.abs(sim.speed_y);
 					const e = nx.get(key);
 					if (e !== undefined) {
-						if (v > e.v) { e.sn = sim.snapshot(e.sn); e.v = v; e.par = i; e.msk = m; e.dist = distOf(field, sim); }
+						if (v > e.v) { e.sn = sim.snapshot(e.sn); e.v = v; e.par = i; e.msk = m; e.dist = distOf(field, sim); e.sc = scoreOf(e.dist); }
 						continue;
 					}
-					nx.set(key, { sn: sim.snapshot(), v, t, dist: distOf(field, sim), par: i, msk: m, key });
+					const dist = distOf(field, sim);
+					nx.set(key, { sn: sim.snapshot(), v, t, dist, sc: scoreOf(dist), par: i, msk: m, key });
 				}
 			}
-			// the next layer: half by the goal field's distance, half by novelty per tile then speed
+			// the next layer: 3/4 by the goal field's distance with at most `perTile` states a tile (flybeam.js's rule: a
+			// beam piled up at a wall's face keeps room for the states that are still behind it, e.g. jumping earlier), the
+			// rest by novelty per tile then speed
 			let arr = [...nx.values()];
 			for (const x of arr) seen.add(x.key);
 			if (seen.size > 6e6) seen.clear();
 			if (arr.length > width) {
-				const half = width >> 1;
-				const byDist = arr.slice().sort((a, b) => a.dist - b.dist || b.v - a.v);
-				const keep = new Set(byDist.slice(0, half));
+				const nDist = Math.floor(width * (o.distShare > 0 ? o.distShare : 0.9));
+				const perTile = o.perTile > 0 ? o.perTile : 8;
+				const byDist = arr.slice().sort((a, b) => a.sc - b.sc || a.dist - b.dist || b.v - a.v);
+				const keep = new Set(), perT = new Map();
+				for (let k = 0; k < byDist.length && keep.size < nDist; k++) {
+					const x = byDist[k], c = perT.get(x.t) || 0;
+					if (c >= perTile) continue;
+					perT.set(x.t, c + 1); keep.add(x);
+				}
 				const rest = arr.filter((x) => !keep.has(x));
-				rest.sort((a, b) => (tileSeen.get(a.t) || 0) - (tileSeen.get(b.t) || 0) || b.v - a.v);
+				rest.sort((a, b) => (tileSeen.get(a.t) || 0) - (tileSeen.get(b.t) || 0) || a.sc - b.sc || b.v - a.v);
 				for (let k = 0; k < rest.length && keep.size < width; k++) keep.add(rest[k]);
 				arr = [...keep];
 			}
+			if (o.onLayer) o.onLayer(c, nx, arr);
 			for (const x of arr) tileSeen.set(x.t, (tileSeen.get(x.t) || 0) + 1);
 			cur = arr.map((x) => ({ sn: x.sn, v: x.v }));
 			layers[c] = { par: Int32Array.from(arr, (x) => x.par), msk: Uint8Array.from(arr, (x) => x.msk) };
@@ -175,10 +207,50 @@ function legBFS(L, starts, goal, o) {
 	}
 	function finish(why) { return res(why); }
 }
+/**
+ * The ranking of a state: the goal field's distance (tiles) less its progress over the next LOOK ticks (its speed along
+ * the walk's descent at its tile, px/tick -> tiles): a state running toward the goal ranks before one standing at the
+ * same place (the field is blind to speed; the beam kept the slow states at a wall's face and lost the run-ups)
+ */
+const LOOK = 10;
+const DIRS = new WeakMap();
+function dirsOf(field) {
+	let d = DIRS.get(field);
+	if (d) return d;
+	const W = field.W, H = field.H, N = W * H, walk = field.walk;
+	d = new Float32Array(2 * N);
+	if (walk) for (let t = 0; t < N; t++) {
+		if (walk[t] === RF.CUT) continue;
+		const x = t % W, y = (t / W) | 0;
+		let bx = 0, by = 0, bv = walk[t];
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			const xx = x + dx, yy = y + dy;
+			if ((!dx && !dy) || xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+			const v = walk[yy * W + xx];
+			if (v !== RF.CUT && v < bv) { bv = v; bx = dx; by = dy; }
+		}
+		const n = Math.hypot(bx, by) || 1;
+		d[2 * t] = bx / n; d[2 * t + 1] = by / n;
+	}
+	DIRS.set(field, d);
+	return d;
+}
+/** ticks to cover D px from speed v along the way: the running acceleration (1 / 7.752 px/tick a tick) up to the
+ *  running speed 6.78 px/tick (a faster speed kept) */
+const A_RUN = 1 / 7.752, V_RUN = 6.78;
+function eta(D, v) {
+	if (D <= 0) return 0;
+	if (v >= V_RUN) return D / v;
+	if (v < -V_RUN) v = -V_RUN;
+	const tv = (V_RUN - v) / A_RUN, dv = v * tv + 0.5 * A_RUN * tv * tv;
+	if (D <= dv) return (-v + Math.sqrt(v * v + 2 * A_RUN * D)) / A_RUN;
+	return tv + (D - dv) / V_RUN;
+}
 const distOf = (field, sim) => {
 	if (!field) return 0;
 	const c = RF.costAt(field, sim);
-	return c < 0 ? 1e9 : c;
+	if (c < 0) return 1e9;
+	return c;
 };
 
 module.exports = { legBFS, cellOf };
