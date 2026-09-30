@@ -151,13 +151,16 @@ function createOneShot(L, o = {}) {
 	const heap = new Heap();
 	const seen = new Map();           // stateHash -> least g
 	const classes = new Map();        // class key -> [g ...] (the CLASS_K least)
-	let level = 0, lvQ = LADDER[0][0], lvQX = LADDER[0][1], lvK = LADDER[0][2], lvKX = LADDER[0][3];
+	// (o.ladder: the refinement ladder of this instance (a portfolio worker starts further down it), o.w1: its greedy weight)
+	const LAD = Array.isArray(o.ladder) && o.ladder.length ? o.ladder : LADDER;
+	const W1o = Number.isFinite(+o.w1) && +o.w1 > 0 ? +o.w1 : W1;
+	let level = 0, lvQ = LAD[0][0], lvQX = LAD[0][1], lvK = LAD[0][2], lvKX = LAD[0][3];
 	const injList = [];              // the injected states (masks), again at every ladder step
 	const infos = new Map();          // S.key -> {wps: [{tiles, field, rest, label}], adm}
 	const firstOfS = new Map();
 	const landSeen = new Map();       // (S, support tile, speed class) -> the landings fan-outs made there       // S.key -> node id (the earliest)
 	let best = null;                  // {T, id, masks}
-	let w = W1, phase = W1 === WEND ? 2 : 1;
+	let w = W1o, phase = W1o === WEND ? 2 : 1;
 	let closed = false, uncert = false;
 	let tRun0 = 0, planSpent = 0, runMs = 0;
 
@@ -482,9 +485,9 @@ function createOneShot(L, o = {}) {
 	 *  fields and the abstract states' first nodes kept: they are real states) */
 	function refine() {
 		level++;
-		[lvQ, lvQX, lvK, lvKX] = LADDER[level];
+		[lvQ, lvQX, lvK, lvKX] = LAD[level];
 		classes.clear(); seen.clear(); heap.a = []; landSeen.clear();
-		w = W1; phase = W1 === WEND ? 2 : 1;
+		w = W1o; phase = W1o === WEND ? 2 : 1;
 		ST.level = level; ST.refines = (ST.refines || 0) + 1;
 		say({ ev: 'oneshot', what: 'refine', level, q: lvQ, qx: lvQX, k: lvK, kx: lvKX, expanded: ST.expanded });
 		if (!o.noRoot) root();
@@ -504,7 +507,7 @@ function createOneShot(L, o = {}) {
 		while (Date.now() < deadline) {
 			if (ro.stop && ro.stop()) break;
 			if (!heap.size) {
-				if (!best && level + 1 < LADDER.length) { refine(); continue; }
+				if (!best && level + 1 < LAD.length) { refine(); continue; }
 				done = true; break;
 			}
 			const n = heap.pop();
@@ -596,4 +599,4 @@ function graphOf(g, L) {
 	};
 }
 
-module.exports = { createOneShot, graphOf, KAPPA };
+module.exports = { createOneShot, graphOf, KAPPA, LADDER };
