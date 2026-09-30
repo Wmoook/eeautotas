@@ -83,6 +83,8 @@ const STALL_S = 60, STALL_MIN_S = 5, STALL_F = 1 / 6;
 // the anchor pick: the most progress (model gain), then the plan's cost + the arrival tick + FAIL_TICKS x its failed
 // steps - UCB_C x sqrt(ln N / (1 + picks)) (a little fairness among equals)
 const FAIL_TICKS = 200, UCB_C = 100;
+// (THE TIMER's anchor pick: planner.js EEAT_PLAN_TIMER=1)
+const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -845,8 +847,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (an empty plan list cut by the planner's budget is no proof: the anchor stays open and replans with twice the budget)
 		const budgetCut = (A, why) => { if (why !== 'budget' || (A.budgetCuts || 0) >= 4) return false; A.budgetCuts = (A.budgetCuts || 0) + 1; A.planVer = -1; return true; };
 		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
-		// (the most progress first, then the lowest plan cost + the arrival tick)
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
+		// (the most progress first, then the lowest plan cost + the arrival tick; THE TIMER (planner.js, EEAT_PLAN_TIMER=1): an
+		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
+		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
+		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);

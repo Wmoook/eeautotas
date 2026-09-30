@@ -115,6 +115,35 @@ const FLOOR_HARD_MS = +process.env.EEAT_PLAN_FLOOR_HARD_MS || 30000;
 const COUNT_GATES = new Set([165, 214]);
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
+// THE TIMER (C6 push 3 lane 3; OPT-IN EEAT_PLAN_TIMER=1, off = the planner as before, byte for byte): a ball carrying a
+// running timed killer (curse 421, zombie 422, poison 1584, fire: eesim.js kills it at start + duration) dies where the
+// plan search's est walk does not know it: One Minute Descent's zombie (60 s, picked up on the only way down at tick ~50)
+// kills every plan that takes the 15 blue coins (they open only the crown's doors) before team 6 (16,378) at the bottom
+// and the levitation climb back to the trophy (65,49): its anchors reached team 6 at tick ~4,960 with ~1,100 ticks left
+// for a 2,100-tick climb, every trophy leg 'budget' (the finders' states die), and the only routes (n5-plan and main
+// alike) went through a death: 11,203-12,352 run ticks vs the known route's 3,550 (the zombie, the bottom, the climb).
+// With the knob an anchor with a timer running first gets a DEADLINE plan search (its own half of the plan call's clock:
+// a node whose est arrival from the anchor + the open level's walk to the trophy passes the ticks left is not generated):
+// a whole plan to the trophy in time goes first (`timer`), the plan search's own plans after it; no such plan and no
+// remover of that killer (its block numbered 0) within the ticks left = a LATE anchor, which the strategy's pick puts after
+// the anchors in time. Ordering only (the est walk is no bound): no edge dropped from the plan search itself, the lb
+// untouched, no claim.
+const TIMER = process.env.EEAT_PLAN_TIMER === '1';
+/** {left, id}: the ticks a ball has before its soonest running timed killer kills it (Infinity: none running; eesim.js's
+ *  rule, Player.as:399-404: it dies on the first tick t with t - start > duration) and that killer's effect block (421
+ *  curse, 422 zombie, 1584 poison, 0 fire: no remover block) */
+function timerOf(s) {
+	const r = { left: Infinity, id: -1 };
+	if (!s || s.is_dead) return r;
+	const t = s._ticks, god = !!s.in_god_mode;
+	const one = (on, start, dur, id) => { if (on && dur) { const l = Math.floor(start + dur - t); if (l < r.left) { r.left = l; r.id = id; } } };
+	one(s.is_cursed, s._curse_time_start, s._curse_duration, 421);
+	if (!god) one(s.is_zombie, s._zombie_time_start, s._zombie_duration, 422);
+	one(s.is_on_fire, s._fire_time_start, s._fire_duration, 0);
+	if (!god) one(s.is_poisoned, s._poison_time_start, s._poison_duration, 1584);
+	return r;
+}
+
 /** a heap on f (then g) */
 class Heap {
 	constructor() { this.a = []; }
@@ -981,9 +1010,15 @@ function createPlanner(model, facts, o = {}) {
 		let seq = 0, expanded = 0, found = null, pruned = 0;
 		const P = pace();
 		const root = { S: a.S, pos: a.pos, g: 0, gl: 0, parent: null, e: null, depth: 0, seq: seq++ };
+		// (THE TIMER, EEAT_PLAN_TIMER=1: the deadline search's ticks left (po.tLeft): a node whose est arrival plus the open
+		// level's walk to the trophy passes them is not generated; ordering only, the plan() call's extra search)
+		const tLeft = po.tLeft > 0 ? po.tLeft : Infinity;
 		// (a puzzle, 3+ landmarks left: greedy on the heuristic, g a tie-break (LAMA's greedy best-first); else weighted A*)
-		const gw = hLM(a.S) >= 3 ? 0.1 : 1;
-		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + LM_W * hLM(S) - GAIN_BONUS * P * S.gain;
+		// (the timer's deadline search: the fewest landmarks left first (LAMA's greedy order: the open level's walk is blind to
+		// the doors a landmark opens), then A* on the est; no gain bonus: the trophy in time, not the most gain)
+		const gw = tLeft < Infinity ? 1 : hLM(a.S) >= 3 ? 0.1 : 1;
+		const gainB = tLeft < Infinity ? 0 : GAIN_BONUS, lmW = tLeft < Infinity ? 1e7 : LM_W;
+		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + lmW * hLM(S) - gainB * P * S.gain;
 		root.f = fOf(0, a.S, a.pos);
 		open.push(root);
 		best.set(a.S.key + '#' + a.pos.id, 0);
@@ -1026,6 +1061,7 @@ function createPlanner(model, facts, o = {}) {
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
 					if (gl2 >= budget) { pruned++; continue; }
+					if (g2 > tLeft) { pruned++; continue; }
 					const gn = { S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true };
 					open.push(gn);
 					if (INC_ON && g2 < PENALTY && (!inc || g2 < inc.g)) inc = gn;
@@ -1033,6 +1069,7 @@ function createPlanner(model, facts, o = {}) {
 				}
 				const hl = hLb(e.pos2);
 				if (gl2 + hl >= budget) { pruned++; continue; }
+				if (tLeft < Infinity && !(g2 + hSteps(e.pos2) * P <= tLeft)) { pruned++; continue; }
 				const k2 = e.S2.key + '#' + e.pos2.id;
 				const had = best.get(k2);
 				if (had !== undefined && had <= g2) continue;
@@ -1219,6 +1256,38 @@ function createPlanner(model, facts, o = {}) {
 		model.setEstWalls(mask);
 		ST.estWalls = n;
 	}
+	/** THE TIMER: a remover of the anchor's running killer (its block with the number 0) within the ticks left by the est
+	 *  walk in the anchor's state */
+	let removerTiles = null;
+	function removerInTime(a, tm) {
+		if (!(tm.id > 0)) return false;
+		if (!removerTiles) {
+			removerTiles = new Map();
+			const fg = L.fg, lk = L.lookup0;
+			for (let i = 0; i < fg.length; i++) {
+				const id = fg[i];
+				if ((id === 421 || id === 422 || id === 1584) && lk && !(lk[i] > 0)) { let r = removerTiles.get(id); if (!r) removerTiles.set(id, (r = [])); r.push(i); }
+			}
+		}
+		const tiles = removerTiles.get(tm.id);
+		if (!tiles || !tiles.length) return false;
+		const d = model.dist(a.S, a.pos, 'est', a.base);
+		let b = INF;
+		for (const t of tiles) if (d[t] < b) b = d[t];
+		return b < INF && b * pace() <= tm.left;
+	}
+	/** THE TIMER's plan: the plan search with the anchor's timed killer as a deadline (po.tLeft: a node whose est arrival
+	 *  + the open level's walk to the trophy passes it is not generated), a whole plan to the trophy or null; its own
+	 *  clock: half of the plan call's (at least 50 ms) */
+	function timerPlan(a, so, deadline, tl) {
+		const ms = Math.max(50, (so.ms || 300) / 2);
+		const res = search(a, Object.assign({}, so, { ms, tLeft: tl }), new Set());
+		if (process.env.EEAT_TIMER_DBG === '1') console.error(`[timer] left ${tl} found ${!!res.found} g ${res.found ? Math.round(res.found.g) : '-'} expanded ${res.expanded} pruned ${res.pruned} exhausted ${res.exhausted} ms ${res.ms} partial ${res.bestPartial ? Math.round(res.bestPartial.g) + ' h ' + hSteps(res.bestPartial.pos) : '-'}`);
+		if (!res.found) return null;
+		const steps = stepsOf(a, res.found);
+		if (!steps.length) return null;
+		return { id: `p${ST.plans}.t`, steps, cost: Math.round(res.found.g), lb: res.found.gl, partial: false, why: `trophy in the timer (${tl} ticks left)`, expanded: res.expanded, timer: tl };
+	}
 	/**
 	 * plan(anchor, {k, depth, epoch, ms, maxExpand}) -> Plan[] (with .why when empty: 'exhausted' | 'proof')
 	 */
@@ -1261,6 +1330,20 @@ function createPlanner(model, facts, o = {}) {
 			let n = node; while (n.parent && n.parent.parent) n = n.parent;
 			if (n.e) exclude.add(n.e.edge);
 		}
+		// (THE TIMER: a whole plan in the anchor's timed killer's time first; none = a late anchor, the strategy's pick puts
+		// it after the anchors in time)
+		let late = false, timerCost;
+		if (TIMER) {
+			const tm = timerOf(a.sim), tl = tm.left;
+			if (tl < Infinity) {
+				let tp = null;
+				try { tp = timerPlan(a, so, deadline, tl); } catch (e) { tp = null; }
+				if (tp) { plans.unshift(tp); timerCost = tp.cost; ST.timerPlans = (ST.timerPlans || 0) + 1; }
+				// (late: no plan in time AND no remover of the killer (its block with the number 0) within the ticks left by
+				// the est walk in the anchor's state: a remover on the way clears it, the plan search does not model that)
+				else if (!removerInTime(a, tm)) { late = true; ST.timerLate = (ST.timerLate || 0) + 1; }
+			}
+		}
 		if (plans.length && NEAR_K > 0 && facts) {
 			try { const near = nearPlans(a, plans); if (near.length) plans.unshift(...near); } catch (e) { /* the rule is ordering only */ }
 		}
@@ -1282,6 +1365,8 @@ function createPlanner(model, facts, o = {}) {
 		const out = plans;
 		out.why = why;
 		out.plans = plans;
+		if (late) out.late = true;
+		if (timerCost !== undefined) out.timerCost = timerCost;
 		return out;
 	}
 	/**
