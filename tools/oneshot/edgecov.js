@@ -121,7 +121,7 @@ async function main() {
 	if (argv.touch === '0') o.touch = false;
 	if (argv.cache) o.cache = argv.cache;
 	const outF = argv.out ? path.resolve(argv.out) : null;
-	const tot = { levels: 0, routes: 0, moves: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0, respawn: 0, buildMs: 0, edges: 0, sups: 0 };
+	const tot = { levels: 0, routes: 0, moves: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0, lazyT: 0, respawn: 0, buildMs: 0, edges: 0, sups: 0 };
 	const byLab = {};
 	for (const [lp, entries, tiles] of list) {
 		const t0 = Date.now();
@@ -144,6 +144,8 @@ async function main() {
 			if (!tr) continue;
 			lv.routes++;
 			const { moves, sim } = segment(tr.L, tr.masks);
+			let S1_ = null;
+			const S1 = () => S1_ || (S1_ = require('../../src/plan/msolve.js').createSolver(tr.L, { K: 2 }));
 			const inp = new E.EEInput();
 			for (const mv of moves) {
 				const lab = lv.lab[mv.label] || (lv.lab[mv.label] = { n: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0 });
@@ -167,18 +169,29 @@ async function main() {
 					if (h && (!best || h < best)) best = h;
 				}
 				if (best) { lv.replay++; lab.replay++; if (best <= mv.len) { lv.replayT++; lab.replayT++; } }
+				// --resolve=1: the lazy verification's fallback (edges.js resolveEdge: the move solver from the route's own
+				// state to the edge's end, plain and field tiers) where the replay did not arrive in time
+				if (argv.resolve === '1') {
+					let ok = best && best <= mv.len;
+					if (!ok) {
+						let r = null;
+						try { r = S1().leg(mv.snap, { tiles: [mv.tile1], cls: mv.tele ? 'any' : mv.c1 === 'D' ? 'D' : mv.c1 }, { Tmax: mv.len, chain: false, coupled: false, fieldMs: 100 }); } catch (e) { r = null; }
+						ok = !!(r && r.ok && r.T <= mv.len);
+					}
+					if (ok) { lv.lazyT = (lv.lazyT || 0) + 1; lab.lazyT = (lab.lazyT || 0) + 1; }
+				}
 			}
 		}
 		const line = JSON.stringify(lv);
 		console.log(line);
 		if (outF) fs.appendFileSync(outF, line + '\n');
-		tot.levels++; tot.routes += lv.routes; tot.moves += lv.moves; tot.src += lv.src; tot.pair += lv.pair; tot.pairT += lv.pairT; tot.replay += lv.replay; tot.replayT += lv.replayT; tot.respawn += lv.respawn;
+		tot.levels++; tot.routes += lv.routes; tot.moves += lv.moves; tot.src += lv.src; tot.pair += lv.pair; tot.pairT += lv.pairT; tot.replay += lv.replay; tot.replayT += lv.replayT; tot.lazyT += lv.lazyT || 0; tot.respawn += lv.respawn;
 		tot.buildMs += lv.buildMs; tot.edges += lv.edges; tot.sups += lv.sups;
-		for (const [k, v] of Object.entries(lv.lab)) { const b = byLab[k] || (byLab[k] = { n: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0 }); for (const q of Object.keys(b)) b[q] += v[q]; }
+		for (const [k, v] of Object.entries(lv.lab)) { const b = byLab[k] || (byLab[k] = { n: 0, src: 0, pair: 0, pairT: 0, replay: 0, replayT: 0, lazyT: 0 }); for (const q of Object.keys(b)) b[q] += v[q] || 0; }
 	}
 	const pc = (a, b) => (b ? (100 * a / b).toFixed(1) + '%' : '-');
-	console.log(`SUMMARY levels ${tot.levels} routes ${tot.routes} moves ${tot.moves} (+${tot.respawn} respawns): src ${pc(tot.src, tot.moves)} pair ${pc(tot.pair, tot.moves)} pairT ${pc(tot.pairT, tot.moves)} replay ${pc(tot.replay, tot.moves)} replayT ${pc(tot.replayT, tot.moves)}; sups ${tot.sups} edges ${tot.edges} build ${(tot.buildMs / 1000).toFixed(1)} s`);
-	for (const [k, b] of Object.entries(byLab).sort((a, c) => c[1].n - a[1].n)) console.log(`  ${k.padEnd(8)} ${String(b.n).padStart(6)}  src ${pc(b.src, b.n)} pair ${pc(b.pair, b.n)} pairT ${pc(b.pairT, b.n)} replay ${pc(b.replay, b.n)} replayT ${pc(b.replayT, b.n)}`);
+	console.log(`SUMMARY levels ${tot.levels} routes ${tot.routes} moves ${tot.moves} (+${tot.respawn} respawns): src ${pc(tot.src, tot.moves)} pair ${pc(tot.pair, tot.moves)} pairT ${pc(tot.pairT, tot.moves)} replay ${pc(tot.replay, tot.moves)} replayT ${pc(tot.replayT, tot.moves)} lazyT ${pc(tot.lazyT, tot.moves)}; sups ${tot.sups} edges ${tot.edges} build ${(tot.buildMs / 1000).toFixed(1)} s`);
+	for (const [k, b] of Object.entries(byLab).sort((a, c) => c[1].n - a[1].n)) console.log(`  ${k.padEnd(8)} ${String(b.n).padStart(6)}  src ${pc(b.src, b.n)} pair ${pc(b.pair, b.n)} pairT ${pc(b.pairT, b.n)} replay ${pc(b.replay, b.n)} replayT ${pc(b.replayT, b.n)} lazyT ${pc(b.lazyT, b.n)}`);
 	if (outF) fs.appendFileSync(outF, JSON.stringify({ summary: tot, byLab }) + '\n');
 }
 
