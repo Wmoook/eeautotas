@@ -38,6 +38,14 @@ if (argv.lazyLegs === '0') copt.lazyLegs = false;
 if (argv.wideStops) copt.wideStops = argv.wideStops;
 for (const k of ['lazyM', 'lazyRX', 'lazyRU']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.fan === '0') copt.fan = false;
+// (--exec=1: the executor tier MC's own options, executor.js; the fields pass (n5-s99-fields): --goalFan=1
+// --directShare= --fieldKey=sub --fieldPx= --fieldV= --Kf=; --fields=1: only the chains with a field move (arrow, dot,
+// boost, climb, swim: metric (c)))
+if (argv.exec === '1') Object.assign(copt, { plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false });
+if (argv.goalFan === '1') copt.goalFan = true;
+for (const k of ['directShare', 'fieldPx', 'fieldV', 'Kf']) if (argv[k] !== undefined) copt[k] = +argv[k];
+if (argv.fieldKey) copt.fieldKey = argv.fieldKey;
+const FIELD_LABELS = new Set(['arrow', 'dot', 'boost', 'climb', 'swim']);
 
 function loadMoves(dir) {
 	const byR = new Map();
@@ -92,6 +100,7 @@ function main() {
 		for (let i = 0; i + KCH - 1 < moves.length; i += EVERY) {
 			const a = moves[i], b = moves[i + KCH - 1];
 			if (a.c0 === 'D' || b.c1 === 'D' || moves.slice(i, i + KCH).some((m) => m.c0 === 'D' || m.c1 === 'D')) continue;
+			if (argv.fields === '1' && !moves.slice(i, i + KCH).some((m) => FIELD_LABELS.has(m.label))) continue;
 			const tele = b.endKind === 'portal';
 			const target = { tiles: [b.tile1], cls: b.c1, tele };
 			if (tele) target.via = portalVia(L, b.tile1);

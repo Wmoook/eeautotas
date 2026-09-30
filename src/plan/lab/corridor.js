@@ -221,6 +221,19 @@ function createCorridor(L, opts = {}) {
 		// (the lazy pass: o.lazyWide the widened fan (stops o.wideStops), o.lazyLegs false: no sub-legs there)
 		const lazyWide = !!o.lazyWide, lazyLegs = o.lazyLegs !== false;
 		const directOnce = !!o.directOnce, dTried = new Set();
+		// THE FIELDS PASS (n5-s99-fields; every knob off = the corridor before, byte for byte):
+		//   o.goalFan: the fans test the target on every tick they play (the engine's own state: a fan that crosses the
+		//     target is a chain at once, not a node a later direct leg has to finish);
+		//   o.directShare: the direct legs' clock at most this share of the call's elapsed time (in a field a direct leg
+		//     costs ~40 ms against ~0.15 ms for a whole event fan: the fans starved);
+		//   o.fieldKey 'sub': a state whose centre is in a field is its own node by its (tile, class, sub-tile offset in
+		//     o.fieldPx px cells, speeds in o.fieldV px/tick cells): the entry offset and speed decide the ticks spent in
+		//     the field and where it lets go (brief ADDENDUM 09:45), so arrivals that differ there are not merged; o.Kf
+		//     states a field node.
+		const goalFan = !!o.goalFan;
+		const directShare = o.directShare || 0;
+		const hot = [], dNear = o.directNear === undefined ? 2 : o.directNear;   // (the new nearest states' direct legs, next turn)
+		const fieldKey = o.fieldKey || null, fPx = o.fieldPx || 4, fV = o.fieldV || 1, Kf = o.Kf || Ka;
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
@@ -233,6 +246,7 @@ function createCorridor(L, opts = {}) {
 		const lazyM = o.lazyM || M, lazyRX = o.lazyRX || RX, lazyRU = o.lazyRU || RU, legNew = !!o.legNew;
 		const snap0 = start instanceof E.EESim ? start.snapshot() : start;
 		const tgt = Object.assign({}, target, { tiles: Array.from(target.tiles), cls: target.cls || 'any' });   // (tele / via kept: a portal target)
+		const gtest = goalFan ? S.goal(tgt) : null;
 		sim.restore(snap0);
 		const G = geometry(sim, tgt.tiles);
 		const c0 = RF.costAt(G.f, sim);
@@ -289,6 +303,11 @@ function createCorridor(L, opts = {}) {
 		const keyOf = () => {
 			const t = T.tileOf(sim, W, H);
 			if (sim.on_ground && G.span[t] >= 0) return 's' + t;
+			if (fieldKey && isField(sim.current_tile)) {
+				// (a field cell: the sub-tile offset and the speeds too)
+				const ox = Math.floor((((sim.px % 16) + 16) % 16) / fPx), oy = Math.floor((((sim.py % 16) + 16) % 16) / fPx);
+				return 'f' + t + clsOf(sim) + ':' + ox + ',' + oy + ':' + Math.round(sim.speed_x / fV) + ',' + Math.round(sim.speed_y / fV);
+			}
 			// (airKey 'vy': the rise / fall speed in 2 px/tick buckets too: two arrivals in one tile at different vertical speeds
 			// land in different places)
 			if (airKey === 'vy') return 'c' + t + clsOf(sim) + ':' + Math.round(sim.speed_y / 2);
@@ -306,6 +325,7 @@ function createCorridor(L, opts = {}) {
 			seen.set(h, g);
 			const c = costNow();
 			if (!(c >= 0)) { rej.cut++; return false; }
+			const newBest = c < out.bestC;
 			if (c < out.bestC) { out.bestC = c; out.bestCg = g; out.bestMasks = masks; }
 			const key = keyOf(), v = toward();
 			let a = nodes.get(key);
@@ -320,7 +340,7 @@ function createCorridor(L, opts = {}) {
 			const n = { snap: sim.snapshot(), g, masks, c, v, sx, key, f: 0, dead: false, from };
 			if (key[0] === 's') spansHit.add(G.span[+key.slice(1)]);
 			n.f = fOf(n);
-			if (a.length >= (key[0] === 's' ? K : Ka)) {
+			if (a.length >= (key[0] === 's' ? K : key[0] === 'f' ? Kf : Ka)) {
 				a.sort((p, q) => p.f - q.f);
 				if (a[a.length - 1].f <= n.f) return false;
 				a[a.length - 1].dead = true;
@@ -329,6 +349,9 @@ function createCorridor(L, opts = {}) {
 			a.push(n);
 			push(n);
 			out.nodes++;
+			// (o.directShare: a new nearest state within dNear tiles gets its direct leg at the loop's next turn, whatever
+			// its place in the order: the near misses one tile from the target waited behind cheaper nodes)
+			if (directShare && newBest && c <= dNear) hot.push(n);
 			if (o.probe) (out.kids || (out.kids = [])).push({ tile: T.tileOf(sim, W, H), g, ground: !!sim.on_ground, from, c });
 			return true;
 		}
@@ -361,7 +384,47 @@ function createCorridor(L, opts = {}) {
 		};
 		if (!R0) { sim.restore(snap0); admit(new Uint8Array(0), 0, 'start'); }
 		let lastC = out.bestC, stall = 0;
+		/** the direct leg from node nn to the target (o.first: true when it ended the search) */
+		const directLeg = (nn, plainNode) => {
+			const lim = best ? Math.min(120, best.T - nn.g - 1) : 120;
+			if (!(lim > 0)) return false;
+			stats.directs++; out.legs++;
+			const tp = Date.now();
+			// (a plain node whose admissible bound to the target is past the horizon: no direct leg; its budgets o.dCT / o.dFMs)
+			const r = plainNode && S.lowerBound(nn.snap, tgt) > lim ? { ok: false, why: 'lb' } : S.leg(nn.snap, tgt, Object.assign(legOpts(lim, plainNode), { alts: 0, fields: true, coupled: true, coupledTicks: o.dCT || 60000, fieldMs: o.dFMs || 100 }));
+			prof.direct += Date.now() - tp;
+			if (!r.ok) return false;
+			stats.directOk++;
+			setBest(nn.g + r.T, cat(nn.masks, r.masks));
+			return true;
+		};
+		// THE DEFERRED DIRECT LEGS (o.directShare): a node whose direct leg the share put off waits here by its cost (the
+		// nearest first); the share's room goes to them before any new node's; a node within o.directNear (2) tiles never waits
+		const dq = [];
+		const dlt = (a, b) => a.c < b.c || (a.c === b.c && a.g < b.g);
+		const dqPush = (x) => { dq.push(x); let i = dq.length - 1; while (i > 0) { const q = (i - 1) >> 1; if (!dlt(dq[i], dq[q])) break; [dq[q], dq[i]] = [dq[i], dq[q]]; i = q; } };
+		const dqPop = () => { const top = dq[0], last = dq.pop(); if (dq.length) { dq[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < dq.length && dlt(dq[l], dq[m])) m = l; if (r < dq.length && dlt(dq[r], dq[m])) m = r; if (m === i) break; [dq[m], dq[i]] = [dq[i], dq[m]]; i = m; } } return top; };
+		const dRoom = () => !directShare || prof.direct <= directShare * (Date.now() - t0) + 20;
 		while (Date.now() < deadline) {
+			if (hot.length) {
+				const m = hot.pop();
+				if (!m.dead && !(best && m.g + 1 >= best.T) && !(directOnce && dTried.has(m.key))) {
+					if (directOnce) dTried.add(m.key);
+					sim.restore(m.snap);
+					out.hotRuns = (out.hotRuns || 0) + 1;
+					if (directLeg(m, !!S.plainStart(sim)) && o.first) break;
+				}
+				continue;
+			}
+			if (dq.length && dRoom()) {
+				const m = dqPop();
+				if (!m.dead && !(best && m.g + 1 >= best.T)) {
+					sim.restore(m.snap);
+					out.dqRuns = (out.dqRuns || 0) + 1;
+					if (directLeg(m, !!S.plainStart(sim)) && o.first) break;
+				}
+				continue;
+			}
 			let n = null, pass = 'all';
 			if (legMode === 'lazy' && lazy.length && (!heap.length || stall >= lazyStall)) { n = lazyPop(); pass = 'legs'; stall = 0; out.lazyPasses = (out.lazyPasses || 0) + 1; }
 			else if (heap.length) n = pop();
@@ -377,20 +440,8 @@ function createCorridor(L, opts = {}) {
 			// (o.directOnce: one direct leg a node key (the tile cell), from its first expanded state)
 			if (pass === 'all' && n.c <= D && !(directOnce && dTried.has(n.key))) {
 				if (directOnce) dTried.add(n.key);
-				const lim = best ? Math.min(120, best.T - n.g - 1) : 120;
-				if (lim > 0) {
-					stats.directs++; out.legs++;
-					const tp = Date.now();
-					// (a plain node whose admissible bound to the target is past the horizon: no direct leg; its budgets o.dCT / o.dFMs)
-					const r = plainNode && S.lowerBound(n.snap, tgt) > lim ? { ok: false, why: 'lb' } : S.leg(n.snap, tgt, Object.assign(legOpts(lim, plainNode), { alts: 0, fields: true, coupled: true, coupledTicks: o.dCT || 60000, fieldMs: o.dFMs || 100 }));
-					prof.direct += Date.now() - tp;
-					if (r.ok) {
-						stats.directOk++;
-						setBest(n.g + r.T, cat(n.masks, r.masks));
-						if (o.first) break;
-						continue;
-					}
-				}
+				if (directShare && n.c > dNear && !dRoom()) dqPush(n);
+				else if (directLeg(n, plainNode)) { if (o.first) break; continue; }
 			}
 			sim.restore(n.snap);
 			// (a grounded plain node: M spans; an airborne or field node (a launch, a field's inside): the best one, its
@@ -460,6 +511,7 @@ function createCorridor(L, opts = {}) {
 						if (sim.is_dead) break;
 						const c1 = clsOf(sim);
 						const tele = Math.abs(sim.px - px) > 20 || Math.abs(sim.py - py) > 20;
+						if (gtest && gtest(sim, px, py)) { setBest(n.g + t + 1, cat(n.masks, Uint8Array.from(ms))); out.fanGoal = (out.fanGoal || 0) + 1; break; }
 						if (tele || (c1 !== c00 && c1 !== 'A') || (sim.on_ground && air && t > 0)) { kids.push(Uint8Array.from(ms)); break; }
 						if (stops.has(t + 1)) kids.push(Uint8Array.from(ms));
 						if (!sim.on_ground) air = true;
@@ -488,6 +540,7 @@ function createCorridor(L, opts = {}) {
 				if (fanOn && Date.now() < deadline) doFans();
 			}
 			if (o.probe) break;
+			if (o.first && best && goalFan) break;
 		}
 		out.prof = prof; out.rej = rej;
 		out.ms = Date.now() - t0;
