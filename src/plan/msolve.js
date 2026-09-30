@@ -974,7 +974,7 @@ function createSolver(L, opts = {}) {
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
 			if (fan <= 0) continue;
-			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 80, toward: tg, nodes: o.fanNodes || 60000, perTile: o.perTile || 0 }) : [];
+			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0 }) : [];
 			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60))) lands.push(e);
 			legs += lands.length;
 			for (const rr of lands) {

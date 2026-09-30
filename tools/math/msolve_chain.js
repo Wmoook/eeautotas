@@ -78,7 +78,7 @@ function main() {
 			const target = { tiles: [b.tile1], cls: b.c1, tele };
 			if (tele) target.via = portalVia(L, b.tile1);
 			const routeT = b.t1 - a.t0;
-			const res = S.chain(snaps.get(a.t0), target, { ms: +(argv.ms || 2000), fan: +(argv.fan || 8), legT: +(argv.legT || 80), w: +(argv.w || 1), coupledDirect: argv.coupledDirect !== '0' });
+			const res = S.chain(snaps.get(a.t0), target, { ms: +(argv.ms || 2000), fan: +(argv.fan || 8), legT: +(argv.legT || 80), w: +(argv.w || 1), coupledDirect: argv.coupledDirect !== '0', fanMax: argv.fanMax ? +argv.fanMax : undefined, fanNodes: argv.fanNodes ? +argv.fanNodes : undefined, events: argv.events !== '0' });
 			const rec = { r: entry._idx, m: i, k: KCH, routeT, labels: moves.slice(i, i + KCH).map((m) => m.label).join(','), ok: res.ok, T: res.T, closed: res.closed, exp: res.expanded, legs: res.legs, nodes: res.nodes, ms: res.ms };
 			if (res.ok) {
 				chk.restore(snaps.get(a.t0));
