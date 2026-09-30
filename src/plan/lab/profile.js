@@ -43,6 +43,38 @@ const CELL_DOM = process.env.EEAT_PROFILE_CELL !== '0';
 const FIN_ON = process.env.EEAT_PROFILE_FIN !== '0';
 const FIN_EVERY = +process.env.EEAT_PROFILE_FIN_EVERY || 4, FIN_K = +process.env.EEAT_PROFILE_FIN_K || 2;
 const FIN_EST = +process.env.EEAT_PROFILE_FIN_EST || 80, FIN_TMAX = 120, FIN_MS = 60, FIN_CT = 20000, FIN_FMS = 20;
+// the stalls: on (EEAT_PROFILE_STALL=0 off), STALL_L layers without a better time to go, the basin of the STALL_K best
+// states; a speed requirement's penalty REQ_PEN ticks (+ 20 a px/tick short) and its margin REQ_MARGIN px/tick
+const STALL_ON = process.env.EEAT_PROFILE_STALL === '1';   // OPT-IN: its walls cut the real way (krt 2 / 24 vs 3 / 24)
+const STALL_L = +process.env.EEAT_PROFILE_STALL_L || 80, STALL_K = +process.env.EEAT_PROFILE_STALL_K || 12;
+const REQ_PEN = 200, REQ_MARGIN = 0.4;
+/** per id 1 where the tile pulls down by default and is no field (no liquid, climbable, boost, dot): kin.js's tables */
+const DGRAV = new WeakMap();
+function defaultGravOf(L) {
+	let a = DGRAV.get(L);
+	if (a) return a;
+	const KN = require('../kin.js');
+	const n = L.flags.length;
+	KN.flagsOf(n - 1);
+	const g = KN.gravTables();
+	a = new Uint8Array(n);
+	for (let id = 0; id < n; id++) {
+		const f = L.flags[id] | 0;
+		if (f & (F_LIQUID | F_CLIMB | F_BOOST)) continue;
+		if (DOTS.has(id)) continue;
+		if (g.morx[id] !== 0 || g.mory[id] !== 2 || g.mox[id] !== 0 || g.moy[id] !== 2) continue;
+		a[id] = 1;
+	}
+	DGRAV.set(L, a);
+	return a;
+}
+/** the level copy with walls (solid 9) at the tiles */
+function withWalls(Lc, walls) {
+	if (!walls || !walls.length) return Lc;
+	const fg = Lc.fg.slice();
+	for (const t of walls) if (t >= 0 && t < fg.length) fg[t] = 9;
+	return Object.assign({}, Lc, { fg });
+}
 
 /** ticks to cover D px from speed v along the way: the running acceleration up to the running speed (legs.js eta) */
 function eta(D, v) {
@@ -96,11 +128,23 @@ function profileLeg(L, starts, goal, o = {}) {
 	const tBase = starts[order[0]].tick;
 	// the goal field (the corridor): the level as the doors stand at the first start
 	let field = o.field || null;
+	sim.restore(starts[order[0]].snap);
+	const Lc0 = T.levelNow(L, sim);
+	const startSnap = starts[order[0]].snap;
 	if (!field) {
-		sim.restore(starts[order[0]].snap);
-		try { field = T.goalField(T.levelNow(L, sim), T.fieldTilesOf(goal), { deaths: allowDeath }); } catch (e) { field = null; }
+		try { field = T.goalField(Lc0, T.fieldTilesOf(goal), { deaths: allowDeath }); } catch (e) { field = null; }
 	}
-	const dirs = field ? dirsOf(field) : null;
+	let dirs = field ? dirsOf(field) : null;
+	// THE STALLS (counterexamples of the corridor): the front's best time to go has not improved for STALL_L layers. Its
+	// basin (the tiles of the front's best states, a tile around) is either a FALSE NEAR of the field (the goal field with the
+	// basin walled still reaches the goal from the start: the walls go into the field, the corridor goes around it) or a
+	// NECESSARY passage the family reaches too slowly (walled, the goal is cut off): a SPEED REQUIREMENT there (TOPP's
+	// controllable set: the least speed along the corridor's direction with which the rest is feasible; learned as more than
+	// the most the front brought into the basin), which a state in the basin slower than it pays for in its time to go.
+	const walls = new Set();
+	const reqs = [];            // {set, dx, dy, vreq}
+	let stalls = 0, wallsAdded = 0, reqsAdded = 0;
+	const goalSet = new Set(Array.from(goal.tiles));
 	const tileNow = () => Math.min(H - 1, Math.max(0, (sim.py + 8) >> 4)) * W + Math.min(W - 1, Math.max(0, (sim.px + 8) >> 4));
 	// A GIVEN CORRIDOR (o.guide: the centre positions of a path, one per tick, and its tube radius): the time to go is the
 	// path's own time from the latest of its points within the tube (the progress along the path), + the distance to it at
@@ -142,15 +186,22 @@ function profileLeg(L, starts, goal, o = {}) {
 		const c = RF.costAt(field, sim);
 		if (c < 0) return 1e9;
 		const v = dirs ? sim.speed_x * dirs[2 * t] + sim.speed_y * dirs[2 * t + 1] : 0;
-		return eta(c * 16, v);
-	};
-	/** the relevant direction masks of the state in sim: the plain vertical-gravity field acts on L / R only */
-	const dirsFor = () => {
-		const id = sim.current_tile, f = id >= 0 && id < flags.length ? flags[id] : 0;
-		if (sim.flip_gravity === 0 && !(f & (F_LIQUID | F_CLIMB | F_BOOST)) && !DOTS.has(id) && !sim.has_levitation) {
-			const gd = sim.gravity_dir;
-			if (!gd || gd.x === 0) return DIRS3;
+		let e = eta(c * 16, v);
+		for (let q = 0; q < reqs.length; q++) {
+			const r = reqs[q];
+			if (!r.set.has(t)) continue;
+			const vd = sim.speed_x * r.dx + sim.speed_y * r.dy;
+			if (vd < r.vreq) e += REQ_PEN + (r.vreq - vd) * 20;
 		}
+		return e;
+	};
+	/** the relevant direction masks of the state in sim: where the current tile and both queued tiles pull down by default
+	 * (the plain vertical-gravity field) only L / R act; elsewhere (arrows: a side arrow's input axis is y, dots, liquids,
+	 * climbables, boosts, flipped gravity, levitation) all 9 directions */
+	const dgrav = defaultGravOf(L);
+	const dflt = (id) => id >= 0 && id < dgrav.length && dgrav[id] === 1;
+	const dirsFor = () => {
+		if (sim.flip_gravity === 0 && !sim.has_levitation && dflt(sim.current_tile) && dflt(sim._q0) && dflt(sim._q1)) return DIRS3;
 		return DIRS9;
 	};
 	// THE FINISH (the mathematics of the last stretch): the front's best states within FIN_EST ticks of the goal by the time
@@ -194,7 +245,7 @@ function profileLeg(L, starts, goal, o = {}) {
 	// start) and the mask of their tick
 	const layers = [];
 	const visits = new Uint16Array(W * H);
-	const seen = new Set(), cells = new Set();
+	const seen = new Set(), cells = new Set(), hitSeen = new Set();
 	const cellDom = o.cellDom !== undefined ? !!o.cellDom : CELL_DOM;
 	const cellKey = () => {
 		let h = 0x811c9dc5 | 0;
@@ -207,19 +258,27 @@ function profileLeg(L, starts, goal, o = {}) {
 		return (h >>> 0) * 1048576 + ((g >>> 12) & 0xfffff);
 	};
 	let cur = [];           // {sn, dm, last, gr, vs, vx, est, ref}
+	let stallBest = Infinity, stallAt = 0;
 	let si = 0, sims = 0;
 	let bestEst = Infinity;
-	let found = null, why = 'depth';
-	for (let d = 0; d <= depth; d++) {
+	let why = 'depth';
+	// the goal hits: {depth, ref, msk}; the family's first hit ends the layers EXTRA layers later or at COLLECT hits (the
+	// executor's diverse arrivals)
+	const hits = [];
+	let firstHit = -1;
+	const collect = o.collect > 0 ? o.collect : 1, extra = o.extra >= 0 ? o.extra : 0;
+	const depthMax = o.beforeTick >= 0 ? Math.min(depth, o.beforeTick - tBase) : depth;
+	for (let d = 0; d <= depthMax; d++) {
 		// the starts of this depth
 		while (si < order.length && starts[order[si]].tick - tBase === d) {
 			const s = order[si++];
 			sim.restore(starts[s].snap);
 			if (sim.is_dead && !allowDeath) continue;
-			if (goal.test(sim)) { found = { depth: d, ref: -1 - s, msk: -1 }; break; }
+			if (goal.test(sim)) { hits.push({ depth: d, ref: -1 - s, msk: -1 }); if (firstHit < 0) firstHit = d; continue; }
 			cur.push({ sn: sim.snapshot(), dm: -1, last: -1e9, gr: !!sim.on_ground, vs: Math.sign(sim.speed_y), vx: sim.speed_x, est: estOf(tileNow()), ref: -1 - s, h: sim.stateHash() });
 		}
-		if (found) break;
+		if (firstHit >= 0 && (hits.length >= collect || d - firstHit >= extra)) break;
+		if (d === depthMax) break;
 		if (bestFin && d >= bestFin.arrive) break;
 		if (cur.length === 0) { why = 'exhausted'; break; }
 		if (Date.now() > deadline) { why = 'time'; break; }
@@ -240,7 +299,12 @@ function profileLeg(L, starts, goal, o = {}) {
 		const kids = [];
 		const add = (nd, m, ev) => {
 			if (sim.is_dead && !allowDeath) return false;
-			if (goal.test(sim)) { found = { depth: d + 1, ref: nd.ref, msk: m }; return true; }
+			if (goal.test(sim)) {
+				// (a hit: its state once; the layer goes on (more arrivals), the hit is no state of the front)
+				const hh = sim.stateHash();
+				if (!hitSeen.has(hh)) { hitSeen.add(hh); hits.push({ depth: d + 1, ref: nd.ref, msk: m }); if (firstHit < 0) firstHit = d + 1; }
+				return false;
+			}
 			// DOMINANCE (exact): a state the family reached at an earlier tick is dominated (the same future, later): once
 			// (the pit's jump cycles end); and the fine cell (1 px x, 2 px y, 1/8 vx, 1/4 vy, support, jumps): its first
 			// arrival (legBFS's cells; an approximation of the phase plane's dominance: a later arrival at the same place and
@@ -257,7 +321,7 @@ function profileLeg(L, starts, goal, o = {}) {
 			kids.push({ sn: sim.snapshot(), dm: m & 30, last: ev ? d : nd.last, gr: !!sim.on_ground, vs: Math.sign(sim.speed_y), vx: sim.speed_x, est: estOf(t), pref: nd.ref, mk: m, tile: t, h });
 			return false;
 		};
-		for (let i = 0; i < cur.length && !found; i++) {
+		for (let i = 0; i < cur.length; i++) {
 			const nd = cur[i];
 			sim.restore(nd.sn);
 			const ds = dirsFor();
@@ -265,19 +329,19 @@ function profileLeg(L, starts, goal, o = {}) {
 				(nd.vx !== 0 && sim.speed_x === 0);
 			const multi = sim.max_jumps > 1 || sim.has_levitation;
 			const opts = ev ? ds : [nd.dm];
-			for (let q = 0; q < opts.length && !found; q++) {
+			for (let q = 0; q < opts.length; q++) {
 				const m = opts[q];
 				sim.restore(nd.sn);
 				E.applyMask(inp, m); sim.tick(inp); sims++;
 				const jumpOK = sim.on_ground || (multi && ev);
-				if (add(nd, m, ev)) break;
+				add(nd, m, ev);
 				if (!jumpOK) continue;
 				sim.restore(nd.sn);
 				E.applyMask(inp, m | 1); sim.tick(inp); sims++;
-				if (add(nd, m | 1, ev)) break;
+				add(nd, m | 1, ev);
 			}
 		}
-		if (found) break;
+		if (firstHit >= 0 && (hits.length >= collect || d + 1 - firstHit >= extra)) break;
 		// the cut: the time to go, a diversity quota per (tile, support, direction of motion)
 		kids.sort((a, b) => a.est - b.est);
 		if (o.debugKids && d === o.debugKids) for (const k of kids) { sim.restore(k.sn); console.error(`  kid est ${k.est.toFixed(1)} at (${((sim.px + 8) / 16).toFixed(2)}, ${((sim.py + 8) / 16).toFixed(2)}) v (${sim.speed_x.toFixed(2)}, ${sim.speed_y.toFixed(2)}) gr ${sim.on_ground} m ${k.mk} cost ${RF.costAt(field, sim)}`); }
@@ -321,13 +385,56 @@ function profileLeg(L, starts, goal, o = {}) {
 			console.error(`d ${d} n ${next.length} kids ${kids.length} est ${next[0].est.toFixed(1)} at (${((sim.px + 8) / 16).toFixed(1)}, ${((sim.py + 8) / 16).toFixed(1)}) v (${sim.speed_x.toFixed(2)}, ${sim.speed_y.toFixed(2)}) gr ${sim.on_ground} box x ${x0}-${x1} y ${y0}-${y1}`);
 		}
 		cur = next;
+		// the stall test (see THE STALLS above)
+		if (next.length && next[0].est < stallBest - 1) { stallBest = next[0].est; stallAt = d; }
+		else if (STALL_ON && field && !guide && d - stallAt >= STALL_L && next.length && Date.now() < deadline) {
+			stalls++;
+			const top = next.filter((k) => k.est < 1e9).slice(0, STALL_K);
+			const basin = new Set();
+			for (const k of top) {
+				const x = k.tile % W, y = (k.tile / W) | 0;
+				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+					const xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+					const t = yy * W + xx;
+					if (!goalSet.has(t)) basin.add(t);
+				}
+			}
+			const wl = Array.from(walls).concat(Array.from(basin));
+			let fw = null;
+			try { fw = T.goalField(withWalls(Lc0, wl), T.fieldTilesOf(goal), { deaths: allowDeath }); } catch (e) { fw = null; }
+			// the goal still reached around the basin from some state of the front outside it: a false near
+			let around = false;
+			if (fw) for (const k of next) {
+				if (basin.has(k.tile)) continue;
+				sim.restore(k.sn);
+				if (RF.costAt(fw, sim) >= 0) { around = true; break; }
+			}
+			if (around) {
+				for (const t of basin) walls.add(t);
+				field = fw; dirs = dirsOf(fw); wallsAdded++;
+			} else {
+				// a necessary passage: the speed requirement along the walk's descent through the basin
+				let sx = 0, sy = 0;
+				for (const t of basin) { sx += dirs[2 * t]; sy += dirs[2 * t + 1]; }
+				const n = Math.hypot(sx, sy) || 1;
+				const dx = sx / n, dy = sy / n;
+				let vmax = 0;
+				for (const k of top) { sim.restore(k.sn); vmax = Math.max(vmax, sim.speed_x * dx + sim.speed_y * dy); }
+				reqs.push({ set: basin, dx, dy, vreq: vmax + REQ_MARGIN });
+				reqsAdded++;
+			}
+			// the front re-measured by the new corridor
+			for (const k of next) { sim.restore(k.sn); k.est = estOf(k.tile); }
+			next.sort((a, b) => a.est - b.est);
+			stallBest = next.length ? next[0].est : Infinity; stallAt = d;
+			if (o.debug) console.error(`stall ${stalls} at d ${d}: ${around ? 'walls' : 'speed'} basin ${basin.size} tiles, best now ${stallBest.toFixed(1)}`);
+		}
 	}
-	// the answer: the family's own arrival, or the finish when it arrives sooner
-	if (found && bestFin && bestFin.arrive < found.depth) found = null;
-	const res = { ok: !!(found || bestFin), ms: Date.now() - t0ms, layers: layers.length, sims, why: found ? 'found' : bestFin ? 'finish' : why, closest: bestEst, finCalls, finOK };
+	// the arrivals: the family's own hits and the finish, the earliest first
+	const res = { ok: hits.length > 0 || !!bestFin, ms: Date.now() - t0ms, layers: layers.length, sims, why: hits.length ? 'found' : bestFin ? 'finish' : why, closest: bestEst, finCalls, finOK, stalls, wallsAdded, reqsAdded };
 	if (!res.ok) return res;
-	if (found && found.msk < 0) return Object.assign(res, { masks: new Uint8Array(0), start: -1 - found.ref, tick: 0 });
-	// the input string: back through the layers to the node, then its tick (found) or the finishing leg
+	// the input string of a node: back through the layers (its start and the masks from it)
 	const pathTo = (ref, dd) => {
 		const out = [];
 		while (ref >= 0) {
@@ -339,10 +446,19 @@ function profileLeg(L, starts, goal, o = {}) {
 		out.reverse();
 		return { out, s: -1 - ref };
 	};
-	const p = found ? pathTo(found.ref, found.depth - 1) : pathTo(bestFin.ref, bestFin.d0);
-	const tail = found ? [found.msk] : bestFin.masks;
-	const masks = Uint8Array.from(p.out.concat(tail));
-	return Object.assign(res, { masks, start: p.s, tick: masks.length, tool: found ? 'profile' : 'profile+' + bestFin.tool });
+	const arrivals = [];
+	for (const hi of hits) {
+		if (hi.msk < 0) { arrivals.push({ start: -1 - hi.ref, masks: new Uint8Array(0), tool: 'profile', depth: hi.depth }); continue; }
+		const p = pathTo(hi.ref, hi.depth - 1);
+		arrivals.push({ start: p.s, masks: Uint8Array.from(p.out.concat([hi.msk])), tool: 'profile', depth: hi.depth });
+	}
+	if (bestFin) {
+		const p = pathTo(bestFin.ref, bestFin.d0);
+		arrivals.push({ start: p.s, masks: Uint8Array.from(p.out.concat(bestFin.masks)), tool: 'profile+' + bestFin.tool, depth: bestFin.arrive });
+	}
+	arrivals.sort((a, b) => a.depth - b.depth);
+	const a0 = arrivals[0];
+	return Object.assign(res, { masks: a0.masks, start: a0.start, tick: a0.masks.length, tool: a0.tool, arrivals });
 }
 
 module.exports = { profileLeg, eta, dirsOf };

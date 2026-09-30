@@ -79,6 +79,10 @@ const PRIMS_SHARE_HI = process.env.EEAT_PRIMS_SHARE_HI !== undefined ? +process.
 // proof and no claim from this tier (its failure is the other tiers' to settle). Its share of the window MSOLVE_SHARE
 // (env: measurements); off = the executor byte for byte as before.
 const MSOLVE_ON = () => process.env.EEAT_MSOLVE === '1';
+// THE PROFILE TIER (n5-lab-profile, approach B, src/plan/lab/profile.js): OPT-IN EEAT_PROFILE=1 (off: nothing of it runs,
+// the executor as before byte for byte); its share of the window EEAT_PROFILE_SHARE (0.4)
+const PROFILE_ON = () => process.env.EEAT_PROFILE === '1';
+const PROFILE_SHARE = process.env.EEAT_PROFILE_SHARE !== undefined ? +process.env.EEAT_PROFILE_SHARE : 0.4;
 const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
 const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
 const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
@@ -595,6 +599,41 @@ function makeCore(L, co) {
 			if (!(dist >= 0) || tail === null || sIdx < 0) return;
 			if (closest.dist < 0 || dist < closest.dist) closest = { dist, masks: T.concat(starts[sIdx].masks, tail) };
 		};
+		// -------- tier P: THE PROFILE (n5-lab-profile, approach B; OPT-IN EEAT_PROFILE=1, off = the executor before byte for
+		// byte): src/plan/lab/profile.js, the bang-bang family's reachable set tick by tick from every live start (x holds one
+		// key between switching events, the jump bit on the ticks whose move hits the floor, states merged by stateHash, the
+		// front cut by this call's goal field's time to go, msolve.leg finishing from the front's best states); PROFILE_SHARE of
+		// the window; its arrivals replayed by the executor's own goal test (finishFound's verifyTail)
+		if (PROFILE_ON() && !allowDeath && !wp.dieField && Date.now() < wEnd - 50) {
+			const tP = Date.now(), pEnd = tP + PROFILE_SHARE * (wEnd - tP);
+			const pst = { tier: 'profile', ok: false };
+			try {
+				const PFm = require('./lab/profile.js');
+				const idx = [];
+				starts.forEach((s, i) => { if (!s.dead) idx.push(i); });
+				const f0 = fields.get(starts[idx[0]].disc) || null;
+				const r = PFm.profileLeg(L, idx.map((i) => ({ snap: starts[i].snap, tick: starts[i].tick })), goal,
+					{ deadline: pEnd, stop: stopFn, collect: 4 * k, extra: 2, beforeTick, field: f0 || undefined });
+				sims += r.sims || 0;
+				Object.assign(pst, { ms: Date.now() - tP, why: r.why, layers: r.layers, sims: r.sims, fin: r.finCalls, closest: r.closest });
+				if (r.ok) {
+					const cands = [];
+					for (const a of r.arrivals || []) {
+						const i = idx[a.start];
+						cands.push({ start: i, tail: Uint8Array.from(a.masks), depth: starts[i].tick - t0 + a.masks.length });
+					}
+					cands.sort((a, b) => a.depth - b.depth);
+					if (cands.length) {
+						const c0 = cands[0];
+						const legsP = [{ start: c0.start, ticks: c0.tail.length, lb: 0, proven: false, tool: 'profile' }];
+						const rP = finishFound(cands, 'profile', legsP, 0);
+						pst.ok = !!rP;
+						tiers.push(pst);
+						if (rP) { delete rP.arrivalsRaw; return out(rP); }
+					} else tiers.push(pst);
+				} else tiers.push(pst);
+			} catch (e) { pst.error = String(e && e.message || e); pst.ms = Date.now() - tP; tiers.push(pst); }
+		}
 		// -------- tier 0b: THE EXACT END SEARCH from a NEAR state (within NEAR_T tiles of the goal by the goal field): a later
 		// start (the strategy's relay: the last rung's nearest state) and, after the primitives and the exact tier, this
 		// call's own nearest state; each alone and a few of its own ancestors (its masks cut NEAR_BACK ticks back: a near
