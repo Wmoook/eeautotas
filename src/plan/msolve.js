@@ -450,8 +450,17 @@ function createSolver(L, opts = {}) {
 				const line = 16 * fr - 16;
 				// the descending crossing of the floor line after the member's air start
 				for (let t = Math.max(1, m.air0 + 1); t <= Tmax; t++) {
-					const yp = t === 1 ? y0 : m.y(t - 1), yt = m.y(t);
-					if (yp <= line && m.r(t) > line && m.v(t) > 0) { const wins = landWins(tg, sol, fr); if (wins.length) items.push({ T: t, m, wins, land: fr }); break; }
+					const yp = t === 1 ? y0 : m.y(t - 1);
+					if (yp <= line && m.r(t) > line && m.v(t) > 0) {
+						if (o.each) {
+							// the forward fan-out: one item per target tile of the row (its own window)
+							for (const c of tg.colsByRow.get(fr - 1) || []) {
+								const wins = landWins({ colsByRow: new Map([[fr - 1, [c]]]) }, sol, fr);
+								if (wins.length) items.push({ T: t, m, wins, land: fr, tile: (fr - 1) * W + c });
+							}
+						} else { const wins = landWins(tg, sol, fr); if (wins.length) items.push({ T: t, m, wins, land: fr }); }
+						break;
+					}
 				}
 			}
 			if (tg.cls !== 'G') {
@@ -467,9 +476,11 @@ function createSolver(L, opts = {}) {
 		items.sort((a, b) => a.T - b.T || (a.m.kind === 'jump' ? a.m.j : 1e3 + a.m.off) - (b.m.kind === 'jump' ? b.m.j : 1e3 + b.m.off));
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
+		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null;
 		for (const it of items) {
-			if (best && it.T > best.T) break;
+			if (!o.each && best && it.T > best.T) break;
 			if (budget.out) break;
+			if (o.each && solved.has(it.tile)) continue;
 			// the root cut: THEOREM M from the start
 			const r0 = holdRange(Hd, x0, vx0, it.T, K1.ALIGN_SLACK + 1e-6);
 			let any = false; for (const w of it.wins) if (r0[1] >= w[0] && r0[0] < w[1]) any = true;
@@ -527,6 +538,13 @@ function createSolver(L, opts = {}) {
 					masks[t - 1] = mk;
 				}
 				stats.verifies++;
+				if (o.each) {
+					let gt = goals.get(it.tile);
+					if (!gt) { gt = goalOf({ tiles: [it.tile], cls: 'G' }); goals.set(it.tile, gt); }
+					const h2 = replay(snap, masks, gt, T);
+					if (h2 > 0) { solved.set(it.tile, { tile: it.tile, T: h2, masks: Uint8Array.from(masks.subarray(0, h2)) }); return true; }
+					return false;
+				}
 				const hit = replay(snap, masks, goal, T + extra);
 				if (hit > 0) {
 					const ms = masks.subarray(0, hit);
@@ -539,6 +557,7 @@ function createSolver(L, opts = {}) {
 			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, budget, wall);
 			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk, land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
 		}
+		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
 		return Object.assign({ ok: true, tool: 'plain' }, best);
 	}
@@ -641,6 +660,9 @@ function createSolver(L, opts = {}) {
 					const jumpNow = standing && s.jump_count < s.max_jumps;
 					let y = y0, v = jumpNow ? G.J : Math.min(vy0, 0);
 					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y < yhi) { t = j + (jumpNow ? 1 : 0) + (tg.cls === 'G' ? 1 : 0); break; } if (v > 0) break; }
+					// out of one jump's reach (stairs, re-jumps from landings): no tick rises more than |J| (the jump sets it,
+					// gravity only slows it): a looser bound, still one
+					if (!Number.isFinite(t)) t = Math.ceil((y0 - yhi) / Math.abs(G.J)) + (tg.cls === 'G' ? 1 : 0);
 				}
 				if (t < ty) ty = t;
 			}
@@ -751,8 +773,142 @@ function createSolver(L, opts = {}) {
 		return res;
 	}
 
+	// ---------------------------------------------------------------- CHAINS: A* over support states
+	/**
+	 * standable support tiles near a state: a free centre tile over a landable tile (solid, one-way, half), the box
+	 * there free, inside the rectangle the plain extremes can reach in `ticks`; sorted by the tile distance to the
+	 * target's nearest tile (the order of the fan-out), at most `max`
+	 */
+	function supportsNear(s, ticks, ctx, tg, max) {
+		const sol = solidOf(s), Hd = holdTables(ctx), G = K1.ga(ctx);
+		let xlo = s.px, xhi = s.px;
+		for (let n = 1; n <= Math.min(ticks, HOLD_T); n++) {
+			const q = holdRange(Hd, s.px, s.speed_x, n, K1.ALIGN_SLACK);
+			if (q[0] < xlo) xlo = q[0]; if (q[1] > xhi) xhi = q[1];
+		}
+		const ylo = s.py - 80, yhi = s.py + ticks * 13.6;
+		const c0 = Math.max(0, Math.floor(xlo / 16)), c1 = Math.min(W - 1, Math.floor((xhi + 16) / 16));
+		const r0 = Math.max(0, Math.floor(ylo / 16)), r1 = Math.min(Hh - 2, Math.floor((yhi + 16) / 16));
+		const here = (Math.trunc(s.py + 8) >> 4) * W + (Math.trunc(s.px + 8) >> 4);
+		const tt = tg.tiles.map((t) => [t % W, (t / W) | 0]);
+		const out = [];
+		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
+			const t = cy * W + cx;
+			if (t === here || sol[t] !== 0 || sol[t + W] === 0) continue;
+			if (!(s.tiles[t] < plainId.length && plainId[s.tiles[t]] === 1)) continue;
+			if (!boxFree(sol, 16 * cx, 16 * cy)) continue;
+			let d = Infinity;
+			for (const [gx, gy] of tt) { const e = Math.abs(gx - cx) + Math.abs(gy - cy); if (e < d) d = e; }
+			out.push([d, t]);
+		}
+		out.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+		return out.slice(0, max).map((q) => q[1]);
+	}
+	/**
+	 * landings(start, o): THE FORWARD FAN-OUT: from a plain state, the earliest verified landing (and its hop) on every
+	 * standable tile the plain extremes reach within o.Tmax (60) ticks (at most o.max (400) tiles), each by the plain
+	 * solver's (T, member, tile) items with <= o.K (1) x changes, one engine replay each: [{tile, T, masks, hop}]
+	 */
+	function landings(start, o = {}) {
+		const snap = snapOf(start);
+		sim.restore(snap);
+		const ctx = plainStart(sim);
+		if (!ctx) return [];
+		const Tmax = o.Tmax || 60;
+		const tiles = supportsNear(sim, Tmax, ctx, { tiles: [] }, o.max || 400);
+		if (!tiles.length) return [];
+		const tg = targetOf({ tiles, cls: 'G' });
+		const stats = { items: 0, cands: 0, verifies: 0, ticks: 0 };
+		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000 }, stats);
+		const out = r.each || [];
+		for (const e of out) {
+			const hm = Uint8Array.from(e.masks); hm[hm.length - 1] |= 1;
+			const g = goalOf({ tiles: [e.tile], cls: 'G' });
+			e.hop = replay(snap, hm, g, hm.length) === hm.length ? hm : null;
+		}
+		out.stats = stats;
+		return out;
+	}
+	/**
+	 * chain(start, target, o): A* over SUPPORT STATES with solved legs as edges. A node = an exact engine state (its
+	 * snapshot, the masks from the chain's start, g = ticks); its edges = the direct leg to the target and legs to the
+	 * o.fan (8) standable tiles nearest the target (supportsNear), each landing also as its hop (the jump on the
+	 * landing tick: another state, the same support); nodes merged by stateHash (a state reached again no sooner is
+	 * dropped); h = the plain regime's certified lower bound to the target (0 where none applies), so a search whose
+	 * open list's least f reaches the best found has CLOSED: that chain is optimal within the graph of these legs.
+	 * Lazy verification: every edge is the solver's replayed answer, made when its node is expanded, not before.
+	 * o: {ms (2000), fan (8), legT (80: a leg's Tmax), K, coupled (false: the fan-out legs plain only; the direct leg
+	 * takes o.coupledDirect)}. Returns {ok, masks, T, closed, expanded, legs, nodes, ms}.
+	 */
+	function chain(start, target, o = {}) {
+		const t0 = Date.now(), budgetMs = o.ms || 2000, fan = o.fan === undefined ? 8 : o.fan, legT = o.legT || 80;
+		const snap0 = snapOf(start);
+		const tg = targetOf(target);
+		const heap = [];
+		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (heap[p].f <= heap[i].f) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+		const down = (i) => { for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l].f < heap[m].f) m = l; if (r < heap.length && heap[r].f < heap[m].f) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
+		const push = (n) => { heap.push(n); up(heap.length - 1); };
+		const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; down(0); } return top; };
+		// h: the plain bound (the order); a bound without its certificate (a field or a portal within reach) orders but
+		// voids the closed claim (uncert)
+		let uncert = false;
+		const W8 = o.w || 1;
+		const hOf = () => {
+			const c = plainStart(sim);
+			if (!c || tg.tele) return 0;
+			const b = lowerBoundOf(sim, tg, c);
+			if (b > 0 && !certify(sim, b, c)) uncert = true;
+			return b * W8;
+		};
+		const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
+		const seen = new Map();
+		sim.restore(snap0);
+		seen.set(sim.stateHash(), 0);
+		push({ snap: snap0, g: 0, masks: new Uint8Array(0), f: hOf() });
+		let best = null, expanded = 0, legs = 0, nodes = 1;
+		while (heap.length && Date.now() - t0 < budgetMs) {
+			const n = pop();
+			if (best && n.f >= best.T) { push(n); break; }
+			expanded++;
+			if (o.trace) o.trace(n);
+			const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
+			if (lim <= 0) continue;
+			sim.restore(n.snap);
+			const plainNode = !!plainStart(sim);
+			const r = leg(n.snap, target, { Tmax: lim, K: o.K, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000 });
+			legs++;
+			if (r.ok && (!best || n.g + r.T < best.T)) best = { T: n.g + r.T, masks: cat(n.masks, r.masks) };
+			sim.restore(n.snap);
+			const ctx = plainStart(sim);
+			if (!ctx || fan <= 0) continue;
+			const lands = landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax });
+			legs += lands.length;
+			for (const rr of lands) {
+				if (Date.now() - t0 >= budgetMs) break;
+				for (const ms of [rr.masks, rr.hop]) {
+					if (!ms) continue;
+					const g = n.g + ms.length;
+					if (best && g >= best.T) continue;
+					sim.restore(n.snap);
+					let dead = false;
+					for (let t = 0; t < ms.length; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); if (sim.is_dead) { dead = true; break; } }
+					if (dead) continue;
+					const hsh = sim.stateHash();
+					if (seen.has(hsh) && seen.get(hsh) <= g) continue;
+					seen.set(hsh, g);
+					const h = hOf();
+					if (best && g + h >= best.T) continue;
+					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), f: g + h });
+					nodes++;
+				}
+			}
+		}
+		const closed = !!best && !uncert && W8 === 1 && (heap.length === 0 || heap[0].f >= best.T);
+		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, ms: Date.now() - t0 };
+	}
+
 	return {
-		L, sim, leg, goal: goalOf, clsOf: (s) => clsOf(s, flags),
+		L, sim, leg, chain, landings, supportsNear, goal: goalOf, clsOf: (s) => clsOf(s, flags),
 		replay: (start, masks, target) => replay(snapOf(start), masks, goalOf(target)),
 		lowerBound: (start, target) => { sim.restore(snapOf(start)); const c = plainStart(sim); return c ? lowerBoundOf(sim, targetOf(target), c) : 0; },
 		solidOf, boxFree, floorAt, plainStart,
