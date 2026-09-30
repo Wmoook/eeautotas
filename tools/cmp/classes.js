@@ -3,11 +3,12 @@
 // per level the time to the first verified route, the best route at 60 / 180 s and at the end, the progress (triggers
 // reached) over time from the progress events, the peak RSS, and ONE class a failing level:
 //   CLAIM-DEATH  its last failure is a claim ('exhausted' / 'proof') or a death step
-//   NEAR         its last failure's closest approach within 3 tiles
+//   NEAR         its last failure's closest approach within 3 tiles (by the report's field and, where the report names the
+//                tile, in a straight line: 'zeroFar' = a field 0 away from its target, no near miss)
 //   ONE-LEG      no trigger reached, the plan one step (the whole route one leg to its target)
-//   RATE         the progress grows with time (at the end >= max(2, 1.3 x) the triggers of 60 s)
-//   STUCK-FIELD  otherwise, a field block (arrow, dot, boost, climbable, liquid, portal) within 4 tiles of the failing
-//   STUCK-PLAIN  target or of its closest approach; else plain
+//   RATE         still progressing at the budget's end (the triggers at the end >= those at 180 s + max(2, 20%))
+//   STUCK-FIELD  otherwise, a field block (arrow, dot, boost, climbable, liquid, portal) within 3 tiles of where the search
+//   STUCK-PLAIN  stalled (the last failure's closest tile, else its target); else plain
 // Compiled levels: the gap to the best known route (--best=<FINAL.jsonl of an earlier chief: rel, best, bestSource>).
 //   node tools/cmp/classes.js <dir> <levels dir> [--best=<jsonl>] [--json=<file>] [--md=<file>]
 const fs = require('fs'), path = require('path');
@@ -53,17 +54,29 @@ for (const l of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n
 	if (r.ok) { r.cls = 'COMPILED'; r.gap = r.best ? Math.round((r.runTicks / r.best) * 1000) / 1000 : null; r.overLb = r.lb ? Math.round((r.runTicks / r.lb) * 100) / 100 : null; }
 	else {
 		const why = String(rep ? rep.why : '');
-		const lf = why.match(/last failures: '([^']*)' rung (\d): ([\w-]+)(?: \(closest ([\d.]+) tiles)?/);
-		r.failLabel = lf ? lf[1] : ''; r.failWhy = lf ? lf[3] : (rep ? '' : 'no report'); r.closest = lf && lf[4] ? +lf[4] : null;
+		// the last failures: the first one that is not a step cut at the budget's end before it measured anything (its report
+		// field 'closest 0 tiles' at a tile far from its target: zeroFar)
+		const all = [...why.replace(/^[\s\S]*?last failures: /, '').matchAll(/'([^']*)' rung (\d): ([\w-]+)(?: \(closest ([\d.]+) tiles(?: at tile (\d+))?)?/g)];
+		const parse = (lf) => {
+			const f = { label: lf[1], why: lf[3], closest: lf[4] ? +lf[4] : null, tile: lf[5] ? +lf[5] : null };
+			const m = f.label.match(/\((\d+),(\d+)\)/);
+			f.xy = m ? [+m[1], +m[2]] : null;
+			f.euclid = f.xy && f.tile !== null ? Math.round(Math.hypot(f.tile % W - f.xy[0], Math.floor(f.tile / W) - f.xy[1]) * 10) / 10 : null;
+			f.zeroFar = f.closest !== null && f.closest <= 3 && f.euclid !== null && f.euclid > 3;
+			return f;
+		};
+		const fs0 = /last failures: /.test(why) ? all.map(parse) : [];
+		const f = fs0.find((x) => !x.zeroFar) || fs0[0] || null;
+		r.zeroFar = fs0.length > 0 && fs0[0].zeroFar;
+		r.failLabel = f ? f.label : ''; r.failWhy = f ? f.why : (rep ? '' : 'no report'); r.closest = f ? f.closest : null;
+		r.closeTile = f ? f.tile : null; r.euclid = f ? f.euclid : null;
 		r.why = why.slice(0, 240);
-		// the failing target's tile and its closest approach's tile (the last failing step of that label)
-		const m = r.failLabel.match(/\((\d+),(\d+)\)/);
+		// FIELD: a field block within 3 tiles of where the search stalled (the closest approach's tile; else the target)
 		const tiles = [];
-		if (m) tiles.push([+m[1], +m[2]]);
-		const st = ev.steps.filter((s) => s.label === r.failLabel && s.closest && s.closest.tile >= 0).pop();
-		if (st) tiles.push([st.closest.tile % W, Math.floor(st.closest.tile / W)]);
+		if (f && f.tile !== null) tiles.push([f.tile % W, Math.floor(f.tile / W)]);
+		else if (f && f.xy) tiles.push(f.xy);
 		let field = false;
-		for (const [x0, y0] of tiles) for (let dy = -4; dy <= 4 && !field; dy++) for (let dx = -4; dx <= 4; dx++) {
+		for (const [x0, y0] of tiles) for (let dy = -3; dy <= 3 && !field; dy++) for (let dx = -3; dx <= 3; dx++) {
 			const x = x0 + dx, y = y0 + dy;
 			if (x < 0 || y < 0 || x >= W || y >= H) continue;
 			const id = L.fg[y * W + x];
@@ -73,9 +86,9 @@ for (const l of fs.readFileSync(path.join(dir, 'index.jsonl'), 'utf8').split('\n
 		const claim = /exhausted|proof/.test(r.failWhy) || /^die/.test(r.failLabel);
 		if (!rep) r.cls = 'CRASH';
 		else if (claim) r.cls = 'CLAIM-DEATH';
-		else if (r.closest !== null && r.closest <= 3) r.cls = 'NEAR';
+		else if (r.closest !== null && r.closest <= 3 && !(f && f.zeroFar)) r.cls = 'NEAR';
 		else if (r.gEnd === 0 && r.planSteps <= 1) r.cls = 'ONE-LEG';
-		else if (r.gEnd >= r.g60 + Math.max(2, Math.ceil(0.3 * r.g60))) r.cls = 'RATE';
+		else if (r.gEnd >= r.g180 + Math.max(2, Math.ceil(0.2 * r.g180))) r.cls = 'RATE';
 		else r.cls = field ? 'STUCK-FIELD' : 'STUCK-PLAIN';
 	}
 	rows.push(r);
