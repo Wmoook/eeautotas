@@ -234,6 +234,7 @@ function createCorridor(L, opts = {}) {
 		const directShare = o.directShare || 0;
 		const hot = [], dNear = o.directNear === undefined ? 2 : o.directNear;   // (the new nearest states' direct legs, next turn)
 		const fieldKey = o.fieldKey || null, fPx = o.fieldPx || 4, fV = o.fieldV || 1, Kf = o.Kf || Ka;
+		const restKey = !!o.restKey;
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
@@ -302,7 +303,9 @@ function createCorridor(L, opts = {}) {
 		/** the node key of the live sim: its support tile when grounded on one, else its (tile, class, rising) cell */
 		const keyOf = () => {
 			const t = T.tileOf(sim, W, H);
-			if (sim.on_ground && G.span[t] >= 0) return 's' + t;
+			// (o.restKey: a support node only at rest on it, the vertical speed 0: a ball on the ground on its jump tick or
+			// bonking under a ceiling is not yet standing, and the standing state dominated every child it made there)
+			if (sim.on_ground && G.span[t] >= 0 && !(restKey && sim.speed_y !== 0)) return 's' + t;
 			if (fieldKey && isField(sim.current_tile)) {
 				// (a field cell: the sub-tile offset and the speeds too)
 				const ox = Math.floor((((sim.px % 16) + 16) % 16) / fPx), oy = Math.floor((((sim.py % 16) + 16) % 16) / fPx);
