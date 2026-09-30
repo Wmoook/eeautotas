@@ -350,6 +350,8 @@ const PF_ON = () => process.env.EEAT_PORTFOLIO === '1';
 const PF_SHARES = (process.env.EEAT_PF_SHARES || '0.3,0.4,0.5,0.6').split(',').map(Number);
 const PF_MS = +process.env.EEAT_PF_MS > 0 ? +process.env.EEAT_PF_MS : 40000;
 const PF_STARTS = +process.env.EEAT_PF_STARTS > 0 ? +process.env.EEAT_PF_STARTS : 1;
+// (its arms: not the leg finder, which is this executor's own tier 3 on the rest of the window)
+const PF_ARMS = process.env.EEAT_PF_ARMS || 'bw,prof,corr,chain';
 const RUNG_PROJ = [1500, 5000, 15000, 45000];
 const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
 const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
@@ -756,7 +758,7 @@ function makeCore(L, co) {
 					let proj = 0;
 					for (let q = pr + 1; q < RUNG_PROJ.length; q++) proj += PF_SHARES[Math.min(q, PF_SHARES.length - 1)] * RUNG_PROJ[q];
 					const ms = pi === pStarts.length - 1 ? left : left / (pStarts.length - pi);
-					const r = P.solve(s.snap, mTarget, { ms, deadline: Date.now() + ms, Tmax, total: Math.min(PF_MS * 2, ms + proj) });
+					const r = P.solve(s.snap, mTarget, { ms, deadline: Date.now() + ms, Tmax, total: Math.min(PF_MS * 2, ms + proj), arms: PF_ARMS });
 					pst.tries++; pst.arms = r.arms; pst.deferred = r.deferred; pst.resumed = r.resumed;
 					if (!r.ok) { pst.why = r.why; continue; }
 					sims += r.T;
