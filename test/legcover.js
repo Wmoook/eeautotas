@@ -92,6 +92,15 @@ function replayHits(L, pre, tail, tiles) {
 		if (fast && tiers.includes('cover')) check('executor EEAT_COVER=2: the cover after the best-first search', tiers.indexOf('best') >= 0 && tiers.indexOf('best') < tiers.indexOf('cover'), `tiers ${tiers.join(',')}`);
 		await ex.close();
 	}
+	// ---- cover v3 (EEAT_COVER=3): v2's fallback; its slot only after a stuck skeleton (none here: the leg is near)
+	process.env.EEAT_COVER = '3';
+	{
+		const ex = await EX.createExecutor(L2, { file, workers: 0 });
+		const res = await ex.reach([''], { kind: 'trigger', tiles: goalTiles, label: 'coin', expect: null }, { ms: 4000, level: 1, k: 4, fast: true });
+		const tiers = (res.tiers || []).map((t) => t.tier);
+		check('executor EEAT_COVER=3, before a route: the leg found, no cover before the best-first search', !!res.ok && (!tiers.includes('cover') || tiers.indexOf('best') < tiers.indexOf('cover')), `${res.tool}, ${res.ok ? res.arrivals[0].tick : res.fail && res.fail.why} (tiers ${tiers.join(',')})`);
+		await ex.close();
+	}
 	delete process.env.EEAT_COVER;
 
 	// ---- the truth: K Underground's detour leg (checkpoint (17,80) -> (64,84), the route's own state at tick 225)
