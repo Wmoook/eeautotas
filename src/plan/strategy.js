@@ -63,6 +63,31 @@ const OS_SLICE = process.env.EEAT_OS_SLICE !== undefined ? +process.env.EEAT_OS_
 // strings (routeOf / addArrival here, as the main-thread harvest); the executor's new anchors and every better route go to
 // it (inject: a route is its bound: its ladder then searches only for faster ones). EEAT_OS_THREAD=0: the main-thread mode.)
 const OS_THREAD = process.env.EEAT_OS_THREAD !== '0';
+// (THE ONE SHOT'S OWN PROCESS, the default of the thread mode: osworker.js forked as a child process at nice 19 (Linux),
+// its V8 heap --max-old-space-size = EEAT_OS_HEAP_MB + 512: in a worker thread its garbage collection shared the V8
+// platform threads of the process with the executor's worker threads and the main thread. EEAT_OS_PROC=0: the worker
+// thread. The same messages either way: osProc() gives the child the Worker's face.)
+const OS_PROC = process.env.EEAT_OS_PROC !== '0';
+/** osworker.js as a child process with a Worker's face (on / once 'message' 'error' 'exit', postMessage, unref, terminate) */
+function osProc(file, data, heapMB) {
+	const cp = require('child_process'), EventEmitter = require('events');
+	const env = Object.assign({}, process.env, { EEAT_OS_WORKERDATA: JSON.stringify(data) });
+	const child = cp.fork(file, [], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: heapMB > 0 ? [`--max-old-space-size=${Math.round(heapMB + 512)}`] : [] });
+	const ee = new EventEmitter();
+	let err = '';
+	if (child.stderr) child.stderr.on('data', (d) => { err = (err + String(d)).slice(-2000); });
+	child.on('message', (m) => ee.emit('message', m));
+	child.on('error', (e) => ee.emit('error', e));
+	child.on('exit', (code, sig) => { if (code && err) ee.emit('error', new Error(`exit ${code}: ${err.split(/\r?\n/).filter(Boolean).slice(-1)[0] || ''}`)); ee.emit('exit', code == null ? sig : code); });
+	return {
+		pid: child.pid,
+		on: (ev, fn) => { ee.on(ev, fn); },
+		once: (ev, fn) => { if (ev === 'exit' && child.exitCode !== null) { fn(child.exitCode); return; } ee.once(ev, fn); },
+		postMessage: (m) => { if (child.connected) child.send(m); },
+		unref: () => { try { child.unref(); if (child.channel) child.channel.unref(); if (child.stderr) child.stderr.unref(); } catch (e) { /* ended */ } },
+		terminate: () => { try { if (child.exitCode === null) child.kill('SIGKILL'); } catch (e) { /* gone */ } return Promise.resolve(); },
+	};
+}
 const OS_DRAIN_MAX = 64;   // the thread's arrivals replayed here per loop turn at most (the rest wait for the next turn)
 // (THE GATE: the thread's arrivals are held until the executor needs them: its first stall (the watchdog's) or its end
 // ('exhausted' / nothing left: the loop's hold) with no route; from then on they go to it as they come. Given at once, the
@@ -367,8 +392,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const { Worker } = require('worker_threads');
 			// (its isolate's old space: osworker.js OS_HEAP_MB (the live heap where its A* stops growing) + 512 MB; 0: V8's own)
 			const osHeap = process.env.EEAT_OS_HEAP_MB !== undefined && process.env.EEAT_OS_HEAP_MB !== '' && Number.isFinite(+process.env.EEAT_OS_HEAP_MB) ? +process.env.EEAT_OS_HEAP_MB : 1024;
-			osw = new Worker(path.join(__dirname, 'oneshot', 'osworker.js'), { workerData: { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null },
-				...(osHeap > 0 ? { resourceLimits: { maxOldGenerationSizeMb: Math.round(osHeap + 512) } } : {}) });
+			const osData = { file: path.resolve(String(opts.file)), graph: process.env.EEAT_OS_GRAPH === '1', graphThreads: 1, cache: process.env.EEAT_OS_CACHE || null };
+			const osFile = path.join(__dirname, 'oneshot', 'osworker.js');
+			osw = OS_PROC ? osProc(osFile, osData, osHeap)
+				: new Worker(osFile, { workerData: osData, ...(osHeap > 0 ? { resourceLimits: { maxOldGenerationSizeMb: Math.round(osHeap + 512) } } : {}) });
 			osw.on('message', (m) => {
 				if (!m || typeof m !== 'object') return;
 				if (m.type === 'route' || m.type === 'arr') osQ.push(m);

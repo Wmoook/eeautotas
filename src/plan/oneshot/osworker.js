@@ -16,7 +16,15 @@
 //   {type: 'inject', masks}   a real state from the level start (an executor anchor, or a whole route: its bound)
 //   {type: 'stop'}            end the loop (the worker then exits by itself)
 //   {type: 'stats'}           a 'stats' answer now
-const { parentPort, workerData } = require('worker_threads');
+// THE ONE SHOT'S OWN PROCESS (strategy.js OS_PROC, the default with EEAT_ONESHOT=1: EEAT_OS_PROC=0 the worker thread): the
+// same code as a child process (child_process.fork: its messages on the IPC channel, its workerData in EEAT_OS_WORKERDATA),
+// so its garbage collection runs on its own V8 platform threads and its whole process at OS_NICE, not on the pool the
+// executor's worker threads share with it; it ends when the compile's channel closes.
+const WT = require('worker_threads');
+const IS_PROC = !WT.parentPort && typeof process.send === 'function';
+const parentPort = IS_PROC ? { on: (ev, fn) => process.on(ev, fn), postMessage: (m) => process.send(m) } : WT.parentPort;
+const workerData = IS_PROC ? JSON.parse(process.env.EEAT_OS_WORKERDATA || '{}') : WT.workerData;
+if (IS_PROC) process.on('disconnect', () => process.exit(0));
 const T = require('../types.js');
 
 const SLICE_MS = +process.env.EEAT_OS_TSLICE || 250;     // one run() of the A* between two looks at the port
@@ -40,13 +48,16 @@ const OS_HEAP_MB = envNum('EEAT_OS_HEAP_MB', 1024);
 function niceSelf() {
 	if (!(OS_NICE > 0) || process.platform !== 'linux') return null;
 	try {
-		const tid = +String(require('fs').readlinkSync('/proc/thread-self')).split('/').pop();
+		const fs = require('fs'), os = require('os');
+		const tid = +String(fs.readlinkSync('/proc/thread-self')).split('/').pop();
 		if (!(tid > 0)) return null;
-		const os = require('os');
-		const cur = os.getPriority(tid);
-		const want = Math.min(19, Math.max(cur, OS_NICE));
-		if (want !== cur) os.setPriority(tid, want);
-		return { tid, nice: os.getPriority(tid) };
+		// (a process of its own: every thread it has now (V8's platform threads, libuv's), later ones inherit the main
+		// thread's value; a worker thread: its own thread only, the executor's threads keep theirs)
+		const tids = IS_PROC ? fs.readdirSync('/proc/self/task').map(Number).filter((t) => t > 0) : [tid];
+		for (const t of tids) {
+			try { const cur = os.getPriority(t); const want = Math.min(19, Math.max(cur, OS_NICE)); if (want !== cur) os.setPriority(t, want); } catch (e) { /* gone */ }
+		}
+		return { tid, nice: os.getPriority(tid), threads: tids.length, proc: IS_PROC };
 	} catch (e) { return null; }
 }
 const heapMB = () => { try { return require('v8').getHeapStatistics().used_heap_size / 1048576; } catch (e) { return 0; } };
@@ -70,6 +81,7 @@ parentPort.on('message', (m) => {
 	inbox.push(m);
 });
 const post = (m) => { try { parentPort.postMessage(m); } catch (e) { /* the main thread is gone */ } };
+// (the process mode: the compile gone = the channel closed: post throws or disconnect fires, and the loop ends)
 
 (async () => {
 	const t0 = Date.now();
