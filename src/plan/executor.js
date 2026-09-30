@@ -103,7 +103,7 @@ const COARSE_CELL = [0.5, 0.25, 2, 1];
 // does not follow the goal field, so a leg whose way first goes away from the goal, a run-up or a detour the relaxation
 // crosses, is not ranked behind the false near's whole region); a leg it finds goes on to the tightening (legBest bounded
 // by it) like any finder's; off = the executor byte for byte as before
-const COVER_ON = () => process.env.EEAT_COVER === '1' || process.env.EEAT_COVER === '2';
+const COVER_ON = () => process.env.EEAT_COVER === '1' || process.env.EEAT_COVER === '2' || process.env.EEAT_COVER === '3';
 // COVER V2 (EEAT_COVER=2, doctor 7 after the box-6 A/B): the coverage finder is the FALLBACK, only BEFORE the compile's first
 // route (budget.fast): the field-following finders first (the core's best-first search with 1 - COVER_SHARE of its window,
 // then the cover with the rest if it found nothing; the skeleton wrapper's direct leg, then the cover slot on the whole leg
@@ -112,7 +112,15 @@ const COVER_ON = () => process.env.EEAT_COVER === '1' || process.env.EEAT_COVER 
 // whole, and the controls' routes came 8-20% slower (box 6, 60 s: Ruins 1,614 vs 1,339, Desolate Caverns 1,923 vs 1,638,
 // Bygone Tutorial 2,397 vs 1,990; the first routes 2,851 vs 1,819 on Desolate Caverns); after the first route the calls look
 // for shorter legs, which random rollouts do not give
-const COVER_V2 = () => process.env.EEAT_COVER === '2';
+const COVER_V2 = () => process.env.EEAT_COVER === '2' || process.env.EEAT_COVER === '3';
+// COVER V3 (EEAT_COVER=3): v2's core fallback, and the wrapper's slot NOT after the direct leg but after the SKELETON GOT
+// STUCK (a sub-level set failed twice: the skeleton's own evidence that the field's way is not the ball's, the detour
+// legs' signature: K Underground's sub-legs from the arrow block's face 10-52 cells each), with COVER_STUCK of what is
+// left, the coverage finder alone on the whole leg from the step's starts; a skeleton that progresses keeps all its time
+// (v1 / v2's slot took 40% / 26% of a far leg's budget from it: Accident Prone's trophy and switch legs, found by the
+// skeleton at rung 3 (skel+math), were lost with v1)
+const COVER_V3 = () => process.env.EEAT_COVER === '3';
+const COVER_STUCK = process.env.EEAT_COVER_STUCK !== undefined ? Math.max(0.1, Math.min(1, +process.env.EEAT_COVER_STUCK || 0.6)) : 0.6;
 const COVER_SHARE = process.env.EEAT_COVER_SHARE !== undefined ? Math.max(0.05, Math.min(0.95, +process.env.EEAT_COVER_SHARE || 0.4)) : 0.4;
 const COVER_RUNG = process.env.EEAT_COVER_RUNG !== undefined ? +process.env.EEAT_COVER_RUNG : 1;
 // (the skeleton wrapper's cover slot: that share of a far waypoint's budget, the coverage finder alone on the whole leg)
@@ -1749,7 +1757,7 @@ async function createExecutor(L, opts) {
 		// that cannot go on (K Underground's checkpoint (64,84) from the known route's own state: the skeleton's sub-legs from
 		// the arrow field's edge, 10-52 cells each; the coverage finder alone on the whole leg found it in 0.5-1.3 s))
 		let coverSlot = false;
-		const slotV2 = COVER_V2() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0 && !!budget.fast;
+		const slotV2 = COVER_V2() && !COVER_V3() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0 && !!budget.fast;
 		if (COVER_ON() && !COVER_V2() && (budget.level | 0) >= COVER_RUNG && COVER_SLOT > 0) {
 			const vMs = COVER_SLOT * (deadline - Date.now());
 			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
@@ -1860,6 +1868,14 @@ async function createExecutor(L, opts) {
 			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
+		// (COVER V3: the skeleton stuck, before the first route: the coverage finder alone on the whole leg from the step's
+		// starts with COVER_STUCK of what is left; the rest of the call as before)
+		if (COVER_V3() && stuck && !!budget.fast && (budget.level | 0) >= COVER_RUNG && deadline - Date.now() > 300) {
+			const vMs = COVER_STUCK * (deadline - Date.now());
+			const rv = await reachLeg(starts, wp, { ms: vMs, level: budget.level | 0, fast: true, k: budget.k, deadline: Math.min(deadline, Date.now() + vMs), stop: budget.stop, next: budget.next || null, cover: 1 });
+			S.coverStuck = (S.coverStuck || 0) + 1;
+			if (rv.ok || (rv.fail && (rv.fail.why === 'stopped' || rv.fail.why === 'dies'))) { if (rv.ok) S.coverStuckOk = (S.coverStuckOk || 0) + 1; return rv; }
+		}
 		// (stuck with DEAD_REST of the call or more left: the direct leg from the deepest level AND the starts with the rest
 		// (the sub-level sets' way is the relaxation's; the finders from the starts may know another: Endless Space's direct
 		// leg reached route tick ~1,000 of 1,821 in 5 s where the skeleton sat at ~350), instead of returning the time unused)
