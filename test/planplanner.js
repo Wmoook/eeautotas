@@ -134,6 +134,14 @@ function units() {
 		check('P-UNIT stepping stones: off = the trophy alone', !!p0 && kindsOf(m, p0).join(',') === 'trophy', p0 && planStr(m, p0));
 		check('P-UNIT stepping stones: on = coins of the corridor in order, then the trophy, never the coin off the way',
 			!!p1 && kindsOf(m, p1).pop() === 'trophy' && xs.length >= 1 && xs.every((x, i) => i === 0 || x > xs[i - 1]) && !xs.includes(60) && p1.steps.every((s) => s.waypoint.kind !== 'trigger' || s.waypoint.expect === null), p1 && planStr(m, p1));
+		// (a failed stone cuts nothing and is blocked from its second rung on; the same failure of a relevant step cuts)
+		const s0 = p1 && p1.steps.find((s) => s.waypoint.kind === 'trigger');
+		if (s0) {
+			const fl = { ok: false, fail: { why: 'budget', closest: { tile: 10 * Wd + 12, dist: 5 } } };
+			const f1 = on.learn(Object.assign({}, s0, { rung: 0 }), fl, {}), f2 = on.learn(Object.assign({}, s0, { rung: 1 }), fl, {});
+			const all = f1.concat(f2);
+			check('P-UNIT stepping stones: a failed stone cuts nothing, blocked at its second rung', all.every((f) => !f.cut) && f2.some((f) => f.kind === 'block') && !f1.some((f) => f.kind === 'block'), JSON.stringify(all.map((f) => [f.kind, f.rung, !!f.cut])));
+		} else check('P-UNIT stepping stones: a failed stone cuts nothing', false, 'no stone step');
 		const lbOff = off.lowerBound({}), lbOn = on.lowerBound({});
 		check('P-UNIT stepping stones: lowerBound unchanged (stones never in the lb)', lbOff.ticks === lbOn.ticks && lbOff.complete === lbOn.complete, `${lbOff.ticks} ${lbOn.ticks}`);
 	}
