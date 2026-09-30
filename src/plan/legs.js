@@ -40,6 +40,8 @@ function cellOf(sim, disc) {
 	const mix = (v) => { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= (v >>> 16) & 0xffff; h = Math.imul(h, 0x01000193); };
 	mix(Math.floor(sim.px) | 0); mix(Math.floor(sim.py * 0.5) | 0); mix(Math.floor(sim.speed_x * 16) | 0); mix(Math.floor(sim.speed_y * 8) | 0);
 	mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0)); mix(disc | 0);
+	// (EEAT_CELL_ZERO=1: the state at rest on the tile grid, per axis, a cell of its own, as legBest's cellKey)
+	if (ZERO_CELL) { const ax = sim.speed_x === 0 && sim.px % 16 === 0, ay = sim.speed_y === 0 && sim.py % 16 === 0; if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0)); }
 	// (a second word so that two cells share a number only by a 52-bit accident)
 	let g = 0x2545f491 | 0;
 	g ^= Math.floor(sim.px * 7) | 0; g = Math.imul(g, 0x5bd1e995); g ^= Math.floor(sim.py * 3) | 0; g = Math.imul(g, 0x5bd1e995);
