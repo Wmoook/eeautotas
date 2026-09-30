@@ -1261,7 +1261,9 @@ async function createExecutor(L, opts) {
 		// (stuck with DEAD_REST of the call or more left: the direct leg from the deepest level AND the starts with the rest
 		// (the sub-level sets' way is the relaxation's; the finders from the starts may know another: Endless Space's direct
 		// leg reached route tick ~1,000 of 1,821 in 5 s where the skeleton sat at ~350), instead of returning the time unused)
-		if (DEAD_ON && stuck && cur !== startStrs && deadline - Date.now() > DEAD_REST * ms) { cur = cur.concat(startStrs.filter((s) => !cur.includes(s))); stuck = false; S.deadDirect = (S.deadDirect || 0) + 1; }
+		let restDirect = false;
+		const cur0 = cur;
+		if (DEAD_ON && stuck && cur !== startStrs && deadline - Date.now() > DEAD_REST * ms) { cur = cur.concat(startStrs.filter((s) => !cur.includes(s))); stuck = false; restDirect = true; S.deadDirect = (S.deadDirect || 0) + 1; }
 		if (Date.now() >= deadline - 100 || (stuck && cur !== startStrs)) {
 			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
 			const cl = skelClosest(fail.closest, cur !== startStrs ? cur : [], f0);
@@ -1282,6 +1284,13 @@ async function createExecutor(L, opts) {
 			});
 			r.lb = 0;
 			r.tool = 'skel+' + (r.tool || '');
+		} else if (restDirect && !(r.fail && r.fail.why === 'stopped')) {
+			// (the rest's direct leg found nothing: the stuck skeleton's own report, as before (its sub-leg's closest: the
+			// planner and the relays read it; I Wanna be the Guy lost its trigger progress 11 -> 1 when this call reported
+			// the direct leg's closest instead: lane 2 / 3's accidental diversifier))
+			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
+			const cl = skelClosest(fail.closest, cur0, f0);
+			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget', closest: cl }) };
 		} else {
 			if (r.fail && r.fail.why !== 'stopped') r.fail = Object.assign({}, r.fail, { why: 'budget' });
 		}
