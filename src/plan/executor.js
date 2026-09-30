@@ -199,6 +199,8 @@ const CORR_MIN = +process.env.EEAT_CORR_MIN >= 0 && process.env.EEAT_CORR_MIN !=
 const CORR_SHARE = +process.env.EEAT_CORR_SHARE > 0 ? +process.env.EEAT_CORR_SHARE : 0.4;
 const CORR_MS = +process.env.EEAT_CORR_MS > 0 ? +process.env.EEAT_CORR_MS : 6000;
 const CORR_TMAX = +process.env.EEAT_CORR_TMAX > 0 ? +process.env.EEAT_CORR_TMAX : 3000;
+// EEAT_CORR_REPLACE=1 (with EEAT_CORR_MIN=0): the corridor also takes tier M2's near chains (msolve.chain off)
+const CORR_REPLACE = process.env.EEAT_CORR_REPLACE === '1';
 const CORR_OPTS = (() => { try { return process.env.EEAT_CORR_OPTS ? JSON.parse(process.env.EEAT_CORR_OPTS) : {}; } catch (e) { return {}; } })();
 // NO RESTART PER RUNG (n5 lane 2): tier M2's chain search is RESUMED by a later call from the same start state to the same
 // target tiles and horizon (msolve.js chain o.resume: its open list, seen states and best chain kept per worker, the newest
@@ -760,7 +762,7 @@ function makeCore(L, co) {
 		// plain bound; ordered by the goal field this call built anyway (its -1 a proof in physics mode): from the start the
 		// goal field puts nearest
 		const nearMin = Math.min(...startCost.map((c, i) => (c >= 0 && !starts[i].dead ? c : Infinity)));
-		if (mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && Date.now() < wEnd - 50) {
+		if (mathOn && MATH_CHAIN_SHARE > 0 && nearMin <= MATH_CHAIN_TILES && !(CORR_ON() && CORR_REPLACE) && Date.now() < wEnd - 50) {
 			const tC = Date.now(), cEnd = tC + Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC));
 			let bi = -1;
 			starts.forEach((s, i) => {
@@ -815,7 +817,7 @@ function makeCore(L, co) {
 					let th = 0x811c9dc5;
 					for (const t of mTarget.tiles) { th = (th ^ t) >>> 0; th = Math.imul(th, 0x01000193); }
 					const resume = `${MSv.sim.stateHash()}|${Tmax}|${mTarget.tiles.length}|${th >>> 0}`;
-					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2 }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
+					try { rc = corridor().solve(s.snap, mTarget, Object.assign({ M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, legs: false, plainStops: [8, 20] }, CORR_OPTS, { ms: Math.max(10, cEnd - Date.now()), deadline: cEnd, Tmax, resume, first: true })); }
 					catch (e) { rc = { ok: false, error: String(e && e.message || e) }; }
 					if (rc && rc.ok) mathCands(bi, rc.masks, { T: rc.T, proven: false, lb: 0 }, cands, 'math:corridor');
 				}

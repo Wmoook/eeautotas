@@ -165,7 +165,7 @@ function createCorridor(L, opts = {}) {
 	 * box), ranked by the estimated f after the move; when none: the spans nearest the ball of any cost (the repair); and
 	 * the field tiles of least cost <= thr in the box (their entries), at most 48 of the least cost
 	 */
-	function corridorOf(G, s, thr, w, M, RX, RU, RD, Mu, exits) {
+	function corridorOf(G, s, thr, w, M, RX, RU, RD, Mu, exits, skip) {
 		const cx = Math.trunc(s.px + 8) >> 4, cy = Math.trunc(s.py + 8) >> 4;
 		const here = T.tileOf(s, W, H);
 		const hereSpan = s.on_ground ? G.span[here] : -1;
@@ -173,7 +173,7 @@ function createCorridor(L, opts = {}) {
 		if (Mu === undefined) Mu = 0;
 		for (let y = Math.max(0, cy - RU); y <= Math.min(H - 1, cy + RD); y++) {
 			for (const sp of G.byRow[y]) {
-				if (sp.x1 < cx - RX || sp.x0 > cx + RX || sp.id === hereSpan) continue;
+				if (sp.x1 < cx - RX || sp.x0 > cx + RX || sp.id === hereSpan || (skip && skip(sp.id))) continue;
 				const x0 = Math.max(sp.x0, cx - RX), x1 = Math.min(sp.x1, cx + RX);
 				const tiles = [];
 				let cmin = Infinity;
@@ -215,7 +215,15 @@ function createCorridor(L, opts = {}) {
 		const fanOn = o.fan !== false;
 		// the sub-legs: 'always' (every expansion), 'stuck' (only where the fans made no progress), 'never' (o.legs false)
 		const legMode = o.legs === false ? 'never' : o.legMode || 'always';
+		const lazyStall = o.lazyStall || 40;
+		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
+		// (the spans a grounded node stands on: legNew's filter)
+		// the event fan's timed stops (ticks): inside a field always (8, 20, 40), on plain physics o.plainStops (none by
+		// default: the held mask to its first event only); a stop is an airborne or mid-run node the next fans turn from
+		const stopsOf = (v, d) => new Set((v === undefined ? d : Array.isArray(v) ? v : String(v).split(',').filter(Boolean)).map(Number));
+		const fieldStops = stopsOf(o.fieldStops, [8, 20, 40]), plainStops = stopsOf(o.plainStops, []);
 		const RX = o.RX || 24, RU = o.RU || 5, RD = o.RD || 60, fanT = o.fanT || 120;
+		const lazyM = o.lazyM || M, lazyRX = o.lazyRX || RX, lazyRU = o.lazyRU || RU, legNew = !!o.legNew;
 		const snap0 = start instanceof E.EESim ? start.snapshot() : start;
 		const tgt = { tiles: Array.from(target.tiles), cls: target.cls || 'any' };
 		sim.restore(snap0);
@@ -235,6 +243,14 @@ function createCorridor(L, opts = {}) {
 		if (R0) { keep.delete(o.resume); keep.set(o.resume, R0); out.resumed = true; out.bestC = R0.bestC; out.bestCg = R0.bestCg; }
 		const nodes = R0 ? R0.nodes : new Map(), seen = R0 ? R0.seen : new Map();
 		const heap = R0 ? R0.heap : [];
+		const spansHit = R0 && R0.spansHit ? R0.spansHit : new Set();
+		const spanSeen = (spId) => spansHit.has(spId);
+		// (legMode 'lazy': the nodes the fans expanded whose legs have not run, by their cost: the legs go to the most advanced
+		// one when the fans' open list runs empty or the frontier stalls lazyStall expansions)
+		const lazy = R0 && R0.lazy ? R0.lazy : [];
+		const llt = (a, b) => a.c < b.c || (a.c === b.c && a.g < b.g);
+		const lazyPush = (n) => { lazy.push(n); let i = lazy.length - 1; while (i > 0) { const q = (i - 1) >> 1; if (!llt(lazy[i], lazy[q])) break; [lazy[q], lazy[i]] = [lazy[i], lazy[q]]; i = q; } };
+		const lazyPop = () => { const top = lazy[0], last = lazy.pop(); if (lazy.length) { lazy[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < lazy.length && llt(lazy[l], lazy[m])) m = l; if (r < lazy.length && llt(lazy[r], lazy[m])) m = r; if (m === i) break; [lazy[m], lazy[i]] = [lazy[i], lazy[m]]; i = m; } } return top; };
 		if (R0) w = R0.w;
 		const lt = (a, b) => a.f < b.f || (a.f === b.f && a.g > b.g);
 		const up = (i) => { while (i > 0) { const p = (i - 1) >> 1; if (!lt(heap[i], heap[p])) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
@@ -248,6 +264,9 @@ function createCorridor(L, opts = {}) {
 		const keyOf = () => {
 			const t = T.tileOf(sim, W, H);
 			if (sim.on_ground && G.span[t] >= 0) return 's' + t;
+			// (airKey 'vy': the rise / fall speed in 2 px/tick buckets too: two arrivals in one tile at different vertical speeds
+			// land in different places)
+			if (airKey === 'vy') return 'c' + t + clsOf(sim) + ':' + Math.round(sim.speed_y / 2);
 			return 'c' + t + clsOf(sim) + (sim.speed_y < 0 ? 'u' : 'd');
 		};
 		/** the speed toward the target's side (px/tick; the credit a kept faster arrival gets) */
@@ -267,9 +286,14 @@ function createCorridor(L, opts = {}) {
 			let a = nodes.get(key);
 			if (!a) { a = []; nodes.set(key, a); }
 			// Pareto in (g, v) with 1 tick / 0.25 px/tick of tolerance, at most K (Ka) a node
-			for (const q of a) if (q.g <= g && q.v >= v - 0.25) return false;
-			for (let i = a.length - 1; i >= 0; i--) if (a[i].g >= g && a[i].v <= v + 0.25) { a[i].dead = true; a.splice(i, 1); }
-			const n = { snap: sim.snapshot(), g, masks, c, v, key, f: 0, dead: false, from };
+			// (dom 'dir': a state dominates another only moving the same way at least as fast (the x speed's sign and size),
+			// never across directions: a run-up away from the target is kept next to a standing arrival)
+			const sx = sim.speed_x;
+			const dm = domDir ? (q, g1, x1) => q.g <= g1 && (Math.abs(x1) < 0.25 || Math.sign(q.sx) === Math.sign(x1)) && Math.abs(q.sx) >= Math.abs(x1) - 0.25 : (q, g1, x1, v1) => q.g <= g1 && q.v >= v1 - 0.25;
+			for (const q of a) if (dm(q, g, sx, v)) return false;
+			for (let i = a.length - 1; i >= 0; i--) if (dm({ g, sx, v }, a[i].g, a[i].sx, a[i].v)) { a[i].dead = true; a.splice(i, 1); }
+			const n = { snap: sim.snapshot(), g, masks, c, v, sx, key, f: 0, dead: false, from };
+			if (key[0] === 's') spansHit.add(G.span[+key.slice(1)]);
 			n.f = fOf(n);
 			if (a.length >= (key[0] === 's' ? K : Ka)) {
 				a.sort((p, q) => p.f - q.f);
@@ -311,21 +335,27 @@ function createCorridor(L, opts = {}) {
 			if (w !== w2) { w = w2; for (const x of heap) x.f = fOf(x); for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i); }
 		};
 		if (!R0) { sim.restore(snap0); admit(new Uint8Array(0), 0, 'start'); }
-		while (heap.length && Date.now() < deadline) {
-			const n = pop();
+		let lastC = out.bestC, stall = 0;
+		while (Date.now() < deadline) {
+			let n = null, pass = 'all';
+			if (legMode === 'lazy' && lazy.length && (!heap.length || stall >= lazyStall)) { n = lazyPop(); pass = 'legs'; stall = 0; out.lazyPasses = (out.lazyPasses || 0) + 1; }
+			else if (heap.length) n = pop();
+			else break;
 			if (n.dead) continue;
 			if (best && n.g + 1 >= best.T) continue;
-			out.expanded++;
+			if (pass === 'all') out.expanded++;
+			if (out.bestC < lastC - 0.01) { lastC = out.bestC; stall = 0; } else stall++;
 			sim.restore(n.snap);
 			const plainNode = !!S.plainStart(sim);
 			if (trace) trace({ ev: 'expand', g: n.g, c: n.c, f: n.f, key: n.key, from: n.from, tile: T.tileOf(sim, W, H), vx: sim.speed_x, vy: sim.speed_y });
 			// THE DIRECT LEG near the target
-			if (n.c <= D) {
+			if (pass === 'all' && n.c <= D) {
 				const lim = best ? Math.min(120, best.T - n.g - 1) : 120;
 				if (lim > 0) {
 					stats.directs++; out.legs++;
 					const tp = Date.now();
-					const r = S.leg(n.snap, tgt, Object.assign(legOpts(lim, plainNode), { alts: 0, fields: true, coupled: true, coupledTicks: 60000, fieldMs: 100 }));
+					// (a plain node whose admissible bound to the target is past the horizon: no direct leg; its budgets o.dCT / o.dFMs)
+					const r = plainNode && S.lowerBound(n.snap, tgt) > lim ? { ok: false, why: 'lb' } : S.leg(n.snap, tgt, Object.assign(legOpts(lim, plainNode), { alts: 0, fields: true, coupled: true, coupledTicks: o.dCT || 60000, fieldMs: o.dFMs || 100 }));
 					prof.direct += Date.now() - tp;
 					if (r.ok) {
 						stats.directOk++;
@@ -340,7 +370,10 @@ function createCorridor(L, opts = {}) {
 			// fans do the rest)
 			const grounded = plainNode && sim.on_ground;
 			const inField = !plainNode && clsOf(sim) !== 'A' && clsOf(sim) !== 'G';
-			const cor = corridorOf(G, sim, n.c - delta, w, grounded ? M : Ma, RX, RU, RD, grounded ? Mu : 0, inField);
+			// (the lazy legs pass: its own span count and reach box, the legs being rare; legNew: only footholds no node stands on
+			// yet: the fans reach the others)
+			const lp = pass === 'legs';
+			const cor = corridorOf(G, sim, n.c - delta, w, grounded ? (lp ? lazyM : M) : Ma, lp ? lazyRX : RX, lp ? lazyRU : RU, RD, grounded ? Mu : 0, inField, lp && legNew ? spanSeen : null);
 			// THE SUB-LEGS: msolve.leg to each of the best corridor spans, then the nearest uphill / level spans (the repair)
 			let got = 0, tp;
 			const doLegs = () => {
@@ -399,7 +432,7 @@ function createCorridor(L, opts = {}) {
 						const c1 = clsOf(sim);
 						const tele = Math.abs(sim.px - px) > 20 || Math.abs(sim.py - py) > 20;
 						if (tele || (c1 !== c00 && c1 !== 'A') || (sim.on_ground && air && t > 0)) { kids.push(Uint8Array.from(ms)); break; }
-						if (!plainNode && (t + 1 === 8 || t + 1 === 20 || t + 1 === 40)) kids.push(Uint8Array.from(ms));
+						if ((plainNode ? plainStops : fieldStops).has(t + 1)) kids.push(Uint8Array.from(ms));
 						if (!sim.on_ground) air = true;
 					}
 				}
@@ -414,7 +447,9 @@ function createCorridor(L, opts = {}) {
 				if (trace) trace({ ev: 'kids', kids: kids.length, admitted: k, got });
 				return cMin;
 			};
-			if (legMode === 'stuck') {
+			if (pass === 'legs') doLegs();
+			else if (legMode === 'lazy') { if (fanOn) doFans(); lazyPush(n); }
+			else if (legMode === 'stuck') {
 				// fans first; the legs only where the fans admitted no child below the node's cost - delta (the moves a held
 				// mask and one x change do not make: run-ups, mid-air turns, uphill ways)
 				const cMin = fanOn ? doFans() : Infinity;
@@ -428,11 +463,11 @@ function createCorridor(L, opts = {}) {
 		out.prof = prof;
 		out.ms = Date.now() - t0;
 		if (best) { out.ok = true; out.masks = best.masks; out.T = best.T; }
-		else out.why = heap.length ? 'budget' : 'exhausted';
+		else out.why = heap.length || lazy.length ? 'budget' : 'exhausted';
 		if (o.resume) {
 			// (kept while it can still give something: an open node)
-			if (heap.length && !best) {
-				keep.set(o.resume, { nodes, seen, heap, best, w, bestC: out.bestC, bestCg: out.bestCg });
+			if ((heap.length || lazy.length) && !best) {
+				keep.set(o.resume, { nodes, seen, heap, lazy, spansHit, best, w, bestC: out.bestC, bestCg: out.bestCg });
 				while (keep.size > KEEP) keep.delete(keep.keys().next().value);
 			} else keep.delete(o.resume);
 		}
