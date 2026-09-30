@@ -1242,6 +1242,60 @@ of 218 levels have an x arrow or a portal), and the local box (radius 20 (R + 2)
 runs: 340 = 340 of the 1,992 failing legs solved, 2,662 = 2,662 of the solved sample, 1 leg shorter. OPT-IN
 (`EEAT_MATH_VCUT=1`, `o.vcut`), kept for the mathematics and a bound the fields do not reach.
 
+### 4.13 The bonk after the act (the coverage iteration 2)
+
+**What the plain tier misses** (`tools/math/msolve_failclass.js`: every bench leg replayed on the ROUTE's own inputs,
+tagged by the events inside it: landings, air jumps (the jump count rising from 1 or more), ceiling bonks (vy < 0 -> 0 in
+the air with a solid tile over the box's top edge), wall stops (|vx| > 0.3 -> 0), half blocks and one-ways within 1 px
+of the box, a standing start off the 16 px grid; the tag counts over the solved and the unsolved legs side by side).
+The airborne 2-move legs of 4.11 whose two moves are plain (11,135 of the 15,281: no field in either move): a ceiling
+bonk inside the leg is in **60.5% of the 3,269 unsolved vs 16.6% of the solved** (such a leg solved 39.8%, the rest
+~85%); walls 33.5% vs 26.5%, half blocks 2.1% vs 1.1%, one-ways 3.3% vs 3.6%, off-grid ground 6.2% vs 8.1%, 3+ input
+changes 59.0% vs 58.6% (no signal), air jumps 6 legs. The single real moves' plain classes (26,971, r10; 465 unsolved):
+3+ input changes 86.5% vs 26.1% (K = 2), walls 40.4% vs 16.1%, legs > 60 ticks 54.2% vs 5.1%, bonks 16.1% vs 51.3%
+(the base members' bonks, 4.2, solve those), a standing start off the grid 11 (the half-block / one-way top the plain
+tier refuses). So the airborne legs' hole is the land-and-act members' SECOND jump: 4.11 gave the start's own flight
+its bonk members (4.2) but the jump after the landing none.
+
+**The members.** For each land-and-act jump member (base, landing (T1, line), jump tick j2) and each ceiling line the
+jump from the line crosses rising at tick b (the base member's rule: y blocked at the line 16 cr + 16, or at a whole
+start y where the move is ONE add and stays; vy = 0), a member: the base member to T1, the line to j2, the jump
+trace to b, the blocked y at b, the fall from it (gravTrace(y_b, 0)): still a closed form of the tables. The tube
+checks the ceiling over the box at b (at the first sub-step, the raw or the aligned x) and the box free under it
+(`lnd.bonk`). Only lines where a ceiling can be: a blocking tile (solid, half) in row cr over the columns the hold
+tables reach at b, with the row under it free there (a thick ceiling's inner rows are no bonk line). THE COST RULE:
+a SECOND PASS. The variants' items run only for a leg the members left unsolved, after them, on a node pool of their
+own (`o.bonkNodes` 100 k; a quarter of an item's node share each) and the tier's clock: a leg the members solve costs
+exactly what it did without the variants. Two versions before it lost on the way: interleaved by T with the members'
+items and sharing their pool, 129 legs lost for 316 won (a partial run); on a pool of their own but still interleaved
+(0 lost, 72 answers shorter through a bonk) the compiler's math tier spent its clock on the variants' items below the
+members' answers (the shared gate's MIHB's Dream side by side 20 vs 27 triggers; on the 4 rerun levels the tier's plain
+legs 34 vs 66): the shorter answers are given up for the time. Every candidate is replayed by the engine as before.
+`o.landBonk` (default on, `EEAT_MSOLVE_LANDBONK=0` off); `member` names them `...>jump@j2>bonk<cr>@<b>`.
+
+**Measured** (box 3, `tools/math/msolve_air.js --arms=bonk --every=3`: the legs of 4.11, every 3rd flight move, the
+plain tier alone, the variants on vs off in one process, every answer replayed again by a separate EESim; the final
+code):
+
+| airborne start -> the support 2 moves on | legs | solved on / off | <= route on / off | < route (on) |
+|---|---:|---|---|---:|
+| **all** | 5,170 | **66.6% / 58.0%** | **60.9% / 53.0%** | 18.9% |
+| hop > hop | 1,768 | 86.3% / 75.4% | 80.4% / 69.6% | 8.7% |
+| hop > jump | 506 | 82.2% / 66.4% | 74.9% / 60.3% | 55.3% |
+| jump > hop | 465 | 83.9% / 68.4% | 79.1% / 64.7% | 13.5% |
+| jump > jump | 311 | 76.8% / 65.3% | 70.7% / 60.8% | 58.5% |
+| fall > jump | 203 | 78.3% / 66.0% | 62.1% / 53.2% | 40.9% |
+| fall > hop | 200 | 73.0% / 61.0% | 65.0% / 54.0% | 12.5% |
+| fall > fall | 309 | 70.2% / 69.6% | 63.1% / 62.8% | 12.6% |
+| hop > fall | 213 | 66.2% / 64.8% | 59.2% / 58.2% | 21.1% |
+| hop > arrow / dot, jump > arrow | 696 | 6.6-12.6% / 6.6-12.6% | | |
+
+**0 answers rejected** by the independent replay; 441 legs solved only with the variants, **0 only without**; the 3,001
+both solved the same T in every one (the second pass). The time a leg (box 3 under the other lanes' load): median 6.5 ms
+vs 3.6 ms, p90 348 ms vs 280 ms (a failing leg also spends the variants' pool). Left (the on arm's failures: no plain
+candidate 1,423, the node budget 247, not plain 58): the field crossings (> arrow, > dot: the field / coupled tiers'),
+3+ input changes (K = 2), a second landing and act, walls.
+
 ## 5 Admissible leg bounds: the event graph
 
 (build / bounds.) Code: `src/math/lb.js` (the bound), `src/math/legsolve.js` (the free-air leg solver of its proofs),
