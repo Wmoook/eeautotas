@@ -163,6 +163,81 @@ function units() {
 		const p = pl.plan({}, { k: 2 })[0];
 		check('P-UNIT keySwitch: key -> past its door -> switch -> trophy', p && kindsOf(m, p).join(',') === 'key,region,psw,trophy', p && planStr(m, p));
 	}
+	// ---- THE PHYSICS PRICE (planner.js PHYS_PRICE, EEAT_PHYS_PRICE=1): the trophy on a shelf whose 1-tile hole the
+	// gravity-blind est walk climbs straight up (11 steps); the physics (RCH3) goes round by the stairs (96 tiles)
+	{
+		const Wd = 56, Hd = 14, g = [];
+		for (let y = 0; y < Hd; y++) g.push(Array(Wd).fill('.'));
+		for (let x = 0; x < Wd; x++) { g[0][x] = '#'; g[Hd - 1][x] = '#'; }
+		for (let y = 0; y < Hd; y++) { g[y][0] = '#'; g[y][Wd - 1] = '#'; }
+		for (let x = 1; x <= 40; x++) if (x !== 4) g[3][x] = '#';
+		for (let i = 0; i < 9; i++) for (let y = 11 - i; y <= 12; y++) g[y][44 + i] = '#';
+		g[2][2] = 'T'; g[12][2] = 'S';
+		const L = level(g.map((r) => r.join('')), {}), m = M.compileModel(L);
+		const off = P.createPlanner(m, F.createFacts(), { physPrice: false }), on = P.createPlanner(m, F.createFacts(), { physPrice: true });
+		const p0 = off.plan({}, { k: 1 })[0], p1 = on.plan({}, { k: 1 })[0];
+		const sim = new (require('../src/eesim.js').EESim)(L); sim.reset();
+		const rc = m.reachable(m.stateOf(sim), sim, m.trophyTiles).cost;
+		check('P-UNIT physics price: off = the walk\'s est (no RCH3 cost read)', !!p0 && p0.cost < 100 && !(off.stats().physPriced > 0), p0 && planStr(m, p0));
+		check('P-UNIT physics price: on = the RCH3 cost x the pace, the lb untouched', !!p1 && p1.cost >= rc * 4 && rc > 2 * 11 + 24 && p1.lb === p0.lb && on.stats().physPriced >= 1, p1 && `${planStr(m, p1)} (RCH3 ${rc} tiles)`);
+	}
+	// ---- THE STEPPING STONES (planner.js STONES, EEAT_PLAN_STONES=1): a 120-tile corridor, the trophy at its far end, 5
+	// irrelevant coins on the way (no coin gate) and one 6 rows off it: the plan goes through coins of the corridor in order (the weighted A* may skip some: the next plans from the stone's anchor split the rest), never the 6th
+	{
+		const Wd = 124, Hd = 12, g = [];
+		for (let y = 0; y < Hd; y++) g.push(Array(Wd).fill('.'));
+		for (let x = 0; x < Wd; x++) { g[0][x] = '#'; g[Hd - 1][x] = '#'; }
+		for (let y = 0; y < Hd; y++) { g[y][0] = '#'; g[y][Wd - 1] = '#'; }
+		g[10][2] = 'S'; g[10][120] = 'T';
+		for (const x of [22, 42, 62, 82, 102]) g[10][x] = 'c';
+		g[3][60] = 'c';
+		const L = level(g.map((r) => r.join('')), { c: [100] }), m = M.compileModel(L);
+		const coins = m.triggers.filter((X) => X.kind === 'coin');
+		const off = P.createPlanner(m, F.createFacts(), { stones: false }), on = P.createPlanner(m, F.createFacts(), { stones: true });
+		const p0 = off.plan({}, { k: 1 })[0], p1 = on.plan({}, { k: 1 })[0];
+		const xs = p1 ? p1.steps.filter((s) => s.waypoint.kind === 'trigger').map((s) => s.waypoint.tiles[0] % Wd) : [];
+		check('P-UNIT stepping stones: the coins irrelevant (no coin gate)', coins.length === 6 && coins.every((X) => !X.relevant), coins.map((X) => X.relevant).join(','));
+		check('P-UNIT stepping stones: off = the trophy alone', !!p0 && kindsOf(m, p0).join(',') === 'trophy', p0 && planStr(m, p0));
+		check('P-UNIT stepping stones: on = coins of the corridor in order, then the trophy, never the coin off the way',
+			!!p1 && kindsOf(m, p1).pop() === 'trophy' && xs.length >= 1 && xs.every((x, i) => i === 0 || x > xs[i - 1]) && !xs.includes(60) && p1.steps.every((s) => s.waypoint.kind !== 'trigger' || s.waypoint.expect === null), p1 && planStr(m, p1));
+		// (a failed stone cuts nothing and is blocked from its second rung on; the same failure of a relevant step cuts)
+		const s0 = p1 && p1.steps.find((s) => s.waypoint.kind === 'trigger');
+		if (s0) {
+			const fl = { ok: false, fail: { why: 'budget', closest: { tile: 10 * Wd + 12, dist: 5 } } };
+			const f1 = on.learn(Object.assign({}, s0, { rung: 0 }), fl, {}), f2 = on.learn(Object.assign({}, s0, { rung: 1 }), fl, {});
+			const all = f1.concat(f2);
+			check('P-UNIT stepping stones: a failed stone cuts nothing, blocked at its second rung', all.every((f) => !f.cut) && f2.some((f) => f.kind === 'block') && !f1.some((f) => f.kind === 'block'), JSON.stringify(all.map((f) => [f.kind, f.rung, !!f.cut])));
+		} else check('P-UNIT stepping stones: a failed stone cuts nothing', false, 'no stone step');
+		// (a stone the anchor took already is no step: held right until the coin at x 22 is taken, then plan)
+		{
+			const E2 = require('../src/eesim.js');
+			const sim = new E2.EESim(L); sim.reset(); const inp = new E2.EEInput();
+			let n = 0; for (; n < 400 && !sim.is_coin_collected(22, 10); n++) { E2.applyMask(inp, 4); sim.tick(inp); }
+			const an = anchorAfter(L, m, new Uint8Array(n).fill(4));
+			const pA = sim.is_coin_collected(22, 10) ? on.plan(an, { k: 1 })[0] : null;
+			const a2 = on._anchorOf(an);
+			const es2 = pA ? on._edgesOf(a2.S, a2.pos, a2.base, 'plan', true, a2.S.key + '|' + a2.cls) : [];
+			const xsA = es2.filter((e) => e.X && e.X.kind === 'coin').map((e) => e.X.tiles[0] % Wd);
+			check('P-UNIT stepping stones: a stone the anchor took already is no edge', !!pA && !xsA.includes(22) && xsA.includes(42) && kindsOf(m, pA).pop() === 'trophy', pA ? `${planStr(m, pA)}; stone edges at x ${xsA.join(',')}` : 'coin not taken');
+		}
+		// (THE WALLED PRICE, EEAT_WALL_PRICE=1: a 1-row tunnel to the trophy; a rung-1 failure's cut in it severs the est walk:
+		// off the trophy edge costs the 1e6 penalty, on WALL_F x the unwalled walk)
+		{
+			const tw = ['##############################################################', '#S...........................................................T#', '##############################################################'];
+			const L2 = level([tw[0], tw[1].slice(0, 62), tw[2]], {}), m2 = M.compileModel(L2);
+			const run = (wp) => {
+				const pl2 = P.createPlanner(m2, F.createFacts(), { wallPrice: wp });
+				const st = pl2.plan({}, { k: 1 })[0].steps[0];
+				const fl = { ok: false, fail: { why: 'budget', closest: { tile: 1 * 62 + 20, dist: 30 } } };
+				pl2.learn(Object.assign({}, st, { rung: 0 }), fl, {}); pl2.learn(Object.assign({}, st, { rung: 1 }), fl, {});
+				return pl2.plan({}, { k: 1 })[0];
+			};
+			const q0 = run(false), q1 = run(true);
+			check('P-UNIT walled price: off = the penalty past a severing cut, on = a finite 3x price', !!q0 && q0.cost >= 1e6 && !!q1 && q1.cost < 1e6 && q1.cost >= 3 * 50 && q1.lb === q0.lb, `${q0 && q0.cost} vs ${q1 && q1.cost}`);
+		}
+		const lbOff = off.lowerBound({}), lbOn = on.lowerBound({});
+		check('P-UNIT stepping stones: lowerBound unchanged (stones never in the lb)', lbOff.ticks === lbOn.ticks && lbOff.complete === lbOn.complete, `${lbOff.ticks} ${lbOn.ticks}`);
+	}
 }
 
 // ---------------------------------------------------------------- CEGAR

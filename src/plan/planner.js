@@ -471,6 +471,50 @@ function createPlanner(model, facts, o = {}) {
 	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
 	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
 	const rchBad = new Map();
+	// THE PHYSICS PRICE (n5 doctor 4): the est walk is 8-way and GRAVITY-BLIND, so it prices a climb the ball cannot make
+	// as a few steps straight up; verifyPath already builds the RCH3 field of every edge of a found plan (the physics:
+	// jumps, falls, fields; a sound relaxation) and kept only its -1 (a proof). Its COST is the physics' own walk: where it
+	// exceeds the est walk's steps by PHYS_R x + PHYS_ADD tiles, the edge's est is raised to that cost x the pace (a PRICE,
+	// never a drop, the lb untouched: ranking only; a learned ok leg keeps its ticks) and the plan search runs again (as
+	// for a new rchBad). Measured on the batch-4 levels (FINAL's failing ones): I Crew Persian Peril's first plan is the
+	// trophy at est 1,248 ticks (walk 312 steps from the spawn) while RCH3 reads 1,935 tiles there (every upper trigger
+	// 1,850-2,144: the walk climbs straight up, the physics goes round through the lower coins, RCH3 470-625 at walk
+	// 377-506); the compile spent 60 s on the trophy / coin (199,83) legs at closest 1,802-1,986 tiles. Where the walk and
+	// the physics agree (Octorage: RCH3 / walk 1.0-1.2 on all 18 legs of its known route) nothing changes.
+	// EEAT_PHYS_PRICE=1 (OPT-IN: o.physPrice overrides), EEAT_PHYS_R (2), EEAT_PHYS_ADD (24 tiles).
+	const PHYS_PRICE = o.physPrice !== undefined ? !!o.physPrice : process.env.EEAT_PHYS_PRICE === '1';
+	const PHYS_R = +process.env.EEAT_PHYS_R || 2, PHYS_ADD = process.env.EEAT_PHYS_ADD !== undefined ? +process.env.EEAT_PHYS_ADD : 24;
+	const rchPrice = new Map();   // (rchKey -> the RCH3 cost in tiles, where it prices the edge)
+	// THE STEPPING STONES (n5 doctor 4): a ONE-LEG level's plan is one leg of thousands of ticks (13_3 Stone Ruin
+	// Speedrun: the trophy from the spawn, 3,194 route ticks through arrows and dots; the compile spends its 60 s on it and
+	// the far checkpoint, closest 309-493 tiles, 0 triggers), while the finders find legs of <= 300 route ticks from the
+	// right state ~90% of the time and 1,000+ tick legs 4 / 28 (the known-route tests). The level's designer marks the way
+	// with coins: Stone Ruin's known route takes 10 of its 11 coins in order (legs of 14-629 ticks), every one of them 0-63
+	// walk steps off the est walk's way; with no coin gate they are irrelevant to the model, so no plan could use them. Here
+	// an irrelevant coin / blue coin is a STONE: a plan step of its own (a trigger waypoint on its tiles, no Expect, the
+	// state unchanged; the strategy keeps its arrival as an anchor of its own: ANCHOR_QUAL keys it by the edge), and every
+	// edge's est gets est^2 / STONE_LONG on top (plan ranking only: the finders' cost grows much faster than the ticks),
+	// so a long leg is split where stones lie on its way and nowhere else (a detour costs its ticks). The lb, costOf and
+	// lowerBound never see stones. EEAT_PLAN_STONES=1 (OPT-IN: o.stones overrides), EEAT_PLAN_STONE_LONG (1000 ticks),
+	// EEAT_PLAN_STONE_MAX (120: more irrelevant coins than this, no stones).
+	const STONES = o.stones !== undefined ? !!o.stones : process.env.EEAT_PLAN_STONES === '1';
+	const STONE_LONG = +process.env.EEAT_PLAN_STONE_LONG || 1000, STONE_MAX = +process.env.EEAT_PLAN_STONE_MAX || 120;
+	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
+	if (stones.length > STONE_MAX) stones = [];
+	const stoneIds = new Set(stones.map((X) => X.id));
+	let stoneLive = null;   // (per plan() call: stone id -> its tiles the anchor has not taken; null: every tile)
+	// THE WALLED PRICE (n5 doctor 4): the CEGAR walls (a failure's cut just past its closest tile and the 3 x 3 around
+	// the closest tile of every failure at rung >= 1) are never taken back, and in a corridor level they SEVER the est
+	// walk: then every edge past them is 'relaxation only' and costs the 1e6 PENALTY, and the plan ranking is gone (every
+	// plan ~1e6). Night 4's FINAL: 105 of the 206 failing compiles end on a plan of est >= 1e6 at 60 s, 126 at 180 s (16
+	// of batch 4's 21). Reproduced (src/out/n5/doctor/batch4.md): Stone Ruin's trophy / checkpoint (357,40) failures of
+	// the box-5 trace fed to learn(): after the checkpoint's rung-2 cut at (151,42) both far edges turn relaxOnly (est
+	// 1,004,932 / 1,005,448) though that is the corridor the known route takes. With the knob an edge the walled est walk
+	// misses but the UNWALLED est walk reaches costs WALL_F (3) x that walk instead of the penalty: a finite, ranked price
+	// (the walls still price their way 3x; a proof or an lb-only way keeps the penalty). EEAT_WALL_PRICE=1 (OPT-IN: o.wallPrice
+	// overrides), EEAT_WALL_F.
+	const WALL_PRICE = o.wallPrice !== undefined ? !!o.wallPrice : process.env.EEAT_WALL_PRICE === '1';
+	const WALL_F = +process.env.EEAT_WALL_F || 3;
 	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
 	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
 	// pocket), so it blocks the edge from that (state, position) only, not from every node of the state: the re-entry
@@ -493,6 +537,8 @@ function createPlanner(model, facts, o = {}) {
 		const wantEst = mode === 'plan';
 		const dE = wantEst ? model.dist(S, pos, 'est', base) : null, dvE = wantEst ? model.deathVia(S, pos, 'est', base) : null;
 		const cls = root ? rootCls : S.key + '|*';
+		let dNW = null;
+		const nwDist = () => dNW || (dNW = model.dist(S, pos, 'estNW', base));
 		const leg = (tiles) => {
 			let sL = INF, rL = INF, sE = INF, rE = INF;
 			const drL = dvL ? dvL.dr : null, drE = dvE ? dvE.dr : null;
@@ -511,15 +557,23 @@ function createPlanner(model, facts, o = {}) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
 				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + (dvE.dt || 0) + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
-					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
-					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
-					const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
-					est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+					// (the walled price: the est walk reaches it once the CEGAR walls are left out: WALL_F x that walk)
+					let sW = INF;
+					if (WALL_PRICE && ST.estWalls > 0) { const dw = nwDist(); for (const t of tiles) if (dw[t] < sW) sW = dw[t]; }
+					if (sW < INF) { est = sW * P * WALL_F + extra; steps = sW; ST.walledPriced = (ST.walledPriced || 0) + 1; }
+					else {
+						// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
+						// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
+						const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
+						est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+					}
 				}
 				est = Math.max(lb, est);
 				// (THE LONG LEG'S CONVEX PRICE, OPT-IN: a leg's est past LEG_T ticks costs LEG_K more a tick, so a chain of
 				// shorter legs through the triggers on the way (checkpoints, coins) beats one long leg of the same walk)
 				if (LEG_T > 0 && !relaxOnly && est > LEG_T) est += LEG_K * (est - LEG_T);
+				// (the stones' price of a long leg: the finders' cost grows much faster than its ticks)
+				if (STONES && stones.length && !relaxOnly && est > 0) est += est * est / STONE_LONG;
 			}
 			// (pen: which penalty priced the edge, a diagnostic for the plan's steps: 'relax' (only the relaxation reaches
 			// it), 'rch' (RCH3 -1 at rest / rising), 'floor' / 'zone' (a count floor not reached))
@@ -534,7 +588,8 @@ function createPlanner(model, facts, o = {}) {
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) { g.est = Math.max(g.lb, ok); g.pen = ''; }
-				}
+					else if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
+				} else if (PHYS_PRICE) { const pr = rchPrice.get(rchKey(S, pos, edge)); if (pr !== undefined) g.est = Math.max(g.est, pr * P + extra); }
 				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'floor'; break; } }
 				else if (floorNeeds.length && zoneNeed(S, tiles)) { g.est += PENALTY; g.pen = (g.pen ? g.pen + '+' : '') + 'zone'; }
 				const bad = rchBad.get(rchKey(S, pos, edge));
@@ -582,6 +637,19 @@ function createPlanner(model, facts, o = {}) {
 		}
 		if (only) return out;
 		finish(null, trophyTiles, 'trophy', null);
+		// (the stepping stones: an irrelevant coin / blue coin as a step of its own, the state unchanged; plan mode only)
+		if (wantEst && STONES && stones.length) {
+			for (const X of stones) {
+				if (pos.trig === X.id) continue;
+				// (a stone the anchor's own run took already is none: the model state does not track irrelevant coins)
+				const live = stoneLive ? stoneLive.get(X.id) : X.tiles;
+				if (!live || !live.length) continue;
+				let sE = INF;
+				if (dE) for (const t of live) if (dE[t] < sE) sE = dE[t];
+				if (sE >= INF) continue;
+				finish(X, live, 'trig:' + X.id, { S2: S, expect: null });
+			}
+		}
 		// DEATHS AS MOVES (lane 2's die edge, lane 5): where a death door (1011) or gate (1012) reads the death count, a death
 		// is an edge of its own (plan mode: the est walk to the nearest killer, the dead ticks, back at the respawn with one
 		// death more), so the door that needs N deaths opens in the plan: Tutorial 2's est walk passed its death door only in
@@ -665,6 +733,10 @@ function createPlanner(model, facts, o = {}) {
 			const bad = r.proof ? (isRoot && a.sim ? 'proof' : true) : false;
 			rchBad.set(k, bad);
 			if (bad) newBad++;
+			// (the physics price: RCH3's cost well above the est walk's steps of this edge)
+			else if (PHYS_PRICE && r.cost > 0 && Number.isFinite(e.steps) && e.steps < INF && !e.relaxOnly && r.cost > PHYS_R * e.steps + PHYS_ADD) {
+				rchPrice.set(k, r.cost); ST.physPriced = (ST.physPriced || 0) + 1; newBad++;
+			}
 		}
 		return newBad;
 	}
@@ -959,6 +1031,13 @@ function createPlanner(model, facts, o = {}) {
 		ST.plans++;
 		syncWalls();
 		const a = anchorOf(anchor);
+		// (the stones' untaken tiles in the anchor's own state: Treasure Trove Cove's box-5 compile with the stones went back to
+		// the blue coins its anchors held already, 6 of 30 stone steps)
+		stoneLive = null;
+		if (STONES && stones.length && a.sim && typeof a.sim.is_coin_collected === 'function') {
+			stoneLive = new Map();
+			for (const X of stones) stoneLive.set(X.id, X.tiles.filter((t) => !a.sim.is_coin_collected(t % W, (t / W) | 0)));
+		}
 		const k = po.k || 3;
 		const first = ST.plans === 1;
 		const so = { ms: po.ms || (first ? 2000 : 300), maxExpand: po.maxExpand || 200000, depth: po.depth || 0 };
@@ -967,8 +1046,10 @@ function createPlanner(model, facts, o = {}) {
 		const deadline = t0 + so.ms;
 		for (let r = 0; r < k; r++) {
 			let res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
-			for (let v = 0; v < 6 && res.found && Date.now() < deadline + so.ms / 2; v++) {
-				if (!verifyPath(a, res.found, deadline + so.ms / 2)) break;
+			// (with the physics price a PARTIAL plan's path is checked too: its first legs are what the executor runs next)
+			const vNode = (x) => x.found || (PHYS_PRICE && x.bestPartial && x.bestPartial.e ? x.bestPartial : null);
+			for (let v = 0; v < 6 && vNode(res) && Date.now() < deadline + so.ms / 2; v++) {
+				if (!verifyPath(a, vNode(res), deadline + so.ms / 2)) break;
 				res = search(a, Object.assign({}, so, { ms: Math.max(50, (deadline - Date.now()) / Math.max(1, k - r)) }), exclude);
 			}
 			if (rootEdges < 0) rootEdges = res.rootEdges;
@@ -1198,13 +1279,17 @@ function createPlanner(model, facts, o = {}) {
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
+		// (a STONE is optional: its failure is no counterexample to the corridor (a cut there walled the est walk's way to
+		// every later target: Machu Picchu's stones plan fell back to the penalised trophy leg after two stone failures);
+		// the stone is blocked from its second rung on instead. EEAT_PLAN_STONE_CUT=1: the cut as for any trigger)
+		const isStone = STONES && stones.length && step.waypoint && step.waypoint.trig !== undefined && stoneIds.has(step.waypoint.trig) && process.env.EEAT_PLAN_STONE_CUT !== '1';
 		let cut = null;
-		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		if (!isStone && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
 		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
-		if (rung + 1 >= facts.RUNG_MAX) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
+		if (rung + 1 >= facts.RUNG_MAX || (isStone && rung + 1 >= 2)) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
 	// ---------------------------------------------------------------- the truth checker's price of an order
