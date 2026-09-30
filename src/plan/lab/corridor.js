@@ -213,6 +213,8 @@ function createCorridor(L, opts = {}) {
 		let w = w1;
 		const BETA = o.beta === undefined ? 4 : o.beta, TMAX = o.Tmax || 6000;
 		const fanOn = o.fan !== false;
+		// the sub-legs: 'always' (every expansion), 'stuck' (only where the fans made no progress), 'never' (o.legs false)
+		const legMode = o.legs === false ? 'never' : o.legMode || 'always';
 		const RX = o.RX || 24, RU = o.RU || 5, RD = o.RD || 60, fanT = o.fanT || 120;
 		const snap0 = start instanceof E.EESim ? start.snapshot() : start;
 		const tgt = { tiles: Array.from(target.tiles), cls: target.cls || 'any' };
@@ -287,7 +289,7 @@ function createCorridor(L, opts = {}) {
 			for (let t = 0; t < ms.length; t++) { E.applyMask(inp, ms[t]); sim.tick(inp); if (sim.is_dead) return false; }
 			return true;
 		}
-		const legOpts = (Tmax, plainNode) => ({ Tmax, chain: false, fields: !plainNode, coupled: !plainNode, nodes: o.legNodes || 40000, itemNodes: o.itemNodes || 10000, plainMs: o.plainMs || 25, coupledTicks: o.coupledTicks || 20000, fieldMs: o.fieldMs || 40, alts, altSlack: 12, deadline });
+		const legOpts = (Tmax, plainNode) => ({ Tmax, chain: false, fields: !plainNode, coupled: !plainNode, nodes: o.legNodes || 40000, itemNodes: o.itemNodes || 10000, plainMs: o.plainMs || 25, coupledTicks: o.coupledTicks || 20000, fieldMs: o.fieldMs || 40, alts, altSlack: 12, deadline, prove: false });
 		/** a leg's arrivals (the answer, its hop, the alternatives) admitted from node n */
 		function takeLeg(n, r, tag) {
 			let k = 0;
@@ -340,72 +342,87 @@ function createCorridor(L, opts = {}) {
 			const inField = !plainNode && clsOf(sim) !== 'A' && clsOf(sim) !== 'G';
 			const cor = corridorOf(G, sim, n.c - delta, w, grounded ? M : Ma, RX, RU, RD, grounded ? Mu : 0, inField);
 			// THE SUB-LEGS: msolve.leg to each of the best corridor spans, then the nearest uphill / level spans (the repair)
-			let tp = Date.now(), got = 0;
-			if (!cor.spans.length) { out.repairs++; stats.repairs++; }
-			let nOk = 0;
-			for (const [list, tag] of [[cor.spans, 'sub'], [cor.repair, 'rep']]) for (const sp of list) {
-				if (Date.now() >= deadline || nOk >= subStop) break;
-				const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
-				if (lim <= 0) break;
-				// (the plain regime's admissible bound past the horizon: no leg, skipped)
-				if (plainNode && S.lowerBound(n.snap, { tiles: sp.tiles, cls: 'G' }) > lim) { out.lbSkips = (out.lbSkips || 0) + 1; continue; }
-				out.legs++; stats.legs++;
-				const r = S.leg(n.snap, { tiles: sp.tiles, cls: 'G' }, legOpts(lim, plainNode));
-				if (r.ok) nOk++;
-				if (r.ok) { got += takeLeg(n, r, tag); out.subOk++; stats.subOk++; }
-				if (trace) trace({ ev: tag, n: sp.tiles.length, c: sp.c, est: Math.round(sp.est), ok: r.ok, T: r.T, why: r.why, tool: r.tool });
-			}
-			prof.sub += Date.now() - tp;
-			// the field entries of the corridor (class any: the centre in a field tile; inside a field: its exits)
-			tp = Date.now();
-			if (cor.fld.length && (!got || !grounded) && Date.now() < deadline) {
-				out.legs++; stats.legs++;
-				const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
-				if (lim > 0) {
-					const r = S.leg(n.snap, { tiles: cor.fld, cls: 'any' }, Object.assign(legOpts(lim, plainNode), { fields: true }));
-					if (r.ok) { got += takeLeg(n, r, 'field'); out.subOk++; stats.subOk++; }
-					if (trace) trace({ ev: 'subField', n: cor.fld.length, ok: r.ok, T: r.T, why: r.why });
+			let got = 0, tp;
+			const doLegs = () => {
+				tp = Date.now();
+				if (!cor.spans.length) { out.repairs++; stats.repairs++; }
+				let nOk = 0;
+				for (const [list, tag] of [[cor.spans, 'sub'], [cor.repair, 'rep']]) for (const sp of list) {
+					if (Date.now() >= deadline || nOk >= subStop) break;
+					const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
+					if (lim <= 0) break;
+					// (the plain regime's admissible bound past the horizon: no leg, skipped)
+					if (plainNode && S.lowerBound(n.snap, { tiles: sp.tiles, cls: 'G' }) > lim) { out.lbSkips = (out.lbSkips || 0) + 1; continue; }
+					out.legs++; stats.legs++;
+					const r = S.leg(n.snap, { tiles: sp.tiles, cls: 'G' }, legOpts(lim, plainNode));
+					if (r.ok) nOk++;
+					if (r.ok) { got += takeLeg(n, r, tag); out.subOk++; stats.subOk++; }
+					if (trace) trace({ ev: tag, n: sp.tiles.length, c: sp.c, est: Math.round(sp.est), ok: r.ok, T: r.T, why: r.why, tool: r.tool });
 				}
-			}
-			prof.field += Date.now() - tp;
-			if (!fanOn || Date.now() >= deadline) continue;
+				prof.sub += Date.now() - tp;
+				// the field entries of the corridor (class any: the centre in a field tile; inside a field: its exits)
+				tp = Date.now();
+				if (cor.fld.length && (!got || !grounded) && Date.now() < deadline) {
+					out.legs++; stats.legs++;
+					const lim = best ? Math.min(legT, best.T - n.g - 1) : legT;
+					if (lim > 0) {
+						const r = S.leg(n.snap, { tiles: cor.fld, cls: 'any' }, Object.assign(legOpts(lim, plainNode), { fields: true }));
+						if (r.ok) { got += takeLeg(n, r, 'field'); out.subOk++; stats.subOk++; }
+						if (trace) trace({ ev: 'subField', n: cor.fld.length, ok: r.ok, T: r.T, why: r.why });
+					}
+				}
+				prof.field += Date.now() - tp;
+			};
 			// MSOLVE'S CHEAP FANS: the forward fan-out toward the corridor (one x change) and the event fan (every held mask to
-			// its first support event, with its timed stops inside a field: the ways the footholds do not see)
-			const kids = [];
-			tp = Date.now();
-			if (plainNode) {
-				const aim = cor.spans.length ? [].concat(...cor.spans.map((s) => s.tiles)) : tgt.tiles;
-				const lands = S.landings(n.snap, { Tmax: 60, K: 1, max: 12, toward: { tiles: aim }, nodes: 10000, deadline });
-				for (const e of lands) { kids.push(e.masks); if (e.hop) kids.push(e.hop); }
-			}
-			prof.land += Date.now() - tp;
-			tp = Date.now();
-			for (const p0 of [0, 1]) for (const m0 of MS.DIR9) {
-				sim.restore(n.snap);
-				const c00 = clsOf(sim);
-				let air = !sim.on_ground || sim.speed_y !== 0;
-				const ms = [];
-				for (let t = 0; t < fanT; t++) {
-					const px = sim.px, py = sim.py;
-					const mk = t === 0 ? (m0 | p0) : m0;
-					E.applyMask(inp, mk); sim.tick(inp); ms.push(mk);
-					if (sim.is_dead) break;
-					const c1 = clsOf(sim);
-					const tele = Math.abs(sim.px - px) > 20 || Math.abs(sim.py - py) > 20;
-					if (tele || (c1 !== c00 && c1 !== 'A') || (sim.on_ground && air && t > 0)) { kids.push(Uint8Array.from(ms)); break; }
-					if (!plainNode && (t + 1 === 8 || t + 1 === 20 || t + 1 === 40)) kids.push(Uint8Array.from(ms));
-					if (!sim.on_ground) air = true;
+			// its first support event, with its timed stops inside a field: the ways the footholds do not see); the least cost
+			// of the children it admitted (the progress test of legMode 'stuck')
+			const doFans = () => {
+				const kids = [];
+				tp = Date.now();
+				if (plainNode) {
+					const aim = cor.spans.length ? [].concat(...cor.spans.map((s) => s.tiles)) : tgt.tiles;
+					const lands = S.landings(n.snap, { Tmax: 60, K: 1, max: 12, toward: { tiles: aim }, nodes: 10000, deadline });
+					for (const e of lands) { kids.push(e.masks); if (e.hop) kids.push(e.hop); }
 				}
+				prof.land += Date.now() - tp;
+				tp = Date.now();
+				for (const p0 of [0, 1]) for (const m0 of MS.DIR9) {
+					sim.restore(n.snap);
+					const c00 = clsOf(sim);
+					let air = !sim.on_ground || sim.speed_y !== 0;
+					const ms = [];
+					for (let t = 0; t < fanT; t++) {
+						const px = sim.px, py = sim.py;
+						const mk = t === 0 ? (m0 | p0) : m0;
+						E.applyMask(inp, mk); sim.tick(inp); ms.push(mk);
+						if (sim.is_dead) break;
+						const c1 = clsOf(sim);
+						const tele = Math.abs(sim.px - px) > 20 || Math.abs(sim.py - py) > 20;
+						if (tele || (c1 !== c00 && c1 !== 'A') || (sim.on_ground && air && t > 0)) { kids.push(Uint8Array.from(ms)); break; }
+						if (!plainNode && (t + 1 === 8 || t + 1 === 20 || t + 1 === 40)) kids.push(Uint8Array.from(ms));
+						if (!sim.on_ground) air = true;
+					}
+				}
+				prof.fan += Date.now() - tp;
+				tp = Date.now();
+				let k = 0, cMin = Infinity;
+				for (const ms of kids) {
+					if (!play(n.snap, ms)) continue;
+					if (admit(cat(n.masks, ms), n.g + ms.length, 'fan')) { k++; const c = RF.costAt(G.f, sim); if (c >= 0 && c < cMin) cMin = c; }
+				}
+				prof.admit += Date.now() - tp;
+				if (trace) trace({ ev: 'kids', kids: kids.length, admitted: k, got });
+				return cMin;
+			};
+			if (legMode === 'stuck') {
+				// fans first; the legs only where the fans admitted no child below the node's cost - delta (the moves a held
+				// mask and one x change do not make: run-ups, mid-air turns, uphill ways)
+				const cMin = fanOn ? doFans() : Infinity;
+				if (!(cMin < n.c - delta) && Date.now() < deadline) { out.stuck = (out.stuck || 0) + 1; doLegs(); }
+			} else {
+				if (legMode !== 'never') doLegs();
+				if (fanOn && Date.now() < deadline) doFans();
 			}
-			prof.fan += Date.now() - tp;
-			tp = Date.now();
-			let k = 0;
-			for (const ms of kids) {
-				if (!play(n.snap, ms)) continue;
-				if (admit(cat(n.masks, ms), n.g + ms.length, 'fan')) k++;
-			}
-			prof.admit += Date.now() - tp;
-			if (trace) trace({ ev: 'kids', kids: kids.length, admitted: k, got });
 			if (o.probe) break;
 		}
 		out.prof = prof;
