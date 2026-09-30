@@ -3,32 +3,41 @@
 // createPlanner(model, facts, {bounds, seed}) -> {plan, learn, lowerBound, costOf, explain, stats}.
 //
 // The abstract graph: a node = (S, position): S the model's abstract state (the features some gate reads, the coin tiles
-// taken), the position the tiles of the last trigger touched (or the anchor's tile; after a death step the respawn
-// tiles). Edges: "touch trigger X next" for every relevant trigger whose touch changes S and that the walk relaxation
-// under S reaches from the position (the walk BFS with its portal hops and the death shortcut: INF there is a proof for
-// the relaxation, so no edge is dropped without one); the trophy edge; a death step where only a death reaches a target.
-//   - est: facts.okTicks when learned, else max(lb, walk steps x the pace (median of learned ticks / steps, 4 at first));
-//     the plans come from a weighted A* on est (k-best, diverse by their first step).
-//   - lb: ADMISSIBLE ticks (model.pairLb: ceil(16 (D - 1) / 16.25) of the walk steps D under the lb relaxation, keys
-//     sticky, coin gates shut only by the anchor's real counts, the death shortcut; o.bounds.pair where no death can
-//     shortcut, the larger of both). lowerBound(anchor): A* on lb with h = the same bound on the level with every gate open
-//     (admissible; nodes re-opened on a better g), the optimum when it completes, else the least f on the open list.
+// taken, the checkpoint where a death moves the ball), the position the tiles of the last trigger touched (or the
+// anchor's tile; the respawn after a death step). Edges: "touch trigger X next" for every relevant trigger whose touch
+// changes S and that the lb walk relaxation under S reaches from the position (the walk BFS: killers and one-ways
+// passable, keys sticky, portal hops, the death shortcut: its INF is a proof for the relaxation, so no edge is dropped
+// without one); the trophy edge; a death step where only a death reaches a target (est).
+//   - est (the plans' ranking): facts.okTicks when learned, else max(lb, est walk steps x the pace (the median of the
+//     learned ticks / steps, 4 at first)); the est walk walls killers unless protected and the CEGAR cuts; an edge only
+//     the relaxation reaches, or that RCH3 calls impossible from the position at rest or rising (verifyPath), a heavy
+//     penalty (never a drop; RCH3's -1 from the anchor's REAL state: a proof, dropped). The plans: weighted A* on est
+//     (k-best, diverse by the first step), greedy on the level's LANDMARKS in a puzzle (3+ left: LAMA's greedy best
+//     first), a one-step partial plan at least whatever the budget.
+//   - lb: ADMISSIBLE ticks (model.pairLb: ceil(16 (D - 1) / 16.25) of the lb walk steps D, a portal hop's entry step
+//     free, the death shortcut to the respawn the state holds; o.bounds.pair where no death can shortcut and no coin
+//     gate, the larger of both). A touch that shuts a gate the ball overlaps is DEFERRED by the engine: the next leg
+//     starts from its deferral region (posOf). lowerBound(anchor): A* on lb, h = the same bound on the level with every
+//     gate open (admissible; nodes re-opened on a better g), the optimum when it completes, else the least f on the open
+//     list; an anchor with a change still queued is bounded from the state it will be (model.pendingOf).
 //   - B&B: plan(anchor, {depth}) drops every node whose lb to the trophy puts it at depth or past.
 // Waypoints (types.js): a trigger -> {kind 'trigger', tiles (a coin trigger's untaken tiles), trig, expect, label}; the
 // trophy -> {kind 'trophy'}; a key followed by its door -> a region step past the door (beforeTickFrom 'prev+500', or
 // beforeTick when the key is the anchor's own); a death step -> {kind 'region', tiles: the respawn tiles, expect deaths +
 // 1, allowDeath}.
-// learn(step, result, anchor) -> Fact[] (>= 1, the version bumped, whenever !result.ok): fail -> the next rung; RUNG_MAX
-// -> block; why 'proof' -> proof (never from that S again); blockedBy -> needs (the gate's feature first); ok -> ok.
+// learn(step, result, anchor) -> Fact[] (>= 1, the version bumped, whenever !result.ok): fail -> the next rung; the
+// facts' rungs -> block; why 'proof' -> proof (never from that S again); blockedBy -> needs (the gate's feature first);
+// a failure at its second rung or exhausted with a closest approach -> a CUT of the est walk just past it (the next plans
+// go another way: Cold World's pool); ok -> ok (the edge's ticks, the pace).
 const E = require('../eesim.js');
 const T = require('./types.js');
 const { lbOfSteps, INF, DEAD_TICKS } = require('./model.js');
 
 const PACE0 = 4;              // est ticks per walk step before any learned leg
-const EST_W = 1.5;
-const PENALTY = 1e6;
+const EST_W = 1.5;            // the plan search's heuristic weight (est only; the lb search is plain A*)
+const PENALTY = 1e6;          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible
 const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
-const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible            // the plan search's heuristic weight (est only; the lb search is plain A*)
+const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
 
@@ -433,6 +442,15 @@ function createPlanner(model, facts, o = {}) {
 			const isRoot = n === root;
 			const es = edgesOf(n.S, n.pos, a.base, 'plan', isRoot, a.S.key + '|' + a.cls);
 			if (isRoot) rootEdges = es.length;
+			// (the landmarks this node reaches only through killers (the est walk walls them unprotected): protection on
+			// counts as one more landmark here, so the search takes it first; Bad EE Level 9's switch 7 past the spikes)
+			let protBoost = false;
+			if (model.featSet.has('prot') && n.S.feats.prot === 0) {
+				const h0 = hLM(n.S);
+				let est = false, relax = false;
+				for (const e of es) if (e.X && hLM(e.S2) < h0) { if (e.relaxOnly) relax = true; else est = true; }
+				protBoost = relax && !est;
+			}
 			for (const e of es) {
 				if (isRoot && exclude.has(e.edge)) continue;
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
@@ -447,7 +465,7 @@ function createPlanner(model, facts, o = {}) {
 				const had = best.get(k2);
 				if (had !== undefined && had <= g2) continue;
 				best.set(k2, g2);
-				const child = { S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false };
+				const child = { S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2) - (protBoost && e.X.kind === 'prot' && e.X.param === 1 ? LM_W : 0), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false };
 				open.push(child);
 				if (isRoot && (!bestRootChild || child.f < bestRootChild.f)) bestRootChild = child;
 			}

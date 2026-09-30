@@ -18,9 +18,14 @@
 //     piece of Chebyshev length <= 16 changes the 8-way tile distance by at most 1; a portal hop's entry step is free);
 //   pairLb(S, pos, tiles, mode) / pairSteps(...): the admissible ticks and the walk steps from a position to a tile set,
 //     with the death shortcut (a killer, 54 dead ticks, any respawn tile) where the level can kill.
-// modes: 'lb' (the lower bound's relaxation: coin gates shut only where the anchor's REAL count already shuts them, keys
-// sticky) and 'est' (the model's own counts). The bound is sound between two consecutive relevant events of any real
-// route: the relevant features do not change there, so every gate the model shuts is shut for the real ball.
+// modes: 'lb' (the lower bound's relaxation: killers passable, coin gates shut only where the anchor's REAL count already
+// shuts them, keys sticky), 'est' (the model's own counts, killers walls unless protected, the planner's CEGAR walls:
+// setEstWalls) and 'walk' (the contract's regions: the gates exact, killers passable). The bound is sound between two
+// consecutive relevant events of any real route: the relevant features do not change there, so every gate the model
+// shuts is shut for the real ball (a change the engine defers while the ball overlaps the gate it shuts: the planner's
+// deferral regions). Also: pendingOf(sim, S) (the state after the changes still in the engine's queues), respawnOf(S,
+// mode) (the checkpoint the state holds, else the spawns; lb without tracked checkpoints: every respawn tile), the
+// checkpoint in S wherever a death can move the ball (tracked, i.e. its touches are edges, up to 255 checkpoints).
 const E = require('../eesim.js');
 const RF = require('../reach.js');
 const ST = require('../steer.js');
