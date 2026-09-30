@@ -750,6 +750,33 @@ async function createExecutor(L, opts) {
 		const f = T.goalField(T.levelNow(L, vsim), goal.tiles, { deaths: !!allowDeath });
 		return { f, c: RF.costAt(f, vsim) };
 	}
+	/** the skeleton's closest in the WAYPOINT's unit (f0: its goal field at the step's starts, the unit of the direct
+	 *  leg's FailReport), the deepest level's arrivals as candidates too (the progress the skeleton made). A failed
+	 *  skeleton returns its last sub-leg's FailReport, whose closest read "0 tiles" on 84 of the 221 failing levels of the
+	 *  chief's full compile b1 (Tutorial 2's trophy leg from the spawn: 0; re-measured here: 347), the number the planner's
+	 *  walls / cuts and the strategy's relays take as the waypoint's. OPT-IN (EEAT_SKEL_CLOSEST=1): on 95 levels (gate20 +
+	 *  the closest-0 levels, 60 s, par 36) it compiled 5 vs 4 (Tutorial 1) and raised Animaly 1 -> 4, Trail Blazer 3 -> 5,
+	 *  Summer Bee / Starlight 0 -> 2, but I Wanna be the Guy 15 -> 1 and The Glitch 5 -> 0: the false 0 was an accidental
+	 *  DIVERSIFIER (lane 2's finding for the start-closest): a far leg "reached" makes the planner move on to other
+	 *  triggers; with the true number it insists on the far leg. Default on only with an explicit diversification rule. */
+	function skelClosest(fc, deep, f0) {
+		if (process.env.EEAT_SKEL_CLOSEST !== '1' || !f0) return fc;
+		const cands = [];
+		if (fc && fc.masks) cands.push(typeof fc.masks === 'string' ? fc.masks : T.strOf(fc.masks));
+		for (const s of deep) cands.push(String(s));
+		let best = null;
+		for (const str of cands) {
+			let e;
+			try { e = core.startOf(str); } catch (x) { continue; }
+			if (e.dead) continue;
+			vsim.restore(e.snap);
+			const c = RF.costAt(f0, vsim);
+			if (!(c >= 0) || (best && c >= best.dist)) continue;
+			best = { masks: e.masks, tile: T.tileOf(vsim, L.width, L.height), dist: c, vx: vsim.speed_x, vy: vsim.speed_y, px: vsim.px, py: vsim.py, dead: false };
+		}
+		if (process.env.EEAT_SKEL_DBG === '1') console.error(`skel closest: sub-leg ${fc ? fc.dist : 'none'} -> waypoint ${best ? best.dist : 'none'} (${cands.length} cands)`);
+		return best || fc;
+	}
 	async function reach(starts, wp, budget) {
 		budget = budget || {};
 		if (!SKEL_ON || wp.beforeTick >= 0 || wp.beforeRel !== undefined || !starts.length) return reachLeg(starts, wp, budget);
@@ -817,7 +844,8 @@ async function createExecutor(L, opts) {
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels });
 		if (Date.now() >= deadline - 100 || (stuck && cur !== startStrs)) {
 			const fail = (lastFail && lastFail.fail) || { why: 'budget', closest: null, touched: [], blockedBy: [], level: budget.level | 0, note: 'skeleton: out of time' };
-			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget' }) };
+			const cl = skelClosest(fail.closest, cur !== startStrs ? cur : [], f0);
+			return { ok: false, arrivals: [], tool: null, ms: Date.now() - tIn, sims, legs: [], lb: 0, fail: Object.assign({}, fail, { why: 'budget', closest: cl }) };
 		}
 		// (the last leg to the waypoint itself, from the deepest arrivals reached)
 		const r = await reachLeg(cur, wp, { ms: deadline - Date.now(), level: budget.level | 0, k: budget.k, deadline, stop: budget.stop });
