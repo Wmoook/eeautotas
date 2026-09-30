@@ -60,6 +60,9 @@ const VRUN = 6.776552880470027;
 const KEEP = 4;                             // resumed searches kept (the newest)
 const BFS_MASKS = [];                         // (o.bfs: the 18 masks a tick)
 for (const p0 of [0, 1]) for (const m of MS.DIR9) BFS_MASKS.push(m | p0);
+// the fields pass (n5-s99-fields): the knobs EEAT_CORR_FIELDS=1 turns on (docs: CLAUDE.md section 11)
+const FIELDS_PASS = { goalFan: true, directShare: 0.15, restKey: true, refine: true, more: 1 };
+const FIELDS_ENV = () => process.env.EEAT_CORR_FIELDS === '1';
 const REFINE = [{ fieldKey: 'sub', fieldPx: 8, fieldV: 2 }, { fieldKey: 'sub', fieldPx: 4, fieldV: 1 }];   // (o.refine's ladder)
 
 function createCorridor(L, opts = {}) {
@@ -206,6 +209,9 @@ function createCorridor(L, opts = {}) {
 	}
 
 	function solve(start, target, o = {}) {
+		// (EEAT_CORR_FIELDS=1: the fields pass as the defaults of every caller, the executor's tier, the portfolio's arm, the
+		// judge's; an option the caller sets wins; unset = the options as given)
+		if (FIELDS_ENV()) o = Object.assign({}, FIELDS_PASS, o);
 		const t0 = Date.now();
 		stats.solves++;
 		const budgetMs = o.ms || 3000;
@@ -651,4 +657,4 @@ function createCorridor(L, opts = {}) {
 	return { solve, geometry, corridorOfForTest: corridorOf, stats: () => Object.assign({}, stats), solver: S };
 }
 
-module.exports = { createCorridor, KAPPA };
+module.exports = { createCorridor, KAPPA, FIELDS_PASS };
