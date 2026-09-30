@@ -543,9 +543,17 @@ ways in.
   and 23 vs 23, pooled 43 vs 45 of 96; The Blank Page (2,942 / 2,024) and INVASION (4,093; the child's whole-level route at
   ~40 s) 2 of 2 vs 0 of 2; lost once each Tutorial 3, INFINITE, Crypts Of Anubis, Presto Penguins (the base 1 of 2 on each:
   the moves' spread); the executor's own work the same with the child (the levels failing in both arms: 1,460 / 1,465 steps
-  vs 1,451 / 1,472, simulated ticks -3% / +4%). Per stretch (the lab's krt data, box 5): from the known route's previous
-  trigger the executor's rungs 1-2 (5 + 15-s windows) 30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49;
-  every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
+  vs 1,451 / 1,472, simulated ticks -3% / +4%). 300 s, two A/Bs (box 6 6f04001; box 5 767e305 = + the stale kill): 38 vs
+  39 and 31 vs 33 (the loaded box 5), pooled 69 vs 72 of 96; Stone Ruin Speedrun (3,707) and Gravity's Rainbow (2,022, under
+  the best known 2,197) 2 of 2 vs 0 of 2 (the child's whole-level routes); lost Tutorial 3, Buuwuu, Christmas Town, Late
+  christmas once each (the base 2 / 2 / 2 / 1 of 2); both compiled run ticks geo-mean 0.979 / 0.960. ALL FOUR POOLED: 112 vs
+  117 of 192 level runs; every run with it and none without: Stone Ruin, Gravity's Rainbow, INVASION, (The Blank Page 4 / 4 vs
+  1 / 4); none the other way round. The 41 ONE-LEG levels n5-plan 3d52987's 300-s full compile (44 / 230) failed, the solver
+  on (box 6, 300 s): the child's own routes Just One More Time 2,899, Stone Ruin 3,707, Gravity's Rainbow 2,022. Per
+  stretch (the lab's krt data, box 5): from the known route's previous trigger the executor's rungs 1-2 (5 + 15-s windows)
+  30 / 49, one continuous 30-s backward clock 34 / 49, either 36 / 49; every start kind 89 / 129 -> 105 / 129 (69% -> 81%).
+  The child runs at nice +10 over the compile (`EEAT_ST_NICE`; 0: the same priority); `EEAT_ST_GENERAL=0`: the short plan's
+  request alone. OPT-IN (it has lost single runs; its gains are the one-leg levels' whole-level routes).
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
