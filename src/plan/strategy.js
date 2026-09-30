@@ -174,6 +174,9 @@ const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 // stage; OPT-IN EEAT_BW_LEVEL=1, off = the compile byte for byte): the level's start -> the trophy in one solve, at most
 // BW_LEVEL_F of the budget and BW_LEVEL_MAX_S; its route is a route like the moves' (routeOf), the moves go on
 const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// (THE WHOLE LEVEL AS LEGS, with BW_LEVEL: a trophy behind a gate gets the first plan's waypoints; each leg's new model state
+// comes back as an imported anchor; EEAT_BW_LEGS=0: the trophy alone, as before)
+const BW_LEGS = process.env.EEAT_BW_LEGS !== '0';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -631,10 +634,34 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const secs = Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
 		if (!(secs >= 5)) return;
 		const cp = require('child_process'), t1 = Date.now();
-		say({ ev: 'bwlevel', seconds: secs });
+		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated)
+		let wpFile = null, nWp = 0;
+		if (BW_LEGS) {
+			try {
+				const A = anchors.get(String(S0.key));
+				const p = A ? planOfAnchor(A) : null;
+				const pl = p && p.plans[0];
+				const wps = [];
+				if (pl) for (const st of pl.steps) {
+					if (st.synthetic) break;
+					const wp = waypointOf(st, A);
+					if (!wp || wp.allowDeath || wp.dieField) break;
+					if (wp.kind === 'trophy') { wps.push({ kind: 'trophy', label: 'trophy' }); break; }
+					const tiles = wp.tiles ? Array.from(wp.tiles) : [];
+					if (!tiles.length) break;
+					wps.push({ kind: wp.kind, label: wp.label || wp.kind, tiles });
+				}
+				if (wps.some((w) => w.kind !== 'trophy')) {
+					wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
+					require('fs').writeFileSync(wpFile, JSON.stringify(wps));
+					nWp = wps.length;
+				}
+			} catch (e) { wpFile = null; say({ ev: 'warning', text: `bwlevel legs: ${e.message}` }); }
+		}
+		say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -653,11 +680,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 						found = ev.inputs;
 						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward)', null);
 						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
-					} else if (ev.ev === 'done') done = ev.end;
+					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best) {
+						// (a leg of the whole level: its new model state an anchor, as an imported state: replayed, addArrival)
+						say({ ev: 'bwlevel', leg: ev.label || '', ticks: ev.ticks, ms: Date.now() - t1 });
+						onLine(`import ${ev.inputs.replace(/[^0-O]/g, '')}`);
+					} else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
+					else if (ev.ev === 'done') done = ev.end;
 				}
 			});
 			let finished = false;
-			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
+			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (wpFile) { try { require('fs').unlinkSync(wpFile); } catch (e) { /* gone */ } } if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
 			ch.on('error', fin);
 			ch.on('close', fin);
 		});
