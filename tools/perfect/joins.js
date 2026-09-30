@@ -70,8 +70,8 @@ function batch() {
 				replayed = ev ? ev.runTicks : -1;
 			}
 			row = Object.assign({}, e, { before: r.before, after: r.runTicks, saved: r.saved, accepted: r.accepted, replayed, waypoints: r.waypoints, legs: r.legs.length,
-				proven: r.proven, provenTicks: r.provenTicks, proveAsked: r.proveAsked, lbSum: r.lbSum, chainTicks: r.chainTicks, stats: r.stats, timeUp: r.timeUp, ms: r.ms,
-				legTools: r.legs.reduce((a, g) => { const k = g.how.startsWith('leg') ? (g.how === 'leg' ? 'leg' : 'skip') : g.how; a[k] = (a[k] || 0) + 1; return a; }, {}) });
+				proven: r.proven, provenTicks: r.provenTicks, proveAsked: r.proveAsked, lbSum: r.lbSum, fasterLegs: r.fasterLegs, passes: r.passes, stats: r.stats, ms: r.ms,
+				legSum: r.legs.reduce((a, g) => a + g.ticks, 0), provenBy: r.legs.reduce((a, g) => { if (g.proven) a[g.provenBy] = (a[g.provenBy] || 0) + 1; return a; }, {}) });
 		} catch (err) { row = Object.assign({}, e, { error: String(err && err.stack || err) }); }
 		row.wall = Date.now() - t;
 		fs.appendFileSync(outF, JSON.stringify(row) + '\n');
@@ -84,14 +84,13 @@ function agg() {
 	for (const f of fs.readdirSync(argv.agg).filter((f) => /^joins_\d+\.jsonl$/.test(f))) for (const l of fs.readFileSync(path.join(argv.agg, f), 'utf8').split('\n')) if (l.trim()) rows.push(JSON.parse(l));
 	rows.sort((a, b) => a.rel.localeCompare(b.rel));
 	const r2 = (x) => (Number.isFinite(x) ? (Math.round(x * 100) / 100).toFixed(2) : '-');
-	console.log('| level | pass | before | after | saved | best known | before / best | after / best | route lb | after / lb | legs (proven) | proven ticks | skips / legs | wall s |');
+	console.log('| level | pass | before | after | saved | best known | before / best | after / best | route lb | after / lb | legs (proven) | proven ticks | passes | wall s |');
 	console.log('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---:|');
 	let sb = 0, sa = 0, pr = 0, lg = 0;
 	for (const r of rows) {
 		if (r.error) { console.log(`| ${r.rel} | ${r.pass} | ERROR ${r.error.split('\n')[0]} |`); continue; }
 		sb += r.before; sa += r.after; pr += r.proven; lg += r.legs;
-		const t = r.legTools || {};
-		console.log(`| ${r.rel} | ${r.pass} | ${r.before} | **${r.after}** | ${r.saved} | ${r.best || '-'} | ${r2(r.best ? r.before / r.best : NaN)} | ${r2(r.best ? r.after / r.best : NaN)} | ${r.lb || '-'} | ${r2(r.lb ? r.after / r.lb : NaN)} | ${r.legs} (${r.proven}) | ${r.provenTicks} | ${(t.skip || 0)} / ${(t.leg || 0) + (t.skip || 0)} | ${Math.round(r.wall / 100) / 10} |`);
+		console.log(`| ${r.rel} | ${r.pass} | ${r.before} | **${r.after}** | ${r.saved} | ${r.best || '-'} | ${r2(r.best ? r.before / r.best : NaN)} | ${r2(r.best ? r.after / r.best : NaN)} | ${r.lb || '-'} | ${r2(r.lb ? r.after / r.lb : NaN)} | ${r.legs} (${r.proven}) | ${r.provenTicks} | ${(r.passes || []).map((p) => p.to).join(' > ')} | ${Math.round(r.wall / 100) / 10} |`);
 	}
 	console.log(`\nall: ${rows.length} levels, before ${sb}, after ${sa} (saved ${sb - sa}), legs ${lg}, proven ${pr}`);
 }
@@ -101,5 +100,5 @@ else if (argv.final) batch();
 else {
 	const r = one(pos[0], pos[1]);
 	if (argv.json) console.log(JSON.stringify(r));
-	else console.log(`${r.before} -> ${r.runTicks} (saved ${r.saved}, accepted ${r.accepted}), ${r.waypoints} waypoints, legs ${r.legs.length}, proven ${r.proven} (${r.provenTicks} ticks), ${r.ms} ms; stats ${JSON.stringify(r.stats)}${r.replayed !== null ? `; replayed ${r.replayed}` : ''}`);
+	else console.log(`${r.before} -> ${r.runTicks} (saved ${r.saved}, accepted ${r.accepted}), ${r.waypoints} waypoints, legs ${r.legs.length}, proven ${r.proven} (${r.provenTicks} ticks), msolve faster on ${r.fasterLegs}, ${r.ms} ms; passes ${JSON.stringify(r.passes.map((p) => [p.gap, p.from, p.to, p.waypoints, p.skips, p.legsUsed, p.ms]))}; stats ${JSON.stringify(r.stats)}${r.replayed !== null ? `; replayed ${r.replayed}` : ''}`);
 }

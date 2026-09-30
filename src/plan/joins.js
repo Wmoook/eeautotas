@@ -68,7 +68,7 @@ function tileOfSim(sim, W, H) {
  * boundary itself; the last one the finish (the first tick with the silver crown). fixed: a death or a respawn (FOLLOW
  * edges only, no leg across it)
  */
-function waypointsOf(L, masks) {
+function waypointsOf(L, masks, o) {
 	const W = L.width, H = L.height, flags = L.flags;
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
@@ -92,14 +92,32 @@ function waypointsOf(L, masks) {
 	const wps = [{ t: 0, tile: tile[0], cls: cls[0], tele: false, fixed: false, prog: prog[0] }];
 	const clsT = (c) => (c === 'A' ? 'any' : c);
 	const match = (u, b) => tile[u] === tile[b] && prog[u] === prog[b] && (clsT(cls[b]) === 'any' || cls[u] === cls[b]) && (!tp[b] || tp[u] === 1) && (cls[b] === 'D' || cls[u] !== 'D');
+	// (a long stretch with no support (a flight through fields, a long fall) gets TILE-ENTRY waypoints every `gap` ticks:
+	// the first tick the route's centre enters the tile it is in then (class any), so the speed is carried there too)
+	const gap = o && o.gap > 0 ? o.gap : 0;
+	const fill = (a, b) => {
+		if (!gap || cls[a] === 'D') return;
+		let cur = a;
+		for (let u = a + gap; u < b - 4; u += 4) {
+			if (u - cur < gap) continue;
+			if (cls[u] === 'D' || tp[u]) continue;
+			let v = u;
+			for (let q = cur + 1; q <= u; q++) if (tile[q] === tile[u] && prog[q] === prog[u] && cls[q] !== 'D') { v = q; break; }
+			if (v - cur < 4 || b - v < 4) continue;
+			wps.push({ t: v, tile: tile[v], cls: 'any', tele: false, fixed: false, prog: prog[v], entry: true });
+			cur = v;
+		}
+	};
 	for (const b of bnd) {
 		const a = wps[wps.length - 1].t;
 		let first = true;
 		for (let u = a + 1; u < b; u++) if (match(u, b)) { first = false; break; }
 		if (!first) continue;
+		fill(a, b);
 		const fixed = cls[b] === 'D' || cls[b - 1] === 'D';
 		wps.push({ t: b, tile: tile[b], cls: clsT(cls[b]), tele: !!tp[b], fixed, prog: prog[b] });
 	}
+	fill(wps[wps.length - 1].t, finish);
 	wps.push({ t: finish, tile: tile[finish], cls: 'any', tele: false, fixed: false, prog: -1, finish: true });
 	return { wps, finish, n, cls, tile, tp, prog };
 }
@@ -109,22 +127,18 @@ function classKey(s) {
 	return `${Math.round(s.speed_x * 2)},${Math.round(s.speed_y * 2)},${s.on_ground ? 1 : 0},${s.jump_count},${Math.floor(s.px / 4)},${Math.floor(s.py / 4)}`;
 }
 
-function joinRoute(L, masks0, o) {
-	o = o || {};
+/** one DP pass over the route's waypoints (the chain re-derived with the speed carried), until `deadline` */
+function joinOnce(L, ev0, o, deadline, S) {
 	const t0 = Date.now();
-	const ms = o.ms > 0 ? o.ms : 60000, deadline = t0 + ms;
 	const F = o.F > 0 ? o.F : 6, M = o.M > 0 ? o.M : 4, A = o.A >= 0 ? o.A : 3, SPAN = o.span > 0 ? o.span : 120;
 	const LEG_MS = o.legMs > 0 ? o.legMs : 60, DIV = o.div >= 0 ? o.div : 6;
 	const stop = typeof o.stop === 'function' ? o.stop : null;
 	const log = typeof o.log === 'function' ? o.log : null;
 	const W = L.width, H = L.height;
-	const ev0 = C.evaluate(L, masks0, true);
-	if (!ev0) return { masks: masks0, runTicks: -1, before: -1, saved: 0, why: 'the route does not finish' };
 	const masks = ev0.ms;
-	const WP = waypointsOf(L, masks);
-	if (!WP) return { masks, runTicks: ev0.runTicks, before: ev0.runTicks, saved: 0, why: 'no finish in the trace' };
+	const WP = waypointsOf(L, masks, o);
+	if (!WP) return { masks, ev: ev0, accepted: false, why: 'no finish in the trace' };
 	const wps = WP.wps, m = wps.length - 1;
-	const S = MS.createSolver(L, {});
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	// the route's states at the waypoints (snapshots, hashes)
 	const rSnap = new Array(m + 1), rHash = new Float64Array(m + 1);
@@ -270,64 +284,106 @@ function joinRoute(L, masks0, o) {
 	for (const x of chain) total += x.ms.length;
 	const out = new Uint8Array(total);
 	{ let at = 0; for (const x of chain) { out.set(x.ms, at); at += x.ms.length; } }
-	const ev = C.evaluate(L, out, true);
-	let result = ev0, accepted = false;
+	const ev = fin ? C.evaluate(L, out, true) : null;
+	let accepted = false;
 	if (ev) {
 		const v = C.judge(ev, ev0, o.maxDeaths === undefined ? Infinity : o.maxDeaths);
-		if (v.accept && ev.runTicks < ev0.runTicks) { result = ev; accepted = true; }
+		if (v.accept && ev.runTicks < ev0.runTicks) accepted = true;
 	}
-	// the legs of the result (its chain when accepted, else the route's own chain)
-	let legs = [];
-	const legChain = accepted ? chain : (() => {
-		const c = [];
-		let prev = root;
-		for (let j = 1; j <= m; j++) { const x = { par: prev, ms: masks.subarray(wps[j - 1].t, wps[j].t), how: 'follow', tool: 'route', k: j, g: wps[j].t }; c.push(x); prev = x; }
-		return c;
-	})();
-	{
-		let g = 0;
-		for (const x of legChain) { legs.push({ from: g, to: g + x.ms.length, ticks: x.ms.length, wp: x.k, how: x.how, tool: x.tool, lb: null, proven: false, provenBy: null }); g += x.ms.length; }
-	}
-	// PROOFS: each leg from its exact start state (the result's own replay) against the certified bounds
-	let proven = 0, provenTicks = 0, lbSum = 0, asked = 0;
-	if (o.prove !== false) {
-		const MLB = require('../math/lb.js').createMathLB(L);
-		const res = accepted ? result.ms : masks;
-		sim.reset();
-		let t = 0;
-		const pEnd = Date.now() + (o.proveBudget > 0 ? o.proveBudget : Math.max(2000, Math.min(20000, ms / 4)));
-		for (const lg of legs) {
-			while (t < lg.from) { E.applyMask(inp, res[t]); sim.tick(inp); t++; }
-			if (Date.now() < pEnd && !sim.is_dead) {
-				const w = wps[lg.wp];
-				const snap = sim.snapshot();
-				let lb = null, how = null;
-				try {
-					// the plain certificate (msolve's bound, certified) and the event-graph bound
-					const tg = { tiles: [w.tile], cls: w.finish ? 'any' : w.cls };
-					const b = S.lowerBound(snap, tg);
-					if (b > 0) { lb = b; how = 'plain?'; }
-					sim.restore(snap);
-					asked++;
-					const r = MLB.certify(sim, { tiles: [w.tile], mode: !w.finish && w.cls === 'G' ? 'land' : 'touch' }, lg.ticks, { cap: 4000, ms: o.proveMs > 0 ? o.proveMs : 40 });
-					if (r && r.lb !== null && r.lb !== undefined) {
-						if (lb === null || r.lb > lb) { lb = r.lb; how = 'events'; }
-						if (r.proven && r.lb === lg.ticks) { lg.proven = true; lg.provenBy = 'events'; }
-					}
-				} catch (e) { /* no bound */ }
-				sim.restore(snap);
-				lg.lb = lb;
-				if (!lg.proven && how === 'plain?') lg.lb = null;   // (the plain bound is claimed only through leg()'s certificate)
-				if (lg.proven) { proven++; provenTicks += lg.ticks; }
-				if (Number.isFinite(lg.lb)) lbSum += lg.lb;
+	const skips = accepted ? chain.filter((x) => String(x.how).startsWith('leg skip')).length : 0;
+	const legsUsed = accepted ? chain.filter((x) => String(x.how).startsWith('leg')).length : 0;
+	return { ev: accepted ? ev : ev0, accepted, chainTicks: fin ? fin.g : -1, routeFinish: WP.finish, waypoints: m, stats, skips, legsUsed, timeUp, ms: Date.now() - t0 };
+}
+
+/**
+ * PROOFS: the route cut at its own waypoints, each leg from its exact start state (the route's replay) against the
+ * event-graph bound (src/math/lb.js certify: lb = the leg's ticks = PROVEN OPTIMAL from that state to that support) and,
+ * where the start is plain, msolve's certified plain bound (THEOREM B + its certificate) through a solve of the leg (the
+ * solver's answer at the certified bound, T <= the route's ticks: the route's leg is optimal when T equals them).
+ * -> {legs [{from, to, ticks, lb, proven, provenBy, faster}], proven, provenTicks, asked, lbSum, faster (legs msolve does
+ * in fewer ticks from the same state: a join the chain could not use)}
+ */
+function proveRoute(L, masks, o) {
+	o = o || {};
+	const WP = waypointsOf(L, masks, { gap: 0 });
+	if (!WP) return null;
+	const wps = WP.wps, m = wps.length - 1;
+	const S = o.S || MS.createSolver(L, {});
+	const MLB = require('../math/lb.js').createMathLB(L);
+	const sim = new E.EESim(L), inp = new E.EEInput();
+	sim.reset();
+	const pEnd = Date.now() + (o.ms > 0 ? o.ms : 20000);
+	const legs = [];
+	let t = 0, proven = 0, provenTicks = 0, asked = 0, lbSum = 0, faster = 0;
+	for (let j = 1; j <= m; j++) {
+		const a = wps[j - 1].t, b = wps[j].t, w = wps[j];
+		while (t < a) { E.applyMask(inp, masks[t]); sim.tick(inp); t++; }
+		const lg = { from: a, to: b, ticks: b - a, lb: null, proven: false, provenBy: null, cls: w.cls, finish: !!w.finish };
+		legs.push(lg);
+		if (Date.now() > pEnd || sim.is_dead || w.cls === 'D' || w.tele || wps[j - 1].fixed) continue;
+		const snap = sim.snapshot();
+		const tiles = [w.tile];
+		asked++;
+		try {
+			const r = MLB.certify(sim, { tiles, mode: !w.finish && w.cls === 'G' ? 'land' : 'touch' }, lg.ticks, { cap: 4000, ms: o.proveMs > 0 ? o.proveMs : 40 });
+			if (r && r.lb !== null && r.lb !== undefined) {
+				lg.lb = r.lb;
+				if (r.proven && r.lb >= lg.ticks) { lg.proven = true; lg.provenBy = 'events'; }
 			}
+		} catch (e) { /* no bound */ }
+		sim.restore(snap);
+		if (!lg.proven && lg.ticks <= 120) {
+			// the plain certificate: msolve's leg at most the route's ticks, its certified bound
+			try {
+				const r = S.leg(snap, { tiles, cls: w.finish ? 'any' : w.cls }, { Tmax: lg.ticks, chain: false, prove: false, fieldMs: 20, coupledTicks: 50000, nodes: 60000, deadline: Math.min(pEnd, Date.now() + 60) });
+				if (r) {
+					if (r.cert && r.lb > 0 && (lg.lb === null || r.lb > lg.lb)) lg.lb = r.lb;
+					if (r.cert && r.lb >= lg.ticks) { lg.proven = true; lg.provenBy = 'plain'; }
+					if (r.ok && r.T < lg.ticks) { lg.faster = r.T; faster++; }
+				}
+			} catch (e) { /* none */ }
+			sim.restore(snap);
 		}
+		if (lg.proven) { proven++; provenTicks += lg.ticks; }
+		if (Number.isFinite(lg.lb)) lbSum += lg.lb;
 	}
+	return { legs, proven, provenTicks, asked, lbSum, faster, waypoints: m };
+}
+
+/**
+ * joinRoute(L, masks, o): passes of the DP (each on the route the last one made: new waypoints, new joins) while they gain
+ * and the clock lasts; the gap waypoints (o.gap, default 24) in every other pass; then the proofs of the result's legs.
+ */
+function joinRoute(L, masks0, o) {
+	o = o || {};
+	const t0 = Date.now();
+	const ms = o.ms > 0 ? o.ms : 60000, deadline = t0 + ms;
+	const ev0 = C.evaluate(L, masks0, true);
+	if (!ev0) return { masks: masks0, runTicks: -1, before: -1, saved: 0, why: 'the route does not finish' };
+	const S = MS.createSolver(L, {});
+	const proveShare = o.prove === false ? 0 : Math.min(20000, Math.max(1500, 0.15 * ms));
+	const dEnd = deadline - proveShare;
+	let cur = ev0;
+	const passes = [];
+	const stats = { legs: 0, legOk: 0, cands: 0, arrivals: 0, follow: 0, skips: 0, nodes: 0, pruned: 0, legMs: 0 };
+	let gainless = 0;
+	for (let p = 0; p < (o.passes > 0 ? o.passes : 8) && Date.now() < dEnd - 500; p++) {
+		const gap = o.gap === 0 ? 0 : (p % 2 === 0 ? (o.gap > 0 ? o.gap : 24) : 0);
+		const left = dEnd - Date.now();
+		// (a pass gets the rest of the clock, but the first pass at most 2/3 of it: a second pass on the new route)
+		const pEnd = Date.now() + (p === 0 ? Math.max(1000, left * 2 / 3) : left);
+		const r = joinOnce(L, cur, Object.assign({}, o, { gap }), pEnd, S);
+		for (const k of Object.keys(stats)) stats[k] += (r.stats && r.stats[k]) || 0;
+		passes.push({ pass: p, gap, from: cur.runTicks, to: r.ev.runTicks, accepted: r.accepted, waypoints: r.waypoints, chainTicks: r.chainTicks, skips: r.skips, legsUsed: r.legsUsed, timeUp: r.timeUp, ms: r.ms });
+		if (typeof o.log === 'function') o.log(`pass ${p} gap ${gap}: ${cur.runTicks} -> ${r.ev.runTicks} (${r.waypoints} waypoints, ${r.ms} ms${r.timeUp ? ', time up' : ''})`);
+		if (r.accepted) { cur = r.ev; gainless = 0; } else if (++gainless >= 2) break;
+	}
+	const pr = o.prove === false ? null : proveRoute(L, cur.ms, { S, ms: Math.max(1000, deadline - Date.now()), proveMs: o.proveMs });
 	return {
-		masks: result.ms, runTicks: result.runTicks, before: ev0.runTicks, saved: ev0.runTicks - result.runTicks, accepted,
-		chainTicks: fin ? fin.g : -1, routeFinish: WP.finish, waypoints: m, legs, proven, provenTicks, proveAsked: asked, lbSum,
-		provenRoute: false, stats, timeUp, ms: Date.now() - t0,
+		masks: cur.ms, runTicks: cur.runTicks, before: ev0.runTicks, saved: ev0.runTicks - cur.runTicks, accepted: cur !== ev0,
+		passes, stats, legs: pr ? pr.legs : [], proven: pr ? pr.proven : 0, provenTicks: pr ? pr.provenTicks : 0, proveAsked: pr ? pr.asked : 0,
+		lbSum: pr ? pr.lbSum : 0, fasterLegs: pr ? pr.faster : 0, waypoints: pr ? pr.waypoints : 0, provenRoute: false, ms: Date.now() - t0,
 	};
 }
 
-module.exports = { joinRoute, waypointsOf, progKey, classKey };
+module.exports = { joinRoute, joinOnce, proveRoute, waypointsOf, progKey, classKey };
