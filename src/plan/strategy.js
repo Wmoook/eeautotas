@@ -83,6 +83,8 @@ const STALL_S = 60, STALL_MIN_S = 5, STALL_F = 1 / 6;
 // the anchor pick: the most progress (model gain), then the plan's cost + the arrival tick + FAIL_TICKS x its failed
 // steps - UCB_C x sqrt(ln N / (1 + picks)) (a little fairness among equals)
 const FAIL_TICKS = 200, UCB_C = 100;
+// (THE TIMER's anchor pick: planner.js EEAT_PLAN_TIMER=1)
+const TIMER_PICK = process.env.EEAT_PLAN_TIMER === '1';
 const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 // the polish's share of the budget once a route is known: min(POLISH_MS, POLISH_F x the budget)
 const POLISH_MS = 15000, POLISH_F = 0.25;
@@ -174,6 +176,12 @@ const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 // stage; OPT-IN EEAT_BW_LEVEL=1, off = the compile byte for byte): the level's start -> the trophy in one solve, at most
 // BW_LEVEL_F of the budget and BW_LEVEL_MAX_S; its route is a route like the moves' (routeOf), the moves go on
 const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// (THE WHOLE LEVEL AS LEGS, with BW_LEVEL: a trophy behind a gate gets the first plan's waypoints; each leg's new model state
+// comes back as an imported anchor; EEAT_BW_LEGS=0: the trophy alone, as before)
+const BW_LEGS = process.env.EEAT_BW_LEGS !== '0';
+// (THE CUTS, with BW_LEVEL, OPT-IN EEAT_BW_CUTS=1: a trophy leg the first clock did not solve is cut at the start walk's
+// narrowest exact cuts, bwlevel_child.js cutChain)
+const BW_CUTS = process.env.EEAT_BW_CUTS === '1';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -625,16 +633,61 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
-	let bwlChild = null, bwlDone = null;
+	let bwlChild = null, bwlDone = null, bwlWpFile = null, bwlWpKey = '';
+	// (a plan's waypoints from the start anchor, in order, up to the trophy: the child's legs; null without a trigger step)
+	const bwlWpsOf = (pl, A) => {
+		const wps = [];
+		if (pl) for (const st of pl.steps) {
+			if (st.synthetic) break;
+			const wp = waypointOf(st, A);
+			if (!wp || wp.allowDeath || wp.dieField) break;
+			if (wp.kind === 'trophy') { wps.push({ kind: 'trophy', label: 'trophy' }); break; }
+			const tiles = wp.tiles ? Array.from(wp.tiles) : [];
+			if (!tiles.length) break;
+			wps.push({ kind: wp.kind, label: wp.label || wp.kind, tiles, expect: !!wp.expect });
+		}
+		return wps.some((w) => w.kind !== 'trophy') ? wps : null;
+	};
+	// (BW_LEGS: a later plan of the start anchor with a trigger step rewrites the file; the child reads it after its first
+	// clock: a ONE-LEG level's first plan is the trophy alone, and its later plans (the facts of the failed trophy legs)
+	// name the triggers)
+	const bwlPlan = (A) => {
+		if (!bwlWpFile || !bwlChild || best || !A || String(A.key) !== String(S0.key)) return;
+		try {
+			// (the anchor's best plan now (its memo's first), not the alternative a job runs)
+			const pl = A.plans && Array.isArray(A.plans.plans) ? A.plans.plans[0] : null;
+			const wps = bwlWpsOf(pl, A);
+			if (!wps) return;
+			const k = wps.map((w) => w.label).join('>');
+			if (k === bwlWpKey) return;
+			bwlWpKey = k;
+			require('fs').writeFileSync(bwlWpFile + '.tmp', JSON.stringify(wps));
+			require('fs').renameSync(bwlWpFile + '.tmp', bwlWpFile);
+			say({ ev: 'bwlevel', waypoints: wps.length, plan: k.slice(0, 200) });
+		} catch (e) { /* the file: next time */ }
+	};
 	const wholeLevel = () => {
 		if (!BW_LEVEL || !opts.file || bwlDone) return;
 		const secs = Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
 		if (!(secs >= 5)) return;
 		const cp = require('child_process'), t1 = Date.now();
-		say({ ev: 'bwlevel', seconds: secs });
+		// (BW_LEGS: the first plan's waypoints from the start, in order, for the child's legs when the trophy is gated)
+		let wpFile = null, nWp = 0;
+		if (BW_LEGS) {
+			try {
+				wpFile = path.join(require('os').tmpdir(), `eeat_bwl_${process.pid}_${Date.now()}.json`);
+				const A = anchors.get(String(S0.key));
+				const p = A ? planOfAnchor(A) : null;
+				const wps = bwlWpsOf(p && p.plans[0], A);
+				require('fs').writeFileSync(wpFile, JSON.stringify(wps || []));
+				if (wps) { nWp = wps.length; bwlWpKey = wps.map((w) => w.label).join('>'); }
+				bwlWpFile = wpFile;
+			} catch (e) { wpFile = null; say({ ev: 'warning', text: `bwlevel legs: ${e.message}` }); }
+		}
+		say({ ev: 'bwlevel', seconds: secs, waypoints: nWp });
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`, ...(wpFile ? [`--wps=${wpFile}`] : []), ...(BW_CUTS ? ['--cuts=1'] : [])], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -653,11 +706,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 						found = ev.inputs;
 						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward)', null);
 						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
-					} else if (ev.ev === 'done') done = ev.end;
+					} else if (ev.ev === 'arrival' && typeof ev.inputs === 'string' && !best) {
+						// (a leg of the whole level: its new model state an anchor, as an imported state: replayed, addArrival)
+						say({ ev: 'bwlevel', leg: ev.label || '', ticks: ev.ticks, ms: Date.now() - t1 });
+						onLine(`import ${ev.inputs.replace(/[^0-O]/g, '')}`);
+					} else if (ev.ev === 'leg') say({ ev: 'bwlevel', legTry: ev.n, of: ev.of, label: ev.label, ok: ev.ok, T: ev.T, why: ev.why, ms: Date.now() - t1 });
+					else if (ev.ev === 'done') done = ev.end;
 				}
 			});
 			let finished = false;
-			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
+			const fin = () => { if (finished) return; finished = true; clearTimeout(kill); clearInterval(poll); process.removeListener('exit', onExit); bwlChild = null; if (wpFile) { bwlWpFile = null; try { require('fs').unlinkSync(wpFile); } catch (e) { /* gone */ } } if (!found) say({ ev: 'bwlevel', end: done || 'ended', ms: Date.now() - t1 }); resolve(); };
 			ch.on('error', fin);
 			ch.on('close', fin);
 		});
@@ -789,8 +847,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// (an empty plan list cut by the planner's budget is no proof: the anchor stays open and replans with twice the budget)
 		const budgetCut = (A, why) => { if (why !== 'budget' || (A.budgetCuts || 0) >= 4) return false; A.budgetCuts = (A.budgetCuts || 0) + 1; A.planVer = -1; return true; };
 		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
-		// (the most progress first, then the lowest plan cost + the arrival tick)
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
+		// (the most progress first, then the lowest plan cost + the arrival tick; THE TIMER (planner.js, EEAT_PLAN_TIMER=1): an
+		// anchor with no plan in its timed killer's time and no remover in time (a LATE anchor) after the others, whatever its gain)
+		const lateOf = (A) => (TIMER_PICK && A.plans && A.plans.late ? 1 : 0);
+		const list = live.filter((A) => !A.exhausted).sort((a, b) => (lateOf(a) - lateOf(b)) || (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
@@ -1345,6 +1405,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const ek = edgeKey(job.step);
 				if (inflight.has(ek)) continue;
 				cur = { plan: job.plan, step: job.step, anchor: job.anchor.id, ok: null, depth: job.anchor.depth };
+				if (bwlWpFile) bwlPlan(job.anchor);
 				say({ ev: 'plan', anchor: job.anchor.id, steps: job.plan.steps.map(labelOf), cost: job.plan.cost, lb: job.plan.lb, partial: !!job.plan.partial, why: job.plan.why || '', rung: job.step.rung });
 				const f = { job, started: Date.now(), budgetMs: budgetOf(job.step.rung).ms };
 				f.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((r) => { inflight.delete(ek); return r; });
