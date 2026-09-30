@@ -6,8 +6,10 @@
 //       every tick (delete one or two ticks, replace an input by any other, delete one and replace the next), each
 //       followed by the route's own inputs until an exact rejoin with a LATER route state (a proven shortcut), a rejoin
 //       that is not later, 200 ticks or 96 px of drift; the shortcuts combined by DP (weighted interval scheduling), the
-//       combination judged (else the largest one alone): T-POLISH's 10 routes (8 s each) saved 176 ticks vs 3 without;
-//       a raw Find a route route (Are You A God's 7,290) 7,042 in 30 s vs 7,255 (o.noMutate: off; o.horizon, o.drift);
+//       combination judged (else the largest one alone); re-anchoring at landings and wall stops (mutate.js --anchor):
+//       T-POLISH's 10 routes (8 s each) saved 430 ticks (176 without the anchors, 3 without the pass);
+//       a raw Find a route route (Are You A God's 7,290) 6,918 in 30 s vs 7,255 (o.noMutate: off; o.horizon, o.drift,
+//       o.anchors);
 //   (b) per leg (the route's feature changes, or o.legs: tick marks), from the route's exact state at a window's start
 //       (windows of o.win ticks, from the end of the route backwards: an accepted change leaves every earlier window as it
 //       was), exact.js exactLeg toward the route's state region at the window's end: the centre in the same tile and the
@@ -59,9 +61,15 @@ function mutatePass(L, masks, o) {
 	// the route: per tick the state hash, the position, the latest tick of each hash
 	const sim = new E.EESim(L), inp = new E.EEInput(), ws = new E.EESim(L);
 	sim.reset();
-	const H = new Float64Array(n + 1), PX = new Float64Array(n + 1), PY = new Float64Array(n + 1);
+	const H = new Float64Array(n + 1), PX = new Float64Array(n + 1), PY = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1), G = new Int8Array(n + 1);
 	const last = new Map();
-	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; last.set(h, t); };
+	const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
+	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; G[t] = grav(sim); last.set(h, t); };
+	// (re-anchoring, src/mutate.js --anchor: at a landing or a wall / ceiling stop of >= 1 px/tick a path ALSO goes on (a
+	// branch) with the inputs of the route tick in [r - 8, r + AHEAD] of the same gravity whose state is nearest
+	// (|dx| + |dy| + 3 (|dvx| + |dvy|) < ATHR), at most ANCH times a path: a move that lands sooner plays the inputs timed
+	// for where it is)
+	const ANCH = o.anchors >= 0 ? o.anchors : 2, AHEAD = 150, ATHR = 6;
 	rec(0);
 	const snaps = [sim.snapshot()];
 	for (let t = 0; t < n; t++) { E.applyMask(inp, masks[t]); sim.tick(inp); rec(t + 1); if ((t + 1) % 64 === 0) snaps[(t + 1) / 64] = sim.snapshot(); }
@@ -70,9 +78,9 @@ function mutatePass(L, masks, o) {
 	const from = Math.max(0, o.from | 0);
 	// (o.ranges: [a, b) spans of start ticks to search, in order; else every tick from o.from)
 	const ranges = Array.isArray(o.ranges) && o.ranges.length ? o.ranges : [[from, n - 1]];
-	const seen = new Set();
+	const seen = new Set(), seenB = new Set();
+	const stack = [];
 	let t = from, timeUp = false;
-	const pre = new Uint8Array(2);
 	outer: for (const [ra0, rb0] of ranges) {
 	const ra = Math.max(0, ra0), rb = Math.min(rb0, n - 1);
 	if (ra >= rb) continue;
@@ -83,39 +91,67 @@ function mutatePass(L, masks, o) {
 		if (!sim.is_dead) {
 			const sT = sim.snapshot();
 			seen.clear();
-			// the moves: [prefix inputs, the route's input index after them]
+			// the moves [the first input played from S(t), the route's input index after it]: replace t by another input;
+			// delete t (masks[t + 1] first) or delete t and replace t + 1 (any input, then from t + 2); delete t and t + 1
 			const moves = [];
-			moves.push([0, -1, t + 1], [0, -1, t + 2]);
 			for (const a of OPTIONS) {
-				if (a !== masks[t]) moves.push([1, a, t + 1]);
-				if (t + 1 < n && a !== masks[t + 1]) moves.push([1, a, t + 2]);
+				if (a !== masks[t]) moves.push([a, t + 1]);
+				if (t + 2 <= n) moves.push([a, t + 2]);
 			}
-			for (const [np, a, r0] of moves) {
-				if (r0 > n) continue;
+			if (t + 3 <= n) moves.push([masks[t + 2], t + 3]);
+			seenB.clear();
+			for (const [a, r0] of moves) {
 				ws.restore(sT);
-				let q = 0;
-				if (np) { E.applyMask(inp, a); ws.tick(inp); ticks++; q = 1; pre[0] = a; }
-				let r = r0;
+				E.applyMask(inp, a); ws.tick(inp); ticks++;
 				// (the first state after the change: once per state and t)
-				let h = ws.stateHash();
-				if (seen.has(h)) continue;
-				seen.add(h);
-				for (;;) {
-					if (ws.is_dead) break;
-					const j = last.get(h);
-					if (j !== undefined) {
-						if (j > t + q) {
-							const ins = new Uint8Array(q);
-							if (np) ins[0] = a;
-							for (let k = np; k < q; k++) ins[k] = masks[r0 + k - np];
-							shortcuts.push({ t, j, ins, saved: j - (t + q) });
+				const h1 = ws.stateHash();
+				if (seen.has(h1)) continue;
+				seen.add(h1);
+				stack.length = 0;
+				stack.push({ snap: null, q: 1, r: r0, segs: [], anchors: ANCH });
+				while (stack.length) {
+					const P = stack.pop();
+					if (P.snap !== null) ws.restore(P.snap);
+					let q = P.q, r = P.r;
+					const segs = P.segs, segStart = r;
+					let h = P.snap !== null ? ws.stateHash() : h1;
+					let pg = ws.on_ground, pvx = ws.speed_x, pvy = ws.speed_y;
+					for (;;) {
+						if (ws.is_dead) break;
+						const j = last.get(h);
+						if (j !== undefined) {
+							if (j > t + q) {
+								const ins = new Uint8Array(q);
+								ins[0] = a;
+								let k = 1;
+								for (const [s0, e0] of segs) for (let u = s0; u < e0; u++) ins[k++] = masks[u];
+								for (let u = segStart; u < r; u++) ins[k++] = masks[u];
+								shortcuts.push({ t, j, ins, saved: j - (t + q) });
+							}
+							break;
 						}
-						break;
+						if (q >= HOR || r >= n) break;
+						if (Math.abs(ws.px - PX[r]) + Math.abs(ws.py - PY[r]) > DRIFT) break;
+						E.applyMask(inp, masks[r]); ws.tick(inp); ticks++; q++; r++;
+						h = ws.stateHash();
+						if (P.anchors > 0 && !ws.is_dead) {
+							const land = !pg && ws.on_ground, sx = Math.abs(pvx) >= 1 && ws.speed_x === 0, sy = Math.abs(pvy) >= 1 && ws.speed_y === 0;
+							if (land || sx || sy) {
+								const g = grav(ws);
+								let bq = -1, bd = ATHR;
+								for (let k = Math.max(t + 1, r - 8), k1 = Math.min(n - 1, r + AHEAD); k <= k1; k++) {
+									if (k === r || G[k] !== g) continue;
+									const d = Math.abs(ws.px - PX[k]) + Math.abs(ws.py - PY[k]) + 3 * (Math.abs(ws.speed_x - VX[k]) + Math.abs(ws.speed_y - VY[k]));
+									if (d < bd) { bd = d; bq = k; }
+								}
+								if (bq >= 0) {
+									const kb = h + ':' + bq;
+									if (!seenB.has(kb)) { seenB.add(kb); stack.push({ snap: ws.snapshot(), q, r: bq, segs: segs.concat([[segStart, r]]), anchors: P.anchors - 1 }); }
+								}
+							}
+						}
+						pg = ws.on_ground; pvx = ws.speed_x; pvy = ws.speed_y;
 					}
-					if (q >= HOR || r >= n) break;
-					if (Math.abs(ws.px - PX[r]) + Math.abs(ws.py - PY[r]) > DRIFT) break;
-					E.applyMask(inp, masks[r]); ws.tick(inp); ticks++; q++; r++;
-					h = ws.stateHash();
 				}
 			}
 		}
