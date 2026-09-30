@@ -37,8 +37,12 @@ const ARROWS = new Set([1, 2, 3, 1518, 411, 412, 413, 1519]);
 const CORR_OPTS = { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2, plainStops: [8, 20], dom: 'dir', landMax: 0, legMode: 'lazy', lazyWide: true, lazyLegs: false };
 const RESUMABLE = { chain: true, corr: true, prof: false, bw: false, leg: false };
 const SESS_KEEP = 8;
-// the default plan (EEAT_PF_PLAN 'arm:share,...': measurements)
-const PLAN_DEF = (process.env.EEAT_PF_PLAN || 'bw:0.4,prof:0.2,leg:0.1,corr:0.25,chain:0.05').split(',').map((x) => { const [a, f] = x.split(':'); return [a, +f]; });
+// the plans (EEAT_PF_PLAN 'arm:share,...' for every stretch: measurements); FAR (EEAT_PF_FAR) tiles
+const planParse = (t) => t.split(',').map((x) => { const [a, f] = x.split(':'); return [a, +f]; });
+const PLAN_ENV = process.env.EEAT_PF_PLAN ? planParse(process.env.EEAT_PF_PLAN) : null;
+const PLAN_NEAR = planParse(process.env.EEAT_PF_NEAR || 'bw:0.3,prof:0.25,leg:0.15,corr:0.25,chain:0.05');
+const PLAN_FAR = planParse(process.env.EEAT_PF_FARPLAN || 'bw:0.55,prof:0.15,leg:0.1,corr:0.2');
+const FAR = +process.env.EEAT_PF_FAR > 0 ? +process.env.EEAT_PF_FAR : 20;
 const GROW = 4;
 const BW_QUICK_MS = +process.env.EEAT_PF_BWQUICK > 0 ? +process.env.EEAT_PF_BWQUICK : 4000;                             // (a one-piece arm's second run: at least this many times its first piece)
 const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
@@ -121,12 +125,14 @@ function createPortfolio(L, opts = {}) {
 		return { c0, est: c0 >= 0 ? Math.round(KAPPA * c0) : -1, field, ffrac: Math.round(100 * ffrac) / 100, tele: !!target.tele, dist };
 	}
 
-	/** THE PLAN: [[arm, share]] in order: the backward meet first (the chains' strongest and fastest arm: 5 s alone 85.9% of
-	 *  the 4-move chains, found in 418 ms median, p90 913 ms), then the profile (79.9%, p90 1.4 s), the corridor (74.4%, p90
-	 *  3 s; resumable), msolve.chain last (resumable, it takes the rest); a teleport target: no profile / leg arm */
+	/** THE PLAN: [[arm, share]] in order, by the stretch's reach (the Chebyshev tiles from the start to the nearest target
+	 *  tile): the backward meet first (the chains' strongest and fastest arm: 20 s alone 89.8% of the 4-move chains, found in
+	 *  111 ms median; the known-route legs 39 / 55 at 30 s), then the profile, the leg finder, the corridor (resumable),
+	 *  msolve.chain (resumable); past FAR tiles the backward meet's piece is the long one (the chains at 30-50 tiles: its p90
+	 *  11 s; the known-route legs it alone finds took it 11-27 s); a teleport target: no profile / leg arm */
 	function planOf(shape, arms) {
 		const has = (a) => arms.includes(a) && !((a === 'prof' || a === 'leg') && shape.tele);
-		const plan = PLAN_DEF;
+		const plan = PLAN_ENV || (shape.near >= FAR ? PLAN_FAR : PLAN_NEAR);
 		return plan.filter(([a]) => has(a));
 	}
 	function parsePlan(s) { return String(s).split(',').filter(Boolean).map((x) => { const [a, f] = x.split(':'); return [a, +f || 0.25]; }); }
@@ -189,7 +195,12 @@ function createPortfolio(L, opts = {}) {
 		const deadline = o.deadline ? Math.min(o.deadline, t0 + B) : t0 + B;
 		const snap = snapOf(start);
 		const arms = String(o.arms || ENV('EEAT_PORT_ARMS', 'chain,corr,prof,bw,leg')).split(',');
-		const shape = { tele: !!target.tele };   // (the plan reads the teleport alone: shapeOf's goal field only for its callers)
+		// (the plan's shape: the teleport and the nearest target tile's Chebyshev distance; shapeOf's goal field only for its callers)
+		sim.restore(snap);
+		const st0 = tileAt(sim);
+		let near = Infinity;
+		for (const t of target.tiles) near = Math.min(near, Math.max(Math.abs((t % W) - (st0 % W)), Math.abs(((t / W) | 0) - ((st0 / W) | 0))));
+		const shape = { tele: !!target.tele, near };
 		// the session (one continuous budget per stretch; o.resume false: a session of this call alone)
 		let key = typeof o.resume === 'string' ? o.resume : null;
 		if (!key) {
