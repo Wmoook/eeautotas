@@ -25,7 +25,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const KCH = +(argv.chain || 4), EVERY = +(argv.every || 48), MSB = +(argv.ms || 5000);
 const ARMS = String(argv.arms || 'chain,corr').split(',');
 const copt = { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2 };
-for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'Mu', 'Ma', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'plainMs', 'coupledTicks', 'fieldMs', 'subStop', 'fanT', 'lazyStall']) if (argv[k] !== undefined) copt[k] = +argv[k];
+for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'Mu', 'Ma', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'plainMs', 'coupledTicks', 'fieldMs', 'subStop', 'fanT', 'lazyStall', 'landMax', 'landT', 'landNodes']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.legs === '0') copt.legs = false;
 if (argv.legMode) copt.legMode = argv.legMode;
 if (argv.plainStops) copt.plainStops = argv.plainStops;

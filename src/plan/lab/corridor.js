@@ -1,50 +1,47 @@
 'use strict';
 // THE CORRIDOR (n5 chains lab, approach C, 2026-09-30): a LONG leg (a real engine state -> a target's tiles, hundreds to
-// thousands of ticks, dozens of input changes) decomposed into SHORT sub-legs at the level's natural waypoints, each one
-// the move solver's (src/plan/msolve.js: <= its horizon, few input changes, computed and replayed, not searched), with
-// several arrival states kept per waypoint and the join chosen by a dynamic programme over them, so the speed carries.
+// thousands of ticks, dozens of input changes) searched as a chain of short moves between the level's natural waypoints
+// (the footholds: support spans; off them the air / field cells), several arrival states kept per waypoint (the speed
+// carries), best-first on the goal field. Every returned leg is masks the engine replayed from the start to the target.
 //
-// WHY: msolve.chain (A* over support states) expands by the forward fan-out (msolve.landings: ONE x change, 60 ticks) and
-// the event fan (the 18 held masks to their first event). Along the known routes' stuck legs (tools/lab/corridor_cases.js:
-// the compile's failing waypoints, from the route's own states) those two generators produce the route's next landing on
-// only ~20-35% (landings) / ~30-50% (event fan) of its moves, while msolve.leg aimed at THAT landing's tile (two x changes,
-// the land-and-act members, the field and coupled tiers) solves ~85% of them in 1-50 ms (src/out/lab_corridor/cover.js).
-// The chain's successors miss the moves; its direct leg aims only at the far target. The corridor aims msolve.leg at the
-// NEXT FOOTHOLDS instead, and the geometry says which.
+// WHAT THE MEASUREMENTS DECIDED (box 5; src/out/lab_corridor/, the ORCHESTRATOR's LAB corridor lines):
+//   * the generator: one expansion from the route's own state at each landing of 24 stuck known-route legs (340 moves;
+//     the route's next landing span reached no later than the route + 8 ticks): msolve's CHEAP FANS alone (the forward
+//     fan-out, one x change, and the event fan, every held mask to its first event) 55.0% at 68 ms an expansion; the
+//     sub-legs (msolve.leg aimed at the corridor's M best spans) alone 21.5%, both 58.2% at 239 ms: the legs cost 3.5x
+//     for +3%. Aimed at the ROUTE's own next foothold, msolve.leg solves 42% at the corridor's small plain budget, 74%
+//     with the plain tier unbounded (median 71 ms, p90 1 s); that foothold is among the corridor's 3 spans 115 / 340.
+//   * the search: with the fans alone most searches ENDED 'exhausted' (the held-mask generator closes): timed stops on
+//     plain nodes too (8, 20 ticks: mid-run and mid-air nodes the next fans turn from, so 2+-change moves compose) and
+//     the Pareto store by x direction (dom 'dir': a run-up away from the target is kept) open it: 3 / 24 legs at 30 s,
+//     progress (c0 - bestC) / c0 0.48 (the legs always: 1 / 17, 0.33).
+//   * THE MOVES STUDY'S 4-MOVE CHAINS (tools/lab/corridor_chain.js, 5 s each, paired with msolve.chain): see the LAB
+//     lines (74.8% vs 51.2% on the first 535; 240+ route ticks 40.5% vs 4.1%).
+// So the default in the executor (tier MC, EEAT_CORRIDOR=1) is the fans + the plain stops, no sub-legs (o.legs false);
+// the sub-legs stay as options: legMode 'always' / 'stuck' (only where the fans made no progress) / 'lazy' (on the most
+// advanced node the fans left, when their open list is empty or the frontier stalls lazyStall expansions; legNew: aimed
+// only at footholds no node stands on).
 //
-// THE GEOMETRY (per leg, from the start's own state: the doors as they stand):
-//   the goal field f = the RCH3 physics field of the level as the doors stand (types.js goalField: a sound relaxation,
-//   cost in tiles to the target; its -1 a proof); the SUPPORTS = every standable tile (a free centre tile whose 16 x 16
-//   box is free over a landable tile: solid, one-way, half block; not a field tile), each with its STANDING COST cs(t) =
-//   f at a ball at rest there; the SPANS = maximal runs of supports on one floor row (the footholds: a waypoint is a
-//   span, the sub-leg's target its tiles within reach, one row: cheap for the plain solver); the FIELD tiles (arrows,
-//   dots, liquids, climbables, boosts) with their least cost tm(t) over every abstract state there (their entries are
-//   waypoints of their own). The CORRIDOR of a state of cost c: the spans of standing cost <= c - delta within one move's
-//   reach (the next sub-level set of footholds: every way to the target meets the sub-level set, a cut of the level for
-//   the physics the field models; its footholds are where the ball stops, never a cell in mid-air), ranked by the order
-//   the search itself uses (the move's estimated ticks + w x KAPPA x the span's cost); when none is in reach (the
-//   relaxation's false near, an uphill way) the spans nearest the ball (any cost): the corridor's REPAIR.
-// THE SUB-LEGS: msolve.leg from a kept state to each of the M best corridor spans (class G: a landing there), horizon
-//   legT, with the plain tier's alternatives (o.alts: distinct end speeds within altSlack ticks) and the landing hop (the
-//   jump on the landing tick: the same foothold, launched); the field entries (class any) when the corridor has field
-//   tiles; msolve's cheap fans too (landings, one x change; the event fan: every held mask to its first event, with timed
-//   stops inside a field). Every arrival the engine's replay.
-// THE DP OVER ARRIVAL STATES: the waypoints are the search's nodes (a support tile when grounded; off the supports a
-//   (tile, class, rising) cell); a node keeps up to K (grounded) / Ka (air) arrival states, Pareto in (the tick, the
-//   speed toward the target's side): a later but faster arrival survives an earlier slow one (it saves the run-up the
-//   slow one still has to make). The order is best-first on f = g + w x KAPPA x c(state) - BETA x the speed toward the
-//   target (ticks: KAPPA = the ticks a tile at the top running speed), greedy (w1) until the first chain, then w: so the
-//   deepest cheap footholds are expanded first; a state near the target (c <= D tiles) also tries the DIRECT leg
-//   (msolve.leg to the target, horizon 120). The first complete chain is the answer (anytime: later chains replace it
-//   while the clock lasts, pruned by g).
-// Nothing here proves anything: every returned leg is masks the engine replayed from the start to the target.
+// THE GEOMETRY (per leg, from the start's own state: the doors as they stand): the goal field f (types.js goalField: the
+//   RCH3 physics field, cost in tiles, its -1 a proof); the SUPPORTS (a free centre tile whose box stands over a landable
+//   tile, edges too: the box straddles the next column's floor) with their standing cost; the SPANS (maximal runs of
+//   supports on one row); the field tiles with their least cost and their exits. The CORRIDOR of a state of cost c: the
+//   spans of standing cost <= c - delta within one move's reach box, ranked by the move's estimated ticks + w x KAPPA x
+//   the span's cost; none in reach: the spans nearest the ball (the repair).
+// THE STORE AND ORDER: a node = a support tile when grounded ('s' + tile), else an air / field cell (tile, class, rising;
+//   airKey 'vy': the vertical speed bucket too); K (grounded) / Ka (air) arrival states a node, Pareto in (tick, speed:
+//   toward the target, or by x direction with dom 'dir'); f = g + w x KAPPA x c - BETA x the speed toward the target,
+//   greedy (w1) until the first chain, then w; a state within D tiles tries the DIRECT leg (msolve.leg to the target,
+//   horizon 120; skipped where the plain lower bound is past it). The first complete chain is the answer (o.first), else
+//   anytime. o.resume: the node store, the open lists and the best kept per key (the executor's rungs add up).
 //
 //   const CR = createCorridor(L, {solver})   (solver: a msolve createSolver(L) to share, else one of its own)
-//   CR.solve(start, target, o) -> {ok, masks, T, why, expanded, legs, subOk, repairs, nodes, ms, firstMs, prof}
-//     start: an EESnapshot / EESim of L; target: {tiles, cls ('any' default)}; o: {ms (3000), deadline, K (3), Ka (2),
-//     delta (tiles, 3), legT (90), alts (1), M (spans a node, 5), D (tiles, 30: the direct leg's radius), w1 (3), w (1.2),
-//     beta (4), fan (true: msolve's cheap fans too), Tmax (the whole leg's tick cap, 6000), first (stop at the first
-//     chain), trace(ev)}
+//   CR.solve(start, target, o) -> {ok, masks, T, why, expanded, legs, subOk, repairs, nodes, ms, firstMs, c0, bestC,
+//     bestCg, prof, resumed}
+//     start: an EESnapshot / EESim of L; target: {tiles, cls ('any' default), tele, via}; o: {ms (3000), deadline, K (3),
+//     Ka (2), delta (0.5), legT (120), alts (1), M (6), Mu (2), D (30), w1 (3), w (1.2), beta (4), fan (true), legs,
+//     legMode, plainStops, fieldStops (8, 20, 40), dom, airKey, landMax (12), landT (60), landNodes (10000), Tmax (6000),
+//     first, resume, probe, trace(ev)}
 const E = require('../../eesim.js');
 const RF = require('../../reach.js');
 const T = require('../types.js');
@@ -217,6 +214,8 @@ function createCorridor(L, opts = {}) {
 		const legMode = o.legs === false ? 'never' : o.legMode || 'always';
 		const lazyStall = o.lazyStall || 40;
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
+		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
+		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
 		// (the spans a grounded node stands on: legNew's filter)
 		// the event fan's timed stops (ticks): inside a field always (8, 20, 40), on plain physics o.plainStops (none by
 		// default: the held mask to its first event only); a stop is an airborne or mid-run node the next fans turn from
@@ -225,7 +224,7 @@ function createCorridor(L, opts = {}) {
 		const RX = o.RX || 24, RU = o.RU || 5, RD = o.RD || 60, fanT = o.fanT || 120;
 		const lazyM = o.lazyM || M, lazyRX = o.lazyRX || RX, lazyRU = o.lazyRU || RU, legNew = !!o.legNew;
 		const snap0 = start instanceof E.EESim ? start.snapshot() : start;
-		const tgt = { tiles: Array.from(target.tiles), cls: target.cls || 'any' };
+		const tgt = Object.assign({}, target, { tiles: Array.from(target.tiles), cls: target.cls || 'any' });   // (tele / via kept: a portal target)
 		sim.restore(snap0);
 		const G = geometry(sim, tgt.tiles);
 		const c0 = RF.costAt(G.f, sim);
@@ -412,9 +411,9 @@ function createCorridor(L, opts = {}) {
 			const doFans = () => {
 				const kids = [];
 				tp = Date.now();
-				if (plainNode) {
+				if (plainNode && landMax > 0) {
 					const aim = cor.spans.length ? [].concat(...cor.spans.map((s) => s.tiles)) : tgt.tiles;
-					const lands = S.landings(n.snap, { Tmax: 60, K: 1, max: 12, toward: { tiles: aim }, nodes: 10000, deadline });
+					const lands = S.landings(n.snap, { Tmax: landT, K: 1, max: landMax, toward: { tiles: aim }, nodes: landNodes, deadline });
 					for (const e of lands) { kids.push(e.masks); if (e.hop) kids.push(e.hop); }
 				}
 				prof.land += Date.now() - tp;

@@ -52,7 +52,7 @@ function main() {
 			} else if (arm === 'corr') {
 				const X = CR.createCorridor(L, { solver: S });
 				const co = { ms: num('ms', 5000), fan: argv.fan !== '0', legs: argv.legs !== '0', legMode: argv.legMode || undefined, plainStops: argv.plainStops, fieldStops: argv.fieldStops, dom: argv.dom, airKey: argv.airKey, legNew: !!argv.legNew };
-				for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'coupledTicks', 'fieldMs', 'Mu', 'Ma', 'plainMs', 'subStop', 'fanT', 'lazyStall', 'lazyM', 'lazyRX', 'lazyRU', 'Tmax']) if (argv[k] !== undefined) co[k] = +argv[k];
+				for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'coupledTicks', 'fieldMs', 'Mu', 'Ma', 'plainMs', 'subStop', 'fanT', 'lazyStall', 'lazyM', 'lazyRX', 'lazyRU', 'landMax', 'landT', 'landNodes', 'Tmax']) if (argv[k] !== undefined) co[k] = +argv[k];
 				const q = X.solve(snap, target, co);
 				r = Object.assign({}, q);
 			} else throw new Error('arm ' + arm);
