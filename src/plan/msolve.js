@@ -25,27 +25,42 @@
 //   4. VERIFY: each candidate (T, x pattern, y member) becomes masks and is replayed ONCE by the engine (EESim from the
 //      start snapshot, ~0.6 us a tick); a miss (a corner of the sub-step staircase, a one-way, a door, the align)
 //      goes on to the next candidate. The answer is the engine's: the first tick the goal test holds.
-//   5. NOT PLAIN (arrows, dots, liquids, climbables, boosts, portals) or no plain candidate: the COUPLED piece, the
-//      per-tick one-change family over the 9 direction masks (and a press at the first tick) replayed by the engine
-//      with the prefix shared, cheapest first-hit tick kept (tool 'coupled').
-//   6. THE BOUND (sections 3.2, 1.4): a lower bound on the leg's ticks for EVERY input sequence of the plain regime:
-//      max(x: the 1D minimum time from max(v0 toward, 0) with the align slack, y: the first tick the jump (or the
-//      fall) reaches the target's floor line); a leg whose found T equals it is PROVEN OPTIMAL (lb === T).
+//   5. NOT PLAIN (arrows, dots, liquids, climbables, boosts, portals) or no plain candidate: THE FIELD TIER,
+//      src/math/fieldsolve.js solveLeg (the fields derivation's per-axis field kinematics: the start field's axis roles,
+//      the gravity axis' options, the input axes by fields.solveAxis, the schedule iteration across field boundaries),
+//      its answer replayed by this solver's goal test; then THE COUPLED PIECE, the per-tick one-change family over the
+//      9 direction masks (and a press at the first tick) replayed by the engine with the prefix shared, only below the
+//      field answer's T or where neither found one (cheapest T across the tiers). tool: 'plain' | 'field' | 'coupled'.
+//   6. THE BOUND (sections 3.2, 1.4, docs/ee_math.md 5): a lower bound on the leg's ticks for EVERY input sequence of
+//      the plain regime: max(x: the 1D minimum time (hold toward from max(v0 toward, 0), the align slack) to the target
+//      columns' centre range, y: the first tick the fall from max(vy0, 0) (below) or the rise of a jump pressed now /
+//      the current rise (above; past one jump's reach: |J| a tick at most) reaches the target rows' centre range, +1
+//      for a landing above). Its CERTIFICATE: no non-plain, non-solid tile inside the rectangle the plain extremes reach
+//      in that many ticks (a field, boost or portal the ball could reach first would void it). A leg whose found T
+//      equals a certified bound is PROVEN OPTIMAL (res.proven): no input sequence reaches the target sooner.
+//   7. CHAINS (chain): A* over SUPPORT STATES with solved legs as edges: the direct leg to the target at every node,
+//      the forward fan-out (landings: the earliest verified landing, and its hop, on the standable tiles the plain
+//      extremes reach), nodes merged by stateHash, h = the plain bound; closed = optimal within the legs' graph.
+// The gravity members also cover BONKS (a rise stopped by a ceiling line: y blocked there, vy = 0, then the fall) and
+// the x map carries the member's WALLS (a blocked x stops at its last free sub-step, vx = 0); the landing reads the raw
+// x and y before the align (the collision probe sees them).
 //
 // API
-//   const S = createSolver(L, {K, Tmax, alts})
+//   const S = createSolver(L, {K, Tmax})
 //   S.leg(start, target, o) -> {ok, masks (Uint8Array of the leg, replayed), T, hop (masks with the jump on the last
-//       tick: the landing hop, verified too) | null, lb, proven, tool ('plain' | 'coupled' | null), cands, verifies,
-//       us, why}
+//       tick: the landing hop, verified too) | null, lb, cert, proven, tool, member, k, cands, verifies, us, why}
 //     start: an EESnapshot of L (sim.snapshot()) or an EESim of L (its current state is read, not changed)
 //     target: {tiles: number[] (centre tiles), cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A' | 'any', tele: bool (the goal tick
 //       must teleport), via: number[] (portal tiles to enter for a teleport target)}
-//     o: {Tmax, K (max x changes, default 2), coupled (default true), plain (default true), alts}
-//   S.lowerBound(start, target) -> ticks (admissible in the plain regime; 0 when no bound applies)
+//     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
+//       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), debug(item)}
+//   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, ms}   o: {ms, legT, w, fanT, fanMax}
+//   S.landings(start, o) -> [{tile, T, masks, hop}]   the forward fan-out from a plain state
+//   S.lowerBound(start, target) -> ticks (the plain regime's bound; 0 when none applies)
 //   S.goal(target) -> (sim, prevX, prevY) -> bool: the target's exact test on a real state
 //   S.replay(start, masks, target) -> first tick (1-based) the goal holds, or 0
-//   clsOf(sim, L) -> the support class letter of a state (the moves study's: D W C Z B G A)
-//   holdTables(ctx) -> {DR, DL, grid}: THE HOLD TABLES (position-free offsets of hold R / hold L per start speed)
+//   clsOf(sim, flags) -> the support class letter of a state (the moves study's: D W C Z B G A)
+//   holdTables(ctx) -> THE HOLD TABLES (position-free offsets of hold R / hold L per start speed, 1/64 px/tick grid)
 const E = require('../eesim.js');
 const K1 = require('./kin1d.js');
 const KN = require('./kin.js');
@@ -443,8 +458,16 @@ function createSolver(L, opts = {}) {
 			if (m.kind === 'walk') {
 				// on the floor row: the target's tiles in the centre row fr0 - 1 (class G while walking)
 				if (tg.cls === 'G' || tg.cls === 'any') {
-					const wins = landWins(tg, sol, fr0);
-					if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr0 });
+					if (o.each) {
+						// the fan-out: the walk's items per tile of the floor row (their own windows and goals)
+						for (const c of tg.colsByRow.get(fr0 - 1) || []) {
+							const wins = landWins({ colsByRow: new Map([[fr0 - 1, [c]]]) }, sol, fr0);
+							if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr0, tile: (fr0 - 1) * W + c });
+						}
+					} else {
+						const wins = landWins(tg, sol, fr0);
+						if (wins.length) for (let T = 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr0 });
+					}
 				}
 				continue;
 			}
@@ -558,7 +581,12 @@ function createSolver(L, opts = {}) {
 				return false;
 			};
 			const c0 = stats.cands;
-			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, budget, wall);
+			// a per-item share of the budget: no one (T, member) item eats the whole leg's budget
+			const cap = o.itemNodes || 40000, before = budget.n;
+			const ib = { n: Math.min(budget.n, cap), out: false };
+			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
+			budget.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
+			if (budget.n <= 0) budget.out = true;
 			if (o.debug) o.debug({ T, kind: m.kind, j: m.j, off: m.off, bonk: m.bonk, land: it.land, wins: it.wins, cands: stats.cands - c0, best: best && best.T });
 		}
 		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
