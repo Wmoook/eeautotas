@@ -800,7 +800,9 @@ function makeCore(L, co) {
 		// -------- tier MC: THE CORRIDOR (opt-in, EEAT_CORRIDOR=1): a far waypoint's leg as a chain of short solver legs
 		// between footholds, resumed across calls from the same start state
 		if (CORR_ON() && mathOn && !walled && nearMin > CORR_MIN && Date.now() < wEnd - 100) {
-			const tC = Date.now(), cEnd = tC + Math.min(CORR_MS, mathShare(CORR_SHARE, cY.tries, cY.ok, 6) * (wEnd - tC));
+			// (a near start in place of tier M2 (EEAT_CORR_REPLACE): M2's own share and cap, like for like)
+			const nearC = CORR_REPLACE && nearMin <= MATH_CHAIN_TILES;
+			const tC = Date.now(), cEnd = tC + (nearC ? Math.min(MATH_CHAIN_MS, mathShare(MATH_CHAIN_SHARE, mY.cTry, mY.cOk, 4) * (wEnd - tC)) : Math.min(CORR_MS, mathShare(CORR_SHARE, cY.tries, cY.ok, 6) * (wEnd - tC)));
 			let bi = -1;
 			starts.forEach((s, i) => {
 				if (s.dead) return;
@@ -830,7 +832,7 @@ function makeCore(L, co) {
 					}
 				}
 			}
-			if (rc) { cY.tries++; if (cands.length) cY.ok++; }
+			if (rc) { if (nearC) { mY.cTry++; if (cands.length) mY.cOk++; } else { cY.tries++; if (cands.length) cY.ok++; } }
 			tiers.push({ tier: 'corridor', ms: Date.now() - tC, ok: cands.length > 0, T: rc && rc.ok ? rc.T : null, expanded: rc ? rc.expanded : 0, nodes: rc ? rc.nodes : 0, resumed: !!(rc && rc.resumed), closest: corrCl, c0: rc ? rc.c0 : null, bestC: rc ? rc.bestC : null, error: rc && rc.error ? rc.error : undefined });
 			if (cands.length) { const r = finishMath(cands); if (r) return out(r); }
 		}
