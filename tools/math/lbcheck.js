@@ -25,6 +25,11 @@ const USE_ADM = argv.adm === '1';
 const SOLVE = argv.solve === '1';
 const SOLVE_MS = +(argv.solveMs || 400);
 const LS = require('../../src/math/legsolve.js');
+// --solver=msolve: the move solver of n4-math (src/plan/msolve.js) finds the leg's T (cheapest first); its own plain bound
+// (lowerBound) is recorded next to this bound for the comparison
+const SOLVER = argv.solver || 'legsolve';
+let MS = null;
+if (SOLVER === 'msolve' || argv.msb === '1') { try { MS = require('../../src/plan/msolve.js'); } catch (e) { console.error('msolve: ' + e.message); } }
 
 function loadMoves(dir) {
 	const byR = new Map(), names = new Map();
@@ -71,6 +76,7 @@ function runRoute(entry, moves) {
 	if (!tr) return { stale: true, legs: [], checks: 0, viol: 0, nulls: 0, capped: 0 };
 	const L = tr.L, W = L.width, H = L.height;
 	const M = LB.createMathLB(L, { cap: CAP });
+	const MSV = MS ? MS.createSolver(L, {}) : null;
 	let adm = null;
 	if (USE_ADM) adm = require('../../src/plan/admbounds.js').createAdmBounds(L, { memo: 4 });
 	const sim = new E.EESim(L), inp = new E.EEInput();
@@ -85,7 +91,7 @@ function runRoute(entry, moves) {
 		const m0 = byStart.get(t);
 		if (m0) {
 			cur = m0;
-			tgt = { tiles: [m0.tile1], mode: m0.c1 === 'G' ? 'land' : 'touch' };
+			tgt = { tiles: [m0.tile1], mode: m0.c1 === 'G' ? 'landing' : 'touch' };
 			field = adm ? adm.field([m0.tile1], T.levelNow(L, sim)) : null;
 		}
 		if (cur && t < cur.t1 && (EVERY || t === cur.t0)) {
@@ -100,14 +106,25 @@ function runRoute(entry, moves) {
 			if (t === cur.t0) {
 				const lbv = b.lb;
 				if (lbv !== null && lbv === actual) proven++;
-				let tsol = null, sms = 0;
+				let tsol = null, sms = 0, mslb = null;
+				if (MSV) { try { const snapM = sim.snapshot(); mslb = MSV.lowerBound(snapM, { tiles: [cur.tile1], cls: cur.c1 === 'G' ? 'G' : 'any' }); } catch (e) { mslb = null; } }
 				if (SOLVE && lbv !== null && lbv < actual) {
 					const snap = sim.snapshot();
-					const r = LS.solveLeg(L, sim, tgt, { lb: lbv, tmax: actual - 1, ms: SOLVE_MS });
+					const tm = Date.now();
+					if (SOLVER === 'msolve' && MSV) {
+						try {
+							const r = MSV.leg(snap, { tiles: [cur.tile1], cls: cur.c1 === 'G' ? 'G' : 'any' }, { Tmax: actual });
+							if (r && r.ok) tsol = r.T;
+						} catch (e) { /* no answer */ }
+					} else {
+						const r = LS.solveLeg(L, sim, tgt, { lb: lbv, tmax: actual - 1, ms: SOLVE_MS });
+						if (r) tsol = r.T;
+					}
 					sim.restore(snap);
-					if (r) { tsol = r.T; sms = r.ms; if (r.T < lbv) { viol++; if (worst.length < 12) worst.push({ t, kind: 'solver below lb', lb: lbv, T: r.T }); } }
+					sms = Date.now() - tm;
+					if (tsol !== null && tsol < lbv) { viol++; if (worst.length < 12) worst.push({ t, kind: 'solver below lb', lb: lbv, T: tsol }); }
 				}
-				legs.push([cur.t0, actual, lbv, cur.label, tgt.mode === 'land' ? 1 : 0, b.why || '', b.arc === undefined ? null : b.arc, b.tx === undefined ? null : b.tx, b.nodes || 0, tsol, sms]);
+				legs.push([cur.t0, actual, lbv, cur.label, tgt.mode === 'touch' ? 0 : 1, b.why || '', b.arc === undefined ? null : b.arc, b.tx === undefined ? null : b.tx, b.nodes || 0, tsol, sms, mslb]);
 			}
 		}
 		if (t === complete) break;
@@ -138,7 +155,8 @@ function aggregate(dir) {
 			if (lbv !== null && lbv === actual) proven++;
 			if (FREE.has(label)) { plainN++; if (lbv !== null && lbv === actual) provenPlain++; }
 			if (lbv === null) { add(label + ':null', 0); continue; }
-			const tsol = l[9];
+			const tsol = l[9], mslb = l[11];
+			if (mslb !== null && mslb !== undefined) { add('MSLB:ALL', mslb / actual); if (FREE.has(label)) add('MSLB:FREE', mslb / actual); }
 			const best = tsol !== null && tsol !== undefined ? Math.min(tsol, actual) : actual;
 			const q2 = best === 0 ? 1 : lbv / best;
 			add('S:ALL', q2); if (FREE.has(label)) add('S:FREE', q2);

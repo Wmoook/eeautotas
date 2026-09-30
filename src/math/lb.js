@@ -276,11 +276,15 @@ function createMathLB(L, o = {}) {
 		st.legs++;
 		const ctx = plainCtx(sim, S);
 		if (!ctx) { st.nulls++; return { lb: null, why: 'not plain' }; }
-		const land = target.mode === 'land';
+		// 'land': grounded with the centre in a target tile (already so counts); 'landing': a NEW landing there (the ball
+		// airborne before it: the moves' next support); 'touch': the centre in a target tile
+		const landing = target.mode === 'landing';
+		const land = target.mode === 'land' || landing;
 		const tiles = Array.from(target.tiles || []);
 		if (!tiles.length) return { lb: null, why: 'no target' };
 		const field = lo.field || null;
 		const cap = lo.cap || o.cap || 4000;
+		const msCap = lo.ms || o.ms || 0;   // a time budget (ms): past it the A* frontier is the answer (a lower bound)
 		const HOR = lo.horizon || o.horizon || 3000;
 		const ice = S.ice || sim._slippery > 0;
 		const freeNear = (row, kc) => {
@@ -288,7 +292,7 @@ function createMathLB(L, o = {}) {
 			for (let c = Math.max(0, kc - 3); c <= Math.min(W - 1, kc + 3); c++) if (S.blk[row * W + c] !== 1) return true;
 			return kc - 3 < 0 || kc + 3 >= W;
 		};
-		const qUp = (q) => (q <= 0 ? 0 : q <= 4 ? 4 : q <= 8 ? 8 : 16);
+		const qUp = (q) => q;
 		const XS = xSteps(ctx, ice);
 		const G = K.ga(ctx);
 		const Js = [G.J];
@@ -336,7 +340,7 @@ function createMathLB(L, o = {}) {
 		// the start in the target (touch: its centre tile; land: grounded there)
 		{
 			const cx = Math.trunc(x0 + 8) >> 4, cy = Math.trunc(y0 + 8) >> 4;
-			if (tgtMask.has(cy * W + cx) && (!land || sim.on_ground)) return done(0, 'start');
+			if (!landing && tgtMask.has(cy * W + cx) && (!land || sim.on_ground)) return done(0, 'start');
 		}
 		let best = Infinity, why = 'target', srcHit = false;
 		let arc = Infinity;   // the target time on the start's own flight (no event before it)
@@ -344,8 +348,18 @@ function createMathLB(L, o = {}) {
 		// node store
 		const nk = [], nkc = [], nline = [], nhi = [], nt = [];
 		const landT = new Map(), bonkT = new Map(), doneL = new Map(), doneB = new Map();
-		const pushNode = (kind, kc, li, hiQ, t) => {
+		// a node = a collision event at time t in centre column kc; (ya, yb) its EXACT y band: the target and the sources
+		// are checked on it here, before the dedup (a node dropped for an earlier one of its key still had its own
+		// position); the key's band (hiQ, quantized up for the retries) is the one its flights start from
+		const pushNode = (kind, kc, li, hiQ, t, ya, yb, isLanding) => {
 			if (t >= best) return;
+			{
+				const r0 = Math.floor((ya + 8) / 16), r1 = Math.floor((yb + 8) / 16);
+				const hit = !land || (kind === 0 && (!landing || isLanding));
+				if (hit) for (const g of tgt) if (g.tx === kc && g.ty >= r0 && g.ty <= r1) cand(Math.max(t, g.xr), 'target');
+				if (srcCount(S, kc, kc, r0, r1) > 0) { const rr = srcRest(kc, kc, r0, r1); if (t + rr < best) { best = t + rr; why = 'source'; srcHit = true; } }
+				if (t >= best) return;
+			}
 			const key = (kc * NL + li) * 512 + hiQ;
 			const M = kind === 0 ? landT : bonkT;
 			const had = M.get(key);
@@ -395,7 +409,7 @@ function createMathLB(L, o = {}) {
 		 * one flight from time tA: y band [ylo, yhi] (exact when equal) with speed v, the x window per tick: the global
 		 * envelope (xw null: the start) or the node window [xa, xb) grown by the node speed sequence
 		 */
-		function flight(tA, ylo, yhi, v, xa, xb, isStart) {
+		function flight(tA, ylo, yhi, v, xa, xb, isStart, air) {
 			let pl = ylo, ph = yhi, vl = v, vh = v;
 			let ea = xa, eb = xb;   // the window's absolute edges (left: min, right: max)
 			const exact = ylo === yhi && !ice;
@@ -428,18 +442,15 @@ function createMathLB(L, o = {}) {
 						if (!(pl <= s && s < nh)) continue;
 						const cols = S.stand[li];
 						if (!cols.length) continue;
-						let hiQ0 = Math.ceil(nh - s); if (hiQ0 < 0) hiQ0 = 0; if (hiQ0 > 16) hiQ0 = 16;
-						hiQ0 = qUp(hiQ0);
+						let hiX = Math.ceil(nh - s); if (hiX < 0) hiX = 0; if (hiX > 16) hiX = 16;
 						const frow = Math.floor((s + 17) / 16);   // the row past the standing line (the floor's)
 						let i = lowerBound(cols, k0);
 						for (; i < cols.length && cols[i] <= k1; i++) {
 							const kc = cols[i];
-							const hiQ = hiQ0 && freeNear(frow, kc) ? hiQ0 : 0;
+							const hx = hiX && freeNear(frow, kc) ? hiX : 0;
 							const tt = Math.max(tn, creach(kc));
-							if (land) for (const g of tgt) {
-								if (g.tx === kc && rowsHit(s - 1, s + hiQ, g.ty)) { cand(tt, isStart ? 'arc' : 'target'); if (isStart && tt < arc) arc = tt; }
-							}
-							pushNode(0, kc, li, hiQ, tt);
+							if (isStart && land && tt < arc && (!landing || air || n >= 2 || v !== 0)) for (const g of tgt) if (g.tx === kc && rowsHit(s - 1, s + hx, g.ty)) arc = tt;
+							pushNode(0, kc, li, qUp(hx), tt, s - 1, s + hx, air || n >= 2 || v !== 0);
 						}
 					}
 				}
@@ -457,12 +468,10 @@ function createMathLB(L, o = {}) {
 						if (exact) { if (Number.isInteger(ph)) hi = ph; else if (Math.floor(ph) < c) hi = ph; else hi = c; }
 						else { const m = Math.floor(ph); if (m >= pl && m > hi) hi = m; }
 						let hiQ = Math.ceil(hi - c); if (hiQ < 1) hiQ = 1; if (hiQ > 16) hiQ = 16;
-						hiQ = qUp(hiQ);
-						let loQ0 = Math.ceil(c - nl); if (loQ0 < 0) loQ0 = 0; if (loQ0 > 16) loQ0 = 16;
-						loQ0 = qUp(loQ0);
+						let loX = Math.ceil(c - nl); if (loX < 0) loX = 0; if (loX > 16) loX = 16;
 						const crow = Math.floor((c - 1) / 16);   // the row past the ceiling line (the ceiling's)
 						let i = lowerBound(cols, k0);
-						for (; i < cols.length && cols[i] <= k1; i++) { const kc = cols[i]; const loQ = loQ0 && freeNear(crow, kc) ? loQ0 : 0; pushNode(1, kc, li, loQ * 17 + hiQ, Math.max(tn, creach(kc))); }
+						for (; i < cols.length && cols[i] <= k1; i++) { const kc = cols[i]; const lx = loX && freeNear(crow, kc) ? loX : 0; pushNode(1, kc, li, qUp(lx) * 17 + hiQ, Math.max(tn, creach(kc)), c - lx, c + hiQ); }
 					}
 				}
 				pl = nl; ph = nh;
@@ -476,13 +485,13 @@ function createMathLB(L, o = {}) {
 			if (cx >= 0 && cy >= 0 && cx < W && cy < H) { const rr = srcRest(cx, cx, cy, cy); if (rr < best) { best = rr; why = 'source'; srcHit = true; } }
 		}
 		curOrigin = -1; curHow = 'start';
-		flight(0, y0, y0, vy0, x0, x0, true);
+		flight(0, y0, y0, vy0, x0, x0, true, !sim.on_ground);
 		let expanded = 0, capped = false, frontier = Infinity;
 		while (heap.n > 0) {
 			const f = heap.k[0];
 			if (f >= best) break;
 			if (f >= HOR) { frontier = f; break; }
-			if (expanded >= cap) { capped = true; frontier = f; break; }
+			if (expanded >= cap || (msCap && (expanded & 31) === 0 && Date.now() - t0 > msCap)) { capped = true; frontier = f; break; }
 			const id = heap.pop();
 			const kind = nk[id], kc = nkc[id], li = nline[id], hiQ = nhi[id], t = nt[id];
 			const key = (kc * NL + li) * 512 + hiQ;
@@ -504,31 +513,25 @@ function createMathLB(L, o = {}) {
 				const s = line, sh = s + hiQ;   // the ball: y in [s - 1, s + hiQ] (hiQ: the retry past the line)
 				const r0 = Math.floor((s - 1 + 8) / 16), r1 = Math.floor((sh + 8) / 16);
 				// the target (touch: the node's position; land: grounded here)
-				curOrigin = id; curHow = 'at';
-				for (const g of tgt) if (g.tx === kc && g.ty >= r0 && g.ty <= r1) cand(Math.max(t, g.xr), 'target');
-				if (srcCount(S, kc, kc, r0, r1) > 0) { const rr = srcRest(kc, kc, r0, r1); if (t + rr < best) { best = t + rr; why = 'source'; srcHit = true; } }
 				curOrigin = id; curHow = 'walk';
 				// walking: the next centre column on the same line, >= 1 tick
-				for (const d of [-1, 1]) {
+				if (hiQ === 0) for (const d of [-1, 1]) {
 					const k2 = kc + d;
 					if (k2 < 0 || k2 >= W) continue;
 					const cols = S.stand[li];
 					const j = lowerBound(cols, k2);
-					if (j < cols.length && cols[j] === k2) pushNode(0, k2, li, hiQ, Math.max(t + 1, creach(k2)));
+					if (j < cols.length && cols[j] === k2) pushNode(0, k2, li, 0, Math.max(t + 1, creach(k2)), s - 1, s, false);
 				}
 				// the jump (at this very tick: the hop) and the walk-off fall
 				curOrigin = id; curHow = 'walk';
-				for (const J of Js) { curHow = 'jump'; flight(t, s - 1, sh, J, xa, xb, false); }
+				for (const J of Js) { curHow = 'jump'; flight(t, s - 1, sh, J, xa, xb, false, true); }
 				curHow = 'walkoff';
-				flight(t, s - 1, sh, 0, xa, xb, false);
+				flight(t, s - 1, sh, 0, xa, xb, false, hiQ > 0);
 			} else {
 				const c = line, loQ = (hiQ / 17) | 0, hQ = hiQ % 17;   // the ball: y in [c - loQ, c + hQ]
 				const r0 = Math.floor((c - loQ + 8) / 16), r1 = Math.floor((c + hQ + 8) / 16);
-				curOrigin = id; curHow = 'at';
-				for (const g of tgt) if (!land && g.tx === kc && g.ty >= r0 && g.ty <= r1) cand(Math.max(t, g.xr), 'target');
-				if (srcCount(S, kc, kc, r0, r1) > 0) { const rr = srcRest(kc, kc, r0, r1); if (t + rr < best) { best = t + rr; why = 'source'; srcHit = true; } }
 				curOrigin = id; curHow = 'bonkfall';
-				flight(t, c - loQ, c + hQ, 0, xa, xb, false);
+				flight(t, c - loQ, c + hQ, 0, xa, xb, false, true);
 			}
 		}
 		st.nodes += expanded;

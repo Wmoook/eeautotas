@@ -46,6 +46,7 @@ if (arg('limit', null)) list = list.slice(0, +arg('limit'));
 
 const NAMES = ['adm', 'fb', 'prim', 'eg', 'max', 'whatif', 'math', 'best'];
 const MATH = arg('math', '1') !== '0';
+const MATH_MS = +arg('mathMs', '30');   // the math bound's time budget a query (its A* frontier past it: still a bound)
 const WHATIF = arg('whatif', '0') === '1';   // a what-if: the fallback with the PLAIN sups on every level (not admissible: how much the sups cost)
 function newAgg() { const a = {}; for (const b of NAMES) a[b] = { n: 0, viol: 0, sumR: 0, hist: new Array(21).fill(0), worst: [] }; return a; }
 function note(agg, b, bound, actual, ctx) {
@@ -89,7 +90,7 @@ function runRoute(entry) {
 	const adm = A.createAdmBounds(L, { memo: 4 });
 	const mlb = MATH ? MLB.createMathLB(L, {}) : null;
 	let mathMs = 0;
-	const mathAt = (s, goalTiles, f, hor) => { if (!mlb) return null; const tm = Date.now(); const r = mlb.leg(s, { tiles: goalTiles, mode: 'touch' }, { field: f, horizon: hor }); mathMs += Date.now() - tm; return r.lb; };
+	const mathAt = (s, goalTiles, f, hor) => { if (!mlb) return null; const tm = Date.now(); const r = mlb.leg(s, { tiles: goalTiles, mode: 'touch' }, { field: f, horizon: hor, ms: MATH_MS }); mathMs += Date.now() - tm; return r.lb; };
 	const prim = P ? P.createBounds(L, {}) : null;
 	const whatif = WHATIF ? A.createAdmBounds(L, { memo: 4, accX: false, up: false, vmax: { xp: A.terminal(1 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, xn: A.terminal(1 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, yp: A.terminal(2 / E.constants.MULT, E.constants.BASE_DRAG) + 0.02, yn: (2 * 26) / E.constants.MULT + 0.02 } }) : null;
 	const trophies = [];
