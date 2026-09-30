@@ -388,6 +388,8 @@ function legBest(L, starts, goal, o) {
 	// (a dead ball (a death step's allowDeath) holds on through its dead ticks until it respawns: its cell does not change
 	// meanwhile, and the first arrival's rule dropped it: a death step was never found)
 	const DEAD_HOLD = 80;
+	// (a death step: the dead ball and the ball at a kill cell's door first: diePri, below)
+	const KC = allowDeath && DIE_PRI > 0 ? killCellsOf(L) : null;
 	const pool = [];
 	// (the finisher: the NK states nearest the goal by the field (at most 2 a tile, within FIN_D tiles) kept with their
 	// snapshots; at FIN_F of the time with no leg found, the exact search from them (solveExact over absolute ticks: the
@@ -563,7 +565,7 @@ function legBest(L, starts, goal, o) {
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
-			hpush(j, g + reps + w * (scoreOf(d) + saxPen(sim)));
+			hpush(j, g + reps + w * (scoreOf(d) + saxPen(sim)) + (KC !== null ? diePri(L, sim, KC, g + reps) : 0));
 			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; closest.pop = pops; }
 			if (FIN && d <= FIN_D && finR === null) keepNear(j, d, cy * W + cx);
 		}
@@ -694,6 +696,61 @@ function eta(D, v) {
 	const tv = (V_RUN - v) / A_RUN, dv = v * tv + 0.5 * A_RUN * tv * tv;
 	if (D <= dv) return (-v + Math.sqrt(v * v + 2 * A_RUN * D)) / A_RUN;
 	return tv + (D - dv) / V_RUN;
+}
+/** a death step's PRIORITY (ordering only; the goal test and every replay are the engine's): its field is 0 on the
+ *  killers' neighbours (the tiles a death starts from: model.js dieSrc) and a dead ball's distance is 0, but the goal
+ *  (alive back at a respawn, one death more) is still the last steps into the killer's cell AND ~55 dead ticks away. The
+ *  best-first search's dive reached the doorstep at priority ~g and stopped there: every child on the doorstep costs
+ *  g + reps while the whole dive's backlog waits at ~g, so the entry and the dead ball's hold to its respawn were never
+ *  popped (box 3, from the level's start, the executor's best tier with the die field: Lab of Insanity 814 k pops,
+ *  I Wanna be the Guy 1.07 M pops, ZERO dead ticks, where random runs die in 100% / 25% of their runs, and holding right
+ *  from IWBTG's doorstep dies in 7 ticks). So a DEAD ball goes first (2 x DIE_PRI ahead: its expansion holds through the
+ *  dead ticks, whose last tick is the goal test at the respawn), then an alive ball whose centre is within 24 px of a kill
+ *  cell (a killer, or a half block whose current-tile redirect is one: the engine's kill test reads the centre's cell),
+ *  nearer first by up to DIE_NEAR ticks (the gradient into the killer the tile field has not): a death step dives INTO
+ *  the death. The same searches then: Lab of Insanity found in 0.28 s (148 ticks), The Square 0.31 s (305), IWBTG 0.43 s
+ *  (268). EEAT_DIE_PRI=0: off (the order as before) */
+const TMD = require('../timed.js');
+const DIE_PRI = process.env.EEAT_DIE_PRI === '0' ? 0 : 1e6, DIE_NEAR = 16;
+const killCellsMemo = new WeakMap();
+function killCellsOf(L) {
+	let m = killCellsMemo.get(L);
+	if (m) return m;
+	const W = L.width, H = L.height, N = W * H, fg = L.fg, gF = L.gFlags, fl = L.flags, xf = L.xflags, lk = L.lookup0;
+	m = new Uint8Array(N);
+	const kills = (id) => gF && id >= 0 && id < gF.length && (gF[id] & 4) !== 0;
+	for (let i = 0; i < N; i++) {
+		const id = fg[i];
+		if (kills(id)) { m[i] = 1; continue; }
+		if (fl && id < fl.length && (fl[id] & 8) !== 0) {   // F_HALF: the centre's cell redirects up (rotation 1) or left (0)
+			let rot = lk ? lk[i] : 0;
+			if (xf && (xf[id] & 4) !== 0) rot = 1;   // X_NONROT_HALF
+			const x = i % W, y = (i / W) | 0;
+			const j = rot === 1 ? (y > 0 ? i - W : -1) : rot === 0 ? (x > 0 ? i - 1 : -1) : i;
+			if (j >= 0 && j !== i && kills(fg[j])) m[i] = 1;
+		}
+	}
+	killCellsMemo.set(L, m);
+	return m;
+}
+/** the death step's priority shift (ticks, <= 0) for the ball now in sim */
+function diePri(L, sim, kc, gt) {
+	if (sim.is_dead) return -2 * DIE_PRI;
+	// (a running timed killer (poison, curse, zombie, fire) kills the ball at a fixed tick wherever it is: its lineage goes
+	// DEPTH first, the deepest ahead, until that tick (DEEPER's death step: its die sources are poison effects; breadth
+	// first over the poisoned states never reached the tick of the death)
+	if (TMD.timedLeft(sim) > 0) return -DIE_PRI - 2 * gt;
+	const W = L.width, H = L.height, cx = sim.px + 8, cy = sim.py + 8, tx = cx >> 4, ty = cy >> 4;
+	let best = Infinity;
+	for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+		const x = tx + dx, y = ty + dy;
+		if (x < 0 || y < 0 || x >= W || y >= H || kc[y * W + x] !== 1) continue;
+		const ex = cx < x * 16 ? x * 16 - cx : cx >= x * 16 + 16 ? cx - (x * 16 + 16) + 1 : 0;
+		const ey = cy < y * 16 ? y * 16 - cy : cy >= y * 16 + 16 ? cy - (y * 16 + 16) + 1 : 0;
+		const e = Math.sqrt(ex * ex + ey * ey);
+		if (e < best) best = e;
+	}
+	return best === Infinity || best >= 24 ? 0 : -DIE_PRI - DIE_NEAR * (1 - best / 24);
 }
 /** the ordering distance, a DEAD ball of a death step (allowDeath) 0: it comes back at its respawn by itself, and its
  *  tile (the killer's) has no value on the field (1e9: the dead states went last and the heap's cut dropped them) */
