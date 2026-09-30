@@ -256,12 +256,12 @@ function compileModel(L, o = {}) {
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
 		return { key, dkey, pkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
 	}
+	// (the features' getters, each key parsed once: T.featValue parsed it on every read)
+	const getF = feats.map((f) => T.featGetter(f));
+	const deathI = feats.indexOf('deaths');
 	function stateOf(sim) {
-		const vals = feats.map((f) => {
-			let v = T.featValue(sim, f);
-			if (f === 'deaths') v = Math.min(v, deathT);
-			return v;
-		});
+		const vals = getF.map((g) => g(sim));
+		if (deathI >= 0) vals[deathI] = Math.min(vals[deathI], deathT);
 		let taken = null, btaken = null;
 		if (coinTiles.length) { taken = new Uint8Array(coinTiles.length); coinTiles.forEach((t, k) => { taken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }); }
 		if (bcoinTiles.length) { btaken = new Uint8Array(bcoinTiles.length); bcoinTiles.forEach((t, k) => { btaken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }); }
@@ -274,6 +274,16 @@ function compileModel(L, o = {}) {
 		S.td = !!sim._timedoor_state;
 		S.zombie = !!sim.is_zombie;
 		return S;
+	}
+	/** stateOf(sim).key alone (the same string: the values joined, the taken coins' hashes, the checkpoint), without
+	 * the state object (the primitives' class key of every child) */
+	function keyOf(sim) {
+		let key = '';
+		for (let n = 0; n < getF.length; n++) { let v = getF[n](sim); if (n === deathI) v = Math.min(v, deathT); key += (n > 0 ? ',' : '') + v; }
+		if (coinTiles.length) { const taken = new Uint8Array(coinTiles.length); for (let k = 0; k < coinTiles.length; k++) { const t = coinTiles[k]; taken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; } key += '|' + hashBytes(taken); }
+		if (bcoinTiles.length) { const bt = new Uint8Array(bcoinTiles.length); for (let k = 0; k < bcoinTiles.length; k++) { const t = bcoinTiles[k]; bt[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; } key += '|' + hashBytes(bt); }
+		if (canDie) key += '|c' + (sim.checkpoint.x >= 0 ? trigOf[sim.checkpoint.y * W + sim.checkpoint.x] : -1);
+		return key;
 	}
 	const init = {};
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
@@ -634,7 +644,7 @@ function compileModel(L, o = {}) {
 		return mkState(vals, S.taken, S.btaken, S.cp);
 	}
 	const model = {
-		L, W, H, N, A, feats, init, triggers, gates, stateOf, levelOf, regionOf, reachable,
+		L, W, H, N, A, feats, init, triggers, gates, stateOf, keyOf, levelOf, regionOf, reachable,
 		// (the planner's machinery)
 		file: o.file || null, S0, startTile, cpTracked, spawnTiles, respawnOf, idleTiles, trophyTiles, trophies, respawn, canDie, dieTile, deathT, timed, coinTiles, bcoinTiles,
 		pendingOf, setEstWalls, trigOf, gateOf, featSet, fIdx, hasCoinGate, touch, liveTiles, gateOpen, passMask, bfs, dist, pairSteps, pairLb, pairInfo, lbOfSteps, deathVia,

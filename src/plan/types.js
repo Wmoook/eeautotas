@@ -161,6 +161,28 @@ function featValue(sim, feat) {
 	}
 }
 /**
+ * featGetter(feat) -> (sim) => featValue(sim, feat): the same value, the feature's key parsed ONCE (featValue parses
+ * the string on every call: the primitives read every feature on every simulated tick, 12.5% of a leg's time in it)
+ */
+function featGetter(feat) {
+	if (feat.startsWith('key')) { const b = +feat.slice(3); return (sim) => (sim._keysMask >> b) & 1; }
+	if (feat.startsWith('psw:')) { const id = +feat.slice(4); return (sim) => (sim._switches.get(id) === true ? 1 : 0); }
+	if (feat.startsWith('osw:')) { const id = +feat.slice(4); return (sim) => (sim._oswitches.get(id) === true ? 1 : 0); }
+	if (feat.startsWith('coin@')) { const t = +feat.slice(5); return (sim) => { const W = sim.width; return sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }; }
+	switch (feat) {
+		case 'team': return (sim) => sim.team;
+		case 'prot': return (sim) => (sim.is_invulnerable ? 1 : 0);
+		case 'coins': return (sim) => sim.coins;
+		case 'bcoins': return (sim) => sim.blue_coins;
+		case 'crown': return (sim) => (sim._collide_crown ? 1 : 0);
+		case 'silver': return (sim) => (sim._collide_silver_crown ? 1 : 0);
+		case 'deaths': return (sim) => sim.deaths;
+		case 'cp': return (sim) => (sim.checkpoint.x < 0 ? -1 : sim.checkpoint.y * sim.width + sim.checkpoint.x);
+		case 'fx': return (sim) => (!sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity ? 0 : 1);
+		default: return () => NaN;
+	}
+}
+/**
  * goalOf(L, wp) -> {kind, tiles: Int32Array (the goal tiles for a goal field; for the trophy the level's trophies),
  * mask: Uint8Array(N) | null, test(sim) -> bool, allowDeath (the step may die on its way: playTo(..., {allowDeath}))}:
  * THE success rule of a waypoint, the same in every part (the primitives' A*, the leg search, the GPU finds' replay
@@ -187,7 +209,8 @@ function goalOf(L, wp) {
 	// alone could be another coin's while the ball stands on the target's untaken coin)
 	const ge = ex && (ex.feat === 'coins' || ex.feat === 'bcoins' || ex.feat === 'deaths');
 	const coin = ex && (ex.feat === 'coins' || ex.feat === 'bcoins');
-	const okF = ex ? (ge ? (sim) => featValue(sim, ex.feat) >= ex.value : (sim) => featValue(sim, ex.feat) === ex.value) : null;
+	const fv = ex ? featGetter(ex.feat) : null;
+	const okF = ex ? (ge ? (sim) => fv(sim) >= ex.value : (sim) => fv(sim) === ex.value) : null;
 	const onT = coin ? (sim, t) => t >= 0 && mask[t] === 1 && sim.is_coin_collected(t % W, (t / W) | 0) : (sim, t) => t >= 0 && mask[t] === 1;
 	const test = ex ? (sim) => !sim.is_dead && okF(sim) && (onT(sim, tileOf(sim, W, H)) || onT(sim, touchedTile(sim, W, H)))
 		: (sim) => !sim.is_dead && mask[tileOf(sim, W, H)] === 1;
@@ -270,4 +293,4 @@ const emitter = (stream = process.stdout) => (ev) => { try { stream.write(JSON.s
 /** the tiles a goal's ordering fields are built to, and their touch rule (the trophy's) */
 const fieldTilesOf = (goal) => (goal.fieldTiles ? goal.fieldTiles : goal.tiles);
 const fieldTouchOf = (goal) => (goal.fieldTiles ? !!goal.fieldTouch : goal.kind === 'trophy');
-module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };
+module.exports = { VERSION, fieldTilesOf, fieldTouchOf, strOf, masksOf, concat, loadLevelFile, tileOf, touchedTile, playTo, featValue, featGetter, goalOf, arrivalOf, classOf, pickDiverse, levelNow, goalField, fgHash, emitter, CLOCK_DOORS };

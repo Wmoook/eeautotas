@@ -107,8 +107,11 @@ async function createPrims(L, o = {}) {
 	const sim = new E.EESim(L), inp = new E.EEInput(), sim2 = new E.EESim(L);
 	const model = o.model || null;
 	const feats = model && model.feats ? model.feats.slice() : null;
-	const fsig = feats ? (s) => { let h = 0x811c9dc5; for (const f of feats) { h ^= (T.featValue(s, f) | 0); h = Math.imul(h, 0x01000193); } return h >>> 0; } : featSig;
-	const featKey = model && model.stateOf ? (s) => model.stateOf(s).key : (s) => fsig(s).toString(36);
+	// (the features' getters, each key parsed once: fsig runs on every simulated tick, and T.featValue's string parsing
+	// was 12.5% of a leg's time; model.keyOf = model.stateOf(s).key without the state object: the same key)
+	const fget = feats ? feats.map((f) => T.featGetter(f)) : null;
+	const fsig = fget ? (s) => { let h = 0x811c9dc5; for (let i = 0; i < fget.length; i++) { h ^= (fget[i](s) | 0); h = Math.imul(h, 0x01000193); } return h >>> 0; } : featSig;
+	const featKey = model && model.keyOf ? (s) => model.keyOf(s) : model && model.stateOf ? (s) => model.stateOf(s).key : (s) => fsig(s).toString(36);
 	let bounds = o.bounds || null;
 	if (!bounds) { const BO = require('./bounds.js'); bounds = BO.createBounds(L, { model }); }
 	let tables = null;
