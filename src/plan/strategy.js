@@ -187,7 +187,7 @@ const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EE
 // executor's (verified: the engine's replay from the level start and the waypoint's goal test).
 const ST_ON = process.env.EEAT_STRETCH === '1';
 const ST_MS = +process.env.EEAT_ST_MS || 40000, ST_RUNG = process.env.EEAT_ST_RUNG !== undefined ? +process.env.EEAT_ST_RUNG : 1;
-const ST_SHORT = process.env.EEAT_ST_SHORT !== undefined ? +process.env.EEAT_ST_SHORT : 3, ST_SHORT_F = +process.env.EEAT_ST_SHORT_F || 0.6, ST_SHORT_MAX_S = +process.env.EEAT_ST_SHORT_MAX_S || 200;
+const ST_SHORT = process.env.EEAT_ST_SHORT !== undefined ? +process.env.EEAT_ST_SHORT : 3, ST_SHORT_F = +process.env.EEAT_ST_SHORT_F || 0.9, ST_SHORT_MAX_S = +process.env.EEAT_ST_SHORT_MAX_S || 270;
 const ST_MIN_MS = 3000, ST_TRIES = 2;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
@@ -785,7 +785,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 	/** the child idle: the next request (the short first plan once, then the failed stretch of the most progress) */
 	const stSchedule = () => {
 		if (!ST_ON || !stChild || stBusy || stopped || best) return;
-		const room = left() - endReserve - 2000;
+		// (before a route the moves have the whole budget: the polish's and the proof's reserves are kept only once a route
+		// is known, and a route of the child's own is one; the whole-level backward solve needed 37 s in one piece on Stone
+		// Ruin at a 90-s clock and failed at 45 s)
+		const room = left() - 3000;
 		if (room < ST_MIN_MS) return;
 		if (!stShortSent) {
 			stShortSent = true;
@@ -797,7 +800,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 				for (const st of pl.steps) { const wp = st.waypoint || { kind: 'trophy', label: 'trophy' }; if (!stOkWp(st, wp)) break; legs.push({ step: st, wp }); }
 				if (legs.length) {
 					const ms = Math.min(ST_SHORT_MAX_S * 1000, ST_SHORT_F * total, room);
-					if (stSend(A, A.arrivals.reduce((m, x) => (x.tick < m.tick ? x : m), A.arrivals[0]), legs, ms, null)) { stBusy.short = true; return; }
+					// (its first leg is the stretch (the start, the plan's first step): the candidate's first try)
+					stNote(A, legs[0].step, legs[0].wp, pl, false);
+					const c0 = stCands.get(`${A.id}|${edgeKey(legs[0].step)}`) || null;
+					if (c0) c0.n--;
+					if (stSend(A, A.arrivals.reduce((m, x) => (x.tick < m.tick ? x : m), A.arrivals[0]), legs, ms, c0)) { stBusy.short = true; return; }
 				}
 			}
 		}
