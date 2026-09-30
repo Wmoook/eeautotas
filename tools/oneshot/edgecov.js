@@ -96,7 +96,7 @@ function replayHit(sim, inp, snap, masks, mv, W, H) {
 		E.applyMask(inp, masks[t]); sim.tick(inp);
 		if (mv.c1 === 'D') { if (sim.is_dead) return t + 1; continue; }
 		if (sim.is_dead) return 0;
-		if (T.tileOf(sim, W, H) === mv.tile1 && (mv.tele || ED.clsOf(sim, flags) === mv.c1)) return t + 1;
+		if (T.tileOf(sim, W, H) === mv.tile1 && (mv.tele || mv.c1 === 'A' || ED.clsOf(sim, flags) === mv.c1)) return t + 1;
 	}
 	return 0;
 }
@@ -152,14 +152,15 @@ async function main() {
 				if (mv.c0 === 'D') { lv.respawn++; continue; }
 				lv.moves++; lab.n++;
 				const srcs = (supAt.get(mv.tile0) || []).filter((u) => !SUPPORT.has(mv.c0) || mv.c0 === 'D' || u.cls === mv.c0 || u.kind === 'start');
-				if (!srcs.length) continue;
+				const miss = (why) => { if (argv.misses && (lv.missN = (lv.missN || 0) + 1) <= +argv.misses) console.log(`  MISS ${why} ${mv.label} t${mv.t0}+${mv.len} ${mv.c0}(${mv.tile0 % W},${(mv.tile0 / W) | 0}) -> ${mv.c1}(${mv.tile1 % W},${(mv.tile1 / W) | 0})${mv.tele ? ' tele' : ''} srcs ${srcs.map((u) => u.kind[0] + u.cls + u.vc).join(' ')}`); };
+				if (!srcs.length) { miss('nosrc'); continue; }
 				lv.src++; lab.src++;
 				const cands = [];
 				for (const u of srcs) for (const n of out.get(u.i) || []) {
 					const e = g.edges[n];
-					if (mv.c1 === 'D' ? e.cls === 'R' : (e.tile === mv.tile1 && (mv.tele || e.cls === mv.c1))) cands.push(n);
+					if (mv.c1 === 'D' ? e.cls === 'R' : (e.tile === mv.tile1 && (mv.tele || mv.c1 === 'A' || e.cls === mv.c1))) cands.push(n);
 				}
-				if (!cands.length) continue;
+				if (!cands.length) { miss('nopair'); continue; }
 				lv.pair++; lab.pair++;
 				cands.sort((a, b) => g.edges[a].T - g.edges[b].T);
 				if (g.edges[cands[0]].T <= mv.len) { lv.pairT++; lab.pairT++; }
@@ -175,7 +176,7 @@ async function main() {
 					let ok = best && best <= mv.len;
 					if (!ok) {
 						let r = null;
-						try { r = S1().leg(mv.snap, { tiles: [mv.tile1], cls: mv.tele ? 'any' : mv.c1 === 'D' ? 'D' : mv.c1 }, { Tmax: mv.len, chain: false, coupled: false, fieldMs: 100 }); } catch (e) { r = null; }
+						try { r = S1().leg(mv.snap, { tiles: [mv.tile1], cls: mv.tele || mv.c1 === 'A' ? 'any' : mv.c1 === 'D' ? 'D' : mv.c1 }, { Tmax: mv.len, chain: false, coupled: false, fieldMs: 100 }); } catch (e) { r = null; }
 						ok = !!(r && r.ok && r.T <= mv.len);
 					}
 					if (ok) { lv.lazyT = (lv.lazyT || 0) + 1; lab.lazyT = (lab.lazyT || 0) + 1; }
