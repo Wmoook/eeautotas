@@ -58,7 +58,9 @@
 //     target: {tiles: number[] (centre tiles), cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A' | 'any', tele: bool (the goal tick
 //       must teleport), via: number[] (portal tiles to enter for a teleport target)}
 //     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
-//       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), chain / chainAny / chainMs (the chain tier),
+//       bound's budget, 400 k), deadline (a Date.now() clock for the plain and coupled pieces; 0 none), alts / altSlack (up
+//       to alts more verified plain legs with distinct end states within altSlack ticks: res.alts [{T, masks}]),
+//       fieldMs (250), coupledTicks (2 M), chain / chainAny / chainMs (the chain tier),
 //       prove (the event-graph proof of src/math/lb.js for a leg the plain certificate did not prove; default
 //       createSolver's opts.prove, false), proveMs (50), land (the land-and-act members of the plain tier: an airborne
 //       member lands on a floor line and hops / jumps / walks off / walks on; default on, EEAT_MSOLVE_LAND=0 off),
@@ -460,6 +462,7 @@ function createSolver(L, opts = {}) {
 	 * Returns {ok, masks, T, hop, cands, verifies, tool: 'plain'} or {ok: false, ...}.
 	 */
 	function solvePlain(snap, s, ctx, tg, goal, o, stats) {
+		stats.t0 = process.hrtime.bigint();
 		const Tmax = o.Tmax;
 		const I = K1.ia(ctx), G = K1.ga(ctx), Hd = holdTables(ctx);
 		const sol = solidOf(s), tiles = s.tiles;
@@ -624,12 +627,22 @@ function createSolver(L, opts = {}) {
 		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
 		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
 		// the plain tier's clock (o.plainMs: a deadline for the whole tier, checked per item and every 2048 nodes)
-		const tEnd = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
+		// and the caller's clock (o.deadline, Date.now(): the executor's window; the branch and bound of a leg with no
+		// candidate ran 1.8-2.7 s on MIHB's Dream (400 k nodes, 386 items, 0 verifies) and ate its whole window)
+		const tEnd0 = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
+		const tEnd = o.deadline > 0 ? (tEnd0 ? Math.min(tEnd0, o.deadline) : o.deadline) : tEnd0;
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
 		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
+		// (o.alts: up to that many verified legs with DISTINCT END STATES (the arrival's class: vx, vy rounded, grounded) within
+		// o.altSlack ticks of the cheapest, the cheapest per class: the next leg starts from the arrival, and the cheapest
+		// leg's end (full speed, launched) can be the worst start for it; the candidate order is unchanged, the first found
+		// is still the answer)
+		const alts = !o.each && o.alts > 0 ? new Map() : null, altSlack = alts ? Math.max(0, o.altSlack || 0) : 0;
+		stats.setupMs = Number(process.hrtime.bigint() - (stats.t0 || process.hrtime.bigint())) / 1e6; stats.nItems = items.length;
 		for (const it of items) {
-			if (!o.each && best && it.T > best.T) break;
+			if (!o.each && best && it.T > best.T + altSlack) break;
+			if (alts && best && it.T > best.T && alts.size >= o.alts) break;
 			if (budget.out) break;
 			if (tEnd && Date.now() > tEnd) { budget.out = true; break; }
 			if (o.each && solved.has(it.tile)) continue;
@@ -711,6 +724,13 @@ function createSolver(L, opts = {}) {
 				if (hit > 0) {
 					const ms = masks.subarray(0, hit);
 					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: memberName(m), code };
+					if (alts) {
+						// (the replay left the engine at the arrival: its class, the cheapest leg per class)
+						const key = `${Math.round(sim.speed_x)},${Math.round(sim.speed_y)},${sim.on_ground ? 1 : 0}`;
+						const a = alts.get(key);
+						if (!a || hit < a.T) alts.set(key, { T: hit, masks: Uint8Array.from(ms) });
+						return alts.size >= o.alts;
+					}
 					return true;
 				}
 				return false;
@@ -726,7 +746,9 @@ function createSolver(L, opts = {}) {
 		}
 		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
-		return Object.assign({ ok: true, tool: 'plain' }, best);
+		const res = Object.assign({ ok: true, tool: 'plain' }, best);
+		if (alts) res.alts = Array.from(alts.values()).filter((a) => a.T !== best.T || a.masks.length !== best.masks.length || a.masks.some((v, i) => v !== best.masks[i])).sort((a, b) => a.T - b.T);
+		return res;
 	}
 
 	// ---------------------------------------------------------------- the coupled piece (per-tick one change, engine)
@@ -743,8 +765,10 @@ function createSolver(L, opts = {}) {
 	function boxOf(tg) {
 		let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
 		for (const t of (tg.via || tg.tiles)) { const c = t % W, r = (t / W) | 0; if (c < x0) x0 = c; if (c > x1) x1 = c; if (r < y0) y0 = r; if (r > y1) y1 = r; }
-		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8)
-		return { xl: 16 * x0 - 8, xh: 16 * x1 + 8, yl: 16 * y0 - 8, yh: 16 * y1 + 8 };
+		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8); the goal test clamps a centre outside the
+		// world to the edge tiles, so a target on the world's edge reaches out without end on that side
+		return { xl: x0 <= 0 ? -Infinity : 16 * x0 - 8, xh: x1 >= W - 1 ? Infinity : 16 * x1 + 8,
+			yl: y0 <= 0 ? -Infinity : 16 * y0 - 8, yh: y1 >= Hh - 1 ? Infinity : 16 * y1 + 8 };
 	}
 	// the coupled piece's JUMP FAMILIES and the cut (EEAT_MATH_CORDER=0: the first version's family alone, no cut): the
 	// first version's order (the first-tick press, then DIR9) with the jump press at the change tick on the same direction
@@ -795,7 +819,7 @@ function createSolver(L, opts = {}) {
 			// (phase 1 only for a leg phase 0 left unsolved: its extra holds are the time a solved leg does not need)
 			if (ph === 1 && best) break;
 			for (const [p0, m0] of pre) {
-				if (stats.ticks > budget) break;
+				if (stats.ticks > budget || (o.deadline > 0 && Date.now() > o.deadline)) break;
 				const lim = best ? best.T - 1 : Tmax - 1;
 				snaps.length = 0;
 				sim.restore(snap);
@@ -827,7 +851,7 @@ function createSolver(L, opts = {}) {
 							best = { T: h, masks: ms, k: 1 };
 						}
 					}
-					if (stats.ticks > budget) break;
+					if (stats.ticks > budget || (o.deadline > 0 && Date.now() > o.deadline)) break;
 				}
 			}
 		}
@@ -1008,8 +1032,11 @@ function createSolver(L, opts = {}) {
 		const goal = goalOf(target);
 		const oo = Object.assign({ Tmax: opts.Tmax || 120 }, o);
 		const ctx = plainStart(sim);
+		const hr = () => Number(process.hrtime.bigint() - t0) / 1e6;
+		const split = {};
 		const lb = ctx && !target.tele ? lowerBoundOf(sim, tg, ctx) : 0;
 		const cert = lb > 0 && certify(sim, lb, ctx, tg);
+		split.pre = hr();
 		let res = { ok: false, why: ctx ? 'no candidate' : 'not plain' };
 		if (ctx && oo.plain !== false) {
 			if (tg.via) {
@@ -1026,6 +1053,7 @@ function createSolver(L, opts = {}) {
 				}
 			} else res = solvePlain(snap, sim, ctx, tg, goal, oo, stats);
 		}
+		split.plain = hr();
 		// a plain answer through a landing (4.11) is the plain regime's cheapest, not the cheapest of every tier: a way
 		// through a field or the coupled one-change family can be shorter (the single moves' hops: 30 of 11,747 legs
 		// longer than the field / coupled tiers' answers), so the other tiers are asked below its T too
@@ -1043,6 +1071,7 @@ function createSolver(L, opts = {}) {
 				if (hit > 0 && (!res.ok || hit < res.T)) res = { ok: true, tool: 'field', T: hit, masks: Uint8Array.from(r.masks.subarray(0, hit)), member: r.tool };
 			}
 		}
+		split.field = hr();
 		if (res.ok && (res.tool === 'field' || landAns) && oo.coupled !== false && res.T > 1) {
 			// cheapest T across the tiers: the coupled piece below the field answer's T
 			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1 }), stats);
@@ -1070,6 +1099,8 @@ function createSolver(L, opts = {}) {
 			res.proven = cert && res.T === lb;
 			if (res.proven) res.provenBy = 'plain';
 		} else { res.lb = lb; res.cert = cert; res.proven = false; }
+		split.coupled = hr();
+		res.split = split; res.plainSetup = stats.setupMs;
 		res.cands = stats.cands; res.verifies = stats.verifies; res.items = stats.items; res.ticks = stats.ticks;
 		res.us = Number(process.hrtime.bigint() - t0) / 1e3;
 		if (res.ok && !res.proven && (oo.prove !== undefined ? oo.prove : opts.prove) && !target.tele) {
@@ -1149,7 +1180,7 @@ function createSolver(L, opts = {}) {
 		if (!tiles.length) return [];
 		const tg = targetOf({ tiles, cls: 'G' });
 		const stats = { items: 0, cands: 0, verifies: 0, ticks: 0 };
-		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000, perTile: o.perTile || 0 }, stats);
+		const r = solvePlain(snap, sim, ctx, tg, goalOf({ tiles, cls: 'G' }), { Tmax, K: o.K === undefined ? 1 : o.K, each: true, nodes: o.nodes || 150000, perTile: o.perTile || 0, deadline: o.deadline || 0 }, stats);
 		const out = r.each || [];
 		for (const e of out) {
 			const hm = Uint8Array.from(e.masks); hm[hm.length - 1] |= 1;
@@ -1224,9 +1255,7 @@ function createSolver(L, opts = {}) {
 			for (const x of heap) x.f = x.g + W8 * x.h;
 			for (let i = (heap.length >> 1) - 1; i >= 0; i--) down(i);
 		};
-		// (o.field: the caller's own ordering field to the target (the compiler's executor passes its goal field of the level as
-		// the doors stand, memoized there): the same use as the reach field here, no build)
-		const rf = o.field !== undefined ? o.field : o.reach === false ? null : reachFieldOf(tg.tiles);
+		const rf = o.reach === false ? null : reachFieldOf(tg.tiles);
 		const KAPPA = o.kappa || 16 / 6.776552880470027;
 		const hOf = () => {
 			let b = 0;
@@ -1261,14 +1290,14 @@ function createSolver(L, opts = {}) {
 			sim.restore(n.snap);
 			const plainNode = !!plainStart(sim);
 			if (n.g > 0 || o.rootLeg !== false) {
-				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000, fieldMs: o.fieldMs });
+				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || 300000, fieldMs: o.fieldMs, deadline: t0 + budgetMs });
 				legs++;
 				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
 			}
 			sim.restore(n.snap);
 			const ctx = plainStart(sim);
 			if (fan <= 0) continue;
-			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0 }) : [];
+			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs }) : [];
 			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60))) lands.push(e);
 			legs += lands.length;
 			for (const rr of lands) {

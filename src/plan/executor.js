@@ -182,6 +182,13 @@ const MATH_UB_MS = +process.env.EEAT_MATH_UB_MS > 0 ? +process.env.EEAT_MATH_UB_
 const MATH_COUPLED_NEAR = +process.env.EEAT_MATH_COUPLED_NEAR > 0 ? +process.env.EEAT_MATH_COUPLED_NEAR : 40;
 const MATH_COUPLED_TICKS = +process.env.EEAT_MATH_COUPLED_TICKS > 0 ? +process.env.EEAT_MATH_COUPLED_TICKS : 150000;
 const MATH_CERT = () => process.env.EEAT_MATH_CERT !== '0';   // the math bound on the search tiers' legs
+// THE ARRIVALS a math leg leaves (iterate lane 'chains'): the direct leg's cheapest T is ONE end state (mostly full speed or
+// launched), where the search tiers leave up to k diverse ones (T.pickDiverse over every goal state at the least depth);
+// the next leg starts from them. The plain solver lists up to MATH_ALTS more verified legs with DISTINCT END STATES (vx,
+// vy rounded, grounded) within MATH_ALT_SLACK ticks of its cheapest (the cheapest per class; the answer and its proof
+// unchanged), each an arrival candidate here (EEAT_MATH_ALTS=0: the cheapest leg and its hop alone, as before)
+const MATH_ALTS = process.env.EEAT_MATH_ALTS !== undefined ? +process.env.EEAT_MATH_ALTS : 6;
+const MATH_ALT_SLACK = process.env.EEAT_MATH_ALT_SLACK !== undefined ? +process.env.EEAT_MATH_ALT_SLACK : 3;
 const PATTERNS_MAX = 400;
 /** a leg's inputs as runs: 'mask x count' joined by spaces (the pattern's code) */
 function runsOf(tail) {
@@ -386,23 +393,30 @@ function makeCore(L, co) {
 			const MS = mathSolver();
 			let B0 = null;
 			// (not for a skeleton sub-leg: its bound context is the waypoint's tiles, not the sub-level set's)
-			if (!goal.fieldTiles) { try { B0 = X.boundFor(L, goal); } catch (e) { B0 = null; } }
-			for (const s of live.slice(0, MATH_STARTS)) {
+			const prof = { bMs: 0, hbMs: 0, legs: [] };
+			if (!goal.fieldTiles) { const tb = Date.now(); try { B0 = X.boundFor(L, goal); } catch (e) { B0 = null; } prof.bMs = Date.now() - tb; }
+			const mStarts = live.slice(0, MATH_STARTS);
+			for (let mi = 0; mi < mStarts.length; mi++) {
+				const s = mStarts[mi];
 				const left = mEnd - Date.now();
+				// (each start its share of the tier's clock: 1.5 x an even split of what is left, the last start all of it)
+				const nLeft = mStarts.length - mi, dlS = Date.now() + (nLeft > 1 ? Math.min(left, 1.5 * left / nLeft) : left);
 				if (left < 5) { why = why || 'time'; break; }
 				const si = starts.indexOf(s);
 				const Tmax = Math.min(MATH_TMAX, beforeTick >= 0 ? beforeTick - s.tick : Infinity);
 				if (!(Tmax >= 1)) continue;
 				// (a start the endgame's sound bound puts past the horizon: no direct leg exists there)
 				let hb = 0;
-				if (B0) { sim.restore(s.snap); hb = require('../endgame.js').lowerBound(B0, sim, Tmax + 1); if (hb > Tmax) { far++; continue; } }
+				if (B0) { const th = Date.now(); sim.restore(s.snap); hb = require('../endgame.js').lowerBound(B0, sim, Tmax + 1); prof.hbMs += Date.now() - th; if (hb > Tmax) { far++; continue; } }
 				const near = B0 !== null && hb <= MATH_COUPLED_NEAR;
 				let r;
 				try {
 					r = MS.leg(s.snap, mTarget, { Tmax, chain: false, prove: true, proveMs: Math.max(2, Math.min(50, left / 4)), fieldMs: Math.max(5, Math.min(120, left / 2)),
-						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000, plainMs: Math.max(5, left / 2) });
+						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000,
+						alts: MATH_ALTS > 0 ? MATH_ALTS : 0, altSlack: MATH_ALT_SLACK, deadline: dlS });
 				} catch (e) { why = `error: ${e && e.message || e}`; continue; }
 				tries++;
+				prof.legs.push({ us: Math.round(r.us || 0), ok: !!r.ok, tool: r.tool || null, T: r.T || 0, pUs: Math.round(r.proveUs || 0), it: r.items || 0, v: r.verifies || 0, tk: r.ticks || 0, why: r.ok ? undefined : r.why, sp: r.split, su: r.plainSetup });
 				sims += r.ticks || 0;
 				// (the bound: the solver's plain bound only with its certificate, the event-graph bound when it has one)
 				const lbE = Math.max(r.cert ? r.lb || 0 : 0, r.lbMath > 0 ? r.lbMath : 0) + (lag === 1 ? 1 : 0);
@@ -411,10 +425,12 @@ function makeCore(L, co) {
 				const n0 = cands.length;
 				mathCands(si, r.masks, r, cands, 'math:' + r.tool);
 				if (r.hop) mathCands(si, r.hop, r, cands, 'math:' + r.tool);
+				// (the solver's other end states: arrivals too, proven only at the cheapest leg's T)
+				if (Array.isArray(r.alts)) for (const a of r.alts) mathCands(si, a.masks, Object.assign({}, r, { T: a.T, proven: !!r.proven && a.T === r.T }), cands, 'math:' + r.tool);
 				for (let i = n0; i < cands.length; i++) if (!best || cands[i].depth < best.depth) best = cands[i];
 			}
 			if (tries > 0) { mY.dTry++; if (cands.length) mY.dOk++; }
-			tiers.push({ tier: 'math', ms: Date.now() - tM, tries, far, ok: cands.length > 0, tool: best ? best.leg.tool : null, T: best ? best.leg.ticks : null, proven: !!(best && best.leg.proven), provenBy: best ? best.leg.provenBy || null : null, why: cands.length ? null : why });
+			tiers.push({ tier: 'math', ms: Date.now() - tM, prof, tries, far, ok: cands.length > 0, tool: best ? best.leg.tool : null, T: best ? best.leg.ticks : null, proven: !!(best && best.leg.proven), provenBy: best ? best.leg.provenBy || null : null, why: cands.length ? null : why });
 			if (cands.length) {
 				// (a short leg the math found but did not prove: the exact search bounded by it (the tier 2b of the finders'
 				// legs), a shorter leg (proven the minimum) or the proof that the math's leg is the minimum; the math's

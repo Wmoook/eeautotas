@@ -1089,11 +1089,12 @@ answer replayed again by the bench's separate EESim: **0 rejected**):
 
 | legs | the first version | the jump families + cut | in <= the route's ticks |
 |---|---:|---:|---:|
-| unsolved field legs <= 120 ticks (1,992) | 0 | **339 (17.0%)** | 0 -> 285 |
+| unsolved field legs <= 120 ticks (1,992) | 0 | **339 (17.0%)** | 0 -> 280 |
 | of them arrow / dot / boost / portal / climb / swim | 0 / 0 / 0 / 0 / 0 / 0 | 260 / 28 / 25 / 25 / 0 / 1 | |
-| solved field legs, every 6th (2,713) | 2,651 | **2,662** (only the first 6, only this 17) | 2,473 -> 2,486 |
+| solved field legs, every 6th (2,713) | 2,651 | **2,663** (only the first 5, only this 17) | 2,473 -> 2,486 |
 
-On the legs both solve the new T is lower on 19, higher on 5 (the budget's order: the same family explored in another
+(The final code: the second family only for an unsolved leg, the edge rule of the cut.) On the legs both solve the
+new T is lower on 17, higher on 5 (the budget's order: the same family explored in another
 order within 150 k ticks). Of the 339 legs it adds 306 hold one direction and press the jump inside the leg (family 1),
 33 press it at a change of direction (family 2).
 
@@ -1685,11 +1686,56 @@ route (lbProof).
   test/planstrategy.js 24/0, test/msolve.js 50/0 (plancompile's hard-watchdog check fails under the box's load with and
   without this change).
 
-### 7.7 The land-and-act members in the compiler (the coverage iteration)
+### 7.7 The tier's clock and its arrivals (the MATH program's iterate lane 'chains', 2026-09-30 05:00-06:00)
 
-The executor's direct legs get msolve's land-and-act members (4.11) by default (`EEAT_MSOLVE_LAND=0` off) and give the
-plain tier half of the time left (`plainMs`, as the field tier's `fieldMs`). Box 3, 60 s, --workers=3, the members on
-vs `EEAT_MSOLVE_LAND=0` side by side on one tree (n4-plan 2cb8357 + the members + plainMs), par 3 each:
+**The clock.** A leg the mathematics does not evaluate must cost the executor nothing but its share. The wire's tier
+gave `msolve.leg` a share of the window but the solver had no clock: on the chain harness (test/planexec.js
+`--only=chain`: the executor alone compiles a known route from its waypoints, each leg from the leg before's
+arrivals, 2 s x legTicks / 150 a leg) MIHB's Dream's direct legs with no plain candidate ran the plain branch and bound
+for 1.8-2.7 s (400 k nodes over 386 (T, member) items, 0 verifies), and with that cut, `fieldsolve.solveLeg` for
+1.3-2.1 s past its `maxMs` of 120 ms (checked per gravity option, while one option's axis solves ran at every tick of
+a long floor window): every such leg failed 'budget' with the math tier at 2-5 s of a 2-s window. Now `o.deadline`
+(a `Date.now()` clock) reaches the plain tier (per item and every 1,024 nodes; on n4-math it is the smaller of it and
+the coverage lane's `o.plainMs`), the coupled piece (per prefix), a chain's own legs and fan-out landings (the chain's
+end), and fieldsolve checks its clock every 8 ticks of an option and between `iterate()`'s schedules (a generation the
+clock cut still proves no bound). The executor gives each start 1.5 x an even split of the tier's time (the last all
+of it).
+
+**The arrivals.** The next leg starts where this one arrives, and the cheapest leg's end is ONE state (mostly full
+speed, or launched), where the search tiers leave up to k diverse ones (T.pickDiverse over every goal state at the
+least depth). The plain solver now lists up to `o.alts` more verified legs with DISTINCT END STATES (the arrival's
+class: vx and vy rounded, grounded) within `o.altSlack` ticks of its cheapest (the cheapest per class; the answer and
+its proof unchanged: the first found is still the answer, the proof holds only at its T); the executor makes each an
+arrival candidate (`EEAT_MATH_ALTS` 6, `EEAT_MATH_ALT_SLACK` 3; 0 = the cheapest leg and its hop alone).
+
+**Measured** (box 3; the 18 known routes of the chain harness, legs done / compiled end to end): 2cb8357 29 legs, 2
+routes (Ruins, Bygone Tutorial); `EEAT_MATH=0` 70 legs, 2 (MIHB's Dream, Bygone); the clock + the arrivals **69 legs, 2
+(MIHB's Dream 46 / 46, Bygone)**, A Dreary Day 5 / 12 vs 2 / 12 either way. Route quality where both compile (the
+compiled run ticks): MIHB's Dream 10,103 / 10,366 (two runs) vs 10,689 without the math; Bygone Tutorial 2,160 / 2,272
+(alts) vs 2,265 (no alts) vs 2,349 (2cb8357) vs 2,209 (off); Ruins 1,535 (alts) vs 1,625 (no alts) vs 1,566
+(2cb8357). The legs' math profile is in the tier record (`tiers[].prof`: the goal bound's build ms, per start the
+leg's us, tool, T, items, verifies and its phase split pre / plain / field / coupled).
+The shared gate (block-4 list vs b3_w3.json, box 3, 60 s, W3, on the fields lane's 2371e55 + this): **exit 0, compiled
+13 vs the baseline's 12** (Tutorial 1 compiles), better 10 (Ruins 1,282 vs 1,444, NC Naos 319 vs 358, Rosa dei Venti
+3,741 vs 3,815, MIHB's Dream progress 36 vs 23, Booty Return 27 vs 13), worse 0, 13 / 13 .eetas replayed; its math
+988 direct calls, 168 with a leg (17.0%; the wire's gate 14.9%), 472 chains, 53 with a leg (11.2%; 7.7%), 496 math legs
+(315), 106 proven (events 58, exact 44, plain 4; 79). (On 2cb8357 the same change failed the gate once on Tree
+Decorating and Starlight; both reran fine, 1,792 / 1,426 ticks and 27 / 24 triggers: the spread.)
+The chain harness again, four arms side by side on the pushed tree (box 3 at load ~80, legs done of the 18 routes /
+compiled end to end / compiled ticks over the known route, median): 2cb8357 36 / 3 / 1.179 (MIHB's Dream 1 / 46);
+this with `EEAT_MATH=0` 85 / 4 / 1.267; this with `EEAT_MATH_ALTS=0` 86 / 4 / 1.292; this 83 / 4 / 1.271 (MIHB's Dream
+10,132 vs 10,233 off vs 10,298 no alts; Bygone Tutorial 2,159 vs 2,129 vs 2,208; Desolate Caverns 2,039 vs 1,834 vs
+1,977): the clock gives the math tier the search tiers' success back; the arrivals make its routes a little shorter than
+the cheapest leg's alone; the ticks against the math-off arm are a draw (Desolate Caverns: the class left, below).
+Left: the diverse arrivals come from the plain tier only (the field / coupled / chain answers are one end state); 7 of
+the 18 routes fail their first leg in every arm (179-1,845 route ticks: the skeleton's, not a direct leg's).
+
+### 7.8 The land-and-act members in the compiler (the coverage iteration)
+
+The executor's direct legs get msolve's land-and-act members (4.11) by default (`EEAT_MSOLVE_LAND=0` off); the plain
+tier's clock is the tier's own (7.7: `o.deadline`, with msolve's `o.plainMs` the lesser). Box 3, 60 s, --workers=3, the
+members on vs `EEAT_MSOLVE_LAND=0` side by side on one tree (n4-plan 2cb8357 + the members + the plain tier's half of
+the time left as its clock), par 3 each:
 
 - **The shared gate:** exit 0 in both arms, compiled 11 = 11 (baseline 9), every .eetas replayed (11 / 11 each);
   on vs off: Ruins 1,387 vs 1,474 run ticks, Desolate Caverns 1,604 vs 1,666, Tree Decorating 1,492 vs 1,619, The Ten
