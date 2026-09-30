@@ -44,6 +44,7 @@ const KEY_TICKS = 500;
 // EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
 const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
 const NEAR_RUNG = process.env.EEAT_NEAR_RUNG !== '0';   // (the rung balance of the near plans: nearPlans; EEAT_NEAR_RUNG=0 off)
+const NEAR_FAR = () => process.env.EEAT_NEAR_FAR === '1';   // (no nearer trigger: the nearest farther one; nearPlans; OPT-IN)
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -941,8 +942,13 @@ function createPlanner(model, facts, o = {}) {
 		// T-PLAN-ORACLE unchanged by construction (it fires only after a failed rung): 619 plans, 0 / 0.
 		// EEAT_NEAR_RUNG=0: only untried triggers, as before)
 		const rCap = NEAR_RUNG ? rMin : 1;
-		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) < rCap)
-			.sort((x, y) => (NEAR_RUNG ? facts.rungOf(x.edge, cls) - facts.rungOf(y.edge, cls) : 0) || x.lb - y.lb || x.est - y.est);
+		const cand0 = (e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && facts.rungOf(e.edge, cls) < rCap;
+		const byRungLb = (x, y) => (NEAR_RUNG ? facts.rungOf(x.edge, cls) - facts.rungOf(y.edge, cls) : 0) || x.lb - y.lb || x.est - y.est;
+		let cands = es.filter((e) => cand0(e) && e.lb < lb0).sort(byRungLb);
+		// (THE FAR NEAR PLAN, doctor 5, OPT-IN EEAT_NEAR_FAR=1: no trigger nearer by the lb than the failed first leg: the
+		// nearest farther one, by the same order. The lb of a false near is small (Unforgiving Climb: the trophy's 47-50
+		// ticks, the level's known route 3,914): no trigger was ever nearer and the plans' first legs climbed every rung)
+		if (!cands.length && NEAR_FAR()) cands = es.filter(cand0).sort(byRungLb);
 		const out = [];
 		const root = { S: a.S, pos: a.pos, e: null, parent: null };
 		for (const e of cands.slice(0, NEAR_K)) {
