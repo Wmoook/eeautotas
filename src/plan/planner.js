@@ -505,7 +505,9 @@ function createPlanner(model, facts, o = {}) {
 			// the anchor's own active key: its door first, before the key runs out
 			if (isRoot && a.sim && (!e.X || e.X.kind !== 'key')) {
 				const pass = keyPassage(a.S, a.pos, e, a.base);
-				if (pass) {
+				// (once done from this anchor's class its arrivals past the door are the anchor's own (the same model state):
+				// the passage is not proposed again, the plan goes on from them)
+				if (pass && !(facts && facts.okTicks(`region:key${pass.colour}-door`, cls) !== undefined)) {
 					const c = pass.colour, left = KEY_TICKS - (a.sim._ticks - a.sim._kt[c]);
 					if (left > 0) push({ edge: `region:key${c}-door`, nodeClass: cls, rung: facts ? facts.rungOf(`region:key${c}-door`, cls) : 0, estTicks: 0, lb: 0,
 						waypoint: { kind: 'region', tiles: pass.tiles, expect: null, beforeTick: a.tick + left - 1, label: `past the ${COLOURS[c] || c} key door` } });
