@@ -39,6 +39,9 @@
 //              "blank": a way, 136 "disappear": none); a 2-high column of it: the field goes over it as over 9s, every
 //              state of the engine's routes finite; random rooms with 50 walls: the field = the room with 50 made 9, its
 //              -1 set holds the one of 50 as an open door (only tighter), no state finite right after a cut-off one
+//   P the plain-ball field (opts.plainFx, COMPILER DOCTOR 6): physics mode with an effect tile, the self-check, a ledge only a
+//              jump effect reaches (every state of the engine's route finite; the start cut without the effect tile), random
+//              rooms with effect tiles of every kind: every state the engine search reached the trophy from finite
 // usage: node test/reach.js [--only=A,B,..] [--gpu] [--tool=<eegpu.exe>] [--jobs=<dir>] [--bench=<file>] [--quick]
 // Exit code 1 if any check fails. Run the --gpu part through the machine's GPU lock (src/out/gpulock.js).
 const fs = require('fs');
@@ -1568,7 +1571,67 @@ function trapLevel() {
 	return { W, H, cells: c };
 }
 
+// ---------------------------------------------------------------- P the plain-ball field (opts.plainFx, COMPILER DOCTOR 6)
+// One effect tile anywhere made the whole field the gravity-blind walk. With plainFx (and goals) the field is the physics
+// model for a PLAIN ball, the effect tiles that change a plain ball goals at their walk cost, and costAt(field, sim) of a
+// ball with an effect on its walk: every state of an engine route finite (the plain part and the part after an effect).
+function sectionP() {
+	section('P the plain-ball field (plainFx): physics up to the first effect tile, sound along engine routes');
+	const goalsOf = (L) => { const g = []; for (let i = 0; i < L.fg.length; i++) if (L.fg[i] === 121) g.push({ tile: i, cost: 0 }); return g; };
+	// (a) a plain room with ONE jump effect in a far corner: physics mode, the self-check, the cost at the start as the room
+	// without the effect (the corner is farther than the trophy)
+	const rows = box(['..........T', '.......####', '...........', '#####......', '...........', 'S........##']);
+	const La = ascii(rows), Lfx = levelOfCells(La.width, La.height, [...(() => { const c = []; rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch !== '.') c.push([x, y, ...ID[ch]]); })); return c; })(), [1, 1, 417, 1]]);
+	const fw = R.reachField(Lfx, { goals: goalsOf(Lfx) }), fp = R.reachField(Lfx, { goals: goalsOf(Lfx), plainFx: true, check: true }), f0 = R.reachField(La, { goals: goalsOf(La) });
+	const s0 = startSim(Lfx, 3), s1 = startSim(La, 3);
+	check('an effect tile anywhere: walk mode without plainFx, physics with it', fw.mode === 'walk' && fp.mode === 'physics' && fp.plainFx === true && fp.fxSeeds === 1, `${fw.mode} / ${fp.mode} seeds ${fp.fxSeeds}`);
+	check('the plain-ball field passes the self-check', fp.mismatches === 0, `${fp.mismatches}`);
+	check('the start costs the same as the room without the effect tile (it is farther than the trophy)', R.costAt(fp, s0) === R.costAt(f0, s1), `${fmt(R.costAt(fp, s0))} vs ${fmt(R.costAt(f0, s1))}`);
+	// (b) the trophy on a ledge only a jump effect reaches: the effect tile by the spawn; plainFx seeds it: finite at the
+	// start, every state of the engine's route finite (after the pickup by the walk); the same room with the tile as air: cut
+	const rowsB = box(['..T.......', '..###.....', '..........', '..........', '..........', 'S.J.......']);
+	const cellsB = []; rowsB.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === 'J') cellsB.push([x, y, 417, 1]); else if (ch !== '.') cellsB.push([x, y, ...ID[ch]]); }));
+	const Lb = levelOfCells(rowsB[0].length, rowsB.length, cellsB), Lb0 = levelOfCells(rowsB[0].length, rowsB.length, cellsB.filter((c) => c[2] !== 417));
+	const route = engineRoute(Lb, 160, 3000), route0 = engineRoute(Lb0, 160, 3000);
+	const fb = R.reachField(Lb, { goals: goalsOf(Lb), plainFx: true, check: true }), fb0 = R.reachField(Lb0, { goals: goalsOf(Lb0) });
+	const wb = route ? walk(Lb, fb, route) : null;
+	check('the high ledge: the engine routes it only with the jump effect', !!route && !route0, `${route ? route.length : 'none'} / ${route0 ? route0.length : 'none'}`);
+	check('the plain-ball field: finite at the start, every state of the route finite (plain and after the pickup)', R.costAt(fb, startSim(Lb, 0)) >= 0 && wb && wb.cut === 0 && wb.finished, wb ? `${wb.n} states, ${wb.cut} cut${wb.first ? ' ' + JSON.stringify(wb.first) : ''}` : 'no route');
+	check('without the effect tile the physics field cuts the start (the proof the seed keeps sound)', R.costAt(fb0, startSim(Lb0, 0)) < 0, fmt(R.costAt(fb0, startSim(Lb0, 0))));
+	// (c) random rooms with effect tiles of every kind and number: every state from which a small engine search reached the
+	// trophy finite in the plain-ball field (the search's states carry any effects they picked up)
+	let seed = 23;
+	const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+	const FX = [[417, 0], [417, 1], [417, 2], [418, 1], [418, 0], [419, 1], [419, 2], [453, 1], [461, 2], [461, 3], [1517, 1], [1517, 2], [1517, 3]];
+	const ids = [9, 9, 9, 4, 1, 2, 3, 361, 1052, 119, 116, 117, 114];
+	let lv = 0, routed = 0, states = 0, cut = 0, bad = 0, physics = 0, firstBad = null;
+	for (let k = 0; k < 24; k++) {
+		const W = 14 + (k % 3) * 4, H = 10 + (k % 2) * 4, cells = [];
+		for (let x = 0; x < W; x++) cells.push([x, 0, 9], [x, H - 1, 9]);
+		for (let y = 1; y < H - 1; y++) cells.push([0, y, 9], [W - 1, y, 9]);
+		for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+			const r = rnd();
+			if (r < 0.06) { const e = FX[Math.floor(rnd() * FX.length)]; cells.push([x, y, e[0], e[1]]); } else if (r < 0.24) { const id = ids[Math.floor(rnd() * ids.length)]; cells.push(id === 1052 ? [x, y, id, Math.floor(rnd() * 4)] : [x, y, id]); }
+		}
+		cells.push([Math.floor(W / 2), 2, 121], [2, H - 2, 255]);
+		const L = levelOfCells(W, H, cells);
+		lv++;
+		const f = R.reachField(L, { goals: goalsOf(L), plainFx: true, check: true });
+		if (f.mode === 'physics') physics++;
+		if (f.mismatches) bad++;
+		const tree = engineRoute(L, 120, 2500, true, 0);
+		if (!tree.route) continue;
+		routed++;
+		const ac = aheadCut(L, f, tree.ahead), wr = walk(L, f, tree.route);
+		states += ac.n + wr.n; cut += ac.cut + wr.cut;
+		if ((ac.cut || wr.cut) && !firstBad) firstBad = { k, ahead: ac.first, route: wr.first };
+	}
+	check(`${lv} random rooms with effect tiles: physics mode (${physics}), the self-check`, physics > 0 && bad === 0, `${bad} with mismatches`);
+	check(`their engine routes (${routed} rooms): every state from which the search reached the trophy finite`, routed > 0 && cut === 0, `${states} states, ${cut} cut${firstBad ? ' ' + JSON.stringify(firstBad) : ''}`);
+}
+
 (async () => {
+	if (want('P')) sectionP();
 	if (want('A')) sectionA();
 	if (want('B')) sectionB();
 	if (want('C')) sectionC();
