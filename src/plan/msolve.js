@@ -60,7 +60,9 @@
 //     o: {Tmax, K (max x changes, default 2), plain, fields, coupled (each default true), nodes (the plain branch and
 //       bound's budget, 400 k), fieldMs (250), coupledTicks (2 M), chain / chainAny / chainMs (the chain tier),
 //       prove (the event-graph proof of src/math/lb.js for a leg the plain certificate did not prove; default
-//       createSolver's opts.prove, false), proveMs (50), debug(item)}
+//       createSolver's opts.prove, false), proveMs (50), land (the land-and-act members of the plain tier: an airborne
+//       member lands on a floor line and hops / jumps / walks off / walks on; default on, EEAT_MSOLVE_LAND=0 off),
+//       plainMs (the plain tier's clock, checked per item and every 2048 nodes; none by default), debug(item)}
 //   S.chain(start, target, o) -> {ok, masks, T, closed, expanded, legs, nodes, cut, reach, firstMs, ms}
 //                                o: {ms, legT, w, fanT, fanMax, fanNodes, events, reach (the reach field's order), kappa}
 //   S.landings(start, o) -> [{tile, T, masks, hop}]   the forward fan-out from a plain state
@@ -363,7 +365,7 @@ function createSolver(L, opts = {}) {
 			const rec = (t, x, v, miPrev, k, code) => {
 				for (let mi = 0; mi < 3 && !stop; mi++) {
 					if (k > 0 && mi === miPrev) continue;
-					if (--budget.n < 0) { stop = true; budget.out = true; return; }
+					if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
 					if (!feasible(x, v, T - t, kT - k, mi)) continue;
 					const code2 = (code | (mi << (2 * k)) | (k > 0 ? t << (8 + 7 * (k - 1)) : 0)) >>> 0;
 					if (k === kT) {
@@ -398,7 +400,7 @@ function createSolver(L, opts = {}) {
 							const mono = mi !== 0 && mf !== 0 && !(I.mods[mi] < 0.1 && I.mods[mi] > -0.1) && !(I.mods[mf] < 0.1 && I.mods[mf] > -0.1);
 							if (!mono) {
 								for (let i = 0; i < n && !stop; i++) {
-									if (--budget.n < 0) { stop = true; budget.out = true; return; }
+									if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
 									if (!feasible(xs[i], vs[i], T - (t + 1 + i), 0, mf)) continue;
 									tryAt(i);
 								}
@@ -410,7 +412,7 @@ function createSolver(L, opts = {}) {
 							let a = 0, b = n;
 							while (a < b) { const m = (a + b) >> 1; budget.n--; const e = endX(m); if (up ? e >= wlo - 1e-9 : e < whi + 1e-9) b = m; else a = m + 1; }
 							for (let i = a; i < n && !stop; i++) {
-								if (--budget.n < 0) { stop = true; budget.out = true; return; }
+								if (--budget.n < 0 || ((budget.n & 2047) === 0 && budget.tEnd && Date.now() > budget.tEnd)) { stop = true; budget.out = true; return; }
 								const e = endX(i);
 								if (up ? e >= whi + 1e-9 : e < wlo - 1e-9) break;
 								tryAt(i);
@@ -618,12 +620,15 @@ function createSolver(L, opts = {}) {
 		}
 		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
 		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
+		// the plain tier's clock (o.plainMs: a deadline for the whole tier, checked per item and every 2048 nodes)
+		const tEnd = o.plainMs > 0 ? Date.now() + o.plainMs : 0;
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
 		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
 		for (const it of items) {
 			if (!o.each && best && it.T > best.T) break;
 			if (budget.out) break;
+			if (tEnd && Date.now() > tEnd) { budget.out = true; break; }
 			if (o.each && solved.has(it.tile)) continue;
 			if (o.each && o.perTile) { const n = (tries.get(it.tile) || 0) + 1; tries.set(it.tile, n); if (n > o.perTile) continue; }
 			// the root cut: THEOREM M from the start
@@ -710,7 +715,7 @@ function createSolver(L, opts = {}) {
 			const c0 = stats.cands;
 			// a per-item share of the budget: no one (T, member) item eats the whole leg's budget
 			const cap = o.itemNodes || 40000, before = budget.n;
-			const ib = { n: Math.min(budget.n, cap), out: false };
+			const ib = { n: Math.min(budget.n, cap), out: false, tEnd };
 			solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
 			budget.n = before - (Math.min(before, cap) - Math.max(ib.n, 0));
 			if (budget.n <= 0) budget.out = true;
