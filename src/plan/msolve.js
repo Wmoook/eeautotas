@@ -813,6 +813,7 @@ function createSolver(L, opts = {}) {
 		const runItems = (items, B) => { for (const it of items) {
 			if (!o.each && best && it.T > best.T + altSlack) break;
 			if (alts && best && it.T > best.T && alts.size >= o.alts) break;
+			if (o.collectDone && o.collectDone(it.T)) break;
 			if (B.out) break;
 			if (tEnd && Date.now() > tEnd) { B.out = true; budget.out = true; break; }
 			if (o.each && solved.has(it.tile)) continue;
@@ -897,6 +898,9 @@ function createSolver(L, opts = {}) {
 					return false;
 				}
 				const hit = replay(snap, masks, goal, T + extra);
+				// (o.collect, the field-entry composition's arrivals: every verified hit with the engine at its arrival; its
+				// answer true ends this item's patterns; no best is kept)
+				if (hit > 0 && o.collect) return o.collect(hit, masks.subarray(0, hit), sim, it, m) === true;
 				if (hit > 0) {
 					const ms = masks.subarray(0, hit);
 					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: memberName(m), code };
@@ -1712,6 +1716,98 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 		rfCache.set(key, f);
 		return f;
 	}
+
+	// ---------------------------------------------------------------- THE FIELD-ENTRY COMPOSITION (EEAT_TRICKS fentry)
+	// (trick mining 1, tools/tricks/fieldmine.js: of the known routes' 31,827 field passages 2,831 reach the tile 10 ticks
+	// past the exit sooner from a setup that holds one mask from 1-12 ticks before the entry, entering deeper toward the
+	// exit face (median +3.2 px) and faster along it (+0.5 px/tick), 1,180 of them entering LATER; the field tier alone,
+	// whose schedule is the start's (air), solves 24% of those passages as legs from 12 ticks before the entry)
+	let fieldId_ = null;
+	/** the field ids (fields.js classOfId: arrows, dots, climbables, liquids, boosts) */
+	function fieldIds() {
+		if (fieldId_) return fieldId_;
+		const FL = require('../math/fields.js');
+		const out = new Uint8Array(flags.length);
+		for (let id = 0; id < flags.length; id++) { const c = FL.classOfId(id); if (c !== 'air' && c !== 'other') out[id] = 1; }
+		return (fieldId_ = out);
+	}
+	/**
+	 * the field tiles a plain ball enters on its way: tiles of a field class with a plain 4-neighbour (a face a plain
+	 * ball can cross), in the box around the start's centre tile and the target's tiles grown by o.entryMargin (4) tiles,
+	 * the o.entryTiles (48) nearest the start (Manhattan, then the index: deterministic)
+	 */
+	function entryTilesOf(s, tg, o) {
+		const fid = fieldIds(), tiles = s.tiles;
+		const sx = Math.trunc(s.px + 8) >> 4, sy = Math.trunc(s.py + 8) >> 4;
+		let x0 = sx, x1 = sx, y0 = sy, y1 = sy;
+		for (const t of tg.tiles) { const c = t % W, r = (t / W) | 0; if (c < x0) x0 = c; if (c > x1) x1 = c; if (r < y0) y0 = r; if (r > y1) y1 = r; }
+		const mg = o.entryMargin === undefined ? 4 : o.entryMargin;
+		x0 = Math.max(0, x0 - mg); y0 = Math.max(0, y0 - mg); x1 = Math.min(W - 1, x1 + mg); y1 = Math.min(Hh - 1, y1 + mg);
+		const isPlain = (x, y) => { if (x < 0 || y < 0 || x >= W || y >= Hh) return false; const id = tiles[y * W + x]; return id < plainId.length && plainId[id] === 1; };
+		const out = [];
+		for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+			const id = tiles[y * W + x];
+			if (!(id < fid.length && fid[id] === 1)) continue;
+			if (!(isPlain(x - 1, y) || isPlain(x + 1, y) || isPlain(x, y - 1) || isPlain(x, y + 1))) continue;
+			out.push([Math.abs(x - sx) + Math.abs(y - sy), y * W + x]);
+		}
+		out.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+		return out.slice(0, o.entryTiles || 48).map((q) => q[1]);
+	}
+	/**
+	 * solveEntry: (1) THE ARRIVALS: the plain solver to the entry tiles (class any: the tick the centre enters), every
+	 * verified hit kept whose entry state differs (the tile, the tick, the position to 1/8 px, the speeds to 1/32 px/tick),
+	 * at most o.entryPerItem (3) a (T, member) item and o.entryArr (48) in all, the earliest first (the items' T order);
+	 * (2) from each, the earliest first, THE REST: this solver's leg to the target from the arrival (not plain: the field
+	 * tier on the field's own schedule from the entry's queue; the coupled piece only with o.entryCoupled), within the best
+	 * sum so far; (3) the sum replayed once from the start (exact). Below ub (an answer another tier found).
+	 */
+	function solveEntry(snap, s, ctx, tg, goal, oo, stats, ub) {
+		const tEnd = Date.now() + (oo.entryMs || 150);
+		const dl = oo.deadline > 0 ? Math.min(tEnd, oo.deadline) : tEnd;
+		const entry = entryTilesOf(s, tg, oo);
+		stats.entryTiles = entry.length;
+		if (!entry.length) return { ok: false, why: 'no field entry' };
+		const Tcap = Math.min(oo.Tmax, ub - 1);
+		if (!(Tcap >= 2)) return { ok: false, why: 'no room' };
+		const etg = targetOf({ tiles: entry, cls: 'any' }), eg = goalOf({ tiles: entry, cls: 'any' });
+		const arr = [], keys = new Set(), perItem = new Map();
+		const maxArr = oo.entryArr || 48, perIt = oo.entryPerItem || 3;
+		const collect = (hit, ms, sa, it) => {
+			const key = `${Math.trunc(sa.px + 8) >> 4},${Math.trunc(sa.py + 8) >> 4},${hit},${Math.round(sa.px * 8)},${Math.round(sa.py * 8)},${Math.round(sa.speed_x * 32)},${Math.round(sa.speed_y * 32)}`;
+			if (!keys.has(key)) { keys.add(key); arr.push({ T: hit, masks: Uint8Array.from(ms), snap: sa.snapshot() }); }
+			const n = (perItem.get(it) || 0) + 1;
+			perItem.set(it, n);
+			return n >= perIt || arr.length >= maxArr;
+		};
+		sim.restore(snap);
+		solvePlain(snap, sim, ctx, etg, eg, Object.assign({}, oo, { Tmax: Tcap - 1, collect, collectDone: () => arr.length >= maxArr || Date.now() > dl,
+			alts: 0, each: false, nodes: oo.entryNodes || 150000, deadline: dl }), stats);
+		stats.entryArr = arr.length;
+		if (!arr.length) return { ok: false, why: 'no field entry reached' };
+		arr.sort((a, b) => a.T - b.T);
+		let best = null, bestT = Number.isFinite(ub) ? ub : Infinity, tried = 0;
+		const post = { tiles: tg.tiles, cls: tg.cls };
+		for (const a of arr) {
+			if (Date.now() > dl) break;
+			const lim = Math.min(oo.Tmax, bestT - 1) - a.T;
+			if (lim < 1) continue;
+			tried++;
+			let r;
+			try {
+				r = leg(a.snap, post, { Tmax: lim, K: oo.K, chain: false, noEntry: true, prove: false, tricks: oo.tricks, coupled: oo.entryCoupled === true,
+					coupledTicks: oo.entryCoupledTicks || 50000, fieldMs: oo.entryFieldMs || 30, nodes: oo.entryPostNodes || 60000, deadline: dl });
+			} catch (e) { r = null; }
+			if (!r || !r.ok) continue;
+			const ms = new Uint8Array(a.T + r.masks.length);
+			ms.set(a.masks); ms.set(r.masks, a.T);
+			const hit = replay(snap, ms, goal);
+			if (hit > 0 && hit < bestT) { bestT = hit; best = { T: hit, masks: Uint8Array.from(ms.subarray(0, hit)), member: `entry@${a.T}+${r.tool}` }; }
+		}
+		stats.entryTried = tried;
+		if (!best) return { ok: false, why: 'no field entry continued' };
+		return { ok: true, tool: 'fentry', T: best.T, masks: best.masks, member: best.member };
+	}
 	function leg(start, target, o = {}) {
 		const t0 = process.hrtime.bigint();
 		const snap = snapOf(start);
@@ -1721,6 +1817,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 		const goal = goalOf(target);
 		const oo = Object.assign({ Tmax: opts.Tmax || 120 }, o);
 		const ctx = plainStart(sim);
+		const tricks = tricksOf(oo);
 		const hr = () => Number(process.hrtime.bigint() - t0) / 1e6;
 		const split = {};
 		const lb = ctx && !target.tele ? lowerBoundOf(sim, tg, ctx) : 0;
@@ -1765,7 +1862,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			// axis' option trajectories, the input axes solved by fields.solveAxis in the goal's windows, the schedule
 			// iteration across field boundaries; its candidates replayed by the engine there
 			sim.restore(snap);
-			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: landAns ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250 });
+			const r = FSOLVE().solveLeg(L, sim, { tiles: tg.tiles, cls: tg.cls === 'any' ? null : tg.cls, maxT: landAns ? res.T - 1 : oo.Tmax }, { k: oo.fieldK || 2, maxMs: oo.fieldMs || 250, tricks: oo.tricks });
 			stats.fields = (stats.fields || 0) + 1;
 			if (r.ok) {
 				// the goal replayed here by this solver's own test (the same letters; a teleport goal never reaches here)
@@ -1774,7 +1871,17 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			}
 		}
 		split.field = hr();
-		if (res.ok && (res.tool === 'field' || landAns) && oo.coupled !== false && res.T > 1 && !(res.tool === 'frame' && frameBelowOf(oo) === 'field')) {
+		// THE FIELD-ENTRY COMPOSITION (trick mining 1, EEAT_TRICKS fentry; docs/ee_math.md 6.11): a leg from a plain state
+		// through a field = the plain regime to the field's entry tiles (EVERY verified arrival that differs in its entry
+		// state: the tick, the position, the speeds) + the field tier from that arrival (the field's own schedule from the
+		// entry's gravity queue), the cheapest sum; the arrival that exits soonest is the SETUP the known routes' passages
+		// use (an entry deeper and faster along the exit face), found by the composition, not by a rule
+		if (tricks.has('fentry') && !oo.noEntry && ctx && !target.tele && oo.fields !== false && (!res.ok || res.tool === 'field' || landAns)) {
+			const r = solveEntry(snap, sim, ctx, tg, goal, oo, stats, res.ok ? res.T : Infinity);
+			if (r.ok && (!res.ok || r.T < res.T)) res = r;
+			split.entry = hr();
+		}
+		if (res.ok && (res.tool === 'field' || res.tool === 'fentry' || landAns) && oo.coupled !== false && res.T > 1 && !(res.tool === 'frame' && frameBelowOf(oo) === 'field')) {
 			// cheapest T across the tiers: the coupled piece below the field answer's T
 			// (below a frame answer on a budget of its own, o.frameCoupledTicks (200 k): a search below an answer the frame found
 			// fails more often than not, and a failing coupled search spends its whole budget)
