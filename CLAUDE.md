@@ -541,7 +541,11 @@ ways in.
   no plan in time (their timers are short, 3-20 s, with removers): their compiles within the spread (Tutorial 3 first
   route 3,525; Accident Prone 3,521 / gate20 3,556 vs 3,318), a level without a timed killer runs the base's code path
   byte for byte (timerOf = Infinity). NOT a default yet: the gains are one level's; the late rule is unmeasured where
-  a remover is off the est walk.
+  a remover is off the est walk. WATCH (one knob-on run each, 300 s, vs the full compiles' single runs): the unrouted
+  short-curse levels ended with fewer triggers than the c6 full compile (SMB3 10 vs 13, Evolution Revolution 7 vs 9,
+  Christmas Eve 4 vs 5, Helix Reborn 3 vs 5; DEEPER 11 vs 8; Into Magma Panic 0, Tower Domination 2, Forgotten Helix 4 the
+  same), all within the C5 / c6 runs' own range (SMB3 6-13,
+  Evolution 0-9, Christmas Eve 2-5, Helix Reborn 0-5): the late rule may demote cursed anchors the base went on from.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
