@@ -71,13 +71,20 @@ const BR_SHIFTS = [1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 12, -12, 16, -16];
  * read is left out of the trigger state, so a join that skips it is a join: a coin colour with no coin door or gate of its
  * colour in the level (gold 43 / 165, blue 213 / 214; not with portal entries on coin cells: common.js coinFreeOk) and the
  * checkpoint on a route with no death (a checkpoint is read only by a respawn; every leg and follow that dies is refused,
- * and the whole chain is replayed and judged: no more deaths). -> {gold, blue, cp (true = blind), keep (the coin words'
- * masks)} or null
+ * and the whole chain is replayed and judged: no more deaths). A colour is blind on THIS ROUTE too when the route never
+ * holds as many coins of it as its lowest door / gate number (`maxC` {gold, blue}: the route's counts at its finish; its
+ * doors stay shut and its gates open all along the route: Trick Or Treat's 14-coin doors, the route's 1-6 coins).
+ * -> {gold, blue, cp (true = blind), keep (the coin words' masks)} or null
  */
-function blindOf(L, deaths) {
+function blindOf(L, deaths, maxC) {
 	if (process.env.EEAT_JOINS_BLIND === '0') return null;
-	let gold = true, blue = true;
-	for (let i = 0; i < L.fg.length; i++) { const v = L.fg[i]; if (v === 43 || v === 165) gold = false; else if (v === 213 || v === 214) blue = false; }
+	let gold = true, blue = true, gMin = Infinity, bMin = Infinity;
+	for (let i = 0; i < L.fg.length; i++) {
+		const v = L.fg[i];
+		if (v === 43 || v === 165) { gold = false; gMin = Math.min(gMin, L.lookup0[i] | 0); } else if (v === 213 || v === 214) { blue = false; bMin = Math.min(bMin, L.lookup0[i] | 0); }
+	}
+	if (maxC && !gold && maxC.gold < gMin) gold = true;
+	if (maxC && !blue && maxC.blue < bMin) blue = true;
 	if (!C.coinFreeOk(L)) gold = blue = false;
 	const cp = deaths === 0;
 	if (!gold && !blue && !cp) return null;
@@ -620,7 +627,13 @@ function joinRoute(L, masks0, o) {
 	if (!ev0) return { masks: masks0, runTicks: -1, before: -1, saved: 0, why: 'the route does not finish' };
 	const S = MS.createSolver(L, {});
 	// (the blind key of this level and route: blindOf; o.blind given (null: none) wins)
-	if (o.blind === undefined) o = Object.assign({}, o, { blind: blindOf(L, ev0.deaths) });
+	if (o.blind === undefined) {
+		// (the route's coin counts at its finish: a colour whose lowest door / gate number it never reaches is blind too)
+		const sm = new E.EESim(L), ip = new E.EEInput();
+		sm.reset();
+		for (let t = 0; t < ev0.ms.length && !sm.has_silver_crown; t++) { E.applyMask(ip, ev0.ms[t]); sm.tick(ip); }
+		o = Object.assign({}, o, { blind: blindOf(L, ev0.deaths, { gold: sm.coins | 0, blue: sm.blue_coins | 0 }) });
+	}
 	const proveShare = o.prove === false ? 0 : Math.min(20000, Math.max(1500, 0.15 * ms));
 	const dEnd = deadline - proveShare;
 	let cur = ev0;
