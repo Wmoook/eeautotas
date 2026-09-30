@@ -866,7 +866,10 @@ construction.
    boundaries), its answer replayed by this solver's goal test.
 3. coupled: the per-tick one-change family over the 9 direction masks, with and without a press at the first tick, the
    prefix played once and snapshotted every tick (the moves study's F1): only where neither tier found an answer, or
-   BELOW the field answer's T (the cheapest T across the tiers).
+   BELOW the field answer's T (the cheapest T across the tiers). Since the fields iteration (4.10): in the same pass the
+   JUMP PRESS AT THE CHANGE TICK ON THE SAME DIRECTION (hold m0, press the jump at tick c, hold on: one more hold a change
+   tick), for a leg that pass left unsolved the press on a change of direction, and THE SPEED-LIMIT CUT (sound) on every
+   hold (`EEAT_MATH_CORDER=0`: the family before, no cut).
 4. chain (a leg of 40+ ticks none of the three solved; not for a teleport target): the leg as a chain of shorter ones
    through supports (4.6) within the leg's horizon and a 400 ms clock, from a plain start and from a non-plain one (its
    successors by the event fan-out: a leg across fields = the pieces between its field events); the root's direct leg
@@ -1051,6 +1054,45 @@ slack)`. A target: `{tiles: [tile index], cls: 'G' | 'Z' | 'W' | 'C' | 'B' | 'A'
 `EEAT_TRUTH_ROOT=<root> node tools/math/msolve_bench.js --moves=<exact_jsonl> --out=<dir> --shard=i/n` then `--agg=<dir>`;
 `tools/math/msolve_chain.js` likewise (`--chain=4 --every=48 --ms=5000`; `--w`, `--w1`, `--phase1`, `--fanMax`,
 `--fanNodes`, `--events=0`, `--reach=0`, `--kappa`).
+
+### 4.10 The field legs: the coupled piece's jump families and the speed-limit cut (the fields iteration)
+
+**The failing class.** The r10 run's unsolved field moves (4.7): arrow 2,157, dot 565, boost 195, portal 96, climb 29,
+swim 28; 1,992 of them take at most 120 ticks (the compiler's direct horizon). Their routes' inputs: the most common
+short pattern is ONE direction held with ONE jump press somewhere inside the leg (the moves study's essential runs:
+arrow d1 / jr1 96, d2 / jr1 74, d3 / jr1 87 of the 1,433 arrow legs), which the coupled piece could not play: its
+family pressed the jump only at the leg's first tick. And in the compiler's budget (150 k engine ticks a leg) the
+coupled piece's F1 family reaches only its first prefixes (a prefix costs T + 8 x T x T / 2 ticks: ~14 k at T = 60).
+
+**The change** (`src/plan/msolve.js` solveCoupled; `EEAT_MATH_CORDER=0`: the family before, no cut):
+
+1. THE SAME-DIRECTION JUMP PRESS: in F1's pass, per prefix (m0, p0) and change tick c, after the 8 holds m1 != m0 one
+   more hold: m0 with the jump bit at tick c (hold, jump, hold on). One hold a change tick (+1/8 of the pass).
+2. THE CHANGE-DIRECTION JUMP PRESS (m1 != m0, the jump bit at c): a second pass, only for a leg the first left
+   unsolved (on a solved leg its holds are time without a use: the solved sample's median 38 -> 60 ms before this rule).
+3. THE SPEED-LIMIT CUT (sound): without a teleport the centre moves at most SPEED_PX (20) px a tick an axis (16 +
+   the align; endgame.js's D_TICK is 16.25), and a death ends the hold, so a state g px (Chebyshev) from the target
+   tiles' box range needs ceil(g / 20) ticks more: a hold whose tick + that passes its limit is cut, and a prefix is cut
+   from that tick on (every branch from its later states needs as much). Off with a portal in the level or a teleport
+   target.
+4. NOT KEPT: an order of the direction masks by their heading to the target (x toward the target first, the first-tick
+   press interleaved per mask) with both press families in one pass: +409 of the 1,992 failing legs, but it lost 79
+   legs of a 2,713-leg solved sample for 44 (the target's direction is not the pressed direction in a field: an arrow's
+   push, a dot's drag).
+
+**Measured** (box 3, `tools/math/msolve_bench.js --only=<list> --coupledTicks=150000 --fieldMs=120 --chain=0
+--prove=0`: the executor's budgets, the r10 legs from the route's exact state, Tmax = the route's ticks + 10; every
+answer replayed again by the bench's separate EESim: **0 rejected**):
+
+| legs | the first version | the jump families + cut | in <= the route's ticks |
+|---|---:|---:|---:|
+| unsolved field legs <= 120 ticks (1,992) | 0 | **339 (17.0%)** | 0 -> 285 |
+| of them arrow / dot / boost / portal / climb / swim | 0 / 0 / 0 / 0 / 0 / 0 | 260 / 28 / 25 / 25 / 0 / 1 | |
+| solved field legs, every 6th (2,713) | 2,651 | **2,662** (only the first 6, only this 17) | 2,473 -> 2,486 |
+
+On the legs both solve the new T is lower on 19, higher on 5 (the budget's order: the same family explored in another
+order within 150 k ticks). Of the 339 legs it adds 306 hold one direction and press the jump inside the leg (family 1),
+33 press it at a change of direction (family 2).
 
 ## 5 Admissible leg bounds: the event graph
 

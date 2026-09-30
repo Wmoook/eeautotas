@@ -634,59 +634,106 @@ function createSolver(L, opts = {}) {
 	}
 
 	// ---------------------------------------------------------------- the coupled piece (per-tick one change, engine)
+	// THE SPEED-LIMIT CUT of the coupled piece (sound): without a teleport the centre moves at most SPEED_PX a tick an axis
+	// (a death ends the hold), so a state whose box position is g px (Chebyshev) from the target tiles' box range needs
+	// ceil(g / SPEED_PX) more ticks; a hold whose tick + that exceeds its limit cannot reach the target within the limit,
+	// nor can any branch from its later ticks (the bound holds for every input from that state). Off with a portal in the
+	// level or a teleport target (the teleport jumps the limit)
+	let hasPortal_ = null;
+	function hasPortal() {
+		if (hasPortal_ === null) { hasPortal_ = false; for (let i = 0; i < N; i++) if (PORTALS.has(L.fg[i])) { hasPortal_ = true; break; } }
+		return hasPortal_;
+	}
+	function boxOf(tg) {
+		let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+		for (const t of (tg.via || tg.tiles)) { const c = t % W, r = (t / W) | 0; if (c < x0) x0 = c; if (c > x1) x1 = c; if (r < y0) y0 = r; if (r > y1) y1 = r; }
+		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8)
+		return { xl: 16 * x0 - 8, xh: 16 * x1 + 8, yl: 16 * y0 - 8, yh: 16 * y1 + 8 };
+	}
+	// the coupled piece's JUMP FAMILIES and the cut (EEAT_MATH_CORDER=0: the first version's family alone, no cut): the
+	// first version's order (the first-tick press, then DIR9) with the jump press at the change tick on the same direction
+	// (hold, then jump: the most common unsolved field-leg pattern of the moves study) in the same pass, then the press on a
+	// change of direction; a heading order (the masks toward the target first) lost more legs than it found
+	const CORDER = process.env.EEAT_MATH_CORDER !== '0';
 	function solveCoupled(snap, s, tg, goal, o, stats) {
 		const Tmax = o.Tmax;
+		const ordered = CORDER && o.coupledOrder !== false;
 		const jumpFirst = [0, 1];
 		let best = null;
 		const snaps = [];
+		const bx = ordered && !tg.tele && !tg.via && !hasPortal() ? boxOf(tg) : null;
+		const cut = (t, limit) => {
+			// (t: the leg tick just played, 1-based; the goal can hold at the earliest at t + need)
+			const x = sim.px, y = sim.py;
+			const g = Math.max(bx.xl - x, x - bx.xh, bx.yl - y, y - bx.yh, 0);
+			return t + Math.ceil(g / SPEED_PX) > limit;
+		};
 		const hold = (m0, p0, from, tick0, limit) => {
-			// play mask m0 (with the jump bit p0 on the first tick of the leg) from snapshot `from` at leg tick tick0
+			// play mask m0 (with the jump bit p0 on the first tick of the leg, or of this hold with p0 = 2) from snapshot
+			// `from` at leg tick tick0
 			sim.restore(from);
 			for (let t = tick0; t < limit; t++) {
 				const px = sim.px, py = sim.py;
-				E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
+				E.applyMask(inp, t === 0 ? (m0 | (p0 & 1)) : t === tick0 && p0 === 2 ? (m0 | 1) : m0);
 				sim.tick(inp);
 				stats.ticks++;
 				if (goal(sim, px, py)) return t + 1;
 				if (sim.is_dead) return 0;
+				if (bx && cut(t + 1, limit)) { stats.cuts = (stats.cuts || 0) + 1; return 0; }
 			}
 			return 0;
 		};
+		const pre = [];
+		for (const p0 of jumpFirst) for (const m0 of DIR9) pre.push([p0, m0]);
 		// F0
-		for (const p0 of jumpFirst) for (const m0 of DIR9) {
+		for (const [p0, m0] of pre) {
 			const h = hold(m0, p0, snap, 0, best ? best.T : Tmax);
 			if (h && (!best || h < best.T)) { const ms = new Uint8Array(h).fill(m0); ms[0] |= p0; best = { T: h, masks: ms, k: 0 }; }
 		}
-		// F1: the prefix m0 (snapshots every tick), then m1 from tick c
-		for (const p0 of jumpFirst) for (const m0 of DIR9) {
-			const lim = best ? best.T - 1 : Tmax - 1;
-			snaps.length = 0;
-			sim.restore(snap);
-			let alive = lim;
-			for (let t = 0; t < lim; t++) {
-				const px = sim.px, py = sim.py;
-				E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
-				sim.tick(inp);
-				stats.ticks++;
-				if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
-				snaps.push(sim.snapshot());
-			}
-			for (let c = 1; c <= alive && c <= snaps.length; c++) {
-				const lim2 = best ? best.T : Tmax;
-				if (c >= lim2) break;
-				for (const m1 of DIR9) {
-					if (m1 === m0) continue;
-					const h = hold(m1, 0, snaps[c - 1], c, best ? best.T : Tmax);
-					if (h && (!best || h < best.T)) {
-						const ms = new Uint8Array(h);
-						for (let t = 0; t < h; t++) ms[t] = t < c ? m0 : m1;
-						ms[0] |= p0;
-						best = { T: h, masks: ms, k: 1 };
-					}
+		// F1: the prefix m0 (snapshots every tick), then m1 from tick c; phase 0 = the family of the first version (m1 != m0)
+		// with THE JUMP PRESS AT c ON THE SAME DIRECTION (m1 = m0, the jump bit at c: hold, then jump: 75% of the unsolved
+		// field legs it solves), phase 1 (the budget left) the press at c on a change of direction (m1 != m0)
+		const budget = o.coupledTicks || 2e6;
+		const phases = ordered && o.coupledJump !== false ? [0, 1] : [0];
+		for (const ph of phases) {
+			// (phase 1 only for a leg phase 0 left unsolved: its extra holds are the time a solved leg does not need)
+			if (ph === 1 && best) break;
+			for (const [p0, m0] of pre) {
+				if (stats.ticks > budget) break;
+				const lim = best ? best.T - 1 : Tmax - 1;
+				snaps.length = 0;
+				sim.restore(snap);
+				let alive = lim;
+				for (let t = 0; t < lim; t++) {
+					const px = sim.px, py = sim.py;
+					E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
+					sim.tick(inp);
+					stats.ticks++;
+					if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
+					snaps.push(sim.snapshot());
+					// (the cut: no branch from this tick on reaches the target within the limit)
+					if (bx && cut(t + 1, best ? best.T : Tmax)) { alive = t; break; }
 				}
-				if (stats.ticks > (o.coupledTicks || 2e6)) break;
+				for (let c = 1; c <= alive && c <= snaps.length; c++) {
+					const lim2 = best ? best.T : Tmax;
+					if (c >= lim2) break;
+					for (let i = 0; i < DIR9.length + 1; i++) {
+						// phase 0: DIR9 (m1 != m0, no press) then m0 with the press (i = 9); phase 1: DIR9 (m1 != m0) with the press
+						let m1, p1;
+						if (i === DIR9.length) { if (ph !== 0 || !ordered || o.coupledJump === false) continue; m1 = m0; p1 = 2; }
+						else { m1 = DIR9[i]; if (m1 === m0) continue; p1 = ph === 0 ? 0 : 2; }
+						const h = hold(m1, p1, snaps[c - 1], c, best ? best.T : Tmax);
+						if (h && (!best || h < best.T)) {
+							const ms = new Uint8Array(h);
+							for (let t = 0; t < h; t++) ms[t] = t < c ? m0 : m1;
+							ms[0] |= p0;
+							if (p1 === 2) ms[c] |= 1;
+							best = { T: h, masks: ms, k: 1 };
+						}
+					}
+					if (stats.ticks > budget) break;
+				}
 			}
-			if (stats.ticks > (o.coupledTicks || 2e6)) break;
 		}
 		if (!best) return { ok: false, why: 'no coupled candidate', tool: 'coupled' };
 		return Object.assign({ ok: true, tool: 'coupled' }, best);
