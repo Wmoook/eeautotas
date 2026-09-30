@@ -34,6 +34,21 @@ const T = require('./types.js');
 // the zero-speed bucket of legBest's cells (doctor 8, n5-doc-8; DEFAULT ON since n5 lane 6 block 1, EEAT_CELL_ZERO=0 = the cells as
 // before): legBest's cellKey
 const ZERO_CELL = process.env.EEAT_CELL_ZERO !== '0';
+// THE EFFECT CELL (COMPILER DOCTOR b9, n5; OPT-IN EEAT_FX_CELL=1, off = the cells as before, byte for byte): legBest's and
+// legBFS's cells (position, speed, ground, jumps, dead + the door state dkOf) carried NO effect state, so a ball that took
+// an effect (low gravity, fly, multijump, jump / speed boost, gravity, protection, curse / poison / fire) and came back to a
+// place the plain ball had already visited shared the plain ball's cell and was merged away as a duplicate: the effect
+// detour, the whole point of an effect puzzle, is pruned. Bad EE Level 9's mini 3: the switch is 6 tiles past a 1-tall
+// corridor over a spike pit that only a low-gravity ball crosses, the low-gravity tile in a pocket 1 tile above the
+// entrance; the plain ball walks the corridor's first tiles first, the low-gravity ball that jumps into the pocket and
+// drops back lands in the same cells and is closed (tools/cmp/legab.js from the mini's entrance, a fresh executor a rep,
+// rungs 1-3 = 65 s: 0 of 5 reps, closest 40.6 tiles in the pit in every rep; with the knob 5 of 5 at rung 1, 4.6-5.3 s,
+// 524-534 ticks). exact.js keys by the full stateHash (effects in) and prims' featSig has them.
+const FX_CELL = process.env.EEAT_FX_CELL === '1';
+/** the effect state of the ball as one word (0 = plain: no effect on) */
+const fxWord = (sim) => (sim.low_gravity ? 1 : 0) | (sim.has_levitation ? 2 : 0) | ((sim.flip_gravity & 7) << 2) | ((sim.jump_boost & 3) << 5) |
+	((sim.speed_boost & 3) << 7) | (((sim.max_jumps === 1 ? 0 : (sim.max_jumps & 63) + 1)) << 9) | (sim.is_invulnerable ? 1 << 16 : 0) |
+	(sim.is_cursed ? 1 << 17 : 0) | (sim.is_poisoned ? 1 << 18 : 0) | (sim.is_on_fire ? 1 << 19 : 0);
 
 /** the fine cell of the state in sim (a number: FNV over the cell's parts) */
 function cellOf(sim, disc) {
@@ -43,6 +58,7 @@ function cellOf(sim, disc) {
 	mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0)); mix(disc | 0);
 	// (EEAT_CELL_ZERO=1: the state at rest on the tile grid, per axis, a cell of its own, as legBest's cellKey)
 	if (ZERO_CELL) { const ax = sim.speed_x === 0 && sim.px % 16 === 0, ay = sim.speed_y === 0 && sim.py % 16 === 0; if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0)); }
+	if (FX_CELL) { const f = fxWord(sim); if (f !== 0) mix(0x5a000000 | f); }
 	// (a second word so that two cells share a number only by a 52-bit accident)
 	let g = 0x2545f491 | 0;
 	g ^= Math.floor(sim.px * 7) | 0; g = Math.imul(g, 0x5bd1e995); g ^= Math.floor(sim.py * 3) | 0; g = Math.imul(g, 0x5bd1e995);
@@ -505,6 +521,7 @@ function legBest(L, starts, goal, o) {
 			if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0));
 		} else { mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0); }
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
+		if (FX_CELL) { const f = fxWord(sim); if (f !== 0) mix(0x5a000000 | f); }
 		ka = h; kb = dkOf(sim) | 0;
 	};
 	const goals = [];
