@@ -2646,6 +2646,7 @@ async function createExecutor(L, opts) {
 				if (!t) continue;
 				if (t.tier === 'math') { S.math.direct++; S.math.directMs += t.ms || 0; if (t.ok) S.math.directOk++; }
 				else if (t.tier === 'math-chain') { S.math.chain++; S.math.chainMs += t.ms || 0; if (t.ok) S.math.chainOk++; }
+				else if (t.tier === 'portfolio') { S.math.pf = (S.math.pf || 0) + 1; S.math.pfMs = (S.math.pfMs || 0) + (t.ms || 0); if (t.ok) { S.math.pfOk = (S.math.pfOk || 0) + 1; const k = 'pfBy_' + (t.arm || '?'); S.math[k] = (S.math[k] || 0) + 1; } if (t.resumed) S.math.pfResumed = (S.math.pfResumed || 0) + 1; if (t.deferred && t.deferred.length) S.math.pfDeferred = (S.math.pfDeferred || 0) + 1; if (t.why && /^error/.test(t.why)) S.math.pfErr = t.why; }
 				else if (t.tier === 'corridor') { S.math.corr = (S.math.corr || 0) + 1; S.math.corrMs = (S.math.corrMs || 0) + (t.ms || 0); if (t.ok) S.math.corrOk = (S.math.corrOk || 0) + 1; S.math.corrExp = (S.math.corrExp || 0) + (t.expanded || 0); if (t.resumed) S.math.corrResumed = (S.math.corrResumed || 0) + 1; if (t.closest) S.math.corrClosest = (S.math.corrClosest || 0) + 1; if (t.error) S.math.corrErr = t.error; }
 			}
 		}
