@@ -891,6 +891,8 @@ function createSolver(L, opts = {}) {
 	const CORDER = process.env.EEAT_MATH_CORDER !== '0';
 // the twin cut of the coupled piece (EEAT_MATH_TWIN=0: off): every TWIN_MASK + 1 ticks (EEAT_MATH_TWIN_K, a power of 2) a hold's state hash under its mask
 const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_MATH_TWIN_K || 4) - 1;   // K a power of 2
+// the coupled piece's two-change family F2 for a leg the one-change families left unsolved (EEAT_MATH_F2=0: none)
+const F2 = process.env.EEAT_MATH_F2 !== '0';
 	function solveCoupled(snap, s, tg, goal, o, stats) {
 		const Tmax = o.Tmax;
 		const ordered = CORDER && o.coupledOrder !== false;
@@ -984,6 +986,81 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 						}
 					}
 					if (stats.ticks > budget || (o.deadline > 0 && Date.now() > o.deadline)) break;
+				}
+			}
+		}
+		// F2 (a leg the one-change families left unsolved, in the budget left; EEAT_MATH_F2=0 / o.coupledTwo false: none):
+		// the prefix m0, m1 from c1 (m1 != m0), m2 from c2 > c1 (m2 != m1). The middle holds' states are keyed like the
+		// twin cut in a set of their own: a middle state met again at the same leg tick under the same mask has had every
+		// branch from that tick on played (by the first, whose limit was at least this one's), so this middle hold's
+		// branches stop there; the last holds share the twin cut's set (a plain continuation, whatever came before)
+		const over = () => stats.ticks > budget || (o.deadline > 0 && Date.now() > o.deadline);
+		if (!best && F2 && ordered && o.coupledTwo !== false && !over()) {
+			const twins2 = new Set(), mid = [];
+			stats.f2 = (stats.f2 || 0) + 1;
+			outer:
+			for (const [p0, m0] of pre) {
+				const lim = best ? best.T - 1 : Tmax - 1;
+				snaps.length = 0;
+				sim.restore(snap);
+				let alive = lim;
+				for (let t = 0; t < lim; t++) {
+					const px = sim.px, py = sim.py;
+					E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
+					sim.tick(inp);
+					stats.ticks++;
+					if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
+					snaps.push(sim.snapshot());
+					if (bx && cut(t + 1, best ? best.T : Tmax)) { alive = t; break; }
+				}
+				for (let c1 = 1; c1 <= alive && c1 <= snaps.length; c1++) {
+					for (const m1 of DIR9) {
+						if (m1 === m0) continue;
+						if (over()) break outer;
+						const L2 = best ? best.T - 1 : Tmax - 1;
+						if (c1 >= L2) continue;
+						mid.length = 0;
+						sim.restore(snaps[c1 - 1]);
+						for (let t = c1; t < L2; t++) {
+							const px = sim.px, py = sim.py;
+							E.applyMask(inp, m1);
+							sim.tick(inp);
+							stats.ticks++;
+							if (sim.is_dead) break;
+							if (goal(sim, px, py)) {
+								const h = t + 1;
+								if (!best || h < best.T) {
+									const ms = new Uint8Array(h);
+									for (let u = 0; u < h; u++) ms[u] = u < c1 ? m0 : m1;
+									ms[0] |= p0;
+									best = { T: h, masks: ms, k: 1 };
+								}
+								break;
+							}
+							if (bx && cut(t + 1, best ? best.T : Tmax)) break;
+							if (twins !== null && ((t + 1) & TWIN_MASK) === 0) {
+								const key = m1 + ':' + (t + 1) + ':' + sim.stateHash();
+								if (twins2.has(key)) { stats.twins2 = (stats.twins2 || 0) + 1; break; }
+								twins2.add(key);
+							}
+							mid.push(sim.snapshot());
+						}
+						for (let j = 0; j < mid.length; j++) {
+							const c2 = c1 + 1 + j, lim3 = best ? best.T : Tmax;
+							if (c2 >= lim3) break;
+							for (const m2 of DIR9) {
+								if (m2 === m1) continue;
+								const h = hold(m2, 0, mid[j], c2, best ? best.T : Tmax);
+								if (h && (!best || h < best.T)) {
+									const ms = new Uint8Array(h);
+									for (let u = 0; u < h; u++) ms[u] = u < c1 ? m0 : u < c2 ? m1 : m2;
+									ms[0] |= p0;
+									best = { T: h, masks: ms, k: 2 };
+								}
+							}
+							if (over()) break outer;
+						}
+					}
 				}
 			}
 		}
@@ -1206,7 +1283,7 @@ const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_
 		split.field = hr();
 		if (res.ok && (res.tool === 'field' || landAns) && oo.coupled !== false && res.T > 1) {
 			// cheapest T across the tiers: the coupled piece below the field answer's T
-			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1 }), stats);
+			const r = solveCoupled(snap, sim, tg, goal, Object.assign({}, oo, { Tmax: res.T - 1, coupledTwo: false }), stats);
 			if (r.ok && r.T < res.T) res = r;
 		}
 		if (!res.ok && oo.coupled !== false) {

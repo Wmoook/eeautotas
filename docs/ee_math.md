@@ -1206,6 +1206,28 @@ failures that spend the whole 150 k ticks: 1,318 -> 547 of the failing legs (<= 
 family is now exhausted there, the budget left over). The wall time: the solved sample's median 28 vs 38 ms (found
 sooner); a failing leg's 156 vs 109 ms (the hashes; its budget is ticks).
 
+**In the compiler** (box 3, n4-plan 87e1ff0 + the twin cut, the shared gate: the block-4 list src/out/n4plan/gate20.txt
+vs b3_w3.json, 60 s, --workers=3, par 6): **exit 0**, compiled 14 vs the baseline's 12 of 20 (Tutorial 1 and The Blank
+Page compile now), better 8, worse 0, 14 / 14 .eetas replayed (tools/cmp/verify.js). test/msolve.js 50/0.
+
+**F2, THE TWO-CHANGE FAMILY** (`EEAT_MATH_F2=0` / `o.coupledTwo` false: none). With the twin cut the one-change
+families end inside the budget on most short legs (the 173 failing legs of <= 40 ticks: none spends it), and the routes
+of the failing class hold 2+ changes. So a leg that NO tier answered (not the cheaper-T call below a field answer: that
+one keeps its time) plays, in the ticks left: the prefix m0 (with the first-tick press p0), m1 from c1 (m1 != m0), m2
+from c2 > c1 (m2 != m1), prefix-major, c1 then m1 then c2 then m2 ascending. The middle holds are keyed like the twin
+cut in a set of their own (a middle state met again at the same leg tick under the same mask has had every branch from
+that tick on played by the first, whose limit was at least this one's: this middle hold's branches stop there); the last
+holds share the twin cut's set (their continuation is plain, whatever came before). Every answer is the engine's replay
+as before. Measured (the same bench, both arms of one tree side by side, `EEAT_MATH_F2=0` the base with the twin cut):
+
+| legs | twin cut | twin cut + F2 | in <= the route's ticks |
+|---|---:|---:|---:|
+| unsolved field legs <= 120 ticks (1,992) | 420 | **670** (+250, 0 lost) | 341 -> 472 |
+| of them arrow / dot / portal / boost / climb / swim | 334 / 33 / 26 / 25 / 0 / 2 | 505 / 90 / 34 / 37 / 2 / 2 | |
+
+0 lost, 0 rejected. From the first version's 340 the class's solved legs are 670 (the twin cut + F2; the tree's other changes 415 -> 420). The failures
+spend the whole 150 k ticks again (the family is larger than the budget): more speed is more legs.
+
 **THEOREM V (the axis speed bounds) and its engine check.** Away from the tiles that can push an axis past its bound
 (x: a pull on x = the left / right arrows, an x boost; y: a y boost, ice (its glide keeps more speed on y), levitation;
 both: a portal, a gravity effect) and with the pulls not rotated onto x (flip not 1 / 3): a tick keeps
