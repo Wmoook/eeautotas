@@ -1,17 +1,19 @@
 'use strict';
 // THE LEG FINDERS (n4plan, part 'executor', tier 3 of reach()): not proofs, finders; every find is replayed by the
 // executor. Both search from real states (each start injected at its own ABSOLUTE tick), the masks of each state from
-// endgame.probeMasks (the same states, fewer simulations), over FINE cells (1 px x, 2 px y, 1/16 px/tick vx, 1/8 px/tick
-// vy, on the ground, the jump count, the ball's door-reading state: exact.js discKey), inside a region (the tiles the goal
-// field's walk reaches, dilated by a tile, in a box around the starts and the goal), ranked by a TIME estimate (ticks):
-// the admissible kinematic bound (endgame.lowerBound) within 64 ticks of the goal, else the goal field's distance at the
-// running pace (or the primitives' tick field when bounds are given). The distance alone is blind to speed: a beam by it
-// kept the slow states at a wall's face and lost the run-ups (the key door leg of test/planexec.js: 184 ticks vs 38).
-//   legBest (the executor's default): best-first, f = the tick + w x the estimate (w 2.5), the first arrival closes its
-//     cell; it dives toward the goal and falls back to the next best open state where it is stuck (T-EXEC-LEGS, box 3,
-//     3 s: 41% of the legs vs the beam's 30%, and nearer the route's own ticks: p90 1.12x vs 2.1x).
+// endgame.probeMasks (the same states, fewer simulations), over cells of position and speed (with on the ground, the jump
+// count, the ball's door-reading state: exact.js discKey), inside a region (the tiles the goal field's walk reaches,
+// dilated by a tile, in a box around the starts and the goal), ranked by a TIME estimate (ticks): the admissible
+// kinematic bound (endgame.lowerBound) within 64 ticks of the goal, else the goal field's distance at the running pace (or
+// the primitives' tick field when bounds are given). The distance alone is blind to speed: a beam by it kept the slow
+// states at a wall's face and lost the run-ups (the key door leg of test/planexec.js: 184 ticks vs 38).
+//   legBest (the executor's default): best-first, f = the tick + w x the estimate (w 5), the first arrival closes its
+//     cell (2 px x, 4 px y, 1/8 px/tick vx, 1/4 vy); it dives toward the goal and falls back to the next best open state
+//     where it is stuck (T-EXEC-LEGS, box 3, 3 s: 56% of the legs vs the beam's 30%; p90 of the ticks over the route's
+//     own 1.44x vs 2.1x).
 //   legBFS: src/legsearch.js's algorithm (copied, not edited): breadth-first by tick keeping the FASTEST state of each
-//     cell, a layer over its width kept by the estimate with at most 8 states a tile (flybeam.js's rule), the rest by
+//     FINE cell (1 px x, 2 px y, 1/16, 1/8 px/tick), a layer over its width kept by the estimate with at most 8 states a
+//     tile (flybeam.js's rule), the rest by
 //     novelty per tile; the width widens (x4) when a pass ends without a goal (the depth limit, exhausted, or no nearer
 //     state for `stall` layers).
 //
@@ -255,10 +257,11 @@ function legBest(L, starts, goal, o) {
 	const deadline = o.deadline || Infinity, stop = o.stop || null;
 	const beforeTick = o.beforeTick >= 0 ? o.beforeTick : -1;
 	const field = o.field || null, region = o.region || null;
-	const w = o.w > 0 ? o.w : 2.5;
+	const w = o.w > 0 ? o.w : 5;   // (T-EXEC-LEGS, box 3, 3 s: 2.5 46% / 5 56% / 8 56% / 12 55% with the cells below)
 	const heapMax = o.heapMax > 0 ? o.heapMax : 300000;
-	// (the cell: px, py, vx, vy multipliers; default the fine cells of legBFS: 1 px, 2 px, 1/16, 1/8)
-	const CQ = o.cell || [1, 0.5, 16, 8];
+	// (the cell: px, py, vx, vy multipliers; default 2 px, 4 px, 1/8, 1/4 px/tick: T-EXEC-LEGS 3 s at w 5: 56% vs 1 px, 2 px,
+	// 1/16, 1/8 (legBFS's) 46%, 4 px, 4 px, 1/4, 1/2 40%)
+	const CQ = o.cell || [0.5, 0.25, 8, 4];
 	const collect = o.collect > 0 ? o.collect : 64;
 	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64, FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;
