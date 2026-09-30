@@ -1449,9 +1449,42 @@ function createPlanner(model, facts, o = {}) {
 	const CRUMB_LEGMIN = +process.env.EEAT_CRUMB_LEGMIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
 	const CRUMB_K = process.env.EEAT_CRUMB_K !== undefined ? Math.max(1, +process.env.EEAT_CRUMB_K | 0) : 2;
 	const CRUMB_AFTER = process.env.EEAT_CRUMB_AFTER !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_AFTER | 0) : 1;
+	// THE CRUMB'S DETOUR (C6 lane 5; EEAT_CRUMB_DETOUR=F, 0 / unset = off: the crumb plans as before, byte for byte): a
+	// crumb is a relay of the long leg only when it lies ON ITS WAY: by the 'now' walk (est's walls without the CEGAR's
+	// cuts, as crumbStep) d(anchor -> crumb) + d(crumb -> the leg's target) - d(anchor -> the target) at most
+	// max(CRUMB_DETOUR_MIN, F x d(anchor -> the target)); and no crumb before a PLANNED DEATH (the plan's first step
+	// 'death:' / 'die:': its long leg starts at the respawn, where the next anchor's crumb plans are asked again). Why: the
+	// nearest crumb by the lb alone took Tutorial 2's compile to a blue coin 101 walk steps off its way (D 176) and to one
+	// beside the checkpoint the plan dies at (1,531 ticks), a route 5,353-6,069 vs 3,070-3,143 without the crumbs; the
+	// crumbs the known routes of 45 levels take (tools/cmp/crumbdetour.js) are all within max(8, 0.351 D) but one (Flight
+	// Path: +73 on a D 34 leg): EX Crew Fall of Zeal 28 crumbs, up to 0.351; Stone Ruin 0.209; On And On 0.114.
+	const CRUMB_DETOUR_F = process.env.EEAT_CRUMB_DETOUR !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DETOUR || 0) : 0;
+	const CRUMB_DETOUR_MIN = process.env.EEAT_CRUMB_DETOUR_MIN !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_DETOUR_MIN || 0) : 8;
+	function crumbOnWay(a, s0, cands) {
+		const tgt = s0 && s0.waypoint && s0.waypoint.tiles;
+		if (!tgt || !tgt.length) return cands;
+		const dA = model.dist(a.S, a.pos, 'now', a.base);
+		let D = INF;
+		for (const t of tgt) if (dA[t] < D) D = dA[t];
+		if (!(D < INF)) return cands;
+		const slack = Math.max(CRUMB_DETOUR_MIN, CRUMB_DETOUR_F * D);
+		return cands.filter((e) => {
+			const live = e.live || [];
+			let d1 = INF;
+			for (const t of live) if (dA[t] < d1) d1 = dA[t];
+			if (!(d1 < INF)) return false;
+			const dX = model.dist(a.S, { id: 'crumb' + e.X.id, tiles: live.slice(), extra: 0 }, 'now', a.base);
+			let d2 = INF;
+			for (const t of tgt) if (dX[t] < d2) d2 = dX[t];
+			const ok = d2 < INF && d1 + d2 - D <= slack;
+			if (!ok) ST.crumbDetours = (ST.crumbDetours || 0) + 1;
+			return ok;
+		});
+	}
 	function crumbPlan(a, plans) {
 		const p0 = plans.find((p) => !p.near) || plans[0];
 		if (!p0 || !p0.steps || !p0.steps.length) return [];
+		if (CRUMB_DETOUR_F > 0 && /^(death|die):/.test(String(p0.steps[0].edge))) return [];
 		const s0 = p0.steps.find((s) => !String(s.edge).startsWith('death:') && !String(s.edge).startsWith('region:key')) || p0.steps[0];
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
 		if (!(lb0 >= CRUMB_LEGMIN)) return [];
@@ -1462,8 +1495,9 @@ function createPlanner(model, facts, o = {}) {
 		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a, crumbs);
 		// (a crumb past the est walk's CEGAR cuts is kept: the cuts come from the long leg's failures, and a way around its
 		// deceptive field is what a crumb is for; its lb is the relaxation's, still admissible)
-		const cands = es.filter((e) => e.X && e.X.crumb && !e.viaDeath && e.lb < CRUMB_F * lb0)
+		let cands = es.filter((e) => e.X && e.X.crumb && !e.viaDeath && e.lb < CRUMB_F * lb0)
 			.sort((x, y) => (facts ? x.lb * (1 + facts.rungOf(x.edge, cls)) - y.lb * (1 + facts.rungOf(y.edge, cls)) : 0) || x.lb - y.lb || x.est - y.est);
+		if (CRUMB_DETOUR_F > 0 && cands.length) cands = crumbOnWay(a, s0, cands);
 		if (process.env.EEAT_CRUMB_DBG === '1') console.error(`crumbPlan: lb0 ${lb0} crumb edges ${es.length} cands ${cands.length}: ${es.slice(0, 6).map((e) => `${e.X && e.X.label} lb ${e.lb} pen '${e.pen}' relax ${e.relaxOnly} r ${facts ? facts.rungOf(e.edge, cls) : '-'}`).join('; ')}`);
 		const out = [];
 		const root = { S: a.S, pos: a.pos, e: null, parent: null };
