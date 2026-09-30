@@ -65,11 +65,13 @@ const POLISH_LONG_F = 0.2, REST_F = 0.5, REST_ROUNDS = 8, REST_MIN_MS = 1500;
 // the proof's share once a route is known (a static level start only): min(PROVE_MS, PROVE_F x the budget) kept for the
 // PROVE stage (one exact search from the level start bounded by the route's own arrival), and all the time the moves leave
 const PROVE_MS = 30000, PROVE_F = 0.2;
-// THE PERFECT PASS (n5-perfect, src/plan/perfect.js; OPT-IN EEAT_PERFECT=1, off = the compile as before): once a route is
-// known, min(PERFECT_MS, PERFECT_F x the budget) is kept for it (like the polish's reserve): branch and bound over the
-// planner's trigger orders from the route's own states with the route as the incumbent, then the polish with the route's
-// joins (its model-state changes and its legs' starts) as its window marks
-const PERFECT = process.env.EEAT_PERFECT === '1';
+// THE PERFECT PASS (n5-perfect, src/plan/perfect.js; DEFAULT ON since the C6 merge into n5-plan (the 300-s A/B on the merged
+// head: CLAUDE.md section 11, PERFECT IN n5-plan); EEAT_PERFECT=0: off, and with it every n5-perfect compile-time knob (the
+// precision fast rests, the loop cuts, the LOOPS stage: EEAT_JOINS=0 turns the joins off); EEAT_PERFECT_PASS=0: only this
+// pass and its reserve off): once a route is known, min(PERFECT_MS, PERFECT_F x the budget) is kept for it (like the
+// polish's reserve): branch and bound over the planner's trigger orders from the route's own states with the route as the
+// incumbent, then the polish with the route's joins (its model-state changes and its legs' starts) as its window marks
+const PERFECT = process.env.EEAT_PERFECT !== '0' && process.env.EEAT_PERFECT_PASS !== '0';
 const PERFECT_MS = +process.env.EEAT_PERFECT_MS || 20000, PERFECT_F = 0.25;
 // (with it, the PROVE stage only for a route the exact search from the start can bound: at most PROVE_MAX_TICKS run
 // ticks (its reach in the final compile: ~70 layers in 10 s on NC Naos; no route of the 24 compiled was proven by it, and
