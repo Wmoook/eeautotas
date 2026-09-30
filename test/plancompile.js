@@ -15,7 +15,8 @@
 //         exists and finishes), one at a time, stop, a level without a trophy refused; the endpoints listed; the page's
 //         script parses and has the Compile button
 //   truth src/plan/truth.js --part=model,compile on a toy truth root: absent parts, the toy routed and verified, the totals
-//   usage: node test/plancompile.js [--only=unit,real,off,api,truth]
+//   page  the page's Compile code cut out of editor.html and run on stubs: the lines, the clipboard (and its refusal), the toast
+//   usage: node test/plancompile.js [--only=unit,real,off,api,truth,page]
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -280,6 +281,74 @@ function sectionApi(TMP) {
 		/navigator\.clipboard\.writeText\(s\.loadtas\)/.test(page) && /id="cmpLine" readonly/.test(page) && /\/api\/editor\/compile/.test(page), perr || `page ${x.page}`);
 }
 
+// ---------------------------------------------------------------- page: the page's Compile code, cut out and run on stubs
+async function sectionPage() {
+	console.log('(page) the editor page\'s Compile code (cut out of editor.html, run against stubs)');
+	const page = fs.readFileSync(path.join(ROOT, 'src', 'app', 'editor.html'), 'utf8');
+	const a = page.indexOf('// ------------------------------------------------------------ Compile (POST'), b = page.indexOf("$('bCompile').onclick = compileLevel;");
+	if (a < 0 || b < 0) { check('the Compile section is in the page', false, `${a} ${b}`); return; }
+	const code = page.slice(a, b + "$('bCompile').onclick = compileLevel;".length);
+	const els = new Map();
+	const el = (id) => { if (!els.has(id)) els.set(id, { id, innerHTML: '', disabled: false, value: '', onclick: null, focus() {}, select() {} }); return els.get(id); };
+	// ($: an element made by an innerHTML (the Stop / Copy buttons, the line) exists only while that HTML holds its id)
+	const $ = (id) => {
+		if (['bCmpStop', 'bCmpCopy', 'cmpLine', 'cmpOpen'].includes(id)) { if (!el('compileSt').innerHTML.includes(`id="${id}"`)) return null; const e = el(id); const m = new RegExp(`id="${id}"[^>]*value="([^"]*)"`).exec(el('compileSt').innerHTML); if (m) e.value = m[1].replace(/&amp;/g, '&'); return e; }
+		return el(id);
+	};
+	el('sSec').value = '60';
+	const toasts = [], clip = [];
+	let clipOk = true, apiState = null;
+	const env = {
+		$, esc: (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+		fmt: (t) => `${Math.floor(t / 6000)}:${((t % 6000) / 100).toFixed(2).padStart(5, '0')}`,
+		api: async () => apiState, postJson: async () => apiState, eelvlBytes: async () => new Uint8Array(4), b64: () => 'AAAA', fileSource: () => null, LV: { name: 'toy' },
+		store: { set() {}, get() { return null; } }, toast: (h, err) => toasts.push({ h, err: !!err }),
+		navigator: { clipboard: { writeText: async (s) => { if (!clipOk) throw new Error('denied'); clip.push(s); } } },
+		document: { execCommand: () => true }, setTimeout: () => 0, clearTimeout: () => {},
+	};
+	const run = new Function(...Object.keys(env), `${code}\nreturn { CMPL, compileLevel, pollCompile, renderCompile, copyLoadtas };`)(...Object.values(env));
+	const stages = [{ name: 'parse', ms: 10, text: 'toy.eelvl 22x6' }, { name: 'model', ms: 5, text: '2 triggers' }];
+	// (a compile this page started, running)
+	apiState = { running: true, started: 111, stage: 'model', stages, detail: 'plan: step 1/2', elapsed: 1.2, seconds: 60 };
+	await run.compileLevel();
+	const h1 = el('compileSt').innerHTML;
+	check('running: the stage lines like a compiler (name, seconds, text), the status line, a Stop button; the Compile button disabled',
+		/parse {3}\s*0\.01 s {2}toy\.eelvl 22x6/.test(h1) && /model {3}\s*0\.01 s {2}2 triggers/.test(h1) && /plan: step 1\/2/.test(h1) && /id="bCmpStop"/.test(h1) && el('bCompile').disabled === true, h1.slice(0, 300));
+	// (done: the line to the clipboard, the toast, the field with a Copy button, the job link)
+	const done = { running: false, started: 111, stage: 'done', stages: stages.concat([{ name: 'polish', ms: 0, text: 'no gain' }]), job: 'toy-compiled-abc123', loadtas: '/loadtas C:\\jobs\\toy-compiled-abc123\\best.eetas',
+		result: { runTicks: 83, time: '0:00.83', lb: 17, lbTime: '0:00.17', gapPct: 79.5, legs: [{}, {}], provenLegs: 1, known: null }, message: 'Compiled', elapsed: 3, seconds: 60 };
+	apiState = done;
+	await run.pollCompile();
+	await new Promise((r) => setImmediate(r));
+	const h2 = el('compileSt').innerHTML;
+	check('done: the /loadtas line copied to the clipboard, the toast "Compiled: 0:00.83 (lower bound 0:00.17), /loadtas line copied", the result row, the field and its Copy button, the job link',
+		clip.length === 1 && clip[0] === done.loadtas && toasts.some((t) => /Compiled: <b>0:00\.83<\/b> \(lower bound 0:00\.17\), \/loadtas line copied/.test(t.h) && !t.err) &&
+		/result {3}\s+83 run ticks \(0:00\.83\); lower bound 17 \(gap 79\.5%\); proven legs 1 of 2/.test(h2) && /id="cmpLine" readonly value="\/loadtas C:\\jobs\\toy-compiled-abc123\\best\.eetas"/.test(h2) &&
+		/id="bCmpCopy"/.test(h2) && /#watch=toy-compiled-abc123/.test(h2) && el('bCompile').disabled === false, `${JSON.stringify(clip)} ${JSON.stringify(toasts)} ${h2.slice(0, 400)}`);
+	await run.pollCompile();
+	check('told once: polling the same done compile again copies nothing more', clip.length === 1 && toasts.filter((t) => /Compiled/.test(t.h)).length === 1, `${clip.length} copies`);
+	// (the clipboard refused: the read-only field, a toast saying so)
+	clipOk = false;
+	apiState = Object.assign({}, done, { started: 222 });
+	run.CMPL.mine = 222;
+	await run.pollCompile();
+	await new Promise((r) => setImmediate(r));
+	const h3 = el('compileSt').innerHTML;
+	check('the clipboard refused: the toast says to copy the line below; the read-only field with the line and a Copy button stay, a note under it',
+		toasts.some((t) => /the browser refused the clipboard/.test(t.h)) && /id="cmpLine" readonly/.test(h3) && /id="bCmpCopy"/.test(h3) && /refused the clipboard: copy the line above/.test(h3), h3.slice(-300));
+	// (a compile another page started: no clipboard, no toast)
+	const n0 = toasts.length;
+	clipOk = true;
+	apiState = Object.assign({}, done, { started: 333 });
+	await run.pollCompile();
+	check('a compile this page did not start: its lines shown, no clipboard, no toast', toasts.length === n0 && clip.length === 1 && /cmpLine/.test(el('compileSt').innerHTML), `${toasts.length - n0} toasts`);
+	// (no route: the reason)
+	apiState = { running: false, started: 444, stage: 'no route', stages, message: 'no route (end exhausted): the most progress ...', elapsed: 60, seconds: 60 };
+	run.CMPL.mine = 444;
+	await run.pollCompile();
+	check('no route: the message in an error box and an error toast', /class="msg err">Compile: no route \(end exhausted\)/.test(el('compileSt').innerHTML) && toasts[toasts.length - 1].err, el('compileSt').innerHTML.slice(-200));
+}
+
 // ---------------------------------------------------------------- truth: src/plan/truth.js on a toy truth root
 function sectionTruth(TMP) {
 	console.log('(truth) src/plan/truth.js --part=compile,model on a toy truth root (the mock parts)');
@@ -310,6 +379,7 @@ function sectionTruth(TMP) {
 		if (want('off')) sectionOff(TMP);
 		if (want('api')) sectionApi(TMP);
 		if (want('truth')) sectionTruth(TMP);
+		if (want('page')) await sectionPage();
 	} finally { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { /* busy */ } }
 	console.log(`\n${pass} passed, ${fail} failed`);
 	process.exit(fail ? 1 : 0);
