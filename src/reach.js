@@ -243,10 +243,22 @@ function reachField(level, opts) {
 	const fl = (id) => (id >= 0 && id < nFlags ? flags[id] : 0);
 	let wild = !(level.gravityMult === 1), protect = false, ice = false, anyField = false, anyPortal = false, checkpoints = false, timed = false;
 	const protOn = [];   // the protection effect's "on" tiles (its number is not 0: Me.as, eesim.js EFFECT_PROTECTION)
+	// opts.plainFx (with opts.goals; COMPILER DOCTOR 6): the field of a PLAIN ball (no effect on: types.js featValue 'fx'
+	// 0) in a level with effect tiles: the physics model up to the first effect tile that changes a plain ball (fxExit)
+	// and that tile a goal at its walk cost (the walk is a lower bound for any effect state, so the field stays a lower
+	// bound and its -1 a proof for the plain ball); an effect tile that leaves a plain ball plain (a fly / jump / speed /
+	// low-gravity / gravity effect of number 0, a multijump of 1) is air. Without it: one effect tile anywhere made the
+	// whole level's field the gravity-blind walk.
 	let mjTiles = 0, wildOther = false;   // (the air jumps: multijump tiles, any other effect tile)
+	const plainFx = !!opts.plainFx && !!opts.goals;
+	const fxExit = plainFx ? [] : null;
 	for (let i = 0; i < N; i++) {
 		const id = fg[i];
-		if (WILD.has(id)) { wild = true; if (id === 461) mjTiles++; else wildOther = true; }
+		if (WILD.has(id)) {
+			if (id === 461) mjTiles++; else wildOther = true;
+			if (!plainFx) wild = true;
+			else if (id === 461 ? lk[i] !== 1 : lk[i] !== 0) fxExit.push(i);
+		}
 		if (id === PROTECTION && lk[i] !== 0) { protect = true; protOn.push(i); }
 		if (id === ICE) ice = true;
 		if (id === CHECKPOINT) checkpoints = true;
@@ -455,6 +467,14 @@ function reachField(level, opts) {
 	// ---- walking distance (both modes: walk mode's cost, physics mode's fallback score): 8-way, a diagonal step closed
 	// only between two walls, portals, death respawns
 	const walk = walkField(W, H, cls, passable, trophy, goalF, portalExits, deaths ? { respawn, src: dsrc } : null, maxF, forcedP, blk);
+	// (opts.plainFx: the effect tiles that change a plain ball become goals at their walk cost, the physics field's seeds)
+	let fxSeeds = 0;
+	if (fxExit !== null && fxExit.length && mode === 'physics') {
+		for (const i of fxExit) {
+			if (!passable(i) || walk[i] === CUT) continue;
+			if (!(goalF.get(i) <= walk[i])) { if (!goalF.has(i)) goals++; goalF.set(i, walk[i]); fxSeeds++; }
+		}
+	}
 	// walk mode with protection: that walk (killing tiles open where a protected ball can be) is a protected ball's way. An
 	// unprotected ball's (every killing tile deadly; the protection tiles goals at the protected walk's cost from there)
 	// orders every ball, and the protected walk + PROT_COST only where the unprotected one has no way. Sound: a protected
@@ -476,7 +496,7 @@ function reachField(level, opts) {
 			else if (protP[i] && walk[i] !== CUT) { walkOut[i] = Math.min(FAR, walk[i] + PROT_COST); protFallback++; }
 		}
 	}
-	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ,
+	const base = { version: 3, W, H, N, mode, Q, B: Q, INF, ice, deaths: deaths || protFallback > 0, goals, toGoals: goalF !== null, cls, walk: walkOut, mismatches: 0, KLJ, fxSeeds, plainFx: plainFx && mode === 'physics',
 		halfQuad: blk ? blk.reduce((a, x) => a + x, 0) : 0,
 		prot: protP === null ? null : { on: protOn.length, tiles: protP.reduce((s, x) => s + x, 0), fallback: protFallback } };
 	if (mode === 'walk') return Object.assign(base, { ms: Date.now() - t0, prioShift: prioShiftOf(walkOut), labels: 0 });
@@ -1534,6 +1554,14 @@ function scoreAt(f, px, py, vy, q0, q1, slip) {
 /** the cost to the trophy in tiles (-1 = cut off): costAt(field, sim), or costAt(field, px, py, vy, onGround) with the
  *  gravity queue unknown (taken as the strongest pull) */
 function costAt(f, a, py, vy) {
+	// (a plain-ball field, opts.plainFx: a ball with an effect on is priced by the field's walk, the walk mode's lookup: the
+	// physics part holds for a plain ball only)
+	if (f.plainFx === true && typeof a === 'object' && a !== null && !(a.has_levitation === false && a.flip_gravity === 0 && a.max_jumps === 1 && a.jump_boost === 0 && a.speed_boost === 0 && !a.low_gravity)) {
+		const tx = Math.trunc(a.px + 8) >> 4, ty = Math.trunc(a.py + 8) >> 4;
+		if (tx < 0 || ty < 0 || tx >= f.W || ty >= f.H) return -1;
+		const w = f.walk[ty * f.W + tx];
+		return w === CUT ? -1 : w / 5;
+	}
 	const v = typeof a === 'object' && a !== null ? fifthsAt(f, a.px, a.py, a.speed_y, a._q0, a._q1, a._slippery) : fifthsAt(f, a, py, vy, -1, -1, f.ice ? 2 : 0);
 	return v < 0 ? -1 : v / 5;
 }

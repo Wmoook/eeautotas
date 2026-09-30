@@ -440,10 +440,13 @@ function makeCore(L, co) {
 		sim.restore(s.snap);
 		const Lc = T.levelNow(L, sim);
 		const tiles = T.fieldTilesOf(goal);
-		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}`;
+		const pfx = T.plainOf(sim);
+		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${pfx ? '|p' : ''}`;
 		let f = ordMemo.get(key);
 		if (f) return f;
-		f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true });
+		const oo = { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true };
+		if (pfx) oo.plainFx = true;
+		f = RF.reachField(Lc, oo);
 		ordMemo.set(key, f);
 		if (ordMemo.size > 8) ordMemo.delete(ordMemo.keys().next().value);
 		return f;
@@ -483,7 +486,7 @@ function makeCore(L, co) {
 	function fieldNow(goal, allowDeath) {
 		const Lc = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
 		const t0 = Date.now();
-		const f = T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath });
+		const f = T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath, plainFx: T.plainOf(sim) });
 		const dt = Date.now() - t0;
 		if (dt > 2) { fieldMs.n++; fieldMs.perTile = Math.max(fieldMs.perTile, dt / N); }
 		return f;
@@ -1776,7 +1779,7 @@ async function createExecutor(L, opts) {
 		if (e.dead) return { f: null, c: NaN };
 		// (the waypoint's own ordering tiles: a death step's are the tiles a death starts from, planner.js dieField; its
 		// goal tiles, the respawn, are where its start stands: c0 0, no skeleton, Tutorial 2's killers 235+ tiles away)
-		const f = T.goalField(walls ? withWalls(T.levelNow(L, vsim), walls) : T.levelNow(L, vsim), T.fieldTilesOf(goal), { deaths: !!allowDeath });
+		const f = T.goalField(walls ? withWalls(T.levelNow(L, vsim), walls) : T.levelNow(L, vsim), T.fieldTilesOf(goal), { deaths: !!allowDeath, plainFx: T.plainOf(vsim) });
 		return { f, c: RF.costAt(f, vsim) };
 	}
 	/** the skeleton's closest in the WAYPOINT's unit (f0: its goal field at the step's starts, the unit of the direct
