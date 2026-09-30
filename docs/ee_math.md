@@ -943,6 +943,16 @@ rest improves the chain and can close it. Lazy verification: an edge is a replay
 expanded. **Closed** = no open node's fa is below the best chain's T and every bound used was certified: no chain of
 these legs is shorter (the order's weight does not enter the claim).
 
+**The compiler's chains are the executor's legs one after another** (each leg from the arrivals the leg before kept),
+not this A*: which arrival a leg keeps decides the next leg. The iterate 2 lane 'chains' measured it (n4-plan's
+docs/ee_math.md 7.9; test/planexec.js T-EXEC-CHAIN `--chainRetry`, box 3, 40 known routes): with a region waypoint every
+60 route ticks, 26 of the 29 first failures are legs that DO solve from the route's own state with the same budget (17 by
+this solver), the chain's arrival being the region's first entry at its edge with the cheapest leg's speed; ranking the
+first entries by tick + the next leg's cost (this solver's leg to the next waypoint, else the endgame's sound bound) is a
+tie (1,162 vs 1,158 / 1,163 legs of 3,763): the way on needs a state deeper in the region than any first entry, so the
+next step is a leg to the NEXT waypoint through this one (a chain whose target is the pair), not a better choice among
+first entries.
+
 ### 4.7 The numbers
 
 **The real moves** (`tools/math/msolve_bench.js`, box 3, the moves study's segmentation of the truthset's 218 routes;
