@@ -57,6 +57,8 @@ const ARRIVALS_K = 4, MAX_DEEPEN = 4, STEER_MISS = 6000;
 const POLISH_MS = 15000, POLISH_F = 0.25;
 // exploration steps (the second stall on): frontier tiles within FRONTIER_STEPS walk steps of an anchor, at most FRONTIER_MAX
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
+// the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
+const FALLBACK_MAX = 6;
 // the arrivals' own bounds for the branch and bound (the planner's lowerBound from one arrival: a short search)
 const ARR_LB_MS = 25, ARR_LB_EXPAND = 20000;
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
@@ -631,7 +633,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		front.sort((a, b) => dist[b] - dist[a]);
 		return front.slice(0, FRONTIER_MAX);
 	};
-	let exploreTurn = 0;
+	let exploreTurn = 0, exploreSeq = 0;
 	const exploreJob = () => {
 		const list = [...anchors.values()].filter((A) => !uselessA(A));
 		for (let i = 0; i < list.length; i++) {
@@ -639,13 +641,34 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const tiles = frontierOf(A);
 			if (!tiles.length) continue;
 			exploreTurn += i + 1;
-			const step = { n: 0, edge: `explore:${A.key}:${stalls}`, nodeClass: `x${A.key}`, rung: Math.min(3, Math.max(0, stalls - 1)), synthetic: true, estTicks: 0,
+			const step = { n: 0, edge: `explore:${A.key}:${++exploreSeq}`, nodeClass: `x${A.key}`, rung: Math.min(3, Math.max(0, stalls - 1)), synthetic: true, estTicks: 0,
 				waypoint: { kind: 'region', tiles, expect: null, label: `explore ${tiles.length} tiles` } };
 			return { anchor: A, plan: { id: 'explore', steps: [step], cost: 0, partial: true, why: 'stall' }, step };
 		}
 		return null;
 	};
 	const exploreQ = [];
+	/** the fallbacks when the planner has nothing left and time remains (at most FALLBACK_MAX without a new anchor): from
+	 *  the anchor of the most progress a direct trophy step (the executor's exact tiers derive the whole way), its rung
+	 *  rising each time, then an exploration step on its unvisited frontier; never the same triple twice */
+	let fallbacks = 0, fallbackAnchors = -1;
+	const fallbackJob = () => {
+		if (anchors.size !== fallbackAnchors) { fallbackAnchors = anchors.size; fallbacks = 0; }
+		if (fallbacks >= FALLBACK_MAX || stopped || left() < 1000) return null;
+		const list = [...anchors.values()].filter((A) => A.arrivals.length && !uselessA(A)).sort((a, b) => b.gain - a.gain || a.firstTick - b.firstTick);
+		for (const A of list) {
+			for (let r = 0; r < rungMs.length; r++) {
+				const step = { n: 0, edge: `fallback:trophy:${A.key}`, nodeClass: `f${A.key}`, rung: r, synthetic: true, fallback: true, estTicks: 0, waypoint: { kind: 'trophy', label: 'trophy (fallback: no plan left)' } };
+				if (tried.has(`${edgeKey(step)}|${r}|${epoch}`)) continue;
+				fallbacks++;
+				say({ ev: 'fallback', kind: 'trophy', anchor: A.id, rung: r, why: A.why || 'no plan' });
+				return { anchor: A, plan: { id: 'fallback', steps: [step], cost: 0, partial: true, why: 'fallback' }, step };
+			}
+		}
+		const j = exploreJob();
+		if (j) { fallbacks++; say({ ev: 'fallback', kind: 'explore', anchor: j.anchor.id, rung: j.step.rung }); }
+		return j;
+	};
 	const deepen = (why) => {
 		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? polishReserve : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
@@ -765,12 +788,13 @@ async function compile(L, opts = {}, emit = () => {}) {
 				inflight.set(ek, f);
 			}
 			if (!inflight.size) {
-				// (every anchor exhausted: a global deepening, else the end)
+				// (every anchor exhausted: a global deepening; nothing new since the last one, or no deepening left: the
+				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
-				if (best && left() <= polishReserve) { end = 'time'; break; }
-				if (nothingSince >= 0 && nothingSince === steps) { end = 'exhausted'; break; }
+				if (left() < 250 || (best && left() <= polishReserve)) { end = 'time'; break; }
+				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				nothingSince = steps;
-				if (!deepen('exhausted')) { end = 'exhausted'; break; }
+				if (!deepen('exhausted')) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				continue;
 			}
 			const tick = new Promise((res) => { const tt = setTimeout(res, 250); if (tt.unref) tt.unref(); });

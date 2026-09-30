@@ -3,6 +3,8 @@
 // the benchmark levels, the known routes) in one command, and the end-to-end check of the compiler itself.
 //   node src/plan/truth.js [--part=model|bounds|prims|exec|compile|all] [--limit=N] [--workers=N] [--seconds=60]
 //       [--out=<dir>] [--sets=campaign,hard,d4] [--resume=1] [--parts=<module of mock parts: tests>] [--root=<truth root>]
+//       [--shards=K (each part's test in K processes, --shard=i/K, the counts summed)] [--par=K (to the parts' tests)]
+//       [--partMinutes=60]
 //   parts (each a child process with --truth; a test file that is not there is 'absent'):
 //     model   test/planmodel.js --truth, test/planplanner.js --truth   (T-MODEL-SOUND, T-PLAN-FEASIBLE, T-PLAN-ORDER, T-CEGAR-PROGRESS)
 //     bounds  test/planbounds.js --truth                               (T-LB-ADMISSIBLE)
@@ -61,22 +63,32 @@ function runChild(cmd, args, o = {}) {
 // ---------------------------------------------------------------- the parts' own --truth checks
 async function partChecks(part, a) {
 	const rows = [];
+	const shards = Math.max(1, Math.round(+a.shards || 1));
 	for (const f of PARTS[part]) {
 		const file = path.join(ROOT, f);
 		if (!fs.existsSync(file)) { rows.push({ part, test: f, status: 'absent', passed: null, failed: null, lines: [] }); continue; }
-		const args = [file, '--truth', ...(a.limit ? [`--limit=${a.limit}`] : []), ...(a.sets ? [`--sets=${a.sets}`] : []), ...(a.workers ? [`--workers=${a.workers}`] : [])];
-		const r = await runChild(process.execPath, args, { timeoutMs: (+a.partMinutes || 60) * 60000 });
-		const lines = r.out.split('\n').map((l) => l.replace(/\s+$/, '')).filter(Boolean);
-		let passed = null, failed = null;
-		for (const l of lines) {
-			let m = /(\d+)\s+passed,\s*(\d+)\s+failed/.exec(l);
-			if (m) { passed = +m[1]; failed = +m[2]; continue; }
-			m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(l);
-			if (m) { passed = +m[1]; failed = +m[2]; }
+		// (--shards=K: K processes, each --shard=i/K, their counts summed; the parts' tests take --shard, --limit, --par)
+		const argsOf = (i) => [file, '--truth', ...(a.limit ? [`--limit=${a.limit}`] : []), ...(a.sets ? [`--sets=${a.sets}`] : []), ...(a.par ? [`--par=${a.par}`] : []),
+			...(shards > 1 ? [`--shard=${i}/${shards}`] : [])];
+		const t0 = Date.now();
+		const rs = await Promise.all(Array.from({ length: shards }, (_, i) => runChild(process.execPath, argsOf(i), { timeoutMs: (+a.partMinutes || 60) * 60000 })));
+		let passed = null, failed = null, keep = [], killed = false, code = 0, tail = '';
+		for (const r of rs) {
+			const lines = r.out.split('\n').map((l) => l.replace(/\s+$/, '')).filter(Boolean);
+			let p = null, q = null;
+			for (const l of lines) {
+				let m = /(\d+)\s+passed,\s*(\d+)\s+failed/.exec(l);
+				if (m) { p = +m[1]; q = +m[2]; continue; }
+				m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(l);
+				if (m) { p = +m[1]; q = +m[2]; }
+			}
+			if (p !== null) { passed = (passed || 0) + p; failed = (failed || 0) + q; }
+			keep = keep.concat(lines.filter((l) => /^\s*(ok|FAIL)\b/.test(l) || /\bT-[A-Z-]+/.test(l)));
+			if (r.killed) killed = true;
+			if (r.code !== 0) { code = r.code; tail += (r.err || r.out).slice(-800); }
 		}
-		const keep = lines.filter((l) => /^\s*(ok|FAIL)\b/.test(l) || /\bT-[A-Z-]+/.test(l)).slice(-80);
-		const status = r.killed ? 'timeout' : r.code === 0 && (failed === null || failed === 0) ? 'pass' : 'fail';
-		rows.push({ part, test: f, status, code: r.code, passed, failed, sec: r2(r.ms / 1000), lines: keep, tail: status === 'pass' ? '' : (r.err || r.out).slice(-1500) });
+		const status = killed ? 'timeout' : code === 0 && (failed === null || failed === 0) ? 'pass' : 'fail';
+		rows.push({ part, test: f, status, code, passed, failed, shards, sec: r2((Date.now() - t0) / 1000), lines: keep.slice(-120), tail: status === 'pass' ? '' : tail.slice(-1500) });
 	}
 	return rows;
 }

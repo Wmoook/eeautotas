@@ -128,13 +128,15 @@ async function sectionA() {
 	process.env.PLANMOCK_MODE = 'fail';
 	const t5 = Date.now();
 	x = await runMock({ first: false, seconds: 30, maxDeepen: 2 });
-	const st5 = x.of('step'), fc5 = x.of('fact');
+	const st5 = x.of('step'), fc5 = x.of('fact'), fb5 = x.of('fallback');
+	const planned5 = st5.filter((s) => !/^(fallback|explore):/.test(String(s.edge)));
 	const trip5 = st5.map((s) => `${s.edge}|${s.nodeClass}|${s.rung}|${s.epoch}`);
-	check('T-STALL a failing executor: a fact after every step (facts change every step), no bug, no triple twice in an epoch',
-		st5.length >= 8 && fc5.length === st5.length && x.of('bug').length === 0 && new Set(trip5).size === trip5.length, `${st5.length} steps, ${fc5.length} facts: ${trip5.join(' ')}`);
-	check('T-STALL a failing executor: the key blocked after its 4 rungs in each epoch, 2 deepenings, the end "exhausted" within the budget (no route, the report says why)',
-		x.r.end === 'exhausted' && !x.r.ok && x.of('deepen').length === 2 && (Date.now() - t5) / 1000 < 30 && /no route \(end exhausted\)/.test(x.r.why || '') && x.of('done')[0].why,
-		`${x.r.end} after ${((Date.now() - t5) / 1000).toFixed(1)} s, deepen ${x.of('deepen').length}: ${x.r.why}`);
+	check('T-STALL a failing executor: a fact after every planned step (facts change every step), no bug, no triple twice in an epoch',
+		planned5.length >= 8 && fc5.length === planned5.length && x.of('bug').length === 0 && new Set(trip5).size === trip5.length, `${planned5.length} planned steps, ${fc5.length} facts: ${trip5.join(' ')}`);
+	check('T-STALL a failing executor: the key blocked after its 4 rungs in each epoch, 2 deepenings, then the fallbacks (a direct trophy step at rungs 0-3, then the frontier; at most 6), the end "exhausted" within the budget (no route, the report says why)',
+		x.r.end === 'exhausted' && !x.r.ok && x.of('deepen').length === 2 && fb5.length === 6 && fb5.slice(0, 4).every((f, i) => f.kind === 'trophy' && f.rung === i) && fb5.slice(4).every((f) => f.kind === 'explore') &&
+		(Date.now() - t5) / 1000 < 30 && /no route \(end exhausted\)/.test(x.r.why || '') && x.of('done')[0].why,
+		`${x.r.end} after ${((Date.now() - t5) / 1000).toFixed(1)} s, deepen ${x.of('deepen').length}, fallbacks ${fb5.map((f) => `${f.kind}${f.rung}`).join(' ')}: ${x.r.why}`);
 	// (a6) T-STALL branch and bound: after the route, the key's anchor offers a 'detour' whose lb (1e6) cannot beat it:
 	// never run; the anchor exhausted by the bound
 	process.env.PLANMOCK_MODE = 'bnb';
