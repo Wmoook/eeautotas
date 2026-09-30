@@ -524,7 +524,12 @@ ways in.
   executor's long trophy leg fails at 1.5-6 s, and the coins / keys were its stepping stones; another coin ORDER on
   Gingerbread House (9 of 14 in order), Frostbitten (11 of 16) and MIHB's Dream's coin clusters. Tools: `tools/perf/plans.js`
   (the planner's plans from a route's state), `stages.js` (a reports dir's stage times), `ladder.js` (the trophy leg from the
-  start under tight deadlines), `table.js` (the before / after table).
+  start under tight deadlines), `table.js` (the before / after table). IN THE COMPILE (box 5, 60 s, `--workers=2`, the 16 levels
+  the final compile routed at 60 s, one run an arm, the same code with / without `EEAT_PERFECT=1` (its polish share 0.5
+  then)): compiled 13 vs 16 (Bygone Tutorial, Accident Prone, The Blank Page not routed with it: the base found them at
+  32-60 s), on the 13 both routed 15,152 vs 15,372 run ticks, better 4 (Rosa 3,814 vs 4,219, Fish Gods 3,657 vs 3,742),
+  worse 4 (Tree Decorating 1,722 vs 1,476: its route came at 59 s), the same 5: the moves stage's run-to-run spread, no
+  gain shown. So OPT-IN: the pass never makes a GIVEN route slower, but in a compile its reserve comes out of the moves.
 - **JOINS: the speed carried across the joins, and the leg proofs** (n5-perfect, 2026-09-30; `src/plan/joins.js`, the stage
   `joins` after prove (and after the perfect pass), DEFAULT ON in `src/compile.js` with its own clock AFTER the budget:
   `--joins=<s>` / `EEAT_JOINS_S`, default half the budget, at most 60 s; `EEAT_JOINS=0` / `--joins=0` off, the watchdog's
