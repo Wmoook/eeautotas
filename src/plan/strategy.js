@@ -84,6 +84,7 @@ const PROVE_ROUNDS = 12;
 const PROVE_SHORT = 600, PROVE_LONG_MS = 3000;
 // (lane 5) a route of at most PROVE_TINY run ticks: the moves stop PROVE_TINY_F of the budget before its end (the proof's)
 const PROVE_TINY = 100, PROVE_TINY_F = 0.5, PROVE_TINY_ON = process.env.EEAT_PROVE_TINY !== '0';
+const PROVE_KEEP = process.env.EEAT_PROVE_KEEP !== '0';
 // exploration steps (the second stall on): frontier tiles within FRONTIER_STEPS walk steps of an anchor, at most FRONTIER_MAX
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
@@ -1141,6 +1142,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const trophy = T.goalOf(L, { kind: 'trophy' });
 			const how = noDeath ? 'nothing kills' : 'deaths as moves';
 			const notes = [];
+			// (lane 5: a start proven for a cost C (no route from it arrives within C ticks after its first input) stays proven for
+			// every smaller cost: a later round (after a faster route) searches only the starts not proven yet. Before, every round
+			// searched every start again: Switch Labyrinth's 5 rounds of -1 re-proved its first 10-14 starts 5 times. EEAT_PROVE_KEEP=0: off)
+			const provenAt = new Map();
 			for (let round = 0; round < PROVE_ROUNDS; round++) {
 				let kStar = 0;
 				while (kStar < best.masks.length && best.masks[kStar] === 0) kStar++;
@@ -1157,6 +1162,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const capEnd = POLISH_REST && process.env.EEAT_POLISH_LAST !== '0' && Cost > PROVE_SHORT ? tm + PROVE_LONG_MS : Infinity;
 				for (let k = 0; k <= restIdle && !faster; k++) {
 					const room = Math.min(left() - 250, capEnd - Date.now());
+					if (PROVE_KEEP && provenAt.get(k) >= Cost) { proved++; lbMin = Math.min(lbMin, Cost); continue; }
 					if (room < 100) { fail = fail || 'no time left'; lbMin = 0; break; }
 					const ms = Math.max(100, Math.floor(room / (restIdle + 1 - k)));
 					const deadline = Date.now() + ms;
@@ -1168,7 +1174,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 						const arr = (r.arrivals || []).filter((a) => a && a.masks && a.tick <= k + Cost - 1).sort((a, b) => a.tick - b.tick);
 						if (!arr.length) { bug('prove', { why: `the executor returned arrivals past the waypoint's beforeTick ${k + Cost - 1}` }); fail = 'its arrivals were past the bound (a bug)'; lbMin = 0; break; }
 						faster = { a: arr[0], r, k };
-					} else if (r && Number(r.lb) >= Cost) proved++;
+					} else if (r && Number(r.lb) >= Cost) { proved++; provenAt.set(k, Cost); }
 					else if (!fail) fail = `start +${k} idle: ${r && r.fail ? r.fail.why : '?'}, the exact search's bound ${r ? num(r.lb || 0) : '?'} of the ${num(Cost)} needed`;
 					// (each search's lb: no arrival within lb - 1 layers of its start; the least over the starts bounds every route)
 					if (!(r && r.ok)) lbMin = Math.min(lbMin, r && Number(r.lb) > 0 ? Math.min(Number(r.lb), Cost) : 0);
