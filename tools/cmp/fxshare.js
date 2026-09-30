@@ -8,6 +8,7 @@ const path = require('path');
 const root = path.join(__dirname, '..', '..');
 const TS = require(path.join(root, 'src/plan/truthset.js'));
 const E = require(path.join(root, 'src/eesim.js'));
+const RF = require(path.join(root, 'src/reach.js'));
 const FX = new Set([417, 418, 419, 453, 461, 1517]);
 const json = process.argv.includes('--json=1');
 const seen = new Set(), rows = [];
@@ -23,18 +24,26 @@ for (const k of TS.knownRoutes({})) {
 	seen.add(k.name);
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
-	let on = 0, n = 0;
+	// (kinds: the effect ticks by kind, fly > gravity > low gravity > the multijump's number (mjInf = 1000+) + jump / speed
+	// boost; modelled: the effect ticks whose state the effect-state field models, reach.js fxStateOf, EEAT_FX_STATE)
+	let on = 0, n = 0, modelled = 0;
+	const kinds = {};
 	for (let i = 0; i < t.masks.length; i++) {
 		E.applyMask(inp, t.masks[i] & 31); sim.tick(inp); n++;
-		if (sim.max_jumps !== 1 || sim.jump_boost || sim.speed_boost || sim.low_gravity || sim.has_levitation || sim.flip_gravity) on++;
+		if (sim.max_jumps !== 1 || sim.jump_boost || sim.speed_boost || sim.low_gravity || sim.has_levitation || sim.flip_gravity) {
+			on++;
+			if (RF.fxStateOf(sim)) modelled++;
+			const kd = sim.has_levitation ? 'fly' : sim.flip_gravity ? 'grav' : sim.low_gravity ? 'lowg' : (sim.max_jumps >= 1000 ? 'mjInf' : sim.max_jumps !== 1 ? 'mj' + sim.max_jumps : '') + (sim.jump_boost ? '+jb' : '') + (sim.speed_boost ? '+sb' : '');
+			kinds[kd] = (kinds[kd] || 0) + 1;
+		}
 		if (sim.has_silver_crown) break;
 	}
-	rows.push({ name: k.name, fxTiles, ticks: n, fxTicks: on, share: +(on / Math.max(1, n)).toFixed(3) });
+	rows.push({ name: k.name, fxTiles, ticks: n, fxTicks: on, modelled, kinds, share: +(on / Math.max(1, n)).toFixed(3) });
 }
 rows.sort((a, b) => b.share - a.share);
 if (json) console.log(JSON.stringify(rows));
 else {
-	for (const r of rows) console.log(`${String(r.share.toFixed(3)).padStart(6)}  ${String(r.fxTicks).padStart(6)} / ${String(r.ticks).padStart(6)}  fx tiles ${String(r.fxTiles).padStart(4)}  ${r.name}`);
+	for (const r of rows) console.log(`${String(r.share.toFixed(3)).padStart(6)}  ${String(r.fxTicks).padStart(6)} / ${String(r.ticks).padStart(6)}  modelled ${String(r.modelled).padStart(6)}  fx tiles ${String(r.fxTiles).padStart(4)}  ${r.name}  ${JSON.stringify(r.kinds)}`);
 	const b = [0, 0, 0, 0];
 	for (const r of rows) b[r.share < 0.1 ? 0 : r.share < 0.5 ? 1 : r.share < 0.9 ? 2 : 3]++;
 	console.log(`levels with effect tiles and a known route: ${rows.length}; effect on for <10% of the route: ${b[0]}, 10-50%: ${b[1]}, 50-90%: ${b[2]}, >=90%: ${b[3]}`);
