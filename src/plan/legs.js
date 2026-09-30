@@ -272,7 +272,8 @@ function legBest(L, starts, goal, o) {
 	if (beforeTick >= 0) depthMax = Math.min(depthMax, beforeTick - t0);
 	const tStart = Date.now();
 	// the nodes: parent, mask, tick (absolute layer), the snapshot while open
-	const par = [], msk = [], gg = [], sn = [], dst = [];
+	const par = [], msk = [], rp = [], gg = [], sn = [], dst = [];
+	const HOLD = o.hold > 0 ? o.hold : 8;
 	const pool = [];
 	// the open heap of node indices by f
 	const heap = [], hf = [];
@@ -317,11 +318,11 @@ function legBest(L, starts, goal, o) {
 	const goals = [];
 	const closest = { dist: -1, start: -1, tail: null, node: -1 };
 	let sims = 0, pops = 0, lastPoll = 0, found = -1;
-	const pathOfNode = (i, extraMask) => {
+	const pathOfNode = (i, extraMask, extraReps) => {
 		const rev = [];
-		if (extraMask >= 0) rev.push(extraMask);
+		if (extraMask >= 0) for (let r = 0; r < (extraReps || 1); r++) rev.push(extraMask);
 		let k = i;
-		while (par[k] >= 0) { rev.push(msk[k]); k = par[k]; }
+		while (par[k] >= 0) { for (let r = 0; r < rp[k]; r++) rev.push(msk[k]); k = par[k]; }
 		return { start: sIdx[k], tail: Uint8Array.from(rev.reverse()) };
 	};
 	const sIdx = [];
@@ -329,7 +330,7 @@ function legBest(L, starts, goal, o) {
 		sim.restore(starts[s].snap);
 		if (sim.is_dead && !allowDeath) continue;
 		const i = par.length;
-		par.push(-1); msk.push(0); gg.push(starts[s].tick - t0); sn.push(sim.snapshot()); sIdx[i] = s;
+		par.push(-1); msk.push(0); rp.push(0); gg.push(starts[s].tick - t0); sn.push(sim.snapshot()); sIdx[i] = s;
 		const d = distOf(field, sim);
 		dst.push(d);
 		if (X.goalAt(goal, sim, starts[s].tick, beforeTick)) { goals.push({ node: i, mask: -1, depth: gg[i] }); found = gg[i]; continue; }
@@ -338,6 +339,7 @@ function legBest(L, starts, goal, o) {
 	}
 	let why = 'exhausted';
 	let popsAtFound = -1;
+	const drop = { dead: 0, oob: 0, region: 0, closed: 0 };
 	while (heap.length && goals.length < collect && (popsAtFound < 0 || pops - popsAtFound < 3000)) {
 		if ((pops & 63) === 0) {
 			const now = Date.now();
@@ -353,29 +355,42 @@ function legBest(L, starts, goal, o) {
 		if (g >= depthMax) { pool.push(snap); continue; }
 		// (once a goal is found, only nodes that can still arrive by then are worth a look: the other goals of its layer)
 		if (found >= 0 && g + 1 > found) { pool.push(snap); continue; }
+		// (the node's own cell: a child is the input HELD until the ball leaves it (at most HOLD ticks): a child in its
+		// parent's cell is the same trajectory a tick on, and the first arrival's rule would drop it (a ball at rest, a slow
+		// fall: the search died at its start on 2 px / 4 px cells))
+		sim.restore(snap);
+		const pkey = cellKey();
 		const masks = EG.probeMasks(sim, inp, snap);
 		sims++;
 		for (let k = 0; k < masks.length; k++) {
 			const m = masks[k];
 			if (k > 0) { sim.restore(snap); E.applyMask(inp, m); sim.tick(inp); sims++; }
-			if (sim.is_dead && !allowDeath) continue;
-			if (!sim.is_dead && X.goalAt(goal, sim, t0 + g + 1, beforeTick)) {
-				if (found < 0 || g + 1 < found) found = g + 1;
-				if (popsAtFound < 0) popsAtFound = pops;
-				goals.push({ node: i, mask: m, depth: g + 1 });
-				continue;
+			let reps = 1, key = 0, bad = false;
+			for (;;) {
+				if (sim.is_dead && !allowDeath) { drop.dead++; bad = true; break; }
+				if (!sim.is_dead && X.goalAt(goal, sim, t0 + g + reps, beforeTick)) {
+					if (found < 0 || g + reps < found) found = g + reps;
+					if (popsAtFound < 0) popsAtFound = pops;
+					goals.push({ node: i, mask: m, reps, depth: g + reps });
+					bad = true;
+					break;
+				}
+				key = cellKey();
+				if (key !== pkey || reps >= HOLD || g + reps >= depthMax) break;
+				E.applyMask(inp, m); sim.tick(inp); sims++; reps++;
 			}
+			if (bad) continue;
+			if (key === pkey) { drop.closed++; continue; }
 			const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
-			if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
-			if (region !== null && !region[cy * W + cx]) continue;
-			const key = cellKey();
-			if (closed.has(key)) continue;
+			if (cx < 0 || cy < 0 || cx >= W || cy >= H) { drop.oob++; continue; }
+			if (region !== null && !region[cy * W + cx]) { drop.region++; continue; }
+			if (closed.has(key)) { drop.closed++; continue; }
 			closed.add(key);
 			const d = distOf(field, sim);
 			const j = par.length;
-			par.push(i); msk.push(m); gg.push(g + 1); dst.push(d);
+			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
 			sn.push(sim.snapshot(pool.length ? pool.pop() : undefined));
-			hpush(j, g + 1 + w * scoreOf(d));
+			hpush(j, g + reps + w * scoreOf(d));
 			if (d < 1e9 && (closest.dist < 0 || d < closest.dist)) { closest.dist = d; closest.node = j; }
 		}
 		pool.push(snap);
@@ -392,10 +407,10 @@ function legBest(L, starts, goal, o) {
 	}
 	const res = (status, extraF) => {
 		if (closest.node >= 0) { const p = pathOfNode(closest.node, -1); closest.start = p.start; closest.tail = p.tail; }
-		return Object.assign({ status, passes: [{ pops, open: heap.length, closed: closed.size, why: status }], sims, closest, seconds: (Date.now() - tStart) / 1000, t0 }, extraF || {});
+		return Object.assign({ status, passes: [{ pops, open: heap.length, closed: closed.size, why: status, drop }], sims, closest, seconds: (Date.now() - tStart) / 1000, t0 }, extraF || {});
 	};
 	if (goals.length) {
-		const out = goals.map((x) => { const p = pathOfNode(x.node, x.mask); return { start: p.start, tail: p.tail, depth: x.depth }; });
+		const out = goals.map((x) => { const p = pathOfNode(x.node, x.mask, x.reps); return { start: p.start, tail: p.tail, depth: x.depth }; });
 		out.sort((a, b) => a.depth - b.depth);
 		return res('found', { tick: t0 + out[0].depth, depth: out[0].depth, start: out[0].start, tail: out[0].tail, goals: out });
 	}
