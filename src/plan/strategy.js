@@ -649,9 +649,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// (BW_LEGS: a later plan of the start anchor with a trigger step rewrites the file; the child reads it after its first
 	// clock: a ONE-LEG level's first plan is the trophy alone, and its later plans (the facts of the failed trophy legs)
 	// name the triggers)
-	const bwlPlan = (A, pl) => {
+	const bwlPlan = (A) => {
 		if (!bwlWpFile || !bwlChild || best || !A || String(A.key) !== String(S0.key)) return;
 		try {
+			// (the anchor's best plan now (its memo's first), not the alternative a job runs)
+			const pl = A.plans && Array.isArray(A.plans.plans) ? A.plans.plans[0] : null;
 			const wps = bwlWpsOf(pl, A);
 			if (!wps) return;
 			const k = wps.map((w) => w.label).join('>');
@@ -1399,7 +1401,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				const ek = edgeKey(job.step);
 				if (inflight.has(ek)) continue;
 				cur = { plan: job.plan, step: job.step, anchor: job.anchor.id, ok: null, depth: job.anchor.depth };
-				if (bwlWpFile) bwlPlan(job.anchor, job.plan);
+				if (bwlWpFile) bwlPlan(job.anchor);
 				say({ ev: 'plan', anchor: job.anchor.id, steps: job.plan.steps.map(labelOf), cost: job.plan.cost, lb: job.plan.lb, partial: !!job.plan.partial, why: job.plan.why || '', rung: job.step.rung });
 				const f = { job, started: Date.now(), budgetMs: budgetOf(job.step.rung).ms };
 				f.promise = runJob(job).catch((e) => { bug('job', { error: e.message }); return {}; }).then((r) => { inflight.delete(ek); return r; });
