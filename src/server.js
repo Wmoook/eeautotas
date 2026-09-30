@@ -151,6 +151,9 @@ const ENDPOINTS = [
 	['GET', '/api/editor/autotas', 'the AutoTASer: running, state (finding / optimizing / done), job, best (run ticks), bestT (s), routes, handoff, events [{t, ev, ...}] (the last 60), t0 (its start, ms), bests [{t, runTicks, what}] (the base route of its job and every faster best: the first and the newest 64)'],
 	['POST', '/api/editor/autotas/stop', 'stop the AutoTASer (Find a route stops, the job pauses with its best)'],
 	['POST', '/api/editor/job', 'a job from a found route: JSON {eelvlB64, eetasB64, name, start: true|false, processor: "cpu" | "gpu"} (import, optionally start)'],
+	['POST', '/api/editor/compile', 'the compiler (src/compile.js: the level -> a verified .eetas; no search, no GPU; one at a time, in the background): JSON {eelvlB64 (or level), seconds (60), workers, name}'],
+	['GET', '/api/editor/compile', 'the compile: running, stage, stages [{name, ms, text}] (parse, model, bounds, plan, moves, verify, polish), detail, notes, result {runTicks, time, lb, gap, legs, known, ...}, job (the run made from its route), loadtas (the eeo-tas line: /loadtas <its best.eetas>), message'],
+	['POST', '/api/editor/compile/stop', 'stop the compile'],
 ];
 
 // ---------------------------------------------------------------- http helpers
@@ -299,6 +302,16 @@ async function editorRoute(req, res, parts, q) {
 					gpu: systemInfo().processors[1], startJob, stopJob, source: b.source });
 			} catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
 			return send(res, 200, autotasState());
+		}
+	}
+	// the COMPILE action (src/compile.js: the level -> a verified .eetas, no search, no GPU; one at a time): its stage
+	// lines, then a job from its route and the eeo-tas line for it (loadtas), which the page copies
+	if (what === 'compile') {
+		if (req.method === 'GET' && !sub) return send(res, 200, ED.compileState());
+		if (req.method === 'POST' && sub === 'stop') return send(res, 200, ED.compileStop());
+		if (req.method === 'POST' && !sub) {
+			const b = await readJsonBody(req, 64 << 20);
+			try { return send(res, 200, ED.compileStart(b)); } catch (e) { return send(res, 400, { error: e.message, problems: e.problems }); }
 		}
 	}
 	if (req.method === 'POST' && what === 'job' && !sub) {
