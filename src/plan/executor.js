@@ -400,7 +400,7 @@ function makeCore(L, co) {
 				let r;
 				try {
 					r = MS.leg(s.snap, mTarget, { Tmax, chain: false, prove: true, proveMs: Math.max(2, Math.min(50, left / 4)), fieldMs: Math.max(5, Math.min(120, left / 2)),
-						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000 });
+						coupled: near, coupledTicks: Math.max(5000, Math.min(MATH_COUPLED_TICKS, Math.round(800 * left))), nodes: 400000, plainMs: Math.max(5, left / 2) });
 				} catch (e) { why = `error: ${e && e.message || e}`; continue; }
 				tries++;
 				sims += r.ticks || 0;
