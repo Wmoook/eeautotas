@@ -290,16 +290,17 @@ function polishRoute(L, masks0, o) {
 		const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
 		let loops = [];
 		try { loops = require('../loops.js').revisits(L, best.ms, { coins: true, radius: LOOP_R, min: 40, max: 900, keep: 24 }); } catch (e) { loops = []; }
-		const done = new Set();
+		// (the loops' ticks are the route's as it was when they were found; every accepted change [at, to) shifts the ticks
+		// after it by its saving, and a loop overlapping a changed span is not searched)
+		const edits = [];
+		const mapT = (p) => { let q = p; for (const e of edits) { if (p >= e.to) q -= e.saved; else if (p > e.at) return -1; } return q; };
 		for (let li = 0; li < loops.length && Date.now() < lEnd && !(stop && stop()); li++) {
 			const cur = best.ms;
-			// (the loop's ticks on the current route: an earlier accepted change shifted the later ones by its saving)
-			const shift = ev0.ms.length - cur.length;
 			const lp = loops[li];
-			const a = Math.max(0, lp.a - LOOP_PRE - (li && lp.a > (loops[0].a || 0) ? shift : 0));
-			const b = Math.min(cur.length - 1, lp.b + LOOP_POST - (li && lp.a > (loops[0].a || 0) ? shift : 0));
-			if (b - a < 20 || done.has(a)) continue;
-			done.add(a);
+			const a0 = mapT(Math.max(0, lp.a - LOOP_PRE)), b0 = mapT(lp.b + LOOP_POST);
+			if (a0 < 0 || b0 < 0) continue;
+			const a = a0, b = Math.min(cur.length - 1, b0);
+			if (b - a < 20) continue;
 			const R4 = traceRoute(L, cur);
 			const sB = stateAt(R4, cur, b);
 			if (sB.is_dead) continue;
@@ -327,7 +328,9 @@ function polishRoute(L, masks0, o) {
 			for (const [, q] of ranked.slice(0, 6)) { if (q === b) continue; const c = new Uint8Array(a + tail.length + (cur.length - q)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(q), a + tail.length); cands.push([`anchor ${q}`, c]); }
 			for (const [how, c] of cands) {
 				if (Date.now() > deadline) break;
-				if (accept(c, `loop ${a}->${b} in ${tail.length} (${how})`)) break;
+				const n0 = cur.length;
+				// (in the loops' own ticks: the change spans the loop's window; the route after it is shorter by the saving)
+				if (accept(c, `loop ${a}->${b} in ${tail.length} (${how})`)) { edits.push({ at: Math.max(0, lp.a - LOOP_PRE), to: lp.b + LOOP_POST + (how === 'plain' ? 0 : 150), saved: n0 - best.ms.length }); break; }
 			}
 		}
 	}
