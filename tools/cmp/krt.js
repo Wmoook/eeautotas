@@ -43,7 +43,7 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 		inTarget = (sim) => !!sim.has_silver_crown;
 	} else {
 		const M = MD.compileModel(L);
-		const X = M.triggers.find((x) => x.label === label);
+		const X = M.triggers.find((x) => String(x.label).replace(/ x\d+$/, '') === label);
 		if (!X) { out.err = 'no trigger ' + label; console.log(JSON.stringify(out)); process.exit(0); }
 		const tiles = new Set(X.tiles);
 		wp = { kind: 'trigger', tiles: X.tiles.slice(), trig: X.id, expect: null, label };
@@ -64,7 +64,7 @@ const pos = argv.filter((s) => !s.startsWith('--'));
 	const prims = await PM.createPrims(L, { file, bounds, model: null, workers: 0 });
 	const ex = await EX.createExecutor(L, { file, prims, bounds, workers: 0, emit: null });
 	const starts = [];
-	if (usePrev && prevEv) starts.push(['prevEvent ' + prevEv.feat, prevEv.tick]);
+	if (usePrev && prevEv) starts.push(['prevEvent ' + prevEv.feat, prevEv.tick]); else if (usePrev) starts.push(['spawn', 0]);
 	// (with the previous trigger's start: only starts after it; --prev=0: any start from the level's start on, e.g. the route's
 	// state before triggers the plan leaves out)
 	for (const b of backs) if (hit - b > (usePrev && prevEv ? prevEv.tick : 0)) starts.push(['hit-' + b, hit - b]);
