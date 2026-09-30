@@ -491,7 +491,11 @@ function createPlanner(model, facts, o = {}) {
 	const DIE_GAP = +process.env.EEAT_PLAN_DIE_GAP || 3;
 	const deathThs = (() => {
 		const set = new Set(), fg = model.L && model.L.fg, lk = model.L && model.L.lookup0;
-		if (fg && lk) for (let i = 0; i < fg.length; i++) if ((fg[i] === 1011 || fg[i] === 1012) && lk[i] > 0) set.add(lk[i]);
+		// (the DOORS' thresholds (1011: open from N deaths on); a death gate (1012) SHUTS at its count, which the est walk
+		// (a shut gate a wall, never a floor) can only lose by: a die edge there is branching for nothing (Polar Eclipse's
+		// 16 gates at 1..16); EEAT_PLAN_DIE_GATES=1: gates too)
+		const gatesToo = process.env.EEAT_PLAN_DIE_GATES === '1';
+		if (fg && lk) for (let i = 0; i < fg.length; i++) if ((fg[i] === 1011 || (gatesToo && fg[i] === 1012)) && lk[i] > 0) set.add(lk[i]);
 		return [...set].sort((x, y) => x - y);
 	})();
 	const dieNear = (cur) => deathThs.some((t) => t > cur && t <= cur + DIE_GAP);
