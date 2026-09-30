@@ -120,6 +120,21 @@ function cegar() {
 	check('T-CEGAR-PROGRESS: every failed learn adds facts and bumps the version', bumps === rounds - (gone >= 0 ? 1 : 0), `${bumps} bumps in ${rounds} rounds`);
 	check('T-CEGAR-PROGRESS: no (edge, nodeClass, rung) triple twice', dup === 0, `${seen.size} triples`);
 	check('T-CEGAR-PROGRESS: the failing edge is gone after at most 4 failures', gone >= 0 && gone <= 4, `gone at round ${gone}, next: ${lastWhy}`);
+	// the strategy's 4 budget rungs (createFacts({rungs: 4})): out after at most 4 failures, no triple twice
+	{
+		const f5 = F.createFacts({ rungs: 4 }), p5 = P.createPlanner(m, f5, {});
+		const seen5 = new Set();
+		let gone5 = -1, dup5 = 0;
+		for (let r = 0; r < 8; r++) {
+			const s = (p5.plan({}, { k: 1 })[0] || { steps: [] }).steps[0];
+			if (!s || s.edge !== 'trig:0') { gone5 = r; break; }
+			const trip = `${s.edge}|${s.nodeClass}|${s.rung}`;
+			if (seen5.has(trip)) dup5++;
+			seen5.add(trip);
+			p5.learn(s, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: s.rung } }, {});
+		}
+		check('T-CEGAR-PROGRESS: with 4 rungs (the strategy\'s) the edge is out after 4 failures, rungs 0-3, no triple twice', gone5 === 4 && dup5 === 0, `gone at ${gone5}`);
+	}
 	// blockedBy: the trophy edge fails next to the key door -> the key first
 	{
 		const L2 = LEVELS.keySwitch(), m2 = M.compileModel(L2), f2 = F.createFacts(), p2 = P.createPlanner(m2, f2, {});
@@ -168,18 +183,28 @@ function truth() {
 		const pl = P.createPlanner(m, null, {});
 		const ev = S.routeEvents(L, tr.masks);
 		// the route's relevant order as trigger ids (the event tile's trigger of that feature, or next to it)
+		// (the ball's tile at every tick: a press queued while the ball overlapped a door it closes, a team change
+		// retried, a key queued fire a tick or more after the touch: the trigger is where the ball was up to 8 ticks before)
+		const tileAt = new Int32Array(tr.masks.length + 2);
+		{ const E = require('../src/eesim.js'), sim = new E.EESim(L), inp = new E.EEInput(); sim.reset(); tileAt[0] = T.tileOf(sim, W, L.height); for (let t = 0; t < tr.masks.length; t++) { E.applyMask(inp, tr.masks[t] & 31); sim.tick(inp); tileAt[t + 1] = T.tileOf(sim, W, L.height); } }
 		const order = [], ticks = [];
 		for (const x of S.orderOf(ev.events, { all: true })) {
 			if (!(m.featSet.has(x.feat) || (x.feat === 'cp' && m.cpTracked)) || (x.feat.startsWith('key') && x.value === 0) || x.feat === 'deaths') continue;
-			let id = -1;
-			const x0 = x.tile % W, y0 = (x.tile / W) | 0;
-			for (let r = 0; r <= 1 && id < 0; r++) for (let dy = -r; dy <= r && id < 0; dy++) for (let dx = -r; dx <= r && id < 0; dx++) {
-				const nx = x0 + dx, ny = y0 + dy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= L.height) continue;
-				const k = m.trigOf[ny * W + nx];
-				if (k >= 0 && m.triggers[k].relevant && (m.triggers[k].feat === x.feat || (m.triggers[k].feat || '').endsWith(':*') || (m.triggers[k].kind === 'reset' && x.feat === 'prot'))) id = k;
+			let id = -1, at = x.tick;
+			for (let back = 0; back <= 8 && id < 0; back++) {
+				const tb = back === 0 ? x.tile : tileAt[Math.max(0, x.tick - back)];
+				const x0 = tb % W, y0 = (tb / W) | 0;
+				for (let r = 0; r <= 1 && id < 0; r++) for (let dy = -r; dy <= r && id < 0; dy++) for (let dx = -r; dx <= r && id < 0; dx++) {
+					const nx = x0 + dx, ny = y0 + dy;
+					if (nx < 0 || ny < 0 || nx >= W || ny >= L.height) continue;
+					const k = m.trigOf[ny * W + nx];
+					// (a reset switch only turns an id off: a press that turned it on is no reset's)
+					const K = k >= 0 ? m.triggers[k] : null;
+					const dirOK = !K || !((K.kind === 'pswR' || K.kind === 'oswR') && x.value === 1);
+					if (K && K.relevant && dirOK && (K.feat === x.feat || (K.feat || '').endsWith(':*') || (K.kind === 'reset' && x.feat === 'prot'))) { id = k; at = Math.max(0, x.tick - back); }
+				}
 			}
-			if (id >= 0) { order.push(id); ticks.push(x.tick); }
+			if (id >= 0) { order.push(id); ticks.push(at); }
 		}
 		tot.routes++;
 		const c = pl.costOf(order, {});

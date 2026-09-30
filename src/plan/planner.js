@@ -27,6 +27,7 @@ const { lbOfSteps, INF, DEAD_TICKS } = require('./model.js');
 const PACE0 = 4;              // est ticks per walk step before any learned leg
 const EST_W = 1.5;
 const PENALTY = 1e6;
+const LM_W = 60;              // ticks of the plan search's f per landmark not yet achieved (src/landmarks.js, LAMA's count)
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)          // est of an edge only the relaxation reaches (no est walk) or RCH3 calls impossible            // the plan search's heuristic weight (est only; the lb search is plain A*)
 const KEY_TICKS = 500;
 const COLOURS = ['red', 'green', 'blue', 'cyan', 'magenta', 'yellow'];
@@ -52,7 +53,98 @@ function createPlanner(model, facts, o = {}) {
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- positions
 	const posOfTrig = new Map();
-	const posOf = (X) => { let p = posOfTrig.get(X.id); if (!p) { p = { id: 't' + X.id, tiles: X.tiles, trig: X.id, extra: 0 }; posOfTrig.set(X.id, p); } return p; };
+	/**
+	 * the position after touching X in state S1 (the state before) giving S2. The engine DEFERS a change that would shut a
+	 * door on the ball (a purple press in _tileQueue, a key / crown / orange switch in its queue, a team change retried)
+	 * while the ball's box overlaps it, so the change's event can come later and elsewhere (The Flighty Slighty's switch
+	 * column: each press shuts the door the ball falls through; First Person Maze: a press deferred through a portal hop).
+	 * tiles: X's (the plan's waypoint, the est walk); grace: the shut gate components next to X, passable for the next leg;
+	 * lbTiles (the lb's sources): X's tiles, and where the touch shuts a gate, the DEFERRAL REGION: the tiles within a tile
+	 * of a gate it shuts reachable from X under S1 (portal hops included) and the tiles next to them (where the ball stops
+	 * overlapping): every place the event can happen, so the next leg's bound stays sound
+	 */
+	const graceMemo = new Map();
+	const posOf = (X, S1, S2) => {
+		let rec = null;
+		if (S1 && S2 && S1.dkey !== S2.dkey) {
+			const gk = X.id + '|' + S1.dkey + '|' + S2.dkey;
+			rec = graceMemo.get(gk);
+			if (rec === undefined) {
+				rec = null;
+				const N = model.N;
+				// the gate tiles the touch shuts (anywhere) and the tiles within one of them
+				let near = null, nShut = 0;
+				for (const g of model.gates) {
+					const j = g.tiles[0];
+					if (!(model.gateOpen(j, S1, 'est', null) && !model.gateOpen(j, S2, 'est', null))) continue;
+					if (!near) near = new Uint8Array(N);
+					for (const t of g.tiles) {
+						nShut++;
+						const x = t % W, y = (t / W) | 0;
+						for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H) near[ny * W + nx] = 1; }
+					}
+				}
+				if (near) {
+					let grace = null;
+					const gs = new Set();
+					for (const t of X.tiles) {
+						const x = t % W, y = (t / W) | 0;
+						for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+							const nx = x + dx, ny = y + dy;
+							if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+							const j = ny * W + nx, g = model.gateOf[j];
+							if (g < 0 || gs.has(g)) continue;
+							gs.add(g);
+							if (model.gateOpen(j, S1, 'est', null) && !model.gateOpen(j, S2, 'est', null)) { if (!grace) grace = []; for (const tt of model.gates[g].tiles) grace.push(tt); }
+						}
+					}
+					// the deferral region: a flood from X over the passable tiles (S1, lb) within one of a shut gate
+					const m1 = model.passMask(S1, 'lb', null);
+					const inR = new Uint8Array(N), out = new Uint8Array(N);
+					const q = [];
+					let anyNear = false;
+					// (seeds: X and the tiles next to it: the ball's box over X overlaps them, and it moves on while the change
+					// waits; First Person Maze's press takes effect one portal hop later)
+					for (const t of X.tiles) {
+						inR[t] = 1; out[t] = 1; if (near[t]) { q.push(t); anyNear = true; }
+						const x = t % W, y = (t / W) | 0;
+						for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+							const nx = x + dx, ny = y + dy;
+							if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+							const j = ny * W + nx;
+							if (!m1[j] && model.A.cls[j] !== 3) continue;
+							out[j] = 1;
+							if (!inR[j] && near[j]) { inR[j] = 1; q.push(j); anyNear = true; }
+						}
+					}
+					if (anyNear) {
+						while (q.length) {
+							const c = q.pop(), x = c % W, y = (c / W) | 0;
+							const nb = [];
+							for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) nb.push(ny * W + nx); }
+							const ex = model.A.portalExits.get(c);
+							if (ex) for (const e of ex) nb.push(e);
+							for (const j of nb) {
+								if (!m1[j] && !(model.A.cls[j] === 3)) continue;
+								out[j] = 1;
+								if (!inR[j] && near[j]) { inR[j] = 1; q.push(j); }
+							}
+						}
+					}
+					const lbTiles = [];
+					for (let i = 0; i < N; i++) if (out[i]) lbTiles.push(i);
+					rec = { grace, lbTiles: lbTiles.length > X.tiles.length ? lbTiles : null, nShut };
+				}
+				if (graceMemo.size > 100000) graceMemo.clear();
+				graceMemo.set(gk, rec);
+			}
+		}
+		const grace = rec ? rec.grace : null, lbTiles = rec ? rec.lbTiles : null;
+		const id = 't' + X.id + (grace ? '~' + grace[0] + ':' + grace.length : '') + (lbTiles ? '^' + lbTiles[0] + ':' + lbTiles.length + ':' + lbTiles[lbTiles.length - 1] : '');
+		let p = posOfTrig.get(id);
+		if (!p) { p = { id, tiles: X.tiles, trig: X.id, extra: 0, grace, lbTiles }; posOfTrig.set(id, p); }
+		return p;
+	};
 	const respawnPos = { id: 'respawn', tiles: model.respawn, extra: DEAD_TICKS };
 	const idlePos = { id: 'idle', tiles: model.idleTiles, extra: 0 };
 	// the fully open level (every tile but the static walls): the heuristics
@@ -88,6 +180,38 @@ function createPlanner(model, facts, o = {}) {
 		best += pos.extra || 0;
 		hMemo.set(pos.id, best);
 		return best;
+	}
+	// ---------------------------------------------------------------- landmarks (the plan search's guide)
+	// the level's landmarks (src/landmarks.js: the relaxed planning graph over its triggers from the start; a fact every
+	// relaxed plan needs): the plan search's f counts the ones the state does not hold (ordering only, est; the lb and the
+	// proofs never read them)
+	let LMS = null;
+	function landmarks() {
+		if (LMS) return LMS;
+		LMS = [];
+		try {
+			const lm = require('../landmarks.js').landmarksOf(L, { maxMs: o.lmMs || 1500 });
+			for (const l of lm.landmarks) {
+				const fct = l.f;
+				if (fct.startsWith('coins>=')) LMS.push((S) => (S.feats.coins !== undefined ? S.feats.coins >= +fct.slice(7) : true));
+				else if (fct.startsWith('bcoins>=')) LMS.push((S) => (S.feats.bcoins !== undefined ? S.feats.bcoins >= +fct.slice(8) : true));
+				else if (fct.startsWith('team=')) LMS.push((S) => S.feats.team === undefined || S.feats.team === +fct.slice(5));
+				else if (fct === 'crown') LMS.push((S) => S.feats.crown === undefined || S.feats.crown === 1);
+				else LMS.push((S) => S.feats[fct] === undefined || S.feats[fct] === 1);
+			}
+			ST.landmarks = LMS.length;
+		} catch (e) { LMS = []; }
+		return LMS;
+	}
+	const lmMemo = new Map();
+	function hLM(S) {
+		let h = lmMemo.get(S.key);
+		if (h !== undefined) return h;
+		h = 0;
+		for (const t of landmarks()) if (!t(S)) h++;
+		if (lmMemo.size > 200000) lmMemo.clear();
+		lmMemo.set(S.key, h);
+		return h;
 	}
 	const pace = () => {
 		if (!paceSamples.length) return PACE0;
@@ -171,7 +295,7 @@ function createPlanner(model, facts, o = {}) {
 				if (bad === 'proof' && root) return;
 				if (bad) g.est += PENALTY;
 			}
-			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, edge, live: tiles });
+			out.push({ X, S2: tr ? tr.S2 : S, pos2: X ? posOf(X, S, tr ? tr.S2 : S) : null, expect: tr ? tr.expect : null, lb: g.lb, est: g.est, steps: g.steps, viaDeath: g.viaDeath, relaxOnly: g.relaxOnly, edge, live: tiles });
 		};
 		for (const X of relevant) {
 			if (pos.trig === X.id && !(X.kind === 'psw' || X.kind === 'osw')) continue;
@@ -266,11 +390,15 @@ function createPlanner(model, facts, o = {}) {
 		let seq = 0, expanded = 0, found = null, pruned = 0;
 		const P = pace();
 		const root = { S: a.S, pos: a.pos, g: 0, gl: 0, parent: null, e: null, depth: 0, seq: seq++ };
-		root.f = EST_W * hSteps(a.pos) * P - GAIN_BONUS * P * a.S.gain;
+		// (a puzzle, 3+ landmarks left: greedy on the heuristic, g a tie-break (LAMA's greedy best-first); else weighted A*)
+		const gw = hLM(a.S) >= 3 ? 0.1 : 1;
+		const fOf = (g, S, pos) => gw * g + EST_W * hSteps(pos) * P + LM_W * hLM(S) - GAIN_BONUS * P * S.gain;
+		root.f = fOf(0, a.S, a.pos);
 		open.push(root);
 		best.set(a.S.key + '#' + a.pos.id, 0);
 		let bestPartial = root;
-		const better = (x, y) => x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f);
+		// (the partial plan's end: the fewest landmarks left, then the most gain, then the least f)
+		const better = (x, y) => { const hx = hLM(x.S), hy = hLM(y.S); return hx < hy || (hx === hy && (x.S.gain > y.S.gain || (x.S.gain === y.S.gain && x.f < y.f))); };
 		let rootEdges = 0;
 		while (open.size) {
 			const n = open.pop();
@@ -288,7 +416,7 @@ function createPlanner(model, facts, o = {}) {
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
 					if (gl2 >= budget) { pruned++; continue; }
-					open.push({ S: n.S, pos: null, g: g2, gl: gl2, f: g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true });
+					open.push({ S: n.S, pos: null, g: g2, gl: gl2, f: gw < 1 ? -1e12 + g2 : g2, parent: n, e, depth: n.depth + 1, seq: seq++, goal: true });
 					continue;
 				}
 				const hl = hLb(e.pos2);
@@ -297,7 +425,7 @@ function createPlanner(model, facts, o = {}) {
 				const had = best.get(k2);
 				if (had !== undefined && had <= g2) continue;
 				best.set(k2, g2);
-				open.push({ S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: g2 + EST_W * hSteps(e.pos2) * P - GAIN_BONUS * P * e.S2.gain, parent: n, e, depth: n.depth + 1, seq: seq++, goal: false });
+				open.push({ S: e.S2, pos: e.pos2, g: g2, gl: gl2, f: fOf(g2, e.S2, e.pos2), parent: n, e, depth: n.depth + 1, seq: seq++, goal: false });
 			}
 		}
 		ST.expands += expanded;
@@ -562,7 +690,7 @@ function createPlanner(model, facts, o = {}) {
 			if (!Number.isFinite(l)) { feasible = false; why = `leg ${i} to ${X ? X.label : 'the trophy'} unreachable in the model`; legs.push({ to: X ? X.id : 'trophy', lb: Infinity }); break; }
 			lb += l; est += Math.max(l, steps < INF ? steps * P : l);
 			legs.push({ to: X ? X.id : 'trophy', lb: l });
-			if (X) { const tr = model.touch(S, X); S = tr.S2; pos = posOf(X); }
+			if (X) { const tr = model.touch(S, X); pos = posOf(X, S, tr.S2); S = tr.S2; }
 		}
 		if (a.idle && feasible) lb = Math.max(0, lb - 2);
 		return { lb, est: Math.round(est), feasible, why, legs };

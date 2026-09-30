@@ -432,7 +432,11 @@ function compileModel(L, o = {}) {
 		const had = distMemo.get(key);
 		if (had) { distMemo.delete(key); distMemo.set(key, had); return had; }
 		const t1 = Date.now();
-		const d = bfs(passMask(S, mode, base), pos.tiles);
+		let msk = passMask(S, mode, base);
+		// (a position's grace gates: shut by the touch that made it, still passable for the ball that overlaps them)
+		if (pos.grace && pos.grace.length) { msk = Uint8Array.from(msk); for (const t of pos.grace) msk[t] = 1; }
+		// (the lb's sources: a position's deferral region, where a deferred change's event can happen)
+		const d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles);
 		distBuilds++; distMs += Date.now() - t1;
 		distMemo.set(key, d);
 		if (distMemo.size > 96) distMemo.delete(distMemo.keys().next().value);

@@ -11,12 +11,13 @@
 //   {kind: 'needs', edge, nodeClass, feat, value}   a shut gate near the closest approach: the edge needs that value first
 //   {kind: 'proof', edge, sKey}                     an RCH3 -1 from that abstract state: never tried from it again
 //   {kind: 'block', edge, nodeClass}                RUNG_MAX failures: the edge is out for that node class
-// o.rungMax (3). The version counts every add (and every reset).
+// o.rungMax (or o.rungs, the strategy's budget rungs; default 3). The version counts every add (and every reset).
 const RUNG_MAX = 3;
 const KINDS = new Set(['ok', 'fail', 'needs', 'proof', 'block']);
 
 function createFacts(o = {}) {
-	const rungMax = o.rungMax || RUNG_MAX;
+	// (o.rungs: the strategy's number of budget rungs, e.g. 4 = 1.5 / 5 / 15 / 45 s: the block after that many failures)
+	const rungMax = o.rungMax || o.rungs || RUNG_MAX;
 	let ver = 0, facts = [];
 	let fails = new Map(), blocks = new Set(), proofs = new Set(), needs = new Map(), oks = new Map();
 	const ek = (edge, cls) => `${edge}\u0001${cls}`;
