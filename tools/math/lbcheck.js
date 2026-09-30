@@ -91,7 +91,7 @@ function runRoute(entry, moves) {
 		const m0 = byStart.get(t);
 		if (m0) {
 			cur = m0;
-			tgt = { tiles: [m0.tile1], mode: m0.c1 === 'G' ? 'landing' : 'touch' };
+			tgt = { tiles: [m0.tile1], mode: m0.c1 === 'G' ? (m0.endKind === 'land' && m0.t1 < tr.complete ? 'landing' : 'land') : 'touch' };
 			field = adm ? adm.field([m0.tile1], T.levelNow(L, sim)) : null;
 		}
 		if (cur && t < cur.t1 && (EVERY || t === cur.t0)) {

@@ -154,10 +154,56 @@ function staticOf(L) {
 	const respawn = AS.respawn || new Int32Array(0);
 	if (killCells.length && respawn.length) tele.push({ exits: respawn, cost: A.DEATH_MIN, dist: chebTransform(W, H, killCells), death: true });
 	S = { W, H, N, blk, NL, lineIdx, stand: toArr(stand), ceil: toArr(ceil), src, phys, kill, ps, W1, ice, AS, tame: AS.tameLevel,
-		tele, respawn, timed: !!AS.timed };
+		tele, respawn, timed: !!AS.timed, sups: levelSups(L, groups.size > 0) };
 	STATIC.set(L, S);
 	return S;
 }
+/**
+ * THE BOUNDED SPEED-UPS: the most speed any tick of the level can give each axis, from the classes of the level's own
+ * tiles (the fields' fixed points, section 1.4 / 6): x the held run (v* at the speed effect's x1.5 where one is in the
+ * level), the fall's terminal where x can be a gravity axis (side arrows, gravity effects), 16 where a boost of the
+ * axis, a portal (the rotation's x 1.42 then the cap) or levitation is; y down the fall's terminal (the level's world
+ * gravity) or 16 (down boosts, portals, levitation); y up the jump's |J| (the jump effect's x1.3), the fall's terminal
+ * under up arrows / gravity effects, the climb and the liquids' drifts, or 16 (up boosts, portals, levitation). An
+ * effect or tile of unknown physics: 16 everywhere. Every speed after a source contact is within these (+ the align's
+ * 0.25 px a tick), so a source's rest is at least the distance over them.
+ */
+// the effects of admbounds.js's UNTAME list whose speed effect is not modelled here (16 on every axis where one is)
+const UNKNOWN_FX = new Set([453, 1520, 1573]);
+function levelSups(L, portals) {
+	const fg = L.fg, fl = L.flags, ids = new Set();
+	for (let i = 0; i < fg.length; i++) ids.add(fg[i]);
+	const has = (id) => ids.has(id);
+	let gm = L.gravityMult;
+	if (!(Number.isFinite(gm) && gm > 0)) return { x: 16, up: 16, down: 16 };
+	if (gm < 1) gm = 1;
+	const fallT = A.terminal((2 * gm) / C.MULT, C.BASE_DRAG);
+	const runT = (sm) => A.terminal(sm / C.MULT, C.BASE_DRAG);
+	let unknown = false, climb = false, liquid = false;
+	for (const id of ids) {
+		if (id < 0 || id >= fl.length) { unknown = true; continue; }
+		if (fl[id] & 32) climb = true;
+		if (fl[id] & 64) liquid = true;
+		if (UNKNOWN_FX.has(id)) unknown = true;
+	}
+	if (unknown) return { x: 16, up: 16, down: 16 };
+	const fly = has(418), grav = has(1517);
+	const side = has(1) || has(3) || has(411) || has(413) || grav;
+	const up = has(2) || has(412) || grav;
+	const jm = has(417) ? 1.3 : 1;
+	const J = (2 * 26 * jm) / C.MULT;
+	const x = Math.max(runT(1), has(419) ? runT(1.5) : 0, side ? fallT : 0, has(114) || has(115) || portals || fly ? 16 : 0);
+	const down = Math.max(fallT, has(117) || portals || fly ? 16 : 0);
+	const upv = Math.max(J, up ? fallT : 0, has(116) || portals || fly ? 16 : 0, climb ? 1.1 : 0, liquid ? 4 : 0);
+	return { x: Math.min(16, x), up: Math.min(16, upv), down: Math.min(16, down) };
+}
+/** the fewest ticks to move the centre from any point of one tile to any point of a tile (dx, dy) tiles away (dy > 0
+ *  down) at the speed sups (+ 0.25 px a tick for the align; 7 px once for a portal's x1.42 tick) */
+function supTicks(dx, dy, sp) {
+	const f = (d, v) => { if (d <= 1) return 0; const px = 16 * (d - 1) - SLACK_PX; return px <= 0 ? 0 : Math.ceil(px / (v + 0.25) - 1e-9); };
+	return Math.max(f(Math.abs(dx), sp.x), f(Math.abs(dy), dy > 0 ? sp.down : sp.up));
+}
+
 /** the Chebyshev (8-way) distance in tiles from every tile to the nearest of `cells` (two-pass transform) */
 function chebTransform(W, H, cells) {
 	const INF = 1 << 29, d = new Int32Array(W * H).fill(INF);
@@ -234,15 +280,21 @@ function createMathLB(L, o = {}) {
 	// by the speed cap alone (chebTicks) and the teleports (a portal group: 1 tick + the least F at its exits; a death:
 	// DEATH_MIN + the least F at a respawn; with timed killers a death anywhere), the teleport exits' values by a fixpoint
 	const restCache = new Map();
-	function restOf(tiles) {
-		const key = tiles.join(',');
+	function restOf(tiles, spQ) {
+		const sp = spQ || S.sups;
+		const key = tiles.join(',') + '|' + sp.x + ',' + sp.up + ',' + sp.down;
 		let R = restCache.get(key);
 		if (R) return R;
 		const d0 = chebTransform(W, H, tiles);
+		const tx = tiles.map((t) => t % W), ty = tiles.map((t) => (t / W) | 0);
+		// the direct term: the sups per axis to the nearest target tile (few target tiles: each; many: the isotropic cap)
+		const direct = tiles.length <= 16
+			? (i) => { const x = i % W, y = (i - x) / W; let m = Infinity; for (let k = 0; k < tiles.length; k++) { const v = supTicks(tx[k] - x, ty[k] - y, sp); if (v < m) m = v; } return m; }
+			: (i) => chebTicks(d0[i]);
 		const T = S.tele, nT = T.length;
 		const minExit = new Float64Array(nT).fill(Infinity);
 		const nodes = new Map();
-		for (const t of T) for (const x of t.exits) if (!nodes.has(x)) nodes.set(x, chebTicks(d0[x]));
+		for (const t of T) for (const x of t.exits) if (!nodes.has(x)) nodes.set(x, direct(x));
 		let deathT = -1;
 		for (let k = 0; k < nT; k++) if (T[k].death) deathT = k;
 		for (let it = 0; it < nodes.size + 3; it++) {
@@ -260,7 +312,7 @@ function createMathLB(L, o = {}) {
 		const timedV = S.timed && deathT >= 0 ? A.DEATH_MIN + minExit[deathT] : Infinity;
 		const deathRest = deathT >= 0 ? A.DEATH_MIN + minExit[deathT] : A.DEATH_MIN;
 		const F = (i) => {
-			let v = chebTicks(d0[i]);
+			let v = direct(i);
 			for (let k = 0; k < nT; k++) { const c = chebTicks(T[k].dist[i]) + T[k].cost + minExit[k]; if (c < v) v = c; }
 			if (timedV < v) v = timedV;
 			return v;
@@ -377,7 +429,9 @@ function createMathLB(L, o = {}) {
 		// no goal while dead) at least DEATH_MIN, the field's value there when a field is given; a physics cell the field's
 		// value (or 0)
 		const inv = !!sim.is_invulnerable;
-		const RS = restOf(tiles);
+		const sp0 = S.sups;
+		const RS = restOf(tiles, Math.abs(vx0) > sp0.x || -vy0 > sp0.up || vy0 > sp0.down
+			? { x: Math.max(sp0.x, Math.abs(vx0)), up: Math.max(sp0.up, -vy0), down: Math.max(sp0.down, vy0) } : sp0);
 		// A*'s h: from any state centred in a tile the rest field F (the speed cap + the teleports) and the given field
 		// bound every continuation, plain or through a source: admissible for the graph's paths (the frontier's least
 		// t + h is then a lower bound of every unexplored path)
