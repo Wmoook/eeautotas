@@ -70,9 +70,11 @@ const OS_DRAIN_MAX = 64;   // the thread's arrivals replayed here per loop turn 
 // built on them: the 40-level A/B's first 15, routes slower on 8 of 12 both-compiled levels, 6 of them with the one shot's
 // arrival as the first leg. EEAT_OS_GATE=0: at once.)
 const OS_GATE = process.env.EEAT_OS_GATE !== '0';
-// (the gate also opens with no route when the executor has made no new anchor for OS_OPEN_F of the budget (at least
-// OS_OPEN_MIN_S), or past OS_OPEN_HALF of the budget: the CEGAR's facts keep changing on a level the executor cannot pass, so
-// its watchdog's stall never comes there)
+// (EEAT_OS_OPEN=1, OPT-IN: the gate also opens with no route when the executor has made no new anchor for OS_OPEN_F of the
+// budget (at least OS_OPEN_MIN_S), or past OS_OPEN_HALF of the budget: the CEGAR's facts keep changing on a level the
+// executor cannot pass, so its watchdog's stall never comes there. NEGATIVE as the default: the 300-s A/B's Tutorial 1 (the
+// base's first route at 62 s) opened it at 78 s, took 8 anchors of the one shot and ended with no route)
+const OS_OPEN = process.env.EEAT_OS_OPEN === '1';
 const OS_OPEN_F = 0.2, OS_OPEN_MIN_S = 10, OS_OPEN_HALF = 0.5;
 const REPLAN_FIRST = process.env.EEAT_REPLAN_FIRST === '1';
 const PROGRESS_MS = 2000, WATCH_MS = 2000, SAVE_MS = 60000;
@@ -1257,7 +1259,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (best && left() <= endRes() && !inflight.size) { end = 'time'; break; }
 			if (anchors.size !== anchorsSeen || best !== bestSeen) { anchorsSeen = anchors.size; bestSeen = best; progressAt = Date.now(); }
 			if (stallEnd && Date.now() - progressAt > stallEnd) { end = 'stalled'; break; }
-			if (osw && !osOpen && !best && !osWantOpen) {
+			if (OS_OPEN && osw && !osOpen && !best && !osWantOpen) {
 				// (the gate with no route: no new anchor for a while, or half the budget gone)
 				if (Date.now() - progressAt > Math.max(OS_OPEN_MIN_S, OS_OPEN_F * seconds) * 1000) osWantOpen = 'no new anchor';
 				else if (secNow() > OS_OPEN_HALF * seconds) osWantOpen = 'half the budget';
