@@ -83,6 +83,67 @@ const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1
 const PORTALS = new Set([242, 381]);
 const TELEPORT_PX = 20;
 const SPEED_PX = 20;                     // the most the centre moves in a tick an axis without a teleport (16 + the align)
+// THE AXIS SPEED BOUNDS (docs/ee_math.md 4.12, THEOREM V; engine check tools/math/speedcut_check.js): away from the
+// tiles that can push an axis past its bound (x: a pull on x (the left / right arrows), an x boost; y: a y boost, ice
+// (its glide keeps more speed on y), levitation; both: a portal, a gravity effect) and with the pulls not rotated onto
+// x (flip not 1 / 3), a tick keeps |vx'| <= max(|vx|, VSTAR_X) (the held run's fixed point: the speed update is monotone
+// in v, the along-key step (v + A sm) B has its fixed point there, every other drag shrinks |v|, walls zero it; x1.5
+// with the run effect) and moves the box |dx| <= |vx'| + the align's 0.2 px; the y axis likewise with the terminal fall
+// VSTAR_Y (13.55: pulls of 2 or less, the world's gravity <= 1, jumps 8.72 at most). Local: from a state, the next R
+// ticks' current and delayed tiles all lie within SPEED_PX (R + 2) px of its centre (the 20-px limit, the queue's 2
+// ticks back), so with no hot tile of an axis in that box the ball covers g px on it in no fewer than
+// ceil(g / (max(|v|, V) + RATE_SLACK)) ticks, for EVERY input sequence of R ticks
+const VSTAR_X = 6.776552880470027, VSTAR_X_RUN = 10.164829320704984, VSTAR_Y = 13.553105760940054, RATE_SLACK = 0.5;
+const CORDER_V = process.env.EEAT_MATH_VCUT === '1';   // OPT-IN: sound, but no leg gained (docs 4.12)
+/** the id's THEOREM V class: 1 hot for x, 2 hot for y, 3 both */
+function hotClass(id, f) {
+	if (id === 1517 || PORTALS.has(id)) return 3;
+	KN.forces(id, id, 0, false, f);
+	let c = 0;
+	if (f.morx !== 0 || f.mox !== 0 || id === 114 || id === 115) c |= 1;
+	if (id === 116 || id === 117 || id === 1064 || id === 418) c |= 2;
+	return c;
+}
+/** the level's hot tiles for THEOREM V: summed-area tables sx / sy, the run effect, the world's gravity */
+function axisHot(L) {
+	const W = L.width, H = L.height, fg = L.fg, R = W + 1;
+	const sx = new Int32Array((W + 1) * (H + 1)), sy = new Int32Array((W + 1) * (H + 1));
+	const cls = new Map(), f = {};
+	let run = false;
+	for (let y = 0; y < H; y++) {
+		let rx = 0, ry = 0;
+		for (let x = 0; x < W; x++) {
+			const id = fg[y * W + x];
+			let c = cls.get(id);
+			if (c === undefined) { c = hotClass(id, f); cls.set(id, c); if (id === 419) run = true; }
+			rx += c & 1; ry += (c >> 1) & 1;
+			sx[(y + 1) * R + x + 1] = sx[y * R + x + 1] + rx;
+			sy[(y + 1) * R + x + 1] = sy[y * R + x + 1] + ry;
+		}
+	}
+	const gm = L.gravityMult === undefined ? 1 : L.gravityMult;
+	return { W, H, sx, sy, run, yOK: Math.abs(gm) <= 1 };
+}
+/** the hot tiles of table S in tile columns [x0, x1] x rows [y0, y1] (clamped to the world) */
+function hotIn(T, S, x0, y0, x1, y1) {
+	x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(T.W - 1, x1); y1 = Math.min(T.H - 1, y1);
+	if (x1 < x0 || y1 < y0) return 0;
+	const R = T.W + 1;
+	return S[(y1 + 1) * R + x1 + 1] - S[y0 * R + x1 + 1] - S[(y1 + 1) * R + x0] + S[y0 * R + x0];
+}
+/** the most the box moves on each axis a tick over the next R ticks from the state s, for every input (THEOREM V where
+ * the box around s of radius RATE_BOX(R) holds no hot tile of that axis; SPEED_PX otherwise) */
+const RATE_BOX = (R) => SPEED_PX * (R + 2) + 32;
+function axisRates(T, s, R, out) {
+	out.x = SPEED_PX; out.y = SPEED_PX;
+	const fl = s.flip_gravity;
+	if (fl === 1 || fl === 3) return out;
+	const rad = RATE_BOX(R), cx = s.px + 8, cy = s.py + 8;
+	const x0 = Math.floor((cx - rad) / 16), x1 = Math.floor((cx + rad) / 16), y0 = Math.floor((cy - rad) / 16), y1 = Math.floor((cy + rad) / 16);
+	if (hotIn(T, T.sx, x0, y0, x1, y1) === 0) out.x = Math.max(Math.abs(s.speed_x), T.run || s.speed_boost === 1 ? VSTAR_X_RUN : VSTAR_X) + RATE_SLACK;
+	if (T.yOK && hotIn(T, T.sy, x0, y0, x1, y1) === 0) out.y = Math.max(Math.abs(s.speed_y), VSTAR_Y) + RATE_SLACK;
+	return out;
+}
 let FS_ = null;
 /** the field leg solver (src/math/fieldsolve.js), loaded on first use */
 const FSOLVE = () => FS_ || (FS_ = require('../math/fieldsolve.js'));
@@ -757,7 +818,10 @@ function createSolver(L, opts = {}) {
 	// ceil(g / SPEED_PX) more ticks; a hold whose tick + that exceeds its limit cannot reach the target within the limit,
 	// nor can any branch from its later ticks (the bound holds for every input from that state). Off with a portal in the
 	// level or a teleport target (the teleport jumps the limit)
-	let hasPortal_ = null;
+	let hasPortal_ = null, tame_ = null;
+	const rates = { x: SPEED_PX, y: SPEED_PX };
+	/** the level's THEOREM V tameness, made on first use */
+	const tame = () => tame_ || (tame_ = axisHot(L));
 	function hasPortal() {
 		if (hasPortal_ === null) { hasPortal_ = false; for (let i = 0; i < N; i++) if (PORTALS.has(L.fg[i])) { hasPortal_ = true; break; } }
 		return hasPortal_;
@@ -775,6 +839,8 @@ function createSolver(L, opts = {}) {
 	// (hold, then jump: the most common unsolved field-leg pattern of the moves study) in the same pass, then the press on a
 	// change of direction; a heading order (the masks toward the target first) lost more legs than it found
 	const CORDER = process.env.EEAT_MATH_CORDER !== '0';
+// the twin cut of the coupled piece (EEAT_MATH_TWIN=0: off): every TWIN_MASK + 1 ticks (EEAT_MATH_TWIN_K, a power of 2) a hold's state hash under its mask
+const TWIN = process.env.EEAT_MATH_TWIN !== '0', TWIN_MASK = (+process.env.EEAT_MATH_TWIN_K || 4) - 1;   // K a power of 2
 	function solveCoupled(snap, s, tg, goal, o, stats) {
 		const Tmax = o.Tmax;
 		const ordered = CORDER && o.coupledOrder !== false;
@@ -782,12 +848,20 @@ function createSolver(L, opts = {}) {
 		let best = null;
 		const snaps = [];
 		const bx = ordered && !tg.tele && !tg.via && !hasPortal() ? boxOf(tg) : null;
+		const vcut = CORDER_V ? o.vcut !== false : o.vcut === true;
 		const cut = (t, limit) => {
 			// (t: the leg tick just played, 1-based; the goal can hold at the earliest at t + need)
 			const x = sim.px, y = sim.py;
-			const g = Math.max(bx.xl - x, x - bx.xh, bx.yl - y, y - bx.yh, 0);
-			return t + Math.ceil(g / SPEED_PX) > limit;
+			if (!vcut) {
+				const g = Math.max(bx.xl - x, x - bx.xh, bx.yl - y, y - bx.yh, 0);
+				return t + Math.ceil(g / SPEED_PX) > limit;
+			}
+			// THEOREM V: each axis at its own rate from this state on
+			axisRates(tame(), sim, limit - t, rates);
+			const gx = Math.max(bx.xl - x, x - bx.xh, 0), gy = Math.max(bx.yl - y, y - bx.yh, 0);
+			return t + Math.max(Math.ceil(gx / rates.x), Math.ceil(gy / rates.y)) > limit;
 		};
+		const twins = TWIN && o.twin !== false ? new Set() : null;
 		const hold = (m0, p0, from, tick0, limit) => {
 			// play mask m0 (with the jump bit p0 on the first tick of the leg, or of this hold with p0 = 2) from snapshot
 			// `from` at leg tick tick0
@@ -800,6 +874,14 @@ function createSolver(L, opts = {}) {
 				if (goal(sim, px, py)) return t + 1;
 				if (sim.is_dead) return 0;
 				if (bx && cut(t + 1, limit)) { stats.cuts = (stats.cuts || 0) + 1; return 0; }
+				// THE TWIN CUT (exact): from tick t + 1 on every hold plays its mask plain, so a state met again at the
+				// same leg tick under the same mask has the continuation already played (with a limit at least this
+				// one's: the limit only shrinks): its outcome is known, the hold ends here
+				if (twins !== null && ((t + 1) & TWIN_MASK) === 0) {
+					const key = m0 + ':' + (t + 1) + ':' + sim.stateHash();
+					if (twins.has(key)) { stats.twins = (stats.twins || 0) + 1; return 0; }
+					twins.add(key);
+				}
 			}
 			return 0;
 		};
@@ -1343,4 +1425,4 @@ function mergeWins(ws) {
 	return out;
 }
 
-module.exports = { createSolver, clsOf, holdTables, holdRange, mergeWins, DIR9, TELEPORT_PX };
+module.exports = { createSolver, clsOf, holdTables, holdRange, mergeWins, DIR9, TELEPORT_PX, axisHot, hotClass, hotIn, axisRates, RATE_BOX, SPEED_PX, VSTAR_X, VSTAR_X_RUN, VSTAR_Y, RATE_SLACK };

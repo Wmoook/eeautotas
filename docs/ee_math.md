@@ -1157,6 +1157,62 @@ both solved, the same T in every one. The time a leg (the loaded box): median 6.
 tiers' (the plain tier alone here); the failures: no plain candidate 5,532 (the field crossings, a second landing, a
 bonk after the landing, K > 2), the node budget 707, not plain 176.
 
+### 4.12 The coupled piece's twin cut, and THEOREM V (the fields iteration 2)
+
+**The failing class, again.** After 4.10, 1,653 of the 1,992 field legs of <= 120 ticks were still unsolved (arrow
+1,172, dot 295, boost 99, portal 49, climb 22, swim 15); 1,441 of them need 4+ essential direction runs in the route's
+own inputs. The coupled piece is where they fail, and it fails on its BUDGET: 1,318 of the 1,652 failures spend the
+executor's whole 150 k engine ticks (the median failure 150,138 ticks), 121 of the 173 legs of <= 40 ticks too. Its F1
+family at T = 50 costs ~9 x 50 x 50 / 2 ticks a prefix (the holds of every change tick run to the limit), so the 18
+prefixes and the second jump family never finish.
+
+**THE TWIN CUT (exact).** Every hold of the family (F0's, F1's branches, the jump families') plays its mask PLAIN from
+the tick after its change on (the jump bit is on one tick only). So two holds that meet the same engine state
+(`stateHash`: exactly what behaves the same from then on, the clocks' phase included) at the same leg tick under the same
+mask have one continuation: the first one played it to its limit, and the limit only shrinks (`best.T - 1`), so the
+second's outcome is known (the goal at the same tick, or none) and it ends there. The key (mask, tick, stateHash) is
+taken every K = 4 ticks (`EEAT_MATH_TWIN_K`, a power of 2; `EEAT_MATH_TWIN=0`: off). It cuts only work already done:
+nothing the family can find is lost (up to a 2^-53 hash collision), and the ticks it saves go to the next prefixes.
+Twins are common in fields: an arrow pins the ball on a wall or in a corner (a blocked step zeroes the speed, a landing
+puts y on the line), after which every change tick of a prefix that reaches the same pin gives the same state.
+
+**Measured** (box 3, `tools/math/msolve_bench.js --only=<list> --coupledTicks=150000 --fieldMs=120 --chain=0
+--prove=0`, the executor's budgets, the r10 legs from the route's exact state, Tmax = the route's ticks + 10; both arms
+of one tree side by side, `EEAT_MATH_TWIN=0` the base; every answer replayed again by the bench's separate EESim:
+**0 rejected**):
+
+| legs | base | the twin cut (K 4) | in <= the route's ticks |
+|---|---:|---:|---:|
+| unsolved field legs <= 120 ticks (1,992) | 340 | **415** (+75, 0 lost) | 280 -> 341 |
+| of them arrow / dot / portal / boost / swim / climb | 261 / 28 / 25 / 25 / 1 / 0 | 329 / 33 / 26 / 25 / 2 / 0 | |
+| solved field legs, every 6th (2,713) | 2,662 | **2,699** (+37, 0 lost) | 2,486 -> 2,538 |
+
+On the legs both solve the twin arm's T is lower on 4 + 49, higher on none (the budget reaches cheaper members). The
+failures that spend the whole 150 k ticks: 1,318 -> 547 of the failing legs (<= 40 ticks: 121 -> 0: the one-change
+family is now exhausted there, the budget left over). The wall time: the solved sample's median 28 vs 38 ms (found
+sooner); a failing leg's 156 vs 109 ms (the hashes; its budget is ticks).
+
+**THEOREM V (the axis speed bounds) and its engine check.** Away from the tiles that can push an axis past its bound
+(x: a pull on x = the left / right arrows, an x boost; y: a y boost, ice (its glide keeps more speed on y), levitation;
+both: a portal, a gravity effect) and with the pulls not rotated onto x (flip not 1 / 3): a tick keeps
+`|vx'| <= max(|vx|, v*)` (v* = 6.776552880470027, the held run's fixed point; 10.164829320704984 with the run effect)
+and moves the box `|dx| <= |vx'| + 0.2` (the align); the y axis the same with the terminal fall 13.553105760940054
+where the world's gravity is <= 1. Proof: the speed update is monotone in v in every context (1.4); the along-key step
+`(v + A sm) B` has its fixed point at v*, every other drag (N, liquids, climbables, ice's glide on x, the dots'
+release) shrinks |v|, a wall zeroes it; the only other writers of a speed are the boosts, the portal's turn, the jump
+(on the pull's axis: x only under an x pull; on y at most 8.72 < 13.55) and levitation's thrust (on the pull's axis).
+The move is the rounded add (T-ADD) or less (a blocked step), the align moves < 0.2 px only at |v| < 1. A state's next R
+ticks read current and delayed tiles within 20 (R + 2) px of its centre, so with no hot tile of an axis in that box the
+bound holds for all of them (`msolve.axisHot` / `axisRates`, summed-area tables of the hot tiles). *Check*
+(`tools/math/speedcut_check.js`, box 3, 4 shards): every tick of the 218 routes' own inputs and of random words from
+their states (every 40th tick, 4 words of 120 ticks) whose 9 x 9 tile box is cold on an axis: **x 11,382,017 ticks, y
+18,101,573 ticks, 0 violations** (the largest |v'| - max(|v|, V): -8.3e-5 on x, -1.3e-4 on y; |dx| never above the old
+bound: the align's slack unused). As the coupled piece's speed-limit cut per axis (instead of 20 px a tick) it is sound
+and **gained nothing**: the whole-level version applies to no failing leg's level (0 of the 1,653 on an x-tame level: 196
+of 218 levels have an x arrow or a portal), and the local box (radius 20 (R + 2) px) is hot almost wherever a field leg
+runs: 340 = 340 of the 1,992 failing legs solved, 2,662 = 2,662 of the solved sample, 1 leg shorter. OPT-IN
+(`EEAT_MATH_VCUT=1`, `o.vcut`), kept for the mathematics and a bound the fields do not reach.
+
 ## 5 Admissible leg bounds: the event graph
 
 (build / bounds.) Code: `src/math/lb.js` (the bound), `src/math/legsolve.js` (the free-air leg solver of its proofs),
