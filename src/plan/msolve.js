@@ -91,6 +91,8 @@ const CHAIN_DGATE = process.env.EEAT_CHAIN_DGATE !== undefined ? +process.env.EE
 // without; env EEAT_CHAIN_CT / EEAT_CHAIN_FMS, 300000 / 250 = as before)
 const CHAIN_CT = +process.env.EEAT_CHAIN_CT > 0 ? +process.env.EEAT_CHAIN_CT : 30000;
 const CHAIN_FMS = +process.env.EEAT_CHAIN_FMS > 0 ? +process.env.EEAT_CHAIN_FMS : 60;
+// the field legs from a plain node whose plain bound is not certified (c6 lane 2; EEAT_CHAIN_PFIELD=1, o.pfield; chain())
+const CHAIN_PFIELD = process.env.EEAT_CHAIN_PFIELD === '1';
 // a field node's timed holds (eventFan's timed: the ticks a hold also stops at; EEAT_CHAIN_TIMED=0: none, as before)
 const CHAIN_TIMED = process.env.EEAT_CHAIN_TIMED === '0' ? [] : (process.env.EEAT_CHAIN_TIMED || '8,20,40').split(',').map(Number).filter((x) => x > 0);
 const DOTS = new Set([4, 414]);
@@ -2102,19 +2104,27 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 		};
 		const rf = o.reach === false ? null : reachFieldOf(tg.tiles);
 		const KAPPA = o.kappa || 16 / 6.776552880470027;
+		// THE FIELD LEGS FROM A PLAIN NODE (c6 lane 2, CHAIN_PFIELD / o.pfield, opt-in): a plain node's direct leg is the plain
+		// solver's alone (fields, coupled off), so a way whose last stretch passes a field (a dot row entered by landing on
+		// its edge, then a jump at the exit with the speed the field kept) had no chain edge from the plain nodes before the
+		// field, and the fan-outs' held masks rarely stop inside it; with the knob a plain node whose plain bound is NOT
+		// certified (a field / portal within reach: the plain regime does not cover the way) also gets the field tier and the
+		// coupled family on its direct leg (the non-plain nodes' own budgets); off = the chain before, byte for byte
+		const pfield = o.pfield === undefined ? CHAIN_PFIELD : !!o.pfield;
 		const hOf = () => {
-			let b = 0;
+			let b = 0, unc = false;
 			const c = plainStart(sim);
 			if (c && !tg.tele) {
 				b = lowerBoundOf(sim, tg, c);
-				if (b > 0 && !certify(sim, b, c, tg)) uncert = true;
+				if (b > 0 && !certify(sim, b, c, tg)) { uncert = true; unc = true; }
+				else if (!(b > 0)) unc = true;
 			}
 			let ord = b;
 			if (rf) {
 				const rc = RF().costAt(rf, sim);
 				if (rc < 0) { if (rf.mode === 'physics') { cut++; return null; } } else ord = Math.max(ord, rc * KAPPA);
 			}
-			return { adm: b, ord };
+			return { adm: b, ord, unc };
 		};
 		const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
 		const seen = R0 ? R0.seen : new Map();
@@ -2125,7 +2135,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 		// compile chain is ~10 expansions). Not a proof: a chain that dropped a state by its class never claims 'closed'
 		const domP = o.dom === undefined ? CHAIN_DOM : o.dom;
 		const dom = R0 ? R0.dom : new Map();
-		let domCut = R0 ? R0.domCut : 0, gatedN = 0;
+		let domCut = R0 ? R0.domCut : 0, gatedN = 0, pfieldN = 0;
 		const domKeep = (g) => {
 			if (!(domP > 0)) return true;
 			const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4;
@@ -2148,7 +2158,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			seen.set(sim.stateHash(), 0);
 			domKeep(0);
 			const h0 = hOf();
-			if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), h: h0.ord, f: W8 * h0.ord, fa: h0.adm });
+			if (h0) push({ snap: snap0, g: 0, masks: new Uint8Array(0), h: h0.ord, f: W8 * h0.ord, fa: h0.adm, unc: h0.unc });
 		}
 		while (heap.length && Date.now() - t0 < budgetMs) {
 			if (phase === 1 && (best || spent0 + Date.now() - t0 >= switchMs)) rekey();
@@ -2171,7 +2181,9 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 			if (gated) gatedN++;
 			if ((n.g > 0 || o.rootLeg !== false) && !gated) {
 				const tL = prof ? Date.now() : 0;
-				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: !plainNode, coupled: !plainNode && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || CHAIN_CT, fieldMs: o.fieldMs || CHAIN_FMS, deadline: t0 + budgetMs, tricks: chainTricks });
+				const fieldLeg = !plainNode || (pfield && n.unc === true);
+				const r = leg(n.snap, target, { Tmax: lim, K: o.K, chain: false, fields: fieldLeg, coupled: fieldLeg && o.coupledDirect !== false, nodes: o.legNodes || 40000, coupledTicks: o.coupledTicks || CHAIN_CT, fieldMs: o.fieldMs || CHAIN_FMS, deadline: t0 + budgetMs, tricks: chainTricks });
+				if (fieldLeg && plainNode) pfieldN++;
 				if (prof) { prof.leg = (prof.leg || 0) + Date.now() - tL; if (!plainNode) prof.legField = (prof.legField || 0) + Date.now() - tL; }
 				legs++;
 				if (r.ok && (!best || n.g + r.T < best.T)) { if (!best) firstAt = spent0 + Date.now() - t0; best = { T: n.g + r.T, masks: cat(n.masks, r.masks) }; }
@@ -2206,7 +2218,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 					const h = hOf();
 					if (!h) continue;
 					if (best && g + h.adm >= best.T) continue;
-					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), h: h.ord, f: g + W8 * h.ord, fa: g + h.adm });
+					push({ snap: sim.snapshot(), g, masks: cat(n.masks, ms), h: h.ord, f: g + W8 * h.ord, fa: g + h.adm, unc: h.unc });
 					nodes++;
 				}
 			}
@@ -2222,7 +2234,7 @@ const F2J = process.env.EEAT_MATH_F2J === '1';
 				while (chainKeep.size > CHAIN_KEEP) chainKeep.delete(chainKeep.keys().next().value);
 			} else chainKeep.delete(o.resume);
 		}
-		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, domCut, gated: gatedN, resumed: !!R0, reach: rf ? rf.mode : null, firstMs: firstAt, ms: Date.now() - t0 };
+		return { ok: !!best, masks: best ? best.masks : null, T: best ? best.T : 0, closed, expanded, legs, nodes, cut, domCut, gated: gatedN, pfield: pfieldN, resumed: !!R0, reach: rf ? rf.mode : null, firstMs: firstAt, ms: Date.now() - t0 };
 	}
 
 	return {
