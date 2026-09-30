@@ -32,6 +32,7 @@ if (argv.plainStops) copt.plainStops = argv.plainStops;
 if (argv.dom) copt.dom = argv.dom;
 if (argv.airKey) copt.airKey = argv.airKey;
 if (argv.legNew) copt.legNew = true;
+if (argv.directOnce) copt.directOnce = true;
 if (argv.lazyWide) copt.lazyWide = true;
 if (argv.lazyLegs === '0') copt.lazyLegs = false;
 if (argv.wideStops) copt.wideStops = argv.wideStops;

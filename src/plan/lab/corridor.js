@@ -215,6 +215,7 @@ function createCorridor(L, opts = {}) {
 		const lazyStall = o.lazyStall || 40;
 		// (the lazy pass: o.lazyWide the widened fan (stops o.wideStops), o.lazyLegs false: no sub-legs there)
 		const lazyWide = !!o.lazyWide, lazyLegs = o.lazyLegs !== false;
+		const directOnce = !!o.directOnce, dTried = new Set();
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
@@ -350,7 +351,9 @@ function createCorridor(L, opts = {}) {
 			const plainNode = !!S.plainStart(sim);
 			if (trace) trace({ ev: 'expand', g: n.g, c: n.c, f: n.f, key: n.key, from: n.from, tile: T.tileOf(sim, W, H), vx: sim.speed_x, vy: sim.speed_y });
 			// THE DIRECT LEG near the target
-			if (pass === 'all' && n.c <= D) {
+			// (o.directOnce: one direct leg a node key (the tile cell), from its first expanded state)
+			if (pass === 'all' && n.c <= D && !(directOnce && dTried.has(n.key))) {
+				if (directOnce) dTried.add(n.key);
 				const lim = best ? Math.min(120, best.T - n.g - 1) : 120;
 				if (lim > 0) {
 					stats.directs++; out.legs++;
