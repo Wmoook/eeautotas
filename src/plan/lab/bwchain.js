@@ -3,18 +3,31 @@
 //
 // The whole-level stage (bwlevel_child.js, EEAT_BW_LEVEL=1) solves a level whose trophy needs no trigger as ONE leg of the
 // backward solver (backward.js) and ends at once on the other 77 of the 206 failing levels ('the start is not in the
-// target's walk': the trophy behind doors a trigger opens). Here such a level is a CHAIN: the compiler's own planner
-// (planner.js, the landmarks' order, the model's gates) names the next trigger from the chain's EXACT engine state, the
-// backward solver runs ONE continuous leg to it (the lab: long legs need 30-40 s in one piece; the executor's rung windows
-// restart it), the leg's end state (its speed and sub-pixel as the engine left them) is the next leg's start, and the
-// planner plans again from there (the triggers taken, the gates as they now stand). A failed leg is a fact for the planner
-// (learn: the next rung, then its CEGAR cut / block) and the chain tries the plans' other first steps; a state with no
-// step left is backed out of (the anchor before it tries its next step). Every leg is the engine's replay; the route is
-// C.evaluate'd by the caller.
+// target's walk': the trophy behind doors a trigger opens). Here such a level is a CHAIN of trigger legs, each one
+// continuous backward solve from the chain's EXACT engine state (its speed and sub-pixel as the last leg left them) to the
+// next trigger's tiles.
 //
-//   chainLevel(L, o) -> {ok, masks, runTicks?, legs: [{label, from, T, ms, ok, why}], depth, why, stats}
-//   o: {ms (the whole clock), sched ([ms] a leg's clocks, the last one capped by the time left), planMs, onAnchor(masks,
-//       info) (each new chain state: the caller's import), log(line), stop() -> bool, model, maxBack}
+// WHERE THE GATED LEVELS BREAK (tools/cmp/routechain.js on the 19 gated levels with a known route, box 5): along the KNOWN
+// ROUTE's trigger order the backward solver finds nearly every leg, from the route's own state and from the chain's own
+// state alike, most in 0.1-12 s (Buuwuu's Stronghold, Katwalk, Treasure Trove Cove: every leg); along the PLANNER's
+// order (the first version of this file: the plan's first step, 6 + 40 s a leg) the chains broke at depth 0-7 on legs
+// from states the route never passes through (Buuwuu's team 2 then coin (7,41), then coin (55,59): 46 s 'budget'; the
+// route takes coin (55,59) before (7,41), 0.5 s). THE ORDER is the break, and a leg that is feasible is found fast.
+//
+// So the chain is a BEST-FIRST SEARCH OVER ORDERS with the backward solver as the edge oracle and ITERATIVE CLOCK
+// DEEPENING: a node = an exact chain state (the masks from the level start); its candidate next steps = the planner's
+// plans' first steps (the landmarks' order, the model's gates) and the nearest relevant triggers of the planner's edges
+// (est walk order); every candidate of every node is tried at the short clock CL[0] before any at CL[1], and so on
+// (a feasible leg costs its time, an infeasible order CL[0]); among the nodes the most progress first, then the planner's
+// est to the trophy + the ticks so far. A child whose abstract state (the model's key) already has KEEP nodes that
+// arrived no later is dropped; the order among nodes: the most gain (the model's state gain: features changed, coins
+// taken; a team or switch toggled back and forth is no gain), then the planner's est + the ticks. Every leg is the engine's replay; the route is C.evaluate'd by the caller.
+//
+//   chainLevel(L, o) -> {ok, masks, runTicks, deaths, legs: [{label, from, depth, T, ms, ok, why, clock}], depth, why,
+//                        stats, ms}
+//   o: {ms (the whole clock), clocks ([ms] the clock levels), planMs, K (nearest candidates a node), onAnchor(masks,
+//       info) (each new chain node: the caller's import), log(line), stop() -> bool, model, backward, starts ([masks]:
+//       more roots, e.g. the compile's anchors)}
 const E = require('../../eesim.js');
 const T = require('../types.js');
 const C = require('../../common.js');
@@ -22,9 +35,11 @@ const MD = require('../model.js');
 const BW = require('./backward.js');
 
 const ENVN = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +process.env[k] : d);
-const SCHED = (process.env.EEAT_BWC_SCHED || '6000,40000').split(',').map(Number).filter((x) => x > 0);
+const CLOCKS = (process.env.EEAT_BWC_CLOCKS || '800,4000,15000,40000').split(',').map(Number).filter((x) => x > 0);
+const KEEP = ENVN('EEAT_BWC_KEEP', 2);
+const NEAR_K = ENVN('EEAT_BWC_K', 6);
 
-/** the masks' replay from a snapshot at tick t0: the first tick (relative) the goal holds, the tail candidates tried */
+/** the masks' replay from a snapshot: the first tick the goal holds (the tail candidates tried) -> {masks, sim} | null */
 function hitOf(L, snap, legMasks, goal) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	const last = legMasks.length ? legMasks[legMasks.length - 1] & 30 : 0;
@@ -56,93 +71,119 @@ function chainLevel(L, o = {}) {
 	const facts = require('../facts.js').createFacts({ rungs: 4, model });
 	const planner = require('../planner.js').createPlanner(model, facts, { bounds: o.bounds || null, seed: o.seed, file: o.file, floorAsync: false });
 	const B = o.backward || BW.createBackward(L);
-	const sched = o.sched || SCHED;
-	const planMs = o.planMs || ENVN('EEAT_BWC_PLANMS', 1500);
-	const maxBack = o.maxBack !== undefined ? o.maxBack : ENVN('EEAT_BWC_BACK', 6);
+	const CL = o.clocks || CLOCKS;
+	const planMs = o.planMs || ENVN('EEAT_BWC_PLANMS', 600);
+	const K = o.K || NEAR_K;
 	const legs = [];
-	const stats = { plans: 0, legs: 0, legsOk: 0, back: 0, bestDepth: 0, skipDeath: 0, miss: 0 };
-	// the chain's nodes: {masks (from the level start), snap, sim state key, tried: Set of edges, depth}
-	const sim0 = new E.EESim(L); sim0.reset();
-	const nodeOf = (masks, sim, depth, parent) => ({ masks, snap: sim.snapshot(), S: model.stateOf(sim), a: Object.assign(T.arrivalOf(L, sim, masks, null), { run: sim.run_ticks }), depth, tried: new Set(), parent, fails: 0 });
-	let cur = nodeOf(new Uint8Array(0), sim0, 0, null);
-	const seen = new Set([cur.a.hash]);
-	let best = null, why = 'budget', deepest = cur;
+	const stats = { plans: 0, legs: 0, legsOk: 0, nodes: 0, dropped: 0, bestDepth: 0, bestGain: 0, level: 0, cands: 0 };
+	const byKey = new Map();   // S.key -> [nodes]
+	const nodes = [];
+	let seq = 0;
 	const anchorArg = (n) => ({ arrival: n.a, arrivals: [n.a], S: n.S, key: String(n.S.key), tick: n.a.tick, run: n.a.run });
-	while (left() > 500 && !stop()) {
-		// ---- the next steps from this node: the plans' first steps not tried here (the planner re-plans as the facts grow)
-		let step = null;
-		for (let rp = 0; rp < 4 && !step && left() > 500; rp++) {
-			let r;
-			try { r = planner.plan(anchorArg(cur), { k: 3, ms: Math.min(planMs, Math.max(100, left() / 8)) }); } catch (e) { r = { plans: [], why: 'error: ' + e.message }; }
-			stats.plans++;
-			const cands = [];
-			for (const p of (r && r.plans) || []) {
-				const s = p.steps && p.steps[0];
-				if (!s || cur.tried.has(String(s.edge))) continue;
-				if (!cands.some((c) => String(c.edge) === String(s.edge))) cands.push(s);
-			}
-			// (a death step: the backward solver's macro moves avoid deaths: not its step (the compiler's executor takes those))
-			for (const s of cands) {
-				if (s.waypoint && s.waypoint.allowDeath) { cur.tried.add(String(s.edge)); stats.skipDeath++; continue; }
-				step = s; break;
-			}
-			if (!step && !cands.length) break;
+	const addNode = (masks, sim, parent, label) => {
+		const S = model.stateOf(sim);
+		const key = String(S.key);
+		const a = Object.assign(T.arrivalOf(L, sim, masks, null), { run: sim.run_ticks });
+		const same = byKey.get(key) || [];
+		if (same.some((x) => x.a.hash === a.hash)) { stats.dropped++; return null; }
+		if (same.length >= KEEP && same.every((x) => x.a.tick <= a.tick)) { stats.dropped++; return null; }
+		const n = { id: ++seq, masks, snap: sim.snapshot(), S, a, depth: parent ? parent.depth + 1 : 0, parent, label, cands: null, h: Infinity, gain: Number.isFinite(+S.gain) ? +S.gain : (parent ? parent.gain + 1 : 0) };
+		same.push(n); byKey.set(key, same);
+		nodes.push(n); stats.nodes++;
+		if (n.depth > stats.bestDepth) stats.bestDepth = n.depth;
+		if (n.gain > stats.bestGain) stats.bestGain = n.gain;
+		return n;
+	};
+	/** a node's candidates, once: the plans' first steps, then the nearest relevant triggers (the planner's edges) */
+	const candsOf = (n) => {
+		if (n.cands) return n.cands;
+		const out = [], seen = new Set();
+		const push = (edge, wp, pri) => { const k = String(edge); if (seen.has(k) || !wp) return; seen.add(k); out.push({ edge: k, wp, pri, tried: -1 }); };
+		let r = null;
+		try { r = planner.plan(anchorArg(n), { k: 3, ms: Math.min(planMs, Math.max(100, left() / 10)) }); } catch (e) { r = null; }
+		stats.plans++;
+		let est = Infinity;
+		for (const p of (r && r.plans) || []) {
+			if (Number.isFinite(+p.cost)) est = Math.min(est, +p.cost);
+			const s = p.steps && p.steps.find((x) => !(x.waypoint && x.waypoint.allowDeath));
+			if (s && s === p.steps[0]) push(s.edge, s.waypoint, 0);
 		}
-		if (!step) {
-			// ---- no step left here: back out (the parent tries its next step)
-			if (!cur.parent || stats.back >= maxBack) { why = cur.parent ? 'back limit' : 'no step from the start'; break; }
-			stats.back++;
-			log(`back from depth ${cur.depth} (tick ${cur.a.tick})`);
-			cur = cur.parent;
-			continue;
+		n.h = est;
+		try {
+			const a = planner._anchorOf(anchorArg(n));
+			const cls = a.S.key + '|' + a.cls;
+			const es = planner._edgesOf(a.S, a.pos, a.base, 'plan', true, cls, a) || [];
+			const ok = es.filter((e) => !e.relaxOnly && !e.viaDeath && (e.X ? e.X.kind !== 'die' && e.live && e.live.length : true));
+			ok.sort((x, y) => (x.est - y.est) || (x.lb - y.lb));
+			for (const e of ok.slice(0, K + 2)) {
+				const X = e.X;
+				const wp = X ? { kind: 'trigger', tiles: e.live.slice(), trig: X.id, expect: e.expect, label: e.anyOf > 1 ? `${X.label} (any of ${e.anyOf})` : X.label } : { kind: 'trophy', label: 'trophy' };
+				push(e.edge, wp, 1);
+				if (out.length >= K + 3) break;
+			}
+		} catch (e) { /* the plans alone */ }
+		stats.cands += out.length;
+		n.cands = out;
+		return out;
+	};
+	const prio = (n) => [-(n.gain), (Number.isFinite(n.h) ? n.h : 1e7) + n.a.tick];
+	const better = (x, y) => { const a = prio(x), b = prio(y); return a[0] - b[0] || a[1] - b[1]; };
+	// the roots: the level start, then the caller's starts (the compile's anchors)
+	{
+		const s0 = new E.EESim(L); s0.reset();
+		addNode(new Uint8Array(0), s0, null, 'start');
+		for (const m of o.starts || []) { try { const r = T.playTo(L, m, { allowDeath: true }); if (!r.sim.is_dead) addNode(m, r.sim, null, 'import'); } catch (e) { /* skip */ } }
+	}
+	let best = null, why = 'budget';
+	outer:
+	while (left() > 300 && !stop()) {
+		// the lowest clock level with an untried candidate, the best node there
+		let pick = null, pc = null, lvl = -1;
+		for (let l = 0; l < CL.length && !pick; l++) {
+			const order = nodes.slice().sort(better);
+			for (const n of order) {
+				const cs = candsOf(n);
+				const c = cs.find((x) => x.tried < l);
+				if (c) { pick = n; pc = c; lvl = l; break; }
+				if (left() < 300) break outer;
+			}
 		}
-		const wp = step.waypoint;
-		cur.tried.add(String(step.edge));
+		if (!pick) { why = 'exhausted'; break; }
+		stats.level = Math.max(stats.level, lvl);
+		pc.tried = lvl;
+		const wp = pc.wp;
 		const goal = T.goalOf(L, wp);
 		const tiles = Array.from(goal.tiles);
 		const tl = Date.now();
-		let r = null, tries = 0;
-		for (let i = 0; i < sched.length && left() > 300 && !stop(); i++) {
-			const ms = i === sched.length - 1 ? Math.min(sched[i], left() - 200) : Math.min(sched[i], left() - 200);
-			if (ms < 300) break;
-			try { r = B.solve(cur.snap, { tiles }, { ms }); } catch (e) { r = { ok: false, why: 'error: ' + e.message }; }
-			tries++;
-			if (r.ok || /walk|target|bug|error/.test(r.why || '')) break;
-		}
+		const ms = Math.min(CL[lvl], left() - 200);
+		if (ms < 200) break;
+		let r;
+		try { r = B.solve(pick.snap, { tiles }, { ms }); } catch (e) { r = { ok: false, why: 'error: ' + e.message }; }
+		if (!r.ok && /walk|target|bug|error/.test(r.why || '')) pc.tried = CL.length;   // (no clock helps)
 		stats.legs++;
-		const leg = { label: wp.label || wp.kind, from: cur.a.tick, depth: cur.depth, ok: false, T: null, ms: Date.now() - tl, why: r ? r.why || '' : 'no clock', tries };
+		const leg = { label: wp.label || wp.kind, from: pick.a.tick, depth: pick.depth, ok: false, T: null, ms: Date.now() - tl, why: r.why || '', clock: ms };
 		legs.push(leg);
 		let hit = null;
-		if (r && r.ok) {
-			hit = hitOf(L, cur.snap, r.masks, goal);
-			if (!hit) { leg.why = 'goal missed'; stats.miss++; }
-		}
-		if (!hit) {
-			log(`leg ${wp.label || wp.kind} from tick ${cur.a.tick} (depth ${cur.depth}): FAIL ${leg.why} ${(leg.ms / 1000).toFixed(1)} s`);
-			cur.fails++;
-			try { planner.learn(step, { ok: false, fail: { why: /exhausted/.test(leg.why) ? 'exhausted' : 'budget' } }, anchorArg(cur)); } catch (e) { /* no fact */ }
-			continue;
-		}
-		const masks = new Uint8Array(cur.masks.length + hit.masks.length);
-		masks.set(cur.masks); masks.set(hit.masks, cur.masks.length);
+		if (r.ok) { hit = hitOf(L, pick.snap, r.masks, goal); if (!hit) { leg.why = 'goal missed'; pc.tried = CL.length; } }
+		if (!hit) { log(`L${lvl} ${leg.label} from tick ${pick.a.tick} (depth ${pick.depth}): FAIL ${leg.why} ${(leg.ms / 1000).toFixed(1)} s`); continue; }
+		pc.tried = CL.length;
+		const masks = new Uint8Array(pick.masks.length + hit.masks.length);
+		masks.set(pick.masks); masks.set(hit.masks, pick.masks.length);
 		leg.ok = true; leg.T = hit.masks.length; stats.legsOk++;
-		log(`leg ${wp.label || wp.kind} from tick ${cur.a.tick} (depth ${cur.depth}): ${leg.T} t, ${(leg.ms / 1000).toFixed(1)} s`);
-		const n = nodeOf(masks, hit.sim, cur.depth + 1, cur);
-		try { planner.learn(step, { ok: true, arrivals: [n.a] }, anchorArg(cur)); } catch (e) { /* no fact */ }
+		log(`L${lvl} ${leg.label} from tick ${pick.a.tick} (depth ${pick.depth}): ${leg.T} t, ${(leg.ms / 1000).toFixed(1)} s`);
 		if (hit.sim.has_silver_crown || wp.kind === 'trophy') {
 			const ev = C.evaluate(L, masks, false);
 			if (ev) { best = { masks: ev.ms || masks, runTicks: ev.runTicks, deaths: ev.deaths }; why = 'finish'; break; }
 			leg.why = 'no finish'; leg.ok = false;
 			continue;
 		}
-		if (seen.has(n.a.hash)) continue;
-		seen.add(n.a.hash);
-		if (n.depth > stats.bestDepth) { stats.bestDepth = n.depth; deepest = n; }
-		if (o.onAnchor) { try { o.onAnchor(masks, { depth: n.depth, label: leg.label, tick: n.a.tick }); } catch (e) { /* the caller's */ } }
-		cur = n;
+		const n = addNode(masks, hit.sim, pick, leg.label);
+		if (n && o.onAnchor) { try { o.onAnchor(masks, { depth: n.depth, gain: n.gain, label: leg.label, tick: n.a.tick }); } catch (e) { /* the caller's */ } }
 	}
 	if (!best && why === 'budget' && stop()) why = 'stopped';
-	return { ok: !!best, masks: best ? best.masks : null, runTicks: best ? best.runTicks : null, deaths: best ? best.deaths : null, legs, depth: stats.bestDepth, deepestTick: deepest.a.tick, why, stats, ms: Date.now() - t0 };
+	let deep = null;
+	for (const n of nodes) if (!deep || n.gain > deep.gain || (n.gain === deep.gain && n.a.tick < deep.a.tick)) deep = n;
+	return { ok: !!best, masks: best ? best.masks : null, runTicks: best ? best.runTicks : null, deaths: best ? best.deaths : null, legs, depth: stats.bestDepth, gain: stats.bestGain, deepestTick: deep ? deep.a.tick : 0, why, stats, ms: Date.now() - t0 };
 }
 
 module.exports = { chainLevel, hitOf };

@@ -174,6 +174,13 @@ const LB0_MS = +process.env.EEAT_LB0_MS || 500;
 // stage; OPT-IN EEAT_BW_LEVEL=1, off = the compile byte for byte): the level's start -> the trophy in one solve, at most
 // BW_LEVEL_F of the budget and BW_LEVEL_MAX_S; its route is a route like the moves' (routeOf), the moves go on
 const BW_LEVEL = process.env.EEAT_BW_LEVEL === '1', BW_LEVEL_F = +process.env.EEAT_BW_LEVEL_F || 0.5, BW_LEVEL_MAX_S = +process.env.EEAT_BW_LEVEL_MAX_S || 150;
+// THE LEVEL AS A CHAIN OF BACKWARD LEGS (n5-s99-gated, src/plan/lab/bwchain_child.js; OPT-IN EEAT_BW_CHAIN=1, off = the compile
+// byte for byte): the whole-level stage's child for every level: a one-leg level gets the whole-level solve first, a GATED level
+// (the trophy behind doors a trigger opens) the chain at once (a best-first search over trigger orders, one continuous backward
+// leg a trigger, the end states carried exactly: bwchain.js); every chain node goes to the loop as an import (an anchor the
+// executor goes on from); at most BWC_F of the budget and BWC_MAX_S (the child is one thread next to the workers)
+const BW_CHAIN = process.env.EEAT_BW_CHAIN === '1', BWC_F = +process.env.EEAT_BWC_F || 0.9, BWC_MAX_S = +process.env.EEAT_BWC_MAX_S || 900;
+const BWC_IMPORT = process.env.EEAT_BWC_IMPORT !== '0';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -627,14 +634,16 @@ async function compile(L, opts = {}, emit = () => {}) {
 	// ---- THE WHOLE LEVEL AS ONE LEG (EEAT_BW_LEVEL=1; BW_LEVEL above): started with the moves loop, killed at its end
 	let bwlChild = null, bwlDone = null;
 	const wholeLevel = () => {
-		if (!BW_LEVEL || !opts.file || bwlDone) return;
-		const secs = Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
+		if (!(BW_LEVEL || BW_CHAIN) || !opts.file || bwlDone) return;
+		const secs = BW_CHAIN ? Math.floor(Math.min(BWC_MAX_S, (+seconds || 60) * BWC_F, (left() - endReserve - 2000) / 1000))
+			: Math.floor(Math.min(BW_LEVEL_MAX_S, (+seconds || 60) * BW_LEVEL_F, (left() - endReserve - 2000) / 1000));
 		if (!(secs >= 5)) return;
 		const cp = require('child_process'), t1 = Date.now();
-		say({ ev: 'bwlevel', seconds: secs });
+		say({ ev: 'bwlevel', seconds: secs, chain: BW_CHAIN });
+		let imported = 0;
 		bwlDone = new Promise((resolve) => {
 			let found = null, done = null, buf = '';
-			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+			const ch = cp.spawn(process.execPath, ['--max-old-space-size=2000', path.join(__dirname, 'lab', BW_CHAIN ? 'bwchain_child.js' : 'bwlevel_child.js'), String(opts.file), `--ms=${secs * 1000}`], { stdio: ['ignore', 'pipe', 'ignore'] });
 			bwlChild = ch;
 			const onExit = () => { try { ch.kill('SIGKILL'); } catch (e) { /* gone */ } };
 			process.once('exit', onExit);
@@ -651,9 +660,14 @@ async function compile(L, opts = {}, emit = () => {}) {
 					try { ev = JSON.parse(line); } catch (e) { continue; }
 					if (ev.ev === 'result' && ev.kind === 'finish' && typeof ev.inputs === 'string') {
 						found = ev.inputs;
-						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), 'the whole level as one leg (backward)', null);
+						const x = routeOf(T.masksOf(found.replace(/[^0-O]/g, '')), BW_CHAIN ? 'the level as a chain of backward legs' : 'the whole level as one leg (backward)', null);
 						say({ ev: 'bwlevel', end: 'finish', runTicks: x && x.ev ? x.ev.runTicks : null, better: !!(x && x.better), ms: Date.now() - t1 });
-					} else if (ev.ev === 'done') done = ev.end;
+					} else if (ev.ev === 'anchor' && BWC_IMPORT && typeof ev.inputs === 'string' && !best && !stopped) {
+						// (a chain node: the loop's import (replayed; a model state not seen yet is an anchor))
+						imported++;
+						onLine('import ' + ev.inputs.replace(/[^0-O]/g, ''));
+					} else if (ev.ev === 'chain') say({ ev: 'bwchain', ok: ev.ok, why: ev.why, legs: ev.legs, legsOk: ev.legsOk, nodes: ev.nodes, gain: ev.gain, imported, ms: Date.now() - t1 });
+					else if (ev.ev === 'done') done = ev.end;
 				}
 			});
 			let finished = false;
