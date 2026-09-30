@@ -91,6 +91,8 @@ const CHAIN_DGATE = process.env.EEAT_CHAIN_DGATE !== undefined ? +process.env.EE
 // without; env EEAT_CHAIN_CT / EEAT_CHAIN_FMS, 300000 / 250 = as before)
 const CHAIN_CT = +process.env.EEAT_CHAIN_CT > 0 ? +process.env.EEAT_CHAIN_CT : 30000;
 const CHAIN_FMS = +process.env.EEAT_CHAIN_FMS > 0 ? +process.env.EEAT_CHAIN_FMS : 60;
+// a field node's timed holds (eventFan's timed: the ticks a hold also stops at; EEAT_CHAIN_TIMED=0: none, as before)
+const CHAIN_TIMED = process.env.EEAT_CHAIN_TIMED === '0' ? [] : (process.env.EEAT_CHAIN_TIMED || '8,20,40').split(',').map(Number).filter((x) => x > 0);
 const DOTS = new Set([4, 414]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const PORTALS = new Set([242, 381]);
@@ -1430,9 +1432,13 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 	/**
 	 * eventFan(start, maxT): each of the 18 held masks (DIR9, with and without the press on the first tick) played to
 	 * its first support event within maxT ticks: a landing (on_ground after a tick in the air or a fresh press), the
-	 * class letter changing (a field entered or left), a teleport; [{masks}] (deaths dropped)
+	 * class letter changing (a field entered or left), a teleport; [{masks}] (deaths dropped).
+	 * timed (a field node's fan: the start is no plain state): each hold also stops at the ticks of CHAIN_TIMED (8, 20,
+	 * 40) before its event: inside an arrow / dot / climbable field a hold meets no event for the whole window, so a
+	 * chain node in a field had no child but its direct leg (Eurus' left-arrow staircase: from the known route's state 74
+	 * ticks before the blue coin, 1 node expanded and no chain; the route's own chain is holds inside the field)
 	 */
-	function eventFan(start, maxT) {
+	function eventFan(start, maxT, timed) {
 		const snap = snapOf(start);
 		const out = [];
 		for (const p0 of [0, 1]) for (const m0 of DIR9) {
@@ -1448,6 +1454,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 				const c = clsOf(sim, flags);
 				const tele = Math.abs(sim.px - px) > TELEPORT_PX || Math.abs(sim.py - py) > TELEPORT_PX;
 				if (tele || (c !== c0 && c !== 'A') || (sim.on_ground && air && t > 0)) { out.push({ masks: Uint8Array.from(ms), hop: null }); break; }
+				if (timed && CHAIN_TIMED.includes(t + 1)) out.push({ masks: Uint8Array.from(ms), hop: null });
 				if (!sim.on_ground) air = true;
 			}
 		}
@@ -1580,7 +1587,7 @@ const F2 = process.env.EEAT_MATH_F2 !== '0';
 			const tF = prof ? Date.now() : 0;
 			const lands = ctx ? landings(n.snap, { Tmax: Math.min(lim, o.fanT || 60), K: o.fanK, max: o.fanMax || 30, toward: tg, nodes: o.fanNodes || 20000, perTile: o.perTile || 0, deadline: t0 + budgetMs }) : [];
 			const tE = prof ? Date.now() : 0;
-			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60))) lands.push(e);
+			if (o.events !== false) for (const e of eventFan(n.snap, Math.min(lim, o.fanT || 60), !ctx && CHAIN_TIMED.length > 0)) lands.push(e);
 			if (prof) { prof.land = (prof.land || 0) + tE - tF; prof.event = (prof.event || 0) + Date.now() - tE; }
 			const tP = prof ? Date.now() : 0;
 			legs += lands.length;
