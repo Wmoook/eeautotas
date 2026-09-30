@@ -79,6 +79,19 @@ function replayHits(L, pre, tail, tiles) {
 		if (!on) check('executor default: no cover tier ran', !tiers.includes('cover'));
 		await ex.close();
 	}
+	// ---- cover v2 (EEAT_COVER=2): the fallback before the first route (budget.fast); none after it
+	process.env.EEAT_COVER = '2';
+	for (const fast of [true, false]) {
+		const ex = await EX.createExecutor(L2, { file, workers: 0 });
+		const wp = { kind: 'trigger', tiles: goalTiles, label: 'coin', expect: null };
+		const res = await ex.reach([''], wp, { ms: 4000, level: 1, k: 4, fast });
+		const tiers = (res.tiers || []).map((t) => t.tier);
+		if (fast) check('executor EEAT_COVER=2, before a route (fast): the leg found', !!res.ok, `${res.tool}, ${res.ok ? res.arrivals[0].tick : res.fail && res.fail.why} (tiers ${tiers.join(',')})`);
+		else check('executor EEAT_COVER=2, after a route (not fast): no cover tier ran', !tiers.includes('cover'), `tiers ${tiers.join(',')}`);
+		// (v2: the cover is never the call's FIRST tier: the field-following finders run before it)
+		if (fast && tiers.includes('cover')) check('executor EEAT_COVER=2: the cover after the best-first search', tiers.indexOf('best') >= 0 && tiers.indexOf('best') < tiers.indexOf('cover'), `tiers ${tiers.join(',')}`);
+		await ex.close();
+	}
 	delete process.env.EEAT_COVER;
 
 	// ---- the truth: K Underground's detour leg (checkpoint (17,80) -> (64,84), the route's own state at tick 225)
