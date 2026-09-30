@@ -1673,6 +1673,14 @@ function sectionM() {
 	// a ball in another state (fly) is priced by the field's walk
 	foot.jump_count = 0; foot.has_levitation = true; const cf = R.costAt(f2, foot);
 	check('a ball in another state (fly): the walk', cf === f2.walk[5 * f2.W + 6] / 5, `${fmt(cf)}`);
+	// the state after the tile under the ball (fxStateNext: the spawn on the multijump tile is a max_jumps 2 leg), and a ball
+	// in another modelled state priced by that state's field when the caller left a builder (f.fxOf)
+	const onM = new E.EESim(L); onM.reset(); onM.px = 2 * 16 + 16; onM.py = 7 * 16 + 16;
+	const nx = R.fxStateNext(onM);
+	check('fxStateNext: a plain ball on the multijump tile -> max_jumps 2', nx && nx.mj === 2 && nx.jb === 0 && R.fxStateOf(onM).mj === 1, JSON.stringify(nx));
+	Object.defineProperty(f1, 'fxOf', { value: (s) => (s.mj === 2 ? f2 : null), enumerable: false });
+	foot.has_levitation = false; foot.max_jumps = 2; foot.py = 7 * 16; foot.speed_y = 0;
+	check('f.fxOf: a max_jumps 2 ball on the mj-1 field is priced by the mj-2 field', R.costAt(f1, foot) === R.costAt(f2, foot), `${fmt(R.costAt(f1, foot))} vs ${fmt(R.costAt(f2, foot))}`);
 	// the exits: a multijump of another number, a jump effect, fly / low gravity / gravity change the state; a speed effect and
 	// a multijump of the state's own number do not
 	const s2 = { mj: 2, jb: 0 };

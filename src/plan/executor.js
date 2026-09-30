@@ -350,7 +350,9 @@ function makeCore(L, co) {
 		const Lc = T.levelNow(L, sim);
 		const tiles = T.fieldTilesOf(goal);
 		// (types.js plainOf: true = the plain-ball field (EEAT_FX_FIELD); an object = the ball's effect state (EEAT_FX_STATE))
-		const pfx = T.wildOf(Lc.fg) ? T.plainOf(sim) : false;
+		return ordFieldFx(Lc, tiles, allowDeath, T.wildOf(Lc.fg) ? T.plainOf(sim) : false);
+	}
+	function ordFieldFx(Lc, tiles, allowDeath, pfx) {
 		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}${T.fxSuffix(pfx)}`;
 		let f = ordMemo.get(key);
 		if (f) return f;
@@ -358,6 +360,8 @@ function makeCore(L, co) {
 		if (pfx && typeof pfx === 'object') oo.fxState = pfx;
 		else if (pfx) oo.plainFx = true;
 		f = RF.reachField(Lc, oo);
+		// (EEAT_FX_STATE: a ball met in another modelled state: that state's ordering field, made on first use)
+		if (pfx && typeof pfx === 'object') Object.defineProperty(f, 'fxOf', { value: (s2) => ordFieldFx(Lc, tiles, allowDeath, s2), enumerable: false });
 		ordMemo.set(key, f);
 		if (ordMemo.size > 8) ordMemo.delete(ordMemo.keys().next().value);
 		return f;
