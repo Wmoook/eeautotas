@@ -520,6 +520,36 @@ ways in.
   to the executor from the compile's start: its routes are routes (verified), the executor's anchors and routes go into it
   (a route = its bound: its refinement ladder then looks only for faster ones), its arrivals reach the executor only when the
   executor stalls or has nothing left (THE GATE). Measured (box 6): with the arrivals given at once it HURT (slower routes on 10 of 15 levels, 2 levels lost); with the gate (300 s, 40 levels) 25 = 25 compiled (lost INFINITE and TPs The Horror, late base routes; gained Endless Space and K Underground), the first route 18% sooner (geo-mean), run ticks 0.7% fewer, one thread and ~1.7 GB more a compile: OPT-IN (it does not yet lose nothing).
+- **The corridor's fields pass** (n5-s99-fields, 2026-09-30; `src/plan/lab/corridor.js`, the executor's tier MC under
+  `EEAT_CORRIDOR=1`; `EEAT_CORR_FIELDS=1` = the pass, OPT-IN, off = the tier byte for byte; each knob of the corridor off =
+  the corridor before). WHY the corridor lost chains through fields: in a field a direct leg (msolve.leg with the field tier
+  and the coupled family) costs ~40 ms where a whole event fan costs ~0.15 ms, so the direct legs took 97% of the clock
+  (Wine Quest I's 4-arrow chain: 131 expansions in 5 s, none found); a support node keyed as standing while on its jump
+  tick or bonking under a ceiling dominated every child it made in its tile (the search ended 'exhausted' after 1
+  expansion: Forgotten Helix, Octorage, Planets, Egg Quest II, Infinity Pain). THE PASS: `o.goalFan` (the fans test the
+  target on every tick they play), `o.directShare` 0.15 (the direct legs' clock a share of the call's; a deferred node
+  waits by its cost, only a NEW nearest state within `o.directNear` 2 tiles skips the share: the hot list), `o.restKey` (a
+  support node only at rest, speed_y 0), `o.refine` (an exhausted search goes again, fresh, with the field cells keyed by
+  the sub-tile offset and the speeds, 8 px / 2 px/tick, then 4 px / 1 px/tick: `o.fieldKey 'sub'`, `o.fieldPx`,
+  `o.fieldV`, `o.Kf`; as the key from the start the cells dilute the search: field chains side by side 80.3% vs 78.4% /
+  75.0%), `o.more` 1 (a found chain goes on for as long again in the refinement's order, a shorter chain replacing it).
+  Opt-in, no gain measured: `o.bfs` (the exact short search, 18 masks a tick, stateHash merge, from a new nearest state and
+  an exhausted store's best states). THE MEASURE (tools/lab/corridor_chain.js `--exec=1` = the tier's own options, the
+  pass by its knobs, `--fields=1` = only the chains with a field move; the moves study's 1,123 4-move chains, 5 s each,
+  both arms side by side, box 6, every answer replayed): **73.7% -> 87.9%** (fields 681: 65.1 -> 85.2, arrow 433: 54.3 ->
+  81.5, dot 72.5 -> 84.2, boost 64.9 -> 81.4; plain 442: 87.1 -> 92.1; by the route's ticks 60-120 85.4 -> 92.5, 120-240
+  61.9 -> 87.0, 240-480 55.1 -> 81.1, 480+ 39.1 -> 60.9), <= the route 431 -> 510 chains; on the 819 both found the pass
+  is faster on 245, slower on 93, the ticks summed -4.2% (without `o.more` +2.4%); with the speed profiles' answers
+  (n5-lab-profile) either 91.6%. The known-route legs (tools/lab/judge_legs.js, arm `corrf` without `o.more`, 20 s, the
+  55 cases from 3 starts, box 5): 72 -> 87 of 129 (prev 21 -> 28 / 55, hit-300 17 -> 22 / 32, hit-120 34 -> 37 / 42;
+  LONG 30 -> 38 of 58), the first chain in 0.8 s vs 7.1 s median. COMPILES (25 levels: 13 STUCK-FIELD / failing with a
+  known route + 12 compiled, 120 s, W3, one run an arm, both arms side by side, one tree; box 6 + box 5): `EEAT_CORRIDOR=1`
+  vs `+ EEAT_CORR_FIELDS=1` compiled **10 vs 13** (+ MIHB's Dream 9,595, Crypts of Anubis 3,232, INVASION 4,576; none
+  lost), the 10 both compiled 32,012 vs 34,381 run ticks (faster 3, slower 7: Trick Or Treat 4,023 vs 5,824, The Ten
+  Commandments 666 vs 852: its corridor chain to the blue coin, 420 ticks, taken as found, changed the route), anchors
+  on the failing: Tutorial 3 2 -> 9, Planets 1 -> 4, Frostbitten 26 -> 35, EZ Spooky Shack 11 -> 14, Tutorial 4 6 -> 2.
+  Still failing (the chain set): long routes (480+ ticks 60.9%: the clock), precision staircases (celeste's half-block
+  steps: 52-tick chains, every copy), boost / portal chains the held-mask fans do not make.
 - **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
   `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
   `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
