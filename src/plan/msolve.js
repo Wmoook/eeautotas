@@ -650,10 +650,10 @@ function createSolver(L, opts = {}) {
 		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8)
 		return { xl: 16 * x0 - 8, xh: 16 * x1 + 8, yl: 16 * y0 - 8, yh: 16 * y1 + 8 };
 	}
-	// the coupled piece's ORDER (EEAT_MATH_CORDER=0: the fixed order of the first version, DIR9 x the first-tick press):
-	// the direction masks by their heading to the target (x: R toward a target on the right, L on the left; y the same with
-	// D / U), the first-tick press interleaved per mask; its family adds THE JUMP PRESS AT THE CHANGE (m1 with the jump
-	// bit on its first tick, m1 = m0 too: a walk-then-jump, the moves' most common unsolved field pattern)
+	// the coupled piece's JUMP FAMILIES and the cut (EEAT_MATH_CORDER=0: the first version's family alone, no cut): the
+	// first version's order (the first-tick press, then DIR9) with the jump press at the change tick on the same direction
+	// (hold, then jump: the most common unsolved field-leg pattern of the moves study) in the same pass, then the press on a
+	// change of direction; a heading order (the masks toward the target first) lost more legs than it found
 	const CORDER = process.env.EEAT_MATH_CORDER !== '0';
 	function solveCoupled(snap, s, tg, goal, o, stats) {
 		const Tmax = o.Tmax;
@@ -683,53 +683,55 @@ function createSolver(L, opts = {}) {
 			}
 			return 0;
 		};
-		let dirs = DIR9, pre = [];
-		if (ordered) {
-			const tx = (tg.via || tg.tiles).length ? boxOf(tg) : null;
-			const sx = tx ? Math.sign((tx.xl + tx.xh) / 2 - s.px) : 0, sy = tx ? Math.sign((tx.yl + tx.yh) / 2 - s.py) : 0;
-			const sc = (m) => sx * (((m & 4) ? 1 : 0) - ((m & 2) ? 1 : 0)) + sy * (((m & 16) ? 1 : 0) - ((m & 8) ? 1 : 0));
-			dirs = DIR9.slice().sort((a, b) => sc(b) - sc(a));
-			for (const m0 of dirs) for (const p0 of jumpFirst) pre.push([p0, m0]);
-		} else for (const p0 of jumpFirst) for (const m0 of DIR9) pre.push([p0, m0]);
-		const presses = ordered && o.coupledJump !== false ? [0, 2] : [0];
+		const pre = [];
+		for (const p0 of jumpFirst) for (const m0 of DIR9) pre.push([p0, m0]);
 		// F0
 		for (const [p0, m0] of pre) {
 			const h = hold(m0, p0, snap, 0, best ? best.T : Tmax);
 			if (h && (!best || h < best.T)) { const ms = new Uint8Array(h).fill(m0); ms[0] |= p0; best = { T: h, masks: ms, k: 0 }; }
 		}
-		// F1: the prefix m0 (snapshots every tick), then m1 from tick c (with the jump press at c: p1 = 2)
-		for (const [p0, m0] of pre) {
-			const lim = best ? best.T - 1 : Tmax - 1;
-			snaps.length = 0;
-			sim.restore(snap);
-			let alive = lim;
-			for (let t = 0; t < lim; t++) {
-				const px = sim.px, py = sim.py;
-				E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
-				sim.tick(inp);
-				stats.ticks++;
-				if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
-				snaps.push(sim.snapshot());
-				// (the cut: no branch from this tick on reaches the target within the limit)
-				if (bx && cut(t + 1, best ? best.T : Tmax)) { alive = t; break; }
-			}
-			for (let c = 1; c <= alive && c <= snaps.length; c++) {
-				const lim2 = best ? best.T : Tmax;
-				if (c >= lim2) break;
-				for (const p1 of presses) for (const m1 of dirs) {
-					if (m1 === m0 && p1 === 0) continue;
-					const h = hold(m1, p1, snaps[c - 1], c, best ? best.T : Tmax);
-					if (h && (!best || h < best.T)) {
-						const ms = new Uint8Array(h);
-						for (let t = 0; t < h; t++) ms[t] = t < c ? m0 : m1;
-						ms[0] |= p0;
-						if (p1 === 2) ms[c] |= 1;
-						best = { T: h, masks: ms, k: 1 };
-					}
+		// F1: the prefix m0 (snapshots every tick), then m1 from tick c; phase 0 = the family of the first version (m1 != m0)
+		// with THE JUMP PRESS AT c ON THE SAME DIRECTION (m1 = m0, the jump bit at c: hold, then jump: 75% of the unsolved
+		// field legs it solves), phase 1 (the budget left) the press at c on a change of direction (m1 != m0)
+		const budget = o.coupledTicks || 2e6;
+		const phases = ordered && o.coupledJump !== false ? [0, 1] : [0];
+		for (const ph of phases) {
+			for (const [p0, m0] of pre) {
+				if (stats.ticks > budget) break;
+				const lim = best ? best.T - 1 : Tmax - 1;
+				snaps.length = 0;
+				sim.restore(snap);
+				let alive = lim;
+				for (let t = 0; t < lim; t++) {
+					const px = sim.px, py = sim.py;
+					E.applyMask(inp, t === 0 ? (m0 | p0) : m0);
+					sim.tick(inp);
+					stats.ticks++;
+					if (sim.is_dead || goal(sim, px, py)) { alive = t; break; }
+					snaps.push(sim.snapshot());
+					// (the cut: no branch from this tick on reaches the target within the limit)
+					if (bx && cut(t + 1, best ? best.T : Tmax)) { alive = t; break; }
 				}
-				if (stats.ticks > (o.coupledTicks || 2e6)) break;
+				for (let c = 1; c <= alive && c <= snaps.length; c++) {
+					const lim2 = best ? best.T : Tmax;
+					if (c >= lim2) break;
+					for (let i = 0; i < DIR9.length + 1; i++) {
+						// phase 0: DIR9 (m1 != m0, no press) then m0 with the press (i = 9); phase 1: DIR9 (m1 != m0) with the press
+						let m1, p1;
+						if (i === DIR9.length) { if (ph !== 0 || !ordered || o.coupledJump === false) continue; m1 = m0; p1 = 2; }
+						else { m1 = DIR9[i]; if (m1 === m0) continue; p1 = ph === 0 ? 0 : 2; }
+						const h = hold(m1, p1, snaps[c - 1], c, best ? best.T : Tmax);
+						if (h && (!best || h < best.T)) {
+							const ms = new Uint8Array(h);
+							for (let t = 0; t < h; t++) ms[t] = t < c ? m0 : m1;
+							ms[0] |= p0;
+							if (p1 === 2) ms[c] |= 1;
+							best = { T: h, masks: ms, k: 1 };
+						}
+					}
+					if (stats.ticks > budget) break;
+				}
 			}
-			if (stats.ticks > (o.coupledTicks || 2e6)) break;
 		}
 		if (!best) return { ok: false, why: 'no coupled candidate', tool: 'coupled' };
 		return Object.assign({ ok: true, tool: 'coupled' }, best);
