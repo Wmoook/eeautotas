@@ -86,6 +86,8 @@ let RF_ = null;
 /** the reach field (src/reach.js), the chains' order, loaded on first use */
 const RF = () => RF_ || (RF_ = require('../reach.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
+/** the land-and-act members' default (o.land overrides): EEAT_MSOLVE_LAND=0 off (the A/B knob through the compiler) */
+const LAND_DEF = process.env.EEAT_MSOLVE_LAND !== '0';
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
 
 /** a gravity member's name (the result's `member`): jump@j, off@o, walk, air; a land-and-act member base>land row@T1>act */
@@ -505,7 +507,7 @@ function createSolver(L, opts = {}) {
 		// two-parameter gravity family, still a closed form of the tables (gravTrace from the line). The x axis is one
 		// pattern across the landing; the tube checks the floor under the box on the ground ticks (row fr). Airborne
 		// starts get every act (jump / off / walk); standing starts' members (a jump, a walk-off) the walk and the hop.
-		if (o.land !== false && !o.each && Tmax > 4) {
+		if ((o.land !== undefined ? o.land : LAND_DEF) && !o.each && Tmax > 4) {
 			const landMax = o.landRows || 6;
 			const jmpFrom = new Map(), fallFromL = new Map();
 			const jmpL = (yl) => { if (!jmpFrom.has(yl)) jmpFrom.set(yl, gravTrace(yl, G.J, Tmax, G)); return jmpFrom.get(yl); };
