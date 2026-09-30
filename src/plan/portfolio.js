@@ -9,21 +9,29 @@
 //           closed values are memoised by target and discrete state),
 //   'leg'   the executor's best-first leg finder (src/plan/legs.js legBest: cells of position and speed, the goal field's
 //           time as the order; one piece).
-// THE ALLOCATOR: the stretch's SHAPE from the start (the goal field's cost c0 in tiles, the estimated ticks KAPPA x c0, the
-// field tiles on the way, a teleport target) picks the arms' ORDER and SHARES (cheap first: the arms that fit the shape);
-// each arm's slice is its share of what is left (an arm that ends early, 'exhausted' / 'cut', gives its time to the next
-// ones); what is left after the last arm goes back to the resumable arms. ONE CONTINUOUS BUDGET: a later call for the same
-// stretch (o.resume, default: the start's state hash + the target) continues its SESSION: the resumable arms go on where
-// they stopped, a one-piece arm runs once a session, and only when the call can give it its whole share (no restarts).
+// THE ALLOCATOR: the plan = the arms in order with their SHARES of the budget, by the stretch's reach (the Chebyshev tiles
+// to the nearest target tile; FAR 8): the backward meet first (the strongest and fastest arm), then the profile, the leg
+// finder, the corridor, msolve.chain; each arm's slice is its share of what is left (an arm that ends early, 'exhausted' /
+// 'cut', gives its time to the next ones); what is left after the last arm goes back to the resumable arms (they resume).
+// ONE CONTINUOUS BUDGET: every call for the same stretch (o.resume, default: the start's state hash + the target) continues
+// its SESSION: the resumable arms go on where they stopped; a one-piece arm runs its share of the first call, and a run the
+// CLOCK ended (not its search) once more as the session's long piece (its share of the projected budget o.total, at least
+// GROW x the first piece, in the first call that holds GROW x the first piece), never cut and never a third time.
 // Every answer is the arm's masks replayed here by the engine from the start (msolve's goal test): exact by construction.
+// MEASURED (tools/lab/portfolio_chain.js / portfolio_krt.js, box 5 + 6, 2026-09-30; every answer replayed again there):
+//   the moves study's 1,123 4-move chains, each arm ALONE 5 s: msolve.chain 47.2%, corridor 74.2%, profile 79.6%, backward
+//   85.9% (union 93.0%); the portfolio in ONE 5-s budget 88.4%; ALONE 20 s: corridor 81.3%, profile 83.1%, leg finder 85.1%,
+//   backward 89.8% (union 96.2%); the portfolio in ONE 20-s budget 93.1% (found in 119 ms median), FIELD chains 90.9%;
+//   the 55 known-route legs from the previous trigger (30 s): msolve.chain 13, backward 39 (union 42), the portfolio 36-38.
 //
 //   const P = createPortfolio(L, {solver})           (solver: a msolve createSolver(L) to share)
-//   P.solve(start, target, o) -> {ok, masks, T, arm, why, ms, shape, arms: {arm: {ms, ok, T, why, runs}}, order, resumed}
+//   P.solve(start, target, o) -> {ok, masks, T, arm, why, ms, shape, arms: {arm: {ms, ok, T, why, runs, piece}}, order,
+//     resumed, deferred}
 //     start: an EESnapshot of L (or an EESim); target: {tiles, cls ('any'), tele, via}
-//     o: {ms (5000), deadline, Tmax (3000), resume (a key; true / undefined: the automatic key; false: no session),
-//         arms ('chain,corr,prof,bw,leg'), plan (an order and shares 'corr:0.3,prof:0.3,...' in place of the shape's),
-//         minProf (800 ms), minBw (1500 ms): a one-piece arm's least slice}
-//   P.shapeOf(start, target) -> {c0, est, field, ffrac, tele, dist}
+//     o: {ms (5000), deadline, Tmax (3000), resume (a key; true / undefined: the automatic key; false: a session of this call
+//         alone), total (the caller's projection of the session's whole budget), arms ('chain,corr,prof,bw,leg'), plan (an
+//         order and shares 'bw:0.3,prof:0.3,...' in place of the default), bwQuick (the backward's quick-meet floor, ms)}
+//   P.shapeOf(start, target) -> {c0, est, field, ffrac, tele, dist}   (the goal field's cost: for callers and measurements)
 const E = require('../eesim.js');
 const T = require('./types.js');
 const RF = require('../reach.js');
@@ -42,7 +50,7 @@ const planParse = (t) => t.split(',').map((x) => { const [a, f] = x.split(':'); 
 const PLAN_ENV = process.env.EEAT_PF_PLAN ? planParse(process.env.EEAT_PF_PLAN) : null;
 const PLAN_NEAR = planParse(process.env.EEAT_PF_NEAR || 'bw:0.3,prof:0.25,leg:0.15,corr:0.25,chain:0.05');
 const PLAN_FAR = planParse(process.env.EEAT_PF_FARPLAN || 'bw:0.55,prof:0.15,leg:0.1,corr:0.2');
-const FAR = +process.env.EEAT_PF_FAR > 0 ? +process.env.EEAT_PF_FAR : 20;
+const FAR = +process.env.EEAT_PF_FAR > 0 ? +process.env.EEAT_PF_FAR : 8;
 const GROW = 4;
 const BW_QUICK_MS = +process.env.EEAT_PF_BWQUICK > 0 ? +process.env.EEAT_PF_BWQUICK : 4000;                             // (a one-piece arm's second run: at least this many times its first piece)
 const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
@@ -254,8 +262,10 @@ function createPortfolio(L, opts = {}) {
 				let piece;
 				if (!prev.length) piece = later ? fair : Math.max(f * proj, fair);
 				else {
-					piece = Math.max(f * proj, GROW * prev[0]);
-					if (piece > left + 1) { out.deferred.push(arm); continue; }
+					// (the long piece: its share of the projection, at least GROW x the first, as much of it as this call holds;
+					// deferred while the call holds less than GROW x the first piece)
+					if (left < GROW * prev[0]) { out.deferred.push(arm); continue; }
+					piece = Math.min(left, Math.max(f * proj, GROW * prev[0]));
 				}
 				slice = i === plan.length - 1 && !prev.length ? left : Math.min(piece, left);
 				(sess.pieces[arm] = prev).push(slice);
