@@ -253,6 +253,8 @@ function legBest(L, starts, goal, o) {
 	const field = o.field || null, region = o.region || null;
 	const w = o.w > 0 ? o.w : 2.5;
 	const heapMax = o.heapMax > 0 ? o.heapMax : 300000;
+	// (the cell: px, py, vx, vy multipliers; default the fine cells of legBFS: 1 px, 2 px, 1/16, 1/8)
+	const CQ = o.cell || [1, 0.5, 16, 8];
 	const collect = o.collect > 0 ? o.collect : 64;
 	const B = allowDeath || o.noBound ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64, FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;
@@ -299,7 +301,7 @@ function legBest(L, starts, goal, o) {
 	const cellKey = () => {
 		let h = 0x811c9dc5 | 0;
 		const mix = (v) => { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= (v >>> 16) & 0xffff; h = Math.imul(h, 0x01000193); };
-		mix(Math.floor(sim.px * 0.25) | 0); mix(Math.floor(sim.py * 0.25) | 0); mix(Math.round(sim.speed_x * 2) | 0); mix(Math.round(sim.speed_y) | 0);
+		mix(Math.floor(sim.px * CQ[0]) | 0); mix(Math.floor(sim.py * CQ[1]) | 0); mix(Math.floor(sim.speed_x * CQ[2]) | 0); mix(Math.floor(sim.speed_y * CQ[3]) | 0);
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0));
 		const d = X.discKey(sim);
 		return (h >>> 0) * 1048576 + (d & 0xfffff);

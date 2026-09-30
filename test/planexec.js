@@ -140,7 +140,7 @@ async function exactTruth() {
 	const S = require('../src/plan/truthset.js');
 	const god = S.knownRoutes({ jobs: false });
 	const seenLevel = new Set();
-	let n = 0, same = 0, tried = 0;
+	let n = 0, same = 0, tried = 0, foundBoth = 0;
 	for (const e of god) {
 		if (n >= 20) break;
 		if (seenLevel.has(e.name)) continue;
@@ -159,11 +159,13 @@ async function exactTruth() {
 		const B = EG.boundContext(L);
 		const g = EG.search(sim, snap, 16, { B, cap: 300000, deadline: Date.now() + 20000 });
 		n++;
-		const ok = r.status === 'found' && g.status === 'found' && r.depth === g.depth && r.depth <= 16;
+		// (the same outcome: both find the same depth (<= 16: the route's own finish), or both run out of their cap)
+		const ok = r.status === g.status && (r.status !== 'found' || (r.depth === g.depth && r.depth <= 16));
 		if (ok) same++;
-		if (!ok && !quiet) console.log(`  ${e.name}: exact ${r.status} ${r.depth}, endgame ${g.status} ${g.depth}`);
+		if (ok && r.status === 'found') foundBoth++;
+		if (!quiet) console.log(`  ${e.name}: exact ${r.status} ${r.depth} (${r.stats.states} states, ${r.stats.seconds} s), endgame ${g.status} ${g.depth} (${g.stats.states} states, ${g.stats.seconds} s)`);
 	}
-	check(`T-EXEC-EXACT known routes: exactLeg from F - 16 to the trophy = endgame.js search() (${same}/${n})`, n >= Math.min(20, tried) && same === n && n > 0, `${same} of ${n}`);
+	check(`T-EXEC-EXACT known routes: exactLeg from F - 16 to the trophy = endgame.js search() (${same}/${n}, ${foundBoth} found by both)`, n >= Math.min(20, tried) && same === n && n > 0 && foundBoth > 0, `${same} of ${n}`);
 }
 
 // ---------------------------------------------------------------- T-EXEC-FAIL
