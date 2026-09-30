@@ -235,6 +235,7 @@ function createCorridor(L, opts = {}) {
 		const c0 = RF.costAt(G.f, sim);
 		const out = { ok: false, masks: null, T: 0, why: '', expanded: 0, legs: 0, subOk: 0, repairs: 0, nodes: 0, ms: 0, firstMs: 0, c0, bestC: c0, bestCg: 0 };
 		const prof = { direct: 0, sub: 0, field: 0, land: 0, fan: 0, admit: 0 };
+		const rej = { g: 0, dead: 0, seen: 0, cut: 0, dom: 0 };   // (the children admit refused, by why)
 		if (!(c0 >= 0)) { out.why = 'cut'; out.ms = Date.now() - t0; return out; }
 		// the target's side (for the speed credit)
 		let tcx = 0; for (const t of tgt.tiles) tcx += t % W; tcx /= Math.max(1, tgt.tiles.length);
@@ -265,6 +266,22 @@ function createCorridor(L, opts = {}) {
 		const fOf = (x) => x.g + w * KAPPA * x.c - BETA * Math.max(0, x.v);
 		let best = R0 ? R0.best : null;
 		const trace = o.trace || null;
+		/** the live sim's cost (tiles) by the goal field; a WALK-mode field (effect levels: never a proof) has no value off
+		 *  its walkable tiles (a flying / launched ball): there the least of the walkable tiles within 2 of the ball + the
+		 *  distance (Flight Path: every child of the start was -1, the search ended at its first expansion) */
+		const costNow = () => {
+			const c = RF.costAt(G.f, sim);
+			if (c >= 0 || G.f.mode !== 'walk') return c;
+			const cx = Math.trunc(sim.px + 8) >> 4, cy = Math.trunc(sim.py + 8) >> 4;
+			let b = -1;
+			for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+				const x = cx + dx, y = cy + dy;
+				if (x < 0 || y < 0 || x >= W || y >= H) continue;
+				const v = G.tm[y * W + x];
+				if (v >= 0) { const d = v + Math.max(Math.abs(dx), Math.abs(dy)); if (b < 0 || d < b) b = d; }
+			}
+			return b;
+		};
 		/** the node key of the live sim: its support tile when grounded on one, else its (tile, class, rising) cell */
 		const keyOf = () => {
 			const t = T.tileOf(sim, W, H);
@@ -278,14 +295,14 @@ function createCorridor(L, opts = {}) {
 		const toward = () => { const cx = (Math.trunc(sim.px + 8) >> 4); const dir = tcx > cx + 0.5 ? 1 : tcx < cx - 0.5 ? -1 : 0; return dir * sim.speed_x; };
 		/** insert the live sim (reached with masks, g ticks) as a state; false when dominated / seen / cut */
 		function admit(masks, g, from) {
-			if (g >= TMAX || (best && g >= best.T)) return false;
-			if (sim.is_dead) return false;
+			if (g >= TMAX || (best && g >= best.T)) { rej.g++; return false; }
+			if (sim.is_dead) { rej.dead++; return false; }
 			const h = sim.stateHash();
 			const sg = seen.get(h);
-			if (sg !== undefined && sg <= g) return false;
+			if (sg !== undefined && sg <= g) { rej.seen++; return false; }
 			seen.set(h, g);
-			const c = RF.costAt(G.f, sim);
-			if (!(c >= 0)) return false;
+			const c = costNow();
+			if (!(c >= 0)) { rej.cut++; return false; }
 			if (c < out.bestC) { out.bestC = c; out.bestCg = g; out.bestMasks = masks; }
 			const key = keyOf(), v = toward();
 			let a = nodes.get(key);
@@ -295,7 +312,7 @@ function createCorridor(L, opts = {}) {
 			// never across directions: a run-up away from the target is kept next to a standing arrival)
 			const sx = sim.speed_x;
 			const dm = domDir ? (q, g1, x1) => q.g <= g1 && (Math.abs(x1) < 0.25 || Math.sign(q.sx) === Math.sign(x1)) && Math.abs(q.sx) >= Math.abs(x1) - 0.25 : (q, g1, x1, v1) => q.g <= g1 && q.v >= v1 - 0.25;
-			for (const q of a) if (dm(q, g, sx, v)) return false;
+			for (const q of a) if (dm(q, g, sx, v)) { rej.dom++; return false; }
 			for (let i = a.length - 1; i >= 0; i--) if (dm({ g, sx, v }, a[i].g, a[i].sx, a[i].v)) { a[i].dead = true; a.splice(i, 1); }
 			const n = { snap: sim.snapshot(), g, masks, c, v, sx, key, f: 0, dead: false, from };
 			if (key[0] === 's') spansHit.add(G.span[+key.slice(1)]);
@@ -450,7 +467,7 @@ function createCorridor(L, opts = {}) {
 				let k = 0, cMin = Infinity;
 				for (const ms of kids) {
 					if (!play(n.snap, ms)) continue;
-					if (admit(cat(n.masks, ms), n.g + ms.length, 'fan')) { k++; const c = RF.costAt(G.f, sim); if (c >= 0 && c < cMin) cMin = c; }
+					if (admit(cat(n.masks, ms), n.g + ms.length, 'fan')) { k++; const c = costNow(); if (c >= 0 && c < cMin) cMin = c; }
 				}
 				prof.admit += Date.now() - tp;
 				if (trace) trace({ ev: 'kids', kids: kids.length, admitted: k, got });
@@ -469,7 +486,7 @@ function createCorridor(L, opts = {}) {
 			}
 			if (o.probe) break;
 		}
-		out.prof = prof;
+		out.prof = prof; out.rej = rej;
 		out.ms = Date.now() - t0;
 		if (best) { out.ok = true; out.masks = best.masks; out.T = best.T; }
 		else out.why = heap.length || lazy.length ? 'budget' : 'exhausted';
