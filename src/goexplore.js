@@ -4800,6 +4800,8 @@ async function main() {
 				else if (line === 'stop') Atomics.store(ctrl, 1, 1);
 				else if (line.startsWith('steer ') && line.length > 6 && !steerBuf) steerLate(line.slice(6));
 				else if (line.startsWith('steerd ') && line.length > 7 && !steerBuf) steerLate(line.slice(7), true);
+				// (the editor's late steer field for the bursts' trophy arm, EEAT_LATEGPU=1: bursts.js reads a.burstSteer at each job)
+				else if (line.startsWith('burststeer ') && line.length > 11 && !a.burstSteer) { a.burstSteer = line.slice(11); say({ ev: 'burststeer', sec: sec() }); }
 				// (the editor's stall escape: only the first K workers search, the others park; 0 or K >= the workers: all)
 				else if (/^workers \d+$/.test(line)) {
 					const k = +line.slice(8), act = k > 0 && k < a.workers ? k : 0;

@@ -482,12 +482,19 @@ const BURST_BIG_MB = 20000;
 const burstSizeArgs = (memMB) => memMB >= BURST_BIG_MB ? ['--burstPar=2', '--gpuCells=26', '--burstCap=0'] : [];
 // the GPU random runs' picks per batch (goexplore.js --batch; each plays 8 runs of 40 ticks)
 const ROLL_BATCH = 4096;
-const beamArgs = (f, o, q) => ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(f.steerBeam && !(q.V && q.V.noSteer) ? [`--steer=${f.steerBeam}`] : [])];
+const beamArgs = (f, o, q) => { const on = !!(f.steerBeam && !(q.V && q.V.noSteer)); if (q.V) q.V._steerOn = q.V._beamOn = on; return ['beam', f.bin, '--goal=1', `--width=${o.width}`, `--seconds=${q.seconds}`, `--depth=${o.depth}`, `--reach=${f.reach}`, ...(on ? [`--steer=${f.steerBeam}`] : [])]; };
 // the steer field (src/steer.js, RCH4: the gate-aware order; the prune stays the reach field's): passed to the GPU tools
 // when it models anything the reach field does not (2+ layers or the coin DP) and their copies fit STEER_GPU_SHARE of the
 // GPU's memory in all (each tool uploads its own: every move and the relay (or the one search's trophy arm) first, the two
 // beams too when four copies fit), to the CPU search whenever it models anything
-const steerArg = (f, V) => (f.steer && !(V && V.noSteer) ? [`--steer=${f.steer}`] : []);
+// (each launch records whether it took the steer field: V._steerOn, which steerless() reads under EEAT_LATEGPU=1, where
+// a late field reaches the GPU tools launched after it while the ones running on stay on the reach field)
+const steerArg = (f, V) => { const on = !!(f.steer && !(V && V.noSteer)); if (V) V._steerOn = on; return on ? [`--steer=${f.steer}`] : []; };
+/** EEAT_LATEGPU=1 (OPT-IN, N4 AUDIT steer; off = main): a steer field that arrives after STEER_WAIT_MS reaches the GPU
+ *  tools too (lateSteer: cur.files.steer / steerBeam by useSteer's memory rule, every GPU launch from then on takes it,
+ *  the running one search's and escape's bursts by stdin "burststeer <file>"); FINAL4: 30 levels had a late steer, 22
+ *  of them failed, and their GPU tools ordered by RCH3 for the whole run */
+const lateGpuOn = () => process.env.EEAT_LATEGPU === '1';
 const STEER_GPU_SHARE = 1 / 40;
 // the steer build: at most this long before the search starts. A later field is taken when it arrives (lateSteer: the
 // CPU search's second heap, the wall breaker's coin plan); before, it was dropped for the whole search, and a run from the
@@ -923,7 +930,7 @@ const deathTiles = () => (cur && cur.opts && cur.opts.fileDeaths === false ? 1e4
 /** a strategy V's distance d (tiles) on the scale the attempts are ranked by: a strategy without the steer field while
  *  the others order by it (a beam over the memory budget, a tool that could not load it, the GPU random runs, which never
  *  read it) reports the reach field's, ranked like the steer field's "no value" ones: STEER_MISS + d */
-const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !cur.files.steerBeam) || (!V.cpu && !cur.files.steer));
+const steerless = (V) => !!cur && cur.distBySteer && !!(V.noSteer || V.rolls || ((V.key === 'goal' || V.key === 'guide') && !(lateGpuOn() && V._beamOn !== undefined ? V._beamOn : cur.files.steerBeam)) || (!V.cpu && !(lateGpuOn() && V._steerOn !== undefined ? V._steerOn : cur.files.steer)));
 function steerDist(V, d) {
 	return steerless(V) && d < 1e4 ? Math.min(9990, STEER_MISS + d) : d;
 }
@@ -2464,6 +2471,17 @@ function lateSteer(gen, sf2) {
 	for (const r of sources.values()) { for (const k of ['early', 'best']) if (r[k] && r[k].dist < STEER_MISS) r[k].dist = Math.min(9990, STEER_MISS + r[k].dist); }
 	const mb = sf2.bytes / 1048576;
 	S.steer = { layers: sf2.layers, bodies: sf2.bodies, features: sf2.features, dp: sf2.dp, mb: Math.round(mb * 10) / 10, start: sf2.start, ms: sf2.ms, gpu: false, beams: false, cpu: true, late: sec };
+	// (EEAT_LATEGPU=1: the GPU tools too, by useSteer's memory rule: every GPU launch from now on, and the running bursts)
+	let lateGpu = 0;
+	if (lateGpuOn() && !S.cpuOnly) {
+		const gpuMB = toolInfo && toolInfo.memMB ? toolInfo.memMB : 8192;
+		const copies = mb * 4 <= gpuMB * STEER_GPU_SHARE ? 4 : mb * 2 <= gpuMB * STEER_GPU_SHARE ? 2 : 0;
+		if (toolInfo && toolInfo.steer === SF.VERSION && copies > 0) {
+			cur.files.steer = sf2.file; if (copies === 4) cur.files.steerBeam = sf2.file;
+			S.steer.gpu = true; S.steer.beams = copies === 4; lateGpu = copies;
+			S.strategies.forEach((q, k) => { const ch = kids[k]; if ((q.key === 'goexplore' || q.key === 'escape') && cur.opts.bursts && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`burststeer ${sf2.file}\n`); } catch (e) { /* gone */ } } });
+		}
+	}
 	// (the plan past its count, when the cache had it; else it comes after the field from the same build: pastArrived)
 	if (!cur.past && sf2.past && fs.existsSync(pastFileOf(sf2.file))) cur.past = Object.assign({ file: pastFileOf(sf2.file) }, sf2.past);
 	if (cur.past) S.steer.past = { T: cur.past.T, planT: cur.past.planT, ms: cur.past.ms, on: false };
@@ -2476,7 +2494,7 @@ function lateSteer(gen, sf2) {
 		if (q.cpu && alive(ch) && ch.stdin && !ch.stdin.destroyed) { try { ch.stdin.write(`${dist ? 'steerd' : 'steer'} ${cur.files.steerCpu}\n`); sent++; if (dist) q.sgMin = 1; } catch (e) { /* gone */ } }
 	});
 	note(`the steer field (gates, switches, coins: ${(sf2.features || []).join(', ') || 'none'}; ${sf2.layers} layer${sf2.layers === 1 ? '' : 's'}${sf2.dp ? `, the ${sf2.dp.kind === 'bcoins' ? 'blue ' : ''}coin DP over ${sf2.dp.n} coins` : ''}${cur.files.steerCpu !== sf2.file && sf2.tour && sf2.tour.n ? `, the coin tour over ${sf2.tour.n} coins (T ${sf2.tour.T}; the CPU search's)` : ''}; ${S.steer.mb} MB, built in ${(sf2.ms / 1000).toFixed(1)} s) ` +
-		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); the GPU tools stay on the reach field, their attempts ranked behind`);
+		`arrived ${sec !== null ? `${sec} s into the search` : 'late'}: from now on it orders the CPU search${sent ? '' : ' (its next launch)'}${sf2.dp && cur.opts.breakGate ? ' and the wall breaker\'s coin plan' : ''} and measures the attempts (the nearest starts over); ${lateGpu ? `the GPU tools launched from now on and the bursts' trophy arm take it too${lateGpu === 4 ? '' : ' (not the beams)'}, the running ones stay on the reach field, their attempts ranked behind` : 'the GPU tools stay on the reach field, their attempts ranked behind'}`);
 	save();
 }
 /** start()'s second half, once the physics check is done: rf {mode, startCost (tiles, -1 = cut off), explain, file}; noGpu:
@@ -2708,6 +2726,8 @@ function steerFp() {
 	h.update(`gatefloor:${process.env.EEAT_GATEFLOOR === '0' ? 0 : process.env.EEAT_GATEFLOOR === 'all' ? 'all' : 1}`);
 	// (the blue DP's knob: a flip builds the field again)
 	if (process.env.EEAT_BLUEDP) h.update(`bluedp:${process.env.EEAT_BLUEDP}`);
+	// (the N4 AUDIT steer knobs, opt-in: another file where they act)
+	for (const k of ['EEAT_CEGARPAST', 'EEAT_DPTOUR', 'EEAT_QUADFALL']) if (process.env[k] === '1') h.update(`${k}:1`);
 	return (steerFpMemo = h.digest('hex').slice(0, 12));
 }
 const steerBase = (hash) => path.join(dir(), `reach_${hash}_s${SF.VERSION}_${steerFp()}`);

@@ -530,8 +530,12 @@ function applyFull(A, st, t) {
 	else if (kind === 'reset') { if (st.prot !== undefined) st.prot = 0; }
 }
 /** the first feature that makes a plan invalid under the full state (a closed gate / a killer it walks through), or null */
-function counterexample(A, plan) {
+function counterexample(A, plan, relaxed) {
 	const st = fullState(A);
+	// (relaxed: the features the budget left out under EEAT_CEGARPAST=1 (cegarPastOn): their gates are no counterexample,
+	// as they are air in the model; null / empty: every gate as before)
+	const rx = relaxed && relaxed.size ? relaxed : null;
+	const relaxedAt = (i) => rx !== null && A.cls[i] === 3 && rx.has(A.gateFeat[i]);
 	for (let n = 1; n < plan.path.length; n++) {
 		const p = plan.path[n];
 		if (p.via === 'expire') { if (st[p.feat] !== undefined) st[p.feat] = 0; continue; }
@@ -539,7 +543,7 @@ function counterexample(A, plan) {
 		const t = p.t, c = A.cls[t];
 		const q = plan.path[n - 1].t, W = A.W;
 		const ddx = (t % W) - (q % W), ddy = Math.floor(t / W) - Math.floor(q / W);
-		const closed = (i) => A.cls[i] === 0 || (A.cls[i] === 3 && A.gateFeat[i] !== 'open' && A.gateFeat[i] !== 'time' && (A.gateFeat[i] === 'static' ? A.gatePol[i] !== 1 : st[A.gateFeat[i]] !== undefined && !testGate(A.gateFeat[i], A.gatePol[i], A.gateParam[i], st[A.gateFeat[i]])));
+		const closed = (i) => A.cls[i] === 0 || (A.cls[i] === 3 && !relaxedAt(i) && A.gateFeat[i] !== 'open' && A.gateFeat[i] !== 'time' && (A.gateFeat[i] === 'static' ? A.gatePol[i] !== 1 : st[A.gateFeat[i]] !== undefined && !testGate(A.gateFeat[i], A.gatePol[i], A.gateParam[i], st[A.gateFeat[i]])));
 		if (ddx && ddy && Math.abs(ddx) === 1 && Math.abs(ddy) === 1) {
 			const a = q + ddx, b = q + ddy * W;
 			if (closed(a) && closed(b)) { const g = A.cls[a] === 3 && A.gateFeat[a] !== 'static' ? a : b; if (A.cls[g] === 3 && A.gateFeat[g] !== 'static') return { feat: A.gateFeat[g], step: n, t: g }; }
@@ -559,28 +563,35 @@ function counterexample(A, plan) {
 		}
 		if (c === 3) {
 			const k = A.gateFeat[t];
-			if (k !== 'open' && k !== 'static' && st[k] !== undefined && !testGate(k, A.gatePol[t], A.gateParam[t], st[k])) return { feat: k, step: n, t };
-		} else if (c === 1 && st.prot !== undefined && st.prot !== 1) return { feat: 'prot', step: n, t };
+			if (k !== 'open' && k !== 'static' && !relaxedAt(t) && st[k] !== undefined && !testGate(k, A.gatePol[t], A.gateParam[t], st[k])) return { feat: k, step: n, t };
+		} else if (c === 1 && st.prot !== undefined && st.prot !== 1 && !(rx !== null && rx.has('prot'))) return { feat: 'prot', step: n, t };
 		applyFull(A, st, t);
 	}
 	return null;
 }
-/** the walk model's CEGAR loop -> {A, M, F, plan, log} */
+/** the walk model's CEGAR loop -> {A, M, F, plan, log}; opts.relaxed (a Set, EEAT_CEGARPAST=1): a feature over the
+ *  layer cap is added to it (its gates no counterexample: air, as the model has them) and the loop goes on to the next
+ *  feature the plan's replay names, instead of stopping at the first one the budget cannot take */
 function walkBuild(level, A, opts) {
 	const modeled = new Set(opts.features || []);
 	const maxLayers = opts.maxLayers || 4096;
+	const relaxed = opts.relaxed || null;
 	const log = [];
 	let M, F, plan, capped = null;
 	for (let it = 0; it < 40; it++) {
 		M = makeModel(A, modeled);
 		F = layeredField(A, M);
 		plan = planFrom(A, M, F, A.start.t, M.s0);
-		const cx = plan.ok ? counterexample(A, plan) : null;
+		const cx = plan.ok ? counterexample(A, plan, relaxed) : null;
 		log.push({ features: [...modeled], S: M.S, planOk: plan.ok, cx: cx && cx.feat });
 		if (!cx || modeled.has(cx.feat)) break;
 		const f = A.feats.get(cx.feat);
 		if (!f) break;
-		if (M.S * f.values.length > maxLayers) { capped = { feat: cx.feat, why: 'layers' }; break; }
+		if (M.S * f.values.length > maxLayers) {
+			if (!capped) capped = { feat: cx.feat, why: 'layers' };
+			if (relaxed && !relaxed.has(cx.feat)) { relaxed.add(cx.feat); continue; }
+			break;
+		}
 		if (opts.deadline && Date.now() > opts.deadline) { capped = { feat: cx.feat, why: 'time' }; break; }
 		modeled.add(cx.feat);
 	}
@@ -1902,7 +1913,39 @@ const STEER_MAX_BYTES = 640 << 20, STEER_MAX_MS = 30000, BODY_BYTES_TILE = 120;
  * Int32Array(S), bodies [field], goals [Uint8Array(N)], dp {n, T, bit, leg, h} | null, prioShift, info {features, layers,
  * builds, kappa, ms, cegar, dp, over (what the budget left out, or null)}}
  */
+/** N4 AUDIT steer knobs (OPT-IN, default off = main byte for byte; editor.js steerFp takes them):
+ *  EEAT_CEGARPAST=1 / opts.cegarPast: the CEGAR past the budget: a feature the budget cannot take is RELAXED (its gates no
+ *    counterexample: they are air in the model anyway) and the loop goes on to the next feature the plans name, instead of
+ *    stopping at the first cut (Evolution Revolution: 'coins: over 34 layers' ended the CEGAR before it named the purple
+ *    doors psw:42 / psw:55 that guard the portal column its pins stand next to); info.relaxed lists them;
+ *  EEAT_DPTOUR=1 / opts.dpTour: where the coin DP (not free) and the layer field both have no value at the start (the DP's
+ *    per-coin physics legs miss coins: Cave Exploration, Bridge Builder, Spring Rose, Polar Eclipse, Spring Relics, Aquatic
+ *    Sanctuary), the DP is dropped and the coin tour (walk legs x kappa, the CPU file's) takes its place, also below 19
+ *    coins; info.dpFell;
+ *  EEAT_QUADFALL=1 / opts.quadFall: where the half-block quadrants (EEAT_HALFQUAD, default on) leave the start without a
+ *    value on a level with half blocks, the steer built without them (process.env EEAT_HALFQUAD=0 for that build: the
+ *    layer fields and the leg workers read it) when that one has a start value (SIG?S 1759.2, Spring Relics 248.4, Polar
+ *    Eclipse 700 before d4-portal-exact); info.quadFell */
+function cegarPastOn(opts) { return opts && opts.cegarPast !== undefined ? !!opts.cegarPast : process.env.EEAT_CEGARPAST === '1'; }
+function dpTourOn(opts) { return opts && opts.dpTour !== undefined ? !!opts.dpTour : process.env.EEAT_DPTOUR === '1'; }
+function quadFallOn(opts) { return opts && opts.quadFall !== undefined ? !!opts.quadFall : process.env.EEAT_QUADFALL === '1'; }
+function hasHalfBlock(level) {
+	const fl = RF.guideFlags(level), fg = level.fg;
+	for (let i = 0; i < fg.length; i++) { const id = fg[i]; if (id < fl.length && (fl[id] & F_HALF)) return true; }
+	return false;
+}
 function buildSteer(level, opts) {
+	const st = buildSteerOnce(level, opts);
+	if (!quadFallOn(opts) || Number.isFinite(st.info.start) || !RF.halfQuadOn(opts) || !hasHalfBlock(level)) return st;
+	const env = process.env.EEAT_HALFQUAD;
+	let st2 = null;
+	try { process.env.EEAT_HALFQUAD = '0'; st2 = buildSteerOnce(level, Object.assign({}, opts, { halfQuad: false })); }
+	finally { if (env === undefined) delete process.env.EEAT_HALFQUAD; else process.env.EEAT_HALFQUAD = env; }
+	if (!st2 || !Number.isFinite(st2.info.start)) return st;
+	st2.info.quadFell = true;
+	return st2;
+}
+function buildSteerOnce(level, opts) {
 	opts = opts || {};
 	const t0 = Date.now();
 	const A = analyze(level, opts);
@@ -1924,9 +1967,10 @@ function buildSteer(level, opts) {
 	let probeMs = 0;
 	const T0 = () => t0 - saved - probeMs;
 	const floorOn = gateFloorOn(opts), floors = [];
+	const relaxed = cegarPastOn(opts) ? new Set() : null;
 	let floorT = 0;
 	for (let it = 0; it < (opts.maxIters || 12); it++) {
-		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: T0() + maxMs / 2 });
+		B = walkBuild(level, A, { features: [...modeled], maxLayers, deadline: T0() + maxMs / 2, relaxed });
 		if (B.capped && !over) over = `${B.capped.feat}: ${B.capped.why === 'time' ? secs : `over ${maxLayers} layers (${mb})`}`;
 		for (const f of B.M.names) modeled.add(f);
 		PH = buildPhysics(B, { staticCoins: true, debug: true, memo });
@@ -1943,7 +1987,7 @@ function buildSteer(level, opts) {
 			const tele = q >= 0 && (Math.abs(t % W - q % W) > 1 || Math.abs(Math.floor(t / W) - Math.floor(q / W)) > 1);
 			path.push({ t, via: tele ? 'portal' : 'move' });
 		}
-		let cx = path.length > 1 ? counterexample(A, { path }) : null;
+		let cx = path.length > 1 ? counterexample(A, { path }, relaxed) : null;
 		// (the plans are valid: the floor probe, a gate the way stands on that is air in the full state)
 		let gx = null;
 		if (!cx && floorOn) {
@@ -1959,7 +2003,12 @@ function buildSteer(level, opts) {
 		cegar.push({ features: [...modeled], layers: PH.layers, builds: PH.builds, ...(PH.memoHits ? { memo: PH.memoHits } : {}), cx: cx && cx.feat, ...(gx ? { floor: gx.feat } : {}) });
 		if (!cx || modeled.has(cx.feat) || !A.feats.has(cx.feat)) break;
 		// (a floor the budget cannot model: left out quietly, the plans' own refusals name what `over` says)
-		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) { if (cx !== gx) over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; else floors[floors.length - 1].over = 'layers'; break; }
+		if (B.M.S * A.feats.get(cx.feat).values.length > maxLayers) {
+			if (cx !== gx) over = over || `${cx.feat}: over ${maxLayers} layers (${mb})`; else floors[floors.length - 1].over = 'layers';
+			// (EEAT_CEGARPAST=1: relaxed, the loop goes on to the next feature)
+			if (relaxed && cx !== gx && !relaxed.has(cx.feat)) { relaxed.add(cx.feat); continue; }
+			break;
+		}
 		// (the next build takes longer than this one)
 		if (Date.now() - T0() > maxMs / 2) { if (cx !== gx) over = over || `${cx.feat}: ${secs}`; else floors[floors.length - 1].over = 'time'; break; }
 		modeled.add(cx.feat);
@@ -2048,6 +2097,12 @@ function buildSteer(level, opts) {
 	// (the DP outside the layer product is the CPU file's alone: the plain file's shift as without it)
 	steer.prioShift = dp && dp.free ? prioShiftOf({ bodies: bodies.slice(0, nPlain), dp: null }) : prioShiftOf(steer);
 	const sim0 = new E.EESim(level); sim0.reset();
+	// (EEAT_DPTOUR=1: a DP with no value at the start where the layer field has none either: the tour in its place)
+	let dpFell = false;
+	if (dpTourOn(opts) && dp && !dp.free && !opts.coinT && !opts.noDP && dpFifths(steer, sim0, Infinity) < 0 && layerFifths(steer, sim0, layerIndex(steer, sim0)) < 0) {
+		dp = null; steer.dp = null; bodies.length = nPlain0; goals.length = nPlain0; steer.nPlain = nPlain0;
+		steer.prioShift = prioShiftOf(steer); dpFell = true;
+	}
 	// the coin tour (no DP; the plan's coin door, or the full count where the coins are modelled: the min with the layer
 	// field keeps the ways that need no more coins; the CPU file's alone: steerFileBytes(st, fp, true); after prioShift,
 	// so the GPU's file stays as it was)
@@ -2076,7 +2131,7 @@ function buildSteer(level, opts) {
 		// (the floor's count past the DP (more than 18 coins, or no DP): the tour over at least it, the larger of both)
 		const floorTour = !freeTour && modelled && opts.tourFirst !== true && floorT > planCoinT(B);
 		const T = freeTour ? Math.min(nCoins, planCoinT(B)) : Math.min(nCoins, Math.max(planCoinT(B), modelled || coinsOver ? fullCoinT(A) : 0, floorTour ? floorT : 0));
-		if (T >= 1 && (modelled || opts.tourFirst === true || freeTour) && (nCoins >= TOUR_MIN_COINS || coinsOver || freeTour || floorTour)) {
+		if (T >= 1 && (modelled || opts.tourFirst === true || freeTour) && (nCoins >= TOUR_MIN_COINS || coinsOver || freeTour || floorTour || dpFell)) {
 			const kappa = PH.kappa || kappaOf(A, { oneWayEntry: true, portalForced: true, exitEntry: exitEntryOn() });
 			const R = buildTour(A, level, T, freeTour || floorTour ? 2 : !modelled, kappa, T0() + 2 * maxMs, opts.tourMaxBytes || TOUR_MAX_BYTES);
 			if (R) {
@@ -2118,7 +2173,8 @@ function buildSteer(level, opts) {
 	steer.info = { features: M.names, layers: PH.layers, bodies: bodies.length, builds: PH.builds, kappa: Math.round(PH.kappa * 1000) / 1000, cegar,
 		dp: dp ? { n: dp.n, T: dp.T, rounds: dp.rounds, tour: dp.tour ? dp.tour.map((t) => [t % A.W, Math.floor(t / A.W)]) : undefined, ...(dp.free ? { free: true } : {}), ...(dp.floor ? { floor: true } : {}), ...(dp.kind ? { kind: dp.kind } : {}) } : null,
 		fullT: Math.max(fullCoinT(A), floorT), start: steerAt(steer, sim0), ms: Date.now() - t0, over,
-		tour: tourInfo, ...(floors.length || probeMs >= 1 ? { floors, floorT, probeMs } : {}), ...(blue ? { blue: blue.info } : {}) };
+		tour: tourInfo, ...(floors.length || probeMs >= 1 ? { floors, floorT, probeMs } : {}), ...(blue ? { blue: blue.info } : {}),
+		...(relaxed && relaxed.size ? { relaxed: [...relaxed] } : {}), ...(dpFell ? { dpFell: true } : {}) };
 	return steer;
 }
 /** the lookup's fields of a reach field (the debug closures and the build's extras dropped) */
