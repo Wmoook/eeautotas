@@ -1529,7 +1529,7 @@ async function createExecutor(L, opts) {
 	const canDieL = !!(opts.model && opts.model.canDie);
 	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
-	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT === '1';
+	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT !== '0';   // (DEFAULT ON since n5 lane 6 block 1; =0: off)
 	const REDIRECT_F = +process.env.EEAT_SKEL_REDIRECT_F > 1 ? +process.env.EEAT_SKEL_REDIRECT_F : 2;
 	const skelDirectMs = new Map();   // skelKey -> the largest direct-leg share tried (EEAT_SKEL_REDIRECT)
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
@@ -1868,7 +1868,7 @@ async function createExecutor(L, opts) {
 		// (the direct leg first with SKEL_DIRECT of the budget (a leg the finders reach whole keeps its way: the skeleton's
 		// split cost PARTIAL levels their progress, SMB3 3 -> 0, Booty Return 14 -> 6); its found leg, or its proof
 		// (the exact tier's exhaustion: no time in it), is the answer; else the skeleton with the rest)
-		// (THE DIRECT LEG AGAIN ON A BIGGER RUNG, OPT-IN EEAT_SKEL_REDIRECT=1 (doctor 8, n5-doc-8): once a call built the
+		// (THE DIRECT LEG AGAIN ON A BIGGER RUNG, default on, EEAT_SKEL_REDIRECT=0 off (doctor 8, n5-doc-8): once a call built the
 		// skeleton's memo for these starts, every later call resumed the skeleton and never tried the direct leg again, so
 		// the rung ladder's bigger budgets only fed the skeleton's sub-level sets: where those descend into the relaxation's
 		// false near (UT Eternal Galaxy's first coin: the dot row beside the shaft) the waypoint failed on every rung

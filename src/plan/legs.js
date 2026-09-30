@@ -31,8 +31,9 @@ const EG = require('../endgame.js');
 const RF = require('../reach.js');
 const X = require('./exact.js');
 const T = require('./types.js');
-// the zero-speed bucket of legBest's cells (doctor 8, n5-doc-8; OPT-IN EEAT_CELL_ZERO=1, off = the cells as before): legBest's cellKey
-const ZERO_CELL = process.env.EEAT_CELL_ZERO === '1';
+// the zero-speed bucket of legBest's cells (doctor 8, n5-doc-8; DEFAULT ON since n5 lane 6 block 1, EEAT_CELL_ZERO=0 = the cells as
+// before): legBest's cellKey
+const ZERO_CELL = process.env.EEAT_CELL_ZERO !== '0';
 
 /** the fine cell of the state in sim (a number: FNV over the cell's parts) */
 function cellOf(sim, disc) {

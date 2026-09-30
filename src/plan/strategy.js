@@ -72,6 +72,17 @@ const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
 const FALLBACK_MAX = 6;
 const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by another trigger: an anchor of its own, addArrival)
+// THE LAST LEG FIRST (n5 lane 6 block 1; EEAT_LASTLEG=0: off): an anchor whose plan is ONE step to the trophy (complete, an
+// est-walk cost, no relaxation penalty) goes before every other anchor in nextJob's order; among such anchors and among the
+// rest the order is as before (the most gain, then the score). The gain counts the features that differ from the level's
+// start, and a toggled switch counts as progress: on a switch-column level the states with a column of switches ON outrank
+// the state the trophy leg starts from. First Person Maze (box 5, 300 s, doctor 8's finder, EEAT_DIE_EST=0): the anchor at
+// tick 697 with every column switch back off and psw 34 on (the known route's own state at its tick 674, from which krt finds
+// the trophy leg at rung 1 in 4.5 s, 595 ticks) had gain 4 and was never picked in 240 s while ~20 anchors of gain 5-35
+// (column switches on) cycled through 'exhausted' switch legs with relaxation-only plans. Ordering only: no plan, edge or
+// bound changes; the trophy leg climbs its rungs like any step and, once the planner stops proposing it, the anchor falls back
+const LASTLEG = process.env.EEAT_LASTLEG !== '0';
+const PENALTY_EST = 1e6;   // (planner.js PENALTY: the est of an edge only the relaxation reaches)
 // (the arrivals' replay: a death in the leg's start prefix is a move of the route, not the leg's (deaths are moves: the
 // acceptance rule takes them); before, every arrival after a die step (or any death) was dropped by its own replay:
 // 'the goal test never holds' / 'a trophy arrival that does not finish'. EEAT_PREFIX_DEATH=0: as before)
@@ -609,6 +620,9 @@ async function compile(L, opts = {}, emit = () => {}) {
 		}
 		A.plans = p; A.planVer = v; A.planEpoch = epoch; A.planBound = rb;
 		A.costEst = p.plans.length ? +p.plans[0].cost || 0 : Infinity; A.costVer = v;
+		// (the last leg first: the anchor's best plan is one complete step to the trophy at an est-walk cost)
+		const q0 = p.plans.length ? p.plans[0] : null;
+		A.lastLeg = !!(LASTLEG && q0 && !q0.partial && q0.steps.length === 1 && (!q0.steps[0].waypoint || q0.steps[0].waypoint.kind === 'trophy') && Number.isFinite(+q0.cost) && +q0.cost < PENALTY_EST);
 		return p;
 	};
 	const scoreOf = (A, N) => (Number.isFinite(A.costEst) ? A.costEst : 1e7) + A.firstTick + FAIL_TICKS * A.fails - UCB_C * Math.sqrt(Math.log(N + 1) / (1 + A.picks));
@@ -623,7 +637,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const budgetCut = (A, why) => { if (why !== 'budget' || (A.budgetCuts || 0) >= 4) return false; A.budgetCuts = (A.budgetCuts || 0) + 1; A.planVer = -1; return true; };
 		for (const A of live) if (A.costVer < 0 && !Number.isFinite(A.costEst)) { const p = planOfAnchor(A); if (!p.plans.length && !budgetCut(A, p.why)) { A.exhausted = true; A.why = p.why || 'exhausted'; } }
 		// (the most progress first, then the lowest plan cost + the arrival tick)
-		const list = live.filter((A) => !A.exhausted).sort((a, b) => (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
+		const list = live.filter((A) => !A.exhausted).sort((a, b) => ((b.lastLeg ? 1 : 0) - (a.lastLeg ? 1 : 0)) || (b.gain - a.gain) || (scoreOf(a, N) - scoreOf(b, N)));
 		for (const A of list) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
