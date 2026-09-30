@@ -40,8 +40,9 @@ const LM_W = 60;              // ticks of the plan search's f per landmark not y
 const GAIN_BONUS = 3;         // walk steps of the plan search's f per unit of gain (the relevant triggers achieved)
 const KEY_TICKS = 500;
 // the diversification rule (nearPlans): one-step plans to the nearest untried triggers once every plan's first leg
-// failed its rung; OPT-IN: EEAT_PLAN_NEAR=K (K near plans; unset / 0: off, the planner as before)
-const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 0;
+// failed its rung; DEFAULT 1 since COMPILE-ALL block 3 lane 4 (with the executor's true skeleton closest,
+// EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
+const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -847,6 +848,12 @@ function createPlanner(model, facts, o = {}) {
 	 * (all failed, 1 near plan) on lane 3's 45 FIRST-LEG levels 4 triggers vs 2 (noise level), gate20 7 compiled vs 9 of
 	 * the same code without it (Tutorial 1 / Bygone Tutorial: they compile in about half the runs), IWBTG 15 / 11 in two
 	 * runs: no gain shown, so OPT-IN; with EEAT_SKEL_CLOSEST=1 IWBTG 11 (15 -> 1 without the rule), MIHB 5, The Glitch 0.
+	 * DEFAULT ON (K 1) with the true skeleton closest since COMPILE-ALL block 3 lane 4: the pair measured together (box 3,
+	 * 60 s, --workers=3, n4-plan a137f8e, env EEAT_SKEL_CLOSEST=1 EEAT_PLAN_NEAR=1): the shared gate compiled 11 vs the
+	 * baseline's 9 (Tutorial 1 2,233 and Tree Decorating 1,320 run ticks, both compile in half the base runs), worse 0,
+	 * better 10 (Booty Return 25 vs 11, I Wanna be the Guy 16 vs 11, MIHB's Dream 22 vs 16, Starlight 22 vs 18, NC Naos
+	 * 319 vs 358 run ticks), The Glitch 8 vs the baseline's 4; the lane's 23 levels side by side with the base: progress
+	 * 78 vs 72 (Booty Return 16 vs 11, SPOT THE DIDFERNECE 4 vs 1, Beaches in Space 4 vs 2). EEAT_PLAN_NEAR=0: off.
 	 */
 	function nearPlans(a, plans) {
 		const p0 = plans[0];

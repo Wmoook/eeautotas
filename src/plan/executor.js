@@ -99,6 +99,16 @@ const WALLS_ON = process.env.EEAT_WALLS !== '0';
 // (the trophy's field only by default: its one-leg levels are the false nears' class; on the coin legs of PARTIAL levels the
 // walls cost progress: MIHB's Dream gain 11 -> 6 and 9 -> 5 in two pairs; EEAT_WALLS=all: every waypoint's field)
 const WALLS_ALL = process.env.EEAT_WALLS === 'all';
+// (COMPILE-ALL lane 4, block 3: every OTHER waypoint's field is walled too, but only once it is STUCK: its calls failed
+// WALLS_STUCK_N times in a row with no nearer closest (by 1 tile, in one wall unit) — a field whose leg only needed more
+// budget keeps its unwalled ordering (MIHB's loss with 'all'); the waypoint's tabu as the trophy's; EEAT_WALLS=trophy:
+// the trophy's field alone, as before; EEAT_WALLS_STUCK: the count). Measured (box 3, 60 s, --workers=3, a137f8e): the
+// lane's 23 levels side by side, progress 73 vs 72 (SPOT THE DIDFERNECE 9 vs 1, Rosa dei Venti 3,807 vs 3,969 run ticks;
+// Ice Cream Expedition 2 vs 8), 'all' 77 (MIHB's Dream 23 vs 25); with the true skeleton closest and the planner's near
+// plans on (both default since this block) the shared gate compiled 10 vs 9, worse 0, better 10 (Starlight 28, MIHB's
+// Dream 24, Pancake Quest 12 vs 18 / 16 / 10; Ruins 1,303 vs 1,395 run ticks), The Glitch 12 vs the baseline's 4
+const WALLS_STUCK = WALLS_ON && !WALLS_ALL && process.env.EEAT_WALLS !== 'trophy';
+const WALLS_STUCK_N = +process.env.EEAT_WALLS_STUCK > 0 ? +process.env.EEAT_WALLS_STUCK : 2;
 const WALL_RING = +process.env.EEAT_WALL_RING > 0 ? +process.env.EEAT_WALL_RING : 2;
 const WALL_RING_MAX = 6;
 const WALLS_MAX = 60000;
@@ -461,7 +471,7 @@ function makeCore(L, co) {
 			const cell0 = process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(',').map(Number) : null;
 			const runBest = (end, cell) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: fOrd || field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: cell || cell0, visited: visW });
 			const mode = LEG_MODE();
-			if (WALLS_ON && (WALLS_ALL || T.fieldTouchOf(goal)) && mode === 'best' && field0 && field0.mode !== 'walk') visW = new Uint8Array(N);
+			if (WALLS_ON && (WALLS_ALL || T.fieldTouchOf(goal) || wp.wallsOn) && mode === 'best' && field0 && field0.mode !== 'walk') visW = new Uint8Array(N);
 			const t3 = Date.now();
 			// (EEAT_BEST_PORT=<f>: the first cells get that share of the window, then the next grain of the ladder the rest (a
 			// measurement knob: a portfolio of grains instead of one)
@@ -880,7 +890,7 @@ function fingerprint(L) {
 /** the Waypoint as plain data (it crosses threads) */
 const wpData = (wp) => ({ kind: wp.kind, tiles: wp.tiles ? Array.from(wp.tiles) : [], trig: wp.trig, expect: wp.expect ? { feat: wp.expect.feat, value: wp.expect.value } : null,
 	label: wp.label || '', allowDeath: !!wp.allowDeath, beforeTick: wp.beforeTick >= 0 ? wp.beforeTick : -1,
-	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch });
+	fieldTiles: wp.fieldTiles ? Array.from(wp.fieldTiles) : null, fieldTouch: !!wp.fieldTouch, wallsOn: !!wp.wallsOn });
 
 async function createExecutor(L, opts) {
 	opts = opts || {};
@@ -891,7 +901,7 @@ async function createExecutor(L, opts) {
 	const core = makeCore(L, { prims: opts.prims || null, bounds: opts.bounds || null, model: opts.model || null });
 	const vsim = new E.EESim(L), vinp = new E.EEInput();
 	const RM = opts.RM || null;
-	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, late: 0, hung: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0, walls: 0, wallsReset: 0 };
+	const S = { reach: 0, ok: 0, fail: 0, watchdog: 0, late: 0, hung: 0, verifyDrop: 0, polish: 0, byTool: {}, byWhy: {}, ms: 0, sims: 0, walls: 0, wallsReset: 0, wallsArmed: 0 };
 	// (EEAT_EXEC_PROF=1, a measurement: every worker answer's prof (execworker.js) as an exec.prof event, late ones too;
 	// this thread's RCH3 builds (the skeleton's fieldAt, the planner's) and its event-loop delay at close)
 	const PROF = process.env.EEAT_EXEC_PROF === '1';
@@ -1012,6 +1022,23 @@ async function createExecutor(L, opts) {
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
 	// skeleton's sub-legs order by their waypoint's field, so they share its walls)
 	const wallMemo = new Map(), wallBatches = new Map(), wallTabu = new Map();
+	// (WALLS_STUCK: per field key {n: failed calls in a row with no nearer closest, d: that closest, u: its wall unit, on})
+	const wallStuck = new Map();
+	const stuckNote = (wp, r) => {
+		if (!WALLS_STUCK || !wp || wp.beforeTick >= 0) return;
+		let wk;
+		try { wk = wallKeyOf(wp); } catch (e) { return; }
+		let s = wallStuck.get(wk);
+		if (!s) { s = { n: 0, d: Infinity, u: -1, on: false }; wallStuck.set(wk, s); }
+		if (s.on) return;
+		if (!r || r.ok) { s.n = 0; s.d = Infinity; return; }
+		if (!r.fail || r.fail.why !== 'budget') return;
+		const d = r.fail.closest && r.fail.closest.dist >= 0 ? r.fail.closest.dist : Infinity, u = r.fail.wallsN | 0;
+		if (u === s.u && !(d < s.d - 1)) s.n++;
+		else { s.n = 1; s.d = d; s.u = u; }
+		if (s.n >= WALLS_STUCK_N) { s.on = true; S.wallsArmed++; if (emit) emit({ ev: 'exec.walls', label: wp.label || '', armed: true, n: s.n, d }); }
+	};
+	const stuckOn = (wk) => { const s = wk ? wallStuck.get(wk) : null; return !!(s && s.on); };
 	/** the last batch of walls of a field dropped (its walls cut every start off the waypoint: no counterexample of the
 	 *  field's way, the batches before it stay; its tiles are never walled again: the relaxation's last way through them
 	 *  is the way); false when none is left */
@@ -1074,9 +1101,12 @@ async function createExecutor(L, opts) {
 	 *  the closest-0 levels, 60 s, par 36) it compiled 5 vs 4 (Tutorial 1) and raised Animaly 1 -> 4, Trail Blazer 3 -> 5,
 	 *  Summer Bee / Starlight 0 -> 2, but I Wanna be the Guy 15 -> 1 and The Glitch 5 -> 0: the false 0 was an accidental
 	 *  DIVERSIFIER (lane 2's finding for the start-closest): a far leg "reached" makes the planner move on to other
-	 *  triggers; with the true number it insists on the far leg. Default on only with an explicit diversification rule. */
+	 *  triggers; with the true number it insists on the far leg. Default on only with an explicit diversification rule:
+	 *  DEFAULT ON since COMPILE-ALL block 3 lane 4, together with the planner's diversification rule (planner.js NEAR_K 1,
+	 *  EEAT_PLAN_NEAR): the shared gate 11 compiled vs 9, worse 0, IWBTG 16 and The Glitch 8 vs the baseline's 11 / 4
+	 *  (planner.js nearPlans' comment has the numbers). EEAT_SKEL_CLOSEST=0: off (the sub-leg's FailReport as before). */
 	function skelClosest(fc, deep, f0) {
-		if (process.env.EEAT_SKEL_CLOSEST !== '1' || !f0) return fc;
+		if (process.env.EEAT_SKEL_CLOSEST === '0' || !f0) return fc;
 		const cands = [];
 		if (fc && fc.masks) cands.push(typeof fc.masks === 'string' ? fc.masks : T.strOf(fc.masks));
 		for (const s of deep) cands.push(String(s));
@@ -1094,6 +1124,11 @@ async function createExecutor(L, opts) {
 		return best || fc;
 	}
 	async function reach(starts, wp, budget) {
+		const r = await reachWp(starts, wp, budget);
+		stuckNote(wp, r);
+		return r;
+	}
+	async function reachWp(starts, wp, budget) {
 		budget = budget || {};
 		if (!SKEL_ON || wp.beforeTick >= 0 || wp.beforeRel !== undefined || !starts.length) return reachLeg(starts, wp, budget);
 		const tIn = Date.now();
@@ -1216,6 +1251,7 @@ async function createExecutor(L, opts) {
 		// (the counterexample walls of this waypoint's field tiles, learnt by the calls before: to the core with the waypoint;
 		// walls that cut every start off: their last batch dropped and the call made again without it)
 		const wk = WALLS_ON ? wallKeyOf(wp) : null;
+		if (stuckOn(wk)) w.wallsOn = true;
 		let res;
 		for (let attempt = 0; ; attempt++) {
 			const wset = wk ? wallMemo.get(wk) : null;
