@@ -316,7 +316,10 @@ function legBest(L, starts, goal, o) {
 	// 1/16, 1/8 (legBFS's) 46%, 4 px, 4 px, 1/4, 1/2 40%)
 	const CQ = o.cell || [0.5, 0.25, 8, 4];
 	const collect = o.collect > 0 ? o.collect : 64;
-	const B = allowDeath || o.noBound || (process.env.EEAT_LEG_KB === '0' && !o.kbOn) ? null : (o.B || X.boundFor(L, goal));
+	// (the order: the goal field's time alone by default; o.kbOn (or EEAT_LEG_KB=1) takes the larger of it and the
+	// kinematic bound where the field puts the goal within KBT ticks: T-EXEC-LEGS, box 3, 3 s: 76.6% / 77.4% without it vs
+	// 71.3% / 71.3% with it (its lookups were 30% of a long leg's time), the legs found 1.050 vs 1.023 of the route's)
+	const B = allowDeath || o.noBound || (process.env.EEAT_LEG_KB !== '1' && !o.kbOn) ? null : (o.B || X.boundFor(L, goal));
 	const HLIM = o.hLim > 0 ? o.hLim : 64, FT = o.fieldPace > 0 ? o.fieldPace : 16 / 6.78;
 	// (the kinematic bound only for states the field puts within KBT ticks (EEAT_LEG_KBT: measurements))
 	const KBT = +process.env.EEAT_LEG_KBT || HLIM + 16;
