@@ -249,6 +249,59 @@ function dirsOf(field) {
  * Not a proof, not optimal: a finder for long legs; the executor improves what it finds (the exact search bounded by it).
  * o: legBFS's + {w (default 2.5), heapMax (default 300000 open states: past it the worst half goes)}.
  */
+/** a set of (uint32, uint32) pairs: open addressing on typed arrays (a Set of the doubles a * 2^20 + b made a heap
+ *  number per key) */
+class PairSet {
+	constructor(cap) { this.cap = 1 << Math.max(10, Math.ceil(Math.log2(cap || 4096))); this.a = new Int32Array(this.cap); this.b = new Int32Array(this.cap); this.u = new Uint8Array(this.cap); this.size = 0; }
+	_slot(a, b) {
+		const m = this.cap - 1;
+		let i = (Math.imul(a ^ Math.imul(b, 0x9e3779b1), 0x85ebca6b) >>> 7) & m;
+		while (this.u[i] && (this.a[i] !== a || this.b[i] !== b)) i = (i + 1) & m;
+		return i;
+	}
+	has(a, b) { return this.u[this._slot(a | 0, b | 0)] === 1; }
+	/** true when new */
+	add(a, b) {
+		a |= 0; b |= 0;
+		const i = this._slot(a, b);
+		if (this.u[i]) return false;
+		this.u[i] = 1; this.a[i] = a; this.b[i] = b; this.size++;
+		if (this.size * 2 > this.cap) this._grow();
+		return true;
+	}
+	_grow() {
+		const oa = this.a, ob = this.b, ou = this.u, n = this.cap;
+		this.cap = n * 2; this.a = new Int32Array(this.cap); this.b = new Int32Array(this.cap); this.u = new Uint8Array(this.cap);
+		for (let k = 0; k < n; k++) if (ou[k]) { const i = this._slot(oa[k], ob[k]); this.u[i] = 1; this.a[i] = oa[k]; this.b[i] = ob[k]; }
+	}
+}
+
+/** X.discKey(sim) with the switch maps' part cached by map identity: a map the sim does not own (a restored snapshot's)
+ *  is never changed in place (eesim.js _swSet copies it first), so the same map gives the same part */
+function discKeyCache() {
+	let dsw = null, dosw = null, s1 = 0, s2 = 0, o1 = 0, o2 = 0;
+	return (sim) => {
+		const sw = sim._switches, osw = sim._oswitches;
+		if (sw !== dsw || sim._swOwned) {
+			s1 = 0; s2 = 0;
+			for (const [k, v] of sw) if (v === true) { s1 = (s1 + Math.imul((k | 0) + 1, 0x9e3779b1)) | 0; s2 ^= Math.imul((k | 0) + 7, 0x85ebca6b); }
+			dsw = sim._swOwned ? null : sw;
+		}
+		if (osw !== dosw || sim._oswOwned) {
+			o1 = 0; o2 = 0;
+			for (const [k, v] of osw) if (v === true) { o1 = (o1 + Math.imul((k | 0) + 1, 0x9e3779b1)) | 0; o2 ^= Math.imul((k | 0) + 7, 0x85ebca6b); }
+			dosw = sim._oswOwned ? null : osw;
+		}
+		let h = 0x811c9dc5;
+		const mix = (v) => { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= (v >>> 16) & 0xffff; h = Math.imul(h, 0x01000193); };
+		mix(sim._keysMask | 0); mix(sim.coins | 0); mix(sim.blue_coins | 0); mix(sim.deaths | 0); mix(sim.team | 0);
+		mix((sim._collide_crown ? 1 : 0) | (sim._collide_silver_crown ? 2 : 0) | (sim.is_zombie ? 4 : 0));
+		mix(sim._show_coin_gate | 0); mix(sim._show_blue_coin_gate | 0); mix(sim._show_death_gate | 0);
+		mix(s1); mix(s2); mix(o1); mix(o2);
+		return h >>> 0;
+	};
+}
+
 function legBest(L, starts, goal, o) {
 	o = o || {};
 	const sim = o.sim || new E.EESim(L), inp = new E.EEInput();
@@ -303,7 +356,8 @@ function legBest(L, starts, goal, o) {
 		}
 		return top;
 	};
-	const closed = new Set();
+	const closed = new PairSet(1 << 16);
+	const dkOf = discKeyCache();
 	const scoreOf = (dist) => {
 		if (dist >= 1e9) return 1e9;
 		const ft = BF !== null ? bfTime(BF, o.bounds, sim) : dist * FT;
@@ -311,13 +365,15 @@ function legBest(L, starts, goal, o) {
 		const h = EG.lowerBound(B, sim, HLIM);
 		return h > ft ? h : ft;
 	};
+	// (the cell: ka the physical part's hash, kb the door-reading state's)
+	let ka = 0, kb = 0;
+	const q0 = CQ[0], q1 = CQ[1], q2 = CQ[2], q3 = CQ[3];
 	const cellKey = () => {
 		let h = 0x811c9dc5 | 0;
 		const mix = (v) => { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= (v >>> 16) & 0xffff; h = Math.imul(h, 0x01000193); };
-		mix(Math.floor(sim.px * CQ[0]) | 0); mix(Math.floor(sim.py * CQ[1]) | 0); mix(Math.floor(sim.speed_x * CQ[2]) | 0); mix(Math.floor(sim.speed_y * CQ[3]) | 0);
+		mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0);
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
-		const d = X.discKey(sim);
-		return (h >>> 0) * 1048576 + (d & 0xfffff);
+		ka = h; kb = dkOf(sim) | 0;
 	};
 	const goals = [];
 	const closest = { dist: -1, start: -1, tail: null, node: -1 };
@@ -338,7 +394,7 @@ function legBest(L, starts, goal, o) {
 		const d = distOf(field, sim);
 		dst.push(d);
 		if (X.goalAt(goal, sim, starts[s].tick, beforeTick)) { goals.push({ node: i, mask: -1, depth: gg[i] }); found = gg[i]; continue; }
-		closed.add(cellKey());
+		cellKey(); closed.add(ka, kb);
 		hpush(i, gg[i] + w * scoreOf(d));
 	}
 	let why = 'exhausted';
@@ -363,13 +419,14 @@ function legBest(L, starts, goal, o) {
 		// parent's cell is the same trajectory a tick on, and the first arrival's rule would drop it (a ball at rest, a slow
 		// fall: the search died at its start on 2 px / 4 px cells))
 		sim.restore(snap);
-		const pkey = cellKey();
+		cellKey();
+		const pa = ka, pb = kb;
 		const masks = EG.probeMasks(sim, inp, snap);
 		sims++;
 		for (let k = 0; k < masks.length; k++) {
 			const m = masks[k];
 			if (k > 0) { sim.restore(snap); E.applyMask(inp, m); sim.tick(inp); sims++; }
-			let reps = 1, key = 0, bad = false;
+			let reps = 1, same = true, bad = false;
 			for (;;) {
 				if (sim.is_dead && !allowDeath) { drop.dead++; bad = true; break; }
 				if (!sim.is_dead && X.goalAt(goal, sim, t0 + g + reps, beforeTick)) {
@@ -379,18 +436,18 @@ function legBest(L, starts, goal, o) {
 					bad = true;
 					break;
 				}
-				key = cellKey();
-				if (key !== pkey || g + reps >= depthMax) break;
+				cellKey();
+				same = ka === pa && kb === pb;
+				if (!same || g + reps >= depthMax) break;
 				if (reps >= HOLD && !(reps < WAIT && sim.speed_x === 0 && sim.speed_y === 0)) break;
 				E.applyMask(inp, m); sim.tick(inp); sims++; reps++;
 			}
 			if (bad) continue;
-			if (key === pkey) { drop.closed++; continue; }
+			if (same) { drop.closed++; continue; }
 			const cx = (sim.px + 8) >> 4, cy = (sim.py + 8) >> 4;
 			if (cx < 0 || cy < 0 || cx >= W || cy >= H) { drop.oob++; continue; }
 			if (region !== null && !region[cy * W + cx]) { drop.region++; continue; }
-			if (closed.has(key)) { drop.closed++; continue; }
-			closed.add(key);
+			if (!closed.add(ka, kb)) { drop.closed++; continue; }
 			const d = distOf(field, sim);
 			const j = par.length;
 			par.push(i); msk.push(m); rp.push(reps); gg.push(g + reps); dst.push(d);
