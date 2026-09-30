@@ -793,9 +793,15 @@ function createPlanner(model, facts, o = {}) {
 	 *  its own (strategy addArrival's re-entry rule: the same model state, another trigger) that the next plan starts
 	 *  from (receding horizon: one crumb a plan). Ordering only: the crumb is a waypoint, never a gate. */
 	function crumbStep(a, e, cls) {
-		if (!CRUMBS || !(e.steps >= CRUMB_MIN) || e.steps >= INF || e.viaDeath || e.relaxOnly) return null;
-		const S = a.S, D = e.steps, tgt = e.live || trophyTiles;
-		const dA = model.dist(S, a.pos, 'est', a.base);
+		if (!CRUMBS || e.viaDeath) return null;
+		// (the geometry by the 'now' walk: est's walls (killers unless protected) WITHOUT the CEGAR's cuts: a failed long
+		// leg's cuts made its est walk relaxation-only (EX Crew Ice with the first version: 4 crumbs, then the trophy edge
+		// at the 1e6 penalty and no crumb from there))
+		const S = a.S, tgt = e.live || trophyTiles;
+		const dA = model.dist(S, a.pos, 'now', a.base);
+		let D = INF;
+		for (const t of tgt) if (dA[t] < D) D = dA[t];
+		if (!(D >= CRUMB_MIN) || D >= INF) return null;
 		const slack = Math.max(CRUMB_SLACK, CRUMB_SLACK_F * D);
 		let near = null, far = null;
 		for (const X of crumbCands) {
@@ -806,7 +812,7 @@ function createPlanner(model, facts, o = {}) {
 			let d1 = INF;
 			for (const t of live) if (dA[t] < d1) d1 = dA[t];
 			if (!(d1 >= CRUMB_NEAR) || d1 >= D) continue;
-			const dX = model.dist(S, { id: 'crumb' + X.id, tiles: live.slice(), extra: 0 }, 'est', a.base);
+			const dX = model.dist(S, { id: 'crumb' + X.id, tiles: live.slice(), extra: 0 }, 'now', a.base);
 			let d2 = INF;
 			for (const t of tgt) if (dX[t] < d2) d2 = dX[t];
 			if (d2 >= INF || d1 + d2 - D > slack) continue;
