@@ -81,9 +81,12 @@ async function checkRoute(entry, fo) {
 	}
 	const prims = await P.createPrims(L, {});
 	let k = 0;
-	for (let i = 0; i + 1 < bnd.length; i++) {
-		const t0 = bnd[i], t1 = bnd[i + 1], len = t1 - t0, c0 = cls[t0], c1 = cls[t1];
-		if (c0 === 'D' || c1 === 'D' || len > 400) continue;
+	const K = +(argv.chain || 1);   // --chain=K: the goal is the support K moves ahead (the moves chained: hops count)
+	for (let i = 0; i + K < bnd.length; i++) {
+		const t0 = bnd[i], t1 = bnd[i + K], len = t1 - t0, c0 = cls[t0], c1 = cls[t1];
+		if (c0 === 'D' || c1 === 'D' || len > 400 * K) continue;
+		let anyD = false; for (let q = t0; q <= t1; q++) if (cls[q] === 'D') { anyD = true; break; }
+		if (anyD) continue;
 		if ((k++ % EVERY) !== 0) continue;
 		// the label (as moves.js)
 		let hop = c0 === 'G' && jumpAt[t0] === 1, jumps = 0, arrow = 0, other = '';
