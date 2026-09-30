@@ -278,6 +278,8 @@ async function legsOfRoute(e, budget, maxLegs) {
 		const startMasks = tr.masks.subarray(0, prevTick);
 		prevTick = o.tick;
 		if (legTicks > 300 || legTicks < 1) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true }); continue; }
+		// (a key running out is the clock's, no trigger: no waypoint a plan would give; the next leg starts there)
+		if (/^key\d$/.test(o.feat) && !o.value) { out.push({ name: e.name, k, tick: o.tick, legTicks, skipped: true, why: 'clock (a key ran out)' }); continue; }
 		const wp = o.feat === 'silver' ? { kind: 'trophy', label: 'trophy' } : { kind: 'trigger', tiles: triggerTiles(L, o.tile, o.feat), expect: { feat: o.feat, value: o.value }, label: `${o.feat}=${o.value}` };
 		// (the route's own leg must meet the waypoint at its tick: else the waypoint is not this leg's)
 		const g = T.goalOf(L, wp);
