@@ -1483,7 +1483,19 @@ async function createExecutor(L, opts) {
 	const SKEL_DIRECT = process.env.EEAT_SKEL_DIRECT !== undefined ? Math.max(0, Math.min(0.9, +process.env.EEAT_SKEL_DIRECT || 0)) : 0.35;
 	const DEATH_LEG = process.env.EEAT_DEATH_LEG !== '0';
 	const canDieL = !!(opts.model && opts.model.canDie);
-	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${wn | 0}`;
+	// ---- THE SKELETON KEEPS ITS LEVELS ACROSS NEW WALLS (COMPILER DOCTOR 10, n5; EEAT_SKEL_KEEP=1): the memo of the levels
+	// a skeleton reached was keyed by the count of its field's counterexample walls, and every failed sub-leg of a stuck
+	// field learns walls, so the call after the walls came in missed the memo and started again from the anchor: its
+	// direct leg (SKEL_DIRECT of the call) and every sub-leg the calls before had already found, up to the same hard spot
+	// (Perilous Endeavor's trophy leg from the spawn, 702 tiles, the executor alone, six calls 15/15/15/45/15/15 s: the
+	// fourth call resumed at c 552 and reached c 540 with the walls armed; the fifth 'resumed: false', c0 704, 12 s
+	// redoing 704 -> 554; the compile's 180-s run never got past c ~520). With the knob the memo is keyed without the
+	// walls' count; each level records the count its c was measured with, and a resume (or a dead end's step back)
+	// re-measures that level on the field with the walls as they are now (a level the walls cut off is dropped, the
+	// one before it taken). Ordering only (which real arrivals a call goes on from): every arrival the engine's replay,
+	// verified as before; no claim reads it. Unset / 0: the memo as before, byte for byte.
+	const SKEL_KEEP = process.env.EEAT_SKEL_KEEP === '1';
+	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${SKEL_KEEP ? 0 : wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
 	// skeleton's sub-legs order by their waypoint's field, so they share its walls)
@@ -1684,6 +1696,17 @@ async function createExecutor(L, opts) {
 		// (resume from the deepest level an earlier call for this step reached)
 		let key = skelKey(goal, wp, startStrs, wN);
 		const memo = skelMemo.get(key);
+		// (SKEL_KEEP: a memo level measured with another count of walls is re-measured on the field as the walls stand now;
+		// a level they cut off is dropped)
+		const levelNowC = (lv) => {
+			if (!SKEL_KEEP || !lv || (lv.wN | 0) === (wN | 0)) return true;
+			let fw;
+			try { fw = fieldAt(lv.cur[0], goal, wp.allowDeath, wArr); } catch (e) { fw = { f: null }; }
+			if (!fw.f || !(fw.c >= 0)) return false;
+			lv.c = fw.c; lv.wN = wN;
+			return true;
+		};
+		if (SKEL_KEEP && memo) while (memo.length && !levelNowC(memo[memo.length - 1])) memo.pop();
 		// (a memo level no deeper than the starts' own cost is not resumed: a relay start (the strategy's nearest state of the
 		// last rung) can stand deeper than the skeleton's deepest level, and resuming went back up to it; EEAT_DEADEND=0: as
 		// before)
@@ -1749,7 +1772,7 @@ async function createExecutor(L, opts) {
 					backs++; S.deadEnds = (S.deadEnds || 0) + 1;
 					for (const s of cur) { const h = hashOf(s); if (h !== null) deadEnds.add(h); }
 					const st = skelMemo.get(key) || [];
-					while (st.length && st[st.length - 1].cur.every((s) => deadEnds.has(hashOf(s)))) st.pop();
+					while (st.length && (st[st.length - 1].cur.every((s) => deadEnds.has(hashOf(s))) || !levelNowC(st[st.length - 1]))) st.pop();
 					const prev = st.length ? st[st.length - 1] : null;
 					cur = prev ? prev.cur.slice() : startStrs; cCur = prev ? prev.c : c0;
 					retried = false; step = SKEL_STEP;
@@ -1767,7 +1790,7 @@ async function createExecutor(L, opts) {
 			cur = r.arrivals.map((a) => T.strOf(a.masks));
 			cCur = c;
 			if (!skelMemo.has(key)) skelMemo.set(key, []);
-			skelMemo.get(key).push({ c: cCur, cur: cur.slice() });
+			skelMemo.get(key).push(SKEL_KEEP ? { c: cCur, cur: cur.slice(), wN } : { c: cCur, cur: cur.slice() });
 		}
 		if (emit) emit({ ev: 'exec.skel', label: wp.label || '', c0: Math.round(c0), c: Math.round(cCur), resumed: !!memo, levels, walls: wN });
 		// (stuck with DEAD_REST of the call or more left: the direct leg from the deepest level AND the starts with the rest
@@ -1978,6 +2001,18 @@ async function createExecutor(L, opts) {
 		return { masks: ev1.ms, runTicks: ev1.runTicks, saved: ev0 ? ev0.runTicks - ev1.runTicks : 0, legs: r.legs || [], steps: r.steps };
 	}
 	function stats() { return Object.assign({ workers: nW, notes: note.slice(), core: nW === 0 ? core.stats() : null }, S); }
+	/** (tests: test/planskel.js) tiles added to a waypoint's field as one batch of counterexample walls, the way a failed
+	 *  call's exhausted search adds them; the field's wall count after */
+	function addWalls(wp, tiles) {
+		if (!WALLS_ON) return 0;
+		const wk = wallKeyOf(wp);
+		let s = wallMemo.get(wk);
+		if (!s) { s = new Set(); wallMemo.set(wk, s); wallBatches.set(wk, []); }
+		const batch = [];
+		for (const t of tiles) if (!s.has(t)) { s.add(t); batch.push(t); }
+		if (batch.length) wallBatches.get(wk).push(batch);
+		return s.size;
+	}
 	async function close() {
 		if (PROF && emit) { emit({ ev: 'exec.prof.main', rf: accM.rf, rfN: accM.rfN, eld: eld ? { mean: eld.mean / 1e6, max: eld.max / 1e6, p99: eld.percentile(99) / 1e6 } : null }); if (eld) eld.disable(); }
 		if (PROF && rfMain0) { RF.reachField = rfMain0; rfMain0 = null; }
@@ -1986,7 +2021,7 @@ async function createExecutor(L, opts) {
 		pool.length = 0;
 		for (const q of queue.splice(0)) q.resolve({ id: 0, error: 'closed' });
 	}
-	return { reach, polish, stats, close, workers: () => nW };
+	return { reach, polish, stats, close, workers: () => nW, _addWalls: addWalls };
 }
 
 module.exports = { createExecutor, makeCore, verifyLeg, verifyTail, fingerprint, wpData, BASE_FEATS };
