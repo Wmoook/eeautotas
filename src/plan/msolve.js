@@ -168,6 +168,8 @@ function createSolver(L, opts = {}) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	const KMAX = opts.K === undefined ? 2 : opts.K;
+	// the certificate's tile test (opts.certTiles false: the rectangle alone, the first version)
+	const certTiles = opts.certTiles !== false;
 	// the per-state solid map: 0 free, 1 solid, 3 one-way (a floor from above only), 4 half block (solid, conservative)
 	const base = new Uint8Array(N);
 	const doorTiles = [];
@@ -661,18 +663,41 @@ function createSolver(L, opts = {}) {
 
 	// ---------------------------------------------------------------- the bound
 	/** the admissible lower bound of the plain regime (0 when it does not apply: fields, teleports, multi-jumps) */
+	// the x part of the bound for one column: the centre in [16c - 8, 16c + 8) (with the align slack), hold toward from
+	// max(v0 toward, 0)
+	function txOf(s, I, c) {
+		const x0 = s.px, vx0 = s.speed_x, lo = 16 * c - 8, hi = 16 * c + 8;
+		if (x0 >= lo - K1.ALIGN_SLACK && x0 < hi + K1.ALIGN_SLACK) return 0;
+		if (x0 < lo) return minTo(x0, Math.max(vx0, 0), lo - K1.ALIGN_SLACK, 2, I);
+		return minTo(x0, Math.min(vx0, 0), hi + K1.ALIGN_SLACK, 1, I);
+	}
+	// the y part for one row (max_jumps 1): the centre in [16 r - 8, 16 r + 8) (with the slack); land: +1 above the start
+	function tyOf(s, G, r, land) {
+		const y0 = s.py, vy0 = s.speed_y, SL = K1.ALIGN_SLACK;
+		const standing = s.on_ground && vy0 === 0;
+		const ylo = 16 * r - 8 - SL, yhi = 16 * r + 8 + SL;
+		let t = Infinity;
+		if (y0 >= ylo && y0 < yhi) t = 0;
+		else if (y0 < ylo) {
+			let y = y0, v = Math.max(vy0, 0);
+			for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y >= ylo) { t = j; break; } }
+		} else {
+			const jumpNow = standing && s.jump_count < s.max_jumps;
+			let y = y0, v = jumpNow ? G.J : Math.min(vy0, 0);
+			for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y < yhi) { t = j + (jumpNow ? 1 : 0) + (land ? 1 : 0); break; } if (v > 0) break; }
+			// out of one jump's reach (stairs, re-jumps from landings): no tick rises more than |J| (the jump sets it,
+			// gravity only slows it): a looser bound, still one
+			if (!Number.isFinite(t)) t = Math.ceil((y0 - yhi) / Math.abs(G.J)) + (land ? 1 : 0);
+		}
+		return t;
+	}
 	function lowerBoundOf(s, tg, ctx) {
 		if (!ctx || tg.tele) return 0;
 		const G = K1.ga(ctx), I = K1.ia(ctx);
-		const x0 = s.px, vx0 = s.speed_x, y0 = s.py, vy0 = s.speed_y;
 		// x: the nearest target column's centre range [16c - 8, 16c + 8): hold toward from max(v0 toward, 0), with the slack
 		let tx = Infinity;
 		for (const t of tg.tiles) {
-			const c = t % W, lo = 16 * c - 8, hi = 16 * c + 8;
-			let need;
-			if (x0 >= lo - K1.ALIGN_SLACK && x0 < hi + K1.ALIGN_SLACK) need = 0;
-			else if (x0 < lo) need = minTo(x0, Math.max(vx0, 0), lo - K1.ALIGN_SLACK, 2, I);
-			else need = minTo(x0, Math.min(vx0, 0), hi + K1.ALIGN_SLACK, 1, I);
+			const need = txOf(s, I, t % W);
 			if (need < tx) tx = need;
 		}
 		// y: a landing on floor row fr (line 16 fr - 16) needs the ball to cross the line descending: below the start, the
@@ -684,24 +709,9 @@ function createSolver(L, opts = {}) {
 		// above it the rise of a jump pressed at tick 1 (y moves from tick 2) or the current rise, and a landing there
 		// needs one tick more (the rise ends first)
 		let ty = Infinity;
-		const standing = s.on_ground && vy0 === 0;
-		const SL = K1.ALIGN_SLACK;
 		if (s.max_jumps === 1) {
 			for (const r of tg.rows) {
-				const ylo = 16 * r - 8 - SL, yhi = 16 * r + 8 + SL;
-				let t = Infinity;
-				if (y0 >= ylo && y0 < yhi) t = 0;
-				else if (y0 < ylo) {
-					let y = y0, v = Math.max(vy0, 0);
-					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y >= ylo) { t = j; break; } }
-				} else {
-					const jumpNow = standing && s.jump_count < s.max_jumps;
-					let y = y0, v = jumpNow ? G.J : Math.min(vy0, 0);
-					for (let j = 1; j <= 4000; j++) { v = K1.axisStep(v, 0, G.mo, 0, 0, false); y += v; if (y < yhi) { t = j + (jumpNow ? 1 : 0) + (tg.cls === 'G' ? 1 : 0); break; } if (v > 0) break; }
-					// out of one jump's reach (stairs, re-jumps from landings): no tick rises more than |J| (the jump sets it,
-					// gravity only slows it): a looser bound, still one
-					if (!Number.isFinite(t)) t = Math.ceil((y0 - yhi) / Math.abs(G.J)) + (tg.cls === 'G' ? 1 : 0);
-				}
+				const t = tyOf(s, G, r, tg.cls === 'G');
 				if (t < ty) ty = t;
 			}
 		} else ty = 0;
@@ -731,11 +741,25 @@ function createSolver(L, opts = {}) {
 		if (s.max_jumps !== 1) return false;
 		const c0 = Math.max(0, (Math.floor(xlo) >> 4)), c1 = Math.min(W - 1, (Math.floor(xhi + 16) >> 4));
 		const r0 = Math.max(0, (Math.floor(ylo) >> 4)), r1 = Math.min(Hh - 1, (Math.floor(yhi + 16) >> 4));
-		const tiles = s.tiles;
+		// THE TILE TEST: a non-plain tile u inside the rectangle voids the bound only when the ball can reach it before
+		// tick b: the first tick the centre can be in u's column (txOf) and in its row (tyOf, no landing) are lower bounds
+		// on the first tick it is in u, valid up to the first non-plain tile a path enters (the plain regime holds until
+		// then); so min over those tiles of max(tx, ty) >= b means no path leaves the plain regime before b, and the bound
+		// holds for every input sequence
+		const tiles = s.tiles, I = K1.ia(ctx);
+		const txc = new Map(), tyr = new Map();
 		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
 			const id = tiles[cy * W + cx];
 			if ((flags[id] & F_SOLID) !== 0) continue;
-			if (!(id < plainId.length && plainId[id] === 1)) return false;
+			if (id < plainId.length && plainId[id] === 1) continue;
+			if (!certTiles) return false;
+			let ty = tyr.get(cy);
+			if (ty === undefined) { ty = tyOf(s, G, cy, false); tyr.set(cy, ty); }
+			if (ty >= b) continue;
+			let tx = txc.get(cx);
+			if (tx === undefined) { tx = txOf(s, I, cx); txc.set(cx, tx); }
+			if (tx >= b) continue;
+			return false;
 		}
 		return true;
 	}

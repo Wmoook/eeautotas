@@ -70,15 +70,15 @@ for (const [sname, snap] of starts) {
 ok(legsOk >= legsN - 3, `legs solved ${legsOk} / ${legsN}`);
 
 // ---------------------------------------------------------------- 2 THE BOUND'S ENGINE CHECK (random input words)
-{
+function boundCheck(Lx, Sx, startsX, name) {
 	const N = +(argv.samples || (argv.quick ? 12000 : 40000)), T = 90;
 	let seed = 12345;
 	const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
 	const MASKS = [0, 2, 4];
-	const sim = new E.EESim(L), inp = new E.EEInput();
-	const first = starts.map(() => new Map());
-	for (let si = 0; si < starts.length; si++) {
-		const snap = starts[si][1];
+	const sim = new E.EESim(Lx), inp = new E.EEInput();
+	const first = startsX.map(() => new Map());
+	for (let si = 0; si < startsX.length; si++) {
+		const snap = startsX[si][1];
 		for (let n = 0; n < N; n++) {
 			sim.restore(snap);
 			let m = MASKS[(rnd() * 3) | 0];
@@ -92,16 +92,36 @@ ok(legsOk >= legsN - 3, `legs solved ${legsOk} / ${legsN}`);
 		}
 	}
 	let checked = 0, bad = 0, provenN = 0, certN = 0;
-	for (let si = 0; si < starts.length; si++) {
+	for (let si = 0; si < startsX.length; si++) {
 		for (const [tile, tmin] of first[si]) {
-			const r = S.leg(starts[si][1], { tiles: [tile], cls: 'G' }, { Tmax: T, coupled: false, fields: false });
+			const r = Sx.leg(startsX[si][1], { tiles: [tile], cls: 'G' }, { Tmax: T, coupled: false, fields: false });
 			checked++;
 			if (r.cert) { certN++; if (r.lb > tmin) { bad++; console.log(`  BOUND ${r.lb} > a sample's ${tmin} (start ${si}, tile ${tile % W},${(tile / W) | 0})`); } }
 			if (r.proven) { provenN++; if (r.T > tmin) { bad++; console.log(`  PROVEN ${r.T} beaten by a sample's ${tmin} (start ${si}, tile ${tile % W},${(tile / W) | 0})`); } }
 		}
 	}
-	ok(bad === 0, `no sample below a certified bound or a proven leg (${checked} (start, tile) pairs, ${certN} certified, ${provenN} proven, ${N} words of ${T} ticks a start)`);
-	console.log(`  bound check: ${checked} pairs, certified ${certN}, proven ${provenN}, violations ${bad}`);
+	ok(bad === 0, `${name}: no sample below a certified bound or a proven leg (${checked} (start, tile) pairs, ${certN} certified, ${provenN} proven, ${N} words of ${T} ticks a start)`);
+	console.log(`  bound check (${name}): ${checked} pairs, certified ${certN}, proven ${provenN}, violations ${bad}`);
+	return { checked, certN, provenN, bad };
+}
+boundCheck(L, S, starts, 'the room');
+// the certificate's TILE TEST: the same room with boosts (16 px/tick: faster than any plain move) and a dot field in
+// the plain extremes' rectangle; a boost the ball can reach before the bound voids it, one it cannot does not, and no
+// random word may beat a certified bound
+{
+	const cells2 = cells.slice();
+	cells2.push([13, 15, 116], [33, 15, 114], [17, 15, 115], [24, 11, 4], [25, 11, 4]);
+	const L2 = E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'msolve2', width: W, height: H, cells: cells2 }))));
+	const s2 = new E.EESim(L2), i2 = new E.EEInput();
+	s2.reset();
+	for (let t = 0; t < 40; t++) { E.applyMask(i2, 0); s2.tick(i2); }
+	const at = (c, dx, vx) => { const s = new E.EESim(L2); s.restore(s2.snapshot()); s.px = 16 * c + dx; s.speed_x = vx; const q = new E.EEInput(); E.applyMask(q, 0); s.tick(q); return s.snapshot(); };
+	const starts2 = [['the spawn', s2.snapshot()], ['col 6 at rest', at(6, 0, 0)], ['col 28 at rest', at(29, 0, 0)]];
+	const S2 = MS.createSolver(L2, {});
+	const S2r = MS.createSolver(L2, { certTiles: false });
+	const a = boundCheck(L2, S2, starts2, 'boosts, the tile test');
+	const b = boundCheck(L2, S2r, starts2, 'boosts, the rectangle alone');
+	ok(a.certN >= b.certN, `the tile test certifies at least what the rectangle does (${a.certN} vs ${b.certN})`);
 }
 
 // ---------------------------------------------------------------- 3 the fan-out and a chain
