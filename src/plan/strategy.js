@@ -192,7 +192,7 @@ const ST_MIN_MS = 3000, ST_TRIES = 2;
 // (a stretch the child did not finish hands back its node of the least time to go (the backward model's), replayed here:
 // the relay start of that stretch's next executor rung when it has none (the executor's own closest replaces it at its
 // next rung, as a relay does); EEAT_ST_RELAY=0: off)
-const ST_RELAY = process.env.EEAT_ST_RELAY !== '0';
+const ST_RELAY = process.env.EEAT_ST_RELAY !== '0', ST_CHAIN = process.env.EEAT_ST_CHAIN !== '0';
 /** a relative deadline (a step's or a waypoint's beforeTickFrom): a number, or 'prev+N' (N ticks after the previous
  *  step's arrival, i.e. this anchor's arrival: a key's KEY_TICKS) -> ticks | NaN */
 function relOf(x) {
@@ -832,9 +832,22 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (!bestC || c.tries < bestC.tries || (c.tries === bestC.tries && (c.A.gain > bestC.A.gain || (c.A.gain === bestC.A.gain && (c.cost < bestC.cost || (c.cost === bestC.cost && c.seq < bestC.seq)))))) bestC = c;
 		}
 		if (!bestC) return;
-		const ms = Math.min(ST_MS * (1 << bestC.tries), room);
+		// (THE REST OF A SHORT PLAN: the anchor's plan through this stretch has at most ST_SHORT steps: its legs in order on
+		// one clock, ST_MS a leg, from its first arrival (the whole-level request's rule from the frontier); EEAT_ST_CHAIN=0: the
+		// stretch alone)
+		let legs = [{ step: bestC.step, wp: bestC.wp }];
+		if (ST_CHAIN && ST_SHORT > 1) {
+			let pl = null;
+			try { const p = planOfAnchor(bestC.A); pl = p && p.plans ? p.plans.find((x) => x.steps && x.steps[0] && edgeKey(x.steps[0]) === edgeKey(bestC.step)) : null; } catch (e) { pl = null; }
+			if (pl && pl.steps.length > 1 && pl.steps.length <= ST_SHORT) {
+				const more = [];
+				for (const st of pl.steps.slice(1)) { const wp = st.waypoint || { kind: 'trophy', label: 'trophy' }; if (!stOkWp(st, wp)) break; more.push({ step: st, wp }); }
+				legs = legs.concat(more);
+			}
+		}
+		const ms = Math.min(ST_MS * legs.length * (1 << bestC.tries), room);
 		const a = bestC.A.arrivals.reduce((m, x) => (x.tick < m.tick ? x : m), bestC.A.arrivals[0]);
-		stSend(bestC.A, a, [{ step: bestC.step, wp: bestC.wp }], ms, bestC);
+		stSend(bestC.A, a, legs, ms, bestC);
 	};
 
 	// ---- control: stdin lines
