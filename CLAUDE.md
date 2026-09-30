@@ -273,6 +273,7 @@ to see where it goes wrong. Coins that are only collected on the way (no coin do
 | `src/server.js` | web app + JSON API on 127.0.0.1:47823 (`--port=`, `--open`); resumes the last running job |
 | `src/app/index.html` | the page (single file, no build) |
 | `src/tas.js` | the CLI (`node src/tas.js help`) |
+| `src/compile.js`, `src/plan.js`, `src/plan/*.js`, `src/math/*.js` | **the compiler** (.eelvl -> a verified .eetas, no search, no GPU): section 11 |
 | `src/jobs.js` | job model shared by server and CLI: import (with the level check, `src/levelcheck.js`: meta.level.md5 / check / eeoCopy, `eeoCopy: true` = EEO's own copy of that campaign level instead of the file), start/stop (on Linux / macOS the grind leads its own process group, so a stop also ends its running stage), summary (with `remote`: the job's copy on a rented machine, `rentedMachines()`), try, where, replay, render, probe, focus |
 | `src/common.js` | `.eetas` bytes I/O, atomic writes, time parsing, level lookup, `replay()`, `evaluate()`, `judge()`, `deathCap(meta, deaths)` / `deathCapFor(runFile, deaths)` (judge's baseDeaths: Infinity unless the job's meta.json says `"deaths": "forbid"`) |
 | `src/render.js` | PNG renderer (canvas, 5x7 font, PNG encoder on zlib) |
@@ -386,7 +387,7 @@ benchmark.
 `probe <job> <t> "<inputs>" [--try]` | `try <job> <file.eetas>` | `focus <job> <from> <to> [seconds]` |
 `endgame <job> [K] [--seconds=60] [--cap=]` |
 `import <level.eelvl> <run.eetas> [--name=] [--start=reset|load] [--eeo-copy]` | `start <job> [--workers=N]` | `stop <job>` |
-`finish <job>`. (`node src/bench.js [--threads=N]` measures the engine speed; `node src/autotas.js <level.eelvl> [--minutes=30]`: the AutoTASer, a TAS from the level alone.)
+`finish <job>`. (`node src/bench.js [--threads=N]` measures the engine speed; `node src/autotas.js <level.eelvl> [--minutes=30]`: the AutoTASer, a TAS from the level alone; `node src/compile.js <level.eelvl> [--out=<file.eetas>] [--seconds=60]`: the compiler, section 11.)
 Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render and replay on another run),
 `--wait=<s>`, `--source=<text>`, `--workers=N`, `--scale=`, `--margin=`.
 
@@ -431,6 +432,9 @@ Options: `--json` (machine-readable output), `--file=<run.eetas>` (where, render
 | POST | `/api/editor/autotas` | `{eelvlB64, minutes (30), workers, name}`: the AutoTASer (`src/autotas.js`) in the background, one at a time; 400 with `problems` when the level is not ready |
 | GET | `/api/editor/autotas` | `running`, `state` (finding / optimizing / done), `job`, `best` (run ticks), `bestT` (s), `routes`, `handoff` {t, why}, `events` (the last 60: {t, ev, ...}), `t0` (its start, ms), `bests` [{t, runTicks, what}] (the job's base route and each faster best, the first and the newest 64); `POST .../stop` (Find a route stops, the job pauses) |
 | POST | `/api/editor/job` | `{eelvlB64, eetasB64, name, start, processor}`: `jobs.importJob` (start mode reset; one spawn) and optionally start (GPU when available) |
+| POST | `/api/editor/compile` | `{eelvlB64 (or level), seconds (60, at most 3600), workers, name, source}`: the compiler (`src/compile.js`, section 11) in its own process, one at a time; 400 with `problems` when the level is not ready, or while a compile runs |
+| GET | `/api/editor/compile` | `running`, `stage` (none / parse ... polish / done / no route / stopped / error), `stages` [{name, ms, text}], `detail`, `notes`, `result` {runTicks, time, ticks, deaths, chance, lb, lbTime, gap, gapPct, legs, provenLegs, known, lbProof}, `job` (the run made from the route: "<name> (compiled)"), `loadtas` (`/loadtas <its best.eetas>`), `message`, `started`, `elapsed`, `seconds` |
+| POST | `/api/editor/compile/stop` | stop the compile |
 
 ## 10. Scripting against the engine
 
@@ -450,3 +454,50 @@ const s = sim.snapshot();                   // restore(s) as often as you like; 
 const ev = C.evaluate(level, candidateMasks);          // null = does not finish; else {runTicks, deaths, chance, ms}
 C.writeEetas('src/out/idea.eetas', ev.ms);             // then: node src/tas.js try <job> src/out/idea.eetas
 ```
+
+## 11. The compiler (`node src/compile.js`: .eelvl -> .eetas, no search)
+
+A separate tool next to Find a route and the optimizer (branch n4-plan, merged 2026-09-30). The user's goal: "eelvl map data
+compiled into inputs", like code compiled into assembly: no search, no heatmap, no GPU burst, the optimal where the mathematics
+proves it, under a minute a level, every level. **Nothing of the search changes unless you use it**: none of main's modules
+require `src/plan/` or `src/math/`; the level editor's Compile button, `POST /api/editor/compile` and `EEAT_PLAN=1` are the only
+ways in.
+
+- **The pipeline** (the contract: `src/plan/types.js` CONTRACT v2; the loop: `src/plan/strategy.js` `compile(L, opts, emit)`):
+  parse -> **MODEL** (`model.js`: the level's triggers, the gates they open, `stateOf` / `levelOf` / `regionOf`) -> **BOUNDS**
+  (`bounds.js`: admissible tick fields; `src/math/lb.js`: the event-graph leg bound) -> **PLAN** (`planner.js` + `facts.js`: which
+  trigger next, to the trophy; CEGAR: a failed step becomes facts, then a new plan) -> **MOVES** (`executor.js`: the math tier
+  `msolve.js` / `src/math/fieldsolve.js` first, then the exact motion primitives `prims.js` / `navgraph.js` / `tables.js`, the exact
+  branch and bound over engine states `exact.js`, `legs.js`; worker threads `execworker.js`, `primworker.js`) -> **VERIFY** (the
+  engine replays the whole run: `common.js evaluate`) -> **POLISH** (`polish.js`) -> the .eetas and a report (run ticks, the lower
+  bound, the gap, per leg: ticks / bound / proven / tool).
+- **Its rules**: it never calls goexplore.js, bursts.js, heat.js or an eegpu tool; every piece it emits is masks the engine
+  replayed; general code only (no level names or coordinates); a leg is PROVEN OPTIMAL only when a certified bound equals its
+  ticks (the plain certificate, lb.js, or the exact search). The mathematics behind the moves: `docs/ee_math.md` and the
+  `src/plan/kin.js` / `src/math/*` / `msolve.js` rows of section 6.
+- **CLI**: `node src/compile.js <level.eelvl | level.json | job id> [--out=<file.eetas>] [--seconds=60] [--workers=N] [--json]
+  [--report=<file.json>] [--quiet] [--verbose] [--known=0] [--polish=0]`. It prints its stages with their times (parse, model,
+  bounds, plan, moves, verify, polish, result, wrote) and the eeo-tas line (`/loadtas <file>`, then `/reset` and `/playtas`).
+  `--out` defaults to `<level name>.eetas` next to the level (`src/out/compile/` for a job id); `--workers` defaults to the
+  threads - 1 (at most 8). Exit 0 = routed, the .eetas written and read back to the same finish; 2 = no route (the report says
+  why and where it stalled); 1 = an error (a watchdog thread ends a compile blocked past its hard limit).
+- **In the app**: the level editor's **Compile** button (POST / GET `/api/editor/compile`, section 9) runs the CLI in its own
+  process in `<data>/editor/compile/`, shows its stage lines, replays the route once more, makes a job `<name> (compiled)`
+  (watch it, optimize it like any run) and copies its `/loadtas` line. `src/plan.js` is the headless runner (JSON lines):
+  Find a route's OPT-IN strategy `plan` ("the planner (compile)", `EEAT_PLAN=1` or the solve body's `plan: true`; off = main's
+  strategies, arguments and events byte for byte).
+- **Where it stands** (the final compile, 2026-09-30, box 3, 60 s, `--workers=3`): **16 / 230 compile at 60 s** (campaign 9 / 203,
+  hard 7 / 25, Bad EE Level 9 and Cold World 0 / 2), **24 / 230 at <= 180 s**; the same code's 60-s runs 13-17 (the run-to-run
+  spread); every .eetas replayed from the level alone; median ticks / best known 1.26, a few at or under the best known
+  (Desolate Caverns 1,619 vs 1,700, My level 730c 98 vs 101, Switch Labyrinth 27 = 27). Every compile spends its budget. THE
+  GOAL (all 230, < 1 min) IS NOT REACHED: the MOVES stage is the wall (long legs through fields, arrivals: from the known route's
+  own state at the previous trigger 31 of 78 stuck legs are found, `tools/cmp/krt.js`). The chief's records: `src/out/n4plan/`
+  (`FINAL.md`, `brief.md`; gitignored).
+- **Checks**: unit tests `test/plantypes.js`, `planmodel.js`, `planplanner.js`, `planbounds.js`, `planprims.js`,
+  `planexec.js --only=unit,fail`, `planstrategy.js`, `plancompile.js` (the CLI and the Compile API with the mock parts
+  `test/planmock.js`), `plantruth.js`, `msolve.js --quick`, `kin.js --quick`, `mathsep.js`. The truth checkers on the known routes
+  (`src/plan/truthset.js`; a worktree sets `EEAT_TRUTH_ROOT` to a checkout with `src/jobs` / `src/out`): T-MODEL-EXACT
+  `tools/n4u/modelexact.js`, T-PLAN-ORACLE `test/planoracle.js`, T-LB-ADMISSIBLE `test/planbounds.js --truth`. A full compile:
+  `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
+  (classes), `tools/cmp/verify.js` (every .eetas replayed from the level file) and `tools/cmp/gate.js` (no level worse than a
+  baseline on a gate list). Levels and routes of third parties never go into git.
