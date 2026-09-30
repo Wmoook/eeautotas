@@ -61,6 +61,9 @@ const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worke
 // EEAT_WORKER_KEEP=0: the old rule, a late worker terminated and replaced at once)
 const WORKER_HANG_MS = +process.env.EEAT_WORKER_HANG_MS || 30000;
 const WORKER_KEEP = process.env.EEAT_WORKER_KEEP !== '0';
+// the primitives tier's share of a reach window (rung 0 / rung 1 on; env: measurements)
+const PRIMS_SHARE = process.env.EEAT_PRIMS_SHARE !== undefined ? +process.env.EEAT_PRIMS_SHARE : 0.5;
+const PRIMS_SHARE_HI = process.env.EEAT_PRIMS_SHARE_HI !== undefined ? +process.env.EEAT_PRIMS_SHARE_HI : 0.2;
 const REPLAY_CACHE = 64;
 const K_DEFAULT = 4;
 // the best-first search's cells after one that ran out of open states: finer vy, then everything 2x, then 4x
@@ -368,7 +371,11 @@ function makeCore(L, co) {
 		if (co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
 			const t1 = Date.now();
 			try {
-				const pEnd = t1 + 0.5 * (wEnd - t1);
+				// (the primitives' share of the window: PRIMS_SHARE at rung 0, PRIMS_SHARE_HI from rung 1 on: a leg the primitives
+				// did not find at rung 0 is mostly one their moves do not cover, and there they spent half of every rung while the
+				// best-first finder needed it: Late christmas' first coin (26,44), 15 s, in-process: the primitives 7.4 s and the
+				// finder's 6 s no leg, the primitives 0.7 s and the finder 10 s a 245-tick leg)
+				const pEnd = t1 + (rung >= 1 ? PRIMS_SHARE_HI : PRIMS_SHARE) * (wEnd - t1);
 				const arr = live.map((s) => { sim.restore(s.snap); return T.arrivalOf(L, sim, s.masks, null); });
 				// (beforeTick: this file's -1 is 'none'; the primitives' is undefined: -1 there pruned every child, so the
 				// primitives tier never found a leg in a compile)
