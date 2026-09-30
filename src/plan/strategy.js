@@ -90,6 +90,23 @@ const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
 const FALLBACK_MAX = 6;
 const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by another trigger: an anchor of its own, addArrival)
+// THE RUNG BREADTH (doctor 5, n5; OPT-IN EEAT_RUNG_BREADTH=1, off = the job pick as before): an anchor's plans are run in
+// the order of their first step's RUNG, then the planner's order (iterative deepening over the offered first legs), not in
+// the planner's cost order alone. The planner re-offers a failed first leg at its next rung with the same cost, so the
+// cost order ran the cheapest plans' first legs depth first (1.5 -> 5 -> 15 -> 45 s windows) while the plans behind them,
+// untried, waited for the whole budget: box 5, 60 s, --workers 2 (src/out/n5/doctor/batch5.md): Unforgiving Climb spent
+// all 60 s on 'trophy' and 'green key (165,16)' (rungs 0-3, closest 53-167 tiles; the third plan 'blue coin (172,47)'
+// got its rung 0 at 59.9 s), The way of the north 39 s of worker time on 'trophy' / 'coin (367,7)' (closest 266-381 tiles)
+// before its third-plan route's first coin (6,29), found at rung 0 in 1.1 s, Stupid Fox 39 s on 'trophy' / 'coin
+// (128,114)' (closest 429-561 tiles). The planner's near plans (nearPlans) fire only once EVERY plan's first leg has
+// failed a rung, which the untried third plan blocked. Ordering only: the same plans, the same rungs and budgets.
+const RUNG_BREADTH = () => process.env.EEAT_RUNG_BREADTH === '1';
+/** the plans in their first step's rung order (stable: the planner's order among equal rungs) */
+function breadthOrder(plans) {
+	if (!RUNG_BREADTH() || plans.length < 2) return plans;
+	const r0 = (p) => (p.steps && p.steps[0] ? p.steps[0].rung | 0 : 0);
+	return plans.map((p, i) => ({ p, i, r: r0(p) })).sort((a, b) => (a.r - b.r) || (a.i - b.i)).map((x) => x.p);
+}
 // (the arrivals' replay: a death in the leg's start prefix is a move of the route, not the leg's (deaths are moves: the
 // acceptance rule takes them); before, every arrival after a die step (or any death) was dropped by its own replay:
 // 'the goal test never holds' / 'a trophy arrival that does not finish'. EEAT_PREFIX_DEATH=0: as before)
@@ -651,7 +668,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (left() < 200 || stopped) return null;
 			const { plans, why } = planOfAnchor(A);
 			if (!plans.length) { if (!budgetCut(A, why)) { A.exhausted = true; A.why = why || 'exhausted'; } continue; }
-			for (const plan of plans) {
+			for (const plan of breadthOrder(plans)) {
 				const step = plan.steps[0];
 				const ek = edgeKey(step);
 				if (inflight.has(ek) || localBlock.has(`${A.key}|${ek}`)) continue;

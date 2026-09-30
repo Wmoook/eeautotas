@@ -523,10 +523,39 @@ function crumbsUnit() {
 	}
 }
 
+/** THE FAR NEAR PLAN (planner.js nearPlans, EEAT_NEAR_FAR): the trophy 3 tiles from the spawn (a small lb: the false near's
+ *  shape) and a red key (its door by the right wall) 7 tiles back: after the trophy's first leg fails, no trigger is nearer
+ *  by the lb, so no near plan; with EEAT_NEAR_FAR=1 the key is offered as a one-step near plan at rung 0 */
+function nearFar() {
+	const { level } = require('./planmodel.js');
+	const L = level([
+		'################',
+		'#k......S..T..d#',
+		'################',
+	], { k: [6], d: [23] });
+	const run = (on) => {
+		if (on) process.env.EEAT_NEAR_FAR = '1'; else delete process.env.EEAT_NEAR_FAR;
+		const m = M.compileModel(L), facts = F.createFacts({ rungs: 4 }), pl = P.createPlanner(m, facts, {});
+		const p0 = pl.plan({}, { k: 1 });
+		const s0 = p0[0] && p0[0].steps[0];
+		if (s0) pl.learn(s0, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: 0 } }, {});
+		const p1 = pl.plan({}, { k: 1 });
+		delete process.env.EEAT_NEAR_FAR;
+		return { p0, p1, s0 };
+	};
+	const off = run(false), on = run(true);
+	const str = (ps) => ps.map((p) => `${p.near ? 'NEAR ' : ''}${p.steps.map((s) => `${s.waypoint.label}[r${s.rung}]`).join(' -> ')}`).join(' | ');
+	check('P-NEARFAR: the first plan is the trophy alone (the false near: its lb below the key\'s)', !!off.s0 && off.s0.waypoint.kind === 'trophy', str(off.p0));
+	check('P-NEARFAR off: after the trophy\'s rung 0 failed, no near plan (no trigger nearer by the lb): the trophy at rung 1', off.p1.length >= 1 && !off.p1.some((p) => p.near) && off.p1[0].steps[0].waypoint.kind === 'trophy' && off.p1[0].steps[0].rung === 1, str(off.p1));
+	check('P-NEARFAR on: the key offered first as a one-step near plan at rung 0, the trophy\'s plan after it (ordering only)',
+		on.p1.length >= 2 && on.p1[0].near && on.p1[0].steps.length === 1 && on.p1[0].steps[0].waypoint.kind === 'trigger' && on.p1[0].steps[0].rung === 0 && on.p1.some((p) => !p.near && p.steps[0].waypoint.kind === 'trophy'), str(on.p1));
+}
+
 if (require.main === module) {
 	units();
 	cegar();
 	crumbsUnit();
+	nearFar();
 	if (process.argv.includes('--truth')) truth();
 	if (process.argv.includes('--scale')) scale();
 	console.log(`${pass}/${pass + fail}`);
