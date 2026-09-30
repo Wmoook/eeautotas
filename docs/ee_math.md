@@ -1227,6 +1227,16 @@ as before. Measured (the same bench, both arms of one tree side by side, `EEAT_M
 
 0 lost, 0 rejected. From the first version's 340 the class's solved legs are 670 (the twin cut + F2; the tree's other changes 415 -> 420). The failures
 spend the whole 150 k ticks again (the family is larger than the budget): more speed is more legs.
+The shared gate with F2 (box 3, n4-plan dc075b4 + F2, the block-4 list vs b3_w3.json, 60 s, W3, par 6): **exit 0**,
+compiled 14 vs 12, better 9, worse 0 (progress MIHB's Dream 32 vs 23, Level 1 Overworld 41 vs 34, Booty Return 36 vs 13,
+Starlight 29 vs 19; Ruins 1,387 vs 1,444, Accident Prone 3,129 vs 3,422), 14 / 14 replayed; test/msolve.js 50/0 on
+both branches. The field class (lane 3's 18 + Accident Prone, The Blank Page; 60 s, W3, the twin cut + F2 vs
+`EEAT_MATH_TWIN=0 EEAT_MATH_F2=0` side by side on one tree): compiled 3 vs 4, better 6 (progress Level 1 Overworld 45 vs
+42, Treasure Trove Cove 4 vs 0, Frostbitten 10 vs 8, Starlight 27 vs 20; Bygone Tutorial 2,027 vs 2,060, Accident Prone
+3,243 vs 3,338), worse 1: Pinball Bloom, a two-way level (the same leg at tick 1,024 fails on 'budget' or passes):
+rerun side by side the base compiles it 3 of 5, the twin cut alone 1 of 2, the twin cut + F2 0 of 3. WATCH it: a
+failing leg now spends its whole coupled budget (the median failing leg 209 vs 144 ms on the bench), wall time the
+executor's other tiers lose; the next step is F2 on a share of the leg's clock.
 
 **THEOREM V (the axis speed bounds) and its engine check.** Away from the tiles that can push an axis past its bound
 (x: a pull on x = the left / right arrows, an x boost; y: a y boost, ice (its glide keeps more speed on y), levitation;
