@@ -340,8 +340,8 @@ function legBest(L, starts, goal, o) {
 	// (the finisher: the NK states nearest the goal by the field (at most 2 a tile, within FIN_D tiles) kept with their
 	// snapshots; at FIN_F of the time with no leg found, the exact search from them (solveExact over absolute ticks: the
 	// fastest way on from every one of them at once) takes the rest: a precise last approach the cells merge away, a
-	// 1-tile pocket; EEAT_FINISH=0 off)
-	const FIN = process.env.EEAT_FINISH !== '0' && !o.noFinish && deadline < Infinity;
+	// 1-tile pocket; OPT-IN EEAT_FINISH=1: T-EXEC-LEGS, box 3, 3 s: 75.8% with it vs 78.1% without, 6 legs lost, none gained)
+	const FIN = process.env.EEAT_FINISH === '1' && !o.noFinish && deadline < Infinity;
 	const FIN_D = +process.env.EEAT_FIN_D || 6, FIN_F = +process.env.EEAT_FIN_F || 0.75, NK = 24;
 	const near = [];
 	const finAt = FIN ? tStart + FIN_F * (deadline - tStart) : Infinity;
