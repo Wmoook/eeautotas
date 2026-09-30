@@ -14,6 +14,8 @@
 //   0. the proof pre-check: the RCH3 field of the level as the doors stand at each start (types.js levelNow + goalField,
 //      physics mode only) -1 at EVERY start = a proof that the goal cannot be reached while the doors stay as they are
 //      (fail 'proof', blockedBy = the shut gates the all-open field's way crosses);
+//   0b. (OPT-IN, EEAT_NEAR=1) the exact end search: solveExact from a near start alone (the relay) and from this call's
+//      own nearest state and its ancestors (tier 0b below: measured, no gain on the near-miss levels);
 //   1. the primitives (opts.prims: prims.route) when given;
 //   2. EXACT (exact.js solveExact): the breadth-first branch and bound over absolute ticks from every start (exact dedup,
 //      the admissible bound, deaths dropped unless wp.allowDeath, the -1 cut, the monotone counter cut, a jump that
@@ -45,6 +47,14 @@ const LG = require('./legs.js');
 
 const X_NEAR = +process.env.EEAT_X_NEAR || 40;   // ticks: the exact tier's full share only where the goal can be this near
 const X_SHARE_NEAR = +process.env.EEAT_X_SHARE_NEAR || 0.35, X_SHARE_FAR = +process.env.EEAT_X_SHARE_FAR || 0.12;   // (env: measurements)
+// the exact end search (tier 0b, OPT-IN: EEAT_NEAR=1): starts within NEAR_T tiles of the goal (the goal field's unit,
+// the FailReport's), its share NEAR_F of the window, the NEAR_STARTS nearest, each from its own state and NEAR_BACK ticks
+// back, NEAR_CAP open states a layer (env: measurements)
+const NEAR_ON = () => process.env.EEAT_NEAR === '1';
+const ORD_FORCED = () => process.env.EEAT_ORD_FORCED === '1';   // (a measurement: the finders' ordering field, tier 3)
+const NEAR_T = +process.env.EEAT_NEAR_T || 6, NEAR_F = +process.env.EEAT_NEAR_F || 0.35, NEAR_STARTS = 2, NEAR_CAP = 200000;
+const NEAR_RES = process.env.EEAT_NEAR_RES !== undefined ? +process.env.EEAT_NEAR_RES : 0.12;   // the finders' window kept for it
+const NEAR_BACK = (process.env.EEAT_NEAR_BACK || '0,10,24').split(',').map(Number).filter((x) => x >= 0);
 const VERIFY_MARGIN_MS = 60;    // the worker's clock ends this much before the deadline (this thread's replays)
 const WATCHDOG_MS = 150;        // past the deadline + this, an unanswered worker call is answered 'budget'
 // (the late worker keeps its slot and its memos until it answers; replaced only when silent this long past the deadline;
@@ -93,6 +103,20 @@ function makeCore(L, co) {
 		cache.set(str, e);
 		if (cache.size > REPLAY_CACHE) cache.delete(cache.keys().next().value);
 		return e;
+	}
+	/** an ordering goal field (no proof: reach.js portalForced + oneWayEntry) of the level as the doors stand at start s */
+	const ordMemo = new Map();
+	function ordFieldOf(s, goal, allowDeath) {
+		sim.restore(s.snap);
+		const Lc = T.levelNow(L, sim);
+		const tiles = T.fieldTilesOf(goal);
+		const key = `${T.fgHash(Lc.fg)}|${Array.from(tiles).sort((a, b) => a - b).join(',')}|${allowDeath ? 1 : 0}`;
+		let f = ordMemo.get(key);
+		if (f) return f;
+		f = RF.reachField(Lc, { goals: Array.from(tiles, (t) => ({ tile: t, cost: 0 })), deaths: !!allowDeath, portalForced: true, oneWayEntry: true });
+		ordMemo.set(key, f);
+		if (ordMemo.size > 8) ordMemo.delete(ordMemo.keys().next().value);
+		return f;
 	}
 	/** the goal field of the level as the doors stand in the state now in sim (memoized in types.js) */
 	function fieldNow(goal, allowDeath) {
@@ -176,6 +200,76 @@ function makeCore(L, co) {
 			if (!(dist >= 0) || tail === null || sIdx < 0) return;
 			if (closest.dist < 0 || dist < closest.dist) closest = { dist, masks: T.concat(starts[sIdx].masks, tail) };
 		};
+		// -------- tier 0b: THE EXACT END SEARCH from a NEAR state (within NEAR_T tiles of the goal by the goal field): a later
+		// start (the strategy's relay: the last rung's nearest state) and, after the primitives and the exact tier, this
+		// call's own nearest state; each alone and a few of its own ancestors (its masks cut NEAR_BACK ticks back: a near
+		// state is often past its window, a coin passed, a gap overshot), the exact search (solveExact: every input tick by
+		// tick, exact dedup, the admissible bound) from THAT state's own tick. The exact tier runs from every start at once
+		// over absolute ticks from the earliest: a near start 300 ticks later enters only after 300 layers of the anchor's
+		// states (it never got there), and nothing searched on from the finders' nearest state: Pancake Quest's coin legs
+		// ended "closest 0" with the ball ON the coin's tile, the coin taken by the next tick's touch (lane 4 block 2). Not a
+		// proof (a subset of the starts' futures): found = the finders' kind ('leg': the tightening and the exact bounded
+		// search below run on it). OPT-IN (EEAT_NEAR=1; off = the code before, byte for byte): lane 4 block 2 (box 3, the 18
+		// near-miss levels of b1, 60 s, --workers=3) ran it 91 times and it found 1 leg (Booty Return); gain sum 45 vs 48 /
+		// 48 / 51 off (the 12% reserve of the finders' window costs more than it finds): those "near misses" are FALSE nears
+		// of the goal field (Level 1 Overworld's coin (186,45) 1.4 tiles from a ball IN the portal column (187,42..45) that
+		// teleports it; Two's coin (125,190) under an up boost, reached only from the shaft beside it; Katwalk's trophy 2
+		// tiles through walls), not windows an exact search closes.
+		const nearJobs = (strs) => {
+			const jobs = [], seenJ = new Set();
+			for (const s0 of strs) {
+				for (const back of NEAR_BACK) {
+					const len = s0.length - back;
+					// (the base: the latest start this prefix extends; none, or a start itself when back > 0: skipped)
+					let j = -1;
+					for (let q = 0; q < starts.length; q++) if (starts[q].tick <= len && (j < 0 || starts[q].tick > starts[j].tick) && s0.startsWith(starts[q].str)) j = q;
+					if (j < 0 || (back > 0 && starts[j].tick === len)) continue;
+					const str = s0.slice(0, len);
+					if (seenJ.has(str)) continue;
+					seenJ.add(str);
+					jobs.push({ str, base: j, w: back === 0 ? 2 : 1 });
+				}
+			}
+			return jobs;
+		};
+		const nearEnd = (jobs, nEnd, what, nearest) => {
+			const tN = Date.now();
+			const wSum = jobs.reduce((a, x) => a + x.w, 0);
+			let nFound = null, nRuns = 0;
+			for (const jb of jobs) {
+				const now = Date.now();
+				if (now >= nEnd - 5 || stopFn()) break;
+				const e = startOf(jb.str);
+				if (e.dead) continue;
+				sim.restore(e.snap);
+				if (X.goalAt(goal, sim, e.tick, beforeTick)) { const b = starts[jb.base]; nFound = [{ start: jb.base, tail: e.masks.slice(b.tick), depth: e.tick - t0 }]; break; }
+				const f = fields.get(e.disc);
+				const jEnd = Math.min(nEnd, now + (nEnd - tN) * jb.w / wSum);
+				const r = X.solveExact(L, [{ snap: e.snap, tick: e.tick }], goal, { sim, allowDeath: false, beforeTick, bounds: co.bounds || null, field: f && f.mode !== 'walk' ? f : null, discKey: X.discKey, disc0: e.disc, stop: stopFn, cap: NEAR_CAP, deadline: jEnd });
+				nRuns++;
+				sims += sumTicks(r);
+				if (r.status === 'found' && r.goals && r.goals.length) {
+					const b = starts[jb.base], pre = e.masks.subarray(b.tick);
+					nFound = r.goals.map((g) => ({ start: jb.base, tail: T.concat(pre, g.tail), depth: e.tick - t0 + g.tail.length }));
+					break;
+				}
+			}
+			tiers.push({ tier: 'near', what, ms: Date.now() - tN, runs: nRuns, jobs: jobs.length, ok: !!nFound, nearest });
+			if (!nFound) return null;
+			const r = finishFound(nFound, 'leg', null, 0, false);
+			if (r) delete r.arrivalsRaw;
+			return r;
+		};
+		const nearOn = NEAR_ON() && !allowDeath;
+		if (nearOn && Date.now() < wEnd - 50) {
+			const near = [];
+			starts.forEach((s, i) => { const c = startCost[i]; if (s.tick > t0 && !s.dead && c >= 0 && c <= NEAR_T) near.push(i); });
+			near.sort((a, b) => startCost[a] - startCost[b] || starts[b].tick - starts[a].tick);
+			if (near.length) {
+				const r = nearEnd(nearJobs(near.slice(0, NEAR_STARTS).map((i) => starts[i].str)), Date.now() + NEAR_F * (wEnd - Date.now()), 'start', startCost[near[0]]);
+				if (r) return out(r);
+			}
+		}
 		// -------- tier 1: the primitives
 		if (co.prims && typeof co.prims.route === 'function' && Date.now() < wEnd) {
 			const t1 = Date.now();
@@ -232,22 +326,33 @@ function makeCore(L, co) {
 				if (r.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
 			}
 		}
+		// -------- tier 0b again: the exact end search from this call's own nearest state (the primitives' or the exact tier's)
+		if (nearOn && !found && !exactProof && closest.masks && closest.dist >= 0 && closest.dist <= NEAR_T && Date.now() < wEnd - 50) {
+			const r = nearEnd(nearJobs([T.strOf(closest.masks)]), Date.now() + NEAR_F * (wEnd - Date.now()), 'closest', closest.dist);
+			if (r) return out(r);
+		}
 		// -------- tier 3: the fine-cell leg search
 		if (!found && !exactProof && Date.now() < wEnd - 5) {
 			// (the finders: the best-first search dives (the first leg, soonest), then the time-layered beam bounded by it
 			// (a faster leg of the same kind); LEG_MODE 'beam' / 'best' (env EEAT_EXEC_LEG) for measurements)
 			const region = regionOf(field0, starts, goal);
+			// (EEAT_ORD_FORCED=1, a measurement: the best-first finder's field is an ORDERING field that is no proof, the
+			// steer's options: portalForced (a portal tile with exits is left only through them) and oneWayEntry; with
+			// EEAT_LEG_BF=0 it orders the search, else only its distances. The -1 cuts keep field0.)
+			const fOrd = ORD_FORCED() && field0 && field0.mode !== 'walk' ? ordFieldOf(starts[0], goal, allowDeath) : null;
 			const depthMax = beforeTick >= 0 ? beforeTick - t0 : 4000;
 			const runBeam = (end, dmax) => LG.legBFS(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null,
 				width0: 300, widthMax: 80000, depthMax: dmax, stall: 150 + 100 * rung });
 			const cell0 = process.env.EEAT_BEST_CELL ? process.env.EEAT_BEST_CELL.split(',').map(Number) : null;
-			const runBest = (end, cell) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: cell || cell0 });
+			const runBest = (end, cell) => LG.legBest(L, snaps, goal, { sim, deadline: end, stop: stopFn, allowDeath, beforeTick, field: fOrd || field0, region, bounds: co.bounds || null, depthMax, w: +process.env.EEAT_BEST_W || 0, cell: cell || cell0 });
 			const mode = LEG_MODE();
 			const t3 = Date.now();
 			// (EEAT_BEST_PORT=<f>: the first cells get that share of the window, then the next grain of the ladder the rest (a
 			// measurement knob: a portfolio of grains instead of one)
 			const port = +process.env.EEAT_BEST_PORT || 0;
-			let r = mode === 'beam' ? runBeam(wEnd - 3, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : wEnd - 3) : t3 + 0.7 * (wEnd - t3));
+			// (the finders end NEAR_RES of the window early: the exact end search from their nearest state gets it, below)
+			const bEnd = nearOn ? wEnd - 3 - NEAR_RES * (wEnd - t3) : wEnd - 3;
+			let r = mode === 'beam' ? runBeam(bEnd, depthMax) : runBest(mode === 'best' ? (port > 0 && port < 1 ? t3 + port * (wEnd - t3) : bEnd) : t3 + 0.7 * (wEnd - t3));
 			sims += r.sims;
 			tiers.push({ tier: mode === 'beam' ? 'leg' : 'best', ms: Date.now() - t3, status: r.status, passes: r.passes });
 			// (the refinement ladder: a best-first search that ran out of open states (its cells closed every way: the first
@@ -257,7 +362,7 @@ function makeCore(L, co) {
 					if (!(r.status === 'exhausted' || (port > 0 && r.status === 'time')) || Date.now() >= wEnd - 20) break;
 					if (r.closest && r.closest.tail) noteClosest(r.closest.dist, r.closest.start, r.closest.tail);
 					const t7 = Date.now();
-					r = runBest(wEnd - 3, cell);
+					r = runBest(bEnd, cell);
 					sims += r.sims;
 					tiers.push({ tier: 'best', ms: Date.now() - t7, status: r.status, passes: r.passes, cell });
 				}
@@ -303,6 +408,11 @@ function makeCore(L, co) {
 				if (r.status === 'time' || r.status === 'depth') legTime = true;
 				if (r.status === 'stopped') return out(failResult('stopped', closest, 'stopped', rung, starts, goal, { deadline }));
 			}
+		}
+		// -------- tier 0b a third time: the exact end search from the finders' nearest state, in the window they left
+		if (nearOn && !found && !exactProof && closest.masks && closest.dist >= 0 && closest.dist <= NEAR_T && Date.now() < wEnd - 30) {
+			const r = nearEnd(nearJobs([T.strOf(closest.masks)]), wEnd - 5, 'late', closest.dist);
+			if (r) return out(r);
 		}
 		// -------- the leg found made shorter: polish.js polishLeg (exact windows from its end back: the waypoint sooner, the
 		// leg's own state region sooner, exact rejoins; every change replayed from the start)

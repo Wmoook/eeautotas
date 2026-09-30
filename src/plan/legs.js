@@ -588,10 +588,15 @@ function legBest(L, starts, goal, o) {
 	return res(why);
 }
 
-/** the primitives' relaxed tick field for this goal (bounds.js field(tiles, null, {touch})), or null (o.fieldTime false,
- *  no bounds, an error): the finders' time estimate when given (wall-aware, the level's top speeds per axis) */
+/** the primitives' relaxed tick field for this goal (bounds.js field(tiles, null, {touch})), or null (no bounds, an
+ *  error, or not asked): the finders' time estimate when asked (wall-aware, the level's top speeds per axis). OPT-IN
+ *  since lane 4 block 2 (EEAT_LEG_BF=1): the admissible tick field is a weak ranking (the bound is a median 0.145 of the
+ *  real ticks, the walls its only physics), and the finders ranked by it stalled at the goal field's false nears; ranked
+ *  by the goal field's physics (the distance at the running pace) the 18 near-miss levels of the full compile b1 (box 3,
+ *  60 s, --workers=3, one run each) reached 67 triggers vs 48 / 48 / 51 (Starlight 13 vs 0-2, Level 1 Overworld 13 vs 7,
+ *  Delusion Valley 2 vs 0, LoZ Skyward Sword 3 vs 2; Booty Return 11 vs 10-13, Pancake Quest 4 vs 5-6) */
 function boundsFieldOf(bounds, goal) {
-	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function' || process.env.EEAT_LEG_BF === '0') return null;
+	if (!bounds || typeof bounds.field !== 'function' || typeof bounds.at !== 'function' || process.env.EEAT_LEG_BF !== '1') return null;
 	try { return bounds.field(T.fieldTilesOf(goal), null, { touch: T.fieldTouchOf(goal) }); } catch (e) { return null; }
 }
 function bfTime(f, bounds, sim) {

@@ -751,6 +751,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		const rec = { ev: 'step', n: steps, anchor: A.id, label: labelOf(step), edge: step.edge, nodeClass: step.nodeClass, rung: step.rung, epoch, tool: res.tool || null, ok: !!res.ok, ms, budgetMs: Math.round(budget.ms),
 			why: res.ok ? '' : (fail && fail.why) || '', arrivals: arr.length, news, routes: routes.length };
 		if (fail && fail.closest) rec.closest = { tile: fail.closest.tile, dist: fail.closest.dist };
+		// (the executor's exact end search from a near start, when it ran: tier 0b)
+		const nearT = Array.isArray(res.tiers) ? res.tiers.find((x) => x && x.tier === 'near') : null;
+		if (nearT) rec.near = { ok: nearT.ok, runs: nearT.runs, ms: nearT.ms, nearest: nearT.nearest };
+		// (EEAT_STEP_CLOSEST=1: the closest state's inputs too, for the near-miss diagnoses)
+		if (fail && fail.closest && fail.closest.masks && process.env.EEAT_STEP_CLOSEST === '1') rec.closest.inputs = typeof fail.closest.masks === 'string' ? fail.closest.masks : T.strOf(fail.closest.masks);
 		if (fail && Array.isArray(fail.blockedBy) && fail.blockedBy.length) rec.blockedBy = fail.blockedBy.slice(0, 4);
 		say(rec);
 		lastSteps.push({ n: steps, label: rec.label, rung: step.rung, ok: rec.ok, why: rec.why, ms, anchor: A.id });
