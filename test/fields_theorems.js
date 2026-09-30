@@ -181,7 +181,7 @@ function testF2() {
 		axes.push({ name: `${ctx.c}${Object.keys(ctx.fx).length ? JSON.stringify(ctx.fx) : ''}.x`, A: c.x });
 		axes.push({ name: `${ctx.c}${Object.keys(ctx.fx).length ? JSON.stringify(ctx.fx) : ''}.y`, A: c.y });
 	}
-	const V = speedSet(axes.map((a) => a.A), QUICK ? 3 : 5, QUICK ? 20000 : 300000);
+	const V = speedSet(axes.map((a) => a.A), QUICK ? 3 : 6, QUICK ? 20000 : 80000);
 	// the canonical signature of a recurrence: its values on V under the 3 inputs (a mirror maps input 1 <-> 2, negates)
 	const same = (A, Bc) => { for (const v of V) for (let i = 0; i < 3; i++) if (F.vStep(v, i, A) !== F.vStep(v, i, Bc)) return false; return true; };
 	const mir = (A, Bc) => { const M = [0, 2, 1]; for (const v of V) for (let i = 0; i < 3; i++) { const a = F.vStep(-v, M[i], Bc), b = -F.vStep(v, i, A); if (a !== b) return false; } return true; };
