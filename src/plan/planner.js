@@ -457,6 +457,17 @@ function createPlanner(model, facts, o = {}) {
 	// those moves x the pace), a target the pass never reaches PHYS_CUT_TILES x the pace: a price only, never a drop (the
 	// transit tables are no proof). Off = the planner byte for byte as before.
 	const PHYS_EST = process.env.EEAT_PHYS_EST === '1';
+	// THE PROGRESS RULE FOR THE CEGAR WALLS (OPT-IN EEAT_CUT_PROG=1; n5 doctor 'cold'): learn() walls a failed step's closest
+	// approach (its 3 x 3 in the est walk, and a cut of the est path just past it) at its second rung, as a counterexample
+	// to the relaxation's way. A BUDGET failure of a long leg is often no counterexample: the leg ran out of time early on
+	// its true way, and the wall then cuts that way. Cold World: the chapter-2 blue coin's rung-1 leg (5 s) ended at the
+	// chapter-2 portal exit (158,229), 13 est steps of the 78 from the spawn; the wall there cut chapter 2 off the est walk
+	// and the planner turned to the pool / trophy-room targets for the rest of the compile. With the rule a budget failure
+	// walls nothing unless its closest approach is at least CUT_PROG_F of the est walk's way from the anchor to the
+	// waypoint (the leg went most of the way and stalled: the false-near shape the walls are for); 'exhausted' as before.
+	// Off = the planner byte for byte as before.
+	const CUT_PROG = process.env.EEAT_CUT_PROG === '1';
+	const CUT_PROG_F = +process.env.EEAT_CUT_PROG_F > 0 ? +process.env.EEAT_CUT_PROG_F : 0.5;
 	const PHYS_CUT_TILES = 2000, PHYS_MAX_STATES = 4e6, PHYS_MEMO = 16;
 	const physMemo = new Map();
 	let RFm = null;
@@ -880,6 +891,7 @@ function createPlanner(model, facts, o = {}) {
 		for (const fct of facts.list()) {
 			if (fct.kind === 'fail' && fct.cut) for (const j of fct.cut) { if (!mask) mask = new Uint8Array(model.N); if (!mask[j]) { mask[j] = 1; n++; } }
 			if (fct.kind !== 'fail' || !fct.closest || fct.closest.tile === undefined || fct.closest.tile === null) continue;
+			if (fct.noWall) continue;   // (CUT_PROG: a budget failure that made too little progress walls nothing)
 			if (!((fct.rung | 0) >= 1 || fct.why === 'exhausted')) continue;
 			const t = fct.closest.tile, x = t % W, y = (t / W) | 0;
 			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -1091,12 +1103,19 @@ function createPlanner(model, facts, o = {}) {
 		const rung = facts.rungOf(edge, cls);
 		// (the est walk's path to the waypoint, cut just past the point nearest the closest approach: the next plans'
 		// est walk goes another way there, CEGAR's generalization over every edge through that corridor)
-		let cut = null;
-		if (a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
+		let cut = null, noWall = false;
+		if (CUT_PROG && a && fail.why !== 'exhausted' && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null) {
+			// (THE PROGRESS RULE: a budget failure whose closest approach is less than CUT_PROG_F of the est walk's way from
+			// the anchor to the waypoint is no counterexample: see CUT_PROG)
+			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
+			const dC = model.pairSteps(a.S, a.pos, [fail.closest.tile], 'est', a.base), dT = model.pairSteps(a.S, a.pos, tiles, 'est', a.base);
+			if (dT > 0 && dT < INF && !(dC >= CUT_PROG_F * dT)) { noWall = true; ST.cutSkipped = (ST.cutSkipped || 0) + 1; }
+		}
+		if (!noWall && a && fail.closest && fail.closest.tile !== undefined && fail.closest.tile !== null && (rung + 1 >= 2 || fail.why === 'exhausted')) {
 			const tiles = step.waypoint && step.waypoint.kind !== 'trophy' && step.waypoint.tiles ? step.waypoint.tiles : trophyTiles;
 			cut = cutPast(a.S, a.pos, tiles, a.base, fail.closest.tile);
 		}
-		out.push(facts.add({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }));
+		out.push(facts.add(Object.assign({ kind: 'fail', edge, nodeClass: cls, rung, why: fail.why || 'budget', closest: fail.closest ? { tile: fail.closest.tile, dist: fail.closest.dist } : null, blockedBy: fail.blockedBy || [], cut }, noWall ? { noWall: true } : {})));
 		if (rung + 1 >= facts.RUNG_MAX) out.push(facts.add({ kind: 'block', edge, nodeClass: cls }));
 		return out;
 	}
