@@ -90,14 +90,57 @@ function createPlanner(model, facts, o = {}) {
 	// gives the count; the trophy edge from a state below it gets the PENALTY (a price, never a drop: the probe is no proof)
 	const floorNeeds = [];
 	let floorVer = 0;
-	/** the probe's floors (steer.js info.floors) -> floorNeeds: the most each count feature needs */
+	// THE FLOOR'S ZONE (lane 4 b4): the probe names the floor the TROPHY's jump needs, and a trigger beside the trophy above
+	// the same floor needs it as much: Nightmare Relics' trophy (98,132) is reached only from its 4-coin gate (98,136) (the
+	// room's floor 6 rows down, a 3-row jump from the gate), and its protection effect (100,132) stands in the same room at
+	// the same height: every PARTIAL plan went there first ("protection on (100,132)" 21 of 25 steps, closest 2 tiles,
+	// 'budget' at every rung), the 4 coins never planned. A floor's zone: the tiles a jump from the probe's jump tile
+	// (x.from) can reach above its support (x.at below it: gravity down; above it: up; beside it: no zone), within
+	// FLOOR_ZX tiles across and FLOOR_ZY tiles up, kept only when the trophy is in it; a trigger edge whose live tiles all
+	// lie in a zone gets the floor's need (the PENALTY, a price, never a drop, as the trophy's). EEAT_FLOOR_ZONE=0 off.
+	const FLOOR_ZONE = process.env.EEAT_FLOOR_ZONE !== '0';
+	const FLOOR_ZX = +process.env.EEAT_FLOOR_ZX || 4, FLOOR_ZY = +process.env.EEAT_FLOOR_ZY || 4;
+	const zoneOf = (x) => {
+		if (!FLOOR_ZONE || !x || !Array.isArray(x.at) || !Array.isArray(x.from) || !L || !L.fg) return null;
+		const [ax, ay] = x.at, [fx, fy] = x.from;
+		const up = ay > fy ? 1 : ay < fy ? -1 : 0;
+		if (up === 0) return null;
+		const z = new Uint8Array(W * H);
+		for (let dy = 0; dy <= FLOOR_ZY; dy++) {
+			const y = fy - up * dy;
+			if (y < 0 || y >= H) continue;
+			for (let xx = Math.max(0, fx - FLOOR_ZX); xx <= Math.min(W - 1, fx + FLOOR_ZX); xx++) z[y * W + xx] = 1;
+		}
+		for (const t of trophyTiles) if (z[t]) return z;
+		return null;
+	};
+	/** the probe's floors (steer.js info.floors) -> floorNeeds: the most each count feature needs (and its zones) */
 	const setFloors = (fl) => {
-		const most = new Map();
-		for (const x of fl || []) if ((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat)) most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));
+		const most = new Map(), zones = new Map();
+		for (const x of fl || []) {
+			if (!((x.feat === 'coins' || x.feat === 'bcoins') && x.param > 0 && model.feats.includes(x.feat))) continue;
+			most.set(x.feat, Math.max(most.get(x.feat) || 0, x.param));
+			const z = zoneOf(x);
+			if (z) { if (!zones.has(x.feat)) zones.set(x.feat, []); zones.get(x.feat).push({ z, min: x.param }); }
+		}
 		floorNeeds.length = 0;
-		for (const [feat, min] of most) floorNeeds.push({ feat, min });
-		ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
+		for (const [feat, min] of most) floorNeeds.push({ feat, min, zones: zones.get(feat) || [] });
+		ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}${n.zones.length ? `(zones ${n.zones.length})` : ''}`).join(' ') || '';
 		if (floorNeeds.length) floorVer++;
+	};
+	/** a trigger edge's floor need: its live tiles all in a zone of a floor whose count S has not reached */
+	const zoneNeed = (S, tiles) => {
+		for (const n of floorNeeds) {
+			if (!n.zones.length) continue;
+			const have = S.feats[n.feat] || 0;
+			for (const q of n.zones) {
+				if (have >= q.min) continue;
+				let all = tiles.length > 0;
+				for (const t of tiles) if (!q.z[t]) { all = false; break; }
+				if (all) return true;
+			}
+		}
+		return false;
 	};
 	if (process.env.EEAT_PLAN_FLOOR !== '0' && L && L.fg) {
 		let has = false;
@@ -134,7 +177,7 @@ function createPlanner(model, facts, o = {}) {
 			}
 		}
 	}
-	ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}`).join(' ') || '';
+	ST.floors = floorNeeds.map((n) => `${n.feat}>=${n.min}${n.zones && n.zones.length ? `(zones ${n.zones.length})` : ''}`).join(' ') || '';
 	// ---------------------------------------------------------------- positions
 	const posOfTrig = new Map();
 	/**
@@ -454,7 +497,8 @@ function createPlanner(model, facts, o = {}) {
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) g.est = Math.max(g.lb, ok);
 				}
-				if (X === null) for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; }
+				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; } }
+				else if (floorNeeds.length && zoneNeed(S, tiles)) g.est += PENALTY;
 				const bad = rchBad.get(rchKey(S, pos, edge));
 				if (bad === 'proof' && root) return;
 				if (bad) g.est += PENALTY;
@@ -1037,7 +1081,7 @@ function createPlanner(model, facts, o = {}) {
 	const stats = () => Object.assign({}, ST, { pace: pace(), model: model.stats() });
 	/** the floors' version: bumps when an async floor probe adds floors (plans made before it priced the trophy edge without) */
 	const floorVersion = () => floorVer;
-	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf };
+	return { plan, learn, lowerBound, costOf, explain, stats, floorVersion, _edgesOf: edgesOf, _hLb: hLb, _anchorOf: anchorOf, _zoneNeed: zoneNeed };
 }
 
 module.exports = { createPlanner, PACE0 };
