@@ -987,6 +987,7 @@ function createPlanner(model, facts, o = {}) {
 	// coin off the route, closest 1 tile) took rungs 0-3 while the route's coin waited at rung 2)
 	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 50, CRUMB_F = +process.env.EEAT_CRUMB_F || 0.9;
 	const CRUMB_K = process.env.EEAT_CRUMB_K !== undefined ? Math.max(1, +process.env.EEAT_CRUMB_K | 0) : 2;
+	const CRUMB_AFTER = process.env.EEAT_CRUMB_AFTER !== undefined ? Math.max(0, +process.env.EEAT_CRUMB_AFTER | 0) : 1;
 	function crumbPlan(a, plans) {
 		const p0 = plans.find((p) => !p.near) || plans[0];
 		if (!p0 || !p0.steps || !p0.steps.length) return [];
@@ -994,6 +995,9 @@ function createPlanner(model, facts, o = {}) {
 		const lb0 = Number.isFinite(+s0.lb) ? +s0.lb : Infinity;
 		if (!(lb0 >= CRUMB_MIN)) return [];
 		const cls = a.S.key + '|' + a.cls;
+		// (only once that leg has failed CRUMB_AFTER rungs from this anchor's class: a first leg the executor finds at its
+		// first rung (the compiled levels' direct legs) keeps both workers; EEAT_CRUMB_AFTER=0: at once)
+		if (CRUMB_AFTER > 0 && facts && facts.rungOf(s0.edge, cls) < CRUMB_AFTER) return [];
 		const es = edgesOf(a.S, a.pos, a.base, 'plan', true, cls, crumbs);
 		// (a crumb past the est walk's CEGAR cuts is kept: the cuts come from the long leg's failures, and a way around its
 		// deceptive field is what a crumb is for; its lb is the relaxation's, still admissible)

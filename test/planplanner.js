@@ -344,6 +344,16 @@ function crumbsUnit() {
 		const m0 = M.compileModel(L), p0 = P.createPlanner(m0, F.createFacts(), {}).plan({}, { k: 3 });
 		check('P-CRUMBS off: coins not relevant, no crumbs, the first plan the trophy alone', !m0.feats.includes('coins') && !m0.triggers.some((X) => X.crumb) && p0[0] && kindsOf(m0, p0[0]).join(',') === 'trophy', planStr(m0, p0[0]));
 		process.env.EEAT_CRUMBS = '1';
+		// (the crumbs wait for one failed rung of the long leg (EEAT_CRUMB_AFTER 1): none before)
+		{
+			const mA = M.compileModel(L), plA = P.createPlanner(mA, F.createFacts(), {}), pA = plA.plan({}, { k: 3 });
+			check('P-CRUMBS on: no crumb plan before the long leg failed a rung', pA.length && !pA.some((p) => p.crumb), planStr(mA, pA[0]));
+			const s0 = pA[0].steps[0];
+			plA.learn(s0, { ok: false, arrivals: [], fail: { why: 'budget', closest: null, touched: [], blockedBy: [], level: s0.rung } }, {});
+			const pB = plA.plan({}, { k: 3 });
+			check('P-CRUMBS on: after the trophy leg failed its rung 0, the crumb plans come first', pB.length && pB[0].crumb, pB[0] ? planStr(mA, pB[0]) : 'none');
+		}
+		process.env.EEAT_CRUMB_AFTER = '0';
 		const m1 = M.compileModel(L), pl = P.createPlanner(m1, F.createFacts(), {}), p1 = pl.plan({}, { k: 3 });
 		const cr = m1.triggers.filter((X) => X.crumb);
 		check('P-CRUMBS on: 3 crumbs, coins a feature, relevant', m1.feats.includes('coins') && cr.length === 3 && cr.every((X) => X.relevant), `${cr.length} crumbs, feats ${m1.feats.join(',')}`);
@@ -360,6 +370,7 @@ function crumbsUnit() {
 		check('P-CRUMBS on: from the first crumb (gain > 0: its count and its tile) the crumb plan takes the next crumb', A.S.gain > 0 && p2[0] && p2[0].crumb && p2[0].steps[0].waypoint.trig === second.id, p2[0] ? `gain ${A.S.gain}: ${planStr(m1, p2[0])}` : 'none');
 	} finally {
 		if (saved === undefined) delete process.env.EEAT_CRUMBS; else process.env.EEAT_CRUMBS = saved;
+		delete process.env.EEAT_CRUMB_AFTER;
 	}
 }
 
