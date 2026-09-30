@@ -142,6 +142,19 @@ const COVER_SLOT = process.env.EEAT_COVER_SLOT !== undefined ? Math.max(0, Math.
 // for a call that got nowhere); (2) the skeleton's last leg from the starts reports its closest re-measured on the
 // waypoint's field f0 (skelClosest), like the skeleton's other failures. Off = the executor byte for byte as before.
 const CLOSEST_UNIT = () => process.env.EEAT_CLOSEST_UNIT === '1';
+// THE FIELD MEMO (doctor 9, n5; OPT-IN EEAT_FIELD_MEMO=1): a leg call builds its goal field only when fieldFits (the thread's
+// slowest build so far x the level's tiles < 0.4 x the window); else it ran with NO field: every finder's distance reads 0
+// (legs.js distOf), legBest orders by ticks alone and its closest is 0 at whatever state it kept first. On a big level that
+// is most skeleton sub-legs: CDB Inc (400x200) in a 40-s compile: 54 leg calls without a field (sub-legs of 234-1,089 ms,
+// the estimate 568-573 ms), though the waypoint's field (the sub-legs' own: goal.fieldTiles) was built for the wrapper,
+// and the final's failure lines say "closest 0 tiles" at tiles 2,000+ field units from the target (the ball on a coin at
+// (80,1), (75,9)); the planner's relays and CEGAR cuts read that 0. 163 of the 230 levels have >= 40,000 tiles (7 of them
+// compiled in night 4's final vs 17 of the 67 smaller). With the knob: a field the thread has (the types.js memo) is used
+// whatever the window, a skeleton sub-leg's field is built even past its window (the next sub-legs read it from the memo),
+// and a call left without a field reports no closest (not a false 0). Off = the executor byte for byte as before.
+const FIELD_MEMO = () => process.env.EEAT_FIELD_MEMO === '1';
+// (EEAT_FIELD_FIT: fieldFits' share of the window a build may take, 0.4; a measurement / test knob)
+const FIELD_FIT = () => (process.env.EEAT_FIELD_FIT !== undefined ? +process.env.EEAT_FIELD_FIT : 0.4);
 const COARSE_SHARE = process.env.EEAT_COARSE_SHARE !== undefined ? +process.env.EEAT_COARSE_SHARE : 0.5;
 const COARSE_RUNG = process.env.EEAT_COARSE_RUNG !== undefined ? +process.env.EEAT_COARSE_RUNG : 1;
 // THE RATE RULE (COMPILE-ALL lane 6, block 4): before the compile's first route the strategy marks its steps' budgets fast;
@@ -398,6 +411,7 @@ function makeCore(L, co) {
 	const mathLB = () => MLB_ || (MLB_ = require('../math/lb.js').createMathLB(L));
 	const mY = { dTry: 0, dOk: 0, cTry: 0, cOk: 0 };   // (the math's yield on this level: calls and calls with a leg)
 	const fieldMs = { n: 0, perTile: 0 };
+	let noFieldLegs = 0, noFieldMemo = 0, noFieldBuilt = 0;   // (FIELD_MEMO diagnostics: calls without a field, memo hits, sub-leg builds past the window)
 	let analysis = null;
 
 	/** the state after a masks string (a cached replay: the longest cached prefix, then the rest) */
@@ -475,7 +489,12 @@ function makeCore(L, co) {
 		return f;
 	}
 	/** a field build expected to fit the time left (an unknown level: yes) */
-	const fieldFits = (left) => fieldMs.n === 0 || fieldMs.perTile * N < 0.4 * left;
+	const fieldFits = (left) => fieldMs.n === 0 || fieldMs.perTile * N < FIELD_FIT() * left;
+	/** the goal field if this thread built it already (types.js memo), else null: no build */
+	function fieldNowCached(goal, allowDeath) {
+		const Lc = goal.walls ? withWalls(T.levelNow(L, sim), goal.walls) : T.levelNow(L, sim);
+		return T.goalField(Lc, T.fieldTilesOf(goal), { deaths: allowDeath, cachedOnly: true });
+	}
 	/** the move solver of this thread (n4-math msolve.js), made on first use */
 	let msol = null;
 	function msolver() { return msol || (msol = require('./msolve.js').createSolver(L, {})); }
@@ -617,7 +636,15 @@ function makeCore(L, co) {
 			sim.restore(s.snap);
 			let f = fields.get(s.disc);
 			if (f === undefined) {
-				f = fieldFits(wEnd - Date.now()) ? fieldNow(goal, allowDeath) : null;
+				if (fieldFits(wEnd - Date.now())) f = fieldNow(goal, allowDeath);
+				else if (FIELD_MEMO()) {
+					// (FIELD_MEMO: a field this thread has is used whatever the window; a skeleton sub-leg's field (the waypoint's
+					// own, goal.fieldTiles) is built even past the window: every next sub-leg of the waypoint reads it from the memo)
+					f = fieldNowCached(goal, allowDeath);
+					if (f === null && goal.fieldTiles) { f = fieldNow(goal, allowDeath); noFieldBuilt++; st.fieldBuilt = noFieldBuilt; }
+					else if (f !== null) { noFieldMemo++; st.fieldMemo = noFieldMemo; }
+				} else f = null;
+				if (f === null) { noFieldLegs++; st.noField = noFieldLegs; }
 				fields.set(s.disc, f);
 			}
 			if (f === null) { proofAll = false; startCost.push(-2); continue; }
@@ -627,7 +654,9 @@ function makeCore(L, co) {
 			startCost.push(c);
 			if (!(c < 0 && f.mode !== 'walk')) proofAll = false;
 		}
-		tiers.push({ tier: 'proof', ms: Date.now() - tIn, proof: anyField && proofAll });
+		tiers.push({ tier: 'proof', ms: Date.now() - tIn, proof: anyField && proofAll, field: anyField ? 1 : 0 });
+		if (!anyField && process.env.EEAT_NOFIELD_DBG === '1') console.error(`NOFIELD ${wp.label || wp.kind} left ${wEnd - Date.now()} ms est ${(fieldMs.perTile * N).toFixed(0)} ms rung ${budget.level | 0} (no field ${noFieldLegs}, memo ${noFieldMemo}, built ${noFieldBuilt})`);
+		else if (FIELD_MEMO() && process.env.EEAT_NOFIELD_DBG === '1' && (noFieldMemo + noFieldBuilt) % 20 === 1) console.error(`FIELDMEMO memo ${noFieldMemo} built ${noFieldBuilt} none ${noFieldLegs}`);
 		// (a death step's field is an ORDERING field (the tiles a death starts from, planner.js dieField), no proof)
 		if (anyField && proofAll && !wp.dieField && !walled) return out(proofFail(starts[0], goal, wp, rung, 'the goal field of the level as the doors stand is -1 at every start', deadline));
 		// (walls that cut every start off the waypoint were no counterexample of the field's way: the main thread drops them)
@@ -640,8 +669,8 @@ function makeCore(L, co) {
 		let closest = { dist: -1, masks: null };
 		const noteClosest = (dist, sIdx, tail) => {
 			if (!(dist >= 0) || tail === null || sIdx < 0) return;
-			// (no goal field in this call: every finder's distance was 0, no measure: CLOSEST_UNIT above)
-			if (field0 === null && CLOSEST_UNIT()) return;
+			// (no goal field in this call: every finder's distance was 0, no measure: CLOSEST_UNIT / FIELD_MEMO above)
+			if (field0 === null && (CLOSEST_UNIT() || FIELD_MEMO())) return;
 			if (closest.dist < 0 || dist < closest.dist) closest = { dist, masks: T.concat(starts[sIdx].masks, tail) };
 		};
 		// -------- tier 0b: THE EXACT END SEARCH from a NEAR state (within NEAR_T tiles of the goal by the goal field): a later
@@ -857,8 +886,8 @@ function makeCore(L, co) {
 					// (measured again in the finders' unit, field0's tiles: the primitives' own number is another field's (or
 					// the bound's ticks), and the smaller number of two units made the closest the start in every compile)
 					const m = nr.closest.masks instanceof Uint8Array ? nr.closest.masks : T.masksOf(nr.closest.masks);
-					// (no goal field in this call: the primitives' number is their own unit's, no measure: CLOSEST_UNIT)
-					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : field0 === null && CLOSEST_UNIT() ? -1 : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
+					// (no goal field in this call: the primitives' number is their own unit's, no measure: CLOSEST_UNIT / FIELD_MEMO)
+					const d = field0 && process.env.EEAT_CLOSEST_NEAR !== '0' ? fieldDistOf(m, starts, field0) : field0 === null && CLOSEST_UNIT() ? -1 : FIELD_MEMO() ? -1 : (nr.closest.dist >= 0 ? nr.closest.dist : 1e9);
 					if (d >= 0 && (closest.dist < 0 || d < closest.dist)) closest = { dist: d, masks: m };
 				}
 			} catch (e) { tiers.push({ tier: 'prims', error: String(e && e.message || e) }); }
