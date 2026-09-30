@@ -95,6 +95,11 @@ function createPlanner(model, facts, o = {}) {
 	// (the SET kinds only: a touch sets the feature whatever it was; the toggles (psw / osw: a member the ball just
 	// pressed is in the union at cost 0 where it stands) and the coins (their own taken bits) stay one edge a trigger)
 	const ANY_KINDS = new Set(['key', 'team', 'prot', 'reset', 'fx', 'crown', 'pswR', 'oswR']);
+	// BREADCRUMBS (crumbStep below; o.crumbs / EEAT_PLAN_CRUMBS=1: on; off (the default until measured) = the planner as before)
+	const CRUMBS = o.crumbs !== undefined ? !!o.crumbs : process.env.EEAT_PLAN_CRUMBS === '1';
+	const CRUMB_MIN = +process.env.EEAT_CRUMB_MIN || 60, CRUMB_REACH = +process.env.EEAT_CRUMB_REACH || 40, CRUMB_NEAR = 6;
+	const CRUMB_SLACK = 3, CRUMB_SLACK_F = 0.03;
+	const crumbCands = CRUMBS ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin' || X.kind === 'cp') && X.tiles && X.tiles.length) : [];
 	const trophyTiles = model.trophyTiles;
 	const openS = { key: '__open__', dkey: '__open__', vals: [], feats: {} };
 	// ---------------------------------------------------------------- floors (a count gate the way STANDS on)
@@ -776,6 +781,43 @@ function createPlanner(model, facts, o = {}) {
 		return wp;
 	}
 	/** the path of a search node -> the plan's steps (with the key-door passages and death steps inserted) */
+	/** BREADCRUMBS (doctor 3, EEAT_PLAN_CRUMBS=1, default off): the root edge's leg is long (its est walk CRUMB_MIN steps
+	 *  or more) -> the one crumb step to take first: a trigger that changes no model state (a coin, blue coin or checkpoint
+	 *  no gate reads: `relevant` false) whose est-walk detour d(pos -> c) + d(c -> target) - d(pos -> target) is at most
+	 *  max(CRUMB_SLACK, CRUMB_SLACK_F x D), the farthest such within CRUMB_REACH steps (else the nearest beyond it), not
+	 *  nearer than CRUMB_NEAR, not one that failed twice from this node class. Why: a level whose triggers gate nothing
+	 *  is ONE leg for the planner (EX Crew Ice: the plan 'trophy', a 5,145-tick known route, the compile 688 tiles short
+	 *  in 60 and 180 s), where the level's designer put its coins along the way: 13 of the known route's 15 coins lie on a
+	 *  shortest est walk from the start to the trophy (detour 0-3 steps), and from its own arrivals the executor chains
+	 *  those coins leg by leg (src/out/doc3/chain.js). The crumb's edge is 'trig:<id>', so its arrival is an anchor of
+	 *  its own (strategy addArrival's re-entry rule: the same model state, another trigger) that the next plan starts
+	 *  from (receding horizon: one crumb a plan). Ordering only: the crumb is a waypoint, never a gate. */
+	function crumbStep(a, e, cls) {
+		if (!CRUMBS || !(e.steps >= CRUMB_MIN) || e.steps >= INF || e.viaDeath || e.relaxOnly) return null;
+		const S = a.S, D = e.steps, tgt = e.live || trophyTiles;
+		const dA = model.dist(S, a.pos, 'est', a.base);
+		const slack = Math.max(CRUMB_SLACK, CRUMB_SLACK_F * D);
+		let near = null, far = null;
+		for (const X of crumbCands) {
+			const edge = 'trig:' + X.id;
+			if (facts && facts.rungOf(edge, cls) >= 2) continue;
+			const live = model.liveTiles(S, X);
+			if (!live.length) continue;
+			let d1 = INF;
+			for (const t of live) if (dA[t] < d1) d1 = dA[t];
+			if (!(d1 >= CRUMB_NEAR) || d1 >= D) continue;
+			const dX = model.dist(S, { id: 'crumb' + X.id, tiles: live.slice(), extra: 0 }, 'est', a.base);
+			let d2 = INF;
+			for (const t of tgt) if (dX[t] < d2) d2 = dX[t];
+			if (d2 >= INF || d1 + d2 - D > slack) continue;
+			const c = { X, live, d1, edge };
+			if (d1 <= CRUMB_REACH) { if (!far || d1 > far.d1) far = c; } else if (!near || d1 < near.d1) near = c;
+		}
+		const c = far || near;
+		if (!c) return null;
+		return { edge: c.edge, nodeClass: cls, rung: facts ? facts.rungOf(c.edge, cls) : 0, estTicks: Math.round(c.d1 * pace()), lb: 0, crumb: true,
+			waypoint: { kind: 'trigger', tiles: c.live.slice(), trig: c.X.id, expect: null, label: `crumb ${c.X.label}` } };
+	}
 	function stepsOf(a, node) {
 		const path = [];
 		for (let n = node; n && n.e; n = n.parent) path.push({ e: n.e, from: n.parent });
@@ -787,6 +829,8 @@ function createPlanner(model, facts, o = {}) {
 			const { e, from } = path[i];
 			const isRoot = i === 0;
 			const cls = isRoot ? a.S.key + '|' + a.cls : from.S.key + '|*';
+			// (breadcrumbs: a long root leg goes by a crumb first)
+			if (isRoot && CRUMBS && !(e.X && e.X.kind === 'die')) { const cs = crumbStep(a, e, cls); if (cs) push(cs); }
 			// a death first where only a death reaches the target
 			if (e.viaDeath) {
 				if (deathsNow === null) deathsNow = a.sim ? a.sim.deaths : 0;
