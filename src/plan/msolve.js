@@ -156,9 +156,26 @@ const LAND_DEF = process.env.EEAT_MSOLVE_LAND !== '0';
 // the land-and-act jump's bonk variants (coverage iteration 2; EEAT_MSOLVE_LANDBONK=0: off, o.landBonk)
 const LAND_BONK_DEF = process.env.EEAT_MSOLVE_LANDBONK !== '0';
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
+// THE MOVEMENT TRICKS (n5-tricks, trick mining 2: tools/tricks/mine.js over the known routes): EEAT_TRICKS=1 (or all) every
+// trick below, a comma list their names (airjump, ...); o.tricks (true / false / a list / a comma string) overrides per leg;
+// off = the solver before, byte for byte
+function parseTricks(v) {
+	if (v === undefined || v === null || v === false || v === '' || v === '0') return null;
+	if (v === true || v === '1' || v === 'all') return 'all';
+	return new Set((Array.isArray(v) ? v : String(v).split(',')).map((q) => String(q).trim()).filter(Boolean));
+}
+const TRICKS_ENV = parseTricks(process.env.EEAT_TRICKS);
+/** the tricks on for a leg: a has(name) test */
+function tricksOf(o) {
+	const t = o && o.tricks !== undefined ? parseTricks(o.tricks) : TRICKS_ENV;
+	return { has: (name) => t === 'all' || (t !== null && t.has(name)), any: t !== null };
+}
+// the air-jump members' default node pool and the air jumps one member takes at most (o.ajNodes, o.ajMax)
+const AJ_NODES = 150000, AJ_MAX = 1;
 
 /** a gravity member's name (the result's `member`): jump@j, off@o, walk, air; a land-and-act member base>land row@T1>act */
 function memberName(m) {
+	if (m.kind === 'ajump') return `${memberName(m.base)}>air@${m.a}`;
 	if (m.kind === 'land') return `${memberName(m.base)}>land${m.l.fr}@${m.l.T1}>${m.act === 'jump' ? (m.l.j2 === m.l.T1 ? 'hop' : `jump@${m.l.j2}`) : m.act === 'off' ? `off@${m.l.off2}` : 'walk'}${m.l.bonk ? `>bonk${m.l.bonk.cr}@${m.l.bonk.b}` : ''}`;
 	return (m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind) + (m.bonk ? `>bonk${m.bonk.cr}@${m.bonk.b}` : '');
 }
@@ -663,6 +680,33 @@ function createSolver(L, opts = {}) {
 				}
 			}
 		}
+		// THE AIR-JUMP MEMBERS (trick mining 2, EEAT_TRICKS airjump; docs/ee_math.md 4.14): with max_jumps > 1 a press in the
+		// air while jump_count < max_jumps sets vy = J at the END of that tick (eesim.js: after the movement, before the align,
+		// so the tick's y is the base member's RAW y: no align at |J| >= 1), then the jump trajectory from there: y = the base
+		// member's to a - 1, r_base(a) at a, gravTrace(r_base(a), J) after it; with more jumps left the same on that member. The
+		// air jumps left: a ground jump or a walk-off leaves max_jumps - 1 (the walk-off tick's count is 1 before its press), an
+		// airborne start max_jumps - max(1, jump_count) (0 turns 1 in the air); max_jumps >= 1000 never counts. Their items
+		// run in a pass of their own (THE THIRD PASS below): below the answer the other members found, or for a leg they left
+		// unsolved, on a node pool of their own (o.ajNodes)
+		const ajMembers = [];
+		const tricks = tricksOf(o);
+		const poolA = { n: o.ajNodes || AJ_NODES, out: false };
+		if (tricks.has('airjump') && !o.each && s.max_jumps > 1 && Tmax > 4) {
+			const left0 = s.max_jumps >= 1000 ? Infinity : standing ? s.max_jumps - 1 : s.max_jumps - Math.max(1, s.jump_count);
+			const ajMax = Math.min(o.ajMax || AJ_MAX, left0);
+			const cap = o.ajCap || 60000;
+			const add = (b, depth) => {
+				for (let a = Math.max(1, b.air0 + 1); a < Tmax && ajMembers.length < cap; a++) {
+					const ya = b.r(a), tr = gravTrace(ya, G.J, Tmax - a, G), by = b.y, br = b.r, bv = b.v;
+					const m = { kind: 'ajump', base: b, a, j: b.j, g: b.g, off: b.off, air0: a, jumps: (b.jumps || (b.kind === 'jump' ? [b.j] : [])).concat([a]),
+						sk: 2e5 + 1e3 * depth + a, nodeCap: 4, pool: poolA,
+						y: (q) => (q < a ? by(q) : q === a ? ya : tr.Y[q - a]), r: (q) => (q < a ? br(q) : q === a ? ya : tr.R[q - a]), v: (q) => (q < a ? bv(q) : q === a ? G.J : tr.V[q - a]) };
+					ajMembers.push(m);
+					if (depth + 1 < ajMax) add(m, depth + 1);
+				}
+			};
+			if (ajMax >= 1) for (const b of members.slice()) if ((b.kind === 'jump' || b.kind === 'off' || b.kind === 'air') && !b.bonk) add(b, 0);
+		}
 		// the (T, member, windows) items
 		const buildItems = (mlist, items) => { for (const m of mlist) {
 			if (m.kind === 'land' && m.act === 'walk') {
@@ -850,7 +894,7 @@ function createSolver(L, opts = {}) {
 			};
 			const c0 = stats.cands;
 			// a per-item share of the budget: no one (T, member) item eats the whole leg's budget
-			const bud = m.nodeCap ? budgetB : budget;
+			const bud = m.pool || (m.nodeCap ? budgetB : budget);
 			const cap = Math.floor((o.itemNodes || 40000) / (m.nodeCap || 1)), before = bud.n;
 			const ib = { n: Math.min(bud.n, cap), out: false, tEnd };
 			if (ib.n > 0) solveX(x0, vx0, T, it.wins, tube, kMax, I, Hd, emit, ib, wall);
@@ -867,6 +911,17 @@ function createSolver(L, opts = {}) {
 			items2.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
 			stats.nItems2 = items2.length;
 			runItems(items2, budgetB);
+		}
+		// THE THIRD PASS (the air-jump members): only their items below the best answer's T (a leg the others solved costs
+		// only this), on their own node pool and the tier's clock
+		if (ajMembers.length && !o.each && !(tEnd && Date.now() > tEnd)) {
+			const items3 = [];
+			buildItems(ajMembers, items3);
+			const lim = best ? best.T : Infinity;
+			const it3 = items3.filter((it) => it.T < lim);
+			it3.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
+			stats.nItems3 = it3.length; stats.ajMembers = ajMembers.length;
+			runItems(it3, poolA);
 		}
 		if (o.each) return { ok: solved.size > 0, tool: 'plain', each: Array.from(solved.values()), budgetOut: budget.out };
 		if (!best) return { ok: false, why: budget.out ? 'budget' : 'no plain candidate', tool: 'plain' };
