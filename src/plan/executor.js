@@ -94,7 +94,7 @@ const PROFILE_AT = process.env.EEAT_PROFILE_AT === 'early' ? 'early' : 'leg';
 // shorter one in EEAT_PROFILE_TIGHT (0.7) of what is left of the window (0: none, the tier's leg as it is). My level 730c:
 // the tier's 144-tick leg at rung 2 kept the finder from its 105-tick leg (141 vs 104 compiled, 3 of 3 A/Bs))
 const PROFILE_TIGHT = process.env.EEAT_PROFILE_TIGHT !== undefined ? +process.env.EEAT_PROFILE_TIGHT : 0.7;
-const PROFILE_YIELD = process.env.EEAT_PROFILE_YIELD !== undefined ? +process.env.EEAT_PROFILE_YIELD : 4;
+const PROFILE_YIELD = process.env.EEAT_PROFILE_YIELD !== undefined ? +process.env.EEAT_PROFILE_YIELD : 0;
 const MSOLVE_SHARE = process.env.EEAT_MSOLVE_SHARE !== undefined ? +process.env.EEAT_MSOLVE_SHARE : 0.2;        // the direct legs' cap
 const MSOLVE_CHAIN_SHARE = process.env.EEAT_MSOLVE_CHAIN !== undefined ? +process.env.EEAT_MSOLVE_CHAIN : 0.3;   // the chains' share, after the primitives
 const MSOLVE_LEGT = +process.env.EEAT_MSOLVE_LEGT || 150;       // the direct leg's horizon (ticks)
@@ -643,8 +643,8 @@ function makeCore(L, co) {
 			} catch (e) { pst.error = String(e && e.message || e); pst.ms = Date.now() - tP; tiers.push(pst); return null; }
 		};
 		const profileOn = PROFILE_ON() && rung >= PROFILE_RUNG && !allowDeath && !wp.dieField;
-		// (its share follows its yield on the level, as the math's (mathShare) with EEAT_PROFILE_YIELD (4: from its 4th call;
-		// 0: the fixed share): on the 20 failing levels its calls found nothing on most and the fixed 40% cost progress)
+		// (its share can follow its yield on the level, as the math's (mathShare): EEAT_PROFILE_YIELD=4 from its 4th call (0, the
+		// default: the fixed share); measured (box 5, 60 s, W3): fail20 progress 45 vs 38, comp29 15 vs 13 compiled: no gain)
 		const profileShare = () => {
 			const b = rung <= 0 ? PROFILE_SHARE0 : PROFILE_SHARE;
 			return PROFILE_YIELD > 0 ? mathShare(b, pY.t, pY.ok, PROFILE_YIELD) : b;
