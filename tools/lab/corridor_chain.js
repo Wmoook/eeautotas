@@ -25,13 +25,16 @@ fs.mkdirSync(OUT, { recursive: true });
 const KCH = +(argv.chain || 4), EVERY = +(argv.every || 48), MSB = +(argv.ms || 5000);
 const ARMS = String(argv.arms || 'chain,corr').split(',');
 const copt = { M: 3, Mu: 1, legT: 90, RX: 18, RD: 30, subStop: 2 };
-for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'Mu', 'Ma', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'plainMs', 'coupledTicks', 'fieldMs', 'subStop', 'fanT', 'lazyStall', 'landMax', 'landT', 'landNodes']) if (argv[k] !== undefined) copt[k] = +argv[k];
+for (const k of ['K', 'Ka', 'delta', 'legT', 'alts', 'D', 'w', 'w1', 'beta', 'M', 'Mu', 'Ma', 'RX', 'RU', 'RD', 'legNodes', 'itemNodes', 'plainMs', 'coupledTicks', 'fieldMs', 'subStop', 'fanT', 'lazyStall', 'landMax', 'landT', 'landNodes', 'dCT', 'dFMs']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.legs === '0') copt.legs = false;
 if (argv.legMode) copt.legMode = argv.legMode;
 if (argv.plainStops) copt.plainStops = argv.plainStops;
 if (argv.dom) copt.dom = argv.dom;
 if (argv.airKey) copt.airKey = argv.airKey;
 if (argv.legNew) copt.legNew = true;
+if (argv.lazyWide) copt.lazyWide = true;
+if (argv.lazyLegs === '0') copt.lazyLegs = false;
+if (argv.wideStops) copt.wideStops = argv.wideStops;
 for (const k of ['lazyM', 'lazyRX', 'lazyRU']) if (argv[k] !== undefined) copt[k] = +argv[k];
 if (argv.fan === '0') copt.fan = false;
 

@@ -213,6 +213,8 @@ function createCorridor(L, opts = {}) {
 		// the sub-legs: 'always' (every expansion), 'stuck' (only where the fans made no progress), 'never' (o.legs false)
 		const legMode = o.legs === false ? 'never' : o.legMode || 'always';
 		const lazyStall = o.lazyStall || 40;
+		// (the lazy pass: o.lazyWide the widened fan (stops o.wideStops), o.lazyLegs false: no sub-legs there)
+		const lazyWide = !!o.lazyWide, lazyLegs = o.lazyLegs !== false;
 		const domDir = o.dom === 'dir', airKey = o.airKey || 'cls';
 		// (the forward fan-out's size: o.landMax landings (0: none), horizon o.landT, o.landNodes)
 		const landMax = o.landMax !== undefined ? o.landMax : 12, landT = o.landT || 60, landNodes = o.landNodes || 10000;
@@ -220,7 +222,7 @@ function createCorridor(L, opts = {}) {
 		// the event fan's timed stops (ticks): inside a field always (8, 20, 40), on plain physics o.plainStops (none by
 		// default: the held mask to its first event only); a stop is an airborne or mid-run node the next fans turn from
 		const stopsOf = (v, d) => new Set((v === undefined ? d : Array.isArray(v) ? v : String(v).split(',').filter(Boolean)).map(Number));
-		const fieldStops = stopsOf(o.fieldStops, [8, 20, 40]), plainStops = stopsOf(o.plainStops, []);
+		const fieldStops = stopsOf(o.fieldStops, [8, 20, 40]), plainStops = stopsOf(o.plainStops, []), wideStops = stopsOf(o.wideStops, [3, 5, 12, 16, 30, 50, 80]);
 		const RX = o.RX || 24, RU = o.RU || 5, RD = o.RD || 60, fanT = o.fanT || 120;
 		const lazyM = o.lazyM || M, lazyRX = o.lazyRX || RX, lazyRU = o.lazyRU || RU, legNew = !!o.legNew;
 		const snap0 = start instanceof E.EESim ? start.snapshot() : start;
@@ -408,12 +410,14 @@ function createCorridor(L, opts = {}) {
 			// MSOLVE'S CHEAP FANS: the forward fan-out toward the corridor (one x change) and the event fan (every held mask to
 			// its first support event, with its timed stops inside a field: the ways the footholds do not see); the least cost
 			// of the children it admitted (the progress test of legMode 'stuck')
-			const doFans = () => {
+			const doFans = (wide) => {
+				// (wide: the widened fan of a lazy pass: more stops, a longer hold, more landings over a longer horizon)
+				const stops = wide ? wideStops : plainNode ? plainStops : fieldStops, fT = wide ? 2 * fanT : fanT;
 				const kids = [];
 				tp = Date.now();
 				if (plainNode && landMax > 0) {
 					const aim = cor.spans.length ? [].concat(...cor.spans.map((s) => s.tiles)) : tgt.tiles;
-					const lands = S.landings(n.snap, { Tmax: landT, K: 1, max: landMax, toward: { tiles: aim }, nodes: landNodes, deadline });
+					const lands = S.landings(n.snap, { Tmax: wide ? 2 * landT : landT, K: 1, max: wide ? 2 * landMax : landMax, toward: { tiles: aim }, nodes: wide ? 4 * landNodes : landNodes, deadline });
 					for (const e of lands) { kids.push(e.masks); if (e.hop) kids.push(e.hop); }
 				}
 				prof.land += Date.now() - tp;
@@ -423,7 +427,7 @@ function createCorridor(L, opts = {}) {
 					const c00 = clsOf(sim);
 					let air = !sim.on_ground || sim.speed_y !== 0;
 					const ms = [];
-					for (let t = 0; t < fanT; t++) {
+					for (let t = 0; t < fT; t++) {
 						const px = sim.px, py = sim.py;
 						const mk = t === 0 ? (m0 | p0) : m0;
 						E.applyMask(inp, mk); sim.tick(inp); ms.push(mk);
@@ -431,7 +435,7 @@ function createCorridor(L, opts = {}) {
 						const c1 = clsOf(sim);
 						const tele = Math.abs(sim.px - px) > 20 || Math.abs(sim.py - py) > 20;
 						if (tele || (c1 !== c00 && c1 !== 'A') || (sim.on_ground && air && t > 0)) { kids.push(Uint8Array.from(ms)); break; }
-						if ((plainNode ? plainStops : fieldStops).has(t + 1)) kids.push(Uint8Array.from(ms));
+						if (stops.has(t + 1)) kids.push(Uint8Array.from(ms));
 						if (!sim.on_ground) air = true;
 					}
 				}
@@ -446,7 +450,7 @@ function createCorridor(L, opts = {}) {
 				if (trace) trace({ ev: 'kids', kids: kids.length, admitted: k, got });
 				return cMin;
 			};
-			if (pass === 'legs') doLegs();
+			if (pass === 'legs') { if (lazyWide) doFans(true); if (lazyLegs) doLegs(); }
 			else if (legMode === 'lazy') { if (fanOn) doFans(); lazyPush(n); }
 			else if (legMode === 'stuck') {
 				// fans first; the legs only where the fans admitted no child below the node's cost - delta (the moves a held
