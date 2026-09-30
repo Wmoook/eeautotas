@@ -103,5 +103,34 @@ ok(!pr0.provenBy.exact && pr0.xAsked === 0, `xprove off: no exact proof (${JSON.
 ok(pr0.proven <= pr.proven, `the exact tier only adds proofs (${pr0.proven} <= ${pr.proven})`);
 console.log(`  proofs: ${pr.proven} of ${pr.legs.length} legs (${JSON.stringify(pr.provenBy)}); without the exact tier ${pr0.proven}; faster from the route's own state ${pr.fasterExact}`);
 
+// ---------------------------------------------------------------- 4 the blind key and the bridge (VERSUS)
+// the room with a gold coin on the way (col 10) and a blue coin: no coin door -> both colours blind; a 5-coin gold door
+// the route never reaches (its 1 coin) -> gold blind on the route, not with 5 coins held
+{
+	const mk = (extra) => E.prepareLevel(EL.toSimLevel(EL.readEelvl(ED.eelvlOf({ name: 'blind', width: W, height: H, cells: cells.concat(extra) }))));
+	const Lc = mk([[10, 15, 100], [14, 15, 101]]);
+	const b0 = J.blindOf(Lc, 0);
+	ok(!!b0 && b0.gold && b0.blue && b0.cp, `blindOf: no coin door, no death -> gold, blue and the checkpoint blind (${JSON.stringify(b0 && { g: b0.gold, b: b0.blue, cp: b0.cp })})`);
+	const b1 = J.blindOf(Lc, 1);
+	ok(!!b1 && !b1.cp, 'blindOf: a route with a death keeps the checkpoint');
+	const Ld = mk([[10, 15, 100], [36, 5, 43, 5]]);
+	const bd = J.blindOf(Ld, 0, { gold: 1, blue: 0 });
+	ok(!!bd && bd.gold, 'blindOf: a 5-coin door the route (1 coin) never reaches -> gold blind on the route');
+	const bn = J.blindOf(Ld, 0, { gold: 5, blue: 0 });
+	ok(!!bn && !bn.gold, 'blindOf: the route holds 5 coins -> gold not blind');
+	// two states apart only in the coin taken: the blind keys equal, the full keys not
+	const s1 = new E.EESim(Lc), s2 = new E.EESim(Lc), ip = new E.EEInput();
+	s1.reset(); s2.reset();
+	let tk = 0;
+	while (!s1.coins && tk++ < 400) { E.applyMask(ip, R); s1.tick(ip); }
+	s2.restore(s1.snapshot());
+	s2.coins = 0; s2._coinBits = new Int32Array(Lc.coinWords); s2._coinOwned = true;
+	ok(s1.coins === 1 && J.progKey(s1) !== J.progKey(s2) && J.progKey(s1, b0) === J.progKey(s2, b0), `progKey: the coin taken or not, the blind key the same (${s1.coins} coins)`);
+	// the bridge on the slow route: the result replays, never slower, with and without it
+	const rb = J.joinRoute(L, masks0, { ms: 6000, prove: false });
+	const evb = C.evaluate(L, rb.masks, true);
+	ok(!!evb && evb.runTicks === rb.runTicks && rb.runTicks <= ev0.runTicks, `the bridge on: the result replays (${rb.runTicks}), never slower; bridge calls ${rb.stats.bridge} (shift ${rb.stats.brShift}, leg ${rb.stats.brLeg}, exact ${rb.stats.brExact})`);
+}
+
 console.log(`joins: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
