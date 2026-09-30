@@ -4,7 +4,8 @@
 //   node tools/perfect/joins.js --final=<n4plan dir> --levels=<levels dir> --out=<dir> [--only=substr,...] [--ms=] [--shard=i/n]
 //     every compiled route of the chief's FINAL (final/cmp_chief_fin_A + _C: .eetas + .json), its best known from FINAL.jsonl;
 //     one JSON line a level to <out>/joins_<shard>.jsonl and the improved .eetas to <out>/<id>.eetas
-//     --threads=N: N worker threads in this one process (shard i/N each)
+//     --threads=N: N worker threads in this one process (shard i/N each); --routes=<dir>: start from <dir>/<id>.eetas where
+//     it exists (another pass's routes: the stack), the compiled route elsewhere
 //   node tools/perfect/joins.js --agg=<dir> [--final=<n4plan dir>]   the table
 const fs = require('fs'), path = require('path');
 const C = require('../../src/common.js');
@@ -45,7 +46,8 @@ function finalList(dir, lvDir) {
 			let rep = null;
 			try { rep = JSON.parse(fs.readFileSync(path.join(d, id + '.json'), 'utf8')); } catch (e) { rep = null; }
 			const row = rows.get(rel) || null;
-			out.push({ id, rel, level: path.join(lvDir, rel + '.eelvl'), eetas: path.join(d, f), lb: rep ? rep.lb : row ? row.lb : null, best: row ? row.best : null, compiled: rep ? rep.runTicks : null, pass: sub.endsWith('_A') ? 'A60' : 'C180' });
+			const alt = argv.routes ? path.join(argv.routes, id + '.eetas') : null;
+			out.push({ id, rel, level: path.join(lvDir, rel + '.eelvl'), eetas: alt && fs.existsSync(alt) ? alt : path.join(d, f), from: alt && fs.existsSync(alt) ? 'routes' : 'compiled', lb: rep ? rep.lb : row ? row.lb : null, best: row ? row.best : null, compiled: rep ? rep.runTicks : null, pass: sub.endsWith('_A') ? 'A60' : 'C180' });
 		}
 	}
 	return out.sort((a, b) => a.rel.localeCompare(b.rel));
@@ -87,15 +89,17 @@ function agg() {
 	for (const f of fs.readdirSync(argv.agg).filter((f) => /^joins_\d+\.jsonl$/.test(f))) for (const l of fs.readFileSync(path.join(argv.agg, f), 'utf8').split('\n')) if (l.trim()) rows.push(JSON.parse(l));
 	rows.sort((a, b) => a.rel.localeCompare(b.rel));
 	const r2 = (x) => (Number.isFinite(x) ? (Math.round(x * 100) / 100).toFixed(2) : '-');
-	console.log('| level | pass | before | after | saved | best known | before / best | after / best | route lb | after / lb | legs (proven) | proven ticks | passes | wall s |');
-	console.log('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---:|');
-	let sb = 0, sa = 0, pr = 0, lg = 0;
+	console.log('| level | pass | compiled | before | after | saved | best known | before / best | after / best | route lb | after / lb | legs (proven) | proven ticks | passes | wall s |');
+	console.log('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---:|');
+	let sb = 0, sa = 0, pr = 0, lg = 0, sc = 0;
 	for (const r of rows) {
 		if (r.error) { console.log(`| ${r.rel} | ${r.pass} | ERROR ${r.error.split('\n')[0]} |`); continue; }
-		sb += r.before; sa += r.after; pr += r.proven; lg += r.legs;
-		console.log(`| ${r.rel} | ${r.pass} | ${r.before} | **${r.after}** | ${r.saved} | ${r.best || '-'} | ${r2(r.best ? r.before / r.best : NaN)} | ${r2(r.best ? r.after / r.best : NaN)} | ${r.lb || '-'} | ${r2(r.lb ? r.after / r.lb : NaN)} | ${r.legs} (${r.proven}) | ${r.provenTicks} | ${(r.passes || []).map((p) => p.to).join(' > ')} | ${Math.round(r.wall / 100) / 10} |`);
+		sb += r.before; sa += r.after; pr += r.proven; lg += r.legs; sc += r.compiled || r.before;
+		console.log(`| ${r.rel} | ${r.pass} | ${r.compiled} | ${r.before} | **${r.after}** | ${r.saved} | ${r.best || '-'} | ${r2(r.best ? r.before / r.best : NaN)} | ${r2(r.best ? r.after / r.best : NaN)} | ${r.lb || '-'} | ${r2(r.lb ? r.after / r.lb : NaN)} | ${r.legs} (${r.proven}) | ${r.provenTicks} | ${(r.passes || []).map((p) => p.to).join(' > ')} | ${Math.round(r.wall / 100) / 10} |`);
 	}
-	console.log(`\nall: ${rows.length} levels, before ${sb}, after ${sa} (saved ${sb - sa}), legs ${lg}, proven ${pr}`);
+	const med = (a) => { const b = a.filter(Number.isFinite).sort((x, y) => x - y); return b.length ? (b.length % 2 ? b[b.length >> 1] : (b[b.length / 2 - 1] + b[b.length / 2]) / 2) : NaN; };
+	const wb = rows.filter((r) => r.best && !r.error);
+	console.log(`\nall: ${rows.length} levels, compiled ${sc}, before ${sb}, after ${sa} (saved ${sb - sa}; ${sc - sa} from the compile), legs ${lg}, proven ${pr}; median / best known over ${wb.length}: compiled ${r2(med(wb.map((r) => r.compiled / r.best)))}, before ${r2(med(wb.map((r) => r.before / r.best)))}, after ${r2(med(wb.map((r) => r.after / r.best)))}; at or under the best known: ${wb.filter((r) => r.after <= r.best).length}`);
 }
 
 if (argv.agg) agg();
