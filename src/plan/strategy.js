@@ -82,6 +82,8 @@ const PROVE_ROUNDS = 12;
 // (lane 5, TAS-perfect) a route of more than PROVE_SHORT ticks after its first input: the proof at most PROVE_LONG_MS (then
 // THE LAST polishes); EEAT_POLISH_LAST=0: the proof takes all the time left, as before
 const PROVE_SHORT = 600, PROVE_LONG_MS = 3000;
+// (lane 5) a route of at most PROVE_TINY run ticks: the moves stop PROVE_TINY_F of the budget before its end (the proof's)
+const PROVE_TINY = 100, PROVE_TINY_F = 0.5, PROVE_TINY_ON = process.env.EEAT_PROVE_TINY !== '0';
 // exploration steps (the second stall on): frontier tiles within FRONTIER_STEPS walk steps of an anchor, at most FRONTIER_MAX
 const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
@@ -342,6 +344,11 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return -1;
 	})();
 	if (proveOn && restIdle >= 0) { proveReserve = Math.min(PROVE_MS, PROVE_F * total); endReserve = polishReserve + proveReserve; }
+	// (lane 5, TAS-perfect: a SHORT route, at most PROVE_TINY run ticks, keeps PROVE_TINY_F of the budget for the proof: its
+	// exhaustive exact searches from the start are within reach and find the faster routes too (Switch Labyrinth at 300 s:
+	// the moves found 32 at ~3 s and nothing in 205 s more; the proof then found 27 (5 rounds of -1) and proved 26 of its 39
+	// starts in 76 s, the 27th at the exact bound 27 of the 28 needed when its share ran out). EEAT_PROVE_TINY=0: off)
+	const endRes = () => endReserve + (best && proveOn && restIdle >= 0 && PROVE_TINY_ON && best.runTicks <= PROVE_TINY ? Math.max(0, PROVE_TINY_F * total - proveReserve) : 0);
 	let lbPlanner = 0, lbBounds = 0, lbComplete = false, lbInf = false;
 	// (a part that overruns its own budget cannot be cut here (a synchronous call): the call is timed, and one that took
 	// LB_SLOW_MS or more is not made again this compile (the arrivals' bounds, the refresh at the end))
@@ -607,7 +614,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		// on big levels (Moving Ice Puzzle 67%, Unforgiving Climb 34%, The Glitch 34%: every re-plan a 2.0-s gap in the event
 		// log, the workers' answers waiting in it). EEAT_REPLAN_FIRST=1: the rule before)
 		const firstPlan = REPLAN_FIRST ? !A.plans : !A.planned;
-		const planMs = Math.max(100, Math.min((firstPlan && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endReserve : 0)) / 4));
+		const planMs = Math.max(100, Math.min((firstPlan && anchors.size <= 1 ? 2000 : 300) * (1 << Math.min(4, A.budgetCuts || 0)), (left() - (best ? endRes() : 0)) / 4));
 		A.planned = true;
 		const tp = Date.now();
 		try { r = planner.plan(anchorArg(A), { k: 3, depth: depthOf(A), runBound: rb, tickBound, epoch, ms: planMs }); } catch (e) { bug('plan', { error: e.message, anchor: A.id }); r = { plans: [], why: `error: ${e.message}` }; }
@@ -663,7 +670,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	/** a step's budget: its rung's x 2^deepenings, capped by the time left (the polish's reserve kept once a route is known) */
 	const budgetOf = (rung) => {
 		const r = Math.max(0, Math.min(rungMs.length - 1, rung | 0));
-		const room = left() - (best ? endReserve : 0) - 100;
+		const room = left() - (best ? endRes() : 0) - 100;
 		const ms = Math.max(50, Math.min(rungMs[r] * mult, room));
 		const deadline = Date.now() + ms;
 		// (fast: before the first route a found leg's tightening is capped by the time it took to find it: executor.js RATE_ON)
@@ -902,7 +909,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 		return j;
 	};
 	const deepen = (why) => {
-		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endReserve : 0)) return false;
+		if (deepenings >= maxDeepen || rungMs[0] * mult * 2 > left() - (best ? endRes() : 0)) return false;
 		deepenings++; epoch++; mult *= 2;
 		try { if (facts && typeof facts.reset === 'function') facts.reset({ keepProofs: true, boost: 2 }); } catch (e) { bug('reset', { error: e.message }); }
 		for (const A of anchors.values()) { if (A.why !== 'bound') { A.exhausted = false; A.why = ''; } A.plans = null; }
@@ -1005,10 +1012,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 			if (left() <= 0) { end = 'time'; break; }
 			if (best && opts.first) { end = 'finish'; break; }
 			// (a route known: the moves stop where the polish's reserve begins)
-			if (best && left() <= endReserve && !inflight.size) { end = 'time'; break; }
+			if (best && left() <= endRes() && !inflight.size) { end = 'time'; break; }
 			if (anchors.size !== anchorsSeen || best !== bestSeen) { anchorsSeen = anchors.size; bestSeen = best; progressAt = Date.now(); }
 			if (stallEnd && Date.now() - progressAt > stallEnd) { end = 'stalled'; break; }
-			while (inflight.size < P && !(best && left() <= endReserve)) {
+			while (inflight.size < P && !(best && left() <= endRes())) {
 				const job = exploreQ.length ? exploreQ.shift() : nextJob();
 				if (!job) break;
 				const ek = edgeKey(job.step);
@@ -1023,7 +1030,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 				// (every anchor exhausted: a global deepening; nothing new since the last one, or no deepening left: the
 				// fallbacks (a direct trophy step, then the frontier) while time is left; else the end)
 				if (exploreQ.length) continue;
-				if (left() < 250 || (best && left() <= endReserve)) { end = 'time'; break; }
+				if (left() < 250 || (best && left() <= endRes())) { end = 'time'; break; }
 				if (nothingSince >= 0 && nothingSince === steps) { const fb = fallbackJob(); if (fb) { exploreQ.push(fb); continue; } end = 'exhausted'; break; }
 				nothingSince = steps;
 				// (a deepening refused for the clock alone (its doubled first rung past the time left) is no exhaustion: the
