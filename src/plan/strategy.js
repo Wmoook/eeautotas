@@ -533,7 +533,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 	const inflight = new Map();   // edgeKey -> {promise, job, started, budgetMs}
 	let cur = null;   // the last plan (the page's line)
 	const bug = (what, o) => { bugs++; say(Object.assign({ ev: 'bug', what }, o || {})); };
-	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A), qual: A.qual || null });
+	const anchorArg = (A) => ({ arrival: A.arrivals[0], arrivals: A.arrivals, S: A.S, key: A.key, tick: A.firstTick, run: runMinOf(A), qual: A.qual || null, via: A.edgeVia || null });
 	/** an anchor that cannot lead to a route that beats the bounds: every arrival's run ticks already at the B&B bound, or
 	 *  its ticks at the depth bound (proofs: a route through it is at least that long) */
 	const uselessA = (A) => {

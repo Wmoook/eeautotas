@@ -44,6 +44,29 @@ const KEY_TICKS = 500;
 // EEAT_SKEL_CLOSEST): EEAT_PLAN_NEAR=K (K near plans; 0: off, the planner as before)
 const NEAR_K = process.env.EEAT_PLAN_NEAR !== undefined ? Math.max(0, +process.env.EEAT_PLAN_NEAR | 0) : 1;
 const NEAR_RUNG = process.env.EEAT_NEAR_RUNG !== '0';   // (the rung balance of the near plans: nearPlans; EEAT_NEAR_RUNG=0 off)
+// THE CROSS-CLASS FAILURE PRICE (n5 doctor b9; OPT-IN EEAT_PLAN_FAILEST=<ticks a failed rung>, 0 / unset: off, the planner
+// as before): the facts' rung ladder is per (edge, node class), and the node class is the whole abstract state (every
+// switch, the checkpoint) + the start's speed, so a leg that failed every rung from one anchor comes back at rung 0, 1, 2,
+// 3 from the next anchor, and the plan search, pricing it by the est walk alone, puts it first again (Bad EE Level 9, 180 s:
+// purple switch 3's mini (a low-gravity spike corridor) failed its 45-s rung from the start, then from the mini's own
+// entrance at the same closest (40.6 tiles, (130,160)), then from 4 more anchors: 17 steps, 190 of the 360 worker-s, never
+// reached, while its sibling minis waited). Every failed rung of an edge from ANY class (facts.failsAny) adds FAIL_EST
+// ticks to its est unless some class reached it (facts.okAnyOf): an untried sibling goes first, a hard leg comes back
+// after the others' rungs (iterative deepening across the plan's independent steps). Ordering only (the est; the lb, the
+// proofs and the blocks untouched).
+const FAIL_EST = process.env.EEAT_PLAN_FAILEST !== undefined ? Math.max(0, +process.env.EEAT_PLAN_FAILEST || 0) : 0;
+// THE TOGGLE-BACK (n5 doctor b9; OPT-IN EEAT_PLAN_UNTOGGLE=1, else the planner as before): a purple / orange switch toggles,
+// so touching the trigger that just turned a switch ON (the plan node's own entering edge, or the anchor's arrival edge:
+// strategy anchorArg `via`), or its reset, turns it OFF again: the abstract state goes back to the one before (a no-op
+// pair), only the ball's modelled position moved. The plan search's alternatives (plans 2 and 3 exclude the best plan's
+// first edge) took exactly such pairs ("purple switch 2 > purple switch 2 > blue key", "purple switch 1 > purple switch 1
+// > blue key"), and the strategy ran their first step: a leg whose start stands ON the switch (closest "0 tiles",
+// 'exhausted' at rungs 0 and 1) or, when found, an anchor that UNDID the progress (Bad EE Level 9, 180 s: 5 such steps,
+// one 'purple switch 2' arrival with switch 2 off again); the near rule offered the reset next to it ("purple reset 2
+// (66,86)", lb 0). Such an edge is skipped where it undoes the node's / anchor's own last toggle. Ordering only: a
+// toggle-back after any other trigger stays an edge (a plan may need a switch off later), the lb and the proofs untouched.
+const UNTOGGLE = process.env.EEAT_PLAN_UNTOGGLE === '1';
+const TOGGLE_FEAT = /^(psw|osw):\d+$/;
 // the floor probe's time (steer.js buildSteer on a level with count gates: the plan the steer's physics layers walk, run
 // again with the gates the model leaves open as floors; env EEAT_PLAN_FLOOR=0: off)
 const FLOOR_MS = +process.env.EEAT_PLAN_FLOOR_MS || 8000;
@@ -423,7 +446,10 @@ function createPlanner(model, facts, o = {}) {
 		const live = (k) => (S.feats[k] !== undefined ? S.feats[k] : 0);
 		const base = { coins: live('coins'), bcoins: live('bcoins'), deaths: live('deaths') };
 		if (sim) { base.coins = Math.min(base.coins, sim._show_coin_gate | 0); base.bcoins = Math.min(base.bcoins, sim._show_blue_coin_gate | 0); base.deaths = Math.min(base.deaths, sim._show_death_gate | 0); }
-		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr };
+		// (the toggle the anchor's own arrival edge made: UNTOGGLE)
+		let viaX = null;
+		if (UNTOGGLE && anchor.via) { const m = /^trig:(\d+)$/.exec(String(anchor.via)); const X = m ? model.triggers[+m[1]] : null; if (X && TOGGLE_FEAT.test(String(X.feat))) viaX = X; }
+		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr, viaX };
 	}
 	// ---------------------------------------------------------------- edges
 	const hasCG = model.hasCoinGate.coins || model.hasCoinGate.bcoins;
@@ -496,6 +522,10 @@ function createPlanner(model, facts, o = {}) {
 					if (facts.needsOf(edge, cls).some((n) => S.feats[n.feat] !== n.value)) return;
 					const ok = facts.okTicks(edge, cls);
 					if (ok !== undefined) g.est = Math.max(g.lb, ok);
+					else if (FAIL_EST > 0 && typeof facts.failsAny === 'function') {
+						const fa = facts.failsAny(edge);
+						if (fa > 0 && !facts.okAnyOf(edge)) { g.est += FAIL_EST * fa; ST.failEst = (ST.failEst || 0) + 1; }
+					}
 				}
 				if (X === null) { for (const n of floorNeeds) if (!((S.feats[n.feat] || 0) >= n.min)) { g.est += PENALTY; break; } }
 				else if (floorNeeds.length && zoneNeed(S, tiles)) g.est += PENALTY;
@@ -659,6 +689,17 @@ function createPlanner(model, facts, o = {}) {
 		ST.lbExpands += expanded; ST.lbMs += Date.now() - t0;
 		return { ticks, complete, expanded, ms: Date.now() - t0 };
 	}
+	/** UNTOGGLE: edge e from state S toggles back the switch feature enterFeat that the node's entering edge (or the
+	 *  anchor's arrival) toggled: a no-op pair on the abstract state (on -> off -> on, or off -> on -> off) */
+	function untoggles(e, S, enter) {
+		if (!enter || !e || !e.X || !e.S2) return false;
+		const f = e.X.feat;
+		if (f !== enter.feat || !TOGGLE_FEAT.test(String(f))) return false;
+		// (the same trigger component again, or a reset of that switch: another component of the same switch id is a real
+		// move (a door passed with the switch on, then off again: test/planplanner.js toggle2))
+		if (e.X.id !== enter.id && e.X.kind !== 'pswR' && e.X.kind !== 'oswR') return false;
+		return S.feats[f] !== e.S2.feats[f];
+	}
 	// ---------------------------------------------------------------- the plan search
 	function search(a, po, exclude) {
 		const t0 = Date.now();
@@ -702,6 +743,7 @@ function createPlanner(model, facts, o = {}) {
 			}
 			for (const e of es) {
 				if (isRoot && exclude.has(e.edge)) continue;
+				if (UNTOGGLE && untoggles(e, n.S, n.e && n.e.X ? n.e.X : isRoot ? a.viaX : null)) { ST.untoggled = (ST.untoggled || 0) + 1; continue; }
 				const g2 = n.g + e.est, gl2 = n.gl + e.lb;
 				if (!e.X) {
 					if (gl2 >= budget) { pruned++; continue; }
@@ -941,7 +983,7 @@ function createPlanner(model, facts, o = {}) {
 		// T-PLAN-ORACLE unchanged by construction (it fires only after a failed rung): 619 plans, 0 / 0.
 		// EEAT_NEAR_RUNG=0: only untried triggers, as before)
 		const rCap = NEAR_RUNG ? rMin : 1;
-		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) < rCap)
+		const cands = es.filter((e) => e.X && !e.relaxOnly && !e.viaDeath && e.edge !== s0.edge && !used.has(e.edge) && e.lb < lb0 && facts.rungOf(e.edge, cls) < rCap && !(UNTOGGLE && untoggles(e, a.S, a.viaX)))
 			.sort((x, y) => (NEAR_RUNG ? facts.rungOf(x.edge, cls) - facts.rungOf(y.edge, cls) : 0) || x.lb - y.lb || x.est - y.est);
 		const out = [];
 		const root = { S: a.S, pos: a.pos, e: null, parent: null };
