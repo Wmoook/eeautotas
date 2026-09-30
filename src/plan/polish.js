@@ -68,13 +68,18 @@ function mutatePass(L, masks, o) {
 	const shortcuts = [];
 	let ticks = 0;
 	const from = Math.max(0, o.from | 0);
-	sim.restore(snaps[Math.floor(from / 64)]);
-	for (let u = Math.floor(from / 64) * 64; u < from; u++) { E.applyMask(inp, masks[u]); sim.tick(inp); }
+	// (o.ranges: [a, b) spans of start ticks to search, in order; else every tick from o.from)
+	const ranges = Array.isArray(o.ranges) && o.ranges.length ? o.ranges : [[from, n - 1]];
 	const seen = new Set();
 	let t = from, timeUp = false;
 	const pre = new Uint8Array(2);
-	for (; t < n - 1; t++) {
-		if ((t & 15) === 0 && (Date.now() > deadline || (stop !== null && stop()))) { timeUp = true; break; }
+	outer: for (const [ra0, rb0] of ranges) {
+	const ra = Math.max(0, ra0), rb = Math.min(rb0, n - 1);
+	if (ra >= rb) continue;
+	sim.restore(snaps[Math.floor(ra / 64)]);
+	for (let u = Math.floor(ra / 64) * 64; u < ra; u++) { E.applyMask(inp, masks[u]); sim.tick(inp); }
+	for (t = ra; t < rb; t++) {
+		if (Date.now() > deadline || ((t & 15) === 0 && stop !== null && stop())) { timeUp = true; break outer; }
 		if (!sim.is_dead) {
 			const sT = sim.snapshot();
 			seen.clear();
@@ -116,6 +121,7 @@ function mutatePass(L, masks, o) {
 		}
 		E.applyMask(inp, masks[t]); sim.tick(inp);
 	}
+	}
 	return { shortcuts, ticks, next: t, timeUp };
 }
 /** the best set of non-overlapping shortcuts (weighted interval scheduling over the route's ticks) */
@@ -131,6 +137,18 @@ function bestShortcutSet(n, shortcuts) {
 	const out = [];
 	for (let k = n; k > 0;) { const c = how[k]; if (c) { out.push(c); k = c.t; } else k--; }
 	return out.reverse();
+}
+/** the spans the shortcuts' inputs take in the spliced route, each widened by m ticks, merged */
+function spansOf(set, m, n) {
+	const out = [];
+	let shift = 0;
+	for (const c of set) {
+		const a = c.t - shift, b = a + c.ins.length;
+		const lo = Math.max(0, a - m), hi = Math.min(n, b + m);
+		if (out.length && lo <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], hi); else out.push([lo, hi]);
+		shift += (c.j - c.t) - c.ins.length;
+	}
+	return out;
 }
 /** the route with the shortcuts (sorted, non-overlapping) spliced in */
 function spliceShortcuts(masks, set) {
@@ -195,21 +213,25 @@ function polishRoute(L, masks0, o) {
 	// its shortcuts one at a time, the largest first); passes while they find time and there is time (o.mutShare of it)
 	if (!o.noMutate) {
 		const mEnd = Math.min(deadline, Date.now() + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - Date.now()));
-		for (let pass = 0; pass < 8 && Date.now() < mEnd; pass++) {
+		// (the first pass searches every tick; a later one only around the spans the last one spliced in: elsewhere the route
+		// has the same states, so the same moves rejoin the same way, except into the new spans' own states)
+		let ranges = null;
+		for (let pass = 0; pass < 64 && Date.now() < mEnd; pass++) {
 			const cur = best.ms;
-			const mp = mutatePass(L, cur, { deadline: mEnd, stop, horizon: o.horizon, drift: o.drift });
+			const mp = mutatePass(L, cur, { deadline: mEnd, stop, horizon: o.horizon, drift: o.drift, ranges });
 			if (!mp.shortcuts.length) break;
 			const set = bestShortcutSet(cur.length, mp.shortcuts);
 			const saved = set.reduce((a, c) => a + c.saved, 0);
-			if (!accept(spliceShortcuts(cur, set), `mutate ${set.length} (${saved})`)) {
-				let any = false;
+			let applied = null;
+			if (accept(spliceShortcuts(cur, set), `mutate ${set.length} (${saved})`)) applied = set;
+			else {
 				for (const c of mp.shortcuts.slice().sort((x, y) => y.saved - x.saved).slice(0, 64)) {
 					if (Date.now() > mEnd) break;
-					if (accept(spliceShortcuts(best.ms === cur ? cur : cur, [c]), `mutate 1 (${c.saved})`)) { any = true; break; }
+					if (accept(spliceShortcuts(cur, [c]), `mutate 1 (${c.saved})`)) { applied = [c]; break; }
 				}
-				if (!any) break;
 			}
-			if (mp.timeUp) break;
+			if (!applied || mp.timeUp) break;
+			ranges = spansOf(applied, 100, best.ms.length);
 		}
 	}
 	// (b) + (c) the windows, from the end backwards
@@ -371,4 +393,4 @@ function polishLeg(L, start, tail0, goal, o) {
 	return { tail, saved: tail0.length - tail.length, windows, ms: Date.now() - t0 };
 }
 
-module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts };
+module.exports = { polishRoute, polishLeg, traceRoute, mutatePass, bestShortcutSet, spliceShortcuts, spansOf };
