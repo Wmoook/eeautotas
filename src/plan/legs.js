@@ -50,6 +50,38 @@ const fxWord = (sim) => (sim.low_gravity ? 1 : 0) | (sim.has_levitation ? 2 : 0)
 	((sim.speed_boost & 3) << 7) | (((sim.max_jumps === 1 ? 0 : (sim.max_jumps & 63) + 1)) << 9) | (sim.is_invulnerable ? 1 << 16 : 0) |
 	(sim.is_cursed ? 1 << 17 : 0) | (sim.is_poisoned ? 1 << 18 : 0) | (sim.is_on_fire ? 1 << 19 : 0);
 
+// THE QUEUE CELL (COMPILER DOCTOR b9, n5; OPT-IN EEAT_Q_CELL=1, off = the cells as before): the engine's gravity queue
+// (eesim.js _q0 / _q1: the tiles whose pull acts this tick and next) is no part of a cell either, so a ball entering a
+// ladder / dot / arrow / liquid row from the air and one already in it share a cell for the 1-2 ticks their pulls differ.
+// A word only while the two queued pulls differ (a transition): steady states keep their cells. Bad EE Level 9's mini 5
+// (a ladder maze between spike columns; tools/cmp/legab.js from its entrance, box 6): 3 of 3 at rung 2 either way, the
+// leg 571 ticks with it vs 884 without (EEAT_FX_FIELD=1: 0 of 3 at rungs 1-3).
+const Q_CELL = process.env.EEAT_Q_CELL === '1';
+const pullOf = (L, t) => ((Math.round(L.gMox[t] * 64) & 0x3ff) | ((Math.round(L.gMoy[t] * 64) & 0x3ff) << 10) | ((L.gFlags[t] & 2) << 19));
+/** the gravity queue's transition word (0 = both queued tiles pull alike) */
+const qWord = (sim) => {
+	const L = sim.level;
+	if (!L || !L.gMox) return 0;
+	const a = pullOf(L, sim._q0), b = pullOf(L, sim._q1);
+	return a === b ? 0 : ((a * 0x9e3779b1) ^ b) | 1;
+};
+
+// THE KEY CELL (COMPILER DOCTOR b9, n5; OPT-IN EEAT_KEY_CELL=1, off = the cells as before): a held key runs out 500 ticks
+// after its last pickup (eesim.js _kt), and dkOf has only which keys are held: a ball that took the key late (much time
+// left) and one that took it early (about to run out: a key GATE opens, a key DOOR shuts) share a cell. A word per held key:
+// its time left in 50-tick buckets. No key held: the cells as before. Bad EE Level 9's mini 1 (blue keys, key doors and
+// gates around its switch; legab from its entrance): 3 of 3 at rung 2 either way (367 vs 361 ticks): no gain shown.
+const KEY_CELL = process.env.EEAT_KEY_CELL === '1';
+const KEY_BUCKET = 50;
+/** the held keys' time-left word (0 = no key held) */
+const keyWord = (sim) => {
+	const m = sim._keysMask | 0;
+	if (m === 0 || !sim._kt) return 0;
+	let w = 0;
+	for (let c = 0; c < 6; c++) if (m & (1 << c)) w = Math.imul(w ^ (c + 1), 0x01000193) ^ Math.max(0, Math.floor((500 - (sim._ticks - sim._kt[c])) / KEY_BUCKET));
+	return w | 1;
+};
+
 /** the fine cell of the state in sim (a number: FNV over the cell's parts) */
 function cellOf(sim, disc) {
 	let h = 0x811c9dc5 | 0;
@@ -59,6 +91,8 @@ function cellOf(sim, disc) {
 	// (EEAT_CELL_ZERO=1: the state at rest on the tile grid, per axis, a cell of its own, as legBest's cellKey)
 	if (ZERO_CELL) { const ax = sim.speed_x === 0 && sim.px % 16 === 0, ay = sim.speed_y === 0 && sim.py % 16 === 0; if (ax || ay) mix(0x7f00 | (ax ? 1 : 0) | (ay ? 2 : 0)); }
 	if (FX_CELL) { const f = fxWord(sim); if (f !== 0) mix(0x5a000000 | f); }
+	if (Q_CELL) { const q = qWord(sim); if (q !== 0) { mix(0x5b000000); mix(q); } }
+	if (KEY_CELL) { const k = keyWord(sim); if (k !== 0) { mix(0x5c000000); mix(k); } }
 	// (a second word so that two cells share a number only by a 52-bit accident)
 	let g = 0x2545f491 | 0;
 	g ^= Math.floor(sim.px * 7) | 0; g = Math.imul(g, 0x5bd1e995); g ^= Math.floor(sim.py * 3) | 0; g = Math.imul(g, 0x5bd1e995);
@@ -522,6 +556,8 @@ function legBest(L, starts, goal, o) {
 		} else { mix(Math.floor(sim.px * q0) | 0); mix(Math.floor(sim.py * q1) | 0); mix(Math.floor(sim.speed_x * q2) | 0); mix(Math.floor(sim.speed_y * q3) | 0); }
 		mix((sim.on_ground ? 1 : 0) | ((sim.jump_count & 255) << 1) | (sim.is_dead ? 512 : 0) | (CLOCK && sim._timedoor_state ? 1024 : 0));
 		if (FX_CELL) { const f = fxWord(sim); if (f !== 0) mix(0x5a000000 | f); }
+		if (Q_CELL) { const q = qWord(sim); if (q !== 0) { mix(0x5b000000); mix(q); } }
+		if (KEY_CELL) { const k = keyWord(sim); if (k !== 0) { mix(0x5c000000); mix(k); } }
 		ka = h; kb = dkOf(sim) | 0;
 	};
 	const goals = [];
