@@ -73,6 +73,7 @@ const DOTS = new Set([4, 414]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const PORTALS = new Set([242, 381]);
 const TELEPORT_PX = 20;
+const SPEED_PX = 20;                     // the most the centre moves in a tick an axis without a teleport (16 + the align)
 let FS_ = null;
 /** the field leg solver (src/math/fieldsolve.js), loaded on first use */
 const FSOLVE = () => FS_ || (FS_ = require('../math/fieldsolve.js'));
@@ -168,8 +169,33 @@ function createSolver(L, opts = {}) {
 	const sim = new E.EESim(L), inp = new E.EEInput();
 	sim.reset();
 	const KMAX = opts.K === undefined ? 2 : opts.K;
-	// the certificate's tile test (opts.certTiles false: the rectangle alone, the first version)
-	const certTiles = opts.certTiles !== false;
+	// the certificate's tile test (opts.certTiles false: the rectangle alone, the first version) and its speed-limit
+	// refinement (opts.certSpeed false: off): a field tile the ball could reach first still leaves the bound when the
+	// way on from it to the target at the speed limit ends at lb or later. The limit holds while no tile the ball could
+	// meet teleports it (a portal) or kills it (a respawn: a killer, an effect with a timer): STRICT tiles, counted by a
+	// summed-area table of the level's static tiles
+	const certTiles = opts.certTiles !== false, certSpeed = opts.certSpeed !== false;
+	const strictSAT = new Int32Array((W + 1) * (Hh + 1));
+	{
+		KN.flagsOf(flags.length - 1);
+		const gt = KN.gravTables();
+		const strictId = (id) => PORTALS.has(id) || EFFECT_IDS.has(id) || (id < gt.flags.length && (gt.flags[id] & 4) !== 0) || !!(L.gFlags && (L.gFlags[id] & 4) !== 0);
+		for (let y = 0; y < Hh; y++) {
+			let row = 0;
+			for (let x = 0; x < W; x++) {
+				const id = L.fg[y * W + x];
+				if (strictId(id)) row++;
+				strictSAT[(y + 1) * (W + 1) + x + 1] = strictSAT[y * (W + 1) + x + 1] + row;
+			}
+		}
+	}
+	/** the strict tiles in columns [x0, x1] x rows [y0, y1] (clamped to the world) */
+	function strictIn(x0, y0, x1, y1) {
+		x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W - 1, x1); y1 = Math.min(Hh - 1, y1);
+		if (x1 < x0 || y1 < y0) return 0;
+		const S = strictSAT, R = W + 1;
+		return S[(y1 + 1) * R + x1 + 1] - S[y0 * R + x1 + 1] - S[(y1 + 1) * R + x0] + S[y0 * R + x0];
+	}
 	// the per-state solid map: 0 free, 1 solid, 3 one-way (a floor from above only), 4 half block (solid, conservative)
 	const base = new Uint8Array(N);
 	const doorTiles = [];
@@ -724,8 +750,10 @@ function createSolver(L, opts = {}) {
 	 * lies in the rectangle the plain extremes reach (x: hold L / hold R, y: the jump's apex to the fall), so the bound
 	 * holds for EVERY input sequence (a field, boost or portal the ball could reach first would void it)
 	 */
-	function certify(s, b, ctx) {
+	function certify(s, b, ctx, tg) {
 		if (b <= 0 || b > HOLD_T) return false;
+		// a timed killer running (a curse, a zombie, fire, poison): its death respawns the ball elsewhere, no bound
+		if (s.is_cursed || s.is_zombie || s.is_on_fire || s.is_poisoned) return false;
 		const G = K1.ga(ctx), Hd = holdTables(ctx);
 		let xlo = s.px, xhi = s.px;
 		for (let n = 1; n <= b; n++) {
@@ -748,6 +776,16 @@ function createSolver(L, opts = {}) {
 		// holds for every input sequence
 		const tiles = s.tiles, I = K1.ia(ctx);
 		const txc = new Map(), tyr = new Map();
+		// THE SPEED LIMIT: every speed is capped at 16 px/tick after the drag (boosts set 16), the sub-steps move by the
+		// speed, the align by < 2 px: the centre moves at most SPEED_PX a tick an axis unless a portal teleports it or a
+		// death respawns it; with no strict tile inside the box the ball can reach at that limit in b ticks, a path that
+		// first leaves the plain regime at a field tile u still needs max(tx, ty)(u) + the gap from u to a target tile
+		// at the limit
+		let refine = false;
+		if (certSpeed && tg && tg.tiles && tg.tiles.length) {
+			const R = SPEED_PX * b;
+			refine = strictIn(Math.floor((s.px - R) / 16), Math.floor((s.py - R) / 16), Math.floor((s.px + 16 + R) / 16), Math.floor((s.py + 16 + R) / 16)) === 0;
+		}
 		for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) {
 			const id = tiles[cy * W + cx];
 			if ((flags[id] & F_SOLID) !== 0) continue;
@@ -759,9 +797,21 @@ function createSolver(L, opts = {}) {
 			let tx = txc.get(cx);
 			if (tx === undefined) { tx = txOf(s, I, cx); txc.set(cx, tx); }
 			if (tx >= b) continue;
+			if (refine && Math.max(tx, ty) + gapTicks(cx, cy, tg) >= b) continue;
 			return false;
 		}
 		return true;
+	}
+	/** the least ticks from anywhere in tile (cx, cy) to a target tile's centre range at the speed limit */
+	function gapTicks(cx, cy, tg) {
+		let best = Infinity;
+		for (const t of tg.tiles) {
+			const tc = t % W, tr = (t / W) | 0;
+			const gx = Math.max(0, 16 * Math.abs(cx - tc) - 16), gy = Math.max(0, 16 * Math.abs(cy - tr) - 16);
+			const n = Math.ceil(Math.max(gx, gy) / SPEED_PX);
+			if (n < best) best = n;
+		}
+		return Number.isFinite(best) ? best : 0;
 	}
 	function minTo(x0, v0, X, mi, I) {
 		let x = x0, v = v0;
@@ -811,7 +861,7 @@ function createSolver(L, opts = {}) {
 		const oo = Object.assign({ Tmax: opts.Tmax || 120 }, o);
 		const ctx = plainStart(sim);
 		const lb = ctx && !target.tele ? lowerBoundOf(sim, tg, ctx) : 0;
-		const cert = lb > 0 && certify(sim, lb, ctx);
+		const cert = lb > 0 && certify(sim, lb, ctx, tg);
 		let res = { ok: false, why: ctx ? 'no candidate' : 'not plain' };
 		if (ctx && oo.plain !== false) {
 			if (tg.via) {
@@ -1009,7 +1059,7 @@ function createSolver(L, opts = {}) {
 			const c = plainStart(sim);
 			if (c && !tg.tele) {
 				b = lowerBoundOf(sim, tg, c);
-				if (b > 0 && !certify(sim, b, c)) uncert = true;
+				if (b > 0 && !certify(sim, b, c, tg)) uncert = true;
 			}
 			let ord = b;
 			if (rf) {

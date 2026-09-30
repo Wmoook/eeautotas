@@ -118,10 +118,12 @@ boundCheck(L, S, starts, 'the room');
 	const at = (c, dx, vx) => { const s = new E.EESim(L2); s.restore(s2.snapshot()); s.px = 16 * c + dx; s.speed_x = vx; const q = new E.EEInput(); E.applyMask(q, 0); s.tick(q); return s.snapshot(); };
 	const starts2 = [['the spawn', s2.snapshot()], ['col 6 at rest', at(6, 0, 0)], ['col 28 at rest', at(29, 0, 0)]];
 	const S2 = MS.createSolver(L2, {});
+	const S2t = MS.createSolver(L2, { certSpeed: false });
 	const S2r = MS.createSolver(L2, { certTiles: false });
-	const a = boundCheck(L2, S2, starts2, 'boosts, the tile test');
+	const a = boundCheck(L2, S2, starts2, 'boosts, the tile test + the speed limit');
+	const c = boundCheck(L2, S2t, starts2, 'boosts, the tile test');
 	const b = boundCheck(L2, S2r, starts2, 'boosts, the rectangle alone');
-	ok(a.certN >= b.certN, `the tile test certifies at least what the rectangle does (${a.certN} vs ${b.certN})`);
+	ok(a.certN >= c.certN && c.certN >= b.certN, `each refinement certifies at least what the one before does (${a.certN} >= ${c.certN} >= ${b.certN})`);
 }
 
 // ---------------------------------------------------------------- 3 the fan-out and a chain
