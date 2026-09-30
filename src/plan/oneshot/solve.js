@@ -62,6 +62,7 @@ const SEG_T = env('EEAT_OS_SEG', 10);              // an airborne fan edge ends 
 const LEG_FAIL = env('EEAT_OS_LEG_FAIL', 8);       // a waypoint's failed legs before its reach for them halves
 const LAND_AIR = process.env.EEAT_OS_LAND_AIR === '1';
 const LAND_PER = env('EEAT_OS_LAND_PER', 2);
+const LEG_TRY_MIN = env('EEAT_OS_LEG_TRYMIN', 48), LEG_RATE = env('EEAT_OS_LEG_RATE', 32), LEG_SPARSE = env('EEAT_OS_LEG_SPARSE', 16);
 const LEG_NOGAIN = env('EEAT_OS_LEG_NOGAIN', 12);   // a step's legs that changed nothing before it gets no more legs        // landings fan-outs per (abstract state, support tile, speed class)   // the landings fan-out from airborne nodes too
 const CLASS_MODE = String(process.env.EEAT_OS_CLASS || 'fine');   // the support class: 'fine' | 'coarse'
 const FAR_TILES = env('EEAT_OS_FAR', 800);         // the order's tiles where the reach field says 'no way while S holds'
@@ -78,8 +79,15 @@ const CLASS_K_EXACT = env('EEAT_OS_CLASS_KX', 1);  // exact states kept per supp
 // no ladder, the run ends 'done')
 const LADDER = process.env.EEAT_OS_LADDER === '0' ? [[CELL_Q, CELL_QX, CLASS_K, CLASS_K_EXACT]]
 	: [[CELL_Q, CELL_QX, CLASS_K, CLASS_K_EXACT], [4, 2, 2, 2], [2, 1, 4, 4], [1, 1, 8, 16]];
+// THE LADDER PAST A ROUTE (TAS-perfect): an open list that runs out WITH a route (the route optimal within this step's
+// classes: closed) goes on down the ladder with the route as its bound (every node whose claim g + adm reaches it pruned),
+// so each finer step either finds a faster route or closes again: optimal within finer and finer classes, the last 1 px
+// with 8 / 16 exact states a class. EEAT_OS_REFINE_BEST=0: the run ends at the first close (as before).
+const REFINE_BEST = process.env.EEAT_OS_REFINE_BEST !== '0';
 const SEG_NEAR = env('EEAT_OS_SEG_NEAR', 4);       // the fan's segments on the exact tiles
 const SEG_G = env('EEAT_OS_SEG_G', 16);            // a grounded run's segment (a mid-run node: the jump from there)
+const PHASE_T = env('EEAT_OS_PHASE', 50);          // the time doors' phase bucket in the class (ticks; 0: none)
+const FIELDS_MAX = env('EEAT_OS_FIELDS', 48);      // the plan steps' goal fields kept at once (the least recently made go)
 const DOTS = new Set([4, 414]), PORTALS = new Set([242, 381]);
 const EFFECT_IDS = new Set([417, 418, 419, 420, 421, 422, 423, 453, 461, 1517, 1573, 1584, 1618]);
 const F_SOLID = 1, F_LIQUID = 64, F_CLIMB = 32, F_BOOST = 128;
@@ -161,7 +169,7 @@ function createOneShot(L, o = {}) {
 	const landSeen = new Map();       // (S, support tile, speed class) -> the landings fan-outs made there       // S.key -> node id (the earliest)
 	let best = null;                  // {T, id, masks}
 	let w = W1o, phase = W1o === WEND ? 2 : 1;
-	let closed = false, uncert = false;
+	let closed = false, uncert = false, uncertLv = false, closedLevel = -1;
 	let tRun0 = 0, planSpent = 0, runMs = 0;
 
 	// ---------------------------------------------------------------- nodes
@@ -174,13 +182,19 @@ function createOneShot(L, o = {}) {
 		for (let i = parts.length - 1; i >= 0; i--) { out.set(parts[i], at); at += parts[i].length; }
 		return out;
 	}
+	// (THE CLOCK: on a level with time doors the doors' phase is part of the class (goexplore.js's coarse cells: phase
+	// buckets of PHASE_T ticks of the doors' 1000-tick period): without it a ball that waits for a door keeps the class of
+	// its first arrival, the waiting states are all dropped as later arrivals of that class, and the A* never gets past a
+	// shut door (Tutorial 2: 1.1 M expansions in the start room for 300 s while the executor's route waits and goes).
+	// EEAT_OS_PHASE=0: no phase)
+	const phaseK = L.hasTimeDoors && PHASE_T > 0 ? (s) => `|p${((s.level_ticks() % E.TIMEDOOR_PERIOD) / PHASE_T) | 0}` : () => '';
 	const clsKey = CLASS_MODE === 'coarse'
-		? (S, s) => `${S.key}|${T.tileOf(s, W, H)}|${s.on_ground ? 1 : 0}|${Math.round(s.speed_x)}|${Math.round(s.speed_y / 4)}`
+		? (S, s) => `${S.key}|${T.tileOf(s, W, H)}|${s.on_ground ? 1 : 0}|${Math.round(s.speed_x)}|${Math.round(s.speed_y / 4)}${phaseK(s)}`
 		: CLASS_MODE === 'tile'
-			? (S, s) => `${S.key}|${T.tileOf(s, W, H)}|${s.on_ground ? 1 : 0}|${Math.round(s.speed_x * 2)}|${Math.round(s.speed_y / 2)}|${s.jump_count}`
+			? (S, s) => `${S.key}|${T.tileOf(s, W, H)}|${s.on_ground ? 1 : 0}|${Math.round(s.speed_x * 2)}|${Math.round(s.speed_y / 2)}|${s.jump_count}${phaseK(s)}`
 			// (the default: a position cell of CELL_Q px (CELL_QX on the exact tiles: the sub-pixel matters there), the speed in
 			// 1/2 px/tick, ground, the jumps: a class holds CLASS_K states, the earliest)
-			: (S, s) => { const q = exactTile[T.tileOf(s, W, H)] ? lvQX : lvQ; return `${S.key}|${Math.floor(s.px / q)},${Math.floor(s.py / q)},${q}|${s.on_ground ? 1 : 0}|${Math.round(s.speed_x * 2)}|${Math.round(s.speed_y * 2)}|${s.jump_count}`; };
+			: (S, s) => { const q = exactTile[T.tileOf(s, W, H)] ? lvQX : lvQ; return `${S.key}|${Math.floor(s.px / q)},${Math.floor(s.py / q)},${q}|${s.on_ground ? 1 : 0}|${Math.round(s.speed_x * 2)}|${Math.round(s.speed_y * 2)}|${s.jump_count}${phaseK(s)}`; };
 	/** the planner's plans from state S (the node's real state in sim): their first waypoints and the est after them */
 	function infoOf(S, id) {
 		let inf = infos.get(S.key);
@@ -230,10 +244,18 @@ function createOneShot(L, o = {}) {
 		return inf;
 	}
 	/** a step's goal field (the RCH3 field on the level as the abstract state holds its doors), made on first use */
+	// (the fields live in an LRU of FIELDS_MAX: a level of many abstract states made one per plan step of each, and the
+	// thread's memory grew by gigabytes (Level 1 Overworld: 192 states); a field dropped is made again when next asked)
+	const fieldLru = new Map();   // step -> 1, in the order of use (the first the least recently used)
 	function fieldOf(inf, step) {
 		if (step.field === undefined) {
 			try { step.field = T.goalField(inf.Lc, step.tiles, { deaths: deathsField && step.allowDeath }); } catch (e) { step.field = null; }
-		}
+			ST.fields = (ST.fields || 0) + 1;
+			if (step.field) {
+				fieldLru.set(step, 1);
+				if (fieldLru.size > FIELDS_MAX) { const old = fieldLru.keys().next().value; fieldLru.delete(old); if (old !== step) old.field = undefined; }
+			}
+		} else if (step.field && fieldLru.size > FIELDS_MAX >> 1) { fieldLru.delete(step); fieldLru.set(step, 1); }
 		return step.field;
 	}
 	/** the steps a node pursues: its parent's (same abstract state) or the first ones, moved on past the steps whose tiles
@@ -266,8 +288,8 @@ function createOneShot(L, o = {}) {
 			if (c < near) near = c;
 		}
 		let adm = 0;
-		if (bounds) { try { const b = bounds.leg(sim, trophyGoal, { relaxed: true }); adm = Number.isFinite(b) ? Math.max(0, b) : 1e9; } catch (e) { adm = 0; uncert = true; } }
-		else uncert = true;
+		if (bounds) { try { const b = bounds.leg(sim, trophyGoal, { relaxed: true }); adm = Number.isFinite(b) ? Math.max(0, b) : 1e9; } catch (e) { adm = 0; uncert = true; uncertLv = true; } }
+		else { uncert = true; uncertLv = true; }
 		ST.hMs += Date.now() - t0;
 		return { ord, adm, near, wi, si };
 	}
@@ -288,7 +310,7 @@ function createOneShot(L, o = {}) {
 		nodes.push(n);
 		const h = hOf(S, id, par);
 		n.h = h.ord; n.fa = g + h.adm; n.wi = h.wi; n.si = h.si; n.near = h.near; n.f = g + w * h.ord;
-		if (best && n.fa >= best.T) { ST.pruned++; n.snap = null; return null; }
+		if (best && n.fa >= best.T) { ST.pruned++; release(n); return null; }
 		if (!gs) { gs = []; classes.set(ck, gs); }
 		gs.push(g); gs.sort((a, b) => a - b); if (gs.length > K) gs.length = K;
 		if (!firstOfS.has(S.key) || nodes[firstOfS.get(S.key)].g > g) firstOfS.set(S.key, id);
@@ -299,12 +321,19 @@ function createOneShot(L, o = {}) {
 		return n;
 	}
 	/** the open list past its cap: the worse half (by f) dropped */
+	/** a node done with (expanded, stale, pruned, dropped): what only its expansion needed goes (its abstract state kept as
+	 *  its key alone; its edge and parent stay: the routes and arrivals are rebuilt from them) */
+	function release(n) {
+		n.snap = null;
+		if (n.S) n.S = { key: n.S.key };
+		n.si = null; n.ck = '';
+	}
 	function trim() {
 		const a = heap.a.slice().sort((x, y) => x.f - y.f || y.g - x.g);
 		const keep = a.slice(0, NODES_MAX >> 1);
-		for (let i = keep.length; i < a.length; i++) { a[i].snap = null; ST.dropped++; }
+		for (let i = keep.length; i < a.length; i++) { release(a[i]); ST.dropped++; }
 		heap.a = keep; heap.heapify();
-		uncert = true;
+		uncert = true; uncertLv = true;
 	}
 	/** a route: the node reached the trophy after `edge` at its tick g */
 	function routeAt(par, edge, g, kind) {
@@ -411,6 +440,14 @@ function createOneShot(L, o = {}) {
 			if (c < 0 || c > reachT) continue;
 			// (a step whose legs arrive and change nothing (the same abstract state, no new node) LEG_NOGAIN times: no more legs)
 			if ((wp.noGain || 0) >= LEG_NOGAIN) continue;
+			// (a step whose legs almost never come (under 1 in LEG_RATE of LEG_TRY_MIN tries or more): a leg at every LEG_SPARSE-th
+			// node that asks for one: the legs are the dear edge (My level fef0: 908 legs, 2 found, 19.2 of the 19.9 s))
+			if (wp.tries >= LEG_TRY_MIN && wp.oks * LEG_RATE < wp.tries) {
+				// (sparser as the failures grow: every LEG_SPARSE x (tries / (LEG_TRY_MIN x (oks + 1)))-th, at most every 256th)
+				wp.skip = (wp.skip || 0) + 1;
+				const every = Math.min(256, LEG_SPARSE * Math.max(1, Math.floor(wp.tries / (LEG_TRY_MIN * (wp.oks + 1)))));
+				if (wp.skip % every !== 0) continue;
+			}
 			wp.tries++;
 			let r = null;
 			try {
@@ -471,6 +508,7 @@ function createOneShot(L, o = {}) {
 			if (cw && (!ch || ch.S.key === n.S.key)) cw.noGain = (cw.noGain || 0) + 1;
 		}
 		n.snap = null;   // (expanded: its children hold what is needed; the route is rebuilt from the edges)
+		release(n);
 		ST.expandMs += Date.now() - t0;
 	}
 
@@ -487,7 +525,9 @@ function createOneShot(L, o = {}) {
 		level++;
 		[lvQ, lvQX, lvK, lvKX] = LAD[level];
 		classes.clear(); seen.clear(); heap.a = []; landSeen.clear();
-		w = W1o; phase = W1o === WEND ? 2 : 1;
+		// (with a route the finer step orders as A* at once (w = WEND) and prunes by its bound)
+		if (best) { w = WEND; phase = 2; } else { w = W1o; phase = W1o === WEND ? 2 : 1; }
+		uncertLv = !bounds;
 		ST.level = level; ST.refines = (ST.refines || 0) + 1;
 		say({ ev: 'oneshot', what: 'refine', level, q: lvQ, qx: lvQX, k: lvK, kx: lvKX, expanded: ST.expanded });
 		if (!o.noRoot) root();
@@ -507,21 +547,23 @@ function createOneShot(L, o = {}) {
 		while (Date.now() < deadline) {
 			if (ro.stop && ro.stop()) break;
 			if (!heap.size) {
-				if (!best && level + 1 < LAD.length) { refine(); continue; }
+				// (a close with a route: optimal within this step's classes; the ladder goes on with it as the bound)
+				if (best && !uncertLv && level > closedLevel) { closedLevel = level; ST.closedLevel = level; ST.closedT = best.T; say({ ev: 'oneshot', what: 'closed', level, ticks: best.T, expanded: ST.expanded }); }
+				if (level + 1 < LAD.length && (!best || REFINE_BEST)) { refine(); continue; }
 				done = true; break;
 			}
 			const n = heap.pop();
 			if (n.closed || !n.snap) continue;
 			// (stale: its exact state reached sooner since, or its class filled with sooner states)
-			if (seen.get(n.hash) < n.g) { ST.stale = (ST.stale || 0) + 1; n.snap = null; continue; }
+			if (seen.get(n.hash) < n.g) { ST.stale = (ST.stale || 0) + 1; n.snap = null; release(n); continue; }
 			const gs = classes.get(n.ck);
-			if (gs && gs.length >= n.K && gs[n.K - 1] < n.g) { ST.stale = (ST.stale || 0) + 1; n.snap = null; continue; }
-			if (best && n.fa >= best.T) { ST.pruned++; continue; }
+			if (gs && gs.length >= n.K && gs[n.K - 1] < n.g) { ST.stale = (ST.stale || 0) + 1; n.snap = null; release(n); continue; }
+			if (best && n.fa >= best.T) { ST.pruned++; release(n); continue; }
 			expand(n, deadline, goal);
 		}
 		runMs += Date.now() - tRun0;
 		ST.ms = runMs;
-		if (done && best && !uncert) closed = true;
+		if (done && best && !uncertLv) closed = true;
 		return { ok: !!best, done, closed, best: best ? { masks: best.masks, ticks: best.T } : null, stats: stats() };
 	}
 	/** a real state from outside (masks from the level start) as a node: the executor's exact fallback's legs */
@@ -543,12 +585,19 @@ function createOneShot(L, o = {}) {
 		for (const [key, id] of firstOfS) { const n = nodes[id]; out.push({ key, S: n.S, g: n.g, id, masks: masksOf(id) }); }
 		return out;
 	}
+	/** per abstract state its earliest node, without the masks: [{key, id, g}] (masksOf(id) for the ones wanted) */
+	function firsts() {
+		const out = [];
+		for (const [key, id] of firstOfS) out.push({ key, id, g: nodes[id].g, kind: nodes[id].kind });
+		return out;
+	}
 	function stats() {
 		let open = 0, minF = Infinity;
 		for (const x of heap.a) if (!x.closed && x.snap) { open++; if (x.f < minF) minF = x.f; }
-		return Object.assign({}, ST, { open, minF: Number.isFinite(minF) ? Math.round(minF) : null, best: best ? best.T : null, phase, closed, uncert, classes: classes.size });
+		return Object.assign({}, ST, { open, minF: Number.isFinite(minF) ? Math.round(minF) : null, best: best ? best.T : null, phase, closed, closedLevel, level, uncert, classes: classes.size });
 	}
-	return { run, inject, arrivals, best: () => (best ? { masks: best.masks, ticks: best.T } : null), stats, masksOf, _nodes: nodes };
+	// (best().kind: the last edge's kind; 'inj' = a whole route handed in (inject): the bound, not the one shot's own)
+	return { run, inject, arrivals, firsts, best: () => (best ? { masks: best.masks, ticks: best.T, kind: best.kind } : null), stats, masksOf, _nodes: nodes };
 }
 
 /**
