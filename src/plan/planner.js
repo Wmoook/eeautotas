@@ -469,6 +469,18 @@ function createPlanner(model, facts, o = {}) {
 	let stones = STONES ? model.triggers.filter((X) => !X.relevant && (X.kind === 'coin' || X.kind === 'bcoin') && X.tiles && X.tiles.length) : [];
 	if (stones.length > STONE_MAX) stones = [];
 	const stoneIds = new Set(stones.map((X) => X.id));
+	// THE WALLED PRICE (n5 doctor 4): the CEGAR walls (a failure's cut just past its closest tile and the 3 x 3 around
+	// the closest tile of every failure at rung >= 1) are never taken back, and in a corridor level they SEVER the est
+	// walk: then every edge past them is 'relaxation only' and costs the 1e6 PENALTY, and the plan ranking is gone (every
+	// plan ~1e6). Night 4's FINAL: 105 of the 206 failing compiles end on a plan of est >= 1e6 at 60 s, 126 at 180 s (16
+	// of batch 4's 21). Reproduced (src/out/n5/doctor/batch4.md): Stone Ruin's trophy / checkpoint (357,40) failures of
+	// the box-5 trace fed to learn(): after the checkpoint's rung-2 cut at (151,42) both far edges turn relaxOnly (est
+	// 1,004,932 / 1,005,448) though that is the corridor the known route takes. With the knob an edge the walled est walk
+	// misses but the UNWALLED est walk reaches costs WALL_F (3) x that walk instead of the penalty: a finite, ranked price
+	// (the walls still price their way 3x; a proof or an lb-only way keeps the penalty). EEAT_WALL_PRICE=1 (OPT-IN: o.wallPrice
+	// overrides), EEAT_WALL_F.
+	const WALL_PRICE = o.wallPrice !== undefined ? !!o.wallPrice : process.env.EEAT_WALL_PRICE === '1';
+	const WALL_F = +process.env.EEAT_WALL_F || 3;
 	// (a PROOF is keyed by the abstract state AND the position it was proven from: the executor's proof is "the goal field
 	// of the level as the doors stand is -1 at every START", a fact about where the ball is (a one-way drop, a portal, a
 	// pocket), so it blocks the edge from that (state, position) only, not from every node of the state: the re-entry
@@ -491,6 +503,8 @@ function createPlanner(model, facts, o = {}) {
 		const wantEst = mode === 'plan';
 		const dE = wantEst ? model.dist(S, pos, 'est', base) : null, dvE = wantEst ? model.deathVia(S, pos, 'est', base) : null;
 		const cls = root ? rootCls : S.key + '|*';
+		let dNW = null;
+		const nwDist = () => dNW || (dNW = model.dist(S, pos, 'estNW', base));
 		const leg = (tiles) => {
 			let sL = INF, rL = INF, sE = INF, rE = INF;
 			const drL = dvL ? dvL.dr : null, drE = dvE ? dvE.dr : null;
@@ -509,10 +523,16 @@ function createPlanner(model, facts, o = {}) {
 				if (sE < INF) { est = sE * P + extra; steps = sE; }
 				else if (drE && rE < INF) { est = (dvE.dk + rE) * P + DEAD_TICKS + extra; steps = dvE.dk + rE; viaDeath = true; }
 				else {
-					// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
-					// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
-					const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
-					est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+					// (the walled price: the est walk reaches it once the CEGAR walls are left out: WALL_F x that walk)
+					let sW = INF;
+					if (WALL_PRICE && ST.estWalls > 0) { const dw = nwDist(); for (const t of tiles) if (dw[t] < sW) sW = dw[t]; }
+					if (sW < INF) { est = sW * P * WALL_F + extra; steps = sW; ST.walledPriced = (ST.walledPriced || 0) + 1; }
+					else {
+						// (only the relaxation reaches it: its walk, else its death shortcut; sL is INF when only the lb's
+						// death way reaches it, and INF x pace overflowed the plan's est to ~4.3e9: The Square)
+						const sR = sL < INF ? sL : drL && rL < INF ? dvL.dk + rL : INF;
+						est = (sR < INF ? sR * P * 3 + (sL < INF ? 0 : DEAD_TICKS) : 0) + PENALTY + extra; relaxOnly = true;
+					}
 				}
 				est = Math.max(lb, est);
 				// (the stones' price of a long leg: the finders' cost grows much faster than its ticks)

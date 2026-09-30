@@ -444,6 +444,8 @@ function compileModel(L, o = {}) {
 	}
 	function doorKey(S, mode, base) {
 		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.pkey + showKey(S, 'est', base);
+		// ('estNW': the est walk without the planner's CEGAR walls (planner.js WALL_PRICE); the key of the unwalled est)
+		if (mode === 'estNW') return 'e:' + S.pkey + showKey(S, 'est', base);
 		if (mode === 'now') return 'n:' + S.pkey + showKey(S, 'est', base) + (hasTime ? '|t' + (S.td ? 1 : 0) : '') + (hasZombieDoor ? '|z' + (S.zombie ? 1 : 0) : '');
 		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey + showKey(S, 'est', base);
 		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins && !hasDeathGate) return 'e:' + S.pkey;
@@ -459,7 +461,7 @@ function compileModel(L, o = {}) {
 		const m = new Uint8Array(N);
 		// (est: a killer is a wall unless the ball is protected; lb: passable, the relaxation)
 		const kill = mode === 'lb' || mode === 'walk' || (S.feats && S.feats.prot === 1) ? 1 : 0;
-		const gm = mode === 'walk' ? 'est' : mode;   // ('now': est's walls with the exact reading of a concrete state)
+		const gm = mode === 'walk' || mode === 'estNW' ? 'est' : mode;   // ('now': est's walls with the exact reading of a concrete state)
 		for (let i = 0; i < N; i++) {
 			const c = A.cls[i];
 			m[i] = c === 0 ? 0 : c === 3 ? (gateOpen(i, S, gm, base) ? 1 : 0) : c === 1 ? kill : 1;
