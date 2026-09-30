@@ -647,8 +647,10 @@ function createSolver(L, opts = {}) {
 	function boxOf(tg) {
 		let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
 		for (const t of (tg.via || tg.tiles)) { const c = t % W, r = (t / W) | 0; if (c < x0) x0 = c; if (c > x1) x1 = c; if (r < y0) y0 = r; if (r > y1) y1 = r; }
-		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8)
-		return { xl: 16 * x0 - 8, xh: 16 * x1 + 8, yl: 16 * y0 - 8, yh: 16 * y1 + 8 };
+		// the box position px of a centre in tile column c: [16 c - 8, 16 c + 8); the goal test clamps a centre outside the
+		// world to the edge tiles, so a target on the world's edge reaches out without end on that side
+		return { xl: x0 <= 0 ? -Infinity : 16 * x0 - 8, xh: x1 >= W - 1 ? Infinity : 16 * x1 + 8,
+			yl: y0 <= 0 ? -Infinity : 16 * y0 - 8, yh: y1 >= Hh - 1 ? Infinity : 16 * y1 + 8 };
 	}
 	// the coupled piece's JUMP FAMILIES and the cut (EEAT_MATH_CORDER=0: the first version's family alone, no cut): the
 	// first version's order (the first-tick press, then DIR9) with the jump press at the change tick on the same direction
