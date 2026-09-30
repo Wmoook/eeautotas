@@ -275,6 +275,67 @@ function polishRoute(L, masks0, o) {
 		}
 		}
 	}
+	// (a3) the segments: from the route's state at a, best-first (legs.js legBest: the kinematic bound in its ranking,
+	// w 3) to the route's state region at b = a + SEG (the tile, the door-reading state) sooner, windows from the end back
+	// every SEG_STEP ticks, SEG_MS each at most; spliced with the route's inputs from b, else re-anchored at the nearest
+	// route state of the same gravity in [b - 8, b + 150] (6 tried); judged. The mutation's local moves cannot change a
+	// route's way over 150 ticks: a compiled route (test/planexec.js --only=chain, Tutorial 1 from a 150-tick skeleton)
+	// 2,450 -> 2,382 in 26 s where the mutation and the windows gave 2,411 in 30 s. (o.noSegments: off; o.segShare)
+	if (!o.noSegments && process.env.EEAT_POLISH_SEG !== '0') {
+		const LG = require('./legs.js');
+		const sEnd = Math.min(deadline, Date.now() + (o.segShare > 0 ? o.segShare : 0.35) * ms);
+		const SEG = o.segWin > 0 ? o.segWin : 150, STEP = o.segStep > 0 ? o.segStep : 50, SEG_MS = 1000;
+		const ssim = new E.EESim(L), sinp = new E.EEInput();
+		const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
+		let R3 = traceRoute(L, best.ms);
+		for (let b = best.ms.length - 1; b > SEG && Date.now() < sEnd && !(stop && stop()); b -= STEP) {
+			const cur = best.ms;
+			const a = b - SEG;
+			const sB = stateAt(R3, cur, b);
+			if (sB.is_dead) continue;
+			const W0 = L.width, H0 = L.height, tile = T.tileOf(sB, W0, H0), dk = X.discKey(sB);
+			const goal = { kind: 'region', tiles: Int32Array.of(tile), mask: null, allowDeath: false, test: (x) => !x.is_dead && T.tileOf(x, W0, H0) === tile && X.discKey(x) === dk };
+			const sA = stateAt(R3, cur, a);
+			if (sA.is_dead) continue;
+			const snapA = sA.snapshot();
+			const field = T.goalField(T.levelNow(L, sA), goal.tiles);
+			const r = LG.legBest(L, [{ snap: snapA, tick: a }], goal, { sim: ssim, field, deadline: Math.min(sEnd, Date.now() + SEG_MS), stop, depthMax: SEG - 1, kbOn: true, w: 3, noFinish: true });
+			if (r.status !== 'found' || !(r.depth < SEG)) continue;
+			const tail = r.tail;
+			const cands = [];
+			{ const c = new Uint8Array(a + tail.length + (cur.length - b)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(b), a + tail.length); cands.push(['plain', c]); }
+			// (the anchors: the route's states near b, by the rule of mutatePass)
+			ssim.restore(snapA);
+			for (let t = 0; t < tail.length; t++) { E.applyMask(sinp, tail[t]); ssim.tick(sinp); }
+			const px = ssim.px, py = ssim.py, vx = ssim.speed_x, vy = ssim.speed_y, g = grav(ssim);
+			const q0 = Math.max(a + 1, b - 8), q1 = Math.min(cur.length - 1, b + 150);
+			const rs = stateAt(R3, cur, q0), ranked = [];
+			for (let q = q0; q <= q1; q++) {
+				if (grav(rs) === g) ranked.push([Math.abs(px - rs.px) + Math.abs(py - rs.py) + 3 * (Math.abs(vx - rs.speed_x) + Math.abs(vy - rs.speed_y)), q]);
+				E.applyMask(R3.inp, cur[q]); rs.tick(R3.inp);
+			}
+			ranked.sort((x, y) => x[0] - y[0]);
+			for (const [, q] of ranked.slice(0, 6)) { if (q === b) continue; const c = new Uint8Array(a + tail.length + (cur.length - q)); c.set(cur.subarray(0, a), 0); c.set(tail, a); c.set(cur.subarray(q), a + tail.length); cands.push([`anchor ${q}`, c]); }
+			for (const [how, c] of cands) {
+				if (Date.now() > deadline) break;
+				if (accept(c, `segment ${a}->${b} in ${tail.length} (${how})`)) {
+					// (the mutation's passes around the new span: its states are new rejoin targets and starts)
+					let ranges = [[Math.max(0, a - 100), Math.min(best.ms.length, a + tail.length + 100)]];
+					const mEnd2 = Math.min(sEnd, Date.now() + 1000);
+					for (let pass = 0; pass < 8 && Date.now() < mEnd2 && !o.noMutate; pass++) {
+						const cur2 = best.ms;
+						const mp = mutatePass(L, cur2, { deadline: mEnd2, stop, ranges, horizon: o.horizon, drift: o.drift });
+						if (!mp.shortcuts.length) break;
+						const set = bestShortcutSet(cur2.length, mp.shortcuts);
+						if (!accept(spliceShortcuts(cur2, set), `mutate ${set.length} (${set.reduce((x, y) => x + y.saved, 0)})`)) break;
+						ranges = spansOf(set, 100, best.ms.length);
+					}
+					R3 = traceRoute(L, best.ms);
+					break;
+				}
+			}
+		}
+	}
 	// (a) the cleanup (src/cleanroute.js: presses and flips dropped where they rejoin or finish sooner)
 	if (!o.noClean && Date.now() < deadline) {
 		try {

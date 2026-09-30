@@ -447,6 +447,8 @@ async function chainOfRoute(e, budget, polishMs) {
 		const ev = fin.length ? C.evaluate(L, fin[0].masks, false) : null;
 		if (ev) {
 			compiled = ev.runTicks;
+			// (--saveDir: the compiled route, for the polish's own measurements)
+			if (args.saveDir) { try { C.writeEetas(path.join(String(args.saveDir), `${e.name}.compiled.eetas`), ev.ms); } catch (err) { /* optional */ } }
 			const t1 = Date.now();
 			const p = await ex.polish(ev.ms, { ms: polishMs });
 			pms = Date.now() - t1;
