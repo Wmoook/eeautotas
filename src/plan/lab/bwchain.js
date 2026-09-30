@@ -38,10 +38,11 @@ const ENVN = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? 
 const CLOCKS = (process.env.EEAT_BWC_CLOCKS || '1500,40000').split(',').map(Number).filter((x) => x > 0);
 const KEEP = ENVN('EEAT_BWC_KEEP', 2);
 const NEAR_K = ENVN('EEAT_BWC_K', 6);
-const RANK_W = ENVN('EEAT_BWC_RANKW', 0.5), GAIN_W = ENVN('EEAT_BWC_GAINW', 1), SIB_W = ENVN('EEAT_BWC_SIBW', 0.5);
-// (a candidate's weight: the planner's first plan's first step 1, the other plans' W_PLAN2, the planner's nearest edges W_EDGE +
+const RANK_W = ENVN('EEAT_BWC_RANKW', 0.5), GAIN_W = ENVN('EEAT_BWC_GAINW', 3), SIB_W = ENVN('EEAT_BWC_SIBW', 0.5);
+// (a candidate's weight: the planner's first plan's first step W_PLAN1 (its 40-s try before most probes: the planner-order
+// first version finished Frostbitten where the broad v3 spent its clock on 102 legs of alternatives), the other plans' W_PLAN2, the planner's nearest edges W_EDGE +
 // RANK_W a place, the model's other triggers (EXTEND) W_EXT + RANK_W a place)
-const W_PLAN2 = ENVN('EEAT_BWC_WPLAN2', 1.5), W_EDGE = ENVN('EEAT_BWC_WEDGE', 2), W_EXT = ENVN('EEAT_BWC_WEXT', 4), EXT_K = ENVN('EEAT_BWC_EXTK', 8);
+const W_PLAN1 = ENVN('EEAT_BWC_WPLAN1', 0.1), W_PLAN2 = ENVN('EEAT_BWC_WPLAN2', 1.5), W_EDGE = ENVN('EEAT_BWC_WEDGE', 2), W_EXT = ENVN('EEAT_BWC_WEXT', 4), EXT_K = ENVN('EEAT_BWC_EXTK', 8);
 const ORDER_LEVEL = process.env.EEAT_BWC_ORDER === 'level';
 
 /** the masks' replay from a snapshot: the first tick the goal holds (the tail candidates tried) -> {masks, sim} | null */
@@ -111,7 +112,7 @@ function chainLevel(L, o = {}) {
 		for (const p of (r && r.plans) || []) {
 			if (Number.isFinite(+p.cost)) est = Math.min(est, +p.cost);
 			const s = p.steps && p.steps.find((x) => !(x.waypoint && x.waypoint.allowDeath));
-			if (s && s === p.steps[0]) push(s.edge, s.waypoint, out.length ? W_PLAN2 : 1);
+			if (s && s === p.steps[0]) push(s.edge, s.waypoint, out.length ? W_PLAN2 : W_PLAN1);
 		}
 		n.h = est;
 		try {
