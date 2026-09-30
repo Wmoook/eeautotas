@@ -17,7 +17,7 @@ const T = require('../src/plan/types.js');
 const M = require('../src/plan/model.js');
 const F = require('../src/plan/facts.js');
 const P = require('../src/plan/planner.js');
-const { LEVELS } = require('./planmodel.js');
+const { LEVELS, level } = require('./planmodel.js');
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail) => { if (ok) pass++; else fail++; console.log(`${name}: ${ok ? 'ok' : 'FAIL'}${detail !== undefined ? ' ' + detail : ''}`); };
@@ -328,9 +328,45 @@ function scale() {
 	}
 }
 
+/** P-CRUMBS (doctor 9, EEAT_CRUMBS=1): coins no gate reads are crumbs (state features, X.crumb), left out of the plan
+ *  search, the nearest one offered as a plan in front when the trophy's leg is long; off: the model and plans as before */
+function crumbsUnit() {
+	const mk = () => level([
+		'######################################################################',
+		'#....................................................................#',
+		'#S.......c...................c...................c.................T.#',
+		'######################################################################',
+	], { c: [100] });
+	const L = mk();
+	const saved = process.env.EEAT_CRUMBS;
+	try {
+		delete process.env.EEAT_CRUMBS;
+		const m0 = M.compileModel(L), p0 = P.createPlanner(m0, F.createFacts(), {}).plan({}, { k: 3 });
+		check('P-CRUMBS off: coins not relevant, no crumbs, the first plan the trophy alone', !m0.feats.includes('coins') && !m0.triggers.some((X) => X.crumb) && p0[0] && kindsOf(m0, p0[0]).join(',') === 'trophy', planStr(m0, p0[0]));
+		process.env.EEAT_CRUMBS = '1';
+		const m1 = M.compileModel(L), pl = P.createPlanner(m1, F.createFacts(), {}), p1 = pl.plan({}, { k: 3 });
+		const cr = m1.triggers.filter((X) => X.crumb);
+		check('P-CRUMBS on: 3 crumbs, coins a feature, relevant', m1.feats.includes('coins') && cr.length === 3 && cr.every((X) => X.relevant), `${cr.length} crumbs, feats ${m1.feats.join(',')}`);
+		const c0 = p1[0], near = cr.slice().sort((a, b) => a.tiles[0] % L.width - b.tiles[0] % L.width)[0];
+		check('P-CRUMBS on: the crumb plan first, to the nearest crumb, one step', c0 && c0.crumb && c0.steps.length === 1 && c0.steps[0].waypoint.trig === near.id, c0 ? planStr(m1, c0) : 'none');
+		const own = p1.find((p) => !p.crumb), nCr = p1.filter((p) => p.crumb).length;
+		check('P-CRUMBS on: 2 crumb plans (EEAT_CRUMB_K), then the plan search own plans (the trophy alone: crumbs left out)', nCr === 2 && p1[1].crumb && own && kindsOf(m1, own).join(',') === 'trophy', `${nCr} crumb plans; ${own ? planStr(m1, own) : 'none'}`);
+		// from the nearest crumb's arrival (a gain of 1) the crumb plan goes to the next one
+		let t = 0; const masks = [];
+		for (; t < 400; t++) { masks.push(4); const r = T.playTo(L, Uint8Array.from(masks)); if (r.sim.coins >= 1) break; }
+		const A = anchorAfter(L, m1, Uint8Array.from(masks));
+		const p2 = pl.plan(A, { k: 3 });
+		const second = cr.slice().sort((a, b) => a.tiles[0] % L.width - b.tiles[0] % L.width)[1];
+		check('P-CRUMBS on: from the first crumb (gain > 0: its count and its tile) the crumb plan takes the next crumb', A.S.gain > 0 && p2[0] && p2[0].crumb && p2[0].steps[0].waypoint.trig === second.id, p2[0] ? `gain ${A.S.gain}: ${planStr(m1, p2[0])}` : 'none');
+	} finally {
+		if (saved === undefined) delete process.env.EEAT_CRUMBS; else process.env.EEAT_CRUMBS = saved;
+	}
+}
+
 if (require.main === module) {
 	units();
 	cegar();
+	crumbsUnit();
 	if (process.argv.includes('--truth')) truth();
 	if (process.argv.includes('--scale')) scale();
 	console.log(`${pass}/${pass + fail}`);
