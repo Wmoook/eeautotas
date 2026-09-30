@@ -35,8 +35,10 @@
 //      the plain regime: max(x: the 1D minimum time (hold toward from max(v0 toward, 0), the align slack) to the target
 //      columns' centre range, y: the first tick the fall from max(vy0, 0) (below) or the rise of a jump pressed now /
 //      the current rise (above; past one jump's reach: |J| a tick at most) reaches the target rows' centre range, +1
-//      for a landing above). Its CERTIFICATE: no non-plain, non-solid tile inside the rectangle the plain extremes reach
-//      in that many ticks (a field, boost or portal the ball could reach first would void it). A leg whose found T
+//      for a landing above). Its CERTIFICATE: every non-plain, non-solid tile u inside the rectangle the plain extremes
+//      reach in that many ticks has max(the first tick the centre can be in u's column, in u's row) >= the bound (THE
+//      TILE TEST), or, with no portal / killer / effect in the box the ball can reach at the speed limit (20 px a tick),
+//      that plus u's gap to the target at the limit (THE SPEED LIMIT); no timed killer running. A leg whose found T
 //      equals a certified bound is PROVEN OPTIMAL (res.proven): no input sequence reaches the target sooner.
 //   7. CHAINS (chain): A* over SUPPORT STATES with solved legs as edges: the direct leg to the target at every node,
 //      the forward fan-out (landings: the earliest verified landing, and its hop, on the standable tiles the plain
