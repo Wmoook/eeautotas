@@ -88,6 +88,12 @@ const RF = () => RF_ || (RF_ = require('../reach.js'));
 const DIR9 = [0, 2, 4, 8, 16, 10, 12, 18, 20];
 const MI_MASK = [0, 2, 4];               // kin1d input index -> mask bits (0 '-', 1 L, 2 R)
 
+/** a gravity member's name (the result's `member`): jump@j, off@o, walk, air; a land-and-act member base>land row@T1>act */
+function memberName(m) {
+	if (m.kind === 'land') return `${memberName(m.base)}>land${m.l.fr}@${m.l.T1}>${m.act === 'jump' ? (m.l.j2 === m.l.T1 ? 'hop' : `jump@${m.l.j2}`) : m.act === 'off' ? `off@${m.l.off2}` : 'walk'}`;
+	return m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind;
+}
+
 // ------------------------------------------------------------------ the support class (the moves study's clsOf)
 function clsOf(sim, flags) {
 	if (sim.is_dead) return 'D';
@@ -491,9 +497,79 @@ function createSolver(L, opts = {}) {
 				prev = yt;
 			}
 		}
+		// THE LAND-AND-ACT MEMBERS (section 4.10, the coverage iteration): the gravity axis of a leg through ONE landing.
+		// An airborne member crosses the floor line of row fr descending at exactly one tick T1 (y = line after it, vy =
+		// 0: the landing is the collision's, the x map is the same plain recurrence on the ground and in the air); from
+		// there the ball is a STANDING ball on row fr: it jumps at a tick j2 >= T1 (j2 = T1: the landing hop), walks off
+		// at a tick o2 > T1 + 1, or walks on. The member = the base member to T1 + the standing family from (line, T1): a
+		// two-parameter gravity family, still a closed form of the tables (gravTrace from the line). The x axis is one
+		// pattern across the landing; the tube checks the floor under the box on the ground ticks (row fr). Airborne
+		// starts get every act (jump / off / walk); standing starts' members (a jump, a walk-off) the walk and the hop.
+		if (o.land !== false && !o.each && Tmax > 4) {
+			const landMax = o.landRows || 6;
+			const jmpFrom = new Map(), fallFromL = new Map();
+			const jmpL = (yl) => { if (!jmpFrom.has(yl)) jmpFrom.set(yl, gravTrace(yl, G.J, Tmax, G)); return jmpFrom.get(yl); };
+			const fallL = (yl) => { if (!fallFromL.has(yl)) fallFromL.set(yl, gravTrace(yl, 0, Tmax, G)); return fallFromL.get(yl); };
+			const bases = members.filter((m) => m.kind === 'air' || ((m.kind === 'jump' || m.kind === 'off') && standing));
+			const canJ2 = s.max_jumps >= 1;
+			const rowHasFloor = (fr, lo, hi) => {
+				if (fr >= Hh) return true;
+				const c0 = Math.max(0, Math.floor(lo / 16) - 1), c1 = Math.min(W - 1, Math.floor((hi + 16) / 16) + 1);
+				for (let c = c0; c <= c1; c++) if (sol[fr * W + c] !== 0) return true;
+				return false;
+			};
+			for (const b of bases) {
+				let nl = 0;
+				for (let t = Math.max(1, b.air0 + 1); t < Tmax - 1 && nl < landMax; t++) {
+					if (!(b.v(t) > 0)) continue;
+					const yp = t === 1 ? y0 : b.y(t - 1), rt = b.r(t);
+					// every floor line crossed descending in this tick: yp <= line < raw
+					for (let line = Math.ceil(yp / 16) * 16; line < rt && nl < landMax; line += 16) {
+						const fr = line / 16 + 1;
+						if (fr > Hh) break;
+						const hr = holdRange(Hd, x0, vx0, t, K1.ALIGN_SLACK + 1e-6);
+						if (!rowHasFloor(fr, hr[0], hr[1])) continue;
+						nl++;
+						const T1 = t, yl = line, jl = jmpL(yl), fl = fallL(yl);
+						const pre = (q) => q < T1;
+						const mk = (kind, j2, off2, g2, air0, y, r, v) => ({ kind: 'land', act: kind, base: b, j: 0, g: 0, off: 0, air0, l: { T1, fr, line: yl, j2, off2, g2 }, jumps: (b.kind === 'jump' ? [b.j] : []).concat(j2 ? [j2] : []), sk: (b.kind === 'jump' ? b.j : b.kind === 'off' ? 1e3 + b.off : 0) + 5e3 + (j2 || off2 || 0), y, r, v });
+						const by = b.y, br = b.r, bv = b.v;
+						// the walk on (only on the landing row's target tiles: the items below)
+						members.push(mk('walk', 0, 0, Tmax, Tmax, (q) => (pre(q) ? by(q) : yl), (q) => (q < T1 ? br(q) : q === T1 ? rt : yl), (q) => (pre(q) ? bv(q) : 0)));
+						if (canJ2) {
+							const jEnd = standing ? T1 : Tmax - 1;           // standing starts: the hop alone
+							for (let j2 = T1; j2 <= jEnd; j2++) {
+								members.push(mk('jump', j2, 0, j2, j2, (q) => (pre(q) ? by(q) : q <= j2 ? yl : jl.Y[q - j2]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q <= j2 ? yl : jl.R[q - j2]), (q) => (pre(q) ? bv(q) : q <= j2 ? 0 : jl.V[q - j2])));
+							}
+						}
+						if (!standing) {
+							for (let o2 = T1 + 1; o2 < Tmax; o2++) {
+								members.push(mk('off', 0, o2, o2 - 1, o2 - 1, (q) => (pre(q) ? by(q) : q < o2 ? yl : fl.Y[q - o2 + 1]), (q) => (q < T1 ? br(q) : q === T1 ? rt : q < o2 ? yl : fl.R[q - o2 + 1]), (q) => (pre(q) ? bv(q) : q < o2 ? 0 : fl.V[q - o2 + 1])));
+							}
+						}
+					}
+				}
+			}
+		}
 		// the (T, member, windows) items
 		const items = [];
 		for (const m of members) {
+			if (m.kind === 'land' && m.act === 'walk') {
+				// on the landing row after the landing: the target's tiles in its centre row (class G while walking)
+				if (tg.cls === 'G' || tg.cls === 'any') {
+					const fr = m.l.fr;
+					if (o.each) {
+						for (const c of tg.colsByRow.get(fr - 1) || []) {
+							const wins = landWins({ colsByRow: new Map([[fr - 1, [c]]]) }, sol, fr);
+							if (wins.length) for (let T = m.l.T1 + 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr, tile: (fr - 1) * W + c });
+						}
+					} else {
+						const wins = landWins(tg, sol, fr);
+						if (wins.length) for (let T = m.l.T1 + 1; T <= Tmax; T++) items.push({ T, m, wins, land: fr });
+					}
+				}
+				continue;
+			}
 			if (m.kind === 'walk') {
 				// on the floor row: the target's tiles in the centre row fr0 - 1 (class G while walking)
 				if (tg.cls === 'G' || tg.cls === 'any') {
@@ -538,7 +614,8 @@ function createSolver(L, opts = {}) {
 				}
 			}
 		}
-		items.sort((a, b) => a.T - b.T || (a.m.kind === 'jump' ? a.m.j : 1e3 + a.m.off) - (b.m.kind === 'jump' ? b.m.j : 1e3 + b.m.off));
+		const skOf = (m) => (m.sk !== undefined ? m.sk : m.kind === 'jump' ? m.j : 1e3 + m.off);
+		items.sort((a, b) => a.T - b.T || skOf(a.m) - skOf(b.m));
 		const budget = { n: o.nodes || 400000, out: false };
 		let best = null;
 		const solved = o.each ? new Map() : null, goals = o.each ? new Map() : null, tries = new Map();
@@ -573,18 +650,27 @@ function createSolver(L, opts = {}) {
 				for (let q = Math.floor(x); q >= xn; q -= 1) { if (blk(q)) return p; p = q; }
 				return p;
 			};
+			const lnd = m.l, bm = lnd ? m.base : m;
 			const tube = (j, xp, x, raw) => {
 				// the first x sub-step's position (the y probe of the lockstep loop sees it); raw = x before the align
 				if (raw === undefined) raw = x;
 				let xs = raw;
 				const fx = Math.floor(xp);
 				if (raw > xp) { if (raw >= fx + 1) xs = fx + 1; } else if (raw < xp) { if (xp !== fx && raw < fx) xs = fx; }
-				if (j <= m.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
-				if (m.off && j === m.off) { if (floorAt(sol, xs, fr0)) return false; }
-				if (m.bonk && j === m.bonk.b) {
+				if (lnd && j >= lnd.T1 && j < T) {
+					// the land-and-act member after its base: the landing tick (the box over a floor of row fr, free at the
+					// line), the ground ticks (the floor under the first sub-step), the walk-off tick, then its own flight
+					if (j === lnd.T1) return boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line) && (floorAt(sol, raw, lnd.fr) || floorAt(sol, xs, lnd.fr) || floorAt(sol, x, lnd.fr));
+					if (j <= lnd.g2) return floorAt(sol, xs, lnd.fr) && boxFree(sol, x, lnd.line) && plainAt(tiles, x, lnd.line);
+					if (lnd.off2 && j === lnd.off2 && floorAt(sol, xs, lnd.fr)) return false;
+					return boxFree(sol, x, Ys[j]) && plainAt(tiles, x, Ys[j]);
+				}
+				if (j <= bm.g) return floorAt(sol, xs, fr0) && boxFree(sol, x, y0);
+				if (bm.off && j === bm.off) { if (floorAt(sol, xs, fr0)) return false; }
+				if (bm.bonk && j === bm.bonk.b) {
 					// the ceiling over the box (at the sub-step, before or after the align) and the box free under it
-					if (!(ceilAt(sol, xs, m.bonk.cr) || ceilAt(sol, raw, m.bonk.cr) || ceilAt(sol, x, m.bonk.cr))) return false;
-					if (j < T) return boxFree(sol, x, m.bonk.line) && plainAt(tiles, x, m.bonk.line);
+					if (!(ceilAt(sol, xs, bm.bonk.cr) || ceilAt(sol, raw, bm.bonk.cr) || ceilAt(sol, x, bm.bonk.cr))) return false;
+					if (j < T) return boxFree(sol, x, bm.bonk.line) && plainAt(tiles, x, bm.bonk.line);
 				}
 				if (j === T) {
 					if (it.land >= 0) return boxFree(sol, x, 16 * it.land - 16) && (floorAt(sol, raw, it.land) || floorAt(sol, xs, it.land) || floorAt(sol, x, it.land));
@@ -600,7 +686,7 @@ function createSolver(L, opts = {}) {
 				const masks = new Uint8Array(T + extra);
 				for (let t = 1; t <= T + extra; t++) {
 					let mk = MI_MASK[K1.inputAt(code, Math.min(t, T))];
-					if (m.kind === 'jump' && t === m.j) mk |= 1;
+					if (m.jumps) { for (let q = 0; q < m.jumps.length; q++) if (t === m.jumps[q]) mk |= 1; } else if (m.kind === 'jump' && t === m.j) mk |= 1;
 					masks[t - 1] = mk;
 				}
 				stats.verifies++;
@@ -614,7 +700,7 @@ function createSolver(L, opts = {}) {
 				const hit = replay(snap, masks, goal, T + extra);
 				if (hit > 0) {
 					const ms = masks.subarray(0, hit);
-					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: m.kind === 'jump' ? `jump@${m.j}` : m.kind === 'off' ? `off@${m.off}` : m.kind, code };
+					if (!best || hit < best.T) best = { T: hit, masks: Uint8Array.from(ms), k, member: memberName(m), code };
 					return true;
 				}
 				return false;

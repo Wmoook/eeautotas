@@ -102,7 +102,7 @@ function main() {
 			if (tele) target.via = portalVia(L, mv.tile1);
 			const snap = snaps.get(mv.t0);
 			const res = S.leg(snap, target, { Tmax: mv.len + SLACK, K: +(argv.K || 2), coupled: argv.coupled !== '0', plain: argv.plain !== '0', fields: argv.fields !== '0', prove: argv.prove !== '0',
-				coupledTicks: argv.coupledTicks ? +argv.coupledTicks : undefined, fieldMs: argv.fieldMs ? +argv.fieldMs : undefined, chain: argv.chain === '0' ? false : undefined });
+				coupledTicks: argv.coupledTicks ? +argv.coupledTicks : undefined, fieldMs: argv.fieldMs ? +argv.fieldMs : undefined, chain: argv.chain === '0' ? false : undefined, land: argv.land !== '0' });
 			const rec = { r: entry._idx, m: mi, label: mv.label, len: mv.len, c0: mv.c0, c1: mv.c1, ok: !!res.ok, tool: res.tool || null, T: res.T || 0,
 				lb: res.lb, cert: !!res.cert, proven: !!res.proven, us: Math.round(res.us), cands: res.cands, ver: res.verifies, items: res.items, ticks: res.ticks,
 				k: res.k, member: res.member, why: res.ok ? undefined : res.why,
