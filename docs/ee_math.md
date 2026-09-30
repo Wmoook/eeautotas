@@ -1855,7 +1855,9 @@ box 3 at load 120-160; legs done / routes compiled end to end):
 | first, the math tier's own 6 alts in 3 ticks | 987 of 37 routes (off 986) | 9 (off 8) | 9 / 9 / 19 |
 | among the picked, 6 alts in 3 ticks | 1,162 | 11 | 8 / 14 / 17 |
 
-(One shard of the third arm lost its two routes' rows, MIHB's Dream and Accident Prone: compared on the other 37.)
+(One shard of the third arm lost its two routes' rows, MIHB's Dream and Accident Prone: compared on the other 37; the two
+rerun in-process with that arm's settings, no error: 137 / 137 compiled 9,160 and 40 / 40 compiled 3,168, so that arm
+1,164 legs and 11 compiled over the 40: the harness lost the shard's output, not the code.)
 The larger alts cost the math tier's clock (its items past the cheapest T + 3): Unforgiving Climb 47 vs 59, Tree
 Decorating 11 vs 18 (MIHB's Dream 114 vs 137 and Need for Steed 7 vs 27 are the harness's spread: the rule-off code's
 second run had 114 and 7 too); with the tier's own alts the rule is a TIE: the chain's candidates are all first entries of the same region, and the next leg's cost from the best of them is
