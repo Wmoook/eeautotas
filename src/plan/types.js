@@ -313,7 +313,8 @@ const FX_STATE = process.env.EEAT_FX_STATE === '1';
  *  state {mj, jb} (an object) or null */
 // (FX_STATE: the state after the effect tile under the ball acts, reach.js fxStateNext: Need for Steed's spawn stands on its
 // multijump, so every leg from the spawn is a max_jumps 2 leg one tick later)
-const plainOf = (sim) => (FX_STATE ? RF.fxStateNext(sim) : FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity);
+// (a level with no effect tile: its fields are the physics ones anyway, goalField ignores the state: no idle ticks)
+const plainOf = (sim) => (FX_STATE ? (sim.level && sim.level.fg && !wildOf(sim.level.fg) ? RF.fxStateOf(sim) : RF.fxStateNext(sim)) : FX_FIELD && !sim.has_levitation && sim.flip_gravity === 0 && sim.max_jumps === 1 && sim.jump_boost === 0 && sim.speed_boost === 0 && !sim.low_gravity);
 /** the memo key suffix of a field for plainOf's value p (the plain-ball field '|p', an effect state '|f<mj>.<jb>') */
 const fxSuffix = (p) => (!p ? '' : typeof p === 'object' ? `|f${p.mj}.${p.jb}` : '|p');
 const FIELDS_MB = process.env.EEAT_FIELDS_MB !== undefined ? +process.env.EEAT_FIELDS_MB : 256;
