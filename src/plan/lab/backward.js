@@ -62,7 +62,7 @@ const ENV = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? +
 const DEF = {
 	vxq: ENV('EEAT_BW_VXQ', 2), vyq: ENV('EEAT_BW_VYQ', 1), airStep: ENV('EEAT_BW_AIRSTEP', 6), maxT: ENV('EEAT_BW_MAXT', 48),
 	corrF: ENV('EEAT_BW_CORRF', 1.5), corrAdd: ENV('EEAT_BW_CORRADD', 40), maxCells: ENV('EEAT_BW_MAXCELLS', 400000),
-	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
+	w: ENV('EEAT_BW_W', 1.0), closeF: ENV('EEAT_BW_CLOSEF', 0.6), meetNodes: ENV('EEAT_BW_MEET', 400000), maxNodes: ENV('EEAT_BW_MAXNODES', 900000), keep: ENV('EEAT_BW_KEEP', 2), quick: ENV('EEAT_BW_QUICK', 50000), quickF: ENV('EEAT_BW_QUICKF', 0.3), reach: ENV('EEAT_BW_REACH', 1), perim: ENV('EEAT_BW_PERIM', 0), corrReach: ENV('EEAT_BW_CORRREACH', 1), relay: ENV('EEAT_BW_RELAY', 6), memo: ENV('EEAT_BW_MEMO', 2), variants: ENV('EEAT_BW_VARIANTS', 2), relayMin: ENV('EEAT_BW_RELAYMIN', 20), meetF: ENV('EEAT_BW_MEETF', 1), finish: ENV('EEAT_BW_FINISH', 1), ladder: ENV('EEAT_BW_LADDER', 3), finishShare: ENV('EEAT_BW_FINISHSHARE', 0.25), finishH: ENV('EEAT_BW_FINISHH', 100), finishEvery: ENV('EEAT_BW_FINISHEVERY', 8), finishMs: ENV('EEAT_BW_FINISHMS', 25), finishT: ENV('EEAT_BW_FINISHT', 120), fw: ENV('EEAT_BW_FW', 3), fadd: ENV('EEAT_BW_FADD', 200),
 };
 
 // ------------------------------------------------------------------ a small binary heap (key, value pairs)
@@ -141,8 +141,8 @@ function createBackward(L, opts = {}) {
 	// (a memo of the last state's fields: the discrete state rarely changes along a leg, and the key's string was a fifth of a
 	// meet's time)
 	const DM = { ok: false, tb: 0, c: 0, b: 0, k: 0, sw: null, osw: null, t: 0, j: 0, mj: 0, jb: 0, sb: 0, fl: 0, fg: 0, d: 0 };
-	function discOf(s) {
-		const tb = L.hasTimeDoors ? Math.floor((s._ticks % 1000) / TD_BUCKET) : 0;
+	function discOf(s, noClock) {
+		const tb = L.hasTimeDoors && !noClock ? Math.floor((s._ticks % 1000) / TD_BUCKET) : 0;
 		const fl = (s.low_gravity ? 1 : 0) | (s.is_invulnerable ? 2 : 0) | (s.has_levitation ? 4 : 0) | (s.is_cursed ? 8 : 0) | (s.is_zombie ? 16 : 0) | (s.is_poisoned ? 32 : 0) | (s.is_on_fire ? 64 : 0) | (s.has_crown ? 128 : 0);
 		const j = s.max_jumps > 1 ? s.jump_count : 0;
 		if (DM.ok && !s._swOwned && !s._oswOwned && DM.tb === tb && DM.c === s.coins && DM.b === s.blue_coins && DM.k === s._keysMask && DM.sw === s._switches && DM.osw === s._oswitches && DM.t === s.team && DM.j === j && DM.mj === s.max_jumps && DM.jb === s.jump_boost && DM.sb === s.speed_boost && DM.fl === fl && DM.fg === s.flip_gravity) return DM.d;
@@ -398,13 +398,22 @@ function createBackward(L, opts = {}) {
 		const tC0 = Date.now();
 		const startKey = keyOf(sim);
 		const startCell = addCell(startKey, sim, tileOfS(sim));
+		// THE VARIANTS: the discrete states other than the start's that the quick meet reached (an effect, a key, a coin taken on
+		// the way: the target's side may be reachable only with one; seeding the start's alone left Planets' blue coin, a long
+		// rise with an effect, no value anywhere), the first state of each, the nearest P.variants seeded too
+		const variants = new Map();
+		sim.restore(snap0);
+		const disc0 = discOf(sim, true);
 		const seedAll = () => {
 			if (P.seeds === false) return;
 			// (the seeds' base: the start, or a dead start's respawn: its discrete state after the death)
 			let base = snap0;
 			sim.restore(snap0);
 			if (sim.is_dead) { for (let k = 0; k < DEAD_T && sim.is_dead; k++) { E.applyMask(inp, 0); sim.tick(inp); } base = sim.snapshot(); }
-			// the start's discrete state at rest on every standable half tile of the corridor, nearest the target first
+			// the start's discrete state (and the variants') at rest on every standable half tile of the corridor, nearest the target first
+			const bases = [base];
+			for (const v of Array.from(variants.values()).sort((a, b) => a.h - b.h).slice(0, P.variants)) bases.push(v.snap);
+			stats.variants = bases.length - 1;
 			const order = [];
 			for (let t = 0; t < N; t++) if (inCorr[t]) order.push(t);
 			order.sort((a, b) => wd[a] - wd[b]);
@@ -414,10 +423,10 @@ function createBackward(L, opts = {}) {
 				const f = sol[t + W];
 				const inField = clsId[idOf(sim.tiles[t])] !== 0;
 				if (!(f !== 0 || inField)) continue;                 // standable (a floor under), or a field tile (dots, liquids ...)
-				for (const px of [16 * cx - 4, 16 * cx + 4]) {
+				for (const bs of bases) for (const px of [16 * cx - 4, 16 * cx + 4]) {
 					const py = 16 * cy;
 					if (!boxFree(sol, px, py)) continue;
-					sim.restore(base);
+					sim.restore(bs);
 					sim.px = px; sim.py = py; sim.prev_px = px; sim.prev_py = py;
 					sim.speed_x = 0; sim.speed_y = 0; sim.modifier_x = 0; sim.modifier_y = 0;
 					sim.on_ground = false; sim.jump_count = 0; sim.teleported = false;
@@ -588,6 +597,7 @@ function createBackward(L, opts = {}) {
 						const tl = tileOfS(sim);
 						if (o.trace) o.trace('child', nd.g + ticks, keyOf(sim), sim, m, p, ticks);
 						const vk = keyOf(sim);
+						if (P.variants > 0 && variants.size < 16 && !sim.is_dead) { const d = discOf(sim, true); if (d !== disc0 && !variants.has(d)) variants.set(d, { snap: sim.snapshot(), h: hFall(sim, tl) }); }
 						push(sim.snapshot(), id, mm, nd.g + ticks, vk, tl, sim.stateHash(), hFall(sim, tl), res === 0 ? vk : mkeyOf(sim, res));
 					});
 				}
