@@ -1684,3 +1684,25 @@ route (lbProof).
   leg, 401 chains, 31 with a leg, 315 math legs, 79 proven (event graph 48, exact 24, plain 7). test/planexec.js 32/32,
   test/planstrategy.js 24/0, test/msolve.js 50/0 (plancompile's hard-watchdog check fails under the box's load with and
   without this change).
+
+### 7.7 The land-and-act members in the compiler (the coverage iteration)
+
+The executor's direct legs get msolve's land-and-act members (4.11) by default (`EEAT_MSOLVE_LAND=0` off) and give the
+plain tier half of the time left (`plainMs`, as the field tier's `fieldMs`). Box 3, 60 s, --workers=3, the members on
+vs `EEAT_MSOLVE_LAND=0` side by side on one tree (n4-plan 2cb8357 + the members + plainMs), par 3 each:
+
+- **The shared gate:** exit 0 in both arms, compiled 11 = 11 (baseline 9), every .eetas replayed (11 / 11 each);
+  on vs off: Ruins 1,387 vs 1,474 run ticks, Desolate Caverns 1,604 vs 1,666, Tree Decorating 1,492 vs 1,619, The Ten
+  Commandments 680 vs 666, Accident Prone 3,681 vs 3,385; progress Booty Return 29 vs 38, MIHB's Dream 20 vs 22, Level 1
+  Overworld 30 vs 32 triggers (the spread levels), Starlight 16 both. The tier: 784 direct calls, 127 with a leg vs 813
+  / 129; its plain legs 77 vs 51 (coupled 124 vs 183: the plain tier now takes legs the coupled piece took), its direct
+  time 124 vs 99 s over the 20 compiles.
+- **The class** (the 16 failing levels with the most short airborne search-tier trigger legs in the full compile, gate
+  levels left out: VVVVVV, The Square, Endless Pain, Purple Depths, Gingerbread House, The Witch's House, SMB3, Trail
+  Blazer, Ring Of Chaos, Imps Paradise, Beat the Spikes 2, Bygone Tutorial, Desolate Helix, EX Crew Odyssey, Endeavor,
+  Lab of Insanity): compiled 0 vs 0, progress 70 vs 66 triggers (Imps Paradise 10 vs 6, Gingerbread House 11 vs 13,
+  the rest within 1); direct calls 633, 45 with a leg, in both arms.
+- **So:** the members take 2-move airborne legs out of the chain tier (58% vs 4.7% of the route's airborne legs, 4.11)
+  but the compiler's direct legs stay at ~7% with a leg: its airborne legs are long (median 176 ticks, past the
+  120-tick horizon) and cross fields; the gain shows as plain legs in place of coupled ones and as shorter routes on
+  3 gate levels, not as compiled levels.
