@@ -685,7 +685,10 @@ async function createExecutor(L, opts) {
 			const sab = new SharedArrayBuffer(4), flag = new Int32Array(sab);
 			let poll = null;
 			if (typeof budget.stop === 'function') poll = setInterval(() => { try { if (budget.stop()) Atomics.store(flag, 0, 1); } catch (e) { /* ignore */ } }, 20);
-			const msg = await dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, k, deadline } }, deadline, sab);
+			const pending = dispatch({ type: 'reach', starts: startStrs, wp: w, budget: { ms, level: budget.level | 0, k, deadline } }, deadline, sab);
+			// (while the worker searches: the starts replayed from the level start in this thread too, for finalize's checks)
+			for (const s of startStrs) { try { core.startOf(String(s)); } catch (e) { /* finalize replays it again */ } }
+			const msg = await pending;
 			if (poll) clearInterval(poll);
 			if (msg.error || !msg.result) {
 				const why = Atomics.load(flag, 0) ? 'stopped' : 'budget';
