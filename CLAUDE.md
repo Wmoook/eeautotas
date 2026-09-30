@@ -576,9 +576,11 @@ ways in.
   compile 319 -> 153 (box 5 / box 6, 60 s). (2) `polish.js` THE LOOP PASS (a1, `EEAT_POLISH_LOOPS=0` off): a loop cut =
   the route's inputs from a later tick b played from S(t), b a revisit within 12 px at a like speed (|dvx| + |dvy| <=
   1.5), kept by the exact rejoin rule or a COIN-BLIND one (`EEAT_POLISH_COINLOOPS=0` off; only where no coin sits on a
-  portal entry; every combination replayed and judged), passes of those moves alone first (25% of the polish), the
-  mutation passes as before: 15-s polishes of the final's routes Trick Or Treat 4,437 -> 3,759 (its optional coins
-  (146, 100), (132, 92) dropped), Tutorial 1 2,414 -> 2,128, The Blank Page 2,607 -> 2,527, 12 others equal (+-6: the
-  budget's noise). (3) THE LOOPS stage (strategy.js, before the joins, its own clock after the budget: `--loops=<s>` /
-  `EEAT_LOOPS_S`, default budget / 6, at most 10 s): the loop pass alone on the finished route (a late route gets no
-  polish: The Blank Page's at 56 s of 60), kept only when faster with no more deaths and no lower chance.
+  portal entry; every combination replayed and judged), passes of those moves alone (`polishRoute` o.loopPass: before
+  the mutation passes, 25% of its time; o.loopsOnly: alone): 15-s polishes of the final's routes with it Trick Or Treat
+  4,437 -> 3,759 (its optional coins (146, 100), (132, 92) dropped), Tutorial 1 2,414 -> 2,128, The Blank Page 2,607 ->
+  2,527, 12 others equal (+-6: the budget's noise). (3) THE LOOPS stage (strategy.js, before the joins, its own clock after
+  the budget: `--loops=<s>` / `EEAT_LOOPS_S`, default budget / 6, at most 10 s): the loop pass alone on the finished route
+  (the polish inside the budget is as before: box 6's Tutorial 1 pair with the pass inside it 2,027 vs 2,025, its route
+  without a loop), kept only when faster with no more deaths and no lower chance: box 6, 60 s, The Blank Page 3,190 (its
+  route at 56 s, polish 0.3 s) -> loops -635 (the portal pit) -> joins 2,266 (known 1,915).

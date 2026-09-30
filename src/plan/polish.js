@@ -281,8 +281,11 @@ function polishRoute(L, masks0, o) {
 	// (15 s polishes of the final's compiled routes, side by side on the laptop): Tutorial 1 2,420 -> 2,159, Trick Or Treat
 	// 4,616 -> 4,480, but The Blank Page 2,618 -> 2,629 and Rosa 3,680 -> 3,682 (the extra moves' time): hence a pass of
 	// their own.
-	if (!o.noMutate && !o.noLoops && LOOPS_ON) {
-		// (o.loopsOnly: this pass alone with the whole clock, the compiler's LOOPS stage after the budget)
+	// (only with o.loopPass or o.loopsOnly: the compiler runs it as its own LOOPS stage after the budget (strategy.js), so
+	// the polish inside the budget is the polish as before: box 6's Tutorial 1 pair (180 s, the same 2,185 moves route in
+	// both arms) with the pass inside the polish 2,027 vs 2,025 (its route had no loop: the pass's scan cost the mutation
+	// time); o.loopsOnly: this pass alone with the whole clock)
+	if (!o.noMutate && !o.noLoops && LOOPS_ON && (o.loopPass || o.loopsOnly)) {
 		const lEnd = o.loopsOnly ? deadline : Math.min(deadline, Date.now() + LOOP_SHARE * (deadline - Date.now()));
 		for (let pass = 0; pass < 8 && Date.now() < lEnd; pass++) {
 			const cur = best.ms;
