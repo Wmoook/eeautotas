@@ -25,6 +25,9 @@ const OUT = argv.out || 'src/out/s99/chain';
 fs.mkdirSync(OUT, { recursive: true });
 const KCH = +(argv.chain || 4), EVERY = +(argv.every || 48), MSB = +(argv.ms || 5000), TMAX = +(argv.Tmax || 3000);
 const ARMS = String(argv.arms || 'port,chain,corr,prof,bw').split(',');
+// (--vars='{"portB":{"plan":"bw:0.3,prof:0.25,leg:0.15,corr:0.3,chain:0.1","bwQuick":0}}': more portfolio arms, each its
+// solve options: paired variants in one process)
+const VARS = argv.vars ? JSON.parse(argv.vars) : {};
 const ONLY = argv.only ? new Set(JSON.parse(fs.readFileSync(argv.only, 'utf8'))) : null;
 
 function loadMoves(dir) {
@@ -93,10 +96,11 @@ function main() {
 				let res;
 				try {
 					if (arm === 'port') res = P.solve(snap, target, { ms: MSB, Tmax: TMAX, resume: false, plan: argv.plan });
+					else if (VARS[arm]) res = P.solve(snap, target, Object.assign({ ms: MSB, Tmax: TMAX, resume: false }, VARS[arm]));
 					else res = P.solve(snap, target, { ms: MSB, Tmax: TMAX, resume: false, plan: arm + ':1' });
 				} catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
 				const ar = { ok: !!res.ok, T: res.T || 0, ms: Date.now() - t0, why: res.why, error: res.error };
-				if (arm === 'port') { ar.arm = res.arm; ar.order = res.order; ar.per = res.arms; }
+				if (arm === 'port' || VARS[arm]) { ar.arm = res.arm; ar.order = res.order; ar.per = res.arms; }
 				if (res.ok) {
 					chk.restore(snap);
 					let px = chk.px, py = chk.py, tel = false, dead = false;
@@ -126,7 +130,7 @@ function aggregate(dir) {
 		const ok = recs.filter((r) => good(r, a));
 		lines.push(`${a}: found ${pct(ok.length, recs.length)}% (${ok.length}), <= route ${pct(ok.filter((r) => r.arms[a].T <= r.routeT).length, recs.length)}%, rejected ${recs.filter((r) => r.arms[a] && r.arms[a].ok && !r.arms[a].verified).length}, T / route median ${med(ok.map((r) => r.arms[a].T / r.routeT)).toFixed(3)}, ms median ${med(recs.map((r) => r.arms[a] ? r.arms[a].ms : 0))} (found ${med(ok.map((r) => r.arms[a].ms))}, p90 ${p90(ok.map((r) => r.arms[a].ms))})`);
 	}
-	const solo = arms.filter((a) => a !== 'port');
+	const solo = arms.filter((a) => !/^port/.test(a));
 	if (solo.length > 1) {
 		const u = recs.filter((r) => solo.some((a) => good(r, a)));
 		lines.push(`union of ${solo.join(' + ')} (each alone at the budget): ${pct(u.length, recs.length)}% (${u.length})`);

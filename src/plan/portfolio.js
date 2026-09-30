@@ -153,7 +153,8 @@ function createPortfolio(L, opts = {}) {
 			} else if (arm === 'bw') {
 				// (its quick meet (the fallback order alone, P.quick nodes) gets at least min(0.8 x the piece, BW_QUICK_MS): with
 				// the lab's 0.3 of a 5-s piece it stopped at 1.6 s where the same meet on a 20-s clock found the leg at 1.7 s)
-				res = backward().solve(snap, target, { ms, quickF: Math.min(0.8, Math.max(0.3, BW_QUICK_MS / Math.max(1, ms))) });
+				const bq = o.bwQuick !== undefined ? +o.bwQuick : BW_QUICK_MS;
+				res = backward().solve(snap, target, bq > 0 ? { ms, quickF: Math.min(0.8, Math.max(0.3, bq / Math.max(1, ms))) } : { ms });
 				r.done = !(res && res.why === 'budget');
 			} else if (arm === 'leg') {
 				// (the executor's tier 3 finder on the stretch: the goal field of the level as it stands at the start, a region
@@ -188,7 +189,7 @@ function createPortfolio(L, opts = {}) {
 		const deadline = o.deadline ? Math.min(o.deadline, t0 + B) : t0 + B;
 		const snap = snapOf(start);
 		const arms = String(o.arms || ENV('EEAT_PORT_ARMS', 'chain,corr,prof,bw,leg')).split(',');
-		const shape = shapeOf(snap, target);
+		const shape = { tele: !!target.tele };   // (the plan reads the teleport alone: shapeOf's goal field only for its callers)
 		// the session (one continuous budget per stretch; o.resume false: a session of this call alone)
 		let key = typeof o.resume === 'string' ? o.resume : null;
 		if (!key) {
