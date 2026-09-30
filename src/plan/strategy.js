@@ -72,6 +72,10 @@ const FRONTIER_STEPS = 60, FRONTIER_MAX = 400;
 // the fallbacks when the planner has nothing left (fallbackJob): at most this many without a new anchor
 const FALLBACK_MAX = 6;
 const ANCHOR_QUAL = process.env.EEAT_ANCHOR_QUAL !== '0';   // (re-entry by another trigger: an anchor of its own, addArrival)
+// (the arrivals' replay: a death in the leg's start prefix is a move of the route, not the leg's (deaths are moves: the
+// acceptance rule takes them); before, every arrival after a die step (or any death) was dropped by its own replay:
+// 'the goal test never holds' / 'a trophy arrival that does not finish'. EEAT_PREFIX_DEATH=0: as before)
+const PREFIX_DEATH = process.env.EEAT_PREFIX_DEATH !== '0';
 // the arrivals' own bounds for the branch and bound (the planner's lowerBound from one arrival: a short search); the start's
 // bound gets LB_MS; a lowerBound call that took LB_SLOW_MS or more is not made again that compile (a synchronous part that
 // overruns its budget cannot be cut: Moving Ice Puzzle's took 90 s with 1.5 s asked)
@@ -282,16 +286,22 @@ async function compile(L, opts = {}, emit = () => {}) {
 	};
 	const visited = new Uint8Array(L.width * L.height);   // tiles along verified arrivals (the exploration frontier)
 	/** a replay of masks from the level start: the goal's first tick (and beforeTick), deaths, the finish, the run timer at
-	 *  the end; marks the visited tiles */
-	const replay = (masks, goal, allowDeath) => {
+	 *  the end; marks the visited tiles. from: the leg's start tick (its start's masks, verified before): a death in that
+	 *  prefix is a move of the route (a die step, a death an earlier leg took), not this leg's; only a death that begins
+	 *  at or after it counts (dead) and ends the replay unless allowDeath (EEAT_PREFIX_DEATH=0: every death, as before) */
+	const replay = (masks, goal, allowDeath, from) => {
 		const sim = new E.EESim(L), inp = new E.EEInput();
 		sim.reset();
-		let dead = -1, finished = -1, goalAt = -1;
+		let dead = -1, finished = -1, goalAt = -1, was = false;
 		const W = L.width, H = L.height;
+		const f0 = PREFIX_DEATH && from > 0 ? from : 0;
 		for (let t = 0; t < masks.length; t++) {
 			E.applyMask(inp, masks[t] & 31);
 			sim.tick(inp);
-			if (sim.is_dead) { if (dead < 0) dead = t + 1; if (!allowDeath) break; } else visited[T.tileOf(sim, W, H)] = 1;
+			if (sim.is_dead) {
+				if (t >= f0 && !was) { if (dead < 0) dead = t + 1; if (!allowDeath) break; }
+				was = true;
+			} else { was = false; visited[T.tileOf(sim, W, H)] = 1; }
 			if (finished < 0 && sim.has_silver_crown) finished = t + 1;
 			if (goal && goalAt < 0 && goal.test(sim)) goalAt = t + 1;
 		}
@@ -681,7 +691,7 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const { s, lg } = startOf(starts, masks, i, res);
 			const leg = addLeg({ label: labelOf(step), fromTick: s ? s.tick : 0, ticks: masks.length - (s ? s.tick : 0), lb: lg && Number.isFinite(+lg.lb) ? +lg.lb : Number.isFinite(+res.lb) ? +res.lb : null,
 				proven: !!(lg && lg.proven), provenBy: (lg && lg.provenBy) || null, lbMath: lg && Number.isFinite(+lg.lbMath) && lg.lbMath !== null ? +lg.lbMath : null, tool: (lg && lg.tool) || res.tool || null, prev: s && s.leg ? s.leg : null });
-			const r = replay(masks, goal, !!(goal && goal.allowDeath));
+			const r = replay(masks, goal, !!(goal && goal.allowDeath) || !!res.deathLeg, s ? s.tick : 0);
 			if (r.finished > 0) { routes.push({ masks: masks.subarray(0, r.finished), leg }); return; }
 			if (trophy) { bug('arrival', { label: labelOf(step), tick: masks.length, why: 'a trophy arrival that does not finish on its replay' }); return; }
 			if (r.goalAt < 0 || r.sim.is_dead) { bug('arrival', { label: labelOf(step), tick: masks.length, why: r.goalAt < 0 ? 'the goal test never holds on its replay' : 'dead at its end' }); return; }
@@ -766,10 +776,10 @@ async function compile(L, opts = {}, emit = () => {}) {
 			const floor = fl && fl.n === unitN ? fl.d : Infinity;
 			if ((!prev || fail.closest.dist < prev.dist) && fail.closest.dist < floor) {
 				const m = fail.closest.masks instanceof Uint8Array ? fail.closest.masks : T.masksOf(fail.closest.masks);
-				const r = replay(m, null, false);
+				const { s } = startOf(starts, m, -1, {});
+				const r = replay(m, null, false, s ? s.tick : 0);
 				const h = r.sim.stateHash();
-				if (r.dead < 0 && r.finished < 0 && !starts.some((s) => s.hash === h)) {
-					const { s } = startOf(starts, m, -1, {});
+				if (r.dead < 0 && !r.sim.is_dead && r.finished < 0 && !starts.some((x) => x.hash === h)) {
 					const leg = addLeg({ label: `relay ${labelOf(step)}`, fromTick: s ? s.tick : 0, ticks: m.length - (s ? s.tick : 0), lb: null, proven: false, tool: 'relay', prev: s && s.leg ? s.leg : null });
 					relays.set(rk, { arrival: Object.assign(T.arrivalOf(L, r.sim, m, RM), { run: r.run, leg, relay: true }), dist: fail.closest.dist, wallsN: unitN });
 					relaySet++;
