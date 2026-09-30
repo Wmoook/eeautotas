@@ -1517,6 +1517,9 @@ async function createExecutor(L, opts) {
 	const canDieL = !!(opts.model && opts.model.canDie);
 	const skelKey = (goal, wp, startStrs, wn) => `${goal.kind}|${Array.from(goal.tiles).slice(0, 64).join(',')}|${goal.tiles.length}|${wp.expect ? wp.expect.feat + '=' + wp.expect.value : ''}|${startStrs[0].length}:${startStrs[0].slice(-64)}|w${wn | 0}`;
 	const skelMemo = new Map();   // key (goal, first start, walls) -> [{c, cur: [mask strings]}] (the levels reached, deepest last)
+	const SKEL_REDIRECT = process.env.EEAT_SKEL_REDIRECT === '1';
+	const REDIRECT_F = +process.env.EEAT_SKEL_REDIRECT_F > 1 ? +process.env.EEAT_SKEL_REDIRECT_F : 2;
+	const skelDirectMs = new Map();   // skelKey -> the largest direct-leg share tried (EEAT_SKEL_REDIRECT)
 	// (the counterexample walls per field: the waypoint's field tiles, their touch rule and deaths -> a Set of tiles; a
 	// skeleton's sub-legs order by their waypoint's field, so they share its walls)
 	const wallMemo = new Map(), wallBatches = new Map(), wallTabu = new Map();
@@ -1776,15 +1779,18 @@ async function createExecutor(L, opts) {
 		// (the inner tiles the build tried and refuted (a ball at rest there reaches no goal: the dot row beside the shaft,
 		// the arrows under it) are the relaxation's false nears on the way to the rim: walls of the sub-leg's ORDERING field
 		// (the executor's counterexample walls, never a cut), so it routes to the rim the way the physics can)
+		let nDead = 0;
 		if (WALLS_ON && BASIN_WALLS) {
 			const thr = BASIN_RIM * cMax, dead = [];
 			for (const t of B.fail) if (B.m[t] < thr && !own.has(t)) dead.push(t);
 			const wk = wallKeyOf(sub);
 			if (dead.length && !wallMemo.has(wk)) { wallMemo.set(wk, new Set(dead)); wallBatches.set(wk, [dead]); }
+			nDead = dead.length;
+			if (process.env.EEAT_BASIN_DBG === '1') console.error('basin walls', dead.map((t) => `${t % L.width},${(t / L.width) | 0}`).join(';'));
 		}
 		const share1 = 0.7 * (deadline - Date.now());
 		const r1 = await reachWp(starts, sub, { ms: share1, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + share1), stop: budget.stop });
-		if (emit) emit({ ev: 'exec.basin', label: wp.label || '', tiles: B.tiles.size, tried: B.tried, cand: B.cand.length, rim: tiles.slice(0, 12).map((t) => [t % L.width, (t / L.width) | 0]), ok1: !!r1.ok, ms: Date.now() - tIn });
+		if (emit) emit({ ev: 'exec.basin', label: wp.label || '', tiles: B.tiles.size, tried: B.tried, cand: B.cand.length, rim: tiles.slice(0, 12).map((t) => [t % L.width, (t / L.width) | 0]), walls: nDead, ok1: !!r1.ok, ms: Date.now() - tIn });
 		if (!r1.ok) return r1;
 		// (an arrival on the goal itself: the waypoint reached)
 		const cur = r1.arrivals.map((a) => T.strOf(a.masks));
@@ -1850,8 +1856,19 @@ async function createExecutor(L, opts) {
 		// (the direct leg first with SKEL_DIRECT of the budget (a leg the finders reach whole keeps its way: the skeleton's
 		// split cost PARTIAL levels their progress, SMB3 3 -> 0, Booty Return 14 -> 6); its found leg, or its proof
 		// (the exact tier's exhaustion: no time in it), is the answer; else the skeleton with the rest)
-		if (SKEL_DIRECT > 0 && !skelMemo.has(skelKey(goal, wp, startStrs, wN))) {
-			const dMs = SKEL_DIRECT * (deadline - Date.now());
+		// (THE DIRECT LEG AGAIN ON A BIGGER RUNG, OPT-IN EEAT_SKEL_REDIRECT=1 (doctor 8, n5-doc-8): once a call built the
+		// skeleton's memo for these starts, every later call resumed the skeleton and never tried the direct leg again, so
+		// the rung ladder's bigger budgets only fed the skeleton's sub-level sets: where those descend into the relaxation's
+		// false near (UT Eternal Galaxy's first coin: the dot row beside the shaft) the waypoint failed on every rung
+		// (krt: rung 1 then rung 2, both 'budget', closest 4 tiles), while a fresh rung-2 call's direct leg finds it (245
+		// ticks at 5.4 s, with EEAT_CELL_ZERO=1). With the knob the direct leg runs again whenever this call's share is
+		// REDIRECT_F times the largest direct share tried for the key)
+		const sk0 = skelKey(goal, wp, startStrs, wN);
+		const dMs0 = SKEL_DIRECT * (deadline - Date.now());
+		const redirect = SKEL_REDIRECT && skelMemo.has(sk0) && dMs0 >= REDIRECT_F * (skelDirectMs.get(sk0) || Infinity);
+		if (SKEL_DIRECT > 0 && (!skelMemo.has(sk0) || redirect)) {
+			const dMs = dMs0;
+			if (SKEL_REDIRECT) { skelDirectMs.set(sk0, Math.max(skelDirectMs.get(sk0) || 0, dMs)); if (redirect) S.redirects = (S.redirects || 0) + 1; }
 			const r0 = await reachLeg(starts, wp, { ms: dMs, level: budget.level | 0, fast: !!budget.fast, k: budget.k, deadline: Math.min(deadline, Date.now() + dMs), stop: budget.stop, next: budget.next || null });
 			if (r0.ok || (r0.fail && (r0.fail.why === 'proof' || r0.fail.why === 'stopped' || r0.fail.why === 'dies'))) return r0;
 			const rD = await deathLeg(starts, wp, budget, r0, Date.now() + 0.5 * (deadline - Date.now()));
