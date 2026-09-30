@@ -237,14 +237,24 @@ function compileModel(L, o = {}) {
 	// eslint-disable-next-line no-new-func
 	const FeatObj = new Function('v', feats.map((f, n) => `this[${JSON.stringify(f)}] = v[${n}];`).join('\n'));
 	let initV = null;
+	// (the pass key: the feature values with each count as the number of its gates' thresholds it meets: every gate's
+	// state, so the geometry's memo (the pass masks, the walks, the level copies) is shared between counts of one class)
+	const countTh = feats.map((fk) => {
+		if (fk !== 'coins' && fk !== 'bcoins' && fk !== 'deaths') return null;
+		const set = new Set();
+		for (const g of gates) if (g.feat === fk) set.add(g.param);
+		return [...set].sort((x, y) => x - y);
+	});
 	function mkState(vals, taken, btaken, cp = -1) {
 		const dkey = vals.join(',');
+		let pkey = dkey;
+		for (let n = 0; n < countTh.length; n++) if (countTh[n]) { pkey = vals.map((v, i) => { const th = countTh[i]; if (!th) return v; let c = 0; for (const t of th) if (v >= t) c++; return 'c' + c; }).join(','); break; }
 		const key = dkey + (taken ? '|' + hashBytes(taken) : '') + (btaken ? '|' + hashBytes(btaken) : '') + (canDie ? '|c' + cp : '');
 		let gain = 0;
 		if (initV) for (let n = 0; n < vals.length; n++) if (vals[n] !== initV[n]) gain++;
 		if (taken) for (let k = 0; k < taken.length; k++) gain += taken[k];
 		if (btaken) for (let k = 0; k < btaken.length; k++) gain += btaken[k];
-		return { key, dkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
+		return { key, dkey, pkey, feats: new FeatObj(vals), vals, taken, btaken, gain, cp };
 	}
 	function stateOf(sim) {
 		const vals = feats.map((f) => {
@@ -336,11 +346,11 @@ function compileModel(L, o = {}) {
 	function setEstWalls(mask) { estWalls = mask; estWallVer++; }
 	/** the key of the gate pattern under S (the memo key of the geometry) */
 	function doorKey(S, mode, base) {
-		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.dkey;
-		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.dkey;
-		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins) return 'e:' + S.dkey;
+		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.pkey;
+		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey;
+		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins) return 'e:' + S.pkey;
 		// (lb: killers passable; the coin gates' part is the base's: the model count opens doors only)
-		return 'l:' + S.dkey + '|' + (base ? `${base.coins},${base.bcoins}` : '');
+		return 'l:' + S.pkey + '|' + (base ? `${base.coins},${base.bcoins}` : '');
 	}
 	/** a Uint8Array(N) passable mask under S */
 	const passMemo = new Map();
@@ -365,7 +375,7 @@ function compileModel(L, o = {}) {
 	 *  death / zombie doors and the doors / gates of an active (sticky) key keep their blocks (open in RCH3) */
 	const levelMemo = new Map();
 	function levelOf(S) {
-		const key = S.dkey;
+		const key = S.pkey;
 		const had = levelMemo.get(key);
 		if (had) return had;
 		const nfg = Int32Array.from(fg);
@@ -432,6 +442,7 @@ function compileModel(L, o = {}) {
 		return dist;
 	}
 	const distMemo = new Map();
+	const DIST_CAP = Math.max(96, Math.floor(64e6 / (4 * N)));   // (the walks kept: ~64 MB of fields)
 	let distBuilds = 0, distMs = 0;
 	/** dist(S, pos, mode, base) -> the walk steps from pos.tiles under S (memo: 96 fields, LRU) */
 	function dist(S, pos, mode = 'est', base = null) {
@@ -446,7 +457,7 @@ function compileModel(L, o = {}) {
 		const d = bfs(msk, mode === 'lb' && pos.lbTiles ? pos.lbTiles : pos.tiles);
 		distBuilds++; distMs += Date.now() - t1;
 		distMemo.set(key, d);
-		if (distMemo.size > 96) distMemo.delete(distMemo.keys().next().value);
+		if (distMemo.size > DIST_CAP) distMemo.delete(distMemo.keys().next().value);
 		return d;
 	}
 	const respawnPos = { id: 'respawn', tiles: respawn, extra: DEAD_TICKS };
@@ -513,7 +524,7 @@ function compileModel(L, o = {}) {
 	// ---------------------------------------------------------------- regions (the contract's regionOf)
 	const regionMemo = new Map();
 	function regionLabels(S) {
-		const key = S.dkey;
+		const key = S.pkey;
 		const had = regionMemo.get(key);
 		if (had) return had;
 		const m = passMask(S, 'walk', null);

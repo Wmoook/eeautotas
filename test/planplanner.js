@@ -256,6 +256,8 @@ function truth() {
 	for (const v of viol.slice(0, 60)) console.log('  ' + v);
 	ratios.sort((a, b) => a - b);
 	const med = ratios.length ? ratios[ratios.length >> 1] : NaN;
+	// (for the shards' sum: the ratios and the counts as one JSON line)
+	console.log(`  JSON ${JSON.stringify({ ratios, tot })}`);
 	console.log(`  totals ${JSON.stringify(tot)} lb/run median ${med.toFixed(3)} (p10 ${(ratios[Math.floor(ratios.length * 0.1)] || 0).toFixed(3)}, p90 ${(ratios[Math.floor(ratios.length * 0.9)] || 0).toFixed(3)})`);
 	check('T-PLAN-FEASIBLE: every route\'s own order feasible in the model', tot.infeasible === 0, `${tot.infeasible} of ${tot.routes} (${tot.stale} stale)`);
 	check('T-PLAN-FEASIBLE: costOf lb <= run ticks (admissible)', tot.costViol === 0, `${tot.costViol} violations`);

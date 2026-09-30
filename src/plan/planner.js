@@ -75,83 +75,77 @@ function createPlanner(model, facts, o = {}) {
 	const graceMemo = new Map();
 	/** deferral(tiles, S1, S2) -> {grace, lbTiles, nShut} | null: the grace gates next to the tiles and the deferral region
 	 *  of the change S1 -> S2 made there (null: it shuts no gate) */
-	function deferral(tiles, S1, S2) {
-		const X = { tiles };
-		let rec = null;
-		{
-			{
-				const N = model.N;
-				// the gate tiles the touch shuts (anywhere) and the tiles within one of them
-				let near = null, nShut = 0;
-				for (const g of model.gates) {
-					const j = g.tiles[0];
-					if (!(model.gateOpen(j, S1, 'est', null) && !model.gateOpen(j, S2, 'est', null))) continue;
-					if (!near) near = new Uint8Array(N);
-					for (const t of g.tiles) {
-						nShut++;
-						const x = t % W, y = (t / W) | 0;
-						for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H) near[ny * W + nx] = 1; }
-					}
-				}
-				if (near) {
-					let grace = null;
-					const gs = new Set();
-					for (const t of X.tiles) {
-						const x = t % W, y = (t / W) | 0;
-						for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-							const nx = x + dx, ny = y + dy;
-							if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-							const j = ny * W + nx, g = model.gateOf[j];
-							if (g < 0 || gs.has(g)) continue;
-							gs.add(g);
-							if (model.gateOpen(j, S1, 'est', null) && !model.gateOpen(j, S2, 'est', null)) { if (!grace) grace = []; for (const tt of model.gates[g].tiles) grace.push(tt); }
-						}
-					}
-					// the deferral region: a flood from X over the passable tiles (S1, lb) within one of a shut gate
-					const m1 = model.passMask(S1, 'lb', null);
-					const inR = new Uint8Array(N), out = new Uint8Array(N);
-					const q = [];
-					let anyNear = false;
-					// (seeds: X and the tiles next to it: the ball's box over X overlaps them, and it moves on while the change
-					// waits; First Person Maze's press takes effect one portal hop later)
-					for (const t of X.tiles) {
-						inR[t] = 1; out[t] = 1; if (near[t]) { q.push(t); anyNear = true; }
-						const x = t % W, y = (t / W) | 0;
-						for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-							const nx = x + dx, ny = y + dy;
-							if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-							const j = ny * W + nx;
-							if (!m1[j] && model.A.cls[j] !== 3) continue;
-							out[j] = 1;
-							if (!inR[j] && near[j]) { inR[j] = 1; q.push(j); anyNear = true; }
-						}
-					}
-					if (anyNear) {
-						while (q.length) {
-							const c = q.pop(), x = c % W, y = (c / W) | 0;
-							const nb = [];
-							for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) nb.push(ny * W + nx); }
-							const ex = model.A.portalExits.get(c);
-							if (ex) for (const e of ex) nb.push(e);
-							for (const j of nb) {
-								if (!m1[j] && !(model.A.cls[j] === 3)) continue;
-								out[j] = 1;
-								if (!inR[j] && near[j]) { inR[j] = 1; q.push(j); }
-							}
-						}
-					}
-					const lbTiles = [];
-					for (let i = 0; i < N; i++) if (out[i]) lbTiles.push(i);
-					rec = { grace, lbTiles: lbTiles.length > X.tiles.length ? lbTiles : null, nShut };
-				}
+	const shutMemo = new Map();
+	/** the gate components the change S1 -> S2 shuts and the tiles within one of them (by the pass keys; null: none) */
+	function shutOf(S1, S2) {
+		const k = S1.pkey + '>' + S2.pkey;
+		let r = shutMemo.get(k);
+		if (r !== undefined) return r;
+		r = null;
+		for (const g of model.gates) {
+			const j = g.tiles[0];
+			if (!(model.gateOpen(j, S1, 'est', null) && !model.gateOpen(j, S2, 'est', null))) continue;
+			if (!r) r = { near: new Uint8Array(model.N), gates: new Set(), nShut: 0 };
+			r.gates.add(g.id);
+			for (const t of g.tiles) {
+				r.nShut++;
+				const x = t % W, y = (t / W) | 0;
+				for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if (nx >= 0 && ny >= 0 && nx < W && ny < H) r.near[ny * W + nx] = 1; }
 			}
 		}
-		return rec;
+		if (shutMemo.size > 4096) shutMemo.clear();
+		shutMemo.set(k, r);
+		return r;
+	}
+	function deferral(tiles, S1, S2) {
+		const sh = shutOf(S1, S2);
+		if (!sh) return null;
+		const near = sh.near;
+		let grace = null;
+		const gs = new Set();
+		for (const t of tiles) {
+			const x = t % W, y = (t / W) | 0;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				const g = model.gateOf[ny * W + nx];
+				if (g < 0 || gs.has(g)) continue;
+				gs.add(g);
+				if (sh.gates.has(g)) { if (!grace) grace = []; for (const tt of model.gates[g].tiles) grace.push(tt); }
+			}
+		}
+		// the deferral region: a flood over the passable tiles (S1, lb) within one of a shut gate, seeded by the tiles and
+		// the tiles next to them (the ball's box over them overlaps those, and it moves on while the change waits; First
+		// Person Maze's press takes effect one portal hop later); out: the region and the tiles next to it (sparse sets)
+		const m1 = model.passMask(S1, 'lb', null);
+		const inR = new Set(), out = new Set(tiles), q = [];
+		const ok = (j) => m1[j] || model.A.cls[j] === 3;
+		for (const t of tiles) {
+			if (near[t] && !inR.has(t)) { inR.add(t); q.push(t); }
+			const x = t % W, y = (t / W) | 0;
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+				const nx = x + dx, ny = y + dy;
+				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+				const j = ny * W + nx;
+				if (!ok(j)) continue;
+				out.add(j);
+				if (near[j] && !inR.has(j)) { inR.add(j); q.push(j); }
+			}
+		}
+		while (q.length) {
+			const c = q.pop(), x = c % W, y = (c / W) | 0;
+			const visit = (j) => { if (!ok(j)) return; out.add(j); if (near[j] && !inR.has(j)) { inR.add(j); q.push(j); } };
+			for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const nx = x + dx, ny = y + dy; if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) visit(ny * W + nx); }
+			const ex = model.A.portalExits.get(c);
+			if (ex) for (const e of ex) visit(e);
+		}
+		const lbTiles = [...out].sort((p, q2) => p - q2);
+		return { grace, lbTiles: lbTiles.length > tiles.length ? lbTiles : null, nShut: sh.nShut };
 	}
 	const posOf = (X, S1, S2) => {
 		let rec = null;
-		if (S1 && S2 && S1.dkey !== S2.dkey) {
-			const gk = X.id + '|' + S1.dkey + '|' + S2.dkey;
+		if (S1 && S2 && S1.pkey !== S2.pkey) {
+			const gk = X.id + '|' + S1.pkey + '|' + S2.pkey;
 			rec = graceMemo.get(gk);
 			if (rec === undefined) {
 				rec = deferral(X.tiles, S1, S2);
@@ -274,7 +268,7 @@ function createPlanner(model, facts, o = {}) {
 	 *  rest and rising at the most (a heavy est penalty in the plan search, never a drop: an abstract position is no real
 	 *  state); 'proof' from the anchor's real state (then the edge is dropped at the root: an exact proof) */
 	const rchBad = new Map();
-	const rchKey = (S, pos, edge) => S.dkey + '|' + pos.id + '|' + edge;
+	const rchKey = (S, pos, edge) => S.pkey + '|' + pos.id + '|' + edge;
 	/**
 	 * the edges of node (S, pos): [{X (null: the trophy), S2, pos2, expect, lb, est, steps, viaDeath, edge, live}]. The
 	 * lb reachability (the walk relaxation: killers passable, keys sticky, the death shortcut) keeps an edge; mode 'plan'
@@ -383,24 +377,37 @@ function createPlanner(model, facts, o = {}) {
 		const ms = lo.ms !== undefined ? lo.ms : 1500, maxExpand = lo.maxExpand || 200000;
 		const open = new Heap(), best = new Map();
 		let seq = 0, expanded = 0, goal = Infinity, complete = false;
-		const k0 = a.S.key + '#' + a.pos.id;
-		best.set(k0, 0);
+		// (nodes merged over the coins' identities: one node per (feature values, checkpoint, position) with the least g
+		// and the INTERSECTION of the coin tiles taken: an over-approximation of every state merged into it (more coins
+		// left, the counts the same), so the bound stays admissible and the coin orders collapse)
+		const mkey = (S, pos) => S.dkey + '|c' + S.cp + '#' + pos.id;
+		const andBits = (x, y) => { if (!x) return x; const o2 = new Uint8Array(x.length); for (let i = 0; i < x.length; i++) o2[i] = x[i] & y[i]; return o2; };
+		const sameBits = (x, y) => { if (!x) return true; for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false; return true; };
+		best.set(mkey(a.S, a.pos), { g: 0, S: a.S });
 		open.push({ S: a.S, pos: a.pos, g: 0, f: hLb(a.pos), seq: seq++, goal: false });
 		while (open.size) {
 			const n = open.pop();
 			if (n.goal) { goal = n.g; complete = true; break; }
-			const k = n.S.key + '#' + n.pos.id;
-			if (best.get(k) < n.g) continue;
+			const rec = best.get(mkey(n.S, n.pos));
+			if (rec && (rec.g < n.g || rec.S !== n.S)) continue;
 			if (expanded >= maxExpand || Date.now() - t0 > ms) { open.push(n); break; }
 			expanded++;
 			for (const e of edgesOf(n.S, n.pos, a.base, 'lb', false, null)) {
 				const g2 = n.g + e.lb;
 				if (!e.X) { open.push({ S: n.S, pos: null, g: g2, f: g2, seq: seq++, goal: true }); continue; }
-				const k2 = e.S2.key + '#' + e.pos2.id;
+				const k2 = mkey(e.S2, e.pos2);
 				const had = best.get(k2);
-				if (had !== undefined && had <= g2) continue;
-				best.set(k2, g2);
-				open.push({ S: e.S2, pos: e.pos2, g: g2, f: g2 + hLb(e.pos2), seq: seq++, goal: false });
+				let S2 = e.S2, gm = g2;
+				if (had) {
+					const tk = andBits(had.S.taken, S2.taken), btk = andBits(had.S.btaken, S2.btaken);
+					const wider = !sameBits(tk, had.S.taken) || !sameBits(btk, had.S.btaken);
+					if (!wider && had.g <= g2) continue;
+					gm = Math.min(had.g, g2);
+					S2 = wider ? model.mkState(S2.vals, tk, btk, S2.cp) : S2;
+					if (!wider && had.g > g2) S2 = model.mkState(S2.vals, tk, btk, S2.cp);
+				}
+				best.set(k2, { g: gm, S: S2 });
+				open.push({ S: S2, pos: e.pos2, g: gm, f: gm + hLb(e.pos2), seq: seq++, goal: false });
 			}
 		}
 		let ticks;
