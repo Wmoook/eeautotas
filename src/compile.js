@@ -13,7 +13,7 @@
 //   result   6,122 run ticks (1:01.22); lower bound 3,210 (gap 2,912 = 47.6%); proven legs 2 of 8; best known 5,480 (job 'X')
 //   wrote    <out file>
 //   node src/compile.js <level.eelvl | level.json | job id> [--out=<file.eetas>] [--seconds=60] [--workers=N] [--json]
-//       [--report=<file.json>] [--quiet] [--verbose] [--known=0] [--seed=1] [--first=1] [--polish=0] [--stallS=0]
+//       [--report=<file.json>] [--quiet] [--verbose] [--known=0] [--seed=1] [--first=1] [--polish=0] [--stallS=0] [--joins=<s>]
 //       [--parts=<module of mock parts: tests>]
 //   --out: default <level name>.eetas next to the level (src/out/compile/<name>.eetas for a job id); --json: the compile
 //   loop's events as JSON lines (src/plan/strategy.js), then {"ev":"report", ...}; --report: the report as a JSON file.
@@ -37,6 +37,7 @@ function parse(argv) {
 // The hard watchdog (a worker thread: it runs while this thread is blocked in a part's synchronous call). Past its
 // limit it prints why (the budget, the last stage and step this thread passed it) and ends the process (exit 1).
 const WATCHDOG_MIN_S = 30, WATCHDOG_F = 0.5;
+const JOINS_MAX_S = 60, JOINS_F = 0.5, LOOPS_MAX_S = 10;
 // (the watchdog thread's code: its own isolate, so it runs while the compile's thread is blocked)
 function watchdogThread() {
 	const { parentPort, workerData } = require('worker_threads');
@@ -124,12 +125,18 @@ async function main() {
 	// (the hard watchdog: a part that blocks this thread past the budget (a synchronous call that ignores its own budget) is
 	// not cut by the loop's clocks; a worker thread then prints why, with the last stage and event this thread passed it,
 	// and ends the process: never a compile that hangs)
-	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds);
+	// (the JOINS stage, src/plan/joins.js: its own clock after the budget; --joins=<s> or EEAT_JOINS_S, default half the
+	// budget (at most 60 s); EEAT_JOINS=0 or --joins=0: off)
+	const joinsS = process.env.EEAT_JOINS === '0' ? 0 : a.joins !== undefined ? Math.max(0, +a.joins || 0) : process.env.EEAT_JOINS_S !== undefined && process.env.EEAT_JOINS_S !== '' && +process.env.EEAT_JOINS_S >= 0 ? +process.env.EEAT_JOINS_S : Math.min(JOINS_MAX_S, JOINS_F * seconds);
+	// (n5-perfect LOOPS: the polish's loop pass alone after the budget, strategy.js; --loops=<s> / EEAT_LOOPS_S, default a
+	// sixth of the budget, at most LOOPS_MAX_S; EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: off)
+	const loopsS = process.env.EEAT_POLISH_LOOPS === '0' || process.env.EEAT_PERFECT === '0' ? 0 : a.loops !== undefined ? Math.max(0, +a.loops || 0) : process.env.EEAT_LOOPS_S !== undefined && process.env.EEAT_LOOPS_S !== '' && +process.env.EEAT_LOOPS_S >= 0 ? +process.env.EEAT_LOOPS_S : Math.min(LOOPS_MAX_S, seconds / 6);
+	const wdS = +process.env.EEAT_COMPILE_WATCHDOG_S > 0 ? +process.env.EEAT_COMPILE_WATCHDOG_S : seconds + Math.max(WATCHDOG_MIN_S, WATCHDOG_F * seconds) + joinsS + loopsS;
 	const wd = watchdog(wdS * 1000, json);
 	const emit0 = emit;
 	const emitW = (ev) => { if (ev.ev === 'stage' || ev.ev === 'step' || ev.ev === 'plan') wd.note(ev); emit0(ev); };
 	const opts = { file: lv.file || undefined, md5: lv.md5 || undefined, seconds, workers, seed: Number.isFinite(+a.seed) ? +a.seed : 1, first: a.first === '1', polish: a.polish !== '0',
-		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined };
+		stallS: +a.stallS || 0, parseMs, known: a.known === '0' ? false : undefined, joinsS, loopsS };
 	if (a.inflight) opts.inflight = +a.inflight;
 	if (a.parts) opts.parts = path.resolve(a.parts);
 	if (a.runOut) opts.out = path.resolve(a.runOut);
@@ -162,7 +169,7 @@ async function main() {
 		runTicks: r.runTicks, time: r.ok ? C.fmt(r.runTicks) : null, ticks: r.ticks, deaths: r.deaths, chance: r.chance, lb: r.lb, lbComplete: !!r.lbComplete, lbProof: r.lbProof || '', gap: r.gap,
 		gapPct: r.ok && r.runTicks > 0 ? Math.round((r.gap / r.runTicks) * 1000) / 10 : null, legs: r.legs || [], provenLegs: proven, stages: Object.assign({}, r.stages, { parse: parseMs }),
 		known: r.known || null, ratio, why: r.why || '', steps: r.steps, anchors: r.anchors, bugs: r.bugs, deepenings: r.deepenings, stalls: r.stalls, relayRuns: r.relayRuns, relaySet: r.relaySet, relayDrop: r.relayDrop, out: wrote || null, verified,
-		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null, math, patterns: ex && Array.isArray(ex.patterns) ? ex.patterns : [] };
+		loadtas: wrote ? `/loadtas ${wrote}` : null, inputs: r.ok ? T.strOf(r.masks) : null, math, patterns: ex && Array.isArray(ex.patterns) ? ex.patterns : [], perfect: r.perfect || null, joins: r.joins || null };
 	if (a.report) { fs.mkdirSync(path.dirname(path.resolve(a.report)), { recursive: true }); fs.writeFileSync(path.resolve(a.report), JSON.stringify(report, null, 1)); }
 	if (json) emitJ(Object.assign({ ev: 'report' }, report));
 	else if (r.ok) {

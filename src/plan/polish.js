@@ -32,6 +32,10 @@ const T = require('./types.js');
 const X = require('./exact.js');
 
 const SNAP = 32;
+// the loop cuts of the mutation pass (mutatePass, LOOP CUTS)
+const LOOPS_ON = process.env.EEAT_POLISH_LOOPS !== '0' && process.env.EEAT_PERFECT !== '0';
+const COIN_LOOPS = process.env.EEAT_POLISH_COINLOOPS !== '0';
+const LOOP_MIN = 24, LOOP_R = 12, LOOP_V = 1.5, LOOP_K = 3, LOOP_GAP = 8, LOOP_D = [-1, 0, 1], LOOP_SHARE = 0.25;
 
 /** the route's replay: per tick its state hash, snapshots every SNAP ticks, the latest tick of each hash */
 function traceRoute(L, masks) {
@@ -69,7 +73,10 @@ function mutatePass(L, masks, o) {
 	const H = new Float64Array(n + 1), PX = new Float64Array(n + 1), PY = new Float64Array(n + 1), VX = new Float64Array(n + 1), VY = new Float64Array(n + 1), G = new Int8Array(n + 1);
 	const last = new Map();
 	const grav = (x) => x.gravity_dir.x * 3 + x.gravity_dir.y;
-	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; G[t] = grav(sim); last.set(h, t); };
+	// (o.coinBlind, the loop pass only: the latest tick of each coin-blind hash too, for the loop cuts that skip a coin
+	// detour: such a cut is a proposal the caller's full replay decides (a coin door later on refuses it), see polishRoute)
+	const lastCB = o.coinBlind ? new Map() : null;
+	const rec = (t) => { const h = sim.stateHash(); H[t] = h; PX[t] = sim.px; PY[t] = sim.py; VX[t] = sim.speed_x; VY[t] = sim.speed_y; G[t] = grav(sim); last.set(h, t); if (lastCB !== null) lastCB.set(sim.stateHash(false, true), t); };
 	// (re-anchoring, src/mutate.js --anchor: at a landing or a wall / ceiling stop of >= 1 px/tick a path ALSO goes on (a
 	// branch) with the inputs of the route tick in [r - 8, r + AHEAD] of the same gravity whose state is nearest
 	// (|dx| + |dy| + 3 (|dvx| + |dvy|) < ATHR), at most ANCH times a path: a move that lands sooner plays the inputs timed
@@ -81,6 +88,25 @@ function mutatePass(L, masks, o) {
 	const shortcuts = [];
 	let ticks = 0;
 	const from = Math.max(0, o.from | 0);
+	// LOOP CUTS (n5-perfect, versus the best known: the compiled routes' LOOPS, e.g. The Blank Page's (53, 56) at t900 and
+	// again at t1360, a fall into the portal pit at (46, 81) back up between: 440 ticks the known route never spends): a
+	// later route tick b where the ball is back within LOOP_R px of S(t) at a like speed (|dvx| + |dvy| <= LOOP_V, the
+	// same gravity), b - t >= LOOP_MIN: the route's inputs from b + d (d in LOOP_D) played from S(t), with the same exact
+	// rejoin rule (a state equal to a LATER route state: a proven shortcut) and re-anchoring as every move; the latest
+	// LOOP_K partners of t (the longest cuts first). Only with o.loops (polishRoute's loop pass (a1); EEAT_POLISH_LOOPS=0 / EEAT_PERFECT=0: no such pass).
+	const loopsOn = o.loops === true;
+	const loopPartners = (t) => {
+		const out = [];
+		if (!loopsOn) return out;
+		for (let b = n - 1; b >= t + LOOP_MIN && out.length < LOOP_K; b--) {
+			if (G[b] !== G[t] || Math.abs(PX[b] - PX[t]) + Math.abs(PY[b] - PY[t]) > LOOP_R) continue;
+			if (Math.abs(VX[b] - VX[t]) + Math.abs(VY[b] - VY[t]) > LOOP_V) continue;
+			// (one partner per LOOP_GAP ticks: the next is another pass, not the same one a tick apart)
+			if (out.length && out[out.length - 1] - b < LOOP_GAP) continue;
+			out.push(b);
+		}
+		return out;
+	};
 	// (o.ranges: [a, b) spans of start ticks to search, in order; else every tick from o.from)
 	const ranges = Array.isArray(o.ranges) && o.ranges.length ? o.ranges : [[from, n - 1]];
 	const seen = new Set(), seenB = new Set();
@@ -99,19 +125,23 @@ function mutatePass(L, masks, o) {
 			// the moves [the first input played from S(t), the route's input index after it]: replace t by another input;
 			// delete t (masks[t + 1] first) or delete t and replace t + 1 (any input, then from t + 2); delete t and t + 1
 			const moves = [];
-			for (const a of OPTIONS) {
-				if (a !== masks[t]) moves.push([a, t + 1]);
-				if (t + 2 <= n) moves.push([a, t + 2]);
+			if (!o.onlyLoops) {
+				for (const a of OPTIONS) {
+					if (a !== masks[t]) moves.push([a, t + 1]);
+					if (t + 2 <= n) moves.push([a, t + 2]);
+				}
+				if (t + 3 <= n) moves.push([masks[t + 2], t + 3]);
 			}
-			if (t + 3 <= n) moves.push([masks[t + 2], t + 3]);
+			for (const b of loopPartners(t)) for (const d of LOOP_D) { const k = b + d; if (k > t + 2 && k < n) moves.push([masks[k], k + 1, 1]); }
 			seenB.clear();
-			for (const [a, r0] of moves) {
+			for (const [a, r0, isLoop] of moves) {
 				ws.restore(sT);
 				E.applyMask(inp, a); ws.tick(inp); ticks++;
-				// (the first state after the change: once per state and t)
+				// (the first state after the change: once per state and t; a loop cut once per state and continuation)
 				const h1 = ws.stateHash();
-				if (seen.has(h1)) continue;
-				seen.add(h1);
+				const sk = isLoop ? h1 + ':' + r0 : h1;
+				if (seen.has(sk)) continue;
+				seen.add(sk);
 				stack.length = 0;
 				stack.push({ snap: null, q: 1, r: r0, segs: [], anchors: ANCH });
 				while (stack.length) {
@@ -123,7 +153,8 @@ function mutatePass(L, masks, o) {
 					let pg = ws.on_ground, pvx = ws.speed_x, pvy = ws.speed_y;
 					for (;;) {
 						if (ws.is_dead) break;
-						const j = last.get(h);
+						let j = last.get(h);
+						if (j === undefined && isLoop && lastCB !== null) j = lastCB.get(ws.stateHash(false, true));
 						if (j !== undefined) {
 							if (j > t + q) {
 								const ins = new Uint8Array(q);
@@ -244,6 +275,31 @@ function polishRoute(L, masks0, o) {
 	};
 	// (a2) the mutation pass: the classic moves everywhere, exact rejoins combined by DP (a combination the judge refuses:
 	// its shortcuts one at a time, the largest first); passes while they find time and there is time (o.mutShare of it)
+	// (a1) THE LOOP CUTS FIRST (n5-perfect, versus the best known; mutatePass LOOP CUTS): passes of the loop moves alone
+	// (few ticks have a loop partner: a pass is cheap) while they gain, within LOOP_SHARE of the time; the mutation pass
+	// below then runs as before (its own moves only) on the shorter route. Measured first as extra moves inside every pass
+	// (15 s polishes of the final's compiled routes, side by side on the laptop): Tutorial 1 2,420 -> 2,159, Trick Or Treat
+	// 4,616 -> 4,480, but The Blank Page 2,618 -> 2,629 and Rosa 3,680 -> 3,682 (the extra moves' time): hence a pass of
+	// their own.
+	// (only with o.loopPass or o.loopsOnly: the compiler runs it as its own LOOPS stage after the budget (strategy.js), so
+	// the polish inside the budget is the polish as before: box 6's Tutorial 1 pair (180 s, the same 2,185 moves route in
+	// both arms) with the pass inside the polish 2,027 vs 2,025 (its route had no loop: the pass's scan cost the mutation
+	// time); o.loopsOnly: this pass alone with the whole clock)
+	if (!o.noMutate && !o.noLoops && LOOPS_ON && (o.loopPass || o.loopsOnly)) {
+		const lEnd = o.loopsOnly ? deadline : Math.min(deadline, Date.now() + LOOP_SHARE * (deadline - Date.now()));
+		for (let pass = 0; pass < 8 && Date.now() < lEnd; pass++) {
+			const cur = best.ms;
+			// (coin-blind rejoins where no coin sits on a portal entry: C.coinFreeOk; every combination is replayed by accept)
+			const mp = mutatePass(L, cur, { deadline: lEnd, stop, onlyLoops: true, loops: true, horizon: o.horizon, drift: o.drift, coinBlind: COIN_LOOPS && C.coinFreeOk(L) });
+			if (!mp.shortcuts.length) break;
+			const set = bestShortcutSet(cur.length, mp.shortcuts);
+			const saved = set.reduce((a, c) => a + c.saved, 0);
+			let ok = accept(spliceShortcuts(cur, set), `loops ${set.length} (${saved})`);
+			if (!ok) for (const c of mp.shortcuts.slice().sort((x, y) => y.saved - x.saved).slice(0, 32)) { if (Date.now() > lEnd) break; if (accept(spliceShortcuts(cur, [c]), `loops 1 (${c.saved})`)) { ok = true; break; } }
+			if (!ok || mp.timeUp) break;
+		}
+	}
+	if (o.loopsOnly) return { masks: best.ms, runTicks: best.runTicks, saved: ev0.runTicks - best.runTicks, legs: [], steps, ms: Date.now() - t0 };
 	if (!o.noMutate) {
 		const mEnd = Math.min(deadline, Date.now() + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - Date.now()));
 		// (the first pass searches every tick; a later one only around the spans the last one spliced in: elsewhere the route
@@ -258,7 +314,7 @@ function polishRoute(L, masks0, o) {
 			// (o.first: the first pass's shortcuts on this very route, found by the caller (the executor's workers in parallel))
 			const mp = ri === 0 && pass === 0 && Array.isArray(o.first)
 				? { shortcuts: o.first.map((c) => ({ t: c.t, j: c.j, saved: c.saved, ins: typeof c.ins === 'string' ? T.masksOf(c.ins) : Uint8Array.from(c.ins) })).filter((c) => c.j <= cur.length), timeUp: !!o.firstTimeUp }
-				: mutatePass(L, cur, Object.assign({ deadline: mEnd, stop, ranges }, rounds[ri]));
+				: mutatePass(L, cur, Object.assign({ deadline: mEnd, stop, ranges, loops: false }, rounds[ri]));
 			if (!mp.shortcuts.length) break;
 			const set = bestShortcutSet(cur.length, mp.shortcuts);
 			const saved = set.reduce((a, c) => a + c.saved, 0);
@@ -324,7 +380,7 @@ function polishRoute(L, masks0, o) {
 					const mEnd2 = Math.min(sEnd, Date.now() + 1000);
 					for (let pass = 0; pass < 8 && Date.now() < mEnd2 && !o.noMutate; pass++) {
 						const cur2 = best.ms;
-						const mp = mutatePass(L, cur2, { deadline: mEnd2, stop, ranges, horizon: o.horizon, drift: o.drift });
+						const mp = mutatePass(L, cur2, { deadline: mEnd2, stop, ranges, horizon: o.horizon, drift: o.drift, loops: false });
 						if (!mp.shortcuts.length) break;
 						const set = bestShortcutSet(cur2.length, mp.shortcuts);
 						if (!accept(spliceShortcuts(cur2, set), `mutate ${set.length} (${set.reduce((x, y) => x + y.saved, 0)})`)) break;
@@ -468,7 +524,7 @@ function polishLeg(L, start, tail0, goal, o) {
 		const mEnd = Math.min(deadline, t0 + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - t0));
 		let ranges = null;
 		for (let pass = 0; pass < 32 && Date.now() < mEnd && !(o.stop && o.stop()); pass++) {
-			const mp = mutatePass(L, tail, { startSnap: start.snap, deadline: mEnd, stop: o.stop, ranges });
+			const mp = mutatePass(L, tail, { startSnap: start.snap, deadline: mEnd, stop: o.stop, ranges, loops: false });
 			if (!mp.shortcuts.length) break;
 			const set = bestShortcutSet(tail.length, mp.shortcuts);
 			let applied = null;

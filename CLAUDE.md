@@ -501,3 +501,168 @@ ways in.
   `node tools/cmp/fullc.js <code dir> <levels dir> <out dir> [--par=] [--workers=3] [--seconds=60]`, then `tools/cmp/summ.js`
   (classes), `tools/cmp/verify.js` (every .eetas replayed from the level file) and `tools/cmp/gate.js` (no level worse than a
   baseline on a gate list). Levels and routes of third parties never go into git.
+- **PERFECT: order and polish** (n5-perfect, 2026-09-30; `src/plan/perfect.js`, OPT-IN `EEAT_PERFECT=1`, off = the compile byte
+  for byte as before): `perfectRoute(ctx, masks, o)` = (1) THE ORDER B&B: the route the incumbent, its own states at every
+  model-state change the seeds, a node = verified arrivals of one model state, f = tick + the planner's admissible
+  lowerBound (a node at or past the incumbent's finish dropped: a proof), expanded depth first from the route's end, each of
+  the planner's plans' first step run by `exec.reach` (arrivals replayed from the level start), a finish sooner the new
+  incumbent (C.evaluate + the acceptance rule); (2) the polish with the route's JOINS as its window marks (`joinTicks`;
+  the compile passed its leg objects, which polish.js reads as tick marks: none). In the compile (strategy.js): once a route
+  is known min(20 s, 0.25 x the budget) is kept for it (a quarter order, three quarters polish: EEAT_PERFECT_POLISH), a route over `EEAT_PROVE_MAX` (300) run
+  ticks skips the prove stage (its exact search from the start proved none of the 24 compiled routes and took 10-30 s of the
+  polish's time) and the polish takes what is left. THE MEASURE (box 5, the pass offline on the final compile's 24 routes,
+  45 s each, `--workers=2`, `tools/perf/perfect.js`; every result replayed): 17 of 24 faster, 64,381 -> 61,931 run ticks,
+  median ticks / best known 1.215 -> 1.197, at or under the best known 3 -> 4 (Ruins 1,543 -> 1,478 vs the known 1,522);
+  The Blank Page 3,190 -> 2,466, Trick Or Treat 5,035 -> 4,424, Frostbitten 9,068 -> 8,840, MIHB's Dream 10,033 -> 9,821;
+  of the 2,450 ticks 2,255 came from the polish (the final compile's polish had 0.2-2.3 s on the long late routes), 195 from
+  the order pass (Tutorial 3 78, Gingerbread House 72, MIHB 34, Tutorial 2 11: re-derived last legs). The gap to the best
+  known, per level (`tools/perf/cmpknown.js --sum`: both routes replayed, the trigger orders side by side): the SAME trigger
+  order with slower legs on most (Fish Gods: the same 16 switch toggles, 303 of its 607-tick gap on the first; Bygone
+  Tutorial, Tutorial 2, the one-leg levels: NC Naos 319 vs 111, Rosa, Accident Prone, The Blank Page); triggers the known
+  route does not take on Trick Or Treat (6 coins vs 1), Tutorial 1 (two keys), Endless Space (2 coins): the planner's first
+  plan from there IS the trophy (Trick Or Treat est 1,580 from the start; Tutorial 1 est 712 from its 3rd coin), but the
+  executor's long trophy leg fails at 1.5-6 s, and the coins / keys were its stepping stones; another coin ORDER on
+  Gingerbread House (9 of 14 in order), Frostbitten (11 of 16) and MIHB's Dream's coin clusters. Tools: `tools/perf/plans.js`
+  (the planner's plans from a route's state), `stages.js` (a reports dir's stage times), `ladder.js` (the trophy leg from the
+  start under tight deadlines), `table.js` (the before / after table). IN THE COMPILE (box 5, 60 s, `--workers=2`, the 16 levels
+  the final compile routed at 60 s, one run an arm, the same code with / without `EEAT_PERFECT=1` (its polish share 0.5
+  then)): compiled 13 vs 16 (Bygone Tutorial, Accident Prone, The Blank Page not routed with it: the base found them at
+  32-60 s), on the 13 both routed 15,152 vs 15,372 run ticks, better 4 (Rosa 3,814 vs 4,219, Fish Gods 3,657 vs 3,742),
+  worse 4 (Tree Decorating 1,722 vs 1,476: its route came at 59 s), the same 5: the moves stage's run-to-run spread, no
+  gain shown. So OPT-IN: the pass never makes a GIVEN route slower, but in a compile its reserve comes out of the moves.
+- **JOINS: the speed carried across the joins, and the leg proofs** (n5-perfect, 2026-09-30; `src/plan/joins.js`, the stage
+  `joins` after prove (and after the perfect pass), DEFAULT ON in `src/compile.js` with its own clock AFTER the budget:
+  `--joins=<s>` / `EEAT_JOINS_S`, default half the budget, at most 60 s; `EEAT_JOINS=0` / `--joins=0` off, the watchdog's
+  limit grows by it; the stages before it are byte for byte as without it, and its route is kept only when the engine
+  replays it faster with no more deaths and no lower chance: never slower). A chain of individually optimal legs is not
+  optimal: `joinRoute(L, masks, o)` cuts the finished route at its SUPPORTS (the moves study's boundaries: a landing, a
+  field entered, a teleport, a death / respawn; kept where the route's own first arrival at the centre tile + class +
+  TRIGGER STATE (`progKey`: discKey + which coins + switches + checkpoint + effects) is the boundary; in every other pass
+  also TILE-ENTRY waypoints every 24 ticks of a support-free stretch) and runs a forward DP over (waypoint, the arrival
+  CLASS: the speed to 1/2 px/tick, grounded, the jump count, the position in 4 px cells), the earliest exact engine state
+  per class, at most F = 6 classes a waypoint (the route's own state always kept); edges = the route's own inputs (FOLLOW)
+  and msolve legs to the next 1..M = 4 waypoints (SKIPS over supports, <= 120 route ticks) with the landing hop and 3 alts
+  (distinct end states: the speed carried), every candidate replayed and kept only when it arrives at the waypoint's tile,
+  class and trigger state alive; passes on the route the last one made while they gain; once a pass's clock is out the
+  route's state and the earliest other state go on (the route's inputs, else a short leg). PROOFS (`proveRoute`): every
+  support leg of the result from its exact start state against lb.js `certify` (the event-graph bound) and msolve's
+  certified plain bound: lb = the leg's ticks = PROVEN OPTIMAL from that state; `fasterLegs` = the legs msolve alone does
+  in fewer ticks from the same state (joins the chain could not use). The report: `report.joins` {before, after, saved,
+  passes, waypoints, legs, proven, provenTicks, lbSum, fasterLegs}. THE MEASURE (box 5, the pass offline on the final
+  compile's 24 routes, 90 s each, one process, 2 threads, `tools/perfect/joins.js --final=src/out/n4plan
+  --levels=<levels> --out=<dir> --threads=2`, then `--agg=<dir>`; every output replayed from the level file): 64,381 ->
+  63,135 run ticks, median ticks / best known 1.22 -> 1.14, at or under the best known 4 of 22 (Desolate Caverns 1,619 ->
+  1,465 vs 1,700; Ruins 1,543 -> 1,479 vs 1,522), Tree Decorating 1,509 -> 1,212 (1,108), The Blank Page 3,190 -> 2,919,
+  Rosa dei Venti 3,714 -> 3,508, Bygone Tutorial 2,163 -> 2,059; 214 of 1,817 support legs proven optimal; no gain on Fish
+  Gods (its legs already tight: 4 legs msolve does sooner), Frostbitten (117 such legs, none that keeps the trigger state
+  and the next leg), the one-leg levels (NC Naos, the precision puzzle: 3 supports). `--routes=<dir>` stacks it on another
+  pass's routes: ON THE PERFECT PASS'S 24 ROUTES (the order / polish offline pass above, 61,931) the joins take them to
+  **60,045** (-1,886; from the compile -4,336), median ticks / best known 1.22 (compiled) -> 1.20 -> **1.12**, every output
+  replayed: Ruins 1,218 (0.80 of the best known 1,522), Desolate Caverns 1,426 (0.84 of 1,700), Tree Decorating 1,175
+  (1.06), Tutorial 2 3,021 (1.03), Rosa dei Venti 3,470 (1.07), Tutorial 3 3,738 -> 3,565, Fish Gods 4,116 -> 4,015; 198 of
+  1,656 support legs proven optimal. In the compile (box 5, 60 s + the joins' 30 s, `--workers=2`, 6 levels one at a time,
+  every .eetas replayed by tools/cmp/verify.js): the stage's own before -> after Desolate Caverns 1,633 -> 1,549, Tree
+  Decorating 1,561 -> 1,545, Ruins 1,317 -> 1,316, Switch Labyrinth 27 and celeste 249 the same (Bygone Tutorial did not
+  compile at 60 s with 2 workers: before the stage). `EEAT_JOINS_TRIG=1` (opt-in): the first tick of each new trigger state
+  a waypoint too (laptop, one pair each: Gingerbread House 5,173 vs 5,131 without, Tutorial 1 2,423 vs 2,399: not kept). `tools/perfect/proveroute.js <level> <route> [--seconds=] [--cap=]`: the compile's route proof (every idle
+  start 0..R, one exhaustive exact search each to the trophy within the route's cost) with a longer clock.
+- **JOINS, round 2: the exact proofs, the wide DP, the stack** (n5-perfect, 2026-09-30, `src/plan/joins.js`; `test/joins.js`
+  16/0: a slow route over a gap and a step, every result replayed, never slower, every proven leg checked against random
+  input words from its start state). THE EXACT PROOFS (default on, `EEAT_JOINS_XPROVE=0` off): `proveRoute` phase 1 the
+  certificates of before on every leg, phase 2 every leg no certificate reached (<= 90 route ticks, the shortest first)
+  searched EXHAUSTIVELY from its exact start state to depth ticks - 1 (exact.js `exactLeg`: every input sequence, the
+  stateHash merge and the endgame's admissible bound cut, the waypoint's goal = tile + class + trigger state, alive; the
+  finish = the silver crown): no open state left = PROVEN OPTIMAL (`provenBy` 'exact'); a goal found = a faster leg from
+  that very state (`fasterExact`, the ticks it saves: the joins the chain could not carry). On the stacked routes (box 6,
+  150 s a level) 530 of 1,642 support legs proven (events 197, exact 328, plain 5) where the first version proved 198 of
+  1,656; 52 legs (89 ticks in all) have a faster leg from their own start state. THE WIDE DP the default (10 classes a
+  waypoint, legs over up to 6 supports and 200 route ticks, 8 ticks of slack; `EEAT_JOINS_NARROW=1`: 6 / 4 / 120 / 6): box 6,
+  round 3 of the stack, arms side by side, 57,897 vs 58,095 run ticks, better 6 / worse 1 (Frostbitten 8,640 vs 8,749, Fish
+  Gods 3,933 vs 4,010). OPT-IN, not kept: THE EXACT EDGES (`EEAT_JOINS_EXACT=1`: the kept frontier's exact minimum to the next
+  1-2 waypoints, every goal state of the first goal layer into the DP, 40% of each waypoint's clock: round 1 58,791 vs 58,638
+  without, better 5 / worse 8: on the stacked routes the msolve legs already reach the exact minimum, `exBest` 14 of 376
+  calls on Accident Prone and no gain carried), THE SPARSE LONG-SKIP PASS (`EEAT_JOINS_LONG=1`: every third pass every 4th
+  support, legs by msolve's chain tier over up to 400 route ticks: round 2 58,226 vs 58,183, Gingerbread House 4,929 vs
+  4,971 the one gain), SHIFTED FOLLOWS (`EEAT_JOINS_SHIFT=n`; the VERSUS bridge does it on the gains in hand).
+  `tools/perfect/joins.js` `--proveOnly=1` (the proofs alone on the routes as they are, the whole clock), `--agg` the proof
+  totals. THE STACK (the offline passes one on another, the best per level over every pass kept, each replayed from the
+  level file; `src/out/p5/`, box 6 `~/perf_j5_*`): the compile 64,381 -> the first joins on the perfect pass 60,051 -> + the
+  VERSUS loops (Trick Or Treat 3,709, Tutorial 1 2,105) 59,221 -> round 1 (90 s) 58,581 -> round 2 (150 s) 58,140 -> round 3
+  57,889 -> the union with the VERSUS stack (its bridge / blind key: Tutorial 1 1,788, Frostbitten 8,529, NC Naos 153)
+  57,221 -> round 4 (the wide DP, 150 s) **57,181** (the median ticks / best known 1.22 -> 1.12 -> **1.07**, at or under it
+  4 of 22: Ruins 1,200 (0.79), Desolate Caverns 1,376 (0.81), My level 730c 98, Switch Labyrinth 27; Frostbitten 8,514
+  (1.01), Tutorial 2 3,005 (1.02)): Tutorial 3 3,565 -> 3,302, The Blank Page 2,320 -> 2,022, Tutorial 1 2,328 -> 1,778,
+  Fish Gods 4,015 -> 3,933, MIHB's Dream 9,799 -> 9,661, Gingerbread House 4,988 -> 4,914, Rosa dei Venti 3,470 -> 3,375.
+  The proofs of the final routes (the joins' own 22-s proof share): 533 of 1,610 support legs proven (events 190, exact
+  340, plain 3; The Ten Commandments 140 of 180); the proofs alone with 120 s a level (`--proveOnly`, legs to 200 ticks,
+  3 s a search) on the round-3 routes 626 of 1,610 (exact 416), 95 legs (176 ticks) with a faster leg from their own start
+  state; no whole route proven (the route lb, the compile's, is 1.5-42x below). WHAT IS LEFT (the comparison, `tools/perf/cmpknown.js --sum`, `tools/cmp/versus.js --lead`): the joins converge
+  (rounds 2-3 left 14 of 24 levels as they were): the rest is PATH / ORDER, not joins: the one-leg levels take another way
+  (Accident Prone 3,249 vs 2,410: the known route runs the top corridor, checkpoints (72, 13) (164, 12) (236, 11)
+  (353, 9), ours goes by the protection (10, 45) and the checkpoints (184, 13) and (332, 44), 37 idle ticks and 10 jumps
+  where the known has none and 5 at known ticks 1,300-1,400; The Blank Page +405, Endless Space +493 on its only leg, Rosa
+  +242, NC Naos 153 vs 111 (the VERSUS braked rests took it from 319; the known lands x = 5720.0 while moving)); the coin ORDER (Gingerbread House 10 of 15 common coins in
+  the known's order, +2,093 at (71, 62); Frostbitten 11 of 15, +5,072 at (180, 153); MIHB's Dream 24 of 31, 16 triggers
+  only ours); other trigger sets (Tutorial 1 7 only ours, 3 only the known's; Trick Or Treat 3 optional coins only ours,
+  +743 at (93, 101) and +731 on the last leg); Bygone Tutorial +258 at the coin (295, 39); Fish Gods +303 on its first
+  switch toggle. The whole-route proof of Switch Labyrinth (27 = the best known): the idle starts +0..+26 exhausted, +27..+38
+  open (2 M states a start; 4 GB of heap ran out): not proven.
+- **VERSUS THE BEST KNOWN: braked rests, the loop pass, the LOOPS stage** (n5-perfect, 2026-09-30; default on, never
+  without the old result; `EEAT_PERFECT=0` all off). `tools/cmp/versus.js <level> <ours.eetas> <known.eetas> [--lead=N]
+  [--trace=a-b]`: both routes replayed (the triggers in order with their ticks, a per-segment input census; `--lead`: every
+  N known ticks the first tick of ours within 24 px of the known ball, the ticks lost per stretch). What it found on the 4
+  slowest compiled levels: NC Naos d3c6 / the precision puzzle (319 vs 111) COAST to rest (264 idle ticks of 337) where
+  the known route BRAKES and lands x = 5720.0 exactly while moving; Trick Or Treat (5,035 vs 2,235) takes 6 coins (5
+  optional waypoints: the known takes 1) and dithers at (37, 98); The Blank Page (3,190 vs 1,915) has LOOPS (the portal pit
+  (46, 81) and back up, a climb done twice) and 153 jump presses vs 33; Tutorial 1 (2,441 vs 1,655) a back-and-forth
+  run-up on the lower floor and stop-and-go joins. (1) `src/precision.js --fast=1` (the compiler passes it; `EEAT_PREC_FAST=0`
+  off): after the coasted rests (the first route, `FAST_OLD` 0.4 of the time) the rests BRAKED from the attempts' moving
+  states (every lateral pattern of up to 22 ticks in the model, brake first, then at most 30 idle ticks, cut by a
+  least-stopping-distance table), capped piece coasts, every hit replayed in order of its ticks: both precision levels
+  compile 319 -> 153 (box 5 / box 6, 60 s). (2) `polish.js` THE LOOP PASS (a1, `EEAT_POLISH_LOOPS=0` off): a loop cut =
+  the route's inputs from a later tick b played from S(t), b a revisit within 12 px at a like speed (|dvx| + |dvy| <=
+  1.5), kept by the exact rejoin rule or a COIN-BLIND one (`EEAT_POLISH_COINLOOPS=0` off; only where no coin sits on a
+  portal entry; every combination replayed and judged), passes of those moves alone (`polishRoute` o.loopPass: before
+  the mutation passes, 25% of its time; o.loopsOnly: alone): 15-s polishes of the final's routes with it Trick Or Treat
+  4,437 -> 3,759 (its optional coins (146, 100), (132, 92) dropped), Tutorial 1 2,414 -> 2,128, The Blank Page 2,607 ->
+  2,527, 12 others equal (+-6: the budget's noise). (3) THE LOOPS stage (strategy.js, before the joins, its own clock after
+  the budget: `--loops=<s>` / `EEAT_LOOPS_S`, default budget / 6, at most 10 s): the loop pass alone on the finished route
+  (the polish inside the budget is as before: box 6's Tutorial 1 pair with the pass inside it 2,027 vs 2,025, its route
+  without a loop), kept only when faster with no more deaths and no lower chance: box 6, 60 s, The Blank Page 3,190 (its
+  route at 56 s, polish 0.3 s) -> loops -635 (the portal pit) -> joins 2,266 (known 1,915). (4) WHERE THE GAINS DIE
+  (`joins.js`, default on in the compile's joins stage): on Fish Gods the DP had the known route's pace at the first
+  switch (its first leg a 1-tile-tall corridor our route jitters through: 165 jump presses into the ceiling, 3-3.9 px/tick
+  where the known holds right to 6.2; msolve alone: the start -> the switch in 576 ticks vs the route's 877, the known's
+  574), 328 ticks ahead, and the gain DIED at the next waypoint (the switch is toggled on and off by stepping back onto
+  it, then a ladder: no follow and no 60-ms leg carried it). THE BRIDGE (`EEAT_JOINS_BRIDGE=0` off): a gain in hand at a
+  waypoint (the route's tick less the earliest arrival) that reaches the next M waypoints less by more than 2 ticks gets
+  `bridgeTo` from its 2 earliest carriers: the route's own inputs SHIFTED (from the route's tick + d, d = +-1..+-16),
+  msolve's legs to k + 1..k + 3 on a longer clock, the exact search on spans <= 16 route ticks; 300 ms a carrier (at most
+  300 ms past the pass's clock). THE BLIND KEY (`blindOf`, `EEAT_JOINS_BLIND=0` off): the trigger state leaves out a coin
+  colour no door / gate of the level reads or whose lowest door / gate number the route never reaches, and the checkpoint
+  on a route with no death (the proofs keep the full key; every chain replayed and judged). Measured (box 6, the joins
+  pass offline on the best route per level so far, 90 s, one process a level, base = both off, the same tree, 2 pairs):
+  better 5 of 15 (Tutorial 3 3,534 -> 3,311 vs 3,534, Tutorial 1 1,849 -> 1,796 vs 1,816, Frostbitten 8,658 -> 8,610 vs
+  8,618, Rosa dei Venti 3,411 -> 3,390 vs 3,403, The Blank Page 2,051 -> 2,044 vs 2,050), worse 1 (Bygone Tutorial 2,020 vs
+  2,016), the same 9; the ablation: the bridge alone gives it all (Tutorial 3 -223, Tutorial 1 -54, Rosa -19), the blind
+  key alone nothing measured (Trick Or Treat's and Endless Space's coin detours are 300-1,000 route ticks, past every
+  leg's span, also with `EEAT_JOINS_LONG=1`). The exact edges (`EEAT_JOINS_EXACT=1`, opt-in) WITH the bridge: on the
+  narrow DP better 5 / worse 4 of 13 (Fish Gods 4,015 -> 3,898, MIHB -86, Gingerbread House -52, Accident Prone -47; the
+  losses 1-8 ticks), on HEAD (the wide DP, 16 levels from the best routes) better 5 / worse 5 (Fish Gods 3,898 -> 3,753 vs
+  3,898, Gingerbread House 4,815 vs 4,835; Tutorial 3 3,203 vs 3,174, Tree Decorating 1,162 vs 1,142): not a default.
+  `tools/cmp/bestof.js <best_known.json> <levels dir> <first dir> <dir>... [--copy=<dir>]`: the best route per level over
+  several passes' outputs, every .eetas replayed from the level file (no more deaths, no lower chance), its ratio to the
+  best known. THE TABLE (the 24 compiled levels, the union of every pass of the VERSUS and JOINS lanes, every route
+  replayed): 64,381 -> **56,635** run ticks, median ticks / best known 1.215 -> **1.061**, at or under the best known 4
+  (Ruins 1,200 = 0.79, Desolate Caverns 1,376 = 0.81, My level 730c 0.97, Switch Labyrinth 1.00); Frostbitten 8,500
+  (1.01), Tutorial 2 1.02, Tree Decorating 1,142 (1.03), celeste x2 1.04, Rosa 3,369 (1.04), The Blank Page 2,022 (1.06),
+  Fish Gods 3,753 (1.07), Tutorial 1 1,774 (1.07). STILL SLOWER, and where (versus.js): Trick Or Treat 3,681 vs 2,235
+  (1.65: 3 optional coins, 300-1,000-tick detours the known never makes; its 14-coin doors never open), NC Naos / the
+  precision puzzle 153 vs 111 (1.38: our landing waits for an exact rest and coasts 30 ticks onto x = 5720.0; the known
+  JUMPS and drifts left in the air, and as it falls into the pocket the first 1-px sub-step of its leftward move snaps it
+  to the whole pixel 5720.0: a wide window (x in (5720, 5720 + |vx|], moving left, falling) that precision.js's point
+  targets at rest never try; an exact search from our own states at ticks 60-80 fills its 400 k-state layers in 16-26 s),
+  Accident Prone 3,192 vs 2,410 (1.32: another way, the protection (10, 45) and 2 checkpoints vs the known's 4), Endless
+  Space 2,313 vs 1,789 (1.29: 2 gold coin detours, another checkpoint), MIHB's Dream 9,651 vs 7,973 and Gingerbread House
+  4,815 vs 4,032 (1.21 / 1.19: another coin ORDER), Bygone Tutorial 2,016 vs 1,680 (1.20: the key doors in another
+  order), My level fef0 65 vs 59.
