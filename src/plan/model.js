@@ -266,7 +266,14 @@ function compileModel(L, o = {}) {
 		if (coinTiles.length) { taken = new Uint8Array(coinTiles.length); coinTiles.forEach((t, k) => { taken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }); }
 		if (bcoinTiles.length) { btaken = new Uint8Array(bcoinTiles.length); bcoinTiles.forEach((t, k) => { btaken[k] = sim.is_coin_collected(t % W, (t / W) | 0) ? 1 : 0; }); }
 		const cp = canDie && sim.checkpoint.x >= 0 ? trigOf[sim.checkpoint.y * W + sim.checkpoint.x] : -1;
-		return mkState(vals, taken, btaken, cp);
+		const S = mkState(vals, taken, btaken, cp);
+		// (the engine's own copies the gates read, not part of any key: the coin / blue coin / death GATES read
+		// _show_*, >= 1 tick late and frozen while the ball overlaps one; the time doors' phase; zombie. The lb and the
+		// 'now' mode read them; abstract states (touch) have none)
+		S.show = { coins: sim._show_coin_gate | 0, bcoins: sim._show_blue_coin_gate | 0, deaths: sim._show_death_gate | 0 };
+		S.td = !!sim._timedoor_state;
+		S.zombie = !!sim.is_zombie;
+		return S;
 	}
 	const init = {};
 	for (const f of feats) init[f] = f === 'deaths' ? Math.min(T.featValue(sim0, f), deathT) : T.featValue(sim0, f);
@@ -325,32 +332,69 @@ function compileModel(L, o = {}) {
 		return out;
 	}
 	// ---------------------------------------------------------------- gates under a state
-	/** gate tile i open under S? mode 'lb': keys sticky, coin gates shut only by the anchor's real count (base) */
+	/** the count a coin / blue coin / death GATE reads: the engine's _show_* copy where the state has it (a concrete
+	 *  state), else the count; lb: the least of the anchor's base, the copy and the count (the copy lags the count and
+	 *  both only grow: a gate the lb shuts is shut for the rest of the leg) */
+	function gateCount(k, S, mode, base) {
+		const n = fIdx.get(k);
+		let c = n === undefined ? (init[k] || 0) : S.vals[n];
+		if (S.show && S.show[k] !== undefined) c = Math.min(c, S.show[k]);
+		if (mode === 'lb') { const bv = base && base[k] !== undefined ? base[k] : init[k]; if (bv !== undefined) c = Math.min(c, bv); }
+		return c;
+	}
+	/**
+	 * gate tile i open under S? modes (the engine's rules, eesim.js _isOpen):
+	 *  'lb'  the relaxation: keys sticky (a key door open once its key was on; key GATES always open: a key expires),
+	 *        coin / blue coin / death gates shut only by the least of the anchor's base, the state's _show_* copy and
+	 *        its count; death doors, zombie doors / gates and time doors open.
+	 *  'est' the planner's walk: key doors open iff the key is on, key GATES shut while it is on (eesim 26-28,
+	 *        1008-1010); coin / death doors by the count, their gates by the _show_* copy where the state has one;
+	 *        time doors and zombie doors / gates open (the phase and zombie are no feature: waiting / an effect).
+	 *  'now' a CONCRETE state's exact reading (stateOf's extras): as est, and 156 open iff the time phase (S.td), 157 the
+	 *        reverse, 206 open unless zombie, 207 only while zombie. 50 is a wall (steer.js analyze), never a gate.
+	 */
 	function gateOpen(i, S, mode, base) {
-		const k = A.gateFeat[i];
-		if (k === 'open' || k === 'time') return true;
-		if (k === 'static') return A.gatePol[i] === 1;
+		const k = A.gateFeat[i], pol = A.gatePol[i], b = fg[i];
+		if (k === 'static') return pol === 1;
+		if (k === 'time') return mode === 'now' && S.td !== undefined ? (b === 156 ? S.td : !S.td) : true;
+		if (k === 'open') {
+			if (b === 1011 || b === 1012) {
+				if (mode === 'lb' && b === 1011) return true;
+				const n = fIdx.get('deaths');
+				const d = b === 1012 ? gateCount('deaths', S, mode, base) : n === undefined ? 0 : S.vals[n];
+				return b === 1011 ? lk[i] <= d : lk[i] > d;
+			}
+			if ((b === 206 || b === 207) && mode === 'now' && S.zombie !== undefined) return b === 206 ? !S.zombie : S.zombie;
+			return true;
+		}
 		const n = fIdx.get(k);
 		if (n === undefined) return true;
 		const v = S.vals[n];
-		if (k.startsWith('key')) return v === 1 ? true : A.gatePol[i] === 0;
-		if ((k === 'coins' || k === 'bcoins') && A.gatePol[i] === 0 && mode === 'lb') {
-			const bv = base && base[k] !== undefined ? base[k] : init[k];
-			return !(bv >= A.gateParam[i]);
-		}
-		return testGate(k, A.gatePol[i], A.gateParam[i], v);
+		if (k.startsWith('key')) return mode === 'lb' ? (v === 1 || pol === 0) : testGate(k, pol, A.gateParam[i], v);
+		if ((k === 'coins' || k === 'bcoins') && pol === 0) return !(gateCount(k, S, mode, base) >= A.gateParam[i]);
+		return testGate(k, pol, A.gateParam[i], v);
 	}
 	/** the est walk's learned walls (the planner's CEGAR: tiles past which a failed step's closest approach did not get;
 	 *  est only: the lb and the proofs never read them) */
 	let estWalls = null, estWallVer = 0;
 	function setEstWalls(mask) { estWalls = mask; estWallVer++; }
 	/** the key of the gate pattern under S (the memo key of the geometry) */
+	const hasDeathGate = (() => { for (let i = 0; i < N; i++) if (fg[i] === 1012) return true; return false; })();
+	const hasTime = (() => { for (let i = 0; i < N; i++) if (A.gateFeat[i] === 'time') return true; return false; })();
+	const hasZombieDoor = (() => { for (let i = 0; i < N; i++) if (fg[i] === 206 || fg[i] === 207) return true; return false; })();
+	/** the part of a door key the gates' _show_* copies decide (a concrete state whose copies lag its counts) */
+	function showKey(S, mode, base) {
+		if (!hasCoinGate.coins && !hasCoinGate.bcoins && !hasDeathGate) return '';
+		if (mode === 'lb') return '|' + ['coins', 'bcoins', 'deaths'].map((k) => gateCount(k, S, mode, base)).join(',');
+		return S.show ? '|' + S.show.coins + ',' + S.show.bcoins + ',' + S.show.deaths : '';
+	}
 	function doorKey(S, mode, base) {
-		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.pkey;
-		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey;
-		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins) return 'e:' + S.pkey;
-		// (lb: killers passable; the coin gates' part is the base's: the model count opens doors only)
-		return 'l:' + S.pkey + '|' + (base ? `${base.coins},${base.bcoins}` : '');
+		if (mode === 'walk') return (killers ? 'k:' : 'e:') + S.pkey + showKey(S, 'est', base);
+		if (mode === 'now') return 'n:' + S.pkey + showKey(S, 'est', base) + (hasTime ? '|t' + (S.td ? 1 : 0) : '') + (hasZombieDoor ? '|z' + (S.zombie ? 1 : 0) : '');
+		if (mode !== 'lb') return (estWalls ? 'w' + estWallVer : 'e') + ':' + S.pkey + showKey(S, 'est', base);
+		if (!killers && !estWalls && !hasCoinGate.coins && !hasCoinGate.bcoins && !hasDeathGate) return 'e:' + S.pkey;
+		// (lb: killers passable; the gates' part is the least of the base, the copy and the count)
+		return 'l:' + S.pkey + showKey(S, 'lb', base);
 	}
 	/** a Uint8Array(N) passable mask under S */
 	const passMemo = new Map();
@@ -361,7 +405,7 @@ function compileModel(L, o = {}) {
 		const m = new Uint8Array(N);
 		// (est: a killer is a wall unless the ball is protected; lb: passable, the relaxation)
 		const kill = mode === 'lb' || mode === 'walk' || (S.feats && S.feats.prot === 1) ? 1 : 0;
-		const gm = mode === 'walk' ? 'est' : mode;
+		const gm = mode === 'walk' ? 'est' : mode;   // ('now': est's walls with the exact reading of a concrete state)
 		for (let i = 0; i < N; i++) {
 			const c = A.cls[i];
 			m[i] = c === 0 ? 0 : c === 3 ? (gateOpen(i, S, gm, base) ? 1 : 0) : c === 1 ? kill : 1;

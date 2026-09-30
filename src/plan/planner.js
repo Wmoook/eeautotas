@@ -258,7 +258,11 @@ function createPlanner(model, facts, o = {}) {
 			S = Sp;
 		}
 		const cls = arr ? `${Math.round(arr.vx || 0)},${arr.onGround ? 1 : 0}` : '0,1';
-		const base = { coins: S.feats.coins !== undefined ? S.feats.coins : 0, bcoins: S.feats.bcoins !== undefined ? S.feats.bcoins : 0 };
+		// (the lb's base: the counts the coin / blue coin / death GATES read: the engine's _show_* copies, which lag the
+		// live counts by >= 1 tick and freeze while the ball overlaps a gate; the least of the copy and the count)
+		const live = (k) => (S.feats[k] !== undefined ? S.feats[k] : 0);
+		const base = { coins: live('coins'), bcoins: live('bcoins'), deaths: live('deaths') };
+		if (sim) { base.coins = Math.min(base.coins, sim._show_coin_gate | 0); base.bcoins = Math.min(base.bcoins, sim._show_blue_coin_gate | 0); base.deaths = Math.min(base.deaths, sim._show_death_gate | 0); }
 		return { S, pos, tick: arr ? arr.tick || 0 : 0, idle, cls, base, sim, arr };
 	}
 	// ---------------------------------------------------------------- edges

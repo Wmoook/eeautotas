@@ -85,6 +85,9 @@ function checkRoute(entry) {
 			if (A.gateFeat[i] === 'bcoins' && A.gatePol[i] === 0 && sim._show_blue_coin_gate !== sim.blue_coins) lag = ' (gate snapshot != count)';
 			if (b === 1011 || b === 1012) lag = ` (deaths ${sim.deaths} vs ${L.lookup0[i]})`;
 			if (b === 206 || b === 207) lag = ` (zombie ${sim.is_zombie ? 1 : 0})`;
+			// ('now': the model's exact reading of a concrete state (stateOf's _show_* copies, time phase, zombie): must match)
+			const now = M.gateOpen(i, R, 'now', null);
+			if (now !== actual) hit(`EXACT door now ${now ? 'open' : 'shut'} / engine ${actual ? 'open' : 'shut'}: ${b} (${A.gateFeat[i]}${A.gatePol[i] ? '' : ' gate'})${lag}${tag}`, { tick, tile: [i % W, (i / W) | 0] });
 			if (est !== actual) hit(`door est ${est ? 'open' : 'shut'} / engine ${actual ? 'open' : 'shut'}: ${b} (${A.gateFeat[i]}${A.gatePol[i] ? '' : ' gate'})${lag}${tag}`, { tick, tile: [i % W, (i / W) | 0] });
 			if (!lb && actual) hit(`UNSOUND lb shut / engine open: ${b} (${A.gateFeat[i]})${lag}${tag}`, { tick, tile: [i % W, (i / W) | 0], coins: sim.coins, show: sim._show_coin_gate, bc: sim.blue_coins, bshow: sim._show_blue_coin_gate, Rc: R.feats.coins, Rb: R.feats.bcoins });
 		}
