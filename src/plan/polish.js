@@ -7,7 +7,8 @@
 //       followed by the route's own inputs until an exact rejoin with a LATER route state (a proven shortcut), a rejoin
 //       that is not later, 200 ticks or 96 px of drift; the shortcuts combined by DP (weighted interval scheduling), the
 //       combination judged (else the largest one alone); re-anchoring at landings and wall stops (mutate.js --anchor):
-//       T-POLISH's 10 routes (8 s each) saved 513 ticks (430 with the cleanup's 0.4 first, 176 without the anchors, 3
+//       rounds: the default reach, then 600 ticks / 200 px; T-POLISH's 10 routes (8 s each) saved 550 ticks (513 with one
+//       round, 430 with the cleanup's 0.4 first, 176 without the anchors, 3
 //       without the pass);
 //       a raw Find a route route (Are You A God's 7,290) 6,918 in 30 s vs 7,255 (o.noMutate: off; o.horizon, o.drift,
 //       o.anchors);
@@ -247,13 +248,17 @@ function polishRoute(L, masks0, o) {
 		const mEnd = Math.min(deadline, Date.now() + (o.mutShare > 0 ? o.mutShare : 0.5) * (deadline - Date.now()));
 		// (the first pass searches every tick; a later one only around the spans the last one spliced in: elsewhere the route
 		// has the same states, so the same moves rejoin the same way, except into the new spans' own states)
+		// (rounds: the default reach, then, once it gains no more, a wide one (600 ticks, 200 px: Are You A God's raw route 6,899
+		// vs 6,918 in 30 s))
+		const rounds = [{ horizon: o.horizon, drift: o.drift }, { horizon: 600, drift: 200 }];
+		for (let ri = 0; ri < rounds.length && Date.now() < mEnd; ri++) {
 		let ranges = null;
 		for (let pass = 0; pass < 64 && Date.now() < mEnd; pass++) {
 			const cur = best.ms;
 			// (o.first: the first pass's shortcuts on this very route, found by the caller (the executor's workers in parallel))
-			const mp = pass === 0 && Array.isArray(o.first)
+			const mp = ri === 0 && pass === 0 && Array.isArray(o.first)
 				? { shortcuts: o.first.map((c) => ({ t: c.t, j: c.j, saved: c.saved, ins: typeof c.ins === 'string' ? T.masksOf(c.ins) : Uint8Array.from(c.ins) })).filter((c) => c.j <= cur.length), timeUp: !!o.firstTimeUp }
-				: mutatePass(L, cur, { deadline: mEnd, stop, horizon: o.horizon, drift: o.drift, ranges });
+				: mutatePass(L, cur, Object.assign({ deadline: mEnd, stop, ranges }, rounds[ri]));
 			if (!mp.shortcuts.length) break;
 			const set = bestShortcutSet(cur.length, mp.shortcuts);
 			const saved = set.reduce((a, c) => a + c.saved, 0);
@@ -267,6 +272,7 @@ function polishRoute(L, masks0, o) {
 			}
 			if (!applied || mp.timeUp) break;
 			ranges = spansOf(applied, 100, best.ms.length);
+		}
 		}
 	}
 	// (a) the cleanup (src/cleanroute.js: presses and flips dropped where they rejoin or finish sooner)
